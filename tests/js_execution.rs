@@ -10,7 +10,9 @@
 ///   - `=>` for pipeline / return type
 ///   - `]=>` for unmold
 ///   - `| cond |> value` for conditions (NOT `| cond = value`)
-use std::path::PathBuf;
+mod common;
+
+use common::taida_bin;
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -21,10 +23,6 @@ static COUNTER: AtomicU64 = AtomicU64::new(0);
 fn unique_id() -> String {
     let seq = COUNTER.fetch_add(1, Ordering::SeqCst);
     format!("{}_{}", std::process::id(), seq)
-}
-
-fn taida_bin() -> PathBuf {
-    PathBuf::from(env!("CARGO_BIN_EXE_taida"))
 }
 
 /// Run Taida source with the interpreter.

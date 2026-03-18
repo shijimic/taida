@@ -97,9 +97,13 @@ pub fn get_hover_info(source: &str, position: Position) -> Option<String> {
     let mut checker = TypeChecker::new();
     checker.check_program(&program);
 
-    // Find the identifier at the given position
+    // Convert LSP 0-based UTF-16 offset to 0-based char index, then to
+    // 1-based column to match Span's convention.
     let target_line = position.line as usize + 1; // Span uses 1-based
-    let target_col = position.character as usize + 1;
+    let line_text = source.lines().nth(position.line as usize).unwrap_or("");
+    let char_index =
+        super::utf16::utf16_offset_to_char_index(line_text, position.character as usize);
+    let target_col = char_index + 1;
 
     // Walk the AST to find the identifier at this position
     for stmt in &program.statements {
@@ -134,7 +138,7 @@ fn find_hover_in_statement(
                 let var_type = checker.lookup_var(&assign.target);
                 if let Some(ty) = var_type
                     && assign.span.column <= col
-                    && col <= assign.span.column + assign.target.len()
+                    && col <= assign.span.column + assign.target.chars().count()
                 {
                     return Some(format!("```taida\n{}: {}\n```", assign.target, ty));
                 }
@@ -160,7 +164,7 @@ fn find_hover_in_statement(
                         }
                     })
                     .collect();
-                if fd.span.column <= col && col <= fd.span.column + fd.name.len() {
+                if fd.span.column <= col && col <= fd.span.column + fd.name.chars().count() {
                     let doc = format_doc_comments(&fd.doc_comments);
                     return Some(format!(
                         "```taida\n{} {} => :{}\n```{}",
@@ -185,7 +189,7 @@ fn find_hover_in_statement(
             // Check if cursor is on the type name
             if td.span.line == line
                 && td.span.column <= col
-                && col <= td.span.column + td.name.len()
+                && col <= td.span.column + td.name.chars().count()
             {
                 let fields: Vec<String> = td
                     .fields
@@ -213,7 +217,7 @@ fn find_hover_in_statement(
             // Check if cursor is on the mold name
             if md.span.line == line
                 && md.span.column <= col
-                && col <= md.span.column + md.name.len()
+                && col <= md.span.column + md.name.chars().count()
             {
                 let parent_args: Vec<String> =
                     md.mold_args.iter().map(format_mold_header_arg).collect();
@@ -366,7 +370,7 @@ fn find_hover_in_expr(
 ) -> Option<String> {
     match expr {
         Expr::Ident(name, span) => {
-            if span.line == line && span.column <= col && col < span.column + name.len() {
+            if span.line == line && span.column <= col && col < span.column + name.chars().count() {
                 let var_type = checker.lookup_var(name);
                 if let Some(ty) = var_type {
                     return Some(format!("```taida\n{}: {}\n```", name, ty));
@@ -444,7 +448,7 @@ fn find_hover_in_expr(
             find_hover_in_expr(obj, line, col, checker, all_stmts)
         }
         Expr::MoldInst(name, _type_args, _fields, span) => {
-            if span.line == line && span.column <= col && col < span.column + name.len() {
+            if span.line == line && span.column <= col && col < span.column + name.chars().count() {
                 if let Some(info) = find_user_mold_hover_info(all_stmts, name, checker) {
                     return Some(info);
                 }
@@ -456,7 +460,7 @@ fn find_hover_in_expr(
         Expr::TypeInst(name, _fields, span) => {
             if span.line == line
                 && span.column <= col
-                && col < span.column + name.len()
+                && col < span.column + name.chars().count()
                 && let Some(fields) = checker.registry.get_type_fields(name)
             {
                 let fields_str: Vec<String> = fields
@@ -964,5 +968,73 @@ value <= Child[1, 2]()
             "Should show info about source: {}",
             info
         );
+    }
+
+    // ── RCB-54: UTF-16 position handling regression tests ──
+
+    #[test]
+    fn test_rcb54_hover_after_japanese_string() {
+        // 'name <= "hello"' on line 0, then 'y <= 99' on line 1.
+        // Japanese variable on line 0 to verify that hover on line 1 still works
+        // even though line 0 has multi-byte chars.
+        let source = "\u{540D}\u{524D} <= \"\u{3053}\u{3093}\u{306B}\u{3061}\u{306F}\"\ny <= 99";
+        // Hover on 'y' at line 1, character 0 (UTF-16). 'y' is pure ASCII.
+        let result = get_hover_info(
+            source,
+            Position {
+                line: 1,
+                character: 0,
+            },
+        );
+        assert!(
+            result.is_some(),
+            "Should get hover info for variable after Japanese content"
+        );
+        let info = result.unwrap();
+        assert!(info.contains("Int"), "y should have type Int: {}", info);
+    }
+
+    #[test]
+    fn test_rcb54_hover_japanese_variable_name() {
+        // Variable name is Japanese: chars are each 1 UTF-16 code unit
+        // but 3 UTF-8 bytes.
+        // "\u{540D}\u{524D}" == "名前" (2 chars, 2 UTF-16 units, 6 UTF-8 bytes)
+        let source = "\u{540D}\u{524D} <= 42";
+        // Hover at UTF-16 offset 0 should find the variable.
+        let result = get_hover_info(
+            source,
+            Position {
+                line: 0,
+                character: 0,
+            },
+        );
+        assert!(
+            result.is_some(),
+            "Should get hover info for Japanese variable name"
+        );
+        let info = result.unwrap();
+        assert!(
+            info.contains("\u{540D}\u{524D}"),
+            "Should contain the Japanese variable name: {}",
+            info
+        );
+    }
+
+    #[test]
+    fn test_rcb54_hover_variable_after_emoji_string() {
+        // "a\u{1F600}b" -- emoji is 2 UTF-16 code units.
+        // Line: `x <= "a\u{1F600}b"`  then  `y <= 10`
+        // Hover on y (line 1, char 0).
+        let source = "x <= \"a\u{1F600}b\"\ny <= 10";
+        let result = get_hover_info(
+            source,
+            Position {
+                line: 1,
+                character: 0,
+            },
+        );
+        assert!(result.is_some(), "Should get hover for y after emoji line");
+        let info = result.unwrap();
+        assert!(info.contains("Int"), "y should be Int: {}", info);
     }
 }

@@ -10,37 +10,11 @@
 /// we use wasmtime (which provides wasi_snapshot_preview1.fd_write)
 /// for the basic stdout path -- the wasm-edge hello example only needs
 /// fd_write and does NOT use taida_host imports.
-use std::path::{Path, PathBuf};
+mod common;
+
+use common::{taida_bin, wasmtime_bin};
+use std::path::Path;
 use std::process::Command;
-
-fn taida_bin() -> PathBuf {
-    let mut path = PathBuf::from(env!("CARGO_BIN_EXE_taida"));
-    if !path.exists() {
-        path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("target")
-            .join("debug")
-            .join("taida");
-    }
-    path
-}
-
-fn wasmtime_bin() -> Option<PathBuf> {
-    if let Ok(home) = std::env::var("HOME") {
-        let path = PathBuf::from(home).join(".wasmtime/bin/wasmtime");
-        if path.exists() {
-            return Some(path);
-        }
-    }
-    if let Ok(output) = Command::new("which").arg("wasmtime").output()
-        && output.status.success()
-    {
-        let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if !path.is_empty() {
-            return Some(PathBuf::from(path));
-        }
-    }
-    None
-}
 
 /// Compile a .td file with wasm-edge and return the wasm path (or None on failure).
 fn compile_wasm_edge(td_path: &Path, wasm_path: &Path) -> Option<String> {

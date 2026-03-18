@@ -109,12 +109,16 @@ fn is_dot_trigger(params: &CompletionParams, source: Option<&str>) -> bool {
     // Also check if the character before cursor is a dot
     if let Some(src) = source {
         let line = params.text_document_position.position.line as usize;
-        let col = params.text_document_position.position.character as usize;
-        if col > 0
+        let utf16_col = params.text_document_position.position.character as usize;
+        if utf16_col > 0
             && let Some(line_text) = src.lines().nth(line)
-            && let Some(ch) = line_text.chars().nth(col - 1)
         {
-            return ch == '.';
+            let char_col = super::utf16::utf16_offset_to_char_index(line_text, utf16_col);
+            if char_col > 0
+                && let Some(ch) = line_text.chars().nth(char_col - 1)
+            {
+                return ch == '.';
+            }
         }
     }
     false
@@ -290,15 +294,15 @@ fn dot_completions(source: &str, params: &CompletionParams) -> Vec<CompletionIte
 
     // Try to find the expression before the dot and infer its type
     let line = params.text_document_position.position.line as usize;
-    let col = params.text_document_position.position.character as usize;
+    let utf16_col = params.text_document_position.position.character as usize;
 
     // Simple approach: find the identifier before the dot on the current line
-    if let Some(line_text) = source.lines().nth(line)
-        && col > 1
-    {
-        // Use char-based slicing to avoid panic on multi-byte characters.
-        // LSP `character` is UTF-16 code units; for BMP characters (no surrogate pairs,
-        // which covers all common Taida source) this matches the char index.
+    if let Some(line_text) = source.lines().nth(line) {
+        // S-2: Guard on converted char index, not raw UTF-16 offset.
+        let col = super::utf16::utf16_offset_to_char_index(line_text, utf16_col);
+        if col <= 1 {
+            return items;
+        }
         let before_dot: String = line_text.chars().take(col.saturating_sub(1)).collect();
         // Get the last identifier before the dot
         let ident = before_dot

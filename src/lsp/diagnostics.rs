@@ -51,32 +51,38 @@ fn parse_error_to_diagnostic(err: &ParseError, source: &str) -> Diagnostic {
         0
     };
 
-    // Calculate end position: use the span's byte range if available,
-    // otherwise use the line end or a reasonable default width.
-    let end_col = if err.span.end > err.span.start {
-        let line_start_byte = source
+    let line_text = source.lines().nth(line).unwrap_or("");
+
+    // Calculate end column (0-based char index) from the span's char range.
+    let end_col_char = if err.span.end > err.span.start {
+        // Span.start/end are char offsets (from Vec<char> indexing in the lexer).
+        // Compute how many chars precede this line to get a line-relative offset.
+        let line_start_char: usize = source
             .lines()
             .take(line)
-            .map(|l| l.len() + 1) // +1 for newline
-            .sum::<usize>();
+            .map(|l| l.chars().count() + 1) // +1 for newline
+            .sum();
 
-        err.span.end.saturating_sub(line_start_byte)
+        err.span.end.saturating_sub(line_start_char)
     } else {
-        // Default: highlight the next few characters based on error message content
-        let line_text = source.lines().nth(line).unwrap_or("");
-        let remaining = line_text.len().saturating_sub(col);
+        // Default: highlight the next few characters
+        let remaining = line_text.chars().count().saturating_sub(col);
         col + remaining.clamp(1, 10)
     };
+
+    // Convert 0-based char indices to 0-based UTF-16 offsets for LSP.
+    let start_utf16 = super::utf16::char_index_to_utf16_offset(line_text, col);
+    let end_utf16 = super::utf16::char_index_to_utf16_offset(line_text, end_col_char);
 
     Diagnostic {
         range: Range {
             start: Position {
                 line: line as u32,
-                character: col as u32,
+                character: start_utf16 as u32,
             },
             end: Position {
                 line: line as u32,
-                character: end_col as u32,
+                character: end_utf16 as u32,
             },
         },
         severity: Some(DiagnosticSeverity::ERROR),
@@ -99,19 +105,20 @@ fn type_error_to_diagnostic(err: &crate::types::TypeError, source: &str) -> Diag
         0
     };
 
-    // Calculate end position from byte range or use intelligent defaults
-    let end_col = if err.span.end > err.span.start {
-        let line_start_byte = source
+    let line_text = source.lines().nth(line).unwrap_or("");
+
+    // Calculate end column (0-based char index) from the span's char range.
+    let end_col_char = if err.span.end > err.span.start {
+        let line_start_char: usize = source
             .lines()
             .take(line)
-            .map(|l| l.len() + 1)
-            .sum::<usize>();
+            .map(|l| l.chars().count() + 1) // +1 for newline
+            .sum();
 
-        err.span.end.saturating_sub(line_start_byte)
+        err.span.end.saturating_sub(line_start_char)
     } else {
         // Use the full line as the range for type errors
-        let line_text = source.lines().nth(line).unwrap_or("");
-        line_text.len()
+        line_text.chars().count()
     };
 
     // Determine severity based on the error message content
@@ -123,15 +130,19 @@ fn type_error_to_diagnostic(err: &crate::types::TypeError, source: &str) -> Diag
         DiagnosticSeverity::WARNING
     };
 
+    // Convert 0-based char indices to 0-based UTF-16 offsets for LSP.
+    let start_utf16 = super::utf16::char_index_to_utf16_offset(line_text, col);
+    let end_utf16 = super::utf16::char_index_to_utf16_offset(line_text, end_col_char);
+
     Diagnostic {
         range: Range {
             start: Position {
                 line: line as u32,
-                character: col as u32,
+                character: start_utf16 as u32,
             },
             end: Position {
                 line: line as u32,
-                character: end_col as u32,
+                character: end_utf16 as u32,
             },
         },
         severity: Some(severity),
@@ -452,6 +463,66 @@ mod tests {
             failures.is_empty(),
             "The following example files produced parse errors in LSP diagnostics:\n{}",
             failures.join("\n")
+        );
+    }
+
+    // ── RCB-54: UTF-16 diagnostic position regression tests ──
+
+    #[test]
+    fn test_rcb54_diagnostic_positions_with_japanese() {
+        // Type mismatch on a line that starts with Japanese characters.
+        let source = "\u{540D}\u{524D}: Int <= \"hello\"";
+        let result = analyze(source);
+        let mismatch = result
+            .diagnostics
+            .iter()
+            .find(|d| d.message.contains("Type mismatch"));
+        assert!(
+            mismatch.is_some(),
+            "Should detect type mismatch with Japanese variable name"
+        );
+        let d = mismatch.unwrap();
+        // Span.column for the start is 1 (1-based), so 0-based char index = 0,
+        // which maps to UTF-16 offset 0.
+        assert_eq!(
+            d.range.start.character, 0,
+            "Start character should be UTF-16 offset 0, got {}",
+            d.range.start.character
+        );
+    }
+
+    #[test]
+    fn test_rcb54_diagnostic_positions_with_emoji() {
+        // Emoji in a string literal, then type mismatch on line 2.
+        let source = "x <= \"a\u{1F600}b\"\ny: Int <= \"oops\"";
+        let result = analyze(source);
+        let mismatch = result
+            .diagnostics
+            .iter()
+            .find(|d| d.message.contains("Type mismatch"));
+        assert!(
+            mismatch.is_some(),
+            "Should detect type mismatch after emoji line"
+        );
+        let d = mismatch.unwrap();
+        assert_eq!(
+            d.range.start.line, 1,
+            "Mismatch should be on line 1 (0-based)"
+        );
+    }
+
+    #[test]
+    fn test_rcb54_valid_japanese_program_no_diagnostics() {
+        let source = "msg <= \"\u{3053}\u{3093}\u{306B}\u{3061}\u{306F}\"\nstdout(msg)";
+        let result = analyze(source);
+        assert!(
+            result.diagnostics.is_empty(),
+            "Valid Japanese program should produce no diagnostics. Got: {:?}",
+            result
+                .diagnostics
+                .iter()
+                .map(|d| &d.message)
+                .collect::<Vec<_>>()
         );
     }
 }

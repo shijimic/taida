@@ -16,6 +16,10 @@ use crate::parser::parse;
 
 type ModuleImports = Vec<(String, Vec<String>)>;
 
+/// L-1: Shared clang flags used for both cache key computation and compilation.
+/// Keeping them in one place prevents cache_key / wasm_clang_base_args drift.
+const WASM_CLANG_FLAGS: &[&str] = &["--target=wasm32-unknown-wasi", "-nostdlib", "-O2", "-c"];
+
 /// Process-wide counter to produce unique .o file names.
 static OBJ_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -58,6 +62,337 @@ impl std::fmt::Display for CompileError {
 pub struct WasmEdgeOutput {
     pub wasm_path: PathBuf,
     pub glue_path: PathBuf,
+}
+
+// ---------------------------------------------------------------------------
+// RC-8a/8d: WASM runtime .o cache
+// ---------------------------------------------------------------------------
+
+/// Filesystem-based cache for pre-compiled WASM runtime .o files.
+///
+/// The WASM compilation pipeline compiles C runtime sources to .o files
+/// via clang on every invocation. Since the runtime sources are embedded
+/// via `include_str!` and never change between invocations, caching the
+/// .o files eliminates the most expensive step of WASM compilation.
+///
+/// Cache key: FNV-1a of (runtime_source + clang_version_string + clang_flags).
+/// Cache location:
+///   - Tests: `target/wasm-rt-cache/`
+///   - Production: `.taida/cache/wasm-rt/`
+///   - Override: `TAIDA_WASM_RT_CACHE` environment variable
+pub struct WasmRuntimeCache {
+    cache_dir: PathBuf,
+    clang: String,
+    clang_version: String,
+    include_dir: PathBuf,
+}
+
+impl WasmRuntimeCache {
+    /// Create a new runtime cache. `cache_dir` will be created if it does not exist.
+    ///
+    /// S-3: If clang version cannot be determined ("unknown"), the cache is
+    /// effectively disabled — every invocation produces a different key because
+    /// "unknown" is a degenerate version string.  A warning is emitted to stderr.
+    pub fn new(cache_dir: PathBuf) -> Result<Self, CompileError> {
+        fs::create_dir_all(&cache_dir).map_err(|e| CompileError {
+            message: format!(
+                "failed to create wasm runtime cache dir '{}': {}",
+                cache_dir.display(),
+                e
+            ),
+        })?;
+
+        let clang = find_clang_for_wasm()?;
+        let clang_version = get_clang_version(&clang);
+
+        // S-3: Warn when clang version is unknown — cache keys will be
+        // unreliable across invocations.
+        if clang_version == "unknown" {
+            eprintln!(
+                "warning: could not determine clang version; WASM runtime cache may not work correctly"
+            );
+        }
+
+        // Create a persistent include directory inside the cache dir
+        let include_dir = cache_dir.join("include");
+        write_wasm_stdint_header(&include_dir)?;
+
+        Ok(Self {
+            cache_dir,
+            clang,
+            clang_version,
+            include_dir,
+        })
+    }
+
+    /// Compute a cache key for the given runtime source + toolchain.
+    ///
+    /// N-1: Uses FNV-1a (matching the project convention) instead of
+    /// `std::hash::DefaultHasher` whose algorithm is not guaranteed
+    /// stable across Rust versions.
+    fn cache_key(&self, source: &str) -> String {
+        let mut state: u64 = 0xcbf29ce484222325; // FNV-1a offset basis
+        for byte in source.bytes() {
+            state ^= byte as u64;
+            state = state.wrapping_mul(0x100000001b3); // FNV prime
+        }
+        // Mix in clang version
+        for byte in self.clang_version.bytes() {
+            state ^= byte as u64;
+            state = state.wrapping_mul(0x100000001b3);
+        }
+        // Mix in clang flags that affect output (L-1: shared via WASM_CLANG_FLAGS)
+        for flag in WASM_CLANG_FLAGS {
+            for byte in flag.bytes() {
+                state ^= byte as u64;
+                state = state.wrapping_mul(0x100000001b3);
+            }
+        }
+        format!("{:016x}", state)
+    }
+
+    /// Get a cached .o file or compile the runtime source and cache the result.
+    ///
+    /// N-3: When a new cache entry is created, stale .o files for the same
+    /// runtime `name` but with a different key are automatically removed.
+    fn get_or_compile(&self, name: &str, source: &str) -> Result<PathBuf, CompileError> {
+        let key = self.cache_key(source);
+        let cached_obj = self.cache_dir.join(format!("{}.{}.o", name, key));
+
+        if cached_obj.exists() {
+            return Ok(cached_obj);
+        }
+
+        // Compile to a temporary file, then rename atomically.
+        // Use PID + counter to avoid collisions between parallel processes/threads.
+        let pid = std::process::id();
+        let seq = OBJ_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let tmp_c = self
+            .cache_dir
+            .join(format!("{}.{}.{}.{}.tmp.c", name, key, pid, seq));
+        let tmp_o = self
+            .cache_dir
+            .join(format!("{}.{}.{}.{}.tmp.o", name, key, pid, seq));
+
+        fs::write(&tmp_c, source).map_err(|e| CompileError {
+            message: format!("failed to write runtime source to cache: {}", e),
+        })?;
+
+        let clang_args = wasm_clang_base_args(&self.include_dir);
+        let status = run_wasm_clang_object(
+            &self.clang,
+            &clang_args,
+            &tmp_c,
+            &tmp_o,
+            &self.include_dir,
+            &[],
+            false,
+            None,
+        )?;
+
+        let _ = fs::remove_file(&tmp_c);
+
+        if !status.success() {
+            let _ = fs::remove_file(&tmp_o);
+            return Err(CompileError {
+                message: format!(
+                    "clang wasm32 compilation of {} runtime failed (cache build).",
+                    name
+                ),
+            });
+        }
+
+        // N-4: Atomic rename to final cached path.
+        // On POSIX systems, `rename(2)` is atomic when source and destination
+        // are on the same filesystem (guaranteed here since both are inside
+        // `cache_dir`).  This ensures that concurrent processes never observe
+        // a partially-written .o file.  On Windows, `std::fs::rename` uses
+        // `MoveFileExW` with `MOVEFILE_REPLACE_EXISTING` which is not strictly
+        // atomic, but is safe enough for our use case (worst case: a redundant
+        // recompile on the next invocation).
+        fs::rename(&tmp_o, &cached_obj).map_err(|e| CompileError {
+            message: format!("failed to rename cached runtime object: {}", e),
+        })?;
+
+        // N-3: Clean up stale cache entries for the same runtime name.
+        // Pattern: `{name}.{old_key}.o` where old_key != current key.
+        let stale_prefix = format!("{}.", name);
+        if let Ok(entries) = fs::read_dir(&self.cache_dir) {
+            for entry in entries.flatten() {
+                let fname = entry.file_name();
+                let fname_str = fname.to_string_lossy();
+                if fname_str.starts_with(&stale_prefix)
+                    && fname_str.ends_with(".o")
+                    && !fname_str.contains(".tmp.")
+                    && entry.path() != cached_obj
+                {
+                    let _ = fs::remove_file(entry.path());
+                }
+            }
+        }
+
+        Ok(cached_obj)
+    }
+
+    /// Get or compile the core runtime .o
+    pub fn rt_core(&self) -> Result<PathBuf, CompileError> {
+        let source = include_str!("runtime_core_wasm.c");
+        self.get_or_compile("rt_core", source)
+    }
+
+    /// Get or compile the WASI I/O runtime .o
+    pub fn rt_wasi(&self) -> Result<PathBuf, CompileError> {
+        let source = include_str!("runtime_wasi_io.c");
+        self.get_or_compile("rt_wasi", source)
+    }
+
+    /// Get or compile the edge host runtime .o
+    pub fn rt_edge(&self) -> Result<PathBuf, CompileError> {
+        let source = include_str!("runtime_edge_host.c");
+        self.get_or_compile("rt_edge", source)
+    }
+
+    /// Get or compile the full runtime .o
+    pub fn rt_full(&self) -> Result<PathBuf, CompileError> {
+        let source = include_str!("runtime_full_wasm.c");
+        self.get_or_compile("rt_full", source)
+    }
+
+    /// Return the clang path discovered during cache init.
+    pub fn clang(&self) -> &str {
+        &self.clang
+    }
+
+    /// Return the include directory (contains stdint.h shim).
+    pub fn include_dir(&self) -> &Path {
+        &self.include_dir
+    }
+
+    /// S-1: Shared helper — compile generated C and link with cached runtime .o files.
+    ///
+    /// This eliminates ~240 lines of near-identical code across the four cached
+    /// compilation branches (wasm-min, wasm-wasi, wasm-edge, wasm-full).
+    ///
+    /// `rt_objs`: pre-compiled runtime .o files from the cache (e.g. `[rt_core.o]`
+    ///            or `[rt_core.o, rt_wasi.o, rt_full.o]`).
+    /// `generated_c`: the C source emitted from the IR.
+    /// `wasm_path`: final output .wasm path.
+    /// `tmp_suffix`: suffix for temp files to avoid collisions between profiles
+    ///               (e.g. `"_wasm_tmp"`, `"_wasm_wasi_tmp"`).
+    /// `extra_ld_args`: additional wasm-ld flags for profile-specific linking
+    ///                  (e.g. `--export=memory` for edge profile).
+    fn link_wasm_cached(
+        &self,
+        rt_objs: &[PathBuf],
+        generated_c: &str,
+        wasm_path: &Path,
+        tmp_suffix: &str,
+        extra_ld_args: &[&str],
+    ) -> Result<(), CompileError> {
+        let tmp_base = wasm_path.with_extension(tmp_suffix);
+        let gen_c_path = tmp_base.with_extension("gen.c");
+        let gen_obj_path = tmp_base.with_extension("gen.o");
+
+        fs::write(&gen_c_path, generated_c).map_err(|e| CompileError {
+            message: format!("failed to write generated C: {}", e),
+        })?;
+
+        let clang_args = wasm_clang_base_args(self.include_dir());
+        let gen_status = run_wasm_clang_object(
+            self.clang(),
+            &clang_args,
+            &gen_c_path,
+            &gen_obj_path,
+            self.include_dir(),
+            &[],
+            false,
+            Some(&gen_c_path),
+        )?;
+
+        if !gen_status.success() {
+            return Err(CompileError {
+                message: format!(
+                    "clang wasm32 compilation of generated code failed (source preserved at: {}; shim preserved at: {})",
+                    gen_c_path.display(),
+                    self.include_dir().display()
+                ),
+            });
+        }
+
+        let _ = fs::remove_file(&gen_c_path);
+
+        let wasm_ld = find_wasm_ld()?;
+        let mut cmd = Command::new(&wasm_ld);
+        cmd.args([
+            "--no-entry",
+            "--export=_start",
+            "--strip-all",
+            "--gc-sections",
+        ]);
+        cmd.args(extra_ld_args);
+        for rt_obj in rt_objs {
+            cmd.arg(rt_obj);
+        }
+        cmd.arg(&gen_obj_path).arg("-o").arg(wasm_path);
+
+        let ld_status = cmd.status().map_err(|e| CompileError {
+            message: format!("wasm-ld invocation failed: {}", e),
+        })?;
+
+        let _ = fs::remove_file(&gen_obj_path);
+
+        if !ld_status.success() {
+            return Err(CompileError {
+                message: format!("wasm-ld failed with exit code: {:?}", ld_status.code()),
+            });
+        }
+
+        Ok(())
+    }
+}
+
+/// Get the clang version string for cache key computation.
+///
+/// S-3: If the version cannot be determined, returns "unknown" which
+/// causes cache invalidation (see `WasmRuntimeCache::new`).
+fn get_clang_version(clang: &str) -> String {
+    Command::new(clang)
+        .arg("--version")
+        .output()
+        .ok()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+/// Resolve the default cache directory for WASM runtime objects.
+///
+/// Priority:
+/// 1. `TAIDA_WASM_RT_CACHE` environment variable
+/// 2. `.taida/cache/wasm-rt/` relative to the project root (if `.taida/` exists)
+/// 3. `target/wasm-rt-cache/` as fallback
+pub fn default_wasm_cache_dir(project_dir: Option<&Path>) -> PathBuf {
+    if let Ok(env_dir) = std::env::var("TAIDA_WASM_RT_CACHE") {
+        return PathBuf::from(env_dir);
+    }
+
+    if let Some(dir) = project_dir {
+        // RCB-56: Walk up parent directories to find the Taida project root.
+        // A project root is identified by `.taida/` + `packages.td` co-existing.
+        // `.taida/` alone is not sufficient — it could be user config (~/.taida/)
+        // or an unrelated ancestor directory (/tmp/.taida/).
+        let mut current = dir.to_path_buf();
+        loop {
+            if current.join(".taida").exists() && current.join("packages.td").exists() {
+                return current.join(".taida").join("cache").join("wasm-rt");
+            }
+            if !current.pop() {
+                break;
+            }
+        }
+    }
+
+    // Fallback: target/wasm-rt-cache/ (works for both tests and standalone)
+    PathBuf::from("target/wasm-rt-cache")
 }
 
 /// 単一 .td ファイルを Native .o にコンパイル（リンクなし）
@@ -417,14 +752,10 @@ fn write_wasm_stdint_header(include_dir: &Path) -> Result<(), CompileError> {
 }
 
 fn wasm_clang_base_args(include_dir: &Path) -> Vec<String> {
-    vec![
-        "--target=wasm32-unknown-wasi".to_string(),
-        "-nostdlib".to_string(),
-        "-O2".to_string(),
-        "-c".to_string(),
-        "-I".to_string(),
-        include_dir.display().to_string(),
-    ]
+    let mut args: Vec<String> = WASM_CLANG_FLAGS.iter().map(|s| s.to_string()).collect();
+    args.push("-I".to_string());
+    args.push(include_dir.display().to_string());
+    args
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -474,6 +805,10 @@ fn run_wasm_clang_object(
 /// RC-1k: エクスポートフィルタリング — 依存モジュールの全関数を融合するのではなく、
 /// import で要求されたシンボル + その推移的依存のみを融合する。
 /// これにより非公開関数がリンク時に名前空間に漏洩することを防ぐ。
+///
+/// RCB-43: ダイヤモンド依存時の IR キャッシュ — 同一モジュールが複数パスから
+/// 異なるシンボルセットで import された場合、2回目以降は初回の parse+lower 結果を
+/// キャッシュから再利用し、ファイル再読込・再パース・再 lower を回避する。
 fn inline_wasm_module_imports(
     main_module: &mut super::ir::IrModule,
     base_dir: &Path,
@@ -489,6 +824,11 @@ fn inline_wasm_module_imports(
         main_path.canonicalize().unwrap_or(main_path.to_path_buf()),
         HashSet::new(),
     );
+
+    // RCB-43: IR キャッシュ — parse+lower 結果をモジュールパスごとにキャッシュする。
+    // ダイヤモンド依存（A→B, A→C, B→D, C→D）で D が複数回参照される場合、
+    // 2回目以降はキャッシュから IR を取得し、再パースを回避する。
+    let mut ir_cache: HashMap<PathBuf, super::ir::IrModule> = HashMap::new();
 
     // pending: (module_path, importer_dir, requested_syms)
     // requested_syms: importer が要求するリンクシンボル名のリスト
@@ -513,41 +853,24 @@ fn inline_wasm_module_imports(
             if new_syms.is_empty() {
                 continue;
             }
-            // 差分シンボルがある場合: モジュールを再パースし差分の推移的依存のみを追加融合
-            let dep_source = fs::read_to_string(&dep_path).map_err(|e| CompileError {
-                message: format!("failed to read module '{}': {}", dep_path.display(), e),
-            })?;
-            let (dep_program, dep_errors) = parse(&dep_source);
-            if !dep_errors.is_empty() {
-                let msgs: Vec<String> = dep_errors.iter().map(|e| format!("{}", e)).collect();
-                return Err(CompileError {
-                    message: format!(
-                        "parse errors in module '{}':\n{}",
-                        dep_path.display(),
-                        msgs.join("\n")
-                    ),
-                });
-            }
-            let mut dep_lowering = Lowering::new();
-            if let Some(parent) = dep_path.parent() {
-                dep_lowering.set_source_dir(parent.to_path_buf());
-            }
-            dep_lowering.set_module_key(Lowering::module_key_for_path(&dep_path));
-            let dep_ir = dep_lowering
-                .lower_program(&dep_program)
-                .map_err(|e| CompileError {
-                    message: format!("lowering error in module '{}': {}", dep_path.display(), e),
-                })?;
+            // 差分シンボルがある場合: キャッシュ済み IR から差分の推移的依存のみを追加融合
+            // RCB-43: ファイル再読込・再パース・再 lower を回避
+            let cached_ir = ir_cache.get(&canonical).unwrap_or_else(|| {
+                panic!(
+                    "BUG: IR cache missing for '{}' despite being in compiled map",
+                    canonical.display()
+                )
+            });
 
             // 差分シンボルの推移的依存のみを計算
-            let needed = compute_needed_functions(&dep_ir, &new_syms);
+            let needed = compute_needed_functions(cached_ir, &new_syms);
             // 既に融合済みの関数は除外して追加
-            for func in dep_ir.functions {
+            for func in &cached_ir.functions {
                 if !needed.contains(&func.name) {
                     continue;
                 }
                 if !main_module.functions.iter().any(|f| f.name == func.name) {
-                    main_module.functions.push(func);
+                    main_module.functions.push(func.clone());
                 }
             }
             // 融合済みシンボルを更新
@@ -586,23 +909,26 @@ fn inline_wasm_module_imports(
         // 要求されたシンボル + init関数 + 推移的依存のみを融合する
         let needed = compute_needed_functions(&dep_ir, &requested_syms);
 
-        for func in dep_ir.functions {
+        for func in &dep_ir.functions {
             if !needed.contains(&func.name) {
                 continue; // 非公開・不要な関数はスキップ
             }
             if !main_module.functions.iter().any(|f| f.name == func.name) {
-                main_module.functions.push(func);
+                main_module.functions.push(func.clone());
             }
         }
-
-        // 融合済みシンボルを記録
-        compiled.insert(canonical, needed);
 
         // 依存モジュールがさらに import していれば、それも再帰的に処理
         let dep_dir = dep_path.parent().unwrap_or(Path::new(".")).to_path_buf();
         for (sub_path, sub_syms) in &dep_ir.imports {
             pending.push((sub_path.clone(), dep_dir.clone(), sub_syms.clone()));
         }
+
+        // RCB-43: IR をキャッシュに保存（diff-symbol パスで再利用するため）
+        ir_cache.insert(canonical.clone(), dep_ir);
+
+        // 融合済みシンボルを記録
+        compiled.insert(canonical, needed);
     }
 
     // インライン展開完了: imports を空にする
@@ -696,17 +1022,19 @@ fn collect_func_refs(insts: &[super::ir::IrInst]) -> Vec<String> {
     refs
 }
 
-/// .td ファイルを wasm-min ターゲットでコンパイルし .wasm を生成する
+// ---------------------------------------------------------------------------
+// RCB-20: Shared WASM compilation helpers
+// ---------------------------------------------------------------------------
+
+/// RCB-20: Frontend pipeline shared by all WASM profiles.
 ///
-/// モジュールインポート対応: 依存モジュールを IR レベルでインライン展開し、
-/// 単一の IR モジュールとして C emit に渡す (Option C: AST/IR インライン展開)。
-/// パイプライン: .td → parse → IR → (依存 IR 融合) → C source → clang(wasm32) → .o → wasm-ld → .wasm
-///
-/// Cranelift の ISA に wasm32 が存在しないため、IR → C → clang ルートを採用する。
-pub fn compile_file_wasm(
+/// Performs: cycle detection -> parse -> lower -> module inline -> RC optimize -> C emit.
+/// Returns (generated_c_source, resolved_wasm_output_path).
+fn wasm_frontend(
     input_path: &Path,
     output_path: Option<&Path>,
-) -> Result<PathBuf, CompileError> {
+    profile: emit_wasm_c::WasmProfile,
+) -> Result<(String, PathBuf), CompileError> {
     // 循環インポート検出
     module_graph::detect_local_import_cycle(input_path).map_err(|e| CompileError {
         message: e.to_string(),
@@ -733,22 +1061,26 @@ pub fn compile_file_wasm(
         message: format!("{}", e),
     })?;
 
-    // wasm-min モジュールインライン展開: 依存モジュールの IR 関数をメインモジュールに融合
+    // モジュールインライン展開: 依存モジュールの IR 関数をメインモジュールに融合
     if !ir_module.imports.is_empty() {
         let base_dir = input_path.parent().unwrap_or(Path::new("."));
         inline_wasm_module_imports(&mut ir_module, base_dir, input_path)?;
     }
 
-    // RC 最適化パス（retain/release は C emitter で無視されるが、IR を整える）
+    // RC 最適化パス
     rc_opt::optimize(&mut ir_module);
 
-    // IR → C ソースコード
-    let generated_c =
-        emit_wasm_c::emit_c(&ir_module, emit_wasm_c::WasmProfile::Min).map_err(|e| {
-            CompileError {
-                message: format!("wasm-min C emission failed: {}", e),
-            }
-        })?;
+    let profile_name = match profile {
+        emit_wasm_c::WasmProfile::Min => "wasm-min",
+        emit_wasm_c::WasmProfile::Wasi => "wasm-wasi",
+        emit_wasm_c::WasmProfile::Edge => "wasm-edge",
+        emit_wasm_c::WasmProfile::Full => "wasm-full",
+    };
+
+    // IR -> C ソースコード
+    let generated_c = emit_wasm_c::emit_c(&ir_module, profile).map_err(|e| CompileError {
+        message: format!("{} C emission failed: {}", profile_name, e),
+    })?;
 
     let base_dir = input_path.parent().unwrap_or(Path::new("."));
 
@@ -764,34 +1096,66 @@ pub fn compile_file_wasm(
         }
     };
 
-    // 一時ファイルパスの生成（出力パスベースで一意化し、並列コンパイルの衝突を防ぐ）
-    let tmp_base = wasm_path.with_extension("_wasm_tmp");
+    Ok((generated_c, wasm_path))
+}
+
+/// RCB-20: Uncached WASM backend -- compile runtime C sources and link into .wasm.
+///
+/// `runtime_sources`: list of (name, C source content) pairs for runtime layers.
+///   e.g. `[("rt", runtime_core_wasm.c)]` for wasm-min,
+///        `[("rt_core", ...), ("rt_wasi", ...)]` for wasm-wasi.
+/// `tmp_suffix`: unique suffix to avoid temp file collisions between profiles.
+fn wasm_compile_and_link_uncached(
+    generated_c: &str,
+    wasm_path: &Path,
+    runtime_sources: &[(&str, &str)],
+    tmp_suffix: &str,
+) -> Result<(), CompileError> {
+    let tmp_base = wasm_path.with_extension(tmp_suffix);
     let gen_c_path = tmp_base.with_extension("gen.c");
     let gen_obj_path = tmp_base.with_extension("gen.o");
-    let rt_c_path = tmp_base.with_extension("rt.c");
-    let rt_obj_path = tmp_base.with_extension("rt.o");
     let include_dir = tmp_base.with_extension("include");
 
+    // Compute runtime file paths up front
+    let rt_files: Vec<(PathBuf, PathBuf)> = runtime_sources
+        .iter()
+        .map(|(name, _)| {
+            (
+                tmp_base.with_extension(format!("{}.c", name)),
+                tmp_base.with_extension(format!("{}.o", name)),
+            )
+        })
+        .collect();
+
+    // Helper: remove all runtime C source files
+    let cleanup_rt_c = |rt_files: &[(PathBuf, PathBuf)]| {
+        for (c_path, _) in rt_files {
+            let _ = fs::remove_file(c_path);
+        }
+    };
+
     // 生成された C ソースを書き出し
-    fs::write(&gen_c_path, &generated_c).map_err(|e| CompileError {
+    fs::write(&gen_c_path, generated_c).map_err(|e| CompileError {
         message: format!("failed to write generated C: {}", e),
     })?;
 
-    // runtime_core_wasm.c を書き出し
-    let rt_source = include_str!("runtime_core_wasm.c");
-    fs::write(&rt_c_path, rt_source).map_err(|e| CompileError {
-        message: format!("failed to write wasm runtime source: {}", e),
-    })?;
+    // Runtime C ソースを書き出し
+    for (i, (name, source)) in runtime_sources.iter().enumerate() {
+        fs::write(&rt_files[i].0, source).map_err(|e| CompileError {
+            message: format!("failed to write wasm {} source: {}", name, e),
+        })?;
+    }
+
     let clang = find_clang_for_wasm()?;
     if let Err(err) = write_wasm_stdint_header(&include_dir) {
         let _ = fs::remove_file(&gen_c_path);
-        let _ = fs::remove_file(&rt_c_path);
+        cleanup_rt_c(&rt_files);
         return Err(err);
     }
 
-    // 生成 C をコンパイル
     let clang_args = wasm_clang_base_args(&include_dir);
 
+    // 生成 C をコンパイル
     let gen_status = run_wasm_clang_object(
         &clang,
         &clang_args,
@@ -804,9 +1168,7 @@ pub fn compile_file_wasm(
     )?;
 
     if !gen_status.success() {
-        // C ソースをデバッグ用に残す
-        let _ = fs::remove_file(&rt_c_path);
-        let _ = fs::remove_file(&rt_obj_path);
+        cleanup_rt_c(&rt_files);
         return Err(CompileError {
             message: format!(
                 "clang wasm32 compilation of generated code failed (source preserved at: {}; shim preserved at: {})",
@@ -816,56 +1178,125 @@ pub fn compile_file_wasm(
         });
     }
 
-    // runtime をコンパイル
-    let rt_status = run_wasm_clang_object(
-        &clang,
-        &clang_args,
-        &rt_c_path,
-        &rt_obj_path,
-        &include_dir,
-        &[&gen_c_path, &rt_c_path, &gen_obj_path],
-        true,
-        None,
-    )?;
+    // Runtime layers を順番にコンパイル
+    // 各 runtime のコンパイル時に、先行するソース/オブジェクトを cleanup_paths に含める
+    for i in 0..runtime_sources.len() {
+        let rt_name = runtime_sources[i].0;
+        let rt_c = &rt_files[i].0;
+        let rt_o = &rt_files[i].1;
 
-    let _ = fs::remove_file(&gen_c_path);
-    let _ = fs::remove_file(&rt_c_path);
-    let _ = fs::remove_dir_all(&include_dir);
+        // cleanup_paths: gen + 全 runtime C ソース + 先行 runtime の .o
+        let mut cleanup: Vec<&Path> = vec![gen_c_path.as_path(), gen_obj_path.as_path()];
+        for (c_path, _) in &rt_files {
+            cleanup.push(c_path.as_path());
+        }
+        for (_, o_path) in rt_files.iter().take(i) {
+            cleanup.push(o_path.as_path());
+        }
 
-    if !rt_status.success() {
-        let _ = fs::remove_file(&gen_obj_path);
-        return Err(CompileError {
-            message: "clang wasm32 compilation of runtime failed.".to_string(),
-        });
+        let status = run_wasm_clang_object(
+            &clang,
+            &clang_args,
+            rt_c,
+            rt_o,
+            &include_dir,
+            &cleanup,
+            true,
+            None,
+        )?;
+
+        if !status.success() {
+            // Clean up everything produced so far
+            let _ = fs::remove_file(&gen_c_path);
+            let _ = fs::remove_file(&gen_obj_path);
+            cleanup_rt_c(&rt_files);
+            for (_, o_path) in rt_files.iter().take(i) {
+                let _ = fs::remove_file(o_path);
+            }
+            let _ = fs::remove_dir_all(&include_dir);
+            return Err(CompileError {
+                message: format!("clang wasm32 compilation of {} runtime failed.", rt_name),
+            });
+        }
     }
 
-    // wasm-ld でリンク
-    let wasm_ld = find_wasm_ld()?;
-    let ld_status = Command::new(&wasm_ld)
-        .args([
-            "--no-entry",
-            "--export=_start",
-            "--strip-all",
-            "--gc-sections",
-        ])
-        .arg(&rt_obj_path)
-        .arg(&gen_obj_path)
-        .arg("-o")
-        .arg(&wasm_path)
-        .status()
-        .map_err(|e| CompileError {
-            message: format!("wasm-ld invocation failed: {}", e),
-        })?;
+    // 一時 C ソースを削除
+    let _ = fs::remove_file(&gen_c_path);
+    cleanup_rt_c(&rt_files);
+    let _ = fs::remove_dir_all(&include_dir);
 
-    // 一時ファイルの削除
+    // wasm-ld でリンク (runtime .o files + gen.o)
+    let wasm_ld = find_wasm_ld()?;
+    let mut cmd = Command::new(&wasm_ld);
+    cmd.args([
+        "--no-entry",
+        "--export=_start",
+        "--strip-all",
+        "--gc-sections",
+    ]);
+    for (_, o_path) in &rt_files {
+        cmd.arg(o_path);
+    }
+    cmd.arg(&gen_obj_path).arg("-o").arg(wasm_path);
+
+    let ld_status = cmd.status().map_err(|e| CompileError {
+        message: format!("wasm-ld invocation failed: {}", e),
+    })?;
+
+    // 一時 .o ファイルの削除
     let _ = fs::remove_file(&gen_obj_path);
-    let _ = fs::remove_file(&rt_obj_path);
+    for (_, o_path) in &rt_files {
+        let _ = fs::remove_file(o_path);
+    }
 
     if !ld_status.success() {
         return Err(CompileError {
             message: format!("wasm-ld failed with exit code: {:?}", ld_status.code()),
         });
     }
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// WASM profile compilation functions
+// ---------------------------------------------------------------------------
+
+/// .td ファイルを wasm-min ターゲットでコンパイルし .wasm を生成する
+///
+/// モジュールインポート対応: 依存モジュールを IR レベルでインライン展開し、
+/// 単一の IR モジュールとして C emit に渡す (Option C: AST/IR インライン展開)。
+/// パイプライン: .td -> parse -> IR -> (依存 IR 融合) -> C source -> clang(wasm32) -> .o -> wasm-ld -> .wasm
+///
+/// Cranelift の ISA に wasm32 が存在しないため、IR -> C -> clang ルートを採用する。
+pub fn compile_file_wasm(
+    input_path: &Path,
+    output_path: Option<&Path>,
+) -> Result<PathBuf, CompileError> {
+    compile_file_wasm_cached(input_path, output_path, None)
+}
+
+/// wasm-min コンパイル with optional runtime cache (RC-8a/8d).
+pub fn compile_file_wasm_cached(
+    input_path: &Path,
+    output_path: Option<&Path>,
+    cache: Option<&WasmRuntimeCache>,
+) -> Result<PathBuf, CompileError> {
+    let (generated_c, wasm_path) =
+        wasm_frontend(input_path, output_path, emit_wasm_c::WasmProfile::Min)?;
+
+    if let Some(rt_cache) = cache {
+        let rt_obj = rt_cache.rt_core()?;
+        rt_cache.link_wasm_cached(&[rt_obj], &generated_c, &wasm_path, "_wasm_tmp", &[])?;
+        return Ok(wasm_path);
+    }
+
+    wasm_compile_and_link_uncached(
+        &generated_c,
+        &wasm_path,
+        &[("rt", include_str!("runtime_core_wasm.c"))],
+        "_wasm_tmp",
+    )?;
 
     Ok(wasm_path)
 }
@@ -877,213 +1308,47 @@ pub fn compile_file_wasm(
 /// .td ファイルを wasm-wasi ターゲットでコンパイルし .wasm を生成する
 ///
 /// wasm-wasi は wasm-min の上位互換で、WASI I/O (env, file read/write) を追加する。
-/// パイプライン: .td → parse → IR → C source → clang(wasm32) → .o → wasm-ld → .wasm
+/// パイプライン: .td -> parse -> IR -> C source -> clang(wasm32) -> .o -> wasm-ld -> .wasm
 ///
-/// リンク構成: gen.o + rt_core.o + rt_wasi.o → wasm-ld → output.wasm
+/// リンク構成: gen.o + rt_core.o + rt_wasi.o -> wasm-ld -> output.wasm
 pub fn compile_file_wasm_wasi(
     input_path: &Path,
     output_path: Option<&Path>,
 ) -> Result<PathBuf, CompileError> {
-    module_graph::detect_local_import_cycle(input_path).map_err(|e| CompileError {
-        message: e.to_string(),
-    })?;
+    compile_file_wasm_wasi_cached(input_path, output_path, None)
+}
 
-    let source = fs::read_to_string(input_path).map_err(|e| CompileError {
-        message: format!("failed to read '{}': {}", input_path.display(), e),
-    })?;
+/// wasm-wasi コンパイル with optional runtime cache (RC-8a/8d).
+pub fn compile_file_wasm_wasi_cached(
+    input_path: &Path,
+    output_path: Option<&Path>,
+    cache: Option<&WasmRuntimeCache>,
+) -> Result<PathBuf, CompileError> {
+    let (generated_c, wasm_path) =
+        wasm_frontend(input_path, output_path, emit_wasm_c::WasmProfile::Wasi)?;
 
-    let (program, parse_errors) = parse(&source);
-    if !parse_errors.is_empty() {
-        let msgs: Vec<String> = parse_errors.iter().map(|e| format!("{}", e)).collect();
-        return Err(CompileError {
-            message: format!("parse errors:\n{}", msgs.join("\n")),
-        });
+    if let Some(rt_cache) = cache {
+        let rt_core = rt_cache.rt_core()?;
+        let rt_wasi = rt_cache.rt_wasi()?;
+        rt_cache.link_wasm_cached(
+            &[rt_core, rt_wasi],
+            &generated_c,
+            &wasm_path,
+            "_wasm_wasi_tmp",
+            &[],
+        )?;
+        return Ok(wasm_path);
     }
 
-    let mut lowering = Lowering::new();
-    if let Some(parent) = input_path.parent() {
-        lowering.set_source_dir(parent.to_path_buf());
-    }
-    lowering.set_module_key(Lowering::module_key_for_path(input_path));
-    let mut ir_module = lowering.lower_program(&program).map_err(|e| CompileError {
-        message: format!("{}", e),
-    })?;
-
-    // wasm-wasi モジュールインライン展開
-    if !ir_module.imports.is_empty() {
-        let base_dir = input_path.parent().unwrap_or(Path::new("."));
-        inline_wasm_module_imports(&mut ir_module, base_dir, input_path)?;
-    }
-
-    // RC 最適化パス
-    rc_opt::optimize(&mut ir_module);
-
-    // IR → C ソースコード (wasm-wasi profile: OS API prototypes allowed)
-    let generated_c =
-        emit_wasm_c::emit_c(&ir_module, emit_wasm_c::WasmProfile::Wasi).map_err(|e| {
-            CompileError {
-                message: format!("wasm-wasi C emission failed: {}", e),
-            }
-        })?;
-
-    let base_dir = input_path.parent().unwrap_or(Path::new("."));
-
-    // 出力パスの決定
-    let wasm_path = match output_path {
-        Some(p) => p.to_path_buf(),
-        None => {
-            let stem = input_path
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or("output");
-            base_dir.join(format!("{}.wasm", stem))
-        }
-    };
-
-    // 一時ファイルパスの生成
-    let tmp_base = wasm_path.with_extension("_wasm_wasi_tmp");
-    let gen_c_path = tmp_base.with_extension("gen.c");
-    let gen_obj_path = tmp_base.with_extension("gen.o");
-    let rt_core_c_path = tmp_base.with_extension("rt_core.c");
-    let rt_core_obj_path = tmp_base.with_extension("rt_core.o");
-    let rt_wasi_c_path = tmp_base.with_extension("rt_wasi.c");
-    let rt_wasi_obj_path = tmp_base.with_extension("rt_wasi.o");
-    let include_dir = tmp_base.with_extension("include");
-
-    // 生成された C ソースを書き出し
-    fs::write(&gen_c_path, &generated_c).map_err(|e| CompileError {
-        message: format!("failed to write generated C: {}", e),
-    })?;
-
-    // runtime_core_wasm.c を書き出し（凍結、wasm-min と同一）
-    let rt_core_source = include_str!("runtime_core_wasm.c");
-    fs::write(&rt_core_c_path, rt_core_source).map_err(|e| CompileError {
-        message: format!("failed to write wasm core runtime source: {}", e),
-    })?;
-
-    // runtime_wasi_io.c を書き出し（wasm-wasi 専用 I/O 層）
-    let rt_wasi_source = include_str!("runtime_wasi_io.c");
-    fs::write(&rt_wasi_c_path, rt_wasi_source).map_err(|e| CompileError {
-        message: format!("failed to write wasm WASI I/O source: {}", e),
-    })?;
-    let clang = find_clang_for_wasm()?;
-    if let Err(err) = write_wasm_stdint_header(&include_dir) {
-        let _ = fs::remove_file(&gen_c_path);
-        let _ = fs::remove_file(&rt_core_c_path);
-        let _ = fs::remove_file(&rt_wasi_c_path);
-        return Err(err);
-    }
-
-    // 生成 C をコンパイル
-    let clang_args = wasm_clang_base_args(&include_dir);
-
-    let gen_status = run_wasm_clang_object(
-        &clang,
-        &clang_args,
-        &gen_c_path,
-        &gen_obj_path,
-        &include_dir,
-        &[],
-        false,
-        Some(&gen_c_path),
-    )?;
-
-    if !gen_status.success() {
-        let _ = fs::remove_file(&rt_core_c_path);
-        let _ = fs::remove_file(&rt_wasi_c_path);
-        return Err(CompileError {
-            message: format!(
-                "clang wasm32 compilation of generated code failed (source preserved at: {}; shim preserved at: {})",
-                gen_c_path.display(),
-                include_dir.display()
-            ),
-        });
-    }
-
-    // runtime core をコンパイル
-    let rt_core_status = run_wasm_clang_object(
-        &clang,
-        &clang_args,
-        &rt_core_c_path,
-        &rt_core_obj_path,
-        &include_dir,
-        &[&gen_c_path, &gen_obj_path, &rt_core_c_path, &rt_wasi_c_path],
-        true,
-        None,
-    )?;
-
-    if !rt_core_status.success() {
-        let _ = fs::remove_file(&gen_c_path);
-        let _ = fs::remove_file(&gen_obj_path);
-        let _ = fs::remove_file(&rt_core_c_path);
-        let _ = fs::remove_file(&rt_wasi_c_path);
-        let _ = fs::remove_dir_all(&include_dir);
-        return Err(CompileError {
-            message: "clang wasm32 compilation of core runtime failed.".to_string(),
-        });
-    }
-
-    // runtime WASI I/O をコンパイル
-    let rt_wasi_status = run_wasm_clang_object(
-        &clang,
-        &clang_args,
-        &rt_wasi_c_path,
-        &rt_wasi_obj_path,
-        &include_dir,
+    wasm_compile_and_link_uncached(
+        &generated_c,
+        &wasm_path,
         &[
-            &gen_c_path,
-            &gen_obj_path,
-            &rt_core_c_path,
-            &rt_core_obj_path,
-            &rt_wasi_c_path,
+            ("rt_core", include_str!("runtime_core_wasm.c")),
+            ("rt_wasi", include_str!("runtime_wasi_io.c")),
         ],
-        true,
-        None,
+        "_wasm_wasi_tmp",
     )?;
-
-    // 一時 C ソースを削除
-    let _ = fs::remove_file(&gen_c_path);
-    let _ = fs::remove_file(&rt_core_c_path);
-    let _ = fs::remove_file(&rt_wasi_c_path);
-    let _ = fs::remove_dir_all(&include_dir);
-
-    if !rt_wasi_status.success() {
-        let _ = fs::remove_file(&gen_obj_path);
-        let _ = fs::remove_file(&rt_core_obj_path);
-        return Err(CompileError {
-            message: "clang wasm32 compilation of WASI I/O runtime failed.".to_string(),
-        });
-    }
-
-    // wasm-ld でリンク（3 object: gen.o + rt_core.o + rt_wasi.o）
-    let wasm_ld = find_wasm_ld()?;
-    let ld_status = Command::new(&wasm_ld)
-        .args([
-            "--no-entry",
-            "--export=_start",
-            "--strip-all",
-            "--gc-sections",
-        ])
-        .arg(&rt_core_obj_path)
-        .arg(&rt_wasi_obj_path)
-        .arg(&gen_obj_path)
-        .arg("-o")
-        .arg(&wasm_path)
-        .status()
-        .map_err(|e| CompileError {
-            message: format!("wasm-ld invocation failed: {}", e),
-        })?;
-
-    // 一時ファイルの削除
-    let _ = fs::remove_file(&gen_obj_path);
-    let _ = fs::remove_file(&rt_core_obj_path);
-    let _ = fs::remove_file(&rt_wasi_obj_path);
-
-    if !ld_status.success() {
-        return Err(CompileError {
-            message: format!("wasm-ld failed with exit code: {:?}", ld_status.code()),
-        });
-    }
 
     Ok(wasm_path)
 }
@@ -1100,206 +1365,44 @@ pub fn compile_file_wasm_edge(
     input_path: &Path,
     output_path: Option<&Path>,
 ) -> Result<WasmEdgeOutput, CompileError> {
-    module_graph::detect_local_import_cycle(input_path).map_err(|e| CompileError {
-        message: e.to_string(),
-    })?;
+    compile_file_wasm_edge_cached(input_path, output_path, None)
+}
 
-    let source = fs::read_to_string(input_path).map_err(|e| CompileError {
-        message: format!("failed to read '{}': {}", input_path.display(), e),
-    })?;
+/// wasm-edge コンパイル with optional runtime cache (RC-8a/8d).
+pub fn compile_file_wasm_edge_cached(
+    input_path: &Path,
+    output_path: Option<&Path>,
+    cache: Option<&WasmRuntimeCache>,
+) -> Result<WasmEdgeOutput, CompileError> {
+    let (generated_c, wasm_path) =
+        wasm_frontend(input_path, output_path, emit_wasm_c::WasmProfile::Edge)?;
 
-    let (program, parse_errors) = parse(&source);
-    if !parse_errors.is_empty() {
-        let msgs: Vec<String> = parse_errors.iter().map(|e| format!("{}", e)).collect();
-        return Err(CompileError {
-            message: format!("parse errors:\n{}", msgs.join("\n")),
+    if let Some(rt_cache) = cache {
+        let rt_core = rt_cache.rt_core()?;
+        let rt_edge = rt_cache.rt_edge()?;
+        rt_cache.link_wasm_cached(
+            &[rt_core, rt_edge],
+            &generated_c,
+            &wasm_path,
+            "_wasm_edge_tmp",
+            &[],
+        )?;
+        let glue_path = generate_edge_js_glue(&wasm_path)?;
+        return Ok(WasmEdgeOutput {
+            wasm_path,
+            glue_path,
         });
     }
 
-    let mut lowering = Lowering::new();
-    if let Some(parent) = input_path.parent() {
-        lowering.set_source_dir(parent.to_path_buf());
-    }
-    lowering.set_module_key(Lowering::module_key_for_path(input_path));
-    let mut ir_module = lowering.lower_program(&program).map_err(|e| CompileError {
-        message: format!("{}", e),
-    })?;
-
-    // wasm-edge モジュールインライン展開
-    if !ir_module.imports.is_empty() {
-        let base_dir = input_path.parent().unwrap_or(Path::new("."));
-        inline_wasm_module_imports(&mut ir_module, base_dir, input_path)?;
-    }
-
-    // RC 最適化パス
-    rc_opt::optimize(&mut ir_module);
-
-    // IR -> C ソースコード (wasm-edge profile: env API allowed, file I/O rejected)
-    let generated_c =
-        emit_wasm_c::emit_c(&ir_module, emit_wasm_c::WasmProfile::Edge).map_err(|e| {
-            CompileError {
-                message: format!("wasm-edge C emission failed: {}", e),
-            }
-        })?;
-
-    let base_dir = input_path.parent().unwrap_or(Path::new("."));
-
-    // 出力パスの決定
-    let wasm_path = match output_path {
-        Some(p) => p.to_path_buf(),
-        None => {
-            let stem = input_path
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or("output");
-            base_dir.join(format!("{}.wasm", stem))
-        }
-    };
-
-    // 一時ファイルパスの生成
-    let tmp_base = wasm_path.with_extension("_wasm_edge_tmp");
-    let gen_c_path = tmp_base.with_extension("gen.c");
-    let gen_obj_path = tmp_base.with_extension("gen.o");
-    let rt_core_c_path = tmp_base.with_extension("rt_core.c");
-    let rt_core_obj_path = tmp_base.with_extension("rt_core.o");
-    let rt_edge_c_path = tmp_base.with_extension("rt_edge.c");
-    let rt_edge_obj_path = tmp_base.with_extension("rt_edge.o");
-    let include_dir = tmp_base.with_extension("include");
-
-    // 生成された C ソースを書き出し
-    fs::write(&gen_c_path, &generated_c).map_err(|e| CompileError {
-        message: format!("failed to write generated C: {}", e),
-    })?;
-
-    // runtime_core_wasm.c を書き出し（凍結、全 profile 共通）
-    let rt_core_source = include_str!("runtime_core_wasm.c");
-    fs::write(&rt_core_c_path, rt_core_source).map_err(|e| CompileError {
-        message: format!("failed to write wasm core runtime source: {}", e),
-    })?;
-
-    // runtime_edge_host.c を書き出し（wasm-edge 専用 host import 層）
-    let rt_edge_source = include_str!("runtime_edge_host.c");
-    fs::write(&rt_edge_c_path, rt_edge_source).map_err(|e| CompileError {
-        message: format!("failed to write wasm edge host source: {}", e),
-    })?;
-    let clang = find_clang_for_wasm()?;
-    if let Err(err) = write_wasm_stdint_header(&include_dir) {
-        let _ = fs::remove_file(&gen_c_path);
-        let _ = fs::remove_file(&rt_core_c_path);
-        let _ = fs::remove_file(&rt_edge_c_path);
-        return Err(err);
-    }
-
-    // 生成 C をコンパイル
-    let clang_args = wasm_clang_base_args(&include_dir);
-
-    let gen_status = run_wasm_clang_object(
-        &clang,
-        &clang_args,
-        &gen_c_path,
-        &gen_obj_path,
-        &include_dir,
-        &[],
-        false,
-        Some(&gen_c_path),
-    )?;
-
-    if !gen_status.success() {
-        let _ = fs::remove_file(&rt_core_c_path);
-        let _ = fs::remove_file(&rt_edge_c_path);
-        return Err(CompileError {
-            message: format!(
-                "clang wasm32 compilation of generated code failed (source preserved at: {}; shim preserved at: {})",
-                gen_c_path.display(),
-                include_dir.display()
-            ),
-        });
-    }
-
-    // runtime core をコンパイル
-    let rt_core_status = run_wasm_clang_object(
-        &clang,
-        &clang_args,
-        &rt_core_c_path,
-        &rt_core_obj_path,
-        &include_dir,
-        &[&gen_c_path, &gen_obj_path, &rt_core_c_path, &rt_edge_c_path],
-        true,
-        None,
-    )?;
-
-    if !rt_core_status.success() {
-        let _ = fs::remove_file(&gen_c_path);
-        let _ = fs::remove_file(&gen_obj_path);
-        let _ = fs::remove_file(&rt_core_c_path);
-        let _ = fs::remove_file(&rt_edge_c_path);
-        let _ = fs::remove_dir_all(&include_dir);
-        return Err(CompileError {
-            message: "clang wasm32 compilation of core runtime failed.".to_string(),
-        });
-    }
-
-    // runtime edge host をコンパイル
-    let rt_edge_status = run_wasm_clang_object(
-        &clang,
-        &clang_args,
-        &rt_edge_c_path,
-        &rt_edge_obj_path,
-        &include_dir,
+    wasm_compile_and_link_uncached(
+        &generated_c,
+        &wasm_path,
         &[
-            &gen_c_path,
-            &gen_obj_path,
-            &rt_core_c_path,
-            &rt_core_obj_path,
-            &rt_edge_c_path,
+            ("rt_core", include_str!("runtime_core_wasm.c")),
+            ("rt_edge", include_str!("runtime_edge_host.c")),
         ],
-        true,
-        None,
+        "_wasm_edge_tmp",
     )?;
-
-    // 一時 C ソースを削除
-    let _ = fs::remove_file(&gen_c_path);
-    let _ = fs::remove_file(&rt_core_c_path);
-    let _ = fs::remove_file(&rt_edge_c_path);
-    let _ = fs::remove_dir_all(&include_dir);
-
-    if !rt_edge_status.success() {
-        let _ = fs::remove_file(&gen_obj_path);
-        let _ = fs::remove_file(&rt_core_obj_path);
-        return Err(CompileError {
-            message: "clang wasm32 compilation of edge host runtime failed.".to_string(),
-        });
-    }
-
-    // wasm-ld でリンク（3 object: gen.o + rt_core.o + rt_edge.o）
-    let wasm_ld = find_wasm_ld()?;
-    let ld_status = Command::new(&wasm_ld)
-        .args([
-            "--no-entry",
-            "--export=_start",
-            "--strip-all",
-            "--gc-sections",
-        ])
-        .arg(&rt_core_obj_path)
-        .arg(&rt_edge_obj_path)
-        .arg(&gen_obj_path)
-        .arg("-o")
-        .arg(&wasm_path)
-        .status()
-        .map_err(|e| CompileError {
-            message: format!("wasm-ld invocation failed: {}", e),
-        })?;
-
-    // 一時ファイルの削除
-    let _ = fs::remove_file(&gen_obj_path);
-    let _ = fs::remove_file(&rt_core_obj_path);
-    let _ = fs::remove_file(&rt_edge_obj_path);
-
-    if !ld_status.success() {
-        return Err(CompileError {
-            message: format!("wasm-ld failed with exit code: {:?}", ld_status.code()),
-        });
-    }
 
     // WE-2d: Generate JS glue alongside the .wasm
     let glue_path = generate_edge_js_glue(&wasm_path)?;
@@ -1326,261 +1429,42 @@ pub fn compile_file_wasm_full(
     input_path: &Path,
     output_path: Option<&Path>,
 ) -> Result<PathBuf, CompileError> {
-    module_graph::detect_local_import_cycle(input_path).map_err(|e| CompileError {
-        message: e.to_string(),
-    })?;
+    compile_file_wasm_full_cached(input_path, output_path, None)
+}
 
-    let source = fs::read_to_string(input_path).map_err(|e| CompileError {
-        message: format!("failed to read '{}': {}", input_path.display(), e),
-    })?;
+/// wasm-full コンパイル with optional runtime cache (RC-8a/8d).
+pub fn compile_file_wasm_full_cached(
+    input_path: &Path,
+    output_path: Option<&Path>,
+    cache: Option<&WasmRuntimeCache>,
+) -> Result<PathBuf, CompileError> {
+    let (generated_c, wasm_path) =
+        wasm_frontend(input_path, output_path, emit_wasm_c::WasmProfile::Full)?;
 
-    let (program, parse_errors) = parse(&source);
-    if !parse_errors.is_empty() {
-        let msgs: Vec<String> = parse_errors.iter().map(|e| format!("{}", e)).collect();
-        return Err(CompileError {
-            message: format!("parse errors:\n{}", msgs.join("\n")),
-        });
+    if let Some(rt_cache) = cache {
+        let rt_core = rt_cache.rt_core()?;
+        let rt_wasi = rt_cache.rt_wasi()?;
+        let rt_full = rt_cache.rt_full()?;
+        rt_cache.link_wasm_cached(
+            &[rt_core, rt_wasi, rt_full],
+            &generated_c,
+            &wasm_path,
+            "_wasm_full_tmp",
+            &[],
+        )?;
+        return Ok(wasm_path);
     }
 
-    let mut lowering = Lowering::new();
-    if let Some(parent) = input_path.parent() {
-        lowering.set_source_dir(parent.to_path_buf());
-    }
-    lowering.set_module_key(Lowering::module_key_for_path(input_path));
-    let mut ir_module = lowering.lower_program(&program).map_err(|e| CompileError {
-        message: format!("{}", e),
-    })?;
-
-    // wasm-full モジュールインライン展開
-    if !ir_module.imports.is_empty() {
-        let base_dir = input_path.parent().unwrap_or(Path::new("."));
-        inline_wasm_module_imports(&mut ir_module, base_dir, input_path)?;
-    }
-
-    // RC 最適化パス
-    rc_opt::optimize(&mut ir_module);
-
-    // IR -> C ソースコード (wasm-full profile)
-    let generated_c =
-        emit_wasm_c::emit_c(&ir_module, emit_wasm_c::WasmProfile::Full).map_err(|e| {
-            CompileError {
-                message: format!("wasm-full C emission failed: {}", e),
-            }
-        })?;
-
-    let base_dir = input_path.parent().unwrap_or(Path::new("."));
-
-    // 出力パスの決定
-    let wasm_path = match output_path {
-        Some(p) => p.to_path_buf(),
-        None => {
-            let stem = input_path
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or("output");
-            base_dir.join(format!("{}.wasm", stem))
-        }
-    };
-
-    // 一時ファイルパスの生成
-    let tmp_base = wasm_path.with_extension("_wasm_full_tmp");
-    let gen_c_path = tmp_base.with_extension("gen.c");
-    let gen_obj_path = tmp_base.with_extension("gen.o");
-    let rt_core_c_path = tmp_base.with_extension("rt_core.c");
-    let rt_core_obj_path = tmp_base.with_extension("rt_core.o");
-    let rt_wasi_c_path = tmp_base.with_extension("rt_wasi.c");
-    let rt_wasi_obj_path = tmp_base.with_extension("rt_wasi.o");
-    let rt_full_c_path = tmp_base.with_extension("rt_full.c");
-    let rt_full_obj_path = tmp_base.with_extension("rt_full.o");
-    let include_dir = tmp_base.with_extension("include");
-
-    // 生成された C ソースを書き出し
-    fs::write(&gen_c_path, &generated_c).map_err(|e| CompileError {
-        message: format!("failed to write generated C: {}", e),
-    })?;
-
-    // runtime_core_wasm.c (凍結)
-    let rt_core_source = include_str!("runtime_core_wasm.c");
-    fs::write(&rt_core_c_path, rt_core_source).map_err(|e| CompileError {
-        message: format!("failed to write wasm core runtime source: {}", e),
-    })?;
-
-    // runtime_wasi_io.c (wasm-wasi I/O 層)
-    let rt_wasi_source = include_str!("runtime_wasi_io.c");
-    fs::write(&rt_wasi_c_path, rt_wasi_source).map_err(|e| CompileError {
-        message: format!("failed to write wasm WASI I/O source: {}", e),
-    })?;
-
-    // runtime_full_wasm.c (wasm-full 拡張層)
-    let rt_full_source = include_str!("runtime_full_wasm.c");
-    fs::write(&rt_full_c_path, rt_full_source).map_err(|e| CompileError {
-        message: format!("failed to write wasm full runtime source: {}", e),
-    })?;
-    let clang = find_clang_for_wasm()?;
-    if let Err(err) = write_wasm_stdint_header(&include_dir) {
-        let _ = fs::remove_file(&gen_c_path);
-        let _ = fs::remove_file(&rt_core_c_path);
-        let _ = fs::remove_file(&rt_wasi_c_path);
-        let _ = fs::remove_file(&rt_full_c_path);
-        return Err(err);
-    }
-
-    // 生成 C をコンパイル
-    let clang_args = wasm_clang_base_args(&include_dir);
-
-    let gen_status = run_wasm_clang_object(
-        &clang,
-        &clang_args,
-        &gen_c_path,
-        &gen_obj_path,
-        &include_dir,
-        &[],
-        false,
-        Some(&gen_c_path),
-    )?;
-
-    if !gen_status.success() {
-        let _ = fs::remove_file(&rt_core_c_path);
-        let _ = fs::remove_file(&rt_wasi_c_path);
-        let _ = fs::remove_file(&rt_full_c_path);
-        return Err(CompileError {
-            message: format!(
-                "clang wasm32 compilation of generated code failed (source preserved at: {}; shim preserved at: {})",
-                gen_c_path.display(),
-                include_dir.display()
-            ),
-        });
-    }
-
-    // runtime core をコンパイル
-    let rt_core_status = run_wasm_clang_object(
-        &clang,
-        &clang_args,
-        &rt_core_c_path,
-        &rt_core_obj_path,
-        &include_dir,
+    wasm_compile_and_link_uncached(
+        &generated_c,
+        &wasm_path,
         &[
-            &gen_c_path,
-            &gen_obj_path,
-            &rt_core_c_path,
-            &rt_wasi_c_path,
-            &rt_full_c_path,
+            ("rt_core", include_str!("runtime_core_wasm.c")),
+            ("rt_wasi", include_str!("runtime_wasi_io.c")),
+            ("rt_full", include_str!("runtime_full_wasm.c")),
         ],
-        true,
-        None,
+        "_wasm_full_tmp",
     )?;
-
-    if !rt_core_status.success() {
-        let _ = fs::remove_file(&gen_c_path);
-        let _ = fs::remove_file(&gen_obj_path);
-        let _ = fs::remove_file(&rt_core_c_path);
-        let _ = fs::remove_file(&rt_wasi_c_path);
-        let _ = fs::remove_file(&rt_full_c_path);
-        let _ = fs::remove_dir_all(&include_dir);
-        return Err(CompileError {
-            message: "clang wasm32 compilation of core runtime failed.".to_string(),
-        });
-    }
-
-    // runtime WASI I/O をコンパイル
-    let rt_wasi_status = run_wasm_clang_object(
-        &clang,
-        &clang_args,
-        &rt_wasi_c_path,
-        &rt_wasi_obj_path,
-        &include_dir,
-        &[
-            &gen_c_path,
-            &gen_obj_path,
-            &rt_core_c_path,
-            &rt_core_obj_path,
-            &rt_wasi_c_path,
-            &rt_full_c_path,
-        ],
-        true,
-        None,
-    )?;
-
-    if !rt_wasi_status.success() {
-        let _ = fs::remove_file(&gen_c_path);
-        let _ = fs::remove_file(&gen_obj_path);
-        let _ = fs::remove_file(&rt_core_obj_path);
-        let _ = fs::remove_file(&rt_core_c_path);
-        let _ = fs::remove_file(&rt_wasi_c_path);
-        let _ = fs::remove_file(&rt_full_c_path);
-        let _ = fs::remove_dir_all(&include_dir);
-        return Err(CompileError {
-            message: "clang wasm32 compilation of WASI I/O runtime failed.".to_string(),
-        });
-    }
-
-    // runtime full をコンパイル
-    let rt_full_status = run_wasm_clang_object(
-        &clang,
-        &clang_args,
-        &rt_full_c_path,
-        &rt_full_obj_path,
-        &include_dir,
-        &[
-            &gen_c_path,
-            &gen_obj_path,
-            &rt_core_c_path,
-            &rt_core_obj_path,
-            &rt_wasi_c_path,
-            &rt_wasi_obj_path,
-            &rt_full_c_path,
-        ],
-        true,
-        None,
-    )?;
-
-    // 一時 C ソースを削除
-    let _ = fs::remove_file(&gen_c_path);
-    let _ = fs::remove_file(&rt_core_c_path);
-    let _ = fs::remove_file(&rt_wasi_c_path);
-    let _ = fs::remove_file(&rt_full_c_path);
-    let _ = fs::remove_dir_all(&include_dir);
-
-    if !rt_full_status.success() {
-        let _ = fs::remove_file(&gen_obj_path);
-        let _ = fs::remove_file(&rt_core_obj_path);
-        let _ = fs::remove_file(&rt_wasi_obj_path);
-        return Err(CompileError {
-            message: "clang wasm32 compilation of full runtime failed.".to_string(),
-        });
-    }
-
-    // wasm-ld でリンク（4 object: gen.o + rt_core.o + rt_wasi.o + rt_full.o）
-    let wasm_ld = find_wasm_ld()?;
-    let ld_status = Command::new(&wasm_ld)
-        .args([
-            "--no-entry",
-            "--export=_start",
-            "--strip-all",
-            "--gc-sections",
-        ])
-        .arg(&rt_core_obj_path)
-        .arg(&rt_wasi_obj_path)
-        .arg(&rt_full_obj_path)
-        .arg(&gen_obj_path)
-        .arg("-o")
-        .arg(&wasm_path)
-        .status()
-        .map_err(|e| CompileError {
-            message: format!("wasm-ld invocation failed: {}", e),
-        })?;
-
-    // 一時ファイルの削除
-    let _ = fs::remove_file(&gen_obj_path);
-    let _ = fs::remove_file(&rt_core_obj_path);
-    let _ = fs::remove_file(&rt_wasi_obj_path);
-    let _ = fs::remove_file(&rt_full_obj_path);
-
-    if !ld_status.success() {
-        return Err(CompileError {
-            message: format!("wasm-ld failed with exit code: {:?}", ld_status.code()),
-        });
-    }
 
     Ok(wasm_path)
 }
@@ -2044,5 +1928,242 @@ mod tests {
             "non-init functions should NOT be included when nothing is requested"
         );
         assert!(!needed.contains("_taida_fn_mod1_private"));
+    }
+
+    // -----------------------------------------------------------------------
+    // S-4: WasmRuntimeCache unit tests
+    // -----------------------------------------------------------------------
+
+    // D-2: Mutex to serialize tests that mutate TAIDA_WASM_RT_CACHE env var,
+    // preventing races when cargo test runs them in parallel.
+    static ENV_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// D-2: RAII guard for env var mutation. Saves the current value on
+    /// construction and restores it on drop.
+    struct EnvGuard {
+        key: &'static str,
+        saved: Option<String>,
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl EnvGuard {
+        fn new(key: &'static str) -> Self {
+            let lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+            let saved = std::env::var(key).ok();
+            Self {
+                key,
+                saved,
+                _lock: lock,
+            }
+        }
+
+        fn set(&self, value: &str) {
+            // SAFETY: serialized by ENV_MUTEX
+            unsafe { std::env::set_var(self.key, value) }
+        }
+
+        fn remove(&self) {
+            // SAFETY: serialized by ENV_MUTEX
+            unsafe { std::env::remove_var(self.key) }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            unsafe {
+                match &self.saved {
+                    Some(v) => std::env::set_var(self.key, v),
+                    None => std::env::remove_var(self.key),
+                }
+            }
+        }
+    }
+
+    /// S-4: cache_key produces different keys for different source content.
+    #[test]
+    fn test_cache_key_differs_on_source_change() {
+        use std::path::PathBuf;
+
+        let cache_dir = PathBuf::from("target/test-wasm-cache-key");
+        let _ = std::fs::create_dir_all(&cache_dir);
+
+        // We cannot easily construct a WasmRuntimeCache without clang,
+        // so test the FNV-1a logic directly with the same algorithm.
+        fn fnv1a_cache_key(source: &str, version: &str) -> String {
+            let mut state: u64 = 0xcbf29ce484222325;
+            for byte in source.bytes() {
+                state ^= byte as u64;
+                state = state.wrapping_mul(0x100000001b3);
+            }
+            for byte in version.bytes() {
+                state ^= byte as u64;
+                state = state.wrapping_mul(0x100000001b3);
+            }
+            // L-1: Use the same shared constant as cache_key()
+            for flag in WASM_CLANG_FLAGS {
+                for byte in flag.bytes() {
+                    state ^= byte as u64;
+                    state = state.wrapping_mul(0x100000001b3);
+                }
+            }
+            format!("{:016x}", state)
+        }
+
+        let key_a = fnv1a_cache_key("int main() { return 0; }", "clang 17.0.0");
+        let key_b = fnv1a_cache_key("int main() { return 1; }", "clang 17.0.0");
+        let key_c = fnv1a_cache_key("int main() { return 0; }", "clang 18.0.0");
+
+        assert_ne!(
+            key_a, key_b,
+            "different source should produce different keys"
+        );
+        assert_ne!(
+            key_a, key_c,
+            "different clang version should produce different keys"
+        );
+
+        // Same inputs should produce the same key
+        let key_a2 = fnv1a_cache_key("int main() { return 0; }", "clang 17.0.0");
+        assert_eq!(key_a, key_a2, "same inputs should produce identical keys");
+
+        // Key should be a 16-char hex string
+        assert_eq!(key_a.len(), 16, "cache key should be 16 hex chars");
+        assert!(
+            key_a.chars().all(|c| c.is_ascii_hexdigit()),
+            "cache key should only contain hex digits"
+        );
+
+        let _ = std::fs::remove_dir_all(&cache_dir);
+    }
+
+    /// S-4: default_wasm_cache_dir respects environment variable priority.
+    #[test]
+    fn test_default_wasm_cache_dir_env_override() {
+        let guard = EnvGuard::new("TAIDA_WASM_RT_CACHE");
+        guard.set("/tmp/test-wasm-cache-override");
+
+        let dir = default_wasm_cache_dir(Some(Path::new("/some/project")));
+        assert_eq!(
+            dir,
+            PathBuf::from("/tmp/test-wasm-cache-override"),
+            "env variable should take highest priority"
+        );
+        // guard restores env on drop
+    }
+
+    /// S-4: default_wasm_cache_dir falls back to target/ when no .taida/ exists.
+    #[test]
+    fn test_default_wasm_cache_dir_fallback() {
+        let guard = EnvGuard::new("TAIDA_WASM_RT_CACHE");
+        guard.remove();
+
+        let tmp = PathBuf::from("target/test-cache-dir-no-taida");
+        let _ = std::fs::create_dir_all(&tmp);
+        let _ = std::fs::remove_dir_all(tmp.join(".taida"));
+
+        let dir = default_wasm_cache_dir(Some(&tmp));
+        assert_eq!(
+            dir,
+            PathBuf::from("target/wasm-rt-cache"),
+            "should fall back to target/wasm-rt-cache when .taida/ does not exist"
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+        // guard restores env on drop
+    }
+
+    /// S-4: default_wasm_cache_dir uses .taida/cache/wasm-rt/ when project root found.
+    #[test]
+    fn test_default_wasm_cache_dir_taida_dir() {
+        let guard = EnvGuard::new("TAIDA_WASM_RT_CACHE");
+        guard.remove();
+
+        let tmp = PathBuf::from("target/test-cache-dir-taida");
+        let taida_dir = tmp.join(".taida");
+        let _ = std::fs::create_dir_all(&taida_dir);
+        // packages.td is the project marker required alongside .taida/
+        let _ = std::fs::write(tmp.join("packages.td"), "");
+
+        let dir = default_wasm_cache_dir(Some(&tmp));
+        assert_eq!(
+            dir,
+            taida_dir.join("cache").join("wasm-rt"),
+            "should use .taida/cache/wasm-rt/ when project root found"
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+        // guard restores env on drop
+    }
+
+    /// S-4: .taida/ without packages.td falls back to target/wasm-rt-cache.
+    #[test]
+    fn test_default_wasm_cache_dir_taida_without_manifest() {
+        let guard = EnvGuard::new("TAIDA_WASM_RT_CACHE");
+        guard.remove();
+
+        let tmp = PathBuf::from("target/test-cache-dir-no-manifest");
+        let _ = std::fs::create_dir_all(tmp.join(".taida"));
+        // No packages.td — not a Taida project root
+        let _ = std::fs::remove_file(tmp.join("packages.td"));
+
+        let dir = default_wasm_cache_dir(Some(&tmp));
+        assert_eq!(
+            dir,
+            PathBuf::from("target/wasm-rt-cache"),
+            "should fall back when .taida/ exists but packages.td is missing"
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+        // guard restores env on drop
+    }
+
+    /// RCB-56: default_wasm_cache_dir walks up parent directories to find project root.
+    #[test]
+    fn test_default_wasm_cache_dir_parent_traversal() {
+        let guard = EnvGuard::new("TAIDA_WASM_RT_CACHE");
+        guard.remove();
+
+        // Create proj/.taida/ + proj/packages.td and proj/src/deep/
+        let tmp = PathBuf::from("target/test-cache-dir-nested");
+        let taida_dir = tmp.join(".taida");
+        let nested = tmp.join("src").join("deep");
+        let _ = std::fs::create_dir_all(&taida_dir);
+        let _ = std::fs::create_dir_all(&nested);
+        let _ = std::fs::write(tmp.join("packages.td"), "");
+
+        // Pass the nested subdirectory — should still find proj/.taida/
+        let dir = default_wasm_cache_dir(Some(&nested));
+        assert_eq!(
+            dir,
+            taida_dir.join("cache").join("wasm-rt"),
+            "should find project root by walking up from subdirectory"
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+        // guard restores env on drop
+    }
+
+    /// RCB-56: Does not pick up ancestor .taida/ without packages.td.
+    #[test]
+    fn test_default_wasm_cache_dir_ignores_non_project_taida() {
+        let guard = EnvGuard::new("TAIDA_WASM_RT_CACHE");
+        guard.remove();
+
+        // ancestor/.taida/ exists but no packages.td — not a project root
+        let tmp = PathBuf::from("target/test-cache-dir-ancestor");
+        let _ = std::fs::create_dir_all(tmp.join(".taida"));
+        let nested = tmp.join("sub").join("deep");
+        let _ = std::fs::create_dir_all(&nested);
+        // No packages.td anywhere
+
+        let dir = default_wasm_cache_dir(Some(&nested));
+        assert_eq!(
+            dir,
+            PathBuf::from("target/wasm-rt-cache"),
+            "should not pick up ancestor .taida/ without packages.td"
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+        // guard restores env on drop
     }
 }

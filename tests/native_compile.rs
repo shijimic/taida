@@ -3,36 +3,12 @@
 ///
 /// These tests ensure that the Cranelift native backend produces the same results
 /// as the interpreter for all compile_* example files.
+mod common;
+
+use common::{run_interpreter, taida_bin};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-
-/// Get the path to the built taida binary.
-fn taida_bin() -> PathBuf {
-    // cargo test builds the binary at target/debug/taida
-    let mut path = PathBuf::from(env!("CARGO_BIN_EXE_taida"));
-    if !path.exists() {
-        // fallback: look relative to the manifest dir
-        path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("target")
-            .join("debug")
-            .join("taida");
-    }
-    path
-}
-
-/// Run a .td file with the interpreter and return its stdout.
-fn run_interpreter(td_path: &Path) -> Option<String> {
-    let output = Command::new(taida_bin()).arg(td_path).output().ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    Some(
-        String::from_utf8_lossy(&output.stdout)
-            .trim_end()
-            .to_string(),
-    )
-}
 
 /// Compile a .td file to a native binary, execute it, and return its stdout.
 fn compile_and_run(td_path: &Path) -> Option<String> {
@@ -1163,7 +1139,6 @@ items <= @[10, 20, 30]
 sumItems =
   Fold[items, 0, _ acc x = acc + x]() ]=> total
   total
-=> :Int
 
 stdout(sumItems().toString())
 "#;

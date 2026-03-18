@@ -40,7 +40,14 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: taiki-e/install-action@nextest
       - name: Install wasmtime
-        run: curl https://wasmtime.dev/install.sh -sSf | bash && echo "$HOME/.wasmtime/bin" >> $GITHUB_PATH
+        run: |
+          WASMTIME_VERSION=v33.0.0
+          curl -L "https://github.com/bytecodealliance/wasmtime/releases/download/${WASMTIME_VERSION}/wasmtime-${WASMTIME_VERSION}-x86_64-linux.tar.xz" -o wasmtime.tar.xz
+          tar xf wasmtime.tar.xz
+          mv "wasmtime-${WASMTIME_VERSION}-x86_64-linux/wasmtime" "$HOME/.wasmtime-bin"
+          mkdir -p "$HOME/.wasmtime/bin"
+          mv "$HOME/.wasmtime-bin" "$HOME/.wasmtime/bin/wasmtime"
+          echo "$HOME/.wasmtime/bin" >> $GITHUB_PATH
       - uses: actions/cache@v5
         with:
           path: |

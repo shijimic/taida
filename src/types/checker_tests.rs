@@ -586,17 +586,18 @@ fn test_generic_function_constraint_is_enforced() {
 fn test_generic_function_requires_inferable_type_param() {
     let source = "make[T] =\n  1\n=> :T\n\nvalue <= make()";
     let (_checker, errors) = check(source);
-    assert_eq!(
-        errors.len(),
-        2,
-        "Expected exactly 2 errors, got: {:?}",
+    // RCB-50: Previously emitted 2 errors (E1510 + E1601), but E1601 is
+    // now correctly suppressed because the return type `:T` is an
+    // unresolved type variable that cannot be meaningfully compared.
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1510]")
+            && e.message.contains("uninferable type parameter(s): T")),
+        "Expected generic inference error E1510, got: {:?}",
         errors
     );
     assert!(
-        errors.iter().any(|e| {
-            e.message.contains("[E1510]") && e.message.contains("uninferable type parameter(s): T")
-        }),
-        "Expected generic inference error, got: {:?}",
+        !errors.iter().any(|e| e.message.contains("[E1601]")),
+        "Should not emit E1601 when return type is an unresolved type variable, got: {:?}",
         errors
     );
 }
@@ -2914,5 +2915,194 @@ fn test_lax_result_current_behavior_stable() {
             || matches!(x_ty, Some(Type::Unknown)),
         "Lax should resolve to Generic(Lax, ...) or Unknown, got {:?}",
         x_ty
+    );
+}
+
+// -- RCB-50: Named/List/BuchiPack return type verification --
+
+#[test]
+fn test_rcb50_named_return_type_mismatch_detected() {
+    // Function declares :A but body returns B -- should emit E1601
+    let source = r#"
+A = @(a: Int)
+B = @(b: Int)
+bad =
+  B(b <= 1)
+=> :A
+bad()
+"#;
+    let (_, errors) = check(source);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1601]")),
+        "Expected E1601 for Named type mismatch (B vs A), got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn test_rcb50_named_return_type_match_no_error() {
+    // Function declares :A and body returns A -- no E1601
+    let source = r#"
+A = @(a: Int)
+good =
+  A(a <= 1)
+=> :A
+good()
+"#;
+    let (_, errors) = check(source);
+    let e1601: Vec<_> = errors
+        .iter()
+        .filter(|e| e.message.contains("[E1601]"))
+        .collect();
+    assert!(
+        e1601.is_empty(),
+        "Should not produce E1601 for matching Named return type, got: {:?}",
+        e1601
+    );
+}
+
+#[test]
+fn test_rcb50_named_subtype_return_no_error() {
+    // Function declares :Parent, body returns Child -- structural subtype, no E1601
+    let source = r#"
+Parent = @(name: Str)
+Parent => Child = @(age: Int)
+good =
+  Child(name <= "x", age <= 1)
+=> :Parent
+good()
+"#;
+    let (_, errors) = check(source);
+    let e1601: Vec<_> = errors
+        .iter()
+        .filter(|e| e.message.contains("[E1601]"))
+        .collect();
+    assert!(
+        e1601.is_empty(),
+        "Should not produce E1601 for subtype return (Child is subtype of Parent), got: {:?}",
+        e1601
+    );
+}
+
+#[test]
+fn test_rcb50_named_return_type_primitive_mismatch() {
+    // Function declares :Int but body returns Named type -- E1601
+    let source = r#"
+A = @(a: Int)
+bad =
+  A(a <= 1)
+=> :Int
+bad()
+"#;
+    let (_, errors) = check(source);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1601]")),
+        "Expected E1601 for Named vs Int mismatch, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn test_rcb50_generic_type_var_return_no_spurious_e1601() {
+    // Generic function with unresolvable type params -- no E1601
+    let source = "id[T] x: T =\n  x\n=> :T";
+    let (_, errors) = check(source);
+    let e1601: Vec<_> = errors
+        .iter()
+        .filter(|e| e.message.contains("[E1601]"))
+        .collect();
+    assert!(
+        e1601.is_empty(),
+        "Should not produce E1601 for generic type variable return, got: {:?}",
+        e1601
+    );
+}
+
+#[test]
+fn test_rcb50_custom_mold_return_no_spurious_e1601() {
+    // Custom mold instantiation as last expression -- checker cannot
+    // predict what solidify returns, so E1601 should be suppressed.
+    let source = r#"
+Mold[T] => AlwaysFail[T] = @(
+  solidify =
+    Error(type <= "SolidifyError", message <= "fail").throw()
+  => :Int
+)
+check x: Int =
+  |== err: Error =
+    -1
+  => :Int
+  AlwaysFail[x]()
+=> :Int
+"#;
+    let (_, errors) = check(source);
+    let e1601: Vec<_> = errors
+        .iter()
+        .filter(|e| e.message.contains("[E1601]"))
+        .collect();
+    assert!(
+        e1601.is_empty(),
+        "Should not produce E1601 for custom mold instantiation return, got: {:?}",
+        e1601
+    );
+}
+
+// -- RCB-51: Cyclic inheritance detection in checker --
+
+#[test]
+fn test_rcb51_cyclic_inheritance_emits_e1610() {
+    // A = @(a: Int), A => B, B => A -- the second should emit E1610
+    let source = r#"
+A = @(a: Int)
+A => B = @(b: Int)
+B => A = @(c: Int)
+"#;
+    let (_, errors) = check(source);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1610]")),
+        "Expected E1610 for cyclic inheritance, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn test_rcb51_cyclic_inheritance_no_hang() {
+    // Even with cyclic definitions, taida check must terminate quickly.
+    let source = r#"
+A = @(a: Int)
+A => B = @(b: Int)
+B => A = @(c: Int)
+C = @(z: Int)
+useC x: C =
+  1
+=> :Int
+b <= B(a <= 1, b <= 2)
+useC(b)
+"#;
+    let (_, errors) = check(source);
+    // The important thing is that this terminates. The cycle should
+    // be caught at registration time (E1610), and is_subtype_of
+    // should not hang even if called.
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1610]")),
+        "Expected E1610 for cyclic inheritance, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn test_rcb51_three_way_cycle_detected() {
+    // A => B => C => A -- indirect 3-node cycle
+    let source = r#"
+A = @(a: Int)
+A => B = @(b: Int)
+B => C = @(c: Int)
+C => A = @(d: Int)
+"#;
+    let (_, errors) = check(source);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1610]")),
+        "Expected E1610 for 3-node cyclic inheritance, got: {:?}",
+        errors
     );
 }

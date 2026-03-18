@@ -6,41 +6,14 @@
 /// WC-7d: Size gate CI tests — hard gates on .wasm file sizes.
 /// Prelude-complete baselines (WC-1~WC-6): hello = 321 bytes, pi_approx = 6,736 bytes.
 /// Gate: hello <= 512 bytes, pi <= 8,192 bytes.
+///
+/// RC-8b: Parity tests save compiled .wasm files to `target/wasm-test-cache/wasm-min/`
+/// so superset tests in wasm_wasi.rs can reuse them without recompiling.
+mod common;
+
+use common::{cache_wasm, run_interpreter, taida_bin, unique_temp_dir, wasmtime_bin};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-
-/// Get the path to the built taida binary.
-fn taida_bin() -> PathBuf {
-    let mut path = PathBuf::from(env!("CARGO_BIN_EXE_taida"));
-    if !path.exists() {
-        path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("target")
-            .join("debug")
-            .join("taida");
-    }
-    path
-}
-
-/// Find wasmtime binary.
-fn wasmtime_bin() -> Option<PathBuf> {
-    // Check HOME/.wasmtime/bin/wasmtime
-    if let Ok(home) = std::env::var("HOME") {
-        let path = PathBuf::from(home).join(".wasmtime/bin/wasmtime");
-        if path.exists() {
-            return Some(path);
-        }
-    }
-    // Check PATH
-    if let Ok(output) = Command::new("which").arg("wasmtime").output()
-        && output.status.success()
-    {
-        let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if !path.is_empty() {
-            return Some(PathBuf::from(path));
-        }
-    }
-    None
-}
 
 /// AT-7: Require wasmtime or skip with clear visibility.
 ///
@@ -63,20 +36,8 @@ fn require_wasmtime() -> Option<PathBuf> {
     }
 }
 
-/// Run a .td file with the interpreter and return its stdout.
-fn run_interpreter(td_path: &Path) -> Option<String> {
-    let output = Command::new(taida_bin()).arg(td_path).output().ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    Some(
-        String::from_utf8_lossy(&output.stdout)
-            .trim_end()
-            .to_string(),
-    )
-}
-
 /// Compile a .td file to wasm-min and run with wasmtime.
+/// RC-8b: Also caches the compiled .wasm for superset test reuse.
 fn compile_and_run_wasm(td_path: &Path, wasmtime: &Path) -> Option<String> {
     let stem = td_path.file_stem()?.to_string_lossy().to_string();
     let wasm_path = std::env::temp_dir().join(format!("taida_wasm_test_{}.wasm", stem));
@@ -101,6 +62,9 @@ fn compile_and_run_wasm(td_path: &Path, wasmtime: &Path) -> Option<String> {
         );
         return None;
     }
+
+    // RC-8b: Cache the compiled .wasm for superset tests
+    cache_wasm("wasm-min", &stem, &wasm_path);
 
     // Run with wasmtime
     let run_output = Command::new(wasmtime).arg(&wasm_path).output().ok()?;
@@ -1247,6 +1211,72 @@ stdout(fromC("y"))
     assert_eq!(
         interp, wasm,
         "RC-1n/WASM: diamond — interp='{}', wasm='{}'",
+        interp, wasm
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// RCB-43/WASM: Diamond dependency with different symbols from shared module.
+/// B imports funcX from D, C imports funcY from D (different symbol sets).
+/// This exercises the diff-symbol path in inline_wasm_module_imports, where
+/// the second encounter of D must use the cached IR instead of re-parsing.
+#[test]
+fn wasm_min_rcb43_diamond_different_symbols() {
+    let Some(wasmtime) = require_wasmtime() else {
+        return;
+    };
+
+    let dir = unique_temp_dir("taida_wasm_rcb43");
+
+    // D exports two distinct functions: funcX and funcY
+    std::fs::write(
+        dir.join("mod_d.td"),
+        r#"funcX x = "X:" + x => :Str
+funcY y = "Y:" + y => :Str
+<<< @(funcX, funcY)
+"#,
+    )
+    .expect("write mod_d");
+
+    // B imports only funcX from D
+    std::fs::write(
+        dir.join("mod_b.td"),
+        r#">>> ./mod_d.td => @(funcX)
+fromB x = "B(" + funcX(x) + ")" => :Str
+<<< @(fromB)
+"#,
+    )
+    .expect("write mod_b");
+
+    // C imports only funcY from D (different symbol from B)
+    std::fs::write(
+        dir.join("mod_c.td"),
+        r#">>> ./mod_d.td => @(funcY)
+fromC y = "C(" + funcY(y) + ")" => :Str
+<<< @(fromC)
+"#,
+    )
+    .expect("write mod_c");
+
+    std::fs::write(
+        dir.join("main.td"),
+        r#">>> ./mod_b.td => @(fromB)
+>>> ./mod_c.td => @(fromC)
+stdout(fromB("hello"))
+stdout(fromC("world"))
+"#,
+    )
+    .expect("write main");
+
+    let main_path = dir.join("main.td");
+    let interp = run_interpreter(&main_path).expect("interpreter should succeed");
+    let wasm = compile_and_run_wasm_project(&main_path, &wasmtime, "rcb43_diamond_diff")
+        .expect("wasm-min should succeed");
+
+    assert_eq!(
+        interp, wasm,
+        "RCB-43/WASM: diamond with different symbols — interp='{}', wasm='{}'",
         interp, wasm
     );
 
