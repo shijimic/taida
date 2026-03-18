@@ -6,6 +6,11 @@
 /// wasm-full is a superset of wasm-wasi, which is a superset of wasm-min.
 /// It adds extended runtime functions (collections, string/number molds,
 /// JSON, Gorillax, bytes, bitwise, etc.) on top of wasm-wasi.
+///
+/// RC-8b: Parity tests save compiled .wasm files to `target/wasm-test-cache/wasm-full/`
+/// so superset tests can reuse them without recompiling.
+mod common;
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -54,6 +59,9 @@ fn compile_wasm_full(td_path: &Path, wasm_path: &Path) -> Option<String> {
         Some(String::from_utf8_lossy(&output.stderr).trim().to_string())
     }
 }
+
+// RC-8b: Cache functions moved to tests/common/mod.rs (S-2: DRY).
+use common::{cache_wasm, cached_wasm};
 
 // ---------------------------------------------------------------------------
 // WF-2a: Smoke tests
@@ -779,6 +787,7 @@ fn wasm_full_parity_all_examples() {
         let native_out = native_output.unwrap();
 
         // wasm-full compile + run
+        // RC-8b: Cache the .wasm so superset test can reuse it.
         let wasm_path = std::env::temp_dir().join(format!("taida_wf5_parity_{}.wasm", stem));
         let compile_output = Command::new(taida_bin())
             .args(["build", "--target", "wasm-full"])
@@ -791,6 +800,8 @@ fn wasm_full_parity_all_examples() {
             if !co.status.success() {
                 return None;
             }
+            // RC-8b: Cache the .wasm for superset test reuse
+            cache_wasm("wasm-full", &stem, &wasm_path);
             let run = Command::new(&wasmtime)
                 .arg("run")
                 .arg("--")
@@ -926,6 +937,14 @@ fn wasm_full_parity_all_examples() {
 // ---------------------------------------------------------------------------
 
 /// WF-5b: Every example that wasm-wasi can compile should also compile with wasm-full.
+///
+/// RC-8b: Uses cached .wasm files from parity tests to avoid recompilation.
+/// If a cached .wasm exists for both wasm-wasi and wasm-full, we know compilation
+/// succeeded already and can skip the compilation entirely.
+///
+/// N-2: The cache is a best-effort optimization that does not affect test
+/// correctness. Tests never rely on cache ordering or presence -- a cache miss
+/// simply triggers recompilation. Test execution order does not matter.
 #[test]
 fn wasm_full_superset_of_wasm_wasi() {
     let examples_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples");
@@ -938,6 +957,7 @@ fn wasm_full_superset_of_wasm_wasi() {
     td_files.sort();
 
     let mut wasi_ok_full_fail = Vec::new();
+    let mut cache_hits = 0;
 
     for td_path in &td_files {
         let stem = td_path.file_stem().unwrap().to_string_lossy().to_string();
@@ -946,35 +966,61 @@ fn wasm_full_superset_of_wasm_wasi() {
             continue;
         }
 
-        let wasi_path = std::env::temp_dir().join(format!("taida_wf5b_wasi_{}.wasm", stem));
-        let full_path = std::env::temp_dir().join(format!("taida_wf5b_full_{}.wasm", stem));
+        // RC-8b: Check if both profiles have cached .wasm files
+        // M-1: Pass td_path so stale caches (source newer than cache) are invalidated.
+        let wasi_cached = cached_wasm("wasm-wasi", &stem, td_path).is_some();
+        let full_cached = cached_wasm("wasm-full", &stem, td_path).is_some();
 
-        let wasi_ok = Command::new(taida_bin())
-            .args(["build", "--target", "wasm-wasi"])
-            .arg(td_path)
-            .arg("-o")
-            .arg(&wasi_path)
-            .output()
-            .is_ok_and(|o| o.status.success());
-        let _ = std::fs::remove_file(&wasi_path);
+        if wasi_cached && full_cached {
+            // Both compiled successfully in parity tests -- superset holds
+            cache_hits += 1;
+            continue;
+        }
+
+        // Fall back to compiling if cache misses
+        let wasi_ok = if wasi_cached {
+            true
+        } else {
+            let wasi_path = std::env::temp_dir().join(format!("taida_wf5b_wasi_{}.wasm", stem));
+            let ok = Command::new(taida_bin())
+                .args(["build", "--target", "wasm-wasi"])
+                .arg(td_path)
+                .arg("-o")
+                .arg(&wasi_path)
+                .output()
+                .is_ok_and(|o| o.status.success());
+            let _ = std::fs::remove_file(&wasi_path);
+            ok
+        };
 
         if !wasi_ok {
             continue; // wasm-wasi can't compile this, skip
         }
 
-        let full_ok = Command::new(taida_bin())
-            .args(["build", "--target", "wasm-full"])
-            .arg(td_path)
-            .arg("-o")
-            .arg(&full_path)
-            .output()
-            .is_ok_and(|o| o.status.success());
-        let _ = std::fs::remove_file(&full_path);
+        let full_ok = if full_cached {
+            true
+        } else {
+            let full_path = std::env::temp_dir().join(format!("taida_wf5b_full_{}.wasm", stem));
+            let ok = Command::new(taida_bin())
+                .args(["build", "--target", "wasm-full"])
+                .arg(td_path)
+                .arg("-o")
+                .arg(&full_path)
+                .output()
+                .is_ok_and(|o| o.status.success());
+            let _ = std::fs::remove_file(&full_path);
+            ok
+        };
 
         if !full_ok {
             wasi_ok_full_fail.push(stem);
         }
     }
+
+    eprintln!(
+        "WF-5b Superset: {} cache hits (skipped recompilation)",
+        cache_hits
+    );
 
     assert!(
         wasi_ok_full_fail.is_empty(),

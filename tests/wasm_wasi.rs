@@ -5,6 +5,11 @@
 ///
 /// WW-2: Tests for env, file I/O, and stderr non-regression.
 /// WW-3: Validation — parity, superset property, size checks.
+///
+/// RC-8b: Parity tests save compiled .wasm files to `target/wasm-test-cache/<profile>/`
+/// so superset tests can reuse them without recompiling.
+mod common;
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -485,50 +490,47 @@ fn compile_wasm_and_get_size(td_path: &Path, target: &str, wasm_path: &Path) -> 
     Some(size)
 }
 
-/// Compile a .td file to wasm-wasi and run with wasmtime (unique temp path for superset test).
-fn compile_and_run_wasm_wasi_superset(td_path: &Path, wasmtime: &Path) -> Option<String> {
-    let stem = td_path.file_stem()?.to_string_lossy().to_string();
-    let wasm_path = std::env::temp_dir().join(format!("taida_ww3_superset_wasi_{}.wasm", stem));
+// RC-8b: Cache functions moved to tests/common/mod.rs (S-2: DRY).
+use common::{cache_wasm, cached_wasm};
 
-    let compile_output = Command::new(taida_bin())
-        .args(["build", "--target", "wasm-wasi"])
-        .arg(td_path)
-        .arg("-o")
-        .arg(&wasm_path)
-        .output()
-        .ok()?;
-
-    if !compile_output.status.success() {
-        let stderr = String::from_utf8_lossy(&compile_output.stderr);
-        eprintln!(
-            "wasm-wasi compile failed for {}: {}",
-            td_path.display(),
-            stderr
-        );
-        return None;
-    }
-
-    let run_output = Command::new(wasmtime).arg(&wasm_path).output().ok()?;
-    let _ = std::fs::remove_file(&wasm_path);
-
-    if !run_output.status.success() {
-        return None;
-    }
-
-    Some(
-        String::from_utf8_lossy(&run_output.stdout)
-            .trim_end()
-            .to_string(),
-    )
+/// S-1: Result of `run_wasm_cached_or_compile`, carrying both the output and
+/// whether the result came from the test cache.
+struct CachedRunResult {
+    stdout: String,
+    cache_hit: bool,
 }
 
-/// Compile a .td file to wasm-min and run with wasmtime.
-fn compile_and_run_wasm_min(td_path: &Path, wasmtime: &Path) -> Option<String> {
+/// RC-8b: Run a cached or freshly compiled .wasm with wasmtime, returning stdout
+/// and cache-hit information.
+///
+/// N-2: The cache is a best-effort optimization that does not affect test
+/// correctness. Tests never rely on cache ordering or presence -- a cache miss
+/// simply triggers recompilation. Test execution order does not matter.
+///
+/// M-1: Uses `cached_wasm` with source-path comparison to invalidate stale caches.
+fn run_wasm_cached_or_compile(
+    td_path: &Path,
+    profile: &str,
+    wasmtime: &Path,
+) -> Option<CachedRunResult> {
     let stem = td_path.file_stem()?.to_string_lossy().to_string();
-    let wasm_path = std::env::temp_dir().join(format!("taida_ww3_superset_min_{}.wasm", stem));
 
+    // Try cache first (M-1: td_path passed for stale-cache detection)
+    if let Some(cache_path) = cached_wasm(profile, &stem, td_path) {
+        let run = Command::new(wasmtime).arg(&cache_path).output().ok()?;
+        if run.status.success() {
+            return Some(CachedRunResult {
+                stdout: String::from_utf8_lossy(&run.stdout).trim_end().to_string(),
+                cache_hit: true,
+            });
+        }
+        // Cache hit but wasmtime failed -- fall through to recompile.
+    }
+
+    // Cache miss or stale: compile, cache, and run
+    let wasm_path = std::env::temp_dir().join(format!("taida_rc8b_{}_{}.wasm", profile, stem));
     let compile_output = Command::new(taida_bin())
-        .args(["build", "--target", "wasm-min"])
+        .args(["build", "--target", profile])
         .arg(td_path)
         .arg("-o")
         .arg(&wasm_path)
@@ -539,18 +541,19 @@ fn compile_and_run_wasm_min(td_path: &Path, wasmtime: &Path) -> Option<String> {
         return None;
     }
 
-    let run_output = Command::new(wasmtime).arg(&wasm_path).output().ok()?;
+    cache_wasm(profile, &stem, &wasm_path);
+
+    let run = Command::new(wasmtime).arg(&wasm_path).output().ok()?;
     let _ = std::fs::remove_file(&wasm_path);
 
-    if !run_output.status.success() {
+    if !run.status.success() {
         return None;
     }
 
-    Some(
-        String::from_utf8_lossy(&run_output.stdout)
-            .trim_end()
-            .to_string(),
-    )
+    Some(CachedRunResult {
+        stdout: String::from_utf8_lossy(&run.stdout).trim_end().to_string(),
+        cache_hit: false,
+    })
 }
 
 /// WW-3a: Comprehensive parity test for wasm-wasi.
@@ -608,7 +611,8 @@ fn wasm_wasi_parity_all_examples() {
         }
         let native_out = native_output.unwrap();
 
-        // Try wasm-wasi compile + run (unique temp path to avoid collision with other tests)
+        // Try wasm-wasi compile + run.
+        // RC-8b: Save to cache so superset tests can reuse without recompiling.
         let parity_wasm_path = std::env::temp_dir().join(format!("taida_ww3_parity_{}.wasm", stem));
         let compile_output = Command::new(taida_bin())
             .args(["build", "--target", "wasm-wasi"])
@@ -621,6 +625,8 @@ fn wasm_wasi_parity_all_examples() {
             if !co.status.success() {
                 return None;
             }
+            // RC-8b: Cache the .wasm before running wasmtime
+            cache_wasm("wasm-wasi", &stem, &parity_wasm_path);
             let run = Command::new(&wasmtime)
                 .arg(&parity_wasm_path)
                 .output()
@@ -758,8 +764,16 @@ fn wasm_wasi_parity_all_examples() {
     );
 }
 
-/// WW-3b: Superset property — everything wasm-min can compile and run,
+/// WW-3b: Superset property -- everything wasm-min can compile and run,
 /// wasm-wasi must also compile, run, and produce identical output.
+///
+/// RC-8b: Uses `run_wasm_cached_or_compile` to reuse .wasm artifacts from
+/// parity tests (`wasm_min_parity_all_examples` and `wasm_wasi_parity_all_examples`),
+/// avoiding double compilation of every example.
+///
+/// N-2: The cache is a best-effort optimization that does not affect test
+/// correctness. Tests never rely on cache ordering or presence -- a cache miss
+/// simply triggers recompilation. Test execution order does not matter.
 #[test]
 fn wasm_wasi_superset_of_wasm_min() {
     let wasmtime = match wasmtime_bin() {
@@ -782,6 +796,7 @@ fn wasm_wasi_superset_of_wasm_min() {
     let mut superset_ok = 0;
     let mut superset_fail = Vec::new();
     let mut min_only = Vec::new();
+    let mut cache_hits = 0;
 
     for td_path in &td_files {
         let stem = td_path.file_stem().unwrap().to_string_lossy().to_string();
@@ -791,33 +806,42 @@ fn wasm_wasi_superset_of_wasm_min() {
             continue;
         }
 
-        // Try wasm-min first
-        let min_output = compile_and_run_wasm_min(td_path, &wasmtime);
-        if min_output.is_none() {
-            // wasm-min cannot compile this — no superset obligation
+        // RC-8b: Try cached wasm-min output first, fall back to compile
+        let min_result = run_wasm_cached_or_compile(td_path, "wasm-min", &wasmtime);
+        if min_result.is_none() {
+            // wasm-min cannot compile this -- no superset obligation
             continue;
         }
-        let min_out = min_output.unwrap();
+        let min_result = min_result.unwrap();
 
-        // wasm-wasi MUST also succeed (use superset-specific temp paths to avoid collision)
-        let wasi_output = compile_and_run_wasm_wasi_superset(td_path, &wasmtime);
-        if wasi_output.is_none() {
+        // RC-8b: Try cached wasm-wasi output first, fall back to compile
+        let wasi_result = run_wasm_cached_or_compile(td_path, "wasm-wasi", &wasmtime);
+        if wasi_result.is_none() {
             min_only.push(stem.clone());
             continue;
         }
-        let wasi_out = wasi_output.unwrap();
+        let wasi_result = wasi_result.unwrap();
 
-        if min_out == wasi_out {
+        // S-1: Count cache hits from the authoritative CachedRunResult.
+        if min_result.cache_hit {
+            cache_hits += 1;
+        }
+        if wasi_result.cache_hit {
+            cache_hits += 1;
+        }
+
+        if min_result.stdout == wasi_result.stdout {
             superset_ok += 1;
         } else {
-            superset_fail.push((stem.clone(), min_out, wasi_out));
+            superset_fail.push((stem.clone(), min_result.stdout, wasi_result.stdout));
         }
     }
 
     eprintln!(
-        "WW-3 Superset: {} OK, {} wasm-min-only (superset violation)",
+        "WW-3 Superset: {} OK, {} wasm-min-only (superset violation), {} cache hits",
         superset_ok,
-        min_only.len()
+        min_only.len(),
+        cache_hits
     );
 
     // Superset violations: wasm-min succeeded but wasm-wasi failed

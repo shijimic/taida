@@ -6,6 +6,11 @@
 /// WC-7d: Size gate CI tests — hard gates on .wasm file sizes.
 /// Prelude-complete baselines (WC-1~WC-6): hello = 321 bytes, pi_approx = 6,736 bytes.
 /// Gate: hello <= 512 bytes, pi <= 8,192 bytes.
+///
+/// RC-8b: Parity tests save compiled .wasm files to `target/wasm-test-cache/wasm-min/`
+/// so superset tests in wasm_wasi.rs can reuse them without recompiling.
+mod common;
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -76,7 +81,11 @@ fn run_interpreter(td_path: &Path) -> Option<String> {
     )
 }
 
+// RC-8b: Cache functions moved to tests/common/mod.rs (S-2: DRY).
+use common::cache_wasm;
+
 /// Compile a .td file to wasm-min and run with wasmtime.
+/// RC-8b: Also caches the compiled .wasm for superset test reuse.
 fn compile_and_run_wasm(td_path: &Path, wasmtime: &Path) -> Option<String> {
     let stem = td_path.file_stem()?.to_string_lossy().to_string();
     let wasm_path = std::env::temp_dir().join(format!("taida_wasm_test_{}.wasm", stem));
@@ -101,6 +110,9 @@ fn compile_and_run_wasm(td_path: &Path, wasmtime: &Path) -> Option<String> {
         );
         return None;
     }
+
+    // RC-8b: Cache the compiled .wasm for superset tests
+    cache_wasm("wasm-min", &stem, &wasm_path);
 
     // Run with wasmtime
     let run_output = Command::new(wasmtime).arg(&wasm_path).output().ok()?;
