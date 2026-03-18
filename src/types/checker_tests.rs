@@ -590,10 +590,8 @@ fn test_generic_function_requires_inferable_type_param() {
     // now correctly suppressed because the return type `:T` is an
     // unresolved type variable that cannot be meaningfully compared.
     assert!(
-        errors
-            .iter()
-            .any(|e| e.message.contains("[E1510]")
-                && e.message.contains("uninferable type parameter(s): T")),
+        errors.iter().any(|e| e.message.contains("[E1510]")
+            && e.message.contains("uninferable type parameter(s): T")),
         "Expected generic inference error E1510, got: {:?}",
         errors
     );

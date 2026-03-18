@@ -4577,8 +4577,7 @@ stdout(fromC("world"))
     assert_eq!(interp, native, "RCB-43: interpreter/native mismatch");
 
     if node_available() {
-        let js =
-            run_js_project(&main_path, "rcb43_diff").expect("RCB-43: js should succeed");
+        let js = run_js_project(&main_path, "rcb43_diff").expect("RCB-43: js should succeed");
         assert_eq!(interp, js, "RCB-43: interpreter/js mismatch");
     }
 

@@ -284,8 +284,7 @@ impl TypeRegistry {
         );
         let registered = self.register_inheritance(parent, name, extra_fields.clone());
         if registered {
-            self.error_types
-                .insert(name.to_string(), extra_fields);
+            self.error_types.insert(name.to_string(), extra_fields);
         }
         registered
     }

@@ -1351,11 +1351,7 @@ mod tests {
         let main_path = dir.join("main.td");
         let lib_path = dir.join("lib.td");
         std::fs::write(&main_path, ">>> ./lib => @(greet)\nstdout(greet())").unwrap();
-        std::fs::write(
-            &lib_path,
-            "greet =\n  \"hello\"\n=> :Str\n\n<<< @(greet)",
-        )
-        .unwrap();
+        std::fs::write(&lib_path, "greet =\n  \"hello\"\n=> :Str\n\n<<< @(greet)").unwrap();
 
         let result = format_ai_json_recursive(main_path.to_str().unwrap());
         assert!(result.is_ok(), "Expected Ok, got: {:?}", result.err());
@@ -1409,7 +1405,10 @@ mod tests {
             .iter()
             .map(|f| f["name"].as_str().unwrap())
             .collect();
-        assert!(funcs.contains(&"square"), "module_math should export square");
+        assert!(
+            funcs.contains(&"square"),
+            "module_math should export square"
+        );
         assert!(funcs.contains(&"cube"), "module_math should export cube");
     }
 

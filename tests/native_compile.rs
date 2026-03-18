@@ -1139,7 +1139,6 @@ items <= @[10, 20, 30]
 sumItems =
   Fold[items, 0, _ acc x = acc + x]() ]=> total
   total
-=> :Int
 
 stdout(sumItems().toString())
 "#;

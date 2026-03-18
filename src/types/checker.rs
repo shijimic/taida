@@ -728,9 +728,7 @@ impl TypeChecker {
                 .iter()
                 .any(|(_, t)| self.contains_unresolved_type_var(t)),
             Type::Function(params, ret) => {
-                params
-                    .iter()
-                    .any(|p| self.contains_unresolved_type_var(p))
+                params.iter().any(|p| self.contains_unresolved_type_var(p))
                     || self.contains_unresolved_type_var(ret)
             }
             _ => false,
