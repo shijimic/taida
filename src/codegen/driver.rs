@@ -376,9 +376,18 @@ pub fn default_wasm_cache_dir(project_dir: Option<&Path>) -> PathBuf {
     }
 
     if let Some(dir) = project_dir {
-        let taida_dir = dir.join(".taida");
-        if taida_dir.exists() {
-            return taida_dir.join("cache").join("wasm-rt");
+        // RCB-56: Walk up parent directories to find the Taida project root.
+        // A project root is identified by `.taida/` + `packages.td` co-existing.
+        // `.taida/` alone is not sufficient — it could be user config (~/.taida/)
+        // or an unrelated ancestor directory (/tmp/.taida/).
+        let mut current = dir.to_path_buf();
+        loop {
+            if current.join(".taida").exists() && current.join("packages.td").exists() {
+                return current.join(".taida").join("cache").join("wasm-rt");
+            }
+            if !current.pop() {
+                break;
+            }
         }
     }
 
@@ -2063,7 +2072,7 @@ mod tests {
         // guard restores env on drop
     }
 
-    /// S-4: default_wasm_cache_dir uses .taida/cache/wasm-rt/ when .taida/ exists.
+    /// S-4: default_wasm_cache_dir uses .taida/cache/wasm-rt/ when project root found.
     #[test]
     fn test_default_wasm_cache_dir_taida_dir() {
         let guard = EnvGuard::new("TAIDA_WASM_RT_CACHE");
@@ -2072,12 +2081,86 @@ mod tests {
         let tmp = PathBuf::from("target/test-cache-dir-taida");
         let taida_dir = tmp.join(".taida");
         let _ = std::fs::create_dir_all(&taida_dir);
+        // packages.td is the project marker required alongside .taida/
+        let _ = std::fs::write(tmp.join("packages.td"), "");
 
         let dir = default_wasm_cache_dir(Some(&tmp));
         assert_eq!(
             dir,
             taida_dir.join("cache").join("wasm-rt"),
-            "should use .taida/cache/wasm-rt/ when .taida/ exists"
+            "should use .taida/cache/wasm-rt/ when project root found"
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+        // guard restores env on drop
+    }
+
+    /// S-4: .taida/ without packages.td falls back to target/wasm-rt-cache.
+    #[test]
+    fn test_default_wasm_cache_dir_taida_without_manifest() {
+        let guard = EnvGuard::new("TAIDA_WASM_RT_CACHE");
+        guard.remove();
+
+        let tmp = PathBuf::from("target/test-cache-dir-no-manifest");
+        let _ = std::fs::create_dir_all(tmp.join(".taida"));
+        // No packages.td — not a Taida project root
+        let _ = std::fs::remove_file(tmp.join("packages.td"));
+
+        let dir = default_wasm_cache_dir(Some(&tmp));
+        assert_eq!(
+            dir,
+            PathBuf::from("target/wasm-rt-cache"),
+            "should fall back when .taida/ exists but packages.td is missing"
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+        // guard restores env on drop
+    }
+
+    /// RCB-56: default_wasm_cache_dir walks up parent directories to find project root.
+    #[test]
+    fn test_default_wasm_cache_dir_parent_traversal() {
+        let guard = EnvGuard::new("TAIDA_WASM_RT_CACHE");
+        guard.remove();
+
+        // Create proj/.taida/ + proj/packages.td and proj/src/deep/
+        let tmp = PathBuf::from("target/test-cache-dir-nested");
+        let taida_dir = tmp.join(".taida");
+        let nested = tmp.join("src").join("deep");
+        let _ = std::fs::create_dir_all(&taida_dir);
+        let _ = std::fs::create_dir_all(&nested);
+        let _ = std::fs::write(tmp.join("packages.td"), "");
+
+        // Pass the nested subdirectory — should still find proj/.taida/
+        let dir = default_wasm_cache_dir(Some(&nested));
+        assert_eq!(
+            dir,
+            taida_dir.join("cache").join("wasm-rt"),
+            "should find project root by walking up from subdirectory"
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+        // guard restores env on drop
+    }
+
+    /// RCB-56: Does not pick up ancestor .taida/ without packages.td.
+    #[test]
+    fn test_default_wasm_cache_dir_ignores_non_project_taida() {
+        let guard = EnvGuard::new("TAIDA_WASM_RT_CACHE");
+        guard.remove();
+
+        // ancestor/.taida/ exists but no packages.td — not a project root
+        let tmp = PathBuf::from("target/test-cache-dir-ancestor");
+        let _ = std::fs::create_dir_all(tmp.join(".taida"));
+        let nested = tmp.join("sub").join("deep");
+        let _ = std::fs::create_dir_all(&nested);
+        // No packages.td anywhere
+
+        let dir = default_wasm_cache_dir(Some(&nested));
+        assert_eq!(
+            dir,
+            PathBuf::from("target/wasm-rt-cache"),
+            "should not pick up ancestor .taida/ without packages.td"
         );
 
         let _ = std::fs::remove_dir_all(&tmp);
