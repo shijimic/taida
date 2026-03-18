@@ -796,6 +796,10 @@ fn run_wasm_clang_object(
 /// RC-1k: エクスポートフィルタリング — 依存モジュールの全関数を融合するのではなく、
 /// import で要求されたシンボル + その推移的依存のみを融合する。
 /// これにより非公開関数がリンク時に名前空間に漏洩することを防ぐ。
+///
+/// RCB-43: ダイヤモンド依存時の IR キャッシュ — 同一モジュールが複数パスから
+/// 異なるシンボルセットで import された場合、2回目以降は初回の parse+lower 結果を
+/// キャッシュから再利用し、ファイル再読込・再パース・再 lower を回避する。
 fn inline_wasm_module_imports(
     main_module: &mut super::ir::IrModule,
     base_dir: &Path,
@@ -811,6 +815,11 @@ fn inline_wasm_module_imports(
         main_path.canonicalize().unwrap_or(main_path.to_path_buf()),
         HashSet::new(),
     );
+
+    // RCB-43: IR キャッシュ — parse+lower 結果をモジュールパスごとにキャッシュする。
+    // ダイヤモンド依存（A→B, A→C, B→D, C→D）で D が複数回参照される場合、
+    // 2回目以降はキャッシュから IR を取得し、再パースを回避する。
+    let mut ir_cache: HashMap<PathBuf, super::ir::IrModule> = HashMap::new();
 
     // pending: (module_path, importer_dir, requested_syms)
     // requested_syms: importer が要求するリンクシンボル名のリスト
@@ -835,41 +844,24 @@ fn inline_wasm_module_imports(
             if new_syms.is_empty() {
                 continue;
             }
-            // 差分シンボルがある場合: モジュールを再パースし差分の推移的依存のみを追加融合
-            let dep_source = fs::read_to_string(&dep_path).map_err(|e| CompileError {
-                message: format!("failed to read module '{}': {}", dep_path.display(), e),
-            })?;
-            let (dep_program, dep_errors) = parse(&dep_source);
-            if !dep_errors.is_empty() {
-                let msgs: Vec<String> = dep_errors.iter().map(|e| format!("{}", e)).collect();
-                return Err(CompileError {
-                    message: format!(
-                        "parse errors in module '{}':\n{}",
-                        dep_path.display(),
-                        msgs.join("\n")
-                    ),
-                });
-            }
-            let mut dep_lowering = Lowering::new();
-            if let Some(parent) = dep_path.parent() {
-                dep_lowering.set_source_dir(parent.to_path_buf());
-            }
-            dep_lowering.set_module_key(Lowering::module_key_for_path(&dep_path));
-            let dep_ir = dep_lowering
-                .lower_program(&dep_program)
-                .map_err(|e| CompileError {
-                    message: format!("lowering error in module '{}': {}", dep_path.display(), e),
-                })?;
+            // 差分シンボルがある場合: キャッシュ済み IR から差分の推移的依存のみを追加融合
+            // RCB-43: ファイル再読込・再パース・再 lower を回避
+            let cached_ir = ir_cache.get(&canonical).unwrap_or_else(|| {
+                panic!(
+                    "BUG: IR cache missing for '{}' despite being in compiled map",
+                    canonical.display()
+                )
+            });
 
             // 差分シンボルの推移的依存のみを計算
-            let needed = compute_needed_functions(&dep_ir, &new_syms);
+            let needed = compute_needed_functions(cached_ir, &new_syms);
             // 既に融合済みの関数は除外して追加
-            for func in dep_ir.functions {
+            for func in &cached_ir.functions {
                 if !needed.contains(&func.name) {
                     continue;
                 }
                 if !main_module.functions.iter().any(|f| f.name == func.name) {
-                    main_module.functions.push(func);
+                    main_module.functions.push(func.clone());
                 }
             }
             // 融合済みシンボルを更新
@@ -908,23 +900,26 @@ fn inline_wasm_module_imports(
         // 要求されたシンボル + init関数 + 推移的依存のみを融合する
         let needed = compute_needed_functions(&dep_ir, &requested_syms);
 
-        for func in dep_ir.functions {
+        for func in &dep_ir.functions {
             if !needed.contains(&func.name) {
                 continue; // 非公開・不要な関数はスキップ
             }
             if !main_module.functions.iter().any(|f| f.name == func.name) {
-                main_module.functions.push(func);
+                main_module.functions.push(func.clone());
             }
         }
-
-        // 融合済みシンボルを記録
-        compiled.insert(canonical, needed);
 
         // 依存モジュールがさらに import していれば、それも再帰的に処理
         let dep_dir = dep_path.parent().unwrap_or(Path::new(".")).to_path_buf();
         for (sub_path, sub_syms) in &dep_ir.imports {
             pending.push((sub_path.clone(), dep_dir.clone(), sub_syms.clone()));
         }
+
+        // RCB-43: IR をキャッシュに保存（diff-symbol パスで再利用するため）
+        ir_cache.insert(canonical.clone(), dep_ir);
+
+        // 融合済みシンボルを記録
+        compiled.insert(canonical, needed);
     }
 
     // インライン展開完了: imports を空にする

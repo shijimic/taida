@@ -11,7 +11,7 @@
 /// so superset tests in wasm_wasi.rs can reuse them without recompiling.
 mod common;
 
-use common::{cache_wasm, run_interpreter, taida_bin, wasmtime_bin};
+use common::{cache_wasm, run_interpreter, taida_bin, unique_temp_dir, wasmtime_bin};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -1211,6 +1211,72 @@ stdout(fromC("y"))
     assert_eq!(
         interp, wasm,
         "RC-1n/WASM: diamond — interp='{}', wasm='{}'",
+        interp, wasm
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// RCB-43/WASM: Diamond dependency with different symbols from shared module.
+/// B imports funcX from D, C imports funcY from D (different symbol sets).
+/// This exercises the diff-symbol path in inline_wasm_module_imports, where
+/// the second encounter of D must use the cached IR instead of re-parsing.
+#[test]
+fn wasm_min_rcb43_diamond_different_symbols() {
+    let Some(wasmtime) = require_wasmtime() else {
+        return;
+    };
+
+    let dir = unique_temp_dir("taida_wasm_rcb43");
+
+    // D exports two distinct functions: funcX and funcY
+    std::fs::write(
+        dir.join("mod_d.td"),
+        r#"funcX x = "X:" + x => :Str
+funcY y = "Y:" + y => :Str
+<<< @(funcX, funcY)
+"#,
+    )
+    .expect("write mod_d");
+
+    // B imports only funcX from D
+    std::fs::write(
+        dir.join("mod_b.td"),
+        r#">>> ./mod_d.td => @(funcX)
+fromB x = "B(" + funcX(x) + ")" => :Str
+<<< @(fromB)
+"#,
+    )
+    .expect("write mod_b");
+
+    // C imports only funcY from D (different symbol from B)
+    std::fs::write(
+        dir.join("mod_c.td"),
+        r#">>> ./mod_d.td => @(funcY)
+fromC y = "C(" + funcY(y) + ")" => :Str
+<<< @(fromC)
+"#,
+    )
+    .expect("write mod_c");
+
+    std::fs::write(
+        dir.join("main.td"),
+        r#">>> ./mod_b.td => @(fromB)
+>>> ./mod_c.td => @(fromC)
+stdout(fromB("hello"))
+stdout(fromC("world"))
+"#,
+    )
+    .expect("write main");
+
+    let main_path = dir.join("main.td");
+    let interp = run_interpreter(&main_path).expect("interpreter should succeed");
+    let wasm = compile_and_run_wasm_project(&main_path, &wasmtime, "rcb43_diamond_diff")
+        .expect("wasm-min should succeed");
+
+    assert_eq!(
+        interp, wasm,
+        "RCB-43/WASM: diamond with different symbols — interp='{}', wasm='{}'",
         interp, wasm
     );
 

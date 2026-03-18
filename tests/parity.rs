@@ -4517,6 +4517,74 @@ stdout(fromC("2"))
     let _ = fs::remove_dir_all(&dir);
 }
 
+/// RCB-43: Diamond dependency with different symbols from shared module.
+/// B imports funcX from D, C imports funcY from D (distinct symbol sets).
+/// Exercises the diff-symbol code path in the WASM module inliner's IR cache.
+/// Verifies correctness across all backends.
+#[test]
+fn test_rcb43_diamond_different_symbols() {
+    let dir = unique_temp_path("taida_rcb43", "diamond_diff", "dir");
+    fs::create_dir_all(&dir).expect("create temp dir");
+
+    // D exports two distinct functions
+    fs::write(
+        dir.join("mod_d.td"),
+        r#"funcX x = "X:" + x => :Str
+funcY y = "Y:" + y => :Str
+<<< @(funcX, funcY)
+"#,
+    )
+    .expect("write mod_d");
+
+    // B imports only funcX from D
+    fs::write(
+        dir.join("mod_b.td"),
+        r#">>> ./mod_d.td => @(funcX)
+fromB x = "B(" + funcX(x) + ")" => :Str
+<<< @(fromB)
+"#,
+    )
+    .expect("write mod_b");
+
+    // C imports only funcY from D (different symbol from B)
+    fs::write(
+        dir.join("mod_c.td"),
+        r#">>> ./mod_d.td => @(funcY)
+fromC y = "C(" + funcY(y) + ")" => :Str
+<<< @(fromC)
+"#,
+    )
+    .expect("write mod_c");
+
+    fs::write(
+        dir.join("main.td"),
+        r#">>> ./mod_b.td => @(fromB)
+>>> ./mod_c.td => @(fromC)
+stdout(fromB("hello"))
+stdout(fromC("world"))
+"#,
+    )
+    .expect("write main");
+
+    let main_path = dir.join("main.td");
+    let interp = run_interpreter(&main_path).expect("RCB-43: interpreter should succeed");
+    assert_eq!(
+        interp, "B(X:hello)\nC(Y:world)",
+        "RCB-43: unexpected interpreter output"
+    );
+
+    let native = run_native(&main_path).expect("RCB-43: native should succeed");
+    assert_eq!(interp, native, "RCB-43: interpreter/native mismatch");
+
+    if node_available() {
+        let js =
+            run_js_project(&main_path, "rcb43_diff").expect("RCB-43: js should succeed");
+        assert_eq!(interp, js, "RCB-43: interpreter/js mismatch");
+    }
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
 /// RC-1o: Symbol collision — two modules with identically-named internal functions.
 /// Verifies that module_key namespacing prevents _helper collision.
 /// mod_a._helper does x * 2, mod_b._helper does x * 3.
