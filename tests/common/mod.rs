@@ -118,6 +118,38 @@ pub fn run_interpreter_normalized(td_path: &Path) -> Option<String> {
 }
 
 // ---------------------------------------------------------------------------
+// Temp dir / file helpers (RCB-29)
+// ---------------------------------------------------------------------------
+
+/// Create a unique temporary directory with the given prefix.
+///
+/// The directory name includes the process ID and nanosecond timestamp to avoid
+/// collisions when tests run in parallel.
+pub fn unique_temp_dir(prefix: &str) -> PathBuf {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock should be after unix epoch")
+        .as_nanos();
+    let dir = std::env::temp_dir().join(format!("{}_{}_{}", prefix, std::process::id(), nanos));
+    std::fs::create_dir_all(&dir).expect("failed to create temp dir");
+    dir
+}
+
+/// Write string content to a file, panicking on failure.
+pub fn write_file(path: &Path, content: &str) {
+    std::fs::write(path, content).expect("failed to write file");
+}
+
+/// Check whether `node` is available on the system PATH.
+pub fn node_available() -> bool {
+    Command::new("node")
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+// ---------------------------------------------------------------------------
 // WASM test cache (RC-8b)
 // ---------------------------------------------------------------------------
 
