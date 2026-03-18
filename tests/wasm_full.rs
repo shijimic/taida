@@ -11,37 +11,9 @@
 /// so superset tests can reuse them without recompiling.
 mod common;
 
-use std::path::{Path, PathBuf};
+use common::{cache_wasm, cached_wasm, taida_bin, wasmtime_bin};
+use std::path::Path;
 use std::process::Command;
-
-fn taida_bin() -> PathBuf {
-    let mut path = PathBuf::from(env!("CARGO_BIN_EXE_taida"));
-    if !path.exists() {
-        path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("target")
-            .join("debug")
-            .join("taida");
-    }
-    path
-}
-
-fn wasmtime_bin() -> Option<PathBuf> {
-    if let Ok(home) = std::env::var("HOME") {
-        let path = PathBuf::from(home).join(".wasmtime/bin/wasmtime");
-        if path.exists() {
-            return Some(path);
-        }
-    }
-    if let Ok(output) = Command::new("which").arg("wasmtime").output()
-        && output.status.success()
-    {
-        let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if !path.is_empty() {
-            return Some(PathBuf::from(path));
-        }
-    }
-    None
-}
 
 /// Compile a .td file with wasm-full and return the error message (or None on success).
 fn compile_wasm_full(td_path: &Path, wasm_path: &Path) -> Option<String> {
@@ -59,9 +31,6 @@ fn compile_wasm_full(td_path: &Path, wasm_path: &Path) -> Option<String> {
         Some(String::from_utf8_lossy(&output.stderr).trim().to_string())
     }
 }
-
-// RC-8b: Cache functions moved to tests/common/mod.rs (S-2: DRY).
-use common::{cache_wasm, cached_wasm};
 
 // ---------------------------------------------------------------------------
 // WF-2a: Smoke tests

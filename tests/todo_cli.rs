@@ -1,10 +1,9 @@
+mod common;
+
+use common::taida_bin;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-
-fn taida_bin() -> PathBuf {
-    PathBuf::from(env!("CARGO_BIN_EXE_taida"))
-}
 
 fn unique_temp_dir(prefix: &str) -> PathBuf {
     let nanos = std::time::SystemTime::now()
@@ -46,8 +45,6 @@ c <= TODO[Stub["shape TBD"]](id <= "TASK-2", task <= "third")
         .output()
         .expect("failed to run taida todo");
 
-    let _ = fs::remove_dir_all(&dir);
-
     assert!(
         output.status.success(),
         "taida todo should succeed: stderr={}",
@@ -73,6 +70,8 @@ c <= TODO[Stub["shape TBD"]](id <= "TASK-2", task <= "third")
 
     assert_eq!(by_id.get("TASK-1"), Some(&2));
     assert_eq!(by_id.get("TASK-2"), Some(&1));
+
+    let _ = fs::remove_dir_all(&dir);
 }
 
 #[test]
@@ -98,8 +97,6 @@ stdout(typeof(v))
         .output()
         .expect("failed to run taida build --target native --release");
 
-    let _ = fs::remove_dir_all(&dir);
-
     assert!(
         !output.status.success(),
         "build --target native --release should fail when TODO/Stub exists"
@@ -110,6 +107,8 @@ stdout(typeof(v))
         "expected release gate message, got: {}",
         stderr
     );
+
+    let _ = fs::remove_dir_all(&dir);
 }
 
 #[test]
@@ -137,8 +136,6 @@ stdout(x.toString())
         .output()
         .expect("failed to run taida build --target js --release");
 
-    let _ = fs::remove_dir_all(&dir);
-
     assert!(
         !output.status.success(),
         "build --target js --release should fail when TODO/Stub exists"
@@ -149,6 +146,8 @@ stdout(x.toString())
         "expected release gate message, got: {}",
         stderr
     );
+
+    let _ = fs::remove_dir_all(&dir);
 }
 
 #[test]
@@ -185,8 +184,6 @@ v <= TODO[Int](id <= "REL-DEP", task <= "must be removed")
         .output()
         .expect("failed to run taida build --target native --release");
 
-    let _ = fs::remove_dir_all(&dir);
-
     assert!(
         !output.status.success(),
         "build --target native --release should fail when imported module has TODO/Stub"
@@ -197,6 +194,8 @@ v <= TODO[Int](id <= "REL-DEP", task <= "must be removed")
         "expected release gate message, got: {}",
         stderr
     );
+
+    let _ = fs::remove_dir_all(&dir);
 }
 
 #[test]
@@ -546,8 +545,6 @@ risky x =
         .output()
         .expect("failed to run taida verify --format jsonl");
 
-    let _ = fs::remove_dir_all(&dir);
-
     assert!(
         !output.status.success(),
         "verify jsonl should exit non-zero when ERROR findings exist"
@@ -577,6 +574,8 @@ risky x =
         summary["summary"]["errors"].as_u64().unwrap_or(0) >= 1,
         "summary should include at least one error"
     );
+
+    let _ = fs::remove_dir_all(&dir);
 }
 
 #[test]
@@ -594,8 +593,6 @@ fn test_build_js_diag_format_jsonl_outputs_parse_error_record() {
         .arg(&src)
         .output()
         .expect("failed to run taida build --diag-format jsonl");
-
-    let _ = fs::remove_dir_all(&dir);
 
     assert!(
         !output.status.success(),
@@ -618,6 +615,8 @@ fn test_build_js_diag_format_jsonl_outputs_parse_error_record() {
     assert!(first.get("message").is_some());
     assert!(first.get("location").is_some());
     assert!(first.get("suggestion").is_some());
+
+    let _ = fs::remove_dir_all(&dir);
 }
 
 #[test]
@@ -639,8 +638,6 @@ stdout(x.toString())
         .output()
         .expect("failed to run taida check --json");
 
-    let _ = fs::remove_dir_all(&dir);
-
     assert!(
         output.status.success(),
         "check --json should succeed: stderr={}",
@@ -654,6 +651,8 @@ stdout(x.toString())
     assert!(value["diagnostics"].is_array());
     assert_eq!(value["summary"]["files"].as_u64(), Some(1));
     assert_eq!(value["summary"]["errors"].as_u64(), Some(0));
+
+    let _ = fs::remove_dir_all(&dir);
 }
 
 // ── C-8a: taida check --json emits E1501/E1502/E1503/E1504 ──
@@ -670,8 +669,6 @@ fn test_check_json_e1501_same_scope_redefinition() {
         .arg(&src)
         .output()
         .expect("failed to run taida check --json");
-
-    let _ = fs::remove_dir_all(&dir);
 
     assert!(
         !output.status.success(),
@@ -691,6 +688,8 @@ fn test_check_json_e1501_same_scope_redefinition() {
         diags
     );
     assert_eq!(value["summary"]["errors"].as_u64(), Some(1));
+
+    let _ = fs::remove_dir_all(&dir);
 }
 
 #[test]
@@ -705,8 +704,6 @@ fn test_check_json_e1502_old_placeholder_partial_application() {
         .arg(&src)
         .output()
         .expect("failed to run taida check --json");
-
-    let _ = fs::remove_dir_all(&dir);
 
     assert!(
         !output.status.success(),
@@ -724,6 +721,8 @@ fn test_check_json_e1502_old_placeholder_partial_application() {
         "Expected E1502 in diagnostics, got: {:?}",
         diags
     );
+
+    let _ = fs::remove_dir_all(&dir);
 }
 
 #[test]
@@ -738,8 +737,6 @@ fn test_check_json_e1503_typedef_partial_application() {
         .arg(&src)
         .output()
         .expect("failed to run taida check --json");
-
-    let _ = fs::remove_dir_all(&dir);
 
     assert!(
         !output.status.success(),
@@ -757,6 +754,8 @@ fn test_check_json_e1503_typedef_partial_application() {
         "Expected E1503 in diagnostics, got: {:?}",
         diags
     );
+
+    let _ = fs::remove_dir_all(&dir);
 }
 
 #[test]
@@ -771,8 +770,6 @@ fn test_check_json_e1504_mold_placeholder_outside_pipeline() {
         .arg(&src)
         .output()
         .expect("failed to run taida check --json");
-
-    let _ = fs::remove_dir_all(&dir);
 
     assert!(
         !output.status.success(),
@@ -790,6 +787,8 @@ fn test_check_json_e1504_mold_placeholder_outside_pipeline() {
         "Expected E1504 in diagnostics, got: {:?}",
         diags
     );
+
+    let _ = fs::remove_dir_all(&dir);
 }
 
 // ── C-8b: file/dir produce same format, summary, exit code ──
@@ -818,8 +817,6 @@ fn test_check_json_file_vs_dir_format_consistency() {
         .arg(&sub_dir)
         .output()
         .expect("check --json dir");
-
-    let _ = fs::remove_dir_all(&dir);
 
     // Both should fail with exit code != 0
     assert!(!file_out.status.success(), "file check should fail");
@@ -862,6 +859,8 @@ fn test_check_json_file_vs_dir_format_consistency() {
             field
         );
     }
+
+    let _ = fs::remove_dir_all(&dir);
 }
 
 #[test]
@@ -885,10 +884,10 @@ fn test_check_file_vs_dir_success_exit_code() {
         .output()
         .expect("check dir");
 
-    let _ = fs::remove_dir_all(&dir);
-
     assert!(file_out.status.success(), "file check should succeed");
     assert!(dir_out.status.success(), "dir check should succeed");
+
+    let _ = fs::remove_dir_all(&dir);
 }
 
 // ── C-8c: build stops on checker failure ──
@@ -923,8 +922,6 @@ fn test_build_stops_on_checker_error() {
         .output()
         .expect("build --target native");
 
-    let _ = fs::remove_dir_all(&dir);
-
     // Both should fail with the same checker error
     for (name, out) in &[
         ("build --target js", &build_js),
@@ -949,6 +946,8 @@ fn test_build_stops_on_checker_error() {
         !js_out.exists(),
         "JS output should not exist when checker fails"
     );
+
+    let _ = fs::remove_dir_all(&dir);
 }
 
 #[test]
@@ -1207,8 +1206,6 @@ fn test_build_diag_format_jsonl_emits_checker_error() {
         .output()
         .expect("build --diag-format jsonl");
 
-    let _ = fs::remove_dir_all(&dir);
-
     assert!(
         !output.status.success(),
         "build should fail with checker error in jsonl mode"
@@ -1226,6 +1223,8 @@ fn test_build_diag_format_jsonl_emits_checker_error() {
     assert_eq!(diag["kind"], "error");
     assert_eq!(diag["stage"], "type");
     assert_eq!(diag["code"], "E1501");
+
+    let _ = fs::remove_dir_all(&dir);
 }
 
 // ── C-6a: same-scope duplicate 検出が CLI 経路（check/build）で一致する ──
@@ -1252,8 +1251,6 @@ fn test_same_scope_duplicate_check_vs_build_consistency() {
         .output()
         .expect("build");
 
-    let _ = fs::remove_dir_all(&dir);
-
     // Both should fail
     assert!(!check_out.status.success(), "check should fail for E1501");
     assert!(!build_out.status.success(), "build should fail for E1501");
@@ -1273,6 +1270,8 @@ fn test_same_scope_duplicate_check_vs_build_consistency() {
         "build should report E1501, got: {}",
         build_stderr
     );
+
+    let _ = fs::remove_dir_all(&dir);
 }
 
 // ── C-11c: taida check --json の回帰テスト ──
@@ -1291,8 +1290,6 @@ fn test_check_json_regression_clean_file() {
         .output()
         .expect("check --json");
 
-    let _ = fs::remove_dir_all(&dir);
-
     assert!(
         output.status.success(),
         "check --json clean file should succeed"
@@ -1307,6 +1304,8 @@ fn test_check_json_regression_clean_file() {
             .expect("diagnostics should be a JSON array")
             .is_empty()
     );
+
+    let _ = fs::remove_dir_all(&dir);
 }
 
 #[test]
@@ -1322,8 +1321,6 @@ fn test_check_json_regression_multiple_errors() {
         .arg(&src)
         .output()
         .expect("check --json");
-
-    let _ = fs::remove_dir_all(&dir);
 
     assert!(
         !output.status.success(),
@@ -1342,6 +1339,8 @@ fn test_check_json_regression_multiple_errors() {
         diags.iter().all(|d| d["code"] == "E1501"),
         "All diagnostics should be E1501"
     );
+
+    let _ = fs::remove_dir_all(&dir);
 }
 
 // ── C-11d: examples/quality/ の checker 用ケースを regression 化 ──

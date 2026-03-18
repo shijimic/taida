@@ -297,7 +297,9 @@ if command -v node >/dev/null 2>&1; then
       continue
     }
 
-    # Normalize float formatting: JS omits .0 for integer-valued floats
+    # Normalize float formatting: JS omits .0 for integer-valued floats.
+    # RCB-47: Use a normalize function that handles all "= <value>" positions
+    # in a line, not just the line-final one.
     actual_norm=$(echo "$actual" | sed 's/[[:space:]]*$//')
     expected_norm=$(echo "$expected" | sed 's/[[:space:]]*$//')
 
@@ -305,9 +307,21 @@ if command -v node >/dev/null 2>&1; then
       pass "js-build: $basename"
       js_pass=$((js_pass + 1))
     else
-      # Allow float formatting differences (e.g. "4" vs "4.0")
-      actual_relaxed=$(echo "$actual_norm" | sed 's/= \([0-9][0-9]*\)$/= \1.0/g; s/= \([0-9][0-9]*\.\)0*$/= \1/g')
-      expected_relaxed=$(echo "$expected_norm" | sed 's/= \([0-9][0-9]*\)$/= \1.0/g; s/= \([0-9][0-9]*\.\)0*$/= \1/g')
+      # Allow float formatting differences (e.g. "4" vs "4.0", "4.10" vs "4.1").
+      # Step 1: Append .0 to bare integers after "= " or "= -" (handles mid-line and negatives).
+      # Step 2: Collapse ".00…0" (all-zero decimals) to ".0" (e.g. "4.00" -> "4.0").
+      # Step 3: Strip trailing zeros after a non-zero decimal digit (e.g. "4.10" -> "4.1").
+      # Step 4: Strip lone trailing dot (e.g. "4." -> "4.0").
+      actual_relaxed=$(echo "$actual_norm" | \
+        sed 's/= \(-\{0,1\}[0-9][0-9]*\)\([^.0-9]\)/= \1.0\2/g; s/= \(-\{0,1\}[0-9][0-9]*\)$/= \1.0/' | \
+        sed 's/\.\(0\{2,\}\)$/.0/g; s/\.\(0\{2,\}\)\([^0-9]\)/.0\2/g' | \
+        sed 's/\(\.[0-9]*[1-9]\)0\{1,\}/\1/g' | \
+        sed 's/= \(-\{0,1\}[0-9][0-9]*\)\.$/= \1.0/g')
+      expected_relaxed=$(echo "$expected_norm" | \
+        sed 's/= \(-\{0,1\}[0-9][0-9]*\)\([^.0-9]\)/= \1.0\2/g; s/= \(-\{0,1\}[0-9][0-9]*\)$/= \1.0/' | \
+        sed 's/\.\(0\{2,\}\)$/.0/g; s/\.\(0\{2,\}\)\([^0-9]\)/.0\2/g' | \
+        sed 's/\(\.[0-9]*[1-9]\)0\{1,\}/\1/g' | \
+        sed 's/= \(-\{0,1\}[0-9][0-9]*\)\.$/= \1.0/g')
       if [ "$actual_relaxed" = "$expected_relaxed" ]; then
         pass "js-build: $basename (float format tolerance)"
         js_pass=$((js_pass + 1))

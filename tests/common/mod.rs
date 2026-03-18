@@ -1,4 +1,8 @@
-//! Shared test cache utilities for wasm backend integration tests.
+//! Shared test utilities for integration tests.
+//!
+//! RCB-26: Common helpers (`taida_bin`, `wasmtime_bin`) extracted from 9 test files
+//! to eliminate copy-paste duplication. Each test crate declares `mod common;` to
+//! import these functions.
 //!
 //! RC-8b: Parity tests save compiled .wasm files to `target/wasm-test-cache/<profile>/`
 //! so superset tests can reuse them without recompiling.
@@ -11,7 +15,111 @@
 #![allow(dead_code)]
 
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::OnceLock;
+
+// ---------------------------------------------------------------------------
+// Binary discovery helpers (RCB-26)
+// ---------------------------------------------------------------------------
+
+/// Get the path to the built `taida` binary.
+///
+/// Tries `CARGO_BIN_EXE_taida` first (set by `cargo test`), then falls back
+/// to `target/debug/taida` relative to the manifest directory.
+pub fn taida_bin() -> PathBuf {
+    let mut path = PathBuf::from(env!("CARGO_BIN_EXE_taida"));
+    if !path.exists() {
+        path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("debug")
+            .join("taida");
+    }
+    path
+}
+
+/// Find the `wasmtime` binary for running compiled `.wasm` files.
+///
+/// Checks `$HOME/.wasmtime/bin/wasmtime` first, then falls back to `which wasmtime`.
+/// Returns `None` if wasmtime is not installed.
+pub fn wasmtime_bin() -> Option<PathBuf> {
+    if let Ok(home) = std::env::var("HOME") {
+        let path = PathBuf::from(home).join(".wasmtime/bin/wasmtime");
+        if path.exists() {
+            return Some(path);
+        }
+    }
+    if let Ok(output) = Command::new("which").arg("wasmtime").output()
+        && output.status.success()
+    {
+        let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !path.is_empty() {
+            return Some(PathBuf::from(path));
+        }
+    }
+    None
+}
+
+/// Run a `.td` file with the interpreter and return its stdout.
+///
+/// Returns `None` if the interpreter exits with a non-zero status.
+/// On failure, prints stderr to aid debugging.
+///
+/// Note: `parity.rs` and `crash_regression.rs` maintain their own local versions
+/// because they require different semantics (per-line `normalize()` and `Result`
+/// return type, respectively).
+pub fn run_interpreter(td_path: &Path) -> Option<String> {
+    let output = Command::new(taida_bin()).arg(td_path).output().ok()?;
+    if !output.status.success() {
+        eprintln!(
+            "run_interpreter failed for {}: {}",
+            td_path.display(),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return None;
+    }
+    Some(
+        String::from_utf8_lossy(&output.stdout)
+            .trim_end()
+            .to_string(),
+    )
+}
+
+// ---------------------------------------------------------------------------
+// Output normalization (RCB-26)
+// ---------------------------------------------------------------------------
+
+/// Normalize output by trimming trailing whitespace on every line.
+///
+/// Used by parity and crash-regression tests to tolerate minor whitespace
+/// differences between backends.
+pub fn normalize(s: &str) -> String {
+    s.lines()
+        .map(|line| line.trim_end())
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim_end()
+        .to_string()
+}
+
+/// Like `run_interpreter`, but applies per-line `normalize()` to the output.
+///
+/// Preferred by parity tests where backends may differ in trailing whitespace.
+pub fn run_interpreter_normalized(td_path: &Path) -> Option<String> {
+    let output = Command::new(taida_bin()).arg(td_path).output().ok()?;
+    if !output.status.success() {
+        eprintln!(
+            "run_interpreter_normalized failed for {}: {}",
+            td_path.display(),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return None;
+    }
+    Some(normalize(&String::from_utf8_lossy(&output.stdout)))
+}
+
+// ---------------------------------------------------------------------------
+// WASM test cache (RC-8b)
+// ---------------------------------------------------------------------------
 
 /// N-1: Per-profile OnceLock to ensure `create_dir_all` runs at most once per profile.
 /// We use a fixed set of known profiles instead of a dynamic map.

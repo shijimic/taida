@@ -11,41 +11,9 @@
 /// so superset tests in wasm_wasi.rs can reuse them without recompiling.
 mod common;
 
+use common::{cache_wasm, run_interpreter, taida_bin, wasmtime_bin};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-
-/// Get the path to the built taida binary.
-fn taida_bin() -> PathBuf {
-    let mut path = PathBuf::from(env!("CARGO_BIN_EXE_taida"));
-    if !path.exists() {
-        path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("target")
-            .join("debug")
-            .join("taida");
-    }
-    path
-}
-
-/// Find wasmtime binary.
-fn wasmtime_bin() -> Option<PathBuf> {
-    // Check HOME/.wasmtime/bin/wasmtime
-    if let Ok(home) = std::env::var("HOME") {
-        let path = PathBuf::from(home).join(".wasmtime/bin/wasmtime");
-        if path.exists() {
-            return Some(path);
-        }
-    }
-    // Check PATH
-    if let Ok(output) = Command::new("which").arg("wasmtime").output()
-        && output.status.success()
-    {
-        let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if !path.is_empty() {
-            return Some(PathBuf::from(path));
-        }
-    }
-    None
-}
 
 /// AT-7: Require wasmtime or skip with clear visibility.
 ///
@@ -67,22 +35,6 @@ fn require_wasmtime() -> Option<PathBuf> {
         }
     }
 }
-
-/// Run a .td file with the interpreter and return its stdout.
-fn run_interpreter(td_path: &Path) -> Option<String> {
-    let output = Command::new(taida_bin()).arg(td_path).output().ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    Some(
-        String::from_utf8_lossy(&output.stdout)
-            .trim_end()
-            .to_string(),
-    )
-}
-
-// RC-8b: Cache functions moved to tests/common/mod.rs (S-2: DRY).
-use common::cache_wasm;
 
 /// Compile a .td file to wasm-min and run with wasmtime.
 /// RC-8b: Also caches the compiled .wasm for superset test reuse.

@@ -10,49 +10,9 @@
 /// so superset tests can reuse them without recompiling.
 mod common;
 
-use std::path::{Path, PathBuf};
+use common::{run_interpreter, taida_bin, wasmtime_bin};
+use std::path::Path;
 use std::process::Command;
-
-fn taida_bin() -> PathBuf {
-    let mut path = PathBuf::from(env!("CARGO_BIN_EXE_taida"));
-    if !path.exists() {
-        path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("target")
-            .join("debug")
-            .join("taida");
-    }
-    path
-}
-
-fn wasmtime_bin() -> Option<PathBuf> {
-    if let Ok(home) = std::env::var("HOME") {
-        let path = PathBuf::from(home).join(".wasmtime/bin/wasmtime");
-        if path.exists() {
-            return Some(path);
-        }
-    }
-    if let Ok(output) = Command::new("which").arg("wasmtime").output()
-        && output.status.success()
-    {
-        let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if !path.is_empty() {
-            return Some(PathBuf::from(path));
-        }
-    }
-    None
-}
-
-fn run_interpreter(td_path: &Path) -> Option<String> {
-    let output = Command::new(taida_bin()).arg(td_path).output().ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    Some(
-        String::from_utf8_lossy(&output.stdout)
-            .trim_end()
-            .to_string(),
-    )
-}
 
 /// Compile a .td file to wasm-wasi and run with wasmtime.
 /// `extra_args` are passed to wasmtime (e.g. --env, --dir).
