@@ -76,14 +76,13 @@ pub fn cached_wasm(profile: &str, stem: &str, td_path: &Path) -> Option<PathBuf>
     let cache_path = wasm_test_cache_dir(profile).join(format!("{}.wasm", stem));
     if cache_path.exists() {
         // M-1: Invalidate if source is newer than cache.
-        if let (Ok(cache_meta), Ok(src_meta)) =
-            (std::fs::metadata(&cache_path), std::fs::metadata(td_path))
-        {
-            if let (Ok(cache_mtime), Ok(src_mtime)) = (cache_meta.modified(), src_meta.modified()) {
-                if src_mtime > cache_mtime {
-                    return None; // stale cache
-                }
-            }
+        // L-3: If metadata/mtime cannot be read, treat as cache miss (safe side).
+        let cache_meta = std::fs::metadata(&cache_path).ok()?;
+        let src_meta = std::fs::metadata(td_path).ok()?;
+        let cache_mtime = cache_meta.modified().ok()?;
+        let src_mtime = src_meta.modified().ok()?;
+        if src_mtime > cache_mtime {
+            return None; // stale cache
         }
         Some(cache_path)
     } else {

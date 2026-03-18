@@ -16,6 +16,15 @@ use crate::parser::parse;
 
 type ModuleImports = Vec<(String, Vec<String>)>;
 
+/// L-1: Shared clang flags used for both cache key computation and compilation.
+/// Keeping them in one place prevents cache_key / wasm_clang_base_args drift.
+const WASM_CLANG_FLAGS: &[&str] = &[
+    "--target=wasm32-unknown-wasi",
+    "-nostdlib",
+    "-O2",
+    "-c",
+];
+
 /// Process-wide counter to produce unique .o file names.
 static OBJ_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -71,7 +80,7 @@ pub struct WasmEdgeOutput {
 /// via `include_str!` and never change between invocations, caching the
 /// .o files eliminates the most expensive step of WASM compilation.
 ///
-/// Cache key: SipHash of (runtime_source + clang_version_string + clang_flags).
+/// Cache key: FNV-1a of (runtime_source + clang_version_string + clang_flags).
 /// Cache location:
 ///   - Tests: `target/wasm-rt-cache/`
 ///   - Production: `.taida/cache/wasm-rt/`
@@ -137,10 +146,12 @@ impl WasmRuntimeCache {
             state ^= byte as u64;
             state = state.wrapping_mul(0x100000001b3);
         }
-        // Mix in clang flags that affect output
-        for byte in b"--target=wasm32-unknown-wasi -nostdlib -O2 -c" {
-            state ^= *byte as u64;
-            state = state.wrapping_mul(0x100000001b3);
+        // Mix in clang flags that affect output (L-1: shared via WASM_CLANG_FLAGS)
+        for flag in WASM_CLANG_FLAGS {
+            for byte in flag.bytes() {
+                state ^= byte as u64;
+                state = state.wrapping_mul(0x100000001b3);
+            }
         }
         format!("{:016x}", state)
     }
@@ -273,12 +284,15 @@ impl WasmRuntimeCache {
     /// `wasm_path`: final output .wasm path.
     /// `tmp_suffix`: suffix for temp files to avoid collisions between profiles
     ///               (e.g. `"_wasm_tmp"`, `"_wasm_wasi_tmp"`).
+    /// `extra_ld_args`: additional wasm-ld flags for profile-specific linking
+    ///                  (e.g. `--export=memory` for edge profile).
     fn link_wasm_cached(
         &self,
         rt_objs: &[PathBuf],
         generated_c: &str,
         wasm_path: &Path,
         tmp_suffix: &str,
+        extra_ld_args: &[&str],
     ) -> Result<(), CompileError> {
         let tmp_base = wasm_path.with_extension(tmp_suffix);
         let gen_c_path = tmp_base.with_extension("gen.c");
@@ -320,6 +334,7 @@ impl WasmRuntimeCache {
             "--strip-all",
             "--gc-sections",
         ]);
+        cmd.args(extra_ld_args);
         for rt_obj in rt_objs {
             cmd.arg(rt_obj);
         }
@@ -733,14 +748,10 @@ fn write_wasm_stdint_header(include_dir: &Path) -> Result<(), CompileError> {
 }
 
 fn wasm_clang_base_args(include_dir: &Path) -> Vec<String> {
-    vec![
-        "--target=wasm32-unknown-wasi".to_string(),
-        "-nostdlib".to_string(),
-        "-O2".to_string(),
-        "-c".to_string(),
-        "-I".to_string(),
-        include_dir.display().to_string(),
-    ]
+    let mut args: Vec<String> = WASM_CLANG_FLAGS.iter().map(|s| s.to_string()).collect();
+    args.push("-I".to_string());
+    args.push(include_dir.display().to_string());
+    args
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1092,7 +1103,7 @@ pub fn compile_file_wasm_cached(
     // --- S-1: cached runtime path (shared helper) ---
     if let Some(rt_cache) = cache {
         let rt_obj = rt_cache.rt_core()?;
-        rt_cache.link_wasm_cached(&[rt_obj], &generated_c, &wasm_path, "_wasm_tmp")?;
+        rt_cache.link_wasm_cached(&[rt_obj], &generated_c, &wasm_path, "_wasm_tmp", &[])?;
         return Ok(wasm_path);
     }
 
@@ -1290,6 +1301,7 @@ pub fn compile_file_wasm_wasi_cached(
             &generated_c,
             &wasm_path,
             "_wasm_wasi_tmp",
+            &[],
         )?;
         return Ok(wasm_path);
     }
@@ -1528,6 +1540,7 @@ pub fn compile_file_wasm_edge_cached(
             &generated_c,
             &wasm_path,
             "_wasm_edge_tmp",
+            &[],
         )?;
         let glue_path = generate_edge_js_glue(&wasm_path)?;
         return Ok(WasmEdgeOutput {
@@ -1781,6 +1794,7 @@ pub fn compile_file_wasm_full_cached(
             &generated_c,
             &wasm_path,
             "_wasm_full_tmp",
+            &[],
         )?;
         return Ok(wasm_path);
     }
@@ -2453,6 +2467,51 @@ mod tests {
     // S-4: WasmRuntimeCache unit tests
     // -----------------------------------------------------------------------
 
+    // D-2: Mutex to serialize tests that mutate TAIDA_WASM_RT_CACHE env var,
+    // preventing races when cargo test runs them in parallel.
+    static ENV_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// D-2: RAII guard for env var mutation. Saves the current value on
+    /// construction and restores it on drop.
+    struct EnvGuard {
+        key: &'static str,
+        saved: Option<String>,
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl EnvGuard {
+        fn new(key: &'static str) -> Self {
+            let lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+            let saved = std::env::var(key).ok();
+            Self {
+                key,
+                saved,
+                _lock: lock,
+            }
+        }
+
+        fn set(&self, value: &str) {
+            // SAFETY: serialized by ENV_MUTEX
+            unsafe { std::env::set_var(self.key, value) }
+        }
+
+        fn remove(&self) {
+            // SAFETY: serialized by ENV_MUTEX
+            unsafe { std::env::remove_var(self.key) }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            unsafe {
+                match &self.saved {
+                    Some(v) => std::env::set_var(self.key, v),
+                    None => std::env::remove_var(self.key),
+                }
+            }
+        }
+    }
+
     /// S-4: cache_key produces different keys for different source content.
     #[test]
     fn test_cache_key_differs_on_source_change() {
@@ -2473,9 +2532,12 @@ mod tests {
                 state ^= byte as u64;
                 state = state.wrapping_mul(0x100000001b3);
             }
-            for byte in b"--target=wasm32-unknown-wasi -nostdlib -O2 -c" {
-                state ^= *byte as u64;
-                state = state.wrapping_mul(0x100000001b3);
+            // L-1: Use the same shared constant as cache_key()
+            for flag in WASM_CLANG_FLAGS {
+                for byte in flag.bytes() {
+                    state ^= byte as u64;
+                    state = state.wrapping_mul(0x100000001b3);
+                }
             }
             format!("{:016x}", state)
         }
@@ -2510,12 +2572,8 @@ mod tests {
     /// S-4: default_wasm_cache_dir respects environment variable priority.
     #[test]
     fn test_default_wasm_cache_dir_env_override() {
-        // Save and set env
-        let saved = std::env::var("TAIDA_WASM_RT_CACHE").ok();
-        // SAFETY: this test is run single-threaded in cargo test; env mutation is safe.
-        unsafe {
-            std::env::set_var("TAIDA_WASM_RT_CACHE", "/tmp/test-wasm-cache-override");
-        }
+        let guard = EnvGuard::new("TAIDA_WASM_RT_CACHE");
+        guard.set("/tmp/test-wasm-cache-override");
 
         let dir = default_wasm_cache_dir(Some(Path::new("/some/project")));
         assert_eq!(
@@ -2523,30 +2581,17 @@ mod tests {
             PathBuf::from("/tmp/test-wasm-cache-override"),
             "env variable should take highest priority"
         );
-
-        // Restore
-        unsafe {
-            match saved {
-                Some(v) => std::env::set_var("TAIDA_WASM_RT_CACHE", v),
-                None => std::env::remove_var("TAIDA_WASM_RT_CACHE"),
-            }
-        }
+        // guard restores env on drop
     }
 
     /// S-4: default_wasm_cache_dir falls back to target/ when no .taida/ exists.
     #[test]
     fn test_default_wasm_cache_dir_fallback() {
-        // Ensure env is not set
-        let saved = std::env::var("TAIDA_WASM_RT_CACHE").ok();
-        // SAFETY: this test is run single-threaded in cargo test; env mutation is safe.
-        unsafe {
-            std::env::remove_var("TAIDA_WASM_RT_CACHE");
-        }
+        let guard = EnvGuard::new("TAIDA_WASM_RT_CACHE");
+        guard.remove();
 
-        // Create a temp dir that definitely has no .taida/ subdirectory
         let tmp = PathBuf::from("target/test-cache-dir-no-taida");
         let _ = std::fs::create_dir_all(&tmp);
-        // Ensure .taida does NOT exist
         let _ = std::fs::remove_dir_all(tmp.join(".taida"));
 
         let dir = default_wasm_cache_dir(Some(&tmp));
@@ -2556,28 +2601,16 @@ mod tests {
             "should fall back to target/wasm-rt-cache when .taida/ does not exist"
         );
 
-        // Cleanup
         let _ = std::fs::remove_dir_all(&tmp);
-
-        // Restore
-        unsafe {
-            if let Some(v) = saved {
-                std::env::set_var("TAIDA_WASM_RT_CACHE", v);
-            }
-        }
+        // guard restores env on drop
     }
 
     /// S-4: default_wasm_cache_dir uses .taida/cache/wasm-rt/ when .taida/ exists.
     #[test]
     fn test_default_wasm_cache_dir_taida_dir() {
-        // Ensure env is not set
-        let saved = std::env::var("TAIDA_WASM_RT_CACHE").ok();
-        // SAFETY: this test is run single-threaded in cargo test; env mutation is safe.
-        unsafe {
-            std::env::remove_var("TAIDA_WASM_RT_CACHE");
-        }
+        let guard = EnvGuard::new("TAIDA_WASM_RT_CACHE");
+        guard.remove();
 
-        // Create a temp dir with .taida/ inside
         let tmp = PathBuf::from("target/test-cache-dir-taida");
         let taida_dir = tmp.join(".taida");
         let _ = std::fs::create_dir_all(&taida_dir);
@@ -2589,14 +2622,7 @@ mod tests {
             "should use .taida/cache/wasm-rt/ when .taida/ exists"
         );
 
-        // Cleanup
         let _ = std::fs::remove_dir_all(&tmp);
-
-        // Restore
-        unsafe {
-            if let Some(v) = saved {
-                std::env::set_var("TAIDA_WASM_RT_CACHE", v);
-            }
-        }
+        // guard restores env on drop
     }
 }
