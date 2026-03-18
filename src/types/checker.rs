@@ -1886,13 +1886,9 @@ defaulted fields must be provided via `()`",
                             || self.registry.is_subtype_of(&body_ty, &ret_ty)
                             // Allow numeric narrowing: Num body is compatible with Int/Float/Num return
                             || body_ty.is_numeric() && ret_ty.is_numeric()
-                            // RCB-50: The previous blanket skip included Named types,
-                            // which hid genuine return-type mismatches (e.g. returning
-                            // B when A is declared).  Named types are now properly
-                            // checked via is_subtype_of (inheritance + structural).
-                            // List/BuchiPack are still skipped because mold operations
-                            // (Fold, Map, etc.) can return inaccurate compound types.
-                            || matches!(body_ty, Type::List(_) | Type::BuchiPack(_))
+                            // RCB-50: Named/List/BuchiPack are now properly checked
+                            // via is_subtype_of. The previous blanket skip hid genuine
+                            // return-type mismatches.
                             || ret_ty == Type::Unknown
                             || self.contains_unresolved_type_var(&body_ty)
                             || self.contains_unresolved_type_var(&ret_ty)

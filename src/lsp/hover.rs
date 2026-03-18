@@ -138,7 +138,7 @@ fn find_hover_in_statement(
                 let var_type = checker.lookup_var(&assign.target);
                 if let Some(ty) = var_type
                     && assign.span.column <= col
-                    && col <= assign.span.column + assign.target.len()
+                    && col <= assign.span.column + assign.target.chars().count()
                 {
                     return Some(format!("```taida\n{}: {}\n```", assign.target, ty));
                 }
@@ -164,7 +164,7 @@ fn find_hover_in_statement(
                         }
                     })
                     .collect();
-                if fd.span.column <= col && col <= fd.span.column + fd.name.len() {
+                if fd.span.column <= col && col <= fd.span.column + fd.name.chars().count() {
                     let doc = format_doc_comments(&fd.doc_comments);
                     return Some(format!(
                         "```taida\n{} {} => :{}\n```{}",
@@ -189,7 +189,7 @@ fn find_hover_in_statement(
             // Check if cursor is on the type name
             if td.span.line == line
                 && td.span.column <= col
-                && col <= td.span.column + td.name.len()
+                && col <= td.span.column + td.name.chars().count()
             {
                 let fields: Vec<String> = td
                     .fields
@@ -217,7 +217,7 @@ fn find_hover_in_statement(
             // Check if cursor is on the mold name
             if md.span.line == line
                 && md.span.column <= col
-                && col <= md.span.column + md.name.len()
+                && col <= md.span.column + md.name.chars().count()
             {
                 let parent_args: Vec<String> =
                     md.mold_args.iter().map(format_mold_header_arg).collect();
@@ -370,7 +370,7 @@ fn find_hover_in_expr(
 ) -> Option<String> {
     match expr {
         Expr::Ident(name, span) => {
-            if span.line == line && span.column <= col && col < span.column + name.len() {
+            if span.line == line && span.column <= col && col < span.column + name.chars().count() {
                 let var_type = checker.lookup_var(name);
                 if let Some(ty) = var_type {
                     return Some(format!("```taida\n{}: {}\n```", name, ty));
@@ -448,7 +448,7 @@ fn find_hover_in_expr(
             find_hover_in_expr(obj, line, col, checker, all_stmts)
         }
         Expr::MoldInst(name, _type_args, _fields, span) => {
-            if span.line == line && span.column <= col && col < span.column + name.len() {
+            if span.line == line && span.column <= col && col < span.column + name.chars().count() {
                 if let Some(info) = find_user_mold_hover_info(all_stmts, name, checker) {
                     return Some(info);
                 }
@@ -460,7 +460,7 @@ fn find_hover_in_expr(
         Expr::TypeInst(name, _fields, span) => {
             if span.line == line
                 && span.column <= col
-                && col < span.column + name.len()
+                && col < span.column + name.chars().count()
                 && let Some(fields) = checker.registry.get_type_fields(name)
             {
                 let fields_str: Vec<String> = fields

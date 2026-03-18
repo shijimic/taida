@@ -206,23 +206,39 @@ pub fn cache_wasm(profile: &str, stem: &str, wasm_path: &Path) {
     }
 }
 
+/// RCB-55: Taida binary mtime, cached once per process via OnceLock.
+/// Used by `cached_wasm` to invalidate cache when the compiler is rebuilt.
+static BIN_MTIME: OnceLock<Option<std::time::SystemTime>> = OnceLock::new();
+
+fn taida_bin_mtime() -> Option<std::time::SystemTime> {
+    *BIN_MTIME.get_or_init(|| std::fs::metadata(taida_bin()).ok()?.modified().ok())
+}
+
 /// RC-8b: Try to load a cached .wasm file. Returns the path if the cache exists
 /// and is not stale.
 ///
 /// M-1: Compares the source file (.td) modification time against the cached .wasm.
-/// If the source is newer than the cache, the cache is considered stale and `None`
-/// is returned, forcing recompilation.
+/// RCB-55: Also compares the taida binary's mtime — if the compiler was rebuilt,
+/// the cache is considered stale and `None` is returned, forcing recompilation.
+/// If the source or binary is newer than the cache, `None` is returned.
+/// Equal mtime is treated as valid (same-time writes are assumed identical).
 pub fn cached_wasm(profile: &str, stem: &str, td_path: &Path) -> Option<PathBuf> {
     let cache_path = wasm_test_cache_dir(profile).join(format!("{}.wasm", stem));
     if cache_path.exists() {
-        // M-1: Invalidate if source is newer than cache.
         // L-3: If metadata/mtime cannot be read, treat as cache miss (safe side).
         let cache_meta = std::fs::metadata(&cache_path).ok()?;
-        let src_meta = std::fs::metadata(td_path).ok()?;
         let cache_mtime = cache_meta.modified().ok()?;
+        // M-1: Invalidate if source is newer than cache.
+        let src_meta = std::fs::metadata(td_path).ok()?;
         let src_mtime = src_meta.modified().ok()?;
         if src_mtime > cache_mtime {
-            return None; // stale cache
+            return None; // stale: source changed
+        }
+        // RCB-55: Invalidate if taida binary is newer than cache.
+        if let Some(bin_mtime) = taida_bin_mtime() {
+            if bin_mtime > cache_mtime {
+                return None; // stale: compiler rebuilt
+            }
         }
         Some(cache_path)
     } else {

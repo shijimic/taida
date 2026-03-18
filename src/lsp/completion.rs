@@ -297,11 +297,12 @@ fn dot_completions(source: &str, params: &CompletionParams) -> Vec<CompletionIte
     let utf16_col = params.text_document_position.position.character as usize;
 
     // Simple approach: find the identifier before the dot on the current line
-    if let Some(line_text) = source.lines().nth(line)
-        && utf16_col > 1
-    {
-        // Convert LSP UTF-16 offset to char index before slicing.
+    if let Some(line_text) = source.lines().nth(line) {
+        // S-2: Guard on converted char index, not raw UTF-16 offset.
         let col = super::utf16::utf16_offset_to_char_index(line_text, utf16_col);
+        if col <= 1 {
+            return items;
+        }
         let before_dot: String = line_text.chars().take(col.saturating_sub(1)).collect();
         // Get the last identifier before the dot
         let ident = before_dot

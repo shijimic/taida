@@ -4171,7 +4171,10 @@ fn run_cache(args: &[String]) {
 }
 
 fn run_cache_clean() {
-    let cache_dir = codegen::driver::default_wasm_cache_dir(Some(Path::new(".")));
+    // RCB-56: Use absolute CWD to match run_build()'s input_path.parent() behavior.
+    // Both now resolve .taida/cache/wasm-rt/ from an absolute path.
+    let project_dir = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let cache_dir = codegen::driver::default_wasm_cache_dir(Some(&project_dir));
 
     if !cache_dir.exists() {
         println!("No cache directory found at '{}'.", cache_dir.display());

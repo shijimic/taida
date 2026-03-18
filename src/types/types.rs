@@ -282,9 +282,12 @@ impl TypeRegistry {
             "register_error_type called with unregistered parent: {}",
             parent
         );
-        self.error_types
-            .insert(name.to_string(), extra_fields.clone());
-        self.register_inheritance(parent, name, extra_fields)
+        let registered = self.register_inheritance(parent, name, extra_fields.clone());
+        if registered {
+            self.error_types
+                .insert(name.to_string(), extra_fields);
+        }
+        registered
     }
 
     /// Get the fields of a type definition.
@@ -315,6 +318,7 @@ impl TypeRegistry {
                 // cyclic inheritance chains that slipped past validation.
                 let mut current = a.clone();
                 let mut visited = HashSet::new();
+                visited.insert(a.clone()); // include start node
                 while let Some(parent) = self.inheritance.get(&current) {
                     if parent == b {
                         return true;

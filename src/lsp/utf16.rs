@@ -16,6 +16,7 @@
 /// pair contains the offset).
 pub fn utf16_offset_to_char_index(line_text: &str, utf16_offset: usize) -> usize {
     let mut utf16_cursor: usize = 0;
+    let mut char_count: usize = 0;
     for (i, ch) in line_text.chars().enumerate() {
         let width = ch.len_utf16();
         if utf16_cursor + width > utf16_offset {
@@ -24,9 +25,10 @@ pub fn utf16_offset_to_char_index(line_text: &str, utf16_offset: usize) -> usize
             return i;
         }
         utf16_cursor += width;
+        char_count = i + 1;
     }
     // offset at or beyond end of line -> return total char count
-    line_text.chars().count()
+    char_count
 }
 
 /// Convert a 0-based char index to a 0-based UTF-16 code unit offset
