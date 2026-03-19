@@ -28,6 +28,10 @@ pub struct JsCodegen {
     project_root: Option<std::path::PathBuf>,
     /// Output .mjs file path (for resolving package import paths relative to the final output)
     output_file: Option<std::path::PathBuf>,
+    /// Entry source root directory (entry .td file's parent) — for output placement logic
+    entry_root: Option<std::path::PathBuf>,
+    /// Output root directory — for output placement logic
+    out_root: Option<std::path::PathBuf>,
 }
 
 #[derive(Debug)]
@@ -68,6 +72,8 @@ impl JsCodegen {
             source_file: None,
             project_root: None,
             output_file: None,
+            entry_root: None,
+            out_root: None,
         }
     }
 
@@ -81,6 +87,18 @@ impl JsCodegen {
         self.source_file = Some(source_file.to_path_buf());
         self.project_root = Some(project_root.to_path_buf());
         self.output_file = Some(output_file.to_path_buf());
+    }
+
+    /// Set the entry root (entry .td file's parent) and output root for
+    /// computing correct ESM import specifiers when modules are placed
+    /// in a flattened output layout.
+    pub fn set_build_context(
+        &mut self,
+        entry_root: &std::path::Path,
+        out_root: &std::path::Path,
+    ) {
+        self.entry_root = Some(entry_root.to_path_buf());
+        self.out_root = Some(out_root.to_path_buf());
     }
 
     /// Program 全体を JS に変換
@@ -1162,62 +1180,7 @@ impl JsCodegen {
             ));
         } else {
             // ローカルモジュール — ESM import (.mjs)
-            // RCB-303: Reject relative imports that escape the project root (path traversal).
-            if import.path.contains("..") {
-                if let Some(ref project_root) = self.project_root {
-                    if let Some(ref source_file) = self.source_file {
-                        let source_dir = source_file
-                            .parent()
-                            .unwrap_or(std::path::Path::new("."));
-                        // Resolve with .td extension (matches actual file on disk)
-                        let mut td_path = source_dir.join(&import.path);
-                        if td_path.extension().is_none() {
-                            td_path.set_extension("td");
-                        }
-                        let reject = if let Ok(canonical) = td_path.canonicalize() {
-                            if let Ok(root_canonical) = project_root.canonicalize() {
-                                !canonical.starts_with(&root_canonical)
-                            } else {
-                                // Cannot canonicalize project root — check normalized path
-                                let normalized = source_dir.join(&import.path);
-                                !normalized
-                                    .components()
-                                    .fold(0i32, |depth, c| match c {
-                                        std::path::Component::ParentDir => depth - 1,
-                                        std::path::Component::Normal(_) => depth + 1,
-                                        _ => depth,
-                                    })
-                                    .is_positive()
-                            }
-                        } else {
-                            // File not found — check if path goes above source_dir's
-                            // depth within the project (conservative: reject net-upward)
-                            let normalized = source_dir.join(&import.path);
-                            !normalized
-                                .components()
-                                .fold(0i32, |depth, c| match c {
-                                    std::path::Component::ParentDir => depth - 1,
-                                    std::path::Component::Normal(_) => depth + 1,
-                                    _ => depth,
-                                })
-                                .is_positive()
-                        };
-                        if reject {
-                            return Err(JsError {
-                                message: format!(
-                                    "Import path '{}' resolves outside the project root. Path traversal is not allowed.",
-                                    import.path
-                                ),
-                            });
-                        }
-                    }
-                }
-            }
-            let js_path = if import.path.ends_with(".td") || import.path.ends_with(".tdjs") {
-                import.path.replace(".td", ".mjs").replace(".tdjs", ".mjs")
-            } else {
-                format!("{}.mjs", import.path)
-            };
+            let js_path = self.resolve_local_import_js_path(&import.path)?;
             self.write(&format!(
                 "import {{ {} }} from '{}';\n",
                 symbols.join(", "),
@@ -1225,6 +1188,104 @@ impl JsCodegen {
             ));
         }
         Ok(())
+    }
+
+    /// Resolve a local (relative) import path to the correct .mjs ESM specifier.
+    ///
+    /// When build context (entry_root, out_root) is available, computes the actual
+    /// output location of the dependency using the same strip_prefix logic as main.rs,
+    /// then produces a relative ESM import from our output to the dependency's output.
+    /// This handles the case where `../shared` from `src/main.td` is flattened to
+    /// `out_root/shared.mjs` alongside `out_root/main.mjs` (correct: `./shared.mjs`).
+    ///
+    /// Also performs RCB-303 path traversal rejection for `..` imports.
+    fn resolve_local_import_js_path(&self, import_path: &str) -> Result<String, JsError> {
+        use std::path::{Path, PathBuf};
+
+        // RCB-303: Check path traversal for `..` imports
+        if import_path.contains("..") {
+            if let (Some(project_root), Some(source_file)) =
+                (&self.project_root, &self.source_file)
+            {
+                let source_dir = source_file.parent().unwrap_or(Path::new("."));
+                let mut td_path = source_dir.join(import_path);
+                if td_path.extension().is_none() {
+                    td_path.set_extension("td");
+                }
+                let reject = if let Ok(canonical) = td_path.canonicalize() {
+                    if let Ok(root_canonical) = project_root.canonicalize() {
+                        !canonical.starts_with(&root_canonical)
+                    } else {
+                        false // cannot verify root — let it through, will fail at read
+                    }
+                } else {
+                    false // file not found — let it through, will fail at read
+                };
+                if reject {
+                    return Err(JsError {
+                        message: format!(
+                            "Import path '{}' resolves outside the project root. Path traversal is not allowed.",
+                            import_path
+                        ),
+                    });
+                }
+            }
+        }
+
+        // When build context is available and the import crosses directory boundaries,
+        // compute the correct ESM path based on output layout.
+        if let (Some(entry_root), Some(out_root), Some(source_file), Some(output_file)) =
+            (&self.entry_root, &self.out_root, &self.source_file, &self.output_file)
+        {
+            let source_dir = source_file.parent().unwrap_or(Path::new("."));
+            let mut dep_source = source_dir.join(import_path);
+            if dep_source.extension().is_none() {
+                dep_source.set_extension("td");
+            }
+            // Canonicalize to resolve symlinks and ..
+            let dep_source = dep_source.canonicalize().unwrap_or(dep_source);
+
+            // Replicate main.rs output placement: strip_prefix chain
+            let dep_rel = dep_source
+                .strip_prefix(entry_root)
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|_| {
+                    let entry_parent = entry_root.parent().unwrap_or(entry_root);
+                    dep_source
+                        .strip_prefix(entry_parent)
+                        .map(Path::to_path_buf)
+                        .unwrap_or_else(|_| {
+                            PathBuf::from(
+                                dep_source
+                                    .file_name()
+                                    .and_then(|n| n.to_str())
+                                    .unwrap_or("module.td"),
+                            )
+                        })
+                });
+            let dep_output = out_root.join(dep_rel.with_extension("mjs"));
+
+            // Compute relative ESM path from our output to the dependency's output
+            let our_dir = output_file.parent().unwrap_or(Path::new("."));
+            if let Some(rel) = pathdiff(our_dir, &dep_output) {
+                let rel_str = rel.to_string_lossy().replace('\\', "/");
+                // ESM requires explicit ./ prefix for same-directory imports
+                let esm_path = if rel_str.starts_with("../") || rel_str.starts_with("./") {
+                    rel_str.to_string()
+                } else {
+                    format!("./{}", rel_str)
+                };
+                return Ok(esm_path);
+            }
+        }
+
+        // Fallback: simple string replacement (no build context)
+        let js_path = if import_path.ends_with(".td") || import_path.ends_with(".tdjs") {
+            import_path.replace(".td", ".mjs").replace(".tdjs", ".mjs")
+        } else {
+            format!("{}.mjs", import_path)
+        };
+        Ok(js_path)
     }
 
     /// Resolve a package import path to a relative .mjs path for ESM import.
@@ -2982,6 +3043,21 @@ pub fn transpile_with_context(
 ) -> Result<String, JsError> {
     let mut codegen = JsCodegen::new();
     codegen.set_file_context(source_file, project_root, output_file);
+    codegen.generate(program)
+}
+
+/// .td ファイルを JS にトランスパイル (with build context for output-layout-aware imports)
+pub fn transpile_with_build_context(
+    program: &Program,
+    source_file: &std::path::Path,
+    project_root: &std::path::Path,
+    output_file: &std::path::Path,
+    entry_root: &std::path::Path,
+    out_root: &std::path::Path,
+) -> Result<String, JsError> {
+    let mut codegen = JsCodegen::new();
+    codegen.set_file_context(source_file, project_root, output_file);
+    codegen.set_build_context(entry_root, out_root);
     codegen.generate(program)
 }
 

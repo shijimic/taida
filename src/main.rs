@@ -1151,6 +1151,8 @@ fn transpile_js_source_to_output(
     diag_format: DiagFormat,
     compile_stats: &mut CompileDiagStats,
     project_root: Option<&Path>,
+    entry_root: Option<&Path>,
+    out_root: Option<&Path>,
 ) {
     let (program, parse_errors) = parse(source);
     if !parse_errors.is_empty() {
@@ -1183,7 +1185,11 @@ fn transpile_js_source_to_output(
     let js_code = {
         let result = if let (Some(td_file), Some(root)) = (source_path, project_root) {
             let import_out = import_base_out.unwrap_or(js_out);
-            js::codegen::transpile_with_context(&program, td_file, root, import_out)
+            if let (Some(er), Some(or)) = (entry_root, out_root) {
+                js::codegen::transpile_with_build_context(&program, td_file, root, import_out, er, or)
+            } else {
+                js::codegen::transpile_with_context(&program, td_file, root, import_out)
+            }
         } else {
             let mut codegen = js::codegen::JsCodegen::new();
             codegen.generate(&program)
@@ -1237,6 +1243,7 @@ fn transpile_js_source_to_output(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn transpile_js_module_to_output(
     td_file: &Path,
     js_out: &Path,
@@ -1245,6 +1252,8 @@ fn transpile_js_module_to_output(
     diag_format: DiagFormat,
     compile_stats: &mut CompileDiagStats,
     project_root: Option<&Path>,
+    entry_root: Option<&Path>,
+    out_root: Option<&Path>,
 ) {
     let source = match fs::read_to_string(td_file) {
         Ok(s) => s,
@@ -1268,6 +1277,8 @@ fn transpile_js_module_to_output(
         diag_format,
         compile_stats,
         project_root,
+        entry_root,
+        out_root,
     );
 }
 
@@ -1353,6 +1364,8 @@ fn run_build_js_file(
             no_check,
             diag_format,
             compile_stats,
+            None,
+            None,
             None,
         );
 
@@ -1463,6 +1476,8 @@ fn run_build_js_file(
             diag_format,
             compile_stats,
             pkg_root.as_deref(),
+            Some(entry_root),
+            Some(&out_root),
         );
         staged_outputs.push((stage_js_out, final_js_out));
         count += 1;
@@ -1526,6 +1541,8 @@ fn stage_dep_js_outputs(
             diag_format,
             compile_stats,
             Some(project_root),
+            None,
+            None,
         );
         staged_outputs.push((stage_mjs_out, final_mjs_out));
     }
@@ -1796,6 +1813,8 @@ fn run_build_js_dir(
             diag_format,
             compile_stats,
             pkg_root.as_deref(),
+            Some(input_path),
+            Some(&out_dir),
         );
         staged_outputs.push((stage_js_out, final_js_out));
         count += 1;
@@ -4376,6 +4395,8 @@ mod tests {
             false,
             DiagFormat::Text,
             &mut stats,
+            None,
+            None,
             None,
         );
 
