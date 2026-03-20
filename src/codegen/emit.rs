@@ -827,6 +827,19 @@ fn runtime_abi(name: &str) -> Result<RuntimeAbi, String> {
             params: &[Ptr],
             returns: &[Ptr],
         },
+        // RCB-101: Error type filtering for |==
+        "taida_register_type_parent" => RuntimeAbi {
+            params: &[Ptr, Ptr],
+            returns: &[],
+        },
+        "taida_error_type_matches" => RuntimeAbi {
+            params: &[Ptr, Ptr],
+            returns: &[Val],
+        },
+        "taida_error_type_check_or_rethrow" => RuntimeAbi {
+            params: &[Ptr, Ptr],
+            returns: &[Val],
+        },
 
         // ── Result[T, P] ──
         "taida_result_create" => RuntimeAbi {
@@ -1889,7 +1902,7 @@ impl Emitter {
         let imported_funcs: std::collections::HashSet<String> = ir_module
             .imports
             .iter()
-            .flat_map(|(_, syms)| syms.iter().cloned())
+            .flat_map(|(_, syms, _)| syms.iter().cloned())
             .collect();
 
         // IR から各インポート関数の引数数を推定

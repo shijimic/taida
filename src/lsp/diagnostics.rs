@@ -415,6 +415,128 @@ mod tests {
         );
     }
 
+    // ── RCB-318: Additional LSP integration tests ──
+
+    #[test]
+    fn test_rcb318_deep_nesting_no_crash() {
+        // SEC-002/RCB-301: deep nesting should produce a parse error, not crash.
+        // Parser has MAX_PARSE_DEPTH=256; we test just above the limit.
+        // Run in a thread with larger stack to avoid stack overflow in the
+        // recursive descent parser before the depth counter catches it.
+        let handle = std::thread::Builder::new()
+            .stack_size(8 * 1024 * 1024) // 8 MB stack
+            .spawn(|| {
+                let source =
+                    "x <= ".to_string() + &"(@(y <= ".repeat(300) + "1" + &"))".repeat(300);
+                let result = analyze(&source);
+                // Should produce a parse error about nesting depth, not crash
+                assert!(
+                    !result.diagnostics.is_empty(),
+                    "Deep nesting should produce diagnostics"
+                );
+                let has_depth_error = result
+                    .diagnostics
+                    .iter()
+                    .any(|d| d.message.contains("nesting depth"));
+                assert!(
+                    has_depth_error,
+                    "Should report nesting depth error. Got: {:?}",
+                    result
+                        .diagnostics
+                        .iter()
+                        .map(|d| &d.message)
+                        .collect::<Vec<_>>()
+                );
+            })
+            .expect("Failed to spawn test thread");
+        handle.join().expect("Test thread panicked");
+    }
+
+    #[test]
+    fn test_rcb318_error_ceiling_diagnostics() {
+        let source = "handler x =\n  |== e: Error = e.message\n  => :Str\n  x.toString()\n=> :Str\nstdout(handler(1))";
+        let result = analyze(source);
+        // Should not produce false parse errors for error ceiling syntax
+        let parse_errors: Vec<_> = result
+            .diagnostics
+            .iter()
+            .filter(|d| d.source == Some("taida".to_string()))
+            .collect();
+        assert!(
+            parse_errors.is_empty(),
+            "Error ceiling syntax should not produce parse errors. Got: {:?}",
+            parse_errors.iter().map(|d| &d.message).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_rcb318_inheritance_def_diagnostics() {
+        let source = "Animal = @(species: Str)\nAnimal => Dog = @(breed: Str)\nd <= Dog(species <= \"Canine\", breed <= \"Shiba\")";
+        let result = analyze(source);
+        let parse_errors: Vec<_> = result
+            .diagnostics
+            .iter()
+            .filter(|d| d.source == Some("taida".to_string()))
+            .collect();
+        assert!(
+            parse_errors.is_empty(),
+            "Inheritance def should not produce parse errors. Got: {:?}",
+            parse_errors.iter().map(|d| &d.message).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_rcb318_import_export_diagnostics() {
+        let source = ">>> ./lib.td => @(helper)\nresult <= helper(42)\nstdout(result)";
+        let result = analyze(source);
+        // Import statements should parse without error (file resolution is runtime)
+        let parse_errors: Vec<_> = result
+            .diagnostics
+            .iter()
+            .filter(|d| d.source == Some("taida".to_string()))
+            .collect();
+        assert!(
+            parse_errors.is_empty(),
+            "Import syntax should not produce parse errors. Got: {:?}",
+            parse_errors.iter().map(|d| &d.message).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_rcb318_empty_export_error() {
+        let source = "x <= 42\n<<< @()";
+        let result = analyze(source);
+        // RCB-102: Empty export should produce a type error
+        let has_empty_export_error = result
+            .diagnostics
+            .iter()
+            .any(|d| d.message.contains("Empty export"));
+        assert!(
+            has_empty_export_error,
+            "Empty export <<< @() should produce diagnostic. Got: {:?}",
+            result
+                .diagnostics
+                .iter()
+                .map(|d| &d.message)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_rcb318_large_source_no_timeout() {
+        // Ensure LSP can handle moderately large files without hanging
+        let mut source = String::new();
+        for i in 0..200 {
+            source.push_str(&format!("x_{} <= {}\n", i, i));
+        }
+        let result = analyze(&source);
+        // Should complete without timing out
+        assert!(
+            result.diagnostics.is_empty(),
+            "Large valid source should produce no errors"
+        );
+    }
+
     // ── RC-4f: integration test — all examples/*.td produce no parse errors ──
 
     #[test]

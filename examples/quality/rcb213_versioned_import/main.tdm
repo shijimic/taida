@@ -1,0 +1,4 @@
+>>> alice/pkg@b.12 => @(greet)
+>>> alice/pkg/submod@b.12 => @(sub_greet)
+stdout(greet)
+stdout(sub_greet)

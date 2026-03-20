@@ -51,6 +51,21 @@ impl GlobalStore {
         GlobalStore { root }
     }
 
+    /// Validate that a path component does not contain traversal sequences.
+    /// Rejects `..`, `/`, `\`, and empty strings (RCB-307 / SEC-009).
+    fn validate_path_component(component: &str, label: &str) -> Result<(), String> {
+        if component.is_empty() {
+            return Err(format!("{} must not be empty", label));
+        }
+        if component.contains("..") || component.contains('/') || component.contains('\\') {
+            return Err(format!(
+                "Invalid {}: '{}'. Path traversal characters ('..', '/', '\\') are not allowed.",
+                label, component
+            ));
+        }
+        Ok(())
+    }
+
     /// Get the path for a specific package version in the store.
     pub fn package_path(&self, org: &str, name: &str, version: &str) -> PathBuf {
         self.root.join(org).join(name).join(version)
@@ -58,6 +73,13 @@ impl GlobalStore {
 
     /// Check if a package version is already cached in the store.
     pub fn is_cached(&self, org: &str, name: &str, version: &str) -> bool {
+        // RCB-307: Reject path traversal in components
+        if Self::validate_path_component(org, "org").is_err()
+            || Self::validate_path_component(name, "package name").is_err()
+            || Self::validate_path_component(version, "version").is_err()
+        {
+            return false;
+        }
         let pkg_dir = self.package_path(org, name, version);
         pkg_dir.join(".taida_installed").exists()
     }
@@ -67,6 +89,11 @@ impl GlobalStore {
     /// Downloads the tarball from `https://github.com/{org}/{name}/archive/refs/tags/{version}.tar.gz`,
     /// extracts it to `~/.taida/store/{org}/{name}/{version}/`, and creates a `.taida_installed` marker.
     pub fn fetch_and_cache(&self, org: &str, name: &str, version: &str) -> Result<PathBuf, String> {
+        // RCB-307: Reject path traversal in components
+        Self::validate_path_component(org, "org")?;
+        Self::validate_path_component(name, "package name")?;
+        Self::validate_path_component(version, "version")?;
+
         let pkg_dir = self.package_path(org, name, version);
 
         // Already cached
@@ -157,6 +184,11 @@ impl GlobalStore {
         name: &str,
         generation: &str,
     ) -> Result<String, String> {
+        // RCB-307: Reject path traversal in components
+        Self::validate_path_component(org, "org")?;
+        Self::validate_path_component(name, "package name")?;
+        Self::validate_path_component(generation, "generation")?;
+
         // First, check local cache
         let pkg_parent = self.root.join(org).join(name);
         if pkg_parent.exists()
@@ -177,6 +209,11 @@ impl GlobalStore {
         name: &str,
         generation: &str,
     ) -> Result<String, String> {
+        // RCB-307: Reject path traversal in components
+        Self::validate_path_component(org, "org")?;
+        Self::validate_path_component(name, "package name")?;
+        Self::validate_path_component(generation, "generation")?;
+
         self.resolve_generation_from_remote(org, name, generation)
     }
 

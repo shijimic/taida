@@ -308,6 +308,11 @@ fn collect_needed_runtime_funcs(insts: &[IrInst], set: &mut HashSet<String>) {
         match inst {
             IrInst::Call(_, name, _) => {
                 set.insert(name.clone());
+                // RCB-101 fix: taida_error_type_check_or_rethrow needs
+                // taida_is_error_thrown for the post-call early-return check.
+                if name == "taida_error_type_check_or_rethrow" {
+                    set.insert("taida_is_error_thrown".to_string());
+                }
             }
             // W-4: Pack IR instructions need runtime function prototypes
             IrInst::PackNew(_, _) => {
@@ -538,6 +543,11 @@ fn runtime_func_prototype(name: &str, profile: WasmProfile) -> Result<String, Wa
         }
         "taida_error_get_value" => "int64_t taida_error_get_value(int64_t depth);".to_string(),
         "taida_error_setjmp" => "int64_t taida_error_setjmp(int64_t depth);".to_string(),
+        // RCB-101: Error type filtering for |==
+        "taida_register_type_parent" => "void taida_register_type_parent(int64_t child_str, int64_t parent_str);".to_string(),
+        "taida_error_type_matches" => "int64_t taida_error_type_matches(int64_t error_val, int64_t handler_type_str);".to_string(),
+        "taida_error_type_check_or_rethrow" => "int64_t taida_error_type_check_or_rethrow(int64_t error_val, int64_t handler_type_str);".to_string(),
+        "taida_is_error_thrown" => "int64_t taida_is_error_thrown(void);".to_string(),
         "taida_make_error" => {
             "int64_t taida_make_error(int64_t type_ptr, int64_t msg_ptr);".to_string()
         }
@@ -1202,6 +1212,7 @@ fn emit_inst(
                 || name == "taida_hashmap_set_value_tag"
                 || name == "taida_set_set_elem_tag"
                 || name == "taida_error_ceiling_pop"
+                || name == "taida_register_type_parent"
                 || name == "taida_gorilla"
             {
                 write!(c, "{}{}(", indent, name).unwrap();
@@ -1222,6 +1233,13 @@ fn emit_inst(
                     write!(c, "v_{}", arg).unwrap();
                 }
                 writeln!(c, ");").unwrap();
+                // RCB-101 fix: In WASM, taida_throw sets a flag instead of
+                // longjmp.  After taida_error_type_check_or_rethrow re-throws,
+                // the handler body must not continue — return immediately so
+                // the error propagates to the outer ceiling.
+                if name == "taida_error_type_check_or_rethrow" {
+                    writeln!(c, "{}if (taida_is_error_thrown()) return 0;", indent).unwrap();
+                }
             }
         }
         IrInst::CallUser(dst, name, args) => {

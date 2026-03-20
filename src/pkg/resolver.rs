@@ -500,10 +500,8 @@ pub fn resolve_package_module(
 /// first (e.g., `.taida/deps/alice/http@b.12/`) before falling back to
 /// unversioned directories. This enables pnpm-style version coexistence.
 ///
-/// Currently used only in tests. When versioned submodule imports (e.g.,
-/// `>>> alice/http/router@b.12`) become supported in production, this
-/// function should be wired into eval_import / JS codegen.
-#[cfg(test)]
+/// Supports submodule imports: `alice/pkg/submod@b.12` resolves to
+/// `.taida/deps/alice/pkg@b.12/submod.td` via longest-prefix matching.
 pub fn resolve_package_module_versioned(
     project_root: &Path,
     import_path: &str,

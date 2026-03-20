@@ -46,7 +46,7 @@ impl TaidaBackend {
 
     /// Get document content by URI.
     fn get_document_content(&self, uri: &Url) -> Option<String> {
-        let docs = self.documents.lock().unwrap();
+        let docs = self.documents.lock().unwrap_or_else(|e| e.into_inner());
         docs.get(uri).map(|d| d.content.clone())
     }
 }
@@ -94,7 +94,7 @@ impl LanguageServer for TaidaBackend {
 
         // Store document
         {
-            let mut docs = self.documents.lock().unwrap();
+            let mut docs = self.documents.lock().unwrap_or_else(|e| e.into_inner());
             docs.insert(
                 uri.clone(),
                 DocumentState {
@@ -116,7 +116,7 @@ impl LanguageServer for TaidaBackend {
 
             // Update stored document
             {
-                let mut docs = self.documents.lock().unwrap();
+                let mut docs = self.documents.lock().unwrap_or_else(|e| e.into_inner());
                 docs.insert(
                     uri.clone(),
                     DocumentState {
@@ -140,7 +140,7 @@ impl LanguageServer for TaidaBackend {
     }
 
     async fn did_close(&self, params: DidCloseTextDocumentParams) {
-        let mut docs = self.documents.lock().unwrap();
+        let mut docs = self.documents.lock().unwrap_or_else(|e| e.into_inner());
         docs.remove(&params.text_document.uri);
     }
 

@@ -317,21 +317,124 @@ impl Lowering {
         format!("m{:016x}", simple_hash(path))
     }
 
-    fn resolve_import_path(&self, module_path: &str) -> Option<std::path::PathBuf> {
+    fn resolve_import_path(
+        &self,
+        module_path: &str,
+        version: Option<&str>,
+    ) -> Option<std::path::PathBuf> {
         let source_dir = self.source_dir.as_ref()?;
-        let mut path = if std::path::Path::new(module_path).is_absolute() {
-            std::path::PathBuf::from(module_path)
-        } else {
+
+        let path = if module_path.starts_with("./") || module_path.starts_with("../") {
+            // Relative path
             source_dir.join(module_path)
+        } else if std::path::Path::new(module_path).is_absolute() {
+            // Absolute path
+            std::path::PathBuf::from(module_path)
+        } else if let Some(stripped) = module_path.strip_prefix("~/") {
+            // RCB-103: Project root relative
+            let root = Self::find_project_root(source_dir);
+            root.join(stripped)
+        } else {
+            // RCB-103/RCB-213: Package import (e.g., "author/pkg" or "author/pkg/submodule")
+            // When version is provided, try version-qualified directory first
+            // (e.g., .taida/deps/author/pkg@version/), then fall back to unversioned.
+            let root = Self::find_project_root(source_dir);
+
+            // RCB-213: Versioned resolution with longest-prefix matching.
+            // Supports submodule imports (e.g., alice/pkg/submod@b.12 resolves to
+            // .taida/deps/alice/pkg@b.12/submod.td).
+            if let Some(ver) = version {
+                if let Some(resolution) =
+                    crate::pkg::resolver::resolve_package_module_versioned(&root, module_path, ver)
+                {
+                    match resolution.submodule {
+                        Some(submodule_path) => {
+                            resolution.pkg_dir.join(format!("{}.td", submodule_path))
+                        }
+                        None => {
+                            let entry =
+                                match crate::pkg::manifest::Manifest::from_dir(&resolution.pkg_dir)
+                                {
+                                    Ok(Some(manifest)) => manifest.entry,
+                                    _ => "main.td".to_string(),
+                                };
+                            if entry.starts_with("./") || entry.starts_with("../") {
+                                resolution.pkg_dir.join(entry[2..].trim_start_matches('/'))
+                            } else {
+                                resolution.pkg_dir.join(&entry)
+                            }
+                        }
+                    }
+                } else {
+                    // RCB-213: Versioned package not found — do not fall back silently.
+                    return None;
+                }
+            } else if let Some(resolution) =
+                crate::pkg::resolver::resolve_package_module(&root, module_path)
+            {
+                match resolution.submodule {
+                    Some(submodule_path) => {
+                        resolution.pkg_dir.join(format!("{}.td", submodule_path))
+                    }
+                    None => {
+                        let entry =
+                            match crate::pkg::manifest::Manifest::from_dir(&resolution.pkg_dir) {
+                                Ok(Some(manifest)) => manifest.entry,
+                                _ => "main.td".to_string(),
+                            };
+                        if entry.starts_with("./") || entry.starts_with("../") {
+                            resolution.pkg_dir.join(entry[2..].trim_start_matches('/'))
+                        } else {
+                            resolution.pkg_dir.join(&entry)
+                        }
+                    }
+                }
+            } else {
+                // RCB-103 fix: package resolution failed — do not fall back
+                // to local path, which would silently misresolve a package
+                // import to a nonexistent relative file.
+                return None;
+            }
         };
-        if path.extension().is_none_or(|e| e != "td") {
-            path.set_extension("td");
+
+        let resolved = path.canonicalize().unwrap_or(path);
+
+        // RCB-303: Reject relative imports that escape the project root (path traversal).
+        if (module_path.starts_with("./") || module_path.starts_with("../"))
+            && let Ok(sd) = source_dir.canonicalize()
+        {
+            let project_root = Self::find_project_root(&sd);
+            if let Ok(root_canonical) = project_root.canonicalize()
+                && !resolved.starts_with(&root_canonical)
+            {
+                return None;
+            }
         }
-        Some(path.canonicalize().unwrap_or(path))
+
+        Some(resolved)
     }
 
-    fn import_module_key(&self, module_path: &str) -> String {
-        self.resolve_import_path(module_path)
+    /// RCB-103: Find project root by walking up from the given directory.
+    /// Mirrors Interpreter::find_project_root().
+    fn find_project_root(start_dir: &std::path::Path) -> std::path::PathBuf {
+        let mut dir = start_dir.to_path_buf();
+        loop {
+            if dir.join("packages.tdm").exists()
+                || dir.join("taida.toml").exists()
+                || dir.join(".taida").exists()
+                || dir.join(".git").exists()
+            {
+                return dir;
+            }
+            if !dir.pop() {
+                break;
+            }
+        }
+        start_dir.to_path_buf()
+    }
+
+    fn import_module_key(&self, module_path: &str, version: Option<&str>) -> String {
+        self.resolve_import_path(module_path, version)
             .map(|path| Self::module_key_for_path(&path))
             .unwrap_or_else(|| Self::fallback_module_key(module_path))
     }
@@ -355,42 +458,99 @@ impl Lowering {
 
     /// QF-16/17: インポートされたシンボルの種類を判定する。
     /// モジュールのソースを解析し、シンボルが関数定義/値代入/TypeDef のいずれかを返す。
-    fn classify_imported_symbol(&self, module_path: &str, symbol_name: &str) -> ImportedSymbolKind {
+    /// Collect the explicit export list from a parsed module's AST.
+    /// Returns `None` if the module has no `<<<` statements (backward compat: export everything).
+    /// Returns `Some(set)` if the module has `<<<` statements listing specific symbols.
+    fn collect_module_export_list(
+        statements: &[Statement],
+    ) -> Option<std::collections::HashSet<String>> {
+        let mut export_symbols: Vec<String> = Vec::new();
+        let mut has_export = false;
+        for stmt in statements {
+            if let Statement::Export(export_stmt) = stmt {
+                has_export = true;
+                for sym in &export_stmt.symbols {
+                    if !export_symbols.contains(sym) {
+                        export_symbols.push(sym.clone());
+                    }
+                }
+            }
+        }
+        if has_export {
+            Some(export_symbols.into_iter().collect())
+        } else {
+            None
+        }
+    }
+
+    fn classify_imported_symbol(
+        &self,
+        module_path: &str,
+        symbol_name: &str,
+        version: Option<&str>,
+    ) -> Result<ImportedSymbolKind, LowerError> {
         // モジュールパスを解決
-        let path = match self.resolve_import_path(module_path) {
+        let path = match self.resolve_import_path(module_path, version) {
             Some(path) => path,
-            None => return ImportedSymbolKind::Function,
+            None => return Ok(ImportedSymbolKind::Function),
         };
 
         // ソースを読み込んでパース
         let source = match std::fs::read_to_string(&path) {
             Ok(s) => s,
-            Err(_) => return ImportedSymbolKind::Function,
+            Err(_) => return Ok(ImportedSymbolKind::Function),
         };
         let (program, _) = crate::parser::parse(&source);
+
+        // RCB-201: Check if the module has explicit exports (<<<).
+        // If it does, verify the symbol is in the export list before classifying.
+        let export_list = Self::collect_module_export_list(&program.statements);
+        if let Some(ref exports) = export_list
+            && !exports.contains(symbol_name)
+        {
+            return Err(LowerError {
+                message: format!(
+                    "Symbol '{}' not found in module '{}'. \
+                     The module exports: {}",
+                    symbol_name,
+                    module_path,
+                    if exports.is_empty() {
+                        "(nothing)".to_string()
+                    } else {
+                        let mut sorted: Vec<&String> = exports.iter().collect();
+                        sorted.sort();
+                        sorted
+                            .iter()
+                            .map(|s| s.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    }
+                ),
+            });
+        }
 
         // シンボルの種類を判定
         for stmt in &program.statements {
             match stmt {
                 Statement::FuncDef(func_def) if func_def.name == symbol_name => {
-                    return ImportedSymbolKind::Function;
+                    return Ok(ImportedSymbolKind::Function);
                 }
                 Statement::TypeDef(type_def) if type_def.name == symbol_name => {
                     // 種類判定のみ。メタデータ登録は register_imported_typedef で行う。
-                    return ImportedSymbolKind::TypeDef;
+                    return Ok(ImportedSymbolKind::TypeDef);
                 }
                 Statement::InheritanceDef(inh_def) if inh_def.child == symbol_name => {
-                    return ImportedSymbolKind::TypeDef;
+                    return Ok(ImportedSymbolKind::TypeDef);
                 }
                 Statement::Assignment(assign) if assign.target == symbol_name => {
-                    return ImportedSymbolKind::Value;
+                    return Ok(ImportedSymbolKind::Value);
                 }
                 _ => {}
             }
         }
 
         // 見つからなかった場合はデフォルトで関数扱い
-        ImportedSymbolKind::Function
+        Ok(ImportedSymbolKind::Function)
     }
 
     // collect_module_top_level_values は廃止。
@@ -405,8 +565,9 @@ impl Lowering {
         module_path: &str,
         symbol_name: &str,
         register_name: &str,
+        version: Option<&str>,
     ) {
-        let path = match self.resolve_import_path(module_path) {
+        let path = match self.resolve_import_path(module_path, version) {
             Some(path) => path,
             None => return,
         };
@@ -1014,6 +1175,14 @@ impl Lowering {
                     }
                 }
                 Statement::Export(export_stmt) => {
+                    // RCB-212: Re-export path `<<< ./path` is not supported.
+                    if export_stmt.path.is_some() {
+                        return Err(LowerError {
+                            message: "Re-export with path (`<<< ./path`) is not yet supported. \
+                                     Use explicit import and re-export instead."
+                                .to_string(),
+                        });
+                    }
                     for sym in &export_stmt.symbols {
                         self.exported_symbols.insert(sym.clone());
                         module.exports.push(self.export_func_symbol(sym));
@@ -1022,12 +1191,10 @@ impl Lowering {
                 Statement::Import(import_stmt) => {
                     // stdlib モジュールの関数はランタイム関数にマッピング
                     // 定数は stdlib_constants にマッピング
-                    // TODO: import_stmt.version is currently ignored in the Native backend.
-                    // Versioned package imports (>>> alice/http@b.12) resolve via
-                    // resolve_import_path which does simple path joining and does not
-                    // consult .taida/deps/. When Native package import support is added,
-                    // use resolve_package_import_versioned() for version-aware resolution.
+                    // RCB-213: version is now passed through to resolve_import_path
+                    // for version-aware package resolution (.taida/deps/org/name@ver/).
                     let path = &import_stmt.path;
+                    let version = import_stmt.version.as_deref();
                     let is_core_bundled_path = matches!(
                         path.as_str(),
                         "taida-lang/os"
@@ -1069,8 +1236,10 @@ impl Lowering {
                         } else {
                             // stdlib でないか、マッピングのない関数はユーザー関数として登録
                             // QF-16/17: シンボルの種類に応じて処理を分岐
-                            let sym_kind = self.classify_imported_symbol(path, orig_name);
-                            let module_key = self.import_module_key(path);
+                            // RCB-201: classify now validates against module's export list
+                            let sym_kind =
+                                self.classify_imported_symbol(path, orig_name, version)?;
+                            let module_key = self.import_module_key(path, version);
                             let init_symbol = Self::init_symbol_for_key(&module_key);
                             needs_module_object = true;
                             match sym_kind {
@@ -1092,7 +1261,9 @@ impl Lowering {
                                 ImportedSymbolKind::TypeDef => {
                                     // TypeDef export: メタデータを登録（インラインで TypeInst 構築）
                                     self.imported_type_symbols.insert(alias.clone());
-                                    self.register_imported_typedef(path, orig_name, &alias);
+                                    self.register_imported_typedef(
+                                        path, orig_name, &alias, version,
+                                    );
                                 }
                                 ImportedSymbolKind::Function => {
                                     // 通常の関数 export
@@ -1114,9 +1285,11 @@ impl Lowering {
 
                     // ローカルモジュール依存は、値/TypeDef import だけでも object を生成する必要がある。
                     if needs_module_object {
-                        module
-                            .imports
-                            .push((import_stmt.path.clone(), import_link_symbols));
+                        module.imports.push((
+                            import_stmt.path.clone(),
+                            import_link_symbols,
+                            import_stmt.version.clone(),
+                        ));
                     }
                 }
                 _ => {}
@@ -1665,7 +1838,22 @@ impl Lowering {
                 "taida_error_get_value".to_string(),
                 vec![depth],
             ));
-            func.push(IrInst::DefVar(ec.error_param.clone(), err_var));
+            // RCB-101: Type filter — re-throw if error type does not match handler type.
+            // taida_error_type_check_or_rethrow(err_var, handler_type_str)
+            // If type does not match, this calls taida_throw internally (longjmp/never returns).
+            let handler_type_name = match &ec.error_type {
+                crate::parser::TypeExpr::Named(name) => name.clone(),
+                _ => "Error".to_string(),
+            };
+            let handler_type_str = func.alloc_var();
+            func.push(IrInst::ConstStr(handler_type_str, handler_type_name));
+            let checked_err = func.alloc_var();
+            func.push(IrInst::Call(
+                checked_err,
+                "taida_error_type_check_or_rethrow".to_string(),
+                vec![err_var, handler_type_str],
+            ));
+            func.push(IrInst::DefVar(ec.error_param.clone(), checked_err));
             // Lower handler body, capturing the last expression's result
             let mut last_handler_var = None;
             for (idx, stmt) in ec.handler_body.iter().enumerate() {
@@ -1939,6 +2127,17 @@ impl Lowering {
                     self.type_method_defs
                         .insert(inh_def.child.clone(), all_methods);
                 }
+                // RCB-101: Register inheritance parent for error type filtering in |==
+                let child_str_var = func.alloc_var();
+                func.push(IrInst::ConstStr(child_str_var, inh_def.child.clone()));
+                let parent_str_var = func.alloc_var();
+                func.push(IrInst::ConstStr(parent_str_var, inh_def.parent.clone()));
+                let reg_dummy = func.alloc_var();
+                func.push(IrInst::Call(
+                    reg_dummy,
+                    "taida_register_type_parent".to_string(),
+                    vec![child_str_var, parent_str_var],
+                ));
                 if let Some(parent_mold) = self.mold_defs.get(&inh_def.parent).cloned() {
                     let mut merged_mold_fields = parent_mold.fields.clone();
                     for child_field in &inh_def.fields {
@@ -5102,10 +5301,30 @@ impl Lowering {
         self.bind_imported_values(&mut init_fn);
 
         for stmt in &program.statements {
-            if let Statement::Assignment(assign) = stmt {
-                let val = self.lower_expr(&mut init_fn, &assign.value)?;
-                let hash = simple_hash(&format!("{}:{}", module_key, assign.target)) as i64;
-                init_fn.push(IrInst::GlobalSet(hash, val));
+            match stmt {
+                Statement::Assignment(assign) => {
+                    let val = self.lower_expr(&mut init_fn, &assign.value)?;
+                    let hash = simple_hash(&format!("{}:{}", module_key, assign.target)) as i64;
+                    init_fn.push(IrInst::GlobalSet(hash, val));
+                }
+                Statement::InheritanceDef(inh_def) => {
+                    // RCB-101 fix: Register inheritance parent for cross-module
+                    // error type filtering.  Without this, error types defined in
+                    // a library module are not registered in the parent map when
+                    // the module is initialised, so |== catch handlers in the
+                    // importing module cannot walk the inheritance chain.
+                    let child_str_var = init_fn.alloc_var();
+                    init_fn.push(IrInst::ConstStr(child_str_var, inh_def.child.clone()));
+                    let parent_str_var = init_fn.alloc_var();
+                    init_fn.push(IrInst::ConstStr(parent_str_var, inh_def.parent.clone()));
+                    let reg_dummy = init_fn.alloc_var();
+                    init_fn.push(IrInst::Call(
+                        reg_dummy,
+                        "taida_register_type_parent".to_string(),
+                        vec![child_str_var, parent_str_var],
+                    ));
+                }
+                _ => {}
             }
         }
 

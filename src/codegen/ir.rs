@@ -163,8 +163,8 @@ pub struct IrModule {
     pub functions: Vec<IrFunction>,
     /// エクスポートされるリンクシンボル名
     pub exports: Vec<String>,
-    /// インポート: (モジュールパス, 依存する関数リンクシンボル名リスト)
-    pub imports: Vec<(String, Vec<String>)>,
+    /// インポート: (モジュールパス, 依存する関数リンクシンボル名リスト, version)
+    pub imports: Vec<(String, Vec<String>, Option<String>)>,
     /// ライブラリモジュール（エクスポートあり）かどうか
     pub is_library: bool,
     /// モジュール一意キー

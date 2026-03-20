@@ -1,0 +1,4 @@
+caught by BaseErr: ChildErr
+caught by ChildErr: ChildErr
+caught by Error: BaseErr
+caught by Error: ChildErr

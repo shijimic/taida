@@ -103,6 +103,42 @@ fn test_rc8d_cache_clean_removes_files() {
     );
 }
 
+/// Regression: `taida cache clean` in a project with `.taida/` + `packages.tdm`
+/// must find the project-local cache (`.taida/cache/wasm-rt/`), not the fallback.
+#[test]
+fn test_cache_clean_finds_project_local_cache() {
+    let tmp = unique_temp_dir("cache_proj_local");
+    let _ = fs::create_dir_all(tmp.join(".taida").join("cache").join("wasm-rt"));
+    let _ = fs::write(tmp.join("packages.tdm"), "");
+
+    // Place a fake cached file in the project-local cache
+    let fake_o = tmp
+        .join(".taida")
+        .join("cache")
+        .join("wasm-rt")
+        .join("fake.deadbeef.o");
+    let _ = fs::write(&fake_o, b"fake");
+    assert!(fake_o.exists(), "setup: fake .o should exist");
+
+    let output = Command::new(taida_bin())
+        .args(["cache", "clean"])
+        .current_dir(&tmp)
+        .output()
+        .expect("cache clean in project dir");
+    assert!(
+        output.status.success(),
+        "cache clean failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    assert!(
+        !fake_o.exists(),
+        "project-local cache .o should be removed by cache clean"
+    );
+
+    let _ = fs::remove_dir_all(&tmp);
+}
+
 #[test]
 fn test_rc8d_cache_unknown_subcommand() {
     let output = Command::new(taida_bin())

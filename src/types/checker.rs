@@ -106,6 +106,8 @@ pub struct TypeChecker {
     /// Whether we are currently inside a pipeline expression.
     /// Used to allow `_` (Placeholder) in pipeline context while rejecting it elsewhere.
     in_pipeline: bool,
+    /// Source file path — used for resolving import paths to validate export symbols.
+    source_file: Option<std::path::PathBuf>,
 }
 
 impl TypeChecker {
@@ -125,7 +127,12 @@ impl TypeChecker {
             mold_header_specs: HashMap::new(),
             declared_header_arities: HashMap::new(),
             in_pipeline: false,
+            source_file: None,
         }
+    }
+
+    pub fn set_source_file(&mut self, path: &std::path::Path) {
+        self.source_file = Some(path.to_path_buf());
     }
 
     fn binding_diag(code: &str, message: String, hint: &str) -> String {
@@ -770,6 +777,153 @@ impl TypeChecker {
     /// If `span` is provided and the name already exists in the current scope,
     /// a compile error is reported (same-scope redefinition is forbidden).
     /// Shadowing across scopes (inner scope redefines outer) is allowed.
+    /// RCB-201: Validate that all imported symbols are actually exported by the target module.
+    fn validate_import_symbols(&mut self, imp: &crate::parser::ImportStmt) {
+        use crate::parser::Statement as S;
+
+        // Skip core-bundled and npm packages
+        if imp.path.starts_with("npm:") || imp.path.starts_with("taida-lang/") {
+            return;
+        }
+
+        // Need source_file to resolve relative imports
+        let source_file = match &self.source_file {
+            Some(f) => f.clone(),
+            None => return,
+        };
+
+        // Resolve the import path to a .td file
+        let td_path = if imp.path.starts_with("./")
+            || imp.path.starts_with("../")
+            || imp.path.starts_with('/')
+        {
+            let source_dir = source_file.parent().unwrap_or(std::path::Path::new("."));
+            let path = source_dir.join(&imp.path);
+            if path.exists() {
+                path
+            } else {
+                return; // Cannot resolve — let downstream handle
+            }
+        } else {
+            // Package import — resolve via .taida/deps/
+            let source_dir = source_file.parent().unwrap_or(std::path::Path::new("."));
+            let project_root = Self::find_project_root(source_dir);
+
+            let resolution = if let Some(ref ver) = imp.version {
+                crate::pkg::resolver::resolve_package_module_versioned(
+                    &project_root,
+                    &imp.path,
+                    ver,
+                )
+            } else {
+                crate::pkg::resolver::resolve_package_module(&project_root, &imp.path)
+            };
+
+            match resolution {
+                Some(res) => {
+                    match &res.submodule {
+                        Some(sub) => {
+                            let sub_path = res.pkg_dir.join(format!("{}.td", sub));
+                            if sub_path.exists() {
+                                sub_path
+                            } else {
+                                return; // Cannot resolve submodule — let downstream handle
+                            }
+                        }
+                        None => {
+                            // Package root import: read packages.tdm to determine entry point
+                            // (mirrors interpreter/JS/Native logic)
+                            let entry_name =
+                                match crate::pkg::manifest::Manifest::from_dir(&res.pkg_dir) {
+                                    Ok(Some(manifest)) => manifest.entry,
+                                    _ => "main.td".to_string(),
+                                };
+                            let entry_path = if let Some(stripped) = entry_name.strip_prefix("./") {
+                                res.pkg_dir.join(stripped)
+                            } else {
+                                res.pkg_dir.join(&entry_name)
+                            };
+                            if entry_path.exists() {
+                                entry_path
+                            } else {
+                                return; // Entry not found — let downstream handle
+                            }
+                        }
+                    }
+                }
+                None => return, // Package not installed — let downstream handle
+            }
+        };
+
+        // Parse the target module
+        let source = match std::fs::read_to_string(&td_path) {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+        let (program, _) = crate::parser::parse(&source);
+
+        // Collect explicit export list
+        let mut exports = std::collections::HashSet::new();
+        let mut has_export = false;
+        for stmt in &program.statements {
+            if let S::Export(export_stmt) = stmt {
+                has_export = true;
+                for sym in &export_stmt.symbols {
+                    exports.insert(sym.clone());
+                }
+            }
+        }
+
+        // If no <<< found, all symbols are exported (backward compat)
+        if !has_export {
+            return;
+        }
+
+        // Validate each imported symbol
+        for sym in &imp.symbols {
+            if !exports.contains(&sym.name) {
+                let export_list = if exports.is_empty() {
+                    "(nothing)".to_string()
+                } else {
+                    let mut sorted: Vec<&String> = exports.iter().collect();
+                    sorted.sort();
+                    sorted
+                        .iter()
+                        .map(|s| s.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                };
+                self.errors.push(TypeError {
+                    message: format!(
+                        "[E1701] Symbol '{}' not found in module '{}'. \
+                         The module exports: {}",
+                        sym.name, imp.path, export_list
+                    ),
+                    span: imp.span.clone(),
+                });
+            }
+        }
+    }
+
+    /// Find project root by walking up from the given directory.
+    /// Looks for `packages.tdm`, `taida.toml`, `.taida`, or `.git`.
+    fn find_project_root(start_dir: &std::path::Path) -> std::path::PathBuf {
+        let mut dir = start_dir.to_path_buf();
+        loop {
+            if dir.join("packages.tdm").exists()
+                || dir.join("taida.toml").exists()
+                || dir.join(".taida").exists()
+                || dir.join(".git").exists()
+            {
+                return dir;
+            }
+            if !dir.pop() {
+                break;
+            }
+        }
+        start_dir.to_path_buf()
+    }
+
     fn define_var(&mut self, name: &str, ty: Type) {
         self.define_var_with_span(name, ty, None);
     }
@@ -1041,6 +1195,37 @@ impl TypeChecker {
                         (f.name.clone(), ty)
                     })
                     .collect();
+                // RCB-216: Check for incompatible field redefinition.
+                // If a child redefines a parent field, the type must be compatible
+                // (same type or subtype). Redefining `legs: Int` as `legs: Str` violates LSP.
+                if let Some(parent_fields) = self.registry.get_type_fields(&inh.parent) {
+                    for (child_name, child_ty) in &extra_fields {
+                        if let Some((_, parent_ty)) =
+                            parent_fields.iter().find(|(n, _)| n == child_name)
+                        {
+                            // Both types must be known and compatible
+                            if !matches!(parent_ty, Type::Unknown)
+                                && !matches!(child_ty, Type::Unknown)
+                                && parent_ty != child_ty
+                                && !self.registry.is_subtype_of(child_ty, parent_ty)
+                            {
+                                self.errors.push(TypeError {
+                                    message: Self::binding_diag(
+                                        "E1410",
+                                        format!(
+                                            "InheritanceDef '{}' redefines field '{}' with incompatible type '{}' (parent '{}' declares it as '{}')",
+                                            inh.child, child_name, child_ty, inh.parent, parent_ty
+                                        ),
+                                        "A child type's field must be compatible with the parent's field type. \
+                                         Use the same type or a subtype.",
+                                    ),
+                                    span: inh.span.clone(),
+                                });
+                            }
+                        }
+                    }
+                }
+
                 // RCB-51: Detect cyclic inheritance and emit an error
                 // instead of silently accepting it (which causes
                 // is_subtype_of to loop forever).
@@ -1944,9 +2129,81 @@ defaulted fields must be provided via `()`",
                     self.check_statement(body_stmt);
                 }
 
+                // RCB-231/232: If the error ceiling declares a return type (`=> :Type`),
+                // verify the handler body's last expression type is compatible.
+                // Exemptions:
+                // - Unit return: checker cannot distinguish Unit from BuchiPack(vec![])
+                // - Gorilla (><): process exit, never returns
+                // - Named/List/BuchiPack body: mold/fold inference imprecision
+                if let Some(ref ret_type_expr) = ec.return_type {
+                    let declared_ret = self.registry.resolve_type(ret_type_expr);
+                    let is_unit_ret = matches!(declared_ret, Type::Unit)
+                        || matches!(&declared_ret, Type::Named(n) if n == "Unit");
+                    if !matches!(declared_ret, Type::Unknown)
+                        && !is_unit_ret
+                        && let Some(last_stmt) = ec.handler_body.last()
+                    {
+                        if let Statement::Expr(last_expr) = last_stmt {
+                            // Skip if the last expression is Gorilla (><) — never returns
+                            let is_never_returns = matches!(last_expr, Expr::Gorilla(_));
+                            if !is_never_returns {
+                                let body_ty = self.infer_expr_type(last_expr);
+                                // Also treat empty BuchiPack as Unit
+                                let is_unit_body = matches!(body_ty, Type::Unit)
+                                    || matches!(&body_ty, Type::BuchiPack(f) if f.is_empty());
+                                // RCB-241: Aligned with FuncDef return type check (FL-1 / RCB-50)
+                                if !(matches!(body_ty, Type::Unknown)
+                                    || is_unit_body
+                                    || Self::contains_unknown(&body_ty)
+                                    || self.registry.is_subtype_of(&body_ty, &declared_ret)
+                                    || body_ty.is_numeric() && declared_ret.is_numeric()
+                                    || self.contains_unresolved_type_var(&body_ty)
+                                    || self.contains_unresolved_type_var(&declared_ret)
+                                    || self.is_mold_defined_named(&body_ty))
+                                {
+                                    self.errors.push(TypeError {
+                                        message: format!(
+                                            "[E1601] Error handler declares return type {}, \
+                                                 but the handler body evaluates to {}. \
+                                                 Hint: The last expression in the |== handler \
+                                                 must produce a value compatible with the declared \
+                                                 return type.",
+                                            declared_ret, body_ty
+                                        ),
+                                        span: ec.span.clone(),
+                                    });
+                                }
+                            }
+                        } else {
+                            // Last statement is not an expression (e.g. assignment).
+                            // Assignments produce Unit implicitly.
+                            let is_unit_producing = matches!(
+                                last_stmt,
+                                Statement::Assignment(_)
+                                    | Statement::UnmoldForward(_)
+                                    | Statement::UnmoldBackward(_)
+                            );
+                            if !(is_unit_producing && is_unit_ret) {
+                                self.errors.push(TypeError {
+                                    message: format!(
+                                        "[E1601] Error handler declares return type {}, \
+                                             but the last statement is not an expression. \
+                                             Hint: The |== handler body's last statement must \
+                                             be an expression that produces a value.",
+                                        declared_ret
+                                    ),
+                                    span: ec.span.clone(),
+                                });
+                            }
+                        }
+                    }
+                }
+
                 self.pop_scope();
             }
             Statement::Import(imp) => {
+                // RCB-201: Validate imported symbols against module's export list
+                self.validate_import_symbols(imp);
                 // Register imported symbols as Unknown
                 // (We don't have cross-module type info yet)
                 for sym in &imp.symbols {
@@ -1965,6 +2222,31 @@ defaulted fields must be provided via `()`",
                 let source_ty = self.infer_expr_type(&ub.source);
                 let target_ty = self.unmold_type(&source_ty);
                 self.define_var_with_span(&ub.target, target_ty, Some(&ub.span));
+            }
+            Statement::Export(export) => {
+                // RCB-102: `<<< @()` (empty export) is almost certainly a mistake.
+                // A module that exports nothing is useless to importers, and the
+                // current backend handling diverges (Interp: leak, JS: runtime error,
+                // Native: linker error).  Reject at check time.
+                if export.symbols.is_empty() && export.path.is_none() {
+                    self.errors.push(TypeError {
+                        message: "Empty export `<<< @()` exports nothing. \
+                             If this module is not meant to be imported, remove the export statement. \
+                             If you want to export symbols, list them: `<<< @(name1, name2)`."
+                            .to_string(),
+                        span: export.span.clone(),
+                    });
+                }
+                // RCB-212: Re-export path `<<< ./path` is parsed but not implemented
+                // in any backend. Emit an error to avoid silent no-op.
+                if export.path.is_some() {
+                    self.errors.push(TypeError {
+                        message: "Re-export path `<<< ./path` is not yet supported. \
+                             Use explicit import and re-export: `>>> ./path.td => @(sym)` then `<<< @(sym)`."
+                            .to_string(),
+                        span: export.span.clone(),
+                    });
+                }
             }
             // N-65: Intentional catch-all — TypeDef, MoldDef, and InheritanceDef
             // are registered in the first pass of check_program(). Additional

@@ -2627,6 +2627,12 @@ void taida_error_ceiling_pop(void) {
     __wasm_error_thrown = 0;
 }
 
+/* RCB-101 fix: expose error-thrown flag so generated C code (separate
+   compilation unit) can check after taida_error_type_check_or_rethrow. */
+int64_t taida_is_error_thrown(void) {
+    return __wasm_error_thrown ? 1 : 0;
+}
+
 int64_t taida_throw(int64_t error_val) {
     if (__wasm_error_depth > 0) {
         int depth = __wasm_error_depth - 1;
@@ -2670,6 +2676,72 @@ int64_t taida_error_get_value(int64_t depth) {
     return __wasm_error_val[(int)depth];
 }
 
+/* RCB-101: Inheritance parent registry for error type filtering in |== */
+/* Dynamic array using wasm_alloc (bump allocator, copy-on-grow). */
+static int64_t *__wasm_type_parent_child = 0;
+static int64_t *__wasm_type_parent_parent = 0;
+static int __wasm_type_parent_count = 0;
+static int __wasm_type_parent_cap = 0;
+
+void taida_register_type_parent(int64_t child_str, int64_t parent_str) {
+    if (__wasm_type_parent_count >= __wasm_type_parent_cap) {
+        int new_cap = __wasm_type_parent_cap == 0 ? 64 : __wasm_type_parent_cap * 2;
+        int64_t *new_child = (int64_t*)wasm_alloc(sizeof(int64_t) * new_cap);
+        int64_t *new_parent = (int64_t*)wasm_alloc(sizeof(int64_t) * new_cap);
+        if (!new_child || !new_parent) return;
+        /* Copy old entries (bump allocator cannot realloc, so we copy) */
+        for (int i = 0; i < __wasm_type_parent_count; i++) {
+            new_child[i] = __wasm_type_parent_child[i];
+            new_parent[i] = __wasm_type_parent_parent[i];
+        }
+        __wasm_type_parent_child = new_child;
+        __wasm_type_parent_parent = new_parent;
+        __wasm_type_parent_cap = new_cap;
+    }
+    __wasm_type_parent_child[__wasm_type_parent_count] = child_str;
+    __wasm_type_parent_parent[__wasm_type_parent_count] = parent_str;
+    __wasm_type_parent_count++;
+}
+
+static int64_t wasm_find_parent_type(int64_t child_str) {
+    for (int i = 0; i < __wasm_type_parent_count; i++) {
+        if (taida_str_eq(__wasm_type_parent_child[i], child_str)) {
+            return __wasm_type_parent_parent[i];
+        }
+    }
+    return 0;
+}
+
+int64_t taida_error_type_matches(int64_t error_val, int64_t handler_type_str) {
+    /* "Error" catches everything */
+    const char *handler_s = (const char*)(intptr_t)handler_type_str;
+    if (handler_s && _wf_strcmp(handler_s, "Error") == 0) return 1;
+
+    /* Get the thrown type from __type field of the BuchiPack.
+       Fall back to "type" field if __type is absent (legacy errors). */
+    int64_t thrown_type_str = 0;
+    if (taida_is_buchi_pack(error_val)) {
+        if (taida_pack_has_hash(error_val, WASM_HASH___TYPE)) {
+            thrown_type_str = taida_pack_get(error_val, WASM_HASH___TYPE);
+        } else if (taida_pack_has_hash(error_val, WASM_HASH_TYPE)) {
+            thrown_type_str = taida_pack_get(error_val, WASM_HASH_TYPE);
+        }
+    }
+    /* RCB-101 fix: unknown type must NOT be catch-all.  Only the "Error"
+       handler (checked above) catches everything. */
+    if (thrown_type_str == 0) return 0;
+
+    /* Walk inheritance chain */
+    int64_t current = thrown_type_str;
+    for (int i = 0; i < 64; i++) {
+        if (taida_str_eq(current, handler_type_str)) return 1;
+        int64_t parent = wasm_find_parent_type(current);
+        if (parent == 0) break;
+        current = parent;
+    }
+    return 0;
+}
+
 /* ── W-5: Error object creation ── */
 /* FNV-1a hashes for error BuchiPack fields (same as native_runtime.c) */
 /* WFX-2: corrected FNV-1a hashes for error fields */
@@ -2695,11 +2767,16 @@ static void _wasm_register_builtin_error_field_names(void) {
 int64_t taida_make_error(int64_t type_ptr, int64_t msg_ptr) {
     _wasm_register_builtin_error_field_names();
 
-    int64_t pack = taida_pack_new(2);
+    int64_t pack = taida_pack_new(3);
     taida_pack_set_hash(pack, 0, WASM_HASH_TYPE);
     taida_pack_set(pack, 0, type_ptr);
     taida_pack_set_hash(pack, 1, WASM_HASH_MESSAGE);
     taida_pack_set(pack, 1, msg_ptr);
+    /* RCB-101 fix: Set __type field so error type matching works.
+       Without this, taida_error_type_matches falls through to catch-all
+       because it looks for __type, not type. */
+    taida_pack_set_hash(pack, 2, WASM_HASH___TYPE);
+    taida_pack_set(pack, 2, type_ptr);
     return pack;
 }
 
@@ -3128,6 +3205,18 @@ static int64_t _wasm_invoke_callback1(int64_t fn_ptr, int64_t arg0) {
     typedef int64_t (*fn_t)(int64_t);
     fn_t func = (fn_t)(intptr_t)fn_ptr;
     return func(arg0);
+}
+
+/* RCB-101: Check error type and re-throw if it does not match.
+   If the type matches, returns the error_val unchanged.
+   If it does not match, calls taida_throw(error_val) which sets the error flag (never returns normally). */
+int64_t taida_error_type_check_or_rethrow(int64_t error_val, int64_t handler_type_str) {
+    if (taida_error_type_matches(error_val, handler_type_str)) {
+        return error_val;
+    }
+    /* Re-throw: sets __wasm_error_thrown flag */
+    taida_throw(error_val);
+    return 0; /* caller should check __wasm_error_thrown */
 }
 
 int64_t taida_cage_apply(int64_t cage_value, int64_t fn_ptr) {

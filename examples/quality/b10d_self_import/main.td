@@ -1,7 +1,7 @@
 // Quality Test: B-10d — Self import (A -> A)
 // Expects: circular import error
 
->>> ./main => @(greet)
+>>> ./main.td => @(greet)
 
 stdout(greet())
 

@@ -1612,7 +1612,7 @@ fn test_docs_sample_lambda_parses() {
 
 #[test]
 fn test_docs_sample_import_export_parses() {
-    let source = ">>> ./utils => @(helper)\n<<< @(main)";
+    let source = ">>> ./utils.td => @(helper)\n<<< @(main)";
     let (program, errors) = parse(source);
     assert!(
         errors.is_empty(),
@@ -1626,6 +1626,72 @@ fn test_docs_sample_import_export_parses() {
     );
     assert!(matches!(&program.statements[0], Statement::Import(_)));
     assert!(matches!(&program.statements[1], Statement::Export(_)));
+}
+
+#[test]
+fn test_relative_import_requires_td_extension() {
+    // Relative import without .td extension should produce a parse error
+    let (_, errors) = parse(">>> ./utils => @(helper)");
+    assert!(
+        !errors.is_empty(),
+        "Relative import without .td should error"
+    );
+    assert!(
+        errors[0].message.contains(".td extension"),
+        "Error should mention .td extension: {}",
+        errors[0].message
+    );
+
+    // Relative import with .td extension should parse fine
+    let (_, errors) = parse(">>> ./utils.td => @(helper)");
+    assert!(
+        errors.is_empty(),
+        "Relative import with .td should parse: {:?}",
+        errors
+    );
+
+    // Parent directory relative import without .td should error
+    let (_, errors) = parse(">>> ../lib/utils => @(func)");
+    assert!(
+        !errors.is_empty(),
+        "Parent-relative import without .td should error"
+    );
+
+    // Parent directory relative import with .td should parse fine
+    let (_, errors) = parse(">>> ../lib/utils.td => @(func)");
+    assert!(
+        errors.is_empty(),
+        "Parent-relative import with .td should parse: {:?}",
+        errors
+    );
+
+    // Package import without .td should still parse fine (not relative)
+    let (_, errors) = parse(">>> author/pkg => @(func)");
+    assert!(
+        errors.is_empty(),
+        "Package import without .td should parse: {:?}",
+        errors
+    );
+
+    // Absolute path import without .td should error
+    let (_, errors) = parse(">>> /tmp/shared => @(msg)");
+    assert!(
+        !errors.is_empty(),
+        "Absolute import without .td should error"
+    );
+    assert!(
+        errors[0].message.contains(".td extension"),
+        "Error should mention .td extension: {}",
+        errors[0].message
+    );
+
+    // Absolute path import with .td should parse fine
+    let (_, errors) = parse(">>> /tmp/shared.td => @(msg)");
+    assert!(
+        errors.is_empty(),
+        "Absolute import with .td should parse: {:?}",
+        errors
+    );
 }
 
 #[test]

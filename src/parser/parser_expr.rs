@@ -2,7 +2,22 @@ use super::*;
 
 impl Parser {
     pub(super) fn parse_expression(&mut self) -> Result<Expr, ParseError> {
-        self.parse_or_expr()
+        // RCB-301: Guard against stack overflow from deeply nested expressions.
+        self.depth += 1;
+        if self.depth > super::MAX_PARSE_DEPTH {
+            let span = self.current_span();
+            self.depth -= 1;
+            return Err(ParseError {
+                message: format!(
+                    "Maximum nesting depth ({}) exceeded. Simplify the expression.",
+                    super::MAX_PARSE_DEPTH
+                ),
+                span,
+            });
+        }
+        let result = self.parse_or_expr();
+        self.depth -= 1;
+        result
     }
 
     pub(super) fn parse_or_expr(&mut self) -> Result<Expr, ParseError> {

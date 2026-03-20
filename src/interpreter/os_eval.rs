@@ -395,6 +395,11 @@ fn parse_url(url: &str) -> Option<(String, u16, String, bool)> {
         None => (host_port.to_string(), default_port),
     };
 
+    // RCB-304: Reject URLs with CR/LF in host or path to prevent CRLF injection
+    if host.contains('\r') || host.contains('\n') || path.contains('\r') || path.contains('\n') {
+        return None;
+    }
+
     Some((host, port, path.to_string(), use_tls))
 }
 
@@ -439,11 +444,17 @@ async fn http_request_async_via_curl(
         .arg("-i")
         .arg("--max-time")
         .arg("30")
+        // RCB-306: Limit response size to prevent OOM
+        .arg("--max-filesize")
+        .arg("104857600") // 100 MB
         .arg("-X")
         .arg(method)
         .arg(url);
     for (k, v) in extra_headers {
-        cmd.arg("-H").arg(format!("{}: {}", k, v));
+        // RCB-304: Strip CR/LF from header values to prevent CRLF injection
+        let safe_k = k.replace(['\r', '\n'], "");
+        let safe_v = v.replace(['\r', '\n'], "");
+        cmd.arg("-H").arg(format!("{}: {}", safe_k, safe_v));
     }
     if !body.is_empty() {
         cmd.arg("--data-raw").arg(body);
@@ -493,7 +504,10 @@ async fn http_request_async(
         request.push_str("Content-Type: text/plain\r\n");
     }
     for (k, v) in extra_headers {
-        request.push_str(&format!("{}: {}\r\n", k, v));
+        // RCB-304: Strip CR/LF from header values to prevent CRLF injection
+        let safe_k = k.replace(['\r', '\n'], "");
+        let safe_v = v.replace(['\r', '\n'], "");
+        request.push_str(&format!("{}: {}\r\n", safe_k, safe_v));
     }
     request.push_str("\r\n");
     if !body.is_empty() {
@@ -502,7 +516,7 @@ async fn http_request_async(
 
     // Send request
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    let (mut reader, mut writer) = stream.into_split();
+    let (reader, mut writer) = stream.into_split();
     if writer.write_all(request.as_bytes()).await.is_err() {
         return make_http_failure();
     }
@@ -510,9 +524,15 @@ async fn http_request_async(
         // Ignore shutdown errors — we may still read the response
     }
 
-    // Read response
+    // Read response with size limit (RCB-306: prevent OOM from huge responses)
+    const MAX_HTTP_RESPONSE_SIZE: usize = 100 * 1024 * 1024; // 100 MB
     let mut response_buf = Vec::new();
-    if reader.read_to_end(&mut response_buf).await.is_err() {
+    if reader
+        .take(MAX_HTTP_RESPONSE_SIZE as u64)
+        .read_to_end(&mut response_buf)
+        .await
+        .is_err()
+    {
         return make_http_failure();
     }
 
@@ -1266,7 +1286,8 @@ impl Interpreter {
                 let next_listener_id = self.next_listener_id.clone();
                 let (tx, rx) = tokio::sync::oneshot::channel();
                 rt.spawn(async move {
-                    let addr = format!("0.0.0.0:{}", port);
+                    // RCB-305: Default to loopback (127.0.0.1) instead of all interfaces (0.0.0.0)
+                    let addr = format!("127.0.0.1:{}", port);
                     let bind_future = tokio::net::TcpListener::bind(&addr);
                     match tokio::time::timeout(
                         std::time::Duration::from_millis(timeout_ms),

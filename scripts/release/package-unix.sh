@@ -19,6 +19,7 @@ mkdir -p "${stage_dir}" "${out_dir}"
 cp "${binary_path}" "${stage_dir}/taida"
 cp README.md "${stage_dir}/README.md"
 cp PHILOSOPHY.md "${stage_dir}/PHILOSOPHY.md"
+cp LICENSE "${stage_dir}/LICENSE"
 
 tar -C "${stage_root}" -czf "${out_dir}/${archive_base}.tar.gz" "${archive_base}"
 rm -rf "${stage_root}"

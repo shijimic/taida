@@ -1,4 +1,5 @@
 //! Graph queries: path_exists, shortest_path, reachable, find_cycles, etc.
+//! Functions are part of the graph API for `taida verify` and future introspection features.
 #![allow(dead_code)]
 
 use std::collections::{HashMap, HashSet, VecDeque};

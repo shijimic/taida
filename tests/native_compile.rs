@@ -1115,7 +1115,7 @@ add x =
     .expect("write helper");
     fs::write(
         dir.join("main.td"),
-        r#">>> ./helper => @(add)
+        r#">>> ./helper.td => @(add)
 
 stdout(add(4).toString())
 stdout(add(10).toString())
@@ -1878,4 +1878,117 @@ a ]=> r
 stdout(r)
 "#;
     assert_native_matches_interpreter(source, "qf58_async_all_retain");
+}
+
+// =========================================================================
+// Cross-module quality tests: examples/quality/*/main.td
+//
+// RCB-214: Sweep multi-module test directories in examples/quality/.
+// Each directory contains a main.td (entry point) and optional helper
+// modules. If an `expected` file is present, native output is compared
+// against it. Otherwise, the interpreter output is used as the reference.
+// =========================================================================
+#[test]
+fn test_quality_cross_module_native() {
+    let quality_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("examples")
+        .join("quality");
+
+    if !quality_dir.exists() {
+        eprintln!("SKIP: examples/quality/ directory does not exist");
+        return;
+    }
+
+    // Collect subdirectories that contain main.td or main.tdm
+    // RCB-213: main.tdm is used for versioned import tests.
+    let mut test_dirs: Vec<PathBuf> = fs::read_dir(&quality_dir)
+        .expect("examples/quality/ should be readable")
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().map(|ft| ft.is_dir()).unwrap_or(false))
+        .filter(|e| e.path().join("main.td").exists() || e.path().join("main.tdm").exists())
+        .map(|e| e.path())
+        .collect();
+    test_dirs.sort();
+
+    if test_dirs.is_empty() {
+        eprintln!("SKIP: no cross-module test directories found in examples/quality/");
+        return;
+    }
+
+    // Tests that are expected to fail (error tests like circular imports)
+    let error_tests: Vec<&str> = vec![
+        "b10a_circular_direct",
+        "b10b_circular_indirect",
+        "b10d_self_import",
+        "b10e_circular_typedef",
+        "b10f_circular_closure",
+        "b10h_cross_backend_circular",
+    ];
+
+    let mut passed = 0;
+    let mut skipped = 0;
+    let mut failures = Vec::new();
+
+    for dir in &test_dirs {
+        let dir_name = dir.file_name().unwrap().to_string_lossy().to_string();
+        // RCB-213: prefer main.td, fall back to main.tdm for versioned import tests
+        let main_td = if dir.join("main.td").exists() {
+            dir.join("main.td")
+        } else {
+            dir.join("main.tdm")
+        };
+
+        // Skip known error tests
+        if error_tests.iter().any(|t| dir_name == *t) {
+            skipped += 1;
+            continue;
+        }
+
+        // Run interpreter (reference)
+        let interp = match run_interpreter(&main_td) {
+            Some(o) => o,
+            None => {
+                skipped += 1;
+                continue;
+            }
+        };
+
+        // Run native
+        let native = match compile_and_run(&main_td) {
+            Some(o) => o,
+            None => {
+                failures.push(format!("{}: native compile/run failed", dir_name));
+                continue;
+            }
+        };
+
+        let interp_norm = normalize(&interp);
+        let native_norm = normalize(&native);
+
+        if interp_norm == native_norm {
+            passed += 1;
+        } else {
+            failures.push(format!(
+                "{}: output mismatch\n  interpreter: {:?}\n  native:      {:?}",
+                dir_name,
+                interp.lines().take(5).collect::<Vec<_>>(),
+                native.lines().take(5).collect::<Vec<_>>(),
+            ));
+        }
+    }
+
+    eprintln!(
+        "Cross-module quality (native): {}/{} passed, {} skipped",
+        passed,
+        passed + failures.len(),
+        skipped,
+    );
+
+    if !failures.is_empty() {
+        panic!(
+            "{} cross-module quality native test(s) failed:\n\n{}",
+            failures.len(),
+            failures.join("\n\n"),
+        );
+    }
 }

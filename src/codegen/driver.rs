@@ -14,7 +14,7 @@ use super::rc_opt;
 use crate::module_graph;
 use crate::parser::parse;
 
-type ModuleImports = Vec<(String, Vec<String>)>;
+type ModuleImports = Vec<(String, Vec<String>, Option<String>)>;
 
 /// L-1: Shared clang flags used for both cache key computation and compilation.
 /// Keeping them in one place prevents cache_key / wasm_clang_base_args drift.
@@ -377,12 +377,12 @@ pub fn default_wasm_cache_dir(project_dir: Option<&Path>) -> PathBuf {
 
     if let Some(dir) = project_dir {
         // RCB-56: Walk up parent directories to find the Taida project root.
-        // A project root is identified by `.taida/` + `packages.td` co-existing.
+        // A project root is identified by `.taida/` + `packages.tdm` co-existing.
         // `.taida/` alone is not sufficient — it could be user config (~/.taida/)
         // or an unrelated ancestor directory (/tmp/.taida/).
         let mut current = dir.to_path_buf();
         loop {
-            if current.join(".taida").exists() && current.join("packages.td").exists() {
+            if current.join(".taida").exists() && current.join("packages.tdm").exists() {
                 return current.join(".taida").join("cache").join("wasm-rt");
             }
             if !current.pop() {
@@ -467,16 +467,17 @@ pub fn compile_file(
             .unwrap_or(input_path.to_path_buf()),
     );
 
-    // Each pending import carries (module_path, symbols, importing_file_dir).
+    // Each pending import carries (module_path, symbols, importing_file_dir, version).
     // Relative paths are resolved from the importing file's directory, not the main file's.
-    let mut pending_imports: Vec<(String, Vec<String>, PathBuf)> = imports
+    // RCB-213: version is now carried through for versioned package resolution.
+    let mut pending_imports: Vec<(String, Vec<String>, PathBuf, Option<String>)> = imports
         .into_iter()
-        .map(|(p, s)| (p, s, base_dir.to_path_buf()))
+        .map(|(p, s, v)| (p, s, base_dir.to_path_buf(), v))
         .collect();
 
     let result = (|| -> Result<PathBuf, CompileError> {
-        while let Some((module_path, _symbols, importer_dir)) = pending_imports.pop() {
-            let dep_path = resolve_module_path(&importer_dir, &module_path);
+        while let Some((module_path, _symbols, importer_dir, version)) = pending_imports.pop() {
+            let dep_path = resolve_module_path(&importer_dir, &module_path, version.as_deref());
             let canonical = dep_path.canonicalize().unwrap_or(dep_path.clone());
             if compiled.contains(&canonical) {
                 continue;
@@ -489,7 +490,7 @@ pub fn compile_file(
             pending_imports.extend(
                 sub_imports
                     .into_iter()
-                    .map(|(p, s)| (p, s, dep_dir.clone())),
+                    .map(|(p, s, v)| (p, s, dep_dir.clone(), v)),
             );
         }
 
@@ -517,13 +518,112 @@ pub fn compile_file(
     result
 }
 
-/// モジュールパスの解決: "./math" → "./math.td"
-fn resolve_module_path(base_dir: &Path, module_path: &str) -> PathBuf {
-    let mut path = base_dir.join(module_path);
-    if path.extension().is_none_or(|e| e != "td") {
-        path.set_extension("td");
+/// モジュールパスの解決: "./math.td" → 絶対パス
+/// RCB-103: Support ~/ (project root relative) and package imports.
+/// RCB-213: Support versioned package imports via resolve_package_import_versioned.
+fn resolve_module_path(base_dir: &Path, module_path: &str, version: Option<&str>) -> PathBuf {
+    let path = if module_path.starts_with("./") || module_path.starts_with("../") {
+        base_dir.join(module_path)
+    } else if Path::new(module_path).is_absolute() {
+        PathBuf::from(module_path)
+    } else if let Some(stripped) = module_path.strip_prefix("~/") {
+        let root = find_project_root(base_dir);
+        root.join(stripped)
+    } else {
+        // Package import
+        let root = find_project_root(base_dir);
+
+        // RCB-213: Versioned resolution with longest-prefix matching.
+        // Supports submodule imports (e.g., alice/pkg/submod@b.12 resolves to
+        // .taida/deps/alice/pkg@b.12/submod.td).
+        if let Some(ver) = version {
+            if let Some(resolution) =
+                crate::pkg::resolver::resolve_package_module_versioned(&root, module_path, ver)
+            {
+                match resolution.submodule {
+                    Some(submodule_path) => {
+                        resolution.pkg_dir.join(format!("{}.td", submodule_path))
+                    }
+                    None => {
+                        let entry =
+                            match crate::pkg::manifest::Manifest::from_dir(&resolution.pkg_dir) {
+                                Ok(Some(manifest)) => manifest.entry,
+                                _ => "main.td".to_string(),
+                            };
+                        if entry.starts_with("./") || entry.starts_with("../") {
+                            resolution.pkg_dir.join(entry[2..].trim_start_matches('/'))
+                        } else {
+                            resolution.pkg_dir.join(&entry)
+                        }
+                    }
+                }
+            } else {
+                // RCB-213: Versioned package not found — do not fall back silently.
+                PathBuf::from(format!("<unresolved package: {}@{}>", module_path, ver))
+            }
+        } else if let Some(resolution) =
+            crate::pkg::resolver::resolve_package_module(&root, module_path)
+        {
+            match resolution.submodule {
+                Some(submodule_path) => resolution.pkg_dir.join(format!("{}.td", submodule_path)),
+                None => {
+                    let entry = match crate::pkg::manifest::Manifest::from_dir(&resolution.pkg_dir)
+                    {
+                        Ok(Some(manifest)) => manifest.entry,
+                        _ => "main.td".to_string(),
+                    };
+                    if entry.starts_with("./") || entry.starts_with("../") {
+                        resolution.pkg_dir.join(entry[2..].trim_start_matches('/'))
+                    } else {
+                        resolution.pkg_dir.join(&entry)
+                    }
+                }
+            }
+        } else {
+            // RCB-103 fix: package resolution failed — use a clearly
+            // non-existent path so the caller gets a meaningful "not found"
+            // error instead of silently misresolving to a local file.
+            PathBuf::from(format!("<unresolved package: {}>", module_path))
+        }
+    };
+    // RCB-303: Reject relative imports that escape the project root (path traversal).
+    if module_path.starts_with("./") || module_path.starts_with("../") {
+        let project_root = find_project_root(base_dir);
+        let reject = if let Ok(resolved) = path.canonicalize() {
+            if let Ok(root_canonical) = project_root.canonicalize() {
+                !resolved.starts_with(&root_canonical)
+            } else {
+                // Cannot canonicalize project root — reject if path contains ".."
+                module_path.contains("..")
+            }
+        } else {
+            // Cannot canonicalize target — reject if path contains ".."
+            module_path.contains("..")
+        };
+        if reject {
+            return PathBuf::from(format!("<path traversal rejected: {}>", module_path));
+        }
     }
+
     path
+}
+
+/// RCB-103: Find project root by walking up from the given directory.
+fn find_project_root(start_dir: &Path) -> PathBuf {
+    let mut dir = start_dir.to_path_buf();
+    loop {
+        if dir.join("packages.tdm").exists()
+            || dir.join("taida.toml").exists()
+            || dir.join(".taida").exists()
+            || dir.join(".git").exists()
+        {
+            return dir;
+        }
+        if !dir.pop() {
+            break;
+        }
+    }
+    start_dir.to_path_buf()
 }
 
 /// 複数 .o ファイルをリンクしてバイナリを生成
@@ -830,16 +930,24 @@ fn inline_wasm_module_imports(
     // 2回目以降はキャッシュから IR を取得し、再パースを回避する。
     let mut ir_cache: HashMap<PathBuf, super::ir::IrModule> = HashMap::new();
 
-    // pending: (module_path, importer_dir, requested_syms)
+    // pending: (module_path, importer_dir, requested_syms, version)
     // requested_syms: importer が要求するリンクシンボル名のリスト
-    let mut pending: Vec<(String, PathBuf, Vec<String>)> = main_module
+    // RCB-213: version is carried through for versioned package resolution.
+    let mut pending: Vec<(String, PathBuf, Vec<String>, Option<String>)> = main_module
         .imports
         .iter()
-        .map(|(path, syms)| (path.clone(), base_dir.to_path_buf(), syms.clone()))
+        .map(|(path, syms, ver)| {
+            (
+                path.clone(),
+                base_dir.to_path_buf(),
+                syms.clone(),
+                ver.clone(),
+            )
+        })
         .collect();
 
-    while let Some((module_path, importer_dir, requested_syms)) = pending.pop() {
-        let dep_path = resolve_module_path(&importer_dir, &module_path);
+    while let Some((module_path, importer_dir, requested_syms, version)) = pending.pop() {
+        let dep_path = resolve_module_path(&importer_dir, &module_path, version.as_deref());
         let canonical = dep_path.canonicalize().unwrap_or(dep_path.clone());
 
         // 既にコンパイル済みのモジュールか確認
@@ -920,8 +1028,13 @@ fn inline_wasm_module_imports(
 
         // 依存モジュールがさらに import していれば、それも再帰的に処理
         let dep_dir = dep_path.parent().unwrap_or(Path::new(".")).to_path_buf();
-        for (sub_path, sub_syms) in &dep_ir.imports {
-            pending.push((sub_path.clone(), dep_dir.clone(), sub_syms.clone()));
+        for (sub_path, sub_syms, sub_ver) in &dep_ir.imports {
+            pending.push((
+                sub_path.clone(),
+                dep_dir.clone(),
+                sub_syms.clone(),
+                sub_ver.clone(),
+            ));
         }
 
         // RCB-43: IR をキャッシュに保存（diff-symbol パスで再利用するため）
@@ -2081,8 +2194,8 @@ mod tests {
         let tmp = PathBuf::from("target/test-cache-dir-taida");
         let taida_dir = tmp.join(".taida");
         let _ = std::fs::create_dir_all(&taida_dir);
-        // packages.td is the project marker required alongside .taida/
-        let _ = std::fs::write(tmp.join("packages.td"), "");
+        // packages.tdm is the project marker required alongside .taida/
+        let _ = std::fs::write(tmp.join("packages.tdm"), "");
 
         let dir = default_wasm_cache_dir(Some(&tmp));
         assert_eq!(
@@ -2095,7 +2208,7 @@ mod tests {
         // guard restores env on drop
     }
 
-    /// S-4: .taida/ without packages.td falls back to target/wasm-rt-cache.
+    /// S-4: .taida/ without packages.tdm falls back to target/wasm-rt-cache.
     #[test]
     fn test_default_wasm_cache_dir_taida_without_manifest() {
         let guard = EnvGuard::new("TAIDA_WASM_RT_CACHE");
@@ -2103,14 +2216,14 @@ mod tests {
 
         let tmp = PathBuf::from("target/test-cache-dir-no-manifest");
         let _ = std::fs::create_dir_all(tmp.join(".taida"));
-        // No packages.td — not a Taida project root
-        let _ = std::fs::remove_file(tmp.join("packages.td"));
+        // No packages.tdm — not a Taida project root
+        let _ = std::fs::remove_file(tmp.join("packages.tdm"));
 
         let dir = default_wasm_cache_dir(Some(&tmp));
         assert_eq!(
             dir,
             PathBuf::from("target/wasm-rt-cache"),
-            "should fall back when .taida/ exists but packages.td is missing"
+            "should fall back when .taida/ exists but packages.tdm is missing"
         );
 
         let _ = std::fs::remove_dir_all(&tmp);
@@ -2123,13 +2236,13 @@ mod tests {
         let guard = EnvGuard::new("TAIDA_WASM_RT_CACHE");
         guard.remove();
 
-        // Create proj/.taida/ + proj/packages.td and proj/src/deep/
+        // Create proj/.taida/ + proj/packages.tdm and proj/src/deep/
         let tmp = PathBuf::from("target/test-cache-dir-nested");
         let taida_dir = tmp.join(".taida");
         let nested = tmp.join("src").join("deep");
         let _ = std::fs::create_dir_all(&taida_dir);
         let _ = std::fs::create_dir_all(&nested);
-        let _ = std::fs::write(tmp.join("packages.td"), "");
+        let _ = std::fs::write(tmp.join("packages.tdm"), "");
 
         // Pass the nested subdirectory — should still find proj/.taida/
         let dir = default_wasm_cache_dir(Some(&nested));
@@ -2143,24 +2256,24 @@ mod tests {
         // guard restores env on drop
     }
 
-    /// RCB-56: Does not pick up ancestor .taida/ without packages.td.
+    /// RCB-56: Does not pick up ancestor .taida/ without packages.tdm.
     #[test]
     fn test_default_wasm_cache_dir_ignores_non_project_taida() {
         let guard = EnvGuard::new("TAIDA_WASM_RT_CACHE");
         guard.remove();
 
-        // ancestor/.taida/ exists but no packages.td — not a project root
+        // ancestor/.taida/ exists but no packages.tdm — not a project root
         let tmp = PathBuf::from("target/test-cache-dir-ancestor");
         let _ = std::fs::create_dir_all(tmp.join(".taida"));
         let nested = tmp.join("sub").join("deep");
         let _ = std::fs::create_dir_all(&nested);
-        // No packages.td anywhere
+        // No packages.tdm anywhere
 
         let dir = default_wasm_cache_dir(Some(&nested));
         assert_eq!(
             dir,
             PathBuf::from("target/wasm-rt-cache"),
-            "should not pick up ancestor .taida/ without packages.td"
+            "should not pick up ancestor .taida/ without packages.tdm"
         );
 
         let _ = std::fs::remove_dir_all(&tmp);

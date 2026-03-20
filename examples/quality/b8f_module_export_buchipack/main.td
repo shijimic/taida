@@ -1,7 +1,7 @@
 // Quality Test: B-8f — モジュール export + BuchiPack
 // ネスト BuchiPack を export して import 元でフィールドアクセス
 
->>> ./helper => @(makePerson)
+>>> ./helper.td => @(makePerson)
 
 p <= makePerson("Taro", 25)
 stdout(p.name)

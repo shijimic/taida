@@ -1,4 +1,5 @@
 //! Core graph model types: GraphNode, GraphEdge, Graph.
+//! Types are part of the graph API for `taida verify` and future introspection features.
 #![allow(dead_code)]
 
 use std::collections::HashMap;

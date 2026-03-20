@@ -31,7 +31,7 @@ pub enum Type {
     Function(Vec<Type>, Box<Type>),
     /// Named user-defined type
     Named(String),
-    /// Generic / Mold type instantiation: e.g., Optional[Int]
+    /// Generic / Mold type instantiation: e.g., Lax[Int]
     Generic(String, Vec<Type>),
     /// Error type (inherits from base Error)
     Error(String),
@@ -257,8 +257,11 @@ impl TypeRegistry {
         self.inheritance
             .insert(child.to_string(), parent.to_string());
 
-        // Child type gets parent fields + its own fields
+        // Child type gets parent fields + its own fields.
+        // RCB-215: Remove parent fields that are overridden by child fields
+        // to prevent duplicate field entries.
         let mut fields = self.get_type_fields(parent).unwrap_or_default();
+        fields.retain(|(name, _)| !extra_fields.iter().any(|(n, _)| n == name));
         fields.extend(extra_fields);
         self.type_defs.insert(child.to_string(), fields);
         true

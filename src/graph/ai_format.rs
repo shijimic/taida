@@ -1343,14 +1343,14 @@ mod tests {
 
     #[test]
     fn test_recursive_resolves_extensionless_import() {
-        // `>>> ./mod` should resolve to `./mod.td` on disk
+        // `>>> ./lib.td` should resolve to `./lib.td` on disk
         let dir = std::env::temp_dir().join("taida_test_rcb52_extensionless");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
 
         let main_path = dir.join("main.td");
         let lib_path = dir.join("lib.td");
-        std::fs::write(&main_path, ">>> ./lib => @(greet)\nstdout(greet())").unwrap();
+        std::fs::write(&main_path, ">>> ./lib.td => @(greet)\nstdout(greet())").unwrap();
         std::fs::write(&lib_path, "greet =\n  \"hello\"\n=> :Str\n\n<<< @(greet)").unwrap();
 
         let result = format_ai_json_recursive(main_path.to_str().unwrap());

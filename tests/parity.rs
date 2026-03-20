@@ -3667,7 +3667,7 @@ fn test_phase_c1e_module_backend_parity() {
 
     fs::write(
         dir.join("main.td"),
-        r#">>> ./helper => @(tools)
+        r#">>> ./helper.td => @(tools)
 
 stdout(tools.run(3))
 stdout(tools.run(1))
@@ -4005,14 +4005,14 @@ fn test_qf21_circular_import_rejected_all_backends() {
 
     fs::write(
         dir.join("main.td"),
-        r#">>> ./mod_a => @(hello)
+        r#">>> ./mod_a.td => @(hello)
 stdout(hello("test"))
 "#,
     )
     .expect("write main");
     fs::write(
         dir.join("mod_a.td"),
-        r#">>> ./mod_b => @(world)
+        r#">>> ./mod_b.td => @(world)
 hello x = "Hello:" + world(x) => :Str
 <<< @(hello)
 "#,
@@ -4020,7 +4020,7 @@ hello x = "Hello:" + world(x) => :Str
     .expect("write mod_a");
     fs::write(
         dir.join("mod_b.td"),
-        r#">>> ./mod_a => @(hello)
+        r#">>> ./mod_a.td => @(hello)
 world x = "World:" + x => :Str
 <<< @(world)
 "#,
@@ -4073,8 +4073,8 @@ fn test_qf24_js_build_writes_transitive_modules() {
 
     fs::write(
         dir.join("main.td"),
-        r#">>> ./mod_b => @(fromB)
->>> ./mod_c => @(fromC)
+        r#">>> ./mod_b.td => @(fromB)
+>>> ./mod_c.td => @(fromC)
 stdout(fromB("x"))
 stdout(fromC("y"))
 "#,
@@ -4082,7 +4082,7 @@ stdout(fromC("y"))
     .expect("write main");
     fs::write(
         dir.join("mod_b.td"),
-        r#">>> ./mod_d => @(shared)
+        r#">>> ./mod_d.td => @(shared)
 fromB x = "B:" + shared(x) => :Str
 <<< @(fromB)
 "#,
@@ -4090,7 +4090,7 @@ fromB x = "B:" + shared(x) => :Str
     .expect("write mod_b");
     fs::write(
         dir.join("mod_c.td"),
-        r#">>> ./mod_d => @(shared)
+        r#">>> ./mod_d.td => @(shared)
 fromC x = "C:" + shared(x) => :Str
 <<< @(fromC)
 "#,
@@ -4143,6 +4143,155 @@ fromC x = "C:" + shared(x) => :Str
     let _ = fs::remove_dir_all(&dir);
 }
 
+/// Directory build with sibling import outside the input directory.
+/// project/src/main.td imports ../shared.td (outside src/).
+/// `taida build --target js project/src -o out` must transpile shared.td too.
+#[test]
+fn test_qf26_js_dir_build_includes_sibling_modules() {
+    if !node_available() {
+        return;
+    }
+
+    let dir = unique_temp_path("taida_qf26", "sibling", "dir");
+    let src_dir = dir.join("src");
+    fs::create_dir_all(&src_dir).expect("create src dir");
+    // Mark project root so find_project_root doesn't fall back to src/
+    fs::create_dir_all(dir.join(".git")).expect("create .git marker");
+
+    fs::write(
+        src_dir.join("main.td"),
+        r#">>> ../shared.td => @(fromShared)
+>>> ./helper.td => @(fromHelper)
+stdout(fromShared("A"))
+stdout(fromHelper("B"))
+"#,
+    )
+    .expect("write main");
+    fs::write(
+        src_dir.join("helper.td"),
+        r#"fromHelper x = "helper:" + x => :Str
+<<< @(fromHelper)
+"#,
+    )
+    .expect("write helper");
+    fs::write(
+        dir.join("shared.td"),
+        r#"fromShared x = "shared:" + x => :Str
+<<< @(fromShared)
+"#,
+    )
+    .expect("write shared");
+
+    let out_dir = dir.join("out");
+    let build = Command::new(taida_bin())
+        .arg("build")
+        .arg("--target")
+        .arg("js")
+        .arg(&src_dir)
+        .arg("-o")
+        .arg(&out_dir)
+        .output()
+        .expect("build js");
+    assert!(
+        build.status.success(),
+        "js dir build failed: {}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+
+    assert!(out_dir.join("main.mjs").exists(), "main.mjs missing");
+    assert!(out_dir.join("helper.mjs").exists(), "helper.mjs missing");
+    assert!(
+        out_dir.join("shared.mjs").exists(),
+        "shared.mjs missing — sibling module not transpiled"
+    );
+
+    let interp = run_interpreter(&src_dir.join("main.td")).expect("interpreter should succeed");
+    let js = Command::new("node")
+        .arg(out_dir.join("main.mjs"))
+        .output()
+        .expect("run node");
+    assert!(
+        js.status.success(),
+        "node run failed: {}",
+        String::from_utf8_lossy(&js.stderr)
+    );
+    let js_out = normalize(&String::from_utf8_lossy(&js.stdout));
+    assert_eq!(interp, js_out, "interpreter vs JS output mismatch");
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// Directory build with relative CLI paths (simulates `cd project && taida build --target js src -o out`).
+/// Ensures entry_root/out_root canonicalization works with nested + sibling modules.
+#[test]
+fn test_qf27_js_dir_build_relative_paths_with_sibling() {
+    if !node_available() {
+        return;
+    }
+
+    let dir = unique_temp_path("taida_qf27", "relpath", "dir");
+    let src_dir = dir.join("src");
+    let nested_dir = src_dir.join("nested");
+    fs::create_dir_all(&nested_dir).expect("create nested dir");
+    let lib_dir = dir.join("lib");
+    fs::create_dir_all(&lib_dir).expect("create lib dir");
+    // Mark project root so find_project_root doesn't fall back to src/nested/
+    fs::create_dir_all(dir.join(".git")).expect("create .git marker");
+
+    fs::write(
+        nested_dir.join("main.td"),
+        r#">>> ../../lib/util.td => @(greet)
+stdout(greet("world"))
+"#,
+    )
+    .expect("write main");
+    fs::write(
+        lib_dir.join("util.td"),
+        r#"greet x = "hello:" + x => :Str
+<<< @(greet)
+"#,
+    )
+    .expect("write util");
+
+    let out_dir = dir.join("out");
+    // Build using the project dir as cwd and relative paths (like `cd dir && taida build --target js src -o out`)
+    let build = Command::new(taida_bin())
+        .current_dir(&dir)
+        .arg("build")
+        .arg("--target")
+        .arg("js")
+        .arg("src")
+        .arg("-o")
+        .arg("out")
+        .output()
+        .expect("build js");
+    assert!(
+        build.status.success(),
+        "js dir build with relative paths failed: {}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+
+    assert!(
+        out_dir.join("nested").join("main.mjs").exists(),
+        "nested/main.mjs missing"
+    );
+
+    let interp = run_interpreter(&nested_dir.join("main.td")).expect("interpreter should succeed");
+    let js = Command::new("node")
+        .arg(out_dir.join("nested").join("main.mjs"))
+        .output()
+        .expect("run node");
+    assert!(
+        js.status.success(),
+        "node run failed: {}",
+        String::from_utf8_lossy(&js.stderr)
+    );
+    let js_out = normalize(&String::from_utf8_lossy(&js.stdout));
+    assert_eq!(interp, js_out, "interpreter vs JS output mismatch");
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn test_qf22_verify_detects_circular_imports() {
     let nanos = SystemTime::now()
@@ -4154,14 +4303,14 @@ fn test_qf22_verify_detects_circular_imports() {
 
     fs::write(
         dir.join("main.td"),
-        r#">>> ./mod_a => @(hello)
+        r#">>> ./mod_a.td => @(hello)
 stdout(hello("test"))
 "#,
     )
     .expect("write main");
     fs::write(
         dir.join("mod_a.td"),
-        r#">>> ./mod_b => @(world)
+        r#">>> ./mod_b.td => @(world)
 hello x = "Hello:" + world(x) => :Str
 <<< @(hello)
 "#,
@@ -4169,7 +4318,7 @@ hello x = "Hello:" + world(x) => :Str
     .expect("write mod_a");
     fs::write(
         dir.join("mod_b.td"),
-        r#">>> ./mod_a => @(hello)
+        r#">>> ./mod_a.td => @(hello)
 world x = "World:" + x => :Str
 <<< @(world)
 "#,
@@ -4211,7 +4360,7 @@ fn test_qf25_self_import_error_message_matches_across_backends() {
 
     fs::write(
         dir.join("main.td"),
-        r#">>> ./main => @(greet)
+        r#">>> ./main.td => @(greet)
 stdout(greet())
 "#,
     )
@@ -5030,4 +5179,166 @@ Str[cat.indoor]() ]=> ci
 stdout(dog.__type + "=" + dog.breed + " " + cat.__type + "=" + ci)
 "#;
     assert_backend_parity_for_source(source, "rc6k_multi_children");
+}
+
+// =========================================================================
+// Cross-module quality tests: examples/quality/*/main.td
+//
+// RCB-214: Sweep multi-module test directories in examples/quality/.
+// Each directory contains a main.td (entry point) and optional helper
+// modules. If an `expected` file is present, all backends are compared
+// against its content. Otherwise, the interpreter output is used as
+// the reference (same parity approach as other tests).
+// =========================================================================
+#[test]
+fn test_quality_cross_module_parity() {
+    let has_node = node_available();
+    let has_cc = cc_available();
+
+    if !has_cc {
+        eprintln!("SKIP: cc not available, skipping cross-module quality parity tests");
+        return;
+    }
+
+    let quality_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("examples")
+        .join("quality");
+
+    if !quality_dir.exists() {
+        eprintln!("SKIP: examples/quality/ directory does not exist");
+        return;
+    }
+
+    // Collect subdirectories that contain main.td or main.tdm
+    // RCB-213: main.tdm is used for versioned import tests (versioned imports
+    // are only allowed in .tdm files).
+    let mut test_dirs: Vec<PathBuf> = fs::read_dir(&quality_dir)
+        .expect("examples/quality/ should be readable")
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().map(|ft| ft.is_dir()).unwrap_or(false))
+        .filter(|e| e.path().join("main.td").exists() || e.path().join("main.tdm").exists())
+        .map(|e| e.path())
+        .collect();
+    test_dirs.sort();
+
+    if test_dirs.is_empty() {
+        eprintln!("SKIP: no cross-module test directories found in examples/quality/");
+        return;
+    }
+
+    // Tests that are expected to fail in the interpreter (error tests, etc.)
+    let error_tests: Vec<&str> = vec![
+        "b10a_circular_direct",
+        "b10b_circular_indirect",
+        "b10d_self_import",
+        "b10e_circular_typedef",
+        "b10f_circular_closure",
+        "b10h_cross_backend_circular",
+    ];
+
+    let mut passed = 0;
+    let mut skipped = 0;
+    let mut failures = Vec::new();
+
+    for dir in &test_dirs {
+        let dir_name = dir.file_name().unwrap().to_string_lossy().to_string();
+        // RCB-213: prefer main.td, fall back to main.tdm for versioned import tests
+        let main_td = if dir.join("main.td").exists() {
+            dir.join("main.td")
+        } else {
+            dir.join("main.tdm")
+        };
+
+        // Skip known error tests (circular imports, etc.)
+        if error_tests.iter().any(|t| dir_name == *t) {
+            skipped += 1;
+            continue;
+        }
+
+        // Run interpreter (reference implementation)
+        let interp = match run_interpreter(&main_td) {
+            Some(o) => o,
+            None => {
+                skipped += 1;
+                continue;
+            }
+        };
+
+        // If an `expected` file exists, verify interpreter matches it
+        let expected_path = dir.join("expected");
+        if expected_path.exists() {
+            let expected = normalize(
+                &fs::read_to_string(&expected_path).expect("expected file should be readable"),
+            );
+            if interp != expected {
+                failures.push(format!(
+                    "{}: interpreter output does not match expected\n  interp:    {:?}\n  expected:  {:?}",
+                    dir_name,
+                    interp.lines().take(5).collect::<Vec<_>>(),
+                    expected.lines().take(5).collect::<Vec<_>>(),
+                ));
+                continue;
+            }
+        }
+
+        // JS parity check
+        if has_node {
+            match run_js_project(&main_td, &dir_name) {
+                Some(js) => {
+                    if interp != js {
+                        failures.push(format!(
+                            "{}: Interpreter vs JS mismatch\n  interp: {:?}\n  js:     {:?}",
+                            dir_name,
+                            interp.lines().take(5).collect::<Vec<_>>(),
+                            js.lines().take(5).collect::<Vec<_>>(),
+                        ));
+                        continue;
+                    }
+                }
+                None => {
+                    failures.push(format!("{}: JS build/execution failed", dir_name));
+                    continue;
+                }
+            }
+        }
+
+        // Native parity check
+        match run_native_with_error(&main_td) {
+            Ok(native) => {
+                if interp != native {
+                    failures.push(format!(
+                        "{}: Interpreter vs Native mismatch\n  interp: {:?}\n  native: {:?}",
+                        dir_name,
+                        interp.lines().take(5).collect::<Vec<_>>(),
+                        native.lines().take(5).collect::<Vec<_>>(),
+                    ));
+                    continue;
+                }
+            }
+            Err(err) => {
+                failures.push(format!(
+                    "{}: Native compile/run failed\n  {}",
+                    dir_name, err
+                ));
+                continue;
+            }
+        }
+
+        passed += 1;
+    }
+
+    eprintln!(
+        "Cross-module quality parity: {}/{} passed, {} skipped",
+        passed,
+        passed + failures.len(),
+        skipped,
+    );
+
+    if !failures.is_empty() {
+        panic!(
+            "{} cross-module quality parity test(s) failed:\n\n{}",
+            failures.len(),
+            failures.join("\n\n"),
+        );
+    }
 }

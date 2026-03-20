@@ -392,6 +392,10 @@ fn run_source(source: &str, filename: &str, no_check: bool) {
     // Type checking
     if !no_check {
         let mut checker = TypeChecker::new();
+        let file_path = std::path::Path::new(filename);
+        if file_path.exists() {
+            checker.set_source_file(file_path);
+        }
         checker.check_program(&program);
         if !checker.errors.is_empty() {
             for err in &checker.errors {
@@ -531,6 +535,7 @@ fn run_check_cmd(args: &[String]) {
         }
 
         let mut checker = TypeChecker::new();
+        checker.set_source_file(std::path::Path::new(&file_str));
         checker.check_program(&program);
         for err in &checker.errors {
             let (code, suggestion) = split_diag_code_and_hint(&err.message);
@@ -1187,6 +1192,8 @@ fn transpile_js_source_to_output(
     diag_format: DiagFormat,
     compile_stats: &mut CompileDiagStats,
     project_root: Option<&Path>,
+    entry_root: Option<&Path>,
+    out_root: Option<&Path>,
 ) {
     let (program, parse_errors) = parse(source);
     if !parse_errors.is_empty() {
@@ -1217,9 +1224,23 @@ fn transpile_js_source_to_output(
     }
 
     let js_code = {
-        let result = if let (Some(td_file), Some(root)) = (source_path, project_root) {
+        let result = if let Some(td_file) = source_path {
             let import_out = import_base_out.unwrap_or(js_out);
-            js::codegen::transpile_with_context(&program, td_file, root, import_out)
+            if let (Some(er), Some(or)) = (entry_root, out_root) {
+                js::codegen::transpile_with_build_context(
+                    &program,
+                    td_file,
+                    project_root,
+                    import_out,
+                    er,
+                    or,
+                )
+            } else if let Some(root) = project_root {
+                js::codegen::transpile_with_context(&program, td_file, root, import_out)
+            } else {
+                let mut codegen = js::codegen::JsCodegen::new();
+                codegen.generate(&program)
+            }
         } else {
             let mut codegen = js::codegen::JsCodegen::new();
             codegen.generate(&program)
@@ -1273,6 +1294,7 @@ fn transpile_js_source_to_output(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn transpile_js_module_to_output(
     td_file: &Path,
     js_out: &Path,
@@ -1281,6 +1303,8 @@ fn transpile_js_module_to_output(
     diag_format: DiagFormat,
     compile_stats: &mut CompileDiagStats,
     project_root: Option<&Path>,
+    entry_root: Option<&Path>,
+    out_root: Option<&Path>,
 ) {
     let source = match fs::read_to_string(td_file) {
         Ok(s) => s,
@@ -1304,6 +1328,8 @@ fn transpile_js_module_to_output(
         diag_format,
         compile_stats,
         project_root,
+        entry_root,
+        out_root,
     );
 }
 
@@ -1389,6 +1415,8 @@ fn run_build_js_file(
             no_check,
             diag_format,
             compile_stats,
+            None,
+            None,
             None,
         );
 
@@ -1499,6 +1527,8 @@ fn run_build_js_file(
             diag_format,
             compile_stats,
             pkg_root.as_deref(),
+            Some(entry_root),
+            Some(&out_root),
         );
         staged_outputs.push((stage_js_out, final_js_out));
         count += 1;
@@ -1562,6 +1592,8 @@ fn stage_dep_js_outputs(
             diag_format,
             compile_stats,
             Some(project_root),
+            None,
+            None,
         );
         staged_outputs.push((stage_mjs_out, final_mjs_out));
     }
@@ -1759,14 +1791,6 @@ fn run_build_js_dir(
         std::process::exit(1);
     }
 
-    if release_mode {
-        let sites = collect_release_gate_sites_for_files(&td_files);
-        if !sites.is_empty() {
-            report_release_gate_violations(sites, diag_format, compile_stats);
-            std::process::exit(1);
-        }
-    }
-
     let pkg_root = find_packages_tdm_from(input_path);
     let out_dir = output_path.map(PathBuf::from).unwrap_or_else(|| {
         // Default: .taida/build/js/ (project-local)
@@ -1808,17 +1832,53 @@ fn run_build_js_dir(
     register_js_stage_root(&stage_root);
     let mut staged_outputs = Vec::new();
     let mut count = 0usize;
-    for td_file in &td_files {
-        if let Err(err) = module_graph::detect_local_import_cycle(td_file) {
-            emit_build_failure_and_exit(
-                compile_stats,
-                diag_format,
-                "compile",
-                Some(td_file),
-                &err.to_string(),
-            );
+    // Cycle detection + collect external sibling modules from import graph
+    let input_canonical = input_path
+        .canonicalize()
+        .unwrap_or_else(|_| input_path.to_path_buf());
+    let mut external_modules = Vec::new();
+    {
+        let mut seen: std::collections::HashSet<PathBuf> = td_files
+            .iter()
+            .filter_map(|f| f.canonicalize().ok())
+            .collect();
+        for td_file in &td_files {
+            match module_graph::collect_local_modules(td_file) {
+                Ok(all_deps) => {
+                    for dep in all_deps {
+                        if !dep.starts_with(&input_canonical) && seen.insert(dep.clone()) {
+                            external_modules.push(dep);
+                        }
+                    }
+                }
+                Err(err) => {
+                    emit_build_failure_and_exit(
+                        compile_stats,
+                        diag_format,
+                        "compile",
+                        Some(td_file),
+                        &err.to_string(),
+                    );
+                }
+            }
         }
     }
+
+    // Release gate: scan all build targets (directory files + external sibling modules)
+    if release_mode {
+        let mut all_build_files = td_files.clone();
+        all_build_files.extend(external_modules.iter().cloned());
+        let sites = collect_release_gate_sites_for_files(&all_build_files);
+        if !sites.is_empty() {
+            report_release_gate_violations(sites, diag_format, compile_stats);
+            std::process::exit(1);
+        }
+    }
+
+    // Canonicalize entry_root and out_root so the JS codegen's strip_prefix
+    // chain works regardless of whether the CLI was invoked with relative paths.
+    let entry_root_canonical = input_canonical.clone();
+    let out_root_canonical = out_dir.canonicalize().unwrap_or_else(|_| out_dir.clone());
 
     for td_file in &td_files {
         let rel = td_file.strip_prefix(input_path).unwrap_or(td_file);
@@ -1832,6 +1892,41 @@ fn run_build_js_dir(
             diag_format,
             compile_stats,
             pkg_root.as_deref(),
+            Some(&entry_root_canonical),
+            Some(&out_root_canonical),
+        );
+        staged_outputs.push((stage_js_out, final_js_out));
+        count += 1;
+    }
+
+    // Transpile external sibling modules (outside input_path but imported by files inside)
+    let entry_parent = entry_root_canonical
+        .parent()
+        .unwrap_or(&entry_root_canonical);
+    for ext_file in &external_modules {
+        let rel = ext_file
+            .strip_prefix(entry_parent)
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|_| {
+                PathBuf::from(
+                    ext_file
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("module.td"),
+                )
+            });
+        let final_js_out = out_dir.join(rel.with_extension("mjs"));
+        let stage_js_out = stage_output_path(&stage_root, &out_dir, &final_js_out);
+        transpile_js_module_to_output(
+            ext_file,
+            &stage_js_out,
+            Some(&final_js_out),
+            no_check,
+            diag_format,
+            compile_stats,
+            pkg_root.as_deref(),
+            Some(&entry_root_canonical),
+            Some(&out_root_canonical),
         );
         staged_outputs.push((stage_js_out, final_js_out));
         count += 1;
@@ -1982,7 +2077,10 @@ fn run_build_native(
     match codegen::driver::compile_file(&entry_file, output) {
         Ok(bin_path) => {
             if diag_format == DiagFormat::Text {
-                println!("Built (native): {}", bin_path.display());
+                // RCB-217: Display the canonical (absolute) path for consistency
+                // with JS backend which always shows absolute paths.
+                let display_path = bin_path.canonicalize().unwrap_or(bin_path);
+                println!("Built (native): {}", display_path.display());
             }
         }
         Err(e) => {
@@ -2146,7 +2244,9 @@ fn run_build_wasm_min(
     match codegen::driver::compile_file_wasm_cached(input_path, output, rt_cache) {
         Ok(wasm_path) => {
             if diag_format == DiagFormat::Text {
-                println!("Built (wasm-min): {}", wasm_path.display());
+                // RCB-217: Display canonical path for consistency with JS backend
+                let display_path = wasm_path.canonicalize().unwrap_or(wasm_path);
+                println!("Built (wasm-min): {}", display_path.display());
             }
         }
         Err(e) => {
@@ -2310,7 +2410,9 @@ fn run_build_wasm_wasi(
     match codegen::driver::compile_file_wasm_wasi_cached(input_path, output, rt_cache) {
         Ok(wasm_path) => {
             if diag_format == DiagFormat::Text {
-                println!("Built (wasm-wasi): {}", wasm_path.display());
+                // RCB-217: Display canonical path for consistency with JS backend
+                let display_path = wasm_path.canonicalize().unwrap_or(wasm_path);
+                println!("Built (wasm-wasi): {}", display_path.display());
             }
         }
         Err(e) => {
@@ -2474,8 +2576,11 @@ fn run_build_wasm_edge(
     match codegen::driver::compile_file_wasm_edge_cached(input_path, output, rt_cache) {
         Ok(result) => {
             if diag_format == DiagFormat::Text {
-                println!("Built (wasm-edge): {}", result.wasm_path.display());
-                println!("  JS glue: {}", result.glue_path.display());
+                // RCB-217: Display canonical path for consistency with JS backend
+                let wasm_display = result.wasm_path.canonicalize().unwrap_or(result.wasm_path);
+                let glue_display = result.glue_path.canonicalize().unwrap_or(result.glue_path);
+                println!("Built (wasm-edge): {}", wasm_display.display());
+                println!("  JS glue: {}", glue_display.display());
             }
         }
         Err(e) => {
@@ -2639,7 +2744,9 @@ fn run_build_wasm_full(
     match codegen::driver::compile_file_wasm_full_cached(input_path, output, rt_cache) {
         Ok(wasm_path) => {
             if diag_format == DiagFormat::Text {
-                println!("Built (wasm-full): {}", wasm_path.display());
+                // RCB-217: Display canonical path for consistency with JS backend
+                let display_path = wasm_path.canonicalize().unwrap_or(wasm_path);
+                println!("Built (wasm-full): {}", display_path.display());
             }
         }
         Err(e) => {
@@ -2701,6 +2808,10 @@ fn run_type_checks_and_warnings(
     compile_stats: &mut CompileDiagStats,
 ) {
     let mut checker = TypeChecker::new();
+    let file_path = std::path::Path::new(file);
+    if file_path.exists() {
+        checker.set_source_file(file_path);
+    }
     checker.check_program(program);
     if !checker.errors.is_empty() {
         for err in &checker.errors {
@@ -2973,11 +3084,7 @@ fn scan_program_for_todo(program: &Program, file: &Path) -> TodoScanResult {
 }
 
 fn resolve_local_import_path(base_dir: &Path, import_path: &str) -> PathBuf {
-    let mut path = base_dir.join(import_path);
-    if path.extension().is_none_or(|e| e != "td") {
-        path.set_extension("td");
-    }
-    path
+    base_dir.join(import_path)
 }
 
 fn collect_release_scan_files(target_path: &Path) -> Vec<PathBuf> {
@@ -4484,6 +4591,8 @@ mod tests {
             false,
             DiagFormat::Text,
             &mut stats,
+            None,
+            None,
             None,
         );
 

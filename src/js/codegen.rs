@@ -28,6 +28,10 @@ pub struct JsCodegen {
     project_root: Option<std::path::PathBuf>,
     /// Output .mjs file path (for resolving package import paths relative to the final output)
     output_file: Option<std::path::PathBuf>,
+    /// Entry source root directory (entry .td file's parent) — for output placement logic
+    entry_root: Option<std::path::PathBuf>,
+    /// Output root directory — for output placement logic
+    out_root: Option<std::path::PathBuf>,
 }
 
 #[derive(Debug)]
@@ -68,6 +72,8 @@ impl JsCodegen {
             source_file: None,
             project_root: None,
             output_file: None,
+            entry_root: None,
+            out_root: None,
         }
     }
 
@@ -81,6 +87,14 @@ impl JsCodegen {
         self.source_file = Some(source_file.to_path_buf());
         self.project_root = Some(project_root.to_path_buf());
         self.output_file = Some(output_file.to_path_buf());
+    }
+
+    /// Set the entry root (entry .td file's parent) and output root for
+    /// computing correct ESM import specifiers when modules are placed
+    /// in a flattened output layout.
+    pub fn set_build_context(&mut self, entry_root: &std::path::Path, out_root: &std::path::Path) {
+        self.entry_root = Some(entry_root.to_path_buf());
+        self.out_root = Some(out_root.to_path_buf());
     }
 
     /// Program 全体を JS に変換
@@ -281,12 +295,39 @@ impl JsCodegen {
                 self.gen_statement_sequence(remaining, result)?;
                 self.indent -= 1;
 
+                // RCB-101: Extract handler type name for error type filtering
+                let handler_type = match &ec.error_type {
+                    TypeExpr::Named(name) => name.as_str(),
+                    _ => "Error",
+                };
+
                 self.output.clear();
                 self.write_indent();
-                self.write(&format!("}} catch ({}) {{\n", ec.error_param));
+                self.write("} catch (__taida_caught_err) {\n");
                 result.push_str(&self.output);
 
                 self.indent += 1;
+
+                // RCB-101: Type filter — re-throw if type does not match
+                self.output.clear();
+                self.write_indent();
+                self.write("const __taida_thrown_type = __taida_caught_err.type || (__taida_caught_err.__type) || 'Error';\n");
+                result.push_str(&self.output);
+
+                self.output.clear();
+                self.write_indent();
+                self.write(&format!(
+                    "if (!__taida_is_error_subtype(__taida_thrown_type, '{}')) throw __taida_caught_err;\n",
+                    handler_type
+                ));
+                result.push_str(&self.output);
+
+                // Bind the error to the user's parameter name
+                self.output.clear();
+                self.write_indent();
+                self.write(&format!("const {} = __taida_caught_err;\n", ec.error_param));
+                result.push_str(&self.output);
+
                 for stmt in &ec.handler_body {
                     self.output.clear();
                     self.gen_statement(stmt)?;
@@ -603,12 +644,35 @@ impl JsCodegen {
                 self.gen_func_body_to_buf(remaining, result)?;
                 self.indent -= 1;
 
+                // RCB-101: Extract handler type name for error type filtering
+                let handler_type = match &ec.error_type {
+                    TypeExpr::Named(name) => name.as_str(),
+                    _ => "Error",
+                };
+
                 self.output.clear();
                 self.write_indent();
-                self.write(&format!("}} catch ({}) {{\n", ec.error_param));
+                self.write("} catch (__taida_caught_err) {\n");
                 result.push_str(&self.output);
 
                 self.indent += 1;
+
+                // RCB-101: Type filter — re-throw if type does not match
+                self.output.clear();
+                self.writeln("const __taida_thrown_type = __taida_caught_err.type || (__taida_caught_err.__type) || 'Error';");
+                result.push_str(&self.output);
+
+                self.output.clear();
+                self.writeln(&format!(
+                    "if (!__taida_is_error_subtype(__taida_thrown_type, '{}')) throw __taida_caught_err;",
+                    handler_type
+                ));
+                result.push_str(&self.output);
+
+                self.output.clear();
+                self.writeln(&format!("const {} = __taida_caught_err;", ec.error_param));
+                result.push_str(&self.output);
+
                 for (j, handler_stmt) in ec.handler_body.iter().enumerate() {
                     self.output.clear();
                     if j == ec.handler_body.len() - 1 {
@@ -867,6 +931,12 @@ impl JsCodegen {
         self.indent -= 1;
         self.writeln("}");
 
+        // RCB-101: Register inheritance parent for error type filtering in |==
+        self.writeln(&format!(
+            "__taida_type_parents['{}'] = '{}';",
+            inh_def.child, inh_def.parent
+        ));
+
         // Register child type fields (parent fields + child fields) for further inheritance
         let mut all_fields: Vec<String> = parent_field_names;
         all_fields.extend(field_names.iter().map(|s| s.to_string()));
@@ -1015,13 +1085,26 @@ impl JsCodegen {
     }
 
     fn gen_error_ceiling(&mut self, ec: &ErrorCeiling) -> Result<(), JsError> {
+        // RCB-101: Extract handler type name for error type filtering
+        let handler_type = match &ec.error_type {
+            TypeExpr::Named(name) => name.as_str(),
+            _ => "Error",
+        };
+
         // Standalone ErrorCeiling — generate try/catch with empty try
         self.writeln("try {");
         self.indent += 1;
         self.indent -= 1;
         self.write_indent();
-        self.write(&format!("}} catch ({}) {{\n", ec.error_param));
+        self.write("} catch (__taida_caught_err) {\n");
         self.indent += 1;
+        // RCB-101: Type filter
+        self.writeln("const __taida_thrown_type = __taida_caught_err.type || (__taida_caught_err.__type) || 'Error';");
+        self.writeln(&format!(
+            "if (!__taida_is_error_subtype(__taida_thrown_type, '{}')) throw __taida_caught_err;",
+            handler_type
+        ));
+        self.writeln(&format!("const {} = __taida_caught_err;", ec.error_param));
         for stmt in &ec.handler_body {
             self.gen_statement(stmt)?;
         }
@@ -1030,7 +1113,136 @@ impl JsCodegen {
         Ok(())
     }
 
+    /// RCB-201: Resolve the .td source path for a local import, for export validation.
+    /// Returns None if the path cannot be determined (e.g., no source_file context).
+    fn resolve_import_td_path(&self, import_path: &str) -> Option<std::path::PathBuf> {
+        let source_file = self.source_file.as_ref()?;
+        let source_dir = source_file.parent()?;
+        let td_path = source_dir.join(import_path);
+        if td_path.exists() {
+            Some(td_path)
+        } else {
+            None
+        }
+    }
+
+    /// RCB-201: Validate that all imported symbols are exported by the target module.
+    /// Reads and parses the target .td file, checks for explicit `<<<` declarations,
+    /// and returns an error if any imported symbol is not in the export list.
+    fn validate_import_symbols(&self, import: &ImportStmt) -> Result<(), JsError> {
+        // Skip core-bundled and npm packages — they don't have .td export declarations
+        if import.path.starts_with("npm:")
+            || import.path == "taida-lang/js"
+            || import.path == "taida-lang/os"
+            || import.path == "taida-lang/crypto"
+            || import.path == "taida-lang/net"
+            || import.path == "taida-lang/pool"
+        {
+            return Ok(());
+        }
+
+        // Resolve the .td source path
+        let td_path = if import.path.starts_with("./")
+            || import.path.starts_with("../")
+            || import.path.starts_with('/')
+        {
+            self.resolve_import_td_path(&import.path)
+        } else if import.path.contains('/') {
+            // Package import — resolve via .taida/deps/
+            let project_root = match self.project_root.as_ref() {
+                Some(r) => r,
+                None => return Ok(()), // No project root — skip validation
+            };
+            let resolution = if let Some(ref ver) = import.version {
+                crate::pkg::resolver::resolve_package_module_versioned(
+                    project_root,
+                    &import.path,
+                    ver,
+                )
+            } else {
+                crate::pkg::resolver::resolve_package_module(project_root, &import.path)
+            };
+            resolution.and_then(|r| {
+                let path = match &r.submodule {
+                    Some(sub) => r.pkg_dir.join(format!("{}.td", sub)),
+                    None => {
+                        let entry = match crate::pkg::manifest::Manifest::from_dir(&r.pkg_dir) {
+                            Ok(Some(manifest)) => manifest.entry,
+                            _ => "main.td".to_string(),
+                        };
+                        r.pkg_dir.join(entry)
+                    }
+                };
+                if path.exists() { Some(path) } else { None }
+            })
+        } else {
+            None
+        };
+
+        let td_path = match td_path {
+            Some(p) => p,
+            None => return Ok(()), // Cannot resolve — let downstream handle the error
+        };
+
+        let source = match std::fs::read_to_string(&td_path) {
+            Ok(s) => s,
+            Err(_) => return Ok(()), // Cannot read — let downstream handle the error
+        };
+        let (program, _) = crate::parser::parse(&source);
+
+        // Collect explicit export list from <<< statements
+        let mut export_symbols: Vec<String> = Vec::new();
+        let mut has_export = false;
+        for stmt in &program.statements {
+            if let crate::parser::Statement::Export(export_stmt) = stmt {
+                has_export = true;
+                for sym in &export_stmt.symbols {
+                    if !export_symbols.contains(sym) {
+                        export_symbols.push(sym.clone());
+                    }
+                }
+            }
+        }
+
+        // If no <<< found, all symbols are exported (backward compat)
+        if !has_export {
+            return Ok(());
+        }
+
+        let exports: std::collections::HashSet<String> = export_symbols.into_iter().collect();
+
+        // Validate each imported symbol
+        for sym in &import.symbols {
+            if !exports.contains(&sym.name) {
+                return Err(JsError {
+                    message: format!(
+                        "Symbol '{}' not found in module '{}'. \
+                         The module exports: {}",
+                        sym.name,
+                        import.path,
+                        if exports.is_empty() {
+                            "(nothing)".to_string()
+                        } else {
+                            let mut sorted: Vec<&String> = exports.iter().collect();
+                            sorted.sort();
+                            sorted
+                                .iter()
+                                .map(|s| s.as_str())
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        }
+                    ),
+                });
+            }
+        }
+
+        Ok(())
+    }
+
     fn gen_import(&mut self, import: &ImportStmt) -> Result<(), JsError> {
+        // RCB-201: Validate imported symbols against target module's export list
+        self.validate_import_symbols(import)?;
+
         // taida-lang/js: JSNew is a compile-time construct, no runtime import needed
         if import.path == "taida-lang/js" {
             return Ok(());
@@ -1080,11 +1292,7 @@ impl JsCodegen {
             ));
         } else {
             // ローカルモジュール — ESM import (.mjs)
-            let js_path = if import.path.ends_with(".td") || import.path.ends_with(".tdjs") {
-                import.path.replace(".td", ".mjs").replace(".tdjs", ".mjs")
-            } else {
-                format!("{}.mjs", import.path)
-            };
+            let js_path = self.resolve_local_import_js_path(&import.path)?;
             self.write(&format!(
                 "import {{ {} }} from '{}';\n",
                 symbols.join(", "),
@@ -1092,6 +1300,97 @@ impl JsCodegen {
             ));
         }
         Ok(())
+    }
+
+    /// Resolve a local (relative) import path to the correct .mjs ESM specifier.
+    ///
+    /// When build context (entry_root, out_root) is available, computes the actual
+    /// output location of the dependency using the same strip_prefix logic as main.rs,
+    /// then produces a relative ESM import from our output to the dependency's output.
+    /// This handles the case where `../shared` from `src/main.td` is flattened to
+    /// `out_root/shared.mjs` alongside `out_root/main.mjs` (correct: `./shared.mjs`).
+    ///
+    /// Also performs RCB-303 path traversal rejection for `..` imports.
+    fn resolve_local_import_js_path(&self, import_path: &str) -> Result<String, JsError> {
+        use std::path::{Path, PathBuf};
+
+        // RCB-303: Check path traversal for `..` imports
+        if import_path.contains("..")
+            && let (Some(project_root), Some(source_file)) = (&self.project_root, &self.source_file)
+        {
+            let source_dir = source_file.parent().unwrap_or(Path::new("."));
+            let td_path = source_dir.join(import_path);
+            let reject = if let Ok(canonical) = td_path.canonicalize() {
+                if let Ok(root_canonical) = project_root.canonicalize() {
+                    !canonical.starts_with(&root_canonical)
+                } else {
+                    false // cannot verify root — let it through, will fail at read
+                }
+            } else {
+                false // file not found — let it through, will fail at read
+            };
+            if reject {
+                return Err(JsError {
+                    message: format!(
+                        "Import path '{}' resolves outside the project root. Path traversal is not allowed.",
+                        import_path
+                    ),
+                });
+            }
+        }
+
+        // When build context is available and the import crosses directory boundaries,
+        // compute the correct ESM path based on output layout.
+        if let (Some(entry_root), Some(out_root), Some(source_file), Some(output_file)) = (
+            &self.entry_root,
+            &self.out_root,
+            &self.source_file,
+            &self.output_file,
+        ) {
+            let source_dir = source_file.parent().unwrap_or(Path::new("."));
+            let dep_source = source_dir.join(import_path);
+            // Canonicalize to resolve symlinks and ..
+            let dep_source = dep_source.canonicalize().unwrap_or(dep_source);
+
+            // Replicate main.rs output placement: strip_prefix chain
+            let dep_rel = dep_source
+                .strip_prefix(entry_root)
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|_| {
+                    let entry_parent = entry_root.parent().unwrap_or(entry_root);
+                    dep_source
+                        .strip_prefix(entry_parent)
+                        .map(Path::to_path_buf)
+                        .unwrap_or_else(|_| {
+                            PathBuf::from(
+                                dep_source
+                                    .file_name()
+                                    .and_then(|n| n.to_str())
+                                    .unwrap_or("module.td"),
+                            )
+                        })
+                });
+            let dep_output = out_root.join(dep_rel.with_extension("mjs"));
+
+            // Compute relative ESM path from our output to the dependency's output
+            let our_dir = output_file.parent().unwrap_or(Path::new("."));
+            if let Some(rel) = pathdiff(our_dir, &dep_output) {
+                let rel_str = rel.to_string_lossy().replace('\\', "/");
+                // ESM requires explicit ./ prefix for same-directory imports
+                let esm_path = if rel_str.starts_with("../") || rel_str.starts_with("./") {
+                    rel_str.to_string()
+                } else {
+                    format!("./{}", rel_str)
+                };
+                return Ok(esm_path);
+            }
+        }
+
+        // Fallback: simple string replacement (no build context).
+        // Parser enforces .td extension on relative imports, so we only need
+        // the .td/.tdjs → .mjs conversion.
+        let js_path = import_path.replace(".tdjs", ".mjs").replace(".td", ".mjs");
+        Ok(js_path)
     }
 
     /// Resolve a package import path to a relative .mjs path for ESM import.
@@ -1121,28 +1420,22 @@ impl JsCodegen {
         })?;
 
         // Find the package directory using longest-prefix matching.
-        // RC-1q: For versioned imports, try version-qualified directory first,
-        // then fall back to unversioned (same logic as interpreter's eval_import).
+        // RCB-213: For versioned imports, use resolve_package_module_versioned
+        // which does longest-prefix matching with version-qualified directories.
+        // This supports submodule imports (e.g., alice/pkg/submod@b.12 resolves to
+        // .taida/deps/alice/pkg@b.12/submod.td).
         let resolution = if let Some(ver) = version {
-            // Try version-qualified path first: .taida/deps/org/name@version/
-            let deps_dir = project_root.join(".taida").join("deps");
-            let versioned_id = format!("{}@{}", import_path, ver);
-            let versioned_path = deps_dir.join(&versioned_id);
-            if versioned_path.exists() && versioned_path.is_dir() {
-                crate::pkg::resolver::PackageModuleResolution {
-                    pkg_dir: versioned_path,
-                    submodule: None,
-                }
-            } else {
-                // Fall back to unversioned resolution
-                crate::pkg::resolver::resolve_package_module(project_root, import_path)
-                    .ok_or_else(|| JsError {
-                        message: format!(
-                            "Could not resolve package import '{}@{}'. Run `taida deps` and ensure the package is installed in .taida/deps/ before building JS.",
-                            import_path, ver
-                        ),
-                    })?
-            }
+            crate::pkg::resolver::resolve_package_module_versioned(
+                project_root,
+                import_path,
+                ver,
+            )
+            .ok_or_else(|| JsError {
+                message: format!(
+                    "Could not resolve package import '{}@{}'. Run `taida deps` and ensure the package is installed in .taida/deps/ before building JS.",
+                    import_path, ver
+                ),
+            })?
         } else {
             crate::pkg::resolver::resolve_package_module(project_root, import_path)
                 .ok_or_else(|| JsError {
@@ -1155,7 +1448,7 @@ impl JsCodegen {
 
         // Determine the target .td file
         let td_path = match &resolution.submodule {
-            Some(submodule) => resolution.pkg_dir.join(submodule),
+            Some(submodule) => resolution.pkg_dir.join(format!("{}.td", submodule)),
             None => {
                 // Read packages.tdm for entry point.
                 // If the manifest is missing or unreadable, fall back to "main.td"
@@ -1219,6 +1512,14 @@ impl JsCodegen {
     }
 
     fn gen_export(&mut self, export: &ExportStmt) -> Result<(), JsError> {
+        // RCB-212: Re-export path `<<< ./path` is not supported.
+        if export.path.is_some() {
+            return Err(JsError {
+                message: "Re-export with path (`<<< ./path`) is not yet supported. \
+                         Use explicit import and re-export instead."
+                    .to_string(),
+            });
+        }
         // ESM named export
         self.write_indent();
         self.write("export { ");
@@ -2847,6 +3148,25 @@ pub fn transpile_with_context(
 ) -> Result<String, JsError> {
     let mut codegen = JsCodegen::new();
     codegen.set_file_context(source_file, project_root, output_file);
+    codegen.generate(program)
+}
+
+/// .td ファイルを JS にトランスパイル (with build context for output-layout-aware imports)
+pub fn transpile_with_build_context(
+    program: &Program,
+    source_file: &std::path::Path,
+    project_root: Option<&std::path::Path>,
+    output_file: &std::path::Path,
+    entry_root: &std::path::Path,
+    out_root: &std::path::Path,
+) -> Result<String, JsError> {
+    let mut codegen = JsCodegen::new();
+    codegen.source_file = Some(source_file.to_path_buf());
+    codegen.output_file = Some(output_file.to_path_buf());
+    if let Some(root) = project_root {
+        codegen.project_root = Some(root.to_path_buf());
+    }
+    codegen.set_build_context(entry_root, out_root);
     codegen.generate(program)
 }
 

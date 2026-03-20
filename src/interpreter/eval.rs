@@ -16,6 +16,13 @@ use super::env::Environment;
 use super::value::{FuncValue, Value};
 use crate::parser::*;
 
+/// Maximum function call depth before RuntimeError (RCB-301 / SEC-002).
+/// Prevents stack overflow from deeply recursive (non-TCO) calls.
+/// Set conservatively to account for multiple Rust stack frames per call
+/// (eval_statements + eval_expr + call_function = ~5 frames per recursion,
+/// plus debug builds have larger frames).
+const MAX_CALL_DEPTH: usize = 256;
+
 /// Runtime error (distinct from thrown Taida errors).
 #[derive(Debug, Clone)]
 pub struct RuntimeError {
@@ -125,6 +132,12 @@ pub struct Interpreter {
     /// When a callback inside call_function_with_values throws, the thrown value
     /// is stored here so that eval_statements' error ceiling can recover it.
     pub(crate) pending_throw: Option<Value>,
+    /// RCB-101: Inheritance parent map (child_name -> parent_name).
+    /// Used by error ceiling to check if a thrown error type IS-A the handler type.
+    pub(crate) type_parents: HashMap<String, String>,
+    /// RCB-301: Current function call depth for stack overflow prevention.
+    /// Incremented on each non-TCO function call, decremented on return.
+    call_depth: usize,
 }
 
 impl Interpreter {
@@ -162,7 +175,31 @@ impl Interpreter {
             pool_states: Arc::new(Mutex::new(HashMap::new())),
             next_pool_id: Arc::new(AtomicI64::new(1)),
             pending_throw: None,
+            type_parents: HashMap::new(),
+            call_depth: 0,
         }
+    }
+
+    /// RCB-101: Check if `thrown_type` IS-A `handler_type` by walking the inheritance chain.
+    /// Returns true if they are the same type or if `thrown_type` inherits from `handler_type`.
+    fn is_error_subtype(&self, thrown_type: &str, handler_type: &str) -> bool {
+        if thrown_type == handler_type {
+            return true;
+        }
+        // Walk the inheritance chain: thrown_type -> parent -> grandparent -> ...
+        let mut current = thrown_type;
+        // Limit chain depth to avoid infinite loops from corrupted data
+        for _ in 0..64 {
+            if let Some(parent) = self.type_parents.get(current) {
+                if parent == handler_type {
+                    return true;
+                }
+                current = parent;
+            } else {
+                break;
+            }
+        }
+        false
     }
 
     /// Set the current file path for module resolution.
@@ -204,10 +241,16 @@ impl Interpreter {
                 // The remaining statements after the error ceiling are "protected"
                 let protected_stmts = &stmts[i + 1..];
 
-                // Evaluate the protected statements.
+                // Evaluate the protected statements WITHOUT tail-call optimization.
+                // TCO on the last protected statement would return Signal::TailCall,
+                // bypassing the error ceiling catch below.  The caller (call_function's
+                // trampoline) would then execute the function outside this ceiling's scope,
+                // so any throw would propagate unhandled.  Using eval_statements_no_tco
+                // ensures all function calls actually execute within the ceiling.
+                //
                 // If a RuntimeError occurs that wraps a Taida throw (from a HOF callback),
                 // recover the thrown value from pending_throw and handle it as Signal::Throw.
-                let protected_result = match self.eval_statements(protected_stmts) {
+                let protected_result = match self.eval_statements_no_tco(protected_stmts) {
                     Ok(signal) => signal,
                     Err(runtime_err) => {
                         if let Some(thrown_val) = self.pending_throw.take() {
@@ -222,19 +265,60 @@ impl Interpreter {
                     Signal::Value(v) => return Ok(Signal::Value(v)),
                     Signal::TailCall(args) => return Ok(Signal::TailCall(args)),
                     Signal::Throw(err) => {
-                        // Error was thrown — run the handler
-                        self.env.push_scope();
-                        self.env.define_force(&ec.error_param, err);
+                        // RCB-101: Check if the thrown error type matches the handler's error_type.
+                        // Extract the expected type name from the ErrorCeiling's type annotation.
+                        let handler_type = match &ec.error_type {
+                            TypeExpr::Named(name) => name.as_str(),
+                            _ => "Error", // fallback: catch-all for complex type exprs
+                        };
 
-                        // Evaluate the handler body
-                        let handler_result = self.eval_statements(&ec.handler_body)?;
-                        self.env.pop_scope();
+                        // Extract the actual error type from the thrown value.
+                        let thrown_type = match &err {
+                            Value::Error(e) => Some(e.error_type.as_str()),
+                            Value::BuchiPack(fields) => fields
+                                .iter()
+                                .find(|(n, _)| n == "__type")
+                                .and_then(|(_, v)| {
+                                    if let Value::Str(s) = v {
+                                        Some(s.as_str())
+                                    } else {
+                                        None
+                                    }
+                                }),
+                            _ => None,
+                        };
 
-                        match handler_result {
-                            Signal::Value(v) => return Ok(Signal::Value(v)),
-                            Signal::TailCall(args) => return Ok(Signal::TailCall(args)),
-                            Signal::Throw(err) => return Ok(Signal::Throw(err)),
-                            Signal::Gorilla => return Ok(Signal::Gorilla),
+                        // Check if the thrown type IS-A the handler type.
+                        // "Error" catches everything (base type).
+                        // Otherwise, walk the inheritance chain.
+                        let type_matches = if handler_type == "Error" {
+                            true
+                        } else if let Some(thrown) = thrown_type {
+                            self.is_error_subtype(thrown, handler_type)
+                        } else {
+                            // Unknown thrown value type — do NOT catch-all.
+                            // Only the "Error" base handler (checked above) should catch everything.
+                            // This matches Native/WASM behavior (return 0 for unknown type).
+                            false
+                        };
+
+                        if type_matches {
+                            // Error type matches — run the handler
+                            self.env.push_scope();
+                            self.env.define_force(&ec.error_param, err);
+
+                            let handler_result = self.eval_statements(&ec.handler_body)?;
+                            self.env.pop_scope();
+
+                            match handler_result {
+                                Signal::Value(v) => return Ok(Signal::Value(v)),
+                                Signal::TailCall(args) => return Ok(Signal::TailCall(args)),
+                                Signal::Throw(err) => return Ok(Signal::Throw(err)),
+                                Signal::Gorilla => return Ok(Signal::Gorilla),
+                            }
+                        } else {
+                            // Type does not match — re-throw (propagate to outer ceiling)
+                            return Ok(Signal::Throw(err));
                         }
                     }
                     Signal::Gorilla => return Ok(Signal::Gorilla),
@@ -303,6 +387,7 @@ impl Interpreter {
                     params: fd.params.clone(),
                     body: fd.body.clone(),
                     closure,
+                    return_type: fd.return_type.clone(),
                 });
                 // Use define() to prevent overwriting existing variables/functions.
                 // define_force is reserved for internal use only (pipeline, closures, params, prelude).
@@ -386,6 +471,9 @@ impl Interpreter {
                     self.mold_defs
                         .insert(inh.child.clone(), self.type_defs[&inh.child].clone());
                 }
+                // RCB-101: Record inheritance parent for error type filtering
+                self.type_parents
+                    .insert(inh.child.clone(), inh.parent.clone());
                 // InheritanceDef 名もシンボルとして環境に登録（<<< @(ChildType) で export 可能にする）
                 let _ = self.env.define(
                     &inh.child,
@@ -450,6 +538,27 @@ impl Interpreter {
                 }
             }
         }
+    }
+
+    /// Evaluate statements without tail-call optimization.
+    /// Used for error-ceiling protected code so that function calls in tail
+    /// position actually execute within the ceiling's scope instead of being
+    /// deferred via Signal::TailCall (which would bypass the catch handler).
+    fn eval_statements_no_tco(&mut self, stmts: &[Statement]) -> Result<Signal, RuntimeError> {
+        let mut last_value = Value::Unit;
+        for (i, stmt) in stmts.iter().enumerate() {
+            // Check for nested error ceilings (delegate to full eval_statements)
+            if let Statement::ErrorCeiling(_) = stmt {
+                return self.eval_statements(&stmts[i..]);
+            }
+            match self.eval_statement(stmt)? {
+                Signal::Value(v) => last_value = v,
+                Signal::TailCall(args) => return Ok(Signal::TailCall(args)),
+                Signal::Throw(err) => return Ok(Signal::Throw(err)),
+                Signal::Gorilla => return Ok(Signal::Gorilla),
+            }
+        }
+        Ok(Signal::Value(last_value))
     }
 
     /// Evaluate a statement in tail position.
@@ -655,7 +764,10 @@ impl Interpreter {
                 match callee_val {
                     Value::Function(func) => self.call_function(&func, args),
                     _ => Err(RuntimeError {
-                        message: format!("Cannot call non-function value: {}", callee_val),
+                        message: format!(
+                            "Cannot call non-function value: {}",
+                            callee_val.to_error_display(200)
+                        ),
                     }),
                 }
             }
@@ -693,7 +805,11 @@ impl Interpreter {
                         }
                     }
                     _ => Err(RuntimeError {
-                        message: format!("Cannot access field '{}' on {}", field, obj_val),
+                        message: format!(
+                            "Cannot access field '{}' on {}",
+                            field,
+                            obj_val.to_error_display(200)
+                        ),
                     }),
                 }
             }
@@ -844,6 +960,7 @@ impl Interpreter {
                         params: func_def.params.clone(),
                         body: func_def.body.clone(),
                         closure: Arc::new(closure),
+                        return_type: func_def.return_type.clone(),
                     });
                     result_fields.push(("__unmold".to_string(), unmold_func));
                 }
@@ -864,6 +981,7 @@ impl Interpreter {
                         params: func_def.params.clone(),
                         body: func_def.body.clone(),
                         closure: Arc::new(closure),
+                        return_type: func_def.return_type.clone(),
                     };
                     return self.call_function_preserving_signals(&solidify_func, &[]);
                 }
@@ -887,6 +1005,7 @@ impl Interpreter {
                     params: params.clone(),
                     body: vec![Statement::Expr(*body.clone())],
                     closure,
+                    return_type: None,
                 })))
             }
 
@@ -1125,6 +1244,7 @@ impl Interpreter {
             params,
             body,
             closure,
+            return_type: None,
         })))
     }
 
@@ -1248,6 +1368,17 @@ impl Interpreter {
         func: &FuncValue,
         arg_values: &[Value],
     ) -> Result<Signal, RuntimeError> {
+        // RCB-301: depth guard
+        self.call_depth += 1;
+        if self.call_depth > MAX_CALL_DEPTH {
+            self.call_depth -= 1;
+            return Err(RuntimeError {
+                message: format!(
+                    "Maximum call depth ({}) exceeded. Use tail recursion or restructure the code.",
+                    MAX_CALL_DEPTH
+                ),
+            });
+        }
         // Internal callback paths (list ops, unmold hooks) should not inherit
         // outer-function tail-call context.
         let prev_active = self.active_function.take();
@@ -1262,6 +1393,7 @@ impl Interpreter {
             self.env.pop_scope();
             self.env.pop_scope();
             self.active_function = prev_active;
+            self.call_depth -= 1;
             return Ok(signal);
         }
 
@@ -1269,6 +1401,7 @@ impl Interpreter {
         self.env.pop_scope(); // pop local scope
         self.env.pop_scope(); // pop closure scope
         self.active_function = prev_active;
+        self.call_depth -= 1;
 
         Ok(result)
     }
@@ -1279,6 +1412,17 @@ impl Interpreter {
         func: &FuncValue,
         arg_values: &[Value],
     ) -> Result<Value, RuntimeError> {
+        // RCB-301: depth guard
+        self.call_depth += 1;
+        if self.call_depth > MAX_CALL_DEPTH {
+            self.call_depth -= 1;
+            return Err(RuntimeError {
+                message: format!(
+                    "Maximum call depth ({}) exceeded. Use tail recursion or restructure the code.",
+                    MAX_CALL_DEPTH
+                ),
+            });
+        }
         // Internal callback paths (Map/Filter/etc.) should not inherit
         // outer-function tail-call context.
         let prev_active = self.active_function.take();
@@ -1293,6 +1437,7 @@ impl Interpreter {
             self.env.pop_scope(); // pop local scope
             self.env.pop_scope(); // pop closure scope
             self.active_function = prev_active;
+            self.call_depth -= 1;
             return match signal {
                 Signal::Value(v) => Ok(v),
                 Signal::TailCall(_) => Err(RuntimeError {
@@ -1313,6 +1458,7 @@ impl Interpreter {
         self.env.pop_scope(); // pop local scope
         self.env.pop_scope(); // pop closure scope
         self.active_function = prev_active;
+        self.call_depth -= 1;
 
         match result {
             Signal::Value(v) => Ok(v),
@@ -1341,6 +1487,18 @@ impl Interpreter {
     /// For mutual recursion, `mutual_tail_call_target` is set by eval_expr_tail
     /// to indicate that the next iteration should execute a different function.
     fn call_function(&mut self, func: &FuncValue, args: &[Expr]) -> Result<Signal, RuntimeError> {
+        // RCB-301: Guard against stack overflow from deeply recursive calls.
+        self.call_depth += 1;
+        if self.call_depth > MAX_CALL_DEPTH {
+            self.call_depth -= 1;
+            return Err(RuntimeError {
+                message: format!(
+                    "Maximum call depth ({}) exceeded. Use tail recursion or restructure the code.",
+                    MAX_CALL_DEPTH
+                ),
+            });
+        }
+
         // Evaluate arguments
         let mut arg_values = Vec::new();
         for arg in args {
@@ -1381,6 +1539,7 @@ impl Interpreter {
                     self.env.pop_scope(); // pop local scope
                     self.env.pop_scope(); // pop closure scope
                     self.active_function = prev_active;
+                    self.call_depth -= 1;
                     return Ok(signal);
                 }
                 Ok(None) => {}
@@ -1388,6 +1547,7 @@ impl Interpreter {
                     self.env.pop_scope(); // pop local scope
                     self.env.pop_scope(); // pop closure scope
                     self.active_function = prev_active;
+                    self.call_depth -= 1;
                     return Err(err);
                 }
             }
@@ -1431,6 +1591,7 @@ impl Interpreter {
                             // as a normal call. Instead, we reconstruct the call.
                             // The simplest safe fallback: look up the function and call it directly.
                             // Since the target wasn't found, just error with a clear message.
+                            self.call_depth -= 1;
                             return Err(RuntimeError {
                                 message: format!(
                                     "Mutual tail call target '{}' not found",
@@ -1446,6 +1607,7 @@ impl Interpreter {
                 other => {
                     // Normal result: restore and return
                     self.active_function = prev_active;
+                    self.call_depth -= 1;
                     return Ok(other);
                 }
             }

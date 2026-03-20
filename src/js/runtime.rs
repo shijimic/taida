@@ -151,6 +151,26 @@ function __taida_throw(obj) {
   throw obj instanceof globalThis.Error ? obj : new __TaidaError(obj.type || 'Error', obj.message || '', obj);
 }
 
+// RCB-101: Inheritance parent map for error type filtering in |==
+// Use globalThis so the registry is shared across ESM modules (each .mjs
+// embeds its own runtime copy, but all modules must see every parent
+// registration so that cross-module error subtype checks work).
+if (!globalThis.__taida_type_parents) globalThis.__taida_type_parents = {};
+const __taida_type_parents = globalThis.__taida_type_parents;
+
+// RCB-101: Check if thrown_type IS-A handler_type (walks inheritance chain)
+function __taida_is_error_subtype(thrown_type, handler_type) {
+  if (handler_type === 'Error') return true;
+  let current = thrown_type;
+  for (let i = 0; i < 64; i++) {
+    if (current === handler_type) return true;
+    const parent = __taida_type_parents[current];
+    if (!parent) break;
+    current = parent;
+  }
+  return false;
+}
+
 // Taida Error base type (not JS Error constructor)
 // Error = @(type: Str, message: Str)
 function Error(fields) {
@@ -2191,7 +2211,7 @@ async function __taida_os_tcpListen(port, timeoutMs) {
     server.once('listening', onListening);
     server.once('error', onError);
     try {
-      server.listen(port, '0.0.0.0');
+      server.listen(port, '127.0.0.1');
     } catch (e) {
       finish(__taida_os_result_fail(e));
     }
