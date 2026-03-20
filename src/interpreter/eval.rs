@@ -392,6 +392,7 @@ impl Interpreter {
                     params: fd.params.clone(),
                     body: fd.body.clone(),
                     closure,
+                    return_type: fd.return_type.clone(),
                 });
                 // Use define() to prevent overwriting existing variables/functions.
                 // define_force is reserved for internal use only (pipeline, closures, params, prelude).
@@ -768,7 +769,7 @@ impl Interpreter {
                 match callee_val {
                     Value::Function(func) => self.call_function(&func, args),
                     _ => Err(RuntimeError {
-                        message: format!("Cannot call non-function value: {}", callee_val),
+                        message: format!("Cannot call non-function value: {}", callee_val.to_error_display(200)),
                     }),
                 }
             }
@@ -806,7 +807,7 @@ impl Interpreter {
                         }
                     }
                     _ => Err(RuntimeError {
-                        message: format!("Cannot access field '{}' on {}", field, obj_val),
+                        message: format!("Cannot access field '{}' on {}", field, obj_val.to_error_display(200)),
                     }),
                 }
             }
@@ -957,6 +958,7 @@ impl Interpreter {
                         params: func_def.params.clone(),
                         body: func_def.body.clone(),
                         closure: Arc::new(closure),
+                        return_type: func_def.return_type.clone(),
                     });
                     result_fields.push(("__unmold".to_string(), unmold_func));
                 }
@@ -977,6 +979,7 @@ impl Interpreter {
                         params: func_def.params.clone(),
                         body: func_def.body.clone(),
                         closure: Arc::new(closure),
+                        return_type: func_def.return_type.clone(),
                     };
                     return self.call_function_preserving_signals(&solidify_func, &[]);
                 }
@@ -1000,6 +1003,7 @@ impl Interpreter {
                     params: params.clone(),
                     body: vec![Statement::Expr(*body.clone())],
                     closure,
+                    return_type: None,
                 })))
             }
 
@@ -1238,6 +1242,7 @@ impl Interpreter {
             params,
             body,
             closure,
+            return_type: None,
         })))
     }
 

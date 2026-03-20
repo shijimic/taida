@@ -45,6 +45,10 @@ pub fn collect_local_modules(entry_path: &Path) -> Result<Vec<PathBuf>, ModuleGr
     Ok(ordered)
 }
 
+/// Resolve a local import path to an absolute path.
+/// Returns `None` for package imports (e.g., `author/pkg@ver`) since those point to
+/// `.taida/deps/` and cannot form circular dependencies with local modules.
+/// Package dependency cycles are handled at the package manager level, not here.
 pub fn resolve_local_import_from(base_file: &Path, import_path: &str) -> Option<PathBuf> {
     let path = if import_path.starts_with("./") || import_path.starts_with("../") {
         base_file
@@ -57,6 +61,8 @@ pub fn resolve_local_import_from(base_file: &Path, import_path: &str) -> Option<
     } else if import_path.starts_with('/') {
         PathBuf::from(import_path)
     } else {
+        // Package imports (e.g., `author/pkg`, `author/pkg@ver`) are external
+        // dependencies and not part of the local module graph.
         return None;
     };
 

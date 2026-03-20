@@ -54,6 +54,9 @@ pub struct FuncValue {
     /// Captured environment (lexical scope closure).
     /// Shared to avoid recursive deep-clone blow-up when many functions capture prior functions.
     pub closure: Arc<HashMap<String, Value>>,
+    /// RCB-242: Declared return type from function definition (if any).
+    /// Used for introspection. Runtime type enforcement is handled by the checker.
+    pub return_type: Option<crate::parser::TypeExpr>,
 }
 
 /// An error value.
@@ -348,6 +351,28 @@ impl Value {
             Value::Str(s) => format!("\"{}\"", s),
             other => other.to_display_string(),
         }
+    }
+
+    /// SEC-007: Truncated display for error messages.
+    /// Limits output to approximately `max_len` characters to prevent
+    /// large data structures from producing multi-megabyte error messages.
+    pub fn to_error_display(&self, max_len: usize) -> String {
+        let full = self.to_display_string();
+        if full.len() <= max_len {
+            return full;
+        }
+        let suffix = match self {
+            Value::List(items) => format!("... ({} items)]", items.len()),
+            Value::BuchiPack(fields) => format!("... ({} fields))", fields.len()),
+            _ => "...".to_string(),
+        };
+        let truncate_at = max_len.saturating_sub(suffix.len());
+        // Find a safe truncation point (don't split multi-byte chars)
+        let mut safe = truncate_at;
+        while safe > 0 && !full.is_char_boundary(safe) {
+            safe -= 1;
+        }
+        format!("{}{}", &full[..safe], suffix)
     }
 }
 

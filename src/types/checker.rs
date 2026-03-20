@@ -2022,13 +2022,13 @@ defaulted fields must be provided via `()`",
                             || self.registry.is_subtype_of(&body_ty, &ret_ty)
                             // Allow numeric narrowing: Num body is compatible with Int/Float/Num return
                             || body_ty.is_numeric() && ret_ty.is_numeric()
-                            // Mold/Fold application and unmold (]=>) can produce types
-                            // that the checker cannot accurately track; skip Named types
-                            // and compound types that may result from these operations
-                            || matches!(
-                                body_ty,
-                                Type::Named(_) | Type::List(_) | Type::BuchiPack(_)
-                            ))
+                            // RCB-241: Mold/Fold application, unmold (]=>), and
+                            // inheritance can produce types that the checker cannot
+                            // accurately track. Named types include Mold subtypes whose
+                            // solidification yields the filling type at runtime (e.g.,
+                            // AlwaysFail[x]() -> Int), so we must exempt all Named body
+                            // types until the checker gains full mold-tracking.
+                            || matches!(body_ty, Type::Named(_) | Type::List(_) | Type::BuchiPack(_)))
                         {
                             self.errors.push(TypeError {
                                 message: format!(
@@ -2103,14 +2103,12 @@ defaulted fields must be provided via `()`",
                                     let is_unit_body =
                                         matches!(body_ty, Type::Unit)
                                         || matches!(&body_ty, Type::BuchiPack(f) if f.is_empty());
+                                    // RCB-241: Same exemption as FuncDef return type check
                                     if !matches!(body_ty, Type::Unknown)
                                         && !is_unit_body
                                         && body_ty != declared_ret
                                         && !self.registry.is_subtype_of(&body_ty, &declared_ret)
-                                        && !matches!(
-                                            body_ty,
-                                            Type::Named(_) | Type::List(_) | Type::BuchiPack(_)
-                                        )
+                                        && !matches!(body_ty, Type::Named(_) | Type::List(_) | Type::BuchiPack(_))
                                     {
                                         self.errors.push(TypeError {
                                             message: format!(

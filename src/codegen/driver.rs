@@ -954,6 +954,7 @@ pub fn compile_file_wasm(
 
     if !rt_status.success() {
         let _ = fs::remove_file(&gen_obj_path);
+        let _ = fs::remove_file(&rt_obj_path);
         return Err(CompileError {
             message: "clang wasm32 compilation of runtime failed.".to_string(),
         });
@@ -973,8 +974,12 @@ pub fn compile_file_wasm(
         .arg("-o")
         .arg(&wasm_path)
         .status()
-        .map_err(|e| CompileError {
-            message: format!("wasm-ld invocation failed: {}", e),
+        .map_err(|e| {
+            let _ = fs::remove_file(&gen_obj_path);
+            let _ = fs::remove_file(&rt_obj_path);
+            CompileError {
+                message: format!("wasm-ld invocation failed: {}", e),
+            }
         })?;
 
     // 一時ファイルの削除
@@ -1170,6 +1175,7 @@ pub fn compile_file_wasm_wasi(
     if !rt_wasi_status.success() {
         let _ = fs::remove_file(&gen_obj_path);
         let _ = fs::remove_file(&rt_core_obj_path);
+        let _ = fs::remove_file(&rt_wasi_obj_path);
         return Err(CompileError {
             message: "clang wasm32 compilation of WASI I/O runtime failed.".to_string(),
         });
@@ -1190,8 +1196,13 @@ pub fn compile_file_wasm_wasi(
         .arg("-o")
         .arg(&wasm_path)
         .status()
-        .map_err(|e| CompileError {
-            message: format!("wasm-ld invocation failed: {}", e),
+        .map_err(|e| {
+            let _ = fs::remove_file(&gen_obj_path);
+            let _ = fs::remove_file(&rt_core_obj_path);
+            let _ = fs::remove_file(&rt_wasi_obj_path);
+            CompileError {
+                message: format!("wasm-ld invocation failed: {}", e),
+            }
         })?;
 
     // 一時ファイルの削除
@@ -1386,6 +1397,7 @@ pub fn compile_file_wasm_edge(
     if !rt_edge_status.success() {
         let _ = fs::remove_file(&gen_obj_path);
         let _ = fs::remove_file(&rt_core_obj_path);
+        let _ = fs::remove_file(&rt_edge_obj_path);
         return Err(CompileError {
             message: "clang wasm32 compilation of edge host runtime failed.".to_string(),
         });
@@ -1406,8 +1418,13 @@ pub fn compile_file_wasm_edge(
         .arg("-o")
         .arg(&wasm_path)
         .status()
-        .map_err(|e| CompileError {
-            message: format!("wasm-ld invocation failed: {}", e),
+        .map_err(|e| {
+            let _ = fs::remove_file(&gen_obj_path);
+            let _ = fs::remove_file(&rt_core_obj_path);
+            let _ = fs::remove_file(&rt_edge_obj_path);
+            CompileError {
+                message: format!("wasm-ld invocation failed: {}", e),
+            }
         })?;
 
     // 一時ファイルの削除
@@ -1665,6 +1682,7 @@ pub fn compile_file_wasm_full(
         let _ = fs::remove_file(&gen_obj_path);
         let _ = fs::remove_file(&rt_core_obj_path);
         let _ = fs::remove_file(&rt_wasi_obj_path);
+        let _ = fs::remove_file(&rt_full_obj_path);
         return Err(CompileError {
             message: "clang wasm32 compilation of full runtime failed.".to_string(),
         });
@@ -1686,8 +1704,14 @@ pub fn compile_file_wasm_full(
         .arg("-o")
         .arg(&wasm_path)
         .status()
-        .map_err(|e| CompileError {
-            message: format!("wasm-ld invocation failed: {}", e),
+        .map_err(|e| {
+            let _ = fs::remove_file(&gen_obj_path);
+            let _ = fs::remove_file(&rt_core_obj_path);
+            let _ = fs::remove_file(&rt_wasi_obj_path);
+            let _ = fs::remove_file(&rt_full_obj_path);
+            CompileError {
+                message: format!("wasm-ld invocation failed: {}", e),
+            }
         })?;
 
     // 一時ファイルの削除

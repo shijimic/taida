@@ -4918,6 +4918,28 @@ taida_val taida_polymorphic_is_empty(taida_val obj) {
 
 // Polymorphic .toString() — works on Int, Float, Bool, Result, Lax, HashMap, Set, List, BuchiPack
 taida_val taida_polymorphic_to_string(taida_val obj) {
+    // RCB-222: Check for user-defined toString method on BuchiPack types.
+    // If the pack has a function field named "toString", call it instead of
+    // formatting as @(field <= value, ...). This matches the Interpreter's
+    // type_methods dispatch behavior.
+    if (taida_is_buchi_pack(obj)) {
+        // FNV-1a hash of "toString"
+        const taida_val toString_hash = 0xc5c8cdb28370e485ULL;
+        taida_val fn_ptr = taida_pack_get(obj, toString_hash);
+        if (fn_ptr != 0 && (TAIDA_IS_CLOSURE(fn_ptr) || taida_ptr_is_readable(fn_ptr, 1))) {
+            // Check if it looks like a function (closure or function pointer)
+            if (TAIDA_IS_CLOSURE(fn_ptr)) {
+                taida_val *closure = (taida_val*)fn_ptr;
+                taida_closure_cb0_fn closure_fn = (taida_closure_cb0_fn)closure[1];
+                taida_val env_ptr = closure[2];
+                return closure_fn(env_ptr);
+            }
+            // Plain function pointer — but we need to distinguish from non-function values.
+            // Function pointers are in code segment, not heap. We cannot reliably distinguish
+            // them from string pointers at runtime, so only dispatch closures here.
+            // Non-closure toString fields (e.g., string values) fall through to default display.
+        }
+    }
     return taida_value_to_display_string(obj);
 }
 
