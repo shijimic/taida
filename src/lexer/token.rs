@@ -1,9 +1,9 @@
 /// Source location tracking for error reporting and graph model.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Span {
-    /// Byte offset of the start position.
+    /// Char offset (Unicode scalar value index) of the start position.
     pub start: usize,
-    /// Byte offset of the end position (exclusive).
+    /// Char offset (Unicode scalar value index) of the end position (exclusive).
     pub end: usize,
     /// 1-based line number.
     pub line: usize,

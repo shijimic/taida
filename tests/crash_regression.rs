@@ -2,13 +2,12 @@
 ///
 /// Each `.td` case in `tests/crash_regression/` reproduces a previously observed
 /// crash/parity issue. The interpreter output is treated as the reference.
+mod common;
+
+use common::{normalize, taida_bin};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-
-fn taida_bin() -> PathBuf {
-    PathBuf::from(env!("CARGO_BIN_EXE_taida"))
-}
 
 fn crash_regression_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -31,18 +30,7 @@ fn unique_temp_path(prefix: &str, stem: &str, ext: &str) -> PathBuf {
     ))
 }
 
-/// Normalize output for comparison: strip trailing whitespace per line and at end.
-///
-/// LIMITATION (AT-1): This hides trailing-space differences between backends.
-/// See tests/parity.rs normalize() for full documentation.
-fn normalize(s: &str) -> String {
-    s.lines()
-        .map(|line| line.trim_end())
-        .collect::<Vec<_>>()
-        .join("\n")
-        .trim_end()
-        .to_string()
-}
+// normalize() is provided by common::normalize (RCB-26).
 
 fn node_available() -> bool {
     Command::new("node")

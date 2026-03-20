@@ -3,7 +3,7 @@
 /// All types have default values — null/undefined does not exist.
 /// Structural subtyping: a value with extra fields is compatible
 /// with a type that expects fewer fields (width subtyping).
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 
 type MoldDefFields = (Vec<String>, Vec<(String, Type)>);
@@ -223,12 +223,37 @@ impl TypeRegistry {
     }
 
     /// Register an inheritance relationship.
+    ///
+    /// Returns `false` if registering would create a cycle in the
+    /// inheritance chain (e.g. `A => B`, then `B => A`).  In that case
+    /// the relationship is **not** stored.
     pub fn register_inheritance(
         &mut self,
         parent: &str,
         child: &str,
         extra_fields: Vec<(String, Type)>,
-    ) {
+    ) -> bool {
+        // RCB-51: Detect cycles before inserting.
+        // Self-cycle: child == parent is always a cycle.
+        if child == parent {
+            return false;
+        }
+        // Walk from `parent` up to the root; if we encounter `child`
+        // anywhere in the chain the new edge would close a cycle.
+        let mut cursor = parent.to_string();
+        let mut visited = HashSet::new();
+        visited.insert(child.to_string());
+        while let Some(ancestor) = self.inheritance.get(&cursor) {
+            if ancestor == child {
+                return false; // Would form a cycle: child -> ... -> parent -> child
+            }
+            if !visited.insert(ancestor.clone()) {
+                // Already seen -- the chain is itself broken or cyclic.
+                return false;
+            }
+            cursor = ancestor.clone();
+        }
+
         self.inheritance
             .insert(child.to_string(), parent.to_string());
 
@@ -239,6 +264,7 @@ impl TypeRegistry {
         fields.retain(|(name, _)| !extra_fields.iter().any(|(n, _)| n == name));
         fields.extend(extra_fields);
         self.type_defs.insert(child.to_string(), fields);
+        true
     }
 
     /// Register an error type (inherits from an error parent).
@@ -246,20 +272,24 @@ impl TypeRegistry {
     /// `parent` is the direct parent type name (e.g. "Error" or "AppError").
     /// Delegates field composition and inheritance registration to `register_inheritance`,
     /// then additionally records the type in `error_types` (extra_fields only, not full set).
+    ///
+    /// Returns `false` if the inheritance would create a cycle.
     pub fn register_error_type(
         &mut self,
         parent: &str,
         name: &str,
         extra_fields: Vec<(String, Type)>,
-    ) {
+    ) -> bool {
         debug_assert!(
             self.get_type_fields(parent).is_some(),
             "register_error_type called with unregistered parent: {}",
             parent
         );
-        self.error_types
-            .insert(name.to_string(), extra_fields.clone());
-        self.register_inheritance(parent, name, extra_fields);
+        let registered = self.register_inheritance(parent, name, extra_fields.clone());
+        if registered {
+            self.error_types.insert(name.to_string(), extra_fields);
+        }
+        registered
     }
 
     /// Get the fields of a type definition.
@@ -286,10 +316,17 @@ impl TypeRegistry {
             // Named vs Named: check inheritance chain, then structural fields
             (Type::Named(a), Type::Named(b)) => {
                 // Check inheritance chain: a inherits from b?
+                // RCB-51: Use a visited set to prevent infinite loops on
+                // cyclic inheritance chains that slipped past validation.
                 let mut current = a.clone();
+                let mut visited = HashSet::new();
+                visited.insert(a.clone()); // include start node
                 while let Some(parent) = self.inheritance.get(&current) {
                     if parent == b {
                         return true;
+                    }
+                    if !visited.insert(parent.clone()) {
+                        break; // Cycle detected -- stop walking
                     }
                     current = parent.clone();
                 }
@@ -340,7 +377,7 @@ impl TypeRegistry {
     /// TypeExpr tree. This is acceptable at current codebase scale because:
     /// 1. Type expressions are typically shallow (1-3 levels deep).
     /// 2. The checker calls resolve_type() O(n) times per program where n is
-    ///    the number of type annotations — not per-expression.
+    ///    the number of type annotations -- not per-expression.
     /// 3. Adding a cache would require either interior mutability (&self -> &mut self
     ///    propagation) or a RefCell, adding complexity for negligible benefit.
     ///
@@ -400,7 +437,7 @@ mod tests {
 
     #[test]
     fn test_default_values_exist() {
-        // All types must have default values — PHILOSOPHY.md constraint
+        // All types must have default values -- PHILOSOPHY.md constraint
         let types = vec![
             Type::Int,
             Type::Float,
@@ -693,5 +730,60 @@ mod tests {
         assert!(reg.is_subtype_of(&car_ty, &vehicle_ty));
         // Vehicle is NOT Car
         assert!(!reg.is_subtype_of(&vehicle_ty, &car_ty));
+    }
+
+    // -- RCB-51: Cyclic inheritance detection --
+
+    #[test]
+    fn test_rcb51_direct_cycle_rejected() {
+        // A => B, then B => A should be rejected
+        let mut reg = TypeRegistry::new();
+        reg.register_type("A", vec![("a".to_string(), Type::Int)]);
+        assert!(reg.register_inheritance("A", "B", vec![("b".to_string(), Type::Int)]));
+        assert!(
+            !reg.register_inheritance("B", "A", vec![("c".to_string(), Type::Int)]),
+            "B => A should be rejected (would create A -> B -> A cycle)"
+        );
+    }
+
+    #[test]
+    fn test_rcb51_indirect_cycle_rejected() {
+        // A => B => C, then C => A should be rejected
+        let mut reg = TypeRegistry::new();
+        reg.register_type("A", vec![("a".to_string(), Type::Int)]);
+        assert!(reg.register_inheritance("A", "B", vec![("b".to_string(), Type::Int)]));
+        assert!(reg.register_inheritance("B", "C", vec![("c".to_string(), Type::Int)]));
+        assert!(
+            !reg.register_inheritance("C", "A", vec![("d".to_string(), Type::Int)]),
+            "C => A should be rejected (would create A -> B -> C -> A cycle)"
+        );
+    }
+
+    #[test]
+    fn test_rcb51_self_cycle_rejected() {
+        // A => A should be rejected
+        let mut reg = TypeRegistry::new();
+        reg.register_type("A", vec![("a".to_string(), Type::Int)]);
+        assert!(
+            !reg.register_inheritance("A", "A", vec![("b".to_string(), Type::Int)]),
+            "A => A should be rejected (self-cycle)"
+        );
+    }
+
+    #[test]
+    fn test_rcb51_is_subtype_of_no_hang_on_cycle() {
+        // Even if a cycle somehow exists in the inheritance map,
+        // is_subtype_of must terminate (visited-set guard).
+        let mut reg = TypeRegistry::new();
+        reg.register_type("X", vec![("x".to_string(), Type::Int)]);
+        reg.register_type("Y", vec![("y".to_string(), Type::Int)]);
+        // Force a cycle by manually inserting (bypass register_inheritance)
+        reg.inheritance.insert("X".to_string(), "Y".to_string());
+        reg.inheritance.insert("Y".to_string(), "X".to_string());
+        let x = Type::Named("X".to_string());
+        let y = Type::Named("Y".to_string());
+        // Must terminate without hanging
+        let _ = reg.is_subtype_of(&x, &y);
+        let _ = reg.is_subtype_of(&y, &x);
     }
 }

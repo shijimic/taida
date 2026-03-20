@@ -8,6 +8,9 @@
 ///   1. Interpreter vs JS -- all non-module, non-stdin examples
 ///   2. Interpreter vs Native -- all compile_*.td examples
 ///   3. Three-way parity -- compile_*.td files tested across all three backends
+mod common;
+
+use common::{normalize, run_interpreter_normalized, taida_bin};
 use std::fs;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream, UdpSocket};
@@ -17,21 +20,16 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-fn taida_bin() -> PathBuf {
-    PathBuf::from(env!("CARGO_BIN_EXE_taida"))
-}
-
 fn examples_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples")
 }
 
-/// Run a .td file with the interpreter and return stdout.
+/// Run a .td file with the interpreter and return normalized stdout.
+///
+/// Delegates to `common::run_interpreter_normalized` which applies per-line
+/// `normalize()` to tolerate minor trailing-whitespace differences between backends.
 fn run_interpreter(td_path: &Path) -> Option<String> {
-    let output = Command::new(taida_bin()).arg(td_path).output().ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    Some(normalize(&String::from_utf8_lossy(&output.stdout)))
+    run_interpreter_normalized(td_path)
 }
 
 /// Transpile a .td file to JS and execute with node, returning stdout.
@@ -169,21 +167,11 @@ fn run_native_with_error(td_path: &Path) -> Result<String, String> {
     Ok(normalize(&String::from_utf8_lossy(&run_output.stdout)))
 }
 
-/// Normalize output for comparison.
-/// Normalize output for comparison: strip trailing whitespace per line and at end.
-///
-/// LIMITATION (AT-1): This hides trailing-space differences between backends.
-/// For structured output (jsonPretty, indented strings), meaningful whitespace
-/// differences may be masked. Consider using exact comparison for specific tests
-/// where whitespace semantics matter.
-fn normalize(s: &str) -> String {
-    s.lines()
-        .map(|line| line.trim_end())
-        .collect::<Vec<_>>()
-        .join("\n")
-        .trim_end()
-        .to_string()
-}
+// normalize() is provided by common::normalize (RCB-26).
+// LIMITATION (AT-1): This hides trailing-space differences between backends.
+// For structured output (jsonPretty, indented strings), meaningful whitespace
+// differences may be masked. Consider using exact comparison for specific tests
+// where whitespace semantics matter.
 
 fn unique_temp_path(prefix: &str, label: &str, ext: &str) -> PathBuf {
     let nanos = std::time::SystemTime::now()
@@ -4666,6 +4654,73 @@ stdout(fromC("2"))
     if node_available() {
         let js = run_js_project(&main_path, "rc1n_val").expect("RC-1n-val: js should succeed");
         assert_eq!(interp, js, "RC-1n-val: interpreter/js mismatch");
+    }
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// RCB-43: Diamond dependency with different symbols from shared module.
+/// B imports funcX from D, C imports funcY from D (distinct symbol sets).
+/// Exercises the diff-symbol code path in the WASM module inliner's IR cache.
+/// Verifies correctness across all backends.
+#[test]
+fn test_rcb43_diamond_different_symbols() {
+    let dir = unique_temp_path("taida_rcb43", "diamond_diff", "dir");
+    fs::create_dir_all(&dir).expect("create temp dir");
+
+    // D exports two distinct functions
+    fs::write(
+        dir.join("mod_d.td"),
+        r#"funcX x = "X:" + x => :Str
+funcY y = "Y:" + y => :Str
+<<< @(funcX, funcY)
+"#,
+    )
+    .expect("write mod_d");
+
+    // B imports only funcX from D
+    fs::write(
+        dir.join("mod_b.td"),
+        r#">>> ./mod_d.td => @(funcX)
+fromB x = "B(" + funcX(x) + ")" => :Str
+<<< @(fromB)
+"#,
+    )
+    .expect("write mod_b");
+
+    // C imports only funcY from D (different symbol from B)
+    fs::write(
+        dir.join("mod_c.td"),
+        r#">>> ./mod_d.td => @(funcY)
+fromC y = "C(" + funcY(y) + ")" => :Str
+<<< @(fromC)
+"#,
+    )
+    .expect("write mod_c");
+
+    fs::write(
+        dir.join("main.td"),
+        r#">>> ./mod_b.td => @(fromB)
+>>> ./mod_c.td => @(fromC)
+stdout(fromB("hello"))
+stdout(fromC("world"))
+"#,
+    )
+    .expect("write main");
+
+    let main_path = dir.join("main.td");
+    let interp = run_interpreter(&main_path).expect("RCB-43: interpreter should succeed");
+    assert_eq!(
+        interp, "B(X:hello)\nC(Y:world)",
+        "RCB-43: unexpected interpreter output"
+    );
+
+    let native = run_native(&main_path).expect("RCB-43: native should succeed");
+    assert_eq!(interp, native, "RCB-43: interpreter/native mismatch");
+
+    if node_available() {
+        let js = run_js_project(&main_path, "rcb43_diff").expect("RCB-43: js should succeed");
+        assert_eq!(interp, js, "RCB-43: interpreter/js mismatch");
     }
 
     let _ = fs::remove_dir_all(&dir);

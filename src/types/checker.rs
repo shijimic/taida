@@ -719,6 +719,39 @@ impl TypeChecker {
         }
     }
 
+    /// RCB-50: Check whether a type contains an unresolved type variable.
+    ///
+    /// A `Named` type that is not registered in the type registry is
+    /// an unresolved generic type parameter (e.g. `T`, `U`).  When
+    /// either the body type or the declared return type contains such
+    /// a variable, the return-type check must be suppressed because
+    /// the checker cannot meaningfully compare them.
+    fn contains_unresolved_type_var(&self, ty: &Type) -> bool {
+        match ty {
+            Type::Named(name) => self.registry.get_type_fields(name).is_none(),
+            Type::List(inner) => self.contains_unresolved_type_var(inner),
+            Type::Generic(_, args) => args.iter().any(|a| self.contains_unresolved_type_var(a)),
+            Type::BuchiPack(fields) => fields
+                .iter()
+                .any(|(_, t)| self.contains_unresolved_type_var(t)),
+            Type::Function(params, ret) => {
+                params.iter().any(|p| self.contains_unresolved_type_var(p))
+                    || self.contains_unresolved_type_var(ret)
+            }
+            _ => false,
+        }
+    }
+
+    /// RCB-50: Check whether a type is a mold-defined Named type.
+    ///
+    /// Custom mold instantiations (e.g. `AlwaysFail[x]()`) return
+    /// `Type::Named("AlwaysFail")` from `infer_expr_type`, but the
+    /// checker cannot predict what the mold's `solidify` function
+    /// actually produces at runtime.  We suppress E1601 in this case.
+    fn is_mold_defined_named(&self, ty: &Type) -> bool {
+        matches!(ty, Type::Named(name) if self.registry.mold_defs.contains_key(name))
+    }
+
     /// Push a new scope (e.g., entering a function body).
     fn push_scope(&mut self) {
         self.scope_stack.push(HashMap::new());
@@ -1193,12 +1226,25 @@ impl TypeChecker {
                     }
                 }
 
-                if self.registry.is_error_type(&inh.parent) {
+                // RCB-51: Detect cyclic inheritance and emit an error
+                // instead of silently accepting it (which causes
+                // is_subtype_of to loop forever).
+                let registered = if self.registry.is_error_type(&inh.parent) {
                     self.registry
-                        .register_error_type(&inh.parent, &inh.child, extra_fields);
+                        .register_error_type(&inh.parent, &inh.child, extra_fields)
                 } else {
                     self.registry
-                        .register_inheritance(&inh.parent, &inh.child, extra_fields);
+                        .register_inheritance(&inh.parent, &inh.child, extra_fields)
+                };
+                if !registered {
+                    self.errors.push(TypeError {
+                        message: format!(
+                            "[E1610] Cyclic inheritance detected: '{}' => '{}' would create a cycle in the inheritance chain. \
+                             Hint: Remove one of the inheritance relationships to break the cycle.",
+                            inh.parent, inh.child
+                        ),
+                        span: inh.span.clone(),
+                    });
                 }
 
                 if let Some(ref parent_header) = parent_header {
@@ -2023,13 +2069,13 @@ defaulted fields must be provided via `()`",
                             || self.registry.is_subtype_of(&body_ty, &ret_ty)
                             // Allow numeric narrowing: Num body is compatible with Int/Float/Num return
                             || body_ty.is_numeric() && ret_ty.is_numeric()
-                            // RCB-241: Mold/Fold application, unmold (]=>), and
-                            // inheritance can produce types that the checker cannot
-                            // accurately track. Named types include Mold subtypes whose
-                            // solidification yields the filling type at runtime (e.g.,
-                            // AlwaysFail[x]() -> Int), so we must exempt all Named body
-                            // types until the checker gains full mold-tracking.
-                            || matches!(body_ty, Type::Named(_) | Type::List(_) | Type::BuchiPack(_)))
+                            // RCB-50: Named/List/BuchiPack are now properly checked
+                            // via is_subtype_of. The previous blanket skip hid genuine
+                            // return-type mismatches.
+                            || ret_ty == Type::Unknown
+                            || self.contains_unresolved_type_var(&body_ty)
+                            || self.contains_unresolved_type_var(&ret_ty)
+                            || self.is_mold_defined_named(&body_ty))
                         {
                             self.errors.push(TypeError {
                                 message: format!(

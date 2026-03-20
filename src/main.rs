@@ -70,6 +70,7 @@ Commands:
   install     Install dependencies and write lockfile
   update      Update dependencies and lockfile
   publish     Prepare and publish a package
+  cache       Manage WASM runtime cache
   doc         Generate docs from doc comments
   lsp         Run the language server over stdio
   auth        Manage authentication state
@@ -124,7 +125,7 @@ fn print_build_help() {
     println!(
         "\
 Usage:
-  taida build [--target js|native|wasm-min|wasm-wasi|wasm-edge|wasm-full] [--release] [--diag-format text|jsonl] [-o OUTPUT] [--entry ENTRY] <PATH>
+  taida build [--target js|native|wasm-min|wasm-wasi|wasm-edge|wasm-full] [--release] [--no-cache] [--diag-format text|jsonl] [-o OUTPUT] [--entry ENTRY] <PATH>
 
 Options:
   --target        Build target (default: js)
@@ -132,6 +133,7 @@ Options:
   --outdir        Alias of `--output`
   --entry         Native dir entry override (default: main.td)
   --release, -r   Fail if TODO/Stub remains in source
+  --no-cache      Disable WASM runtime .o cache
   --diag-format   text | jsonl
 
 Examples:
@@ -339,6 +341,7 @@ fn main() {
                 std::process::exit(1);
             }
             "doc" => run_doc(&filtered_args[2..]),
+            "cache" => run_cache(&filtered_args[2..]),
             "todo" => run_todo(&filtered_args[2..]),
             #[cfg(feature = "community")]
             "auth" => auth::run_auth(&filtered_args[2..]),
@@ -677,6 +680,14 @@ impl BuildTarget {
             Self::WasmFull => "wasm-full",
         }
     }
+
+    /// S-2: Returns true for WASM targets that use the runtime cache.
+    fn is_wasm(self) -> bool {
+        matches!(
+            self,
+            Self::WasmMin | Self::WasmWasi | Self::WasmEdge | Self::WasmFull
+        )
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -838,7 +849,7 @@ fn print_build_usage_and_exit() -> ! {
     eprintln!(
         "\
 Usage:
-  taida build [--target js|native|wasm-min|wasm-wasi|wasm-edge|wasm-full] [--release] [--diag-format text|jsonl] [-o OUTPUT] [--entry ENTRY] <PATH>
+  taida build [--target js|native|wasm-min|wasm-wasi|wasm-edge|wasm-full] [--release] [--no-cache] [--diag-format text|jsonl] [-o OUTPUT] [--entry ENTRY] <PATH>
 
 Options:
   --target        Build target (default: js)
@@ -846,6 +857,7 @@ Options:
   --outdir        Alias of `--output`
   --entry         Native dir entry override (default: main.td)
   --release, -r   Fail if TODO/Stub remains in source
+  --no-cache      Disable WASM runtime .o cache
   --diag-format   text | jsonl"
     );
     std::process::exit(1);
@@ -858,6 +870,7 @@ fn run_build(args: &[String], no_check: bool) {
     let mut output_path: Option<String> = None;
     let mut entry_path: Option<String> = None;
     let mut release_mode = false;
+    let mut no_cache = false;
 
     let mut i = 0;
     while i < args.len() {
@@ -912,6 +925,9 @@ fn run_build(args: &[String], no_check: bool) {
             "-r" | "--release" => {
                 release_mode = true;
             }
+            "--no-cache" => {
+                no_cache = true;
+            }
             raw if raw.starts_with('-') => {
                 eprintln!("Unknown option for build: {}", raw);
                 print_build_usage_and_exit();
@@ -933,6 +949,22 @@ fn run_build(args: &[String], no_check: bool) {
     };
     let input_path = Path::new(&input);
     let mut compile_stats = CompileDiagStats::default();
+
+    // S-2: Initialize WASM runtime cache once for all wasm targets.
+    // N-2: Emit warning if cache initialization fails instead of silently ignoring.
+    #[cfg(feature = "native")]
+    let wasm_rt_cache = if no_cache || !target.is_wasm() {
+        None
+    } else {
+        let cache_dir = codegen::driver::default_wasm_cache_dir(input_path.parent());
+        match codegen::driver::WasmRuntimeCache::new(cache_dir) {
+            Ok(cache) => Some(cache),
+            Err(e) => {
+                eprintln!("warning: WASM runtime cache initialization failed: {}", e);
+                None
+            }
+        }
+    };
 
     match target {
         BuildTarget::Js => {
@@ -988,6 +1020,7 @@ fn run_build(args: &[String], no_check: bool) {
                 output_path.as_deref(),
                 release_mode,
                 no_check,
+                wasm_rt_cache.as_ref(),
                 diag_format,
                 &mut compile_stats,
             );
@@ -1005,6 +1038,7 @@ fn run_build(args: &[String], no_check: bool) {
                 output_path.as_deref(),
                 release_mode,
                 no_check,
+                wasm_rt_cache.as_ref(),
                 diag_format,
                 &mut compile_stats,
             );
@@ -1022,6 +1056,7 @@ fn run_build(args: &[String], no_check: bool) {
                 output_path.as_deref(),
                 release_mode,
                 no_check,
+                wasm_rt_cache.as_ref(),
                 diag_format,
                 &mut compile_stats,
             );
@@ -1039,6 +1074,7 @@ fn run_build(args: &[String], no_check: bool) {
                 output_path.as_deref(),
                 release_mode,
                 no_check,
+                wasm_rt_cache.as_ref(),
                 diag_format,
                 &mut compile_stats,
             );
@@ -2076,6 +2112,7 @@ fn run_build_wasm_min(
     output_path: Option<&str>,
     release_mode: bool,
     no_check: bool,
+    rt_cache: Option<&codegen::driver::WasmRuntimeCache>,
     diag_format: DiagFormat,
     compile_stats: &mut CompileDiagStats,
 ) {
@@ -2203,7 +2240,8 @@ fn run_build_wasm_min(
         default_wasm_output = build_dir.join(format!("{}.wasm", stem));
         Some(default_wasm_output.as_path())
     };
-    match codegen::driver::compile_file_wasm(input_path, output) {
+    // S-2: Cache is initialized once in run_build and passed in.
+    match codegen::driver::compile_file_wasm_cached(input_path, output, rt_cache) {
         Ok(wasm_path) => {
             if diag_format == DiagFormat::Text {
                 // RCB-217: Display canonical path for consistency with JS backend
@@ -2240,6 +2278,7 @@ fn run_build_wasm_wasi(
     output_path: Option<&str>,
     release_mode: bool,
     no_check: bool,
+    rt_cache: Option<&codegen::driver::WasmRuntimeCache>,
     diag_format: DiagFormat,
     compile_stats: &mut CompileDiagStats,
 ) {
@@ -2367,7 +2406,8 @@ fn run_build_wasm_wasi(
         default_wasm_output = build_dir.join(format!("{}.wasm", stem));
         Some(default_wasm_output.as_path())
     };
-    match codegen::driver::compile_file_wasm_wasi(input_path, output) {
+    // S-2: Cache is initialized once in run_build and passed in.
+    match codegen::driver::compile_file_wasm_wasi_cached(input_path, output, rt_cache) {
         Ok(wasm_path) => {
             if diag_format == DiagFormat::Text {
                 // RCB-217: Display canonical path for consistency with JS backend
@@ -2404,6 +2444,7 @@ fn run_build_wasm_edge(
     output_path: Option<&str>,
     release_mode: bool,
     no_check: bool,
+    rt_cache: Option<&codegen::driver::WasmRuntimeCache>,
     diag_format: DiagFormat,
     compile_stats: &mut CompileDiagStats,
 ) {
@@ -2531,7 +2572,8 @@ fn run_build_wasm_edge(
         default_wasm_output = build_dir.join(format!("{}.wasm", stem));
         Some(default_wasm_output.as_path())
     };
-    match codegen::driver::compile_file_wasm_edge(input_path, output) {
+    // S-2: Cache is initialized once in run_build and passed in.
+    match codegen::driver::compile_file_wasm_edge_cached(input_path, output, rt_cache) {
         Ok(result) => {
             if diag_format == DiagFormat::Text {
                 // RCB-217: Display canonical path for consistency with JS backend
@@ -2570,6 +2612,7 @@ fn run_build_wasm_full(
     output_path: Option<&str>,
     release_mode: bool,
     no_check: bool,
+    rt_cache: Option<&codegen::driver::WasmRuntimeCache>,
     diag_format: DiagFormat,
     compile_stats: &mut CompileDiagStats,
 ) {
@@ -2697,7 +2740,8 @@ fn run_build_wasm_full(
         default_wasm_output = build_dir.join(format!("{}.wasm", stem));
         Some(default_wasm_output.as_path())
     };
-    match codegen::driver::compile_file_wasm_full(input_path, output) {
+    // S-2: Cache is initialized once in run_build and passed in.
+    match codegen::driver::compile_file_wasm_full_cached(input_path, output, rt_cache) {
         Ok(wasm_path) => {
             if diag_format == DiagFormat::Text {
                 // RCB-217: Display canonical path for consistency with JS backend
@@ -4207,6 +4251,70 @@ fn run_publish(args: &[String]) {
 }
 
 // ── Doc subcommand ──────────────────────────────────────
+
+// ---------------------------------------------------------------------------
+// N-3: `taida cache clean` — remove stale WASM runtime cache files
+// ---------------------------------------------------------------------------
+
+fn run_cache(args: &[String]) {
+    if args.is_empty() || args.iter().any(|a| is_help_flag(a.as_str())) {
+        println!("Usage: taida cache <command>");
+        println!();
+        println!("Commands:");
+        println!("  clean    Remove all cached WASM runtime .o files");
+        return;
+    }
+
+    match args[0].as_str() {
+        "clean" => run_cache_clean(),
+        other => {
+            eprintln!(
+                "Unknown cache command '{}'. Use 'taida cache clean'.",
+                other
+            );
+            std::process::exit(1);
+        }
+    }
+}
+
+fn run_cache_clean() {
+    // RCB-56: Use absolute CWD to match run_build()'s input_path.parent() behavior.
+    // Both now resolve .taida/cache/wasm-rt/ from an absolute path.
+    let project_dir = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let cache_dir = codegen::driver::default_wasm_cache_dir(Some(&project_dir));
+
+    if !cache_dir.exists() {
+        println!("No cache directory found at '{}'.", cache_dir.display());
+        return;
+    }
+
+    let mut removed = 0usize;
+    if let Ok(entries) = fs::read_dir(&cache_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let fname = path.file_name().and_then(|f| f.to_str()).unwrap_or("");
+            // Remove cached .o files and temp files, preserve 'include/' dir
+            if (fname.ends_with(".o") || fname.ends_with(".tmp.c") || fname.ends_with(".tmp.o"))
+                && fs::remove_file(&path).is_ok()
+            {
+                removed += 1;
+            }
+        }
+    }
+
+    if removed > 0 {
+        println!(
+            "Cleaned {} cached file(s) from '{}'.",
+            removed,
+            cache_dir.display()
+        );
+    } else {
+        println!(
+            "Cache directory '{}' is already clean.",
+            cache_dir.display()
+        );
+    }
+}
 
 fn run_doc(args: &[String]) {
     if args.iter().any(|a| is_help_flag(a.as_str())) {
