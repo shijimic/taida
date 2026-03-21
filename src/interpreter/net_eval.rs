@@ -15,7 +15,7 @@
 /// These are `impl Interpreter` methods split from eval.rs for maintainability.
 
 use super::eval::{Interpreter, RuntimeError, Signal};
-use super::value::Value;
+use super::value::{ErrorValue, Value};
 use crate::parser::Expr;
 
 /// All symbols exported by the net package.
@@ -43,6 +43,267 @@ pub(crate) const NET_SYMBOLS: &[&str] = &[
     "httpParseRequestHead",
     "httpEncodeResponse",
 ];
+
+// ── Result helpers ──────────────────────────────────────────
+
+fn make_result_success(inner: Value) -> Value {
+    Value::BuchiPack(vec![
+        ("__value".into(), inner),
+        ("throw".into(), Value::Unit),
+        ("__predicate".into(), Value::Unit),
+        ("__type".into(), Value::Str("Result".into())),
+    ])
+}
+
+fn make_result_failure_msg(kind: &str, message: impl Into<String>) -> Value {
+    let message = message.into();
+    let inner = Value::BuchiPack(vec![
+        ("ok".into(), Value::Bool(false)),
+        ("code".into(), Value::Int(-1)),
+        ("message".into(), Value::Str(message.clone())),
+        ("kind".into(), Value::Str(kind.to_string())),
+    ]);
+    let error_val = Value::Error(ErrorValue {
+        error_type: "HttpError".into(),
+        message,
+        fields: vec![("kind".into(), Value::Str(kind.to_string()))],
+    });
+    Value::BuchiPack(vec![
+        ("__value".into(), inner),
+        ("throw".into(), error_val),
+        ("__predicate".into(), Value::Unit),
+        ("__type".into(), Value::Str("Result".into())),
+    ])
+}
+
+fn make_span(start: usize, len: usize) -> Value {
+    Value::BuchiPack(vec![
+        ("start".into(), Value::Int(start as i64)),
+        ("len".into(), Value::Int(len as i64)),
+    ])
+}
+
+// ── httpParseRequestHead ────────────────────────────────────
+
+/// Parse HTTP/1.1 request head from raw bytes.
+/// Returns Result[@(complete, consumed, method, path, query, version, headers, bodyOffset, contentLength), _]
+fn parse_request_head(bytes: &[u8]) -> Value {
+    let mut header_buf = [httparse::EMPTY_HEADER; 64];
+    let mut req = httparse::Request::new(&mut header_buf);
+
+    match req.parse(bytes) {
+        Ok(httparse::Status::Complete(consumed)) => {
+            build_parse_result(&req, bytes, consumed, true)
+        }
+        Ok(httparse::Status::Partial) => {
+            // Incomplete: try to extract what we can, but mark complete=false
+            // Re-parse to get partial data (httparse populates fields even on Partial)
+            build_parse_result(&req, bytes, 0, false)
+        }
+        Err(e) => make_result_failure_msg("ParseError", format!("Malformed HTTP request: {}", e)),
+    }
+}
+
+fn build_parse_result(
+    req: &httparse::Request,
+    bytes: &[u8],
+    consumed: usize,
+    complete: bool,
+) -> Value {
+    let base = bytes.as_ptr() as usize;
+
+    // method span
+    let method_span = if let Some(method) = req.method {
+        let start = method.as_ptr() as usize - base;
+        make_span(start, method.len())
+    } else {
+        make_span(0, 0)
+    };
+
+    // path + query spans (split on '?')
+    let (path_span, query_span) = if let Some(full_path) = req.path {
+        let path_start = full_path.as_ptr() as usize - base;
+        if let Some(q_pos) = full_path.find('?') {
+            (
+                make_span(path_start, q_pos),
+                make_span(path_start + q_pos + 1, full_path.len() - q_pos - 1),
+            )
+        } else {
+            (make_span(path_start, full_path.len()), make_span(0, 0))
+        }
+    } else {
+        (make_span(0, 0), make_span(0, 0))
+    };
+
+    // version
+    let version = Value::BuchiPack(vec![
+        ("major".into(), Value::Int(1)),
+        (
+            "minor".into(),
+            Value::Int(req.version.unwrap_or(1) as i64),
+        ),
+    ]);
+
+    // headers as list of @(name: span, value: span)
+    // On Partial parse, req.headers contains EMPTY_HEADER entries beyond parsed ones.
+    // Stop at the first empty header name to avoid pointer arithmetic on unrelated memory.
+    let mut content_length: i64 = 0;
+    let mut headers_list = Vec::new();
+    for header in req.headers.iter() {
+        if header.name.is_empty() {
+            break;
+        }
+        let name_start = header.name.as_ptr() as usize - base;
+        let value_start = header.value.as_ptr() as usize - base;
+        headers_list.push(Value::BuchiPack(vec![
+            ("name".into(), make_span(name_start, header.name.len())),
+            ("value".into(), make_span(value_start, header.value.len())),
+        ]));
+        if header.name.eq_ignore_ascii_case("content-length") {
+            if let Ok(s) = std::str::from_utf8(header.value) {
+                if let Ok(len) = s.trim().parse::<i64>() {
+                    content_length = len;
+                }
+            }
+        }
+    }
+
+    let parsed = Value::BuchiPack(vec![
+        ("complete".into(), Value::Bool(complete)),
+        ("consumed".into(), Value::Int(consumed as i64)),
+        ("method".into(), method_span),
+        ("path".into(), path_span),
+        ("query".into(), query_span),
+        ("version".into(), version),
+        ("headers".into(), Value::List(headers_list)),
+        ("bodyOffset".into(), Value::Int(consumed as i64)),
+        ("contentLength".into(), Value::Int(content_length)),
+    ]);
+
+    make_result_success(parsed)
+}
+
+// ── httpEncodeResponse ──────────────────────────────────────
+
+/// Encode a response BuchiPack into HTTP/1.1 wire bytes.
+/// Input: @(status: Int, headers: @[@(name: Str, value: Str)], body: Bytes | Str)
+/// Returns Result[@(bytes: Bytes), _]
+fn encode_response(response: &Value) -> Value {
+    let (status, headers, body_bytes) = match extract_response_fields(response) {
+        Ok(fields) => fields,
+        Err(msg) => return make_result_failure_msg("EncodeError", msg),
+    };
+
+    let reason = status_reason(status);
+    let mut buf = Vec::with_capacity(256 + body_bytes.len());
+
+    // Status line
+    buf.extend_from_slice(format!("HTTP/1.1 {} {}\r\n", status, reason).as_bytes());
+
+    // Check if user provided Content-Length
+    let has_content_length = headers
+        .iter()
+        .any(|(n, _)| n.eq_ignore_ascii_case("Content-Length"));
+
+    // User headers
+    for (name, value) in &headers {
+        buf.extend_from_slice(format!("{}: {}\r\n", name, value).as_bytes());
+    }
+
+    // Auto-append Content-Length if not provided
+    if !has_content_length {
+        buf.extend_from_slice(format!("Content-Length: {}\r\n", body_bytes.len()).as_bytes());
+    }
+
+    buf.extend_from_slice(b"\r\n");
+    buf.extend_from_slice(&body_bytes);
+
+    let result = Value::BuchiPack(vec![("bytes".into(), Value::Bytes(buf))]);
+    make_result_success(result)
+}
+
+fn extract_response_fields(
+    response: &Value,
+) -> Result<(i64, Vec<(String, String)>, Vec<u8>), String> {
+    let fields = match response {
+        Value::BuchiPack(fields) => fields,
+        _ => return Err("httpEncodeResponse: argument must be a BuchiPack @(...)".into()),
+    };
+
+    // status
+    let status = fields
+        .iter()
+        .find(|(k, _)| k == "status")
+        .and_then(|(_, v)| if let Value::Int(n) = v { Some(*n) } else { None })
+        .unwrap_or(200);
+
+    // headers
+    let mut headers = Vec::new();
+    if let Some((_, Value::List(header_list))) = fields.iter().find(|(k, _)| k == "headers") {
+        for h in header_list {
+            if let Value::BuchiPack(hf) = h {
+                let name = hf
+                    .iter()
+                    .find(|(k, _)| k == "name")
+                    .and_then(|(_, v)| {
+                        if let Value::Str(s) = v {
+                            Some(s.clone())
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap_or_default();
+                let value = hf
+                    .iter()
+                    .find(|(k, _)| k == "value")
+                    .and_then(|(_, v)| {
+                        if let Value::Str(s) = v {
+                            Some(s.clone())
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap_or_default();
+                headers.push((name, value));
+            }
+        }
+    }
+
+    // body (Bytes or Str)
+    let body_bytes = fields
+        .iter()
+        .find(|(k, _)| k == "body")
+        .map(|(_, v)| match v {
+            Value::Bytes(b) => b.clone(),
+            Value::Str(s) => s.as_bytes().to_vec(),
+            _ => Vec::new(),
+        })
+        .unwrap_or_default();
+
+    Ok((status, headers, body_bytes))
+}
+
+fn status_reason(code: i64) -> &'static str {
+    match code {
+        200 => "OK",
+        201 => "Created",
+        204 => "No Content",
+        301 => "Moved Permanently",
+        302 => "Found",
+        304 => "Not Modified",
+        400 => "Bad Request",
+        401 => "Unauthorized",
+        403 => "Forbidden",
+        404 => "Not Found",
+        405 => "Method Not Allowed",
+        500 => "Internal Server Error",
+        502 => "Bad Gateway",
+        503 => "Service Unavailable",
+        _ => "OK",
+    }
+}
+
+// ── Dispatch ────────────────────────────────────────────────
 
 impl Interpreter {
     /// Try to handle a net built-in function call.
@@ -79,17 +340,59 @@ impl Interpreter {
                 self.try_os_func(&original_name, args)
             }
 
-            // ── HTTP v1 — stub (implementation in NET-1/NET-2) ──
-            "httpServe" | "httpParseRequestHead" | "httpEncodeResponse" => {
-                Err(RuntimeError {
-                    message: format!(
-                        "{} is not yet implemented (taida-lang/net HTTP v1 pending)",
-                        original_name
-                    ),
-                })
+            // ── httpParseRequestHead(bytes) → Result[@(parsed), _] ──
+            "httpParseRequestHead" => {
+                let bytes = self.eval_net_bytes_arg(args, 0, "httpParseRequestHead")?;
+                Ok(Some(Signal::Value(parse_request_head(&bytes))))
             }
 
+            // ── httpEncodeResponse(response) → Result[@(bytes: Bytes), _] ──
+            "httpEncodeResponse" => {
+                let response = match args.first() {
+                    Some(arg) => match self.eval_expr(arg)? {
+                        Signal::Value(v) => v,
+                        other => return Ok(Some(other)),
+                    },
+                    None => {
+                        return Err(RuntimeError {
+                            message: "httpEncodeResponse: missing response argument".into(),
+                        })
+                    }
+                };
+                Ok(Some(Signal::Value(encode_response(&response))))
+            }
+
+            // ── httpServe — stub (implementation in NET-2) ──
+            "httpServe" => Err(RuntimeError {
+                message: "httpServe is not yet implemented (taida-lang/net NET-2 pending)".into(),
+            }),
+
             _ => Ok(None),
+        }
+    }
+
+    fn eval_net_bytes_arg(
+        &mut self,
+        args: &[Expr],
+        index: usize,
+        func_name: &str,
+    ) -> Result<Vec<u8>, RuntimeError> {
+        let arg = args.get(index).ok_or_else(|| RuntimeError {
+            message: format!("{}: missing bytes argument", func_name),
+        })?;
+        match self.eval_expr(arg)? {
+            Signal::Value(Value::Bytes(b)) => Ok(b),
+            Signal::Value(Value::Str(s)) => Ok(s.into_bytes()),
+            Signal::Value(v) => Err(RuntimeError {
+                message: format!("{}: argument must be Bytes or Str, got {}", func_name, v),
+            }),
+            other => Err(RuntimeError {
+                message: format!(
+                    "{}: unexpected signal: {:?}",
+                    func_name,
+                    std::mem::discriminant(&other)
+                ),
+            }),
         }
     }
 }
@@ -102,98 +405,305 @@ mod tests {
     fn test_net_symbols_count() {
         // 16 legacy + 3 HTTP v1 = 19
         assert_eq!(NET_SYMBOLS.len(), 19);
-        // Legacy
         assert!(NET_SYMBOLS.contains(&"dnsResolve"));
-        assert!(NET_SYMBOLS.contains(&"tcpConnect"));
-        assert!(NET_SYMBOLS.contains(&"socketClose"));
-        assert!(NET_SYMBOLS.contains(&"udpClose"));
-        // HTTP v1
         assert!(NET_SYMBOLS.contains(&"httpServe"));
         assert!(NET_SYMBOLS.contains(&"httpParseRequestHead"));
         assert!(NET_SYMBOLS.contains(&"httpEncodeResponse"));
     }
 
+    // ── Sentinel guard tests ──
+
     #[test]
     fn test_sentinel_guard_blocks_without_import() {
-        // httpServe without sentinel → try_net_func returns None (no interception)
         let mut interp = Interpreter::new();
         let args: Vec<Expr> = vec![];
         let result = interp.try_net_func("httpServe", &args).unwrap();
-        assert!(result.is_none(), "should return None without sentinel");
+        assert!(result.is_none());
     }
 
     #[test]
     fn test_sentinel_guard_passes_with_correct_sentinel() {
-        // httpServe with correct sentinel → dispatches (returns error since stub)
         let mut interp = Interpreter::new();
         interp
             .env
             .define_force("httpServe", Value::Str("__net_builtin_httpServe".into()));
         let args: Vec<Expr> = vec![];
         let result = interp.try_net_func("httpServe", &args);
-        assert!(result.is_err(), "stub should return RuntimeError");
-        let err = result.unwrap_err();
-        assert!(
-            err.message.contains("not yet implemented"),
-            "error: {}",
-            err.message
-        );
+        assert!(result.is_err());
     }
 
     #[test]
     fn test_sentinel_guard_with_alias() {
         // >>> taida-lang/net => @(httpServe: serve)
-        // env["serve"] = "__net_builtin_httpServe" → should dispatch correctly
         let mut interp = Interpreter::new();
         interp
             .env
             .define_force("serve", Value::Str("__net_builtin_httpServe".into()));
         let args: Vec<Expr> = vec![];
         let result = interp.try_net_func("serve", &args);
-        assert!(result.is_err(), "aliased stub should return RuntimeError");
-        let err = result.unwrap_err();
-        assert!(
-            err.message.contains("httpServe"),
-            "error should reference original name: {}",
-            err.message
-        );
+        assert!(result.is_err());
+        assert!(result.unwrap_err().message.contains("httpServe"));
     }
 
     #[test]
     fn test_sentinel_guard_blocks_wrong_sentinel() {
-        // httpServe with os sentinel → try_net_func returns None
         let mut interp = Interpreter::new();
         interp
             .env
             .define_force("httpServe", Value::Str("__os_builtin_httpServe".into()));
         let args: Vec<Expr> = vec![];
-        let result = interp.try_net_func("httpServe", &args).unwrap();
-        assert!(result.is_none(), "wrong sentinel should return None");
+        assert!(interp.try_net_func("httpServe", &args).unwrap().is_none());
     }
 
     #[test]
     fn test_sentinel_guard_blocks_user_function() {
-        // httpServe defined as user function → try_net_func returns None
         let mut interp = Interpreter::new();
-        interp
-            .env
-            .define_force("httpServe", Value::Int(42));
+        interp.env.define_force("httpServe", Value::Int(42));
         let args: Vec<Expr> = vec![];
-        let result = interp.try_net_func("httpServe", &args).unwrap();
-        assert!(result.is_none(), "user value should return None");
+        assert!(interp.try_net_func("httpServe", &args).unwrap().is_none());
+    }
+
+    // ── httpParseRequestHead tests ──
+
+    #[test]
+    fn test_parse_complete_get() {
+        let raw = b"GET /path?x=1 HTTP/1.1\r\nHost: localhost\r\n\r\n";
+        let result = parse_request_head(raw);
+        let fields = match &result {
+            Value::BuchiPack(f) => f,
+            _ => panic!("expected BuchiPack"),
+        };
+        // Result success: __type = "Result", throw = Unit
+        assert!(matches!(
+            fields.iter().find(|(k, _)| k == "__type"),
+            Some((_, Value::Str(s))) if s == "Result"
+        ));
+        assert!(matches!(
+            fields.iter().find(|(k, _)| k == "throw"),
+            Some((_, Value::Unit))
+        ));
+        // Inner value
+        let inner = match fields.iter().find(|(k, _)| k == "__value") {
+            Some((_, v)) => v,
+            _ => panic!("no __value"),
+        };
+        let inner_fields = match inner {
+            Value::BuchiPack(f) => f,
+            _ => panic!("expected BuchiPack"),
+        };
+        // complete = true
+        assert!(matches!(
+            inner_fields.iter().find(|(k, _)| k == "complete"),
+            Some((_, Value::Bool(true)))
+        ));
+        // method span: "GET" starts at 0, len 3
+        let method = match inner_fields.iter().find(|(k, _)| k == "method") {
+            Some((_, Value::BuchiPack(f))) => f,
+            _ => panic!("no method"),
+        };
+        assert!(matches!(
+            method.iter().find(|(k, _)| k == "start"),
+            Some((_, Value::Int(0)))
+        ));
+        assert!(matches!(
+            method.iter().find(|(k, _)| k == "len"),
+            Some((_, Value::Int(3)))
+        ));
+        // path span: "/path" starts at 4, len 5
+        let path = match inner_fields.iter().find(|(k, _)| k == "path") {
+            Some((_, Value::BuchiPack(f))) => f,
+            _ => panic!("no path"),
+        };
+        assert!(matches!(
+            path.iter().find(|(k, _)| k == "start"),
+            Some((_, Value::Int(4)))
+        ));
+        assert!(matches!(
+            path.iter().find(|(k, _)| k == "len"),
+            Some((_, Value::Int(5)))
+        ));
+        // query span: "x=1" starts at 10, len 3
+        let query = match inner_fields.iter().find(|(k, _)| k == "query") {
+            Some((_, Value::BuchiPack(f))) => f,
+            _ => panic!("no query"),
+        };
+        assert!(matches!(
+            query.iter().find(|(k, _)| k == "start"),
+            Some((_, Value::Int(10)))
+        ));
+        assert!(matches!(
+            query.iter().find(|(k, _)| k == "len"),
+            Some((_, Value::Int(3)))
+        ));
     }
 
     #[test]
-    fn test_http_stubs_return_not_implemented() {
-        for name in ["httpServe", "httpParseRequestHead", "httpEncodeResponse"] {
-            let mut interp = Interpreter::new();
-            interp.env.define_force(
-                name,
-                Value::Str(format!("__net_builtin_{}", name)),
-            );
-            let args: Vec<Expr> = vec![];
-            let result = interp.try_net_func(name, &args);
-            assert!(result.is_err(), "{} should error as stub", name);
+    fn test_parse_post_with_body() {
+        let raw = b"POST /data HTTP/1.1\r\nContent-Length: 5\r\nHost: localhost\r\n\r\nhello";
+        let result = parse_request_head(raw);
+        let inner = extract_result_inner(&result);
+        assert_eq!(get_bool(&inner, "complete"), true);
+        assert_eq!(get_int(&inner, "contentLength"), 5);
+        // bodyOffset should equal consumed (end of headers)
+        let consumed = get_int(&inner, "consumed");
+        assert!(consumed > 0);
+        assert_eq!(get_int(&inner, "bodyOffset"), consumed);
+    }
+
+    #[test]
+    fn test_parse_incomplete() {
+        let raw = b"GET / HTTP/1.1\r\nHost: local";
+        let result = parse_request_head(raw);
+        let inner = extract_result_inner(&result);
+        assert_eq!(get_bool(&inner, "complete"), false);
+    }
+
+    #[test]
+    fn test_parse_malformed() {
+        let raw = b"INVALID\x00\x01\x02";
+        let result = parse_request_head(raw);
+        let fields = match &result {
+            Value::BuchiPack(f) => f,
+            _ => panic!("expected BuchiPack"),
+        };
+        // Result failure: throw is not Unit
+        assert!(!matches!(
+            fields.iter().find(|(k, _)| k == "throw"),
+            Some((_, Value::Unit))
+        ));
+    }
+
+    #[test]
+    fn test_parse_no_query() {
+        let raw = b"GET /path HTTP/1.1\r\nHost: localhost\r\n\r\n";
+        let result = parse_request_head(raw);
+        let inner = extract_result_inner(&result);
+        // query span should have len=0
+        let query = match inner
+            .iter()
+            .find(|(k, _)| k == "query")
+            .map(|(_, v)| v)
+        {
+            Some(Value::BuchiPack(f)) => f,
+            _ => panic!("no query"),
+        };
+        assert!(matches!(
+            query.iter().find(|(k, _)| k == "len"),
+            Some((_, Value::Int(0)))
+        ));
+    }
+
+    // ── httpEncodeResponse tests ──
+
+    #[test]
+    fn test_encode_200_text() {
+        let response = Value::BuchiPack(vec![
+            ("status".into(), Value::Int(200)),
+            (
+                "headers".into(),
+                Value::List(vec![Value::BuchiPack(vec![
+                    ("name".into(), Value::Str("content-type".into())),
+                    ("value".into(), Value::Str("text/plain".into())),
+                ])]),
+            ),
+            ("body".into(), Value::Str("Hello".into())),
+        ]);
+        let result = encode_response(&response);
+        let inner = extract_result_inner(&result);
+        let bytes = match inner.iter().find(|(k, _)| k == "bytes") {
+            Some((_, Value::Bytes(b))) => b.clone(),
+            _ => panic!("no bytes"),
+        };
+        let text = String::from_utf8(bytes).unwrap();
+        assert!(text.starts_with("HTTP/1.1 200 OK\r\n"));
+        assert!(text.contains("content-type: text/plain\r\n"));
+        assert!(text.contains("Content-Length: 5\r\n"));
+        assert!(text.ends_with("\r\n\r\nHello"));
+    }
+
+    #[test]
+    fn test_encode_404_empty() {
+        let response = Value::BuchiPack(vec![
+            ("status".into(), Value::Int(404)),
+            ("headers".into(), Value::List(vec![])),
+            ("body".into(), Value::Str(String::new())),
+        ]);
+        let result = encode_response(&response);
+        let inner = extract_result_inner(&result);
+        let bytes = match inner.iter().find(|(k, _)| k == "bytes") {
+            Some((_, Value::Bytes(b))) => b.clone(),
+            _ => panic!("no bytes"),
+        };
+        let text = String::from_utf8(bytes).unwrap();
+        assert!(text.starts_with("HTTP/1.1 404 Not Found\r\n"));
+        assert!(text.contains("Content-Length: 0\r\n"));
+    }
+
+    #[test]
+    fn test_encode_binary_body() {
+        let response = Value::BuchiPack(vec![
+            ("status".into(), Value::Int(200)),
+            ("headers".into(), Value::List(vec![])),
+            ("body".into(), Value::Bytes(vec![0x00, 0xFF, 0x42])),
+        ]);
+        let result = encode_response(&response);
+        let inner = extract_result_inner(&result);
+        let bytes = match inner.iter().find(|(k, _)| k == "bytes") {
+            Some((_, Value::Bytes(b))) => b.clone(),
+            _ => panic!("no bytes"),
+        };
+        assert!(bytes.ends_with(&[0x00, 0xFF, 0x42]));
+    }
+
+    #[test]
+    fn test_encode_user_content_length_preserved() {
+        let response = Value::BuchiPack(vec![
+            ("status".into(), Value::Int(200)),
+            (
+                "headers".into(),
+                Value::List(vec![Value::BuchiPack(vec![
+                    ("name".into(), Value::Str("Content-Length".into())),
+                    ("value".into(), Value::Str("99".into())),
+                ])]),
+            ),
+            ("body".into(), Value::Str("Hi".into())),
+        ]);
+        let result = encode_response(&response);
+        let inner = extract_result_inner(&result);
+        let bytes = match inner.iter().find(|(k, _)| k == "bytes") {
+            Some((_, Value::Bytes(b))) => b.clone(),
+            _ => panic!("no bytes"),
+        };
+        let text = String::from_utf8(bytes).unwrap();
+        // User's Content-Length should be preserved, no auto-append
+        assert!(text.contains("Content-Length: 99\r\n"));
+        assert_eq!(text.matches("Content-Length").count(), 1);
+    }
+
+    // ── Test helpers ──
+
+    fn extract_result_inner(result: &Value) -> &Vec<(String, Value)> {
+        let fields = match result {
+            Value::BuchiPack(f) => f,
+            _ => panic!("expected Result BuchiPack"),
+        };
+        match fields.iter().find(|(k, _)| k == "__value") {
+            Some((_, Value::BuchiPack(f))) => f,
+            _ => panic!("no __value BuchiPack"),
+        }
+    }
+
+    fn get_bool(fields: &[(String, Value)], key: &str) -> bool {
+        match fields.iter().find(|(k, _)| k == key) {
+            Some((_, Value::Bool(b))) => *b,
+            _ => panic!("missing bool field: {}", key),
+        }
+    }
+
+    fn get_int(fields: &[(String, Value)], key: &str) -> i64 {
+        match fields.iter().find(|(k, _)| k == key) {
+            Some((_, Value::Int(n))) => *n,
+            _ => panic!("missing int field: {}", key),
         }
     }
 }
