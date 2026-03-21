@@ -1531,6 +1531,23 @@ fn runtime_abi(name: &str) -> Result<RuntimeAbi, String> {
             returns: &[Ptr],
         },
 
+        // ── taida-lang/net HTTP v1 ──
+        // taida_net_http_parse_request_head(input: Ptr) -> Ptr
+        "taida_net_http_parse_request_head" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Ptr],
+        },
+        // taida_net_http_encode_response(response: Ptr) -> Ptr
+        "taida_net_http_encode_response" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Ptr],
+        },
+        // taida_net_http_serve(port: Val, handler: Ptr, max_requests: Val, timeout_ms: Val) -> Ptr
+        "taida_net_http_serve" => RuntimeAbi {
+            params: &[Val, Ptr, Val, Val],
+            returns: &[Ptr],
+        },
+
         // N-44: ABI table maintenance note
         // When adding a new runtime function in lower.rs, a corresponding entry
         // MUST be added here. The match is exhaustive by design — an unknown
