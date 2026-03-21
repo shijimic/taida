@@ -238,7 +238,18 @@ fn build_parse_result(
             // Safe to parse: we already validated all-digits, so parse::<i64>() cannot fail
             // (unless the number overflows i64, which we still want to reject).
             match raw_val.parse::<i64>() {
-                Ok(len) => content_length = len,
+                Ok(len) => {
+                    // Cap at Number.MAX_SAFE_INTEGER (2^53 - 1 = 9007199254740991) for
+                    // cross-backend parity. JS Number loses precision beyond this value,
+                    // so both backends must reject to keep contentLength identical.
+                    if len > 9_007_199_254_740_991 {
+                        return make_result_failure_msg(
+                            "ParseError",
+                            "Malformed HTTP request: invalid Content-Length value",
+                        );
+                    }
+                    content_length = len;
+                }
                 Err(_) => {
                     return make_result_failure_msg(
                         "ParseError",
@@ -1248,13 +1259,33 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_content_length_i64_max_boundary() {
-        // Exactly i64::MAX = 9223372036854775807 (19 digits) — should succeed.
-        let raw = b"POST /data HTTP/1.1\r\nContent-Length: 9223372036854775807\r\nHost: localhost\r\n\r\n";
+    fn test_parse_content_length_max_safe_integer_boundary() {
+        // Exactly Number.MAX_SAFE_INTEGER = 9007199254740991 (2^53 - 1) — should succeed.
+        // This is the cross-backend upper limit (JS Number precision boundary).
+        let raw = b"POST /data HTTP/1.1\r\nContent-Length: 9007199254740991\r\nHost: localhost\r\n\r\n";
         let result = parse_request_head(raw);
         assert!(!is_result_failure(&result));
         let inner = extract_result_inner(&result);
-        assert_eq!(get_int(inner, "contentLength"), 9223372036854775807);
+        assert_eq!(get_int(inner, "contentLength"), 9_007_199_254_740_991);
+    }
+
+    #[test]
+    fn test_parse_content_length_max_safe_integer_plus_one() {
+        // Number.MAX_SAFE_INTEGER + 1 = 9007199254740992 — must be rejected.
+        // Beyond this value, JS Number loses precision, breaking cross-backend parity.
+        let raw = b"POST /data HTTP/1.1\r\nContent-Length: 9007199254740992\r\nHost: localhost\r\n\r\n";
+        let result = parse_request_head(raw);
+        assert!(is_result_failure(&result));
+        assert!(get_failure_message(&result).contains("invalid Content-Length"));
+    }
+
+    #[test]
+    fn test_parse_content_length_i64_max_rejected() {
+        // i64::MAX = 9223372036854775807 — exceeds MAX_SAFE_INTEGER, must be rejected.
+        let raw = b"POST /data HTTP/1.1\r\nContent-Length: 9223372036854775807\r\nHost: localhost\r\n\r\n";
+        let result = parse_request_head(raw);
+        assert!(is_result_failure(&result));
+        assert!(get_failure_message(&result).contains("invalid Content-Length"));
     }
 
     #[test]

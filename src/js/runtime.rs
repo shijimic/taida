@@ -3108,10 +3108,11 @@ function __taida_net_httpParseRequestHead(input) {
       if (!/^\d+$/.test(rawVal)) {
         return __taida_net_result_fail('ParseError', 'Malformed HTTP request: invalid Content-Length value');
       }
-      // Guard against i64 overflow: Interpreter uses parse::<i64>() which rejects
-      // values > 9223372036854775807 (19 digits). JS parseInt silently loses precision
-      // for large numbers, so we must check string length before parsing.
-      if (rawVal.length > 19 || (rawVal.length === 19 && rawVal > '9223372036854775807')) {
+      // Cap at Number.MAX_SAFE_INTEGER (2^53 - 1 = 9007199254740991) for
+      // cross-backend parity. JS Number loses precision beyond this value,
+      // so both backends must reject to keep contentLength identical.
+      // String comparison: reject if >16 digits, or exactly 16 digits and > '9007199254740991'.
+      if (rawVal.length > 16 || (rawVal.length === 16 && rawVal > '9007199254740991')) {
         return __taida_net_result_fail('ParseError', 'Malformed HTTP request: invalid Content-Length value');
       }
       const parsedCl = parseInt(rawVal, 10);
