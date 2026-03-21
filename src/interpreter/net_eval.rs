@@ -148,6 +148,7 @@ fn build_parse_result(
     // On Partial parse, req.headers contains EMPTY_HEADER entries beyond parsed ones.
     // Stop at the first empty header name to avoid pointer arithmetic on unrelated memory.
     let mut content_length: i64 = 0;
+    let mut cl_count: usize = 0;
     let mut headers_list = Vec::new();
     for header in req.headers.iter() {
         if header.name.is_empty() {
@@ -160,9 +161,23 @@ fn build_parse_result(
             ("value".into(), make_span(value_start, header.value.len())),
         ]));
         if header.name.eq_ignore_ascii_case("content-length") {
-            if let Ok(s) = std::str::from_utf8(header.value) {
-                if let Ok(len) = s.trim().parse::<i64>() {
-                    content_length = len;
+            cl_count += 1;
+            if cl_count > 1 {
+                return make_result_failure_msg(
+                    "ParseError",
+                    "Malformed HTTP request: duplicate Content-Length header",
+                );
+            }
+            let val_str = std::str::from_utf8(header.value)
+                .map_err(|_| ())
+                .and_then(|s| s.trim().parse::<i64>().map_err(|_| ()));
+            match val_str {
+                Ok(len) if len >= 0 => content_length = len,
+                _ => {
+                    return make_result_failure_msg(
+                        "ParseError",
+                        "Malformed HTTP request: invalid Content-Length value",
+                    );
                 }
             }
         }
@@ -230,55 +245,92 @@ fn extract_response_fields(
         _ => return Err("httpEncodeResponse: argument must be a BuchiPack @(...)".into()),
     };
 
-    // status
-    let status = fields
-        .iter()
-        .find(|(k, _)| k == "status")
-        .and_then(|(_, v)| if let Value::Int(n) = v { Some(*n) } else { None })
-        .unwrap_or(200);
-
-    // headers
-    let mut headers = Vec::new();
-    if let Some((_, Value::List(header_list))) = fields.iter().find(|(k, _)| k == "headers") {
-        for h in header_list {
-            if let Value::BuchiPack(hf) = h {
-                let name = hf
-                    .iter()
-                    .find(|(k, _)| k == "name")
-                    .and_then(|(_, v)| {
-                        if let Value::Str(s) = v {
-                            Some(s.clone())
-                        } else {
-                            None
-                        }
-                    })
-                    .unwrap_or_default();
-                let value = hf
-                    .iter()
-                    .find(|(k, _)| k == "value")
-                    .and_then(|(_, v)| {
-                        if let Value::Str(s) = v {
-                            Some(s.clone())
-                        } else {
-                            None
-                        }
-                    })
-                    .unwrap_or_default();
-                headers.push((name, value));
-            }
+    // status (required, must be Int)
+    let status = match fields.iter().find(|(k, _)| k == "status") {
+        Some((_, Value::Int(n))) => *n,
+        Some((_, v)) => {
+            return Err(format!(
+                "httpEncodeResponse: status must be Int, got {}",
+                v
+            ))
         }
+        None => return Err("httpEncodeResponse: missing required field 'status'".into()),
+    };
+    if !(100..=999).contains(&status) {
+        return Err(format!(
+            "httpEncodeResponse: status must be 100-999, got {}",
+            status
+        ));
     }
 
-    // body (Bytes or Str)
-    let body_bytes = fields
-        .iter()
-        .find(|(k, _)| k == "body")
-        .map(|(_, v)| match v {
-            Value::Bytes(b) => b.clone(),
-            Value::Str(s) => s.as_bytes().to_vec(),
-            _ => Vec::new(),
-        })
-        .unwrap_or_default();
+    // headers (required, must be List of @(name: Str, value: Str))
+    let header_list = match fields.iter().find(|(k, _)| k == "headers") {
+        Some((_, Value::List(list))) => list,
+        Some((_, v)) => {
+            return Err(format!(
+                "httpEncodeResponse: headers must be a List, got {}",
+                v
+            ))
+        }
+        None => return Err("httpEncodeResponse: missing required field 'headers'".into()),
+    };
+    let mut headers = Vec::new();
+    for (i, h) in header_list.iter().enumerate() {
+        let hf = match h {
+            Value::BuchiPack(f) => f,
+            _ => {
+                return Err(format!(
+                    "httpEncodeResponse: headers[{}] must be @(name, value)",
+                    i
+                ))
+            }
+        };
+        let name = match hf.iter().find(|(k, _)| k == "name") {
+            Some((_, Value::Str(s))) => s.clone(),
+            _ => {
+                return Err(format!(
+                    "httpEncodeResponse: headers[{}].name must be Str",
+                    i
+                ))
+            }
+        };
+        let value = match hf.iter().find(|(k, _)| k == "value") {
+            Some((_, Value::Str(s))) => s.clone(),
+            _ => {
+                return Err(format!(
+                    "httpEncodeResponse: headers[{}].value must be Str",
+                    i
+                ))
+            }
+        };
+        // Reject CRLF in header name/value to prevent response splitting
+        if name.contains('\r') || name.contains('\n') {
+            return Err(format!(
+                "httpEncodeResponse: headers[{}].name contains CR/LF",
+                i
+            ));
+        }
+        if value.contains('\r') || value.contains('\n') {
+            return Err(format!(
+                "httpEncodeResponse: headers[{}].value contains CR/LF",
+                i
+            ));
+        }
+        headers.push((name, value));
+    }
+
+    // body (required, must be Bytes or Str)
+    let body_bytes = match fields.iter().find(|(k, _)| k == "body") {
+        Some((_, Value::Bytes(b))) => b.clone(),
+        Some((_, Value::Str(s))) => s.as_bytes().to_vec(),
+        Some((_, v)) => {
+            return Err(format!(
+                "httpEncodeResponse: body must be Bytes or Str, got {}",
+                v
+            ))
+        }
+        None => return Err("httpEncodeResponse: missing required field 'body'".into()),
+    };
 
     Ok((status, headers, body_bytes))
 }
@@ -705,5 +757,186 @@ mod tests {
             Some((_, Value::Int(n))) => *n,
             _ => panic!("missing int field: {}", key),
         }
+    }
+
+    fn is_result_failure(result: &Value) -> bool {
+        match result {
+            Value::BuchiPack(f) => !matches!(
+                f.iter().find(|(k, _)| k == "throw"),
+                Some((_, Value::Unit))
+            ),
+            _ => false,
+        }
+    }
+
+    fn get_failure_message(result: &Value) -> String {
+        let fields = match result {
+            Value::BuchiPack(f) => f,
+            _ => panic!("expected BuchiPack"),
+        };
+        match fields.iter().find(|(k, _)| k == "throw") {
+            Some((_, Value::Error(e))) => e.message.clone(),
+            _ => panic!("no Error in throw"),
+        }
+    }
+
+    // ── Content-Length validation tests ──
+
+    #[test]
+    fn test_parse_invalid_content_length_non_numeric() {
+        let raw = b"POST /data HTTP/1.1\r\nContent-Length: abc\r\nHost: localhost\r\n\r\n";
+        let result = parse_request_head(raw);
+        assert!(is_result_failure(&result));
+        assert!(get_failure_message(&result).contains("invalid Content-Length"));
+    }
+
+    #[test]
+    fn test_parse_invalid_content_length_negative() {
+        let raw = b"POST /data HTTP/1.1\r\nContent-Length: -5\r\nHost: localhost\r\n\r\n";
+        let result = parse_request_head(raw);
+        assert!(is_result_failure(&result));
+        assert!(get_failure_message(&result).contains("invalid Content-Length"));
+    }
+
+    #[test]
+    fn test_parse_duplicate_content_length() {
+        let raw = b"POST /data HTTP/1.1\r\nContent-Length: 5\r\nContent-Length: 10\r\nHost: localhost\r\n\r\n";
+        let result = parse_request_head(raw);
+        assert!(is_result_failure(&result));
+        assert!(get_failure_message(&result).contains("duplicate Content-Length"));
+    }
+
+    #[test]
+    fn test_parse_valid_content_length_zero() {
+        let raw = b"POST /data HTTP/1.1\r\nContent-Length: 0\r\nHost: localhost\r\n\r\n";
+        let result = parse_request_head(raw);
+        assert!(!is_result_failure(&result));
+        let inner = extract_result_inner(&result);
+        assert_eq!(get_int(inner, "contentLength"), 0);
+    }
+
+    // ── Encode strict validation tests ──
+
+    #[test]
+    fn test_encode_missing_status() {
+        let response = Value::BuchiPack(vec![
+            ("headers".into(), Value::List(vec![])),
+            ("body".into(), Value::Str("Hello".into())),
+        ]);
+        let result = encode_response(&response);
+        assert!(is_result_failure(&result));
+        assert!(get_failure_message(&result).contains("missing required field 'status'"));
+    }
+
+    #[test]
+    fn test_encode_wrong_type_status() {
+        let response = Value::BuchiPack(vec![
+            ("status".into(), Value::Str("200".into())),
+            ("headers".into(), Value::List(vec![])),
+            ("body".into(), Value::Str("Hello".into())),
+        ]);
+        let result = encode_response(&response);
+        assert!(is_result_failure(&result));
+        assert!(get_failure_message(&result).contains("status must be Int"));
+    }
+
+    #[test]
+    fn test_encode_status_out_of_range() {
+        let response = Value::BuchiPack(vec![
+            ("status".into(), Value::Int(99)),
+            ("headers".into(), Value::List(vec![])),
+            ("body".into(), Value::Str("Hello".into())),
+        ]);
+        let result = encode_response(&response);
+        assert!(is_result_failure(&result));
+        assert!(get_failure_message(&result).contains("status must be 100-999"));
+    }
+
+    #[test]
+    fn test_encode_missing_headers() {
+        let response = Value::BuchiPack(vec![
+            ("status".into(), Value::Int(200)),
+            ("body".into(), Value::Str("Hello".into())),
+        ]);
+        let result = encode_response(&response);
+        assert!(is_result_failure(&result));
+        assert!(get_failure_message(&result).contains("missing required field 'headers'"));
+    }
+
+    #[test]
+    fn test_encode_missing_body() {
+        let response = Value::BuchiPack(vec![
+            ("status".into(), Value::Int(200)),
+            ("headers".into(), Value::List(vec![])),
+        ]);
+        let result = encode_response(&response);
+        assert!(is_result_failure(&result));
+        assert!(get_failure_message(&result).contains("missing required field 'body'"));
+    }
+
+    #[test]
+    fn test_encode_crlf_in_header_name() {
+        let response = Value::BuchiPack(vec![
+            ("status".into(), Value::Int(200)),
+            (
+                "headers".into(),
+                Value::List(vec![Value::BuchiPack(vec![
+                    ("name".into(), Value::Str("Bad\r\nHeader".into())),
+                    ("value".into(), Value::Str("ok".into())),
+                ])]),
+            ),
+            ("body".into(), Value::Str(String::new())),
+        ]);
+        let result = encode_response(&response);
+        assert!(is_result_failure(&result));
+        assert!(get_failure_message(&result).contains("CR/LF"));
+    }
+
+    #[test]
+    fn test_encode_crlf_in_header_value() {
+        let response = Value::BuchiPack(vec![
+            ("status".into(), Value::Int(200)),
+            (
+                "headers".into(),
+                Value::List(vec![Value::BuchiPack(vec![
+                    ("name".into(), Value::Str("X-Test".into())),
+                    ("value".into(), Value::Str("inject\r\nEvil: header".into())),
+                ])]),
+            ),
+            ("body".into(), Value::Str(String::new())),
+        ]);
+        let result = encode_response(&response);
+        assert!(is_result_failure(&result));
+        assert!(get_failure_message(&result).contains("CR/LF"));
+    }
+
+    #[test]
+    fn test_encode_wrong_type_body() {
+        let response = Value::BuchiPack(vec![
+            ("status".into(), Value::Int(200)),
+            ("headers".into(), Value::List(vec![])),
+            ("body".into(), Value::Int(42)),
+        ]);
+        let result = encode_response(&response);
+        assert!(is_result_failure(&result));
+        assert!(get_failure_message(&result).contains("body must be Bytes or Str"));
+    }
+
+    #[test]
+    fn test_encode_header_name_not_str() {
+        let response = Value::BuchiPack(vec![
+            ("status".into(), Value::Int(200)),
+            (
+                "headers".into(),
+                Value::List(vec![Value::BuchiPack(vec![
+                    ("name".into(), Value::Int(42)),
+                    ("value".into(), Value::Str("ok".into())),
+                ])]),
+            ),
+            ("body".into(), Value::Str(String::new())),
+        ]);
+        let result = encode_response(&response);
+        assert!(is_result_failure(&result));
+        assert!(get_failure_message(&result).contains("headers[0].name must be Str"));
     }
 }

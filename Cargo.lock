@@ -1280,6 +1280,7 @@ dependencies = [
  "cranelift-frontend",
  "cranelift-module",
  "cranelift-object",
+ "httparse",
  "reqwest",
  "serde",
  "serde_json",
