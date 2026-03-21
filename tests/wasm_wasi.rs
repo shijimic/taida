@@ -667,6 +667,7 @@ fn wasm_wasi_parity_all_examples() {
         "helper_val",
         "module_math",
         "module_utils",
+        "net_http_hello",   // server example, blocks waiting for connections
         "transpile_npm",
     ];
 

@@ -15,9 +15,8 @@
 /// These are `impl Interpreter` methods split from eval.rs for maintainability.
 
 use super::eval::{Interpreter, RuntimeError, Signal};
-use super::value::{AsyncStatus, AsyncValue, ErrorValue, PendingState, Value};
+use super::value::{AsyncStatus, AsyncValue, ErrorValue, Value};
 use crate::parser::Expr;
-use std::sync::{Arc, Mutex};
 
 /// All symbols exported by the net package.
 /// Legacy (16) + HTTP v1 (3) = 19 symbols.

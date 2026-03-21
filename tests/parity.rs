@@ -576,6 +576,7 @@ fn js_skip_list() -> Vec<&'static str> {
         "wasm_wasi_exists",              // wasm-wasi specific (requires wasmtime)
         "wasm_wasi_write_failure",       // wasm-wasi specific (requires wasmtime)
         "wasm_wasi_write_failure_shape", // wasm-wasi specific (shape validation)
+        "net_http_hello",                // server example, requires dedicated loopback test harness
     ]
 }
 
@@ -584,10 +585,11 @@ fn js_skip_list() -> Vec<&'static str> {
 /// All other interpreter failures are treated as test failures.
 fn interpreter_skip_list() -> Vec<&'static str> {
     vec![
-        "module_math",   // helper module, not standalone
-        "module_utils",  // helper module, not standalone
-        "helper_val",    // helper module, not standalone
-        "transpile_npm", // npm: imports only work in JS transpiler
+        "module_math",      // helper module, not standalone
+        "module_utils",     // helper module, not standalone
+        "helper_val",       // helper module, not standalone
+        "transpile_npm",    // npm: imports only work in JS transpiler
+        "net_http_hello",   // server example, requires dedicated loopback test harness
     ]
 }
 
