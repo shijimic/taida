@@ -218,12 +218,28 @@ fn build_parse_result(
                     "Malformed HTTP request: duplicate Content-Length header",
                 );
             }
-            let val_str = std::str::from_utf8(header.value)
-                .map_err(|_| ())
-                .and_then(|s| s.trim().parse::<i64>().map_err(|_| ()));
-            match val_str {
-                Ok(len) if len >= 0 => content_length = len,
-                _ => {
+            let raw_val = match std::str::from_utf8(header.value) {
+                Ok(s) => s.trim(),
+                Err(_) => {
+                    return make_result_failure_msg(
+                        "ParseError",
+                        "Malformed HTTP request: invalid Content-Length value",
+                    );
+                }
+            };
+            // Strict: entire trimmed value must be ASCII digits only (no leading +/-, no mixed chars).
+            // This matches the JS backend's /^\d+$/ validation for cross-backend parity.
+            if raw_val.is_empty() || !raw_val.bytes().all(|b| b.is_ascii_digit()) {
+                return make_result_failure_msg(
+                    "ParseError",
+                    "Malformed HTTP request: invalid Content-Length value",
+                );
+            }
+            // Safe to parse: we already validated all-digits, so parse::<i64>() cannot fail
+            // (unless the number overflows i64, which we still want to reject).
+            match raw_val.parse::<i64>() {
+                Ok(len) => content_length = len,
+                Err(_) => {
                     return make_result_failure_msg(
                         "ParseError",
                         "Malformed HTTP request: invalid Content-Length value",
@@ -1178,6 +1194,33 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_invalid_content_length_leading_plus() {
+        // "+5" is accepted by Rust's parse::<i64>() but must be rejected for JS parity.
+        // Both backends must use strict digits-only validation (/^\d+$/ equivalent).
+        let raw = b"POST /data HTTP/1.1\r\nContent-Length: +5\r\nHost: localhost\r\n\r\n";
+        let result = parse_request_head(raw);
+        assert!(is_result_failure(&result));
+        assert!(get_failure_message(&result).contains("invalid Content-Length"));
+    }
+
+    #[test]
+    fn test_parse_invalid_content_length_trailing_chars() {
+        // "5abc" must be rejected (not silently parsed as 5).
+        let raw = b"POST /data HTTP/1.1\r\nContent-Length: 5abc\r\nHost: localhost\r\n\r\n";
+        let result = parse_request_head(raw);
+        assert!(is_result_failure(&result));
+        assert!(get_failure_message(&result).contains("invalid Content-Length"));
+    }
+
+    #[test]
+    fn test_parse_invalid_content_length_empty() {
+        let raw = b"POST /data HTTP/1.1\r\nContent-Length: \r\nHost: localhost\r\n\r\n";
+        let result = parse_request_head(raw);
+        assert!(is_result_failure(&result));
+        assert!(get_failure_message(&result).contains("invalid Content-Length"));
+    }
+
+    #[test]
     fn test_parse_duplicate_content_length() {
         let raw = b"POST /data HTTP/1.1\r\nContent-Length: 5\r\nContent-Length: 10\r\nHost: localhost\r\n\r\n";
         let result = parse_request_head(raw);
@@ -2055,5 +2098,112 @@ mod tests {
         );
 
         let _ = server_handle.join();
+    }
+
+    /// EOF during head: client connects then immediately closes without sending any data.
+    /// Server must count it as a request and not hang.
+    #[test]
+    fn test_http_serve_eof_during_head_counts_request() {
+        use std::sync::atomic::{AtomicU16, Ordering};
+        static PORT_COUNTER: AtomicU16 = AtomicU16::new(18800);
+        let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+
+        let server_port = port;
+        let server_handle = std::thread::spawn(move || {
+            let mut interp = Interpreter::new();
+            interp.env.define_force(
+                "httpServe",
+                Value::Str("__net_builtin_httpServe".into()),
+            );
+            let args = vec![
+                Expr::IntLit(server_port as i64, dummy_span()),
+                make_handler_expr("should-not-reach"),
+                Expr::IntLit(1, dummy_span()), // maxRequests=1
+                Expr::IntLit(3000, dummy_span()),
+            ];
+            interp.try_net_func("httpServe", &args).unwrap().unwrap()
+        });
+
+        std::thread::sleep(std::time::Duration::from_millis(100));
+
+        // Connect and immediately close (EOF before any HTTP data)
+        let client = std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
+        drop(client); // close immediately
+
+        // Server should terminate because maxRequests=1 is reached
+        let result = server_handle.join().unwrap();
+        match result {
+            Signal::Value(Value::Async(a)) => {
+                assert_eq!(a.status, AsyncStatus::Fulfilled);
+                let inner = extract_result_value(&a.value).unwrap();
+                assert_eq!(get_field_bool(inner, "ok"), Some(true));
+                assert_eq!(get_field_int(inner, "requests"), Some(1));
+            }
+            _ => panic!("expected fulfilled Async"),
+        }
+    }
+
+    /// Close after partial head: client sends an incomplete request line then closes.
+    /// Server must return 400 and count it.
+    #[test]
+    fn test_http_serve_close_after_partial_head() {
+        use std::sync::atomic::{AtomicU16, Ordering};
+        static PORT_COUNTER: AtomicU16 = AtomicU16::new(18810);
+        let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+
+        let server_port = port;
+        let server_handle = std::thread::spawn(move || {
+            let mut interp = Interpreter::new();
+            interp.env.define_force(
+                "httpServe",
+                Value::Str("__net_builtin_httpServe".into()),
+            );
+            let args = vec![
+                Expr::IntLit(server_port as i64, dummy_span()),
+                make_handler_expr("should-not-reach"),
+                Expr::IntLit(1, dummy_span()),
+                Expr::IntLit(3000, dummy_span()),
+            ];
+            interp.try_net_func("httpServe", &args).unwrap().unwrap()
+        });
+
+        std::thread::sleep(std::time::Duration::from_millis(100));
+
+        let mut client =
+            std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
+
+        // Send partial HTTP request (no \r\n\r\n terminator) then close
+        std::io::Write::write_all(&mut client, b"GET /hello HTTP/1.1\r\nHost: loc").unwrap();
+        let _ = std::net::TcpStream::shutdown(&client, std::net::Shutdown::Write);
+
+        let mut response = Vec::new();
+        let _ = client.set_read_timeout(Some(std::time::Duration::from_secs(3)));
+        loop {
+            let mut buf = [0u8; 4096];
+            match std::io::Read::read(&mut client, &mut buf) {
+                Ok(0) => break,
+                Ok(n) => response.extend_from_slice(&buf[..n]),
+                Err(_) => break,
+            }
+        }
+
+        // Server should respond with 400 for incomplete head
+        let resp = String::from_utf8_lossy(&response);
+        assert!(
+            resp.contains("400 Bad Request"),
+            "Partial head should get 400, got: {}",
+            resp
+        );
+
+        let result = server_handle.join().unwrap();
+        match result {
+            Signal::Value(Value::Async(a)) => {
+                assert_eq!(a.status, AsyncStatus::Fulfilled);
+                let inner = extract_result_value(&a.value).unwrap();
+                assert_eq!(get_field_bool(inner, "ok"), Some(true));
+                assert_eq!(get_field_int(inner, "requests"), Some(1));
+            }
+            _ => panic!("expected fulfilled Async"),
+        }
     }
 }
