@@ -260,7 +260,13 @@ impl Interpreter {
                     // Global path: ~/.taida/bundled/{pkg}/
                     let global_unix = format!(".taida/bundled/{}/", pkg);
                     let global_win = format!(".taida\\bundled\\{}\\", pkg);
-                    path_str.contains(&global_unix) || path_str.contains(&global_win)
+                    // Deps path: .taida/deps/taida-lang/{pkg}/ (symlink or direct)
+                    let deps_unix = format!(".taida/deps/taida-lang/{}/", pkg);
+                    let deps_win = format!(".taida\\deps\\taida-lang\\{}\\", pkg);
+                    path_str.contains(&global_unix)
+                        || path_str.contains(&global_win)
+                        || path_str.contains(&deps_unix)
+                        || path_str.contains(&deps_win)
                 };
 
                 if in_bundled("os") {

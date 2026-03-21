@@ -1255,6 +1255,10 @@ impl JsCodegen {
         if import.path == "taida-lang/crypto" {
             return Ok(());
         }
+        // taida-lang/net: core-bundled, HTTP v1 runtime functions already embedded
+        if import.path == "taida-lang/net" {
+            return Ok(());
+        }
 
         let symbols: Vec<String> = import
             .symbols
@@ -1777,6 +1781,10 @@ impl JsCodegen {
                             "poolRelease" => self.write("__taida_os_poolRelease"),
                             "poolClose" => self.write("__taida_os_poolClose"),
                             "poolHealth" => self.write("__taida_os_poolHealth"),
+                            // taida-lang/net HTTP v1
+                            "httpServe" => self.write("__taida_net_httpServe"),
+                            "httpParseRequestHead" => self.write("__taida_net_httpParseRequestHead"),
+                            "httpEncodeResponse" => self.write("__taida_net_httpEncodeResponse"),
                             _ => self.gen_expr(callee)?,
                         }
                     } else {
@@ -1843,6 +1851,10 @@ impl JsCodegen {
                         "poolRelease" => self.write("__taida_os_poolRelease"),
                         "poolClose" => self.write("__taida_os_poolClose"),
                         "poolHealth" => self.write("__taida_os_poolHealth"),
+                        // taida-lang/net HTTP v1
+                        "httpServe" => self.write("__taida_net_httpServe"),
+                        "httpParseRequestHead" => self.write("__taida_net_httpParseRequestHead"),
+                        "httpEncodeResponse" => self.write("__taida_net_httpEncodeResponse"),
                         _ => self.gen_expr(callee)?,
                     }
                 } else {
@@ -2535,6 +2547,10 @@ impl JsCodegen {
                             "poolRelease" => self.write("__taida_os_poolRelease"),
                             "poolClose" => self.write("__taida_os_poolClose"),
                             "poolHealth" => self.write("__taida_os_poolHealth"),
+                            // taida-lang/net HTTP v1
+                            "httpServe" => self.write("__taida_net_httpServe"),
+                            "httpParseRequestHead" => self.write("__taida_net_httpParseRequestHead"),
+                            "httpEncodeResponse" => self.write("__taida_net_httpEncodeResponse"),
                             _ => self.write(name),
                         }
                     } else {
@@ -2708,6 +2724,10 @@ impl JsCodegen {
                     "poolRelease" => self.write("__taida_os_poolRelease(__p)"),
                     "poolClose" => self.write("__taida_os_poolClose(__p)"),
                     "poolHealth" => self.write("__taida_os_poolHealth(__p)"),
+                    // taida-lang/net HTTP v1
+                    "httpServe" => self.write("__taida_net_httpServe(__p)"),
+                    "httpParseRequestHead" => self.write("__taida_net_httpParseRequestHead(__p)"),
+                    "httpEncodeResponse" => self.write("__taida_net_httpEncodeResponse(__p)"),
                     _ => self.write(&format!("{}(__p)", name)),
                 },
                 _ => {
@@ -2812,6 +2832,8 @@ const OS_ASYNC_FUNCS: &[&str] = &[
     "dnsResolve",
     "poolAcquire",
     "poolClose",
+    // taida-lang/net HTTP v1
+    "httpServe",
 ];
 
 fn callee_is_os_async_func(callee: &Expr) -> bool {

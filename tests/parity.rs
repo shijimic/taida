@@ -5344,3 +5344,446 @@ fn test_quality_cross_module_parity() {
         );
     }
 }
+
+// ── taida-lang/net: Phase 3 JS parity tests ──────────────────────
+
+/// Create a temp project directory with taida-lang/net properly linked.
+/// Returns (project_dir, cleanup_guard) — the project dir contains a .taida/deps/taida-lang/net/ symlink
+/// to the global bundled dir, and a main.td with the provided source.
+fn setup_net_project(source: &str, label: &str) -> PathBuf {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock")
+        .as_nanos();
+    let dir = std::env::temp_dir().join(format!("taida_net3_{}_{}", label, nanos));
+    fs::create_dir_all(&dir).expect("create project dir");
+
+    // Write main.td
+    fs::write(dir.join("main.td"), source).expect("write main.td");
+
+    // Write packages.tdm (required for project root detection in JS build)
+    fs::write(
+        dir.join("packages.tdm"),
+        "// Minimal packages.tdm for net test project\n",
+    )
+    .expect("write packages.tdm");
+
+    // Create .taida/deps/taida-lang/net/ with the bundled stub
+    let deps_net = dir.join(".taida").join("deps").join("taida-lang").join("net");
+    fs::create_dir_all(&deps_net).expect("create deps/taida-lang/net");
+
+    // Write the net package stub (same as CoreBundledProvider::net_package_source)
+    let net_stub = r#"// taida-lang/net — Core bundled network package
+<<< @(dnsResolve, tcpConnect, tcpListen, tcpAccept, socketSend, socketSendAll, socketRecv, socketSendBytes, socketRecvBytes, socketRecvExact, udpBind, udpSendTo, udpRecvFrom, socketClose, listenerClose, udpClose, httpServe, httpParseRequestHead, httpEncodeResponse)
+"#;
+    fs::write(deps_net.join("main.td"), net_stub).expect("write net stub");
+
+    dir
+}
+
+fn cleanup_net_project(dir: &Path) {
+    let _ = fs::remove_dir_all(dir);
+}
+
+fn run_net_interpreter(project_dir: &Path) -> Option<String> {
+    let td_path = project_dir.join("main.td");
+    let output = Command::new(taida_bin())
+        .arg(&td_path)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        eprintln!(
+            "run_net_interpreter failed for {}:\n{}",
+            td_path.display(),
+            stderr
+        );
+        return None;
+    }
+    Some(normalize(&String::from_utf8_lossy(&output.stdout)))
+}
+
+fn run_net_js(project_dir: &Path, label: &str) -> Option<String> {
+    let td_path = project_dir.join("main.td");
+    let js_path = unique_temp_path("taida_net3_js", label, "mjs");
+
+    let transpile = Command::new(taida_bin())
+        .arg("build")
+        .arg("--target")
+        .arg("js")
+        .arg(&td_path)
+        .arg("-o")
+        .arg(&js_path)
+        .output()
+        .ok()?;
+
+    if !transpile.status.success() {
+        let stderr = String::from_utf8_lossy(&transpile.stderr);
+        eprintln!("run_net_js transpile failed: {}", stderr);
+        let _ = fs::remove_file(&js_path);
+        return None;
+    }
+
+    let run_output = Command::new("node").arg(&js_path).output().ok()?;
+    let _ = fs::remove_file(&js_path);
+
+    if !run_output.status.success() {
+        let stderr = String::from_utf8_lossy(&run_output.stderr);
+        eprintln!("run_net_js node failed: {}", stderr);
+        return None;
+    }
+
+    Some(normalize(&String::from_utf8_lossy(&run_output.stdout)))
+}
+
+/// NET-3c: httpParseRequestHead parse fixture parity (Interpreter vs JS)
+#[test]
+fn test_net_parse_request_head_interp_js_parity() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+
+    let source = r#">>> taida-lang/net => @(httpParseRequestHead)
+
+// Simple GET request
+bytesLax <= Bytes["GET / HTTP/1.1\r\nHost: localhost\r\n\r\n"]()
+bytesLax ]=> bytes
+result <= httpParseRequestHead(bytes)
+result ]=> parsed
+
+stdout(parsed.complete)
+stdout(parsed.method.start)
+stdout(parsed.method.len)
+stdout(parsed.path.start)
+stdout(parsed.path.len)
+stdout(parsed.query.len)
+stdout(parsed.version.major)
+stdout(parsed.version.minor)
+stdout(parsed.contentLength)
+"#;
+
+    let dir = setup_net_project(source, "parse");
+    let interp = run_net_interpreter(&dir)
+        .expect("interpreter failed for net parse parity");
+    let js = run_net_js(&dir, "parse")
+        .expect("js failed for net parse parity");
+    cleanup_net_project(&dir);
+
+    assert_eq!(
+        interp, js,
+        "NET-3c: httpParseRequestHead parity mismatch\nInterp: {}\nJS: {}",
+        interp, js
+    );
+}
+
+/// NET-3c: httpParseRequestHead with query string parity
+#[test]
+fn test_net_parse_request_head_query_parity() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+
+    let source = r#">>> taida-lang/net => @(httpParseRequestHead)
+
+bytesLax <= Bytes["GET /path?x=1&y=2 HTTP/1.1\r\nHost: localhost\r\n\r\n"]()
+bytesLax ]=> bytes
+result <= httpParseRequestHead(bytes)
+result ]=> parsed
+
+stdout(parsed.complete)
+stdout(parsed.path.start)
+stdout(parsed.path.len)
+stdout(parsed.query.start)
+stdout(parsed.query.len)
+"#;
+
+    let dir = setup_net_project(source, "parse_query");
+    let interp = run_net_interpreter(&dir)
+        .expect("interpreter failed for net parse query parity");
+    let js = run_net_js(&dir, "parse_query")
+        .expect("js failed for net parse query parity");
+    cleanup_net_project(&dir);
+
+    assert_eq!(
+        interp, js,
+        "NET-3c: httpParseRequestHead query parity mismatch\nInterp: {}\nJS: {}",
+        interp, js
+    );
+}
+
+/// NET-3c: httpParseRequestHead with POST body and Content-Length
+#[test]
+fn test_net_parse_request_head_post_body_parity() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+
+    let source = r#">>> taida-lang/net => @(httpParseRequestHead)
+
+bytesLax <= Bytes["POST /data HTTP/1.1\r\nHost: localhost\r\nContent-Length: 5\r\n\r\nhello"]()
+bytesLax ]=> bytes
+result <= httpParseRequestHead(bytes)
+result ]=> parsed
+
+stdout(parsed.complete)
+stdout(parsed.contentLength)
+stdout(parsed.bodyOffset)
+"#;
+
+    let dir = setup_net_project(source, "parse_post");
+    let interp = run_net_interpreter(&dir)
+        .expect("interpreter failed for net parse post parity");
+    let js = run_net_js(&dir, "parse_post")
+        .expect("js failed for net parse post parity");
+    cleanup_net_project(&dir);
+
+    assert_eq!(
+        interp, js,
+        "NET-3c: httpParseRequestHead POST body parity mismatch\nInterp: {}\nJS: {}",
+        interp, js
+    );
+}
+
+/// NET-3c: httpEncodeResponse encode fixture parity (Interpreter vs JS)
+#[test]
+fn test_net_encode_response_interp_js_parity() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+
+    let source = r#">>> taida-lang/net => @(httpEncodeResponse)
+
+resp <= @(status <= 200, headers <= @[@(name <= "content-type", value <= "text/plain")], body <= "Hello")
+result <= httpEncodeResponse(resp)
+result ]=> encoded
+stdout(encoded.bytes.length())
+"#;
+
+    let dir = setup_net_project(source, "encode");
+    let interp = run_net_interpreter(&dir)
+        .expect("interpreter failed for net encode parity");
+    let js = run_net_js(&dir, "encode")
+        .expect("js failed for net encode parity");
+    cleanup_net_project(&dir);
+
+    assert_eq!(
+        interp, js,
+        "NET-3c: httpEncodeResponse parity mismatch\nInterp: {}\nJS: {}",
+        interp, js
+    );
+}
+
+/// NET-3c: httpEncodeResponse 404 empty body parity
+#[test]
+fn test_net_encode_response_404_parity() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+
+    let source = r#">>> taida-lang/net => @(httpEncodeResponse)
+
+resp <= @(status <= 404, headers <= @[], body <= "")
+result <= httpEncodeResponse(resp)
+result ]=> encoded
+stdout(encoded.bytes.length())
+"#;
+
+    let dir = setup_net_project(source, "encode_404");
+    let interp = run_net_interpreter(&dir)
+        .expect("interpreter failed for net encode 404 parity");
+    let js = run_net_js(&dir, "encode_404")
+        .expect("js failed for net encode 404 parity");
+    cleanup_net_project(&dir);
+
+    assert_eq!(
+        interp, js,
+        "NET-3c: httpEncodeResponse 404 parity mismatch\nInterp: {}\nJS: {}",
+        interp, js
+    );
+}
+
+/// NET-3c: httpEncodeResponse 204 no body parity
+#[test]
+fn test_net_encode_response_204_no_body_parity() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+
+    let source = r#">>> taida-lang/net => @(httpEncodeResponse)
+
+resp <= @(status <= 204, headers <= @[], body <= "")
+result <= httpEncodeResponse(resp)
+result ]=> encoded
+stdout(encoded.bytes.length())
+"#;
+
+    let dir = setup_net_project(source, "encode_204");
+    let interp = run_net_interpreter(&dir)
+        .expect("interpreter failed for net encode 204 parity");
+    let js = run_net_js(&dir, "encode_204")
+        .expect("js failed for net encode 204 parity");
+    cleanup_net_project(&dir);
+
+    assert_eq!(
+        interp, js,
+        "NET-3c: httpEncodeResponse 204 parity mismatch\nInterp: {}\nJS: {}",
+        interp, js
+    );
+}
+
+/// NET-3d: httpServe bounded server parity (Interpreter vs JS)
+/// Runs httpServe with maxRequests=1, sends a raw HTTP request, and verifies response + result.
+#[test]
+fn test_net_http_serve_bounded_interp_js_parity() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+
+    let backends = vec!["interp", "js"];
+
+    for backend in &backends {
+        // Use a fresh ephemeral port: bind, get port, immediately release
+        let port = find_free_loopback_port();
+        let source = format!(
+            r#">>> taida-lang/net => @(httpServe)
+
+handler req =
+  @(status <= 200, headers <= @[@(name <= "content-type", value <= "text/plain")], body <= "pong")
+=> :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
+
+asyncResult <= httpServe({port}, handler, 1)
+asyncResult ]=> result
+result ]=> r
+stdout(r.ok)
+stdout(r.requests)
+"#
+        );
+
+        let dir = setup_net_project(&source, &format!("serve_{}", backend));
+        let td_path = dir.join("main.td");
+
+        let mut child = match *backend {
+            "interp" => Command::new(taida_bin())
+                .arg(&td_path)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .expect("spawn interpreter"),
+            "js" => {
+                let js_path = unique_temp_path("taida_net3_serve_js", backend, "mjs");
+                let transpile = Command::new(taida_bin())
+                    .arg("build")
+                    .arg("--target")
+                    .arg("js")
+                    .arg(&td_path)
+                    .arg("-o")
+                    .arg(&js_path)
+                    .output()
+                    .expect("transpile");
+                if !transpile.status.success() {
+                    let stderr = String::from_utf8_lossy(&transpile.stderr);
+                    cleanup_net_project(&dir);
+                    let _ = fs::remove_file(&js_path);
+                    panic!("JS transpile failed for {}: {}", backend, stderr);
+                }
+                let child = Command::new("node")
+                    .arg(&js_path)
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped())
+                    .spawn()
+                    .expect("spawn node");
+                // Give Node.js time to read the file before deleting
+                thread::sleep(Duration::from_millis(500));
+                let _ = fs::remove_file(&js_path);
+                child
+            }
+            _ => unreachable!(),
+        };
+
+        // Wait for server to be ready, then send the actual request on a *new* connection
+        // The probe connection is separate and should NOT count as the one request.
+        // Strategy: keep trying to connect + send + read until we get a valid response.
+        let mut response = Vec::new();
+        let mut got_response = false;
+        for _ in 0..80 {
+            thread::sleep(Duration::from_millis(100));
+            let stream = match TcpStream::connect(format!("127.0.0.1:{}", port)) {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .ok();
+            stream
+                .set_write_timeout(Some(Duration::from_secs(5)))
+                .ok();
+            let mut stream = stream;
+            let request = b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n";
+            if std::io::Write::write_all(&mut stream, request).is_err() {
+                continue;
+            }
+            let mut buf = [0u8; 4096];
+            loop {
+                match std::io::Read::read(&mut stream, &mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => response.extend_from_slice(&buf[..n]),
+                    Err(ref e)
+                        if e.kind() == std::io::ErrorKind::WouldBlock
+                            || e.kind() == std::io::ErrorKind::TimedOut =>
+                    {
+                        break;
+                    }
+                    Err(_) => break,
+                }
+            }
+            if !response.is_empty() {
+                got_response = true;
+                break;
+            }
+        }
+
+        if !got_response {
+            let _ = child.kill();
+            cleanup_net_project(&dir);
+            panic!(
+                "{} backend: server did not respond on port {}",
+                backend, port,
+            );
+        }
+
+        let resp_str = String::from_utf8_lossy(&response).to_string();
+        assert!(
+            resp_str.contains("200 OK"),
+            "{} backend: response should contain '200 OK', got: {:?}",
+            backend,
+            resp_str
+        );
+        assert!(
+            resp_str.contains("pong"),
+            "{} backend: response body should contain 'pong', got: {:?}",
+            backend,
+            resp_str
+        );
+
+        // Wait for server process to exit (it should self-terminate after maxRequests=1)
+        let output = child
+            .wait_with_output()
+            .expect("wait for server process");
+        let stdout = normalize(&String::from_utf8_lossy(&output.stdout));
+
+        assert_eq!(
+            stdout, "true\n1",
+            "{} backend: httpServe result mismatch. stdout: {:?}",
+            backend, stdout
+        );
+
+        cleanup_net_project(&dir);
+    }
+}

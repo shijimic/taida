@@ -6,13 +6,14 @@
 //
 // The server processes 1 request and exits (maxRequests = 1).
 
->>> taida-lang/net
+>>> taida-lang/net => @(httpServe)
 
 handler req =
   @(status <= 200, headers <= @[@(name <= "content-type", value <= "text/plain")], body <= "Hello from taida-lang/net!")
 => :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
 
-result <= httpServe(8080, handler, 1)
+asyncResult <= httpServe(8080, handler, 1)
+asyncResult ]=> result
 result ]=> r
 stdout(r.ok)
 stdout(r.requests)
