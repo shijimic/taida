@@ -49,7 +49,7 @@ impl Interpreter {
     /// Returns None if the name is not a recognized net function
     /// or if the function was not imported from taida-lang/net (sentinel guard).
     ///
-    /// Supports alias imports: `>>> taida-lang/net => @(httpServe as serve)`
+    /// Supports alias imports: `>>> taida-lang/net => @(httpServe: serve)`
     /// binds `serve = "__net_builtin_httpServe"`. The guard extracts the original
     /// function name from the `__net_builtin_` prefix rather than deriving it
     /// from the local call name.
@@ -142,7 +142,7 @@ mod tests {
 
     #[test]
     fn test_sentinel_guard_with_alias() {
-        // >>> taida-lang/net => @(httpServe as serve)
+        // >>> taida-lang/net => @(httpServe: serve)
         // env["serve"] = "__net_builtin_httpServe" → should dispatch correctly
         let mut interp = Interpreter::new();
         interp
