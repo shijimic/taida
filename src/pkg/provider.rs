@@ -295,7 +295,7 @@ impl CoreBundledProvider {
     /// Generate the net package stub source.
     fn net_package_source() -> &'static str {
         r#"// taida-lang/net — Core bundled network package
-// Current surface (delegates to existing socket runtime path):
+// Legacy surface (delegates to existing socket runtime path):
 //   dnsResolve
 //   tcpConnect, tcpListen, tcpAccept
 //   socketSend, socketSendAll, socketRecv
@@ -303,12 +303,15 @@ impl CoreBundledProvider {
 //   udpBind, udpSendTo, udpRecvFrom
 //   socketClose, listenerClose, udpClose
 //
+// HTTP v1 surface:
+//   httpServe, httpParseRequestHead, httpEncodeResponse
+//
 // TI-21 contract notes:
 //   TLS verification on Http* uses backend default trust store (no insecure -k path)
 //   IPv6 outbound resolution/connect is supported via resolver path
 //   Unix domain sockets are not provided yet (explicit non-support)
 
-<<< @(dnsResolve, tcpConnect, tcpListen, tcpAccept, socketSend, socketSendAll, socketRecv, socketSendBytes, socketRecvBytes, socketRecvExact, udpBind, udpSendTo, udpRecvFrom, socketClose, listenerClose, udpClose)
+<<< @(dnsResolve, tcpConnect, tcpListen, tcpAccept, socketSend, socketSendAll, socketRecv, socketSendBytes, socketRecvBytes, socketRecvExact, udpBind, udpSendTo, udpRecvFrom, socketClose, listenerClose, udpClose, httpServe, httpParseRequestHead, httpEncodeResponse)
 "#
     }
 

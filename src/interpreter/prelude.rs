@@ -661,8 +661,11 @@ impl Interpreter {
                 Ok(Some(Signal::Value(Value::Bool(true))))
             }
 
-            // ── OS side-effect and query functions ──
-            _ => self.try_os_func(name, args),
+            // ── Net functions (sentinel-guarded), then OS functions ──
+            _ => match self.try_net_func(name, args)? {
+                Some(signal) => Ok(Some(signal)),
+                None => self.try_os_func(name, args),
+            },
         }
     }
 }

@@ -275,24 +275,7 @@ impl Interpreter {
                             .define_force(sym, Value::Str(format!("__crypto_builtin_{}", sym)));
                     }
                 } else if in_bundled("net") {
-                    for sym in [
-                        "dnsResolve",
-                        "tcpConnect",
-                        "tcpListen",
-                        "tcpAccept",
-                        "socketSend",
-                        "socketSendAll",
-                        "socketRecv",
-                        "socketSendBytes",
-                        "socketRecvBytes",
-                        "socketRecvExact",
-                        "udpBind",
-                        "udpSendTo",
-                        "udpRecvFrom",
-                        "socketClose",
-                        "listenerClose",
-                        "udpClose",
-                    ] {
+                    for sym in super::net_eval::NET_SYMBOLS {
                         self.env
                             .define_force(sym, Value::Str(format!("__net_builtin_{}", sym)));
                     }

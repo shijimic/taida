@@ -5,6 +5,7 @@ pub(crate) mod json;
 mod methods;
 mod module_eval;
 mod mold_eval;
+mod net_eval;
 mod os_eval;
 mod prelude;
 #[cfg(test)]
