@@ -1237,6 +1237,35 @@ mod tests {
         assert_eq!(get_int(inner, "contentLength"), 0);
     }
 
+    #[test]
+    fn test_parse_content_length_i64_overflow() {
+        // Value exceeds i64::MAX (9223372036854775807). Interpreter rejects via parse::<i64>().
+        // JS must also reject (string-length guard) for cross-backend parity.
+        let raw = b"POST /data HTTP/1.1\r\nContent-Length: 999999999999999999999999\r\nHost: localhost\r\n\r\n";
+        let result = parse_request_head(raw);
+        assert!(is_result_failure(&result));
+        assert!(get_failure_message(&result).contains("invalid Content-Length"));
+    }
+
+    #[test]
+    fn test_parse_content_length_i64_max_boundary() {
+        // Exactly i64::MAX = 9223372036854775807 (19 digits) — should succeed.
+        let raw = b"POST /data HTTP/1.1\r\nContent-Length: 9223372036854775807\r\nHost: localhost\r\n\r\n";
+        let result = parse_request_head(raw);
+        assert!(!is_result_failure(&result));
+        let inner = extract_result_inner(&result);
+        assert_eq!(get_int(inner, "contentLength"), 9223372036854775807);
+    }
+
+    #[test]
+    fn test_parse_content_length_i64_max_plus_one() {
+        // i64::MAX + 1 = 9223372036854775808 — must be rejected.
+        let raw = b"POST /data HTTP/1.1\r\nContent-Length: 9223372036854775808\r\nHost: localhost\r\n\r\n";
+        let result = parse_request_head(raw);
+        assert!(is_result_failure(&result));
+        assert!(get_failure_message(&result).contains("invalid Content-Length"));
+    }
+
     // ── Encode strict validation tests ──
 
     #[test]
