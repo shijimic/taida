@@ -723,14 +723,19 @@ impl Interpreter {
             }
             buf.truncate(total_read);
 
+            // Reject if body is incomplete (EOF / timeout / buffer limit before full body)
+            if content_length > 0 && total_read < body_needed {
+                let bad_request = b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+                let _ = std::io::Write::write_all(&mut stream, bad_request);
+                request_count += 1;
+                continue;
+            }
+
             // ── Build request pack for handler ──
             let raw_bytes = buf;
             let body_offset = head_consumed as i64;
             let body_start = head_consumed;
-            let body_len = std::cmp::min(
-                content_length as usize,
-                raw_bytes.len().saturating_sub(body_start),
-            );
+            let body_len = content_length as usize;
 
             let mut request_fields: Vec<(String, Value)> = Vec::new();
             request_fields.push(("raw".into(), Value::Bytes(raw_bytes)));
@@ -1918,7 +1923,8 @@ mod tests {
         }
     }
 
-    /// TCP fragmentation: body arriving after head in a separate write
+    /// TCP fragmentation: body arriving after head in a separate write.
+    /// 200 OK proves the server waited for the full body (incomplete bodies get 400).
     #[test]
     fn test_http_serve_split_body() {
         use std::sync::atomic::{AtomicU16, Ordering};
@@ -1926,7 +1932,6 @@ mod tests {
         let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
 
         let server_port = port;
-        // We need a handler that echoes contentLength so we can verify the body was complete
         let server_handle = std::thread::spawn(move || {
             let mut interp = Interpreter::new();
             interp.env.define_force(
@@ -1947,7 +1952,7 @@ mod tests {
         let mut client =
             std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
 
-        // Send complete head with Content-Length, but body arrives separately
+        // Send complete head with Content-Length, but body arrives in a separate write
         std::io::Write::write_all(
             &mut client,
             b"POST /data HTTP/1.1\r\nHost: localhost\r\nContent-Length: 11\r\n\r\n",
@@ -1968,9 +1973,11 @@ mod tests {
         }
 
         let response_str = String::from_utf8_lossy(&response);
+        // 200 OK proves the server waited for the full 11-byte body;
+        // an incomplete body would have resulted in 400.
         assert!(
             response_str.contains("200 OK"),
-            "Split body should succeed, got: {}",
+            "Split body should succeed (200 proves full body arrived), got: {}",
             response_str
         );
 
@@ -1984,5 +1991,69 @@ mod tests {
             }
             _ => panic!("expected fulfilled Async"),
         }
+    }
+
+    /// Incomplete body: Content-Length declares 100 bytes but client sends only 5 then closes.
+    /// Server must return 400, not pass truncated body to handler.
+    #[test]
+    fn test_http_serve_incomplete_body_returns_400() {
+        use std::sync::atomic::{AtomicU16, Ordering};
+        static PORT_COUNTER: AtomicU16 = AtomicU16::new(18700);
+        let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+
+        let server_port = port;
+        let server_handle = std::thread::spawn(move || {
+            let mut interp = Interpreter::new();
+            interp.env.define_force(
+                "httpServe",
+                Value::Str("__net_builtin_httpServe".into()),
+            );
+            let args = vec![
+                Expr::IntLit(server_port as i64, dummy_span()),
+                make_handler_expr("should-not-reach"),
+                Expr::IntLit(1, dummy_span()),
+                Expr::IntLit(5000, dummy_span()),
+            ];
+            interp.try_net_func("httpServe", &args).unwrap().unwrap()
+        });
+
+        std::thread::sleep(std::time::Duration::from_millis(100));
+
+        let mut client =
+            std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
+
+        // Send head claiming 100-byte body, but only send 5 bytes then close
+        std::io::Write::write_all(
+            &mut client,
+            b"POST /data HTTP/1.1\r\nHost: localhost\r\nContent-Length: 100\r\n\r\nhello",
+        )
+        .unwrap();
+        // Shut down the write side to signal EOF to the server
+        let _ = std::net::TcpStream::shutdown(&client, std::net::Shutdown::Write);
+
+        let mut response = Vec::new();
+        let _ = client.set_read_timeout(Some(std::time::Duration::from_secs(3)));
+        loop {
+            let mut buf = [0u8; 4096];
+            match std::io::Read::read(&mut client, &mut buf) {
+                Ok(0) => break,
+                Ok(n) => response.extend_from_slice(&buf[..n]),
+                Err(_) => break,
+            }
+        }
+
+        let response_str = String::from_utf8_lossy(&response);
+        assert!(
+            response_str.contains("400 Bad Request"),
+            "Incomplete body must be rejected with 400, got: {}",
+            response_str
+        );
+        // Response must NOT contain handler's body (handler should never be called)
+        assert!(
+            !response_str.contains("should-not-reach"),
+            "Handler must not be called for incomplete body"
+        );
+
+        let _ = server_handle.join();
     }
 }
