@@ -209,29 +209,48 @@ fn encode_response(response: &Value) -> Value {
         Err(msg) => return make_result_failure_msg("EncodeError", msg),
     };
 
+    // RFC 9110: 1xx, 204, 304 MUST NOT contain a message body
+    let no_body = (100..200).contains(&status) || status == 204 || status == 304;
+    if no_body && !body_bytes.is_empty() {
+        return make_result_failure_msg(
+            "EncodeError",
+            format!(
+                "httpEncodeResponse: status {} must not have a body",
+                status
+            ),
+        );
+    }
+
     let reason = status_reason(status);
     let mut buf = Vec::with_capacity(256 + body_bytes.len());
 
     // Status line
     buf.extend_from_slice(format!("HTTP/1.1 {} {}\r\n", status, reason).as_bytes());
 
-    // Check if user provided Content-Length
-    let has_content_length = headers
-        .iter()
-        .any(|(n, _)| n.eq_ignore_ascii_case("Content-Length"));
-
-    // User headers
+    // User headers (skip Content-Length for no-body statuses)
     for (name, value) in &headers {
+        if no_body && name.eq_ignore_ascii_case("Content-Length") {
+            continue;
+        }
         buf.extend_from_slice(format!("{}: {}\r\n", name, value).as_bytes());
     }
 
-    // Auto-append Content-Length if not provided
-    if !has_content_length {
-        buf.extend_from_slice(format!("Content-Length: {}\r\n", body_bytes.len()).as_bytes());
+    // Auto-append Content-Length for statuses that allow a body
+    if !no_body {
+        let has_content_length = headers
+            .iter()
+            .any(|(n, _)| n.eq_ignore_ascii_case("Content-Length"));
+        if !has_content_length {
+            buf.extend_from_slice(
+                format!("Content-Length: {}\r\n", body_bytes.len()).as_bytes(),
+            );
+        }
     }
 
     buf.extend_from_slice(b"\r\n");
-    buf.extend_from_slice(&body_bytes);
+    if !no_body {
+        buf.extend_from_slice(&body_bytes);
+    }
 
     let result = Value::BuchiPack(vec![("bytes".into(), Value::Bytes(buf))]);
     make_result_success(result)
@@ -337,21 +356,36 @@ fn extract_response_fields(
 
 fn status_reason(code: i64) -> &'static str {
     match code {
+        100 => "Continue",
+        101 => "Switching Protocols",
         200 => "OK",
         201 => "Created",
+        202 => "Accepted",
         204 => "No Content",
+        206 => "Partial Content",
         301 => "Moved Permanently",
         302 => "Found",
         304 => "Not Modified",
+        307 => "Temporary Redirect",
+        308 => "Permanent Redirect",
         400 => "Bad Request",
         401 => "Unauthorized",
         403 => "Forbidden",
         404 => "Not Found",
         405 => "Method Not Allowed",
+        408 => "Request Timeout",
+        409 => "Conflict",
+        410 => "Gone",
+        413 => "Content Too Large",
+        415 => "Unsupported Media Type",
+        418 => "I'm a Teapot",
+        422 => "Unprocessable Content",
+        429 => "Too Many Requests",
         500 => "Internal Server Error",
         502 => "Bad Gateway",
         503 => "Service Unavailable",
-        _ => "OK",
+        504 => "Gateway Timeout",
+        _ => "",
     }
 }
 
@@ -938,5 +972,129 @@ mod tests {
         let result = encode_response(&response);
         assert!(is_result_failure(&result));
         assert!(get_failure_message(&result).contains("headers[0].name must be Str"));
+    }
+
+    // ── No-body status tests ──
+
+    #[test]
+    fn test_encode_204_empty_body_ok() {
+        let response = Value::BuchiPack(vec![
+            ("status".into(), Value::Int(204)),
+            ("headers".into(), Value::List(vec![])),
+            ("body".into(), Value::Str(String::new())),
+        ]);
+        let result = encode_response(&response);
+        assert!(!is_result_failure(&result));
+        let inner = extract_result_inner(&result);
+        let bytes = match inner.iter().find(|(k, _)| k == "bytes") {
+            Some((_, Value::Bytes(b))) => b.clone(),
+            _ => panic!("no bytes"),
+        };
+        let text = String::from_utf8(bytes).unwrap();
+        assert!(text.starts_with("HTTP/1.1 204 No Content\r\n"));
+        // No Content-Length for 204
+        assert!(!text.contains("Content-Length"));
+        // No body after final CRLF
+        assert!(text.ends_with("\r\n\r\n"));
+    }
+
+    #[test]
+    fn test_encode_204_with_body_rejected() {
+        let response = Value::BuchiPack(vec![
+            ("status".into(), Value::Int(204)),
+            ("headers".into(), Value::List(vec![])),
+            ("body".into(), Value::Str("oops".into())),
+        ]);
+        let result = encode_response(&response);
+        assert!(is_result_failure(&result));
+        assert!(get_failure_message(&result).contains("must not have a body"));
+    }
+
+    #[test]
+    fn test_encode_304_with_body_rejected() {
+        let response = Value::BuchiPack(vec![
+            ("status".into(), Value::Int(304)),
+            ("headers".into(), Value::List(vec![])),
+            ("body".into(), Value::Str("cached".into())),
+        ]);
+        let result = encode_response(&response);
+        assert!(is_result_failure(&result));
+        assert!(get_failure_message(&result).contains("must not have a body"));
+    }
+
+    #[test]
+    fn test_encode_1xx_with_body_rejected() {
+        let response = Value::BuchiPack(vec![
+            ("status".into(), Value::Int(100)),
+            ("headers".into(), Value::List(vec![])),
+            ("body".into(), Value::Str("data".into())),
+        ]);
+        let result = encode_response(&response);
+        assert!(is_result_failure(&result));
+        assert!(get_failure_message(&result).contains("must not have a body"));
+    }
+
+    #[test]
+    fn test_encode_204_content_length_stripped() {
+        // User-provided Content-Length should be silently dropped for 204
+        let response = Value::BuchiPack(vec![
+            ("status".into(), Value::Int(204)),
+            (
+                "headers".into(),
+                Value::List(vec![Value::BuchiPack(vec![
+                    ("name".into(), Value::Str("Content-Length".into())),
+                    ("value".into(), Value::Str("0".into())),
+                ])]),
+            ),
+            ("body".into(), Value::Str(String::new())),
+        ]);
+        let result = encode_response(&response);
+        assert!(!is_result_failure(&result));
+        let inner = extract_result_inner(&result);
+        let bytes = match inner.iter().find(|(k, _)| k == "bytes") {
+            Some((_, Value::Bytes(b))) => b.clone(),
+            _ => panic!("no bytes"),
+        };
+        let text = String::from_utf8(bytes).unwrap();
+        assert!(!text.contains("Content-Length"));
+    }
+
+    // ── Reason phrase tests ──
+
+    #[test]
+    fn test_encode_429_reason_phrase() {
+        let response = Value::BuchiPack(vec![
+            ("status".into(), Value::Int(429)),
+            ("headers".into(), Value::List(vec![])),
+            ("body".into(), Value::Str(String::new())),
+        ]);
+        let result = encode_response(&response);
+        assert!(!is_result_failure(&result));
+        let inner = extract_result_inner(&result);
+        let bytes = match inner.iter().find(|(k, _)| k == "bytes") {
+            Some((_, Value::Bytes(b))) => b.clone(),
+            _ => panic!("no bytes"),
+        };
+        let text = String::from_utf8(bytes).unwrap();
+        assert!(text.starts_with("HTTP/1.1 429 Too Many Requests\r\n"));
+    }
+
+    #[test]
+    fn test_encode_unknown_status_no_fake_reason() {
+        let response = Value::BuchiPack(vec![
+            ("status".into(), Value::Int(599)),
+            ("headers".into(), Value::List(vec![])),
+            ("body".into(), Value::Str(String::new())),
+        ]);
+        let result = encode_response(&response);
+        assert!(!is_result_failure(&result));
+        let inner = extract_result_inner(&result);
+        let bytes = match inner.iter().find(|(k, _)| k == "bytes") {
+            Some((_, Value::Bytes(b))) => b.clone(),
+            _ => panic!("no bytes"),
+        };
+        let text = String::from_utf8(bytes).unwrap();
+        // Should NOT say "OK" for unknown status
+        assert!(text.starts_with("HTTP/1.1 599 \r\n"));
     }
 }
