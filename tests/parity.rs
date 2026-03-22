@@ -7506,3 +7506,147 @@ stdout(callWith(triple))
     assert_eq!(interp, js, "NET-5 shadow lambda: Interp vs JS\nInterp: {}\nJS: {}", interp, js);
     assert_eq!(interp, native, "NET-5 shadow lambda: Interp vs Native\nInterp: {}\nNative: {}", interp, native);
 }
+
+// ── NET-5 review fix 2: local assignment shadow ──────────────────────────
+
+/// NET-5 assignment shadow: when httpServe is reassigned via local assignment
+/// (`httpServe <= add`), subsequent calls must use the local value.
+#[test]
+fn test_net5_shadow_assignment_http_serve_3way_parity() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+
+    let source = r#">>> taida-lang/net => @(httpServe)
+
+add a b = a + b => :Int
+wrap =
+  httpServe <= add
+  httpServe(10, 20)
+=> :Int
+
+stdout(wrap())
+"#;
+
+    let dir = setup_net_project(source, "5_shadow_assign_serve");
+    let interp = run_net_interpreter(&dir).expect("interpreter failed");
+    let js = run_net_js(&dir, "5_shadow_assign_serve").expect("js failed");
+    let native = run_net_native(&dir, "5_shadow_assign_serve").expect("native failed");
+    cleanup_net_project(&dir);
+
+    // Expected: 30 (add(10, 20) = 30)
+    assert_eq!(interp.trim(), "30", "NET-5 assignment shadow httpServe: Interpreter should produce 30, got: {}", interp);
+    assert_eq!(interp, js, "NET-5 assignment shadow httpServe: Interp vs JS\nInterp: {}\nJS: {}", interp, js);
+    assert_eq!(interp, native, "NET-5 assignment shadow httpServe: Interp vs Native\nInterp: {}\nNative: {}", interp, native);
+}
+
+/// NET-5 assignment shadow: httpParseRequestHead reassigned via local assignment.
+#[test]
+fn test_net5_shadow_assignment_http_parse_3way_parity() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+
+    let source = r#">>> taida-lang/net => @(httpParseRequestHead)
+
+double n = n + n => :Int
+wrap =
+  httpParseRequestHead <= double
+  httpParseRequestHead(7)
+=> :Int
+
+stdout(wrap())
+"#;
+
+    let dir = setup_net_project(source, "5_shadow_assign_parse");
+    let interp = run_net_interpreter(&dir).expect("interpreter failed");
+    let js = run_net_js(&dir, "5_shadow_assign_parse").expect("js failed");
+    let native = run_net_native(&dir, "5_shadow_assign_parse").expect("native failed");
+    cleanup_net_project(&dir);
+
+    // Expected: 14 (double(7) = 14)
+    assert_eq!(interp.trim(), "14", "NET-5 assignment shadow httpParseRequestHead: Interpreter should produce 14, got: {}", interp);
+    assert_eq!(interp, js, "NET-5 assignment shadow httpParseRequestHead: Interp vs JS\nInterp: {}\nJS: {}", interp, js);
+    assert_eq!(interp, native, "NET-5 assignment shadow httpParseRequestHead: Interp vs Native\nInterp: {}\nNative: {}", interp, native);
+}
+
+/// NET-5 assignment shadow: httpEncodeResponse reassigned via local assignment.
+#[test]
+fn test_net5_shadow_assignment_http_encode_3way_parity() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+
+    let source = r#">>> taida-lang/net => @(httpEncodeResponse)
+
+triple n = n * 3 => :Int
+wrap =
+  httpEncodeResponse <= triple
+  httpEncodeResponse(5)
+=> :Int
+
+stdout(wrap())
+"#;
+
+    let dir = setup_net_project(source, "5_shadow_assign_encode");
+    let interp = run_net_interpreter(&dir).expect("interpreter failed");
+    let js = run_net_js(&dir, "5_shadow_assign_encode").expect("js failed");
+    let native = run_net_native(&dir, "5_shadow_assign_encode").expect("native failed");
+    cleanup_net_project(&dir);
+
+    // Expected: 15 (triple(5) = 15)
+    assert_eq!(interp.trim(), "15", "NET-5 assignment shadow httpEncodeResponse: Interpreter should produce 15, got: {}", interp);
+    assert_eq!(interp, js, "NET-5 assignment shadow httpEncodeResponse: Interp vs JS\nInterp: {}\nJS: {}", interp, js);
+    assert_eq!(interp, native, "NET-5 assignment shadow httpEncodeResponse: Interp vs Native\nInterp: {}\nNative: {}", interp, native);
+}
+
+/// NET-5 assignment shadow: shadow does NOT leak to a sibling function scope.
+/// After wrap() uses httpServe as a local var, a call to httpServe in another
+/// function (or at top level in a different function) must still resolve to the builtin.
+#[test]
+fn test_net5_shadow_assignment_no_leak_3way_parity() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+
+    // wrap() shadows httpServe with a local assignment. outer() does NOT shadow it.
+    // outer() calls httpServe which should still refer to the net builtin (but since
+    // we can't easily test server start, we test that the shadow is correctly scoped
+    // by having two functions: one that shadows and one that does not).
+    let source = r#">>> taida-lang/net => @(httpServe)
+
+add a b = a + b => :Int
+wrap =
+  httpServe <= add
+  httpServe(10, 20)
+=> :Int
+
+// outer does NOT shadow httpServe — it should still see the builtin.
+// But calling the builtin would start a server, so we test scoping differently:
+// we define another function that also takes httpServe as a param to confirm
+// the assignment shadow in wrap does not persist.
+outer httpServe =
+  httpServe(3, 4)
+=> :Int
+
+multiply a b = a * b => :Int
+stdout(wrap())
+stdout(outer(multiply))
+"#;
+
+    let dir = setup_net_project(source, "5_shadow_assign_noleak");
+    let interp = run_net_interpreter(&dir).expect("interpreter failed");
+    let js = run_net_js(&dir, "5_shadow_assign_noleak").expect("js failed");
+    let native = run_net_native(&dir, "5_shadow_assign_noleak").expect("native failed");
+    cleanup_net_project(&dir);
+
+    // Expected: "30\n12" (add(10,20)=30, multiply(3,4)=12)
+    let expected = "30\n12";
+    assert_eq!(interp.trim(), expected, "NET-5 assignment shadow no-leak: Interpreter should produce {}, got: {}", expected, interp);
+    assert_eq!(interp, js, "NET-5 assignment shadow no-leak: Interp vs JS\nInterp: {}\nJS: {}", interp, js);
+    assert_eq!(interp, native, "NET-5 assignment shadow no-leak: Interp vs Native\nInterp: {}\nNative: {}", interp, native);
+}

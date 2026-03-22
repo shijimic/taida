@@ -1455,15 +1455,13 @@ impl Lowering {
         let mangled = self.resolve_user_func_symbol(&func_def.name);
         let mut ir_func = IrFunction::new_with_params(mangled, params.clone());
 
-        // Scope-aware net builtin shadowing: if a parameter name matches a net builtin,
-        // suppress stdlib_runtime_funcs dispatch inside this function body.
-        let mut newly_shadowed_net: Vec<String> = Vec::new();
+        // Scope-aware net builtin shadowing: snapshot before function body,
+        // restore after. This covers both parameter shadows and local assignment
+        // shadows (e.g. `httpServe <= add`) within the function scope.
+        let prev_shadowed_net = self.shadowed_net_builtins.clone();
         for p in &func_def.params {
-            if Self::NET_BUILTIN_NAMES.contains(&p.name.as_str())
-                && !self.shadowed_net_builtins.contains(&p.name)
-            {
+            if Self::NET_BUILTIN_NAMES.contains(&p.name.as_str()) {
                 self.shadowed_net_builtins.insert(p.name.clone());
-                newly_shadowed_net.push(p.name.clone());
             }
         }
 
@@ -1701,10 +1699,8 @@ impl Lowering {
             ir_func.push(IrInst::Return(zero));
         }
 
-        // Restore: remove net builtin names shadowed by this function's params
-        for name in &newly_shadowed_net {
-            self.shadowed_net_builtins.remove(name);
-        }
+        // Restore net builtin shadow set to pre-function state
+        self.shadowed_net_builtins = prev_shadowed_net;
 
         Ok(ir_func)
     }
@@ -2038,6 +2034,13 @@ impl Lowering {
                     self.current_heap_vars.push(assign.target.clone());
                 }
 
+                // Track local assignment shadow: if the target name matches a net
+                // builtin, subsequent calls in the same scope must use the local
+                // variable, not the builtin dispatch.
+                if Self::NET_BUILTIN_NAMES.contains(&assign.target.as_str()) {
+                    self.shadowed_net_builtins.insert(assign.target.clone());
+                }
+
                 Ok(())
             }
             Statement::FuncDef(func_def_stmt) => {
@@ -2227,6 +2230,10 @@ impl Lowering {
                 func.push(IrInst::DefVar(uf.target.clone(), result));
                 // Track type from mold source for debug display
                 self.track_unmold_type(&uf.target, &uf.source);
+                // Track local unmold-forward shadow for net builtins
+                if Self::NET_BUILTIN_NAMES.contains(&uf.target.as_str()) {
+                    self.shadowed_net_builtins.insert(uf.target.clone());
+                }
                 Ok(())
             }
             Statement::UnmoldBackward(ub) => {
@@ -2241,6 +2248,10 @@ impl Lowering {
                 func.push(IrInst::DefVar(ub.target.clone(), result));
                 // Track type from mold source for debug display
                 self.track_unmold_type(&ub.target, &ub.source);
+                // Track local unmold-backward shadow for net builtins
+                if Self::NET_BUILTIN_NAMES.contains(&ub.target.as_str()) {
+                    self.shadowed_net_builtins.insert(ub.target.clone());
+                }
                 Ok(())
             } // All statement types are now handled above.
               // This branch should not be reached.
@@ -4011,14 +4022,11 @@ impl Lowering {
             params.iter().map(|p| p.name.as_str()).collect();
         let free_vars = self.collect_free_vars(body, &param_names);
 
-        // Scope-aware net builtin shadowing for lambda parameters
-        let mut newly_shadowed_net: Vec<String> = Vec::new();
+        // Scope-aware net builtin shadowing: snapshot/restore for lambda scope
+        let prev_shadowed_net = self.shadowed_net_builtins.clone();
         for p in params {
-            if Self::NET_BUILTIN_NAMES.contains(&p.name.as_str())
-                && !self.shadowed_net_builtins.contains(&p.name)
-            {
+            if Self::NET_BUILTIN_NAMES.contains(&p.name.as_str()) {
                 self.shadowed_net_builtins.insert(p.name.clone());
-                newly_shadowed_net.push(p.name.clone());
             }
         }
 
@@ -4054,10 +4062,8 @@ impl Lowering {
             let dst = func.alloc_var();
             func.push(IrInst::MakeClosure(dst, lambda_name, free_vars));
 
-            // Restore: remove net builtin names shadowed by lambda params
-            for name in &newly_shadowed_net {
-                self.shadowed_net_builtins.remove(name);
-            }
+            // Restore net builtin shadow set to pre-lambda state
+            self.shadowed_net_builtins = prev_shadowed_net;
 
             Ok(dst)
         }

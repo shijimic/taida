@@ -532,6 +532,14 @@ impl JsCodegen {
                 }
                 self.gen_expr(&assign.value)?;
                 self.write(";\n");
+                // Track local assignment shadow: if the target name matches a net
+                // builtin, subsequent calls in the same scope must use the local
+                // value, not the builtin rewrite.
+                if self.has_net_import
+                    && Self::NET_BUILTIN_NAMES.contains(&assign.target.as_str())
+                {
+                    self.shadowed_net_builtins.insert(assign.target.clone());
+                }
                 Ok(())
             }
             Statement::FuncDef(func_def) => self.gen_func_def(func_def),
@@ -557,6 +565,12 @@ impl JsCodegen {
                 ));
                 self.gen_expr(&unmold.source)?;
                 self.write(");\n");
+                // Track local unmold-forward shadow for net builtins
+                if self.has_net_import
+                    && Self::NET_BUILTIN_NAMES.contains(&unmold.target.as_str())
+                {
+                    self.shadowed_net_builtins.insert(unmold.target.clone());
+                }
                 Ok(())
             }
             Statement::UnmoldBackward(unmold) => {
@@ -572,6 +586,12 @@ impl JsCodegen {
                 ));
                 self.gen_expr(&unmold.source)?;
                 self.write(");\n");
+                // Track local unmold-backward shadow for net builtins
+                if self.has_net_import
+                    && Self::NET_BUILTIN_NAMES.contains(&unmold.target.as_str())
+                {
+                    self.shadowed_net_builtins.insert(unmold.target.clone());
+                }
                 Ok(())
             }
         }
@@ -588,15 +608,13 @@ impl JsCodegen {
         let prev_async_context = self.in_async_context;
         self.in_async_context = needs_async;
 
-        // Scope-aware net builtin shadowing: if a parameter name matches a net builtin,
-        // suppress call-site rewriting inside this function body.
-        let mut newly_shadowed: Vec<String> = Vec::new();
+        // Scope-aware net builtin shadowing: snapshot before function body,
+        // restore after. This covers both parameter shadows and local assignment
+        // shadows (e.g. `httpServe <= add`) within the function scope.
+        let prev_shadowed_net = self.shadowed_net_builtins.clone();
         for p in &func_def.params {
-            if Self::NET_BUILTIN_NAMES.contains(&p.name.as_str())
-                && !self.shadowed_net_builtins.contains(&p.name)
-            {
+            if Self::NET_BUILTIN_NAMES.contains(&p.name.as_str()) {
                 self.shadowed_net_builtins.insert(p.name.clone());
-                newly_shadowed.push(p.name.clone());
             }
         }
 
@@ -655,10 +673,8 @@ impl JsCodegen {
             self.writeln("}\n");
         }
 
-        // Restore: remove net builtin names shadowed by this function's params
-        for name in &newly_shadowed {
-            self.shadowed_net_builtins.remove(name);
-        }
+        // Restore net builtin shadow set to pre-function state
+        self.shadowed_net_builtins = prev_shadowed_net;
 
         // Restore async context
         self.in_async_context = prev_async_context;
@@ -2388,22 +2404,17 @@ impl JsCodegen {
             }
             Expr::Lambda(params, body, _) => {
                 let param_names: Vec<String> = params.iter().map(|p| p.name.clone()).collect();
-                // Scope-aware net builtin shadowing for lambda parameters
-                let mut newly_shadowed: Vec<String> = Vec::new();
+                // Scope-aware net builtin shadowing: snapshot/restore for lambda scope
+                let prev_shadowed_net = self.shadowed_net_builtins.clone();
                 for p in params {
-                    if Self::NET_BUILTIN_NAMES.contains(&p.name.as_str())
-                        && !self.shadowed_net_builtins.contains(&p.name)
-                    {
+                    if Self::NET_BUILTIN_NAMES.contains(&p.name.as_str()) {
                         self.shadowed_net_builtins.insert(p.name.clone());
-                        newly_shadowed.push(p.name.clone());
                     }
                 }
                 self.write(&format!("(({}) => ", param_names.join(", ")));
                 self.gen_expr(body)?;
                 self.write(")");
-                for name in &newly_shadowed {
-                    self.shadowed_net_builtins.remove(name);
-                }
+                self.shadowed_net_builtins = prev_shadowed_net;
                 Ok(())
             }
             Expr::Throw(inner, _) => {
