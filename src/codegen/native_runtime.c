@@ -9141,6 +9141,11 @@ taida_val taida_net_http_encode_response(taida_val response) {
         return taida_net_result_fail("EncodeError", "httpEncodeResponse: missing required field 'status'");
     }
     taida_val status = taida_pack_get(response, status_hash);
+    // NB-14: Type check — status must be Int (not Str/List/Pack/Bytes)
+    if (taida_is_buchi_pack(status) || taida_is_list(status) ||
+        TAIDA_IS_BYTES(status) || taida_is_string_value(status)) {
+        return taida_net_result_fail("EncodeError", "httpEncodeResponse: status must be Int, got non-Int");
+    }
     if (status < 100 || status > 999) {
         char err_msg[128];
         snprintf(err_msg, sizeof(err_msg), "httpEncodeResponse: status must be 100-999, got %d", (int)status);
@@ -9154,7 +9159,13 @@ taida_val taida_net_http_encode_response(taida_val response) {
     }
     taida_val headers_ptr = taida_pack_get(response, headers_hash);
     if (!taida_is_list(headers_ptr)) {
-        return taida_net_result_fail("EncodeError", "httpEncodeResponse: headers must be a List");
+        // NB-21: Include type info in error message (parity with Interpreter/JS)
+        const char *htype = taida_is_buchi_pack(headers_ptr) ? "BuchiPack"
+                          : taida_is_string_value(headers_ptr) ? "Str"
+                          : TAIDA_IS_BYTES(headers_ptr) ? "Bytes" : "non-List";
+        char err_msg[128];
+        snprintf(err_msg, sizeof(err_msg), "httpEncodeResponse: headers must be a List, got %s", htype);
+        return taida_net_result_fail("EncodeError", err_msg);
     }
 
     // Extract body (required, must be Bytes or Str)
@@ -9182,7 +9193,12 @@ taida_val taida_net_http_encode_response(taida_val response) {
             body_data = (unsigned char*)body_ptr;
             body_len = slen;
         } else {
-            return taida_net_result_fail("EncodeError", "httpEncodeResponse: body must be Bytes or Str");
+            // NB-21: Include type info in error message (parity with Interpreter/JS)
+            const char *btype = taida_is_buchi_pack(body_ptr) ? "BuchiPack"
+                              : taida_is_list(body_ptr) ? "List" : "non-Str";
+            char err_msg[128];
+            snprintf(err_msg, sizeof(err_msg), "httpEncodeResponse: body must be Bytes or Str, got %s", btype);
+            return taida_net_result_fail("EncodeError", err_msg);
         }
     }
 
@@ -9242,18 +9258,24 @@ taida_val taida_net_http_encode_response(taida_val response) {
                 return taida_net_result_fail("EncodeError", err_msg);
             }
 
-            // Check for CRLF injection
-            int has_crlf = 0;
+            // NB-13: Check for CRLF injection with index + name/value distinction (parity with Interpreter/JS)
             for (size_t k = 0; k < hn_len; k++) {
-                if (hname_s[k] == '\r' || hname_s[k] == '\n') { has_crlf = 1; break; }
+                if (hname_s[k] == '\r' || hname_s[k] == '\n') {
+                    if (free_body) free(body_data);
+                    free(buf);
+                    char err_msg[128];
+                    snprintf(err_msg, sizeof(err_msg), "httpEncodeResponse: headers[%d].name contains CR/LF", (int)i);
+                    return taida_net_result_fail("EncodeError", err_msg);
+                }
             }
-            for (size_t k = 0; k < hv_len && !has_crlf; k++) {
-                if (hvalue_s[k] == '\r' || hvalue_s[k] == '\n') { has_crlf = 1; break; }
-            }
-            if (has_crlf) {
-                if (free_body) free(body_data);
-                free(buf);
-                return taida_net_result_fail("EncodeError", "httpEncodeResponse: header contains CR/LF");
+            for (size_t k = 0; k < hv_len; k++) {
+                if (hvalue_s[k] == '\r' || hvalue_s[k] == '\n') {
+                    if (free_body) free(body_data);
+                    free(buf);
+                    char err_msg[128];
+                    snprintf(err_msg, sizeof(err_msg), "httpEncodeResponse: headers[%d].value contains CR/LF", (int)i);
+                    return taida_net_result_fail("EncodeError", err_msg);
+                }
             }
 
             // Skip Content-Length for no-body statuses
@@ -9509,8 +9531,8 @@ taida_val taida_net_http_serve(taida_val port, taida_val handler, taida_val max_
             continue;
         }
 
-        // NB-3: Early reject if Content-Length exceeds buffer limit (413 Content Too Large)
-        if (content_length > NET_MAX_REQUEST_BUF) {
+        // NB-3: Early reject if head + body exceeds buffer limit (413 Content Too Large)
+        if (head_consumed + (size_t)content_length > NET_MAX_REQUEST_BUF) {
             const char *too_large = "HTTP/1.1 413 Content Too Large\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
             taida_net_send_all(client_fd, too_large, strlen(too_large));
             close(client_fd);

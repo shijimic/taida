@@ -3192,6 +3192,13 @@ function __taida_net_httpEncodeResponse(response) {
     if (typeof value !== 'string') {
       return __taida_net_result_fail('EncodeError', 'httpEncodeResponse: headers[' + i + '].value must be Str');
     }
+    // NB-7: Enforce header name/value length limits (parity with Native)
+    if (name.length > 8192) {
+      return __taida_net_result_fail('EncodeError', 'httpEncodeResponse: headers[' + i + '].name exceeds 8192 bytes');
+    }
+    if (value.length > 65536) {
+      return __taida_net_result_fail('EncodeError', 'httpEncodeResponse: headers[' + i + '].value exceeds 65536 bytes');
+    }
     // Reject CRLF in header name/value
     if (name.includes('\r') || name.includes('\n')) {
       return __taida_net_result_fail('EncodeError', 'httpEncodeResponse: headers[' + i + '].name contains CR/LF');
@@ -3398,8 +3405,8 @@ async function __taida_net_httpServe(port, handler, maxRequests, timeoutMs) {
 
         const contentLength = parsed.contentLength || 0;
 
-        // NB-3: Early reject if Content-Length exceeds buffer limit (413 Content Too Large)
-        if (contentLength > MAX_REQUEST_BUF) { send413(); return; }
+        // NB-3: Early reject if head + body exceeds buffer limit (413 Content Too Large)
+        if (parsed.consumed + contentLength > MAX_REQUEST_BUF) { send413(); return; }
 
         const bodyNeeded = parsed.consumed + contentLength;
 

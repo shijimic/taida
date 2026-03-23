@@ -399,6 +399,19 @@ fn extract_response_fields(
                 ))
             }
         };
+        // NB-7: Enforce header name/value length limits (parity with Native)
+        if name.len() > 8192 {
+            return Err(format!(
+                "httpEncodeResponse: headers[{}].name exceeds 8192 bytes",
+                i
+            ));
+        }
+        if value.len() > 65536 {
+            return Err(format!(
+                "httpEncodeResponse: headers[{}].value exceeds 65536 bytes",
+                i
+            ));
+        }
         // Reject CRLF in header name/value to prevent response splitting
         if name.contains('\r') || name.contains('\n') {
             return Err(format!(
@@ -728,8 +741,8 @@ impl Interpreter {
                 }
             };
 
-            // NB-3: Early reject if Content-Length exceeds buffer limit (413 Content Too Large)
-            if content_length as usize > MAX_REQUEST_BUF {
+            // NB-3: Early reject if head + body exceeds buffer limit (413 Content Too Large)
+            if head_consumed + content_length as usize > MAX_REQUEST_BUF {
                 let too_large = b"HTTP/1.1 413 Content Too Large\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
                 let _ = std::io::Write::write_all(&mut stream, too_large);
                 request_count += 1;
@@ -1482,6 +1495,90 @@ mod tests {
         let result = encode_response(&response);
         assert!(is_result_failure(&result));
         assert!(get_failure_message(&result).contains("headers[0].name must be Str"));
+    }
+
+    // ── NB-7: header name/value length limits ──
+
+    #[test]
+    fn test_encode_header_name_exceeds_limit() {
+        let long_name = "X".repeat(8193);
+        let response = Value::BuchiPack(vec![
+            ("status".into(), Value::Int(200)),
+            (
+                "headers".into(),
+                Value::List(vec![Value::BuchiPack(vec![
+                    ("name".into(), Value::Str(long_name)),
+                    ("value".into(), Value::Str("ok".into())),
+                ])]),
+            ),
+            ("body".into(), Value::Str(String::new())),
+        ]);
+        let result = encode_response(&response);
+        assert!(is_result_failure(&result));
+        assert!(
+            get_failure_message(&result).contains("name exceeds 8192 bytes"),
+            "Expected name length error, got: {}",
+            get_failure_message(&result)
+        );
+    }
+
+    #[test]
+    fn test_encode_header_value_exceeds_limit() {
+        let long_value = "V".repeat(65537);
+        let response = Value::BuchiPack(vec![
+            ("status".into(), Value::Int(200)),
+            (
+                "headers".into(),
+                Value::List(vec![Value::BuchiPack(vec![
+                    ("name".into(), Value::Str("X-Data".into())),
+                    ("value".into(), Value::Str(long_value)),
+                ])]),
+            ),
+            ("body".into(), Value::Str(String::new())),
+        ]);
+        let result = encode_response(&response);
+        assert!(is_result_failure(&result));
+        assert!(
+            get_failure_message(&result).contains("value exceeds 65536 bytes"),
+            "Expected value length error, got: {}",
+            get_failure_message(&result)
+        );
+    }
+
+    #[test]
+    fn test_encode_header_name_at_limit_ok() {
+        let name = "X".repeat(8192);
+        let response = Value::BuchiPack(vec![
+            ("status".into(), Value::Int(200)),
+            (
+                "headers".into(),
+                Value::List(vec![Value::BuchiPack(vec![
+                    ("name".into(), Value::Str(name)),
+                    ("value".into(), Value::Str("ok".into())),
+                ])]),
+            ),
+            ("body".into(), Value::Str(String::new())),
+        ]);
+        let result = encode_response(&response);
+        assert!(!is_result_failure(&result));
+    }
+
+    #[test]
+    fn test_encode_header_value_at_limit_ok() {
+        let value = "V".repeat(65536);
+        let response = Value::BuchiPack(vec![
+            ("status".into(), Value::Int(200)),
+            (
+                "headers".into(),
+                Value::List(vec![Value::BuchiPack(vec![
+                    ("name".into(), Value::Str("X-Data".into())),
+                    ("value".into(), Value::Str(value)),
+                ])]),
+            ),
+            ("body".into(), Value::Str(String::new())),
+        ]);
+        let result = encode_response(&response);
+        assert!(!is_result_failure(&result));
     }
 
     // ── No-body status tests ──
@@ -2639,6 +2736,266 @@ mod tests {
             resp
         );
 
+        let result = server_handle.join().unwrap();
+        match result {
+            Signal::Value(Value::Async(a)) => {
+                assert_eq!(a.status, AsyncStatus::Fulfilled);
+                let inner = extract_result_value(&a.value).unwrap();
+                assert_eq!(get_field_bool(inner, "ok"), Some(true));
+                assert_eq!(get_field_int(inner, "requests"), Some(1));
+            }
+            _ => panic!("expected fulfilled Async"),
+        }
+    }
+
+    /// NB-3: Content-Length under 1 MiB but head + body exceeds 1 MiB → 413
+    /// The early reject condition must be `head_consumed + content_length > MAX_REQUEST_BUF`,
+    /// not just `content_length > MAX_REQUEST_BUF`.
+    #[test]
+    fn test_nb3_head_plus_body_exceeds_limit_returns_413() {
+        use std::sync::atomic::{AtomicU16, Ordering};
+        static PORT_COUNTER: AtomicU16 = AtomicU16::new(18900);
+        let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+
+        let server_port = port;
+        let server_handle = std::thread::spawn(move || {
+            let mut interp = Interpreter::new();
+            interp.env.define_force(
+                "httpServe",
+                Value::Str("__net_builtin_httpServe".into()),
+            );
+            let args = vec![
+                Expr::IntLit(server_port as i64, dummy_span()),
+                make_handler_expr("should not reach"),
+                Expr::IntLit(1, dummy_span()),
+                Expr::IntLit(5000, dummy_span()),
+            ];
+            interp.try_net_func("httpServe", &args).unwrap().unwrap()
+        });
+
+        std::thread::sleep(std::time::Duration::from_millis(100));
+
+        // Craft a request where Content-Length < MAX_REQUEST_BUF (1 MiB)
+        // but head_consumed + Content-Length > MAX_REQUEST_BUF.
+        // Header is ~60 bytes, so CL = 1048576 - 10 = 1048566 (under 1 MiB).
+        // head (~60) + 1048566 > 1048576 → must trigger 413.
+        let cl_value = 1_048_576usize - 10; // just under 1 MiB
+        let request = format!(
+            "POST / HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\n\r\n",
+            cl_value
+        );
+
+        let mut client =
+            std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
+        let _ = client.set_write_timeout(Some(std::time::Duration::from_secs(3)));
+        std::io::Write::write_all(&mut client, request.as_bytes()).unwrap();
+
+        // Read response
+        let mut response = Vec::new();
+        let _ = client.set_read_timeout(Some(std::time::Duration::from_secs(3)));
+        loop {
+            let mut buf = [0u8; 4096];
+            match std::io::Read::read(&mut client, &mut buf) {
+                Ok(0) => break,
+                Ok(n) => response.extend_from_slice(&buf[..n]),
+                Err(ref e)
+                    if e.kind() == std::io::ErrorKind::WouldBlock
+                        || e.kind() == std::io::ErrorKind::TimedOut =>
+                {
+                    break;
+                }
+                Err(_) => break,
+            }
+        }
+
+        let resp = String::from_utf8_lossy(&response);
+        assert!(
+            resp.contains("413 Content Too Large"),
+            "NB-3: head + body > 1 MiB should get 413, got: {}",
+            resp
+        );
+
+        let result = server_handle.join().unwrap();
+        match result {
+            Signal::Value(Value::Async(a)) => {
+                assert_eq!(a.status, AsyncStatus::Fulfilled);
+                let inner = extract_result_value(&a.value).unwrap();
+                assert_eq!(get_field_bool(inner, "ok"), Some(true));
+                assert_eq!(get_field_int(inner, "requests"), Some(1));
+            }
+            _ => panic!("expected fulfilled Async"),
+        }
+    }
+
+    /// NB-3: Content-Length that exactly fits (head + body == MAX_REQUEST_BUF) → 200 OK, not 413
+    #[test]
+    fn test_nb3_head_plus_body_exactly_fits_returns_200() {
+        use std::sync::atomic::{AtomicU16, Ordering};
+        static PORT_COUNTER: AtomicU16 = AtomicU16::new(18910);
+        let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+
+        // Pre-calculate the header size to set Content-Length so head + body == 1 MiB exactly.
+        // "POST / HTTP/1.1\r\nHost: localhost\r\nContent-Length: NNNNNN\r\n\r\n"
+        // We need to know consumed size; build the header template first.
+        let header_template = "POST / HTTP/1.1\r\nHost: localhost\r\nContent-Length: ";
+        let header_suffix = "\r\n\r\n";
+        // CL digits: we'll target ~6 digits. head_consumed = template + digits + suffix
+        // Try CL = 1048576 - 62 = 1048514 (6 digits). head = 48 + 7 + 4 = 59 => 59 + 1048514 = 1048573 < 1048576, fits.
+        // Actually compute: template.len() = 48, digits of CL, suffix.len() = 4
+        // Let's just compute iteratively.
+        let max = 1_048_576usize;
+        let template_len = header_template.len() + header_suffix.len(); // 48 + 4 = 52
+        // head_consumed = template_len + cl_digits_len
+        // We need head_consumed + cl_value == max
+        // cl_value = max - head_consumed = max - template_len - cl_digits_len
+        // For 6-digit CL: cl = max - 52 - 6 = 1048518, which is 7 digits → contradiction
+        // For 7-digit CL: cl = max - 52 - 7 = 1048517, which is 7 digits ✓
+        let cl_digits = 7;
+        let cl_value = max - template_len - cl_digits;
+        assert_eq!(cl_value.to_string().len(), cl_digits, "CL digit count mismatch");
+
+        let request_head = format!("{}{}{}", header_template, cl_value, header_suffix);
+        let head_len = request_head.len();
+        assert_eq!(
+            head_len + cl_value,
+            max,
+            "head + body must equal MAX_REQUEST_BUF"
+        );
+
+        let server_port = port;
+        let server_handle = std::thread::spawn(move || {
+            let mut interp = Interpreter::new();
+            interp.env.define_force(
+                "httpServe",
+                Value::Str("__net_builtin_httpServe".into()),
+            );
+            let args = vec![
+                Expr::IntLit(server_port as i64, dummy_span()),
+                make_handler_expr("ok"),
+                Expr::IntLit(1, dummy_span()),
+                Expr::IntLit(5000, dummy_span()),
+            ];
+            interp.try_net_func("httpServe", &args).unwrap().unwrap()
+        });
+
+        std::thread::sleep(std::time::Duration::from_millis(100));
+
+        let mut client =
+            std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
+        let _ = client.set_write_timeout(Some(std::time::Duration::from_secs(5)));
+        // Send head + exactly cl_value bytes of body
+        std::io::Write::write_all(&mut client, request_head.as_bytes()).unwrap();
+        let body = vec![b'A'; cl_value];
+        std::io::Write::write_all(&mut client, &body).unwrap();
+
+        // Read response
+        let mut response = Vec::new();
+        let _ = client.set_read_timeout(Some(std::time::Duration::from_secs(5)));
+        loop {
+            let mut buf = [0u8; 4096];
+            match std::io::Read::read(&mut client, &mut buf) {
+                Ok(0) => break,
+                Ok(n) => response.extend_from_slice(&buf[..n]),
+                Err(ref e)
+                    if e.kind() == std::io::ErrorKind::WouldBlock
+                        || e.kind() == std::io::ErrorKind::TimedOut =>
+                {
+                    break;
+                }
+                Err(_) => break,
+            }
+        }
+
+        let resp = String::from_utf8_lossy(&response);
+        assert!(
+            resp.contains("200 OK"),
+            "NB-3: head + body == 1 MiB should get 200, got: {}",
+            resp
+        );
+
+        let result = server_handle.join().unwrap();
+        match result {
+            Signal::Value(Value::Async(a)) => {
+                assert_eq!(a.status, AsyncStatus::Fulfilled);
+            }
+            _ => panic!("expected fulfilled Async"),
+        }
+    }
+
+    /// NB-28: Verify that timeoutMs actually causes the server to timeout
+    /// a slow client (connects but sends no data).
+    #[test]
+    fn test_nb28_timeout_closes_connection() {
+        use std::sync::atomic::{AtomicU16, Ordering};
+        static PORT_COUNTER: AtomicU16 = AtomicU16::new(18920);
+        let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+
+        let server_port = port;
+        let server_handle = std::thread::spawn(move || {
+            let mut interp = Interpreter::new();
+            interp.env.define_force(
+                "httpServe",
+                Value::Str("__net_builtin_httpServe".into()),
+            );
+            let args = vec![
+                Expr::IntLit(server_port as i64, dummy_span()),
+                make_handler_expr("should-not-reach"),
+                Expr::IntLit(1, dummy_span()),  // maxRequests=1
+                Expr::IntLit(500, dummy_span()), // timeoutMs=500 (short timeout)
+            ];
+            interp.try_net_func("httpServe", &args).unwrap().unwrap()
+        });
+
+        std::thread::sleep(std::time::Duration::from_millis(100));
+
+        // Connect but send NO data — the server should timeout after ~500ms
+        let start = std::time::Instant::now();
+        let mut client =
+            std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
+
+        // Set a generous read timeout on the client side so we don't hang forever
+        let _ = client.set_read_timeout(Some(std::time::Duration::from_secs(5)));
+
+        // Wait for the server to respond (it should timeout and send 400)
+        let mut response = Vec::new();
+        loop {
+            let mut buf = [0u8; 4096];
+            match std::io::Read::read(&mut client, &mut buf) {
+                Ok(0) => break,
+                Ok(n) => response.extend_from_slice(&buf[..n]),
+                Err(ref e)
+                    if e.kind() == std::io::ErrorKind::WouldBlock
+                        || e.kind() == std::io::ErrorKind::TimedOut =>
+                {
+                    break;
+                }
+                Err(_) => break,
+            }
+        }
+        let elapsed = start.elapsed();
+
+        // Verify: server sent a 400 Bad Request (timeout → Incomplete → 400)
+        let resp = String::from_utf8_lossy(&response);
+        assert!(
+            resp.contains("400 Bad Request"),
+            "NB-28: timeout should produce 400, got: {}",
+            resp
+        );
+
+        // Verify: elapsed time should be at least ~400ms (timeout was 500ms)
+        // but not more than 3s (proving it was the timeout, not client-side timeout)
+        assert!(
+            elapsed.as_millis() >= 400,
+            "NB-28: elapsed {}ms is too short — timeout did not fire",
+            elapsed.as_millis()
+        );
+        assert!(
+            elapsed.as_millis() < 3000,
+            "NB-28: elapsed {}ms is too long — timeout should be ~500ms",
+            elapsed.as_millis()
+        );
+
+        // Verify: server terminates successfully (maxRequests=1 reached)
         let result = server_handle.join().unwrap();
         match result {
             Signal::Value(Value::Async(a)) => {
