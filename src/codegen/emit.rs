@@ -1542,9 +1542,9 @@ fn runtime_abi(name: &str) -> Result<RuntimeAbi, String> {
             params: &[Ptr],
             returns: &[Ptr],
         },
-        // taida_net_http_serve(port: Val, handler: Ptr, max_requests: Val, timeout_ms: Val) -> Ptr
+        // NB-31: taida_net_http_serve(port, handler, max_requests, timeout_ms, handler_type_tag) -> Ptr
         "taida_net_http_serve" => RuntimeAbi {
-            params: &[Val, Ptr, Val, Val],
+            params: &[Val, Ptr, Val, Val, Val],
             returns: &[Ptr],
         },
 

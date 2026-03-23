@@ -725,7 +725,8 @@ fn wasm_full_parity_all_examples() {
         .collect();
     td_files.sort();
 
-    // Skip: WASI tests needing --env/--dir, edge tests needing host imports
+    // Skip: WASI tests needing --env/--dir, edge tests needing host imports,
+    // and server examples that block waiting for connections.
     let skip_stems: Vec<&str> = vec![
         "wasm_wasi_env",
         "wasm_wasi_exists",
@@ -734,6 +735,7 @@ fn wasm_full_parity_all_examples() {
         "wasm_wasi_write_failure_shape",
         "wasm_wasi_stderr", // stderr goes to separate fd
         "wasm_edge_env",    // edge profile, different env mechanism
+        "net_http_hello",   // server blocks on httpServe waiting for connections
     ];
 
     let mut parity_ok = Vec::new();
@@ -845,8 +847,8 @@ fn wasm_full_parity_all_examples() {
         "helper_val",
         "module_math",
         "module_utils",
-        "net_http_hello",            // server example, blocks waiting for connections
         "transpile_npm",
+        // net_http_hello: moved to skip_stems (blocks on httpServe)
     ];
 
     // Detect regressions: any new rejected example not in the allowlist

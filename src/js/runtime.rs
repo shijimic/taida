@@ -3062,6 +3062,11 @@ function __taida_net_httpParseRequestHead(input) {
   if (vMatch) {
     major = parseInt(vMatch[1], 10);
     minor = parseInt(vMatch[2], 10);
+    // NB-32: restrict to HTTP/1.0 and HTTP/1.1 only (parity with Interpreter/httparse)
+    // Reject immediately once version is fully parsed, regardless of head completeness
+    if (major !== 1 || (minor !== 0 && minor !== 1)) {
+      return __taida_net_result_fail('ParseError', 'Malformed HTTP request: invalid HTTP version');
+    }
   } else if (complete) {
     return __taida_net_result_fail('ParseError', 'Malformed HTTP request: invalid HTTP version');
   }
@@ -3085,11 +3090,13 @@ function __taida_net_httpParseRequestHead(input) {
     }
     const nameStart = lineOffset;
     const nameLen = colonIdx;
-    // Value: skip ': ' (colon + optional space)
+    // Value: skip leading SP/HT after colon, and trim trailing SP/HT (NB-34: parity with Interpreter/httparse)
     let valueOff = colonIdx + 1;
-    while (valueOff < line.length && line[valueOff] === ' ') valueOff++;
+    while (valueOff < line.length && (line[valueOff] === ' ' || line[valueOff] === '\t')) valueOff++;
+    let valueEnd = line.length;
+    while (valueEnd > valueOff && (line[valueEnd - 1] === ' ' || line[valueEnd - 1] === '\t')) valueEnd--;
     const valueStart = lineOffset + valueOff;
-    const valueLen = line.length - valueOff;
+    const valueLen = valueEnd - valueOff;
 
     headersList.push(Object.freeze({
       name: __taida_net_span(nameStart, nameLen),
@@ -3108,11 +3115,15 @@ function __taida_net_httpParseRequestHead(input) {
       if (!/^\d+$/.test(rawVal)) {
         return __taida_net_result_fail('ParseError', 'Malformed HTTP request: invalid Content-Length value');
       }
+      // Strip leading zeros for numeric comparison (RFC 9110: Content-Length = 1*DIGIT,
+      // leading zeros are valid). Interpreter uses parse::<i64>() and Native uses manual
+      // digit accumulation — both ignore leading zeros. JS must match.
+      const clStripped = rawVal.replace(/^0+/, '') || '0';
       // Cap at Number.MAX_SAFE_INTEGER (2^53 - 1 = 9007199254740991) for
       // cross-backend parity. JS Number loses precision beyond this value,
       // so both backends must reject to keep contentLength identical.
       // String comparison: reject if >16 digits, or exactly 16 digits and > '9007199254740991'.
-      if (rawVal.length > 16 || (rawVal.length === 16 && rawVal > '9007199254740991')) {
+      if (clStripped.length > 16 || (clStripped.length === 16 && clStripped > '9007199254740991')) {
         return __taida_net_result_fail('ParseError', 'Malformed HTTP request: invalid Content-Length value');
       }
       const parsedCl = parseInt(rawVal, 10);
@@ -3245,7 +3256,7 @@ async function __taida_net_httpServe(port, handler, maxRequests, timeoutMs) {
   }
   if (typeof handler !== 'function') {
     return new __TaidaAsync(
-      __taida_net_result_fail('BindError', 'httpServe: handler must be a Function'),
+      __taida_net_result_fail('TypeError', 'httpServe: handler must be a Function'),
       null, 'fulfilled');
   }
   const maxReq = (typeof maxRequests === 'number' && Number.isInteger(maxRequests)) ? maxRequests : 0;
@@ -3377,8 +3388,8 @@ async function __taida_net_httpServe(port, handler, maxRequests, timeoutMs) {
         socket.removeAllListeners('timeout');
         socket.removeAllListeners('end');
 
-        // Build request pack (same shape as Interpreter)
-        const raw = new Uint8Array(buf.buffer, buf.byteOffset, buf.length);
+        // NB-33: Build request pack — raw is sliced to current request only (exclude pipelined tail)
+        const raw = new Uint8Array(buf.buffer, buf.byteOffset, bodyNeeded);
         const remoteAddr = socket.remoteAddress || '127.0.0.1';
         const cleanHost = remoteAddr.startsWith('::ffff:') ? remoteAddr.substring(7) : remoteAddr;
 

@@ -142,6 +142,12 @@ typedef intptr_t  taida_fn_ptr;  // 関数ポインタ
 #define TAIDA_IS_BYTES(ptr) (taida_ptr_is_readable(ptr, 8) && (((taida_val*)ptr)[0] & TAIDA_MAGIC_MASK) == TAIDA_BYTES_MAGIC)
 #define TAIDA_IS_CLOSURE(ptr) (taida_ptr_is_readable(ptr, sizeof(taida_val) * 3) && (((taida_val*)ptr)[0] & TAIDA_MAGIC_MASK) == TAIDA_CLOSURE_MAGIC)
 
+// NB-31: Callable check — closure OR readable non-heap-tagged pointer (function pointer).
+// Catches: integers (not readable), data objects (readable + heap magic), null/zero.
+// Cannot catch all adversarial cases (e.g., aligned readable int in code segment range)
+// but prevents the common httpServe(port, 42) / httpServe(port, 50000) crash paths.
+#define TAIDA_IS_CALLABLE(val) _taida_is_callable_impl(val)
+
 #define TAIDA_GET_RC(ptr)      (((taida_val*)ptr)[0] & TAIDA_RC_MASK)
 #define TAIDA_SET_RC(ptr, rc)  (((taida_val*)ptr)[0] = (((taida_val*)ptr)[0] & TAIDA_MAGIC_MASK) | ((rc) & TAIDA_RC_MASK))
 #define TAIDA_INC_RC(ptr)      do { taida_val _rc = TAIDA_GET_RC(ptr); if (_rc < 255) TAIDA_SET_RC(ptr, _rc + 1); } while (0)
@@ -3307,6 +3313,29 @@ static int taida_ptr_is_readable(taida_val ptr, size_t bytes) {
         if (page > UINTPTR_MAX - step) return 0;
         page += step;
     }
+    return 1;
+}
+
+// NB-31: Check if a taida_val is callable (function pointer or closure).
+// Uses negative logic: reject values that are DEFINITELY not callable.
+// Function pointers may not be 8-byte aligned, so we cannot use taida_ptr_is_readable
+// as a positive gate (it requires 8-byte alignment for heap objects).
+static int _taida_is_callable_impl(taida_val val) {
+    // Closures are always callable
+    if (TAIDA_IS_CLOSURE(val)) return 1;
+    // Small non-negative integers (covers most user-facing Int values including 42, 50000)
+    if (val >= 0 && val <= 65535) return 0;
+    // Negative integers
+    if (val < 0) return 0;
+    // 8-byte aligned + readable → check for known heap data types
+    if ((val & 0x7) == 0 && taida_ptr_is_readable(val, 8)) {
+        taida_val magic = ((taida_val*)val)[0] & TAIDA_MAGIC_MASK;
+        if (magic == TAIDA_PACK_MAGIC || magic == TAIDA_LIST_MAGIC ||
+            magic == TAIDA_STR_MAGIC || magic == TAIDA_HMAP_MAGIC ||
+            magic == TAIDA_SET_MAGIC || magic == TAIDA_ASYNC_MAGIC ||
+            magic == TAIDA_BYTES_MAGIC) return 0;
+    }
+    // Assume callable: function pointer or large integer (rare edge case)
     return 1;
 }
 
@@ -8707,7 +8736,7 @@ taida_val taida_pool_health(taida_val pool_or_pack) {
 // Forward declarations
 taida_val taida_net_http_parse_request_head(taida_val input);
 taida_val taida_net_http_encode_response(taida_val response);
-taida_val taida_net_http_serve(taida_val port, taida_val handler, taida_val max_requests, taida_val timeout_ms);
+taida_val taida_net_http_serve(taida_val port, taida_val handler, taida_val max_requests, taida_val timeout_ms, taida_val handler_type_tag);
 
 // Net result helpers (use HttpError instead of IoError)
 static taida_val taida_net_result_ok(taida_val inner) {
@@ -8906,6 +8935,12 @@ taida_val taida_net_http_parse_request_head(taida_val input) {
         data[version_start+7] >= '0' && data[version_start+7] <= '9') {
         http_major = data[version_start+5] - '0';
         http_minor = data[version_start+7] - '0';
+        // NB-32: restrict to HTTP/1.0 and HTTP/1.1 only (parity with Interpreter/httparse)
+        // Reject immediately once version is fully parsed, regardless of head completeness
+        if (http_major != 1 || (http_minor != 0 && http_minor != 1)) {
+            if (free_data) free(data);
+            return taida_net_result_fail("ParseError", "Malformed HTTP request: invalid HTTP version");
+        }
     } else if (complete) {
         if (free_data) free(data);
         return taida_net_result_fail("ParseError", "Malformed HTTP request: invalid HTTP version");
@@ -8965,13 +9000,15 @@ taida_val taida_net_http_parse_request_head(taida_val input) {
             break;  // incomplete — stop parsing headers
         }
 
-        // Header name: pos..colon, value: after colon + optional leading SP/HT
+        // Header name: pos..colon, value: after colon + OWS trimming
         size_t name_start = pos;
         size_t name_len = colon - pos;
         size_t val_start = colon + 1;
-        // Skip leading spaces and tabs (parity with Interpreter's httparse and JS's trim)
+        // NB-34: Skip leading SP/HT and trim trailing SP/HT (parity with Interpreter/httparse)
         while (val_start < line_end && (data[val_start] == ' ' || data[val_start] == '\t')) val_start++;
-        size_t val_len = line_end - val_start;
+        size_t val_end = line_end;
+        while (val_end > val_start && (data[val_end - 1] == ' ' || data[val_end - 1] == '\t')) val_end--;
+        size_t val_len = val_end - val_start;
 
         taida_val header_pack = taida_pack_new(2);
         taida_pack_set_hash(header_pack, 0, taida_str_hash((taida_val)"name"));
@@ -9239,7 +9276,7 @@ taida_val taida_net_http_encode_response(taida_val response) {
             size_t needed = buf_len + hn_len + hv_len + 4;
             if (needed > buf_cap) {
                 buf_cap = needed * 2;
-                buf = (unsigned char*)realloc(buf, buf_cap);
+                TAIDA_REALLOC(buf, buf_cap, "net_encode_headers");
             }
             memcpy(buf + buf_len, hname_s, hn_len); buf_len += hn_len;
             buf[buf_len++] = ':'; buf[buf_len++] = ' ';
@@ -9255,7 +9292,7 @@ taida_val taida_net_http_encode_response(taida_val response) {
         size_t needed = buf_len + (size_t)cl_len;
         if (needed > buf_cap) {
             buf_cap = needed * 2;
-            buf = (unsigned char*)realloc(buf, buf_cap);
+            TAIDA_REALLOC(buf, buf_cap, "net_encode_cl");
         }
         memcpy(buf + buf_len, cl_hdr, (size_t)cl_len);
         buf_len += (size_t)cl_len;
@@ -9265,7 +9302,7 @@ taida_val taida_net_http_encode_response(taida_val response) {
     size_t needed = buf_len + 2 + body_len;
     if (needed > buf_cap) {
         buf_cap = needed;
-        buf = (unsigned char*)realloc(buf, buf_cap);
+        TAIDA_REALLOC(buf, buf_cap, "net_encode_body");
     }
     buf[buf_len++] = '\r'; buf[buf_len++] = '\n';
 
@@ -9311,7 +9348,31 @@ static int taida_net_send_all(int fd, const void *buf, size_t len) {
 // ── httpServe(port, handler, maxRequests, timeoutMs) ────────────
 // HTTP/1.1 server: bind, accept loop, parse, call handler, encode, respond.
 // Returns Async[Result[@(ok: Bool, requests: Int), _]]
-taida_val taida_net_http_serve(taida_val port, taida_val handler, taida_val max_requests, taida_val timeout_ms) {
+taida_val taida_net_http_serve(taida_val port, taida_val handler, taida_val max_requests, taida_val timeout_ms, taida_val handler_type_tag) {
+    // NB-2: port range validation (parity with Interpreter/JS)
+    if (port < 0 || port > 65535) {
+        char errbuf[256];
+        snprintf(errbuf, sizeof(errbuf), "httpServe: port must be 0-65535, got %lld", (long long)port);
+        return taida_async_resolved(taida_net_result_fail("PortError", errbuf));
+    }
+
+    // NB-31: handler callable check using compile-time type tag.
+    // Tag values: 6 = CLOSURE, 10 = FUNC (named function ref), -1 = UNKNOWN.
+    // For known non-callable tags (0=INT, 1=FLOAT, 2=BOOL, 3=STR, 4=PACK, 5=LIST),
+    // reject immediately. For UNKNOWN, fall back to runtime heuristic.
+    {
+        int callable = 0;
+        if (handler_type_tag == 6 || handler_type_tag == 10) {
+            callable = 1; // Compile-time: lambda, closure, or named function
+        } else if (handler_type_tag == -1) {
+            callable = TAIDA_IS_CALLABLE(handler); // Runtime heuristic fallback
+        }
+        // else: tag is 0..5 — statically known non-callable
+        if (!callable) {
+            return taida_async_resolved(taida_net_result_fail("TypeError", "httpServe: handler must be a Function"));
+        }
+    }
+
     // Bind to 127.0.0.1:port (v1 contract: always loopback)
     int sockfd = socket(AF_INET, SOCK_STREAM, 0);
     if (sockfd < 0) {
@@ -9388,7 +9449,7 @@ taida_val taida_net_http_serve(taida_val port, taida_val handler, taida_val max_
             if (total_read == buf_cap) {
                 size_t new_cap = buf_cap * 2;
                 if (new_cap > NET_MAX_REQUEST_BUF) new_cap = NET_MAX_REQUEST_BUF;
-                buf = (unsigned char*)realloc(buf, new_cap);
+                TAIDA_REALLOC(buf, new_cap, "net_serve_head");
                 buf_cap = new_cap;
             }
             ssize_t n = recv(client_fd, buf + total_read, buf_cap - total_read, 0);
@@ -9443,7 +9504,7 @@ taida_val taida_net_http_serve(taida_val port, taida_val handler, taida_val max_
             if (total_read == buf_cap) {
                 size_t new_cap = buf_cap * 2;
                 if (new_cap > NET_MAX_REQUEST_BUF) new_cap = NET_MAX_REQUEST_BUF;
-                buf = (unsigned char*)realloc(buf, new_cap);
+                TAIDA_REALLOC(buf, new_cap, "net_serve_body");
                 buf_cap = new_cap;
             }
             ssize_t n = recv(client_fd, buf + total_read, buf_cap - total_read, 0);
@@ -9461,9 +9522,9 @@ taida_val taida_net_http_serve(taida_val port, taida_val handler, taida_val max_
             continue;
         }
 
-        // Build request pack for handler
+        // NB-33: Build request pack — raw is sized to current request only (exclude pipelined tail)
         // First, parse the full request to get spans
-        taida_val raw_bytes = taida_bytes_from_raw(buf, (taida_val)total_read);
+        taida_val raw_bytes = taida_bytes_from_raw(buf, (taida_val)body_needed);
         taida_val parse_result = taida_net_http_parse_request_head(raw_bytes);
         taida_val inner = taida_pack_get(parse_result, taida_str_hash((taida_val)"__value"));
 

@@ -6695,6 +6695,97 @@ stdout(result.__value.kind)
     assert_eq!(interp2, native2, "NET-5a: MAX_SAFE+1 reject Interp vs Native\nInterp: {}\nNative: {}", interp2, native2);
 }
 
+/// NB-20: Content-Length leading-zero padded values — 3-way parity
+/// "00000000000000005" (17 chars) should be accepted as 5 in all 3 backends.
+/// Previously JS rejected this because rawVal.length > 16 without stripping leading zeros.
+#[test]
+fn test_nb20_content_length_leading_zeros_3way_parity() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+
+    // Test 1: "00000000000000005" (17 chars) should be accepted as 5
+    let source_accept = r#">>> taida-lang/net => @(httpParseRequestHead)
+
+bytesLax <= Bytes["POST /data HTTP/1.1\r\nHost: localhost\r\nContent-Length: 00000000000000005\r\n\r\nhello"]()
+bytesLax ]=> bytes
+result <= httpParseRequestHead(bytes)
+
+stdout(result.__value.contentLength)
+"#;
+
+    let dir = setup_net_project(source_accept, "nb20_lz_accept");
+    let interp = run_net_interpreter(&dir).expect("interpreter failed");
+    let js = run_net_js(&dir, "nb20_lz_accept").expect("js failed");
+    let native = run_net_native(&dir, "nb20_lz_accept").expect("native failed");
+    cleanup_net_project(&dir);
+
+    assert_eq!(interp, js, "NB-20: leading-zero CL Interp vs JS\nInterp: {}\nJS: {}", interp, js);
+    assert_eq!(interp, native, "NB-20: leading-zero CL Interp vs Native\nInterp: {}\nNative: {}", interp, native);
+    assert!(interp.contains("5"), "Leading-zero padded CL '00000000000000005' should parse as 5, got: {}", interp);
+
+    // Test 2: "0042" should be accepted as 42
+    let source_0042 = r#">>> taida-lang/net => @(httpParseRequestHead)
+
+bytesLax <= Bytes["POST /data HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0042\r\n\r\n"]()
+bytesLax ]=> bytes
+result <= httpParseRequestHead(bytes)
+
+stdout(result.__value.contentLength)
+"#;
+
+    let dir2 = setup_net_project(source_0042, "nb20_lz_0042");
+    let interp2 = run_net_interpreter(&dir2).expect("interpreter failed");
+    let js2 = run_net_js(&dir2, "nb20_lz_0042").expect("js failed");
+    let native2 = run_net_native(&dir2, "nb20_lz_0042").expect("native failed");
+    cleanup_net_project(&dir2);
+
+    assert_eq!(interp2, js2, "NB-20: '0042' CL Interp vs JS\nInterp: {}\nJS: {}", interp2, js2);
+    assert_eq!(interp2, native2, "NB-20: '0042' CL Interp vs Native\nInterp: {}\nNative: {}", interp2, native2);
+    assert!(interp2.contains("42"), "Leading-zero padded CL '0042' should parse as 42, got: {}", interp2);
+
+    // Test 3: all-zeros "00000000000000000" (17 zeros) should be accepted as 0
+    let source_allzeros = r#">>> taida-lang/net => @(httpParseRequestHead)
+
+bytesLax <= Bytes["GET / HTTP/1.1\r\nHost: localhost\r\nContent-Length: 00000000000000000\r\n\r\n"]()
+bytesLax ]=> bytes
+result <= httpParseRequestHead(bytes)
+
+stdout(result.__value.contentLength)
+"#;
+
+    let dir3 = setup_net_project(source_allzeros, "nb20_lz_allzeros");
+    let interp3 = run_net_interpreter(&dir3).expect("interpreter failed");
+    let js3 = run_net_js(&dir3, "nb20_lz_allzeros").expect("js failed");
+    let native3 = run_net_native(&dir3, "nb20_lz_allzeros").expect("native failed");
+    cleanup_net_project(&dir3);
+
+    assert_eq!(interp3, js3, "NB-20: all-zeros CL Interp vs JS\nInterp: {}\nJS: {}", interp3, js3);
+    assert_eq!(interp3, native3, "NB-20: all-zeros CL Interp vs Native\nInterp: {}\nNative: {}", interp3, native3);
+    assert!(interp3.contains("0"), "All-zeros CL '00000000000000000' should parse as 0, got: {}", interp3);
+
+    // Test 4: leading zeros + value > MAX_SAFE_INTEGER must still be rejected
+    let source_reject = r#">>> taida-lang/net => @(httpParseRequestHead)
+
+bytesLax <= Bytes["GET / HTTP/1.1\r\nHost: localhost\r\nContent-Length: 009007199254740992\r\n\r\n"]()
+bytesLax ]=> bytes
+result <= httpParseRequestHead(bytes)
+
+stdout(result.__value.kind)
+"#;
+
+    let dir4 = setup_net_project(source_reject, "nb20_lz_over_max");
+    let interp4 = run_net_interpreter(&dir4).expect("interpreter failed");
+    let js4 = run_net_js(&dir4, "nb20_lz_over_max").expect("js failed");
+    let native4 = run_net_native(&dir4, "nb20_lz_over_max").expect("native failed");
+    cleanup_net_project(&dir4);
+
+    assert_eq!(interp4, js4, "NB-20: leading-zero + over MAX_SAFE Interp vs JS\nInterp: {}\nJS: {}", interp4, js4);
+    assert_eq!(interp4, native4, "NB-20: leading-zero + over MAX_SAFE Interp vs Native\nInterp: {}\nNative: {}", interp4, native4);
+    assert!(interp4.contains("ParseError"), "Leading-zero + over MAX_SAFE should be rejected, got: {}", interp4);
+}
+
 /// NET-5a: malformed HTTP version "HTTP/a.b" — 3-way rejection parity
 #[test]
 fn test_net5a_parse_malformed_version_3way_parity() {
@@ -7649,4 +7740,231 @@ stdout(outer(multiply))
     assert_eq!(interp.trim(), expected, "NET-5 assignment shadow no-leak: Interpreter should produce {}, got: {}", expected, interp);
     assert_eq!(interp, js, "NET-5 assignment shadow no-leak: Interp vs JS\nInterp: {}\nJS: {}", interp, js);
     assert_eq!(interp, native, "NET-5 assignment shadow no-leak: Interp vs Native\nInterp: {}\nNative: {}", interp, native);
+}
+
+// ── NB-31: httpServe handler callable check regression tests ──
+
+/// NB-31: Passing a large Int as handler to httpServe must NOT crash the Native
+/// binary (previously caused a segfault via indirect call to an integer value).
+/// JS and Native should both return a TypeError Result instead of crashing.
+/// Tests BOTH literal and variable-path Int handlers to cover compile-time tag.
+#[test]
+fn test_nb31_http_serve_int_handler_js_native_parity() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+
+    // Variable-path: bad <= 1000000; httpServe(0, bad, ...)
+    // This exercises the int_vars → callable_type_tag path in lower.rs.
+    let source = r#">>> taida-lang/net => @(httpServe)
+
+bad <= 1000000
+asyncResult <= httpServe(0, bad, 1, 1000)
+asyncResult ]=> result
+stdout(result.__value.ok.toString())
+stdout(result.__value.kind)
+"#;
+
+    let dir = setup_net_project(source, "nb31_int_handler");
+
+    // -- JS backend --
+    let js = run_net_js(&dir, "nb31_int_handler")
+        .expect("NB-31: JS backend should not crash with Int handler");
+
+    // -- Native backend --
+    let native = run_net_native(&dir, "nb31_int_handler")
+        .expect("NB-31: Native backend should not crash with Int handler");
+
+    cleanup_net_project(&dir);
+
+    // Both should produce error result with ok=false and kind=TypeError
+    let js_lines: Vec<&str> = js.trim().lines().collect();
+    let native_lines: Vec<&str> = native.trim().lines().collect();
+
+    assert!(
+        js_lines.len() >= 2,
+        "NB-31: JS output should have at least 2 lines, got: {:?}",
+        js
+    );
+    assert!(
+        native_lines.len() >= 2,
+        "NB-31: Native output should have at least 2 lines, got: {:?}",
+        native
+    );
+
+    // ok should be false (or "0" in native where bool may render as int)
+    assert!(
+        js_lines[0] == "false" || js_lines[0] == "0",
+        "NB-31: JS ok field should be false, got: {}",
+        js_lines[0]
+    );
+    assert!(
+        native_lines[0] == "false" || native_lines[0] == "0",
+        "NB-31: Native ok field should be false, got: {}",
+        native_lines[0]
+    );
+
+    // Both must return TypeError — this is the critical assertion.
+    assert!(
+        js_lines[1] == "TypeError",
+        "NB-31: JS kind must be TypeError, got: {}",
+        js_lines[1]
+    );
+    assert!(
+        native_lines[1] == "TypeError",
+        "NB-31: Native kind must be TypeError, got: {}",
+        native_lines[1]
+    );
+}
+
+/// NB-31: Interpreter should return RuntimeError for non-callable handler.
+/// This is a different behavior from JS/Native (which return a Result),
+/// but we verify it doesn't silently succeed.
+/// Uses variable-path Int handler to match the JS/Native test.
+#[test]
+fn test_nb31_http_serve_int_handler_interpreter_error() {
+    let source = r#">>> taida-lang/net => @(httpServe)
+
+bad <= 1000000
+asyncResult <= httpServe(0, bad, 1, 1000)
+stdout("should not reach here")
+"#;
+
+    let dir = setup_net_project(source, "nb31_interp_error");
+    let td_path = dir.join("main.td");
+
+    let output = Command::new(taida_bin())
+        .arg(&td_path)
+        .output()
+        .expect("spawn interpreter");
+
+    cleanup_net_project(&dir);
+
+    // Interpreter should fail (exit code != 0)
+    assert!(
+        !output.status.success(),
+        "NB-31: Interpreter should reject non-callable handler (exit non-zero)"
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("handler must be a Function"),
+        "NB-31: Interpreter stderr should mention handler type error, got: {}",
+        stderr
+    );
+}
+
+/// NB-31: Arithmetic Int expression path (bad <= 999999 + 1).
+/// Exercises noncallable_type_tag → expr_is_int → BinaryOp detection.
+#[test]
+fn test_nb31_http_serve_arithmetic_int_handler_parity() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+
+    let source = r#">>> taida-lang/net => @(httpServe)
+
+bad <= 999999 + 1
+asyncResult <= httpServe(0, bad, 1, 1000)
+asyncResult ]=> result
+stdout(result.__value.ok.toString())
+stdout(result.__value.kind)
+"#;
+
+    let dir = setup_net_project(source, "nb31_arith");
+
+    let js = run_net_js(&dir, "nb31_arith")
+        .expect("NB-31: JS should not crash with arithmetic Int handler");
+    let native = run_net_native(&dir, "nb31_arith")
+        .expect("NB-31: Native should not crash with arithmetic Int handler");
+
+    cleanup_net_project(&dir);
+
+    let js_lines: Vec<&str> = js.trim().lines().collect();
+    let native_lines: Vec<&str> = native.trim().lines().collect();
+
+    assert!(js_lines.len() >= 2, "NB-31 arith: JS output too short: {:?}", js);
+    assert!(native_lines.len() >= 2, "NB-31 arith: Native output too short: {:?}", native);
+
+    assert_eq!(js_lines[1], "TypeError", "NB-31 arith: JS kind must be TypeError, got: {}", js_lines[1]);
+    assert_eq!(native_lines[1], "TypeError", "NB-31 arith: Native kind must be TypeError, got: {}", native_lines[1]);
+}
+
+/// NB-31: Int-returning function path (mk n = n + 1 => :Int / bad <= mk(999999)).
+/// Exercises noncallable_type_tag → expr_is_int → FuncCall return type.
+#[test]
+fn test_nb31_http_serve_func_return_int_handler_parity() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+
+    let source = r#">>> taida-lang/net => @(httpServe)
+
+mk n = n + 1 => :Int
+bad <= mk(999999)
+asyncResult <= httpServe(0, bad, 1, 1000)
+asyncResult ]=> result
+stdout(result.__value.ok.toString())
+stdout(result.__value.kind)
+"#;
+
+    let dir = setup_net_project(source, "nb31_func_ret");
+
+    let js = run_net_js(&dir, "nb31_func_ret")
+        .expect("NB-31: JS should not crash with func-return Int handler");
+    let native = run_net_native(&dir, "nb31_func_ret")
+        .expect("NB-31: Native should not crash with func-return Int handler");
+
+    cleanup_net_project(&dir);
+
+    let js_lines: Vec<&str> = js.trim().lines().collect();
+    let native_lines: Vec<&str> = native.trim().lines().collect();
+
+    assert!(js_lines.len() >= 2, "NB-31 func_ret: JS output too short: {:?}", js);
+    assert!(native_lines.len() >= 2, "NB-31 func_ret: Native output too short: {:?}", native);
+
+    assert_eq!(js_lines[1], "TypeError", "NB-31 func_ret: JS kind must be TypeError, got: {}", js_lines[1]);
+    assert_eq!(native_lines[1], "TypeError", "NB-31 func_ret: Native kind must be TypeError, got: {}", native_lines[1]);
+}
+
+/// NB-31: Typed Int parameter path (wrap bad: Int = ...).
+/// Exercises callable_type_tag → Ident → int_vars (param registration).
+#[test]
+fn test_nb31_http_serve_typed_param_int_handler_parity() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+
+    let source = r#">>> taida-lang/net => @(httpServe)
+
+wrap bad: Int =
+  asyncResult <= httpServe(0, bad, 1, 1000)
+  asyncResult ]=> result
+  stdout(result.__value.ok.toString())
+  stdout(result.__value.kind)
+
+wrap(1000000)
+"#;
+
+    let dir = setup_net_project(source, "nb31_typed_param");
+
+    let js = run_net_js(&dir, "nb31_typed_param")
+        .expect("NB-31: JS should not crash with typed Int param handler");
+    let native = run_net_native(&dir, "nb31_typed_param")
+        .expect("NB-31: Native should not crash with typed Int param handler");
+
+    cleanup_net_project(&dir);
+
+    let js_lines: Vec<&str> = js.trim().lines().collect();
+    let native_lines: Vec<&str> = native.trim().lines().collect();
+
+    assert!(js_lines.len() >= 2, "NB-31 typed_param: JS output too short: {:?}", js);
+    assert!(native_lines.len() >= 2, "NB-31 typed_param: Native output too short: {:?}", native);
+
+    assert_eq!(js_lines[1], "TypeError", "NB-31 typed_param: JS kind must be TypeError, got: {}", js_lines[1]);
+    assert_eq!(native_lines[1], "TypeError", "NB-31 typed_param: Native kind must be TypeError, got: {}", native_lines[1]);
 }

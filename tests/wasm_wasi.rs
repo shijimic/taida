@@ -548,6 +548,7 @@ fn wasm_wasi_parity_all_examples() {
         "wasm_wasi_write_failure",       // needs --dir
         "wasm_wasi_write_failure_shape", // needs --dir
         "wasm_edge_env",                 // wasm-edge profile, needs taida_host imports
+        "net_http_hello",                // server blocks on httpServe waiting for connections
     ];
 
     let mut parity_ok = Vec::new();
@@ -668,8 +669,8 @@ fn wasm_wasi_parity_all_examples() {
         "helper_val",
         "module_math",
         "module_utils",
-        "net_http_hello",            // server example, blocks waiting for connections
         "transpile_npm",
+        // net_http_hello: moved to skip_stems (blocks on httpServe)
     ];
 
     // Detect regressions: any new rejected/native-fail example not in the allowlist

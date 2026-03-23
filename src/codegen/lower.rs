@@ -66,6 +66,8 @@ pub struct Lowering {
     bool_returning_funcs: std::collections::HashSet<String>,
     /// 戻り値が Float のユーザー定義関数名セット
     float_returning_funcs: std::collections::HashSet<String>,
+    /// NB-31: 戻り値が Int/Num のユーザー定義関数名セット
+    int_returning_funcs: std::collections::HashSet<String>,
     /// BuchiPack/TypeInst を保持する変数名のセット（F-58 メソッド名衝突回避用）
     pack_vars: std::collections::HashSet<String>,
     /// BuchiPack/TypeInst を返すユーザー定義関数名セット
@@ -248,6 +250,7 @@ impl Lowering {
             string_returning_funcs: std::collections::HashSet::new(),
             bool_returning_funcs: std::collections::HashSet::new(),
             float_returning_funcs: std::collections::HashSet::new(),
+            int_returning_funcs: std::collections::HashSet::new(),
             pack_vars: std::collections::HashSet::new(),
             pack_returning_funcs: std::collections::HashSet::new(),
             list_vars: std::collections::HashSet::new(),
@@ -999,6 +1002,12 @@ impl Lowering {
                             crate::parser::TypeExpr::Named(n) if n == "Float" => {
                                 self.float_returning_funcs.insert(func_def.name.clone());
                             }
+                            // NB-31: Track Int/Num-returning functions for callable_type_tag
+                            crate::parser::TypeExpr::Named(n)
+                                if n == "Int" || n == "Num" =>
+                            {
+                                self.int_returning_funcs.insert(func_def.name.clone());
+                            }
                             crate::parser::TypeExpr::List(_) => {
                                 self.list_returning_funcs.insert(func_def.name.clone());
                             }
@@ -1323,6 +1332,9 @@ impl Lowering {
             if let Statement::Assignment(assign) = stmt {
                 self.top_level_vars.insert(assign.target.clone());
                 // 型情報を事前登録（2nd pass の lower_func_def 内で正しく型判定するため）
+                if self.expr_is_int(&assign.value) {
+                    self.int_vars.insert(assign.target.clone());
+                }
                 if self.expr_is_string_full(&assign.value) {
                     self.string_vars.insert(assign.target.clone());
                 }
@@ -1995,6 +2007,10 @@ impl Lowering {
                     func.push(IrInst::GlobalSet(hash, val));
                 }
 
+                // NB-31: int を返す式の結果を追跡（callable_type_tag 精度向上）
+                if self.expr_is_int(&assign.value) {
+                    self.int_vars.insert(assign.target.clone());
+                }
                 // float を返す式の結果を追跡
                 if self.expr_returns_float(&assign.value) {
                     self.float_vars.insert(assign.target.clone());
@@ -2839,11 +2855,18 @@ impl Lowering {
                     func.push(IrInst::ConstInt(v, 5000)); // default: 5000ms
                     v
                 };
+                // NB-31: Pass compile-time handler type tag so the C runtime
+                // can reject non-callable values (large ints, strings, packs)
+                // without relying on the heuristic _taida_is_callable_impl.
+                // Tag 6 = CLOSURE, 10 = named function ref, -1 = unknown.
+                let handler_tag = self.callable_type_tag(&args[1]);
+                let handler_tag_var = func.alloc_var();
+                func.push(IrInst::ConstInt(handler_tag_var, handler_tag));
                 let result = func.alloc_var();
                 func.push(IrInst::Call(
                     result,
                     "taida_net_http_serve".to_string(),
-                    vec![port, handler, max_requests, timeout_ms],
+                    vec![port, handler, max_requests, timeout_ms, handler_tag_var],
                 ));
                 return Ok(result);
             }
@@ -4945,6 +4968,60 @@ impl Lowering {
         }
     }
 
+    /// NB-31: Determine compile-time callable type tag for httpServe handler.
+    /// Returns:
+    ///   6  (TAIDA_TAG_CLOSURE) — lambda or closure variable
+    ///  10  (TAIDA_TAG_FUNC)    — named function reference (user_funcs / lambda_vars)
+    ///  -1  (TAIDA_TAG_UNKNOWN) — dynamic / cannot determine at compile time
+    ///   other (0..5, etc.)     — statically known non-callable type
+    ///
+    /// Strategy: check callable first, then delegate to noncallable_type_tag()
+    /// which uses the existing expr_returns_float / expr_is_string_full / expr_is_bool /
+    /// expr_is_pack / expr_is_list helpers + arithmetic Int detection.
+    fn callable_type_tag(&self, expr: &Expr) -> i64 {
+        // 1. Callable detection
+        match expr {
+            Expr::Lambda(_, _, _) => return 6, // TAIDA_TAG_CLOSURE
+            Expr::Ident(name, _) => {
+                if self.closure_vars.contains(name) {
+                    return 6; // TAIDA_TAG_CLOSURE
+                }
+                if self.user_funcs.contains(name) || self.lambda_vars.contains_key(name) {
+                    return 10; // TAIDA_TAG_FUNC
+                }
+            }
+            _ => {}
+        }
+        // 2. Non-callable detection — use rich expression-type helpers
+        if let Some(tag) = self.noncallable_type_tag(expr) {
+            return tag;
+        }
+        -1 // TAIDA_TAG_UNKNOWN
+    }
+
+    /// NB-31: Determine if an expression is a known non-callable type.
+    /// Returns Some(tag) for statically known non-callable, None for unknown.
+    /// Leverages existing expr_returns_float / expr_is_string_full / expr_is_bool /
+    /// expr_is_pack / expr_is_list which already handle literals, variables, BinaryOp,
+    /// MethodCall, FuncCall, etc.
+    fn noncallable_type_tag(&self, expr: &Expr) -> Option<i64> {
+        // Bool (2) — handles BoolLit, bool_vars, comparison ops, boolean methods
+        if self.expr_is_bool(expr) { return Some(2); }
+        // Float (1) — handles FloatLit, float_vars, float BinaryOp, float-returning funcs
+        if self.expr_returns_float(expr) { return Some(1); }
+        // String (3) — handles StringLit, TemplateLit, string_vars, string methods/funcs
+        if self.expr_is_string_full(expr) { return Some(3); }
+        // Pack (4) — handles BuchiPack, TypeInst, pack_vars
+        if self.expr_is_pack(expr) { return Some(4); }
+        // List (5) — handles ListLit, list_vars, list methods/funcs
+        if self.expr_is_list(expr) { return Some(5); }
+        // Int (0) — literals, int_vars, arithmetic ops, int-returning methods/funcs
+        if self.expr_is_int(expr) { return Some(0); }
+        // MoldInst always returns a Pack-like value
+        if matches!(expr, Expr::MoldInst(_, _, _, _)) { return Some(4); }
+        None
+    }
+
     /// retain-on-store: Pack/List/Closure/Str をフィールドに格納する際に retain する。
     /// taida_release の再帰 release と対になり、double-free を防ぐ。
     /// tag が TAIDA_TAG_STR(3), TAIDA_TAG_PACK(4), TAIDA_TAG_LIST(5), TAIDA_TAG_CLOSURE(6) の場合に retain。
@@ -5023,6 +5100,38 @@ impl Lowering {
                         | "zip"
                         | "enumerate"
                 )
+            }
+            _ => false,
+        }
+    }
+
+    /// NB-31: 式が Int を返すかどうかを判定（noncallable_type_tag 用）
+    /// arithmetic 演算、Int-returning メソッド/関数、int_vars を網羅する。
+    fn expr_is_int(&self, expr: &Expr) -> bool {
+        match expr {
+            Expr::IntLit(_, _) => true,
+            Expr::UnaryOp(UnaryOp::Neg, inner, _) => self.expr_is_int(inner),
+            Expr::Ident(name, _) => self.int_vars.contains(name),
+            // Arithmetic ops: Int if neither side is Float
+            Expr::BinaryOp(lhs, op, rhs, _) => {
+                matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul)
+                    && !self.expr_returns_float(lhs)
+                    && !self.expr_returns_float(rhs)
+            }
+            // Methods that always return Int
+            Expr::MethodCall(_, method, _, _) => {
+                matches!(
+                    method.as_str(),
+                    "length" | "indexOf" | "lastIndexOf" | "count"
+                )
+            }
+            // Functions with :Int/:Num return type
+            Expr::FuncCall(callee, _, _) => {
+                if let Expr::Ident(name, _) = callee.as_ref() {
+                    self.int_returning_funcs.contains(name.as_str())
+                } else {
+                    false
+                }
             }
             _ => false,
         }

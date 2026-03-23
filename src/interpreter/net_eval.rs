@@ -758,6 +758,9 @@ impl Interpreter {
                 continue;
             }
 
+            // NB-33: Truncate raw to current request only (exclude pipelined tail bytes)
+            buf.truncate(body_needed);
+
             // ── Build request pack for handler ──
             let raw_bytes = buf;
             let body_offset = head_consumed as i64;
@@ -1292,6 +1295,59 @@ mod tests {
     fn test_parse_content_length_i64_max_plus_one() {
         // i64::MAX + 1 = 9223372036854775808 — must be rejected.
         let raw = b"POST /data HTTP/1.1\r\nContent-Length: 9223372036854775808\r\nHost: localhost\r\n\r\n";
+        let result = parse_request_head(raw);
+        assert!(is_result_failure(&result));
+        assert!(get_failure_message(&result).contains("invalid Content-Length"));
+    }
+
+    // ── Content-Length leading-zero tests (NB-20 parity fix) ──
+
+    #[test]
+    fn test_parse_content_length_leading_zeros_simple() {
+        // "007" should be accepted as 7 (RFC 9110: Content-Length = 1*DIGIT, leading zeros valid).
+        let raw = b"POST /data HTTP/1.1\r\nContent-Length: 007\r\nHost: localhost\r\n\r\n";
+        let result = parse_request_head(raw);
+        assert!(!is_result_failure(&result));
+        let inner = extract_result_inner(&result);
+        assert_eq!(get_int(inner, "contentLength"), 7);
+    }
+
+    #[test]
+    fn test_parse_content_length_leading_zeros_17_digits() {
+        // "00000000000000005" (17 chars) should be accepted as 5.
+        // JS must strip leading zeros before length check for parity.
+        let raw = b"POST /data HTTP/1.1\r\nContent-Length: 00000000000000005\r\nHost: localhost\r\n\r\n";
+        let result = parse_request_head(raw);
+        assert!(!is_result_failure(&result));
+        let inner = extract_result_inner(&result);
+        assert_eq!(get_int(inner, "contentLength"), 5);
+    }
+
+    #[test]
+    fn test_parse_content_length_all_zeros_long() {
+        // "00000000000000000" (17 zeros) should be accepted as 0.
+        let raw = b"POST /data HTTP/1.1\r\nContent-Length: 00000000000000000\r\nHost: localhost\r\n\r\n";
+        let result = parse_request_head(raw);
+        assert!(!is_result_failure(&result));
+        let inner = extract_result_inner(&result);
+        assert_eq!(get_int(inner, "contentLength"), 0);
+    }
+
+    #[test]
+    fn test_parse_content_length_leading_zeros_0042() {
+        // "0042" should be accepted as 42.
+        let raw = b"POST /data HTTP/1.1\r\nContent-Length: 0042\r\nHost: localhost\r\n\r\n";
+        let result = parse_request_head(raw);
+        assert!(!is_result_failure(&result));
+        let inner = extract_result_inner(&result);
+        assert_eq!(get_int(inner, "contentLength"), 42);
+    }
+
+    #[test]
+    fn test_parse_content_length_leading_zeros_over_max_safe() {
+        // Leading zeros + value > MAX_SAFE_INTEGER must still be rejected.
+        // "009007199254740992" = 9007199254740992 > MAX_SAFE_INTEGER
+        let raw = b"POST /data HTTP/1.1\r\nContent-Length: 009007199254740992\r\nHost: localhost\r\n\r\n";
         let result = parse_request_head(raw);
         assert!(is_result_failure(&result));
         assert!(get_failure_message(&result).contains("invalid Content-Length"));
