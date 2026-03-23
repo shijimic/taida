@@ -3007,4 +3007,96 @@ mod tests {
             _ => panic!("expected fulfilled Async"),
         }
     }
+
+    // ── NB-26: Content-Length absent GET should have contentLength=0 ──
+
+    #[test]
+    fn test_nb26_get_without_content_length_has_cl_zero() {
+        // A GET request with no Content-Length header.
+        // The parser must default contentLength to 0.
+        let raw = b"GET /hello HTTP/1.1\r\nHost: localhost\r\nAccept: */*\r\n\r\n";
+        let result = parse_request_head(raw);
+        assert!(!is_result_failure(&result));
+        let inner = extract_result_inner(&result);
+        assert_eq!(get_bool(inner, "complete"), true);
+        // contentLength must be 0 when Content-Length header is absent
+        assert_eq!(
+            get_int(inner, "contentLength"),
+            0,
+            "GET without Content-Length header must have contentLength=0"
+        );
+    }
+
+    // ── NB-27: empty path parse ──
+
+    #[test]
+    fn test_nb27_empty_path_parse() {
+        // "GET  HTTP/1.1\r\n..." — double space means the path token is empty.
+        // httparse interprets space-delimited tokens in the request line;
+        // "GET  HTTP/1.1" is malformed because httparse cannot find a valid
+        // URI between the method and version. We verify the parser handles
+        // this gracefully (malformed error, not a panic).
+        let raw = b"GET  HTTP/1.1\r\nHost: localhost\r\n\r\n";
+        let result = parse_request_head(raw);
+        // httparse treats double-space as a malformed request line.
+        // The important thing is we get a well-defined result (not a panic).
+        if is_result_failure(&result) {
+            // Malformed is acceptable — httparse cannot parse "GET  HTTP/1.1"
+            let msg = get_failure_message(&result);
+            assert!(
+                msg.contains("Malformed"),
+                "Expected Malformed error, got: {}",
+                msg
+            );
+        } else {
+            // If the parser somehow succeeds, path span should have len=0
+            let inner = extract_result_inner(&result);
+            let path = match inner.iter().find(|(k, _)| k == "path").map(|(_, v)| v) {
+                Some(Value::BuchiPack(f)) => f,
+                _ => panic!("no path"),
+            };
+            let path_len = match path.iter().find(|(k, _)| k == "len") {
+                Some((_, Value::Int(n))) => *n,
+                _ => panic!("no path.len"),
+            };
+            assert_eq!(
+                path_len, 0,
+                "Empty path should have len=0, got: {}",
+                path_len
+            );
+        }
+    }
+
+    // ── NB-29: sentinel shadow by unmold ──
+
+    #[test]
+    fn test_nb29_sentinel_shadow_by_unmold() {
+        // Simulates: >>> taida-lang/net => @(httpServe)
+        //            someResult ]=> httpServe
+        // After unmold, httpServe is overwritten with a non-sentinel value.
+        // try_net_func must return None (sentinel guard blocks dispatch).
+        let mut interp = Interpreter::new();
+
+        // Step 1: Set up sentinel (as if imported via >>> taida-lang/net)
+        interp
+            .env
+            .define_force("httpServe", Value::Str("__net_builtin_httpServe".into()));
+        // Verify sentinel is active
+        let args: Vec<Expr> = vec![];
+        let result = interp.try_net_func("httpServe", &args);
+        assert!(
+            result.is_err(),
+            "Before shadow: sentinel should be active (httpServe requires args)"
+        );
+
+        // Step 2: Simulate unmold shadow (]=> httpServe overwrites with a value)
+        interp.env.define_force("httpServe", Value::Int(99));
+
+        // Step 3: try_net_func must return None — sentinel is gone
+        let result = interp.try_net_func("httpServe", &args).unwrap();
+        assert!(
+            result.is_none(),
+            "After unmold shadow: sentinel is gone, try_net_func must return None"
+        );
+    }
 }
