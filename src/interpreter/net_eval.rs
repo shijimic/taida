@@ -1683,6 +1683,328 @@ mod tests {
         assert!(get_field_value(&fields, "missing").is_none());
     }
 
+    // ── NB-23: Multiple header span verification ──
+
+    /// Helper to extract span (start, len) from a header entry.
+    fn get_header_span(
+        headers: &[Value],
+        idx: usize,
+        field: &str,
+    ) -> (i64, i64) {
+        let entry = match &headers[idx] {
+            Value::BuchiPack(f) => f,
+            _ => panic!("header[{}] is not BuchiPack", idx),
+        };
+        let span = match entry.iter().find(|(k, _)| k == field) {
+            Some((_, Value::BuchiPack(f))) => f,
+            _ => panic!("header[{}].{} not found", idx, field),
+        };
+        let start = match span.iter().find(|(k, _)| k == "start") {
+            Some((_, Value::Int(n))) => *n,
+            _ => panic!("no start"),
+        };
+        let len = match span.iter().find(|(k, _)| k == "len") {
+            Some((_, Value::Int(n))) => *n,
+            _ => panic!("no len"),
+        };
+        (start, len)
+    }
+
+    #[test]
+    fn test_parse_multiple_headers_span() {
+        // "GET / HTTP/1.1\r\nHost: example.com\r\nContent-Type: text/plain\r\nX-Custom: value\r\n\r\n"
+        let raw = b"GET / HTTP/1.1\r\nHost: example.com\r\nContent-Type: text/plain\r\nX-Custom: value\r\n\r\n";
+        let result = parse_request_head(raw);
+        assert!(!is_result_failure(&result));
+        let inner = extract_result_inner(&result);
+
+        // Extract headers list
+        let headers = match inner.iter().find(|(k, _)| k == "headers") {
+            Some((_, Value::List(h))) => h,
+            _ => panic!("no headers list"),
+        };
+        assert_eq!(headers.len(), 3, "expected 3 headers");
+
+        // Verify each header's name/value span against raw bytes.
+        // Header 0: "Host" / "example.com"
+        let (name_start, name_len) = get_header_span(headers, 0, "name");
+        assert_eq!(
+            &raw[name_start as usize..(name_start + name_len) as usize],
+            b"Host"
+        );
+        let (val_start, val_len) = get_header_span(headers, 0, "value");
+        assert_eq!(
+            &raw[val_start as usize..(val_start + val_len) as usize],
+            b"example.com"
+        );
+
+        // Header 1: "Content-Type" / "text/plain"
+        let (name_start, name_len) = get_header_span(headers, 1, "name");
+        assert_eq!(
+            &raw[name_start as usize..(name_start + name_len) as usize],
+            b"Content-Type"
+        );
+        let (val_start, val_len) = get_header_span(headers, 1, "value");
+        assert_eq!(
+            &raw[val_start as usize..(val_start + val_len) as usize],
+            b"text/plain"
+        );
+
+        // Header 2: "X-Custom" / "value"
+        let (name_start, name_len) = get_header_span(headers, 2, "name");
+        assert_eq!(
+            &raw[name_start as usize..(name_start + name_len) as usize],
+            b"X-Custom"
+        );
+        let (val_start, val_len) = get_header_span(headers, 2, "value");
+        assert_eq!(
+            &raw[val_start as usize..(val_start + val_len) as usize],
+            b"value"
+        );
+    }
+
+    #[test]
+    fn test_parse_single_header_span() {
+        let raw = b"GET / HTTP/1.1\r\nAccept: */*\r\n\r\n";
+        let result = parse_request_head(raw);
+        assert!(!is_result_failure(&result));
+        let inner = extract_result_inner(&result);
+
+        let headers = match inner.iter().find(|(k, _)| k == "headers") {
+            Some((_, Value::List(h))) => h,
+            _ => panic!("no headers list"),
+        };
+        assert_eq!(headers.len(), 1);
+
+        let (name_start, name_len) = get_header_span(headers, 0, "name");
+        assert_eq!(
+            &raw[name_start as usize..(name_start + name_len) as usize],
+            b"Accept"
+        );
+        let (val_start, val_len) = get_header_span(headers, 0, "value");
+        assert_eq!(
+            &raw[val_start as usize..(val_start + val_len) as usize],
+            b"*/*"
+        );
+    }
+
+    #[test]
+    fn test_parse_no_headers_empty_list() {
+        // Minimal valid HTTP request with no headers (just terminator).
+        let raw = b"GET / HTTP/1.1\r\n\r\n";
+        let result = parse_request_head(raw);
+        assert!(!is_result_failure(&result));
+        let inner = extract_result_inner(&result);
+
+        let headers = match inner.iter().find(|(k, _)| k == "headers") {
+            Some((_, Value::List(h))) => h,
+            _ => panic!("no headers list"),
+        };
+        assert_eq!(headers.len(), 0);
+    }
+
+    // ── NB-24: HTTP version validation ──
+
+    #[test]
+    fn test_parse_http_version_1_0_accepted() {
+        let raw = b"GET / HTTP/1.0\r\nHost: localhost\r\n\r\n";
+        let result = parse_request_head(raw);
+        assert!(!is_result_failure(&result));
+        let inner = extract_result_inner(&result);
+
+        // version.minor should be 0
+        let version = match inner.iter().find(|(k, _)| k == "version") {
+            Some((_, Value::BuchiPack(f))) => f,
+            _ => panic!("no version"),
+        };
+        assert!(matches!(
+            version.iter().find(|(k, _)| k == "minor"),
+            Some((_, Value::Int(0)))
+        ));
+    }
+
+    #[test]
+    fn test_parse_http_version_1_1_accepted() {
+        let raw = b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n";
+        let result = parse_request_head(raw);
+        assert!(!is_result_failure(&result));
+        let inner = extract_result_inner(&result);
+
+        let version = match inner.iter().find(|(k, _)| k == "version") {
+            Some((_, Value::BuchiPack(f))) => f,
+            _ => panic!("no version"),
+        };
+        assert!(matches!(
+            version.iter().find(|(k, _)| k == "minor"),
+            Some((_, Value::Int(1)))
+        ));
+    }
+
+    #[test]
+    fn test_parse_http_version_alpha_rejected() {
+        // "HTTP/a.b" — httparse rejects non-digit version components
+        let raw = b"GET / HTTP/a.b\r\nHost: localhost\r\n\r\n";
+        let result = parse_request_head(raw);
+        assert!(is_result_failure(&result));
+        assert!(get_failure_message(&result).contains("Malformed"));
+    }
+
+    #[test]
+    fn test_parse_http_version_multi_digit_rejected() {
+        // "HTTP/12.34" — httparse rejects multi-digit version numbers
+        let raw = b"GET / HTTP/12.34\r\nHost: localhost\r\n\r\n";
+        let result = parse_request_head(raw);
+        assert!(is_result_failure(&result));
+        assert!(get_failure_message(&result).contains("Malformed"));
+    }
+
+    #[test]
+    fn test_parse_http_version_2_0_rejected() {
+        // "HTTP/2.0" — httparse rejects major version != 1
+        let raw = b"GET / HTTP/2.0\r\nHost: localhost\r\n\r\n";
+        let result = parse_request_head(raw);
+        assert!(is_result_failure(&result));
+        assert!(get_failure_message(&result).contains("Malformed"));
+    }
+
+    #[test]
+    fn test_parse_http_version_1_9_rejected() {
+        // "HTTP/1.9" — httparse only accepts HTTP/1.0 and HTTP/1.1
+        let raw = b"GET / HTTP/1.9\r\nHost: localhost\r\n\r\n";
+        let result = parse_request_head(raw);
+        assert!(is_result_failure(&result));
+        assert!(get_failure_message(&result).contains("Malformed"));
+    }
+
+    #[test]
+    fn test_parse_http_version_0_9_rejected() {
+        // "HTTP/0.9" — httparse rejects major version != 1
+        let raw = b"GET / HTTP/0.9\r\nHost: localhost\r\n\r\n";
+        let result = parse_request_head(raw);
+        assert!(is_result_failure(&result));
+        assert!(get_failure_message(&result).contains("Malformed"));
+    }
+
+    // ── NB-25: Multiple header encode verification ──
+
+    #[test]
+    fn test_encode_multiple_headers() {
+        let response = Value::BuchiPack(vec![
+            ("status".into(), Value::Int(200)),
+            (
+                "headers".into(),
+                Value::List(vec![
+                    Value::BuchiPack(vec![
+                        ("name".into(), Value::Str("Content-Type".into())),
+                        ("value".into(), Value::Str("application/json".into())),
+                    ]),
+                    Value::BuchiPack(vec![
+                        ("name".into(), Value::Str("X-Request-Id".into())),
+                        ("value".into(), Value::Str("abc-123".into())),
+                    ]),
+                    Value::BuchiPack(vec![
+                        ("name".into(), Value::Str("Cache-Control".into())),
+                        ("value".into(), Value::Str("no-cache".into())),
+                    ]),
+                ]),
+            ),
+            ("body".into(), Value::Str("{\"ok\":true}".into())),
+        ]);
+        let result = encode_response(&response);
+        assert!(!is_result_failure(&result));
+        let inner = extract_result_inner(&result);
+        let bytes = match inner.iter().find(|(k, _)| k == "bytes") {
+            Some((_, Value::Bytes(b))) => b.clone(),
+            _ => panic!("no bytes"),
+        };
+        let text = String::from_utf8(bytes).unwrap();
+        assert!(text.starts_with("HTTP/1.1 200 OK\r\n"));
+        assert!(text.contains("Content-Type: application/json\r\n"));
+        assert!(text.contains("X-Request-Id: abc-123\r\n"));
+        assert!(text.contains("Cache-Control: no-cache\r\n"));
+        assert!(text.contains("Content-Length: 11\r\n"));
+        assert!(text.ends_with("\r\n\r\n{\"ok\":true}"));
+    }
+
+    #[test]
+    fn test_encode_multiple_headers_order_preserved() {
+        // Headers should appear in the order provided by the user.
+        let response = Value::BuchiPack(vec![
+            ("status".into(), Value::Int(200)),
+            (
+                "headers".into(),
+                Value::List(vec![
+                    Value::BuchiPack(vec![
+                        ("name".into(), Value::Str("X-First".into())),
+                        ("value".into(), Value::Str("1".into())),
+                    ]),
+                    Value::BuchiPack(vec![
+                        ("name".into(), Value::Str("X-Second".into())),
+                        ("value".into(), Value::Str("2".into())),
+                    ]),
+                    Value::BuchiPack(vec![
+                        ("name".into(), Value::Str("X-Third".into())),
+                        ("value".into(), Value::Str("3".into())),
+                    ]),
+                ]),
+            ),
+            ("body".into(), Value::Str(String::new())),
+        ]);
+        let result = encode_response(&response);
+        assert!(!is_result_failure(&result));
+        let inner = extract_result_inner(&result);
+        let bytes = match inner.iter().find(|(k, _)| k == "bytes") {
+            Some((_, Value::Bytes(b))) => b.clone(),
+            _ => panic!("no bytes"),
+        };
+        let text = String::from_utf8(bytes).unwrap();
+
+        // Find positions to verify ordering
+        let pos_first = text.find("X-First: 1\r\n").expect("X-First missing");
+        let pos_second = text.find("X-Second: 2\r\n").expect("X-Second missing");
+        let pos_third = text.find("X-Third: 3\r\n").expect("X-Third missing");
+        assert!(
+            pos_first < pos_second && pos_second < pos_third,
+            "Headers not in order: first={}, second={}, third={}",
+            pos_first,
+            pos_second,
+            pos_third
+        );
+    }
+
+    #[test]
+    fn test_encode_duplicate_header_names_preserved() {
+        // Multiple headers with the same name should all appear (e.g. Set-Cookie).
+        let response = Value::BuchiPack(vec![
+            ("status".into(), Value::Int(200)),
+            (
+                "headers".into(),
+                Value::List(vec![
+                    Value::BuchiPack(vec![
+                        ("name".into(), Value::Str("Set-Cookie".into())),
+                        ("value".into(), Value::Str("a=1".into())),
+                    ]),
+                    Value::BuchiPack(vec![
+                        ("name".into(), Value::Str("Set-Cookie".into())),
+                        ("value".into(), Value::Str("b=2".into())),
+                    ]),
+                ]),
+            ),
+            ("body".into(), Value::Str(String::new())),
+        ]);
+        let result = encode_response(&response);
+        assert!(!is_result_failure(&result));
+        let inner = extract_result_inner(&result);
+        let bytes = match inner.iter().find(|(k, _)| k == "bytes") {
+            Some((_, Value::Bytes(b))) => b.clone(),
+            _ => panic!("no bytes"),
+        };
+        let text = String::from_utf8(bytes).unwrap();
+        assert!(text.contains("Set-Cookie: a=1\r\n"));
+        assert!(text.contains("Set-Cookie: b=2\r\n"));
+        assert_eq!(text.matches("Set-Cookie").count(), 2);
+    }
+
     // ── httpServe integration tests ──
 
     use crate::lexer::Span;
