@@ -8975,6 +8975,7 @@ taida_val taida_net_http_parse_request_head(taida_val input) {
     int cl_count = 0;
     size_t pos = (size_t)(first_crlf + 2);  // after first \r\n
 
+    int header_count = 0;
     while (pos < scan_limit) {
         // Find next \r\n
         size_t line_end = scan_limit;
@@ -8985,6 +8986,13 @@ taida_val taida_net_http_parse_request_head(taida_val input) {
             }
         }
         if (line_end == pos) break;  // empty line = end of headers
+
+        // NB-4/NB-6: enforce max 64 headers (parity with Interpreter/httparse)
+        header_count++;
+        if (header_count > 64) {
+            if (free_data) free(data);
+            return taida_net_result_fail("ParseError", "Malformed HTTP request: too many headers");
+        }
 
         // Find colon separator
         size_t colon = line_end;
@@ -9427,10 +9435,13 @@ taida_val taida_net_http_serve(taida_val port, taida_val handler, taida_val max_
         }
 
         // Set read timeout on client
-        if (timeout_ms > 0) {
+        // NB-10: timeoutMs <= 0 falls back to 5000ms (v1 default).
+        // Skipping SO_RCVTIMEO leaves the socket in indefinite-block mode; 0 must not skip.
+        {
+            taida_val effective_timeout = (timeout_ms > 0) ? timeout_ms : 5000;
             struct timeval tv;
-            tv.tv_sec = (long)(timeout_ms / 1000);
-            tv.tv_usec = (long)((timeout_ms % 1000) * 1000);
+            tv.tv_sec = (long)(effective_timeout / 1000);
+            tv.tv_usec = (long)((effective_timeout % 1000) * 1000);
             setsockopt(client_fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
         }
 

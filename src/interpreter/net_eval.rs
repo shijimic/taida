@@ -608,18 +608,16 @@ impl Interpreter {
         };
 
         // ── Arg 3: timeoutMs (optional, default 5000) ──
+        // NB-5: timeoutMs <= 0 falls back to 5000ms (v1 default).
+        // Duration::ZERO is OS-undefined for set_read_timeout; 0 must not reach the OS.
         let timeout_ms: u64 = match args.get(3) {
             Some(arg) => match self.eval_expr(arg)? {
                 Signal::Value(Value::Int(n)) => {
-                    if n < 0 {
-                        return Err(RuntimeError {
-                            message: format!(
-                                "httpServe: timeoutMs must be non-negative, got {}",
-                                n
-                            ),
-                        });
+                    if n <= 0 {
+                        5000 // fallback to default
+                    } else {
+                        n as u64
                     }
-                    n as u64
                 }
                 Signal::Value(v) => {
                     return Err(RuntimeError {

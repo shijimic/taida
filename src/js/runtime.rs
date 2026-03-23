@@ -3080,6 +3080,10 @@ function __taida_net_httpParseRequestHead(input) {
   for (let i = 1; i < lines.length; i++) {
     const line = lines[i];
     if (line.length === 0) break; // end of headers
+    // NB-4/NB-6: enforce max 64 headers (parity with Interpreter/httparse)
+    if (headersList.length >= 64) {
+      return __taida_net_result_fail('ParseError', 'Malformed HTTP request: too many headers');
+    }
     const colonIdx = line.indexOf(':');
     if (colonIdx < 0) {
       // Malformed header line
@@ -3260,7 +3264,9 @@ async function __taida_net_httpServe(port, handler, maxRequests, timeoutMs) {
       null, 'fulfilled');
   }
   const maxReq = (typeof maxRequests === 'number' && Number.isInteger(maxRequests)) ? maxRequests : 0;
-  const timeout = (typeof timeoutMs === 'number' && Number.isInteger(timeoutMs) && timeoutMs >= 0) ? timeoutMs : 5000;
+  // NB-9: timeoutMs <= 0 falls back to 5000ms (v1 default).
+  // socket.setTimeout(0) means "disable timeout" in Node.js = wait forever; 0 must not reach the socket.
+  const timeout = (typeof timeoutMs === 'number' && Number.isInteger(timeoutMs) && timeoutMs > 0) ? timeoutMs : 5000;
 
   const net = __os_net;
   if (!net) {
