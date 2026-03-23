@@ -4898,7 +4898,7 @@ impl Lowering {
     }
 
     /// A-4c: 式から Pack フィールド値の型タグを推論する
-    /// Returns: 0=Int, 1=Float, 2=Bool, 3=Str, 4=Pack, 5=List, 6=Closure
+    /// Returns: 0=Int, 1=Float, 2=Bool, 3=Str, 4=Pack, 5=List, 6=Closure, -1=Unknown
     pub(crate) fn expr_type_tag(&self, expr: &Expr) -> i64 {
         match expr {
             Expr::IntLit(_, _) => 0,                              // TAIDA_TAG_INT
@@ -4922,11 +4922,12 @@ impl Lowering {
                 } else if self.closure_vars.contains(name) {
                     6
                 } else {
-                    0
+                    -1 // TAIDA_TAG_UNKNOWN: type cannot be determined at compile time
                 }
             }
             Expr::FuncCall(callee, _, _) => {
                 if let Expr::Ident(name, _) = callee.as_ref() {
+                    // Known Int-returning: length, indexOf, etc. already match MethodCall above
                     if self.bool_returning_funcs.contains(name.as_str()) {
                         return 2;
                     }
@@ -4947,7 +4948,7 @@ impl Lowering {
                         return 5;
                     }
                 }
-                0
+                -1 // TAIDA_TAG_UNKNOWN: return type cannot be determined at compile time
             }
             Expr::MethodCall(_, method, _, _) => {
                 if self.expr_is_bool(expr) {
@@ -4955,16 +4956,16 @@ impl Lowering {
                 }
                 match method.as_str() {
                     "toString" | "toUpperCase" | "toLowerCase" => 3,
-                    "length" | "indexOf" | "lastIndexOf" => 0,
+                    "length" | "indexOf" | "lastIndexOf" => 0, // known Int-returning methods
                     "map" | "filter" | "flatMap" | "sort" | "unique" | "flatten" | "reverse"
                     | "concat" | "append" | "prepend" | "zip" | "enumerate" => 5,
-                    _ => 0,
+                    _ => -1, // TAIDA_TAG_UNKNOWN
                 }
             }
             Expr::MoldInst(_, _, _, _) => 4, // Mold instantiation returns a Pack
-            Expr::Unmold(_, _) => 0,         // Could be anything
+            Expr::Unmold(_, _) => -1,        // TAIDA_TAG_UNKNOWN: could be anything
             _ if self.expr_is_bool(expr) => 2,
-            _ => 0,
+            _ => -1, // TAIDA_TAG_UNKNOWN
         }
     }
 

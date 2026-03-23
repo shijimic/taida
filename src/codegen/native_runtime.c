@@ -1900,6 +1900,100 @@ taida_val taida_pack_get(taida_ptr pack_ptr, taida_val field_hash) {
     return 0; // default value
 }
 
+// Get the type tag for a field by its hash. Returns TAIDA_TAG_UNKNOWN if not found.
+static taida_val taida_pack_get_field_tag(taida_ptr pack_ptr, taida_val field_hash) {
+    taida_val *pack = (taida_val*)pack_ptr;
+    taida_val count = pack[1];
+    for (taida_val i = 0; i < count; i++) {
+        if (pack[2 + i * 3] == field_hash) {
+            return pack[2 + i * 3 + 1];
+        }
+    }
+    return TAIDA_TAG_UNKNOWN;
+}
+
+// Return a human-readable type name for a given type tag.
+static const char *taida_tag_name(taida_val tag) {
+    switch (tag) {
+        case TAIDA_TAG_INT:     return "Int";
+        case TAIDA_TAG_FLOAT:   return "Float";
+        case TAIDA_TAG_BOOL:    return "Bool";
+        case TAIDA_TAG_STR:     return "Str";
+        case TAIDA_TAG_PACK:    return "BuchiPack";
+        case TAIDA_TAG_LIST:    return "List";
+        case TAIDA_TAG_CLOSURE: return "Closure";
+        case TAIDA_TAG_HMAP:    return "HashMap";
+        case TAIDA_TAG_SET:     return "Set";
+        default:                return "unknown";
+    }
+}
+
+// NB-14/NB-21: Runtime type detection for UNKNOWN-tagged values.
+// When the compiler cannot determine the field tag (e.g., dynamic argument passing),
+// we inspect the runtime value to determine its actual type.
+// Limitation: Bool and Int are indistinguishable at runtime (both are unboxed scalars),
+// so Bool values with UNKNOWN tag will be detected as Int.
+static taida_val taida_runtime_detect_tag(taida_val value) {
+    // Heap types can be distinguished by magic headers
+    if (value == 0 || (value > 0 && value < 4096)) return TAIDA_TAG_INT;  // small scalar
+    if (taida_is_list(value)) return TAIDA_TAG_LIST;
+    if (taida_is_buchi_pack(value)) return TAIDA_TAG_PACK;
+    if (TAIDA_IS_BYTES(value)) return TAIDA_TAG_STR;  // Bytes is string-like
+    if (TAIDA_IS_CLOSURE(value)) return TAIDA_TAG_CLOSURE;
+    if (taida_is_hashmap(value)) return TAIDA_TAG_HMAP;
+    if (taida_is_set(value)) return TAIDA_TAG_SET;
+    if (taida_is_string_value(value)) return TAIDA_TAG_STR;
+    return TAIDA_TAG_INT;  // unboxed scalar fallback
+}
+
+// Format a value for error messages (parity with Interpreter/JS).
+// Returns 1 if the tag was known, 0 if UNKNOWN (best-effort formatting).
+static int taida_format_value(taida_val tag, taida_val value, char *buf, size_t size) {
+    switch (tag) {
+        case TAIDA_TAG_BOOL:
+            snprintf(buf, size, "%s", value ? "true" : "false");
+            return 1;
+        case TAIDA_TAG_INT:
+            snprintf(buf, size, "%lld", (long long)value);
+            return 1;
+        case TAIDA_TAG_FLOAT: {
+            double d;
+            memcpy(&d, &value, sizeof(double));
+            snprintf(buf, size, "%g", d);
+            return 1;
+        }
+        case TAIDA_TAG_STR: {
+            size_t slen = 0;
+            if (taida_read_cstr_len_safe((const char*)value, 128, &slen)) {
+                snprintf(buf, size, "%s", (const char*)value);
+            } else {
+                snprintf(buf, size, "Str");
+            }
+            return 1;
+        }
+        case TAIDA_TAG_PACK:
+            snprintf(buf, size, "BuchiPack");
+            return 1;
+        case TAIDA_TAG_LIST:
+            snprintf(buf, size, "List");
+            return 1;
+        case TAIDA_TAG_CLOSURE:
+            snprintf(buf, size, "Closure");
+            return 1;
+        default: {
+            // UNKNOWN tag: use runtime type detection to format meaningfully
+            taida_val detected = taida_runtime_detect_tag(value);
+            if (detected != TAIDA_TAG_INT) {
+                // Detected a non-scalar type; recurse with the resolved tag
+                return taida_format_value(detected, value, buf, size);
+            }
+            // Unboxed scalar: Bool/Int indistinguishable at runtime, display as Int
+            snprintf(buf, size, "%lld", (long long)value);
+            return 0;
+        }
+    }
+}
+
 taida_val taida_pack_has_hash(taida_ptr pack_ptr, taida_val field_hash) {
     taida_val *pack = (taida_val*)pack_ptr;
     taida_val count = pack[1];
@@ -9141,10 +9235,23 @@ taida_val taida_net_http_encode_response(taida_val response) {
         return taida_net_result_fail("EncodeError", "httpEncodeResponse: missing required field 'status'");
     }
     taida_val status = taida_pack_get(response, status_hash);
-    // NB-14: Type check — status must be Int (not Str/List/Pack/Bytes)
-    if (taida_is_buchi_pack(status) || taida_is_list(status) ||
-        TAIDA_IS_BYTES(status) || taida_is_string_value(status)) {
-        return taida_net_result_fail("EncodeError", "httpEncodeResponse: status must be Int, got non-Int");
+    // NB-14: Type check via field tag — status must be Int.
+    // When tag is UNKNOWN, resolve via runtime detection to catch non-Int values
+    // that the compiler couldn't type-check statically.
+    {
+        taida_val status_tag = taida_pack_get_field_tag(response, status_hash);
+        if (status_tag == TAIDA_TAG_UNKNOWN) {
+            status_tag = taida_runtime_detect_tag(status);
+        }
+        if (status_tag != TAIDA_TAG_INT) {
+            char val_buf[64];
+            taida_format_value(status_tag, status, val_buf, sizeof(val_buf));
+            char err_msg[128];
+            snprintf(err_msg, sizeof(err_msg),
+                     "httpEncodeResponse: status must be Int, got %s",
+                     val_buf);
+            return taida_net_result_fail("EncodeError", err_msg);
+        }
     }
     if (status < 100 || status > 999) {
         char err_msg[128];
@@ -9159,12 +9266,13 @@ taida_val taida_net_http_encode_response(taida_val response) {
     }
     taida_val headers_ptr = taida_pack_get(response, headers_hash);
     if (!taida_is_list(headers_ptr)) {
-        // NB-21: Include type info in error message (parity with Interpreter/JS)
-        const char *htype = taida_is_buchi_pack(headers_ptr) ? "BuchiPack"
-                          : taida_is_string_value(headers_ptr) ? "Str"
-                          : TAIDA_IS_BYTES(headers_ptr) ? "Bytes" : "non-List";
+        // NB-21: Format actual value for parity with Interpreter/JS
+        taida_val htag = taida_pack_get_field_tag(response, headers_hash);
+        char val_buf[64];
+        taida_format_value(htag, headers_ptr, val_buf, sizeof(val_buf));
         char err_msg[128];
-        snprintf(err_msg, sizeof(err_msg), "httpEncodeResponse: headers must be a List, got %s", htype);
+        snprintf(err_msg, sizeof(err_msg), "httpEncodeResponse: headers must be a List, got %s",
+                 val_buf);
         return taida_net_result_fail("EncodeError", err_msg);
     }
 
@@ -9193,11 +9301,13 @@ taida_val taida_net_http_encode_response(taida_val response) {
             body_data = (unsigned char*)body_ptr;
             body_len = slen;
         } else {
-            // NB-21: Include type info in error message (parity with Interpreter/JS)
-            const char *btype = taida_is_buchi_pack(body_ptr) ? "BuchiPack"
-                              : taida_is_list(body_ptr) ? "List" : "non-Str";
+            // NB-21: Format actual value for parity with Interpreter/JS
+            taida_val btag = taida_pack_get_field_tag(response, body_hash);
+            char val_buf[64];
+            taida_format_value(btag, body_ptr, val_buf, sizeof(val_buf));
             char err_msg[128];
-            snprintf(err_msg, sizeof(err_msg), "httpEncodeResponse: body must be Bytes or Str, got %s", btype);
+            snprintf(err_msg, sizeof(err_msg), "httpEncodeResponse: body must be Bytes or Str, got %s",
+                     val_buf);
             return taida_net_result_fail("EncodeError", err_msg);
         }
     }

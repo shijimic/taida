@@ -3192,11 +3192,11 @@ function __taida_net_httpEncodeResponse(response) {
     if (typeof value !== 'string') {
       return __taida_net_result_fail('EncodeError', 'httpEncodeResponse: headers[' + i + '].value must be Str');
     }
-    // NB-7: Enforce header name/value length limits (parity with Native)
-    if (name.length > 8192) {
+    // NB-7: Enforce header name/value length limits in UTF-8 bytes (parity with Interpreter/Native)
+    if (Buffer.byteLength(name, 'utf-8') > 8192) {
       return __taida_net_result_fail('EncodeError', 'httpEncodeResponse: headers[' + i + '].name exceeds 8192 bytes');
     }
-    if (value.length > 65536) {
+    if (Buffer.byteLength(value, 'utf-8') > 65536) {
       return __taida_net_result_fail('EncodeError', 'httpEncodeResponse: headers[' + i + '].value exceeds 65536 bytes');
     }
     // Reject CRLF in header name/value

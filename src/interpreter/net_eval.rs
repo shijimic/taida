@@ -3032,39 +3032,21 @@ mod tests {
     #[test]
     fn test_nb27_empty_path_parse() {
         // "GET  HTTP/1.1\r\n..." — double space means the path token is empty.
-        // httparse interprets space-delimited tokens in the request line;
-        // "GET  HTTP/1.1" is malformed because httparse cannot find a valid
-        // URI between the method and version. We verify the parser handles
-        // this gracefully (malformed error, not a panic).
+        // httparse treats this as malformed because it cannot find a valid URI
+        // between the method and version.
         let raw = b"GET  HTTP/1.1\r\nHost: localhost\r\n\r\n";
         let result = parse_request_head(raw);
-        // httparse treats double-space as a malformed request line.
-        // The important thing is we get a well-defined result (not a panic).
-        if is_result_failure(&result) {
-            // Malformed is acceptable — httparse cannot parse "GET  HTTP/1.1"
-            let msg = get_failure_message(&result);
-            assert!(
-                msg.contains("Malformed"),
-                "Expected Malformed error, got: {}",
-                msg
-            );
-        } else {
-            // If the parser somehow succeeds, path span should have len=0
-            let inner = extract_result_inner(&result);
-            let path = match inner.iter().find(|(k, _)| k == "path").map(|(_, v)| v) {
-                Some(Value::BuchiPack(f)) => f,
-                _ => panic!("no path"),
-            };
-            let path_len = match path.iter().find(|(k, _)| k == "len") {
-                Some((_, Value::Int(n))) => *n,
-                _ => panic!("no path.len"),
-            };
-            assert_eq!(
-                path_len, 0,
-                "Empty path should have len=0, got: {}",
-                path_len
-            );
-        }
+        // httparse rejects double-space as a malformed request line → ParseError.
+        assert!(
+            is_result_failure(&result),
+            "NB-27: double-space path should be rejected as malformed, got success"
+        );
+        let msg = get_failure_message(&result);
+        assert!(
+            msg.contains("Malformed"),
+            "NB-27: expected Malformed error, got: {}",
+            msg
+        );
     }
 
     // ── NB-29: sentinel shadow by unmold ──
