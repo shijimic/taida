@@ -4301,8 +4301,13 @@ taida_val taida_throw(taida_val error_val) {
         __taida_error_val[depth] = error_val;
         longjmp(__taida_error_jmp[depth], 1);
     }
-    // No error ceiling: gorilla
-    fprintf(stderr, "Unhandled error (no error ceiling)\n");
+    // No error ceiling: gorilla — print the actual error message
+    taida_val msg = taida_throw_to_display_string(error_val);
+    if (msg != 0) {
+        fprintf(stderr, "Runtime error: %s\n", (const char*)msg);
+    } else {
+        fprintf(stderr, "Unhandled error (no error ceiling)\n");
+    }
     exit(1);
     return 0;
 }
@@ -8896,6 +8901,7 @@ taida_val taida_pool_health(taida_val pool_or_pack) {
 taida_val taida_net_http_parse_request_head(taida_val input);
 taida_val taida_net_http_encode_response(taida_val response);
 taida_val taida_net_http_serve(taida_val port, taida_val handler, taida_val max_requests, taida_val timeout_ms, taida_val handler_type_tag);
+taida_val taida_net_read_body(taida_val req);
 
 // Net result helpers (use HttpError instead of IoError)
 static taida_val taida_net_result_ok(taida_val inner) {
@@ -9550,6 +9556,66 @@ static int taida_net_send_all(int fd, const void *buf, size_t len) {
     return 0;
 }
 
+// ── readBody(req) → Bytes ────────────────────────────────────────
+// Extract body bytes from a request pack.
+// req.raw (Bytes) + body span (start, len) → body slice as new Bytes.
+// If body.len == 0 or body span is absent, returns empty Bytes.
+taida_val taida_net_read_body(taida_val req) {
+    if (!taida_is_buchi_pack(req)) {
+        // Parity: Interpreter returns RuntimeError, JS throws __NativeError
+        char val_buf[64];
+        taida_val tag = taida_runtime_detect_tag(req);
+        taida_format_value(tag, req, val_buf, sizeof(val_buf));
+        char err_msg[256];
+        snprintf(err_msg, sizeof(err_msg),
+                 "readBody: argument must be a request pack @(...), got %s",
+                 val_buf);
+        return taida_throw(taida_make_error("TypeError", err_msg));
+    }
+
+    // Extract raw: Bytes
+    taida_val raw = taida_pack_get(req, taida_str_hash((taida_val)"raw"));
+    if (!TAIDA_IS_BYTES(raw)) {
+        return taida_throw(taida_make_error("TypeError",
+            "readBody: request pack missing 'raw: Bytes' field"));
+    }
+
+    // Extract body: @(start: Int, len: Int)
+    taida_val body_span = taida_pack_get(req, taida_str_hash((taida_val)"body"));
+    taida_val body_start = 0;
+    taida_val body_len = 0;
+    if (body_span != 0 && taida_is_buchi_pack(body_span)) {
+        body_start = taida_pack_get(body_span, taida_str_hash((taida_val)"start"));
+        body_len = taida_pack_get(body_span, taida_str_hash((taida_val)"len"));
+    }
+
+    if (body_len <= 0) {
+        return taida_bytes_new_filled(0, 0);
+    }
+
+    // raw layout: [magic+rc, length, b0, b1, ...]
+    taida_val *raw_arr = (taida_val*)raw;
+    taida_val raw_len = raw_arr[1];
+
+    // Clamp to valid range
+    if (body_start < 0) body_start = 0;
+    if (body_start > raw_len) body_start = raw_len;
+    taida_val end = body_start + body_len;
+    if (end > raw_len) end = raw_len;
+    taida_val actual_len = end - body_start;
+    if (actual_len <= 0) {
+        return taida_bytes_new_filled(0, 0);
+    }
+
+    // Copy body bytes into a new Bytes object
+    taida_val out = taida_bytes_new_filled(actual_len, 0);
+    taida_val *out_arr = (taida_val*)out;
+    for (taida_val i = 0; i < actual_len; i++) {
+        out_arr[2 + i] = raw_arr[2 + body_start + i];
+    }
+    return out;
+}
+
 // ── httpServe(port, handler, maxRequests, timeoutMs) ────────────
 // HTTP/1.1 server: bind, accept loop, parse, call handler, encode, respond.
 // Returns Async[Result[@(ok: Bool, requests: Int), _]]
@@ -9746,8 +9812,8 @@ taida_val taida_net_http_serve(taida_val port, taida_val handler, taida_val max_
         taida_val parse_result = taida_net_http_parse_request_head(raw_bytes);
         taida_val inner = taida_pack_get(parse_result, taida_str_hash((taida_val)"__value"));
 
-        // Build request @(raw, method, path, query, version, headers, body, bodyOffset, contentLength, remoteHost, remotePort)
-        taida_val request = taida_pack_new(11);
+        // Build request @(raw, method, path, query, version, headers, body, bodyOffset, contentLength, remoteHost, remotePort, keepAlive, chunked)
+        taida_val request = taida_pack_new(13);
         taida_pack_set_hash(request, 0, taida_str_hash((taida_val)"raw"));
         taida_pack_set(request, 0, raw_bytes);
         taida_pack_set_tag(request, 0, TAIDA_TAG_PACK);  // Bytes
@@ -9831,6 +9897,15 @@ taida_val taida_net_http_serve(taida_val port, taida_val handler, taida_val max_
 
         taida_pack_set_hash(request, 10, taida_str_hash((taida_val)"remotePort"));
         taida_pack_set(request, 10, (taida_val)ntohs(peer_addr.sin_port));
+
+        // v2 scaffold: keepAlive / chunked (Phase 0 = always false)
+        taida_pack_set_hash(request, 11, taida_str_hash((taida_val)"keepAlive"));
+        taida_pack_set(request, 11, 0);  // false
+        taida_pack_set_tag(request, 11, TAIDA_TAG_BOOL);
+
+        taida_pack_set_hash(request, 12, taida_str_hash((taida_val)"chunked"));
+        taida_pack_set(request, 12, 0);  // false
+        taida_pack_set_tag(request, 12, TAIDA_TAG_BOOL);
 
         free(buf);
 

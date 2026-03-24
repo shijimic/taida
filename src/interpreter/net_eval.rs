@@ -21,7 +21,7 @@ use crate::parser::Expr;
 type ResponseFields = (i64, Vec<(String, String)>, Vec<u8>);
 
 /// All symbols exported by the net package.
-/// Legacy (16) + HTTP v1 (3) = 19 symbols.
+/// Legacy (16) + HTTP v1 (3) + HTTP v2 (1) = 20 symbols.
 pub(crate) const NET_SYMBOLS: &[&str] = &[
     // Legacy surface (shared with os)
     "dnsResolve",
@@ -44,6 +44,8 @@ pub(crate) const NET_SYMBOLS: &[&str] = &[
     "httpServe",
     "httpParseRequestHead",
     "httpEncodeResponse",
+    // HTTP v2
+    "readBody",
 ];
 
 // ── Result helpers ──────────────────────────────────────────
@@ -488,6 +490,55 @@ fn status_reason(code: i64) -> &'static str {
     }
 }
 
+// ── readBody ─────────────────────────────────────────────────
+
+/// `readBody(req)` — extract body bytes from a request pack.
+///
+/// Returns `Bytes` (owned copy of `req.raw[body.start .. body.start + body.len]`).
+/// If body.len == 0 or body span is absent, returns empty Bytes.
+fn eval_read_body(req: &Value) -> Result<Value, RuntimeError> {
+    let fields = match req {
+        Value::BuchiPack(f) => f,
+        _ => {
+            return Err(RuntimeError {
+                message: format!(
+                    "readBody: argument must be a request pack @(...), got {}",
+                    req
+                ),
+            });
+        }
+    };
+
+    // Extract raw: Bytes
+    let raw = match get_field_value(fields, "raw") {
+        Some(Value::Bytes(b)) => b,
+        _ => {
+            return Err(RuntimeError {
+                message: "readBody: request pack missing 'raw: Bytes' field".into(),
+            });
+        }
+    };
+
+    // Extract body: @(start: Int, len: Int)
+    let (body_start, body_len) = match get_field_value(fields, "body") {
+        Some(Value::BuchiPack(span)) => {
+            let start = get_field_int(span, "start").unwrap_or(0) as usize;
+            let len = get_field_int(span, "len").unwrap_or(0) as usize;
+            (start, len)
+        }
+        _ => (0, 0),
+    };
+
+    // Return body slice as Bytes
+    if body_len == 0 {
+        Ok(Value::Bytes(vec![]))
+    } else {
+        let end = body_start.saturating_add(body_len).min(raw.len());
+        let start = body_start.min(end);
+        Ok(Value::Bytes(raw[start..end].to_vec()))
+    }
+}
+
 // ── Dispatch ────────────────────────────────────────────────
 
 impl Interpreter {
@@ -547,6 +598,22 @@ impl Interpreter {
             // ── httpServe(port, handler, maxRequests, timeoutMs) ──
             // → Async[Result[@(ok: Bool, requests: Int), _]]
             "httpServe" => self.eval_http_serve(args),
+
+            // ── readBody(req) → Bytes ──
+            "readBody" => {
+                let req = match args.first() {
+                    Some(arg) => match self.eval_expr(arg)? {
+                        Signal::Value(v) => v,
+                        other => return Ok(Some(other)),
+                    },
+                    None => {
+                        return Err(RuntimeError {
+                            message: "readBody: missing argument 'req'".into(),
+                        });
+                    }
+                };
+                Ok(Some(Signal::Value(eval_read_body(&req)?)))
+            }
 
             _ => Ok(None),
         }
@@ -811,6 +878,9 @@ impl Interpreter {
             request_fields.push(("contentLength".into(), Value::Int(content_length)));
             request_fields.push(("remoteHost".into(), Value::Str(peer_addr.ip().to_string())));
             request_fields.push(("remotePort".into(), Value::Int(peer_addr.port() as i64)));
+            // v2 scaffold: keepAlive / chunked (Phase 0 = always false)
+            request_fields.push(("keepAlive".into(), Value::Bool(false)));
+            request_fields.push(("chunked".into(), Value::Bool(false)));
 
             let request_pack = Value::BuchiPack(request_fields);
 
@@ -894,12 +964,13 @@ mod tests {
 
     #[test]
     fn test_net_symbols_count() {
-        // 16 legacy + 3 HTTP v1 = 19
-        assert_eq!(NET_SYMBOLS.len(), 19);
+        // 16 legacy + 3 HTTP v1 + 1 HTTP v2 = 20
+        assert_eq!(NET_SYMBOLS.len(), 20);
         assert!(NET_SYMBOLS.contains(&"dnsResolve"));
         assert!(NET_SYMBOLS.contains(&"httpServe"));
         assert!(NET_SYMBOLS.contains(&"httpParseRequestHead"));
         assert!(NET_SYMBOLS.contains(&"httpEncodeResponse"));
+        assert!(NET_SYMBOLS.contains(&"readBody"));
     }
 
     // ── Sentinel guard tests ──
@@ -3091,5 +3162,69 @@ mod tests {
             result.is_none(),
             "After unmold shadow: sentinel is gone, try_net_func must return None"
         );
+    }
+
+    // ── readBody tests ──
+
+    #[test]
+    fn test_read_body_content_length() {
+        // Build a fake request pack with raw bytes containing a body
+        let raw = b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\nhello".to_vec();
+        let body_start = 35i64; // "hello" starts at offset 35
+        let body_len = 5i64;
+        let req = Value::BuchiPack(vec![
+            ("raw".into(), Value::Bytes(raw)),
+            (
+                "body".into(),
+                Value::BuchiPack(vec![
+                    ("start".into(), Value::Int(body_start)),
+                    ("len".into(), Value::Int(body_len)),
+                ]),
+            ),
+        ]);
+        let result = eval_read_body(&req).unwrap();
+        assert_eq!(result, Value::Bytes(b"hello".to_vec()));
+    }
+
+    #[test]
+    fn test_read_body_no_body() {
+        // body.len == 0 should return empty Bytes
+        let raw = b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n".to_vec();
+        let req = Value::BuchiPack(vec![
+            ("raw".into(), Value::Bytes(raw)),
+            (
+                "body".into(),
+                Value::BuchiPack(vec![
+                    ("start".into(), Value::Int(35)),
+                    ("len".into(), Value::Int(0)),
+                ]),
+            ),
+        ]);
+        let result = eval_read_body(&req).unwrap();
+        assert_eq!(result, Value::Bytes(vec![]));
+    }
+
+    #[test]
+    fn test_read_body_missing_raw() {
+        // Request pack without 'raw' field should produce RuntimeError
+        let req = Value::BuchiPack(vec![(
+            "body".into(),
+            Value::BuchiPack(vec![
+                ("start".into(), Value::Int(0)),
+                ("len".into(), Value::Int(5)),
+            ]),
+        )]);
+        let result = eval_read_body(&req);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().message.contains("raw"));
+    }
+
+    #[test]
+    fn test_read_body_not_buchipack() {
+        // Argument that is not a BuchiPack should produce RuntimeError
+        let req = Value::Int(42);
+        let result = eval_read_body(&req);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().message.contains("request pack"));
     }
 }

@@ -5380,7 +5380,7 @@ fn setup_net_project(source: &str, label: &str) -> PathBuf {
 
     // Write the net package stub (same as CoreBundledProvider::net_package_source)
     let net_stub = r#"// taida-lang/net — Core bundled network package
-<<< @(dnsResolve, tcpConnect, tcpListen, tcpAccept, socketSend, socketSendAll, socketRecv, socketSendBytes, socketRecvBytes, socketRecvExact, udpBind, udpSendTo, udpRecvFrom, socketClose, listenerClose, udpClose, httpServe, httpParseRequestHead, httpEncodeResponse)
+<<< @(dnsResolve, tcpConnect, tcpListen, tcpAccept, socketSend, socketSendAll, socketRecv, socketSendBytes, socketRecvBytes, socketRecvExact, udpBind, udpSendTo, udpRecvFrom, socketClose, listenerClose, udpClose, httpServe, httpParseRequestHead, httpEncodeResponse, readBody)
 "#;
     fs::write(deps_net.join("main.td"), net_stub).expect("write net stub");
 
@@ -8667,5 +8667,213 @@ stdout(parsed.bodyOffset)\n\
         interp, native,
         "NB-11: non-ASCII header Interp vs Native\nInterp: {}\nNative: {}",
         interp, native
+    );
+}
+
+// ── readBody: 3-way parity tests ──────────────────────────────
+
+/// readBody with Content-Length body — 3-way parity.
+/// Build a request pack manually (raw + body span) and verify readBody
+/// extracts the body bytes correctly across all three backends.
+#[test]
+fn test_net_readbody_content_length_3way_parity() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+
+    // Construct a request pack with raw bytes + body span, then call readBody.
+    // The raw bytes contain "POST /data HTTP/1.1\r\nContent-Length: 5\r\n\r\nhello"
+    // body span starts at offset 42 (after \r\n\r\n), length 5.
+    let source = r#">>> taida-lang/net => @(readBody)
+
+rawLax <= Bytes["POST /data HTTP/1.1\r\nContent-Length: 5\r\n\r\nhello"]()
+rawLax ]=> raw
+req <= @(raw <= raw, body <= @(start <= 42, len <= 5))
+body <= readBody(req)
+stdout(body.length())
+"#;
+
+    let dir = setup_net_project(source, "readbody_cl");
+    let interp = run_net_interpreter(&dir).expect("interpreter failed for readBody parity");
+    let js = run_net_js(&dir, "readbody_cl").expect("js failed for readBody parity");
+    let native = run_net_native(&dir, "readbody_cl").expect("native failed for readBody parity");
+    cleanup_net_project(&dir);
+
+    assert_eq!(
+        interp, js,
+        "readBody Content-Length Interp vs JS\nInterp: {}\nJS: {}",
+        interp, js
+    );
+    assert_eq!(
+        interp, native,
+        "readBody Content-Length Interp vs Native\nInterp: {}\nNative: {}",
+        interp, native
+    );
+    // Verify the body length is 5 (the "hello" body)
+    assert_eq!(
+        interp.trim(),
+        "5",
+        "readBody should return 5 bytes for 'hello'"
+    );
+}
+
+/// readBody with empty body (len=0) — 3-way parity.
+#[test]
+fn test_net_readbody_empty_body_3way_parity() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+
+    let source = r#">>> taida-lang/net => @(readBody)
+
+rawLax <= Bytes["GET / HTTP/1.1\r\nHost: localhost\r\n\r\n"]()
+rawLax ]=> raw
+req <= @(raw <= raw, body <= @(start <= 35, len <= 0))
+body <= readBody(req)
+stdout(body.length())
+"#;
+
+    let dir = setup_net_project(source, "readbody_empty");
+    let interp = run_net_interpreter(&dir).expect("interpreter failed for readBody empty parity");
+    let js = run_net_js(&dir, "readbody_empty").expect("js failed for readBody empty parity");
+    let native =
+        run_net_native(&dir, "readbody_empty").expect("native failed for readBody empty parity");
+    cleanup_net_project(&dir);
+
+    assert_eq!(
+        interp, js,
+        "readBody empty Interp vs JS\nInterp: {}\nJS: {}",
+        interp, js
+    );
+    assert_eq!(
+        interp, native,
+        "readBody empty Interp vs Native\nInterp: {}\nNative: {}",
+        interp, native
+    );
+    // Empty body should return 0 bytes
+    assert_eq!(
+        interp.trim(),
+        "0",
+        "readBody should return 0 bytes for empty body"
+    );
+}
+
+// ── readBody runtime-error helpers ──────────────────────────────
+
+/// Run a net project with the interpreter and return stderr on runtime failure.
+fn run_net_interpreter_runtime_error(project_dir: &Path) -> Option<String> {
+    let td_path = project_dir.join("main.td");
+    let output = Command::new(taida_bin()).arg(&td_path).output().ok()?;
+    if output.status.success() {
+        return None; // expected to fail
+    }
+    Some(String::from_utf8_lossy(&output.stderr).to_string())
+}
+
+/// Transpile a net project to JS, run with node, and return stderr on runtime failure.
+fn run_net_js_runtime_error(project_dir: &Path, label: &str) -> Option<String> {
+    let td_path = project_dir.join("main.td");
+    let js_path = unique_temp_path("taida_net_err_js", label, "mjs");
+
+    let transpile = Command::new(taida_bin())
+        .arg("build")
+        .arg("--target")
+        .arg("js")
+        .arg(&td_path)
+        .arg("-o")
+        .arg(&js_path)
+        .output()
+        .ok()?;
+
+    if !transpile.status.success() {
+        let _ = fs::remove_file(&js_path);
+        return None; // transpile failure, not runtime
+    }
+
+    let run_output = Command::new("node").arg(&js_path).output().ok()?;
+    let _ = fs::remove_file(&js_path);
+
+    if run_output.status.success() {
+        return None; // expected to fail
+    }
+    Some(String::from_utf8_lossy(&run_output.stderr).to_string())
+}
+
+/// Compile a net project to native, run the binary, and return stderr on runtime failure.
+fn run_net_native_runtime_error(project_dir: &Path, label: &str) -> Option<String> {
+    let td_path = project_dir.join("main.td");
+    let bin_path = unique_temp_path("taida_net_err_native", label, "bin");
+
+    let compile = Command::new(taida_bin())
+        .arg("build")
+        .arg("--target")
+        .arg("native")
+        .arg(&td_path)
+        .arg("-o")
+        .arg(&bin_path)
+        .output()
+        .ok()?;
+
+    if !compile.status.success() {
+        let _ = fs::remove_file(&bin_path);
+        return None; // compile failure, not runtime
+    }
+
+    let output = Command::new(&bin_path).output().ok()?;
+    let _ = fs::remove_file(&bin_path);
+
+    if output.status.success() {
+        return None; // expected to fail
+    }
+    Some(String::from_utf8_lossy(&output.stderr).to_string())
+}
+
+/// readBody with invalid argument (Int) — 3-way runtime error parity.
+/// All backends should produce an error containing the message fragment.
+#[test]
+fn test_net_readbody_invalid_arg_3way_parity() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+
+    let source = r#">>> taida-lang/net => @(readBody)
+
+body <= readBody(42)
+stdout(body.length())
+"#;
+
+    let expected_fragment = "readBody: argument must be a request pack @(...), got 42";
+
+    let dir = setup_net_project(source, "readbody_invalid_arg");
+
+    let interp_err = run_net_interpreter_runtime_error(&dir)
+        .expect("interpreter should fail for readBody(42)");
+    let js_err = run_net_js_runtime_error(&dir, "readbody_invalid_arg")
+        .expect("js should fail for readBody(42)");
+    let native_err = run_net_native_runtime_error(&dir, "readbody_invalid_arg")
+        .expect("native should fail for readBody(42)");
+
+    cleanup_net_project(&dir);
+
+    assert!(
+        interp_err.contains(expected_fragment),
+        "interpreter stderr should contain error message fragment.\nExpected: {}\nGot: {}",
+        expected_fragment,
+        interp_err
+    );
+    assert!(
+        js_err.contains(expected_fragment),
+        "js stderr should contain error message fragment.\nExpected: {}\nGot: {}",
+        expected_fragment,
+        js_err
+    );
+    assert!(
+        native_err.contains(expected_fragment),
+        "native stderr should contain error message fragment.\nExpected: {}\nGot: {}",
+        expected_fragment,
+        native_err
     );
 }

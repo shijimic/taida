@@ -304,14 +304,14 @@ impl CoreBundledProvider {
 //   socketClose, listenerClose, udpClose
 //
 // HTTP v1 surface:
-//   httpServe, httpParseRequestHead, httpEncodeResponse
+//   httpServe, httpParseRequestHead, httpEncodeResponse, readBody
 //
 // TI-21 contract notes:
 //   TLS verification on Http* uses backend default trust store (no insecure -k path)
 //   IPv6 outbound resolution/connect is supported via resolver path
 //   Unix domain sockets are not provided yet (explicit non-support)
 
-<<< @(dnsResolve, tcpConnect, tcpListen, tcpAccept, socketSend, socketSendAll, socketRecv, socketSendBytes, socketRecvBytes, socketRecvExact, udpBind, udpSendTo, udpRecvFrom, socketClose, listenerClose, udpClose, httpServe, httpParseRequestHead, httpEncodeResponse)
+<<< @(dnsResolve, tcpConnect, tcpListen, tcpAccept, socketSend, socketSendAll, socketRecv, socketSendBytes, socketRecvBytes, socketRecvExact, udpBind, udpSendTo, udpRecvFrom, socketClose, listenerClose, udpClose, httpServe, httpParseRequestHead, httpEncodeResponse, readBody)
 "#
     }
 

@@ -1572,6 +1572,11 @@ fn runtime_abi(name: &str) -> Result<RuntimeAbi, String> {
             params: &[Val, Ptr, Val, Val, Val],
             returns: &[Ptr],
         },
+        // NET2-0f: taida_net_read_body(req: Ptr) -> Ptr (Bytes)
+        "taida_net_read_body" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Ptr],
+        },
 
         // N-44: ABI table maintenance note
         // When adding a new runtime function in lower.rs, a corresponding entry

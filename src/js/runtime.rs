@@ -3435,6 +3435,8 @@ async function __taida_net_httpServe(port, handler, maxRequests, timeoutMs) {
           contentLength: contentLength,
           remoteHost: cleanHost,
           remotePort: socket.remotePort || 0,
+          keepAlive: false,
+          chunked: false,
         });
 
         // Call handler
@@ -3497,6 +3499,27 @@ function __taida_net_sendResponse(socket, responseVal, onDone) {
       if (onDone) onDone();
     });
   }
+}
+
+// readBody(req) -> Bytes
+// Extract body bytes from a request pack using raw buffer + body span.
+// Returns empty Uint8Array if body.len == 0.
+function __taida_net_readBody(req) {
+  if (!req || typeof req !== 'object') {
+    throw new __NativeError('readBody: argument must be a request pack @(...), got ' + __taida_format(req));
+  }
+  const raw = req.raw;
+  if (!(raw instanceof Uint8Array)) {
+    throw new __NativeError("readBody: request pack missing 'raw: Bytes' field");
+  }
+  const body = req.body;
+  if (!body || typeof body.start !== 'number' || typeof body.len !== 'number' || body.len === 0) {
+    return new Uint8Array(0);
+  }
+  const start = Math.max(0, body.start);
+  const end = Math.min(raw.length, start + body.len);
+  if (start >= end) return new Uint8Array(0);
+  return raw.slice(start, end);
 }
 "#;
 

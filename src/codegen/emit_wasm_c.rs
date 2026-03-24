@@ -87,6 +87,7 @@ fn validate_net_http_api_for_wasm(
         ("taida_net_http_serve", "httpServe"),
         ("taida_net_http_parse_request_head", "httpParseRequestHead"),
         ("taida_net_http_encode_response", "httpEncodeResponse"),
+        ("taida_net_read_body", "readBody"),
     ];
 
     for &(runtime_name, api_name) in NET_HTTP_FUNCS {
@@ -982,7 +983,8 @@ fn runtime_func_prototype(name: &str, profile: WasmProfile) -> Result<String, Wa
         // Source of truth: .dev/NET_WASM_POLICY.md
         "taida_net_http_serve"
         | "taida_net_http_parse_request_head"
-        | "taida_net_http_encode_response" =>
+        | "taida_net_http_encode_response"
+        | "taida_net_read_body" =>
         {
             let profile_name = match profile {
                 WasmProfile::Min => "wasm-min",
@@ -994,6 +996,7 @@ fn runtime_func_prototype(name: &str, profile: WasmProfile) -> Result<String, Wa
                 "taida_net_http_serve" => "httpServe",
                 "taida_net_http_parse_request_head" => "httpParseRequestHead",
                 "taida_net_http_encode_response" => "httpEncodeResponse",
+                "taida_net_read_body" => "readBody",
                 _ => name,
             };
             return Err(WasmCEmitError {
@@ -1589,15 +1592,16 @@ fn sanitize_name(name: &str) -> String {
 mod tests {
     use super::*;
 
-    /// NET-6: All 3 net HTTP v1 runtime function names.
+    /// NET-6: All net HTTP runtime function names.
     const NET_RUNTIME_FUNCS: &[&str] = &[
         "taida_net_http_serve",
         "taida_net_http_parse_request_head",
         "taida_net_http_encode_response",
+        "taida_net_read_body",
     ];
 
     /// NET-6: Human-readable API names expected in error messages.
-    const NET_API_NAMES: &[&str] = &["httpServe", "httpParseRequestHead", "httpEncodeResponse"];
+    const NET_API_NAMES: &[&str] = &["httpServe", "httpParseRequestHead", "httpEncodeResponse", "readBody"];
 
     /// NET-6b: wasm-min rejects all 3 net HTTP API functions with profile-specific error.
     #[test]
