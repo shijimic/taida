@@ -2900,9 +2900,9 @@ impl Lowering {
                 }
             }
 
-            // httpServe(port, handler, maxRequests <= 0, timeoutMs <= 5000)
+            // httpServe(port, handler, maxRequests <= 0, timeoutMs <= 5000, maxConnections <= 128)
             // handler is a function/closure, passed as a function pointer.
-            // maxRequests and timeoutMs are optional with defaults.
+            // maxRequests, timeoutMs, and maxConnections are optional with defaults.
             // Skip if the name is shadowed by a parameter in the current function scope.
             if name == "httpServe"
                 && !self.is_net_builtin_shadowed("httpServe")
@@ -2911,10 +2911,10 @@ impl Lowering {
                     .get("httpServe")
                     .is_some_and(|v| v == "taida_net_http_serve")
             {
-                if args.is_empty() || args.len() > 4 {
+                if args.is_empty() || args.len() > 5 {
                     return Err(LowerError {
                         message:
-                            "httpServe requires 2 to 4 arguments: httpServe(port, handler[, maxRequests, timeoutMs])"
+                            "httpServe requires 2 to 5 arguments: httpServe(port, handler[, maxRequests, timeoutMs, maxConnections])"
                                 .to_string(),
                     });
                 }
@@ -2934,6 +2934,14 @@ impl Lowering {
                     func.push(IrInst::ConstInt(v, 5000)); // default: 5000ms
                     v
                 };
+                // NET2-5d: maxConnections (optional, default 128)
+                let max_connections = if let Some(arg) = args.get(4) {
+                    self.lower_expr(func, arg)?
+                } else {
+                    let v = func.alloc_var();
+                    func.push(IrInst::ConstInt(v, 128)); // default: 128
+                    v
+                };
                 // NB-31: Pass compile-time handler type tag so the C runtime
                 // can reject non-callable values (large ints, strings, packs)
                 // without relying on the heuristic _taida_is_callable_impl.
@@ -2945,7 +2953,7 @@ impl Lowering {
                 func.push(IrInst::Call(
                     result,
                     "taida_net_http_serve".to_string(),
-                    vec![port, handler, max_requests, timeout_ms, handler_tag_var],
+                    vec![port, handler, max_requests, timeout_ms, max_connections, handler_tag_var],
                 ));
                 return Ok(result);
             }

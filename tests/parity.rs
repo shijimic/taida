@@ -9058,8 +9058,9 @@ stdout(body.length())
 
 // ── NET2-4e: JS backend parity tests ──────────────────────────────
 
-/// Helper: spawn a server (interpreter or JS) and return the child process.
+/// Helper: spawn a server (interpreter, JS, or native) and return the child process.
 /// For JS, transpiles to .mjs, spawns `node`, and waits for startup.
+/// For native, compiles to a binary and spawns it.
 fn spawn_net_server_backend(
     dir: &Path,
     backend: &str,
@@ -9099,6 +9100,29 @@ fn spawn_net_server_backend(
                 .expect("spawn node");
             thread::sleep(Duration::from_millis(500));
             (child, Some(js_path))
+        }
+        "native" => {
+            let bin_path = unique_temp_path("taida_net5_native", label, "bin");
+            let compile = Command::new(taida_bin())
+                .arg("build")
+                .arg("--target")
+                .arg("native")
+                .arg(&td_path)
+                .arg("-o")
+                .arg(&bin_path)
+                .output()
+                .expect("compile native");
+            if !compile.status.success() {
+                let stderr = String::from_utf8_lossy(&compile.stderr);
+                panic!("Native compile failed for {}: {}", label, stderr);
+            }
+            let child = Command::new(&bin_path)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .expect("spawn native binary");
+            thread::sleep(Duration::from_millis(500));
+            (child, Some(bin_path))
         }
         _ => unreachable!(),
     }
@@ -9909,4 +9933,792 @@ stdout(r.requests)
         }
         cleanup_net_project(&dir);
     }
+}
+
+// ── NET2-5e: Native backend parity tests ──────────────────────────
+
+/// NET2-5e: Keep-alive parity -- Interpreter vs Native.
+/// Sends 2 requests on a single TCP connection, verifies both get responses.
+#[test]
+fn test_net2_5e_keep_alive_interp_native_parity() {
+    for backend in &["interp", "native"] {
+        let port = find_free_loopback_port();
+        let source = format!(
+            r#">>> taida-lang/net => @(httpServe)
+
+handler req =
+  @(status <= 200, headers <= @[], body <= "ok")
+=> :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
+
+asyncResult <= httpServe({port}, handler, 2)
+asyncResult ]=> result
+result ]=> r
+stdout(r.ok)
+stdout(r.requests)
+"#
+        );
+
+        let dir = setup_net_project(&source, &format!("net5_ka_{}", backend));
+        let (mut child, artifact_path) =
+            spawn_net_server_backend(&dir, backend, &format!("ka_{}", backend));
+
+        // Wait for server to be ready and open a single TCP connection
+        let mut connected = false;
+        let mut stream = None;
+        for _ in 0..80 {
+            thread::sleep(Duration::from_millis(100));
+            match TcpStream::connect(format!("127.0.0.1:{}", port)) {
+                Ok(s) => {
+                    s.set_read_timeout(Some(Duration::from_secs(5))).ok();
+                    s.set_write_timeout(Some(Duration::from_secs(5))).ok();
+                    stream = Some(s);
+                    connected = true;
+                    break;
+                }
+                Err(_) => continue,
+            }
+        }
+        if !connected {
+            let _ = child.kill();
+            if let Some(p) = &artifact_path { let _ = fs::remove_file(p); }
+            cleanup_net_project(&dir);
+            panic!("{} backend: server did not become ready on port {}", backend, port);
+        }
+
+        let s = stream.as_mut().unwrap();
+
+        // Request 1
+        let req1 = b"GET /a HTTP/1.1\r\nHost: localhost\r\n\r\n";
+        std::io::Write::write_all(s, req1).expect("write req1");
+        let mut resp1 = vec![0u8; 4096];
+        let n1 = std::io::Read::read(s, &mut resp1).expect("read resp1");
+        let resp1_str = String::from_utf8_lossy(&resp1[..n1]);
+        assert!(
+            resp1_str.contains("200 OK"),
+            "{} backend: first keep-alive response should be 200 OK, got: {}",
+            backend, resp1_str
+        );
+
+        // Request 2 on same connection (keep-alive)
+        let req2 = b"GET /b HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+        std::io::Write::write_all(s, req2).expect("write req2");
+        let mut resp2 = Vec::new();
+        let mut buf = [0u8; 4096];
+        loop {
+            match std::io::Read::read(s, &mut buf) {
+                Ok(0) => break,
+                Ok(n) => resp2.extend_from_slice(&buf[..n]),
+                Err(ref e)
+                    if e.kind() == std::io::ErrorKind::WouldBlock
+                        || e.kind() == std::io::ErrorKind::TimedOut =>
+                {
+                    break;
+                }
+                Err(_) => break,
+            }
+        }
+        let resp2_str = String::from_utf8_lossy(&resp2);
+        assert!(
+            resp2_str.contains("200 OK"),
+            "{} backend: second keep-alive response should be 200 OK, got: {}",
+            backend, resp2_str
+        );
+
+        // Wait for server to exit (maxRequests=2)
+        let output = child.wait_with_output().expect("wait for server");
+        let stdout = normalize(&String::from_utf8_lossy(&output.stdout));
+        assert!(
+            stdout.contains("2"),
+            "{} backend: server should report 2 requests. Got: {}",
+            backend, stdout
+        );
+
+        if let Some(p) = &artifact_path { let _ = fs::remove_file(p); }
+        cleanup_net_project(&dir);
+    }
+}
+
+/// NET2-5e: Chunked body parity -- Interpreter vs Native.
+/// Sends a POST with Transfer-Encoding: chunked, verifies readBody returns correct bytes.
+#[test]
+fn test_net2_5e_chunked_body_interp_native_parity() {
+    for backend in &["interp", "native"] {
+        let port = find_free_loopback_port();
+        let source = format!(
+            r#">>> taida-lang/net => @(httpServe, readBody)
+
+handler req =
+  body <= readBody(req)
+  @(status <= 200, headers <= @[], body <= body)
+=> :@(status: Int, headers: @[@(name: Str, value: Str)], body: Bytes)
+
+asyncResult <= httpServe({port}, handler, 1)
+asyncResult ]=> result
+result ]=> r
+stdout(r.ok)
+"#
+        );
+
+        let dir = setup_net_project(&source, &format!("net5_chunked_{}", backend));
+        let (child, artifact_path) =
+            spawn_net_server_backend(&dir, backend, &format!("chunked_{}", backend));
+
+        // Chunked POST: "4\r\nWiki\r\n7\r\npedia i\r\n0\r\n\r\n" = "Wikipedia i"
+        let chunked_request = b"POST / HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n4\r\nWiki\r\n7\r\npedia i\r\n0\r\n\r\n";
+        let resp = send_http_request(port, chunked_request);
+        assert!(
+            resp.is_some(),
+            "{} backend: chunked request must get a response",
+            backend
+        );
+        let body = String::from_utf8_lossy(resp.as_ref().unwrap());
+        assert!(
+            body.contains("Wikipedia i"),
+            "{} backend: chunked readBody should return 'Wikipedia i', got: {}",
+            backend, body
+        );
+
+        let _ = child.wait_with_output();
+        if let Some(p) = &artifact_path { let _ = fs::remove_file(p); }
+        cleanup_net_project(&dir);
+    }
+}
+
+/// NET2-5e: Concurrent connections parity -- Interpreter vs Native.
+/// Connects 2 clients simultaneously, verifies both get responses.
+#[test]
+fn test_net2_5e_concurrent_connections_interp_native_parity() {
+    for backend in &["interp", "native"] {
+        let port = find_free_loopback_port();
+        let source = format!(
+            r#">>> taida-lang/net => @(httpServe)
+
+handler req =
+  @(status <= 200, headers <= @[], body <= "concurrent-ok")
+=> :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
+
+asyncResult <= httpServe({port}, handler, 3)
+asyncResult ]=> result
+result ]=> r
+stdout(r.ok)
+stdout(r.requests)
+"#
+        );
+
+        let dir = setup_net_project(&source, &format!("net5_conc_{}", backend));
+        let (mut child, artifact_path) =
+            spawn_net_server_backend(&dir, backend, &format!("conc_{}", backend));
+
+        // Readiness probe
+        let probe = send_http_request(
+            port,
+            b"GET /probe HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+        );
+        assert!(
+            probe.is_some(),
+            "{} backend: readiness probe must succeed",
+            backend
+        );
+
+        // Connect 2 clients simultaneously
+        let mut clients: Vec<TcpStream> = Vec::new();
+        for _ in 0..2 {
+            match TcpStream::connect(format!("127.0.0.1:{}", port)) {
+                Ok(s) => {
+                    s.set_read_timeout(Some(Duration::from_secs(5))).ok();
+                    s.set_write_timeout(Some(Duration::from_secs(5))).ok();
+                    clients.push(s);
+                }
+                Err(e) => {
+                    let _ = child.kill();
+                    if let Some(p) = &artifact_path { let _ = fs::remove_file(p); }
+                    cleanup_net_project(&dir);
+                    panic!("{} backend: concurrent connect failed: {}", backend, e);
+                }
+            }
+        }
+
+        // Send requests on both connections
+        for (i, s) in clients.iter_mut().enumerate() {
+            let req = format!(
+                "GET /{} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+                i
+            );
+            std::io::Write::write_all(s, req.as_bytes()).expect("write concurrent req");
+        }
+
+        // Read responses from both connections
+        for (i, s) in clients.iter_mut().enumerate() {
+            let mut resp = Vec::new();
+            let mut buf = [0u8; 4096];
+            loop {
+                match std::io::Read::read(s, &mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => resp.extend_from_slice(&buf[..n]),
+                    Err(ref e)
+                        if e.kind() == std::io::ErrorKind::WouldBlock
+                            || e.kind() == std::io::ErrorKind::TimedOut =>
+                    {
+                        break;
+                    }
+                    Err(_) => break,
+                }
+            }
+            let resp_str = String::from_utf8_lossy(&resp);
+            assert!(
+                resp_str.contains("concurrent-ok"),
+                "{} backend: client {} should get 'concurrent-ok', got: {}",
+                backend, i, resp_str
+            );
+        }
+
+        let output = child.wait_with_output().expect("wait for server");
+        let stdout = normalize(&String::from_utf8_lossy(&output.stdout));
+        assert!(
+            stdout.contains("3"),
+            "{} backend: concurrent server should report 3 requests (1 probe + 2). Got: {}",
+            backend, stdout
+        );
+
+        if let Some(p) = &artifact_path { let _ = fs::remove_file(p); }
+        cleanup_net_project(&dir);
+    }
+}
+
+/// NET2-5e: maxConnections parity -- Interpreter vs Native.
+/// Uses maxConnections=1, maxRequests=2. Sends 2 sequential requests on separate
+/// connections. Both must succeed (proving the single-slot pool recycles correctly).
+#[test]
+fn test_net2_5e_max_connections_interp_native_parity() {
+    for backend in &["interp", "native"] {
+        let port = find_free_loopback_port();
+        let source = format!(
+            r#">>> taida-lang/net => @(httpServe)
+
+handler req =
+  @(status <= 200, headers <= @[], body <= "slot-ok")
+=> :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
+
+asyncResult <= httpServe({port}, handler, 3, 5000, 1)
+asyncResult ]=> result
+result ]=> r
+stdout(r.ok)
+stdout(r.requests)
+"#
+        );
+
+        let dir = setup_net_project(&source, &format!("net5_maxconn_{}", backend));
+        let (child, artifact_path) =
+            spawn_net_server_backend(&dir, backend, &format!("maxconn_{}", backend));
+
+        // Readiness probe (request 1 of 3)
+        let probe = send_http_request(
+            port,
+            b"GET /probe HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+        );
+        assert!(
+            probe.is_some(),
+            "{} backend: readiness probe must succeed",
+            backend
+        );
+
+        // Brief wait for slot recycling
+        thread::sleep(Duration::from_millis(200));
+
+        // Client A: (request 2 of 3)
+        let resp_a = send_http_request(
+            port,
+            b"GET /a HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+        );
+        assert!(
+            resp_a.is_some(),
+            "{} backend: client A must get a response with maxConnections=1",
+            backend
+        );
+        let body_a = String::from_utf8_lossy(resp_a.as_ref().unwrap());
+        assert!(
+            body_a.contains("slot-ok"),
+            "{} backend: client A response should contain 'slot-ok', got: {}",
+            backend, body_a
+        );
+
+        thread::sleep(Duration::from_millis(200));
+
+        // Client B: after A closed, slot freed (request 3 of 3)
+        let resp_b = send_http_request(
+            port,
+            b"GET /b HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+        );
+        assert!(
+            resp_b.is_some(),
+            "{} backend: client B must get a response after slot freed (maxConnections=1)",
+            backend
+        );
+        let body_b = String::from_utf8_lossy(resp_b.as_ref().unwrap());
+        assert!(
+            body_b.contains("slot-ok"),
+            "{} backend: client B response should contain 'slot-ok', got: {}",
+            backend, body_b
+        );
+
+        let output = child.wait_with_output().expect("wait for server");
+        let stdout = normalize(&String::from_utf8_lossy(&output.stdout));
+        assert!(
+            stdout.contains("3"),
+            "{} backend: maxConnections=1 server should report 3 requests. Got: {}",
+            backend, stdout
+        );
+
+        if let Some(p) = &artifact_path { let _ = fs::remove_file(p); }
+        cleanup_net_project(&dir);
+    }
+}
+
+/// NET2-5e: keepAlive field parity -- verify keepAlive is correctly set in Native.
+/// Handler echoes keepAlive via Str[] mold. Sends Connection: close -> false.
+/// Note: Native renders Bool false as "0" due to known type tag loss on field access.
+/// Interpreter renders it as "false". Both are accepted.
+#[test]
+fn test_net2_5e_keep_alive_field_interp_native_parity() {
+    for backend in &["interp", "native"] {
+        let port = find_free_loopback_port();
+        let source = format!(
+            r#">>> taida-lang/net => @(httpServe)
+
+handler req =
+  kaStr <= Str[req.keepAlive]()
+  kaStr ]=> ka
+  @(status <= 200, headers <= @[], body <= ka)
+=> :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
+
+asyncResult <= httpServe({port}, handler, 1)
+asyncResult ]=> result
+result ]=> r
+stdout(r.ok)
+"#
+        );
+
+        let dir = setup_net_project(&source, &format!("net5_kafield_{}", backend));
+        let (child, artifact_path) =
+            spawn_net_server_backend(&dir, backend, &format!("kafield_{}", backend));
+
+        // Send request with Connection: close -> keepAlive should be false
+        let resp = send_http_request(
+            port,
+            b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+        );
+        assert!(
+            resp.is_some(),
+            "{} backend: keepAlive field request must get a response",
+            backend
+        );
+        let body = String::from_utf8_lossy(resp.as_ref().unwrap());
+        // "false" (interpreter) or "0" (native Bool display limitation)
+        assert!(
+            body.contains("false") || body.contains("\n0\n") || body.ends_with("\n0") || body.ends_with("\r\n0"),
+            "{} backend: keepAlive should be false/0 with Connection: close, got: {}",
+            backend, body
+        );
+
+        let _ = child.wait_with_output();
+        if let Some(p) = &artifact_path { let _ = fs::remove_file(p); }
+        cleanup_net_project(&dir);
+    }
+}
+
+/// NET2-5f: maxRequests=1 with 2 concurrent clients -- only 1 should get 200.
+/// The reservation pattern (TOCTOU fix) ensures the second client cannot overshoot.
+/// Interpreter vs Native parity.
+#[test]
+fn test_net2_5f_max_requests_no_overshoot_interp_native_parity() {
+    for backend in &["interp", "native"] {
+        let port = find_free_loopback_port();
+        // maxRequests=1, maxConnections=2: server should serve exactly 1 request then stop.
+        let source = format!(
+            r#">>> taida-lang/net => @(httpServe)
+
+handler req =
+  @(status <= 200, headers <= @[], body <= "single-ok")
+=> :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
+
+asyncResult <= httpServe({port}, handler, 1, 5000, 2)
+asyncResult ]=> result
+result ]=> r
+stdout(r.ok)
+stdout(r.requests)
+"#
+        );
+
+        let dir = setup_net_project(&source, &format!("net5_overshoot_{}", backend));
+        let (child, artifact_path) =
+            spawn_net_server_backend(&dir, backend, &format!("overshoot_{}", backend));
+
+        // Readiness probe counts as request 1 of 1 — server should stop after this.
+        let probe = send_http_request(
+            port,
+            b"GET /probe HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+        );
+        assert!(
+            probe.is_some(),
+            "{} backend: readiness probe must succeed",
+            backend
+        );
+        let probe_body = String::from_utf8_lossy(probe.as_ref().unwrap());
+        assert!(
+            probe_body.contains("single-ok"),
+            "{} backend: probe should get 'single-ok', got: {}",
+            backend, probe_body
+        );
+
+        // Brief sleep to let server process shutdown after maxRequests hit.
+        thread::sleep(Duration::from_millis(500));
+
+        // Second client: server should be shutting down, connection should fail or get no HTTP response.
+        let second = TcpStream::connect(format!("127.0.0.1:{}", port));
+        let got_http_200 = match second {
+            Ok(mut s) => {
+                s.set_read_timeout(Some(Duration::from_secs(2))).ok();
+                s.set_write_timeout(Some(Duration::from_secs(2))).ok();
+                let req = b"GET /second HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+                let wrote = std::io::Write::write_all(&mut s, req);
+                if wrote.is_err() {
+                    false
+                } else {
+                    let mut resp = Vec::new();
+                    let mut buf = [0u8; 4096];
+                    loop {
+                        match std::io::Read::read(&mut s, &mut buf) {
+                            Ok(0) => break,
+                            Ok(n) => resp.extend_from_slice(&buf[..n]),
+                            Err(_) => break,
+                        }
+                    }
+                    let resp_str = String::from_utf8_lossy(&resp);
+                    resp_str.contains("200 OK") && resp_str.contains("single-ok")
+                }
+            }
+            Err(_) => false, // connection refused = correct
+        };
+        assert!(
+            !got_http_200,
+            "{} backend: second client must NOT get 200 OK when maxRequests=1 (overshoot)",
+            backend
+        );
+
+        let output = child.wait_with_output().expect("wait for server");
+        let stdout = normalize(&String::from_utf8_lossy(&output.stdout));
+        // Server should report exactly 1 request
+        assert!(
+            stdout.contains("1"),
+            "{} backend: server should report 1 request. Got: {}",
+            backend, stdout
+        );
+
+        if let Some(p) = &artifact_path { let _ = fs::remove_file(p); }
+        cleanup_net_project(&dir);
+    }
+}
+
+/// NET2-5f: partial head timeout returns 400 Bad Request.
+/// Sends an incomplete HTTP head and waits for the timeout to fire.
+/// Interpreter vs Native parity.
+#[test]
+fn test_net2_5f_partial_timeout_400_interp_native_parity() {
+    for backend in &["interp", "native"] {
+        let port = find_free_loopback_port();
+        // timeoutMs=500: partial data should trigger 400 after 500ms.
+        // maxRequests=2: 1 for readiness probe, 1 for the partial timeout test.
+        let source = format!(
+            r#">>> taida-lang/net => @(httpServe)
+
+handler req =
+  @(status <= 200, headers <= @[], body <= "timeout-ok")
+=> :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
+
+asyncResult <= httpServe({port}, handler, 2, 500)
+asyncResult ]=> result
+result ]=> r
+stdout(r.ok)
+stdout(r.requests)
+"#
+        );
+
+        let dir = setup_net_project(&source, &format!("net5_timeout_{}", backend));
+        let (child, artifact_path) =
+            spawn_net_server_backend(&dir, backend, &format!("timeout_{}", backend));
+
+        // Readiness probe (request 1 of 2)
+        let probe = send_http_request(
+            port,
+            b"GET /probe HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+        );
+        assert!(
+            probe.is_some(),
+            "{} backend: readiness probe must succeed",
+            backend
+        );
+
+        // Brief sleep for connection cleanup
+        thread::sleep(Duration::from_millis(200));
+
+        // Send partial head (no \r\n\r\n termination) -- this should timeout and get 400.
+        let partial_result = match TcpStream::connect(format!("127.0.0.1:{}", port)) {
+            Ok(mut s) => {
+                s.set_read_timeout(Some(Duration::from_secs(5))).ok();
+                s.set_write_timeout(Some(Duration::from_secs(5))).ok();
+                // Send incomplete HTTP head -- no \r\n\r\n
+                let partial = b"GET /partial HTTP/1.1\r\nHost: localhost\r\n";
+                let _ = std::io::Write::write_all(&mut s, partial);
+                // Wait for server timeout (500ms) + margin
+                thread::sleep(Duration::from_millis(1200));
+                // Read whatever the server sent back
+                let mut resp = Vec::new();
+                let mut buf = [0u8; 4096];
+                loop {
+                    match std::io::Read::read(&mut s, &mut buf) {
+                        Ok(0) => break,
+                        Ok(n) => resp.extend_from_slice(&buf[..n]),
+                        Err(ref e)
+                            if e.kind() == std::io::ErrorKind::WouldBlock
+                                || e.kind() == std::io::ErrorKind::TimedOut =>
+                        {
+                            break;
+                        }
+                        Err(_) => break,
+                    }
+                }
+                String::from_utf8_lossy(&resp).to_string()
+            }
+            Err(e) => {
+                // If we can't even connect, that's also acceptable (server may have shut down)
+                format!("connect_failed: {}", e)
+            }
+        };
+
+        // The response should contain 400 Bad Request
+        assert!(
+            partial_result.contains("400 Bad Request"),
+            "{} backend: partial head timeout should return 400 Bad Request, got: {}",
+            backend, partial_result
+        );
+
+        let output = child.wait_with_output().expect("wait for server");
+        let stdout = normalize(&String::from_utf8_lossy(&output.stdout));
+        // Server should report 2 requests (1 probe + 1 partial timeout)
+        assert!(
+            stdout.contains("2"),
+            "{} backend: server should report 2 requests (probe + partial timeout). Got: {}",
+            backend, stdout
+        );
+
+        if let Some(p) = &artifact_path { let _ = fs::remove_file(p); }
+        cleanup_net_project(&dir);
+    }
+}
+
+/// NET2-5f: idle connection does NOT consume maxRequests budget.
+/// Opens a TCP connection, sends nothing, closes it. Then sends a real request.
+/// With maxRequests=1, the real request must succeed (idle didn't eat the budget).
+/// Interpreter vs Native parity.
+#[test]
+fn test_net2_5f_idle_connection_does_not_consume_max_requests() {
+    for backend in &["interp", "native"] {
+        let port = find_free_loopback_port();
+        // maxRequests=1, maxConnections=2, timeout=2000ms
+        // The idle connection should NOT consume the single request slot.
+        let source = format!(
+            r#">>> taida-lang/net => @(httpServe)
+
+handler req =
+  @(status <= 200, headers <= @[], body <= "idle-ok")
+=> :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
+
+asyncResult <= httpServe({port}, handler, 1, 2000, 2)
+asyncResult ]=> result
+result ]=> r
+stdout(r.ok)
+stdout(r.requests)
+"#
+        );
+
+        let dir = setup_net_project(&source, &format!("net5_idle_budget_{}", backend));
+        let (child, artifact_path) =
+            spawn_net_server_backend(&dir, backend, &format!("idle_budget_{}", backend));
+
+        // Wait for server to be ready by polling
+        let mut server_ready = false;
+        for _ in 0..80 {
+            thread::sleep(Duration::from_millis(100));
+            if TcpStream::connect(format!("127.0.0.1:{}", port)).is_ok() {
+                server_ready = true;
+                break;
+            }
+        }
+        assert!(server_ready, "{} backend: server did not start", backend);
+
+        // Step 1: Open an idle TCP connection, send nothing, then close.
+        {
+            let idle_conn = TcpStream::connect(format!("127.0.0.1:{}", port));
+            assert!(idle_conn.is_ok(), "{} backend: idle connection should succeed", backend);
+            // Hold briefly then drop (clean close with no data)
+            thread::sleep(Duration::from_millis(300));
+            drop(idle_conn);
+        }
+
+        // Brief sleep to let server process the idle close
+        thread::sleep(Duration::from_millis(500));
+
+        // Step 2: Send a real HTTP request — this MUST succeed (budget was not consumed).
+        let real_resp = send_http_request(
+            port,
+            b"GET /real HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+        );
+        assert!(
+            real_resp.is_some(),
+            "{} backend: real request after idle close must succeed (idle must not consume maxRequests budget)",
+            backend
+        );
+        let body = String::from_utf8_lossy(real_resp.as_ref().unwrap());
+        assert!(
+            body.contains("idle-ok"),
+            "{} backend: real request should get 'idle-ok', got: {}",
+            backend, body
+        );
+
+        // Wait for server to shut down (maxRequests=1 reached)
+        let output = child.wait_with_output().expect("wait for server");
+        let stdout = normalize(&String::from_utf8_lossy(&output.stdout));
+        // Server should report exactly 1 request (the real one, not the idle).
+        // Native prints bool as "1" (not "true"), so just check requests count.
+        // stdout lines: ok (true/1), requests (1)
+        let lines: Vec<&str> = stdout.lines().collect();
+        assert!(
+            lines.len() >= 2 && lines[1].trim() == "1",
+            "{} backend: server should report requests=1, got stdout: {}",
+            backend, stdout
+        );
+
+        if let Some(p) = &artifact_path { let _ = fs::remove_file(p); }
+        cleanup_net_project(&dir);
+    }
+}
+
+/// NET2-5f: Concurrent race test for maxRequests TOCTOU fix.
+/// maxRequests=1, maxConnections=2: two clients connect and send request heads
+/// simultaneously. Exactly one must get 200 OK; the other must NOT get 200 OK
+/// (either 503 Service Unavailable or connection refused/reset).
+/// No readiness probe — both clients race for the single request slot.
+#[test]
+fn test_net2_5f_max_requests_concurrent_race() {
+    // Native only — the TOCTOU race is specific to the pthread pool in native_runtime.c.
+    // The interpreter is single-threaded and cannot exhibit this race.
+    let port = find_free_loopback_port();
+    let source = format!(
+        r#">>> taida-lang/net => @(httpServe)
+
+handler req =
+  @(status <= 200, headers <= @[], body <= "race-ok")
+=> :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
+
+asyncResult <= httpServe({port}, handler, 1, 5000, 2)
+asyncResult ]=> result
+result ]=> r
+stdout(r.ok)
+stdout(r.requests)
+"#
+    );
+
+    let dir = setup_net_project(&source, "net5_race_native");
+    let (child, artifact_path) =
+        spawn_net_server_backend(&dir, "native", "race_native");
+
+    // Wait for server to accept TCP connections (poll without sending HTTP data).
+    let mut server_ready = false;
+    for _ in 0..80 {
+        thread::sleep(Duration::from_millis(100));
+        if let Ok(s) = TcpStream::connect(format!("127.0.0.1:{}", port)) {
+            // Immediately close — idle connection, no data sent, no budget consumed.
+            drop(s);
+            server_ready = true;
+            break;
+        }
+    }
+    assert!(server_ready, "native backend: server did not start");
+
+    // Brief sleep to let the server process the idle close.
+    thread::sleep(Duration::from_millis(300));
+
+    // Open two TCP connections simultaneously, then send request heads in parallel.
+    let conn1 = TcpStream::connect(format!("127.0.0.1:{}", port));
+    let conn2 = TcpStream::connect(format!("127.0.0.1:{}", port));
+
+    let req = b"GET /race HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+
+    // Helper: send request and read response on a stream.
+    fn race_send(mut stream: TcpStream, req: &[u8]) -> String {
+        stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
+        stream.set_write_timeout(Some(Duration::from_secs(5))).ok();
+        if std::io::Write::write_all(&mut stream, req).is_err() {
+            return String::new();
+        }
+        let mut resp = Vec::new();
+        let mut buf = [0u8; 4096];
+        loop {
+            match std::io::Read::read(&mut stream, &mut buf) {
+                Ok(0) => break,
+                Ok(n) => resp.extend_from_slice(&buf[..n]),
+                Err(_) => break,
+            }
+        }
+        String::from_utf8_lossy(&resp).to_string()
+    }
+
+    // Send both requests in parallel using threads.
+    let h1 = if let Ok(s) = conn1 {
+        let req_copy = req.to_vec();
+        Some(thread::spawn(move || race_send(s, &req_copy)))
+    } else {
+        None
+    };
+    let h2 = if let Ok(s) = conn2 {
+        let req_copy = req.to_vec();
+        Some(thread::spawn(move || race_send(s, &req_copy)))
+    } else {
+        None
+    };
+
+    let resp1 = h1.map(|h| h.join().unwrap_or_default()).unwrap_or_default();
+    let resp2 = h2.map(|h| h.join().unwrap_or_default()).unwrap_or_default();
+
+    let got_200_1 = resp1.contains("200 OK") && resp1.contains("race-ok");
+    let got_200_2 = resp2.contains("200 OK") && resp2.contains("race-ok");
+    let count_200 = (got_200_1 as i32) + (got_200_2 as i32);
+
+    assert_eq!(
+        count_200, 1,
+        "native backend: exactly 1 of 2 concurrent clients should get 200 OK (TOCTOU race guard). \
+         resp1 200={}, resp2 200={}. resp1: [{}] resp2: [{}]",
+        got_200_1, got_200_2, resp1, resp2
+    );
+
+    // The other response should be 503 or empty (connection refused/reset).
+    let other_resp = if got_200_1 { &resp2 } else { &resp1 };
+    assert!(
+        other_resp.is_empty() || other_resp.contains("503") || other_resp.contains("Service Unavailable"),
+        "native backend: rejected client should get 503 or connection error, got: [{}]",
+        other_resp
+    );
+
+    // Wait for server to shut down.
+    let output = child.wait_with_output().expect("wait for server");
+    let stdout = normalize(&String::from_utf8_lossy(&output.stdout));
+    // Server should report exactly 1 request.
+    assert!(
+        stdout.contains("1"),
+        "native backend: server should report 1 request. Got: {}",
+        stdout
+    );
+
+    if let Some(p) = &artifact_path { let _ = fs::remove_file(p); }
+    cleanup_net_project(&dir);
 }

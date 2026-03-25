@@ -1567,9 +1567,9 @@ fn runtime_abi(name: &str) -> Result<RuntimeAbi, String> {
             params: &[Ptr],
             returns: &[Ptr],
         },
-        // NB-31: taida_net_http_serve(port, handler, max_requests, timeout_ms, handler_type_tag) -> Ptr
+        // NET2-5d: taida_net_http_serve(port, handler, max_requests, timeout_ms, max_connections, handler_type_tag) -> Ptr
         "taida_net_http_serve" => RuntimeAbi {
-            params: &[Val, Ptr, Val, Val, Val],
+            params: &[Val, Ptr, Val, Val, Val, Val],
             returns: &[Ptr],
         },
         // NET2-0f: taida_net_read_body(req: Ptr) -> Ptr (Bytes)

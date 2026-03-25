@@ -1212,20 +1212,19 @@ impl Interpreter {
 
                 // Check idle timeout — applies to all connections.
                 // For first-request connections (conn_requests == 0):
-                //   - No data at all: send 400 (v1 compat), count as request.
+                //   - No data at all: clean close, no request budget consumed.
                 //   - Partial data: send 400 (malformed), count as request.
                 // For keep-alive connections (conn_requests > 0):
                 //   - No partial data (true idle): clean close, no 400.
                 //   - Partial data present: send 400 (malformed), count as request.
-                //     This restores the v1/v2-Phase1 timeout contract: any partial
-                //     request that times out is a 400, regardless of keep-alive state.
                 if conn.last_activity.elapsed() > read_timeout {
-                    if conn.conn_requests == 0 || conn.total_read > 0 {
-                        // Partial data or first-request timeout: bad request
+                    if conn.total_read > 0 {
+                        // Partial data present: bad request, counts toward budget
                         let bad_request = b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
                         let _ = std::io::Write::write_all(&mut conn.stream, bad_request);
                         request_count += 1;
                     }
+                    // else: no data at all — clean close, no request budget consumed
                     // After 400 or clean idle close: remove connection.
                     close_idx = Some(idx);
                     break;
@@ -1269,12 +1268,13 @@ impl Interpreter {
                         break; // processed one request, loop back to accept + poll
                     }
                     ConnReadResult::Eof => {
-                        if conn.conn_requests == 0 {
-                            // First request EOF: bad request (v1 compat)
+                        if conn.total_read > 0 {
+                            // Partial data received then EOF: bad request
                             let bad_request = b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
                             let _ = std::io::Write::write_all(&mut conn.stream, bad_request);
                             request_count += 1;
                         }
+                        // else: clean close with no data — no request budget consumed
                         close_idx = Some(idx);
                         break;
                     }
@@ -3421,7 +3421,7 @@ mod tests {
     /// EOF during head: client connects then immediately closes without sending any data.
     /// Server must count it as a request and not hang.
     #[test]
-    fn test_http_serve_eof_during_head_counts_request() {
+    fn test_http_serve_eof_during_head_does_not_count_request() {
         use std::sync::atomic::{AtomicU16, Ordering};
         static PORT_COUNTER: AtomicU16 = AtomicU16::new(18800);
         let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
@@ -3434,7 +3434,7 @@ mod tests {
                 .define_force("httpServe", Value::Str("__net_builtin_httpServe".into()));
             let args = vec![
                 Expr::IntLit(server_port as i64, dummy_span()),
-                make_handler_expr("should-not-reach"),
+                make_handler_expr("idle-ok"),
                 Expr::IntLit(1, dummy_span()), // maxRequests=1
                 Expr::IntLit(3000, dummy_span()),
             ];
@@ -3443,17 +3443,42 @@ mod tests {
 
         std::thread::sleep(std::time::Duration::from_millis(100));
 
-        // Connect and immediately close (EOF before any HTTP data)
+        // Connect and immediately close (EOF before any HTTP data).
+        // This idle connection should NOT consume the request budget.
         let client = std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
         drop(client); // close immediately
 
-        // Server should terminate because maxRequests=1 is reached
+        std::thread::sleep(std::time::Duration::from_millis(200));
+
+        // Now send a real request — this should succeed and consume the budget.
+        let mut real = std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
+        let _ = real.set_read_timeout(Some(std::time::Duration::from_secs(3)));
+        let req = b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+        let _ = std::io::Write::write_all(&mut real, req);
+        let mut resp = Vec::new();
+        let mut buf = [0u8; 4096];
+        loop {
+            match std::io::Read::read(&mut real, &mut buf) {
+                Ok(0) => break,
+                Ok(n) => resp.extend_from_slice(&buf[..n]),
+                Err(_) => break,
+            }
+        }
+        let resp_str = String::from_utf8_lossy(&resp);
+        assert!(
+            resp_str.contains("200 OK"),
+            "real request after idle close should get 200, got: {}",
+            resp_str
+        );
+
+        // Server should terminate because maxRequests=1 is now reached.
         let result = server_handle.join().unwrap();
         match result {
             Signal::Value(Value::Async(a)) => {
                 assert_eq!(a.status, AsyncStatus::Fulfilled);
                 let inner = extract_result_value(&a.value).unwrap();
                 assert_eq!(get_field_bool(inner, "ok"), Some(true));
+                // Only the real request counted, not the idle close.
                 assert_eq!(get_field_int(inner, "requests"), Some(1));
             }
             _ => panic!("expected fulfilled Async"),
@@ -3696,8 +3721,10 @@ mod tests {
         }
     }
 
-    /// NB-28: Verify that timeoutMs actually causes the server to timeout
-    /// a slow client (connects but sends no data).
+    /// NB-28: Verify that timeoutMs causes the server to close an idle connection
+    /// (connects but sends no data). With the "idle = no budget" rule, this idle
+    /// connection should be cleanly closed without a 400 and without consuming
+    /// the request budget.
     #[test]
     fn test_nb28_timeout_closes_connection() {
         use std::sync::atomic::{AtomicU16, Ordering};
@@ -3712,7 +3739,7 @@ mod tests {
                 .define_force("httpServe", Value::Str("__net_builtin_httpServe".into()));
             let args = vec![
                 Expr::IntLit(server_port as i64, dummy_span()),
-                make_handler_expr("should-not-reach"),
+                make_handler_expr("timeout-ok"),
                 Expr::IntLit(1, dummy_span()),   // maxRequests=1
                 Expr::IntLit(500, dummy_span()), // timeoutMs=500 (short timeout)
             ];
@@ -3728,7 +3755,7 @@ mod tests {
         // Set a generous read timeout on the client side so we don't hang forever
         let _ = client.set_read_timeout(Some(std::time::Duration::from_secs(5)));
 
-        // Wait for the server to respond (it should timeout and send 400)
+        // Wait for the server to close the connection (clean close, no 400)
         let mut response = Vec::new();
         loop {
             let mut buf = [0u8; 4096];
@@ -3746,12 +3773,11 @@ mod tests {
         }
         let elapsed = start.elapsed();
 
-        // Verify: server sent a 400 Bad Request (timeout → Incomplete → 400)
-        let resp = String::from_utf8_lossy(&response);
+        // Verify: idle connection with no data gets clean close (no 400)
         assert!(
-            resp.contains("400 Bad Request"),
-            "NB-28: timeout should produce 400, got: {}",
-            resp
+            response.is_empty(),
+            "NB-28: idle connection (no data) should get clean close, got: {}",
+            String::from_utf8_lossy(&response)
         );
 
         // Verify: elapsed time should be at least ~400ms (timeout was 500ms)
@@ -3767,13 +3793,36 @@ mod tests {
             elapsed.as_millis()
         );
 
-        // Verify: server terminates successfully (maxRequests=1 reached)
+        // Idle close did not consume budget. Send a real request to terminate the server.
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        let mut real = std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
+        let _ = real.set_read_timeout(Some(std::time::Duration::from_secs(3)));
+        let req = b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+        let _ = std::io::Write::write_all(&mut real, req);
+        let mut resp2 = Vec::new();
+        let mut buf2 = [0u8; 4096];
+        loop {
+            match std::io::Read::read(&mut real, &mut buf2) {
+                Ok(0) => break,
+                Ok(n) => resp2.extend_from_slice(&buf2[..n]),
+                Err(_) => break,
+            }
+        }
+        let real_resp = String::from_utf8_lossy(&resp2);
+        assert!(
+            real_resp.contains("200 OK"),
+            "NB-28: real request after idle timeout should get 200, got: {}",
+            real_resp
+        );
+
+        // Verify: server terminates successfully (maxRequests=1 reached by real request)
         let result = server_handle.join().unwrap();
         match result {
             Signal::Value(Value::Async(a)) => {
                 assert_eq!(a.status, AsyncStatus::Fulfilled);
                 let inner = extract_result_value(&a.value).unwrap();
                 assert_eq!(get_field_bool(inner, "ok"), Some(true));
+                // Only the real request counted, not the idle timeout.
                 assert_eq!(get_field_int(inner, "requests"), Some(1));
             }
             _ => panic!("expected fulfilled Async"),
