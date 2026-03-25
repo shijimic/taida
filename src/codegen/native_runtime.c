@@ -150,8 +150,28 @@ typedef intptr_t  taida_fn_ptr;  // 関数ポインタ
 
 #define TAIDA_GET_RC(ptr)      (((taida_val*)ptr)[0] & TAIDA_RC_MASK)
 #define TAIDA_SET_RC(ptr, rc)  (((taida_val*)ptr)[0] = (((taida_val*)ptr)[0] & TAIDA_MAGIC_MASK) | ((rc) & TAIDA_RC_MASK))
-#define TAIDA_INC_RC(ptr)      do { taida_val _rc = TAIDA_GET_RC(ptr); if (_rc < 255) TAIDA_SET_RC(ptr, _rc + 1); } while (0)
-#define TAIDA_DEC_RC(ptr)      do { taida_val _rc = TAIDA_GET_RC(ptr); if (_rc > 0) TAIDA_SET_RC(ptr, _rc - 1); } while (0)
+// NB2-7: Thread-safe RC increment/decrement using CAS loop.
+// Prevents data races when multiple worker threads retain/release objects concurrently.
+#define TAIDA_INC_RC(ptr) do { \
+    volatile taida_val *_hdr = (volatile taida_val*)(ptr); \
+    taida_val _old, _new; \
+    do { \
+        _old = __atomic_load_n(_hdr, __ATOMIC_RELAXED); \
+        taida_val _rc = _old & TAIDA_RC_MASK; \
+        if (_rc >= 255) break; \
+        _new = (_old & TAIDA_MAGIC_MASK) | ((_rc + 1) & TAIDA_RC_MASK); \
+    } while (!__atomic_compare_exchange_n(_hdr, &_old, _new, 0, __ATOMIC_ACQ_REL, __ATOMIC_RELAXED)); \
+} while (0)
+#define TAIDA_DEC_RC(ptr) do { \
+    volatile taida_val *_hdr = (volatile taida_val*)(ptr); \
+    taida_val _old, _new; \
+    do { \
+        _old = __atomic_load_n(_hdr, __ATOMIC_RELAXED); \
+        taida_val _rc = _old & TAIDA_RC_MASK; \
+        if (_rc == 0) break; \
+        _new = (_old & TAIDA_MAGIC_MASK) | ((_rc - 1) & TAIDA_RC_MASK); \
+    } while (!__atomic_compare_exchange_n(_hdr, &_old, _new, 0, __ATOMIC_ACQ_REL, __ATOMIC_RELAXED)); \
+} while (0)
 
 extern taida_val _taida_main(void);
 static int taida_cli_argc = 0;
@@ -389,8 +409,10 @@ taida_val taida_get_call_arg_tag(taida_val index);
 #define TAG_STACK_DEPTH 64
 #define TAG_FRAME_SIZE 256
 
-static int64_t __taida_tag_stack[TAG_STACK_DEPTH][TAG_FRAME_SIZE];
-static int __taida_tag_stack_top = 0;
+// NB2-7: Thread-local tag stack prevents concurrent worker threads from corrupting
+// each other's call-site type tag frames during handler invocation.
+static __thread int64_t __taida_tag_stack[TAG_STACK_DEPTH][TAG_FRAME_SIZE];
+static __thread int __taida_tag_stack_top = 0;
 
 void taida_push_call_tags(void) {
     if (__taida_tag_stack_top < TAG_STACK_DEPTH) {
@@ -422,7 +444,9 @@ taida_val taida_get_call_arg_tag(taida_val index) {
 // NB-14: Return type tag propagation.
 // Allows type info to survive through generic function returns (e.g. `id x = x`).
 // Callee sets before return, caller reads after CallUser.
-static int64_t __taida_return_tag = TAIDA_TAG_UNKNOWN;
+// NB2-7: Thread-local return tag prevents worker thread A's return value
+// from being overwritten by worker thread B's concurrent handler call.
+static __thread int64_t __taida_return_tag = TAIDA_TAG_UNKNOWN;
 
 taida_val taida_set_return_tag(taida_val tag) {
     __taida_return_tag = tag;
@@ -4345,13 +4369,17 @@ taida_val taida_error_get_value(taida_val depth) {
 
 // RCB-101: Inheritance parent registry for error type filtering in |==
 // Dynamic array — grows as needed to handle projects with many type hierarchies.
+// NB2-7: Protected by mutex — realloc during registration could cause dangling
+// pointers if a worker thread reads while the main thread grows the arrays.
 static taida_val *__taida_type_parent_child = NULL;
 static taida_val *__taida_type_parent_parent = NULL;
 static int __taida_type_parent_count = 0;
 static int __taida_type_parent_cap = 0;
+static pthread_mutex_t __taida_type_parent_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 // Register an inheritance parent: child IS-A parent
 void taida_register_type_parent(taida_val child_str, taida_val parent_str) {
+    pthread_mutex_lock(&__taida_type_parent_mutex);
     if (__taida_type_parent_count >= __taida_type_parent_cap) {
         int new_cap = __taida_type_parent_cap == 0 ? 64 : __taida_type_parent_cap * 2;
         // Allocate both new arrays first, then copy + swap atomically.
@@ -4362,6 +4390,7 @@ void taida_register_type_parent(taida_val child_str, taida_val parent_str) {
             free(new_child);
             free(new_parent);
             fprintf(stderr, "Warning: type parent registry allocation failed\n");
+            pthread_mutex_unlock(&__taida_type_parent_mutex);
             return;
         }
         if (__taida_type_parent_count > 0) {
@@ -4377,17 +4406,23 @@ void taida_register_type_parent(taida_val child_str, taida_val parent_str) {
     __taida_type_parent_child[__taida_type_parent_count] = child_str;
     __taida_type_parent_parent[__taida_type_parent_count] = parent_str;
     __taida_type_parent_count++;
+    pthread_mutex_unlock(&__taida_type_parent_mutex);
 }
 
 // Find the parent type string for a given child type string.
 // Returns 0 if not found.
+// NB2-7: Protected by mutex for safe concurrent reads during handler execution.
 static taida_val taida_find_parent_type(taida_val child_str) {
+    pthread_mutex_lock(&__taida_type_parent_mutex);
+    taida_val result = 0;
     for (int i = 0; i < __taida_type_parent_count; i++) {
         if (taida_str_eq(__taida_type_parent_child[i], child_str)) {
-            return __taida_type_parent_parent[i];
+            result = __taida_type_parent_parent[i];
+            break;
         }
     }
-    return 0;
+    pthread_mutex_unlock(&__taida_type_parent_mutex);
+    return result;
 }
 
 // Check if thrown_type IS-A handler_type by walking the inheritance chain.
@@ -9805,6 +9840,9 @@ static int64_t taida_net_chunked_body_complete(
         if (hs >= he) return -2; // empty chunk-size = malformed
 
         // Parse hex
+        // NB2-5: Reject chunk-size with more than 15 hex digits (max safe: 0xFFFFFFFFFFFFFFF)
+        // to prevent size_t overflow that silently wraps to 0 and accepts malformed input.
+        if (he - hs > 15) return -2; // oversized chunk-size = malformed
         size_t chunk_size = 0;
         for (size_t i = hs; i < he; i++) {
             unsigned char c = buf[body_offset + rp + i];
@@ -9862,6 +9900,8 @@ static int taida_net_chunked_in_place_compact(
         while (he > hs && (buf[body_offset + rp + he - 1] == ' ' || buf[body_offset + rp + he - 1] == '\t')) he--;
         if (hs >= he) return -1;
 
+        // NB2-5: Reject oversized chunk-size to prevent overflow (parity with body_complete)
+        if (he - hs > 15) return -1;
         size_t chunk_size = 0;
         for (size_t i = hs; i < he; i++) {
             unsigned char c = buf[body_offset + rp + i];
@@ -10005,6 +10045,10 @@ static taida_val taida_net_build_request_pack(
 }
 
 // ── NET2-5: httpServe helper — send encoded response ─────────────
+// NB2-20: Send directly from Bytes internal array — no extra malloc + byte-by-byte copy.
+// Bytes layout: [header(magic+rc), length, byte0, byte1, ...] — each byte is a taida_val.
+// We still need a contiguous buffer because taida_val slots are 8 bytes each (not 1 byte).
+// Optimization: use stack buffer for small responses, heap only for large ones.
 static void taida_net_send_response(int client_fd, taida_val encoded) {
     taida_val enc_throw = taida_pack_get(encoded, taida_str_hash((taida_val)"throw"));
     if (enc_throw == 0) {
@@ -10014,10 +10058,19 @@ static void taida_net_send_response(int client_fd, taida_val encoded) {
             if (TAIDA_IS_BYTES(wire_bytes)) {
                 taida_val *wb = (taida_val*)wire_bytes;
                 taida_val wb_len = wb[1];
-                unsigned char *wb_buf = (unsigned char*)TAIDA_MALLOC((size_t)wb_len, "net_serve_send");
+                // Use stack buffer for typical responses (< 4KB), heap for larger
+                unsigned char stack_buf[4096];
+                unsigned char *wb_buf;
+                int heap_alloc = 0;
+                if ((size_t)wb_len <= sizeof(stack_buf)) {
+                    wb_buf = stack_buf;
+                } else {
+                    wb_buf = (unsigned char*)TAIDA_MALLOC((size_t)wb_len, "net_serve_send");
+                    heap_alloc = 1;
+                }
                 for (taida_val i = 0; i < wb_len; i++) wb_buf[i] = (unsigned char)wb[2 + i];
                 taida_net_send_all(client_fd, wb_buf, (size_t)wb_len);
-                free(wb_buf);
+                if (heap_alloc) free(wb_buf);
             }
         }
     } else {
@@ -10159,11 +10212,15 @@ static void *net_worker_thread(void *arg) {
         for (;;) {
 
             // Phase 1: Read until HTTP head is complete
+            // NB2-19: Parse once, reuse result for keepAlive + request pack building.
+            // NB2-9: Properly release parse_result / parse_bytes to prevent memory leak.
             int head_complete = 0;
             size_t head_consumed = 0;
             int64_t content_length = 0;
             int is_chunked = 0;
             int head_malformed = 0;
+            taida_val parse_result = 0;  // retained across head+body for single-parse reuse
+            taida_val parse_inner = 0;   // inner pack from parse_result
 
             while (total_read < NET_MAX_REQUEST_BUF) {
                 // Try to parse what we have so far
@@ -10178,20 +10235,21 @@ static void *net_worker_thread(void *arg) {
                     }
                     if (found_end) {
                         head_complete = 1;
-                        // Parse to get content_length and chunked flag
                         taida_val parse_bytes = taida_bytes_from_raw(buf, (taida_val)total_read);
-                        taida_val parse_result = taida_net_http_parse_request_head(parse_bytes);
+                        parse_result = taida_net_http_parse_request_head(parse_bytes);
                         taida_val throw_val = taida_pack_get(parse_result, taida_str_hash((taida_val)"throw"));
                         if (throw_val != 0) {
                             head_malformed = 1;
                             taida_release(parse_bytes);
+                            taida_release(parse_result);
+                            parse_result = 0;
                             break;
                         }
-                        taida_val pinner = taida_pack_get(parse_result, taida_str_hash((taida_val)"__value"));
-                        if (pinner != 0 && taida_is_buchi_pack(pinner)) {
-                            content_length = taida_pack_get(pinner, taida_str_hash((taida_val)"contentLength"));
-                            head_consumed = (size_t)taida_pack_get(pinner, taida_str_hash((taida_val)"consumed"));
-                            taida_val chunked_val = taida_pack_get(pinner, taida_str_hash((taida_val)"chunked"));
+                        parse_inner = taida_pack_get(parse_result, taida_str_hash((taida_val)"__value"));
+                        if (parse_inner != 0 && taida_is_buchi_pack(parse_inner)) {
+                            content_length = taida_pack_get(parse_inner, taida_str_hash((taida_val)"contentLength"));
+                            head_consumed = (size_t)taida_pack_get(parse_inner, taida_str_hash((taida_val)"consumed"));
+                            taida_val chunked_val = taida_pack_get(parse_inner, taida_str_hash((taida_val)"chunked"));
                             is_chunked = (chunked_val != 0) ? 1 : 0;
                         }
                         taida_release(parse_bytes);
@@ -10212,14 +10270,12 @@ static void *net_worker_thread(void *arg) {
                     if (total_read > 0) {
                         const char *bad = "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
                         taida_net_send_all(client_fd, bad, strlen(bad));
-                        // Partial data = real request attempt; atomic check+increment
                         pthread_mutex_lock(&pool->mutex);
                         if (!net_pool_requests_exhausted(pool)) {
                             pool->request_count++;
                         }
                         pthread_mutex_unlock(&pool->mutex);
                     }
-                    // else: clean close on idle connection — no request budget consumed
                     goto conn_done;
                 }
                 total_read += (size_t)n;
@@ -10228,7 +10284,6 @@ static void *net_worker_thread(void *arg) {
             if (!head_complete || head_malformed) {
                 const char *bad = "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
                 taida_net_send_all(client_fd, bad, strlen(bad));
-                // Head was received (even if malformed) — atomic check+increment
                 pthread_mutex_lock(&pool->mutex);
                 if (!net_pool_requests_exhausted(pool)) {
                     pool->request_count++;
@@ -10238,13 +10293,12 @@ static void *net_worker_thread(void *arg) {
             }
 
             // Head is complete — this counts as a real request.
-            // Atomic check+increment: if limit already hit, reject with 503.
-            // No code between check and increment — TOCTOU race is impossible.
             pthread_mutex_lock(&pool->mutex);
             if (net_pool_requests_exhausted(pool)) {
                 pthread_mutex_unlock(&pool->mutex);
                 const char *unavail = "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
                 taida_net_send_all(client_fd, unavail, strlen(unavail));
+                if (parse_result) taida_release(parse_result);
                 goto conn_done;
             }
             pool->request_count++;
@@ -10260,19 +10314,17 @@ static void *net_worker_thread(void *arg) {
                 // NET2-5b: Read chunked body until complete
                 for (;;) {
                     int64_t check = taida_net_chunked_body_complete(buf, total_read, head_consumed);
-                    if (check >= 0) break; // complete
+                    if (check >= 0) break;
                     if (check == -2) {
-                        // Malformed
                         const char *bad = "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
                         taida_net_send_all(client_fd, bad, strlen(bad));
-                        // request_count already reserved after head complete
+                        if (parse_result) taida_release(parse_result);
                         goto conn_done;
                     }
-                    // Incomplete — read more
                     if (total_read >= NET_MAX_REQUEST_BUF) {
                         const char *bad = "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
                         taida_net_send_all(client_fd, bad, strlen(bad));
-                        // request_count already reserved after head complete
+                        if (parse_result) taida_release(parse_result);
                         goto conn_done;
                     }
                     if (total_read >= buf_cap) {
@@ -10283,21 +10335,19 @@ static void *net_worker_thread(void *arg) {
                     }
                     ssize_t n = recv(client_fd, buf + total_read, buf_cap - total_read, 0);
                     if (n <= 0) {
-                        // Chunked body incomplete: timeout/EOF — send 400 (parity with interpreter)
                         const char *bad = "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
                         taida_net_send_all(client_fd, bad, strlen(bad));
-                        // request_count already reserved after head complete
+                        if (parse_result) taida_release(parse_result);
                         goto conn_done;
                     }
                     total_read += (size_t)n;
                 }
 
-                // In-place compaction
                 ChunkedCompactResult compact;
                 if (taida_net_chunked_in_place_compact(buf, head_consumed, &compact) < 0) {
                     const char *bad = "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
                     taida_net_send_all(client_fd, bad, strlen(bad));
-                    // request_count already reserved after head complete
+                    if (parse_result) taida_release(parse_result);
                     goto conn_done;
                 }
 
@@ -10310,7 +10360,7 @@ static void *net_worker_thread(void *arg) {
                 if (head_consumed + (size_t)content_length > NET_MAX_REQUEST_BUF) {
                     const char *too_large = "HTTP/1.1 413 Content Too Large\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
                     taida_net_send_all(client_fd, too_large, strlen(too_large));
-                    // request_count already reserved after head complete
+                    if (parse_result) taida_release(parse_result);
                     break; // close connection
                 }
 
@@ -10330,7 +10380,7 @@ static void *net_worker_thread(void *arg) {
                 if (content_length > 0 && total_read < body_needed) {
                     const char *bad = "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
                     taida_net_send_all(client_fd, bad, strlen(bad));
-                    // request_count already reserved after head complete
+                    if (parse_result) taida_release(parse_result);
                     break; // close connection
                 }
 
@@ -10340,34 +10390,102 @@ static void *net_worker_thread(void *arg) {
                 final_content_length = content_length;
             }
 
-            // Detach request-scoped raw bytes (owned copy from scratch buffer)
+            // NB2-19: Reuse initial parse result for keepAlive determination (no re-parse).
             size_t raw_len = is_chunked ? (head_consumed + body_len) : wire_consumed;
-
-            // Determine keep-alive from the raw wire data
-            // We need parsed headers for this, so re-parse the raw
-            taida_val tmp_raw = taida_bytes_from_raw(buf, (taida_val)raw_len);
-            taida_val tmp_parse = taida_net_http_parse_request_head(tmp_raw);
-            taida_val tmp_inner = taida_pack_get(tmp_parse, taida_str_hash((taida_val)"__value"));
             int keep_alive = 1; // default HTTP/1.1
             taida_val http_minor = 1;
             taida_val parsed_headers = 0;
-            if (tmp_inner != 0 && taida_is_buchi_pack(tmp_inner)) {
-                taida_val ver = taida_pack_get(tmp_inner, taida_str_hash((taida_val)"version"));
+            if (parse_inner != 0 && taida_is_buchi_pack(parse_inner)) {
+                taida_val ver = taida_pack_get(parse_inner, taida_str_hash((taida_val)"version"));
                 if (ver != 0 && taida_is_buchi_pack(ver)) {
                     http_minor = taida_pack_get(ver, taida_str_hash((taida_val)"minor"));
                 }
-                parsed_headers = taida_pack_get(tmp_inner, taida_str_hash((taida_val)"headers"));
+                parsed_headers = taida_pack_get(parse_inner, taida_str_hash((taida_val)"headers"));
             }
             keep_alive = taida_net_determine_keep_alive(buf, raw_len, parsed_headers, http_minor);
-            taida_release(tmp_raw);
 
-            // Build request pack (using the raw bytes from scratch buffer)
-            taida_val request = taida_net_build_request_pack(
-                buf, raw_len,
-                body_start, body_len, final_content_length,
-                is_chunked, keep_alive,
-                peer_host, peer_port
-            );
+            // NB2-19: Build request pack directly from parse_inner spans (no re-parse).
+            taida_val raw_bytes = taida_bytes_from_raw(buf, (taida_val)raw_len);
+            taida_val request = taida_pack_new(13);
+            taida_pack_set_hash(request, 0, taida_str_hash((taida_val)"raw"));
+            taida_pack_set(request, 0, raw_bytes);
+            taida_pack_set_tag(request, 0, TAIDA_TAG_PACK);
+            // NB2-21: raw_bytes is owned by request pack — no extra retain needed.
+            // taida_release(request) will release raw_bytes via child traversal.
+
+            if (parse_inner != 0 && taida_is_buchi_pack(parse_inner)) {
+                taida_val method_v = taida_pack_get(parse_inner, taida_str_hash((taida_val)"method"));
+                taida_pack_set_hash(request, 1, taida_str_hash((taida_val)"method"));
+                taida_pack_set(request, 1, method_v);
+                taida_pack_set_tag(request, 1, TAIDA_TAG_PACK);
+                if (method_v > 4096) taida_retain(method_v);
+
+                taida_val path_v = taida_pack_get(parse_inner, taida_str_hash((taida_val)"path"));
+                taida_pack_set_hash(request, 2, taida_str_hash((taida_val)"path"));
+                taida_pack_set(request, 2, path_v);
+                taida_pack_set_tag(request, 2, TAIDA_TAG_PACK);
+                if (path_v > 4096) taida_retain(path_v);
+
+                taida_val query_v = taida_pack_get(parse_inner, taida_str_hash((taida_val)"query"));
+                taida_pack_set_hash(request, 3, taida_str_hash((taida_val)"query"));
+                taida_pack_set(request, 3, query_v);
+                taida_pack_set_tag(request, 3, TAIDA_TAG_PACK);
+                if (query_v > 4096) taida_retain(query_v);
+
+                taida_val version_v = taida_pack_get(parse_inner, taida_str_hash((taida_val)"version"));
+                taida_pack_set_hash(request, 4, taida_str_hash((taida_val)"version"));
+                taida_pack_set(request, 4, version_v);
+                taida_pack_set_tag(request, 4, TAIDA_TAG_PACK);
+                if (version_v > 4096) taida_retain(version_v);
+
+                taida_val headers_v = taida_pack_get(parse_inner, taida_str_hash((taida_val)"headers"));
+                taida_pack_set_hash(request, 5, taida_str_hash((taida_val)"headers"));
+                taida_pack_set(request, 5, headers_v);
+                taida_pack_set_tag(request, 5, TAIDA_TAG_LIST);
+                if (headers_v > 4096) taida_retain(headers_v);
+            } else {
+                taida_pack_set_hash(request, 1, taida_str_hash((taida_val)"method"));
+                taida_pack_set(request, 1, taida_net_make_span(0, 0));
+                taida_pack_set_tag(request, 1, TAIDA_TAG_PACK);
+                taida_pack_set_hash(request, 2, taida_str_hash((taida_val)"path"));
+                taida_pack_set(request, 2, taida_net_make_span(0, 0));
+                taida_pack_set_tag(request, 2, TAIDA_TAG_PACK);
+                taida_pack_set_hash(request, 3, taida_str_hash((taida_val)"query"));
+                taida_pack_set(request, 3, taida_net_make_span(0, 0));
+                taida_pack_set_tag(request, 3, TAIDA_TAG_PACK);
+                taida_val ver = taida_pack_new(2);
+                taida_pack_set_hash(ver, 0, taida_str_hash((taida_val)"major"));
+                taida_pack_set(ver, 0, 1);
+                taida_pack_set_hash(ver, 1, taida_str_hash((taida_val)"minor"));
+                taida_pack_set(ver, 1, 1);
+                taida_pack_set_hash(request, 4, taida_str_hash((taida_val)"version"));
+                taida_pack_set(request, 4, ver);
+                taida_pack_set_tag(request, 4, TAIDA_TAG_PACK);
+                taida_pack_set_hash(request, 5, taida_str_hash((taida_val)"headers"));
+                taida_pack_set(request, 5, taida_list_new());
+                taida_pack_set_tag(request, 5, TAIDA_TAG_LIST);
+            }
+            taida_pack_set_hash(request, 6, taida_str_hash((taida_val)"body"));
+            taida_pack_set(request, 6, taida_net_make_span((taida_val)body_start, (taida_val)body_len));
+            taida_pack_set_tag(request, 6, TAIDA_TAG_PACK);
+            taida_pack_set_hash(request, 7, taida_str_hash((taida_val)"bodyOffset"));
+            taida_pack_set(request, 7, (taida_val)body_start);
+            taida_pack_set_hash(request, 8, taida_str_hash((taida_val)"contentLength"));
+            taida_pack_set(request, 8, (taida_val)final_content_length);
+            taida_pack_set_hash(request, 9, taida_str_hash((taida_val)"remoteHost"));
+            taida_pack_set(request, 9, (taida_val)taida_str_new_copy(peer_host));
+            taida_pack_set_tag(request, 9, TAIDA_TAG_STR);
+            taida_pack_set_hash(request, 10, taida_str_hash((taida_val)"remotePort"));
+            taida_pack_set(request, 10, (taida_val)peer_port);
+            taida_pack_set_hash(request, 11, taida_str_hash((taida_val)"keepAlive"));
+            taida_pack_set(request, 11, keep_alive ? 1 : 0);
+            taida_pack_set_tag(request, 11, TAIDA_TAG_BOOL);
+            taida_pack_set_hash(request, 12, taida_str_hash((taida_val)"chunked"));
+            taida_pack_set(request, 12, is_chunked ? 1 : 0);
+            taida_pack_set_tag(request, 12, TAIDA_TAG_BOOL);
+
+            // NB2-9: Release parse result now that spans are extracted
+            if (parse_result) { taida_release(parse_result); parse_result = 0; }
 
             // Call handler
             taida_val response = taida_invoke_callback1(pool->handler, request);
@@ -10375,6 +10493,12 @@ static void *net_worker_thread(void *arg) {
             // Encode and send response
             taida_val encoded = taida_net_http_encode_response(response);
             taida_net_send_response(client_fd, encoded);
+
+            // NB2-21: Release per-request objects now that the response is sent.
+            // Neither taida_invoke_callback1 nor taida_net_send_response consumes ownership.
+            taida_release(request);
+            taida_release(encoded);
+            taida_release(response);
 
             // request_count already reserved after head complete — check limit
             pthread_mutex_lock(&pool->mutex);
@@ -10490,14 +10614,13 @@ taida_val taida_net_http_serve(taida_val port, taida_val handler, taida_val max_
 
     // Accept loop: accept connections and enqueue to worker pool
     for (;;) {
-        // Check global request limit
+        // NB2-14: Single critical section for both request-limit check and maxConnections wait.
+        // Eliminates TOCTOU window from the original unlock-relock pattern.
         pthread_mutex_lock(&pool.mutex);
-        int exhausted = net_pool_requests_exhausted(&pool);
-        pthread_mutex_unlock(&pool.mutex);
-        if (exhausted) break;
-
-        // Wait if at maxConnections
-        pthread_mutex_lock(&pool.mutex);
+        if (net_pool_requests_exhausted(&pool)) {
+            pthread_mutex_unlock(&pool.mutex);
+            break;
+        }
         while (pool.active_connections + pool.queue_count >= (int)max_conn && !net_pool_requests_exhausted(&pool)) {
             pthread_cond_wait(&pool.cond_done, &pool.mutex);
         }
@@ -10528,17 +10651,34 @@ taida_val taida_net_http_serve(taida_val port, taida_val handler, taida_val max_
 
         // Enqueue to worker pool
         pthread_mutex_lock(&pool.mutex);
-        net_pool_enqueue(&pool, client_fd, peer_addr);
-        pthread_cond_signal(&pool.cond_available);
-        pthread_mutex_unlock(&pool.mutex);
+        // NB2-10: Close fd if queue is full to prevent fd leak
+        if (net_pool_enqueue(&pool, client_fd, peer_addr) < 0) {
+            pthread_mutex_unlock(&pool.mutex);
+            close(client_fd);
+        } else {
+            pthread_cond_signal(&pool.cond_available);
+            pthread_mutex_unlock(&pool.mutex);
+        }
     }
 
-    // Shutdown: signal all workers to exit
+    // NB2-6: Shutdown — close server socket early, drain queued fds, signal workers.
+    // Close the listening socket first so no new connections can arrive.
+    close(sockfd);
+
+    // Signal all workers to exit and drain any queued-but-unprocessed client fds.
     pthread_mutex_lock(&pool.mutex);
     pool.shutdown = 1;
+    // Drain unprocessed queue entries to prevent fd leak
+    {
+        NetClientSlot drain_slot;
+        while (net_pool_dequeue(&pool, &drain_slot) == 0) {
+            close(drain_slot.client_fd);
+        }
+    }
     pthread_cond_broadcast(&pool.cond_available);
     pthread_mutex_unlock(&pool.mutex);
 
+    // Workers currently in recv() will time out within SO_RCVTIMEO (effective_timeout ms).
     for (int i = 0; i < num_workers; i++) {
         pthread_join(workers[i], NULL);
     }
@@ -10547,7 +10687,6 @@ taida_val taida_net_http_serve(taida_val port, taida_val handler, taida_val max_
 
     free(workers);
     net_pool_destroy(&pool);
-    close(sockfd);
 
     // Server completed successfully
     taida_val ok_inner = taida_pack_new(2);

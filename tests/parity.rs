@@ -6429,8 +6429,9 @@ stdout(parsed.contentLength)
         "F4: Content-Length tab trim native parity mismatch\nInterp: {}\nNative: {}",
         interp, native
     );
-    assert!(
-        interp.contains("5"),
+    // NB2-17: Use exact match instead of contains()
+    assert_eq!(
+        interp.trim(), "5",
         "Content-Length should be 5 with tab whitespace, got: {}",
         interp
     );
@@ -6742,8 +6743,9 @@ stdout(result.__value.contentLength)
         "NB-20: leading-zero CL Interp vs Native\nInterp: {}\nNative: {}",
         interp, native
     );
-    assert!(
-        interp.contains("5"),
+    // NB2-17: Use exact match instead of contains()
+    assert_eq!(
+        interp.trim(), "5",
         "Leading-zero padded CL '00000000000000005' should parse as 5, got: {}",
         interp
     );
@@ -6806,8 +6808,9 @@ stdout(result.__value.contentLength)
         "NB-20: all-zeros CL Interp vs Native\nInterp: {}\nNative: {}",
         interp3, native3
     );
-    assert!(
-        interp3.contains("0"),
+    // NB2-17: Use exact match instead of contains() which could match "10", "200" etc.
+    assert_eq!(
+        interp3.trim(), "0",
         "All-zeros CL '00000000000000000' should parse as 0, got: {}",
         interp3
     );
@@ -6959,8 +6962,9 @@ stdout(parsed.contentLength)
         "NET-5a: CL tab Interp vs Native\nInterp: {}\nNative: {}",
         interp, native
     );
-    assert!(
-        interp.contains("5"),
+    // NB2-17: Use exact match instead of contains()
+    assert_eq!(
+        interp.trim(), "5",
         "Content-Length should be 5 with tab, got: {}",
         interp
     );
@@ -6977,7 +6981,8 @@ fn test_net2_parse_chunked_field_3way_parity() {
     }
 
     // Test 1: Request without Transfer-Encoding → chunked = false
-    // Use "chunked:" + toString() interpolation to avoid native Bool display issue
+    // NB2-16: Include chunked field in output. Uses Int(chunked) to normalize
+    // Bool display across backends (true/1 -> 1, false/0 -> 0).
     let source_no_te = r#">>> taida-lang/net => @(httpParseRequestHead)
 
 bytesLax <= Bytes["GET / HTTP/1.1\r\nHost: localhost\r\n\r\n"]()
@@ -6987,6 +6992,7 @@ result ]=> parsed
 
 stdout(parsed.consumed)
 stdout(parsed.contentLength)
+stdout(parsed.chunked)
 "#;
 
     let dir = setup_net_project(source_no_te, "net2_chunked_false");
@@ -6995,20 +7001,36 @@ stdout(parsed.contentLength)
     let native = run_net_native(&dir, "net2_chunked_false").expect("native failed");
     cleanup_net_project(&dir);
 
+    // NB2-16: Interp vs JS must be exact (both display Bool as true/false)
     assert_eq!(
         interp, js,
         "NET2-2a: chunked=false Interp vs JS\nInterp: {}\nJS: {}",
         interp, js
     );
-    assert_eq!(
-        interp, native,
-        "NET2-2a: chunked=false Interp vs Native\nInterp: {}\nNative: {}",
-        interp, native
+    // NB2-16: Verify chunked field is "false" on Interp/JS
+    assert!(
+        interp.contains("false"),
+        "NET2-2a: chunked should be false on Interp, got: {}", interp
+    );
+    // NB2-16+NB2-1: Native Bool display may differ (0 vs false). Check numeric lines match
+    // and chunked line is falsy (0 or false).
+    let interp_lines: Vec<&str> = interp.trim().lines().collect();
+    let native_lines: Vec<&str> = native.trim().lines().collect();
+    assert_eq!(interp_lines.len(), native_lines.len(),
+        "NET2-2a: chunked=false line count mismatch\nInterp: {}\nNative: {}", interp, native);
+    // First two lines (consumed, contentLength) must match exactly
+    assert_eq!(interp_lines[0], native_lines[0],
+        "NET2-2a: consumed mismatch\nInterp: {}\nNative: {}", interp, native);
+    assert_eq!(interp_lines[1], native_lines[1],
+        "NET2-2a: contentLength mismatch\nInterp: {}\nNative: {}", interp, native);
+    // Third line (chunked) must be falsy: "false" or "0"
+    assert!(
+        native_lines[2] == "false" || native_lines[2] == "0",
+        "NET2-2a: Native chunked should be false/0, got: {}", native_lines[2]
     );
 
     // Test 2: Request with Transfer-Encoding: chunked → chunked = true
-    // Verify chunked is detected by checking contentLength is 0 (no CL header)
-    // and consumed > 0 (parse succeeded). The real chunked field test is Interp-vs-JS only.
+    // NB2-16: Include chunked field in output.
     let source_te_chunked = r#">>> taida-lang/net => @(httpParseRequestHead)
 
 bytesLax <= Bytes["POST /data HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n\r\n"]()
@@ -7018,6 +7040,7 @@ result ]=> parsed
 
 stdout(parsed.consumed)
 stdout(parsed.contentLength)
+stdout(parsed.chunked)
 "#;
 
     let dir2 = setup_net_project(source_te_chunked, "net2_chunked_true");
@@ -7031,10 +7054,24 @@ stdout(parsed.contentLength)
         "NET2-2a: chunked=true Interp vs JS\nInterp: {}\nJS: {}",
         interp2, js2
     );
-    assert_eq!(
-        interp2, native2,
-        "NET2-2a: chunked=true Interp vs Native\nInterp: {}\nNative: {}",
-        interp2, native2
+    // NB2-16: Verify chunked field is "true" on Interp/JS
+    assert!(
+        interp2.contains("true"),
+        "NET2-2a: chunked should be true on Interp, got: {}", interp2
+    );
+    // NB2-16+NB2-1: Check Native parity with Bool normalization
+    let interp2_lines: Vec<&str> = interp2.trim().lines().collect();
+    let native2_lines: Vec<&str> = native2.trim().lines().collect();
+    assert_eq!(interp2_lines.len(), native2_lines.len(),
+        "NET2-2a: chunked=true line count mismatch\nInterp: {}\nNative: {}", interp2, native2);
+    assert_eq!(interp2_lines[0], native2_lines[0],
+        "NET2-2a: consumed mismatch\nInterp: {}\nNative: {}", interp2, native2);
+    assert_eq!(interp2_lines[1], native2_lines[1],
+        "NET2-2a: contentLength mismatch\nInterp: {}\nNative: {}", interp2, native2);
+    // Third line (chunked) must be truthy: "true" or "1"
+    assert!(
+        native2_lines[2] == "true" || native2_lines[2] == "1",
+        "NET2-2a: Native chunked should be true/1, got: {}", native2_lines[2]
     );
 }
 
@@ -10174,8 +10211,10 @@ stdout(r.requests)
 
         let output = child.wait_with_output().expect("wait for server");
         let stdout = normalize(&String::from_utf8_lossy(&output.stdout));
-        assert!(
-            stdout.contains("3"),
+        // NB2-17: Check last line is "3" (output has "true\n3" from ok + requests)
+        let last_line = stdout.trim().lines().last().unwrap_or("");
+        assert_eq!(
+            last_line, "3",
             "{} backend: concurrent server should report 3 requests (1 probe + 2). Got: {}",
             backend, stdout
         );
@@ -10263,8 +10302,10 @@ stdout(r.requests)
 
         let output = child.wait_with_output().expect("wait for server");
         let stdout = normalize(&String::from_utf8_lossy(&output.stdout));
-        assert!(
-            stdout.contains("3"),
+        // NB2-17: Check last line is "3" (output has "true\n3" from ok + requests)
+        let last_line = stdout.trim().lines().last().unwrap_or("");
+        assert_eq!(
+            last_line, "3",
             "{} backend: maxConnections=1 server should report 3 requests. Got: {}",
             backend, stdout
         );
@@ -10721,4 +10762,865 @@ stdout(r.requests)
 
     if let Some(p) = &artifact_path { let _ = fs::remove_file(p); }
     cleanup_net_project(&dir);
+}
+
+// ── NET2-6: Phase 6 — Parity / Hardening ──────────────────────────
+
+// ── NET2-6a: Keep-Alive 3-way parity ──────────────────────────────
+
+/// NET2-6a: Keep-alive 3-way parity — Interpreter vs JS vs Native.
+/// Sends 2 requests on a single TCP connection for each backend,
+/// verifies both get 200 OK responses and server reports 2 requests.
+#[test]
+fn test_net2_6a_keep_alive_3way_parity() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+
+    let mut results: Vec<(String, String)> = Vec::new(); // (backend, stdout)
+
+    for backend in &["interp", "js", "native"] {
+        let port = find_free_loopback_port();
+        let source = format!(
+            r#">>> taida-lang/net => @(httpServe)
+
+handler req =
+  @(status <= 200, headers <= @[], body <= "ka-ok")
+=> :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
+
+asyncResult <= httpServe({port}, handler, 2)
+asyncResult ]=> result
+result ]=> r
+stdout(r.requests)
+"#
+        );
+
+        let dir = setup_net_project(&source, &format!("net6_ka_{}", backend));
+        let (mut child, artifact) =
+            spawn_net_server_backend(&dir, backend, &format!("6ka_{}", backend));
+
+        // Wait for server to be ready and open a single TCP connection
+        let mut connected = false;
+        let mut stream = None;
+        for _ in 0..80 {
+            thread::sleep(Duration::from_millis(100));
+            match TcpStream::connect(format!("127.0.0.1:{}", port)) {
+                Ok(s) => {
+                    s.set_read_timeout(Some(Duration::from_secs(5))).ok();
+                    s.set_write_timeout(Some(Duration::from_secs(5))).ok();
+                    stream = Some(s);
+                    connected = true;
+                    break;
+                }
+                Err(_) => continue,
+            }
+        }
+        if !connected {
+            let _ = child.kill();
+            if let Some(p) = &artifact { let _ = fs::remove_file(p); }
+            cleanup_net_project(&dir);
+            panic!("{} backend: server did not start for keep-alive 3-way parity", backend);
+        }
+
+        let s = stream.as_mut().unwrap();
+
+        // Request 1 (keep-alive by default in HTTP/1.1)
+        let req1 = b"GET /a HTTP/1.1\r\nHost: localhost\r\n\r\n";
+        std::io::Write::write_all(s, req1).expect("write req1");
+        let mut resp1 = vec![0u8; 4096];
+        let n1 = std::io::Read::read(s, &mut resp1).expect("read resp1");
+        let resp1_str = String::from_utf8_lossy(&resp1[..n1]);
+        assert!(
+            resp1_str.contains("200 OK"),
+            "{} backend: first keep-alive response should be 200 OK, got: {}",
+            backend, resp1_str
+        );
+        assert!(
+            resp1_str.contains("ka-ok"),
+            "{} backend: first keep-alive response body should contain 'ka-ok', got: {}",
+            backend, resp1_str
+        );
+
+        // Request 2 on same connection (Connection: close to end)
+        let req2 = b"GET /b HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+        std::io::Write::write_all(s, req2).expect("write req2");
+        let mut resp2 = Vec::new();
+        let mut buf = [0u8; 4096];
+        loop {
+            match std::io::Read::read(s, &mut buf) {
+                Ok(0) => break,
+                Ok(n) => resp2.extend_from_slice(&buf[..n]),
+                Err(ref e)
+                    if e.kind() == std::io::ErrorKind::WouldBlock
+                        || e.kind() == std::io::ErrorKind::TimedOut =>
+                {
+                    break;
+                }
+                Err(_) => break,
+            }
+        }
+        let resp2_str = String::from_utf8_lossy(&resp2);
+        assert!(
+            resp2_str.contains("200 OK"),
+            "{} backend: second keep-alive response should be 200 OK, got: {}",
+            backend, resp2_str
+        );
+
+        // Wait for server to exit (maxRequests=2)
+        let output = child.wait_with_output().expect("wait for server");
+        let stdout = normalize(&String::from_utf8_lossy(&output.stdout));
+        results.push((backend.to_string(), stdout));
+
+        if let Some(p) = &artifact { let _ = fs::remove_file(p); }
+        cleanup_net_project(&dir);
+    }
+
+    // 3-way comparison: all backends should report "2" requests
+    let interp = &results[0].1;
+    let js = &results[1].1;
+    let native = &results[2].1;
+
+    assert!(
+        interp.contains("2"),
+        "NET2-6a: Interpreter should report 2 requests, got: {}",
+        interp
+    );
+    assert_eq!(
+        interp, js,
+        "NET2-6a: Keep-Alive 3-way parity: Interp vs JS\nInterp: {}\nJS: {}",
+        interp, js
+    );
+    assert_eq!(
+        interp, native,
+        "NET2-6a: Keep-Alive 3-way parity: Interp vs Native\nInterp: {}\nNative: {}",
+        interp, native
+    );
+}
+
+// ── NET2-6b: Chunked body 3-way parity ──────────────────────────────
+
+/// NET2-6b: Chunked body 3-way parity — Interpreter vs JS vs Native.
+/// Sends a POST with Transfer-Encoding: chunked, verifies readBody
+/// returns the correct reassembled body across all three backends.
+#[test]
+fn test_net2_6b_chunked_body_3way_parity() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+
+    let mut results: Vec<(String, String)> = Vec::new();
+
+    for backend in &["interp", "js", "native"] {
+        let port = find_free_loopback_port();
+        let source = format!(
+            r#">>> taida-lang/net => @(httpServe, readBody)
+
+handler req =
+  body <= readBody(req)
+  @(status <= 200, headers <= @[], body <= body)
+=> :@(status: Int, headers: @[@(name: Str, value: Str)], body: Bytes)
+
+asyncResult <= httpServe({port}, handler, 1)
+asyncResult ]=> result
+result ]=> r
+stdout(r.requests)
+"#
+        );
+
+        let dir = setup_net_project(&source, &format!("net6_chunked_{}", backend));
+        let (child, artifact) =
+            spawn_net_server_backend(&dir, backend, &format!("6chunked_{}", backend));
+
+        // Chunked POST: "5\r\nHello\r\n6\r\n World\r\n0\r\n\r\n" = "Hello World"
+        let chunked_request = b"POST / HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n5\r\nHello\r\n6\r\n World\r\n0\r\n\r\n";
+        let resp = send_http_request(port, chunked_request);
+        assert!(
+            resp.is_some(),
+            "{} backend: chunked request must get a response",
+            backend
+        );
+        let resp_str = String::from_utf8_lossy(resp.as_ref().unwrap());
+        assert!(
+            resp_str.contains("Hello World"),
+            "{} backend: chunked readBody should return 'Hello World', got: {}",
+            backend, resp_str
+        );
+
+        let output = child.wait_with_output().expect("wait for server");
+        let stdout = normalize(&String::from_utf8_lossy(&output.stdout));
+        results.push((backend.to_string(), stdout));
+
+        if let Some(p) = &artifact { let _ = fs::remove_file(p); }
+        cleanup_net_project(&dir);
+    }
+
+    // 3-way comparison
+    let interp = &results[0].1;
+    let js = &results[1].1;
+    let native = &results[2].1;
+
+    assert!(
+        interp.contains("1"),
+        "NET2-6b: Interpreter should report 1 request, got: {}",
+        interp
+    );
+    assert_eq!(
+        interp, js,
+        "NET2-6b: Chunked 3-way parity: Interp vs JS\nInterp: {}\nJS: {}",
+        interp, js
+    );
+    assert_eq!(
+        interp, native,
+        "NET2-6b: Chunked 3-way parity: Interp vs Native\nInterp: {}\nNative: {}",
+        interp, native
+    );
+}
+
+// ── NET2-6c: readBody 3-way parity (httpServe-level) ──────────────
+
+/// NET2-6c: readBody Content-Length body 3-way parity via httpServe.
+/// Sends a POST with Content-Length body, verifies readBody returns
+/// the body correctly and all backends echo the same response.
+#[test]
+fn test_net2_6c_readbody_content_length_httpserve_3way_parity() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+
+    let mut results: Vec<(String, String)> = Vec::new();
+
+    for backend in &["interp", "js", "native"] {
+        let port = find_free_loopback_port();
+        let source = format!(
+            r#">>> taida-lang/net => @(httpServe, readBody)
+
+handler req =
+  body <= readBody(req)
+  @(status <= 200, headers <= @[], body <= body)
+=> :@(status: Int, headers: @[@(name: Str, value: Str)], body: Bytes)
+
+asyncResult <= httpServe({port}, handler, 1)
+asyncResult ]=> result
+result ]=> r
+stdout(r.requests)
+"#
+        );
+
+        let dir = setup_net_project(&source, &format!("net6_rb_cl_{}", backend));
+        let (child, artifact) =
+            spawn_net_server_backend(&dir, backend, &format!("6rb_cl_{}", backend));
+
+        // POST with Content-Length body "taida-net-v2"
+        let body_str = "taida-net-v2";
+        let request = format!(
+            "POST /echo HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body_str.len(),
+            body_str
+        );
+        let resp = send_http_request(port, request.as_bytes());
+        assert!(
+            resp.is_some(),
+            "{} backend: Content-Length POST must get a response",
+            backend
+        );
+        let resp_str = String::from_utf8_lossy(resp.as_ref().unwrap());
+        assert!(
+            resp_str.contains("taida-net-v2"),
+            "{} backend: readBody should echo 'taida-net-v2', got: {}",
+            backend, resp_str
+        );
+
+        let output = child.wait_with_output().expect("wait for server");
+        let stdout = normalize(&String::from_utf8_lossy(&output.stdout));
+        results.push((backend.to_string(), stdout));
+
+        if let Some(p) = &artifact { let _ = fs::remove_file(p); }
+        cleanup_net_project(&dir);
+    }
+
+    // 3-way comparison
+    let interp = &results[0].1;
+    let js = &results[1].1;
+    let native = &results[2].1;
+
+    assert!(
+        interp.contains("1"),
+        "NET2-6c: Interpreter should report 1 request, got: {}",
+        interp
+    );
+    assert_eq!(
+        interp, js,
+        "NET2-6c: readBody CL 3-way parity: Interp vs JS\nInterp: {}\nJS: {}",
+        interp, js
+    );
+    assert_eq!(
+        interp, native,
+        "NET2-6c: readBody CL 3-way parity: Interp vs Native\nInterp: {}\nNative: {}",
+        interp, native
+    );
+}
+
+/// NET2-6c: readBody empty body 3-way parity via httpServe.
+/// Sends a GET with no body, verifies readBody returns empty Bytes.
+#[test]
+fn test_net2_6c_readbody_empty_httpserve_3way_parity() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+
+    let mut results: Vec<(String, String)> = Vec::new();
+
+    for backend in &["interp", "js", "native"] {
+        let port = find_free_loopback_port();
+        // readBody on a GET (no body) should return empty Bytes.
+        // We output the body length to compare across backends.
+        let source = format!(
+            r#">>> taida-lang/net => @(httpServe, readBody)
+
+handler req =
+  body <= readBody(req)
+  lenStr <= Str[body.length()]()
+  lenStr ]=> ls
+  @(status <= 200, headers <= @[], body <= ls)
+=> :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
+
+asyncResult <= httpServe({port}, handler, 1)
+asyncResult ]=> result
+result ]=> r
+stdout(r.requests)
+"#
+        );
+
+        let dir = setup_net_project(&source, &format!("net6_rb_empty_{}", backend));
+        let (child, artifact) =
+            spawn_net_server_backend(&dir, backend, &format!("6rb_empty_{}", backend));
+
+        // GET with no body
+        let request = b"GET /empty HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+        let resp = send_http_request(port, request);
+        assert!(
+            resp.is_some(),
+            "{} backend: GET must get a response",
+            backend
+        );
+        let resp_str = String::from_utf8_lossy(resp.as_ref().unwrap());
+        // The response body should be "0" (length of empty readBody result)
+        assert!(
+            resp_str.contains("\r\n\r\n0") || resp_str.ends_with("0"),
+            "{} backend: readBody of GET should return 0-length body, got: {}",
+            backend, resp_str
+        );
+
+        let output = child.wait_with_output().expect("wait for server");
+        let stdout = normalize(&String::from_utf8_lossy(&output.stdout));
+        results.push((backend.to_string(), stdout));
+
+        if let Some(p) = &artifact { let _ = fs::remove_file(p); }
+        cleanup_net_project(&dir);
+    }
+
+    // 3-way comparison
+    let interp = &results[0].1;
+    let js = &results[1].1;
+    let native = &results[2].1;
+
+    assert_eq!(
+        interp, js,
+        "NET2-6c: readBody empty 3-way parity: Interp vs JS\nInterp: {}\nJS: {}",
+        interp, js
+    );
+    assert_eq!(
+        interp, native,
+        "NET2-6c: readBody empty 3-way parity: Interp vs Native\nInterp: {}\nNative: {}",
+        interp, native
+    );
+}
+
+// ── NET2-6d: Concurrent connections 3-way parity ──────────────────
+
+/// NET2-6d: Concurrent connections 3-way parity — Interpreter vs JS vs Native.
+/// Opens 2 clients simultaneously, verifies both get responses.
+#[test]
+fn test_net2_6d_concurrent_connections_3way_parity() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+
+    let mut results: Vec<(String, String)> = Vec::new();
+
+    for backend in &["interp", "js", "native"] {
+        let port = find_free_loopback_port();
+        let source = format!(
+            r#">>> taida-lang/net => @(httpServe)
+
+handler req =
+  @(status <= 200, headers <= @[], body <= "conc-3way")
+=> :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
+
+asyncResult <= httpServe({port}, handler, 3)
+asyncResult ]=> result
+result ]=> r
+stdout(r.requests)
+"#
+        );
+
+        let dir = setup_net_project(&source, &format!("net6_conc_{}", backend));
+        let (mut child, artifact) =
+            spawn_net_server_backend(&dir, backend, &format!("6conc_{}", backend));
+
+        // Readiness probe (request 1 of 3)
+        let probe = send_http_request(
+            port,
+            b"GET /probe HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+        );
+        assert!(
+            probe.is_some(),
+            "{} backend: readiness probe must succeed",
+            backend
+        );
+
+        // Connect 2 clients simultaneously (requests 2 and 3)
+        let mut clients: Vec<TcpStream> = Vec::new();
+        for _ in 0..2 {
+            match TcpStream::connect(format!("127.0.0.1:{}", port)) {
+                Ok(s) => {
+                    s.set_read_timeout(Some(Duration::from_secs(5))).ok();
+                    s.set_write_timeout(Some(Duration::from_secs(5))).ok();
+                    clients.push(s);
+                }
+                Err(e) => {
+                    let _ = child.kill();
+                    if let Some(p) = &artifact { let _ = fs::remove_file(p); }
+                    cleanup_net_project(&dir);
+                    panic!("{} backend: concurrent connect failed: {}", backend, e);
+                }
+            }
+        }
+
+        // Send requests on both clients
+        for (i, c) in clients.iter_mut().enumerate() {
+            let req = format!(
+                "GET /c{} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+                i
+            );
+            std::io::Write::write_all(c, req.as_bytes())
+                .unwrap_or_else(|_| panic!("{} backend: write to client {} failed", backend, i));
+        }
+
+        // Read responses from both clients
+        for (i, c) in clients.iter_mut().enumerate() {
+            let mut resp = Vec::new();
+            let mut buf = [0u8; 4096];
+            loop {
+                match std::io::Read::read(c, &mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => resp.extend_from_slice(&buf[..n]),
+                    Err(ref e)
+                        if e.kind() == std::io::ErrorKind::WouldBlock
+                            || e.kind() == std::io::ErrorKind::TimedOut =>
+                    {
+                        break;
+                    }
+                    Err(_) => break,
+                }
+            }
+            let resp_str = String::from_utf8_lossy(&resp);
+            assert!(
+                resp_str.contains("conc-3way"),
+                "{} backend: concurrent client {} should get 'conc-3way', got: {}",
+                backend, i, resp_str
+            );
+        }
+
+        // Wait for server to exit (maxRequests=3)
+        let output = child.wait_with_output().expect("wait for server");
+        let stdout = normalize(&String::from_utf8_lossy(&output.stdout));
+        results.push((backend.to_string(), stdout));
+
+        if let Some(p) = &artifact { let _ = fs::remove_file(p); }
+        cleanup_net_project(&dir);
+    }
+
+    // 3-way comparison: all should report 3 requests
+    let interp = &results[0].1;
+    let js = &results[1].1;
+    let native = &results[2].1;
+
+    // NB2-17: Check last line is "3" (output has "true\n3" from ok + requests)
+    let interp_last = interp.trim().lines().last().unwrap_or("");
+    assert_eq!(
+        interp_last, "3",
+        "NET2-6d: Interpreter should report 3 requests, got: {}",
+        interp
+    );
+    assert_eq!(
+        interp, js,
+        "NET2-6d: Concurrent 3-way parity: Interp vs JS\nInterp: {}\nJS: {}",
+        interp, js
+    );
+    assert_eq!(
+        interp, native,
+        "NET2-6d: Concurrent 3-way parity: Interp vs Native\nInterp: {}\nNative: {}",
+        interp, native
+    );
+}
+
+// ── NET2-6e: v1 existing test re-confirmation ─────────────────────
+
+/// NET2-6e: v1 httpServe bounded 3-way parity still works.
+/// This re-runs the existing all-backends httpServe test to confirm
+/// no v2 changes broke v1 behavior.
+#[test]
+fn test_net2_6e_v1_http_serve_bounded_3way_still_passes() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+
+    // Re-run the v1 bounded serve test pattern with all 3 backends.
+    for backend in &["interp", "js", "native"] {
+        let port = find_free_loopback_port();
+        let source = format!(
+            r#">>> taida-lang/net => @(httpServe)
+
+handler req =
+  @(status <= 200, headers <= @[@(name <= "content-type", value <= "text/plain")], body <= "v1-ok")
+=> :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
+
+asyncResult <= httpServe({port}, handler, 1)
+asyncResult ]=> result
+result ]=> r
+stdout(r.requests)
+"#
+        );
+
+        let dir = setup_net_project(&source, &format!("net6_v1_{}", backend));
+        let (child, artifact) =
+            spawn_net_server_backend(&dir, backend, &format!("6v1_{}", backend));
+
+        let request = b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+        let resp = send_http_request(port, request);
+        assert!(
+            resp.is_some(),
+            "{} backend: v1 bounded serve must respond",
+            backend
+        );
+        let resp_str = String::from_utf8_lossy(resp.as_ref().unwrap());
+        assert!(
+            resp_str.contains("200 OK"),
+            "{} backend: v1 bounded serve response should contain '200 OK', got: {}",
+            backend, resp_str
+        );
+        assert!(
+            resp_str.contains("v1-ok"),
+            "{} backend: v1 bounded serve body should contain 'v1-ok', got: {}",
+            backend, resp_str
+        );
+
+        let output = child.wait_with_output().expect("wait for server");
+        let stdout = normalize(&String::from_utf8_lossy(&output.stdout));
+        assert_eq!(
+            stdout, "1",
+            "{} backend: v1 httpServe result should report 1 request, got: {}",
+            backend, stdout
+        );
+
+        if let Some(p) = &artifact { let _ = fs::remove_file(p); }
+        cleanup_net_project(&dir);
+    }
+}
+
+/// NET2-6e: v1 httpParseRequestHead 3-way parity still works.
+/// Confirms parse API parity is unchanged by v2 additions.
+#[test]
+fn test_net2_6e_v1_parse_request_head_3way_still_passes() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+
+    let source = r#">>> taida-lang/net => @(httpParseRequestHead)
+
+bytesLax <= Bytes["GET /hello?q=1 HTTP/1.1\r\nHost: localhost\r\nContent-Length: 3\r\n\r\nabc"]()
+bytesLax ]=> bytes
+result <= httpParseRequestHead(bytes)
+result ]=> parsed
+
+stdout(parsed.consumed)
+stdout(parsed.method.start)
+stdout(parsed.method.len)
+stdout(parsed.path.start)
+stdout(parsed.path.len)
+stdout(parsed.query.start)
+stdout(parsed.query.len)
+stdout(parsed.contentLength)
+"#;
+
+    let dir = setup_net_project(source, "net6_v1_parse");
+    let interp = run_net_interpreter(&dir).expect("interpreter failed for v1 parse parity");
+    let js = run_net_js(&dir, "net6_v1_parse").expect("js failed for v1 parse parity");
+    let native = run_net_native(&dir, "net6_v1_parse").expect("native failed for v1 parse parity");
+    cleanup_net_project(&dir);
+
+    assert_eq!(
+        interp, js,
+        "NET2-6e: v1 parse 3-way parity: Interp vs JS\nInterp: {}\nJS: {}",
+        interp, js
+    );
+    assert_eq!(
+        interp, native,
+        "NET2-6e: v1 parse 3-way parity: Interp vs Native\nInterp: {}\nNative: {}",
+        interp, native
+    );
+}
+
+/// NET2-6e: v1 httpEncodeResponse 3-way parity still works.
+#[test]
+fn test_net2_6e_v1_encode_response_3way_still_passes() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+
+    let source = r#">>> taida-lang/net => @(httpEncodeResponse)
+
+response <= @(status <= 200, headers <= @[@(name <= "X-Test", value <= "yes")], body <= "hello")
+result <= httpEncodeResponse(response)
+result ]=> encoded
+stdout(encoded.bytes.length())
+"#;
+
+    let dir = setup_net_project(source, "net6_v1_encode");
+    let interp = run_net_interpreter(&dir).expect("interpreter failed for v1 encode parity");
+    let js = run_net_js(&dir, "net6_v1_encode").expect("js failed for v1 encode parity");
+    let native = run_net_native(&dir, "net6_v1_encode").expect("native failed for v1 encode parity");
+    cleanup_net_project(&dir);
+
+    assert_eq!(
+        interp, js,
+        "NET2-6e: v1 encode 3-way parity: Interp vs JS\nInterp: {}\nJS: {}",
+        interp, js
+    );
+    assert_eq!(
+        interp, native,
+        "NET2-6e: v1 encode 3-way parity: Interp vs Native\nInterp: {}\nNative: {}",
+        interp, native
+    );
+}
+
+// ── NET2-6f: WASM capability gating ───────────────────────────────
+
+/// NET2-6f: readBody must produce compile error on wasm-min.
+/// v2 added readBody to the net API — WASM gating must reject it.
+#[test]
+fn test_net2_6f_wasm_min_readbody_compile_error() {
+    let source = r#">>> taida-lang/net => @(readBody)
+
+rawLax <= Bytes["GET / HTTP/1.1\r\nHost: localhost\r\n\r\n"]()
+rawLax ]=> raw
+req <= @(raw <= raw, body <= @(start <= 0, len <= 0))
+body <= readBody(req)
+stdout(body.length())
+"#;
+    let td_path = std::env::temp_dir().join("taida_net6f_readbody_wasm.td");
+    let wasm_path = std::env::temp_dir().join("taida_net6f_readbody_wasm.wasm");
+    std::fs::write(&td_path, source).expect("write test .td");
+
+    let output = Command::new(taida_bin())
+        .arg("build")
+        .arg("--target")
+        .arg("wasm-min")
+        .arg(&td_path)
+        .arg("-o")
+        .arg(&wasm_path)
+        .output()
+        .expect("failed to run taida build");
+
+    let _ = std::fs::remove_file(&td_path);
+    let _ = std::fs::remove_file(&wasm_path);
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !output.status.success(),
+        "NET2-6f: wasm-min should reject readBody, but compile succeeded.\nstderr: {}",
+        stderr
+    );
+    assert!(
+        stderr.contains("readBody") || stderr.contains("net"),
+        "NET2-6f: compile error should mention readBody or net.\nstderr: {}",
+        stderr
+    );
+}
+
+/// NET2-6f: readBody must produce compile error on wasm-wasi.
+#[test]
+fn test_net2_6f_wasm_wasi_readbody_compile_error() {
+    let source = r#">>> taida-lang/net => @(readBody)
+
+rawLax <= Bytes["GET / HTTP/1.1\r\nHost: localhost\r\n\r\n"]()
+rawLax ]=> raw
+req <= @(raw <= raw, body <= @(start <= 0, len <= 0))
+body <= readBody(req)
+stdout(body.length())
+"#;
+    let td_path = std::env::temp_dir().join("taida_net6f_readbody_wasi.td");
+    let wasm_path = std::env::temp_dir().join("taida_net6f_readbody_wasi.wasm");
+    std::fs::write(&td_path, source).expect("write test .td");
+
+    let output = Command::new(taida_bin())
+        .arg("build")
+        .arg("--target")
+        .arg("wasm-wasi")
+        .arg(&td_path)
+        .arg("-o")
+        .arg(&wasm_path)
+        .output()
+        .expect("failed to run taida build");
+
+    let _ = std::fs::remove_file(&td_path);
+    let _ = std::fs::remove_file(&wasm_path);
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !output.status.success(),
+        "NET2-6f: wasm-wasi should reject readBody, but compile succeeded.\nstderr: {}",
+        stderr
+    );
+    assert!(
+        stderr.contains("readBody") || stderr.contains("net"),
+        "NET2-6f: compile error should mention readBody or net.\nstderr: {}",
+        stderr
+    );
+}
+
+/// NET2-6f: readBody must produce compile error on wasm-edge.
+#[test]
+fn test_net2_6f_wasm_edge_readbody_compile_error() {
+    let source = r#">>> taida-lang/net => @(readBody)
+
+rawLax <= Bytes["GET / HTTP/1.1\r\nHost: localhost\r\n\r\n"]()
+rawLax ]=> raw
+req <= @(raw <= raw, body <= @(start <= 0, len <= 0))
+body <= readBody(req)
+stdout(body.length())
+"#;
+    let td_path = std::env::temp_dir().join("taida_net6f_readbody_edge.td");
+    let wasm_path = std::env::temp_dir().join("taida_net6f_readbody_edge.wasm");
+    std::fs::write(&td_path, source).expect("write test .td");
+
+    let output = Command::new(taida_bin())
+        .arg("build")
+        .arg("--target")
+        .arg("wasm-edge")
+        .arg(&td_path)
+        .arg("-o")
+        .arg(&wasm_path)
+        .output()
+        .expect("failed to run taida build");
+
+    let _ = std::fs::remove_file(&td_path);
+    let _ = std::fs::remove_file(&wasm_path);
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !output.status.success(),
+        "NET2-6f: wasm-edge should reject readBody, but compile succeeded.\nstderr: {}",
+        stderr
+    );
+    assert!(
+        stderr.contains("readBody") || stderr.contains("net"),
+        "NET2-6f: compile error should mention readBody or net.\nstderr: {}",
+        stderr
+    );
+}
+
+/// NET2-6f: readBody must produce compile error on wasm-full.
+#[test]
+fn test_net2_6f_wasm_full_readbody_compile_error() {
+    let source = r#">>> taida-lang/net => @(readBody)
+
+rawLax <= Bytes["GET / HTTP/1.1\r\nHost: localhost\r\n\r\n"]()
+rawLax ]=> raw
+req <= @(raw <= raw, body <= @(start <= 0, len <= 0))
+body <= readBody(req)
+stdout(body.length())
+"#;
+    let td_path = std::env::temp_dir().join("taida_net6f_readbody_full.td");
+    let wasm_path = std::env::temp_dir().join("taida_net6f_readbody_full.wasm");
+    std::fs::write(&td_path, source).expect("write test .td");
+
+    let output = Command::new(taida_bin())
+        .arg("build")
+        .arg("--target")
+        .arg("wasm-full")
+        .arg(&td_path)
+        .arg("-o")
+        .arg(&wasm_path)
+        .output()
+        .expect("failed to run taida build");
+
+    let _ = std::fs::remove_file(&td_path);
+    let _ = std::fs::remove_file(&wasm_path);
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !output.status.success(),
+        "NET2-6f: wasm-full should reject readBody, but compile succeeded.\nstderr: {}",
+        stderr
+    );
+    assert!(
+        stderr.contains("readBody") || stderr.contains("net"),
+        "NET2-6f: compile error should mention readBody or net.\nstderr: {}",
+        stderr
+    );
+}
+
+/// NET2-6f: httpServe still rejected on all 4 WASM profiles (regression check).
+#[test]
+fn test_net2_6f_wasm_all_profiles_httpserve_still_rejected() {
+    let source = r#">>> taida-lang/net => @(httpServe)
+
+handler req =
+  @(status <= 200, headers <= @[], body <= "ok")
+=> :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
+
+httpServe(8080, handler, 1, 1000) ]=> serverResult
+stdout(serverResult.ok)
+"#;
+
+    for profile in &["wasm-min", "wasm-wasi", "wasm-edge", "wasm-full"] {
+        let td_path = std::env::temp_dir().join(format!("taida_net6f_serve_{}.td", profile));
+        let wasm_path = std::env::temp_dir().join(format!("taida_net6f_serve_{}.wasm", profile));
+        std::fs::write(&td_path, source).expect("write test .td");
+
+        let output = Command::new(taida_bin())
+            .arg("build")
+            .arg("--target")
+            .arg(profile)
+            .arg(&td_path)
+            .arg("-o")
+            .arg(&wasm_path)
+            .output()
+            .expect("failed to run taida build");
+
+        let _ = std::fs::remove_file(&td_path);
+        let _ = std::fs::remove_file(&wasm_path);
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            !output.status.success(),
+            "NET2-6f: {} should reject httpServe, but compile succeeded.\nstderr: {}",
+            profile, stderr
+        );
+        assert!(
+            stderr.contains("httpServe") || stderr.contains("net"),
+            "NET2-6f: {} compile error should mention httpServe or net.\nstderr: {}",
+            profile, stderr
+        );
+    }
 }

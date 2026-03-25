@@ -467,28 +467,35 @@ fn find_crlf(data: &[u8]) -> Option<usize> {
 }
 
 /// Check if the buffer contains a complete chunked body (read-only scan).
+/// NB2-15: Typed error for chunked body parsing — avoids string prefix matching.
+#[derive(Debug)]
+#[allow(dead_code)]
+enum ChunkedBodyError {
+    /// Need more data (incomplete chunk framing)
+    Incomplete(String),
+    /// Malformed chunk data (reject immediately)
+    Malformed(String),
+}
+
 ///
 /// Walks the chunk framing without modifying the buffer.
 /// Returns `Ok(wire_consumed)` if the terminator chunk was found,
-/// or `Err(reason)` if the data is incomplete or malformed.
-///
-/// "incomplete" errors contain "truncated" or "missing" for the retry loop.
-/// True malformation errors (invalid hex, etc.) do not.
-fn chunked_body_complete(buf: &[u8], body_offset: usize) -> Result<usize, String> {
+/// or `Err(ChunkedBodyError)` if the data is incomplete or malformed.
+fn chunked_body_complete(buf: &[u8], body_offset: usize) -> Result<usize, ChunkedBodyError> {
     let data_len = buf.len() - body_offset;
     let mut read_pos: usize = 0;
 
     loop {
         // Need at least 1 byte to start scanning for chunk-size
         if read_pos >= data_len {
-            return Err("truncated: no data for next chunk-size".into());
+            return Err(ChunkedBodyError::Incomplete("no data for next chunk-size".into()));
         }
 
         // Find the end of the chunk-size line (CRLF)
         let size_line_end = match find_crlf(&buf[body_offset + read_pos..]) {
             Some(pos) => pos,
             None => {
-                return Err("truncated: missing CRLF after chunk-size".into());
+                return Err(ChunkedBodyError::Incomplete("missing CRLF after chunk-size".into()));
             }
         };
 
@@ -499,14 +506,14 @@ fn chunked_body_complete(buf: &[u8], body_offset: usize) -> Result<usize, String
             None => size_line,
         };
         let hex_str = std::str::from_utf8(trim_ascii(hex_part))
-            .map_err(|_| "Malformed chunked body: invalid chunk-size encoding".to_string())?;
+            .map_err(|_| ChunkedBodyError::Malformed("invalid chunk-size encoding".to_string()))?;
 
         if hex_str.is_empty() {
-            return Err("Malformed chunked body: empty chunk-size".into());
+            return Err(ChunkedBodyError::Malformed("empty chunk-size".into()));
         }
 
         let chunk_size = usize::from_str_radix(hex_str, 16)
-            .map_err(|_| format!("Malformed chunked body: invalid chunk-size '{}'", hex_str))?;
+            .map_err(|_| ChunkedBodyError::Malformed(format!("invalid chunk-size '{}'", hex_str)))?;
 
         // Advance past "chunk-size\r\n"
         read_pos += size_line_end + 2;
@@ -516,7 +523,7 @@ fn chunked_body_complete(buf: &[u8], body_offset: usize) -> Result<usize, String
             // Skip optional trailer headers until final CRLF
             loop {
                 if read_pos + 2 > data_len {
-                    return Err("truncated: missing final CRLF after 0 chunk".into());
+                    return Err(ChunkedBodyError::Incomplete("missing final CRLF after 0 chunk".into()));
                 }
                 if buf[body_offset + read_pos] == b'\r'
                     && buf[body_offset + read_pos + 1] == b'\n'
@@ -527,7 +534,7 @@ fn chunked_body_complete(buf: &[u8], body_offset: usize) -> Result<usize, String
                 match find_crlf(&buf[body_offset + read_pos..]) {
                     Some(pos) => read_pos += pos + 2,
                     None => {
-                        return Err("truncated: incomplete trailer".into());
+                        return Err(ChunkedBodyError::Incomplete("incomplete trailer".into()));
                     }
                 }
             }
@@ -535,7 +542,7 @@ fn chunked_body_complete(buf: &[u8], body_offset: usize) -> Result<usize, String
 
         // Check we have chunk-data + CRLF
         if read_pos + chunk_size + 2 > data_len {
-            return Err("truncated: chunk data incomplete".into());
+            return Err(ChunkedBodyError::Incomplete("chunk data incomplete".into()));
         }
 
         // Skip chunk-data + CRLF
@@ -543,7 +550,7 @@ fn chunked_body_complete(buf: &[u8], body_offset: usize) -> Result<usize, String
 
         // Validate CRLF after data
         if buf[body_offset + read_pos] != b'\r' || buf[body_offset + read_pos + 1] != b'\n' {
-            return Err("Malformed chunked body: missing CRLF after chunk data".into());
+            return Err(ChunkedBodyError::Malformed("missing CRLF after chunk data".into()));
         }
         read_pos += 2;
     }
@@ -1434,7 +1441,8 @@ impl Interpreter {
                 let check = chunked_body_complete(&conn.buf[..conn.total_read], head_consumed);
                 match check {
                     Ok(wire_used) => break Ok(wire_used),
-                    Err(ref msg) if msg.starts_with("truncated:") => {
+                    // NB2-15: Use typed enum instead of string prefix matching
+                    Err(ChunkedBodyError::Incomplete(_)) => {
                         if conn.total_read >= MAX_REQUEST_BUF {
                             break Err("Chunked body exceeds buffer limit".to_string());
                         }
@@ -1453,7 +1461,7 @@ impl Interpreter {
                             Err(_) => break Err("Chunked body incomplete: read error".into()),
                         }
                     }
-                    Err(msg) => break Err(msg),
+                    Err(ChunkedBodyError::Malformed(msg)) => break Err(msg),
                 }
             };
 
@@ -4954,7 +4962,8 @@ mod tests {
     #[test]
     fn test_http_serve_chunked_body() {
         use std::sync::atomic::{AtomicU16, Ordering};
-        static PORT_COUNTER: AtomicU16 = AtomicU16::new(19500);
+        // NB2-11: Use distinct port range to avoid collision with test_keep_alive_max_requests_across_connections
+        static PORT_COUNTER: AtomicU16 = AtomicU16::new(19700);
         let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
 
         let server_port = port;

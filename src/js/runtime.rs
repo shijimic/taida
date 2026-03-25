@@ -3307,8 +3307,10 @@ function __taida_net_chunkedInPlaceCompact(buf, bodyOffset) {
 
     const hexStr = buf.toString('latin1', bodyOffset + hexStart, bodyOffset + hexEnd);
     if (!/^[0-9a-fA-F]+$/.test(hexStr)) return null; // strict hex validation
+    // NB2-4: Reject oversized chunk-size (parity with body_complete)
+    if (hexStr.length > 15) return null; // malformed: oversized chunk-size
     const chunkSize = parseInt(hexStr, 16);
-    if (isNaN(chunkSize) || chunkSize < 0) return null; // invalid hex
+    if (isNaN(chunkSize) || chunkSize < 0 || !Number.isSafeInteger(chunkSize)) return null; // invalid hex
 
     // Advance past "chunk-size\r\n"
     readPos = crlfPos + 2;
@@ -3374,8 +3376,11 @@ function __taida_net_chunkedBodyComplete(buf, bodyOffset) {
 
     const hexStr = buf.toString('latin1', bodyOffset + hexStart, bodyOffset + hexEnd);
     if (!/^[0-9a-fA-F]+$/.test(hexStr)) return -2; // strict hex validation
+    // NB2-4: Reject oversized chunk-size that would exceed safe integer range.
+    // Prevents JS parseInt wrapping to Infinity / imprecise float for huge hex values.
+    if (hexStr.length > 15) return -2; // malformed: oversized chunk-size
     const chunkSize = parseInt(hexStr, 16);
-    if (isNaN(chunkSize) || chunkSize < 0) return -2; // malformed
+    if (isNaN(chunkSize) || chunkSize < 0 || !Number.isSafeInteger(chunkSize)) return -2; // malformed
 
     readPos = crlfPos + 2;
 
@@ -3565,7 +3570,8 @@ async function __taida_net_httpServe(port, handler, maxRequests, timeoutMs, maxC
         }
         if (headEnd < 0) return false; // need more data
 
-        const parseResult = __taida_net_httpParseRequestHead(new Uint8Array(buf));
+        // NB2-18: Pass buf directly (Buffer IS-A Uint8Array, no copy needed)
+        const parseResult = __taida_net_httpParseRequestHead(buf);
         const parsed = parseResult && parseResult.__value;
         if (!parsed || (parseResult.throw !== null && parseResult.throw !== undefined)) {
           send400AndClose(); return true;
@@ -3588,14 +3594,17 @@ async function __taida_net_httpServe(port, handler, maxRequests, timeoutMs, maxC
           const totalWire = parsed.consumed + compact.wireConsumed;
           // Detach request-scoped raw (owned copy): head + compacted body
           const rawLen = parsed.consumed + compact.bodyLen;
-          const raw = new Uint8Array(buf.buffer, buf.byteOffset, rawLen).slice();
+          const raw = buf.subarray(0, rawLen);
 
           const remoteAddr = socket.remoteAddress || '127.0.0.1';
           const cleanHost = remoteAddr.startsWith('::ffff:') ? remoteAddr.substring(7) : remoteAddr;
-          const keepAlive = __taida_net_determineKeepAlive(Buffer.from(raw), parsed.headers, parsed.version.minor);
+          // NB2-18: Determine keepAlive from buf directly (no extra copy)
+          const keepAlive = __taida_net_determineKeepAlive(buf, parsed.headers, parsed.version.minor);
 
+          // Snapshot raw for request pack (owned copy, decoupled from scratch buffer)
+          const rawSnapshot = Buffer.from(raw);
           const request = Object.freeze({
-            raw: raw,
+            raw: new Uint8Array(rawSnapshot.buffer, rawSnapshot.byteOffset, rawSnapshot.byteLength),
             method: parsed.method,
             path: parsed.path,
             query: parsed.query,
@@ -3623,15 +3632,15 @@ async function __taida_net_httpServe(port, handler, maxRequests, timeoutMs, maxC
           const bodyNeeded = parsed.consumed + contentLength;
           if (buf.length < bodyNeeded) return false; // need more body data
 
-          // Detach request-scoped raw (owned copy)
-          const raw = new Uint8Array(buf.buffer, buf.byteOffset, bodyNeeded).slice();
-
           const remoteAddr = socket.remoteAddress || '127.0.0.1';
           const cleanHost = remoteAddr.startsWith('::ffff:') ? remoteAddr.substring(7) : remoteAddr;
-          const keepAlive = __taida_net_determineKeepAlive(Buffer.from(raw), parsed.headers, parsed.version.minor);
+          // NB2-18: Determine keepAlive from buf directly (no extra copy)
+          const keepAlive = __taida_net_determineKeepAlive(buf, parsed.headers, parsed.version.minor);
 
+          // Snapshot raw for request pack (owned copy, decoupled from scratch buffer)
+          const rawSnapshot = Buffer.from(buf.subarray(0, bodyNeeded));
           const request = Object.freeze({
-            raw: raw,
+            raw: new Uint8Array(rawSnapshot.buffer, rawSnapshot.byteOffset, rawSnapshot.byteLength),
             method: parsed.method,
             path: parsed.path,
             query: parsed.query,
@@ -3682,6 +3691,8 @@ async function __taida_net_httpServe(port, handler, maxRequests, timeoutMs, maxC
 
       function afterHandler(responseVal, keepAlive) {
         if (connClosed_ || serverClosed) return;
+        // NB2-12: Guard against writing to a destroyed/ended socket
+        if (socket.destroyed || !socket.writable) { closeConn(); return; }
 
         // Encode and write response
         const encoded = __taida_net_httpEncodeResponse(responseVal);
@@ -3718,22 +3729,28 @@ async function __taida_net_httpServe(port, handler, maxRequests, timeoutMs, maxC
           // (pipelined or buffered data)
           if (buf.length > 0 && tryProcessRequest()) return;
 
+          // NB2-8: Remove all existing listeners before re-attaching to prevent
+          // listener accumulation on keep-alive connections (avoids MaxListenersExceededWarning).
+          socket.removeAllListeners('timeout');
+          socket.removeAllListeners('end');
+          socket.removeAllListeners('error');
+
           // Re-attach data listener for next request on this connection
           socket.setTimeout(timeout);
           socket.on('timeout', () => {
-            if (connRequests === 0 || buf.length > 0) {
-              // First request timeout or partial data timeout: bad request
+            if (buf.length > 0) {
+              // Partial data timeout: bad request
               send400AndClose();
             } else {
               // True idle on keep-alive: clean close
               closeConn();
             }
           });
+          // NB2-3: Partial data on keep-alive follow-up should be 400,
+          // not silent close — parity with Interpreter/Native.
           socket.on('end', () => {
             if (buf.length > 0) {
-              // Partial data when client closes: bad request
-              if (connRequests === 0) send400AndClose();
-              else closeConn();
+              send400AndClose();
             } else {
               closeConn();
             }
@@ -3751,10 +3768,12 @@ async function __taida_net_httpServe(port, handler, maxRequests, timeoutMs, maxC
         tryProcessRequest();
       }
 
-      // Initial event setup for the first request
+      // NB2-2: Initial event setup for the first request.
+      // If no data has arrived (buf.length === 0), idle timeout/EOF is a clean close
+      // (no 400, no request budget consumed) — parity with Interpreter/Native.
       socket.setTimeout(timeout);
       socket.on('timeout', () => {
-        if (connRequests === 0 || buf.length > 0) {
+        if (buf.length > 0) {
           send400AndClose();
         } else {
           closeConn();
@@ -3762,7 +3781,7 @@ async function __taida_net_httpServe(port, handler, maxRequests, timeoutMs, maxC
       });
       socket.on('end', () => {
         if (!connClosed_) {
-          if (connRequests === 0) send400AndClose();
+          if (buf.length > 0) send400AndClose();
           else closeConn();
         }
       });
@@ -3789,21 +3808,7 @@ async function __taida_net_httpServe(port, handler, maxRequests, timeoutMs, maxC
   });
 }
 
-// Helper: encode response and write to socket (does NOT destroy socket — caller decides)
-function __taida_net_sendResponse(socket, responseVal, onDone) {
-  const encoded = __taida_net_httpEncodeResponse(responseVal);
-  const encInner = encoded && encoded.__value;
-  if (encInner && encInner.bytes) {
-    socket.write(Buffer.from(encInner.bytes), () => {
-      if (onDone) onDone();
-    });
-  } else {
-    // Encode failed -> 500
-    socket.write('HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n', () => {
-      if (onDone) onDone();
-    });
-  }
-}
+// NB2-13: __taida_net_sendResponse removed (dead code since v2 inlined response encoding in afterHandler)
 
 // readBody(req) -> Bytes
 // Extract body bytes from a request pack using raw buffer + body span.
