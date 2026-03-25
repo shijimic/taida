@@ -6431,7 +6431,8 @@ stdout(parsed.contentLength)
     );
     // NB2-17: Use exact match instead of contains()
     assert_eq!(
-        interp.trim(), "5",
+        interp.trim(),
+        "5",
         "Content-Length should be 5 with tab whitespace, got: {}",
         interp
     );
@@ -6745,7 +6746,8 @@ stdout(result.__value.contentLength)
     );
     // NB2-17: Use exact match instead of contains()
     assert_eq!(
-        interp.trim(), "5",
+        interp.trim(),
+        "5",
         "Leading-zero padded CL '00000000000000005' should parse as 5, got: {}",
         interp
     );
@@ -6810,7 +6812,8 @@ stdout(result.__value.contentLength)
     );
     // NB2-17: Use exact match instead of contains() which could match "10", "200" etc.
     assert_eq!(
-        interp3.trim(), "0",
+        interp3.trim(),
+        "0",
         "All-zeros CL '00000000000000000' should parse as 0, got: {}",
         interp3
     );
@@ -6964,7 +6967,8 @@ stdout(parsed.contentLength)
     );
     // NB2-17: Use exact match instead of contains()
     assert_eq!(
-        interp.trim(), "5",
+        interp.trim(),
+        "5",
         "Content-Length should be 5 with tab, got: {}",
         interp
     );
@@ -7010,23 +7014,36 @@ stdout(parsed.chunked)
     // NB2-16: Verify chunked field is "false" on Interp/JS
     assert!(
         interp.contains("false"),
-        "NET2-2a: chunked should be false on Interp, got: {}", interp
+        "NET2-2a: chunked should be false on Interp, got: {}",
+        interp
     );
     // NB2-16+NB2-1: Native Bool display may differ (0 vs false). Check numeric lines match
     // and chunked line is falsy (0 or false).
     let interp_lines: Vec<&str> = interp.trim().lines().collect();
     let native_lines: Vec<&str> = native.trim().lines().collect();
-    assert_eq!(interp_lines.len(), native_lines.len(),
-        "NET2-2a: chunked=false line count mismatch\nInterp: {}\nNative: {}", interp, native);
+    assert_eq!(
+        interp_lines.len(),
+        native_lines.len(),
+        "NET2-2a: chunked=false line count mismatch\nInterp: {}\nNative: {}",
+        interp,
+        native
+    );
     // First two lines (consumed, contentLength) must match exactly
-    assert_eq!(interp_lines[0], native_lines[0],
-        "NET2-2a: consumed mismatch\nInterp: {}\nNative: {}", interp, native);
-    assert_eq!(interp_lines[1], native_lines[1],
-        "NET2-2a: contentLength mismatch\nInterp: {}\nNative: {}", interp, native);
+    assert_eq!(
+        interp_lines[0], native_lines[0],
+        "NET2-2a: consumed mismatch\nInterp: {}\nNative: {}",
+        interp, native
+    );
+    assert_eq!(
+        interp_lines[1], native_lines[1],
+        "NET2-2a: contentLength mismatch\nInterp: {}\nNative: {}",
+        interp, native
+    );
     // Third line (chunked) must be falsy: "false" or "0"
     assert!(
         native_lines[2] == "false" || native_lines[2] == "0",
-        "NET2-2a: Native chunked should be false/0, got: {}", native_lines[2]
+        "NET2-2a: Native chunked should be false/0, got: {}",
+        native_lines[2]
     );
 
     // Test 2: Request with Transfer-Encoding: chunked → chunked = true
@@ -7057,21 +7074,34 @@ stdout(parsed.chunked)
     // NB2-16: Verify chunked field is "true" on Interp/JS
     assert!(
         interp2.contains("true"),
-        "NET2-2a: chunked should be true on Interp, got: {}", interp2
+        "NET2-2a: chunked should be true on Interp, got: {}",
+        interp2
     );
     // NB2-16+NB2-1: Check Native parity with Bool normalization
     let interp2_lines: Vec<&str> = interp2.trim().lines().collect();
     let native2_lines: Vec<&str> = native2.trim().lines().collect();
-    assert_eq!(interp2_lines.len(), native2_lines.len(),
-        "NET2-2a: chunked=true line count mismatch\nInterp: {}\nNative: {}", interp2, native2);
-    assert_eq!(interp2_lines[0], native2_lines[0],
-        "NET2-2a: consumed mismatch\nInterp: {}\nNative: {}", interp2, native2);
-    assert_eq!(interp2_lines[1], native2_lines[1],
-        "NET2-2a: contentLength mismatch\nInterp: {}\nNative: {}", interp2, native2);
+    assert_eq!(
+        interp2_lines.len(),
+        native2_lines.len(),
+        "NET2-2a: chunked=true line count mismatch\nInterp: {}\nNative: {}",
+        interp2,
+        native2
+    );
+    assert_eq!(
+        interp2_lines[0], native2_lines[0],
+        "NET2-2a: consumed mismatch\nInterp: {}\nNative: {}",
+        interp2, native2
+    );
+    assert_eq!(
+        interp2_lines[1], native2_lines[1],
+        "NET2-2a: contentLength mismatch\nInterp: {}\nNative: {}",
+        interp2, native2
+    );
     // Third line (chunked) must be truthy: "true" or "1"
     assert!(
         native2_lines[2] == "true" || native2_lines[2] == "1",
-        "NET2-2a: Native chunked should be true/1, got: {}", native2_lines[2]
+        "NET2-2a: Native chunked should be true/1, got: {}",
+        native2_lines[2]
     );
 }
 
@@ -9064,8 +9094,8 @@ stdout(body.length())
 
     let dir = setup_net_project(source, "readbody_invalid_arg");
 
-    let interp_err = run_net_interpreter_runtime_error(&dir)
-        .expect("interpreter should fail for readBody(42)");
+    let interp_err =
+        run_net_interpreter_runtime_error(&dir).expect("interpreter should fail for readBody(42)");
     let js_err = run_net_js_runtime_error(&dir, "readbody_invalid_arg")
         .expect("js should fail for readBody(42)");
     let native_err = run_net_native_runtime_error(&dir, "readbody_invalid_arg")
@@ -9098,11 +9128,7 @@ stdout(body.length())
 /// Helper: spawn a server (interpreter, JS, or native) and return the child process.
 /// For JS, transpiles to .mjs, spawns `node`, and waits for startup.
 /// For native, compiles to a binary and spawns it.
-fn spawn_net_server_backend(
-    dir: &Path,
-    backend: &str,
-    label: &str,
-) -> (Child, Option<PathBuf>) {
+fn spawn_net_server_backend(dir: &Path, backend: &str, label: &str) -> (Child, Option<PathBuf>) {
     let td_path = dir.join("main.td");
     match backend {
         "interp" => {
@@ -9229,7 +9255,8 @@ stdout(r.requests)
         );
 
         let dir = setup_net_project(&source, &format!("net4_ka_{}", backend));
-        let (mut child, js_path) = spawn_net_server_backend(&dir, backend, &format!("ka_{}", backend));
+        let (mut child, js_path) =
+            spawn_net_server_backend(&dir, backend, &format!("ka_{}", backend));
 
         // Wait for server to be ready
         let mut connected = false;
@@ -9250,7 +9277,9 @@ stdout(r.requests)
 
         if !connected {
             let _ = child.kill();
-            if let Some(p) = &js_path { let _ = fs::remove_file(p); }
+            if let Some(p) = &js_path {
+                let _ = fs::remove_file(p);
+            }
             cleanup_net_project(&dir);
             panic!("{} backend: server did not start on port {}", backend, port);
         }
@@ -9341,7 +9370,9 @@ stdout(r.requests)
             backend, stdout
         );
 
-        if let Some(p) = &js_path { let _ = fs::remove_file(p); }
+        if let Some(p) = &js_path {
+            let _ = fs::remove_file(p);
+        }
         cleanup_net_project(&dir);
     }
 }
@@ -9374,7 +9405,8 @@ stdout(r.requests)
         );
 
         let dir = setup_net_project(&source, &format!("net4_chunk_{}", backend));
-        let (mut child, js_path) = spawn_net_server_backend(&dir, backend, &format!("chunk_{}", backend));
+        let (mut child, js_path) =
+            spawn_net_server_backend(&dir, backend, &format!("chunk_{}", backend));
 
         // Chunked POST body: "Wiki" (4 bytes) + "pedia " (7 bytes, note trailing space) = "Wikipedia "
         // Actually let's use a simpler body: "Hello" (5) + "World" (5) = "HelloWorld"
@@ -9384,9 +9416,14 @@ stdout(r.requests)
 
         if response.is_none() {
             let _ = child.kill();
-            if let Some(p) = &js_path { let _ = fs::remove_file(p); }
+            if let Some(p) = &js_path {
+                let _ = fs::remove_file(p);
+            }
             cleanup_net_project(&dir);
-            panic!("{} backend: server did not respond for chunked request", backend);
+            panic!(
+                "{} backend: server did not respond for chunked request",
+                backend
+            );
         }
 
         let resp_bytes = response.unwrap();
@@ -9413,7 +9450,9 @@ stdout(r.requests)
             backend, stdout
         );
 
-        if let Some(p) = &js_path { let _ = fs::remove_file(p); }
+        if let Some(p) = &js_path {
+            let _ = fs::remove_file(p);
+        }
         cleanup_net_project(&dir);
     }
 }
@@ -9447,7 +9486,8 @@ stdout(r.requests)
         );
 
         let dir = setup_net_project(&source, &format!("net4_malchunk_{}", backend));
-        let (mut child, js_path) = spawn_net_server_backend(&dir, backend, &format!("malchunk_{}", backend));
+        let (mut child, js_path) =
+            spawn_net_server_backend(&dir, backend, &format!("malchunk_{}", backend));
 
         // Malformed chunk-size: "5X" is prefix-valid garbage that parseInt would accept as 5,
         // but strict hex validation must reject it entirely.
@@ -9458,7 +9498,9 @@ stdout(r.requests)
         if response.is_none() {
             // Server closed connection without response — acceptable rejection behavior
             let _ = child.kill();
-            if let Some(p) = &js_path { let _ = fs::remove_file(p); }
+            if let Some(p) = &js_path {
+                let _ = fs::remove_file(p);
+            }
             cleanup_net_project(&dir);
             continue;
         }
@@ -9480,7 +9522,9 @@ stdout(r.requests)
             backend, stdout
         );
 
-        if let Some(p) = &js_path { let _ = fs::remove_file(p); }
+        if let Some(p) = &js_path {
+            let _ = fs::remove_file(p);
+        }
         cleanup_net_project(&dir);
     }
 }
@@ -9512,7 +9556,8 @@ stdout(r.requests)
         );
 
         let dir = setup_net_project(&source, &format!("net4_conc_{}", backend));
-        let (mut child, js_path) = spawn_net_server_backend(&dir, backend, &format!("conc_{}", backend));
+        let (mut child, js_path) =
+            spawn_net_server_backend(&dir, backend, &format!("conc_{}", backend));
 
         // Wait for server to be ready using send_http_request (which consumes 1 request slot).
         // maxRequests is 3: 1 readiness probe + 2 real concurrent clients.
@@ -9522,7 +9567,9 @@ stdout(r.requests)
         );
         if probe_resp.is_none() {
             let _ = child.kill();
-            if let Some(p) = &js_path { let _ = fs::remove_file(p); }
+            if let Some(p) = &js_path {
+                let _ = fs::remove_file(p);
+            }
             cleanup_net_project(&dir);
             panic!("{} backend: server did not start on port {}", backend, port);
         }
@@ -9584,9 +9631,19 @@ stdout(r.requests)
         );
 
         let s1 = String::from_utf8_lossy(resp1.as_ref().unwrap());
-        assert!(s1.contains("concurrent-ok"), "{} backend: client 1 response should contain 'concurrent-ok', got: {}", backend, s1);
+        assert!(
+            s1.contains("concurrent-ok"),
+            "{} backend: client 1 response should contain 'concurrent-ok', got: {}",
+            backend,
+            s1
+        );
         let s2 = String::from_utf8_lossy(resp2.as_ref().unwrap());
-        assert!(s2.contains("concurrent-ok"), "{} backend: client 2 response should contain 'concurrent-ok', got: {}", backend, s2);
+        assert!(
+            s2.contains("concurrent-ok"),
+            "{} backend: client 2 response should contain 'concurrent-ok', got: {}",
+            backend,
+            s2
+        );
 
         let output = child.wait_with_output().expect("wait for server");
         let stdout = normalize(&String::from_utf8_lossy(&output.stdout));
@@ -9596,7 +9653,9 @@ stdout(r.requests)
             backend, stdout
         );
 
-        if let Some(p) = &js_path { let _ = fs::remove_file(p); }
+        if let Some(p) = &js_path {
+            let _ = fs::remove_file(p);
+        }
         cleanup_net_project(&dir);
     }
 }
@@ -9630,7 +9689,8 @@ stdout(r.requests)
         );
 
         let dir = setup_net_project(&source, &format!("net4_maxconn_{}", backend));
-        let (mut child, js_path) = spawn_net_server_backend(&dir, backend, &format!("maxconn_{}", backend));
+        let (mut child, js_path) =
+            spawn_net_server_backend(&dir, backend, &format!("maxconn_{}", backend));
 
         // First request: fills the single connection slot, then closes (Connection: close)
         let response1 = send_http_request(
@@ -9640,9 +9700,14 @@ stdout(r.requests)
 
         if response1.is_none() {
             let _ = child.kill();
-            if let Some(p) = &js_path { let _ = fs::remove_file(p); }
+            if let Some(p) = &js_path {
+                let _ = fs::remove_file(p);
+            }
             cleanup_net_project(&dir);
-            panic!("{} backend: server did not respond for first request with maxConnections=1", backend);
+            panic!(
+                "{} backend: server did not respond for first request with maxConnections=1",
+                backend
+            );
         }
 
         let resp1_str = String::from_utf8_lossy(response1.as_ref().unwrap());
@@ -9662,7 +9727,9 @@ stdout(r.requests)
             // Server already shut down after maxRequests=2 was reached (first request counted)
             // This is acceptable — the first request proved maxConn=1 works
             let _ = child.wait_with_output();
-            if let Some(p) = &js_path { let _ = fs::remove_file(p); }
+            if let Some(p) = &js_path {
+                let _ = fs::remove_file(p);
+            }
             cleanup_net_project(&dir);
             continue;
         }
@@ -9707,7 +9774,9 @@ stdout(r.requests)
             backend, stdout
         );
 
-        if let Some(p) = &js_path { let _ = fs::remove_file(p); }
+        if let Some(p) = &js_path {
+            let _ = fs::remove_file(p);
+        }
         cleanup_net_project(&dir);
     }
 }
@@ -9741,7 +9810,8 @@ stdout(r.ok)
         );
 
         let dir = setup_net_project(&source, &format!("net4_kafield_{}", backend));
-        let (mut child, js_path) = spawn_net_server_backend(&dir, backend, &format!("kafield_{}", backend));
+        let (mut child, js_path) =
+            spawn_net_server_backend(&dir, backend, &format!("kafield_{}", backend));
 
         // HTTP/1.1 request with Connection: close -> keepAlive should be false
         let response = send_http_request(
@@ -9756,9 +9826,14 @@ stdout(r.ok)
                 out.map(|o| String::from_utf8_lossy(&o.stderr).to_string())
                     .unwrap_or_default()
             };
-            if let Some(p) = &js_path { let _ = fs::remove_file(p); }
+            if let Some(p) = &js_path {
+                let _ = fs::remove_file(p);
+            }
             cleanup_net_project(&dir);
-            panic!("{} backend: server did not respond for keepAlive field test.\nstderr: {}", backend, stderr);
+            panic!(
+                "{} backend: server did not respond for keepAlive field test.\nstderr: {}",
+                backend, stderr
+            );
         }
 
         let resp_bytes = response.unwrap();
@@ -9771,7 +9846,9 @@ stdout(r.ok)
         );
 
         let _ = child.wait_with_output();
-        if let Some(p) = &js_path { let _ = fs::remove_file(p); }
+        if let Some(p) = &js_path {
+            let _ = fs::remove_file(p);
+        }
         cleanup_net_project(&dir);
     }
 }
@@ -9780,7 +9857,7 @@ stdout(r.ok)
 /// Tests multiple malformed chunk-size patterns beyond "5X":
 ///   - empty chunk-size ("\r\nHello\r\n...")
 ///   - negative chunk-size ("-1\r\nX\r\n...")
-/// Each must be rejected with 400 or connection close by both backends.
+///     Each must be rejected with 400 or connection close by both backends.
 #[test]
 fn test_net2_4e_malformed_chunked_variants_interp_js_parity() {
     if !node_available() {
@@ -10017,9 +10094,14 @@ stdout(r.requests)
         }
         if !connected {
             let _ = child.kill();
-            if let Some(p) = &artifact_path { let _ = fs::remove_file(p); }
+            if let Some(p) = &artifact_path {
+                let _ = fs::remove_file(p);
+            }
             cleanup_net_project(&dir);
-            panic!("{} backend: server did not become ready on port {}", backend, port);
+            panic!(
+                "{} backend: server did not become ready on port {}",
+                backend, port
+            );
         }
 
         let s = stream.as_mut().unwrap();
@@ -10033,7 +10115,8 @@ stdout(r.requests)
         assert!(
             resp1_str.contains("200 OK"),
             "{} backend: first keep-alive response should be 200 OK, got: {}",
-            backend, resp1_str
+            backend,
+            resp1_str
         );
 
         // Request 2 on same connection (keep-alive)
@@ -10058,7 +10141,8 @@ stdout(r.requests)
         assert!(
             resp2_str.contains("200 OK"),
             "{} backend: second keep-alive response should be 200 OK, got: {}",
-            backend, resp2_str
+            backend,
+            resp2_str
         );
 
         // Wait for server to exit (maxRequests=2)
@@ -10067,10 +10151,13 @@ stdout(r.requests)
         assert!(
             stdout.contains("2"),
             "{} backend: server should report 2 requests. Got: {}",
-            backend, stdout
+            backend,
+            stdout
         );
 
-        if let Some(p) = &artifact_path { let _ = fs::remove_file(p); }
+        if let Some(p) = &artifact_path {
+            let _ = fs::remove_file(p);
+        }
         cleanup_net_project(&dir);
     }
 }
@@ -10112,11 +10199,14 @@ stdout(r.ok)
         assert!(
             body.contains("Wikipedia i"),
             "{} backend: chunked readBody should return 'Wikipedia i', got: {}",
-            backend, body
+            backend,
+            body
         );
 
         let _ = child.wait_with_output();
-        if let Some(p) = &artifact_path { let _ = fs::remove_file(p); }
+        if let Some(p) = &artifact_path {
+            let _ = fs::remove_file(p);
+        }
         cleanup_net_project(&dir);
     }
 }
@@ -10168,7 +10258,9 @@ stdout(r.requests)
                 }
                 Err(e) => {
                     let _ = child.kill();
-                    if let Some(p) = &artifact_path { let _ = fs::remove_file(p); }
+                    if let Some(p) = &artifact_path {
+                        let _ = fs::remove_file(p);
+                    }
                     cleanup_net_project(&dir);
                     panic!("{} backend: concurrent connect failed: {}", backend, e);
                 }
@@ -10205,7 +10297,9 @@ stdout(r.requests)
             assert!(
                 resp_str.contains("concurrent-ok"),
                 "{} backend: client {} should get 'concurrent-ok', got: {}",
-                backend, i, resp_str
+                backend,
+                i,
+                resp_str
             );
         }
 
@@ -10219,7 +10313,9 @@ stdout(r.requests)
             backend, stdout
         );
 
-        if let Some(p) = &artifact_path { let _ = fs::remove_file(p); }
+        if let Some(p) = &artifact_path {
+            let _ = fs::remove_file(p);
+        }
         cleanup_net_project(&dir);
     }
 }
@@ -10278,7 +10374,8 @@ stdout(r.requests)
         assert!(
             body_a.contains("slot-ok"),
             "{} backend: client A response should contain 'slot-ok', got: {}",
-            backend, body_a
+            backend,
+            body_a
         );
 
         thread::sleep(Duration::from_millis(200));
@@ -10297,7 +10394,8 @@ stdout(r.requests)
         assert!(
             body_b.contains("slot-ok"),
             "{} backend: client B response should contain 'slot-ok', got: {}",
-            backend, body_b
+            backend,
+            body_b
         );
 
         let output = child.wait_with_output().expect("wait for server");
@@ -10310,7 +10408,9 @@ stdout(r.requests)
             backend, stdout
         );
 
-        if let Some(p) = &artifact_path { let _ = fs::remove_file(p); }
+        if let Some(p) = &artifact_path {
+            let _ = fs::remove_file(p);
+        }
         cleanup_net_project(&dir);
     }
 }
@@ -10356,13 +10456,19 @@ stdout(r.ok)
         let body = String::from_utf8_lossy(resp.as_ref().unwrap());
         // "false" (interpreter) or "0" (native Bool display limitation)
         assert!(
-            body.contains("false") || body.contains("\n0\n") || body.ends_with("\n0") || body.ends_with("\r\n0"),
+            body.contains("false")
+                || body.contains("\n0\n")
+                || body.ends_with("\n0")
+                || body.ends_with("\r\n0"),
             "{} backend: keepAlive should be false/0 with Connection: close, got: {}",
-            backend, body
+            backend,
+            body
         );
 
         let _ = child.wait_with_output();
-        if let Some(p) = &artifact_path { let _ = fs::remove_file(p); }
+        if let Some(p) = &artifact_path {
+            let _ = fs::remove_file(p);
+        }
         cleanup_net_project(&dir);
     }
 }
@@ -10408,7 +10514,8 @@ stdout(r.requests)
         assert!(
             probe_body.contains("single-ok"),
             "{} backend: probe should get 'single-ok', got: {}",
-            backend, probe_body
+            backend,
+            probe_body
         );
 
         // Brief sleep to let server process shutdown after maxRequests hit.
@@ -10452,10 +10559,13 @@ stdout(r.requests)
         assert!(
             stdout.contains("1"),
             "{} backend: server should report 1 request. Got: {}",
-            backend, stdout
+            backend,
+            stdout
         );
 
-        if let Some(p) = &artifact_path { let _ = fs::remove_file(p); }
+        if let Some(p) = &artifact_path {
+            let _ = fs::remove_file(p);
+        }
         cleanup_net_project(&dir);
     }
 }
@@ -10540,7 +10650,8 @@ stdout(r.requests)
         assert!(
             partial_result.contains("400 Bad Request"),
             "{} backend: partial head timeout should return 400 Bad Request, got: {}",
-            backend, partial_result
+            backend,
+            partial_result
         );
 
         let output = child.wait_with_output().expect("wait for server");
@@ -10549,10 +10660,13 @@ stdout(r.requests)
         assert!(
             stdout.contains("2"),
             "{} backend: server should report 2 requests (probe + partial timeout). Got: {}",
-            backend, stdout
+            backend,
+            stdout
         );
 
-        if let Some(p) = &artifact_path { let _ = fs::remove_file(p); }
+        if let Some(p) = &artifact_path {
+            let _ = fs::remove_file(p);
+        }
         cleanup_net_project(&dir);
     }
 }
@@ -10600,7 +10714,11 @@ stdout(r.requests)
         // Step 1: Open an idle TCP connection, send nothing, then close.
         {
             let idle_conn = TcpStream::connect(format!("127.0.0.1:{}", port));
-            assert!(idle_conn.is_ok(), "{} backend: idle connection should succeed", backend);
+            assert!(
+                idle_conn.is_ok(),
+                "{} backend: idle connection should succeed",
+                backend
+            );
             // Hold briefly then drop (clean close with no data)
             thread::sleep(Duration::from_millis(300));
             drop(idle_conn);
@@ -10623,7 +10741,8 @@ stdout(r.requests)
         assert!(
             body.contains("idle-ok"),
             "{} backend: real request should get 'idle-ok', got: {}",
-            backend, body
+            backend,
+            body
         );
 
         // Wait for server to shut down (maxRequests=1 reached)
@@ -10636,10 +10755,13 @@ stdout(r.requests)
         assert!(
             lines.len() >= 2 && lines[1].trim() == "1",
             "{} backend: server should report requests=1, got stdout: {}",
-            backend, stdout
+            backend,
+            stdout
         );
 
-        if let Some(p) = &artifact_path { let _ = fs::remove_file(p); }
+        if let Some(p) = &artifact_path {
+            let _ = fs::remove_file(p);
+        }
         cleanup_net_project(&dir);
     }
 }
@@ -10670,8 +10792,7 @@ stdout(r.requests)
     );
 
     let dir = setup_net_project(&source, "net5_race_native");
-    let (child, artifact_path) =
-        spawn_net_server_backend(&dir, "native", "race_native");
+    let (child, artifact_path) = spawn_net_server_backend(&dir, "native", "race_native");
 
     // Wait for server to accept TCP connections (poll without sending HTTP data).
     let mut server_ready = false;
@@ -10745,7 +10866,9 @@ stdout(r.requests)
     // The other response should be 503 or empty (connection refused/reset).
     let other_resp = if got_200_1 { &resp2 } else { &resp1 };
     assert!(
-        other_resp.is_empty() || other_resp.contains("503") || other_resp.contains("Service Unavailable"),
+        other_resp.is_empty()
+            || other_resp.contains("503")
+            || other_resp.contains("Service Unavailable"),
         "native backend: rejected client should get 503 or connection error, got: [{}]",
         other_resp
     );
@@ -10760,7 +10883,9 @@ stdout(r.requests)
         stdout
     );
 
-    if let Some(p) = &artifact_path { let _ = fs::remove_file(p); }
+    if let Some(p) = &artifact_path {
+        let _ = fs::remove_file(p);
+    }
     cleanup_net_project(&dir);
 }
 
@@ -10818,9 +10943,14 @@ stdout(r.requests)
         }
         if !connected {
             let _ = child.kill();
-            if let Some(p) = &artifact { let _ = fs::remove_file(p); }
+            if let Some(p) = &artifact {
+                let _ = fs::remove_file(p);
+            }
             cleanup_net_project(&dir);
-            panic!("{} backend: server did not start for keep-alive 3-way parity", backend);
+            panic!(
+                "{} backend: server did not start for keep-alive 3-way parity",
+                backend
+            );
         }
 
         let s = stream.as_mut().unwrap();
@@ -10834,12 +10964,14 @@ stdout(r.requests)
         assert!(
             resp1_str.contains("200 OK"),
             "{} backend: first keep-alive response should be 200 OK, got: {}",
-            backend, resp1_str
+            backend,
+            resp1_str
         );
         assert!(
             resp1_str.contains("ka-ok"),
             "{} backend: first keep-alive response body should contain 'ka-ok', got: {}",
-            backend, resp1_str
+            backend,
+            resp1_str
         );
 
         // Request 2 on same connection (Connection: close to end)
@@ -10864,7 +10996,8 @@ stdout(r.requests)
         assert!(
             resp2_str.contains("200 OK"),
             "{} backend: second keep-alive response should be 200 OK, got: {}",
-            backend, resp2_str
+            backend,
+            resp2_str
         );
 
         // Wait for server to exit (maxRequests=2)
@@ -10872,7 +11005,9 @@ stdout(r.requests)
         let stdout = normalize(&String::from_utf8_lossy(&output.stdout));
         results.push((backend.to_string(), stdout));
 
-        if let Some(p) = &artifact { let _ = fs::remove_file(p); }
+        if let Some(p) = &artifact {
+            let _ = fs::remove_file(p);
+        }
         cleanup_net_project(&dir);
     }
 
@@ -10945,14 +11080,17 @@ stdout(r.requests)
         assert!(
             resp_str.contains("Hello World"),
             "{} backend: chunked readBody should return 'Hello World', got: {}",
-            backend, resp_str
+            backend,
+            resp_str
         );
 
         let output = child.wait_with_output().expect("wait for server");
         let stdout = normalize(&String::from_utf8_lossy(&output.stdout));
         results.push((backend.to_string(), stdout));
 
-        if let Some(p) = &artifact { let _ = fs::remove_file(p); }
+        if let Some(p) = &artifact {
+            let _ = fs::remove_file(p);
+        }
         cleanup_net_project(&dir);
     }
 
@@ -11030,14 +11168,17 @@ stdout(r.requests)
         assert!(
             resp_str.contains("taida-net-v2"),
             "{} backend: readBody should echo 'taida-net-v2', got: {}",
-            backend, resp_str
+            backend,
+            resp_str
         );
 
         let output = child.wait_with_output().expect("wait for server");
         let stdout = normalize(&String::from_utf8_lossy(&output.stdout));
         results.push((backend.to_string(), stdout));
 
-        if let Some(p) = &artifact { let _ = fs::remove_file(p); }
+        if let Some(p) = &artifact {
+            let _ = fs::remove_file(p);
+        }
         cleanup_net_project(&dir);
     }
 
@@ -11112,14 +11253,17 @@ stdout(r.requests)
         assert!(
             resp_str.contains("\r\n\r\n0") || resp_str.ends_with("0"),
             "{} backend: readBody of GET should return 0-length body, got: {}",
-            backend, resp_str
+            backend,
+            resp_str
         );
 
         let output = child.wait_with_output().expect("wait for server");
         let stdout = normalize(&String::from_utf8_lossy(&output.stdout));
         results.push((backend.to_string(), stdout));
 
-        if let Some(p) = &artifact { let _ = fs::remove_file(p); }
+        if let Some(p) = &artifact {
+            let _ = fs::remove_file(p);
+        }
         cleanup_net_project(&dir);
     }
 
@@ -11195,7 +11339,9 @@ stdout(r.requests)
                 }
                 Err(e) => {
                     let _ = child.kill();
-                    if let Some(p) = &artifact { let _ = fs::remove_file(p); }
+                    if let Some(p) = &artifact {
+                        let _ = fs::remove_file(p);
+                    }
                     cleanup_net_project(&dir);
                     panic!("{} backend: concurrent connect failed: {}", backend, e);
                 }
@@ -11233,7 +11379,9 @@ stdout(r.requests)
             assert!(
                 resp_str.contains("conc-3way"),
                 "{} backend: concurrent client {} should get 'conc-3way', got: {}",
-                backend, i, resp_str
+                backend,
+                i,
+                resp_str
             );
         }
 
@@ -11242,7 +11390,9 @@ stdout(r.requests)
         let stdout = normalize(&String::from_utf8_lossy(&output.stdout));
         results.push((backend.to_string(), stdout));
 
-        if let Some(p) = &artifact { let _ = fs::remove_file(p); }
+        if let Some(p) = &artifact {
+            let _ = fs::remove_file(p);
+        }
         cleanup_net_project(&dir);
     }
 
@@ -11314,12 +11464,14 @@ stdout(r.requests)
         assert!(
             resp_str.contains("200 OK"),
             "{} backend: v1 bounded serve response should contain '200 OK', got: {}",
-            backend, resp_str
+            backend,
+            resp_str
         );
         assert!(
             resp_str.contains("v1-ok"),
             "{} backend: v1 bounded serve body should contain 'v1-ok', got: {}",
-            backend, resp_str
+            backend,
+            resp_str
         );
 
         let output = child.wait_with_output().expect("wait for server");
@@ -11330,7 +11482,9 @@ stdout(r.requests)
             backend, stdout
         );
 
-        if let Some(p) = &artifact { let _ = fs::remove_file(p); }
+        if let Some(p) = &artifact {
+            let _ = fs::remove_file(p);
+        }
         cleanup_net_project(&dir);
     }
 }
@@ -11398,7 +11552,8 @@ stdout(encoded.bytes.length())
     let dir = setup_net_project(source, "net6_v1_encode");
     let interp = run_net_interpreter(&dir).expect("interpreter failed for v1 encode parity");
     let js = run_net_js(&dir, "net6_v1_encode").expect("js failed for v1 encode parity");
-    let native = run_net_native(&dir, "net6_v1_encode").expect("native failed for v1 encode parity");
+    let native =
+        run_net_native(&dir, "net6_v1_encode").expect("native failed for v1 encode parity");
     cleanup_net_project(&dir);
 
     assert_eq!(
@@ -11615,12 +11770,14 @@ stdout(serverResult.ok)
         assert!(
             !output.status.success(),
             "NET2-6f: {} should reject httpServe, but compile succeeded.\nstderr: {}",
-            profile, stderr
+            profile,
+            stderr
         );
         assert!(
             stderr.contains("httpServe") || stderr.contains("net"),
             "NET2-6f: {} compile error should mention httpServe or net.\nstderr: {}",
-            profile, stderr
+            profile,
+            stderr
         );
     }
 }

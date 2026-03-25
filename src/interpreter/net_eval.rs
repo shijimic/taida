@@ -400,13 +400,10 @@ fn chunked_in_place_compact(
             // Trailer format: (header-field CRLF)* CRLF
             loop {
                 if body_offset + read_pos + 2 > buf.len() {
-                    return Err(
-                        "Malformed chunked body: missing final CRLF after 0 chunk".into(),
-                    );
+                    return Err("Malformed chunked body: missing final CRLF after 0 chunk".into());
                 }
                 // Check if the next two bytes are CRLF (end of trailers)
-                if buf[body_offset + read_pos] == b'\r'
-                    && buf[body_offset + read_pos + 1] == b'\n'
+                if buf[body_offset + read_pos] == b'\r' && buf[body_offset + read_pos + 1] == b'\n'
                 {
                     read_pos += 2;
                     break;
@@ -415,9 +412,7 @@ fn chunked_in_place_compact(
                 match find_crlf(&buf[body_offset + read_pos..]) {
                     Some(pos) => read_pos += pos + 2,
                     None => {
-                        return Err(
-                            "Malformed chunked body: incomplete trailer".into(),
-                        );
+                        return Err("Malformed chunked body: incomplete trailer".into());
                     }
                 }
             }
@@ -458,12 +453,7 @@ fn find_crlf(data: &[u8]) -> Option<usize> {
     if data.len() < 2 {
         return None;
     }
-    for i in 0..data.len() - 1 {
-        if data[i] == b'\r' && data[i + 1] == b'\n' {
-            return Some(i);
-        }
-    }
-    None
+    (0..data.len() - 1).find(|&i| data[i] == b'\r' && data[i + 1] == b'\n')
 }
 
 /// Check if the buffer contains a complete chunked body (read-only scan).
@@ -488,14 +478,18 @@ fn chunked_body_complete(buf: &[u8], body_offset: usize) -> Result<usize, Chunke
     loop {
         // Need at least 1 byte to start scanning for chunk-size
         if read_pos >= data_len {
-            return Err(ChunkedBodyError::Incomplete("no data for next chunk-size".into()));
+            return Err(ChunkedBodyError::Incomplete(
+                "no data for next chunk-size".into(),
+            ));
         }
 
         // Find the end of the chunk-size line (CRLF)
         let size_line_end = match find_crlf(&buf[body_offset + read_pos..]) {
             Some(pos) => pos,
             None => {
-                return Err(ChunkedBodyError::Incomplete("missing CRLF after chunk-size".into()));
+                return Err(ChunkedBodyError::Incomplete(
+                    "missing CRLF after chunk-size".into(),
+                ));
             }
         };
 
@@ -512,8 +506,9 @@ fn chunked_body_complete(buf: &[u8], body_offset: usize) -> Result<usize, Chunke
             return Err(ChunkedBodyError::Malformed("empty chunk-size".into()));
         }
 
-        let chunk_size = usize::from_str_radix(hex_str, 16)
-            .map_err(|_| ChunkedBodyError::Malformed(format!("invalid chunk-size '{}'", hex_str)))?;
+        let chunk_size = usize::from_str_radix(hex_str, 16).map_err(|_| {
+            ChunkedBodyError::Malformed(format!("invalid chunk-size '{}'", hex_str))
+        })?;
 
         // Advance past "chunk-size\r\n"
         read_pos += size_line_end + 2;
@@ -523,10 +518,11 @@ fn chunked_body_complete(buf: &[u8], body_offset: usize) -> Result<usize, Chunke
             // Skip optional trailer headers until final CRLF
             loop {
                 if read_pos + 2 > data_len {
-                    return Err(ChunkedBodyError::Incomplete("missing final CRLF after 0 chunk".into()));
+                    return Err(ChunkedBodyError::Incomplete(
+                        "missing final CRLF after 0 chunk".into(),
+                    ));
                 }
-                if buf[body_offset + read_pos] == b'\r'
-                    && buf[body_offset + read_pos + 1] == b'\n'
+                if buf[body_offset + read_pos] == b'\r' && buf[body_offset + read_pos + 1] == b'\n'
                 {
                     read_pos += 2;
                     return Ok(read_pos);
@@ -550,7 +546,9 @@ fn chunked_body_complete(buf: &[u8], body_offset: usize) -> Result<usize, Chunke
 
         // Validate CRLF after data
         if buf[body_offset + read_pos] != b'\r' || buf[body_offset + read_pos + 1] != b'\n' {
-            return Err(ChunkedBodyError::Malformed("missing CRLF after chunk data".into()));
+            return Err(ChunkedBodyError::Malformed(
+                "missing CRLF after chunk data".into(),
+            ));
         }
         read_pos += 2;
     }
@@ -1240,7 +1238,12 @@ impl Interpreter {
                 // Try to read data (non-blocking due to short timeout)
                 let read_result = Self::try_read_request(conn);
                 match read_result {
-                    ConnReadResult::Ready(parsed_fields, head_consumed, content_length, is_chunked) => {
+                    ConnReadResult::Ready(
+                        parsed_fields,
+                        head_consumed,
+                        content_length,
+                        is_chunked,
+                    ) => {
                         // We have a complete request head. Process body + handler.
                         // Advance round-robin past this connection.
                         poll_start = (idx + 1) % n;
@@ -1344,11 +1347,9 @@ impl Interpreter {
                 None => return ConnReadResult::Malformed,
                 Some(inner) => {
                     if get_field_bool(inner, "complete").unwrap_or(false) {
-                        let consumed =
-                            get_field_int(inner, "consumed").unwrap_or(0) as usize;
+                        let consumed = get_field_int(inner, "consumed").unwrap_or(0) as usize;
                         let cl = get_field_int(inner, "contentLength").unwrap_or(0);
-                        let is_chunked =
-                            get_field_bool(inner, "chunked").unwrap_or(false);
+                        let is_chunked = get_field_bool(inner, "chunked").unwrap_or(false);
                         Some((consumed, cl, is_chunked))
                     } else {
                         None
@@ -1367,7 +1368,8 @@ impl Interpreter {
 
         // Need more data -- try a non-blocking read
         if conn.total_read == conn.buf.len() {
-            conn.buf.resize(std::cmp::min(conn.buf.len() * 2, MAX_REQUEST_BUF), 0);
+            conn.buf
+                .resize(std::cmp::min(conn.buf.len() * 2, MAX_REQUEST_BUF), 0);
         }
         match std::io::Read::read(&mut conn.stream, &mut conn.buf[conn.total_read..]) {
             Ok(0) => ConnReadResult::Eof,
@@ -1383,11 +1385,9 @@ impl Interpreter {
                     None => return ConnReadResult::Malformed,
                     Some(inner) => {
                         if get_field_bool(inner, "complete").unwrap_or(false) {
-                            let consumed =
-                                get_field_int(inner, "consumed").unwrap_or(0) as usize;
+                            let consumed = get_field_int(inner, "consumed").unwrap_or(0) as usize;
                             let cl = get_field_int(inner, "contentLength").unwrap_or(0);
-                            let is_chunked =
-                                get_field_bool(inner, "chunked").unwrap_or(false);
+                            let is_chunked = get_field_bool(inner, "chunked").unwrap_or(false);
                             Some((consumed, cl, is_chunked))
                         } else {
                             None
@@ -1447,9 +1447,13 @@ impl Interpreter {
                             break Err("Chunked body exceeds buffer limit".to_string());
                         }
                         if conn.total_read == conn.buf.len() {
-                            conn.buf.resize(std::cmp::min(conn.buf.len() * 2, MAX_REQUEST_BUF), 0);
+                            conn.buf
+                                .resize(std::cmp::min(conn.buf.len() * 2, MAX_REQUEST_BUF), 0);
                         }
-                        match std::io::Read::read(&mut conn.stream, &mut conn.buf[conn.total_read..]) {
+                        match std::io::Read::read(
+                            &mut conn.stream,
+                            &mut conn.buf[conn.total_read..],
+                        ) {
                             Ok(0) => break Err("Chunked body incomplete: connection closed".into()),
                             Ok(n) => conn.total_read += n,
                             Err(ref e)
@@ -1466,20 +1470,24 @@ impl Interpreter {
             };
 
             match completeness {
-                Ok(_scan_wire) => {
-                    match chunked_in_place_compact(&mut conn.buf, head_consumed) {
-                        Ok(compact) => {
-                            let total_wire = head_consumed + compact.wire_consumed;
-                            Ok((total_wire, head_consumed, compact.body_len, compact.body_len as i64, true))
-                        }
-                        Err(_msg) => {
-                            let bad_request = b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
-                            let _ = std::io::Write::write_all(&mut conn.stream, bad_request);
-                            *request_count += 1;
-                            Err(())
-                        }
+                Ok(_scan_wire) => match chunked_in_place_compact(&mut conn.buf, head_consumed) {
+                    Ok(compact) => {
+                        let total_wire = head_consumed + compact.wire_consumed;
+                        Ok((
+                            total_wire,
+                            head_consumed,
+                            compact.body_len,
+                            compact.body_len as i64,
+                            true,
+                        ))
                     }
-                }
+                    Err(_msg) => {
+                        let bad_request = b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+                        let _ = std::io::Write::write_all(&mut conn.stream, bad_request);
+                        *request_count += 1;
+                        Err(())
+                    }
+                },
                 Err(_msg) => {
                     let bad_request = b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
                     let _ = std::io::Write::write_all(&mut conn.stream, bad_request);
@@ -1500,29 +1508,44 @@ impl Interpreter {
             let mut body_incomplete = false;
             while conn.total_read < body_needed && conn.total_read < MAX_REQUEST_BUF {
                 if conn.total_read == conn.buf.len() {
-                    conn.buf.resize(std::cmp::min(conn.buf.len() * 2, MAX_REQUEST_BUF), 0);
+                    conn.buf
+                        .resize(std::cmp::min(conn.buf.len() * 2, MAX_REQUEST_BUF), 0);
                 }
                 match std::io::Read::read(&mut conn.stream, &mut conn.buf[conn.total_read..]) {
-                    Ok(0) => { body_incomplete = true; break; }
+                    Ok(0) => {
+                        body_incomplete = true;
+                        break;
+                    }
                     Ok(n) => conn.total_read += n,
                     Err(ref e)
                         if e.kind() == std::io::ErrorKind::WouldBlock
                             || e.kind() == std::io::ErrorKind::TimedOut =>
                     {
-                        body_incomplete = true; break;
+                        body_incomplete = true;
+                        break;
                     }
-                    Err(_) => { body_incomplete = true; break; }
+                    Err(_) => {
+                        body_incomplete = true;
+                        break;
+                    }
                 }
             }
 
             if content_length > 0 && (body_incomplete || conn.total_read < body_needed) {
-                let bad_request = b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+                let bad_request =
+                    b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
                 let _ = std::io::Write::write_all(&mut conn.stream, bad_request);
                 *request_count += 1;
                 return ConnAction::Close;
             }
 
-            Ok((body_needed, head_consumed, content_length as usize, content_length, false))
+            Ok((
+                body_needed,
+                head_consumed,
+                content_length as usize,
+                content_length,
+                false,
+            ))
         };
 
         let (wire_consumed, body_start, body_len, final_content_length, is_request_chunked) =
@@ -1541,16 +1564,12 @@ impl Interpreter {
 
         // ── Determine keep-alive (NET2-1a/1b/1c) ──
         let http_minor = match get_field_value(&parsed_fields, "version") {
-            Some(Value::BuchiPack(ver_fields)) => {
-                get_field_int(ver_fields, "minor").unwrap_or(1)
-            }
+            Some(Value::BuchiPack(ver_fields)) => get_field_int(ver_fields, "minor").unwrap_or(1),
             _ => 1,
         };
 
         let keep_alive = match get_field_value(&parsed_fields, "headers") {
-            Some(Value::List(headers)) => {
-                determine_keep_alive(&raw_bytes, headers, http_minor)
-            }
+            Some(Value::List(headers)) => determine_keep_alive(&raw_bytes, headers, http_minor),
             _ => http_minor == 1,
         };
 
@@ -1567,8 +1586,14 @@ impl Interpreter {
         request_fields.push(("body".into(), make_span(body_start, body_len)));
         request_fields.push(("bodyOffset".into(), Value::Int(head_consumed as i64)));
         request_fields.push(("contentLength".into(), Value::Int(final_content_length)));
-        request_fields.push(("remoteHost".into(), Value::Str(conn.peer_addr.ip().to_string())));
-        request_fields.push(("remotePort".into(), Value::Int(conn.peer_addr.port() as i64)));
+        request_fields.push((
+            "remoteHost".into(),
+            Value::Str(conn.peer_addr.ip().to_string()),
+        ));
+        request_fields.push((
+            "remotePort".into(),
+            Value::Int(conn.peer_addr.port() as i64),
+        ));
         request_fields.push(("keepAlive".into(), Value::Bool(keep_alive)));
         request_fields.push(("chunked".into(), Value::Bool(is_request_chunked)));
 
@@ -4269,9 +4294,8 @@ mod tests {
                                 {
                                     let cl_start = resp_start + cl_pos + 16;
                                     if let Some(cl_end) = text[cl_start..].find("\r\n") {
-                                        let cl: usize = text[cl_start..cl_start + cl_end]
-                                            .parse()
-                                            .unwrap_or(0);
+                                        let cl: usize =
+                                            text[cl_start..cl_start + cl_end].parse().unwrap_or(0);
                                         if let Some(body_start) =
                                             text[resp_start..].find("\r\n\r\n")
                                         {
@@ -4345,7 +4369,7 @@ mod tests {
             let args = vec![
                 Expr::IntLit(server_port as i64, dummy_span()),
                 make_handler_expr("keep-alive-ok"),
-                Expr::IntLit(2, dummy_span()),  // maxRequests=2
+                Expr::IntLit(2, dummy_span()), // maxRequests=2
                 Expr::IntLit(5000, dummy_span()),
             ];
             interp.try_net_func("httpServe", &args).unwrap().unwrap()
@@ -4363,10 +4387,7 @@ mod tests {
 
         // Read first response
         let responses = read_responses(&mut client, 1);
-        assert!(
-            !responses.is_empty(),
-            "Should receive first response"
-        );
+        assert!(!responses.is_empty(), "Should receive first response");
         assert!(
             responses[0].contains("200 OK"),
             "First response should be 200 OK, got: {}",
@@ -4386,10 +4407,7 @@ mod tests {
 
         // Read second response
         let responses2 = read_responses(&mut client, 1);
-        assert!(
-            !responses2.is_empty(),
-            "Should receive second response"
-        );
+        assert!(!responses2.is_empty(), "Should receive second response");
         assert!(
             responses2[0].contains("200 OK"),
             "Second response should be 200 OK, got: {}",
@@ -4425,7 +4443,7 @@ mod tests {
             let args = vec![
                 Expr::IntLit(server_port as i64, dummy_span()),
                 make_handler_expr("close-ok"),
-                Expr::IntLit(1, dummy_span()),  // maxRequests=1
+                Expr::IntLit(1, dummy_span()), // maxRequests=1
                 Expr::IntLit(5000, dummy_span()),
             ];
             interp.try_net_func("httpServe", &args).unwrap().unwrap()
@@ -4453,15 +4471,8 @@ mod tests {
         }
 
         let resp = String::from_utf8_lossy(&response);
-        assert!(
-            resp.contains("200 OK"),
-            "Should get 200 OK, got: {}",
-            resp
-        );
-        assert!(
-            resp.contains("close-ok"),
-            "Response body should be present"
-        );
+        assert!(resp.contains("200 OK"), "Should get 200 OK, got: {}", resp);
+        assert!(resp.contains("close-ok"), "Response body should be present");
 
         // Server terminates (maxRequests=1 reached after one request with Connection: close)
         let result = server_handle.join().unwrap();
@@ -4492,7 +4503,7 @@ mod tests {
             let args = vec![
                 Expr::IntLit(server_port as i64, dummy_span()),
                 make_handler_expr("http10-ka-ok"),
-                Expr::IntLit(2, dummy_span()),  // maxRequests=2
+                Expr::IntLit(2, dummy_span()), // maxRequests=2
                 Expr::IntLit(5000, dummy_span()),
             ];
             interp.try_net_func("httpServe", &args).unwrap().unwrap()
@@ -4579,11 +4590,8 @@ mod tests {
 
         // HTTP/1.0 without Connection header → default close
         let mut client = std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
-        std::io::Write::write_all(
-            &mut client,
-            b"GET / HTTP/1.0\r\nHost: localhost\r\n\r\n",
-        )
-        .unwrap();
+        std::io::Write::write_all(&mut client, b"GET / HTTP/1.0\r\nHost: localhost\r\n\r\n")
+            .unwrap();
 
         let mut response = Vec::new();
         let _ = client.set_read_timeout(Some(std::time::Duration::from_secs(3)));
@@ -4651,7 +4659,7 @@ mod tests {
             let args = vec![
                 Expr::IntLit(server_port as i64, dummy_span()),
                 make_handler_expr("max-req-ok"),
-                Expr::IntLit(3, dummy_span()),  // maxRequests=3 total
+                Expr::IntLit(3, dummy_span()), // maxRequests=3 total
                 Expr::IntLit(5000, dummy_span()),
             ];
             interp.try_net_func("httpServe", &args).unwrap().unwrap()
@@ -4716,7 +4724,10 @@ mod tests {
 
         let result = chunked_in_place_compact(&mut buf, body_offset).unwrap();
         assert_eq!(result.body_len, 11); // "Wikipedia i" = 11 bytes
-        assert_eq!(&buf[body_offset..body_offset + result.body_len], b"Wikipedia i");
+        assert_eq!(
+            &buf[body_offset..body_offset + result.body_len],
+            b"Wikipedia i"
+        );
         // wire_consumed should cover all chunked framing
         assert_eq!(result.wire_consumed, chunked_body.len());
     }
@@ -4890,8 +4901,7 @@ mod tests {
 
     #[test]
     fn test_parse_head_chunked_case_insensitive() {
-        let raw =
-            b"POST / HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: Chunked\r\n\r\n";
+        let raw = b"POST / HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: Chunked\r\n\r\n";
         let result = parse_request_head(raw);
         let inner = extract_result_value(&result).unwrap();
         assert_eq!(get_field_bool(inner, "chunked"), Some(true));
@@ -4914,7 +4924,10 @@ mod tests {
         let raw = b"POST / HTTP/1.1\r\nHost: h\r\nContent-Length: 5\r\nTransfer-Encoding: chunked\r\n\r\nhello";
         let result = parse_request_head(raw);
         // Should be a failure result
-        assert!(extract_result_value(&result).is_none(), "Should reject CL + TE:chunked");
+        assert!(
+            extract_result_value(&result).is_none(),
+            "Should reject CL + TE:chunked"
+        );
     }
 
     #[test]
@@ -5244,9 +5257,9 @@ mod tests {
             let args = vec![
                 Expr::IntLit(server_port as i64, dummy_span()),
                 make_handler_expr("concurrent-ok"),
-                Expr::IntLit(2, dummy_span()),   // maxRequests=2 (one per client)
+                Expr::IntLit(2, dummy_span()), // maxRequests=2 (one per client)
                 Expr::IntLit(5000, dummy_span()), // timeoutMs
-                Expr::IntLit(4, dummy_span()),    // maxConnections=4
+                Expr::IntLit(4, dummy_span()), // maxConnections=4
             ];
             interp.try_net_func("httpServe", &args).unwrap().unwrap()
         });
@@ -5254,10 +5267,8 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(100));
 
         // Connect two clients simultaneously before sending any data
-        let mut client1 =
-            std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
-        let mut client2 =
-            std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
+        let mut client1 = std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
+        let mut client2 = std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
 
         // Both send requests
         std::io::Write::write_all(
@@ -5275,10 +5286,7 @@ mod tests {
         let responses1 = read_responses(&mut client1, 1);
         let responses2 = read_responses(&mut client2, 1);
 
-        assert!(
-            !responses1.is_empty(),
-            "Client 1 should receive a response"
-        );
+        assert!(!responses1.is_empty(), "Client 1 should receive a response");
         assert!(
             responses1[0].contains("200 OK"),
             "Client 1 should get 200 OK, got: {}",
@@ -5289,10 +5297,7 @@ mod tests {
             "Client 1 should get body"
         );
 
-        assert!(
-            !responses2.is_empty(),
-            "Client 2 should receive a response"
-        );
+        assert!(!responses2.is_empty(), "Client 2 should receive a response");
         assert!(
             responses2[0].contains("200 OK"),
             "Client 2 should get 200 OK, got: {}",
@@ -5333,7 +5338,7 @@ mod tests {
             let args = vec![
                 Expr::IntLit(server_port as i64, dummy_span()),
                 make_handler_expr("limited-ok"),
-                Expr::IntLit(3, dummy_span()),   // maxRequests=3
+                Expr::IntLit(3, dummy_span()),    // maxRequests=3
                 Expr::IntLit(5000, dummy_span()), // timeoutMs
                 Expr::IntLit(2, dummy_span()),    // maxConnections=2
             ];
@@ -5344,10 +5349,8 @@ mod tests {
 
         // Connect 3 clients. maxConnections=2, so only 2 can be in the pool at once.
         // The third will be accepted after one of the first two closes.
-        let mut client1 =
-            std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
-        let mut client2 =
-            std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
+        let mut client1 = std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
+        let mut client2 = std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
 
         // Send requests on first two
         std::io::Write::write_all(
@@ -5364,8 +5367,14 @@ mod tests {
         // Both get responses
         let r1 = read_responses(&mut client1, 1);
         let r2 = read_responses(&mut client2, 1);
-        assert!(!r1.is_empty() && r1[0].contains("200 OK"), "Client 1 should get 200");
-        assert!(!r2.is_empty() && r2[0].contains("200 OK"), "Client 2 should get 200");
+        assert!(
+            !r1.is_empty() && r1[0].contains("200 OK"),
+            "Client 1 should get 200"
+        );
+        assert!(
+            !r2.is_empty() && r2[0].contains("200 OK"),
+            "Client 2 should get 200"
+        );
 
         // Drop clients to free slots
         drop(client1);
@@ -5373,15 +5382,17 @@ mod tests {
 
         // Third client can now connect (after slots free up)
         std::thread::sleep(std::time::Duration::from_millis(50));
-        let mut client3 =
-            std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
+        let mut client3 = std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
         std::io::Write::write_all(
             &mut client3,
             b"GET /c3 HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
         )
         .unwrap();
         let r3 = read_responses(&mut client3, 1);
-        assert!(!r3.is_empty() && r3[0].contains("200 OK"), "Client 3 should get 200");
+        assert!(
+            !r3.is_empty() && r3[0].contains("200 OK"),
+            "Client 3 should get 200"
+        );
 
         // Server should terminate (maxRequests=3)
         let result = server_handle.join().unwrap();
@@ -5412,9 +5423,9 @@ mod tests {
             let args = vec![
                 Expr::IntLit(server_port as i64, dummy_span()),
                 make_handler_expr("counted"),
-                Expr::IntLit(3, dummy_span()),   // maxRequests=3 total
+                Expr::IntLit(3, dummy_span()), // maxRequests=3 total
                 Expr::IntLit(5000, dummy_span()),
-                Expr::IntLit(4, dummy_span()),    // maxConnections=4
+                Expr::IntLit(4, dummy_span()), // maxConnections=4
             ];
             interp.try_net_func("httpServe", &args).unwrap().unwrap()
         });
@@ -5422,27 +5433,19 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(100));
 
         // Client 1: keep-alive, sends 2 requests
-        let mut client1 =
-            std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
-        std::io::Write::write_all(
-            &mut client1,
-            b"GET /r1 HTTP/1.1\r\nHost: localhost\r\n\r\n",
-        )
-        .unwrap();
+        let mut client1 = std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
+        std::io::Write::write_all(&mut client1, b"GET /r1 HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .unwrap();
         let r1 = read_responses(&mut client1, 1);
         assert!(!r1.is_empty() && r1[0].contains("200 OK"));
 
-        std::io::Write::write_all(
-            &mut client1,
-            b"GET /r2 HTTP/1.1\r\nHost: localhost\r\n\r\n",
-        )
-        .unwrap();
+        std::io::Write::write_all(&mut client1, b"GET /r2 HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .unwrap();
         let r2 = read_responses(&mut client1, 1);
         assert!(!r2.is_empty() && r2[0].contains("200 OK"));
 
         // Client 2: sends 1 request (should be the 3rd total, hitting maxRequests)
-        let mut client2 =
-            std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
+        let mut client2 = std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
         std::io::Write::write_all(
             &mut client2,
             b"GET /r3 HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
@@ -5481,9 +5484,9 @@ mod tests {
             let args = vec![
                 Expr::IntLit(server_port as i64, dummy_span()),
                 make_handler_expr("isolated"),
-                Expr::IntLit(2, dummy_span()),   // maxRequests=2
+                Expr::IntLit(2, dummy_span()), // maxRequests=2
                 Expr::IntLit(5000, dummy_span()),
-                Expr::IntLit(4, dummy_span()),    // maxConnections=4
+                Expr::IntLit(4, dummy_span()), // maxConnections=4
             ];
             interp.try_net_func("httpServe", &args).unwrap().unwrap()
         });
@@ -5491,8 +5494,7 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(100));
 
         // Client 1: POST with body "AAAA"
-        let mut client1 =
-            std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
+        let mut client1 = std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
         std::io::Write::write_all(
             &mut client1,
             b"POST /c1 HTTP/1.1\r\nHost: localhost\r\nContent-Length: 4\r\nConnection: close\r\n\r\nAAAA",
@@ -5500,8 +5502,7 @@ mod tests {
         .unwrap();
 
         // Client 2: POST with body "BBBB"
-        let mut client2 =
-            std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
+        let mut client2 = std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
         std::io::Write::write_all(
             &mut client2,
             b"POST /c2 HTTP/1.1\r\nHost: localhost\r\nContent-Length: 4\r\nConnection: close\r\n\r\nBBBB",
@@ -5512,8 +5513,14 @@ mod tests {
         let r1 = read_responses(&mut client1, 1);
         let r2 = read_responses(&mut client2, 1);
 
-        assert!(!r1.is_empty() && r1[0].contains("200 OK"), "Client 1 should get 200");
-        assert!(!r2.is_empty() && r2[0].contains("200 OK"), "Client 2 should get 200");
+        assert!(
+            !r1.is_empty() && r1[0].contains("200 OK"),
+            "Client 1 should get 200"
+        );
+        assert!(
+            !r2.is_empty() && r2[0].contains("200 OK"),
+            "Client 2 should get 200"
+        );
 
         // Server terminates
         let result = server_handle.join().unwrap();
@@ -5545,7 +5552,7 @@ mod tests {
             let args = vec![
                 Expr::IntLit(server_port as i64, dummy_span()),
                 make_handler_expr("default-mc"),
-                Expr::IntLit(1, dummy_span()),   // maxRequests=1
+                Expr::IntLit(1, dummy_span()), // maxRequests=1
                 Expr::IntLit(5000, dummy_span()),
             ];
             interp.try_net_func("httpServe", &args).unwrap().unwrap()
@@ -5554,8 +5561,7 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(100));
 
         // Single client should work fine with default maxConnections
-        let mut client =
-            std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
+        let mut client = std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
         std::io::Write::write_all(
             &mut client,
             b"GET /test HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
@@ -5594,9 +5600,9 @@ mod tests {
             let args = vec![
                 Expr::IntLit(server_port as i64, dummy_span()),
                 make_handler_expr("ka-concurrent"),
-                Expr::IntLit(3, dummy_span()),   // maxRequests=3 total
+                Expr::IntLit(3, dummy_span()), // maxRequests=3 total
                 Expr::IntLit(5000, dummy_span()),
-                Expr::IntLit(4, dummy_span()),    // maxConnections=4
+                Expr::IntLit(4, dummy_span()), // maxConnections=4
             ];
             interp.try_net_func("httpServe", &args).unwrap().unwrap()
         });
@@ -5604,12 +5610,10 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(100));
 
         // Client 1: keep-alive, 2 requests
-        let mut client1 =
-            std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
+        let mut client1 = std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
 
         // Client 2: single request with Connection: close
-        let mut client2 =
-            std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
+        let mut client2 = std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
 
         // Client 1 first request
         std::io::Write::write_all(
@@ -5677,8 +5681,7 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(100));
 
         // Client 1: normal Content-Length request
-        let mut client1 =
-            std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
+        let mut client1 = std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
         std::io::Write::write_all(
             &mut client1,
             b"POST /normal HTTP/1.1\r\nHost: localhost\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello",
@@ -5686,8 +5689,7 @@ mod tests {
         .unwrap();
 
         // Client 2: chunked request
-        let mut client2 =
-            std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
+        let mut client2 = std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
         std::io::Write::write_all(
             &mut client2,
             b"POST /chunked HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n5\r\nworld\r\n0\r\n\r\n",
@@ -5697,8 +5699,14 @@ mod tests {
         let r1 = read_responses(&mut client1, 1);
         let r2 = read_responses(&mut client2, 1);
 
-        assert!(!r1.is_empty() && r1[0].contains("200 OK"), "Normal request should succeed");
-        assert!(!r2.is_empty() && r2[0].contains("200 OK"), "Chunked request should succeed");
+        assert!(
+            !r1.is_empty() && r1[0].contains("200 OK"),
+            "Normal request should succeed"
+        );
+        assert!(
+            !r2.is_empty() && r2[0].contains("200 OK"),
+            "Chunked request should succeed"
+        );
 
         let result = server_handle.join().unwrap();
         match result {
@@ -5732,8 +5740,8 @@ mod tests {
             let args = vec![
                 Expr::IntLit(server_port as i64, dummy_span()),
                 make_handler_expr("partial-timeout-test"),
-                Expr::IntLit(3, dummy_span()),   // maxRequests=3 (1 real + 1 partial-timeout + 1 margin)
-                Expr::IntLit(300, dummy_span()),  // timeoutMs=300 (short for test speed)
+                Expr::IntLit(3, dummy_span()), // maxRequests=3 (1 real + 1 partial-timeout + 1 margin)
+                Expr::IntLit(300, dummy_span()), // timeoutMs=300 (short for test speed)
             ];
             interp.try_net_func("httpServe", &args).unwrap().unwrap()
         });
@@ -5835,7 +5843,7 @@ mod tests {
                 Expr::IntLit(server_port as i64, dummy_span()),
                 make_handler_expr("slow-split-ok"),
                 Expr::IntLit(1, dummy_span()),   // maxRequests=1
-                Expr::IntLit(500, dummy_span()),  // timeoutMs=500
+                Expr::IntLit(500, dummy_span()), // timeoutMs=500
             ];
             interp.try_net_func("httpServe", &args).unwrap().unwrap()
         });
@@ -5846,22 +5854,15 @@ mod tests {
         let _ = client.set_read_timeout(Some(std::time::Duration::from_secs(5)));
 
         // Send first half of the request head
-        std::io::Write::write_all(
-            &mut client,
-            b"GET /split HTTP/1.1\r\nHost: localhost\r\n",
-        )
-        .unwrap();
+        std::io::Write::write_all(&mut client, b"GET /split HTTP/1.1\r\nHost: localhost\r\n")
+            .unwrap();
 
         // Wait 200ms — under the 500ms timeout, but long enough to trigger
         // a timeout if last_activity were not updated on byte reception.
         std::thread::sleep(std::time::Duration::from_millis(200));
 
         // Send the rest (completing the head with double CRLF)
-        std::io::Write::write_all(
-            &mut client,
-            b"Connection: close\r\n\r\n",
-        )
-        .unwrap();
+        std::io::Write::write_all(&mut client, b"Connection: close\r\n\r\n").unwrap();
 
         let resp = read_responses(&mut client, 1);
         assert!(
