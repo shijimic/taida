@@ -16,6 +16,8 @@ use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream, UdpSocket};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::Once;
+use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -392,9 +394,47 @@ fn spawn_tcp_echo_server() -> (u16, mpsc::Receiver<String>, thread::JoinHandle<(
     (port, rx, handle)
 }
 
+/// Allocate a unique, bindable port for network tests.
+///
+/// The classic `bind(0) → get port → drop listener` pattern has a TOCTOU race:
+/// when many tests run in parallel, the OS can hand the same just-freed port to
+/// two callers before either server binds.
+///
+/// This function combines two mitigations:
+///   1. **Monotonic counter** — seeded once from the OS, then incremented with
+///      `fetch_add` so no two parallel tests receive the same candidate.
+///   2. **Bind probe** — each candidate is verified with a real `bind()` to
+///      reject ports already held as ephemeral client ports or by other processes.
+///
+/// If the counter drifts outside the usable range (wrap-around or low ports)
+/// the function reseeds from the OS.
 fn find_free_loopback_port() -> u16 {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("bind free loopback port");
-    listener.local_addr().expect("local addr").port()
+    static INIT: Once = Once::new();
+    static COUNTER: AtomicU16 = AtomicU16::new(0);
+
+    INIT.call_once(|| {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind free loopback port");
+        let seed = listener.local_addr().expect("local addr").port();
+        COUNTER.store(seed, Ordering::Relaxed);
+    });
+
+    for _ in 0..200 {
+        let port = COUNTER.fetch_add(1, Ordering::Relaxed);
+        if !(10000..=65000).contains(&port) {
+            // Counter wrapped into reserved / near-overflow range — reseed from OS.
+            let listener =
+                TcpListener::bind("127.0.0.1:0").expect("reseed: bind free loopback port");
+            let fresh = listener.local_addr().expect("local addr").port();
+            // Store fresh+1 so the returned port (fresh) is never handed out again.
+            COUNTER.store(fresh.wrapping_add(1), Ordering::Relaxed);
+            return fresh;
+        }
+        // Verify the candidate is actually bindable right now.
+        if TcpListener::bind(("127.0.0.1", port)).is_ok() {
+            return port;
+        }
+    }
+    panic!("find_free_loopback_port: could not find a free port after 200 attempts");
 }
 
 fn spawn_tcp_client_for_accept(port: u16) -> (mpsc::Receiver<String>, thread::JoinHandle<()>) {
