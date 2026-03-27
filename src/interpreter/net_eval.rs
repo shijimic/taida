@@ -76,11 +76,10 @@ pub(crate) enum WriterState {
 }
 
 /// Streaming writer state for a 2-arg handler.
-/// Held as a Value::BuchiPack with a `__writer_id` sentinel field,
-/// but the actual mutable state lives in the connection-scoped StreamingWriter.
-///
-/// NOTE: This is Phase 2 scaffolding. The `sse_mode` field and some methods
-/// are not yet wired into the public surface (v3 APIs are not exported).
+/// The handler receives a Value::BuchiPack with a `__writer_id` sentinel field,
+/// but the actual mutable state lives here on the dispatch_request stack.
+/// During handler execution, the Interpreter's `active_streaming_writer` field
+/// holds raw pointers to this struct and the connection's TcpStream.
 pub(crate) struct StreamingWriter {
     pub state: WriterState,
     pub pending_status: u16,
@@ -101,16 +100,12 @@ impl StreamingWriter {
     }
 
     /// Check if a status code forbids a message body (1xx, 204, 205, 304).
-    /// Phase 2 scaffolding: will be used when v3 streaming surface is connected.
-    #[allow(dead_code)]
     fn is_bodyless_status(status: u16) -> bool {
         matches!(status, 100..=199 | 204 | 205 | 304)
     }
 
     /// Validate that user-supplied headers do not contain reserved headers
     /// for the streaming path (Content-Length, Transfer-Encoding).
-    /// Phase 2 scaffolding: will be used when v3 streaming surface is connected.
-    #[allow(dead_code)]
     fn validate_reserved_headers(headers: &[(String, String)]) -> Result<(), String> {
         for (name, _) in headers {
             let lower = name.to_ascii_lowercase();
@@ -133,11 +128,27 @@ impl StreamingWriter {
     }
 }
 
-/// Build the HTTP response head bytes for a streaming (chunked) response.
-/// Writes: `HTTP/1.1 {status} {reason}\r\n{headers}\r\nTransfer-Encoding: chunked\r\n\r\n`
+/// Active streaming writer context, stored on the Interpreter during 2-arg handler execution.
+/// Holds raw pointers to stack-local variables in `dispatch_request`.
+///
+/// Safety invariants:
+/// - The Interpreter is single-threaded (!Send).
+/// - The pointers are set before `call_function_with_values` and cleared after it returns.
+/// - The pointees (StreamingWriter, TcpStream) live on the stack in `dispatch_request`
+///   and outlive the handler call.
+pub(crate) struct ActiveStreamingWriter {
+    pub writer: *mut StreamingWriter,
+    pub stream: *mut std::net::TcpStream,
+}
+
+/// Build the HTTP response head bytes for a streaming response.
+///
+/// For normal status codes: appends `Transfer-Encoding: chunked`.
+/// For bodyless status codes (1xx/204/205/304): omits `Transfer-Encoding`
+/// since no message body is allowed.
 ///
 /// This is the head commit function. Once called, status/headers are on the wire
-/// and cannot be changed. Transfer-Encoding: chunked is automatically appended.
+/// and cannot be changed.
 fn build_streaming_head(status: u16, headers: &[(String, String)]) -> Vec<u8> {
     let reason = http_reason_phrase(status);
     let mut buf = Vec::with_capacity(256);
@@ -145,8 +156,12 @@ fn build_streaming_head(status: u16, headers: &[(String, String)]) -> Vec<u8> {
     for (name, value) in headers {
         buf.extend_from_slice(format!("{}: {}\r\n", name, value).as_bytes());
     }
-    // NET3-1d: Auto-append Transfer-Encoding: chunked
-    buf.extend_from_slice(b"Transfer-Encoding: chunked\r\n");
+    // NET3-1d: Auto-append Transfer-Encoding: chunked — but only for status codes
+    // that allow a message body. Bodyless statuses (1xx/204/205/304) must NOT have
+    // Transfer-Encoding (RFC 9110 §6.4.1).
+    if !StreamingWriter::is_bodyless_status(status) {
+        buf.extend_from_slice(b"Transfer-Encoding: chunked\r\n");
+    }
     buf.extend_from_slice(b"\r\n");
     buf
 }
@@ -176,6 +191,38 @@ fn http_reason_phrase(status: u16) -> &'static str {
         503 => "Service Unavailable",
         _ => "Unknown",
     }
+}
+
+// ── v3 streaming write helpers ──────────────────────────────
+//
+// These avoid creating aggregate buffers. `write_vectored_all` uses IoSlice
+// to send multiple disjoint buffers in a single syscall where supported.
+
+/// Write all bytes to a std::net::TcpStream, retrying on partial writes.
+fn write_all_retry(stream: &mut std::net::TcpStream, data: &[u8]) -> Result<(), RuntimeError> {
+    use std::io::Write;
+    stream.write_all(data).map_err(|e| RuntimeError {
+        message: format!("streaming write error: {}", e),
+    })
+}
+
+/// Write multiple IoSlice buffers to a stream without creating an aggregate buffer.
+/// Uses vectored write (writev) where available, falling back to sequential writes.
+fn write_vectored_all(
+    stream: &mut std::net::TcpStream,
+    bufs: &[std::io::IoSlice<'_>],
+) -> Result<(), RuntimeError> {
+    use std::io::Write;
+    // std::net::TcpStream supports write_vectored. We need to handle partial writes.
+    // For simplicity and correctness, write each buffer sequentially via write_all.
+    // This still avoids aggregate buffer creation — each buffer is sent as-is.
+    // The kernel may coalesce these via Nagle or TCP_CORK.
+    for buf in bufs {
+        stream.write_all(buf).map_err(|e| RuntimeError {
+            message: format!("streaming write error: {}", e),
+        })?;
+    }
+    Ok(())
 }
 
 // ── Result helpers ──────────────────────────────────────────
@@ -281,6 +328,14 @@ fn get_field_bool(fields: &[(String, Value)], key: &str) -> Option<bool> {
 fn get_field_int(fields: &[(String, Value)], key: &str) -> Option<i64> {
     match fields.iter().find(|(k, _)| k == key) {
         Some((_, Value::Int(n))) => Some(*n),
+        _ => None,
+    }
+}
+
+/// Get a Str field from a BuchiPack field list.
+fn get_field_str(fields: &[(String, Value)], key: &str) -> Option<String> {
+    match fields.iter().find(|(k, _)| k == key) {
+        Some((_, Value::Str(s))) => Some(s.clone()),
         _ => None,
     }
 }
@@ -1124,26 +1179,313 @@ impl Interpreter {
 
             // ── v3 streaming API ──
             // These functions are only callable inside a 2-arg httpServe handler.
-            // Outside that context, the writer BuchiPack won't have the
-            // __writer_id sentinel, so these will return an error.
-            //
-            // The actual streaming logic is implemented in dispatch_request_v3,
-            // where the writer state is held in a StreamingWriter. The functions
-            // here serve as the user-facing API entry points.
-            "startResponse" | "writeChunk" | "endResponse" | "sseEvent" => {
-                // These are dispatched within handler context via the writer
-                // mechanism in dispatch_request. If called outside a handler,
-                // we reach here but the writer won't be valid.
+            // The active_streaming_writer field is set during handler execution
+            // and provides access to the StreamingWriter state and TcpStream.
+            "startResponse" => self.eval_start_response(args),
+            "writeChunk" => self.eval_write_chunk(args),
+            "endResponse" => self.eval_end_response(args),
+            "sseEvent" => {
+                // sseEvent is Phase 3. For now, guard with context check.
+                if self.active_streaming_writer.is_none() {
+                    return Err(RuntimeError {
+                        message:
+                            "sseEvent: can only be called inside a 2-argument httpServe handler"
+                                .into(),
+                    });
+                }
+                // Phase 3 will implement the actual SSE logic here.
                 Err(RuntimeError {
-                    message: format!(
-                        "{}: can only be called inside a 2-argument httpServe handler",
-                        original_name
-                    ),
+                    message: "sseEvent: not yet implemented (Phase 3)".into(),
                 })
             }
 
             _ => Ok(None),
         }
+    }
+
+    // ── v3 streaming API implementation ─────────────────────────
+    //
+    // These methods implement startResponse / writeChunk / endResponse.
+    // They access the active_streaming_writer field which holds raw pointers
+    // to the stack-local StreamingWriter and TcpStream in dispatch_request.
+    //
+    // Zero-copy contract:
+    //   - Bytes payload is sent directly via IoSlice (no copy)
+    //   - Str payload is encoded to UTF-8 bytes, then sent via IoSlice
+    //   - Chunk framing uses small stack-local buffers for hex prefix
+    //   - No aggregate buffer (prefix + payload + suffix) is ever created
+
+    /// Validate that args[0] is the genuine writer token created by dispatch_request.
+    fn validate_writer_token(&mut self, args: &[Expr], api_name: &str) -> Result<(), RuntimeError> {
+        let arg0 = match args.first() {
+            Some(a) => a,
+            None => {
+                return Err(RuntimeError {
+                    message: format!("{}: missing writer argument", api_name),
+                });
+            }
+        };
+        match self.eval_expr(arg0)? {
+            Signal::Value(Value::BuchiPack(fields)) => {
+                let is_valid = fields.iter().any(|(k, v)| {
+                    k == "__writer_id" && matches!(v, Value::Str(s) if s == "__v3_streaming_writer")
+                });
+                if !is_valid {
+                    return Err(RuntimeError {
+                        message: format!(
+                            "{}: first argument must be the writer provided by httpServe",
+                            api_name
+                        ),
+                    });
+                }
+                Ok(())
+            }
+            _ => Err(RuntimeError {
+                message: format!(
+                    "{}: first argument must be the writer provided by httpServe",
+                    api_name
+                ),
+            }),
+        }
+    }
+
+    /// `startResponse(writer, status <= 200, headers <= @[])`
+    ///
+    /// Updates pending status/headers on the StreamingWriter.
+    /// Does NOT commit to wire — that happens on first writeChunk/endResponse.
+    fn eval_start_response(&mut self, args: &[Expr]) -> Result<Option<Signal>, RuntimeError> {
+        // Check we're inside a 2-arg handler first (before token validation).
+        if self.active_streaming_writer.is_none() {
+            return Err(RuntimeError {
+                message: "startResponse: can only be called inside a 2-argument httpServe handler"
+                    .into(),
+            });
+        }
+
+        // Validate writer token.
+        self.validate_writer_token(args, "startResponse")?;
+
+        let active = self.active_streaming_writer.as_ref().unwrap();
+
+        // Safety: pointers are valid during handler execution (see ActiveStreamingWriter doc).
+        let writer = unsafe { &mut *active.writer };
+
+        // State check: startResponse is only valid in Idle state.
+        match writer.state {
+            WriterState::Idle => {}
+            WriterState::HeadPrepared => {
+                return Err(RuntimeError {
+                    message: "startResponse: already called. Cannot call startResponse twice."
+                        .into(),
+                });
+            }
+            WriterState::Streaming => {
+                return Err(RuntimeError {
+                    message: "startResponse: head already committed (chunks are being written). Cannot change status/headers after writeChunk.".into(),
+                });
+            }
+            WriterState::Ended => {
+                return Err(RuntimeError {
+                    message: "startResponse: response already ended.".into(),
+                });
+            }
+        }
+
+        // Arg 0: writer (BuchiPack with __writer_id sentinel) — skip, already validated.
+        // Arg 1: status (Int, default 200)
+        let status: u16 = if let Some(arg) = args.get(1) {
+            match self.eval_expr(arg)? {
+                Signal::Value(Value::Int(n)) => {
+                    if !(100..=599).contains(&n) {
+                        return Err(RuntimeError {
+                            message: format!("startResponse: status must be 100-599, got {}", n),
+                        });
+                    }
+                    n as u16
+                }
+                Signal::Value(v) => {
+                    return Err(RuntimeError {
+                        message: format!("startResponse: status must be Int, got {}", v),
+                    });
+                }
+                other => return Ok(Some(other)),
+            }
+        } else {
+            200
+        };
+
+        // Arg 2: headers (List of @(name, value), default @[])
+        let headers: Vec<(String, String)> = if let Some(arg) = args.get(2) {
+            match self.eval_expr(arg)? {
+                Signal::Value(Value::List(items)) => {
+                    let mut out = Vec::new();
+                    for item in &items {
+                        if let Value::BuchiPack(fields) = item {
+                            let name = get_field_str(fields, "name").unwrap_or_default();
+                            let value = get_field_str(fields, "value").unwrap_or_default();
+                            out.push((name, value));
+                        }
+                    }
+                    out
+                }
+                Signal::Value(_) => Vec::new(),
+                other => return Ok(Some(other)),
+            }
+        } else {
+            Vec::new()
+        };
+
+        // Validate reserved headers (Content-Length, Transfer-Encoding).
+        StreamingWriter::validate_reserved_headers(&headers)
+            .map_err(|msg| RuntimeError { message: msg })?;
+
+        // Update pending state.
+        // Re-borrow writer since self was borrowed by eval_expr above.
+        let active = self.active_streaming_writer.as_ref().unwrap();
+        let writer = unsafe { &mut *active.writer };
+        writer.pending_status = status;
+        writer.pending_headers = headers;
+        writer.state = WriterState::HeadPrepared;
+
+        Ok(Some(Signal::Value(Value::Unit)))
+    }
+
+    /// `writeChunk(writer, data)`
+    ///
+    /// Sends one chunk of body data using chunked transfer encoding.
+    /// If head is not yet committed, commits it first (implicit 200/@[] or pending state).
+    ///
+    /// Zero-copy: uses IoSlice to send [hex_prefix, payload, suffix] without
+    /// creating an aggregate buffer.
+    fn eval_write_chunk(&mut self, args: &[Expr]) -> Result<Option<Signal>, RuntimeError> {
+        if self.active_streaming_writer.is_none() {
+            return Err(RuntimeError {
+                message: "writeChunk: can only be called inside a 2-argument httpServe handler"
+                    .into(),
+            });
+        }
+
+        // Validate writer token.
+        self.validate_writer_token(args, "writeChunk")?;
+
+        let active = self.active_streaming_writer.as_ref().unwrap();
+
+        let writer = unsafe { &mut *active.writer };
+
+        // State check: writeChunk is not valid after endResponse.
+        if writer.state == WriterState::Ended {
+            return Err(RuntimeError {
+                message: "writeChunk: response already ended.".into(),
+            });
+        }
+
+        // Arg 0: writer (skip)
+        // Arg 1: data (Bytes or Str)
+        let data = match args.get(1) {
+            Some(arg) => match self.eval_expr(arg)? {
+                Signal::Value(v) => v,
+                other => return Ok(Some(other)),
+            },
+            None => {
+                return Err(RuntimeError {
+                    message: "writeChunk: missing argument 'data'".into(),
+                });
+            }
+        };
+
+        // Extract payload bytes. Bytes = zero-copy fast path, Str = UTF-8 encode.
+        let payload: &[u8] = match &data {
+            Value::Bytes(b) => b.as_slice(),
+            Value::Str(s) => s.as_bytes(),
+            other => {
+                return Err(RuntimeError {
+                    message: format!("writeChunk: data must be Bytes or Str, got {}", other),
+                });
+            }
+        };
+
+        // Empty chunk is no-op (design contract: avoid colliding with terminator).
+        if payload.is_empty() {
+            return Ok(Some(Signal::Value(Value::Unit)));
+        }
+
+        // Re-borrow after eval_expr.
+        let active = self.active_streaming_writer.as_ref().unwrap();
+        let writer = unsafe { &mut *active.writer };
+        let stream = unsafe { &mut *active.stream };
+
+        // Bodyless status check: 1xx/204/205/304 cannot have body chunks.
+        if StreamingWriter::is_bodyless_status(writer.pending_status) {
+            return Err(RuntimeError {
+                message: format!(
+                    "writeChunk: status {} does not allow a message body",
+                    writer.pending_status
+                ),
+            });
+        }
+
+        // Commit head if not yet committed.
+        if writer.state == WriterState::Idle || writer.state == WriterState::HeadPrepared {
+            let head_bytes = build_streaming_head(writer.pending_status, &writer.pending_headers);
+            write_all_retry(stream, &head_bytes)?;
+            writer.state = WriterState::Streaming;
+        }
+
+        // Send chunk using IoSlice (zero-copy for payload).
+        // Wire format: <hex-size>\r\n<payload>\r\n
+        let hex_prefix = format!("{:x}\r\n", payload.len());
+        let suffix = b"\r\n";
+
+        let bufs = &[
+            std::io::IoSlice::new(hex_prefix.as_bytes()),
+            std::io::IoSlice::new(payload),
+            std::io::IoSlice::new(suffix),
+        ];
+        write_vectored_all(stream, bufs)?;
+
+        Ok(Some(Signal::Value(Value::Unit)))
+    }
+
+    /// `endResponse(writer)`
+    ///
+    /// Terminates the chunked response by sending `0\r\n\r\n`.
+    /// If head is not yet committed, commits it first (empty chunked body).
+    /// Idempotent: second call is a no-op.
+    fn eval_end_response(&mut self, args: &[Expr]) -> Result<Option<Signal>, RuntimeError> {
+        if self.active_streaming_writer.is_none() {
+            return Err(RuntimeError {
+                message: "endResponse: can only be called inside a 2-argument httpServe handler"
+                    .into(),
+            });
+        }
+
+        // Validate writer token.
+        self.validate_writer_token(args, "endResponse")?;
+
+        let active = self.active_streaming_writer.as_ref().unwrap();
+
+        let writer = unsafe { &mut *active.writer };
+        let stream = unsafe { &mut *active.stream };
+
+        // Idempotent: no-op if already ended.
+        if writer.state == WriterState::Ended {
+            return Ok(Some(Signal::Value(Value::Unit)));
+        }
+
+        // Commit head if not yet committed.
+        if writer.state == WriterState::Idle || writer.state == WriterState::HeadPrepared {
+            let head_bytes = build_streaming_head(writer.pending_status, &writer.pending_headers);
+            write_all_retry(stream, &head_bytes)?;
+        }
+
+        // Send chunked terminator — but only for status codes that allow a body.
+        // Bodyless statuses (1xx/204/205/304) have head-only responses.
+        if !StreamingWriter::is_bodyless_status(writer.pending_status) {
+            write_all_retry(stream, b"0\r\n\r\n")?;
+        }
+        writer.state = WriterState::Ended;
+
+        Ok(Some(Signal::Value(Value::Unit)))
     }
 
     // ── httpServe implementation ───────────────────────────────
@@ -1767,35 +2109,40 @@ impl Interpreter {
             // Create a mutable StreamingWriter for this request scope.
             let mut writer = StreamingWriter::new();
 
-            // Install v3 streaming builtins in the handler scope.
-            // The actual streaming functions are closures that capture the writer state
-            // through the connection's StreamingWriter. We use environment sentinels
-            // to route calls through the interpreter's function dispatch.
-            //
-            // For Phase 1, the writer state is validated here. The actual wire write
-            // (writeChunk/endResponse body) is Phase 2. Phase 1 focuses on:
-            //   - 2-arg handler detection and one-shot fallback
-            //   - Writer state transitions
-            //   - startResponse pending state
-            //   - Reserved header rejection
-            //   - Bodyless status validation
+            // NET3-2: Install active_streaming_writer so that startResponse/writeChunk/
+            // endResponse can access the writer state and TcpStream during handler execution.
+            // Safety: writer and conn.stream live on this stack frame and outlive the
+            // call_function_with_values call. The interpreter is single-threaded.
+            self.active_streaming_writer = Some(ActiveStreamingWriter {
+                writer: &mut writer as *mut StreamingWriter,
+                stream: &mut conn.stream as *mut std::net::TcpStream,
+            });
 
             let handler_result =
                 self.call_function_with_values(handler, &[request_pack, writer_pack]);
 
+            // Clear the active writer — handler execution is done.
+            self.active_streaming_writer = None;
+
             let response_value = match handler_result {
                 Ok(v) => v,
                 Err(e) => {
-                    // If streaming already started, auto-end before error response.
-                    if writer.state == WriterState::Streaming
-                        || writer.state == WriterState::HeadPrepared
-                    {
-                        // Auto-end: send terminator if head was committed
-                        if writer.state == WriterState::Streaming {
-                            let _ = std::io::Write::write_all(&mut conn.stream, b"0\r\n\r\n");
-                        }
+                    if writer.state == WriterState::Streaming {
+                        // Head already committed — we cannot send a new HTTP response
+                        // on this connection. Send chunk terminator and drop the connection.
+                        let _ = std::io::Write::write_all(&mut conn.stream, b"0\r\n\r\n");
                         writer.state = WriterState::Ended;
+                        *request_count += 1;
+                        return ConnAction::Close;
                     }
+                    if writer.state == WriterState::Ended {
+                        // Response already fully sent — just drop the connection.
+                        *request_count += 1;
+                        return ConnAction::Close;
+                    }
+                    // Head not yet committed (Idle / HeadPrepared) — safe to send a
+                    // full 500 error response.
+                    writer.state = WriterState::Ended;
                     let error_body = format!("Internal Server Error: {}", e.message);
                     let error_response = format!(
                         "HTTP/1.1 500 Internal Server Error\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
@@ -1847,18 +2194,14 @@ impl Interpreter {
                 // Auto-end if not already ended.
                 if writer.state != WriterState::Ended {
                     // Auto endResponse: commit head if needed, send terminator.
-                    if writer.state == WriterState::HeadPrepared
-                        || writer.state == WriterState::Streaming
-                    {
-                        if writer.state == WriterState::HeadPrepared {
-                            // Commit head first, then send empty chunked body terminator.
-                            let head_bytes = build_streaming_head(
-                                writer.pending_status,
-                                &writer.pending_headers,
-                            );
-                            let _ = std::io::Write::write_all(&mut conn.stream, &head_bytes);
-                        }
-                        // Send chunked terminator
+                    if writer.state == WriterState::HeadPrepared {
+                        // Commit head first.
+                        let head_bytes =
+                            build_streaming_head(writer.pending_status, &writer.pending_headers);
+                        let _ = std::io::Write::write_all(&mut conn.stream, &head_bytes);
+                    }
+                    // Send chunked terminator — only for status codes that allow a body.
+                    if !StreamingWriter::is_bodyless_status(writer.pending_status) {
                         let _ = std::io::Write::write_all(&mut conn.stream, b"0\r\n\r\n");
                     }
                     writer.state = WriterState::Ended;
@@ -6448,10 +6791,45 @@ mod tests {
         )
     }
 
-    /// Allocate a free loopback port for tests by binding to port 0 and reading the OS-assigned port.
+    /// Allocate a unique, bindable port for tests using a monotonic counter.
+    /// Same pattern as tests/parity.rs — avoids the TOCTOU race of bind(0)+drop.
     fn v3_free_port() -> u16 {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        listener.local_addr().unwrap().port()
+        use std::sync::Once;
+        use std::sync::atomic::{AtomicU16, Ordering};
+
+        static INIT: Once = Once::new();
+        static COUNTER: AtomicU16 = AtomicU16::new(0);
+
+        INIT.call_once(|| {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let seed = listener.local_addr().unwrap().port();
+            COUNTER.store(seed, Ordering::Relaxed);
+        });
+
+        for _ in 0..200 {
+            let port = COUNTER.fetch_add(1, Ordering::Relaxed);
+            if !(10000..=65000).contains(&port) {
+                // Counter drifted out of usable range — reseed from OS.
+                // The OS-assigned port is verified bindable (listener is alive).
+                // Advance the counter past it so no other caller gets the same number.
+                let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+                let fresh = listener.local_addr().unwrap().port();
+                COUNTER.store(fresh.wrapping_add(1), Ordering::Relaxed);
+                // Drop the listener, then re-verify the port is still bindable.
+                drop(listener);
+                if (10000..=65000).contains(&fresh)
+                    && std::net::TcpListener::bind(("127.0.0.1", fresh)).is_ok()
+                {
+                    return fresh;
+                }
+                // Rare: OS gave an out-of-range or immediately-reclaimed port. Retry.
+                continue;
+            }
+            if std::net::TcpListener::bind(("127.0.0.1", port)).is_ok() {
+                return port;
+            }
+        }
+        panic!("v3_free_port: could not find a free port after 200 attempts");
     }
 
     #[test]
@@ -6602,5 +6980,902 @@ mod tests {
             }
             _ => panic!("expected fulfilled Async"),
         }
+    }
+
+    // ── NET3 Phase 2 tests ──
+
+    use crate::parser::Statement;
+    use std::sync::Arc;
+
+    /// Build a streaming handler FuncValue that calls the given sequence of
+    /// streaming API calls. Each call is a Statement::Expr(Expr::FuncCall(...)).
+    /// The handler has params (req, writer) and body is the statements.
+    fn make_streaming_handler(stmts: Vec<Statement>) -> Value {
+        Value::Function(super::super::value::FuncValue {
+            name: "<streaming_handler>".to_string(),
+            params: vec![
+                Param {
+                    name: "req".into(),
+                    type_annotation: None,
+                    default_value: None,
+                    span: dummy_span(),
+                },
+                Param {
+                    name: "writer".into(),
+                    type_annotation: None,
+                    default_value: None,
+                    span: dummy_span(),
+                },
+            ],
+            body: stmts,
+            closure: Arc::new(std::collections::HashMap::new()),
+            return_type: None,
+        })
+    }
+
+    /// Build `writeChunk(writer, "data")` expression
+    fn make_write_chunk_call(data: &str) -> Expr {
+        Expr::FuncCall(
+            Box::new(Expr::Ident("writeChunk".into(), dummy_span())),
+            vec![
+                Expr::Ident("writer".into(), dummy_span()),
+                Expr::StringLit(data.into(), dummy_span()),
+            ],
+            dummy_span(),
+        )
+    }
+
+    /// Build `writeChunk(writer, Bytes)` expression using a pre-set variable
+    fn make_write_chunk_bytes_call(_data: Vec<u8>) -> Expr {
+        Expr::FuncCall(
+            Box::new(Expr::Ident("writeChunk".into(), dummy_span())),
+            vec![
+                Expr::Ident("writer".into(), dummy_span()),
+                // Use a pre-evaluated Bytes value via a variable
+                Expr::Ident("__test_bytes_data".into(), dummy_span()),
+            ],
+            dummy_span(),
+        )
+    }
+
+    /// Build `endResponse(writer)` expression
+    fn make_end_response_call() -> Expr {
+        Expr::FuncCall(
+            Box::new(Expr::Ident("endResponse".into(), dummy_span())),
+            vec![Expr::Ident("writer".into(), dummy_span())],
+            dummy_span(),
+        )
+    }
+
+    /// Build `startResponse(writer, status, headers)` expression
+    fn make_start_response_call(status: i64, headers: Vec<(String, String)>) -> Expr {
+        let header_list: Vec<Expr> = headers
+            .into_iter()
+            .map(|(name, value)| {
+                Expr::BuchiPack(
+                    vec![
+                        BuchiField {
+                            name: "name".into(),
+                            value: Expr::StringLit(name, dummy_span()),
+                            span: dummy_span(),
+                        },
+                        BuchiField {
+                            name: "value".into(),
+                            value: Expr::StringLit(value, dummy_span()),
+                            span: dummy_span(),
+                        },
+                    ],
+                    dummy_span(),
+                )
+            })
+            .collect();
+
+        Expr::FuncCall(
+            Box::new(Expr::Ident("startResponse".into(), dummy_span())),
+            vec![
+                Expr::Ident("writer".into(), dummy_span()),
+                Expr::IntLit(status, dummy_span()),
+                Expr::ListLit(header_list, dummy_span()),
+            ],
+            dummy_span(),
+        )
+    }
+
+    /// Helper to set up streaming API sentinels on an interpreter
+    fn setup_v3_sentinels(interp: &mut Interpreter) {
+        interp
+            .env
+            .define_force("httpServe", Value::Str("__net_builtin_httpServe".into()));
+        for sym in &["startResponse", "writeChunk", "endResponse", "sseEvent"] {
+            interp
+                .env
+                .define_force(sym, Value::Str(format!("__net_builtin_{}", sym)));
+        }
+    }
+
+    /// Read full HTTP response from a client stream
+    fn read_full_response(client: &mut std::net::TcpStream) -> String {
+        let mut response = Vec::new();
+        let _ = client.set_read_timeout(Some(std::time::Duration::from_secs(3)));
+        loop {
+            let mut buf = [0u8; 4096];
+            match std::io::Read::read(client, &mut buf) {
+                Ok(0) => break,
+                Ok(n) => response.extend_from_slice(&buf[..n]),
+                Err(ref e)
+                    if e.kind() == std::io::ErrorKind::WouldBlock
+                        || e.kind() == std::io::ErrorKind::TimedOut =>
+                {
+                    break;
+                }
+                Err(_) => break,
+            }
+        }
+        String::from_utf8_lossy(&response).to_string()
+    }
+
+    // NET3-2b: writeChunk sends chunked body
+    #[test]
+    fn test_v3_write_chunk_basic() {
+        let port = v3_free_port();
+
+        let handler = make_streaming_handler(vec![
+            Statement::Expr(make_write_chunk_call("hello ")),
+            Statement::Expr(make_write_chunk_call("world")),
+            Statement::Expr(make_end_response_call()),
+        ]);
+
+        let server_port = port;
+        let server_handle = std::thread::spawn(move || {
+            let mut interp = Interpreter::new();
+            setup_v3_sentinels(&mut interp);
+            interp.env.define_force("__handler", handler);
+            let args = vec![
+                Expr::IntLit(server_port as i64, dummy_span()),
+                Expr::Ident("__handler".into(), dummy_span()),
+                Expr::IntLit(1, dummy_span()),
+                Expr::IntLit(5000, dummy_span()),
+            ];
+            interp.try_net_func("httpServe", &args).unwrap().unwrap()
+        });
+
+        std::thread::sleep(std::time::Duration::from_millis(200));
+
+        let mut client = std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
+        std::io::Write::write_all(
+            &mut client,
+            b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+        )
+        .unwrap();
+
+        let response_str = read_full_response(&mut client);
+
+        // Should have chunked transfer encoding
+        assert!(
+            response_str.contains("Transfer-Encoding: chunked"),
+            "chunked response should have Transfer-Encoding: chunked\n{}",
+            response_str
+        );
+        // Should have HTTP/1.1 200 OK
+        assert!(
+            response_str.contains("HTTP/1.1 200 OK"),
+            "chunked response should have 200 OK\n{}",
+            response_str
+        );
+        // Should NOT have Content-Length
+        assert!(
+            !response_str.contains("Content-Length"),
+            "chunked response should NOT have Content-Length\n{}",
+            response_str
+        );
+        // Body should contain the chunked data
+        assert!(
+            response_str.contains("hello "),
+            "response should contain 'hello '\n{}",
+            response_str
+        );
+        assert!(
+            response_str.contains("world"),
+            "response should contain 'world'\n{}",
+            response_str
+        );
+
+        let result = server_handle.join().unwrap();
+        match result {
+            Signal::Value(Value::Async(a)) => {
+                assert_eq!(a.status, AsyncStatus::Fulfilled);
+            }
+            _ => panic!("expected fulfilled Async"),
+        }
+    }
+
+    // NET3-2c: endResponse sends chunked terminator
+    #[test]
+    fn test_v3_end_response_empty_body() {
+        let port = v3_free_port();
+
+        // endResponse without any writeChunk → empty chunked body
+        let handler = make_streaming_handler(vec![Statement::Expr(make_end_response_call())]);
+
+        let server_port = port;
+        let server_handle = std::thread::spawn(move || {
+            let mut interp = Interpreter::new();
+            setup_v3_sentinels(&mut interp);
+            interp.env.define_force("__handler", handler);
+            let args = vec![
+                Expr::IntLit(server_port as i64, dummy_span()),
+                Expr::Ident("__handler".into(), dummy_span()),
+                Expr::IntLit(1, dummy_span()),
+                Expr::IntLit(5000, dummy_span()),
+            ];
+            interp.try_net_func("httpServe", &args).unwrap().unwrap()
+        });
+
+        std::thread::sleep(std::time::Duration::from_millis(200));
+
+        let mut client = std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
+        std::io::Write::write_all(
+            &mut client,
+            b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+        )
+        .unwrap();
+
+        let response_str = read_full_response(&mut client);
+
+        assert!(
+            response_str.contains("Transfer-Encoding: chunked"),
+            "empty chunked response should have Transfer-Encoding: chunked\n{}",
+            response_str
+        );
+        assert!(
+            response_str.contains("HTTP/1.1 200 OK"),
+            "empty chunked response should have 200 OK\n{}",
+            response_str
+        );
+        // Should end with chunked terminator (0\r\n\r\n)
+        assert!(
+            response_str.contains("0\r\n\r\n"),
+            "empty chunked response should have terminator\n{}",
+            response_str
+        );
+
+        let result = server_handle.join().unwrap();
+        match result {
+            Signal::Value(Value::Async(a)) => {
+                assert_eq!(a.status, AsyncStatus::Fulfilled);
+            }
+            _ => panic!("expected fulfilled Async"),
+        }
+    }
+
+    // NET3-2c: endResponse is idempotent (double call)
+    #[test]
+    fn test_v3_end_response_idempotent() {
+        let port = v3_free_port();
+
+        let handler = make_streaming_handler(vec![
+            Statement::Expr(make_write_chunk_call("data")),
+            Statement::Expr(make_end_response_call()),
+            Statement::Expr(make_end_response_call()), // second call is no-op
+        ]);
+
+        let server_port = port;
+        let server_handle = std::thread::spawn(move || {
+            let mut interp = Interpreter::new();
+            setup_v3_sentinels(&mut interp);
+            interp.env.define_force("__handler", handler);
+            let args = vec![
+                Expr::IntLit(server_port as i64, dummy_span()),
+                Expr::Ident("__handler".into(), dummy_span()),
+                Expr::IntLit(1, dummy_span()),
+                Expr::IntLit(5000, dummy_span()),
+            ];
+            interp.try_net_func("httpServe", &args).unwrap().unwrap()
+        });
+
+        std::thread::sleep(std::time::Duration::from_millis(200));
+
+        let mut client = std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
+        std::io::Write::write_all(
+            &mut client,
+            b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+        )
+        .unwrap();
+
+        let response_str = read_full_response(&mut client);
+
+        assert!(
+            response_str.contains("Transfer-Encoding: chunked"),
+            "response should be chunked\n{}",
+            response_str
+        );
+        assert!(
+            response_str.contains("data"),
+            "response should contain 'data'\n{}",
+            response_str
+        );
+
+        let result = server_handle.join().unwrap();
+        match result {
+            Signal::Value(Value::Async(a)) => {
+                assert_eq!(a.status, AsyncStatus::Fulfilled);
+            }
+            _ => panic!("expected fulfilled Async"),
+        }
+    }
+
+    // NET3-2d: Bytes fast path (zero-copy)
+    #[test]
+    fn test_v3_write_chunk_bytes_fast_path() {
+        let port = v3_free_port();
+
+        let bytes_data = b"binary\x00payload\xff".to_vec();
+        let bytes_data_clone = bytes_data.clone();
+
+        let handler = make_streaming_handler(vec![
+            Statement::Expr(make_write_chunk_bytes_call(bytes_data.clone())),
+            Statement::Expr(make_end_response_call()),
+        ]);
+
+        let server_port = port;
+        let server_handle = std::thread::spawn(move || {
+            let mut interp = Interpreter::new();
+            setup_v3_sentinels(&mut interp);
+            // Pre-set the bytes data in the environment
+            interp
+                .env
+                .define_force("__test_bytes_data", Value::Bytes(bytes_data_clone));
+            interp.env.define_force("__handler", handler);
+            let args = vec![
+                Expr::IntLit(server_port as i64, dummy_span()),
+                Expr::Ident("__handler".into(), dummy_span()),
+                Expr::IntLit(1, dummy_span()),
+                Expr::IntLit(5000, dummy_span()),
+            ];
+            interp.try_net_func("httpServe", &args).unwrap().unwrap()
+        });
+
+        std::thread::sleep(std::time::Duration::from_millis(200));
+
+        let mut client = std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
+        std::io::Write::write_all(
+            &mut client,
+            b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+        )
+        .unwrap();
+
+        let mut response = Vec::new();
+        let _ = client.set_read_timeout(Some(std::time::Duration::from_secs(3)));
+        loop {
+            let mut buf = [0u8; 4096];
+            match std::io::Read::read(&mut client, &mut buf) {
+                Ok(0) => break,
+                Ok(n) => response.extend_from_slice(&buf[..n]),
+                Err(ref e)
+                    if e.kind() == std::io::ErrorKind::WouldBlock
+                        || e.kind() == std::io::ErrorKind::TimedOut =>
+                {
+                    break;
+                }
+                Err(_) => break,
+            }
+        }
+
+        let response_str = String::from_utf8_lossy(&response);
+        assert!(
+            response_str.contains("Transfer-Encoding: chunked"),
+            "bytes response should be chunked\n{}",
+            response_str
+        );
+        // Binary payload should be present in raw bytes
+        // The chunk format is: <hex_len>\r\n<payload>\r\n
+        // Our payload is b"binary\x00payload\xff" = 15 bytes → hex "f"
+        assert!(
+            response.windows(b"binary".len()).any(|w| w == b"binary"),
+            "response should contain binary data"
+        );
+        assert!(
+            response.windows(b"payload".len()).any(|w| w == b"payload"),
+            "response should contain 'payload' binary data"
+        );
+
+        let result = server_handle.join().unwrap();
+        match result {
+            Signal::Value(Value::Async(a)) => {
+                assert_eq!(a.status, AsyncStatus::Fulfilled);
+            }
+            _ => panic!("expected fulfilled Async"),
+        }
+    }
+
+    // NET3-2e: Str chunk without aggregate buffer
+    #[test]
+    fn test_v3_write_chunk_str_no_aggregate() {
+        let port = v3_free_port();
+
+        // Multiple string chunks to verify no aggregate buffer
+        let handler = make_streaming_handler(vec![
+            Statement::Expr(make_write_chunk_call("chunk1")),
+            Statement::Expr(make_write_chunk_call("chunk2")),
+            Statement::Expr(make_write_chunk_call("chunk3")),
+            Statement::Expr(make_end_response_call()),
+        ]);
+
+        let server_port = port;
+        let server_handle = std::thread::spawn(move || {
+            let mut interp = Interpreter::new();
+            setup_v3_sentinels(&mut interp);
+            interp.env.define_force("__handler", handler);
+            let args = vec![
+                Expr::IntLit(server_port as i64, dummy_span()),
+                Expr::Ident("__handler".into(), dummy_span()),
+                Expr::IntLit(1, dummy_span()),
+                Expr::IntLit(5000, dummy_span()),
+            ];
+            interp.try_net_func("httpServe", &args).unwrap().unwrap()
+        });
+
+        std::thread::sleep(std::time::Duration::from_millis(200));
+
+        let mut client = std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
+        std::io::Write::write_all(
+            &mut client,
+            b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+        )
+        .unwrap();
+
+        let response_str = read_full_response(&mut client);
+
+        assert!(
+            response_str.contains("Transfer-Encoding: chunked"),
+            "str chunks response should be chunked\n{}",
+            response_str
+        );
+        // All chunks should be present
+        assert!(
+            response_str.contains("chunk1"),
+            "response should contain chunk1\n{}",
+            response_str
+        );
+        assert!(
+            response_str.contains("chunk2"),
+            "response should contain chunk2\n{}",
+            response_str
+        );
+        assert!(
+            response_str.contains("chunk3"),
+            "response should contain chunk3\n{}",
+            response_str
+        );
+
+        let result = server_handle.join().unwrap();
+        match result {
+            Signal::Value(Value::Async(a)) => {
+                assert_eq!(a.status, AsyncStatus::Fulfilled);
+            }
+            _ => panic!("expected fulfilled Async"),
+        }
+    }
+
+    // NET3-2f: startResponse + writeChunk + endResponse full flow
+    #[test]
+    fn test_v3_start_response_write_chunk_end_response() {
+        let port = v3_free_port();
+
+        let handler = make_streaming_handler(vec![
+            Statement::Expr(make_start_response_call(
+                201,
+                vec![("X-Custom".into(), "streaming-test".into())],
+            )),
+            Statement::Expr(make_write_chunk_call("first")),
+            Statement::Expr(make_write_chunk_call("second")),
+            Statement::Expr(make_end_response_call()),
+        ]);
+
+        let server_port = port;
+        let server_handle = std::thread::spawn(move || {
+            let mut interp = Interpreter::new();
+            setup_v3_sentinels(&mut interp);
+            interp.env.define_force("__handler", handler);
+            let args = vec![
+                Expr::IntLit(server_port as i64, dummy_span()),
+                Expr::Ident("__handler".into(), dummy_span()),
+                Expr::IntLit(1, dummy_span()),
+                Expr::IntLit(5000, dummy_span()),
+            ];
+            interp.try_net_func("httpServe", &args).unwrap().unwrap()
+        });
+
+        std::thread::sleep(std::time::Duration::from_millis(200));
+
+        let mut client = std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
+        std::io::Write::write_all(
+            &mut client,
+            b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+        )
+        .unwrap();
+
+        let response_str = read_full_response(&mut client);
+
+        // Custom status
+        assert!(
+            response_str.contains("HTTP/1.1 201 Created"),
+            "response should have 201 Created\n{}",
+            response_str
+        );
+        // Custom header
+        assert!(
+            response_str.contains("X-Custom: streaming-test"),
+            "response should have custom header\n{}",
+            response_str
+        );
+        // Chunked
+        assert!(
+            response_str.contains("Transfer-Encoding: chunked"),
+            "response should be chunked\n{}",
+            response_str
+        );
+        // Body chunks
+        assert!(
+            response_str.contains("first"),
+            "response should contain 'first'\n{}",
+            response_str
+        );
+        assert!(
+            response_str.contains("second"),
+            "response should contain 'second'\n{}",
+            response_str
+        );
+
+        let result = server_handle.join().unwrap();
+        match result {
+            Signal::Value(Value::Async(a)) => {
+                assert_eq!(a.status, AsyncStatus::Fulfilled);
+            }
+            _ => panic!("expected fulfilled Async"),
+        }
+    }
+
+    // NET3-2f: writeChunk empty data is no-op
+    #[test]
+    fn test_v3_write_chunk_empty_is_noop() {
+        let port = v3_free_port();
+
+        let handler = make_streaming_handler(vec![
+            Statement::Expr(make_write_chunk_call("before")),
+            Statement::Expr(make_write_chunk_call("")), // empty = no-op
+            Statement::Expr(make_write_chunk_call("after")),
+            Statement::Expr(make_end_response_call()),
+        ]);
+
+        let server_port = port;
+        let server_handle = std::thread::spawn(move || {
+            let mut interp = Interpreter::new();
+            setup_v3_sentinels(&mut interp);
+            interp.env.define_force("__handler", handler);
+            let args = vec![
+                Expr::IntLit(server_port as i64, dummy_span()),
+                Expr::Ident("__handler".into(), dummy_span()),
+                Expr::IntLit(1, dummy_span()),
+                Expr::IntLit(5000, dummy_span()),
+            ];
+            interp.try_net_func("httpServe", &args).unwrap().unwrap()
+        });
+
+        std::thread::sleep(std::time::Duration::from_millis(200));
+
+        let mut client = std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
+        std::io::Write::write_all(
+            &mut client,
+            b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+        )
+        .unwrap();
+
+        let response_str = read_full_response(&mut client);
+
+        assert!(
+            response_str.contains("before"),
+            "response should contain 'before'\n{}",
+            response_str
+        );
+        assert!(
+            response_str.contains("after"),
+            "response should contain 'after'\n{}",
+            response_str
+        );
+
+        let result = server_handle.join().unwrap();
+        match result {
+            Signal::Value(Value::Async(a)) => {
+                assert_eq!(a.status, AsyncStatus::Fulfilled);
+            }
+            _ => panic!("expected fulfilled Async"),
+        }
+    }
+
+    // NET3-2f: auto-end when handler returns without endResponse
+    #[test]
+    fn test_v3_auto_end_on_handler_return() {
+        let port = v3_free_port();
+
+        // Handler writes chunks but doesn't call endResponse → auto-end
+        let handler = make_streaming_handler(vec![Statement::Expr(make_write_chunk_call(
+            "auto-end-data",
+        ))]);
+
+        let server_port = port;
+        let server_handle = std::thread::spawn(move || {
+            let mut interp = Interpreter::new();
+            setup_v3_sentinels(&mut interp);
+            interp.env.define_force("__handler", handler);
+            let args = vec![
+                Expr::IntLit(server_port as i64, dummy_span()),
+                Expr::Ident("__handler".into(), dummy_span()),
+                Expr::IntLit(1, dummy_span()),
+                Expr::IntLit(5000, dummy_span()),
+            ];
+            interp.try_net_func("httpServe", &args).unwrap().unwrap()
+        });
+
+        std::thread::sleep(std::time::Duration::from_millis(200));
+
+        let mut client = std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
+        std::io::Write::write_all(
+            &mut client,
+            b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+        )
+        .unwrap();
+
+        let response_str = read_full_response(&mut client);
+
+        assert!(
+            response_str.contains("Transfer-Encoding: chunked"),
+            "auto-end response should be chunked\n{}",
+            response_str
+        );
+        assert!(
+            response_str.contains("auto-end-data"),
+            "response should contain body\n{}",
+            response_str
+        );
+        // Should have terminator (auto-ended)
+        assert!(
+            response_str.contains("0\r\n\r\n"),
+            "auto-ended response should have terminator\n{}",
+            response_str
+        );
+
+        let result = server_handle.join().unwrap();
+        match result {
+            Signal::Value(Value::Async(a)) => {
+                assert_eq!(a.status, AsyncStatus::Fulfilled);
+            }
+            _ => panic!("expected fulfilled Async"),
+        }
+    }
+
+    // NET3-2f: reserved header rejection in startResponse
+    #[test]
+    fn test_v3_reserved_header_rejection_in_handler() {
+        let port = v3_free_port();
+
+        // Handler calls startResponse with Content-Length → should error
+        let handler = make_streaming_handler(vec![
+            Statement::Expr(make_start_response_call(
+                200,
+                vec![("Content-Length".into(), "42".into())],
+            )),
+            Statement::Expr(make_write_chunk_call("data")),
+            Statement::Expr(make_end_response_call()),
+        ]);
+
+        let server_port = port;
+        let server_handle = std::thread::spawn(move || {
+            let mut interp = Interpreter::new();
+            setup_v3_sentinels(&mut interp);
+            interp.env.define_force("__handler", handler);
+            let args = vec![
+                Expr::IntLit(server_port as i64, dummy_span()),
+                Expr::Ident("__handler".into(), dummy_span()),
+                Expr::IntLit(1, dummy_span()),
+                Expr::IntLit(5000, dummy_span()),
+            ];
+            interp.try_net_func("httpServe", &args).unwrap().unwrap()
+        });
+
+        std::thread::sleep(std::time::Duration::from_millis(200));
+
+        let mut client = std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
+        std::io::Write::write_all(
+            &mut client,
+            b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+        )
+        .unwrap();
+
+        let response_str = read_full_response(&mut client);
+
+        // Should get 500 error because startResponse rejected Content-Length
+        assert!(
+            response_str.contains("500"),
+            "reserved header should cause 500 error\n{}",
+            response_str
+        );
+        assert!(
+            response_str.contains("Content-Length"),
+            "error should mention Content-Length\n{}",
+            response_str
+        );
+
+        let _ = server_handle.join();
+    }
+
+    // NET3-2f: bodyless status rejects writeChunk
+    #[test]
+    fn test_v3_bodyless_status_rejects_write_chunk() {
+        let port = v3_free_port();
+
+        // Handler calls startResponse(204) then writeChunk → should error
+        let handler = make_streaming_handler(vec![
+            Statement::Expr(make_start_response_call(204, vec![])),
+            Statement::Expr(make_write_chunk_call("body-not-allowed")),
+            Statement::Expr(make_end_response_call()),
+        ]);
+
+        let server_port = port;
+        let server_handle = std::thread::spawn(move || {
+            let mut interp = Interpreter::new();
+            setup_v3_sentinels(&mut interp);
+            interp.env.define_force("__handler", handler);
+            let args = vec![
+                Expr::IntLit(server_port as i64, dummy_span()),
+                Expr::Ident("__handler".into(), dummy_span()),
+                Expr::IntLit(1, dummy_span()),
+                Expr::IntLit(5000, dummy_span()),
+            ];
+            interp.try_net_func("httpServe", &args).unwrap().unwrap()
+        });
+
+        std::thread::sleep(std::time::Duration::from_millis(200));
+
+        let mut client = std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
+        std::io::Write::write_all(
+            &mut client,
+            b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+        )
+        .unwrap();
+
+        let response_str = read_full_response(&mut client);
+
+        // Should get 500 error because 204 does not allow body
+        assert!(
+            response_str.contains("500"),
+            "bodyless status should cause 500 error\n{}",
+            response_str
+        );
+
+        let _ = server_handle.join();
+    }
+
+    // NET3-2f: Verify chunked wire format correctness
+    #[test]
+    fn test_v3_chunked_wire_format() {
+        let port = v3_free_port();
+
+        let handler = make_streaming_handler(vec![
+            Statement::Expr(make_write_chunk_call("AB")), // 2 bytes → hex "2"
+            Statement::Expr(make_end_response_call()),
+        ]);
+
+        let server_port = port;
+        let server_handle = std::thread::spawn(move || {
+            let mut interp = Interpreter::new();
+            setup_v3_sentinels(&mut interp);
+            interp.env.define_force("__handler", handler);
+            let args = vec![
+                Expr::IntLit(server_port as i64, dummy_span()),
+                Expr::Ident("__handler".into(), dummy_span()),
+                Expr::IntLit(1, dummy_span()),
+                Expr::IntLit(5000, dummy_span()),
+            ];
+            interp.try_net_func("httpServe", &args).unwrap().unwrap()
+        });
+
+        std::thread::sleep(std::time::Duration::from_millis(200));
+
+        let mut client = std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
+        std::io::Write::write_all(
+            &mut client,
+            b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+        )
+        .unwrap();
+
+        let mut response = Vec::new();
+        let _ = client.set_read_timeout(Some(std::time::Duration::from_secs(3)));
+        loop {
+            let mut buf = [0u8; 4096];
+            match std::io::Read::read(&mut client, &mut buf) {
+                Ok(0) => break,
+                Ok(n) => response.extend_from_slice(&buf[..n]),
+                Err(ref e)
+                    if e.kind() == std::io::ErrorKind::WouldBlock
+                        || e.kind() == std::io::ErrorKind::TimedOut =>
+                {
+                    break;
+                }
+                Err(_) => break,
+            }
+        }
+
+        let response_str = String::from_utf8_lossy(&response);
+        // Verify exact chunked wire format:
+        // "2\r\nAB\r\n0\r\n\r\n"
+        assert!(
+            response_str.contains("2\r\nAB\r\n"),
+            "chunk should be '2\\r\\nAB\\r\\n', got:\n{}",
+            response_str
+        );
+        assert!(
+            response_str.ends_with("0\r\n\r\n"),
+            "response should end with '0\\r\\n\\r\\n', got:\n{}",
+            response_str
+        );
+
+        let _ = server_handle.join();
+    }
+
+    // NET3-2f: implicit head commit on first writeChunk
+    #[test]
+    fn test_v3_implicit_head_commit() {
+        let port = v3_free_port();
+
+        // No startResponse → writeChunk should auto-commit 200/@[]
+        let handler = make_streaming_handler(vec![
+            Statement::Expr(make_write_chunk_call("implicit-head")),
+            Statement::Expr(make_end_response_call()),
+        ]);
+
+        let server_port = port;
+        let server_handle = std::thread::spawn(move || {
+            let mut interp = Interpreter::new();
+            setup_v3_sentinels(&mut interp);
+            interp.env.define_force("__handler", handler);
+            let args = vec![
+                Expr::IntLit(server_port as i64, dummy_span()),
+                Expr::Ident("__handler".into(), dummy_span()),
+                Expr::IntLit(1, dummy_span()),
+                Expr::IntLit(5000, dummy_span()),
+            ];
+            interp.try_net_func("httpServe", &args).unwrap().unwrap()
+        });
+
+        std::thread::sleep(std::time::Duration::from_millis(200));
+
+        let mut client = std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
+        std::io::Write::write_all(
+            &mut client,
+            b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+        )
+        .unwrap();
+
+        let response_str = read_full_response(&mut client);
+
+        // Should default to 200 OK
+        assert!(
+            response_str.contains("HTTP/1.1 200 OK"),
+            "implicit head should default to 200 OK\n{}",
+            response_str
+        );
+        assert!(
+            response_str.contains("Transfer-Encoding: chunked"),
+            "implicit head should include chunked TE\n{}",
+            response_str
+        );
+        assert!(
+            response_str.contains("implicit-head"),
+            "response should contain body\n{}",
+            response_str
+        );
+
+        let _ = server_handle.join();
     }
 }

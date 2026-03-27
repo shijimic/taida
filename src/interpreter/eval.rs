@@ -138,6 +138,13 @@ pub struct Interpreter {
     /// RCB-301: Current function call depth for stack overflow prevention.
     /// Incremented on each non-TCO function call, decremented on return.
     call_depth: usize,
+    /// NET3-2: Active streaming writer for 2-arg httpServe handler.
+    /// Set before calling the handler, cleared after the handler returns.
+    /// This allows startResponse/writeChunk/endResponse/sseEvent to access
+    /// the connection's StreamingWriter state and TcpStream during handler execution.
+    /// Safety: The interpreter is single-threaded (!Send). The raw pointers point to
+    /// stack-local variables in dispatch_request that outlive the handler call.
+    pub(crate) active_streaming_writer: Option<super::net_eval::ActiveStreamingWriter>,
 }
 
 impl Interpreter {
@@ -177,6 +184,7 @@ impl Interpreter {
             pending_throw: None,
             type_parents: HashMap::new(),
             call_depth: 0,
+            active_streaming_writer: None,
         }
     }
 
