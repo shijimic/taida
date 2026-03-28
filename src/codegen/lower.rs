@@ -127,6 +127,17 @@ pub struct Lowering {
     /// NB-14: When true, the current CallUser is in tail position (return value).
     /// Skip get_return_tag to preserve C compiler tail call optimization (WASM/mutual recursion).
     in_tail_call_return: bool,
+    /// NB3-4: Variable alias tracking for identity assignments (e.g., `h <= handler`).
+    /// Maps target variable name to source variable name.
+    var_aliases: std::collections::HashMap<String, String>,
+    /// NB3-4: Lambda parameter count tracking for lambda assignments (e.g., `h <= req, writer => @(...)`).
+    /// Maps variable name to the number of lambda parameters.
+    lambda_param_counts: std::collections::HashMap<String, usize>,
+    /// NB3-4 fix: Parameter names whose type was inferred from return-type annotation
+    /// (not from explicit type annotations or literal assignments).
+    /// These are unreliable for callable_type_tag because the parameter might actually
+    /// be a function/closure passed at runtime.
+    return_type_inferred_params: std::collections::HashSet<String>,
 }
 
 #[derive(Debug)]
@@ -285,6 +296,9 @@ impl Lowering {
             param_tag_vars: std::collections::HashMap::new(),
             return_tag_vars: std::collections::HashMap::new(),
             in_tail_call_return: false,
+            var_aliases: std::collections::HashMap::new(),
+            lambda_param_counts: std::collections::HashMap::new(),
+            return_type_inferred_params: std::collections::HashSet::new(),
         }
     }
 
@@ -847,12 +861,17 @@ impl Lowering {
     }
 
     /// taida-lang/net package function → C runtime function mapping.
-    /// Names of taida-lang/net HTTP v1 builtins that require scope-aware dispatch.
+    /// Names of taida-lang/net builtins that require scope-aware dispatch.
+    /// HTTP v1 (3) + HTTP v2 (1) + HTTP v3 (4) = 8.
     const NET_BUILTIN_NAMES: &'static [&'static str] = &[
         "httpServe",
         "httpParseRequestHead",
         "httpEncodeResponse",
         "readBody",
+        "startResponse",
+        "writeChunk",
+        "endResponse",
+        "sseEvent",
     ];
 
     /// Check if a name is a net HTTP v1 builtin that is currently shadowed by a parameter.
@@ -887,6 +906,11 @@ impl Lowering {
             "httpEncodeResponse" => Some("taida_net_http_encode_response"),
             // HTTP v2 surface
             "readBody" => Some("taida_net_read_body"),
+            // HTTP v3 streaming surface
+            "startResponse" => Some("taida_net_start_response"),
+            "writeChunk" => Some("taida_net_write_chunk"),
+            "endResponse" => Some("taida_net_end_response"),
+            "sseEvent" => Some("taida_net_sse_event"),
             _ => None,
         }
     }
@@ -1489,10 +1513,23 @@ impl Lowering {
         // restore after. This covers both parameter shadows and local assignment
         // shadows (e.g. `httpServe <= add`) within the function scope.
         let prev_shadowed_net = self.shadowed_net_builtins.clone();
+        // NB3-4: Snapshot var_aliases and lambda_param_counts so that aliases
+        // defined inside this function do not leak to sibling/parent scopes.
+        let prev_var_aliases = self.var_aliases.clone();
+        let prev_lambda_param_counts = self.lambda_param_counts.clone();
+        let prev_lambda_vars = self.lambda_vars.clone();
+        let prev_closure_vars = self.closure_vars.clone();
         for p in &func_def.params {
             if Self::NET_BUILTIN_NAMES.contains(&p.name.as_str()) {
                 self.shadowed_net_builtins.insert(p.name.clone());
             }
+            // NB3-4 parameter shadow: remove outer-scope aliases so that
+            // resolve_ident_arity / resolve_ident_callable_tag return unknown (-1)
+            // for parameters that shadow outer aliases.
+            self.var_aliases.remove(&p.name);
+            self.lambda_param_counts.remove(&p.name);
+            self.lambda_vars.remove(&p.name);
+            self.closure_vars.remove(&p.name);
         }
 
         // ヒープ変数トラッカーをリセット
@@ -1525,6 +1562,13 @@ impl Lowering {
             }
         }
 
+        // NB3-4 fix: Save/restore return_type_inferred_params across function boundaries
+        // so that inner function parameters don't inherit outer function's inference.
+        // Must be saved BEFORE return-type inference so that current function's inferred
+        // params are tracked in the fresh (empty) set.
+        let prev_return_type_inferred_params =
+            std::mem::take(&mut self.return_type_inferred_params);
+
         // 戻り値型注釈から型注釈なしパラメータの型を推論登録
         // 例: `sumTo n acc = ... => :Int` の場合、n, acc を int_vars に登録
         // これにより poly_add 等のヒューリスティック関数の誤発火を防ぐ
@@ -1544,6 +1588,11 @@ impl Lowering {
                         && !self.closure_vars.contains(&param.name)
                     {
                         self.int_vars.insert(param.name.clone());
+                        // NB3-4 fix: Track that this parameter's type was inferred
+                        // from the return type, not from an explicit annotation.
+                        // callable_type_tag must not trust this inference for
+                        // handler arguments, since the parameter might be a function.
+                        self.return_type_inferred_params.insert(param.name.clone());
                     }
                 }
             }
@@ -1792,6 +1841,14 @@ impl Lowering {
         self.shadowed_net_builtins = prev_shadowed_net;
         // NB-14: Restore param_tag_vars to pre-function state
         self.param_tag_vars = prev_param_tag_vars;
+        // NB3-4 fix: Restore return_type_inferred_params to pre-function state
+        self.return_type_inferred_params = prev_return_type_inferred_params;
+        // NB3-4: Restore var_aliases, lambda_param_counts, lambda_vars, closure_vars
+        // to pre-function state (parameter shadow cleanup)
+        self.var_aliases = prev_var_aliases;
+        self.lambda_param_counts = prev_lambda_param_counts;
+        self.lambda_vars = prev_lambda_vars;
+        self.closure_vars = prev_closure_vars;
 
         Ok(ir_func)
     }
@@ -2073,6 +2130,14 @@ impl Lowering {
                             .insert(assign.target.clone(), next_lambda_name);
                         self.closure_vars.insert(assign.target.clone());
                     }
+                    // NB3-4: Record lambda parameter count for handler_arity resolution
+                    self.lambda_param_counts
+                        .insert(assign.target.clone(), params.len());
+                }
+                // NB3-4: Track variable aliases for identity assignments (e.g., `h <= handler`)
+                if let Expr::Ident(source_name, _) = &assign.value {
+                    self.var_aliases
+                        .insert(assign.target.clone(), source_name.clone());
                 }
                 let val = self.lower_expr(func, &assign.value)?;
                 func.push(IrInst::DefVar(assign.target.clone(), val));
@@ -2953,6 +3018,12 @@ impl Lowering {
                 let handler_tag = self.callable_type_tag(&args[1]);
                 let handler_tag_var = func.alloc_var();
                 func.push(IrInst::ConstInt(handler_tag_var, handler_tag));
+                // NET3-5a: Pass compile-time handler arity so the C runtime
+                // can distinguish 1-arg (one-shot) vs 2-arg (streaming) handlers.
+                // -1 = unknown (dynamic).
+                let handler_arity = self.handler_arity(&args[1]);
+                let handler_arity_var = func.alloc_var();
+                func.push(IrInst::ConstInt(handler_arity_var, handler_arity));
                 let result = func.alloc_var();
                 func.push(IrInst::Call(
                     result,
@@ -2964,6 +3035,7 @@ impl Lowering {
                         timeout_ms,
                         max_connections,
                         handler_tag_var,
+                        handler_arity_var,
                     ],
                 ));
                 return Ok(result);
@@ -4291,10 +4363,23 @@ impl Lowering {
 
         // Scope-aware net builtin shadowing: snapshot/restore for lambda scope
         let prev_shadowed_net = self.shadowed_net_builtins.clone();
+        // NB3-4: Snapshot var_aliases, lambda_param_counts, lambda_vars, closure_vars
+        // for lambda scope
+        let prev_var_aliases = self.var_aliases.clone();
+        let prev_lambda_param_counts = self.lambda_param_counts.clone();
+        let prev_lambda_vars = self.lambda_vars.clone();
+        let prev_closure_vars = self.closure_vars.clone();
         for p in params {
             if Self::NET_BUILTIN_NAMES.contains(&p.name.as_str()) {
                 self.shadowed_net_builtins.insert(p.name.clone());
             }
+            // NB3-4 parameter shadow: remove outer-scope aliases so that
+            // resolve_ident_arity / resolve_ident_callable_tag return unknown (-1)
+            // for parameters that shadow outer aliases.
+            self.var_aliases.remove(&p.name);
+            self.lambda_param_counts.remove(&p.name);
+            self.lambda_vars.remove(&p.name);
+            self.closure_vars.remove(&p.name);
         }
 
         // 全ラムダを統一的にクロージャとして生成する。
@@ -4394,6 +4479,12 @@ impl Lowering {
 
             // Restore net builtin shadow set to pre-lambda state
             self.shadowed_net_builtins = prev_shadowed_net;
+            // NB3-4: Restore var_aliases, lambda_param_counts, lambda_vars, closure_vars
+            // to pre-lambda state (parameter shadow cleanup)
+            self.var_aliases = prev_var_aliases;
+            self.lambda_param_counts = prev_lambda_param_counts;
+            self.lambda_vars = prev_lambda_vars;
+            self.closure_vars = prev_closure_vars;
 
             Ok(dst)
         }
@@ -5402,16 +5493,66 @@ impl Lowering {
     /// Strategy: check callable first, then delegate to noncallable_type_tag()
     /// which uses the existing expr_returns_float / expr_is_string_full / expr_is_bool /
     /// expr_is_pack / expr_is_list helpers + arithmetic Int detection.
+    /// NET3-5a: Determine compile-time handler parameter count for httpServe.
+    /// Returns the number of parameters if statically known, -1 if dynamic.
+    fn handler_arity(&self, expr: &Expr) -> i64 {
+        match expr {
+            Expr::Lambda(params, _, _) => params.len() as i64,
+            Expr::Ident(name, _) => self.resolve_ident_arity(name),
+            _ => -1,
+        }
+    }
+
+    /// NB3-4: Resolve handler arity for a named identifier by following
+    /// func_param_defs, lambda_vars, lambda_param_counts, and var_aliases chains.
+    /// Max chain depth of 16 to prevent infinite loops from cyclic aliases.
+    fn resolve_ident_arity(&self, name: &str) -> i64 {
+        let mut current = name;
+        let mut depth = 0;
+        loop {
+            if depth > 16 {
+                return -1; // too deep, give up
+            }
+            // 1. Named function definition (top-level or inner FuncDef)
+            if let Some(params) = self.func_param_defs.get(current) {
+                return params.len() as i64;
+            }
+            // 2. Lambda variable mapped to a lambda function name
+            if let Some(lambda_name) = self.lambda_vars.get(current)
+                && let Some(params) = self.func_param_defs.get(lambda_name.as_str())
+            {
+                return params.len() as i64;
+            }
+            // 3. Direct lambda param count (from lambda assignment: `h <= req, writer => @(...)`)
+            if let Some(&count) = self.lambda_param_counts.get(current) {
+                return count as i64;
+            }
+            // 4. Variable alias — follow the chain (e.g., `h <= handler`)
+            if let Some(source) = self.var_aliases.get(current) {
+                current = source.as_str();
+                depth += 1;
+                continue;
+            }
+            return -1; // dynamic / unknown
+        }
+    }
+
     fn callable_type_tag(&self, expr: &Expr) -> i64 {
         // 1. Callable detection
         match expr {
             Expr::Lambda(_, _, _) => return 6, // TAIDA_TAG_CLOSURE
             Expr::Ident(name, _) => {
-                if self.closure_vars.contains(name) {
-                    return 6; // TAIDA_TAG_CLOSURE
+                if let Some(tag) = self.resolve_ident_callable_tag(name) {
+                    return tag;
                 }
-                if self.user_funcs.contains(name) || self.lambda_vars.contains_key(name) {
-                    return 10; // TAIDA_TAG_FUNC
+                // NB3-4 fix: If this identifier (or any alias-chain ancestor)
+                // was inferred solely from the function's return-type annotation
+                // (e.g. `run_server h ... => :Int` puts `h` into int_vars),
+                // do NOT trust noncallable_type_tag. The parameter might actually
+                // be a function/closure passed at runtime.
+                // Follow var_aliases to cover `x <= h` 1-hop (and N-hop) aliases.
+                if self.ident_or_alias_is_return_type_inferred(name) {
+                    return -1;
                 }
             }
             _ => {}
@@ -5421,6 +5562,52 @@ impl Lowering {
             return tag;
         }
         -1 // TAIDA_TAG_UNKNOWN
+    }
+
+    /// NB3-4: Resolve callable type tag for a named identifier, following var_aliases.
+    fn resolve_ident_callable_tag(&self, name: &str) -> Option<i64> {
+        let mut current = name;
+        let mut depth = 0;
+        loop {
+            if depth > 16 {
+                return None;
+            }
+            if self.closure_vars.contains(current) {
+                return Some(6); // TAIDA_TAG_CLOSURE
+            }
+            if self.user_funcs.contains(current) || self.lambda_vars.contains_key(current) {
+                return Some(10); // TAIDA_TAG_FUNC
+            }
+            // NB3-4: Follow variable alias chain
+            if let Some(source) = self.var_aliases.get(current) {
+                current = source.as_str();
+                depth += 1;
+                continue;
+            }
+            return None;
+        }
+    }
+
+    /// NB3-4: Check if an identifier, or any ancestor in its var_aliases chain,
+    /// belongs to return_type_inferred_params. This ensures that `x <= h` where
+    /// `h` is a return-type-inferred parameter is also treated as unknown callable.
+    fn ident_or_alias_is_return_type_inferred(&self, name: &str) -> bool {
+        let mut current = name;
+        let mut depth = 0;
+        loop {
+            if depth > 16 {
+                return false;
+            }
+            if self.return_type_inferred_params.contains(current) {
+                return true;
+            }
+            if let Some(source) = self.var_aliases.get(current) {
+                current = source.as_str();
+                depth += 1;
+                continue;
+            }
+            return false;
+        }
     }
 
     /// NB-31: Determine if an expression is a known non-callable type.

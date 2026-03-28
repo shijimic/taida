@@ -3671,22 +3671,143 @@ async function __taida_net_httpServe(port, handler, maxRequests, timeoutMs, maxC
         socket.removeAllListeners('timeout');
         socket.removeAllListeners('end');
 
-        let responseVal;
-        try {
-          responseVal = handler(request);
-          if (responseVal && typeof responseVal.then === 'function') {
-            responseVal.then((val) => {
-              afterHandler(val, keepAlive);
-            }).catch((err) => {
-              send500AndClose(err && err.message || err);
-            });
+        // NET3-4a: Detect handler arity (1-arg vs 2-arg).
+        // handler.length gives the number of declared parameters.
+        const handlerArity = handler.length;
+
+        if (handlerArity >= 2) {
+          // ── v3 2-arg handler path ──
+          // Create a writer object with mutable state for streaming.
+          const writer = {
+            __writer_id: '__v3_streaming_writer',
+            _state: 0,           // 0=Idle, 1=HeadPrepared, 2=Streaming, 3=Ended
+            _pendingStatus: 200,
+            _pendingHeaders: [],  // Array of @(name, value)
+            _sseMode: false,
+            _socket: socket,
+            _needsDrain: false,   // backpressure flag: set when sock.write returns false
+          };
+          // Listen for drain events to clear backpressure flag.
+          // Attached once per request (removed in afterResponseWritten
+          // to prevent keep-alive accumulation).
+          function onDrain() {
+            writer._needsDrain = false;
+          }
+          socket.on('drain', onDrain);
+          writer._onDrain = onDrain; // stash for removal
+
+          let responseVal;
+          try {
+            responseVal = handler(request, writer);
+            if (responseVal && typeof responseVal.then === 'function') {
+              responseVal.then((val) => {
+                afterHandlerStreaming(val, keepAlive, writer);
+              }).catch((err) => {
+                afterHandlerStreamingError(err, keepAlive, writer);
+              });
+              return;
+            }
+          } catch (err) {
+            afterHandlerStreamingError(err, keepAlive, writer);
             return;
           }
-        } catch (err) {
-          send500AndClose(err && err.message || err);
+          afterHandlerStreaming(responseVal, keepAlive, writer);
+        } else {
+          // ── v2 1-arg handler path (unchanged) ──
+          let responseVal;
+          try {
+            responseVal = handler(request);
+            if (responseVal && typeof responseVal.then === 'function') {
+              responseVal.then((val) => {
+                afterHandler(val, keepAlive);
+              }).catch((err) => {
+                send500AndClose(err && err.message || err);
+              });
+              return;
+            }
+          } catch (err) {
+            send500AndClose(err && err.message || err);
+            return;
+          }
+          afterHandler(responseVal, keepAlive);
+        }
+      }
+
+      // NET3-4a: Handle error in 2-arg handler
+      function afterHandlerStreamingError(err, keepAlive, writer) {
+        const msg = (err && err.message) || String(err);
+        if (writer._state === 2) {
+          // Head already committed — send chunk terminator and close
+          if (!socket.destroyed && socket.writable) {
+            socket.write('0\r\n\r\n', () => { closeConn(); });
+          } else {
+            closeConn();
+          }
+          writer._state = 3;
+          requestCount++;
           return;
         }
-        afterHandler(responseVal, keepAlive);
+        if (writer._state === 3) {
+          // Already ended — just close
+          requestCount++;
+          closeConn();
+          return;
+        }
+        // Head not yet committed (Idle/HeadPrepared) — safe to send 500
+        writer._state = 3;
+        send500AndClose(msg);
+      }
+
+      // NET3-4a: afterHandler for 2-arg handler (streaming path)
+      function afterHandlerStreaming(responseVal, keepAlive, writer) {
+        if (connClosed_ || serverClosed) return;
+        if (socket.destroyed || !socket.writable) { closeConn(); return; }
+
+        if (writer._state === 0) {
+          // ── One-shot fallback: writer never touched ──
+          // Use responseVal as v2-style response pack, or default 200 + empty body.
+          const isResponsePack = responseVal && typeof responseVal === 'object'
+            && ('status' in responseVal || 'body' in responseVal);
+          const effectiveResponse = isResponsePack ? responseVal
+            : Object.freeze({ status: 200, headers: Object.freeze([]), body: '' });
+
+          const encoded = __taida_net_httpEncodeResponse(effectiveResponse);
+          const encInner = encoded && encoded.__value;
+          let responseBytes;
+          if (encInner && encInner.bytes) {
+            responseBytes = Buffer.from(encInner.bytes);
+          } else {
+            responseBytes = Buffer.from('HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n');
+            keepAlive = false;
+          }
+
+          socket.write(responseBytes, () => {
+            afterResponseWritten(keepAlive);
+          });
+        } else {
+          // Streaming was started. Return value is ignored.
+          // Auto-end if not already ended.
+          if (writer._state !== 3) {
+            if (writer._state === 1) {
+              // HeadPrepared but never wrote chunks — commit head first
+              const headBytes = __taida_net_buildStreamingHead(writer._pendingStatus, writer._pendingHeaders);
+              socket.write(headBytes);
+            }
+            // Send chunked terminator (only for non-bodyless status).
+            // Use callback on the last write to ensure data is flushed
+            // before afterResponseWritten potentially closes the connection.
+            if (!__taida_net_isBodylessStatus(writer._pendingStatus)) {
+              writer._state = 3;
+              socket.write('0\r\n\r\n', () => {
+                afterResponseWritten(keepAlive);
+              });
+              return;
+            }
+            writer._state = 3;
+          }
+          // Streaming response done — continue keep-alive loop
+          afterResponseWritten(keepAlive);
+        }
       }
 
       function afterHandler(responseVal, keepAlive) {
@@ -3706,6 +3827,12 @@ async function __taida_net_httpServe(port, handler, maxRequests, timeoutMs, maxC
         }
 
         socket.write(responseBytes, () => {
+          afterResponseWritten(keepAlive);
+        });
+      }
+
+      // Shared keep-alive continuation after any response (one-shot or streaming)
+      function afterResponseWritten(keepAlive) {
           requestCount++;
           connRequests++;
 
@@ -3731,6 +3858,7 @@ async function __taida_net_httpServe(port, handler, maxRequests, timeoutMs, maxC
 
           // NB2-8: Remove all existing listeners before re-attaching to prevent
           // listener accumulation on keep-alive connections (avoids MaxListenersExceededWarning).
+          socket.removeAllListeners('drain');
           socket.removeAllListeners('timeout');
           socket.removeAllListeners('end');
           socket.removeAllListeners('error');
@@ -3758,7 +3886,6 @@ async function __taida_net_httpServe(port, handler, maxRequests, timeoutMs, maxC
           socket.on('error', () => { closeConn(); });
           socket.on('data', onData);
           socket.resume();
-        });
       }
 
       function onData(chunk) {
@@ -3810,6 +3937,322 @@ async function __taida_net_httpServe(port, handler, maxRequests, timeoutMs, maxC
 
 // NB2-13: __taida_net_sendResponse removed (dead code since v2 inlined response encoding in afterHandler)
 
+// ── v3 streaming helpers ──────────────────────────────────────────
+
+// Check if a status code forbids a message body (1xx, 204, 205, 304).
+function __taida_net_isBodylessStatus(status) {
+  return (status >= 100 && status <= 199) || status === 204 || status === 205 || status === 304;
+}
+
+// Map HTTP status code to reason phrase (parity with interpreter).
+function __taida_net_statusReasonPhrase(status) {
+  switch (status) {
+    case 100: return 'Continue';
+    case 101: return 'Switching Protocols';
+    case 200: return 'OK';
+    case 201: return 'Created';
+    case 202: return 'Accepted';
+    case 204: return 'No Content';
+    case 205: return 'Reset Content';
+    case 301: return 'Moved Permanently';
+    case 302: return 'Found';
+    case 304: return 'Not Modified';
+    case 400: return 'Bad Request';
+    case 401: return 'Unauthorized';
+    case 403: return 'Forbidden';
+    case 404: return 'Not Found';
+    case 405: return 'Method Not Allowed';
+    case 408: return 'Request Timeout';
+    case 413: return 'Content Too Large';
+    case 500: return 'Internal Server Error';
+    case 502: return 'Bad Gateway';
+    case 503: return 'Service Unavailable';
+    default: return 'Unknown';
+  }
+}
+
+// Build HTTP response head bytes for streaming response.
+// Appends Transfer-Encoding: chunked for non-bodyless status codes.
+function __taida_net_buildStreamingHead(status, headers) {
+  const reason = __taida_net_statusReasonPhrase(status);
+  let head = 'HTTP/1.1 ' + status + ' ' + reason + '\r\n';
+  for (let i = 0; i < headers.length; i++) {
+    const h = headers[i];
+    head += (h.name || '') + ': ' + (h.value || '') + '\r\n';
+  }
+  // Auto-append Transfer-Encoding: chunked for status codes that allow body
+  if (!__taida_net_isBodylessStatus(status)) {
+    head += 'Transfer-Encoding: chunked\r\n';
+  }
+  head += '\r\n';
+  return head;
+}
+
+// Validate that headers don't contain reserved names for streaming path.
+function __taida_net_validateReservedHeaders(headers) {
+  for (let i = 0; i < headers.length; i++) {
+    const name = (headers[i].name || '').toLowerCase();
+    if (name === 'content-length') {
+      throw new __NativeError(
+        "startResponse: 'Content-Length' is not allowed in streaming response headers. " +
+        'The runtime manages Content-Length/Transfer-Encoding for streaming responses.');
+    }
+    if (name === 'transfer-encoding') {
+      throw new __NativeError(
+        "startResponse: 'Transfer-Encoding' is not allowed in streaming response headers. " +
+        'The runtime manages Transfer-Encoding for streaming responses.');
+    }
+  }
+}
+
+// Validate writer token: must have __writer_id === '__v3_streaming_writer'
+function __taida_net_validateWriter(writer, apiName) {
+  if (!writer || typeof writer !== 'object' || writer.__writer_id !== '__v3_streaming_writer') {
+    throw new __NativeError(apiName + ': first argument must be the writer provided by httpServe');
+  }
+}
+
+// ── v3 streaming API ─────────────────────────────────────────────
+
+// NET3-4b: startResponse(writer, status, headers)
+// Updates pending status/headers. Does NOT commit to wire.
+function __taida_net_startResponse(writer, status, headers) {
+  __taida_net_validateWriter(writer, 'startResponse');
+
+  // State check
+  if (writer._state === 1) {
+    throw new __NativeError('startResponse: already called. Cannot call startResponse twice.');
+  }
+  if (writer._state === 2) {
+    throw new __NativeError(
+      'startResponse: head already committed (chunks are being written). ' +
+      'Cannot change status/headers after writeChunk.');
+  }
+  if (writer._state === 3) {
+    throw new __NativeError('startResponse: response already ended.');
+  }
+
+  // Default status = 200
+  const s = (typeof status === 'number' && Number.isInteger(status)) ? status : 200;
+  if (s < 100 || s > 599) {
+    throw new __NativeError('startResponse: status must be 100-599, got ' + s);
+  }
+
+  // Default headers = []
+  const h = Array.isArray(headers) ? headers : [];
+
+  // Validate reserved headers
+  __taida_net_validateReservedHeaders(h);
+
+  writer._pendingStatus = s;
+  writer._pendingHeaders = h;
+  writer._state = 1; // HeadPrepared
+
+  return undefined; // Unit
+}
+
+// NET3-4b/4c/4d: writeChunk(writer, data)
+// Sends one chunk of body data using chunked transfer encoding.
+// Uses socket.cork()/uncork() to coalesce prefix+payload+suffix into one TCP segment.
+// No Buffer.concat — each piece is written separately within a cork.
+function __taida_net_writeChunk(writer, data) {
+  __taida_net_validateWriter(writer, 'writeChunk');
+
+  // State check
+  if (writer._state === 3) {
+    throw new __NativeError('writeChunk: response already ended.');
+  }
+
+  // Extract payload
+  let payload;
+  if (data instanceof Uint8Array) {
+    payload = data; // Bytes fast path (zero-copy: Buffer IS-A Uint8Array)
+  } else if (typeof data === 'string') {
+    payload = data; // Str — socket.write accepts strings directly (UTF-8 by default)
+  } else {
+    throw new __NativeError('writeChunk: data must be Bytes or Str, got ' + __taida_format(data));
+  }
+
+  // Empty chunk is no-op (avoid colliding with terminator)
+  const payloadLen = (typeof payload === 'string') ? Buffer.byteLength(payload) : payload.length;
+  if (payloadLen === 0) return undefined;
+
+  // Bodyless status check
+  if (__taida_net_isBodylessStatus(writer._pendingStatus)) {
+    throw new __NativeError('writeChunk: status ' + writer._pendingStatus + ' does not allow a message body');
+  }
+
+  const sock = writer._socket;
+
+  // Commit head if not yet committed
+  if (writer._state === 0 || writer._state === 1) {
+    const headBytes = __taida_net_buildStreamingHead(writer._pendingStatus, writer._pendingHeaders);
+    sock.write(headBytes);
+    writer._state = 2; // Streaming
+  }
+
+  // NET3-4c/4d: Send chunk using cork/uncork (no Buffer.concat).
+  // Wire format: <hex-size>\r\n<payload>\r\n
+  // Send chunk using cork/uncork (no Buffer.concat).
+  // Track drain state: if sock.write returns false the kernel buffer
+  // is full and the 'drain' event will fire to clear _needsDrain.
+  // writeChunk always returns undefined (Unit) per NET_DESIGN contract.
+  // Backpressure is handled by Node.js internal buffering; the drain
+  // listener resets the flag for observability but no Promise is exposed.
+  const hexPrefix = payloadLen.toString(16) + '\r\n';
+  sock.cork();
+  sock.write(hexPrefix);
+  sock.write(payload);
+  const ok = sock.write('\r\n');
+  sock.uncork();
+  if (!ok) {
+    writer._needsDrain = true;
+  }
+
+  return undefined; // Unit
+}
+
+// NET3-4b: endResponse(writer)
+// Terminates the chunked response by sending 0\r\n\r\n.
+// Idempotent: second call is no-op.
+function __taida_net_endResponse(writer) {
+  __taida_net_validateWriter(writer, 'endResponse');
+
+  // Idempotent
+  if (writer._state === 3) return undefined;
+
+  const sock = writer._socket;
+
+  // Commit head if not yet committed
+  if (writer._state === 0 || writer._state === 1) {
+    const headBytes = __taida_net_buildStreamingHead(writer._pendingStatus, writer._pendingHeaders);
+    sock.write(headBytes);
+  }
+
+  // Send chunked terminator (only for non-bodyless status)
+  if (!__taida_net_isBodylessStatus(writer._pendingStatus)) {
+    sock.write('0\r\n\r\n');
+  }
+  writer._state = 3; // Ended
+
+  return undefined; // Unit
+}
+
+// NET3-4e: sseEvent(writer, event, data)
+// SSE convenience API. Sends one Server-Sent Event in wire format.
+// Auto-sets Content-Type and Cache-Control headers if not already set.
+// Multiline data is split into multiple data: lines.
+function __taida_net_sseEvent(writer, event, data) {
+  __taida_net_validateWriter(writer, 'sseEvent');
+
+  if (typeof event !== 'string') {
+    throw new __NativeError('sseEvent: event must be Str, got ' + __taida_format(event));
+  }
+  if (typeof data !== 'string') {
+    throw new __NativeError('sseEvent: data must be Str, got ' + __taida_format(data));
+  }
+
+  // State check
+  if (writer._state === 3) {
+    throw new __NativeError('sseEvent: response already ended.');
+  }
+
+  // Bodyless status check
+  if (__taida_net_isBodylessStatus(writer._pendingStatus)) {
+    throw new __NativeError('sseEvent: status ' + writer._pendingStatus + ' does not allow a message body');
+  }
+
+  // NET3-3b/3c: Auto-set SSE headers if not in sse_mode
+  if (!writer._sseMode) {
+    if (writer._state === 2) {
+      // Head already committed — check if SSE headers were set by user
+      const hasSSEContentType = writer._pendingHeaders.some(function(h) {
+        return (h.name || '').toLowerCase() === 'content-type'
+          && (h.value || '').toLowerCase().indexOf('text/event-stream') >= 0;
+      });
+      const hasCacheNoCache = writer._pendingHeaders.some(function(h) {
+        return (h.name || '').toLowerCase() === 'cache-control'
+          && (h.value || '').toLowerCase().indexOf('no-cache') >= 0;
+      });
+      if (!hasSSEContentType || !hasCacheNoCache) {
+        throw new __NativeError(
+          'sseEvent: head already committed without SSE headers. ' +
+          'Call sseEvent before writeChunk, or use startResponse ' +
+          'with explicit Content-Type: text/event-stream and ' +
+          'Cache-Control: no-cache headers before writeChunk.');
+      }
+      writer._sseMode = true;
+    } else {
+      // Head not yet committed — safe to add auto-headers
+      const hasContentType = writer._pendingHeaders.some(function(h) {
+        return (h.name || '').toLowerCase() === 'content-type';
+      });
+      if (!hasContentType) {
+        writer._pendingHeaders.push(Object.freeze({
+          name: 'Content-Type',
+          value: 'text/event-stream; charset=utf-8'
+        }));
+      }
+      const hasCacheControl = writer._pendingHeaders.some(function(h) {
+        return (h.name || '').toLowerCase() === 'cache-control';
+      });
+      if (!hasCacheControl) {
+        writer._pendingHeaders.push(Object.freeze({
+          name: 'Cache-Control',
+          value: 'no-cache'
+        }));
+      }
+      writer._sseMode = true;
+    }
+  }
+
+  const sock = writer._socket;
+
+  // Commit head if not yet committed
+  if (writer._state === 0 || writer._state === 1) {
+    const headBytes = __taida_net_buildStreamingHead(writer._pendingStatus, writer._pendingHeaders);
+    sock.write(headBytes);
+    writer._state = 2; // Streaming
+  }
+
+  // Build SSE event as separate pieces (no aggregate string).
+  // Wire format:
+  //   event: <event>\n      (omit if empty)
+  //   data: <line1>\n
+  //   data: <line2>\n
+  //   \n                    (event terminator)
+  const dataLines = data.split('\n');
+
+  // Compute total payload byte length from parts (without building one big string).
+  let payloadLen = 0;
+  if (event.length > 0) {
+    payloadLen += 7 + Buffer.byteLength(event) + 1; // 'event: ' + event + '\n'
+  }
+  for (let i = 0; i < dataLines.length; i++) {
+    payloadLen += 6 + Buffer.byteLength(dataLines[i]) + 1; // 'data: ' + line + '\n'
+  }
+  payloadLen += 1; // terminator '\n'
+
+  // Send as one chunked frame using cork (pieces written separately).
+  const hexPrefix = payloadLen.toString(16) + '\r\n';
+  sock.cork();
+  sock.write(hexPrefix);
+  if (event.length > 0) {
+    sock.write('event: ' + event + '\n');
+  }
+  for (let i = 0; i < dataLines.length; i++) {
+    sock.write('data: ' + dataLines[i] + '\n');
+  }
+  sock.write('\n');
+  const ok = sock.write('\r\n');
+  sock.uncork();
+  if (!ok) {
+    writer._needsDrain = true;
+  }
+
+  return undefined; // Unit
+}
+
 // readBody(req) -> Bytes
 // Extract body bytes from a request pack using raw buffer + body span.
 // Returns empty Uint8Array if body.len == 0.
@@ -3830,6 +4273,7 @@ function __taida_net_readBody(req) {
   if (start >= end) return new Uint8Array(0);
   return raw.slice(start, end);
 }
+
 "#;
 
 #[cfg(test)]
@@ -3851,6 +4295,97 @@ mod tests {
         assert!(
             RUNTIME_JS.contains("process.stdin.fd"),
             "JS runtime should use process.stdin.fd for cross-platform stdin"
+        );
+    }
+
+    /// Regression: JS sseEvent must NOT build a single aggregate payload string.
+    /// The old code concatenated everything into `ssePayload` before writing,
+    /// defeating the zero-copy streaming design. The fix writes each SSE line
+    /// separately within cork/uncork.
+    #[test]
+    fn test_sse_event_no_aggregate_payload_string() {
+        // The old pattern was: let ssePayload = ''; ssePayload += ...
+        // followed by sock.write(ssePayload). After the fix, sseEvent should
+        // write 'event: ' and 'data: ' lines directly to the socket.
+        assert!(
+            !RUNTIME_JS.contains("let ssePayload = ''"),
+            "JS sseEvent should not build an aggregate ssePayload string — \
+             write SSE lines directly to socket within cork/uncork"
+        );
+        assert!(
+            !RUNTIME_JS.contains("sock.write(ssePayload)"),
+            "JS sseEvent should not write a single aggregate ssePayload — \
+             write each SSE line separately"
+        );
+    }
+
+    /// Regression: JS writeChunk must track drain (backpressure) state.
+    /// sock.write() returns false when the kernel buffer is full; the writer
+    /// must record this so callers can react to backpressure.
+    #[test]
+    fn test_write_chunk_tracks_drain() {
+        assert!(
+            RUNTIME_JS.contains("_needsDrain"),
+            "JS writer should have a _needsDrain flag for backpressure tracking"
+        );
+        assert!(
+            RUNTIME_JS.contains("'drain'"),
+            "JS runtime should listen for 'drain' events to clear backpressure flag"
+        );
+    }
+
+    /// Regression: JS drain listener must not accumulate across keep-alive
+    /// requests.  The old code added `socket.on('drain', ...)` per request
+    /// but never removed it, causing listener leak on keep-alive connections.
+    /// The fix removes drain listeners in afterResponseWritten alongside
+    /// timeout/end/error cleanup.
+    #[test]
+    fn test_drain_listener_cleaned_up_between_requests() {
+        // afterResponseWritten must remove drain listeners before re-attaching
+        // for the next request (same pattern as timeout/end/error).
+        assert!(
+            RUNTIME_JS.contains("removeAllListeners('drain')"),
+            "afterResponseWritten should remove drain listeners to prevent \
+             accumulation on keep-alive connections"
+        );
+    }
+
+    /// Regression: JS drain listener must store a removable reference.
+    /// The old code used an anonymous function in `socket.on('drain', ...)`,
+    /// making targeted removal impossible.  The fix stashes the handler
+    /// as `writer._onDrain` for per-listener removal, and also uses
+    /// `removeAllListeners('drain')` for bulk cleanup.
+    #[test]
+    fn test_drain_listener_has_named_reference() {
+        assert!(
+            RUNTIME_JS.contains("_onDrain"),
+            "drain listener should be stashed as _onDrain for removability"
+        );
+    }
+
+    /// Contract: writeChunk/sseEvent are synchronous Unit functions.
+    /// They must NOT return a Promise on backpressure — that would break
+    /// the public contract (NET_DESIGN) and backend parity.
+    /// Instead they only set `_needsDrain = true` for observability and
+    /// always return undefined (Unit).
+    #[test]
+    fn test_backpressure_is_sync_unit() {
+        // writeChunk/sseEvent must set _needsDrain flag on backpressure
+        assert!(
+            RUNTIME_JS.contains("writer._needsDrain = true;"),
+            "writeChunk/sseEvent should set _needsDrain flag on backpressure"
+        );
+        // Must NOT return a Promise (drain Promise would break sync Unit contract)
+        assert!(
+            !RUNTIME_JS.contains("return new Promise(function(resolve) { writer._drainResolve"),
+            "writeChunk/sseEvent must NOT return a drain Promise — \
+             they are synchronous Unit per NET_DESIGN contract"
+        );
+        // Must NOT have _drainResolve field (no async drain resolution)
+        assert!(
+            !RUNTIME_JS.contains("_drainResolve"),
+            "writer must NOT have _drainResolve field — \
+             backpressure is handled by Node.js internal buffering"
         );
     }
 }

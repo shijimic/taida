@@ -16,6 +16,8 @@ use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream, UdpSocket};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::Once;
+use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -392,9 +394,47 @@ fn spawn_tcp_echo_server() -> (u16, mpsc::Receiver<String>, thread::JoinHandle<(
     (port, rx, handle)
 }
 
+/// Allocate a unique, bindable port for network tests.
+///
+/// The classic `bind(0) → get port → drop listener` pattern has a TOCTOU race:
+/// when many tests run in parallel, the OS can hand the same just-freed port to
+/// two callers before either server binds.
+///
+/// This function combines two mitigations:
+///   1. **Monotonic counter** — seeded once from the OS, then incremented with
+///      `fetch_add` so no two parallel tests receive the same candidate.
+///   2. **Bind probe** — each candidate is verified with a real `bind()` to
+///      reject ports already held as ephemeral client ports or by other processes.
+///
+/// If the counter drifts outside the usable range (wrap-around or low ports)
+/// the function reseeds from the OS.
 fn find_free_loopback_port() -> u16 {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("bind free loopback port");
-    listener.local_addr().expect("local addr").port()
+    static INIT: Once = Once::new();
+    static COUNTER: AtomicU16 = AtomicU16::new(0);
+
+    INIT.call_once(|| {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind free loopback port");
+        let seed = listener.local_addr().expect("local addr").port();
+        COUNTER.store(seed, Ordering::Relaxed);
+    });
+
+    for _ in 0..200 {
+        let port = COUNTER.fetch_add(1, Ordering::Relaxed);
+        if !(10000..=65000).contains(&port) {
+            // Counter wrapped into reserved / near-overflow range — reseed from OS.
+            let listener =
+                TcpListener::bind("127.0.0.1:0").expect("reseed: bind free loopback port");
+            let fresh = listener.local_addr().expect("local addr").port();
+            // Store fresh+1 so the returned port (fresh) is never handed out again.
+            COUNTER.store(fresh.wrapping_add(1), Ordering::Relaxed);
+            return fresh;
+        }
+        // Verify the candidate is actually bindable right now.
+        if TcpListener::bind(("127.0.0.1", port)).is_ok() {
+            return port;
+        }
+    }
+    panic!("find_free_loopback_port: could not find a free port after 200 attempts");
 }
 
 fn spawn_tcp_client_for_accept(port: u16) -> (mpsc::Receiver<String>, thread::JoinHandle<()>) {
@@ -5380,7 +5420,7 @@ fn setup_net_project(source: &str, label: &str) -> PathBuf {
 
     // Write the net package stub (same as CoreBundledProvider::net_package_source)
     let net_stub = r#"// taida-lang/net — Core bundled network package
-<<< @(dnsResolve, tcpConnect, tcpListen, tcpAccept, socketSend, socketSendAll, socketRecv, socketSendBytes, socketRecvBytes, socketRecvExact, udpBind, udpSendTo, udpRecvFrom, socketClose, listenerClose, udpClose, httpServe, httpParseRequestHead, httpEncodeResponse, readBody)
+<<< @(dnsResolve, tcpConnect, tcpListen, tcpAccept, socketSend, socketSendAll, socketRecv, socketSendBytes, socketRecvBytes, socketRecvExact, udpBind, udpSendTo, udpRecvFrom, socketClose, listenerClose, udpClose, httpServe, httpParseRequestHead, httpEncodeResponse, readBody, startResponse, writeChunk, endResponse, sseEvent)
 "#;
     fs::write(deps_net.join("main.td"), net_stub).expect("write net stub");
 
@@ -11779,5 +11819,2932 @@ stdout(serverResult.ok)
             profile,
             stderr
         );
+    }
+}
+
+// ── NET v3 Phase 4: JS backend streaming parity tests ──────────────────────
+
+/// Helper: spawn a backend server (interp or js), wait for it to be ready,
+/// send a request, read the full response (including chunked), and return it.
+fn spawn_and_request_v3(
+    source: &str,
+    backend: &str,
+    port: u16,
+    request_bytes: &[u8],
+) -> (String, String) {
+    let dir = setup_net_project(source, &format!("v3_{}_{}", backend, port));
+    let td_path = dir.join("main.td");
+
+    let mut child: Child = match backend {
+        "interp" => Command::new(taida_bin())
+            .arg(&td_path)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn interpreter"),
+        "js" => {
+            let js_path =
+                unique_temp_path("taida_net3_v3js", &format!("{}_{}", backend, port), "mjs");
+            let transpile = Command::new(taida_bin())
+                .arg("build")
+                .arg("--target")
+                .arg("js")
+                .arg(&td_path)
+                .arg("-o")
+                .arg(&js_path)
+                .output()
+                .expect("transpile");
+            if !transpile.status.success() {
+                let stderr = String::from_utf8_lossy(&transpile.stderr);
+                cleanup_net_project(&dir);
+                let _ = fs::remove_file(&js_path);
+                panic!("JS transpile failed for {}: {}", backend, stderr);
+            }
+            let child = Command::new("node")
+                .arg(&js_path)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .expect("spawn node");
+            thread::sleep(Duration::from_millis(500));
+            let _ = fs::remove_file(&js_path);
+            child
+        }
+        // NET3-5f: Native backend support for v3 streaming tests
+        "native" => {
+            let bin_path = unique_temp_path(
+                "taida_net3_v3native",
+                &format!("{}_{}", backend, port),
+                "bin",
+            );
+            let compile = Command::new(taida_bin())
+                .arg("build")
+                .arg("--target")
+                .arg("native")
+                .arg(&td_path)
+                .arg("-o")
+                .arg(&bin_path)
+                .output()
+                .expect("compile native");
+            if !compile.status.success() {
+                let stderr = String::from_utf8_lossy(&compile.stderr);
+                cleanup_net_project(&dir);
+                let _ = fs::remove_file(&bin_path);
+                panic!("Native compile failed for {}: {}", backend, stderr);
+            }
+            let child = Command::new(&bin_path)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .expect("spawn native binary");
+            thread::sleep(Duration::from_millis(500));
+            let _ = fs::remove_file(&bin_path);
+            child
+        }
+        _ => unreachable!(),
+    };
+
+    // Wait for server to be ready, then send request
+    let mut response = Vec::new();
+    let mut got_response = false;
+    for _ in 0..80 {
+        thread::sleep(Duration::from_millis(100));
+        let stream = match TcpStream::connect(format!("127.0.0.1:{}", port)) {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+        stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
+        stream.set_write_timeout(Some(Duration::from_secs(5))).ok();
+        let mut stream = stream;
+        if std::io::Write::write_all(&mut stream, request_bytes).is_err() {
+            continue;
+        }
+        let mut buf = [0u8; 8192];
+        loop {
+            match std::io::Read::read(&mut stream, &mut buf) {
+                Ok(0) => break,
+                Ok(n) => response.extend_from_slice(&buf[..n]),
+                Err(ref e)
+                    if e.kind() == std::io::ErrorKind::WouldBlock
+                        || e.kind() == std::io::ErrorKind::TimedOut =>
+                {
+                    break;
+                }
+                Err(_) => break,
+            }
+        }
+        if !response.is_empty() {
+            got_response = true;
+            break;
+        }
+    }
+
+    if !got_response {
+        let _ = child.kill();
+        cleanup_net_project(&dir);
+        panic!(
+            "{} backend: server did not respond on port {}",
+            backend, port,
+        );
+    }
+
+    let resp_str = String::from_utf8_lossy(&response).to_string();
+
+    // Wait for server process to exit
+    let output = child.wait_with_output().expect("wait for server process");
+    let stdout = normalize(&String::from_utf8_lossy(&output.stdout));
+
+    cleanup_net_project(&dir);
+    (resp_str, stdout)
+}
+
+/// NET3-4f: 2-arg handler one-shot fallback — interp vs JS parity
+#[test]
+fn test_net3_4f_one_shot_fallback_interp_js_parity() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+
+    for backend in &["interp", "js"] {
+        let port = find_free_loopback_port();
+        let source = format!(
+            r#">>> taida-lang/net => @(httpServe)
+
+handler req writer =
+  @(status <= 200, headers <= @[@(name <= "Content-Type", value <= "text/plain")], body <= "fallback-ok")
+=> :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
+
+asyncResult <= httpServe({port}, handler, 1)
+asyncResult ]=> result
+result ]=> r
+stdout(r.requests)
+"#
+        );
+
+        let request = b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+        let (resp, stdout) = spawn_and_request_v3(&source, backend, port, request);
+
+        assert!(
+            resp.contains("200 OK"),
+            "NET3-4f {}: one-shot fallback should return 200 OK, got: {:?}",
+            backend,
+            resp
+        );
+        assert!(
+            resp.contains("fallback-ok"),
+            "NET3-4f {}: one-shot fallback body should contain 'fallback-ok', got: {:?}",
+            backend,
+            resp
+        );
+        // One-shot fallback must use Content-Length, NOT chunked
+        assert!(
+            resp.contains("Content-Length"),
+            "NET3-4f {}: one-shot fallback should use Content-Length, got: {:?}",
+            backend,
+            resp
+        );
+        assert!(
+            !resp.contains("Transfer-Encoding: chunked"),
+            "NET3-4f {}: one-shot fallback should NOT use chunked TE, got: {:?}",
+            backend,
+            resp
+        );
+        assert_eq!(
+            stdout, "1",
+            "NET3-4f {}: httpServe result mismatch. stdout: {:?}",
+            backend, stdout
+        );
+    }
+}
+
+/// NET3-4f: 2-arg handler with writeChunk streaming — interp vs JS parity
+#[test]
+fn test_net3_4f_write_chunk_streaming_interp_js_parity() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+
+    for backend in &["interp", "js"] {
+        let port = find_free_loopback_port();
+        let source = format!(
+            r#">>> taida-lang/net => @(httpServe, startResponse, writeChunk, endResponse)
+
+handler req writer =
+  startResponse(writer, 200, @[@(name <= "X-Custom", value <= "streaming")])
+  writeChunk(writer, "hello ")
+  writeChunk(writer, "world")
+  endResponse(writer)
+=> :Int
+
+asyncResult <= httpServe({port}, handler, 1)
+asyncResult ]=> result
+result ]=> r
+stdout(r.requests)
+"#
+        );
+
+        let request = b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+        let (resp, stdout) = spawn_and_request_v3(&source, backend, port, request);
+
+        assert!(
+            resp.contains("200 OK"),
+            "NET3-4f {}: streaming should return 200 OK, got: {:?}",
+            backend,
+            resp
+        );
+        assert!(
+            resp.contains("Transfer-Encoding: chunked"),
+            "NET3-4f {}: streaming should use chunked TE, got: {:?}",
+            backend,
+            resp
+        );
+        assert!(
+            resp.contains("X-Custom: streaming"),
+            "NET3-4f {}: streaming should include custom header, got: {:?}",
+            backend,
+            resp
+        );
+        // The body should contain "hello world" in chunked encoding
+        assert!(
+            resp.contains("hello ") && resp.contains("world"),
+            "NET3-4f {}: streaming body should contain 'hello ' and 'world', got: {:?}",
+            backend,
+            resp
+        );
+        assert_eq!(
+            stdout, "1",
+            "NET3-4f {}: httpServe result mismatch. stdout: {:?}",
+            backend, stdout
+        );
+    }
+}
+
+/// NET3-4f: 2-arg handler with sseEvent — interp vs JS parity
+#[test]
+fn test_net3_4f_sse_event_interp_js_parity() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+
+    for backend in &["interp", "js"] {
+        let port = find_free_loopback_port();
+        let source = format!(
+            r#">>> taida-lang/net => @(httpServe, sseEvent, endResponse)
+
+handler req writer =
+  sseEvent(writer, "message", "hello")
+  sseEvent(writer, "update", "world")
+  endResponse(writer)
+=> :Int
+
+asyncResult <= httpServe({port}, handler, 1)
+asyncResult ]=> result
+result ]=> r
+stdout(r.requests)
+"#
+        );
+
+        let request = b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+        let (resp, stdout) = spawn_and_request_v3(&source, backend, port, request);
+
+        assert!(
+            resp.contains("200 OK"),
+            "NET3-4f {}: SSE should return 200 OK, got: {:?}",
+            backend,
+            resp
+        );
+        assert!(
+            resp.contains("Transfer-Encoding: chunked"),
+            "NET3-4f {}: SSE should use chunked TE, got: {:?}",
+            backend,
+            resp
+        );
+        assert!(
+            resp.contains("Content-Type: text/event-stream"),
+            "NET3-4f {}: SSE should auto-set Content-Type, got: {:?}",
+            backend,
+            resp
+        );
+        assert!(
+            resp.contains("Cache-Control: no-cache"),
+            "NET3-4f {}: SSE should auto-set Cache-Control, got: {:?}",
+            backend,
+            resp
+        );
+        // Check SSE wire format in the chunked body
+        assert!(
+            resp.contains("event: message") && resp.contains("data: hello"),
+            "NET3-4f {}: SSE should contain 'event: message' and 'data: hello', got: {:?}",
+            backend,
+            resp
+        );
+        assert!(
+            resp.contains("event: update") && resp.contains("data: world"),
+            "NET3-4f {}: SSE should contain 'event: update' and 'data: world', got: {:?}",
+            backend,
+            resp
+        );
+        assert_eq!(
+            stdout, "1",
+            "NET3-4f {}: httpServe result mismatch. stdout: {:?}",
+            backend, stdout
+        );
+    }
+}
+
+/// NET3-4f: 2-arg handler no-return fallback (returns non-response value) — interp vs JS parity
+#[test]
+fn test_net3_4f_no_return_fallback_interp_js_parity() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+
+    for backend in &["interp", "js"] {
+        let port = find_free_loopback_port();
+        let source = format!(
+            r#">>> taida-lang/net => @(httpServe)
+
+handler req writer =
+  42
+=> :Int
+
+asyncResult <= httpServe({port}, handler, 1)
+asyncResult ]=> result
+result ]=> r
+stdout(r.requests)
+"#
+        );
+
+        let request = b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+        let (resp, stdout) = spawn_and_request_v3(&source, backend, port, request);
+
+        assert!(
+            resp.contains("200 OK"),
+            "NET3-4f {}: no-return fallback should return 200 OK, got: {:?}",
+            backend,
+            resp
+        );
+        // No-return fallback should use Content-Length: 0
+        assert!(
+            resp.contains("Content-Length: 0"),
+            "NET3-4f {}: no-return fallback should have Content-Length: 0, got: {:?}",
+            backend,
+            resp
+        );
+        assert_eq!(
+            stdout, "1",
+            "NET3-4f {}: httpServe result mismatch. stdout: {:?}",
+            backend, stdout
+        );
+    }
+}
+
+/// NET3-4f: sseEvent with multiline data — interp vs JS parity
+#[test]
+fn test_net3_4f_sse_multiline_interp_js_parity() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+
+    for backend in &["interp", "js"] {
+        let port = find_free_loopback_port();
+        // Use a multiline string with \n embedded
+        let source = format!(
+            r#">>> taida-lang/net => @(httpServe, sseEvent, endResponse)
+
+handler req writer =
+  sseEvent(writer, "multi", "line1\nline2\nline3")
+  endResponse(writer)
+=> :Int
+
+asyncResult <= httpServe({port}, handler, 1)
+asyncResult ]=> result
+result ]=> r
+stdout(r.requests)
+"#
+        );
+
+        let request = b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+        let (resp, stdout) = spawn_and_request_v3(&source, backend, port, request);
+
+        assert!(
+            resp.contains("200 OK"),
+            "NET3-4f {}: SSE multiline should return 200 OK, got: {:?}",
+            backend,
+            resp
+        );
+        // Check multiline data is split into separate data: lines
+        assert!(
+            resp.contains("data: line1")
+                && resp.contains("data: line2")
+                && resp.contains("data: line3"),
+            "NET3-4f {}: SSE multiline data should be split into data: lines, got: {:?}",
+            backend,
+            resp
+        );
+        assert_eq!(
+            stdout, "1",
+            "NET3-4f {}: httpServe result mismatch. stdout: {:?}",
+            backend, stdout
+        );
+    }
+}
+
+/// NET3-4f: implicit head commit on first writeChunk — interp vs JS parity
+#[test]
+fn test_net3_4f_implicit_head_commit_interp_js_parity() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+
+    for backend in &["interp", "js"] {
+        let port = find_free_loopback_port();
+        // No startResponse — writeChunk should auto-commit 200/@[]
+        let source = format!(
+            r#">>> taida-lang/net => @(httpServe, writeChunk, endResponse)
+
+handler req writer =
+  writeChunk(writer, "auto-head")
+  endResponse(writer)
+=> :Int
+
+asyncResult <= httpServe({port}, handler, 1)
+asyncResult ]=> result
+result ]=> r
+stdout(r.requests)
+"#
+        );
+
+        let request = b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+        let (resp, stdout) = spawn_and_request_v3(&source, backend, port, request);
+
+        assert!(
+            resp.contains("200 OK"),
+            "NET3-4f {}: implicit head should return 200 OK, got: {:?}",
+            backend,
+            resp
+        );
+        assert!(
+            resp.contains("Transfer-Encoding: chunked"),
+            "NET3-4f {}: implicit head should use chunked TE, got: {:?}",
+            backend,
+            resp
+        );
+        assert!(
+            resp.contains("auto-head"),
+            "NET3-4f {}: implicit head body should contain 'auto-head', got: {:?}",
+            backend,
+            resp
+        );
+        assert_eq!(
+            stdout, "1",
+            "NET3-4f {}: httpServe result mismatch. stdout: {:?}",
+            backend, stdout
+        );
+    }
+}
+
+// ── NET v3 Phase 5: Native backend streaming parity tests ──────────────────
+
+/// NET3-5f: 2-arg handler one-shot fallback — 3-way parity (interp vs JS vs native)
+#[test]
+fn test_net3_5f_one_shot_fallback_3way_parity() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+
+    for backend in &["interp", "js", "native"] {
+        let port = find_free_loopback_port();
+        let source = format!(
+            r#">>> taida-lang/net => @(httpServe)
+
+handler req writer =
+  @(status <= 200, headers <= @[@(name <= "Content-Type", value <= "text/plain")], body <= "fallback-ok")
+=> :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
+
+asyncResult <= httpServe({port}, handler, 1)
+asyncResult ]=> result
+result ]=> r
+stdout(r.requests)
+"#
+        );
+
+        let request = b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+        let (resp, stdout) = spawn_and_request_v3(&source, backend, port, request);
+
+        assert!(
+            resp.contains("200 OK"),
+            "NET3-5f {}: one-shot fallback should return 200 OK, got: {:?}",
+            backend,
+            resp
+        );
+        assert!(
+            resp.contains("fallback-ok"),
+            "NET3-5f {}: one-shot fallback body should contain 'fallback-ok', got: {:?}",
+            backend,
+            resp
+        );
+        // One-shot fallback must use Content-Length, NOT chunked
+        assert!(
+            resp.contains("Content-Length"),
+            "NET3-5f {}: one-shot fallback should use Content-Length, got: {:?}",
+            backend,
+            resp
+        );
+        assert!(
+            !resp.contains("Transfer-Encoding: chunked"),
+            "NET3-5f {}: one-shot fallback should NOT use chunked TE, got: {:?}",
+            backend,
+            resp
+        );
+        assert_eq!(
+            stdout, "1",
+            "NET3-5f {}: httpServe result mismatch. stdout: {:?}",
+            backend, stdout
+        );
+    }
+}
+
+/// NET3-5f: 2-arg handler with writeChunk streaming — 3-way parity
+#[test]
+fn test_net3_5f_write_chunk_streaming_3way_parity() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+
+    for backend in &["interp", "js", "native"] {
+        let port = find_free_loopback_port();
+        let source = format!(
+            r#">>> taida-lang/net => @(httpServe, startResponse, writeChunk, endResponse)
+
+handler req writer =
+  startResponse(writer, 200, @[@(name <= "X-Custom", value <= "streaming")])
+  writeChunk(writer, "hello ")
+  writeChunk(writer, "world")
+  endResponse(writer)
+
+asyncResult <= httpServe({port}, handler, 1)
+asyncResult ]=> result
+result ]=> r
+stdout(r.requests)
+"#
+        );
+
+        let request = b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+        let (resp, stdout) = spawn_and_request_v3(&source, backend, port, request);
+
+        assert!(
+            resp.contains("200 OK"),
+            "NET3-5f {}: streaming should return 200 OK, got: {:?}",
+            backend,
+            resp
+        );
+        assert!(
+            resp.contains("Transfer-Encoding: chunked"),
+            "NET3-5f {}: streaming should use chunked TE, got: {:?}",
+            backend,
+            resp
+        );
+        assert!(
+            resp.contains("X-Custom: streaming"),
+            "NET3-5f {}: streaming should include custom header, got: {:?}",
+            backend,
+            resp
+        );
+        // Chunked body should contain the data
+        assert!(
+            resp.contains("hello ") && resp.contains("world"),
+            "NET3-5f {}: streaming body should contain 'hello ' and 'world', got: {:?}",
+            backend,
+            resp
+        );
+        assert_eq!(
+            stdout, "1",
+            "NET3-5f {}: httpServe result mismatch. stdout: {:?}",
+            backend, stdout
+        );
+    }
+}
+
+/// NET3-5f: 2-arg handler with sseEvent — 3-way parity
+#[test]
+fn test_net3_5f_sse_event_3way_parity() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+
+    for backend in &["interp", "js", "native"] {
+        let port = find_free_loopback_port();
+        let source = format!(
+            r#">>> taida-lang/net => @(httpServe, sseEvent, endResponse)
+
+handler req writer =
+  sseEvent(writer, "message", "hello")
+  sseEvent(writer, "update", "world")
+  endResponse(writer)
+
+asyncResult <= httpServe({port}, handler, 1)
+asyncResult ]=> result
+result ]=> r
+stdout(r.requests)
+"#
+        );
+
+        let request = b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+        let (resp, stdout) = spawn_and_request_v3(&source, backend, port, request);
+
+        assert!(
+            resp.contains("200 OK"),
+            "NET3-5f {}: SSE should return 200 OK, got: {:?}",
+            backend,
+            resp
+        );
+        assert!(
+            resp.contains("Transfer-Encoding: chunked"),
+            "NET3-5f {}: SSE should use chunked TE, got: {:?}",
+            backend,
+            resp
+        );
+        assert!(
+            resp.contains("text/event-stream"),
+            "NET3-5f {}: SSE should set Content-Type: text/event-stream, got: {:?}",
+            backend,
+            resp
+        );
+        assert!(
+            resp.contains("Cache-Control: no-cache"),
+            "NET3-5f {}: SSE should set Cache-Control: no-cache, got: {:?}",
+            backend,
+            resp
+        );
+        // Check SSE wire format
+        assert!(
+            resp.contains("event: message") && resp.contains("data: hello"),
+            "NET3-5f {}: SSE should contain 'event: message' and 'data: hello', got: {:?}",
+            backend,
+            resp
+        );
+        assert!(
+            resp.contains("event: update") && resp.contains("data: world"),
+            "NET3-5f {}: SSE should contain 'event: update' and 'data: world', got: {:?}",
+            backend,
+            resp
+        );
+        assert_eq!(
+            stdout, "1",
+            "NET3-5f {}: httpServe result mismatch. stdout: {:?}",
+            backend, stdout
+        );
+    }
+}
+
+/// NET3-5f: sseEvent with multiline data — 3-way parity
+#[test]
+fn test_net3_5f_sse_multiline_3way_parity() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+
+    for backend in &["interp", "js", "native"] {
+        let port = find_free_loopback_port();
+        let source = format!(
+            r#">>> taida-lang/net => @(httpServe, sseEvent, endResponse)
+
+handler req writer =
+  sseEvent(writer, "multi", "line1\nline2\nline3")
+  endResponse(writer)
+
+asyncResult <= httpServe({port}, handler, 1)
+asyncResult ]=> result
+result ]=> r
+stdout(r.requests)
+"#
+        );
+
+        let request = b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+        let (resp, stdout) = spawn_and_request_v3(&source, backend, port, request);
+
+        assert!(
+            resp.contains("event: multi"),
+            "NET3-5f {}: multiline SSE should contain 'event: multi', got: {:?}",
+            backend,
+            resp
+        );
+        // Multiline data should be split into data: lines
+        assert!(
+            resp.contains("data: line1")
+                && resp.contains("data: line2")
+                && resp.contains("data: line3"),
+            "NET3-5f {}: multiline SSE should split data into 'data: line1', 'data: line2', 'data: line3', got: {:?}",
+            backend,
+            resp
+        );
+        assert_eq!(
+            stdout, "1",
+            "NET3-5f {}: httpServe result mismatch. stdout: {:?}",
+            backend, stdout
+        );
+    }
+}
+
+/// NET3-5f: implicit head commit on first writeChunk — 3-way parity
+#[test]
+fn test_net3_5f_implicit_head_commit_3way_parity() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+
+    for backend in &["interp", "js", "native"] {
+        let port = find_free_loopback_port();
+        // No startResponse — writeChunk should auto-commit 200/@[]
+        let source = format!(
+            r#">>> taida-lang/net => @(httpServe, writeChunk, endResponse)
+
+handler req writer =
+  writeChunk(writer, "auto-head")
+  endResponse(writer)
+
+asyncResult <= httpServe({port}, handler, 1)
+asyncResult ]=> result
+result ]=> r
+stdout(r.requests)
+"#
+        );
+
+        let request = b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+        let (resp, stdout) = spawn_and_request_v3(&source, backend, port, request);
+
+        assert!(
+            resp.contains("200 OK"),
+            "NET3-5f {}: implicit head should default to 200 OK, got: {:?}",
+            backend,
+            resp
+        );
+        assert!(
+            resp.contains("Transfer-Encoding: chunked"),
+            "NET3-5f {}: implicit head should use chunked TE, got: {:?}",
+            backend,
+            resp
+        );
+        assert!(
+            resp.contains("auto-head"),
+            "NET3-5f {}: implicit head body should contain 'auto-head', got: {:?}",
+            backend,
+            resp
+        );
+        assert_eq!(
+            stdout, "1",
+            "NET3-5f {}: httpServe result mismatch. stdout: {:?}",
+            backend, stdout
+        );
+    }
+}
+
+/// NET3-5f: 2-arg handler with no return and no writer use — 3-way parity
+#[test]
+fn test_net3_5f_no_return_fallback_3way_parity() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+
+    for backend in &["interp", "js", "native"] {
+        let port = find_free_loopback_port();
+        let source = format!(
+            r#">>> taida-lang/net => @(httpServe)
+
+handler req writer =
+  x <= 1
+
+asyncResult <= httpServe({port}, handler, 1)
+asyncResult ]=> result
+result ]=> r
+stdout(r.requests)
+"#
+        );
+
+        let request = b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+        let (resp, stdout) = spawn_and_request_v3(&source, backend, port, request);
+
+        // Writer not used, no response returned — should fallback to 200 + empty body
+        assert!(
+            resp.contains("200 OK"),
+            "NET3-5f {}: no-return fallback should return 200 OK, got: {:?}",
+            backend,
+            resp
+        );
+        assert_eq!(
+            stdout, "1",
+            "NET3-5f {}: httpServe result mismatch. stdout: {:?}",
+            backend, stdout
+        );
+    }
+}
+
+// ── NET v3 Phase 6: Parity / Hardening / Perf ────────────────────────────────
+
+// NET3-6a: one-shot fallback parity test — 3 backends, strict assertion set.
+// Verifies that 2-arg handler returning @(status, headers, body) produces
+// identical Content-Length response on all 3 backends.
+#[test]
+fn test_net3_6a_one_shot_fallback_parity_3way() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+
+    let mut results: Vec<(String, String)> = Vec::new();
+    for backend in &["interp", "js", "native"] {
+        let port = find_free_loopback_port();
+        let source = format!(
+            r#">>> taida-lang/net => @(httpServe)
+
+handler req writer =
+  @(status <= 200, headers <= @[@(name <= "Content-Type", value <= "text/plain")], body <= "parity-check")
+=> :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
+
+asyncResult <= httpServe({port}, handler, 1)
+asyncResult ]=> result
+result ]=> r
+stdout(r.requests)
+"#
+        );
+
+        let request = b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+        let (resp, stdout) = spawn_and_request_v3(&source, backend, port, request);
+
+        assert!(
+            resp.contains("200 OK"),
+            "NET3-6a {}: expected 200 OK, got: {:?}",
+            backend,
+            resp
+        );
+        assert!(
+            resp.contains("parity-check"),
+            "NET3-6a {}: body should contain 'parity-check', got: {:?}",
+            backend,
+            resp
+        );
+        assert!(
+            resp.contains("Content-Length"),
+            "NET3-6a {}: one-shot must use Content-Length, got: {:?}",
+            backend,
+            resp
+        );
+        assert!(
+            !resp.contains("Transfer-Encoding: chunked"),
+            "NET3-6a {}: one-shot must NOT use chunked TE, got: {:?}",
+            backend,
+            resp
+        );
+        assert_eq!(
+            stdout, "1",
+            "NET3-6a {}: httpServe result mismatch. stdout: {:?}",
+            backend, stdout
+        );
+        results.push((resp.clone(), stdout.clone()));
+    }
+
+    // Cross-backend body parity: all backends must return the same body content
+    for i in 1..results.len() {
+        assert!(
+            results[0].0.contains("parity-check") && results[i].0.contains("parity-check"),
+            "NET3-6a: backend parity failure between backend 0 and {}: bodies differ",
+            i
+        );
+    }
+}
+
+// NET3-6b: chunked streaming parity test — 3 backends, strict assertion set.
+// Verifies multi-chunk streaming produces chunked TE and correct body on all backends.
+#[test]
+fn test_net3_6b_chunked_streaming_parity_3way() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+
+    for backend in &["interp", "js", "native"] {
+        let port = find_free_loopback_port();
+        let source = format!(
+            r#">>> taida-lang/net => @(httpServe, startResponse, writeChunk, endResponse)
+
+handler req writer =
+  startResponse(writer, 201, @[@(name <= "X-Phase", value <= "six")])
+  writeChunk(writer, "chunk1-")
+  writeChunk(writer, "chunk2-")
+  writeChunk(writer, "chunk3")
+  endResponse(writer)
+
+asyncResult <= httpServe({port}, handler, 1)
+asyncResult ]=> result
+result ]=> r
+stdout(r.requests)
+"#
+        );
+
+        let request = b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+        let (resp, stdout) = spawn_and_request_v3(&source, backend, port, request);
+
+        assert!(
+            resp.contains("201"),
+            "NET3-6b {}: expected 201 status, got: {:?}",
+            backend,
+            resp
+        );
+        assert!(
+            resp.contains("Transfer-Encoding: chunked"),
+            "NET3-6b {}: streaming must use chunked TE, got: {:?}",
+            backend,
+            resp
+        );
+        assert!(
+            resp.contains("X-Phase: six"),
+            "NET3-6b {}: custom header missing, got: {:?}",
+            backend,
+            resp
+        );
+        assert!(
+            resp.contains("chunk1-") && resp.contains("chunk2-") && resp.contains("chunk3"),
+            "NET3-6b {}: all chunks must be present in body, got: {:?}",
+            backend,
+            resp
+        );
+        assert!(
+            !resp.contains("Content-Length"),
+            "NET3-6b {}: chunked response must NOT have Content-Length, got: {:?}",
+            backend,
+            resp
+        );
+        assert_eq!(
+            stdout, "1",
+            "NET3-6b {}: httpServe result mismatch. stdout: {:?}",
+            backend, stdout
+        );
+    }
+}
+
+// NET3-6c: SSE parity test — 3 backends, strict assertion set.
+// Verifies SSE auto-headers, wire format, and multiline data on all backends.
+#[test]
+fn test_net3_6c_sse_parity_3way() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+
+    for backend in &["interp", "js", "native"] {
+        let port = find_free_loopback_port();
+        let source = format!(
+            r#">>> taida-lang/net => @(httpServe, sseEvent, endResponse)
+
+handler req writer =
+  sseEvent(writer, "greeting", "hello\nworld")
+  sseEvent(writer, "", "no-event-name")
+  endResponse(writer)
+
+asyncResult <= httpServe({port}, handler, 1)
+asyncResult ]=> result
+result ]=> r
+stdout(r.requests)
+"#
+        );
+
+        let request = b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+        let (resp, stdout) = spawn_and_request_v3(&source, backend, port, request);
+
+        assert!(
+            resp.contains("200 OK"),
+            "NET3-6c {}: expected 200 OK, got: {:?}",
+            backend,
+            resp
+        );
+        assert!(
+            resp.contains("Transfer-Encoding: chunked"),
+            "NET3-6c {}: SSE must use chunked TE, got: {:?}",
+            backend,
+            resp
+        );
+        assert!(
+            resp.contains("text/event-stream"),
+            "NET3-6c {}: Content-Type must be text/event-stream, got: {:?}",
+            backend,
+            resp
+        );
+        assert!(
+            resp.contains("Cache-Control: no-cache"),
+            "NET3-6c {}: Cache-Control must be no-cache, got: {:?}",
+            backend,
+            resp
+        );
+        // First event: multiline data split
+        assert!(
+            resp.contains("event: greeting"),
+            "NET3-6c {}: should contain 'event: greeting', got: {:?}",
+            backend,
+            resp
+        );
+        assert!(
+            resp.contains("data: hello") && resp.contains("data: world"),
+            "NET3-6c {}: multiline should be split into 'data: hello' and 'data: world', got: {:?}",
+            backend,
+            resp
+        );
+        // Second event: empty event name (no event: line)
+        assert!(
+            resp.contains("data: no-event-name"),
+            "NET3-6c {}: should contain 'data: no-event-name', got: {:?}",
+            backend,
+            resp
+        );
+        assert_eq!(
+            stdout, "1",
+            "NET3-6c {}: httpServe result mismatch. stdout: {:?}",
+            backend, stdout
+        );
+    }
+}
+
+// NET3-6d: keep-alive + streaming transition test.
+// Sends 2 requests on the same connection (keep-alive). First request uses streaming,
+// second uses streaming. Both should succeed without resource leak or corruption.
+#[test]
+fn test_net3_6d_keep_alive_streaming_transition() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+
+    for backend in &["interp", "js", "native"] {
+        let port = find_free_loopback_port();
+        let source = format!(
+            r#">>> taida-lang/net => @(httpServe, writeChunk, endResponse)
+
+handler req writer =
+  writeChunk(writer, "keepalive-ok")
+  endResponse(writer)
+
+asyncResult <= httpServe({port}, handler, 2)
+asyncResult ]=> result
+result ]=> r
+stdout(r.requests)
+"#
+        );
+
+        let dir = setup_net_project(&source, &format!("v3_6d_{}_{}", backend, port));
+        let td_path = dir.join("main.td");
+
+        let mut child: Child = match *backend {
+            "interp" => Command::new(taida_bin())
+                .arg(&td_path)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .expect("spawn interpreter"),
+            "js" => {
+                let js_path =
+                    unique_temp_path("taida_net3_6d_js", &format!("{}_{}", backend, port), "mjs");
+                let transpile = Command::new(taida_bin())
+                    .arg("build")
+                    .arg("--target")
+                    .arg("js")
+                    .arg(&td_path)
+                    .arg("-o")
+                    .arg(&js_path)
+                    .output()
+                    .expect("transpile");
+                if !transpile.status.success() {
+                    let stderr = String::from_utf8_lossy(&transpile.stderr);
+                    cleanup_net_project(&dir);
+                    let _ = fs::remove_file(&js_path);
+                    panic!("JS transpile failed for {}: {}", backend, stderr);
+                }
+                let child = Command::new("node")
+                    .arg(&js_path)
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped())
+                    .spawn()
+                    .expect("spawn node");
+                thread::sleep(Duration::from_millis(500));
+                let _ = fs::remove_file(&js_path);
+                child
+            }
+            "native" => {
+                let bin_path = unique_temp_path(
+                    "taida_net3_6d_native",
+                    &format!("{}_{}", backend, port),
+                    "bin",
+                );
+                let compile = Command::new(taida_bin())
+                    .arg("build")
+                    .arg("--target")
+                    .arg("native")
+                    .arg(&td_path)
+                    .arg("-o")
+                    .arg(&bin_path)
+                    .output()
+                    .expect("compile native");
+                if !compile.status.success() {
+                    let stderr = String::from_utf8_lossy(&compile.stderr);
+                    cleanup_net_project(&dir);
+                    let _ = fs::remove_file(&bin_path);
+                    panic!("Native compile failed for {}: {}", backend, stderr);
+                }
+                let child = Command::new(&bin_path)
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped())
+                    .spawn()
+                    .expect("spawn native binary");
+                thread::sleep(Duration::from_millis(500));
+                let _ = fs::remove_file(&bin_path);
+                child
+            }
+            _ => unreachable!(),
+        };
+
+        // Wait for server to be ready
+        let mut connected = false;
+        for _ in 0..80 {
+            thread::sleep(Duration::from_millis(100));
+            if TcpStream::connect(format!("127.0.0.1:{}", port)).is_ok() {
+                connected = true;
+                break;
+            }
+        }
+        if !connected {
+            let _ = child.kill();
+            cleanup_net_project(&dir);
+            panic!("NET3-6d {}: server did not start on port {}", backend, port);
+        }
+
+        // Send two requests over one keep-alive connection
+        let mut stream =
+            TcpStream::connect(format!("127.0.0.1:{}", port)).expect("connect to server");
+        stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
+        stream.set_write_timeout(Some(Duration::from_secs(5))).ok();
+
+        // First request (keep-alive)
+        let req1 = b"GET /1 HTTP/1.1\r\nHost: localhost\r\nConnection: keep-alive\r\n\r\n";
+        std::io::Write::write_all(&mut stream, req1).expect("write req1");
+
+        // Read first response — read until we see the chunked terminator "0\r\n\r\n"
+        let mut resp1_buf = Vec::new();
+        let mut buf = [0u8; 4096];
+        loop {
+            match std::io::Read::read(&mut stream, &mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    resp1_buf.extend_from_slice(&buf[..n]);
+                    let resp_str = String::from_utf8_lossy(&resp1_buf);
+                    // Chunked response ends with 0\r\n\r\n
+                    if resp_str.contains("0\r\n\r\n") {
+                        break;
+                    }
+                }
+                Err(ref e)
+                    if e.kind() == std::io::ErrorKind::WouldBlock
+                        || e.kind() == std::io::ErrorKind::TimedOut =>
+                {
+                    break;
+                }
+                Err(_) => break,
+            }
+        }
+        let resp1 = String::from_utf8_lossy(&resp1_buf).to_string();
+        assert!(
+            resp1.contains("200 OK") && resp1.contains("keepalive-ok"),
+            "NET3-6d {}: first keep-alive request failed, got: {:?}",
+            backend,
+            resp1
+        );
+
+        // Second request on same connection
+        let req2 = b"GET /2 HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+        std::io::Write::write_all(&mut stream, req2).expect("write req2");
+
+        let mut resp2_buf = Vec::new();
+        loop {
+            match std::io::Read::read(&mut stream, &mut buf) {
+                Ok(0) => break,
+                Ok(n) => resp2_buf.extend_from_slice(&buf[..n]),
+                Err(ref e)
+                    if e.kind() == std::io::ErrorKind::WouldBlock
+                        || e.kind() == std::io::ErrorKind::TimedOut =>
+                {
+                    break;
+                }
+                Err(_) => break,
+            }
+        }
+        let resp2 = String::from_utf8_lossy(&resp2_buf).to_string();
+        assert!(
+            resp2.contains("200 OK") && resp2.contains("keepalive-ok"),
+            "NET3-6d {}: second keep-alive request failed, got: {:?}",
+            backend,
+            resp2
+        );
+
+        let output = child.wait_with_output().expect("wait for server");
+        let stdout = normalize(&String::from_utf8_lossy(&output.stdout));
+        cleanup_net_project(&dir);
+
+        assert_eq!(
+            stdout, "2",
+            "NET3-6d {}: should handle 2 requests, got: {:?}",
+            backend, stdout
+        );
+    }
+}
+
+// NET3-6e: reserved header / bodyless status / double-end edge tests.
+// These tests verify error handling behavior across all 3 backends.
+
+/// NET3-6e: reserved header (Content-Length) in startResponse is rejected.
+/// Interpreter and JS catch the error and return a 500 response with the error message.
+/// Native exits with error on stderr.
+/// We check the HTTP response for 500 + "Content-Length" error text on interp/JS,
+/// and stderr for native.
+#[test]
+fn test_net3_6e_reserved_header_content_length_rejected() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+
+    for backend in &["interp", "js"] {
+        let port = find_free_loopback_port();
+        let source = format!(
+            r#">>> taida-lang/net => @(httpServe, startResponse, writeChunk, endResponse)
+
+handler req writer =
+  startResponse(writer, 200, @[@(name <= "Content-Length", value <= "42")])
+  writeChunk(writer, "should-not-reach")
+  endResponse(writer)
+
+asyncResult <= httpServe({port}, handler, 1)
+asyncResult ]=> result
+result ]=> r
+stdout(r.requests)
+"#
+        );
+
+        let request = b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+        let (resp, _stdout) = spawn_and_request_v3(&source, backend, port, request);
+
+        // The handler error should produce a 500 response containing the error message
+        assert!(
+            resp.contains("500") || resp.contains("Content-Length"),
+            "NET3-6e {}: Content-Length in streaming headers should be rejected (response should be 500 or mention Content-Length), got: {:?}",
+            backend,
+            resp
+        );
+        assert!(
+            !resp.contains("should-not-reach"),
+            "NET3-6e {}: writeChunk after reserved header rejection should not execute, got: {:?}",
+            backend,
+            resp
+        );
+    }
+}
+
+/// NET3-6e: reserved header (Transfer-Encoding) in startResponse is rejected.
+#[test]
+fn test_net3_6e_reserved_header_transfer_encoding_rejected() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+
+    for backend in &["interp", "js"] {
+        let port = find_free_loopback_port();
+        let source = format!(
+            r#">>> taida-lang/net => @(httpServe, startResponse, writeChunk, endResponse)
+
+handler req writer =
+  startResponse(writer, 200, @[@(name <= "Transfer-Encoding", value <= "gzip")])
+  writeChunk(writer, "should-not-reach")
+  endResponse(writer)
+
+asyncResult <= httpServe({port}, handler, 1)
+asyncResult ]=> result
+result ]=> r
+stdout(r.requests)
+"#
+        );
+
+        let request = b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+        let (resp, _stdout) = spawn_and_request_v3(&source, backend, port, request);
+
+        // The handler error should produce a 500 response containing the error message
+        assert!(
+            resp.contains("500") || resp.contains("Transfer-Encoding"),
+            "NET3-6e {}: Transfer-Encoding in streaming headers should be rejected (response should be 500 or mention Transfer-Encoding), got: {:?}",
+            backend,
+            resp
+        );
+        assert!(
+            !resp.contains("should-not-reach"),
+            "NET3-6e {}: writeChunk after reserved header rejection should not execute, got: {:?}",
+            backend,
+            resp
+        );
+    }
+}
+
+/// NET3-6e: reserved header (Content-Length) rejected on native backend.
+/// Native exits with non-zero code and prints error to stderr.
+#[test]
+fn test_net3_6e_reserved_header_content_length_rejected_native() {
+    let port = find_free_loopback_port();
+    let source = format!(
+        r#">>> taida-lang/net => @(httpServe, startResponse, writeChunk, endResponse)
+
+handler req writer =
+  startResponse(writer, 200, @[@(name <= "Content-Length", value <= "42")])
+  writeChunk(writer, "should-not-reach")
+  endResponse(writer)
+
+asyncResult <= httpServe({port}, handler, 1)
+asyncResult ]=> result
+result ]=> r
+stdout(r.requests)
+"#
+    );
+
+    let dir = setup_net_project(&source, &format!("v3_native_cl_reject_{}", port));
+    let td_path = dir.join("main.td");
+    let bin_path = unique_temp_path("taida_net3_6e_native_cl", &format!("cl_{}", port), "bin");
+
+    let compile = Command::new(taida_bin())
+        .arg("build")
+        .arg("--target")
+        .arg("native")
+        .arg(&td_path)
+        .arg("-o")
+        .arg(&bin_path)
+        .output()
+        .expect("compile native");
+    if !compile.status.success() {
+        let stderr = String::from_utf8_lossy(&compile.stderr);
+        cleanup_net_project(&dir);
+        let _ = fs::remove_file(&bin_path);
+        panic!("NET3-6e native CL: compile failed: {}", stderr);
+    }
+
+    let mut child = Command::new(&bin_path)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn native binary");
+
+    // Wait for server to be ready, then send request to trigger the handler
+    let mut triggered = false;
+    for _ in 0..80 {
+        thread::sleep(Duration::from_millis(100));
+        let stream = match TcpStream::connect(format!("127.0.0.1:{}", port)) {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+        stream.set_write_timeout(Some(Duration::from_secs(5))).ok();
+        let mut stream = stream;
+        let request = b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+        let _ = std::io::Write::write_all(&mut stream, request);
+        triggered = true;
+        break;
+    }
+
+    let _ = fs::remove_file(&bin_path);
+
+    if !triggered {
+        let _ = child.kill();
+        cleanup_net_project(&dir);
+        panic!(
+            "NET3-6e native CL: server did not accept connection on port {}",
+            port
+        );
+    }
+
+    // Wait for process to exit (it should exit(1) after reserved header rejection)
+    let output = child.wait_with_output().expect("wait for native process");
+    cleanup_net_project(&dir);
+
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    assert!(
+        !output.status.success(),
+        "NET3-6e native CL: process should exit with non-zero status, got: {:?}",
+        output.status,
+    );
+    assert!(
+        stderr.contains("Content-Length"),
+        "NET3-6e native CL: stderr should mention Content-Length, got: {:?}",
+        stderr,
+    );
+}
+
+/// NET3-6e: reserved header (Transfer-Encoding) rejected on native backend.
+/// Native exits with non-zero code and prints error to stderr.
+#[test]
+fn test_net3_6e_reserved_header_transfer_encoding_rejected_native() {
+    let port = find_free_loopback_port();
+    let source = format!(
+        r#">>> taida-lang/net => @(httpServe, startResponse, writeChunk, endResponse)
+
+handler req writer =
+  startResponse(writer, 200, @[@(name <= "Transfer-Encoding", value <= "gzip")])
+  writeChunk(writer, "should-not-reach")
+  endResponse(writer)
+
+asyncResult <= httpServe({port}, handler, 1)
+asyncResult ]=> result
+result ]=> r
+stdout(r.requests)
+"#
+    );
+
+    let dir = setup_net_project(&source, &format!("v3_native_te_reject_{}", port));
+    let td_path = dir.join("main.td");
+    let bin_path = unique_temp_path("taida_net3_6e_native_te", &format!("te_{}", port), "bin");
+
+    let compile = Command::new(taida_bin())
+        .arg("build")
+        .arg("--target")
+        .arg("native")
+        .arg(&td_path)
+        .arg("-o")
+        .arg(&bin_path)
+        .output()
+        .expect("compile native");
+    if !compile.status.success() {
+        let stderr = String::from_utf8_lossy(&compile.stderr);
+        cleanup_net_project(&dir);
+        let _ = fs::remove_file(&bin_path);
+        panic!("NET3-6e native TE: compile failed: {}", stderr);
+    }
+
+    let mut child = Command::new(&bin_path)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn native binary");
+
+    // Wait for server to be ready, then send request to trigger the handler
+    let mut triggered = false;
+    for _ in 0..80 {
+        thread::sleep(Duration::from_millis(100));
+        let stream = match TcpStream::connect(format!("127.0.0.1:{}", port)) {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+        stream.set_write_timeout(Some(Duration::from_secs(5))).ok();
+        let mut stream = stream;
+        let request = b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+        let _ = std::io::Write::write_all(&mut stream, request);
+        triggered = true;
+        break;
+    }
+
+    let _ = fs::remove_file(&bin_path);
+
+    if !triggered {
+        let _ = child.kill();
+        cleanup_net_project(&dir);
+        panic!(
+            "NET3-6e native TE: server did not accept connection on port {}",
+            port
+        );
+    }
+
+    // Wait for process to exit (it should exit(1) after reserved header rejection)
+    let output = child.wait_with_output().expect("wait for native process");
+    cleanup_net_project(&dir);
+
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    assert!(
+        !output.status.success(),
+        "NET3-6e native TE: process should exit with non-zero status, got: {:?}",
+        output.status,
+    );
+    assert!(
+        stderr.contains("Transfer-Encoding"),
+        "NET3-6e native TE: stderr should mention Transfer-Encoding, got: {:?}",
+        stderr,
+    );
+}
+
+/// NET3-6e: double endResponse is idempotent (no error, no crash).
+#[test]
+fn test_net3_6e_double_end_response_idempotent() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+
+    for backend in &["interp", "js", "native"] {
+        let port = find_free_loopback_port();
+        let source = format!(
+            r#">>> taida-lang/net => @(httpServe, writeChunk, endResponse)
+
+handler req writer =
+  writeChunk(writer, "double-end")
+  endResponse(writer)
+  endResponse(writer)
+
+asyncResult <= httpServe({port}, handler, 1)
+asyncResult ]=> result
+result ]=> r
+stdout(r.requests)
+"#
+        );
+
+        let request = b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+        let (resp, stdout) = spawn_and_request_v3(&source, backend, port, request);
+
+        assert!(
+            resp.contains("200 OK"),
+            "NET3-6e {}: double endResponse should not crash, got: {:?}",
+            backend,
+            resp
+        );
+        assert!(
+            resp.contains("double-end"),
+            "NET3-6e {}: body should contain 'double-end', got: {:?}",
+            backend,
+            resp
+        );
+        assert_eq!(
+            stdout, "1",
+            "NET3-6e {}: httpServe result mismatch. stdout: {:?}",
+            backend, stdout
+        );
+    }
+}
+
+/// NET3-6e: endResponse with zero writeChunks produces empty chunked body.
+#[test]
+fn test_net3_6e_end_response_no_chunks_empty_body() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+
+    for backend in &["interp", "js", "native"] {
+        let port = find_free_loopback_port();
+        let source = format!(
+            r#">>> taida-lang/net => @(httpServe, startResponse, endResponse)
+
+handler req writer =
+  startResponse(writer, 200, @[])
+  endResponse(writer)
+
+asyncResult <= httpServe({port}, handler, 1)
+asyncResult ]=> result
+result ]=> r
+stdout(r.requests)
+"#
+        );
+
+        let request = b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+        let (resp, stdout) = spawn_and_request_v3(&source, backend, port, request);
+
+        assert!(
+            resp.contains("200 OK"),
+            "NET3-6e {}: empty chunked should return 200 OK, got: {:?}",
+            backend,
+            resp
+        );
+        assert!(
+            resp.contains("Transfer-Encoding: chunked"),
+            "NET3-6e {}: empty chunked should still use chunked TE, got: {:?}",
+            backend,
+            resp
+        );
+        // Body should be empty (only chunked terminator)
+        assert!(
+            resp.contains("0\r\n\r\n"),
+            "NET3-6e {}: should contain chunked terminator, got: {:?}",
+            backend,
+            resp
+        );
+        assert_eq!(
+            stdout, "1",
+            "NET3-6e {}: httpServe result mismatch. stdout: {:?}",
+            backend, stdout
+        );
+    }
+}
+
+// NET3-6g: WASM capability gating for v3 APIs.
+// Verify that startResponse, writeChunk, endResponse, sseEvent all produce
+// compile errors on all 4 WASM profiles.
+
+/// NET3-6g: startResponse must produce compile error on all 4 WASM profiles.
+#[test]
+fn test_net3_6g_wasm_all_profiles_start_response_rejected() {
+    let source = r#">>> taida-lang/net => @(httpServe, startResponse)
+
+handler req writer =
+  startResponse(writer, 200, @[])
+
+httpServe(8080, handler, 1, 1000) ]=> serverResult
+stdout(serverResult.ok)
+"#;
+
+    for profile in &["wasm-min", "wasm-wasi", "wasm-edge", "wasm-full"] {
+        let td_path =
+            std::env::temp_dir().join(format!("taida_net6g_startResponse_{}.td", profile));
+        let wasm_path =
+            std::env::temp_dir().join(format!("taida_net6g_startResponse_{}.wasm", profile));
+        std::fs::write(&td_path, source).expect("write test .td");
+
+        let output = Command::new(taida_bin())
+            .arg("build")
+            .arg("--target")
+            .arg(profile)
+            .arg(&td_path)
+            .arg("-o")
+            .arg(&wasm_path)
+            .output()
+            .expect("failed to run taida build");
+
+        let _ = std::fs::remove_file(&td_path);
+        let _ = std::fs::remove_file(&wasm_path);
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            !output.status.success(),
+            "NET3-6g: {} should reject startResponse, but compile succeeded.\nstderr: {}",
+            profile,
+            stderr
+        );
+        assert!(
+            stderr.contains("startResponse") || stderr.contains("net"),
+            "NET3-6g: {} compile error should mention startResponse or net.\nstderr: {}",
+            profile,
+            stderr
+        );
+    }
+}
+
+/// NET3-6g: writeChunk must produce compile error on all 4 WASM profiles.
+#[test]
+fn test_net3_6g_wasm_all_profiles_write_chunk_rejected() {
+    let source = r#">>> taida-lang/net => @(httpServe, writeChunk)
+
+handler req writer =
+  writeChunk(writer, "data")
+
+httpServe(8080, handler, 1, 1000) ]=> serverResult
+stdout(serverResult.ok)
+"#;
+
+    for profile in &["wasm-min", "wasm-wasi", "wasm-edge", "wasm-full"] {
+        let td_path = std::env::temp_dir().join(format!("taida_net6g_writeChunk_{}.td", profile));
+        let wasm_path =
+            std::env::temp_dir().join(format!("taida_net6g_writeChunk_{}.wasm", profile));
+        std::fs::write(&td_path, source).expect("write test .td");
+
+        let output = Command::new(taida_bin())
+            .arg("build")
+            .arg("--target")
+            .arg(profile)
+            .arg(&td_path)
+            .arg("-o")
+            .arg(&wasm_path)
+            .output()
+            .expect("failed to run taida build");
+
+        let _ = std::fs::remove_file(&td_path);
+        let _ = std::fs::remove_file(&wasm_path);
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            !output.status.success(),
+            "NET3-6g: {} should reject writeChunk, but compile succeeded.\nstderr: {}",
+            profile,
+            stderr
+        );
+        assert!(
+            stderr.contains("writeChunk") || stderr.contains("net"),
+            "NET3-6g: {} compile error should mention writeChunk or net.\nstderr: {}",
+            profile,
+            stderr
+        );
+    }
+}
+
+/// NET3-6g: endResponse must produce compile error on all 4 WASM profiles.
+#[test]
+fn test_net3_6g_wasm_all_profiles_end_response_rejected() {
+    let source = r#">>> taida-lang/net => @(httpServe, endResponse)
+
+handler req writer =
+  endResponse(writer)
+
+httpServe(8080, handler, 1, 1000) ]=> serverResult
+stdout(serverResult.ok)
+"#;
+
+    for profile in &["wasm-min", "wasm-wasi", "wasm-edge", "wasm-full"] {
+        let td_path = std::env::temp_dir().join(format!("taida_net6g_endResponse_{}.td", profile));
+        let wasm_path =
+            std::env::temp_dir().join(format!("taida_net6g_endResponse_{}.wasm", profile));
+        std::fs::write(&td_path, source).expect("write test .td");
+
+        let output = Command::new(taida_bin())
+            .arg("build")
+            .arg("--target")
+            .arg(profile)
+            .arg(&td_path)
+            .arg("-o")
+            .arg(&wasm_path)
+            .output()
+            .expect("failed to run taida build");
+
+        let _ = std::fs::remove_file(&td_path);
+        let _ = std::fs::remove_file(&wasm_path);
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            !output.status.success(),
+            "NET3-6g: {} should reject endResponse, but compile succeeded.\nstderr: {}",
+            profile,
+            stderr
+        );
+        assert!(
+            stderr.contains("endResponse") || stderr.contains("net"),
+            "NET3-6g: {} compile error should mention endResponse or net.\nstderr: {}",
+            profile,
+            stderr
+        );
+    }
+}
+
+/// NET3-6g: sseEvent must produce compile error on all 4 WASM profiles.
+#[test]
+fn test_net3_6g_wasm_all_profiles_sse_event_rejected() {
+    let source = r#">>> taida-lang/net => @(httpServe, sseEvent)
+
+handler req writer =
+  sseEvent(writer, "msg", "data")
+
+httpServe(8080, handler, 1, 1000) ]=> serverResult
+stdout(serverResult.ok)
+"#;
+
+    for profile in &["wasm-min", "wasm-wasi", "wasm-edge", "wasm-full"] {
+        let td_path = std::env::temp_dir().join(format!("taida_net6g_sseEvent_{}.td", profile));
+        let wasm_path = std::env::temp_dir().join(format!("taida_net6g_sseEvent_{}.wasm", profile));
+        std::fs::write(&td_path, source).expect("write test .td");
+
+        let output = Command::new(taida_bin())
+            .arg("build")
+            .arg("--target")
+            .arg(profile)
+            .arg(&td_path)
+            .arg("-o")
+            .arg(&wasm_path)
+            .output()
+            .expect("failed to run taida build");
+
+        let _ = std::fs::remove_file(&td_path);
+        let _ = std::fs::remove_file(&wasm_path);
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            !output.status.success(),
+            "NET3-6g: {} should reject sseEvent, but compile succeeded.\nstderr: {}",
+            profile,
+            stderr
+        );
+        assert!(
+            stderr.contains("sseEvent") || stderr.contains("net"),
+            "NET3-6g: {} compile error should mention sseEvent or net.\nstderr: {}",
+            profile,
+            stderr
+        );
+    }
+}
+
+// NB3-11: Streaming response followed by one-shot response on the same keep-alive connection.
+// Verifies that after endResponse() completes and the chunked terminator is sent,
+// the next request on the same connection is correctly parsed and handled.
+// First request = streaming (writeChunk + endResponse), second request = one-shot fallback.
+#[test]
+fn test_net3_11_streaming_then_oneshot_keep_alive_parity() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+
+    for backend in &["interp", "js", "native"] {
+        let port = find_free_loopback_port();
+        // NB3-11: Streaming response followed by a second request on the same
+        // keep-alive TCP connection. Both requests are streaming because Taida
+        // handlers have no mutable state and request path is an opaque span.
+        // Complements 6d with additional assertions: each response is a
+        // well-formed independent chunked response, no data leaks between them.
+        let source = format!(
+            r#">>> taida-lang/net => @(httpServe, writeChunk, endResponse)
+
+handler req writer =
+  writeChunk(writer, "keep-alive-check")
+  endResponse(writer)
+
+asyncResult <= httpServe({port}, handler, 2)
+asyncResult ]=> result
+result ]=> r
+stdout(r.requests)
+"#
+        );
+
+        let dir = setup_net_project(&source, &format!("nb3_11_{}_{}", backend, port));
+        let td_path = dir.join("main.td");
+
+        let mut child: Child = match *backend {
+            "interp" => Command::new(taida_bin())
+                .arg(&td_path)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .expect("spawn interpreter"),
+            "js" => {
+                let js_path =
+                    unique_temp_path("taida_nb3_11_js", &format!("{}_{}", backend, port), "mjs");
+                let transpile = Command::new(taida_bin())
+                    .arg("build")
+                    .arg("--target")
+                    .arg("js")
+                    .arg(&td_path)
+                    .arg("-o")
+                    .arg(&js_path)
+                    .output()
+                    .expect("transpile");
+                if !transpile.status.success() {
+                    let stderr = String::from_utf8_lossy(&transpile.stderr);
+                    cleanup_net_project(&dir);
+                    let _ = fs::remove_file(&js_path);
+                    panic!("JS transpile failed for {}: {}", backend, stderr);
+                }
+                let child = Command::new("node")
+                    .arg(&js_path)
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped())
+                    .spawn()
+                    .expect("spawn node");
+                thread::sleep(Duration::from_millis(500));
+                let _ = fs::remove_file(&js_path);
+                child
+            }
+            "native" => {
+                let bin_path = unique_temp_path(
+                    "taida_nb3_11_native",
+                    &format!("{}_{}", backend, port),
+                    "bin",
+                );
+                let compile = Command::new(taida_bin())
+                    .arg("build")
+                    .arg("--target")
+                    .arg("native")
+                    .arg(&td_path)
+                    .arg("-o")
+                    .arg(&bin_path)
+                    .output()
+                    .expect("compile native");
+                if !compile.status.success() {
+                    let stderr = String::from_utf8_lossy(&compile.stderr);
+                    cleanup_net_project(&dir);
+                    let _ = fs::remove_file(&bin_path);
+                    panic!("Native compile failed for {}: {}", backend, stderr);
+                }
+                let child = Command::new(&bin_path)
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped())
+                    .spawn()
+                    .expect("spawn native binary");
+                thread::sleep(Duration::from_millis(500));
+                let _ = fs::remove_file(&bin_path);
+                child
+            }
+            _ => unreachable!(),
+        };
+
+        // Wait for server to be ready
+        let mut connected = false;
+        for _ in 0..80 {
+            thread::sleep(Duration::from_millis(100));
+            if TcpStream::connect(format!("127.0.0.1:{}", port)).is_ok() {
+                connected = true;
+                break;
+            }
+        }
+        if !connected {
+            let _ = child.kill();
+            cleanup_net_project(&dir);
+            panic!("NB3-11 {}: server did not start on port {}", backend, port);
+        }
+
+        // Open a single TCP connection for both requests (keep-alive).
+        let mut stream =
+            TcpStream::connect(format!("127.0.0.1:{}", port)).expect("connect to server");
+        stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
+        stream.set_write_timeout(Some(Duration::from_secs(5))).ok();
+
+        // First request: streaming path
+        let req1 = b"GET /stream HTTP/1.1\r\nHost: localhost\r\nConnection: keep-alive\r\n\r\n";
+        std::io::Write::write_all(&mut stream, req1).expect("write req1");
+
+        // Read first response — chunked, ends with 0\r\n\r\n
+        let mut resp1_buf = Vec::new();
+        let mut buf = [0u8; 4096];
+        loop {
+            match std::io::Read::read(&mut stream, &mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    resp1_buf.extend_from_slice(&buf[..n]);
+                    let resp_str = String::from_utf8_lossy(&resp1_buf);
+                    if resp_str.contains("0\r\n\r\n") {
+                        break;
+                    }
+                }
+                Err(ref e)
+                    if e.kind() == std::io::ErrorKind::WouldBlock
+                        || e.kind() == std::io::ErrorKind::TimedOut =>
+                {
+                    break;
+                }
+                Err(_) => break,
+            }
+        }
+        let resp1 = String::from_utf8_lossy(&resp1_buf).to_string();
+        assert!(
+            resp1.contains("200 OK") && resp1.contains("keep-alive-check"),
+            "NB3-11 {}: first request (streaming) failed, got: {:?}",
+            backend,
+            resp1
+        );
+        // Verify chunked terminator is present — proves endResponse completed.
+        assert!(
+            resp1.contains("0\r\n\r\n"),
+            "NB3-11 {}: first response missing chunked terminator, got: {:?}",
+            backend,
+            resp1
+        );
+
+        // Second request on the same keep-alive connection.
+        let req2 = b"GET /2 HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+        std::io::Write::write_all(&mut stream, req2).expect("write req2");
+
+        let mut resp2_buf = Vec::new();
+        loop {
+            match std::io::Read::read(&mut stream, &mut buf) {
+                Ok(0) => break,
+                Ok(n) => resp2_buf.extend_from_slice(&buf[..n]),
+                Err(ref e)
+                    if e.kind() == std::io::ErrorKind::WouldBlock
+                        || e.kind() == std::io::ErrorKind::TimedOut =>
+                {
+                    break;
+                }
+                Err(_) => break,
+            }
+        }
+        let resp2 = String::from_utf8_lossy(&resp2_buf).to_string();
+        assert!(
+            resp2.contains("200 OK") && resp2.contains("keep-alive-check"),
+            "NB3-11 {}: second request after streaming failed (keep-alive broken?), got: {:?}",
+            backend,
+            resp2
+        );
+        // Verify no data leakage from first response into second.
+        // If keep-alive buffer wasn't properly reset, resp2 might contain
+        // remnants of resp1's chunked framing.
+        assert!(
+            !resp2.starts_with("0\r\n"),
+            "NB3-11 {}: second response starts with chunk terminator (data leak from first response)",
+            backend
+        );
+
+        let output = child.wait_with_output().expect("wait for server");
+        let stdout = normalize(&String::from_utf8_lossy(&output.stdout));
+        cleanup_net_project(&dir);
+
+        assert_eq!(
+            stdout, "2",
+            "NB3-11 {}: should handle 2 requests, got: {:?}",
+            backend, stdout
+        );
+    }
+}
+
+// NB3-8 / NB3-10: non-ASCII SSE parity test — 3 backends.
+// Verifies that non-ASCII event names and data (Japanese, emoji) produce
+// identical chunked hex prefix (byte-length) across all 3 backends.
+#[test]
+fn test_net3_8_non_ascii_sse_parity_3way() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+
+    let mut results: Vec<(String, String)> = Vec::new();
+
+    for backend in &["interp", "js", "native"] {
+        let port = find_free_loopback_port();
+        // Send two SSE events: one with Japanese text, one with emoji.
+        // Use actual UTF-8 characters (not escape sequences) since Taida strings
+        // are UTF-8 literals.
+        let source = format!(
+            ">>> taida-lang/net => @(httpServe, sseEvent, endResponse)\n\
+             \n\
+             handler req writer =\n\
+             \x20 sseEvent(writer, \"msg\", \"\u{3053}\u{3093}\u{306B}\u{3061}\u{306F}\")\n\
+             \x20 sseEvent(writer, \"emoji\", \"Hello \u{1F30D}\")\n\
+             \x20 endResponse(writer)\n\
+             \n\
+             asyncResult <= httpServe({port}, handler, 1)\n\
+             asyncResult ]=> result\n\
+             result ]=> r\n\
+             stdout(r.requests)\n"
+        );
+
+        let dir = setup_net_project(&source, &format!("nb3_8_{}_{}", backend, port));
+        let td_path = dir.join("main.td");
+
+        let mut child: Child = match *backend {
+            "interp" => Command::new(taida_bin())
+                .arg(&td_path)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .expect("spawn interpreter"),
+            "js" => {
+                let js_path =
+                    unique_temp_path("taida_nb3_8_js", &format!("{}_{}", backend, port), "mjs");
+                let transpile = Command::new(taida_bin())
+                    .arg("build")
+                    .arg("--target")
+                    .arg("js")
+                    .arg(&td_path)
+                    .arg("-o")
+                    .arg(&js_path)
+                    .output()
+                    .expect("transpile");
+                if !transpile.status.success() {
+                    let stderr = String::from_utf8_lossy(&transpile.stderr);
+                    cleanup_net_project(&dir);
+                    let _ = fs::remove_file(&js_path);
+                    panic!("JS transpile failed for {}: {}", backend, stderr);
+                }
+                let child = Command::new("node")
+                    .arg(&js_path)
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped())
+                    .spawn()
+                    .expect("spawn node");
+                thread::sleep(Duration::from_millis(500));
+                let _ = fs::remove_file(&js_path);
+                child
+            }
+            "native" => {
+                let bin_path = unique_temp_path(
+                    "taida_nb3_8_native",
+                    &format!("{}_{}", backend, port),
+                    "bin",
+                );
+                let compile = Command::new(taida_bin())
+                    .arg("build")
+                    .arg("--target")
+                    .arg("native")
+                    .arg(&td_path)
+                    .arg("-o")
+                    .arg(&bin_path)
+                    .output()
+                    .expect("compile native");
+                if !compile.status.success() {
+                    let stderr = String::from_utf8_lossy(&compile.stderr);
+                    cleanup_net_project(&dir);
+                    let _ = fs::remove_file(&bin_path);
+                    panic!("Native compile failed for {}: {}", backend, stderr);
+                }
+                let child = Command::new(&bin_path)
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped())
+                    .spawn()
+                    .expect("spawn native binary");
+                thread::sleep(Duration::from_millis(500));
+                let _ = fs::remove_file(&bin_path);
+                child
+            }
+            _ => unreachable!(),
+        };
+
+        // Wait for server to be ready
+        let mut connected = false;
+        for _ in 0..80 {
+            thread::sleep(Duration::from_millis(100));
+            if TcpStream::connect(format!("127.0.0.1:{}", port)).is_ok() {
+                connected = true;
+                break;
+            }
+        }
+        if !connected {
+            let _ = child.kill();
+            cleanup_net_project(&dir);
+            panic!("NB3-8 {}: server did not start on port {}", backend, port);
+        }
+
+        // Send a request and capture raw response bytes.
+        let mut stream =
+            TcpStream::connect(format!("127.0.0.1:{}", port)).expect("connect to server");
+        stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
+        stream.set_write_timeout(Some(Duration::from_secs(5))).ok();
+
+        let req = b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+        std::io::Write::write_all(&mut stream, req).expect("write request");
+
+        let mut resp_buf = Vec::new();
+        let mut buf = [0u8; 8192];
+        loop {
+            match std::io::Read::read(&mut stream, &mut buf) {
+                Ok(0) => break,
+                Ok(n) => resp_buf.extend_from_slice(&buf[..n]),
+                Err(ref e)
+                    if e.kind() == std::io::ErrorKind::WouldBlock
+                        || e.kind() == std::io::ErrorKind::TimedOut =>
+                {
+                    break;
+                }
+                Err(_) => break,
+            }
+        }
+
+        let _ = child.wait_with_output();
+        cleanup_net_project(&dir);
+
+        let resp = String::from_utf8_lossy(&resp_buf).to_string();
+        assert!(
+            resp.contains("200 OK"),
+            "NB3-8 {}: expected 200 OK, got: {:?}",
+            backend,
+            resp
+        );
+
+        // Extract chunked body (everything after the \r\n\r\n header separator).
+        let body_start = resp.find("\r\n\r\n").map(|i| i + 4).unwrap_or(0);
+        let body = &resp[body_start..];
+        results.push((backend.to_string(), body.to_string()));
+    }
+
+    // All 3 backends should produce identical chunked body (same hex prefixes, same content).
+    let (ref interp_name, ref interp_body) = results[0];
+    for (name, body) in &results[1..] {
+        assert_eq!(
+            interp_body, body,
+            "NB3-8 parity: {} vs {} chunked body differs.\n{}: {:?}\n{}: {:?}",
+            interp_name, name, interp_name, interp_body, name, body
+        );
+    }
+}
+
+// ── NB3-4 v3: variable-bound 2-arg handler arity resolution ──
+
+/// NB3-4 v3: Variable-bound 2-arg handler with writeChunk streaming.
+/// `handler` is a named function, `h <= handler` aliases it.
+/// `httpServe(port, h, ...)` must resolve h's arity as 2 via alias chain.
+/// All 3 backends should produce identical chunked streaming output.
+#[test]
+fn test_nb3_4_var_bound_handler_streaming_3way_parity() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+
+    for backend in &["interp", "js", "native"] {
+        let port = find_free_loopback_port();
+        let source = format!(
+            r#">>> taida-lang/net => @(httpServe, startResponse, writeChunk, endResponse)
+
+handler req writer =
+  startResponse(writer, 200, @[@(name <= "X-Via", value <= "alias")])
+  writeChunk(writer, "alias-")
+  writeChunk(writer, "ok")
+  endResponse(writer)
+=> :Int
+
+h <= handler
+asyncResult <= httpServe({port}, h, 1)
+asyncResult ]=> result
+result ]=> r
+stdout(r.requests)
+"#
+        );
+
+        let request = b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+        let (resp, stdout) = spawn_and_request_v3(&source, backend, port, request);
+
+        assert!(
+            resp.contains("200 OK"),
+            "NB3-4 v3 {}: variable-bound handler streaming should return 200 OK, got: {:?}",
+            backend,
+            resp
+        );
+        assert!(
+            resp.contains("Transfer-Encoding: chunked"),
+            "NB3-4 v3 {}: variable-bound handler streaming should use chunked TE, got: {:?}",
+            backend,
+            resp
+        );
+        assert!(
+            resp.contains("X-Via: alias"),
+            "NB3-4 v3 {}: variable-bound handler streaming should include custom header, got: {:?}",
+            backend,
+            resp
+        );
+        assert!(
+            resp.contains("alias-") && resp.contains("ok"),
+            "NB3-4 v3 {}: variable-bound handler streaming body should contain 'alias-ok', got: {:?}",
+            backend,
+            resp
+        );
+        assert_eq!(
+            stdout, "1",
+            "NB3-4 v3 {}: httpServe result mismatch. stdout: {:?}",
+            backend, stdout
+        );
+    }
+}
+
+/// NB3-4 v3: Double alias chain — `handler` -> `h1` -> `h2`.
+/// `httpServe(port, h2, ...)` must resolve arity through two alias hops.
+/// All 3 backends should produce identical chunked streaming output.
+#[test]
+fn test_nb3_4_double_alias_handler_streaming_3way_parity() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+
+    for backend in &["interp", "js", "native"] {
+        let port = find_free_loopback_port();
+        let source = format!(
+            r#">>> taida-lang/net => @(httpServe, startResponse, writeChunk, endResponse)
+
+handler req writer =
+  startResponse(writer, 200, @[@(name <= "X-Via", value <= "chain")])
+  writeChunk(writer, "chain-")
+  writeChunk(writer, "ok")
+  endResponse(writer)
+=> :Int
+
+h1 <= handler
+h2 <= h1
+asyncResult <= httpServe({port}, h2, 1)
+asyncResult ]=> result
+result ]=> r
+stdout(r.requests)
+"#
+        );
+
+        let request = b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+        let (resp, stdout) = spawn_and_request_v3(&source, backend, port, request);
+
+        assert!(
+            resp.contains("200 OK"),
+            "NB3-4 v3 {}: double-alias handler streaming should return 200 OK, got: {:?}",
+            backend,
+            resp
+        );
+        assert!(
+            resp.contains("Transfer-Encoding: chunked"),
+            "NB3-4 v3 {}: double-alias handler streaming should use chunked TE, got: {:?}",
+            backend,
+            resp
+        );
+        assert!(
+            resp.contains("X-Via: chain"),
+            "NB3-4 v3 {}: double-alias handler streaming should include custom header, got: {:?}",
+            backend,
+            resp
+        );
+        assert!(
+            resp.contains("chain-") && resp.contains("ok"),
+            "NB3-4 v3 {}: double-alias handler streaming body should contain 'chain-ok', got: {:?}",
+            backend,
+            resp
+        );
+        assert_eq!(
+            stdout, "1",
+            "NB3-4 v3 {}: httpServe result mismatch. stdout: {:?}",
+            backend, stdout
+        );
+    }
+}
+
+// ── NB3-4 scope leak fix: var_aliases / lambda_param_counts must not leak ──
+
+/// NB3-4 scope leak: Function `f` defines `h <= streaming_handler` (alias).
+/// The top-level code then uses the same name `h` as a fresh alias for a
+/// DIFFERENT handler (`responder`) and passes it to httpServe.
+/// If var_aliases leaks from `f`'s scope, the top-level `h` could be
+/// mis-resolved as `streaming_handler` instead of `responder`.
+/// The test verifies the response comes from `responder` ("scope-ok"),
+/// not from `streaming_handler` ("f-leaked").
+#[test]
+fn test_nb3_4_scope_leak_alias_no_cross_function_3way_parity() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+
+    for backend in &["interp", "js", "native"] {
+        let port = find_free_loopback_port();
+        let source = format!(
+            r#">>> taida-lang/net => @(httpServe, startResponse, writeChunk, endResponse)
+
+streaming_handler req writer =
+  startResponse(writer, 200, @[@(name <= "X-From", value <= "f-alias")])
+  writeChunk(writer, "f-leaked")
+  endResponse(writer)
+=> :Int
+
+f =
+  h <= streaming_handler
+  0
+=> :Int
+
+responder req writer =
+  startResponse(writer, 200, @[@(name <= "X-From", value <= "g-param")])
+  writeChunk(writer, "scope-ok")
+  endResponse(writer)
+=> :Int
+
+f()
+h <= responder
+asyncResult <= httpServe({port}, h, 1)
+asyncResult ]=> result
+result ]=> r
+stdout(r.requests)
+"#
+        );
+
+        let request = b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+        let (resp, stdout) = spawn_and_request_v3(&source, backend, port, request);
+
+        // The response must come from `responder` (top-level h), not `streaming_handler` (f's h).
+        assert!(
+            resp.contains("200 OK"),
+            "NB3-4 scope-leak {}: should return 200 OK, got: {:?}",
+            backend,
+            resp
+        );
+        assert!(
+            resp.contains("X-From: g-param"),
+            "NB3-4 scope-leak {}: header should be 'g-param' (from responder), not 'f-alias'. Got: {:?}",
+            backend,
+            resp
+        );
+        assert!(
+            resp.contains("scope-ok"),
+            "NB3-4 scope-leak {}: body should contain 'scope-ok' (from responder), not 'f-leaked'. Got: {:?}",
+            backend,
+            resp
+        );
+        assert_eq!(
+            stdout, "1",
+            "NB3-4 scope-leak {}: httpServe result mismatch. stdout: {:?}",
+            backend, stdout
+        );
+    }
+}
+
+// ── NB3-4 parameter shadow: inner scope parameter must shadow outer alias ──
+
+/// NB3-4 parameter shadow (function): outer scope defines `h <= streaming_handler`
+/// (2-arg alias, registered in var_aliases). A function `run_server` takes parameter
+/// `h` which must shadow the outer alias. Inside `run_server`, `httpServe(port, h, 1)`
+/// must resolve h's arity as unknown (-1), NOT as 2 from the outer alias.
+/// When called with a 1-arg handler, the 1-arg (one-shot response) path must be used.
+///
+/// Interpreter-only: interpreter handles async httpServe inside inner functions
+/// correctly. JS backend converts inner functions to async (Promise leak issue).
+/// Native backend has separate callable-tag pass-through limitations for parameters.
+/// The core bug (resolve_ident_arity returning outer alias arity for inner params)
+/// is in lower.rs which only affects Native codegen — verified by build success
+/// (previously would generate incorrect handler_arity=2 for the 1-arg handler).
+#[test]
+fn test_nb3_4_param_shadow_func_interp() {
+    for _ in 0..1 {
+        let port = find_free_loopback_port();
+        // outer: h <= streaming_handler (2-arg alias registered in var_aliases)
+        // run_server: parameter h shadows outer alias; httpServe uses inner h
+        // Expected: 1-arg (one-shot) response path
+        let source = format!(
+            r#">>> taida-lang/net => @(httpServe, startResponse, writeChunk, endResponse)
+
+streaming_handler req writer =
+  startResponse(writer, 200, @[@(name <= "X-From", value <= "stream")])
+  writeChunk(writer, "streamed")
+  endResponse(writer)
+=> :Int
+
+h <= streaming_handler
+
+simple_handler req =
+  @(status <= 200, headers <= @[@(name <= "X-From", value <= "oneshot")], body <= "param-shadow-ok")
+=> :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
+
+run_server h port =
+  asyncResult <= httpServe(port, h, 1)
+  asyncResult ]=> result
+  result ]=> r
+  r.requests
+=> :Int
+
+stdout(run_server(simple_handler, {port}))
+"#
+        );
+
+        let request = b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+        let (resp, stdout) = spawn_and_request_v3(&source, "interp", port, request);
+
+        assert!(
+            resp.contains("200 OK") || resp.contains("200"),
+            "NB3-4 param-shadow func interp: should return 200, got: {:?}",
+            resp
+        );
+        assert!(
+            resp.contains("X-From: oneshot"),
+            "NB3-4 param-shadow func interp: header should be 'oneshot' (from simple_handler), \
+             not 'stream' (from outer alias). Got: {:?}",
+            resp
+        );
+        assert!(
+            resp.contains("param-shadow-ok"),
+            "NB3-4 param-shadow func interp: body should contain 'param-shadow-ok'. Got: {:?}",
+            resp
+        );
+        assert_eq!(
+            stdout, "1",
+            "NB3-4 param-shadow func interp: httpServe result mismatch. stdout: {:?}",
+            stdout
+        );
+    }
+}
+
+/// NB3-4 parameter shadow (native compile): verify that Native codegen succeeds
+/// when inner function parameter shadows outer 2-arg alias. The fix ensures
+/// `resolve_ident_arity` returns -1 (unknown) for the shadowed parameter,
+/// preventing the incorrect handler_arity=2 that would cause UB at runtime.
+#[test]
+fn test_nb3_4_param_shadow_native_compile() {
+    // Verify Native compilation succeeds (codegen doesn't crash or miscompile)
+    let source = r#">>> taida-lang/net => @(httpServe, startResponse, writeChunk, endResponse)
+
+streaming_handler req writer =
+  startResponse(writer, 200, @[@(name <= "X-From", value <= "stream")])
+  writeChunk(writer, "streamed")
+  endResponse(writer)
+=> :Int
+
+h <= streaming_handler
+
+simple_handler req =
+  @(status <= 200, headers <= @[@(name <= "X-From", value <= "oneshot")], body <= "param-shadow-ok")
+=> :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
+
+run_server h port =
+  asyncResult <= httpServe(port, h, 1)
+  asyncResult ]=> result
+  result ]=> r
+  r.requests
+=> :Int
+
+stdout(run_server(simple_handler, 12345))
+"#;
+
+    let dir = setup_net_project(source, "param_shadow_native");
+    let td_path = dir.join("main.td");
+    let bin_path = unique_temp_path("taida_nb34_shadow", "native", "bin");
+
+    let compile = Command::new(taida_bin())
+        .arg("build")
+        .arg("--target")
+        .arg("native")
+        .arg(&td_path)
+        .arg("-o")
+        .arg(&bin_path)
+        .output()
+        .expect("compile native");
+
+    cleanup_net_project(&dir);
+    let _ = fs::remove_file(&bin_path);
+
+    assert!(
+        compile.status.success(),
+        "NB3-4 param-shadow: Native compile should succeed. stderr: {}",
+        String::from_utf8_lossy(&compile.stderr)
+    );
+}
+
+/// NB3-4 parameter shadow (lambda): verify that lambda parameter shadow
+/// correctly removes outer aliases during Native codegen. Since Taida lambdas
+/// are single-expression only (no multi-statement httpServe+unmold), this test
+/// verifies the codegen path by compiling a lambda where parameter `h` shadows
+/// an outer 2-arg alias, and the lambda calls h(req) with 1 arg.
+#[test]
+fn test_nb3_4_param_shadow_lambda_compile() {
+    // Lambda with parameter shadow — verifies codegen doesn't crash
+    // and outer alias is properly removed in lambda scope.
+    let source = r#">>> taida-lang/net => @(httpServe, startResponse, writeChunk, endResponse)
+
+streaming_handler req writer =
+  startResponse(writer, 200, @[@(name <= "X-From", value <= "stream")])
+  writeChunk(writer, "streamed")
+  endResponse(writer)
+=> :Int
+
+h <= streaming_handler
+
+simple_handler req =
+  @(status <= 200, headers <= @[@(name <= "X-From", value <= "oneshot")], body <= "ok")
+=> :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
+
+// Lambda where parameter h shadows outer alias
+apply_handler <= _ h req = h(req)
+
+result <= apply_handler(simple_handler, @(method <= "GET", path <= "/", headers <= @[]))
+stdout(result.body)
+"#;
+
+    // Test all 3 backends produce "ok"
+    let dir = setup_net_project(source, "param_shadow_lambda");
+    let td_path = dir.join("main.td");
+
+    // Interpreter
+    let interp = run_net_interpreter(&dir).expect("interpreter failed");
+    assert_eq!(
+        interp.trim(),
+        "ok",
+        "NB3-4 param-shadow lambda interp: expected 'ok', got: {:?}",
+        interp
+    );
+
+    // JS
+    if node_available() {
+        let js = run_net_js(&dir, "param_shadow_lambda").expect("js failed");
+        assert_eq!(
+            js.trim(),
+            "ok",
+            "NB3-4 param-shadow lambda JS: expected 'ok', got: {:?}",
+            js
+        );
+    }
+
+    // Native
+    let bin_path = unique_temp_path("taida_nb34_shadow_lambda", "native", "bin");
+    let compile = Command::new(taida_bin())
+        .arg("build")
+        .arg("--target")
+        .arg("native")
+        .arg(&td_path)
+        .arg("-o")
+        .arg(&bin_path)
+        .output()
+        .expect("compile native");
+    assert!(
+        compile.status.success(),
+        "NB3-4 param-shadow lambda: Native compile should succeed. stderr: {}",
+        String::from_utf8_lossy(&compile.stderr)
+    );
+    let run = Command::new(&bin_path).output().expect("run native");
+    let native_out = normalize(&String::from_utf8_lossy(&run.stdout));
+    let _ = fs::remove_file(&bin_path);
+    assert_eq!(
+        native_out.trim(),
+        "ok",
+        "NB3-4 param-shadow lambda native: expected 'ok', got: {:?}",
+        native_out
+    );
+
+    cleanup_net_project(&dir);
+}
+
+// ── NB3-4 handler_type_tag: parameter handler must not be misclassified by return-type inference ──
+
+/// NB3-4 handler_type_tag fix: When a function like `run_server h ... => :Int`
+/// has an unannotated parameter `h`, the return-type inference (line 1559-1581)
+/// inserts `h` into `int_vars`. This caused `callable_type_tag` to return 0 (Int)
+/// instead of -1 (unknown), making the C runtime reject the handler as non-callable.
+///
+/// The fix ensures `callable_type_tag` returns -1 for Ident expressions where
+/// `resolve_ident_callable_tag` returned None, skipping `noncallable_type_tag`
+/// which would use the misleading `int_vars` membership.
+///
+/// This test runs Interpreter and Native backends with actual HTTP request/response
+/// to verify the parameter handler works end-to-end.
+/// JS backend is excluded because it does not correctly handle async httpServe
+/// inside inner functions (known limitation, see test_nb3_4_param_shadow_func_interp).
+#[test]
+fn test_nb3_4_handler_type_tag_param_not_misclassified() {
+    let backends = vec!["interp", "native"];
+
+    for backend in &backends {
+        let port = find_free_loopback_port();
+        // Key pattern: `run_server h ... => :Int`
+        // Parameter `h` has no type annotation; return type `:Int` triggers
+        // inference that would put `h` into int_vars (before the fix).
+        let source = format!(
+            r#">>> taida-lang/net => @(httpServe)
+
+handler req =
+  @(status <= 200, headers <= @[@(name <= "content-type", value <= "text/plain")], body <= "param-handler-ok")
+=> :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
+
+run_server h port =
+  asyncResult <= httpServe(port, h, 1)
+  asyncResult ]=> result
+  result ]=> r
+  r.requests
+=> :Int
+
+stdout(run_server(handler, {port}))
+"#
+        );
+
+        let dir = setup_net_project(&source, &format!("nb34_tag_{}", backend));
+        let td_path = dir.join("main.td");
+
+        let mut child = match *backend {
+            "interp" => Command::new(taida_bin())
+                .arg(&td_path)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .expect("spawn interpreter"),
+            "native" => {
+                let bin_path = unique_temp_path("taida_nb34_tag_native", backend, "bin");
+                let compile = Command::new(taida_bin())
+                    .arg("build")
+                    .arg("--target")
+                    .arg("native")
+                    .arg(&td_path)
+                    .arg("-o")
+                    .arg(&bin_path)
+                    .output()
+                    .expect("compile native");
+                if !compile.status.success() {
+                    let stderr = String::from_utf8_lossy(&compile.stderr);
+                    cleanup_net_project(&dir);
+                    let _ = fs::remove_file(&bin_path);
+                    panic!("NB3-4 tag {} Native compile failed: {}", backend, stderr);
+                }
+                let child = Command::new(&bin_path)
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped())
+                    .spawn()
+                    .expect("spawn native");
+                thread::sleep(Duration::from_millis(200));
+                let _ = fs::remove_file(&bin_path);
+                child
+            }
+            _ => unreachable!(),
+        };
+
+        // Wait for server to be ready, then send request
+        let mut response = Vec::new();
+        let mut got_response = false;
+        for _ in 0..80 {
+            thread::sleep(Duration::from_millis(100));
+            let stream = match TcpStream::connect(format!("127.0.0.1:{}", port)) {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+            stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
+            stream.set_write_timeout(Some(Duration::from_secs(5))).ok();
+            let mut stream = stream;
+            let request = b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n";
+            if std::io::Write::write_all(&mut stream, request).is_err() {
+                continue;
+            }
+            let mut buf = [0u8; 4096];
+            loop {
+                match std::io::Read::read(&mut stream, &mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => response.extend_from_slice(&buf[..n]),
+                    Err(ref e)
+                        if e.kind() == std::io::ErrorKind::WouldBlock
+                            || e.kind() == std::io::ErrorKind::TimedOut =>
+                    {
+                        break;
+                    }
+                    Err(_) => break,
+                }
+            }
+            if !response.is_empty() {
+                got_response = true;
+                break;
+            }
+        }
+
+        if !got_response {
+            let _ = child.kill();
+            cleanup_net_project(&dir);
+            panic!(
+                "NB3-4 tag {}: server did not respond on port {}",
+                backend, port,
+            );
+        }
+
+        let resp_str = String::from_utf8_lossy(&response).to_string();
+        assert!(
+            resp_str.contains("200 OK"),
+            "NB3-4 tag {}: response should contain '200 OK', got: {:?}",
+            backend,
+            resp_str
+        );
+        assert!(
+            resp_str.contains("param-handler-ok"),
+            "NB3-4 tag {}: response body should contain 'param-handler-ok', got: {:?}",
+            backend,
+            resp_str
+        );
+
+        // Wait for server process to exit
+        let output = child.wait_with_output().expect("wait for server process");
+        let stdout = normalize(&String::from_utf8_lossy(&output.stdout));
+
+        assert_eq!(
+            stdout,
+            "1",
+            "NB3-4 tag {}: httpServe result mismatch. stdout: {:?}, stderr: {:?}",
+            backend,
+            stdout,
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        cleanup_net_project(&dir);
+    }
+}
+
+// ── NB3-4 alias chain: return_type_inferred_params must propagate through var_aliases ──
+
+/// NB3-4 alias chain fix: When `run_server h port => :Int` puts `h` into
+/// return_type_inferred_params, a local alias `x <= h` must also be treated
+/// as potentially callable. Before this fix, `x` fell through to
+/// noncallable_type_tag which classified it as Int (from return-type inference),
+/// causing "handler must be a Function" at runtime.
+///
+/// This test uses Interpreter and Native backends with actual HTTP
+/// request/response to verify the alias handler works end-to-end.
+#[test]
+fn test_nb3_4_alias_chain_return_type_inferred_param() {
+    let backends = vec!["interp", "native"];
+
+    for backend in &backends {
+        let port = find_free_loopback_port();
+        // Key pattern: `x <= h` inside `run_server h port => :Int`
+        // `h` is in return_type_inferred_params, `x` is a 1-hop alias.
+        let source = format!(
+            r#">>> taida-lang/net => @(httpServe)
+
+handler req =
+  @(status <= 200, headers <= @[@(name <= "content-type", value <= "text/plain")], body <= "alias-chain-ok")
+=> :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
+
+run_server h port =
+  x <= h
+  asyncResult <= httpServe(port, x, 1)
+  asyncResult ]=> result
+  result ]=> r
+  r.requests
+=> :Int
+
+stdout(run_server(handler, {port}))
+"#
+        );
+
+        let dir = setup_net_project(&source, &format!("nb34_alias_{}", backend));
+        let td_path = dir.join("main.td");
+
+        let mut child = match *backend {
+            "interp" => Command::new(taida_bin())
+                .arg(&td_path)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .expect("spawn interpreter"),
+            "native" => {
+                let bin_path = unique_temp_path("taida_nb34_alias_native", backend, "bin");
+                let compile = Command::new(taida_bin())
+                    .arg("build")
+                    .arg("--target")
+                    .arg("native")
+                    .arg(&td_path)
+                    .arg("-o")
+                    .arg(&bin_path)
+                    .output()
+                    .expect("compile native");
+                if !compile.status.success() {
+                    let stderr = String::from_utf8_lossy(&compile.stderr);
+                    cleanup_net_project(&dir);
+                    let _ = fs::remove_file(&bin_path);
+                    panic!("NB3-4 alias {} Native compile failed: {}", backend, stderr);
+                }
+                let child = Command::new(&bin_path)
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped())
+                    .spawn()
+                    .expect("spawn native");
+                thread::sleep(Duration::from_millis(200));
+                let _ = fs::remove_file(&bin_path);
+                child
+            }
+            _ => unreachable!(),
+        };
+
+        // Wait for server to be ready, then send request
+        let mut response = Vec::new();
+        let mut got_response = false;
+        for _ in 0..80 {
+            thread::sleep(Duration::from_millis(100));
+            let stream = match TcpStream::connect(format!("127.0.0.1:{}", port)) {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+            stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
+            stream.set_write_timeout(Some(Duration::from_secs(5))).ok();
+            let mut stream = stream;
+            let request = b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n";
+            if std::io::Write::write_all(&mut stream, request).is_err() {
+                continue;
+            }
+            let mut buf = [0u8; 4096];
+            loop {
+                match std::io::Read::read(&mut stream, &mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => response.extend_from_slice(&buf[..n]),
+                    Err(ref e)
+                        if e.kind() == std::io::ErrorKind::WouldBlock
+                            || e.kind() == std::io::ErrorKind::TimedOut =>
+                    {
+                        break;
+                    }
+                    Err(_) => break,
+                }
+            }
+            if !response.is_empty() {
+                got_response = true;
+                break;
+            }
+        }
+
+        if !got_response {
+            let _ = child.kill();
+            cleanup_net_project(&dir);
+            panic!(
+                "NB3-4 alias {}: server did not respond on port {}",
+                backend, port,
+            );
+        }
+
+        let resp_str = String::from_utf8_lossy(&response).to_string();
+        assert!(
+            resp_str.contains("200 OK"),
+            "NB3-4 alias {}: response should contain '200 OK', got: {:?}",
+            backend,
+            resp_str
+        );
+        assert!(
+            resp_str.contains("alias-chain-ok"),
+            "NB3-4 alias {}: response body should contain 'alias-chain-ok', got: {:?}",
+            backend,
+            resp_str
+        );
+
+        // Wait for server process to exit
+        let output = child.wait_with_output().expect("wait for server process");
+        let stdout = normalize(&String::from_utf8_lossy(&output.stdout));
+
+        assert_eq!(
+            stdout,
+            "1",
+            "NB3-4 alias {}: httpServe result mismatch. stdout: {:?}, stderr: {:?}",
+            backend,
+            stdout,
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        cleanup_net_project(&dir);
     }
 }

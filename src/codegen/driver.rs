@@ -2286,4 +2286,91 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
         // guard restores env on drop
     }
+
+    // ── NET3 regression tests for native_runtime.c ──────────────────────
+
+    /// The C runtime source used by include_str!("native_runtime.c").
+    const NATIVE_C: &str = include_str!("native_runtime.c");
+
+    /// Regression: commit_head must use length-checked snprintf writes.
+    /// The old code blindly accumulated `offset += snprintf(...)` without
+    /// verifying that snprintf did not return a value >= remaining capacity,
+    /// leading to OOB writes when headers exceeded the buffer size.
+    #[test]
+    fn test_native_commit_head_length_checked() {
+        // The fix introduces an explicit overflow label and error return.
+        assert!(
+            NATIVE_C.contains("goto overflow"),
+            "commit_head should use 'goto overflow' for length-checked writes"
+        );
+        assert!(
+            NATIVE_C.contains("overflow:\n"),
+            "commit_head should have an 'overflow:' label for the error path"
+        );
+        assert!(
+            NATIVE_C.contains("response head exceeds"),
+            "commit_head should print a descriptive error on head overflow"
+        );
+    }
+
+    /// Regression: Native v3 streaming API must validate the writer token.
+    /// The old code accepted any value as the writer argument, so
+    /// `startResponse(0, ...)` would silently operate on the current request.
+    /// The fix validates __writer_id === "__v3_streaming_writer" (parity with
+    /// Interpreter/JS).
+    #[test]
+    fn test_native_v3_validates_writer_token() {
+        // The validation function should exist.
+        assert!(
+            NATIVE_C.contains("taida_net3_validate_writer("),
+            "Native runtime should define taida_net3_validate_writer"
+        );
+        // Each API function must call it.
+        for api in &["startResponse", "writeChunk", "endResponse", "sseEvent"] {
+            let pattern = format!("taida_net3_validate_writer(writer, \"{}\")", api);
+            assert!(
+                NATIVE_C.contains(&pattern),
+                "Native {} should validate writer token",
+                api
+            );
+        }
+    }
+
+    /// Regression: commit_head callers must check its return value.
+    /// The old code ignored the int return from commit_head, missing I/O
+    /// errors and the new overflow error code.
+    #[test]
+    fn test_native_commit_head_return_checked() {
+        // All callers within v3 API functions should check != 0.
+        assert!(
+            NATIVE_C.contains("if (taida_net3_commit_head(fd, w) != 0)"),
+            "v3 API callers should check commit_head return value"
+        );
+    }
+
+    /// Regression: auto-end must NOT send chunk terminator when commit_head
+    /// fails.  The old code logged the error but still wrote `0\r\n\r\n`,
+    /// producing an invalid wire (no head followed by a bare terminator).
+    /// The fix introduces `auto_end_failed` to skip the terminator and
+    /// force connection close.
+    #[test]
+    fn test_native_auto_end_skips_terminator_on_commit_head_failure() {
+        // The guard variable must exist in the auto-end path.
+        assert!(
+            NATIVE_C.contains("int auto_end_failed = 0;"),
+            "auto-end path should declare auto_end_failed flag"
+        );
+        // Terminator send must be gated on !auto_end_failed.
+        assert!(
+            NATIVE_C.contains("if (!auto_end_failed && !taida_net3_is_bodyless_status("),
+            "auto-end terminator must be skipped when commit_head failed"
+        );
+        // On failure, keep_alive must be forced off to close the connection.
+        assert!(
+            NATIVE_C.contains(
+                "if (auto_end_failed) {\n                            // Force connection close"
+            ),
+            "auto-end failure must force keep_alive = 0 for connection close"
+        );
+    }
 }

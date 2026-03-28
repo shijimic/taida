@@ -104,12 +104,19 @@ impl JsCodegen {
         self.out_root = Some(out_root.to_path_buf());
     }
 
-    /// Names of taida-lang/net HTTP v1 builtins that require scope-aware call-site rewriting.
+    /// Names of taida-lang/net builtins that require scope-aware call-site rewriting.
+    /// HTTP v1 (3) + HTTP v2 (1) = 4.
+    /// v3 streaming APIs will be added when JS backend is ready (Phase 4).
     const NET_BUILTIN_NAMES: &'static [&'static str] = &[
         "httpServe",
         "httpParseRequestHead",
         "httpEncodeResponse",
         "readBody",
+        // v3 streaming API
+        "startResponse",
+        "writeChunk",
+        "endResponse",
+        "sseEvent",
     ];
 
     /// Check if a net builtin name should be rewritten to its __taida_net_* form.
@@ -143,6 +150,23 @@ impl JsCodegen {
             }
             "readBody" => {
                 self.write(&format!("__taida_net_readBody{}", suffix));
+                true
+            }
+            // v3 streaming API
+            "startResponse" => {
+                self.write(&format!("__taida_net_startResponse{}", suffix));
+                true
+            }
+            "writeChunk" => {
+                self.write(&format!("__taida_net_writeChunk{}", suffix));
+                true
+            }
+            "endResponse" => {
+                self.write(&format!("__taida_net_endResponse{}", suffix));
+                true
+            }
+            "sseEvent" => {
+                self.write(&format!("__taida_net_sseEvent{}", suffix));
                 true
             }
             _ => false,

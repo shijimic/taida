@@ -1567,15 +1567,35 @@ fn runtime_abi(name: &str) -> Result<RuntimeAbi, String> {
             params: &[Ptr],
             returns: &[Ptr],
         },
-        // NET2-5d: taida_net_http_serve(port, handler, max_requests, timeout_ms, max_connections, handler_type_tag) -> Ptr
+        // NET3-5a: taida_net_http_serve(port, handler, max_requests, timeout_ms, max_connections, handler_type_tag, handler_arity) -> Ptr
         "taida_net_http_serve" => RuntimeAbi {
-            params: &[Val, Ptr, Val, Val, Val, Val],
+            params: &[Val, Ptr, Val, Val, Val, Val, Val],
             returns: &[Ptr],
         },
         // NET2-0f: taida_net_read_body(req: Ptr) -> Ptr (Bytes)
         "taida_net_read_body" => RuntimeAbi {
             params: &[Ptr],
             returns: &[Ptr],
+        },
+        // NET3-5b: startResponse(writer, status, headers) -> Val
+        "taida_net_start_response" => RuntimeAbi {
+            params: &[Ptr, Val, Ptr],
+            returns: &[Val],
+        },
+        // NET3-5b: writeChunk(writer, data) -> Val
+        "taida_net_write_chunk" => RuntimeAbi {
+            params: &[Ptr, Ptr],
+            returns: &[Val],
+        },
+        // NET3-5b: endResponse(writer) -> Val
+        "taida_net_end_response" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Val],
+        },
+        // NET3-5e: sseEvent(writer, event, data) -> Val
+        "taida_net_sse_event" => RuntimeAbi {
+            params: &[Ptr, Ptr, Ptr],
+            returns: &[Val],
         },
 
         // N-44: ABI table maintenance note

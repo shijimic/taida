@@ -3551,8 +3551,28 @@ static int taida_read_cstr_len_safe(const char *s, size_t max_len, size_t *out_l
     return 0;
 }
 
+// NB3-8: Get string byte length from heap header metadata when available,
+// falling back to taida_read_cstr_len_safe for static strings.
+// Returns 1 on success (length stored in *out_len), 0 on failure.
+static int taida_str_byte_len(const char *s, size_t *out_len) {
+    if (!s) return 0;
+    uintptr_t ptr = (uintptr_t)s;
+    if (ptr < 4096) return 0;
+    // Check if this is a heap string with hidden header
+    taida_val *hdr = ((taida_val*)s) - 2;
+    if (taida_ptr_is_readable((taida_val)hdr, sizeof(taida_val) * 2)) {
+        taida_val tag = hdr[0];
+        if ((tag & TAIDA_MAGIC_MASK) == TAIDA_STR_MAGIC) {
+            if (out_len) *out_len = (size_t)hdr[1];
+            return 1;
+        }
+    }
+    // Static string — fall back to NUL scan
+    return taida_read_cstr_len_safe(s, 16 * 1024 * 1024, out_len);
+}
+
 static int taida_hashmap_key_valid(taida_val key_ptr) {
-    // All values are valid keys in Taida. 
+    // All values are valid keys in Taida.
     // Null (0) is traditionally not a key, but we can allow it as Int(0).
     return 1;
 }
@@ -7557,6 +7577,8 @@ taida_val taida_os_argv(void) {
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <sys/time.h>
+#include <sys/uio.h>  // NET3-5c: writev() for zero-copy chunk writes
+#include <signal.h>   // NB3-5: SIGPIPE suppression for peer-close resilience
 
 // Helper: create a resolved Async[value] (fulfilled)
 // NO-3: auto-detect value type for ownership tracking
@@ -8012,7 +8034,7 @@ static taida_val taida_os_http_do(const char *method, const char *url, taida_val
 
     size_t sent_total = 0;
     while (sent_total < (size_t)req_len) {
-        ssize_t sent = send(sockfd, request + sent_total, (size_t)req_len - sent_total, 0);
+        ssize_t sent = send(sockfd, request + sent_total, (size_t)req_len - sent_total, MSG_NOSIGNAL);
         if (sent <= 0) {
             free(request);
             close(sockfd);
@@ -8314,7 +8336,7 @@ taida_val taida_os_socket_send(taida_val socket_fd, taida_val data_ptr, taida_va
     }
 
     taida_os_apply_socket_timeout((int)socket_fd, timeout_ms);
-    ssize_t sent = send((int)socket_fd, payload_buf, payload_len, 0);
+    ssize_t sent = send((int)socket_fd, payload_buf, payload_len, MSG_NOSIGNAL);
     free(payload_buf);
     if (sent < 0) {
         return taida_async_resolved(taida_os_result_failure(errno, strerror(errno)));
@@ -8357,7 +8379,7 @@ taida_val taida_os_socket_send_all(taida_val socket_fd, taida_val data_ptr, taid
     taida_os_apply_socket_timeout((int)socket_fd, timeout_ms);
     size_t sent_total = 0;
     while (sent_total < payload_len) {
-        ssize_t sent = send((int)socket_fd, payload_buf + sent_total, payload_len - sent_total, 0);
+        ssize_t sent = send((int)socket_fd, payload_buf + sent_total, payload_len - sent_total, MSG_NOSIGNAL);
         if (sent < 0) {
             if (errno == EINTR) continue;
             free(payload_buf);
@@ -8935,8 +8957,13 @@ taida_val taida_pool_health(taida_val pool_or_pack) {
 // Forward declarations
 taida_val taida_net_http_parse_request_head(taida_val input);
 taida_val taida_net_http_encode_response(taida_val response);
-taida_val taida_net_http_serve(taida_val port, taida_val handler, taida_val max_requests, taida_val timeout_ms, taida_val max_connections, taida_val handler_type_tag);
+taida_val taida_net_http_serve(taida_val port, taida_val handler, taida_val max_requests, taida_val timeout_ms, taida_val max_connections, taida_val handler_type_tag, taida_val handler_arity);
 taida_val taida_net_read_body(taida_val req);
+// NET3-5b: v3 streaming API forward declarations
+taida_val taida_net_start_response(taida_val writer, taida_val status, taida_val headers);
+taida_val taida_net_write_chunk(taida_val writer, taida_val data);
+taida_val taida_net_end_response(taida_val writer);
+taida_val taida_net_sse_event(taida_val writer, taida_val event, taida_val data);
 
 // Net result helpers (use HttpError instead of IoError)
 static taida_val taida_net_result_ok(taida_val inner) {
@@ -9630,7 +9657,9 @@ static int taida_net_send_all(int fd, const void *buf, size_t len) {
     const unsigned char *p = (const unsigned char*)buf;
     size_t remaining = len;
     while (remaining > 0) {
-        ssize_t n = send(fd, p, remaining, 0);
+        // NB3-5: MSG_NOSIGNAL prevents SIGPIPE on peer-closed sockets,
+        // causing send() to return EPIPE instead of killing the process.
+        ssize_t n = send(fd, p, remaining, MSG_NOSIGNAL);
         if (n < 0) {
             if (errno == EINTR) continue;
             return -1;
@@ -10079,6 +10108,594 @@ static void taida_net_send_response(int client_fd, taida_val encoded) {
     }
 }
 
+// ── NET3-5a/5b/5c/5d/5e: v3 streaming writer state machine ─────────────
+// Writer state: Idle(0) → HeadPrepared(1) → Streaming(2) → Ended(3)
+// Thread-local context for v3 streaming API. Set in the worker thread
+// before invoking a 2-arg handler; the v3 API functions (startResponse,
+// writeChunk, endResponse, sseEvent) access it via these thread-locals.
+
+#define NET3_STATE_IDLE         0
+#define NET3_STATE_HEAD_PREPARED 1
+#define NET3_STATE_STREAMING    2
+#define NET3_STATE_ENDED        3
+
+// Maximum pending headers per streaming response
+#define NET3_MAX_HEADERS 64
+
+typedef struct {
+    int state;               // NET3_STATE_*
+    int pending_status;      // default 200
+    int sse_mode;            // SSE auto-headers applied
+    int header_count;        // number of pending headers
+    // Stack-allocated header storage (no per-request malloc for headers)
+    const char *header_names[NET3_MAX_HEADERS];
+    const char *header_values[NET3_MAX_HEADERS];
+} Net3WriterState;
+
+// Thread-local: current writer state and client fd for v3 streaming API.
+// These are set/cleared around each 2-arg handler invocation.
+static __thread Net3WriterState *tl_net3_writer = NULL;
+static __thread int tl_net3_client_fd = -1;
+
+// Forward declaration: writer token validation (defined after create_writer_token).
+static void taida_net3_validate_writer(taida_val writer, const char *api_name);
+
+// NET3-5c: writev()-based send helper. Sends all iov buffers, handling
+// partial writes and EINTR. Returns 0 on success, -1 on error.
+static int taida_net_writev_all(int fd, struct iovec *iov, int iovcnt) {
+    while (iovcnt > 0) {
+        ssize_t n = writev(fd, iov, iovcnt);
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            return -1;
+        }
+        if (n == 0) return -1;  // peer closed
+        // Advance past fully-sent iovecs
+        size_t written = (size_t)n;
+        while (iovcnt > 0 && written >= iov[0].iov_len) {
+            written -= iov[0].iov_len;
+            iov++;
+            iovcnt--;
+        }
+        if (iovcnt > 0 && written > 0) {
+            // Partial iovec: advance base pointer
+            iov[0].iov_base = (char*)iov[0].iov_base + written;
+            iov[0].iov_len -= written;
+        }
+    }
+    return 0;
+}
+
+// Check if a status code forbids a message body (1xx, 204, 205, 304).
+static int taida_net3_is_bodyless_status(int status) {
+    return (status >= 100 && status <= 199) || status == 204 || status == 205 || status == 304;
+}
+
+// Build and send the streaming response head.
+// Appends Transfer-Encoding: chunked for non-bodyless status codes.
+// Uses stack buffer (no per-request malloc for typical headers).
+// Returns 0 on success, -1 on send error, -2 on head overflow.
+#define NET3_HEAD_BUF_SIZE 8192
+static int taida_net3_commit_head(int fd, Net3WriterState *w) {
+    char head_buf[NET3_HEAD_BUF_SIZE];
+    size_t cap = sizeof(head_buf);
+    size_t offset = 0;
+    int n;
+
+    const char *reason = taida_net_status_reason(w->pending_status);
+    n = snprintf(head_buf, cap, "HTTP/1.1 %d %s\r\n", w->pending_status, reason);
+    if (n < 0 || (size_t)n >= cap) goto overflow;
+    offset += (size_t)n;
+
+    for (int i = 0; i < w->header_count && i < NET3_MAX_HEADERS; i++) {
+        size_t remaining = cap - offset;
+        n = snprintf(head_buf + offset, remaining,
+                     "%s: %s\r\n", w->header_names[i], w->header_values[i]);
+        if (n < 0 || (size_t)n >= remaining) goto overflow;
+        offset += (size_t)n;
+    }
+    if (!taida_net3_is_bodyless_status(w->pending_status)) {
+        size_t remaining = cap - offset;
+        n = snprintf(head_buf + offset, remaining, "Transfer-Encoding: chunked\r\n");
+        if (n < 0 || (size_t)n >= remaining) goto overflow;
+        offset += (size_t)n;
+    }
+    {
+        size_t remaining = cap - offset;
+        n = snprintf(head_buf + offset, remaining, "\r\n");
+        if (n < 0 || (size_t)n >= remaining) goto overflow;
+        offset += (size_t)n;
+    }
+    return taida_net_send_all(fd, head_buf, offset);
+
+overflow:
+    fprintf(stderr, "commit_head: response head exceeds %d bytes (too many or too large headers)\n",
+            (int)NET3_HEAD_BUF_SIZE);
+    return -2;
+}
+
+// Validate reserved headers (Content-Length, Transfer-Encoding) in streaming path.
+// Returns 0 if valid, prints error to stderr and returns -1 if invalid.
+static int taida_net3_validate_reserved_headers(taida_val headers, const char *api_name) {
+    if (!TAIDA_IS_LIST(headers)) return 0;
+    taida_val *list = (taida_val*)headers;
+    taida_val len = list[2];
+    for (taida_val i = 0; i < len; i++) {
+        taida_val item = list[4 + i];
+        if (!taida_is_buchi_pack(item)) continue;
+        taida_val name_val = taida_pack_get(item, taida_str_hash((taida_val)"name"));
+        if (name_val == 0) continue;
+        const char *name_str = (const char*)name_val;
+        size_t name_len = 0;
+        if (!taida_read_cstr_len_safe(name_str, 256, &name_len)) continue;
+        // Case-insensitive comparison
+        if (name_len == 14) {
+            // "content-length" (14 chars)
+            char lower[15];
+            for (size_t j = 0; j < name_len; j++) lower[j] = (char)((name_str[j] >= 'A' && name_str[j] <= 'Z') ? name_str[j] + 32 : name_str[j]);
+            lower[name_len] = '\0';
+            if (strcmp(lower, "content-length") == 0) {
+                fprintf(stderr, "%s: 'Content-Length' is not allowed in streaming response headers. "
+                        "The runtime manages Content-Length/Transfer-Encoding for streaming responses.\n", api_name);
+                return -1;
+            }
+        }
+        if (name_len == 17) {
+            // "transfer-encoding" (17 chars)
+            char lower[18];
+            for (size_t j = 0; j < name_len; j++) lower[j] = (char)((name_str[j] >= 'A' && name_str[j] <= 'Z') ? name_str[j] + 32 : name_str[j]);
+            lower[name_len] = '\0';
+            if (strcmp(lower, "transfer-encoding") == 0) {
+                fprintf(stderr, "%s: 'Transfer-Encoding' is not allowed in streaming response headers. "
+                        "The runtime manages Transfer-Encoding for streaming responses.\n", api_name);
+                return -1;
+            }
+        }
+    }
+    return 0;
+}
+
+// Extract headers from a taida list of @(name, value) packs into the writer state.
+static void taida_net3_extract_headers(Net3WriterState *w, taida_val headers) {
+    w->header_count = 0;
+    if (!TAIDA_IS_LIST(headers)) return;
+    taida_val *list = (taida_val*)headers;
+    taida_val len = list[2];
+    for (taida_val i = 0; i < len && w->header_count < NET3_MAX_HEADERS; i++) {
+        taida_val item = list[4 + i];
+        if (!taida_is_buchi_pack(item)) continue;
+        taida_val name_val = taida_pack_get(item, taida_str_hash((taida_val)"name"));
+        taida_val value_val = taida_pack_get(item, taida_str_hash((taida_val)"value"));
+        if (name_val == 0 || value_val == 0) continue;
+        w->header_names[w->header_count] = (const char*)name_val;
+        w->header_values[w->header_count] = (const char*)value_val;
+        w->header_count++;
+    }
+}
+
+// NET3-5b: startResponse(writer, status, headers)
+// Updates pending status/headers on the writer state. Does NOT commit to wire.
+taida_val taida_net_start_response(taida_val writer, taida_val status, taida_val headers) {
+    taida_net3_validate_writer(writer, "startResponse");
+    Net3WriterState *w = tl_net3_writer;
+    if (!w) {
+        fprintf(stderr, "startResponse: can only be called inside a 2-argument httpServe handler\n");
+        exit(1);
+    }
+    // State check
+    switch (w->state) {
+        case NET3_STATE_IDLE: break;
+        case NET3_STATE_HEAD_PREPARED:
+            fprintf(stderr, "startResponse: already called. Cannot call startResponse twice.\n");
+            exit(1);
+        case NET3_STATE_STREAMING:
+            fprintf(stderr, "startResponse: head already committed (chunks are being written). Cannot change status/headers after writeChunk.\n");
+            exit(1);
+        case NET3_STATE_ENDED:
+            fprintf(stderr, "startResponse: response already ended.\n");
+            exit(1);
+    }
+    // Validate status range
+    if (status < 100 || status > 599) {
+        fprintf(stderr, "startResponse: status must be 100-599, got %lld\n", (long long)status);
+        exit(1);
+    }
+    // Validate reserved headers
+    if (taida_net3_validate_reserved_headers(headers, "startResponse") < 0) {
+        exit(1);
+    }
+    w->pending_status = (int)status;
+    taida_net3_extract_headers(w, headers);
+    w->state = NET3_STATE_HEAD_PREPARED;
+    return 0; // Unit
+}
+
+// NET3-5b/5c/5d: writeChunk(writer, data)
+// Sends one chunk of body data using chunked TE. Uses writev() for zero-copy.
+// Bytes: extract from taida_val array to stack/stack-heap buffer, then writev.
+// Str: use C string directly.
+taida_val taida_net_write_chunk(taida_val writer, taida_val data) {
+    taida_net3_validate_writer(writer, "writeChunk");
+    Net3WriterState *w = tl_net3_writer;
+    int fd = tl_net3_client_fd;
+    if (!w) {
+        fprintf(stderr, "writeChunk: can only be called inside a 2-argument httpServe handler\n");
+        exit(1);
+    }
+    if (w->state == NET3_STATE_ENDED) {
+        fprintf(stderr, "writeChunk: response already ended.\n");
+        exit(1);
+    }
+
+    // Extract payload pointer and length
+    const unsigned char *payload = NULL;
+    size_t payload_len = 0;
+    // NET3-5d: For Bytes, we need to convert from taida_val array to contiguous bytes.
+    // Use stack buffer for small payloads, heap only for large ones. No per-chunk persistent alloc.
+    unsigned char stack_payload[4096];
+    unsigned char *heap_payload = NULL;
+    int is_bytes = 0;
+
+    if (TAIDA_IS_BYTES(data)) {
+        is_bytes = 1;
+        taida_val *bytes = (taida_val*)data;
+        taida_val blen = bytes[1];
+        payload_len = (size_t)blen;
+        if (payload_len == 0) return 0; // empty chunk is no-op
+        if (payload_len <= sizeof(stack_payload)) {
+            for (size_t i = 0; i < payload_len; i++) stack_payload[i] = (unsigned char)bytes[2 + i];
+            payload = stack_payload;
+        } else {
+            heap_payload = (unsigned char*)TAIDA_MALLOC(payload_len, "net3_write_chunk_bytes");
+            for (size_t i = 0; i < payload_len; i++) heap_payload[i] = (unsigned char)bytes[2 + i];
+            payload = heap_payload;
+        }
+    } else {
+        // Assume Str (C string)
+        const char *str = (const char*)data;
+        size_t slen = 0;
+        if (!taida_read_cstr_len_safe(str, 16 * 1024 * 1024, &slen)) {
+            fprintf(stderr, "writeChunk: data must be Bytes or Str\n");
+            if (heap_payload) free(heap_payload);
+            exit(1);
+        }
+        payload = (const unsigned char*)str;
+        payload_len = slen;
+        if (payload_len == 0) return 0; // empty chunk is no-op
+    }
+
+    // Bodyless status check
+    if (taida_net3_is_bodyless_status(w->pending_status)) {
+        fprintf(stderr, "writeChunk: status %d does not allow a message body\n", w->pending_status);
+        if (heap_payload) free(heap_payload);
+        exit(1);
+    }
+
+    // Commit head if not yet committed
+    if (w->state == NET3_STATE_IDLE || w->state == NET3_STATE_HEAD_PREPARED) {
+        if (taida_net3_commit_head(fd, w) != 0) {
+            fprintf(stderr, "writeChunk: failed to commit response head\n");
+            if (heap_payload) free(heap_payload);
+            exit(1);
+        }
+        w->state = NET3_STATE_STREAMING;
+    }
+
+    // NET3-5c: Send chunk using writev() — zero-copy for payload.
+    // Wire format: <hex-size>\r\n<payload>\r\n
+    char hex_prefix[32];
+    int hex_len = snprintf(hex_prefix, sizeof(hex_prefix), "%zx\r\n", payload_len);
+
+    struct iovec iov[3];
+    iov[0].iov_base = hex_prefix;
+    iov[0].iov_len = (size_t)hex_len;
+    iov[1].iov_base = (void*)payload;
+    iov[1].iov_len = payload_len;
+    iov[2].iov_base = (void*)"\r\n";
+    iov[2].iov_len = 2;
+
+    // NB3-5: Check writev_all return value for write errors (e.g. peer RST).
+    if (taida_net_writev_all(fd, iov, 3) != 0) {
+        if (heap_payload) free(heap_payload);
+        fprintf(stderr, "writeChunk: failed to send chunk data\n");
+        exit(1);
+    }
+
+    if (heap_payload) free(heap_payload);
+    return 0; // Unit
+}
+
+// NET3-5b: endResponse(writer)
+// Terminates the chunked response by sending 0\r\n\r\n.
+// Idempotent: second call is a no-op.
+taida_val taida_net_end_response(taida_val writer) {
+    taida_net3_validate_writer(writer, "endResponse");
+    Net3WriterState *w = tl_net3_writer;
+    int fd = tl_net3_client_fd;
+    if (!w) {
+        fprintf(stderr, "endResponse: can only be called inside a 2-argument httpServe handler\n");
+        exit(1);
+    }
+    // Idempotent: no-op if already ended
+    if (w->state == NET3_STATE_ENDED) return 0;
+
+    // Commit head if not yet committed
+    if (w->state == NET3_STATE_IDLE || w->state == NET3_STATE_HEAD_PREPARED) {
+        if (taida_net3_commit_head(fd, w) != 0) {
+            fprintf(stderr, "endResponse: failed to commit response head\n");
+            exit(1);
+        }
+    }
+
+    // Send chunked terminator — but only for non-bodyless status
+    if (!taida_net3_is_bodyless_status(w->pending_status)) {
+        taida_net_send_all(fd, "0\r\n\r\n", 5);
+    }
+    w->state = NET3_STATE_ENDED;
+    return 0; // Unit
+}
+
+// NET3-5e: sseEvent(writer, event, data)
+// SSE convenience API. Sends one Server-Sent Event.
+// Auto-sets Content-Type and Cache-Control headers if not already set.
+// Splits multiline data into data: lines.
+taida_val taida_net_sse_event(taida_val writer, taida_val event, taida_val data) {
+    taida_net3_validate_writer(writer, "sseEvent");
+    Net3WriterState *w = tl_net3_writer;
+    int fd = tl_net3_client_fd;
+    if (!w) {
+        fprintf(stderr, "sseEvent: can only be called inside a 2-argument httpServe handler\n");
+        exit(1);
+    }
+    // Validate event and data are strings.
+    // NB3-8: Use taida_str_byte_len which reads heap string length from header
+    // metadata instead of scanning for NUL. This is correct for non-ASCII
+    // (multi-byte UTF-8) strings and avoids parity issues with Interpreter/JS.
+    const char *event_str = (const char*)event;
+    const char *data_str = (const char*)data;
+    size_t event_len = 0, data_len = 0;
+    if (!taida_str_byte_len(event_str, &event_len)) {
+        fprintf(stderr, "sseEvent: event must be Str\n");
+        exit(1);
+    }
+    if (!taida_str_byte_len(data_str, &data_len)) {
+        fprintf(stderr, "sseEvent: data must be Str\n");
+        exit(1);
+    }
+
+    if (w->state == NET3_STATE_ENDED) {
+        fprintf(stderr, "sseEvent: response already ended.\n");
+        exit(1);
+    }
+    if (taida_net3_is_bodyless_status(w->pending_status)) {
+        fprintf(stderr, "sseEvent: status %d does not allow a message body\n", w->pending_status);
+        exit(1);
+    }
+
+    // SSE auto-headers (once per writer)
+    if (!w->sse_mode) {
+        if (w->state == NET3_STATE_STREAMING) {
+            // Head already committed — check if SSE headers were set
+            int has_ct = 0, has_cc = 0;
+            for (int i = 0; i < w->header_count; i++) {
+                const char *n = w->header_names[i];
+                size_t nlen = 0;
+                if (!taida_read_cstr_len_safe(n, 256, &nlen)) continue;
+                // Case-insensitive check
+                if (nlen == 12) {
+                    char lower[13];
+                    for (size_t j = 0; j < nlen; j++) lower[j] = (char)((n[j] >= 'A' && n[j] <= 'Z') ? n[j] + 32 : n[j]);
+                    lower[nlen] = '\0';
+                    if (strcmp(lower, "content-type") == 0) {
+                        const char *v = w->header_values[i];
+                        size_t vlen = 0;
+                        if (taida_read_cstr_len_safe(v, 256, &vlen)) {
+                            char lv[256];
+                            for (size_t j = 0; j < vlen && j < 255; j++) lv[j] = (char)((v[j] >= 'A' && v[j] <= 'Z') ? v[j] + 32 : v[j]);
+                            lv[vlen < 255 ? vlen : 255] = '\0';
+                            if (strstr(lv, "text/event-stream")) has_ct = 1;
+                        }
+                    }
+                }
+                if (nlen == 13) {
+                    char lower[14];
+                    for (size_t j = 0; j < nlen; j++) lower[j] = (char)((n[j] >= 'A' && n[j] <= 'Z') ? n[j] + 32 : n[j]);
+                    lower[nlen] = '\0';
+                    if (strcmp(lower, "cache-control") == 0) {
+                        const char *v = w->header_values[i];
+                        size_t vlen = 0;
+                        if (taida_read_cstr_len_safe(v, 256, &vlen)) {
+                            char lv[256];
+                            for (size_t j = 0; j < vlen && j < 255; j++) lv[j] = (char)((v[j] >= 'A' && v[j] <= 'Z') ? v[j] + 32 : v[j]);
+                            lv[vlen < 255 ? vlen : 255] = '\0';
+                            if (strstr(lv, "no-cache")) has_cc = 1;
+                        }
+                    }
+                }
+            }
+            if (!has_ct || !has_cc) {
+                fprintf(stderr, "sseEvent: head already committed without SSE headers. "
+                        "Call sseEvent before writeChunk, or use startResponse "
+                        "with explicit Content-Type: text/event-stream and "
+                        "Cache-Control: no-cache headers before writeChunk.\n");
+                exit(1);
+            }
+            w->sse_mode = 1;
+        } else {
+            // Head not yet committed — safe to add auto-headers
+            int has_ct = 0, has_cc = 0;
+            for (int i = 0; i < w->header_count; i++) {
+                const char *n = w->header_names[i];
+                size_t nlen = 0;
+                if (!taida_read_cstr_len_safe(n, 256, &nlen)) continue;
+                char lower[256];
+                for (size_t j = 0; j < nlen && j < 255; j++) lower[j] = (char)((n[j] >= 'A' && n[j] <= 'Z') ? n[j] + 32 : n[j]);
+                lower[nlen < 255 ? nlen : 255] = '\0';
+                if (strcmp(lower, "content-type") == 0) has_ct = 1;
+                if (strcmp(lower, "cache-control") == 0) has_cc = 1;
+            }
+            if (!has_ct && w->header_count < NET3_MAX_HEADERS) {
+                w->header_names[w->header_count] = "Content-Type";
+                w->header_values[w->header_count] = "text/event-stream; charset=utf-8";
+                w->header_count++;
+            }
+            if (!has_cc && w->header_count < NET3_MAX_HEADERS) {
+                w->header_names[w->header_count] = "Cache-Control";
+                w->header_values[w->header_count] = "no-cache";
+                w->header_count++;
+            }
+            w->sse_mode = 1;
+        }
+    }
+
+    // Commit head if not yet committed
+    if (w->state == NET3_STATE_IDLE || w->state == NET3_STATE_HEAD_PREPARED) {
+        if (taida_net3_commit_head(fd, w) != 0) {
+            fprintf(stderr, "sseEvent: failed to commit response head\n");
+            exit(1);
+        }
+        w->state = NET3_STATE_STREAMING;
+    }
+
+    // Build SSE event payload and compute total length.
+    // Wire format:
+    //   event: <event>\n      (omit if event is empty)
+    //   data: <line1>\n
+    //   data: <line2>\n       (for each line in data split by \n)
+    //   \n                    (event terminator)
+
+    // Count data lines
+    int line_count = 1;
+    for (size_t i = 0; i < data_len; i++) {
+        if (data_str[i] == '\n') line_count++;
+    }
+
+    // Compute total payload length for chunk header
+    size_t total_payload = 0;
+    if (event_len > 0) {
+        total_payload += 7 + event_len + 1; // "event: " + event + "\n"
+    }
+    // For each data line: "data: " + line + "\n"
+    {
+        const char *p = data_str;
+        const char *end = data_str + data_len;
+        while (p <= end) {
+            const char *nl = p;
+            while (nl < end && *nl != '\n') nl++;
+            size_t line_len = (size_t)(nl - p);
+            total_payload += 6 + line_len + 1; // "data: " + line + "\n"
+            p = nl + 1;
+            if (nl == end) break;
+        }
+    }
+    total_payload += 1; // terminator "\n"
+
+    // Build chunk: hex_prefix + SSE payload + chunk suffix
+    char hex_prefix[32];
+    int hex_len = snprintf(hex_prefix, sizeof(hex_prefix), "%zx\r\n", total_payload);
+
+    // Use iov array. Max iovecs: 1(hex) + 3(event line) + 3*line_count(data lines) + 1(term) + 1(suffix)
+    int max_iov = 1 + 3 + 3 * line_count + 1 + 1;
+    // Use stack for small SSE events, heap for large
+    struct iovec stack_iov[64];
+    struct iovec *iov = (max_iov <= 64) ? stack_iov : (struct iovec*)TAIDA_MALLOC(sizeof(struct iovec) * (size_t)max_iov, "net3_sse_iov");
+    int iov_count = 0;
+
+    // hex prefix
+    iov[iov_count].iov_base = hex_prefix;
+    iov[iov_count].iov_len = (size_t)hex_len;
+    iov_count++;
+
+    // event: line
+    if (event_len > 0) {
+        iov[iov_count].iov_base = (void*)"event: ";
+        iov[iov_count].iov_len = 7;
+        iov_count++;
+        iov[iov_count].iov_base = (void*)event_str;
+        iov[iov_count].iov_len = event_len;
+        iov_count++;
+        iov[iov_count].iov_base = (void*)"\n";
+        iov[iov_count].iov_len = 1;
+        iov_count++;
+    }
+
+    // data: lines
+    {
+        const char *p = data_str;
+        const char *end = data_str + data_len;
+        while (p <= end) {
+            const char *nl = p;
+            while (nl < end && *nl != '\n') nl++;
+            size_t line_len = (size_t)(nl - p);
+            iov[iov_count].iov_base = (void*)"data: ";
+            iov[iov_count].iov_len = 6;
+            iov_count++;
+            if (line_len > 0) {
+                iov[iov_count].iov_base = (void*)p;
+                iov[iov_count].iov_len = line_len;
+                iov_count++;
+            }
+            iov[iov_count].iov_base = (void*)"\n";
+            iov[iov_count].iov_len = 1;
+            iov_count++;
+            p = nl + 1;
+            if (nl == end) break;
+        }
+    }
+
+    // event terminator
+    iov[iov_count].iov_base = (void*)"\n";
+    iov[iov_count].iov_len = 1;
+    iov_count++;
+
+    // chunk suffix
+    iov[iov_count].iov_base = (void*)"\r\n";
+    iov[iov_count].iov_len = 2;
+    iov_count++;
+
+    // NB3-5: Check writev_all return value for write errors (e.g. peer RST).
+    if (taida_net_writev_all(fd, iov, iov_count) != 0) {
+        if (iov != stack_iov) free(iov);
+        fprintf(stderr, "sseEvent: failed to send SSE chunk data\n");
+        exit(1);
+    }
+
+    if (iov != stack_iov) free(iov);
+
+    return 0; // Unit
+}
+
+// Validate that the writer argument is a genuine BuchiPack token with
+// __writer_id === "__v3_streaming_writer" (parity with Interpreter/JS).
+static void taida_net3_validate_writer(taida_val writer, const char *api_name) {
+    if (!taida_is_buchi_pack(writer)) {
+        fprintf(stderr, "%s: first argument must be the writer provided by httpServe\n", api_name);
+        exit(1);
+    }
+    taida_val id_val = taida_pack_get(writer, taida_str_hash((taida_val)"__writer_id"));
+    if (id_val == 0) {
+        fprintf(stderr, "%s: first argument must be the writer provided by httpServe\n", api_name);
+        exit(1);
+    }
+    const char *id_str = (const char*)id_val;
+    size_t id_len = 0;
+    if (!taida_read_cstr_len_safe(id_str, 64, &id_len) ||
+        id_len != 21 || memcmp(id_str, "__v3_streaming_writer", 21) != 0) {
+        fprintf(stderr, "%s: first argument must be the writer provided by httpServe\n", api_name);
+        exit(1);
+    }
+}
+
+// Create a writer BuchiPack token for 2-arg handler.
+// Contains __writer_id sentinel field (parity with Interpreter/JS).
+static taida_val taida_net3_create_writer_token(void) {
+    taida_val pack = taida_pack_new(1);
+    taida_pack_set_hash(pack, 0, taida_str_hash((taida_val)"__writer_id"));
+    taida_pack_set(pack, 0, (taida_val)"__v3_streaming_writer");
+    taida_pack_set_tag(pack, 0, TAIDA_TAG_STR);
+    return pack;
+}
+
 // ── NET2-5c: Thread pool structures ─────────────────────────────
 // Shared state for the thread pool: a mutex-protected queue of client fds.
 // Each worker thread pulls a client fd, processes the keep-alive loop, then
@@ -10115,9 +10732,12 @@ typedef struct {
     // Handler and timeout
     taida_val handler;
     int64_t timeout_ms;
+
+    // NET3-5a: handler arity (1 = one-shot, 2 = streaming, -1 = unknown/runtime detect)
+    int handler_arity;
 } NetThreadPool;
 
-static void net_pool_init(NetThreadPool *pool, int queue_cap, taida_val handler, int64_t max_requests, int64_t timeout_ms) {
+static void net_pool_init(NetThreadPool *pool, int queue_cap, taida_val handler, int64_t max_requests, int64_t timeout_ms, int handler_arity) {
     pthread_mutex_init(&pool->mutex, NULL);
     pthread_cond_init(&pool->cond_available, NULL);
     pthread_cond_init(&pool->cond_done, NULL);
@@ -10132,6 +10752,7 @@ static void net_pool_init(NetThreadPool *pool, int queue_cap, taida_val handler,
     pool->shutdown = 0;
     pool->handler = handler;
     pool->timeout_ms = timeout_ms;
+    pool->handler_arity = handler_arity;
 }
 
 static void net_pool_destroy(NetThreadPool *pool) {
@@ -10487,18 +11108,116 @@ static void *net_worker_thread(void *arg) {
             // NB2-9: Release parse result now that spans are extracted
             if (parse_result) { taida_release(parse_result); parse_result = 0; }
 
-            // Call handler
-            taida_val response = taida_invoke_callback1(pool->handler, request);
+            // NET3-5a: Detect handler arity and dispatch accordingly.
+            // 1-arg handler = v2 one-shot response path.
+            // 2-arg handler = v3 streaming writer path with one-shot fallback.
+            // NB3-4: When handler_arity == -1 (unknown/dynamic), use the safe
+            // 1-arg (v2) path. Calling a 1-arg compiled function via a 2-arg
+            // cast (taida_invoke_callback2) is C undefined behaviour. The v2
+            // path is always correct: if the handler is actually 2-arg, it
+            // simply won't receive the writer and the one-shot response path
+            // handles the return value. Users who need v3 streaming with a
+            // dynamic handler can bind it directly in the httpServe call so
+            // that lower.rs resolves the arity at compile time.
+            if (pool->handler_arity >= 2) {
+                // ── v3 2-arg handler path ──
+                // Create thread-local writer state for this request.
+                Net3WriterState writer_state;
+                writer_state.state = NET3_STATE_IDLE;
+                writer_state.pending_status = 200;
+                writer_state.sse_mode = 0;
+                writer_state.header_count = 0;
 
-            // Encode and send response
-            taida_val encoded = taida_net_http_encode_response(response);
-            taida_net_send_response(client_fd, encoded);
+                // Set thread-local context so v3 API functions can access it.
+                tl_net3_writer = &writer_state;
+                tl_net3_client_fd = client_fd;
 
-            // NB2-21: Release per-request objects now that the response is sent.
-            // Neither taida_invoke_callback1 nor taida_net_send_response consumes ownership.
-            taida_release(request);
-            taida_release(encoded);
-            taida_release(response);
+                // Create writer token BuchiPack (parity with Interpreter/JS).
+                taida_val writer_token = taida_net3_create_writer_token();
+
+                // Call 2-arg handler: handler(request, writer)
+                taida_val response = taida_invoke_callback2(pool->handler, request, writer_token);
+
+                // Clear thread-local context.
+                tl_net3_writer = NULL;
+                tl_net3_client_fd = -1;
+
+                if (writer_state.state == NET3_STATE_IDLE) {
+                    // ── One-shot fallback: writer never touched ──
+                    // Use response as v2-style response pack, or default 200+empty body.
+                    taida_val effective_response = response;
+                    int need_default = 1;
+                    if (response > 4096 && taida_is_buchi_pack(response)) {
+                        // Check if it has status or body field
+                        taida_val status_val = taida_pack_get(response, taida_str_hash((taida_val)"status"));
+                        taida_val body_val = taida_pack_get(response, taida_str_hash((taida_val)"body"));
+                        if (status_val != 0 || body_val != 0) {
+                            need_default = 0;
+                        }
+                    }
+                    if (need_default && (response == 0 || !taida_is_buchi_pack(response))) {
+                        // Create default 200 + empty body response
+                        effective_response = taida_pack_new(3);
+                        taida_pack_set_hash(effective_response, 0, taida_str_hash((taida_val)"status"));
+                        taida_pack_set(effective_response, 0, 200);
+                        taida_pack_set_hash(effective_response, 1, taida_str_hash((taida_val)"headers"));
+                        taida_pack_set(effective_response, 1, taida_list_new());
+                        taida_pack_set_tag(effective_response, 1, TAIDA_TAG_LIST);
+                        taida_pack_set_hash(effective_response, 2, taida_str_hash((taida_val)"body"));
+                        taida_pack_set(effective_response, 2, (taida_val)"");
+                        taida_pack_set_tag(effective_response, 2, TAIDA_TAG_STR);
+                    }
+                    taida_val encoded = taida_net_http_encode_response(effective_response);
+                    taida_net_send_response(client_fd, encoded);
+                    taida_release(encoded);
+                    if (need_default && effective_response != response) {
+                        taida_release(effective_response);
+                    }
+                } else {
+                    // Streaming was started. Return value is ignored.
+                    // Auto-end if not already ended.
+                    if (writer_state.state != NET3_STATE_ENDED) {
+                        int auto_end_failed = 0;
+                        if (writer_state.state == NET3_STATE_HEAD_PREPARED) {
+                            // HeadPrepared but never wrote chunks — commit head
+                            if (taida_net3_commit_head(client_fd, &writer_state) != 0) {
+                                // Head commit failed (overflow or send error).
+                                // Do NOT send a chunk terminator — the wire is
+                                // in an undefined state.  Mark failure so we
+                                // skip the terminator and fall through to
+                                // connection close.
+                                fprintf(stderr, "httpServe: failed to commit response head during auto-end\n");
+                                auto_end_failed = 1;
+                            }
+                        }
+                        if (!auto_end_failed && !taida_net3_is_bodyless_status(writer_state.pending_status)) {
+                            taida_net_send_all(client_fd, "0\r\n\r\n", 5);
+                        }
+                        writer_state.state = NET3_STATE_ENDED;
+                        if (auto_end_failed) {
+                            // Force connection close — cannot continue
+                            // keep-alive on a broken wire.
+                            keep_alive = 0;
+                        }
+                    }
+                }
+
+                taida_release(request);
+                taida_release(writer_token);
+                taida_release(response);
+            } else {
+                // ── v2 1-arg handler path (unchanged) ──
+                taida_val response = taida_invoke_callback1(pool->handler, request);
+
+                // Encode and send response
+                taida_val encoded = taida_net_http_encode_response(response);
+                taida_net_send_response(client_fd, encoded);
+
+                // NB2-21: Release per-request objects now that the response is sent.
+                taida_release(request);
+                taida_release(encoded);
+                taida_release(response);
+            }
 
             // request_count already reserved after head complete — check limit
             pthread_mutex_lock(&pool->mutex);
@@ -10540,9 +11259,18 @@ static void *net_worker_thread(void *arg) {
 }
 
 // ── httpServe(port, handler, maxRequests, timeoutMs, maxConnections) ──
-// HTTP/1.1 server v2: keep-alive, chunked TE, pthread pool, maxConnections.
+// HTTP/1.1 server v2+v3: keep-alive, chunked TE, pthread pool, maxConnections.
+// NET3-5a: handler_arity added — 2 = streaming writer, 1 = one-shot, -1 = unknown.
 // Returns Async[Result[@(ok: Bool, requests: Int), _]]
-taida_val taida_net_http_serve(taida_val port, taida_val handler, taida_val max_requests, taida_val timeout_ms, taida_val max_connections, taida_val handler_type_tag) {
+taida_val taida_net_http_serve(taida_val port, taida_val handler, taida_val max_requests, taida_val timeout_ms, taida_val max_connections, taida_val handler_type_tag, taida_val handler_arity) {
+    // NB3-5: Suppress SIGPIPE process-wide. Without this, writev() or
+    // send() on a peer-closed socket delivers SIGPIPE which terminates the
+    // process before the return-value error path can execute. This is the
+    // standard pattern for HTTP servers (nginx, Apache, Go net/http all do
+    // the same). MSG_NOSIGNAL covers send() individually, but writev() has
+    // no per-call flag — signal(SIGPIPE, SIG_IGN) is the only portable way.
+    signal(SIGPIPE, SIG_IGN);
+
     // NB-2: port range validation (parity with Interpreter/JS)
     if (port < 0 || port > 65535) {
         char errbuf[256];
@@ -10605,7 +11333,7 @@ taida_val taida_net_http_serve(taida_val port, taida_val handler, taida_val max_
     if (num_workers < 1) num_workers = 1;
 
     NetThreadPool pool;
-    net_pool_init(&pool, (int)max_conn + 16, handler, max_requests, timeout_ms);
+    net_pool_init(&pool, (int)max_conn + 16, handler, max_requests, timeout_ms, (int)handler_arity);
 
     pthread_t *workers = (pthread_t*)TAIDA_MALLOC(sizeof(pthread_t) * (size_t)num_workers, "net_workers");
     for (int i = 0; i < num_workers; i++) {

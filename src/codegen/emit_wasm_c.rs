@@ -88,6 +88,11 @@ fn validate_net_http_api_for_wasm(
         ("taida_net_http_parse_request_head", "httpParseRequestHead"),
         ("taida_net_http_encode_response", "httpEncodeResponse"),
         ("taida_net_read_body", "readBody"),
+        // v3 streaming API
+        ("taida_net_start_response", "startResponse"),
+        ("taida_net_write_chunk", "writeChunk"),
+        ("taida_net_end_response", "endResponse"),
+        ("taida_net_sse_event", "sseEvent"),
     ];
 
     for &(runtime_name, api_name) in NET_HTTP_FUNCS {
