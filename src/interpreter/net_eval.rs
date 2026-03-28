@@ -83,9 +83,12 @@ pub(crate) enum WriterState {
 pub(crate) struct StreamingWriter {
     pub state: WriterState,
     pub pending_status: u16,
+    /// Response headers staged for head commit.
+    /// Intentionally retained after commit so later logic can validate which
+    /// headers were already put on the wire (for example, SSE checks after an
+    /// earlier writeChunk committed the head).
     pub pending_headers: Vec<(String, String)>,
     /// Whether SSE auto-headers have been applied.
-    #[allow(dead_code)]
     pub sse_mode: bool,
 }
 
@@ -1184,20 +1187,7 @@ impl Interpreter {
             "startResponse" => self.eval_start_response(args),
             "writeChunk" => self.eval_write_chunk(args),
             "endResponse" => self.eval_end_response(args),
-            "sseEvent" => {
-                // sseEvent is Phase 3. For now, guard with context check.
-                if self.active_streaming_writer.is_none() {
-                    return Err(RuntimeError {
-                        message:
-                            "sseEvent: can only be called inside a 2-argument httpServe handler"
-                                .into(),
-                    });
-                }
-                // Phase 3 will implement the actual SSE logic here.
-                Err(RuntimeError {
-                    message: "sseEvent: not yet implemented (Phase 3)".into(),
-                })
-            }
+            "sseEvent" => self.eval_sse_event(args),
 
             _ => Ok(None),
         }
@@ -1484,6 +1474,222 @@ impl Interpreter {
             write_all_retry(stream, b"0\r\n\r\n")?;
         }
         writer.state = WriterState::Ended;
+
+        Ok(Some(Signal::Value(Value::Unit)))
+    }
+
+    /// `sseEvent(writer, event, data)`
+    ///
+    /// SSE convenience API. Sends one Server-Sent Event in wire format:
+    ///   event: <event>\n
+    ///   data: <line1>\n
+    ///   data: <line2>\n
+    ///   \n
+    ///
+    /// Auto-header behavior (NET3-3b, NET3-3c):
+    ///   - If Content-Type is not already set in pending headers, sets
+    ///     `text/event-stream; charset=utf-8`
+    ///   - If Cache-Control is not already set, sets `no-cache`
+    ///   - These are applied once (sse_mode flag prevents re-checking)
+    ///
+    /// Multiline data (NET3-3d):
+    ///   - Splits `data` on `\n` and emits a `data: ` line for each
+    ///
+    /// Zero-copy note:
+    ///   - Each SSE line is a separate small String; no aggregate String
+    ///     is built for the entire event.
+    ///   - All lines are sent as one chunked frame via vectored I/O
+    ///     (IoSlice), so the event arrives atomically to the client.
+    fn eval_sse_event(&mut self, args: &[Expr]) -> Result<Option<Signal>, RuntimeError> {
+        if self.active_streaming_writer.is_none() {
+            return Err(RuntimeError {
+                message: "sseEvent: can only be called inside a 2-argument httpServe handler"
+                    .into(),
+            });
+        }
+
+        // Validate writer token.
+        self.validate_writer_token(args, "sseEvent")?;
+
+        // Evaluate event name (arg 1).
+        let event_name: String = if let Some(arg) = args.get(1) {
+            match self.eval_expr(arg)? {
+                Signal::Value(Value::Str(s)) => s,
+                Signal::Value(v) => {
+                    return Err(RuntimeError {
+                        message: format!("sseEvent: event must be Str, got {}", v),
+                    });
+                }
+                other => return Ok(Some(other)),
+            }
+        } else {
+            return Err(RuntimeError {
+                message: "sseEvent: missing argument 'event'".into(),
+            });
+        };
+
+        // Evaluate data (arg 2).
+        let data: String = if let Some(arg) = args.get(2) {
+            match self.eval_expr(arg)? {
+                Signal::Value(Value::Str(s)) => s,
+                Signal::Value(v) => {
+                    return Err(RuntimeError {
+                        message: format!("sseEvent: data must be Str, got {}", v),
+                    });
+                }
+                other => return Ok(Some(other)),
+            }
+        } else {
+            return Err(RuntimeError {
+                message: "sseEvent: missing argument 'data'".into(),
+            });
+        };
+
+        // Re-borrow after eval_expr calls.
+        let active = self.active_streaming_writer.as_ref().unwrap();
+        let writer = unsafe { &mut *active.writer };
+        let stream = unsafe { &mut *active.stream };
+
+        // State check: sseEvent is not valid after endResponse.
+        if writer.state == WriterState::Ended {
+            return Err(RuntimeError {
+                message: "sseEvent: response already ended.".into(),
+            });
+        }
+
+        // Bodyless status check.
+        if StreamingWriter::is_bodyless_status(writer.pending_status) {
+            return Err(RuntimeError {
+                message: format!(
+                    "sseEvent: status {} does not allow a message body",
+                    writer.pending_status
+                ),
+            });
+        }
+
+        // NET3-3b, NET3-3c: Auto-set SSE headers if not already in sse_mode.
+        if !writer.sse_mode {
+            // If head is already committed (Streaming state), check whether SSE
+            // headers were already set by the user via startResponse. If not,
+            // auto-headers cannot be retroactively added to the response.
+            if writer.state == WriterState::Streaming {
+                let has_sse_content_type = writer
+                    .pending_headers
+                    .iter()
+                    .any(|(k, v)| {
+                        k.to_ascii_lowercase() == "content-type"
+                            && v.to_ascii_lowercase().contains("text/event-stream")
+                    });
+                let has_cache_no_cache = writer
+                    .pending_headers
+                    .iter()
+                    .any(|(k, v)| {
+                        k.to_ascii_lowercase() == "cache-control"
+                            && v.to_ascii_lowercase().contains("no-cache")
+                    });
+                if !has_sse_content_type || !has_cache_no_cache {
+                    return Err(RuntimeError {
+                        message: "sseEvent: head already committed without SSE headers. \
+                                  Call sseEvent before writeChunk, or use startResponse \
+                                  with explicit Content-Type: text/event-stream and \
+                                  Cache-Control: no-cache headers before writeChunk."
+                            .into(),
+                    });
+                }
+                // User already set both SSE headers; mark sse_mode and proceed.
+                writer.sse_mode = true;
+            } else {
+                // Head not yet committed — safe to add auto-headers.
+                // Check if Content-Type is already set.
+                let has_content_type = writer
+                    .pending_headers
+                    .iter()
+                    .any(|(k, _)| k.to_ascii_lowercase() == "content-type");
+                if !has_content_type {
+                    writer.pending_headers.push((
+                        "Content-Type".to_string(),
+                        "text/event-stream; charset=utf-8".to_string(),
+                    ));
+                }
+
+                // Check if Cache-Control is already set.
+                let has_cache_control = writer
+                    .pending_headers
+                    .iter()
+                    .any(|(k, _)| k.to_ascii_lowercase() == "cache-control");
+                if !has_cache_control {
+                    writer
+                        .pending_headers
+                        .push(("Cache-Control".to_string(), "no-cache".to_string()));
+                }
+
+                writer.sse_mode = true;
+            }
+        }
+
+        // Commit head if not yet committed.
+        if writer.state == WriterState::Idle || writer.state == WriterState::HeadPrepared {
+            let head_bytes = build_streaming_head(writer.pending_status, &writer.pending_headers);
+            write_all_retry(stream, &head_bytes)?;
+            writer.state = WriterState::Streaming;
+        }
+
+        // Send SSE event via zero-copy vectored I/O in one chunked frame.
+        // Wire format:
+        //   event: <event>\n      (omit if event is empty)
+        //   data: <line1>\n
+        //   data: <line2>\n
+        //   \n                    (event terminator)
+        //
+        // We reference the original event_name and data strings directly via
+        // IoSlice, interleaving static prefix/suffix byte slices. No per-line
+        // String is allocated — payload data is never copied into a new buffer.
+        // (NET_IMPL_GUIDE.md: "payload copy は最小限 / 1回まで",
+        //  "巨大な1文字列を組み立てない")
+
+        let event_prefix = b"event: ";
+        let data_prefix = b"data: ";
+        let newline = b"\n";
+        let terminator = b"\n";
+
+        // Split data into &str slices (zero-copy views into `data`).
+        let data_lines: Vec<&str> = data.split('\n').collect();
+
+        // First pass: compute total payload byte length for chunk header.
+        let mut total_len: usize = 0;
+        if !event_name.is_empty() {
+            total_len += event_prefix.len() + event_name.len() + newline.len();
+        }
+        for line in &data_lines {
+            total_len += data_prefix.len() + line.len() + newline.len();
+        }
+        total_len += terminator.len();
+
+        // Build chunk frame: hex_prefix + payload slices + suffix.
+        let hex_prefix = format!("{:x}\r\n", total_len);
+        let suffix = b"\r\n";
+
+        // Capacity: 1 (hex) + 3 (event line) + 3*n (data lines) + 1 (term) + 1 (suffix)
+        let mut bufs: Vec<std::io::IoSlice<'_>> =
+            Vec::with_capacity(3 + 3 * data_lines.len() + 3);
+        bufs.push(std::io::IoSlice::new(hex_prefix.as_bytes()));
+
+        if !event_name.is_empty() {
+            bufs.push(std::io::IoSlice::new(event_prefix));
+            bufs.push(std::io::IoSlice::new(event_name.as_bytes()));
+            bufs.push(std::io::IoSlice::new(newline));
+        }
+
+        for line in &data_lines {
+            bufs.push(std::io::IoSlice::new(data_prefix));
+            bufs.push(std::io::IoSlice::new(line.as_bytes()));
+            bufs.push(std::io::IoSlice::new(newline));
+        }
+
+        bufs.push(std::io::IoSlice::new(terminator));
+        bufs.push(std::io::IoSlice::new(suffix));
+
+        write_vectored_all(stream, &bufs)?;
 
         Ok(Some(Signal::Value(Value::Unit)))
     }
@@ -7081,6 +7287,19 @@ mod tests {
         )
     }
 
+    /// Build `sseEvent(writer, event, data)` expression
+    fn make_sse_event_call(event: &str, data: &str) -> Expr {
+        Expr::FuncCall(
+            Box::new(Expr::Ident("sseEvent".into(), dummy_span())),
+            vec![
+                Expr::Ident("writer".into(), dummy_span()),
+                Expr::StringLit(event.into(), dummy_span()),
+                Expr::StringLit(data.into(), dummy_span()),
+            ],
+            dummy_span(),
+        )
+    }
+
     /// Helper to set up streaming API sentinels on an interpreter
     fn setup_v3_sentinels(interp: &mut Interpreter) {
         interp
@@ -7874,6 +8093,787 @@ mod tests {
             response_str.contains("implicit-head"),
             "response should contain body\n{}",
             response_str
+        );
+
+        let _ = server_handle.join();
+    }
+
+    // ── Phase 3: SSE tests ──────────────────────────────────────
+
+    // NET3-3a: sseEvent sends SSE wire format
+    #[test]
+    fn test_v3_sse_event_basic() {
+        let port = v3_free_port();
+
+        let handler = make_streaming_handler(vec![
+            Statement::Expr(make_sse_event_call("message", "hello")),
+            Statement::Expr(make_sse_event_call("message", "world")),
+            Statement::Expr(make_end_response_call()),
+        ]);
+
+        let server_port = port;
+        let server_handle = std::thread::spawn(move || {
+            let mut interp = Interpreter::new();
+            setup_v3_sentinels(&mut interp);
+            interp.env.define_force("__handler", handler);
+            let args = vec![
+                Expr::IntLit(server_port as i64, dummy_span()),
+                Expr::Ident("__handler".into(), dummy_span()),
+                Expr::IntLit(1, dummy_span()),
+                Expr::IntLit(5000, dummy_span()),
+            ];
+            interp.try_net_func("httpServe", &args).unwrap().unwrap()
+        });
+
+        std::thread::sleep(std::time::Duration::from_millis(200));
+
+        let mut client = std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
+        std::io::Write::write_all(
+            &mut client,
+            b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+        )
+        .unwrap();
+
+        let response_str = read_full_response(&mut client);
+
+        // Should have SSE content type
+        assert!(
+            response_str.contains("Content-Type: text/event-stream; charset=utf-8"),
+            "SSE response should have text/event-stream Content-Type\n{}",
+            response_str
+        );
+        // Should have Cache-Control: no-cache
+        assert!(
+            response_str.contains("Cache-Control: no-cache"),
+            "SSE response should have Cache-Control: no-cache\n{}",
+            response_str
+        );
+        // Should have Transfer-Encoding: chunked
+        assert!(
+            response_str.contains("Transfer-Encoding: chunked"),
+            "SSE response should have chunked TE\n{}",
+            response_str
+        );
+        // Should contain SSE wire format
+        assert!(
+            response_str.contains("event: message\ndata: hello\n\n"),
+            "SSE response should contain first event wire format\n{}",
+            response_str
+        );
+        assert!(
+            response_str.contains("event: message\ndata: world\n\n"),
+            "SSE response should contain second event wire format\n{}",
+            response_str
+        );
+
+        let result = server_handle.join().unwrap();
+        match result {
+            Signal::Value(Value::Async(a)) => {
+                assert_eq!(a.status, AsyncStatus::Fulfilled);
+            }
+            _ => panic!("expected fulfilled Async"),
+        }
+    }
+
+    // NET3-3b: Content-Type auto-setting
+    #[test]
+    fn test_v3_sse_auto_content_type() {
+        let port = v3_free_port();
+
+        // startResponse with no Content-Type header, then sseEvent → auto-set
+        let handler = make_streaming_handler(vec![
+            Statement::Expr(make_start_response_call(200, vec![])),
+            Statement::Expr(make_sse_event_call("ping", "pong")),
+            Statement::Expr(make_end_response_call()),
+        ]);
+
+        let server_port = port;
+        let server_handle = std::thread::spawn(move || {
+            let mut interp = Interpreter::new();
+            setup_v3_sentinels(&mut interp);
+            interp.env.define_force("__handler", handler);
+            let args = vec![
+                Expr::IntLit(server_port as i64, dummy_span()),
+                Expr::Ident("__handler".into(), dummy_span()),
+                Expr::IntLit(1, dummy_span()),
+                Expr::IntLit(5000, dummy_span()),
+            ];
+            interp.try_net_func("httpServe", &args).unwrap().unwrap()
+        });
+
+        std::thread::sleep(std::time::Duration::from_millis(200));
+
+        let mut client = std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
+        std::io::Write::write_all(
+            &mut client,
+            b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+        )
+        .unwrap();
+
+        let response_str = read_full_response(&mut client);
+
+        assert!(
+            response_str.contains("Content-Type: text/event-stream; charset=utf-8"),
+            "sseEvent should auto-set Content-Type\n{}",
+            response_str
+        );
+        assert!(
+            response_str.contains("Cache-Control: no-cache"),
+            "sseEvent should auto-set Cache-Control\n{}",
+            response_str
+        );
+
+        let _ = server_handle.join();
+    }
+
+    // NET3-3b: Content-Type is NOT overwritten if user already set it
+    #[test]
+    fn test_v3_sse_respects_user_content_type() {
+        let port = v3_free_port();
+
+        // startResponse with explicit Content-Type → sseEvent should NOT override
+        let handler = make_streaming_handler(vec![
+            Statement::Expr(make_start_response_call(
+                200,
+                vec![("Content-Type".to_string(), "text/plain".to_string())],
+            )),
+            Statement::Expr(make_sse_event_call("test", "data")),
+            Statement::Expr(make_end_response_call()),
+        ]);
+
+        let server_port = port;
+        let server_handle = std::thread::spawn(move || {
+            let mut interp = Interpreter::new();
+            setup_v3_sentinels(&mut interp);
+            interp.env.define_force("__handler", handler);
+            let args = vec![
+                Expr::IntLit(server_port as i64, dummy_span()),
+                Expr::Ident("__handler".into(), dummy_span()),
+                Expr::IntLit(1, dummy_span()),
+                Expr::IntLit(5000, dummy_span()),
+            ];
+            interp.try_net_func("httpServe", &args).unwrap().unwrap()
+        });
+
+        std::thread::sleep(std::time::Duration::from_millis(200));
+
+        let mut client = std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
+        std::io::Write::write_all(
+            &mut client,
+            b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+        )
+        .unwrap();
+
+        let response_str = read_full_response(&mut client);
+
+        // Should have the user-specified Content-Type, NOT the auto-set SSE one
+        assert!(
+            response_str.contains("Content-Type: text/plain"),
+            "User Content-Type should be preserved\n{}",
+            response_str
+        );
+        assert!(
+            !response_str.contains("text/event-stream"),
+            "Auto Content-Type should NOT override user-set Content-Type\n{}",
+            response_str
+        );
+        // But Cache-Control should still be auto-set (user didn't set it)
+        assert!(
+            response_str.contains("Cache-Control: no-cache"),
+            "Cache-Control should still be auto-set\n{}",
+            response_str
+        );
+
+        let _ = server_handle.join();
+    }
+
+    // NET3-3d: multiline data splitting
+    #[test]
+    fn test_v3_sse_multiline_data() {
+        let port = v3_free_port();
+
+        let handler = make_streaming_handler(vec![
+            Statement::Expr(make_sse_event_call("update", "line1\nline2\nline3")),
+            Statement::Expr(make_end_response_call()),
+        ]);
+
+        let server_port = port;
+        let server_handle = std::thread::spawn(move || {
+            let mut interp = Interpreter::new();
+            setup_v3_sentinels(&mut interp);
+            interp.env.define_force("__handler", handler);
+            let args = vec![
+                Expr::IntLit(server_port as i64, dummy_span()),
+                Expr::Ident("__handler".into(), dummy_span()),
+                Expr::IntLit(1, dummy_span()),
+                Expr::IntLit(5000, dummy_span()),
+            ];
+            interp.try_net_func("httpServe", &args).unwrap().unwrap()
+        });
+
+        std::thread::sleep(std::time::Duration::from_millis(200));
+
+        let mut client = std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
+        std::io::Write::write_all(
+            &mut client,
+            b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+        )
+        .unwrap();
+
+        let response_str = read_full_response(&mut client);
+
+        // Multiline data should be split into multiple data: lines
+        assert!(
+            response_str.contains("event: update\ndata: line1\ndata: line2\ndata: line3\n\n"),
+            "multiline data should be split into data: lines\n{}",
+            response_str
+        );
+
+        let _ = server_handle.join();
+    }
+
+    // NET3-3d: empty event name omits event: line
+    #[test]
+    fn test_v3_sse_empty_event_name() {
+        let port = v3_free_port();
+
+        let handler = make_streaming_handler(vec![
+            Statement::Expr(make_sse_event_call("", "noname")),
+            Statement::Expr(make_end_response_call()),
+        ]);
+
+        let server_port = port;
+        let server_handle = std::thread::spawn(move || {
+            let mut interp = Interpreter::new();
+            setup_v3_sentinels(&mut interp);
+            interp.env.define_force("__handler", handler);
+            let args = vec![
+                Expr::IntLit(server_port as i64, dummy_span()),
+                Expr::Ident("__handler".into(), dummy_span()),
+                Expr::IntLit(1, dummy_span()),
+                Expr::IntLit(5000, dummy_span()),
+            ];
+            interp.try_net_func("httpServe", &args).unwrap().unwrap()
+        });
+
+        std::thread::sleep(std::time::Duration::from_millis(200));
+
+        let mut client = std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
+        std::io::Write::write_all(
+            &mut client,
+            b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+        )
+        .unwrap();
+
+        let response_str = read_full_response(&mut client);
+
+        // Should NOT contain "event:" line when event name is empty
+        assert!(
+            !response_str.contains("event:"),
+            "empty event name should omit event: line\n{}",
+            response_str
+        );
+        // Should contain "data: noname\n\n"
+        assert!(
+            response_str.contains("data: noname\n\n"),
+            "data should still be sent\n{}",
+            response_str
+        );
+
+        let _ = server_handle.join();
+    }
+
+    // NET3-3f: sseEvent outside handler context
+    #[test]
+    fn test_v3_sse_event_outside_handler() {
+        let mut interp = Interpreter::new();
+        // Set sentinel but not inside handler
+        interp
+            .env
+            .define_force("sseEvent", Value::Str("__net_builtin_sseEvent".into()));
+        let args: Vec<Expr> = vec![
+            Expr::StringLit("writer".into(), dummy_span()),
+            Expr::StringLit("message".into(), dummy_span()),
+            Expr::StringLit("hello".into(), dummy_span()),
+        ];
+        let result = interp.try_net_func("sseEvent", &args);
+        assert!(result.is_err(), "sseEvent should error outside handler");
+        let msg = result.unwrap_err().message;
+        assert!(
+            msg.contains("2-argument httpServe handler"),
+            "error should mention 2-arg handler: {}",
+            msg
+        );
+    }
+
+    // NET3-3f: sseEvent after endResponse
+    #[test]
+    fn test_v3_sse_event_after_end() {
+        let port = v3_free_port();
+
+        // endResponse first, then sseEvent → should error
+        let handler = make_streaming_handler(vec![
+            Statement::Expr(make_end_response_call()),
+            Statement::Expr(make_sse_event_call("message", "after-end")),
+        ]);
+
+        let server_port = port;
+        let server_handle = std::thread::spawn(move || {
+            let mut interp = Interpreter::new();
+            setup_v3_sentinels(&mut interp);
+            interp.env.define_force("__handler", handler);
+            let args = vec![
+                Expr::IntLit(server_port as i64, dummy_span()),
+                Expr::Ident("__handler".into(), dummy_span()),
+                Expr::IntLit(1, dummy_span()),
+                Expr::IntLit(5000, dummy_span()),
+            ];
+            // This will result in a runtime error from sseEvent after endResponse,
+            // but httpServe catches handler errors and returns an error response.
+            interp.try_net_func("httpServe", &args).unwrap().unwrap()
+        });
+
+        std::thread::sleep(std::time::Duration::from_millis(200));
+
+        let mut client = std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
+        std::io::Write::write_all(
+            &mut client,
+            b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+        )
+        .unwrap();
+
+        let response_str = read_full_response(&mut client);
+
+        // The server should still respond (handler error is caught by httpServe).
+        // The response might be a 500 error or the chunked response that was already sent.
+        assert!(
+            !response_str.is_empty(),
+            "server should respond even when handler has SSE error"
+        );
+
+        let _ = server_handle.join();
+    }
+
+    // NET3-3f: SSE with implicit head commit (no startResponse)
+    #[test]
+    fn test_v3_sse_implicit_head() {
+        let port = v3_free_port();
+
+        // No startResponse → sseEvent should auto-commit 200 with SSE headers
+        let handler = make_streaming_handler(vec![
+            Statement::Expr(make_sse_event_call("message", "auto-head")),
+            Statement::Expr(make_end_response_call()),
+        ]);
+
+        let server_port = port;
+        let server_handle = std::thread::spawn(move || {
+            let mut interp = Interpreter::new();
+            setup_v3_sentinels(&mut interp);
+            interp.env.define_force("__handler", handler);
+            let args = vec![
+                Expr::IntLit(server_port as i64, dummy_span()),
+                Expr::Ident("__handler".into(), dummy_span()),
+                Expr::IntLit(1, dummy_span()),
+                Expr::IntLit(5000, dummy_span()),
+            ];
+            interp.try_net_func("httpServe", &args).unwrap().unwrap()
+        });
+
+        std::thread::sleep(std::time::Duration::from_millis(200));
+
+        let mut client = std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
+        std::io::Write::write_all(
+            &mut client,
+            b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+        )
+        .unwrap();
+
+        let response_str = read_full_response(&mut client);
+
+        // Should have 200 OK
+        assert!(
+            response_str.contains("HTTP/1.1 200 OK"),
+            "implicit head should default to 200 OK\n{}",
+            response_str
+        );
+        // Should have SSE headers auto-set
+        assert!(
+            response_str.contains("Content-Type: text/event-stream; charset=utf-8"),
+            "auto-head should include SSE Content-Type\n{}",
+            response_str
+        );
+        assert!(
+            response_str.contains("Cache-Control: no-cache"),
+            "auto-head should include Cache-Control\n{}",
+            response_str
+        );
+        // Should contain the SSE data
+        assert!(
+            response_str.contains("data: auto-head\n\n"),
+            "response should contain SSE data\n{}",
+            response_str
+        );
+
+        let result = server_handle.join().unwrap();
+        match result {
+            Signal::Value(Value::Async(a)) => {
+                assert_eq!(a.status, AsyncStatus::Fulfilled);
+            }
+            _ => panic!("expected fulfilled Async"),
+        }
+    }
+
+    // NET3-3f: SSE mixed with writeChunk
+    #[test]
+    fn test_v3_sse_mixed_with_write_chunk() {
+        let port = v3_free_port();
+
+        // Mix sseEvent and writeChunk — both should work on the same chunked stream
+        let handler = make_streaming_handler(vec![
+            Statement::Expr(make_sse_event_call("greet", "hi")),
+            Statement::Expr(make_write_chunk_call("raw-chunk")),
+            Statement::Expr(make_sse_event_call("bye", "bye")),
+            Statement::Expr(make_end_response_call()),
+        ]);
+
+        let server_port = port;
+        let server_handle = std::thread::spawn(move || {
+            let mut interp = Interpreter::new();
+            setup_v3_sentinels(&mut interp);
+            interp.env.define_force("__handler", handler);
+            let args = vec![
+                Expr::IntLit(server_port as i64, dummy_span()),
+                Expr::Ident("__handler".into(), dummy_span()),
+                Expr::IntLit(1, dummy_span()),
+                Expr::IntLit(5000, dummy_span()),
+            ];
+            interp.try_net_func("httpServe", &args).unwrap().unwrap()
+        });
+
+        std::thread::sleep(std::time::Duration::from_millis(200));
+
+        let mut client = std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
+        std::io::Write::write_all(
+            &mut client,
+            b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+        )
+        .unwrap();
+
+        let response_str = read_full_response(&mut client);
+
+        // Should contain SSE event
+        assert!(
+            response_str.contains("event: greet\ndata: hi\n\n"),
+            "first SSE event should be present\n{}",
+            response_str
+        );
+        // Should contain raw chunk
+        assert!(
+            response_str.contains("raw-chunk"),
+            "raw writeChunk data should be present\n{}",
+            response_str
+        );
+        // Should contain second SSE event
+        assert!(
+            response_str.contains("event: bye\ndata: bye\n\n"),
+            "second SSE event should be present\n{}",
+            response_str
+        );
+
+        let _ = server_handle.join();
+    }
+
+    // NET3-3f: writeChunk before sseEvent → error (head committed without SSE headers)
+    #[test]
+    fn test_v3_write_chunk_then_sse_event_errors() {
+        let port = v3_free_port();
+
+        // writeChunk commits head without SSE headers, then sseEvent should error
+        let handler = make_streaming_handler(vec![
+            Statement::Expr(make_write_chunk_call("raw-first")),
+            Statement::Expr(make_sse_event_call("message", "after-chunk")),
+            Statement::Expr(make_end_response_call()),
+        ]);
+
+        let server_port = port;
+        let server_handle = std::thread::spawn(move || {
+            let mut interp = Interpreter::new();
+            setup_v3_sentinels(&mut interp);
+            interp.env.define_force("__handler", handler);
+            let args = vec![
+                Expr::IntLit(server_port as i64, dummy_span()),
+                Expr::Ident("__handler".into(), dummy_span()),
+                Expr::IntLit(1, dummy_span()),
+                Expr::IntLit(5000, dummy_span()),
+            ];
+            interp.try_net_func("httpServe", &args).unwrap().unwrap()
+        });
+
+        std::thread::sleep(std::time::Duration::from_millis(200));
+
+        let mut client = std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
+        std::io::Write::write_all(
+            &mut client,
+            b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+        )
+        .unwrap();
+
+        let response_str = read_full_response(&mut client);
+
+        // The handler should have errored on the sseEvent call — httpServe catches
+        // runtime errors and returns a 500 or similar response.
+        // The raw-first chunk was already sent before the error, so the response
+        // will contain it. The SSE event should NOT be present.
+        assert!(
+            !response_str.contains("event: message"),
+            "sseEvent should not succeed after writeChunk committed head\n{}",
+            response_str
+        );
+
+        let _ = server_handle.join();
+    }
+
+    // NET3-3f: startResponse with Content-Type only (no Cache-Control) + writeChunk + sseEvent → error
+    #[test]
+    fn test_v3_content_type_only_then_write_chunk_then_sse_event_errors() {
+        let port = v3_free_port();
+
+        // User sets Content-Type but NOT Cache-Control, then writeChunk commits head.
+        // sseEvent should still error because Cache-Control: no-cache is also required.
+        let handler = make_streaming_handler(vec![
+            Statement::Expr(make_start_response_call(
+                200,
+                vec![
+                    ("Content-Type".to_string(), "text/event-stream; charset=utf-8".to_string()),
+                ],
+            )),
+            Statement::Expr(make_write_chunk_call("raw-first")),
+            Statement::Expr(make_sse_event_call("message", "after-chunk")),
+            Statement::Expr(make_end_response_call()),
+        ]);
+
+        let server_port = port;
+        let server_handle = std::thread::spawn(move || {
+            let mut interp = Interpreter::new();
+            setup_v3_sentinels(&mut interp);
+            interp.env.define_force("__handler", handler);
+            let args = vec![
+                Expr::IntLit(server_port as i64, dummy_span()),
+                Expr::Ident("__handler".into(), dummy_span()),
+                Expr::IntLit(1, dummy_span()),
+                Expr::IntLit(5000, dummy_span()),
+            ];
+            interp.try_net_func("httpServe", &args).unwrap().unwrap()
+        });
+
+        std::thread::sleep(std::time::Duration::from_millis(200));
+
+        let mut client = std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
+        std::io::Write::write_all(
+            &mut client,
+            b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+        )
+        .unwrap();
+
+        let response_str = read_full_response(&mut client);
+
+        // sseEvent should fail — Content-Type alone is not enough, Cache-Control is also required
+        assert!(
+            !response_str.contains("event: message"),
+            "sseEvent should not succeed when only Content-Type is set (Cache-Control missing)\n{}",
+            response_str
+        );
+
+        let _ = server_handle.join();
+    }
+
+    // NET3-3f: startResponse with explicit SSE headers + writeChunk + sseEvent → OK
+    #[test]
+    fn test_v3_explicit_sse_headers_then_write_chunk_then_sse() {
+        let port = v3_free_port();
+
+        // User explicitly sets SSE headers via startResponse, then writeChunk, then sseEvent.
+        // This should work because the user took responsibility for setting SSE headers.
+        let handler = make_streaming_handler(vec![
+            Statement::Expr(make_start_response_call(
+                200,
+                vec![
+                    ("Content-Type".to_string(), "text/event-stream; charset=utf-8".to_string()),
+                    ("Cache-Control".to_string(), "no-cache".to_string()),
+                ],
+            )),
+            Statement::Expr(make_write_chunk_call("preamble")),
+            Statement::Expr(make_sse_event_call("update", "data-after-chunk")),
+            Statement::Expr(make_end_response_call()),
+        ]);
+
+        let server_port = port;
+        let server_handle = std::thread::spawn(move || {
+            let mut interp = Interpreter::new();
+            setup_v3_sentinels(&mut interp);
+            interp.env.define_force("__handler", handler);
+            let args = vec![
+                Expr::IntLit(server_port as i64, dummy_span()),
+                Expr::Ident("__handler".into(), dummy_span()),
+                Expr::IntLit(1, dummy_span()),
+                Expr::IntLit(5000, dummy_span()),
+            ];
+            interp.try_net_func("httpServe", &args).unwrap().unwrap()
+        });
+
+        std::thread::sleep(std::time::Duration::from_millis(200));
+
+        let mut client = std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
+        std::io::Write::write_all(
+            &mut client,
+            b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+        )
+        .unwrap();
+
+        let response_str = read_full_response(&mut client);
+
+        // Verify SSE headers are present in the response head
+        assert!(
+            response_str.contains("text/event-stream"),
+            "explicit SSE Content-Type should be in response\n{}",
+            response_str
+        );
+        assert!(
+            response_str.contains("no-cache"),
+            "explicit Cache-Control should be in response\n{}",
+            response_str
+        );
+
+        // The preamble chunk should be present
+        assert!(
+            response_str.contains("preamble"),
+            "preamble writeChunk should be present\n{}",
+            response_str
+        );
+
+        // The SSE event should be present (sse_mode was set by explicit headers check)
+        assert!(
+            response_str.contains("event: update\ndata: data-after-chunk\n\n"),
+            "sseEvent should succeed when SSE headers were explicitly set\n{}",
+            response_str
+        );
+
+        let _ = server_handle.join();
+    }
+
+    // NET3-3f: SSE wire format exactness
+    #[test]
+    fn test_v3_sse_wire_format_exact() {
+        let port = v3_free_port();
+
+        let handler = make_streaming_handler(vec![
+            Statement::Expr(make_sse_event_call("tick", "42")),
+            Statement::Expr(make_end_response_call()),
+        ]);
+
+        let server_port = port;
+        let server_handle = std::thread::spawn(move || {
+            let mut interp = Interpreter::new();
+            setup_v3_sentinels(&mut interp);
+            interp.env.define_force("__handler", handler);
+            let args = vec![
+                Expr::IntLit(server_port as i64, dummy_span()),
+                Expr::Ident("__handler".into(), dummy_span()),
+                Expr::IntLit(1, dummy_span()),
+                Expr::IntLit(5000, dummy_span()),
+            ];
+            interp.try_net_func("httpServe", &args).unwrap().unwrap()
+        });
+
+        std::thread::sleep(std::time::Duration::from_millis(200));
+
+        let mut client = std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
+        std::io::Write::write_all(
+            &mut client,
+            b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+        )
+        .unwrap();
+
+        let mut response = Vec::new();
+        let _ = client.set_read_timeout(Some(std::time::Duration::from_secs(3)));
+        loop {
+            let mut buf = [0u8; 4096];
+            match std::io::Read::read(&mut client, &mut buf) {
+                Ok(0) => break,
+                Ok(n) => response.extend_from_slice(&buf[..n]),
+                Err(ref e)
+                    if e.kind() == std::io::ErrorKind::WouldBlock
+                        || e.kind() == std::io::ErrorKind::TimedOut =>
+                {
+                    break;
+                }
+                Err(_) => break,
+            }
+        }
+
+        let response_str = String::from_utf8_lossy(&response);
+
+        // SSE event is sent as one chunked frame via vectored I/O.
+        // The payload "event: tick\ndata: 42\n\n" is 23 bytes → hex "17"
+        let expected_sse = "event: tick\ndata: 42\n\n";
+        let expected_hex = format!("{:x}", expected_sse.len());
+        let expected_chunk = format!("{}\r\n{}\r\n", expected_hex, expected_sse);
+        assert!(
+            response_str.contains(&expected_chunk),
+            "SSE chunk wire format mismatch.\nExpected chunk: {:?}\nGot:\n{}",
+            expected_chunk,
+            response_str
+        );
+        // Should end with chunked terminator
+        assert!(
+            response_str.ends_with("0\r\n\r\n"),
+            "response should end with chunked terminator\n{}",
+            response_str
+        );
+
+        let _ = server_handle.join();
+    }
+
+    // NET3-3f: SSE bodyless status rejection
+    #[test]
+    fn test_v3_sse_bodyless_status_rejected() {
+        let port = v3_free_port();
+
+        // startResponse with 204 (No Content), then sseEvent → should error
+        let handler = make_streaming_handler(vec![
+            Statement::Expr(make_start_response_call(204, vec![])),
+            Statement::Expr(make_sse_event_call("message", "should-fail")),
+        ]);
+
+        let server_port = port;
+        let server_handle = std::thread::spawn(move || {
+            let mut interp = Interpreter::new();
+            setup_v3_sentinels(&mut interp);
+            interp.env.define_force("__handler", handler);
+            let args = vec![
+                Expr::IntLit(server_port as i64, dummy_span()),
+                Expr::Ident("__handler".into(), dummy_span()),
+                Expr::IntLit(1, dummy_span()),
+                Expr::IntLit(5000, dummy_span()),
+            ];
+            interp.try_net_func("httpServe", &args).unwrap().unwrap()
+        });
+
+        std::thread::sleep(std::time::Duration::from_millis(200));
+
+        let mut client = std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
+        std::io::Write::write_all(
+            &mut client,
+            b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+        )
+        .unwrap();
+
+        let response_str = read_full_response(&mut client);
+
+        // The handler error should be caught by httpServe — we should get some response
+        assert!(
+            !response_str.is_empty(),
+            "server should respond even with bodyless status SSE error"
         );
 
         let _ = server_handle.join();
