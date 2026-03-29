@@ -1597,6 +1597,36 @@ fn runtime_abi(name: &str) -> Result<RuntimeAbi, String> {
             params: &[Ptr, Ptr, Ptr],
             returns: &[Val],
         },
+        // NET4-4a: readBodyChunk(req) -> Ptr (Lax[Bytes])
+        "taida_net_read_body_chunk" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Ptr],
+        },
+        // NET4-4a: readBodyAll(req) -> Ptr (Bytes)
+        "taida_net_read_body_all" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Ptr],
+        },
+        // NET4-4b/4c: wsUpgrade(req, writer) -> Ptr (Lax[@(ws: WsConn)])
+        "taida_net_ws_upgrade" => RuntimeAbi {
+            params: &[Ptr, Ptr],
+            returns: &[Ptr],
+        },
+        // NET4-4d: wsSend(ws, data) -> Ptr
+        "taida_net_ws_send" => RuntimeAbi {
+            params: &[Ptr, Ptr],
+            returns: &[Ptr],
+        },
+        // NET4-4d: wsReceive(ws) -> Ptr (Lax[WsFrame])
+        "taida_net_ws_receive" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Ptr],
+        },
+        // NET4-4d: wsClose(ws) -> Ptr
+        "taida_net_ws_close" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Ptr],
+        },
 
         // N-44: ABI table maintenance note
         // When adding a new runtime function in lower.rs, a corresponding entry

@@ -3437,6 +3437,12 @@ function __taida_net_determineKeepAlive(raw, headers, httpMinor) {
 }
 
 // httpServe(port, handler, maxRequests?, timeoutMs?, maxConnections?) -> Async[Result[@(ok, requests), _]]
+// NB4-7: Monotonic request token counter for identity verification.
+let __taida_net_requestTokenCounter = 0;
+function __taida_net_nextRequestToken() {
+  return ++__taida_net_requestTokenCounter;
+}
+
 // NET2-4a/4b/4c/4d: TCP server with keep-alive, chunked TE, concurrent connections, maxConnections.
 // Node.js event loop provides natural concurrency (multiple sockets active simultaneously).
 // bind to 127.0.0.1 (never 0.0.0.0). maxRequests=0 means unlimited.
@@ -3580,6 +3586,56 @@ async function __taida_net_httpServe(port, handler, maxRequests, timeoutMs, maxC
 
         const isChunked = parsed.chunked || false;
         const contentLength = isChunked ? 0 : (parsed.contentLength || 0);
+
+        // NET4-3a: Detect handler arity to decide body-deferred vs eager path.
+        const handlerArity = handler.length;
+
+        if (handlerArity >= 2) {
+          // ── v4 2-arg handler: body-deferred path (NB4-16 fix) ──
+          // Dispatch handler at HEAD arrival time. Body bytes are read
+          // incrementally via readBodyChunk/readBodyAll from the socket.
+          // Any body bytes that arrived with the head buffer are passed
+          // as leftover; remaining bytes are read via fs.readSync when
+          // readBodyChunk/readBodyAll is called.
+
+          const remoteAddr = socket.remoteAddress || '127.0.0.1';
+          const cleanHost = remoteAddr.startsWith('::ffff:') ? remoteAddr.substring(7) : remoteAddr;
+          const keepAlive = __taida_net_determineKeepAlive(buf, parsed.headers, parsed.version.minor);
+
+          // Capture only the head as raw (body is NOT in raw for 2-arg handlers).
+          const rawSnapshot = Buffer.from(buf.subarray(0, parsed.consumed));
+
+          // Capture any body bytes that arrived with the head parse buffer.
+          const leftover = buf.length > parsed.consumed
+            ? Buffer.from(buf.subarray(parsed.consumed))
+            : Buffer.alloc(0);
+
+          const request = {
+            raw: new Uint8Array(rawSnapshot.buffer, rawSnapshot.byteOffset, rawSnapshot.byteLength),
+            method: parsed.method,
+            path: parsed.path,
+            query: parsed.query,
+            version: parsed.version,
+            headers: parsed.headers,
+            body: __taida_net_span(0, 0),
+            bodyOffset: parsed.consumed,
+            contentLength: contentLength,
+            remoteHost: cleanHost,
+            remotePort: socket.remotePort || 0,
+            keepAlive: keepAlive,
+            chunked: isChunked,
+            __body_stream: '__v4_body_stream',
+            __body_token: __taida_net_nextRequestToken(),
+            _socket: socket,
+          };
+
+          // Clear buf — all buffered bytes are either in rawSnapshot or leftover.
+          buf = Buffer.alloc(0);
+          dispatchHandlerBodyDeferred(request, keepAlive, leftover, isChunked, contentLength);
+          return true;
+        }
+
+        // ── v2 1-arg handler: eager body read (unchanged) ──
 
         if (isChunked) {
           // NET2-4b: Chunked Transfer Encoding path
@@ -3731,6 +3787,217 @@ async function __taida_net_httpServe(port, handler, maxRequests, timeoutMs, maxC
           }
           afterHandler(responseVal, keepAlive);
         }
+      }
+
+      // NET4-3a: Dispatch handler with body-deferred mode for 2-arg handlers.
+      // Body is NOT eagerly read — readBodyChunk/readBodyAll will read from socket.
+      function dispatchHandlerBodyDeferred(request, keepAlive, leftover, isChunked, contentLength) {
+        // Pause data events while handling (sequential within connection)
+        socket.pause();
+        socket.removeAllListeners('data');
+        socket.removeAllListeners('timeout');
+        socket.removeAllListeners('end');
+
+        // Create writer with body state for v4 body-deferred mode.
+        const writer = {
+          __writer_id: '__v3_streaming_writer',
+          _state: 0,           // 0=Idle, 1=HeadPrepared, 2=Streaming, 3=Ended, 4=WebSocket
+          _pendingStatus: 200,
+          _pendingHeaders: [],
+          _sseMode: false,
+          _socket: socket,
+          _needsDrain: false,
+          // v4: body streaming state
+          _bodyState: {
+            isChunked: isChunked,
+            contentLength: contentLength,
+            bytesConsumed: 0,
+            fullyRead: !isChunked && contentLength === 0,
+            anyReadStarted: false,
+            leftover: leftover,    // leftover body bytes from head parse buffer
+            leftoverPos: 0,
+            // Chunked decoder state: 'waitSize' | 'readData' | 'waitTrailer' | 'done'
+            chunkedState: 'waitSize',
+            chunkedRemaining: 0,
+            requestToken: request.__body_token,
+          },
+          // v4: WebSocket state
+          _wsClosed: false,
+        };
+
+        function onDrain() {
+          writer._needsDrain = false;
+        }
+        socket.on('drain', onDrain);
+        writer._onDrain = onDrain;
+
+        // Store writer on socket so readBodyChunk/readBodyAll/ws* can find it.
+        socket.__v4_writer = writer;
+
+        let responseVal;
+        try {
+          responseVal = handler(request, writer);
+          if (responseVal && typeof responseVal.then === 'function') {
+            responseVal.then((val) => {
+              afterHandlerStreamingV4(val, keepAlive, writer);
+            }).catch((err) => {
+              afterHandlerStreamingErrorV4(err, keepAlive, writer);
+            });
+            return;
+          }
+        } catch (err) {
+          afterHandlerStreamingErrorV4(err, keepAlive, writer);
+          return;
+        }
+        afterHandlerStreamingV4(responseVal, keepAlive, writer);
+      }
+
+      // NET4-3a: Error handler for v4 body-deferred 2-arg handler.
+      function afterHandlerStreamingErrorV4(err, keepAlive, writer) {
+        const msg = (err && err.message) || String(err);
+        socket.__v4_writer = null;
+        __taida_net_activeWsWriter = null;
+
+        // v4: WebSocket state — send close frame on error.
+        if (writer._state === 4) {
+          if (!writer._wsClosed && !socket.destroyed && socket.writable) {
+            // Send close frame with 1011 (internal error).
+            __taida_net_writeWsFrame(socket, 0x8, Buffer.from([0x03, 0xF3]));
+          }
+          requestCount++;
+          closeConn();
+          if (maxReq > 0 && requestCount >= maxReq) { finish(true); }
+          return;
+        }
+
+        if (writer._state === 2) {
+          if (!socket.destroyed && socket.writable) {
+            socket.write('0\r\n\r\n', () => { closeConn(); });
+          } else {
+            closeConn();
+          }
+          writer._state = 3;
+          requestCount++;
+          return;
+        }
+        if (writer._state === 3) {
+          requestCount++;
+          closeConn();
+          return;
+        }
+        writer._state = 3;
+        send500AndClose(msg);
+      }
+
+      // NET4-3a: afterHandler for v4 body-deferred 2-arg handler.
+      function afterHandlerStreamingV4(responseVal, keepAlive, writer) {
+        socket.__v4_writer = null;
+        __taida_net_activeWsWriter = null;
+        if (connClosed_ || serverClosed) return;
+        if (socket.destroyed || !socket.writable) { closeConn(); return; }
+
+        // v4: WebSocket auto-close on handler return.
+        if (writer._state === 4) {
+          if (!writer._wsClosed && !socket.destroyed && socket.writable) {
+            // Auto close with 1000 (normal closure).
+            __taida_net_writeWsFrame(socket, 0x8, Buffer.from([0x03, 0xE8]));
+          }
+          requestCount++;
+          connRequests++;
+          // WebSocket connections never return to keep-alive.
+          closeConn();
+          if (maxReq > 0 && requestCount >= maxReq) { finish(true); }
+          return;
+        }
+
+        if (writer._state === 0) {
+          // ── One-shot fallback: writer never touched ──
+          const isResponsePack = responseVal && typeof responseVal === 'object'
+            && ('status' in responseVal || 'body' in responseVal);
+          const effectiveResponse = isResponsePack ? responseVal
+            : Object.freeze({ status: 200, headers: Object.freeze([]), body: '' });
+
+          const encoded = __taida_net_httpEncodeResponse(effectiveResponse);
+          const encInner = encoded && encoded.__value;
+          let responseBytes;
+          if (encInner && encInner.bytes) {
+            responseBytes = Buffer.from(encInner.bytes);
+          } else {
+            responseBytes = Buffer.from('HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n');
+            keepAlive = false;
+          }
+
+          socket.write(responseBytes, () => {
+            afterResponseWrittenV4(keepAlive, writer);
+          });
+        } else {
+          // Streaming was started. Return value is ignored.
+          // Auto-end if not already ended.
+          if (writer._state !== 3) {
+            if (writer._state === 1) {
+              const headBytes = __taida_net_buildStreamingHead(writer._pendingStatus, writer._pendingHeaders);
+              socket.write(headBytes);
+            }
+            if (!__taida_net_isBodylessStatus(writer._pendingStatus)) {
+              writer._state = 3;
+              socket.write('0\r\n\r\n', () => {
+                afterResponseWrittenV4(keepAlive, writer);
+              });
+              return;
+            }
+            writer._state = 3;
+          }
+          afterResponseWrittenV4(keepAlive, writer);
+        }
+      }
+
+      // v4 keep-alive continuation with unread body check.
+      function afterResponseWrittenV4(keepAlive, writer) {
+        requestCount++;
+        connRequests++;
+
+        if (maxReq > 0 && requestCount >= maxReq) {
+          closeConn();
+          finish(true);
+          return;
+        }
+
+        // NET4-1g: If body was not fully read, close (no keep-alive).
+        const bs = writer._bodyState;
+        const bodyDone = bs.fullyRead || (!bs.isChunked && bs.contentLength === 0);
+        if (!bodyDone || !keepAlive) {
+          closeConn();
+          return;
+        }
+
+        // Body was fully consumed; safe to continue keep-alive.
+        if (connClosed_ || serverClosed || socket.destroyed) { closeConn(); return; }
+
+        if (buf.length > 0 && tryProcessRequest()) return;
+
+        socket.removeAllListeners('drain');
+        socket.removeAllListeners('timeout');
+        socket.removeAllListeners('end');
+        socket.removeAllListeners('error');
+
+        socket.setTimeout(timeout);
+        socket.on('timeout', () => {
+          if (buf.length > 0) {
+            send400AndClose();
+          } else {
+            closeConn();
+          }
+        });
+        socket.on('end', () => {
+          if (buf.length > 0) {
+            send400AndClose();
+          } else {
+            closeConn();
+          }
+        });
+        socket.on('error', () => { closeConn(); });
+        socket.on('data', onData);
+        socket.resume();
       }
 
       // NET3-4a: Handle error in 2-arg handler
@@ -4020,6 +4287,9 @@ function __taida_net_startResponse(writer, status, headers) {
   __taida_net_validateWriter(writer, 'startResponse');
 
   // State check
+  if (writer._state === 4) {
+    throw new __NativeError('startResponse: cannot use HTTP streaming API after WebSocket upgrade.');
+  }
   if (writer._state === 1) {
     throw new __NativeError('startResponse: already called. Cannot call startResponse twice.');
   }
@@ -4059,6 +4329,9 @@ function __taida_net_writeChunk(writer, data) {
   __taida_net_validateWriter(writer, 'writeChunk');
 
   // State check
+  if (writer._state === 4) {
+    throw new __NativeError('writeChunk: cannot use HTTP streaming API after WebSocket upgrade.');
+  }
   if (writer._state === 3) {
     throw new __NativeError('writeChunk: response already ended.');
   }
@@ -4118,6 +4391,11 @@ function __taida_net_writeChunk(writer, data) {
 function __taida_net_endResponse(writer) {
   __taida_net_validateWriter(writer, 'endResponse');
 
+  // v4: WebSocket state check.
+  if (writer._state === 4) {
+    throw new __NativeError('endResponse: cannot use HTTP streaming API after WebSocket upgrade.');
+  }
+
   // Idempotent
   if (writer._state === 3) return undefined;
 
@@ -4144,6 +4422,11 @@ function __taida_net_endResponse(writer) {
 // Multiline data is split into multiple data: lines.
 function __taida_net_sseEvent(writer, event, data) {
   __taida_net_validateWriter(writer, 'sseEvent');
+
+  // v4: WebSocket state check.
+  if (writer._state === 4) {
+    throw new __NativeError('sseEvent: cannot use HTTP streaming API after WebSocket upgrade.');
+  }
 
   if (typeof event !== 'string') {
     throw new __NativeError('sseEvent: event must be Str, got ' + __taida_format(event));
@@ -4255,11 +4538,19 @@ function __taida_net_sseEvent(writer, event, data) {
 
 // readBody(req) -> Bytes
 // Extract body bytes from a request pack using raw buffer + body span.
+// v4: In a 2-arg handler (body-deferred), acts as readBodyAll alias.
 // Returns empty Uint8Array if body.len == 0.
 function __taida_net_readBody(req) {
   if (!req || typeof req !== 'object') {
     throw new __NativeError('readBody: argument must be a request pack @(...), got ' + __taida_format(req));
   }
+
+  // v4: If the request has __body_stream sentinel (2-arg handler),
+  // delegate to readBodyAll to stream from socket.
+  if (req.__body_stream === '__v4_body_stream') {
+    return __taida_net_readBodyAll(req);
+  }
+
   const raw = req.raw;
   if (!(raw instanceof Uint8Array)) {
     throw new __NativeError("readBody: request pack missing 'raw: Bytes' field");
@@ -4272,6 +4563,993 @@ function __taida_net_readBody(req) {
   const end = Math.min(raw.length, start + body.len);
   if (start >= end) return new Uint8Array(0);
   return raw.slice(start, end);
+}
+
+// ── v4 Request Body Streaming Helpers (synchronous) ─────────────
+// NB4-16 fix: Body is dispatched at HEAD arrival. readBodyChunk/readBodyAll
+// first drain leftover bytes, then read incrementally from the socket
+// via fs.readSync. This eliminates full-body buffering for 2-arg handlers.
+
+// Read one byte from leftover buffer or socket (synchronous).
+// Returns -1 on EOF.
+function __taida_net_readOneByte(writer) {
+  const bs = writer._bodyState;
+  // First drain leftover.
+  if (bs.leftoverPos < bs.leftover.length) {
+    return bs.leftover[bs.leftoverPos++];
+  }
+  // Read from socket.
+  const sock = writer._socket;
+  if (!sock) return -1;
+  const fd = sock._handle ? sock._handle.fd : -1;
+  if (fd < 0 || !__taida_fs) return -1;
+  const oneBuf = Buffer.alloc(1);
+  const deadline = Date.now() + 10000;
+  while (true) {
+    if (Date.now() > deadline) return -1;
+    try {
+      const n = __taida_fs.readSync(fd, oneBuf, 0, 1);
+      if (n === 0) return -1; // EOF
+      return oneBuf[0];
+    } catch (e) {
+      if (e.code === 'EAGAIN' || e.code === 'EWOULDBLOCK') {
+        const spinEnd = Date.now() + 1;
+        while (Date.now() < spinEnd) {}
+        continue;
+      }
+      return -1;
+    }
+  }
+}
+
+// Read up to `count` bytes from leftover buffer, then socket.
+// Returns a Buffer (synchronous).
+function __taida_net_readBodyBytes(writer, count) {
+  const bs = writer._bodyState;
+  const parts = [];
+  let totalRead = 0;
+
+  // First drain leftover.
+  const leftoverAvail = bs.leftover.length - bs.leftoverPos;
+  if (leftoverAvail > 0) {
+    const fromLeftover = Math.min(count, leftoverAvail);
+    parts.push(Buffer.from(bs.leftover.subarray(bs.leftoverPos, bs.leftoverPos + fromLeftover)));
+    bs.leftoverPos += fromLeftover;
+    totalRead += fromLeftover;
+  }
+
+  // Then read from socket if needed.
+  if (totalRead < count) {
+    const sock = writer._socket;
+    const fd = sock && sock._handle ? sock._handle.fd : -1;
+    if (fd >= 0 && __taida_fs) {
+      const remaining = count - totalRead;
+      const fdBuf = Buffer.alloc(remaining);
+      let fdPos = 0;
+      const deadline = Date.now() + 10000;
+      while (fdPos < remaining) {
+        if (Date.now() > deadline) break;
+        try {
+          const n = __taida_fs.readSync(fd, fdBuf, fdPos, remaining - fdPos);
+          if (n === 0) break; // EOF
+          fdPos += n;
+        } catch (e) {
+          if (e.code === 'EAGAIN' || e.code === 'EWOULDBLOCK') {
+            if (fdPos > 0) break; // return what we have
+            const spinEnd = Date.now() + 1;
+            while (Date.now() < spinEnd) {}
+            continue;
+          }
+          break;
+        }
+      }
+      if (fdPos > 0) {
+        parts.push(fdBuf.subarray(0, fdPos));
+        totalRead += fdPos;
+      }
+    }
+  }
+
+  if (totalRead === 0) return Buffer.alloc(0);
+  if (parts.length === 1) return parts[0];
+  return Buffer.concat(parts);
+}
+
+// Read a line (up to LF) from leftover buffer, then socket.
+// Returns string (synchronous).
+function __taida_net_readLineFromBody(writer) {
+  const bs = writer._bodyState;
+  const lineParts = [];
+
+  // First drain from leftover.
+  while (bs.leftoverPos < bs.leftover.length) {
+    const b = bs.leftover[bs.leftoverPos];
+    bs.leftoverPos++;
+    lineParts.push(b);
+    if (b === 0x0A) { // LF
+      return Buffer.from(lineParts).toString();
+    }
+  }
+
+  // Then read from socket byte-by-byte until LF.
+  while (true) {
+    const b = __taida_net_readOneByte(writer);
+    if (b < 0) break; // EOF
+    lineParts.push(b);
+    if (b === 0x0A) break;
+  }
+
+  return Buffer.from(lineParts).toString();
+}
+
+// Drain chunked trailers after terminal chunk (NB4-8 parity).
+function __taida_net_drainChunkedTrailers(writer) {
+  for (let i = 0; i < 64; i++) {
+    const line = __taida_net_readLineFromBody(writer);
+    // NB4-18: EOF (0 raw bytes) != valid empty line ("\r\n").
+    if (line.length === 0) {
+      throw new __NativeError('chunked body error: missing final CRLF after terminal chunk');
+    }
+    if (line.trim() === '') return;
+  }
+}
+
+// NET4-3a: readBodyChunk(req) -> Lax[Bytes]
+// Reads one chunk from the request body (synchronous from leftover).
+function __taida_net_readBodyChunk(req) {
+  if (!req || typeof req !== 'object' || req.__body_stream !== '__v4_body_stream') {
+    throw new __NativeError(
+      'readBodyChunk: can only be called in a 2-argument httpServe handler. ' +
+      'In a 1-argument handler, the request body is already fully read. ' +
+      'Use readBody(req) instead.'
+    );
+  }
+
+  const sock = req._socket;
+  if (!sock) {
+    throw new __NativeError('readBodyChunk: no active socket');
+  }
+
+  const writer = sock.__v4_writer;
+  if (!writer) {
+    throw new __NativeError('readBodyChunk: no active body streaming state');
+  }
+
+  // NB4-7: Verify request token.
+  if (req.__body_token !== writer._bodyState.requestToken) {
+    throw new __NativeError(
+      'readBodyChunk: request pack does not match the current active request. ' +
+      'The request may be stale or fabricated.'
+    );
+  }
+
+  if (writer._state === 4) {
+    throw new __NativeError('readBodyChunk: cannot read HTTP body after WebSocket upgrade.');
+  }
+
+  const bs = writer._bodyState;
+  bs.anyReadStarted = true;
+
+  if (bs.fullyRead) {
+    return __taida_net_makeLaxBytesEmpty();
+  }
+
+  if (bs.isChunked) {
+    return __taida_net_readBodyChunkChunkedSync(writer);
+  } else {
+    return __taida_net_readBodyChunkCLSync(writer);
+  }
+}
+
+// Chunked TE decode (synchronous from leftover).
+function __taida_net_readBodyChunkChunkedSync(writer) {
+  const bs = writer._bodyState;
+
+  while (true) {
+    switch (bs.chunkedState) {
+      case 'done':
+        bs.fullyRead = true;
+        return __taida_net_makeLaxBytesEmpty();
+
+      case 'waitSize': {
+        const line = __taida_net_readLineFromBody(writer);
+        const trimmed = line.trim();
+        if (trimmed === '') continue;
+        const hexStr = trimmed.split(';')[0].trim();
+        // NB4-18: Strict hex-only parse. Reject partial parse like '1g'.
+        if (!/^[0-9a-fA-F]+$/.test(hexStr)) {
+          throw new __NativeError('readBodyChunk: invalid chunk-size \'' + hexStr + '\' in chunked body');
+        }
+        const chunkSize = parseInt(hexStr, 16);
+        if (isNaN(chunkSize)) {
+          throw new __NativeError('readBodyChunk: invalid chunk-size \'' + hexStr + '\' in chunked body');
+        }
+        if (chunkSize === 0) {
+          bs.chunkedState = 'done';
+          bs.fullyRead = true;
+          __taida_net_drainChunkedTrailers(writer);
+          return __taida_net_makeLaxBytesEmpty();
+        }
+        bs.chunkedState = 'readData';
+        bs.chunkedRemaining = chunkSize;
+        break;
+      }
+
+      case 'readData': {
+        if (bs.chunkedRemaining === 0) {
+          bs.chunkedState = 'waitTrailer';
+          continue;
+        }
+        const toRead = Math.min(bs.chunkedRemaining, 8192);
+        const data = __taida_net_readBodyBytes(writer, toRead);
+        const actuallyRead = data.length;
+        // NB4-18: short read (EOF) in chunked data is a protocol error.
+        if (actuallyRead === 0) {
+          throw new __NativeError(
+            'readBodyChunk: truncated chunked body — expected ' +
+            bs.chunkedRemaining + ' more chunk-data bytes but got EOF'
+          );
+        }
+        bs.chunkedRemaining -= actuallyRead;
+        bs.bytesConsumed += actuallyRead;
+        return __taida_net_makeLaxBytesValue(new Uint8Array(data.buffer, data.byteOffset, data.byteLength));
+      }
+
+      case 'waitTrailer': {
+        // NB4-18: Read CRLF after chunk data and validate.
+        const trailerLine = __taida_net_readLineFromBody(writer);
+        if (trailerLine.length === 0) {
+          throw new __NativeError(
+            'readBodyChunk: missing CRLF after chunk data (unexpected EOF)'
+          );
+        }
+        if (trailerLine.trim() !== '') {
+          throw new __NativeError(
+            'readBodyChunk: malformed chunk trailer — expected CRLF after chunk data, ' +
+            'got ' + JSON.stringify(trailerLine)
+          );
+        }
+        bs.chunkedState = 'waitSize';
+        break;
+      }
+    }
+  }
+}
+
+// Content-Length body decode (synchronous from leftover + socket).
+// NB4-18: EOF before Content-Length exhausted is now a protocol error.
+function __taida_net_readBodyChunkCLSync(writer) {
+  const bs = writer._bodyState;
+  const remaining = bs.contentLength - bs.bytesConsumed;
+  if (remaining <= 0) {
+    bs.fullyRead = true;
+    return __taida_net_makeLaxBytesEmpty();
+  }
+  const toRead = Math.min(remaining, 8192);
+  const data = __taida_net_readBodyBytes(writer, toRead);
+  if (data.length === 0) {
+    // NB4-18: EOF before Content-Length exhausted is a protocol error.
+    throw new __NativeError(
+      'readBodyChunk: truncated body — expected ' + bs.contentLength +
+      ' bytes (Content-Length) but got EOF after ' + bs.bytesConsumed + ' bytes'
+    );
+  }
+  bs.bytesConsumed += data.length;
+  if (bs.bytesConsumed >= bs.contentLength) {
+    bs.fullyRead = true;
+  }
+  return __taida_net_makeLaxBytesValue(new Uint8Array(data.buffer, data.byteOffset, data.byteLength));
+}
+
+// Lax[Bytes] constructors for readBodyChunk.
+function __taida_net_makeLaxBytesEmpty() {
+  return Object.freeze({
+    hasValue: __taida_hasValue(false),
+    __value: new Uint8Array(0),
+    __default: new Uint8Array(0),
+    __type: 'Lax',
+  });
+}
+
+function __taida_net_makeLaxBytesValue(bytes) {
+  return Object.freeze({
+    hasValue: __taida_hasValue(true),
+    __value: bytes,
+    __default: new Uint8Array(0),
+    __type: 'Lax',
+  });
+}
+
+// NET4-3a: readBodyAll(req) → Bytes
+// Reads all remaining body bytes. This is the only aggregate path.
+function __taida_net_readBodyAll(req) {
+  if (!req || typeof req !== 'object' || req.__body_stream !== '__v4_body_stream') {
+    throw new __NativeError(
+      'readBodyAll: can only be called in a 2-argument httpServe handler. ' +
+      'In a 1-argument handler, the request body is already fully read. ' +
+      'Use readBody(req) instead.'
+    );
+  }
+
+  const sock = req._socket || (function() {
+    throw new __NativeError('readBodyAll: no active socket');
+  })();
+  const writer = sock.__v4_writer;
+  if (!writer) {
+    throw new __NativeError('readBodyAll: no active body streaming state');
+  }
+
+  // NB4-7: Verify request token.
+  if (req.__body_token !== writer._bodyState.requestToken) {
+    throw new __NativeError(
+      'readBodyAll: request pack does not match the current active request. ' +
+      'The request may be stale or fabricated.'
+    );
+  }
+
+  if (writer._state === 4) {
+    throw new __NativeError('readBodyAll: cannot read HTTP body after WebSocket upgrade.');
+  }
+
+  const bs = writer._bodyState;
+  bs.anyReadStarted = true;
+
+  if (bs.fullyRead) {
+    return new Uint8Array(0);
+  }
+
+  return __taida_net_readBodyAllImpl(writer);
+}
+
+function __taida_net_readBodyAllImpl(writer) {
+  const bs = writer._bodyState;
+  const allParts = [];
+  let totalLen = 0;
+
+  if (bs.isChunked) {
+    // Chunked path: read all chunks (synchronous from leftover).
+    while (true) {
+      switch (bs.chunkedState) {
+        case 'done':
+          bs.fullyRead = true;
+          break;
+        case 'waitSize': {
+          const line = __taida_net_readLineFromBody(writer);
+          const trimmed = line.trim();
+          if (trimmed === '') continue;
+          const hexStr = trimmed.split(';')[0].trim();
+          // NB4-18: Strict hex-only parse (parity with readBodyChunk).
+          if (!/^[0-9a-fA-F]+$/.test(hexStr)) {
+            throw new __NativeError('readBodyAll: invalid chunk-size \'' + hexStr + '\' in chunked body');
+          }
+          const chunkSize = parseInt(hexStr, 16);
+          if (isNaN(chunkSize)) {
+            throw new __NativeError('readBodyAll: invalid chunk-size \'' + hexStr + '\' in chunked body');
+          }
+          if (chunkSize === 0) {
+            bs.chunkedState = 'done';
+            bs.fullyRead = true;
+            __taida_net_drainChunkedTrailers(writer);
+            break;
+          }
+          bs.chunkedState = 'readData';
+          bs.chunkedRemaining = chunkSize;
+          continue;
+        }
+        case 'readData': {
+          if (bs.chunkedRemaining === 0) {
+            bs.chunkedState = 'waitTrailer';
+            continue;
+          }
+          const data = __taida_net_readBodyBytes(writer, bs.chunkedRemaining);
+          const n = data.length;
+          // NB4-18: short read (EOF) in chunked data is a protocol error (parity with readBodyChunk).
+          if (n === 0) {
+            throw new __NativeError(
+              'readBodyAll: truncated chunked body — expected ' +
+              bs.chunkedRemaining + ' more chunk-data bytes but got EOF'
+            );
+          }
+          allParts.push(data);
+          totalLen += n;
+          bs.chunkedRemaining -= n;
+          continue;
+        }
+        case 'waitTrailer': {
+          // NB4-18: Read CRLF after chunk data and validate.
+          const trailerLine2 = __taida_net_readLineFromBody(writer);
+          if (trailerLine2.length === 0) {
+            throw new __NativeError(
+              'readBodyAll: missing CRLF after chunk data (unexpected EOF)'
+            );
+          }
+          if (trailerLine2.trim() !== '') {
+            throw new __NativeError(
+              'readBodyAll: malformed chunk trailer — expected CRLF after chunk data, ' +
+              'got ' + JSON.stringify(trailerLine2)
+            );
+          }
+          bs.chunkedState = 'waitSize';
+          continue;
+        }
+      }
+      if (bs.fullyRead) break;
+    }
+  } else {
+    // Content-Length path: read remaining bytes (synchronous from leftover).
+    const remaining = bs.contentLength - bs.bytesConsumed;
+    if (remaining > 0) {
+      const data = __taida_net_readBodyBytes(writer, remaining);
+      bs.bytesConsumed += data.length;
+      allParts.push(data);
+      totalLen += data.length;
+    }
+    bs.fullyRead = true;
+  }
+
+  // Aggregate (only aggregate path in v4).
+  if (allParts.length === 0) return new Uint8Array(0);
+  if (allParts.length === 1) return new Uint8Array(allParts[0].buffer, allParts[0].byteOffset, allParts[0].byteLength);
+  const result = Buffer.concat(allParts, totalLen);
+  return new Uint8Array(result.buffer, result.byteOffset, result.byteLength);
+}
+
+// ── v4 WebSocket Implementation ─────────────────────────────
+
+// RFC 6455 magic GUID.
+const __WS_GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11';
+const __WS_MAX_PAYLOAD = 16 * 1024 * 1024; // 16 MiB
+
+// Compute Sec-WebSocket-Accept from Sec-WebSocket-Key (NET4-3b).
+function __taida_net_computeWsAccept(key) {
+  if (!__taida_crypto) {
+    throw new __NativeError('wsUpgrade: node:crypto module not available');
+  }
+  const hash = __taida_crypto.createHash('sha1').update(key + __WS_GUID).digest();
+  return hash.toString('base64');
+}
+
+// Write a WebSocket frame to the socket (NET4-3c).
+// Server-to-client: FIN=1, MASK=0.
+// Uses cork/uncork to coalesce header + payload (no Buffer.concat).
+function __taida_net_writeWsFrame(sock, opcode, payload) {
+  const payloadLen = payload ? payload.length : 0;
+  // Build frame header on stack (max 10 bytes).
+  let header;
+  if (payloadLen < 126) {
+    header = Buffer.alloc(2);
+    header[0] = 0x80 | opcode; // FIN=1
+    header[1] = payloadLen;    // MASK=0
+  } else if (payloadLen <= 65535) {
+    header = Buffer.alloc(4);
+    header[0] = 0x80 | opcode;
+    header[1] = 126;
+    header[2] = (payloadLen >> 8) & 0xFF;
+    header[3] = payloadLen & 0xFF;
+  } else {
+    header = Buffer.alloc(10);
+    header[0] = 0x80 | opcode;
+    header[1] = 127;
+    // Write 64-bit big-endian length.
+    // JS numbers are safe up to 2^53, sufficient for 16 MiB cap.
+    header[2] = 0; header[3] = 0; header[4] = 0; header[5] = 0;
+    header[6] = (payloadLen >> 24) & 0xFF;
+    header[7] = (payloadLen >> 16) & 0xFF;
+    header[8] = (payloadLen >> 8) & 0xFF;
+    header[9] = payloadLen & 0xFF;
+  }
+
+  // Synchronous fd write to bypass Node's event loop buffering.
+  // This ensures data reaches the kernel buffer immediately, even if
+  // the event loop is blocked by a subsequent synchronous read.
+  const fd = sock._handle ? sock._handle.fd : -1;
+  if (fd >= 0 && __taida_fs) {
+    __taida_net_fdWriteAll(fd, header);
+    if (payloadLen > 0) __taida_net_fdWriteAll(fd, payload);
+  } else {
+    // Fallback: vectored write via cork/uncork.
+    sock.cork();
+    sock.write(header);
+    if (payloadLen > 0) sock.write(payload);
+    sock.uncork();
+  }
+}
+
+// Synchronous write helper: write all bytes to fd with EAGAIN retry.
+function __taida_net_fdWriteAll(fd, buf) {
+  let written = 0;
+  while (written < buf.length) {
+    try {
+      const n = __taida_fs.writeSync(fd, buf, written, buf.length - written);
+      written += n;
+    } catch (e) {
+      if (e.code === 'EAGAIN' || e.code === 'EWOULDBLOCK') {
+        const spinEnd = Date.now() + 1;
+        while (Date.now() < spinEnd) {}
+        continue;
+      }
+      throw new __NativeError('WebSocket write error: ' + (e.message || e));
+    }
+  }
+}
+
+// Read exactly `count` bytes from socket (synchronous).
+// Uses fs.readSync on the socket fd with EAGAIN retry.
+// The socket must be paused so Node does not consume data from the kernel buffer.
+function __taida_net_readExactFromSocket(sock, count) {
+  if (count === 0) return Buffer.alloc(0);
+
+  // First, drain any bytes already in Node's internal read buffer.
+  // sock.read() returns data from Node's internal buffer (synchronous).
+  let collected = Buffer.alloc(0);
+  while (collected.length < count) {
+    const needed = count - collected.length;
+    const chunk = sock.read(needed);
+    if (!chunk) break;
+    collected = collected.length === 0 ? chunk : Buffer.concat([collected, chunk]);
+  }
+  if (collected.length >= count) {
+    return collected.subarray(0, count);
+  }
+
+  // Fall back to synchronous fd read for remaining bytes.
+  const fd = sock._handle ? sock._handle.fd : -1;
+  if (fd < 0 || !__taida_fs) {
+    throw new __NativeError('wsReceive: cannot access socket file descriptor for synchronous read');
+  }
+
+  const remaining = count - collected.length;
+  const fdBuf = Buffer.alloc(remaining);
+  let fdPos = 0;
+  const deadline = Date.now() + 10000; // 10 second timeout
+
+  while (fdPos < remaining) {
+    if (Date.now() > deadline) {
+      throw new __NativeError('wsReceive: timed out waiting for ' + count + ' bytes (got ' + (collected.length + fdPos) + ')');
+    }
+    try {
+      const n = __taida_fs.readSync(fd, fdBuf, fdPos, remaining - fdPos);
+      if (n === 0) {
+        throw new __NativeError('wsReceive: connection closed unexpectedly');
+      }
+      fdPos += n;
+    } catch (e) {
+      if (e.code === 'EAGAIN' || e.code === 'EWOULDBLOCK') {
+        // Spin briefly — data not yet in kernel buffer.
+        const spinEnd = Date.now() + 1;
+        while (Date.now() < spinEnd) { /* busy wait */ }
+        continue;
+      }
+      throw new __NativeError('wsReceive: read error: ' + (e.message || e));
+    }
+  }
+
+  if (collected.length === 0) return fdBuf;
+  return Buffer.concat([collected, fdBuf]);
+}
+
+// Read and parse one WebSocket frame from the socket (NET4-3c).
+// Synchronous — uses readExactFromSocket which does fd-level blocking read.
+// Returns {opcode, payload}|{close:true}|{ping:payload}|{pong:true}|{error:msg}
+function __taida_net_readWsFrame(sock) {
+  // Read first 2 bytes.
+  const hdr = __taida_net_readExactFromSocket(sock, 2);
+  const byte0 = hdr[0];
+  const byte1 = hdr[1];
+
+  const fin = (byte0 & 0x80) !== 0;
+  const rsv = byte0 & 0x70;
+  const opcode = byte0 & 0x0F;
+  const masked = (byte1 & 0x80) !== 0;
+  let payloadLen = byte1 & 0x7F;
+
+  // RSV bits must be 0.
+  if (rsv !== 0) return { error: 'RSV bits must be 0' };
+
+  // Fragmented frames not supported.
+  if (!fin) return { error: 'fragmented frames are not supported' };
+
+  // Continuation opcode without fragmentation is a protocol error.
+  if (opcode === 0x0) return { error: 'unexpected continuation frame' };
+
+  // NB4-11: Client-to-server frames MUST be masked (RFC 6455 Section 5.1).
+  if (!masked) return { error: 'client frame must be masked (MASK=0 received)' };
+
+  // Extended payload length.
+  if (payloadLen === 126) {
+    const ext = __taida_net_readExactFromSocket(sock, 2);
+    payloadLen = (ext[0] << 8) | ext[1];
+  } else if (payloadLen === 127) {
+    const ext = __taida_net_readExactFromSocket(sock, 8);
+    // Read 64-bit BE. Check MSB = 0.
+    if (ext[0] & 0x80) return { error: 'payload length MSB must be 0' };
+    payloadLen = 0;
+    for (let i = 0; i < 8; i++) payloadLen = payloadLen * 256 + ext[i];
+  }
+
+  // Oversized payload check.
+  if (payloadLen > __WS_MAX_PAYLOAD) {
+    return { error: 'payload too large (' + payloadLen + ' bytes, max ' + __WS_MAX_PAYLOAD + ' bytes)' };
+  }
+
+  // Read masking key.
+  let maskKey = null;
+  if (masked) {
+    maskKey = __taida_net_readExactFromSocket(sock, 4);
+  }
+
+  // Read payload.
+  let payload = payloadLen > 0
+    ? __taida_net_readExactFromSocket(sock, payloadLen)
+    : Buffer.alloc(0);
+
+  // Unmask in-place.
+  if (maskKey) {
+    for (let i = 0; i < payload.length; i++) {
+      payload[i] ^= maskKey[i % 4];
+    }
+  }
+
+  // Dispatch by opcode.
+  switch (opcode) {
+    case 0x1: // text
+    case 0x2: // binary
+      return { opcode, payload };
+    case 0x8: // close
+      return { close: true };
+    case 0x9: // ping
+      return { ping: payload };
+    case 0xA: // pong
+      return { pong: true };
+    default:
+      return { error: 'unknown opcode 0x' + opcode.toString(16).toUpperCase() };
+  }
+}
+
+// Extract header value from parsed request headers (case-insensitive).
+function __taida_net_getHeaderValue(req, targetName) {
+  const headers = req.headers;
+  const raw = req.raw;
+  if (!headers || !raw) return null;
+  const lowerTarget = targetName.toLowerCase();
+  for (let i = 0; i < headers.length; i++) {
+    const h = headers[i];
+    if (!h || !h.name) continue;
+    // Header name is a span in raw bytes.
+    const nStart = h.name.start || 0;
+    const nLen = h.name.len || 0;
+    const nameStr = Buffer.from(raw.buffer, raw.byteOffset + nStart, nLen).toString().toLowerCase();
+    if (nameStr === lowerTarget) {
+      const vStart = h.value ? (h.value.start || 0) : 0;
+      const vLen = h.value ? (h.value.len || 0) : 0;
+      return Buffer.from(raw.buffer, raw.byteOffset + vStart, vLen).toString();
+    }
+  }
+  return null;
+}
+
+// Extract method string from parsed request.
+function __taida_net_getMethodStr(req) {
+  const method = req.method;
+  const raw = req.raw;
+  if (!method || !raw) return '';
+  const start = method.start || 0;
+  const len = method.len || 0;
+  return Buffer.from(raw.buffer, raw.byteOffset + start, len).toString();
+}
+
+// NET4-3b: wsUpgrade(req, writer) → Lax[@(ws: WsConn)]
+function __taida_net_wsUpgrade(req, writer) {
+  __taida_net_validateWriter(writer, 'wsUpgrade');
+
+  // State check: wsUpgrade only valid in Idle state.
+  if (writer._state === 1 || writer._state === 2) {
+    throw new __NativeError(
+      'wsUpgrade: cannot upgrade after HTTP response has started. ' +
+      'wsUpgrade must be called before startResponse/writeChunk.'
+    );
+  }
+  if (writer._state === 3) {
+    throw new __NativeError('wsUpgrade: cannot upgrade after HTTP response has ended.');
+  }
+  if (writer._state === 4) {
+    throw new __NativeError('wsUpgrade: WebSocket upgrade already completed.');
+  }
+
+  // Must be body-deferred request (2-arg handler).
+  if (!req || req.__body_stream !== '__v4_body_stream') {
+    return __taida_net_makeLaxWsEmpty();
+  }
+
+  // NB4-10: Verify request token matches the active body state.
+  if (writer._bodyState && req.__body_token !== writer._bodyState.requestToken) {
+    throw new __NativeError(
+      'wsUpgrade: request pack does not match the current active request. ' +
+      'The request may be stale or fabricated.'
+    );
+  }
+
+  // Validate: must be GET.
+  const method = __taida_net_getMethodStr(req);
+  if (method.toUpperCase() !== 'GET') {
+    return __taida_net_makeLaxWsEmpty();
+  }
+
+  // Validate: no body (Content-Length must be 0 or absent, not chunked).
+  if ((req.contentLength || 0) > 0 || req.chunked) {
+    return __taida_net_makeLaxWsEmpty();
+  }
+
+  // Validate: Upgrade: websocket
+  const upgradeVal = __taida_net_getHeaderValue(req, 'Upgrade');
+  if (!upgradeVal || upgradeVal.toLowerCase() !== 'websocket') {
+    return __taida_net_makeLaxWsEmpty();
+  }
+
+  // Validate: Connection: Upgrade (may contain comma-separated values)
+  const connVal = __taida_net_getHeaderValue(req, 'Connection');
+  if (!connVal || !connVal.split(',').some(function(p) { return p.trim().toLowerCase() === 'upgrade'; })) {
+    return __taida_net_makeLaxWsEmpty();
+  }
+
+  // Validate: Sec-WebSocket-Version: 13
+  const versionVal = __taida_net_getHeaderValue(req, 'Sec-WebSocket-Version');
+  if (!versionVal || versionVal.trim() !== '13') {
+    return __taida_net_makeLaxWsEmpty();
+  }
+
+  // NB4-11: Validate Sec-WebSocket-Key (must be 24-char base64, decoding to 16 bytes).
+  const wsKey = __taida_net_getHeaderValue(req, 'Sec-WebSocket-Key');
+  if (!wsKey || wsKey.trim() === '') {
+    return __taida_net_makeLaxWsEmpty();
+  }
+  // RFC 6455: key must be a base64-encoded 16-byte value (= 24 chars with padding).
+  {
+    const trimmedKey = wsKey.trim();
+    if (trimmedKey.length !== 24 || !/^[A-Za-z0-9+/]{22}==$/.test(trimmedKey)) {
+      return __taida_net_makeLaxWsEmpty();
+    }
+    // Decode and verify 16-byte length.
+    try {
+      const decoded = Buffer.from(trimmedKey, 'base64');
+      if (decoded.length !== 16) {
+        return __taida_net_makeLaxWsEmpty();
+      }
+    } catch (_) {
+      return __taida_net_makeLaxWsEmpty();
+    }
+  }
+
+  // All validations passed. Compute accept and send 101.
+  const accept = __taida_net_computeWsAccept(wsKey.trim());
+  const response =
+    'HTTP/1.1 101 Switching Protocols\r\n' +
+    'Upgrade: websocket\r\n' +
+    'Connection: Upgrade\r\n' +
+    'Sec-WebSocket-Accept: ' + accept + '\r\n' +
+    '\r\n';
+
+  const sock = writer._socket;
+
+  // Write 101 response synchronously via fd to bypass Node's event loop.
+  // This is critical: subsequent wsReceive will block the event loop,
+  // so the 101 response must reach the kernel buffer before that.
+  const fd = sock._handle ? sock._handle.fd : -1;
+  if (fd >= 0 && __taida_fs) {
+    const respBuf = Buffer.from(response);
+    let written = 0;
+    while (written < respBuf.length) {
+      try {
+        const n = __taida_fs.writeSync(fd, respBuf, written, respBuf.length - written);
+        written += n;
+      } catch (e) {
+        if (e.code === 'EAGAIN' || e.code === 'EWOULDBLOCK') {
+          const spinEnd = Date.now() + 1;
+          while (Date.now() < spinEnd) {}
+          continue;
+        }
+        throw new __NativeError('wsUpgrade: write error: ' + (e.message || e));
+      }
+    }
+  } else {
+    sock.write(response);
+  }
+
+  // Transition to WebSocket state.
+  writer._state = 4; // WebSocket
+
+  // NB4-10: Generate a connection-scoped token for ws identity verification.
+  const wsToken = ++__taida_net_wsTokenCounter;
+  writer._wsToken = wsToken;
+
+  // Set active ws writer for wsSend/wsReceive/wsClose to find.
+  __taida_net_activeWsWriter = writer;
+
+  // Create WsConn pack with identity token.
+  const wsPack = Object.freeze({ __ws_id: '__v4_websocket_conn', __ws_token: wsToken });
+
+  return __taida_net_makeLaxWsValue(wsPack);
+}
+
+// Lax constructors for WebSocket.
+function __taida_net_makeLaxWsEmpty() {
+  return Object.freeze({
+    hasValue: __taida_hasValue(false),
+    __value: Object.freeze({}),
+    __default: Object.freeze({}),
+    __type: 'Lax',
+  });
+}
+
+function __taida_net_makeLaxWsValue(ws) {
+  return Object.freeze({
+    hasValue: __taida_hasValue(true),
+    __value: Object.freeze({ ws: ws }),
+    __default: Object.freeze({}),
+    __type: 'Lax',
+  });
+}
+
+function __taida_net_makeLaxWsFrameValue(typeStr, data) {
+  return Object.freeze({
+    hasValue: __taida_hasValue(true),
+    __value: Object.freeze({ type: typeStr, data: data }),
+    __default: Object.freeze({}),
+    __type: 'Lax',
+  });
+}
+
+function __taida_net_makeLaxWsFrameEmpty() {
+  return Object.freeze({
+    hasValue: __taida_hasValue(false),
+    __value: Object.freeze({}),
+    __default: Object.freeze({}),
+    __type: 'Lax',
+  });
+}
+
+// NB4-10: Validate ws token — checks both sentinel AND connection-scoped token.
+function __taida_net_validateWs(ws, apiName) {
+  if (!ws || typeof ws !== 'object' || ws.__ws_id !== '__v4_websocket_conn') {
+    throw new __NativeError(apiName + ': first argument must be the WebSocket connection from wsUpgrade');
+  }
+  // Verify connection-scoped token matches the active writer.
+  const writer = __taida_net_activeWsWriter;
+  if (!writer || ws.__ws_token !== writer._wsToken) {
+    throw new __NativeError(
+      apiName + ': WebSocket connection does not match the current active connection. ' +
+      'The connection may be stale or fabricated.'
+    );
+  }
+}
+
+// Find active writer via ws token's socket reference.
+function __taida_net_getWriterForWs(ws, apiName) {
+  // The writer is accessible via the socket stored on the writer.
+  // Since we don't store back-references on ws, we need to find it.
+  // In the JS runtime, the writer is stored on socket.__v4_writer during handler execution.
+  // We search through all sockets... but actually we can't easily.
+  // Better approach: store a reference on the ws pack itself.
+  // Since ws is frozen, we can't add properties. Instead, the ws validation
+  // ensures we're in a valid context, and the writer is on the socket.
+  // The socket is on the writer.
+  // We need a way to get from ws → writer. Let's use a module-level map.
+  const writer = __taida_net_activeWsWriter;
+  if (!writer) {
+    throw new __NativeError(apiName + ': no active WebSocket context');
+  }
+  return writer;
+}
+
+// Module-level reference to the active WebSocket writer.
+// Set when wsUpgrade succeeds, cleared when handler completes.
+let __taida_net_activeWsWriter = null;
+
+// NB4-10: Monotonic WebSocket connection token counter for identity verification.
+let __taida_net_wsTokenCounter = 0;
+
+// NET4-3d: wsSend(ws, data) → Unit
+function __taida_net_wsSend(ws, data) {
+  __taida_net_validateWs(ws, 'wsSend');
+  const writer = __taida_net_getWriterForWs(ws, 'wsSend');
+
+  if (writer._state !== 4) {
+    throw new __NativeError('wsSend: not in WebSocket state. Call wsUpgrade first.');
+  }
+  if (writer._wsClosed) {
+    throw new __NativeError('wsSend: WebSocket connection is already closed.');
+  }
+
+  const sock = writer._socket;
+  let opcode, payload;
+  if (typeof data === 'string') {
+    opcode = 0x1; // text
+    payload = Buffer.from(data, 'utf8');
+  } else if (data instanceof Uint8Array) {
+    opcode = 0x2; // binary
+    payload = data;
+  } else {
+    throw new __NativeError('wsSend: data must be Str (text frame) or Bytes (binary frame)');
+  }
+
+  __taida_net_writeWsFrame(sock, opcode, payload);
+  return undefined; // Unit
+}
+
+// NET4-3d: wsReceive(ws) → Lax[@(type: Str, data: Bytes|Str)]
+// Synchronous — blocks on fd read until a data frame arrives.
+function __taida_net_wsReceive(ws) {
+  __taida_net_validateWs(ws, 'wsReceive');
+  const writer = __taida_net_getWriterForWs(ws, 'wsReceive');
+
+  if (writer._state !== 4) {
+    throw new __NativeError('wsReceive: not in WebSocket state. Call wsUpgrade first.');
+  }
+  if (writer._wsClosed) {
+    return __taida_net_makeLaxWsFrameEmpty();
+  }
+
+  const sock = writer._socket;
+
+  // Synchronous loop to handle ping/pong transparently.
+  while (true) {
+    const frame = __taida_net_readWsFrame(sock);
+
+    if (frame.error) {
+      // Protocol error: send close frame with 1002.
+      __taida_net_writeWsFrame(sock, 0x8, Buffer.from([0x03, 0xEA]));
+      writer._wsClosed = true;
+      throw new __NativeError('wsReceive: protocol error: ' + frame.error);
+    }
+
+    if (frame.close) {
+      // NB4-12: Send close reply before marking closed (parity with Native).
+      __taida_net_writeWsFrame(sock, 0x8, Buffer.from([0x03, 0xE8]));
+      writer._wsClosed = true;
+      return __taida_net_makeLaxWsFrameEmpty();
+    }
+
+    if (frame.ping) {
+      // Auto pong with same payload.
+      __taida_net_writeWsFrame(sock, 0xA, frame.ping);
+      continue; // advance to next frame
+    }
+
+    if (frame.pong) {
+      continue; // unsolicited pong, ignore
+    }
+
+    // Data frame (text or binary).
+    const typeStr = frame.opcode === 0x1 ? 'text' : 'binary';
+    let dataVal;
+    if (frame.opcode === 0x1) {
+      // Text: return the payload as Str in data field for parity with interpreter.
+      dataVal = frame.payload.toString('utf8');
+    } else {
+      dataVal = new Uint8Array(frame.payload.buffer, frame.payload.byteOffset, frame.payload.byteLength);
+    }
+    return __taida_net_makeLaxWsFrameValue(typeStr, dataVal);
+  }
+}
+
+// NET4-3d: wsClose(ws) → Unit
+function __taida_net_wsClose(ws) {
+  __taida_net_validateWs(ws, 'wsClose');
+  const writer = __taida_net_getWriterForWs(ws, 'wsClose');
+
+  if (writer._state !== 4) {
+    throw new __NativeError('wsClose: not in WebSocket state. Call wsUpgrade first.');
+  }
+
+  // Idempotent: no-op if already closed.
+  if (writer._wsClosed) return undefined;
+
+  const sock = writer._socket;
+  // Send close frame with 1000 (normal closure).
+  __taida_net_writeWsFrame(sock, 0x8, Buffer.from([0x03, 0xE8]));
+  writer._wsClosed = true;
+
+  return undefined; // Unit
 }
 
 "#;

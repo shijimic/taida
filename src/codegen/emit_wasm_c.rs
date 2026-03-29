@@ -93,6 +93,14 @@ fn validate_net_http_api_for_wasm(
         ("taida_net_write_chunk", "writeChunk"),
         ("taida_net_end_response", "endResponse"),
         ("taida_net_sse_event", "sseEvent"),
+        // v4 request body streaming API
+        ("taida_net_read_body_chunk", "readBodyChunk"),
+        ("taida_net_read_body_all", "readBodyAll"),
+        // v4 WebSocket API
+        ("taida_net_ws_upgrade", "wsUpgrade"),
+        ("taida_net_ws_send", "wsSend"),
+        ("taida_net_ws_receive", "wsReceive"),
+        ("taida_net_ws_close", "wsClose"),
     ];
 
     for &(runtime_name, api_name) in NET_HTTP_FUNCS {
@@ -989,7 +997,13 @@ fn runtime_func_prototype(name: &str, profile: WasmProfile) -> Result<String, Wa
         "taida_net_http_serve"
         | "taida_net_http_parse_request_head"
         | "taida_net_http_encode_response"
-        | "taida_net_read_body" =>
+        | "taida_net_read_body"
+        | "taida_net_read_body_chunk"
+        | "taida_net_read_body_all"
+        | "taida_net_ws_upgrade"
+        | "taida_net_ws_send"
+        | "taida_net_ws_receive"
+        | "taida_net_ws_close" =>
         {
             let profile_name = match profile {
                 WasmProfile::Min => "wasm-min",
@@ -1002,6 +1016,12 @@ fn runtime_func_prototype(name: &str, profile: WasmProfile) -> Result<String, Wa
                 "taida_net_http_parse_request_head" => "httpParseRequestHead",
                 "taida_net_http_encode_response" => "httpEncodeResponse",
                 "taida_net_read_body" => "readBody",
+                "taida_net_read_body_chunk" => "readBodyChunk",
+                "taida_net_read_body_all" => "readBodyAll",
+                "taida_net_ws_upgrade" => "wsUpgrade",
+                "taida_net_ws_send" => "wsSend",
+                "taida_net_ws_receive" => "wsReceive",
+                "taida_net_ws_close" => "wsClose",
                 _ => name,
             };
             return Err(WasmCEmitError {

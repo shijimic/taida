@@ -911,6 +911,14 @@ impl Lowering {
             "writeChunk" => Some("taida_net_write_chunk"),
             "endResponse" => Some("taida_net_end_response"),
             "sseEvent" => Some("taida_net_sse_event"),
+            // HTTP v4 request body streaming surface
+            "readBodyChunk" => Some("taida_net_read_body_chunk"),
+            "readBodyAll" => Some("taida_net_read_body_all"),
+            // HTTP v4 WebSocket surface
+            "wsUpgrade" => Some("taida_net_ws_upgrade"),
+            "wsSend" => Some("taida_net_ws_send"),
+            "wsReceive" => Some("taida_net_ws_receive"),
+            "wsClose" => Some("taida_net_ws_close"),
             _ => None,
         }
     }

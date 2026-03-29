@@ -117,6 +117,14 @@ impl JsCodegen {
         "writeChunk",
         "endResponse",
         "sseEvent",
+        // v4 request body streaming API
+        "readBodyChunk",
+        "readBodyAll",
+        // v4 WebSocket API
+        "wsUpgrade",
+        "wsSend",
+        "wsReceive",
+        "wsClose",
     ];
 
     /// Check if a net builtin name should be rewritten to its __taida_net_* form.
@@ -167,6 +175,32 @@ impl JsCodegen {
             }
             "sseEvent" => {
                 self.write(&format!("__taida_net_sseEvent{}", suffix));
+                true
+            }
+            // v4 request body streaming API
+            "readBodyChunk" => {
+                self.write(&format!("__taida_net_readBodyChunk{}", suffix));
+                true
+            }
+            "readBodyAll" => {
+                self.write(&format!("__taida_net_readBodyAll{}", suffix));
+                true
+            }
+            // v4 WebSocket API
+            "wsUpgrade" => {
+                self.write(&format!("__taida_net_wsUpgrade{}", suffix));
+                true
+            }
+            "wsSend" => {
+                self.write(&format!("__taida_net_wsSend{}", suffix));
+                true
+            }
+            "wsReceive" => {
+                self.write(&format!("__taida_net_wsReceive{}", suffix));
+                true
+            }
+            "wsClose" => {
+                self.write(&format!("__taida_net_wsClose{}", suffix));
                 true
             }
             _ => false,

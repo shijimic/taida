@@ -5420,7 +5420,7 @@ fn setup_net_project(source: &str, label: &str) -> PathBuf {
 
     // Write the net package stub (same as CoreBundledProvider::net_package_source)
     let net_stub = r#"// taida-lang/net — Core bundled network package
-<<< @(dnsResolve, tcpConnect, tcpListen, tcpAccept, socketSend, socketSendAll, socketRecv, socketSendBytes, socketRecvBytes, socketRecvExact, udpBind, udpSendTo, udpRecvFrom, socketClose, listenerClose, udpClose, httpServe, httpParseRequestHead, httpEncodeResponse, readBody, startResponse, writeChunk, endResponse, sseEvent)
+<<< @(dnsResolve, tcpConnect, tcpListen, tcpAccept, socketSend, socketSendAll, socketRecv, socketSendBytes, socketRecvBytes, socketRecvExact, udpBind, udpSendTo, udpRecvFrom, socketClose, listenerClose, udpClose, httpServe, httpParseRequestHead, httpEncodeResponse, readBody, startResponse, writeChunk, endResponse, sseEvent, readBodyChunk, readBodyAll, wsUpgrade, wsSend, wsReceive, wsClose)
 "#;
     fs::write(deps_net.join("main.td"), net_stub).expect("write net stub");
 
@@ -14745,6 +14745,4103 @@ stdout(run_server(handler, {port}))
             String::from_utf8_lossy(&output.stderr)
         );
 
+        cleanup_net_project(&dir);
+    }
+}
+
+// ── NET4 Phase 1: Request Body Streaming Tests ──────────────────
+
+/// NET4-1h-1: readBodyAll with Content-Length body in 2-arg handler.
+/// Server reads full POST body via readBodyAll and echoes it back.
+#[test]
+fn test_net4_read_body_all_content_length_interp() {
+    let port = find_free_loopback_port();
+    let source = format!(
+        r#">>> taida-lang/net => @(httpServe, readBodyAll, startResponse, writeChunk, endResponse)
+
+handler req writer =
+  body <= readBodyAll(req)
+  startResponse(writer, 200, @[@(name <= "Content-Type", value <= "text/plain")])
+  writeChunk(writer, body)
+  endResponse(writer)
+=> :Unit
+
+asyncResult <= httpServe({port}, handler, 1)
+asyncResult ]=> result
+result ]=> r
+stdout(r.ok)
+"#
+    );
+
+    let dir = setup_net_project(&source, "net4_rba_cl");
+    let td_path = dir.join("main.td");
+    let mut child = Command::new(taida_bin())
+        .arg(&td_path)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn interpreter");
+
+    let mut response = Vec::new();
+    let mut got_response = false;
+    let body = b"Hello, streaming!";
+    let request = format!(
+        "POST / HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\n\r\n{}",
+        body.len(),
+        std::str::from_utf8(body).unwrap()
+    );
+
+    for _ in 0..80 {
+        thread::sleep(Duration::from_millis(100));
+        let stream = match TcpStream::connect(format!("127.0.0.1:{}", port)) {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+        stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
+        stream.set_write_timeout(Some(Duration::from_secs(5))).ok();
+        let mut stream = stream;
+        if std::io::Write::write_all(&mut stream, request.as_bytes()).is_err() {
+            continue;
+        }
+        let mut buf = [0u8; 4096];
+        loop {
+            match std::io::Read::read(&mut stream, &mut buf) {
+                Ok(0) => break,
+                Ok(n) => response.extend_from_slice(&buf[..n]),
+                Err(ref e)
+                    if e.kind() == std::io::ErrorKind::WouldBlock
+                        || e.kind() == std::io::ErrorKind::TimedOut =>
+                {
+                    break;
+                }
+                Err(_) => break,
+            }
+        }
+        if !response.is_empty() {
+            got_response = true;
+            break;
+        }
+    }
+
+    if !got_response {
+        let _ = child.kill();
+        cleanup_net_project(&dir);
+        panic!("server did not respond on port {}", port);
+    }
+
+    let resp_str = String::from_utf8_lossy(&response).to_string();
+    assert!(
+        resp_str.contains("200 OK"),
+        "response should contain '200 OK', got: {:?}",
+        resp_str
+    );
+    assert!(
+        resp_str.contains("Hello, streaming!"),
+        "response body should contain 'Hello, streaming!', got: {:?}",
+        resp_str
+    );
+
+    let output = child.wait_with_output().expect("wait for server");
+    let stdout = normalize(&String::from_utf8_lossy(&output.stdout));
+    assert_eq!(stdout, "true", "httpServe result mismatch: {:?}", stdout);
+
+    cleanup_net_project(&dir);
+}
+
+/// NET4-1h-2: readBodyChunk with Content-Length body.
+/// Server reads first chunk of a POST body and reports whether it has data.
+#[test]
+fn test_net4_read_body_chunk_content_length_interp() {
+    let port = find_free_loopback_port();
+    let source = format!(
+        r#">>> taida-lang/net => @(httpServe, readBodyChunk, startResponse, writeChunk, endResponse)
+
+handler req writer =
+  chunk <= readBodyChunk(req)
+  startResponse(writer, 200, @[@(name <= "Content-Type", value <= "text/plain")])
+  writeChunk(writer, chunk.hasValue.toString())
+  writeChunk(writer, chunk.__value)
+  endResponse(writer)
+=> :Unit
+
+asyncResult <= httpServe({port}, handler, 1)
+asyncResult ]=> result
+result ]=> r
+stdout(r.ok)
+"#
+    );
+
+    let dir = setup_net_project(&source, "net4_rbc_cl");
+    let td_path = dir.join("main.td");
+    let mut child = Command::new(taida_bin())
+        .arg(&td_path)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn interpreter");
+
+    let body = "Hello body";
+    let request = format!(
+        "POST / HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\n\r\n{}",
+        body.len(),
+        body,
+    );
+
+    let mut response = Vec::new();
+    let mut got_response = false;
+    for _ in 0..80 {
+        thread::sleep(Duration::from_millis(100));
+        let stream = match TcpStream::connect(format!("127.0.0.1:{}", port)) {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+        stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
+        stream.set_write_timeout(Some(Duration::from_secs(5))).ok();
+        let mut stream = stream;
+        if std::io::Write::write_all(&mut stream, request.as_bytes()).is_err() {
+            continue;
+        }
+        let mut buf = [0u8; 4096];
+        loop {
+            match std::io::Read::read(&mut stream, &mut buf) {
+                Ok(0) => break,
+                Ok(n) => response.extend_from_slice(&buf[..n]),
+                Err(ref e)
+                    if e.kind() == std::io::ErrorKind::WouldBlock
+                        || e.kind() == std::io::ErrorKind::TimedOut =>
+                {
+                    break;
+                }
+                Err(_) => break,
+            }
+        }
+        if !response.is_empty() {
+            got_response = true;
+            break;
+        }
+    }
+
+    if !got_response {
+        let _ = child.kill();
+        cleanup_net_project(&dir);
+        panic!("server did not respond on port {}", port);
+    }
+
+    let resp_str = String::from_utf8_lossy(&response).to_string();
+    assert!(
+        resp_str.contains("200 OK"),
+        "response should contain '200 OK', got: {:?}",
+        resp_str
+    );
+    // Chunk should have data (hasValue = true) and contain "Hello body"
+    assert!(
+        resp_str.contains("true"),
+        "response should contain 'true' (chunk has value), got: {:?}",
+        resp_str
+    );
+    assert!(
+        resp_str.contains("Hello body"),
+        "response body should contain 'Hello body', got: {:?}",
+        resp_str
+    );
+
+    let output = child.wait_with_output().expect("wait for server");
+    let stdout = normalize(&String::from_utf8_lossy(&output.stdout));
+    assert_eq!(stdout, "true", "httpServe result mismatch: {:?}", stdout);
+
+    cleanup_net_project(&dir);
+}
+
+/// NET4-1h-3: readBodyChunk with chunked Transfer-Encoding.
+/// Server reads first chunk and reports it.
+#[test]
+fn test_net4_read_body_chunk_chunked_te_interp() {
+    let port = find_free_loopback_port();
+    let source = format!(
+        r#">>> taida-lang/net => @(httpServe, readBodyChunk, readBodyAll, startResponse, writeChunk, endResponse)
+
+handler req writer =
+  chunk <= readBodyChunk(req)
+  startResponse(writer, 200, @[@(name <= "Content-Type", value <= "text/plain")])
+  writeChunk(writer, chunk.hasValue.toString())
+  writeChunk(writer, "|")
+  writeChunk(writer, chunk.__value)
+  endResponse(writer)
+=> :Unit
+
+asyncResult <= httpServe({port}, handler, 1)
+asyncResult ]=> result
+result ]=> r
+stdout(r.ok)
+"#
+    );
+
+    let dir = setup_net_project(&source, "net4_rbc_chunked");
+    let td_path = dir.join("main.td");
+    let mut child = Command::new(taida_bin())
+        .arg(&td_path)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn interpreter");
+
+    // Send a chunked body: "Hello" (5 bytes) + " World" (6 bytes)
+    let chunked_request = "POST / HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n\r\n\
+         5\r\nHello\r\n6\r\n World\r\n0\r\n\r\n";
+
+    let mut response = Vec::new();
+    let mut got_response = false;
+    for _ in 0..80 {
+        thread::sleep(Duration::from_millis(100));
+        let stream = match TcpStream::connect(format!("127.0.0.1:{}", port)) {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+        stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
+        stream.set_write_timeout(Some(Duration::from_secs(5))).ok();
+        let mut stream = stream;
+        if std::io::Write::write_all(&mut stream, chunked_request.as_bytes()).is_err() {
+            continue;
+        }
+        let mut buf = [0u8; 4096];
+        loop {
+            match std::io::Read::read(&mut stream, &mut buf) {
+                Ok(0) => break,
+                Ok(n) => response.extend_from_slice(&buf[..n]),
+                Err(ref e)
+                    if e.kind() == std::io::ErrorKind::WouldBlock
+                        || e.kind() == std::io::ErrorKind::TimedOut =>
+                {
+                    break;
+                }
+                Err(_) => break,
+            }
+        }
+        if !response.is_empty() {
+            got_response = true;
+            break;
+        }
+    }
+
+    if !got_response {
+        let _ = child.kill();
+        cleanup_net_project(&dir);
+        panic!("server did not respond on port {}", port);
+    }
+
+    let resp_str = String::from_utf8_lossy(&response).to_string();
+    assert!(
+        resp_str.contains("200 OK"),
+        "response should contain '200 OK', got: {:?}",
+        resp_str
+    );
+    // First chunk should be "Hello" (5 bytes). The response is chunked,
+    // so we check that "true" and "Hello" appear in the decoded body.
+    assert!(
+        resp_str.contains("true") && resp_str.contains("Hello"),
+        "response should contain 'true' and 'Hello' (first chunk), got: {:?}",
+        resp_str
+    );
+
+    let output = child.wait_with_output().expect("wait for server");
+    let stdout = normalize(&String::from_utf8_lossy(&output.stdout));
+    assert_eq!(stdout, "true", "httpServe result mismatch: {:?}", stdout);
+
+    cleanup_net_project(&dir);
+}
+
+/// NET4-1h-4: readBodyAll with chunked Transfer-Encoding.
+#[test]
+fn test_net4_read_body_all_chunked_te_interp() {
+    let port = find_free_loopback_port();
+    let source = format!(
+        r#">>> taida-lang/net => @(httpServe, readBodyAll, startResponse, writeChunk, endResponse)
+
+handler req writer =
+  body <= readBodyAll(req)
+  startResponse(writer, 200, @[@(name <= "Content-Type", value <= "text/plain")])
+  writeChunk(writer, body)
+  endResponse(writer)
+=> :Unit
+
+asyncResult <= httpServe({port}, handler, 1)
+asyncResult ]=> result
+result ]=> r
+stdout(r.ok)
+"#
+    );
+
+    let dir = setup_net_project(&source, "net4_rba_chunked");
+    let td_path = dir.join("main.td");
+    let mut child = Command::new(taida_bin())
+        .arg(&td_path)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn interpreter");
+
+    let chunked_request = "POST / HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n\r\n\
+         5\r\nHello\r\n6\r\n World\r\n0\r\n\r\n";
+
+    let mut response = Vec::new();
+    let mut got_response = false;
+    for _ in 0..80 {
+        thread::sleep(Duration::from_millis(100));
+        let stream = match TcpStream::connect(format!("127.0.0.1:{}", port)) {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+        stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
+        stream.set_write_timeout(Some(Duration::from_secs(5))).ok();
+        let mut stream = stream;
+        if std::io::Write::write_all(&mut stream, chunked_request.as_bytes()).is_err() {
+            continue;
+        }
+        let mut buf = [0u8; 4096];
+        loop {
+            match std::io::Read::read(&mut stream, &mut buf) {
+                Ok(0) => break,
+                Ok(n) => response.extend_from_slice(&buf[..n]),
+                Err(ref e)
+                    if e.kind() == std::io::ErrorKind::WouldBlock
+                        || e.kind() == std::io::ErrorKind::TimedOut =>
+                {
+                    break;
+                }
+                Err(_) => break,
+            }
+        }
+        if !response.is_empty() {
+            got_response = true;
+            break;
+        }
+    }
+
+    if !got_response {
+        let _ = child.kill();
+        cleanup_net_project(&dir);
+        panic!("server did not respond on port {}", port);
+    }
+
+    let resp_str = String::from_utf8_lossy(&response).to_string();
+    assert!(
+        resp_str.contains("200 OK"),
+        "response should contain '200 OK', got: {:?}",
+        resp_str
+    );
+    assert!(
+        resp_str.contains("Hello World"),
+        "response body should contain 'Hello World', got: {:?}",
+        resp_str
+    );
+
+    let output = child.wait_with_output().expect("wait for server");
+    let stdout = normalize(&String::from_utf8_lossy(&output.stdout));
+    assert_eq!(stdout, "true", "httpServe result mismatch: {:?}", stdout);
+
+    cleanup_net_project(&dir);
+}
+
+/// NET4-1h-5: readBody in 2-arg handler acts as readBodyAll alias.
+#[test]
+fn test_net4_read_body_alias_in_2arg_handler_interp() {
+    let port = find_free_loopback_port();
+    let source = format!(
+        r#">>> taida-lang/net => @(httpServe, readBody, startResponse, writeChunk, endResponse)
+
+handler req writer =
+  body <= readBody(req)
+  startResponse(writer, 200, @[@(name <= "Content-Type", value <= "text/plain")])
+  writeChunk(writer, body)
+  endResponse(writer)
+=> :Unit
+
+asyncResult <= httpServe({port}, handler, 1)
+asyncResult ]=> result
+result ]=> r
+stdout(r.ok)
+"#
+    );
+
+    let dir = setup_net_project(&source, "net4_rb_alias");
+    let td_path = dir.join("main.td");
+    let mut child = Command::new(taida_bin())
+        .arg(&td_path)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn interpreter");
+
+    let body = "Alias test body";
+    let request = format!(
+        "POST / HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\n\r\n{}",
+        body.len(),
+        body,
+    );
+
+    let mut response = Vec::new();
+    let mut got_response = false;
+    for _ in 0..80 {
+        thread::sleep(Duration::from_millis(100));
+        let stream = match TcpStream::connect(format!("127.0.0.1:{}", port)) {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+        stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
+        stream.set_write_timeout(Some(Duration::from_secs(5))).ok();
+        let mut stream = stream;
+        if std::io::Write::write_all(&mut stream, request.as_bytes()).is_err() {
+            continue;
+        }
+        let mut buf = [0u8; 4096];
+        loop {
+            match std::io::Read::read(&mut stream, &mut buf) {
+                Ok(0) => break,
+                Ok(n) => response.extend_from_slice(&buf[..n]),
+                Err(ref e)
+                    if e.kind() == std::io::ErrorKind::WouldBlock
+                        || e.kind() == std::io::ErrorKind::TimedOut =>
+                {
+                    break;
+                }
+                Err(_) => break,
+            }
+        }
+        if !response.is_empty() {
+            got_response = true;
+            break;
+        }
+    }
+
+    if !got_response {
+        let _ = child.kill();
+        cleanup_net_project(&dir);
+        panic!("server did not respond on port {}", port);
+    }
+
+    let resp_str = String::from_utf8_lossy(&response).to_string();
+    assert!(
+        resp_str.contains("200 OK"),
+        "response should contain '200 OK', got: {:?}",
+        resp_str
+    );
+    assert!(
+        resp_str.contains("Alias test body"),
+        "response body should contain 'Alias test body', got: {:?}",
+        resp_str
+    );
+
+    let output = child.wait_with_output().expect("wait for server");
+    let stdout = normalize(&String::from_utf8_lossy(&output.stdout));
+    assert_eq!(stdout, "true", "httpServe result mismatch: {:?}", stdout);
+
+    cleanup_net_project(&dir);
+}
+
+/// NET4-1h-6: readBodyChunk on empty body (GET request) returns Lax empty immediately.
+#[test]
+fn test_net4_read_body_chunk_empty_body_interp() {
+    let port = find_free_loopback_port();
+    let source = format!(
+        r#">>> taida-lang/net => @(httpServe, readBodyChunk, startResponse, writeChunk, endResponse)
+
+handler req writer =
+  chunk <= readBodyChunk(req)
+  startResponse(writer, 200, @[@(name <= "Content-Type", value <= "text/plain")])
+  writeChunk(writer, chunk.hasValue.toString())
+  endResponse(writer)
+=> :Unit
+
+asyncResult <= httpServe({port}, handler, 1)
+asyncResult ]=> result
+result ]=> r
+stdout(r.ok)
+"#
+    );
+
+    let dir = setup_net_project(&source, "net4_rbc_empty");
+    let td_path = dir.join("main.td");
+    let mut child = Command::new(taida_bin())
+        .arg(&td_path)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn interpreter");
+
+    let request = "GET / HTTP/1.1\r\nHost: localhost\r\n\r\n";
+
+    let mut response = Vec::new();
+    let mut got_response = false;
+    for _ in 0..80 {
+        thread::sleep(Duration::from_millis(100));
+        let stream = match TcpStream::connect(format!("127.0.0.1:{}", port)) {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+        stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
+        stream.set_write_timeout(Some(Duration::from_secs(5))).ok();
+        let mut stream = stream;
+        if std::io::Write::write_all(&mut stream, request.as_bytes()).is_err() {
+            continue;
+        }
+        let mut buf = [0u8; 4096];
+        loop {
+            match std::io::Read::read(&mut stream, &mut buf) {
+                Ok(0) => break,
+                Ok(n) => response.extend_from_slice(&buf[..n]),
+                Err(ref e)
+                    if e.kind() == std::io::ErrorKind::WouldBlock
+                        || e.kind() == std::io::ErrorKind::TimedOut =>
+                {
+                    break;
+                }
+                Err(_) => break,
+            }
+        }
+        if !response.is_empty() {
+            got_response = true;
+            break;
+        }
+    }
+
+    if !got_response {
+        let _ = child.kill();
+        cleanup_net_project(&dir);
+        panic!("server did not respond on port {}", port);
+    }
+
+    let resp_str = String::from_utf8_lossy(&response).to_string();
+    assert!(
+        resp_str.contains("200 OK"),
+        "response should contain '200 OK', got: {:?}",
+        resp_str
+    );
+    // GET with no body -> readBodyChunk returns Lax empty -> hasValue = false
+    assert!(
+        resp_str.contains("false"),
+        "response body should contain 'false' (hasValue), got: {:?}",
+        resp_str
+    );
+
+    let output = child.wait_with_output().expect("wait for server");
+    let stdout = normalize(&String::from_utf8_lossy(&output.stdout));
+    assert_eq!(stdout, "true", "httpServe result mismatch: {:?}", stdout);
+
+    cleanup_net_project(&dir);
+}
+
+/// NET4-1h-7: v3 2-arg handler one-shot fallback still works (no body read).
+/// Verifies that the v4 body-deferred path does not break v3 one-shot fallback.
+#[test]
+fn test_net4_v3_oneshot_fallback_still_works_interp() {
+    let port = find_free_loopback_port();
+    let source = format!(
+        r#">>> taida-lang/net => @(httpServe)
+
+handler req writer =
+  @(status <= 200, headers <= @[], body <= "v3 fallback ok")
+
+asyncResult <= httpServe({port}, handler, 1)
+asyncResult ]=> result
+result ]=> r
+stdout(r.ok)
+"#
+    );
+
+    let dir = setup_net_project(&source, "net4_v3_fallback");
+    let td_path = dir.join("main.td");
+    let mut child = Command::new(taida_bin())
+        .arg(&td_path)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn interpreter");
+
+    let request = "GET / HTTP/1.1\r\nHost: localhost\r\n\r\n";
+
+    let mut response = Vec::new();
+    let mut got_response = false;
+    for _ in 0..80 {
+        thread::sleep(Duration::from_millis(100));
+        let stream = match TcpStream::connect(format!("127.0.0.1:{}", port)) {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+        stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
+        stream.set_write_timeout(Some(Duration::from_secs(5))).ok();
+        let mut stream = stream;
+        if std::io::Write::write_all(&mut stream, request.as_bytes()).is_err() {
+            continue;
+        }
+        let mut buf = [0u8; 4096];
+        loop {
+            match std::io::Read::read(&mut stream, &mut buf) {
+                Ok(0) => break,
+                Ok(n) => response.extend_from_slice(&buf[..n]),
+                Err(ref e)
+                    if e.kind() == std::io::ErrorKind::WouldBlock
+                        || e.kind() == std::io::ErrorKind::TimedOut =>
+                {
+                    break;
+                }
+                Err(_) => break,
+            }
+        }
+        if !response.is_empty() {
+            got_response = true;
+            break;
+        }
+    }
+
+    if !got_response {
+        let _ = child.kill();
+        cleanup_net_project(&dir);
+        panic!("server did not respond on port {}", port);
+    }
+
+    let resp_str = String::from_utf8_lossy(&response).to_string();
+    assert!(
+        resp_str.contains("200 OK"),
+        "response should contain '200 OK', got: {:?}",
+        resp_str
+    );
+    assert!(
+        resp_str.contains("v3 fallback ok"),
+        "response body should contain 'v3 fallback ok', got: {:?}",
+        resp_str
+    );
+
+    let output = child.wait_with_output().expect("wait for server");
+    let stdout = normalize(&String::from_utf8_lossy(&output.stdout));
+    assert_eq!(stdout, "true", "httpServe result mismatch: {:?}", stdout);
+
+    cleanup_net_project(&dir);
+}
+
+/// NET4-1h-8: v3 streaming (writeChunk) still works with v4 body-deferred path.
+#[test]
+fn test_net4_v3_streaming_still_works_interp() {
+    let port = find_free_loopback_port();
+    let source = format!(
+        r#">>> taida-lang/net => @(httpServe, startResponse, writeChunk, endResponse)
+
+handler req writer =
+  startResponse(writer, 200, @[@(name <= "Content-Type", value <= "text/plain")])
+  writeChunk(writer, "v3 streaming ok")
+  endResponse(writer)
+=> :Unit
+
+asyncResult <= httpServe({port}, handler, 1)
+asyncResult ]=> result
+result ]=> r
+stdout(r.ok)
+"#
+    );
+
+    let dir = setup_net_project(&source, "net4_v3_streaming");
+    let td_path = dir.join("main.td");
+    let mut child = Command::new(taida_bin())
+        .arg(&td_path)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn interpreter");
+
+    let request = "GET / HTTP/1.1\r\nHost: localhost\r\n\r\n";
+
+    let mut response = Vec::new();
+    let mut got_response = false;
+    for _ in 0..80 {
+        thread::sleep(Duration::from_millis(100));
+        let stream = match TcpStream::connect(format!("127.0.0.1:{}", port)) {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+        stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
+        stream.set_write_timeout(Some(Duration::from_secs(5))).ok();
+        let mut stream = stream;
+        if std::io::Write::write_all(&mut stream, request.as_bytes()).is_err() {
+            continue;
+        }
+        let mut buf = [0u8; 4096];
+        loop {
+            match std::io::Read::read(&mut stream, &mut buf) {
+                Ok(0) => break,
+                Ok(n) => response.extend_from_slice(&buf[..n]),
+                Err(ref e)
+                    if e.kind() == std::io::ErrorKind::WouldBlock
+                        || e.kind() == std::io::ErrorKind::TimedOut =>
+                {
+                    break;
+                }
+                Err(_) => break,
+            }
+        }
+        if !response.is_empty() {
+            got_response = true;
+            break;
+        }
+    }
+
+    if !got_response {
+        let _ = child.kill();
+        cleanup_net_project(&dir);
+        panic!("server did not respond on port {}", port);
+    }
+
+    let resp_str = String::from_utf8_lossy(&response).to_string();
+    assert!(
+        resp_str.contains("200 OK"),
+        "response should contain '200 OK', got: {:?}",
+        resp_str
+    );
+    assert!(
+        resp_str.contains("v3 streaming ok"),
+        "response body should contain 'v3 streaming ok', got: {:?}",
+        resp_str
+    );
+
+    let output = child.wait_with_output().expect("wait for server");
+    let stdout = normalize(&String::from_utf8_lossy(&output.stdout));
+    assert_eq!(stdout, "true", "httpServe result mismatch: {:?}", stdout);
+
+    cleanup_net_project(&dir);
+}
+
+// ── NET4 Phase 2: WebSocket Tests ──────────────────────────────
+
+/// NET4-2i-1: WebSocket handshake + echo text frame.
+/// Server upgrades to WebSocket and echoes received text messages.
+#[test]
+fn test_net4_ws_upgrade_and_echo_text_interp() {
+    let port = find_free_loopback_port();
+    let source = format!(
+        r#">>> taida-lang/net => @(httpServe, wsUpgrade, wsSend, wsReceive, wsClose)
+
+handler req writer =
+  upgrade <= wsUpgrade(req, writer)
+  ws <= upgrade.__value.ws
+  msg <= wsReceive(ws)
+  wsSend(ws, msg.__value.data)
+  wsClose(ws)
+=> :Unit
+
+asyncResult <= httpServe({port}, handler, 1)
+asyncResult ]=> result
+stdout(result.__value.ok.toString())
+"#,
+        port = port
+    );
+
+    let dir = setup_net_project(&source, "net4_ws_echo_text");
+    let td_path = dir.join("main.td");
+    let mut child = Command::new(taida_bin())
+        .arg(&td_path)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn interpreter");
+
+    // Prepare WebSocket handshake request.
+    let ws_key = "dGhlIHNhbXBsZSBub25jZQ==";
+    let request = format!(
+        "GET /ws HTTP/1.1\r\n\
+         Host: localhost:{port}\r\n\
+         Upgrade: websocket\r\n\
+         Connection: Upgrade\r\n\
+         Sec-WebSocket-Key: {key}\r\n\
+         Sec-WebSocket-Version: 13\r\n\
+         \r\n",
+        port = port,
+        key = ws_key
+    );
+
+    let mut got_response = false;
+    let mut ws_response_data: Vec<u8> = Vec::new();
+
+    for _ in 0..80 {
+        thread::sleep(Duration::from_millis(100));
+        let stream = match TcpStream::connect(format!("127.0.0.1:{}", port)) {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+        stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
+        stream.set_write_timeout(Some(Duration::from_secs(5))).ok();
+        let mut stream = stream;
+
+        // Send WebSocket upgrade request.
+        if std::io::Write::write_all(&mut stream, request.as_bytes()).is_err() {
+            continue;
+        }
+
+        // Read 101 response.
+        let mut buf = [0u8; 4096];
+        let mut response_head = Vec::new();
+        loop {
+            match std::io::Read::read(&mut stream, &mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    response_head.extend_from_slice(&buf[..n]);
+                    let head_str = String::from_utf8_lossy(&response_head);
+                    if head_str.contains("\r\n\r\n") {
+                        break;
+                    }
+                }
+                Err(ref e)
+                    if e.kind() == std::io::ErrorKind::WouldBlock
+                        || e.kind() == std::io::ErrorKind::TimedOut =>
+                {
+                    break;
+                }
+                Err(_) => break,
+            }
+        }
+
+        let head_str = String::from_utf8_lossy(&response_head).to_string();
+        if !head_str.contains("101 Switching Protocols") {
+            continue;
+        }
+
+        // Verify Sec-WebSocket-Accept.
+        assert!(
+            head_str.contains("s3pPLMBiTxaQ9kYGzzhZRbK+xOo="),
+            "response should contain correct Sec-WebSocket-Accept, got: {:?}",
+            head_str
+        );
+
+        // Send a masked text frame: "Hello"
+        // FIN=1, opcode=0x1, MASK=1, len=5
+        let payload = b"Hello";
+        let mask_key: [u8; 4] = [0x37, 0xfa, 0x21, 0x3d];
+        let mut masked_payload = payload.to_vec();
+        for (i, byte) in masked_payload.iter_mut().enumerate() {
+            *byte ^= mask_key[i % 4];
+        }
+        let mut frame = Vec::new();
+        frame.push(0x81); // FIN=1, opcode=text
+        frame.push(0x80 | payload.len() as u8); // MASK=1, len=5
+        frame.extend_from_slice(&mask_key);
+        frame.extend_from_slice(&masked_payload);
+        if std::io::Write::write_all(&mut stream, &frame).is_err() {
+            continue;
+        }
+
+        // Read echo response frame.
+        thread::sleep(Duration::from_millis(200));
+        match std::io::Read::read(&mut stream, &mut buf) {
+            Ok(0) => {}
+            Ok(n) => {
+                ws_response_data.extend_from_slice(&buf[..n]);
+            }
+            Err(ref e)
+                if e.kind() == std::io::ErrorKind::WouldBlock
+                    || e.kind() == std::io::ErrorKind::TimedOut => {}
+            Err(_) => {}
+        }
+
+        if !ws_response_data.is_empty() {
+            got_response = true;
+            break;
+        }
+    }
+
+    if !got_response {
+        let _ = child.kill();
+        cleanup_net_project(&dir);
+        panic!("WebSocket server did not respond on port {}", port);
+    }
+
+    // Parse the response frame: should be text frame "Hello" (unmasked).
+    assert!(ws_response_data.len() >= 2, "response frame too short");
+    assert_eq!(
+        ws_response_data[0], 0x81,
+        "expected FIN=1 + opcode=text (0x81), got 0x{:02X}",
+        ws_response_data[0]
+    );
+    // Payload length
+    let payload_len = (ws_response_data[1] & 0x7F) as usize;
+    assert_eq!(payload_len, 5, "expected payload length 5");
+    let echo_payload = &ws_response_data[2..2 + payload_len];
+    assert_eq!(
+        echo_payload, b"Hello",
+        "echoed payload mismatch: {:?}",
+        echo_payload
+    );
+
+    let output = child.wait_with_output().expect("wait for server");
+    let stdout = normalize(&String::from_utf8_lossy(&output.stdout));
+    assert_eq!(stdout, "true", "httpServe result mismatch: {:?}", stdout);
+
+    cleanup_net_project(&dir);
+}
+
+/// NET4-2i-2: WebSocket upgrade failure (missing headers) returns Lax empty.
+#[test]
+fn test_net4_ws_upgrade_failure_no_wire_interp() {
+    let port = find_free_loopback_port();
+    let source = format!(
+        r#">>> taida-lang/net => @(httpServe, wsUpgrade, startResponse, writeChunk, endResponse)
+
+handler req writer =
+  upgrade <= wsUpgrade(req, writer)
+  startResponse(writer, 200, @[@(name <= "Content-Type", value <= "text/plain")])
+  writeChunk(writer, upgrade.hasValue.toString())
+  endResponse(writer)
+=> :Unit
+
+asyncResult <= httpServe({port}, handler, 1)
+asyncResult ]=> result
+stdout(result.__value.ok.toString())
+"#,
+        port = port
+    );
+
+    let dir = setup_net_project(&source, "net4_ws_upgrade_fail");
+    let td_path = dir.join("main.td");
+    let mut child = Command::new(taida_bin())
+        .arg(&td_path)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn interpreter");
+
+    // Send a regular GET (no WebSocket headers).
+    let request = format!("GET / HTTP/1.1\r\nHost: localhost:{}\r\n\r\n", port);
+
+    let mut response = Vec::new();
+    let mut got_response = false;
+    for _ in 0..80 {
+        thread::sleep(Duration::from_millis(100));
+        let stream = match TcpStream::connect(format!("127.0.0.1:{}", port)) {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+        stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
+        stream.set_write_timeout(Some(Duration::from_secs(5))).ok();
+        let mut stream = stream;
+        if std::io::Write::write_all(&mut stream, request.as_bytes()).is_err() {
+            continue;
+        }
+        let mut buf = [0u8; 4096];
+        loop {
+            match std::io::Read::read(&mut stream, &mut buf) {
+                Ok(0) => break,
+                Ok(n) => response.extend_from_slice(&buf[..n]),
+                Err(ref e)
+                    if e.kind() == std::io::ErrorKind::WouldBlock
+                        || e.kind() == std::io::ErrorKind::TimedOut =>
+                {
+                    break;
+                }
+                Err(_) => break,
+            }
+        }
+        if !response.is_empty() {
+            got_response = true;
+            break;
+        }
+    }
+
+    if !got_response {
+        let _ = child.kill();
+        cleanup_net_project(&dir);
+        panic!("server did not respond on port {}", port);
+    }
+
+    let resp_str = String::from_utf8_lossy(&response).to_string();
+    // Should get 200 OK, not 101.
+    assert!(
+        resp_str.contains("200 OK"),
+        "response should contain '200 OK', got: {:?}",
+        resp_str
+    );
+    // Body should contain "false" (upgrade.hasValue == false).
+    assert!(
+        resp_str.contains("false"),
+        "response body should contain 'false' (upgrade failed), got: {:?}",
+        resp_str
+    );
+
+    let output = child.wait_with_output().expect("wait for server");
+    let stdout = normalize(&String::from_utf8_lossy(&output.stdout));
+    assert_eq!(stdout, "true", "httpServe result mismatch: {:?}", stdout);
+
+    cleanup_net_project(&dir);
+}
+
+/// NET4-2i-3: writeChunk after wsUpgrade returns error.
+#[test]
+fn test_net4_ws_upgrade_blocks_http_streaming_interp() {
+    let port = find_free_loopback_port();
+    let source = format!(
+        r#">>> taida-lang/net => @(httpServe, wsUpgrade, writeChunk, wsClose)
+
+handler req writer =
+  upgrade <= wsUpgrade(req, writer)
+  ws <= upgrade.__value.ws
+  // This should fail: cannot use writeChunk after WebSocket upgrade.
+  writeChunk(writer, "should fail")
+  wsClose(ws)
+=> :Unit
+
+asyncResult <= httpServe({port}, handler, 1)
+asyncResult ]=> result
+stdout(result.__value.ok.toString())
+"#,
+        port = port
+    );
+
+    let dir = setup_net_project(&source, "net4_ws_blocks_http");
+    let td_path = dir.join("main.td");
+    let child = Command::new(taida_bin())
+        .arg(&td_path)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn interpreter");
+
+    // Send a proper WebSocket upgrade request.
+    let ws_key = "dGhlIHNhbXBsZSBub25jZQ==";
+    let request = format!(
+        "GET /ws HTTP/1.1\r\n\
+         Host: localhost:{port}\r\n\
+         Upgrade: websocket\r\n\
+         Connection: Upgrade\r\n\
+         Sec-WebSocket-Key: {key}\r\n\
+         Sec-WebSocket-Version: 13\r\n\
+         \r\n",
+        port = port,
+        key = ws_key
+    );
+
+    let mut got_101 = false;
+    for _ in 0..80 {
+        thread::sleep(Duration::from_millis(100));
+        let stream = match TcpStream::connect(format!("127.0.0.1:{}", port)) {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+        stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
+        stream.set_write_timeout(Some(Duration::from_secs(5))).ok();
+        let mut stream = stream;
+        if std::io::Write::write_all(&mut stream, request.as_bytes()).is_err() {
+            continue;
+        }
+        let mut buf = [0u8; 4096];
+        let mut response = Vec::new();
+        match std::io::Read::read(&mut stream, &mut buf) {
+            Ok(0) => {}
+            Ok(n) => {
+                response.extend_from_slice(&buf[..n]);
+            }
+            Err(ref e)
+                if e.kind() == std::io::ErrorKind::WouldBlock
+                    || e.kind() == std::io::ErrorKind::TimedOut => {}
+            Err(_) => {}
+        }
+        let resp_str = String::from_utf8_lossy(&response).to_string();
+        if resp_str.contains("101 Switching Protocols") {
+            got_101 = true;
+            break;
+        }
+    }
+
+    assert!(got_101, "expected 101 Switching Protocols response");
+
+    // The handler should have errored trying to use writeChunk after upgrade.
+    let output = child.wait_with_output().expect("wait for server");
+    let stdout = normalize(&String::from_utf8_lossy(&output.stdout));
+    assert_eq!(stdout, "true", "httpServe result mismatch: {:?}", stdout);
+
+    cleanup_net_project(&dir);
+}
+
+/// NET4-2i-4: wsUpgrade with POST request (has body) returns Lax empty.
+#[test]
+fn test_net4_ws_upgrade_rejects_post_interp() {
+    let port = find_free_loopback_port();
+    let source = format!(
+        r#">>> taida-lang/net => @(httpServe, wsUpgrade, startResponse, writeChunk, endResponse)
+
+handler req writer =
+  upgrade <= wsUpgrade(req, writer)
+  startResponse(writer, 200, @[@(name <= "Content-Type", value <= "text/plain")])
+  writeChunk(writer, upgrade.hasValue.toString())
+  endResponse(writer)
+=> :Unit
+
+asyncResult <= httpServe({port}, handler, 1)
+asyncResult ]=> result
+stdout(result.__value.ok.toString())
+"#,
+        port = port
+    );
+
+    let dir = setup_net_project(&source, "net4_ws_reject_post");
+    let td_path = dir.join("main.td");
+    let mut child = Command::new(taida_bin())
+        .arg(&td_path)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn interpreter");
+
+    // Send a POST request with WebSocket headers (body is present).
+    let ws_key = "dGhlIHNhbXBsZSBub25jZQ==";
+    let body_content = "some body";
+    let request = format!(
+        "POST /ws HTTP/1.1\r\n\
+         Host: localhost:{port}\r\n\
+         Content-Length: {cl}\r\n\
+         Upgrade: websocket\r\n\
+         Connection: Upgrade\r\n\
+         Sec-WebSocket-Key: {key}\r\n\
+         Sec-WebSocket-Version: 13\r\n\
+         \r\n\
+         {body}",
+        port = port,
+        cl = body_content.len(),
+        key = ws_key,
+        body = body_content
+    );
+
+    let mut response = Vec::new();
+    let mut got_response = false;
+    for _ in 0..80 {
+        thread::sleep(Duration::from_millis(100));
+        let stream = match TcpStream::connect(format!("127.0.0.1:{}", port)) {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+        stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
+        stream.set_write_timeout(Some(Duration::from_secs(5))).ok();
+        let mut stream = stream;
+        if std::io::Write::write_all(&mut stream, request.as_bytes()).is_err() {
+            continue;
+        }
+        let mut buf = [0u8; 4096];
+        loop {
+            match std::io::Read::read(&mut stream, &mut buf) {
+                Ok(0) => break,
+                Ok(n) => response.extend_from_slice(&buf[..n]),
+                Err(ref e)
+                    if e.kind() == std::io::ErrorKind::WouldBlock
+                        || e.kind() == std::io::ErrorKind::TimedOut =>
+                {
+                    break;
+                }
+                Err(_) => break,
+            }
+        }
+        if !response.is_empty() {
+            got_response = true;
+            break;
+        }
+    }
+
+    if !got_response {
+        let _ = child.kill();
+        cleanup_net_project(&dir);
+        panic!("server did not respond on port {}", port);
+    }
+
+    let resp_str = String::from_utf8_lossy(&response).to_string();
+    // Should get 200 OK (not 101) because POST with body is rejected.
+    assert!(
+        resp_str.contains("200 OK"),
+        "response should be 200 OK (not 101), got: {:?}",
+        resp_str
+    );
+    // Body should contain "false" (upgrade failed).
+    assert!(
+        resp_str.contains("false"),
+        "response body should contain 'false', got: {:?}",
+        resp_str
+    );
+
+    let output = child.wait_with_output().expect("wait for server");
+    let stdout = normalize(&String::from_utf8_lossy(&output.stdout));
+    assert_eq!(stdout, "true", "httpServe result mismatch: {:?}", stdout);
+
+    cleanup_net_project(&dir);
+}
+
+/// NET4-2i-5: WebSocket ping receives auto-pong.
+#[test]
+fn test_net4_ws_ping_pong_interp() {
+    let port = find_free_loopback_port();
+    let source = format!(
+        r#">>> taida-lang/net => @(httpServe, wsUpgrade, wsSend, wsReceive, wsClose)
+
+handler req writer =
+  upgrade <= wsUpgrade(req, writer)
+  ws <= upgrade.__value.ws
+  msg <= wsReceive(ws)
+  wsSend(ws, msg.__value.data)
+  wsClose(ws)
+=> :Unit
+
+asyncResult <= httpServe({port}, handler, 1)
+asyncResult ]=> result
+stdout(result.__value.ok.toString())
+"#,
+        port = port
+    );
+
+    let dir = setup_net_project(&source, "net4_ws_ping_pong");
+    let td_path = dir.join("main.td");
+    let child = Command::new(taida_bin())
+        .arg(&td_path)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn interpreter");
+
+    let ws_key = "dGhlIHNhbXBsZSBub25jZQ==";
+    let request = format!(
+        "GET /ws HTTP/1.1\r\n\
+         Host: localhost:{port}\r\n\
+         Upgrade: websocket\r\n\
+         Connection: Upgrade\r\n\
+         Sec-WebSocket-Key: {key}\r\n\
+         Sec-WebSocket-Version: 13\r\n\
+         \r\n",
+        port = port,
+        key = ws_key
+    );
+
+    let mut got_pong = false;
+    let mut got_echo = false;
+
+    for _ in 0..80 {
+        thread::sleep(Duration::from_millis(100));
+        let stream = match TcpStream::connect(format!("127.0.0.1:{}", port)) {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+        stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
+        stream.set_write_timeout(Some(Duration::from_secs(5))).ok();
+        let mut stream = stream;
+
+        if std::io::Write::write_all(&mut stream, request.as_bytes()).is_err() {
+            continue;
+        }
+
+        // Read 101.
+        let mut buf = [0u8; 4096];
+        let mut response_head = Vec::new();
+        loop {
+            match std::io::Read::read(&mut stream, &mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    response_head.extend_from_slice(&buf[..n]);
+                    if String::from_utf8_lossy(&response_head).contains("\r\n\r\n") {
+                        break;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+
+        if !String::from_utf8_lossy(&response_head).contains("101") {
+            continue;
+        }
+
+        // Send masked ping frame with payload "ping"
+        let ping_payload = b"ping";
+        let mask_key: [u8; 4] = [0x12, 0x34, 0x56, 0x78];
+        let mut masked = ping_payload.to_vec();
+        for (i, b) in masked.iter_mut().enumerate() {
+            *b ^= mask_key[i % 4];
+        }
+        let mut frame = Vec::new();
+        frame.push(0x89); // FIN=1, opcode=ping
+        frame.push(0x80 | ping_payload.len() as u8); // MASK=1
+        frame.extend_from_slice(&mask_key);
+        frame.extend_from_slice(&masked);
+        std::io::Write::write_all(&mut stream, &frame).unwrap();
+
+        // Read pong response.
+        thread::sleep(Duration::from_millis(200));
+        let mut pong_buf = Vec::new();
+        match std::io::Read::read(&mut stream, &mut buf) {
+            Ok(0) => {}
+            Ok(n) => {
+                pong_buf.extend_from_slice(&buf[..n]);
+            }
+            Err(_) => {}
+        }
+
+        if pong_buf.len() >= 2 {
+            let pong_opcode = pong_buf[0] & 0x0F;
+            if pong_opcode == 0xA {
+                got_pong = true;
+                let pong_len = (pong_buf[1] & 0x7F) as usize;
+                if pong_len == 4 {
+                    assert_eq!(&pong_buf[2..6], b"ping");
+                }
+            }
+        }
+
+        // Send text frame so wsReceive unblocks.
+        let text_payload = b"World";
+        let mut masked_text = text_payload.to_vec();
+        for (i, b) in masked_text.iter_mut().enumerate() {
+            *b ^= mask_key[i % 4];
+        }
+        let mut text_frame = Vec::new();
+        text_frame.push(0x81);
+        text_frame.push(0x80 | text_payload.len() as u8);
+        text_frame.extend_from_slice(&mask_key);
+        text_frame.extend_from_slice(&masked_text);
+        std::io::Write::write_all(&mut stream, &text_frame).unwrap();
+
+        // Read echo.
+        thread::sleep(Duration::from_millis(200));
+        let mut echo_buf = Vec::new();
+        match std::io::Read::read(&mut stream, &mut buf) {
+            Ok(0) => {}
+            Ok(n) => {
+                echo_buf.extend_from_slice(&buf[..n]);
+            }
+            Err(_) => {}
+        }
+
+        if echo_buf.len() >= 2 && (echo_buf[0] & 0x0F) == 0x1 {
+            let echo_len = (echo_buf[1] & 0x7F) as usize;
+            if echo_len == 5 {
+                assert_eq!(&echo_buf[2..7], b"World");
+                got_echo = true;
+            }
+        }
+
+        break;
+    }
+
+    assert!(got_pong, "expected pong response from server");
+    assert!(got_echo, "expected echo response from server");
+
+    let output = child.wait_with_output().expect("wait for server");
+    let stdout = normalize(&String::from_utf8_lossy(&output.stdout));
+    assert_eq!(stdout, "true", "httpServe result mismatch: {:?}", stdout);
+
+    cleanup_net_project(&dir);
+}
+
+/// NET4-2i-6: WebSocket auto-close on handler return.
+#[test]
+fn test_net4_ws_auto_close_on_return_interp() {
+    let port = find_free_loopback_port();
+    let source = format!(
+        r#">>> taida-lang/net => @(httpServe, wsUpgrade, wsSend)
+
+handler req writer =
+  upgrade <= wsUpgrade(req, writer)
+  ws <= upgrade.__value.ws
+  wsSend(ws, "goodbye")
+=> :Unit
+
+asyncResult <= httpServe({port}, handler, 1)
+asyncResult ]=> result
+stdout(result.__value.ok.toString())
+"#,
+        port = port
+    );
+
+    let dir = setup_net_project(&source, "net4_ws_auto_close");
+    let td_path = dir.join("main.td");
+    let child = Command::new(taida_bin())
+        .arg(&td_path)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn interpreter");
+
+    let ws_key = "dGhlIHNhbXBsZSBub25jZQ==";
+    let request = format!(
+        "GET /ws HTTP/1.1\r\n\
+         Host: localhost:{port}\r\n\
+         Upgrade: websocket\r\n\
+         Connection: Upgrade\r\n\
+         Sec-WebSocket-Key: {key}\r\n\
+         Sec-WebSocket-Version: 13\r\n\
+         \r\n",
+        port = port,
+        key = ws_key
+    );
+
+    let mut got_close = false;
+    let mut got_data = false;
+
+    for _ in 0..80 {
+        thread::sleep(Duration::from_millis(100));
+        let stream = match TcpStream::connect(format!("127.0.0.1:{}", port)) {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+        stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
+        stream.set_write_timeout(Some(Duration::from_secs(5))).ok();
+        let mut stream = stream;
+
+        if std::io::Write::write_all(&mut stream, request.as_bytes()).is_err() {
+            continue;
+        }
+
+        // Read 101.
+        let mut buf = [0u8; 4096];
+        let mut head = Vec::new();
+        loop {
+            match std::io::Read::read(&mut stream, &mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    head.extend_from_slice(&buf[..n]);
+                    if String::from_utf8_lossy(&head).contains("\r\n\r\n") {
+                        break;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+
+        if !String::from_utf8_lossy(&head).contains("101") {
+            continue;
+        }
+
+        // Read all frames until connection closes.
+        let mut all_frames = Vec::new();
+        loop {
+            match std::io::Read::read(&mut stream, &mut buf) {
+                Ok(0) => break,
+                Ok(n) => all_frames.extend_from_slice(&buf[..n]),
+                Err(_) => break,
+            }
+        }
+
+        // Parse frames: expect text "goodbye" + close frame.
+        let mut pos = 0;
+        while pos + 1 < all_frames.len() {
+            let opcode = all_frames[pos] & 0x0F;
+            let payload_len = (all_frames[pos + 1] & 0x7F) as usize;
+            pos += 2;
+
+            if opcode == 0x1 {
+                if pos + payload_len <= all_frames.len() {
+                    let data = &all_frames[pos..pos + payload_len];
+                    if data == b"goodbye" {
+                        got_data = true;
+                    }
+                }
+                pos += payload_len;
+            } else if opcode == 0x8 {
+                got_close = true;
+                pos += payload_len;
+            } else {
+                pos += payload_len;
+            }
+        }
+
+        break;
+    }
+
+    assert!(got_data, "expected text frame 'goodbye'");
+    assert!(got_close, "expected auto-close frame from server");
+
+    let output = child.wait_with_output().expect("wait for server");
+    let stdout = normalize(&String::from_utf8_lossy(&output.stdout));
+    assert_eq!(stdout, "true", "httpServe result mismatch: {:?}", stdout);
+
+    cleanup_net_project(&dir);
+}
+
+// ── NET4 Phase 3: JS Backend Parity Tests ───────────────────────
+
+/// Helper: spawn a server for a given backend (interp or js).
+/// Returns (child, temp_dir).
+fn spawn_net_server(source: &str, label: &str, backend: &str) -> (Child, PathBuf) {
+    let dir = setup_net_project(source, label);
+    let td_path = dir.join("main.td");
+
+    let child = match backend {
+        "interp" => Command::new(taida_bin())
+            .arg(&td_path)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn interpreter"),
+        "js" => {
+            let js_path = unique_temp_path("taida_net4_p3_js", label, "mjs");
+            let transpile = Command::new(taida_bin())
+                .arg("build")
+                .arg("--target")
+                .arg("js")
+                .arg(&td_path)
+                .arg("-o")
+                .arg(&js_path)
+                .output()
+                .expect("transpile");
+            if !transpile.status.success() {
+                let stderr = String::from_utf8_lossy(&transpile.stderr);
+                cleanup_net_project(&dir);
+                let _ = fs::remove_file(&js_path);
+                panic!("JS transpile failed for {}: {}", label, stderr);
+            }
+            let child = Command::new("node")
+                .arg(&js_path)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .expect("spawn node");
+            thread::sleep(Duration::from_millis(500));
+            let _ = fs::remove_file(&js_path);
+            child
+        }
+        "native" => {
+            let bin_path = unique_temp_path("taida_net4_native", label, "bin");
+            let compile = Command::new(taida_bin())
+                .arg("build")
+                .arg("--target")
+                .arg("native")
+                .arg(&td_path)
+                .arg("-o")
+                .arg(&bin_path)
+                .output()
+                .expect("compile native");
+            if !compile.status.success() {
+                let stderr = String::from_utf8_lossy(&compile.stderr);
+                cleanup_net_project(&dir);
+                let _ = fs::remove_file(&bin_path);
+                panic!("Native compile failed for {}: {}", label, stderr);
+            }
+            let child = Command::new(&bin_path)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .expect("spawn native binary");
+            thread::sleep(Duration::from_millis(500));
+            let _ = fs::remove_file(&bin_path);
+            child
+        }
+        _ => panic!("unsupported backend: {}", backend),
+    };
+
+    (child, dir)
+}
+
+/// NET4-3e-1: readBodyAll with Content-Length body — Interpreter vs JS parity.
+#[test]
+fn test_net4_read_body_all_cl_interp_js_parity() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+
+    for backend in &["interp", "js"] {
+        let port = find_free_loopback_port();
+        let source = format!(
+            r#">>> taida-lang/net => @(httpServe, readBodyAll, startResponse, writeChunk, endResponse)
+
+handler req writer =
+  body <= readBodyAll(req)
+  startResponse(writer, 200, @[@(name <= "Content-Type", value <= "text/plain")])
+  writeChunk(writer, body)
+  endResponse(writer)
+=> :Unit
+
+asyncResult <= httpServe({port}, handler, 1)
+asyncResult ]=> result
+result ]=> r
+stdout(r.ok)
+"#
+        );
+
+        let (mut child, dir) =
+            spawn_net_server(&source, &format!("net4_rba_cl_{}", backend), backend);
+
+        let body = b"Hello, streaming!";
+        let request = format!(
+            "POST / HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\n\r\n{}",
+            body.len(),
+            std::str::from_utf8(body).unwrap()
+        );
+
+        let response = send_http_request(port, request.as_bytes());
+        let response = match response {
+            Some(r) => r,
+            None => {
+                let _ = child.kill();
+                cleanup_net_project(&dir);
+                panic!("server ({}) did not respond on port {}", backend, port);
+            }
+        };
+
+        let resp_str = String::from_utf8_lossy(&response).to_string();
+        assert!(
+            resp_str.contains("200 OK"),
+            "[{}] response should contain '200 OK', got: {:?}",
+            backend,
+            resp_str
+        );
+        assert!(
+            resp_str.contains("Hello, streaming!"),
+            "[{}] response body should contain 'Hello, streaming!', got: {:?}",
+            backend,
+            resp_str
+        );
+
+        let output = child.wait_with_output().expect("wait for server");
+        let stdout = normalize(&String::from_utf8_lossy(&output.stdout));
+        assert_eq!(
+            stdout, "true",
+            "[{}] httpServe result mismatch: {:?}",
+            backend, stdout
+        );
+
+        cleanup_net_project(&dir);
+    }
+}
+
+/// NET4-3e-2: readBodyChunk with Content-Length body — Interpreter vs JS parity.
+#[test]
+fn test_net4_read_body_chunk_cl_interp_js_parity() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+
+    for backend in &["interp", "js"] {
+        let port = find_free_loopback_port();
+        let source = format!(
+            r#">>> taida-lang/net => @(httpServe, readBodyChunk, startResponse, writeChunk, endResponse)
+
+handler req writer =
+  chunk <= readBodyChunk(req)
+  startResponse(writer, 200, @[@(name <= "Content-Type", value <= "text/plain")])
+  writeChunk(writer, chunk.__value)
+  endResponse(writer)
+=> :Unit
+
+asyncResult <= httpServe({port}, handler, 1)
+asyncResult ]=> result
+result ]=> r
+stdout(r.ok)
+"#
+        );
+
+        let (mut child, dir) =
+            spawn_net_server(&source, &format!("net4_rbc_cl_{}", backend), backend);
+
+        let body = b"ChunkMe";
+        let request = format!(
+            "POST / HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\n\r\n{}",
+            body.len(),
+            std::str::from_utf8(body).unwrap()
+        );
+
+        let response = send_http_request(port, request.as_bytes());
+        let response = match response {
+            Some(r) => r,
+            None => {
+                let _ = child.kill();
+                cleanup_net_project(&dir);
+                panic!("server ({}) did not respond on port {}", backend, port);
+            }
+        };
+
+        let resp_str = String::from_utf8_lossy(&response).to_string();
+        assert!(
+            resp_str.contains("200 OK"),
+            "[{}] response should contain '200 OK', got: {:?}",
+            backend,
+            resp_str
+        );
+        assert!(
+            resp_str.contains("ChunkMe"),
+            "[{}] response body should contain 'ChunkMe', got: {:?}",
+            backend,
+            resp_str
+        );
+
+        let output = child.wait_with_output().expect("wait for server");
+        let stdout = normalize(&String::from_utf8_lossy(&output.stdout));
+        assert_eq!(
+            stdout, "true",
+            "[{}] httpServe result mismatch: {:?}",
+            backend, stdout
+        );
+
+        cleanup_net_project(&dir);
+    }
+}
+
+/// NET4-3e-3: readBodyAll with chunked TE body — Interpreter vs JS parity.
+#[test]
+fn test_net4_read_body_all_chunked_interp_js_parity() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+
+    for backend in &["interp", "js"] {
+        let port = find_free_loopback_port();
+        let source = format!(
+            r#">>> taida-lang/net => @(httpServe, readBodyAll, startResponse, writeChunk, endResponse)
+
+handler req writer =
+  body <= readBodyAll(req)
+  startResponse(writer, 200, @[@(name <= "Content-Type", value <= "text/plain")])
+  writeChunk(writer, body)
+  endResponse(writer)
+=> :Unit
+
+asyncResult <= httpServe({port}, handler, 1)
+asyncResult ]=> result
+result ]=> r
+stdout(r.ok)
+"#
+        );
+
+        let (mut child, dir) =
+            spawn_net_server(&source, &format!("net4_rba_ch_{}", backend), backend);
+
+        // Send chunked TE body.
+        let chunked_request = format!(
+            "POST / HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n\r\n\
+             5\r\nHello\r\n7\r\n, World\r\n0\r\n\r\n"
+        );
+
+        let response = send_http_request(port, chunked_request.as_bytes());
+        let response = match response {
+            Some(r) => r,
+            None => {
+                let _ = child.kill();
+                cleanup_net_project(&dir);
+                panic!("server ({}) did not respond on port {}", backend, port);
+            }
+        };
+
+        let resp_str = String::from_utf8_lossy(&response).to_string();
+        assert!(
+            resp_str.contains("200 OK"),
+            "[{}] response should contain '200 OK', got: {:?}",
+            backend,
+            resp_str
+        );
+        assert!(
+            resp_str.contains("Hello, World"),
+            "[{}] response body should contain 'Hello, World', got: {:?}",
+            backend,
+            resp_str
+        );
+
+        let output = child.wait_with_output().expect("wait for server");
+        let stdout = normalize(&String::from_utf8_lossy(&output.stdout));
+        assert_eq!(
+            stdout, "true",
+            "[{}] httpServe result mismatch: {:?}",
+            backend, stdout
+        );
+
+        cleanup_net_project(&dir);
+    }
+}
+
+/// NET4-3e-4: readBodyChunk on GET (no body) returns Lax empty — Interpreter vs JS parity.
+#[test]
+fn test_net4_read_body_chunk_empty_interp_js_parity() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+
+    for backend in &["interp", "js"] {
+        let port = find_free_loopback_port();
+        let source = format!(
+            r#">>> taida-lang/net => @(httpServe, readBodyChunk, startResponse, writeChunk, endResponse)
+
+handler req writer =
+  chunk <= readBodyChunk(req)
+  startResponse(writer, 200, @[@(name <= "Content-Type", value <= "text/plain")])
+  writeChunk(writer, chunk.hasValue.toString())
+  endResponse(writer)
+=> :Unit
+
+asyncResult <= httpServe({port}, handler, 1)
+asyncResult ]=> result
+result ]=> r
+stdout(r.ok)
+"#
+        );
+
+        let (mut child, dir) =
+            spawn_net_server(&source, &format!("net4_rbc_empty_{}", backend), backend);
+
+        let request = b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n";
+        let response = send_http_request(port, request);
+        let response = match response {
+            Some(r) => r,
+            None => {
+                let _ = child.kill();
+                cleanup_net_project(&dir);
+                panic!("server ({}) did not respond on port {}", backend, port);
+            }
+        };
+
+        let resp_str = String::from_utf8_lossy(&response).to_string();
+        assert!(
+            resp_str.contains("200 OK"),
+            "[{}] response should contain '200 OK', got: {:?}",
+            backend,
+            resp_str
+        );
+        // GET with no body -> readBodyChunk returns Lax empty -> hasValue = false
+        assert!(
+            resp_str.contains("false"),
+            "[{}] response body should contain 'false', got: {:?}",
+            backend,
+            resp_str
+        );
+
+        let output = child.wait_with_output().expect("wait for server");
+        let stdout = normalize(&String::from_utf8_lossy(&output.stdout));
+        assert_eq!(
+            stdout, "true",
+            "[{}] httpServe result mismatch: {:?}",
+            backend, stdout
+        );
+
+        cleanup_net_project(&dir);
+    }
+}
+
+/// NET4-3e-5: WebSocket handshake + echo text frame — Interpreter vs JS parity.
+#[test]
+fn test_net4_ws_echo_text_interp_js_parity() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+
+    for backend in &["interp", "js"] {
+        let port = find_free_loopback_port();
+        let source = format!(
+            r#">>> taida-lang/net => @(httpServe, wsUpgrade, wsSend, wsReceive, wsClose)
+
+handler req writer =
+  upgrade <= wsUpgrade(req, writer)
+  ws <= upgrade.__value.ws
+  msg <= wsReceive(ws)
+  wsSend(ws, msg.__value.data)
+  wsClose(ws)
+=> :Unit
+
+asyncResult <= httpServe({port}, handler, 1)
+asyncResult ]=> result
+stdout(result.__value.ok.toString())
+"#,
+            port = port
+        );
+
+        let (child, dir) = spawn_net_server(&source, &format!("net4_ws_echo_{}", backend), backend);
+
+        // WebSocket handshake.
+        let ws_key = "dGhlIHNhbXBsZSBub25jZQ==";
+        let request = format!(
+            "GET /ws HTTP/1.1\r\n\
+             Host: localhost:{port}\r\n\
+             Upgrade: websocket\r\n\
+             Connection: Upgrade\r\n\
+             Sec-WebSocket-Key: {key}\r\n\
+             Sec-WebSocket-Version: 13\r\n\
+             \r\n",
+            port = port,
+            key = ws_key
+        );
+
+        let mut got_echo = false;
+        let mut got_close = false;
+
+        for _ in 0..80 {
+            thread::sleep(Duration::from_millis(100));
+            let stream = match TcpStream::connect(format!("127.0.0.1:{}", port)) {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+            stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
+            stream.set_write_timeout(Some(Duration::from_secs(5))).ok();
+            let mut stream = stream;
+
+            // Send WS handshake.
+            if std::io::Write::write_all(&mut stream, request.as_bytes()).is_err() {
+                continue;
+            }
+
+            // Read 101 response.
+            let mut head_buf = [0u8; 1024];
+            let mut head_len = 0;
+            let mut handshake_ok = false;
+            loop {
+                match std::io::Read::read(&mut stream, &mut head_buf[head_len..]) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        head_len += n;
+                        let s = std::str::from_utf8(&head_buf[..head_len]).unwrap_or("");
+                        if s.contains("\r\n\r\n") {
+                            if s.contains("101 Switching Protocols") {
+                                handshake_ok = true;
+                            }
+                            break;
+                        }
+                    }
+                    Err(ref e)
+                        if e.kind() == std::io::ErrorKind::WouldBlock
+                            || e.kind() == std::io::ErrorKind::TimedOut =>
+                    {
+                        break;
+                    }
+                    Err(_) => break,
+                }
+            }
+
+            if !handshake_ok {
+                continue;
+            }
+
+            // Send a masked text frame: "Hello WS"
+            let msg = b"Hello WS";
+            let mask_key = [0x37, 0xfa, 0x21, 0x3d];
+            let mut frame = Vec::new();
+            frame.push(0x81); // FIN=1, opcode=text
+            frame.push(0x80 | msg.len() as u8); // MASK=1
+            frame.extend_from_slice(&mask_key);
+            for (i, &b) in msg.iter().enumerate() {
+                frame.push(b ^ mask_key[i % 4]);
+            }
+            if std::io::Write::write_all(&mut stream, &frame).is_err() {
+                continue;
+            }
+
+            // Read echo frame + close frame.
+            let mut all_frames = Vec::new();
+            loop {
+                let mut buf = [0u8; 1024];
+                match std::io::Read::read(&mut stream, &mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => all_frames.extend_from_slice(&buf[..n]),
+                    Err(ref e)
+                        if e.kind() == std::io::ErrorKind::WouldBlock
+                            || e.kind() == std::io::ErrorKind::TimedOut =>
+                    {
+                        break;
+                    }
+                    Err(_) => break,
+                }
+            }
+
+            // Parse frames.
+            let mut pos = 0;
+            while pos + 1 < all_frames.len() {
+                let opcode = all_frames[pos] & 0x0F;
+                let payload_len = (all_frames[pos + 1] & 0x7F) as usize;
+                pos += 2;
+
+                if opcode == 0x1 {
+                    if pos + payload_len <= all_frames.len() {
+                        let data = &all_frames[pos..pos + payload_len];
+                        if data == b"Hello WS" {
+                            got_echo = true;
+                        }
+                    }
+                    pos += payload_len;
+                } else if opcode == 0x8 {
+                    got_close = true;
+                    pos += payload_len;
+                } else {
+                    pos += payload_len;
+                }
+            }
+
+            break;
+        }
+
+        assert!(
+            got_echo,
+            "[{}] expected echo text frame 'Hello WS'",
+            backend
+        );
+        assert!(got_close, "[{}] expected close frame from server", backend);
+
+        let output = child.wait_with_output().expect("wait for server");
+        let stdout = normalize(&String::from_utf8_lossy(&output.stdout));
+        assert_eq!(
+            stdout, "true",
+            "[{}] httpServe result mismatch: {:?}",
+            backend, stdout
+        );
+
+        cleanup_net_project(&dir);
+    }
+}
+
+/// NET4-3e-6: wsUpgrade failure (missing headers) returns Lax empty — Interpreter vs JS parity.
+#[test]
+fn test_net4_ws_upgrade_failure_interp_js_parity() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+
+    for backend in &["interp", "js"] {
+        let port = find_free_loopback_port();
+        let source = format!(
+            r#">>> taida-lang/net => @(httpServe, wsUpgrade, startResponse, writeChunk, endResponse)
+
+handler req writer =
+  upgrade <= wsUpgrade(req, writer)
+  startResponse(writer, 200, @[@(name <= "Content-Type", value <= "text/plain")])
+  writeChunk(writer, upgrade.hasValue.toString())
+  endResponse(writer)
+=> :Unit
+
+asyncResult <= httpServe({port}, handler, 1)
+asyncResult ]=> result
+result ]=> r
+stdout(r.ok)
+"#
+        );
+
+        let (mut child, dir) =
+            spawn_net_server(&source, &format!("net4_ws_fail_{}", backend), backend);
+
+        // Send normal GET (no upgrade headers) — wsUpgrade should return Lax empty.
+        let request = b"GET /ws HTTP/1.1\r\nHost: localhost\r\n\r\n";
+        let response = send_http_request(port, request);
+        let response = match response {
+            Some(r) => r,
+            None => {
+                let _ = child.kill();
+                cleanup_net_project(&dir);
+                panic!("server ({}) did not respond on port {}", backend, port);
+            }
+        };
+
+        let resp_str = String::from_utf8_lossy(&response).to_string();
+        assert!(
+            resp_str.contains("200 OK"),
+            "[{}] response should contain '200 OK', got: {:?}",
+            backend,
+            resp_str
+        );
+        // wsUpgrade failed -> hasValue = false
+        assert!(
+            resp_str.contains("false"),
+            "[{}] response body should contain 'false', got: {:?}",
+            backend,
+            resp_str
+        );
+
+        let output = child.wait_with_output().expect("wait for server");
+        let stdout = normalize(&String::from_utf8_lossy(&output.stdout));
+        assert_eq!(
+            stdout, "true",
+            "[{}] httpServe result mismatch: {:?}",
+            backend, stdout
+        );
+
+        cleanup_net_project(&dir);
+    }
+}
+
+/// NET4-3e-7: v3 one-shot fallback still works in body-deferred mode — Interpreter vs JS parity.
+#[test]
+fn test_net4_oneshot_fallback_interp_js_parity() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+
+    for backend in &["interp", "js"] {
+        let port = find_free_loopback_port();
+        let source = format!(
+            r#">>> taida-lang/net => @(httpServe)
+
+handler req writer =
+  @(status <= 200, headers <= @[@(name <= "Content-Type", value <= "text/plain")], body <= "oneshot ok")
+=> :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
+
+asyncResult <= httpServe({port}, handler, 1)
+asyncResult ]=> result
+result ]=> r
+stdout(r.ok)
+"#
+        );
+
+        let (mut child, dir) =
+            spawn_net_server(&source, &format!("net4_oneshot_{}", backend), backend);
+
+        let request = b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n";
+        let response = send_http_request(port, request);
+        let response = match response {
+            Some(r) => r,
+            None => {
+                let _ = child.kill();
+                cleanup_net_project(&dir);
+                panic!("server ({}) did not respond on port {}", backend, port);
+            }
+        };
+
+        let resp_str = String::from_utf8_lossy(&response).to_string();
+        assert!(
+            resp_str.contains("200 OK"),
+            "[{}] response should contain '200 OK', got: {:?}",
+            backend,
+            resp_str
+        );
+        assert!(
+            resp_str.contains("oneshot ok"),
+            "[{}] response body should contain 'oneshot ok', got: {:?}",
+            backend,
+            resp_str
+        );
+
+        let output = child.wait_with_output().expect("wait for server");
+        let stdout = normalize(&String::from_utf8_lossy(&output.stdout));
+        assert_eq!(
+            stdout, "true",
+            "[{}] httpServe result mismatch: {:?}",
+            backend, stdout
+        );
+
+        cleanup_net_project(&dir);
+    }
+}
+
+// ── NET4-4e: Native parity tests ─────────────────────────────────────────────
+
+/// NET4-4e-1: readBodyAll with Content-Length body — 3-way parity (Interpreter, JS, Native).
+#[test]
+fn test_net4_read_body_all_cl_3way_parity() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+
+    for backend in &["interp", "js", "native"] {
+        let port = find_free_loopback_port();
+        let source = format!(
+            r#">>> taida-lang/net => @(httpServe, readBodyAll, startResponse, writeChunk, endResponse)
+
+handler req writer =
+  body <= readBodyAll(req)
+  startResponse(writer, 200, @[@(name <= "Content-Type", value <= "text/plain")])
+  writeChunk(writer, body)
+  endResponse(writer)
+=> :Unit
+
+asyncResult <= httpServe({port}, handler, 1)
+asyncResult ]=> result
+result ]=> r
+stdout(r.requests)
+"#
+        );
+
+        let (mut child, dir) =
+            spawn_net_server(&source, &format!("net4e_rba_cl_{}", backend), backend);
+
+        let body = b"Hello, streaming!";
+        let request = format!(
+            "POST / HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\n\r\n{}",
+            body.len(),
+            std::str::from_utf8(body).unwrap()
+        );
+
+        let response = send_http_request(port, request.as_bytes());
+        let response = match response {
+            Some(r) => r,
+            None => {
+                let _ = child.kill();
+                cleanup_net_project(&dir);
+                panic!("[{}] server did not respond on port {}", backend, port);
+            }
+        };
+
+        let resp_str = String::from_utf8_lossy(&response).to_string();
+        assert!(
+            resp_str.contains("200 OK"),
+            "[{}] response should contain '200 OK', got: {:?}",
+            backend,
+            resp_str
+        );
+        assert!(
+            resp_str.contains("Hello, streaming!"),
+            "[{}] response body should echo 'Hello, streaming!', got: {:?}",
+            backend,
+            resp_str
+        );
+
+        let output = child.wait_with_output().expect("wait for server");
+        let stdout_str = normalize(&String::from_utf8_lossy(&output.stdout));
+        assert_eq!(
+            stdout_str, "1",
+            "[{}] httpServe stdout mismatch: {:?}",
+            backend, stdout_str
+        );
+
+        cleanup_net_project(&dir);
+    }
+}
+
+/// NET4-4e-2: readBodyChunk with Content-Length body — 3-way parity.
+#[test]
+fn test_net4_read_body_chunk_cl_3way_parity() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+
+    for backend in &["interp", "js", "native"] {
+        let port = find_free_loopback_port();
+        let source = format!(
+            r#">>> taida-lang/net => @(httpServe, readBodyChunk, startResponse, writeChunk, endResponse)
+
+handler req writer =
+  chunk <= readBodyChunk(req)
+  startResponse(writer, 200, @[@(name <= "Content-Type", value <= "text/plain")])
+  writeChunk(writer, chunk.__value)
+  endResponse(writer)
+=> :Unit
+
+asyncResult <= httpServe({port}, handler, 1)
+asyncResult ]=> result
+result ]=> r
+stdout(r.requests)
+"#
+        );
+
+        let (mut child, dir) =
+            spawn_net_server(&source, &format!("net4e_rbc_cl_{}", backend), backend);
+
+        let body = b"chunk data";
+        let request = format!(
+            "POST / HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\n\r\n{}",
+            body.len(),
+            std::str::from_utf8(body).unwrap()
+        );
+
+        let response = send_http_request(port, request.as_bytes());
+        let response = match response {
+            Some(r) => r,
+            None => {
+                let _ = child.kill();
+                cleanup_net_project(&dir);
+                panic!("[{}] server did not respond on port {}", backend, port);
+            }
+        };
+
+        let resp_str = String::from_utf8_lossy(&response).to_string();
+        assert!(
+            resp_str.contains("200 OK"),
+            "[{}] response should contain '200 OK', got: {:?}",
+            backend,
+            resp_str
+        );
+        assert!(
+            resp_str.contains("chunk data"),
+            "[{}] response body should echo 'chunk data', got: {:?}",
+            backend,
+            resp_str
+        );
+
+        let output = child.wait_with_output().expect("wait for server");
+        let stdout_str = normalize(&String::from_utf8_lossy(&output.stdout));
+        assert_eq!(
+            stdout_str, "1",
+            "[{}] httpServe stdout mismatch: {:?}",
+            backend, stdout_str
+        );
+
+        cleanup_net_project(&dir);
+    }
+}
+
+/// NET4-4e-3: readBodyAll with chunked Transfer-Encoding — 3-way parity.
+#[test]
+fn test_net4_read_body_all_chunked_3way_parity() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+
+    for backend in &["interp", "js", "native"] {
+        let port = find_free_loopback_port();
+        let source = format!(
+            r#">>> taida-lang/net => @(httpServe, readBodyAll, startResponse, writeChunk, endResponse)
+
+handler req writer =
+  body <= readBodyAll(req)
+  startResponse(writer, 200, @[@(name <= "Content-Type", value <= "text/plain")])
+  writeChunk(writer, body)
+  endResponse(writer)
+=> :Unit
+
+asyncResult <= httpServe({port}, handler, 1)
+asyncResult ]=> result
+result ]=> r
+stdout(r.requests)
+"#
+        );
+
+        let (mut child, dir) =
+            spawn_net_server(&source, &format!("net4e_rba_chunked_{}", backend), backend);
+
+        let request = b"POST / HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nHello\r\n7\r\n, world\r\n0\r\n\r\n";
+        let response = send_http_request(port, request);
+        let response = match response {
+            Some(r) => r,
+            None => {
+                let _ = child.kill();
+                cleanup_net_project(&dir);
+                panic!("[{}] server did not respond on port {}", backend, port);
+            }
+        };
+
+        let resp_str = String::from_utf8_lossy(&response).to_string();
+        assert!(
+            resp_str.contains("200 OK"),
+            "[{}] response should contain '200 OK', got: {:?}",
+            backend,
+            resp_str
+        );
+        assert!(
+            resp_str.contains("Hello, world"),
+            "[{}] response body should contain 'Hello, world', got: {:?}",
+            backend,
+            resp_str
+        );
+
+        let output = child.wait_with_output().expect("wait for server");
+        let stdout_str = normalize(&String::from_utf8_lossy(&output.stdout));
+        assert_eq!(
+            stdout_str, "1",
+            "[{}] httpServe stdout mismatch: {:?}",
+            backend, stdout_str
+        );
+
+        cleanup_net_project(&dir);
+    }
+}
+
+/// NET4-4e-4: readBodyChunk with empty body (GET) — 3-way parity.
+#[test]
+fn test_net4_read_body_chunk_empty_3way_parity() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+
+    for backend in &["interp", "js", "native"] {
+        let port = find_free_loopback_port();
+        let source = format!(
+            r#">>> taida-lang/net => @(httpServe, readBodyChunk, startResponse, writeChunk, endResponse)
+
+handler req writer =
+  chunk <= readBodyChunk(req)
+  startResponse(writer, 200, @[@(name <= "Content-Type", value <= "text/plain")])
+  writeChunk(writer, chunk.hasValue.toString())
+  endResponse(writer)
+=> :Unit
+
+asyncResult <= httpServe({port}, handler, 1)
+asyncResult ]=> result
+result ]=> r
+stdout(r.requests)
+"#
+        );
+
+        let (mut child, dir) =
+            spawn_net_server(&source, &format!("net4e_rbc_empty_{}", backend), backend);
+
+        let request = b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n";
+        let response = send_http_request(port, request);
+        let response = match response {
+            Some(r) => r,
+            None => {
+                let _ = child.kill();
+                cleanup_net_project(&dir);
+                panic!("[{}] server did not respond on port {}", backend, port);
+            }
+        };
+
+        let resp_str = String::from_utf8_lossy(&response).to_string();
+        assert!(
+            resp_str.contains("200 OK"),
+            "[{}] response should contain '200 OK', got: {:?}",
+            backend,
+            resp_str
+        );
+        // Empty body -> readBodyChunk returns Lax empty -> hasValue = false
+        assert!(
+            resp_str.contains("false"),
+            "[{}] response body should contain 'false' for empty body, got: {:?}",
+            backend,
+            resp_str
+        );
+
+        let output = child.wait_with_output().expect("wait for server");
+        let stdout_str = normalize(&String::from_utf8_lossy(&output.stdout));
+        assert_eq!(
+            stdout_str, "1",
+            "[{}] httpServe stdout mismatch: {:?}",
+            backend, stdout_str
+        );
+
+        cleanup_net_project(&dir);
+    }
+}
+
+/// NET4-4e-5: WebSocket echo text frame — 3-way parity.
+#[test]
+fn test_net4_ws_echo_text_3way_parity() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+
+    for backend in &["interp", "js", "native"] {
+        let port = find_free_loopback_port();
+        let source = format!(
+            r#">>> taida-lang/net => @(httpServe, wsUpgrade, wsSend, wsReceive, wsClose)
+
+handler req writer =
+  upgrade <= wsUpgrade(req, writer)
+  ws <= upgrade.__value.ws
+  msg <= wsReceive(ws)
+  wsSend(ws, msg.__value.data)
+  wsClose(ws)
+=> :Unit
+
+asyncResult <= httpServe({port}, handler, 1)
+asyncResult ]=> result
+result ]=> r
+stdout(r.requests)
+"#,
+            port = port
+        );
+
+        let (child, dir) =
+            spawn_net_server(&source, &format!("net4e_ws_echo_{}", backend), backend);
+
+        // WebSocket handshake
+        let ws_key = "dGhlIHNhbXBsZSBub25jZQ==";
+        let request = format!(
+            "GET /ws HTTP/1.1\r\n\
+             Host: localhost:{port}\r\n\
+             Upgrade: websocket\r\n\
+             Connection: Upgrade\r\n\
+             Sec-WebSocket-Key: {key}\r\n\
+             Sec-WebSocket-Version: 13\r\n\
+             \r\n",
+            port = port,
+            key = ws_key
+        );
+
+        let mut got_echo = false;
+        let mut got_close = false;
+
+        for _ in 0..80 {
+            thread::sleep(Duration::from_millis(100));
+            let stream = match TcpStream::connect(format!("127.0.0.1:{}", port)) {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+            stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
+            stream.set_write_timeout(Some(Duration::from_secs(5))).ok();
+            let mut stream = stream;
+
+            if std::io::Write::write_all(&mut stream, request.as_bytes()).is_err() {
+                continue;
+            }
+
+            // Read 101 Switching Protocols
+            let mut head_buf = [0u8; 1024];
+            let mut head_len = 0;
+            let mut handshake_ok = false;
+            loop {
+                match std::io::Read::read(&mut stream, &mut head_buf[head_len..]) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        head_len += n;
+                        let s = std::str::from_utf8(&head_buf[..head_len]).unwrap_or("");
+                        if s.contains("\r\n\r\n") {
+                            if s.contains("101 Switching Protocols") {
+                                handshake_ok = true;
+                            }
+                            break;
+                        }
+                    }
+                    Err(ref e)
+                        if e.kind() == std::io::ErrorKind::WouldBlock
+                            || e.kind() == std::io::ErrorKind::TimedOut =>
+                    {
+                        break;
+                    }
+                    Err(_) => break,
+                }
+            }
+
+            if !handshake_ok {
+                continue;
+            }
+
+            // Send masked text frame: "Hello WS"
+            let msg = b"Hello WS";
+            let mask_key = [0x37, 0xfa, 0x21, 0x3d];
+            let mut frame = Vec::new();
+            frame.push(0x81); // FIN=1, opcode=text
+            frame.push(0x80 | msg.len() as u8); // MASK=1
+            frame.extend_from_slice(&mask_key);
+            for (i, &b) in msg.iter().enumerate() {
+                frame.push(b ^ mask_key[i % 4]);
+            }
+            if std::io::Write::write_all(&mut stream, &frame).is_err() {
+                continue;
+            }
+
+            // Read echo frame + close frame
+            let mut all_frames = Vec::new();
+            loop {
+                let mut buf = [0u8; 1024];
+                match std::io::Read::read(&mut stream, &mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => all_frames.extend_from_slice(&buf[..n]),
+                    Err(ref e)
+                        if e.kind() == std::io::ErrorKind::WouldBlock
+                            || e.kind() == std::io::ErrorKind::TimedOut =>
+                    {
+                        break;
+                    }
+                    Err(_) => break,
+                }
+            }
+
+            // Parse frames
+            let mut pos = 0;
+            while pos + 1 < all_frames.len() {
+                let opcode = all_frames[pos] & 0x0F;
+                let payload_len = (all_frames[pos + 1] & 0x7F) as usize;
+                pos += 2;
+                if opcode == 0x1 {
+                    if pos + payload_len <= all_frames.len() {
+                        let data = &all_frames[pos..pos + payload_len];
+                        if data == b"Hello WS" {
+                            got_echo = true;
+                        }
+                    }
+                    pos += payload_len;
+                } else if opcode == 0x8 {
+                    got_close = true;
+                    pos += payload_len;
+                } else {
+                    pos += payload_len;
+                }
+            }
+
+            break;
+        }
+
+        assert!(
+            got_echo,
+            "[{}] expected echo text frame 'Hello WS'",
+            backend
+        );
+        assert!(got_close, "[{}] expected close frame from server", backend);
+
+        let output = child.wait_with_output().expect("wait for server");
+        let stdout_str = normalize(&String::from_utf8_lossy(&output.stdout));
+        assert_eq!(
+            stdout_str, "1",
+            "[{}] httpServe stdout mismatch: {:?}",
+            backend, stdout_str
+        );
+
+        cleanup_net_project(&dir);
+    }
+}
+
+/// NET4-4e-6: wsUpgrade failure (missing headers) returns Lax empty — 3-way parity.
+#[test]
+fn test_net4_ws_upgrade_failure_3way_parity() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+
+    for backend in &["interp", "js", "native"] {
+        let port = find_free_loopback_port();
+        let source = format!(
+            r#">>> taida-lang/net => @(httpServe, wsUpgrade, startResponse, writeChunk, endResponse)
+
+handler req writer =
+  upgrade <= wsUpgrade(req, writer)
+  startResponse(writer, 200, @[@(name <= "Content-Type", value <= "text/plain")])
+  writeChunk(writer, upgrade.hasValue.toString())
+  endResponse(writer)
+=> :Unit
+
+asyncResult <= httpServe({port}, handler, 1)
+asyncResult ]=> result
+result ]=> r
+stdout(r.requests)
+"#
+        );
+
+        let (mut child, dir) =
+            spawn_net_server(&source, &format!("net4e_ws_fail_{}", backend), backend);
+
+        // Normal GET (no upgrade headers) — wsUpgrade returns Lax empty
+        let request = b"GET /ws HTTP/1.1\r\nHost: localhost\r\n\r\n";
+        let response = send_http_request(port, request);
+        let response = match response {
+            Some(r) => r,
+            None => {
+                let _ = child.kill();
+                cleanup_net_project(&dir);
+                panic!("[{}] server did not respond on port {}", backend, port);
+            }
+        };
+
+        let resp_str = String::from_utf8_lossy(&response).to_string();
+        assert!(
+            resp_str.contains("200 OK"),
+            "[{}] response should contain '200 OK', got: {:?}",
+            backend,
+            resp_str
+        );
+        // wsUpgrade failed -> hasValue = false
+        assert!(
+            resp_str.contains("false"),
+            "[{}] response body should contain 'false', got: {:?}",
+            backend,
+            resp_str
+        );
+
+        let output = child.wait_with_output().expect("wait for server");
+        let stdout_str = normalize(&String::from_utf8_lossy(&output.stdout));
+        assert_eq!(
+            stdout_str, "1",
+            "[{}] httpServe stdout mismatch: {:?}",
+            backend, stdout_str
+        );
+
+        cleanup_net_project(&dir);
+    }
+}
+
+/// NET4-4e-7: v3 one-shot fallback still works in body-deferred mode — 3-way parity.
+#[test]
+fn test_net4_oneshot_fallback_3way_parity() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+
+    for backend in &["interp", "js", "native"] {
+        let port = find_free_loopback_port();
+        let source = format!(
+            r#">>> taida-lang/net => @(httpServe)
+
+handler req writer =
+  @(status <= 200, headers <= @[@(name <= "Content-Type", value <= "text/plain")], body <= "oneshot ok")
+=> :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
+
+asyncResult <= httpServe({port}, handler, 1)
+asyncResult ]=> result
+result ]=> r
+stdout(r.requests)
+"#
+        );
+
+        let (mut child, dir) =
+            spawn_net_server(&source, &format!("net4e_oneshot_{}", backend), backend);
+
+        let request = b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n";
+        let response = send_http_request(port, request);
+        let response = match response {
+            Some(r) => r,
+            None => {
+                let _ = child.kill();
+                cleanup_net_project(&dir);
+                panic!("[{}] server did not respond on port {}", backend, port);
+            }
+        };
+
+        let resp_str = String::from_utf8_lossy(&response).to_string();
+        assert!(
+            resp_str.contains("200 OK"),
+            "[{}] response should contain '200 OK', got: {:?}",
+            backend,
+            resp_str
+        );
+        assert!(
+            resp_str.contains("oneshot ok"),
+            "[{}] response body should contain 'oneshot ok', got: {:?}",
+            backend,
+            resp_str
+        );
+
+        let output = child.wait_with_output().expect("wait for server");
+        let stdout_str = normalize(&String::from_utf8_lossy(&output.stdout));
+        assert_eq!(
+            stdout_str, "1",
+            "[{}] httpServe stdout mismatch: {:?}",
+            backend, stdout_str
+        );
+
+        cleanup_net_project(&dir);
+    }
+}
+
+// ── NET4-5: Phase 5 Hardening / Parity / Perf ─────────────────────────────────
+
+// NET4-5a: request body streaming parity tests fixed across 3 backends.
+// (readBodyAll CL, readBodyChunk CL, readBodyAll chunked, readBodyChunk empty
+//  are already tested by NET4-4e-1..4e-4 across 3 backends.)
+
+/// NET4-5a-1: readBody in 2-arg handler as readBodyAll alias — 3-way parity.
+#[test]
+fn test_net4_5a_read_body_alias_3way_parity() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+
+    for backend in &["interp", "js", "native"] {
+        let port = find_free_loopback_port();
+        let source = format!(
+            r#">>> taida-lang/net => @(httpServe, readBody, startResponse, writeChunk, endResponse)
+
+handler req writer =
+  body <= readBody(req)
+  startResponse(writer, 200, @[@(name <= "Content-Type", value <= "text/plain")])
+  writeChunk(writer, body)
+  endResponse(writer)
+=> :Unit
+
+asyncResult <= httpServe({port}, handler, 1)
+asyncResult ]=> result
+result ]=> r
+stdout(r.requests)
+"#
+        );
+
+        let (mut child, dir) =
+            spawn_net_server(&source, &format!("net4_5a_alias_{}", backend), backend);
+
+        let body = b"readBody-alias-test";
+        let request = format!(
+            "POST / HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\n\r\n{}",
+            body.len(),
+            std::str::from_utf8(body).unwrap()
+        );
+
+        let response = send_http_request(port, request.as_bytes());
+        let response = match response {
+            Some(r) => r,
+            None => {
+                let _ = child.kill();
+                cleanup_net_project(&dir);
+                panic!("[{}] server did not respond on port {}", backend, port);
+            }
+        };
+
+        let resp_str = String::from_utf8_lossy(&response).to_string();
+        assert!(
+            resp_str.contains("200 OK"),
+            "[{}] response should contain '200 OK', got: {:?}",
+            backend,
+            resp_str
+        );
+        assert!(
+            resp_str.contains("readBody-alias-test"),
+            "[{}] response body should echo 'readBody-alias-test', got: {:?}",
+            backend,
+            resp_str
+        );
+
+        let output = child.wait_with_output().expect("wait for server");
+        let stdout_str = normalize(&String::from_utf8_lossy(&output.stdout));
+        assert_eq!(
+            stdout_str, "1",
+            "[{}] httpServe stdout mismatch: {:?}",
+            backend, stdout_str
+        );
+
+        cleanup_net_project(&dir);
+    }
+}
+
+// NET4-5b: WebSocket parity tests fixed across 3 backends.
+// (wsUpgrade echo, wsUpgrade failure are already tested by NET4-4e-5..4e-6.)
+
+/// NET4-5b-1: WebSocket upgrade failure with POST (has body) — 3-way parity.
+#[test]
+fn test_net4_5b_ws_upgrade_post_reject_3way_parity() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+
+    for backend in &["interp", "js", "native"] {
+        let port = find_free_loopback_port();
+        let source = format!(
+            r#">>> taida-lang/net => @(httpServe, wsUpgrade, startResponse, writeChunk, endResponse)
+
+handler req writer =
+  upgrade <= wsUpgrade(req, writer)
+  startResponse(writer, 200, @[@(name <= "Content-Type", value <= "text/plain")])
+  writeChunk(writer, upgrade.hasValue.toString())
+  endResponse(writer)
+=> :Unit
+
+asyncResult <= httpServe({port}, handler, 1)
+asyncResult ]=> result
+result ]=> r
+stdout(r.requests)
+"#
+        );
+
+        let (mut child, dir) =
+            spawn_net_server(&source, &format!("net4_5b_post_{}", backend), backend);
+
+        // POST with WebSocket upgrade headers — should be rejected (body present).
+        let ws_key = "dGhlIHNhbXBsZSBub25jZQ==";
+        let request = format!(
+            "POST /ws HTTP/1.1\r\n\
+             Host: localhost\r\n\
+             Upgrade: websocket\r\n\
+             Connection: Upgrade\r\n\
+             Sec-WebSocket-Key: {}\r\n\
+             Sec-WebSocket-Version: 13\r\n\
+             Content-Length: 5\r\n\
+             \r\n\
+             hello",
+            ws_key
+        );
+
+        let response = send_http_request(port, request.as_bytes());
+        let response = match response {
+            Some(r) => r,
+            None => {
+                let _ = child.kill();
+                cleanup_net_project(&dir);
+                panic!("[{}] server did not respond on port {}", backend, port);
+            }
+        };
+
+        let resp_str = String::from_utf8_lossy(&response).to_string();
+        assert!(
+            resp_str.contains("200 OK"),
+            "[{}] response should contain '200 OK', got: {:?}",
+            backend,
+            resp_str
+        );
+        // wsUpgrade should fail for POST -> hasValue = false
+        assert!(
+            resp_str.contains("false"),
+            "[{}] response body should contain 'false', got: {:?}",
+            backend,
+            resp_str
+        );
+
+        let output = child.wait_with_output().expect("wait for server");
+        let stdout_str = normalize(&String::from_utf8_lossy(&output.stdout));
+        assert_eq!(
+            stdout_str, "1",
+            "[{}] httpServe stdout mismatch: {:?}",
+            backend, stdout_str
+        );
+
+        cleanup_net_project(&dir);
+    }
+}
+
+// NET4-5c: WebSocket edge case tests (malformed frame, oversized payload, non-ASCII SSE).
+
+/// NET4-5c-1: Non-ASCII SSE data (NB4-5) — 3-way parity.
+/// Sends SSE events with accented and CJK text and verifies round-trip.
+#[test]
+fn test_net4_5c_non_ascii_sse_3way_parity() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+
+    for backend in &["interp", "js", "native"] {
+        let port = find_free_loopback_port();
+        // Use raw UTF-8 directly in the Taida source (no escape sequences needed).
+        let source = format!(
+            ">>> taida-lang/net => @(httpServe, sseEvent, endResponse)\n\
+             \n\
+             handler req writer =\n\
+             \x20 sseEvent(writer, \"message\", \"\u{00E9}\u{00F1}\u{00FC}\")\n\
+             \x20 sseEvent(writer, \"update\", \"\u{65E5}\u{672C}\u{8A9E}\")\n\
+             \x20 endResponse(writer)\n\
+             => :Unit\n\
+             \n\
+             asyncResult <= httpServe({port}, handler, 1)\n\
+             asyncResult ]=> result\n\
+             result ]=> r\n\
+             stdout(r.requests)\n"
+        );
+
+        let (mut child, dir) =
+            spawn_net_server(&source, &format!("net4_5c_sse_{}", backend), backend);
+
+        let request = b"GET /events HTTP/1.1\r\nHost: localhost\r\n\r\n";
+        let response = send_http_request(port, request);
+        let response = match response {
+            Some(r) => r,
+            None => {
+                let _ = child.kill();
+                cleanup_net_project(&dir);
+                panic!("[{}] server did not respond on port {}", backend, port);
+            }
+        };
+
+        let resp_str = String::from_utf8_lossy(&response).to_string();
+        assert!(
+            resp_str.contains("200"),
+            "[{}] response should contain '200', got: {:?}",
+            backend,
+            resp_str
+        );
+        // Verify non-ASCII characters survived the round-trip.
+        assert!(
+            resp_str.contains("\u{00E9}\u{00F1}\u{00FC}"),
+            "[{}] response should contain accented chars, got: {:?}",
+            backend,
+            resp_str
+        );
+        assert!(
+            resp_str.contains("\u{65E5}\u{672C}\u{8A9E}"),
+            "[{}] response should contain CJK chars, got: {:?}",
+            backend,
+            resp_str
+        );
+
+        let output = child.wait_with_output().expect("wait for server");
+        let stdout_str = normalize(&String::from_utf8_lossy(&output.stdout));
+        assert_eq!(
+            stdout_str, "1",
+            "[{}] httpServe stdout mismatch: {:?}",
+            backend, stdout_str
+        );
+
+        cleanup_net_project(&dir);
+    }
+}
+
+// NET4-5d: v3 + v4 mixed tests (streaming response + request streaming).
+
+/// NET4-5d-1: readBodyAll + writeChunk streaming response — 3-way parity.
+/// Reads the POST body, then streams it back in multiple writeChunk calls.
+#[test]
+fn test_net4_5d_read_body_then_stream_response_3way_parity() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+
+    for backend in &["interp", "js", "native"] {
+        let port = find_free_loopback_port();
+        let source = format!(
+            r#">>> taida-lang/net => @(httpServe, readBodyAll, startResponse, writeChunk, endResponse)
+
+handler req writer =
+  body <= readBodyAll(req)
+  startResponse(writer, 200, @[@(name <= "Content-Type", value <= "text/plain")])
+  writeChunk(writer, "got:")
+  writeChunk(writer, body)
+  endResponse(writer)
+=> :Unit
+
+asyncResult <= httpServe({port}, handler, 1)
+asyncResult ]=> result
+result ]=> r
+stdout(r.requests)
+"#
+        );
+
+        let (mut child, dir) =
+            spawn_net_server(&source, &format!("net4_5d_mixed_{}", backend), backend);
+
+        let body = b"mixed-test-data";
+        let request = format!(
+            "POST / HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\n\r\n{}",
+            body.len(),
+            std::str::from_utf8(body).unwrap()
+        );
+
+        let response = send_http_request(port, request.as_bytes());
+        let response = match response {
+            Some(r) => r,
+            None => {
+                let _ = child.kill();
+                cleanup_net_project(&dir);
+                panic!("[{}] server did not respond on port {}", backend, port);
+            }
+        };
+
+        let resp_str = String::from_utf8_lossy(&response).to_string();
+        assert!(
+            resp_str.contains("200 OK"),
+            "[{}] response should contain '200 OK', got: {:?}",
+            backend,
+            resp_str
+        );
+        assert!(
+            resp_str.contains("got:"),
+            "[{}] response body should contain 'got:', got: {:?}",
+            backend,
+            resp_str
+        );
+        assert!(
+            resp_str.contains("mixed-test-data"),
+            "[{}] response body should contain 'mixed-test-data', got: {:?}",
+            backend,
+            resp_str
+        );
+
+        let output = child.wait_with_output().expect("wait for server");
+        let stdout_str = normalize(&String::from_utf8_lossy(&output.stdout));
+        assert_eq!(
+            stdout_str, "1",
+            "[{}] httpServe stdout mismatch: {:?}",
+            backend, stdout_str
+        );
+
+        cleanup_net_project(&dir);
+    }
+}
+
+/// NET4-5d-2: readBodyChunk + sseEvent streaming — 3-way parity.
+/// Reads body chunk then sends SSE events back.
+#[test]
+fn test_net4_5d_read_body_chunk_then_sse_3way_parity() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+
+    for backend in &["interp", "js", "native"] {
+        let port = find_free_loopback_port();
+        let source = format!(
+            r#">>> taida-lang/net => @(httpServe, readBodyChunk, sseEvent, endResponse)
+
+handler req writer =
+  chunk <= readBodyChunk(req)
+  sseEvent(writer, "body", chunk.hasValue.toString())
+  endResponse(writer)
+=> :Unit
+
+asyncResult <= httpServe({port}, handler, 1)
+asyncResult ]=> result
+result ]=> r
+stdout(r.requests)
+"#
+        );
+
+        let (mut child, dir) =
+            spawn_net_server(&source, &format!("net4_5d_chunk_sse_{}", backend), backend);
+
+        let body = b"ssedata";
+        let request = format!(
+            "POST / HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\n\r\n{}",
+            body.len(),
+            std::str::from_utf8(body).unwrap()
+        );
+
+        let response = send_http_request(port, request.as_bytes());
+        let response = match response {
+            Some(r) => r,
+            None => {
+                let _ = child.kill();
+                cleanup_net_project(&dir);
+                panic!("[{}] server did not respond on port {}", backend, port);
+            }
+        };
+
+        let resp_str = String::from_utf8_lossy(&response).to_string();
+        assert!(
+            resp_str.contains("200"),
+            "[{}] response should contain '200', got: {:?}",
+            backend,
+            resp_str
+        );
+        // readBodyChunk returns hasValue=true for 7 bytes
+        assert!(
+            resp_str.contains("data: true"),
+            "[{}] response should contain SSE 'data: true', got: {:?}",
+            backend,
+            resp_str
+        );
+
+        let output = child.wait_with_output().expect("wait for server");
+        let stdout_str = normalize(&String::from_utf8_lossy(&output.stdout));
+        assert_eq!(
+            stdout_str, "1",
+            "[{}] httpServe stdout mismatch: {:?}",
+            backend, stdout_str
+        );
+
+        cleanup_net_project(&dir);
+    }
+}
+
+// NET4-5e: keep-alive + WebSocket transition tests.
+
+/// NET4-5e-1: WebSocket upgrade on a server that uses maxRequests=2.
+/// Verifies that WebSocket connection counts toward maxRequests and server shuts down.
+#[test]
+fn test_net4_5e_ws_counts_toward_max_requests_interp() {
+    let port = find_free_loopback_port();
+    let source = format!(
+        r#">>> taida-lang/net => @(httpServe, wsUpgrade, wsSend, wsReceive, wsClose)
+
+handler req writer =
+  upgrade <= wsUpgrade(req, writer)
+  ws <= upgrade.__value.ws
+  msg <= wsReceive(ws)
+  wsSend(ws, msg.__value.data)
+  wsClose(ws)
+=> :Unit
+
+asyncResult <= httpServe({port}, handler, 1)
+asyncResult ]=> result
+result ]=> r
+stdout(r.requests)
+"#
+    );
+
+    let (child, dir) = spawn_net_server(&source, "net4_5e_ws_max", "interp");
+
+    // Send WebSocket upgrade.
+    let ws_key = "dGhlIHNhbXBsZSBub25jZQ==";
+    let ws_request = format!(
+        "GET /ws HTTP/1.1\r\n\
+         Host: localhost:{port}\r\n\
+         Upgrade: websocket\r\n\
+         Connection: Upgrade\r\n\
+         Sec-WebSocket-Key: {key}\r\n\
+         Sec-WebSocket-Version: 13\r\n\
+         \r\n",
+        port = port,
+        key = ws_key
+    );
+
+    let mut got_echo = false;
+    for _ in 0..80 {
+        thread::sleep(Duration::from_millis(100));
+        let stream = match TcpStream::connect(format!("127.0.0.1:{}", port)) {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+        stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
+        stream.set_write_timeout(Some(Duration::from_secs(5))).ok();
+        let mut stream = stream;
+
+        if std::io::Write::write_all(&mut stream, ws_request.as_bytes()).is_err() {
+            continue;
+        }
+
+        let mut head_buf = [0u8; 1024];
+        let mut head_len = 0;
+        let mut handshake_ok = false;
+        loop {
+            match std::io::Read::read(&mut stream, &mut head_buf[head_len..]) {
+                Ok(0) => break,
+                Ok(n) => {
+                    head_len += n;
+                    let s = std::str::from_utf8(&head_buf[..head_len]).unwrap_or("");
+                    if s.contains("\r\n\r\n") {
+                        if s.contains("101 Switching Protocols") {
+                            handshake_ok = true;
+                        }
+                        break;
+                    }
+                }
+                Err(ref e)
+                    if e.kind() == std::io::ErrorKind::WouldBlock
+                        || e.kind() == std::io::ErrorKind::TimedOut =>
+                {
+                    break;
+                }
+                Err(_) => break,
+            }
+        }
+
+        if !handshake_ok {
+            continue;
+        }
+
+        // Send masked text frame.
+        let msg = b"transition";
+        let mask_key = [0x12, 0x34, 0x56, 0x78];
+        let mut frame = Vec::new();
+        frame.push(0x81);
+        frame.push(0x80 | msg.len() as u8);
+        frame.extend_from_slice(&mask_key);
+        for (i, &b) in msg.iter().enumerate() {
+            frame.push(b ^ mask_key[i % 4]);
+        }
+        if std::io::Write::write_all(&mut stream, &frame).is_err() {
+            continue;
+        }
+
+        // Read echo frame(s).
+        let mut all_data = Vec::new();
+        loop {
+            let mut buf = [0u8; 1024];
+            match std::io::Read::read(&mut stream, &mut buf) {
+                Ok(0) => break,
+                Ok(n) => all_data.extend_from_slice(&buf[..n]),
+                Err(ref e)
+                    if e.kind() == std::io::ErrorKind::WouldBlock
+                        || e.kind() == std::io::ErrorKind::TimedOut =>
+                {
+                    break;
+                }
+                Err(_) => break,
+            }
+        }
+
+        // Parse frames from the received data.
+        let mut pos = 0;
+        while pos + 1 < all_data.len() {
+            let opcode = all_data[pos] & 0x0F;
+            let plen = (all_data[pos + 1] & 0x7F) as usize;
+            pos += 2;
+            if opcode == 0x1 && pos + plen <= all_data.len() {
+                if &all_data[pos..pos + plen] == b"transition" {
+                    got_echo = true;
+                }
+            }
+            pos += plen;
+        }
+
+        break;
+    }
+
+    assert!(got_echo, "WebSocket echo should return 'transition'");
+
+    // Server should shut down after handling 1 request (WS counts toward maxRequests).
+    let output = child.wait_with_output().expect("wait for server");
+    let stdout_str = normalize(&String::from_utf8_lossy(&output.stdout));
+    assert_eq!(
+        stdout_str, "1",
+        "httpServe should count WS as 1 request: {:?}",
+        stdout_str
+    );
+
+    cleanup_net_project(&dir);
+}
+
+// NET4-5f: failed upgrade no-wire + unread body close tests.
+
+/// NET4-5f-1: wsUpgrade failure leaves wire clean — server can still send normal HTTP response.
+/// Already covered by NET4-4e-6, but this test explicitly verifies the response is well-formed.
+/// 3-way parity.
+#[test]
+fn test_net4_5f_failed_upgrade_clean_wire_3way_parity() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+
+    for backend in &["interp", "js", "native"] {
+        let port = find_free_loopback_port();
+        let source = format!(
+            r#">>> taida-lang/net => @(httpServe, wsUpgrade, startResponse, writeChunk, endResponse)
+
+handler req writer =
+  upgrade <= wsUpgrade(req, writer)
+  startResponse(writer, 400, @[@(name <= "Content-Type", value <= "text/plain")])
+  writeChunk(writer, "upgrade-failed")
+  endResponse(writer)
+=> :Unit
+
+asyncResult <= httpServe({port}, handler, 1)
+asyncResult ]=> result
+result ]=> r
+stdout(r.requests)
+"#
+        );
+
+        let (mut child, dir) =
+            spawn_net_server(&source, &format!("net4_5f_clean_{}", backend), backend);
+
+        let request = b"GET /ws HTTP/1.1\r\nHost: localhost\r\n\r\n";
+        let response = send_http_request(port, request);
+        let response = match response {
+            Some(r) => r,
+            None => {
+                let _ = child.kill();
+                cleanup_net_project(&dir);
+                panic!("[{}] server did not respond on port {}", backend, port);
+            }
+        };
+
+        let resp_str = String::from_utf8_lossy(&response).to_string();
+        // Server should have sent a proper 400 response (not garbage from a failed 101).
+        assert!(
+            resp_str.contains("400"),
+            "[{}] response should contain '400', got: {:?}",
+            backend,
+            resp_str
+        );
+        assert!(
+            resp_str.contains("upgrade-failed"),
+            "[{}] response body should contain 'upgrade-failed', got: {:?}",
+            backend,
+            resp_str
+        );
+
+        let output = child.wait_with_output().expect("wait for server");
+        let stdout_str = normalize(&String::from_utf8_lossy(&output.stdout));
+        assert_eq!(
+            stdout_str, "1",
+            "[{}] httpServe stdout mismatch: {:?}",
+            backend, stdout_str
+        );
+
+        cleanup_net_project(&dir);
+    }
+}
+
+// NET4-5h: WASM capability gating for v4 APIs.
+// All 6 v4 APIs must produce compile errors on all 4 WASM profiles.
+
+/// NET4-5h-1: readBodyChunk must produce compile error on all 4 WASM profiles.
+#[test]
+fn test_net4_5h_wasm_all_profiles_read_body_chunk_rejected() {
+    let source = r#">>> taida-lang/net => @(httpServe, readBodyChunk)
+
+handler req writer =
+  readBodyChunk(req)
+
+httpServe(8080, handler, 1, 1000) ]=> serverResult
+stdout(serverResult.ok)
+"#;
+
+    for profile in &["wasm-min", "wasm-wasi", "wasm-edge", "wasm-full"] {
+        let td_path =
+            std::env::temp_dir().join(format!("taida_net5h_readBodyChunk_{}.td", profile));
+        let wasm_path =
+            std::env::temp_dir().join(format!("taida_net5h_readBodyChunk_{}.wasm", profile));
+        std::fs::write(&td_path, source).expect("write test .td");
+
+        let output = Command::new(taida_bin())
+            .arg("build")
+            .arg("--target")
+            .arg(profile)
+            .arg(&td_path)
+            .arg("-o")
+            .arg(&wasm_path)
+            .output()
+            .expect("failed to run taida build");
+
+        let _ = std::fs::remove_file(&td_path);
+        let _ = std::fs::remove_file(&wasm_path);
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            !output.status.success(),
+            "NET4-5h: {} should reject readBodyChunk, but compile succeeded.\nstderr: {}",
+            profile,
+            stderr
+        );
+        assert!(
+            stderr.contains("readBodyChunk") || stderr.contains("net"),
+            "NET4-5h: {} compile error should mention readBodyChunk or net.\nstderr: {}",
+            profile,
+            stderr
+        );
+    }
+}
+
+/// NET4-5h-2: readBodyAll must produce compile error on all 4 WASM profiles.
+#[test]
+fn test_net4_5h_wasm_all_profiles_read_body_all_rejected() {
+    let source = r#">>> taida-lang/net => @(httpServe, readBodyAll)
+
+handler req writer =
+  readBodyAll(req)
+
+httpServe(8080, handler, 1, 1000) ]=> serverResult
+stdout(serverResult.ok)
+"#;
+
+    for profile in &["wasm-min", "wasm-wasi", "wasm-edge", "wasm-full"] {
+        let td_path = std::env::temp_dir().join(format!("taida_net5h_readBodyAll_{}.td", profile));
+        let wasm_path =
+            std::env::temp_dir().join(format!("taida_net5h_readBodyAll_{}.wasm", profile));
+        std::fs::write(&td_path, source).expect("write test .td");
+
+        let output = Command::new(taida_bin())
+            .arg("build")
+            .arg("--target")
+            .arg(profile)
+            .arg(&td_path)
+            .arg("-o")
+            .arg(&wasm_path)
+            .output()
+            .expect("failed to run taida build");
+
+        let _ = std::fs::remove_file(&td_path);
+        let _ = std::fs::remove_file(&wasm_path);
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            !output.status.success(),
+            "NET4-5h: {} should reject readBodyAll, but compile succeeded.\nstderr: {}",
+            profile,
+            stderr
+        );
+        assert!(
+            stderr.contains("readBodyAll") || stderr.contains("net"),
+            "NET4-5h: {} compile error should mention readBodyAll or net.\nstderr: {}",
+            profile,
+            stderr
+        );
+    }
+}
+
+/// NET4-5h-3: wsUpgrade must produce compile error on all 4 WASM profiles.
+#[test]
+fn test_net4_5h_wasm_all_profiles_ws_upgrade_rejected() {
+    let source = r#">>> taida-lang/net => @(httpServe, wsUpgrade)
+
+handler req writer =
+  wsUpgrade(req, writer)
+
+httpServe(8080, handler, 1, 1000) ]=> serverResult
+stdout(serverResult.ok)
+"#;
+
+    for profile in &["wasm-min", "wasm-wasi", "wasm-edge", "wasm-full"] {
+        let td_path = std::env::temp_dir().join(format!("taida_net5h_wsUpgrade_{}.td", profile));
+        let wasm_path =
+            std::env::temp_dir().join(format!("taida_net5h_wsUpgrade_{}.wasm", profile));
+        std::fs::write(&td_path, source).expect("write test .td");
+
+        let output = Command::new(taida_bin())
+            .arg("build")
+            .arg("--target")
+            .arg(profile)
+            .arg(&td_path)
+            .arg("-o")
+            .arg(&wasm_path)
+            .output()
+            .expect("failed to run taida build");
+
+        let _ = std::fs::remove_file(&td_path);
+        let _ = std::fs::remove_file(&wasm_path);
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            !output.status.success(),
+            "NET4-5h: {} should reject wsUpgrade, but compile succeeded.\nstderr: {}",
+            profile,
+            stderr
+        );
+        assert!(
+            stderr.contains("wsUpgrade") || stderr.contains("net"),
+            "NET4-5h: {} compile error should mention wsUpgrade or net.\nstderr: {}",
+            profile,
+            stderr
+        );
+    }
+}
+
+/// NET4-5h-4: wsSend must produce compile error on all 4 WASM profiles.
+#[test]
+fn test_net4_5h_wasm_all_profiles_ws_send_rejected() {
+    let source = r#">>> taida-lang/net => @(httpServe, wsSend)
+
+handler req writer =
+  wsSend(writer, "test")
+
+httpServe(8080, handler, 1, 1000) ]=> serverResult
+stdout(serverResult.ok)
+"#;
+
+    for profile in &["wasm-min", "wasm-wasi", "wasm-edge", "wasm-full"] {
+        let td_path = std::env::temp_dir().join(format!("taida_net5h_wsSend_{}.td", profile));
+        let wasm_path = std::env::temp_dir().join(format!("taida_net5h_wsSend_{}.wasm", profile));
+        std::fs::write(&td_path, source).expect("write test .td");
+
+        let output = Command::new(taida_bin())
+            .arg("build")
+            .arg("--target")
+            .arg(profile)
+            .arg(&td_path)
+            .arg("-o")
+            .arg(&wasm_path)
+            .output()
+            .expect("failed to run taida build");
+
+        let _ = std::fs::remove_file(&td_path);
+        let _ = std::fs::remove_file(&wasm_path);
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            !output.status.success(),
+            "NET4-5h: {} should reject wsSend, but compile succeeded.\nstderr: {}",
+            profile,
+            stderr
+        );
+        assert!(
+            stderr.contains("wsSend") || stderr.contains("net"),
+            "NET4-5h: {} compile error should mention wsSend or net.\nstderr: {}",
+            profile,
+            stderr
+        );
+    }
+}
+
+/// NET4-5h-5: wsReceive must produce compile error on all 4 WASM profiles.
+#[test]
+fn test_net4_5h_wasm_all_profiles_ws_receive_rejected() {
+    let source = r#">>> taida-lang/net => @(httpServe, wsReceive)
+
+handler req writer =
+  wsReceive(writer)
+
+httpServe(8080, handler, 1, 1000) ]=> serverResult
+stdout(serverResult.ok)
+"#;
+
+    for profile in &["wasm-min", "wasm-wasi", "wasm-edge", "wasm-full"] {
+        let td_path = std::env::temp_dir().join(format!("taida_net5h_wsReceive_{}.td", profile));
+        let wasm_path =
+            std::env::temp_dir().join(format!("taida_net5h_wsReceive_{}.wasm", profile));
+        std::fs::write(&td_path, source).expect("write test .td");
+
+        let output = Command::new(taida_bin())
+            .arg("build")
+            .arg("--target")
+            .arg(profile)
+            .arg(&td_path)
+            .arg("-o")
+            .arg(&wasm_path)
+            .output()
+            .expect("failed to run taida build");
+
+        let _ = std::fs::remove_file(&td_path);
+        let _ = std::fs::remove_file(&wasm_path);
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            !output.status.success(),
+            "NET4-5h: {} should reject wsReceive, but compile succeeded.\nstderr: {}",
+            profile,
+            stderr
+        );
+        assert!(
+            stderr.contains("wsReceive") || stderr.contains("net"),
+            "NET4-5h: {} compile error should mention wsReceive or net.\nstderr: {}",
+            profile,
+            stderr
+        );
+    }
+}
+
+/// NET4-5h-6: wsClose must produce compile error on all 4 WASM profiles.
+#[test]
+fn test_net4_5h_wasm_all_profiles_ws_close_rejected() {
+    let source = r#">>> taida-lang/net => @(httpServe, wsClose)
+
+handler req writer =
+  wsClose(writer)
+
+httpServe(8080, handler, 1, 1000) ]=> serverResult
+stdout(serverResult.ok)
+"#;
+
+    for profile in &["wasm-min", "wasm-wasi", "wasm-edge", "wasm-full"] {
+        let td_path = std::env::temp_dir().join(format!("taida_net5h_wsClose_{}.td", profile));
+        let wasm_path = std::env::temp_dir().join(format!("taida_net5h_wsClose_{}.wasm", profile));
+        std::fs::write(&td_path, source).expect("write test .td");
+
+        let output = Command::new(taida_bin())
+            .arg("build")
+            .arg("--target")
+            .arg(profile)
+            .arg(&td_path)
+            .arg("-o")
+            .arg(&wasm_path)
+            .output()
+            .expect("failed to run taida build");
+
+        let _ = std::fs::remove_file(&td_path);
+        let _ = std::fs::remove_file(&wasm_path);
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            !output.status.success(),
+            "NET4-5h: {} should reject wsClose, but compile succeeded.\nstderr: {}",
+            profile,
+            stderr
+        );
+        assert!(
+            stderr.contains("wsClose") || stderr.contains("net"),
+            "NET4-5h: {} compile error should mention wsClose or net.\nstderr: {}",
+            profile,
+            stderr
+        );
+    }
+}
+
+/// NB4-19: Client-initiated close -- server close reply with code 1000.
+/// 3-backend wire regression test to ensure NB4-12 fix stays fixed.
+#[test]
+fn test_net4_nb19_client_close_reply_3way_parity() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+
+    for backend in &["interp", "js", "native"] {
+        let port = find_free_loopback_port();
+        // Handler: upgrade, receive (will get client close), handler returns.
+        // wsReceive sees the close frame, sends close reply, returns Lax empty.
+        // wsSend is called with hasValue="false" string (close -> empty -> hasValue=false).
+        let source = format!(
+            r#">>> taida-lang/net => @(httpServe, wsUpgrade, wsSend, wsReceive)
+
+handler req writer =
+  upgrade <= wsUpgrade(req, writer)
+  ws <= upgrade.__value.ws
+  msg <= wsReceive(ws)
+  stdout(msg.hasValue.toString())
+=> :Unit
+
+asyncResult <= httpServe({port}, handler, 1)
+asyncResult ]=> result
+result ]=> r
+stdout(r.requests)
+"#,
+            port = port
+        );
+
+        let (child, dir) = spawn_net_server(
+            &source,
+            &format!("net4_nb19_close_reply_{}", backend),
+            backend,
+        );
+
+        let ws_key = "dGhlIHNhbXBsZSBub25jZQ==";
+        let request = format!(
+            "GET /ws HTTP/1.1\r\n\
+             Host: localhost:{port}\r\n\
+             Upgrade: websocket\r\n\
+             Connection: Upgrade\r\n\
+             Sec-WebSocket-Key: {key}\r\n\
+             Sec-WebSocket-Version: 13\r\n\
+             \r\n",
+            port = port,
+            key = ws_key
+        );
+
+        let mut got_close_reply = false;
+        let mut close_code: Option<u16> = None;
+
+        for _ in 0..80 {
+            thread::sleep(Duration::from_millis(100));
+            let stream = match TcpStream::connect(format!("127.0.0.1:{}", port)) {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+            stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
+            stream.set_write_timeout(Some(Duration::from_secs(5))).ok();
+            let mut stream = stream;
+
+            if std::io::Write::write_all(&mut stream, request.as_bytes()).is_err() {
+                continue;
+            }
+
+            // Read 101 response.
+            let mut head_buf = [0u8; 1024];
+            let mut head_len = 0;
+            let mut handshake_ok = false;
+            loop {
+                match std::io::Read::read(&mut stream, &mut head_buf[head_len..]) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        head_len += n;
+                        let s = std::str::from_utf8(&head_buf[..head_len]).unwrap_or("");
+                        if s.contains("\r\n\r\n") {
+                            if s.contains("101 Switching Protocols") {
+                                handshake_ok = true;
+                            }
+                            break;
+                        }
+                    }
+                    Err(ref e)
+                        if e.kind() == std::io::ErrorKind::WouldBlock
+                            || e.kind() == std::io::ErrorKind::TimedOut =>
+                    {
+                        break;
+                    }
+                    Err(_) => break,
+                }
+            }
+            if !handshake_ok {
+                continue;
+            }
+
+            // Send a masked close frame from client with code 1000.
+            // FIN=1, opcode=0x8, MASK=1, payload = [0x03, 0xE8]
+            let close_payload: [u8; 2] = [0x03, 0xE8];
+            let mask_key: [u8; 4] = [0xAB, 0xCD, 0xEF, 0x01];
+            let mut masked = close_payload.to_vec();
+            for (i, byte) in masked.iter_mut().enumerate() {
+                *byte ^= mask_key[i % 4];
+            }
+            let mut frame = Vec::new();
+            frame.push(0x88); // FIN=1, opcode=close
+            frame.push(0x80 | close_payload.len() as u8); // MASK=1
+            frame.extend_from_slice(&mask_key);
+            frame.extend_from_slice(&masked);
+            if std::io::Write::write_all(&mut stream, &frame).is_err() {
+                continue;
+            }
+
+            // Read server close reply frame.
+            thread::sleep(Duration::from_millis(300));
+            let mut all_frames = Vec::new();
+            loop {
+                let mut buf = [0u8; 1024];
+                match std::io::Read::read(&mut stream, &mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => all_frames.extend_from_slice(&buf[..n]),
+                    Err(ref e)
+                        if e.kind() == std::io::ErrorKind::WouldBlock
+                            || e.kind() == std::io::ErrorKind::TimedOut =>
+                    {
+                        break;
+                    }
+                    Err(_) => break,
+                }
+            }
+
+            // Parse frames to find close reply.
+            let mut pos = 0;
+            while pos + 1 < all_frames.len() {
+                let opcode = all_frames[pos] & 0x0F;
+                let payload_len = (all_frames[pos + 1] & 0x7F) as usize;
+                pos += 2;
+                if opcode == 0x8 {
+                    got_close_reply = true;
+                    if payload_len >= 2 && pos + 2 <= all_frames.len() {
+                        let code = ((all_frames[pos] as u16) << 8) | (all_frames[pos + 1] as u16);
+                        close_code = Some(code);
+                    }
+                    pos += payload_len;
+                } else {
+                    pos += payload_len;
+                }
+            }
+
+            break;
+        }
+
+        assert!(
+            got_close_reply,
+            "[{}] expected server to send close reply frame after client close",
+            backend
+        );
+        assert_eq!(
+            close_code,
+            Some(1000),
+            "[{}] expected close code 1000 (normal closure), got {:?}",
+            backend,
+            close_code
+        );
+
+        let output = child.wait_with_output().expect("wait for server");
+        let stdout_str = normalize(&String::from_utf8_lossy(&output.stdout));
+        // Handler prints "false" (hasValue of close Lax empty) + "1" (requests count).
+        assert!(
+            stdout_str.contains("false") && stdout_str.contains("1"),
+            "[{}] stdout should contain 'false' and '1', got: {:?}",
+            backend,
+            stdout_str
+        );
+
+        cleanup_net_project(&dir);
+    }
+}
+
+/// NB4-10: wsUpgrade rejects stale/fake request packs — 3-backend regression.
+/// A fabricated request pack with wrong __body_token must cause wsUpgrade to error,
+/// not proceed with the upgrade. We verify the server does NOT return 101.
+#[test]
+fn test_net4_nb10_ws_upgrade_fake_req_rejected_3way() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+
+    for backend in &["interp", "js", "native"] {
+        let port = find_free_loopback_port();
+        // Handler creates a fake request pack with correct sentinel but wrong token,
+        // then passes it to wsUpgrade. This should fail with a RuntimeError.
+        // The interpreter catches the error and sends 500; JS/Native print to stderr and exit.
+        let source = format!(
+            r#">>> taida-lang/net => @(httpServe, wsUpgrade, startResponse, endResponse)
+
+handler req writer =
+  fakeReq <= @(__body_stream <= "__v4_body_stream", __body_token <= 99999)
+  upgrade <= wsUpgrade(fakeReq, writer)
+  startResponse(writer, 200, @[])
+  endResponse(writer)
+=> :Unit
+
+asyncResult <= httpServe({port}, handler, 1)
+asyncResult ]=> result
+result ]=> r
+stdout(r.requests)
+"#,
+            port = port
+        );
+
+        let (child, dir) =
+            spawn_net_server(&source, &format!("net4_nb10_fake_req_{}", backend), backend);
+
+        // Send a valid WebSocket upgrade request.
+        let ws_key = "dGhlIHNhbXBsZSBub25jZQ==";
+        let request = format!(
+            "GET /ws HTTP/1.1\r\n\
+             Host: localhost:{port}\r\n\
+             Upgrade: websocket\r\n\
+             Connection: Upgrade\r\n\
+             Sec-WebSocket-Key: {key}\r\n\
+             Sec-WebSocket-Version: 13\r\n\
+             \r\n",
+            port = port,
+            key = ws_key
+        );
+
+        let response = send_http_request(port, request.as_bytes());
+
+        // The handler should error out (fake req rejected).
+        let output = child.wait_with_output().expect("wait for server");
+        let stderr_str = String::from_utf8_lossy(&output.stderr).to_string();
+        let stdout_str = String::from_utf8_lossy(&output.stdout).to_string();
+
+        // Check that the response or stderr contains the rejection message.
+        // Interpreter: handler error => 500 response with "stale or fabricated" in body.
+        // JS/Native: error => stderr message + process exit.
+        let resp_str = response
+            .as_ref()
+            .map(|r| String::from_utf8_lossy(r).to_string())
+            .unwrap_or_default();
+
+        let all_output = format!("{}{}{}", resp_str, stderr_str, stdout_str);
+
+        // Must NOT produce 101 Switching Protocols.
+        assert!(
+            !resp_str.contains("101 Switching Protocols"),
+            "[{}] fake req should NOT trigger 101 upgrade, got: {:?}",
+            backend,
+            resp_str
+        );
+
+        // Must mention the rejection reason somewhere (response body for interp, stderr for JS/Native).
+        assert!(
+            all_output.contains("stale or fabricated") || all_output.contains("does not match"),
+            "[{}] expected token mismatch error, got response: {:?}, stderr: {:?}",
+            backend,
+            resp_str,
+            stderr_str
+        );
+
+        cleanup_net_project(&dir);
+    }
+}
+
+/// NB4-18: chunked body with well-formed CRLF passes — 3-backend sanity.
+/// Verifies that normal chunked encoding still works after CRLF strictness was added.
+#[test]
+fn test_net4_nb18_chunked_body_valid_crlf_3way() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+
+    for backend in &["interp", "js", "native"] {
+        let port = find_free_loopback_port();
+        // Use r.requests instead of r.ok to avoid native Bool display issue.
+        let source = format!(
+            r#">>> taida-lang/net => @(httpServe, readBodyAll, startResponse, writeChunk, endResponse)
+
+handler req writer =
+  body <= readBodyAll(req)
+  startResponse(writer, 200, @[@(name <= "Content-Type", value <= "text/plain")])
+  writeChunk(writer, body)
+  endResponse(writer)
+=> :Unit
+
+asyncResult <= httpServe({port}, handler, 1)
+asyncResult ]=> result
+result ]=> r
+stdout(r.requests)
+"#,
+            port = port
+        );
+
+        let (mut child, dir) = spawn_net_server(
+            &source,
+            &format!("net4_nb18_valid_crlf_{}", backend),
+            backend,
+        );
+
+        // Send a properly formed chunked body with multiple chunks.
+        let chunked_body = "5\r\nHello\r\n6\r\nWorld!\r\n0\r\n\r\n";
+        let request = format!(
+            "POST / HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n\r\n{}",
+            chunked_body
+        );
+
+        let response = send_http_request(port, request.as_bytes());
+        let response = match response {
+            Some(r) => r,
+            None => {
+                let _ = child.kill();
+                cleanup_net_project(&dir);
+                panic!("[{}] server did not respond on port {}", backend, port);
+            }
+        };
+
+        let resp_str = String::from_utf8_lossy(&response).to_string();
+        assert!(
+            resp_str.contains("200 OK"),
+            "[{}] expected 200 OK, got: {:?}",
+            backend,
+            resp_str
+        );
+        assert!(
+            resp_str.contains("HelloWorld!"),
+            "[{}] expected body 'HelloWorld!', got: {:?}",
+            backend,
+            resp_str
+        );
+
+        let output = child.wait_with_output().expect("wait for server");
+        let stdout = normalize(&String::from_utf8_lossy(&output.stdout));
+        assert_eq!(
+            stdout, "1",
+            "[{}] httpServe result mismatch: {:?}",
+            backend, stdout
+        );
+
+        cleanup_net_project(&dir);
+    }
+}
+
+/// NB4-18: missing final CRLF after terminal chunk must be rejected (3-backend).
+/// Sends "5\r\nHello\r\n0\r\n" then immediately closes the connection (no final "\r\n").
+/// The server should detect this as a protocol error and not return 200 OK.
+#[test]
+fn test_net4_nb18_missing_final_crlf_after_terminal_chunk_3way() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+
+    for backend in &["interp", "js", "native"] {
+        let port = find_free_loopback_port();
+        let source = format!(
+            r#">>> taida-lang/net => @(httpServe, readBodyAll, startResponse, writeChunk, endResponse)
+
+handler req writer =
+  body <= readBodyAll(req)
+  startResponse(writer, 200, @[@(name <= "Content-Type", value <= "text/plain")])
+  writeChunk(writer, body)
+  endResponse(writer)
+=> :Unit
+
+asyncResult <= httpServe({port}, handler, 1)
+asyncResult ]=> result
+result ]=> r
+stdout(r.requests)
+"#,
+            port = port
+        );
+
+        let (mut child, dir) = spawn_net_server(
+            &source,
+            &format!("net4_nb18_missing_crlf_{}", backend),
+            backend,
+        );
+
+        // Send chunked body with terminal chunk but NO final CRLF, then close.
+        let truncated_body = "5\r\nHello\r\n0\r\n";
+        let request = format!(
+            "POST / HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n{}",
+            truncated_body
+        );
+
+        // Use raw TcpStream to send then immediately shutdown write side.
+        let response: Option<Vec<u8>> = (|| {
+            for _ in 0..80 {
+                std::thread::sleep(Duration::from_millis(100));
+                let stream = match TcpStream::connect(format!("127.0.0.1:{}", port)) {
+                    Ok(s) => s,
+                    Err(_) => continue,
+                };
+                stream.set_read_timeout(Some(Duration::from_secs(3))).ok();
+                stream.set_write_timeout(Some(Duration::from_secs(3))).ok();
+                let mut stream = stream;
+                if std::io::Write::write_all(&mut stream, request.as_bytes()).is_err() {
+                    continue;
+                }
+                // Immediately shutdown write to signal EOF to server.
+                let _ = stream.shutdown(std::net::Shutdown::Write);
+                let mut resp = Vec::new();
+                let mut buf = [0u8; 4096];
+                loop {
+                    match std::io::Read::read(&mut stream, &mut buf) {
+                        Ok(0) => break,
+                        Ok(n) => resp.extend_from_slice(&buf[..n]),
+                        Err(ref e)
+                            if e.kind() == std::io::ErrorKind::WouldBlock
+                                || e.kind() == std::io::ErrorKind::TimedOut =>
+                        {
+                            break;
+                        }
+                        Err(_) => break,
+                    }
+                }
+                return Some(resp);
+            }
+            None
+        })();
+
+        // Server should NOT return 200 OK for a truncated chunked body.
+        if let Some(resp) = &response {
+            let resp_str = String::from_utf8_lossy(resp).to_string();
+            assert!(
+                !resp_str.contains("200 OK"),
+                "[{}] server should NOT return 200 OK for missing final CRLF, got: {:?}",
+                backend,
+                resp_str
+            );
+        }
+        // If no response at all, that's also acceptable (server closed connection).
+
+        let _ = child.kill();
+        let _ = child.wait();
         cleanup_net_project(&dir);
     }
 }

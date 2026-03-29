@@ -21,7 +21,7 @@ use crate::parser::Expr;
 type ResponseFields = (i64, Vec<(String, String)>, Vec<u8>);
 
 /// All symbols exported by the net package.
-/// Legacy (16) + HTTP v1 (3) + HTTP v2 (1) + HTTP v3 (4) = 24 symbols.
+/// Legacy (16) + HTTP v1 (3) + HTTP v2 (1) + HTTP v3 (4) + HTTP v4 (6) = 30 symbols.
 pub(crate) const NET_SYMBOLS: &[&str] = &[
     // Legacy surface (shared with os)
     "dnsResolve",
@@ -51,6 +51,14 @@ pub(crate) const NET_SYMBOLS: &[&str] = &[
     "writeChunk",
     "endResponse",
     "sseEvent",
+    // HTTP v4 request body streaming
+    "readBodyChunk",
+    "readBodyAll",
+    // HTTP v4 WebSocket
+    "wsUpgrade",
+    "wsSend",
+    "wsReceive",
+    "wsClose",
 ];
 
 // ── v3 Writer State Machine ───────────────────────────────────────
@@ -76,6 +84,9 @@ pub(crate) enum WriterState {
     Streaming,
     /// `endResponse` called or auto-ended; no more writes allowed.
     Ended,
+    /// v4: WebSocket upgrade completed. HTTP streaming API is disabled.
+    /// Only wsSend/wsReceive/wsClose are valid in this state.
+    WebSocket,
 }
 
 /// Streaming writer state for a 2-arg handler.
@@ -153,6 +164,120 @@ pub(crate) struct ActiveStreamingWriter {
     /// API call is attempted while this is true, it returns a RuntimeError
     /// instead of creating a second `&mut` to the same pointee.
     pub borrowed: bool,
+    /// v4: Raw pointer to the body streaming state for this request.
+    /// Only set for 2-arg handlers (body-deferred mode).
+    /// Null when 1-arg handler (body already read eagerly).
+    pub body_state: *mut RequestBodyState,
+    /// v4: WebSocket close state. True after wsClose has been sent.
+    pub ws_closed: bool,
+    /// NB4-10: Connection-scoped WebSocket token for identity verification.
+    /// Set when wsUpgrade succeeds; verified by wsSend/wsReceive/wsClose.
+    pub ws_token: u64,
+}
+
+// ── v4 Request Body Streaming State ──────────────────────────
+
+/// Per-request body streaming state for 2-arg handlers.
+/// Lives on the `dispatch_request` stack frame. The `ActiveStreamingWriter`
+/// holds a raw pointer to this struct during handler execution.
+///
+/// Tracks how much of the request body has been consumed so that
+/// `readBodyChunk` can read incrementally from the TcpStream without
+/// buffering the full body.
+pub(crate) struct RequestBodyState {
+    /// Whether the request uses chunked transfer encoding.
+    pub is_chunked: bool,
+    /// Content-Length value from the request head (0 if absent or chunked).
+    pub content_length: i64,
+    /// How many body bytes have been consumed so far (Content-Length path).
+    pub bytes_consumed: i64,
+    /// Whether the body has been fully read (terminal chunk seen or all CL bytes read).
+    pub fully_read: bool,
+    /// Whether any readBodyChunk / readBodyAll call has been made.
+    pub any_read_started: bool,
+    /// Leftover bytes from head parsing that belong to the body start.
+    /// For 2-arg handler, after head parse, there may be unread bytes in
+    /// conn.buf that are body bytes already received. We copy these out
+    /// so that the first readBodyChunk can return them without re-reading.
+    pub leftover: Vec<u8>,
+    /// Current position within the leftover buffer.
+    pub leftover_pos: usize,
+    /// Chunked decoder state: pending partial chunk header bytes.
+    pub chunked_state: ChunkedDecoderState,
+    /// NB4-7: Request-scoped token to verify that readBody*/readBodyChunk/readBodyAll
+    /// are called with the correct request pack (not a fake or stale pack).
+    pub request_token: u64,
+}
+
+/// Global monotonic counter for generating unique request tokens (NB4-7).
+static NEXT_REQUEST_TOKEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+/// NB4-10: Global monotonic counter for generating unique WebSocket connection tokens.
+static NEXT_WS_TOKEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+// ── v4 WebSocket frame types ───────────────────────────────
+
+/// Parsed WebSocket frame result.
+enum WsFrame {
+    /// Text (opcode 0x1) or Binary (opcode 0x2) data frame.
+    Data { opcode: u8, payload: Vec<u8> },
+    /// Ping frame (opcode 0x9) with payload for pong echo.
+    Ping { payload: Vec<u8> },
+    /// Pong frame (opcode 0xA) — unsolicited, ignored.
+    Pong,
+    /// Close frame (opcode 0x8).
+    Close,
+    /// Protocol error (fragmented frame, unknown opcode, etc.).
+    ProtocolError(String),
+}
+
+/// Chunked transfer-encoding decoder state.
+/// Maintains state between readBodyChunk calls for incremental decoding.
+#[derive(Debug)]
+pub(crate) enum ChunkedDecoderState {
+    /// Waiting for chunk-size line (hex digits + CRLF).
+    WaitingChunkSize,
+    /// In the middle of reading chunk data.
+    /// `remaining` is how many bytes left in the current chunk.
+    ReadingChunkData { remaining: usize },
+    /// Waiting for CRLF after chunk data.
+    WaitingChunkTrailer,
+    /// Terminal chunk (size=0) has been seen. Body is done.
+    Done,
+}
+
+impl RequestBodyState {
+    fn new(is_chunked: bool, content_length: i64, leftover: Vec<u8>) -> Self {
+        let fully_read = !is_chunked && content_length == 0;
+        let token = NEXT_REQUEST_TOKEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        RequestBodyState {
+            is_chunked,
+            content_length,
+            bytes_consumed: 0,
+            fully_read,
+            any_read_started: false,
+            leftover,
+            leftover_pos: 0,
+            chunked_state: ChunkedDecoderState::WaitingChunkSize,
+            request_token: token,
+        }
+    }
+
+    /// Check if there are leftover bytes available.
+    fn has_leftover(&self) -> bool {
+        self.leftover_pos < self.leftover.len()
+    }
+
+    /// Take remaining leftover bytes (consuming them).
+    #[allow(dead_code)]
+    fn take_leftover(&mut self) -> Vec<u8> {
+        if self.leftover_pos >= self.leftover.len() {
+            return Vec::new();
+        }
+        let data = self.leftover[self.leftover_pos..].to_vec();
+        self.leftover_pos = self.leftover.len();
+        data
+    }
 }
 
 /// Build the HTTP response head bytes for a streaming response.
@@ -1027,6 +1152,35 @@ fn status_reason(code: i64) -> &'static str {
     }
 }
 
+// ── v4 request body streaming helpers ────────────────────────
+
+/// Check if a request Value has the `__body_stream` sentinel,
+/// indicating it was created by a 2-arg handler with body-deferred semantics.
+fn is_body_stream_request(req: &Value) -> bool {
+    if let Value::BuchiPack(fields) = req {
+        fields.iter().any(|(k, v)| {
+            k == "__body_stream" && matches!(v, Value::Str(s) if s == "__v4_body_stream")
+        })
+    } else {
+        false
+    }
+}
+
+/// Extract the request body token from a body-stream request pack (NB4-7).
+/// Returns None if the request is not a body-stream request or has no token.
+fn extract_body_token(req: &Value) -> Option<u64> {
+    if let Value::BuchiPack(fields) = req {
+        for (k, v) in fields {
+            if k == "__body_token" {
+                if let Value::Int(n) = v {
+                    return Some(*n as u64);
+                }
+            }
+        }
+    }
+    None
+}
+
 // ── readBody ─────────────────────────────────────────────────
 
 /// `readBody(req)` — extract body bytes from a request pack.
@@ -1176,6 +1330,7 @@ impl Interpreter {
             "httpServe" => self.eval_http_serve(args),
 
             // ── readBody(req) → Bytes ──
+            // v4: In a 2-arg handler, readBody acts as readBodyAll alias.
             "readBody" => {
                 let req = match args.first() {
                     Some(arg) => match self.eval_expr(arg)? {
@@ -1188,7 +1343,101 @@ impl Interpreter {
                         });
                     }
                 };
+                // v4: If the request has __body_stream sentinel (2-arg handler),
+                // delegate to readBodyAll to stream from socket.
+                if is_body_stream_request(&req) {
+                    // NB4-7: Verify token before delegating.
+                    if let Some(ref active) = self.active_streaming_writer {
+                        if !active.body_state.is_null() {
+                            let body = unsafe { &*active.body_state };
+                            let pack_token = extract_body_token(&req);
+                            if pack_token != Some(body.request_token) {
+                                return Err(RuntimeError {
+                                    message: "readBody: request pack does not match the current active request. \
+                                             The request may be stale or fabricated.".into(),
+                                });
+                            }
+                        }
+                    }
+                    return self.eval_read_body_all_impl("readBody");
+                }
                 Ok(Some(Signal::Value(eval_read_body(&req)?)))
+            }
+
+            // ── v4 request body streaming API ──
+            // readBodyChunk(req) → Lax[Bytes]
+            // readBodyAll(req) → Bytes
+            // Protected by the same re-entrancy guard as v3 streaming API.
+            "readBodyChunk" | "readBodyAll" => {
+                // Evaluate the req argument first (before re-entrancy guard).
+                let req = match args.first() {
+                    Some(arg) => match self.eval_expr(arg)? {
+                        Signal::Value(v) => v,
+                        other => return Ok(Some(other)),
+                    },
+                    None => {
+                        return Err(RuntimeError {
+                            message: format!("{}: missing argument 'req'", original_name),
+                        });
+                    }
+                };
+
+                // NET4-1f: 1-arg handler request packs do NOT have __body_stream sentinel.
+                if !is_body_stream_request(&req) {
+                    return Err(RuntimeError {
+                        message: format!(
+                            "{}: can only be called in a 2-argument httpServe handler. \
+                             In a 1-argument handler, the request body is already fully read. \
+                             Use readBody(req) instead.",
+                            original_name
+                        ),
+                    });
+                }
+
+                // NB4-7: Verify that the request pack's token matches the active body state.
+                if let Some(ref active) = self.active_streaming_writer {
+                    if !active.body_state.is_null() {
+                        let body = unsafe { &*active.body_state };
+                        let pack_token = extract_body_token(&req);
+                        if pack_token != Some(body.request_token) {
+                            return Err(RuntimeError {
+                                message: format!(
+                                    "{}: request pack does not match the current active request. \
+                                     The request may be stale or fabricated.",
+                                    original_name
+                                ),
+                            });
+                        }
+                    }
+                }
+
+                // Re-entrancy guard (same pattern as v3 streaming API).
+                if let Some(ref active) = self.active_streaming_writer
+                    && active.borrowed
+                {
+                    return Err(RuntimeError {
+                        message: format!(
+                            "{}: cannot be called while another streaming API call is in progress (re-entrant call detected)",
+                            original_name
+                        ),
+                    });
+                }
+                if let Some(ref mut active) = self.active_streaming_writer {
+                    active.borrowed = true;
+                }
+
+                let result = match original_name.as_str() {
+                    "readBodyChunk" => self.eval_read_body_chunk_impl(),
+                    "readBodyAll" => self.eval_read_body_all_impl(&original_name),
+                    _ => unreachable!(),
+                };
+
+                // Clear re-entrancy guard.
+                if let Some(ref mut active) = self.active_streaming_writer {
+                    active.borrowed = false;
+                }
+
+                result
             }
 
             // ── v3 streaming API ──
@@ -1224,6 +1473,42 @@ impl Interpreter {
                     "writeChunk" => self.eval_write_chunk(args),
                     "endResponse" => self.eval_end_response(args),
                     "sseEvent" => self.eval_sse_event(args),
+                    _ => unreachable!(),
+                };
+
+                // Clear the guard after the call completes (success or error).
+                if let Some(ref mut active) = self.active_streaming_writer {
+                    active.borrowed = false;
+                }
+
+                result
+            }
+
+            // ── v4 WebSocket API ──
+            // These functions are only callable inside a 2-arg httpServe handler.
+            // Protected by the same re-entrancy guard as v3 streaming API.
+            "wsUpgrade" | "wsSend" | "wsReceive" | "wsClose" => {
+                // Check re-entrancy before dispatching.
+                if let Some(ref active) = self.active_streaming_writer
+                    && active.borrowed
+                {
+                    return Err(RuntimeError {
+                        message: format!(
+                            "{}: cannot be called while another streaming API call is in progress (re-entrant call detected)",
+                            original_name
+                        ),
+                    });
+                }
+                // Set the guard.
+                if let Some(ref mut active) = self.active_streaming_writer {
+                    active.borrowed = true;
+                }
+
+                let result = match original_name.as_str() {
+                    "wsUpgrade" => self.eval_ws_upgrade(args),
+                    "wsSend" => self.eval_ws_send(args),
+                    "wsReceive" => self.eval_ws_receive(args),
+                    "wsClose" => self.eval_ws_close(args),
                     _ => unreachable!(),
                 };
 
@@ -1325,6 +1610,13 @@ impl Interpreter {
                     message: "startResponse: response already ended.".into(),
                 });
             }
+            WriterState::WebSocket => {
+                return Err(RuntimeError {
+                    message:
+                        "startResponse: cannot use HTTP streaming API after WebSocket upgrade."
+                            .into(),
+                });
+            }
         }
 
         // Arg 0: writer (BuchiPack with __writer_id sentinel) — skip, already validated.
@@ -1408,10 +1700,16 @@ impl Interpreter {
 
         let writer = unsafe { &mut *active.writer };
 
-        // State check: writeChunk is not valid after endResponse.
+        // State check: writeChunk is not valid after endResponse or WebSocket upgrade.
         if writer.state == WriterState::Ended {
             return Err(RuntimeError {
                 message: "writeChunk: response already ended.".into(),
+            });
+        }
+        if writer.state == WriterState::WebSocket {
+            return Err(RuntimeError {
+                message: "writeChunk: cannot use HTTP streaming API after WebSocket upgrade."
+                    .into(),
             });
         }
 
@@ -1507,6 +1805,12 @@ impl Interpreter {
         if writer.state == WriterState::Ended {
             return Ok(Some(Signal::Value(Value::Unit)));
         }
+        if writer.state == WriterState::WebSocket {
+            return Err(RuntimeError {
+                message: "endResponse: cannot use HTTP streaming API after WebSocket upgrade."
+                    .into(),
+            });
+        }
 
         // Commit head if not yet committed.
         if writer.state == WriterState::Idle || writer.state == WriterState::HeadPrepared {
@@ -1596,10 +1900,15 @@ impl Interpreter {
         let writer = unsafe { &mut *active.writer };
         let stream = unsafe { &mut *active.stream };
 
-        // State check: sseEvent is not valid after endResponse.
+        // State check: sseEvent is not valid after endResponse or WebSocket.
         if writer.state == WriterState::Ended {
             return Err(RuntimeError {
                 message: "sseEvent: response already ended.".into(),
+            });
+        }
+        if writer.state == WriterState::WebSocket {
+            return Err(RuntimeError {
+                message: "sseEvent: cannot use HTTP streaming API after WebSocket upgrade.".into(),
             });
         }
 
@@ -1729,6 +2038,1244 @@ impl Interpreter {
         bufs.push(std::io::IoSlice::new(suffix));
 
         write_vectored_all(stream, &bufs)?;
+
+        Ok(Some(Signal::Value(Value::Unit)))
+    }
+
+    // ── v4 request body streaming implementation ─────────────────
+    //
+    // readBodyChunk(req) → Lax[Bytes]
+    //   Reads the next chunk of request body from the socket.
+    //   - Chunked TE: decodes one chunk at a time
+    //   - Content-Length: reads in 8KB increments
+    //   - Body end: returns Lax empty (hasValue = false)
+    //
+    // readBodyAll(req) → Bytes
+    //   Reads all remaining body bytes. This is the only aggregate-permitted path.
+
+    /// Build a Lax[Bytes] with a value.
+    fn make_lax_bytes_value(data: Vec<u8>) -> Value {
+        Value::BuchiPack(vec![
+            ("hasValue".into(), Value::Bool(true)),
+            ("__value".into(), Value::Bytes(data)),
+            ("__default".into(), Value::Bytes(vec![])),
+            ("__type".into(), Value::Str("Lax".into())),
+        ])
+    }
+
+    /// Build a Lax[Bytes] empty (hasValue = false).
+    fn make_lax_bytes_empty() -> Value {
+        Value::BuchiPack(vec![
+            ("hasValue".into(), Value::Bool(false)),
+            ("__value".into(), Value::Bytes(vec![])),
+            ("__default".into(), Value::Bytes(vec![])),
+            ("__type".into(), Value::Str("Lax".into())),
+        ])
+    }
+
+    /// `readBodyChunk(req)` implementation.
+    ///
+    /// Reads the next chunk of request body from the TcpStream.
+    /// Returns Lax[Bytes] with the chunk data, or Lax empty when body is done.
+    ///
+    /// Zero-copy contract: each chunk is returned independently; no aggregate buffer.
+    fn eval_read_body_chunk_impl(&mut self) -> Result<Option<Signal>, RuntimeError> {
+        // Must be inside a 2-arg handler.
+        let active = match self.active_streaming_writer.as_ref() {
+            Some(a) => a,
+            None => {
+                return Err(RuntimeError {
+                    message:
+                        "readBodyChunk: can only be called inside a 2-argument httpServe handler"
+                            .into(),
+                });
+            }
+        };
+
+        // v4: After WebSocket upgrade, readBodyChunk is not allowed.
+        let writer = unsafe { &*active.writer };
+        if writer.state == WriterState::WebSocket {
+            return Err(RuntimeError {
+                message: "readBodyChunk: cannot read HTTP body after WebSocket upgrade.".into(),
+            });
+        }
+
+        if active.body_state.is_null() {
+            return Err(RuntimeError {
+                message: "readBodyChunk: no body streaming state available".into(),
+            });
+        }
+
+        // Safety: body_state is valid during handler execution.
+        let body = unsafe { &mut *active.body_state };
+        let stream = unsafe { &mut *active.stream };
+
+        body.any_read_started = true;
+
+        // NET4-1d: If body is already fully read, return Lax empty.
+        if body.fully_read {
+            return Ok(Some(Signal::Value(Self::make_lax_bytes_empty())));
+        }
+
+        if body.is_chunked {
+            // ── NET4-1b: Chunked TE decode ──
+            Self::read_body_chunk_chunked(body, stream)
+        } else {
+            // ── NET4-1c: Content-Length body ──
+            Self::read_body_chunk_content_length(body, stream)
+        }
+    }
+
+    /// Read one chunk from a chunked transfer-encoded body.
+    fn read_body_chunk_chunked(
+        body: &mut RequestBodyState,
+        stream: &mut std::net::TcpStream,
+    ) -> Result<Option<Signal>, RuntimeError> {
+        const READ_BUF_SIZE: usize = 8192;
+
+        loop {
+            match body.chunked_state {
+                ChunkedDecoderState::Done => {
+                    body.fully_read = true;
+                    return Ok(Some(Signal::Value(Self::make_lax_bytes_empty())));
+                }
+                ChunkedDecoderState::WaitingChunkSize => {
+                    // Read chunk-size line from leftover or stream.
+                    let line = Self::read_line_from_body(body, stream)?;
+                    let line = line.trim().to_string();
+                    if line.is_empty() {
+                        // Could be trailing CRLF; try again.
+                        continue;
+                    }
+                    // Parse hex chunk size (strip any chunk-extension after ';')
+                    let hex_str = line.split(';').next().unwrap_or("").trim();
+                    let chunk_size =
+                        usize::from_str_radix(hex_str, 16).map_err(|_| RuntimeError {
+                            message: format!(
+                                "readBodyChunk: invalid chunk-size '{}' in chunked body",
+                                hex_str
+                            ),
+                        })?;
+
+                    if chunk_size == 0 {
+                        // Terminal chunk. Drain all trailing headers + final CRLF (NB4-8).
+                        body.chunked_state = ChunkedDecoderState::Done;
+                        body.fully_read = true;
+                        Self::drain_chunked_trailers(body, stream)?;
+                        return Ok(Some(Signal::Value(Self::make_lax_bytes_empty())));
+                    }
+
+                    body.chunked_state = ChunkedDecoderState::ReadingChunkData {
+                        remaining: chunk_size,
+                    };
+                }
+                ChunkedDecoderState::ReadingChunkData { remaining } => {
+                    if remaining == 0 {
+                        body.chunked_state = ChunkedDecoderState::WaitingChunkTrailer;
+                        continue;
+                    }
+
+                    // Read up to `remaining` bytes from leftover + stream.
+                    let to_read = remaining.min(READ_BUF_SIZE);
+                    let data = Self::read_exact_from_body(body, stream, to_read)?;
+                    let actually_read = data.len();
+
+                    // NB4-18: short read (EOF) in chunked data is a protocol error.
+                    if actually_read == 0 {
+                        return Err(RuntimeError {
+                            message: format!(
+                                "readBodyChunk: truncated chunked body — expected {} more chunk-data bytes but got EOF",
+                                remaining
+                            ),
+                        });
+                    }
+
+                    let new_remaining = remaining - actually_read;
+                    body.chunked_state = ChunkedDecoderState::ReadingChunkData {
+                        remaining: new_remaining,
+                    };
+
+                    body.bytes_consumed += actually_read as i64;
+                    return Ok(Some(Signal::Value(Self::make_lax_bytes_value(data))));
+                }
+                ChunkedDecoderState::WaitingChunkTrailer => {
+                    // NB4-18: Read the CRLF after chunk data and validate it is
+                    // exactly empty (only whitespace/CRLF). Non-empty content or
+                    // EOF is a protocol error.
+                    let line = Self::read_line_from_body(body, stream)?;
+                    let trimmed = line.trim();
+                    if !trimmed.is_empty() {
+                        return Err(RuntimeError {
+                            message: format!(
+                                "readBodyChunk: malformed chunk trailer — expected CRLF after chunk data, \
+                                 got {:?}",
+                                line
+                            ),
+                        });
+                    }
+                    if line.is_empty() {
+                        // EOF before CRLF — protocol error.
+                        return Err(RuntimeError {
+                            message:
+                                "readBodyChunk: missing CRLF after chunk data (unexpected EOF)"
+                                    .into(),
+                        });
+                    }
+                    body.chunked_state = ChunkedDecoderState::WaitingChunkSize;
+                }
+            }
+        }
+    }
+
+    /// Read one chunk from a Content-Length body.
+    fn read_body_chunk_content_length(
+        body: &mut RequestBodyState,
+        stream: &mut std::net::TcpStream,
+    ) -> Result<Option<Signal>, RuntimeError> {
+        const READ_BUF_SIZE: usize = 8192;
+
+        let remaining = body.content_length - body.bytes_consumed;
+        if remaining <= 0 {
+            body.fully_read = true;
+            return Ok(Some(Signal::Value(Self::make_lax_bytes_empty())));
+        }
+
+        let to_read = (remaining as usize).min(READ_BUF_SIZE);
+        let data = Self::read_exact_from_body(body, stream, to_read)?;
+        if data.is_empty() {
+            // NB4-18: EOF before Content-Length exhausted is a protocol error.
+            return Err(RuntimeError {
+                message: format!(
+                    "readBodyChunk: truncated body — expected {} bytes (Content-Length) but got EOF after {} bytes",
+                    body.content_length, body.bytes_consumed
+                ),
+            });
+        }
+        body.bytes_consumed += data.len() as i64;
+        if body.bytes_consumed >= body.content_length {
+            body.fully_read = true;
+        }
+        Ok(Some(Signal::Value(Self::make_lax_bytes_value(data))))
+    }
+
+    /// Consume all trailing headers after a chunked terminal chunk (size=0).
+    /// RFC 7230 Section 4.1.2: After the terminal chunk, there may be
+    /// trailer header fields followed by a final CRLF. We read lines
+    /// until we see an empty line (just CRLF), which marks the end of
+    /// the chunked message. This prevents leftover trailer bytes from
+    /// corrupting the next request on a keep-alive connection.
+    fn drain_chunked_trailers(
+        body: &mut RequestBodyState,
+        stream: &mut std::net::TcpStream,
+    ) -> Result<(), RuntimeError> {
+        // Read lines until we get an empty line (just whitespace/CRLF).
+        // Safety limit: at most 64 trailer lines to prevent infinite loops.
+        for _ in 0..64 {
+            let line = Self::read_line_from_body(body, stream)?;
+            // NB4-18: EOF (0 raw bytes) != valid empty line ("\r\n").
+            if line.is_empty() {
+                return Err(RuntimeError {
+                    message: "chunked body error: missing final CRLF after terminal chunk"
+                        .to_string(),
+                });
+            }
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                // Final empty line found; trailers fully consumed.
+                return Ok(());
+            }
+            // Non-empty line: a trailer header. Continue reading.
+        }
+        // Too many trailer lines; treat as consumed (close will handle cleanup).
+        Ok(())
+    }
+
+    /// Read a line (up to CRLF) from leftover buffer then stream.
+    fn read_line_from_body(
+        body: &mut RequestBodyState,
+        stream: &mut std::net::TcpStream,
+    ) -> Result<String, RuntimeError> {
+        let mut line = Vec::new();
+
+        // First consume from leftover.
+        while body.has_leftover() {
+            let b = body.leftover[body.leftover_pos];
+            body.leftover_pos += 1;
+            line.push(b);
+            if b == b'\n' {
+                return Ok(String::from_utf8_lossy(&line).into_owned());
+            }
+        }
+
+        // Then read from stream byte-by-byte until LF.
+        let mut byte = [0u8; 1];
+        loop {
+            match std::io::Read::read(stream, &mut byte) {
+                Ok(0) => break, // EOF
+                Ok(_) => {
+                    line.push(byte[0]);
+                    if byte[0] == b'\n' {
+                        break;
+                    }
+                }
+                Err(ref e)
+                    if e.kind() == std::io::ErrorKind::WouldBlock
+                        || e.kind() == std::io::ErrorKind::TimedOut =>
+                {
+                    // Retry once: set blocking briefly.
+                    break;
+                }
+                Err(e) => {
+                    return Err(RuntimeError {
+                        message: format!("readBodyChunk: read error: {}", e),
+                    });
+                }
+            }
+        }
+
+        Ok(String::from_utf8_lossy(&line).into_owned())
+    }
+
+    /// Read up to `count` bytes from leftover buffer then stream.
+    /// Returns a Vec of the bytes actually read (may be less than count on EOF).
+    fn read_exact_from_body(
+        body: &mut RequestBodyState,
+        stream: &mut std::net::TcpStream,
+        count: usize,
+    ) -> Result<Vec<u8>, RuntimeError> {
+        let mut result = Vec::with_capacity(count);
+
+        // First, drain from leftover.
+        while result.len() < count && body.has_leftover() {
+            result.push(body.leftover[body.leftover_pos]);
+            body.leftover_pos += 1;
+        }
+
+        // Then read from stream.
+        while result.len() < count {
+            let remaining = count - result.len();
+            let mut buf = vec![0u8; remaining];
+            match std::io::Read::read(stream, &mut buf) {
+                Ok(0) => break, // EOF
+                Ok(n) => {
+                    result.extend_from_slice(&buf[..n]);
+                }
+                Err(ref e)
+                    if e.kind() == std::io::ErrorKind::WouldBlock
+                        || e.kind() == std::io::ErrorKind::TimedOut =>
+                {
+                    if result.is_empty() {
+                        // If we have nothing yet, this might be a real timeout.
+                        // Retry one more time with a blocking read.
+                        continue;
+                    }
+                    break; // Return what we have.
+                }
+                Err(e) => {
+                    return Err(RuntimeError {
+                        message: format!("readBodyChunk: read error: {}", e),
+                    });
+                }
+            }
+        }
+
+        Ok(result)
+    }
+
+    /// `readBodyAll(req)` implementation.
+    ///
+    /// Reads all remaining body bytes by repeatedly calling readBodyChunk logic.
+    /// This is the only path where aggregate buffering is permitted.
+    fn eval_read_body_all_impl(&mut self, api_name: &str) -> Result<Option<Signal>, RuntimeError> {
+        let active = match self.active_streaming_writer.as_ref() {
+            Some(a) => a,
+            None => {
+                return Err(RuntimeError {
+                    message: format!(
+                        "{}: can only be called inside a 2-argument httpServe handler",
+                        api_name
+                    ),
+                });
+            }
+        };
+
+        // v4: After WebSocket upgrade, readBodyAll is not allowed.
+        let writer = unsafe { &*active.writer };
+        if writer.state == WriterState::WebSocket {
+            return Err(RuntimeError {
+                message: format!(
+                    "{}: cannot read HTTP body after WebSocket upgrade.",
+                    api_name
+                ),
+            });
+        }
+
+        if active.body_state.is_null() {
+            return Err(RuntimeError {
+                message: format!("{}: no body streaming state available", api_name),
+            });
+        }
+
+        // Safety: body_state is valid during handler execution.
+        let body = unsafe { &mut *active.body_state };
+        let stream = unsafe { &mut *active.stream };
+
+        body.any_read_started = true;
+
+        // If body is already fully read, return empty Bytes.
+        if body.fully_read {
+            return Ok(Some(Signal::Value(Value::Bytes(vec![]))));
+        }
+
+        // Aggregate all remaining body bytes.
+        // This is the only place where aggregate buffering is permitted.
+        let mut all_bytes: Vec<u8> = Vec::new();
+
+        if body.is_chunked {
+            // Chunked path: read all chunks.
+            loop {
+                match body.chunked_state {
+                    ChunkedDecoderState::Done => {
+                        body.fully_read = true;
+                        break;
+                    }
+                    ChunkedDecoderState::WaitingChunkSize => {
+                        let line = Self::read_line_from_body(body, stream)?;
+                        let line = line.trim().to_string();
+                        if line.is_empty() {
+                            continue;
+                        }
+                        let hex_str = line.split(';').next().unwrap_or("").trim();
+                        let chunk_size =
+                            usize::from_str_radix(hex_str, 16).map_err(|_| RuntimeError {
+                                message: format!(
+                                    "{}: invalid chunk-size '{}' in chunked body",
+                                    api_name, hex_str
+                                ),
+                            })?;
+
+                        if chunk_size == 0 {
+                            body.chunked_state = ChunkedDecoderState::Done;
+                            body.fully_read = true;
+                            // NB4-8: Drain all trailing headers + final CRLF.
+                            Self::drain_chunked_trailers(body, stream)?;
+                            break;
+                        }
+
+                        body.chunked_state = ChunkedDecoderState::ReadingChunkData {
+                            remaining: chunk_size,
+                        };
+                    }
+                    ChunkedDecoderState::ReadingChunkData { remaining } => {
+                        if remaining == 0 {
+                            body.chunked_state = ChunkedDecoderState::WaitingChunkTrailer;
+                            continue;
+                        }
+                        let data = Self::read_exact_from_body(body, stream, remaining)?;
+                        let n = data.len();
+                        all_bytes.extend_from_slice(&data);
+                        let new_remaining = remaining - n;
+                        body.chunked_state = ChunkedDecoderState::ReadingChunkData {
+                            remaining: new_remaining,
+                        };
+                    }
+                    ChunkedDecoderState::WaitingChunkTrailer => {
+                        // NB4-18: Validate CRLF after chunk data.
+                        let line = Self::read_line_from_body(body, stream)?;
+                        let trimmed = line.trim();
+                        if !trimmed.is_empty() {
+                            return Err(RuntimeError {
+                                message: format!(
+                                    "{}: malformed chunk trailer — expected CRLF after chunk data, \
+                                     got {:?}",
+                                    api_name, line
+                                ),
+                            });
+                        }
+                        if line.is_empty() {
+                            return Err(RuntimeError {
+                                message: format!(
+                                    "{}: missing CRLF after chunk data (unexpected EOF)",
+                                    api_name
+                                ),
+                            });
+                        }
+                        body.chunked_state = ChunkedDecoderState::WaitingChunkSize;
+                    }
+                }
+            }
+        } else {
+            // Content-Length path: read remaining bytes.
+            let remaining = (body.content_length - body.bytes_consumed) as usize;
+            if remaining > 0 {
+                let data = Self::read_exact_from_body(body, stream, remaining)?;
+                body.bytes_consumed += data.len() as i64;
+                all_bytes = data;
+            }
+            body.fully_read = true;
+        }
+
+        Ok(Some(Signal::Value(Value::Bytes(all_bytes))))
+    }
+
+    // ── v4 WebSocket implementation ─────────────────────────────
+    //
+    // WebSocket handshake + frame I/O per RFC 6455.
+    //
+    // Design constraints (from NET_DESIGN.md / NET_IMPL_GUIDE.md):
+    //   - wsUpgrade failure → no wire write, Lax empty
+    //   - wsUpgrade success → 101 response + WriterState::WebSocket
+    //   - server→client frames: MASK=0
+    //   - client→server frames: MASK=1, XOR decode in-place
+    //   - fragmented frames (FIN=0) → protocol error → close
+    //   - oversized payload (>16 MiB) → close
+    //   - ping → auto pong → advance to next data frame
+    //   - close frame → Lax empty
+    //   - wsClose → send close frame, idempotent
+    //   - auto close on handler return
+
+    /// WebSocket opcodes.
+    const WS_OPCODE_TEXT: u8 = 0x1;
+    const WS_OPCODE_BINARY: u8 = 0x2;
+    const WS_OPCODE_CLOSE: u8 = 0x8;
+    #[allow(dead_code)]
+    const WS_OPCODE_PING: u8 = 0x9;
+    const WS_OPCODE_PONG: u8 = 0xA;
+
+    /// Maximum WebSocket payload size: 16 MiB.
+    const WS_MAX_PAYLOAD: u64 = 16 * 1024 * 1024;
+
+    /// RFC 6455 magic GUID for Sec-WebSocket-Accept calculation.
+    const WS_GUID: &'static str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
+
+    /// Compute Sec-WebSocket-Accept from Sec-WebSocket-Key (NET4-2b).
+    /// SHA-1(key + GUID) → Base64.
+    fn compute_ws_accept(key: &str) -> String {
+        use base64::Engine;
+        use sha1::{Digest, Sha1};
+        let mut hasher = Sha1::new();
+        hasher.update(key.as_bytes());
+        hasher.update(Self::WS_GUID.as_bytes());
+        let hash = hasher.finalize();
+        base64::engine::general_purpose::STANDARD.encode(hash)
+    }
+
+    /// Validate a WebSocket ws token argument (similar to validate_writer_token).
+    /// NB4-10: Validate ws token — checks both sentinel AND connection-scoped token.
+    fn validate_ws_token(&mut self, args: &[Expr], api_name: &str) -> Result<(), RuntimeError> {
+        let arg0 = match args.first() {
+            Some(a) => a,
+            None => {
+                return Err(RuntimeError {
+                    message: format!("{}: missing ws argument", api_name),
+                });
+            }
+        };
+        match self.eval_expr(arg0)? {
+            Signal::Value(Value::BuchiPack(fields)) => {
+                // Check sentinel.
+                let is_valid = fields.iter().any(|(k, v)| {
+                    k == "__ws_id" && matches!(v, Value::Str(s) if s == "__v4_websocket_conn")
+                });
+                if !is_valid {
+                    return Err(RuntimeError {
+                        message: format!(
+                            "{}: first argument must be the WebSocket connection from wsUpgrade",
+                            api_name
+                        ),
+                    });
+                }
+                // NB4-10: Verify connection-scoped token matches active ws_token.
+                let pack_token = fields.iter().find_map(|(k, v)| {
+                    if k == "__ws_token" {
+                        match v {
+                            Value::Int(n) => Some(*n as u64),
+                            _ => None,
+                        }
+                    } else {
+                        None
+                    }
+                });
+                if let Some(ref active) = self.active_streaming_writer {
+                    if active.ws_token == 0 || pack_token != Some(active.ws_token) {
+                        return Err(RuntimeError {
+                            message: format!(
+                                "{}: WebSocket connection does not match the current active connection. \
+                                 The connection may be stale or fabricated.",
+                                api_name
+                            ),
+                        });
+                    }
+                }
+                Ok(())
+            }
+            _ => Err(RuntimeError {
+                message: format!(
+                    "{}: first argument must be the WebSocket connection from wsUpgrade",
+                    api_name
+                ),
+            }),
+        }
+    }
+
+    /// `wsUpgrade(req, writer)` → `Lax[@(ws: WsConn)]` (NET4-2a).
+    ///
+    /// Validates the WebSocket upgrade request, sends 101 response if valid,
+    /// and transitions writer state to WebSocket.
+    /// On failure: returns Lax empty, writes nothing to wire.
+    fn eval_ws_upgrade(&mut self, args: &[Expr]) -> Result<Option<Signal>, RuntimeError> {
+        if self.active_streaming_writer.is_none() {
+            return Err(RuntimeError {
+                message: "wsUpgrade: can only be called inside a 2-argument httpServe handler"
+                    .into(),
+            });
+        }
+
+        // Evaluate req argument.
+        let req = match args.first() {
+            Some(arg) => match self.eval_expr(arg)? {
+                Signal::Value(v) => v,
+                other => return Ok(Some(other)),
+            },
+            None => {
+                return Err(RuntimeError {
+                    message: "wsUpgrade: missing argument 'req'".into(),
+                });
+            }
+        };
+
+        // NB4-10: Verify that the request pack's token matches the active body state.
+        // This prevents stale/fabricated request packs from triggering an upgrade.
+        if let Some(ref active) = self.active_streaming_writer {
+            if !active.body_state.is_null() {
+                let body = unsafe { &*active.body_state };
+                let pack_token = extract_body_token(&req);
+                if pack_token != Some(body.request_token) {
+                    return Err(RuntimeError {
+                        message:
+                            "wsUpgrade: request pack does not match the current active request. \
+                                 The request may be stale or fabricated."
+                                .into(),
+                    });
+                }
+            }
+        }
+
+        // Validate writer token (2nd arg).
+        self.validate_writer_token(&args[1..], "wsUpgrade")?;
+
+        let active = self.active_streaming_writer.as_ref().unwrap();
+        let writer = unsafe { &mut *active.writer };
+
+        // State check: wsUpgrade is only valid in Idle state (before any head commit).
+        match writer.state {
+            WriterState::Idle => {}
+            WriterState::HeadPrepared | WriterState::Streaming => {
+                return Err(RuntimeError {
+                    message: "wsUpgrade: cannot upgrade after HTTP response has started. \
+                             wsUpgrade must be called before startResponse/writeChunk."
+                        .into(),
+                });
+            }
+            WriterState::Ended => {
+                return Err(RuntimeError {
+                    message: "wsUpgrade: cannot upgrade after HTTP response has ended.".into(),
+                });
+            }
+            WriterState::WebSocket => {
+                return Err(RuntimeError {
+                    message: "wsUpgrade: WebSocket upgrade already completed.".into(),
+                });
+            }
+        }
+
+        // Extract request fields for validation.
+        let req_fields = match &req {
+            Value::BuchiPack(f) => f,
+            _ => {
+                return Ok(Some(Signal::Value(Self::make_lax_ws_empty())));
+            }
+        };
+
+        // Validate: must be GET.
+        let method_ok = match get_field_value(req_fields, "method") {
+            Some(Value::BuchiPack(method_span)) => {
+                // Method is stored as a span in raw bytes.
+                let raw = match get_field_value(req_fields, "raw") {
+                    Some(Value::Bytes(b)) => b,
+                    _ => return Ok(Some(Signal::Value(Self::make_lax_ws_empty()))),
+                };
+                let start = get_field_int(method_span, "start").unwrap_or(0) as usize;
+                let len = get_field_int(method_span, "len").unwrap_or(0) as usize;
+                let end = start.saturating_add(len).min(raw.len());
+                let method_str = std::str::from_utf8(&raw[start..end]).unwrap_or("");
+                method_str.eq_ignore_ascii_case("GET")
+            }
+            _ => false,
+        };
+        if !method_ok {
+            return Ok(Some(Signal::Value(Self::make_lax_ws_empty())));
+        }
+
+        // Check request has no body (Content-Length must be 0 or absent, not chunked).
+        let cl = get_field_int(req_fields, "contentLength").unwrap_or(0);
+        let chunked = match get_field_value(req_fields, "chunked") {
+            Some(Value::Bool(b)) => *b,
+            _ => false,
+        };
+        if cl > 0 || chunked {
+            return Ok(Some(Signal::Value(Self::make_lax_ws_empty())));
+        }
+
+        // Extract headers for WebSocket validation.
+        let headers = match get_field_value(req_fields, "headers") {
+            Some(Value::List(h)) => h,
+            _ => return Ok(Some(Signal::Value(Self::make_lax_ws_empty()))),
+        };
+
+        // Extract raw bytes for header value extraction.
+        let raw = match get_field_value(req_fields, "raw") {
+            Some(Value::Bytes(b)) => b,
+            _ => return Ok(Some(Signal::Value(Self::make_lax_ws_empty()))),
+        };
+
+        // Helper to extract header value from span.
+        let get_header_value =
+            |headers: &[Value], raw: &[u8], target_name: &str| -> Option<String> {
+                for h in headers {
+                    if let Value::BuchiPack(hf) = h {
+                        let name_span = match get_field_value(hf, "name") {
+                            Some(Value::BuchiPack(s)) => s,
+                            _ => continue,
+                        };
+                        let n_start = get_field_int(name_span, "start").unwrap_or(0) as usize;
+                        let n_len = get_field_int(name_span, "len").unwrap_or(0) as usize;
+                        let n_end = n_start.saturating_add(n_len).min(raw.len());
+                        let name_str = std::str::from_utf8(&raw[n_start..n_end]).unwrap_or("");
+                        if name_str.eq_ignore_ascii_case(target_name) {
+                            let val_span = match get_field_value(hf, "value") {
+                                Some(Value::BuchiPack(s)) => s,
+                                _ => continue,
+                            };
+                            let v_start = get_field_int(val_span, "start").unwrap_or(0) as usize;
+                            let v_len = get_field_int(val_span, "len").unwrap_or(0) as usize;
+                            let v_end = v_start.saturating_add(v_len).min(raw.len());
+                            let val_str = std::str::from_utf8(&raw[v_start..v_end]).unwrap_or("");
+                            return Some(val_str.to_string());
+                        }
+                    }
+                }
+                None
+            };
+
+        // Validate: Upgrade: websocket
+        let upgrade_val = get_header_value(headers, raw, "Upgrade");
+        if !upgrade_val
+            .as_ref()
+            .is_some_and(|v| v.eq_ignore_ascii_case("websocket"))
+        {
+            return Ok(Some(Signal::Value(Self::make_lax_ws_empty())));
+        }
+
+        // Validate: Connection: Upgrade (may contain multiple values separated by comma)
+        let conn_val = get_header_value(headers, raw, "Connection");
+        let connection_ok = conn_val.as_ref().is_some_and(|v| {
+            v.split(',')
+                .any(|part| part.trim().eq_ignore_ascii_case("Upgrade"))
+        });
+        if !connection_ok {
+            return Ok(Some(Signal::Value(Self::make_lax_ws_empty())));
+        }
+
+        // Validate: Sec-WebSocket-Version: 13
+        let version_val = get_header_value(headers, raw, "Sec-WebSocket-Version");
+        if !version_val.as_ref().is_some_and(|v| v.trim() == "13") {
+            return Ok(Some(Signal::Value(Self::make_lax_ws_empty())));
+        }
+
+        // Validate: Sec-WebSocket-Key (must be present, 24-char base64)
+        let ws_key = match get_header_value(headers, raw, "Sec-WebSocket-Key") {
+            Some(k) => k.trim().to_string(),
+            None => {
+                return Ok(Some(Signal::Value(Self::make_lax_ws_empty())));
+            }
+        };
+        // NB4-11: RFC 6455: key must be a base64 encoded 16-byte value (= 24 chars with padding).
+        // Validate both the length (24 chars) and that it decodes to exactly 16 bytes.
+        if ws_key.len() != 24 {
+            return Ok(Some(Signal::Value(Self::make_lax_ws_empty())));
+        }
+        match base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &ws_key) {
+            Ok(decoded) if decoded.len() == 16 => {} // Valid
+            _ => {
+                return Ok(Some(Signal::Value(Self::make_lax_ws_empty())));
+            }
+        }
+
+        // All validations passed. Send 101 Switching Protocols response.
+        let accept = Self::compute_ws_accept(&ws_key);
+        let response = format!(
+            "HTTP/1.1 101 Switching Protocols\r\n\
+             Upgrade: websocket\r\n\
+             Connection: Upgrade\r\n\
+             Sec-WebSocket-Accept: {}\r\n\
+             \r\n",
+            accept
+        );
+
+        // Write the 101 response to wire.
+        let active = self.active_streaming_writer.as_ref().unwrap();
+        let stream = unsafe { &mut *active.stream };
+        write_all_retry(stream, response.as_bytes())?;
+
+        // Transition to WebSocket state.
+        let writer = unsafe { &mut *active.writer };
+        writer.state = WriterState::WebSocket;
+
+        // NB4-10: Generate connection-scoped token for identity verification.
+        let ws_token = NEXT_WS_TOKEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if let Some(ref mut active) = self.active_streaming_writer {
+            active.ws_token = ws_token;
+        }
+
+        // Create WsConn BuchiPack with identity token.
+        let ws_pack = Value::BuchiPack(vec![
+            ("__ws_id".into(), Value::Str("__v4_websocket_conn".into())),
+            ("__ws_token".into(), Value::Int(ws_token as i64)),
+        ]);
+
+        // Return Lax with the ws connection.
+        Ok(Some(Signal::Value(Self::make_lax_ws_value(ws_pack))))
+    }
+
+    /// Build Lax[@(ws: WsConn)] with value.
+    fn make_lax_ws_value(ws: Value) -> Value {
+        let inner = Value::BuchiPack(vec![("ws".into(), ws)]);
+        Value::BuchiPack(vec![
+            ("hasValue".into(), Value::Bool(true)),
+            ("__value".into(), inner),
+            ("__default".into(), Value::BuchiPack(vec![])),
+            ("__type".into(), Value::Str("Lax".into())),
+        ])
+    }
+
+    /// Build Lax empty for failed wsUpgrade.
+    fn make_lax_ws_empty() -> Value {
+        Value::BuchiPack(vec![
+            ("hasValue".into(), Value::Bool(false)),
+            ("__value".into(), Value::BuchiPack(vec![])),
+            ("__default".into(), Value::BuchiPack(vec![])),
+            ("__type".into(), Value::Str("Lax".into())),
+        ])
+    }
+
+    /// `wsSend(ws, data)` → Unit (NET4-2e).
+    ///
+    /// Sends a WebSocket text or binary frame.
+    /// - Str → text frame (opcode 0x1)
+    /// - Bytes → binary frame (opcode 0x2)
+    /// Server-to-client: MASK=0.
+    fn eval_ws_send(&mut self, args: &[Expr]) -> Result<Option<Signal>, RuntimeError> {
+        if self.active_streaming_writer.is_none() {
+            return Err(RuntimeError {
+                message: "wsSend: can only be called inside a 2-argument httpServe handler".into(),
+            });
+        }
+
+        // Validate ws token.
+        self.validate_ws_token(args, "wsSend")?;
+
+        // Evaluate data argument.
+        let data = match args.get(1) {
+            Some(arg) => match self.eval_expr(arg)? {
+                Signal::Value(v) => v,
+                other => return Ok(Some(other)),
+            },
+            None => {
+                return Err(RuntimeError {
+                    message: "wsSend: missing argument 'data'".into(),
+                });
+            }
+        };
+
+        let active = self.active_streaming_writer.as_ref().unwrap();
+        let writer = unsafe { &*active.writer };
+
+        // Must be in WebSocket state.
+        if writer.state != WriterState::WebSocket {
+            return Err(RuntimeError {
+                message: "wsSend: not in WebSocket state. Call wsUpgrade first.".into(),
+            });
+        }
+
+        // Check if already closed.
+        if active.ws_closed {
+            return Err(RuntimeError {
+                message: "wsSend: WebSocket connection is already closed.".into(),
+            });
+        }
+
+        let stream = unsafe { &mut *active.stream };
+
+        // Determine opcode and payload.
+        let (opcode, payload): (u8, &[u8]) = match &data {
+            Value::Str(s) => (Self::WS_OPCODE_TEXT, s.as_bytes()),
+            Value::Bytes(b) => (Self::WS_OPCODE_BINARY, b.as_slice()),
+            _ => {
+                return Err(RuntimeError {
+                    message: "wsSend: data must be Str (text frame) or Bytes (binary frame)".into(),
+                });
+            }
+        };
+
+        Self::write_ws_frame(stream, opcode, payload)?;
+
+        Ok(Some(Signal::Value(Value::Unit)))
+    }
+
+    /// Write a WebSocket frame to the stream.
+    /// Server-to-client: FIN=1, MASK=0.
+    /// Uses vectored write (header on stack, payload direct).
+    fn write_ws_frame(
+        stream: &mut std::net::TcpStream,
+        opcode: u8,
+        payload: &[u8],
+    ) -> Result<(), RuntimeError> {
+        let payload_len = payload.len();
+
+        // Build frame header on stack (max 10 bytes).
+        let mut header = [0u8; 10];
+        header[0] = 0x80 | opcode; // FIN=1, opcode
+        let header_len;
+
+        if payload_len < 126 {
+            header[1] = payload_len as u8; // MASK=0
+            header_len = 2;
+        } else if payload_len <= 65535 {
+            header[1] = 126;
+            header[2] = (payload_len >> 8) as u8;
+            header[3] = (payload_len & 0xFF) as u8;
+            header_len = 4;
+        } else {
+            header[1] = 127;
+            let len64 = payload_len as u64;
+            header[2] = (len64 >> 56) as u8;
+            header[3] = (len64 >> 48) as u8;
+            header[4] = (len64 >> 40) as u8;
+            header[5] = (len64 >> 32) as u8;
+            header[6] = (len64 >> 24) as u8;
+            header[7] = (len64 >> 16) as u8;
+            header[8] = (len64 >> 8) as u8;
+            header[9] = len64 as u8;
+            header_len = 10;
+        }
+
+        // Vectored write: header + payload (no aggregate buffer).
+        let bufs = [
+            std::io::IoSlice::new(&header[..header_len]),
+            std::io::IoSlice::new(payload),
+        ];
+        write_vectored_all(stream, &bufs)
+    }
+
+    /// `wsReceive(ws)` → `Lax[@(type: Str, data: Bytes)]` (NET4-2d).
+    ///
+    /// Receives the next WebSocket data frame.
+    /// - ping: auto pong, advance to next frame
+    /// - close: return Lax empty
+    /// - text/binary: return @(type, data)
+    /// - fragmented (FIN=0): protocol error → close
+    /// - oversized (>16 MiB): close
+    fn eval_ws_receive(&mut self, args: &[Expr]) -> Result<Option<Signal>, RuntimeError> {
+        if self.active_streaming_writer.is_none() {
+            return Err(RuntimeError {
+                message: "wsReceive: can only be called inside a 2-argument httpServe handler"
+                    .into(),
+            });
+        }
+
+        // Validate ws token.
+        self.validate_ws_token(args, "wsReceive")?;
+
+        let active = self.active_streaming_writer.as_ref().unwrap();
+        let writer = unsafe { &*active.writer };
+
+        if writer.state != WriterState::WebSocket {
+            return Err(RuntimeError {
+                message: "wsReceive: not in WebSocket state. Call wsUpgrade first.".into(),
+            });
+        }
+
+        if active.ws_closed {
+            // Already closed — return Lax empty.
+            return Ok(Some(Signal::Value(Self::make_lax_ws_frame_empty())));
+        }
+
+        let stream = unsafe { &mut *active.stream };
+
+        // Loop to handle ping/pong transparently.
+        loop {
+            let frame = Self::read_ws_frame(stream)?;
+
+            match frame {
+                WsFrame::Data { opcode, payload } => {
+                    let (type_str, data_val) = if opcode == Self::WS_OPCODE_TEXT {
+                        // Text frames carry UTF-8: return Str so wsSend(ws, data) echoes as text.
+                        let text = String::from_utf8(payload)
+                            .unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned());
+                        ("text", Value::Str(text))
+                    } else {
+                        ("binary", Value::Bytes(payload))
+                    };
+                    let inner = Value::BuchiPack(vec![
+                        ("type".into(), Value::Str(type_str.into())),
+                        ("data".into(), data_val),
+                    ]);
+                    return Ok(Some(Signal::Value(Self::make_lax_ws_frame_value(inner))));
+                }
+                WsFrame::Ping { payload } => {
+                    // Auto pong: send pong with same payload.
+                    Self::write_ws_frame(stream, Self::WS_OPCODE_PONG, &payload)?;
+                    // Continue to next frame.
+                    continue;
+                }
+                WsFrame::Pong => {
+                    // Unsolicited pong: ignore, continue.
+                    continue;
+                }
+                WsFrame::Close => {
+                    // NB4-12: Send close reply before marking closed (parity with Native).
+                    let close_reply = [0x03, 0xE8]; // 1000 normal closure
+                    let _ = Self::write_ws_frame(stream, Self::WS_OPCODE_CLOSE, &close_reply);
+                    // Mark as closed.
+                    if let Some(ref mut active) = self.active_streaming_writer {
+                        active.ws_closed = true;
+                    }
+                    return Ok(Some(Signal::Value(Self::make_lax_ws_frame_empty())));
+                }
+                WsFrame::ProtocolError(msg) => {
+                    // Send close frame with protocol error status code (1002).
+                    let close_payload = [0x03, 0xEA]; // 1002 in big-endian
+                    let _ = Self::write_ws_frame(stream, Self::WS_OPCODE_CLOSE, &close_payload);
+                    if let Some(ref mut active) = self.active_streaming_writer {
+                        active.ws_closed = true;
+                    }
+                    return Err(RuntimeError {
+                        message: format!("wsReceive: protocol error: {}", msg),
+                    });
+                }
+            }
+        }
+    }
+
+    /// Build Lax[@(type, data)] with value.
+    fn make_lax_ws_frame_value(inner: Value) -> Value {
+        Value::BuchiPack(vec![
+            ("hasValue".into(), Value::Bool(true)),
+            ("__value".into(), inner),
+            ("__default".into(), Value::BuchiPack(vec![])),
+            ("__type".into(), Value::Str("Lax".into())),
+        ])
+    }
+
+    /// Build Lax empty for close / end of stream.
+    fn make_lax_ws_frame_empty() -> Value {
+        Value::BuchiPack(vec![
+            ("hasValue".into(), Value::Bool(false)),
+            ("__value".into(), Value::BuchiPack(vec![])),
+            ("__default".into(), Value::BuchiPack(vec![])),
+            ("__type".into(), Value::Str("Lax".into())),
+        ])
+    }
+
+    /// Read exactly `count` bytes from a TcpStream.
+    fn read_exact_bytes(
+        stream: &mut std::net::TcpStream,
+        count: usize,
+    ) -> Result<Vec<u8>, RuntimeError> {
+        use std::io::Read;
+        let mut buf = vec![0u8; count];
+        let mut pos = 0;
+        while pos < count {
+            match stream.read(&mut buf[pos..]) {
+                Ok(0) => {
+                    return Err(RuntimeError {
+                        message: "wsReceive: connection closed unexpectedly".into(),
+                    });
+                }
+                Ok(n) => pos += n,
+                Err(ref e)
+                    if e.kind() == std::io::ErrorKind::WouldBlock
+                        || e.kind() == std::io::ErrorKind::TimedOut =>
+                {
+                    // Retry.
+                    continue;
+                }
+                Err(e) => {
+                    return Err(RuntimeError {
+                        message: format!("wsReceive: read error: {}", e),
+                    });
+                }
+            }
+        }
+        Ok(buf)
+    }
+
+    /// Read and parse one WebSocket frame from the stream (NET4-2c).
+    fn read_ws_frame(stream: &mut std::net::TcpStream) -> Result<WsFrame, RuntimeError> {
+        // Read first 2 bytes: FIN+opcode, MASK+payload_len7.
+        let header = Self::read_exact_bytes(stream, 2)?;
+        let byte0 = header[0];
+        let byte1 = header[1];
+
+        let fin = (byte0 & 0x80) != 0;
+        let rsv = byte0 & 0x70;
+        let opcode = byte0 & 0x0F;
+        let masked = (byte1 & 0x80) != 0;
+        let payload_len7 = (byte1 & 0x7F) as u64;
+
+        // RSV bits must be 0 (no extensions in v4).
+        if rsv != 0 {
+            return Ok(WsFrame::ProtocolError("RSV bits must be 0".into()));
+        }
+
+        // NET4-2h: Fragmented frames (FIN=0) are not supported in v4.
+        if !fin {
+            return Ok(WsFrame::ProtocolError(
+                "fragmented frames are not supported".into(),
+            ));
+        }
+
+        // Continuation opcode (0x0) without fragmentation is also a protocol error.
+        if opcode == 0x0 {
+            return Ok(WsFrame::ProtocolError(
+                "unexpected continuation frame".into(),
+            ));
+        }
+
+        // NB4-11: Client-to-server frames MUST be masked (RFC 6455 Section 5.1).
+        if !masked {
+            return Ok(WsFrame::ProtocolError(
+                "client frame must be masked (MASK=0 received)".into(),
+            ));
+        }
+
+        // Determine actual payload length.
+        let payload_len: u64 = if payload_len7 < 126 {
+            payload_len7
+        } else if payload_len7 == 126 {
+            let ext = Self::read_exact_bytes(stream, 2)?;
+            ((ext[0] as u64) << 8) | (ext[1] as u64)
+        } else {
+            // payload_len7 == 127
+            let ext = Self::read_exact_bytes(stream, 8)?;
+            let mut val: u64 = 0;
+            for &b in &ext {
+                val = (val << 8) | (b as u64);
+            }
+            // MSB must be 0 (unsigned).
+            if val >> 63 != 0 {
+                return Ok(WsFrame::ProtocolError(
+                    "payload length MSB must be 0".into(),
+                ));
+            }
+            val
+        };
+
+        // NET4-2h: Oversized payload check.
+        if payload_len > Self::WS_MAX_PAYLOAD {
+            return Ok(WsFrame::ProtocolError(format!(
+                "payload too large ({} bytes, max {} bytes)",
+                payload_len,
+                Self::WS_MAX_PAYLOAD
+            )));
+        }
+
+        // Read masking key (4 bytes) if masked.
+        let mask_key = if masked {
+            let key = Self::read_exact_bytes(stream, 4)?;
+            Some([key[0], key[1], key[2], key[3]])
+        } else {
+            None
+        };
+
+        // Read payload.
+        let mut payload = if payload_len > 0 {
+            Self::read_exact_bytes(stream, payload_len as usize)?
+        } else {
+            Vec::new()
+        };
+
+        // Unmask payload in-place (XOR with mask key).
+        if let Some(key) = mask_key {
+            for (i, byte) in payload.iter_mut().enumerate() {
+                *byte ^= key[i % 4];
+            }
+        }
+
+        // Dispatch by opcode.
+        match opcode {
+            0x1 | 0x2 => {
+                // Text or binary data frame.
+                Ok(WsFrame::Data { opcode, payload })
+            }
+            0x8 => {
+                // Close frame.
+                Ok(WsFrame::Close)
+            }
+            0x9 => {
+                // Ping.
+                Ok(WsFrame::Ping { payload })
+            }
+            0xA => {
+                // Pong (unsolicited).
+                Ok(WsFrame::Pong)
+            }
+            _ => Ok(WsFrame::ProtocolError(format!(
+                "unknown opcode 0x{:X}",
+                opcode
+            ))),
+        }
+    }
+
+    /// `wsClose(ws)` → Unit (NET4-2f).
+    ///
+    /// Sends a close frame. Idempotent (second call is no-op).
+    /// Handler return auto-close is handled in dispatch_request.
+    fn eval_ws_close(&mut self, args: &[Expr]) -> Result<Option<Signal>, RuntimeError> {
+        if self.active_streaming_writer.is_none() {
+            return Err(RuntimeError {
+                message: "wsClose: can only be called inside a 2-argument httpServe handler".into(),
+            });
+        }
+
+        // Validate ws token.
+        self.validate_ws_token(args, "wsClose")?;
+
+        let active = self.active_streaming_writer.as_ref().unwrap();
+        let writer = unsafe { &*active.writer };
+
+        if writer.state != WriterState::WebSocket {
+            return Err(RuntimeError {
+                message: "wsClose: not in WebSocket state. Call wsUpgrade first.".into(),
+            });
+        }
+
+        // Idempotent: no-op if already closed.
+        if active.ws_closed {
+            return Ok(Some(Signal::Value(Value::Unit)));
+        }
+
+        let stream = unsafe { &mut *active.stream };
+
+        // Send close frame (opcode 0x8) with normal closure status (1000).
+        let close_payload = [0x03, 0xE8u8]; // 1000 in big-endian
+        let _ = Self::write_ws_frame(stream, Self::WS_OPCODE_CLOSE, &close_payload);
+
+        // Mark as closed.
+        if let Some(ref mut active) = self.active_streaming_writer {
+            active.ws_closed = true;
+        }
 
         Ok(Some(Signal::Value(Value::Unit)))
     }
@@ -2171,201 +3718,106 @@ impl Interpreter {
     ) -> ConnAction {
         const MAX_REQUEST_BUF: usize = 1_048_576; // 1 MiB
 
-        // ── Body reading: Content-Length vs Chunked Transfer-Encoding ──
-        let body_result = if is_chunked {
-            // ── NET2-2: Chunked Transfer Encoding ──
-            let completeness = loop {
-                let check = chunked_body_complete(&conn.buf[..conn.total_read], head_consumed);
-                match check {
-                    Ok(wire_used) => break Ok(wire_used),
-                    // NB2-15: Use typed enum instead of string prefix matching
-                    Err(ChunkedBodyError::Incomplete(_)) => {
-                        if conn.total_read >= MAX_REQUEST_BUF {
-                            break Err("Chunked body exceeds buffer limit".to_string());
-                        }
-                        if conn.total_read == conn.buf.len() {
-                            conn.buf
-                                .resize(std::cmp::min(conn.buf.len() * 2, MAX_REQUEST_BUF), 0);
-                        }
-                        match std::io::Read::read(
-                            &mut conn.stream,
-                            &mut conn.buf[conn.total_read..],
-                        ) {
-                            Ok(0) => break Err("Chunked body incomplete: connection closed".into()),
-                            Ok(n) => conn.total_read += n,
-                            Err(ref e)
-                                if e.kind() == std::io::ErrorKind::WouldBlock
-                                    || e.kind() == std::io::ErrorKind::TimedOut =>
-                            {
-                                break Err("Chunked body incomplete: timeout".into());
-                            }
-                            Err(_) => break Err("Chunked body incomplete: read error".into()),
-                        }
-                    }
-                    Err(ChunkedBodyError::Malformed(msg)) => break Err(msg),
-                }
-            };
-
-            match completeness {
-                Ok(_scan_wire) => match chunked_in_place_compact(&mut conn.buf, head_consumed) {
-                    Ok(compact) => {
-                        let total_wire = head_consumed + compact.wire_consumed;
-                        Ok((
-                            total_wire,
-                            head_consumed,
-                            compact.body_len,
-                            compact.body_len as i64,
-                            true,
-                        ))
-                    }
-                    Err(_msg) => {
-                        let bad_request = b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
-                        let _ = std::io::Write::write_all(&mut conn.stream, bad_request);
-                        *request_count += 1;
-                        Err(())
-                    }
-                },
-                Err(_msg) => {
-                    let bad_request = b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
-                    let _ = std::io::Write::write_all(&mut conn.stream, bad_request);
-                    *request_count += 1;
-                    Err(())
-                }
-            }
-        } else {
-            // ── Content-Length path (v1 behavior) ──
-            if head_consumed + content_length as usize > MAX_REQUEST_BUF {
-                let too_large = b"HTTP/1.1 413 Content Too Large\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
-                let _ = std::io::Write::write_all(&mut conn.stream, too_large);
-                *request_count += 1;
-                return ConnAction::Close;
-            }
-
-            let body_needed = head_consumed + content_length as usize;
-            let mut body_incomplete = false;
-            while conn.total_read < body_needed && conn.total_read < MAX_REQUEST_BUF {
-                if conn.total_read == conn.buf.len() {
-                    conn.buf
-                        .resize(std::cmp::min(conn.buf.len() * 2, MAX_REQUEST_BUF), 0);
-                }
-                match std::io::Read::read(&mut conn.stream, &mut conn.buf[conn.total_read..]) {
-                    Ok(0) => {
-                        body_incomplete = true;
-                        break;
-                    }
-                    Ok(n) => conn.total_read += n,
-                    Err(ref e)
-                        if e.kind() == std::io::ErrorKind::WouldBlock
-                            || e.kind() == std::io::ErrorKind::TimedOut =>
-                    {
-                        body_incomplete = true;
-                        break;
-                    }
-                    Err(_) => {
-                        body_incomplete = true;
-                        break;
-                    }
-                }
-            }
-
-            if content_length > 0 && (body_incomplete || conn.total_read < body_needed) {
-                let bad_request =
-                    b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
-                let _ = std::io::Write::write_all(&mut conn.stream, bad_request);
-                *request_count += 1;
-                return ConnAction::Close;
-            }
-
-            Ok((
-                body_needed,
-                head_consumed,
-                content_length as usize,
-                content_length,
-                false,
-            ))
-        };
-
-        let (wire_consumed, body_start, body_len, final_content_length, is_request_chunked) =
-            match body_result {
-                Ok(tuple) => tuple,
-                Err(()) => return ConnAction::Close,
-            };
-
-        // Detach request-scoped raw from scratch buffer (owned copy).
-        let raw_len = if is_request_chunked {
-            head_consumed + body_len
-        } else {
-            wire_consumed
-        };
-        let raw_bytes = conn.buf[..raw_len].to_vec();
-
-        // ── Determine keep-alive (NET2-1a/1b/1c) ──
-        let http_minor = match get_field_value(&parsed_fields, "version") {
-            Some(Value::BuchiPack(ver_fields)) => get_field_int(ver_fields, "minor").unwrap_or(1),
-            _ => 1,
-        };
-
-        let keep_alive = match get_field_value(&parsed_fields, "headers") {
-            Some(Value::List(headers)) => determine_keep_alive(&raw_bytes, headers, http_minor),
-            _ => http_minor == 1,
-        };
-
-        // ── Build request pack for handler ──
-        let mut request_fields: Vec<(String, Value)> = Vec::new();
-        request_fields.push(("raw".into(), Value::Bytes(raw_bytes)));
-
-        for key in &["method", "path", "query", "version", "headers"] {
-            if let Some(v) = get_field_value(&parsed_fields, key) {
-                request_fields.push((key.to_string(), v.clone()));
-            }
-        }
-
-        request_fields.push(("body".into(), make_span(body_start, body_len)));
-        request_fields.push(("bodyOffset".into(), Value::Int(head_consumed as i64)));
-        request_fields.push(("contentLength".into(), Value::Int(final_content_length)));
-        request_fields.push((
-            "remoteHost".into(),
-            Value::Str(conn.peer_addr.ip().to_string()),
-        ));
-        request_fields.push((
-            "remotePort".into(),
-            Value::Int(conn.peer_addr.port() as i64),
-        ));
-        request_fields.push(("keepAlive".into(), Value::Bool(keep_alive)));
-        request_fields.push(("chunked".into(), Value::Bool(is_request_chunked)));
-
-        let request_pack = Value::BuchiPack(request_fields);
-
-        // ── NET3-1a: Detect handler arity (1-arg vs 2-arg) ──
-        // 1-arg handler = v2 one-shot response path (unchanged)
-        // 2-arg handler = streaming writer path (v3)
+        // ── NET3-1a / NET4-1a: Detect handler arity before body reading ──
+        // 1-arg handler = v2 one-shot response path (eager body read)
+        // 2-arg handler = v3/v4 streaming path (body read deferred for v4)
         let handler_arity = handler.params.len();
 
         if handler_arity >= 2 {
-            // ── v3 2-arg handler path ──
-            // Create a writer BuchiPack with a sentinel for identification.
-            // The actual mutable StreamingWriter state is held on the stack here;
-            // the writer Value is an opaque token passed to the handler.
+            // ── v4 2-arg handler path: body-deferred ──
+            // Do NOT eagerly read body. Only read the head.
+            // Body will be read on demand via readBodyChunk/readBodyAll.
+
+            // Detach head bytes from scratch buffer (owned copy).
+            let raw_bytes = conn.buf[..head_consumed].to_vec();
+
+            // Determine keep-alive from head bytes.
+            let http_minor = match get_field_value(&parsed_fields, "version") {
+                Some(Value::BuchiPack(ver_fields)) => {
+                    get_field_int(ver_fields, "minor").unwrap_or(1)
+                }
+                _ => 1,
+            };
+            let keep_alive = match get_field_value(&parsed_fields, "headers") {
+                Some(Value::List(headers)) => determine_keep_alive(&raw_bytes, headers, http_minor),
+                _ => http_minor == 1,
+            };
+
+            // Capture any leftover body bytes already in conn.buf (beyond head).
+            let leftover = if conn.total_read > head_consumed {
+                conn.buf[head_consumed..conn.total_read].to_vec()
+            } else {
+                Vec::new()
+            };
+
+            // Create mutable StreamingWriter for this request scope.
+            let mut writer = StreamingWriter::new();
+
+            // v4: Create body streaming state for readBodyChunk/readBodyAll.
+            // Must be created before request pack so we can embed the token.
+            let mut body_state = RequestBodyState::new(is_chunked, content_length, leftover);
+
+            // Build request pack for handler (head only, body = empty span).
+            let mut request_fields: Vec<(String, Value)> = Vec::new();
+            request_fields.push(("raw".into(), Value::Bytes(raw_bytes)));
+
+            for key in &["method", "path", "query", "version", "headers"] {
+                if let Some(v) = get_field_value(&parsed_fields, key) {
+                    request_fields.push((key.to_string(), v.clone()));
+                }
+            }
+
+            // v4: body span is empty (body not yet read).
+            request_fields.push(("body".into(), make_span(0, 0)));
+            request_fields.push(("bodyOffset".into(), Value::Int(head_consumed as i64)));
+            request_fields.push(("contentLength".into(), Value::Int(content_length)));
+            request_fields.push((
+                "remoteHost".into(),
+                Value::Str(conn.peer_addr.ip().to_string()),
+            ));
+            request_fields.push((
+                "remotePort".into(),
+                Value::Int(conn.peer_addr.port() as i64),
+            ));
+            request_fields.push(("keepAlive".into(), Value::Bool(keep_alive)));
+            request_fields.push(("chunked".into(), Value::Bool(is_chunked)));
+            // v4: sentinel to identify this request pack as body-streaming capable.
+            request_fields.push((
+                "__body_stream".into(),
+                Value::Str("__v4_body_stream".into()),
+            ));
+            // NB4-7: Request-scoped token for identity verification.
+            request_fields.push((
+                "__body_token".into(),
+                Value::Int(body_state.request_token as i64),
+            ));
+
+            let request_pack = Value::BuchiPack(request_fields);
+
+            // Create writer BuchiPack with sentinel for identification.
             let writer_pack = Value::BuchiPack(vec![(
                 "__writer_id".into(),
                 Value::Str("__v3_streaming_writer".into()),
             )]);
 
-            // Create a mutable StreamingWriter for this request scope.
-            let mut writer = StreamingWriter::new();
-
-            // NET3-2: Install active_streaming_writer so that startResponse/writeChunk/
-            // endResponse can access the writer state and TcpStream during handler execution.
-            // Safety: writer and conn.stream live on this stack frame and outlive the
-            // call_function_with_values call. The interpreter is single-threaded.
+            // NET3-2 + NET4-1a: Install active_streaming_writer with body_state pointer.
             self.active_streaming_writer = Some(ActiveStreamingWriter {
                 writer: &mut writer as *mut StreamingWriter,
                 stream: &mut conn.stream as *mut std::net::TcpStream,
                 borrowed: false,
+                body_state: &mut body_state as *mut RequestBodyState,
+                ws_closed: false,
+                ws_token: 0,
             });
 
             let handler_result =
                 self.call_function_with_values(handler, &[request_pack, writer_pack]);
+
+            // Save WebSocket close state before clearing active writer.
+            let ws_was_closed = self
+                .active_streaming_writer
+                .as_ref()
+                .map_or(false, |a| a.ws_closed);
 
             // Clear the active writer — handler execution is done.
             self.active_streaming_writer = None;
@@ -2373,21 +3825,26 @@ impl Interpreter {
             let response_value = match handler_result {
                 Ok(v) => v,
                 Err(e) => {
+                    // v4: WebSocket state — send close frame on error.
+                    if writer.state == WriterState::WebSocket {
+                        // Send close frame with 1011 (internal error) if not already closed.
+                        if !ws_was_closed {
+                            let close_payload = [0x03, 0xF3u8]; // 1011
+                            let _ = Self::write_ws_frame(&mut conn.stream, 0x8, &close_payload);
+                        }
+                        *request_count += 1;
+                        return ConnAction::Close;
+                    }
                     if writer.state == WriterState::Streaming {
-                        // Head already committed — we cannot send a new HTTP response
-                        // on this connection. Send chunk terminator and drop the connection.
                         let _ = std::io::Write::write_all(&mut conn.stream, b"0\r\n\r\n");
                         writer.state = WriterState::Ended;
                         *request_count += 1;
                         return ConnAction::Close;
                     }
                     if writer.state == WriterState::Ended {
-                        // Response already fully sent — just drop the connection.
                         *request_count += 1;
                         return ConnAction::Close;
                     }
-                    // Head not yet committed (Idle / HeadPrepared) — safe to send a
-                    // full 500 error response.
                     writer.state = WriterState::Ended;
                     let error_body = format!("Internal Server Error: {}", e.message);
                     let error_response = format!(
@@ -2401,19 +3858,27 @@ impl Interpreter {
                 }
             };
 
+            // ── v4: WebSocket auto-close on handler return ──
+            if writer.state == WriterState::WebSocket {
+                // Auto-close if not already closed.
+                if !ws_was_closed {
+                    let close_payload = [0x03, 0xE8u8]; // 1000 normal closure
+                    let _ = Self::write_ws_frame(&mut conn.stream, 0x8, &close_payload);
+                }
+                *request_count += 1;
+                conn.conn_requests += 1;
+                conn.total_read = 0;
+                // WebSocket connections never return to keep-alive.
+                return ConnAction::Close;
+            }
+
             // ── NET3-1a: One-shot fallback for 2-arg handler ──
-            // If the handler never touched the writer (state is still Idle),
-            // fall back to v2 one-shot response path using the return value.
             if writer.state == WriterState::Idle {
-                // One-shot fallback: use the response_value as a v2-style response pack.
-                // If it's Unit or not a response pack (handler returned nothing useful),
-                // send 200 + empty body.
                 let is_response_pack = matches!(&response_value, Value::BuchiPack(fields)
                     if fields.iter().any(|(k, _)| k == "status" || k == "body"));
                 let effective_response = if is_response_pack {
                     response_value
                 } else {
-                    // Unit, Int, Str, or any non-response value → 200 + empty body
                     Value::BuchiPack(vec![
                         ("status".into(), Value::Int(200)),
                         ("headers".into(), Value::List(vec![])),
@@ -2439,22 +3904,212 @@ impl Interpreter {
                 // Streaming was started. The return value is ignored.
                 // Auto-end if not already ended.
                 if writer.state != WriterState::Ended {
-                    // Auto endResponse: commit head if needed, send terminator.
                     if writer.state == WriterState::HeadPrepared {
-                        // Commit head first.
                         let head_bytes =
                             build_streaming_head(writer.pending_status, &writer.pending_headers);
                         let _ = std::io::Write::write_all(&mut conn.stream, &head_bytes);
                     }
-                    // Send chunked terminator — only for status codes that allow a body.
                     if !StreamingWriter::is_bodyless_status(writer.pending_status) {
                         let _ = std::io::Write::write_all(&mut conn.stream, b"0\r\n\r\n");
                     }
                     writer.state = WriterState::Ended;
                 }
             }
+
+            *request_count += 1;
+            conn.conn_requests += 1;
+
+            // v4 NET4-1g: If body was not fully read, do NOT return to keep-alive.
+            // The socket read buffer may contain unread body bytes that would
+            // corrupt the next request's head parse.
+            let body_done = body_state.fully_read || (!is_chunked && content_length == 0);
+            if !body_done || !keep_alive {
+                // Reset conn buffer and close.
+                conn.total_read = 0;
+                return ConnAction::Close;
+            }
+
+            // Body was fully consumed; safe to advance buffer.
+            // For body-deferred path, the stream read pointer is already past
+            // the body (readBodyChunk consumed it all). We don't need to advance
+            // conn.buf because body bytes were read directly from the stream,
+            // not from conn.buf.
+            conn.total_read = 0;
+            if conn.buf.len() < 8192 {
+                conn.buf.resize(8192, 0);
+            }
+
+            ConnAction::KeepAlive
         } else {
             // ── v2 1-arg handler path (unchanged) ──
+            // Eager body read as before.
+
+            let body_result = if is_chunked {
+                // ── NET2-2: Chunked Transfer Encoding ──
+                let completeness = loop {
+                    let check = chunked_body_complete(&conn.buf[..conn.total_read], head_consumed);
+                    match check {
+                        Ok(wire_used) => break Ok(wire_used),
+                        Err(ChunkedBodyError::Incomplete(_)) => {
+                            if conn.total_read >= MAX_REQUEST_BUF {
+                                break Err("Chunked body exceeds buffer limit".to_string());
+                            }
+                            if conn.total_read == conn.buf.len() {
+                                conn.buf
+                                    .resize(std::cmp::min(conn.buf.len() * 2, MAX_REQUEST_BUF), 0);
+                            }
+                            match std::io::Read::read(
+                                &mut conn.stream,
+                                &mut conn.buf[conn.total_read..],
+                            ) {
+                                Ok(0) => {
+                                    break Err("Chunked body incomplete: connection closed".into());
+                                }
+                                Ok(n) => conn.total_read += n,
+                                Err(ref e)
+                                    if e.kind() == std::io::ErrorKind::WouldBlock
+                                        || e.kind() == std::io::ErrorKind::TimedOut =>
+                                {
+                                    break Err("Chunked body incomplete: timeout".into());
+                                }
+                                Err(_) => break Err("Chunked body incomplete: read error".into()),
+                            }
+                        }
+                        Err(ChunkedBodyError::Malformed(msg)) => break Err(msg),
+                    }
+                };
+
+                match completeness {
+                    Ok(_scan_wire) => {
+                        match chunked_in_place_compact(&mut conn.buf, head_consumed) {
+                            Ok(compact) => {
+                                let total_wire = head_consumed + compact.wire_consumed;
+                                Ok((
+                                    total_wire,
+                                    head_consumed,
+                                    compact.body_len,
+                                    compact.body_len as i64,
+                                    true,
+                                ))
+                            }
+                            Err(_msg) => {
+                                let bad_request = b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+                                let _ = std::io::Write::write_all(&mut conn.stream, bad_request);
+                                *request_count += 1;
+                                Err(())
+                            }
+                        }
+                    }
+                    Err(_msg) => {
+                        let bad_request = b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+                        let _ = std::io::Write::write_all(&mut conn.stream, bad_request);
+                        *request_count += 1;
+                        Err(())
+                    }
+                }
+            } else {
+                // ── Content-Length path (v1 behavior) ──
+                if head_consumed + content_length as usize > MAX_REQUEST_BUF {
+                    let too_large = b"HTTP/1.1 413 Content Too Large\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+                    let _ = std::io::Write::write_all(&mut conn.stream, too_large);
+                    *request_count += 1;
+                    return ConnAction::Close;
+                }
+
+                let body_needed = head_consumed + content_length as usize;
+                let mut body_incomplete = false;
+                while conn.total_read < body_needed && conn.total_read < MAX_REQUEST_BUF {
+                    if conn.total_read == conn.buf.len() {
+                        conn.buf
+                            .resize(std::cmp::min(conn.buf.len() * 2, MAX_REQUEST_BUF), 0);
+                    }
+                    match std::io::Read::read(&mut conn.stream, &mut conn.buf[conn.total_read..]) {
+                        Ok(0) => {
+                            body_incomplete = true;
+                            break;
+                        }
+                        Ok(n) => conn.total_read += n,
+                        Err(ref e)
+                            if e.kind() == std::io::ErrorKind::WouldBlock
+                                || e.kind() == std::io::ErrorKind::TimedOut =>
+                        {
+                            body_incomplete = true;
+                            break;
+                        }
+                        Err(_) => {
+                            body_incomplete = true;
+                            break;
+                        }
+                    }
+                }
+
+                if content_length > 0 && (body_incomplete || conn.total_read < body_needed) {
+                    let bad_request = b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+                    let _ = std::io::Write::write_all(&mut conn.stream, bad_request);
+                    *request_count += 1;
+                    return ConnAction::Close;
+                }
+
+                Ok((
+                    body_needed,
+                    head_consumed,
+                    content_length as usize,
+                    content_length,
+                    false,
+                ))
+            };
+
+            let (wire_consumed, body_start, body_len, final_content_length, is_request_chunked) =
+                match body_result {
+                    Ok(tuple) => tuple,
+                    Err(()) => return ConnAction::Close,
+                };
+
+            // Detach request-scoped raw from scratch buffer (owned copy).
+            let raw_len = if is_request_chunked {
+                head_consumed + body_len
+            } else {
+                wire_consumed
+            };
+            let raw_bytes = conn.buf[..raw_len].to_vec();
+
+            let http_minor = match get_field_value(&parsed_fields, "version") {
+                Some(Value::BuchiPack(ver_fields)) => {
+                    get_field_int(ver_fields, "minor").unwrap_or(1)
+                }
+                _ => 1,
+            };
+            let keep_alive = match get_field_value(&parsed_fields, "headers") {
+                Some(Value::List(headers)) => determine_keep_alive(&raw_bytes, headers, http_minor),
+                _ => http_minor == 1,
+            };
+
+            // ── Build request pack for handler ──
+            let mut request_fields: Vec<(String, Value)> = Vec::new();
+            request_fields.push(("raw".into(), Value::Bytes(raw_bytes)));
+
+            for key in &["method", "path", "query", "version", "headers"] {
+                if let Some(v) = get_field_value(&parsed_fields, key) {
+                    request_fields.push((key.to_string(), v.clone()));
+                }
+            }
+
+            request_fields.push(("body".into(), make_span(body_start, body_len)));
+            request_fields.push(("bodyOffset".into(), Value::Int(head_consumed as i64)));
+            request_fields.push(("contentLength".into(), Value::Int(final_content_length)));
+            request_fields.push((
+                "remoteHost".into(),
+                Value::Str(conn.peer_addr.ip().to_string()),
+            ));
+            request_fields.push((
+                "remotePort".into(),
+                Value::Int(conn.peer_addr.port() as i64),
+            ));
+            request_fields.push(("keepAlive".into(), Value::Bool(keep_alive)));
+            request_fields.push(("chunked".into(), Value::Bool(is_request_chunked)));
+
+            let request_pack = Value::BuchiPack(request_fields);
+
             let handler_result = self.call_function_with_values(handler, &[request_pack]);
 
             let response_value = match handler_result {
@@ -2487,28 +4142,28 @@ impl Interpreter {
                     return ConnAction::Close;
                 }
             }
-        }
 
-        *request_count += 1;
-        conn.conn_requests += 1;
+            *request_count += 1;
+            conn.conn_requests += 1;
 
-        // ── Buffer advance: remove consumed bytes, keep any leftover ──
-        if wire_consumed < conn.total_read {
-            conn.buf.copy_within(wire_consumed..conn.total_read, 0);
-            conn.total_read -= wire_consumed;
-        } else {
-            conn.total_read = 0;
-        }
-        if conn.buf.len() < 8192 {
-            conn.buf.resize(8192, 0);
-        }
+            // ── Buffer advance: remove consumed bytes, keep any leftover ──
+            if wire_consumed < conn.total_read {
+                conn.buf.copy_within(wire_consumed..conn.total_read, 0);
+                conn.total_read -= wire_consumed;
+            } else {
+                conn.total_read = 0;
+            }
+            if conn.buf.len() < 8192 {
+                conn.buf.resize(8192, 0);
+            }
 
-        // ── Keep-alive decision ──
-        if !keep_alive {
-            return ConnAction::Close;
-        }
+            // ── Keep-alive decision ──
+            if !keep_alive {
+                return ConnAction::Close;
+            }
 
-        ConnAction::KeepAlive
+            ConnAction::KeepAlive
+        }
     }
 
     fn eval_net_bytes_arg(
@@ -2543,8 +4198,8 @@ mod tests {
 
     #[test]
     fn test_net_symbols_count() {
-        // 16 legacy + 3 HTTP v1 + 1 HTTP v2 + 4 HTTP v3 = 24
-        assert_eq!(NET_SYMBOLS.len(), 24);
+        // 16 legacy + 3 HTTP v1 + 1 HTTP v2 + 4 HTTP v3 + 6 HTTP v4 = 30
+        assert_eq!(NET_SYMBOLS.len(), 30);
         assert!(NET_SYMBOLS.contains(&"dnsResolve"));
         assert!(NET_SYMBOLS.contains(&"httpServe"));
         assert!(NET_SYMBOLS.contains(&"httpParseRequestHead"));
@@ -2555,6 +4210,48 @@ mod tests {
         assert!(NET_SYMBOLS.contains(&"writeChunk"));
         assert!(NET_SYMBOLS.contains(&"endResponse"));
         assert!(NET_SYMBOLS.contains(&"sseEvent"));
+        // v4 request body streaming
+        assert!(NET_SYMBOLS.contains(&"readBodyChunk"));
+        assert!(NET_SYMBOLS.contains(&"readBodyAll"));
+        // v4 WebSocket
+        assert!(NET_SYMBOLS.contains(&"wsUpgrade"));
+        assert!(NET_SYMBOLS.contains(&"wsSend"));
+        assert!(NET_SYMBOLS.contains(&"wsReceive"));
+        assert!(NET_SYMBOLS.contains(&"wsClose"));
+    }
+
+    // ── WebSocket tests ──
+
+    #[test]
+    fn test_ws_accept_computation() {
+        // RFC 6455 Section 4.2.2 example:
+        // Key: "dGhlIHNhbXBsZSBub25jZQ==" → Accept: "s3pPLMBiTxaQ9kYGzzhZRbK+xOo="
+        let accept = Interpreter::compute_ws_accept("dGhlIHNhbXBsZSBub25jZQ==");
+        assert_eq!(accept, "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=");
+    }
+
+    #[test]
+    fn test_ws_frame_write() {
+        use std::io::Read;
+        // Create a pair of connected streams to test frame write.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let mut client = std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
+        let (mut server, _) = listener.accept().unwrap();
+
+        // Write a text frame "Hello" from server to client.
+        Interpreter::write_ws_frame(&mut server, 0x1, b"Hello").unwrap();
+
+        // Read and verify the frame.
+        let mut buf = [0u8; 64];
+        let n = client.read(&mut buf).unwrap();
+        assert!(n >= 7);
+        // byte 0: FIN=1, opcode=0x1 → 0x81
+        assert_eq!(buf[0], 0x81);
+        // byte 1: MASK=0, len=5 → 0x05
+        assert_eq!(buf[1], 0x05);
+        // payload
+        assert_eq!(&buf[2..7], b"Hello");
     }
 
     // ── Sentinel guard tests ──
