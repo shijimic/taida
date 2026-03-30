@@ -10456,14 +10456,22 @@ static int taida_net_send_response_scatter(int client_fd, taida_val response) {
     taida_val hcount = hlist[2];
     for (taida_val i = 0; i < hcount; i++) {
         taida_val hdr = hlist[4 + i];
-        if (!taida_is_buchi_pack(hdr)) continue;
+        if (!taida_is_buchi_pack(hdr)) { if (head != head_stack) free(head); return -1; }
         taida_val hname = taida_pack_get(hdr, name_hash);
         taida_val hvalue = taida_pack_get(hdr, value_hash);
         const char *hname_s = (const char*)hname;
         const char *hvalue_s = (const char*)hvalue;
         size_t hn_len = 0, hv_len = 0;
-        if (!taida_read_cstr_len_safe(hname_s, 8192, &hn_len)) continue;
-        if (!taida_read_cstr_len_safe(hvalue_s, 65536, &hv_len)) continue;
+        if (!taida_read_cstr_len_safe(hname_s, 8192, &hn_len)) { if (head != head_stack) free(head); return -1; }
+        if (!taida_read_cstr_len_safe(hvalue_s, 65536, &hv_len)) { if (head != head_stack) free(head); return -1; }
+
+        // NB-13: Reject CRLF in header name/value (parity with public encoder)
+        for (size_t k = 0; k < hn_len; k++) {
+            if (hname_s[k] == '\r' || hname_s[k] == '\n') { if (head != head_stack) free(head); return -1; }
+        }
+        for (size_t k = 0; k < hv_len; k++) {
+            if (hvalue_s[k] == '\r' || hvalue_s[k] == '\n') { if (head != head_stack) free(head); return -1; }
+        }
 
         // Check content-length
         if (hn_len == 14) {

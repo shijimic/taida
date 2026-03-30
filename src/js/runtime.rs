@@ -3304,6 +3304,12 @@ function __taida_net_encodeResponseScatter(response) {
     if (!h || typeof h !== 'object') return null;
     const name = h.name, value = h.value;
     if (typeof name !== 'string' || typeof value !== 'string') return null;
+    // NB-7: Enforce header name/value length limits (parity with public encoder)
+    if (Buffer.byteLength(name, 'utf-8') > 8192) return null;
+    if (Buffer.byteLength(value, 'utf-8') > 65536) return null;
+    // Reject CRLF in header name/value to prevent response splitting
+    if (name.includes('\r') || name.includes('\n')) return null;
+    if (value.includes('\r') || value.includes('\n')) return null;
     if (noBody && name.toLowerCase() === 'content-length') continue;
     head += name + ': ' + value + '\r\n';
     if (name.toLowerCase() === 'content-length') hasContentLength = true;
