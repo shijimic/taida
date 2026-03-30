@@ -3518,10 +3518,25 @@ async function __taida_net_httpServe(port, handler, maxRequests, timeoutMs, maxC
   // tls is a BuchiPack (object) or undefined/null.
   // @() = empty object = plaintext (v4 compat).
   // @(cert: "path", key: "path") = HTTPS.
+  // v6 NET6-1b: @(cert: ..., key: ..., protocol: "h2") = HTTP/2 (rejected on JS).
   let __useTls = false;
   let __tlsCert = null;
   let __tlsKey = null;
+  let __requestedProtocol = null;
   if (tls !== undefined && tls !== null && typeof tls === 'object') {
+    // v6 NET6-1b: Extract protocol field if present.
+    // NB6-10: Separate "field exists" from "field is Str".
+    // If protocol field exists but is not Str, reject immediately.
+    if ('protocol' in tls) {
+      if (typeof tls.protocol === 'string') {
+        __requestedProtocol = tls.protocol;
+      } else {
+        return new __TaidaAsync(
+          __taida_net_result_fail('ProtocolError',
+            'httpServe: protocol must be a Str, got ' + typeof tls.protocol),
+          null, 'fulfilled');
+      }
+    }
     const hasCert = 'cert' in tls;
     const hasKey = 'key' in tls;
     if (hasCert || hasKey) {
@@ -3572,12 +3587,36 @@ async function __taida_net_httpServe(port, handler, maxRequests, timeoutMs, maxC
           null, 'fulfilled');
       }
       __useTls = true;
+    } else if (__requestedProtocol !== null) {
+      // v6 NET6-1b: @(protocol: "h2") without cert/key — still validate protocol.
+      // Fall through to protocol validation below.
     }
     // else: empty object @() → plaintext, fall through
   } else if (tls !== undefined && tls !== null) {
     // NB5-16: non-object tls (e.g. 42, "str", true) must NOT silently fall back to plaintext.
     // Match Interpreter parity: RuntimeError for invalid tls type.
     throw new __NativeError('httpServe: tls must be a BuchiPack @(cert: Str, key: Str) or @(), got ' + typeof tls);
+  }
+
+  // v6 NET6-1b: Protocol validation.
+  // JS backend does NOT support HTTP/2 (design lock: JS = HTTP/1.1 compatibility backend).
+  // This is a permanent restriction, not a temporary limitation.
+  if (__requestedProtocol !== null) {
+    if (__requestedProtocol === 'h1.1' || __requestedProtocol === 'http/1.1') {
+      // Explicit HTTP/1.1 — same as default, no action needed.
+    } else if (__requestedProtocol === 'h2') {
+      // v6 NET6-1b: JS backend permanently does not support HTTP/2.
+      return new __TaidaAsync(
+        __taida_net_result_fail('H2Unsupported',
+          'httpServe: HTTP/2 (protocol: "h2") is not supported on the JS backend. ' +
+          'Use the interpreter or native backend for HTTP/2 support.'),
+        null, 'fulfilled');
+    } else {
+      return new __TaidaAsync(
+        __taida_net_result_fail('ProtocolError',
+          'httpServe: unknown protocol "' + __requestedProtocol + '". Supported values: "h1.1", "h2"'),
+        null, 'fulfilled');
+    }
   }
 
   const net = __os_net;

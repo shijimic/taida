@@ -3806,10 +3806,12 @@ impl Interpreter {
 
         // ── Arg 5: tls (optional, default @() = plaintext) ──
         // v5: TLS configuration. @() means plaintext (v4 compat).
-        // @(cert: "path", key: "path") means HTTPS.
-        // Phase 1: parse and validate only. TLS runtime is Phase 2.
+        // @(cert: "path", key: "path") means HTTPS (HTTP/1.1 over TLS).
+        // @(cert: "path", key: "path", protocol: "h2") means HTTP/2 over TLS.
+        // v6 NET6-1b: protocol field support for h2 opt-in.
         let tls_cert_path: Option<String>;
         let tls_key_path: Option<String>;
+        let mut requested_protocol: Option<String> = None;
         match args.get(5) {
             Some(arg) => match self.eval_expr(arg)? {
                 Signal::Value(Value::BuchiPack(fields)) => {
@@ -3818,6 +3820,29 @@ impl Interpreter {
                         tls_cert_path = None;
                         tls_key_path = None;
                     } else {
+                        // v6 NET6-1b: Extract protocol field if present.
+                        // NB6-10: Separate "field exists" from "field is Str".
+                        // If protocol field exists but is not Str, reject immediately.
+                        if let Some((_, proto_val)) =
+                            fields.iter().find(|(k, _)| k == "protocol")
+                        {
+                            match proto_val {
+                                Value::Str(proto) => {
+                                    requested_protocol = Some(proto.clone());
+                                }
+                                _ => {
+                                    let result = make_result_failure_msg(
+                                        "ProtocolError",
+                                        format!(
+                                            "httpServe: protocol must be a Str, got {}",
+                                            proto_val
+                                        ),
+                                    );
+                                    return Ok(Some(Signal::Value(make_fulfilled_async(result))));
+                                }
+                            }
+                        }
+
                         // Extract cert and key fields.
                         let cert = fields
                             .iter()
@@ -3850,11 +3875,18 @@ impl Interpreter {
                                 return Ok(Some(Signal::Value(make_fulfilled_async(result))));
                             }
                             _ => {
-                                let result = make_result_failure_msg(
-                                    "TlsError",
-                                    "httpServe: tls must be @(cert: Str, key: Str) or @()",
-                                );
-                                return Ok(Some(Signal::Value(make_fulfilled_async(result))));
+                                // v6 NET6-1b: Allow @(protocol: "h2") without cert/key
+                                // to still trigger protocol validation below.
+                                if requested_protocol.is_some() {
+                                    tls_cert_path = None;
+                                    tls_key_path = None;
+                                } else {
+                                    let result = make_result_failure_msg(
+                                        "TlsError",
+                                        "httpServe: tls must be @(cert: Str, key: Str) or @()",
+                                    );
+                                    return Ok(Some(Signal::Value(make_fulfilled_async(result))));
+                                }
                             }
                         }
                     }
@@ -3873,6 +3905,38 @@ impl Interpreter {
                 // Default: plaintext (v4 compat)
                 tls_cert_path = None;
                 tls_key_path = None;
+            }
+        }
+
+        // v6 NET6-1b: Protocol validation.
+        // HTTP/2 is opt-in. If protocol="h2" is requested, reject until Phase 2 implements it.
+        // Unknown protocol values are rejected immediately.
+        if let Some(ref proto) = requested_protocol {
+            match proto.as_str() {
+                "h1.1" | "http/1.1" => {
+                    // Explicit HTTP/1.1 — same as default, no action needed.
+                }
+                "h2" => {
+                    // v6 NET6-1b: HTTP/2 not yet implemented in Interpreter.
+                    // Phase 2 (NET6-2a) will unlock this path.
+                    let result = make_result_failure_msg(
+                        "H2NotYetImplemented",
+                        "httpServe: HTTP/2 (protocol: \"h2\") is not yet implemented. \
+                         It will be available in a future release.",
+                    );
+                    return Ok(Some(Signal::Value(make_fulfilled_async(result))));
+                }
+                other => {
+                    let result = make_result_failure_msg(
+                        "ProtocolError",
+                        format!(
+                            "httpServe: unknown protocol \"{}\". \
+                             Supported values: \"h1.1\", \"h2\"",
+                            other
+                        ),
+                    );
+                    return Ok(Some(Signal::Value(make_fulfilled_async(result))));
+                }
             }
         }
 

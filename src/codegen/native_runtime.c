@@ -13384,7 +13384,9 @@ taida_val taida_net_http_serve(taida_val port, taida_val handler, taida_val max_
     // tls is a BuchiPack pointer (non-zero = object) or 0 (default = plaintext).
     // NB5-16: Non-zero non-BuchiPack tls must NOT silently fall back to plaintext.
     // Only 0 (default) and valid BuchiPack pointers are accepted.
+    // v6 NET6-1b: protocol field support for h2 opt-in.
     OSSL_SSL_CTX *ssl_ctx = NULL;
+    const char *requested_protocol = NULL;
     if (tls != 0 && !TAIDA_IS_PACK(tls)) {
         // Non-BuchiPack non-zero value (e.g. tls=42) → reject.
         fprintf(stderr, "RuntimeError: httpServe: tls must be a BuchiPack @(cert: Str, key: Str) or @(), got non-pack value\n");
@@ -13394,36 +13396,86 @@ taida_val taida_net_http_serve(taida_val port, taida_val handler, taida_val max_
     if (tls != 0) {
         taida_val *pack = (taida_val *)tls;
         int64_t field_count = pack[1];
-        if (field_count > 0) {
-            // Non-empty tls pack → extract cert and key paths, initialize TLS.
-            // Load OpenSSL via dlopen.
-            if (!taida_ossl_load()) {
-                return taida_async_resolved(taida_net_result_fail("TlsError",
-                    "httpServe: TLS/HTTPS requires OpenSSL (libssl.so). "
-                    "Install libssl3 or equivalent."));
-            }
-            // Extract cert and key fields from the BuchiPack.
-            taida_val cert_val = taida_pack_get(tls, taida_str_hash((taida_val)"cert"));
-            taida_val key_val = taida_pack_get(tls, taida_str_hash((taida_val)"key"));
-            if (!cert_val || cert_val <= 4096) {
-                return taida_async_resolved(taida_net_result_fail("TlsError",
-                    "httpServe: tls config requires 'cert' field (path to PEM certificate file)"));
-            }
-            if (!key_val || key_val <= 4096) {
-                return taida_async_resolved(taida_net_result_fail("TlsError",
-                    "httpServe: tls config requires 'key' field (path to PEM private key file)"));
-            }
-            const char *cert_path = (const char *)cert_val;
-            const char *key_path = (const char *)key_val;
 
-            // Create SSL_CTX with cert/key.
-            char tls_errbuf[512];
-            ssl_ctx = taida_tls_create_ctx(cert_path, key_path, tls_errbuf, sizeof(tls_errbuf));
-            if (!ssl_ctx) {
-                return taida_async_resolved(taida_net_result_fail("TlsError", tls_errbuf));
+        // v6 NET6-1b: Extract protocol field if present.
+        // NB6-10: Separate "field exists" from "field is Str".
+        // If protocol field exists but is not Str, reject immediately.
+        taida_val proto_hash = taida_str_hash((taida_val)"protocol");
+        taida_val proto_tag = taida_pack_get_field_tag(tls, proto_hash);
+        if (proto_tag != TAIDA_TAG_UNKNOWN) {
+            // protocol field exists in the pack
+            if (proto_tag == TAIDA_TAG_STR) {
+                taida_val proto_val = taida_pack_get(tls, proto_hash);
+                if (proto_val && proto_val > 4096) {
+                    requested_protocol = (const char *)proto_val;
+                }
+            } else {
+                // protocol field exists but is not Str → ProtocolError
+                char proto_err[256];
+                snprintf(proto_err, sizeof(proto_err),
+                    "httpServe: protocol must be a Str, got %s",
+                    taida_tag_name(proto_tag));
+                return taida_async_resolved(taida_net_result_fail("ProtocolError", proto_err));
             }
         }
+
+        if (field_count > 0) {
+            // Check if we have cert/key fields (not just protocol).
+            taida_val cert_val = taida_pack_get(tls, taida_str_hash((taida_val)"cert"));
+            taida_val key_val = taida_pack_get(tls, taida_str_hash((taida_val)"key"));
+
+            if ((cert_val && cert_val > 4096) || (key_val && key_val > 4096)) {
+                // Non-empty tls pack with cert/key → extract cert and key paths, initialize TLS.
+                // Load OpenSSL via dlopen.
+                if (!taida_ossl_load()) {
+                    return taida_async_resolved(taida_net_result_fail("TlsError",
+                        "httpServe: TLS/HTTPS requires OpenSSL (libssl.so). "
+                        "Install libssl3 or equivalent."));
+                }
+                if (!cert_val || cert_val <= 4096) {
+                    return taida_async_resolved(taida_net_result_fail("TlsError",
+                        "httpServe: tls config requires 'cert' field (path to PEM certificate file)"));
+                }
+                if (!key_val || key_val <= 4096) {
+                    return taida_async_resolved(taida_net_result_fail("TlsError",
+                        "httpServe: tls config requires 'key' field (path to PEM private key file)"));
+                }
+                const char *cert_path = (const char *)cert_val;
+                const char *key_path = (const char *)key_val;
+
+                // Create SSL_CTX with cert/key.
+                char tls_errbuf[512];
+                ssl_ctx = taida_tls_create_ctx(cert_path, key_path, tls_errbuf, sizeof(tls_errbuf));
+                if (!ssl_ctx) {
+                    return taida_async_resolved(taida_net_result_fail("TlsError", tls_errbuf));
+                }
+            }
+            // else: pack has fields but no cert/key (e.g. only protocol) → fall through to protocol check
+        }
         // else: empty @() pack → plaintext, fall through
+    }
+
+    // v6 NET6-1b: Protocol validation.
+    // HTTP/2 is opt-in. If protocol="h2" is requested, reject until Phase 2 implements it.
+    // Unknown protocol values are rejected immediately.
+    if (requested_protocol != NULL) {
+        if (strcmp(requested_protocol, "h1.1") == 0 || strcmp(requested_protocol, "http/1.1") == 0) {
+            // Explicit HTTP/1.1 — same as default, no action needed.
+        } else if (strcmp(requested_protocol, "h2") == 0) {
+            // v6 NET6-1b: HTTP/2 not yet implemented in Native.
+            // Phase 3 (NET6-3a) will unlock this path.
+            if (ssl_ctx) { taida_ossl.SSL_CTX_free(ssl_ctx); }
+            return taida_async_resolved(taida_net_result_fail("H2NotYetImplemented",
+                "httpServe: HTTP/2 (protocol: \"h2\") is not yet implemented. "
+                "It will be available in a future release."));
+        } else {
+            if (ssl_ctx) { taida_ossl.SSL_CTX_free(ssl_ctx); }
+            char proto_err[256];
+            snprintf(proto_err, sizeof(proto_err),
+                "httpServe: unknown protocol \"%s\". Supported values: \"h1.1\", \"h2\"",
+                requested_protocol);
+            return taida_async_resolved(taida_net_result_fail("ProtocolError", proto_err));
+        }
     }
 
     // NET2-5d: maxConnections (default 128, <= 0 falls back to 128)
