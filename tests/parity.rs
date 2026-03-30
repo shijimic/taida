@@ -21981,3 +21981,172 @@ stdout(r.requests)
         cleanup_net_project(&dir);
     }
 }
+
+// ── NB6-1 regression: invalid response headers → 500 fallback ──────────
+
+/// NB6-1a: handler returns header name containing CR/LF → 500 fallback (3-way parity)
+#[test]
+fn test_net6_1a_invalid_header_name_crlf_3way_parity() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+
+    for backend in &["interp", "js", "native"] {
+        let port = find_free_loopback_port();
+        let source = format!(
+            r#">>> taida-lang/net => @(httpServe)
+
+handler req =
+  @(status <= 200, headers <= @[@(name <= "Bad\r\nName", value <= "ok")], body <= "should-not-appear")
+=> :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
+
+asyncResult <= httpServe({port}, handler, 1)
+asyncResult ]=> result
+result ]=> r
+stdout(r.requests)
+"#
+        );
+
+        let request = b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+        let (resp, stdout) = spawn_and_request_v3(&source, backend, port, request);
+
+        assert!(
+            resp.contains("500 Internal Server Error"),
+            "NB6-1a {}: expected 500 fallback for CR/LF in header name, got: {:?}",
+            backend,
+            resp
+        );
+        assert!(
+            resp.contains("Content-Length: 0"),
+            "NB6-1a {}: 500 fallback should have Content-Length: 0, got: {:?}",
+            backend,
+            resp
+        );
+        assert!(
+            !resp.contains("should-not-appear"),
+            "NB6-1a {}: handler body must NOT appear in 500 fallback, got: {:?}",
+            backend,
+            resp
+        );
+        assert_eq!(
+            stdout, "1",
+            "NB6-1a {}: httpServe should still count 1 request, got: {:?}",
+            backend, stdout
+        );
+    }
+}
+
+/// NB6-1b: handler returns header value containing CR/LF → 500 fallback (3-way parity)
+#[test]
+fn test_net6_1b_invalid_header_value_crlf_3way_parity() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+
+    for backend in &["interp", "js", "native"] {
+        let port = find_free_loopback_port();
+        let source = format!(
+            r#">>> taida-lang/net => @(httpServe)
+
+handler req =
+  @(status <= 200, headers <= @[@(name <= "X-Evil", value <= "injected\r\nX-Fake: header")], body <= "should-not-appear")
+=> :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
+
+asyncResult <= httpServe({port}, handler, 1)
+asyncResult ]=> result
+result ]=> r
+stdout(r.requests)
+"#
+        );
+
+        let request = b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+        let (resp, stdout) = spawn_and_request_v3(&source, backend, port, request);
+
+        assert!(
+            resp.contains("500 Internal Server Error"),
+            "NB6-1b {}: expected 500 fallback for CR/LF in header value, got: {:?}",
+            backend,
+            resp
+        );
+        assert!(
+            resp.contains("Content-Length: 0"),
+            "NB6-1b {}: 500 fallback should have Content-Length: 0, got: {:?}",
+            backend,
+            resp
+        );
+        assert!(
+            !resp.contains("should-not-appear"),
+            "NB6-1b {}: handler body must NOT appear in 500 fallback, got: {:?}",
+            backend,
+            resp
+        );
+        assert!(
+            !resp.contains("X-Fake"),
+            "NB6-1b {}: injected header must NOT appear (response splitting prevented), got: {:?}",
+            backend,
+            resp
+        );
+        assert_eq!(
+            stdout, "1",
+            "NB6-1b {}: httpServe should still count 1 request, got: {:?}",
+            backend, stdout
+        );
+    }
+}
+
+/// NB6-1c: handler returns oversized header name (> 8192 bytes) → 500 fallback (3-way parity)
+#[test]
+fn test_net6_1c_oversized_header_name_3way_parity() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+
+    for backend in &["interp", "js", "native"] {
+        let port = find_free_loopback_port();
+        let source = format!(
+            r#">>> taida-lang/net => @(httpServe)
+
+bigName <= Repeat["x", 8193]()
+
+handler req =
+  @(status <= 200, headers <= @[@(name <= bigName, value <= "ok")], body <= "should-not-appear")
+=> :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
+
+asyncResult <= httpServe({port}, handler, 1)
+asyncResult ]=> result
+result ]=> r
+stdout(r.requests)
+"#
+        );
+
+        let request = b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+        let (resp, stdout) = spawn_and_request_v3(&source, backend, port, request);
+
+        assert!(
+            resp.contains("500 Internal Server Error"),
+            "NB6-1c {}: expected 500 fallback for oversized header name, got: {:?}",
+            backend,
+            resp
+        );
+        assert!(
+            resp.contains("Content-Length: 0"),
+            "NB6-1c {}: 500 fallback should have Content-Length: 0, got: {:?}",
+            backend,
+            resp
+        );
+        assert!(
+            !resp.contains("should-not-appear"),
+            "NB6-1c {}: handler body must NOT appear in 500 fallback, got: {:?}",
+            backend,
+            resp
+        );
+        assert_eq!(
+            stdout, "1",
+            "NB6-1c {}: httpServe should still count 1 request, got: {:?}",
+            backend, stdout
+        );
+    }
+}
