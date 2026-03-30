@@ -352,19 +352,84 @@ fn write_all_retry(stream: &mut ConnStream, data: &[u8]) -> Result<(), RuntimeEr
     })
 }
 
-/// Write multiple IoSlice buffers to a stream without creating an aggregate buffer.
-/// Uses sequential writes to avoid aggregate buffer creation.
+/// Write multiple IoSlice buffers to a stream.
+///
+/// NB5-18: Plaintext path uses `write_vectored()` (writev syscall) to send
+/// multiple buffers in a single syscall, avoiding Nagle-induced small packet
+/// splitting. TLS path concatenates all IoSlices into one buffer before passing
+/// to rustls writer — rustls `Writer` only implements `std::io::Write` (not
+/// `write_vectored`), so a single `write_all` call produces one TLS record
+/// instead of N records for N buffers (the previous per-buffer approach caused
+/// 3 TLS records per chunked write: hex_prefix + payload + suffix).
 fn write_vectored_all(
     stream: &mut ConnStream,
     bufs: &[std::io::IoSlice<'_>],
 ) -> Result<(), RuntimeError> {
     use std::io::Write;
-    for buf in bufs {
-        stream.write_all(buf).map_err(|e| RuntimeError {
-            message: format!("streaming write error: {}", e),
-        })?;
+    match stream {
+        ConnStream::Plain(tcp) => {
+            // Use writev to send all buffers in as few syscalls as possible.
+            // write_vectored may not write all bytes in one call, so we track
+            // which buffers (and partial offset within the current one) remain.
+            let mut buf_idx = 0usize;
+            let mut offset_in_buf = 0usize;
+            while buf_idx < bufs.len() {
+                if offset_in_buf > 0 {
+                    // Partial write left us mid-buffer — finish it with write_all.
+                    tcp.write_all(&bufs[buf_idx][offset_in_buf..])
+                        .map_err(|e| RuntimeError {
+                            message: format!("streaming write error: {}", e),
+                        })?;
+                    buf_idx += 1;
+                    offset_in_buf = 0;
+                    continue;
+                }
+                // Build IoSlice array for remaining buffers.
+                let remaining: Vec<std::io::IoSlice<'_>> = bufs[buf_idx..]
+                    .iter()
+                    .map(|b| std::io::IoSlice::new(b))
+                    .collect();
+                match tcp.write_vectored(&remaining) {
+                    Ok(0) => {
+                        return Err(RuntimeError {
+                            message: "streaming write error: write returned 0".into(),
+                        });
+                    }
+                    Ok(mut n) => {
+                        // Advance past fully written buffers.
+                        for buf in &remaining {
+                            if n >= buf.len() {
+                                n -= buf.len();
+                                buf_idx += 1;
+                            } else {
+                                // Partial write within this buffer.
+                                offset_in_buf = n;
+                                break;
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        return Err(RuntimeError {
+                            message: format!("streaming write error: {}", e),
+                        });
+                    }
+                }
+            }
+            Ok(())
+        }
+        ConnStream::Tls(_) => {
+            // TLS: concatenate all IoSlices into one buffer, then write once.
+            // This produces a single TLS record instead of N records.
+            let total_len: usize = bufs.iter().map(|b| b.len()).sum();
+            let mut combined = Vec::with_capacity(total_len);
+            for buf in bufs {
+                combined.extend_from_slice(buf);
+            }
+            stream.write_all(&combined).map_err(|e| RuntimeError {
+                message: format!("streaming write error: {}", e),
+            })
+        }
     }
-    Ok(())
 }
 
 // ── Result helpers ──────────────────────────────────────────
@@ -1104,6 +1169,12 @@ fn extract_response_fields(response: &Value) -> Result<ResponseFields, String> {
     }
 
     // body (required, must be Bytes or Str)
+    // NB5-22: `b.clone()` is necessary because `fields` is a shared reference to the
+    // handler's returned BuchiPack — `Value` does not support destructive move from a
+    // borrowed slice. This is the 1-arg eager path where the full body is already in
+    // memory; the 2-arg streaming path avoids this clone by writing chunks directly.
+    // A future `Value::into_bytes()` consuming method could eliminate this clone, but
+    // would require changes to the Value type across the codebase.
     let body_bytes = match fields.iter().find(|(k, _)| k == "body") {
         Some((_, Value::Bytes(b))) => b.clone(),
         Some((_, Value::Str(s))) => s.as_bytes().to_vec(),
@@ -2349,6 +2420,12 @@ impl Interpreter {
     }
 
     /// Read a line (up to CRLF) from leftover buffer then stream.
+    ///
+    /// NB5-21: After leftover is exhausted, reads in 64-byte chunks from the
+    /// stream instead of byte-by-byte. Excess bytes beyond the LF are pushed
+    /// back into `body.leftover` so they are available for subsequent reads.
+    /// This reduces syscall count from O(line_length) to O(1) for typical
+    /// chunk-size lines (4-8 bytes), and avoids per-byte rustls overhead on TLS.
     fn read_line_from_body(
         body: &mut RequestBodyState,
         stream: &mut ConnStream,
@@ -2365,22 +2442,42 @@ impl Interpreter {
             }
         }
 
-        // Then read from stream byte-by-byte until LF.
-        let mut byte = [0u8; 1];
+        // Then read from stream in chunks until LF is found.
+        let mut chunk_buf = [0u8; 64];
         loop {
-            match std::io::Read::read(stream, &mut byte) {
+            match std::io::Read::read(stream, &mut chunk_buf) {
                 Ok(0) => break, // EOF
-                Ok(_) => {
-                    line.push(byte[0]);
-                    if byte[0] == b'\n' {
+                Ok(n) => {
+                    // Scan the chunk for LF.
+                    if let Some(lf_pos) = chunk_buf[..n].iter().position(|&b| b == b'\n') {
+                        // Include everything up to and including the LF.
+                        line.extend_from_slice(&chunk_buf[..=lf_pos]);
+                        // Push excess bytes back into leftover for subsequent reads.
+                        let excess = &chunk_buf[lf_pos + 1..n];
+                        if !excess.is_empty() {
+                            // Prepend excess to any remaining leftover.
+                            let remaining_leftover = if body.leftover_pos < body.leftover.len() {
+                                body.leftover[body.leftover_pos..].to_vec()
+                            } else {
+                                Vec::new()
+                            };
+                            let mut new_leftover =
+                                Vec::with_capacity(excess.len() + remaining_leftover.len());
+                            new_leftover.extend_from_slice(excess);
+                            new_leftover.extend_from_slice(&remaining_leftover);
+                            body.leftover = new_leftover;
+                            body.leftover_pos = 0;
+                        }
                         break;
+                    } else {
+                        // No LF in this chunk — append all and continue reading.
+                        line.extend_from_slice(&chunk_buf[..n]);
                     }
                 }
                 Err(ref e)
                     if e.kind() == std::io::ErrorKind::WouldBlock
                         || e.kind() == std::io::ErrorKind::TimedOut =>
                 {
-                    // Retry once: set blocking briefly.
                     break;
                 }
                 Err(e) => {
@@ -2396,33 +2493,37 @@ impl Interpreter {
 
     /// Read up to `count` bytes from leftover buffer then stream.
     /// Returns a Vec of the bytes actually read (may be less than count on EOF).
+    ///
+    /// NB5-19: Single allocation — `result` is pre-sized to `count` and the stream
+    /// reads directly into the unfilled tail, avoiding the previous intermediate
+    /// `vec![0u8; remaining]` allocation per read call.
     fn read_exact_from_body(
         body: &mut RequestBodyState,
         stream: &mut ConnStream,
         count: usize,
     ) -> Result<Vec<u8>, RuntimeError> {
-        let mut result = Vec::with_capacity(count);
+        let mut result = vec![0u8; count];
+        let mut len = 0usize;
 
-        // First, drain from leftover.
-        while result.len() < count && body.has_leftover() {
-            result.push(body.leftover[body.leftover_pos]);
+        // First, drain from leftover directly into result.
+        while len < count && body.has_leftover() {
+            result[len] = body.leftover[body.leftover_pos];
             body.leftover_pos += 1;
+            len += 1;
         }
 
-        // Then read from stream.
-        while result.len() < count {
-            let remaining = count - result.len();
-            let mut buf = vec![0u8; remaining];
-            match std::io::Read::read(stream, &mut buf) {
+        // Then read from stream directly into the unfilled tail of result.
+        while len < count {
+            match std::io::Read::read(stream, &mut result[len..count]) {
                 Ok(0) => break, // EOF
                 Ok(n) => {
-                    result.extend_from_slice(&buf[..n]);
+                    len += n;
                 }
                 Err(ref e)
                     if e.kind() == std::io::ErrorKind::WouldBlock
                         || e.kind() == std::io::ErrorKind::TimedOut =>
                 {
-                    if result.is_empty() {
+                    if len == 0 {
                         // If we have nothing yet, this might be a real timeout.
                         // Retry one more time with a blocking read.
                         continue;
@@ -2437,6 +2538,7 @@ impl Interpreter {
             }
         }
 
+        result.truncate(len);
         Ok(result)
     }
 
@@ -4033,7 +4135,10 @@ impl Interpreter {
             // Do NOT eagerly read body. Only read the head.
             // Body will be read on demand via readBodyChunk/readBodyAll.
 
-            // Detach head bytes from scratch buffer (owned copy).
+            // NB5-20: Detach head bytes from scratch buffer (owned copy).
+            // This to_vec() is necessary because `Value` requires `'static` lifetime —
+            // the connection scratch buffer (`conn.buf`) is reused/overwritten on keep-alive,
+            // so we cannot borrow from it into a `Value::Bytes` that outlives this scope.
             let raw_bytes = conn.buf[..head_consumed].to_vec();
 
             // Determine keep-alive from head bytes.
@@ -4048,7 +4153,10 @@ impl Interpreter {
                 _ => http_minor == 1,
             };
 
-            // Capture any leftover body bytes already in conn.buf (beyond head).
+            // NB5-20: Capture any leftover body bytes already in conn.buf (beyond head).
+            // Same as raw_bytes above — `Value` is `'static`, so we cannot borrow from
+            // `conn.buf`. The leftover is typically 0–a few KB (body bytes that arrived
+            // in the same TCP segment as the head), so this copy is acceptable.
             let leftover = if conn.total_read > head_consumed {
                 conn.buf[head_consumed..conn.total_read].to_vec()
             } else {
@@ -4235,14 +4343,30 @@ impl Interpreter {
                 return ConnAction::Close;
             }
 
-            // Body was fully consumed; safe to advance buffer.
-            // For body-deferred path, the stream read pointer is already past
-            // the body (readBodyChunk consumed it all). We don't need to advance
-            // conn.buf because body bytes were read directly from the stream,
-            // not from conn.buf.
-            conn.total_read = 0;
-            if conn.buf.len() < 8192 {
-                conn.buf.resize(8192, 0);
+            // NB5-24: Recover any trailing bytes from body_state leftover.
+            // When a pipelined client sends the next request in the same TCP segment
+            // as the current body, those bytes end up in body_state.leftover beyond
+            // the body data. We must copy them back into conn.buf so the keep-alive
+            // loop can parse the next request from them.
+            let trailing = if body_state.leftover_pos < body_state.leftover.len() {
+                body_state.leftover[body_state.leftover_pos..].to_vec()
+            } else {
+                Vec::new()
+            };
+
+            if !trailing.is_empty() {
+                // Ensure conn.buf is large enough for the trailing bytes.
+                let needed = trailing.len();
+                if conn.buf.len() < needed {
+                    conn.buf.resize(std::cmp::max(8192, needed), 0);
+                }
+                conn.buf[..needed].copy_from_slice(&trailing);
+                conn.total_read = needed;
+            } else {
+                conn.total_read = 0;
+                if conn.buf.len() < 8192 {
+                    conn.buf.resize(8192, 0);
+                }
             }
 
             ConnAction::KeepAlive

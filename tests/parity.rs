@@ -21872,3 +21872,112 @@ stdout(serverResult.__value.ok)
         );
     }
 }
+
+// ── NB5-24: 2-arg body-deferred pipelined request parity ────────────
+
+/// NB5-24: Verify that a 2-arg handler with readBodyAll correctly handles
+/// pipelined requests where the second request's bytes are already buffered
+/// in the same TCP segment as the first request's body.
+/// Tests all 3 backends (Interpreter, JS, Native) for identical behavior.
+#[test]
+fn test_nb5_24_pipelined_2arg_body_deferred_3way_parity() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+
+    for backend in &["interp", "js", "native"] {
+        let port = find_free_loopback_port();
+        // 2-arg handler: reads body via readBodyAll, echoes the body back.
+        // maxRequests=2 so server exits after 2 requests.
+        let source = format!(
+            r#">>> taida-lang/net => @(httpServe, readBodyAll, startResponse, writeChunk, endResponse)
+
+handler req writer =
+  body <= readBodyAll(req)
+  startResponse(writer, 200, @[@(name <= "Content-Type", value <= "application/octet-stream")])
+  writeChunk(writer, body)
+  endResponse(writer)
+=> :Unit
+
+asyncResult <= httpServe({port}, handler, 2)
+asyncResult ]=> result
+result ]=> r
+stdout(r.requests)
+"#
+        );
+
+        let (mut child, dir) =
+            spawn_net_server(&source, &format!("nb5_24_pipeline_{}", backend), backend);
+
+        // Build two pipelined HTTP requests with Content-Length bodies.
+        // Both are sent in a single TCP write to ensure the second request's
+        // bytes land in the same buffer read as the first request's body.
+        let body1 = b"AAAA"; // 4 bytes
+        let body2 = b"BBBBBB"; // 6 bytes
+        let req1 = format!(
+            "POST /first HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\n\r\n{}",
+            body1.len(),
+            std::str::from_utf8(body1).unwrap()
+        );
+        let req2 = format!(
+            "POST /second HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{}",
+            body2.len(),
+            std::str::from_utf8(body2).unwrap()
+        );
+        let pipelined = format!("{}{}", req1, req2);
+
+        let response = send_http_request(port, pipelined.as_bytes());
+        let response = match response {
+            Some(r) => r,
+            None => {
+                let _ = child.kill();
+                cleanup_net_project(&dir);
+                panic!(
+                    "[{}] NB5-24: server did not respond on port {}",
+                    backend, port
+                );
+            }
+        };
+
+        let resp_str = String::from_utf8_lossy(&response).to_string();
+
+        // Both responses should be present.
+        // Response 1 should echo "AAAA" (body1).
+        // Response 2 should echo "BBBBBB" (body2).
+        let resp_parts: Vec<&str> = resp_str.split("HTTP/1.1 200 OK").collect();
+        assert!(
+            resp_parts.len() >= 3,
+            "[{}] NB5-24: expected 2 HTTP 200 responses but got {} parts.\nFull response:\n{}",
+            backend,
+            resp_parts.len() - 1,
+            resp_str
+        );
+
+        // Verify both echoed bodies are present in the response.
+        // The chunked transfer encoding wraps them, so look for the body
+        // content in the response.
+        assert!(
+            resp_str.contains("AAAA"),
+            "[{}] NB5-24: first response should contain body 'AAAA'.\nFull response:\n{}",
+            backend,
+            resp_str
+        );
+        assert!(
+            resp_str.contains("BBBBBB"),
+            "[{}] NB5-24: second response should contain body 'BBBBBB'.\nFull response:\n{}",
+            backend,
+            resp_str
+        );
+
+        let output = child.wait_with_output().expect("wait for server");
+        let stdout_str = normalize(&String::from_utf8_lossy(&output.stdout));
+        assert_eq!(
+            stdout_str, "2",
+            "[{}] NB5-24: httpServe should report 2 requests processed, got: {:?}",
+            backend, stdout_str
+        );
+
+        cleanup_net_project(&dir);
+    }
+}

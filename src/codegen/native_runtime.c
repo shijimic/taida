@@ -12639,6 +12639,7 @@ static void *net_worker_thread(void *arg) {
             // 2-arg handler = body-deferred (v4), 1-arg = eager body read (v2).
             int keep_alive = 1;
             size_t wire_consumed = head_consumed; // default for 2-arg deferred
+            int skip_buffer_advance = 0; // NB5-24: set by 2-arg path to skip shared advance
 
             if (pool->handler_arity >= 2) {
                 // ── v4 2-arg handler path: body-deferred ──
@@ -12866,15 +12867,37 @@ static void *net_worker_thread(void *arg) {
                 taida_release(request);
                 taida_release(writer_token);
                 taida_release(response);
-                if (leftover) free(leftover);
 
                 // NET4-1g: If body not fully read, do NOT return to keep-alive.
                 int body_done = body_state.fully_read || (!is_chunked && content_length == 0);
                 if (!body_done) keep_alive = 0;
 
-                // For 2-arg body-deferred path, stream read pointer is already
-                // past the body (readBodyChunk consumed it). Reset buf.
-                total_read = 0;
+                // NB5-24: Recover trailing bytes from body_state leftover.
+                // When a pipelined client sends the next request in the same TCP
+                // segment as the current body, those bytes end up in leftover beyond
+                // the body data. Copy them back into the connection buffer so the
+                // keep-alive loop can parse the next request from them.
+                size_t trailing_len = 0;
+                if (body_state.leftover && body_state.leftover_pos < body_state.leftover_len) {
+                    trailing_len = body_state.leftover_len - body_state.leftover_pos;
+                }
+                if (trailing_len > 0 && keep_alive) {
+                    if (trailing_len > buf_cap) {
+                        buf_cap = trailing_len > 8192 ? trailing_len : 8192;
+                        free(buf);
+                        buf = (unsigned char*)TAIDA_MALLOC(buf_cap, "net_worker_buf");
+                    }
+                    memcpy(buf, body_state.leftover + body_state.leftover_pos, trailing_len);
+                    total_read = trailing_len;
+                } else {
+                    total_read = 0;
+                }
+
+                // NB5-24: Skip the shared "Buffer advance" section — the 2-arg path
+                // manages its own buffer state (total_read already set correctly).
+                skip_buffer_advance = 1;
+
+                if (leftover) free(leftover);
             } else {
                 // ── v2/v3 1-arg handler path (unchanged eager body read) ──
                 size_t body_start;
@@ -13055,12 +13078,15 @@ static void *net_worker_thread(void *arg) {
             int limit_hit = net_pool_requests_exhausted(pool);
             pthread_mutex_unlock(&pool->mutex);
 
-            // Buffer advance: remove consumed bytes, keep any leftover
-            if (wire_consumed < total_read) {
-                memmove(buf, buf + wire_consumed, total_read - wire_consumed);
-                total_read -= wire_consumed;
-            } else {
-                total_read = 0;
+            // Buffer advance: remove consumed bytes, keep any leftover.
+            // NB5-24: Skip for 2-arg path — it manages its own buffer state.
+            if (!skip_buffer_advance) {
+                if (wire_consumed < total_read) {
+                    memmove(buf, buf + wire_consumed, total_read - wire_consumed);
+                    total_read -= wire_consumed;
+                } else {
+                    total_read = 0;
+                }
             }
 
             // Close if not keep-alive or limit reached
