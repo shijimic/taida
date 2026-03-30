@@ -22949,3 +22949,126 @@ stdout(result.throw.message)
         );
     }
 }
+
+/// NB6-10-3: httpServe with **dynamic** non-Str protocol field.
+/// Uses a function to construct the tls pack at runtime so the compiler
+/// cannot determine the field tag statically (tag = UNKNOWN in Native).
+/// Before the fix, Native silently treated the unknown-tag protocol as absent
+/// and fell through to plaintext. Now all 3 backends must reject with ProtocolError.
+#[test]
+fn test_nb6_10_dynamic_non_str_protocol_rejected_3way_parity() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+
+    // makeTls wraps the argument in @(protocol <= x).
+    // Calling makeTls(true) produces a dynamic BuchiPack whose protocol
+    // field tag is UNKNOWN at compile time in Native.
+    let source_template = |port: u16| {
+        format!(
+            r#">>> taida-lang/net => @(httpServe)
+
+handler req =
+  @(status <= 200, headers <= @[], body <= "should-not-reach")
+=> :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
+
+makeTls x = @(protocol <= x) => :@()
+
+asyncResult <= httpServe({port}, handler, 1, 5000, 128, makeTls(true))
+asyncResult ]=> result
+stdout(result.throw.message)
+"#,
+            port = port
+        )
+    };
+
+    // Interpreter
+    {
+        let port = find_free_loopback_port();
+        let source = source_template(port);
+        let dir = setup_net_project(&source, "nb6_10_dyn_proto_interp");
+        let td_path = dir.join("main.td");
+        let output = Command::new(taida_bin())
+            .arg(&td_path)
+            .output()
+            .expect("spawn interpreter");
+        let stdout = normalize(&String::from_utf8_lossy(&output.stdout));
+        cleanup_net_project(&dir);
+
+        assert!(
+            stdout.contains("protocol must be a Str"),
+            "NB6-10-3 interp: expected ProtocolError for dynamic non-Str protocol, got: {:?}",
+            stdout
+        );
+    }
+
+    // JS
+    {
+        let port = find_free_loopback_port();
+        let source = source_template(port);
+        let dir = setup_net_project(&source, "nb6_10_dyn_proto_js");
+        let td_path = dir.join("main.td");
+        let js_path = unique_temp_path("taida_nb6_10_dyn_proto_js", "dyn_proto", "mjs");
+        let transpile = Command::new(taida_bin())
+            .arg("build")
+            .arg("--target")
+            .arg("js")
+            .arg(&td_path)
+            .arg("-o")
+            .arg(&js_path)
+            .output()
+            .expect("transpile");
+        assert!(
+            transpile.status.success(),
+            "JS transpile failed: {}",
+            String::from_utf8_lossy(&transpile.stderr)
+        );
+        let js_output = Command::new("node")
+            .arg(&js_path)
+            .output()
+            .expect("run node");
+        let stdout = normalize(&String::from_utf8_lossy(&js_output.stdout));
+        let _ = fs::remove_file(&js_path);
+        cleanup_net_project(&dir);
+
+        assert!(
+            stdout.contains("protocol must be a Str"),
+            "NB6-10-3 js: expected ProtocolError for dynamic non-Str protocol, got: {:?}",
+            stdout
+        );
+    }
+
+    // Native
+    {
+        let port = find_free_loopback_port();
+        let source = source_template(port);
+        let dir = setup_net_project(&source, "nb6_10_dyn_proto_native");
+        let td_path = dir.join("main.td");
+        let bin_path = unique_temp_path("taida_nb6_10_dyn_proto_native", "dyn_proto", "bin");
+        let compile = Command::new(taida_bin())
+            .arg("build")
+            .arg("--target")
+            .arg("native")
+            .arg(&td_path)
+            .arg("-o")
+            .arg(&bin_path)
+            .output()
+            .expect("compile native");
+        assert!(
+            compile.status.success(),
+            "Native compile failed: {}",
+            String::from_utf8_lossy(&compile.stderr)
+        );
+        let native_output = Command::new(&bin_path).output().expect("run native");
+        let stdout = normalize(&String::from_utf8_lossy(&native_output.stdout));
+        let _ = fs::remove_file(&bin_path);
+        cleanup_net_project(&dir);
+
+        assert!(
+            stdout.contains("protocol must be a Str"),
+            "NB6-10-3 native: expected ProtocolError for dynamic non-Str protocol, got: {:?}",
+            stdout
+        );
+    }
+}

@@ -13398,12 +13398,20 @@ taida_val taida_net_http_serve(taida_val port, taida_val handler, taida_val max_
         int64_t field_count = pack[1];
 
         // v6 NET6-1b: Extract protocol field if present.
-        // NB6-10: Separate "field exists" from "field is Str".
-        // If protocol field exists but is not Str, reject immediately.
+        // NB6-10: Use taida_pack_has_hash() to confirm field existence first,
+        // then resolve UNKNOWN tags via taida_runtime_detect_tag().
+        // This correctly handles dynamic packs where the compiler couldn't
+        // determine the field tag statically (e.g., `@(protocol <= x)` with
+        // x being a non-Str value passed through a function parameter).
         taida_val proto_hash = taida_str_hash((taida_val)"protocol");
-        taida_val proto_tag = taida_pack_get_field_tag(tls, proto_hash);
-        if (proto_tag != TAIDA_TAG_UNKNOWN) {
-            // protocol field exists in the pack
+        if (taida_pack_has_hash(tls, proto_hash)) {
+            // protocol field exists in the pack — now check its type
+            taida_val proto_tag = taida_pack_get_field_tag(tls, proto_hash);
+            if (proto_tag == TAIDA_TAG_UNKNOWN) {
+                // Dynamic case: tag not set at compile time, resolve at runtime
+                taida_val proto_val = taida_pack_get(tls, proto_hash);
+                proto_tag = taida_runtime_detect_tag(proto_val);
+            }
             if (proto_tag == TAIDA_TAG_STR) {
                 taida_val proto_val = taida_pack_get(tls, proto_hash);
                 if (proto_val && proto_val > 4096) {
@@ -13412,9 +13420,12 @@ taida_val taida_net_http_serve(taida_val port, taida_val handler, taida_val max_
             } else {
                 // protocol field exists but is not Str → ProtocolError
                 char proto_err[256];
+                taida_val proto_val = taida_pack_get(tls, proto_hash);
+                char val_buf[64];
+                taida_format_value(proto_tag, proto_val, val_buf, sizeof(val_buf));
                 snprintf(proto_err, sizeof(proto_err),
                     "httpServe: protocol must be a Str, got %s",
-                    taida_tag_name(proto_tag));
+                    val_buf);
                 return taida_async_resolved(taida_net_result_fail("ProtocolError", proto_err));
             }
         }
