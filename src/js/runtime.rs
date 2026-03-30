@@ -3273,6 +3273,48 @@ function __taida_net_httpEncodeResponse(response) {
   return __taida_net_result_ok(Object.freeze({ bytes: result }));
 }
 
+// NB6-1: Scatter-gather send for internal one-shot response path.
+// Returns { head: Buffer, body: Buffer|Uint8Array } or null on error.
+// Avoids the aggregate Uint8Array concatenation of httpEncodeResponse.
+function __taida_net_encodeResponseScatter(response) {
+  if (!response || typeof response !== 'object') return null;
+  const status = response.status;
+  if (typeof status !== 'number' || !Number.isInteger(status) || status < 100 || status > 999) return null;
+  const noBody = (status >= 100 && status < 200) || status === 204 || status === 205 || status === 304;
+  const headers = response.headers;
+  if (!Array.isArray(headers)) return null;
+
+  let bodyBytes;
+  const bodyVal = response.body;
+  if (bodyVal instanceof Uint8Array) {
+    bodyBytes = bodyVal;
+  } else if (typeof bodyVal === 'string') {
+    bodyBytes = Buffer.from(bodyVal, 'utf-8');
+  } else {
+    return null;
+  }
+
+  if (noBody && bodyBytes.length > 0) return null;
+
+  const reason = __taida_net_status_reason(status);
+  let head = 'HTTP/1.1 ' + status + ' ' + reason + '\r\n';
+  let hasContentLength = false;
+  for (let i = 0; i < headers.length; i++) {
+    const h = headers[i];
+    if (!h || typeof h !== 'object') return null;
+    const name = h.name, value = h.value;
+    if (typeof name !== 'string' || typeof value !== 'string') return null;
+    if (noBody && name.toLowerCase() === 'content-length') continue;
+    head += name + ': ' + value + '\r\n';
+    if (name.toLowerCase() === 'content-length') hasContentLength = true;
+  }
+  if (!noBody && !hasContentLength) {
+    head += 'Content-Length: ' + bodyBytes.length + '\r\n';
+  }
+  head += '\r\n';
+  return { head: Buffer.from(head, 'latin1'), body: bodyBytes };
+}
+
 // NET2-4b: Chunked Transfer Encoding in-place compaction (JS)
 // Mirrors Interpreter's chunked_in_place_compact algorithm.
 // buf is a Buffer; bodyOffset is where chunk framing starts.
@@ -3758,18 +3800,23 @@ async function __taida_net_httpServe(port, handler, maxRequests, timeoutMs, maxC
           // For plaintext sockets, the original fd-based synchronous I/O works
           // correctly and body-deferred streaming is preserved.
           if (socket.__tls && (contentLength > 0 || isChunked)) {
-            // TLS + body present: defer dispatch until full body is buffered.
+            // NB6-2: TLS + body present: pre-buffer entire body before dispatch.
+            // Design contract: TLS streaming body is non-zero-copy / non-streaming
+            // due to Node.js TLS sockets delivering via event loop callbacks.
+            // This is a fundamental limitation of the sync handler model.
+            // HTTP/2 will require async runtime boundary (out of v6 scope for JS).
             if (!isChunked) {
               // Content-Length path: wait until buf has head + full body.
               const bodyNeeded = parsed.consumed + contentLength;
               if (buf.length < bodyNeeded) return false; // need more body data
 
-              // Full body is now in buf. Extract leftover and dispatch.
+              // NB6-2: Use buf.slice() for owned copies (avoids intermediate
+              // Buffer.subarray view + Buffer.from double-copy overhead).
               const remoteAddr = socket.remoteAddress || '127.0.0.1';
               const cleanHost = remoteAddr.startsWith('::ffff:') ? remoteAddr.substring(7) : remoteAddr;
               const keepAlive = __taida_net_determineKeepAlive(buf, parsed.headers, parsed.version.minor);
-              const rawSnapshot = Buffer.from(buf.subarray(0, parsed.consumed));
-              const leftover = Buffer.from(buf.subarray(parsed.consumed, bodyNeeded));
+              const rawSnapshot = buf.slice(0, parsed.consumed);
+              const leftover = buf.slice(parsed.consumed, bodyNeeded);
               bufConsume(bodyNeeded);
 
               const request = {
@@ -3808,9 +3855,9 @@ async function __taida_net_httpServe(port, handler, maxRequests, timeoutMs, maxC
               const remoteAddr = socket.remoteAddress || '127.0.0.1';
               const cleanHost = remoteAddr.startsWith('::ffff:') ? remoteAddr.substring(7) : remoteAddr;
               const keepAlive = __taida_net_determineKeepAlive(buf, parsed.headers, parsed.version.minor);
-              const rawSnapshot = Buffer.from(buf.subarray(0, parsed.consumed));
-              // Leftover = compacted body bytes (already in buf after in-place compact).
-              const leftover = Buffer.from(buf.subarray(parsed.consumed, parsed.consumed + compact.bodyLen));
+              // NB6-2: Use buf.slice() for owned copies (avoids Buffer.from + subarray overhead).
+              const rawSnapshot = buf.slice(0, parsed.consumed);
+              const leftover = buf.slice(parsed.consumed, parsed.consumed + compact.bodyLen);
               bufConsume(totalWire);
 
               const request = {
@@ -3849,11 +3896,11 @@ async function __taida_net_httpServe(port, handler, maxRequests, timeoutMs, maxC
           const keepAlive = __taida_net_determineKeepAlive(buf, parsed.headers, parsed.version.minor);
 
           // Capture only the head as raw (body is NOT in raw for 2-arg handlers).
-          const rawSnapshot = Buffer.from(buf.subarray(0, parsed.consumed));
+          const rawSnapshot = buf.slice(0, parsed.consumed);
 
           // Capture any body bytes that arrived with the head parse buffer.
           const leftover = buf.length > parsed.consumed
-            ? Buffer.from(buf.subarray(parsed.consumed))
+            ? buf.slice(parsed.consumed)
             : Buffer.alloc(0);
 
           const request = {
@@ -3940,7 +3987,7 @@ async function __taida_net_httpServe(port, handler, maxRequests, timeoutMs, maxC
           const keepAlive = __taida_net_determineKeepAlive(buf, parsed.headers, parsed.version.minor);
 
           // Snapshot raw for request pack (owned copy, decoupled from scratch buffer)
-          const rawSnapshot = Buffer.from(buf.subarray(0, bodyNeeded));
+          const rawSnapshot = buf.slice(0, bodyNeeded);
           const request = Object.freeze({
             raw: new Uint8Array(rawSnapshot.buffer, rawSnapshot.byteOffset, rawSnapshot.byteLength),
             method: parsed.method,
@@ -4172,19 +4219,27 @@ async function __taida_net_httpServe(port, handler, maxRequests, timeoutMs, maxC
           const effectiveResponse = isResponsePack ? responseVal
             : Object.freeze({ status: 200, headers: Object.freeze([]), body: '' });
 
-          const encoded = __taida_net_httpEncodeResponse(effectiveResponse);
-          const encInner = encoded && encoded.__value;
-          let responseBytes;
-          if (encInner && encInner.bytes) {
-            responseBytes = Buffer.from(encInner.bytes);
+          // NB6-1: Scatter-gather send — head and body as separate buffers.
+          // Use cork/uncork to batch both writes into a single TCP segment.
+          const scatter = __taida_net_encodeResponseScatter(effectiveResponse);
+          if (scatter) {
+            if (scatter.body.length > 0) {
+              socket.cork();
+              socket.write(scatter.head);
+              socket.write(scatter.body, () => {
+                afterResponseWrittenV4(keepAlive, writer);
+              });
+              socket.uncork();
+            } else {
+              socket.write(scatter.head, () => {
+                afterResponseWrittenV4(keepAlive, writer);
+              });
+            }
           } else {
-            responseBytes = Buffer.from('HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n');
-            keepAlive = false;
+            socket.write(Buffer.from('HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n'), () => {
+              afterResponseWrittenV4(false, writer);
+            });
           }
-
-          socket.write(responseBytes, () => {
-            afterResponseWrittenV4(keepAlive, writer);
-          });
         } else {
           // Streaming was started. Return value is ignored.
           // Auto-end if not already ended.
@@ -4304,19 +4359,26 @@ async function __taida_net_httpServe(port, handler, maxRequests, timeoutMs, maxC
           const effectiveResponse = isResponsePack ? responseVal
             : Object.freeze({ status: 200, headers: Object.freeze([]), body: '' });
 
-          const encoded = __taida_net_httpEncodeResponse(effectiveResponse);
-          const encInner = encoded && encoded.__value;
-          let responseBytes;
-          if (encInner && encInner.bytes) {
-            responseBytes = Buffer.from(encInner.bytes);
+          // NB6-1: Scatter-gather send — head and body as separate buffers.
+          const scatter2 = __taida_net_encodeResponseScatter(effectiveResponse);
+          if (scatter2) {
+            if (scatter2.body.length > 0) {
+              socket.cork();
+              socket.write(scatter2.head);
+              socket.write(scatter2.body, () => {
+                afterResponseWritten(keepAlive);
+              });
+              socket.uncork();
+            } else {
+              socket.write(scatter2.head, () => {
+                afterResponseWritten(keepAlive);
+              });
+            }
           } else {
-            responseBytes = Buffer.from('HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n');
-            keepAlive = false;
+            socket.write(Buffer.from('HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n'), () => {
+              afterResponseWritten(false);
+            });
           }
-
-          socket.write(responseBytes, () => {
-            afterResponseWritten(keepAlive);
-          });
         } else {
           // Streaming was started. Return value is ignored.
           // Auto-end if not already ended.
@@ -4348,20 +4410,26 @@ async function __taida_net_httpServe(port, handler, maxRequests, timeoutMs, maxC
         // NB2-12: Guard against writing to a destroyed/ended socket
         if (socket.destroyed || !socket.writable) { closeConn(); return; }
 
-        // Encode and write response
-        const encoded = __taida_net_httpEncodeResponse(responseVal);
-        const encInner = encoded && encoded.__value;
-        let responseBytes;
-        if (encInner && encInner.bytes) {
-          responseBytes = Buffer.from(encInner.bytes);
+        // NB6-1: Scatter-gather send — head and body as separate buffers.
+        const scatter3 = __taida_net_encodeResponseScatter(responseVal);
+        if (scatter3) {
+          if (scatter3.body.length > 0) {
+            socket.cork();
+            socket.write(scatter3.head);
+            socket.write(scatter3.body, () => {
+              afterResponseWritten(keepAlive);
+            });
+            socket.uncork();
+          } else {
+            socket.write(scatter3.head, () => {
+              afterResponseWritten(keepAlive);
+            });
+          }
         } else {
-          responseBytes = Buffer.from('HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n');
-          keepAlive = false; // force close on encode failure
+          socket.write(Buffer.from('HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n'), () => {
+            afterResponseWritten(false);
+          });
         }
-
-        socket.write(responseBytes, () => {
-          afterResponseWritten(keepAlive);
-        });
       }
 
       // Shared keep-alive continuation after any response (one-shot or streaming)
@@ -5555,10 +5623,19 @@ function __taida_net_readWsFrame(sock) {
     ? __taida_net_readExactFromSocket(sock, payloadLen)
     : Buffer.alloc(0);
 
-  // Unmask in-place.
+  // NB6-6: Unmask in-place using word-at-a-time XOR via DataView.
+  // Process 4 bytes at a time to eliminate modulo per byte.
   if (maskKey) {
-    for (let i = 0; i < payload.length; i++) {
-      payload[i] ^= maskKey[i % 4];
+    const plen = payload.length;
+    const dv = new DataView(payload.buffer, payload.byteOffset, plen);
+    const maskWord = (maskKey[0] << 24) | (maskKey[1] << 16) | (maskKey[2] << 8) | maskKey[3];
+    let i = 0;
+    const wordEnd = plen - 3;
+    for (; i < wordEnd; i += 4) {
+      dv.setUint32(i, dv.getUint32(i) ^ maskWord);
+    }
+    for (; i < plen; i++) {
+      payload[i] ^= maskKey[i & 3];
     }
   }
 

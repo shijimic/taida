@@ -7774,14 +7774,30 @@ static int taida_tls_send_all(int fd, const void *buf, size_t len) {
 // Returns 0 on success, -1 on error.
 static int taida_tls_writev_all(int fd, struct iovec *iov, int iovcnt) {
     if (tl_ssl) {
-        // SSL doesn't support writev — send each iovec buffer via SSL_write.
+        // NB6-3: SSL doesn't support writev — linearize all iovecs into a single
+        // contiguous buffer and make one SSL_write call. This prevents TLS record
+        // fragmentation (previously one SSL_write per iovec caused 3 TLS records
+        // per chunked response chunk). Stack buffer for small writes, heap fallback.
+        size_t total = 0;
+        for (int i = 0; i < iovcnt; i++) total += iov[i].iov_len;
+        if (total == 0) return 0;
+        // Single iovec: no linearization needed.
+        if (iovcnt == 1) {
+            return taida_tls_send_all(fd, iov[0].iov_base, iov[0].iov_len);
+        }
+        unsigned char stack_buf[8192];
+        unsigned char *buf = (total <= sizeof(stack_buf)) ? stack_buf
+            : (unsigned char*)TAIDA_MALLOC(total, "tls_writev_linear");
+        size_t pos = 0;
         for (int i = 0; i < iovcnt; i++) {
             if (iov[i].iov_len > 0) {
-                if (taida_tls_send_all(fd, iov[i].iov_base, iov[i].iov_len) != 0)
-                    return -1;
+                memcpy(buf + pos, iov[i].iov_base, iov[i].iov_len);
+                pos += iov[i].iov_len;
             }
         }
-        return 0;
+        int rc = taida_tls_send_all(fd, buf, total);
+        if (buf != stack_buf) free(buf);
+        return rc;
     }
     // Plaintext: use real writev.
     while (iovcnt > 0) {
@@ -9734,24 +9750,26 @@ taida_val taida_net_http_encode_response(taida_val response) {
     }
 
     // Extract body (required, must be Bytes or Str)
+    // NB6-4: For Bytes, defer materialization until the wire buffer is ready.
+    // Instead of allocating a separate body_data buffer and copying twice
+    // (taida_val -> body_data -> wire buf), we record the source pointer and
+    // copy directly into the wire buffer once.
     taida_val body_hash = taida_str_hash((taida_val)"body");
     if (!taida_pack_has_hash(response, body_hash)) {
         return taida_net_result_fail("EncodeError", "httpEncodeResponse: missing required field 'body'");
     }
     taida_val body_ptr = taida_pack_get(response, body_hash);
-    unsigned char *body_data = NULL;
+    unsigned char *body_data = NULL;  // contiguous body (Str path only)
+    taida_val *body_bytes_arr = NULL; // taida_val array (Bytes path only)
     size_t body_len = 0;
-    int free_body = 0;
+    int body_is_bytes = 0;
 
     if (TAIDA_IS_BYTES(body_ptr)) {
-        taida_val *bytes = (taida_val*)body_ptr;
-        taida_val blen = bytes[1];
+        body_bytes_arr = (taida_val*)body_ptr;
+        taida_val blen = body_bytes_arr[1];
         if (blen < 0) blen = 0;
         body_len = (size_t)blen;
-        body_data = (unsigned char*)TAIDA_MALLOC(body_len + 1, "net_encode_body");
-        for (size_t i = 0; i < body_len; i++) body_data[i] = (unsigned char)bytes[2 + i];
-        body_data[body_len] = 0;
-        free_body = 1;
+        body_is_bytes = 1;
     } else {
         size_t slen = 0;
         if (taida_read_cstr_len_safe((const char*)body_ptr, 10485760, &slen)) {
@@ -9772,7 +9790,6 @@ taida_val taida_net_http_encode_response(taida_val response) {
     // RFC 9110: 1xx, 204, 205, 304 MUST NOT contain a message body
     int no_body = (status >= 100 && status < 200) || status == 204 || status == 205 || status == 304;
     if (no_body && body_len > 0) {
-        if (free_body) free(body_data);
         char err_msg[128];
         snprintf(err_msg, sizeof(err_msg), "httpEncodeResponse: status %d must not have a body", (int)status);
         return taida_net_result_fail("EncodeError", err_msg);
@@ -9799,7 +9816,6 @@ taida_val taida_net_http_encode_response(taida_val response) {
         for (taida_val i = 0; i < hcount; i++) {
             taida_val hdr = hlist[4 + i];
             if (!taida_is_buchi_pack(hdr)) {
-                if (free_body) free(body_data);
                 free(buf);
                 char err_msg[128];
                 snprintf(err_msg, sizeof(err_msg), "httpEncodeResponse: headers[%d] must be @(name, value)", (int)i);
@@ -9811,14 +9827,12 @@ taida_val taida_net_http_encode_response(taida_val response) {
             const char *hvalue_s = (const char*)hvalue;
             size_t hn_len = 0, hv_len = 0;
             if (!taida_read_cstr_len_safe(hname_s, 8192, &hn_len)) {
-                if (free_body) free(body_data);
                 free(buf);
                 char err_msg[128];
                 snprintf(err_msg, sizeof(err_msg), "httpEncodeResponse: headers[%d].name must be Str", (int)i);
                 return taida_net_result_fail("EncodeError", err_msg);
             }
             if (!taida_read_cstr_len_safe(hvalue_s, 65536, &hv_len)) {
-                if (free_body) free(body_data);
                 free(buf);
                 char err_msg[128];
                 snprintf(err_msg, sizeof(err_msg), "httpEncodeResponse: headers[%d].value must be Str", (int)i);
@@ -9828,7 +9842,6 @@ taida_val taida_net_http_encode_response(taida_val response) {
             // NB-13: Check for CRLF injection with index + name/value distinction (parity with Interpreter/JS)
             for (size_t k = 0; k < hn_len; k++) {
                 if (hname_s[k] == '\r' || hname_s[k] == '\n') {
-                    if (free_body) free(body_data);
                     free(buf);
                     char err_msg[128];
                     snprintf(err_msg, sizeof(err_msg), "httpEncodeResponse: headers[%d].name contains CR/LF", (int)i);
@@ -9837,7 +9850,6 @@ taida_val taida_net_http_encode_response(taida_val response) {
             }
             for (size_t k = 0; k < hv_len; k++) {
                 if (hvalue_s[k] == '\r' || hvalue_s[k] == '\n') {
-                    if (free_body) free(body_data);
                     free(buf);
                     char err_msg[128];
                     snprintf(err_msg, sizeof(err_msg), "httpEncodeResponse: headers[%d].value contains CR/LF", (int)i);
@@ -9903,13 +9915,19 @@ taida_val taida_net_http_encode_response(taida_val response) {
     }
     buf[buf_len++] = '\r'; buf[buf_len++] = '\n';
 
-    // Body
+    // NB6-4: Copy body directly into wire buffer — single copy from source.
+    // For Bytes: copy from taida_val array directly (no intermediate buffer).
+    // For Str: memcpy from C string pointer (already contiguous).
     if (!no_body && body_len > 0) {
-        memcpy(buf + buf_len, body_data, body_len);
+        if (body_is_bytes) {
+            for (size_t i = 0; i < body_len; i++) {
+                buf[buf_len + i] = (unsigned char)body_bytes_arr[2 + i];
+            }
+        } else {
+            memcpy(buf + buf_len, body_data, body_len);
+        }
         buf_len += body_len;
     }
-
-    if (free_body) free(body_data);
 
     // Convert to Bytes value
     taida_val result_bytes = taida_bytes_from_raw(buf, (taida_val)buf_len);
@@ -10372,6 +10390,174 @@ static void taida_net_send_response(int client_fd, taida_val encoded) {
         const char *fallback = "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
         taida_net_send_all(client_fd, fallback, strlen(fallback));
     }
+}
+
+// NB6-1: Scatter-gather send for internal one-shot response path.
+// Builds head in one buffer, then sends head + body via writev (2 iovecs).
+// Avoids the aggregate buffer concatenation of encode → materialize → send.
+// Returns 0 on success, -1 on error.
+static int taida_net_send_response_scatter(int client_fd, taida_val response) {
+    if (!taida_is_buchi_pack(response)) return -1;
+
+    taida_val status_hash = taida_str_hash((taida_val)"status");
+    if (!taida_pack_has_hash(response, status_hash)) return -1;
+    taida_val status = taida_pack_get(response, status_hash);
+    if (status < 100 || status > 999) return -1;
+
+    taida_val headers_hash = taida_str_hash((taida_val)"headers");
+    if (!taida_pack_has_hash(response, headers_hash)) return -1;
+    taida_val headers_ptr = taida_pack_get(response, headers_hash);
+    if (!taida_is_list(headers_ptr)) return -1;
+
+    taida_val body_hash = taida_str_hash((taida_val)"body");
+    if (!taida_pack_has_hash(response, body_hash)) return -1;
+    taida_val body_ptr = taida_pack_get(response, body_hash);
+
+    // Determine body source and length.
+    const unsigned char *body_data = NULL;
+    taida_val *body_bytes_arr = NULL;
+    size_t body_len = 0;
+    int body_is_bytes = 0;
+
+    if (TAIDA_IS_BYTES(body_ptr)) {
+        body_bytes_arr = (taida_val*)body_ptr;
+        taida_val blen = body_bytes_arr[1];
+        if (blen < 0) blen = 0;
+        body_len = (size_t)blen;
+        body_is_bytes = 1;
+    } else {
+        size_t slen = 0;
+        if (taida_read_cstr_len_safe((const char*)body_ptr, 10485760, &slen)) {
+            body_data = (const unsigned char*)body_ptr;
+            body_len = slen;
+        } else {
+            return -1;
+        }
+    }
+
+    int no_body = (status >= 100 && status < 200) || status == 204 || status == 205 || status == 304;
+    if (no_body && body_len > 0) return -1;
+
+    // Build head buffer.
+    char head_stack[2048];
+    char *head = head_stack;
+    size_t head_cap = sizeof(head_stack);
+    size_t head_len = 0;
+
+    const char *reason = taida_net_status_reason((int)status);
+    head_len += (size_t)snprintf(head + head_len, head_cap - head_len,
+                                  "HTTP/1.1 %d %s\r\n", (int)status, reason);
+
+    taida_val name_hash = taida_str_hash((taida_val)"name");
+    taida_val value_hash = taida_str_hash((taida_val)"value");
+    int has_content_length = 0;
+
+    taida_val *hlist = (taida_val*)headers_ptr;
+    taida_val hcount = hlist[2];
+    for (taida_val i = 0; i < hcount; i++) {
+        taida_val hdr = hlist[4 + i];
+        if (!taida_is_buchi_pack(hdr)) continue;
+        taida_val hname = taida_pack_get(hdr, name_hash);
+        taida_val hvalue = taida_pack_get(hdr, value_hash);
+        const char *hname_s = (const char*)hname;
+        const char *hvalue_s = (const char*)hvalue;
+        size_t hn_len = 0, hv_len = 0;
+        if (!taida_read_cstr_len_safe(hname_s, 8192, &hn_len)) continue;
+        if (!taida_read_cstr_len_safe(hvalue_s, 65536, &hv_len)) continue;
+
+        // Check content-length
+        if (hn_len == 14) {
+            const char *cl_expected = "content-length";
+            int is_cl = 1;
+            for (size_t k = 0; k < 14; k++) {
+                char c = hname_s[k];
+                if (c >= 'A' && c <= 'Z') c += 32;
+                if (c != cl_expected[k]) { is_cl = 0; break; }
+            }
+            if (is_cl) {
+                if (no_body) continue;
+                has_content_length = 1;
+            }
+        }
+
+        size_t needed = head_len + hn_len + hv_len + 4;
+        if (needed > head_cap) {
+            head_cap = needed * 2;
+            if (head == head_stack) {
+                head = (char*)TAIDA_MALLOC(head_cap, "net_scatter_head");
+                memcpy(head, head_stack, head_len);
+            } else {
+                TAIDA_REALLOC(head, head_cap, "net_scatter_head");
+            }
+        }
+        memcpy(head + head_len, hname_s, hn_len); head_len += hn_len;
+        head[head_len++] = ':'; head[head_len++] = ' ';
+        memcpy(head + head_len, hvalue_s, hv_len); head_len += hv_len;
+        head[head_len++] = '\r'; head[head_len++] = '\n';
+    }
+
+    if (!no_body && !has_content_length) {
+        char cl_hdr[64];
+        int cl_len = snprintf(cl_hdr, sizeof(cl_hdr), "Content-Length: %zu\r\n", body_len);
+        size_t needed = head_len + (size_t)cl_len;
+        if (needed > head_cap) {
+            head_cap = needed * 2;
+            if (head == head_stack) {
+                head = (char*)TAIDA_MALLOC(head_cap, "net_scatter_head");
+                memcpy(head, head_stack, head_len);
+            } else {
+                TAIDA_REALLOC(head, head_cap, "net_scatter_head");
+            }
+        }
+        memcpy(head + head_len, cl_hdr, (size_t)cl_len);
+        head_len += (size_t)cl_len;
+    }
+
+    // End of headers.
+    if (head_len + 2 > head_cap) {
+        head_cap = head_len + 2;
+        if (head == head_stack) {
+            head = (char*)TAIDA_MALLOC(head_cap, "net_scatter_head");
+            memcpy(head, head_stack, head_len);
+        } else {
+            TAIDA_REALLOC(head, head_cap, "net_scatter_head");
+        }
+    }
+    head[head_len++] = '\r'; head[head_len++] = '\n';
+
+    // Send using scatter-gather (writev).
+    int rc;
+    if (no_body || body_len == 0) {
+        rc = taida_net_send_all(client_fd, head, head_len);
+    } else if (!body_is_bytes) {
+        // Str body: already contiguous, use 2 iovecs.
+        struct iovec iov[2];
+        iov[0].iov_base = head;
+        iov[0].iov_len = head_len;
+        iov[1].iov_base = (void*)body_data;
+        iov[1].iov_len = body_len;
+        rc = taida_tls_writev_all(client_fd, iov, 2);
+    } else {
+        // Bytes body: materialize from taida_val array into contiguous buffer,
+        // then send head + body via 2 iovecs. Single materialization, no
+        // intermediate encode step.
+        unsigned char body_stack[4096];
+        unsigned char *body_buf = (body_len <= sizeof(body_stack)) ? body_stack
+            : (unsigned char*)TAIDA_MALLOC(body_len, "net_scatter_body");
+        for (size_t i = 0; i < body_len; i++) {
+            body_buf[i] = (unsigned char)body_bytes_arr[2 + i];
+        }
+        struct iovec iov[2];
+        iov[0].iov_base = head;
+        iov[0].iov_len = head_len;
+        iov[1].iov_base = body_buf;
+        iov[1].iov_len = body_len;
+        rc = taida_tls_writev_all(client_fd, iov, 2);
+        if (body_buf != body_stack) free(body_buf);
+    }
+
+    if (head != head_stack) free(head);
+    return rc;
 }
 
 // ── NET3-5a/5b/5c/5d/5e: v3 streaming writer state machine ─────────────
@@ -11667,22 +11853,50 @@ static WsFrameResult taida_net4_read_ws_frame(int fd) {
         if (taida_net4_recv_exact(fd, mask_key, 4) != 4) return result;
     }
 
-    // Read payload.
+    // NB6-9: Read payload using stack buffer for small frames (<=4KB) to avoid
+    // per-frame malloc/free overhead for high-frequency small WebSocket messages.
+    // Heap fallback for larger payloads.
+    unsigned char stack_payload[4096];
     unsigned char *payload = NULL;
+    int payload_on_heap = 0;
     if (payload_len > 0) {
-        payload = (unsigned char*)TAIDA_MALLOC((size_t)payload_len, "net_ws_frame_payload");
+        if ((size_t)payload_len <= sizeof(stack_payload)) {
+            payload = stack_payload;
+        } else {
+            payload = (unsigned char*)TAIDA_MALLOC((size_t)payload_len, "net_ws_frame_payload");
+            payload_on_heap = 1;
+        }
         if (taida_net4_recv_exact(fd, payload, (size_t)payload_len) != (size_t)payload_len) {
-            free(payload);
+            if (payload_on_heap) free(payload);
             return result;
         }
-        // Unmask in-place.
+        // NB6-6: Unmask in-place using word-at-a-time XOR.
+        // Process 4 bytes at a time to eliminate modulo per byte.
         if (masked) {
-            for (size_t i = 0; i < (size_t)payload_len; i++) {
-                payload[i] ^= mask_key[i % 4];
+            uint32_t mask_word;
+            memcpy(&mask_word, mask_key, 4);
+            size_t plen = (size_t)payload_len;
+            size_t i = 0;
+            // Word-at-a-time loop.
+            for (; i + 4 <= plen; i += 4) {
+                uint32_t word;
+                memcpy(&word, payload + i, 4);
+                word ^= mask_word;
+                memcpy(payload + i, &word, 4);
+            }
+            // Handle remaining 1-3 bytes.
+            for (; i < plen; i++) {
+                payload[i] ^= mask_key[i & 3];
             }
         }
     }
 
+    // NB6-9: If payload was on stack, copy to heap for caller to free.
+    if (payload && !payload_on_heap) {
+        unsigned char *heap_copy = (unsigned char*)TAIDA_MALLOC((size_t)payload_len, "net_ws_frame_payload");
+        memcpy(heap_copy, payload, (size_t)payload_len);
+        payload = heap_copy;
+    }
     result.payload = payload;
     result.payload_len = (size_t)payload_len;
     result.opcode = opcode;
@@ -12839,9 +13053,11 @@ static void *net_worker_thread(void *arg) {
                         taida_pack_set(effective_response, 2, (taida_val)"");
                         taida_pack_set_tag(effective_response, 2, TAIDA_TAG_STR);
                     }
-                    taida_val encoded = taida_net_http_encode_response(effective_response);
-                    taida_net_send_response(client_fd, encoded);
-                    taida_release(encoded);
+                    // NB6-1: Scatter-gather send — head and body as separate buffers.
+                    if (taida_net_send_response_scatter(client_fd, effective_response) != 0) {
+                        const char *fallback = "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+                        taida_net_send_all(client_fd, fallback, strlen(fallback));
+                    }
                     if (need_default && effective_response != response) taida_release(effective_response);
                 } else {
                     // Streaming was started.
@@ -13064,12 +13280,13 @@ static void *net_worker_thread(void *arg) {
 
                 if (parse_result) { taida_release(parse_result); parse_result = 0; }
 
-                // 1-arg handler: v2 one-shot response.
+                // NB6-1: 1-arg handler — scatter-gather send (head+body separate).
                 taida_val response = taida_invoke_callback1(pool->handler, request);
-                taida_val encoded = taida_net_http_encode_response(response);
-                taida_net_send_response(client_fd, encoded);
+                if (taida_net_send_response_scatter(client_fd, response) != 0) {
+                    const char *fallback = "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+                    taida_net_send_all(client_fd, fallback, strlen(fallback));
+                }
                 taida_release(request);
-                taida_release(encoded);
                 taida_release(response);
             }
 

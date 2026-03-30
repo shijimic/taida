@@ -296,11 +296,13 @@ impl RequestBodyState {
 /// This is the head commit function. Once called, status/headers are on the wire
 /// and cannot be changed.
 fn build_streaming_head(status: u16, headers: &[(String, String)]) -> Vec<u8> {
+    use std::io::Write as _;
     let reason = http_reason_phrase(status);
     let mut buf = Vec::with_capacity(256);
-    buf.extend_from_slice(format!("HTTP/1.1 {} {}\r\n", status, reason).as_bytes());
+    // NB6-5: write!() directly into Vec<u8> to avoid intermediate String heap allocs.
+    let _ = write!(buf, "HTTP/1.1 {} {}\r\n", status, reason);
     for (name, value) in headers {
-        buf.extend_from_slice(format!("{}: {}\r\n", name, value).as_bytes());
+        let _ = write!(buf, "{}: {}\r\n", name, value);
     }
     // NET3-1d: Auto-append Transfer-Encoding: chunked — but only for status codes
     // that allow a message body. Bodyless statuses (1xx/204/205/304) must NOT have
@@ -1047,18 +1049,20 @@ fn encode_response(response: &Value) -> Value {
         );
     }
 
+    use std::io::Write as _;
     let reason = status_reason(status);
     let mut buf = Vec::with_capacity(256 + body_bytes.len());
 
+    // NB6-5: write!() directly into Vec<u8> to eliminate per-header intermediate String allocs.
     // Status line
-    buf.extend_from_slice(format!("HTTP/1.1 {} {}\r\n", status, reason).as_bytes());
+    let _ = write!(buf, "HTTP/1.1 {} {}\r\n", status, reason);
 
     // User headers (skip Content-Length for no-body statuses)
     for (name, value) in &headers {
         if no_body && name.eq_ignore_ascii_case("Content-Length") {
             continue;
         }
-        buf.extend_from_slice(format!("{}: {}\r\n", name, value).as_bytes());
+        let _ = write!(buf, "{}: {}\r\n", name, value);
     }
 
     // Auto-append Content-Length for statuses that allow a body
@@ -1067,7 +1071,7 @@ fn encode_response(response: &Value) -> Value {
             .iter()
             .any(|(n, _)| n.eq_ignore_ascii_case("Content-Length"));
         if !has_content_length {
-            buf.extend_from_slice(format!("Content-Length: {}\r\n", body_bytes.len()).as_bytes());
+            let _ = write!(buf, "Content-Length: {}\r\n", body_bytes.len());
         }
     }
 
@@ -1078,6 +1082,60 @@ fn encode_response(response: &Value) -> Value {
 
     let result = Value::BuchiPack(vec![("bytes".into(), Value::Bytes(buf))]);
     make_result_success(result)
+}
+
+/// NB6-1: Scatter-gather send for internal one-shot response path.
+/// Builds head and body as separate buffers and sends them via vectored I/O,
+/// avoiding the aggregate buffer concatenation of encode_response().
+fn send_response_scatter(stream: &mut ConnStream, response: &Value) -> Result<(), String> {
+    use std::io::Write as _;
+
+    let (status, headers, body_bytes) = extract_response_fields(response)?;
+
+    let no_body = (100..200).contains(&status) || status == 204 || status == 205 || status == 304;
+    if no_body && !body_bytes.is_empty() {
+        return Err(format!(
+            "httpEncodeResponse: status {} must not have a body",
+            status
+        ));
+    }
+
+    let reason = status_reason(status);
+    let mut head = Vec::with_capacity(256);
+    let _ = write!(head, "HTTP/1.1 {} {}\r\n", status, reason);
+
+    for (name, value) in &headers {
+        if no_body && name.eq_ignore_ascii_case("Content-Length") {
+            continue;
+        }
+        let _ = write!(head, "{}: {}\r\n", name, value);
+    }
+
+    if !no_body {
+        let has_content_length = headers
+            .iter()
+            .any(|(n, _)| n.eq_ignore_ascii_case("Content-Length"));
+        if !has_content_length {
+            let _ = write!(head, "Content-Length: {}\r\n", body_bytes.len());
+        }
+    }
+
+    head.extend_from_slice(b"\r\n");
+
+    // NB6-1: Send head and body as separate IoSlices — no aggregate buffer.
+    if no_body || body_bytes.is_empty() {
+        stream
+            .write_all(&head)
+            .map_err(|e| format!("response write error: {}", e))?;
+    } else {
+        let bufs = [
+            std::io::IoSlice::new(&head),
+            std::io::IoSlice::new(&body_bytes),
+        ];
+        write_vectored_all(stream, &bufs)
+            .map_err(|e| format!("response write error: {}", e.message))?;
+    }
+    Ok(())
 }
 
 fn extract_response_fields(response: &Value) -> Result<ResponseFields, String> {
@@ -2269,20 +2327,18 @@ impl Interpreter {
                     return Ok(Some(Signal::Value(Self::make_lax_bytes_empty())));
                 }
                 ChunkedDecoderState::WaitingChunkSize => {
-                    // Read chunk-size line from leftover or stream.
+                    // NB6-7: Read chunk-size line as bytes; parse hex directly.
                     let line = Self::read_line_from_body(body, stream)?;
-                    let line = line.trim().to_string();
-                    if line.is_empty() {
+                    let trimmed = Self::trim_bytes(&line);
+                    if trimmed.is_empty() {
                         // Could be trailing CRLF; try again.
                         continue;
                     }
-                    // Parse hex chunk size (strip any chunk-extension after ';')
-                    let hex_str = line.split(';').next().unwrap_or("").trim();
                     let chunk_size =
-                        usize::from_str_radix(hex_str, 16).map_err(|_| RuntimeError {
+                        Self::parse_chunk_size_bytes(&line).ok_or_else(|| RuntimeError {
                             message: format!(
                                 "readBodyChunk: invalid chunk-size '{}' in chunked body",
-                                hex_str
+                                String::from_utf8_lossy(trimmed)
                             ),
                         })?;
 
@@ -2332,13 +2388,13 @@ impl Interpreter {
                     // exactly empty (only whitespace/CRLF). Non-empty content or
                     // EOF is a protocol error.
                     let line = Self::read_line_from_body(body, stream)?;
-                    let trimmed = line.trim();
+                    let trimmed = Self::trim_bytes(&line);
                     if !trimmed.is_empty() {
                         return Err(RuntimeError {
                             message: format!(
                                 "readBodyChunk: malformed chunk trailer — expected CRLF after chunk data, \
                                  got {:?}",
-                                line
+                                String::from_utf8_lossy(&line)
                             ),
                         });
                     }
@@ -2408,7 +2464,7 @@ impl Interpreter {
                         .to_string(),
                 });
             }
-            let trimmed = line.trim();
+            let trimmed = Self::trim_bytes(&line);
             if trimmed.is_empty() {
                 // Final empty line found; trailers fully consumed.
                 return Ok(());
@@ -2426,10 +2482,16 @@ impl Interpreter {
     /// back into `body.leftover` so they are available for subsequent reads.
     /// This reduces syscall count from O(line_length) to O(1) for typical
     /// chunk-size lines (4-8 bytes), and avoids per-byte rustls overhead on TLS.
+    ///
+    /// NB6-7: Returns Vec<u8> instead of String to avoid per-line UTF-8 validation
+    /// and String heap allocation. Chunk-size lines are always ASCII hex digits.
+    ///
+    /// NB6-8: Excess pushback now uses in-place splice (drain + insert) on
+    /// body.leftover instead of allocating a new Vec per pushback.
     fn read_line_from_body(
         body: &mut RequestBodyState,
         stream: &mut ConnStream,
-    ) -> Result<String, RuntimeError> {
+    ) -> Result<Vec<u8>, RuntimeError> {
         let mut line = Vec::new();
 
         // First consume from leftover.
@@ -2438,7 +2500,7 @@ impl Interpreter {
             body.leftover_pos += 1;
             line.push(b);
             if b == b'\n' {
-                return Ok(String::from_utf8_lossy(&line).into_owned());
+                return Ok(line);
             }
         }
 
@@ -2452,21 +2514,15 @@ impl Interpreter {
                     if let Some(lf_pos) = chunk_buf[..n].iter().position(|&b| b == b'\n') {
                         // Include everything up to and including the LF.
                         line.extend_from_slice(&chunk_buf[..=lf_pos]);
-                        // Push excess bytes back into leftover for subsequent reads.
+                        // NB6-8: Push excess bytes back into leftover using in-place
+                        // splice instead of allocating a new Vec per pushback.
                         let excess = &chunk_buf[lf_pos + 1..n];
                         if !excess.is_empty() {
-                            // Prepend excess to any remaining leftover.
-                            let remaining_leftover = if body.leftover_pos < body.leftover.len() {
-                                body.leftover[body.leftover_pos..].to_vec()
-                            } else {
-                                Vec::new()
-                            };
-                            let mut new_leftover =
-                                Vec::with_capacity(excess.len() + remaining_leftover.len());
-                            new_leftover.extend_from_slice(excess);
-                            new_leftover.extend_from_slice(&remaining_leftover);
-                            body.leftover = new_leftover;
+                            // Drain consumed portion and prepend excess.
+                            body.leftover.drain(..body.leftover_pos);
                             body.leftover_pos = 0;
+                            // Insert excess at the beginning.
+                            body.leftover.splice(..0, excess.iter().copied());
                         }
                         break;
                     } else {
@@ -2488,7 +2544,48 @@ impl Interpreter {
             }
         }
 
-        Ok(String::from_utf8_lossy(&line).into_owned())
+        Ok(line)
+    }
+
+    /// NB6-7: Trim ASCII whitespace from a byte slice (equivalent to str::trim()).
+    #[inline]
+    fn trim_bytes(data: &[u8]) -> &[u8] {
+        let start = data
+            .iter()
+            .position(|b| !b.is_ascii_whitespace())
+            .unwrap_or(data.len());
+        let end = data
+            .iter()
+            .rposition(|b| !b.is_ascii_whitespace())
+            .map_or(start, |p| p + 1);
+        &data[start..end]
+    }
+
+    /// NB6-7: Parse hex chunk size directly from byte slice.
+    /// Strips any chunk-extension after ';' and trims whitespace.
+    #[inline]
+    fn parse_chunk_size_bytes(line: &[u8]) -> Option<usize> {
+        let trimmed = Self::trim_bytes(line);
+        // Strip chunk-extension after ';'
+        let hex_part = match trimmed.iter().position(|&b| b == b';') {
+            Some(pos) => Self::trim_bytes(&trimmed[..pos]),
+            None => trimmed,
+        };
+        if hex_part.is_empty() {
+            return None;
+        }
+        // Parse hex digits directly from bytes.
+        let mut result: usize = 0;
+        for &b in hex_part {
+            let digit = match b {
+                b'0'..=b'9' => (b - b'0') as usize,
+                b'a'..=b'f' => (b - b'a' + 10) as usize,
+                b'A'..=b'F' => (b - b'A' + 10) as usize,
+                _ => return None,
+            };
+            result = result.checked_mul(16)?.checked_add(digit)?;
+        }
+        Some(result)
     }
 
     /// Read up to `count` bytes from leftover buffer then stream.
@@ -2600,17 +2697,18 @@ impl Interpreter {
                         break;
                     }
                     ChunkedDecoderState::WaitingChunkSize => {
+                        // NB6-7: Parse chunk size directly from byte slice.
                         let line = Self::read_line_from_body(body, stream)?;
-                        let line = line.trim().to_string();
-                        if line.is_empty() {
+                        let trimmed = Self::trim_bytes(&line);
+                        if trimmed.is_empty() {
                             continue;
                         }
-                        let hex_str = line.split(';').next().unwrap_or("").trim();
                         let chunk_size =
-                            usize::from_str_radix(hex_str, 16).map_err(|_| RuntimeError {
+                            Self::parse_chunk_size_bytes(&line).ok_or_else(|| RuntimeError {
                                 message: format!(
                                     "{}: invalid chunk-size '{}' in chunked body",
-                                    api_name, hex_str
+                                    api_name,
+                                    String::from_utf8_lossy(trimmed)
                                 ),
                             })?;
 
@@ -2642,13 +2740,14 @@ impl Interpreter {
                     ChunkedDecoderState::WaitingChunkTrailer => {
                         // NB4-18: Validate CRLF after chunk data.
                         let line = Self::read_line_from_body(body, stream)?;
-                        let trimmed = line.trim();
+                        let trimmed = Self::trim_bytes(&line);
                         if !trimmed.is_empty() {
                             return Err(RuntimeError {
                                 message: format!(
                                     "{}: malformed chunk trailer — expected CRLF after chunk data, \
                                      got {:?}",
-                                    api_name, line
+                                    api_name,
+                                    String::from_utf8_lossy(&line)
                                 ),
                             });
                         }
@@ -3425,10 +3524,19 @@ impl Interpreter {
             Vec::new()
         };
 
-        // Unmask payload in-place (XOR with mask key).
+        // NB6-6: Unmask payload in-place using word-at-a-time XOR.
+        // Process 4 bytes at a time to eliminate modulo per byte.
         if let Some(key) = mask_key {
-            for (i, byte) in payload.iter_mut().enumerate() {
-                *byte ^= key[i % 4];
+            let mask_word = u32::from_ne_bytes(key);
+            let mut chunks = payload.chunks_exact_mut(4);
+            for chunk in chunks.by_ref() {
+                let word = u32::from_ne_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+                let unmasked = word ^ mask_word;
+                chunk.copy_from_slice(&unmasked.to_ne_bytes());
+            }
+            // Handle remaining 1-3 bytes.
+            for (i, byte) in chunks.into_remainder().iter_mut().enumerate() {
+                *byte ^= key[i];
             }
         }
 
@@ -4300,19 +4408,12 @@ impl Interpreter {
                     ])
                 };
 
-                let encoded = encode_response(&effective_response);
-                match extract_result_value(&encoded) {
-                    Some(inner) => {
-                        if let Some(Value::Bytes(wire_bytes)) = get_field_value(inner, "bytes") {
-                            let _ = std::io::Write::write_all(&mut conn.stream, wire_bytes);
-                        }
-                    }
-                    None => {
-                        let fallback = b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
-                        let _ = std::io::Write::write_all(&mut conn.stream, fallback);
-                        *request_count += 1;
-                        return ConnAction::Close;
-                    }
+                // NB6-1: Scatter-gather send — head and body as separate buffers.
+                if send_response_scatter(&mut conn.stream, &effective_response).is_err() {
+                    let fallback = b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+                    let _ = std::io::Write::write_all(&mut conn.stream, fallback);
+                    *request_count += 1;
+                    return ConnAction::Close;
                 }
             } else {
                 // Streaming was started. The return value is ignored.
@@ -4557,20 +4658,12 @@ impl Interpreter {
                 }
             };
 
-            // ── Encode response and write back ──
-            let encoded = encode_response(&response_value);
-            match extract_result_value(&encoded) {
-                Some(inner) => {
-                    if let Some(Value::Bytes(wire_bytes)) = get_field_value(inner, "bytes") {
-                        let _ = std::io::Write::write_all(&mut conn.stream, wire_bytes);
-                    }
-                }
-                None => {
-                    let fallback = b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
-                    let _ = std::io::Write::write_all(&mut conn.stream, fallback);
-                    *request_count += 1;
-                    return ConnAction::Close;
-                }
+            // NB6-1: Scatter-gather send — head and body as separate buffers.
+            if send_response_scatter(&mut conn.stream, &response_value).is_err() {
+                let fallback = b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+                let _ = std::io::Write::write_all(&mut conn.stream, fallback);
+                *request_count += 1;
+                return ConnAction::Close;
             }
 
             *request_count += 1;
