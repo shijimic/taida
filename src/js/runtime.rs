@@ -3589,7 +3589,58 @@ async function __taida_net_httpServe(port, handler, maxRequests, timeoutMs, maxC
     // Each connection runs independently (Node.js event loop concurrency).
     function processConnection(socket) {
       activeConnections++;
-      let buf = Buffer.alloc(0);
+      // NB5-23: Pre-allocated growable buffer with amortized doubling.
+      // Previous approach used Buffer.concat([buf, chunk]) per data event,
+      // copying all existing bytes each time = O(n^2) for n chunks.
+      // Now we maintain a backing buffer (_bufBacking) with spare capacity,
+      // and expose buf as a subarray view of the valid data region.
+      // Appending a chunk copies only the chunk (not existing data) when
+      // capacity suffices, and doubles the backing buffer otherwise —
+      // amortized O(1) per byte.
+      // NB5-23: Pre-allocated growable buffer with amortized doubling.
+      // Previous approach used Buffer.concat([buf, chunk]) per data event,
+      // copying all existing bytes each time = O(n^2) for n chunks.
+      // Now we maintain a backing buffer with spare capacity.
+      // bufAppend() copies only the chunk (not existing data) when capacity
+      // suffices, and doubles the backing buffer otherwise — amortized O(1)
+      // per byte. bufConsume(n) advances the valid region without reallocation.
+      let _bb = Buffer.alloc(8192); // backing buffer
+      let _bo = 0; // offset of valid data start within _bb
+      let _bl = 0; // length of valid data
+      function bufAppend(chunk) {
+        if (_bo + _bl + chunk.length <= _bb.length) {
+          chunk.copy(_bb, _bo + _bl);
+          _bl += chunk.length;
+        } else if (_bl + chunk.length <= _bb.length) {
+          // Compact: move valid data to start, then append.
+          _bb.copy(_bb, 0, _bo, _bo + _bl);
+          _bo = 0;
+          chunk.copy(_bb, _bl);
+          _bl += chunk.length;
+        } else {
+          // Grow: double until sufficient, copy valid + chunk.
+          let newCap = _bb.length * 2;
+          while (newCap < _bl + chunk.length) newCap *= 2;
+          const nb = Buffer.alloc(newCap);
+          _bb.copy(nb, 0, _bo, _bo + _bl);
+          chunk.copy(nb, _bl);
+          _bb = nb;
+          _bo = 0;
+          _bl += chunk.length;
+        }
+        buf = _bb.subarray(_bo, _bo + _bl);
+      }
+      function bufConsume(n) {
+        _bo += n;
+        _bl -= n;
+        if (_bl <= 0) { _bo = 0; _bl = 0; }
+        buf = _bb.subarray(_bo, _bo + _bl);
+      }
+      function bufReset() {
+        _bo = 0; _bl = 0;
+        buf = _bb.subarray(0, 0);
+      }
+      let buf = _bb.subarray(0, 0);
       let connClosed_ = false;
       let connRequests = 0;
 
@@ -3719,7 +3770,7 @@ async function __taida_net_httpServe(port, handler, maxRequests, timeoutMs, maxC
               const keepAlive = __taida_net_determineKeepAlive(buf, parsed.headers, parsed.version.minor);
               const rawSnapshot = Buffer.from(buf.subarray(0, parsed.consumed));
               const leftover = Buffer.from(buf.subarray(parsed.consumed, bodyNeeded));
-              buf = buf.subarray(bodyNeeded);
+              bufConsume(bodyNeeded);
 
               const request = {
                 raw: new Uint8Array(rawSnapshot.buffer, rawSnapshot.byteOffset, rawSnapshot.byteLength),
@@ -3760,7 +3811,7 @@ async function __taida_net_httpServe(port, handler, maxRequests, timeoutMs, maxC
               const rawSnapshot = Buffer.from(buf.subarray(0, parsed.consumed));
               // Leftover = compacted body bytes (already in buf after in-place compact).
               const leftover = Buffer.from(buf.subarray(parsed.consumed, parsed.consumed + compact.bodyLen));
-              buf = buf.subarray(totalWire);
+              bufConsume(totalWire);
 
               const request = {
                 raw: new Uint8Array(rawSnapshot.buffer, rawSnapshot.byteOffset, rawSnapshot.byteLength),
@@ -3825,7 +3876,7 @@ async function __taida_net_httpServe(port, handler, maxRequests, timeoutMs, maxC
           };
 
           // Clear buf — all buffered bytes are either in rawSnapshot or leftover.
-          buf = Buffer.alloc(0);
+          bufReset();
           dispatchHandlerBodyDeferred(request, keepAlive, leftover, isChunked, contentLength);
           return true;
         }
@@ -3870,8 +3921,8 @@ async function __taida_net_httpServe(port, handler, maxRequests, timeoutMs, maxC
             chunked: true,
           });
 
-          // Advance buffer: remove consumed wire bytes
-          buf = buf.subarray(totalWire);
+          // NB5-23: Advance buffer using amortized consume.
+          bufConsume(totalWire);
 
           dispatchHandler(request, keepAlive);
           return true;
@@ -3906,8 +3957,8 @@ async function __taida_net_httpServe(port, handler, maxRequests, timeoutMs, maxC
             chunked: false,
           });
 
-          // Advance buffer: remove consumed wire bytes
-          buf = buf.subarray(bodyNeeded);
+          // NB5-23: Advance buffer using amortized consume.
+          bufConsume(bodyNeeded);
 
           dispatchHandler(request, keepAlive);
           return true;
@@ -4177,6 +4228,17 @@ async function __taida_net_httpServe(port, handler, maxRequests, timeoutMs, maxC
         // Body was fully consumed; safe to continue keep-alive.
         if (connClosed_ || serverClosed || socket.destroyed) { closeConn(); return; }
 
+        // NB5-24: Recover trailing bytes from body state leftover.
+        // When a pipelined client sends the next request in the same TCP segment
+        // as the current body, those bytes are in leftover beyond the consumed body.
+        // Prepend them to the connection buffer so the next request can be parsed.
+        if (bs.leftover && bs.leftoverPos < bs.leftover.length) {
+          const trailing = bs.leftover.subarray(bs.leftoverPos);
+          if (trailing.length > 0) {
+            bufAppend(trailing);
+          }
+        }
+
         if (buf.length > 0 && tryProcessRequest()) return;
 
         socket.removeAllListeners('drain');
@@ -4361,7 +4423,8 @@ async function __taida_net_httpServe(port, handler, maxRequests, timeoutMs, maxC
 
       function onData(chunk) {
         if (connClosed_ || serverClosed) { closeConn(); return; }
-        buf = Buffer.concat([buf, chunk]);
+        // NB5-23: amortized O(1) append instead of O(n) Buffer.concat.
+        bufAppend(chunk);
         if (buf.length > MAX_REQUEST_BUF) { send400AndClose(); return; }
         tryProcessRequest();
       }
@@ -5347,20 +5410,27 @@ function __taida_net_fdWriteAll(fd, buf) {
 // Plaintext: uses fs.readSync on the socket fd with EAGAIN retry.
 // TLS: uses sock.read() from the internal decrypted buffer (v5 transport boundary).
 // The socket must be paused so Node does not consume data from the kernel buffer.
+//
+// NB5-23: Pre-allocates a single target buffer and copies chunks directly into
+// it at the correct offset, avoiding O(n^2) Buffer.concat in the read loop.
 function __taida_net_readExactFromSocket(sock, count) {
   if (count === 0) return Buffer.alloc(0);
 
+  // NB5-23: Single allocation for the full result.
+  const result = Buffer.alloc(count);
+  let pos = 0;
+
   // First, drain any bytes already in Node's internal read buffer.
   // sock.read() returns data from Node's internal buffer (synchronous).
-  let collected = Buffer.alloc(0);
-  while (collected.length < count) {
-    const needed = count - collected.length;
+  while (pos < count) {
+    const needed = count - pos;
     const chunk = sock.read(needed);
     if (!chunk) break;
-    collected = collected.length === 0 ? chunk : Buffer.concat([collected, chunk]);
+    chunk.copy(result, pos);
+    pos += chunk.length;
   }
-  if (collected.length >= count) {
-    return collected.subarray(0, count);
+  if (pos >= count) {
+    return result;
   }
 
   // v5: TLS sockets — use socket.read() polling from the decrypted buffer.
@@ -5368,19 +5438,19 @@ function __taida_net_readExactFromSocket(sock, count) {
   // socket.read() returns decrypted data from Node's internal buffer.
   // We resume the socket briefly to allow TLS data flow, then poll.
   if (sock.__tls) {
-    const remaining = count - collected.length;
     const deadline = Date.now() + 10000; // 10 second timeout
     // Resume the socket so the TLS layer can process incoming data.
     sock.resume();
-    while (collected.length < count) {
+    while (pos < count) {
       if (Date.now() > deadline) {
         sock.pause();
-        throw new __NativeError('wsReceive: timed out waiting for ' + count + ' bytes (got ' + collected.length + ')');
+        throw new __NativeError('wsReceive: timed out waiting for ' + count + ' bytes (got ' + pos + ')');
       }
-      const needed = count - collected.length;
+      const needed = count - pos;
       const chunk = sock.read(needed);
       if (chunk) {
-        collected = collected.length === 0 ? chunk : Buffer.concat([collected, chunk]);
+        chunk.copy(result, pos);
+        pos += chunk.length;
       } else {
         // Check if socket is closed.
         if (sock.destroyed || !sock.readable) {
@@ -5393,7 +5463,7 @@ function __taida_net_readExactFromSocket(sock, count) {
       }
     }
     sock.pause();
-    return collected.subarray(0, count);
+    return result;
   }
 
   // Fall back to synchronous fd read for remaining bytes (plaintext only).
@@ -5402,21 +5472,20 @@ function __taida_net_readExactFromSocket(sock, count) {
     throw new __NativeError('wsReceive: cannot access socket file descriptor for synchronous read');
   }
 
-  const remaining = count - collected.length;
-  const fdBuf = Buffer.alloc(remaining);
-  let fdPos = 0;
+  // NB5-23: Read directly into the pre-allocated result buffer at the correct offset.
+  const remaining = count - pos;
   const deadline = Date.now() + 10000; // 10 second timeout
 
-  while (fdPos < remaining) {
+  while (pos < count) {
     if (Date.now() > deadline) {
-      throw new __NativeError('wsReceive: timed out waiting for ' + count + ' bytes (got ' + (collected.length + fdPos) + ')');
+      throw new __NativeError('wsReceive: timed out waiting for ' + count + ' bytes (got ' + pos + ')');
     }
     try {
-      const n = __taida_fs.readSync(fd, fdBuf, fdPos, remaining - fdPos);
+      const n = __taida_fs.readSync(fd, result, pos, count - pos);
       if (n === 0) {
         throw new __NativeError('wsReceive: connection closed unexpectedly');
       }
-      fdPos += n;
+      pos += n;
     } catch (e) {
       if (e.code === 'EAGAIN' || e.code === 'EWOULDBLOCK') {
         // Spin briefly — data not yet in kernel buffer.
@@ -5428,8 +5497,7 @@ function __taida_net_readExactFromSocket(sock, count) {
     }
   }
 
-  if (collected.length === 0) return fdBuf;
-  return Buffer.concat([collected, fdBuf]);
+  return result;
 }
 
 // Read and parse one WebSocket frame from the socket (NET4-3c).
