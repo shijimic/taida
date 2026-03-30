@@ -1629,13 +1629,13 @@ fn runtime_abi(name: &str) -> Result<RuntimeAbi, String> {
         // When called with 2 args, the lowering passes ws + code.
         // The C runtime uses the 2nd arg to set the close code (0 = default 1000).
         "taida_net_ws_close" => RuntimeAbi {
-            params: &[Ptr, Ptr],
+            params: &[Ptr, Val],
             returns: &[Ptr],
         },
-        // v5: wsCloseCode(ws) -> Ptr (returns Int wrapped as taida_val)
+        // v5: wsCloseCode(ws) -> Val (returns Int as raw i64)
         "taida_net_ws_close_code" => RuntimeAbi {
             params: &[Ptr],
-            returns: &[Ptr],
+            returns: &[Val],
         },
 
         // N-44: ABI table maintenance note

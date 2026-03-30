@@ -278,7 +278,12 @@ pub(crate) fn load_tls_config(
     let certs: Vec<rustls::pki_types::CertificateDer<'static>> =
         rustls_pemfile::certs(&mut cert_reader)
             .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| format!("httpServe: failed to parse cert file '{}': {}", cert_path, e))?;
+            .map_err(|e| {
+                format!(
+                    "httpServe: failed to parse cert file '{}': {}",
+                    cert_path, e
+                )
+            })?;
     if certs.is_empty() {
         return Err(format!(
             "httpServe: cert file '{}' contains no certificates",
@@ -292,12 +297,7 @@ pub(crate) fn load_tls_config(
     let mut key_reader = BufReader::new(key_file);
     let key = rustls_pemfile::private_key(&mut key_reader)
         .map_err(|e| format!("httpServe: failed to parse key file '{}': {}", key_path, e))?
-        .ok_or_else(|| {
-            format!(
-                "httpServe: key file '{}' contains no private key",
-                key_path
-            )
-        })?;
+        .ok_or_else(|| format!("httpServe: key file '{}' contains no private key", key_path))?;
 
     // Build server config.
     let config = rustls::ServerConfig::builder()
@@ -395,8 +395,7 @@ impl TransportAcceptor for TlsAcceptor {
 
         // Create TLS server connection.
         let tls_conn = rustls::ServerConnection::new(self.tls_config.clone()).map_err(|e| {
-            io::Error::new(
-                io::ErrorKind::Other,
+            io::Error::other(
                 format!("TLS server connection error: {}", e),
             )
         })?;
@@ -443,8 +442,7 @@ pub(crate) fn complete_tls_handshake(
             }
             Ok(_) => {}
             Err(ref e)
-                if e.kind() == io::ErrorKind::WouldBlock
-                    || e.kind() == io::ErrorKind::TimedOut =>
+                if e.kind() == io::ErrorKind::WouldBlock || e.kind() == io::ErrorKind::TimedOut =>
             {
                 return Err(io::Error::new(
                     io::ErrorKind::TimedOut,
@@ -531,11 +529,7 @@ pub(crate) struct ConnectionConfig {
 
 impl ConnectionConfig {
     /// Create a new config from httpServe arguments.
-    pub fn new(
-        timeout_ms: u64,
-        max_connections: usize,
-        max_requests: i64,
-    ) -> Self {
+    pub fn new(timeout_ms: u64, max_connections: usize, max_requests: i64) -> Self {
         let read_timeout = Duration::from_millis(timeout_ms);
         ConnectionConfig {
             read_timeout,
@@ -635,7 +629,12 @@ mod tests {
         let acceptor = PlaintextAcceptor::new(listener);
 
         // No client connected yet — should return None (WouldBlock).
-        assert!(acceptor.try_accept(Duration::from_secs(5)).unwrap().is_none());
+        assert!(
+            acceptor
+                .try_accept(Duration::from_secs(5))
+                .unwrap()
+                .is_none()
+        );
         assert!(!acceptor.is_tls());
 
         // Connect a client.
@@ -643,7 +642,10 @@ mod tests {
         // Give the OS a moment to propagate the connection.
         std::thread::sleep(Duration::from_millis(50));
 
-        let accepted = acceptor.try_accept(Duration::from_secs(5)).unwrap().unwrap();
+        let accepted = acceptor
+            .try_accept(Duration::from_secs(5))
+            .unwrap()
+            .unwrap();
         assert!(!accepted.transport.is_tls());
         assert_eq!(accepted.peer_addr.ip(), std::net::Ipv4Addr::LOCALHOST);
     }
@@ -727,7 +729,9 @@ mod tests {
         let msg = result.unwrap_err();
         // Should fail because no valid certificates found.
         assert!(
-            msg.contains("no certificates") || msg.contains("no private key") || msg.contains("TLS config error"),
+            msg.contains("no certificates")
+                || msg.contains("no private key")
+                || msg.contains("TLS config error"),
             "unexpected error: {}",
             msg
         );
@@ -746,11 +750,7 @@ mod tests {
         let result = load_tls_config(cert_path.to_str().unwrap(), key_path.to_str().unwrap());
         assert!(result.is_err());
         let msg = result.unwrap_err();
-        assert!(
-            msg.contains("no certificates"),
-            "unexpected error: {}",
-            msg
-        );
+        assert!(msg.contains("no certificates"), "unexpected error: {}", msg);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -772,8 +772,7 @@ mod tests {
         let key_pair = rcgen::KeyPair::generate().unwrap();
         let cert = cert_params.self_signed(&key_pair).unwrap();
         let cert_der = rustls::pki_types::CertificateDer::from(cert.der().to_vec());
-        let key_der = rustls::pki_types::PrivateKeyDer::try_from(key_pair.serialize_der())
-            .unwrap();
+        let key_der = rustls::pki_types::PrivateKeyDer::try_from(key_pair.serialize_der()).unwrap();
         (vec![cert_der], key_der)
     }
 
@@ -813,8 +812,12 @@ mod tests {
 
         let server_handle = std::thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
-            stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
-            stream.set_write_timeout(Some(Duration::from_secs(5))).unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            stream
+                .set_write_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
 
             let tls_conn = rustls::ServerConnection::new(server_config.clone()).unwrap();
             let mut transport = TlsTransport::new(tls_conn, stream);
@@ -832,8 +835,12 @@ mod tests {
 
         // Client: connect and read all data through TLS.
         let client_stream = std::net::TcpStream::connect(addr).unwrap();
-        client_stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
-        client_stream.set_write_timeout(Some(Duration::from_secs(5))).unwrap();
+        client_stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        client_stream
+            .set_write_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
 
         let server_name = rustls::pki_types::ServerName::try_from("localhost").unwrap();
         let mut tls_client = rustls::ClientConnection::new(client_config, server_name).unwrap();
@@ -893,8 +900,12 @@ mod tests {
 
         let server_handle = std::thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
-            stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
-            stream.set_write_timeout(Some(Duration::from_secs(5))).unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            stream
+                .set_write_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
 
             let tls_conn = rustls::ServerConnection::new(server_config.clone()).unwrap();
             let mut transport = TlsTransport::new(tls_conn, stream);
@@ -907,8 +918,12 @@ mod tests {
         });
 
         let client_stream = std::net::TcpStream::connect(addr).unwrap();
-        client_stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
-        client_stream.set_write_timeout(Some(Duration::from_secs(5))).unwrap();
+        client_stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        client_stream
+            .set_write_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
 
         let server_name = rustls::pki_types::ServerName::try_from("localhost").unwrap();
         let mut tls_client = rustls::ClientConnection::new(client_config, server_name).unwrap();

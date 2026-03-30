@@ -686,7 +686,11 @@ fn link_objects_inner(
         for obj in obj_paths {
             c.arg(obj);
         }
-        c.arg("-o").arg(bin_path).arg("-lm").arg("-lpthread").arg("-ldl");
+        c.arg("-o")
+            .arg(bin_path)
+            .arg("-lm")
+            .arg("-lpthread")
+            .arg("-ldl");
         c
     };
 

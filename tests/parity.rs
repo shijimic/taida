@@ -18952,7 +18952,9 @@ stdout(result.throw.message)
     );
     // Both should contain TlsError or cert-related error message.
     assert!(
-        interp_trimmed.contains("cert") || interp_trimmed.contains("Tls") || interp_trimmed.contains("tls"),
+        interp_trimmed.contains("cert")
+            || interp_trimmed.contains("Tls")
+            || interp_trimmed.contains("tls"),
         "Interpreter: expected TLS cert error, got: {:?}",
         interp_trimmed
     );
@@ -19013,7 +19015,7 @@ stdout(r.requests)
         let dir = setup_net_project(&source, &format!("tls_serve_{}", backend));
         let td_path = dir.join("main.td");
 
-        let mut child = match *backend {
+        let child = match *backend {
             "interp" => Command::new(taida_bin())
                 .arg(&td_path)
                 .stdout(Stdio::piped())
@@ -19021,8 +19023,7 @@ stdout(r.requests)
                 .spawn()
                 .expect("spawn interpreter"),
             "js" => {
-                let js_path =
-                    unique_temp_path("taida_v5_tls_serve_js", backend, "mjs");
+                let js_path = unique_temp_path("taida_v5_tls_serve_js", backend, "mjs");
                 let transpile = Command::new(taida_bin())
                     .arg("build")
                     .arg("--target")
@@ -19176,7 +19177,9 @@ stdout(result.throw.message)
 
     // Both should contain a cert-related error (either in stdout or stderr).
     assert!(
-        interp_combined.contains("cert") || interp_combined.contains("tls") || interp_combined.contains("Tls"),
+        interp_combined.contains("cert")
+            || interp_combined.contains("tls")
+            || interp_combined.contains("Tls"),
         "Interpreter: expected TLS cert error for key-only. stdout: {:?}, stderr: {:?}",
         interp_stdout.trim(),
         interp_stderr.trim()
@@ -19220,7 +19223,7 @@ stdout(r.requests)
         let dir = setup_net_project(&source, &format!("tls_empty_{}", backend));
         let td_path = dir.join("main.td");
 
-        let mut child = match *backend {
+        let child = match *backend {
             "interp" => Command::new(taida_bin())
                 .arg(&td_path)
                 .stdout(Stdio::piped())
@@ -19228,8 +19231,7 @@ stdout(r.requests)
                 .spawn()
                 .expect("spawn interpreter"),
             "js" => {
-                let js_path =
-                    unique_temp_path("taida_v5_tls_empty_js", backend, "mjs");
+                let js_path = unique_temp_path("taida_v5_tls_empty_js", backend, "mjs");
                 let transpile = Command::new(taida_bin())
                     .arg("build")
                     .arg("--target")
@@ -19302,13 +19304,16 @@ stdout(r.requests)
         assert!(
             resp_str.contains("plain-ok"),
             "{} backend: response should contain 'plain-ok'. Got: {:?}",
-            backend, resp_str
+            backend,
+            resp_str
         );
 
         assert!(
             stdout.trim().contains('1'),
             "{} backend: server should report 1 request. stdout: {:?}, stderr: {:?}",
-            backend, stdout, stderr
+            backend,
+            stdout,
+            stderr
         );
     }
 }
@@ -19370,7 +19375,7 @@ stdout(r.requests)
         let dir = setup_net_project(&source, &format!("nb5_11_rba_cl_{}", backend));
         let td_path = dir.join("main.td");
 
-        let mut child = match *backend {
+        let child = match *backend {
             "interp" => Command::new(taida_bin())
                 .arg(&td_path)
                 .stdout(Stdio::piped())
@@ -19378,8 +19383,7 @@ stdout(r.requests)
                 .spawn()
                 .expect("spawn interpreter"),
             "js" => {
-                let js_path =
-                    unique_temp_path("taida_nb5_11_rba_cl_js", backend, "mjs");
+                let js_path = unique_temp_path("taida_nb5_11_rba_cl_js", backend, "mjs");
                 let transpile = Command::new(taida_bin())
                     .arg("build")
                     .arg("--target")
@@ -19451,13 +19455,17 @@ stdout(r.requests)
             curl_response.trim(),
             "TLS-body-echo-test",
             "{} backend: TLS readBodyAll response body mismatch. Got: {:?}, stderr: {:?}",
-            backend, curl_response, stderr
+            backend,
+            curl_response,
+            stderr
         );
 
         assert!(
             stdout.trim().contains('1'),
             "{} backend: TLS server should report 1 request. stdout: {:?}, stderr: {:?}",
-            backend, stdout, stderr
+            backend,
+            stdout,
+            stderr
         );
     }
 
@@ -19518,7 +19526,7 @@ stdout(r.requests)
         let dir = setup_net_project(&source, &format!("nb5_11_rbc_cl_{}", backend));
         let td_path = dir.join("main.td");
 
-        let mut child = match *backend {
+        let child = match *backend {
             "interp" => Command::new(taida_bin())
                 .arg(&td_path)
                 .stdout(Stdio::piped())
@@ -19526,8 +19534,7 @@ stdout(r.requests)
                 .spawn()
                 .expect("spawn interpreter"),
             "js" => {
-                let js_path =
-                    unique_temp_path("taida_nb5_11_rbc_cl_js", backend, "mjs");
+                let js_path = unique_temp_path("taida_nb5_11_rbc_cl_js", backend, "mjs");
                 let transpile = Command::new(taida_bin())
                     .arg("build")
                     .arg("--target")
@@ -19598,13 +19605,17 @@ stdout(r.requests)
             curl_response.trim(),
             "TLS-chunk-test",
             "{} backend: TLS readBodyChunk response body mismatch. Got: {:?}, stderr: {:?}",
-            backend, curl_response, stderr
+            backend,
+            curl_response,
+            stderr
         );
 
         assert!(
             stdout.trim().contains('1'),
             "{} backend: TLS server should report 1 request. stdout: {:?}, stderr: {:?}",
-            backend, stdout, stderr
+            backend,
+            stdout,
+            stderr
         );
     }
 
@@ -19665,7 +19676,7 @@ stdout(r.requests)
         let dir = setup_net_project(&source, &format!("nb5_11_rba_chunked_{}", backend));
         let td_path = dir.join("main.td");
 
-        let mut child = match *backend {
+        let child = match *backend {
             "interp" => Command::new(taida_bin())
                 .arg(&td_path)
                 .stdout(Stdio::piped())
@@ -19673,8 +19684,7 @@ stdout(r.requests)
                 .spawn()
                 .expect("spawn interpreter"),
             "js" => {
-                let js_path =
-                    unique_temp_path("taida_nb5_11_rba_chunked_js", backend, "mjs");
+                let js_path = unique_temp_path("taida_nb5_11_rba_chunked_js", backend, "mjs");
                 let transpile = Command::new(taida_bin())
                     .arg("build")
                     .arg("--target")
@@ -19748,13 +19758,17 @@ stdout(r.requests)
             curl_response.trim(),
             "chunked-tls-data",
             "{} backend: TLS readBodyAll (chunked) response body mismatch. Got: {:?}, stderr: {:?}",
-            backend, curl_response, stderr
+            backend,
+            curl_response,
+            stderr
         );
 
         assert!(
             stdout.trim().contains('1'),
             "{} backend: TLS server should report 1 request. stdout: {:?}, stderr: {:?}",
-            backend, stdout, stderr
+            backend,
+            stdout,
+            stderr
         );
     }
 
@@ -19839,7 +19853,7 @@ stdout(r.requests)
         String::from_utf8_lossy(&transpile.stderr)
     );
 
-    let mut child = Command::new("node")
+    let child = Command::new("node")
         .arg(&js_path)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -20065,9 +20079,7 @@ stdout(result.throw.message)
         "Native compile failed: {}",
         String::from_utf8_lossy(&compile.stderr)
     );
-    let native_output = Command::new(&bin_path)
-        .output()
-        .expect("run native");
+    let native_output = Command::new(&bin_path).output().expect("run native");
     let native_stdout = String::from_utf8_lossy(&native_output.stdout).to_string();
     let _ = fs::remove_file(&bin_path);
     cleanup_net_project(&dir);
@@ -20085,13 +20097,18 @@ stdout(result.throw.message)
         "Native: TLS cert missing should produce error output, got empty"
     );
     assert!(
-        interp_trimmed.contains("cert") || interp_trimmed.contains("Tls") || interp_trimmed.contains("tls"),
+        interp_trimmed.contains("cert")
+            || interp_trimmed.contains("Tls")
+            || interp_trimmed.contains("tls"),
         "Interpreter: expected TLS cert error, got: {:?}",
         interp_trimmed
     );
     assert!(
-        native_trimmed.contains("cert") || native_trimmed.contains("Tls") || native_trimmed.contains("tls")
-            || native_trimmed.contains("SSL") || native_trimmed.contains("OpenSSL"),
+        native_trimmed.contains("cert")
+            || native_trimmed.contains("Tls")
+            || native_trimmed.contains("tls")
+            || native_trimmed.contains("SSL")
+            || native_trimmed.contains("OpenSSL"),
         "Native: expected TLS cert error, got: {:?}",
         native_trimmed
     );
@@ -20142,7 +20159,7 @@ stdout(r.requests)
         let dir = setup_net_project(&source, &format!("tls_native_serve_{}", backend));
         let td_path = dir.join("main.td");
 
-        let mut child = match *backend {
+        let child = match *backend {
             "interp" => Command::new(taida_bin())
                 .arg(&td_path)
                 .stdout(Stdio::piped())
@@ -20150,8 +20167,7 @@ stdout(r.requests)
                 .spawn()
                 .expect("spawn interpreter"),
             "native" => {
-                let bin_path =
-                    unique_temp_path("taida_net5_4a_serve_native", backend, "bin");
+                let bin_path = unique_temp_path("taida_net5_4a_serve_native", backend, "bin");
                 let compile = Command::new(taida_bin())
                     .arg("build")
                     .arg("--target")
@@ -20276,7 +20292,7 @@ stdout(r.requests)
         String::from_utf8_lossy(&compile.stderr)
     );
 
-    let mut child = Command::new(&bin_path)
+    let child = Command::new(&bin_path)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -20339,7 +20355,8 @@ stdout(r.requests)
     assert!(
         stdout.trim().contains('1'),
         "Native: plaintext server should report 1 request. stdout: {:?}, stderr: {:?}",
-        stdout, stderr
+        stdout,
+        stderr
     );
 }
 
@@ -20391,7 +20408,7 @@ stdout(r.requests)
         let dir = setup_net_project(&source, &format!("tls_native_body_{}", backend));
         let td_path = dir.join("main.td");
 
-        let mut child = match *backend {
+        let child = match *backend {
             "interp" => Command::new(taida_bin())
                 .arg(&td_path)
                 .stdout(Stdio::piped())
@@ -20399,8 +20416,7 @@ stdout(r.requests)
                 .spawn()
                 .expect("spawn interpreter"),
             "native" => {
-                let bin_path =
-                    unique_temp_path("taida_net5_4a_body_native", backend, "bin");
+                let bin_path = unique_temp_path("taida_net5_4a_body_native", backend, "bin");
                 let compile = Command::new(taida_bin())
                     .arg("build")
                     .arg("--target")
@@ -20539,7 +20555,7 @@ stdout(r.requests)
         let dir = setup_net_project(&source, &format!("3way_tls_{}", backend));
         let td_path = dir.join("main.td");
 
-        let mut child = match *backend {
+        let child = match *backend {
             "interp" => Command::new(taida_bin())
                 .arg(&td_path)
                 .stdout(Stdio::piped())
@@ -20547,8 +20563,7 @@ stdout(r.requests)
                 .spawn()
                 .expect("spawn interpreter"),
             "js" => {
-                let js_path =
-                    unique_temp_path("taida_net5_4b_3way_js", backend, "mjs");
+                let js_path = unique_temp_path("taida_net5_4b_3way_js", backend, "mjs");
                 let transpile = Command::new(taida_bin())
                     .arg("build")
                     .arg("--target")
@@ -20575,8 +20590,7 @@ stdout(r.requests)
                 child
             }
             "native" => {
-                let bin_path =
-                    unique_temp_path("taida_net5_4b_3way_native", backend, "bin");
+                let bin_path = unique_temp_path("taida_net5_4b_3way_native", backend, "bin");
                 let compile = Command::new(taida_bin())
                     .arg("build")
                     .arg("--target")
@@ -20627,7 +20641,7 @@ stdout(r.requests)
         }
 
         let output = child.wait_with_output().expect("wait for child");
-        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        let _stdout = String::from_utf8_lossy(&output.stdout).to_string();
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
 
         cleanup_net_project(&dir);
@@ -20737,9 +20751,7 @@ stdout(result.throw.message)
         "Native compile failed: {}",
         String::from_utf8_lossy(&compile.stderr)
     );
-    let native_output = Command::new(&bin_path)
-        .output()
-        .expect("run native");
+    let native_output = Command::new(&bin_path).output().expect("run native");
     let native_stdout = String::from_utf8_lossy(&native_output.stdout).to_string();
     let _ = fs::remove_file(&bin_path);
 
@@ -20750,15 +20762,23 @@ stdout(result.throw.message)
     let native_trimmed = native_stdout.trim();
 
     // All three should produce non-empty TLS-related error messages.
-    for (name, output) in [("Interpreter", interp_trimmed), ("JS", js_trimmed), ("Native", native_trimmed)] {
+    for (name, output) in [
+        ("Interpreter", interp_trimmed),
+        ("JS", js_trimmed),
+        ("Native", native_trimmed),
+    ] {
         assert!(
             !output.is_empty(),
             "{}: TLS cert missing should produce error output, got empty",
             name
         );
         assert!(
-            output.contains("cert") || output.contains("Tls") || output.contains("tls")
-                || output.contains("SSL") || output.contains("OpenSSL") || output.contains("ENOENT"),
+            output.contains("cert")
+                || output.contains("Tls")
+                || output.contains("tls")
+                || output.contains("SSL")
+                || output.contains("OpenSSL")
+                || output.contains("ENOENT"),
             "{}: expected TLS/cert error, got: {:?}",
             name,
             output
@@ -20840,8 +20860,7 @@ stdout(r.requests)
                 .spawn()
                 .expect("spawn interpreter"),
             "native" => {
-                let bin_path =
-                    unique_temp_path("taida_nb5_14_ws", backend, "bin");
+                let bin_path = unique_temp_path("taida_nb5_14_ws", backend, "bin");
                 let compile = Command::new(taida_bin())
                     .arg("build")
                     .arg("--target")
@@ -20984,8 +21003,7 @@ stdout(r.requests)
                 .spawn()
                 .expect("spawn interpreter"),
             "native" => {
-                let bin_path =
-                    unique_temp_path("taida_nb5_14_frame", backend, "bin");
+                let bin_path = unique_temp_path("taida_nb5_14_frame", backend, "bin");
                 let compile = Command::new(taida_bin())
                     .arg("build")
                     .arg("--target")
@@ -21043,10 +21061,7 @@ except Exception as e:
                 // Give server a moment to start.
                 continue;
             }
-            let py_result = Command::new("python3")
-                .arg("-c")
-                .arg(&py_script)
-                .output();
+            let py_result = Command::new("python3").arg("-c").arg(&py_script).output();
             match py_result {
                 Ok(output) if output.status.success() => {
                     echo_result = String::from_utf8_lossy(&output.stdout).to_string();
@@ -21061,7 +21076,10 @@ except Exception as e:
                     }
                     // Other error: might be a real failure, but retry a few more times.
                     if attempt > 40 {
-                        eprintln!("{} attempt {}: Python WS error: {}", backend, attempt, stderr);
+                        eprintln!(
+                            "{} attempt {}: Python WS error: {}",
+                            backend, attempt, stderr
+                        );
                     }
                     continue;
                 }
@@ -21138,7 +21156,7 @@ stdout(result.__value.ok.toString())
     );
 
     let dir = setup_net_project(&source, "net5_5a_close1000");
-    let mut child = Command::new(taida_bin())
+    let child = Command::new(taida_bin())
         .arg(dir.join("main.td"))
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -21159,23 +21177,40 @@ stdout(result.__value.ok.toString())
             "GET / HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n",
             port
         );
-        if sock.write_all(upgrade_req.as_bytes()).is_err() { return false; }
+        if sock.write_all(upgrade_req.as_bytes()).is_err() {
+            return false;
+        }
         let mut buf = [0u8; 1024];
-        let n = match sock.read(&mut buf) { Ok(n) => n, Err(_) => return false };
+        let n = match sock.read(&mut buf) {
+            Ok(n) => n,
+            Err(_) => return false,
+        };
         let resp = String::from_utf8_lossy(&buf[..n]);
-        if !resp.contains("101") { return false; }
+        if !resp.contains("101") {
+            return false;
+        }
 
         // Send close frame: opcode 0x8, code 1000, masked
         let mask_key: [u8; 4] = [0x12, 0x34, 0x56, 0x78];
         let code_bytes: [u8; 2] = [0x03, 0xE8]; // 1000 big-endian
-        let masked: Vec<u8> = code_bytes.iter().enumerate()
-            .map(|(i, b)| b ^ mask_key[i % 4]).collect();
+        let masked: Vec<u8> = code_bytes
+            .iter()
+            .enumerate()
+            .map(|(i, b)| b ^ mask_key[i % 4])
+            .collect();
         let frame: Vec<u8> = vec![
-            0x88, 0x82,
-            mask_key[0], mask_key[1], mask_key[2], mask_key[3],
-            masked[0], masked[1],
+            0x88,
+            0x82,
+            mask_key[0],
+            mask_key[1],
+            mask_key[2],
+            mask_key[3],
+            masked[0],
+            masked[1],
         ];
-        if sock.write_all(&frame).is_err() { return false; }
+        if sock.write_all(&frame).is_err() {
+            return false;
+        }
         // Read server's close reply
         let _ = sock.read(&mut buf);
         true
@@ -21186,11 +21221,14 @@ stdout(result.__value.ok.toString())
     let stdout = normalize(&String::from_utf8_lossy(&output.stdout));
     cleanup_net_project(&dir);
 
-    assert!(ws_ok, "NET5-5a-1: WebSocket client should complete upgrade + close");
+    assert!(
+        ws_ok,
+        "NET5-5a-1: WebSocket client should complete upgrade + close"
+    );
     // Output should contain "1000" (wsCloseCode result) and "true" (server ok)
     let lines: Vec<&str> = stdout.lines().collect();
     assert!(
-        lines.iter().any(|l| *l == "1000"),
+        lines.contains(&"1000"),
         "NET5-5a-1: wsCloseCode should return 1000 after client close(1000). Got: {:?}",
         lines
     );
@@ -21224,7 +21262,7 @@ stdout(result.__value.ok.toString())
     );
 
     let dir = setup_net_project(&source, "net5_5a_closecode_initial");
-    let mut child = Command::new(taida_bin())
+    let child = Command::new(taida_bin())
         .arg(dir.join("main.td"))
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -21245,7 +21283,9 @@ stdout(result.__value.ok.toString())
             "GET / HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n",
             port
         );
-        if sock.write_all(upgrade_req.as_bytes()).is_err() { return false; }
+        if sock.write_all(upgrade_req.as_bytes()).is_err() {
+            return false;
+        }
         let mut buf = [0u8; 1024];
         let _ = sock.read(&mut buf);
         // Read the close frame from server
@@ -21320,7 +21360,9 @@ stdout(result.__value.ok.toString())
                 "GET / HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n",
                 port
             );
-            if sock.write_all(upgrade_req.as_bytes()).is_err() { return false; }
+            if sock.write_all(upgrade_req.as_bytes()).is_err() {
+                return false;
+            }
             let mut buf = [0u8; 1024];
             let _ = sock.read(&mut buf);
             thread::sleep(Duration::from_millis(300));
@@ -21337,7 +21379,8 @@ stdout(result.__value.ok.toString())
         assert!(
             !stdout.contains("ok\n"),
             "NET5-5a-3: wsClose with reserved code {} should error before stdout(\"ok\"). Got: {:?}",
-            reserved_code, stdout
+            reserved_code,
+            stdout
         );
     }
 }
@@ -21390,7 +21433,9 @@ stdout(result.__value.ok.toString())
                 "GET / HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n",
                 port
             );
-            if sock.write_all(upgrade_req.as_bytes()).is_err() { return false; }
+            if sock.write_all(upgrade_req.as_bytes()).is_err() {
+                return false;
+            }
             let mut buf = [0u8; 1024];
             let _ = sock.read(&mut buf);
             thread::sleep(Duration::from_millis(300));
@@ -21406,7 +21451,8 @@ stdout(result.__value.ok.toString())
         assert!(
             !stdout.contains("ok\n"),
             "NET5-5a-4: wsClose with code {} should error before stdout(\"ok\"). Got: {:?}",
-            bad_code, stdout
+            bad_code,
+            stdout
         );
     }
 }
@@ -21445,7 +21491,8 @@ stdout(serverResult.__value.ok)
 
     // NB5-15 fix: All 3 backends MUST produce output (Result failure path, not a crash).
     // Previously used `if let (Some, Some)` which silently skipped when a backend returned None.
-    let i = out_i.expect("NET5-5a-5: Interpreter must produce output for cert-only tls arg (not crash)");
+    let i = out_i
+        .expect("NET5-5a-5: Interpreter must produce output for cert-only tls arg (not crash)");
     let j = out_j.expect("NET5-5a-5: JS must produce output for cert-only tls arg (not crash)");
     let n = out_n.expect("NET5-5a-5: Native must produce output for cert-only tls arg (not crash)");
 
@@ -21586,7 +21633,8 @@ stdout(serverResult.__value.ok)
     // First connection: connect and immediately close (no TLS handshake)
     let _ = (|| -> Option<()> {
         let sock = TcpStream::connect(format!("127.0.0.1:{}", port)).ok()?;
-        sock.set_read_timeout(Some(Duration::from_millis(500))).ok()?;
+        sock.set_read_timeout(Some(Duration::from_millis(500)))
+            .ok()?;
         drop(sock);
         Some(())
     })();
@@ -21624,7 +21672,8 @@ stdout(serverResult.__value.ok)
     assert!(
         curl_out.status.success(),
         "NET5-5a-6: curl must exit successfully (exit status: {:?}). stderr: {}",
-        curl_out.status, stderr
+        curl_out.status,
+        stderr
     );
     assert_eq!(
         http_code, "200",
@@ -21812,12 +21861,14 @@ stdout(serverResult.__value.ok)
         assert!(
             !output.status.success(),
             "NET5-5c-3: wasm-min should reject {}, but compile succeeded.\nstderr: {}",
-            api_name, stderr
+            api_name,
+            stderr
         );
         assert!(
             stderr.contains(api_name) || stderr.contains("net"),
             "NET5-5c-3: wasm-min error for {} should mention the API or net.\nstderr: {}",
-            api_name, stderr
+            api_name,
+            stderr
         );
     }
 }

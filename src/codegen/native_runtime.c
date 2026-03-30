@@ -12297,18 +12297,8 @@ taida_val taida_net_ws_close(taida_val ws, taida_val code_val) {
     }
 
     // v5: Determine close code from 2nd argument.
-    // code_val is a tagged Int (shifted left 1, tag bit 0 = 1 for Int).
-    // When lowering passes 0, that decodes to Int(0) = default.
-    int64_t raw_code = (int64_t)code_val;
-    int64_t close_code_i64;
-    // Check if it's a tagged integer (low bit set) or a pointer (0).
-    if (raw_code == 0) {
-        close_code_i64 = 0; // default
-    } else if (raw_code & 1) {
-        close_code_i64 = raw_code >> 1; // unbox tagged Int
-    } else {
-        close_code_i64 = 0; // fallback to default for non-Int
-    }
+    // code_val is a raw Int (lowering passes 0 for default, or the literal value).
+    int64_t close_code_i64 = (int64_t)code_val;
 
     uint16_t close_code;
     if (close_code_i64 == 0) {

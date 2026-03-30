@@ -3144,7 +3144,9 @@ impl Interpreter {
                             // ws_close_code NOT updated for protocol error
                         }
                         return Err(RuntimeError {
-                            message: "wsReceive: protocol error: malformed close frame (1-byte payload)".into(),
+                            message:
+                                "wsReceive: protocol error: malformed close frame (1-byte payload)"
+                                    .into(),
                         });
                     } else {
                         // 2+ bytes: first 2 bytes are the close code (big-endian).
@@ -3157,27 +3159,36 @@ impl Interpreter {
                         );
                         if !valid_code {
                             let close_payload = [0x03, 0xEA]; // 1002
-                            let _ = Self::write_ws_frame(stream, Self::WS_OPCODE_CLOSE, &close_payload);
+                            let _ =
+                                Self::write_ws_frame(stream, Self::WS_OPCODE_CLOSE, &close_payload);
                             if let Some(ref mut active) = self.active_streaming_writer {
                                 active.ws_closed = true;
                             }
                             return Err(RuntimeError {
-                                message: format!("wsReceive: protocol error: invalid close code {}", code),
+                                message: format!(
+                                    "wsReceive: protocol error: invalid close code {}",
+                                    code
+                                ),
                             });
                         }
                         // Validate reason UTF-8 if present.
-                        if payload.len() > 2 {
-                            if std::str::from_utf8(&payload[2..]).is_err() {
+                        if payload.len() > 2
+                            && std::str::from_utf8(&payload[2..]).is_err() {
                                 let close_payload = [0x03, 0xEA]; // 1002
-                                let _ = Self::write_ws_frame(stream, Self::WS_OPCODE_CLOSE, &close_payload);
+                                let _ = Self::write_ws_frame(
+                                    stream,
+                                    Self::WS_OPCODE_CLOSE,
+                                    &close_payload,
+                                );
                                 if let Some(ref mut active) = self.active_streaming_writer {
                                     active.ws_closed = true;
                                 }
                                 return Err(RuntimeError {
-                                    message: "wsReceive: protocol error: invalid UTF-8 in close reason".into(),
+                                    message:
+                                        "wsReceive: protocol error: invalid UTF-8 in close reason"
+                                            .into(),
                                 });
                             }
-                        }
                         // Valid close: echo the code in the reply.
                         let reply = [(code >> 8) as u8, (code & 0xFF) as u8];
                         let _ = Self::write_ws_frame(stream, Self::WS_OPCODE_CLOSE, &reply);
@@ -3224,10 +3235,7 @@ impl Interpreter {
     }
 
     /// Read exactly `count` bytes from a TcpStream.
-    fn read_exact_bytes(
-        stream: &mut ConnStream,
-        count: usize,
-    ) -> Result<Vec<u8>, RuntimeError> {
+    fn read_exact_bytes(stream: &mut ConnStream, count: usize) -> Result<Vec<u8>, RuntimeError> {
         use std::io::Read;
         let mut buf = vec![0u8; count];
         let mut pos = 0;
@@ -3400,10 +3408,7 @@ impl Interpreter {
                     // Validate close code per NET5-0d.
                     if !(1000..=4999).contains(&n) {
                         return Err(RuntimeError {
-                            message: format!(
-                                "wsClose: close code must be 1000-4999, got {}",
-                                n
-                            ),
+                            message: format!("wsClose: close code must be 1000-4999, got {}", n),
                         });
                     }
                     // Reserved codes that must not be sent.
@@ -3647,15 +3652,24 @@ impl Interpreter {
                             (Some(Value::Str(_)), _) => {
                                 // NB5-16: Return Result failure(TlsError) for startup config errors
                                 // (NET5-0c: startup failure = Result failure), matching JS/Native parity.
-                                let result = make_result_failure_msg("TlsError", "httpServe: tls.key must be a Str (PEM file path)");
+                                let result = make_result_failure_msg(
+                                    "TlsError",
+                                    "httpServe: tls.key must be a Str (PEM file path)",
+                                );
                                 return Ok(Some(Signal::Value(make_fulfilled_async(result))));
                             }
                             (_, Some(Value::Str(_))) => {
-                                let result = make_result_failure_msg("TlsError", "httpServe: tls.cert must be a Str (PEM file path)");
+                                let result = make_result_failure_msg(
+                                    "TlsError",
+                                    "httpServe: tls.cert must be a Str (PEM file path)",
+                                );
                                 return Ok(Some(Signal::Value(make_fulfilled_async(result))));
                             }
                             _ => {
-                                let result = make_result_failure_msg("TlsError", "httpServe: tls must be @(cert: Str, key: Str) or @()");
+                                let result = make_result_failure_msg(
+                                    "TlsError",
+                                    "httpServe: tls must be @(cert: Str, key: Str) or @()",
+                                );
                                 return Ok(Some(Signal::Value(make_fulfilled_async(result))));
                             }
                         }
@@ -3759,8 +3773,12 @@ impl Interpreter {
                                 Ok(c) => c,
                                 Err(_) => continue, // TLS setup error, skip connection
                             };
-                            let mut tls_transport = super::net_transport::TlsTransport::new(tls_conn, tcp_stream);
-                            match super::net_transport::complete_tls_handshake(&mut tls_transport, read_timeout) {
+                            let mut tls_transport =
+                                super::net_transport::TlsTransport::new(tls_conn, tcp_stream);
+                            match super::net_transport::complete_tls_handshake(
+                                &mut tls_transport,
+                                read_timeout,
+                            ) {
                                 Ok(()) => ConnStream::Tls(tls_transport),
                                 Err(_) => {
                                     // NET5-0c: handshake failure = close + don't call handler.
@@ -10955,9 +10973,10 @@ mod tests {
     fn test_ws_close_code_not_in_ws_state() {
         // wsCloseCode outside handler should fail.
         let mut interp = Interpreter::new();
-        interp
-            .env
-            .define_force("wsCloseCode", Value::Str("__net_builtin_wsCloseCode".into()));
+        interp.env.define_force(
+            "wsCloseCode",
+            Value::Str("__net_builtin_wsCloseCode".into()),
+        );
         let args = vec![Expr::Ident("dummy".into(), dummy_span())];
         let result = interp.try_net_func("wsCloseCode", &args);
         assert!(result.is_err());
@@ -10965,43 +10984,13 @@ mod tests {
     }
 
     #[test]
-    fn test_ws_close_code_validation_reserved_codes() {
-        // wsClose with reserved codes: since validation happens inside the
-        // re-entrancy guard (which checks handler context first), out-of-handler
-        // calls fail with the handler-context error. This test verifies that
-        // wsClose dispatches correctly when given a close code argument.
-        for code in &[1004i64, 1005, 1006, 1015] {
-            let mut interp = Interpreter::new();
-            interp
-                .env
-                .define_force("wsClose", Value::Str("__net_builtin_wsClose".into()));
-            let args = vec![
-                Expr::Ident("dummy".into(), dummy_span()),
-                Expr::IntLit(*code, dummy_span()),
-            ];
-            let result = interp.try_net_func("wsClose", &args);
-            // Out of handler context, so it fails with the handler-context error.
-            // The close code validation is deeper in the call chain.
-            assert!(
-                result.is_err(),
-                "wsClose({}) should fail outside handler",
-                code
-            );
-            let msg = result.unwrap_err().message;
-            assert!(
-                msg.contains("wsClose"),
-                "Error for code {} should mention wsClose, got: {}",
-                code,
-                msg
-            );
-        }
-    }
-
-    #[test]
-    fn test_ws_close_code_validation_out_of_range() {
-        // wsClose with out-of-range codes: same as above, out-of-handler
-        // context fails first. This validates dispatch routing.
-        for code in &[0i64, 999, 5000, -1] {
+    fn test_ws_close_dispatch_with_code_arg() {
+        // wsClose with 2 args (ws, code) dispatches correctly.
+        // Out of handler context, the handler-context guard rejects the call
+        // before reaching close code validation. This only verifies dispatch
+        // routing — actual close code validation is covered by parity tests
+        // (test_net5_5a_ws_close_reserved_codes_interp, test_net5_5a_ws_close_out_of_range_interp).
+        for code in &[1004i64, 1005, 1006, 1015, 0, 999, 5000, -1] {
             let mut interp = Interpreter::new();
             interp
                 .env
@@ -11013,7 +11002,7 @@ mod tests {
             let result = interp.try_net_func("wsClose", &args);
             assert!(
                 result.is_err(),
-                "wsClose({}) should fail outside handler",
+                "wsClose({}) should fail outside handler context",
                 code
             );
         }
@@ -11028,9 +11017,7 @@ mod tests {
         interp
             .env
             .define_force("httpServe", Value::Str("__net_builtin_httpServe".into()));
-        interp
-            .env
-            .define_force("test_handler", Value::Int(42));
+        interp.env.define_force("test_handler", Value::Int(42));
 
         let args = vec![
             Expr::IntLit(0, dummy_span()),
@@ -11154,19 +11141,20 @@ mod tests {
                 // The inner value should be a Result with TlsError.
                 match &*async_val.value {
                     Value::BuchiPack(fields) => {
-                        let kind = fields
-                            .iter()
-                            .find(|(k, _)| k == "__value")
-                            .and_then(|(_, v)| {
-                                if let Value::BuchiPack(inner) = v {
-                                    inner
-                                        .iter()
-                                        .find(|(k, _)| k == "kind")
-                                        .map(|(_, v)| v.clone())
-                                } else {
-                                    None
-                                }
-                            });
+                        let kind =
+                            fields
+                                .iter()
+                                .find(|(k, _)| k == "__value")
+                                .and_then(|(_, v)| {
+                                    if let Value::BuchiPack(inner) = v {
+                                        inner
+                                            .iter()
+                                            .find(|(k, _)| k == "kind")
+                                            .map(|(_, v)| v.clone())
+                                    } else {
+                                        None
+                                    }
+                                });
                         assert_eq!(
                             kind,
                             Some(Value::Str("TlsError".into())),
