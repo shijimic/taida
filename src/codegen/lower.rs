@@ -919,6 +919,8 @@ impl Lowering {
             "wsSend" => Some("taida_net_ws_send"),
             "wsReceive" => Some("taida_net_ws_receive"),
             "wsClose" => Some("taida_net_ws_close"),
+            // v5 WebSocket revision
+            "wsCloseCode" => Some("taida_net_ws_close_code"),
             _ => None,
         }
     }
@@ -2988,10 +2990,10 @@ impl Lowering {
                     .get("httpServe")
                     .is_some_and(|v| v == "taida_net_http_serve")
             {
-                if args.is_empty() || args.len() > 5 {
+                if args.is_empty() || args.len() > 6 {
                     return Err(LowerError {
                         message:
-                            "httpServe requires 2 to 5 arguments: httpServe(port, handler[, maxRequests, timeoutMs, maxConnections])"
+                            "httpServe requires 2 to 6 arguments: httpServe(port, handler[, maxRequests, timeoutMs, maxConnections, tls])"
                                 .to_string(),
                     });
                 }
@@ -3019,6 +3021,16 @@ impl Lowering {
                     func.push(IrInst::ConstInt(v, 128)); // default: 128
                     v
                 };
+                // v5: tls parameter (optional, default 0 = plaintext)
+                // When omitted, pass 0 (tagged int 0 = plaintext).
+                // When provided, it's a BuchiPack expression (@() or @(cert, key)).
+                let tls_var = if let Some(arg) = args.get(5) {
+                    self.lower_expr(func, arg)?
+                } else {
+                    let v = func.alloc_var();
+                    func.push(IrInst::ConstInt(v, 0)); // default: 0 = plaintext
+                    v
+                };
                 // NB-31: Pass compile-time handler type tag so the C runtime
                 // can reject non-callable values (large ints, strings, packs)
                 // without relying on the heuristic _taida_is_callable_impl.
@@ -3042,6 +3054,7 @@ impl Lowering {
                         max_requests,
                         timeout_ms,
                         max_connections,
+                        tls_var,
                         handler_tag_var,
                         handler_arity_var,
                     ],
@@ -3151,6 +3164,27 @@ impl Lowering {
                     };
                     let result = func.alloc_var();
                     func.push(IrInst::Call(result, rt_name, vec![prompt_var]));
+                    return Ok(result);
+                }
+                // v5: wsClose(ws) or wsClose(ws, code) — always pass 2 args.
+                // When code is omitted, pass 0 (C runtime treats 0 as default 1000).
+                if name == "wsClose" {
+                    let ws_var = if let Some(arg) = args.first() {
+                        self.lower_expr(func, arg)?
+                    } else {
+                        return Err(LowerError {
+                            message: "wsClose requires at least 1 argument (ws)".to_string(),
+                        });
+                    };
+                    let code_var = if let Some(arg) = args.get(1) {
+                        self.lower_expr(func, arg)?
+                    } else {
+                        let v = func.alloc_var();
+                        func.push(IrInst::ConstInt(v, 0)); // 0 = use default 1000
+                        v
+                    };
+                    let result = func.alloc_var();
+                    func.push(IrInst::Call(result, rt_name, vec![ws_var, code_var]));
                     return Ok(result);
                 }
                 // jsonEncode/jsonPretty: pass value directly (no auto-conversion)

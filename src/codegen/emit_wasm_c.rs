@@ -101,6 +101,8 @@ fn validate_net_http_api_for_wasm(
         ("taida_net_ws_send", "wsSend"),
         ("taida_net_ws_receive", "wsReceive"),
         ("taida_net_ws_close", "wsClose"),
+        // v5 WebSocket revision
+        ("taida_net_ws_close_code", "wsCloseCode"),
     ];
 
     for &(runtime_name, api_name) in NET_HTTP_FUNCS {
@@ -1003,7 +1005,8 @@ fn runtime_func_prototype(name: &str, profile: WasmProfile) -> Result<String, Wa
         | "taida_net_ws_upgrade"
         | "taida_net_ws_send"
         | "taida_net_ws_receive"
-        | "taida_net_ws_close" =>
+        | "taida_net_ws_close"
+        | "taida_net_ws_close_code" =>
         {
             let profile_name = match profile {
                 WasmProfile::Min => "wasm-min",
@@ -1022,6 +1025,7 @@ fn runtime_func_prototype(name: &str, profile: WasmProfile) -> Result<String, Wa
                 "taida_net_ws_send" => "wsSend",
                 "taida_net_ws_receive" => "wsReceive",
                 "taida_net_ws_close" => "wsClose",
+                "taida_net_ws_close_code" => "wsCloseCode",
                 _ => name,
             };
             return Err(WasmCEmitError {

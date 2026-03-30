@@ -25,6 +25,10 @@ sha1 = "0.10"
 base64 = "0.22"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"], optional = true }
 
+# TLS support for taida-lang/net v5
+rustls = "0.23"
+rustls-pemfile = "2"
+
 # LSP server
 tower-lsp = { version = "0.20", optional = true }
 tokio = { version = "1", features = ["full"] }
@@ -35,6 +39,9 @@ cranelift-frontend = { version = "0.129.1", optional = true }
 cranelift-module = { version = "0.129.1", optional = true }
 cranelift-object = { version = "0.129.1", optional = true }
 target-lexicon = { version = "0.13", optional = true }
+
+[dev-dependencies]
+rcgen = "0.13"
 
 [profile.dev]
 codegen-units = 256  # Explicit: Rust default for dev is 256

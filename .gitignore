@@ -16,6 +16,7 @@ CLAUDE.md
 # Generated outputs in examples/
 examples/*.o
 examples/*.js
+*.o
 # Compiled binaries (extensionless) in examples/
 examples/compile_arithmetic
 examples/compile_buchi

@@ -7579,6 +7579,269 @@ taida_val taida_os_argv(void) {
 #include <sys/time.h>
 #include <sys/uio.h>  // NET3-5c: writev() for zero-copy chunk writes
 #include <signal.h>   // NB3-5: SIGPIPE suppression for peer-close resilience
+#include <dlfcn.h>    // NET5-4a: dlopen for OpenSSL TLS support
+
+// ── NET5-4a: OpenSSL dlopen TLS support ─────────────────────────────
+// Load libssl/libcrypto at runtime via dlopen — no compile-time headers needed.
+// This avoids requiring libssl-dev at build time while still providing
+// TLS server capability when OpenSSL shared libraries are installed.
+//
+// Opaque handle types — we only ever pass pointers through.
+typedef void OSSL_SSL_CTX;
+typedef void OSSL_SSL;
+typedef void OSSL_SSL_METHOD;
+typedef void OSSL_BIO;
+typedef void OSSL_X509;
+typedef void OSSL_EVP_PKEY;
+
+// Function pointer table for the OpenSSL symbols we need.
+static struct {
+    int loaded;
+    void *libssl_handle;
+    void *libcrypto_handle;
+    // libssl functions
+    OSSL_SSL_METHOD *(*TLS_server_method)(void);
+    OSSL_SSL_CTX *(*SSL_CTX_new)(const OSSL_SSL_METHOD *method);
+    void (*SSL_CTX_free)(OSSL_SSL_CTX *ctx);
+    int (*SSL_CTX_use_certificate_chain_file)(OSSL_SSL_CTX *ctx, const char *file);
+    int (*SSL_CTX_use_PrivateKey_file)(OSSL_SSL_CTX *ctx, const char *file, int type);
+    int (*SSL_CTX_check_private_key)(const OSSL_SSL_CTX *ctx);
+    OSSL_SSL *(*SSL_new)(OSSL_SSL_CTX *ctx);
+    void (*SSL_free)(OSSL_SSL *ssl);
+    int (*SSL_set_fd)(OSSL_SSL *ssl, int fd);
+    int (*SSL_accept)(OSSL_SSL *ssl);
+    int (*SSL_read)(OSSL_SSL *ssl, void *buf, int num);
+    int (*SSL_write)(OSSL_SSL *ssl, const void *buf, int num);
+    int (*SSL_shutdown)(OSSL_SSL *ssl);
+    int (*SSL_get_error)(const OSSL_SSL *ssl, int ret);
+    long (*SSL_CTX_set_options)(OSSL_SSL_CTX *ctx, long options);
+} taida_ossl = { 0, NULL, NULL };
+
+// OpenSSL constants (stable ABI, unlikely to change).
+#define TAIDA_SSL_FILETYPE_PEM 1
+#define TAIDA_SSL_ERROR_NONE           0
+#define TAIDA_SSL_ERROR_SSL            1
+#define TAIDA_SSL_ERROR_WANT_READ      2
+#define TAIDA_SSL_ERROR_WANT_WRITE     3
+#define TAIDA_SSL_ERROR_SYSCALL        5
+#define TAIDA_SSL_ERROR_ZERO_RETURN    6
+// SSL_OP_NO_SSLv2 | SSL_OP_NO_SSLv3 | SSL_OP_NO_TLSv1 | SSL_OP_NO_TLSv1_1
+// Only allow TLS 1.2+ for security.
+#define TAIDA_SSL_OP_SECURE  (0x01000000L | 0x02000000L | 0x04000000L | 0x10000000L)
+
+// Forward declaration.
+static void taida_ossl_unload(void);
+
+// Load OpenSSL shared libraries via dlopen. Returns 1 on success, 0 on failure.
+static int taida_ossl_load(void) {
+    if (taida_ossl.loaded) return 1;
+
+    // Try common shared library names.
+    taida_ossl.libssl_handle = dlopen("libssl.so.3", RTLD_LAZY);
+    if (!taida_ossl.libssl_handle)
+        taida_ossl.libssl_handle = dlopen("libssl.so", RTLD_LAZY);
+    if (!taida_ossl.libssl_handle) return 0;
+
+    taida_ossl.libcrypto_handle = dlopen("libcrypto.so.3", RTLD_LAZY);
+    if (!taida_ossl.libcrypto_handle)
+        taida_ossl.libcrypto_handle = dlopen("libcrypto.so", RTLD_LAZY);
+    if (!taida_ossl.libcrypto_handle) {
+        dlclose(taida_ossl.libssl_handle);
+        taida_ossl.libssl_handle = NULL;
+        return 0;
+    }
+
+    // Resolve symbols. Cast through void* to suppress -Wpedantic warnings.
+    #define LOAD_SYM(lib, name) do { \
+        *(void**)(&taida_ossl.name) = dlsym(taida_ossl.lib##_handle, #name); \
+        if (!taida_ossl.name) { taida_ossl_unload(); return 0; } \
+    } while(0)
+
+    LOAD_SYM(libssl, TLS_server_method);
+    LOAD_SYM(libssl, SSL_CTX_new);
+    LOAD_SYM(libssl, SSL_CTX_free);
+    LOAD_SYM(libssl, SSL_CTX_use_certificate_chain_file);
+    LOAD_SYM(libssl, SSL_CTX_use_PrivateKey_file);
+    LOAD_SYM(libssl, SSL_CTX_check_private_key);
+    LOAD_SYM(libssl, SSL_new);
+    LOAD_SYM(libssl, SSL_free);
+    LOAD_SYM(libssl, SSL_set_fd);
+    LOAD_SYM(libssl, SSL_accept);
+    LOAD_SYM(libssl, SSL_read);
+    LOAD_SYM(libssl, SSL_write);
+    LOAD_SYM(libssl, SSL_shutdown);
+    LOAD_SYM(libssl, SSL_get_error);
+    LOAD_SYM(libssl, SSL_CTX_set_options);
+
+    #undef LOAD_SYM
+
+    taida_ossl.loaded = 1;
+    return 1;
+}
+
+static void taida_ossl_unload(void) {
+    if (taida_ossl.libssl_handle) { dlclose(taida_ossl.libssl_handle); taida_ossl.libssl_handle = NULL; }
+    if (taida_ossl.libcrypto_handle) { dlclose(taida_ossl.libcrypto_handle); taida_ossl.libcrypto_handle = NULL; }
+    taida_ossl.loaded = 0;
+}
+
+// Create an SSL_CTX for TLS server with cert/key PEM files.
+// Returns non-NULL on success. On failure, writes error to errbuf and returns NULL.
+static OSSL_SSL_CTX *taida_tls_create_ctx(const char *cert_path, const char *key_path, char *errbuf, size_t errbuf_sz) {
+    OSSL_SSL_CTX *ctx = taida_ossl.SSL_CTX_new(taida_ossl.TLS_server_method());
+    if (!ctx) {
+        snprintf(errbuf, errbuf_sz, "httpServe: failed to create SSL context");
+        return NULL;
+    }
+    // Only allow TLS 1.2+.
+    taida_ossl.SSL_CTX_set_options(ctx, TAIDA_SSL_OP_SECURE);
+
+    if (taida_ossl.SSL_CTX_use_certificate_chain_file(ctx, cert_path) != 1) {
+        snprintf(errbuf, errbuf_sz, "httpServe: failed to load cert file '%s'", cert_path);
+        taida_ossl.SSL_CTX_free(ctx);
+        return NULL;
+    }
+    if (taida_ossl.SSL_CTX_use_PrivateKey_file(ctx, key_path, TAIDA_SSL_FILETYPE_PEM) != 1) {
+        snprintf(errbuf, errbuf_sz, "httpServe: failed to load key file '%s'", key_path);
+        taida_ossl.SSL_CTX_free(ctx);
+        return NULL;
+    }
+    if (taida_ossl.SSL_CTX_check_private_key(ctx) != 1) {
+        snprintf(errbuf, errbuf_sz, "httpServe: cert/key mismatch for '%s' / '%s'", cert_path, key_path);
+        taida_ossl.SSL_CTX_free(ctx);
+        return NULL;
+    }
+    return ctx;
+}
+
+// Thread-local: current SSL connection pointer for TLS-aware I/O.
+// NULL = plaintext (v4 path), non-NULL = TLS connection.
+static __thread OSSL_SSL *tl_ssl = NULL;
+
+// ── TLS-aware I/O wrappers ──────────────────────────────────────────
+// These check tl_ssl and route through SSL_read/SSL_write when active.
+
+// TLS-aware recv: reads from SSL or raw fd. Returns bytes read, or <=0 on error/EOF.
+static ssize_t taida_tls_recv(int fd, void *buf, size_t len) {
+    if (tl_ssl) {
+        int n = taida_ossl.SSL_read(tl_ssl, buf, (int)(len > INT_MAX ? INT_MAX : len));
+        if (n <= 0) {
+            int err = taida_ossl.SSL_get_error(tl_ssl, n);
+            if (err == TAIDA_SSL_ERROR_ZERO_RETURN) return 0; // clean TLS shutdown
+            if (err == TAIDA_SSL_ERROR_WANT_READ || err == TAIDA_SSL_ERROR_WANT_WRITE) {
+                errno = EAGAIN;
+                return -1;
+            }
+            errno = EIO;
+            return -1;
+        }
+        return (ssize_t)n;
+    }
+    return recv(fd, buf, len, 0);
+}
+
+// TLS-aware send_all: writes all bytes through SSL or raw fd.
+// Returns 0 on success, -1 on error.
+static int taida_tls_send_all(int fd, const void *buf, size_t len) {
+    const unsigned char *p = (const unsigned char*)buf;
+    size_t remaining = len;
+    if (tl_ssl) {
+        while (remaining > 0) {
+            int chunk = (int)(remaining > INT_MAX ? INT_MAX : remaining);
+            int n = taida_ossl.SSL_write(tl_ssl, p, chunk);
+            if (n <= 0) return -1;
+            p += n;
+            remaining -= (size_t)n;
+        }
+        return 0;
+    }
+    // Plaintext path: delegate to existing send_all.
+    while (remaining > 0) {
+        ssize_t n = send(fd, p, remaining, MSG_NOSIGNAL);
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            return -1;
+        }
+        if (n == 0) return -1;
+        p += (size_t)n;
+        remaining -= (size_t)n;
+    }
+    return 0;
+}
+
+// TLS-aware writev_all: writes all iov buffers through SSL or raw fd.
+// For TLS, we linearize the iovecs since SSL_write doesn't support scatter/gather.
+// Returns 0 on success, -1 on error.
+static int taida_tls_writev_all(int fd, struct iovec *iov, int iovcnt) {
+    if (tl_ssl) {
+        // SSL doesn't support writev — send each iovec buffer via SSL_write.
+        for (int i = 0; i < iovcnt; i++) {
+            if (iov[i].iov_len > 0) {
+                if (taida_tls_send_all(fd, iov[i].iov_base, iov[i].iov_len) != 0)
+                    return -1;
+            }
+        }
+        return 0;
+    }
+    // Plaintext: use real writev.
+    while (iovcnt > 0) {
+        ssize_t n = writev(fd, iov, iovcnt);
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            return -1;
+        }
+        if (n == 0) return -1;
+        size_t written = (size_t)n;
+        while (iovcnt > 0 && written >= iov[0].iov_len) {
+            written -= iov[0].iov_len;
+            iov++;
+            iovcnt--;
+        }
+        if (iovcnt > 0 && written > 0) {
+            iov[0].iov_base = (char*)iov[0].iov_base + written;
+            iov[0].iov_len -= written;
+        }
+    }
+    return 0;
+}
+
+// TLS-aware recv_exact: reads exactly `count` bytes. Returns bytes actually read.
+static size_t taida_tls_recv_exact(int fd, unsigned char *out, size_t count) {
+    size_t pos = 0;
+    while (pos < count) {
+        ssize_t n = taida_tls_recv(fd, out + pos, count - pos);
+        if (n <= 0) {
+            if (n < 0 && errno == EINTR) continue;
+            return pos;
+        }
+        pos += (size_t)n;
+    }
+    return pos;
+}
+
+// Perform TLS handshake on an accepted fd. Returns SSL* on success, NULL on failure.
+static OSSL_SSL *taida_tls_handshake(OSSL_SSL_CTX *ctx, int fd) {
+    OSSL_SSL *ssl = taida_ossl.SSL_new(ctx);
+    if (!ssl) return NULL;
+    if (taida_ossl.SSL_set_fd(ssl, fd) != 1) {
+        taida_ossl.SSL_free(ssl);
+        return NULL;
+    }
+    int ret = taida_ossl.SSL_accept(ssl);
+    if (ret != 1) {
+        // Handshake failed — connection close per NET5-0c policy.
+        taida_ossl.SSL_free(ssl);
+        return NULL;
+    }
+    return ssl;
+}
+
+// TLS shutdown + free.
+static void taida_tls_shutdown_free(OSSL_SSL *ssl) {
+    if (!ssl) return;
+    taida_ossl.SSL_shutdown(ssl);
+    taida_ossl.SSL_free(ssl);
+}
 
 // Helper: create a resolved Async[value] (fulfilled)
 // NO-3: auto-detect value type for ownership tracking
@@ -8957,7 +9220,7 @@ taida_val taida_pool_health(taida_val pool_or_pack) {
 // Forward declarations
 taida_val taida_net_http_parse_request_head(taida_val input);
 taida_val taida_net_http_encode_response(taida_val response);
-taida_val taida_net_http_serve(taida_val port, taida_val handler, taida_val max_requests, taida_val timeout_ms, taida_val max_connections, taida_val handler_type_tag, taida_val handler_arity);
+taida_val taida_net_http_serve(taida_val port, taida_val handler, taida_val max_requests, taida_val timeout_ms, taida_val max_connections, taida_val tls, taida_val handler_type_tag, taida_val handler_arity);
 taida_val taida_net_read_body(taida_val req);
 // NET3-5b: v3 streaming API forward declarations
 taida_val taida_net_start_response(taida_val writer, taida_val status, taida_val headers);
@@ -8970,7 +9233,8 @@ taida_val taida_net_read_body_all(taida_val req);
 taida_val taida_net_ws_upgrade(taida_val req, taida_val writer);
 taida_val taida_net_ws_send(taida_val ws, taida_val data);
 taida_val taida_net_ws_receive(taida_val ws);
-taida_val taida_net_ws_close(taida_val ws);
+taida_val taida_net_ws_close(taida_val ws, taida_val code);
+taida_val taida_net_ws_close_code(taida_val ws);
 // v4: body stream request check (defined later, forward declared here for readBody delegation)
 static int taida_net4_is_body_stream_request(taida_val req);
 
@@ -9662,22 +9926,9 @@ taida_val taida_net_http_encode_response(taida_val response) {
 // ── net_send_all: short-write safe send helper ──────────────────
 // Loops send() until all bytes are written or an error occurs.
 // Returns 0 on success, -1 on error.
+// NET5-4a: Routes through TLS when tl_ssl is active.
 static int taida_net_send_all(int fd, const void *buf, size_t len) {
-    const unsigned char *p = (const unsigned char*)buf;
-    size_t remaining = len;
-    while (remaining > 0) {
-        // NB3-5: MSG_NOSIGNAL prevents SIGPIPE on peer-closed sockets,
-        // causing send() to return EPIPE instead of killing the process.
-        ssize_t n = send(fd, p, remaining, MSG_NOSIGNAL);
-        if (n < 0) {
-            if (errno == EINTR) continue;
-            return -1;
-        }
-        if (n == 0) return -1;  // peer closed
-        p += (size_t)n;
-        remaining -= (size_t)n;
-    }
-    return 0;
+    return taida_tls_send_all(fd, buf, len);
 }
 
 // ── readBody(req) → Bytes ────────────────────────────────────────
@@ -10176,6 +10427,8 @@ typedef struct {
     int ws_closed;
     // NB4-10: Connection-scoped WebSocket token for identity verification.
     uint64_t ws_token;
+    // v5: Received close code from peer's close frame (0 = not received).
+    int64_t ws_close_code;
 } Net4BodyState;
 
 // Global monotonic counter for unique request tokens (NB4-7 parity).
@@ -10202,28 +10455,9 @@ static void taida_net3_validate_writer(taida_val writer, const char *api_name);
 
 // NET3-5c: writev()-based send helper. Sends all iov buffers, handling
 // partial writes and EINTR. Returns 0 on success, -1 on error.
+// NET5-4a: Routes through TLS when tl_ssl is active.
 static int taida_net_writev_all(int fd, struct iovec *iov, int iovcnt) {
-    while (iovcnt > 0) {
-        ssize_t n = writev(fd, iov, iovcnt);
-        if (n < 0) {
-            if (errno == EINTR) continue;
-            return -1;
-        }
-        if (n == 0) return -1;  // peer closed
-        // Advance past fully-sent iovecs
-        size_t written = (size_t)n;
-        while (iovcnt > 0 && written >= iov[0].iov_len) {
-            written -= iov[0].iov_len;
-            iov++;
-            iovcnt--;
-        }
-        if (iovcnt > 0 && written > 0) {
-            // Partial iovec: advance base pointer
-            iov[0].iov_base = (char*)iov[0].iov_base + written;
-            iov[0].iov_len -= written;
-        }
-    }
-    return 0;
+    return taida_tls_writev_all(fd, iov, iovcnt);
 }
 
 // Check if a status code forbids a message body (1xx, 204, 205, 304).
@@ -10908,30 +11142,23 @@ static char *taida_net4_compute_ws_accept(const char *key) {
 // ── v4 Body streaming helpers ────────────────────────────────
 
 // Read exactly `count` bytes from fd. Returns bytes read, 0 on error/EOF.
+// NET5-4a: Routes through TLS when tl_ssl is active.
 static size_t taida_net4_recv_exact(int fd, unsigned char *out, size_t count) {
-    size_t pos = 0;
-    while (pos < count) {
-        ssize_t n = recv(fd, out + pos, count - pos, 0);
-        if (n <= 0) {
-            if (n < 0 && errno == EINTR) continue;
-            return pos; // EOF or error
-        }
-        pos += (size_t)n;
-    }
-    return pos;
+    return taida_tls_recv_exact(fd, out, count);
 }
 
 // Read up to `count` bytes from leftover then fd.
 // Returns a new Bytes object (caller's ownership), or empty Bytes on EOF.
+// NET5-4a: Routes through TLS when tl_ssl is active.
 static size_t taida_net4_read_body_bytes(Net4BodyState *bs, int fd, unsigned char *out, size_t count) {
     size_t total = 0;
     // First, drain from leftover.
     while (total < count && bs->leftover_pos < bs->leftover_len) {
         out[total++] = bs->leftover[bs->leftover_pos++];
     }
-    // Then read from socket.
+    // Then read from socket (TLS-aware).
     while (total < count) {
-        ssize_t n = recv(fd, out + total, count - total, 0);
+        ssize_t n = taida_tls_recv(fd, out + total, count - total);
         if (n <= 0) {
             if (n < 0 && errno == EINTR) continue;
             break; // EOF or error
@@ -10944,6 +11171,7 @@ static size_t taida_net4_read_body_bytes(Net4BodyState *bs, int fd, unsigned cha
 // Read a line (up to LF) from leftover then fd.
 // Returns line in `out` (null-terminated). Max `cap` bytes including NUL.
 // Returns length excluding NUL.
+// NET5-4a: Routes through TLS when tl_ssl is active.
 static size_t taida_net4_read_line(Net4BodyState *bs, int fd, char *out, size_t cap) {
     size_t pos = 0;
     // From leftover.
@@ -10952,10 +11180,10 @@ static size_t taida_net4_read_line(Net4BodyState *bs, int fd, char *out, size_t 
         out[pos++] = (char)b;
         if (b == '\n') { out[pos] = '\0'; return pos; }
     }
-    // From socket byte-by-byte.
+    // From socket byte-by-byte (TLS-aware).
     while (pos < cap - 1) {
         unsigned char b;
-        ssize_t n = recv(fd, &b, 1, 0);
+        ssize_t n = taida_tls_recv(fd, &b, 1);
         if (n <= 0) {
             if (n < 0 && errno == EINTR) continue;
             break;
@@ -11929,14 +12157,101 @@ taida_val taida_net_ws_receive(taida_val ws) {
             }
 
             case WS_FRAME_CLOSE: {
-                if (frame.payload) free(frame.payload);
-                // NB4-12 parity: send close reply before marking closed.
-                if (bs && !bs->ws_closed) {
-                    unsigned char close_reply[2] = { 0x03, 0xE8 }; // 1000
-                    taida_net4_write_ws_frame(fd, WS_OPCODE_CLOSE, close_reply, 2);
+                // v5 close code extraction (NET5-0d).
+                if (frame.payload_len == 0) {
+                    // No status code: reply with empty close payload.
+                    if (bs && !bs->ws_closed) {
+                        taida_net4_write_ws_frame(fd, WS_OPCODE_CLOSE, (unsigned char*)"", 0);
+                    }
+                    if (bs) {
+                        bs->ws_closed = 1;
+                        bs->ws_close_code = 1005; // No Status Rcvd
+                    }
+                    if (frame.payload) free(frame.payload);
+                    return taida_net4_make_lax_ws_frame_empty();
+                } else if (frame.payload_len == 1) {
+                    // 1-byte close payload is malformed.
+                    unsigned char close_1002[2] = { 0x03, 0xEA };
+                    taida_net4_write_ws_frame(fd, WS_OPCODE_CLOSE, close_1002, 2);
+                    if (bs) bs->ws_closed = 1;
+                    if (frame.payload) free(frame.payload);
+                    fprintf(stderr, "wsReceive: protocol error: malformed close frame (1-byte payload)\n");
+                    exit(1);
+                } else {
+                    // 2+ bytes: first 2 bytes are the close code (big-endian).
+                    uint16_t code = ((uint16_t)frame.payload[0] << 8) | (uint16_t)frame.payload[1];
+                    // Validate close code (RFC 6455 Section 7.4).
+                    // 1000-1003: standard, 1007-1014: IANA-registered,
+                    // 3000-4999: reserved for libraries/apps/private use.
+                    int valid_code = (code >= 1000 && code <= 1003) ||
+                                     (code >= 1007 && code <= 1014) ||
+                                     (code >= 3000 && code <= 4999);
+                    if (!valid_code) {
+                        unsigned char close_1002[2] = { 0x03, 0xEA };
+                        taida_net4_write_ws_frame(fd, WS_OPCODE_CLOSE, close_1002, 2);
+                        if (bs) bs->ws_closed = 1;
+                        free(frame.payload);
+                        fprintf(stderr, "wsReceive: protocol error: invalid close code %u\n", (unsigned)code);
+                        exit(1);
+                    }
+                    // Validate reason UTF-8 if present.
+                    // Strict UTF-8 validation: reject overlong sequences, surrogate
+                    // halves (U+D800..U+DFFF), and code points > U+10FFFF to match
+                    // Interpreter (std::str::from_utf8) and JS (decode+re-encode).
+                    if (frame.payload_len > 2) {
+                        size_t rlen = frame.payload_len - 2;
+                        unsigned char *reason = frame.payload + 2;
+                        size_t i = 0;
+                        int utf8_ok = 1;
+                        while (i < rlen && utf8_ok) {
+                            unsigned char c = reason[i];
+                            if (c < 0x80) {
+                                i++;
+                            } else if ((c & 0xE0) == 0xC0) {
+                                // 2-byte: must have 1 continuation, code point >= 0x80
+                                if (i + 1 >= rlen || (reason[i+1] & 0xC0) != 0x80) { utf8_ok = 0; break; }
+                                uint32_t cp = ((uint32_t)(c & 0x1F) << 6) | (uint32_t)(reason[i+1] & 0x3F);
+                                if (cp < 0x80) { utf8_ok = 0; break; } // overlong
+                                i += 2;
+                            } else if ((c & 0xF0) == 0xE0) {
+                                // 3-byte: must have 2 continuations, cp >= 0x800, not surrogate
+                                if (i + 2 >= rlen || (reason[i+1] & 0xC0) != 0x80 || (reason[i+2] & 0xC0) != 0x80) { utf8_ok = 0; break; }
+                                uint32_t cp = ((uint32_t)(c & 0x0F) << 12) | ((uint32_t)(reason[i+1] & 0x3F) << 6) | (uint32_t)(reason[i+2] & 0x3F);
+                                if (cp < 0x800) { utf8_ok = 0; break; } // overlong
+                                if (cp >= 0xD800 && cp <= 0xDFFF) { utf8_ok = 0; break; } // surrogate
+                                i += 3;
+                            } else if ((c & 0xF8) == 0xF0) {
+                                // 4-byte: must have 3 continuations, cp >= 0x10000, cp <= 0x10FFFF
+                                if (i + 3 >= rlen || (reason[i+1] & 0xC0) != 0x80 || (reason[i+2] & 0xC0) != 0x80 || (reason[i+3] & 0xC0) != 0x80) { utf8_ok = 0; break; }
+                                uint32_t cp = ((uint32_t)(c & 0x07) << 18) | ((uint32_t)(reason[i+1] & 0x3F) << 12) | ((uint32_t)(reason[i+2] & 0x3F) << 6) | (uint32_t)(reason[i+3] & 0x3F);
+                                if (cp < 0x10000) { utf8_ok = 0; break; } // overlong
+                                if (cp > 0x10FFFF) { utf8_ok = 0; break; } // out of range
+                                i += 4;
+                            } else {
+                                utf8_ok = 0; break; // invalid lead byte
+                            }
+                        }
+                        if (!utf8_ok) {
+                            unsigned char close_1002[2] = { 0x03, 0xEA };
+                            taida_net4_write_ws_frame(fd, WS_OPCODE_CLOSE, close_1002, 2);
+                            if (bs) bs->ws_closed = 1;
+                            free(frame.payload);
+                            fprintf(stderr, "wsReceive: protocol error: invalid UTF-8 in close reason\n");
+                            exit(1);
+                        }
+                    }
+                    // Valid close: echo the code in the reply.
+                    unsigned char reply[2] = { (unsigned char)(code >> 8), (unsigned char)(code & 0xFF) };
+                    if (bs && !bs->ws_closed) {
+                        taida_net4_write_ws_frame(fd, WS_OPCODE_CLOSE, reply, 2);
+                    }
+                    if (bs) {
+                        bs->ws_closed = 1;
+                        bs->ws_close_code = (int64_t)code;
+                    }
+                    free(frame.payload);
+                    return taida_net4_make_lax_ws_frame_empty();
                 }
-                if (bs) bs->ws_closed = 1;
-                return taida_net4_make_lax_ws_frame_empty();
             }
 
             case WS_FRAME_ERROR:
@@ -11953,8 +12268,11 @@ taida_val taida_net_ws_receive(taida_val ws) {
     }
 }
 
-// ── wsClose(ws) → Unit (NET4-4d) ────────────────────────────
-taida_val taida_net_ws_close(taida_val ws) {
+// ── wsClose(ws, code) → Unit (NET4-4d, v5 revision) ────────────────
+// v5: wsClose(ws) or wsClose(ws, code) → Unit.
+// 2nd arg (code): 0 = default 1000 (Normal Closure), otherwise explicit close code.
+// Valid codes: 1000-4999 excluding reserved 1004, 1005, 1006, 1015.
+taida_val taida_net_ws_close(taida_val ws, taida_val code_val) {
     Net3WriterState *w = tl_net3_writer;
     if (!w) {
         fprintf(stderr, "wsClose: can only be called inside a 2-argument httpServe handler\n");
@@ -11978,15 +12296,71 @@ taida_val taida_net_ws_close(taida_val ws) {
         return 0; // Unit
     }
 
+    // v5: Determine close code from 2nd argument.
+    // code_val is a tagged Int (shifted left 1, tag bit 0 = 1 for Int).
+    // When lowering passes 0, that decodes to Int(0) = default.
+    int64_t raw_code = (int64_t)code_val;
+    int64_t close_code_i64;
+    // Check if it's a tagged integer (low bit set) or a pointer (0).
+    if (raw_code == 0) {
+        close_code_i64 = 0; // default
+    } else if (raw_code & 1) {
+        close_code_i64 = raw_code >> 1; // unbox tagged Int
+    } else {
+        close_code_i64 = 0; // fallback to default for non-Int
+    }
+
+    uint16_t close_code;
+    if (close_code_i64 == 0) {
+        close_code = 1000; // default: Normal Closure
+    } else {
+        // Validate close code range.
+        if (close_code_i64 < 1000 || close_code_i64 > 4999) {
+            fprintf(stderr, "wsClose: close code must be 1000-4999, got %lld\n", (long long)close_code_i64);
+            exit(1);
+        }
+        // Reserved codes that must not be sent.
+        if (close_code_i64 == 1004 || close_code_i64 == 1005 || close_code_i64 == 1006 || close_code_i64 == 1015) {
+            fprintf(stderr, "wsClose: close code %lld is reserved and cannot be sent\n", (long long)close_code_i64);
+            exit(1);
+        }
+        close_code = (uint16_t)close_code_i64;
+    }
+
     int fd = tl_net3_client_fd;
 
-    // Send close frame with normal closure (1000).
-    unsigned char close_payload[2] = { 0x03, 0xE8 };
+    // Send close frame with the specified close code.
+    unsigned char close_payload[2] = { (unsigned char)(close_code >> 8), (unsigned char)(close_code & 0xFF) };
     taida_net4_write_ws_frame(fd, WS_OPCODE_CLOSE, close_payload, 2);
 
     if (bs) bs->ws_closed = 1;
 
     return 0; // Unit
+}
+
+// v5: wsCloseCode(ws) → Int (NET5-0d)
+// Returns the close code received from the peer's close frame.
+// 0 = no close frame received yet, 1005 = no status code, 1000-4999 = peer code.
+taida_val taida_net_ws_close_code(taida_val ws) {
+    Net3WriterState *w = tl_net3_writer;
+    if (!w) {
+        fprintf(stderr, "wsCloseCode: can only be called inside a 2-argument httpServe handler\n");
+        exit(1);
+    }
+
+    if (!taida_net4_validate_ws_token(ws)) {
+        fprintf(stderr, "wsCloseCode: first argument must be the WebSocket connection from wsUpgrade\n");
+        exit(1);
+    }
+
+    if (w->state != NET3_STATE_WEBSOCKET) {
+        fprintf(stderr, "wsCloseCode: not in WebSocket state. Call wsUpgrade first.\n");
+        exit(1);
+    }
+
+    Net4BodyState *bs = tl_net4_body;
+    int64_t code = (bs) ? bs->ws_close_code : 0;
+    return (taida_val)code;
 }
 
 // Validate that the writer argument is a genuine BuchiPack token with
@@ -12059,6 +12433,9 @@ typedef struct {
 
     // NET3-5a: handler arity (1 = one-shot, 2 = streaming, -1 = unknown/runtime detect)
     int handler_arity;
+
+    // NET5-4a: TLS context (NULL = plaintext, non-NULL = TLS).
+    OSSL_SSL_CTX *ssl_ctx;
 } NetThreadPool;
 
 static void net_pool_init(NetThreadPool *pool, int queue_cap, taida_val handler, int64_t max_requests, int64_t timeout_ms, int handler_arity) {
@@ -12077,6 +12454,7 @@ static void net_pool_init(NetThreadPool *pool, int queue_cap, taida_val handler,
     pool->handler = handler;
     pool->timeout_ms = timeout_ms;
     pool->handler_arity = handler_arity;
+    pool->ssl_ctx = NULL; // NET5-4a: set by httpServe if TLS configured
 }
 
 static void net_pool_destroy(NetThreadPool *pool) {
@@ -12145,7 +12523,25 @@ static void *net_worker_thread(void *arg) {
             tv.tv_sec = (long)(effective_timeout / 1000);
             tv.tv_usec = (long)((effective_timeout % 1000) * 1000);
             setsockopt(client_fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+            // Also set write timeout for TLS handshake and writes.
+            setsockopt(client_fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
         }
+
+        // NET5-4a: TLS handshake if pool has SSL_CTX.
+        OSSL_SSL *conn_ssl = NULL;
+        if (pool->ssl_ctx) {
+            conn_ssl = taida_tls_handshake(pool->ssl_ctx, client_fd);
+            if (!conn_ssl) {
+                // NET5-0c: handshake failure = close connection, don't call handler.
+                close(client_fd);
+                pthread_mutex_lock(&pool->mutex);
+                pool->active_connections--;
+                pthread_cond_signal(&pool->cond_done);
+                pthread_mutex_unlock(&pool->mutex);
+                continue;
+            }
+        }
+        tl_ssl = conn_ssl;
 
         // Per-connection scratch buffer (allocated once, reused via advance)
         #define NET_MAX_REQUEST_BUF 1048576
@@ -12209,7 +12605,7 @@ static void *net_worker_thread(void *arg) {
                     TAIDA_REALLOC(buf, new_cap, "net_worker_head");
                     buf_cap = new_cap;
                 }
-                ssize_t n = recv(client_fd, buf + total_read, buf_cap - total_read, 0);
+                ssize_t n = taida_tls_recv(client_fd, buf + total_read, buf_cap - total_read);
                 if (n <= 0) {
                     // EOF or timeout — partial head gets 400 (parity with interpreter)
                     if (total_read > 0) {
@@ -12294,6 +12690,7 @@ static void *net_worker_thread(void *arg) {
                 body_state.request_token = taida_net4_alloc_token();
                 body_state.ws_closed = 0;
                 body_state.ws_token = 0;
+                body_state.ws_close_code = 0; // v5: no close frame received yet
 
                 // Build request pack (head only, body = empty span).
                 taida_val raw_bytes = taida_bytes_from_raw(buf, (taida_val)head_consumed);
@@ -12516,7 +12913,7 @@ static void *net_worker_thread(void *arg) {
                             TAIDA_REALLOC(buf, new_cap, "net_worker_chunked");
                             buf_cap = new_cap;
                         }
-                        ssize_t n = recv(client_fd, buf + total_read, buf_cap - total_read, 0);
+                        ssize_t n = taida_tls_recv(client_fd, buf + total_read, buf_cap - total_read);
                         if (n <= 0) {
                             const char *bad = "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
                             taida_net_send_all(client_fd, bad, strlen(bad));
@@ -12551,7 +12948,7 @@ static void *net_worker_thread(void *arg) {
                             TAIDA_REALLOC(buf, new_cap, "net_worker_body");
                             buf_cap = new_cap;
                         }
-                        ssize_t n = recv(client_fd, buf + total_read, buf_cap - total_read, 0);
+                        ssize_t n = taida_tls_recv(client_fd, buf + total_read, buf_cap - total_read);
                         if (n <= 0) break;
                         total_read += (size_t)n;
                     }
@@ -12681,6 +13078,12 @@ static void *net_worker_thread(void *arg) {
         }
 
     conn_done:
+        // NET5-4a: TLS shutdown before closing fd.
+        if (conn_ssl) {
+            taida_tls_shutdown_free(conn_ssl);
+            conn_ssl = NULL;
+            tl_ssl = NULL;
+        }
         close(client_fd);
         free(buf);
         buf = NULL;
@@ -12705,8 +13108,9 @@ static void *net_worker_thread(void *arg) {
 // ── httpServe(port, handler, maxRequests, timeoutMs, maxConnections) ──
 // HTTP/1.1 server v2+v3: keep-alive, chunked TE, pthread pool, maxConnections.
 // NET3-5a: handler_arity added — 2 = streaming writer, 1 = one-shot, -1 = unknown.
+// v5: tls parameter added. 0 = plaintext (v4 compat), non-zero = BuchiPack @(cert, key) = HTTPS via OpenSSL dlopen.
 // Returns Async[Result[@(ok: Bool, requests: Int), _]]
-taida_val taida_net_http_serve(taida_val port, taida_val handler, taida_val max_requests, taida_val timeout_ms, taida_val max_connections, taida_val handler_type_tag, taida_val handler_arity) {
+taida_val taida_net_http_serve(taida_val port, taida_val handler, taida_val max_requests, taida_val timeout_ms, taida_val max_connections, taida_val tls, taida_val handler_type_tag, taida_val handler_arity) {
     // NB3-5: Suppress SIGPIPE process-wide. Without this, writev() or
     // send() on a peer-closed socket delivers SIGPIPE which terminates the
     // process before the return-value error path can execute. This is the
@@ -12733,6 +13137,52 @@ taida_val taida_net_http_serve(taida_val port, taida_val handler, taida_val max_
         if (!callable) {
             return taida_async_resolved(taida_net_result_fail("TypeError", "httpServe: handler must be a Function"));
         }
+    }
+
+    // NET5-4a: TLS configuration — replaced Phase 2 stub with actual implementation.
+    // tls is a BuchiPack pointer (non-zero = object) or 0 (default = plaintext).
+    // NB5-16: Non-zero non-BuchiPack tls must NOT silently fall back to plaintext.
+    // Only 0 (default) and valid BuchiPack pointers are accepted.
+    OSSL_SSL_CTX *ssl_ctx = NULL;
+    if (tls != 0 && !TAIDA_IS_PACK(tls)) {
+        // Non-BuchiPack non-zero value (e.g. tls=42) → reject.
+        fprintf(stderr, "RuntimeError: httpServe: tls must be a BuchiPack @(cert: Str, key: Str) or @(), got non-pack value\n");
+        fflush(stderr);
+        exit(1);
+    }
+    if (tls != 0) {
+        taida_val *pack = (taida_val *)tls;
+        int64_t field_count = pack[1];
+        if (field_count > 0) {
+            // Non-empty tls pack → extract cert and key paths, initialize TLS.
+            // Load OpenSSL via dlopen.
+            if (!taida_ossl_load()) {
+                return taida_async_resolved(taida_net_result_fail("TlsError",
+                    "httpServe: TLS/HTTPS requires OpenSSL (libssl.so). "
+                    "Install libssl3 or equivalent."));
+            }
+            // Extract cert and key fields from the BuchiPack.
+            taida_val cert_val = taida_pack_get(tls, taida_str_hash((taida_val)"cert"));
+            taida_val key_val = taida_pack_get(tls, taida_str_hash((taida_val)"key"));
+            if (!cert_val || cert_val <= 4096) {
+                return taida_async_resolved(taida_net_result_fail("TlsError",
+                    "httpServe: tls config requires 'cert' field (path to PEM certificate file)"));
+            }
+            if (!key_val || key_val <= 4096) {
+                return taida_async_resolved(taida_net_result_fail("TlsError",
+                    "httpServe: tls config requires 'key' field (path to PEM private key file)"));
+            }
+            const char *cert_path = (const char *)cert_val;
+            const char *key_path = (const char *)key_val;
+
+            // Create SSL_CTX with cert/key.
+            char tls_errbuf[512];
+            ssl_ctx = taida_tls_create_ctx(cert_path, key_path, tls_errbuf, sizeof(tls_errbuf));
+            if (!ssl_ctx) {
+                return taida_async_resolved(taida_net_result_fail("TlsError", tls_errbuf));
+            }
+        }
+        // else: empty @() pack → plaintext, fall through
     }
 
     // NET2-5d: maxConnections (default 128, <= 0 falls back to 128)
@@ -12778,6 +13228,7 @@ taida_val taida_net_http_serve(taida_val port, taida_val handler, taida_val max_
 
     NetThreadPool pool;
     net_pool_init(&pool, (int)max_conn + 16, handler, max_requests, timeout_ms, (int)handler_arity);
+    pool.ssl_ctx = ssl_ctx; // NET5-4a: NULL = plaintext, non-NULL = TLS
 
     pthread_t *workers = (pthread_t*)TAIDA_MALLOC(sizeof(pthread_t) * (size_t)num_workers, "net_workers");
     for (int i = 0; i < num_workers; i++) {
@@ -12859,6 +13310,11 @@ taida_val taida_net_http_serve(taida_val port, taida_val handler, taida_val max_
 
     free(workers);
     net_pool_destroy(&pool);
+
+    // NET5-4a: Free TLS context.
+    if (ssl_ctx && taida_ossl.loaded) {
+        taida_ossl.SSL_CTX_free(ssl_ctx);
+    }
 
     // Server completed successfully
     taida_val ok_inner = taida_pack_new(2);

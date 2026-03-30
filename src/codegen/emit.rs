@@ -1567,9 +1567,10 @@ fn runtime_abi(name: &str) -> Result<RuntimeAbi, String> {
             params: &[Ptr],
             returns: &[Ptr],
         },
-        // NET3-5a: taida_net_http_serve(port, handler, max_requests, timeout_ms, max_connections, handler_type_tag, handler_arity) -> Ptr
+        // NET3-5a / v5: taida_net_http_serve(port, handler, max_requests, timeout_ms, max_connections, tls, handler_type_tag, handler_arity) -> Ptr
+        // v5: tls parameter added (6th arg, Ptr to BuchiPack or 0 for plaintext).
         "taida_net_http_serve" => RuntimeAbi {
-            params: &[Val, Ptr, Val, Val, Val, Val, Val],
+            params: &[Val, Ptr, Val, Val, Val, Ptr, Val, Val],
             returns: &[Ptr],
         },
         // NET2-0f: taida_net_read_body(req: Ptr) -> Ptr (Bytes)
@@ -1622,8 +1623,17 @@ fn runtime_abi(name: &str) -> Result<RuntimeAbi, String> {
             params: &[Ptr],
             returns: &[Ptr],
         },
-        // NET4-4d: wsClose(ws) -> Ptr
+        // NET4-4d / v5: wsClose(ws, code) -> Ptr
+        // v5 revision: 2nd arg is optional close code (Int, default 1000).
+        // When called with 1 arg, the lowering passes only ws.
+        // When called with 2 args, the lowering passes ws + code.
+        // The C runtime uses the 2nd arg to set the close code (0 = default 1000).
         "taida_net_ws_close" => RuntimeAbi {
+            params: &[Ptr, Ptr],
+            returns: &[Ptr],
+        },
+        // v5: wsCloseCode(ws) -> Ptr (returns Int wrapped as taida_val)
+        "taida_net_ws_close_code" => RuntimeAbi {
             params: &[Ptr],
             returns: &[Ptr],
         },

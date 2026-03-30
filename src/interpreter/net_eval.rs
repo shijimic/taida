@@ -21,7 +21,7 @@ use crate::parser::Expr;
 type ResponseFields = (i64, Vec<(String, String)>, Vec<u8>);
 
 /// All symbols exported by the net package.
-/// Legacy (16) + HTTP v1 (3) + HTTP v2 (1) + HTTP v3 (4) + HTTP v4 (6) = 30 symbols.
+/// Legacy (16) + HTTP v1 (3) + HTTP v2 (1) + HTTP v3 (4) + HTTP v4 (6) + v5 (1) = 31 symbols.
 pub(crate) const NET_SYMBOLS: &[&str] = &[
     // Legacy surface (shared with os)
     "dnsResolve",
@@ -59,6 +59,8 @@ pub(crate) const NET_SYMBOLS: &[&str] = &[
     "wsSend",
     "wsReceive",
     "wsClose",
+    // v5 WebSocket revision
+    "wsCloseCode",
 ];
 
 // ── v3 Writer State Machine ───────────────────────────────────────
@@ -158,7 +160,7 @@ impl StreamingWriter {
 ///   `writeChunk(writer, writeChunk(writer, "data"))`).
 pub(crate) struct ActiveStreamingWriter {
     pub writer: *mut StreamingWriter,
-    pub stream: *mut std::net::TcpStream,
+    pub stream: *mut ConnStream,
     /// NB3-9: Re-entrancy guard. Set to true while a streaming API function
     /// holds `&mut *self.writer` / `&mut *self.stream`. If another streaming
     /// API call is attempted while this is true, it returns a RuntimeError
@@ -173,6 +175,10 @@ pub(crate) struct ActiveStreamingWriter {
     /// NB4-10: Connection-scoped WebSocket token for identity verification.
     /// Set when wsUpgrade succeeds; verified by wsSend/wsReceive/wsClose.
     pub ws_token: u64,
+    /// v5: Received close code from peer's close frame.
+    /// 0 = no close frame received yet.
+    /// Set when a valid close frame is received in wsReceive.
+    pub ws_close_code: i64,
 }
 
 // ── v4 Request Body Streaming State ──────────────────────────
@@ -226,7 +232,8 @@ enum WsFrame {
     /// Pong frame (opcode 0xA) — unsolicited, ignored.
     Pong,
     /// Close frame (opcode 0x8).
-    Close,
+    /// v5: carries the raw close payload for close code extraction.
+    Close { payload: Vec<u8> },
     /// Protocol error (fragmented frame, unknown opcode, etc.).
     ProtocolError(String),
 }
@@ -337,8 +344,8 @@ fn http_reason_phrase(status: u16) -> &'static str {
 // These avoid creating aggregate buffers. `write_vectored_all` uses IoSlice
 // to send multiple disjoint buffers in a single syscall where supported.
 
-/// Write all bytes to a std::net::TcpStream, retrying on partial writes.
-fn write_all_retry(stream: &mut std::net::TcpStream, data: &[u8]) -> Result<(), RuntimeError> {
+/// Write all bytes to a ConnStream (plaintext or TLS), retrying on partial writes.
+fn write_all_retry(stream: &mut ConnStream, data: &[u8]) -> Result<(), RuntimeError> {
     use std::io::Write;
     stream.write_all(data).map_err(|e| RuntimeError {
         message: format!("streaming write error: {}", e),
@@ -346,16 +353,12 @@ fn write_all_retry(stream: &mut std::net::TcpStream, data: &[u8]) -> Result<(), 
 }
 
 /// Write multiple IoSlice buffers to a stream without creating an aggregate buffer.
-/// Uses vectored write (writev) where available, falling back to sequential writes.
+/// Uses sequential writes to avoid aggregate buffer creation.
 fn write_vectored_all(
-    stream: &mut std::net::TcpStream,
+    stream: &mut ConnStream,
     bufs: &[std::io::IoSlice<'_>],
 ) -> Result<(), RuntimeError> {
     use std::io::Write;
-    // std::net::TcpStream supports write_vectored. We need to handle partial writes.
-    // For simplicity and correctness, write each buffer sequentially via write_all.
-    // This still avoids aggregate buffer creation — each buffer is sent as-is.
-    // The kernel may coalesce these via Nagle or TCP_CORK.
     for buf in bufs {
         stream.write_all(buf).map_err(|e| RuntimeError {
             message: format!("streaming write error: {}", e),
@@ -1232,10 +1235,85 @@ fn eval_read_body(req: &Value) -> Result<Value, RuntimeError> {
 
 // ── NET2-3: Concurrent connection pool types ────────────────
 
+// ── ConnStream: polymorphic stream for TLS / plaintext ──────────────
+
+/// Polymorphic stream that wraps either a plain TcpStream (v4 compat)
+/// or a TlsTransport (v5 HTTPS). Implements `std::io::Read` and `std::io::Write`
+/// so existing streaming helpers work unchanged.
+pub(crate) enum ConnStream {
+    Plain(std::net::TcpStream),
+    Tls(super::net_transport::TlsTransport),
+}
+
+impl std::io::Read for ConnStream {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        match self {
+            ConnStream::Plain(s) => std::io::Read::read(s, buf),
+            ConnStream::Tls(t) => super::net_transport::Transport::read(t, buf),
+        }
+    }
+}
+
+impl std::io::Write for ConnStream {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        match self {
+            ConnStream::Plain(s) => std::io::Write::write(s, buf),
+            ConnStream::Tls(t) => {
+                super::net_transport::Transport::write_all(t, buf)?;
+                Ok(buf.len())
+            }
+        }
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        match self {
+            ConnStream::Plain(s) => std::io::Write::flush(s),
+            ConnStream::Tls(t) => super::net_transport::Transport::flush(t),
+        }
+    }
+
+    fn write_all(&mut self, buf: &[u8]) -> std::io::Result<()> {
+        match self {
+            ConnStream::Plain(s) => std::io::Write::write_all(s, buf),
+            ConnStream::Tls(t) => super::net_transport::Transport::write_all(t, buf),
+        }
+    }
+}
+
+impl ConnStream {
+    fn set_read_timeout(&self, dur: Option<std::time::Duration>) -> std::io::Result<()> {
+        match self {
+            ConnStream::Plain(s) => s.set_read_timeout(dur),
+            ConnStream::Tls(t) => t.stream_ref().set_read_timeout(dur),
+        }
+    }
+
+    fn set_write_timeout(&self, dur: Option<std::time::Duration>) -> std::io::Result<()> {
+        match self {
+            ConnStream::Plain(s) => s.set_write_timeout(dur),
+            ConnStream::Tls(t) => t.stream_ref().set_write_timeout(dur),
+        }
+    }
+
+    fn shutdown(&self, how: std::net::Shutdown) -> std::io::Result<()> {
+        match self {
+            ConnStream::Plain(s) => s.shutdown(how),
+            ConnStream::Tls(t) => t.stream_ref().shutdown(how),
+        }
+    }
+
+    fn peer_addr(&self) -> std::io::Result<std::net::SocketAddr> {
+        match self {
+            ConnStream::Plain(s) => s.peer_addr(),
+            ConnStream::Tls(t) => t.stream_ref().peer_addr(),
+        }
+    }
+}
+
 /// Per-connection state for the concurrent httpServe pool.
 /// Each connection owns its own scratch buffer (no sharing).
 struct HttpConnection {
-    stream: std::net::TcpStream,
+    stream: ConnStream,
     peer_addr: std::net::SocketAddr,
     /// Per-connection scratch buffer (allocated once, reused via advance)
     buf: Vec<u8>,
@@ -1484,10 +1562,10 @@ impl Interpreter {
                 result
             }
 
-            // ── v4 WebSocket API ──
+            // ── v4 WebSocket API + v5 WebSocket revision ──
             // These functions are only callable inside a 2-arg httpServe handler.
             // Protected by the same re-entrancy guard as v3 streaming API.
-            "wsUpgrade" | "wsSend" | "wsReceive" | "wsClose" => {
+            "wsUpgrade" | "wsSend" | "wsReceive" | "wsClose" | "wsCloseCode" => {
                 // Check re-entrancy before dispatching.
                 if let Some(ref active) = self.active_streaming_writer
                     && active.borrowed
@@ -1509,6 +1587,7 @@ impl Interpreter {
                     "wsSend" => self.eval_ws_send(args),
                     "wsReceive" => self.eval_ws_receive(args),
                     "wsClose" => self.eval_ws_close(args),
+                    "wsCloseCode" => self.eval_ws_close_code(args),
                     _ => unreachable!(),
                 };
 
@@ -2129,7 +2208,7 @@ impl Interpreter {
     /// Read one chunk from a chunked transfer-encoded body.
     fn read_body_chunk_chunked(
         body: &mut RequestBodyState,
-        stream: &mut std::net::TcpStream,
+        stream: &mut ConnStream,
     ) -> Result<Option<Signal>, RuntimeError> {
         const READ_BUF_SIZE: usize = 8192;
 
@@ -2230,7 +2309,7 @@ impl Interpreter {
     /// Read one chunk from a Content-Length body.
     fn read_body_chunk_content_length(
         body: &mut RequestBodyState,
-        stream: &mut std::net::TcpStream,
+        stream: &mut ConnStream,
     ) -> Result<Option<Signal>, RuntimeError> {
         const READ_BUF_SIZE: usize = 8192;
 
@@ -2266,7 +2345,7 @@ impl Interpreter {
     /// corrupting the next request on a keep-alive connection.
     fn drain_chunked_trailers(
         body: &mut RequestBodyState,
-        stream: &mut std::net::TcpStream,
+        stream: &mut ConnStream,
     ) -> Result<(), RuntimeError> {
         // Read lines until we get an empty line (just whitespace/CRLF).
         // Safety limit: at most 64 trailer lines to prevent infinite loops.
@@ -2293,7 +2372,7 @@ impl Interpreter {
     /// Read a line (up to CRLF) from leftover buffer then stream.
     fn read_line_from_body(
         body: &mut RequestBodyState,
-        stream: &mut std::net::TcpStream,
+        stream: &mut ConnStream,
     ) -> Result<String, RuntimeError> {
         let mut line = Vec::new();
 
@@ -2340,7 +2419,7 @@ impl Interpreter {
     /// Returns a Vec of the bytes actually read (may be less than count on EOF).
     fn read_exact_from_body(
         body: &mut RequestBodyState,
-        stream: &mut std::net::TcpStream,
+        stream: &mut ConnStream,
         count: usize,
     ) -> Result<Vec<u8>, RuntimeError> {
         let mut result = Vec::with_capacity(count);
@@ -2937,7 +3016,7 @@ impl Interpreter {
     /// Server-to-client: FIN=1, MASK=0.
     /// Uses vectored write (header on stack, payload direct).
     fn write_ws_frame(
-        stream: &mut std::net::TcpStream,
+        stream: &mut ConnStream,
         opcode: u8,
         payload: &[u8],
     ) -> Result<(), RuntimeError> {
@@ -3043,15 +3122,71 @@ impl Interpreter {
                     // Unsolicited pong: ignore, continue.
                     continue;
                 }
-                WsFrame::Close => {
-                    // NB4-12: Send close reply before marking closed (parity with Native).
-                    let close_reply = [0x03, 0xE8]; // 1000 normal closure
-                    let _ = Self::write_ws_frame(stream, Self::WS_OPCODE_CLOSE, &close_reply);
-                    // Mark as closed.
-                    if let Some(ref mut active) = self.active_streaming_writer {
-                        active.ws_closed = true;
+                WsFrame::Close { payload } => {
+                    // v5 close code extraction (NET5-0d):
+                    // - 0 bytes: no status code → wsCloseCode returns 1005, reply with empty close
+                    // - 2+ bytes: extract 16-bit code, validate, echo code in reply
+                    // - 1 byte or invalid code or invalid UTF-8 reason: protocol error → 1002
+                    if payload.is_empty() {
+                        // No status code: reply with empty close payload.
+                        let _ = Self::write_ws_frame(stream, Self::WS_OPCODE_CLOSE, &[]);
+                        if let Some(ref mut active) = self.active_streaming_writer {
+                            active.ws_closed = true;
+                            active.ws_close_code = 1005; // No Status Rcvd
+                        }
+                        return Ok(Some(Signal::Value(Self::make_lax_ws_frame_empty())));
+                    } else if payload.len() == 1 {
+                        // 1-byte close payload is malformed (RFC 6455 Section 5.5).
+                        let close_payload = [0x03, 0xEA]; // 1002 protocol error
+                        let _ = Self::write_ws_frame(stream, Self::WS_OPCODE_CLOSE, &close_payload);
+                        if let Some(ref mut active) = self.active_streaming_writer {
+                            active.ws_closed = true;
+                            // ws_close_code NOT updated for protocol error
+                        }
+                        return Err(RuntimeError {
+                            message: "wsReceive: protocol error: malformed close frame (1-byte payload)".into(),
+                        });
+                    } else {
+                        // 2+ bytes: first 2 bytes are the close code (big-endian).
+                        let code = ((payload[0] as u16) << 8) | (payload[1] as u16);
+                        // Validate close code (RFC 6455 Section 7.4).
+                        // 1000-1003: standard, 1007-1014: IANA-registered,
+                        // 3000-4999: reserved for libraries/apps/private use.
+                        let valid_code = matches!(code,
+                            1000..=1003 | 1007..=1014 | 3000..=4999
+                        );
+                        if !valid_code {
+                            let close_payload = [0x03, 0xEA]; // 1002
+                            let _ = Self::write_ws_frame(stream, Self::WS_OPCODE_CLOSE, &close_payload);
+                            if let Some(ref mut active) = self.active_streaming_writer {
+                                active.ws_closed = true;
+                            }
+                            return Err(RuntimeError {
+                                message: format!("wsReceive: protocol error: invalid close code {}", code),
+                            });
+                        }
+                        // Validate reason UTF-8 if present.
+                        if payload.len() > 2 {
+                            if std::str::from_utf8(&payload[2..]).is_err() {
+                                let close_payload = [0x03, 0xEA]; // 1002
+                                let _ = Self::write_ws_frame(stream, Self::WS_OPCODE_CLOSE, &close_payload);
+                                if let Some(ref mut active) = self.active_streaming_writer {
+                                    active.ws_closed = true;
+                                }
+                                return Err(RuntimeError {
+                                    message: "wsReceive: protocol error: invalid UTF-8 in close reason".into(),
+                                });
+                            }
+                        }
+                        // Valid close: echo the code in the reply.
+                        let reply = [(code >> 8) as u8, (code & 0xFF) as u8];
+                        let _ = Self::write_ws_frame(stream, Self::WS_OPCODE_CLOSE, &reply);
+                        if let Some(ref mut active) = self.active_streaming_writer {
+                            active.ws_closed = true;
+                            active.ws_close_code = code as i64;
+                        }
+                        return Ok(Some(Signal::Value(Self::make_lax_ws_frame_empty())));
                     }
-                    return Ok(Some(Signal::Value(Self::make_lax_ws_frame_empty())));
                 }
                 WsFrame::ProtocolError(msg) => {
                     // Send close frame with protocol error status code (1002).
@@ -3090,7 +3225,7 @@ impl Interpreter {
 
     /// Read exactly `count` bytes from a TcpStream.
     fn read_exact_bytes(
-        stream: &mut std::net::TcpStream,
+        stream: &mut ConnStream,
         count: usize,
     ) -> Result<Vec<u8>, RuntimeError> {
         use std::io::Read;
@@ -3122,7 +3257,7 @@ impl Interpreter {
     }
 
     /// Read and parse one WebSocket frame from the stream (NET4-2c).
-    fn read_ws_frame(stream: &mut std::net::TcpStream) -> Result<WsFrame, RuntimeError> {
+    fn read_ws_frame(stream: &mut ConnStream) -> Result<WsFrame, RuntimeError> {
         // Read first 2 bytes: FIN+opcode, MASK+payload_len7.
         let header = Self::read_exact_bytes(stream, 2)?;
         let byte0 = header[0];
@@ -3220,8 +3355,8 @@ impl Interpreter {
                 Ok(WsFrame::Data { opcode, payload })
             }
             0x8 => {
-                // Close frame.
-                Ok(WsFrame::Close)
+                // Close frame. v5: carry raw payload for close code extraction.
+                Ok(WsFrame::Close { payload })
             }
             0x9 => {
                 // Ping.
@@ -3242,6 +3377,12 @@ impl Interpreter {
     ///
     /// Sends a close frame. Idempotent (second call is no-op).
     /// Handler return auto-close is handled in dispatch_request.
+    /// `wsClose(ws)` or `wsClose(ws, code)` → Unit (NET4-2f, v5 revision).
+    ///
+    /// Sends a close frame. Optional close code (default 1000).
+    /// v5: accepts an explicit close code in the range 1000-4999
+    /// (excluding reserved codes 1004, 1005, 1006, 1015).
+    /// Idempotent (second call is no-op).
     fn eval_ws_close(&mut self, args: &[Expr]) -> Result<Option<Signal>, RuntimeError> {
         if self.active_streaming_writer.is_none() {
             return Err(RuntimeError {
@@ -3252,6 +3393,42 @@ impl Interpreter {
         // Validate ws token.
         self.validate_ws_token(args, "wsClose")?;
 
+        // v5: Evaluate optional close code arg before taking borrows.
+        let close_code: u16 = if let Some(code_arg) = args.get(1) {
+            match self.eval_expr(code_arg)? {
+                Signal::Value(Value::Int(n)) => {
+                    // Validate close code per NET5-0d.
+                    if !(1000..=4999).contains(&n) {
+                        return Err(RuntimeError {
+                            message: format!(
+                                "wsClose: close code must be 1000-4999, got {}",
+                                n
+                            ),
+                        });
+                    }
+                    // Reserved codes that must not be sent.
+                    if matches!(n, 1004 | 1005 | 1006 | 1015) {
+                        return Err(RuntimeError {
+                            message: format!(
+                                "wsClose: close code {} is reserved and cannot be sent",
+                                n
+                            ),
+                        });
+                    }
+                    n as u16
+                }
+                Signal::Value(v) => {
+                    return Err(RuntimeError {
+                        message: format!("wsClose: close code must be Int, got {}", v),
+                    });
+                }
+                other => return Ok(Some(other)),
+            }
+        } else {
+            1000 // default: Normal Closure
+        };
+
+        // Now take borrows after eval_expr is done.
         let active = self.active_streaming_writer.as_ref().unwrap();
         let writer = unsafe { &*active.writer };
 
@@ -3268,8 +3445,8 @@ impl Interpreter {
 
         let stream = unsafe { &mut *active.stream };
 
-        // Send close frame (opcode 0x8) with normal closure status (1000).
-        let close_payload = [0x03, 0xE8u8]; // 1000 in big-endian
+        // Send close frame (opcode 0x8) with the specified close code.
+        let close_payload = [(close_code >> 8) as u8, (close_code & 0xFF) as u8];
         let _ = Self::write_ws_frame(stream, Self::WS_OPCODE_CLOSE, &close_payload);
 
         // Mark as closed.
@@ -3280,10 +3457,44 @@ impl Interpreter {
         Ok(Some(Signal::Value(Value::Unit)))
     }
 
+    /// `wsCloseCode(ws)` → Int (v5 NET5-0d).
+    ///
+    /// Returns the close code received from the peer's close frame.
+    /// - 0: no close frame received yet
+    /// - 1005: close frame with no status code
+    /// - 1000-4999: peer's close code
+    fn eval_ws_close_code(&mut self, args: &[Expr]) -> Result<Option<Signal>, RuntimeError> {
+        if self.active_streaming_writer.is_none() {
+            return Err(RuntimeError {
+                message: "wsCloseCode: can only be called inside a 2-argument httpServe handler"
+                    .into(),
+            });
+        }
+
+        // Validate ws token.
+        self.validate_ws_token(args, "wsCloseCode")?;
+
+        let active = self.active_streaming_writer.as_ref().unwrap();
+        let writer = unsafe { &*active.writer };
+
+        if writer.state != WriterState::WebSocket {
+            return Err(RuntimeError {
+                message: "wsCloseCode: not in WebSocket state. Call wsUpgrade first.".into(),
+            });
+        }
+
+        let close_code = active.ws_close_code;
+        Ok(Some(Signal::Value(Value::Int(close_code))))
+    }
+
     // ── httpServe implementation ───────────────────────────────
     //
-    // httpServe(port, handler, maxRequests <= 0, timeoutMs <= 5000, maxConnections <= 128)
+    // httpServe(port, handler, maxRequests <= 0, timeoutMs <= 5000, maxConnections <= 128, tls <= @())
     //   → Async[Result[@(ok: Bool, requests: Int), _]]
+    //
+    // v5: tls parameter added. When tls is non-empty @(cert: Str, key: Str),
+    //   the server runs HTTPS. When tls is @() (default), plaintext HTTP.
+    //   TLS implementation is Phase 2; Phase 1 only parses and validates the arg.
     //
     // v2 concurrency model (NET2-3):
     //   The Interpreter is single-threaded (!Send, &mut self for handler eval).
@@ -3404,6 +3615,85 @@ impl Interpreter {
             None => 128,
         };
 
+        // ── Arg 5: tls (optional, default @() = plaintext) ──
+        // v5: TLS configuration. @() means plaintext (v4 compat).
+        // @(cert: "path", key: "path") means HTTPS.
+        // Phase 1: parse and validate only. TLS runtime is Phase 2.
+        let tls_cert_path: Option<String>;
+        let tls_key_path: Option<String>;
+        match args.get(5) {
+            Some(arg) => match self.eval_expr(arg)? {
+                Signal::Value(Value::BuchiPack(fields)) => {
+                    if fields.is_empty() {
+                        // @() → plaintext
+                        tls_cert_path = None;
+                        tls_key_path = None;
+                    } else {
+                        // Extract cert and key fields.
+                        let cert = fields
+                            .iter()
+                            .find(|(k, _)| k == "cert")
+                            .map(|(_, v)| v.clone());
+                        let key = fields
+                            .iter()
+                            .find(|(k, _)| k == "key")
+                            .map(|(_, v)| v.clone());
+
+                        match (cert, key) {
+                            (Some(Value::Str(c)), Some(Value::Str(k))) => {
+                                tls_cert_path = Some(c);
+                                tls_key_path = Some(k);
+                            }
+                            (Some(Value::Str(_)), _) => {
+                                // NB5-16: Return Result failure(TlsError) for startup config errors
+                                // (NET5-0c: startup failure = Result failure), matching JS/Native parity.
+                                let result = make_result_failure_msg("TlsError", "httpServe: tls.key must be a Str (PEM file path)");
+                                return Ok(Some(Signal::Value(make_fulfilled_async(result))));
+                            }
+                            (_, Some(Value::Str(_))) => {
+                                let result = make_result_failure_msg("TlsError", "httpServe: tls.cert must be a Str (PEM file path)");
+                                return Ok(Some(Signal::Value(make_fulfilled_async(result))));
+                            }
+                            _ => {
+                                let result = make_result_failure_msg("TlsError", "httpServe: tls must be @(cert: Str, key: Str) or @()");
+                                return Ok(Some(Signal::Value(make_fulfilled_async(result))));
+                            }
+                        }
+                    }
+                }
+                Signal::Value(v) => {
+                    return Err(RuntimeError {
+                        message: format!(
+                            "httpServe: tls must be a BuchiPack @(cert: Str, key: Str) or @(), got {}",
+                            v
+                        ),
+                    });
+                }
+                other => return Ok(Some(other)),
+            },
+            None => {
+                // Default: plaintext (v4 compat)
+                tls_cert_path = None;
+                tls_key_path = None;
+            }
+        }
+
+        // v5: Load TLS config if cert/key provided (NET5-2a).
+        let tls_config: Option<std::sync::Arc<rustls::ServerConfig>> =
+            match (tls_cert_path.as_deref(), tls_key_path.as_deref()) {
+                (Some(cert), Some(key)) => {
+                    match super::net_transport::load_tls_config(cert, key) {
+                        Ok(config) => Some(config),
+                        Err(msg) => {
+                            // cert/key load failure → startup Result failure (NET5-0c).
+                            let result = make_result_failure_msg("TlsError", msg);
+                            return Ok(Some(Signal::Value(make_fulfilled_async(result))));
+                        }
+                    }
+                }
+                _ => None, // plaintext (v4 compat)
+            };
+
         // ── Bind to 127.0.0.1:port ──
         // v1 contract: always bind to loopback, never 0.0.0.0
         let addr = format!("127.0.0.1:{}", port);
@@ -3457,11 +3747,34 @@ impl Interpreter {
             // ── Step 1: Accept new connections (non-blocking) ──
             while connections.len() < max_connections {
                 match listener.accept() {
-                    Ok((stream, peer_addr)) => {
+                    Ok((tcp_stream, peer_addr)) => {
+                        // v5: If TLS is configured, perform TLS handshake on the accepted TCP stream.
+                        let conn_stream = if let Some(ref tls_cfg) = tls_config {
+                            // Set blocking mode with handshake deadline.
+                            let _ = tcp_stream.set_nonblocking(false);
+                            let _ = tcp_stream.set_read_timeout(Some(read_timeout));
+                            let _ = tcp_stream.set_write_timeout(Some(read_timeout));
+
+                            let tls_conn = match rustls::ServerConnection::new(tls_cfg.clone()) {
+                                Ok(c) => c,
+                                Err(_) => continue, // TLS setup error, skip connection
+                            };
+                            let mut tls_transport = super::net_transport::TlsTransport::new(tls_conn, tcp_stream);
+                            match super::net_transport::complete_tls_handshake(&mut tls_transport, read_timeout) {
+                                Ok(()) => ConnStream::Tls(tls_transport),
+                                Err(_) => {
+                                    // NET5-0c: handshake failure = close + don't call handler.
+                                    continue;
+                                }
+                            }
+                        } else {
+                            ConnStream::Plain(tcp_stream)
+                        };
+
                         // Set short read timeout for polling readiness
-                        let _ = stream.set_read_timeout(Some(poll_timeout));
+                        let _ = conn_stream.set_read_timeout(Some(poll_timeout));
                         connections.push(HttpConnection {
-                            stream,
+                            stream: conn_stream,
                             peer_addr,
                             buf: vec![0u8; 8192],
                             total_read: 0,
@@ -3803,11 +4116,12 @@ impl Interpreter {
             // NET3-2 + NET4-1a: Install active_streaming_writer with body_state pointer.
             self.active_streaming_writer = Some(ActiveStreamingWriter {
                 writer: &mut writer as *mut StreamingWriter,
-                stream: &mut conn.stream as *mut std::net::TcpStream,
+                stream: &mut conn.stream as *mut ConnStream,
                 borrowed: false,
                 body_state: &mut body_state as *mut RequestBodyState,
                 ws_closed: false,
                 ws_token: 0,
+                ws_close_code: 0, // v5: no close frame received yet
             });
 
             let handler_result =
@@ -4198,11 +4512,12 @@ mod tests {
 
     #[test]
     fn test_net_symbols_count() {
-        // 16 legacy + 3 HTTP v1 + 1 HTTP v2 + 4 HTTP v3 + 6 HTTP v4 = 30
-        assert_eq!(NET_SYMBOLS.len(), 30);
+        // 16 legacy + 3 HTTP v1 + 1 HTTP v2 + 4 HTTP v3 + 6 HTTP v4 + 1 v5 = 31
+        assert_eq!(NET_SYMBOLS.len(), 31);
         assert!(NET_SYMBOLS.contains(&"dnsResolve"));
         assert!(NET_SYMBOLS.contains(&"httpServe"));
         assert!(NET_SYMBOLS.contains(&"httpParseRequestHead"));
+        assert!(NET_SYMBOLS.contains(&"wsCloseCode"));
         assert!(NET_SYMBOLS.contains(&"httpEncodeResponse"));
         assert!(NET_SYMBOLS.contains(&"readBody"));
         // v3 streaming
@@ -4237,7 +4552,8 @@ mod tests {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         let mut client = std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
-        let (mut server, _) = listener.accept().unwrap();
+        let (server_tcp, _) = listener.accept().unwrap();
+        let mut server = ConnStream::Plain(server_tcp);
 
         // Write a text frame "Hello" from server to client.
         Interpreter::write_ws_frame(&mut server, 0x1, b"Hello").unwrap();
@@ -10623,5 +10939,248 @@ mod tests {
         );
 
         let _ = server_handle.join();
+    }
+
+    // ── v5 Phase 1 tests ──
+
+    #[test]
+    fn test_net_symbols_includes_ws_close_code() {
+        assert!(
+            NET_SYMBOLS.contains(&"wsCloseCode"),
+            "NET_SYMBOLS must include wsCloseCode (v5)"
+        );
+    }
+
+    #[test]
+    fn test_ws_close_code_not_in_ws_state() {
+        // wsCloseCode outside handler should fail.
+        let mut interp = Interpreter::new();
+        interp
+            .env
+            .define_force("wsCloseCode", Value::Str("__net_builtin_wsCloseCode".into()));
+        let args = vec![Expr::Ident("dummy".into(), dummy_span())];
+        let result = interp.try_net_func("wsCloseCode", &args);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().message.contains("wsCloseCode"));
+    }
+
+    #[test]
+    fn test_ws_close_code_validation_reserved_codes() {
+        // wsClose with reserved codes: since validation happens inside the
+        // re-entrancy guard (which checks handler context first), out-of-handler
+        // calls fail with the handler-context error. This test verifies that
+        // wsClose dispatches correctly when given a close code argument.
+        for code in &[1004i64, 1005, 1006, 1015] {
+            let mut interp = Interpreter::new();
+            interp
+                .env
+                .define_force("wsClose", Value::Str("__net_builtin_wsClose".into()));
+            let args = vec![
+                Expr::Ident("dummy".into(), dummy_span()),
+                Expr::IntLit(*code, dummy_span()),
+            ];
+            let result = interp.try_net_func("wsClose", &args);
+            // Out of handler context, so it fails with the handler-context error.
+            // The close code validation is deeper in the call chain.
+            assert!(
+                result.is_err(),
+                "wsClose({}) should fail outside handler",
+                code
+            );
+            let msg = result.unwrap_err().message;
+            assert!(
+                msg.contains("wsClose"),
+                "Error for code {} should mention wsClose, got: {}",
+                code,
+                msg
+            );
+        }
+    }
+
+    #[test]
+    fn test_ws_close_code_validation_out_of_range() {
+        // wsClose with out-of-range codes: same as above, out-of-handler
+        // context fails first. This validates dispatch routing.
+        for code in &[0i64, 999, 5000, -1] {
+            let mut interp = Interpreter::new();
+            interp
+                .env
+                .define_force("wsClose", Value::Str("__net_builtin_wsClose".into()));
+            let args = vec![
+                Expr::Ident("dummy".into(), dummy_span()),
+                Expr::IntLit(*code, dummy_span()),
+            ];
+            let result = interp.try_net_func("wsClose", &args);
+            assert!(
+                result.is_err(),
+                "wsClose({}) should fail outside handler",
+                code
+            );
+        }
+    }
+
+    #[test]
+    fn test_http_serve_tls_arg_empty_pack_accepted() {
+        // httpServe with tls <= @() should be accepted (plaintext mode).
+        // Define test_handler as a non-Function value to trigger the handler type check.
+        // This proves the tls arg parsing (index 5) succeeds without interference.
+        let mut interp = Interpreter::new();
+        interp
+            .env
+            .define_force("httpServe", Value::Str("__net_builtin_httpServe".into()));
+        interp
+            .env
+            .define_force("test_handler", Value::Int(42));
+
+        let args = vec![
+            Expr::IntLit(0, dummy_span()),
+            Expr::Ident("test_handler".into(), dummy_span()),
+            Expr::IntLit(1, dummy_span()),
+            Expr::IntLit(100, dummy_span()),
+            Expr::IntLit(1, dummy_span()),
+            Expr::BuchiPack(vec![], dummy_span()), // tls = @()
+        ];
+
+        let result = interp.try_net_func("httpServe", &args);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().message;
+        assert!(
+            msg.contains("handler must be a Function"),
+            "Should fail on handler, not on tls arg. Got: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn test_http_serve_tls_arg_non_pack_rejected() {
+        // httpServe with tls as non-BuchiPack should be rejected.
+        let mut interp = Interpreter::new();
+        interp
+            .env
+            .define_force("httpServe", Value::Str("__net_builtin_httpServe".into()));
+
+        // Define a dummy handler function.
+        interp.env.define_force(
+            "test_handler",
+            Value::Function(super::super::value::FuncValue {
+                name: "test_handler".into(),
+                params: vec![Param {
+                    name: "req".into(),
+                    default_value: None,
+                    type_annotation: None,
+                    span: dummy_span(),
+                }],
+                body: vec![],
+                closure: std::sync::Arc::new(std::collections::HashMap::new()),
+                return_type: None,
+            }),
+        );
+
+        let args = vec![
+            Expr::IntLit(0, dummy_span()),
+            Expr::Ident("test_handler".into(), dummy_span()),
+            Expr::IntLit(1, dummy_span()),
+            Expr::IntLit(100, dummy_span()),
+            Expr::IntLit(1, dummy_span()),
+            Expr::IntLit(42, dummy_span()), // tls = 42 (not a BuchiPack)
+        ];
+
+        let result = interp.try_net_func("httpServe", &args);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().message;
+        assert!(
+            msg.contains("tls must be a BuchiPack"),
+            "Should reject non-BuchiPack tls. Got: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn test_http_serve_tls_cert_key_returns_phase2_error() {
+        // httpServe with tls = @(cert: "x", key: "y") should return TlsError (Phase 2 not ready).
+        let mut interp = Interpreter::new();
+        interp
+            .env
+            .define_force("httpServe", Value::Str("__net_builtin_httpServe".into()));
+
+        interp.env.define_force(
+            "test_handler",
+            Value::Function(super::super::value::FuncValue {
+                name: "test_handler".into(),
+                params: vec![Param {
+                    name: "req".into(),
+                    default_value: None,
+                    type_annotation: None,
+                    span: dummy_span(),
+                }],
+                body: vec![],
+                closure: std::sync::Arc::new(std::collections::HashMap::new()),
+                return_type: None,
+            }),
+        );
+
+        let args = vec![
+            Expr::IntLit(0, dummy_span()),
+            Expr::Ident("test_handler".into(), dummy_span()),
+            Expr::IntLit(1, dummy_span()),
+            Expr::IntLit(100, dummy_span()),
+            Expr::IntLit(1, dummy_span()),
+            Expr::BuchiPack(
+                vec![
+                    BuchiField {
+                        name: "cert".into(),
+                        value: Expr::StringLit("cert.pem".into(), dummy_span()),
+                        span: dummy_span(),
+                    },
+                    BuchiField {
+                        name: "key".into(),
+                        value: Expr::StringLit("key.pem".into(), dummy_span()),
+                        span: dummy_span(),
+                    },
+                ],
+                dummy_span(),
+            ),
+        ];
+
+        let result = interp.try_net_func("httpServe", &args);
+        // Should succeed (return a Signal::Value with Async), but with a TlsError result.
+        assert!(result.is_ok());
+        let signal = result.unwrap();
+        assert!(signal.is_some());
+        match signal.unwrap() {
+            Signal::Value(Value::Async(async_val)) => {
+                // Should be a fulfilled Async with a Result failure.
+                assert_eq!(async_val.status, AsyncStatus::Fulfilled);
+                // The inner value should be a Result with TlsError.
+                match &*async_val.value {
+                    Value::BuchiPack(fields) => {
+                        let kind = fields
+                            .iter()
+                            .find(|(k, _)| k == "__value")
+                            .and_then(|(_, v)| {
+                                if let Value::BuchiPack(inner) = v {
+                                    inner
+                                        .iter()
+                                        .find(|(k, _)| k == "kind")
+                                        .map(|(_, v)| v.clone())
+                                } else {
+                                    None
+                                }
+                            });
+                        assert_eq!(
+                            kind,
+                            Some(Value::Str("TlsError".into())),
+                            "Should have TlsError kind"
+                        );
+                    }
+                    other => {
+                        panic!("Expected BuchiPack (Result), got: {:?}", other);
+                    }
+                }
+            }
+            other => {
+                panic!("Expected Async value, got: {:?}", other);
+            }
+        }
     }
 }

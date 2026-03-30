@@ -2129,6 +2129,7 @@ async function __taida_os_httpRequest(method, url, reqHeaders, body) {
 
 // TCP: load net module
 const __os_net = await import('node:net').catch(() => null);
+const __os_tls = await import('node:tls').catch(() => null);
 const __os_dgram = await import('node:dgram').catch(() => null);
 const __TAIDA_OS_NETWORK_TIMEOUT_MS = 30000;
 
@@ -3436,7 +3437,7 @@ function __taida_net_determineKeepAlive(raw, headers, httpMinor) {
   return httpMinor === 1 ? true : hasKeepAlive;
 }
 
-// httpServe(port, handler, maxRequests?, timeoutMs?, maxConnections?) -> Async[Result[@(ok, requests), _]]
+// httpServe(port, handler, maxRequests?, timeoutMs?, maxConnections?, tls?) -> Async[Result[@(ok, requests), _]]
 // NB4-7: Monotonic request token counter for identity verification.
 let __taida_net_requestTokenCounter = 0;
 function __taida_net_nextRequestToken() {
@@ -3444,9 +3445,10 @@ function __taida_net_nextRequestToken() {
 }
 
 // NET2-4a/4b/4c/4d: TCP server with keep-alive, chunked TE, concurrent connections, maxConnections.
+// v5: tls parameter added (6th arg). @() or undefined = plaintext, @(cert, key) = HTTPS (Phase 2 stub).
 // Node.js event loop provides natural concurrency (multiple sockets active simultaneously).
 // bind to 127.0.0.1 (never 0.0.0.0). maxRequests=0 means unlimited.
-async function __taida_net_httpServe(port, handler, maxRequests, timeoutMs, maxConnections) {
+async function __taida_net_httpServe(port, handler, maxRequests, timeoutMs, maxConnections, tls) {
   if (typeof port !== 'number' || !Number.isInteger(port) || port < 0 || port > 65535) {
     return new __TaidaAsync(
       __taida_net_result_fail('BindError', 'httpServe: port must be 0-65535, got ' + String(port)),
@@ -3464,6 +3466,72 @@ async function __taida_net_httpServe(port, handler, maxRequests, timeoutMs, maxC
   // NET2-4d: maxConnections (optional, default 128). <= 0 falls back to 128.
   const maxConn = (typeof maxConnections === 'number' && Number.isInteger(maxConnections) && maxConnections > 0) ? maxConnections : 128;
 
+  // v5: TLS configuration.
+  // tls is a BuchiPack (object) or undefined/null.
+  // @() = empty object = plaintext (v4 compat).
+  // @(cert: "path", key: "path") = HTTPS.
+  let __useTls = false;
+  let __tlsCert = null;
+  let __tlsKey = null;
+  if (tls !== undefined && tls !== null && typeof tls === 'object') {
+    const hasCert = 'cert' in tls;
+    const hasKey = 'key' in tls;
+    if (hasCert || hasKey) {
+      // Validate that both cert and key are present and are Str.
+      if (hasCert && !hasKey) {
+        return new __TaidaAsync(
+          __taida_net_result_fail('TlsError', 'httpServe: tls.key must be a Str (PEM file path)'),
+          null, 'fulfilled');
+      }
+      if (!hasCert && hasKey) {
+        return new __TaidaAsync(
+          __taida_net_result_fail('TlsError', 'httpServe: tls.cert must be a Str (PEM file path)'),
+          null, 'fulfilled');
+      }
+      if (typeof tls.cert !== 'string') {
+        return new __TaidaAsync(
+          __taida_net_result_fail('TlsError', 'httpServe: tls.cert must be a Str (PEM file path)'),
+          null, 'fulfilled');
+      }
+      if (typeof tls.key !== 'string') {
+        return new __TaidaAsync(
+          __taida_net_result_fail('TlsError', 'httpServe: tls.key must be a Str (PEM file path)'),
+          null, 'fulfilled');
+      }
+      // v5 Phase 3: Load cert/key files at startup (NET5-0c: startup failure = Result failure).
+      if (!__taida_fs) {
+        return new __TaidaAsync(
+          __taida_net_result_fail('TlsError', 'httpServe: fs module not available for TLS cert/key loading'),
+          null, 'fulfilled');
+      }
+      if (!__os_tls) {
+        return new __TaidaAsync(
+          __taida_net_result_fail('TlsError', 'httpServe: tls module not available'),
+          null, 'fulfilled');
+      }
+      try {
+        __tlsCert = __taida_fs.readFileSync(tls.cert);
+      } catch (e) {
+        return new __TaidaAsync(
+          __taida_net_result_fail('TlsError', 'httpServe: failed to read cert file: ' + (e.message || e)),
+          null, 'fulfilled');
+      }
+      try {
+        __tlsKey = __taida_fs.readFileSync(tls.key);
+      } catch (e) {
+        return new __TaidaAsync(
+          __taida_net_result_fail('TlsError', 'httpServe: failed to read key file: ' + (e.message || e)),
+          null, 'fulfilled');
+      }
+      __useTls = true;
+    }
+    // else: empty object @() → plaintext, fall through
+  } else if (tls !== undefined && tls !== null) {
+    // NB5-16: non-object tls (e.g. 42, "str", true) must NOT silently fall back to plaintext.
+    // Match Interpreter parity: RuntimeError for invalid tls type.
+    throw new __NativeError('httpServe: tls must be a BuchiPack @(cert: Str, key: Str) or @(), got ' + typeof tls);
+  }
+
   const net = __os_net;
   if (!net) {
     return new __TaidaAsync(
@@ -3478,7 +3546,29 @@ async function __taida_net_httpServe(port, handler, maxRequests, timeoutMs, maxC
     let activeConnections = 0;
     const MAX_REQUEST_BUF = 1048576;
 
-    const server = net.createServer({ allowHalfOpen: false });
+    // v5: Create TLS or plaintext server based on tls parameter.
+    let server;
+    if (__useTls) {
+      // TLS server using node:tls. The 'secureConnection' event provides
+      // a tls.TLSSocket (decrypted stream) that has the same API as net.Socket.
+      try {
+        server = __os_tls.createServer({
+          cert: __tlsCert,
+          key: __tlsKey,
+          // Disable client certificate verification (server-only TLS).
+          requestCert: false,
+          // Allow self-signed certificates (validation is client's responsibility).
+          rejectUnauthorized: false,
+        });
+      } catch (e) {
+        resolveOuter(new __TaidaAsync(
+          __taida_net_result_fail('TlsError', 'httpServe: failed to create TLS server: ' + (e.message || e)),
+          null, 'fulfilled'));
+        return;
+      }
+    } else {
+      server = net.createServer({ allowHalfOpen: false });
+    }
     // NET2-4d: Use Node.js built-in maxConnections to limit simultaneous connections.
     // When at capacity, Node.js queues incoming connections in the kernel backlog.
     server.maxConnections = maxConn;
@@ -3507,7 +3597,22 @@ async function __taida_net_httpServe(port, handler, maxRequests, timeoutMs, maxC
         if (connClosed_) return;
         connClosed_ = true;
         socket.removeAllListeners();
-        socket.destroy();
+        // NB5-11: For TLS sockets, socket.write() is asynchronous — the TLS
+        // layer encrypts data in the event loop. Calling socket.destroy()
+        // immediately would discard pending TLS writes (response body, chunked
+        // terminator, close_notify). Use socket.end() which flushes all queued
+        // writes to the TLS layer before closing. The 'close' event will fire
+        // after the socket is fully closed, which is harmless.
+        if (socket.__tls && !socket.destroyed) {
+          socket.end();
+          // Ensure the socket is destroyed after a short timeout in case
+          // end() stalls (e.g., unresponsive client).
+          setTimeout(() => {
+            if (!socket.destroyed) socket.destroy();
+          }, 1000);
+        } else {
+          socket.destroy();
+        }
         connClosed();
       }
 
@@ -3592,8 +3697,98 @@ async function __taida_net_httpServe(port, handler, maxRequests, timeoutMs, maxC
 
         if (handlerArity >= 2) {
           // ── v4 2-arg handler: body-deferred path (NB4-16 fix) ──
-          // Dispatch handler at HEAD arrival time. Body bytes are read
-          // incrementally via readBodyChunk/readBodyAll from the socket.
+
+          // NB5-11 fix: For TLS sockets, pre-buffer the entire body before
+          // dispatching the handler. Node.js TLS sockets deliver decrypted data
+          // via event loop callbacks; synchronous busy-poll (sock.read() in a
+          // tight loop) cannot receive data that arrives after handler dispatch
+          // because the event loop is blocked. Pre-buffering ensures all body
+          // bytes are available as leftover before the synchronous handler runs.
+          // For plaintext sockets, the original fd-based synchronous I/O works
+          // correctly and body-deferred streaming is preserved.
+          if (socket.__tls && (contentLength > 0 || isChunked)) {
+            // TLS + body present: defer dispatch until full body is buffered.
+            if (!isChunked) {
+              // Content-Length path: wait until buf has head + full body.
+              const bodyNeeded = parsed.consumed + contentLength;
+              if (buf.length < bodyNeeded) return false; // need more body data
+
+              // Full body is now in buf. Extract leftover and dispatch.
+              const remoteAddr = socket.remoteAddress || '127.0.0.1';
+              const cleanHost = remoteAddr.startsWith('::ffff:') ? remoteAddr.substring(7) : remoteAddr;
+              const keepAlive = __taida_net_determineKeepAlive(buf, parsed.headers, parsed.version.minor);
+              const rawSnapshot = Buffer.from(buf.subarray(0, parsed.consumed));
+              const leftover = Buffer.from(buf.subarray(parsed.consumed, bodyNeeded));
+              buf = buf.subarray(bodyNeeded);
+
+              const request = {
+                raw: new Uint8Array(rawSnapshot.buffer, rawSnapshot.byteOffset, rawSnapshot.byteLength),
+                method: parsed.method,
+                path: parsed.path,
+                query: parsed.query,
+                version: parsed.version,
+                headers: parsed.headers,
+                body: __taida_net_span(0, 0),
+                bodyOffset: parsed.consumed,
+                contentLength: contentLength,
+                remoteHost: cleanHost,
+                remotePort: socket.remotePort || 0,
+                keepAlive: keepAlive,
+                chunked: false,
+                __body_stream: '__v4_body_stream',
+                __body_token: __taida_net_nextRequestToken(),
+                _socket: socket,
+                __tls_prebuffered: true,
+              };
+
+              dispatchHandlerBodyDeferred(request, keepAlive, leftover, false, contentLength);
+              return true;
+            } else {
+              // Chunked path: wait until terminal chunk (0\r\n...\r\n) is in buf.
+              const completeness = __taida_net_chunkedBodyComplete(buf, parsed.consumed);
+              if (completeness === -1) return false; // need more data
+              if (completeness === -2) { send400AndClose(); return true; } // malformed
+
+              // Full chunked body is in buf. Compact and extract leftover.
+              const compact = __taida_net_chunkedInPlaceCompact(buf, parsed.consumed);
+              if (!compact) { send400AndClose(); return true; }
+
+              const totalWire = parsed.consumed + compact.wireConsumed;
+              const remoteAddr = socket.remoteAddress || '127.0.0.1';
+              const cleanHost = remoteAddr.startsWith('::ffff:') ? remoteAddr.substring(7) : remoteAddr;
+              const keepAlive = __taida_net_determineKeepAlive(buf, parsed.headers, parsed.version.minor);
+              const rawSnapshot = Buffer.from(buf.subarray(0, parsed.consumed));
+              // Leftover = compacted body bytes (already in buf after in-place compact).
+              const leftover = Buffer.from(buf.subarray(parsed.consumed, parsed.consumed + compact.bodyLen));
+              buf = buf.subarray(totalWire);
+
+              const request = {
+                raw: new Uint8Array(rawSnapshot.buffer, rawSnapshot.byteOffset, rawSnapshot.byteLength),
+                method: parsed.method,
+                path: parsed.path,
+                query: parsed.query,
+                version: parsed.version,
+                headers: parsed.headers,
+                body: __taida_net_span(0, 0),
+                bodyOffset: parsed.consumed,
+                contentLength: compact.bodyLen,
+                remoteHost: cleanHost,
+                remotePort: socket.remotePort || 0,
+                keepAlive: keepAlive,
+                chunked: true,
+                __body_stream: '__v4_body_stream',
+                __body_token: __taida_net_nextRequestToken(),
+                _socket: socket,
+                __tls_prebuffered: true,
+              };
+
+              dispatchHandlerBodyDeferred(request, keepAlive, leftover, true, compact.bodyLen);
+              return true;
+            }
+          }
+
+          // Plaintext or TLS with no body: dispatch at HEAD arrival time.
+          // Body bytes are read incrementally via readBodyChunk/readBodyAll.
           // Any body bytes that arrived with the head buffer are passed
           // as leftover; remaining bytes are read via fs.readSync when
           // readBodyChunk/readBodyAll is called.
@@ -3798,6 +3993,14 @@ async function __taida_net_httpServe(port, handler, maxRequests, timeoutMs, maxC
         socket.removeAllListeners('timeout');
         socket.removeAllListeners('end');
 
+        // NB5-11: For TLS pre-buffered requests, all body bytes are already
+        // in leftover. The body is decoded (chunked framing removed) and
+        // presented as a Content-Length body so readBodyChunk/readBodyAll
+        // consume from leftover only — no socket I/O during the synchronous
+        // handler. bytesConsumed starts at 0; the normal CL read path will
+        // drain leftover and set fullyRead when bytesConsumed >= contentLength.
+        const tlsPreBuffered = request.__tls_prebuffered === true;
+
         // Create writer with body state for v4 body-deferred mode.
         const writer = {
           __writer_id: '__v3_streaming_writer',
@@ -3809,7 +4012,7 @@ async function __taida_net_httpServe(port, handler, maxRequests, timeoutMs, maxC
           _needsDrain: false,
           // v4: body streaming state
           _bodyState: {
-            isChunked: isChunked,
+            isChunked: tlsPreBuffered ? false : isChunked,
             contentLength: contentLength,
             bytesConsumed: 0,
             fullyRead: !isChunked && contentLength === 0,
@@ -3817,12 +4020,13 @@ async function __taida_net_httpServe(port, handler, maxRequests, timeoutMs, maxC
             leftover: leftover,    // leftover body bytes from head parse buffer
             leftoverPos: 0,
             // Chunked decoder state: 'waitSize' | 'readData' | 'waitTrailer' | 'done'
-            chunkedState: 'waitSize',
+            chunkedState: tlsPreBuffered ? 'done' : 'waitSize',
             chunkedRemaining: 0,
             requestToken: request.__body_token,
           },
           // v4: WebSocket state
           _wsClosed: false,
+          _wsCloseCode: 0, // v5: 0 = no close frame received yet
         };
 
         function onDrain() {
@@ -4192,11 +4396,27 @@ async function __taida_net_httpServe(port, handler, maxRequests, timeoutMs, maxC
         null, 'fulfilled'));
     });
 
-    // NET2-4c: Each connection is processed independently (event-driven concurrency)
-    server.on('connection', (socket) => {
-      if (serverClosed) { socket.destroy(); return; }
-      processConnection(socket);
-    });
+    if (__useTls) {
+      // v5 TLS: 'secureConnection' fires after successful TLS handshake.
+      // The socket is a tls.TLSSocket (decrypted stream, same API as net.Socket).
+      // NET5-0c: TLS handshake failure = 'tlsClientError' event → connection close, handler not called.
+      server.on('tlsClientError', (err, tlsSocket) => {
+        // Handshake failure: close connection, don't call handler.
+        if (tlsSocket && !tlsSocket.destroyed) tlsSocket.destroy();
+      });
+      server.on('secureConnection', (socket) => {
+        if (serverClosed) { socket.destroy(); return; }
+        // Mark TLS socket so I/O helpers know to avoid raw fd access.
+        socket.__tls = true;
+        processConnection(socket);
+      });
+    } else {
+      // NET2-4c: Each connection is processed independently (event-driven concurrency)
+      server.on('connection', (socket) => {
+        if (serverClosed) { socket.destroy(); return; }
+        processConnection(socket);
+      });
+    }
 
     server.listen(port, '127.0.0.1');
   });
@@ -4581,6 +4801,22 @@ function __taida_net_readOneByte(writer) {
   // Read from socket.
   const sock = writer._socket;
   if (!sock) return -1;
+
+  // v5 TLS: use socket.read() from decrypted buffer.
+  if (sock.__tls) {
+    sock.resume();
+    const deadline = Date.now() + 10000;
+    while (true) {
+      if (Date.now() > deadline) { sock.pause(); return -1; }
+      const chunk = sock.read(1);
+      if (chunk && chunk.length > 0) { sock.pause(); return chunk[0]; }
+      if (sock.destroyed || !sock.readable) { sock.pause(); return -1; }
+      const spinEnd = Date.now() + 1;
+      while (Date.now() < spinEnd) {}
+    }
+  }
+
+  // Plaintext: use fd-based sync read.
   const fd = sock._handle ? sock._handle.fd : -1;
   if (fd < 0 || !__taida_fs) return -1;
   const oneBuf = Buffer.alloc(1);
@@ -4621,31 +4857,58 @@ function __taida_net_readBodyBytes(writer, count) {
   // Then read from socket if needed.
   if (totalRead < count) {
     const sock = writer._socket;
-    const fd = sock && sock._handle ? sock._handle.fd : -1;
-    if (fd >= 0 && __taida_fs) {
+    if (sock && sock.__tls) {
+      // v5 TLS: read from decrypted stream buffer, not raw fd.
       const remaining = count - totalRead;
-      const fdBuf = Buffer.alloc(remaining);
-      let fdPos = 0;
+      sock.resume();
       const deadline = Date.now() + 10000;
-      while (fdPos < remaining) {
+      let tlsRead = 0;
+      const tlsParts = [];
+      while (tlsRead < remaining) {
         if (Date.now() > deadline) break;
-        try {
-          const n = __taida_fs.readSync(fd, fdBuf, fdPos, remaining - fdPos);
-          if (n === 0) break; // EOF
-          fdPos += n;
-        } catch (e) {
-          if (e.code === 'EAGAIN' || e.code === 'EWOULDBLOCK') {
-            if (fdPos > 0) break; // return what we have
-            const spinEnd = Date.now() + 1;
-            while (Date.now() < spinEnd) {}
-            continue;
-          }
-          break;
+        const chunk = sock.read(remaining - tlsRead);
+        if (chunk) {
+          tlsParts.push(chunk);
+          tlsRead += chunk.length;
+        } else {
+          if (sock.destroyed || !sock.readable) break;
+          const spinEnd = Date.now() + 1;
+          while (Date.now() < spinEnd) {}
         }
       }
-      if (fdPos > 0) {
-        parts.push(fdBuf.subarray(0, fdPos));
-        totalRead += fdPos;
+      sock.pause();
+      if (tlsRead > 0) {
+        const tlsBuf = tlsParts.length === 1 ? tlsParts[0] : Buffer.concat(tlsParts);
+        parts.push(tlsBuf);
+        totalRead += tlsRead;
+      }
+    } else {
+      const fd = sock && sock._handle ? sock._handle.fd : -1;
+      if (fd >= 0 && __taida_fs) {
+        const remaining = count - totalRead;
+        const fdBuf = Buffer.alloc(remaining);
+        let fdPos = 0;
+        const deadline = Date.now() + 10000;
+        while (fdPos < remaining) {
+          if (Date.now() > deadline) break;
+          try {
+            const n = __taida_fs.readSync(fd, fdBuf, fdPos, remaining - fdPos);
+            if (n === 0) break; // EOF
+            fdPos += n;
+          } catch (e) {
+            if (e.code === 'EAGAIN' || e.code === 'EWOULDBLOCK') {
+              if (fdPos > 0) break; // return what we have
+              const spinEnd = Date.now() + 1;
+              while (Date.now() < spinEnd) {}
+              continue;
+            }
+            break;
+          }
+        }
+        if (fdPos > 0) {
+          parts.push(fdBuf.subarray(0, fdPos));
+          totalRead += fdPos;
+        }
       }
     }
   }
@@ -5039,19 +5302,26 @@ function __taida_net_writeWsFrame(sock, opcode, payload) {
     header[9] = payloadLen & 0xFF;
   }
 
-  // Synchronous fd write to bypass Node's event loop buffering.
-  // This ensures data reaches the kernel buffer immediately, even if
-  // the event loop is blocked by a subsequent synchronous read.
-  const fd = sock._handle ? sock._handle.fd : -1;
-  if (fd >= 0 && __taida_fs) {
-    __taida_net_fdWriteAll(fd, header);
-    if (payloadLen > 0) __taida_net_fdWriteAll(fd, payload);
-  } else {
-    // Fallback: vectored write via cork/uncork.
+  // v5: TLS sockets must use socket.write() (decrypted stream API), not raw fd writes.
+  // For plaintext, use synchronous fd write to bypass Node's event loop buffering.
+  if (sock.__tls) {
+    // TLS: use socket stream API (cork/uncork for coalescing).
     sock.cork();
     sock.write(header);
     if (payloadLen > 0) sock.write(payload);
     sock.uncork();
+  } else {
+    const fd = sock._handle ? sock._handle.fd : -1;
+    if (fd >= 0 && __taida_fs) {
+      __taida_net_fdWriteAll(fd, header);
+      if (payloadLen > 0) __taida_net_fdWriteAll(fd, payload);
+    } else {
+      // Fallback: vectored write via cork/uncork.
+      sock.cork();
+      sock.write(header);
+      if (payloadLen > 0) sock.write(payload);
+      sock.uncork();
+    }
   }
 }
 
@@ -5074,7 +5344,8 @@ function __taida_net_fdWriteAll(fd, buf) {
 }
 
 // Read exactly `count` bytes from socket (synchronous).
-// Uses fs.readSync on the socket fd with EAGAIN retry.
+// Plaintext: uses fs.readSync on the socket fd with EAGAIN retry.
+// TLS: uses sock.read() from the internal decrypted buffer (v5 transport boundary).
 // The socket must be paused so Node does not consume data from the kernel buffer.
 function __taida_net_readExactFromSocket(sock, count) {
   if (count === 0) return Buffer.alloc(0);
@@ -5092,7 +5363,40 @@ function __taida_net_readExactFromSocket(sock, count) {
     return collected.subarray(0, count);
   }
 
-  // Fall back to synchronous fd read for remaining bytes.
+  // v5: TLS sockets — use socket.read() polling from the decrypted buffer.
+  // Raw fd access is not possible on TLS sockets (would read ciphertext).
+  // socket.read() returns decrypted data from Node's internal buffer.
+  // We resume the socket briefly to allow TLS data flow, then poll.
+  if (sock.__tls) {
+    const remaining = count - collected.length;
+    const deadline = Date.now() + 10000; // 10 second timeout
+    // Resume the socket so the TLS layer can process incoming data.
+    sock.resume();
+    while (collected.length < count) {
+      if (Date.now() > deadline) {
+        sock.pause();
+        throw new __NativeError('wsReceive: timed out waiting for ' + count + ' bytes (got ' + collected.length + ')');
+      }
+      const needed = count - collected.length;
+      const chunk = sock.read(needed);
+      if (chunk) {
+        collected = collected.length === 0 ? chunk : Buffer.concat([collected, chunk]);
+      } else {
+        // Check if socket is closed.
+        if (sock.destroyed || !sock.readable) {
+          sock.pause();
+          throw new __NativeError('wsReceive: connection closed unexpectedly');
+        }
+        // Busy wait briefly to yield (data arrives asynchronously in TLS layer).
+        const spinEnd = Date.now() + 1;
+        while (Date.now() < spinEnd) { /* busy wait */ }
+      }
+    }
+    sock.pause();
+    return collected.subarray(0, count);
+  }
+
+  // Fall back to synchronous fd read for remaining bytes (plaintext only).
   const fd = sock._handle ? sock._handle.fd : -1;
   if (fd < 0 || !__taida_fs) {
     throw new __NativeError('wsReceive: cannot access socket file descriptor for synchronous read');
@@ -5195,8 +5499,8 @@ function __taida_net_readWsFrame(sock) {
     case 0x1: // text
     case 0x2: // binary
       return { opcode, payload };
-    case 0x8: // close
-      return { close: true };
+    case 0x8: // close — v5: carry raw payload for close code extraction
+      return { close: true, closePayload: payload };
     case 0x9: // ping
       return { ping: payload };
     case 0xA: // pong
@@ -5269,6 +5573,31 @@ function __taida_net_wsUpgrade(req, writer) {
     );
   }
 
+  // NB5-12 (DEFERRED): WebSocket over TLS (wss://) is not supported in the JS
+  // backend. This is a documented spec limitation, not a bug.
+  //
+  // Root cause (PoC verified): Node.js TLS sockets perform decryption via the
+  // event loop. In Taida's synchronous handler model, the handler blocks the
+  // event loop, so wsReceive's sock.resume()+sock.read() polling never receives
+  // decrypted data — sock.read() returns null indefinitely. Plaintext WebSocket
+  // works because it uses fs.readSync on the raw fd, bypassing the event loop.
+  //
+  // Interpreter/Native use rustls which performs synchronous blocking I/O
+  // (read ciphertext from TCP stream and decrypt inline), so wss:// works there.
+  //
+  // Resolution: a future async runtime migration will unblock the event loop during
+  // handler execution, enabling TLS WebSocket I/O.
+  //
+  // Spec refs: NET_DESIGN.md line 343, NET_IMPL_GUIDE.md line 156, NET_BLOCKERS.md NB5-12.
+  if (writer._socket && writer._socket.__tls) {
+    throw new __NativeError(
+      'wsUpgrade: WebSocket over TLS (wss://) is not supported in the JS backend. ' +
+      'Node.js TLS requires event-loop I/O which is incompatible with the synchronous ' +
+      'handler model. Use plaintext WebSocket (ws://) or the Interpreter/Native backend. ' +
+      'This limitation will be resolved with a future async runtime migration.'
+    );
+  }
+
   // Validate: must be GET.
   const method = __taida_net_getMethodStr(req);
   if (method.toUpperCase() !== 'GET') {
@@ -5331,28 +5660,32 @@ function __taida_net_wsUpgrade(req, writer) {
 
   const sock = writer._socket;
 
-  // Write 101 response synchronously via fd to bypass Node's event loop.
-  // This is critical: subsequent wsReceive will block the event loop,
-  // so the 101 response must reach the kernel buffer before that.
-  const fd = sock._handle ? sock._handle.fd : -1;
-  if (fd >= 0 && __taida_fs) {
-    const respBuf = Buffer.from(response);
-    let written = 0;
-    while (written < respBuf.length) {
-      try {
-        const n = __taida_fs.writeSync(fd, respBuf, written, respBuf.length - written);
-        written += n;
-      } catch (e) {
-        if (e.code === 'EAGAIN' || e.code === 'EWOULDBLOCK') {
-          const spinEnd = Date.now() + 1;
-          while (Date.now() < spinEnd) {}
-          continue;
-        }
-        throw new __NativeError('wsUpgrade: write error: ' + (e.message || e));
-      }
-    }
-  } else {
+  // v5: TLS sockets use socket.write() (decrypted stream API).
+  // Plaintext: write synchronously via fd to bypass Node's event loop.
+  if (sock.__tls) {
+    // TLS: use socket.write() — the TLS layer handles encryption transparently.
     sock.write(response);
+  } else {
+    const fd = sock._handle ? sock._handle.fd : -1;
+    if (fd >= 0 && __taida_fs) {
+      const respBuf = Buffer.from(response);
+      let written = 0;
+      while (written < respBuf.length) {
+        try {
+          const n = __taida_fs.writeSync(fd, respBuf, written, respBuf.length - written);
+          written += n;
+        } catch (e) {
+          if (e.code === 'EAGAIN' || e.code === 'EWOULDBLOCK') {
+            const spinEnd = Date.now() + 1;
+            while (Date.now() < spinEnd) {}
+            continue;
+          }
+          throw new __NativeError('wsUpgrade: write error: ' + (e.message || e));
+        }
+      }
+    } else {
+      sock.write(response);
+    }
   }
 
   // Transition to WebSocket state.
@@ -5503,10 +5836,54 @@ function __taida_net_wsReceive(ws) {
     }
 
     if (frame.close) {
-      // NB4-12: Send close reply before marking closed (parity with Native).
-      __taida_net_writeWsFrame(sock, 0x8, Buffer.from([0x03, 0xE8]));
-      writer._wsClosed = true;
-      return __taida_net_makeLaxWsFrameEmpty();
+      // v5 close code extraction (NET5-0d).
+      const cp = frame.closePayload;
+      if (!cp || cp.length === 0) {
+        // No status code: reply with empty close payload.
+        __taida_net_writeWsFrame(sock, 0x8, Buffer.alloc(0));
+        writer._wsClosed = true;
+        writer._wsCloseCode = 1005; // No Status Rcvd
+        return __taida_net_makeLaxWsFrameEmpty();
+      } else if (cp.length === 1) {
+        // 1-byte close payload is malformed.
+        __taida_net_writeWsFrame(sock, 0x8, Buffer.from([0x03, 0xEA])); // 1002
+        writer._wsClosed = true;
+        throw new __NativeError('wsReceive: protocol error: malformed close frame (1-byte payload)');
+      } else {
+        const code = (cp[0] << 8) | cp[1];
+        // Validate close code (RFC 6455 Section 7.4).
+        // 1000-1003: standard, 1007-1014: IANA-registered, 3000-4999: reserved for libs/apps/private.
+        const validCode = (code >= 1000 && code <= 1003) || (code >= 1007 && code <= 1014) || (code >= 3000 && code <= 4999);
+        if (!validCode) {
+          __taida_net_writeWsFrame(sock, 0x8, Buffer.from([0x03, 0xEA])); // 1002
+          writer._wsClosed = true;
+          throw new __NativeError('wsReceive: protocol error: invalid close code ' + code);
+        }
+        // Validate reason UTF-8 if present.
+        if (cp.length > 2) {
+          try {
+            const reason = cp.slice(2);
+            // Check for invalid UTF-8 sequences by round-tripping.
+            const decoded = reason.toString('utf8');
+            const reencoded = Buffer.from(decoded, 'utf8');
+            if (reencoded.length !== reason.length || !reencoded.equals(reason)) {
+              __taida_net_writeWsFrame(sock, 0x8, Buffer.from([0x03, 0xEA])); // 1002
+              writer._wsClosed = true;
+              throw new __NativeError('wsReceive: protocol error: invalid UTF-8 in close reason');
+            }
+          } catch (e) {
+            if (e instanceof __NativeError) throw e;
+            __taida_net_writeWsFrame(sock, 0x8, Buffer.from([0x03, 0xEA])); // 1002
+            writer._wsClosed = true;
+            throw new __NativeError('wsReceive: protocol error: invalid UTF-8 in close reason');
+          }
+        }
+        // Valid close: echo the code in the reply.
+        __taida_net_writeWsFrame(sock, 0x8, Buffer.from([(code >> 8) & 0xFF, code & 0xFF]));
+        writer._wsClosed = true;
+        writer._wsCloseCode = code;
+        return __taida_net_makeLaxWsFrameEmpty();
+      }
     }
 
     if (frame.ping) {
@@ -5533,7 +5910,8 @@ function __taida_net_wsReceive(ws) {
 }
 
 // NET4-3d: wsClose(ws) → Unit
-function __taida_net_wsClose(ws) {
+// v5: wsClose(ws) or wsClose(ws, code) → Unit
+function __taida_net_wsClose(ws, code) {
   __taida_net_validateWs(ws, 'wsClose');
   const writer = __taida_net_getWriterForWs(ws, 'wsClose');
 
@@ -5544,12 +5922,39 @@ function __taida_net_wsClose(ws) {
   // Idempotent: no-op if already closed.
   if (writer._wsClosed) return undefined;
 
+  // v5: Optional close code (default 1000).
+  let closeCode = 1000;
+  if (code !== undefined && code !== null) {
+    closeCode = code;
+    if (typeof closeCode !== 'number' || !Number.isInteger(closeCode)) {
+      throw new __NativeError('wsClose: close code must be Int, got ' + String(closeCode));
+    }
+    if (closeCode < 1000 || closeCode > 4999) {
+      throw new __NativeError('wsClose: close code must be 1000-4999, got ' + closeCode);
+    }
+    // Reserved codes that must not be sent.
+    if (closeCode === 1004 || closeCode === 1005 || closeCode === 1006 || closeCode === 1015) {
+      throw new __NativeError('wsClose: close code ' + closeCode + ' is reserved and cannot be sent');
+    }
+  }
+
   const sock = writer._socket;
-  // Send close frame with 1000 (normal closure).
-  __taida_net_writeWsFrame(sock, 0x8, Buffer.from([0x03, 0xE8]));
+  __taida_net_writeWsFrame(sock, 0x8, Buffer.from([(closeCode >> 8) & 0xFF, closeCode & 0xFF]));
   writer._wsClosed = true;
 
   return undefined; // Unit
+}
+
+// v5: wsCloseCode(ws) → Int
+function __taida_net_wsCloseCode(ws) {
+  __taida_net_validateWs(ws, 'wsCloseCode');
+  const writer = __taida_net_getWriterForWs(ws, 'wsCloseCode');
+
+  if (writer._state !== 4) {
+    throw new __NativeError('wsCloseCode: not in WebSocket state. Call wsUpgrade first.');
+  }
+
+  return writer._wsCloseCode;
 }
 
 "#;

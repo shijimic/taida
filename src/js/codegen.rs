@@ -125,6 +125,8 @@ impl JsCodegen {
         "wsSend",
         "wsReceive",
         "wsClose",
+        // v5 WebSocket revision
+        "wsCloseCode",
     ];
 
     /// Check if a net builtin name should be rewritten to its __taida_net_* form.
@@ -201,6 +203,11 @@ impl JsCodegen {
             }
             "wsClose" => {
                 self.write(&format!("__taida_net_wsClose{}", suffix));
+                true
+            }
+            // v5 WebSocket revision
+            "wsCloseCode" => {
+                self.write(&format!("__taida_net_wsCloseCode{}", suffix));
                 true
             }
             _ => false,
