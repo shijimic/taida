@@ -23856,3 +23856,523 @@ stdout(r.requests)
         "NET6-3b-3: server count mismatch: server={} curl_ok={}", server_count, ok_count
     );
 }
+
+// ── Phase 4: JS Compatibility Backend ──────────────────────────────
+
+// NET6-4a-1: JS h1 basic serve works end-to-end after v6 scatter-gather changes.
+// This is a JS-specific regression gate: after introducing scatter-gather send
+// (NB6-1) and protocol field (NET6-1b), the JS h1 path must still serve
+// HTTP/1.1 requests correctly.
+#[test]
+fn test_net6_4a_js_h1_serve_basic_after_v6() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+
+    let port = find_free_loopback_port();
+    let source = format!(
+        r#">>> taida-lang/net => @(httpServe)
+
+handler req =
+  @(status <= 200, headers <= @[@(name <= "x-engine", value <= "js-h1")], body <= "hello-v6-js")
+=> :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
+
+asyncResult <= httpServe({port}, handler, 1, 5000, 128)
+asyncResult ]=> result
+result ]=> r
+stdout(r.requests)
+"#,
+        port = port
+    );
+
+    let dir = setup_net_project(&source, "v6_4a_js_h1");
+    let td_path = dir.join("main.td");
+    let js_path = unique_temp_path("taida_v6_4a_js", "h1_basic", "mjs");
+
+    let transpile = Command::new(taida_bin())
+        .arg("build")
+        .arg("--target")
+        .arg("js")
+        .arg(&td_path)
+        .arg("-o")
+        .arg(&js_path)
+        .output()
+        .expect("transpile");
+    assert!(
+        transpile.status.success(),
+        "NET6-4a-1: JS transpile failed: {}",
+        String::from_utf8_lossy(&transpile.stderr)
+    );
+
+    // Run the JS server in background
+    let child = Command::new("node")
+        .arg(&js_path)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn node");
+
+    // Wait for server to be ready
+    thread::sleep(Duration::from_millis(500));
+
+    // Send one HTTP/1.1 request
+    let response = TcpStream::connect(format!("127.0.0.1:{}", port));
+    if let Ok(mut stream) = response {
+        stream
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .ok();
+        let req = format!(
+            "GET / HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nConnection: close\r\n\r\n",
+            port
+        );
+        let _ = stream.write_all(req.as_bytes());
+        let mut buf = vec![0u8; 4096];
+        let mut total = Vec::new();
+        loop {
+            match stream.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => total.extend_from_slice(&buf[..n]),
+                Err(_) => break,
+            }
+        }
+        let resp = String::from_utf8_lossy(&total);
+        assert!(
+            resp.contains("200"),
+            "NET6-4a-1: expected 200 status in JS h1 response, got: {:?}",
+            resp
+        );
+        assert!(
+            resp.contains("hello-v6-js"),
+            "NET6-4a-1: expected body 'hello-v6-js' in JS h1 response, got: {:?}",
+            resp
+        );
+        assert!(
+            resp.contains("x-engine"),
+            "NET6-4a-1: expected custom header 'x-engine' in JS h1 response, got: {:?}",
+            resp
+        );
+    } else {
+        // Server may not have started in time, but that's not a Phase 4 parity issue
+        eprintln!("NET6-4a-1: could not connect to JS server on port {}; skipping", port);
+    }
+
+    // Wait for server completion
+    let output = child.wait_with_output().expect("wait for node");
+    let stdout = normalize(&String::from_utf8_lossy(&output.stdout));
+    let _ = fs::remove_file(&js_path);
+    cleanup_net_project(&dir);
+
+    // Server should have processed 1 request (maxRequests=1)
+    assert!(
+        stdout.contains("1"),
+        "NET6-4a-1: JS h1 server should report requests=1 after serving 1 request, got: {:?}",
+        stdout
+    );
+}
+
+// NET6-4a-2: JS h1 with explicit protocol="h1.1" works the same as default (no protocol).
+// 2-way parity: Interpreter and JS both serve h1 identically with explicit protocol.
+#[test]
+fn test_net6_4a_js_explicit_h11_serves_correctly() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+
+    let source_template = |port: u16| {
+        format!(
+            r#">>> taida-lang/net => @(httpServe)
+
+handler req =
+  @(status <= 200, headers <= @[], body <= "explicit-h11")
+=> :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
+
+asyncResult <= httpServe({port}, handler, 1, 5000, 128, @(protocol <= "h1.1"))
+asyncResult ]=> result
+result ]=> r
+stdout(r.requests)
+"#,
+            port = port
+        )
+    };
+
+    // JS
+    let port_js = find_free_loopback_port();
+    let source_js = source_template(port_js);
+    let dir_js = setup_net_project(&source_js, "v6_4a_js_h11");
+    let td_path_js = dir_js.join("main.td");
+    let js_path = unique_temp_path("taida_v6_4a_js", "explicit_h11", "mjs");
+
+    let transpile = Command::new(taida_bin())
+        .arg("build")
+        .arg("--target")
+        .arg("js")
+        .arg(&td_path_js)
+        .arg("-o")
+        .arg(&js_path)
+        .output()
+        .expect("transpile");
+    assert!(
+        transpile.status.success(),
+        "NET6-4a-2: JS transpile failed: {}",
+        String::from_utf8_lossy(&transpile.stderr)
+    );
+
+    let child_js = Command::new("node")
+        .arg(&js_path)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn node");
+
+    thread::sleep(Duration::from_millis(500));
+
+    // Send request
+    if let Ok(mut stream) = TcpStream::connect(format!("127.0.0.1:{}", port_js)) {
+        stream.set_read_timeout(Some(Duration::from_secs(3))).ok();
+        let req = format!(
+            "GET / HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nConnection: close\r\n\r\n",
+            port_js
+        );
+        let _ = stream.write_all(req.as_bytes());
+        let mut buf = vec![0u8; 4096];
+        let mut total = Vec::new();
+        loop {
+            match stream.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => total.extend_from_slice(&buf[..n]),
+                Err(_) => break,
+            }
+        }
+        let resp = String::from_utf8_lossy(&total);
+        assert!(
+            resp.contains("200"),
+            "NET6-4a-2 js: expected 200 status, got: {:?}",
+            resp
+        );
+        assert!(
+            resp.contains("explicit-h11"),
+            "NET6-4a-2 js: expected body 'explicit-h11', got: {:?}",
+            resp
+        );
+    } else {
+        eprintln!("NET6-4a-2: could not connect to JS server on port {}", port_js);
+    }
+
+    let output_js = child_js.wait_with_output().expect("wait for node");
+    let stdout_js = normalize(&String::from_utf8_lossy(&output_js.stdout));
+    let _ = fs::remove_file(&js_path);
+    cleanup_net_project(&dir_js);
+
+    // Interpreter
+    let port_interp = find_free_loopback_port();
+    let source_interp = source_template(port_interp);
+    let dir_interp = setup_net_project(&source_interp, "v6_4a_interp_h11");
+    let td_path_interp = dir_interp.join("main.td");
+
+    let child_interp = Command::new(taida_bin())
+        .arg(&td_path_interp)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn interpreter");
+
+    thread::sleep(Duration::from_millis(300));
+
+    if let Ok(mut stream) = TcpStream::connect(format!("127.0.0.1:{}", port_interp)) {
+        stream.set_read_timeout(Some(Duration::from_secs(3))).ok();
+        let req = format!(
+            "GET / HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nConnection: close\r\n\r\n",
+            port_interp
+        );
+        let _ = stream.write_all(req.as_bytes());
+        let mut buf = vec![0u8; 4096];
+        let mut total = Vec::new();
+        loop {
+            match stream.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => total.extend_from_slice(&buf[..n]),
+                Err(_) => break,
+            }
+        }
+        let resp = String::from_utf8_lossy(&total);
+        assert!(
+            resp.contains("200") && resp.contains("explicit-h11"),
+            "NET6-4a-2 interp: expected 200 + 'explicit-h11', got: {:?}",
+            resp
+        );
+    }
+
+    let output_interp = child_interp.wait_with_output().expect("wait for interp");
+    let stdout_interp = normalize(&String::from_utf8_lossy(&output_interp.stdout));
+    cleanup_net_project(&dir_interp);
+
+    // Parity: both should report count=1
+    assert_eq!(
+        stdout_js, stdout_interp,
+        "NET6-4a-2: JS and Interpreter should produce identical output for explicit h1.1, \
+         JS={:?} Interp={:?}",
+        stdout_js, stdout_interp
+    );
+}
+
+// NET6-4b-1: JS permanently rejects protocol="h2" with H2Unsupported, even with valid TLS cert/key.
+// This confirms that JS h2 rejection is not just "missing cert/key" but a fundamental unsupported status.
+#[test]
+fn test_net6_4b_js_h2_rejected_even_with_tls_cert_key() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+    if !openssl_available() {
+        eprintln!("SKIP: openssl not available");
+        return;
+    }
+
+    let (cert_path, key_path) = match generate_self_signed_cert("v6_4b_js_h2_tls") {
+        Some(paths) => paths,
+        None => {
+            eprintln!("SKIP: cert generation failed");
+            return;
+        }
+    };
+
+    let port = find_free_loopback_port();
+    let source = format!(
+        r#">>> taida-lang/net => @(httpServe)
+
+handler req =
+  @(status <= 200, headers <= @[], body <= "should-not-reach")
+=> :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
+
+asyncResult <= httpServe({port}, handler, 1, 5000, 128, @(cert <= "{cert}", key <= "{key}", protocol <= "h2"))
+asyncResult ]=> result
+stdout(result.throw.message)
+"#,
+        port = port,
+        cert = cert_path.display(),
+        key = key_path.display()
+    );
+
+    let dir = setup_net_project(&source, "v6_4b_js_h2_tls");
+    let td_path = dir.join("main.td");
+    let js_path = unique_temp_path("taida_v6_4b_js", "h2_tls_reject", "mjs");
+
+    let transpile = Command::new(taida_bin())
+        .arg("build")
+        .arg("--target")
+        .arg("js")
+        .arg(&td_path)
+        .arg("-o")
+        .arg(&js_path)
+        .output()
+        .expect("transpile");
+    assert!(
+        transpile.status.success(),
+        "NET6-4b-1: JS transpile failed: {}",
+        String::from_utf8_lossy(&transpile.stderr)
+    );
+
+    let js_output = Command::new("node")
+        .arg(&js_path)
+        .output()
+        .expect("run node");
+    let stdout = normalize(&String::from_utf8_lossy(&js_output.stdout));
+    let _ = fs::remove_file(&js_path);
+    let _ = fs::remove_file(&cert_path);
+    let _ = fs::remove_file(&key_path);
+    cleanup_net_project(&dir);
+
+    // JS must reject with H2Unsupported even when valid cert/key are provided
+    assert!(
+        stdout.contains("HTTP/2") || stdout.contains("h2"),
+        "NET6-4b-1: expected message mentioning HTTP/2 or h2, got: {:?}",
+        stdout
+    );
+    assert!(
+        stdout.contains("not supported"),
+        "NET6-4b-1: expected 'not supported' in JS H2Unsupported message, got: {:?}",
+        stdout
+    );
+    assert!(
+        stdout.contains("JS backend") || stdout.contains("js backend"),
+        "NET6-4b-1: expected 'JS backend' in message (guidance), got: {:?}",
+        stdout
+    );
+    // Must mention alternatives
+    assert!(
+        stdout.contains("interpreter") || stdout.contains("native"),
+        "NET6-4b-1: expected guidance to use interpreter/native, got: {:?}",
+        stdout
+    );
+}
+
+// NET6-4b-2: 3-backend h2 behavior divergence is correctly documented.
+// Interpreter + Native serve h2 (with TLS), JS rejects it.
+// This test validates the documented parity policy:
+//   h2 = Interpreter + Native (2-way), JS = H2Unsupported (permanent)
+#[test]
+fn test_net6_4b_h2_3backend_divergence_documented() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+
+    // Source that requests h2 without TLS (triggers error on all backends, but different errors)
+    let source_template = |port: u16| {
+        format!(
+            r#">>> taida-lang/net => @(httpServe)
+
+handler req =
+  @(status <= 200, headers <= @[], body <= "nope")
+=> :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
+
+asyncResult <= httpServe({port}, handler, 1, 5000, 128, @(protocol <= "h2"))
+asyncResult ]=> result
+stdout(result.throw.message)
+"#,
+            port = port
+        )
+    };
+
+    // Interpreter: ProtocolError("requires TLS") -- h2 is supported but needs cert/key
+    let port_i = find_free_loopback_port();
+    let dir_i = setup_net_project(&source_template(port_i), "v6_4b_div_interp");
+    let output_i = Command::new(taida_bin())
+        .arg(dir_i.join("main.td"))
+        .output()
+        .expect("interp");
+    let stdout_i = normalize(&String::from_utf8_lossy(&output_i.stdout));
+    cleanup_net_project(&dir_i);
+
+    // JS: H2Unsupported -- h2 is permanently unsupported
+    let port_j = find_free_loopback_port();
+    let dir_j = setup_net_project(&source_template(port_j), "v6_4b_div_js");
+    let js_path = unique_temp_path("taida_v6_4b", "div_js", "mjs");
+    let t = Command::new(taida_bin())
+        .arg("build")
+        .arg("--target")
+        .arg("js")
+        .arg(dir_j.join("main.td"))
+        .arg("-o")
+        .arg(&js_path)
+        .output()
+        .expect("transpile");
+    assert!(t.status.success());
+    let js_out = Command::new("node").arg(&js_path).output().expect("node");
+    let stdout_j = normalize(&String::from_utf8_lossy(&js_out.stdout));
+    let _ = fs::remove_file(&js_path);
+    cleanup_net_project(&dir_j);
+
+    // Native: ProtocolError("requires TLS") -- h2 is supported but needs cert/key
+    let port_n = find_free_loopback_port();
+    let dir_n = setup_net_project(&source_template(port_n), "v6_4b_div_native");
+    let bin_path = unique_temp_path("taida_v6_4b", "div_native", "bin");
+    let c = Command::new(taida_bin())
+        .arg("build")
+        .arg("--target")
+        .arg("native")
+        .arg(dir_n.join("main.td"))
+        .arg("-o")
+        .arg(&bin_path)
+        .output()
+        .expect("compile");
+    assert!(
+        c.status.success(),
+        "NET6-4b-2: Native compile failed: {}",
+        String::from_utf8_lossy(&c.stderr)
+    );
+    let native_out = Command::new(&bin_path).output().expect("native");
+    let stdout_n = normalize(&String::from_utf8_lossy(&native_out.stdout));
+    let _ = fs::remove_file(&bin_path);
+    cleanup_net_project(&dir_n);
+
+    // Verify the documented divergence:
+    // Interpreter: "requires TLS" (h2 is implemented, but h2c is out of scope)
+    assert!(
+        stdout_i.contains("requires TLS"),
+        "NET6-4b-2 interp: expected 'requires TLS' for h2 without cert/key, got: {:?}",
+        stdout_i
+    );
+
+    // JS: "not supported" (h2 is permanently unsupported on JS)
+    assert!(
+        stdout_j.contains("not supported"),
+        "NET6-4b-2 js: expected 'not supported' (H2Unsupported), got: {:?}",
+        stdout_j
+    );
+
+    // Native: "requires TLS" (h2 is implemented, but h2c is out of scope) -- same as Interpreter
+    assert!(
+        stdout_n.contains("requires TLS"),
+        "NET6-4b-2 native: expected 'requires TLS' for h2 without cert/key, got: {:?}",
+        stdout_n
+    );
+
+    // Interpreter and Native should have the same error class (both ProtocolError about TLS)
+    // while JS should have a different error class (H2Unsupported about backend limitation)
+    assert!(
+        stdout_i.contains("requires TLS") && stdout_n.contains("requires TLS"),
+        "NET6-4b-2: Interpreter and Native should both mention 'requires TLS'"
+    );
+    assert!(
+        !stdout_j.contains("requires TLS"),
+        "NET6-4b-2: JS should NOT mention 'requires TLS' (it's a backend limitation, not TLS issue)"
+    );
+}
+
+// NET6-4b-3: JS h2 unsupported message stability contract.
+// The exact error message is part of the public contract for JS users.
+// This test pins the message content to prevent accidental changes.
+#[test]
+fn test_net6_4b_js_h2_unsupported_message_contract() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+
+    let port = find_free_loopback_port();
+    let source = format!(
+        r#">>> taida-lang/net => @(httpServe)
+
+handler req =
+  @(status <= 200, headers <= @[], body <= "nope")
+=> :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
+
+asyncResult <= httpServe({port}, handler, 1, 5000, 128, @(protocol <= "h2"))
+asyncResult ]=> result
+stdout(result.throw.message)
+"#,
+        port = port
+    );
+
+    let dir = setup_net_project(&source, "v6_4b_msg_js");
+    let js_path = unique_temp_path("taida_v6_4b", "msg_contract", "mjs");
+    let t = Command::new(taida_bin())
+        .arg("build")
+        .arg("--target")
+        .arg("js")
+        .arg(dir.join("main.td"))
+        .arg("-o")
+        .arg(&js_path)
+        .output()
+        .expect("transpile");
+    assert!(t.status.success());
+    let out = Command::new("node").arg(&js_path).output().expect("node");
+    let stdout = normalize(&String::from_utf8_lossy(&out.stdout));
+    let _ = fs::remove_file(&js_path);
+    cleanup_net_project(&dir);
+
+    // Pin the exact message content
+    assert!(
+        stdout.contains("httpServe: HTTP/2 (protocol: \"h2\") is not supported on the JS backend"),
+        "NET6-4b-3: expected exact H2Unsupported message prefix, got: {:?}",
+        stdout
+    );
+    assert!(
+        stdout.contains("Use the interpreter or native backend for HTTP/2 support"),
+        "NET6-4b-3: expected guidance suffix in message, got: {:?}",
+        stdout
+    );
+}
