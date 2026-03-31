@@ -6,6 +6,7 @@ mod methods;
 mod module_eval;
 mod mold_eval;
 mod net_eval;
+mod net_h2;
 #[allow(dead_code)] // Phase 1 defines interfaces consumed in Phase 2+
 mod net_transport;
 mod os_eval;

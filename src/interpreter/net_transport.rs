@@ -142,6 +142,15 @@ impl TlsTransport {
         &self.stream
     }
 
+    /// Get the ALPN-negotiated protocol after TLS handshake.
+    /// Returns `Some(b"h2")` for HTTP/2, `Some(b"http/1.1")` for HTTP/1.1,
+    /// or `None` if ALPN was not negotiated.
+    ///
+    /// NET6-2a: Used by httpServe to dispatch to the h2 or h1 connection loop.
+    pub fn alpn_protocol(&self) -> Option<&[u8]> {
+        self.tls_conn.alpn_protocol()
+    }
+
     /// Drain all pending TLS ciphertext to the TCP stream.
     ///
     /// rustls may buffer multiple TLS records internally (e.g. when a single
@@ -304,6 +313,60 @@ pub(crate) fn load_tls_config(
         .with_no_client_auth()
         .with_single_cert(certs, key)
         .map_err(|e| format!("httpServe: TLS config error: {}", e))?;
+
+    Ok(std::sync::Arc::new(config))
+}
+
+/// Load TLS server config with ALPN protocol negotiation for HTTP/2.
+///
+/// NET6-2a: Configures ALPN to advertise ["h2", "http/1.1"] so that clients
+/// can negotiate HTTP/2 during the TLS handshake. The negotiated protocol
+/// is accessible via `TlsTransport::alpn_protocol()` after handshake.
+///
+/// h2c (cleartext HTTP/2) is out of scope per NET_DESIGN.md.
+pub(crate) fn load_tls_config_h2(
+    cert_path: &str,
+    key_path: &str,
+) -> Result<std::sync::Arc<rustls::ServerConfig>, String> {
+    use std::fs::File;
+    use std::io::BufReader;
+
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+
+    let cert_file = File::open(cert_path)
+        .map_err(|e| format!("httpServe: failed to open cert file '{}': {}", cert_path, e))?;
+    let mut cert_reader = BufReader::new(cert_file);
+    let certs: Vec<rustls::pki_types::CertificateDer<'static>> =
+        rustls_pemfile::certs(&mut cert_reader)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| {
+                format!(
+                    "httpServe: failed to parse cert file '{}': {}",
+                    cert_path, e
+                )
+            })?;
+    if certs.is_empty() {
+        return Err(format!(
+            "httpServe: cert file '{}' contains no certificates",
+            cert_path
+        ));
+    }
+
+    let key_file = File::open(key_path)
+        .map_err(|e| format!("httpServe: failed to open key file '{}': {}", key_path, e))?;
+    let mut key_reader = BufReader::new(key_file);
+    let key = rustls_pemfile::private_key(&mut key_reader)
+        .map_err(|e| format!("httpServe: failed to parse key file '{}': {}", key_path, e))?
+        .ok_or_else(|| format!("httpServe: key file '{}' contains no private key", key_path))?;
+
+    let mut config = rustls::ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(certs, key)
+        .map_err(|e| format!("httpServe: TLS config error: {}", e))?;
+
+    // NET6-2a: ALPN protocol negotiation for HTTP/2.
+    // Advertise h2 first (preferred), then http/1.1 as fallback.
+    config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
 
     Ok(std::sync::Arc::new(config))
 }
