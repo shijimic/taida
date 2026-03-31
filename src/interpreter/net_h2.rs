@@ -120,20 +120,20 @@ const SETTINGS_MAX_HEADER_LIST_SIZE: u16 = 0x6;
 /// Static table entries. Index is 1-based (entry 0 is unused).
 const HPACK_STATIC_TABLE: &[(&str, &str)] = &[
     ("", ""),                             // 0: unused
-    (":authority", ""),                    // 1
-    (":method", "GET"),                    // 2
-    (":method", "POST"),                   // 3
-    (":path", "/"),                        // 4
+    (":authority", ""),                   // 1
+    (":method", "GET"),                   // 2
+    (":method", "POST"),                  // 3
+    (":path", "/"),                       // 4
     (":path", "/index.html"),             // 5
-    (":scheme", "http"),                   // 6
-    (":scheme", "https"),                  // 7
-    (":status", "200"),                    // 8
-    (":status", "204"),                    // 9
-    (":status", "206"),                    // 10
-    (":status", "304"),                    // 11
-    (":status", "400"),                    // 12
-    (":status", "404"),                    // 13
-    (":status", "500"),                    // 14
+    (":scheme", "http"),                  // 6
+    (":scheme", "https"),                 // 7
+    (":status", "200"),                   // 8
+    (":status", "204"),                   // 9
+    (":status", "206"),                   // 10
+    (":status", "304"),                   // 11
+    (":status", "400"),                   // 12
+    (":status", "404"),                   // 13
+    (":status", "500"),                   // 14
     ("accept-charset", ""),               // 15
     ("accept-encoding", "gzip, deflate"), // 16
     ("accept-language", ""),              // 17
@@ -212,10 +212,10 @@ static STATIC_EXACT_MAP: std::sync::LazyLock<HashMap<(&'static str, &'static str
 /// A parsed HTTP/2 frame header (9 bytes).
 #[derive(Debug, Clone)]
 pub(crate) struct FrameHeader {
-    pub length: u32,     // 24-bit payload length
+    pub length: u32, // 24-bit payload length
     pub frame_type: u8,
     pub flags: u8,
-    pub stream_id: u32,  // 31-bit stream identifier (R bit masked)
+    pub stream_id: u32, // 31-bit stream identifier (R bit masked)
 }
 
 impl FrameHeader {
@@ -388,7 +388,9 @@ impl HpackDecoder {
     /// Look up just the name from an index.
     fn get_indexed_name(&self, index: usize) -> Result<String, H2Error> {
         if index == 0 {
-            return Err(H2Error::Compression("HPACK: index 0 is invalid for name lookup".into()));
+            return Err(H2Error::Compression(
+                "HPACK: index 0 is invalid for name lookup".into(),
+            ));
         }
         if index < HPACK_STATIC_TABLE.len() {
             Ok(HPACK_STATIC_TABLE[index].0.to_string())
@@ -572,7 +574,9 @@ impl HpackEncoder {
 /// Returns (value, bytes_consumed).
 fn decode_integer(data: &[u8], prefix_bits: u8) -> Result<(usize, usize), H2Error> {
     if data.is_empty() {
-        return Err(H2Error::Compression("HPACK: unexpected end of input for integer".into()));
+        return Err(H2Error::Compression(
+            "HPACK: unexpected end of input for integer".into(),
+        ));
     }
 
     let mask = (1u8 << prefix_bits) - 1;
@@ -631,7 +635,9 @@ fn encode_integer(buf: &mut Vec<u8>, value: usize, prefix_bits: u8, prefix_patte
 /// Returns (string, bytes_consumed).
 fn decode_string(data: &[u8]) -> Result<(String, usize), H2Error> {
     if data.is_empty() {
-        return Err(H2Error::Compression("HPACK: unexpected end of input for string".into()));
+        return Err(H2Error::Compression(
+            "HPACK: unexpected end of input for string".into(),
+        ));
     }
 
     let huffman = data[0] & 0x80 != 0;
@@ -652,9 +658,8 @@ fn decode_string(data: &[u8]) -> Result<(String, usize), H2Error> {
         // Decode Huffman-encoded string
         decode_huffman(raw)?
     } else {
-        String::from_utf8(raw.to_vec()).map_err(|_| {
-            H2Error::Compression("HPACK: invalid UTF-8 in string literal".into())
-        })?
+        String::from_utf8(raw.to_vec())
+            .map_err(|_| H2Error::Compression("HPACK: invalid UTF-8 in string literal".into()))?
     };
 
     Ok((s, start + length))
@@ -1131,7 +1136,9 @@ impl From<io::Error> for H2Error {
 impl std::fmt::Display for H2Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            H2Error::Connection(code, msg) => write!(f, "h2 connection error (0x{:x}): {}", code, msg),
+            H2Error::Connection(code, msg) => {
+                write!(f, "h2 connection error (0x{:x}): {}", code, msg)
+            }
             H2Error::Stream(stream_id, code, msg) => {
                 write!(f, "h2 stream {} error (0x{:x}): {}", stream_id, code, msg)
             }
@@ -1145,9 +1152,7 @@ impl std::fmt::Display for H2Error {
 /// RFC 9113 Section 6.5.2: The value is based on the uncompressed size of
 /// header fields, including the length of the name and value in octets
 /// plus an overhead of 32 octets for each header field.
-pub(crate) fn validate_header_list_size(
-    headers: &[(String, String)],
-) -> Result<(), H2Error> {
+pub(crate) fn validate_header_list_size(headers: &[(String, String)]) -> Result<(), H2Error> {
     let mut total_size: usize = 0;
     for (name, value) in headers {
         total_size += name.len() + value.len() + 32;
@@ -1156,8 +1161,7 @@ pub(crate) fn validate_header_list_size(
                 ERROR_INTERNAL_ERROR,
                 format!(
                     "decoded header list size {} exceeds safety limit {}",
-                    total_size,
-                    MAX_DECODED_HEADER_LIST_SIZE
+                    total_size, MAX_DECODED_HEADER_LIST_SIZE
                 ),
             ));
         }
@@ -1460,10 +1464,7 @@ pub(crate) fn send_response_data<W: Write>(
             0
         };
 
-        let chunk_size = remaining
-            .min(frame_limit)
-            .min(conn_limit)
-            .min(stream_limit);
+        let chunk_size = remaining.min(frame_limit).min(conn_limit).min(stream_limit);
 
         if chunk_size == 0 {
             // Flow control window exhausted — cannot send more data.
@@ -1486,13 +1487,7 @@ pub(crate) fn send_response_data<W: Write>(
         } else {
             0
         };
-        write_frame(
-            writer,
-            FRAME_DATA,
-            flags,
-            stream_id,
-            &data[sent..chunk_end],
-        )?;
+        write_frame(writer, FRAME_DATA, flags, stream_id, &data[sent..chunk_end])?;
 
         // Debit both windows
         let debit = chunk_size as i64;
@@ -1522,7 +1517,12 @@ pub(crate) fn parse_settings(payload: &[u8]) -> Result<Vec<(u16, u32)>, H2Error>
     let mut pos = 0;
     while pos + 6 <= payload.len() {
         let id = u16::from_be_bytes([payload[pos], payload[pos + 1]]);
-        let value = u32::from_be_bytes([payload[pos + 2], payload[pos + 3], payload[pos + 4], payload[pos + 5]]);
+        let value = u32::from_be_bytes([
+            payload[pos + 2],
+            payload[pos + 3],
+            payload[pos + 4],
+            payload[pos + 5],
+        ]);
         settings.push((id, value));
         pos += 6;
     }
@@ -1751,9 +1751,10 @@ pub(crate) fn process_frame(
             }
 
             // END_HEADERS set — decode immediately.
-            let headers = conn.decoder.decode(header_block).map_err(|e| {
-                H2Error::Connection(ERROR_COMPRESSION_ERROR, format!("{}", e))
-            })?;
+            let headers = conn
+                .decoder
+                .decode(header_block)
+                .map_err(|e| H2Error::Connection(ERROR_COMPRESSION_ERROR, format!("{}", e)))?;
 
             // Safety: enforce header list size limit (HPACK bomb protection).
             validate_header_list_size(&headers)?;
@@ -1869,12 +1870,8 @@ pub(crate) fn process_frame(
                 ));
             }
 
-            let increment = u32::from_be_bytes([
-                payload[0] & 0x7F,
-                payload[1],
-                payload[2],
-                payload[3],
-            ]);
+            let increment =
+                u32::from_be_bytes([payload[0] & 0x7F, payload[1], payload[2], payload[3]]);
 
             if increment == 0 {
                 if header.stream_id == 0 {
@@ -2039,9 +2036,10 @@ pub(crate) fn process_frame(
             conn.continuation_stream_id = 0;
             conn.continuation_flags = 0;
 
-            let headers = conn.decoder.decode(&header_block).map_err(|e| {
-                H2Error::Connection(ERROR_COMPRESSION_ERROR, format!("{}", e))
-            })?;
+            let headers = conn
+                .decoder
+                .decode(&header_block)
+                .map_err(|e| H2Error::Connection(ERROR_COMPRESSION_ERROR, format!("{}", e)))?;
 
             // Safety: enforce header list size limit (HPACK bomb protection).
             validate_header_list_size(&headers)?;
@@ -2083,6 +2081,7 @@ pub(crate) type RequestFields = (String, String, String, Vec<(String, String)>);
 /// Validates per RFC 9113 Section 8.3:
 /// - Pseudo-headers MUST appear before all regular headers.
 /// - `:method`, `:path`, and `:scheme` are required for requests.
+///
 /// NB6-36: Accept actual stream_id to embed in errors instead of hardcoded 0.
 /// Backward-compat wrapper with stream_id=0 for unit tests.
 #[allow(dead_code)]
@@ -2177,7 +2176,11 @@ pub(crate) fn extract_request_fields_with_stream_id(
     }
 
     let method = method.ok_or_else(|| {
-        H2Error::Stream(stream_id, ERROR_PROTOCOL_ERROR, "missing :method pseudo-header".into())
+        H2Error::Stream(
+            stream_id,
+            ERROR_PROTOCOL_ERROR,
+            "missing :method pseudo-header".into(),
+        )
     })?;
     // RFC 9113 Section 8.3.1: :method value MUST NOT be empty.
     if method.is_empty() {
@@ -2189,7 +2192,11 @@ pub(crate) fn extract_request_fields_with_stream_id(
     }
 
     let path = path.ok_or_else(|| {
-        H2Error::Stream(stream_id, ERROR_PROTOCOL_ERROR, "missing :path pseudo-header".into())
+        H2Error::Stream(
+            stream_id,
+            ERROR_PROTOCOL_ERROR,
+            "missing :path pseudo-header".into(),
+        )
     })?;
     // RFC 9113 Section 8.3.1: :path value MUST NOT be empty for non-CONNECT requests.
     if path.is_empty() {
@@ -2202,7 +2209,11 @@ pub(crate) fn extract_request_fields_with_stream_id(
 
     // RFC 9113 Section 8.3.1: :scheme is required for request pseudo-headers.
     let _scheme = scheme.ok_or_else(|| {
-        H2Error::Stream(stream_id, ERROR_PROTOCOL_ERROR, "missing :scheme pseudo-header".into())
+        H2Error::Stream(
+            stream_id,
+            ERROR_PROTOCOL_ERROR,
+            "missing :scheme pseudo-header".into(),
+        )
     })?;
 
     let authority = authority.unwrap_or_default();
@@ -2339,9 +2350,7 @@ mod tests {
         let mut encoder = HpackEncoder::new(4096);
         let mut decoder = HpackDecoder::new(4096);
 
-        let headers = vec![
-            (":status".to_string(), "200".to_string()),
-        ];
+        let headers = vec![(":status".to_string(), "200".to_string())];
         let encoded = encoder.encode(&headers);
         let decoded = decoder.decode(&encoded).unwrap();
         assert_eq!(decoded, headers);
@@ -2352,9 +2361,7 @@ mod tests {
         let mut encoder = HpackEncoder::new(4096);
         let mut decoder = HpackDecoder::new(4096);
 
-        let headers = vec![
-            ("content-type".to_string(), "text/html".to_string()),
-        ];
+        let headers = vec![("content-type".to_string(), "text/html".to_string())];
         let encoded = encoder.encode(&headers);
         let decoded = decoder.decode(&encoded).unwrap();
         assert_eq!(decoded, headers);
@@ -2365,9 +2372,7 @@ mod tests {
         let mut encoder = HpackEncoder::new(4096);
         let mut decoder = HpackDecoder::new(4096);
 
-        let headers = vec![
-            ("x-custom".to_string(), "value123".to_string()),
-        ];
+        let headers = vec![("x-custom".to_string(), "value123".to_string())];
         let encoded = encoder.encode(&headers);
         let decoded = decoder.decode(&encoded).unwrap();
         assert_eq!(decoded, headers);
@@ -2379,9 +2384,7 @@ mod tests {
         let mut decoder = HpackDecoder::new(4096);
 
         // First request: new header, gets added to dynamic table
-        let headers1 = vec![
-            ("x-custom".to_string(), "hello".to_string()),
-        ];
+        let headers1 = vec![("x-custom".to_string(), "hello".to_string())];
         let encoded1 = encoder.encode(&headers1);
         let decoded1 = decoder.decode(&encoded1).unwrap();
         assert_eq!(decoded1, headers1);
@@ -2602,14 +2605,15 @@ mod tests {
         assert_eq!(method, "GET");
         assert_eq!(path, "/hello");
         assert_eq!(authority, "localhost:8443");
-        assert_eq!(regular, vec![("accept".to_string(), "text/plain".to_string())]);
+        assert_eq!(
+            regular,
+            vec![("accept".to_string(), "text/plain".to_string())]
+        );
     }
 
     #[test]
     fn test_extract_request_fields_missing_method() {
-        let headers = vec![
-            (":path".to_string(), "/hello".to_string()),
-        ];
+        let headers = vec![(":path".to_string(), "/hello".to_string())];
         assert!(extract_request_fields(&headers).is_err());
     }
 
@@ -2799,10 +2803,16 @@ mod tests {
         // Decode response headers with a fresh decoder
         let mut resp_decoder = HpackDecoder::new(4096);
         let resp_headers = resp_decoder.decode(&payload).unwrap();
-        assert!(resp_headers.iter().any(|(n, v)| n == ":status" && v == "200"));
-        assert!(resp_headers
-            .iter()
-            .any(|(n, v)| n == "content-type" && v == "text/plain"));
+        assert!(
+            resp_headers
+                .iter()
+                .any(|(n, v)| n == ":status" && v == "200")
+        );
+        assert!(
+            resp_headers
+                .iter()
+                .any(|(n, v)| n == "content-type" && v == "text/plain")
+        );
 
         // Read response DATA
         let (hdr, payload) = read_frame(&mut resp_reader, DEFAULT_MAX_FRAME_SIZE).unwrap();
@@ -2820,9 +2830,15 @@ mod tests {
         client_data.extend_from_slice(CONNECTION_PREFACE);
 
         // Client SETTINGS
-        client_data.extend_from_slice(&FrameHeader {
-            length: 0, frame_type: FRAME_SETTINGS, flags: 0, stream_id: 0,
-        }.serialize());
+        client_data.extend_from_slice(
+            &FrameHeader {
+                length: 0,
+                frame_type: FRAME_SETTINGS,
+                flags: 0,
+                stream_id: 0,
+            }
+            .serialize(),
+        );
 
         // HEADERS for POST /data (no END_STREAM — body follows)
         let mut enc = HpackEncoder::new(4096);
@@ -2833,22 +2849,28 @@ mod tests {
             ("content-type".to_string(), "application/json".to_string()),
         ];
         let encoded = enc.encode(&hdrs);
-        client_data.extend_from_slice(&FrameHeader {
-            length: encoded.len() as u32,
-            frame_type: FRAME_HEADERS,
-            flags: FLAG_END_HEADERS, // No END_STREAM
-            stream_id: 1,
-        }.serialize());
+        client_data.extend_from_slice(
+            &FrameHeader {
+                length: encoded.len() as u32,
+                frame_type: FRAME_HEADERS,
+                flags: FLAG_END_HEADERS, // No END_STREAM
+                stream_id: 1,
+            }
+            .serialize(),
+        );
         client_data.extend_from_slice(&encoded);
 
         // DATA frame with body and END_STREAM
         let body = b"{\"key\": \"value\"}";
-        client_data.extend_from_slice(&FrameHeader {
-            length: body.len() as u32,
-            frame_type: FRAME_DATA,
-            flags: FLAG_END_STREAM,
-            stream_id: 1,
-        }.serialize());
+        client_data.extend_from_slice(
+            &FrameHeader {
+                length: body.len() as u32,
+                frame_type: FRAME_DATA,
+                flags: FLAG_END_STREAM,
+                stream_id: 1,
+            }
+            .serialize(),
+        );
         client_data.extend_from_slice(body);
 
         // Process
@@ -2885,9 +2907,15 @@ mod tests {
         let mut client_data = Vec::new();
 
         client_data.extend_from_slice(CONNECTION_PREFACE);
-        client_data.extend_from_slice(&FrameHeader {
-            length: 0, frame_type: FRAME_SETTINGS, flags: 0, stream_id: 0,
-        }.serialize());
+        client_data.extend_from_slice(
+            &FrameHeader {
+                length: 0,
+                frame_type: FRAME_SETTINGS,
+                flags: 0,
+                stream_id: 0,
+            }
+            .serialize(),
+        );
 
         let mut enc = HpackEncoder::new(4096);
 
@@ -2898,12 +2926,15 @@ mod tests {
             (":scheme".to_string(), "https".to_string()),
         ];
         let encoded1 = enc.encode(&hdrs1);
-        client_data.extend_from_slice(&FrameHeader {
-            length: encoded1.len() as u32,
-            frame_type: FRAME_HEADERS,
-            flags: FLAG_END_HEADERS | FLAG_END_STREAM,
-            stream_id: 1,
-        }.serialize());
+        client_data.extend_from_slice(
+            &FrameHeader {
+                length: encoded1.len() as u32,
+                frame_type: FRAME_HEADERS,
+                flags: FLAG_END_HEADERS | FLAG_END_STREAM,
+                stream_id: 1,
+            }
+            .serialize(),
+        );
         client_data.extend_from_slice(&encoded1);
 
         // Stream 3: GET /second
@@ -2913,12 +2944,15 @@ mod tests {
             (":scheme".to_string(), "https".to_string()),
         ];
         let encoded3 = enc.encode(&hdrs3);
-        client_data.extend_from_slice(&FrameHeader {
-            length: encoded3.len() as u32,
-            frame_type: FRAME_HEADERS,
-            flags: FLAG_END_HEADERS | FLAG_END_STREAM,
-            stream_id: 3,
-        }.serialize());
+        client_data.extend_from_slice(
+            &FrameHeader {
+                length: encoded3.len() as u32,
+                frame_type: FRAME_HEADERS,
+                flags: FLAG_END_HEADERS | FLAG_END_STREAM,
+                stream_id: 3,
+            }
+            .serialize(),
+        );
         client_data.extend_from_slice(&encoded3);
 
         // Process
@@ -2987,7 +3021,16 @@ mod tests {
 
         let mut conn_sw = 1_000_000i64; // large enough window
         let mut stream_sw = 1_000_000i64;
-        send_response_data(&mut buf, 1, &data, true, max_frame, &mut conn_sw, &mut stream_sw).unwrap();
+        send_response_data(
+            &mut buf,
+            1,
+            &data,
+            true,
+            max_frame,
+            &mut conn_sw,
+            &mut stream_sw,
+        )
+        .unwrap();
 
         // Should produce 2 DATA frames
         let mut reader = std::io::Cursor::new(buf);
@@ -3130,7 +3173,7 @@ mod tests {
     fn test_send_flow_control_respects_minimum_window() {
         // send_response_data should use min(frame_size, conn_w, stream_w)
         let mut buf = Vec::new();
-        let mut conn_sw = 100i64;    // Smallest — should be the limit
+        let mut conn_sw = 100i64; // Smallest — should be the limit
         let mut stream_sw = 500i64;
         let data = vec![0x42u8; 80]; // Less than conn_sw
 
@@ -3213,7 +3256,11 @@ mod tests {
         let (h1, _p1) = read_frame(&mut reader, DEFAULT_MAX_FRAME_SIZE).unwrap();
         assert_eq!(h1.frame_type, FRAME_HEADERS);
         assert_eq!(h1.stream_id, stream_id);
-        assert_eq!(h1.flags & FLAG_END_STREAM, 0, "HEADERS must not have END_STREAM");
+        assert_eq!(
+            h1.flags & FLAG_END_STREAM,
+            0,
+            "HEADERS must not have END_STREAM"
+        );
 
         // Frame 2: DATA (partial — 500 bytes, no END_STREAM)
         let (h2, p2) = read_frame(&mut reader, DEFAULT_MAX_FRAME_SIZE).unwrap();
@@ -3221,7 +3268,8 @@ mod tests {
         assert_eq!(h2.stream_id, stream_id);
         assert_eq!(p2.len(), 500, "only 500 bytes should have been sent");
         assert_eq!(
-            h2.flags & FLAG_END_STREAM, 0,
+            h2.flags & FLAG_END_STREAM,
+            0,
             "partial DATA must not have END_STREAM"
         );
 
@@ -3401,13 +3449,21 @@ mod tests {
         // Note: actual protocol minimum is 16384, but for testing we go smaller.
         let small_max = 50u32;
         let headers = vec![
-            ("x-long-header-name-1".to_string(), "some-longish-value-here-foo".to_string()),
-            ("x-long-header-name-2".to_string(), "another-longish-value-bar".to_string()),
-            ("x-long-header-name-3".to_string(), "yet-more-long-value-data".to_string()),
+            (
+                "x-long-header-name-1".to_string(),
+                "some-longish-value-here-foo".to_string(),
+            ),
+            (
+                "x-long-header-name-2".to_string(),
+                "another-longish-value-bar".to_string(),
+            ),
+            (
+                "x-long-header-name-3".to_string(),
+                "yet-more-long-value-data".to_string(),
+            ),
         ];
 
-        send_response_headers(&mut buf, &mut encoder, 1, 200, &headers, true, small_max)
-            .unwrap();
+        send_response_headers(&mut buf, &mut encoder, 1, 200, &headers, true, small_max).unwrap();
 
         // Read frames and verify structure
         // We need to use a large enough max_frame_size for read_frame since the
@@ -3436,7 +3492,11 @@ mod tests {
             }
         }
         // There should be more than 1 frame total
-        assert!(frame_count >= 2, "expected HEADERS + at least 1 CONTINUATION, got {} frames", frame_count);
+        assert!(
+            frame_count >= 2,
+            "expected HEADERS + at least 1 CONTINUATION, got {} frames",
+            frame_count
+        );
     }
 
     #[test]
@@ -3447,8 +3507,16 @@ mod tests {
         let mut encoder = HpackEncoder::new(4096);
         let headers = vec![("content-type".to_string(), "text/plain".to_string())];
 
-        send_response_headers(&mut buf, &mut encoder, 1, 200, &headers, true, DEFAULT_MAX_FRAME_SIZE)
-            .unwrap();
+        send_response_headers(
+            &mut buf,
+            &mut encoder,
+            1,
+            200,
+            &headers,
+            true,
+            DEFAULT_MAX_FRAME_SIZE,
+        )
+        .unwrap();
 
         let mut reader = std::io::Cursor::new(buf);
         let (h, _) = read_frame(&mut reader, DEFAULT_MAX_FRAME_SIZE).unwrap();

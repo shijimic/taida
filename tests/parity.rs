@@ -22295,27 +22295,32 @@ stdout(r.requests)
         assert!(
             resp.contains("200 OK"),
             "NET6-1a-2 {}: expected 200, got: {:?}",
-            backend, resp
+            backend,
+            resp
         );
         assert!(
             resp.contains("X-A: alpha"),
             "NET6-1a-2 {}: expected X-A header, got: {:?}",
-            backend, resp
+            backend,
+            resp
         );
         assert!(
             resp.contains("X-B: beta"),
             "NET6-1a-2 {}: expected X-B header, got: {:?}",
-            backend, resp
+            backend,
+            resp
         );
         assert!(
             resp.contains("X-C: gamma"),
             "NET6-1a-2 {}: expected X-C header, got: {:?}",
-            backend, resp
+            backend,
+            resp
         );
         assert!(
             resp.contains("multi-hdr"),
             "NET6-1a-2 {}: expected body 'multi-hdr', got: {:?}",
-            backend, resp
+            backend,
+            resp
         );
         assert_eq!(
             stdout, "1",
@@ -22357,7 +22362,8 @@ stdout(r.requests)
         assert!(
             resp.contains("204"),
             "NET6-1a-3 {}: expected 204 status, got: {:?}",
-            backend, resp
+            backend,
+            resp
         );
         assert_eq!(
             stdout, "1",
@@ -22652,12 +22658,14 @@ stdout(r.requests)
         assert!(
             resp.contains("200 OK"),
             "NET6-1b-3 {}: expected 200 OK with explicit h1.1, got: {:?}",
-            backend, resp
+            backend,
+            resp
         );
         assert!(
             resp.contains("h11-ok"),
             "NET6-1b-3 {}: expected body 'h11-ok', got: {:?}",
-            backend, resp
+            backend,
+            resp
         );
         assert_eq!(
             stdout, "1",
@@ -22705,19 +22713,22 @@ stdout(r.requests)
         assert!(
             resp.contains("200 OK"),
             "NET6-1c-1 {}: expected 200 OK, got: {:?}",
-            backend, resp
+            backend,
+            resp
         );
         // Check Content-Length is 5000 (1000 repeats of 5-char "ABCDE")
         assert!(
             resp.contains("Content-Length: 5000"),
             "NET6-1c-1 {}: expected Content-Length: 5000 for large body, got: {:?}",
-            backend, resp
+            backend,
+            resp
         );
         // Verify body starts with expected pattern
         assert!(
             resp.contains("ABCDEABCDE"),
             "NET6-1c-1 {}: expected repeated ABCDE pattern in body, got response length: {}",
-            backend, resp.len()
+            backend,
+            resp.len()
         );
         assert_eq!(
             stdout, "1",
@@ -22761,12 +22772,14 @@ stdout(r.requests)
         assert!(
             resp.contains("200 OK"),
             "NET6-1c-2 {}: expected 200 OK with @() tls config, got: {:?}",
-            backend, resp
+            backend,
+            resp
         );
         assert!(
             resp.contains("compat-ok"),
             "NET6-1c-2 {}: expected body 'compat-ok', got: {:?}",
-            backend, resp
+            backend,
+            resp
         );
         assert_eq!(
             stdout, "1",
@@ -22943,7 +22956,11 @@ stdout(result.throw.message)
         let source = source_template(port);
         let dir = setup_net_project(&source, "nb6_10_nonstr_proto_cert_js");
         let td_path = dir.join("main.td");
-        let js_path = unique_temp_path("taida_nb6_10_nonstr_proto_cert_js", "nonstr_proto_cert", "mjs");
+        let js_path = unique_temp_path(
+            "taida_nb6_10_nonstr_proto_cert_js",
+            "nonstr_proto_cert",
+            "mjs",
+        );
         let transpile = Command::new(taida_bin())
             .arg("build")
             .arg("--target")
@@ -22979,7 +22996,11 @@ stdout(result.throw.message)
         let source = source_template(port);
         let dir = setup_net_project(&source, "nb6_10_nonstr_proto_cert_native");
         let td_path = dir.join("main.td");
-        let bin_path = unique_temp_path("taida_nb6_10_nonstr_proto_cert_native", "nonstr_proto_cert", "bin");
+        let bin_path = unique_temp_path(
+            "taida_nb6_10_nonstr_proto_cert_native",
+            "nonstr_proto_cert",
+            "bin",
+        );
         let compile = Command::new(taida_bin())
             .arg("build")
             .arg("--target")
@@ -23147,12 +23168,20 @@ fn curl_h2_available() -> bool {
 /// Returns true on success.
 fn gen_self_signed_cert(cert_path: &std::path::Path, key_path: &std::path::Path) -> bool {
     Command::new("openssl")
-        .args(&[
-            "req", "-x509", "-newkey", "rsa:2048", "-nodes",
-            "-subj", "/CN=127.0.0.1",
-            "-keyout", key_path.to_str().unwrap_or(""),
-            "-out", cert_path.to_str().unwrap_or(""),
-            "-days", "1",
+        .args([
+            "req",
+            "-x509",
+            "-newkey",
+            "rsa:2048",
+            "-nodes",
+            "-subj",
+            "/CN=127.0.0.1",
+            "-keyout",
+            key_path.to_str().unwrap_or(""),
+            "-out",
+            cert_path.to_str().unwrap_or(""),
+            "-days",
+            "1",
         ])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -23348,13 +23377,16 @@ stdout(r.requests)
 
     // Use curl --http2 to make a real HTTP/2 request
     let curl_out = Command::new("curl")
-        .args(&[
+        .args([
             "--http2",
             "--insecure",
             "--silent",
-            "--max-time", "5",
-            "-w", "%{http_version}:%{http_code}",
-            "-o", "/dev/null",
+            "--max-time",
+            "5",
+            "-w",
+            "%{http_version}:%{http_code}",
+            "-o",
+            "/dev/null",
             &format!("https://127.0.0.1:{}/test", port),
         ])
         .output()
@@ -23414,7 +23446,9 @@ asyncResult ]=> result
 result ]=> r
 stdout(r.requests)
 "#,
-            port = port, cert = cert, key = key
+            port = port,
+            cert = cert,
+            key = key
         )
     };
 
@@ -23430,26 +23464,25 @@ stdout(r.requests)
         }
 
         let port = find_free_loopback_port();
-        let source = source_fn(port, cert_path.to_str().unwrap_or(""), key_path.to_str().unwrap_or(""));
+        let source = source_fn(
+            port,
+            cert_path.to_str().unwrap_or(""),
+            key_path.to_str().unwrap_or(""),
+        );
 
         let dir = setup_net_project(&source, &format!("net6_3a_parity_{}", backend));
         let td_path = dir.join("main.td");
 
         let mut child: Child = match *backend {
-            "interp" => {
-                Command::new(taida_bin())
-                    .arg(&td_path)
-                    .stdout(Stdio::piped())
-                    .stderr(Stdio::null())
-                    .spawn()
-                    .expect("spawn interp h2 server")
-            }
+            "interp" => Command::new(taida_bin())
+                .arg(&td_path)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .spawn()
+                .expect("spawn interp h2 server"),
             "native" => {
-                let bin_path = unique_temp_path(
-                    "taida_h2_native_parity",
-                    &format!("{}", port),
-                    "bin",
-                );
+                let bin_path =
+                    unique_temp_path("taida_h2_native_parity", &format!("{}", port), "bin");
                 let compile = Command::new(taida_bin())
                     .arg("build")
                     .arg("--target")
@@ -23496,11 +23529,12 @@ stdout(r.requests)
 
         // Fetch with curl --http2
         let curl_out = Command::new("curl")
-            .args(&[
+            .args([
                 "--http2",
                 "--insecure",
                 "--silent",
-                "--max-time", "5",
+                "--max-time",
+                "5",
                 &format!("https://127.0.0.1:{}/", port),
             ])
             .output()
@@ -23516,7 +23550,11 @@ stdout(r.requests)
         results.push((body, server_stdout));
     }
 
-    assert_eq!(results.len(), 2, "NET6-3a-3: expected results for both backends");
+    assert_eq!(
+        results.len(),
+        2,
+        "NET6-3a-3: expected results for both backends"
+    );
 
     let (interp_body, interp_count) = &results[0];
     let (native_body, native_count) = &results[1];
@@ -23602,23 +23640,35 @@ asyncResult ]=> result
 result ]=> r
 stdout(r.requests)
 "#,
-        port = port, n = N_REQUESTS,
-        cert = cert_path.display(), key = key_path.display(),
+        port = port,
+        n = N_REQUESTS,
+        cert = cert_path.display(),
+        key = key_path.display(),
     );
 
     let dir = setup_net_project(&source, "net6_3b_1_hello");
     let td_path = dir.join("main.td");
     let bin_path = unique_temp_path("taida_h2_bench_1", "net6_3b", "bin");
     let compile = Command::new(taida_bin())
-        .arg("build").arg("--target").arg("native")
-        .arg(&td_path).arg("-o").arg(&bin_path)
-        .output().expect("compile net6_3b_1");
-    assert!(compile.status.success(),
-        "NET6-3b-1: compile failed: {}", String::from_utf8_lossy(&compile.stderr));
+        .arg("build")
+        .arg("--target")
+        .arg("native")
+        .arg(&td_path)
+        .arg("-o")
+        .arg(&bin_path)
+        .output()
+        .expect("compile net6_3b_1");
+    assert!(
+        compile.status.success(),
+        "NET6-3b-1: compile failed: {}",
+        String::from_utf8_lossy(&compile.stderr)
+    );
 
     let mut child = Command::new(&bin_path)
-        .stdout(Stdio::piped()).stderr(Stdio::null())
-        .spawn().expect("spawn net6_3b_1 server");
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn net6_3b_1 server");
     let _ = fs::remove_file(&bin_path);
 
     // Wait for server ready
@@ -23626,12 +23676,15 @@ stdout(r.requests)
     for _ in 0..50 {
         thread::sleep(Duration::from_millis(100));
         if TcpStream::connect(format!("127.0.0.1:{}", port)).is_ok() {
-            ready = true; break;
+            ready = true;
+            break;
         }
     }
     if !ready {
-        let _ = child.kill(); let _ = child.wait();
-        let _ = fs::remove_file(&cert_path); let _ = fs::remove_file(&key_path);
+        let _ = child.kill();
+        let _ = child.wait();
+        let _ = fs::remove_file(&cert_path);
+        let _ = fs::remove_file(&key_path);
         cleanup_net_project(&dir);
         panic!("NET6-3b-1: server not ready on port {}", port);
     }
@@ -23642,40 +23695,73 @@ stdout(r.requests)
     let mut ok_count = 0u64;
     for _ in 0..N_REQUESTS {
         let out = Command::new("curl")
-            .args(&["--http2", "--insecure", "--silent", "--max-time", "5",
-                    "-w", "%{http_version}:%{http_code}", "-o", "/dev/null", &url])
+            .args([
+                "--http2",
+                "--insecure",
+                "--silent",
+                "--max-time",
+                "5",
+                "-w",
+                "%{http_version}:%{http_code}",
+                "-o",
+                "/dev/null",
+                &url,
+            ])
             .output();
         if let Ok(o) = out {
             let s = String::from_utf8_lossy(&o.stdout);
-            if s.starts_with("2:2") { ok_count += 1; }
+            if s.starts_with("2:2") {
+                ok_count += 1;
+            }
         }
     }
     let elapsed_ms = t_start.elapsed().as_millis() as u64;
 
     let server_out = child.wait_with_output().expect("wait net6_3b_1");
-    let _ = fs::remove_file(&cert_path); let _ = fs::remove_file(&key_path);
+    let _ = fs::remove_file(&cert_path);
+    let _ = fs::remove_file(&key_path);
     cleanup_net_project(&dir);
 
-    let req_per_s = if elapsed_ms > 0 { ok_count * 1000 / elapsed_ms } else { 0 };
-    let latency_ms = if ok_count > 0 { elapsed_ms / ok_count } else { 0 };
+    let req_per_s = if elapsed_ms > 0 {
+        ok_count * 1000 / elapsed_ms
+    } else {
+        0
+    };
+    let latency_ms = if ok_count > 0 {
+        elapsed_ms / ok_count
+    } else {
+        0
+    };
     let server_count: u64 = normalize(&String::from_utf8_lossy(&server_out.stdout))
-        .trim().parse().unwrap_or(0);
+        .trim()
+        .parse()
+        .unwrap_or(0);
 
     eprintln!(
         "NET6-3b-1 [native h2 new-conn hello] ok={}/{} req/s={} latency={}ms \
          | may_minihttp north-star ~310000 req/s (HTTP/1.1 plaintext, loopback) | gap=~{}x",
-        ok_count, N_REQUESTS, req_per_s, latency_ms,
-        if req_per_s > 0 { 310000u64 / req_per_s } else { 0 }
+        ok_count,
+        N_REQUESTS,
+        req_per_s,
+        latency_ms,
+        if req_per_s > 0 {
+            310000u64 / req_per_s
+        } else {
+            0
+        }
     );
 
     // Structural assertions (correctness, not timing)
     assert!(
         ok_count >= N_REQUESTS * 90 / 100,
-        "NET6-3b-1: expected >=90% success rate, got {}/{}", ok_count, N_REQUESTS
+        "NET6-3b-1: expected >=90% success rate, got {}/{}",
+        ok_count,
+        N_REQUESTS
     );
     assert_eq!(
         server_count, ok_count,
-        "NET6-3b-1: server request count mismatch: server={} curl_ok={}", server_count, ok_count
+        "NET6-3b-1: server request count mismatch: server={} curl_ok={}",
+        server_count, ok_count
     );
 }
 
@@ -23712,35 +23798,50 @@ asyncResult ]=> result
 result ]=> r
 stdout(r.requests)
 "#,
-        port = port, n = N_REQUESTS,
-        cert = cert_path.display(), key = key_path.display(),
+        port = port,
+        n = N_REQUESTS,
+        cert = cert_path.display(),
+        key = key_path.display(),
     );
 
     let dir = setup_net_project(&source, "net6_3b_2_32req");
     let td_path = dir.join("main.td");
     let bin_path = unique_temp_path("taida_h2_bench_2", "net6_3b", "bin");
     let compile = Command::new(taida_bin())
-        .arg("build").arg("--target").arg("native")
-        .arg(&td_path).arg("-o").arg(&bin_path)
-        .output().expect("compile net6_3b_2");
-    assert!(compile.status.success(),
-        "NET6-3b-2: compile failed: {}", String::from_utf8_lossy(&compile.stderr));
+        .arg("build")
+        .arg("--target")
+        .arg("native")
+        .arg(&td_path)
+        .arg("-o")
+        .arg(&bin_path)
+        .output()
+        .expect("compile net6_3b_2");
+    assert!(
+        compile.status.success(),
+        "NET6-3b-2: compile failed: {}",
+        String::from_utf8_lossy(&compile.stderr)
+    );
 
     let mut child = Command::new(&bin_path)
-        .stdout(Stdio::piped()).stderr(Stdio::null())
-        .spawn().expect("spawn net6_3b_2 server");
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn net6_3b_2 server");
     let _ = fs::remove_file(&bin_path);
 
     let mut ready = false;
     for _ in 0..50 {
         thread::sleep(Duration::from_millis(100));
         if TcpStream::connect(format!("127.0.0.1:{}", port)).is_ok() {
-            ready = true; break;
+            ready = true;
+            break;
         }
     }
     if !ready {
-        let _ = child.kill(); let _ = child.wait();
-        let _ = fs::remove_file(&cert_path); let _ = fs::remove_file(&key_path);
+        let _ = child.kill();
+        let _ = child.wait();
+        let _ = fs::remove_file(&cert_path);
+        let _ = fs::remove_file(&key_path);
         cleanup_net_project(&dir);
         panic!("NET6-3b-2: server not ready on port {}", port);
     }
@@ -23750,23 +23851,42 @@ stdout(r.requests)
     let mut ok_count = 0u64;
     for _ in 0..N_REQUESTS {
         let out = Command::new("curl")
-            .args(&["--http2", "--insecure", "--silent", "--max-time", "5",
-                    "-w", "%{http_version}:%{http_code}", "-o", "/dev/null", &url])
+            .args([
+                "--http2",
+                "--insecure",
+                "--silent",
+                "--max-time",
+                "5",
+                "-w",
+                "%{http_version}:%{http_code}",
+                "-o",
+                "/dev/null",
+                &url,
+            ])
             .output();
         if let Ok(o) = out {
             let s = String::from_utf8_lossy(&o.stdout);
-            if s.starts_with("2:2") { ok_count += 1; }
+            if s.starts_with("2:2") {
+                ok_count += 1;
+            }
         }
     }
     let elapsed_ms = t_start.elapsed().as_millis() as u64;
 
     let server_out = child.wait_with_output().expect("wait net6_3b_2");
-    let _ = fs::remove_file(&cert_path); let _ = fs::remove_file(&key_path);
+    let _ = fs::remove_file(&cert_path);
+    let _ = fs::remove_file(&key_path);
     cleanup_net_project(&dir);
 
-    let req_per_s = if elapsed_ms > 0 { ok_count * 1000 / elapsed_ms } else { 0 };
+    let req_per_s = if elapsed_ms > 0 {
+        ok_count * 1000 / elapsed_ms
+    } else {
+        0
+    };
     let server_count: u64 = normalize(&String::from_utf8_lossy(&server_out.stdout))
-        .trim().parse().unwrap_or(0);
+        .trim()
+        .parse()
+        .unwrap_or(0);
 
     eprintln!(
         "NET6-3b-2 [native h2 32 new-conn requests] ok={}/{} req/s={} total={}ms \
@@ -23776,11 +23896,14 @@ stdout(r.requests)
 
     assert!(
         ok_count >= N_REQUESTS * 90 / 100,
-        "NET6-3b-2: expected >=90% success rate, got {}/{}", ok_count, N_REQUESTS
+        "NET6-3b-2: expected >=90% success rate, got {}/{}",
+        ok_count,
+        N_REQUESTS
     );
     assert_eq!(
         server_count, ok_count,
-        "NET6-3b-2: server count mismatch: server={} curl_ok={}", server_count, ok_count
+        "NET6-3b-2: server count mismatch: server={} curl_ok={}",
+        server_count, ok_count
     );
 }
 
@@ -23821,35 +23944,50 @@ result ]=> r
 stdout(r.requests)
 "#,
         body = body_64k,
-        port = port, n = N_REQUESTS,
-        cert = cert_path.display(), key = key_path.display(),
+        port = port,
+        n = N_REQUESTS,
+        cert = cert_path.display(),
+        key = key_path.display(),
     );
 
     let dir = setup_net_project(&source, "net6_3b_3_64k");
     let td_path = dir.join("main.td");
     let bin_path = unique_temp_path("taida_h2_bench_3", "net6_3b", "bin");
     let compile = Command::new(taida_bin())
-        .arg("build").arg("--target").arg("native")
-        .arg(&td_path).arg("-o").arg(&bin_path)
-        .output().expect("compile net6_3b_3");
-    assert!(compile.status.success(),
-        "NET6-3b-3: compile failed: {}", String::from_utf8_lossy(&compile.stderr));
+        .arg("build")
+        .arg("--target")
+        .arg("native")
+        .arg(&td_path)
+        .arg("-o")
+        .arg(&bin_path)
+        .output()
+        .expect("compile net6_3b_3");
+    assert!(
+        compile.status.success(),
+        "NET6-3b-3: compile failed: {}",
+        String::from_utf8_lossy(&compile.stderr)
+    );
 
     let mut child = Command::new(&bin_path)
-        .stdout(Stdio::piped()).stderr(Stdio::null())
-        .spawn().expect("spawn net6_3b_3 server");
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn net6_3b_3 server");
     let _ = fs::remove_file(&bin_path);
 
     let mut ready = false;
     for _ in 0..50 {
         thread::sleep(Duration::from_millis(100));
         if TcpStream::connect(format!("127.0.0.1:{}", port)).is_ok() {
-            ready = true; break;
+            ready = true;
+            break;
         }
     }
     if !ready {
-        let _ = child.kill(); let _ = child.wait();
-        let _ = fs::remove_file(&cert_path); let _ = fs::remove_file(&key_path);
+        let _ = child.kill();
+        let _ = child.wait();
+        let _ = fs::remove_file(&cert_path);
+        let _ = fs::remove_file(&key_path);
         cleanup_net_project(&dir);
         panic!("NET6-3b-3: server not ready on port {}", port);
     }
@@ -23860,9 +23998,18 @@ stdout(r.requests)
     let mut total_bytes: u64 = 0;
     for _ in 0..N_REQUESTS {
         let out = Command::new("curl")
-            .args(&["--http2", "--insecure", "--silent", "--max-time", "10",
-                    "-w", "%{http_version}:%{http_code}:%{size_download}",
-                    "-o", "/dev/null", &url])
+            .args([
+                "--http2",
+                "--insecure",
+                "--silent",
+                "--max-time",
+                "10",
+                "-w",
+                "%{http_version}:%{http_code}:%{size_download}",
+                "-o",
+                "/dev/null",
+                &url,
+            ])
             .output();
         if let Ok(o) = out {
             let s = String::from_utf8_lossy(&o.stdout);
@@ -23877,14 +24024,19 @@ stdout(r.requests)
     let elapsed_ms = t_start.elapsed().as_millis() as u64;
 
     let server_out = child.wait_with_output().expect("wait net6_3b_3");
-    let _ = fs::remove_file(&cert_path); let _ = fs::remove_file(&key_path);
+    let _ = fs::remove_file(&cert_path);
+    let _ = fs::remove_file(&key_path);
     cleanup_net_project(&dir);
 
     let throughput_mib_s = if elapsed_ms > 0 {
         (total_bytes as f64 / (1024.0 * 1024.0)) / (elapsed_ms as f64 / 1000.0)
-    } else { 0.0 };
+    } else {
+        0.0
+    };
     let server_count: u64 = normalize(&String::from_utf8_lossy(&server_out.stdout))
-        .trim().parse().unwrap_or(0);
+        .trim()
+        .parse()
+        .unwrap_or(0);
 
     eprintln!(
         "NET6-3b-3 [native h2 64KiB data] ok={}/{} throughput={:.1}MiB/s total_bytes={} elapsed={}ms \
@@ -23894,19 +24046,23 @@ stdout(r.requests)
 
     assert!(
         ok_count >= N_REQUESTS * 90 / 100,
-        "NET6-3b-3: expected >=90% success rate, got {}/{}", ok_count, N_REQUESTS
+        "NET6-3b-3: expected >=90% success rate, got {}/{}",
+        ok_count,
+        N_REQUESTS
     );
     // Each successful response must have delivered the full 64KiB
     if ok_count > 0 {
         let avg_bytes = total_bytes / ok_count;
         assert!(
             avg_bytes >= 65536 * 90 / 100,
-            "NET6-3b-3: average response body too small: {} bytes (expected ~65536)", avg_bytes
+            "NET6-3b-3: average response body too small: {} bytes (expected ~65536)",
+            avg_bytes
         );
     }
     assert_eq!(
         server_count, ok_count,
-        "NET6-3b-3: server count mismatch: server={} curl_ok={}", server_count, ok_count
+        "NET6-3b-3: server count mismatch: server={} curl_ok={}",
+        server_count, ok_count
     );
 }
 
@@ -23932,9 +24088,8 @@ fn test_net6_3b_native_h2_32_stream_multiplex_benchmark() {
 
     // Check curl --parallel support (curl 7.66+)
     let curl_ver = Command::new("curl").arg("--help").arg("all").output();
-    let has_parallel = curl_ver.map_or(false, |o| {
-        String::from_utf8_lossy(&o.stdout).contains("--parallel")
-    });
+    let has_parallel =
+        curl_ver.is_ok_and(|o| String::from_utf8_lossy(&o.stdout).contains("--parallel"));
     if !has_parallel {
         eprintln!("SKIP: curl --parallel not available (requires curl 7.66+)");
         return;
@@ -23962,35 +24117,50 @@ asyncResult ]=> result
 result ]=> r
 stdout(r.requests)
 "#,
-        port = port, n = N_STREAMS,
-        cert = cert_path.display(), key = key_path.display(),
+        port = port,
+        n = N_STREAMS,
+        cert = cert_path.display(),
+        key = key_path.display(),
     );
 
     let dir = setup_net_project(&source, "net6_3b_4_mux");
     let td_path = dir.join("main.td");
     let bin_path = unique_temp_path("taida_h2_bench_4", "net6_3b", "bin");
     let compile = Command::new(taida_bin())
-        .arg("build").arg("--target").arg("native")
-        .arg(&td_path).arg("-o").arg(&bin_path)
-        .output().expect("compile net6_3b_4");
-    assert!(compile.status.success(),
-        "NET6-3b-4: compile failed: {}", String::from_utf8_lossy(&compile.stderr));
+        .arg("build")
+        .arg("--target")
+        .arg("native")
+        .arg(&td_path)
+        .arg("-o")
+        .arg(&bin_path)
+        .output()
+        .expect("compile net6_3b_4");
+    assert!(
+        compile.status.success(),
+        "NET6-3b-4: compile failed: {}",
+        String::from_utf8_lossy(&compile.stderr)
+    );
 
     let mut child = Command::new(&bin_path)
-        .stdout(Stdio::piped()).stderr(Stdio::piped())
-        .spawn().expect("spawn net6_3b_4 server");
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn net6_3b_4 server");
 
     let mut ready = false;
     for _ in 0..50 {
         thread::sleep(Duration::from_millis(100));
         if TcpStream::connect(format!("127.0.0.1:{}", port)).is_ok() {
-            ready = true; break;
+            ready = true;
+            break;
         }
     }
     if !ready {
-        let _ = child.kill(); let _ = child.wait();
+        let _ = child.kill();
+        let _ = child.wait();
         let _ = fs::remove_file(&bin_path);
-        let _ = fs::remove_file(&cert_path); let _ = fs::remove_file(&key_path);
+        let _ = fs::remove_file(&cert_path);
+        let _ = fs::remove_file(&key_path);
         cleanup_net_project(&dir);
         panic!("NET6-3b-4: server not ready on port {}", port);
     }
@@ -23999,10 +24169,14 @@ stdout(r.requests)
     // curl --parallel with multiple URL arguments multiplexes them on one connection.
     let url = format!("https://127.0.0.1:{}/mux", port);
     let mut curl_args: Vec<String> = vec![
-        "--http2".into(), "--insecure".into(), "--silent".into(),
-        "--max-time".into(), "15".into(),
+        "--http2".into(),
+        "--insecure".into(),
+        "--silent".into(),
+        "--max-time".into(),
+        "15".into(),
         "--parallel".into(),
-        "--parallel-max".into(), N_STREAMS.to_string(),
+        "--parallel-max".into(),
+        N_STREAMS.to_string(),
     ];
     // Add N_STREAMS URL arguments — curl multiplexes these over one connection
     for _ in 0..N_STREAMS {
@@ -24014,14 +24188,13 @@ stdout(r.requests)
     }
 
     let t_start = std::time::Instant::now();
-    let curl_out = Command::new("curl")
-        .args(&curl_args)
-        .output();
+    let curl_out = Command::new("curl").args(&curl_args).output();
     let elapsed_ms = t_start.elapsed().as_millis() as u64;
 
     let server_out = child.wait_with_output().expect("wait net6_3b_4");
     let _ = fs::remove_file(&bin_path);
-    let _ = fs::remove_file(&cert_path); let _ = fs::remove_file(&key_path);
+    let _ = fs::remove_file(&cert_path);
+    let _ = fs::remove_file(&key_path);
     cleanup_net_project(&dir);
 
     let ok_count = curl_out.as_ref().map_or(0u64, |o| {
@@ -24033,17 +24206,26 @@ stdout(r.requests)
 
     // Parse server stdout: single line — request count.
     let raw_out = normalize(&String::from_utf8_lossy(&server_out.stdout));
-    let server_requests: u64 = raw_out.trim().lines().next()
-        .and_then(|s| s.trim().parse().ok()).unwrap_or(0);
+    let server_requests: u64 = raw_out
+        .trim()
+        .lines()
+        .next()
+        .and_then(|s| s.trim().parse().ok())
+        .unwrap_or(0);
     // NB6-47: Parse connection count from stderr side channel ([h2-conn] N lines).
     let stderr_str = String::from_utf8_lossy(&server_out.stderr);
-    let server_connections: u64 = stderr_str.lines()
+    let server_connections: u64 = stderr_str
+        .lines()
         .filter_map(|l| l.strip_prefix("[h2-conn] "))
         .filter_map(|s| s.trim().parse::<u64>().ok())
-        .last()
+        .next_back()
         .unwrap_or(0);
 
-    let req_per_s = if elapsed_ms > 0 { ok_count * 1000 / elapsed_ms } else { 0 };
+    let req_per_s = if elapsed_ms > 0 {
+        ok_count * 1000 / elapsed_ms
+    } else {
+        0
+    };
 
     eprintln!(
         "NET6-3b-4 [native h2 32-stream MULTIPLEX] ok={}/{} req/s={} total={}ms \
@@ -24055,11 +24237,14 @@ stdout(r.requests)
     // NB6-25 fail-fast: all three assertions must pass
     assert!(
         ok_count >= N_STREAMS * 80 / 100,
-        "NET6-3b-4: expected >=80% success rate for multiplex, got {}/{}", ok_count, N_STREAMS
+        "NET6-3b-4: expected >=80% success rate for multiplex, got {}/{}",
+        ok_count,
+        N_STREAMS
     );
     assert_eq!(
-        server_requests, N_STREAMS as u64,
-        "NET6-3b-4: expected {} requests on server, got {}", N_STREAMS, server_requests
+        server_requests, N_STREAMS,
+        "NET6-3b-4: expected {} requests on server, got {}",
+        N_STREAMS, server_requests
     );
     assert_eq!(
         server_connections, 1,
@@ -24126,12 +24311,7 @@ stdout(r.requests)
         .expect("spawn node");
 
     // Send one HTTP/1.1 request with retry-connect + full verification (fail-fast)
-    let _resp = send_h1_get_and_assert(
-        port,
-        "NET6-4a-1",
-        "hello-v6-js",
-        &["x-engine"],
-    );
+    let _resp = send_h1_get_and_assert(port, "NET6-4a-1", "hello-v6-js", &["x-engine"]);
 
     // Wait for server completion and verify exit success
     let output = child.wait_with_output().expect("wait for node");
@@ -24208,12 +24388,7 @@ stdout(r.requests)
         .expect("spawn node");
 
     // Send request with retry-connect + full verification (fail-fast)
-    let _resp_js = send_h1_get_and_assert(
-        port_js,
-        "NET6-4a-2 js",
-        "explicit-h11",
-        &[],
-    );
+    let _resp_js = send_h1_get_and_assert(port_js, "NET6-4a-2 js", "explicit-h11", &[]);
 
     // Verify JS server exit success and stdout
     let output_js = child_js.wait_with_output().expect("wait for node");
@@ -24246,12 +24421,7 @@ stdout(r.requests)
         .expect("spawn interpreter");
 
     // Send request with retry-connect + full verification (fail-fast)
-    let _resp_interp = send_h1_get_and_assert(
-        port_interp,
-        "NET6-4a-2 interp",
-        "explicit-h11",
-        &[],
-    );
+    let _resp_interp = send_h1_get_and_assert(port_interp, "NET6-4a-2 interp", "explicit-h11", &[]);
 
     // Verify interpreter exit success and stdout
     let output_interp = child_interp.wait_with_output().expect("wait for interp");
@@ -24630,8 +24800,7 @@ stdout(result.throw.message)
 fn test_net6_5b_scatter_gather_is_default_send_path() {
     // Verify that Interpreter scatter-gather send is the default path.
     // The source code must call send_response_scatter in the serve loop.
-    let source = std::fs::read_to_string("src/interpreter/net_eval.rs")
-        .expect("read net_eval.rs");
+    let source = std::fs::read_to_string("src/interpreter/net_eval.rs").expect("read net_eval.rs");
     assert!(
         source.contains("send_response_scatter"),
         "NET6-5b audit: send_response_scatter must be present in net_eval.rs"
@@ -24647,8 +24816,8 @@ fn test_net6_5b_scatter_gather_is_default_send_path() {
 #[test]
 fn test_net6_5b_native_scatter_gather_present() {
     // Verify that Native scatter-gather send is implemented.
-    let source = std::fs::read_to_string("src/codegen/native_runtime.c")
-        .expect("read native_runtime.c");
+    let source =
+        std::fs::read_to_string("src/codegen/native_runtime.c").expect("read native_runtime.c");
     assert!(
         source.contains("taida_net_send_response_scatter"),
         "NET6-5b audit: taida_net_send_response_scatter must be present in native_runtime.c"
@@ -24662,8 +24831,7 @@ fn test_net6_5b_native_scatter_gather_present() {
 #[test]
 fn test_net6_5b_js_scatter_gather_present() {
     // Verify that JS scatter-gather send is implemented.
-    let source = std::fs::read_to_string("src/js/runtime.rs")
-        .expect("read runtime.rs");
+    let source = std::fs::read_to_string("src/js/runtime.rs").expect("read runtime.rs");
     assert!(
         source.contains("encodeResponseScatter") || source.contains("cork"),
         "NET6-5b audit: JS scatter-gather (cork/uncork or encodeResponseScatter) must be present"
@@ -24674,8 +24842,7 @@ fn test_net6_5b_js_scatter_gather_present() {
 fn test_net6_5b_no_format_in_hot_path_head_builder() {
     // NB6-5 fix: head builder should use write!(&mut buf) not format!()
     // for status line and header encoding in the hot path.
-    let source = std::fs::read_to_string("src/interpreter/net_eval.rs")
-        .expect("read net_eval.rs");
+    let source = std::fs::read_to_string("src/interpreter/net_eval.rs").expect("read net_eval.rs");
 
     // Find the encode_response and build_streaming_head functions
     // They should contain write! instead of format! for the wire head
@@ -24694,16 +24861,15 @@ fn test_net6_5b_no_format_in_hot_path_head_builder() {
 fn test_net6_5b_websocket_word_at_a_time_mask() {
     // NB6-6 fix: WebSocket mask/unmask should use 4-byte-at-a-time XOR.
     // Interpreter: chunks_exact_mut(4) + u32::from_ne_bytes
-    let source = std::fs::read_to_string("src/interpreter/net_eval.rs")
-        .expect("read net_eval.rs");
+    let source = std::fs::read_to_string("src/interpreter/net_eval.rs").expect("read net_eval.rs");
     assert!(
         source.contains("chunks_exact_mut(4)") || source.contains("from_ne_bytes"),
         "NET6-5b audit: Interpreter WebSocket mask should use word-at-a-time XOR"
     );
 
     // Native: uint32_t mask_word + memcpy + XOR
-    let native_source = std::fs::read_to_string("src/codegen/native_runtime.c")
-        .expect("read native_runtime.c");
+    let native_source =
+        std::fs::read_to_string("src/codegen/native_runtime.c").expect("read native_runtime.c");
     assert!(
         native_source.contains("uint32_t mask_word") || native_source.contains("mask_word"),
         "NET6-5b audit: Native WebSocket mask should use word-at-a-time XOR"
@@ -24713,8 +24879,8 @@ fn test_net6_5b_websocket_word_at_a_time_mask() {
 #[test]
 fn test_net6_5b_native_tls_linearization() {
     // NB6-3 fix: Native TLS should linearize iovecs before a single SSL_write.
-    let source = std::fs::read_to_string("src/codegen/native_runtime.c")
-        .expect("read native_runtime.c");
+    let source =
+        std::fs::read_to_string("src/codegen/native_runtime.c").expect("read native_runtime.c");
     // Check for the stack buffer + heap fallback pattern
     assert!(
         source.contains("stack_buf") && source.contains("taida_tls_send_all"),
@@ -24729,25 +24895,42 @@ fn test_net6_5b_h2_module_architecture() {
         std::path::Path::new("src/interpreter/net_h2.rs").exists(),
         "NET6-5b audit: net_h2.rs module must exist"
     );
-    let source = std::fs::read_to_string("src/interpreter/net_h2.rs")
-        .expect("read net_h2.rs");
+    let source = std::fs::read_to_string("src/interpreter/net_h2.rs").expect("read net_h2.rs");
     // Core h2 protocol elements must be present
-    assert!(source.contains("CONNECTION_PREFACE"), "NET6-5b: connection preface");
+    assert!(
+        source.contains("CONNECTION_PREFACE"),
+        "NET6-5b: connection preface"
+    );
     assert!(source.contains("HpackDecoder"), "NET6-5b: HPACK decoder");
     assert!(source.contains("HpackEncoder"), "NET6-5b: HPACK encoder");
-    assert!(source.contains("H2Connection"), "NET6-5b: H2 connection state");
-    assert!(source.contains("StreamState"), "NET6-5b: stream state machine");
+    assert!(
+        source.contains("H2Connection"),
+        "NET6-5b: H2 connection state"
+    );
+    assert!(
+        source.contains("StreamState"),
+        "NET6-5b: stream state machine"
+    );
     assert!(source.contains("FRAME_GOAWAY"), "NET6-5b: GOAWAY frame");
-    assert!(source.contains("validate_header_list_size"), "NET6-5b: header list size protection");
-    assert!(source.contains("MAX_CONTINUATION_BUFFER_SIZE"), "NET6-5b: continuation buffer limit");
-    assert!(source.contains("MAX_FLOW_CONTROL_WINDOW"), "NET6-5b: flow control overflow protection");
+    assert!(
+        source.contains("validate_header_list_size"),
+        "NET6-5b: header list size protection"
+    );
+    assert!(
+        source.contains("MAX_CONTINUATION_BUFFER_SIZE"),
+        "NET6-5b: continuation buffer limit"
+    );
+    assert!(
+        source.contains("MAX_FLOW_CONTROL_WINDOW"),
+        "NET6-5b: flow control overflow protection"
+    );
 }
 
 #[test]
 fn test_net6_5b_native_h2_hardening_present() {
     // Verify that Native h2 has the same hardening as Interpreter.
-    let source = std::fs::read_to_string("src/codegen/native_runtime.c")
-        .expect("read native_runtime.c");
+    let source =
+        std::fs::read_to_string("src/codegen/native_runtime.c").expect("read native_runtime.c");
     // WINDOW_UPDATE overflow protection
     assert!(
         source.contains("H2_MAX_FLOW_CONTROL_WINDOW"),
@@ -24786,8 +24969,10 @@ stdout(serverResult.ok)
 "#;
 
     for profile in &["wasm-min", "wasm-wasi", "wasm-edge", "wasm-full"] {
-        let td_path = std::env::temp_dir().join(format!("taida_net6_5b_wasm_policy_{}.td", profile));
-        let wasm_path = std::env::temp_dir().join(format!("taida_net6_5b_wasm_policy_{}.wasm", profile));
+        let td_path =
+            std::env::temp_dir().join(format!("taida_net6_5b_wasm_policy_{}.td", profile));
+        let wasm_path =
+            std::env::temp_dir().join(format!("taida_net6_5b_wasm_policy_{}.wasm", profile));
         std::fs::write(&td_path, source).expect("write test .td");
 
         let output = Command::new(taida_bin())
@@ -24832,7 +25017,7 @@ fn test_net6_5b_release_gate_v6_test_counts() {
 
     // Use `cargo test --list` to discover actual test names in the binary
     let list_output = Command::new("cargo")
-        .args(&["test", "--test", "parity", "--", "--list"])
+        .args(["test", "--test", "parity", "--", "--list"])
         .output()
         .expect("cargo test --list failed");
 
@@ -24861,12 +25046,13 @@ fn test_net6_5b_release_gate_v6_test_counts() {
 
     // Verify net_h2 unit tests exist via cargo test --lib --list
     let lib_list_output = Command::new("cargo")
-        .args(&["test", "--lib", "--", "--list", "net_h2"])
+        .args(["test", "--lib", "--", "--list", "net_h2"])
         .output()
         .expect("cargo test --lib --list failed");
 
     let lib_test_list = String::from_utf8_lossy(&lib_list_output.stdout);
-    let h2_test_count = lib_test_list.lines()
+    let h2_test_count = lib_test_list
+        .lines()
         .filter(|line| line.contains("net_h2") && line.ends_with(": test"))
         .count();
     assert!(
@@ -24882,8 +25068,8 @@ fn test_net6_5b_release_gate_v6_test_counts() {
 /// for shared body/raw, and includes 14 fields (with "chunked").
 #[test]
 fn test_nb6_26_27_28_native_h2_request_pack_parity() {
-    let source = std::fs::read_to_string("src/codegen/native_runtime.c")
-        .expect("read native_runtime.c");
+    let source =
+        std::fs::read_to_string("src/codegen/native_runtime.c").expect("read native_runtime.c");
 
     // NB6-26: Must use taida_bytes_from_raw (not taida_list_new + append)
     assert!(
@@ -24919,8 +25105,8 @@ fn test_nb6_26_27_28_native_h2_request_pack_parity() {
 /// NB6-31: Verify Native RST_STREAM validates payload length.
 #[test]
 fn test_nb6_31_native_rst_stream_payload_length_check() {
-    let source = std::fs::read_to_string("src/codegen/native_runtime.c")
-        .expect("read native_runtime.c");
+    let source =
+        std::fs::read_to_string("src/codegen/native_runtime.c").expect("read native_runtime.c");
 
     // The RST_STREAM handler must check payload_len != 4
     let rst_section: String = source
@@ -24938,8 +25124,8 @@ fn test_nb6_31_native_rst_stream_payload_length_check() {
 /// NB6-32: Verify Native TLS writev NULL check.
 #[test]
 fn test_nb6_32_native_tls_writev_null_check() {
-    let source = std::fs::read_to_string("src/codegen/native_runtime.c")
-        .expect("read native_runtime.c");
+    let source =
+        std::fs::read_to_string("src/codegen/native_runtime.c").expect("read native_runtime.c");
 
     // The tls_writev_all function must check for NULL after heap alloc
     let writev_section: String = source
@@ -24958,8 +25144,7 @@ fn test_nb6_32_native_tls_writev_null_check() {
 #[test]
 fn test_nb6_33_hpack_dyntable_o1_insert() {
     // Interpreter: VecDeque instead of Vec
-    let h2_source = std::fs::read_to_string("src/interpreter/net_h2.rs")
-        .expect("read net_h2.rs");
+    let h2_source = std::fs::read_to_string("src/interpreter/net_h2.rs").expect("read net_h2.rs");
     assert!(
         h2_source.contains("VecDeque<HpackEntry>"),
         "NB6-33: Interpreter HPACK dynamic table must use VecDeque for O(1) insert"
@@ -24970,8 +25155,8 @@ fn test_nb6_33_hpack_dyntable_o1_insert() {
     );
 
     // Native: no memmove for insert
-    let c_source = std::fs::read_to_string("src/codegen/native_runtime.c")
-        .expect("read native_runtime.c");
+    let c_source =
+        std::fs::read_to_string("src/codegen/native_runtime.c").expect("read native_runtime.c");
     // The insert function should append at end, not memmove
     let insert_section: String = c_source
         .lines()
@@ -24992,8 +25177,8 @@ fn test_nb6_33_hpack_dyntable_o1_insert() {
 /// NB6-34: Verify Native Huffman decoder uses lookup table optimization.
 #[test]
 fn test_nb6_34_native_huffman_lut() {
-    let source = std::fs::read_to_string("src/codegen/native_runtime.c")
-        .expect("read native_runtime.c");
+    let source =
+        std::fs::read_to_string("src/codegen/native_runtime.c").expect("read native_runtime.c");
     assert!(
         source.contains("h2_huff_lut"),
         "NB6-34: Native Huffman decoder must use 8-bit prefix lookup table"
@@ -25007,8 +25192,7 @@ fn test_nb6_34_native_huffman_lut() {
 /// NB6-35: Verify write_frame does not flush per-frame.
 #[test]
 fn test_nb6_35_no_per_frame_flush() {
-    let source = std::fs::read_to_string("src/interpreter/net_h2.rs")
-        .expect("read net_h2.rs");
+    let source = std::fs::read_to_string("src/interpreter/net_h2.rs").expect("read net_h2.rs");
     // Find the write_frame function body
     let write_frame_section: String = source
         .lines()
@@ -25025,8 +25209,8 @@ fn test_nb6_35_no_per_frame_flush() {
 /// NB6-29/30: Verify Native HPACK header buffer sizes increased.
 #[test]
 fn test_nb6_29_30_native_header_buffer_sizes() {
-    let source = std::fs::read_to_string("src/codegen/native_runtime.c")
-        .expect("read native_runtime.c");
+    let source =
+        std::fs::read_to_string("src/codegen/native_runtime.c").expect("read native_runtime.c");
     assert!(
         source.contains("H2_MAX_HEADERS 128"),
         "NB6-30: Native H2_MAX_HEADERS must be >= 128"
@@ -25044,8 +25228,8 @@ fn test_nb6_29_30_native_header_buffer_sizes() {
 /// NB6-24: Verify Native h2 response headers use stack+heap fallback.
 #[test]
 fn test_nb6_24_native_h2_header_stack_fallback() {
-    let source = std::fs::read_to_string("src/codegen/native_runtime.c")
-        .expect("read native_runtime.c");
+    let source =
+        std::fs::read_to_string("src/codegen/native_runtime.c").expect("read native_runtime.c");
     // Must have hdr_stack buffer instead of fixed 64KB malloc
     let hdr_section: String = source
         .lines()
@@ -25066,8 +25250,7 @@ fn test_nb6_24_native_h2_header_stack_fallback() {
 /// NB6-39: Verify Interpreter HPACK encoder uses HashMap for static table lookup.
 #[test]
 fn test_nb6_39_hpack_encoder_hashmap_lookup() {
-    let source = std::fs::read_to_string("src/interpreter/net_h2.rs")
-        .expect("read net_h2.rs");
+    let source = std::fs::read_to_string("src/interpreter/net_h2.rs").expect("read net_h2.rs");
     assert!(
         source.contains("STATIC_EXACT_MAP"),
         "NB6-39: Interpreter HPACK encoder must use HashMap for exact static table lookup"
@@ -25081,8 +25264,8 @@ fn test_nb6_39_hpack_encoder_hashmap_lookup() {
 /// NB6-40: Verify Native H2Conn is heap-allocated.
 #[test]
 fn test_nb6_40_native_h2conn_heap_alloc() {
-    let source = std::fs::read_to_string("src/codegen/native_runtime.c")
-        .expect("read native_runtime.c");
+    let source =
+        std::fs::read_to_string("src/codegen/native_runtime.c").expect("read native_runtime.c");
     assert!(
         source.contains("TAIDA_MALLOC(sizeof(H2Conn)"),
         "NB6-40: Native H2Conn must be heap-allocated (not stack)"
@@ -25092,8 +25275,8 @@ fn test_nb6_40_native_h2conn_heap_alloc() {
 /// NB6-41: Verify Native h2_conn_find_stream searches from end.
 #[test]
 fn test_nb6_41_native_stream_find_from_end() {
-    let source = std::fs::read_to_string("src/codegen/native_runtime.c")
-        .expect("read native_runtime.c");
+    let source =
+        std::fs::read_to_string("src/codegen/native_runtime.c").expect("read native_runtime.c");
     let find_section: String = source
         .lines()
         .skip_while(|l| !l.contains("h2_conn_find_stream"))
@@ -25109,8 +25292,8 @@ fn test_nb6_41_native_stream_find_from_end() {
 /// NB6-37: Verify Native h2_dyntable_insert checks strdup return values.
 #[test]
 fn test_nb6_37_native_dyntable_strdup_check() {
-    let source = std::fs::read_to_string("src/codegen/native_runtime.c")
-        .expect("read native_runtime.c");
+    let source =
+        std::fs::read_to_string("src/codegen/native_runtime.c").expect("read native_runtime.c");
     let insert_section: String = source
         .lines()
         .skip_while(|l| !l.contains("static void h2_dyntable_insert"))
@@ -25193,13 +25376,16 @@ stdout(r.requests)
     }
 
     let curl_out = Command::new("curl")
-        .args(&[
+        .args([
             "--http2",
             "--insecure",
             "--silent",
-            "--max-time", "5",
-            "--data", "{\"key\":\"value\"}",
-            "-H", "Content-Type: application/json",
+            "--max-time",
+            "5",
+            "--data",
+            "{\"key\":\"value\"}",
+            "-H",
+            "Content-Type: application/json",
             &format!("https://127.0.0.1:{}/post-test", port),
         ])
         .output()
@@ -25219,7 +25405,8 @@ stdout(r.requests)
         interp_body
     );
     assert_eq!(
-        interp_count.trim(), "1",
+        interp_count.trim(),
+        "1",
         "NB6-44 interp: expected '1' request count, got: {:?}",
         interp_count
     );
@@ -25314,13 +25501,16 @@ stdout(r.requests)
 
     // Send POST with curl — capture both body and status metadata
     let curl_out = Command::new("curl")
-        .args(&[
+        .args([
             "--http2",
             "--insecure",
             "--silent",
-            "--max-time", "5",
-            "--data", "{\"key\":\"value\"}",
-            "-H", "Content-Type: application/json",
+            "--max-time",
+            "5",
+            "--data",
+            "{\"key\":\"value\"}",
+            "-H",
+            "Content-Type: application/json",
             &format!("https://127.0.0.1:{}/post-test", port),
         ])
         .output()
@@ -25347,7 +25537,8 @@ stdout(r.requests)
         response_body
     );
     assert_eq!(
-        server_stdout.trim(), "1",
+        server_stdout.trim(),
+        "1",
         "NB6-44 native: expected '1' request count, got: {:?}",
         server_stdout
     );

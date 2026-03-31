@@ -3823,9 +3823,7 @@ impl Interpreter {
                         // v6 NET6-1b: Extract protocol field if present.
                         // NB6-10: Separate "field exists" from "field is Str".
                         // If protocol field exists but is not Str, reject immediately.
-                        if let Some((_, proto_val)) =
-                            fields.iter().find(|(k, _)| k == "protocol")
-                        {
+                        if let Some((_, proto_val)) = fields.iter().find(|(k, _)| k == "protocol") {
                             match proto_val {
                                 Value::Str(proto) => {
                                     requested_protocol = Some(proto.clone());
@@ -4270,12 +4268,8 @@ impl Interpreter {
                 Ok(c) => c,
                 Err(_) => continue, // TLS setup error, skip connection
             };
-            let mut tls_transport =
-                super::net_transport::TlsTransport::new(tls_conn, tcp_stream);
-            match super::net_transport::complete_tls_handshake(
-                &mut tls_transport,
-                read_timeout,
-            ) {
+            let mut tls_transport = super::net_transport::TlsTransport::new(tls_conn, tcp_stream);
+            match super::net_transport::complete_tls_handshake(&mut tls_transport, read_timeout) {
                 Ok(()) => {}
                 Err(_) => continue, // Handshake failure, skip connection
             }
@@ -4384,7 +4378,11 @@ impl Interpreter {
             }
 
             // Read next frame (NB6-38: reuse frame_buf to avoid per-frame heap alloc)
-            let (header, payload) = match read_frame_reuse(stream, h2_conn.local_settings.max_frame_size, &mut frame_buf) {
+            let (header, payload) = match read_frame_reuse(
+                stream,
+                h2_conn.local_settings.max_frame_size,
+                &mut frame_buf,
+            ) {
                 Ok(frame) => frame,
                 Err(H2Error::Io(ref e))
                     if e.kind() == std::io::ErrorKind::UnexpectedEof
@@ -4470,7 +4468,10 @@ impl Interpreter {
             }
 
             // Send PING ACK if needed
-            if ping_data.as_ref().is_some_and(|data| send_ping_ack(stream, data).is_err()) {
+            if ping_data
+                .as_ref()
+                .is_some_and(|data| send_ping_ack(stream, data).is_err())
+            {
                 return Ok(());
             }
 
@@ -4488,12 +4489,12 @@ impl Interpreter {
                         h2_conn.conn_recv_window += replenish;
                     }
                     // Stream window
-                    if let Some(s) = h2_conn.streams.get_mut(&stream_id) {
-                        if s.recv_window < initial_window / 2 {
-                            let replenish = initial_window - s.recv_window;
-                            let _ = send_window_update(stream, stream_id, replenish as u32);
-                            s.recv_window += replenish;
-                        }
+                    if let Some(s) = h2_conn.streams.get_mut(&stream_id)
+                        && s.recv_window < initial_window / 2
+                    {
+                        let replenish = initial_window - s.recv_window;
+                        let _ = send_window_update(stream, stream_id, replenish as u32);
+                        s.recv_window += replenish;
                     }
                 }
 
@@ -4551,14 +4552,8 @@ impl Interpreter {
                 request_fields.push(("bodyOffset".into(), Value::Int(0)));
                 request_fields.push(("contentLength".into(), Value::Int(raw_len as i64)));
                 request_fields.push(("raw".into(), Value::Bytes(body)));
-                request_fields.push((
-                    "remoteHost".into(),
-                    Value::Str(peer_addr.ip().to_string()),
-                ));
-                request_fields.push((
-                    "remotePort".into(),
-                    Value::Int(peer_addr.port() as i64),
-                ));
+                request_fields.push(("remoteHost".into(), Value::Str(peer_addr.ip().to_string())));
+                request_fields.push(("remotePort".into(), Value::Int(peer_addr.port() as i64)));
                 request_fields.push(("keepAlive".into(), Value::Bool(true)));
                 request_fields.push(("chunked".into(), Value::Bool(false)));
                 request_fields.push(("protocol".into(), Value::Str("h2".into())));
@@ -4566,8 +4561,7 @@ impl Interpreter {
                 let request_pack = Value::BuchiPack(request_fields);
 
                 // Call handler with request pack (1-arg path for h2).
-                let handler_result =
-                    self.call_function_with_values(handler, &[request_pack]);
+                let handler_result = self.call_function_with_values(handler, &[request_pack]);
 
                 *total_request_count += 1;
                 h2_conn.request_count += 1;
@@ -4576,12 +4570,10 @@ impl Interpreter {
                 match handler_result {
                     Ok(response) => {
                         // Send h2 response
-                        if self.send_h2_response(
-                            stream,
-                            h2_conn,
-                            stream_id,
-                            &response,
-                        ).is_err() {
+                        if self
+                            .send_h2_response(stream, h2_conn, stream_id, &response)
+                            .is_err()
+                        {
                             // Write error — close connection
                             return Ok(());
                         }
@@ -4606,7 +4598,9 @@ impl Interpreter {
                 }
 
                 // Clean up closed streams to prevent unbounded growth
-                h2_conn.streams.retain(|_, s| s.state != super::net_h2::StreamState::Closed);
+                h2_conn
+                    .streams
+                    .retain(|_, s| s.state != super::net_h2::StreamState::Closed);
             }
         }
     }
@@ -4640,7 +4634,8 @@ impl Interpreter {
             }
         };
 
-        let no_body = (100..200).contains(&status) || status == 204 || status == 205 || status == 304;
+        let no_body =
+            (100..200).contains(&status) || status == 204 || status == 205 || status == 304;
 
         if no_body || body_bytes.is_empty() {
             // Headers only, END_STREAM on HEADERS frame
@@ -4659,7 +4654,9 @@ impl Interpreter {
             }
         } else {
             // Add content-length header
-            let has_cl = headers.iter().any(|(n, _)| n.eq_ignore_ascii_case("content-length"));
+            let has_cl = headers
+                .iter()
+                .any(|(n, _)| n.eq_ignore_ascii_case("content-length"));
             let mut all_headers = headers.clone();
             if !has_cl {
                 all_headers.push(("content-length".to_string(), body_bytes.len().to_string()));
