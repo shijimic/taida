@@ -9268,6 +9268,59 @@ fn send_http_request(port: u16, request: &[u8]) -> Option<Vec<u8>> {
     None
 }
 
+/// Helper: connect with retry, send HTTP/1.1 GET, assert 200 + expected body.
+/// Returns the full HTTP response string. Panics on failure (fail-fast).
+/// `label` is used in assertion messages for identification.
+/// `expected_body` is the body substring that MUST appear.
+/// `expected_headers` is an optional list of header names that MUST appear.
+fn send_h1_get_and_assert(
+    port: u16,
+    label: &str,
+    expected_body: &str,
+    expected_headers: &[&str],
+) -> String {
+    let req = format!(
+        "GET / HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nConnection: close\r\n\r\n",
+        port
+    );
+    let response = send_http_request(port, req.as_bytes());
+    let response = response.unwrap_or_else(|| {
+        panic!(
+            "{}: failed to connect or get response from server on port {} after retries",
+            label, port
+        )
+    });
+    let resp_str = String::from_utf8_lossy(&response).to_string();
+
+    // Assert HTTP 200 status
+    assert!(
+        resp_str.contains("200"),
+        "{}: expected HTTP 200 status, got: {:?}",
+        label,
+        resp_str
+    );
+    // Assert expected body
+    assert!(
+        resp_str.contains(expected_body),
+        "{}: expected body '{}', got: {:?}",
+        label,
+        expected_body,
+        resp_str
+    );
+    // Assert expected headers
+    for header in expected_headers {
+        assert!(
+            resp_str.to_lowercase().contains(&header.to_lowercase()),
+            "{}: expected header '{}' in response, got: {:?}",
+            label,
+            header,
+            resp_str
+        );
+    }
+
+    resp_str
+}
+
 /// NET2-4e: Keep-alive parity — Interpreter vs JS.
 /// Sends 2 requests on a single TCP connection, verifies both get responses.
 #[test]
@@ -23913,60 +23966,29 @@ stdout(r.requests)
         .spawn()
         .expect("spawn node");
 
-    // Wait for server to be ready
-    thread::sleep(Duration::from_millis(500));
+    // Send one HTTP/1.1 request with retry-connect + full verification (fail-fast)
+    let _resp = send_h1_get_and_assert(
+        port,
+        "NET6-4a-1",
+        "hello-v6-js",
+        &["x-engine"],
+    );
 
-    // Send one HTTP/1.1 request
-    let response = TcpStream::connect(format!("127.0.0.1:{}", port));
-    if let Ok(mut stream) = response {
-        stream
-            .set_read_timeout(Some(Duration::from_secs(3)))
-            .ok();
-        let req = format!(
-            "GET / HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nConnection: close\r\n\r\n",
-            port
-        );
-        let _ = stream.write_all(req.as_bytes());
-        let mut buf = vec![0u8; 4096];
-        let mut total = Vec::new();
-        loop {
-            match stream.read(&mut buf) {
-                Ok(0) => break,
-                Ok(n) => total.extend_from_slice(&buf[..n]),
-                Err(_) => break,
-            }
-        }
-        let resp = String::from_utf8_lossy(&total);
-        assert!(
-            resp.contains("200"),
-            "NET6-4a-1: expected 200 status in JS h1 response, got: {:?}",
-            resp
-        );
-        assert!(
-            resp.contains("hello-v6-js"),
-            "NET6-4a-1: expected body 'hello-v6-js' in JS h1 response, got: {:?}",
-            resp
-        );
-        assert!(
-            resp.contains("x-engine"),
-            "NET6-4a-1: expected custom header 'x-engine' in JS h1 response, got: {:?}",
-            resp
-        );
-    } else {
-        // Server may not have started in time, but that's not a Phase 4 parity issue
-        eprintln!("NET6-4a-1: could not connect to JS server on port {}; skipping", port);
-    }
-
-    // Wait for server completion
+    // Wait for server completion and verify exit success
     let output = child.wait_with_output().expect("wait for node");
+    assert!(
+        output.status.success(),
+        "NET6-4a-1: JS server process exited with failure: {:?}",
+        output.status
+    );
     let stdout = normalize(&String::from_utf8_lossy(&output.stdout));
     let _ = fs::remove_file(&js_path);
     cleanup_net_project(&dir);
 
-    // Server should have processed 1 request (maxRequests=1)
-    assert!(
-        stdout.contains("1"),
-        "NET6-4a-1: JS h1 server should report requests=1 after serving 1 request, got: {:?}",
+    // Server should have processed exactly 1 request (maxRequests=1)
+    assert_eq!(
+        stdout, "1",
+        "NET6-4a-1: JS h1 server should report requests=1, got: {:?}",
         stdout
     );
 }
@@ -23997,7 +24019,7 @@ stdout(r.requests)
         )
     };
 
-    // JS
+    // === JS backend ===
     let port_js = find_free_loopback_port();
     let source_js = source_template(port_js);
     let dir_js = setup_net_project(&source_js, "v6_4a_js_h11");
@@ -24026,46 +24048,32 @@ stdout(r.requests)
         .spawn()
         .expect("spawn node");
 
-    thread::sleep(Duration::from_millis(500));
+    // Send request with retry-connect + full verification (fail-fast)
+    let _resp_js = send_h1_get_and_assert(
+        port_js,
+        "NET6-4a-2 js",
+        "explicit-h11",
+        &[],
+    );
 
-    // Send request
-    if let Ok(mut stream) = TcpStream::connect(format!("127.0.0.1:{}", port_js)) {
-        stream.set_read_timeout(Some(Duration::from_secs(3))).ok();
-        let req = format!(
-            "GET / HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nConnection: close\r\n\r\n",
-            port_js
-        );
-        let _ = stream.write_all(req.as_bytes());
-        let mut buf = vec![0u8; 4096];
-        let mut total = Vec::new();
-        loop {
-            match stream.read(&mut buf) {
-                Ok(0) => break,
-                Ok(n) => total.extend_from_slice(&buf[..n]),
-                Err(_) => break,
-            }
-        }
-        let resp = String::from_utf8_lossy(&total);
-        assert!(
-            resp.contains("200"),
-            "NET6-4a-2 js: expected 200 status, got: {:?}",
-            resp
-        );
-        assert!(
-            resp.contains("explicit-h11"),
-            "NET6-4a-2 js: expected body 'explicit-h11', got: {:?}",
-            resp
-        );
-    } else {
-        eprintln!("NET6-4a-2: could not connect to JS server on port {}", port_js);
-    }
-
+    // Verify JS server exit success and stdout
     let output_js = child_js.wait_with_output().expect("wait for node");
+    assert!(
+        output_js.status.success(),
+        "NET6-4a-2: JS server process exited with failure: {:?}",
+        output_js.status
+    );
     let stdout_js = normalize(&String::from_utf8_lossy(&output_js.stdout));
     let _ = fs::remove_file(&js_path);
     cleanup_net_project(&dir_js);
 
-    // Interpreter
+    assert_eq!(
+        stdout_js, "1",
+        "NET6-4a-2 js: expected requests=1, got: {:?}",
+        stdout_js
+    );
+
+    // === Interpreter backend ===
     let port_interp = find_free_loopback_port();
     let source_interp = source_template(port_interp);
     let dir_interp = setup_net_project(&source_interp, "v6_4a_interp_h11");
@@ -24078,35 +24086,29 @@ stdout(r.requests)
         .spawn()
         .expect("spawn interpreter");
 
-    thread::sleep(Duration::from_millis(300));
+    // Send request with retry-connect + full verification (fail-fast)
+    let _resp_interp = send_h1_get_and_assert(
+        port_interp,
+        "NET6-4a-2 interp",
+        "explicit-h11",
+        &[],
+    );
 
-    if let Ok(mut stream) = TcpStream::connect(format!("127.0.0.1:{}", port_interp)) {
-        stream.set_read_timeout(Some(Duration::from_secs(3))).ok();
-        let req = format!(
-            "GET / HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nConnection: close\r\n\r\n",
-            port_interp
-        );
-        let _ = stream.write_all(req.as_bytes());
-        let mut buf = vec![0u8; 4096];
-        let mut total = Vec::new();
-        loop {
-            match stream.read(&mut buf) {
-                Ok(0) => break,
-                Ok(n) => total.extend_from_slice(&buf[..n]),
-                Err(_) => break,
-            }
-        }
-        let resp = String::from_utf8_lossy(&total);
-        assert!(
-            resp.contains("200") && resp.contains("explicit-h11"),
-            "NET6-4a-2 interp: expected 200 + 'explicit-h11', got: {:?}",
-            resp
-        );
-    }
-
+    // Verify interpreter exit success and stdout
     let output_interp = child_interp.wait_with_output().expect("wait for interp");
+    assert!(
+        output_interp.status.success(),
+        "NET6-4a-2: Interpreter process exited with failure: {:?}",
+        output_interp.status
+    );
     let stdout_interp = normalize(&String::from_utf8_lossy(&output_interp.stdout));
     cleanup_net_project(&dir_interp);
+
+    assert_eq!(
+        stdout_interp, "1",
+        "NET6-4a-2 interp: expected requests=1, got: {:?}",
+        stdout_interp
+    );
 
     // Parity: both should report count=1
     assert_eq!(
