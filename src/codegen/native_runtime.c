@@ -15565,6 +15565,27 @@ taida_val taida_net_http_serve(taida_val port, taida_val handler, taida_val max_
             }
         }
 
+        // NB7-6: Check h3 protocol BEFORE cert/key file load so that the
+        // backend contract error (H3NotYetImplemented) is returned instead of
+        // TlsError when cert/key files are invalid or missing.
+        if (requested_protocol != NULL && strcmp(requested_protocol, "h3") == 0) {
+            // Check cert/key presence for the ProtocolError contract, but do NOT
+            // load the files or create SSL_CTX — the h3 backend is not yet implemented.
+            taida_val cert_val = taida_pack_get(tls, taida_str_hash((taida_val)"cert"));
+            taida_val key_val = taida_pack_get(tls, taida_str_hash((taida_val)"key"));
+            int has_cert = (cert_val && cert_val > 4096);
+            int has_key = (key_val && key_val > 4096);
+            if (!has_cert || !has_key) {
+                return taida_async_resolved(taida_net_result_fail("ProtocolError",
+                    "httpServe: HTTP/3 (protocol: \"h3\") requires TLS (cert + key)."));
+            }
+            // cert/key are present as Str but h3 is not yet implemented.
+            // Return H3NotYetImplemented without touching the filesystem or OpenSSL.
+            return taida_async_resolved(taida_net_result_fail("H3NotYetImplemented",
+                "httpServe: HTTP/3 (protocol: \"h3\") is not yet implemented on the "
+                "native backend. QUIC transport support will be available after Phase 2."));
+        }
+
         if (field_count > 0) {
             // Check if we have cert/key fields (not just protocol).
             taida_val cert_val = taida_pack_get(tls, taida_str_hash((taida_val)"cert"));
@@ -15602,10 +15623,10 @@ taida_val taida_net_http_serve(taida_val port, taida_val handler, taida_val max_
     }
 
     // v6 NET6-1b / NET6-3a / v7 NET7-1c: Protocol validation and dispatch.
-    // HTTP/2 and HTTP/3 are opt-in. Explicit h1.1 falls through to h1 path.
+    // HTTP/2 is opt-in. Explicit h1.1 falls through to h1 path.
     // h2 without TLS cert/key → ProtocolError (h2c out of scope per design).
     // h2 with TLS cert/key → taida_net_h2_serve (NET6-3a unlocked).
-    // h3 → recognized but not yet implemented (unlock in Phase 2: NET7-2a).
+    // h3 is fully handled BEFORE cert/key loading (NB7-6 fix above).
     // Unknown protocol values are rejected immediately.
     if (requested_protocol != NULL) {
         if (strcmp(requested_protocol, "h1.1") == 0 || strcmp(requested_protocol, "http/1.1") == 0) {
@@ -15640,21 +15661,8 @@ taida_val taida_net_http_serve(taida_val port, taida_val handler, taida_val max_
             taida_pack_set(h2_inner, 1, (taida_val)h2_result.requests);
             taida_pack_set_tag(h2_inner, 1, TAIDA_TAG_INT);
             return taida_async_resolved(taida_net_result_ok(h2_inner));
-        } else if (strcmp(requested_protocol, "h3") == 0) {
-            // v7 NET7-1c: HTTP/3 requires TLS (cert + key). Validate before returning
-            // not-yet-implemented so the cert/key contract is established from Phase 1.
-            if (!h2_cert_path || !h2_key_path) {
-                if (ssl_ctx) { taida_ossl.SSL_CTX_free(ssl_ctx); }
-                return taida_async_resolved(taida_net_result_fail("ProtocolError",
-                    "httpServe: HTTP/3 (protocol: \"h3\") requires TLS (cert + key)."));
-            }
-            // v7 Phase 1: h3 is recognized but not yet implemented on the Native backend.
-            // Unlock target: Phase 2 (NET7-2a).
-            if (ssl_ctx) { taida_ossl.SSL_CTX_free(ssl_ctx); ssl_ctx = NULL; }
-            return taida_async_resolved(taida_net_result_fail("H3NotYetImplemented",
-                "httpServe: HTTP/3 (protocol: \"h3\") is not yet implemented on the "
-                "native backend. QUIC transport support will be available after Phase 2."));
         } else {
+            // Unknown protocol. h3 is already handled before cert/key loading (NB7-6).
             if (ssl_ctx) { taida_ossl.SSL_CTX_free(ssl_ctx); }
             char proto_err[256];
             snprintf(proto_err, sizeof(proto_err),

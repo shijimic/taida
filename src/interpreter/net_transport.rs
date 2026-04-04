@@ -28,7 +28,7 @@
 /// h1/h2 path. The transport contract is defined here; implementation will be
 /// filled in Phase 2 (Native reference) and Phase 3 (Interpreter parity).
 ///
-/// ## Transport Abstraction (NET7-1a)
+/// ## Transport Abstraction (NET7-1a) -- NB7-7 Design Decision
 ///
 /// QUIC transport differs from TCP in several fundamental ways:
 ///   - **UDP-based**: No connection-oriented socket; uses `UdpSocket` for send/recv
@@ -36,11 +36,34 @@
 ///   - **Stream multiplexing**: A single QUIC connection carries multiple bidirectional streams
 ///   - **Connection-level vs stream-level I/O**: Read/write operate on streams, not on the connection
 ///
-/// The `QuicTransport` abstraction (to be implemented in Phase 2) will:
-///   - Accept incoming QUIC connections on a bound `UdpSocket`
-///   - Perform TLS 1.3 handshake as part of the QUIC handshake (not separate)
-///   - Expose per-stream read/write through the existing `Transport` trait interface
-///   - Map QUIC connection close to the existing shutdown contract
+/// ### QUIC / TCP Transport Separation (NB7-7 resolution)
+///
+/// The existing `Transport` trait and `TransportAcceptor` / `TransportConnection` types
+/// are designed around TCP semantics:
+///   - `as_tcp_stream_mut()` returns `&mut TcpStream` (TCP-only)
+///   - `TransportAcceptor::try_accept()` returns 1 connection per accept (no stream mux)
+///   - `TransportConnection` bundles per-connection buffer and request count for a
+///     single-stream-per-connection model
+///
+/// These cannot directly represent QUIC's connection-to-multi-stream relationship.
+/// Rather than force-fitting QUIC into the TCP abstraction (which would require
+/// breaking changes to h1/h2 code paths), v7 adopts a **separate QUIC transport
+/// path**:
+///
+///   - The `Transport` trait, `TransportAcceptor`, and `TransportConnection` remain
+///     **TCP-only** and continue to serve h1/h2 without modification.
+///   - The h3 path (Phase 2 Native, Phase 3 Interpreter) will use a dedicated
+///     QUIC accept/connection/stream model that does NOT implement `Transport`.
+///   - The h3 handler dispatch will map QUIC streams to the existing
+///     `httpServe` handler contract at the request/response level, not at the
+///     transport I/O level.
+///   - Interpreter parity (Phase 3) will mirror the Native QUIC path structure,
+///     using the same dedicated types rather than wrapping `Transport`.
+///
+/// This separation is intentional: the handler contract is shared across h1/h2/h3,
+/// but the transport layer beneath it is protocol-specific. Forcing a single
+/// `Transport` trait to cover both TCP and QUIC would either break existing h1/h2
+/// code or produce an abstraction that pappers over fundamental protocol differences.
 ///
 /// Copy discipline (bounded-copy):
 ///   - 1 packet = at most 1 materialization (no aggregate buffer above packet boundary)
@@ -134,10 +157,14 @@ impl ProtocolKind {
 
 // ── Transport trait ──────────────────────────────────────────────────
 
-/// Unified read/write interface for a single connection.
+/// Unified read/write interface for a single TCP connection (h1/h2 only).
 ///
 /// Implementors: `PlaintextTransport` (v4 path), `TlsTransport` (v5 Phase 2).
-/// Future: `QuicStreamTransport` (v7 Phase 2/3, wraps a single QUIC stream).
+///
+/// NOTE (NB7-7): The h3/QUIC path does NOT implement this trait. QUIC streams
+/// use a dedicated transport model introduced in Phase 2/3. See the module-level
+/// NB7-7 design decision for rationale.
+///
 /// The trait uses `&mut self` because connections are not shared across threads
 /// (the Interpreter is single-threaded, `!Send`).
 pub(crate) trait Transport {
@@ -169,6 +196,10 @@ pub(crate) trait Transport {
     /// Get a mutable reference to the underlying `TcpStream`.
     /// Used by legacy code paths that need direct stream access (WebSocket frame I/O, etc.).
     /// This will be removed or deprecated once all I/O goes through the Transport trait.
+    ///
+    /// NOTE (NB7-7): This method is TCP-only by design. The h3/QUIC transport path
+    /// does NOT implement `Transport` and will never provide a `TcpStream`.
+    /// See the module-level NB7-7 design decision for rationale.
     fn as_tcp_stream_mut(&mut self) -> &mut std::net::TcpStream;
 
     /// Whether this transport uses TLS.
@@ -487,10 +518,14 @@ pub(crate) struct AcceptedTransport {
     pub peer_addr: SocketAddr,
 }
 
-/// Listener-level abstraction for accepting new connections.
+/// Listener-level abstraction for accepting new TCP connections (h1/h2 only).
 ///
 /// `PlaintextAcceptor` wraps `TcpListener` directly.
 /// `TlsAcceptor` wraps `TcpListener` + `rustls::ServerConfig` and performs TLS handshake.
+///
+/// NOTE (NB7-7): This trait follows the TCP model of 1 accept = 1 connection.
+/// QUIC's 1 connection = N streams model is handled by a separate h3-specific
+/// acceptor in Phase 2/3. See the module-level NB7-7 design decision.
 pub(crate) trait TransportAcceptor {
     /// Try to accept a new connection (non-blocking).
     /// Returns `Ok(Some(...))` if a connection is ready, `Ok(None)` if WouldBlock,
@@ -637,10 +672,14 @@ pub(crate) fn complete_tls_handshake(
 
 // ── Connection lifecycle state ───────────────────────────────────────
 
-/// Connection state within the httpServe pool.
+/// Connection state within the httpServe pool (TCP / h1/h2 only).
 ///
 /// Replaces the previous `HttpConnection` struct to use transport abstraction.
 /// Each connection owns its transport, buffer, and lifecycle metadata.
+///
+/// NOTE (NB7-7): This struct models a single TCP connection with one active
+/// request stream. QUIC connections (h3) use a separate connection/stream model
+/// in Phase 2/3. See the module-level NB7-7 design decision.
 ///
 /// # Lifecycle
 ///

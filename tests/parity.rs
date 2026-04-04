@@ -25839,6 +25839,353 @@ stdout(result.throw.message)
     }
 }
 
+/// NB7-6 / NB7-8: httpServe with cert/key (invalid paths) + protocol="h3" must return
+/// the backend contract error (H3Unsupported / H3NotYetImplemented), NOT TlsError.
+///
+/// This test directly verifies the NB7-6 fix: protocol dispatch must happen BEFORE
+/// cert/key file loading. Both error kind and message are checked.
+///
+/// - Interpreter: H3NotYetImplemented (not TlsError)
+/// - JS: H3Unsupported (not TlsError)
+/// - Native: H3NotYetImplemented (not TlsError)
+#[test]
+fn test_nb7_6_h3_with_cert_key_returns_backend_contract_not_tls_error() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+
+    // Use cert/key paths that do NOT exist on disk. If the backend incorrectly
+    // tries to load them before checking h3, it will return TlsError.
+    let source_template = |port: u16| {
+        format!(
+            r#">>> taida-lang/net => @(httpServe)
+
+handler req =
+  @(status <= 200, headers <= @[], body <= "should-not-reach")
+=> :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
+
+asyncResult <= httpServe({port}, handler, 1, 5000, 128, @(cert <= "/nonexistent_nb7_cert.pem", key <= "/nonexistent_nb7_key.pem", protocol <= "h3"))
+asyncResult ]=> result
+stdout(result.__value.kind)
+stdout(result.throw.message)
+"#,
+            port = port
+        )
+    };
+
+    // Interpreter: must return H3NotYetImplemented, NOT TlsError
+    {
+        let port = find_free_loopback_port();
+        let source = source_template(port);
+        let dir = setup_net_project(&source, "nb7_6_h3_cert_interp");
+        let td_path = dir.join("main.td");
+        let output = Command::new(taida_bin())
+            .arg(&td_path)
+            .output()
+            .expect("spawn interpreter");
+        let stdout = normalize(&String::from_utf8_lossy(&output.stdout));
+        cleanup_net_project(&dir);
+
+        assert!(
+            stdout.contains("H3NotYetImplemented"),
+            "NB7-6 interp: expected H3NotYetImplemented kind, got: {:?}",
+            stdout
+        );
+        assert!(
+            !stdout.contains("TlsError"),
+            "NB7-6 interp: must NOT return TlsError when h3 is requested with cert/key, got: {:?}",
+            stdout
+        );
+    }
+
+    // JS: must return H3Unsupported, NOT TlsError
+    {
+        let port = find_free_loopback_port();
+        let source = source_template(port);
+        let dir = setup_net_project(&source, "nb7_6_h3_cert_js");
+        let td_path = dir.join("main.td");
+        let js_path = unique_temp_path("taida_nb7_6_h3_cert_js", "h3_cert", "mjs");
+        let transpile = Command::new(taida_bin())
+            .arg("build")
+            .arg("--target")
+            .arg("js")
+            .arg(&td_path)
+            .arg("-o")
+            .arg(&js_path)
+            .output()
+            .expect("transpile");
+        assert!(
+            transpile.status.success(),
+            "JS transpile failed: {}",
+            String::from_utf8_lossy(&transpile.stderr)
+        );
+        let js_output = Command::new("node")
+            .arg(&js_path)
+            .output()
+            .expect("run node");
+        let stdout = normalize(&String::from_utf8_lossy(&js_output.stdout));
+        let _ = fs::remove_file(&js_path);
+        cleanup_net_project(&dir);
+
+        assert!(
+            stdout.contains("H3Unsupported"),
+            "NB7-6 js: expected H3Unsupported kind, got: {:?}",
+            stdout
+        );
+        assert!(
+            !stdout.contains("TlsError"),
+            "NB7-6 js: must NOT return TlsError when h3 is requested with cert/key, got: {:?}",
+            stdout
+        );
+    }
+
+    // Native: must return H3NotYetImplemented, NOT TlsError
+    {
+        let port = find_free_loopback_port();
+        let source = source_template(port);
+        let dir = setup_net_project(&source, "nb7_6_h3_cert_native");
+        let td_path = dir.join("main.td");
+        let bin_path = unique_temp_path("taida_nb7_6_h3_cert_native", "h3_cert", "bin");
+        let compile = Command::new(taida_bin())
+            .arg("build")
+            .arg("--target")
+            .arg("native")
+            .arg(&td_path)
+            .arg("-o")
+            .arg(&bin_path)
+            .output()
+            .expect("compile native");
+        assert!(
+            compile.status.success(),
+            "Native compile failed: {}",
+            String::from_utf8_lossy(&compile.stderr)
+        );
+        let native_output = Command::new(&bin_path).output().expect("run native");
+        let stdout = normalize(&String::from_utf8_lossy(&native_output.stdout));
+        let _ = fs::remove_file(&bin_path);
+        cleanup_net_project(&dir);
+
+        assert!(
+            stdout.contains("H3NotYetImplemented"),
+            "NB7-6 native: expected H3NotYetImplemented kind, got: {:?}",
+            stdout
+        );
+        assert!(
+            !stdout.contains("TlsError"),
+            "NB7-6 native: must NOT return TlsError when h3 is requested with cert/key, got: {:?}",
+            stdout
+        );
+    }
+}
+
+/// NB7-8: Verify error kind for all h3 protocol scenarios across 3 backends.
+/// This test complements the existing NET7-1c tests by asserting on __value.kind
+/// (not just message substrings) for:
+///   1. protocol="h3" without cert/key
+///   2. unknown protocol "h4"
+#[test]
+fn test_nb7_8_h3_error_kind_verification_3way() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+
+    // Case 1: h3 without cert/key → Interpreter/Native: ProtocolError, JS: H3Unsupported
+    {
+        let source_template = |port: u16| {
+            format!(
+                r#">>> taida-lang/net => @(httpServe)
+
+handler req =
+  @(status <= 200, headers <= @[], body <= "should-not-reach")
+=> :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
+
+asyncResult <= httpServe({port}, handler, 1, 5000, 128, @(protocol <= "h3"))
+asyncResult ]=> result
+stdout(result.__value.kind)
+"#,
+                port = port
+            )
+        };
+
+        // Interpreter: ProtocolError (cert/key required)
+        {
+            let port = find_free_loopback_port();
+            let source = source_template(port);
+            let dir = setup_net_project(&source, "nb7_8_h3_nocert_interp");
+            let td_path = dir.join("main.td");
+            let output = Command::new(taida_bin())
+                .arg(&td_path)
+                .output()
+                .expect("spawn interpreter");
+            let stdout = normalize(&String::from_utf8_lossy(&output.stdout));
+            cleanup_net_project(&dir);
+            assert!(
+                stdout.contains("ProtocolError"),
+                "NB7-8 h3-no-cert interp: expected ProtocolError kind, got: {:?}",
+                stdout
+            );
+        }
+
+        // JS: H3Unsupported (permanent, regardless of cert/key)
+        {
+            let port = find_free_loopback_port();
+            let source = source_template(port);
+            let dir = setup_net_project(&source, "nb7_8_h3_nocert_js");
+            let td_path = dir.join("main.td");
+            let js_path = unique_temp_path("taida_nb7_8_h3_nocert_js", "h3_kind", "mjs");
+            let transpile = Command::new(taida_bin())
+                .arg("build")
+                .arg("--target")
+                .arg("js")
+                .arg(&td_path)
+                .arg("-o")
+                .arg(&js_path)
+                .output()
+                .expect("transpile");
+            assert!(transpile.status.success());
+            let js_output = Command::new("node")
+                .arg(&js_path)
+                .output()
+                .expect("run node");
+            let stdout = normalize(&String::from_utf8_lossy(&js_output.stdout));
+            let _ = fs::remove_file(&js_path);
+            cleanup_net_project(&dir);
+            assert!(
+                stdout.contains("H3Unsupported"),
+                "NB7-8 h3-no-cert js: expected H3Unsupported kind, got: {:?}",
+                stdout
+            );
+        }
+
+        // Native: ProtocolError (cert/key required)
+        {
+            let port = find_free_loopback_port();
+            let source = source_template(port);
+            let dir = setup_net_project(&source, "nb7_8_h3_nocert_native");
+            let td_path = dir.join("main.td");
+            let bin_path = unique_temp_path("taida_nb7_8_h3_nocert_native", "h3_kind", "bin");
+            let compile = Command::new(taida_bin())
+                .arg("build")
+                .arg("--target")
+                .arg("native")
+                .arg(&td_path)
+                .arg("-o")
+                .arg(&bin_path)
+                .output()
+                .expect("compile native");
+            assert!(compile.status.success());
+            let native_output = Command::new(&bin_path).output().expect("run native");
+            let stdout = normalize(&String::from_utf8_lossy(&native_output.stdout));
+            let _ = fs::remove_file(&bin_path);
+            cleanup_net_project(&dir);
+            assert!(
+                stdout.contains("ProtocolError"),
+                "NB7-8 h3-no-cert native: expected ProtocolError kind, got: {:?}",
+                stdout
+            );
+        }
+    }
+
+    // Case 2: unknown protocol "h4" → all backends: ProtocolError
+    {
+        let source_template = |port: u16| {
+            format!(
+                r#">>> taida-lang/net => @(httpServe)
+
+handler req =
+  @(status <= 200, headers <= @[], body <= "should-not-reach")
+=> :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
+
+asyncResult <= httpServe({port}, handler, 1, 5000, 128, @(protocol <= "h4"))
+asyncResult ]=> result
+stdout(result.__value.kind)
+"#,
+                port = port
+            )
+        };
+
+        // Interpreter
+        {
+            let port = find_free_loopback_port();
+            let source = source_template(port);
+            let dir = setup_net_project(&source, "nb7_8_h4_kind_interp");
+            let td_path = dir.join("main.td");
+            let output = Command::new(taida_bin())
+                .arg(&td_path)
+                .output()
+                .expect("spawn interpreter");
+            let stdout = normalize(&String::from_utf8_lossy(&output.stdout));
+            cleanup_net_project(&dir);
+            assert!(
+                stdout.contains("ProtocolError"),
+                "NB7-8 h4 interp: expected ProtocolError kind, got: {:?}",
+                stdout
+            );
+        }
+
+        // JS
+        {
+            let port = find_free_loopback_port();
+            let source = source_template(port);
+            let dir = setup_net_project(&source, "nb7_8_h4_kind_js");
+            let td_path = dir.join("main.td");
+            let js_path = unique_temp_path("taida_nb7_8_h4_js", "h4_kind", "mjs");
+            let transpile = Command::new(taida_bin())
+                .arg("build")
+                .arg("--target")
+                .arg("js")
+                .arg(&td_path)
+                .arg("-o")
+                .arg(&js_path)
+                .output()
+                .expect("transpile");
+            assert!(transpile.status.success());
+            let js_output = Command::new("node")
+                .arg(&js_path)
+                .output()
+                .expect("run node");
+            let stdout = normalize(&String::from_utf8_lossy(&js_output.stdout));
+            let _ = fs::remove_file(&js_path);
+            cleanup_net_project(&dir);
+            assert!(
+                stdout.contains("ProtocolError"),
+                "NB7-8 h4 js: expected ProtocolError kind, got: {:?}",
+                stdout
+            );
+        }
+
+        // Native
+        {
+            let port = find_free_loopback_port();
+            let source = source_template(port);
+            let dir = setup_net_project(&source, "nb7_8_h4_kind_native");
+            let td_path = dir.join("main.td");
+            let bin_path = unique_temp_path("taida_nb7_8_h4_native", "h4_kind", "bin");
+            let compile = Command::new(taida_bin())
+                .arg("build")
+                .arg("--target")
+                .arg("native")
+                .arg(&td_path)
+                .arg("-o")
+                .arg(&bin_path)
+                .output()
+                .expect("compile native");
+            assert!(compile.status.success());
+            let native_output = Command::new(&bin_path).output().expect("run native");
+            let stdout = normalize(&String::from_utf8_lossy(&native_output.stdout));
+            let _ = fs::remove_file(&bin_path);
+            cleanup_net_project(&dir);
+            assert!(
+                stdout.contains("ProtocolError"),
+                "NB7-8 h4 native: expected ProtocolError kind, got: {:?}",
+                stdout
+            );
+        }
+    }
+}
+
 /// NET7-1c-3: httpServe with truly unknown protocol (e.g. "h4") still returns
 /// ProtocolError with updated supported values list that includes "h3".
 /// 3-way parity: all backends mention "h3" in the supported values.
