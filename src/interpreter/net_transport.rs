@@ -121,7 +121,7 @@ use std::time::Duration;
 /// Variants:
 ///   - `H1` -- HTTP/1.1 (default, TCP, optionally over TLS)
 ///   - `H2` -- HTTP/2 (TCP + TLS required, ALPN negotiation)
-///   - `H3` -- HTTP/3 (UDP + QUIC/TLS1.3, not yet implemented in Phase 1)
+///   - `H3` -- HTTP/3 (UDP + QUIC/TLS1.3, Native reference in Phase 2)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ProtocolKind {
     /// HTTP/1.1 over TCP (plaintext or TLS).
@@ -129,7 +129,8 @@ pub(crate) enum ProtocolKind {
     /// HTTP/2 over TCP + TLS. Requires cert/key. ALPN negotiation.
     H2,
     /// HTTP/3 over UDP + QUIC/TLS1.3. Requires cert/key.
-    /// Not yet implemented in Phase 1. Unlock: Phase 2 (Native), Phase 3 (Interpreter).
+    /// Phase 2: Native reference backend (QPACK, frames, stream state, handler mapping).
+    /// Phase 3: Interpreter parity backend (unlock target).
     H3,
 }
 
@@ -1264,5 +1265,38 @@ mod tests {
             &received, b"goodbye",
             "NB5-10: close_notify test: payload mismatch"
         );
+    }
+
+    // ── NET7-2a: Phase 2 ProtocolKind contract tests ──────────────────
+
+    #[test]
+    fn test_protocol_kind_h3_properties() {
+        // H3 requires TLS (QUIC mandates TLS 1.3)
+        assert!(ProtocolKind::H3.requires_tls());
+        // H3 is distinct from H1 and H2
+        assert_ne!(ProtocolKind::H3, ProtocolKind::H1);
+        assert_ne!(ProtocolKind::H3, ProtocolKind::H2);
+        // H3 is parsed from "h3" only (case-sensitive)
+        assert_eq!(ProtocolKind::from_str("h3"), Some(ProtocolKind::H3));
+        assert_eq!(ProtocolKind::from_str("H3"), None);
+        assert_eq!(ProtocolKind::from_str("http/3"), None);
+        assert_eq!(ProtocolKind::from_str("h3.0"), None);
+    }
+
+    #[test]
+    fn test_protocol_kind_copy_clone() {
+        // ProtocolKind is Copy + Clone (used in immutable server config)
+        let pk = ProtocolKind::H3;
+        let pk2 = pk; // Copy
+        let pk3 = pk.clone(); // Clone
+        assert_eq!(pk, pk2);
+        assert_eq!(pk, pk3);
+    }
+
+    #[test]
+    fn test_protocol_kind_debug() {
+        // ProtocolKind implements Debug (for error messages)
+        let dbg = format!("{:?}", ProtocolKind::H3);
+        assert!(dbg.contains("H3"), "Debug should contain H3: {}", dbg);
     }
 }

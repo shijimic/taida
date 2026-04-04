@@ -25840,14 +25840,14 @@ stdout(result.throw.message)
 }
 
 /// NB7-6 / NB7-8: httpServe with cert/key (invalid paths) + protocol="h3" must return
-/// the backend contract error (H3Unsupported / H3NotYetImplemented), NOT TlsError.
+/// the backend contract error, NOT TlsError.
 ///
 /// This test directly verifies the NB7-6 fix: protocol dispatch must happen BEFORE
 /// cert/key file loading. Both error kind and message are checked.
 ///
-/// - Interpreter: H3NotYetImplemented (not TlsError)
-/// - JS: H3Unsupported (not TlsError)
-/// - Native: H3NotYetImplemented (not TlsError)
+/// - Interpreter: H3NotYetImplemented (not TlsError) -- Phase 3 unlock target
+/// - JS: H3Unsupported (not TlsError) -- permanent
+/// - Native: H3QuicUnavailable or H3TransportPending (not TlsError) -- Phase 2 unlocked
 #[test]
 fn test_nb7_6_h3_with_cert_key_returns_backend_contract_not_tls_error() {
     if !node_available() {
@@ -25940,7 +25940,9 @@ stdout(result.throw.message)
         );
     }
 
-    // Native: must return H3NotYetImplemented, NOT TlsError
+    // Native: must return H3QuicUnavailable or H3TransportPending (Phase 2 unlocked), NOT TlsError
+    // NET7-2a: Phase 2 dispatch is active — Native no longer returns H3NotYetImplemented.
+    // Instead it attempts QUIC transport and returns the appropriate status.
     {
         let port = find_free_loopback_port();
         let source = source_template(port);
@@ -25966,9 +25968,12 @@ stdout(result.throw.message)
         let _ = fs::remove_file(&bin_path);
         cleanup_net_project(&dir);
 
+        // NET7-2a: Phase 2 unlocked — Native dispatches to H3 serve path.
+        // Without quiche installed: H3QuicUnavailable
+        // With quiche installed but pending: H3TransportPending
         assert!(
-            stdout.contains("H3NotYetImplemented"),
-            "NB7-6 native: expected H3NotYetImplemented kind, got: {:?}",
+            stdout.contains("H3QuicUnavailable") || stdout.contains("H3TransportPending"),
+            "NB7-6 native: expected H3QuicUnavailable or H3TransportPending kind (Phase 2), got: {:?}",
             stdout
         );
         assert!(
@@ -26316,4 +26321,331 @@ stdout(result.throw.message)
             stdout
         );
     }
+}
+
+// ── NET v7 Phase 2: Native HTTP/3 Reference Backend tests ──────────────
+
+/// NET7-2a: Native h3 with cert/key dispatches to H3 serve path (not H3NotYetImplemented).
+/// Phase 2 unlocks the Native h3 path. Without quiche installed, the backend
+/// returns H3QuicUnavailable (QUIC transport missing) or H3TransportPending
+/// (quiche found, integration pending). The key contract: it does NOT return
+/// H3NotYetImplemented anymore — the protocol layer is implemented.
+#[test]
+fn test_net7_2a_native_h3_dispatches_to_serve_path() {
+    let source_template = |port: u16| {
+        format!(
+            r#">>> taida-lang/net => @(httpServe)
+
+handler req =
+  @(status <= 200, headers <= @[], body <= "h3-test")
+=> :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
+
+asyncResult <= httpServe({port}, handler, 1, 5000, 128, @(cert <= "/nonexistent_cert.pem", key <= "/nonexistent_key.pem", protocol <= "h3"))
+asyncResult ]=> result
+stdout(result.__value.kind)
+"#,
+            port = port
+        )
+    };
+
+    // Native: must NOT return H3NotYetImplemented (Phase 2 unlocked)
+    {
+        let port = find_free_loopback_port();
+        let source = source_template(port);
+        let dir = setup_net_project(&source, "net7_2a_h3_native");
+        let td_path = dir.join("main.td");
+        let bin_path = unique_temp_path("taida_net7_2a_h3_native", "h3_dispatch", "bin");
+        let compile = Command::new(taida_bin())
+            .arg("build")
+            .arg("--target")
+            .arg("native")
+            .arg(&td_path)
+            .arg("-o")
+            .arg(&bin_path)
+            .output()
+            .expect("compile native");
+        assert!(
+            compile.status.success(),
+            "Native compile failed: {}",
+            String::from_utf8_lossy(&compile.stderr)
+        );
+        let native_output = Command::new(&bin_path).output().expect("run native");
+        let stdout = normalize(&String::from_utf8_lossy(&native_output.stdout));
+        let _ = fs::remove_file(&bin_path);
+        cleanup_net_project(&dir);
+
+        // Phase 2: Native dispatches to H3 serve path
+        assert!(
+            !stdout.contains("H3NotYetImplemented"),
+            "NET7-2a: Native must NOT return H3NotYetImplemented after Phase 2, got: {:?}",
+            stdout
+        );
+        // Must return one of the Phase 2 H3 status kinds
+        assert!(
+            stdout.contains("H3QuicUnavailable") || stdout.contains("H3TransportPending"),
+            "NET7-2a: Native expected H3QuicUnavailable or H3TransportPending, got: {:?}",
+            stdout
+        );
+        // Must NOT be a TLS error (protocol dispatch before cert/key load)
+        assert!(
+            !stdout.contains("TlsError"),
+            "NET7-2a: Native must NOT return TlsError for h3, got: {:?}",
+            stdout
+        );
+    }
+}
+
+/// NET7-2a: Interpreter still returns H3NotYetImplemented (Phase 3 unlock target).
+/// Phase 2 only unlocks the Native backend; Interpreter parity is Phase 3.
+#[test]
+fn test_net7_2a_interpreter_h3_still_not_yet_implemented() {
+    let port = find_free_loopback_port();
+    let source = format!(
+        r#">>> taida-lang/net => @(httpServe)
+
+handler req =
+  @(status <= 200, headers <= @[], body <= "h3-test")
+=> :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
+
+asyncResult <= httpServe({port}, handler, 1, 5000, 128, @(cert <= "/nonexistent_cert.pem", key <= "/nonexistent_key.pem", protocol <= "h3"))
+asyncResult ]=> result
+stdout(result.__value.kind)
+"#,
+        port = port
+    );
+    let dir = setup_net_project(&source, "net7_2a_h3_interp");
+    let td_path = dir.join("main.td");
+    let output = Command::new(taida_bin())
+        .arg(&td_path)
+        .output()
+        .expect("spawn interpreter");
+    let stdout = normalize(&String::from_utf8_lossy(&output.stdout));
+    cleanup_net_project(&dir);
+
+    assert!(
+        stdout.contains("H3NotYetImplemented"),
+        "NET7-2a interp: expected H3NotYetImplemented (Phase 3 target), got: {:?}",
+        stdout
+    );
+}
+
+/// NET7-2a: JS still returns H3Unsupported (permanent in v7).
+#[test]
+fn test_net7_2a_js_h3_still_unsupported() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+    let port = find_free_loopback_port();
+    let source = format!(
+        r#">>> taida-lang/net => @(httpServe)
+
+handler req =
+  @(status <= 200, headers <= @[], body <= "h3-test")
+=> :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
+
+asyncResult <= httpServe({port}, handler, 1, 5000, 128, @(cert <= "/nonexistent_cert.pem", key <= "/nonexistent_key.pem", protocol <= "h3"))
+asyncResult ]=> result
+stdout(result.__value.kind)
+"#,
+        port = port
+    );
+    let dir = setup_net_project(&source, "net7_2a_h3_js");
+    let td_path = dir.join("main.td");
+    let js_path = unique_temp_path("taida_net7_2a_h3_js", "h3_js", "mjs");
+    let transpile = Command::new(taida_bin())
+        .arg("build")
+        .arg("--target")
+        .arg("js")
+        .arg(&td_path)
+        .arg("-o")
+        .arg(&js_path)
+        .output()
+        .expect("transpile");
+    assert!(transpile.status.success());
+    let js_output = Command::new("node")
+        .arg(&js_path)
+        .output()
+        .expect("run node");
+    let stdout = normalize(&String::from_utf8_lossy(&js_output.stdout));
+    let _ = fs::remove_file(&js_path);
+    cleanup_net_project(&dir);
+
+    assert!(
+        stdout.contains("H3Unsupported"),
+        "NET7-2a js: expected H3Unsupported (permanent), got: {:?}",
+        stdout
+    );
+}
+
+/// NET7-2a: h3 without cert/key still returns ProtocolError on all 3 backends.
+/// Phase 2 does not change the cert/key validation contract.
+#[test]
+fn test_net7_2a_h3_without_cert_key_still_protocol_error() {
+    let source_template = |port: u16| {
+        format!(
+            r#">>> taida-lang/net => @(httpServe)
+
+handler req =
+  @(status <= 200, headers <= @[], body <= "h3-test")
+=> :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
+
+asyncResult <= httpServe({port}, handler, 1, 5000, 128, @(protocol <= "h3"))
+asyncResult ]=> result
+stdout(result.__value.kind)
+"#,
+            port = port
+        )
+    };
+
+    // Interpreter
+    {
+        let port = find_free_loopback_port();
+        let source = source_template(port);
+        let dir = setup_net_project(&source, "net7_2a_nocert_interp");
+        let td_path = dir.join("main.td");
+        let output = Command::new(taida_bin())
+            .arg(&td_path)
+            .output()
+            .expect("spawn interpreter");
+        let stdout = normalize(&String::from_utf8_lossy(&output.stdout));
+        cleanup_net_project(&dir);
+        assert!(
+            stdout.contains("ProtocolError"),
+            "NET7-2a nocert interp: expected ProtocolError, got: {:?}",
+            stdout
+        );
+    }
+
+    // Native
+    {
+        let port = find_free_loopback_port();
+        let source = source_template(port);
+        let dir = setup_net_project(&source, "net7_2a_nocert_native");
+        let td_path = dir.join("main.td");
+        let bin_path = unique_temp_path("taida_net7_2a_nocert_native", "h3_nocert", "bin");
+        let compile = Command::new(taida_bin())
+            .arg("build")
+            .arg("--target")
+            .arg("native")
+            .arg(&td_path)
+            .arg("-o")
+            .arg(&bin_path)
+            .output()
+            .expect("compile native");
+        assert!(compile.status.success());
+        let native_output = Command::new(&bin_path).output().expect("run native");
+        let stdout = normalize(&String::from_utf8_lossy(&native_output.stdout));
+        let _ = fs::remove_file(&bin_path);
+        cleanup_net_project(&dir);
+        assert!(
+            stdout.contains("ProtocolError"),
+            "NET7-2a nocert native: expected ProtocolError, got: {:?}",
+            stdout
+        );
+    }
+}
+
+/// NET7-2b: Native h3 error message contains QUIC transport information.
+/// Validates that the Phase 2 H3 serve path provides actionable error messages
+/// about the QUIC transport requirement.
+#[test]
+fn test_net7_2b_native_h3_error_mentions_quic() {
+    let port = find_free_loopback_port();
+    let source = format!(
+        r#">>> taida-lang/net => @(httpServe)
+
+handler req =
+  @(status <= 200, headers <= @[], body <= "h3-test")
+=> :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
+
+asyncResult <= httpServe({port}, handler, 1, 5000, 128, @(cert <= "/nonexistent.pem", key <= "/nonexistent.pem", protocol <= "h3"))
+asyncResult ]=> result
+stdout(result.throw.message)
+"#,
+        port = port
+    );
+    let dir = setup_net_project(&source, "net7_2b_h3_quic_msg");
+    let td_path = dir.join("main.td");
+    let bin_path = unique_temp_path("taida_net7_2b_quic_msg", "h3_quic", "bin");
+    let compile = Command::new(taida_bin())
+        .arg("build")
+        .arg("--target")
+        .arg("native")
+        .arg(&td_path)
+        .arg("-o")
+        .arg(&bin_path)
+        .output()
+        .expect("compile native");
+    assert!(compile.status.success());
+    let native_output = Command::new(&bin_path).output().expect("run native");
+    let stdout = normalize(&String::from_utf8_lossy(&native_output.stdout));
+    let _ = fs::remove_file(&bin_path);
+    cleanup_net_project(&dir);
+
+    // Error message should mention QUIC transport
+    assert!(
+        stdout.contains("QUIC") || stdout.contains("quiche") || stdout.contains("H3"),
+        "NET7-2b: h3 error should mention QUIC transport, got: {:?}",
+        stdout
+    );
+    // Should mention HTTP/3 protocol layer readiness
+    assert!(
+        stdout.contains("QPACK") || stdout.contains("protocol layer") || stdout.contains("transport"),
+        "NET7-2b: h3 error should indicate protocol layer status, got: {:?}",
+        stdout
+    );
+}
+
+/// NET7-2c: Native h3 compile + run succeeds (binary links correctly).
+/// This validates the wire baseline: the H3 code (QPACK static table, frame
+/// encoding, stream management, request/response mapping) compiles and links
+/// as part of the native binary without errors.
+#[test]
+fn test_net7_2c_native_h3_binary_links_correctly() {
+    let port = find_free_loopback_port();
+    let source = format!(
+        r#">>> taida-lang/net => @(httpServe)
+
+handler req =
+  @(status <= 200, headers <= @[], body <= "h3-link-test")
+=> :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
+
+asyncResult <= httpServe({port}, handler, 1, 5000, 128, @(cert <= "/tmp/test.pem", key <= "/tmp/test.pem", protocol <= "h3"))
+asyncResult ]=> result
+stdout(result.__value.kind)
+"#,
+        port = port
+    );
+    let dir = setup_net_project(&source, "net7_2c_link");
+    let td_path = dir.join("main.td");
+    let bin_path = unique_temp_path("taida_net7_2c_link", "h3_link", "bin");
+    let compile = Command::new(taida_bin())
+        .arg("build")
+        .arg("--target")
+        .arg("native")
+        .arg(&td_path)
+        .arg("-o")
+        .arg(&bin_path)
+        .output()
+        .expect("compile native");
+
+    // Must compile successfully (H3 code links without errors)
+    assert!(
+        compile.status.success(),
+        "NET7-2c: Native compile with h3 code must succeed. stderr: {}",
+        String::from_utf8_lossy(&compile.stderr)
+    );
+
+    // Must run without crash (segfault, etc.)
+    let native_output = Command::new(&bin_path).output().expect("run native");
+    let _ = fs::remove_file(&bin_path);
+    cleanup_net_project(&dir);
+
+    assert!(
+        native_output.status.success() || native_output.status.code() == Some(0),
+        "NET7-2c: Native binary must not crash. exit={:?}, stderr={}",
+        native_output.status.code(),
+        String::from_utf8_lossy(&native_output.stderr)
+    );
 }
