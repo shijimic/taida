@@ -15601,10 +15601,11 @@ taida_val taida_net_http_serve(taida_val port, taida_val handler, taida_val max_
         // else: empty @() pack → plaintext, fall through
     }
 
-    // v6 NET6-1b / NET6-3a: Protocol validation and dispatch.
-    // HTTP/2 is opt-in. Explicit h1.1 falls through to h1 path.
+    // v6 NET6-1b / NET6-3a / v7 NET7-1c: Protocol validation and dispatch.
+    // HTTP/2 and HTTP/3 are opt-in. Explicit h1.1 falls through to h1 path.
     // h2 without TLS cert/key → ProtocolError (h2c out of scope per design).
     // h2 with TLS cert/key → taida_net_h2_serve (NET6-3a unlocked).
+    // h3 → recognized but not yet implemented (unlock in Phase 2: NET7-2a).
     // Unknown protocol values are rejected immediately.
     if (requested_protocol != NULL) {
         if (strcmp(requested_protocol, "h1.1") == 0 || strcmp(requested_protocol, "http/1.1") == 0) {
@@ -15639,11 +15640,25 @@ taida_val taida_net_http_serve(taida_val port, taida_val handler, taida_val max_
             taida_pack_set(h2_inner, 1, (taida_val)h2_result.requests);
             taida_pack_set_tag(h2_inner, 1, TAIDA_TAG_INT);
             return taida_async_resolved(taida_net_result_ok(h2_inner));
+        } else if (strcmp(requested_protocol, "h3") == 0) {
+            // v7 NET7-1c: HTTP/3 requires TLS (cert + key). Validate before returning
+            // not-yet-implemented so the cert/key contract is established from Phase 1.
+            if (!h2_cert_path || !h2_key_path) {
+                if (ssl_ctx) { taida_ossl.SSL_CTX_free(ssl_ctx); }
+                return taida_async_resolved(taida_net_result_fail("ProtocolError",
+                    "httpServe: HTTP/3 (protocol: \"h3\") requires TLS (cert + key)."));
+            }
+            // v7 Phase 1: h3 is recognized but not yet implemented on the Native backend.
+            // Unlock target: Phase 2 (NET7-2a).
+            if (ssl_ctx) { taida_ossl.SSL_CTX_free(ssl_ctx); ssl_ctx = NULL; }
+            return taida_async_resolved(taida_net_result_fail("H3NotYetImplemented",
+                "httpServe: HTTP/3 (protocol: \"h3\") is not yet implemented on the "
+                "native backend. QUIC transport support will be available after Phase 2."));
         } else {
             if (ssl_ctx) { taida_ossl.SSL_CTX_free(ssl_ctx); }
             char proto_err[256];
             snprintf(proto_err, sizeof(proto_err),
-                "httpServe: unknown protocol \"%s\". Supported values: \"h1.1\", \"h2\"",
+                "httpServe: unknown protocol \"%s\". Supported values: \"h1.1\", \"h2\", \"h3\"",
                 requested_protocol);
             return taida_async_resolved(taida_net_result_fail("ProtocolError", proto_err));
         }

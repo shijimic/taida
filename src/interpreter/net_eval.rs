@@ -3906,8 +3906,9 @@ impl Interpreter {
             }
         }
 
-        // v6 NET6-1b / NET6-2a: Protocol validation.
-        // HTTP/2 is opt-in. Unknown protocol values are rejected immediately.
+        // v6 NET6-1b / NET6-2a / v7 NET7-1c: Protocol validation.
+        // HTTP/2 and HTTP/3 are opt-in. Unknown protocol values are rejected immediately.
+        // v7: "h3" is now a recognized protocol value but not yet implemented (Phase 2/3).
         let is_h2 = match requested_protocol.as_deref() {
             Some("h1.1") | Some("http/1.1") => false, // Explicit HTTP/1.1
             Some("h2") => {
@@ -3922,12 +3923,33 @@ impl Interpreter {
                 }
                 true
             }
+            Some("h3") => {
+                // v7 NET7-1c: HTTP/3 requires TLS (cert + key). Validate before
+                // returning the not-yet-implemented error so the cert/key contract
+                // is established from Phase 1 onward.
+                if tls_cert_path.is_none() || tls_key_path.is_none() {
+                    let result = make_result_failure_msg(
+                        "ProtocolError",
+                        "httpServe: HTTP/3 (protocol: \"h3\") requires TLS (cert + key).",
+                    );
+                    return Ok(Some(Signal::Value(make_fulfilled_async(result))));
+                }
+                // v7 Phase 1: h3 is recognized but not yet implemented on the
+                // Interpreter backend. Unlock target: Phase 3 (NET7-3a).
+                let result = make_result_failure_msg(
+                    "H3NotYetImplemented",
+                    "httpServe: HTTP/3 (protocol: \"h3\") is not yet implemented on the \
+                     interpreter backend. Use the native backend for HTTP/3 support \
+                     (available after Phase 2).",
+                );
+                return Ok(Some(Signal::Value(make_fulfilled_async(result))));
+            }
             Some(other) => {
                 let result = make_result_failure_msg(
                     "ProtocolError",
                     format!(
                         "httpServe: unknown protocol \"{}\". \
-                         Supported values: \"h1.1\", \"h2\"",
+                         Supported values: \"h1.1\", \"h2\", \"h3\"",
                         other
                     ),
                 );

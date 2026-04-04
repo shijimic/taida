@@ -25560,3 +25560,413 @@ stdout(r.requests)
         server_stdout
     );
 }
+
+// ── NET v7 Phase 1: QUIC Substrate / Transport Contract tests ──────
+
+/// NET7-1c-1: httpServe with protocol="h3" without cert/key returns an error
+/// that mentions "h3" on all 3 backends. The key property: "h3" is no longer
+/// "unknown protocol" -- it is a recognized protocol value.
+///
+/// - Interpreter: ProtocolError (cert/key required for h3)
+/// - JS: H3Unsupported (permanent, protocol check happens before cert/key for h3)
+/// - Native: ProtocolError (cert/key required for h3)
+///
+/// All backends must mention "h3" in the error and must NOT say "unknown protocol".
+#[test]
+fn test_net7_1c_h3_protocol_recognized_3way_parity() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+
+    let source_template = |port: u16| {
+        format!(
+            r#">>> taida-lang/net => @(httpServe)
+
+handler req =
+  @(status <= 200, headers <= @[], body <= "should-not-reach")
+=> :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
+
+asyncResult <= httpServe({port}, handler, 1, 5000, 128, @(protocol <= "h3"))
+asyncResult ]=> result
+stdout(result.throw.message)
+"#,
+            port = port
+        )
+    };
+
+    // Interpreter
+    {
+        let port = find_free_loopback_port();
+        let source = source_template(port);
+        let dir = setup_net_project(&source, "v7_h3_interp");
+        let td_path = dir.join("main.td");
+        let output = Command::new(taida_bin())
+            .arg(&td_path)
+            .output()
+            .expect("spawn interpreter");
+        let stdout = normalize(&String::from_utf8_lossy(&output.stdout));
+        cleanup_net_project(&dir);
+
+        // NET7-1c: Interpreter recognizes "h3" (not "unknown protocol").
+        // Without cert/key, it returns ProtocolError about TLS requirement.
+        assert!(
+            stdout.contains("h3") || stdout.contains("H3"),
+            "NET7-1c-1 interp: expected h3 mention in error, got: {:?}",
+            stdout
+        );
+        assert!(
+            !stdout.contains("unknown protocol"),
+            "NET7-1c-1 interp: h3 should NOT be 'unknown protocol' anymore, got: {:?}",
+            stdout
+        );
+    }
+
+    // JS
+    {
+        let port = find_free_loopback_port();
+        let source = source_template(port);
+        let dir = setup_net_project(&source, "v7_h3_js");
+        let td_path = dir.join("main.td");
+        let js_path = unique_temp_path("taida_v7_h3_js", "h3_reject", "mjs");
+        let transpile = Command::new(taida_bin())
+            .arg("build")
+            .arg("--target")
+            .arg("js")
+            .arg(&td_path)
+            .arg("-o")
+            .arg(&js_path)
+            .output()
+            .expect("transpile");
+        assert!(
+            transpile.status.success(),
+            "JS transpile failed: {}",
+            String::from_utf8_lossy(&transpile.stderr)
+        );
+        let js_output = Command::new("node")
+            .arg(&js_path)
+            .output()
+            .expect("run node");
+        let stdout = normalize(&String::from_utf8_lossy(&js_output.stdout));
+        let _ = fs::remove_file(&js_path);
+        cleanup_net_project(&dir);
+
+        // NET7-1c: JS returns H3Unsupported (permanent, not "unknown protocol").
+        assert!(
+            stdout.contains("h3") || stdout.contains("H3"),
+            "NET7-1c-1 js: expected h3 mention in error, got: {:?}",
+            stdout
+        );
+        assert!(
+            !stdout.contains("unknown protocol"),
+            "NET7-1c-1 js: h3 should NOT be 'unknown protocol' anymore, got: {:?}",
+            stdout
+        );
+    }
+
+    // Native
+    {
+        let port = find_free_loopback_port();
+        let source = source_template(port);
+        let dir = setup_net_project(&source, "v7_h3_native");
+        let td_path = dir.join("main.td");
+        let bin_path = unique_temp_path("taida_v7_h3_native", "h3_reject", "bin");
+        let compile = Command::new(taida_bin())
+            .arg("build")
+            .arg("--target")
+            .arg("native")
+            .arg(&td_path)
+            .arg("-o")
+            .arg(&bin_path)
+            .output()
+            .expect("compile native");
+        assert!(
+            compile.status.success(),
+            "Native compile failed: {}",
+            String::from_utf8_lossy(&compile.stderr)
+        );
+        let native_output = Command::new(&bin_path).output().expect("run native");
+        let stdout = normalize(&String::from_utf8_lossy(&native_output.stdout));
+        let _ = fs::remove_file(&bin_path);
+        cleanup_net_project(&dir);
+
+        // NET7-1c: Native recognizes "h3" (not "unknown protocol").
+        assert!(
+            stdout.contains("h3") || stdout.contains("H3"),
+            "NET7-1c-1 native: expected h3 mention in error, got: {:?}",
+            stdout
+        );
+        assert!(
+            !stdout.contains("unknown protocol"),
+            "NET7-1c-1 native: h3 should NOT be 'unknown protocol' anymore, got: {:?}",
+            stdout
+        );
+    }
+}
+
+/// NET7-1c-2: httpServe with protocol="h3" without cert/key returns an error
+/// that confirms the TLS requirement contract on Interpreter and Native.
+/// JS returns H3Unsupported regardless of cert/key (permanent unsupported).
+///
+/// Interpreter / Native: ProtocolError mentioning "requires TLS" or "cert"
+/// JS: H3Unsupported mentioning "not supported"
+#[test]
+fn test_net7_1c_h3_no_tls_rejected_3way_parity() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+
+    let source_template = |port: u16| {
+        format!(
+            r#">>> taida-lang/net => @(httpServe)
+
+handler req =
+  @(status <= 200, headers <= @[], body <= "should-not-reach")
+=> :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
+
+asyncResult <= httpServe({port}, handler, 1, 5000, 128, @(protocol <= "h3"))
+asyncResult ]=> result
+stdout(result.throw.message)
+"#,
+            port = port
+        )
+    };
+
+    // Interpreter: h3 without cert/key → ProtocolError "requires TLS"
+    {
+        let port = find_free_loopback_port();
+        let source = source_template(port);
+        let dir = setup_net_project(&source, "v7_h3_notls_interp");
+        let td_path = dir.join("main.td");
+        let output = Command::new(taida_bin())
+            .arg(&td_path)
+            .output()
+            .expect("spawn interpreter");
+        let stdout = normalize(&String::from_utf8_lossy(&output.stdout));
+        cleanup_net_project(&dir);
+
+        assert!(
+            stdout.contains("h3") || stdout.contains("H3"),
+            "NET7-1c-2 interp: expected h3 mention, got: {:?}",
+            stdout
+        );
+        assert!(
+            stdout.contains("requires TLS") || stdout.contains("cert"),
+            "NET7-1c-2 interp: expected TLS requirement mention, got: {:?}",
+            stdout
+        );
+    }
+
+    // JS: h3 → H3Unsupported (permanent, regardless of cert/key)
+    {
+        let port = find_free_loopback_port();
+        let source = source_template(port);
+        let dir = setup_net_project(&source, "v7_h3_notls_js");
+        let td_path = dir.join("main.td");
+        let js_path = unique_temp_path("taida_v7_h3_notls_js", "h3_notls", "mjs");
+        let transpile = Command::new(taida_bin())
+            .arg("build")
+            .arg("--target")
+            .arg("js")
+            .arg(&td_path)
+            .arg("-o")
+            .arg(&js_path)
+            .output()
+            .expect("transpile");
+        assert!(
+            transpile.status.success(),
+            "JS transpile failed: {}",
+            String::from_utf8_lossy(&transpile.stderr)
+        );
+        let js_output = Command::new("node")
+            .arg(&js_path)
+            .output()
+            .expect("run node");
+        let stdout = normalize(&String::from_utf8_lossy(&js_output.stdout));
+        let _ = fs::remove_file(&js_path);
+        cleanup_net_project(&dir);
+
+        // JS rejects h3 as H3Unsupported regardless of cert/key
+        assert!(
+            stdout.contains("h3") || stdout.contains("H3"),
+            "NET7-1c-2 js: expected h3 mention, got: {:?}",
+            stdout
+        );
+        assert!(
+            stdout.contains("not supported") || stdout.contains("Unsupported"),
+            "NET7-1c-2 js: expected unsupported mention, got: {:?}",
+            stdout
+        );
+    }
+
+    // Native: h3 without cert/key → ProtocolError "requires TLS"
+    {
+        let port = find_free_loopback_port();
+        let source = source_template(port);
+        let dir = setup_net_project(&source, "v7_h3_notls_native");
+        let td_path = dir.join("main.td");
+        let bin_path = unique_temp_path("taida_v7_h3_notls_native", "h3_notls", "bin");
+        let compile = Command::new(taida_bin())
+            .arg("build")
+            .arg("--target")
+            .arg("native")
+            .arg(&td_path)
+            .arg("-o")
+            .arg(&bin_path)
+            .output()
+            .expect("compile native");
+        assert!(
+            compile.status.success(),
+            "Native compile failed: {}",
+            String::from_utf8_lossy(&compile.stderr)
+        );
+        let native_output = Command::new(&bin_path).output().expect("run native");
+        let stdout = normalize(&String::from_utf8_lossy(&native_output.stdout));
+        let _ = fs::remove_file(&bin_path);
+        cleanup_net_project(&dir);
+
+        assert!(
+            stdout.contains("h3") || stdout.contains("H3"),
+            "NET7-1c-2 native: expected h3 mention, got: {:?}",
+            stdout
+        );
+        assert!(
+            stdout.contains("requires TLS") || stdout.contains("cert"),
+            "NET7-1c-2 native: expected TLS requirement mention, got: {:?}",
+            stdout
+        );
+    }
+}
+
+/// NET7-1c-3: httpServe with truly unknown protocol (e.g. "h4") still returns
+/// ProtocolError with updated supported values list that includes "h3".
+/// 3-way parity: all backends mention "h3" in the supported values.
+#[test]
+fn test_net7_1c_unknown_protocol_includes_h3_in_supported_values() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+
+    let source_template = |port: u16| {
+        format!(
+            r#">>> taida-lang/net => @(httpServe)
+
+handler req =
+  @(status <= 200, headers <= @[], body <= "should-not-reach")
+=> :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
+
+asyncResult <= httpServe({port}, handler, 1, 5000, 128, @(protocol <= "h4"))
+asyncResult ]=> result
+stdout(result.throw.message)
+"#,
+            port = port
+        )
+    };
+
+    // Interpreter
+    {
+        let port = find_free_loopback_port();
+        let source = source_template(port);
+        let dir = setup_net_project(&source, "v7_proto_h4_interp");
+        let td_path = dir.join("main.td");
+        let output = Command::new(taida_bin())
+            .arg(&td_path)
+            .output()
+            .expect("spawn interpreter");
+        let stdout = normalize(&String::from_utf8_lossy(&output.stdout));
+        cleanup_net_project(&dir);
+
+        assert!(
+            stdout.contains("unknown protocol") && stdout.contains("h4"),
+            "NET7-1c-3 interp: expected unknown protocol error mentioning h4, got: {:?}",
+            stdout
+        );
+        // v7: supported values list must include "h3"
+        assert!(
+            stdout.contains("\"h3\""),
+            "NET7-1c-3 interp: supported values should include h3, got: {:?}",
+            stdout
+        );
+    }
+
+    // JS
+    {
+        let port = find_free_loopback_port();
+        let source = source_template(port);
+        let dir = setup_net_project(&source, "v7_proto_h4_js");
+        let td_path = dir.join("main.td");
+        let js_path = unique_temp_path("taida_v7_h4_js", "h4_reject", "mjs");
+        let transpile = Command::new(taida_bin())
+            .arg("build")
+            .arg("--target")
+            .arg("js")
+            .arg(&td_path)
+            .arg("-o")
+            .arg(&js_path)
+            .output()
+            .expect("transpile");
+        assert!(
+            transpile.status.success(),
+            "JS transpile failed: {}",
+            String::from_utf8_lossy(&transpile.stderr)
+        );
+        let js_output = Command::new("node")
+            .arg(&js_path)
+            .output()
+            .expect("run node");
+        let stdout = normalize(&String::from_utf8_lossy(&js_output.stdout));
+        let _ = fs::remove_file(&js_path);
+        cleanup_net_project(&dir);
+
+        assert!(
+            stdout.contains("unknown protocol") && stdout.contains("h4"),
+            "NET7-1c-3 js: expected unknown protocol error mentioning h4, got: {:?}",
+            stdout
+        );
+        assert!(
+            stdout.contains("\"h3\""),
+            "NET7-1c-3 js: supported values should include h3, got: {:?}",
+            stdout
+        );
+    }
+
+    // Native
+    {
+        let port = find_free_loopback_port();
+        let source = source_template(port);
+        let dir = setup_net_project(&source, "v7_proto_h4_native");
+        let td_path = dir.join("main.td");
+        let bin_path = unique_temp_path("taida_v7_h4_native", "h4_reject", "bin");
+        let compile = Command::new(taida_bin())
+            .arg("build")
+            .arg("--target")
+            .arg("native")
+            .arg(&td_path)
+            .arg("-o")
+            .arg(&bin_path)
+            .output()
+            .expect("compile native");
+        assert!(
+            compile.status.success(),
+            "Native compile failed: {}",
+            String::from_utf8_lossy(&compile.stderr)
+        );
+        let native_output = Command::new(&bin_path).output().expect("run native");
+        let stdout = normalize(&String::from_utf8_lossy(&native_output.stdout));
+        let _ = fs::remove_file(&bin_path);
+        cleanup_net_project(&dir);
+
+        assert!(
+            stdout.contains("unknown protocol") && stdout.contains("h4"),
+            "NET7-1c-3 native: expected unknown protocol error mentioning h4, got: {:?}",
+            stdout
+        );
+        assert!(
+            stdout.contains("\"h3\""),
+            "NET7-1c-3 native: supported values should include h3, got: {:?}",
+            stdout
+        );
+    }
+}

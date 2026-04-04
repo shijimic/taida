@@ -1,4 +1,4 @@
-/// Transport abstraction for `taida-lang/net` v5.
+/// Transport abstraction for `taida-lang/net` v5/v7.
 ///
 /// Defines the `Transport` trait that unifies plaintext TCP and TLS connections
 /// behind a common interface. All HTTP serve / WebSocket I/O paths use this
@@ -20,16 +20,124 @@
 ///
 /// The `TransportAcceptor` trait abstracts the listener-level accept, producing
 /// either a plaintext or TLS transport for each incoming connection.
+///
+/// # v7 QUIC Transport Contract (NET7-1a / NET7-1b)
+///
+/// v7 extends the transport layer with a QUIC substrate for HTTP/3.
+/// The QUIC transport operates over UDP + TLS 1.3, distinct from the TCP-based
+/// h1/h2 path. The transport contract is defined here; implementation will be
+/// filled in Phase 2 (Native reference) and Phase 3 (Interpreter parity).
+///
+/// ## Transport Abstraction (NET7-1a)
+///
+/// QUIC transport differs from TCP in several fundamental ways:
+///   - **UDP-based**: No connection-oriented socket; uses `UdpSocket` for send/recv
+///   - **TLS 1.3 mandatory**: Encryption is built into the QUIC handshake (not layered above)
+///   - **Stream multiplexing**: A single QUIC connection carries multiple bidirectional streams
+///   - **Connection-level vs stream-level I/O**: Read/write operate on streams, not on the connection
+///
+/// The `QuicTransport` abstraction (to be implemented in Phase 2) will:
+///   - Accept incoming QUIC connections on a bound `UdpSocket`
+///   - Perform TLS 1.3 handshake as part of the QUIC handshake (not separate)
+///   - Expose per-stream read/write through the existing `Transport` trait interface
+///   - Map QUIC connection close to the existing shutdown contract
+///
+/// Copy discipline (bounded-copy):
+///   - 1 packet = at most 1 materialization (no aggregate buffer above packet boundary)
+///   - Connection-local and stream-local buffers are reused
+///   - No `true zero-copy` claim (QUIC includes AEAD encryption)
+///
+/// ## Lifecycle Contract (NET7-1b)
+///
+/// Stream lifecycle:
+///   - Streams are created by the QUIC library on incoming request
+///   - Each stream maps to one HTTP/3 request/response exchange
+///   - Stream close is handled by the HTTP/3 layer (HEADERS + DATA + trailers)
+///   - Half-close semantics: client can close send side while server writes response
+///
+/// Connection lifecycle:
+///   - Connection established via QUIC handshake (includes TLS 1.3)
+///   - Multiple streams share one connection
+///   - Connection idle timeout follows existing `timeout` parameter from `httpServe`
+///   - No QUIC-specific timeout knobs exposed to user-land (v7 design lock)
+///
+/// Shutdown lifecycle:
+///   - Graceful: GOAWAY frame → drain in-flight streams → close connection
+///   - Maps to existing `maxRequests` / server shutdown contract
+///   - No user-facing QUIC drain period knob (v7 design lock)
+///
+/// Security boundaries (NET7-0g):
+///   - 0-RTT: default-off, no user-facing opt-in in v7
+///   - Resumption/stateless reset/connection migration: runtime-internal only
+///   - None of these are exposed in the `Transport` trait or `httpServe` contract
+///
+/// ## Protocol Selection (NET7-1c)
+///
+/// The `protocol` field in the `tls` BuchiPack determines the transport:
+///   - `"h1.1"` / `"http/1.1"` → TCP + optional TLS → HTTP/1.1
+///   - `"h2"`                   → TCP + TLS (required) → HTTP/2
+///   - `"h3"`                   → UDP + QUIC/TLS1.3 (required) → HTTP/3
+///   - absent / `None`          → TCP + optional TLS → HTTP/1.1 (default)
+///   - unknown value             → `ProtocolError` (immediate reject, no fallback)
+///
+/// Protocol selection happens at `httpServe` startup and is immutable for the
+/// lifetime of the server. No mixed-protocol, no automatic Alt-Svc, no silent fallback.
 use std::io;
 use std::io::Read as _;
 use std::net::SocketAddr;
 use std::time::Duration;
+
+// ── Protocol Selection (NET7-1c) ────────────────────────────────────
+
+/// Protocol kind selected by the caller via `tls.protocol` field.
+///
+/// v7 NET7-1c: This enum formalizes the protocol selection contract.
+/// It is determined once at `httpServe` startup and is immutable for the
+/// lifetime of the server instance.
+///
+/// Variants:
+///   - `H1` -- HTTP/1.1 (default, TCP, optionally over TLS)
+///   - `H2` -- HTTP/2 (TCP + TLS required, ALPN negotiation)
+///   - `H3` -- HTTP/3 (UDP + QUIC/TLS1.3, not yet implemented in Phase 1)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ProtocolKind {
+    /// HTTP/1.1 over TCP (plaintext or TLS).
+    H1,
+    /// HTTP/2 over TCP + TLS. Requires cert/key. ALPN negotiation.
+    H2,
+    /// HTTP/3 over UDP + QUIC/TLS1.3. Requires cert/key.
+    /// Not yet implemented in Phase 1. Unlock: Phase 2 (Native), Phase 3 (Interpreter).
+    H3,
+}
+
+impl ProtocolKind {
+    /// Parse the protocol string from the `tls.protocol` field.
+    /// Returns `None` for unrecognized values (caller should reject with `ProtocolError`).
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s {
+            "h1.1" | "http/1.1" => Some(ProtocolKind::H1),
+            "h2" => Some(ProtocolKind::H2),
+            "h3" => Some(ProtocolKind::H3),
+            _ => None,
+        }
+    }
+
+    /// Whether this protocol requires TLS (cert + key).
+    pub fn requires_tls(&self) -> bool {
+        match self {
+            ProtocolKind::H1 => false, // TLS is optional for h1
+            ProtocolKind::H2 => true,  // h2c is out of scope
+            ProtocolKind::H3 => true,  // QUIC mandates TLS 1.3
+        }
+    }
+}
 
 // ── Transport trait ──────────────────────────────────────────────────
 
 /// Unified read/write interface for a single connection.
 ///
 /// Implementors: `PlaintextTransport` (v4 path), `TlsTransport` (v5 Phase 2).
+/// Future: `QuicStreamTransport` (v7 Phase 2/3, wraps a single QUIC stream).
 /// The trait uses `&mut self` because connections are not shared across threads
 /// (the Interpreter is single-threaded, `!Send`).
 pub(crate) trait Transport {
@@ -603,12 +711,114 @@ impl ConnectionConfig {
     }
 }
 
+// ── QUIC Transport Contract (NET7-1a / NET7-1b) ────────────────────
+//
+// This section documents the QUIC transport abstraction that Phase 2 (Native)
+// and Phase 3 (Interpreter) will implement. No actual QUIC library dependency
+// is added in Phase 1 -- only the contract is established.
+//
+// ## QuicTransport (NET7-1a)
+//
+// Future implementor of the `Transport` trait for QUIC streams.
+// Each QuicStreamTransport wraps a single bidirectional QUIC stream and
+// maps read/write/shutdown to QUIC stream operations.
+//
+// Key differences from TCP-based transports:
+//   - `read`: reads from the QUIC stream's receive buffer (decrypted by QUIC)
+//   - `write_all`: writes to the QUIC stream's send buffer (encrypted by QUIC)
+//   - `flush`: triggers QUIC packet assembly and UDP send
+//   - `shutdown_write`: sends STREAM FIN on this stream
+//   - Timeouts: per-stream deadlines map to QUIC idle timeout internally
+//   - `is_tls`: always true (QUIC mandates TLS 1.3)
+//   - `peer_addr`: returns the UDP peer address of the QUIC connection
+//
+// ## QuicAcceptor (NET7-1a)
+//
+// Future implementor of the `TransportAcceptor` trait for QUIC connections.
+// Listens on a `UdpSocket`, manages QUIC connection state, and accepts
+// incoming streams as `QuicStreamTransport` instances.
+//
+// Key differences from TCP-based acceptors:
+//   - Binds a `UdpSocket` instead of a `TcpListener`
+//   - QUIC handshake (including TLS 1.3) happens as part of connection setup
+//   - A single accepted QUIC connection can yield multiple streams
+//   - `try_accept` returns the next available stream on any connection
+//   - `is_tls`: always true
+//
+// ## Stream Lifecycle (NET7-1b)
+//
+// 1. Client initiates QUIC connection (Initial packet)
+// 2. Server performs QUIC handshake (includes TLS 1.3 handshake)
+// 3. Client opens a bidirectional stream and sends HTTP/3 HEADERS frame
+// 4. Server receives stream, maps to handler via existing request dispatch
+// 5. Handler returns response; server sends HEADERS + DATA on the stream
+// 6. Stream is closed (FIN sent in both directions)
+// 7. Connection persists for additional streams until idle timeout or GOAWAY
+//
+// ## Connection Lifecycle (NET7-1b)
+//
+// - Established: QUIC handshake complete, TLS 1.3 keys derived
+// - Active: streams being created/served
+// - Draining: GOAWAY sent, no new streams, in-flight streams complete
+// - Closed: all streams done, connection resources released
+//
+// ## Shutdown Contract (NET7-1b)
+//
+// Graceful shutdown (triggered by maxRequests or external signal):
+// 1. Stop accepting new QUIC connections
+// 2. Send GOAWAY on all active connections
+// 3. Wait for in-flight streams to complete (bounded by timeout)
+// 4. Close all connections
+//
+// This maps to the existing shutdown contract from httpServe.
+// No QUIC-specific drain knobs are exposed to user-land in v7.
+//
+// ## Timeout Contract (NET7-1b)
+//
+// - The `timeout` parameter from httpServe is used as the per-connection
+//   idle timeout for QUIC connections
+// - No QUIC-specific timeout knobs are added to the user-facing API in v7
+// - QUIC idle timeout, max idle timeout, and keep-alive are runtime-internal
+//
+// ## Security Boundaries (NET7-0g, referenced from NET7-1a/1b)
+//
+// - 0-RTT: default-off, not exposed in Phase 1
+// - Resumption tickets: runtime-internal, not exposed
+// - Stateless reset: runtime-internal, not exposed
+// - Connection migration: runtime-internal, not exposed
+
 // ── Tests ────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::io::{Read, Write};
+
+    // ── NET7-1c: ProtocolKind unit tests ────────────────────────────
+
+    #[test]
+    fn test_protocol_kind_from_str_valid() {
+        assert_eq!(ProtocolKind::from_str("h1.1"), Some(ProtocolKind::H1));
+        assert_eq!(ProtocolKind::from_str("http/1.1"), Some(ProtocolKind::H1));
+        assert_eq!(ProtocolKind::from_str("h2"), Some(ProtocolKind::H2));
+        assert_eq!(ProtocolKind::from_str("h3"), Some(ProtocolKind::H3));
+    }
+
+    #[test]
+    fn test_protocol_kind_from_str_unknown() {
+        assert_eq!(ProtocolKind::from_str("h4"), None);
+        assert_eq!(ProtocolKind::from_str("quic"), None);
+        assert_eq!(ProtocolKind::from_str(""), None);
+        assert_eq!(ProtocolKind::from_str("HTTP/2"), None); // case-sensitive
+        assert_eq!(ProtocolKind::from_str("H3"), None); // case-sensitive
+    }
+
+    #[test]
+    fn test_protocol_kind_requires_tls() {
+        assert!(!ProtocolKind::H1.requires_tls()); // h1 TLS is optional
+        assert!(ProtocolKind::H2.requires_tls()); // h2 requires TLS (h2c out of scope)
+        assert!(ProtocolKind::H3.requires_tls()); // h3 mandates TLS 1.3 via QUIC
+    }
 
     #[test]
     fn test_plaintext_transport_read_write() {

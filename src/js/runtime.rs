@@ -3598,9 +3598,9 @@ async function __taida_net_httpServe(port, handler, maxRequests, timeoutMs, maxC
     throw new __NativeError('httpServe: tls must be a BuchiPack @(cert: Str, key: Str) or @(), got ' + typeof tls);
   }
 
-  // v6 NET6-1b: Protocol validation.
-  // JS backend does NOT support HTTP/2 (design lock: JS = HTTP/1.1 compatibility backend).
-  // This is a permanent restriction, not a temporary limitation.
+  // v6 NET6-1b / v7 NET7-1c: Protocol validation.
+  // JS backend does NOT support HTTP/2 or HTTP/3 (design lock: JS = HTTP/1.1 compatibility backend).
+  // These are permanent restrictions, not temporary limitations.
   if (__requestedProtocol !== null) {
     if (__requestedProtocol === 'h1.1' || __requestedProtocol === 'http/1.1') {
       // Explicit HTTP/1.1 — same as default, no action needed.
@@ -3611,10 +3611,18 @@ async function __taida_net_httpServe(port, handler, maxRequests, timeoutMs, maxC
           'httpServe: HTTP/2 (protocol: "h2") is not supported on the JS backend. ' +
           'Use the interpreter or native backend for HTTP/2 support.'),
         null, 'fulfilled');
+    } else if (__requestedProtocol === 'h3') {
+      // v7 NET7-1c: JS backend permanently does not support HTTP/3.
+      // HTTP/3 requires QUIC transport which is not available in Node.js runtime.
+      return new __TaidaAsync(
+        __taida_net_result_fail('H3Unsupported',
+          'httpServe: HTTP/3 (protocol: "h3") is not supported on the JS backend. ' +
+          'Use the native or interpreter backend for HTTP/3 support.'),
+        null, 'fulfilled');
     } else {
       return new __TaidaAsync(
         __taida_net_result_fail('ProtocolError',
-          'httpServe: unknown protocol "' + __requestedProtocol + '". Supported values: "h1.1", "h2"'),
+          'httpServe: unknown protocol "' + __requestedProtocol + '". Supported values: "h1.1", "h2", "h3"'),
         null, 'fulfilled');
     }
   }
