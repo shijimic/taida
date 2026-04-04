@@ -756,33 +756,41 @@ impl ConnectionConfig {
 // and Phase 3 (Interpreter) will implement. No actual QUIC library dependency
 // is added in Phase 1 -- only the contract is established.
 //
-// ## QuicTransport (NET7-1a)
+// IMPORTANT (NB7-7): The QUIC transport does NOT implement the `Transport`,
+// `TransportAcceptor`, or `TransportConnection` traits defined above. Those
+// are TCP-only and remain unchanged for h1/h2. The h3 path uses a dedicated
+// QUIC accept/connection/stream model. See the module-level NB7-7 design
+// decision and `.dev/NET_DESIGN.md` "QUIC / TCP Transport Separation" for
+// full rationale.
 //
-// Future implementor of the `Transport` trait for QUIC streams.
+// ## QuicStreamTransport (NET7-1a)
+//
+// Dedicated QUIC stream transport (does NOT implement the `Transport` trait).
 // Each QuicStreamTransport wraps a single bidirectional QUIC stream and
 // maps read/write/shutdown to QUIC stream operations.
 //
-// Key differences from TCP-based transports:
+// I/O semantics (parallel to TCP transports but on a separate type hierarchy):
 //   - `read`: reads from the QUIC stream's receive buffer (decrypted by QUIC)
 //   - `write_all`: writes to the QUIC stream's send buffer (encrypted by QUIC)
 //   - `flush`: triggers QUIC packet assembly and UDP send
 //   - `shutdown_write`: sends STREAM FIN on this stream
 //   - Timeouts: per-stream deadlines map to QUIC idle timeout internally
-//   - `is_tls`: always true (QUIC mandates TLS 1.3)
+//   - TLS is always active (QUIC mandates TLS 1.3)
 //   - `peer_addr`: returns the UDP peer address of the QUIC connection
 //
 // ## QuicAcceptor (NET7-1a)
 //
-// Future implementor of the `TransportAcceptor` trait for QUIC connections.
-// Listens on a `UdpSocket`, manages QUIC connection state, and accepts
+// Dedicated QUIC acceptor (does NOT implement the `TransportAcceptor` trait).
+// Listens on a `UdpSocket`, manages QUIC connection state, and yields
 // incoming streams as `QuicStreamTransport` instances.
 //
 // Key differences from TCP-based acceptors:
 //   - Binds a `UdpSocket` instead of a `TcpListener`
 //   - QUIC handshake (including TLS 1.3) happens as part of connection setup
 //   - A single accepted QUIC connection can yield multiple streams
-//   - `try_accept` returns the next available stream on any connection
-//   - `is_tls`: always true
+//   - Stream acceptance is per-stream, not per-connection (unlike TCP's
+//     `try_accept` which returns one connection per call)
+//   - TLS is always active
 //
 // ## Stream Lifecycle (NET7-1b)
 //
