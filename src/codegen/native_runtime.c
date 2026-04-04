@@ -15753,7 +15753,8 @@ static int h3_qpack_decode_block(const unsigned char *data, size_t data_len,
     consumed += db_consumed;
 
     int hdr_count = 0;
-    while (consumed < data_len && hdr_count < max_headers) {
+    while (consumed < data_len) {
+        if (hdr_count >= max_headers) return -1; // NB7-11: overflow = decode error (H2 parity)
         uint8_t byte = data[consumed];
 
         if (byte & 0x80) {
@@ -16421,10 +16422,11 @@ static int h3_selftest_qpack_roundtrip(void) {
         if (strcmp(output[i + 1].value, input[i].value) != 0) return -(20 + i);
     }
 
-    // Test max_headers truncation: encode 4 headers but decode with max=2
-    // Should return 2 (not error), stopping at max_headers
-    int trunc_count = h3_qpack_decode_block(buf, (size_t)enc_len, output, 2);
-    if (trunc_count != 2) return -30; // truncation should return partial count
+    // NB7-11: Test max_headers overflow: encode 5 fields (:status + 4 headers)
+    // but decode with max=2. Must return -1 (decode error), matching H2 behavior.
+    // Before NB7-11 fix, this returned partial count (silent truncation).
+    int overflow_count = h3_qpack_decode_block(buf, (size_t)enc_len, output, 2);
+    if (overflow_count != -1) return -30; // overflow must be decode error (H2 parity)
 
     return 0; // all tests passed
 }

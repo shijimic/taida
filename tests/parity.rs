@@ -26948,3 +26948,136 @@ stdout(result.__value.kind)
         stdout
     );
 }
+
+/// NB7-11: Source-level verification that h3_qpack_decode_block treats
+/// max_headers overflow as a decode error (-1), matching H2 hpack_decode_block.
+///
+/// Before the fix, the loop condition was:
+///   `while (consumed < data_len && hdr_count < max_headers)`
+/// which silently stopped decoding when max_headers was reached, returning
+/// a partial count. The fix changes this to check inside the loop body:
+///   `if (hdr_count >= max_headers) return -1;`
+/// This matches H2's behavior in h2_hpack_decode_block.
+#[test]
+fn test_nb7_11_qpack_overflow_is_decode_error() {
+    let source =
+        std::fs::read_to_string("src/codegen/native_runtime.c").expect("read native_runtime.c");
+
+    // Find the h3_qpack_decode_block function
+    let func_start = source
+        .find("static int h3_qpack_decode_block(")
+        .expect("h3_qpack_decode_block must exist");
+    // Take a reasonable slice for the function body
+    let func_region = &source[func_start..func_start + 2000.min(source.len() - func_start)];
+
+    // The loop must NOT use hdr_count < max_headers as a loop condition
+    // (that was the old silent-truncation pattern)
+    assert!(
+        !func_region.contains("while (consumed < data_len && hdr_count < max_headers)"),
+        "NB7-11: h3_qpack_decode_block must not use max_headers in the while condition \
+         (silent truncation pattern). It should check inside the loop and return -1."
+    );
+
+    // The loop body must contain the overflow check that returns -1
+    assert!(
+        func_region.contains("if (hdr_count >= max_headers) return -1;"),
+        "NB7-11: h3_qpack_decode_block must check hdr_count >= max_headers inside \
+         the loop body and return -1 on overflow, matching H2 hpack_decode_block."
+    );
+}
+
+/// NB7-11: Verify that the selftest exercises overflow-as-error behavior.
+/// The h3_selftest_qpack_roundtrip() function must test that decoding with
+/// a max_headers smaller than the encoded field count returns -1 (not a
+/// partial count).
+#[test]
+fn test_nb7_11_qpack_selftest_expects_overflow_error() {
+    let source =
+        std::fs::read_to_string("src/codegen/native_runtime.c").expect("read native_runtime.c");
+
+    // Find the selftest function
+    let func_start = source
+        .find("static int h3_selftest_qpack_roundtrip(")
+        .expect("h3_selftest_qpack_roundtrip must exist");
+    let func_region = &source[func_start..func_start + 3000.min(source.len() - func_start)];
+
+    // Must NOT expect partial count (the old truncation behavior)
+    assert!(
+        !func_region.contains("truncation should return partial count"),
+        "NB7-11: selftest must not expect partial count on overflow (old behavior)."
+    );
+
+    // Must expect -1 (decode error) on overflow
+    assert!(
+        func_region.contains("overflow_count != -1"),
+        "NB7-11: selftest must verify that overflow returns -1 (decode error)."
+    );
+
+    // Must reference H2 parity in the overflow check comment
+    assert!(
+        func_region.contains("H2 parity"),
+        "NB7-11: selftest overflow check must document H2 parity rationale."
+    );
+}
+
+/// NB7-11: Runtime verification that the native H3 self-test passes with
+/// the corrected overflow-as-error behavior. This compiles and runs a Taida
+/// program that triggers h3_run_selftests() inside taida_net_h3_serve().
+/// If the selftest fails after the NB7-11 fix, error kind will be
+/// "H3SelftestFailed" instead of the expected QUIC transport gate.
+#[test]
+fn test_nb7_11_qpack_overflow_runtime() {
+    let port = find_free_loopback_port();
+    let source = format!(
+        r#">>> taida-lang/net => @(httpServe)
+
+handler req =
+  @(status <= 200, headers <= @[], body <= "nb7-11-test")
+=> :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
+
+asyncResult <= httpServe({port}, handler, 1, 5000, 128, @(cert <= "/tmp/nb711.pem", key <= "/tmp/nb711.pem", protocol <= "h3"))
+asyncResult ]=> result
+stdout(result.__value.kind)
+"#,
+        port = port
+    );
+    let dir = setup_net_project(&source, "nb7_11_qpack_overflow");
+    let td_path = dir.join("main.td");
+    let bin_path = unique_temp_path("taida_nb7_11", "qpk_ovf", "bin");
+    let compile = Command::new(taida_bin())
+        .arg("build")
+        .arg("--target")
+        .arg("native")
+        .arg(&td_path)
+        .arg("-o")
+        .arg(&bin_path)
+        .output()
+        .expect("compile native");
+    assert!(
+        compile.status.success(),
+        "NB7-11: Native compile must succeed. stderr: {}",
+        String::from_utf8_lossy(&compile.stderr)
+    );
+
+    let native_output = Command::new(&bin_path).output().expect("run native");
+    let stdout = normalize(&String::from_utf8_lossy(&native_output.stdout));
+    let _ = fs::remove_file(&bin_path);
+    cleanup_net_project(&dir);
+
+    // The selftest must NOT fail — error kind must not be H3SelftestFailed.
+    // The corrected overflow check (return -1) must be properly tested by
+    // h3_selftest_qpack_roundtrip() without causing a false failure.
+    assert!(
+        !stdout.contains("H3SelftestFailed"),
+        "NB7-11: QPACK overflow selftest failed! The corrected overflow-as-error \
+         behavior caused a selftest regression. Output: {:?}",
+        stdout
+    );
+
+    // Should reach QUIC transport gate (selftest passed, quiche check happens next)
+    assert!(
+        stdout.contains("H3QuicUnavailable") || stdout.contains("H3TransportPending"),
+        "NB7-11: After selftest passes, should reach QUIC transport gate. Got: {:?}",
+        stdout
+    );
+}
