@@ -26649,3 +26649,302 @@ stdout(result.__value.kind)
         String::from_utf8_lossy(&native_output.stderr)
     );
 }
+
+/// NB7-9: QPACK literal-name decode round-trip self-test.
+/// Verifies that the native H3 self-test passes, which exercises QPACK
+/// encode/decode round-trip including headers with literal names not in
+/// the static table. Before the fix, the decode side called
+/// h3_qpack_decode_string() on the instruction byte with a 7-bit prefix,
+/// which misinterpreted the 001Nxxxx layout and returned -1.
+///
+/// This test compiles a Taida program that invokes httpServe with protocol "h3",
+/// triggering h3_run_selftests() inside taida_net_h3_serve(). If the selftest
+/// fails, the error kind will be "H3SelftestFailed" instead of the expected
+/// "H3QuicUnavailable" or "H3TransportPending".
+#[test]
+fn test_nb7_9_qpack_literal_name_roundtrip() {
+    let port = find_free_loopback_port();
+    let source = format!(
+        r#">>> taida-lang/net => @(httpServe)
+
+handler req =
+  @(status <= 200, headers <= @[], body <= "nb7-9-test")
+=> :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
+
+asyncResult <= httpServe({port}, handler, 1, 5000, 128, @(cert <= "/tmp/nb79.pem", key <= "/tmp/nb79.pem", protocol <= "h3"))
+asyncResult ]=> result
+stdout(result.__value.kind)
+"#,
+        port = port
+    );
+    let dir = setup_net_project(&source, "nb7_9_qpack_roundtrip");
+    let td_path = dir.join("main.td");
+    let bin_path = unique_temp_path("taida_nb7_9", "qpack_rt", "bin");
+    let compile = Command::new(taida_bin())
+        .arg("build")
+        .arg("--target")
+        .arg("native")
+        .arg(&td_path)
+        .arg("-o")
+        .arg(&bin_path)
+        .output()
+        .expect("compile native");
+    assert!(
+        compile.status.success(),
+        "NB7-9: Native compile must succeed. stderr: {}",
+        String::from_utf8_lossy(&compile.stderr)
+    );
+
+    let native_output = Command::new(&bin_path).output().expect("run native");
+    let stdout = normalize(&String::from_utf8_lossy(&native_output.stdout));
+    let _ = fs::remove_file(&bin_path);
+    cleanup_net_project(&dir);
+
+    // The selftest must NOT fail — error kind must not be H3SelftestFailed.
+    // It should be H3QuicUnavailable (no libquiche.so) or H3TransportPending.
+    assert!(
+        !stdout.contains("H3SelftestFailed"),
+        "NB7-9: QPACK round-trip selftest failed! The H3 protocol layer \
+         self-test detected a QPACK encode/decode or request validation \
+         error. Output: {:?}",
+        stdout
+    );
+
+    // Should reach a QUIC transport gate (selftest passed, quiche check happens next)
+    assert!(
+        stdout.contains("H3QuicUnavailable") || stdout.contains("H3TransportPending"),
+        "NB7-9: After selftest passes, should reach QUIC transport gate. Got: {:?}",
+        stdout
+    );
+}
+
+/// NB7-9: Source-level verification that the erroneous h3_qpack_decode_string
+/// call on the instruction byte has been removed from the literal-name branch.
+#[test]
+fn test_nb7_9_qpack_decode_no_spurious_string_call() {
+    let source =
+        std::fs::read_to_string("src/codegen/native_runtime.c").expect("read native_runtime.c");
+
+    // Find the Literal Field Line With Literal Name decode section
+    let literal_section: String = source
+        .lines()
+        .skip_while(|l| !l.contains("Literal Field Line With Literal Name (Section 4.5.6)"))
+        .take(40)
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    // The old buggy code called h3_qpack_decode_string before the 3-bit prefix decode.
+    // After the fix, the literal-name branch should NOT call h3_qpack_decode_string
+    // for the name — it uses h3_qpack_decode_int with 3-bit prefix directly.
+    // The section should contain h3_qpack_decode_int for the name length,
+    // and h3_qpack_decode_string only for the value.
+
+    // Count occurrences of h3_qpack_decode_string in this section
+    let string_decode_calls: Vec<&str> = literal_section
+        .lines()
+        .filter(|l| l.contains("h3_qpack_decode_string"))
+        .collect();
+
+    // After fix: exactly 1 call (for the value string only)
+    assert_eq!(
+        string_decode_calls.len(),
+        1,
+        "NB7-9: Literal-name decode section must have exactly 1 h3_qpack_decode_string call \
+         (for value only). Found {}: {:?}",
+        string_decode_calls.len(),
+        string_decode_calls
+    );
+
+    // Must contain h3_qpack_decode_int with 3-bit prefix for name length
+    assert!(
+        literal_section.contains("h3_qpack_decode_int") && literal_section.contains(", 3,"),
+        "NB7-9: Literal-name decode must use h3_qpack_decode_int with 3-bit prefix for name length"
+    );
+
+    // Must NOT contain the old "modified[1]" hack
+    assert!(
+        !literal_section.contains("modified[1]"),
+        "NB7-9: Old 'modified[1]' workaround must be removed"
+    );
+
+    // Must NOT contain "strip upper 5 bits" comment (old code remnant)
+    assert!(
+        !literal_section.contains("strip upper 5 bits"),
+        "NB7-9: Old 'strip upper 5 bits' comment must be removed"
+    );
+}
+
+/// NB7-9: Verify that the QPACK round-trip selftest function exists and
+/// covers literal-name headers.
+#[test]
+fn test_nb7_9_qpack_selftest_exists() {
+    let source =
+        std::fs::read_to_string("src/codegen/native_runtime.c").expect("read native_runtime.c");
+
+    assert!(
+        source.contains("h3_selftest_qpack_roundtrip"),
+        "NB7-9: QPACK round-trip selftest function must exist"
+    );
+    assert!(
+        source.contains("x-custom-header"),
+        "NB7-9: QPACK selftest must include a literal-name header (not in static table)"
+    );
+    assert!(
+        source.contains("h3_run_selftests"),
+        "NB7-9: Combined selftest runner must exist and be called from h3_serve"
+    );
+}
+
+/// NB7-10: H3 request pseudo-header validation parity with H2.
+/// Verifies that h3_extract_request_fields requires :scheme (matching H2),
+/// rejects empty pseudo-header values, and the selftest covers all cases.
+#[test]
+fn test_nb7_10_h3_request_validation_scheme_required() {
+    let source =
+        std::fs::read_to_string("src/codegen/native_runtime.c").expect("read native_runtime.c");
+
+    // Find h3_extract_request_fields function
+    let h3_extract_section: String = source
+        .lines()
+        .skip_while(|l| !l.contains("static void h3_extract_request_fields"))
+        .take(60)
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    // Must check saw_scheme in the missing pseudo check (NB7-10 fix)
+    assert!(
+        h3_extract_section.contains("!saw_scheme"),
+        "NB7-10: h3_extract_request_fields must check saw_scheme in missing-pseudo validation"
+    );
+
+    // Must check empty pseudo-header values (parity with H2)
+    assert!(
+        h3_extract_section.contains("scheme[0] == '\\0'"),
+        "NB7-10: h3_extract_request_fields must reject empty :scheme value"
+    );
+    assert!(
+        h3_extract_section.contains("H3_REQ_ERR_EMPTY_PSEUDO"),
+        "NB7-10: h3_extract_request_fields must use H3_REQ_ERR_EMPTY_PSEUDO for empty values"
+    );
+
+    // Find h2_extract_request_fields for comparison
+    let h2_extract_section: String = source
+        .lines()
+        .skip_while(|l| !l.contains("static void h2_extract_request_fields"))
+        .take(80)
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    // H2 checks scheme[0] == '\0' — H3 must do the same
+    assert!(
+        h2_extract_section.contains("scheme[0] == '\\0'"),
+        "NB7-10: H2 reference checks empty scheme — confirming parity baseline"
+    );
+}
+
+/// NB7-10: Verify the H3 request validation selftest covers all malformed cases.
+#[test]
+fn test_nb7_10_h3_request_validation_selftest_coverage() {
+    let source =
+        std::fs::read_to_string("src/codegen/native_runtime.c").expect("read native_runtime.c");
+
+    // Find the selftest function
+    let selftest_section: String = source
+        .lines()
+        .skip_while(|l| !l.contains("h3_selftest_request_validation"))
+        .take(120)
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    // Must test missing :scheme
+    assert!(
+        selftest_section.contains("Missing :scheme"),
+        "NB7-10: Selftest must cover missing :scheme case"
+    );
+
+    // Must test empty :scheme
+    assert!(
+        selftest_section.contains("Empty :scheme"),
+        "NB7-10: Selftest must cover empty :scheme case"
+    );
+
+    // Must test empty :method
+    assert!(
+        selftest_section.contains("Empty :method"),
+        "NB7-10: Selftest must cover empty :method case"
+    );
+
+    // Must test duplicate :scheme
+    assert!(
+        selftest_section.contains("Duplicate :scheme"),
+        "NB7-10: Selftest must cover duplicate :scheme case"
+    );
+
+    // Must test ordering violation
+    assert!(
+        selftest_section.contains("Ordering violation") || selftest_section.contains("ordering"),
+        "NB7-10: Selftest must cover ordering violation case"
+    );
+
+    // Must test unknown pseudo-header
+    assert!(
+        selftest_section.contains("Unknown pseudo") || selftest_section.contains("unknown pseudo"),
+        "NB7-10: Selftest must cover unknown pseudo-header case"
+    );
+}
+
+/// NB7-10: Native binary selftest confirms H3 request validation passes.
+/// This is the runtime counterpart to the source inspection tests.
+#[test]
+fn test_nb7_10_h3_request_validation_runtime() {
+    let port = find_free_loopback_port();
+    let source = format!(
+        r#">>> taida-lang/net => @(httpServe)
+
+handler req =
+  @(status <= 200, headers <= @[], body <= "nb7-10-test")
+=> :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
+
+asyncResult <= httpServe({port}, handler, 1, 5000, 128, @(cert <= "/tmp/nb710.pem", key <= "/tmp/nb710.pem", protocol <= "h3"))
+asyncResult ]=> result
+stdout(result.__value.kind)
+"#,
+        port = port
+    );
+    let dir = setup_net_project(&source, "nb7_10_req_validation");
+    let td_path = dir.join("main.td");
+    let bin_path = unique_temp_path("taida_nb7_10", "req_val", "bin");
+    let compile = Command::new(taida_bin())
+        .arg("build")
+        .arg("--target")
+        .arg("native")
+        .arg(&td_path)
+        .arg("-o")
+        .arg(&bin_path)
+        .output()
+        .expect("compile native");
+    assert!(
+        compile.status.success(),
+        "NB7-10: Native compile must succeed. stderr: {}",
+        String::from_utf8_lossy(&compile.stderr)
+    );
+
+    let native_output = Command::new(&bin_path).output().expect("run native");
+    let stdout = normalize(&String::from_utf8_lossy(&native_output.stdout));
+    let _ = fs::remove_file(&bin_path);
+    cleanup_net_project(&dir);
+
+    // Selftest must pass — no H3SelftestFailed
+    assert!(
+        !stdout.contains("H3SelftestFailed"),
+        "NB7-10: H3 request validation selftest failed! Output: {:?}",
+        stdout
+    );
+
+    // Should reach QUIC transport gate
+    assert!(
+        stdout.contains("H3QuicUnavailable") || stdout.contains("H3TransportPending"),
+        "NB7-10: After selftest passes, should reach QUIC transport gate. Got: {:?}",
+        stdout
+    );
+}

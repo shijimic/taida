@@ -15801,24 +15801,17 @@ static int h3_qpack_decode_block(const unsigned char *data, size_t data_len,
             hdr_count++;
         } else if (byte & 0x20) {
             // Literal Field Line With Literal Name (Section 4.5.6): 001Nxxxx
+            // Instruction byte layout: 001N Hxxx
+            //   N = never-indexed bit (bit 4)
+            //   H = name Huffman bit (bit 3)
+            //   xxx = 3-bit prefix for name length integer
             // int is_never_indexed = (byte & 0x10) != 0;
-            // Name length (3-bit prefix)
-            size_t name_consumed;
-            if (h3_qpack_decode_string(data + consumed + 0, data_len - consumed,
-                                        headers[hdr_count].name, sizeof(headers[hdr_count].name),
-                                        &name_consumed) < 0) return -1;
-            // Skip the initial instruction byte for name decode
-            // Actually: the instruction byte includes the H bit and name length prefix
-            // Let's re-decode properly: strip the 001N bits and decode name
+
+            // Decode name: 3-bit prefix integer for length, then raw/Huffman bytes
             {
-                // Reconstruct: the first byte's lower 3 bits are part of the name length
-                unsigned char modified[1];
-                modified[0] = byte & 0x07; // strip upper 5 bits, keep Huffman bit in the string
-                // This is tricky: the name string starts at the instruction byte with 3-bit prefix
-                // for its length integer. Let's handle it more carefully.
+                int name_huffman = (byte & 0x08) != 0;
                 uint64_t name_len;
                 size_t nli_consumed;
-                int name_huffman = (byte & 0x08) != 0;
                 if (h3_qpack_decode_int(data + consumed, data_len - consumed, 3, &name_len, &nli_consumed) < 0) return -1;
                 consumed += nli_consumed;
                 if (consumed + (size_t)name_len > data_len) return -1;
@@ -15835,7 +15828,7 @@ static int h3_qpack_decode_block(const unsigned char *data, size_t data_len,
                 consumed += (size_t)name_len;
             }
 
-            // Value string
+            // Decode value: standard QPACK string (7-bit prefix)
             size_t val_consumed;
             if (h3_qpack_decode_string(data + consumed, data_len - consumed,
                                         headers[hdr_count].value, sizeof(headers[hdr_count].value),
@@ -16239,8 +16232,16 @@ static void h3_extract_request_fields(const H3Header *headers, int count, H3Requ
         }
     }
 
-    if (!saw_method || !saw_path) {
+    // Required pseudo-headers: :method, :path, :scheme (matches H2 semantics)
+    if (!saw_method || !saw_path || !saw_scheme) {
         out->error_reason = H3_REQ_ERR_MISSING_PSEUDO;
+        free(regs);
+        return;
+    }
+
+    // Reject empty pseudo-header values (matches H2 semantics)
+    if (out->method[0] == '\0' || out->path[0] == '\0' || scheme[0] == '\0') {
+        out->error_reason = H3_REQ_ERR_EMPTY_PSEUDO;
         free(regs);
         return;
     }
@@ -16374,6 +16375,186 @@ static int h3_build_data_frame(unsigned char *buf, size_t buf_cap,
     return h3_encode_frame(buf, buf_cap, H3_FRAME_DATA, data, data_len);
 }
 
+// ── H3 self-tests (NB7-9, NB7-10) ────────────────────────────────────────
+// Embedded self-tests for QPACK round-trip and H3 request validation.
+// Called from taida_net_h3_serve() to ensure Phase 2 reference semantics
+// are correct before entering the QUIC transport layer.
+
+// NB7-9: QPACK encode/decode round-trip self-test.
+// Verifies that headers with literal names (not in static table) survive
+// a full encode → decode cycle.
+static int h3_selftest_qpack_roundtrip(void) {
+    H3Header input[4];
+    // Header 0: static table hit (:status 200 uses indexed field line)
+    // We test with regular headers only for the round-trip
+    snprintf(input[0].name, sizeof(input[0].name), "content-type");
+    snprintf(input[0].value, sizeof(input[0].value), "text/plain");
+    // Header 1: literal name NOT in static table
+    snprintf(input[1].name, sizeof(input[1].name), "x-custom-header");
+    snprintf(input[1].value, sizeof(input[1].value), "custom-value-123");
+    // Header 2: another literal name
+    snprintf(input[2].name, sizeof(input[2].name), "x-request-id");
+    snprintf(input[2].value, sizeof(input[2].value), "abc-def-ghi");
+    // Header 3: static table name match with custom value
+    snprintf(input[3].name, sizeof(input[3].name), "accept");
+    snprintf(input[3].value, sizeof(input[3].value), "application/json");
+
+    // Encode
+    unsigned char buf[4096];
+    int enc_len = h3_qpack_encode_block(buf, sizeof(buf), 200, input, 4);
+    if (enc_len < 0) return -1; // encode failed
+
+    // Decode
+    H3Header output[8];
+    int dec_count = h3_qpack_decode_block(buf, (size_t)enc_len, output, 8);
+    // Expected: :status + 4 headers = 5
+    if (dec_count != 5) return -2; // header count mismatch
+
+    // Verify :status
+    if (strcmp(output[0].name, ":status") != 0) return -3;
+    if (strcmp(output[0].value, "200") != 0) return -4;
+
+    // Verify round-trip for each input header
+    // Note: the encoder outputs :status first, then the custom headers
+    for (int i = 0; i < 4; i++) {
+        if (strcmp(output[i + 1].name, input[i].name) != 0) return -(10 + i);
+        if (strcmp(output[i + 1].value, input[i].value) != 0) return -(20 + i);
+    }
+
+    // Test max_headers truncation: encode 4 headers but decode with max=2
+    // Should return 2 (not error), stopping at max_headers
+    int trunc_count = h3_qpack_decode_block(buf, (size_t)enc_len, output, 2);
+    if (trunc_count != 2) return -30; // truncation should return partial count
+
+    return 0; // all tests passed
+}
+
+// NB7-10: H3 request pseudo-header validation self-test.
+// Verifies that :scheme is required, empty values are rejected,
+// and validation matches H2 semantics.
+static int h3_selftest_request_validation(void) {
+    // Test 1: Valid request with all required pseudo-headers
+    {
+        H3Header hdrs[4];
+        snprintf(hdrs[0].name, sizeof(hdrs[0].name), ":method");
+        snprintf(hdrs[0].value, sizeof(hdrs[0].value), "GET");
+        snprintf(hdrs[1].name, sizeof(hdrs[1].name), ":path");
+        snprintf(hdrs[1].value, sizeof(hdrs[1].value), "/");
+        snprintf(hdrs[2].name, sizeof(hdrs[2].name), ":scheme");
+        snprintf(hdrs[2].value, sizeof(hdrs[2].value), "https");
+        snprintf(hdrs[3].name, sizeof(hdrs[3].name), ":authority");
+        snprintf(hdrs[3].value, sizeof(hdrs[3].value), "localhost");
+        H3RequestFields out;
+        h3_extract_request_fields(hdrs, 4, &out);
+        if (!out.ok) return -1; // valid request should succeed
+        if (out.regular_headers) free(out.regular_headers);
+    }
+
+    // Test 2: Missing :scheme should fail (NB7-10 fix)
+    {
+        H3Header hdrs[2];
+        snprintf(hdrs[0].name, sizeof(hdrs[0].name), ":method");
+        snprintf(hdrs[0].value, sizeof(hdrs[0].value), "GET");
+        snprintf(hdrs[1].name, sizeof(hdrs[1].name), ":path");
+        snprintf(hdrs[1].value, sizeof(hdrs[1].value), "/");
+        H3RequestFields out;
+        h3_extract_request_fields(hdrs, 2, &out);
+        if (out.ok) return -2; // missing :scheme should fail
+        if (out.error_reason != H3_REQ_ERR_MISSING_PSEUDO) return -3;
+    }
+
+    // Test 3: Empty :scheme value should fail
+    {
+        H3Header hdrs[3];
+        snprintf(hdrs[0].name, sizeof(hdrs[0].name), ":method");
+        snprintf(hdrs[0].value, sizeof(hdrs[0].value), "GET");
+        snprintf(hdrs[1].name, sizeof(hdrs[1].name), ":path");
+        snprintf(hdrs[1].value, sizeof(hdrs[1].value), "/");
+        snprintf(hdrs[2].name, sizeof(hdrs[2].name), ":scheme");
+        hdrs[2].value[0] = '\0'; // empty value
+        H3RequestFields out;
+        h3_extract_request_fields(hdrs, 3, &out);
+        if (out.ok) return -4; // empty :scheme should fail
+        if (out.error_reason != H3_REQ_ERR_EMPTY_PSEUDO) return -5;
+    }
+
+    // Test 4: Empty :method value should fail
+    {
+        H3Header hdrs[3];
+        snprintf(hdrs[0].name, sizeof(hdrs[0].name), ":method");
+        hdrs[0].value[0] = '\0'; // empty
+        snprintf(hdrs[1].name, sizeof(hdrs[1].name), ":path");
+        snprintf(hdrs[1].value, sizeof(hdrs[1].value), "/");
+        snprintf(hdrs[2].name, sizeof(hdrs[2].name), ":scheme");
+        snprintf(hdrs[2].value, sizeof(hdrs[2].value), "https");
+        H3RequestFields out;
+        h3_extract_request_fields(hdrs, 3, &out);
+        if (out.ok) return -6; // empty :method should fail
+        if (out.error_reason != H3_REQ_ERR_EMPTY_PSEUDO) return -7;
+    }
+
+    // Test 5: Duplicate :scheme should fail
+    {
+        H3Header hdrs[4];
+        snprintf(hdrs[0].name, sizeof(hdrs[0].name), ":method");
+        snprintf(hdrs[0].value, sizeof(hdrs[0].value), "GET");
+        snprintf(hdrs[1].name, sizeof(hdrs[1].name), ":path");
+        snprintf(hdrs[1].value, sizeof(hdrs[1].value), "/");
+        snprintf(hdrs[2].name, sizeof(hdrs[2].name), ":scheme");
+        snprintf(hdrs[2].value, sizeof(hdrs[2].value), "https");
+        snprintf(hdrs[3].name, sizeof(hdrs[3].name), ":scheme");
+        snprintf(hdrs[3].value, sizeof(hdrs[3].value), "http");
+        H3RequestFields out;
+        h3_extract_request_fields(hdrs, 4, &out);
+        if (out.ok) return -8; // duplicate :scheme should fail
+        if (out.error_reason != H3_REQ_ERR_DUPLICATE_PSEUDO) return -9;
+    }
+
+    // Test 6: Ordering violation (regular before pseudo)
+    {
+        H3Header hdrs[3];
+        snprintf(hdrs[0].name, sizeof(hdrs[0].name), "host");
+        snprintf(hdrs[0].value, sizeof(hdrs[0].value), "localhost");
+        snprintf(hdrs[1].name, sizeof(hdrs[1].name), ":method");
+        snprintf(hdrs[1].value, sizeof(hdrs[1].value), "GET");
+        snprintf(hdrs[2].name, sizeof(hdrs[2].name), ":path");
+        snprintf(hdrs[2].value, sizeof(hdrs[2].value), "/");
+        H3RequestFields out;
+        h3_extract_request_fields(hdrs, 3, &out);
+        if (out.ok) return -10; // ordering violation should fail
+        if (out.error_reason != H3_REQ_ERR_ORDERING) return -11;
+    }
+
+    // Test 7: Unknown pseudo-header should fail
+    {
+        H3Header hdrs[4];
+        snprintf(hdrs[0].name, sizeof(hdrs[0].name), ":method");
+        snprintf(hdrs[0].value, sizeof(hdrs[0].value), "GET");
+        snprintf(hdrs[1].name, sizeof(hdrs[1].name), ":path");
+        snprintf(hdrs[1].value, sizeof(hdrs[1].value), "/");
+        snprintf(hdrs[2].name, sizeof(hdrs[2].name), ":scheme");
+        snprintf(hdrs[2].value, sizeof(hdrs[2].value), "https");
+        snprintf(hdrs[3].name, sizeof(hdrs[3].name), ":protocol");
+        snprintf(hdrs[3].value, sizeof(hdrs[3].value), "websocket");
+        H3RequestFields out;
+        h3_extract_request_fields(hdrs, 4, &out);
+        if (out.ok) return -12; // unknown pseudo should fail
+        if (out.error_reason != H3_REQ_ERR_UNKNOWN_PSEUDO) return -13;
+    }
+
+    return 0; // all tests passed
+}
+
+// Combined self-test runner. Returns 0 on success, or a diagnostic code.
+static int h3_run_selftests(void) {
+    int rc;
+    rc = h3_selftest_qpack_roundtrip();
+    if (rc != 0) return 1000 + (-rc); // 1001..1030 = QPACK failures
+    rc = h3_selftest_request_validation();
+    if (rc != 0) return 2000 + (-rc); // 2001..2013 = validation failures
+    return 0;
+}
+
 // ── taida_net_h3_serve ────────────────────────────────────────────────────
 // NET7-2a/2b/2c: HTTP/3 server reference implementation.
 //
@@ -16401,6 +16582,18 @@ static H3ServeResult taida_net_h3_serve(int port, taida_val handler, int handler
                                          int64_t max_requests, int64_t timeout_ms,
                                          const char *cert_path, const char *key_path) {
     H3ServeResult fail_result = {-1};
+
+    // NB7-9/NB7-10: Run embedded self-tests to validate QPACK round-trip
+    // and H3 request pseudo-header validation at every H3 serve invocation.
+    // This ensures Phase 2 reference semantics are correct before entering
+    // the QUIC transport layer.
+    {
+        int selftest_rc = h3_run_selftests();
+        if (selftest_rc != 0) {
+            fail_result.requests = -3; // -3 = selftest failure
+            return fail_result;
+        }
+    }
 
     // NET7-2c: QUIC transport requires a QUIC library (quiche).
     // Attempt to dlopen libquiche.so; if unavailable, report clearly.
@@ -16580,6 +16773,13 @@ taida_val taida_net_http_serve(taida_val port, taida_val handler, taida_val max_
                     "is pending. The HTTP/3 protocol layer (QPACK, frame encoding, "
                     "stream state, request/response mapping, graceful shutdown) is "
                     "implemented. QUIC transport wiring will complete in Phase 2 hardening."));
+            }
+            if (h3_result.requests == -3) {
+                // NB7-9/NB7-10: H3 protocol layer self-test failed
+                return taida_async_resolved(taida_net_result_fail("H3SelftestFailed",
+                    "httpServe: HTTP/3 protocol layer self-test failed. "
+                    "QPACK encode/decode round-trip or request pseudo-header "
+                    "validation is broken."));
             }
             // Success
             taida_val h3_inner = taida_pack_new(2);
