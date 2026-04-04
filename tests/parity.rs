@@ -27383,6 +27383,193 @@ stdout(result.throw.message)
          Interpreter: {:?}, Native: {:?}",
         interp_msg, native_msg
     );
+
+    // NB7-13 note: This runtime test validates whichever path the environment
+    // reaches (H3TransportPending if libquiche.so is present, H3QuicUnavailable
+    // otherwise). It does NOT guarantee that the H3TransportPending path
+    // specifically is tested. See test_nb7_13_h3_transport_pending_source_parity
+    // for environment-independent source inspection of the pending message.
+}
+
+/// NB7-13: Source-inspection parity for H3TransportPending message.
+///
+/// The runtime test (test_nb7_12) only exercises whichever QUIC availability
+/// path the current environment reaches. On CI / review machines without
+/// libquiche.so, only H3QuicUnavailable is tested, leaving the
+/// H3TransportPending message drift undetected.
+///
+/// This test reads the source files directly and extracts the
+/// H3TransportPending message string from both backends, then asserts
+/// exact equality. This catches drift regardless of runtime environment.
+#[test]
+fn test_nb7_13_h3_transport_pending_source_parity() {
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+
+    // --- Extract from Interpreter (Rust) ---
+    let interp_path = manifest_dir.join("src/interpreter/net_eval.rs");
+    let interp_src = fs::read_to_string(&interp_path)
+        .unwrap_or_else(|e| panic!("NB7-13: cannot read {:?}: {}", interp_path, e));
+
+    // The Interpreter message is in a make_result_failure_msg("H3TransportPending", "...")
+    // block. We locate the marker and extract the message.
+    let interp_msg = extract_rust_h3_transport_pending_msg(&interp_src)
+        .unwrap_or_else(|| panic!(
+            "NB7-13: could not find H3TransportPending message in {:?}. \
+             The string literal starting with 'httpServe: HTTP/3 QUIC transport library found' \
+             must appear after '\"H3TransportPending\"' in a make_result_failure_msg call.",
+            interp_path
+        ));
+
+    // --- Extract from Native (C) ---
+    let native_path = manifest_dir.join("src/codegen/native_runtime.c");
+    let native_src = fs::read_to_string(&native_path)
+        .unwrap_or_else(|e| panic!("NB7-13: cannot read {:?}: {}", native_path, e));
+
+    let native_msg = extract_c_h3_transport_pending_msg(&native_src)
+        .unwrap_or_else(|| panic!(
+            "NB7-13: could not find H3TransportPending message in {:?}. \
+             The string literal starting with 'httpServe: HTTP/3 QUIC transport library found' \
+             must appear after '\"H3TransportPending\"' in a taida_net_result_fail call.",
+            native_path
+        ));
+
+    // --- Core assertion: exact message parity ---
+    assert_eq!(
+        interp_msg, native_msg,
+        "NB7-13: H3TransportPending message must be identical in Interpreter and Native source. \
+         Interpreter: {:?}, Native: {:?}",
+        interp_msg, native_msg
+    );
+
+    // Also verify both messages contain the expected key phrases
+    for (label, msg) in [("Interpreter", &interp_msg), ("Native", &native_msg)] {
+        assert!(
+            msg.contains("QUIC transport library found but integration is pending"),
+            "NB7-13: {} H3TransportPending message missing key phrase. Got: {:?}",
+            label, msg
+        );
+        assert!(
+            msg.contains("Phase 2 hardening"),
+            "NB7-13: {} H3TransportPending message missing 'Phase 2 hardening'. Got: {:?}",
+            label, msg
+        );
+    }
+}
+
+/// Extract the H3TransportPending user-visible message from net_eval.rs source.
+///
+/// Rust source uses line-continuation backslash + leading spaces to form a single
+/// string literal across multiple lines:
+///   "httpServe: HTTP/3 QUIC transport library found but integration \
+///    is pending. ..."
+///
+/// We find `"H3TransportPending"` then scan forward for the next string literal
+/// starting with `"httpServe:` and collect the full continued string.
+fn extract_rust_h3_transport_pending_msg(src: &str) -> Option<String> {
+    // Find the H3TransportPending kind marker
+    let marker = "\"H3TransportPending\"";
+    let marker_pos = src.find(marker)?;
+    let after_marker = &src[marker_pos + marker.len()..];
+
+    // Find the opening quote of the message string (starts with "httpServe:)
+    let msg_prefix = "\"httpServe:";
+    let msg_start = after_marker.find(msg_prefix)?;
+    let msg_region = &after_marker[msg_start..];
+
+    // Parse the Rust string literal with line continuations using byte indexing.
+    // The pattern is: "..." possibly with \<newline><spaces> continuations.
+    let bytes = msg_region.as_bytes();
+    let len = bytes.len();
+    let mut result = String::new();
+    let mut pos = 1; // skip opening '"'
+
+    while pos < len {
+        match bytes[pos] {
+            b'\\' if pos + 1 < len => {
+                let next = bytes[pos + 1];
+                if next == b'\n' {
+                    // Line continuation: skip \<newline> and leading whitespace
+                    pos += 2;
+                    while pos < len && (bytes[pos] == b' ' || bytes[pos] == b'\t') {
+                        pos += 1;
+                    }
+                    // The continuation joins with a single space
+                    if !result.ends_with(' ') {
+                        result.push(' ');
+                    }
+                } else {
+                    // Other escape — take literal next char
+                    pos += 1;
+                    result.push(bytes[pos] as char);
+                    pos += 1;
+                }
+            }
+            b'"' => break, // End of string literal
+            b => {
+                result.push(b as char);
+                pos += 1;
+            }
+        }
+    }
+
+    if result.is_empty() { None } else { Some(result) }
+}
+
+/// Extract the H3TransportPending user-visible message from native_runtime.c source.
+///
+/// C source uses adjacent string literal concatenation:
+///   "httpServe: HTTP/3 QUIC transport library found but integration "
+///   "is pending. ..."
+///
+/// We find `"H3TransportPending"` then collect all adjacent string literals
+/// that form the message.
+fn extract_c_h3_transport_pending_msg(src: &str) -> Option<String> {
+    let marker = "\"H3TransportPending\"";
+    let marker_pos = src.find(marker)?;
+    let after_marker = &src[marker_pos + marker.len()..];
+
+    // Find the start of the message string
+    let msg_prefix = "\"httpServe:";
+    let msg_start = after_marker.find(msg_prefix)?;
+    let msg_region = &after_marker[msg_start..];
+
+    // C uses adjacent string literals: "foo" "bar" -> "foobar"
+    // Collect all adjacent quoted strings until we hit ));
+    let mut result = String::new();
+    let mut pos = 0;
+    let bytes = msg_region.as_bytes();
+    let len = bytes.len();
+
+    loop {
+        // Skip whitespace/newlines to find next quote or end
+        while pos < len && (bytes[pos] == b' ' || bytes[pos] == b'\n'
+            || bytes[pos] == b'\r' || bytes[pos] == b'\t')
+        {
+            pos += 1;
+        }
+
+        if pos >= len || bytes[pos] != b'"' {
+            break; // No more string literals
+        }
+
+        // Parse one "..." literal
+        pos += 1; // skip opening "
+        while pos < len && bytes[pos] != b'"' {
+            if bytes[pos] == b'\\' && pos + 1 < len {
+                // Escape sequence — take the escaped char
+                pos += 1;
+                result.push(bytes[pos] as char);
+            } else {
+                result.push(bytes[pos] as char);
+            }
+            pos += 1;
+        }
+        if pos < len {
+            pos += 1; // skip closing "
+        }
+    }
+
+    if result.is_empty() { None } else { Some(result) }
 }
 
 /// NET7-3b: Interpreter and Native h3 without cert/key both return ProtocolError.
