@@ -27284,6 +27284,107 @@ stdout(result.throw.message)
     );
 }
 
+/// NB7-12: H3TransportPending message parity — Interpreter and Native must return
+/// the exact same user-visible message for the H3TransportPending error kind.
+/// This prevents message drift (e.g. "Phase 5 hardening" vs "Phase 2 hardening")
+/// that the broad-substring parity tests above cannot detect.
+#[test]
+fn test_nb7_12_h3_transport_pending_message_parity() {
+    let source_template = |port: u16| {
+        format!(
+            r#">>> taida-lang/net => @(httpServe)
+
+handler req =
+  @(status <= 200, headers <= @[], body <= "nb7-12")
+=> :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
+
+asyncResult <= httpServe({port}, handler, 1, 5000, 128, @(cert <= "/nonexistent_cert.pem", key <= "/nonexistent_key.pem", protocol <= "h3"))
+asyncResult ]=> result
+stdout(result.__value.kind)
+stdout("---MSG---")
+stdout(result.throw.message)
+"#,
+            port = port
+        )
+    };
+
+    // Interpreter
+    let (interp_kind, interp_msg) = {
+        let port = find_free_loopback_port();
+        let source = source_template(port);
+        let dir = setup_net_project(&source, "nb7_12_msg_parity_interp");
+        let td_path = dir.join("main.td");
+        let output = Command::new(taida_bin())
+            .arg(&td_path)
+            .output()
+            .expect("spawn interpreter");
+        let stdout = normalize(&String::from_utf8_lossy(&output.stdout));
+        cleanup_net_project(&dir);
+        let parts: Vec<&str> = stdout.splitn(2, "---MSG---").collect();
+        let kind = parts.first().unwrap_or(&"").trim().to_string();
+        let msg = parts.get(1).unwrap_or(&"").trim().to_string();
+        (kind, msg)
+    };
+
+    // Native
+    let (native_kind, native_msg) = {
+        let port = find_free_loopback_port();
+        let source = source_template(port);
+        let dir = setup_net_project(&source, "nb7_12_msg_parity_native");
+        let td_path = dir.join("main.td");
+        let bin_path = unique_temp_path("taida_nb7_12_msg_parity_native", "h3_msg", "bin");
+        let compile = Command::new(taida_bin())
+            .arg("build")
+            .arg("--target")
+            .arg("native")
+            .arg(&td_path)
+            .arg("-o")
+            .arg(&bin_path)
+            .output()
+            .expect("compile");
+        assert!(
+            compile.status.success(),
+            "NB7-12 native compile failed: {}",
+            String::from_utf8_lossy(&compile.stderr)
+        );
+        let run = Command::new(&bin_path)
+            .output()
+            .expect("run native");
+        let stdout = normalize(&String::from_utf8_lossy(&run.stdout));
+        let _ = fs::remove_file(&bin_path);
+        cleanup_net_project(&dir);
+        let parts: Vec<&str> = stdout.splitn(2, "---MSG---").collect();
+        let kind = parts.first().unwrap_or(&"").trim().to_string();
+        let msg = parts.get(1).unwrap_or(&"").trim().to_string();
+        (kind, msg)
+    };
+
+    // Both must reach the same QUIC transport gate error kind
+    assert_eq!(
+        interp_kind, native_kind,
+        "NB7-12: error kind must match. Interpreter: {:?}, Native: {:?}",
+        interp_kind, native_kind
+    );
+
+    // Both must produce non-empty messages
+    assert!(
+        !interp_msg.is_empty(),
+        "NB7-12: Interpreter message must not be empty"
+    );
+    assert!(
+        !native_msg.is_empty(),
+        "NB7-12: Native message must not be empty"
+    );
+
+    // Exact message parity — this is the core NB7-12 assertion
+    assert_eq!(
+        interp_msg, native_msg,
+        "NB7-12: H3TransportPending/H3QuicUnavailable message must be identical. \
+         Interpreter: {:?}, Native: {:?}",
+        interp_msg, native_msg
+    );
+}
+
 /// NET7-3b: Interpreter and Native h3 without cert/key both return ProtocolError.
 /// This is the h3 cert/key contract parity baseline.
 #[test]

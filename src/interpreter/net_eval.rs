@@ -4858,7 +4858,7 @@ impl Interpreter {
             "httpServe: HTTP/3 QUIC transport library found but integration \
              is pending. The HTTP/3 protocol layer (QPACK, frame encoding, \
              stream state, request/response mapping, graceful shutdown) is \
-             implemented. QUIC transport wiring will complete in Phase 5 hardening.",
+             implemented. QUIC transport wiring will complete in Phase 2 hardening.",
         );
         Ok(Some(Signal::Value(make_fulfilled_async(result))))
     }
