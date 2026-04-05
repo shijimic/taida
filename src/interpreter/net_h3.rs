@@ -1754,6 +1754,50 @@ impl H3Stream {
 
 // ── H3 Connection State ──────────────────────────────────────────────────
 
+/// Connection-level QUIC transport state (NB7-20, NB7-26, NB7-28).
+///
+/// These fields track QUIC-specific state and are **separate** from the
+/// existing 14-field handler contract. They are surfaced via `H3HandlerContext`
+/// for H3-specific requests and do not affect h1/h2 handler compatibility.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum H3ConnState {
+    /// No active QUIC stream; awaiting peer frames.
+    Idle,
+    /// One or more streams are active; peer frames being processed.
+    Active,
+    /// GOAWAY has been sent or received; new streams rejected, existing streams drain.
+    Draining,
+    /// All streams closed; connection ready for cleanup.
+    Closed,
+}
+
+/// H3-specific handler context, decoupled from the standard 14-field request pack.
+///
+/// NB7-20: H3 固有フィールド (quic_connection_id, quic_stream_id)
+/// NB7-26: 既存 14 field に影響を与えずに分離
+///
+/// This struct carries QUIC transport metadata that only applies to HTTP/3
+/// requests. Non-QUIC backends (h1, h2) leave these fields empty/default,
+/// preserving the 14-field handler contract.
+#[derive(Debug, Clone)]
+pub(crate) struct H3HandlerContext {
+    /// QUIC Connection ID bytes (opaque, length depends on transport config).
+    /// Empty for non-QUIC connections.
+    pub quic_connection_id: Vec<u8>,
+    /// QUIC stream ID used for multiplexed routing.
+    /// Default 0 for non-QUIC connections.
+    pub quic_stream_id: u64,
+}
+
+impl Default for H3HandlerContext {
+    fn default() -> Self {
+        H3HandlerContext {
+            quic_connection_id: Vec::new(),
+            quic_stream_id: 0,
+        }
+    }
+}
+
 /// HTTP/3 protocol state per connection.
 ///
 /// **NB7-22 / NB7-28: Responsibility boundary.**
@@ -1763,6 +1807,7 @@ impl H3Stream {
 /// - Settings (max_field_section_size)
 /// - GOAWAY tracking
 /// - Idle timeout (NET7-6c): H3-layer deadline tracking
+/// - QUIC transport state (NET7-7c): connection ID, stream ID, lifecycle
 ///
 /// QUIC transport state (draining, loss_detection, congestion_control)
 /// is managed by `net_transport.rs` / QUIC substrate (libquiche).
@@ -1776,6 +1821,15 @@ pub(crate) struct H3Connection {
     // NET7-6c (NB7-22): idle timeout deadline implemented in Phase 6+.
     // Set on init, checked during polling, refreshed on peer activity.
     pub idle_timeout_at: std::time::Instant,
+    // NET7-7c (NB7-20, NB7-26, NB7-28): QUIC transport state integration.
+    // Connection-level QUIC Connection ID (bytes). Empty for non-QUIC.
+    pub quic_connection_id: Vec<u8>,
+    // Current QUIC stream being processed (0 if none / non-QUIC).
+    pub current_quic_stream_id: u64,
+    // Connection lifecycle state (Idle -> Active -> Draining -> Closed)
+    pub state: H3ConnState,
+    // H3-specific handler context for the current request
+    pub handler_ctx: H3HandlerContext,
 }
 
 impl H3Connection {
@@ -1791,6 +1845,10 @@ impl H3Connection {
             goaway_sent: false,
             goaway_id: 0,
             idle_timeout_at: Self::default_idle_deadline(),
+            quic_connection_id: Vec::new(),
+            current_quic_stream_id: 0,
+            state: H3ConnState::Idle,
+            handler_ctx: H3HandlerContext::default(),
         }
     }
 
@@ -1853,6 +1911,84 @@ impl H3Connection {
 
     pub fn remove_closed_streams(&mut self) {
         self.streams.retain(|s| s.state != H3StreamState::Closed);
+    }
+
+    // ── NET7-7c: QUIC Transport State Integration ─────────────────────
+    // NET7-7a: Error scope boundary — these methods manage connection-level
+    // state. Stream-level errors are scoped per-stream; connection-level
+    // errors (state transitions, GOAWAY) apply to the entire connection.
+
+    /// Set the QUIC Connection ID from the transport layer.
+    /// The ID is opaque bytes whose length depends on the QUIC config.
+    /// NB7-20, NB7-26: stored on H3Connection, NOT on the 14-field handler pack.
+    pub fn set_quic_connection_id(&mut self, id: Vec<u8>) {
+        self.quic_connection_id = id;
+        self.handler_ctx.quic_connection_id = self.quic_connection_id.clone();
+    }
+
+    /// Return a reference to the QUIC Connection ID bytes.
+    pub fn quic_connection_id(&self) -> &[u8] {
+        &self.quic_connection_id
+    }
+
+    /// Set the current QUIC stream being processed.
+    /// Updates both the connection field and the handler context.
+    pub fn set_current_stream(&mut self, stream_id: u64) {
+        self.current_quic_stream_id = stream_id;
+        self.handler_ctx.quic_stream_id = stream_id;
+    }
+
+    /// Get the handler context for the current H3 request.
+    /// Returns a clone so the caller can embed it in the 14-field pack
+    /// without breaking the existing handler contract.
+    pub fn handler_context(&self) -> H3HandlerContext {
+        self.handler_ctx.clone()
+    }
+
+    /// Transition the connection state. Returns false if the transition
+    /// is illegal for the current state.
+    ///
+    /// State machine: Idle -> Active -> Draining -> Closed
+    /// Active -> Closed (emergency close, skip draining)
+    pub fn transition_state(&mut self, target: H3ConnState) -> bool {
+        let valid = matches!(
+            (self.state.clone(), target.clone()),
+            (H3ConnState::Idle, H3ConnState::Active)
+                | (H3ConnState::Idle, H3ConnState::Closed)
+                | (H3ConnState::Active, H3ConnState::Draining)
+                | (H3ConnState::Active, H3ConnState::Closed)
+                | (H3ConnState::Draining, H3ConnState::Closed)
+        );
+        if valid {
+            self.state = target;
+        }
+        valid
+    }
+
+    /// Check if the connection is in a state that accepts new streams.
+    /// Only Active connections accept new streams.
+    pub fn accepts_new_streams(&self) -> bool {
+        self.state == H3ConnState::Active
+    }
+
+    /// Begin graceful shutdown: send GOAWAY with the last peer stream ID,
+    /// then transition to Draining state. Returns false if already shutting down.
+    pub fn begin_shutdown(&mut self) -> bool {
+        if self.state != H3ConnState::Active || self.goaway_sent {
+            return false;
+        }
+        self.goaway_sent = true;
+        self.state = H3ConnState::Draining;
+        true
+    }
+
+    /// Complete shutdown: close all remaining streams and transition to Closed.
+    pub fn complete_shutdown(&mut self) {
+        for stream in self.streams.iter_mut() {
+            stream.state = H3StreamState::Closed;
+        }
+        self.remove_closed_streams();
+        self.state = H3ConnState::Closed;
     }
 }
 
