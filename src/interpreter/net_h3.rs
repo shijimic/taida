@@ -652,9 +652,6 @@ pub(crate) fn decode_frame_header(data: &[u8]) -> Option<(u64, u64, usize)> {
 /// **Bounded-copy discipline**: declared payload length is validated against
 /// the actual available buffer. Rejects truncated / oversized frame declarations.
 /// Returns `Some((frame_type, payload_slice))` on success, `None` on malformed input.
-/// Decode a complete H3 frame with bounds-checking (NET7-5a hardening).
-/// **Bounded-copy discipline**: declared payload length is validated against
-/// the actual available buffer. Rejects truncated / oversized frame declarations.
 /// **NB7-24**: `frame_length` is guarded against usize overflow on 32-bit systems.
 ///   64-bit onlyの場合は常に安全。32-bit systemでもusize overflowをgraceful reject。
 pub(crate) fn decode_frame(data: &[u8]) -> Option<(u64, &[u8])> {
