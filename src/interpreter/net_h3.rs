@@ -1247,15 +1247,16 @@ pub(crate) fn decode_decoder_instruction(data: &[u8]) -> Option<(H3DecoderInstru
 pub(crate) struct H3DecoderState {
     /// Known received insert count (from Insert Count Increment instructions).
     received_insert_count: u64,
-    /// Set of acknowledged stream IDs (from SectionAck) — simplified.
-    acked_streams: std::collections::HashSet<u64>,
+    /// Maximum insert count that has been acknowledged by the decoder.
+    /// Replaces a bounded HashMap (NB7-49): monotonic counter, O(1) memory.
+    acknowledged_insert_count: u64,
 }
 
 impl H3DecoderState {
     pub fn new() -> Self {
         H3DecoderState {
             received_insert_count: 0,
-            acked_streams: std::collections::HashSet::new(),
+            acknowledged_insert_count: 0,
         }
     }
 
@@ -1263,14 +1264,23 @@ impl H3DecoderState {
         self.received_insert_count
     }
 
+    /// Returns the maximum insert count that has been acknowledged.
+    pub fn acknowledged_insert_count(&self) -> u64 {
+        self.acknowledged_insert_count
+    }
+
     pub fn apply_decoder_instruction(&mut self, instruction: &H3DecoderInstruction) -> bool {
         match instruction {
             H3DecoderInstruction::SectionAck { insert_count } => {
-                self.acked_streams.insert(*insert_count);
+                // NB7-49: monotonic update (only advance, never regress)
+                if *insert_count > self.acknowledged_insert_count {
+                    self.acknowledged_insert_count = *insert_count;
+                }
                 true
             }
-            H3DecoderInstruction::StreamCancel { stream_id } => {
-                self.acked_streams.remove(stream_id);
+            H3DecoderInstruction::StreamCancel { stream_id: _stream_id } => {
+                // StreamCancel: in a simplified model, no-op on bounded state.
+                // In the full model, this would reclaim decoder references.
                 true
             }
             H3DecoderInstruction::InsertCountIncrement { increment } => {
