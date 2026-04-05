@@ -173,6 +173,12 @@ pub(crate) enum H3DecodeError {
     NonCanonical,
     /// Invalid instruction / unknown prefix.
     InvalidInstruction,
+    /// Invalid UTF-8 in string literal.
+    /// Maps to: RFC 9114 H3_ERR_GENERAL_PROTOCOL_ERROR
+    InvalidUtf8,
+    /// Idle timeout — no peer activity within timeout window.
+    /// Maps to: RFC 9114 H3_ERR_NO_ERROR (0x0100, clean idle close)
+    IdleTimeout,
 }
 
 impl std::fmt::Display for H3DecodeError {
@@ -189,6 +195,8 @@ impl std::fmt::Display for H3DecodeError {
             H3DecodeError::TooManyHeaders => write!(f, "too many header fields"),
             H3DecodeError::NonCanonical => write!(f, "non-canonical encoding"),
             H3DecodeError::InvalidInstruction => write!(f, "invalid encoder/decoder instruction"),
+            H3DecodeError::InvalidUtf8 => write!(f, "invalid UTF-8 in string literal"),
+            H3DecodeError::IdleTimeout => write!(f, "idle timeout"),
         }
     }
 }
@@ -264,7 +272,7 @@ pub(crate) fn qpack_decode_string_r(data: &[u8]) -> H3Result<(String, usize)> {
     } else {
         match std::str::from_utf8(str_data) {
             Ok(s) => Ok((s.to_string(), int_consumed + str_len)),
-            Err(_) => Err(H3DecodeError::Truncated),
+            Err(_) => Err(H3DecodeError::InvalidUtf8),
         }
     }
 }

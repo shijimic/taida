@@ -1164,7 +1164,7 @@ mod tests {
         // Set timeout to 0 — should fire immediately
         conn.set_idle_timeout(std::time::Duration::from_secs(0));
         assert!(conn.check_timeout().is_some());
-        assert!(matches!(conn.check_timeout(), Some(H3DecodeError::Truncated)));
+        assert!(matches!(conn.check_timeout(), Some(H3DecodeError::IdleTimeout)));
     }
 
     #[test]
@@ -1218,28 +1218,51 @@ mod tests {
     #[test]
     fn test_flow_control_settings_bounded_iteration() {
         // H3_MAX_SETTINGS_PAIRS = 64 prevents unbounded settings parsing.
-        // Construct 65 settings pairs and verify rejection.
-        let mut buf = vec![0u8; 256];
+        // Construct 65 settings pairs with unique unknown IDs and verify rejection.
+        let mut buf = vec![0u8; 512];
         let mut pos = 0;
-        // Write 63 valid QPACK_MAX_TABLE_CAPACITY pairs (0=0)
-        for _ in 0..63 {
-            pos += varint_encode(&mut buf[pos..], H3_SETTINGS_QPACK_MAX_TABLE_CAPACITY).unwrap();
+        // Write 64 unique unknown settings (IDs 1000..1063).
+        // Unknown settings are ignored per RFC 9114 but still count toward pair limit.
+        for i in 0..64u64 {
+            pos += varint_encode(&mut buf[pos..], 1000 + i).unwrap();
             pos += varint_encode(&mut buf[pos..], 0).unwrap();
         }
         assert!(decode_settings(&buf[..pos]).is_some(),
-            "63 pairs should be valid");
+            "64 unique pairs (H3_MAX_SETTINGS_PAIRS) should be valid");
 
-        // Add the 64th pair — should still be within limit
-        pos += varint_encode(&mut buf[pos..], H3_SETTINGS_QPACK_MAX_TABLE_CAPACITY).unwrap();
-        pos += varint_encode(&mut buf[pos..], 0).unwrap();
-        assert!(decode_settings(&buf[..pos]).is_some(),
-            "64 pairs (H3_MAX_SETTINGS_PAIRS) should be valid");
-
-        // Add a 65th pair — should be rejected
-        pos += varint_encode(&mut buf[pos..], H3_SETTINGS_QPACK_MAX_TABLE_CAPACITY).unwrap();
+        // Add a 65th pair — should be rejected (DoS mitigation)
+        pos += varint_encode(&mut buf[pos..], 2000u64).unwrap();
         pos += varint_encode(&mut buf[pos..], 0).unwrap();
         assert!(decode_settings(&buf[..pos]).is_none(),
-            "65 pairs (> H3_MAX_SETTINGS_PAIRS) must be rejected (DoS mitigation)");
+            "65 pairs (> H3_MAX_SETTINGS_PAIRS) must be rejected");
+    }
+
+    #[test]
+    fn test_settings_duplicate_rejection() {
+        // RFC 9114 §7.2.4.2: duplicate setting ID is rejected.
+        let mut buf = vec![0u8; 32];
+        let mut pos = 0;
+        pos += varint_encode(&mut buf[pos..], H3_SETTINGS_QPACK_MAX_TABLE_CAPACITY).unwrap();
+        pos += varint_encode(&mut buf[pos..], 0).unwrap();
+        pos += varint_encode(&mut buf[pos..], H3_SETTINGS_MAX_FIELD_SECTION_SIZE).unwrap();
+        pos += varint_encode(&mut buf[pos..], 65536).unwrap();
+        assert!(decode_settings(&buf[..pos]).is_some(), "3 known unique settings valid");
+
+        // Duplicate QPACK_MAX_TABLE_CAPACITY
+        let dup_pos = pos;
+        pos += varint_encode(&mut buf[pos..], H3_SETTINGS_QPACK_MAX_TABLE_CAPACITY).unwrap();
+        pos += varint_encode(&mut buf[pos..], 0).unwrap();
+        assert!(decode_settings(&buf[..pos]).is_none(), "duplicate QPACK_MAX_TABLE_CAPACITY rejected");
+
+        // Reset, duplicate MAX_FIELD_SECTION_SIZE
+        pos = 0;
+        pos += varint_encode(&mut buf[pos..], H3_SETTINGS_QPACK_MAX_TABLE_CAPACITY).unwrap();
+        pos += varint_encode(&mut buf[pos..], 0).unwrap();
+        pos += varint_encode(&mut buf[pos..], H3_SETTINGS_MAX_FIELD_SECTION_SIZE).unwrap();
+        pos += varint_encode(&mut buf[pos..], 65536).unwrap();
+        pos += varint_encode(&mut buf[pos..], H3_SETTINGS_MAX_FIELD_SECTION_SIZE).unwrap();
+        pos += varint_encode(&mut buf[pos..], 32768).unwrap();
+        assert!(decode_settings(&buf[..pos]).is_none(), "duplicate MAX_FIELD_SECTION_SIZE rejected");
     }
 
     #[test]
@@ -1386,6 +1409,7 @@ mod tests {
         conn.new_stream(2);
         conn.last_peer_stream_id = 2;
 
+        // Step 1: Active -> Draining, GOAWAY sent
         let (success, frames) = conn.shutdown();
         assert!(success);
         assert!(frames.is_some());
@@ -1398,7 +1422,15 @@ mod tests {
         let (sid, _) = varint_decode(&frames[0][hs..hs + fl as usize]).expect("decode goaway payload");
         assert_eq!(sid, 2);
 
-        // Connection should be fully closed after shutdown
+        assert_eq!(conn.state, H3ConnState::Draining);
+
+        // Step 2: Draining -> Closed (caller should wait for streams to complete first)
+        for stream in conn.streams.iter_mut() {
+            stream.state = H3StreamState::Closed;
+        }
+        let (s2, f2) = conn.shutdown();
+        assert!(s2);
+        assert!(f2.is_none());
         assert_eq!(conn.state, H3ConnState::Closed);
         assert!(conn.streams.is_empty());
     }
@@ -1408,14 +1440,21 @@ mod tests {
         let mut conn = H3Connection::new();
         conn.transition_state(H3ConnState::Active);
 
+        // Step 1: Active -> Draining
         let (s1, _) = conn.shutdown();
         assert!(s1);
+        assert!(!conn.is_closed());
+        assert_eq!(conn.state, H3ConnState::Draining);
+
+        // Step 2: Draining -> Closed
+        let (s2, _) = conn.shutdown();
+        assert!(s2);
         assert!(conn.is_closed());
 
-        // Second shutdown on Closed connection should be no-op
-        let (s2, f2) = conn.shutdown();
-        assert!(!s2);
-        assert!(f2.is_none());
+        // Third shutdown on Closed connection should be no-op
+        let (s3, f3) = conn.shutdown();
+        assert!(!s3);
+        assert!(f3.is_none());
         assert!(conn.is_closed());
     }
 
@@ -1449,10 +1488,16 @@ mod tests {
         let mut conn = H3Connection::new();
         conn.transition_state(H3ConnState::Active);
 
+        // Step 1: Active -> Draining, GOAWAY sent
         let (success, frames) = conn.shutdown();
         assert!(success);
         // Even with no streams, GOAWAY should be sent
         assert!(frames.is_some());
+        assert_eq!(conn.state, H3ConnState::Draining);
+
+        // Step 2: Draining -> Closed (no streams to wait for)
+        let (s2, _) = conn.shutdown();
+        assert!(s2);
         assert_eq!(conn.state, H3ConnState::Closed);
     }
 

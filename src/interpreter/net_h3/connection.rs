@@ -38,7 +38,7 @@ impl H3Stream {
     pub fn new(stream_id: u64) -> Self {
         H3Stream {
             stream_id,
-            state: H3StreamState::Open,
+            state: H3StreamState::Idle,
             request_headers: Vec::new(),
             request_body: Vec::new(),
         }
@@ -158,18 +158,13 @@ impl H3Connection {
 
     /// Check whether the idle timeout has elapsed.
     ///
-    /// Returns `Some(H3DecodeError::Truncated)` if the idle timeout has fired
-    /// (the specific error type is `Truncated` because an idle timeout is
-    /// conceptually "expected more data within the deadline — none arrived").
+    /// Returns `Some(H3DecodeError::IdleTimeout)` if the idle timeout has fired.
+    /// Per RFC 9114, idle timeout is a clean close: maps to `H3_ERR_NO_ERROR` (0x0100).
     /// Per RFC 9000 §10.1, idle timeout fires when no frames are received
     /// within the idle timeout period.
-    ///
-    /// NET7-6b note: this maps to RFC 9114 `H3_ERR_NO_ERROR` (0x0100) for
-    /// a clean idle close, but here we use `H3DecodeError::Truncated` as an
-    /// internal signal since `Truncated` means "expected input but didn't arrive".
     pub fn check_timeout(&self) -> Option<H3DecodeError> {
         if std::time::Instant::now() > self.idle_timeout_at {
-            Some(H3DecodeError::Truncated)
+            Some(H3DecodeError::IdleTimeout)
         } else {
             None
         }
@@ -200,7 +195,9 @@ impl H3Connection {
         if self.streams.len() >= H3_MAX_STREAMS {
             return None;
         }
-        self.streams.push(H3Stream::new(stream_id));
+        let mut s = H3Stream::new(stream_id);
+        s.state = H3StreamState::Open;
+        self.streams.push(s);
         self.streams.last_mut()
     }
 
@@ -293,54 +290,65 @@ impl H3Connection {
     }
 
     /// Complete shutdown: close all remaining streams and transition to Closed.
-    pub fn complete_shutdown(&mut self) {
+    /// Uses `transition_state()` to validate the state transition.
+    /// NB7-52/53: Previously bypassed the state machine — now properly guarded.
+    pub fn complete_shutdown(&mut self) -> bool {
+        // Close all remaining streams
         for stream in self.streams.iter_mut() {
             stream.state = H3StreamState::Closed;
         }
         self.remove_closed_streams();
-        self.state = H3ConnState::Closed;
+        // Validate transition: Draining -> Closed or Active -> Closed (emergency close)
+        let ok = self.transition_state(H3ConnState::Closed);
+        ok
     }
 
     /// Execute the full shutdown pipeline: GOAWAY -> drain -> close.
     ///
-    /// 1. If Active, send GOAWAY (begin_shutdown)
-    /// 2. Transition to Draining (already done by begin_shutdown or receive_goaway)
-    /// 3. Close all streams and transition to Closed
+    /// 1. If Active, send GOAWAY and transition to Draining
+    /// 2. If Draining, close all streams and transition to Closed
+    /// 3. If Already Closed, no-op
+    ///
+    /// Each call advances the state machine by at most one step,
+    /// allowing the caller to implement a proper drain wait between steps.
     ///
     /// Returns `(true, Some(Vec<Vec<u8>>))` with GOAWAY frame bytes if GOAWAY was sent.
-    /// Returns `(false, None)` if already shutting down or closed.
+    /// Returns `(true, None)` if state advanced without GOAWAY (Draining -> Closed).
+    /// Returns `(false, None)` if no state change was possible (already Closed).
     pub fn shutdown(&mut self) -> (bool, Option<Vec<Vec<u8>>>) {
-        if self.state == H3ConnState::Closed {
-            return (false, None);
-        }
-        let mut frames = Vec::new();
-
-        // Step 1: Send GOAWAY if not already sent and in Active state
-        if self.state == H3ConnState::Active && !self.goaway_sent {
-            let last_id = self.last_peer_stream_id;
-            self.goaway_sent = true;
-            self.state = H3ConnState::Draining;
-            if let Some(frame) = encode_goaway(last_id) {
-                frames.push(frame);
+        match self.state {
+            // Step 1: Active -> Draining, send GOAWAY if not yet sent
+            H3ConnState::Active => {
+                if self.goaway_sent {
+                    // GOAWAY sent but still Active — advance to Draining
+                    let ok = self.transition_state(H3ConnState::Draining);
+                    if !ok { return (false, None); }
+                    (true, None)
+                } else {
+                    let last_id = self.last_peer_stream_id;
+                    self.goaway_sent = true;
+                    let ok = self.transition_state(H3ConnState::Draining);
+                    if !ok { return (false, None); }
+                    let mut frames = Vec::new();
+                    if let Some(frame) = encode_goaway(last_id) {
+                        frames.push(frame);
+                    }
+                    (true, Some(frames))
+                }
             }
-        } else if self.state == H3ConnState::Active {
-            // Already sent GOAWAY somehow but still Active — fix state
-            self.state = H3ConnState::Draining;
-        }
-
-        // Step 2: Drain — close all remaining streams
-        for stream in self.streams.iter_mut() {
-            stream.state = H3StreamState::Closed;
-        }
-
-        // Step 3: Remove closed streams and transition to Closed
-        self.remove_closed_streams();
-        self.state = H3ConnState::Closed;
-
-        if frames.is_empty() {
-            (true, None)
-        } else {
-            (true, Some(frames))
+            // Step 2: Draining -> Closed (caller should have waited for streams to complete)
+            H3ConnState::Draining => {
+                for stream in self.streams.iter_mut() {
+                    stream.state = H3StreamState::Closed;
+                }
+                self.remove_closed_streams();
+                let ok = self.transition_state(H3ConnState::Closed);
+                if ok { (true, None) } else { (false, None) }
+            }
+            // Step 3: Already closed
+            H3ConnState::Closed | H3ConnState::Idle => {
+                (false, None)
+            }
         }
     }
 

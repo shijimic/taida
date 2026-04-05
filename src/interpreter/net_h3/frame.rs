@@ -194,10 +194,15 @@ pub(crate) fn encode_settings() -> Option<Vec<u8>> {
 /// Decode a SETTINGS frame payload.
 /// Returns the parsed settings on success.
 /// **NET7-5a**: bounded iteration — rejects oversized SETTINGS frames.
+/// **RFC 9114 §7.2.4.2**: duplicate settings are rejected.
 pub(crate) fn decode_settings(data: &[u8]) -> Option<H3Settings> {
     let mut settings = H3Settings::default();
     let mut pos = 0;
     let mut pair_count = 0;
+    // Duplicate detection: track which known setting IDs we've seen
+    let mut seen_qpack_max_table_capacity = false;
+    let mut seen_max_field_section_size = false;
+    let mut seen_qpack_blocked_streams = false;
     while pos < data.len() {
         // NET7-5a: bounded iteration to prevent DoS via oversized SETTINGS
         if pair_count >= H3_MAX_SETTINGS_PAIRS {
@@ -210,12 +215,25 @@ pub(crate) fn decode_settings(data: &[u8]) -> Option<H3Settings> {
         pos += vc;
         match id {
             H3_SETTINGS_QPACK_MAX_TABLE_CAPACITY => {
+                // RFC 9114 §7.2.4.2: duplicate setting ID is a connection error
+                if seen_qpack_max_table_capacity {
+                    return None;
+                }
+                seen_qpack_max_table_capacity = true;
                 // Phase 2/3: we only support static table, ignore capacity > 0
             }
             H3_SETTINGS_MAX_FIELD_SECTION_SIZE => {
+                if seen_max_field_section_size {
+                    return None;
+                }
+                seen_max_field_section_size = true;
                 settings.max_field_section_size = val;
             }
             H3_SETTINGS_QPACK_BLOCKED_STREAMS => {
+                if seen_qpack_blocked_streams {
+                    return None;
+                }
+                seen_qpack_blocked_streams = true;
                 // Phase 2/3: no blocked streams support
             }
             _ => {
