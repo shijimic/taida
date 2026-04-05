@@ -28557,11 +28557,19 @@ fn test_net7_5a_h3_non_canonical_varint_hardening_source_parity() {
     );
 
     // Native must have the canonical check inside h3_varint_decode.
-    // The check uses specific threshold comparisons (63, 16383).
+    // The check uses specific threshold comparisons (63, 16383, 1073741823).
     assert!(
         (native_src.contains("val <= 63") || native_src.contains("(63)"))
             && native_src.contains("h3_varint_decode"),
         "NET7-5a: Native h3_varint_decode must have non-canonical encoding rejection"
+    );
+
+    // NET7-5a/NB7-16: 8-byte form must also have smallest-encoding guard.
+    // Value 1073741823 (2^30-1) is the max that fits in 4 bytes, so 8-byte encoding
+    // must reject values <= 1073741823.
+    assert!(
+        native_src.contains("1073741823") || native_src.contains("1_073_741_823"),
+        "NET7-5a/NB7-16: Native h3_varint_decode must have 8-byte canonical guard (value <= 2^30-1 reject)"
     );
 
     // Native must have the guard for prefix_bits==8 in h3_qpack_decode_int.
@@ -28604,49 +28612,36 @@ fn test_net7_5a_h3_frame_bounds_hardening_source() {
     );
 }
 
-/// NET7-5b: H3 frame encoding interop parity between backends.
-/// Verifies that DATA, HEADERS, SETTINGS, and GOAWAY frames encoded by one
-/// backend can be decoded by the other with the same semantics.
-/// This is a bounded-copy structural audit: frame length must not exceed buffer.
+/// NET7-5b: H3 frame type constant parity between backends (source audit).
+/// Verifies that DATA, HEADERS, SETTINGS, and GOAWAY frame type numbers
+/// are identical across Interpreter and Native. This is a source-level audit
+/// — runtime interop is covered by QPACK selftests + native runtime gate.
 #[test]
-fn test_net7_5b_h3_frame_encode_decode_interop() {
-    use std::process::Command;
-
-    // Test 1: Native encodes a DATA frame, we verify it decodes to the same payload.
-    // We use the selftest QPACK roundtrip which exercises encode+decode in Native.
-    // If the Native decode succeeds, and the Interpreter decode also succeeds
-    // on the same wire format, interop is confirmed.
-
-    // Verify that both backends produce identical frame headers for the same input.
-    // DATA frame type = 0x00
-    let data_frame = [0x00u8, 0x03, 0x41, 0x42, 0x43]; // type=0, len=3, payload="ABC"
-    // Interpreter decode
+fn test_net7_5b_h3_frame_type_source_parity() {
     let interp_src = fs::read_to_string("src/interpreter/net_h3.rs")
         .expect("read net_h3.rs");
     let native_src = fs::read_to_string("src/codegen/native_runtime.c")
         .expect("read native_runtime.c");
 
-    // Both must have DATA frame type = 0
+    // Both must have DATA frame type = 0x00
     assert!(
         interp_src.contains("H3_FRAME_DATA: u64 = 0x00"),
-        "NET7-5b: Interpreter must define H3_FRAME_DATA = 0"
+        "NET7-5b: Interpreter must define H3_FRAME_DATA = 0x00"
     );
     assert!(
-        (native_src.contains("H3_FRAME_DATA") || native_src.contains("0x00"))
-            && native_src.contains("frame_type"),
-        "NET7-5b: Native must handle DATA frame type"
+        native_src.contains("H3_FRAME_DATA"),
+        "NET7-5b: Native must define H3_FRAME_DATA"
     );
 
-    // Headroom audit: verify frame type constants are identical
     // HEADERS = 0x01, SETTINGS = 0x04, GOAWAY = 0x07
     assert!(interp_src.contains("H3_FRAME_HEADERS: u64 = 0x01"));
     assert!(interp_src.contains("H3_FRAME_SETTINGS: u64 = 0x04"));
     assert!(interp_src.contains("H3_FRAME_GOAWAY: u64 = 0x07"));
 
-    // Native frame type constants (RFC 9114 values)
-    assert!(native_src.contains("H3_FRAME_HEADERS") || native_src.contains("0x01"));
-    assert!(native_src.contains("H3_FRAME_SETTINGS") || native_src.contains("0x04"));
-    assert!(native_src.contains("H3_FRAME_GOAWAY") || native_src.contains("0x07"));
+    // Native must also have these constants
+    assert!(native_src.contains("H3_FRAME_HEADERS"));
+    assert!(native_src.contains("H3_FRAME_SETTINGS"));
+    assert!(native_src.contains("H3_FRAME_GOAWAY"));
 }
 
 /// NET7-5b: Native runtime QPACK roundtrip succeeds — confirms that Native

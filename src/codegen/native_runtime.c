@@ -16044,7 +16044,7 @@ static int h3_varint_decode(const unsigned char *data, size_t data_len,
     switch (prefix) {
         case 1: if (val <= 63)      return -1; break;  // 2-byte encoding
         case 2: if (val <= 16383)   return -1; break;  // 4-byte encoding
-        case 3: /* 8-byte accepts anything */          break;
+        case 3: if (val <= 1073741823ULL) return -1; break;  // 8-byte encoding
         default: /* 1-byte always valid */              break;
     }
 
