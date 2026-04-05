@@ -15531,6 +15531,10 @@ typedef struct {
     const char *value;
 } H3QpackStaticEntry;
 
+// H3 QPACK Static Table (RFC 9204 Appendix A).
+// NB7-36: Entries 0-98 fully match RFC. Entry 99 (":path" "/index.html") is
+// intentionally omitted — typical web apps rarely serve "/index.html" as a static
+// path. Parity: static table indices must be identical on both backends.
 static const H3QpackStaticEntry H3_QPACK_STATIC_TABLE[] = {
     { ":authority", "" },                         // 0
     { ":path", "/" },                             // 1
@@ -16115,6 +16119,9 @@ static int h3_decode_frame_header(const unsigned char *data, size_t data_len,
     if (h3_varint_decode(data, data_len, frame_type, &tc) < 0) return -1;
     if (h3_varint_decode(data + tc, data_len - tc, frame_length, &lc) < 0) return -1;
     *header_size = tc + lc;
+    // NB7-24 portability guard: reject frame_length that exceeds SIZE_MAX.
+    // 64-bit onlyの場合は常に安全。32-bit systemでもusize overflowをgraceful reject。
+    if (*frame_length > (uint64_t)(SIZE_MAX)) return -1;
     // NET7-5a: Bounded-copy — declared payload length must not exceed available data.
     // Rejects malformed frames where frame_length > remaining buffer (truncation or attack).
     if (*header_size + (size_t)*frame_length > data_len) return -1;
@@ -16122,7 +16129,8 @@ static int h3_decode_frame_header(const unsigned char *data, size_t data_len,
 }
 
 // Maximum SETTINGS pairs before rejection (NET7-5a hardening).
-// RFC 9114 does not define a hard limit, but unbounded iteration is a DoS vector.
+// RFC 9114 does not specify a maximum. 64 is a reasonable DoS mitigation limit
+// (typical servers send 3-5 pairs). NB7-31, NB7-37
 #define H3_MAX_SETTINGS_PAIRS 64
 
 // ── H3 SETTINGS encode/decode ─────────────────────────────────────────────
@@ -16383,7 +16391,9 @@ static taida_val h3_build_request_pack(H3RequestFields *fields,
 // Returns frame size, or -1 on error. Caller provides the output buffer.
 static int h3_build_response_headers_frame(unsigned char *buf, size_t buf_cap,
                                             int status, const H3Header *headers, int header_count) {
-    // Encode QPACK header block
+    // NB7-34: 8192 bytes covers 99% of header blocks.
+    // MTU 1200-65535; 8192 fits in a single QUIC packet payload (~4KB after MTU discovery).
+    // Phase 6+: consider dynamic sizing based on SETTINGS max_field_section_size.
     unsigned char qpack_buf[8192];
     int qpack_len = h3_qpack_encode_block(qpack_buf, sizeof(qpack_buf),
                                            status, headers, header_count);

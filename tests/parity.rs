@@ -27903,10 +27903,11 @@ stdout(r.requests)
     );
 }
 
-/// NET7-4a-2: JS h1 with explicit protocol="h1.1" has parity with Interpreter
-/// after Phase 2/3 changes. Both backends serve h1 identically.
+/// NB7-14: h1.1 parity test — response status code + body exact match.
+/// Also covers NET7-4a-2: JS h1 with explicit protocol="h1.1" has parity
+/// with Interpreter after Phase 2/3 changes. Both backends serve h1 identically.
 #[test]
-fn test_net7_4a_js_h11_parity_with_interp_after_phase3() {
+fn test_nb7_14_h11_response_parity_with_interp() {
     if !node_available() {
         eprintln!("SKIP: node not available");
         return;
@@ -27932,9 +27933,9 @@ stdout(r.requests)
     // JS backend
     let port_js = find_free_loopback_port();
     let source_js = source_template(port_js);
-    let dir_js = setup_net_project(&source_js, "v7_4a_js_h11_parity");
+    let dir_js = setup_net_project(&source_js, "v7_nb7_14_h11_parity");
     let td_path_js = dir_js.join("main.td");
-    let js_path = unique_temp_path("taida_v7_4a_js", "h11_parity", "mjs");
+    let js_path = unique_temp_path("taida_v7_nb7_14", "h11_parity", "mjs");
 
     let transpile = Command::new(taida_bin())
         .arg("build")
@@ -27947,7 +27948,7 @@ stdout(r.requests)
         .expect("transpile");
     assert!(
         transpile.status.success(),
-        "NET7-4a-2: JS transpile failed: {}",
+        "NB7-14: JS transpile failed: {}",
         String::from_utf8_lossy(&transpile.stderr)
     );
 
