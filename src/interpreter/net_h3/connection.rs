@@ -270,8 +270,7 @@ impl H3Connection {
             return false;
         }
         self.goaway_sent = true;
-        self.state = H3ConnState::Draining;
-        true
+        self.transition_state(H3ConnState::Draining)
     }
 
     /// Receive a GOAWAY frame from the peer. Returns false if already received.
@@ -284,7 +283,7 @@ impl H3Connection {
         self.goaway_received = true;
         if self.state == H3ConnState::Active {
             self.goaway_id = last_stream_id;
-            self.state = H3ConnState::Draining;
+            self.transition_state(H3ConnState::Draining);
         }
         true
     }
