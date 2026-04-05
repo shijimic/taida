@@ -7581,6 +7581,7 @@ taida_val taida_os_argv(void) {
 #include <sys/uio.h>  // NET3-5c: writev() for zero-copy chunk writes
 #include <signal.h>   // NB3-5: SIGPIPE suppression for peer-close resilience
 #include <dlfcn.h>    // NET5-4a: dlopen for OpenSSL TLS support
+#include <stdbool.h>  // NET7-8a: bool type for quiche FFI
 
 // ── NET5-4a: OpenSSL dlopen TLS support ─────────────────────────────
 // Load libssl/libcrypto at runtime via dlopen — no compile-time headers needed.
@@ -16410,6 +16411,207 @@ static int h3_build_data_frame(unsigned char *buf, size_t buf_cap,
     return h3_encode_frame(buf, buf_cap, H3_FRAME_DATA, data, data_len);
 }
 
+// ── NET7-8a: libquiche dlopen FFI contract ────────────────────────────────
+// Runtime loading of libquiche.so (shared library) — no compile-time headers
+// needed. Follows the exact taida_ossl pattern at line ~7599.
+//
+// Opaque handle types — all quiche pointers are passed through without
+// dereferencing at the C level.
+
+typedef struct quiche_config quiche_config;
+typedef struct quiche_conn quiche_conn;
+
+// quiche constants
+#define QUICHE_OK 0
+#define QUICHE_H3_ALPN "\x02h3"
+
+// NET7-8b: QUIC datagram size limit.
+// QUIC long header max is ~32 bytes; remaining budget is the UDP payload.
+// RFC 9000: initial_max_udp_payload_size is 65527.
+#define QUICHE_MAX_DATAGRAM_SIZE 65527
+
+// Function pointer table for the quiche symbols required for Phase 8
+// (server-side QUIC transport + HTTP/3 dispatch).
+static struct {
+    int loaded;
+    void *libquiche_handle;
+
+    // quiche_config
+    quiche_config *(*quiche_config_new)(const uint32_t version);
+    void           (*quiche_config_free)(quiche_config *config);
+    int            (*quiche_config_load_cert_chain_from_pem_file)(quiche_config *config, const char *path);
+    int            (*quiche_config_load_priv_key_from_pem_file)(quiche_config *config, const char *path);
+    int            (*quiche_config_set_application_protos)(quiche_config *config, const uint8_t *protos, size_t protos_len);
+    void           (*quiche_config_verify_peer)(quiche_config *config, bool v);
+    void           (*quiche_config_grease)(quiche_config *config, bool value);
+    void           (*quiche_config_set_max_idle_timeout)(quiche_config *config, uint64_t v);
+
+    // quiche_accept / connection lifecycle
+    quiche_conn    *(*quiche_accept)(const uint8_t *dcid, size_t dcid_len,
+                                     const uint8_t *odcid, size_t odcid_len,
+                                     const quiche_config *config,
+                                     struct sockaddr *addr, socklen_t addr_len);
+    void            (*quiche_conn_free)(quiche_conn *conn);
+    ssize_t         (*quiche_conn_recv)(quiche_conn *conn, uint8_t *buf, size_t buf_len,
+                                        const struct sockaddr *from, socklen_t from_len);
+    ssize_t         (*quiche_conn_send)(quiche_conn *conn, uint8_t *out, size_t out_len,
+                                        struct sockaddr *to, socklen_t *to_len);
+    bool            (*quiche_conn_is_established)(const quiche_conn *conn);
+    bool            (*quiche_conn_is_closed)(const quiche_conn *conn);
+    bool            (*quiche_conn_is_draining)(const quiche_conn *conn);
+    int             (*quiche_conn_close)(quiche_conn *conn, int app, uint64_t err,
+                                         const uint8_t *reason, size_t reason_len);
+    bool            (*quiche_conn_is_in_early_data)(const quiche_conn *conn);
+
+    // stream send/recv
+    int64_t         (*quiche_conn_stream_recv)(quiche_conn *conn, uint64_t stream_id,
+                                               uint8_t *out, size_t buf_len, bool *fin);
+    int64_t         (*quiche_conn_stream_send)(quiche_conn *conn, uint64_t stream_id,
+                                               const uint8_t *buf, size_t buf_len, bool fin);
+    int             (*quiche_conn_stream_shutdown)(quiche_conn *conn, uint64_t stream_id,
+                                                  int direction, uint16_t app_error_code);
+
+    // version and accept helpers
+    uint32_t        (*quiche_version)(void);
+    int64_t         (*quiche_accept_dcid_len)(const uint8_t *buf, size_t buf_len);
+
+    // header info / connection metadata
+    // Note: dcid_len (input) and scid_len/token_len (output) are separate params
+    int             (*quiche_header_info)(const uint8_t *buf, size_t buf_len,
+                                          size_t dcid_len_input, uint32_t *version,
+                                          uint8_t *type, uint8_t *dcid, size_t *dcid_output_len,
+                                          uint8_t *scid, size_t *scid_output_len,
+                                          uint8_t *token, size_t *token_output_len);
+
+    // H3 layer (quiche-h3): HTTP/3 config and connection
+    void*           (*quiche_h3_config_new)(void);
+    void            (*quiche_h3_config_free)(void *config);
+    void*           (*quiche_h3_conn_new_with_transport)(quiche_conn *quiche_conn, void *config);
+    void            (*quiche_h3_conn_free)(void *h3_conn);
+
+    // H3 polling and I/O
+    ssize_t         (*quiche_h3_conn_poll)(void *h3_conn, uint64_t *stream_id, void *ev);
+    ssize_t         (*quiche_h3_recv)(void *h3_conn, uint64_t stream_id,
+                                      uint8_t *out, size_t out_len);
+    ssize_t         (*quiche_h3_send)(void *h3_conn, quiche_conn *quiche_conn);
+    ssize_t         (*quiche_h3_send_body)(void *h3_conn, quiche_conn *quiche_conn,
+                                           uint64_t stream_id, uint8_t *body, size_t body_len, bool fin);
+
+    // ── Optional symbols: loaded if present, NULL-checked before use. ──
+    // Version negotiation (server-side retry)
+    ssize_t         (*quiche_negotiate_version)(const uint8_t *scid, size_t scid_len,
+                                                 const uint8_t *dcid, size_t dcid_len,
+                                                 uint8_t *out, size_t out_len);
+    ssize_t         (*quiche_retry)(const uint8_t *scid, size_t scid_len,
+                                    const uint8_t *dcid, size_t dcid_len,
+                                    const uint8_t *new_scid, size_t new_scid_len,
+                                    const uint8_t *token, size_t token_len,
+                                    uint32_t version, uint8_t *out, size_t out_len);
+    // Stream priority
+    int             (*quiche_conn_stream_priority)(quiche_conn *conn, uint64_t stream_id,
+                                                    uint8_t urgency, int incremental);
+
+} taida_quiche = { 0, NULL };
+
+// Forward declaration.
+static void taida_quiche_unload(void);
+
+// Load libquiche and resolve all required symbols. Returns 1 on success, 0 on failure.
+static int taida_quiche_load(void) {
+    if (taida_quiche.loaded) return 1;
+
+    // Try common shared library names.
+    taida_quiche.libquiche_handle = dlopen("libquiche.so", RTLD_LAZY);
+    if (!taida_quiche.libquiche_handle)
+        taida_quiche.libquiche_handle = dlopen("libquiche.so.0", RTLD_LAZY);
+    if (!taida_quiche.libquiche_handle) return 0;
+
+    // Resolve symbols. Cast through void* to suppress -Wpedantic warnings.
+    #define LOAD_QSYM(name) do { \
+        *(void**)(&taida_quiche.name) = dlsym(taida_quiche.libquiche_handle, #name); \
+        if (!taida_quiche.name) { taida_quiche_unload(); return 0; } \
+    } while(0)
+
+    // Config symbols (critical)
+    LOAD_QSYM(quiche_config_new);
+    LOAD_QSYM(quiche_config_free);
+    LOAD_QSYM(quiche_config_load_cert_chain_from_pem_file);
+    LOAD_QSYM(quiche_config_load_priv_key_from_pem_file);
+    LOAD_QSYM(quiche_config_set_application_protos);
+    LOAD_QSYM(quiche_config_verify_peer);
+    LOAD_QSYM(quiche_config_grease);
+    LOAD_QSYM(quiche_config_set_max_idle_timeout);
+
+    // Connection lifecycle (critical)
+    LOAD_QSYM(quiche_accept);
+    LOAD_QSYM(quiche_accept_dcid_len);
+    LOAD_QSYM(quiche_conn_free);
+    LOAD_QSYM(quiche_conn_recv);
+    LOAD_QSYM(quiche_conn_send);
+    LOAD_QSYM(quiche_conn_is_established);
+    LOAD_QSYM(quiche_conn_is_closed);
+    LOAD_QSYM(quiche_conn_is_draining);
+    LOAD_QSYM(quiche_conn_is_in_early_data);
+    LOAD_QSYM(quiche_conn_close);
+
+    // Stream I/O (critical)
+    LOAD_QSYM(quiche_conn_stream_recv);
+    LOAD_QSYM(quiche_conn_stream_send);
+    LOAD_QSYM(quiche_conn_stream_shutdown);
+
+    // Version info
+    LOAD_QSYM(quiche_version);
+
+    // Header info
+    LOAD_QSYM(quiche_header_info);
+
+    #undef LOAD_QSYM
+
+    // ── Optional symbols: gracefully degrade if absent. ──
+    // Phase 8a: H3 layer functions are optional — the QUIC transport
+    // substrate (NET7-8a) only needs quiche_conn_* functions.
+    // H3 framing (quiche_h3_*) is wired in Phase 8b/8c/8d.
+
+    // H3 config / conn — used in Phase 8b for full QUIC+H3 integration
+    *(void**)(&taida_quiche.quiche_h3_config_new) =
+        dlsym(taida_quiche.libquiche_handle, "quiche_h3_config_new");
+    *(void**)(&taida_quiche.quiche_h3_config_free) =
+        dlsym(taida_quiche.libquiche_handle, "quiche_h3_config_free");
+    *(void**)(&taida_quiche.quiche_h3_conn_new_with_transport) =
+        dlsym(taida_quiche.libquiche_handle, "quiche_h3_conn_new_with_transport");
+    *(void**)(&taida_quiche.quiche_h3_conn_free) =
+        dlsym(taida_quiche.libquiche_handle, "quiche_h3_conn_free");
+    *(void**)(&taida_quiche.quiche_h3_conn_poll) =
+        dlsym(taida_quiche.libquiche_handle, "quiche_h3_conn_poll");
+    *(void**)(&taida_quiche.quiche_h3_recv) =
+        dlsym(taida_quiche.libquiche_handle, "quiche_h3_recv");
+    *(void**)(&taida_quiche.quiche_h3_send) =
+        dlsym(taida_quiche.libquiche_handle, "quiche_h3_send");
+    *(void**)(&taida_quiche.quiche_h3_send_body) =
+        dlsym(taida_quiche.libquiche_handle, "quiche_h3_send_body");
+
+    // Version negotiation — only needed for server-side retry/version negotiation.
+    *(void**)(&taida_quiche.quiche_negotiate_version) =
+        dlsym(taida_quiche.libquiche_handle, "quiche_negotiate_version");
+    *(void**)(&taida_quiche.quiche_retry) =
+        dlsym(taida_quiche.libquiche_handle, "quiche_retry");
+
+    // conn_stream_priority — useful for stream prioritization (optional)
+    *(void**)(&taida_quiche.quiche_conn_stream_priority) =
+        dlsym(taida_quiche.libquiche_handle, "quiche_conn_stream_priority");
+
+    taida_quiche.loaded = 1;
+    return 1;
+}
+
+static void taida_quiche_unload(void) {
+    if (taida_quiche.libquiche_handle) {
+        dlclose(taida_quiche.libquiche_handle);
+        taida_quiche.libquiche_handle = NULL;
+    }
+    taida_quiche.loaded = 0;
+}
+
 // ── H3 self-tests (NB7-9, NB7-10) ────────────────────────────────────────
 // Embedded self-tests for QPACK round-trip and H3 request validation.
 // Called from taida_net_h3_serve() to ensure Phase 2 reference semantics
@@ -16591,6 +16793,472 @@ static int h3_run_selftests(void) {
     return 0;
 }
 
+// ── NET7-8b: QUIC connection pool ─────────────────────────────────────────
+// Bounded connection pool for the UDP-based QUIC accept loop.
+// Unlike TCP (which uses thread pools with client fds), QUIC/UDP uses a
+// single socket where each packet is demultiplexed by DCID to a connection.
+//
+// bounded-copy discipline: 1 packet = at most 1 materialization.
+// No aggregate buffer above packet boundary.
+
+// H3ServeResult — return type for taida_net_h3_serve and serve_h3_loop.
+// Defined here (before the pool and loop) so serve_h3_loop can use it.
+typedef struct { int64_t requests; } H3ServeResult;
+
+#define QUIC_MAX_CONNECTIONS 256
+
+typedef struct {
+    quiche_conn   *conn;             // opaque QUIC connection (FFI handle)
+    struct sockaddr_in peer_addr;    // peer address for sendto()
+    uint64_t         dcid_hash;      // hash of DCID for fast packet routing
+    int64_t          conn_id;        // unique connection id (0-based index)
+    int              active;         // 0 = free slot, 1 = active
+    int              established;    // 0 = handshake pending, 1 = established (ALPN OK)
+} QuicConnSlot;
+
+typedef struct {
+    QuicConnSlot  slots[QUIC_MAX_CONNECTIONS];
+    int            count;           // active connection count
+    int            max_connections;
+    pthread_mutex_t mutex;
+    int64_t        request_count;
+    int64_t        max_requests;
+    int            shutdown;        // flag: 1 = shutting down
+    taida_val      handler;
+    int64_t        timeout_ms;
+    int            handler_arity;
+    const char    *cert_path;
+    const char    *key_path;
+} QuicConnPool;
+
+static void quic_pool_init(QuicConnPool *pool, int max_conn, taida_val handler,
+                           int64_t max_requests, int64_t timeout_ms, int handler_arity,
+                           const char *cert_path, const char *key_path) {
+    pthread_mutex_init(&pool->mutex, NULL);
+    pool->count = 0;
+    pool->max_connections = max_conn;
+    pool->request_count = 0;
+    pool->max_requests = max_requests;
+    pool->shutdown = 0;
+    pool->handler = handler;
+    pool->timeout_ms = timeout_ms;
+    pool->handler_arity = handler_arity;
+    pool->cert_path = cert_path;
+    pool->key_path = key_path;
+    for (int i = 0; i < QUIC_MAX_CONNECTIONS; i++) {
+        pool->slots[i].conn = NULL;
+        pool->slots[i].active = 0;
+        pool->slots[i].conn_id = -1;
+        pool->slots[i].dcid_hash = 0;
+        pool->slots[i].established = 0;
+    }
+}
+
+// NET7-8c: FNV-1a 64-bit hash for DCID-based connection routing.
+// Simple, fast, and deterministic — no dependency on external hash libs.
+static uint64_t _fnv1a_64(const uint8_t *data, size_t len) {
+    uint64_t hash = 14695981039346656037ULL; // FNV offset basis
+    for (size_t i = 0; i < len; i++) {
+        hash ^= (uint64_t)data[i];
+        hash *= 1099511628211ULL; // FNV prime
+    }
+    return hash;
+}
+
+// NET7-8c: Lookup connection slot by DCID hash.
+// Returns slot index (>=0) if found, -1 otherwise.
+static int quic_pool_find_by_dcid(QuicConnPool *pool, uint64_t dcid_hash) {
+    pthread_mutex_lock(&pool->mutex);
+    for (int i = 0; i < QUIC_MAX_CONNECTIONS; i++) {
+        if (pool->slots[i].active && pool->slots[i].dcid_hash == dcid_hash) {
+            pthread_mutex_unlock(&pool->mutex);
+            return i;
+        }
+    }
+    pthread_mutex_unlock(&pool->mutex);
+    return -1;
+}
+
+// NET7-8c: Connection maintenance pass.
+// Closes connections that are fully closed or draining.
+// Called periodically during the I/O event loop.
+static void h3_conn_maintenance(QuicConnPool *pool) {
+    pthread_mutex_lock(&pool->mutex);
+    for (int i = 0; i < QUIC_MAX_CONNECTIONS; i++) {
+        if (!pool->slots[i].active) continue;
+        if (!pool->slots[i].conn) continue;
+
+        // Check closed/draining state.
+        if (taida_quiche.quiche_conn_is_closed(pool->slots[i].conn) ||
+            taida_quiche.quiche_conn_is_draining(pool->slots[i].conn)) {
+            taida_quiche.quiche_conn_free(pool->slots[i].conn);
+            pool->slots[i].conn = NULL;
+            pool->slots[i].active = 0;
+            pool->slots[i].conn_id = -1;
+            pool->slots[i].dcid_hash = 0;
+            pool->slots[i].established = 0;
+            pool->count--;
+        }
+    }
+    pthread_mutex_unlock(&pool->mutex);
+}
+
+// Find or create a slot for a connection identified by its DCID hash.
+// Returns slot index, or -1 if pool is full.
+static int quic_pool_find_or_create(QuicConnPool *pool, quiche_conn *conn,
+                                     const struct sockaddr_in *peer,
+                                     uint64_t dcid_hash) {
+    pthread_mutex_lock(&pool->mutex);
+
+    // Find a free slot.
+    int free_slot = -1;
+    for (int i = 0; i < QUIC_MAX_CONNECTIONS; i++) {
+        if (!pool->slots[i].active) {
+            free_slot = i;
+            break;
+        }
+    }
+
+    if (free_slot < 0) {
+        // Pool is full — bounded rejection, no allocation.
+        pthread_mutex_unlock(&pool->mutex);
+        return -1;
+    }
+
+    pool->slots[free_slot].conn = conn;
+    pool->slots[free_slot].peer_addr = *peer;
+    pool->slots[free_slot].conn_id = (int64_t)free_slot;
+    pool->slots[free_slot].dcid_hash = dcid_hash;
+    pool->slots[free_slot].active = 1;
+    pool->slots[free_slot].established = 0;
+    pool->count++;
+
+    pthread_mutex_unlock(&pool->mutex);
+    return free_slot;
+}
+
+static void quic_pool_close_slot(QuicConnPool *pool, int slot_idx) {
+    pthread_mutex_lock(&pool->mutex);
+    if (slot_idx >= 0 && slot_idx < QUIC_MAX_CONNECTIONS && pool->slots[slot_idx].active) {
+        if (pool->slots[slot_idx].conn && taida_quiche.quiche_conn_free) {
+            taida_quiche.quiche_conn_free(pool->slots[slot_idx].conn);
+        }
+        pool->slots[slot_idx].conn = NULL;
+        pool->slots[slot_idx].active = 0;
+        pool->slots[slot_idx].conn_id = -1;
+        pool->slots[slot_idx].dcid_hash = 0;
+        pool->slots[slot_idx].established = 0;
+        pool->count--;
+    }
+    pthread_mutex_unlock(&pool->mutex);
+}
+
+static void quic_pool_destroy(QuicConnPool *pool) {
+    // Close all remaining connections.
+    for (int i = 0; i < QUIC_MAX_CONNECTIONS; i++) {
+        if (pool->slots[i].active && pool->slots[i].conn) {
+            taida_quiche.quiche_conn_free(pool->slots[i].conn);
+        }
+    }
+    pthread_mutex_destroy(&pool->mutex);
+}
+
+// Check if connection count is exhausted (matching h1/h2 pattern).
+static int quic_pool_requests_exhausted(QuicConnPool *pool) {
+    return (pool->max_requests > 0 && pool->request_count >= pool->max_requests) ? 1 : 0;
+}
+
+// ── NET7-8b: serve_h3_loop — UDP socket + quiche_accept ──────────────────
+//
+// This is the entry point for the QUIC transport accept loop.
+// It binds a UDP socket to 127.0.0.1:port and feeds incoming packets to
+// quiche_accept(). Established connections are stored in the connection pool.
+//
+// Bounded-copy discipline: each recvfrom() packet is fed directly to
+// quiche_accept/quiche_conn_recv without intermediate buffering.
+// 1 packet = at most 1 materialization.
+//
+// Returns H3ServeResult with request count on success, or -1 on failure.
+static H3ServeResult serve_h3_loop(int port, taida_val handler, int handler_arity,
+                                    int64_t max_requests, int64_t timeout_ms,
+                                    const char *cert_path, const char *key_path) {
+    H3ServeResult fail_result = {-1};
+
+    // Suppress SIGPIPE (same contract as h1/h2).
+    signal(SIGPIPE, SIG_IGN);
+
+    // Bind UDP socket to 127.0.0.1:port (same loopback contract as h1/h2).
+    int udp_fd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (udp_fd < 0) {
+        return fail_result;
+    }
+
+    int opt = 1;
+    setsockopt(udp_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr);
+    addr.sin_port = htons((unsigned short)port);
+
+    if (bind(udp_fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+        close(udp_fd);
+        return fail_result;
+    }
+
+    // Set a receive timeout so we can periodically check shutdown/max_requests.
+    {
+        struct timeval tv;
+        tv.tv_sec = 0;
+        tv.tv_usec = 100000; // 100ms — matches h1/h2 accept timeout
+        setsockopt(udp_fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    }
+
+    // Create quiche_config.
+    uint32_t version = taida_quiche.quiche_version();
+    quiche_config *config = taida_quiche.quiche_config_new(version);
+    if (!config) {
+        close(udp_fd);
+        return fail_result;
+    }
+
+    // NB7-3: cert/key loaded into quiche config (TLS 1.3 is mandatory for QUIC).
+    if (taida_quiche.quiche_config_load_cert_chain_from_pem_file(config, cert_path) != 0) {
+        taida_quiche.quiche_config_free(config);
+        close(udp_fd);
+        return fail_result;
+    }
+    if (taida_quiche.quiche_config_load_priv_key_from_pem_file(config, key_path) != 0) {
+        taida_quiche.quiche_config_free(config);
+        close(udp_fd);
+        return fail_result;
+    }
+
+    // ALPN h3 only — matching design contract (no silent fallback).
+    unsigned char alpn[] = QUICHE_H3_ALPN; // "\x02h3"
+    if (taida_quiche.quiche_config_set_application_protos(config, alpn, sizeof(alpn) - 1) != 0) {
+        taida_quiche.quiche_config_free(config);
+        close(udp_fd);
+        return fail_result;
+    }
+
+    // TLS verification and grease (matching quiche server defaults).
+    taida_quiche.quiche_config_verify_peer(config, 0);
+    taida_quiche.quiche_config_grease(config, 1);
+
+    // Idle timeout — bounded to prevent connection leaks.
+    uint64_t idle_timeout = (timeout_ms > 0) ? (uint64_t)timeout_ms : 30000; // default 30s
+    taida_quiche.quiche_config_set_max_idle_timeout(config, idle_timeout);
+
+    // Initialize connection pool.
+    int max_conn = (QUIC_MAX_CONNECTIONS < 256) ? QUIC_MAX_CONNECTIONS : 256;
+    QuicConnPool pool;
+    quic_pool_init(&pool, max_conn, handler, max_requests, timeout_ms, handler_arity,
+                   cert_path, key_path);
+
+    // ── NET7-8c: QUIC connection I/O event loop ─────────────────────────
+    //
+    // Unified accept + I/O processing loop. Each incoming datagram is
+    // routed by DCID hash to either:
+    //   - Known connection: quiche_conn_recv() → established check → send
+    //   - Unknown DCID: quiche_accept() → quiche_conn_recv() → send → pool
+    //
+    // Bounded-copy discipline: 1 packet = at most 1 materialization.
+    // No intermediate buffer between recvfrom() and quiche_conn_recv().
+
+    unsigned char recv_buf[QUICHE_MAX_DATAGRAM_SIZE]; // 65527 (QUIC MTU budget)
+    unsigned char send_buf[QUICHE_MAX_DATAGRAM_SIZE]; // bounded: matches recv_buf
+    struct sockaddr_in peer_addr;
+    socklen_t peer_len;
+    struct sockaddr_in send_addr;
+    socklen_t send_addr_len;
+    H3ServeResult serve_result = {0};
+
+    for (;;) {
+        // Check shutdown and request limit before processing more.
+        pthread_mutex_lock(&pool.mutex);
+        int do_shutdown = pool.shutdown || quic_pool_requests_exhausted(&pool);
+        pthread_mutex_unlock(&pool.mutex);
+
+        if (do_shutdown) {
+            break;
+        }
+
+        peer_len = sizeof(peer_addr);
+        ssize_t rlen = recvfrom(udp_fd, recv_buf, sizeof(recv_buf), 0,
+                               (struct sockaddr*)&peer_addr, &peer_len);
+
+        if (rlen < 0) {
+            if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {
+                // Timeout — periodic maintenance pass.
+                h3_conn_maintenance(&pool);
+                continue;
+            }
+            // Fatal recvfrom error — break and clean up.
+            break;
+        }
+
+        // bounded-copy: recv_buf is the only materialization of this packet.
+        // No intermediate buffer.
+
+        // Parse QUIC long header to extract DCID for connection routing.
+        uint32_t pkt_version = 0;
+        uint8_t pkt_type = 0;
+        uint8_t pkt_dcid[20];
+        size_t pkt_dcid_len = 0;
+        uint8_t pkt_scid[20];
+        size_t pkt_scid_len = 0;
+        uint8_t pkt_token[20];
+        size_t pkt_token_len = 0;
+
+        int hdr_ok = taida_quiche.quiche_header_info(
+            recv_buf, (size_t)rlen, 5,  // 5 byte DCID length hint for long header
+            &pkt_version, &pkt_type,
+            pkt_dcid, &pkt_dcid_len,
+            pkt_scid, &pkt_scid_len,
+            pkt_token, &pkt_token_len
+        );
+
+        if (hdr_ok != 0) {
+            // Cannot parse header — skip packet (malformed or non-QUIC).
+            continue;
+        }
+
+        if (pkt_dcid_len == 0) {
+            // No DCID — malformed packet, skip.
+            continue;
+        }
+
+        // Compute FNV-1a hash of the DCID for fast pool lookup.
+        uint64_t dcid_hash = _fnv1a_64(pkt_dcid, pkt_dcid_len);
+
+        // Look up existing connection by DCID hash.
+        int slot_idx = quic_pool_find_by_dcid(&pool, dcid_hash);
+
+        if (slot_idx >= 0) {
+            // ── Known connection: feed to quiche_conn_recv() ────
+            QuicConnSlot *slot = &pool.slots[slot_idx];
+
+            if (!slot->conn || !slot->active) {
+                // Slot metadata is inconsistent — skip this packet.
+                continue;
+            }
+
+            // Check if connection is fully closed — free the slot.
+            if (taida_quiche.quiche_conn_is_closed(slot->conn)) {
+                quic_pool_close_slot(&pool, slot_idx);
+                continue;
+            }
+
+            // If draining, close the slot and clean up.
+            if (taida_quiche.quiche_conn_is_draining(slot->conn)) {
+                quic_pool_close_slot(&pool, slot_idx);
+                continue;
+            }
+
+            // Feed datagram to the QUIC connection.
+            ssize_t recv_rc = taida_quiche.quiche_conn_recv(
+                slot->conn,
+                recv_buf, (size_t)rlen,
+                (struct sockaddr*)&peer_addr, peer_len
+            );
+
+            if (recv_rc < 0 && recv_rc != -2) {
+                // Fatal recv error — close the connection.
+                // -2 = QUICHE_ERR_DONE (no more data to process)
+                quic_pool_close_slot(&pool, slot_idx);
+                continue;
+            }
+
+            // Connection established → verify ALPN h3.
+            if (taida_quiche.quiche_conn_is_established(slot->conn)) {
+                slot->established = 1;
+
+                // Phase 8c: Connection state validated.
+                // Phase 8d will add stream-level H3 dispatch here.
+            }
+
+            // Write any pending outbound datagrams.
+            ssize_t send_rc = taida_quiche.quiche_conn_send(
+                slot->conn,
+                send_buf, sizeof(send_buf),
+                (struct sockaddr*)&send_addr, &send_addr_len
+            );
+
+            if (send_rc > 0) {
+                ssize_t n = sendto(udp_fd, send_buf, (size_t)send_rc, 0,
+                                 (struct sockaddr*)&send_addr, send_addr_len);
+                if (n < 0) {
+                    // Send failed — connection may be unreachable.
+                    quic_pool_close_slot(&pool, slot_idx);
+                    continue;
+                }
+            }
+        } else {
+            // ── Unknown DCID: new connection attempt ────
+            quiche_conn *conn = taida_quiche.quiche_accept(
+                pkt_dcid, pkt_dcid_len,           // DCID from packet header
+                NULL, 0,                           // odcid (not needed for server)
+                config,                            // TLS + protocol config
+                (struct sockaddr*)&peer_addr,
+                peer_len
+            );
+
+            if (!conn) {
+                // Accept failed — invalid initial, version mismatch, etc.
+                continue;
+            }
+
+            // First recv() to process the initial packet on the new connection.
+            ssize_t recv_rc = taida_quiche.quiche_conn_recv(
+                conn,
+                recv_buf, (size_t)rlen,
+                (struct sockaddr*)&peer_addr, peer_len
+            );
+
+            if (recv_rc < 0 && recv_rc != -2) {
+                // Fatal recv error on new connection — free it.
+                taida_quiche.quiche_conn_free(conn);
+                continue;
+            }
+
+            // Send initial handshake response if quiche produced data.
+            ssize_t send_rc = taida_quiche.quiche_conn_send(
+                conn,
+                send_buf, sizeof(send_buf),
+                (struct sockaddr*)&send_addr, &send_addr_len
+            );
+
+            if (send_rc > 0) {
+                sendto(udp_fd, send_buf, (size_t)send_rc, 0,
+                       (struct sockaddr*)&send_addr, send_addr_len);
+            }
+
+            // Add to connection pool.
+            int slot = quic_pool_find_or_create(&pool, conn, &peer_addr, dcid_hash);
+            if (slot < 0) {
+                // Pool full — close the connection immediately.
+                taida_quiche.quiche_conn_free(conn);
+                continue;
+            }
+        }
+
+        // Periodic maintenance (bounded-cost: scans 256 slots max).
+        h3_conn_maintenance(&pool);
+    }
+
+    // ── Shutdown: close all connections ───────────────────────────────────
+    quic_pool_destroy(&pool);
+
+    serve_result.requests = pool.request_count;
+
+    taida_quiche.quiche_config_free(config);
+    close(udp_fd);
+
+    return serve_result;
+}
+
 // ── taida_net_h3_serve ────────────────────────────────────────────────────
 // NET7-2a/2b/2c: HTTP/3 server reference implementation.
 //
@@ -16612,7 +17280,7 @@ static int h3_run_selftests(void) {
 //   - Graceful shutdown: GOAWAY → drain → close
 //   - Bounded-copy discipline: 1 packet = at most 1 materialization
 //   - No aggregate buffer above packet boundary
-typedef struct { int64_t requests; } H3ServeResult;
+// (H3ServeResult typedef moved before NET7-8b pool struct, see above)
 
 static H3ServeResult taida_net_h3_serve(int port, taida_val handler, int handler_arity,
                                          int64_t max_requests, int64_t timeout_ms,
@@ -16631,29 +17299,19 @@ static H3ServeResult taida_net_h3_serve(int port, taida_val handler, int handler
         }
     }
 
-    // NET7-2c: QUIC transport requires a QUIC library (quiche).
-    // Attempt to dlopen libquiche.so; if unavailable, report clearly.
+    // NET7-8a: QUIC transport requires a QUIC library (quiche).
+    // Use the taida_quiche FFI contract (dlopen + dlsym) instead of
+    // raw dlopen — this mirrors the taida_ossl pattern for TLS.
     //
-    // Phase 2 reference: The H3 protocol layer (QPACK, frames, stream state,
-    // request/response mapping, graceful shutdown) is fully implemented above.
-    // The QUIC transport binding is gated on quiche availability.
+    // If quiche (libquiche.so) is not available at runtime, returns
+    // H3QuicUnavailable (-1) — analogous to how TLS returns TlsError
+    // when OpenSSL is missing.
     //
-    // This is analogous to how h1/h2 TLS requires OpenSSL via dlopen:
-    // the protocol semantics are in native_runtime.c, the crypto/transport
-    // library is loaded at runtime.
-    void *quiche_handle = dlopen("libquiche.so", RTLD_LAZY);
-    if (!quiche_handle) {
-        quiche_handle = dlopen("libquiche.so.0", RTLD_LAZY);
-    }
-    if (!quiche_handle) {
-        // QUIC transport library not available.
-        // All H3 protocol semantics (QPACK, frames, streams, request mapping,
-        // graceful shutdown) are implemented and tested. Only the QUIC
-        // transport binding requires the external library.
-        return fail_result;
-    }
-
-    // Phase 2 reference: quiche is available. The full H3 serve loop would:
+    // The H3 protocol layer (QPACK, frames, stream state, request/response
+    // mapping, graceful shutdown) is fully implemented above. The QUIC
+    // transport binding is gated on quiche availability.
+    //
+    // If taida_quiche_load() succeeds, the full H3 serve loop would:
     //   1. Create quiche_config with cert/key and TLS 1.3
     //   2. Bind UDP socket to 127.0.0.1:port
     //   3. Accept QUIC connections (quiche_accept / quiche_conn_new_with_tls)
@@ -16667,23 +17325,23 @@ static H3ServeResult taida_net_h3_serve(int port, taida_val handler, int handler
     //      g. Encode QPACK response headers → send HEADERS + DATA frames
     //      h. Track request count against max_requests
     //   5. On shutdown: send GOAWAY, drain in-flight streams, close connections
-    //
-    // The protocol layer above (QPACK encode/decode, H3 frame encode/decode,
-    // stream state management, request/response mapping) is complete and
-    // ready for integration with the quiche transport API.
-    //
-    // For Phase 2 reference validation, the QUIC transport integration
-    // is deferred to when quiche is available on the target system.
-    // The H3 semantics are validated through unit tests of QPACK, frame
-    // encoding, request extraction, and response building.
 
-    dlclose(quiche_handle);
+    if (!taida_quiche_load()) {
+        // QUIC transport library not available.
+        // All H3 protocol semantics (QPACK, frames, streams, request mapping,
+        // graceful shutdown) are implemented and tested. Only the QUIC
+        // transport binding requires the external library.
+        return fail_result;
+    }
 
-    // Phase 2: Return a sentinel indicating quiche was found but full
-    // integration is pending QUIC transport wiring.
-    // TODO(Phase 2 hardening): Wire quiche transport loop.
-    fail_result.requests = -2; // -2 = quiche available but not yet wired
-    return fail_result;
+    // NET7-8b/8c: Wire the QUIC transport I/O event loop.
+    // 8b: UDP socket accept loop + quiche_accept (DONE)
+    // 8c: QUIC connection I/O event loop (recv/send/established) (DONE)
+    // 8d: QUIC stream dispatch → H3 decode → handler → response encode — deferred
+    H3ServeResult loop_result = serve_h3_loop(port, handler, handler_arity,
+                                               max_requests, timeout_ms,
+                                               cert_path, key_path);
+    return loop_result;
 }
 
 // ── httpServe(port, handler, maxRequests, timeoutMs, maxConnections) ──

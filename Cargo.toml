@@ -41,6 +41,9 @@ cranelift-object = { version = "0.129.1", optional = true }
 target-lexicon = { version = "0.13", optional = true }
 
 [dev-dependencies]
+h3 = "0.0.8"
+h3-quinn = "0.0.10"
+quinn = { version = "0.11", features = ["ring", "rustls-ring"] }
 rcgen = "0.13"
 
 [profile.dev]

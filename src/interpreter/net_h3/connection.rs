@@ -192,6 +192,11 @@ impl H3Connection {
     }
 
     pub fn new_stream(&mut self, stream_id: u64) -> Option<&mut H3Stream> {
+        // NB7-63: Reject new streams in Draining/Closed states.
+        // Only Active connections accept new streams per RFC 9114.
+        if !self.accepts_new_streams() {
+            return None;
+        }
         if self.streams.len() >= H3_MAX_STREAMS {
             return None;
         }
