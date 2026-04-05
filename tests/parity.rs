@@ -9321,6 +9321,28 @@ fn send_h1_get_and_assert(
     resp_str
 }
 
+/// Helper: extract (status_code, body) from a raw HTTP/1.1 response string.
+/// Used by response-parity tests to compare semantically meaningful parts
+/// while ignoring backend-specific headers (Date, Server, etc.).
+fn extract_h1_status_and_body(raw: &str) -> (String, String) {
+    // Status line: "HTTP/1.1 200 OK\r\n..."
+    let status_code = raw
+        .lines()
+        .next()
+        .and_then(|line| line.split_whitespace().nth(1))
+        .unwrap_or("")
+        .to_string();
+    // Body: everything after the first blank line (\r\n\r\n)
+    let body = if let Some(idx) = raw.find("\r\n\r\n") {
+        raw[idx + 4..].to_string()
+    } else if let Some(idx) = raw.find("\n\n") {
+        raw[idx + 2..].to_string()
+    } else {
+        String::new()
+    };
+    (status_code, body)
+}
+
 /// NET2-4e: Keep-alive parity — Interpreter vs JS.
 /// Sends 2 requests on a single TCP connection, verifies both get responses.
 #[test]
@@ -27936,7 +27958,7 @@ stdout(r.requests)
         .spawn()
         .expect("spawn node");
 
-    let _resp_js = send_h1_get_and_assert(port_js, "NET7-4a-2 js", "v7-explicit-h11", &[]);
+    let resp_js = send_h1_get_and_assert(port_js, "NET7-4a-2 js", "v7-explicit-h11", &[]);
 
     let output_js = child_js.wait_with_output().expect("wait for node");
     assert!(
@@ -27961,7 +27983,7 @@ stdout(r.requests)
         .spawn()
         .expect("spawn interpreter");
 
-    let _resp_interp = send_h1_get_and_assert(port_interp, "NET7-4a-2 interp", "v7-explicit-h11", &[]);
+    let resp_interp = send_h1_get_and_assert(port_interp, "NET7-4a-2 interp", "v7-explicit-h11", &[]);
 
     let output_interp = child_interp.wait_with_output().expect("wait for interp");
     assert!(
@@ -27972,6 +27994,7 @@ stdout(r.requests)
     let stdout_interp = normalize(&String::from_utf8_lossy(&output_interp.stdout));
     cleanup_net_project(&dir_interp);
 
+    // Request count parity
     assert_eq!(
         stdout_js, "1",
         "NET7-4a-2 js: expected requests=1, got: {:?}",
@@ -27987,6 +28010,24 @@ stdout(r.requests)
         "NET7-4a-2: JS and Interpreter must produce identical h1.1 output. \
          JS={:?} Interp={:?}",
         stdout_js, stdout_interp
+    );
+
+    // Response parity: compare status code and body between backends.
+    // Headers may differ (Date, Server, etc.) so we compare the semantically
+    // meaningful parts: status code and response body.
+    let (status_js, body_js) = extract_h1_status_and_body(&resp_js);
+    let (status_interp, body_interp) = extract_h1_status_and_body(&resp_interp);
+    assert_eq!(
+        status_js, status_interp,
+        "NET7-4a-2: JS and Interpreter must return the same HTTP status code. \
+         JS={:?} Interp={:?}",
+        status_js, status_interp
+    );
+    assert_eq!(
+        body_js, body_interp,
+        "NET7-4a-2: JS and Interpreter must return the same response body. \
+         JS={:?} Interp={:?}",
+        body_js, body_interp
     );
 }
 
@@ -28102,16 +28143,94 @@ stdout(result.throw.message)
     let _ = fs::remove_file(&js_path);
     cleanup_net_project(&dir);
 
-    // Pin the exact message content
-    assert!(
-        stdout.contains("httpServe: HTTP/3 (protocol: \"h3\") is not supported on the JS backend"),
-        "NET7-4b-1: expected exact H3Unsupported message prefix, got: {:?}",
-        stdout
+    // Pin the exact message content — full string equality, not substring match.
+    // Source of truth: src/js/runtime.rs H3Unsupported branch.
+    let expected_msg = "httpServe: HTTP/3 (protocol: \"h3\") is not supported on the JS backend. \
+                        Use the native or interpreter backend for HTTP/3 support.";
+    assert_eq!(
+        stdout, expected_msg,
+        "NET7-4b-1: JS H3Unsupported message must match exact contract. \
+         expected: {:?}, got: {:?}",
+        expected_msg, stdout
     );
+}
+
+/// NB7-15 source-inspection: extract the H3Unsupported message from JS runtime
+/// source and verify it matches the contract string pinned by test_net7_4b above.
+/// This catches drift between the runtime and the test without running Node.
+#[test]
+fn test_nb7_15_js_h3_unsupported_source_inspection() {
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let js_runtime_path = manifest_dir.join("src/js/runtime.rs");
+    let js_src = fs::read_to_string(&js_runtime_path)
+        .unwrap_or_else(|e| panic!("NB7-15: cannot read {:?}: {}", js_runtime_path, e));
+
+    // The JS runtime has exactly one H3Unsupported message, defined as:
+    //   __taida_net_result_fail('H3Unsupported',
+    //     'httpServe: HTTP/3 ...')
+    // We locate "'H3Unsupported'" and then extract the next JS string literal.
+    let marker = "'H3Unsupported'";
+    let marker_pos = js_src.find(marker)
+        .unwrap_or_else(|| panic!(
+            "NB7-15: could not find {:?} in {:?}", marker, js_runtime_path
+        ));
+    let after_marker = &js_src[marker_pos + marker.len()..];
+
+    // Find the opening quote of the message string (starts with 'httpServe:)
+    let msg_prefix = "'httpServe:";
+    let msg_start = after_marker.find(msg_prefix)
+        .unwrap_or_else(|| panic!(
+            "NB7-15: could not find message string starting with {:?} after H3Unsupported marker \
+             in {:?}", msg_prefix, js_runtime_path
+        ));
+    let msg_region = &after_marker[msg_start..];
+
+    // Parse the JS string: may span multiple lines with ' + \n' concatenation.
+    // The actual source uses 'part1' +\n 'part2' pattern.
+    let mut result = String::new();
+    let bytes = msg_region.as_bytes();
+    let len = bytes.len();
+    let mut pos = 0;
+
+    loop {
+        // Skip whitespace to find next quote
+        while pos < len && (bytes[pos] == b' ' || bytes[pos] == b'\n'
+            || bytes[pos] == b'\r' || bytes[pos] == b'\t' || bytes[pos] == b'+')
+        {
+            pos += 1;
+        }
+        if pos >= len || bytes[pos] != b'\'' {
+            break;
+        }
+        // Parse one '...' literal
+        pos += 1; // skip opening '
+        while pos < len && bytes[pos] != b'\'' {
+            if bytes[pos] == b'\\' && pos + 1 < len {
+                result.push(bytes[pos + 1] as char);
+                pos += 2;
+            } else {
+                result.push(bytes[pos] as char);
+                pos += 1;
+            }
+        }
+        if pos < len {
+            pos += 1; // skip closing '
+        }
+    }
+
     assert!(
-        stdout.contains("Use the native or interpreter backend for HTTP/3 support"),
-        "NET7-4b-1: expected guidance suffix in message, got: {:?}",
-        stdout
+        !result.is_empty(),
+        "NB7-15: extracted empty H3Unsupported message from {:?}", js_runtime_path
+    );
+
+    // The contract-pinned expected message (must match test_net7_4b above)
+    let expected_msg = "httpServe: HTTP/3 (protocol: \"h3\") is not supported on the JS backend. \
+                        Use the native or interpreter backend for HTTP/3 support.";
+    assert_eq!(
+        result, expected_msg,
+        "NB7-15: JS runtime H3Unsupported message has drifted from contract. \
+         source: {:?}, contract: {:?}",
+        result, expected_msg
     );
 }
 
