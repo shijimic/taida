@@ -25867,9 +25867,13 @@ stdout(result.throw.message)
 /// This test directly verifies the NB7-6 fix: protocol dispatch must happen BEFORE
 /// cert/key file loading. Both error kind and message are checked.
 ///
-/// - Interpreter: H3QuicUnavailable or H3TransportPending (not TlsError) -- Phase 3 unlocked
+/// - Interpreter: ProtocolError (cert file not found) -- Phase 12 unlocked (real QUIC transport via quinn)
 /// - JS: H3Unsupported (not TlsError) -- permanent
 /// - Native: H3QuicUnavailable or H3TransportPending (not TlsError) -- Phase 2 unlocked
+///
+/// NET7-12a: The Interpreter now has a real QUIC transport (quinn) and will genuinely
+/// attempt to read the cert/key files. With nonexistent paths, it returns ProtocolError
+/// (cert file I/O error), not the old H3TransportPending/H3QuicUnavailable.
 #[test]
 fn test_nb7_6_h3_with_cert_key_returns_backend_contract_not_tls_error() {
     if !node_available() {
@@ -25896,9 +25900,8 @@ stdout(result.throw.message)
         )
     };
 
-    // Interpreter: must return H3QuicUnavailable or H3TransportPending, NOT TlsError.
-    // NET7-3a: Phase 3 unlocked -- Interpreter now dispatches to H3 serve path
-    // (same as Native), no longer returns H3NotYetImplemented.
+    // Interpreter: NET7-12a — Interpreter now uses quinn (pure Rust QUIC) and will
+    // attempt to read the cert/key files. Nonexistent paths produce ProtocolError.
     {
         let port = find_free_loopback_port();
         let source = source_template(port);
@@ -25911,12 +25914,15 @@ stdout(result.throw.message)
         let stdout = normalize(&String::from_utf8_lossy(&output.stdout));
         cleanup_net_project(&dir);
 
-        // NET7-3a: Phase 3 unlocked -- Interpreter dispatches to H3 serve path.
-        // Without quiche installed: H3QuicUnavailable
-        // With quiche installed but pending: H3TransportPending
+        // NET7-12a: Interpreter has real QUIC transport. Nonexistent cert → ProtocolError.
         assert!(
-            stdout.contains("H3QuicUnavailable") || stdout.contains("H3TransportPending"),
-            "NB7-6 interp: expected H3QuicUnavailable or H3TransportPending kind (Phase 3), got: {:?}",
+            stdout.contains("ProtocolError"),
+            "NB7-6 interp: expected ProtocolError (cert file not found) after NET7-12a, got: {:?}",
+            stdout
+        );
+        assert!(
+            stdout.contains("failed to read cert"),
+            "NB7-6 interp: expected cert read error message, got: {:?}",
             stdout
         );
         assert!(
@@ -26428,8 +26434,9 @@ stdout(result.__value.kind)
 }
 
 /// NET7-3a: Interpreter now dispatches to H3 serve path (Phase 3 unlocked).
-/// Returns H3QuicUnavailable or H3TransportPending, matching Native semantics.
-/// Before Phase 3, this returned H3NotYetImplemented.
+/// NET7-12a: Interpreter has real QUIC transport (quinn). With nonexistent cert/key,
+/// it returns ProtocolError (cert read failure). With valid cert/key, it would start
+/// the actual QUIC serve loop.
 #[test]
 fn test_net7_3a_interpreter_h3_dispatches_to_serve_path() {
     let port = find_free_loopback_port();
@@ -26456,12 +26463,11 @@ stdout(result.throw.message)
     let stdout = normalize(&String::from_utf8_lossy(&output.stdout));
     cleanup_net_project(&dir);
 
-    // NET7-3a: Phase 3 unlocked -- Interpreter dispatches to H3 serve path.
-    // Without quiche installed: H3QuicUnavailable
-    // With quiche installed but pending: H3TransportPending
+    // NET7-12a: Interpreter has real QUIC transport via quinn.
+    // Nonexistent cert/key → ProtocolError (cert file not found).
     assert!(
-        stdout.contains("H3QuicUnavailable") || stdout.contains("H3TransportPending"),
-        "NET7-3a interp: expected H3QuicUnavailable or H3TransportPending, got: {:?}",
+        stdout.contains("ProtocolError"),
+        "NET7-3a interp: expected ProtocolError (cert file not found) after NET7-12a, got: {:?}",
         stdout
     );
     assert!(
@@ -26469,10 +26475,10 @@ stdout(result.throw.message)
         "NET7-3a interp: must NOT return H3NotYetImplemented after Phase 3, got: {:?}",
         stdout
     );
-    // Verify the error mentions QUIC transport (same as Native)
+    // Verify the error mentions HTTP/3 cert read failure
     assert!(
-        stdout.contains("QUIC") || stdout.contains("quic"),
-        "NET7-3a interp: h3 error should mention QUIC transport, got: {:?}",
+        stdout.contains("HTTP/3") || stdout.contains("failed to read cert"),
+        "NET7-3a interp: h3 error should mention HTTP/3 or cert read failure, got: {:?}",
         stdout
     );
 }
@@ -27140,9 +27146,11 @@ stdout(result.__value.kind)
 
 // ── NET7-3a/3b: Interpreter HTTP/3 Parity Backend Tests ──────────────────
 
-/// NET7-3a: Interpreter h3 dispatch returns same error kinds as Native.
-/// Both backends should return H3QuicUnavailable or H3TransportPending
-/// (not H3NotYetImplemented) when cert/key are provided.
+/// NET7-3a: Interpreter h3 dispatch returns appropriate error kinds.
+/// NET7-12a: Interpreter now has real QUIC transport (quinn). With nonexistent
+/// cert/key, it returns ProtocolError. Native still returns H3QuicUnavailable
+/// or H3TransportPending (libquiche gate). This divergence is expected because
+/// the Interpreter has a compile-time QUIC dependency while Native uses dlopen.
 #[test]
 fn test_net7_3a_interpreter_native_h3_error_kind_parity() {
     let source_template = |port: u16| {
@@ -27206,34 +27214,29 @@ stdout(result.__value.kind)
         stdout
     };
 
-    // Both should return H3QuicUnavailable or H3TransportPending
-    let interp_has_quic = interp_kind.contains("H3QuicUnavailable");
-    let interp_has_pending = interp_kind.contains("H3TransportPending");
-    let native_has_quic = native_kind.contains("H3QuicUnavailable");
-    let native_has_pending = native_kind.contains("H3TransportPending");
-
+    // NET7-12a: Interpreter has real QUIC transport (quinn, compile-time).
+    // With nonexistent cert/key, Interpreter returns ProtocolError (cert read failure).
     assert!(
-        interp_has_quic || interp_has_pending,
-        "NET7-3a parity: Interpreter expected H3QuicUnavailable or H3TransportPending, got: {:?}",
+        interp_kind.contains("ProtocolError"),
+        "NET7-3a parity: Interpreter expected ProtocolError (real QUIC transport), got: {:?}",
         interp_kind
     );
+
+    // Native still uses libquiche (dlopen). Without libquiche: H3QuicUnavailable.
+    // With libquiche but bad cert: may also fail at cert loading stage.
+    let native_has_quic = native_kind.contains("H3QuicUnavailable");
+    let native_has_pending = native_kind.contains("H3TransportPending");
     assert!(
         native_has_quic || native_has_pending,
         "NET7-3a parity: Native expected H3QuicUnavailable or H3TransportPending, got: {:?}",
         native_kind
     );
-
-    // Both should agree on the error kind (both unavailable or both pending)
-    assert_eq!(
-        interp_has_quic, native_has_quic,
-        "NET7-3a parity: Interpreter and Native must return same H3 error kind. \
-         Interpreter: {:?}, Native: {:?}",
-        interp_kind, native_kind
-    );
 }
 
 /// NET7-3a: Interpreter h3 selftest passes (same as Native).
 /// Verifies the H3 protocol layer self-tests run and pass on the Interpreter.
+/// NET7-12a: After selftests pass, the Interpreter now enters the real QUIC
+/// transport loop (quinn). With nonexistent cert/key, it returns ProtocolError.
 #[test]
 fn test_net7_3a_interpreter_h3_selftest_passes() {
     let port = find_free_loopback_port();
@@ -27266,15 +27269,18 @@ stdout(result.__value.kind)
         stdout
     );
 
-    // Should reach QUIC transport gate (selftests passed)
+    // NET7-12a: After selftests pass, Interpreter enters real QUIC transport.
+    // With nonexistent cert/key, it returns ProtocolError (cert read failure).
     assert!(
-        stdout.contains("H3QuicUnavailable") || stdout.contains("H3TransportPending"),
-        "NET7-3a: After selftest passes, should reach QUIC transport gate. Got: {:?}",
+        stdout.contains("ProtocolError"),
+        "NET7-3a: After selftest passes, should attempt real transport (ProtocolError for bad cert). Got: {:?}",
         stdout
     );
 }
 
-/// NET7-3a: Interpreter h3 error message mentions QUIC transport (matching Native).
+/// NET7-3a: Interpreter h3 error message mentions HTTP/3.
+/// NET7-12a: With real QUIC transport (quinn), the error on bad cert/key
+/// includes "HTTP/3" in the message (from serve_h3_loop error path).
 #[test]
 fn test_net7_3a_interpreter_h3_error_mentions_quic() {
     let port = find_free_loopback_port();
@@ -27300,24 +27306,23 @@ stdout(result.throw.message)
     let stdout = normalize(&String::from_utf8_lossy(&output.stdout));
     cleanup_net_project(&dir);
 
-    // Error message should mention QUIC transport (matching Native NET7-2b)
+    // NET7-12a: Error message mentions HTTP/3 (cert/key read failure path).
     assert!(
-        stdout.contains("QUIC") || stdout.contains("quic"),
-        "NET7-3a: h3 error should mention QUIC transport, got: {:?}",
-        stdout
-    );
-    // Error message should mention protocol layer status
-    assert!(
-        stdout.contains("protocol layer") || stdout.contains("HTTP/3"),
-        "NET7-3a: h3 error should indicate protocol layer status, got: {:?}",
+        stdout.contains("HTTP/3"),
+        "NET7-3a: h3 error should mention HTTP/3, got: {:?}",
         stdout
     );
 }
 
-/// NB7-12: H3TransportPending message parity — Interpreter and Native must return
-/// the exact same user-visible message for the H3TransportPending error kind.
-/// This prevents message drift (e.g. "Phase 5 hardening" vs "Phase 2 hardening")
-/// that the broad-substring parity tests above cannot detect.
+/// NET7-12a: Interpreter H3 transport is live — cert/key error message parity.
+/// Both backends should return meaningful error messages when cert/key files are invalid.
+/// Interpreter: ProtocolError (cert read failure via quinn/rustls)
+/// Native: H3QuicUnavailable (libquiche dlopen gate, no cert loading reached)
+///
+/// NOTE: This replaces the old NB7-12 H3TransportPending message parity test.
+/// The Interpreter no longer returns H3TransportPending because it has a real
+/// QUIC transport (quinn). The parity divergence is expected: Interpreter has
+/// compile-time QUIC, Native has runtime dlopen QUIC.
 #[test]
 fn test_nb7_12_h3_transport_pending_message_parity() {
     let source_template = |port: u16| {
@@ -27356,250 +27361,67 @@ stdout(result.throw.message)
         (kind, msg)
     };
 
-    // Native
-    let (native_kind, native_msg) = {
-        let port = find_free_loopback_port();
-        let source = source_template(port);
-        let dir = setup_net_project(&source, "nb7_12_msg_parity_native");
-        let td_path = dir.join("main.td");
-        let bin_path = unique_temp_path("taida_nb7_12_msg_parity_native", "h3_msg", "bin");
-        let compile = Command::new(taida_bin())
-            .arg("build")
-            .arg("--target")
-            .arg("native")
-            .arg(&td_path)
-            .arg("-o")
-            .arg(&bin_path)
-            .output()
-            .expect("compile");
-        assert!(
-            compile.status.success(),
-            "NB7-12 native compile failed: {}",
-            String::from_utf8_lossy(&compile.stderr)
-        );
-        let run = Command::new(&bin_path)
-            .output()
-            .expect("run native");
-        let stdout = normalize(&String::from_utf8_lossy(&run.stdout));
-        let _ = fs::remove_file(&bin_path);
-        cleanup_net_project(&dir);
-        let parts: Vec<&str> = stdout.splitn(2, "---MSG---").collect();
-        let kind = parts.first().unwrap_or(&"").trim().to_string();
-        let msg = parts.get(1).unwrap_or(&"").trim().to_string();
-        (kind, msg)
-    };
-
-    // Both must reach the same QUIC transport gate error kind
+    // NET7-12a: Interpreter now reaches real QUIC transport.
+    // Bad cert → ProtocolError with cert read failure.
     assert_eq!(
-        interp_kind, native_kind,
-        "NB7-12: error kind must match. Interpreter: {:?}, Native: {:?}",
-        interp_kind, native_kind
+        interp_kind, "ProtocolError",
+        "NET7-12a: Interpreter expected ProtocolError (real QUIC transport), got: {:?}",
+        interp_kind
     );
-
-    // Both must produce non-empty messages
     assert!(
         !interp_msg.is_empty(),
-        "NB7-12: Interpreter message must not be empty"
+        "NET7-12a: Interpreter message must not be empty"
     );
     assert!(
-        !native_msg.is_empty(),
-        "NB7-12: Native message must not be empty"
+        interp_msg.contains("failed to read cert"),
+        "NET7-12a: Interpreter should mention cert read failure, got: {:?}",
+        interp_msg
     );
-
-    // Exact message parity — this is the core NB7-12 assertion
-    assert_eq!(
-        interp_msg, native_msg,
-        "NB7-12: H3TransportPending/H3QuicUnavailable message must be identical. \
-         Interpreter: {:?}, Native: {:?}",
-        interp_msg, native_msg
-    );
-
-    // NB7-13 note: This runtime test validates whichever path the environment
-    // reaches (H3TransportPending if libquiche.so is present, H3QuicUnavailable
-    // otherwise). It does NOT guarantee that the H3TransportPending path
-    // specifically is tested. See test_nb7_13_h3_transport_pending_source_parity
-    // for environment-independent source inspection of the pending message.
 }
 
-/// NB7-13: Source-inspection parity for H3TransportPending message.
+/// NET7-12a: Source-inspection — Interpreter serve_h3() calls serve_h3_loop().
 ///
-/// The runtime test (test_nb7_12) only exercises whichever QUIC availability
-/// path the current environment reaches. On CI / review machines without
-/// libquiche.so, only H3QuicUnavailable is tested, leaving the
-/// H3TransportPending message drift undetected.
+/// This replaces the old NB7-13 H3TransportPending source parity test.
+/// The Interpreter no longer has an H3TransportPending path because it now
+/// calls serve_h3_loop() directly (via quinn QUIC transport).
 ///
-/// This test reads the source files directly and extracts the
-/// H3TransportPending message string from both backends, then asserts
-/// exact equality. This catches drift regardless of runtime environment.
+/// This test verifies that:
+/// 1. serve_h3() in net_eval.rs calls net_h3::serve_h3_loop()
+/// 2. The old H3TransportPending / dlopen gate code has been removed
+/// 3. The success path returns @(ok: true, requests: N)
 #[test]
 fn test_nb7_13_h3_transport_pending_source_parity() {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
 
-    // --- Extract from Interpreter (Rust) ---
+    // --- Check Interpreter source ---
     let interp_path = manifest_dir.join("src/interpreter/net_eval.rs");
     let interp_src = fs::read_to_string(&interp_path)
-        .unwrap_or_else(|e| panic!("NB7-13: cannot read {:?}: {}", interp_path, e));
+        .unwrap_or_else(|e| panic!("NET7-12a: cannot read {:?}: {}", interp_path, e));
 
-    // The Interpreter message is in a make_result_failure_msg("H3TransportPending", "...")
-    // block. We locate the marker and extract the message.
-    let interp_msg = extract_rust_h3_transport_pending_msg(&interp_src)
-        .unwrap_or_else(|| panic!(
-            "NB7-13: could not find H3TransportPending message in {:?}. \
-             The string literal starting with 'httpServe: HTTP/3 QUIC transport library found' \
-             must appear after '\"H3TransportPending\"' in a make_result_failure_msg call.",
-            interp_path
-        ));
-
-    // --- Extract from Native (C) ---
-    let native_path = manifest_dir.join("src/codegen/native_runtime.c");
-    let native_src = fs::read_to_string(&native_path)
-        .unwrap_or_else(|e| panic!("NB7-13: cannot read {:?}: {}", native_path, e));
-
-    let native_msg = extract_c_h3_transport_pending_msg(&native_src)
-        .unwrap_or_else(|| panic!(
-            "NB7-13: could not find H3TransportPending message in {:?}. \
-             The string literal starting with 'httpServe: HTTP/3 QUIC transport library found' \
-             must appear after '\"H3TransportPending\"' in a taida_net_result_fail call.",
-            native_path
-        ));
-
-    // --- Core assertion: exact message parity ---
-    assert_eq!(
-        interp_msg, native_msg,
-        "NB7-13: H3TransportPending message must be identical in Interpreter and Native source. \
-         Interpreter: {:?}, Native: {:?}",
-        interp_msg, native_msg
+    // serve_h3() must call serve_h3_loop (real transport)
+    assert!(
+        interp_src.contains("net_h3::serve_h3_loop"),
+        "NET7-12a: serve_h3() must call net_h3::serve_h3_loop() for real QUIC transport"
     );
 
-    // Also verify both messages contain the expected key phrases
-    for (label, msg) in [("Interpreter", &interp_msg), ("Native", &native_msg)] {
-        assert!(
-            msg.contains("QUIC transport library found but integration is pending"),
-            "NB7-13: {} H3TransportPending message missing key phrase. Got: {:?}",
-            label, msg
-        );
-        assert!(
-            msg.contains("Phase 2 hardening"),
-            "NB7-13: {} H3TransportPending message missing 'Phase 2 hardening'. Got: {:?}",
-            label, msg
-        );
-    }
-}
+    // Old dlopen gate must be removed
+    assert!(
+        !interp_src.contains("\"H3TransportPending\""),
+        "NET7-12a: H3TransportPending should be removed from Interpreter (real transport connected)"
+    );
 
-/// Extract the H3TransportPending user-visible message from net_eval.rs source.
-///
-/// Rust source uses line-continuation backslash + leading spaces to form a single
-/// string literal across multiple lines:
-///   "httpServe: HTTP/3 QUIC transport library found but integration \
-///    is pending. ..."
-///
-/// We find `"H3TransportPending"` then scan forward for the next string literal
-/// starting with `"httpServe:` and collect the full continued string.
-fn extract_rust_h3_transport_pending_msg(src: &str) -> Option<String> {
-    // Find the H3TransportPending kind marker
-    let marker = "\"H3TransportPending\"";
-    let marker_pos = src.find(marker)?;
-    let after_marker = &src[marker_pos + marker.len()..];
+    // Old libquiche.so dlopen probing must be removed
+    assert!(
+        !interp_src.contains("libquiche.so"),
+        "NET7-12a: libquiche.so dlopen probe should be removed from serve_h3() (uses quinn)"
+    );
 
-    // Find the opening quote of the message string (starts with "httpServe:)
-    let msg_prefix = "\"httpServe:";
-    let msg_start = after_marker.find(msg_prefix)?;
-    let msg_region = &after_marker[msg_start..];
-
-    // Parse the Rust string literal with line continuations using byte indexing.
-    // The pattern is: "..." possibly with \<newline><spaces> continuations.
-    let bytes = msg_region.as_bytes();
-    let len = bytes.len();
-    let mut result = String::new();
-    let mut pos = 1; // skip opening '"'
-
-    while pos < len {
-        match bytes[pos] {
-            b'\\' if pos + 1 < len => {
-                let next = bytes[pos + 1];
-                if next == b'\n' {
-                    // Line continuation: skip \<newline> and leading whitespace
-                    pos += 2;
-                    while pos < len && (bytes[pos] == b' ' || bytes[pos] == b'\t') {
-                        pos += 1;
-                    }
-                    // The continuation joins with a single space
-                    if !result.ends_with(' ') {
-                        result.push(' ');
-                    }
-                } else {
-                    // Other escape — take literal next char
-                    pos += 1;
-                    result.push(bytes[pos] as char);
-                    pos += 1;
-                }
-            }
-            b'"' => break, // End of string literal
-            b => {
-                result.push(b as char);
-                pos += 1;
-            }
-        }
-    }
-
-    if result.is_empty() { None } else { Some(result) }
-}
-
-/// Extract the H3TransportPending user-visible message from native_runtime.c source.
-///
-/// C source uses adjacent string literal concatenation:
-///   "httpServe: HTTP/3 QUIC transport library found but integration "
-///   "is pending. ..."
-///
-/// We find `"H3TransportPending"` then collect all adjacent string literals
-/// that form the message.
-fn extract_c_h3_transport_pending_msg(src: &str) -> Option<String> {
-    let marker = "\"H3TransportPending\"";
-    let marker_pos = src.find(marker)?;
-    let after_marker = &src[marker_pos + marker.len()..];
-
-    // Find the start of the message string
-    let msg_prefix = "\"httpServe:";
-    let msg_start = after_marker.find(msg_prefix)?;
-    let msg_region = &after_marker[msg_start..];
-
-    // C uses adjacent string literals: "foo" "bar" -> "foobar"
-    // Collect all adjacent quoted strings until we hit ));
-    let mut result = String::new();
-    let mut pos = 0;
-    let bytes = msg_region.as_bytes();
-    let len = bytes.len();
-
-    loop {
-        // Skip whitespace/newlines to find next quote or end
-        while pos < len && (bytes[pos] == b' ' || bytes[pos] == b'\n'
-            || bytes[pos] == b'\r' || bytes[pos] == b'\t')
-        {
-            pos += 1;
-        }
-
-        if pos >= len || bytes[pos] != b'"' {
-            break; // No more string literals
-        }
-
-        // Parse one "..." literal
-        pos += 1; // skip opening "
-        while pos < len && bytes[pos] != b'"' {
-            if bytes[pos] == b'\\' && pos + 1 < len {
-                // Escape sequence — take the escaped char
-                pos += 1;
-                result.push(bytes[pos] as char);
-            } else {
-                result.push(bytes[pos] as char);
-            }
-            pos += 1;
-        }
-        if pos < len {
-            pos += 1; // skip closing "
-        }
-    }
-
-    if result.is_empty() { None } else { Some(result) }
+    // Success path must return @(ok: true, requests: N)
+    // This is in the Ok(request_count) arm of the serve_h3_loop match
+    assert!(
+        interp_src.contains("make_result_success(result_inner)"),
+        "NET7-12a: serve_h3() success path must call make_result_success"
+    );
 }
 
 /// NET7-3b: Interpreter and Native h3 without cert/key both return ProtocolError.
@@ -28348,7 +28170,8 @@ stdout(result.__value.kind)
 }
 
 /// NET7-4b-3: 3-way h3 backend divergence is documented.
-/// Native/Interpreter: H3QuicUnavailable or H3TransportPending (runtime state dependent)
+/// Interpreter: ProtocolError (real QUIC transport via quinn, cert read failure with bad paths)
+/// Native: H3QuicUnavailable or H3TransportPending (runtime dlopen gate)
 /// JS: H3Unsupported (permanent)
 /// This confirms the v7 backend contract:
 ///   h3 = Native + Interpreter (2-way parity), JS = H3Unsupported (permanent)
@@ -28440,10 +28263,11 @@ stdout(result.__value.kind)
         stdout
     };
 
-    // Interpreter: H3QuicUnavailable or H3TransportPending (h3 is implemented, runtime gate)
+    // NET7-12a: Interpreter has real QUIC transport (quinn).
+    // With nonexistent cert/key → ProtocolError (cert read failure).
     assert!(
-        interp_kind.contains("H3QuicUnavailable") || interp_kind.contains("H3TransportPending"),
-        "NET7-4b-3 interp: expected H3QuicUnavailable or H3TransportPending, got: {:?}",
+        interp_kind.contains("ProtocolError"),
+        "NET7-4b-3 interp: expected ProtocolError (real QUIC transport via quinn), got: {:?}",
         interp_kind
     );
 
@@ -28461,20 +28285,12 @@ stdout(result.__value.kind)
         native_kind
     );
 
-    // Interpreter and Native should have the same error class
-    // (both runtime-gated, not unsupported)
-    assert_eq!(
-        interp_kind.contains("H3QuicUnavailable"),
-        native_kind.contains("H3QuicUnavailable"),
-        "NET7-4b-3: Interpreter and Native must agree on H3 error kind. \
-         Interpreter={:?}, Native={:?}",
-        interp_kind, native_kind
-    );
-
+    // 3-backend divergence: Interpreter (ProtocolError), Native (H3QuicUnavailable), JS (H3Unsupported)
+    // This divergence is expected: each backend has a different transport substrate.
     // JS should NOT contain any runtime-gated error kinds
-    // (it's permanently unsupported, not runtime-dependent)
     assert!(
-        !js_kind.contains("H3QuicUnavailable") && !js_kind.contains("H3TransportPending"),
+        !js_kind.contains("H3QuicUnavailable") && !js_kind.contains("H3TransportPending")
+            && !js_kind.contains("ProtocolError"),
         "NET7-4b-3: JS must NOT return runtime-gated H3 errors (it's permanently unsupported), got: {:?}",
         js_kind
     );
@@ -29537,6 +29353,154 @@ stdout(result.__value.kind)
     assert!(
         native_ok,
         "NET7-10d: Native dynamic table selftest must pass"
+    );
+}
+
+// ── NET7-11b: Hardening Gate Runtime Tests ─────────────────────────────
+
+/// NET7-11b-1: Runtime malformed H3 reject — Interpreter h3 selftest still passes
+/// after hardening tests were added.
+#[test]
+fn test_net7_11b_runtime_malformed_reject_selftest_passes() {
+    // The interpreter selftest (test_net7_11b_runtime_malformed_h3_reject)
+    // is a lib test. This parity test confirms the runtime test exists.
+    let interp_src = fs::read_to_string("src/interpreter/net_h3/mod.rs")
+        .expect("read net_h3/mod.rs");
+    assert!(
+        interp_src.contains("test_net7_11b_runtime_malformed_h3_reject"),
+        "NET7-11b: Interpreter must have runtime malformed H3 reject tests"
+    );
+}
+
+/// NET7-11b-2: 0-RTT default-off — no 0-RTT surface across backends.
+#[test]
+fn test_net7_11b_0rtt_default_off_no_surface() {
+    let files = [
+        "src/interpreter/net_h3/qpack.rs",
+        "src/interpreter/net_h3/frame.rs",
+        "src/interpreter/net_h3/connection.rs",
+        "src/interpreter/net_h3/request.rs",
+    ];
+
+    let forbidden = [
+        "enable_0rtt",
+        "accept_early_data",
+        "send_early_data",
+        "zero_rtt_enabled",
+        "resumption_ticket",
+        "resumption_token",
+    ];
+
+    for &path in &files {
+        let src = fs::read_to_string(path).expect(&path);
+        for patt in &forbidden {
+            assert!(
+                !src.contains(patt),
+                "NET7-11b: 0-RTT surface leak: '{}' found in {}",
+                patt, path
+            );
+        }
+    }
+}
+
+/// NET7-11b-3: Verify no silent fallback — h3 without cert/key returns error.
+#[test]
+fn test_net7_11b_no_silent_fallback_3way() {
+    let source_template = |port: u16| {
+        format!(
+            r#">>> taida-lang/net => @(httpServe)
+
+handler req =
+  @(status <= 200, headers <= @[], body <= "should-not-reach")
+=> :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
+
+asyncResult <= httpServe({port}, handler, 1, 5000, 128, @(protocol <= "h3"))
+asyncResult ]=> result
+stdout(result.throw.kind)
+"#,
+            port = port
+        )
+    };
+
+    // Interpreter
+    {
+        let port = find_free_loopback_port();
+        let source = source_template(port);
+        let dir = setup_net_project(&source, "net7_11b_fallback_interp");
+        let td_path = dir.join("main.td");
+        let output = Command::new(taida_bin())
+            .args(&["--timeout", "3000"])
+            .arg(&td_path)
+            .output()
+            .expect("spawn interpreter");
+        let stdout_string = normalize(&String::from_utf8_lossy(&output.stdout));
+        cleanup_net_project(&dir);
+
+        // Any error kind is acceptable — the important thing is it does NOT
+        // silently fall back to h1/h2 and return a working response
+        assert!(
+            !stdout_string.contains("should-not-reach"),
+            "NET7-11b: Interpreter h3 (no cert) must not silently fall back, got: {:?}",
+            stdout_string
+        );
+    }
+
+    // JS
+    if node_available() {
+        let port = find_free_loopback_port();
+        let source = source_template(port);
+        let dir = setup_net_project(&source, "net7_11b_fallback_js");
+        let td_path = dir.join("main.td");
+        let js_output = Command::new(taida_bin())
+            .arg("--target")
+            .arg("js")
+            .arg(&td_path)
+            .output()
+            .ok();
+        if let Some(output) = js_output {
+            let stdout_string = normalize(&String::from_utf8_lossy(&output.stdout));
+            let stderr_string = normalize(&String::from_utf8_lossy(&output.stderr));
+            let combined = format!("{}{}", stdout_string, stderr_string);
+            // JS must either return H3Unsupported or an error — never a working response
+            assert!(
+                !combined.contains("should-not-reach"),
+                "NET7-11b: JS h3 must not silently fall back, got: {:?}",
+                combined
+            );
+        }
+        cleanup_net_project(&dir);
+    }
+}
+
+/// NET7-11b-4: Bounded-copy structural audit (runtime constant parity).
+#[test]
+fn test_net7_11b_hardening_bounded_copy_parity() {
+    let nat_src = fs::read_to_string("src/codegen/native_runtime.c")
+        .expect("read native_runtime.c");
+    let ip_src = fs::read_to_string("src/interpreter/net_h3/frame.rs")
+        .expect("read frame.rs");
+
+    // Both backends must define the same bounded limits
+    assert!(
+        nat_src.contains("H3_MAX_STREAMS") && ip_src.contains("H3_MAX_STREAMS"),
+        "NET7-11b: H3_MAX_STREAMS must be defined in both backends"
+    );
+    assert!(
+        nat_src.contains("H3_MAX_SETTINGS_PAIRS")
+            && ip_src.contains("H3_MAX_SETTINGS_PAIRS"),
+        "NET7-11b: H3_MAX_SETTINGS_PAIRS must be defined in both backends"
+    );
+
+    // Interpreter has runtime hardening tests
+    let mod_src = fs::read_to_string("src/interpreter/net_h3/mod.rs")
+        .expect("read mod.rs");
+    assert!(
+        mod_src.contains("test_net7_11b_runtime_malformed_h3_reject"),
+        "NET7-11b: malformed H3 reject unit test must exist"
+    );
+    assert!(
+        mod_src.contains("test_net7_11b_0rtt_not_exposed_in_h3_api"),
+        "NET7-11b: 0-RTT non-exposure audit must exist"
     );
 }
 

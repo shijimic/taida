@@ -113,10 +113,12 @@ pub(crate) use connection::{
 };
 
 // NET7-9b: QUIC transport substrate (quinn) — Phase 9
+// NET7-12a: serve_h3_loop exposed for net_eval.rs -> quic.rs connection
 #[allow(unused_imports)]
 pub(crate) use quic::{
     create_quic_endpoint,
     accept_connection,
+    serve_h3_loop,
     H3_ALPN,
     DEFAULT_H3_PORT,
 };
@@ -2297,5 +2299,215 @@ mod tests {
             }
             _ => panic!("wrong instruction: {:?}", inst),
         }
+    }
+
+    // ── NET7-11b: Runtime Malformed H3 Reject Tests ──────────────────────
+
+    /// NET7-11b-1: Runtime rejection of malformed H3 input.
+    /// Phase 5 (NET7-5a) did source audits; NET7-11b verifies runtime behavior.
+    #[test]
+    fn test_net7_11b_runtime_malformed_h3_reject() {
+        use qpack::{H3DecodeError, qpack_decode_int_r, qpack_decode_string_r, qpack_decode_block_r, qpack_encode_block};
+        use frame::{varint_decode, varint_encode, decode_frame, decode_frame_header, decode_settings};
+        let _ = qpack_decode_string_r; // ensure path coverage
+
+        // ── QPACK integer rejection tests ──────────────────────────────
+
+        // Empty input → Truncated
+        assert_eq!(qpack_decode_int_r(&[], 8), Err(H3DecodeError::Truncated));
+
+        // Overflow guard (m > 62) → QpackIntOverflow
+        let overflow_bytes: [u8; 16] = [0xFF; 16];
+        let result = qpack_decode_int_r(&overflow_bytes, 8);
+        assert!(
+            result == Err(H3DecodeError::QpackIntOverflow) || result == Err(H3DecodeError::Truncated),
+            "overflow must be rejected, got: {:?}", result
+        );
+
+        // ── QUIC varint rejection tests ────────────────────────────────
+
+        // Empty → None
+        assert!(varint_decode(&[]).is_none());
+
+        // Non-canonical encoding (value=5 encoded in 2-byte form 0x4005) → reject
+        assert!(varint_decode(&[0x40, 0x05]).is_none());
+
+        // Non-canonical 4-byte form for small value → reject
+        assert!(varint_decode(&[0x80, 0x00, 0x00, 0x05]).is_none());
+
+        // Truncated varint → None
+        assert!(varint_decode(&[0xC0, 0x00]).is_none()); // needs 4 bytes, only 2
+
+        // ── Frame rejection tests ──────────────────────────────────────
+
+        // Empty frame → None
+        assert!(decode_frame_header(&[]).is_none());
+
+        // Single byte frame → None (needs at least type + length varint)
+        assert!(decode_frame(&[]).is_none());
+
+        // Truncated frame (length varint says 2-byte form but missing bytes) → None
+        let truncated_frame: [u8; 2] = [0x00, 0x40]; // DATA frame, 2-byte length but only 1 byte present
+        assert!(decode_frame(&truncated_frame).is_none());
+
+        // ── Settings rejection tests ───────────────────────────────────
+
+        // Empty settings → valid (no settings to parse, returns defaults)
+        let settings = decode_settings(&[]).expect("empty settings valid");
+        assert_eq!(settings.max_field_section_size, H3_DEFAULT_MAX_FIELD_SECTION_SIZE);
+        // Decode with a full valid settings block
+        let settings_payload = encode_settings().expect("settings encode");
+        let settings2 = decode_settings(&settings_payload).expect("settings decode");
+        assert_eq!(settings2.max_field_section_size, H3_DEFAULT_MAX_FIELD_SECTION_SIZE);
+
+        // Truncated settings (type without value) → None
+        let truncated_settings: [u8; 1] = [0x01]; // SETTINGS id without value
+        let result = decode_settings(&truncated_settings);
+        assert!(result.is_none(), "truncated settings must be rejected");
+
+        // Malformed settings (exactly H3_MAX_SETTINGS_PAIRS + 1) → None
+        // Build a settings frame with 65 id-value pairs
+        let mut settings_payload = Vec::new();
+        for i in 0..65 {
+            let mut tmp = [0u8; 16];
+            let n = varint_encode(&mut tmp, i as u64).unwrap();
+            settings_payload.extend_from_slice(&tmp[..n]);
+            let n = varint_encode(&mut tmp, 0u64).unwrap();
+            settings_payload.extend_from_slice(&tmp[..n]);
+        }
+        let result = decode_settings(&settings_payload);
+        assert!(result.is_none(), "settings exceeding H3_MAX_SETTINGS_PAIRS must be rejected");
+
+        // ── QPACK block rejection tests ────────────────────────────────
+
+        // Empty block → Truncated
+        assert!(matches!(qpack_decode_block_r(&[], 100, None, None), Err(H3DecodeError::Truncated)));
+
+        // Too small block (1 byte) → Truncated
+        assert!(matches!(qpack_decode_block_r(&[0x00], 100, None, None), Err(H3DecodeError::Truncated)));
+
+        // Block requiring dynamic table when none provided → DynamicTableError
+        let dt_required: [u8; 3] = [0x02, 0x00, 0x00]; // req_insert_count=2
+        assert!(matches!(
+            qpack_decode_block_r(&dt_required, 100, None, None),
+            Err(H3DecodeError::DynamicTableError)
+        ));
+
+        // Valid empty block (req_insert_count=0, sign+delta=0) → 0 headers
+        let valid_empty: [u8; 2] = [0x00, 0x00];
+        let result = qpack_decode_block_r(&valid_empty, 100, None, None);
+        assert!(result.is_ok(), "valid empty block should succeed, got: {:?}", result);
+        assert_eq!(result.unwrap().len(), 0);
+
+        // Oversized block with max_field_section_size → FieldSectionTooLarge
+        assert!(matches!(
+            qpack_decode_block_r(&[0u8; 1024], 100, Some(64), None),
+            Err(H3DecodeError::FieldSectionTooLarge)
+        ));
+    }
+
+    /// NET7-11b-2: 0-RTT is not exposed in the public API surface.
+    /// Verifies that no 0-RTT / early_data / resumption functions exist in the H3 layer.
+    //
+    // NOTE: The QPACK static table entry index 86 has name "early-data" and value "1"
+    // (RFC 9204 Appendix A). This is a normal header field, not a protocol knob.
+    // We exclude "early-data" (the header field name) and "resumption" (used in
+    // code comments about TLS) from the forbidden patterns.
+    #[test]
+    fn test_net7_11b_0rtt_not_exposed_in_h3_api() {
+        let h3_modules = [
+            "src/interpreter/net_h3/qpack.rs",
+            "src/interpreter/net_h3/frame.rs",
+            "src/interpreter/net_h3/connection.rs",
+            "src/interpreter/net_h3/request.rs",
+        ];
+
+        // These are API-level 0-RTT knobs that must NOT appear in the H3 layer
+        let forbidden_patterns = [
+            "zero_rtt",
+            "early_data_enabled",
+            "enable_0rtt",
+            "accept_early_data",
+            "send_early_data",
+            "resumption_ticket",
+        ];
+
+        for module_path in &h3_modules {
+            let content = std::fs::read_to_string(module_path)
+                .unwrap_or_else(|_| panic!("cannot read {}", module_path));
+
+            for pattern in &forbidden_patterns {
+                assert!(
+                    !content.contains(pattern),
+                    "NET7-11b: 0-RTT surface check: '{}' found in {} (0-RTT must not be exposed)",
+                    pattern, module_path
+                );
+            }
+        }
+    }
+
+    /// NET7-11b-3: Verify that QPACK encode/decode round-trip works for the
+    /// RFC 9204 static table "early-data" header entry (index 86).
+    /// This is a normal header field, NOT a 0-RTT signal.
+    #[test]
+    fn test_net7_11b_early_data_header_roundtrip() {
+        // Index 86 in RFC 9204 static table is "early-data: 1"
+        let entry_86 = &QPACK_STATIC_TABLE[86];
+        assert_eq!(entry_86.name, "early-data");
+        assert_eq!(entry_86.value, "1");
+
+        // Verify that encoding/decoding this header works normally
+        // Note: qpack_encode_block also encodes :status as a pseudo-header,
+        // so 1 custom header input → 2 headers output (:status + early-data)
+        let headers = vec![("early-data".to_string(), "1".to_string())];
+        let encoded = qpack_encode_block(200, &headers);
+        assert!(encoded.is_some(), "early-data header must encode");
+        let encoded = encoded.unwrap();
+        assert!(!encoded.is_empty());
+
+        let decoded = qpack_decode_block_r(&encoded, 100, None, None);
+        assert!(decoded.is_ok(), "early-data header must decode normally, got: {:?}", decoded);
+        let headers_out = decoded.unwrap();
+        assert_eq!(headers_out.len(), 2); // :status + early-data
+        // :status is always first
+        assert_eq!(headers_out[0].name, ":status");
+        assert_eq!(headers_out[0].value, "200");
+        // early-data is second
+        assert_eq!(headers_out[1].name, "early-data");
+        assert_eq!(headers_out[1].value, "1");
+    }
+
+    /// NET7-11b-4: Verify bounded-copy discipline at runtime boundary.
+    /// Ensures that decode functions do not allocate beyond bounded buffers.
+    #[test]
+    fn test_net7_11b_runtime_bounded_copy_guards() {
+        use qpack::qpack_decode_block_r;
+        use frame::{H3_MAX_STREAMS, H3_MAX_SETTINGS_PAIRS};
+
+        // H3_MAX_STREAMS is bounded at 256
+        assert_eq!(H3_MAX_STREAMS, 256);
+
+        // H3_MAX_SETTINGS_PAIRS is bounded at 64
+        assert_eq!(H3_MAX_SETTINGS_PAIRS, 64);
+
+        // qpack_decode_block_r rejects blocks with too many headers.
+        // Build a block that would produce >256 headers (overflow).
+        // Each QPACK "Indexed Field Line (Static)" entry is 1 byte: 1xxxxxxx
+        // where the lower 6 bits give the static table index (max 63 = 0xBF).
+        let mut buf = vec![0u8; 300];
+        // First 2 bytes: req_insert_count=0 (0x00), sign+delta=0 (0x00)
+        buf[0] = 0x00;
+        buf[1] = 0x00;
+        // Fill with indexed static entries (index 0 = 0xC0 with base form)
+        // QPACK indexed static: 11xxxxxx → 0xC0 | index
+        for i in 2..300 {
+            buf[i] = 0xC0; // Indexed static entry index 0
+        }
+        // Decode with limit of 256 headers — should reject
+        let result = qpack_decode_block_r(&buf[..300], 256, None, None);
+        assert!(
+            result.is_err(),
+            "decode with ~298 headers must exceed limit of 256, got: {:?}", result
+        );
     }
 }

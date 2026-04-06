@@ -517,7 +517,12 @@ async fn connection_handler(
 /// # Returns
 ///
 /// The number of requests served, or an error string.
-pub(crate) fn serve_h3_loop(port: u16, max_requests: i64) -> Result<i64, String> {
+pub(crate) fn serve_h3_loop(
+    cert_path: &str,
+    key_path: &str,
+    port: u16,
+    max_requests: i64,
+) -> Result<i64, String> {
     // Create a single-threaded tokio runtime.
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -525,8 +530,8 @@ pub(crate) fn serve_h3_loop(port: u16, max_requests: i64) -> Result<i64, String>
         .map_err(|e| format!("httpServe: HTTP/3 failed to create tokio runtime: {}", e))?;
 
     rt.block_on(async {
-        // Step 1: Create QUIC endpoint.
-        let (endpoint, _cert_der, _key_der) = create_quic_endpoint("", "", port)?;
+        // Step 1: Create QUIC endpoint with user-provided or self-signed cert/key.
+        let (endpoint, _cert_der, _key_der) = create_quic_endpoint(cert_path, key_path, port)?;
 
         let connection_count: Arc<std::sync::Mutex<Vec<quinn::Connection>>> =
             Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -764,7 +769,7 @@ mod tests {
         // Use max_requests=0 (unlimited) and timeout to assert it's waiting.
         let handle = tokio::spawn(async move {
             // Pick a port unlikely to have real traffic during test.
-            serve_h3_loop(0, 0)
+            serve_h3_loop("", "", 0, 0)
         });
 
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;

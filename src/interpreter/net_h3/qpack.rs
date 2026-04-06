@@ -242,11 +242,9 @@ pub(crate) fn qpack_decode_int_r(data: &[u8], prefix_bits: u8) -> H3Result<(u64,
 
 // ── QPACK Decode Functions: Result Variants (NET7-6b) ────────────────────
 
-/// Decode a QPACK integer with the given prefix bit width (legacy `Option<T>` form).
-/// **QPACK Integer encoding per RFC 9204 Section 4.1.1.** Uses prefix bits (m) and 7-bit continuation bytes.
-/// NB7-33: Distinct from QUIC varint (RFC 9000 Section 16) — QPACK uses arbitrary prefix bit widths,
-///   while QUIC varint uses fixed 2-bit length prefix.
-/// Returns `Some((value, bytes_consumed))` on success, `None` on error.
+/// Decode a QPACK integer with the given prefix bit width.
+/// **QPACK Integer decoding per RFC 9204 Section 4.1.1** — thin wrapper
+/// around `qpack_decode_int_r` to share a single implementation path (NET7-11c).
 pub(crate) fn qpack_decode_int(data: &[u8], prefix_bits: u8) -> Option<(u64, usize)> {
     qpack_decode_int_r(data, prefix_bits).ok()
 }
@@ -400,206 +398,17 @@ pub(crate) struct H3Header {
 /// `max_field_section_size` limits the wire size of the block (NB7-43 hardening).
 /// When `Some(limit)` is passed, the block is rejected if it exceeds the limit.
 /// `dynamic_table` is used for dynamic table lookups (Phase 6+).
+/// Decode a QPACK header block — `Option` wrapper (NB7-47).
+///
+/// Thin wrapper around `qpack_decode_block_r` to guarantee identical decoding logic.
+/// Eliminates the Option/Result duplication risk described in NB7-47.
 pub(crate) fn qpack_decode_block(
     data: &[u8],
     max_headers: usize,
     max_field_section_size: Option<u64>,
     dynamic_table: Option<&H3DynamicTable>,
 ) -> Option<Vec<H3Header>> {
-    // NB7-43: Reject oversized header blocks per client's max_field_section_size
-    if let Some(limit) = max_field_section_size {
-        if data.len() as u64 > limit {
-            return None;
-        }
-    }
-    if data.len() < 2 {
-        return None;
-    }
-
-    // Required Insert Count (prefix int, 8-bit prefix)
-    let (req_insert_count, mut consumed) = qpack_decode_int(data, 8)?;
-
-    // If dynamic table is not provided but the block requires it, reject.
-    // This preserves the Phase 2/3 "reject non-zero insert_count" behavior
-    // while enabling Phase 6 dynamic table decoding when the table is available.
-    if dynamic_table.is_none() && req_insert_count != 0 {
-        return None;
-    }
-
-    // Sign bit + Delta Base (prefix int, 7-bit prefix) — RFC 9204 Section 4.5.1.
-    // The sign bit (MSB) affects index calculation for Before Base entries:
-    //   D_abs = D + 2^(N-1) when Sign=1, where N = Required Insert Count.
-    //   D_abs = D when Sign=0.
-    if consumed >= data.len() {
-        return None;
-    }
-    let (most_deltas_base, db_consumed) = qpack_decode_int(&data[consumed..], 7)?;
-    consumed += db_consumed;
-
-    // NB7-109: RFC 9204 §4.5.1 — extract sign bit and compute D, D_abs.
-    let sign_bit = (most_deltas_base >> 6) != 0;
-    let delta_base = most_deltas_base & 0x3F; // 6-bit value after removing sign
-
-    // Compute D_abs per RFC 9204 Section 4.5.1:
-    //   D_abs = D when Sign=0
-    //   D_abs = D + 2^(N-1) when Sign=1 (N = Required Insert Count)
-    let d_abs = if sign_bit && req_insert_count > 0 {
-        req_insert_count
-            .checked_sub(1)
-            .and_then(|n| 1u64.checked_shl(n as u32))
-            .and_then(|pow| delta_base.checked_add(pow))
-            .unwrap_or(0)
-    } else {
-        delta_base
-    };
-
-    let mut headers = Vec::new();
-    while consumed < data.len() {
-        // NB7-11: overflow = decode error (H2 parity)
-        if headers.len() >= max_headers {
-            return None;
-        }
-
-        let byte = data[consumed];
-
-        if byte & 0x80 != 0 {
-            // Indexed Field Line (Section 4.5.2): 1Txxxxxx
-            let is_static = (byte & 0x40) != 0;
-            let (index, idx_consumed) = qpack_decode_int(&data[consumed..], 6)?;
-            consumed += idx_consumed;
-
-            if is_static {
-                let index = index as usize;
-                if index >= QPACK_STATIC_TABLE.len() {
-                    return None;
-                }
-                headers.push(H3Header {
-                    name: QPACK_STATIC_TABLE[index].name.to_string(),
-                    value: QPACK_STATIC_TABLE[index].value.to_string(),
-                });
-            } else {
-                // Dynamic table indexed by relative index (Section 4.5.2): 10xxxxxx
-                // T=0 => Before Base (absolute_index = RIC - D_abs - 1 - index)
-                let dynamic = dynamic_table?;
-                if req_insert_count == 0 {
-                    return None; // no dynamic table entries when insert_count is 0
-                }
-                // NB7-109: RFC 9204 §4.5.1 — use D_abs with sign bit for correct resolution.
-                // Before Base formula: absolute_index = RIC - D_abs - 1 - index
-                let ric = req_insert_count;
-                let base_val = ric.checked_sub(d_abs).and_then(|v| v.checked_sub(1))?;
-                // Verify index is within bounds: index < D_abs + 1
-                let max_relative = d_abs.checked_add(1).filter(|&m| index < m)?;
-                if index >= max_relative {
-                    return None;
-                }
-                let abs = base_val.checked_sub(index)?;
-                let entry = dynamic.lookup_absolute(abs)?;
-                headers.push(H3Header {
-                    name: entry.name.clone(),
-                    value: entry.value.clone(),
-                });
-            }
-        } else if byte & 0x40 != 0 {
-            // Literal Field Line With Name Reference (Section 4.5.4): 01NTxxxx
-            let is_static = (byte & 0x10) != 0;
-            let (name_index, ni_consumed) = qpack_decode_int(&data[consumed..], 4)?;
-            consumed += ni_consumed;
-
-            let name = if is_static {
-                let idx = name_index as usize;
-                if idx >= QPACK_STATIC_TABLE.len() {
-                    return None;
-                }
-                QPACK_STATIC_TABLE[idx].name.to_string()
-            } else {
-                // Dynamic table name reference (T=0): Before Base
-                let dynamic = dynamic_table?;
-                if req_insert_count == 0 {
-                    return None;
-                }
-                // NB7-109: same D_abs-based Before Base formula
-                let ric = req_insert_count;
-                let base_val = ric.checked_sub(d_abs).and_then(|v| v.checked_sub(1))?;
-                let max_relative = d_abs.checked_add(1).filter(|&m| name_index < m)?;
-                if name_index >= max_relative {
-                    return None;
-                }
-                let abs = base_val.checked_sub(name_index)?;
-                let entry = dynamic.lookup_absolute(abs)?;
-                entry.name.clone()
-            };
-
-            // Value string
-            let (value, val_consumed) = qpack_decode_string(&data[consumed..])?;
-            consumed += val_consumed;
-            headers.push(H3Header { name, value });
-        } else if byte & 0x20 != 0 {
-            // Literal Field Line With Literal Name (Section 4.5.6): 001Nxxxx
-            // Instruction byte layout: 001N Hxxx
-            //   N = never-indexed bit (bit 4)
-            //   H = name Huffman bit (bit 3)
-            //   xxx = 3-bit prefix for name length integer
-
-            // Decode name: 3-bit prefix integer for length, then raw/Huffman bytes
-            let name_huffman = (byte & 0x08) != 0;
-            let (name_len, nli_consumed) = qpack_decode_int(&data[consumed..], 3)?;
-            consumed += nli_consumed;
-            let name_len = name_len as usize;
-            if consumed + name_len > data.len() {
-                return None;
-            }
-            let name_data = &data[consumed..consumed + name_len];
-            let name = if name_huffman {
-                net_h2::huffman_decode(name_data)?
-            } else {
-                std::str::from_utf8(name_data).ok()?.to_string()
-            };
-            consumed += name_len;
-
-            // Decode value: standard QPACK string (7-bit prefix)
-            let (value, val_consumed) = qpack_decode_string(&data[consumed..])?;
-            consumed += val_consumed;
-            headers.push(H3Header { name, value });
-        } else if byte & 0x10 != 0 {
-            // Indexed Field Line With Post-Base Index (Section 4.5.3): 0001xxxx
-            let (post_base_index, idx_consumed) = qpack_decode_int(&data[consumed..], 4)?;
-            consumed += idx_consumed;
-
-            let dynamic = dynamic_table?;
-            let entry = dynamic.lookup_post_base(post_base_index)?;
-            headers.push(H3Header {
-                name: entry.name.clone(),
-                value: entry.value.clone(),
-            });
-        } else {
-            // NB7-110: Literal Field Line With Post-Base Name Reference (Section 4.5.5)
-            // Wire format: 000N xxxx where N = Never-Indexed bit.
-            let never_indexed = (byte & 0x08) != 0;
-            let (name_index, ni_consumed) = qpack_decode_int(&data[consumed..], 3)?;
-            consumed += ni_consumed;
-
-            let name = if never_indexed {
-                let idx = name_index as usize;
-                if idx >= QPACK_STATIC_TABLE.len() {
-                    return None;
-                }
-                QPACK_STATIC_TABLE[idx].name.to_string()
-            } else {
-                let dynamic = dynamic_table?;
-                if req_insert_count == 0 {
-                    return None;
-                }
-                dynamic.lookup_post_base(name_index)?;
-                dynamic.lookup_post_base(name_index).unwrap().name.clone()
-            };
-
-            let (value, val_consumed) = qpack_decode_string(&data[consumed..])?;
-            consumed += val_consumed;
-            headers.push(H3Header { name, value });
-        }
-    }
-    Some(headers)
+    qpack_decode_block_r(data, max_headers, max_field_section_size, dynamic_table).ok()
 }
 
 // ── QPACK Header Block Decode: Result Variant (NET7-6b / NB7-27) ────────

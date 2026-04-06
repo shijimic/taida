@@ -4764,11 +4764,11 @@ impl Interpreter {
     ///   - Transport I/O does NOT use the existing Transport trait (NB7-7)
     fn serve_h3(
         &mut self,
-        _cert_path: String,
-        _key_path: String,
+        cert_path: String,
+        key_path: String,
         _handler: super::value::FuncValue,
-        _max_requests: i64,
-        _port: u16,
+        max_requests: i64,
+        port: u16,
     ) -> Result<Option<Signal>, RuntimeError> {
         use super::net_h3;
 
@@ -4800,67 +4800,49 @@ impl Interpreter {
             }
         }
 
-        // QUIC transport gate: attempt to load a QUIC library.
-        // The Interpreter uses the same gating pattern as the Native backend:
-        // the H3 protocol semantics are fully implemented, but the actual
-        // QUIC transport requires an external library.
+        // NET7-12a: Connect to the real QUIC transport loop.
         //
-        // Phase 3: Try to load libquiche via dlopen. If unavailable, return
-        // H3QuicUnavailable (matching Native). If found but pending
-        // integration, return H3TransportPending (matching Native).
+        // The Interpreter H3 path uses quinn (pure Rust, tokio-native) as the
+        // QUIC substrate. Unlike the Native backend which uses libquiche via
+        // dlopen, the Interpreter compiles quinn in at build time -- no runtime
+        // library gate is needed.
         //
-        // We use raw FFI to call dlopen/dlclose directly (Rust links against
-        // libc on Linux/macOS), matching the Native backend's exact check.
-        unsafe extern "C" {
-            fn dlopen(filename: *const std::os::raw::c_char, flags: std::os::raw::c_int)
-                -> *mut std::os::raw::c_void;
-            fn dlclose(handle: *mut std::os::raw::c_void) -> std::os::raw::c_int;
-        }
-        const RTLD_LAZY: std::os::raw::c_int = 1;
-
-        let quiche_available = unsafe {
-            let handle = dlopen(
-                b"libquiche.so\0".as_ptr() as *const _,
-                RTLD_LAZY,
-            );
-            if handle.is_null() {
-                let handle2 = dlopen(
-                    b"libquiche.so.0\0".as_ptr() as *const _,
-                    RTLD_LAZY,
-                );
-                if handle2.is_null() {
-                    false
-                } else {
-                    dlclose(handle2);
-                    true
-                }
-            } else {
-                dlclose(handle);
-                true
+        // serve_h3_loop() creates a single-threaded tokio runtime internally,
+        // bridges to the synchronous interpreter via Runtime::block_on(), and
+        // returns the total request count on success.
+        //
+        // TODO(NB7-87/NET7-12b): handler dispatch is not yet wired. The
+        // serve loop currently echoes method+path+authority. Full handler
+        // integration will be added in NET7-12b.
+        match net_h3::serve_h3_loop(&cert_path, &key_path, port, max_requests) {
+            Ok(request_count) => {
+                let result_inner = Value::BuchiPack(vec![
+                    ("ok".into(), Value::Bool(true)),
+                    ("requests".into(), Value::Int(request_count)),
+                ]);
+                let result = make_result_success(result_inner);
+                Ok(Some(Signal::Value(make_fulfilled_async(result))))
             }
-        };
-
-        if !quiche_available {
-            // QUIC transport library not available — same as Native.
-            let result = make_result_failure_msg(
-                "H3QuicUnavailable",
-                "httpServe: HTTP/3 requires QUIC transport (libquiche.so). \
-                 Install quiche or equivalent QUIC library. \
-                 The HTTP/3 protocol layer (QPACK, frames, stream management) \
-                 is ready; only the QUIC transport binding is missing.",
-            );
-            return Ok(Some(Signal::Value(make_fulfilled_async(result))));
+            Err(e) => {
+                // Classify the error: quinn/rustls initialization failures
+                // are ProtocolError; runtime transport failures are separate.
+                let kind = if e.contains("failed to read cert") || e.contains("failed to read key")
+                    || e.contains("failed to parse") || e.contains("TLS config failed")
+                    || e.contains("unsupported key type") || e.contains("no valid certificates")
+                    || e.contains("no PEM items")
+                {
+                    "ProtocolError"
+                } else if e.contains("failed to create QUIC endpoint")
+                    || e.contains("failed to parse bind address")
+                {
+                    "ProtocolError"
+                } else {
+                    "H3RuntimeError"
+                };
+                let result = make_result_failure_msg(kind, e);
+                Ok(Some(Signal::Value(make_fulfilled_async(result))))
+            }
         }
-
-        // quiche found but integration pending — same as Native Phase 2.
-        let result = make_result_failure_msg(
-            "H3TransportPending",
-            "httpServe: HTTP/3 QUIC transport library found but integration \
-             is pending. The HTTP/3 protocol layer (QPACK, frame encoding, \
-             stream state, request/response mapping, graceful shutdown) is \
-             implemented. QUIC transport wiring will complete in Phase 2 hardening.",
-        );
-        Ok(Some(Signal::Value(make_fulfilled_async(result))))
     }
 
     /// Try to read and parse a request head from a connection (non-blocking).
