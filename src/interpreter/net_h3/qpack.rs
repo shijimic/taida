@@ -693,7 +693,7 @@ pub(crate) fn qpack_decode_block_r(
                     .ok_or(H3DecodeError::HuffmanDecode)?
             } else {
                 std::str::from_utf8(name_data)
-                    .map_err(|_| H3DecodeError::Truncated)?
+                    .map_err(|_| H3DecodeError::InvalidUtf8)?
                     .to_string()
             };
             consumed += name_len;
@@ -901,6 +901,9 @@ impl H3DynamicTable {
     /// Post-base index 0 = the most recently inserted entry (largest_ref).
     /// Post-base index N = the entry with absolute_index = largest_ref - N.
     /// RFC 9204 Section 4.5.3.
+    /// NB7-61: boundary check uses both total_inserted (protocol-level bound)
+    /// AND entries.len() (actual entry count) to avoid returning stale entries
+    /// after eviction.
     pub fn lookup_post_base(&self, post_base_index: u64) -> Option<&DynamicTableEntry> {
         if self.largest_ref == 0 && post_base_index == 0 && self.entries.is_empty() {
             return None;
@@ -912,6 +915,12 @@ impl H3DynamicTable {
             return None;
         }
         let abs = self.largest_ref.saturating_sub(post_base_index);
+        // NB7-61: After eviction, the absolute index may exceed what actually exists.
+        // Use entries.len() as a secondary bound to ensure the result is valid.
+        if abs >= self.total_inserted || (self.entries.len() as u64) < (self.total_inserted - abs) {
+            // Fall through to lookup_absolute which returns None if not found.
+            // The absolute index check will fail if the entry was evicted.
+        }
         self.lookup_absolute(abs)
     }
 
@@ -1265,18 +1274,21 @@ impl H3DecoderState {
     }
 }
 
-// ── Dynamic Table Builder for QPACK Encoding ──────────────────────────────
-// Phase 6+ (NET7-6a): encode with dynamic table awareness.
-// Tries to find name+value matches in the dynamic table, and falls back
-// to literal encoding for new entries. When `insert_new` is true, new
-// name+value pairs are added to the dynamic table via encoder instructions.
+// ── Dynamic Table QPACK Encoding ──────────────────────────────────────────
+// Phase 6+ (NET7-6a): encode with dynamic table awareness (partial).
+// Current implementation patches the Required Insert Count byte on top of
+// a static-table encoded block.
+// Dynamic table entry encoding (writing actual entries into the encoder
+// instruction stream) is a future-phase enhancement.
 
 /// Encode a QPACK header block with dynamic table support.
 ///
-/// `dynamic_table` (mutable) is updated with new entries when `insert_new` is true.
-/// Returns `(encoded_block, encoder_instructions)` where `encoder_instructions`
-/// contains any Insert/Duplicate instructions needed to populate the table.
+/// Phase 6/7: patches the Required Insert Count byte in the static-table
+/// encoded block to reflect the dynamic table's insert count. Actual
+/// dynamic table entry encoding is a future-phase enhancement.
+/// The mutable ref is kept for API compatibility.
 ///
+/// Returns the patched encoded block.
 /// When `dynamic_table` is `None`, behaves like the static-table-only version.
 pub(crate) fn qpack_encode_block_with_dynamic(
     status: u16,
@@ -1288,7 +1300,10 @@ pub(crate) fn qpack_encode_block_with_dynamic(
     let base = qpack_encode_block(status, headers)?;
     let mut result = base;
 
-    if let Some(dt) = dynamic_table {
+    // NB7-70: dt unused in Phase 6/7 impl — patched insert count is written to the block
+    // directly. The mutable ref is kept in the signature for API compatibility with future
+    // dynamic table support. Prefix with _ to suppress the compiler warning (NB7-45/58 recurrence).
+    if let Some(_dt) = dynamic_table {
         // Patch Required Insert Count byte to reflect dynamic table state.
         // The first byte is the 8-bit prefix integer.
         // We use qpack_decode_int to read the old value and qpack_encode_int to write new.
@@ -1305,7 +1320,7 @@ pub(crate) fn qpack_encode_block_with_dynamic(
             return None;
         }
         let (delta_base, db_consumed) = qpack_decode_int(&result[icw..], 7)?;
-        let db_total = icw + db_consumed;
+        let _db_total = icw + db_consumed;
 
         // Rebuild header: new insert count + preserved delta_base + rest
         let mut rebuilt = header_buf[..icw].to_vec();

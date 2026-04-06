@@ -692,7 +692,14 @@ fn decode_huffman(data: &[u8]) -> Result<String, H2Error> {
         while bits_left >= 5 {
             // Try to match from longest to shortest code
             if let Some((sym, len)) = try_decode_huffman_symbol(bits, bits_left) {
-                result.push(sym);
+                // NB7-75: RFC 7541 Section 5.2 — EOS symbol (256) MUST NOT be emitted
+                // by an encoder. Treat it as a decoding error to prevent request smuggling.
+                if sym == 256 {
+                    return Err(H2Error::Compression(
+                        "HPACK: Huffman EOS symbol forbidden in header compression".into(),
+                    ));
+                }
+                result.push(sym as u8);
                 bits_left -= len;
                 // Mask off the consumed bits
                 bits &= (1u64 << bits_left) - 1;
@@ -716,7 +723,7 @@ fn decode_huffman(data: &[u8]) -> Result<String, H2Error> {
     }
     if bits_left > 0 {
         let padding_mask = (1u64 << bits_left) - 1;
-        if bits & padding_mask != padding_mask {
+        if (bits & padding_mask) != padding_mask {
             return Err(H2Error::Compression(
                 "HPACK: invalid Huffman padding (not all 1s)".into(),
             ));
@@ -736,7 +743,7 @@ pub(crate) fn huffman_decode(data: &[u8]) -> Option<String> {
 
 /// Try to decode one Huffman symbol from the bit buffer.
 /// Returns (symbol_byte, bits_consumed) if successful.
-fn try_decode_huffman_symbol(bits: u64, bits_left: u8) -> Option<(u8, u8)> {
+fn try_decode_huffman_symbol(bits: u64, bits_left: u8) -> Option<(u16, u8)> {
     // Check each symbol in the Huffman table (RFC 7541 Appendix B).
     // We align the top bits of our buffer and compare against each code.
     for &(sym, code, code_len) in HUFFMAN_TABLE.iter() {
@@ -755,7 +762,7 @@ fn try_decode_huffman_symbol(bits: u64, bits_left: u8) -> Option<(u8, u8)> {
 /// Each entry: (symbol, code, code_length_in_bits)
 /// Sorted by code length for decode efficiency.
 #[rustfmt::skip]
-const HUFFMAN_TABLE: &[(u8, u32, u8)] = &[
+const HUFFMAN_TABLE: &[(u16, u32, u8)] = &[
     // 5-bit codes
     (  48, 0x00,  5), // '0'
     (  49, 0x01,  5), // '1'
@@ -1033,7 +1040,9 @@ const HUFFMAN_TABLE: &[(u8, u32, u8)] = &[
     (  10, 0x3ffffffc, 30),
     (  13, 0x3ffffffd, 30),
     (  22, 0x3ffffffe, 30),
-    // EOS (256) is 0x3fffffff, 30 bits — not decoded as a symbol
+    // 30-bit EOS symbol (RFC 7541 Section 5.2). Must be rejected per spec:
+    // an encoder MUST NOT emit this symbol; a decoder MUST treat it as an error.
+    (256, 0x3fffffff, 30),
 ];
 
 // ── H2 Connection State ─────────────────────────────────────────────

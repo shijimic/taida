@@ -7,15 +7,11 @@
 /// - Selftests mirroring Native reference
 
 use super::qpack::{
-    qpack_encode_block, qpack_decode_block, QPACK_STATIC_TABLE, H3Header,
-    H3DecodeError, qpack_decode_int,
+    qpack_encode_block, qpack_decode_block, H3Header,
 };
 use super::frame::{
-    encode_frame, decode_frame, decode_frame_header,
+    encode_frame,
     H3_FRAME_HEADERS, H3_FRAME_DATA,
-    H3_DEFAULT_MAX_FIELD_SECTION_SIZE, H3_MAX_STREAMS,
-    varint_decode, varint_encode,
-    encode_settings, H3Settings, H3_MAX_SETTINGS_PAIRS,
 };
 
 

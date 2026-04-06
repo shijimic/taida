@@ -8,12 +8,9 @@
 /// - QPACK dynamic table and decoder/encoder instruction processing
 
 use super::qpack::{
-    H3DecodeError, H3DynamicTable, H3EncoderInstruction,
-    H3DecoderInstruction, H3DecoderState,
-    apply_encoder_instruction, decode_encoder_instruction,
-    decode_decoder_instruction, H3Header,
+    H3DecodeError, H3Header,
 };
-use super::frame::{encode_goaway, H3_FRAME_GOAWAY, varint_decode, H3_MAX_STREAMS, H3_DEFAULT_MAX_FIELD_SECTION_SIZE};
+use super::frame::{encode_goaway, H3_MAX_STREAMS, H3_DEFAULT_MAX_FIELD_SECTION_SIZE};
 
 
 // ── H3 Stream State Machine ──────────────────────────────────────────────
@@ -52,7 +49,7 @@ impl H3Stream {
 /// These fields track QUIC-specific state and are **separate** from the
 /// existing 14-field handler contract. They are surfaced via `H3HandlerContext`
 /// for H3-specific requests and do not affect h1/h2 handler compatibility.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum H3ConnState {
     /// No active QUIC stream; awaiting peer frames.
     Idle,
@@ -124,6 +121,10 @@ pub(crate) struct H3Connection {
     pub state: H3ConnState,
     // H3-specific handler context for the current request
     pub handler_ctx: H3HandlerContext,
+    // NB7-76: Track active streams for drain wait. Counts streams in Open
+    // or HalfClosedLocal state. Draining connections must wait for this to
+    // reach zero before transitioning to Closed to avoid data loss.
+    pub active_stream_count: usize,
 }
 
 impl H3Connection {
@@ -144,6 +145,7 @@ impl H3Connection {
             current_quic_stream_id: 0,
             state: H3ConnState::Idle,
             handler_ctx: H3HandlerContext::default(),
+            active_stream_count: 0,
         }
     }
 
@@ -249,7 +251,7 @@ impl H3Connection {
     /// Active -> Closed (emergency close, skip draining)
     pub fn transition_state(&mut self, target: H3ConnState) -> bool {
         let valid = matches!(
-            (self.state.clone(), target.clone()),
+            (self.state, target),
             (H3ConnState::Idle, H3ConnState::Active)
                 | (H3ConnState::Idle, H3ConnState::Closed)
                 | (H3ConnState::Active, H3ConnState::Draining)
@@ -270,12 +272,29 @@ impl H3Connection {
 
     /// Begin graceful shutdown: send GOAWAY with the last peer stream ID,
     /// then transition to Draining state. Returns false if already shutting down.
+    ///
+    /// NB7-76: After sending GOAWAY, the caller MUST check `has_active_streams()`
+    /// or `active_stream_count() == 0` before transitioning to Closed.
+    /// The `shutdown()` 1-step pipeline enforces this by design — the caller
+    /// implements drain wait between Step 1 (Draining) and Step 2 (Closed).
     pub fn begin_shutdown(&mut self) -> bool {
         if self.state != H3ConnState::Active || self.goaway_sent {
             return false;
         }
         self.goaway_sent = true;
         self.transition_state(H3ConnState::Draining)
+    }
+
+    /// Return the count of streams that are not yet Closed.
+    /// NB7-76: Used to verify drain wait before transitioning to Closed.
+    pub fn active_stream_count(&self) -> usize {
+        self.streams.iter().filter(|s| s.state != H3StreamState::Closed).count()
+    }
+
+    /// Check whether there are streams still in flight.
+    /// NB7-76: Caller should wait until this returns false before completing shutdown.
+    pub fn has_active_streams(&self) -> bool {
+        self.active_stream_count() > 0
     }
 
     /// Receive a GOAWAY frame from the peer. Returns false if already received.

@@ -99,7 +99,8 @@ pub(crate) use request::{
     SelftestResult, run_selftests,
 };
 
-// From connection.rs
+// From connection.rs — NB7-73: intentional API surface for external callers
+#[allow(unused_imports)]
 pub(crate) use connection::{
     H3StreamState, H3Stream,
     H3ConnState, H3HandlerContext,
@@ -1604,5 +1605,453 @@ mod tests {
         let elapsed = start.elapsed().as_millis() as u64;
         let frames_per_ms = cycles / elapsed.max(1);
         assert!(frames_per_ms > 1000, "H3 frame should achieve >1000 enc/dec/ms, got {}", frames_per_ms);
+    }
+
+    // ── NB7-79: QPACK Static Table RFC 9204 Appendix A Verification ─────
+
+    /// Verify that QPACK_STATIC_TABLE matches RFC 9204 Appendix A exactly.
+    /// This test prevents silent drift from the RFC spec.
+    #[test]
+    fn test_qpack_static_table_rfc9204_compliance() {
+        // RFC 9204 Appendix A: The static table contains 99 entries (indices 0..98).
+        assert_eq!(QPACK_STATIC_TABLE.len(), 99,
+            "RFC 9204 §Appendix A defines exactly 99 static table entries");
+
+        // Verify critical entries that are most likely to cause interop failures.
+        // These are the entries used in real HTTP/3 request/response flows.
+        let critical = [
+            (0, ":authority", ""),           // Pseudo-header
+            (1, ":path", "/"),               // Pseudo-header
+            (15, ":method", "CONNECT"),
+            (16, ":method", "DELETE"),
+            (17, ":method", "GET"),
+            (18, ":method", "HEAD"),
+            (19, ":method", "OPTIONS"),
+            (20, ":method", "POST"),
+            (21, ":method", "PUT"),
+            (22, ":scheme", "http"),
+            (23, ":scheme", "https"),
+            (25, ":status", "200"),
+            (24, ":status", "103"),
+            (26, ":status", "304"),
+            (27, ":status", "404"),
+            (28, ":status", "503"),
+            (53, "content-type", "text/plain"),
+            (52, "content-type", "text/html; charset=utf-8"),
+            (46, "content-type", "application/json"),
+        ];
+
+        for (idx, name, value) in critical {
+            let entry = &QPACK_STATIC_TABLE[idx];
+            assert_eq!(entry.name, name,
+                "Static table [{}] name mismatch: expected '{}', got '{}'", idx, name, entry.name);
+            assert_eq!(entry.value, value,
+                "Static table [{}] value mismatch: expected '{}', got '{}'", idx, value, entry.value);
+        }
+    }
+
+    /// Verify the first 20 entries of the QPACK static table (indices 0-19).
+    /// These cover pseudo-headers and common method values.
+    #[test]
+    fn test_qpack_static_table_first_20_entries() {
+        let expected = [
+            (":authority", ""),
+            (":path", "/"),
+            ("age", "0"),
+            ("content-disposition", ""),
+            ("content-length", "0"),
+            ("cookie", ""),
+            ("date", ""),
+            ("etag", ""),
+            ("if-modified-since", ""),
+            ("if-none-match", ""),
+            ("last-modified", ""),
+            ("link", ""),
+            ("location", ""),
+            ("referer", ""),
+            ("set-cookie", ""),
+            (":method", "CONNECT"),
+            (":method", "DELETE"),
+            (":method", "GET"),
+            (":method", "HEAD"),
+            (":method", "OPTIONS"),
+        ];
+        for (i, (name, value)) in expected.iter().enumerate() {
+            assert_eq!(QPACK_STATIC_TABLE[i].name, *name,
+                "Entry {} name mismatch", i);
+            assert_eq!(QPACK_STATIC_TABLE[i].value, *value,
+                "Entry {} value mismatch", i);
+        }
+    }
+
+    /// Verify status code entries in the static table.
+    #[test]
+    fn test_qpack_static_table_status_codes() {
+        let status_entries = [
+            (24, "103"), (25, "200"), (26, "304"), (27, "404"), (28, "503"),
+            (63, "100"), (64, "204"), (65, "206"), (66, "302"), (67, "400"),
+            (68, "403"), (69, "421"), (70, "425"), (71, "500"),
+        ];
+        for (idx, expected_val) in status_entries {
+            let entry = &QPACK_STATIC_TABLE[idx];
+            assert_eq!(entry.name, ":status");
+            assert_eq!(entry.value, expected_val,
+                "Status code at [{}]: expected '{}', got '{}'", idx, expected_val, entry.value);
+        }
+    }
+
+    /// Verify content-type entries in the static table.
+    #[test]
+    fn test_qpack_static_table_content_types() {
+        let ct_entries = [
+            (44, "application/dns-message"),
+            (45, "application/javascript"),
+            (46, "application/json"),
+            (47, "application/x-www-form-urlencoded"),
+            (48, "image/gif"),
+            (49, "image/jpeg"),
+            (50, "image/png"),
+            (51, "text/css"),
+            (52, "text/html; charset=utf-8"),
+            (53, "text/plain"),
+            (54, "text/plain;charset=utf-8"),
+        ];
+        for (idx, expected_val) in ct_entries {
+            let entry = &QPACK_STATIC_TABLE[idx];
+            assert_eq!(entry.name, "content-type");
+            assert_eq!(entry.value, expected_val);
+        }
+    }
+
+    // ── NB7-81: Edge Case Interop Tests ─────────────────────────────────
+
+    /// Test 1: GOAWAY reception → new stream rejection.
+    /// After receive_goaway(), the connection should be in Draining state
+    /// and reject new streams via new_stream().
+    #[test]
+    fn test_h3_goaway_rejects_new_streams() {
+        let mut conn = H3Connection::new();
+        conn.transition_state(H3ConnState::Active);
+
+        // Accept a stream normally
+        assert!(conn.new_stream(0).is_some());
+        assert_eq!(conn.streams.len(), 1);
+
+        // Peer sends GOAWAY
+        assert!(conn.receive_goaway(0));
+        assert_eq!(conn.state, H3ConnState::Draining);
+        assert!(conn.goaway_received);
+
+        // New stream should be rejected (Draining state)
+        assert!(conn.new_stream(4).is_none(),
+            "new_stream after GOAWAY should be rejected");
+
+        // Existing stream can still be accessed
+        assert!(conn.find_stream(0).is_some());
+    }
+
+    /// Test 2: Malformed QPACK header block — truncated input returns error.
+    /// A block that is too short for the prefix integers should be rejected.
+    #[test]
+    fn test_h3_qpack_decode_rejects_truncated_block() {
+        // Minimum valid block is 2 bytes (insert count + sign/delta_base prefix minimum)
+        // 0 or 1 byte should always fail
+        assert!(qpack_decode_block(&[], 10, None, None).is_none());
+        assert!(qpack_decode_block(&[0x00], 10, None, None).is_none());
+
+        // 2-byte block with invalid indexed field reference
+        let truncated = [0x00, 0x00]; // Insert Count=0, Delta Base=0
+        // This is technically valid (empty header block) — should decode to empty
+        let result = qpack_decode_block(&truncated, 10, None, None);
+        assert!(result.is_some(), "empty block should decode to empty headers");
+        assert_eq!(result.unwrap().len(), 0);
+    }
+
+    /// Test 2b: QPACK decode rejects static table OOB index.
+    /// Indexed field with T=1 but index beyond table length.
+    #[test]
+    fn test_h3_qpack_rejects_static_table_oob() {
+        // Build a block referencing static table index 99 (OOB, valid range is 0..98)
+        let mut buf = [0u8; 16];
+        let mut pos = 0;
+        // Required Insert Count = 0
+        buf[pos] = 0x00; pos += 1;
+        // Delta Base = 0
+        buf[pos] = 0x00; pos += 1;
+        // Indexed Field T=1, 6-bit prefix, index=99 (OOB)
+        // 1Txxxxxx = 11xxxxxx, prefix value = 63, continuation for 99-63=36
+        // Actually: prefix 6 bits, mask = 0x3F. If value >= 63, use continuation.
+        // 99 >= 63, so base = 63, extra = 99-63 = 36, first byte = 0xC0 | 63 = 0xFF
+        // continuation = 36 (with high bit = 0) = 0x24
+        let w = qpack_encode_int(&mut buf[pos..], 6, 99, 0xC0).unwrap();
+        pos += w;
+
+        assert!(qpack_decode_block(&buf[..pos], 10, None, None).is_none(),
+            "OOB static table index should be rejected");
+    }
+
+    /// Test 3: Frame boundary — zero-payload frame is accepted.
+    /// A DATA frame with zero-length payload is legal and should be accepted.
+    #[test]
+    fn test_h3_zero_length_payload_frame() {
+        let frame = encode_frame(H3_FRAME_DATA, &[]).expect("encode empty payload");
+        let (ft, payload) = decode_frame(&frame).expect("decode empty payload");
+        assert_eq!(ft, H3_FRAME_DATA);
+        assert!(payload.is_empty());
+    }
+
+    /// Test 3b: Truncated frame header is rejected.
+    #[test]
+    fn test_h3_truncated_frame_rejected() {
+        // A frame type varint that claims 2-byte encoding but only 1 byte present
+        let truncated = [0x40]; // 01xxxxxx prefix = 2-byte form, but only 1 byte
+        assert!(decode_frame(&truncated).is_none(),
+            "Truncated varint in frame should be rejected");
+    }
+
+    /// Test 4: Stream half-close lifecycle.
+    /// A stream transitions: Idle -> Open -> HalfClosedLocal -> Closed.
+    /// Verify the state machine works correctly.
+    #[test]
+    fn test_h3_stream_lifecycle_half_close() {
+        let mut conn = H3Connection::new();
+        conn.transition_state(H3ConnState::Active);
+
+        let stream = conn.new_stream(0).expect("create stream");
+        assert_eq!(stream.state, H3StreamState::Open);
+
+        // Simulate half-close: the stream is half-closed when request body is complete
+        stream.state = H3StreamState::HalfClosedLocal;
+
+        // Final close
+        stream.state = H3StreamState::Closed;
+        assert_eq!(conn.find_stream(0).unwrap().state, H3StreamState::Closed);
+
+        // remove_closed_streams should clean it up
+        assert_eq!(conn.streams.len(), 1);
+        conn.remove_closed_streams();
+        assert_eq!(conn.streams.len(), 0);
+    }
+
+    /// Test 4b: Draining state — existing stream can complete.
+    #[test]
+    fn test_h3_draining_existing_stream_can_complete() {
+        let mut conn = H3Connection::new();
+        conn.transition_state(H3ConnState::Active);
+        conn.new_stream(0).expect("stream");
+
+        // Verify stream is Open
+        assert_eq!(conn.find_stream(0).unwrap().state, H3StreamState::Open);
+
+        // GOAWAY received — connection enters Draining
+        assert!(conn.receive_goaway(0));
+        assert_eq!(conn.state, H3ConnState::Draining);
+
+        // Stream can still transition
+        if let Some(s) = conn.find_stream_mut(0) {
+            s.state = H3StreamState::HalfClosedLocal;
+        }
+        if let Some(s) = conn.find_stream_mut(0) {
+            s.state = H3StreamState::Closed;
+        }
+
+        // Verify active_stream_count
+        assert!(!conn.has_active_streams());
+        assert_eq!(conn.active_stream_count(), 0);
+    }
+
+    // ── NB7-82: QPACK Dynamic Table Linear Search Rationale ────────────
+
+    // NB7-82: The dynamic table uses linear search (O(n)) for post-base
+    // lookups in `lookup_post_base()`. For the typical HTTP/3 use case
+    // (dynamic table size < 100 entries), this is sub-microsecond.
+    // Hash-based matching would improve worst-case to O(1) but adds
+    // complexity and memory overhead. This is documented for future
+    // optimization — not a correctness issue.
+    // See: `H3DynamicTable::lookup_post_base()` in qpack.rs
+
+    /// Verify that dynamic table linear search works correctly for
+    /// typical-sized tables (< 100 entries).
+    #[test]
+    fn test_dynamic_table_linear_search_correctness() {
+        let mut table = H3DynamicTable::new(32768); // 32KB
+
+        // Insert entries
+        for i in 0..50 {
+            table.insert(format!("x-header-{}", i), format!("value-{}", i));
+        }
+
+        assert_eq!(table.len(), 50);
+
+        // Verify all entries via lookup_post_base
+        // Post-base index 0 = newest entry (index 49)
+        // Post-base index 49 = oldest entry (index 0)
+        for post_idx in 0..50u64 {
+            let entry = table.lookup_post_base(post_idx)
+                .unwrap_or_else(|| panic!("post_base({}) not found", post_idx));
+            let expected_i = 49 - post_idx;
+            assert_eq!(entry.name, format!("x-header-{}", expected_i),
+                "post_index {} should map to x-header-{}", post_idx, expected_i);
+            assert_eq!(entry.value, format!("value-{}", expected_i));
+        }
+
+        // Out-of-range should return None
+        assert!(table.lookup_post_base(50).is_none());
+    }
+
+    // ── NB7-83: Property-Based VarInt Tests ─────────────────────────────
+
+    /// Property: Every value that can be encoded should decode back to the same value.
+    /// Tests all boundary values and a range around each boundary.
+    #[test]
+    fn test_varint_property_roundtrip_all_forms() {
+        // Boundary values for each encoding form:
+        // 1-byte: 0..=63, 2-byte: 64..=16383, 4-byte: 16384..=1073741823,
+        // 8-byte: 1073741824..=4611686018427387903
+        let boundaries: &[u64] = &[
+            0, 1, 62, 63,                 // 1-byte boundary
+            64, 65,                       // 2-byte start
+            16382, 16383,                 // 2-byte boundary
+            16384, 16385,                 // 4-byte start
+            1_073_741_822, 1_073_741_823, // 4-byte boundary
+            1_073_741_824, 1_073_741_825, // 8-byte start
+            4_611_686_018_427_387_903,    // max QUIC varint (2^62-1)
+        ];
+
+        for &value in boundaries {
+            let mut buf = [0u8; 16];
+            let written = varint_encode(&mut buf, value)
+                .unwrap_or_else(|| panic!("encode failed for {}", value));
+            let (decoded, consumed) = varint_decode(&buf[..written])
+                .unwrap_or_else(|| panic!("decode failed for {}", value));
+            assert_eq!(decoded, value, "roundtrip failed for {}", value);
+            assert_eq!(consumed, written, "bytes consumed != written for {}", value);
+        }
+    }
+
+    /// Property: VarInt encoding should use the smallest valid form.
+    /// A value encodable in 1 byte should not produce a 2+ byte encoding.
+    #[test]
+    fn test_varint_property_minimal_encoding() {
+        for value in 0..=63u64 {
+            let mut buf = [0u8; 16];
+            let written = varint_encode(&mut buf, value).unwrap();
+            assert_eq!(written, 1,
+                "value {} should encode to 1 byte, got {} bytes", value, written);
+        }
+        // 64 should be 2 bytes
+        {
+            let mut buf = [0u8; 16];
+            let written = varint_encode(&mut buf, 64).unwrap();
+            assert_eq!(written, 2, "64 should encode to 2 bytes");
+        }
+        // 16384 should be 4 bytes
+        {
+            let mut buf = [0u8; 16];
+            let written = varint_encode(&mut buf, 16384).unwrap();
+            assert_eq!(written, 4, "16384 should encode to 4 bytes");
+        }
+        // 1073741824 should be 8 bytes
+        {
+            let mut buf = [0u8; 16];
+            let written = varint_encode(&mut buf, 1_073_741_824).unwrap();
+            assert_eq!(written, 8, "1073741824 should encode to 8 bytes");
+        }
+    }
+
+    /// Property: Non-canonical encodings should be rejected.
+    /// Values that fit in fewer bytes but use larger forms are malformed.
+    #[test]
+    fn test_varint_rejects_non_canonical() {
+        // Value 5 encoded in 2-byte form (should be 1 byte)
+        // 2-byte form: 01xxxxxx, value = 5 -> 0x40 | (5>>8) = 0x40, then 0x05
+        let non_canonical_2 = [0x40, 0x05];
+        assert!(varint_decode(&non_canonical_2).is_none(),
+            "should reject 2-byte encoding of 5");
+
+        // Value 100 encoded in 4-byte form (should be 2 bytes)
+        // 4-byte form: 10xxxxxx, value = 100 -> 0x80 | (100>>24), 0, 0, 100
+        let non_canonical_4 = [0x80, 0x00, 0x00, 100];
+        assert!(varint_decode(&non_canonical_4).is_none(),
+            "should reject 4-byte encoding of 100");
+
+        // Value 42 encoded in 8-byte form
+        let non_canonical_8 = [0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 42];
+        assert!(varint_decode(&non_canonical_8).is_none(),
+            "should reject 8-byte encoding of 42");
+    }
+
+    /// Property: VarInt decode handles all malformed inputs gracefully.
+    #[test]
+    fn test_varint_malformed_inputs() {
+        assert!(varint_decode(&[]).is_none(), "empty input");
+        assert!(varint_decode(&[0x40]).is_none(), "2-byte prefix with no data");
+        assert!(varint_decode(&[0x80, 0x00, 0x00]).is_none(), "4-byte prefix with 3 bytes");
+        assert!(varint_decode(&[0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]).is_none(),
+            "8-byte prefix with 7 bytes");
+    }
+
+    /// Property: VarInt roundtrip for random values (deterministic pseudo-random).
+    #[test]
+    fn test_varint_property_pseudo_random_roundtrip() {
+        // Deterministic "random" values using a simple LCG
+        let mut state: u64 = 42;
+        let mut count = 0;
+        for _ in 0..1000 {
+            // LCG: s = s * 6364136223846793005 + 1442695040888963407
+            state = state.wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            // Mask to 62 bits (valid QUIC varint range)
+            let val = state & 0x3FFF_FFFF_FFFF_FFFF;
+            let mut buf = [0u8; 16];
+            if let Some(written) = varint_encode(&mut buf, val) {
+                if let Some((decoded, consumed)) = varint_decode(&buf[..written]) {
+                    assert_eq!(decoded, val, "roundtrip failed at iteration {}", count);
+                    assert_eq!(consumed, written);
+                } else {
+                    panic!("decode failed at iteration {} for value {}", count, val);
+                }
+            } else {
+                panic!("encode failed at iteration {} for value {}", count, val);
+            }
+            count += 1;
+        }
+    }
+
+    // ── NB7-76: Active stream tracking for drain wait ────────────────────
+
+    /// Verify that begin_shutdown + drain wait + complete_shutdown works
+    /// when there are active streams.
+    #[test]
+    fn test_shutdown_drain_wait_with_active_streams() {
+        let mut conn = H3Connection::new();
+        conn.transition_state(H3ConnState::Active);
+
+        // Create two streams
+        conn.new_stream(0).unwrap();
+        conn.new_stream(4).unwrap();
+        assert_eq!(conn.active_stream_count(), 2);
+        assert!(conn.has_active_streams());
+
+        // Step 1: begin_shutdown sends GOAWAY, enters Draining
+        let (ok, frames) = conn.shutdown();
+        assert!(ok);
+        assert!(frames.is_some()); // GOAWAY frame bytes
+        assert_eq!(conn.state, H3ConnState::Draining);
+
+        // Draining connections still have active streams — caller should wait
+        assert!(conn.has_active_streams());
+        assert_eq!(conn.active_stream_count(), 2);
+
+        // Close streams (simulating drain complete)
+        if let Some(s) = conn.find_stream_mut(0) { s.state = H3StreamState::Closed; }
+        if let Some(s) = conn.find_stream_mut(4) { s.state = H3StreamState::Closed; }
+        assert!(!conn.has_active_streams());
+        assert_eq!(conn.active_stream_count(), 0);
+
+        // Step 2: Draining -> Closed
+        let (ok2, _) = conn.shutdown();
+        assert!(ok2);
+        assert_eq!(conn.state, H3ConnState::Closed);
     }
 }

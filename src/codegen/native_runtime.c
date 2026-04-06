@@ -13793,6 +13793,8 @@ static const H2HuffEntry H2_HUFFMAN_TABLE[] = {
     { 26, 0xffffff6,28},{ 27, 0xffffff7,28},{ 28, 0xffffff8,28},{ 29, 0xffffff9,28},
     { 30, 0xffffffa,28},{ 31, 0xffffffb,28},{127, 0xffffffc,28},{220, 0xffffffd,28},
     {249, 0xffffffe,28},{ 10, 0x3ffffffc,30},{ 13, 0x3ffffffd,30},{ 22, 0x3ffffffe,30},
+    /* NB7-75: RFC 7541 Section 5.2 — EOS (256) must be in table so decoder can reject it */
+    {256, 0x3fffffff,30},
 };
 #define H2_HUFFMAN_TABLE_LEN (sizeof(H2_HUFFMAN_TABLE)/sizeof(H2_HUFFMAN_TABLE[0]))
 
@@ -13858,6 +13860,8 @@ static int h2_huffman_decode(const unsigned char *src, size_t src_len,
                 }
                 H2HuffLookup *entry = &h2_huff_lut[prefix];
                 if (entry->bits > 0 && entry->bits <= bits_left) {
+                    /* NB7-75: RFC 7541 Section 5.2 — EOS symbol (256) forbidden */
+                    if (entry->sym == 256) return -1;
                     if (out >= (int)dst_cap) return -1;
                     dst[out++] = entry->sym;
                     bits_left -= entry->bits;
@@ -13874,6 +13878,8 @@ static int h2_huffman_decode(const unsigned char *src, size_t src_len,
                 uint8_t shift = bits_left - code_len;
                 uint32_t candidate = (uint32_t)(bits >> shift);
                 if (candidate == H2_HUFFMAN_TABLE[t].code) {
+                    /* NB7-75: RFC 7541 Section 5.2 — EOS symbol (256) forbidden */
+                    if (H2_HUFFMAN_TABLE[t].sym == 256) return -1;
                     if (out >= (int)dst_cap) return -1;
                     dst[out++] = H2_HUFFMAN_TABLE[t].sym;
                     bits_left -= code_len;
@@ -16882,10 +16888,14 @@ static int quic_pool_find_by_dcid(QuicConnPool *pool, uint64_t dcid_hash) {
 // NET7-8c: Connection maintenance pass.
 // Closes connections that are fully closed or draining.
 // Called periodically during the I/O event loop.
+// NB7-74: scans only active slots (pool->count), not all 256 slots.
+// Early-exits once all active connections have been checked.
 static void h3_conn_maintenance(QuicConnPool *pool) {
     pthread_mutex_lock(&pool->mutex);
-    for (int i = 0; i < QUIC_MAX_CONNECTIONS; i++) {
+    int remaining = pool->count;
+    for (int i = 0; i < QUIC_MAX_CONNECTIONS && remaining > 0; i++) {
         if (!pool->slots[i].active) continue;
+        remaining--;
         if (!pool->slots[i].conn) continue;
 
         // Check closed/draining state.

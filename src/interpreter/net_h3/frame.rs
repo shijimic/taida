@@ -1,8 +1,4 @@
 /// H3 frame I/O with QUIC varint encoding (RFC 9000 §16) and frame type constants (RFC 9114).
-///
-/// **Dependencies**: `super::qpack` for H3Result/H3DecodeError (qpack defines them).
-
-use super::qpack::{H3DecodeError, H3Result};
 
 // ── QUIC Variable-Length Integer Coding (RFC 9000 Section 16) ────────────
 // **QUIC Variable-Length Integer encoding per RFC 9000 Section 16.**
@@ -161,13 +157,14 @@ pub(crate) fn decode_frame_header(data: &[u8]) -> Option<(u64, u64, usize)> {
 ///   64-bit onlyの場合は常に安全。32-bit systemでもusize overflowをgraceful reject。
 pub(crate) fn decode_frame(data: &[u8]) -> Option<(u64, &[u8])> {
     let (frame_type, frame_length, header_size) = decode_frame_header(data)?;
-    // NB7-24 portability guard: reject frame_length that exceeds usize::MAX
-    if frame_length > usize::MAX as u64 {
-        return None;
-    }
-    let total = header_size
-        .checked_add(frame_length as usize)
-        .filter(|&end| end <= data.len())?;
+    // NB7-27 / NB7-77: use try_into() instead of `as usize` to prevent silent truncation
+    // on 32-bit platforms. A varint-decoded frame length > usize::MAX is an overflow error,
+    // not a valid frame.
+    let frame_len = u64::try_from(frame_length)
+        .ok()
+        .and_then(|fl| usize::try_from(fl).ok())
+        .filter(|&fl| fl <= data.len().saturating_sub(header_size))?;
+    let total = header_size + frame_len;
     Some((frame_type, &data[header_size..total]))
 }
 
@@ -259,8 +256,15 @@ impl Default for H3Settings {
 
 // ── H3 GOAWAY ────────────────────────────────────────────────────────────
 
+/// Maximum valid QUIC stream ID (62-bit varint max per RFC 9000 §16).
+const H3_MAX_STREAM_ID: u64 = (1 << 62) - 1;
+
 /// Encode a GOAWAY frame. Payload is a single varint (stream ID).
+/// NB7-62: Validates stream_id is within QUIC varint range (62-bit).
 pub(crate) fn encode_goaway(stream_id: u64) -> Option<Vec<u8>> {
+    if stream_id > H3_MAX_STREAM_ID {
+        return None;
+    }
     let mut payload_buf = [0u8; 8];
     let pw = varint_encode(&mut payload_buf, stream_id)?;
     encode_frame(H3_FRAME_GOAWAY, &payload_buf[..pw])
