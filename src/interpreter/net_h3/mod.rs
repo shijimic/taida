@@ -49,8 +49,11 @@ mod request;
 mod connection;
 
 // ── Re-exports: preserve exact same public API as the old monolithic net_h3.rs ──
+// NB7-73: These re-exports are intentional API surface. They are used by
+// `net_eval.rs` via `use super::net_h3` and serve as the stable public interface.
 
 // From qpack.rs
+#[allow(unused_imports)]
 pub(crate) use qpack::{
     QpackStaticEntry, QPACK_STATIC_TABLE,
     H3DecodeError, H3Result, H3Header,
@@ -71,6 +74,7 @@ pub(crate) use qpack::{
 };
 
 // From frame.rs
+#[allow(unused_imports)]
 pub(crate) use frame::{
     is_canonical_varint,
     varint_decode, varint_encode,
@@ -87,6 +91,7 @@ pub(crate) use frame::{
 };
 
 // From request.rs
+#[allow(unused_imports)]
 pub(crate) use request::{
     selftest_qpack_roundtrip, selftest_request_validation,
     H3RequestError, H3RequestFields, extract_request_fields,
