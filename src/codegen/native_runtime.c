@@ -15954,6 +15954,13 @@ static int h3_qpack_encode_string(unsigned char *buf, size_t buf_cap, const char
 // Reuse H2Header for H3 headers (same name/value buffer structure).
 typedef H2Header H3Header;
 
+// NB7-104: truncation-safe string copy for H3Header fields.
+// snprintf silently truncates; this macro detects it and returns -1.
+#define H3_STRCPY(dst, src) do { \
+    int _n = snprintf((dst), sizeof(dst), "%s", (src)); \
+    if (_n < 0 || (size_t)_n >= sizeof(dst)) return -1; \
+} while (0)
+
 /// Decode a QPACK header block with optional dynamic table (NET7-10d).
 /// If dynamic_table is NULL, behaves as static-table-only (legacy mode).
 static int h3_qpack_decode_block_with_dt(const unsigned char *data, size_t data_len,
@@ -16001,10 +16008,8 @@ static int h3_qpack_decode_block_with_dt(const unsigned char *data, size_t data_
 
             if (is_static) {
                 if (index >= H3_QPACK_STATIC_TABLE_LEN) return -1;
-                snprintf(headers[hdr_count].name, sizeof(headers[hdr_count].name),
-                         "%s", H3_QPACK_STATIC_TABLE[index].name);
-                snprintf(headers[hdr_count].value, sizeof(headers[hdr_count].value),
-                         "%s", H3_QPACK_STATIC_TABLE[index].value);
+                H3_STRCPY(headers[hdr_count].name, H3_QPACK_STATIC_TABLE[index].name);
+                H3_STRCPY(headers[hdr_count].value, H3_QPACK_STATIC_TABLE[index].value);
             } else {
                 /* NB7-109 fix: Dynamic table indexed (Before Base, T=0)
                  * absolute_index = RIC - D_abs - 1 - index
@@ -16018,8 +16023,8 @@ static int h3_qpack_decode_block_with_dt(const unsigned char *data, size_t data_
                 uint64_t abs = base_val - index;
                 const H3DynamicTableEntry *entry = h3_dt_lookup_absolute(dynamic_table, abs);
                 if (!entry) return -1;
-                snprintf(headers[hdr_count].name, sizeof(headers[hdr_count].name), "%s", entry->name);
-                snprintf(headers[hdr_count].value, sizeof(headers[hdr_count].value), "%s", entry->value);
+                H3_STRCPY(headers[hdr_count].name, entry->name);
+                H3_STRCPY(headers[hdr_count].value, entry->value);
             }
             hdr_count++;
         } else if (byte & 0x40) {
@@ -16034,8 +16039,7 @@ static int h3_qpack_decode_block_with_dt(const unsigned char *data, size_t data_
 
             if (is_static) {
                 if (name_index >= H3_QPACK_STATIC_TABLE_LEN) return -1;
-                snprintf(headers[hdr_count].name, sizeof(headers[hdr_count].name),
-                         "%s", H3_QPACK_STATIC_TABLE[name_index].name);
+                H3_STRCPY(headers[hdr_count].name, H3_QPACK_STATIC_TABLE[name_index].name);
             } else {
                 /* NB7-109 fix: Dynamic table name reference (Before Base, T=0)
                  * absolute_index = RIC - D_abs - 1 - name_index
@@ -16048,7 +16052,7 @@ static int h3_qpack_decode_block_with_dt(const unsigned char *data, size_t data_
                 uint64_t abs = base_val - name_index;
                 const H3DynamicTableEntry *entry = h3_dt_lookup_absolute(dynamic_table, abs);
                 if (!entry) return -1;
-                snprintf(headers[hdr_count].name, sizeof(headers[hdr_count].name), "%s", entry->name);
+                H3_STRCPY(headers[hdr_count].name, entry->name);
             }
 
             // Value string
@@ -16098,8 +16102,8 @@ static int h3_qpack_decode_block_with_dt(const unsigned char *data, size_t data_
 
             const H3DynamicTableEntry *entry = h3_dt_lookup_post_base(dynamic_table, post_base_index);
             if (!entry) return -1;
-            snprintf(headers[hdr_count].name, sizeof(headers[hdr_count].name), "%s", entry->name);
-            snprintf(headers[hdr_count].value, sizeof(headers[hdr_count].value), "%s", entry->value);
+            H3_STRCPY(headers[hdr_count].name, entry->name);
+            H3_STRCPY(headers[hdr_count].value, entry->value);
             hdr_count++;
         } else {
             // NB7-110: Literal Field Line With Post-Base Name Reference (Section 4.5.5)
@@ -16116,15 +16120,14 @@ static int h3_qpack_decode_block_with_dt(const unsigned char *data, size_t data_
             if (never_indexed) {
                 // Static table name reference
                 if (name_index >= H3_QPACK_STATIC_TABLE_LEN) return -1;
-                snprintf(headers[hdr_count].name, sizeof(headers[hdr_count].name),
-                         "%s", H3_QPACK_STATIC_TABLE[name_index].name);
+                H3_STRCPY(headers[hdr_count].name, H3_QPACK_STATIC_TABLE[name_index].name);
             } else {
                 // Dynamic table post-base name reference
                 if (!dynamic_table || h3_dt_is_empty(dynamic_table)) return -1;
                 if (req_insert_count == 0) return -1;
                 const H3DynamicTableEntry *entry = h3_dt_lookup_post_base(dynamic_table, name_index);
                 if (!entry) return -1;
-                snprintf(headers[hdr_count].name, sizeof(headers[hdr_count].name), "%s", entry->name);
+                H3_STRCPY(headers[hdr_count].name, entry->name);
             }
 
             // Value string
