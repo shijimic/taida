@@ -15711,19 +15711,26 @@ static uint64_t h3_dt_total_inserted(const H3DynamicTable *dt) {
     return dt->total_inserted;
 }
 
-/// Evict oldest entries until current_size <= new_capacity.
+/// NB7-112 fix: Evict oldest active entries until current_size <= new_capacity.
+/// Previously broke on first inactive slot, which caused sparse-table
+/// under-eviction: if earlier shrink left a hole at slot 0, the loop
+/// would immediately hit that inactive slot and break, failing to evict
+/// later active entries.
 static void h3_dt_evict_to_capacity(H3DynamicTable *dt, size_t new_capacity) {
-    for (int i = 0; i < H3_DYNAMIC_TABLE_MAX_ENTRIES; i++) {
-        if (dt->entries[i].active && dt->current_size > new_capacity) {
-            size_t entry_size = strlen(dt->entries[i].name) + strlen(dt->entries[i].value) + 32;
-            dt->current_size = dt->current_size > entry_size ? dt->current_size - entry_size : 0;
-            dt->entries[i].active = 0;
-            dt->entries[i].name[0] = '\0';
-            dt->entries[i].value[0] = '\0';
-        } else {
-            break;
+    int progress;
+    do {
+        progress = 0;
+        for (int i = 0; i < H3_DYNAMIC_TABLE_MAX_ENTRIES; i++) {
+            if (dt->entries[i].active && dt->current_size > new_capacity) {
+                size_t entry_size = strlen(dt->entries[i].name) + strlen(dt->entries[i].value) + 32;
+                dt->current_size = dt->current_size > entry_size ? dt->current_size - entry_size : 0;
+                dt->entries[i].active = 0;
+                dt->entries[i].name[0] = '\0';
+                dt->entries[i].value[0] = '\0';
+                progress = 1;
+            }
         }
-    }
+    } while (progress && dt->current_size > new_capacity);
     dt->max_capacity = new_capacity;
 }
 
@@ -15989,16 +15996,19 @@ static int h3_qpack_decode_block_with_dt(const unsigned char *data, size_t data_
                 snprintf(headers[hdr_count].value, sizeof(headers[hdr_count].value),
                          "%s", H3_QPACK_STATIC_TABLE[index].value);
             } else {
-                // Dynamic table indexed by relative index (NET7-10d)
+                /* Dynamic table indexed by relative index (NET7-10d)
+                 * NB7-100 fix: use checked arithmetic instead of saturating
+                 * silent collapse-to-zero which could return wrong entries. */
                 if (!dynamic_table || h3_dt_is_empty(dynamic_table)) return -1;
                 if (req_insert_count == 0) return -1;
-                uint64_t max_relative = req_insert_count > delta_base
-                    ? req_insert_count - delta_base : 0;
+                if (req_insert_count <= delta_base) return -1;
+                uint64_t max_relative = req_insert_count - delta_base;
                 if (index >= max_relative) return -1;
-                uint64_t abs = h3_dt_largest_ref(dynamic_table);
-                if (abs >= delta_base) abs -= delta_base; else abs = 0;
-                if (abs >= index) abs -= index; else abs = 0;
-                // Now abs is: largest_ref - delta_base - index
+                uint64_t largest_ref = h3_dt_largest_ref(dynamic_table);
+                if (largest_ref <= delta_base) return -1;
+                uint64_t base_val = largest_ref - delta_base;
+                if (base_val <= index) return -1;
+                uint64_t abs = base_val - index;
                 const H3DynamicTableEntry *entry = h3_dt_lookup_absolute(dynamic_table, abs);
                 if (!entry) return -1;
                 snprintf(headers[hdr_count].name, sizeof(headers[hdr_count].name), "%s", entry->name);
@@ -17062,8 +17072,15 @@ static int h3_decoder_apply(H3DecoderState *state, const H3DecoderInstruction *i
         case H3_DEC_INST_STREAM_CANCEL:
             return 1; // no-op in simplified model
         case H3_DEC_INST_INSERT_COUNT_INC:
-            if (inst->value == 0) return 0; // zero increment is illegal
-            state->received_insert_count = state->received_insert_count + inst->value;
+            if (inst->value == 0) return 0; // zero increment is illegal (RFC 9204 §6.2.3)
+            /* NB7-113 fix: use saturated addition to match Interpreter's
+             * checked_add(...).unwrap_or(u64::MAX) behavior. This prevents
+             * wrap-around on overflow, which would corrupt decoder state. */
+            if (inst->value > UINT64_MAX - state->received_insert_count) {
+                state->received_insert_count = UINT64_MAX;
+            } else {
+                state->received_insert_count += inst->value;
+            }
             return 1;
     }
     return 0;

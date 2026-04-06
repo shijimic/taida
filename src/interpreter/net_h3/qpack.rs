@@ -479,13 +479,17 @@ pub(crate) fn qpack_decode_block(
                 if req_insert_count == 0 {
                     return None; // no dynamic table entries when insert_count is 0
                 }
-                // Relative index: the entry at position (req_insert_count - delta_base - 1 - index)
-                // is invalid if index >= (req_insert_count - delta_base).
-                let max_relative = req_insert_count.saturating_sub(delta_base);
-                if index >= max_relative {
-                    return None;
-                }
-                let abs = dynamic.largest_ref.saturating_sub(delta_base).saturating_sub(index);
+                // NB7-100 fix: RFC 9204 §4.5.2 — relative index must resolve to a valid
+                // absolute index. Use checked arithmetic to detect overflow and fail rather
+                // than silently saturating to 0 (which could return a wrong entry).
+                //
+                // absolute_index = largest_ref - delta_base - index
+                // We already verified: index < req_insert_count - delta_base (max_relative).
+                let max_relative = req_insert_count.checked_sub(delta_base).filter(|&m| index < m)?;
+                let abs = dynamic
+                    .largest_ref
+                    .checked_sub(delta_base)
+                    .and_then(|v| v.checked_sub(index))?;
                 let entry = dynamic.lookup_absolute(abs)?;
                 headers.push(H3Header {
                     name: entry.name.clone(),
@@ -506,16 +510,19 @@ pub(crate) fn qpack_decode_block(
                 QPACK_STATIC_TABLE[idx].name.to_string()
             } else {
                 // Dynamic table name reference (T=0)
+                // NB7-100 fix: checked arithmetic (same pattern as indexed field line)
                 let dynamic = dynamic_table?;
                 if req_insert_count == 0 {
                     return None;
                 }
-                // Similar to indexed: relative index from base
-                let max_relative = req_insert_count.saturating_sub(delta_base);
+                let max_relative = req_insert_count.checked_sub(delta_base).filter(|&m| name_index < m)?;
                 if name_index >= max_relative {
                     return None;
                 }
-                let abs = dynamic.largest_ref.saturating_sub(delta_base).saturating_sub(name_index);
+                let abs = dynamic
+                    .largest_ref
+                    .checked_sub(delta_base)
+                    .and_then(|v| v.checked_sub(name_index))?;
                 let entry = dynamic.lookup_absolute(abs)?;
                 entry.name.clone()
             };
@@ -636,11 +643,16 @@ pub(crate) fn qpack_decode_block_r(
                 if req_insert_count == 0 {
                     return Err(H3DecodeError::DynamicTableError);
                 }
-                let max_relative = req_insert_count.saturating_sub(delta_base);
+                // NB7-100 fix: same checked arithmetic for qpack_decode_block_r
+                let max_relative = req_insert_count.checked_sub(delta_base).filter(|&m| index < m).ok_or(H3DecodeError::DynamicTableError)?;
                 if index >= max_relative {
                     return Err(H3DecodeError::DynamicTableError);
                 }
-                let abs = dynamic.largest_ref.saturating_sub(delta_base).saturating_sub(index);
+                let abs = dynamic
+                    .largest_ref
+                    .checked_sub(delta_base)
+                    .and_then(|v| v.checked_sub(index))
+                    .ok_or(H3DecodeError::DynamicTableError)?;
                 let entry = dynamic.lookup_absolute(abs)
                     .ok_or(H3DecodeError::DynamicTableError)?;
                 headers.push(H3Header {
@@ -661,11 +673,12 @@ pub(crate) fn qpack_decode_block_r(
                 }
                 QPACK_STATIC_TABLE[idx].name.to_string()
             } else {
+                // NB7-100 fix: dynamic table name reference also needs checked arithmetic
                 let dynamic = dynamic_table.ok_or(H3DecodeError::DynamicTableError)?;
                 if req_insert_count == 0 {
                     return Err(H3DecodeError::DynamicTableError);
                 }
-                let max_relative = req_insert_count.saturating_sub(delta_base);
+                let max_relative = req_insert_count.checked_sub(delta_base).filter(|&m| name_index < m).ok_or(H3DecodeError::DynamicTableError)?;
                 if name_index >= max_relative {
                     return Err(H3DecodeError::DynamicTableError);
                 }
