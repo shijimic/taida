@@ -1283,12 +1283,27 @@ impl JsCodegen {
     /// Reads and parses the target .td file, checks for explicit `<<<` declarations,
     /// and returns an error if any imported symbol is not in the export list.
     fn validate_import_symbols(&self, import: &ImportStmt) -> Result<(), JsError> {
-        // Skip core-bundled and npm packages — they don't have .td export declarations
+        if import.path == "taida-lang/net" {
+            for sym in &import.symbols {
+                if !Self::NET_BUILTIN_NAMES.contains(&sym.name.as_str()) {
+                    return Err(JsError {
+                        message: format!(
+                            "Symbol '{}' not found in module '{}'. The module exports: {}",
+                            sym.name,
+                            import.path,
+                            Self::NET_BUILTIN_NAMES.join(", ")
+                        ),
+                    });
+                }
+            }
+            return Ok(());
+        }
+
+        // Skip other core-bundled and npm packages — they don't have .td export declarations
         if import.path.starts_with("npm:")
             || import.path == "taida-lang/js"
             || import.path == "taida-lang/os"
             || import.path == "taida-lang/crypto"
-            || import.path == "taida-lang/net"
             || import.path == "taida-lang/pool"
         {
             return Ok(());
@@ -1395,6 +1410,26 @@ impl JsCodegen {
     fn gen_import(&mut self, import: &ImportStmt) -> Result<(), JsError> {
         // RCB-201: Validate imported symbols against target module's export list
         self.validate_import_symbols(import)?;
+
+        // RC1 Phase 4: addon-backed package detection.
+        //
+        // If the import resolves to a package directory that contains
+        // `native/addon.toml`, this is an addon-backed package. JS is
+        // a non-Native backend so the deterministic policy guard
+        // produces a compile-time error here.
+        //
+        // The check uses the same resolver pair as the source-load
+        // path so we cannot drift from the runtime resolution order.
+        if let Some(pkg_dir) = self.try_locate_addon_pkg_dir(import)
+            && pkg_dir.join("native").join("addon.toml").exists()
+        {
+            let policy_err =
+                crate::addon::ensure_addon_supported(crate::addon::AddonBackend::Js, &import.path)
+                    .expect_err("Js backend must be rejected by addon policy");
+            return Err(JsError {
+                message: policy_err.to_string(),
+            });
+        }
 
         // taida-lang/js: JSNew is a compile-time construct, no runtime import needed
         if import.path == "taida-lang/js" {
@@ -1684,6 +1719,40 @@ impl JsCodegen {
         self.write(&export.symbols.join(", "));
         self.write(" };\n");
         Ok(())
+    }
+
+    /// RC1 Phase 4 helper: resolve only the **package directory** for
+    /// an import statement, without producing a `.mjs` path. Used by
+    /// the addon-policy guard in `gen_import` so JS codegen can detect
+    /// addon-backed packages and emit a deterministic compile-time
+    /// error rather than silently emitting an `import` statement that
+    /// would crash at runtime.
+    ///
+    /// Returns `None` for relative / absolute / project-root /
+    /// `std/` / `npm:` imports — those can never be addon-backed.
+    /// Also returns `None` for submodule imports (`org/pkg/sub`)
+    /// because RC1 addons are package-level only.
+    fn try_locate_addon_pkg_dir(&self, import: &ImportStmt) -> Option<std::path::PathBuf> {
+        let path = &import.path;
+        if path.starts_with("./")
+            || path.starts_with("../")
+            || path.starts_with('/')
+            || path.starts_with("~/")
+            || path.starts_with("std/")
+            || path.starts_with("npm:")
+        {
+            return None;
+        }
+        let project_root = self.project_root.as_ref()?;
+        let resolution = if let Some(ver) = &import.version {
+            crate::pkg::resolver::resolve_package_module_versioned(project_root, path, ver)
+        } else {
+            crate::pkg::resolver::resolve_package_module(project_root, path)
+        }?;
+        if resolution.submodule.is_some() {
+            return None;
+        }
+        Some(resolution.pkg_dir)
     }
 
     fn gen_todo_default_expr(&mut self, arg: &Expr) -> Result<(), JsError> {

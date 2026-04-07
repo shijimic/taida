@@ -1,6 +1,14 @@
+[workspace]
+members = [".", "crates/addon-rs", "crates/addon-rs-sample"]
+resolver = "2"
+
+[workspace.package]
+edition = "2024"
+license = "MIT"
+
 [package]
 name = "taida"
-version = "1.6.0"
+version = "2.0.0"
 edition = "2024"
 license = "MIT"
 
@@ -8,8 +16,11 @@ license = "MIT"
 default = ["native", "lsp", "community"]
 
 # Native compiler backend (Cranelift + C runtime)
+# libloading is part of `native` because the addon-rs loader (RC1 Phase 2)
+# only runs on the Native backend; other backends fall through to a
+# deterministic unsupported error from `addon::backend_policy`.
 native = ["cranelift-codegen", "cranelift-frontend", "cranelift-module",
-          "cranelift-object", "target-lexicon"]
+          "cranelift-object", "target-lexicon", "libloading"]
 
 # Language Server Protocol
 lsp = ["tower-lsp"]
@@ -39,6 +50,15 @@ cranelift-frontend = { version = "0.129.1", optional = true }
 cranelift-module = { version = "0.129.1", optional = true }
 cranelift-object = { version = "0.129.1", optional = true }
 target-lexicon = { version = "0.13", optional = true }
+
+# RC1 Phase 2 -- Native addon loader (dlopen / dlsym wrapper).
+# Only pulled in by the `native` feature; other backends do not see it.
+libloading = { version = "0.8", optional = true }
+
+# RC1 Phase 2 -- in-process addon foundation crate.
+# Used by the loader to share the frozen ABI v1 type definitions and
+# the `TAIDA_ADDON_ABI_VERSION` / `TAIDA_ADDON_ENTRY_SYMBOL` constants.
+taida-addon = { path = "crates/addon-rs", version = "2.0.0" }
 
 # QUIC transport for the Interpreter backend (NET7-9: Phase 9)
 # quinn: pure Rust QUIC stack (tokio-native)

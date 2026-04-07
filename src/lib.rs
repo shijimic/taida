@@ -1,3 +1,10 @@
+/// RC1 -- Native addon foundation host bindings.
+///
+/// `addon::backend_policy` is always available so non-Native backends
+/// can produce the deterministic unsupported-backend diagnostic.
+/// `addon::loader` is gated on `feature = "native"` because it depends
+/// on `libloading` (dlopen / LoadLibrary).
+pub mod addon;
 #[cfg(feature = "community")]
 pub mod auth;
 #[cfg(feature = "native")]

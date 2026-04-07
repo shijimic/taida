@@ -1,0 +1,18 @@
+[package]
+name = "taida-addon-sample"
+version = "2.0.0"
+edition.workspace = true
+license.workspace = true
+description = "Minimal sample addon for taida-lang/addon-rs (RC1 reference). Demonstrates the smallest possible addon that exposes a function via the frozen ABI v1 entry symbol."
+
+# This crate is *both* an rlib (so the workspace's `cargo test` can link
+# it as a regular dependency to verify the descriptor) and a cdylib (so
+# the Native loader has a real shared object to dlopen in Phase 2).
+#
+# Phase 1 only needs the descriptor wiring; Phase 2 will exercise the
+# cdylib via the loader integration tests.
+[lib]
+crate-type = ["rlib", "cdylib"]
+
+[dependencies]
+taida-addon = { path = "../addon-rs", version = "2.0.0" }

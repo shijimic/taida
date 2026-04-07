@@ -1,0 +1,20 @@
+[package]
+name = "taida-addon"
+version = "2.0.0"
+edition.workspace = true
+license.workspace = true
+description = "Taida Lang addon authoring crate (ABI v1). Provides the frozen C ABI types and a safe Rust API for building Native-backend addons."
+
+# This crate is the addon foundation referenced by `taida-lang/addon-rs` (RC1).
+# Addon authors depend on this crate to build cdylib addons that the Taida
+# Native backend loader will discover via the `taida_addon_get_v1` symbol.
+
+[lib]
+# rlib so addon crates can depend on it as a regular library.
+# The cdylib output is the responsibility of the *consuming* addon crate
+# (see `crates/addon-rs-sample` for an example).
+crate-type = ["rlib"]
+
+[dependencies]
+# No runtime dependencies. The crate is intentionally `no_std`-friendly
+# at the ABI layer; only `core::ffi` and `alloc` are used in the safe API.

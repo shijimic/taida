@@ -295,23 +295,21 @@ impl CoreBundledProvider {
     /// Generate the net package stub source.
     fn net_package_source() -> &'static str {
         r#"// taida-lang/net — Core bundled network package
-// Legacy surface (delegates to existing socket runtime path):
-//   dnsResolve
-//   tcpConnect, tcpListen, tcpAccept
-//   socketSend, socketSendAll, socketRecv
-//   socketSendBytes, socketRecvBytes, socketRecvExact
-//   udpBind, udpSendTo, udpRecvFrom
-//   socketClose, listenerClose, udpClose
+// HTTP server/runtime surface only.
+// Low-level socket / DNS APIs live in taida-lang/os.
 //
-// HTTP v1 surface:
+// HTTP surface:
 //   httpServe, httpParseRequestHead, httpEncodeResponse, readBody
+//   startResponse, writeChunk, endResponse, sseEvent
+//   readBodyChunk, readBodyAll
+//   wsUpgrade, wsSend, wsReceive, wsClose, wsCloseCode
 //
 // TI-21 contract notes:
 //   TLS verification on Http* uses backend default trust store (no insecure -k path)
-//   IPv6 outbound resolution/connect is supported via resolver path
-//   Unix domain sockets are not provided yet (explicit non-support)
+//   Protocol/runtime details remain behind httpServe contract
+//   Legacy tcp*/udp*/dnsResolve re-exports were removed after HTTP/3 package freeze
 
-<<< @(dnsResolve, tcpConnect, tcpListen, tcpAccept, socketSend, socketSendAll, socketRecv, socketSendBytes, socketRecvBytes, socketRecvExact, udpBind, udpSendTo, udpRecvFrom, socketClose, listenerClose, udpClose, httpServe, httpParseRequestHead, httpEncodeResponse, readBody, startResponse, writeChunk, endResponse, sseEvent, readBodyChunk, readBodyAll, wsUpgrade, wsSend, wsReceive, wsClose, wsCloseCode)
+<<< @(httpServe, httpParseRequestHead, httpEncodeResponse, readBody, startResponse, writeChunk, endResponse, sseEvent, readBodyChunk, readBodyAll, wsUpgrade, wsSend, wsReceive, wsClose, wsCloseCode)
 "#
     }
 
