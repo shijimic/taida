@@ -97,6 +97,12 @@ impl<'a> BorrowedValue<'a> {
     }
 
     /// If this value is a `Bool`, return its boolean payload.
+    ///
+    /// Per the frozen ABI v1 contract the payload byte is strictly
+    /// `0` (false) or `1` (true). Any other value is a malformed
+    /// input and yields `None` so the addon can treat it as a failure
+    /// (RC1B-109). The previous `!= 0` coercion silently mapped
+    /// `2..=255` to `true`, hiding bugs on the producer side.
     pub fn as_bool(&self) -> Option<bool> {
         if self.raw.tag != TaidaAddonValueTag::Bool as u32 {
             return None;
@@ -106,7 +112,11 @@ impl<'a> BorrowedValue<'a> {
         }
         // SAFETY: see `as_int`.
         let p = self.raw.payload as *const crate::abi::TaidaAddonBoolPayload;
-        Some(unsafe { (*p).value != 0 })
+        match unsafe { (*p).value } {
+            0 => Some(false),
+            1 => Some(true),
+            _ => None,
+        }
     }
 
     /// If this value is a `Str`, return its UTF-8 bytes as `&str`. The
@@ -524,6 +534,33 @@ mod tests {
             }
             .as_bool(),
             Some(false)
+        );
+    }
+
+    // RC1B-109 regression: invalid bool payload (anything outside
+    // the 0/1 whitelist) must be rejected, not silently coerced to
+    // `true`.
+    #[test]
+    fn borrowed_value_rejects_invalid_bool_payload_2() {
+        let p = TaidaAddonBoolPayload { value: 2 };
+        let v = make_bool(&p);
+        let b = BorrowedValue { raw: &v };
+        assert_eq!(
+            b.as_bool(),
+            None,
+            "invalid bool payload (2) must yield None, not true"
+        );
+    }
+
+    #[test]
+    fn borrowed_value_rejects_invalid_bool_payload_255() {
+        let p = TaidaAddonBoolPayload { value: 255 };
+        let v = make_bool(&p);
+        let b = BorrowedValue { raw: &v };
+        assert_eq!(
+            b.as_bool(),
+            None,
+            "invalid bool payload (255) must yield None, not true"
         );
     }
 

@@ -285,6 +285,86 @@ stdout(echo("x"))
     let _ = std::fs::remove_dir_all(&project);
 }
 
+/// RC1B-110 regression: the `package` declared inside
+/// `native/addon.toml` must match the package id the import resolver
+/// is looking up. If it drifts (e.g. someone swaps the manifest but
+/// forgets to update the import path, or an attacker hijacks a
+/// dependency directory), the import MUST fail at import time with a
+/// deterministic `PackageMismatch` diagnostic rather than silently
+/// succeeding.
+#[test]
+fn addon_package_mismatch_rejects_at_import_time() {
+    // We don't need an actual cdylib here -- the mismatch check runs
+    // immediately after manifest parse, before cdylib resolution. So
+    // this test works even when `taida-addon-sample` has not been
+    // built yet.
+    let project = std::env::temp_dir().join("rc1b110_addon_pkg_mismatch_e2e");
+    let _ = std::fs::remove_dir_all(&project);
+    std::fs::create_dir_all(&project).unwrap();
+
+    // Layout: the import path says taida-lang/addon-rs-sample, but
+    // the manifest inside that directory claims to be
+    // "evil/wrong-package". Previously this silently succeeded.
+    let native_dir = project
+        .join(".taida")
+        .join("deps")
+        .join("taida-lang")
+        .join("addon-rs-sample")
+        .join("native");
+    std::fs::create_dir_all(&native_dir).unwrap();
+    std::fs::write(
+        native_dir.join("addon.toml"),
+        r#"
+abi = 1
+entry = "taida_addon_get_v1"
+package = "evil/wrong-package"
+library = "taida_addon_sample"
+
+[functions]
+echo = 1
+"#,
+    )
+    .unwrap();
+
+    let main_td = r#">>> taida-lang/addon-rs-sample => @(echo)
+stdout(echo("x"))
+"#;
+    std::fs::write(project.join("main.td"), main_td).unwrap();
+
+    let output = Command::new(taida_bin())
+        .arg(project.join("main.td"))
+        .output()
+        .expect("taida binary must run");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !output.status.success(),
+        "package id mismatch must fail at import time. stdout={}, stderr={}",
+        stdout,
+        stderr
+    );
+    let combined = format!("{}{}", stderr, stdout);
+    assert!(
+        combined.contains("package id mismatch"),
+        "diagnostic must classify the mismatch, got: {}",
+        combined
+    );
+    // Both ids must appear in the diagnostic so the user can see
+    // exactly which side drifted.
+    assert!(
+        combined.contains("taida-lang/addon-rs-sample"),
+        "diagnostic must name the expected package id, got: {}",
+        combined
+    );
+    assert!(
+        combined.contains("evil/wrong-package"),
+        "diagnostic must name the manifest-declared id, got: {}",
+        combined
+    );
+
+    let _ = std::fs::remove_dir_all(&project);
+}
+
 #[test]
 fn js_backend_rejects_addon_backed_package_at_compile_time() {
     let project = std::env::temp_dir().join("rc1_phase4_addon_js_reject");

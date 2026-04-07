@@ -82,6 +82,19 @@ pub enum AddonImportError {
         manifest_arity: u32,
         binary_arity: u32,
     },
+    /// The `package` field inside `native/addon.toml` does not match
+    /// the package id the import resolver was looking up. RC1B-110
+    /// contract: the two identifiers must be identical; a drift here
+    /// would desynchronise the registry key, the sentinel binding,
+    /// and the manifest-reported diagnostics.
+    PackageMismatch {
+        /// The package id from the `>>>` import statement.
+        expected: String,
+        /// The `package` value from `native/addon.toml`.
+        actual: String,
+        /// Path of the `addon.toml` that declared the wrong id.
+        manifest_path: PathBuf,
+    },
 }
 
 impl std::fmt::Display for AddonImportError {
@@ -127,6 +140,17 @@ impl std::fmt::Display for AddonImportError {
                 f,
                 "addon import failed: package '{}' function '{}' arity mismatch (manifest declares {}, binary declares {})",
                 package, function, manifest_arity, binary_arity
+            ),
+            Self::PackageMismatch {
+                expected,
+                actual,
+                manifest_path,
+            } => write!(
+                f,
+                "addon import failed: package id mismatch in '{}' (import resolver expected '{}', manifest declares '{}')",
+                manifest_path.display(),
+                expected,
+                actual
             ),
         }
     }
@@ -242,6 +266,22 @@ impl AddonRegistry {
         // 1. Parse the addon manifest.
         let manifest_path = pkg_dir.join("native").join("addon.toml");
         let manifest = parse_addon_manifest(&manifest_path)?;
+
+        // 1a. Cross-check the manifest's declared `package` against
+        //     the package id the import resolver was looking up
+        //     (RC1B-110). A drift here would desynchronise:
+        //       - the registry key (`package_id`)
+        //       - the sentinel string (`__taida_addon_call::<pkg>::...`)
+        //       - manifest-reported diagnostics (`manifest.package`)
+        //     so it is a hard import-time error with a dedicated
+        //     variant for deterministic classification.
+        if manifest.package != package_id {
+            return Err(AddonImportError::PackageMismatch {
+                expected: package_id.to_string(),
+                actual: manifest.package.clone(),
+                manifest_path: manifest_path.clone(),
+            });
+        }
 
         // 2. Resolve the cdylib path.
         let cdylib = resolve_cdylib_path(pkg_dir, &manifest.library).ok_or_else(|| {
@@ -492,6 +532,66 @@ noop = 0
         let msg = err.to_string();
         assert!(msg.contains("manifest declares 2"));
         assert!(msg.contains("binary declares 1"));
+    }
+
+    // RC1B-110 regression: manifest `package` id must match the
+    // import resolver's package id. Silent acceptance would
+    // desynchronise the registry key and the sentinel binding.
+    #[test]
+    fn ensure_loaded_rejects_package_id_mismatch() {
+        let pkg = std::env::temp_dir().join("rc1b110_pkg_mismatch_pkg");
+        let _ = std::fs::remove_dir_all(&pkg);
+        std::fs::create_dir_all(pkg.join("native")).unwrap();
+        // Manifest declares "evil/wrong-package" but the import
+        // resolver is looking up "test/original-package".
+        std::fs::write(
+            pkg.join("native").join("addon.toml"),
+            r#"
+abi = 1
+entry = "taida_addon_get_v1"
+package = "evil/wrong-package"
+library = "taida_addon_sample"
+
+[functions]
+echo = 1
+"#,
+        )
+        .unwrap();
+
+        let project = pkg.parent().unwrap().to_path_buf();
+        let result = AddonRegistry::global().ensure_loaded(&project, "test/original-package", &pkg);
+        match result {
+            Err(AddonImportError::PackageMismatch {
+                expected,
+                actual,
+                manifest_path,
+            }) => {
+                assert_eq!(expected, "test/original-package");
+                assert_eq!(actual, "evil/wrong-package");
+                assert!(
+                    manifest_path.ends_with("native/addon.toml"),
+                    "manifest_path must point at the offending addon.toml, got {}",
+                    manifest_path.display()
+                );
+            }
+            other => panic!("expected PackageMismatch, got {other:?}"),
+        }
+
+        let _ = std::fs::remove_dir_all(&pkg);
+    }
+
+    #[test]
+    fn package_mismatch_display_pins_both_ids_and_path() {
+        let err = AddonImportError::PackageMismatch {
+            expected: "org/alpha".to_string(),
+            actual: "org/beta".to_string(),
+            manifest_path: PathBuf::from("/tmp/pkg/native/addon.toml"),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("addon import failed"));
+        assert!(msg.contains("'org/alpha'"));
+        assert!(msg.contains("'org/beta'"));
+        assert!(msg.contains("/tmp/pkg/native/addon.toml"));
     }
 
     #[test]

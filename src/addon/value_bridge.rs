@@ -162,13 +162,19 @@ extern "C" fn cb_value_new_list(
     items: *const *mut TaidaAddonValueV1,
     len: usize,
 ) -> *mut TaidaAddonValueV1 {
-    // Copy the pointer array into a host-owned Vec so the addon's
-    // stack buffer doesn't need to live past this call. Ownership of
-    // each child transfers into the copied array — we do *not*
-    // release the children here, only store them.
-    let vec: Vec<*mut TaidaAddonValueV1> = if len == 0 || items.is_null() {
+    // ABI v1 contract (RC1B-108): `value_new_list` with `len > 0`
+    // REQUIRES a non-null `items` array. `len == 0` is the only case
+    // where a null `items` is tolerated (empty list). Silently
+    // normalising `(null, len > 0)` to an empty list would mask a
+    // malformed addon output and hide the underlying bug, so we
+    // reject it by returning null (the addon's documented failure
+    // signal for constructor callbacks).
+    let vec: Vec<*mut TaidaAddonValueV1> = if len == 0 {
         Vec::new()
     } else {
+        if items.is_null() {
+            return core::ptr::null_mut();
+        }
         // SAFETY: the addon contract for `value_new_list` is to pass a
         // valid pointer / len pair.
         unsafe { core::slice::from_raw_parts(items, len) }.to_vec()
@@ -187,12 +193,21 @@ extern "C" fn cb_value_new_pack(
     values: *const *mut TaidaAddonValueV1,
     len: usize,
 ) -> *mut TaidaAddonValueV1 {
-    if len == 0 || names.is_null() || values.is_null() {
+    // ABI v1 contract (RC1B-108): `value_new_pack` with `len > 0`
+    // REQUIRES non-null `names` and `values` parallel arrays. Only
+    // `len == 0` permits null arrays (empty pack). Silently
+    // normalising `(null, len > 0)` to an empty pack would hide a
+    // malformed addon output from debugging, so we reject it by
+    // returning null (the constructor's documented failure signal).
+    if len == 0 {
         let payload = Box::into_raw(Box::new(TaidaAddonPackPayload {
             entries: core::ptr::null(),
             len: 0,
         })) as *mut c_void;
         return alloc_value(TaidaAddonValueTag::Pack, payload);
+    }
+    if names.is_null() || values.is_null() {
+        return core::ptr::null_mut();
     }
     // Copy and own each name by `CString::into_raw` so the addon's
     // stack buffers can be dropped after the call returns.
@@ -661,7 +676,18 @@ unsafe fn read_value_by_ref(v: &TaidaAddonValueV1) -> Result<Value, BridgeError>
             }
             // SAFETY: see Int.
             let p = unsafe { &*(v.payload as *const TaidaAddonBoolPayload) };
-            Ok(Value::Bool(p.value != 0))
+            // ABI v1 contract (RC1B-109): Bool payload is strictly
+            // `0` (false) or `1` (true). Any other byte is a
+            // malformed output. Silently mapping `2..=255` to `true`
+            // (the previous `!= 0` behaviour) would hide type-safety
+            // violations from the addon side.
+            match p.value {
+                0 => Ok(Value::Bool(false)),
+                1 => Ok(Value::Bool(true)),
+                _ => Err(BridgeError::MalformedOutput {
+                    reason: "Bool payload must be 0 or 1",
+                }),
+            }
         }
         Some(TaidaAddonValueTag::Str) => {
             if v.payload.is_null() {
@@ -949,6 +975,183 @@ mod tests {
         // SAFETY: null is explicitly handled as an error.
         let err = unsafe { take_addon_output(core::ptr::null_mut()) }.expect_err("null must fail");
         assert!(matches!(err, BridgeError::MalformedOutput { .. }));
+    }
+
+    // ── RC1B-108 regression: null array + non-zero len must not
+    // silently normalise to an empty container. ───────────────────
+
+    #[test]
+    fn value_new_list_rejects_null_items_with_nonzero_len() {
+        // Calling `value_new_list(null, 3)` must return null (malformed
+        // input). Previously the callback silently normalised the
+        // null pointer to an empty Vec, masking the bug.
+        let table = make_host_table();
+        let result = (table.value_new_list)(
+            &table as *const _,
+            core::ptr::null::<*mut TaidaAddonValueV1>(),
+            3,
+        );
+        assert!(
+            result.is_null(),
+            "value_new_list(null, len=3) must return null, got a constructed value"
+        );
+    }
+
+    #[test]
+    fn value_new_list_allows_empty_list_with_null_items() {
+        // `len == 0` with null `items` stays legal: explicit empty list.
+        let table = make_host_table();
+        let result = (table.value_new_list)(
+            &table as *const _,
+            core::ptr::null::<*mut TaidaAddonValueV1>(),
+            0,
+        );
+        assert!(!result.is_null(), "empty list with null items must succeed");
+        // Materialise & release to prove the subtree is well-formed.
+        // SAFETY: we just built it via the host table.
+        let value = unsafe { take_addon_output(result) }.expect("empty list must decode");
+        match value {
+            Value::List(items) => assert!(items.is_empty()),
+            other => panic!("expected empty List, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn value_new_pack_rejects_null_names_with_nonzero_len() {
+        let table = make_host_table();
+        // Provide a valid `values` slot but null `names`.
+        let dummy_value_slot: *mut TaidaAddonValueV1 = (table.value_new_int)(&table as *const _, 7);
+        assert!(!dummy_value_slot.is_null());
+        let values_arr: [*mut TaidaAddonValueV1; 1] = [dummy_value_slot];
+        let result = (table.value_new_pack)(
+            &table as *const _,
+            core::ptr::null::<*const c_char>(),
+            values_arr.as_ptr(),
+            1,
+        );
+        assert!(
+            result.is_null(),
+            "value_new_pack(null names, values, len=1) must return null"
+        );
+        // Because construction failed, we must release the orphaned
+        // child ourselves so the test doesn't leak. SAFETY: the child
+        // was allocated by the host table above and not consumed.
+        (table.value_release)(&table as *const _, dummy_value_slot);
+    }
+
+    #[test]
+    fn value_new_pack_rejects_null_values_with_nonzero_len() {
+        let table = make_host_table();
+        // Provide a valid `names` slot but null `values`.
+        let name_bytes = b"k\0";
+        let names_arr: [*const c_char; 1] = [name_bytes.as_ptr() as *const c_char];
+        let result = (table.value_new_pack)(
+            &table as *const _,
+            names_arr.as_ptr(),
+            core::ptr::null::<*mut TaidaAddonValueV1>(),
+            1,
+        );
+        assert!(
+            result.is_null(),
+            "value_new_pack(names, null values, len=1) must return null"
+        );
+    }
+
+    #[test]
+    fn value_new_pack_allows_empty_pack_with_null_arrays() {
+        // `len == 0` with both arrays null is the explicit empty pack
+        // case and must continue to succeed.
+        let table = make_host_table();
+        let result = (table.value_new_pack)(
+            &table as *const _,
+            core::ptr::null::<*const c_char>(),
+            core::ptr::null::<*mut TaidaAddonValueV1>(),
+            0,
+        );
+        assert!(
+            !result.is_null(),
+            "empty pack with null arrays must succeed"
+        );
+        // SAFETY: host-built, release via take_addon_output.
+        let value = unsafe { take_addon_output(result) }.expect("empty pack must decode");
+        match value {
+            Value::BuchiPack(fields) => assert!(fields.is_empty()),
+            other => panic!("expected empty BuchiPack, got {other:?}"),
+        }
+    }
+
+    // ── RC1B-109 regression: invalid bool payload (2, 255, ...) must
+    // be rejected, not silently coerced to `true`. ──────────────────
+
+    #[test]
+    fn take_addon_output_rejects_invalid_bool_payload() {
+        // Build a raw TaidaAddonValueV1 with tag=Bool but a payload
+        // whose inner byte is `2` (outside the frozen ABI's 0/1
+        // whitelist). `take_addon_output` MUST reject with
+        // `MalformedOutput`, not silently map `2` to `true`.
+        let payload_ptr =
+            Box::into_raw(Box::new(taida_addon::TaidaAddonBoolPayload { value: 2 })) as *mut c_void;
+        let ptr = Box::into_raw(Box::new(TaidaAddonValueV1 {
+            tag: TaidaAddonValueTag::Bool as u32,
+            _reserved: 0,
+            payload: payload_ptr,
+        }));
+        // SAFETY: we built `ptr` through Box::into_raw using the same
+        // allocator shape that `cb_value_new_bool` uses, so
+        // `take_addon_output` / `release_value_ptr` can reclaim it
+        // uniformly.
+        let err = unsafe { take_addon_output(ptr) }
+            .expect_err("invalid bool payload (2) must be rejected");
+        assert!(
+            matches!(err, BridgeError::MalformedOutput { .. }),
+            "expected MalformedOutput for invalid bool, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn take_addon_output_rejects_invalid_bool_payload_255() {
+        // Same as the `2` case but with a high-bit value to lock the
+        // full != 0 surface.
+        let payload_ptr = Box::into_raw(Box::new(taida_addon::TaidaAddonBoolPayload { value: 255 }))
+            as *mut c_void;
+        let ptr = Box::into_raw(Box::new(TaidaAddonValueV1 {
+            tag: TaidaAddonValueTag::Bool as u32,
+            _reserved: 0,
+            payload: payload_ptr,
+        }));
+        // SAFETY: see the `2` case above.
+        let err = unsafe { take_addon_output(ptr) }
+            .expect_err("invalid bool payload (255) must be rejected");
+        assert!(
+            matches!(err, BridgeError::MalformedOutput { .. }),
+            "expected MalformedOutput for 255, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn take_addon_output_accepts_zero_and_one_bool_payloads() {
+        // The 0/1 path must continue to round-trip correctly.
+        let t_ptr =
+            Box::into_raw(Box::new(taida_addon::TaidaAddonBoolPayload { value: 1 })) as *mut c_void;
+        let t_val = Box::into_raw(Box::new(TaidaAddonValueV1 {
+            tag: TaidaAddonValueTag::Bool as u32,
+            _reserved: 0,
+            payload: t_ptr,
+        }));
+        // SAFETY: allocator shape matches cb_value_new_bool.
+        let got_true = unsafe { take_addon_output(t_val) }.expect("true must decode");
+        assert!(matches!(got_true, Value::Bool(true)));
+
+        let f_ptr =
+            Box::into_raw(Box::new(taida_addon::TaidaAddonBoolPayload { value: 0 })) as *mut c_void;
+        let f_val = Box::into_raw(Box::new(TaidaAddonValueV1 {
+            tag: TaidaAddonValueTag::Bool as u32,
+            _reserved: 0,
+            payload: f_ptr,
+        }));
+        // SAFETY: same as above.
+        let got_false = unsafe { take_addon_output(f_val) }.expect("false must decode");
+        assert!(matches!(got_false, Value::Bool(false)));
     }
 
     #[test]
