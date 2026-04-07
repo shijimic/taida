@@ -849,6 +849,10 @@ fn wasm_full_parity_all_examples() {
         "module_utils",
         "transpile_npm",
         // net_http_hello: moved to skip_stems (blocks on httpServe)
+        // RC1 Phase 4: addon-backed packages are interpreter-dispatch
+        // only in RC1; Cranelift native backend deliberately rejects
+        // them with a deterministic compile-time error.
+        "addon_echo",
     ];
 
     // Detect regressions: any new rejected example not in the allowlist

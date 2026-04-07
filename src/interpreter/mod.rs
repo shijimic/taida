@@ -1,3 +1,5 @@
+#[cfg(feature = "native")]
+mod addon_eval;
 mod control_flow;
 pub mod env;
 pub mod eval;

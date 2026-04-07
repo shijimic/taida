@@ -353,6 +353,44 @@ impl Lowering {
         format!("m{:016x}", simple_hash(path))
     }
 
+    /// RC1 Phase 4 helper: resolve only the **package directory** for
+    /// an import path, without producing a `.td` source path. Used by
+    /// the addon-policy guard in `Statement::Import` so the Cranelift
+    /// native lower can detect addon-backed packages and emit a
+    /// deterministic compile-time error rather than silently
+    /// generating native call symbols that would never resolve.
+    ///
+    /// Returns `None` for relative / absolute / project-root /
+    /// `std/` / `npm:` imports — those can never be addon-backed.
+    /// Also returns `None` for submodule imports (`org/pkg/sub`)
+    /// because RC1 addons are package-level only.
+    fn try_locate_addon_pkg_dir(
+        &self,
+        path: &str,
+        version: Option<&str>,
+    ) -> Option<std::path::PathBuf> {
+        if path.starts_with("./")
+            || path.starts_with("../")
+            || path.starts_with('/')
+            || path.starts_with("~/")
+            || path.starts_with("std/")
+            || path.starts_with("npm:")
+        {
+            return None;
+        }
+        let source_dir = self.source_dir.as_ref()?;
+        let project_root = Self::find_project_root(source_dir);
+        let resolution = if let Some(ver) = version {
+            crate::pkg::resolver::resolve_package_module_versioned(&project_root, path, ver)
+        } else {
+            crate::pkg::resolver::resolve_package_module(&project_root, path)
+        }?;
+        if resolution.submodule.is_some() {
+            return None;
+        }
+        Some(resolution.pkg_dir)
+    }
+
     fn resolve_import_path(
         &self,
         module_path: &str,
@@ -879,27 +917,10 @@ impl Lowering {
         self.shadowed_net_builtins.contains(name)
     }
 
-    /// Legacy surface reuses the existing socket runtime path.
-    /// HTTP v1 surface maps to dedicated taida_net_* runtime functions.
+    /// taida-lang/net is HTTP-focused.
+    /// Low-level socket/DNS APIs are available from taida-lang/os only.
     fn net_func_mapping(sym: &str) -> Option<&'static str> {
         match sym {
-            // Legacy surface (shared with os)
-            "dnsResolve" => Some("taida_os_dns_resolve"),
-            "tcpConnect" => Some("taida_os_tcp_connect"),
-            "tcpListen" => Some("taida_os_tcp_listen"),
-            "tcpAccept" => Some("taida_os_tcp_accept"),
-            "socketSend" => Some("taida_os_socket_send"),
-            "socketSendAll" => Some("taida_os_socket_send_all"),
-            "socketRecv" => Some("taida_os_socket_recv"),
-            "socketSendBytes" => Some("taida_os_socket_send_bytes"),
-            "socketRecvBytes" => Some("taida_os_socket_recv_bytes"),
-            "socketRecvExact" => Some("taida_os_socket_recv_exact"),
-            "udpBind" => Some("taida_os_udp_bind"),
-            "udpSendTo" => Some("taida_os_udp_send_to"),
-            "udpRecvFrom" => Some("taida_os_udp_recv_from"),
-            "socketClose" => Some("taida_os_socket_close"),
-            "listenerClose" => Some("taida_os_listener_close"),
-            "udpClose" => Some("taida_os_socket_close"),
             // HTTP v1 surface
             "httpServe" => Some("taida_net_http_serve"),
             "httpParseRequestHead" => Some("taida_net_http_parse_request_head"),
@@ -1276,6 +1297,43 @@ impl Lowering {
                     // for version-aware package resolution (.taida/deps/org/name@ver/).
                     let path = &import_stmt.path;
                     let version = import_stmt.version.as_deref();
+
+                    // RC1 Phase 4: addon-backed package detection.
+                    //
+                    // Cranelift native compile path does not own the
+                    // addon dispatch runtime in RC1 (the interpreter
+                    // is the reference implementation that ships the
+                    // dispatch path; Cranelift integration is out of
+                    // scope per `.dev/RC1_DESIGN.md` Phase 4 Lock).
+                    // Reject addon-backed packages here with the same
+                    // deterministic error string the policy table
+                    // produces for any other unsupported backend.
+                    //
+                    // The check uses the same package-directory
+                    // resolution as the interpreter and JS codegen so
+                    // resolution order cannot drift across backends.
+                    if let Some(addon_pkg_dir) = self.try_locate_addon_pkg_dir(path, version)
+                        && addon_pkg_dir.join("native").join("addon.toml").exists()
+                    {
+                        let policy_err = crate::addon::ensure_addon_supported(
+                            crate::addon::AddonBackend::Native,
+                            path,
+                        );
+                        // Native is allowed by the policy table, but
+                        // RC1 Phase 4 explicitly defers Cranelift
+                        // dispatch wiring. Surface the limitation in
+                        // a deterministic message that mentions the
+                        // package id.
+                        let msg = match policy_err {
+                            Ok(()) => format!(
+                                "addon-backed package '{}' cannot be compiled by the Cranelift native backend in RC1 (interpreter dispatch only). Run with the interpreter, or wait for a later RC that wires addon dispatch into the native compile path.",
+                                path
+                            ),
+                            Err(e) => e.to_string(),
+                        };
+                        return Err(LowerError { message: msg });
+                    }
+
                     let is_core_bundled_path = matches!(
                         path.as_str(),
                         "taida-lang/os"
@@ -1310,6 +1368,14 @@ impl Lowering {
                         if let Some(rt_name) = runtime_name {
                             self.stdlib_runtime_funcs.insert(alias, rt_name.to_string());
                         } else if is_core_bundled_path {
+                            if path == "taida-lang/net" {
+                                return Err(LowerError {
+                                    message: format!(
+                                        "Symbol '{}' not found in module '{}'",
+                                        orig_name, path
+                                    ),
+                                });
+                            }
                             // Core-bundled symbols that do not have native runtime mapping yet
                             // are intentionally skipped here (e.g. pool contract placeholders).
                             // This prevents unresolved pseudo-user-function stubs.

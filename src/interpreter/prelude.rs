@@ -151,6 +151,21 @@ impl Interpreter {
         name: &str,
         args: &[Expr],
     ) -> Result<Option<Signal>, RuntimeError> {
+        // RC1 Phase 4: addon-backed function dispatch.
+        //
+        // The sentinel `__taida_addon_call::<package>::<function>` is
+        // structurally distinct from every other builtin sentinel
+        // (`__os_builtin_*`, `__net_builtin_*`, `__crypto_builtin_*`,
+        // etc. — all underscore-flat single-segment names) so the
+        // guard cannot collide. We check this *first* so addon
+        // dispatch happens before any prelude shadowing.
+        #[cfg(feature = "native")]
+        {
+            if let Some(signal) = self.try_addon_func(name, args)? {
+                return Ok(Some(signal));
+            }
+        }
+
         // taida-lang/crypto imported symbol dispatch.
         // We intentionally do not provide prelude-level sha256 compatibility.
         if matches!(

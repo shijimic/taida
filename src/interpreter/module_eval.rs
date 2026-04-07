@@ -158,6 +158,55 @@ impl Interpreter {
             }
         }
 
+        // RC1 Phase 4 -- addon-backed package early branch.
+        //
+        // Before falling through to the source-loading path, check
+        // whether the import target is an addon-backed package
+        // (`<pkg_dir>/native/addon.toml` exists). If so, the import
+        // never reads a Taida `.td` source -- the addon manifest
+        // declares the function table and the registry hands back
+        // dispatch sentinels that `try_builtin_func` routes through
+        // `LoadedAddon::call_function`.
+        //
+        // The check uses the SAME package-directory resolution that
+        // the source path uses (`resolve_package_module_versioned` /
+        // `resolve_package_module`), so addon-backed and pure-source
+        // packages share the resolution order documented in
+        // `.dev/RC1_DESIGN.md` Phase 4 Lock.
+        //
+        // Native-only behaviour: this whole branch is gated on
+        // `feature = "native"`. On non-native interpreter builds, the
+        // addon backend policy guard runs at the package boundary
+        // (compile-time error before any source is touched).
+        #[cfg(feature = "native")]
+        {
+            if let Some(signal) = self.try_eval_addon_import(import)? {
+                return Ok(signal);
+            }
+        }
+        #[cfg(not(feature = "native"))]
+        {
+            // Defensive: even on non-native builds the design lock says
+            // addon-backed packages must produce the deterministic
+            // unsupported-backend error rather than silently falling
+            // through to "package not found".
+            if let Some(pkg_dir) = self.try_locate_addon_pkg_dir(import) {
+                if pkg_dir.join("native").join("addon.toml").exists() {
+                    // The non-native interpreter binary is the
+                    // `Interpreter` backend in the policy table.
+                    let err = crate::addon::ensure_addon_supported(
+                        crate::addon::AddonBackend::Interpreter,
+                        &import.path,
+                    );
+                    if let Err(policy_err) = err {
+                        return Err(RuntimeError {
+                            message: policy_err.to_string(),
+                        });
+                    }
+                }
+            }
+        }
+
         // For versioned imports (>>> alice/string-utils@b.12 or alice/pkg/submod@b.12),
         // the path is "alice/string-utils" or "alice/pkg/submod" and version is "b.12".
         //
@@ -526,5 +575,142 @@ impl Interpreter {
             }
         }
         Ok(Signal::Value(Value::Unit))
+    }
+
+    // ── RC1 Phase 4: addon-backed package import support ────────────────
+
+    /// Resolve only the **package directory** for an import statement
+    /// (without canonicalizing to a `.td` source file).
+    ///
+    /// This is the shared step that addon-backed packages and pure
+    /// source packages perform identically. The addon-import branch
+    /// uses it to decide whether `<pkg_dir>/native/addon.toml` exists
+    /// before committing to a source-loading or addon-loading path.
+    ///
+    /// Returns `None` for relative imports (`./mod.td`) and absolute
+    /// path imports — those can never be addon-backed.
+    pub(crate) fn try_locate_addon_pkg_dir(
+        &self,
+        import: &crate::parser::ImportStmt,
+    ) -> Option<std::path::PathBuf> {
+        let path = &import.path;
+        // Relative / absolute / project-root imports are never addons.
+        if path.starts_with("./")
+            || path.starts_with("../")
+            || path.starts_with('/')
+            || path.starts_with("~/")
+            || path.starts_with("std/")
+            || path.starts_with("npm:")
+        {
+            return None;
+        }
+
+        let project_root = self.find_project_root();
+
+        // Use the same resolver pair as `eval_import` so addon-backed
+        // and pure-source resolution stay in lockstep.
+        let resolution = if let Some(version) = &import.version {
+            crate::pkg::resolver::resolve_package_module_versioned(&project_root, path, version)
+        } else {
+            crate::pkg::resolver::resolve_package_module(&project_root, path)
+        }?;
+
+        // Submodule imports (`org/pkg/sub`) cannot be addon-backed in
+        // RC1: addon function dispatch happens at the package level,
+        // not the submodule level. Submodules of an addon-backed
+        // package fall through to the source path (today there is no
+        // such concept, but the structure leaves room).
+        if resolution.submodule.is_some() {
+            return None;
+        }
+
+        Some(resolution.pkg_dir)
+    }
+
+    /// Native-only addon import handler.
+    ///
+    /// Detects whether `import` resolves to an addon-backed package,
+    /// and if so:
+    /// 1. Calls `ensure_addon_supported` (defensive: should always
+    ///    pass on the native interpreter binary).
+    /// 2. Loads / caches the addon via `AddonRegistry::ensure_loaded`.
+    /// 3. Validates that every symbol the import statement asked for
+    ///    is declared in `addon.toml`'s `[functions]` table (or is the
+    ///    addon's own symbol set, with no over-binding).
+    /// 4. Binds each requested symbol into the current env as a
+    ///    sentinel `Value::Str("__taida_addon_call::<pkg>::<fn>")`
+    ///    that `try_addon_func` (in `prelude.rs`) routes through
+    ///    `LoadedAddon::call_function`.
+    ///
+    /// Returns `Ok(Some(Signal::Value(Unit)))` if the import was
+    /// handled by the addon path, `Ok(None)` if it was not addon-backed
+    /// (caller should fall through to the source-loading path), or
+    /// `Err(RuntimeError)` for any deterministic addon failure mode.
+    #[cfg(feature = "native")]
+    pub(crate) fn try_eval_addon_import(
+        &mut self,
+        import: &crate::parser::ImportStmt,
+    ) -> Result<Option<Signal>, RuntimeError> {
+        let pkg_dir = match self.try_locate_addon_pkg_dir(import) {
+            Some(d) => d,
+            None => return Ok(None),
+        };
+        let manifest_path = pkg_dir.join("native").join("addon.toml");
+        if !manifest_path.exists() {
+            return Ok(None);
+        }
+
+        // Backend policy guard. Native interpreter is supported, every
+        // other backend is rejected with a deterministic message. The
+        // interpreter binary built with `feature = "native"` runs as
+        // the `Native` backend for addon-policy purposes (the
+        // interpreter is the reference implementation that ships the
+        // dispatch path).
+        crate::addon::ensure_addon_supported(crate::addon::AddonBackend::Native, &import.path)
+            .map_err(|e| RuntimeError {
+                message: e.to_string(),
+            })?;
+
+        let project_root = self.find_project_root();
+        let resolved = crate::addon::AddonRegistry::global()
+            .ensure_loaded(&project_root, &import.path, &pkg_dir)
+            .map_err(|e| RuntimeError {
+                message: e.to_string(),
+            })?;
+
+        // Bind each requested symbol. Symbols not declared in the
+        // manifest's `[functions]` table are rejected as
+        // "Symbol '<name>' not found in module '<package>'", matching
+        // the existing source-import error format.
+        for sym in &import.symbols {
+            let orig_name = &sym.name;
+            let local_name = sym.alias.as_deref().unwrap_or(orig_name);
+            if !resolved.manifest.functions.contains_key(orig_name) {
+                return Err(RuntimeError {
+                    message: format!(
+                        "Symbol '{}' not found in addon-backed package '{}'",
+                        orig_name, import.path
+                    ),
+                });
+            }
+            // The sentinel encodes (package_id, function_name) so the
+            // dispatcher can look the addon back up via the registry
+            // without needing per-call env state. We use "::" as the
+            // separator because existing sentinels (`__os_builtin_*`,
+            // `__net_builtin_*`, etc.) use single-segment underscore
+            // names, so collision is structurally impossible.
+            let sentinel = format!("__taida_addon_call::{}::{}", resolved.package_id, orig_name);
+            if self.env.define(local_name, Value::Str(sentinel)).is_err() {
+                return Err(RuntimeError {
+                    message: format!(
+                        "Cannot import '{}' as '{}': name already defined in this scope. \
+                         Use an alias to resolve the conflict: >>> {} => @({}: newName)",
+                        orig_name, local_name, import.path, orig_name
+                    ),
+                });
+            }
+        }
+
+        Ok(Some(Signal::Value(Value::Unit)))
     }
 }

@@ -618,6 +618,7 @@ fn js_skip_list() -> Vec<&'static str> {
         "wasm_wasi_write_failure_shape", // wasm-wasi specific (shape validation)
         "net_http_hello",                // server example, requires dedicated loopback test harness
         "net_http_parse_encode",         // net package example, requires project root + deps
+        "addon_echo", // RC1 Phase 4 addon-backed example, exercised by addon_package_integration.rs
     ]
 }
 
@@ -632,6 +633,7 @@ fn interpreter_skip_list() -> Vec<&'static str> {
         "transpile_npm",         // npm: imports only work in JS transpiler
         "net_http_hello",        // server example, requires dedicated loopback test harness
         "net_http_parse_encode", // net package example, requires project root + deps
+        "addon_echo", // RC1 Phase 4 addon-backed example, requires .taida/deps/ setup; exercised by addon_package_integration.rs
     ]
 }
 
@@ -21940,7 +21942,7 @@ stdout("should not reach here")
     }
 }
 
-/// NET5-5c-3: All 31 net symbols must produce compile error when called on wasm-min.
+/// NET5-5c-3: All current net symbols must produce compile error when called on wasm-min.
 ///
 /// Comprehensive test ensuring the full NET_SYMBOLS list is gated.
 /// Tests a subset of the most important APIs that are exercised in v5.
