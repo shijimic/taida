@@ -5420,7 +5420,7 @@ fn setup_net_project(source: &str, label: &str) -> PathBuf {
 
     // Write the net package stub (same as CoreBundledProvider::net_package_source)
     let net_stub = r#"// taida-lang/net — Core bundled network package
-<<< @(dnsResolve, tcpConnect, tcpListen, tcpAccept, socketSend, socketSendAll, socketRecv, socketSendBytes, socketRecvBytes, socketRecvExact, udpBind, udpSendTo, udpRecvFrom, socketClose, listenerClose, udpClose, httpServe, httpParseRequestHead, httpEncodeResponse, readBody, startResponse, writeChunk, endResponse, sseEvent, readBodyChunk, readBodyAll, wsUpgrade, wsSend, wsReceive, wsClose, wsCloseCode)
+<<< @(httpServe, httpParseRequestHead, httpEncodeResponse, readBody, startResponse, writeChunk, endResponse, sseEvent, readBodyChunk, readBodyAll, wsUpgrade, wsSend, wsReceive, wsClose, wsCloseCode)
 "#;
     fs::write(deps_net.join("main.td"), net_stub).expect("write net stub");
 
@@ -7786,51 +7786,124 @@ stdout(r.requests)
     }
 }
 
-// ── NET-5d: legacy net surface re-verification ─────────────────
+// ── NET-5d: net package freeze re-verification ─────────────────
 
-/// NET-5d: import taida-lang/net with both legacy (TCP) and HTTP v1 symbols — 3-way parity
-/// Verifies that legacy symbols and new HTTP v1 symbols can coexist in a single import.
-/// Uses tcpListen as a legacy symbol alongside httpParseRequestHead (HTTP v1).
+/// NET-5d: taida-lang/net must reject legacy os symbols after package freeze.
 #[test]
-fn test_net5d_legacy_and_v1_coexist_3way_parity() {
+fn test_net5d_net_rejects_legacy_os_reexports() {
     if !node_available() {
         eprintln!("SKIP: node not available");
         return;
     }
 
-    // Import both legacy (dnsResolve, socketClose) and HTTP v1 (httpParseRequestHead, httpEncodeResponse)
-    // from taida-lang/net. dnsResolve/socketClose are legacy re-exports from taida-lang/os.
-    // Verifies that mixed legacy+v1 import doesn't cause errors and HTTP v1 works correctly.
-    let source = r#">>> taida-lang/net => @(dnsResolve, socketClose, httpParseRequestHead, httpEncodeResponse)
+    let source = r#">>> taida-lang/net => @(dnsResolve, httpParseRequestHead)
+bytesLax <= Bytes["GET / HTTP/1.1\r\nHost: localhost\r\n\r\n"]()
+bytesLax ]=> bytes
+result <= httpParseRequestHead(bytes)
+stdout(result.hasValue())
+"#;
 
-// HTTP v1 symbol: httpParseRequestHead (coexists with legacy dnsResolve, socketClose)
+    let dir = setup_net_project(source, "5d_legacy_removed");
+    let td_path = dir.join("main.td");
+
+    let interp = Command::new(taida_bin())
+        .arg(&td_path)
+        .output()
+        .expect("spawn interpreter");
+
+    let js_path = unique_temp_path("taida_net5d_js", "legacy_removed", "mjs");
+    let js = Command::new(taida_bin())
+        .arg("build")
+        .arg("--target")
+        .arg("js")
+        .arg(&td_path)
+        .arg("-o")
+        .arg(&js_path)
+        .output()
+        .expect("spawn js transpile");
+    let _ = fs::remove_file(&js_path);
+
+    let bin_path = unique_temp_path("taida_net5d_native", "legacy_removed", "bin");
+    let native = Command::new(taida_bin())
+        .arg("build")
+        .arg("--target")
+        .arg("native")
+        .arg(&td_path)
+        .arg("-o")
+        .arg(&bin_path)
+        .output()
+        .expect("spawn native compile");
+    let _ = fs::remove_file(&bin_path);
+
+    cleanup_net_project(&dir);
+
+    assert_eq!(
+        interp.status.success(),
+        false,
+        "NET-5d: interpreter should reject legacy taida-lang/net import"
+    );
+    assert_eq!(
+        js.status.success(),
+        false,
+        "NET-5d: JS build should reject legacy taida-lang/net import"
+    );
+    assert_eq!(
+        native.status.success(),
+        false,
+        "NET-5d: Native build should reject legacy taida-lang/net import"
+    );
+
+    for (backend, stderr) in [
+        ("interp", String::from_utf8_lossy(&interp.stderr)),
+        ("js", String::from_utf8_lossy(&js.stderr)),
+        ("native", String::from_utf8_lossy(&native.stderr)),
+    ] {
+        assert!(
+            stderr.contains("dnsResolve")
+                && (stderr.contains("not found") || stderr.contains("not exported")),
+            "NET-5d: {} stderr should mention dnsResolve not exported, got: {}",
+            backend,
+            stderr
+        );
+    }
+}
+
+/// NET-5d: HTTP-only taida-lang/net import still works after legacy cleanup.
+#[test]
+fn test_net5d_http_only_surface_still_works_3way_parity() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+
+    let source = r#">>> taida-lang/net => @(httpParseRequestHead, httpEncodeResponse)
+
 bytesLax <= Bytes["GET / HTTP/1.1\r\nHost: localhost\r\n\r\n"]()
 bytesLax ]=> bytes
 result <= httpParseRequestHead(bytes)
 result ]=> parsed
 stdout(parsed.method.len)
 
-// HTTP v1 symbol: httpEncodeResponse
 resp <= @(status <= 200, headers <= @[], body <= "ok")
 encResult <= httpEncodeResponse(resp)
 encResult ]=> encoded
 stdout(encoded.bytes.length())
 "#;
 
-    let dir = setup_net_project(source, "5d_coexist");
+    let dir = setup_net_project(source, "5d_http_only");
     let interp = run_net_interpreter(&dir).expect("interpreter failed");
-    let js = run_net_js(&dir, "5d_coexist").expect("js failed");
-    let native = run_net_native(&dir, "5d_coexist").expect("native failed");
+    let js = run_net_js(&dir, "5d_http_only").expect("js failed");
+    let native = run_net_native(&dir, "5d_http_only").expect("native failed");
     cleanup_net_project(&dir);
 
     assert_eq!(
         interp, js,
-        "NET-5d: coexist Interp vs JS\nInterp: {}\nJS: {}",
+        "NET-5d: http-only Interp vs JS\nInterp: {}\nJS: {}",
         interp, js
     );
     assert_eq!(
         interp, native,
-        "NET-5d: coexist Interp vs Native\nInterp: {}\nNative: {}",
+        "NET-5d: http-only Interp vs Native\nInterp: {}\nNative: {}",
         interp, native
     );
 }

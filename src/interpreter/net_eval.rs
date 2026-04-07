@@ -2,15 +2,11 @@
 ///
 /// Implements `taida-lang/net` (core-bundled):
 ///
-/// Legacy surface (shared with os runtime dispatch):
-///   dnsResolve, tcpConnect, tcpListen, tcpAccept,
-///   socketSend, socketSendAll, socketRecv,
-///   socketSendBytes, socketRecvBytes, socketRecvExact,
-///   udpBind, udpSendTo, udpRecvFrom,
-///   socketClose, listenerClose, udpClose
-///
-/// HTTP v1 surface (new):
-///   httpServe, httpParseRequestHead, httpEncodeResponse
+/// HTTP surface:
+///   httpServe, httpParseRequestHead, httpEncodeResponse, readBody
+///   startResponse, writeChunk, endResponse, sseEvent
+///   readBodyChunk, readBodyAll
+///   wsUpgrade, wsSend, wsReceive, wsClose, wsCloseCode
 ///
 /// These are `impl Interpreter` methods split from eval.rs for maintainability.
 use super::eval::{Interpreter, RuntimeError, Signal};
@@ -21,25 +17,8 @@ use crate::parser::Expr;
 type ResponseFields = (i64, Vec<(String, String)>, Vec<u8>);
 
 /// All symbols exported by the net package.
-/// Legacy (16) + HTTP v1 (3) + HTTP v2 (1) + HTTP v3 (4) + HTTP v4 (6) + v5 (1) = 31 symbols.
+/// HTTP v1 (3) + HTTP v2 (1) + HTTP v3 (4) + HTTP v4 (6) + v5 (1) = 15 symbols.
 pub(crate) const NET_SYMBOLS: &[&str] = &[
-    // Legacy surface (shared with os)
-    "dnsResolve",
-    "tcpConnect",
-    "tcpListen",
-    "tcpAccept",
-    "socketSend",
-    "socketSendAll",
-    "socketRecv",
-    "socketSendBytes",
-    "socketRecvBytes",
-    "socketRecvExact",
-    "udpBind",
-    "udpSendTo",
-    "udpRecvFrom",
-    "socketClose",
-    "listenerClose",
-    "udpClose",
     // HTTP v1
     "httpServe",
     "httpParseRequestHead",
@@ -1481,14 +1460,6 @@ impl Interpreter {
         };
 
         match original_name.as_str() {
-            // ── Legacy surface — delegate to os_eval implementations ──
-            // Note: these symbols are also reachable via the unguarded try_os_func()
-            // when imported from taida-lang/os. That is known debt, not a NET-0 scope fix.
-            "dnsResolve" | "tcpConnect" | "tcpListen" | "tcpAccept" | "socketSend"
-            | "socketSendAll" | "socketRecv" | "socketSendBytes" | "socketRecvBytes"
-            | "socketRecvExact" | "udpBind" | "udpSendTo" | "udpRecvFrom" | "socketClose"
-            | "listenerClose" | "udpClose" => self.try_os_func(&original_name, args),
-
             // ── httpParseRequestHead(bytes) → Result[@(parsed), _] ──
             "httpParseRequestHead" => {
                 let bytes = self.eval_net_bytes_arg(args, 0, "httpParseRequestHead")?;
@@ -5520,9 +5491,9 @@ mod tests {
 
     #[test]
     fn test_net_symbols_count() {
-        // 16 legacy + 3 HTTP v1 + 1 HTTP v2 + 4 HTTP v3 + 6 HTTP v4 + 1 v5 = 31
-        assert_eq!(NET_SYMBOLS.len(), 31);
-        assert!(NET_SYMBOLS.contains(&"dnsResolve"));
+        // HTTP v1 (3) + HTTP v2 (1) + HTTP v3 (4) + HTTP v4 (6) + v5 (1) = 15
+        assert_eq!(NET_SYMBOLS.len(), 15);
+        assert!(!NET_SYMBOLS.contains(&"dnsResolve"));
         assert!(NET_SYMBOLS.contains(&"httpServe"));
         assert!(NET_SYMBOLS.contains(&"httpParseRequestHead"));
         assert!(NET_SYMBOLS.contains(&"wsCloseCode"));
