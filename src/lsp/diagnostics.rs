@@ -551,8 +551,9 @@ mod tests {
                 continue;
             }
             // Skip module import files (they require their dependency files)
+            // Skip addon example files (they require native addon runtime)
             let fname = path.file_name().unwrap().to_str().unwrap();
-            if fname.starts_with("module_") {
+            if fname.starts_with("module_") || fname.starts_with("addon_") {
                 continue;
             }
 

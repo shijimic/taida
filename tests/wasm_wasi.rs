@@ -675,6 +675,8 @@ fn wasm_wasi_parity_all_examples() {
         // only in RC1; Cranelift native backend deliberately rejects
         // them with a deterministic compile-time error.
         "addon_echo",
+        // RC1.5-4: addon-backed example, native dispatch only
+        "addon_terminal",
     ];
 
     // Detect regressions: any new rejected/native-fail example not in the allowlist

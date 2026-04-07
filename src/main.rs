@@ -3916,17 +3916,23 @@ fn run_deps(args: &[String]) {
 // ── Install subcommand ──────────────────────────────────
 
 fn run_install(args: &[String]) {
-    match args {
-        [] => {}
-        [arg] if is_help_flag(arg.as_str()) => {
+    // RC1.5-3c: parse --force-refresh flag
+    let mut force_refresh = false;
+    let mut filtered: Vec<&str> = Vec::new();
+    for arg in args {
+        if arg == "--force-refresh" {
+            force_refresh = true;
+        } else if is_help_flag(arg.as_str()) {
             print_install_help();
             return;
+        } else {
+            filtered.push(arg.as_str());
         }
-        _ => {
-            eprintln!("Unexpected arguments.");
-            eprintln!("Run `taida install --help` for usage.");
-            std::process::exit(1);
-        }
+    }
+    if !filtered.is_empty() {
+        eprintln!("Unexpected arguments.");
+        eprintln!("Run `taida install --help` for usage.");
+        std::process::exit(1);
     }
 
     // Find project root by looking for packages.tdm
@@ -3985,6 +3991,8 @@ fn run_install(args: &[String]) {
     }
 
     // Install resolved dependencies
+    let mut addon_map: std::collections::BTreeMap<String, pkg::lockfile::LockedAddon> =
+        std::collections::BTreeMap::new();
     if !result.resolved.is_empty() {
         match pkg::resolver::install_deps(&manifest, &result) {
             Ok(()) => {
@@ -4008,10 +4016,32 @@ fn run_install(args: &[String]) {
                 std::process::exit(1);
             }
         }
+
+        // RC1.5-3a: install addon prebuilds
+        let existing_lock = pkg::lockfile::Lockfile::read(&lock_path).unwrap_or(None);
+        addon_map = match pkg::resolver::install_addon_prebuilds(
+            &manifest,
+            &result,
+            force_refresh,
+            existing_lock.as_ref(),
+        ) {
+            Ok(map) => map,
+            Err(e) => {
+                eprintln!("Error installing addon prebuilds: {}", e);
+                std::process::exit(1);
+            }
+        };
+
+        if !addon_map.is_empty() {
+            for (pkg_name, addon) in &addon_map {
+                println!("  Addon {} @ {} ({})", pkg_name, addon.target, addon.sha256);
+            }
+        }
     }
 
     // Generate lockfile (always, even if some deps failed)
-    match pkg::resolver::write_lockfile(&manifest, &result) {
+    // RC1.5: include addon info if addon prebuilds were installed
+    match pkg::resolver::write_lockfile_with_addons(&manifest, &result, &addon_map) {
         Ok(()) => println!("Generated taida.lock"),
         Err(e) => eprintln!("Warning: could not write lockfile: {}", e),
     }

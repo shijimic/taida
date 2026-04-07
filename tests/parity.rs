@@ -619,6 +619,7 @@ fn js_skip_list() -> Vec<&'static str> {
         "net_http_hello",                // server example, requires dedicated loopback test harness
         "net_http_parse_encode",         // net package example, requires project root + deps
         "addon_echo", // RC1 Phase 4 addon-backed example, exercised by addon_package_integration.rs
+        "addon_terminal", // RC1.5-4 addon-backed example, exercised by addon_terminal_install_e2e.rs
     ]
 }
 
@@ -634,6 +635,7 @@ fn interpreter_skip_list() -> Vec<&'static str> {
         "net_http_hello",        // server example, requires dedicated loopback test harness
         "net_http_parse_encode", // net package example, requires project root + deps
         "addon_echo", // RC1 Phase 4 addon-backed example, requires .taida/deps/ setup; exercised by addon_package_integration.rs
+        "addon_terminal", // RC1.5-4 addon-backed example, requires .taida/deps/ setup; exercised by addon_terminal_install_e2e.rs
     ]
 }
 

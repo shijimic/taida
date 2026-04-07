@@ -1720,6 +1720,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "taida-addon-terminal-sample"
+version = "2.0.0"
+dependencies = [
+ "libc",
+ "taida-addon",
+]
+
+[[package]]
 name = "target-lexicon"
 version = "0.13.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"

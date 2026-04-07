@@ -17,6 +17,11 @@ use super::provider::{
     StoreProvider, WorkspaceProvider,
 };
 
+// RC1.5: addon prebuild integration
+use crate::addon::host_target;
+use crate::addon::manifest::parse_addon_manifest;
+use crate::addon::prebuild_fetcher::{FetchError, fetch_prebuild};
+
 /// Result of dependency resolution.
 #[derive(Debug)]
 pub struct ResolveResult {
@@ -373,6 +378,187 @@ pub fn install_deps(manifest: &Manifest, result: &ResolveResult) -> Result<(), S
     Ok(())
 }
 
+/// RC1.5: Install addon prebuilds for all resolved packages that have `native/addon.toml`.
+///
+/// For each package, checks if `native/addon.toml` exists in the package dir.
+/// If present, parses the manifest, detects the host target, and fetches the prebuild
+/// binary via `fetch_prebuild`. The `.so` is placed at
+/// `.taida/deps/<pkg>/native/lib<name>.<ext>`.
+///
+/// Fails fast on any addon-related error (partial state is not left behind).
+///
+/// `force_refresh`: if true, bypasses the cache and re-downloads.
+pub fn install_addon_prebuilds(
+    manifest: &Manifest,
+    result: &ResolveResult,
+    force_refresh: bool,
+    lockfile: Option<&Lockfile>,
+) -> Result<BTreeMap<String, crate::pkg::lockfile::LockedAddon>, String> {
+    let deps_dir = manifest.root_dir.join(".taida").join("deps");
+    let mut addon_info: BTreeMap<String, crate::pkg::lockfile::LockedAddon> = BTreeMap::new();
+
+    // Detect host target once
+    let host = host_target::detect_host_target().map_err(|e| {
+        format!(
+            "cannot detect host target for addon prebuild: {} (supported: {})",
+            e.host_triple,
+            host_target::supported_targets().join(", ")
+        )
+    })?;
+
+    for pkg in &result.packages {
+        let addon_toml = pkg.path.join("native").join("addon.toml");
+        if !addon_toml.exists() {
+            continue; // No addon manifest -> skip
+        }
+
+        // Parse the addon manifest
+        let addon_manifest = parse_addon_manifest(&addon_toml).map_err(|e| e.to_string())?;
+
+        // Check if prebuild is configured
+        if !addon_manifest.prebuild.has_prebuild() {
+            // Prebuild not configured -> skip (RC1 "manual placement" mode)
+            continue;
+        }
+
+        // Check if the host target is supported by this addon
+        let sha256_for_target = addon_manifest.prebuild.targets.get(host.as_triple());
+        let expected_sha256 = match sha256_for_target {
+            Some(s) => s,
+            None => {
+                return Err(format!(
+                    "addon '{}' is not available for your platform\n  host target:    {}\n  supported targets:\n    - {}\n  action: ask the addon author to upload a prebuild for {}",
+                    addon_manifest.package,
+                    host.as_triple(),
+                    host_target::supported_targets().join("\n    - "),
+                    host.as_triple(),
+                ));
+            }
+        };
+
+        // Expand URL template
+        let url = crate::addon::url_template::expand_url_template(
+            addon_manifest.prebuild.url_template.as_ref().unwrap(),
+            &pkg.version,
+            host.as_triple(),
+            host.cdylib_ext(),
+            &addon_manifest.library,
+        )
+        .map_err(|e| format!("addon URL template expansion failed: {}", e))?;
+
+        // RC1.5-3b-4: cross-check with lockfile if available
+        if let Some(lf) = lockfile {
+            for locked in &lf.packages {
+                if locked.name == pkg.name
+                    && let Some(ref locked_addon) = locked.addon
+                    && locked_addon.target == host.as_triple()
+                    && locked_addon.sha256 != *expected_sha256
+                {
+                    // RC1.5-3b-5: mismatch -> reject
+                    return Err(format!(
+                        "lockfile addon SHA-256 mismatch for package '{}' (expected {}, got {}). Re-run `taida install --force-refresh`.",
+                        pkg.name, expected_sha256, locked_addon.sha256
+                    ));
+                }
+            }
+        }
+
+        // Parse out org/name from package id
+        let (org, name) = pkg.name.split_once('/').ok_or_else(|| {
+            format!(
+                "cannot parse package '{}' as org/name for addon prebuild",
+                pkg.name
+            )
+        })?;
+
+        // Fetch prebuild binary (cache-aware by default)
+        let fetched_path = if force_refresh {
+            // Bypass cache: delete cached file first
+            let cache_root = std::env::var("HOME")
+                .ok()
+                .map(|h| PathBuf::from(h).join(".taida/addon-cache"));
+            if let Some(ref root) = cache_root {
+                let pkg_cache = root
+                    .join(org)
+                    .join(name)
+                    .join(&pkg.version)
+                    .join(host.as_triple());
+                if pkg_cache.exists() {
+                    let _ = std::fs::remove_dir_all(&pkg_cache);
+                }
+            }
+            fetch_prebuild(
+                &pkg.name,
+                &pkg.version,
+                host.as_triple(),
+                &addon_manifest.library,
+                host.cdylib_ext(),
+                &url,
+                expected_sha256,
+            )
+            .map_err(|e| addon_fetch_error_as_string(&e))?
+        } else {
+            fetch_prebuild(
+                &pkg.name,
+                &pkg.version,
+                host.as_triple(),
+                &addon_manifest.library,
+                host.cdylib_ext(),
+                &url,
+                expected_sha256,
+            )
+            .map_err(|e| addon_fetch_error_as_string(&e))?
+        };
+
+        // Place the .so at .taida/deps/<pkg>/native/lib<name>.<ext>
+        let native_dir = deps_dir.join(&pkg.name).join("native");
+        std::fs::create_dir_all(&native_dir)
+            .map_err(|e| format!("cannot create native dir for '{}': {}", pkg.name, e))?;
+
+        let dest = native_dir.join(format!(
+            "lib{}.{}",
+            addon_manifest.library,
+            host.cdylib_ext()
+        ));
+        std::fs::copy(&fetched_path, &dest)
+            .map_err(|e| format!("cannot copy addon binary to {}: {}", dest.display(), e))?;
+
+        // Record addon info for lockfile
+        addon_info.insert(
+            pkg.name.clone(),
+            crate::pkg::lockfile::LockedAddon {
+                target: host.as_triple().to_string(),
+                sha256: expected_sha256.clone(),
+            },
+        );
+    }
+
+    Ok(addon_info)
+}
+
+fn addon_fetch_error_as_string(err: &FetchError) -> String {
+    match err {
+        FetchError::UnsupportedTarget { host, supported } => format!(
+            "addon not available for platform '{}' (supported: {})",
+            host,
+            supported.join(", ")
+        ),
+        FetchError::DownloadFailed { message } => format!("addon download failed: {}", message),
+        FetchError::IntegrityMismatch { expected, actual } => format!(
+            "addon integrity check failed (expected {}, got {})",
+            expected, actual
+        ),
+        FetchError::SizeLimitExceeded {
+            max_bytes,
+            actual_bytes,
+        } => format!(
+            "addon binary too large ({} bytes, max {} bytes)",
+            actual_bytes, max_bytes
+        ),
+        FetchError::CacheIoError { message } => format!("addon cache I/O error: {}", message),
+    }
+}
+
 /// Generate/update the lockfile after dependency resolution.
 pub fn write_lockfile(manifest: &Manifest, result: &ResolveResult) -> Result<(), String> {
     let lock_path = manifest.root_dir.join(".taida").join("taida.lock");
@@ -389,6 +575,29 @@ pub fn write_lockfile(manifest: &Manifest, result: &ResolveResult) -> Result<(),
         && existing.is_up_to_date(&result.packages)
     {
         return Ok(()); // Already up to date, skip write
+    }
+
+    lockfile.write(&lock_path)
+}
+
+/// RC1.5-3b: Generate/update lockfile with addon info.
+pub fn write_lockfile_with_addons(
+    manifest: &Manifest,
+    result: &ResolveResult,
+    addons: &std::collections::BTreeMap<String, crate::pkg::lockfile::LockedAddon>,
+) -> Result<(), String> {
+    let lock_path = manifest.root_dir.join(".taida").join("taida.lock");
+
+    // Ensure .taida/ directory exists
+    if let Some(parent) = lock_path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("Cannot create .taida/ directory: {}", e))?;
+    }
+    let mut lockfile = Lockfile::from_resolved(&result.packages);
+
+    // Attach addon info
+    for (pkg_name, addon) in addons {
+        lockfile.with_addon(pkg_name, addon.target.clone(), addon.sha256.clone())?;
     }
 
     lockfile.write(&lock_path)
@@ -1099,6 +1308,7 @@ deps <= @(
                 version: "a.1".to_string(),
                 source: "bundled".to_string(),
                 integrity: "fnv1a:0000000000000002".to_string(),
+                addon: None,
             }],
         };
 

@@ -1,0 +1,14 @@
+[package]
+name = "taida-addon-terminal-sample"
+version = "2.0.0"
+edition.workspace = true
+license.workspace = true
+description = "Minimal sample terminal addon for RC1.5. Proves install-time prebuild pipeline with 5 sync functions."
+
+# cdylib for the Native loader; rlib for workspace cargo test.
+[lib]
+crate-type = ["rlib", "cdylib"]
+
+[target.'cfg(unix)'.dependencies]
+taida-addon = { path = "../addon-rs", version = "2.0.0" }
+libc = "0.2"

@@ -24,6 +24,12 @@ fn test_all_examples_pass_typecheck() {
     for entry in fs::read_dir(examples_dir).unwrap() {
         let entry = entry.unwrap();
         let path = entry.path();
+        // Skip addon example files (they require native addon runtime;
+        // same rationale as LSP diagnostics skip)
+        let fname = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        if fname.starts_with("addon_") {
+            continue;
+        }
         if path.extension().is_some_and(|e| e == "td") {
             let errors = check_file(path.to_str().unwrap());
             if !errors.is_empty() {

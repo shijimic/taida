@@ -53,6 +53,17 @@ pub struct LockedPackage {
     pub source: String,
     /// Integrity hash.
     pub integrity: String,
+    /// RC1.5: Optional addon binary info.
+    pub addon: Option<LockedAddon>,
+}
+
+/// RC1.5: Locked addon binary metadata.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LockedAddon {
+    /// Target triple (e.g. "x86_64-unknown-linux-gnu").
+    pub target: String,
+    /// SHA-256 hex digest of the prebuild binary.
+    pub sha256: String,
 }
 
 impl Lockfile {
@@ -65,6 +76,7 @@ impl Lockfile {
                 version: pkg.version.clone(),
                 source: source_to_string(&pkg.source),
                 integrity: pkg.integrity.clone(),
+                addon: None, // caller should extend via with_addon if needed
             })
             .collect();
 
@@ -75,6 +87,23 @@ impl Lockfile {
             version: LOCKFILE_VERSION,
             packages: locked,
         }
+    }
+
+    /// RC1.5: Attach addon info to a package entry.
+    /// Returns Err if the package is not in the lockfile.
+    pub fn with_addon(
+        &mut self,
+        package_name: &str,
+        target: String,
+        sha256: String,
+    ) -> Result<(), String> {
+        let pkg = self
+            .packages
+            .iter_mut()
+            .find(|p| p.name == package_name)
+            .ok_or_else(|| format!("package '{package_name}' not found in lockfile"))?;
+        pkg.addon = Some(LockedAddon { target, sha256 });
+        Ok(())
     }
 
     /// Write the lockfile to disk.
@@ -102,6 +131,8 @@ impl Lockfile {
         let mut version = LOCKFILE_VERSION;
         let mut packages = Vec::new();
         let mut current_pkg: Option<LockedPackageBuilder> = None;
+        // RC1.5: track whether we're inside [[package.addon]]
+        let mut in_addon = false;
 
         for line in content.lines() {
             let line = line.trim();
@@ -125,19 +156,36 @@ impl Lockfile {
                     packages.push(builder.build()?);
                 }
                 current_pkg = Some(LockedPackageBuilder::new());
+                in_addon = false;
+                continue;
+            }
+
+            // RC1.5: [[package.addon]] subtable
+            if line.starts_with("[[package.addon]]") {
+                in_addon = true;
                 continue;
             }
 
             // Parse key = "value" lines
-            if let Some(builder) = &mut current_pkg
-                && let Some((key, value)) = parse_kv_line(line)
-            {
-                match key {
-                    "name" => builder.name = Some(value.to_string()),
-                    "version" => builder.version = Some(value.to_string()),
-                    "source" => builder.source = Some(value.to_string()),
-                    "integrity" => builder.integrity = Some(value.to_string()),
-                    _ => {} // Ignore unknown keys for forward compatibility
+            if let Some(kv) = parse_kv_line(line) {
+                let (key, value) = kv;
+                if let Some(builder) = &mut current_pkg {
+                    if in_addon {
+                        // RC1.5: parse addon fields
+                        match key {
+                            "target" => builder.addon_target = Some(value.to_string()),
+                            "sha256" => builder.addon_sha256 = Some(value.to_string()),
+                            _ => {}
+                        }
+                    } else {
+                        match key {
+                            "name" => builder.name = Some(value.to_string()),
+                            "version" => builder.version = Some(value.to_string()),
+                            "source" => builder.source = Some(value.to_string()),
+                            "integrity" => builder.integrity = Some(value.to_string()),
+                            _ => {} // Ignore unknown keys for forward compatibility
+                        }
+                    }
                 }
             }
         }
@@ -191,6 +239,14 @@ impl std::fmt::Display for Lockfile {
             out.push_str(&format!("version = \"{}\"\n", pkg.version));
             out.push_str(&format!("source = \"{}\"\n", pkg.source));
             out.push_str(&format!("integrity = \"{}\"\n", pkg.integrity));
+
+            // RC1.5: optional [[package.addon]] subtable
+            if let Some(ref addon) = pkg.addon {
+                out.push('\n');
+                out.push_str("  [[package.addon]]\n");
+                out.push_str(&format!("  target = \"{}\"\n", addon.target));
+                out.push_str(&format!("  sha256 = \"{}\"\n", addon.sha256));
+            }
         }
 
         write!(f, "{}", out)
@@ -204,6 +260,9 @@ struct LockedPackageBuilder {
     version: Option<String>,
     source: Option<String>,
     integrity: Option<String>,
+    // RC1.5: optional addon fields
+    addon_target: Option<String>,
+    addon_sha256: Option<String>,
 }
 
 impl LockedPackageBuilder {
@@ -212,6 +271,10 @@ impl LockedPackageBuilder {
     }
 
     fn build(self) -> Result<LockedPackage, String> {
+        let addon = match (self.addon_target, self.addon_sha256) {
+            (Some(target), Some(sha256)) => Some(LockedAddon { target, sha256 }),
+            _ => None, // both absent -> None (backward compat)
+        };
         Ok(LockedPackage {
             name: self.name.ok_or("lockfile: package missing 'name' field")?,
             version: self
@@ -223,6 +286,7 @@ impl LockedPackageBuilder {
             integrity: self
                 .integrity
                 .ok_or("lockfile: package missing 'integrity' field")?,
+            addon,
         })
     }
 }
@@ -412,5 +476,71 @@ mod tests {
         );
         assert_eq!(parse_kv_line("key=value"), Some(("key", "value")));
         assert_eq!(parse_kv_line("no equals sign"), None);
+    }
+
+    // ── RC1.5: Lockfile addon subtable tests ─────────────────────
+
+    #[test]
+    fn test_lockfile_with_addon_roundtrip() {
+        let packages = vec![make_resolved(
+            "taida-lang/terminal",
+            "a.1",
+            PackageSource::CoreBundled,
+        )];
+        let mut lockfile = Lockfile::from_resolved(&packages);
+        lockfile
+            .with_addon(
+                "taida-lang/terminal",
+                "x86_64-unknown-linux-gnu".to_string(),
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                    .to_string(),
+            )
+            .unwrap();
+
+        let serialized = lockfile.to_string();
+        assert!(serialized.contains("[[package.addon]]"));
+        assert!(serialized.contains("target = \"x86_64-unknown-linux-gnu\""));
+        assert!(serialized.contains("sha256 = \"sha256:aaa"));
+
+        let parsed = Lockfile::parse(&serialized).unwrap();
+        assert_eq!(parsed.packages.len(), 1);
+        let addon = parsed.packages[0].addon.as_ref().unwrap();
+        assert_eq!(addon.target, "x86_64-unknown-linux-gnu");
+        assert!(addon.sha256.starts_with("sha256:aa"));
+    }
+
+    #[test]
+    fn test_lockfile_backward_compat_no_addon() {
+        // Existing lockfile without [[package.addon]] should parse fine
+        let content = r#"# taida.lock -- auto-generated by taida install
+# lockfile-version: 1
+
+[[package]]
+name = "os"
+version = "1.0.0"
+source = "bundled"
+integrity = "fnv1a:0000000000000002"
+"#;
+        let parsed = Lockfile::parse(content).unwrap();
+        assert_eq!(parsed.packages.len(), 1);
+        assert_eq!(parsed.packages[0].name, "os");
+        assert!(parsed.packages[0].addon.is_none());
+    }
+
+    #[test]
+    fn test_lockfile_with_addon_display_indent() {
+        let packages = vec![make_resolved("org/pkg", "a.1", PackageSource::CoreBundled)];
+        let mut lockfile = Lockfile::from_resolved(&packages);
+        lockfile
+            .with_addon(
+                "org/pkg",
+                "x86_64-unknown-linux-gnu".to_string(),
+                "sha256:bbb".to_string(),
+            )
+            .unwrap();
+        let serialized = lockfile.to_string();
+        // Subtable should be indented with 2 spaces
+        assert!(serialized.contains("  [[package.addon]]"));
+        assert!(serialized.contains("  target = "));
     }
 }
