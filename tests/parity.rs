@@ -7839,19 +7839,16 @@ stdout(result.hasValue())
 
     cleanup_net_project(&dir);
 
-    assert_eq!(
-        interp.status.success(),
-        false,
+    assert!(
+        !interp.status.success(),
         "NET-5d: interpreter should reject legacy taida-lang/net import"
     );
-    assert_eq!(
-        js.status.success(),
-        false,
+    assert!(
+        !js.status.success(),
         "NET-5d: JS build should reject legacy taida-lang/net import"
     );
-    assert_eq!(
-        native.status.success(),
-        false,
+    assert!(
+        !native.status.success(),
         "NET-5d: Native build should reject legacy taida-lang/net import"
     );
 
