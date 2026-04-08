@@ -855,6 +855,40 @@ impl Interpreter {
                     return Ok(result);
                 }
 
+                // RC2B-207: Addon-backed "operation mold" bridge.
+                //
+                // The RC2 design uses mold syntax for effectful addon
+                // queries (`TerminalSize[]()`, `ReadKey[]()`). When a
+                // mold name is bound in the current env to an addon
+                // sentinel (`Value::Str("__taida_addon_call::...")`),
+                // we dispatch through the addon call path with the
+                // positional `type_args` as arguments and no named
+                // fields. This preserves the normal mold path for
+                // every non-addon identifier so there is zero change
+                // to Str/JSON/user-defined mold behaviour.
+                //
+                // `fields` (named `foo <= bar` slots) are forbidden on
+                // addon molds because the addon ABI has positional
+                // arity only; mixing them would require a calling
+                // convention the addon surface does not have.
+                #[cfg(feature = "native")]
+                if let Some(Value::Str(tag)) = self.env.get(name)
+                    && tag.starts_with("__taida_addon_call::")
+                {
+                    if !fields.is_empty() {
+                        return Err(RuntimeError {
+                            message: format!(
+                                "Addon mold '{}' does not accept named fields. \
+                                 Pass arguments positionally: {}[arg1, arg2]().",
+                                name, name
+                            ),
+                        });
+                    }
+                    if let Some(signal) = self.try_addon_func(name, type_args)? {
+                        return Ok(signal);
+                    }
+                }
+
                 // Generic/custom mold instantiation.
                 let mut named_values = HashMap::<String, Value>::new();
                 for field in fields {

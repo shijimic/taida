@@ -634,12 +634,20 @@ impl Interpreter {
     /// 1. Calls `ensure_addon_supported` (defensive: should always
     ///    pass on the native interpreter binary).
     /// 2. Loads / caches the addon via `AddonRegistry::ensure_loaded`.
-    /// 3. Validates that every symbol the import statement asked for
-    ///    is declared in `addon.toml`'s `[functions]` table (or is the
-    ///    addon's own symbol set, with no over-binding).
-    /// 4. Binds each requested symbol into the current env as a
-    ///    sentinel `Value::Str("__taida_addon_call::<pkg>::<fn>")`
-    ///    that `try_addon_func` (in `prelude.rs`) routes through
+    /// 3. If the package ships a Taida-side facade at
+    ///    `<pkg_dir>/taida/<stem>.td`, executes it as a module with the
+    ///    addon's `[functions]` pre-injected as sentinels. This lets the
+    ///    facade wrap the lowercase Rust functions under uppercase
+    ///    Taida-side names (e.g. `TerminalSize <= terminalSize`) and
+    ///    define pure-Taida companion values (like the `KeyKind` pack).
+    /// 4. Validates that every symbol the import statement asked for
+    ///    resolves to either
+    ///      - a facade export (if a facade was loaded), or
+    ///      - an `addon.toml` `[functions]` entry.
+    /// 5. Binds each requested symbol into the current env. Facade
+    ///    exports are bound by value; addon functions are bound as
+    ///    sentinels `Value::Str("__taida_addon_call::<pkg>::<fn>")` that
+    ///    `try_addon_func` (in `addon_eval.rs`) routes through
     ///    `LoadedAddon::call_function`.
     ///
     /// Returns `Ok(Some(Signal::Value(Unit)))` if the import was
@@ -678,29 +686,52 @@ impl Interpreter {
                 message: e.to_string(),
             })?;
 
-        // Bind each requested symbol. Symbols not declared in the
-        // manifest's `[functions]` table are rejected as
-        // "Symbol '<name>' not found in module '<package>'", matching
-        // the existing source-import error format.
+        // RC2B-207: Load the optional Taida-side facade. The facade is a
+        // single `.td` file at `<pkg_dir>/taida/<stem>.td` where `<stem>`
+        // is the final `/`-segment of the canonical package id (e.g.
+        // `terminal` for `taida-lang/terminal`). It runs in a dedicated
+        // child environment with all `[functions]` entries pre-bound as
+        // addon sentinels, so the facade can write
+        // `TerminalSize <= terminalSize` to re-export the Rust function
+        // under a Taida-side name, or define auxiliary pure-Taida values
+        // like the `KeyKind` enum pack. Facade exports drive the user
+        // import's symbol lookup and always take precedence over the raw
+        // `[functions]` table.
+        let facade_exports = self.load_addon_facade(&pkg_dir, &resolved)?;
+
+        // Bind each requested symbol. Lookup order:
+        // 1. facade exports (facade's `<<<` or full symbol snapshot), or
+        // 2. manifest `[functions]` entries.
+        // Anything missing from both is rejected as
+        // "Symbol '<name>' not found in addon-backed package '<pkg>'".
         for sym in &import.symbols {
             let orig_name = &sym.name;
             let local_name = sym.alias.as_deref().unwrap_or(orig_name);
-            if !resolved.manifest.functions.contains_key(orig_name) {
+
+            let value = if let Some(val) = facade_exports.get(orig_name) {
+                val.clone()
+            } else if resolved.manifest.functions.contains_key(orig_name) {
+                // The sentinel encodes (package_id, function_name) so
+                // the dispatcher can look the addon back up via the
+                // registry without needing per-call env state. We use
+                // "::" as the separator because existing sentinels
+                // (`__os_builtin_*`, `__net_builtin_*`, etc.) use
+                // single-segment underscore names, so collision is
+                // structurally impossible.
+                Value::Str(format!(
+                    "__taida_addon_call::{}::{}",
+                    resolved.package_id, orig_name
+                ))
+            } else {
                 return Err(RuntimeError {
                     message: format!(
                         "Symbol '{}' not found in addon-backed package '{}'",
                         orig_name, import.path
                     ),
                 });
-            }
-            // The sentinel encodes (package_id, function_name) so the
-            // dispatcher can look the addon back up via the registry
-            // without needing per-call env state. We use "::" as the
-            // separator because existing sentinels (`__os_builtin_*`,
-            // `__net_builtin_*`, etc.) use single-segment underscore
-            // names, so collision is structurally impossible.
-            let sentinel = format!("__taida_addon_call::{}::{}", resolved.package_id, orig_name);
-            if self.env.define(local_name, Value::Str(sentinel)).is_err() {
+            };
+
+            if self.env.define(local_name, value).is_err() {
                 return Err(RuntimeError {
                     message: format!(
                         "Cannot import '{}' as '{}': name already defined in this scope. \
@@ -712,5 +743,181 @@ impl Interpreter {
         }
 
         Ok(Some(Signal::Value(Value::Unit)))
+    }
+
+    /// Load the Taida-side facade for an addon-backed package, if one
+    /// exists. Returns the facade's exported environment snapshot (or
+    /// an empty map if no facade is present).
+    ///
+    /// The facade file lives at `<pkg_dir>/taida/<stem>.td` where
+    /// `<stem>` is the final `/`-segment of the package id. Inside the
+    /// facade, every manifest `[functions]` entry is pre-bound as an
+    /// addon sentinel (`Value::Str(__taida_addon_call::<pkg>::<fn>)`)
+    /// so the facade can assign `TerminalSize <= terminalSize` to
+    /// rename the Rust function under a Taida-side name, or combine
+    /// addon calls with pure-Taida companion values such as the
+    /// `KeyKind` enum pack.
+    ///
+    /// The facade is cached in `loaded_modules` under its canonical
+    /// path so subsequent addon imports from the same package return
+    /// the same export set without re-executing the facade. This makes
+    /// the facade behave exactly like a normal cached source module.
+    #[cfg(feature = "native")]
+    fn load_addon_facade(
+        &mut self,
+        pkg_dir: &std::path::Path,
+        resolved: &crate::addon::ResolvedAddon,
+    ) -> Result<std::collections::HashMap<String, Value>, RuntimeError> {
+        // Derive the facade filename from the canonical package id. We
+        // use the last segment after `/` so `taida-lang/terminal`
+        // picks `taida/terminal.td`, and a plain `mypkg` picks
+        // `taida/mypkg.td`.
+        let stem = resolved
+            .package_id
+            .rsplit('/')
+            .next()
+            .unwrap_or(&resolved.package_id);
+        let facade_path = pkg_dir.join("taida").join(format!("{}.td", stem));
+        if !facade_path.exists() {
+            return Ok(std::collections::HashMap::new());
+        }
+
+        // Canonicalize for cache keying. Fall back to the raw path so
+        // an unreadable parent directory still produces a deterministic
+        // error further down when we try to read the file.
+        let canonical = facade_path
+            .canonicalize()
+            .unwrap_or_else(|_| facade_path.clone());
+
+        if let Some(cached) = self.loaded_modules.get(&canonical) {
+            return Ok(cached.exports.clone());
+        }
+
+        // Facade execution mirrors the source-module loading path in
+        // `eval_import`: parse, swap env/current_file/exports state,
+        // evaluate, then restore.
+        let source = std::fs::read_to_string(&canonical).map_err(|e| RuntimeError {
+            message: format!(
+                "Cannot read addon facade '{}': {}",
+                canonical.display(),
+                e
+            ),
+        })?;
+        let (program, parse_errors) = crate::parser::parse(&source);
+        if !parse_errors.is_empty() {
+            return Err(RuntimeError {
+                message: format!(
+                    "Parse errors in addon facade '{}': {}",
+                    canonical.display(),
+                    parse_errors
+                        .iter()
+                        .map(|e| e.to_string())
+                        .collect::<Vec<_>>()
+                        .join("; ")
+                ),
+            });
+        }
+
+        // Circular facade load guard. Reuses the same set as regular
+        // module loading so a pathological facade that re-imports
+        // itself still trips the circular-import error.
+        if self.loading_modules.contains(&canonical) {
+            return Err(RuntimeError {
+                message: format!(
+                    "Circular import detected while loading addon facade '{}'",
+                    canonical.display()
+                ),
+            });
+        }
+
+        let prev_file = self.current_file.clone();
+        let prev_env = self.env.clone();
+        let prev_exported_symbols = std::mem::take(&mut self.module_exported_symbols);
+        let prev_type_defs = self.type_defs.clone();
+        let prev_type_methods = self.type_methods.clone();
+
+        self.current_file = Some(canonical.clone());
+        self.loading_modules.insert(canonical.clone());
+        self.env = Environment::new();
+
+        // Pre-inject every manifest `[functions]` entry as an addon
+        // sentinel. The facade can bind these to uppercase Taida names
+        // (`TerminalSize <= terminalSize`) or reference them to combine
+        // addon calls with pure-Taida values (`KeyKind`, wrapper funcs).
+        for fn_name in resolved.manifest.functions.keys() {
+            let sentinel = format!(
+                "__taida_addon_call::{}::{}",
+                resolved.package_id, fn_name
+            );
+            self.env.define_force(fn_name, Value::Str(sentinel));
+        }
+
+        let exec_result = self.eval_program(&program);
+
+        let module_env = self.env.clone();
+        let exported_symbols = std::mem::take(&mut self.module_exported_symbols);
+        let module_type_defs = self.type_defs.clone();
+        let module_type_methods = self.type_methods.clone();
+
+        self.env = prev_env;
+        self.current_file = prev_file;
+        self.loading_modules.remove(&canonical);
+        self.module_exported_symbols = prev_exported_symbols;
+        self.type_defs = prev_type_defs;
+        self.type_methods = prev_type_methods;
+
+        if let Err(e) = exec_result {
+            return Err(RuntimeError {
+                message: format!(
+                    "Error executing addon facade '{}': {}",
+                    canonical.display(),
+                    e
+                ),
+            });
+        }
+
+        // Collect facade exports. If the facade used `<<<`, only the
+        // listed symbols survive. Otherwise every top-level binding is
+        // exported (same rule as regular modules).
+        let all_symbols = module_env.snapshot();
+        let exports: std::collections::HashMap<String, Value> = if exported_symbols.is_empty() {
+            all_symbols.into_iter().collect()
+        } else {
+            all_symbols
+                .into_iter()
+                .filter(|(k, _)| exported_symbols.contains(k))
+                .collect()
+        };
+
+        // Persist TypeDef / method metadata for exported symbols so
+        // user code can pattern-match on facade-declared types if the
+        // facade ever introduces them. Today the terminal facade only
+        // exports packs + aliases, but keeping the hook in place
+        // avoids a future gotcha.
+        let exported_type_defs: std::collections::HashMap<
+            String,
+            Vec<crate::parser::FieldDef>,
+        > = module_type_defs
+            .into_iter()
+            .filter(|(k, _)| exports.contains_key(k))
+            .collect();
+        let exported_type_methods: std::collections::HashMap<
+            String,
+            std::collections::HashMap<String, crate::parser::FuncDef>,
+        > = module_type_methods
+            .into_iter()
+            .filter(|(k, _)| exports.contains_key(k))
+            .collect();
+
+        self.loaded_modules.insert(
+            canonical,
+            LoadedModule {
+                exports: exports.clone(),
+                type_defs: exported_type_defs,
+                type_methods: exported_type_methods,
+            },
+        );
+
+        Ok(exports)
     }
 }
