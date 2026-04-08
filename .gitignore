@@ -50,3 +50,4 @@ tests/fixtures/*/.taida/
 
 # Local development notes (untracked)
 .dev/
+.taida-test-temp-e2e/

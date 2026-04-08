@@ -674,9 +674,14 @@ mod tests {
         }
         assert_eq!(result.unwrap(), *data);
 
-        // Cleanup.
+        // Cleanup. RC2B-209: only remove our own unique file —
+        // never `remove_dir_all` the shared `.taida-test-temp`
+        // directory, otherwise we race with sibling tests
+        // (`file_scheme_progress_is_reported`,
+        // `file_scheme_integrity_mismatch`) that share the same
+        // parent directory and create their own files there
+        // concurrently.
         let _ = std::fs::remove_file(&path);
-        let _ = std::fs::remove_dir_all(".taida-test-temp");
     }
 
     #[test]
@@ -689,8 +694,9 @@ mod tests {
         let err = download_from_url(&url, wrong_sha, &mut noop_progress).unwrap_err();
         assert!(matches!(err, FetchError::IntegrityMismatch { .. }));
 
+        // RC2B-209: see comment in `file_scheme_happy_path` —
+        // never `remove_dir_all` the shared `.taida-test-temp`.
         let _ = std::fs::remove_file(&path);
-        let _ = std::fs::remove_dir_all(".taida-test-temp");
     }
 
     #[test]
@@ -790,13 +796,19 @@ mod tests {
 
     #[test]
     fn clean_addon_cache_on_empty_root() {
+        // RC2B-209: serialize HOME mutation against every other
+        // test (in any module of this crate) that touches HOME via
+        // the shared `crate::util::env_test_lock()`. Cargo runs
+        // unit tests in parallel and `cache_root()` reads `HOME`,
+        // so without this lock two clean_addon_cache tests race
+        // and one walks the other test's fixture root.
+        let _guard = crate::util::env_test_lock().lock().unwrap();
         // Redirect HOME to a temp dir so we don't touch the real cache.
         let saved_home = std::env::var("HOME").ok();
         let tmp = std::env::temp_dir().join(format!("taida_clean_empty_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).unwrap();
-        // Safety: single-threaded per-test guard; tests in this file
-        // never run in parallel against the shared cache root.
+        // Safety: serialised by `env_test_lock()` above.
         unsafe {
             std::env::set_var("HOME", &tmp);
         }
@@ -821,10 +833,14 @@ mod tests {
 
     #[test]
     fn clean_addon_cache_removes_binaries_and_sidecars() {
+        // RC2B-209: serialize HOME mutation. See sibling test
+        // `clean_addon_cache_on_empty_root` for the rationale.
+        let _guard = crate::util::env_test_lock().lock().unwrap();
         let saved_home = std::env::var("HOME").ok();
         let tmp = std::env::temp_dir().join(format!("taida_clean_nonempty_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).unwrap();
+        // Safety: serialised by `env_test_lock()` above.
         unsafe {
             std::env::set_var("HOME", &tmp);
         }
