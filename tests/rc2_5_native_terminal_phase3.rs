@@ -36,11 +36,11 @@
 //! `termPrintLn` / `termReadLine` / `termPrint`. Of those:
 //!
 //!   - `termIsTty` always succeeds with a `Bool` payload — perfect for
-//!      the happy-path runtime parity sanity check.
+//!     the happy-path runtime parity sanity check.
 //!   - `termReadLine` returns `Status::Error` (code 3, message
 //!     `"termReadLine: EOF on stdin"`) when stdin is at EOF, which is
-//!      exactly the deterministic non-TTY error variant we need for
-//!      RC2.5-3a.
+//!     exactly the deterministic non-TTY error variant we need for
+//!     RC2.5-3a.
 //!
 //! The fixture writes a fresh `addon.toml` describing the sample
 //! addon's function table, copies the cdylib into

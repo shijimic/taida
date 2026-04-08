@@ -330,9 +330,9 @@ fn abi_struct_layout_parity_matches_c_static_assert_sizes() {
 ///
 ///   - `termIsTty` (addon function, 0 arity, always Ok → Bool)
 ///   - `termPrintLn` (addon function, 1 arity, Str → Unit, side effect
-///      is a stdout write directly from the addon cdylib via libc)
+///     is a stdout write directly from the addon cdylib via libc)
 ///   - `KeyKind` (pure-Taida facade pack binding exposed by
-///      `terminal.td`)
+///     `terminal.td`)
 ///
 /// This exercises every Cranelift lowering path RC2.5 added:
 ///
@@ -452,10 +452,10 @@ stdout(`phase4: done`)
 ///
 ///   - `KeyKind.Char` / `KeyKind.Enter` (pure facade pack, no I/O)
 ///   - `termIsTty()` (return value depends on stdin but both runs
-///      have stdin pinned to /dev/null so they agree)
+///     have stdin pinned to /dev/null so they agree)
 ///   - `termPrintLn("...")` (the addon's own stdout write happens in
-///      both processes, so whatever ordering/semantics one uses, the
-///      other uses the same)
+///     both processes, so whatever ordering/semantics one uses, the
+///     other uses the same)
 ///
 /// We deliberately do *not* call `termReadLine` here because it's
 /// exercised by Phase 3 (`addon_status_error_becomes_catchable_addon_error_variant`)
