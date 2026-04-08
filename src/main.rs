@@ -220,13 +220,26 @@ fn print_install_help() {
     println!(
         "\
 Usage:
-  taida install
+  taida install [--force-refresh]
 
 Behavior:
   Install resolved dependencies and generate/update `.taida/taida.lock`.
 
+  For addons with a `[library.prebuild]` section in `native/addon.toml`,
+  downloads the prebuild binary for the current host target, verifies its
+  SHA-256 against the manifest, and places it in
+  `.taida/deps/<pkg>/native/lib<name>.<ext>`. Downloads are cached under
+  `~/.taida/addon-cache/`; use `taida cache clean --addons` to prune.
+
+  Large addon downloads (>= 256 KiB) show a progress indicator on stderr
+  (RC15B-002).
+
+Options:
+  --force-refresh   Ignore the addon cache and re-download every prebuild.
+
 Example:
-  taida install"
+  taida install
+  taida install --force-refresh"
     );
 }
 
@@ -4288,15 +4301,47 @@ fn run_publish(args: &[String]) {
 
 fn run_cache(args: &[String]) {
     if args.is_empty() || args.iter().any(|a| is_help_flag(a.as_str())) {
-        println!("Usage: taida cache <command>");
+        println!("Usage: taida cache <command> [options]");
         println!();
         println!("Commands:");
-        println!("  clean    Remove all cached WASM runtime .o files");
+        println!("  clean              Remove cached WASM runtime .o files (default)");
+        println!("  clean --addons     Remove cached addon prebuild binaries");
+        println!("                     (RC15B-001: prunes ~/.taida/addon-cache/)");
+        println!("  clean --all        Remove both WASM and addon caches");
         return;
     }
 
     match args[0].as_str() {
-        "clean" => run_cache_clean(),
+        "clean" => {
+            // RC15B-001: parse optional --addons / --all flags.
+            let mut clean_wasm = true;
+            let mut clean_addons = false;
+            for extra in &args[1..] {
+                match extra.as_str() {
+                    "--addons" => {
+                        clean_wasm = false;
+                        clean_addons = true;
+                    }
+                    "--all" => {
+                        clean_wasm = true;
+                        clean_addons = true;
+                    }
+                    other => {
+                        eprintln!(
+                            "Unknown flag '{}' for 'taida cache clean'. Use --addons, --all, or no flag.",
+                            other
+                        );
+                        std::process::exit(1);
+                    }
+                }
+            }
+            if clean_wasm {
+                run_cache_clean();
+            }
+            if clean_addons {
+                run_cache_clean_addons();
+            }
+        }
         other => {
             eprintln!(
                 "Unknown cache command '{}'. Use 'taida cache clean'.",
@@ -4343,6 +4388,43 @@ fn run_cache_clean() {
             "Cache directory '{}' is already clean.",
             cache_dir.display()
         );
+    }
+}
+
+// RC15B-001: prune the addon prebuild cache at ~/.taida/addon-cache/.
+//
+// The directory tree is walked by `clean_addon_cache`, which preserves
+// user-placed files (anything that is not a recognised addon binary or
+// `.manifest-sha256` sidecar) so a confused user can still inspect the
+// directory after the command runs.
+fn run_cache_clean_addons() {
+    match taida::addon::prebuild_fetcher::clean_addon_cache() {
+        Ok(summary) => {
+            if !summary.root_existed {
+                println!("No addon cache found at '{}'.", summary.root.display());
+                return;
+            }
+            let total = summary.binaries_removed + summary.sidecars_removed;
+            if total == 0 {
+                println!(
+                    "Addon cache at '{}' is already clean.",
+                    summary.root.display()
+                );
+            } else {
+                let mib = summary.bytes_freed as f64 / (1024.0 * 1024.0);
+                println!(
+                    "Cleaned {} addon binary file(s) and {} sidecar file(s) ({:.2} MiB) from '{}'.",
+                    summary.binaries_removed,
+                    summary.sidecars_removed,
+                    mib,
+                    summary.root.display()
+                );
+            }
+        }
+        Err(e) => {
+            eprintln!("Error cleaning addon cache: {}", e);
+            std::process::exit(1);
+        }
     }
 }
 

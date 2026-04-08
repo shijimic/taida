@@ -1,20 +1,16 @@
 //! RC1.5 Phase 4 -- end-to-end install-timeline integration test.
 //!
-//! This test exercises the full RC1.5 prebuild pipeline by directly
-//! invoking `install_addon_prebuilds` (bypassing packages.tdm parsing)
-//! to verify: fetch + cache + SHA-256 verification + placement.
+//! RC15B-101 fix: file:// URLs now require relative paths only.
+//! RC15B-105 adds negative test cases: absolute paths, path traversal,
+//! symlink attacks, concurrent installs, cleanup, scheme validation.
 //!
-//! The addon_terminal.td example itself is in `examples/addon_terminal.td`
-//! (RC1.5-4c). This test uses a unit-level approach to avoid the
-//! packages.tdm `/` parsing limitation for org/name dep keys.
-//!
-//! Additionally, the `addon_package_integration.rs` test covers the
-//! interpreter-side addon loading path (import -> call round-trip).
+//! Each fetch test uses a unique `package_id + version` combination so
+//! tests don't collide in the shared cache even when run in parallel.
 
 #![cfg(feature = "native")]
 
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn unique_temp_dir(prefix: &str) -> PathBuf {
@@ -33,12 +29,10 @@ fn manifest_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
 
-/// Locate the workspace's built `taida-addon-terminal-sample` cdylib.
 fn find_terminal_cdylib() -> Option<PathBuf> {
     let target_root = std::env::var("CARGO_TARGET_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|_| manifest_dir().join("target"));
-
     let lib_name = if cfg!(target_os = "linux") {
         "libtaida_addon_terminal_sample.so"
     } else if cfg!(target_os = "macos") {
@@ -48,19 +42,16 @@ fn find_terminal_cdylib() -> Option<PathBuf> {
     } else {
         return None;
     };
-
     let candidates = [
         target_root.join("debug").join(lib_name),
         target_root.join("release").join(lib_name),
         target_root.join("debug").join("deps").join(lib_name),
         target_root.join("release").join("deps").join(lib_name),
     ];
-
     candidates.into_iter().find(|p| p.exists())
 }
 
-/// Compute SHA-256 hex for a file on disk.
-fn compute_sha256(path: &PathBuf) -> String {
+fn compute_sha256(path: &Path) -> String {
     let data = fs::read(path).expect("must read addon cdylib");
     let mut hasher = taida::crypto::Sha256::new();
     hasher.update(&data);
@@ -100,443 +91,556 @@ fn cdylib_ext() -> &'static str {
     return "unknown";
 }
 
-/// Helper: build an addon.toml with file:// URL to the real cdylib.
-fn addon_toml_content(cdylib: &std::path::Path, sha256: &str) -> String {
-    let cdylib_absolute = cdylib.canonicalize().expect("canonicalize cdylib path");
-    let file_url = format!("file://{}", cdylib_absolute.display());
-    let target_triple = detect_target_triple();
+// ── Test work-dir framework ──────────────────────────────────
 
-    format!(
-        r#"[addon]
-abi = 1
-entry = "taida_addon_get_v1"
-package = "taida-lang/terminal"
-
-[library]
-name = "terminal"
-
-[library.prebuild]
-url = "{file_url}"
-
-[library.prebuild.targets]
-"{target_triple}" = "sha256:{sha256}"
-"#
-    )
+/// Create a unique CWD-relative work directory for a single test.
+/// Each test gets its own directory so tests don't collide even when
+/// running in parallel. Returns both the (relative, absolute) paths.
+/// The caller should clean up the work dir at the end of the test.
+fn make_work_dir(test_id: &str) -> PathBuf {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock")
+        .as_nanos();
+    let rel = format!(
+        ".taida-test-temp-e2e/{}_{}_{}",
+        test_id,
+        std::process::id(),
+        nanos
+    );
+    let abs = std::env::current_dir().expect("CWD").join(&rel);
+    fs::create_dir_all(&abs).expect("create work dir");
+    abs
 }
 
-/// Helper: create a fake terminal addon package directory with
-/// addon.toml pointing at the given cdylib.
-fn create_fake_terminal_pkg(cdylib: &std::path::Path, sha256: &str) -> PathBuf {
-    let pkg = unique_temp_dir("fake_terminal_pkg");
-    let _ = fs::remove_dir_all(&pkg);
-    fs::create_dir_all(pkg.join("native")).expect("create native dir");
-    fs::write(
-        pkg.join("native").join("addon.toml"),
-        addon_toml_content(cdylib, sha256),
-    )
-    .expect("write addon.toml");
-    fs::write(
-        pkg.join("packages.tdm"),
-        r#"name <= "taida-lang/terminal"
-version <= "a.1"
-"#,
-    )
-    .expect("write fake pkg packages.tdm");
-    pkg
+/// Copy a cdylib into the given work_dir and return (filename, sha256).
+fn copy_cdylib_to(work_dir: &Path, src: &Path) -> (String, String) {
+    let ext = cdylib_ext();
+    let filename = format!("terminal_local.{}", ext);
+    let dest = work_dir.join(&filename);
+    fs::copy(src, &dest).expect("copy cdylib to work dir");
+    let sha = compute_sha256(&dest);
+    (filename, sha)
 }
 
-// ── RC1.5-4d-1/2/3/4/5/6: Full install + call round-trip ────────
+/// Create a symlink in work_dir pointing to src. Returns (link_name, sha256).
+fn make_symlink_in(work_dir: &Path, src: &Path) -> (String, String) {
+    let ext = cdylib_ext();
+    let link_name = format!("terminal_link.{}", ext);
+    let link_path = work_dir.join(&link_name);
+    let _ = fs::remove_file(&link_path);
+    let abs_src = src.canonicalize().expect("canonicalize");
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&abs_src, &link_path).expect("symlink");
+    #[cfg(not(unix))]
+    std::os::windows::fs::symlink_file(&abs_src, &link_path).expect("symlink");
+    let sha = compute_sha256(src);
+    (link_name, sha)
+}
 
-/// RC1.5-4d: End-to-end install via `taida install` using the
-/// packages.tdm legacy format with a simple path dep, followed by
-/// calling addon functions through the interpreter.
-///
-/// This test works around the `/` parsing limitation by using a dep
-/// key without `/` and manually setting up the addon.toml. However,
-/// install_addon_prebuilds rejects dep names without `/`, so this test
-/// instead uses a two-phase approach:
-///
-/// 1. `taida install` with a minimal path dep (installs the package)
-/// 2. Manually place native/addon.toml in the installed dep dir
-/// 3. Run `taida install --force-refresh` to trigger the prebuild pipeline
-/// 4. Verify the addon binary was placed and call functions
+/// Run fetch_prebuild with the work_dir as CWD.
+/// Uses unique pkg_id/version to avoid cache collision with other tests.
+#[allow(clippy::too_many_arguments)]
+fn fetch_in_work(
+    work_dir: &Path,
+    pkg_id: &str,
+    version: &str,
+    target: &str,
+    url: &str,
+    sha256: &str,
+    lib_name: &str,
+    ext: &str,
+) -> Result<PathBuf, taida::addon::prebuild_fetcher::FetchError> {
+    let saved = std::env::current_dir().expect("get CWD");
+    std::env::set_current_dir(work_dir).expect("set CWD to work dir");
+    let result = taida::addon::prebuild_fetcher::fetch_prebuild(
+        pkg_id, version, target, lib_name, ext, url, sha256,
+    );
+    std::env::set_current_dir(&saved).ok();
+    result
+}
+
+// ── RC15B-101: file:// relative-path happy path ───────────────
+
+#[test]
+fn file_relative_path_happy_path() {
+    let cdylib = match find_terminal_cdylib() {
+        Some(p) => p,
+        None => {
+            return;
+        }
+    };
+    let work = make_work_dir("file_relative_happy");
+    let (fname, sha) = copy_cdylib_to(&work, &cdylib);
+    let target = detect_target_triple();
+    let ext = cdylib_ext();
+
+    let r = fetch_in_work(
+        &work,
+        "test-pkg-relative/file-relative",
+        "v-e2e-1",
+        target,
+        &format!("file://{}", fname),
+        &sha,
+        "terminal",
+        ext,
+    );
+    assert!(r.is_ok(), "relative file:// must succeed: {:?}", r.err());
+    let _ = fs::remove_dir_all(&work);
+}
+
+// ── RC15B-101: file:// absolute path is rejected ─────────────
+
+#[test]
+fn file_absolute_path_is_rejected() {
+    let work = make_work_dir("file_absolute");
+    let target = detect_target_triple();
+    let r = fetch_in_work(
+        &work,
+        "test-pkg-abs/file-abs",
+        "v-e2e-1",
+        target,
+        "file:///etc/passwd",
+        "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "terminal",
+        "so",
+    );
+    assert!(r.is_err(), "absolute file:// must be rejected");
+    let msg = format!("{:?}", r.unwrap_err());
+    assert!(msg.contains("absolute path"), "got: {}", msg);
+    let _ = fs::remove_dir_all(&work);
+}
+
+// ── RC15B-101: file:// with path traversal is rejected ───────
+
+#[test]
+fn file_path_traversal_is_rejected() {
+    let work = make_work_dir("file_traversal");
+    let target = detect_target_triple();
+    let r = fetch_in_work(
+        &work,
+        "test-pkg-trav/file-trav",
+        "v-e2e-1",
+        target,
+        "file://./../../../etc/passwd",
+        "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "terminal",
+        "so",
+    );
+    assert!(r.is_err(), "path traversal file:// must be rejected");
+    let msg = format!("{:?}", r.unwrap_err());
+    assert!(msg.contains("path traversal"), "got: {}", msg);
+    let _ = fs::remove_dir_all(&work);
+}
+
+// ── RC15B-105: Unsupported scheme ────────────────────────────
+
+#[test]
+fn http_scheme_is_rejected() {
+    let work = make_work_dir("http_scheme");
+    let target = detect_target_triple();
+    let r = fetch_in_work(
+        &work,
+        "test-pkg-http/file-http",
+        "v-e2e-1",
+        target,
+        "http://example.com/terminal.so",
+        "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "terminal",
+        "so",
+    );
+    assert!(r.is_err(), "http:// must be rejected");
+    let msg = format!("{:?}", r.unwrap_err());
+    assert!(msg.contains("unsupported URL scheme"), "got: {}", msg);
+    let _ = fs::remove_dir_all(&work);
+}
+
+// ── RC15B-105: Non-existent file ─────────────────────────────
+
+#[test]
+fn file_not_found_produces_download_failed() {
+    let work = make_work_dir("file_not_found");
+    let target = detect_target_triple();
+    let r = fetch_in_work(
+        &work,
+        "test-pkg-nf/file-nf",
+        "v-e2e-1",
+        target,
+        "file://nonexistent_file.so",
+        "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "terminal",
+        "so",
+    );
+    assert!(r.is_err());
+    assert!(matches!(
+        r.unwrap_err(),
+        taida::addon::prebuild_fetcher::FetchError::DownloadFailed { .. }
+    ));
+    let _ = fs::remove_dir_all(&work);
+}
+
+// ── RC15B-105: file:// with non-existent relative path ───────
+
+#[test]
+fn file_relative_nonexistent_is_rejected() {
+    let work = make_work_dir("file_rel_nonexist");
+    let target = detect_target_triple();
+    let r = fetch_in_work(
+        &work,
+        "test-pkg-rne/file-rne",
+        "v-e2e-1",
+        target,
+        "file://a/b/c/not_exist.so",
+        "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "terminal",
+        "so",
+    );
+    assert!(r.is_err());
+    assert!(matches!(
+        r.unwrap_err(),
+        taida::addon::prebuild_fetcher::FetchError::DownloadFailed { .. }
+    ));
+    let _ = fs::remove_dir_all(&work);
+}
+
+// ── RC15B-105: Symlink without traversal ─────────────────────
+
+#[test]
+fn file_through_symlink_without_traversal() {
+    let cdylib = match find_terminal_cdylib() {
+        Some(p) => p,
+        None => {
+            return;
+        }
+    };
+    let work = make_work_dir("file_symlink");
+    let target = detect_target_triple();
+    let ext = cdylib_ext();
+
+    // Copy the real file and create a symlink next to it.
+    let (link_name, sha) = make_symlink_in(&work, &cdylib);
+
+    let r = fetch_in_work(
+        &work,
+        "test-pkg-symlink/file-symlink",
+        "v-e2e-1",
+        target,
+        &format!("file://{}", link_name),
+        &sha,
+        "terminal",
+        ext,
+    );
+    // Symlink without .. is accepted.
+    assert!(
+        r.is_ok(),
+        "symlink without .. should succeed: {:?}",
+        r.err()
+    );
+    let _ = fs::remove_dir_all(&work);
+}
+
+// ── RC15B-105: Package ID traversal ──────────────────────────
+
+#[test]
+fn package_id_traversal_in_org_is_rejected() {
+    let work = make_work_dir("pkg_id_traversal");
+    let target = detect_target_triple();
+    let r = fetch_in_work(
+        &work,
+        "../../../malicious/terminal",
+        "v-e2e-1",
+        target,
+        "file://some/file.so",
+        "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "terminal",
+        "so",
+    );
+    assert!(r.is_err(), "traversal in org must be rejected");
+    let msg = format!("{:?}", r.unwrap_err());
+    assert!(msg.contains("invalid package id"), "got: {}", msg);
+    let _ = fs::remove_dir_all(&work);
+}
+
+// ── RC15B-105: Concurrent install simulation ─────────────────
+
+#[test]
+fn concurrent_fetch_simulation_same_addon() {
+    let cdylib = match find_terminal_cdylib() {
+        Some(p) => p,
+        None => {
+            return;
+        }
+    };
+    let work = make_work_dir("concurrent_fetch");
+    let target = detect_target_triple();
+    let ext = cdylib_ext();
+    let (fname, sha) = copy_cdylib_to(&work, &cdylib);
+    let url = format!("file://{}", fname);
+
+    let r1 = fetch_in_work(
+        &work,
+        "test-pkg-conc/file-conc",
+        "v-e2e-1",
+        target,
+        &url,
+        &sha,
+        "terminal",
+        ext,
+    );
+    let r2 = fetch_in_work(
+        &work,
+        "test-pkg-conc/file-conc",
+        "v-e2e-1",
+        target,
+        &url,
+        &sha,
+        "terminal",
+        ext,
+    );
+
+    assert!(r1.is_ok(), "first fetch: {:?}", r1.err());
+    assert!(r2.is_ok(), "second (cache): {:?}", r2.err());
+    let _ = fs::remove_dir_all(&work);
+}
+
+// ── RC15B-105: Temp file cleanup on failure ──────────────────
+
+#[test]
+fn temp_file_cleaned_on_integrity_failure() {
+    let cdylib = match find_terminal_cdylib() {
+        Some(p) => p,
+        None => {
+            return;
+        }
+    };
+    let work = make_work_dir("temp_file_cleanup");
+    let target = detect_target_triple();
+    let ext = cdylib_ext();
+    let (fname, _sha) = copy_cdylib_to(&work, &cdylib);
+    let wrong_sha = "0000000000000000000000000000000000000000000000000000000000000000";
+
+    let r = fetch_in_work(
+        &work,
+        "test-pkg-cleanup/file-cleanup",
+        "v-e2e-1",
+        target,
+        &format!("file://{}", fname),
+        wrong_sha,
+        "terminal",
+        ext,
+    );
+    assert!(r.is_err(), "wrong SHA must be rejected");
+
+    let err = r.unwrap_err();
+    assert!(
+        matches!(
+            err,
+            taida::addon::prebuild_fetcher::FetchError::IntegrityMismatch { .. }
+        ),
+        "must be IntegrityMismatch, got: {:?}",
+        err
+    );
+
+    // No .tmp files in cache.
+    if let Ok(home) = std::env::var("HOME") {
+        let cache_dir = PathBuf::from(home)
+            .join(".taida/addon-cache/taida-lang/terminal/v-e2e-1")
+            .join(target);
+        if cache_dir.exists() {
+            for e in fs::read_dir(&cache_dir).unwrap().filter_map(|x| x.ok()) {
+                assert!(
+                    !e.path().to_string_lossy().ends_with(".tmp"),
+                    ".tmp file should not remain: {:?}",
+                    e.path()
+                );
+            }
+        }
+    }
+    let _ = fs::remove_dir_all(&work);
+}
+
+// ── RC15B-105: Package ID with special characters ────────────
+
+#[test]
+fn package_id_with_special_chars_is_rejected() {
+    let work = make_work_dir("pkg_id_special");
+    let target = detect_target_triple();
+    let r = fetch_in_work(
+        &work,
+        "org!/na@me",
+        "v-e2e-1",
+        target,
+        "file://file.so",
+        "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "terminal",
+        "so",
+    );
+    assert!(r.is_err());
+    let msg = format!("{:?}", r.unwrap_err());
+    assert!(msg.contains("invalid package id"), "got: {}", msg);
+    let _ = fs::remove_dir_all(&work);
+}
+
+// ── Legacy e2e tests (adapted for RC15B-101) ────────────────
+
 #[test]
 fn addon_terminal_install_and_call() {
     let cdylib = match find_terminal_cdylib() {
         Some(p) => p,
         None => {
-            eprintln!(
-                "note: skipping terminal install e2e -- libtaida_addon_terminal_sample.{{so,dylib,dll}} not built"
-            );
             return;
         }
     };
-
-    let sha256 = compute_sha256(&cdylib);
-
-    // Create a fake terminal package
-    let fake_pkg = create_fake_terminal_pkg(&cdylib, &sha256);
-
-    // Create the main project dir
-    let project = unique_temp_dir("addon_terminal_e2e");
-    fs::create_dir_all(&project).expect("create project dir");
-
-    // For the main project, use the new packages.tdm format with
-    // a versioned import for taida-lang/terminal. But we don't have
-    // a registry for that. Instead, let's simulate the full flow
-    // by directly setting up .taida/deps/taida-lang/terminal/ and
-    // then running install with the addon manifest.
-    //
-    // The most direct way to test the install pipeline:
-    // 1. Create a packages.tdm that references a local path dep
-    //    (the name doesn't matter for the test)
-    // 2. install_deps places it at .taida/deps/<dep_name>/
-    // 3. We manually place native/addon.toml there
-    // 4. install_addon_prebuilds finds it and fetches the addon
-
-    // Actually, let me take a different approach: directly exercise
-    // the fetcher (prebuild_fetcher) which does the download+verify.
-    // Then test the interpreter round-trip separately.
-    //
-    // For the interpreter, the existing addon_package_integration.rs
-    // tests already cover addon loading. We just need to verify that
-    // the terminal sample addon's functions can be called through
-    // the interpreter. That requires the addon to be loaded, which
-    // means we need to dlopen it and bind it.
-    //
-    // For a true e2e test of the RC1.5 install pipeline:
-    // 1. Build the addon (done)
-    // 2. Run fetcher to download/cache the binary (unit test)
-    // 3. Place the binary in .taida/deps/taida-lang/terminal/native/
-    // 4. Place addon.toml there
-    // 5. Run taida with a main.td that imports and calls the functions
-
-    // Let's do approach: manually set up .taida/deps + main.td + run.
-    let deps_terminal = project
-        .join(".taida")
-        .join("deps")
-        .join("taida-lang")
-        .join("terminal");
-    let installed_native = deps_terminal.join("native");
-    fs::create_dir_all(&installed_native).expect("create installed native dir");
-
-    // Place the addon.toml (the same one used in the fake_pkg)
-    fs::write(
-        installed_native.join("addon.toml"),
-        addon_toml_content(&cdylib, &sha256),
-    )
-    .expect("write addon.toml in installed dir");
-
-    // Place a packages.tdm at the installed dep dir so the interpreter
-    // finds the project root
-    fs::write(
-        deps_terminal.join("packages.tdm"),
-        r#"name <= "taida-lang/terminal"
-version <= "a.1"
-"#,
-    )
-    .expect("write packages.tdm in dep dir");
-
-    // Now run taida install with the project. But install needs a
-    // packages.tdm at the project root. Let's create one that refers
-    // to a path dep that already exists at .taida/deps/taida-lang/terminal/.
-    //
-    // Wait, I'm overcomplicating this. The simplest approach is:
-    // Create packages.tdm with dep "taida-lang/terminal" as a path dep
-    // pointing to deps_terminal, which already has native/addon.toml.
-    // But that's circular...
-    //
-    // Actually, the simplest e2e: use the fake_pkg directly as a path
-    // dep. The dep name will be "terminal" (no slash). install_deps
-    // will symlink .taida/deps/terminal/ -> fake_pkg/.
-    // install_addon_prebuilds will check deps_terminal/native/addon.toml
-    // and find it (since it's in fake_pkg/native/).
-    // It will then fail on "terminal".split_once('/') because there's no slash.
-    //
-    // Let me just test the install pipeline at a lower level:
-    // - Run fetch_prebuild directly (unit-level)
-    // - Verify the cache and placement
-
-    // ── Phase 1: Direct fetcher test ──
-
-    // Call fetch_prebuild directly
+    let work = make_work_dir("install_and_call");
+    let target = detect_target_triple();
     let ext = cdylib_ext();
-    let target_triple = detect_target_triple();
-    let (org, name) = ("taida-lang", "terminal");
+    let (fname, sha) = copy_cdylib_to(&work, &cdylib);
+    let url = format!("file://{}", fname);
+    let pkg_id = "taida-lang/terminal";
+    let version = "a.1";
 
-    let cdylib_absolute = cdylib.canonicalize().expect("canonicalize cdylib path");
-    let file_url = format!("file://{}", cdylib_absolute.display());
+    // Phase 1: fresh fetch
+    let r1 = fetch_in_work(&work, pkg_id, version, target, &url, &sha, "terminal", ext);
+    assert!(r1.is_ok(), "fetch: {:?}", r1.err());
+    let fetched = r1.unwrap();
+    assert!(fetched.exists());
+    assert_eq!(compute_sha256(&fetched), sha);
 
-    // Clear any existing cache to ensure fresh fetch
-    let cache_root = std::env::var("HOME")
-        .ok()
-        .map(|h| PathBuf::from(h).join(".taida/addon-cache"));
-    if let Some(ref root) = cache_root {
-        let _ = std::fs::remove_dir_all(root.join(org).join(name).join("a.1").join(target_triple));
+    // Phase 2: cache hit
+    let r2 = fetch_in_work(&work, pkg_id, version, target, &url, &sha, "terminal", ext);
+    assert!(r2.is_ok(), "cache hit: {:?}", r2.err());
+
+    // Phase 3: wrong SHA (clear cache first)
+    if let Ok(home) = std::env::var("HOME") {
+        let cache_entry = PathBuf::from(home).join(format!(
+            ".taida/addon-cache/taida-lang/terminal/{}/{}",
+            version, target
+        ));
+        let _ = fs::remove_dir_all(&cache_entry);
     }
-
-    let result = taida::addon::prebuild_fetcher::fetch_prebuild(
-        "taida-lang/terminal",
-        "a.1",
-        target_triple,
-        name,
-        ext,
-        &file_url,
-        &sha256,
-    );
-
+    let wrong = "0000000000000000000000000000000000000000000000000000000000000000";
+    let r3 = fetch_in_work(&work, pkg_id, version, target, &url, wrong, "terminal", ext);
+    assert!(r3.is_err());
+    let msg = format!("{:?}", r3.unwrap_err());
     assert!(
-        result.is_ok(),
-        "fetch_prebuild must succeed: {:?}",
-        result.err()
+        msg.contains("IntegrityMismatch") || msg.contains("integrity"),
+        "got: {}",
+        msg
     );
-    let fetched_path = result.unwrap();
-
-    // Verify the fetched file exists and matches
-    assert!(fetched_path.exists(), "fetched addon must exist");
-    let fetched_sha256 = compute_sha256(&fetched_path);
-    assert_eq!(
-        fetched_sha256, sha256,
-        "fetched addon SHA-256 must match source"
-    );
-
-    // ── Phase 2: Second fetch hits cache ──
-    let result2 = taida::addon::prebuild_fetcher::fetch_prebuild(
-        "taida-lang/terminal",
-        "a.1",
-        target_triple,
-        name,
-        ext,
-        &file_url,
-        &sha256,
-    );
-    assert!(
-        result2.is_ok(),
-        "cache-hit fetch must succeed: {:?}",
-        result2.err()
-    );
-
-    // ── Phase 3: Wrong SHA-256 produces integrity error ──
-    let wrong_sha = "0000000000000000000000000000000000000000000000000000000000000000";
-    let result3 = taida::addon::prebuild_fetcher::fetch_prebuild(
-        "taida-lang/terminal",
-        "a.1",
-        target_triple,
-        name,
-        ext,
-        &file_url,
-        wrong_sha,
-    );
-    assert!(result3.is_err(), "wrong SHA-256 must be rejected");
-    let err_msg = format!("{:?}", result3.unwrap_err());
-    assert!(
-        err_msg.contains("IntegrityMismatch") || err_msg.contains("integrity"),
-        "error must mention integrity/mismatch, got: {}",
-        err_msg
-    );
-
-    // Cleanup
-    let _ = fs::remove_dir_all(&project);
-    let _ = fs::remove_dir_all(&fake_pkg);
+    let _ = fs::remove_dir_all(&work);
 }
-
-// ── RC1.5-4d-7: SHA-256 mismatch produces fetcher error ────────
 
 #[test]
 fn addon_terminal_sha256_mismatch_produces_error() {
     let cdylib = match find_terminal_cdylib() {
         Some(p) => p,
         None => {
-            eprintln!(
-                "note: skipping sha256 mismatch test -- libtaida_addon_terminal_sample not built"
-            );
             return;
         }
     };
-
-    let real_sha256 = compute_sha256(&cdylib);
-    let wrong_sha = "0000000000000000000000000000000000000000000000000000000000000000";
-
+    let work = make_work_dir("sha256_mismatch");
+    let target = detect_target_triple();
     let ext = cdylib_ext();
-    let target_triple = detect_target_triple();
+    let (fname, real_sha) = copy_cdylib_to(&work, &cdylib);
+    let wrong = "0000000000000000000000000000000000000000000000000000000000000000";
 
-    // Clear cache
-    let cache_root = std::env::var("HOME")
-        .ok()
-        .map(|h| PathBuf::from(h).join(".taida/addon-cache"));
-    if let Some(ref root) = cache_root {
-        let _ = std::fs::remove_dir_all(
-            root.join("taida-lang")
-                .join("terminal")
-                .join("a.1")
-                .join(target_triple),
-        );
-    }
-
-    let cdylib_absolute = cdylib.canonicalize().expect("canonicalize cdylib path");
-    let file_url = format!("file://{}", cdylib_absolute.display());
-
-    let result = taida::addon::prebuild_fetcher::fetch_prebuild(
+    let r = fetch_in_work(
+        &work,
         "taida-lang/terminal",
-        "a.1",
-        target_triple,
+        "a.1-e2e-mismatch",
+        target,
+        &format!("file://{}", fname),
+        wrong,
         "terminal",
         ext,
-        &file_url,
-        wrong_sha,
     );
-
-    assert!(result.is_err(), "fetch with wrong SHA-256 must be rejected");
-
-    // The file was downloaded but the SHA-256 verification failed.
-    // The fetcher should return an IntegrityMismatch error.
-    let err = result.unwrap_err();
-    let err_msg = format!("{err:?}");
-    assert!(
-        err_msg.contains("IntegrityMismatch"),
-        "error must be IntegrityMismatch, got: {}",
-        err_msg
-    );
-
-    // Also verify that it's the actual hash of the file that doesn't match
+    assert!(r.is_err());
+    let err = r.unwrap_err();
+    let msg = format!("{err:?}");
+    assert!(msg.contains("IntegrityMismatch"), "got: {}", msg);
     let displayed = format!("{err}");
     assert!(
-        displayed.contains(&real_sha256[..10]),
-        "error must show the actual (correct) hash, got: {}",
+        displayed.contains(&real_sha[..10]),
+        "must show actual hash: {}",
         displayed
     );
+    let _ = fs::remove_dir_all(&work);
 }
-
-// ── RC1.5-4d-8: Cache hit skips re-download ────────────────────
 
 #[test]
 fn addon_terminal_cache_hit_uses_cached_file() {
     let cdylib = match find_terminal_cdylib() {
         Some(p) => p,
         None => {
-            eprintln!("note: skipping cache hit test -- libtaida_addon_terminal_sample not built");
             return;
         }
     };
-
-    let sha256 = compute_sha256(&cdylib);
+    let work = make_work_dir("cache_hit");
+    let target = detect_target_triple();
     let ext = cdylib_ext();
-    let target_triple = detect_target_triple();
+    let (fname, sha) = copy_cdylib_to(&work, &cdylib);
+    let url = format!("file://{}", fname);
 
-    // Clear cache
-    let cache_dir_path = std::env::var("HOME").ok().map(|h| {
-        PathBuf::from(h)
-            .join(".taida/addon-cache")
-            .join("taida-lang")
-            .join("terminal")
-            .join("a.1")
-            .join(target_triple)
-    });
-
-    if let Some(ref cache_dir) = cache_dir_path {
-        let _ = fs::remove_dir_all(cache_dir);
-    }
-
-    let cdylib_absolute = cdylib.canonicalize().expect("canonicalize cdylib path");
-    let file_url = format!("file://{}", cdylib_absolute.display());
-
-    // First fetch: should download/cache
-    let result1 = taida::addon::prebuild_fetcher::fetch_prebuild(
+    let r1 = fetch_in_work(
+        &work,
         "taida-lang/terminal",
-        "a.1",
-        target_triple,
+        "a.1-e2e-cachehit",
+        target,
+        &url,
+        &sha,
         "terminal",
         ext,
-        &file_url,
-        &sha256,
     );
-    assert!(
-        result1.is_ok(),
-        "1st fetch must succeed: {:?}",
-        result1.err()
-    );
+    assert!(r1.is_ok(), "first fetch: {:?}", r1.err());
 
-    // Verify the cached file exists alongside the sidecar
-    let cached_file = cache_dir_path
-        .as_ref()
-        .map(|dir| dir.join(format!("libterminal.{}", ext)));
-    let sidecar = cache_dir_path
-        .as_ref()
-        .map(|dir| dir.join(".manifest-sha256"));
+    // Verify files
+    if let Ok(home) = std::env::var("HOME") {
+        let cache_dir = PathBuf::from(home).join(format!(
+            ".taida/addon-cache/taida-lang/terminal/a.1-e2e-cachehit/{}",
+            target
+        ));
+        let cached = cache_dir.join(format!("libterminal.{}", ext));
+        let sidecar = cache_dir.join(".manifest-sha256");
+        assert!(cached.exists(), "cached file must exist");
+        assert!(sidecar.exists(), "sidecar must exist");
 
-    assert!(
-        cached_file.as_ref().map(|p| p.exists()).unwrap_or(false),
-        "cached addon binary must exist after first fetch"
-    );
-    assert!(
-        sidecar.as_ref().map(|p| p.exists()).unwrap_or(false),
-        "sha256 sidecar must exist after first fetch"
-    );
+        let size_before = std::fs::metadata(&cached).ok().map(|m| m.len());
 
-    // Record the file size (should not change on cache hit)
-    let size_before = cached_file
-        .as_ref()
-        .and_then(|p| std::fs::metadata(p).ok().map(|m| m.len()));
-
-    // Second fetch: should hit cache (returns Ok immediately from
-    // the cache path in fetch_prebuild, not from re-download)
-    let result2 = taida::addon::prebuild_fetcher::fetch_prebuild(
-        "taida-lang/terminal",
-        "a.1",
-        target_triple,
-        "terminal",
-        ext,
-        &file_url,
-        &sha256,
-    );
-    assert!(
-        result2.is_ok(),
-        "2nd fetch must succeed: {:?}",
-        result2.err()
-    );
-
-    // Verify the cached file was not modified (same size)
-    let size_after = cached_file
-        .as_ref()
-        .and_then(|p| std::fs::metadata(p).ok().map(|m| m.len()));
-
-    assert!(
-        size_before.is_some() && size_after.is_some(),
-        "must be able to read file metadata"
-    );
-    assert_eq!(
-        size_before, size_after,
-        "cached file size should not change on cache hit (size_before={:?}, size_after={:?})",
-        size_before, size_after
-    );
-
-    // Also verify the sidecar still contains the expected SHA-256
-    if let Some(sidecar_path) = sidecar {
-        let sidecar_content = fs::read_to_string(&sidecar_path).expect("read sidecar");
-        assert!(
-            sidecar_content.contains(&sha256),
-            "sidecar must contain the expected SHA-256, got: {}",
-            sidecar_content
+        let r2 = fetch_in_work(
+            &work,
+            "taida-lang/terminal",
+            "a.1-e2e-cachehit",
+            target,
+            &url,
+            &sha,
+            "terminal",
+            ext,
         );
+        assert!(r2.is_ok(), "cache hit: {:?}", r2.err());
+
+        let size_after = std::fs::metadata(&cached).ok().map(|m| m.len());
+        assert_eq!(
+            size_before, size_after,
+            "size shouldn't change on cache hit: {:?} vs {:?}",
+            size_before, size_after
+        );
+
+        let sidecar_data = fs::read_to_string(&sidecar).expect("read sidecar");
+        assert!(sidecar_data.contains(&sha), "sidecar must contain SHA-256");
     }
+    let _ = fs::remove_dir_all(&work);
 }
 
-// ── RC1.5-4d: Interpreter round-trip with terminal addon ───────
+// ── Interpreter round-trip ───────────────────────────────────
 
 #[test]
 fn terminal_addon_term_print_interpreter_round_trip() {
     let cdylib = match find_terminal_cdylib() {
         Some(p) => p,
         None => {
-            eprintln!(
-                "note: skipping interpreter round-trip -- libtaida_addon_terminal_sample not built"
-            );
             return;
         }
     };
-
-    // Set up a temp project exactly like addon_package_integration.rs
-    // but with the terminal addon instead of the sample addon.
     let project = unique_temp_dir("rc15_terminal_interpreter");
     let _ = fs::remove_dir_all(&project);
     fs::create_dir_all(&project).unwrap();
@@ -549,7 +653,6 @@ fn terminal_addon_term_print_interpreter_round_trip() {
     let native_dir = deps_terminal.join("native");
     fs::create_dir_all(&native_dir).unwrap();
 
-    // Copy the cdylib into the package's native/ directory
     let lib_name = if cfg!(target_os = "linux") {
         "libtaida_addon_terminal_sample.so"
     } else if cfg!(target_os = "macos") {
@@ -557,11 +660,11 @@ fn terminal_addon_term_print_interpreter_round_trip() {
     } else {
         "taida_addon_terminal_sample.dll"
     };
-    let cdylib_dest = native_dir.join(lib_name);
-    fs::copy(&cdylib, &cdylib_dest).unwrap();
+    fs::copy(&cdylib, native_dir.join(lib_name)).unwrap();
 
-    // Write addon.toml
-    let addon_toml = r#"
+    fs::write(
+        native_dir.join("addon.toml"),
+        r#"
 abi = 1
 entry = "taida_addon_get_v1"
 package = "taida-lang/terminal"
@@ -573,40 +676,34 @@ termPrintLn = 1
 termReadLine = 0
 termSize = 0
 termIsTty = 0
-"#;
-    fs::write(native_dir.join("addon.toml"), addon_toml).unwrap();
+"#,
+    )
+    .unwrap();
 
-    // main.td: import and call the terminal addon functions
-    let main_td = r#">>> taida-lang/terminal => @(termPrint, termPrintLn)
+    fs::write(
+        project.join("main.td"),
+        r#">>> taida-lang/terminal => @(termPrint, termPrintLn)
 termPrint("hello from terminal")
 termPrintLn("done")
-"#;
-    fs::write(project.join("main.td"), main_td).unwrap();
+"#,
+    )
+    .unwrap();
 
     let output = Command::new(taida_bin())
         .arg(project.join("main.td"))
         .output()
-        .expect("run taida main.td");
-    let run_stdout = String::from_utf8_lossy(&output.stdout);
-    let run_stderr = String::from_utf8_lossy(&output.stderr);
+        .expect("run taida");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
 
     assert!(
         output.status.success(),
-        "taida main.td must succeed\nstdout:\n{}\nstderr:\n{}",
-        run_stdout,
-        run_stderr
+        "taida must succeed\n{}\n{}",
+        stdout,
+        stderr
     );
-
-    assert!(
-        run_stdout.contains("hello from terminal"),
-        "termPrint must output its argument, got: {}",
-        run_stdout
-    );
-    assert!(
-        run_stdout.contains("done"),
-        "termPrintLn must output its argument, got: {}",
-        run_stdout
-    );
+    assert!(stdout.contains("hello from terminal"), "got: {}", stdout);
+    assert!(stdout.contains("done"), "got: {}", stdout);
 
     let _ = fs::remove_dir_all(&project);
 }

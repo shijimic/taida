@@ -20,7 +20,7 @@ use super::provider::{
 // RC1.5: addon prebuild integration
 use crate::addon::host_target;
 use crate::addon::manifest::parse_addon_manifest;
-use crate::addon::prebuild_fetcher::{FetchError, fetch_prebuild};
+use crate::addon::prebuild_fetcher::{FetchError, fetch_prebuild_with_progress};
 
 /// Result of dependency resolution.
 #[derive(Debug)]
@@ -471,7 +471,14 @@ pub fn install_addon_prebuilds(
             )
         })?;
 
-        // Fetch prebuild binary (cache-aware by default)
+        // Fetch prebuild binary (cache-aware by default).
+        //
+        // RC15B-002: attach a progress reporter that writes a single
+        // carriage-return line to stderr so long downloads stay
+        // visible. The reporter is silent for trivially small files
+        // (< 256 KiB) to avoid cluttering fast path tests and cache
+        // hits (cache hits skip the callback entirely anyway).
+        let mut reporter = make_progress_reporter(&pkg.name, host.as_triple());
         let fetched_path = if force_refresh {
             // Bypass cache: delete cached file first
             let cache_root = std::env::var("HOME")
@@ -487,7 +494,7 @@ pub fn install_addon_prebuilds(
                     let _ = std::fs::remove_dir_all(&pkg_cache);
                 }
             }
-            fetch_prebuild(
+            fetch_prebuild_with_progress(
                 &pkg.name,
                 &pkg.version,
                 host.as_triple(),
@@ -495,10 +502,11 @@ pub fn install_addon_prebuilds(
                 host.cdylib_ext(),
                 &url,
                 expected_sha256,
+                &mut *reporter,
             )
             .map_err(|e| addon_fetch_error_as_string(&e))?
         } else {
-            fetch_prebuild(
+            fetch_prebuild_with_progress(
                 &pkg.name,
                 &pkg.version,
                 host.as_triple(),
@@ -506,6 +514,7 @@ pub fn install_addon_prebuilds(
                 host.cdylib_ext(),
                 &url,
                 expected_sha256,
+                &mut *reporter,
             )
             .map_err(|e| addon_fetch_error_as_string(&e))?
         };
@@ -534,6 +543,89 @@ pub fn install_addon_prebuilds(
     }
 
     Ok(addon_info)
+}
+
+/// RC15B-002: builds a progress reporter closure that prints a one-line
+/// carriage-return indicator to stderr while an addon binary downloads.
+///
+/// The reporter deliberately stays silent for the first ~256 KiB so
+/// tiny sample addons (and file:// copies during tests) don't clutter
+/// terminal output. Once the indicator starts it updates at most about
+/// 20 times per second because the underlying fetcher already throttles
+/// its own callbacks to ~64 KiB granularity.
+///
+/// The indicator uses `\r` + a fixed-width layout so successive updates
+/// overwrite the same line. A final newline is printed when the
+/// download completes (signalled by `so_far == total`) so subsequent CLI
+/// output doesn't overwrite the final progress line.
+fn make_progress_reporter(
+    pkg_name: &str,
+    target: &str,
+) -> Box<dyn FnMut(u64, Option<u64>) + Send + 'static> {
+    use std::io::Write;
+
+    let label = format!("    downloading {} ({})", pkg_name, target);
+    let mut started = false;
+    let mut newline_printed = false;
+
+    Box::new(move |so_far: u64, total: Option<u64>| {
+        // Stay silent until the payload gets big enough to matter.
+        const MIN_BYTES_TO_SHOW: u64 = 256 * 1024;
+        let big_enough = match total {
+            Some(t) => t >= MIN_BYTES_TO_SHOW,
+            None => so_far >= MIN_BYTES_TO_SHOW,
+        };
+        if !big_enough {
+            return;
+        }
+
+        let stderr = std::io::stderr();
+        let mut lock = stderr.lock();
+        if !started {
+            started = true;
+        }
+
+        match total {
+            Some(t) if t > 0 => {
+                let pct = (so_far as f64 / t as f64 * 100.0).min(100.0);
+                let _ = write!(
+                    lock,
+                    "\r{} {:>6.1}%  {:>10}/{:<10}",
+                    label,
+                    pct,
+                    human_bytes(so_far),
+                    human_bytes(t)
+                );
+            }
+            _ => {
+                let _ = write!(lock, "\r{} {:>10}", label, human_bytes(so_far));
+            }
+        }
+        let _ = lock.flush();
+
+        // Trailing newline when we reach the known end.
+        if let Some(t) = total
+            && so_far >= t
+            && !newline_printed
+        {
+            newline_printed = true;
+            let _ = writeln!(lock);
+        }
+    })
+}
+
+/// Format a byte count as a short human-readable string.
+fn human_bytes(bytes: u64) -> String {
+    const KIB: f64 = 1024.0;
+    const MIB: f64 = 1024.0 * 1024.0;
+    let b = bytes as f64;
+    if b >= MIB {
+        format!("{:.1} MiB", b / MIB)
+    } else if b >= KIB {
+        format!("{:.1} KiB", b / KIB)
+    } else {
+        format!("{} B", bytes)
+    }
 }
 
 fn addon_fetch_error_as_string(err: &FetchError) -> String {

@@ -267,9 +267,12 @@ impl AddonRegistry {
         let key: RegistryKey = (canonical_root.clone(), package_id.to_string());
 
         {
-            let map = self.inner.lock().map_err(|_| AddonImportError::RegistryPoisoned {
-                package: package_id.to_string(),
-            })?;
+            let map = self
+                .inner
+                .lock()
+                .map_err(|_| AddonImportError::RegistryPoisoned {
+                    package: package_id.to_string(),
+                })?;
             if let Some(existing) = map.get(&key) {
                 return Ok(existing.clone());
             }
@@ -338,9 +341,12 @@ impl AddonRegistry {
             manifest,
         });
 
-        let mut map = self.inner.lock().map_err(|_| AddonImportError::RegistryPoisoned {
-            package: package_id.to_string(),
-        })?;
+        let mut map = self
+            .inner
+            .lock()
+            .map_err(|_| AddonImportError::RegistryPoisoned {
+                package: package_id.to_string(),
+            })?;
         if let Some(existing) = map.get(&key) {
             // Another thread raced; prefer the older entry to keep
             // pointer identity stable. The `loaded` we just built will

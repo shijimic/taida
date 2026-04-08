@@ -66,12 +66,35 @@ pub struct PrebuildConfig {
     pub url_template: Option<String>,
     /// Target triple -> `sha256:<64-hex-string>` mapping.
     pub targets: HashMap<String, String>,
+    /// RC15B-005: Optional GPG / detached signatures keyed by target triple.
+    ///
+    /// Reserved for future supply-chain hardening. In RC1.5 the signatures
+    /// are **parsed and stored** but **not verified**: the field is
+    /// preserved so that manifest authors can start including signatures
+    /// today without tripping `unknown key` errors, and so that the
+    /// forthcoming verifier has a stable place to read them from.
+    ///
+    /// Accepted value format is `"gpg:<opaque-identifier>"` — the opaque
+    /// identifier is treated as an opaque token (URL, fingerprint, base64
+    /// signature, ...). Non-`gpg:` prefixes are rejected at parse time
+    /// so that the reserved namespace stays disjoint from future schemes
+    /// such as `sigstore:`.
+    pub signatures: HashMap<String, String>,
 }
 
 impl PrebuildConfig {
     /// Returns true if a prebuild URL template is configured.
     pub fn has_prebuild(&self) -> bool {
         self.url_template.is_some()
+    }
+
+    /// RC15B-005: Returns true if any target has a signature recorded.
+    ///
+    /// The signature field is reserved in RC1.5 and the verifier is not
+    /// wired yet; callers can use this to gate future verification code
+    /// paths without having to plumb through a separate flag.
+    pub fn has_signatures(&self) -> bool {
+        !self.signatures.is_empty()
     }
 }
 
@@ -161,6 +184,20 @@ pub enum AddonManifestError {
     PrebuildUnbalancedBrace { path: PathBuf, detail: String },
     /// RC1.5: duplicate `[library.prebuild.targets.<target>]` for the same target.
     PrebuildDuplicateTarget { path: PathBuf, target: String },
+    /// RC15B-103: target triple in `[library.prebuild.targets]` is not a known valid triple.
+    PrebuildUnknownTarget { path: PathBuf, target: String },
+    /// RC15B-005: `[library.prebuild.signatures]` entry is not in the
+    /// reserved `gpg:<opaque>` format. Future schemes (e.g. `sigstore:`)
+    /// should be added as a new variant rather than loosened here.
+    PrebuildInvalidSignatureFormat {
+        path: PathBuf,
+        target: String,
+        value: String,
+    },
+    /// RC15B-005: signature target triple is not a known valid triple.
+    PrebuildSignatureUnknownTarget { path: PathBuf, target: String },
+    /// RC15B-005: duplicate `[library.prebuild.signatures.<target>]` for the same target.
+    PrebuildDuplicateSignatureTarget { path: PathBuf, target: String },
 }
 
 impl fmt::Display for AddonManifestError {
@@ -282,6 +319,35 @@ impl fmt::Display for AddonManifestError {
                 target,
                 path.display()
             ),
+            Self::PrebuildUnknownTarget { path, target } => write!(
+                f,
+                "addon manifest error: unknown target triple '{}' in '{}' (must be a canonical triple like 'x86_64-unknown-linux-gnu')",
+                target,
+                path.display()
+            ),
+            Self::PrebuildInvalidSignatureFormat {
+                path,
+                target,
+                value,
+            } => write!(
+                f,
+                "addon manifest error: invalid signature for target '{}' in '{}': expected 'gpg:' prefix + opaque identifier, got '{}'",
+                target,
+                path.display(),
+                value
+            ),
+            Self::PrebuildSignatureUnknownTarget { path, target } => write!(
+                f,
+                "addon manifest error: unknown target triple '{}' in '[library.prebuild.signatures]' of '{}' (must be a canonical triple)",
+                target,
+                path.display()
+            ),
+            Self::PrebuildDuplicateSignatureTarget { path, target } => write!(
+                f,
+                "addon manifest error: duplicate prebuild signature target '{}' in '{}'",
+                target,
+                path.display()
+            ),
         }
     }
 }
@@ -385,7 +451,10 @@ pub fn parse_addon_manifest_str(
     }
 
     // Validate and build prebuild config (RC1.5).
-    let prebuild = if raw.prebuild.is_empty() && raw.prebuild_targets.is_empty() {
+    let prebuild_section_present = !raw.prebuild.is_empty()
+        || !raw.prebuild_targets.is_empty()
+        || !raw.prebuild_signatures.is_empty();
+    let prebuild = if !prebuild_section_present {
         PrebuildConfig::default()
     } else {
         // If either prebuild section exists, validate the URL template.
@@ -434,6 +503,13 @@ pub fn parse_addon_manifest_str(
         // Validate [library.prebuild.targets] entries.
         let mut targets: HashMap<String, String> = HashMap::new();
         for (target_triple, sha_value) in raw.prebuild_targets {
+            // RC15B-103: Validate target triple against known supported targets.
+            if crate::addon::host_target::HostTarget::from_triple(&target_triple).is_none() {
+                return Err(AddonManifestError::PrebuildUnknownTarget {
+                    path: path.to_path_buf(),
+                    target: target_triple,
+                });
+            }
             match sha_value {
                 RawValue::Str(s) => {
                     if !is_valid_sha256(&s) {
@@ -461,9 +537,53 @@ pub fn parse_addon_manifest_str(
             }
         }
 
+        // RC15B-005: Validate [library.prebuild.signatures] entries.
+        //
+        // Signatures are **reserved**: parsed and stored but not verified
+        // in RC1.5. Each entry must be keyed by a canonical target triple
+        // and carry a `"gpg:<opaque>"` value. Other schemes (e.g.
+        // `sigstore:`) are rejected so the `gpg:` namespace stays clean
+        // for a future verifier without accidentally colliding with
+        // formats added ad-hoc by addon authors.
+        let mut signatures: HashMap<String, String> = HashMap::new();
+        for (sig_target, sig_value) in raw.prebuild_signatures {
+            if crate::addon::host_target::HostTarget::from_triple(&sig_target).is_none() {
+                return Err(AddonManifestError::PrebuildSignatureUnknownTarget {
+                    path: path.to_path_buf(),
+                    target: sig_target,
+                });
+            }
+            match sig_value {
+                RawValue::Str(s) => {
+                    if !is_valid_signature(&s) {
+                        return Err(AddonManifestError::PrebuildInvalidSignatureFormat {
+                            path: path.to_path_buf(),
+                            target: sig_target,
+                            value: s.clone(),
+                        });
+                    }
+                    if signatures.contains_key(&sig_target) {
+                        return Err(AddonManifestError::PrebuildDuplicateSignatureTarget {
+                            path: path.to_path_buf(),
+                            target: sig_target,
+                        });
+                    }
+                    signatures.insert(sig_target, s);
+                }
+                _ => {
+                    return Err(AddonManifestError::TypeMismatch {
+                        path: path.to_path_buf(),
+                        key: format!("signatures.{}", sig_target),
+                        expected: "string",
+                    });
+                }
+            }
+        }
+
         PrebuildConfig {
             url_template,
             targets,
+            signatures,
         }
     };
 
@@ -484,6 +604,25 @@ pub fn parse_addon_manifest_str(
 /// keys, the `[functions]` table, and optional `[library.prebuild]`
 /// with its child `[library.prebuild.targets]` table (RC1.5).
 /// Anything else triggers a syntax error so the schema stays pinned.
+///
+/// ## RC15B-107: Unknown-key forward-compatibility policy
+///
+/// The parser is **strict**: any section or top-level key not listed in
+/// [`parse_minimal_toml`]'s section table is rejected with a
+/// `Syntax` error. This is intentional — it prevents ABI drift by
+/// making schema changes visible at install time rather than silently
+/// tolerating stray keys that would become load-bearing in a future RC.
+///
+/// Forward-compat for addon authors:
+///   1. Adding a new section is an **ABI bump** and should coincide with
+///      a new manifest schema version (future work).
+///   2. Adding a new optional key inside an existing reserved section
+///      (e.g. `[library.prebuild.signatures]` added in RC15B-005) must
+///      only be done after updating this parser and bumping the host's
+///      minimum supported tool version.
+///   3. Manifests written by a *newer* taida will fail to load on older
+///      taidas that do not know the new key — this is by design. Authors
+///      should document the minimum `taida` version in their README.
 #[derive(Debug, Default)]
 struct ParsedToml {
     top_level: BTreeMap<String, RawValue>,
@@ -492,6 +631,8 @@ struct ParsedToml {
     prebuild: BTreeMap<String, RawValue>,
     // RC1.5: [library.prebuild.targets] key-value pairs
     prebuild_targets: BTreeMap<String, RawValue>,
+    // RC15B-005: [library.prebuild.signatures] key-value pairs (reserved)
+    prebuild_signatures: BTreeMap<String, RawValue>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -590,12 +731,16 @@ fn parse_minimal_toml(path: &Path, source: &str) -> Result<ParsedToml, AddonMani
                     // RC1.5: target -> sha256 mapping
                     current_section = Some("library.prebuild.targets".to_string());
                 }
+                "library.prebuild.signatures" => {
+                    // RC15B-005: target -> gpg:<opaque> reserved section
+                    current_section = Some("library.prebuild.signatures".to_string());
+                }
                 other => {
                     return Err(AddonManifestError::Syntax {
                         path: path.to_path_buf(),
                         line: line_no,
                         message: format!(
-                            "unknown section '[{}]' (only [functions], [library.prebuild], [library.prebuild.targets] are allowed)",
+                            "unknown section '[{}]' (only [functions], [library.prebuild], [library.prebuild.targets], [library.prebuild.signatures] are allowed)",
                             other
                         ),
                     });
@@ -615,6 +760,13 @@ fn parse_minimal_toml(path: &Path, source: &str) -> Result<ParsedToml, AddonMani
         let key = key.trim();
         let value = strip_inline_comment(value).trim();
 
+        // Support simple quoted keys: "key name" -> key name
+        let key = if key.starts_with('"') && key.ends_with('"') && key.len() >= 2 {
+            &key[1..key.len() - 1]
+        } else {
+            key
+        };
+
         if key.is_empty() {
             return Err(AddonManifestError::Syntax {
                 path: path.to_path_buf(),
@@ -622,12 +774,29 @@ fn parse_minimal_toml(path: &Path, source: &str) -> Result<ParsedToml, AddonMani
                 message: "empty key before '='".to_string(),
             });
         }
-        if !is_valid_key(key) {
+
+        // For [library.prebuild.targets] and [library.prebuild.signatures],
+        // allow '/' in addition to standard chars so path-traversal attempts
+        // flow through to the per-section validator (which rejects them
+        // via `HostTarget::from_triple`).
+        let section_is_target_keyed = matches!(
+            current_section.as_deref(),
+            Some("library.prebuild.targets") | Some("library.prebuild.signatures")
+        );
+        let key_is_valid = if section_is_target_keyed {
+            !key.is_empty()
+                && key.chars().all(|c| {
+                    c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.' || c == '/'
+                })
+        } else {
+            is_valid_key(key)
+        };
+        if !key_is_valid {
             return Err(AddonManifestError::Syntax {
                 path: path.to_path_buf(),
                 line: line_no,
                 message: format!(
-                    "invalid key '{}': only ASCII letters/digits/_/- allowed",
+                    "invalid key '{}': only ASCII letters/digits/_/-/. allowed",
                     key
                 ),
             });
@@ -642,6 +811,7 @@ fn parse_minimal_toml(path: &Path, source: &str) -> Result<ParsedToml, AddonMani
                 .expect("functions section must be initialised"),
             Some(name) if name == "library.prebuild" => &mut parsed.prebuild,
             Some(name) if name == "library.prebuild.targets" => &mut parsed.prebuild_targets,
+            Some(name) if name == "library.prebuild.signatures" => &mut parsed.prebuild_signatures,
             Some(other) => unreachable!("unexpected section state: {}", other),
         };
         if target.contains_key(key) {
@@ -720,11 +890,14 @@ fn is_valid_key(key: &str) -> bool {
     !key.is_empty()
         && key
             .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.')
 }
 
 /// Validates `sha256:<64-lowercase-hex>` format.
-/// The prefix must be exactly `sha256:` followed by exactly 64 lowercase hex characters.
+///
+/// The prefix must be exactly `sha256:` (lowercase) followed by exactly
+/// 64 lowercase hex characters (`0-9`, `a-f`). Uppercase hex is rejected
+/// to ensure canonical form for cross-platform consistency.
 fn is_valid_sha256(value: &str) -> bool {
     let prefix = "sha256:";
     if !value.starts_with(prefix) {
@@ -734,9 +907,26 @@ fn is_valid_sha256(value: &str) -> bool {
     if hex_part.len() != 64 {
         return false;
     }
-    hex_part
-        .chars()
-        .all(|c| c.is_ascii_hexdigit() && c.to_ascii_lowercase() == c)
+    hex_part.chars().all(|c| matches!(c, '0'..='9' | 'a'..='f'))
+}
+
+/// RC15B-005: validates the reserved `gpg:<opaque>` signature format.
+///
+/// The opaque identifier must be non-empty and contain only printable
+/// ASCII (no whitespace, no control characters) so it can be embedded
+/// in a URL template or a fingerprint without escaping. Actual signature
+/// verification is deferred to a future RC; the format check here is
+/// only to keep the reserved namespace clean.
+fn is_valid_signature(value: &str) -> bool {
+    let prefix = "gpg:";
+    let Some(payload) = value.strip_prefix(prefix) else {
+        return false;
+    };
+    if payload.is_empty() {
+        return false;
+    }
+    // Printable ASCII, no whitespace.
+    payload.chars().all(|c| c.is_ascii_graphic() && c != ' ')
 }
 
 #[cfg(test)]
@@ -1321,5 +1511,247 @@ f = 0
         assert!(!manifest.prebuild.has_prebuild());
         assert!(manifest.prebuild.url_template.is_none());
         assert!(manifest.prebuild.targets.is_empty());
+    }
+
+    // ── RC15B-103: Unknown target triple is rejected ──
+
+    #[test]
+    fn prebuild_unknown_target_triple_is_rejected() {
+        let src = r#"
+abi = 1
+entry = "taida_addon_get_v1"
+package = "x/y"
+library = "z"
+
+[functions]
+f = 0
+
+[library.prebuild]
+url = "https://example.com/{name}.{ext}"
+
+[library.prebuild.targets]
+"armv7-unknown-linux-gnueabihf" = "sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+"#;
+        let err = parse(src).expect_err("unknown target must error");
+        assert!(
+            matches!(err, AddonManifestError::PrebuildUnknownTarget { target, .. } if target == "armv7-unknown-linux-gnueabihf")
+        );
+    }
+
+    #[test]
+    fn prebuild_path_traversal_target_is_rejected() {
+        let src = r#"
+abi = 1
+entry = "taida_addon_get_v1"
+package = "x/y"
+library = "z"
+
+[functions]
+f = 0
+
+[library.prebuild]
+url = "https://example.com/{name}.{ext}"
+
+[library.prebuild.targets]
+"x86_64/../../../etc/passwd" = "sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+"#;
+        let err = parse(src).expect_err("path traversal target must error");
+        assert!(matches!(
+            err,
+            AddonManifestError::PrebuildUnknownTarget { .. }
+        ));
+    }
+
+    #[test]
+    fn prebuild_valid_target_triples_parse() {
+        let base = r#"
+abi = 1
+entry = "taida_addon_get_v1"
+package = "x/y"
+library = "z"
+
+[functions]
+f = 0
+
+[library.prebuild]
+url = "https://example.com/{name}.{ext}"
+
+[library.prebuild.targets]
+"#;
+        // All canonical targets (baseline + RC15B-003 extensions) should parse.
+        for triple in crate::addon::host_target::supported_targets() {
+            let src = format!(
+                "{base}{} = \"sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789\"\n",
+                triple
+            );
+            let manifest = parse(&src).unwrap_or_else(|e| panic!("triple={}, err={:?}", triple, e));
+            assert!(manifest.prebuild.targets.contains_key(*triple));
+            // Cleanup is not needed since we use a virtual path.
+        }
+    }
+
+    // ── RC15B-005: signatures (reserved) ────────────────────────
+
+    #[test]
+    fn prebuild_signatures_happy_path() {
+        let src = r#"
+abi = 1
+entry = "taida_addon_get_v1"
+package = "x/y"
+library = "z"
+
+[functions]
+f = 0
+
+[library.prebuild]
+url = "https://example.com/{name}.{ext}"
+
+[library.prebuild.targets]
+"x86_64-unknown-linux-gnu" = "sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+
+[library.prebuild.signatures]
+"x86_64-unknown-linux-gnu" = "gpg:ABC123DEADBEEF"
+"#;
+        let manifest = parse(src).expect("signature section should parse");
+        assert!(manifest.prebuild.has_prebuild());
+        assert!(manifest.prebuild.has_signatures());
+        assert_eq!(
+            manifest.prebuild.signatures.get("x86_64-unknown-linux-gnu"),
+            Some(&"gpg:ABC123DEADBEEF".to_string())
+        );
+    }
+
+    #[test]
+    fn prebuild_signatures_reject_non_gpg_prefix() {
+        let src = r#"
+abi = 1
+entry = "taida_addon_get_v1"
+package = "x/y"
+library = "z"
+
+[functions]
+f = 0
+
+[library.prebuild]
+url = "https://example.com/{name}.{ext}"
+
+[library.prebuild.targets]
+"x86_64-unknown-linux-gnu" = "sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+
+[library.prebuild.signatures]
+"x86_64-unknown-linux-gnu" = "sigstore:xxx"
+"#;
+        let err = parse(src).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                AddonManifestError::PrebuildInvalidSignatureFormat { .. }
+            ),
+            "got: {:?}",
+            err
+        );
+    }
+
+    #[test]
+    fn prebuild_signatures_reject_empty_gpg_payload() {
+        let src = r#"
+abi = 1
+entry = "taida_addon_get_v1"
+package = "x/y"
+library = "z"
+
+[functions]
+f = 0
+
+[library.prebuild]
+url = "https://example.com/{name}.{ext}"
+
+[library.prebuild.targets]
+"x86_64-unknown-linux-gnu" = "sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+
+[library.prebuild.signatures]
+"x86_64-unknown-linux-gnu" = "gpg:"
+"#;
+        let err = parse(src).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                AddonManifestError::PrebuildInvalidSignatureFormat { .. }
+            ),
+            "got: {:?}",
+            err
+        );
+    }
+
+    #[test]
+    fn prebuild_signatures_reject_unknown_target() {
+        let src = r#"
+abi = 1
+entry = "taida_addon_get_v1"
+package = "x/y"
+library = "z"
+
+[functions]
+f = 0
+
+[library.prebuild]
+url = "https://example.com/{name}.{ext}"
+
+[library.prebuild.targets]
+"x86_64-unknown-linux-gnu" = "sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+
+[library.prebuild.signatures]
+"x86_64-unknown-hurd" = "gpg:ABC"
+"#;
+        let err = parse(src).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                AddonManifestError::PrebuildSignatureUnknownTarget { .. }
+            ),
+            "got: {:?}",
+            err
+        );
+    }
+
+    #[test]
+    fn prebuild_signatures_absent_by_default() {
+        let src = r#"
+abi = 1
+entry = "taida_addon_get_v1"
+package = "x/y"
+library = "z"
+
+[functions]
+f = 0
+
+[library.prebuild]
+url = "https://example.com/{name}.{ext}"
+
+[library.prebuild.targets]
+"x86_64-unknown-linux-gnu" = "sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+"#;
+        let manifest = parse(src).expect("manifest without signatures must parse");
+        assert!(manifest.prebuild.has_prebuild());
+        assert!(!manifest.prebuild.has_signatures());
+        assert!(manifest.prebuild.signatures.is_empty());
+    }
+
+    #[test]
+    fn is_valid_signature_accepts_gpg_prefix() {
+        assert!(is_valid_signature("gpg:ABC123"));
+        assert!(is_valid_signature("gpg:deadbeef"));
+        assert!(is_valid_signature(
+            "gpg:https://keys.openpgp.org/vks/v1/by-fingerprint/ABC"
+        ));
+    }
+
+    #[test]
+    fn is_valid_signature_rejects_bad_formats() {
+        assert!(!is_valid_signature("sigstore:xxx"));
+        assert!(!is_valid_signature(""));
+        assert!(!is_valid_signature("gpg:"));
+        assert!(!is_valid_signature("gpg:has space"));
+        assert!(!is_valid_signature("gpg:has\ttab"));
     }
 }

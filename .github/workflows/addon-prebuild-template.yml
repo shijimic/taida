@@ -1,0 +1,208 @@
+# Taida Lang addon — prebuild release template (RC15B-004)
+#
+# This file is a **template** for addon authors. Copy it to your own
+# addon repository (for example `taida-lang/terminal`) and adjust the
+# `ADDON_NAME`, `CRATE_DIR`, and cdylib filename patterns to match your
+# project. The taida-lang main repository does not run this workflow —
+# it ships it so addon authors have a known-good starting point.
+#
+# What it does
+# ------------
+# 1. On every tag that looks like `vX.Y.Z`, builds your addon's
+#    `cdylib` for the 5 RC1.5 baseline targets.
+# 2. Computes the SHA-256 of each artefact.
+# 3. Uploads the binaries to the GitHub Release that matches the tag.
+# 4. Emits a `prebuild-targets.toml.txt` fragment that can be pasted
+#    into your `native/addon.toml`'s `[library.prebuild.targets]`
+#    section.
+#
+# The matrix covers the 5 baseline targets declared by
+# `HostTarget::supported_targets()`. RC15B-003 Nice-to-Have extensions
+# (musl, i686, riscv64, FreeBSD) are commented out — enable them only
+# after verifying your addon actually builds and links on the target.
+#
+# Requirements
+# ------------
+# - Your crate must declare `crate-type = ["cdylib"]`.
+# - The cdylib's final filename is expected to be
+#   `lib${ADDON_NAME}.${ext}` (Linux/macOS) or `${ADDON_NAME}.${ext}`
+#   (Windows). Adjust the `pack` step if your crate name differs.
+# - `GITHUB_TOKEN` is used for uploading artefacts — no additional
+#   secrets are required.
+# - The taida framework verifies downloaded prebuilds against the
+#   SHA-256 recorded in your manifest. After running this workflow,
+#   copy the generated `prebuild-targets.toml.txt` into
+#   `native/addon.toml` and commit it alongside the tag.
+#
+# Safety note
+# -----------
+# This template deliberately avoids cross-compilation (`cross`) to keep
+# the moving parts minimal. Use native runners — `ubuntu-latest`,
+# `macos-latest`, `windows-latest` — and let GitHub's hosted toolchain
+# produce the matching triple.
+
+name: addon-prebuild-template
+
+# NOTE: This workflow ships as a **template** for addon authors. It is
+# intentionally gated on `workflow_dispatch` only so it never runs
+# automatically on the taida main repository (which uses its own
+# `release.yml` with `@*` tag format). Addon authors who copy this file
+# to their own repo should uncomment the `push: tags:` trigger below.
+#
+# on:
+#   push:
+#     tags:
+#       - "v*"
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write  # upload release assets
+
+env:
+  # Change this to your addon's library name (the `[library] name` key
+  # in `native/addon.toml`, without any `lib` prefix or extension).
+  ADDON_NAME: terminal
+  # Path to the crate that produces the cdylib.
+  CRATE_DIR: .
+
+jobs:
+  build:
+    name: build ${{ matrix.triple }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # ── RC1.5 v1 baseline ──
+          - triple: x86_64-unknown-linux-gnu
+            runner: ubuntu-latest
+            ext: so
+            prefix: lib
+          - triple: aarch64-unknown-linux-gnu
+            runner: ubuntu-latest
+            ext: so
+            prefix: lib
+            # ubuntu-latest on GitHub runners is still x86_64. Use cross
+            # or a native arm64 runner for real aarch64 releases.
+            cross: true
+          - triple: x86_64-apple-darwin
+            runner: macos-latest
+            ext: dylib
+            prefix: lib
+          - triple: aarch64-apple-darwin
+            runner: macos-latest
+            ext: dylib
+            prefix: lib
+          - triple: x86_64-pc-windows-msvc
+            runner: windows-latest
+            ext: dll
+            prefix: ""
+          # ── RC15B-003 Nice-to-Have extensions (opt-in) ──
+          # Uncomment after verifying your crate builds for the target.
+          # - triple: x86_64-unknown-linux-musl
+          #   runner: ubuntu-latest
+          #   ext: so
+          #   prefix: lib
+          #   cross: true
+          # - triple: i686-unknown-linux-gnu
+          #   runner: ubuntu-latest
+          #   ext: so
+          #   prefix: lib
+          #   cross: true
+          # - triple: riscv64gc-unknown-linux-gnu
+          #   runner: ubuntu-latest
+          #   ext: so
+          #   prefix: lib
+          #   cross: true
+          # - triple: x86_64-unknown-freebsd
+          #   runner: ubuntu-latest
+          #   ext: so
+          #   prefix: lib
+          #   cross: true
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.triple }}
+
+      - name: Install cross (for non-native targets)
+        if: matrix.cross
+        run: cargo install cross --locked
+
+      - name: Build cdylib (native)
+        if: "!matrix.cross"
+        run: |
+          cd "${{ env.CRATE_DIR }}"
+          cargo build --release --target ${{ matrix.triple }}
+
+      - name: Build cdylib (cross)
+        if: matrix.cross
+        run: |
+          cd "${{ env.CRATE_DIR }}"
+          cross build --release --target ${{ matrix.triple }}
+
+      - name: Pack and hash
+        id: pack
+        shell: bash
+        run: |
+          set -euo pipefail
+          src="target/${{ matrix.triple }}/release/${{ matrix.prefix }}${ADDON_NAME}.${{ matrix.ext }}"
+          if [ ! -f "$src" ]; then
+            echo "expected artifact $src not found" >&2
+            ls -l "target/${{ matrix.triple }}/release/" || true
+            exit 1
+          fi
+          dst="${{ matrix.prefix }}${ADDON_NAME}-${{ matrix.triple }}.${{ matrix.ext }}"
+          cp "$src" "$dst"
+          if command -v sha256sum >/dev/null; then
+            sha=$(sha256sum "$dst" | awk '{print $1}')
+          else
+            sha=$(shasum -a 256 "$dst" | awk '{print $1}')
+          fi
+          echo "artifact=$dst" >> "$GITHUB_OUTPUT"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          printf '"%s" = "sha256:%s"\n' "${{ matrix.triple }}" "$sha" > "${{ matrix.triple }}.toml.fragment"
+
+      - name: Upload artefact
+        uses: actions/upload-artifact@v4
+        with:
+          name: prebuild-${{ matrix.triple }}
+          path: |
+            ${{ steps.pack.outputs.artifact }}
+            ${{ matrix.triple }}.toml.fragment
+
+  release:
+    name: attach to release
+    needs: build
+    runs-on: ubuntu-latest
+    # Only publish when invoked for a tag push in downstream addon
+    # repos. With only `workflow_dispatch` configured in this template,
+    # this job is skipped — add a `push: tags:` trigger and the
+    # condition automatically flips on.
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: prebuild-artifacts
+
+      - name: Assemble manifest fragment
+        run: |
+          set -e
+          echo "[library.prebuild.targets]" > prebuild-targets.toml.txt
+          find prebuild-artifacts -name "*.toml.fragment" -print0 \
+            | xargs -0 cat >> prebuild-targets.toml.txt
+          cat prebuild-targets.toml.txt
+
+      - name: Upload to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            prebuild-artifacts/**/lib*.so
+            prebuild-artifacts/**/lib*.dylib
+            prebuild-artifacts/**/*.dll
+            prebuild-targets.toml.txt
+          fail_on_unmatched_files: false
