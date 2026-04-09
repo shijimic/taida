@@ -845,6 +845,215 @@ impl PublishRollback {
     }
 }
 
+// ─────────────────────────────────────────────────────────────
+// RC2.6 Phase 2: GitHub Release helpers
+// ─────────────────────────────────────────────────────────────
+//
+// The helpers below drive `gh release create` as a subprocess.
+// No direct GitHub REST API calls — the `gh` CLI handles auth,
+// pagination, asset upload, and error display. If the user does
+// not have `gh` installed or authenticated, we give a clear
+// error with action hints rather than silently failing.
+//
+// Design constraints (from RC2_6_DESIGN.md):
+//
+//   * `create_github_release` runs AFTER `git_commit_tag_push`, so
+//     it is a post-push side-effect. There is no rollback: if the
+//     release step fails, the commit and tag already exist on the
+//     remote and the user must fix things manually (or re-run with
+//     `gh release create` by hand).
+//   * The `GH_BIN` environment variable overrides the path to `gh`
+//     so integration tests can substitute a mock script.
+//   * `TAIDA_PUBLISH_SKIP_RELEASE=1` is checked by the orchestrator
+//     (not here) — this function is only called when the orchestrator
+//     decides a release should happen.
+
+/// A single asset to attach to a GitHub Release.
+///
+/// The `gh release create` command supports a rename syntax:
+/// `<local_path>#<display_name>` so the asset appears with a
+/// canonical name in the release even if the on-disk filename
+/// differs (e.g. `target/release/libfoo.so#libfoo-x86_64-unknown-linux-gnu.so`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GhReleaseAsset {
+    /// Absolute (or project-relative) path to the file on disk.
+    pub local_path: PathBuf,
+    /// Display name for the asset in the GitHub Release. When this
+    /// differs from the file's basename, the `#` rename syntax is
+    /// used automatically.
+    pub asset_name: String,
+}
+
+/// Create a GitHub Release for `tag` and attach the given assets.
+///
+/// This is Phase 2 task **RC2.6-2a**. The function:
+///
+///   1. Locates the `gh` binary (respects `GH_BIN` env var, otherwise
+///      `gh` on PATH).
+///   2. Runs `gh auth status` to verify the user is authenticated.
+///   3. Invokes `gh release create <tag> --title <title> --notes <notes>
+///      <asset1>#<name1> <asset2>#<name2> ...` from `project_dir`.
+///
+/// ## Error handling
+///
+/// All errors are returned as descriptive `String`s that the CLI
+/// orchestrator can print directly. Error messages include action
+/// hints (install `gh`, run `gh auth login`, check file paths).
+///
+/// ## Contract
+///
+/// * **Not pure.** Invokes `gh` as a subprocess and creates a GitHub
+///   Release (irreversible network side-effect).
+/// * Must be called AFTER `git_commit_tag_push` succeeds so the tag
+///   exists on the remote.
+/// * Does NOT attempt rollback on failure — the caller prints the
+///   error and exits.
+pub fn create_github_release(
+    project_dir: &Path,
+    tag: &str,
+    title: &str,
+    notes: &str,
+    assets: &[GhReleaseAsset],
+) -> Result<(), String> {
+    let gh_bin = env::var("GH_BIN").unwrap_or_else(|_| "gh".to_string());
+
+    // Pre-check 1: Is `gh` available at all?
+    let version_check = Command::new(&gh_bin)
+        .args(["--version"])
+        .output();
+    match version_check {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Err(format!(
+                "GitHub CLI (`gh`) not found.\n\
+                 \n\
+                 The release step requires `gh` to upload assets to GitHub Releases.\n\
+                 Install it from https://cli.github.com/ and then run:\n\
+                 \n\
+                 \x20 gh auth login\n\
+                 \n\
+                 Alternatively, skip the release step with:\n\
+                 \n\
+                 \x20 TAIDA_PUBLISH_SKIP_RELEASE=1 taida publish --target rust-addon\n\
+                 \n\
+                 Or create the release manually:\n\
+                 \n\
+                 \x20 gh release create {tag} --title \"{title}\" \\\n\
+                 \x20   <asset1> <asset2> ..."
+            ));
+        }
+        Err(e) => {
+            return Err(format!(
+                "Failed to invoke `{}`: {}",
+                gh_bin, e
+            ));
+        }
+        Ok(out) if !out.status.success() => {
+            return Err(format!(
+                "`{} --version` exited with status {}.",
+                gh_bin,
+                out.status
+            ));
+        }
+        Ok(_) => {}
+    }
+
+    // Pre-check 2: Is the user authenticated?
+    let auth_output = Command::new(&gh_bin)
+        .args(["auth", "status"])
+        .current_dir(project_dir)
+        .output()
+        .map_err(|e| format!("Failed to run `{} auth status`: {}", gh_bin, e))?;
+
+    if !auth_output.status.success() {
+        let stderr = String::from_utf8_lossy(&auth_output.stderr);
+        return Err(format!(
+            "`gh auth status` indicates you are not authenticated:\n\
+             {}\n\
+             \n\
+             Run `gh auth login` to authenticate, then retry `taida publish`.\n\
+             \n\
+             Alternatively, skip the release step with:\n\
+             \n\
+             \x20 TAIDA_PUBLISH_SKIP_RELEASE=1 taida publish --target rust-addon",
+            stderr.trim()
+        ));
+    }
+
+    // Validate that every asset file exists on disk.
+    for asset in assets {
+        if !asset.local_path.exists() {
+            return Err(format!(
+                "Release asset '{}' (display name '{}') does not exist on disk.",
+                asset.local_path.display(),
+                asset.asset_name
+            ));
+        }
+    }
+
+    // Build the `gh release create` argument list.
+    //
+    // The `gh` rename syntax is: `<path>#<display_name>`.
+    // If the display name matches the file's basename we omit the
+    // `#` suffix for cleanliness.
+    let mut cmd_args: Vec<String> = vec![
+        "release".to_string(),
+        "create".to_string(),
+        tag.to_string(),
+        "--title".to_string(),
+        title.to_string(),
+        "--notes".to_string(),
+        notes.to_string(),
+    ];
+
+    for asset in assets {
+        let path_str = asset
+            .local_path
+            .to_str()
+            .ok_or_else(|| {
+                format!(
+                    "Asset path '{}' contains non-UTF-8 characters.",
+                    asset.local_path.display()
+                )
+            })?;
+        let basename = asset
+            .local_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("");
+        if basename == asset.asset_name {
+            cmd_args.push(path_str.to_string());
+        } else {
+            cmd_args.push(format!("{}#{}", path_str, asset.asset_name));
+        }
+    }
+
+    let output = Command::new(&gh_bin)
+        .args(&cmd_args)
+        .current_dir(project_dir)
+        .output()
+        .map_err(|e| format!("Failed to invoke `{} release create`: {}", gh_bin, e))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        return Err(format!(
+            "`gh release create` failed (exit {}):\n\
+             --- stderr ---\n{}\n--- stdout ---\n{}\n\
+             \n\
+             You can retry the release manually:\n\
+             \n\
+             \x20 gh release create {} --title \"{}\" --notes \"...\" <assets...>",
+            output.status,
+            stderr.trim(),
+            stdout.trim(),
+            tag,
+            title,
+        ));
+    }
+
+    Ok(())
+}
+
 fn run_git(dir: &Path, args: &[&str]) -> Result<String, String> {
     let output = Command::new("git")
         .args(args)
@@ -1865,6 +2074,125 @@ mod tests {
             err.contains("Cargo.toml"),
             "error should mention Cargo.toml: {err}"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── RC2.6-2a: create_github_release (negative paths) ─────
+    //
+    // We cannot invoke real `gh release create` in unit tests (it
+    // would require a GitHub repo + auth). We test the pre-check
+    // paths that fire before the subprocess: missing `gh` binary
+    // and missing asset files.
+
+    #[test]
+    fn test_create_github_release_missing_gh_binary() {
+        let dir = std::env::temp_dir().join(format!(
+            "taida_gh_missing_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // Point GH_BIN at a non-existent binary to force NotFound.
+        // Safety: this is a single-threaded test scope; we restore the
+        // original value immediately after the call under test.
+        let prev = std::env::var("GH_BIN").ok();
+        unsafe { std::env::set_var("GH_BIN", "/nonexistent/gh-test-bin-rc26") };
+
+        let err = create_github_release(
+            &dir,
+            "a.1",
+            "test a.1",
+            "notes",
+            &[],
+        )
+        .unwrap_err();
+
+        // Restore env.
+        match prev {
+            Some(v) => unsafe { std::env::set_var("GH_BIN", v) },
+            None => unsafe { std::env::remove_var("GH_BIN") },
+        }
+
+        assert!(
+            err.contains("not found") || err.contains("Not Found") || err.contains("Failed to invoke"),
+            "error should indicate gh is missing: {err}"
+        );
+        assert!(
+            err.contains("gh auth login") || err.contains("cli.github.com") || err.contains("Failed"),
+            "error should contain action hints: {err}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_create_github_release_missing_asset_file() {
+        // The test only reaches the asset-existence check if gh
+        // --version + gh auth status pass. We use a mock script.
+        let dir = std::env::temp_dir().join(format!(
+            "taida_gh_asset_missing_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // Create a mock gh script that succeeds on --version and auth status.
+        let mock_gh = dir.join("mock-gh");
+        #[cfg(unix)]
+        {
+            std::fs::write(
+                &mock_gh,
+                "#!/bin/sh\nexit 0\n",
+            )
+            .unwrap();
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&mock_gh, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        #[cfg(not(unix))]
+        {
+            // On non-Unix, skip this test.
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        }
+
+        // Safety: single-threaded test scope, restored immediately.
+        let prev = std::env::var("GH_BIN").ok();
+        unsafe { std::env::set_var("GH_BIN", mock_gh.to_str().unwrap()) };
+
+        let bogus_asset = GhReleaseAsset {
+            local_path: dir.join("nonexistent-lib.so"),
+            asset_name: "libfoo-x86_64-unknown-linux-gnu.so".to_string(),
+        };
+        let err = create_github_release(
+            &dir,
+            "a.1",
+            "test a.1",
+            "notes",
+            &[bogus_asset],
+        )
+        .unwrap_err();
+
+        match prev {
+            Some(v) => unsafe { std::env::set_var("GH_BIN", v) },
+            None => unsafe { std::env::remove_var("GH_BIN") },
+        }
+
+        assert!(
+            err.contains("does not exist"),
+            "error should mention missing asset: {err}"
+        );
+        assert!(
+            err.contains("nonexistent-lib.so"),
+            "error should name the missing file: {err}"
+        );
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

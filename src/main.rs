@@ -262,21 +262,28 @@ fn print_publish_help() {
     println!(
         "\
 Usage:
-  taida publish [--label LABEL] [--dry-run] [--target rust-addon]
+  taida publish [--label LABEL] [--dry-run[=MODE]] [--target rust-addon]
 
 Options:
   --label          Append a version label, for example `rc`
-  --dry-run        Print the publish plan without changing files or git state
+  --dry-run        Print the publish plan without changing files or git state.
+                   Equivalent to `--dry-run=plan`.
+  --dry-run=plan   (Default) Show what would happen; no cargo build, no git, no release.
+  --dry-run=build  Run cargo build + lockfile merge + packages.tdm rewrite,
+                   then stop. Git commit/push and release are skipped.
+                   Useful for inspecting the lockfile before committing.
   --target TARGET  Force a publish target. Supported values:
                      rust-addon   Build the package as a Rust cdylib addon,
                                   merge the host entry into
-                                  native/addon.lock.toml and (Phase 2)
-                                  upload the release asset.
+                                  native/addon.lock.toml and upload
+                                  the release asset.
                    When omitted, `taida publish` auto-detects rust-addon
                    from the presence of `native/addon.toml`.
 
 Examples:
   taida publish --dry-run
+  taida publish --dry-run=plan
+  taida publish --dry-run=build --target rust-addon
   taida publish --label rc
   taida publish --target rust-addon"
     );
@@ -4202,9 +4209,27 @@ fn run_update(args: &[String]) {
 /// and prints the computed plan, but explicitly SKIPS the cargo build
 /// to preserve B-015 invariant "dry-run must not touch target/".
 fn run_publish(args: &[String]) {
+    // ── Dry-run modes ───────────────────────────────────
+    //
+    // RC2.6-2c: two-stage dry-run semantics.
+    //
+    //   Plan  — print what would happen; no cargo build, no git, no release.
+    //           This is the default for bare `--dry-run`.
+    //   Build — run cargo build + lockfile merge + packages.tdm rewrite,
+    //           then stop. Git commit/push and release are skipped.
+    //           Useful to inspect the lockfile before committing.
+    //
+    // For source-only packages, `Build` behaves the same as `Plan`
+    // because there is no cargo build to perform.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum DryRunMode {
+        Plan,
+        Build,
+    }
+
     // ── CLI parsing ──────────────────────────────────────
     let mut label: Option<String> = None;
-    let mut dry_run = false;
+    let mut dry_run: Option<DryRunMode> = None;
     let mut explicit_rust_addon = false;
 
     let mut i = 0;
@@ -4223,7 +4248,20 @@ fn run_publish(args: &[String]) {
                 }
                 label = Some(args[i].clone());
             }
-            "--dry-run" => dry_run = true,
+            // Bare `--dry-run` is equivalent to `--dry-run=plan`
+            // for backward compatibility.
+            "--dry-run" => dry_run = Some(DryRunMode::Plan),
+            "--dry-run=plan" => dry_run = Some(DryRunMode::Plan),
+            "--dry-run=build" => dry_run = Some(DryRunMode::Build),
+            raw if raw.starts_with("--dry-run=") => {
+                let mode = &raw["--dry-run=".len()..];
+                eprintln!(
+                    "Unknown --dry-run mode '{}'. Supported modes: plan, build.",
+                    mode
+                );
+                eprintln!("Run `taida publish --help` for usage.");
+                std::process::exit(1);
+            }
             "--target" => {
                 i += 1;
                 if i >= args.len() {
@@ -4326,13 +4364,13 @@ fn run_publish(args: &[String]) {
         }
     };
 
-    // ── Dry-run branch ──────────────────────────────────
+    // ── Dry-run: Plan mode ────────────────────────────────
     //
-    // B-015 invariant: `--dry-run` MUST NOT touch the filesystem.
-    // That means no cargo build, no lockfile write, no git commit.
-    // The addon-flow details are still surfaced so users know what
-    // the real run would do.
-    if dry_run {
+    // B-015 invariant: `--dry-run` (plan) MUST NOT touch the
+    // filesystem. That means no cargo build, no lockfile write, no
+    // git commit. The addon-flow details are still surfaced so users
+    // know what the real run would do.
+    if dry_run == Some(DryRunMode::Plan) {
         println!("Dry run: no changes made.");
         println!("  Package: {}/{}", token.username, preparation.package_name);
         println!("  Version: @{}", preparation.version);
@@ -4351,6 +4389,22 @@ fn run_publish(args: &[String]) {
                 addon_lock_path.display()
             );
             println!("  Cargo build: skipped (dry-run invariant)");
+        }
+        return;
+    }
+
+    // For source-only packages, `--dry-run=build` has no cargo build
+    // to perform, so it degrades to `plan` mode gracefully.
+    if dry_run == Some(DryRunMode::Build) && !is_addon_flow {
+        println!("Dry run (build): no addon build required for source-only packages.");
+        println!("  Package: {}/{}", token.username, preparation.package_name);
+        println!("  Version: @{}", preparation.version);
+        println!("  Integrity: {}", preparation.integrity);
+        if let Some(previous) = &preparation.previous_version {
+            println!("  Previous: @{}", previous);
+        }
+        if let Some(source_repo) = &preparation.source_repo {
+            println!("  Source repo: {}", source_repo);
         }
         return;
     }
@@ -4407,6 +4461,13 @@ fn run_publish(args: &[String]) {
     // before the lockfile existed, which would defeat the purpose of
     // the metadata.
     let mut final_integrity = preparation.integrity.clone();
+
+    // Addon build metadata captured for the release step (Phase 2).
+    // These are set inside the cfg(native) block and consumed later.
+    let mut addon_cdylib_path: Option<PathBuf> = None;
+    let mut addon_library_stem: Option<String> = None;
+    let mut addon_host_triple: Option<String> = None;
+
     if is_addon_flow {
         #[cfg(feature = "native")]
         {
@@ -4440,6 +4501,11 @@ fn run_publish(args: &[String]) {
                     .display()
             );
 
+            // Capture build metadata for the Phase 2 release step.
+            addon_cdylib_path = Some(build_output.cdylib_path);
+            addon_library_stem = Some(build_output.library_stem);
+            addon_host_triple = Some(build_output.host_triple);
+
             // Re-compute integrity post-lockfile so the digest
             // reflects the actual committed tree state.
             final_integrity = pkg::publish::compute_publish_integrity(&project_dir);
@@ -4467,6 +4533,25 @@ fn run_publish(args: &[String]) {
         preparation.version
     );
 
+    // ── Dry-run: Build mode exit point ────────────────────
+    //
+    // RC2.6-2c: `--dry-run=build` runs cargo build + lockfile merge
+    // + packages.tdm rewrite, then stops. Git commit/push/release
+    // are skipped. The mutated files (lockfile, packages.tdm) remain
+    // on disk so the user can inspect them.
+    if dry_run == Some(DryRunMode::Build) {
+        println!("Dry run (build): build + lockfile completed, git/release skipped.");
+        println!("  Package: {}/{}", token.username, preparation.package_name);
+        println!("  Version: @{}", preparation.version);
+        println!("  Integrity: {}", final_integrity);
+        if is_addon_flow {
+            println!("  Lockfile: {}", addon_lock_path.display());
+        }
+        println!("  packages.tdm and lockfile have been updated on disk.");
+        println!("  Run `git diff` to inspect, or `git checkout .` to revert.");
+        return;
+    }
+
     // ── I2: worktree dirty only within the allowlist ────
     let allow_refs: Vec<&Path> = allowlist.iter().map(|p| p.as_path()).collect();
     if let Err(e) = pkg::publish::check_dirty_allowlist(&project_dir, &allow_refs) {
@@ -4491,21 +4576,84 @@ fn run_publish(args: &[String]) {
         bail(&rollback, e);
     }
 
-    // ── Phase 2 placeholder: gh release create ──────────
+    // ── Phase 2: gh release create ────────────────────────
     //
-    // Phase 1 intentionally stops before invoking `gh release
-    // create`. The env var `TAIDA_PUBLISH_SKIP_RELEASE=1` is already
-    // read here so Phase 1 integration tests can assert the
-    // orchestrator branches on the flag, and Phase 2 can flip the
-    // default to "do the release" without touching test fixtures.
+    // The env var `TAIDA_PUBLISH_SKIP_RELEASE=1` is the dev escape
+    // hatch (also used by Phase 1 integration tests). When not set,
+    // we create a GitHub Release with the lockfile + cdylib as assets.
+    //
+    // Note: this runs AFTER git_commit_tag_push, so the commit and
+    // tag already exist on the remote. There is no rollback if the
+    // release step fails — the error is printed and the user must
+    // fix manually (or re-run `gh release create` by hand).
     let skip_release = std::env::var("TAIDA_PUBLISH_SKIP_RELEASE")
         .map(|v| v == "1")
         .unwrap_or(false);
     if is_addon_flow {
         if skip_release {
             println!("  [release]  skipped (TAIDA_PUBLISH_SKIP_RELEASE=1)");
-        } else {
-            println!("  [release]  phase-2 TODO: gh release create {}", preparation.version);
+        } else if let (Some(cdylib_path), Some(library_stem), Some(host_triple)) =
+            (&addon_cdylib_path, &addon_library_stem, &addon_host_triple)
+        {
+            // Determine the cdylib extension from the on-disk file.
+            let cdylib_ext = cdylib_path
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("so");
+            let canonical_cdylib_name =
+                format!("lib{}-{}.{}", library_stem, host_triple, cdylib_ext);
+
+            let release_title = format!(
+                "{} {}",
+                preparation.package_name, preparation.version
+            );
+            let release_notes = format!(
+                "Release {} of {}",
+                preparation.version, preparation.package_name
+            );
+
+            let assets = vec![
+                pkg::publish::GhReleaseAsset {
+                    local_path: addon_lock_path.clone(),
+                    asset_name: "addon.lock.toml".to_string(),
+                },
+                pkg::publish::GhReleaseAsset {
+                    local_path: cdylib_path.clone(),
+                    asset_name: canonical_cdylib_name.clone(),
+                },
+            ];
+
+            println!(
+                "  [release]  gh release create {} (2 assets: addon.lock.toml, {})",
+                preparation.version, canonical_cdylib_name
+            );
+
+            if let Err(e) = pkg::publish::create_github_release(
+                &project_dir,
+                &preparation.version,
+                &release_title,
+                &release_notes,
+                &assets,
+            ) {
+                // Release failure is non-fatal to the commit/push but
+                // is reported as a CLI error so the user knows.
+                eprintln!("Warning: GitHub Release creation failed:\n{}", e);
+                eprintln!();
+                eprintln!(
+                    "The commit and tag ({}) have been pushed successfully.",
+                    preparation.version
+                );
+                eprintln!("You can create the release manually with:");
+                eprintln!(
+                    "  gh release create {} --title \"{}\" --notes \"{}\" {}#addon.lock.toml {}#{}",
+                    preparation.version,
+                    release_title,
+                    release_notes,
+                    addon_lock_path.display(),
+                    cdylib_path.display(),
+                    canonical_cdylib_name,
+                );
+            }
         }
     }
 

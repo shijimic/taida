@@ -511,3 +511,246 @@ fn test_publish_rust_addon_full_flow_skip_release() {
 
     let _ = fs::remove_dir_all(&root);
 }
+
+// ──────────────────────────────────────────────────────────────
+// Layer 4: RC2.6-2c dry-run=plan explicit (parser compatibility)
+// ──────────────────────────────────────────────────────────────
+
+/// Verify that `--dry-run=plan` is accepted and behaves identically
+/// to the bare `--dry-run` flag (backward compatibility). The test
+/// is intentionally parallel to `test_publish_rust_addon_dry_run_auto_detect`
+/// but uses the explicit `=plan` syntax.
+#[test]
+fn test_publish_rust_addon_dry_run_plan_explicit() {
+    let root = unique_temp_dir("taida_publish_addon_plan");
+    let (project_dir, _bare) = setup_project_with_remote(&root);
+
+    fs::write(project_dir.join("packages.tdm"), "<<<@a @(run)\n").expect("write packages.tdm");
+    fs::write(project_dir.join("main.td"), "stdout(\"ok\")\n").expect("write main.td");
+    write_addon_toml(&project_dir, "tester/pkg", "tester_pkg");
+
+    run_git(&["add", "."], &project_dir);
+    run_git(&["commit", "-m", "initial"], &project_dir);
+    run_git(&["push", "-u", "origin", "HEAD"], &project_dir);
+
+    let fake_home = write_fake_auth(&root, "alice");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_taida"))
+        .args(["publish", "--dry-run=plan"])
+        .current_dir(&project_dir)
+        .env("HOME", &fake_home)
+        .output()
+        .expect("run taida publish");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "dry-run=plan should succeed\nstdout:\n{}\nstderr:\n{}",
+        stdout,
+        stderr
+    );
+    // Same assertions as the bare `--dry-run` test.
+    assert!(
+        stdout.contains("Dry run: no changes made."),
+        "dry-run=plan should report no changes: {}",
+        stdout
+    );
+    assert!(
+        stdout.contains("Target: rust-addon"),
+        "dry-run=plan should report rust-addon target: {}",
+        stdout
+    );
+    assert!(
+        stdout.contains("Cargo build: skipped"),
+        "dry-run=plan must announce cargo build is skipped: {}",
+        stdout
+    );
+
+    // No filesystem mutations.
+    let manifest =
+        fs::read_to_string(project_dir.join("packages.tdm")).expect("read packages.tdm");
+    assert_eq!(manifest, "<<<@a @(run)\n");
+    assert!(
+        !project_dir.join("native").join("addon.lock.toml").exists(),
+        "dry-run=plan must not create addon.lock.toml"
+    );
+    let tags = git_output(&["tag", "--list"], &project_dir);
+    assert!(tags.is_empty(), "dry-run=plan should create no tags: {}", tags);
+
+    let _ = fs::remove_dir_all(&root);
+}
+
+// ──────────────────────────────────────────────────────────────
+// Layer 4: RC2.6-2c dry-run=build (build + lockfile, no git)
+// ──────────────────────────────────────────────────────────────
+
+/// Verify that `--dry-run=build` executes `cargo build --release --lib`
+/// and merges the lockfile, but does NOT create a git commit, tag,
+/// or push. The mutated files (packages.tdm, addon.lock.toml) are
+/// left on disk for inspection.
+#[test]
+fn test_publish_rust_addon_dry_run_build() {
+    if Command::new("cargo").arg("--version").output().is_err() {
+        eprintln!("cargo not available; skipping test_publish_rust_addon_dry_run_build");
+        return;
+    }
+
+    let root = unique_temp_dir("taida_publish_addon_drbuild");
+    let (project_dir, _bare) = setup_project_with_remote(&root);
+
+    // packages.tdm + main.td.
+    fs::write(project_dir.join("packages.tdm"), "<<<@a @(run)\n").unwrap();
+    fs::write(project_dir.join("main.td"), "stdout(\"ok\")\n").unwrap();
+
+    // Cargo.toml + src/lib.rs producing a cdylib.
+    fs::write(project_dir.join("Cargo.toml"), MINIMAL_CDYLIB_CARGO_TOML).unwrap();
+    fs::create_dir_all(project_dir.join("src")).unwrap();
+    fs::write(project_dir.join("src").join("lib.rs"), MINIMAL_CDYLIB_LIB_RS).unwrap();
+
+    // native/addon.toml.
+    write_addon_toml(
+        &project_dir,
+        "tester/rc26-build",
+        "taida_rc26_phase1_fixture",
+    );
+
+    // .gitignore.
+    fs::write(
+        project_dir.join(".gitignore"),
+        "target/\nCargo.lock\n",
+    )
+    .unwrap();
+
+    run_git(&["add", "."], &project_dir);
+    run_git(&["commit", "-m", "initial"], &project_dir);
+    run_git(&["push", "-u", "origin", "HEAD"], &project_dir);
+
+    let fake_home = write_fake_auth(&root, "alice");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_taida"))
+        .args(["publish", "--target", "rust-addon", "--dry-run=build"])
+        .current_dir(&project_dir)
+        .env("HOME", &fake_home)
+        .output()
+        .expect("run taida publish");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "dry-run=build should succeed\nstdout:\n{}\nstderr:\n{}",
+        stdout,
+        stderr
+    );
+
+    // The build + lockfile steps should have run.
+    assert!(
+        stdout.contains("[build]"),
+        "stdout should include build step: {}",
+        stdout
+    );
+    assert!(
+        stdout.contains("[sha256]"),
+        "stdout should include sha256 step: {}",
+        stdout
+    );
+    assert!(
+        stdout.contains("[lockfile]"),
+        "stdout should include lockfile step: {}",
+        stdout
+    );
+    assert!(
+        stdout.contains("[rewrite]"),
+        "stdout should include rewrite step: {}",
+        stdout
+    );
+    assert!(
+        stdout.contains("Dry run (build)"),
+        "stdout should announce dry-run build mode: {}",
+        stdout
+    );
+    assert!(
+        stdout.contains("git/release skipped"),
+        "stdout should say git/release skipped: {}",
+        stdout
+    );
+
+    // Lockfile should exist on disk (build was real).
+    let lock_path = project_dir.join("native").join("addon.lock.toml");
+    assert!(
+        lock_path.exists(),
+        "dry-run=build should create addon.lock.toml on disk"
+    );
+    let lock = fs::read_to_string(&lock_path).unwrap();
+    assert!(
+        lock.contains("[targets]") && lock.contains("sha256:"),
+        "lockfile should contain targets + sha256: {}",
+        lock
+    );
+
+    // packages.tdm should be rewritten.
+    let manifest = fs::read_to_string(project_dir.join("packages.tdm")).unwrap();
+    assert!(
+        manifest.contains("<<<@a.1"),
+        "packages.tdm should be rewritten: {}",
+        manifest
+    );
+
+    // But NO git tag should exist (commit/push were skipped).
+    let tags = git_output(&["tag", "--list"], &project_dir);
+    assert!(
+        tags.is_empty(),
+        "dry-run=build should not create tags: {}",
+        tags
+    );
+
+    // HEAD should still be the initial commit.
+    let log = git_output(&["log", "--oneline"], &project_dir);
+    assert!(
+        log.lines().count() == 1,
+        "dry-run=build should not add commits: {}",
+        log
+    );
+
+    let _ = fs::remove_dir_all(&root);
+}
+
+// ──────────────────────────────────────────────────────────────
+// Layer 4: RC2.6-2c invalid --dry-run mode is rejected
+// ──────────────────────────────────────────────────────────────
+
+#[test]
+fn test_publish_invalid_dry_run_mode_rejected() {
+    let root = unique_temp_dir("taida_publish_bad_dryrun");
+    let (project_dir, _bare) = setup_project_with_remote(&root);
+
+    fs::write(project_dir.join("packages.tdm"), "<<<@a @(run)\n").unwrap();
+    fs::write(project_dir.join("main.td"), "stdout(\"ok\")\n").unwrap();
+
+    run_git(&["add", "."], &project_dir);
+    run_git(&["commit", "-m", "initial"], &project_dir);
+    run_git(&["push", "-u", "origin", "HEAD"], &project_dir);
+
+    let fake_home = write_fake_auth(&root, "alice");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_taida"))
+        .args(["publish", "--dry-run=commit"])
+        .current_dir(&project_dir)
+        .env("HOME", &fake_home)
+        .output()
+        .expect("run taida publish");
+
+    assert!(
+        !output.status.success(),
+        "unknown dry-run mode should fail"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("Unknown --dry-run mode") && stderr.contains("commit"),
+        "error should mention the invalid mode: {}",
+        stderr
+    );
+
+    let _ = fs::remove_dir_all(&root);
+}
