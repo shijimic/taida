@@ -4647,14 +4647,21 @@ fn run_publish(args: &[String]) {
             let canonical_cdylib_name =
                 format!("lib{}-{}.{}", library_stem, host_triple, cdylib_ext);
 
-            // RC2.6B-024: release title uses org/name@version format.
+            // RC2.6B-024: release title uses qualified org/name@version.
+            // preparation.package_name is the bare directory name;
+            // addon.toml's `package` field holds the qualified name.
+            let qualified_name = taida::addon::manifest::parse_addon_manifest(
+                &project_dir.join("native").join("addon.toml"),
+            )
+            .map(|m| m.package)
+            .unwrap_or_else(|_| preparation.package_name.clone());
             let release_title = format!(
                 "{}@{}",
-                preparation.package_name, preparation.version
+                qualified_name, preparation.version
             );
             let release_notes = format!(
                 "Release {} of {}",
-                preparation.version, preparation.package_name
+                preparation.version, qualified_name
             );
 
             let assets = vec![

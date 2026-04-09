@@ -2415,27 +2415,117 @@ mod tests {
 
     #[test]
     fn test_rewrite_prebuild_url_rewrites_org_name() {
-        // Simulate a scenario where the addon.toml has a different org/name
-        // than what we'd derive from git origin. Since we can't easily mock
-        // git remote, we test the internal line-rewrite logic directly by
-        // calling the function on a non-git dir — it should return Ok(false)
-        // because git_origin_url returns None. We test the rewrite logic
-        // indirectly through the string manipulation below.
-        let input = r#"[addon]
+        // RC2.6B-004: create a real git repo with a GitHub-style origin
+        // and an addon.toml pointing to a different org. Verify that
+        // rewrite_prebuild_url_if_needed rewrites the file on disk.
+        let dir = std::env::temp_dir().join(format!(
+            "taida_test_b004_rewrite_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("native")).unwrap();
+
+        // Initialise a git repo with a GitHub origin
+        let run_git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .args(args)
+                .current_dir(&dir)
+                .output()
+                .expect("git failed")
+        };
+        run_git(&["init"]);
+        run_git(&["remote", "add", "origin", "https://github.com/shijimic/terminal.git"]);
+
+        // Write addon.toml with a different org (taida-lang)
+        let addon_toml = dir.join("native/addon.toml");
+        std::fs::write(
+            &addon_toml,
+            r#"abi = 1
+entry = "taida_addon_get_v1"
 package = "taida-lang/terminal"
-abi-version = 1
+library = "taida_lang_terminal"
+
+[functions]
+terminalSize = 1
 
 [library.prebuild]
 url = "https://github.com/taida-lang/terminal/releases/download/{version}/lib{name}-{target}.{ext}"
-"#;
-        // Simulate what the rewrite does: replace org/name
-        let old_prefix = "taida-lang/terminal";
-        let new_prefix = "shijimic/terminal";
-        let result = input.replace(
-            &format!("https://github.com/{}/releases/download/", old_prefix),
-            &format!("https://github.com/{}/releases/download/", new_prefix),
+
+[library.prebuild.targets]
+"#,
+        )
+        .unwrap();
+
+        // Call the real function
+        let result = rewrite_prebuild_url_if_needed(&dir);
+        assert_eq!(result, Ok(true), "should report that a rewrite happened");
+
+        // Verify the file on disk was rewritten
+        let content = std::fs::read_to_string(&addon_toml).unwrap();
+        assert!(
+            content.contains("https://github.com/shijimic/terminal/releases/download/"),
+            "URL should point to shijimic/terminal: {}",
+            content
         );
-        assert!(result.contains("shijimic/terminal/releases/download/"));
-        assert!(!result.contains("taida-lang/terminal/releases/download/"));
+        assert!(
+            !content.contains("https://github.com/taida-lang/terminal/releases/download/"),
+            "old taida-lang URL should be gone: {}",
+            content
+        );
+        // package field should NOT be rewritten (only the URL line)
+        assert!(
+            content.contains("package = \"taida-lang/terminal\""),
+            "package field must be unchanged: {}",
+            content
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_rewrite_prebuild_url_no_change_when_origin_matches() {
+        // When the addon.toml URL already matches the git origin,
+        // the function should return Ok(false) and not modify the file.
+        let dir = std::env::temp_dir().join(format!(
+            "taida_test_b004_noop_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("native")).unwrap();
+
+        let run_git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .args(args)
+                .current_dir(&dir)
+                .output()
+                .expect("git failed")
+        };
+        run_git(&["init"]);
+        run_git(&["remote", "add", "origin", "https://github.com/taida-lang/terminal.git"]);
+
+        let addon_toml = dir.join("native/addon.toml");
+        let original = r#"abi = 1
+entry = "taida_addon_get_v1"
+package = "taida-lang/terminal"
+library = "taida_lang_terminal"
+
+[functions]
+terminalSize = 1
+
+[library.prebuild]
+url = "https://github.com/taida-lang/terminal/releases/download/{version}/lib{name}-{target}.{ext}"
+
+[library.prebuild.targets]
+"#;
+        std::fs::write(&addon_toml, original).unwrap();
+
+        let result = rewrite_prebuild_url_if_needed(&dir);
+        assert_eq!(result, Ok(false), "should report no change needed");
+
+        // File content must be unchanged
+        let content = std::fs::read_to_string(&addon_toml).unwrap();
+        assert_eq!(content, original, "file must not be modified");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -503,13 +503,19 @@ jobs:
       - name: Upload cdylib to release
         shell: bash
         run: |
-          # RC2.6B-021: avoid --clobber so a local-publish cdylib is not
-          # overwritten with a CI-built binary whose SHA differs from the
-          # lockfile uploaded by local publish.  If the asset already
-          # exists we skip the upload; the lockfile job will still collect
-          # the SHA from the CI build artifact so it remains consistent.
+          # RC2.6B-021: If the asset already exists (e.g. from local
+          # publish), keep it and recompute sha256-*.txt from the
+          # existing asset so the lockfile job stays consistent.
           if gh release view "${{{{ github.ref_name }}}}" --json assets -q '.assets[].name' | grep -qx "$CANONICAL"; then
-            echo "Asset $CANONICAL already exists on release, skipping upload"
+            echo "Asset $CANONICAL already exists on release, recomputing SHA from existing asset"
+            gh release download "${{{{ github.ref_name }}}}" -p "$CANONICAL" -D /tmp/existing-asset --clobber
+            if command -v sha256sum &>/dev/null; then
+              SHA=$(sha256sum "/tmp/existing-asset/$CANONICAL" | awk '{{print $1}}')
+            else
+              SHA=$(shasum -a 256 "/tmp/existing-asset/$CANONICAL" | awk '{{print $1}}')
+            fi
+            echo "$SHA" > "sha256-${{{{ matrix.target }}}}.txt"
+            echo "Overwrote sha256-${{{{ matrix.target }}}}.txt with existing asset SHA: $SHA"
           else
             gh release upload "${{{{ github.ref_name }}}}" "$CANONICAL"
           fi
@@ -812,6 +818,32 @@ mod tests {
         assert!(manifest.functions.contains_key("echo"));
         assert_eq!(manifest.functions["echo"], 1);
         assert!(manifest.prebuild.has_prebuild());
+        // RC2.6B-024: package field is the qualified name source for
+        // release titles. Scaffold uses "OWNER/<crate_name>" placeholder.
+        assert_eq!(manifest.package, "OWNER/test_pkg");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_rust_addon_addon_toml_qualified_name_used_for_release_title() {
+        // RC2.6B-024: release title reads addon.toml's `package` field
+        // as the qualified name. Verify that when a user sets this to
+        // "org/name", parse_addon_manifest returns it correctly.
+        let dir = temp_dir("addon_b024_pkg");
+        init_project(&dir, "cool-addon", InitTarget::RustAddon).unwrap();
+
+        // Scaffold generates "OWNER/cool_addon"; simulate user setting
+        // the real org/name before publishing.
+        let toml_path = dir.join("native/addon.toml");
+        let content = std::fs::read_to_string(&toml_path).unwrap();
+        let updated = content.replace("OWNER/cool_addon", "my-org/cool-addon");
+        std::fs::write(&toml_path, &updated).unwrap();
+
+        let manifest = crate::addon::manifest::parse_addon_manifest(&toml_path).unwrap();
+        assert_eq!(
+            manifest.package, "my-org/cool-addon",
+            "addon.toml package must be the qualified name for release titles"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1158,6 +1190,50 @@ mod tests {
                 );
             }
         }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_rust_addon_ci_workflow_recomputes_sha_for_existing_asset() {
+        // RC2.6B-021: when cdylib upload is skipped because the asset
+        // already exists, the CI must download the existing asset,
+        // recompute its SHA, and overwrite sha256-*.txt so the lockfile
+        // job uses the correct hash.
+        let dir = temp_dir("addon_ci_sha_recompute");
+        init_project(&dir, "my-addon", InitTarget::RustAddon).unwrap();
+        let content = std::fs::read_to_string(
+            dir.join(".github/workflows/release.yml"),
+        )
+        .unwrap();
+        let mut in_cdylib_upload = false;
+        let mut found_download = false;
+        let mut found_sha_overwrite = false;
+        for line in content.lines() {
+            let trimmed = line.trim();
+            if trimmed.starts_with("- name: Upload cdylib") {
+                in_cdylib_upload = true;
+                continue;
+            }
+            if trimmed.starts_with("- name:") && in_cdylib_upload {
+                break;
+            }
+            if in_cdylib_upload {
+                if trimmed.contains("gh release download") {
+                    found_download = true;
+                }
+                if trimmed.contains("sha256-") && trimmed.contains(".txt") && trimmed.contains("> \"") {
+                    found_sha_overwrite = true;
+                }
+            }
+        }
+        assert!(
+            found_download,
+            "cdylib upload step must download existing asset when it already exists"
+        );
+        assert!(
+            found_sha_overwrite,
+            "cdylib upload step must overwrite sha256-*.txt with existing asset's SHA"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
