@@ -10,6 +10,16 @@ fn check(source: &str) -> (TypeChecker, Vec<TypeError>) {
     (checker, errors)
 }
 
+fn check_with_target(source: &str, target: CompileTarget) -> (TypeChecker, Vec<TypeError>) {
+    let (program, parse_errors) = parse(source);
+    assert!(parse_errors.is_empty(), "Parse errors: {:?}", parse_errors);
+    let mut checker = TypeChecker::new();
+    checker.set_compile_target(target);
+    checker.check_program(&program);
+    let errors = checker.errors.clone();
+    (checker, errors)
+}
+
 #[test]
 fn test_literal_type_inference() {
     let mut checker = TypeChecker::new();
@@ -159,6 +169,83 @@ fn test_type_registration() {
     assert_eq!(fields.len(), 2);
     assert_eq!(fields[0], ("name".to_string(), Type::Str));
     assert_eq!(fields[1], ("age".to_string(), Type::Int));
+}
+
+#[test]
+fn test_enum_registration_and_constructor_type() {
+    let (checker, errors) = check("Enum => Status = :Ok :Fail\nstatus: Status <= Status:Ok()");
+    assert!(errors.is_empty(), "Errors: {:?}", errors);
+    assert!(checker.registry.is_enum_type("Status"));
+    assert_eq!(
+        checker.registry.get_enum_variants("Status"),
+        Some(vec!["Ok".to_string(), "Fail".to_string()])
+    );
+}
+
+#[test]
+fn test_unknown_enum_variant_rejected() {
+    let (_checker, errors) = check("Enum => Status = :Ok :Fail\nstatus <= Status:Missing()");
+    assert!(
+        errors
+            .iter()
+            .any(|err| err.message.contains("Unknown enum variant")),
+        "Expected unknown enum variant error, got {:?}",
+        errors
+    );
+}
+
+#[test]
+fn test_cross_enum_comparison_rejected() {
+    let (_checker, errors) =
+        check("Enum => A = :One :Two\nEnum => B = :One :Two\nsame <= A:One() == B:One()");
+    assert!(
+        errors.iter().any(|err| err.message.contains("[E1605]")),
+        "Expected E1605 for cross-enum comparison, got {:?}",
+        errors
+    );
+}
+
+#[test]
+fn test_http_protocol_import_alias_registers_enum() {
+    let (checker, errors) = check(">>> taida-lang/net => @(HttpProtocol: Proto)\np <= Proto:H2()");
+    assert!(errors.is_empty(), "Errors: {:?}", errors);
+    assert!(checker.registry.is_enum_type("Proto"));
+    assert_eq!(
+        checker.registry.get_enum_variants("Proto"),
+        Some(vec!["H1".to_string(), "H2".to_string(), "H3".to_string()])
+    );
+}
+
+#[test]
+fn test_http_protocol_js_h2_compile_time_reject() {
+    let (_checker, errors) = check_with_target(
+        ">>> taida-lang/net => @(httpServe: serve, HttpProtocol: Proto)\n\
+         handler req = @(status <= 200, headers <= @[], body <= \"ok\")\n\
+         serve(8080, handler, 1, 1000, 1, @(protocol <= Proto:H2()))",
+        CompileTarget::Js,
+    );
+    assert!(
+        errors
+            .iter()
+            .any(|err| err.message.contains("not supported on the JS backend")),
+        "Expected JS compile-time reject for HttpProtocol:H2(), got {:?}",
+        errors
+    );
+}
+
+#[test]
+fn test_http_protocol_native_h3_allowed() {
+    let (_checker, errors) = check_with_target(
+        ">>> taida-lang/net => @(httpServe, HttpProtocol)\n\
+         handler req = @(status <= 200, headers <= @[], body <= \"ok\")\n\
+         httpServe(8080, handler, 1, 1000, 1, @(protocol <= HttpProtocol:H3()))",
+        CompileTarget::Native,
+    );
+    assert!(
+        errors.is_empty(),
+        "Native target should accept HttpProtocol:H3(), got {:?}",
+        errors
+    );
 }
 
 #[test]

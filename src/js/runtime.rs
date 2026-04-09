@@ -973,6 +973,7 @@ function Trim(str, opts) {
   return str;
 }
 function Split(str, delim) { return Object.freeze(typeof str === 'string' ? str.split(delim) : []); }
+function Chars(str) { return Object.freeze(typeof str === 'string' ? Array.from(str) : []); }
 function Replace(str, old, rep, opts) {
   if (typeof str !== 'string') return '';
   if (opts && opts.all) return str.split(old).join(rep);
@@ -3530,10 +3531,24 @@ async function __taida_net_httpServe(port, handler, maxRequests, timeoutMs, maxC
     if ('protocol' in tls) {
       if (typeof tls.protocol === 'string') {
         __requestedProtocol = tls.protocol;
+      } else if (typeof tls.protocol === 'number' && Number.isInteger(tls.protocol)) {
+        if (tls.protocol === 0) {
+          __requestedProtocol = 'h1.1';
+        } else if (tls.protocol === 1) {
+          __requestedProtocol = 'h2';
+        } else if (tls.protocol === 2) {
+          __requestedProtocol = 'h3';
+        } else {
+          return new __TaidaAsync(
+            __taida_net_result_fail('ProtocolError',
+              'httpServe: unknown HttpProtocol ordinal ' + tls.protocol +
+              '. Expected 0 (H1), 1 (H2), or 2 (H3).'),
+            null, 'fulfilled');
+        }
       } else {
         return new __TaidaAsync(
           __taida_net_result_fail('ProtocolError',
-            'httpServe: protocol must be a Str, got ' + typeof tls.protocol),
+            'httpServe: protocol must be HttpProtocol or Str, got ' + typeof tls.protocol),
           null, 'fulfilled');
       }
     }

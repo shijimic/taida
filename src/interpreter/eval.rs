@@ -57,6 +57,8 @@ pub(crate) struct LoadedModule {
     pub(crate) exports: HashMap<String, Value>,
     /// QF-17: TypeDef field definitions exported from this module
     pub(crate) type_defs: HashMap<String, Vec<FieldDef>>,
+    /// Enum definitions exported from this module
+    pub(crate) enum_defs: HashMap<String, Vec<String>>,
     /// QF-17: TypeDef methods exported from this module
     pub(crate) type_methods: HashMap<String, HashMap<String, FuncDef>>,
 }
@@ -100,6 +102,8 @@ pub struct Interpreter {
     pub(crate) type_methods: HashMap<String, HashMap<String, FuncDef>>,
     /// TypeDef field definitions: type_name -> Vec<FieldDef> (for JSON schema matching)
     pub(crate) type_defs: HashMap<String, Vec<FieldDef>>,
+    /// Enum definitions: enum_name -> variants in ordinal order
+    pub(crate) enum_defs: HashMap<String, Vec<String>>,
     /// MoldDef field definitions: mold_name -> Vec<FieldDef> (for filling/unmold lookup)
     mold_defs: HashMap<String, Vec<FieldDef>>,
     /// Symbols declared via `<<<` during module execution.
@@ -171,6 +175,7 @@ impl Interpreter {
             mutual_tail_call_target: None,
             type_methods: HashMap::new(),
             type_defs: HashMap::new(),
+            enum_defs: HashMap::new(),
             mold_defs: HashMap::new(),
             module_exported_symbols: Vec::new(),
             tokio_runtime,
@@ -360,6 +365,24 @@ impl Interpreter {
     fn eval_statement(&mut self, stmt: &Statement) -> Result<Signal, RuntimeError> {
         match stmt {
             Statement::Expr(expr) => self.eval_expr(expr),
+
+            Statement::EnumDef(ed) => {
+                self.enum_defs.insert(
+                    ed.name.clone(),
+                    ed.variants
+                        .iter()
+                        .map(|variant| variant.name.clone())
+                        .collect(),
+                );
+                let _ = self.env.define(
+                    &ed.name,
+                    Value::BuchiPack(vec![
+                        ("__type".to_string(), Value::Str("EnumDef".to_string())),
+                        ("__name".to_string(), Value::Str(ed.name.clone())),
+                    ]),
+                );
+                Ok(Signal::Value(Value::Unit))
+            }
 
             Statement::TypeDef(td) => {
                 // Register methods defined in the type
@@ -1049,6 +1072,22 @@ impl Interpreter {
                     closure,
                     return_type: None,
                 })))
+            }
+
+            Expr::EnumVariant(enum_name, variant_name, _) => {
+                let ordinal = self
+                    .enum_defs
+                    .get(enum_name)
+                    .and_then(|variants| {
+                        variants.iter().position(|variant| variant == variant_name)
+                    })
+                    .ok_or_else(|| RuntimeError {
+                        message: format!(
+                            "Unknown enum variant: '{}:{}()'",
+                            enum_name, variant_name
+                        ),
+                    })?;
+                Ok(Signal::Value(Value::Int(ordinal as i64)))
             }
 
             Expr::TypeInst(name, fields, _) => {

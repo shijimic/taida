@@ -108,6 +108,22 @@ impl GraphExtractor {
                 Some(self.add_variable_node(graph, name, span.line, span.column))
             }
 
+            Expr::EnumVariant(enum_name, variant_name, span) => {
+                let id = Graph::make_id(&self.file, span.line, span.column, &NodeKind::Literal);
+                graph.add_node(GraphNode {
+                    id: id.clone(),
+                    kind: NodeKind::Literal,
+                    label: format!("{}:{}()", enum_name, variant_name),
+                    location: Location {
+                        file: self.file.clone(),
+                        line: span.line,
+                        column: span.column,
+                    },
+                    metadata: HashMap::new(),
+                });
+                Some(id)
+            }
+
             Expr::IntLit(n, span) => {
                 let id = Graph::make_id(&self.file, span.line, span.column, &NodeKind::Literal);
                 graph.add_node(GraphNode {

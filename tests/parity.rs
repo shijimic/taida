@@ -274,6 +274,24 @@ fn assert_backend_parity_for_source(source: &str, label: &str) {
     }
 }
 
+#[test]
+fn test_rc3_enum_variant_three_way_parity() {
+    if !cc_available() {
+        eprintln!("SKIP: cc not available, skipping RC3 enum native parity");
+        return;
+    }
+    if !node_available() {
+        eprintln!("SKIP: node not available, skipping RC3 enum JS parity");
+        return;
+    }
+
+    let source = r#"
+Enum => Status = :Ok :Fail :Retry
+stdout(Status:Retry())
+"#;
+    assert_backend_parity_for_source(source, "rc3_enum_variant_parity");
+}
+
 fn assert_backends_reject_source(source: &str, label: &str) {
     assert!(
         run_interpreter_src(source, label).is_none(),
@@ -2538,6 +2556,27 @@ stdout(badDec.getOrDefault("bad"))
     let out = run_interpreter_src(source, "utf8_molds_expected")
         .expect("interpreter output should exist");
     assert_eq!(out, "4\nBytes[@[112, 111, 110, 103]]\npong\nbad");
+}
+
+#[test]
+fn test_chars_three_way_parity() {
+    let source = r#"
+chars <= Chars["A😀é"]()
+stdout(chars.length().toString())
+stdout(chars.get(0).getOrDefault("?"))
+stdout(chars.get(1).getOrDefault("?"))
+third <= chars.get(2).getOrDefault("?")
+stdout(third)
+thirdCp <= CodePoint[third]()
+stdout(thirdCp.getOrDefault(-1).toString())
+
+emptyChars <= Chars[""]()
+stdout(emptyChars.length().toString())
+"#;
+    assert_backend_parity_for_source(source, "chars_mold");
+    let out = run_interpreter_src(source, "chars_mold_expected")
+        .expect("interpreter output should exist");
+    assert_eq!(out, "3\nA\n😀\né\n233\n0");
 }
 
 #[test]
@@ -5424,7 +5463,9 @@ fn setup_net_project(source: &str, label: &str) -> PathBuf {
 
     // Write the net package stub (same as CoreBundledProvider::net_package_source)
     let net_stub = r#"// taida-lang/net — Core bundled network package
-<<< @(httpServe, httpParseRequestHead, httpEncodeResponse, readBody, startResponse, writeChunk, endResponse, sseEvent, readBodyChunk, readBodyAll, wsUpgrade, wsSend, wsReceive, wsClose, wsCloseCode)
+Enum => HttpProtocol = :H1 :H2 :H3
+
+<<< @(httpServe, httpParseRequestHead, httpEncodeResponse, readBody, startResponse, writeChunk, endResponse, sseEvent, readBodyChunk, readBodyAll, wsUpgrade, wsSend, wsReceive, wsClose, wsCloseCode, HttpProtocol)
 "#;
     fs::write(deps_net.join("main.td"), net_stub).expect("write net stub");
 
@@ -22885,8 +22926,7 @@ stdout(r.requests)
     }
 }
 
-/// NB6-10-1: httpServe with non-Str protocol field (e.g. @(protocol <= 42))
-/// returns ProtocolError on all 3 backends (no silent fallback).
+/// NB6-10-1: httpServe with a raw numeric protocol literal is rejected at compile time.
 #[test]
 fn test_nb6_10_non_str_protocol_rejected_3way_parity() {
     if !node_available() {
@@ -22920,13 +22960,14 @@ stdout(result.throw.message)
             .arg(&td_path)
             .output()
             .expect("spawn interpreter");
-        let stdout = normalize(&String::from_utf8_lossy(&output.stdout));
+        let stderr = normalize(&String::from_utf8_lossy(&output.stderr));
         cleanup_net_project(&dir);
 
         assert!(
-            stdout.contains("protocol must be a Str"),
-            "NB6-10-1 interp: expected ProtocolError for non-Str protocol, got: {:?}",
-            stdout
+            !output.status.success()
+                && stderr.contains("tls.protocol literal must be HttpProtocol or Str"),
+            "NB6-10-1 interp: expected compile-time reject for numeric protocol literal, got: {:?}",
+            stderr
         );
     }
 
@@ -22946,23 +22987,15 @@ stdout(result.throw.message)
             .arg(&js_path)
             .output()
             .expect("transpile");
-        assert!(
-            transpile.status.success(),
-            "JS transpile failed: {}",
-            String::from_utf8_lossy(&transpile.stderr)
-        );
-        let js_output = Command::new("node")
-            .arg(&js_path)
-            .output()
-            .expect("run node");
-        let stdout = normalize(&String::from_utf8_lossy(&js_output.stdout));
+        let stderr = normalize(&String::from_utf8_lossy(&transpile.stderr));
         let _ = fs::remove_file(&js_path);
         cleanup_net_project(&dir);
 
         assert!(
-            stdout.contains("protocol must be a Str"),
-            "NB6-10-1 js: expected ProtocolError for non-Str protocol, got: {:?}",
-            stdout
+            !transpile.status.success()
+                && stderr.contains("tls.protocol literal must be HttpProtocol or Str"),
+            "NB6-10-1 js: expected compile-time reject for numeric protocol literal, got: {:?}",
+            stderr
         );
     }
 
@@ -22982,27 +23015,22 @@ stdout(result.throw.message)
             .arg(&bin_path)
             .output()
             .expect("compile native");
-        assert!(
-            compile.status.success(),
-            "Native compile failed: {}",
-            String::from_utf8_lossy(&compile.stderr)
-        );
-        let native_output = Command::new(&bin_path).output().expect("run native");
-        let stdout = normalize(&String::from_utf8_lossy(&native_output.stdout));
+        let stderr = normalize(&String::from_utf8_lossy(&compile.stderr));
         let _ = fs::remove_file(&bin_path);
         cleanup_net_project(&dir);
 
         assert!(
-            stdout.contains("protocol must be a Str"),
-            "NB6-10-1 native: expected ProtocolError for non-Str protocol, got: {:?}",
-            stdout
+            !compile.status.success()
+                && stderr.contains("tls.protocol literal must be HttpProtocol or Str"),
+            "NB6-10-1 native: expected compile-time reject for numeric protocol literal, got: {:?}",
+            stderr
         );
     }
 }
 
 /// NB6-10-2: httpServe with non-Str protocol field AND cert/key present
 /// (e.g. @(cert <= "...", key <= "...", protocol <= 42))
-/// still returns ProtocolError on all 3 backends (cert/key do not bypass type check).
+/// is also rejected at compile time.
 #[test]
 fn test_nb6_10_non_str_protocol_with_cert_key_rejected_3way_parity() {
     if !node_available() {
@@ -23036,13 +23064,14 @@ stdout(result.throw.message)
             .arg(&td_path)
             .output()
             .expect("spawn interpreter");
-        let stdout = normalize(&String::from_utf8_lossy(&output.stdout));
+        let stderr = normalize(&String::from_utf8_lossy(&output.stderr));
         cleanup_net_project(&dir);
 
         assert!(
-            stdout.contains("protocol must be a Str"),
-            "NB6-10-2 interp: expected ProtocolError even with cert/key, got: {:?}",
-            stdout
+            !output.status.success()
+                && stderr.contains("tls.protocol literal must be HttpProtocol or Str"),
+            "NB6-10-2 interp: expected compile-time reject even with cert/key, got: {:?}",
+            stderr
         );
     }
 
@@ -23066,23 +23095,15 @@ stdout(result.throw.message)
             .arg(&js_path)
             .output()
             .expect("transpile");
-        assert!(
-            transpile.status.success(),
-            "JS transpile failed: {}",
-            String::from_utf8_lossy(&transpile.stderr)
-        );
-        let js_output = Command::new("node")
-            .arg(&js_path)
-            .output()
-            .expect("run node");
-        let stdout = normalize(&String::from_utf8_lossy(&js_output.stdout));
+        let stderr = normalize(&String::from_utf8_lossy(&transpile.stderr));
         let _ = fs::remove_file(&js_path);
         cleanup_net_project(&dir);
 
         assert!(
-            stdout.contains("protocol must be a Str"),
-            "NB6-10-2 js: expected ProtocolError even with cert/key, got: {:?}",
-            stdout
+            !transpile.status.success()
+                && stderr.contains("tls.protocol literal must be HttpProtocol or Str"),
+            "NB6-10-2 js: expected compile-time reject even with cert/key, got: {:?}",
+            stderr
         );
     }
 
@@ -23106,20 +23127,15 @@ stdout(result.throw.message)
             .arg(&bin_path)
             .output()
             .expect("compile native");
-        assert!(
-            compile.status.success(),
-            "Native compile failed: {}",
-            String::from_utf8_lossy(&compile.stderr)
-        );
-        let native_output = Command::new(&bin_path).output().expect("run native");
-        let stdout = normalize(&String::from_utf8_lossy(&native_output.stdout));
+        let stderr = normalize(&String::from_utf8_lossy(&compile.stderr));
         let _ = fs::remove_file(&bin_path);
         cleanup_net_project(&dir);
 
         assert!(
-            stdout.contains("protocol must be a Str"),
-            "NB6-10-2 native: expected ProtocolError even with cert/key, got: {:?}",
-            stdout
+            !compile.status.success()
+                && stderr.contains("tls.protocol literal must be HttpProtocol or Str"),
+            "NB6-10-2 native: expected compile-time reject even with cert/key, got: {:?}",
+            stderr
         );
     }
 }
@@ -23171,7 +23187,7 @@ stdout(result.throw.message)
         cleanup_net_project(&dir);
 
         assert!(
-            stdout.contains("protocol must be a Str"),
+            stdout.contains("protocol must be HttpProtocol or Str"),
             "NB6-10-3 interp: expected ProtocolError for dynamic non-Str protocol, got: {:?}",
             stdout
         );
@@ -23207,7 +23223,7 @@ stdout(result.throw.message)
         cleanup_net_project(&dir);
 
         assert!(
-            stdout.contains("protocol must be a Str"),
+            stdout.contains("protocol must be HttpProtocol or Str"),
             "NB6-10-3 js: expected ProtocolError for dynamic non-Str protocol, got: {:?}",
             stdout
         );
@@ -23240,7 +23256,7 @@ stdout(result.throw.message)
         cleanup_net_project(&dir);
 
         assert!(
-            stdout.contains("protocol must be a Str"),
+            stdout.contains("protocol must be HttpProtocol or Str"),
             "NB6-10-3 native: expected ProtocolError for dynamic non-Str protocol, got: {:?}",
             stdout
         );
@@ -24559,6 +24575,121 @@ stdout(r.requests)
          JS={:?} Interp={:?}",
         stdout_js, stdout_interp
     );
+}
+
+#[test]
+fn test_rc3_http_protocol_h1_enum_three_way_parity() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+
+    let source = r#">>> taida-lang/net => @(HttpProtocol)
+
+stdout(HttpProtocol:H1())
+stdout(HttpProtocol:H2())
+stdout(HttpProtocol:H3())
+stdout(HttpProtocol:H1() == HttpProtocol:H1())
+"#;
+
+    let dir = setup_net_project(source, "rc3_http_protocol_enum_surface");
+    let td_path = dir.join("main.td");
+    let interp = run_interpreter(&td_path).expect("interpreter output");
+    let js = run_js_project(&td_path, "rc3_http_protocol_enum_surface").expect("js output");
+    let native = run_native(&td_path).expect("native output");
+    cleanup_net_project(&dir);
+
+    let expected = "0\n1\n2\ntrue";
+    assert_eq!(interp, expected);
+    assert_eq!(js, expected);
+    assert_eq!(native, expected);
+}
+
+#[test]
+fn test_rc3_http_protocol_js_h2_compile_time_reject() {
+    let source = r#">>> taida-lang/net => @(httpServe, HttpProtocol)
+
+handler req =
+  @(status <= 200, headers <= @[], body <= "should-not-reach")
+=> :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
+
+httpServe(8080, handler, 1, 1000, 128, @(protocol <= HttpProtocol:H2())) ]=> serverResult
+stdout(serverResult.ok)
+"#;
+
+    let dir = setup_net_project(source, "rc3_http_protocol_js_h2_reject");
+    let td_path = dir.join("main.td");
+    let js_path = unique_temp_path("taida_rc3_http_protocol_js_h2", "reject", "mjs");
+    let output = Command::new(taida_bin())
+        .arg("build")
+        .arg("--target")
+        .arg("js")
+        .arg(&td_path)
+        .arg("-o")
+        .arg(&js_path)
+        .output()
+        .expect("build js");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let _ = fs::remove_file(&js_path);
+    cleanup_net_project(&dir);
+
+    assert!(
+        !output.status.success(),
+        "JS build should reject HttpProtocol:H2(), but succeeded.\nstderr: {}",
+        stderr
+    );
+    assert!(
+        stderr.contains("not supported on the JS backend"),
+        "JS compile-time reject should explain backend policy.\nstderr: {}",
+        stderr
+    );
+}
+
+#[test]
+fn test_rc3_http_protocol_wasm_compile_error_policy() {
+    let source = r#">>> taida-lang/net => @(httpServe, HttpProtocol)
+
+handler req =
+  @(status <= 200, headers <= @[], body <= "h2-wasm-test")
+=> :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
+
+httpServe(8080, handler, 1, 1000, 128, @(cert <= "c.pem", key <= "k.pem", protocol <= HttpProtocol:H2())) ]=> serverResult
+stdout(serverResult.ok)
+"#;
+
+    for profile in &["wasm-min", "wasm-wasi", "wasm-edge", "wasm-full"] {
+        let dir = setup_net_project(source, &format!("rc3_http_protocol_wasm_{}", profile));
+        let td_path = dir.join("main.td");
+        let wasm_path =
+            std::env::temp_dir().join(format!("taida_rc3_http_protocol_wasm_{}.wasm", profile));
+
+        let output = Command::new(taida_bin())
+            .arg("build")
+            .arg("--target")
+            .arg(profile)
+            .arg(&td_path)
+            .arg("-o")
+            .arg(&wasm_path)
+            .output()
+            .expect("failed to run taida build");
+
+        let _ = std::fs::remove_file(&wasm_path);
+        cleanup_net_project(&dir);
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            !output.status.success(),
+            "RC3 HttpProtocol WASM policy: {} should reject httpServe(HttpProtocol:H2()), but compile succeeded.\nstderr: {}",
+            profile,
+            stderr
+        );
+        assert!(
+            stderr.contains("httpServe") || stderr.contains("net"),
+            "RC3 HttpProtocol WASM policy: {} compile error should mention httpServe or net.\nstderr: {}",
+            profile,
+            stderr
+        );
+    }
 }
 
 // NET6-4b-1: JS permanently rejects protocol="h2" with H2Unsupported, even with valid TLS cert/key.

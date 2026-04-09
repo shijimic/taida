@@ -1003,6 +1003,7 @@ fn expr_span(expr: &Expr) -> Option<&Span> {
         | Expr::BoolLit(_, s)
         | Expr::Gorilla(s)
         | Expr::Ident(_, s)
+        | Expr::EnumVariant(_, _, s)
         | Expr::Placeholder(s)
         | Expr::Hole(s) => Some(s),
         Expr::BuchiPack(_, s) | Expr::ListLit(_, s) => Some(s),

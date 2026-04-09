@@ -275,6 +275,24 @@ impl Interpreter {
                     s.split(&delim).map(|p| Value::Str(p.to_string())).collect();
                 Ok(Some(Signal::Value(Value::List(parts))))
             }
+            "Chars" => {
+                if type_args.len() != 1 {
+                    return Err(RuntimeError {
+                        message: "Chars requires 1 argument: Chars[str]()".into(),
+                    });
+                }
+                let s = match self.eval_expr(&type_args[0])? {
+                    Signal::Value(Value::Str(s)) => s,
+                    Signal::Value(v) => {
+                        return Err(RuntimeError {
+                            message: format!("Chars: argument must be a string, got {}", v),
+                        });
+                    }
+                    other => return Ok(Some(other)),
+                };
+                let chars: Vec<Value> = s.chars().map(|ch| Value::Str(ch.to_string())).collect();
+                Ok(Some(Signal::Value(Value::List(chars))))
+            }
             "Replace" => {
                 if type_args.len() < 3 {
                     return Err(RuntimeError {

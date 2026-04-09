@@ -408,6 +408,10 @@ fn runtime_abi(name: &str) -> Result<RuntimeAbi, String> {
             params: &[Ptr, Ptr],
             returns: &[Ptr],
         },
+        "taida_str_chars" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Ptr],
+        },
         "taida_str_replace" => RuntimeAbi {
             params: &[Ptr, Ptr, Ptr],
             returns: &[Ptr],

@@ -541,31 +541,12 @@ impl Lexer {
             }
             if self.peek() == '\\' {
                 self.advance(); // consume backslash
-                if self.is_at_end() {
-                    self.error("Unterminated escape sequence", start, start_line, start_col);
+                if let Some(decoded) =
+                    self.scan_escape_sequence(quote, false, false, start, start_line, start_col)
+                {
+                    value.push_str(&decoded);
+                } else {
                     return;
-                }
-                let escaped = self.advance();
-                match escaped {
-                    'n' => value.push('\n'),
-                    't' => value.push('\t'),
-                    'r' => value.push('\r'),
-                    '\\' => value.push('\\'),
-                    '\'' => value.push('\''),
-                    '"' => value.push('"'),
-                    _ => {
-                        self.error(
-                            &format!("Invalid escape sequence: \\{}", escaped),
-                            start,
-                            start_line,
-                            start_col,
-                        );
-                        // Keep the literal character (without backslash) for
-                        // error recovery: the token is still emitted so that
-                        // downstream parsing can continue and report further
-                        // errors instead of aborting at the first bad escape.
-                        value.push(escaped);
-                    }
                 }
             } else {
                 value.push(self.advance());
@@ -592,35 +573,12 @@ impl Lexer {
         while !self.is_at_end() && self.peek() != '`' {
             if self.peek() == '\\' {
                 self.advance();
-                if self.is_at_end() {
-                    self.error(
-                        "Unterminated escape sequence in template string",
-                        start,
-                        start_line,
-                        start_col,
-                    );
+                if let Some(decoded) =
+                    self.scan_escape_sequence('`', true, true, start, start_line, start_col)
+                {
+                    value.push_str(&decoded);
+                } else {
                     return;
-                }
-                let escaped = self.advance();
-                match escaped {
-                    'n' => value.push('\n'),
-                    't' => value.push('\t'),
-                    'r' => value.push('\r'),
-                    '\\' => value.push('\\'),
-                    '`' => value.push('`'),
-                    '$' => value.push('$'),
-                    _ => {
-                        // Mirror the regular string's behaviour: report the
-                        // unknown escape but keep scanning for more errors.
-                        self.error(
-                            &format!("Invalid escape sequence in template string: \\{}", escaped),
-                            start,
-                            start_line,
-                            start_col,
-                        );
-                        value.push('\\');
-                        value.push(escaped);
-                    }
                 }
             } else {
                 value.push(self.advance());
@@ -639,6 +597,266 @@ impl Lexer {
             start_line,
             start_col,
         );
+    }
+
+    fn scan_escape_sequence(
+        &mut self,
+        terminator: char,
+        allow_newline: bool,
+        in_template: bool,
+        start: usize,
+        start_line: usize,
+        start_col: usize,
+    ) -> Option<String> {
+        if self.is_at_end() {
+            self.error(
+                &format!(
+                    "Unterminated escape sequence{}",
+                    Self::escape_context(in_template)
+                ),
+                start,
+                start_line,
+                start_col,
+            );
+            return None;
+        }
+
+        let escaped = self.advance();
+        match escaped {
+            'n' => Some("\n".to_string()),
+            't' => Some("\t".to_string()),
+            'r' => Some("\r".to_string()),
+            '\\' => Some("\\".to_string()),
+            '\'' => Some("'".to_string()),
+            '"' => Some("\"".to_string()),
+            '`' if in_template => Some("`".to_string()),
+            '$' if in_template => Some("$".to_string()),
+            '0' => {
+                if self.peek().is_ascii_digit() {
+                    self.error(
+                        &format!(
+                            "Unsupported octal escape sequence{}: use \\0, \\xNN, or \\u{{HEX+}}",
+                            Self::escape_context(in_template)
+                        ),
+                        start,
+                        start_line,
+                        start_col,
+                    );
+                    Some("\\0".to_string())
+                } else {
+                    Some("\0".to_string())
+                }
+            }
+            'x' => Some(self.scan_hex_escape(in_template, start, start_line, start_col)),
+            'u' => Some(self.scan_unicode_escape(
+                terminator,
+                allow_newline,
+                in_template,
+                start,
+                start_line,
+                start_col,
+            )),
+            _ => {
+                self.error(
+                    &format!(
+                        "Invalid escape sequence{}: \\{}",
+                        Self::escape_context(in_template),
+                        escaped
+                    ),
+                    start,
+                    start_line,
+                    start_col,
+                );
+                Some(format!("\\{}", escaped))
+            }
+        }
+    }
+
+    fn scan_hex_escape(
+        &mut self,
+        in_template: bool,
+        start: usize,
+        start_line: usize,
+        start_col: usize,
+    ) -> String {
+        let hi = self.peek();
+        let lo = self.peek_at(1);
+        if !(hi.is_ascii_hexdigit() && lo.is_ascii_hexdigit()) {
+            self.error(
+                &format!(
+                    "Invalid hex escape sequence{}: expected two hex digits after \\x",
+                    Self::escape_context(in_template)
+                ),
+                start,
+                start_line,
+                start_col,
+            );
+            return "\\x".to_string();
+        }
+
+        let hi = self.advance();
+        let lo = self.advance();
+        let value = u8::from_str_radix(&format!("{}{}", hi, lo), 16)
+            .expect("validated hex escape should parse");
+        (value as char).to_string()
+    }
+
+    fn scan_unicode_escape(
+        &mut self,
+        terminator: char,
+        allow_newline: bool,
+        in_template: bool,
+        start: usize,
+        start_line: usize,
+        start_col: usize,
+    ) -> String {
+        if self.peek() != '{' {
+            self.error(
+                &format!(
+                    "Unsupported Unicode escape sequence{}: use \\u{{HEX+}}, not \\uXXXX",
+                    Self::escape_context(in_template)
+                ),
+                start,
+                start_line,
+                start_col,
+            );
+            return "\\u".to_string();
+        }
+
+        self.advance(); // consume `{`
+        let mut raw = String::from("\\u{");
+        let mut hex = String::new();
+
+        while !self.is_at_end() && self.peek() != '}' {
+            if self.peek() == terminator || (!allow_newline && self.peek() == '\n') {
+                self.error(
+                    &format!(
+                        "Unterminated Unicode escape sequence{}",
+                        Self::escape_context(in_template)
+                    ),
+                    start,
+                    start_line,
+                    start_col,
+                );
+                return raw;
+            }
+
+            let ch = self.advance();
+            raw.push(ch);
+            if !ch.is_ascii_hexdigit() {
+                while !self.is_at_end() && self.peek() != '}' {
+                    if self.peek() == terminator || (!allow_newline && self.peek() == '\n') {
+                        self.error(
+                            &format!(
+                                "Invalid Unicode escape sequence{}: non-hex digit in \\u{{...}}",
+                                Self::escape_context(in_template)
+                            ),
+                            start,
+                            start_line,
+                            start_col,
+                        );
+                        return raw;
+                    }
+                    let extra = self.advance();
+                    raw.push(extra);
+                }
+                if self.peek() == '}' {
+                    self.advance();
+                    raw.push('}');
+                }
+                self.error(
+                    &format!(
+                        "Invalid Unicode escape sequence{}: non-hex digit in \\u{{...}}",
+                        Self::escape_context(in_template)
+                    ),
+                    start,
+                    start_line,
+                    start_col,
+                );
+                return raw;
+            }
+            hex.push(ch);
+        }
+
+        if self.is_at_end() {
+            self.error(
+                &format!(
+                    "Unterminated Unicode escape sequence{}",
+                    Self::escape_context(in_template)
+                ),
+                start,
+                start_line,
+                start_col,
+            );
+            return raw;
+        }
+
+        self.advance(); // consume `}`
+        raw.push('}');
+
+        if hex.is_empty() {
+            self.error(
+                &format!(
+                    "Invalid Unicode escape sequence{}: empty \\u{{}} is not allowed",
+                    Self::escape_context(in_template)
+                ),
+                start,
+                start_line,
+                start_col,
+            );
+            return raw;
+        }
+
+        let code_point =
+            u32::from_str_radix(&hex, 16).expect("validated unicode escape should parse");
+        if code_point > 0x10FFFF {
+            self.error(
+                &format!(
+                    "Invalid Unicode escape sequence{}: code point must be <= U+10FFFF",
+                    Self::escape_context(in_template)
+                ),
+                start,
+                start_line,
+                start_col,
+            );
+            return raw;
+        }
+        if (0xD800..=0xDFFF).contains(&code_point) {
+            self.error(
+                &format!(
+                    "Invalid Unicode escape sequence{}: surrogate code points are not allowed",
+                    Self::escape_context(in_template)
+                ),
+                start,
+                start_line,
+                start_col,
+            );
+            return raw;
+        }
+
+        char::from_u32(code_point).map_or_else(
+            || {
+                self.error(
+                    &format!(
+                        "Invalid Unicode escape sequence{}: invalid scalar value",
+                        Self::escape_context(in_template)
+                    ),
+                    start,
+                    start_line,
+                    start_col,
+                );
+                raw
+            },
+            |ch| ch.to_string(),
+        )
+    }
+
+    fn escape_context(in_template: bool) -> &'static str {
+        if in_template {
+            " in template string"
+        } else {
+            ""
+        }
     }
 
     // ── Identifiers & Keywords ───────────────────────────────
@@ -983,10 +1201,26 @@ mod tests {
     }
 
     #[test]
+    fn test_string_rc3_escape_sequences() {
+        assert_eq!(
+            tok_kinds(r#""\0\x41\u{1F600}""#),
+            vec![StringLiteral("\0A😀".into())]
+        );
+    }
+
+    #[test]
     fn test_template_string() {
         assert_eq!(
             tok_kinds(r#"`Hello ${name}`"#),
             vec![TemplateLiteral("Hello ${name}".into())]
+        );
+    }
+
+    #[test]
+    fn test_template_string_rc3_escape_sequences() {
+        assert_eq!(
+            tok_kinds(r#"`\0\x41\u{1F600}`"#),
+            vec![TemplateLiteral("\0A😀".into())]
         );
     }
 
@@ -1566,9 +1800,103 @@ alice <= Person(name <= "Alice", age <= 30)
         assert_eq!(string_tokens.len(), 1);
         if let StringLiteral(ref val) = string_tokens[0].kind {
             assert!(
-                val.contains('q'),
-                "Recovery should keep the escaped char literal"
+                val.contains("\\q"),
+                "Recovery should keep the literal escape sequence"
             );
+        }
+    }
+
+    #[test]
+    fn test_invalid_hex_escape_in_string_reports_error() {
+        let (tokens, errors) = tokenize(r#""bad \x4 end""#);
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.message.contains("Invalid hex escape sequence")),
+            "Expected invalid hex escape error, got: {:?}",
+            errors
+        );
+        let string_tokens: Vec<_> = tokens
+            .iter()
+            .filter(|t| matches!(t.kind, StringLiteral(_)))
+            .collect();
+        assert_eq!(string_tokens.len(), 1);
+        if let StringLiteral(ref val) = string_tokens[0].kind {
+            assert!(val.contains("\\x4"));
+        }
+    }
+
+    #[test]
+    fn test_invalid_unicode_escape_in_string_reports_error() {
+        let (_tokens, errors) = tokenize(r#""bad \u{} end""#);
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.message.contains("empty \\u{} is not allowed")),
+            "Expected empty unicode escape error, got: {:?}",
+            errors
+        );
+    }
+
+    #[test]
+    fn test_unicode_escape_out_of_range_reports_error() {
+        let (_tokens, errors) = tokenize(r#""bad \u{110000} end""#);
+        assert!(
+            errors.iter().any(|e| e.message.contains("<= U+10FFFF")),
+            "Expected out-of-range unicode escape error, got: {:?}",
+            errors
+        );
+    }
+
+    #[test]
+    fn test_unicode_escape_surrogate_reports_error() {
+        let (_tokens, errors) = tokenize(r#""bad \u{D800} end""#);
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.message.contains("surrogate code points")),
+            "Expected surrogate unicode escape error, got: {:?}",
+            errors
+        );
+    }
+
+    #[test]
+    fn test_unsupported_octal_escape_reports_error() {
+        let (tokens, errors) = tokenize(r#""bad \033 end""#);
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.message.contains("Unsupported octal escape sequence")),
+            "Expected unsupported octal escape error, got: {:?}",
+            errors
+        );
+        let string_tokens: Vec<_> = tokens
+            .iter()
+            .filter(|t| matches!(t.kind, StringLiteral(_)))
+            .collect();
+        assert_eq!(string_tokens.len(), 1);
+        if let StringLiteral(ref val) = string_tokens[0].kind {
+            assert!(val.contains("\\033"));
+        }
+    }
+
+    #[test]
+    fn test_unsupported_fixed_width_unicode_escape_reports_error() {
+        let (tokens, errors) = tokenize(r#""bad \u0041 end""#);
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.message.contains("use \\u{HEX+}, not \\uXXXX")),
+            "Expected unsupported fixed-width unicode escape error, got: {:?}",
+            errors
+        );
+        let string_tokens: Vec<_> = tokens
+            .iter()
+            .filter(|t| matches!(t.kind, StringLiteral(_)))
+            .collect();
+        assert_eq!(string_tokens.len(), 1);
+        if let StringLiteral(ref val) = string_tokens[0].kind {
+            assert!(val.contains("\\u0041"));
         }
     }
 
@@ -1765,7 +2093,6 @@ alice <= Person(name <= "Alice", age <= 30)
     #[test]
     fn test_invalid_escape_in_template_reports_error() {
         let (tokens, errors) = tokenize(r#"`template \q text`"#);
-        // Error is now reported for template strings too (N-11 fix)
         assert!(
             !errors.is_empty(),
             "Expected error for invalid escape \\q in template string"
@@ -1787,6 +2114,54 @@ alice <= Person(name <= "Alice", age <= 30)
                 "Template recovery keeps backslash + char"
             );
         }
+    }
+
+    #[test]
+    fn test_invalid_hex_escape_in_template_reports_error() {
+        let (_tokens, errors) = tokenize(r#"`bad \xG1 end`"#);
+        assert!(
+            errors.iter().any(|e| e
+                .message
+                .contains("Invalid hex escape sequence in template string")),
+            "Expected invalid hex escape in template error, got: {:?}",
+            errors
+        );
+    }
+
+    #[test]
+    fn test_invalid_unicode_escape_in_template_reports_error() {
+        let (_tokens, errors) = tokenize(r#"`bad \u{} end`"#);
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.message.contains("empty \\u{} is not allowed")),
+            "Expected invalid unicode escape in template error, got: {:?}",
+            errors
+        );
+    }
+
+    #[test]
+    fn test_unsupported_octal_escape_in_template_reports_error() {
+        let (_tokens, errors) = tokenize(r#"`bad \033 end`"#);
+        assert!(
+            errors.iter().any(|e| e
+                .message
+                .contains("Unsupported octal escape sequence in template string")),
+            "Expected unsupported octal template escape error, got: {:?}",
+            errors
+        );
+    }
+
+    #[test]
+    fn test_unsupported_fixed_width_unicode_escape_in_template_reports_error() {
+        let (_tokens, errors) = tokenize(r#"`bad \u0041 end`"#);
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.message.contains("use \\u{HEX+}, not \\uXXXX")),
+            "Expected unsupported fixed-width unicode template error, got: {:?}",
+            errors
+        );
     }
 
     // ── BT-16: Unicode boundary tests ──

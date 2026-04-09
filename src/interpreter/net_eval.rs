@@ -3799,11 +3799,28 @@ impl Interpreter {
                                 Value::Str(proto) => {
                                     requested_protocol = Some(proto.clone());
                                 }
+                                Value::Int(ordinal) => match ordinal {
+                                    0 => requested_protocol = Some("h1.1".to_string()),
+                                    1 => requested_protocol = Some("h2".to_string()),
+                                    2 => requested_protocol = Some("h3".to_string()),
+                                    _ => {
+                                        let result = make_result_failure_msg(
+                                            "ProtocolError",
+                                            format!(
+                                                "httpServe: unknown HttpProtocol ordinal {}. Expected 0 (H1), 1 (H2), or 2 (H3).",
+                                                ordinal
+                                            ),
+                                        );
+                                        return Ok(Some(Signal::Value(make_fulfilled_async(
+                                            result,
+                                        ))));
+                                    }
+                                },
                                 _ => {
                                     let result = make_result_failure_msg(
                                         "ProtocolError",
                                         format!(
-                                            "httpServe: protocol must be a Str, got {}",
+                                            "httpServe: protocol must be HttpProtocol or Str, got {}",
                                             proto_val
                                         ),
                                     );

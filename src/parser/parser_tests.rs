@@ -51,6 +51,46 @@ fn test_parse_type_def() {
 }
 
 #[test]
+fn test_parse_enum_def_single_line() {
+    match first_stmt("Enum => Status = :Ok :Fail") {
+        Statement::EnumDef(ed) => {
+            assert_eq!(ed.name, "Status");
+            assert_eq!(ed.variants.len(), 2);
+            assert_eq!(ed.variants[0].name, "Ok");
+            assert_eq!(ed.variants[1].name, "Fail");
+        }
+        other => panic!("Expected EnumDef, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_parse_enum_def_multiline() {
+    match first_stmt("Enum => Status =\n  :Ok\n  :Fail") {
+        Statement::EnumDef(ed) => {
+            assert_eq!(ed.name, "Status");
+            assert_eq!(ed.variants.len(), 2);
+            assert_eq!(ed.variants[0].name, "Ok");
+            assert_eq!(ed.variants[1].name, "Fail");
+        }
+        other => panic!("Expected EnumDef, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_parse_enum_variant_constructor() {
+    match first_stmt("status <= Status:Ok()") {
+        Statement::Assignment(assign) => match assign.value {
+            Expr::EnumVariant(enum_name, variant_name, _) => {
+                assert_eq!(enum_name, "Status");
+                assert_eq!(variant_name, "Ok");
+            }
+            other => panic!("Expected EnumVariant, got {:?}", other),
+        },
+        other => panic!("Expected Assignment, got {:?}", other),
+    }
+}
+
+#[test]
 fn test_parse_buchi_pack_literal() {
     match first_stmt("user <= @(name <= \"Alice\", age <= 30)") {
         Statement::Assignment(a) => {

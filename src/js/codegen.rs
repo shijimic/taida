@@ -13,6 +13,8 @@ pub struct JsCodegen {
     type_field_registry: std::collections::HashMap<String, Vec<String>>,
     /// Registry of mold field definitions for mold-aware inheritance codegen.
     mold_field_registry: std::collections::HashMap<String, Vec<FieldDef>>,
+    /// Enum definitions: enum_name -> variants in ordinal order.
+    enum_defs: std::collections::HashMap<String, Vec<String>>,
     /// Set of function names that need trampoline wrapping (self or mutual recursion)
     trampoline_funcs: std::collections::HashSet<String>,
     /// Set of function names that contain ]=> (unmold) and need `async function` generation
@@ -64,6 +66,9 @@ impl Default for JsCodegen {
 }
 
 impl JsCodegen {
+    const NET_HTTP_PROTOCOL_SYMBOL: &'static str = "HttpProtocol";
+    const NET_HTTP_PROTOCOL_VARIANTS: [&'static str; 3] = ["H1", "H2", "H3"];
+
     pub fn new() -> Self {
         Self {
             output: String::new(),
@@ -71,6 +76,7 @@ impl JsCodegen {
             current_tco_funcs: std::collections::HashSet::new(),
             type_field_registry: std::collections::HashMap::new(),
             mold_field_registry: std::collections::HashMap::new(),
+            enum_defs: std::collections::HashMap::new(),
             trampoline_funcs: std::collections::HashSet::new(),
             async_funcs: std::collections::HashSet::new(),
             in_async_context: true, // top-level is async (ESM top-level await)
@@ -223,6 +229,36 @@ impl JsCodegen {
             .statements
             .iter()
             .any(|s| matches!(s, Statement::Import(imp) if imp.path == "taida-lang/net"));
+
+        self.enum_defs.clear();
+        for stmt in &program.statements {
+            if let Statement::EnumDef(enum_def) = stmt {
+                self.enum_defs.insert(
+                    enum_def.name.clone(),
+                    enum_def
+                        .variants
+                        .iter()
+                        .map(|variant| variant.name.clone())
+                        .collect(),
+                );
+            }
+            if let Statement::Import(import) = stmt
+                && import.path == "taida-lang/net"
+            {
+                for sym in &import.symbols {
+                    if sym.name == Self::NET_HTTP_PROTOCOL_SYMBOL {
+                        let local_name = sym.alias.as_ref().unwrap_or(&sym.name);
+                        self.enum_defs.insert(
+                            local_name.clone(),
+                            Self::NET_HTTP_PROTOCOL_VARIANTS
+                                .iter()
+                                .map(|variant| (*variant).to_string())
+                                .collect(),
+                        );
+                    }
+                }
+            }
+        }
 
         // Pre-pass: detect mutual recursion groups and mark functions for trampolining
         self.detect_trampoline_funcs(&program.statements);
@@ -640,6 +676,7 @@ impl JsCodegen {
                 Ok(())
             }
             Statement::FuncDef(func_def) => self.gen_func_def(func_def),
+            Statement::EnumDef(_) => Ok(()),
             Statement::TypeDef(type_def) => self.gen_type_def(type_def),
             Statement::InheritanceDef(inh_def) => self.gen_inheritance_def(inh_def),
             Statement::MoldDef(mold_def) => self.gen_mold_def(mold_def),
@@ -1285,13 +1322,17 @@ impl JsCodegen {
     fn validate_import_symbols(&self, import: &ImportStmt) -> Result<(), JsError> {
         if import.path == "taida-lang/net" {
             for sym in &import.symbols {
-                if !Self::NET_BUILTIN_NAMES.contains(&sym.name.as_str()) {
+                if !Self::NET_BUILTIN_NAMES.contains(&sym.name.as_str())
+                    && sym.name != Self::NET_HTTP_PROTOCOL_SYMBOL
+                {
+                    let mut exports: Vec<&str> = Self::NET_BUILTIN_NAMES.to_vec();
+                    exports.push(Self::NET_HTTP_PROTOCOL_SYMBOL);
                     return Err(JsError {
                         message: format!(
                             "Symbol '{}' not found in module '{}'. The module exports: {}",
                             sym.name,
                             import.path,
-                            Self::NET_BUILTIN_NAMES.join(", ")
+                            exports.join(", ")
                         ),
                     });
                 }
@@ -2150,6 +2191,19 @@ impl JsCodegen {
                     self.gen_expr(&field.value)?;
                 }
                 self.write(" })");
+                Ok(())
+            }
+            Expr::EnumVariant(enum_name, variant_name, _) => {
+                let ordinal = self
+                    .enum_defs
+                    .get(enum_name)
+                    .and_then(|variants| {
+                        variants.iter().position(|variant| variant == variant_name)
+                    })
+                    .ok_or_else(|| JsError {
+                        message: format!("Unknown enum variant '{}:{}()'", enum_name, variant_name),
+                    })?;
+                self.write(&ordinal.to_string());
                 Ok(())
             }
             Expr::MoldInst(name, type_args, fields, _) => {

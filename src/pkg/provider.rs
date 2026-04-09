@@ -303,13 +303,16 @@ impl CoreBundledProvider {
 //   startResponse, writeChunk, endResponse, sseEvent
 //   readBodyChunk, readBodyAll
 //   wsUpgrade, wsSend, wsReceive, wsClose, wsCloseCode
+//   HttpProtocol
 //
 // TI-21 contract notes:
 //   TLS verification on Http* uses backend default trust store (no insecure -k path)
 //   Protocol/runtime details remain behind httpServe contract
 //   Legacy tcp*/udp*/dnsResolve re-exports were removed after HTTP/3 package freeze
 
-<<< @(httpServe, httpParseRequestHead, httpEncodeResponse, readBody, startResponse, writeChunk, endResponse, sseEvent, readBodyChunk, readBodyAll, wsUpgrade, wsSend, wsReceive, wsClose, wsCloseCode)
+Enum => HttpProtocol = :H1 :H2 :H3
+
+<<< @(httpServe, httpParseRequestHead, httpEncodeResponse, readBody, startResponse, writeChunk, endResponse, sseEvent, readBodyChunk, readBodyAll, wsUpgrade, wsSend, wsReceive, wsClose, wsCloseCode, HttpProtocol)
 "#
     }
 
@@ -349,15 +352,19 @@ impl CoreBundledProvider {
 
         // Write the package source file
         let main_td = bundled_dir.join("main.td");
-        if !main_td.exists() {
-            let source = match pkg_name {
-                "os" => Self::os_package_source(),
-                "js" => Self::js_package_source(),
-                "crypto" => Self::crypto_package_source(),
-                "net" => Self::net_package_source(),
-                "pool" => Self::pool_package_source(),
-                _ => "// Unknown core-bundled package\n",
-            };
+        let source = match pkg_name {
+            "os" => Self::os_package_source(),
+            "js" => Self::js_package_source(),
+            "crypto" => Self::crypto_package_source(),
+            "net" => Self::net_package_source(),
+            "pool" => Self::pool_package_source(),
+            _ => "// Unknown core-bundled package\n",
+        };
+        let needs_write = match std::fs::read_to_string(&main_td) {
+            Ok(existing) => existing != source,
+            Err(_) => true,
+        };
+        if needs_write {
             std::fs::write(&main_td, source)
                 .map_err(|e| format!("Cannot write bundled source for '{}': {}", pkg_name, e))?;
         }
