@@ -101,6 +101,7 @@ pub struct Assignment {
     pub target: String,
     pub type_annotation: Option<TypeExpr>,
     pub value: Expr,
+    pub doc_comments: Vec<String>,
     pub span: Span,
 }
 

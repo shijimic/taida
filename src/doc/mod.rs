@@ -3,8 +3,8 @@
 //! Extracts doc comments (`///@`) from AST nodes and generates Markdown documentation.
 
 use crate::parser::{
-    ExportStmt, FieldDef, FuncDef, InheritanceDef, MoldDef, MoldHeaderArg, Program, Statement,
-    TypeDef, TypeExpr, TypeParam,
+    Assignment, ExportStmt, FieldDef, FuncDef, InheritanceDef, MoldDef, MoldHeaderArg, Program,
+    Statement, TypeDef, TypeExpr, TypeParam,
 };
 
 // ── Data structures ─────────────────────────────────────────────────
@@ -93,6 +93,13 @@ pub struct InheritDoc {
     pub fields: Vec<FieldDoc>,
 }
 
+/// Documentation for a variable assignment.
+#[derive(Debug, Clone)]
+pub struct AssignmentDoc {
+    pub name: String,
+    pub tags: DocTags,
+}
+
 /// Documentation for the entire module.
 #[derive(Debug, Clone)]
 pub struct ModuleDoc {
@@ -101,6 +108,7 @@ pub struct ModuleDoc {
     pub functions: Vec<FuncDoc>,
     pub molds: Vec<MoldDoc>,
     pub inheritances: Vec<InheritDoc>,
+    pub assignments: Vec<AssignmentDoc>,
     pub exports: Vec<String>,
 }
 
@@ -168,16 +176,17 @@ pub fn parse_doc_tags(comments: &[String]) -> DocTags {
 }
 
 /// Try to match a tag at the start of a line. Returns (tag_name, rest_of_line).
+///
+/// Accepts both `@Purpose: ...` (raw doc comment content where `///@` prefix
+/// left the `@`) and `Purpose: ...` (where the lexer already consumed the `@`
+/// as part of the `///@` prefix).
 fn try_match_tag(line: &str) -> Option<(String, String)> {
-    if !line.starts_with('@') {
-        return None;
-    }
-
-    let after_at = &line[1..];
+    // Strip optional leading `@`
+    let body = line.strip_prefix('@').unwrap_or(line);
 
     // Try each known tag (case-sensitive)
     for &tag in SINGLE_LINE_TAGS.iter().chain(MULTI_LINE_TAGS.iter()) {
-        if let Some(remaining) = after_at.strip_prefix(tag) {
+        if let Some(remaining) = body.strip_prefix(tag) {
             // Must be followed by `:`, whitespace, or end of line
             if remaining.is_empty() || remaining.starts_with(':') || remaining.starts_with(' ') {
                 let rest = remaining.trim_start_matches(':').to_string();
@@ -320,6 +329,7 @@ pub fn extract_docs(program: &Program, module_name: &str) -> ModuleDoc {
         functions: Vec::new(),
         molds: Vec::new(),
         inheritances: Vec::new(),
+        assignments: Vec::new(),
         exports: Vec::new(),
     };
 
@@ -352,6 +362,11 @@ pub fn extract_docs(program: &Program, module_name: &str) -> ModuleDoc {
                     doc.inheritances.push(extract_inherit_doc(id));
                 }
             }
+            Statement::Assignment(a) => {
+                if !a.doc_comments.is_empty() {
+                    doc.assignments.push(extract_assignment_doc(a));
+                }
+            }
             Statement::Export(es) => {
                 doc.exports.extend(extract_export_symbols(es));
             }
@@ -360,6 +375,13 @@ pub fn extract_docs(program: &Program, module_name: &str) -> ModuleDoc {
     }
 
     doc
+}
+
+fn extract_assignment_doc(a: &Assignment) -> AssignmentDoc {
+    AssignmentDoc {
+        name: a.target.clone(),
+        tags: parse_doc_tags(&a.doc_comments),
+    }
 }
 
 fn extract_type_doc(td: &TypeDef) -> TypeDoc {
@@ -482,6 +504,19 @@ pub fn render_markdown(doc: &ModuleDoc) -> String {
         out.push_str("## Inheritances\n\n");
         for id in &doc.inheritances {
             render_inherit_doc(&mut out, id);
+        }
+    }
+
+    // Assignments (documented bindings)
+    if !doc.assignments.is_empty() {
+        out.push_str("## Bindings\n\n");
+        for ad in &doc.assignments {
+            out.push_str(&format!("### {}\n\n", ad.name));
+            render_tags_header(&mut out, &ad.tags);
+            if let Some(ref ret) = ad.tags.returns {
+                out.push_str(&format!("**Returns**: {}\n\n", ret));
+            }
+            render_tags_body(&mut out, &ad.tags);
         }
     }
 
@@ -1021,6 +1056,7 @@ mod tests {
             functions: vec![],
             molds: vec![],
             inheritances: vec![],
+            assignments: vec![],
             exports: vec![],
         };
 
@@ -1051,6 +1087,7 @@ mod tests {
             }],
             molds: vec![],
             inheritances: vec![],
+            assignments: vec![],
             exports: vec![],
         };
 
@@ -1081,6 +1118,7 @@ mod tests {
                 }],
             }],
             inheritances: vec![],
+            assignments: vec![],
             exports: vec![],
         };
 
@@ -1112,6 +1150,7 @@ mod tests {
                     doc: "Dog breed".to_string(),
                 }],
             }],
+            assignments: vec![],
             exports: vec![],
         };
 
@@ -1129,6 +1168,7 @@ mod tests {
             functions: vec![],
             molds: vec![],
             inheritances: vec![],
+            assignments: vec![],
             exports: vec!["Pilot".to_string(), "createPilot".to_string()],
         };
 
@@ -1161,6 +1201,7 @@ mod tests {
             }],
             molds: vec![],
             inheritances: vec![],
+            assignments: vec![],
             exports: vec![],
         };
 
