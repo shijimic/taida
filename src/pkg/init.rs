@@ -470,9 +470,9 @@ jobs:
         shell: bash
         run: |
           if [[ "${{{{ matrix.os }}}}" == "windows-latest" ]]; then
-            CDYLIB="{library_stem}.${{{{ matrix.ext }}}}"
+            CDYLIB="${{{{ env.LIBRARY_STEM }}}}.${{{{ matrix.ext }}}}"
           else
-            CDYLIB="lib{library_stem}.${{{{ matrix.ext }}}}"
+            CDYLIB="lib${{{{ env.LIBRARY_STEM }}}}.${{{{ matrix.ext }}}}"
           fi
           FILE="target/${{{{ matrix.target }}}}/release/$CDYLIB"
           if command -v sha256sum &>/dev/null; then
