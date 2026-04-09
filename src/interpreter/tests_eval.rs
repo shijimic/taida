@@ -48,6 +48,22 @@ mod tests {
     }
 
     #[test]
+    fn test_eval_enum_variant_to_ordinal() {
+        assert_eq!(
+            eval_ok("Enum => Status = :Ok :Fail\nstatus <= Status:Fail()"),
+            Value::Int(1)
+        );
+    }
+
+    #[test]
+    fn test_eval_single_variant_enum_to_zero() {
+        assert_eq!(
+            eval_ok("Enum => Traffic = :Red\nsignal <= Traffic:Red()"),
+            Value::Int(0)
+        );
+    }
+
+    #[test]
     fn test_eval_div_mold() {
         // Div[10, 3]() returns Lax with hasValue=true, value=3
         let result = eval_ok("result <= Div[10, 3]()");
@@ -1081,6 +1097,19 @@ Utf8Decode[bb]()",
                 );
             }
             _ => panic!("expected Lax pack"),
+        }
+
+        if let Value::List(items) = eval_ok(r#"Chars["A😀é"]()"#) {
+            assert_eq!(
+                items,
+                vec![
+                    Value::Str("A".into()),
+                    Value::Str("😀".into()),
+                    Value::Str("é".into())
+                ]
+            );
+        } else {
+            panic!("expected list");
         }
     }
 

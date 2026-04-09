@@ -40,7 +40,7 @@ use taida::js;
 use taida::module_graph;
 use taida::parser::{BuchiField, Expr, FieldDef, FuncDef, Program, Statement, parse};
 use taida::pkg;
-use taida::types::TypeChecker;
+use taida::types::{CompileTarget, TypeChecker};
 use taida::version::taida_version;
 
 fn print_cli_version() {
@@ -435,6 +435,7 @@ fn run_source(source: &str, filename: &str, no_check: bool) {
     // Type checking
     if !no_check {
         let mut checker = TypeChecker::new();
+        checker.set_compile_target(CompileTarget::Interpreter);
         let file_path = std::path::Path::new(filename);
         if file_path.exists() {
             checker.set_source_file(file_path);
@@ -578,6 +579,7 @@ fn run_check_cmd(args: &[String]) {
         }
 
         let mut checker = TypeChecker::new();
+        checker.set_compile_target(CompileTarget::Interpreter);
         checker.set_source_file(std::path::Path::new(&file_str));
         checker.check_program(&program);
         for err in &checker.errors {
@@ -1263,7 +1265,13 @@ fn transpile_js_source_to_output(
     }
 
     if !no_check {
-        run_type_checks_and_warnings(&program, source_label, diag_format, compile_stats);
+        run_type_checks_and_warnings(
+            &program,
+            source_label,
+            CompileTarget::Js,
+            diag_format,
+            compile_stats,
+        );
     }
 
     let js_code = {
@@ -2087,6 +2095,7 @@ fn run_build_native(
         run_type_checks_and_warnings(
             &program,
             &entry_file.to_string_lossy(),
+            CompileTarget::Native,
             diag_format,
             compile_stats,
         );
@@ -2244,6 +2253,7 @@ fn run_build_wasm_min(
         run_type_checks_and_warnings(
             &program,
             &input_path.to_string_lossy(),
+            CompileTarget::WasmMin,
             diag_format,
             compile_stats,
         );
@@ -2410,6 +2420,7 @@ fn run_build_wasm_wasi(
         run_type_checks_and_warnings(
             &program,
             &input_path.to_string_lossy(),
+            CompileTarget::WasmWasi,
             diag_format,
             compile_stats,
         );
@@ -2576,6 +2587,7 @@ fn run_build_wasm_edge(
         run_type_checks_and_warnings(
             &program,
             &input_path.to_string_lossy(),
+            CompileTarget::WasmEdge,
             diag_format,
             compile_stats,
         );
@@ -2744,6 +2756,7 @@ fn run_build_wasm_full(
         run_type_checks_and_warnings(
             &program,
             &input_path.to_string_lossy(),
+            CompileTarget::WasmFull,
             diag_format,
             compile_stats,
         );
@@ -2847,10 +2860,12 @@ fn resolve_native_entry_path(
 fn run_type_checks_and_warnings(
     program: &Program,
     file: &str,
+    compile_target: CompileTarget,
     diag_format: DiagFormat,
     compile_stats: &mut CompileDiagStats,
 ) {
     let mut checker = TypeChecker::new();
+    checker.set_compile_target(compile_target);
     let file_path = std::path::Path::new(file);
     if file_path.exists() {
         checker.set_source_file(file_path);
@@ -2995,6 +3010,7 @@ fn scan_func_for_todo(func: &FuncDef, file: &str, out: &mut TodoScanResult) {
 fn scan_stmt_for_todo(stmt: &Statement, file: &str, out: &mut TodoScanResult) {
     match stmt {
         Statement::Expr(expr) => scan_expr_for_todo(expr, file, out),
+        Statement::EnumDef(_) => {}
         Statement::TypeDef(td) => {
             for field in &td.fields {
                 scan_field_defaults(field, file, out);
@@ -3112,6 +3128,7 @@ fn scan_expr_for_todo(expr: &Expr, file: &str, out: &mut TodoScanResult) {
         | Expr::BoolLit(_, _)
         | Expr::Gorilla(_)
         | Expr::Ident(_, _)
+        | Expr::EnumVariant(_, _, _)
         | Expr::Placeholder(_)
         | Expr::Hole(_) => {}
     }
@@ -5105,6 +5122,7 @@ fn repl(no_check: bool) {
                 // Type checking in REPL (warn but don't abort)
                 if !no_check {
                     let mut checker = TypeChecker::new();
+                    checker.set_compile_target(CompileTarget::Interpreter);
                     checker.check_program(&program);
                     if !checker.errors.is_empty() {
                         for err in &checker.errors {

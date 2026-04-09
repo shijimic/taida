@@ -1,5 +1,6 @@
 use super::types::{Type, TypeRegistry};
 use crate::lexer::Span;
+use crate::net_surface::{NET_HTTP_PROTOCOL_VARIANTS, is_net_export_name, net_export_list};
 use crate::parser::*;
 /// Type checker for Taida Lang.
 ///
@@ -55,6 +56,9 @@ struct MoldBindingDef<'a> {
 /// - `E1605` -- comparison type mismatch
 /// - `E1606` -- logical operator type mismatch
 /// - `E1607` -- unary operator type mismatch
+/// - `E1608` -- unknown enum variant
+/// - `E1611` -- JS backend capability rejection
+/// - `E1612` -- WASM backend capability rejection
 ///
 /// Some internal diagnostic messages (e.g., inheritance validation, mold binding
 /// checks) do not yet carry error codes. These are emitted during registration
@@ -108,6 +112,50 @@ pub struct TypeChecker {
     in_pipeline: bool,
     /// Source file path — used for resolving import paths to validate export symbols.
     source_file: Option<std::path::PathBuf>,
+    /// Compile target for backend-aware diagnostics.
+    compile_target: CompileTarget,
+    /// Local names that resolve to taida-lang/net's `httpServe`.
+    net_http_serve_symbols: HashSet<String>,
+    /// Local enum names that resolve to taida-lang/net's `HttpProtocol`.
+    net_http_protocol_type_names: HashSet<String>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CompileTarget {
+    Neutral,
+    Interpreter,
+    Js,
+    Native,
+    WasmMin,
+    WasmWasi,
+    WasmEdge,
+    WasmFull,
+}
+
+impl CompileTarget {
+    fn is_js(self) -> bool {
+        matches!(self, Self::Js)
+    }
+
+    fn is_wasm(self) -> bool {
+        matches!(
+            self,
+            Self::WasmMin | Self::WasmWasi | Self::WasmEdge | Self::WasmFull
+        )
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Neutral => "neutral",
+            Self::Interpreter => "interpreter",
+            Self::Js => "js",
+            Self::Native => "native",
+            Self::WasmMin => "wasm-min",
+            Self::WasmWasi => "wasm-wasi",
+            Self::WasmEdge => "wasm-edge",
+            Self::WasmFull => "wasm-full",
+        }
+    }
 }
 
 impl TypeChecker {
@@ -128,11 +176,40 @@ impl TypeChecker {
             declared_header_arities: HashMap::new(),
             in_pipeline: false,
             source_file: None,
+            compile_target: CompileTarget::Neutral,
+            net_http_serve_symbols: HashSet::new(),
+            net_http_protocol_type_names: HashSet::new(),
         }
     }
 
     pub fn set_source_file(&mut self, path: &std::path::Path) {
         self.source_file = Some(path.to_path_buf());
+    }
+
+    pub fn set_compile_target(&mut self, target: CompileTarget) {
+        self.compile_target = target;
+    }
+
+    fn register_net_import_symbol(&mut self, symbol_name: &str, local_name: &str) {
+        match symbol_name {
+            "httpServe" => {
+                self.net_http_serve_symbols.insert(local_name.to_string());
+            }
+            "HttpProtocol" => {
+                self.registry.register_enum(
+                    local_name,
+                    NET_HTTP_PROTOCOL_VARIANTS
+                        .iter()
+                        .map(|variant| (*variant).to_string())
+                        .collect(),
+                );
+                self.declared_header_arities
+                    .insert(local_name.to_string(), 0);
+                self.net_http_protocol_type_names
+                    .insert(local_name.to_string());
+            }
+            _ => {}
+        }
     }
 
     fn binding_diag(code: &str, message: String, hint: &str) -> String {
@@ -167,6 +244,7 @@ impl TypeChecker {
     fn type_param_name_is_reserved(&self, name: &str) -> bool {
         self.declared_concrete_type_names.contains(name)
             || self.registry.type_defs.contains_key(name)
+            || self.registry.enum_defs.contains_key(name)
             || self.registry.mold_defs.contains_key(name)
             || !matches!(
                 self.registry.resolve_type(&TypeExpr::Named(name.to_string())),
@@ -645,6 +723,7 @@ impl TypeChecker {
             | Expr::BoolLit(_, _)
             | Expr::Gorilla(_)
             | Expr::Placeholder(_)
+            | Expr::EnumVariant(_, _, _)
             | Expr::Hole(_) => None,
             Expr::BuchiPack(fields, _) => fields
                 .iter()
@@ -762,6 +841,64 @@ impl TypeChecker {
         self.scope_stack.pop();
     }
 
+    fn validate_http_serve_protocol_capability(&mut self, callee_name: &str, args: &[Expr]) {
+        if !self.net_http_serve_symbols.contains(callee_name) {
+            return;
+        }
+        if self.compile_target.is_wasm() {
+            self.errors.push(TypeError {
+                message: format!(
+                    "[E1612] {} does not support taida-lang/net HTTP API 'httpServe'. \
+                     Hint: Use the interpreter, JS, or native backend instead.",
+                    self.compile_target.label()
+                ),
+                span: args
+                    .first()
+                    .map(|arg| arg.span().clone())
+                    .unwrap_or_else(|| Span {
+                        start: 0,
+                        end: 0,
+                        line: 1,
+                        column: 1,
+                    }),
+            });
+            return;
+        }
+        let Some(tls_expr) = args.get(5) else {
+            return;
+        };
+        if let Expr::BuchiPack(fields, _) = tls_expr
+            && let Some(protocol_field) = fields.iter().find(|field| field.name == "protocol")
+        {
+            match &protocol_field.value {
+                Expr::StringLit(_, _) | Expr::TemplateLit(_, _) => (),
+                Expr::EnumVariant(enum_name, variant_name, span)
+                    if self.net_http_protocol_type_names.contains(enum_name) =>
+                {
+                    if self.compile_target.is_js() && matches!(variant_name.as_str(), "H2" | "H3") {
+                        self.errors.push(TypeError {
+                            message: format!(
+                                "[E1611] `httpServe(..., tls <= @(..., protocol <= {}:{}()))` is not supported on the JS backend. \
+                                 Hint: JS supports only `{}:H1()`; use the interpreter or native backend for HTTP/2 and HTTP/3.",
+                                enum_name, variant_name, enum_name
+                            ),
+                            span: span.clone(),
+                        });
+                    }
+                }
+                Expr::IntLit(_, span) | Expr::FloatLit(_, span) | Expr::BoolLit(_, span) => {
+                    self.errors.push(TypeError {
+                        message: "[E1506] `httpServe` tls.protocol literal must be HttpProtocol or Str. \
+                             Hint: Use `HttpProtocol:H1()` / `HttpProtocol:H2()` / `HttpProtocol:H3()` or a legacy string like \"h1.1\"."
+                            .to_string(),
+                        span: span.clone(),
+                    });
+                }
+                _ => (),
+            }
+        }
+    }
+
     /// Define a variable in the current scope.
     ///
     /// ## Scope stack invariant (N-75)
@@ -781,7 +918,24 @@ impl TypeChecker {
     fn validate_import_symbols(&mut self, imp: &crate::parser::ImportStmt) {
         use crate::parser::Statement as S;
 
-        // Skip core-bundled and npm packages
+        if imp.path == "taida-lang/net" {
+            for sym in &imp.symbols {
+                if !is_net_export_name(&sym.name) {
+                    self.errors.push(TypeError {
+                        message: format!(
+                            "Symbol '{}' not found in module '{}'. The module exports: {}",
+                            sym.name,
+                            imp.path,
+                            net_export_list()
+                        ),
+                        span: imp.span.clone(),
+                    });
+                }
+            }
+            return;
+        }
+
+        // Skip other core-bundled and npm packages
         if imp.path.starts_with("npm:") || imp.path.starts_with("taida-lang/") {
             return;
         }
@@ -1036,6 +1190,9 @@ impl TypeChecker {
         self.declared_concrete_type_names.clear();
         for stmt in &program.statements {
             match stmt {
+                Statement::EnumDef(ed) => {
+                    self.declared_concrete_type_names.insert(ed.name.clone());
+                }
                 Statement::TypeDef(td) => {
                     self.declared_concrete_type_names.insert(td.name.clone());
                 }
@@ -1103,9 +1260,47 @@ impl TypeChecker {
     /// Register type definitions from a statement (first pass).
     fn register_types(&mut self, stmt: &Statement) {
         match stmt {
+            Statement::EnumDef(ed) => {
+                let has_collision = self.registry.type_defs.contains_key(&ed.name)
+                    || self.registry.enum_defs.contains_key(&ed.name)
+                    || self.func_types.contains_key(&ed.name)
+                    || self.registry.mold_defs.contains_key(&ed.name);
+                if has_collision {
+                    self.errors.push(TypeError {
+                        message: format!(
+                            "[E1501] Name '{}' is already defined in this scope. \
+                             Redefinition in the same scope is not allowed. \
+                             Hint: Use a different name, or define it in an inner scope (shadowing is allowed).",
+                            ed.name
+                        ),
+                        span: ed.span.clone(),
+                    });
+                }
+                let mut seen = HashSet::new();
+                for variant in &ed.variants {
+                    if !seen.insert(variant.name.clone()) {
+                        self.errors.push(TypeError {
+                            message: format!(
+                                "[E1501] Enum '{}' redefines variant '{}'. Hint: Enum variants must be unique within the same enum.",
+                                ed.name, variant.name
+                            ),
+                            span: variant.span.clone(),
+                        });
+                    }
+                }
+                self.registry.register_enum(
+                    &ed.name,
+                    ed.variants
+                        .iter()
+                        .map(|variant| variant.name.clone())
+                        .collect(),
+                );
+                self.declared_header_arities.insert(ed.name.clone(), 0);
+            }
             Statement::TypeDef(td) => {
                 // E1501: Check for TypeDef name collision with existing types, functions, or molds
                 let has_collision = self.registry.type_defs.contains_key(&td.name)
+                    || self.registry.enum_defs.contains_key(&td.name)
                     || self.func_types.contains_key(&td.name)
                     || self.registry.mold_defs.contains_key(&td.name);
                 if has_collision {
@@ -1378,6 +1573,11 @@ impl TypeChecker {
                             self.func_types.insert(local_name.clone(), Type::Str);
                             self.func_param_counts.insert(local_name, 1);
                         }
+                    }
+                } else if imp.path == "taida-lang/net" {
+                    for sym in &imp.symbols {
+                        let local_name = sym.alias.as_ref().unwrap_or(&sym.name);
+                        self.register_net_import_symbol(&sym.name, local_name);
                     }
                 }
             }
@@ -1974,6 +2174,7 @@ defaulted fields must be provided via `()`",
     /// Type-check a statement (second pass).
     fn check_statement(&mut self, stmt: &Statement) {
         match stmt {
+            Statement::EnumDef(_) => {}
             Statement::Assignment(assign) => {
                 let inferred = self.infer_expr_type(&assign.value);
 
@@ -2208,6 +2409,9 @@ defaulted fields must be provided via `()`",
                 // (We don't have cross-module type info yet)
                 for sym in &imp.symbols {
                     let name = sym.alias.as_ref().unwrap_or(&sym.name);
+                    if imp.path == "taida-lang/net" {
+                        self.register_net_import_symbol(&sym.name, name);
+                    }
                     self.define_var(name, Type::Unknown);
                 }
             }
@@ -2576,6 +2780,8 @@ defaulted fields must be provided via `()`",
 
                 // Try to resolve return type from function name
                 if let Expr::Ident(name, _) = func.as_ref() {
+                    self.validate_http_serve_protocol_capability(name, args);
+
                     if let Some(fd) = self.generic_func_defs.get(name).cloned() {
                         let param_patterns: Vec<Type> = fd
                             .params
@@ -3219,7 +3425,7 @@ defaulted fields must be provided via `()`",
                             Type::Str
                         }
                     }
-                    "Split" => Type::List(Box::new(Type::Str)),
+                    "Split" | "Chars" => Type::List(Box::new(Type::Str)),
                     // Number operation molds
                     "Abs" | "Clamp" => {
                         if let Some(first_arg) = type_args.first() {
@@ -3364,6 +3570,34 @@ defaulted fields must be provided via `()`",
                 let ret_type = self.infer_expr_type(body);
                 self.pop_scope();
                 Type::Function(param_types, Box::new(ret_type))
+            }
+
+            Expr::EnumVariant(enum_name, variant_name, span) => {
+                if !self.registry.is_enum_type(enum_name) {
+                    self.errors.push(TypeError {
+                        message: format!(
+                            "[E1608] Unknown enum type '{}'. Hint: Define `Enum => {} = ...` before using {}:{}().",
+                            enum_name, enum_name, enum_name, variant_name
+                        ),
+                        span: span.clone(),
+                    });
+                    Type::Unknown
+                } else if self
+                    .registry
+                    .get_enum_variant_ordinal(enum_name, variant_name)
+                    .is_none()
+                {
+                    self.errors.push(TypeError {
+                        message: format!(
+                            "[E1608] Unknown enum variant '{}:{}()'. Hint: Use one of the variants declared on '{}'.",
+                            enum_name, variant_name, enum_name
+                        ),
+                        span: span.clone(),
+                    });
+                    Type::Unknown
+                } else {
+                    Type::Named(enum_name.clone())
+                }
             }
 
             Expr::TypeInst(name, _, _) => Type::Named(name.clone()),

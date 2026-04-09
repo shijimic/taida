@@ -255,6 +255,18 @@ impl Parser {
                 let name = name.clone();
                 self.advance();
 
+                if self.check(&TokenKind::Colon)
+                    && matches!(self.peek_at(1).kind, TokenKind::Ident(_))
+                    && matches!(self.peek_at(2).kind, TokenKind::LParen)
+                    && matches!(self.peek_at(3).kind, TokenKind::RParen)
+                {
+                    self.advance(); // consume `:`
+                    let variant = self.expect_ident()?;
+                    self.expect(&TokenKind::LParen)?;
+                    self.expect(&TokenKind::RParen)?;
+                    return Ok(Expr::EnumVariant(name, variant, span));
+                }
+
                 // Check for type/mold instantiation: `Name[args](...)`
                 // Uses backtracking: if bracket-args parsing fails or the
                 // result is not followed by `(`, we restore `self.pos = save`

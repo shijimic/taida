@@ -454,6 +454,12 @@ impl Interpreter {
                 .into_iter()
                 .filter(|(k, _)| module_exports.contains_key(k))
                 .collect();
+            let exported_enum_defs: std::collections::HashMap<String, Vec<String>> = self
+                .enum_defs
+                .iter()
+                .filter(|(k, _)| module_exports.contains_key(*k))
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
             let exported_type_methods: std::collections::HashMap<
                 String,
                 std::collections::HashMap<String, crate::parser::FuncDef>,
@@ -468,6 +474,7 @@ impl Interpreter {
                 LoadedModule {
                     exports: module_exports.clone(),
                     type_defs: exported_type_defs,
+                    enum_defs: exported_enum_defs,
                     type_methods: exported_type_methods,
                 },
             );
@@ -480,6 +487,11 @@ impl Interpreter {
             .loaded_modules
             .get(&module_path)
             .map(|m| m.type_defs.clone())
+            .unwrap_or_default();
+        let cached_enum_defs = self
+            .loaded_modules
+            .get(&module_path)
+            .map(|m| m.enum_defs.clone())
             .unwrap_or_default();
         let cached_type_methods = self
             .loaded_modules
@@ -510,6 +522,10 @@ impl Interpreter {
                 if let Some(td_fields) = cached_type_defs.get(name) {
                     self.type_defs
                         .insert(local_name.to_string(), td_fields.clone());
+                }
+                if let Some(enum_variants) = cached_enum_defs.get(name) {
+                    self.enum_defs
+                        .insert(local_name.to_string(), enum_variants.clone());
                 }
                 if let Some(td_methods) = cached_type_methods.get(name) {
                     self.type_methods
@@ -892,6 +908,12 @@ impl Interpreter {
                 .into_iter()
                 .filter(|(k, _)| exports.contains_key(k))
                 .collect();
+        let exported_enum_defs: std::collections::HashMap<String, Vec<String>> = self
+            .enum_defs
+            .iter()
+            .filter(|(k, _)| exports.contains_key(*k))
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
         let exported_type_methods: std::collections::HashMap<
             String,
             std::collections::HashMap<String, crate::parser::FuncDef>,
@@ -905,6 +927,7 @@ impl Interpreter {
             LoadedModule {
                 exports: exports.clone(),
                 type_defs: exported_type_defs,
+                enum_defs: exported_enum_defs,
                 type_methods: exported_type_methods,
             },
         );

@@ -188,6 +188,21 @@ impl Lowering {
                 ));
                 Ok(result)
             }
+            "Chars" => {
+                if type_args.len() != 1 {
+                    return Err(LowerError {
+                        message: "Chars requires 1 argument: Chars[str]()".into(),
+                    });
+                }
+                let s = self.lower_expr(func, &type_args[0])?;
+                let result = func.alloc_var();
+                func.push(IrInst::Call(
+                    result,
+                    "taida_str_chars".to_string(),
+                    vec![s],
+                ));
+                Ok(result)
+            }
             "Replace" => {
                 if type_args.len() < 3 {
                     return Err(LowerError {
@@ -2172,6 +2187,9 @@ fn rewrite_expr_ident_aliases(
             } else {
                 Expr::Ident(name.clone(), s.clone())
             }
+        }
+        Expr::EnumVariant(enum_name, variant_name, s) => {
+            Expr::EnumVariant(enum_name.clone(), variant_name.clone(), s.clone())
         }
         Expr::Placeholder(s) => Expr::Placeholder(s.clone()),
         Expr::Hole(s) => Expr::Hole(s.clone()),

@@ -184,6 +184,8 @@ impl Type {
 pub struct TypeRegistry {
     /// Named type definitions: name -> fields
     pub type_defs: HashMap<String, Vec<(String, Type)>>,
+    /// Enum definitions: name -> variants in ordinal order
+    pub enum_defs: HashMap<String, Vec<String>>,
     /// Mold type definitions: name -> (type_params, fields)
     pub mold_defs: HashMap<String, MoldDefFields>,
     /// Inheritance relationships: child -> parent
@@ -209,6 +211,11 @@ impl TypeRegistry {
     /// Register a type definition.
     pub fn register_type(&mut self, name: &str, fields: Vec<(String, Type)>) {
         self.type_defs.insert(name.to_string(), fields);
+    }
+
+    /// Register an enum definition.
+    pub fn register_enum(&mut self, name: &str, variants: Vec<String>) {
+        self.enum_defs.insert(name.to_string(), variants);
     }
 
     /// Register a mold type definition.
@@ -295,6 +302,20 @@ impl TypeRegistry {
     /// Get the fields of a type definition.
     pub fn get_type_fields(&self, name: &str) -> Option<Vec<(String, Type)>> {
         self.type_defs.get(name).cloned()
+    }
+
+    pub fn is_enum_type(&self, name: &str) -> bool {
+        self.enum_defs.contains_key(name)
+    }
+
+    pub fn get_enum_variants(&self, name: &str) -> Option<Vec<String>> {
+        self.enum_defs.get(name).cloned()
+    }
+
+    pub fn get_enum_variant_ordinal(&self, enum_name: &str, variant_name: &str) -> Option<usize> {
+        self.enum_defs
+            .get(enum_name)
+            .and_then(|variants| variants.iter().position(|variant| variant == variant_name))
     }
 
     /// Check if a type is an error type (inherits from Error).
