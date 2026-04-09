@@ -74,6 +74,7 @@ taida help
 | `lsp` | LSP サーバー起動（stdio） |
 | `auth` | 認証状態の管理 |
 | `community` | community API へのアクセス |
+| `upgrade` | taida 自身のセルフアップデート |
 
 補足:
 - 表のサブコマンドは `--help` / `-h` を受理し、各節の usage を stdout に出して exit code `0` で終了します。
@@ -409,3 +410,29 @@ taida community <posts|post|messages|message|author> --help
 - `messages` は自分宛の公開メッセージ一覧を取得します。
 - `message` は `--to <user>` を使って公開メッセージを送信します。本文に `--help` のような literal flag を含めたい場合は `--` 以降を本文として扱います。
 - `author` は著者プロフィールを表示します。引数省略時は認証済みユーザー自身を表示します。
+
+---
+
+## `taida upgrade`
+
+```bash
+taida upgrade [--check] [--gen GEN] [--label LABEL] [--version VERSION]
+```
+
+| オプション | 短縮 | 説明 |
+|---|---|---|
+| `--check` | - | 更新有無の確認のみ（インストールしない） |
+| `--gen <GEN>` | - | 特定の世代（generation）でフィルタ（例: `b`） |
+| `--label <LABEL>` | - | 特定のラベルでフィルタ（例: `rc2`） |
+| `--version <VERSION>` | - | 特定バージョンに固定（例: `@b.10.rc2`） |
+
+挙動:
+- GitHub Releases API から全リリースタグを取得し、バージョン解決を行います。
+- デフォルトでは最新の stable バージョン（ラベルなし、または `stable` ラベル）に更新します。
+- `--gen` と `--label` は組み合わせ可能です。`--version` は `--gen`/`--label` と排他です。
+- 同じ `@gen.num` に stable が複数ある場合、ラベルなしを優先します（例: `@b.11` > `@b.11.stable`）。
+- 更新時はプラットフォームに応じたバイナリをダウンロードし、SHA-256 検証を行ってから自己置換します。
+- `--check` 指定時は更新有無を表示するのみで、exit code は常に `0` です。
+
+注:
+- `update`（依存パッケージ更新）と `upgrade`（taida 自身の更新）は別のコマンドです。

@@ -67,6 +67,7 @@ fn test_top_level_help_prints_usage_and_commands() {
         stdout.contains("Usage:\n  taida [--no-check] <FILE>")
             && stdout.contains("Commands:")
             && stdout.contains("graph")
+            && stdout.contains("upgrade")
             && stdout.contains("Global options:"),
         "unexpected help output: {}",
         stdout
@@ -157,6 +158,10 @@ fn test_subcommand_help_prints_usage_and_exits_zero() {
         (
             &["community", "author", "alice", "--help"][..],
             "taida community author [NAME]",
+        ),
+        (
+            &["upgrade", "--help"][..],
+            "taida upgrade [--check] [--gen GEN] [--label LABEL] [--version VERSION]",
         ),
     ];
 

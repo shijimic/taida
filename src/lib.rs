@@ -25,5 +25,7 @@ pub mod net_surface;
 pub mod parser;
 pub mod pkg;
 pub mod types;
+#[cfg(feature = "community")]
+pub mod upgrade;
 pub mod util;
 pub mod version;
