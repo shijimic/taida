@@ -679,15 +679,38 @@ impl Lowering {
     /// interpreter byte-for-byte. The ABI v1 manifest (`addon.toml`)
     /// only carries `name = arity`, so return types live here as a
     /// per-package lookup table. RC3+ will consider a manifest schema
-    /// extension; for now the table only needs the `taida-lang/terminal`
-    /// sample surface.
+    /// extension or dynamic facade-based lookup; for now the table
+    /// enumerates both the production `taida-lang/terminal` surface
+    /// (external package at `../terminal`) **and** the workspace sample
+    /// crate (`crates/addon-terminal-sample`) which unfortunately
+    /// declares the same `taida-lang/terminal` package id. The two
+    /// surfaces do not overlap, so a superset entry is safe.
+    ///
+    /// Package id collision (`taida-lang/terminal` declared by both
+    /// the production external repo and the in-tree sample crate) is
+    /// tracked as tech debt in `.dev/RC2_6_BLOCKERS.md::RC2.6B-015`
+    /// and should be resolved in RC3+ by renaming the sample crate's
+    /// package id to something like `taida-lang/addon-rs-sample`.
     ///
     /// Returns the Taida type name (`"Bool"`, `"Str"`, `"Pack"`, ...)
     /// or `None` if the function's return type is unknown.
     fn addon_known_return_tag(package_id: &str, function_name: &str) -> Option<&'static str> {
         match (package_id, function_name) {
-            // `taida-lang/terminal` sample addon (see
-            // `crates/addon-terminal-sample/src/lib.rs::TERMINAL_FUNCTIONS`).
+            // Production `taida-lang/terminal` external package v1
+            // surface (`../terminal/src/{size,key}.rs`). Both functions
+            // return a Pack:
+            //   terminalSize → @(cols: Int, rows: Int)
+            //   readKey      → @(kind: Int, text: Str, ctrl: Bool, alt: Bool, shift: Bool)
+            ("taida-lang/terminal", "terminalSize") => Some("Pack"),
+            ("taida-lang/terminal", "readKey") => Some("Pack"),
+
+            // Workspace sample crate `crates/addon-terminal-sample`
+            // which also declares `package = "taida-lang/terminal"`
+            // (package id collision, see RC2.6B-015). Kept so the
+            // sample's install E2E test
+            // (`tests/addon_terminal_install_e2e.rs`) continues to
+            // resolve return types correctly until the collision is
+            // resolved.
             ("taida-lang/terminal", "termIsTty") => Some("Bool"),
             ("taida-lang/terminal", "termReadLine") => Some("Str"),
             ("taida-lang/terminal", "termSize") => Some("Pack"),
