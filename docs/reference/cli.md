@@ -58,7 +58,7 @@ taida help
 
 | コマンド | 用途 |
 |---|---|
-| `build` | 成果物生成の主コマンド（`--target js|native|wasm-*`） |
+| `build` | 成果物生成の主コマンド（`--target native|js|wasm-*`） |
 | `transpile` | `build --target js` のエイリアス |
 | `todo` | `TODO[...]` 抽出と集計 |
 | `check` | parse/type/verify(error-coverage) の静的診断 |
@@ -85,12 +85,12 @@ taida help
 ## `taida build`
 
 ```bash
-taida build [--target js|native|wasm-min|wasm-wasi|wasm-edge|wasm-full] [--release] [--diag-format text|jsonl] [-o OUTPUT] [--entry ENTRY] <PATH>
+taida build [--target native|js|wasm-min|wasm-wasi|wasm-edge|wasm-full] [--release] [--diag-format text|jsonl] [-o OUTPUT] [--entry ENTRY] <PATH>
 ```
 
 | オプション | 短縮 | 説明 |
 |---|---|---|
-| `--target <js\|native\|wasm-min\|wasm-wasi\|wasm-edge\|wasm-full>` | - | 生成ターゲット（既定: `js`） |
+| `--target <native\|js\|wasm-min\|wasm-wasi\|wasm-edge\|wasm-full>` | - | 生成ターゲット（既定: `native`） |
 | `--output <PATH>` / `--outdir <DIR>` | `-o` | 出力先（file入力時はファイル、dir入力時はディレクトリ） |
 | `--entry <PATH>` | - | Native + dir入力時のエントリ上書き（既定: `main.td`） |
 | `--release` | `-r` | TODO/Stub 残存時に失敗 |
@@ -98,13 +98,14 @@ taida build [--target js|native|wasm-min|wasm-wasi|wasm-edge|wasm-full] [--relea
 
 挙動:
 - `<PATH>` は file/dir を受理します。
+- `--target` 省略時は `native` がデフォルトです。
+- `--target native`（デフォルト）:
+  - file入力: そのファイルをエントリに Native バイナリ生成（既定 `src/foo.td -> src/foo`）
+  - dir入力: 既定エントリ `<PATH>/main.td`、`--entry` で上書き可能
 - `--target js`:
   - file入力: 単一 `.mjs` を生成（既定 `src/foo.td -> src/foo.mjs`）
   - dir入力: `.td` を再帰収集して `.mjs` を出力（既定出力は `<PATH>` 親の `dist/`）
   - dir入力で `package.json` が無ければ `{ "type": "module" }` を生成します。
-- `--target native`:
-  - file入力: そのファイルをエントリに Native バイナリ生成（既定 `src/foo.td -> src/foo`）
-  - dir入力: 既定エントリ `<PATH>/main.td`、`--entry` で上書き可能
 - `--target wasm-*`:
   - `.wasm` 成果物を生成します。
   - 対応ターゲットは `wasm-min`, `wasm-wasi`, `wasm-edge`, `wasm-full` です。

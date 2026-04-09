@@ -58,7 +58,7 @@ Usage:
   taida <COMMAND> [OPTIONS]
 
 Commands:
-  build       Build JS, Native, or WASM output
+  build       Build Native, JS, or WASM output
   transpile   Alias for `build --target js`
   todo        Scan TODO/Stub molds
   check       Run parse/type/verify front gate
@@ -125,10 +125,10 @@ fn print_build_help() {
     println!(
         "\
 Usage:
-  taida build [--target js|native|wasm-min|wasm-wasi|wasm-edge|wasm-full] [--release] [--no-cache] [--diag-format text|jsonl] [-o OUTPUT] [--entry ENTRY] <PATH>
+  taida build [--target native|js|wasm-min|wasm-wasi|wasm-edge|wasm-full] [--release] [--no-cache] [--diag-format text|jsonl] [-o OUTPUT] [--entry ENTRY] <PATH>
 
 Options:
-  --target        Build target (default: js)
+  --target        Build target (default: native)
   --output, -o    Output file or directory
   --outdir        Alias of `--output`
   --entry         Native dir entry override (default: main.td)
@@ -137,8 +137,9 @@ Options:
   --diag-format   text | jsonl
 
 Examples:
+  taida build app.td
   taida build --target js src
-  taida build --target native --release app.td
+  taida build --release app.td
 
 Notes:
   `--no-check` is a global option and applies here."
@@ -894,10 +895,10 @@ fn print_build_usage_and_exit() -> ! {
     eprintln!(
         "\
 Usage:
-  taida build [--target js|native|wasm-min|wasm-wasi|wasm-edge|wasm-full] [--release] [--no-cache] [--diag-format text|jsonl] [-o OUTPUT] [--entry ENTRY] <PATH>
+  taida build [--target native|js|wasm-min|wasm-wasi|wasm-edge|wasm-full] [--release] [--no-cache] [--diag-format text|jsonl] [-o OUTPUT] [--entry ENTRY] <PATH>
 
 Options:
-  --target        Build target (default: js)
+  --target        Build target (default: native)
   --output, -o    Output file or directory
   --outdir        Alias of `--output`
   --entry         Native dir entry override (default: main.td)
@@ -909,7 +910,7 @@ Options:
 }
 
 fn run_build(args: &[String], no_check: bool) {
-    let mut target = BuildTarget::Js;
+    let mut target = BuildTarget::Native;
     let mut diag_format = DiagFormat::Text;
     let mut input_path: Option<String> = None;
     let mut output_path: Option<String> = None;
@@ -933,7 +934,7 @@ fn run_build(args: &[String], no_check: bool) {
                     Some(v) => v,
                     None => {
                         eprintln!(
-                            "Unknown build target '{}'. Expected: js | native | wasm-min | wasm-wasi | wasm-edge | wasm-full",
+                            "Unknown build target '{}'. Expected: native | js | wasm-min | wasm-wasi | wasm-edge | wasm-full",
                             args[i]
                         );
                         std::process::exit(1);

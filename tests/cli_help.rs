@@ -80,7 +80,7 @@ fn test_subcommand_help_prints_usage_and_exits_zero() {
         (&["check", "--help"][..], "taida check [--json] <PATH>"),
         (
             &["build", "--help"][..],
-            "taida build [--target js|native|wasm-min|wasm-wasi|wasm-edge|wasm-full]",
+            "taida build [--target native|js|wasm-min|wasm-wasi|wasm-edge|wasm-full]",
         ),
         (
             &["todo", "--help"][..],
