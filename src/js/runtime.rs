@@ -3532,6 +3532,7 @@ async function __taida_net_httpServe(port, handler, maxRequests, timeoutMs, maxC
       if (typeof tls.protocol === 'string') {
         __requestedProtocol = tls.protocol;
       } else if (typeof tls.protocol === 'number' && Number.isInteger(tls.protocol)) {
+        // Sync with `crate::net_surface::http_protocol_ordinal_to_wire`.
         if (tls.protocol === 0) {
           __requestedProtocol = 'h1.1';
         } else if (tls.protocol === 1) {

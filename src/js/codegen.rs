@@ -1,5 +1,9 @@
 use super::runtime::RUNTIME_JS;
 /// Taida AST → JavaScript コード生成
+use crate::net_surface::{
+    NET_HTTP_PROTOCOL_SYMBOL, NET_HTTP_PROTOCOL_VARIANTS, is_net_export_name,
+    is_net_runtime_builtin, net_export_list,
+};
 use crate::parser::*;
 
 pub struct JsCodegen {
@@ -66,9 +70,6 @@ impl Default for JsCodegen {
 }
 
 impl JsCodegen {
-    const NET_HTTP_PROTOCOL_SYMBOL: &'static str = "HttpProtocol";
-    const NET_HTTP_PROTOCOL_VARIANTS: [&'static str; 3] = ["H1", "H2", "H3"];
-
     pub fn new() -> Self {
         Self {
             output: String::new(),
@@ -110,37 +111,12 @@ impl JsCodegen {
         self.out_root = Some(out_root.to_path_buf());
     }
 
-    /// Names of taida-lang/net builtins that require scope-aware call-site rewriting.
-    /// HTTP v1 (3) + HTTP v2 (1) = 4.
-    /// v3 streaming APIs will be added when JS backend is ready (Phase 4).
-    const NET_BUILTIN_NAMES: &'static [&'static str] = &[
-        "httpServe",
-        "httpParseRequestHead",
-        "httpEncodeResponse",
-        "readBody",
-        // v3 streaming API
-        "startResponse",
-        "writeChunk",
-        "endResponse",
-        "sseEvent",
-        // v4 request body streaming API
-        "readBodyChunk",
-        "readBodyAll",
-        // v4 WebSocket API
-        "wsUpgrade",
-        "wsSend",
-        "wsReceive",
-        "wsClose",
-        // v5 WebSocket revision
-        "wsCloseCode",
-    ];
-
     /// Check if a net builtin name should be rewritten to its __taida_net_* form.
     /// Returns true only when the module has a net import AND the name is not
     /// shadowed by a parameter/local in the current scope.
     fn should_rewrite_net_builtin(&self, name: &str) -> bool {
         self.has_net_import
-            && Self::NET_BUILTIN_NAMES.contains(&name)
+            && is_net_runtime_builtin(name)
             && !self.shadowed_net_builtins.contains(name)
     }
 
@@ -246,11 +222,11 @@ impl JsCodegen {
                 && import.path == "taida-lang/net"
             {
                 for sym in &import.symbols {
-                    if sym.name == Self::NET_HTTP_PROTOCOL_SYMBOL {
+                    if sym.name == NET_HTTP_PROTOCOL_SYMBOL {
                         let local_name = sym.alias.as_ref().unwrap_or(&sym.name);
                         self.enum_defs.insert(
                             local_name.clone(),
-                            Self::NET_HTTP_PROTOCOL_VARIANTS
+                            NET_HTTP_PROTOCOL_VARIANTS
                                 .iter()
                                 .map(|variant| (*variant).to_string())
                                 .collect(),
@@ -669,8 +645,7 @@ impl JsCodegen {
                 // Track local assignment shadow: if the target name matches a net
                 // builtin, subsequent calls in the same scope must use the local
                 // value, not the builtin rewrite.
-                if self.has_net_import && Self::NET_BUILTIN_NAMES.contains(&assign.target.as_str())
-                {
+                if self.has_net_import && is_net_runtime_builtin(&assign.target) {
                     self.shadowed_net_builtins.insert(assign.target.clone());
                 }
                 Ok(())
@@ -700,8 +675,7 @@ impl JsCodegen {
                 self.gen_expr(&unmold.source)?;
                 self.write(");\n");
                 // Track local unmold-forward shadow for net builtins
-                if self.has_net_import && Self::NET_BUILTIN_NAMES.contains(&unmold.target.as_str())
-                {
+                if self.has_net_import && is_net_runtime_builtin(&unmold.target) {
                     self.shadowed_net_builtins.insert(unmold.target.clone());
                 }
                 Ok(())
@@ -720,8 +694,7 @@ impl JsCodegen {
                 self.gen_expr(&unmold.source)?;
                 self.write(");\n");
                 // Track local unmold-backward shadow for net builtins
-                if self.has_net_import && Self::NET_BUILTIN_NAMES.contains(&unmold.target.as_str())
-                {
+                if self.has_net_import && is_net_runtime_builtin(&unmold.target) {
                     self.shadowed_net_builtins.insert(unmold.target.clone());
                 }
                 Ok(())
@@ -745,7 +718,7 @@ impl JsCodegen {
         // shadows (e.g. `httpServe <= add`) within the function scope.
         let prev_shadowed_net = self.shadowed_net_builtins.clone();
         for p in &func_def.params {
-            if Self::NET_BUILTIN_NAMES.contains(&p.name.as_str()) {
+            if is_net_runtime_builtin(&p.name) {
                 self.shadowed_net_builtins.insert(p.name.clone());
             }
         }
@@ -1322,17 +1295,13 @@ impl JsCodegen {
     fn validate_import_symbols(&self, import: &ImportStmt) -> Result<(), JsError> {
         if import.path == "taida-lang/net" {
             for sym in &import.symbols {
-                if !Self::NET_BUILTIN_NAMES.contains(&sym.name.as_str())
-                    && sym.name != Self::NET_HTTP_PROTOCOL_SYMBOL
-                {
-                    let mut exports: Vec<&str> = Self::NET_BUILTIN_NAMES.to_vec();
-                    exports.push(Self::NET_HTTP_PROTOCOL_SYMBOL);
+                if !is_net_export_name(&sym.name) {
                     return Err(JsError {
                         message: format!(
                             "Symbol '{}' not found in module '{}'. The module exports: {}",
                             sym.name,
                             import.path,
-                            exports.join(", ")
+                            net_export_list()
                         ),
                     });
                 }
@@ -2621,7 +2590,7 @@ impl JsCodegen {
                 // Scope-aware net builtin shadowing: snapshot/restore for lambda scope
                 let prev_shadowed_net = self.shadowed_net_builtins.clone();
                 for p in params {
-                    if Self::NET_BUILTIN_NAMES.contains(&p.name.as_str()) {
+                    if is_net_runtime_builtin(&p.name) {
                         self.shadowed_net_builtins.insert(p.name.clone());
                     }
                 }
@@ -4064,6 +4033,19 @@ waitWithTimeout p =
             js.contains("function __taida_js_spread("),
             "Runtime should include __taida_js_spread helper: got {}",
             js
+        );
+    }
+
+    #[test]
+    fn test_js_codegen_invalid_net_import_reports_shared_export_list() {
+        let err = transpile(">>> taida-lang/net => @(MissingNetSymbol)")
+            .expect_err("invalid taida-lang/net import should fail");
+        assert!(
+            err.message.contains("MissingNetSymbol")
+                && err.message.contains("HttpProtocol")
+                && err.message.contains("httpServe"),
+            "Expected taida-lang/net export list with HttpProtocol, got {}",
+            err.message
         );
     }
 }

@@ -288,6 +288,37 @@ pub enum Expr {
     Throw(Box<Expr>, Span),
 }
 
+impl Expr {
+    pub fn span(&self) -> &Span {
+        match self {
+            Expr::IntLit(_, span)
+            | Expr::FloatLit(_, span)
+            | Expr::StringLit(_, span)
+            | Expr::TemplateLit(_, span)
+            | Expr::BoolLit(_, span)
+            | Expr::Gorilla(span)
+            | Expr::Ident(_, span)
+            | Expr::Placeholder(span)
+            | Expr::Hole(span)
+            | Expr::BuchiPack(_, span)
+            | Expr::ListLit(_, span)
+            | Expr::BinaryOp(_, _, _, span)
+            | Expr::UnaryOp(_, _, span)
+            | Expr::FuncCall(_, _, span)
+            | Expr::MethodCall(_, _, _, span)
+            | Expr::FieldAccess(_, _, span)
+            | Expr::CondBranch(_, span)
+            | Expr::Pipeline(_, span)
+            | Expr::MoldInst(_, _, _, span)
+            | Expr::Unmold(_, span)
+            | Expr::Lambda(_, _, span)
+            | Expr::TypeInst(_, _, span)
+            | Expr::EnumVariant(_, _, span)
+            | Expr::Throw(_, span) => span,
+        }
+    }
+}
+
 /// A field in a buchi pack literal or type instantiation.
 #[derive(Debug, Clone, PartialEq)]
 pub struct BuchiField {

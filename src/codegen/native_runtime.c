@@ -18717,6 +18717,7 @@ taida_val taida_net_http_serve(taida_val port, taida_val handler, taida_val max_
             } else if (proto_tag == TAIDA_TAG_INT) {
                 taida_val proto_val = taida_pack_get(tls, proto_hash);
                 int64_t ordinal = (int64_t)proto_val;
+                // Sync with `crate::net_surface::http_protocol_ordinal_to_wire`.
                 if (ordinal == 0) {
                     requested_protocol = "h1.1";
                 } else if (ordinal == 1) {

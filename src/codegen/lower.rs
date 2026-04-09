@@ -1,5 +1,8 @@
 use super::ir::*;
 /// AST → Taida IR 変換（Lowering）
+use crate::net_surface::{
+    NET_HTTP_PROTOCOL_SYMBOL, NET_HTTP_PROTOCOL_VARIANTS, http_protocol_variant_to_wire,
+};
 use crate::parser::*;
 
 /// 簡易フィールド名ハッシュ（FNV-1a）
@@ -222,9 +225,6 @@ enum ImportedSymbolKind {
     /// TypeDef / InheritanceDef
     TypeDef,
 }
-
-const NET_HTTP_PROTOCOL_SYMBOL: &str = "HttpProtocol";
-const NET_HTTP_PROTOCOL_VARIANTS: [&str; 3] = ["H1", "H2", "H3"];
 
 type InheritanceChainFields = (
     Vec<String>,
@@ -1552,12 +1552,7 @@ impl Lowering {
                     && let Expr::EnumVariant(enum_name, variant_name, variant_span) = &field.value
                     && self.enum_defs.contains_key(enum_name)
                 {
-                    let protocol = match variant_name.as_str() {
-                        "H1" => Some("h1.1"),
-                        "H2" => Some("h2"),
-                        "H3" => Some("h3"),
-                        _ => None,
-                    };
+                    let protocol = http_protocol_variant_to_wire(variant_name);
                     if let Some(protocol) = protocol {
                         let mut rewritten = field.clone();
                         rewritten.value =

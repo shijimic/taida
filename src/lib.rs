@@ -21,6 +21,7 @@ pub mod lexer;
 #[cfg(feature = "lsp")]
 pub mod lsp;
 pub mod module_graph;
+pub mod net_surface;
 pub mod parser;
 pub mod pkg;
 pub mod types;

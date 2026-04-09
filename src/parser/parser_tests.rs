@@ -77,6 +77,18 @@ fn test_parse_enum_def_multiline() {
 }
 
 #[test]
+fn test_parse_enum_def_single_variant() {
+    match first_stmt("Enum => Traffic = :Red") {
+        Statement::EnumDef(ed) => {
+            assert_eq!(ed.name, "Traffic");
+            assert_eq!(ed.variants.len(), 1);
+            assert_eq!(ed.variants[0].name, "Red");
+        }
+        other => panic!("Expected EnumDef, got {:?}", other),
+    }
+}
+
+#[test]
 fn test_parse_enum_variant_constructor() {
     match first_stmt("status <= Status:Ok()") {
         Statement::Assignment(assign) => match assign.value {
@@ -86,6 +98,27 @@ fn test_parse_enum_variant_constructor() {
             }
             other => panic!("Expected EnumVariant, got {:?}", other),
         },
+        other => panic!("Expected Assignment, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_parse_enum_variant_pipeline_assignment() {
+    let program = parse_ok("status <= Status:Fail()\nstatus => id(_) => result");
+    match &program.statements[1] {
+        Statement::Assignment(assign) => {
+            assert_eq!(assign.target, "result");
+            match &assign.value {
+                Expr::Pipeline(steps, _) => {
+                    assert!(
+                        matches!(steps.first(), Some(Expr::Ident(name, _)) if name == "status")
+                    );
+                    assert_eq!(steps.len(), 2);
+                }
+                Expr::FuncCall(_, _, _) => {}
+                other => panic!("Expected Pipeline or FuncCall, got {:?}", other),
+            }
+        }
         other => panic!("Expected Assignment, got {:?}", other),
     }
 }

@@ -1,5 +1,6 @@
 use super::types::{Type, TypeRegistry};
 use crate::lexer::Span;
+use crate::net_surface::{NET_HTTP_PROTOCOL_VARIANTS, is_net_export_name, net_export_list};
 use crate::parser::*;
 /// Type checker for Taida Lang.
 ///
@@ -55,6 +56,9 @@ struct MoldBindingDef<'a> {
 /// - `E1605` -- comparison type mismatch
 /// - `E1606` -- logical operator type mismatch
 /// - `E1607` -- unary operator type mismatch
+/// - `E1608` -- unknown enum variant
+/// - `E1611` -- JS backend capability rejection
+/// - `E1612` -- WASM backend capability rejection
 ///
 /// Some internal diagnostic messages (e.g., inheritance validation, mold binding
 /// checks) do not yet carry error codes. These are emitted during registration
@@ -186,26 +190,6 @@ impl TypeChecker {
         self.compile_target = target;
     }
 
-    const NET_HTTP_PROTOCOL_VARIANTS: [&'static str; 3] = ["H1", "H2", "H3"];
-    const NET_EXPORT_NAMES: [&'static str; 16] = [
-        "httpServe",
-        "httpParseRequestHead",
-        "httpEncodeResponse",
-        "readBody",
-        "startResponse",
-        "writeChunk",
-        "endResponse",
-        "sseEvent",
-        "readBodyChunk",
-        "readBodyAll",
-        "wsUpgrade",
-        "wsSend",
-        "wsReceive",
-        "wsClose",
-        "wsCloseCode",
-        "HttpProtocol",
-    ];
-
     fn register_net_import_symbol(&mut self, symbol_name: &str, local_name: &str) {
         match symbol_name {
             "httpServe" => {
@@ -214,7 +198,7 @@ impl TypeChecker {
             "HttpProtocol" => {
                 self.registry.register_enum(
                     local_name,
-                    Self::NET_HTTP_PROTOCOL_VARIANTS
+                    NET_HTTP_PROTOCOL_VARIANTS
                         .iter()
                         .map(|variant| (*variant).to_string())
                         .collect(),
@@ -226,10 +210,6 @@ impl TypeChecker {
             }
             _ => {}
         }
-    }
-
-    fn net_export_list() -> String {
-        Self::NET_EXPORT_NAMES.join(", ")
     }
 
     fn binding_diag(code: &str, message: String, hint: &str) -> String {
@@ -874,32 +854,7 @@ impl TypeChecker {
                 ),
                 span: args
                     .first()
-                    .map(|arg| match arg {
-                        Expr::IntLit(_, span)
-                        | Expr::FloatLit(_, span)
-                        | Expr::StringLit(_, span)
-                        | Expr::TemplateLit(_, span)
-                        | Expr::BoolLit(_, span)
-                        | Expr::Gorilla(span)
-                        | Expr::Placeholder(span)
-                        | Expr::Hole(span)
-                        | Expr::Pipeline(_, span)
-                        | Expr::BuchiPack(_, span)
-                        | Expr::UnaryOp(_, _, span)
-                        | Expr::BinaryOp(_, _, _, span)
-                        | Expr::FieldAccess(_, _, span)
-                        | Expr::CondBranch(_, span)
-                        | Expr::MoldInst(_, _, _, span)
-                        | Expr::Unmold(_, span)
-                        | Expr::Lambda(_, _, span)
-                        | Expr::EnumVariant(_, _, span)
-                        | Expr::TypeInst(_, _, span)
-                        | Expr::Throw(_, span)
-                        | Expr::MethodCall(_, _, _, span)
-                        | Expr::ListLit(_, span)
-                        | Expr::FuncCall(_, _, span)
-                        | Expr::Ident(_, span) => span.clone(),
-                    })
+                    .map(|arg| arg.span().clone())
                     .unwrap_or_else(|| Span {
                         start: 0,
                         end: 0,
@@ -967,13 +922,13 @@ impl TypeChecker {
 
         if imp.path == "taida-lang/net" {
             for sym in &imp.symbols {
-                if !Self::NET_EXPORT_NAMES.contains(&sym.name.as_str()) {
+                if !is_net_export_name(&sym.name) {
                     self.errors.push(TypeError {
                         message: format!(
                             "Symbol '{}' not found in module '{}'. The module exports: {}",
                             sym.name,
                             imp.path,
-                            Self::net_export_list()
+                            net_export_list()
                         ),
                         span: imp.span.clone(),
                     });

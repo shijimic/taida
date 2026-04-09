@@ -56,6 +56,14 @@ mod tests {
     }
 
     #[test]
+    fn test_eval_single_variant_enum_to_zero() {
+        assert_eq!(
+            eval_ok("Enum => Traffic = :Red\nsignal <= Traffic:Red()"),
+            Value::Int(0)
+        );
+    }
+
+    #[test]
     fn test_eval_div_mold() {
         // Div[10, 3]() returns Lax with hasValue=true, value=3
         let result = eval_ok("result <= Div[10, 3]()");

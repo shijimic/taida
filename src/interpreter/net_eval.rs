@@ -11,6 +11,7 @@
 /// These are `impl Interpreter` methods split from eval.rs for maintainability.
 use super::eval::{Interpreter, RuntimeError, Signal};
 use super::value::{AsyncStatus, AsyncValue, ErrorValue, Value};
+use crate::net_surface::{NET_RUNTIME_BUILTIN_NAMES, http_protocol_ordinal_to_wire};
 use crate::parser::Expr;
 
 /// (status_code, headers, body_bytes)
@@ -18,29 +19,7 @@ type ResponseFields = (i64, Vec<(String, String)>, Vec<u8>);
 
 /// All symbols exported by the net package.
 /// HTTP v1 (3) + HTTP v2 (1) + HTTP v3 (4) + HTTP v4 (6) + v5 (1) = 15 symbols.
-pub(crate) const NET_SYMBOLS: &[&str] = &[
-    // HTTP v1
-    "httpServe",
-    "httpParseRequestHead",
-    "httpEncodeResponse",
-    // HTTP v2
-    "readBody",
-    // HTTP v3 streaming
-    "startResponse",
-    "writeChunk",
-    "endResponse",
-    "sseEvent",
-    // HTTP v4 request body streaming
-    "readBodyChunk",
-    "readBodyAll",
-    // HTTP v4 WebSocket
-    "wsUpgrade",
-    "wsSend",
-    "wsReceive",
-    "wsClose",
-    // v5 WebSocket revision
-    "wsCloseCode",
-];
+pub(crate) const NET_SYMBOLS: &[&str] = &NET_RUNTIME_BUILTIN_NAMES;
 
 // ── v3 Writer State Machine ───────────────────────────────────────
 //
@@ -3799,11 +3778,11 @@ impl Interpreter {
                                 Value::Str(proto) => {
                                     requested_protocol = Some(proto.clone());
                                 }
-                                Value::Int(ordinal) => match ordinal {
-                                    0 => requested_protocol = Some("h1.1".to_string()),
-                                    1 => requested_protocol = Some("h2".to_string()),
-                                    2 => requested_protocol = Some("h3".to_string()),
-                                    _ => {
+                                Value::Int(ordinal) => {
+                                    if let Some(protocol) = http_protocol_ordinal_to_wire(*ordinal)
+                                    {
+                                        requested_protocol = Some(protocol.to_string());
+                                    } else {
                                         let result = make_result_failure_msg(
                                             "ProtocolError",
                                             format!(
@@ -3815,7 +3794,7 @@ impl Interpreter {
                                             result,
                                         ))));
                                     }
-                                },
+                                }
                                 _ => {
                                     let result = make_result_failure_msg(
                                         "ProtocolError",

@@ -183,6 +183,17 @@ fn test_enum_registration_and_constructor_type() {
 }
 
 #[test]
+fn test_single_variant_enum_registration_and_constructor_type() {
+    let (checker, errors) = check("Enum => Traffic = :Red\nsignal: Traffic <= Traffic:Red()");
+    assert!(errors.is_empty(), "Errors: {:?}", errors);
+    assert!(checker.registry.is_enum_type("Traffic"));
+    assert_eq!(
+        checker.registry.get_enum_variants("Traffic"),
+        Some(vec!["Red".to_string()])
+    );
+}
+
+#[test]
 fn test_unknown_enum_variant_rejected() {
     let (_checker, errors) = check("Enum => Status = :Ok :Fail\nstatus <= Status:Missing()");
     assert!(
@@ -201,6 +212,21 @@ fn test_cross_enum_comparison_rejected() {
     assert!(
         errors.iter().any(|err| err.message.contains("[E1605]")),
         "Expected E1605 for cross-enum comparison, got {:?}",
+        errors
+    );
+}
+
+#[test]
+fn test_enum_pipeline_identity_is_allowed() {
+    let (_checker, errors) = check(
+        "Enum => Status = :Ok :Fail\n\
+         status <= Status:Fail()\n\
+         id x = x\n\
+         status => id(_) => result",
+    );
+    assert!(
+        errors.is_empty(),
+        "Enum pipeline identity should type-check, got {:?}",
         errors
     );
 }
@@ -244,6 +270,20 @@ fn test_http_protocol_native_h3_allowed() {
     assert!(
         errors.is_empty(),
         "Native target should accept HttpProtocol:H3(), got {:?}",
+        errors
+    );
+}
+
+#[test]
+fn test_invalid_net_import_reports_shared_export_list() {
+    let (_checker, errors) = check(">>> taida-lang/net => @(MissingNetSymbol)");
+    assert!(
+        errors.iter().any(|err| {
+            err.message.contains("MissingNetSymbol")
+                && err.message.contains("HttpProtocol")
+                && err.message.contains("httpServe")
+        }),
+        "Expected taida-lang/net export list with HttpProtocol, got {:?}",
         errors
     );
 }
