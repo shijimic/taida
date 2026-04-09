@@ -92,22 +92,22 @@ fn terminal_cdylib() -> Option<PathBuf> {
 
 fn terminal_facade() -> Option<PathBuf> {
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let facade = manifest.parent()?.join("terminal").join("taida").join("terminal.td");
-    if facade.exists() {
-        Some(facade)
-    } else {
-        None
-    }
+    let facade = manifest
+        .parent()?
+        .join("terminal")
+        .join("taida")
+        .join("terminal.td");
+    if facade.exists() { Some(facade) } else { None }
 }
 
 fn terminal_addon_toml() -> Option<PathBuf> {
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let toml = manifest.parent()?.join("terminal").join("native").join("addon.toml");
-    if toml.exists() {
-        Some(toml)
-    } else {
-        None
-    }
+    let toml = manifest
+        .parent()?
+        .join("terminal")
+        .join("native")
+        .join("addon.toml");
+    if toml.exists() { Some(toml) } else { None }
 }
 
 fn e2e_demo_upstream_dir() -> Option<PathBuf> {
@@ -219,10 +219,8 @@ fn write_fixture(project: &Path, fix: &Fixture) {
     std::fs::create_dir_all(pkg.join("native")).expect("create native dir");
     std::fs::create_dir_all(pkg.join("taida")).expect("create taida dir");
 
-    std::fs::copy(&fix.addon_toml, pkg.join("native").join("addon.toml"))
-        .expect("copy addon.toml");
-    std::fs::copy(&fix.facade, pkg.join("taida").join("terminal.td"))
-        .expect("copy facade");
+    std::fs::copy(&fix.addon_toml, pkg.join("native").join("addon.toml")).expect("copy addon.toml");
+    std::fs::copy(&fix.facade, pkg.join("taida").join("terminal.td")).expect("copy facade");
 
     let dest_name = cdylib_filename("taida_lang_terminal");
     std::fs::copy(&fix.cdylib, pkg.join("native").join(&dest_name)).expect("copy cdylib");

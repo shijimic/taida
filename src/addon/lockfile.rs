@@ -304,13 +304,11 @@ pub fn parse_lockfile_str(path: &Path, source: &str) -> Result<AddonLockfile, Lo
         }
 
         // Key = value pair.
-        let (key_raw, value_raw) = line
-            .split_once('=')
-            .ok_or_else(|| LockfileError::Syntax {
-                path: path.to_path_buf(),
-                line: line_no,
-                message: "expected 'key = value' or '[section]'".to_string(),
-            })?;
+        let (key_raw, value_raw) = line.split_once('=').ok_or_else(|| LockfileError::Syntax {
+            path: path.to_path_buf(),
+            line: line_no,
+            message: "expected 'key = value' or '[section]'".to_string(),
+        })?;
         let key_raw = key_raw.trim();
         let value_raw = strip_inline_comment(value_raw).trim();
 
@@ -667,7 +665,10 @@ mod tests {
 
         // Initial: linux-gnu only.
         let mut first = AddonLockfile::new();
-        first.set_target("x86_64-unknown-linux-gnu", format!("sha256:{}", "1".repeat(64)));
+        first.set_target(
+            "x86_64-unknown-linux-gnu",
+            format!("sha256:{}", "1".repeat(64)),
+        );
         write_lockfile(&p, &first).expect("first write");
 
         // Second: add macOS; linux-gnu must survive.
@@ -697,12 +698,18 @@ mod tests {
 
         // Original digest.
         let mut first = AddonLockfile::new();
-        first.set_target("x86_64-unknown-linux-gnu", format!("sha256:{}", "1".repeat(64)));
+        first.set_target(
+            "x86_64-unknown-linux-gnu",
+            format!("sha256:{}", "1".repeat(64)),
+        );
         write_lockfile(&p, &first).expect("first write");
 
         // Rebuild on the same host, new digest.
         let mut second = AddonLockfile::new();
-        second.set_target("x86_64-unknown-linux-gnu", format!("sha256:{}", "9".repeat(64)));
+        second.set_target(
+            "x86_64-unknown-linux-gnu",
+            format!("sha256:{}", "9".repeat(64)),
+        );
         write_lockfile(&p, &second).expect("second write");
 
         let merged = read_lockfile(&p).expect("read back");
@@ -722,11 +729,16 @@ mod tests {
         let p = dir.join("addon.lock.toml");
 
         let mut lock = AddonLockfile::new();
-        lock.targets
-            .insert("x86_64-unknown-linux-gnu".to_string(), "not-a-sha".to_string());
+        lock.targets.insert(
+            "x86_64-unknown-linux-gnu".to_string(),
+            "not-a-sha".to_string(),
+        );
         let err = write_lockfile(&p, &lock).unwrap_err();
         matches!(err, LockfileError::InvalidSha256Format { .. });
-        assert!(!p.exists(), "lockfile should not be written when validation fails");
+        assert!(
+            !p.exists(),
+            "lockfile should not be written when validation fails"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -734,7 +746,10 @@ mod tests {
     #[test]
     fn render_lockfile_is_lexicographic() {
         let mut lock = AddonLockfile::new();
-        lock.set_target("x86_64-unknown-linux-gnu", format!("sha256:{}", "1".repeat(64)));
+        lock.set_target(
+            "x86_64-unknown-linux-gnu",
+            format!("sha256:{}", "1".repeat(64)),
+        );
         lock.set_target("aarch64-apple-darwin", format!("sha256:{}", "2".repeat(64)));
         let out = render_lockfile(&lock);
         let linux_idx = out.find("x86_64-unknown-linux-gnu").expect("linux line");

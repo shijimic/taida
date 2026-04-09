@@ -178,8 +178,7 @@ fn test_publish_rust_addon_dry_run_auto_detect() {
     );
 
     // packages.tdm must NOT be modified and addon.lock.toml must NOT exist.
-    let manifest =
-        fs::read_to_string(project_dir.join("packages.tdm")).expect("read packages.tdm");
+    let manifest = fs::read_to_string(project_dir.join("packages.tdm")).expect("read packages.tdm");
     assert_eq!(manifest, "<<<@a @(run)\n");
     assert!(
         !project_dir.join("native").join("addon.lock.toml").exists(),
@@ -366,23 +365,19 @@ fn test_publish_rust_addon_full_flow_skip_release() {
     // matches the library field below.
     fs::write(project_dir.join("Cargo.toml"), MINIMAL_CDYLIB_CARGO_TOML).unwrap();
     fs::create_dir_all(project_dir.join("src")).unwrap();
-    fs::write(project_dir.join("src").join("lib.rs"), MINIMAL_CDYLIB_LIB_RS).unwrap();
+    fs::write(
+        project_dir.join("src").join("lib.rs"),
+        MINIMAL_CDYLIB_LIB_RS,
+    )
+    .unwrap();
 
     // native/addon.toml with library = "taida_rc26_phase1_fixture"
     // so the orchestrator can locate `target/release/libtaida_rc26_phase1_fixture.<ext>`.
-    write_addon_toml(
-        &project_dir,
-        "tester/rc26",
-        "taida_rc26_phase1_fixture",
-    );
+    write_addon_toml(&project_dir, "tester/rc26", "taida_rc26_phase1_fixture");
 
     // .gitignore — keep target/ out of the initial commit so the
     // worktree is clean after `cargo build --release --lib` runs.
-    fs::write(
-        project_dir.join(".gitignore"),
-        "target/\nCargo.lock\n",
-    )
-    .unwrap();
+    fs::write(project_dir.join(".gitignore"), "target/\nCargo.lock\n").unwrap();
 
     run_git(&["add", "."], &project_dir);
     run_git(&["commit", "-m", "initial"], &project_dir);
@@ -568,15 +563,18 @@ fn test_publish_rust_addon_dry_run_plan_explicit() {
     );
 
     // No filesystem mutations.
-    let manifest =
-        fs::read_to_string(project_dir.join("packages.tdm")).expect("read packages.tdm");
+    let manifest = fs::read_to_string(project_dir.join("packages.tdm")).expect("read packages.tdm");
     assert_eq!(manifest, "<<<@a @(run)\n");
     assert!(
         !project_dir.join("native").join("addon.lock.toml").exists(),
         "dry-run=plan must not create addon.lock.toml"
     );
     let tags = git_output(&["tag", "--list"], &project_dir);
-    assert!(tags.is_empty(), "dry-run=plan should create no tags: {}", tags);
+    assert!(
+        tags.is_empty(),
+        "dry-run=plan should create no tags: {}",
+        tags
+    );
 
     let _ = fs::remove_dir_all(&root);
 }
@@ -606,7 +604,11 @@ fn test_publish_rust_addon_dry_run_build() {
     // Cargo.toml + src/lib.rs producing a cdylib.
     fs::write(project_dir.join("Cargo.toml"), MINIMAL_CDYLIB_CARGO_TOML).unwrap();
     fs::create_dir_all(project_dir.join("src")).unwrap();
-    fs::write(project_dir.join("src").join("lib.rs"), MINIMAL_CDYLIB_LIB_RS).unwrap();
+    fs::write(
+        project_dir.join("src").join("lib.rs"),
+        MINIMAL_CDYLIB_LIB_RS,
+    )
+    .unwrap();
 
     // native/addon.toml.
     write_addon_toml(
@@ -616,11 +618,7 @@ fn test_publish_rust_addon_dry_run_build() {
     );
 
     // .gitignore.
-    fs::write(
-        project_dir.join(".gitignore"),
-        "target/\nCargo.lock\n",
-    )
-    .unwrap();
+    fs::write(project_dir.join(".gitignore"), "target/\nCargo.lock\n").unwrap();
 
     run_git(&["add", "."], &project_dir);
     run_git(&["commit", "-m", "initial"], &project_dir);
@@ -741,10 +739,7 @@ fn test_publish_invalid_dry_run_mode_rejected() {
         .output()
         .expect("run taida publish");
 
-    assert!(
-        !output.status.success(),
-        "unknown dry-run mode should fail"
-    );
+    assert!(!output.status.success(), "unknown dry-run mode should fail");
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         stderr.contains("Unknown --dry-run mode") && stderr.contains("commit"),

@@ -44,11 +44,7 @@ pub enum InitTarget {
 ///
 /// * `packages.tdm` already exists in `dir` (conflict guard).
 /// * Any filesystem write fails.
-pub fn init_project(
-    dir: &Path,
-    name: &str,
-    target: InitTarget,
-) -> Result<Vec<String>, String> {
+pub fn init_project(dir: &Path, name: &str, target: InitTarget) -> Result<Vec<String>, String> {
     // ── Name validation ─────────────────────────────────
     validate_project_name(name)?;
 
@@ -128,25 +124,22 @@ fn init_rust_addon(dir: &Path, name: &str) -> Result<Vec<String>, String> {
     created.push("Cargo.toml".to_string());
 
     // ── src/lib.rs ──────────────────────────────────────
-    fs::create_dir_all(dir.join("src")).map_err(|e| {
-        format!("Cannot create src/ directory: {}", e)
-    })?;
+    fs::create_dir_all(dir.join("src"))
+        .map_err(|e| format!("Cannot create src/ directory: {}", e))?;
     let lib_rs = addon_lib_rs(&crate_name);
     write_file(dir, "src/lib.rs", &lib_rs)?;
     created.push("src/lib.rs".to_string());
 
     // ── native/addon.toml ───────────────────────────────
-    fs::create_dir_all(dir.join("native")).map_err(|e| {
-        format!("Cannot create native/ directory: {}", e)
-    })?;
+    fs::create_dir_all(dir.join("native"))
+        .map_err(|e| format!("Cannot create native/ directory: {}", e))?;
     let addon_toml = addon_manifest(&crate_name);
     write_file(dir, "native/addon.toml", &addon_toml)?;
     created.push("native/addon.toml".to_string());
 
     // ── taida/<name>.td ─────────────────────────────────
-    fs::create_dir_all(dir.join("taida")).map_err(|e| {
-        format!("Cannot create taida/ directory: {}", e)
-    })?;
+    fs::create_dir_all(dir.join("taida"))
+        .map_err(|e| format!("Cannot create taida/ directory: {}", e))?;
     let facade = addon_facade(name);
     let facade_path = format!("taida/{name}.td");
     write_file(dir, &facade_path, &facade)?;
@@ -179,9 +172,8 @@ fn init_rust_addon(dir: &Path, name: &str) -> Result<Vec<String>, String> {
     // Placeholders {LIBRARY_STEM} and {PACKAGE_NAME} are replaced
     // with values derived from the project name.
     let workflow = ci_release_workflow(&crate_name, name);
-    fs::create_dir_all(dir.join(".github/workflows")).map_err(|e| {
-        format!("Cannot create .github/workflows/ directory: {}", e)
-    })?;
+    fs::create_dir_all(dir.join(".github/workflows"))
+        .map_err(|e| format!("Cannot create .github/workflows/ directory: {}", e))?;
     write_file(dir, ".github/workflows/release.yml", &workflow)?;
     created.push(".github/workflows/release.yml".to_string());
 
@@ -642,9 +634,7 @@ fn validate_project_name(name: &str) -> Result<(), String> {
 
 fn write_file(dir: &Path, rel_path: &str, content: &str) -> Result<(), String> {
     let abs = dir.join(rel_path);
-    fs::write(&abs, content).map_err(|e| {
-        format!("Error writing '{}': {}", abs.display(), e)
-    })
+    fs::write(&abs, content).map_err(|e| format!("Error writing '{}': {}", abs.display(), e))
 }
 
 // ── Tests ───────────────────────────────────────────────────────
@@ -741,8 +731,14 @@ mod tests {
         let dir = temp_dir("addon_cargo");
         init_project(&dir, "test-pkg", InitTarget::RustAddon).unwrap();
         let content = std::fs::read_to_string(dir.join("Cargo.toml")).unwrap();
-        assert!(content.contains("cdylib"), "Cargo.toml must declare cdylib: {content}");
-        assert!(content.contains("rlib"), "Cargo.toml must declare rlib: {content}");
+        assert!(
+            content.contains("cdylib"),
+            "Cargo.toml must declare cdylib: {content}"
+        );
+        assert!(
+            content.contains("rlib"),
+            "Cargo.toml must declare rlib: {content}"
+        );
         assert!(
             content.contains("taida-addon"),
             "Cargo.toml must depend on taida-addon: {content}"
@@ -755,7 +751,10 @@ mod tests {
         let dir = temp_dir("addon_abi");
         init_project(&dir, "test-pkg", InitTarget::RustAddon).unwrap();
         let content = std::fs::read_to_string(dir.join("native/addon.toml")).unwrap();
-        assert!(content.contains("abi = 1"), "addon.toml must have abi = 1: {content}");
+        assert!(
+            content.contains("abi = 1"),
+            "addon.toml must have abi = 1: {content}"
+        );
         assert!(
             content.contains("entry = \"taida_addon_get_v1\""),
             "addon.toml must have correct entry: {content}"
@@ -803,9 +802,7 @@ mod tests {
         init_project(&dir, "test-pkg", InitTarget::RustAddon).unwrap();
         // The generated addon.toml must be parseable by the real
         // addon manifest parser (RC2.6-3e requirement).
-        let result = crate::addon::manifest::parse_addon_manifest(
-            &dir.join("native/addon.toml"),
-        );
+        let result = crate::addon::manifest::parse_addon_manifest(&dir.join("native/addon.toml"));
         assert!(
             result.is_ok(),
             "addon.toml must be parseable: {:?}",
@@ -905,7 +902,10 @@ mod tests {
     fn test_init_rejects_invalid_name() {
         let dir = temp_dir("bad_name");
         let err = init_project(&dir, "", InitTarget::SourceOnly).unwrap_err();
-        assert!(err.contains("must not be empty"), "expected empty rejection: {err}");
+        assert!(
+            err.contains("must not be empty"),
+            "expected empty rejection: {err}"
+        );
 
         let err = init_project(&dir, "foo bar", InitTarget::RustAddon).unwrap_err();
         assert!(err.contains("lowercase"), "expected char rejection: {err}");
@@ -945,10 +945,7 @@ mod tests {
     fn test_rust_addon_ci_workflow_no_raw_placeholders() {
         let dir = temp_dir("addon_ci_ph");
         init_project(&dir, "my-addon", InitTarget::RustAddon).unwrap();
-        let content = std::fs::read_to_string(
-            dir.join(".github/workflows/release.yml"),
-        )
-        .unwrap();
+        let content = std::fs::read_to_string(dir.join(".github/workflows/release.yml")).unwrap();
         // {LIBRARY_STEM} and {PACKAGE_NAME} must be resolved
         assert!(
             !content.contains("{LIBRARY_STEM}"),
@@ -970,14 +967,23 @@ mod tests {
     fn test_rust_addon_ci_workflow_has_matrix_targets() {
         let dir = temp_dir("addon_ci_mx");
         init_project(&dir, "my-addon", InitTarget::RustAddon).unwrap();
-        let content = std::fs::read_to_string(
-            dir.join(".github/workflows/release.yml"),
-        )
-        .unwrap();
-        assert!(content.contains("x86_64-unknown-linux-gnu"), "missing linux target");
-        assert!(content.contains("x86_64-apple-darwin"), "missing macOS x86 target");
-        assert!(content.contains("aarch64-apple-darwin"), "missing macOS ARM target");
-        assert!(content.contains("x86_64-pc-windows-msvc"), "missing Windows target");
+        let content = std::fs::read_to_string(dir.join(".github/workflows/release.yml")).unwrap();
+        assert!(
+            content.contains("x86_64-unknown-linux-gnu"),
+            "missing linux target"
+        );
+        assert!(
+            content.contains("x86_64-apple-darwin"),
+            "missing macOS x86 target"
+        );
+        assert!(
+            content.contains("aarch64-apple-darwin"),
+            "missing macOS ARM target"
+        );
+        assert!(
+            content.contains("x86_64-pc-windows-msvc"),
+            "missing Windows target"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -985,10 +991,7 @@ mod tests {
     fn test_rust_addon_ci_workflow_has_taida_tag_triggers() {
         let dir = temp_dir("addon_ci_tag");
         init_project(&dir, "my-addon", InitTarget::RustAddon).unwrap();
-        let content = std::fs::read_to_string(
-            dir.join(".github/workflows/release.yml"),
-        )
-        .unwrap();
+        let content = std::fs::read_to_string(dir.join(".github/workflows/release.yml")).unwrap();
         // Taida version tags: '*.*' covers all generation-based versions
         assert!(content.contains("'*.*'"), "missing '*.*' tag trigger");
         // Must NOT contain semver-style v* prefix
@@ -1003,10 +1006,7 @@ mod tests {
     fn test_rust_addon_ci_workflow_has_lockfile_job() {
         let dir = temp_dir("addon_ci_lock");
         init_project(&dir, "my-addon", InitTarget::RustAddon).unwrap();
-        let content = std::fs::read_to_string(
-            dir.join(".github/workflows/release.yml"),
-        )
-        .unwrap();
+        let content = std::fs::read_to_string(dir.join(".github/workflows/release.yml")).unwrap();
         assert!(
             content.contains("lockfile:"),
             "workflow must have lockfile job"
@@ -1026,10 +1026,7 @@ mod tests {
     fn test_rust_addon_ci_workflow_sha256_computation() {
         let dir = temp_dir("addon_ci_sha");
         init_project(&dir, "my-addon", InitTarget::RustAddon).unwrap();
-        let content = std::fs::read_to_string(
-            dir.join(".github/workflows/release.yml"),
-        )
-        .unwrap();
+        let content = std::fs::read_to_string(dir.join(".github/workflows/release.yml")).unwrap();
         assert!(
             content.contains("sha256sum"),
             "workflow must compute SHA-256 (Linux)"
@@ -1049,10 +1046,7 @@ mod tests {
     fn test_rust_addon_ci_workflow_has_create_release_job() {
         let dir = temp_dir("addon_ci_rel");
         init_project(&dir, "my-addon", InitTarget::RustAddon).unwrap();
-        let content = std::fs::read_to_string(
-            dir.join(".github/workflows/release.yml"),
-        )
-        .unwrap();
+        let content = std::fs::read_to_string(dir.join(".github/workflows/release.yml")).unwrap();
         assert!(
             content.contains("create-release:"),
             "workflow must have create-release job"
@@ -1072,10 +1066,7 @@ mod tests {
     fn test_rust_addon_ci_workflow_has_permissions() {
         let dir = temp_dir("addon_ci_perm");
         init_project(&dir, "my-addon", InitTarget::RustAddon).unwrap();
-        let content = std::fs::read_to_string(
-            dir.join(".github/workflows/release.yml"),
-        )
-        .unwrap();
+        let content = std::fs::read_to_string(dir.join(".github/workflows/release.yml")).unwrap();
         assert!(
             content.contains("permissions:"),
             "workflow must declare permissions"
@@ -1091,10 +1082,7 @@ mod tests {
     fn test_rust_addon_ci_workflow_cross_compile() {
         let dir = temp_dir("addon_ci_cross");
         init_project(&dir, "my-addon", InitTarget::RustAddon).unwrap();
-        let content = std::fs::read_to_string(
-            dir.join(".github/workflows/release.yml"),
-        )
-        .unwrap();
+        let content = std::fs::read_to_string(dir.join(".github/workflows/release.yml")).unwrap();
         assert!(
             content.contains("--target ${{ matrix.target }}"),
             "cargo build must use --target flag for cross-compile"
@@ -1111,10 +1099,7 @@ mod tests {
     fn test_rust_addon_ci_workflow_canonical_rename() {
         let dir = temp_dir("addon_ci_rename");
         init_project(&dir, "my-addon", InitTarget::RustAddon).unwrap();
-        let content = std::fs::read_to_string(
-            dir.join(".github/workflows/release.yml"),
-        )
-        .unwrap();
+        let content = std::fs::read_to_string(dir.join(".github/workflows/release.yml")).unwrap();
         assert!(
             content.contains("Rename cdylib to canonical name"),
             "workflow must have rename step"
@@ -1165,10 +1150,7 @@ mod tests {
     fn test_rust_addon_ci_workflow_no_clobber_on_cdylib_upload() {
         let dir = temp_dir("addon_ci_no_clobber");
         init_project(&dir, "my-addon", InitTarget::RustAddon).unwrap();
-        let content = std::fs::read_to_string(
-            dir.join(".github/workflows/release.yml"),
-        )
-        .unwrap();
+        let content = std::fs::read_to_string(dir.join(".github/workflows/release.yml")).unwrap();
         // The cdylib upload step must NOT use --clobber so that a
         // local-publish cdylib is not overwritten by CI.
         // However, the lockfile upload MAY use --clobber (it's a
@@ -1201,10 +1183,7 @@ mod tests {
         // job uses the correct hash.
         let dir = temp_dir("addon_ci_sha_recompute");
         init_project(&dir, "my-addon", InitTarget::RustAddon).unwrap();
-        let content = std::fs::read_to_string(
-            dir.join(".github/workflows/release.yml"),
-        )
-        .unwrap();
+        let content = std::fs::read_to_string(dir.join(".github/workflows/release.yml")).unwrap();
         let mut in_cdylib_upload = false;
         let mut found_download = false;
         let mut found_sha_overwrite = false;
@@ -1221,7 +1200,10 @@ mod tests {
                 if trimmed.contains("gh release download") {
                     found_download = true;
                 }
-                if trimmed.contains("sha256-") && trimmed.contains(".txt") && trimmed.contains("> \"") {
+                if trimmed.contains("sha256-")
+                    && trimmed.contains(".txt")
+                    && trimmed.contains("> \"")
+                {
                     found_sha_overwrite = true;
                 }
             }
@@ -1243,10 +1225,7 @@ mod tests {
     fn test_rust_addon_ci_workflow_upload_uses_bash_shell() {
         let dir = temp_dir("addon_ci_bash");
         init_project(&dir, "my-addon", InitTarget::RustAddon).unwrap();
-        let content = std::fs::read_to_string(
-            dir.join(".github/workflows/release.yml"),
-        )
-        .unwrap();
+        let content = std::fs::read_to_string(dir.join(".github/workflows/release.yml")).unwrap();
         // The upload step and rename step must use `shell: bash` so
         // that $CANONICAL env var expansion works on Windows (B-023).
         let lines: Vec<&str> = content.lines().collect();

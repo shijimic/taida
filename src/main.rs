@@ -3787,10 +3787,7 @@ fn run_init(args: &[String]) {
                 match args[i].as_str() {
                     "rust-addon" => target = pkg::init::InitTarget::RustAddon,
                     other => {
-                        eprintln!(
-                            "Unknown init target '{}'. Supported: rust-addon",
-                            other
-                        );
+                        eprintln!("Unknown init target '{}'. Supported: rust-addon", other);
                         eprintln!("Run `taida init --help` for usage.");
                         std::process::exit(1);
                     }
@@ -4464,7 +4461,9 @@ fn run_publish(args: &[String]) {
             );
         } else {
             eprintln!("Publish failed: {}", msg);
-            eprintln!("packages.tdm (and addon.lock.toml, if applicable) have been restored to their original state.");
+            eprintln!(
+                "packages.tdm (and addon.lock.toml, if applicable) have been restored to their original state."
+            );
         }
         std::process::exit(1);
     };
@@ -4561,10 +4560,7 @@ fn run_publish(args: &[String]) {
             format!("Failed to update '{}': {}", manifest_path.display(), e),
         );
     }
-    println!(
-        "  [rewrite]  packages.tdm <<<@{}",
-        preparation.version
-    );
+    println!("  [rewrite]  packages.tdm <<<@{}", preparation.version);
 
     // Re-compute integrity AFTER packages.tdm rewrite so the digest
     // reflects the final on-disk state of all committed files.
@@ -4594,10 +4590,7 @@ fn run_publish(args: &[String]) {
     // ── I2: worktree dirty only within the allowlist ────
     let allow_refs: Vec<&Path> = allowlist.iter().map(|p| p.as_path()).collect();
     if let Err(e) = pkg::publish::check_dirty_allowlist(&project_dir, &allow_refs) {
-        bail(
-            &rollback,
-            format!("Worktree invariant I2 violated: {}", e),
-        );
+        bail(&rollback, format!("Worktree invariant I2 violated: {}", e));
     }
 
     // ── Commit + tag + push ─────────────────────────────
@@ -4655,14 +4648,8 @@ fn run_publish(args: &[String]) {
             )
             .map(|m| m.package)
             .unwrap_or_else(|_| preparation.package_name.clone());
-            let release_title = format!(
-                "{}@{}",
-                qualified_name, preparation.version
-            );
-            let release_notes = format!(
-                "Release {} of {}",
-                preparation.version, qualified_name
-            );
+            let release_title = format!("{}@{}", qualified_name, preparation.version);
+            let release_notes = format!("Release {} of {}", preparation.version, qualified_name);
 
             let assets = vec![
                 pkg::publish::GhReleaseAsset {

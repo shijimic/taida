@@ -151,7 +151,10 @@ pub fn build_addon_artifacts(project_dir: &Path) -> Result<AddonBuildOutput, Str
 
     let cdylib_prefix = host.cdylib_prefix();
     let cdylib_name = format!("{cdylib_prefix}{library_stem}.{cdylib_ext}");
-    let cdylib_path = project_dir.join("target").join("release").join(&cdylib_name);
+    let cdylib_path = project_dir
+        .join("target")
+        .join("release")
+        .join(&cdylib_name);
     if !cdylib_path.exists() {
         return Err(format!(
             "build_addon_artifacts: expected cdylib '{}' not found after `cargo build --release --lib`. \
@@ -319,9 +322,8 @@ pub fn rewrite_prebuild_url_if_needed(project_dir: &Path) -> Result<bool, String
         None => return Ok(false), // non-GitHub remote → skip
     };
 
-    let source = std::fs::read_to_string(&addon_toml_path).map_err(|e| {
-        format!("Failed to read '{}': {}", addon_toml_path.display(), e)
-    })?;
+    let source = std::fs::read_to_string(&addon_toml_path)
+        .map_err(|e| format!("Failed to read '{}': {}", addon_toml_path.display(), e))?;
 
     // Look for a line matching `url = "https://github.com/<...>/<...>/releases/download/..."`
     // and replace the org/name portion with the origin-derived values.
@@ -330,7 +332,10 @@ pub fn rewrite_prebuild_url_if_needed(project_dir: &Path) -> Result<bool, String
 
     for line in source.lines() {
         let trimmed = line.trim();
-        if trimmed.starts_with("url") && trimmed.contains("https://github.com/") && trimmed.contains("/releases/download/") {
+        if trimmed.starts_with("url")
+            && trimmed.contains("https://github.com/")
+            && trimmed.contains("/releases/download/")
+        {
             // Extract the current URL value
             if let Some(eq_pos) = trimmed.find('=') {
                 let value_part = trimmed[eq_pos + 1..].trim();
@@ -365,9 +370,8 @@ pub fn rewrite_prebuild_url_if_needed(project_dir: &Path) -> Result<bool, String
     }
 
     if changed {
-        std::fs::write(&addon_toml_path, &rewritten).map_err(|e| {
-            format!("Failed to write '{}': {}", addon_toml_path.display(), e)
-        })?;
+        std::fs::write(&addon_toml_path, &rewritten)
+            .map_err(|e| format!("Failed to write '{}': {}", addon_toml_path.display(), e))?;
     }
 
     Ok(changed)
@@ -564,10 +568,7 @@ pub fn check_worktree_clean(project_dir: &Path) -> Result<(), String> {
 /// [`compute_publish_integrity`]. This is the only implicit exception;
 /// every other file must be in `allowlist` or the worktree counts as
 /// dirty.
-pub fn check_dirty_allowlist(
-    project_dir: &Path,
-    allowlist: &[&Path],
-) -> Result<(), String> {
+pub fn check_dirty_allowlist(project_dir: &Path, allowlist: &[&Path]) -> Result<(), String> {
     // Use `-u` (`--untracked-files=all`) so that untracked directories
     // are expanded into individual file entries. Without this flag, git
     // rolls up untracked directories (e.g. `?? native/`) and a prefix
@@ -626,9 +627,7 @@ pub fn check_dirty_allowlist(
         let path_str = path_str.trim_matches('"');
 
         // Implicit exclusion: target/ (cargo build output).
-        if path_str == "target" || path_str == "target/"
-            || path_str.starts_with("target/")
-        {
+        if path_str == "target" || path_str == "target/" || path_str.starts_with("target/") {
             continue;
         }
 
@@ -764,9 +763,9 @@ pub fn git_commit_tag_push(
                 project_dir.display()
             ));
         }
-        let rel_str = extra
-            .to_str()
-            .ok_or_else(|| "git_commit_tag_push: extra_paths entry is not valid UTF-8.".to_string())?;
+        let rel_str = extra.to_str().ok_or_else(|| {
+            "git_commit_tag_push: extra_paths entry is not valid UTF-8.".to_string()
+        })?;
         run_git(project_dir, &["add", rel_str])?;
     }
 
@@ -899,11 +898,7 @@ impl PublishRollback {
             match entry {
                 PublishRollbackEntry::Existing { path, original } => {
                     if let Err(e) = std::fs::write(path, original) {
-                        errors.push(format!(
-                            "failed to restore '{}': {}",
-                            path.display(),
-                            e
-                        ));
+                        errors.push(format!("failed to restore '{}': {}", path.display(), e));
                     }
                 }
                 PublishRollbackEntry::Missing { path } => {
@@ -932,13 +927,10 @@ impl PublishRollback {
         // directory without a git repo (unit tests), or git may not
         // be on PATH. The file-content restoration above is the
         // critical path; the index cleanup is supplementary.
-        let work_dir: Option<&Path> = self
-            .entries
-            .first()
-            .and_then(|e| match e {
-                PublishRollbackEntry::Existing { path, .. }
-                | PublishRollbackEntry::Missing { path } => path.parent(),
-            });
+        let work_dir: Option<&Path> = self.entries.first().and_then(|e| match e {
+            PublishRollbackEntry::Existing { path, .. }
+            | PublishRollbackEntry::Missing { path } => path.parent(),
+        });
         if let Some(cwd) = work_dir {
             for entry in &self.entries {
                 let (path, is_missing) = match entry {
@@ -1054,9 +1046,7 @@ pub fn create_github_release(
     let gh_bin = env::var("GH_BIN").unwrap_or_else(|_| "gh".to_string());
 
     // Pre-check 1: Is `gh` available at all?
-    let version_check = Command::new(&gh_bin)
-        .args(["--version"])
-        .output();
+    let version_check = Command::new(&gh_bin).args(["--version"]).output();
     match version_check {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             return Err(format!(
@@ -1078,16 +1068,12 @@ pub fn create_github_release(
             ));
         }
         Err(e) => {
-            return Err(format!(
-                "Failed to invoke `{}`: {}",
-                gh_bin, e
-            ));
+            return Err(format!("Failed to invoke `{}`: {}", gh_bin, e));
         }
         Ok(out) if !out.status.success() => {
             return Err(format!(
                 "`{} --version` exited with status {}.",
-                gh_bin,
-                out.status
+                gh_bin, out.status
             ));
         }
         Ok(_) => {}
@@ -1174,9 +1160,8 @@ pub fn create_github_release(
         } else {
             // Name differs — copy to temp dir with canonical name so
             // the GitHub Release asset URL uses the canonical name.
-            std::fs::create_dir_all(&rename_dir).map_err(|e| {
-                format!("Cannot create temp dir for asset rename: {}", e)
-            })?;
+            std::fs::create_dir_all(&rename_dir)
+                .map_err(|e| format!("Cannot create temp dir for asset rename: {}", e))?;
             let dest = rename_dir.join(&asset.asset_name);
             std::fs::copy(&asset.local_path, &dest).map_err(|e| {
                 format!(
@@ -1992,11 +1977,7 @@ mod tests {
         let dir = init_tmp_git_repo("nested");
         // Simulate addon.lock.toml being created for the first time.
         std::fs::create_dir_all(dir.join("native")).unwrap();
-        std::fs::write(
-            dir.join("native").join("addon.lock.toml"),
-            "[targets]\n",
-        )
-        .unwrap();
+        std::fs::write(dir.join("native").join("addon.lock.toml"), "[targets]\n").unwrap();
         let allowed = [Path::new("native/addon.lock.toml")];
         check_dirty_allowlist(&dir, &allowed).expect("nested allowlist match");
         let _ = std::fs::remove_dir_all(&dir);
@@ -2014,11 +1995,7 @@ mod tests {
         let dir = init_tmp_git_repo("dir_rollup");
         std::fs::create_dir_all(dir.join("native")).unwrap();
         // Allowlisted file.
-        std::fs::write(
-            dir.join("native").join("addon.lock.toml"),
-            "[targets]\n",
-        )
-        .unwrap();
+        std::fs::write(dir.join("native").join("addon.lock.toml"), "[targets]\n").unwrap();
         // Stray file NOT in the allowlist.
         std::fs::write(dir.join("native").join("extra.txt"), "oops\n").unwrap();
         let allowed = [Path::new("native/addon.lock.toml")];
@@ -2302,14 +2279,7 @@ mod tests {
         let prev = std::env::var("GH_BIN").ok();
         unsafe { std::env::set_var("GH_BIN", "/nonexistent/gh-test-bin-rc26") };
 
-        let err = create_github_release(
-            &dir,
-            "a.1",
-            "test a.1",
-            "notes",
-            &[],
-        )
-        .unwrap_err();
+        let err = create_github_release(&dir, "a.1", "test a.1", "notes", &[]).unwrap_err();
 
         // Restore env.
         match prev {
@@ -2318,11 +2288,15 @@ mod tests {
         }
 
         assert!(
-            err.contains("not found") || err.contains("Not Found") || err.contains("Failed to invoke"),
+            err.contains("not found")
+                || err.contains("Not Found")
+                || err.contains("Failed to invoke"),
             "error should indicate gh is missing: {err}"
         );
         assert!(
-            err.contains("gh auth login") || err.contains("cli.github.com") || err.contains("Failed"),
+            err.contains("gh auth login")
+                || err.contains("cli.github.com")
+                || err.contains("Failed"),
             "error should contain action hints: {err}"
         );
 
@@ -2347,11 +2321,7 @@ mod tests {
         let mock_gh = dir.join("mock-gh");
         #[cfg(unix)]
         {
-            std::fs::write(
-                &mock_gh,
-                "#!/bin/sh\nexit 0\n",
-            )
-            .unwrap();
+            std::fs::write(&mock_gh, "#!/bin/sh\nexit 0\n").unwrap();
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&mock_gh, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
@@ -2370,14 +2340,8 @@ mod tests {
             local_path: dir.join("nonexistent-lib.so"),
             asset_name: "libfoo-x86_64-unknown-linux-gnu.so".to_string(),
         };
-        let err = create_github_release(
-            &dir,
-            "a.1",
-            "test a.1",
-            "notes",
-            &[bogus_asset],
-        )
-        .unwrap_err();
+        let err =
+            create_github_release(&dir, "a.1", "test a.1", "notes", &[bogus_asset]).unwrap_err();
 
         match prev {
             Some(v) => unsafe { std::env::set_var("GH_BIN", v) },
@@ -2401,10 +2365,8 @@ mod tests {
     #[test]
     fn test_rewrite_prebuild_url_no_addon_toml() {
         // If there is no native/addon.toml, the function should return Ok(false).
-        let dir = std::env::temp_dir().join(format!(
-            "taida_test_b004_no_addon_{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("taida_test_b004_no_addon_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         // No native/addon.toml created.
@@ -2418,10 +2380,8 @@ mod tests {
         // RC2.6B-004: create a real git repo with a GitHub-style origin
         // and an addon.toml pointing to a different org. Verify that
         // rewrite_prebuild_url_if_needed rewrites the file on disk.
-        let dir = std::env::temp_dir().join(format!(
-            "taida_test_b004_rewrite_{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("taida_test_b004_rewrite_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("native")).unwrap();
 
@@ -2434,7 +2394,12 @@ mod tests {
                 .expect("git failed")
         };
         run_git(&["init"]);
-        run_git(&["remote", "add", "origin", "https://github.com/shijimic/terminal.git"]);
+        run_git(&[
+            "remote",
+            "add",
+            "origin",
+            "https://github.com/shijimic/terminal.git",
+        ]);
 
         // Write addon.toml with a different org (taida-lang)
         let addon_toml = dir.join("native/addon.toml");
@@ -2486,10 +2451,7 @@ url = "https://github.com/taida-lang/terminal/releases/download/{version}/lib{na
     fn test_rewrite_prebuild_url_no_change_when_origin_matches() {
         // When the addon.toml URL already matches the git origin,
         // the function should return Ok(false) and not modify the file.
-        let dir = std::env::temp_dir().join(format!(
-            "taida_test_b004_noop_{}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("taida_test_b004_noop_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("native")).unwrap();
 
@@ -2501,7 +2463,12 @@ url = "https://github.com/taida-lang/terminal/releases/download/{version}/lib{na
                 .expect("git failed")
         };
         run_git(&["init"]);
-        run_git(&["remote", "add", "origin", "https://github.com/taida-lang/terminal.git"]);
+        run_git(&[
+            "remote",
+            "add",
+            "origin",
+            "https://github.com/taida-lang/terminal.git",
+        ]);
 
         let addon_toml = dir.join("native/addon.toml");
         let original = r#"abi = 1

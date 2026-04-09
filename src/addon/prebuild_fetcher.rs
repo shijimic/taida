@@ -607,16 +607,10 @@ fn download_from_https(
 /// `version`:      exact tag, e.g. `"a.1"` (NO `v` prefix — Taida tags
 ///                 are `a.1`, not `va.1`)
 #[cfg(feature = "community")]
-pub fn fetch_release_lockfile(
-    package_name: &str,
-    version: &str,
-) -> Result<String, String> {
-    let (org, name) = package_name.split_once('/').ok_or_else(|| {
-        format!(
-            "Cannot parse package name '{}' as org/name",
-            package_name
-        )
-    })?;
+pub fn fetch_release_lockfile(package_name: &str, version: &str) -> Result<String, String> {
+    let (org, name) = package_name
+        .split_once('/')
+        .ok_or_else(|| format!("Cannot parse package name '{}' as org/name", package_name))?;
 
     let base_url = crate::pkg::store::github_base_url();
     let url = format!(
@@ -651,15 +645,17 @@ pub fn fetch_release_lockfile(
         ));
     }
 
-    let body = response.text().map_err(|e| {
-        format!("Failed to read addon.lock.toml response body: {}", e)
-    })?;
+    let body = response
+        .text()
+        .map_err(|e| format!("Failed to read addon.lock.toml response body: {}", e))?;
 
     // Sanity check: lockfile should be small text
     if body.len() > 1_048_576 {
         return Err(format!(
             "addon.lock.toml for '{}@{}' is too large ({} bytes, limit 1 MB)",
-            package_name, version, body.len()
+            package_name,
+            version,
+            body.len()
         ));
     }
 
@@ -668,10 +664,7 @@ pub fn fetch_release_lockfile(
 
 /// Stub for when `community` feature is not enabled.
 #[cfg(not(feature = "community"))]
-pub fn fetch_release_lockfile(
-    package_name: &str,
-    version: &str,
-) -> Result<String, String> {
+pub fn fetch_release_lockfile(package_name: &str, version: &str) -> Result<String, String> {
     Err(format!(
         "HTTPS downloads require the 'community' feature (addon.lock.toml for '{}@{}')",
         package_name, version

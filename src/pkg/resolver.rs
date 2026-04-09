@@ -436,11 +436,10 @@ pub fn install_addon_prebuilds(
             None if addon_manifest.prebuild.has_prebuild() => {
                 // RC2.6 addon.lock.toml fallback: targets not in addon.toml,
                 // download addon.lock.toml from the GitHub Release asset.
-                let lockfile_text =
-                    crate::addon::prebuild_fetcher::fetch_release_lockfile(
-                        &pkg.name,
-                        &pkg.version,
-                    )?;
+                let lockfile_text = crate::addon::prebuild_fetcher::fetch_release_lockfile(
+                    &pkg.name,
+                    &pkg.version,
+                )?;
                 let addon_lockfile = crate::addon::lockfile::parse_lockfile_str(
                     std::path::Path::new("addon.lock.toml"),
                     &lockfile_text,

@@ -15,7 +15,10 @@ fn unique_temp_dir(prefix: &str) -> PathBuf {
         .expect("system clock should be after unix epoch")
         .as_nanos();
     let p = std::env::temp_dir().join(format!(
-        "taida_cli_init_{}_{}_{}", prefix, std::process::id(), nanos
+        "taida_cli_init_{}_{}_{}",
+        prefix,
+        std::process::id(),
+        nanos
     ));
     let _ = fs::remove_dir_all(&p);
     fs::create_dir_all(&p).unwrap();
@@ -47,12 +50,30 @@ fn test_init_rust_addon_creates_full_tree() {
     );
 
     // Verify all expected files exist.
-    assert!(project_dir.join("packages.tdm").exists(), "packages.tdm missing");
-    assert!(project_dir.join("Cargo.toml").exists(), "Cargo.toml missing");
-    assert!(project_dir.join("src/lib.rs").exists(), "src/lib.rs missing");
-    assert!(project_dir.join("native/addon.toml").exists(), "native/addon.toml missing");
-    assert!(project_dir.join("taida/foo.td").exists(), "taida/foo.td missing");
-    assert!(project_dir.join(".gitignore").exists(), ".gitignore missing");
+    assert!(
+        project_dir.join("packages.tdm").exists(),
+        "packages.tdm missing"
+    );
+    assert!(
+        project_dir.join("Cargo.toml").exists(),
+        "Cargo.toml missing"
+    );
+    assert!(
+        project_dir.join("src/lib.rs").exists(),
+        "src/lib.rs missing"
+    );
+    assert!(
+        project_dir.join("native/addon.toml").exists(),
+        "native/addon.toml missing"
+    );
+    assert!(
+        project_dir.join("taida/foo.td").exists(),
+        "taida/foo.td missing"
+    );
+    assert!(
+        project_dir.join(".gitignore").exists(),
+        ".gitignore missing"
+    );
     assert!(project_dir.join("README.md").exists(), "README.md missing");
     assert!(
         project_dir.join(".github/workflows/release.yml").exists(),
@@ -60,7 +81,10 @@ fn test_init_rust_addon_creates_full_tree() {
     );
 
     // main.td must NOT exist for addon projects.
-    assert!(!project_dir.join("main.td").exists(), "main.td must not exist for addon");
+    assert!(
+        !project_dir.join("main.td").exists(),
+        "main.td must not exist for addon"
+    );
 
     let _ = fs::remove_dir_all(&root);
 }
@@ -160,7 +184,10 @@ fn test_init_rust_addon_addon_toml_structure() {
         content.contains("entry = \"taida_addon_get_v1\""),
         "addon.toml must have correct entry symbol"
     );
-    assert!(content.contains("[functions]"), "addon.toml must have [functions]");
+    assert!(
+        content.contains("[functions]"),
+        "addon.toml must have [functions]"
+    );
     assert!(content.contains("echo = 1"), "addon.toml must declare echo");
     assert!(
         content.contains("[library.prebuild]"),
@@ -186,10 +213,7 @@ fn test_init_unknown_target_produces_error() {
         .output()
         .expect("taida init should run");
 
-    assert!(
-        !output.status.success(),
-        "unknown target should fail"
-    );
+    assert!(!output.status.success(), "unknown target should fail");
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         stderr.contains("Unknown init target"),
@@ -224,11 +248,26 @@ fn test_init_rust_addon_no_name_uses_cwd() {
     );
 
     // Files should be created in the CWD (root).
-    assert!(root.join("packages.tdm").exists(), "packages.tdm missing in CWD");
-    assert!(root.join("Cargo.toml").exists(), "Cargo.toml missing in CWD");
-    assert!(root.join("src/lib.rs").exists(), "src/lib.rs missing in CWD");
-    assert!(root.join("native/addon.toml").exists(), "native/addon.toml missing in CWD");
-    assert!(root.join(".gitignore").exists(), ".gitignore missing in CWD");
+    assert!(
+        root.join("packages.tdm").exists(),
+        "packages.tdm missing in CWD"
+    );
+    assert!(
+        root.join("Cargo.toml").exists(),
+        "Cargo.toml missing in CWD"
+    );
+    assert!(
+        root.join("src/lib.rs").exists(),
+        "src/lib.rs missing in CWD"
+    );
+    assert!(
+        root.join("native/addon.toml").exists(),
+        "native/addon.toml missing in CWD"
+    );
+    assert!(
+        root.join(".gitignore").exists(),
+        ".gitignore missing in CWD"
+    );
     assert!(root.join("README.md").exists(), "README.md missing in CWD");
 
     let _ = fs::remove_dir_all(&parent);
@@ -255,7 +294,10 @@ fn test_init_rust_addon_ci_workflow_exists() {
     );
 
     let workflow_path = project_dir.join(".github/workflows/release.yml");
-    assert!(workflow_path.exists(), ".github/workflows/release.yml missing");
+    assert!(
+        workflow_path.exists(),
+        ".github/workflows/release.yml missing"
+    );
 
     let content = fs::read_to_string(&workflow_path).unwrap();
 
@@ -283,8 +325,14 @@ fn test_init_rust_addon_ci_workflow_exists() {
     assert!(content.contains("'*.*'"), "missing '*.*' tag trigger");
 
     // Must have the four matrix targets.
-    assert!(content.contains("x86_64-unknown-linux-gnu"), "missing linux target");
-    assert!(content.contains("aarch64-apple-darwin"), "missing macOS ARM target");
+    assert!(
+        content.contains("x86_64-unknown-linux-gnu"),
+        "missing linux target"
+    );
+    assert!(
+        content.contains("aarch64-apple-darwin"),
+        "missing macOS ARM target"
+    );
 
     // Must reference addon.lock.toml (lockfile job).
     assert!(
