@@ -463,7 +463,13 @@ pub fn install_addon_prebuilds(
                              \x20 host target:    {}\n\
                              \x20 available targets in addon.lock.toml:\n\
                              \x20   - {}\n\
-                             \x20 action: ask the addon author to upload a prebuild for {}",
+                             \x20 action: ask the addon author to upload a prebuild for {}\n\
+                             \x20\n\
+                             \x20 If you are the addon author, run:\n\
+                             \x20   cd <addon-repo>\n\
+                             \x20   taida publish --target rust-addon\n\
+                             \x20\n\
+                             \x20 Or trigger the CI release workflow by pushing a version tag.",
                             addon_manifest.package,
                             host.as_triple(),
                             if available.is_empty() {
@@ -483,7 +489,11 @@ pub fn install_addon_prebuilds(
                 return Err(format!(
                     "addon '{}' is not available for your platform\n\
                      \x20 host target:    {}\n\
-                     \x20 action: ask the addon author to upload a prebuild for {}",
+                     \x20 action: ask the addon author to upload a prebuild for {}\n\
+                     \x20\n\
+                     \x20 If you are the addon author, run:\n\
+                     \x20   cd <addon-repo>\n\
+                     \x20   taida publish --target rust-addon",
                     addon_manifest.package,
                     host.as_triple(),
                     host.as_triple(),

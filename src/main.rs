@@ -4299,10 +4299,22 @@ fn run_publish(args: &[String]) {
     }
 
     // ── Authentication & project discovery ──────────────
-    let token = auth::token::load_token().unwrap_or_else(|| {
+    //
+    // RC2.6B-017: `--dry-run=plan` should not require authentication.
+    // The token is only needed for the real publish flow (git push +
+    // proposals URL). For plan mode we attempt to load it but fall
+    // back to a placeholder so the user can inspect what *would*
+    // happen without being logged in.
+    let token_opt = auth::token::load_token();
+    if token_opt.is_none() && dry_run != Some(DryRunMode::Plan) {
         eprintln!("Authentication required. Run `taida auth login` first.");
         std::process::exit(1);
-    });
+    }
+    // For display purposes in dry-run output.
+    let author_name = token_opt
+        .as_ref()
+        .map(|t| t.username.clone())
+        .unwrap_or_else(|| "(not authenticated)".to_string());
 
     let project_dir = find_packages_tdm().unwrap_or_else(|| {
         eprintln!("No packages.tdm found in current directory or parent directories.");
@@ -4357,7 +4369,7 @@ fn run_publish(args: &[String]) {
         &project_dir,
         &manifest,
         &manifest_source,
-        &token.username,
+        &author_name,
         label.as_deref(),
     ) {
         Ok(preparation) => preparation,
@@ -4375,7 +4387,7 @@ fn run_publish(args: &[String]) {
     // know what the real run would do.
     if dry_run == Some(DryRunMode::Plan) {
         println!("Dry run: no changes made.");
-        println!("  Package: {}/{}", token.username, preparation.package_name);
+        println!("  Package: {}/{}", author_name, preparation.package_name);
         println!("  Version: @{}", preparation.version);
         println!("  Integrity: {}", preparation.integrity);
         if let Some(previous) = &preparation.previous_version {
@@ -4400,7 +4412,7 @@ fn run_publish(args: &[String]) {
     // to perform, so it degrades to `plan` mode gracefully.
     if dry_run == Some(DryRunMode::Build) && !is_addon_flow {
         println!("Dry run (build): no addon build required for source-only packages.");
-        println!("  Package: {}/{}", token.username, preparation.package_name);
+        println!("  Package: {}/{}", author_name, preparation.package_name);
         println!("  Version: @{}", preparation.version);
         println!("  Integrity: {}", preparation.integrity);
         if let Some(previous) = &preparation.previous_version {
@@ -4421,6 +4433,7 @@ fn run_publish(args: &[String]) {
     let mut allowlist: Vec<std::path::PathBuf> = vec![std::path::PathBuf::from("packages.tdm")];
     if is_addon_flow {
         allowlist.push(std::path::PathBuf::from("native/addon.lock.toml"));
+        allowlist.push(std::path::PathBuf::from("native/addon.toml"));
     }
 
     // ── Snapshot every mutable file BEFORE any side-effect ─
@@ -4429,11 +4442,15 @@ fn run_publish(args: &[String]) {
         eprintln!("Publish failed (rollback snapshot): {}", e);
         std::process::exit(1);
     }
-    if is_addon_flow
-        && let Err(e) = rollback.snapshot(&addon_lock_path)
-    {
-        eprintln!("Publish failed (rollback snapshot addon.lock.toml): {}", e);
-        std::process::exit(1);
+    if is_addon_flow {
+        if let Err(e) = rollback.snapshot(&addon_lock_path) {
+            eprintln!("Publish failed (rollback snapshot addon.lock.toml): {}", e);
+            std::process::exit(1);
+        }
+        if let Err(e) = rollback.snapshot(&addon_toml_path) {
+            eprintln!("Publish failed (rollback snapshot addon.toml): {}", e);
+            std::process::exit(1);
+        }
     }
 
     // Helper for deterministic error-path cleanup. We use a closure
@@ -4469,8 +4486,22 @@ fn run_publish(args: &[String]) {
     let mut addon_cdylib_path: Option<PathBuf> = None;
     let mut addon_library_stem: Option<String> = None;
     let mut addon_host_triple: Option<String> = None;
+    // Track whether addon.toml was modified so it gets staged.
+    let mut addon_toml_rewritten = false;
 
     if is_addon_flow {
+        // RC2.6B-004: rewrite addon.toml prebuild URL template to
+        // match the current git remote origin. This ensures that
+        // forks do not publish with the upstream org hardcoded.
+        match pkg::publish::rewrite_prebuild_url_if_needed(&project_dir) {
+            Ok(true) => {
+                println!("  [url]      addon.toml prebuild URL rewritten to match git origin");
+                addon_toml_rewritten = true;
+            }
+            Ok(false) => {} // URL already correct or no origin
+            Err(e) => bail(&rollback, format!("addon.toml URL rewrite failed: {}", e)),
+        }
+
         #[cfg(feature = "native")]
         {
             let build_output = match pkg::publish::build_addon_artifacts(&project_dir) {
@@ -4549,7 +4580,7 @@ fn run_publish(args: &[String]) {
     // on disk so the user can inspect them.
     if dry_run == Some(DryRunMode::Build) {
         println!("Dry run (build): build + lockfile completed, git/release skipped.");
-        println!("  Package: {}/{}", token.username, preparation.package_name);
+        println!("  Package: {}/{}", author_name, preparation.package_name);
         println!("  Version: @{}", preparation.version);
         println!("  Integrity: {}", final_integrity);
         if is_addon_flow {
@@ -4571,7 +4602,12 @@ fn run_publish(args: &[String]) {
 
     // ── Commit + tag + push ─────────────────────────────
     let extra_paths: Vec<&Path> = if is_addon_flow {
-        vec![Path::new("native/addon.lock.toml")]
+        let mut paths = vec![Path::new("native/addon.lock.toml")];
+        // RC2.6B-004: stage addon.toml if the URL was rewritten
+        if addon_toml_rewritten {
+            paths.push(Path::new("native/addon.toml"));
+        }
+        paths
     } else {
         Vec::new()
     };
@@ -4611,8 +4647,9 @@ fn run_publish(args: &[String]) {
             let canonical_cdylib_name =
                 format!("lib{}-{}.{}", library_stem, host_triple, cdylib_ext);
 
+            // RC2.6B-024: release title uses org/name@version format.
             let release_title = format!(
-                "{} {}",
+                "{}@{}",
                 preparation.package_name, preparation.version
             );
             let release_notes = format!(
@@ -4667,7 +4704,7 @@ fn run_publish(args: &[String]) {
 
     println!(
         "Published {}/{}@{}",
-        token.username, preparation.package_name, preparation.version
+        author_name, preparation.package_name, preparation.version
     );
     println!("  Integrity: {}", final_integrity);
     println!("  Tag: {}", preparation.version);
@@ -4676,7 +4713,7 @@ fn run_publish(args: &[String]) {
     println!(
         "  {}",
         pkg::publish::proposals_url(
-            &token.username,
+            &author_name,
             &preparation.package_name,
             &preparation.version,
             &final_integrity,
