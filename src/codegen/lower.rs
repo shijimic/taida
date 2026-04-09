@@ -1,5 +1,8 @@
 use super::ir::*;
 /// AST → Taida IR 変換（Lowering）
+use crate::net_surface::{
+    NET_HTTP_PROTOCOL_SYMBOL, NET_HTTP_PROTOCOL_VARIANTS, http_protocol_variant_to_wire,
+};
 use crate::parser::*;
 
 /// 簡易フィールド名ハッシュ（FNV-1a）
@@ -58,6 +61,8 @@ pub struct Lowering {
     field_type_tags: std::collections::HashMap<String, i64>,
     /// Mold 定義レジストリ（custom mold lowering 用）
     pub(crate) mold_defs: std::collections::HashMap<String, crate::parser::MoldDef>,
+    /// Enum definitions: enum_name -> variants in ordinal order
+    enum_defs: std::collections::HashMap<String, Vec<String>>,
     /// Mold 名 → solidify ヘルパー関数シンボル（mangled）
     pub(crate) mold_solidify_funcs: std::collections::HashMap<String, String>,
     /// 戻り値が Str のユーザー定義関数名セット
@@ -328,6 +333,7 @@ impl Lowering {
             field_names: std::collections::HashSet::new(),
             field_type_tags: std::collections::HashMap::new(),
             mold_defs: std::collections::HashMap::new(),
+            enum_defs: std::collections::HashMap::new(),
             mold_solidify_funcs: std::collections::HashMap::new(),
             string_returning_funcs: std::collections::HashSet::new(),
             bool_returning_funcs: std::collections::HashSet::new(),
@@ -1525,6 +1531,41 @@ impl Lowering {
         }
     }
 
+    fn register_net_enum_import(&mut self, local_name: &str) {
+        self.enum_defs.insert(
+            local_name.to_string(),
+            NET_HTTP_PROTOCOL_VARIANTS
+                .iter()
+                .map(|variant| (*variant).to_string())
+                .collect(),
+        );
+    }
+
+    fn rewrite_http_serve_tls_expr_for_runtime(&self, expr: &Expr) -> Expr {
+        let Expr::BuchiPack(fields, span) = expr else {
+            return expr.clone();
+        };
+        let rewritten_fields = fields
+            .iter()
+            .map(|field| {
+                if field.name == "protocol"
+                    && let Expr::EnumVariant(enum_name, variant_name, variant_span) = &field.value
+                    && self.enum_defs.contains_key(enum_name)
+                {
+                    let protocol = http_protocol_variant_to_wire(variant_name);
+                    if let Some(protocol) = protocol {
+                        let mut rewritten = field.clone();
+                        rewritten.value =
+                            Expr::StringLit(protocol.to_string(), variant_span.clone());
+                        return rewritten;
+                    }
+                }
+                field.clone()
+            })
+            .collect();
+        Expr::BuchiPack(rewritten_fields, span.clone())
+    }
+
     /// taida-lang/pool package function → C runtime function mapping.
     fn pool_func_mapping(sym: &str) -> Option<&'static str> {
         match sym {
@@ -1733,6 +1774,16 @@ impl Lowering {
                     if !methods.is_empty() {
                         self.type_method_defs.insert(type_def.name.clone(), methods);
                     }
+                }
+                Statement::EnumDef(enum_def) => {
+                    self.enum_defs.insert(
+                        enum_def.name.clone(),
+                        enum_def
+                            .variants
+                            .iter()
+                            .map(|variant| variant.name.clone())
+                            .collect(),
+                    );
                 }
                 Statement::MoldDef(mold_def) => {
                     let non_method_field_defs: Vec<crate::parser::FieldDef> = mold_def
@@ -1943,6 +1994,9 @@ impl Lowering {
 
                         if let Some(rt_name) = runtime_name {
                             self.stdlib_runtime_funcs.insert(alias, rt_name.to_string());
+                        } else if path == "taida-lang/net" && orig_name == NET_HTTP_PROTOCOL_SYMBOL
+                        {
+                            self.register_net_enum_import(&alias);
                         } else if is_core_bundled_path {
                             if path == "taida-lang/net" {
                                 return Err(LowerError {
@@ -2781,6 +2835,7 @@ impl Lowering {
         stmt: &Statement,
     ) -> Result<(), LowerError> {
         match stmt {
+            Statement::EnumDef(_) => Ok(()),
             Statement::Expr(expr) => {
                 self.lower_expr(func, expr)?;
                 Ok(())
@@ -3138,6 +3193,20 @@ impl Lowering {
             Expr::Pipeline(exprs, _) => self.lower_pipeline(func, exprs),
             Expr::BuchiPack(fields, _) => self.lower_buchi_pack(func, fields),
             Expr::TypeInst(name, fields, _) => self.lower_type_inst(func, name, fields),
+            Expr::EnumVariant(enum_name, variant_name, _) => {
+                let ordinal = self
+                    .enum_defs
+                    .get(enum_name)
+                    .and_then(|variants| {
+                        variants.iter().position(|variant| variant == variant_name)
+                    })
+                    .ok_or_else(|| LowerError {
+                        message: format!("unknown enum variant '{}:{}()'", enum_name, variant_name),
+                    })?;
+                let result = func.alloc_var();
+                func.push(IrInst::ConstInt(result, ordinal as i64));
+                Ok(result)
+            }
             Expr::FieldAccess(obj, field, _) => self.lower_field_access(func, obj, field),
             Expr::CondBranch(arms, _) => self.lower_cond_branch(func, arms),
             Expr::Lambda(params, body, _) => self.lower_lambda(func, params, body),
@@ -3710,7 +3779,8 @@ impl Lowering {
                 // When omitted, pass 0 (tagged int 0 = plaintext).
                 // When provided, it's a BuchiPack expression (@() or @(cert, key)).
                 let tls_var = if let Some(arg) = args.get(5) {
-                    self.lower_expr(func, arg)?
+                    let tls_expr = self.rewrite_http_serve_tls_expr_for_runtime(arg);
+                    self.lower_expr(func, &tls_expr)?
                 } else {
                     let v = func.alloc_var();
                     func.push(IrInst::ConstInt(v, 0)); // default: 0 = plaintext

@@ -4,7 +4,6 @@ use super::escape_json;
 use super::extract::GraphExtractor;
 use super::model::*;
 use super::query;
-use crate::lexer::Span;
 use crate::module_graph;
 use crate::parser::*;
 use serde_json::json;
@@ -612,7 +611,7 @@ fn scan_stmt_for_direction(stmt: &Statement, file: &str, findings: &mut Vec<Veri
                     severity: Severity::Error,
                     message: "E0301: Single-direction constraint violation \u{2014} => and <= must not be mixed in the same statement".to_string(),
                     file: Some(file.to_string()),
-                    line: expr_span(expr).map(|s| s.line),
+                    line: Some(expr.span().line),
                 });
             }
         }
@@ -978,7 +977,7 @@ fn check_expr_for_unsafe_lax_use(
             continue;
         }
         if expr_uses_lax_unsafely(expr, var) {
-            let line = expr_span(expr).map(|s| s.line);
+            let line = Some(expr.span().line);
             findings.push(VerifyFinding {
                 check: "unchecked-lax".to_string(),
                 severity: Severity::Warning,
@@ -990,29 +989,6 @@ fn check_expr_for_unsafe_lax_use(
                 line,
             });
         }
-    }
-}
-
-/// Extract the span from an expression (for line number reporting).
-fn expr_span(expr: &Expr) -> Option<&Span> {
-    match expr {
-        Expr::IntLit(_, s)
-        | Expr::FloatLit(_, s)
-        | Expr::StringLit(_, s)
-        | Expr::TemplateLit(_, s)
-        | Expr::BoolLit(_, s)
-        | Expr::Gorilla(s)
-        | Expr::Ident(_, s)
-        | Expr::Placeholder(s)
-        | Expr::Hole(s) => Some(s),
-        Expr::BuchiPack(_, s) | Expr::ListLit(_, s) => Some(s),
-        Expr::BinaryOp(_, _, _, s) | Expr::UnaryOp(_, _, s) => Some(s),
-        Expr::FuncCall(_, _, s) | Expr::MethodCall(_, _, _, s) | Expr::FieldAccess(_, _, s) => {
-            Some(s)
-        }
-        Expr::CondBranch(_, s) | Expr::Pipeline(_, s) => Some(s),
-        Expr::MoldInst(_, _, _, s) | Expr::Unmold(_, s) => Some(s),
-        Expr::Lambda(_, _, s) | Expr::TypeInst(_, _, s) | Expr::Throw(_, s) => Some(s),
     }
 }
 

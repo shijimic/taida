@@ -245,6 +245,19 @@ fn extract_ai_graph(program: &Program, file: &str) -> AiGraph {
 
     for stmt in &program.statements {
         match stmt {
+            Statement::EnumDef(ed) => {
+                types.push(AiType {
+                    name: ed.name.clone(),
+                    kind: "enum",
+                    parent: None,
+                    fields: ed
+                        .variants
+                        .iter()
+                        .map(|variant| (variant.name.clone(), String::new()))
+                        .collect(),
+                    line: ed.span.line,
+                });
+            }
             Statement::TypeDef(td) => {
                 types.push(AiType {
                     name: td.name.clone(),
@@ -542,6 +555,7 @@ fn summarize_stmt(stmt: &Statement) -> String {
                 format_type_expr(&ec.error_type)
             )
         }
+        Statement::EnumDef(ed) => format!("enum {}", ed.name),
         Statement::FuncDef(fd) => format!("fn {}", fd.name),
         Statement::TypeDef(td) => format!("type {}", td.name),
         Statement::MoldDef(md) => format!("mold {}", md.name),
@@ -565,6 +579,9 @@ fn summarize_expr(expr: &Expr) -> String {
         Expr::BoolLit(b, _) => b.to_string(),
         Expr::Gorilla(_) => "><".to_string(),
         Expr::Ident(name, _) => name.clone(),
+        Expr::EnumVariant(enum_name, variant_name, _) => {
+            format!("{}:{}()", enum_name, variant_name)
+        }
         Expr::Placeholder(_) => "_".to_string(),
         Expr::Hole(_) => "_hole".to_string(),
 

@@ -11,6 +11,8 @@ pub struct Program {
 pub enum Statement {
     /// Expression statement (expression evaluated for its value or side effects).
     Expr(Expr),
+    /// Enum definition: `Enum => Name = :A :B`
+    EnumDef(EnumDef),
     /// Type definition: `Name = @(...)`
     TypeDef(TypeDef),
     /// Function definition: `name params = body => :ReturnType`
@@ -31,6 +33,23 @@ pub enum Statement {
     UnmoldForward(UnmoldForwardStmt),
     /// Unmold backward: `name <=[ expr`
     UnmoldBackward(UnmoldBackwardStmt),
+}
+
+/// Enum definition: `Enum => Name = :A :B`
+#[derive(Debug, Clone, PartialEq)]
+pub struct EnumDef {
+    pub name: String,
+    pub variants: Vec<EnumVariantDef>,
+    /// Documentation comments (`///@`) attached to this enum definition.
+    pub doc_comments: Vec<String>,
+    pub span: Span,
+}
+
+/// A single enum variant in an enum definition.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EnumVariantDef {
+    pub name: String,
+    pub span: Span,
 }
 
 /// Type definition: `Name = @(field: Type, ...)`
@@ -262,8 +281,42 @@ pub enum Expr {
     /// Type instantiation: `TypeName(field <= value, ...)`
     TypeInst(String, Vec<BuchiField>, Span),
 
+    /// Enum value constructor: `Name:Variant()`
+    EnumVariant(String, String, Span),
+
     /// Throw expression: `expr.throw()`
     Throw(Box<Expr>, Span),
+}
+
+impl Expr {
+    pub fn span(&self) -> &Span {
+        match self {
+            Expr::IntLit(_, span)
+            | Expr::FloatLit(_, span)
+            | Expr::StringLit(_, span)
+            | Expr::TemplateLit(_, span)
+            | Expr::BoolLit(_, span)
+            | Expr::Gorilla(span)
+            | Expr::Ident(_, span)
+            | Expr::Placeholder(span)
+            | Expr::Hole(span)
+            | Expr::BuchiPack(_, span)
+            | Expr::ListLit(_, span)
+            | Expr::BinaryOp(_, _, _, span)
+            | Expr::UnaryOp(_, _, span)
+            | Expr::FuncCall(_, _, span)
+            | Expr::MethodCall(_, _, _, span)
+            | Expr::FieldAccess(_, _, span)
+            | Expr::CondBranch(_, span)
+            | Expr::Pipeline(_, span)
+            | Expr::MoldInst(_, _, _, span)
+            | Expr::Unmold(_, span)
+            | Expr::Lambda(_, _, span)
+            | Expr::TypeInst(_, _, span)
+            | Expr::EnumVariant(_, _, span)
+            | Expr::Throw(_, span) => span,
+        }
+    }
 }
 
 /// A field in a buchi pack literal or type instantiation.

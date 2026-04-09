@@ -997,6 +997,18 @@ fn create_github_release_gh(
 ) -> Result<(), String> {
     let gh_bin = env::var("GH_BIN").unwrap_or_else(|_| "gh".to_string());
 
+    // Validate local inputs before any external tool/auth checks so callers get
+    // deterministic missing-asset diagnostics even when `gh` is unavailable.
+    for asset in assets {
+        if !asset.local_path.exists() {
+            return Err(format!(
+                "Release asset '{}' (display name '{}') does not exist on disk.",
+                asset.local_path.display(),
+                asset.asset_name
+            ));
+        }
+    }
+
     // Pre-check 1: Is `gh` available at all?
     let version_check = Command::new(&gh_bin).args(["--version"]).output();
     match version_check {
@@ -1051,17 +1063,6 @@ fn create_github_release_gh(
              \x20 TAIDA_PUBLISH_SKIP_RELEASE=1 taida publish --target rust-addon",
             stderr.trim()
         ));
-    }
-
-    // Validate that every asset file exists on disk.
-    for asset in assets {
-        if !asset.local_path.exists() {
-            return Err(format!(
-                "Release asset '{}' (display name '{}') does not exist on disk.",
-                asset.local_path.display(),
-                asset.asset_name
-            ));
-        }
     }
 
     // Build the `gh release create` argument list.

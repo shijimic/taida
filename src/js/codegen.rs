@@ -1,5 +1,9 @@
 use super::runtime::RUNTIME_JS;
 /// Taida AST → JavaScript コード生成
+use crate::net_surface::{
+    NET_HTTP_PROTOCOL_SYMBOL, NET_HTTP_PROTOCOL_VARIANTS, is_net_export_name,
+    is_net_runtime_builtin, net_export_list,
+};
 use crate::parser::*;
 
 pub struct JsCodegen {
@@ -13,6 +17,8 @@ pub struct JsCodegen {
     type_field_registry: std::collections::HashMap<String, Vec<String>>,
     /// Registry of mold field definitions for mold-aware inheritance codegen.
     mold_field_registry: std::collections::HashMap<String, Vec<FieldDef>>,
+    /// Enum definitions: enum_name -> variants in ordinal order.
+    enum_defs: std::collections::HashMap<String, Vec<String>>,
     /// Set of function names that need trampoline wrapping (self or mutual recursion)
     trampoline_funcs: std::collections::HashSet<String>,
     /// Set of function names that contain ]=> (unmold) and need `async function` generation
@@ -71,6 +77,7 @@ impl JsCodegen {
             current_tco_funcs: std::collections::HashSet::new(),
             type_field_registry: std::collections::HashMap::new(),
             mold_field_registry: std::collections::HashMap::new(),
+            enum_defs: std::collections::HashMap::new(),
             trampoline_funcs: std::collections::HashSet::new(),
             async_funcs: std::collections::HashSet::new(),
             in_async_context: true, // top-level is async (ESM top-level await)
@@ -104,37 +111,12 @@ impl JsCodegen {
         self.out_root = Some(out_root.to_path_buf());
     }
 
-    /// Names of taida-lang/net builtins that require scope-aware call-site rewriting.
-    /// HTTP v1 (3) + HTTP v2 (1) = 4.
-    /// v3 streaming APIs will be added when JS backend is ready (Phase 4).
-    const NET_BUILTIN_NAMES: &'static [&'static str] = &[
-        "httpServe",
-        "httpParseRequestHead",
-        "httpEncodeResponse",
-        "readBody",
-        // v3 streaming API
-        "startResponse",
-        "writeChunk",
-        "endResponse",
-        "sseEvent",
-        // v4 request body streaming API
-        "readBodyChunk",
-        "readBodyAll",
-        // v4 WebSocket API
-        "wsUpgrade",
-        "wsSend",
-        "wsReceive",
-        "wsClose",
-        // v5 WebSocket revision
-        "wsCloseCode",
-    ];
-
     /// Check if a net builtin name should be rewritten to its __taida_net_* form.
     /// Returns true only when the module has a net import AND the name is not
     /// shadowed by a parameter/local in the current scope.
     fn should_rewrite_net_builtin(&self, name: &str) -> bool {
         self.has_net_import
-            && Self::NET_BUILTIN_NAMES.contains(&name)
+            && is_net_runtime_builtin(name)
             && !self.shadowed_net_builtins.contains(name)
     }
 
@@ -223,6 +205,36 @@ impl JsCodegen {
             .statements
             .iter()
             .any(|s| matches!(s, Statement::Import(imp) if imp.path == "taida-lang/net"));
+
+        self.enum_defs.clear();
+        for stmt in &program.statements {
+            if let Statement::EnumDef(enum_def) = stmt {
+                self.enum_defs.insert(
+                    enum_def.name.clone(),
+                    enum_def
+                        .variants
+                        .iter()
+                        .map(|variant| variant.name.clone())
+                        .collect(),
+                );
+            }
+            if let Statement::Import(import) = stmt
+                && import.path == "taida-lang/net"
+            {
+                for sym in &import.symbols {
+                    if sym.name == NET_HTTP_PROTOCOL_SYMBOL {
+                        let local_name = sym.alias.as_ref().unwrap_or(&sym.name);
+                        self.enum_defs.insert(
+                            local_name.clone(),
+                            NET_HTTP_PROTOCOL_VARIANTS
+                                .iter()
+                                .map(|variant| (*variant).to_string())
+                                .collect(),
+                        );
+                    }
+                }
+            }
+        }
 
         // Pre-pass: detect mutual recursion groups and mark functions for trampolining
         self.detect_trampoline_funcs(&program.statements);
@@ -633,13 +645,13 @@ impl JsCodegen {
                 // Track local assignment shadow: if the target name matches a net
                 // builtin, subsequent calls in the same scope must use the local
                 // value, not the builtin rewrite.
-                if self.has_net_import && Self::NET_BUILTIN_NAMES.contains(&assign.target.as_str())
-                {
+                if self.has_net_import && is_net_runtime_builtin(&assign.target) {
                     self.shadowed_net_builtins.insert(assign.target.clone());
                 }
                 Ok(())
             }
             Statement::FuncDef(func_def) => self.gen_func_def(func_def),
+            Statement::EnumDef(_) => Ok(()),
             Statement::TypeDef(type_def) => self.gen_type_def(type_def),
             Statement::InheritanceDef(inh_def) => self.gen_inheritance_def(inh_def),
             Statement::MoldDef(mold_def) => self.gen_mold_def(mold_def),
@@ -663,8 +675,7 @@ impl JsCodegen {
                 self.gen_expr(&unmold.source)?;
                 self.write(");\n");
                 // Track local unmold-forward shadow for net builtins
-                if self.has_net_import && Self::NET_BUILTIN_NAMES.contains(&unmold.target.as_str())
-                {
+                if self.has_net_import && is_net_runtime_builtin(&unmold.target) {
                     self.shadowed_net_builtins.insert(unmold.target.clone());
                 }
                 Ok(())
@@ -683,8 +694,7 @@ impl JsCodegen {
                 self.gen_expr(&unmold.source)?;
                 self.write(");\n");
                 // Track local unmold-backward shadow for net builtins
-                if self.has_net_import && Self::NET_BUILTIN_NAMES.contains(&unmold.target.as_str())
-                {
+                if self.has_net_import && is_net_runtime_builtin(&unmold.target) {
                     self.shadowed_net_builtins.insert(unmold.target.clone());
                 }
                 Ok(())
@@ -708,7 +718,7 @@ impl JsCodegen {
         // shadows (e.g. `httpServe <= add`) within the function scope.
         let prev_shadowed_net = self.shadowed_net_builtins.clone();
         for p in &func_def.params {
-            if Self::NET_BUILTIN_NAMES.contains(&p.name.as_str()) {
+            if is_net_runtime_builtin(&p.name) {
                 self.shadowed_net_builtins.insert(p.name.clone());
             }
         }
@@ -1285,13 +1295,13 @@ impl JsCodegen {
     fn validate_import_symbols(&self, import: &ImportStmt) -> Result<(), JsError> {
         if import.path == "taida-lang/net" {
             for sym in &import.symbols {
-                if !Self::NET_BUILTIN_NAMES.contains(&sym.name.as_str()) {
+                if !is_net_export_name(&sym.name) {
                     return Err(JsError {
                         message: format!(
                             "Symbol '{}' not found in module '{}'. The module exports: {}",
                             sym.name,
                             import.path,
-                            Self::NET_BUILTIN_NAMES.join(", ")
+                            net_export_list()
                         ),
                     });
                 }
@@ -2152,6 +2162,19 @@ impl JsCodegen {
                 self.write(" })");
                 Ok(())
             }
+            Expr::EnumVariant(enum_name, variant_name, _) => {
+                let ordinal = self
+                    .enum_defs
+                    .get(enum_name)
+                    .and_then(|variants| {
+                        variants.iter().position(|variant| variant == variant_name)
+                    })
+                    .ok_or_else(|| JsError {
+                        message: format!("Unknown enum variant '{}:{}()'", enum_name, variant_name),
+                    })?;
+                self.write(&ordinal.to_string());
+                Ok(())
+            }
             Expr::MoldInst(name, type_args, fields, _) => {
                 // B5: MoldInst → function call with type args
 
@@ -2567,7 +2590,7 @@ impl JsCodegen {
                 // Scope-aware net builtin shadowing: snapshot/restore for lambda scope
                 let prev_shadowed_net = self.shadowed_net_builtins.clone();
                 for p in params {
-                    if Self::NET_BUILTIN_NAMES.contains(&p.name.as_str()) {
+                    if is_net_runtime_builtin(&p.name) {
                         self.shadowed_net_builtins.insert(p.name.clone());
                     }
                 }
@@ -4010,6 +4033,19 @@ waitWithTimeout p =
             js.contains("function __taida_js_spread("),
             "Runtime should include __taida_js_spread helper: got {}",
             js
+        );
+    }
+
+    #[test]
+    fn test_js_codegen_invalid_net_import_reports_shared_export_list() {
+        let err = transpile(">>> taida-lang/net => @(MissingNetSymbol)")
+            .expect_err("invalid taida-lang/net import should fail");
+        assert!(
+            err.message.contains("MissingNetSymbol")
+                && err.message.contains("HttpProtocol")
+                && err.message.contains("httpServe"),
+            "Expected taida-lang/net export list with HttpProtocol, got {}",
+            err.message
         );
     }
 }

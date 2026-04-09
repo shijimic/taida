@@ -263,6 +263,7 @@ taida_val taida_str_starts_with(const char* s, const char* prefix);
 taida_val taida_str_ends_with(const char* s, const char* suffix);
 taida_val taida_str_last_index_of(const char* s, const char* sub);
 taida_ptr taida_str_get(const char* s, taida_val idx);
+taida_ptr taida_str_chars(const char* s);
 // List state check methods
 taida_val taida_list_last_index_of(taida_ptr list_ptr, taida_val item);
 taida_val taida_list_any(taida_ptr list_ptr, taida_fn_ptr fn_ptr);
@@ -2688,6 +2689,45 @@ taida_val taida_str_split(const char* s, const char* sep) {
         list = taida_list_push(list, (taida_val)part);
         p = found + sep_len;
     }
+    return list;
+}
+
+taida_val taida_str_chars(const char* s) {
+    taida_val list = taida_list_new();
+    taida_list_set_elem_tag(list, TAIDA_TAG_STR);
+    if (!s) return list;
+
+    size_t len = 0;
+    if (!taida_read_cstr_len_safe(s, 65536, &len) || len == 0) {
+        return list;
+    }
+
+    const unsigned char *buf = (const unsigned char*)s;
+    size_t offset = 0;
+    while (offset < len) {
+        size_t consumed = 0;
+        uint32_t cp = 0;
+        if (!taida_utf8_decode_one(buf + offset, len - offset, &consumed, &cp) || consumed == 0) {
+            char *fallback = taida_str_alloc(1);
+            fallback[0] = (char)buf[offset];
+            list = taida_list_push(list, (taida_val)fallback);
+            offset += 1;
+            continue;
+        }
+
+        unsigned char utf8[4];
+        size_t out_len = 0;
+        if (!taida_utf8_encode_scalar(cp, utf8, &out_len) || out_len == 0) {
+            offset += consumed;
+            continue;
+        }
+
+        char *ch = taida_str_alloc(out_len);
+        memcpy(ch, utf8, out_len);
+        list = taida_list_push(list, (taida_val)ch);
+        offset += consumed;
+    }
+
     return list;
 }
 
@@ -18674,14 +18714,31 @@ taida_val taida_net_http_serve(taida_val port, taida_val handler, taida_val max_
                 if (proto_val && proto_val > 4096) {
                     requested_protocol = (const char *)proto_val;
                 }
+            } else if (proto_tag == TAIDA_TAG_INT) {
+                taida_val proto_val = taida_pack_get(tls, proto_hash);
+                int64_t ordinal = (int64_t)proto_val;
+                // Sync with `crate::net_surface::http_protocol_ordinal_to_wire`.
+                if (ordinal == 0) {
+                    requested_protocol = "h1.1";
+                } else if (ordinal == 1) {
+                    requested_protocol = "h2";
+                } else if (ordinal == 2) {
+                    requested_protocol = "h3";
+                } else {
+                    char proto_err[256];
+                    snprintf(proto_err, sizeof(proto_err),
+                        "httpServe: unknown HttpProtocol ordinal %" PRId64 ". Expected 0 (H1), 1 (H2), or 2 (H3).",
+                        ordinal);
+                    return taida_async_resolved(taida_net_result_fail("ProtocolError", proto_err));
+                }
             } else {
-                // protocol field exists but is not Str → ProtocolError
+                // protocol field exists but is not Str / HttpProtocol ordinal → ProtocolError
                 char proto_err[256];
                 taida_val proto_val = taida_pack_get(tls, proto_hash);
                 char val_buf[64];
                 taida_format_value(proto_tag, proto_val, val_buf, sizeof(val_buf));
                 snprintf(proto_err, sizeof(proto_err),
-                    "httpServe: protocol must be a Str, got %s",
+                    "httpServe: protocol must be HttpProtocol or Str, got %s",
                     val_buf);
                 return taida_async_resolved(taida_net_result_fail("ProtocolError", proto_err));
             }

@@ -456,6 +456,20 @@ impl Parser {
 
             // `name => ...` -> could be pipeline or inheritance
             TokenKind::FatArrow => {
+                if name == "Enum" {
+                    let enum_name = {
+                        self.advance(); // consume `=>`
+                        self.expect_ident()?
+                    };
+                    self.expect(&TokenKind::Eq)?;
+                    let variants = self.parse_enum_variants()?;
+                    return Ok(Statement::EnumDef(EnumDef {
+                        name: enum_name,
+                        variants,
+                        doc_comments,
+                        span: start_span,
+                    }));
+                }
                 // Check if this is `Name => ChildName = @(...)` (inheritance)
                 // or `name => func(_) => ...` (pipeline)
                 let _save = self.pos;
@@ -532,6 +546,28 @@ impl Parser {
                 self.finish_expr_as_statement(expr, start_span, doc_comments)
             }
         }
+    }
+
+    fn parse_enum_variants(&mut self) -> Result<Vec<EnumVariantDef>, ParseError> {
+        let mut variants = Vec::new();
+        loop {
+            self.skip_newlines();
+            if !self.check(&TokenKind::Colon) {
+                break;
+            }
+            let span = self.current_span();
+            self.advance(); // consume `:`
+            let name = self.expect_ident()?;
+            variants.push(EnumVariantDef { name, span });
+        }
+
+        if variants.is_empty() {
+            return Err(
+                self.error_at_current("Expected at least one enum variant after `Enum => Name =`")
+            );
+        }
+
+        Ok(variants)
     }
 
     fn parse_func_def_with_docs(
