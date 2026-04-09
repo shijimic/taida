@@ -262,15 +262,23 @@ fn print_publish_help() {
     println!(
         "\
 Usage:
-  taida publish [--label LABEL] [--dry-run]
+  taida publish [--label LABEL] [--dry-run] [--target rust-addon]
 
 Options:
-  --label         Append a version label, for example `rc`
-  --dry-run       Print the publish plan without changing files or git state
+  --label          Append a version label, for example `rc`
+  --dry-run        Print the publish plan without changing files or git state
+  --target TARGET  Force a publish target. Supported values:
+                     rust-addon   Build the package as a Rust cdylib addon,
+                                  merge the host entry into
+                                  native/addon.lock.toml and (Phase 2)
+                                  upload the release asset.
+                   When omitted, `taida publish` auto-detects rust-addon
+                   from the presence of `native/addon.toml`.
 
 Examples:
   taida publish --dry-run
-  taida publish --label rc"
+  taida publish --label rc
+  taida publish --target rust-addon"
     );
 }
 
@@ -4157,9 +4165,47 @@ fn run_update(args: &[String]) {
 // ── Publish subcommand ─────────────────────────────────
 
 #[cfg(feature = "community")]
+/// RC2.6-1f: publish subcommand entry point — rewritten as a two-mode
+/// orchestrator (source-only vs Rust addon).
+///
+/// The pre-RC2.6 implementation inlined a linear "prepare + write +
+/// commit + push" flow. That flow is preserved verbatim for
+/// source-only packages (non-negotiable condition 1) but now runs
+/// **through** the shared orchestration harness below so that:
+///
+///   * `prepare_publish` remains a pure function (RC2.6B-015).
+///   * Every file written during the run is captured by a
+///     `PublishRollback` snapshot so a late failure restores the
+///     worktree exactly as it was.
+///   * The worktree invariants I1-I4 spelled out in RC2.6B-015 are
+///     checked at the boundaries (`check_worktree_clean` →
+///     `prepare` → `check_dirty_allowlist` → `commit` →
+///     `check_worktree_clean`).
+///
+/// For the Rust addon flow the orchestrator additionally:
+///
+///   1. Runs `build_addon_artifacts` (cargo build --release --lib).
+///   2. Computes the cdylib SHA-256.
+///   3. Merges the host entry into `native/addon.lock.toml`.
+///   4. Re-computes the integrity digest **after** the lockfile is
+///      materialised so `prepare_publish`'s hash is superseded by the
+///      post-lockfile state (the pre-lockfile hash is intentionally
+///      thrown away).
+///   5. Stages `packages.tdm` plus `native/addon.lock.toml` via the
+///      extended `git_commit_tag_push(extra_paths=...)`.
+///   6. Will call `create_github_release` here in Phase 2. For Phase
+///      1 the release step is a pure no-op (Phase 2 will wire it up),
+///      and the env var `TAIDA_PUBLISH_SKIP_RELEASE=1` is honoured
+///      ahead of time so integration tests can bypass `gh` entirely.
+///
+/// `--dry-run` in the addon flow still runs `prepare_publish` (pure)
+/// and prints the computed plan, but explicitly SKIPS the cargo build
+/// to preserve B-015 invariant "dry-run must not touch target/".
 fn run_publish(args: &[String]) {
+    // ── CLI parsing ──────────────────────────────────────
     let mut label: Option<String> = None;
     let mut dry_run = false;
+    let mut explicit_rust_addon = false;
 
     let mut i = 0;
     while i < args.len() {
@@ -4178,6 +4224,25 @@ fn run_publish(args: &[String]) {
                 label = Some(args[i].clone());
             }
             "--dry-run" => dry_run = true,
+            "--target" => {
+                i += 1;
+                if i >= args.len() {
+                    eprintln!("Missing value for --target.");
+                    eprintln!("Run `taida publish --help` for usage.");
+                    std::process::exit(1);
+                }
+                match args[i].as_str() {
+                    "rust-addon" => explicit_rust_addon = true,
+                    other => {
+                        eprintln!(
+                            "Unknown --target value '{}'. Supported values: rust-addon.",
+                            other
+                        );
+                        eprintln!("Run `taida publish --help` for usage.");
+                        std::process::exit(1);
+                    }
+                }
+            }
             raw if raw.starts_with('-') => {
                 eprintln!("Unknown option for publish: {}", raw);
                 eprintln!("Run `taida publish --help` for usage.");
@@ -4192,6 +4257,7 @@ fn run_publish(args: &[String]) {
         i += 1;
     }
 
+    // ── Authentication & project discovery ──────────────
     let token = auth::token::load_token().unwrap_or_else(|| {
         eprintln!("Authentication required. Run `taida auth login` first.");
         std::process::exit(1);
@@ -4203,6 +4269,8 @@ fn run_publish(args: &[String]) {
         std::process::exit(1);
     });
     let manifest_path = project_dir.join("packages.tdm");
+    let addon_toml_path = project_dir.join("native").join("addon.toml");
+    let addon_lock_path = project_dir.join("native").join("addon.lock.toml");
 
     let manifest = match pkg::manifest::Manifest::from_dir(&project_dir) {
         Ok(Some(m)) => m,
@@ -4224,6 +4292,26 @@ fn run_publish(args: &[String]) {
         }
     };
 
+    // ── Addon detection ─────────────────────────────────
+    //
+    // The addon flow triggers when either:
+    //   * the user explicitly passed `--target rust-addon`, OR
+    //   * a `native/addon.toml` exists at the project root.
+    //
+    // A mismatch (user requested addon but no manifest) is a hard
+    // error so the failure mode is deterministic rather than
+    // "silently fall through to source-only".
+    let addon_manifest_present = addon_toml_path.exists();
+    let is_addon_flow = explicit_rust_addon || addon_manifest_present;
+    if explicit_rust_addon && !addon_manifest_present {
+        eprintln!(
+            "--target rust-addon requires '{}' but none was found.",
+            addon_toml_path.display()
+        );
+        std::process::exit(1);
+    }
+
+    // ── Phase 1: pure preparation (prepare_publish is pure) ─
     let preparation = match pkg::publish::prepare_publish(
         &project_dir,
         &manifest,
@@ -4238,6 +4326,12 @@ fn run_publish(args: &[String]) {
         }
     };
 
+    // ── Dry-run branch ──────────────────────────────────
+    //
+    // B-015 invariant: `--dry-run` MUST NOT touch the filesystem.
+    // That means no cargo build, no lockfile write, no git commit.
+    // The addon-flow details are still surfaced so users know what
+    // the real run would do.
     if dry_run {
         println!("Dry run: no changes made.");
         println!("  Package: {}/{}", token.username, preparation.package_name);
@@ -4249,40 +4343,177 @@ fn run_publish(args: &[String]) {
         if let Some(source_repo) = &preparation.source_repo {
             println!("  Source repo: {}", source_repo);
         }
+        if is_addon_flow {
+            println!("  Target: rust-addon");
+            println!("  Addon manifest: {}", addon_toml_path.display());
+            println!(
+                "  Addon lockfile: {} (would be merged with host entry)",
+                addon_lock_path.display()
+            );
+            println!("  Cargo build: skipped (dry-run invariant)");
+        }
         return;
     }
 
-    // Save original manifest for rollback on failure
-    let original_manifest_source = manifest_source.clone();
+    // ── Real publish run: orchestrate side-effects ──────
+    //
+    // Allow list of files the publish run is permitted to mutate
+    // (used by `check_dirty_allowlist` at invariant I2). The
+    // source-only flow only ever touches `packages.tdm`; the addon
+    // flow also touches `native/addon.lock.toml`.
+    let mut allowlist: Vec<std::path::PathBuf> = vec![std::path::PathBuf::from("packages.tdm")];
+    if is_addon_flow {
+        allowlist.push(std::path::PathBuf::from("native/addon.lock.toml"));
+    }
 
-    // Update packages.tdm
-    if let Err(e) = fs::write(&manifest_path, &preparation.updated_manifest_source) {
-        eprintln!("Failed to update '{}': {}", manifest_path.display(), e);
+    // ── Snapshot every mutable file BEFORE any side-effect ─
+    let mut rollback = pkg::publish::PublishRollback::new();
+    if let Err(e) = rollback.snapshot(&manifest_path) {
+        eprintln!("Publish failed (rollback snapshot): {}", e);
+        std::process::exit(1);
+    }
+    if is_addon_flow
+        && let Err(e) = rollback.snapshot(&addon_lock_path)
+    {
+        eprintln!("Publish failed (rollback snapshot addon.lock.toml): {}", e);
         std::process::exit(1);
     }
 
-    // Git commit + tag + push (with rollback on failure).
-    // Phase 1 of RC2.6 preserves the source-only call-site by
-    // passing `&[]` for extra_paths; the addon flow (Phase 1-f)
-    // will plug `native/addon.lock.toml` into this slot.
+    // Helper for deterministic error-path cleanup. We use a closure
+    // so every bail-out restores the worktree before exit.
+    let bail = |rollback: &pkg::publish::PublishRollback, msg: String| -> ! {
+        if let Err(restore_err) = rollback.restore() {
+            eprintln!("Publish failed: {}", msg);
+            eprintln!(
+                "Additionally, rollback encountered errors and the worktree may still be dirty: {}",
+                restore_err
+            );
+        } else {
+            eprintln!("Publish failed: {}", msg);
+            eprintln!("packages.tdm (and addon.lock.toml, if applicable) have been restored to their original state.");
+        }
+        std::process::exit(1);
+    };
+
+    // ── Addon-flow side-effect chain ─────────────────────
+    //
+    // The order matters: (1) cargo build, (2) SHA-256, (3) lockfile
+    // merge, (4) rewrite packages.tdm, (5) invariant I2, (6)
+    // git_commit_tag_push with extra_paths, (7) Phase 2 release.
+    //
+    // `compute_publish_integrity` is re-evaluated after step (3) so
+    // the stored integrity reflects the committed tree state —
+    // otherwise the integrity reported to proposals would be computed
+    // before the lockfile existed, which would defeat the purpose of
+    // the metadata.
+    let mut final_integrity = preparation.integrity.clone();
+    if is_addon_flow {
+        #[cfg(feature = "native")]
+        {
+            let build_output = match pkg::publish::build_addon_artifacts(&project_dir) {
+                Ok(out) => out,
+                Err(e) => bail(&rollback, format!("addon build failed: {}", e)),
+            };
+
+            println!("  [build]    cargo build --release --lib");
+            println!(
+                "  [build]    cdylib -> {}",
+                build_output.cdylib_path.display()
+            );
+
+            let sha = match pkg::publish::compute_cdylib_sha256(&build_output.cdylib_path) {
+                Ok(s) => s,
+                Err(e) => bail(&rollback, format!("sha256 computation failed: {}", e)),
+            };
+            println!("  [sha256]   {} = {}", build_output.host_triple, sha);
+
+            let mut delta = taida::addon::lockfile::AddonLockfile::new();
+            delta.set_target(build_output.host_triple.clone(), sha.clone());
+            if let Err(e) = taida::addon::lockfile::write_lockfile(&addon_lock_path, &delta) {
+                bail(&rollback, format!("addon.lock.toml write failed: {}", e));
+            }
+            println!(
+                "  [lockfile] {} merged",
+                addon_lock_path
+                    .strip_prefix(&project_dir)
+                    .unwrap_or(&addon_lock_path)
+                    .display()
+            );
+
+            // Re-compute integrity post-lockfile so the digest
+            // reflects the actual committed tree state.
+            final_integrity = pkg::publish::compute_publish_integrity(&project_dir);
+        }
+
+        #[cfg(not(feature = "native"))]
+        {
+            bail(
+                &rollback,
+                "addon flow requires the `native` feature. Rebuild taida with --features native to publish Rust addon packages."
+                    .to_string(),
+            );
+        }
+    }
+
+    // ── Write packages.tdm (common to both flows) ───────
+    if let Err(e) = fs::write(&manifest_path, &preparation.updated_manifest_source) {
+        bail(
+            &rollback,
+            format!("Failed to update '{}': {}", manifest_path.display(), e),
+        );
+    }
+    println!(
+        "  [rewrite]  packages.tdm <<<@{}",
+        preparation.version
+    );
+
+    // ── I2: worktree dirty only within the allowlist ────
+    let allow_refs: Vec<&Path> = allowlist.iter().map(|p| p.as_path()).collect();
+    if let Err(e) = pkg::publish::check_dirty_allowlist(&project_dir, &allow_refs) {
+        bail(
+            &rollback,
+            format!("Worktree invariant I2 violated: {}", e),
+        );
+    }
+
+    // ── Commit + tag + push ─────────────────────────────
+    let extra_paths: Vec<&Path> = if is_addon_flow {
+        vec![Path::new("native/addon.lock.toml")]
+    } else {
+        Vec::new()
+    };
     if let Err(e) = pkg::publish::git_commit_tag_push(
         &project_dir,
         &preparation.version,
         &preparation.package_name,
-        &[],
+        &extra_paths,
     ) {
-        // Restore packages.tdm to its original state
-        let _ = fs::write(&manifest_path, &original_manifest_source);
-        eprintln!("Publish failed: {}", e);
-        eprintln!("packages.tdm has been restored to its original state.");
-        std::process::exit(1);
+        bail(&rollback, e);
+    }
+
+    // ── Phase 2 placeholder: gh release create ──────────
+    //
+    // Phase 1 intentionally stops before invoking `gh release
+    // create`. The env var `TAIDA_PUBLISH_SKIP_RELEASE=1` is already
+    // read here so Phase 1 integration tests can assert the
+    // orchestrator branches on the flag, and Phase 2 can flip the
+    // default to "do the release" without touching test fixtures.
+    let skip_release = std::env::var("TAIDA_PUBLISH_SKIP_RELEASE")
+        .map(|v| v == "1")
+        .unwrap_or(false);
+    if is_addon_flow {
+        if skip_release {
+            println!("  [release]  skipped (TAIDA_PUBLISH_SKIP_RELEASE=1)");
+        } else {
+            println!("  [release]  phase-2 TODO: gh release create {}", preparation.version);
+        }
     }
 
     println!(
         "Published {}/{}@{}",
         token.username, preparation.package_name, preparation.version
     );
-    println!("  Integrity: {}", preparation.integrity);
+    println!("  Integrity: {}", final_integrity);
     println!("  Tag: {}", preparation.version);
     println!();
     println!("To register as a verified package on taida-community:");
@@ -4292,7 +4523,7 @@ fn run_publish(args: &[String]) {
             &token.username,
             &preparation.package_name,
             &preparation.version,
-            &preparation.integrity,
+            &final_integrity,
         )
     );
 }

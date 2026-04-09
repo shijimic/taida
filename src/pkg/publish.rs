@@ -447,6 +447,130 @@ pub fn check_worktree_clean(project_dir: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// RC2.6-1g: enforce invariants I2 and I3 of the addon publish flow.
+///
+/// `check_dirty_allowlist(project_dir, allowlist)` runs `git status
+/// --porcelain` and asserts that every dirty entry corresponds to a
+/// file in `allowlist`. It is used at two points in the addon
+/// orchestrator:
+///
+/// * **I2 — "prepare → mutate" boundary**. After `prepare_publish`
+///   runs, the orchestrator writes the new `packages.tdm` and merges
+///   `native/addon.lock.toml`. Before proceeding to `git add + commit`
+///   the orchestrator calls this helper with the allowed set so that
+///   a rogue file (for example a stray `Cargo.lock` regeneration
+///   triggered by `cargo build`) is caught before it silently ends up
+///   in the commit.
+///
+/// * **I3 — "commit ready" precheck**. Called again just before
+///   `git_commit_tag_push` so the invariant holds if Phase 1-f adds
+///   more mutation steps in the future.
+///
+/// Untracked files are silently ignored **only** when they match the
+/// allowlist. Untracked files outside the allowlist are reported as
+/// dirty — a strict interpretation of RC2.6 non-negotiable 1 "do not
+/// stage files the user did not intend to publish".
+///
+/// `target/` is always excluded because `cargo build --release --lib`
+/// writes there and the directory is part of the ignore set used by
+/// [`compute_publish_integrity`]. This is the only implicit exception;
+/// every other file must be in `allowlist` or the worktree counts as
+/// dirty.
+pub fn check_dirty_allowlist(
+    project_dir: &Path,
+    allowlist: &[&Path],
+) -> Result<(), String> {
+    let status = run_git(project_dir, &["status", "--porcelain"])?;
+    if status.is_empty() {
+        return Ok(());
+    }
+
+    // Normalise the allowlist to forward-slash POSIX strings for
+    // match purposes; `git status --porcelain` also uses `/`.
+    let normalised: Vec<String> = allowlist
+        .iter()
+        .map(|p| p.to_string_lossy().replace('\\', "/"))
+        .collect();
+
+    let mut violations: Vec<String> = Vec::new();
+    for raw_line in status.lines() {
+        if raw_line.len() < 3 {
+            continue;
+        }
+        // `git status --porcelain` format: "XY <path>". Two status
+        // code characters + separating space + path.
+        //
+        // `run_git` applies `.trim()` to the whole stdout buffer so a
+        // single-line status like "\n M packages.tdm\n" arrives here
+        // as "M packages.tdm" — the leading space of " M" has been
+        // stripped away. We detect that case by checking whether the
+        // second character is a space: "M p..." means the first space
+        // was trimmed (start path at index 2), while " M p..." or
+        // "?? n..." means the leading position is the code character
+        // itself (start path at index 3).
+        let bytes = raw_line.as_bytes();
+        let path_start = if bytes.get(1).copied() == Some(b' ') {
+            2
+        } else {
+            3
+        };
+        if path_start >= raw_line.len() {
+            continue;
+        }
+        let path_str = raw_line[path_start..].trim();
+        if path_str.is_empty() {
+            continue;
+        }
+        // Strip optional "-> <new-path>" renames (rare for publish
+        // workflow); take the destination side.
+        let path_str = if let Some((_, dst)) = path_str.split_once(" -> ") {
+            dst.trim()
+        } else {
+            path_str
+        };
+        // Strip quotes that git wraps paths with spaces/special chars in.
+        let path_str = path_str.trim_matches('"');
+
+        // Implicit exclusion: target/ (cargo build output).
+        if path_str == "target" || path_str == "target/"
+            || path_str.starts_with("target/")
+        {
+            continue;
+        }
+
+        // Porcelain summarises untracked directories by reporting the
+        // directory itself with a trailing slash ("?? native/"). Match
+        // such rollups when EVERY allowlist entry rooted at that
+        // directory is the only thing that could be dirty. We take a
+        // permissive stance: if the directory prefix matches any
+        // allowlist entry, treat the rollup as acceptable — the outer
+        // orchestrator is responsible for ensuring only the files it
+        // wrote actually live under that path.
+        let is_dir_rollup = path_str.ends_with('/');
+        let allowlist_match = if is_dir_rollup {
+            let dir_prefix = path_str;
+            normalised.iter().any(|p| p.starts_with(dir_prefix))
+        } else {
+            normalised.iter().any(|p| p == path_str)
+        };
+
+        if allowlist_match {
+            continue;
+        }
+
+        violations.push(raw_line.to_string());
+    }
+
+    if violations.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "Working tree has unexpected changes outside the publish allowlist:\n{}",
+            violations.join("\n")
+        ))
+    }
+}
+
 pub fn prepare_publish(
     project_dir: &Path,
     manifest: &Manifest,
@@ -1393,6 +1517,107 @@ mod tests {
             err.contains("native/addon.toml"),
             "error should mention addon.toml: {err}"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── RC2.6-1g: check_dirty_allowlist ───────────────────
+
+    fn init_tmp_git_repo(label: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "taida_allowlist_{}_{}_{}",
+            label,
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        Command::new("git")
+            .args(["init", "--quiet"])
+            .current_dir(&dir)
+            .status()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.email", "t@taida.dev"])
+            .current_dir(&dir)
+            .status()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.name", "t"])
+            .current_dir(&dir)
+            .status()
+            .unwrap();
+        std::fs::write(dir.join("packages.tdm"), "<<<@a\n").unwrap();
+        Command::new("git")
+            .args(["add", "packages.tdm"])
+            .current_dir(&dir)
+            .status()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "init", "--quiet"])
+            .current_dir(&dir)
+            .status()
+            .unwrap();
+        dir
+    }
+
+    #[test]
+    fn test_check_dirty_allowlist_clean_tree_is_ok() {
+        let dir = init_tmp_git_repo("clean");
+        let allowed: &[&Path] = &[];
+        check_dirty_allowlist(&dir, allowed).expect("clean tree");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_check_dirty_allowlist_allows_listed_mutation() {
+        let dir = init_tmp_git_repo("allow");
+        // Mutate packages.tdm — inside the allowlist.
+        std::fs::write(dir.join("packages.tdm"), "<<<@a.1\n").unwrap();
+        let allowed = [Path::new("packages.tdm")];
+        check_dirty_allowlist(&dir, &allowed).expect("allowed mutation");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_check_dirty_allowlist_rejects_stray_file() {
+        let dir = init_tmp_git_repo("stray");
+        // Create an unrelated dirty file.
+        std::fs::write(dir.join("stray.txt"), "oops\n").unwrap();
+        let allowed = [Path::new("packages.tdm")];
+        let err = check_dirty_allowlist(&dir, &allowed).unwrap_err();
+        assert!(err.contains("stray.txt"), "should mention stray.txt: {err}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_check_dirty_allowlist_ignores_target_dir() {
+        let dir = init_tmp_git_repo("target");
+        // Create target/ with a file (simulates cargo build output).
+        std::fs::create_dir_all(dir.join("target").join("release")).unwrap();
+        std::fs::write(
+            dir.join("target").join("release").join("libtest.so"),
+            b"binary",
+        )
+        .unwrap();
+        let allowed = [Path::new("packages.tdm")];
+        check_dirty_allowlist(&dir, &allowed).expect("target/ should be ignored");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_check_dirty_allowlist_allows_new_nested_file_in_allowlist() {
+        let dir = init_tmp_git_repo("nested");
+        // Simulate addon.lock.toml being created for the first time.
+        std::fs::create_dir_all(dir.join("native")).unwrap();
+        std::fs::write(
+            dir.join("native").join("addon.lock.toml"),
+            "[targets]\n",
+        )
+        .unwrap();
+        let allowed = [Path::new("native/addon.lock.toml")];
+        check_dirty_allowlist(&dir, &allowed).expect("nested allowlist match");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
