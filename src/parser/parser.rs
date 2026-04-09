@@ -315,7 +315,7 @@ impl Parser {
             _ => {
                 let start_span = self.current_span();
                 let expr = self.parse_expression()?;
-                self.finish_expr_as_statement(expr, start_span)
+                self.finish_expr_as_statement(expr, start_span, doc_comments)
             }
         }
     }
@@ -402,6 +402,7 @@ impl Parser {
                     target: name,
                     type_annotation: None,
                     value,
+                    doc_comments,
                     span: start_span,
                 }))
             }
@@ -416,6 +417,7 @@ impl Parser {
                     target: name,
                     type_annotation: Some(type_ann),
                     value,
+                    doc_comments,
                     span: start_span,
                 }))
             }
@@ -447,7 +449,7 @@ impl Parser {
                     Err(_) => {
                         self.pos = save_pos;
                         let expr = self.parse_expression()?;
-                        self.finish_expr_as_statement(expr, start_span)
+                        self.finish_expr_as_statement(expr, start_span, doc_comments)
                     }
                 }
             }
@@ -478,7 +480,7 @@ impl Parser {
                 // Not inheritance, backtrack and parse as expression + pipeline
                 self.pos = save_pos;
                 let expr = self.parse_expression()?;
-                self.finish_expr_as_statement(expr, start_span)
+                self.finish_expr_as_statement(expr, start_span, doc_comments)
             }
 
             // `expr ]=> name` -> unmold forward
@@ -527,7 +529,7 @@ impl Parser {
                 }
                 self.pos = save_pos;
                 let expr = self.parse_expression()?;
-                self.finish_expr_as_statement(expr, start_span)
+                self.finish_expr_as_statement(expr, start_span, doc_comments)
             }
         }
     }
@@ -1512,6 +1514,7 @@ impl Parser {
         &mut self,
         expr: Expr,
         start_span: Span,
+        doc_comments: Vec<String>,
     ) -> Result<Statement, ParseError> {
         if self.check(&TokenKind::FatArrow) {
             // Pipeline: expr => step => step => ...
@@ -1576,6 +1579,7 @@ impl Parser {
                     target,
                     type_annotation: None,
                     value,
+                    doc_comments,
                     span: start_span,
                 }));
             }
