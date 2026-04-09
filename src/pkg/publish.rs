@@ -7,6 +7,194 @@ use super::manifest::{Manifest, is_valid_taida_version};
 
 const DEFAULT_PROPOSALS_REPO: &str = "taida-community/proposals";
 
+// ─────────────────────────────────────────────────────────────
+// RC2.6 Phase 1: addon publish orchestration helpers
+// ─────────────────────────────────────────────────────────────
+//
+// The helpers below are part of the addon publish flow described in
+// `.dev/RC2_6_DESIGN.md`. They are deliberately kept **side-effect
+// isolated** so that `prepare_publish` (which is a pure function) can
+// remain pure: all disk writes, subprocess calls and SHA computation
+// happen in these helpers and are stitched together by
+// `src/main.rs::run_publish` (the orchestrator).
+//
+// Non-negotiable invariants carried from RC2.6 v2 design:
+//
+//   * `prepare_publish` must not call any of the functions in this
+//     block (it would break its pure contract).
+//   * `compute_cdylib_sha256` is ungated so it can be unit-tested on
+//     any feature set. It operates on an arbitrary byte stream.
+//   * `build_addon_artifacts` is `native`-gated because it both relies
+//     on `cargo build` producing a `cdylib` for the current host and
+//     on `addon::host_target::detect_host_target` which itself lives
+//     behind `#[cfg(feature = "native")]`.
+
+/// Result of invoking `cargo build --release --lib` for an addon package.
+///
+/// Returned by [`build_addon_artifacts`]. Carries exactly the information
+/// the downstream pipeline needs: (1) the absolute path to the freshly
+/// built `cdylib` so SHA-256 can be computed and the file can be attached
+/// to a GitHub Release asset, (2) the library stem so the asset can be
+/// renamed into the canonical `lib<stem>-<triple>.<ext>` form, and
+/// (3) the current host triple so `addon.lock.toml` can be keyed on it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg(feature = "native")]
+pub struct AddonBuildOutput {
+    /// Absolute path to the freshly built `cdylib` under
+    /// `<project>/target/release/`.
+    pub cdylib_path: PathBuf,
+    /// Library stem as declared in `native/addon.toml` (the string
+    /// between `lib` and the platform extension). Used for canonical
+    /// release asset naming.
+    pub library_stem: String,
+    /// Canonical host triple (e.g. `x86_64-unknown-linux-gnu`). Keyed
+    /// into `native/addon.lock.toml::[targets]`.
+    pub host_triple: String,
+}
+
+/// Build the Rust addon cdylib for the current host and return the
+/// artifact location plus metadata.
+///
+/// This is Phase 1 task **RC2.6-1a**. The function:
+///
+///   1. Parses `native/addon.toml` to discover the declared library
+///      stem (`[addon].library`).
+///   2. Detects the current host triple via
+///      [`crate::addon::host_target::detect_host_target`].
+///   3. Invokes `cargo build --release --lib` in `project_dir` and
+///      surfaces `cargo`'s full stderr on failure.
+///   4. Probes `target/release/lib<stem>.<ext>` for the cdylib (where
+///      `<ext>` is `so` / `dylib` / `dll` depending on the host).
+///
+/// The function returns an error string (never panics) so the
+/// orchestrator in `src/main.rs` can convert it into a CLI diagnostic.
+///
+/// ## Contract
+///
+/// * **Not pure.** Invokes `cargo` as a subprocess and touches
+///   `project_dir/target/`.
+/// * Does **not** modify `packages.tdm`, `addon.toml` or `addon.lock.toml`.
+///   Those writes are delegated to subsequent helpers (`1c`/`1e`).
+/// * Must be called **after** `prepare_publish` (so that
+///   `compute_publish_integrity` is re-evaluated afterwards; the
+///   orchestrator handles the ordering).
+/// * Only the currently running host is built. Cross-compile is a
+///   CI responsibility (RC2.6 non-negotiable 5).
+#[cfg(feature = "native")]
+pub fn build_addon_artifacts(project_dir: &Path) -> Result<AddonBuildOutput, String> {
+    use crate::addon::host_target::detect_host_target;
+    use crate::addon::manifest::parse_addon_manifest;
+
+    let addon_toml = project_dir.join("native").join("addon.toml");
+    if !addon_toml.exists() {
+        return Err(format!(
+            "build_addon_artifacts: '{}' not found. `taida publish --target rust-addon` requires a native/addon.toml manifest.",
+            addon_toml.display()
+        ));
+    }
+
+    let manifest = parse_addon_manifest(&addon_toml).map_err(|e| e.to_string())?;
+    let library_stem = manifest.library.clone();
+
+    let host = detect_host_target().map_err(|e| {
+        format!(
+            "build_addon_artifacts: {} (cannot build a host-specific cdylib on this platform).",
+            e
+        )
+    })?;
+    let host_triple = host.as_triple().to_string();
+    let cdylib_ext = host.cdylib_ext();
+
+    // Invoke cargo build --release --lib. The --manifest-path flag
+    // anchors the build at project_dir so the working directory the
+    // caller is in does not leak into the cargo invocation.
+    let cargo_toml = project_dir.join("Cargo.toml");
+    if !cargo_toml.exists() {
+        return Err(format!(
+            "build_addon_artifacts: '{}' not found. Addon publish requires a Cargo project alongside packages.tdm.",
+            cargo_toml.display()
+        ));
+    }
+
+    let output = Command::new("cargo")
+        .args([
+            "build",
+            "--release",
+            "--lib",
+            "--manifest-path",
+            cargo_toml
+                .to_str()
+                .ok_or_else(|| "Cargo.toml path contains non-UTF-8 bytes".to_string())?,
+        ])
+        .current_dir(project_dir)
+        .output()
+        .map_err(|e| {
+            format!(
+                "build_addon_artifacts: failed to invoke cargo build in '{}': {}",
+                project_dir.display(),
+                e
+            )
+        })?;
+
+    if !output.status.success() {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!(
+            "build_addon_artifacts: `cargo build --release --lib` failed in '{}':\n--- stdout ---\n{}\n--- stderr ---\n{}",
+            project_dir.display(),
+            stdout.trim_end(),
+            stderr.trim_end()
+        ));
+    }
+
+    let cdylib_name = format!("lib{library_stem}.{cdylib_ext}");
+    let cdylib_path = project_dir.join("target").join("release").join(&cdylib_name);
+    if !cdylib_path.exists() {
+        return Err(format!(
+            "build_addon_artifacts: expected cdylib '{}' not found after `cargo build --release --lib`. \
+             Check that Cargo.toml declares `crate-type = [\"rlib\", \"cdylib\"]` and that \
+             `[package].name` produces the stem '{}' configured in native/addon.toml.",
+            cdylib_path.display(),
+            library_stem
+        ));
+    }
+
+    Ok(AddonBuildOutput {
+        cdylib_path,
+        library_stem,
+        host_triple,
+    })
+}
+
+/// Compute the SHA-256 digest of a file and format it as the
+/// `"sha256:<64-lowercase-hex>"` string that the addon manifest /
+/// lockfile schemas expect.
+///
+/// This is Phase 1 task **RC2.6-1b**. It delegates to the in-house
+/// streaming SHA-256 implementation in `crate::crypto` so no new
+/// dependency (`sha2`, `ring`, ...) is added to the tree — consistent
+/// with RC2.6 Should Fix S1 "no new TOML/hash crates".
+///
+/// ## Errors
+///
+/// Returns the underlying `io::Error` message on read failure. The
+/// function is intentionally streaming-friendly (loads the file in
+/// one shot via `fs::read`) because addon cdylibs are small (sub-MB).
+/// If very large assets appear in a future release, this can be
+/// replaced with a chunked loop feeding [`crate::crypto::Sha256`]
+/// without changing the return format.
+pub fn compute_cdylib_sha256(path: &Path) -> Result<String, String> {
+    let bytes = std::fs::read(path).map_err(|e| {
+        format!(
+            "compute_cdylib_sha256: cannot read '{}': {}",
+            path.display(),
+            e
+        )
+    })?;
+    let hex = crate::crypto::sha256_hex_bytes(&bytes);
+    Ok(format!("sha256:{hex}"))
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct TaidaVersionParts {
     generation: String,
@@ -947,5 +1135,124 @@ mod tests {
                 .unwrap();
         assert_eq!(plan.version, "a.51.patch");
         assert_eq!(plan.generation, "a");
+    }
+
+    // ── RC2.6-1b: compute_cdylib_sha256 ──────────────────────
+
+    #[test]
+    fn test_compute_cdylib_sha256_empty_file() {
+        let dir = std::env::temp_dir().join(format!(
+            "taida_sha256_empty_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("empty.bin");
+        std::fs::write(&f, b"").unwrap();
+        let got = compute_cdylib_sha256(&f).unwrap();
+        assert_eq!(
+            got,
+            "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_compute_cdylib_sha256_known_vector() {
+        // SHA-256("hello world") is the canonical test vector
+        let dir = std::env::temp_dir().join(format!(
+            "taida_sha256_vec_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("hello.bin");
+        std::fs::write(&f, b"hello world").unwrap();
+        let got = compute_cdylib_sha256(&f).unwrap();
+        assert_eq!(
+            got,
+            "sha256:b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_compute_cdylib_sha256_missing_file_errors() {
+        let bogus = std::env::temp_dir().join(format!(
+            "taida_sha256_missing_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let err = compute_cdylib_sha256(&bogus).unwrap_err();
+        assert!(
+            err.starts_with("compute_cdylib_sha256: cannot read"),
+            "error should carry helper prefix: {err}"
+        );
+    }
+
+    // ── RC2.6-1a: build_addon_artifacts (negative paths) ─────
+    //
+    // We do not invoke a real `cargo build` in unit tests (it would
+    // take seconds and requires a working Rust toolchain). The
+    // integration test in `tests/publish_rust_addon.rs` covers the
+    // positive path with a minimal on-disk fixture.
+
+    #[cfg(feature = "native")]
+    #[test]
+    fn test_build_addon_artifacts_missing_addon_toml_errors() {
+        let dir = std::env::temp_dir().join(format!(
+            "taida_build_addon_no_toml_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let err = build_addon_artifacts(&dir).unwrap_err();
+        assert!(
+            err.contains("native/addon.toml"),
+            "error should mention addon.toml: {err}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(feature = "native")]
+    #[test]
+    fn test_build_addon_artifacts_missing_cargo_toml_errors() {
+        let dir = std::env::temp_dir().join(format!(
+            "taida_build_addon_no_cargo_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(dir.join("native")).unwrap();
+        std::fs::write(
+            dir.join("native").join("addon.toml"),
+            "abi = 1\n\
+             entry = \"taida_addon_get_v1\"\n\
+             package = \"test/pkg\"\n\
+             library = \"test_pkg\"\n\
+             [functions]\n\
+             noop = 0\n",
+        )
+        .unwrap();
+        let err = build_addon_artifacts(&dir).unwrap_err();
+        assert!(
+            err.contains("Cargo.toml"),
+            "error should mention Cargo.toml: {err}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
