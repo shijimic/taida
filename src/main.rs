@@ -4463,7 +4463,6 @@ fn run_publish(args: &[String]) {
     // otherwise the integrity reported to proposals would be computed
     // before the lockfile existed, which would defeat the purpose of
     // the metadata.
-    let mut final_integrity = preparation.integrity.clone();
 
     // Addon build metadata captured for the release step (Phase 2).
     // These are set inside the cfg(native) block and consumed later.
@@ -4509,9 +4508,9 @@ fn run_publish(args: &[String]) {
             addon_library_stem = Some(build_output.library_stem);
             addon_host_triple = Some(build_output.host_triple);
 
-            // Re-compute integrity post-lockfile so the digest
-            // reflects the actual committed tree state.
-            final_integrity = pkg::publish::compute_publish_integrity(&project_dir);
+            // NOTE: integrity is re-computed after packages.tdm
+            // rewrite below (common to both flows) so the digest
+            // reflects the final committed tree state.
         }
 
         #[cfg(not(feature = "native"))]
@@ -4535,6 +4534,12 @@ fn run_publish(args: &[String]) {
         "  [rewrite]  packages.tdm <<<@{}",
         preparation.version
     );
+
+    // Re-compute integrity AFTER packages.tdm rewrite so the digest
+    // reflects the final on-disk state of all committed files.
+    // For the addon flow this also includes native/addon.lock.toml
+    // which was written earlier.
+    let final_integrity = pkg::publish::compute_publish_integrity(&project_dir);
 
     // ── Dry-run: Build mode exit point ────────────────────
     //

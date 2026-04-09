@@ -419,8 +419,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Create GitHub Release
-        run: gh release create "${{{{ github.ref_name }}}}" --generate-notes
+      - name: Create GitHub Release (idempotent)
+        run: |
+          if gh release view "${{{{ github.ref_name }}}}" &>/dev/null; then
+            echo "Release ${{{{ github.ref_name }}}} already exists, skipping creation"
+          else
+            gh release create "${{{{ github.ref_name }}}}" --generate-notes
+          fi
         env:
           GH_TOKEN: ${{{{ secrets.GITHUB_TOKEN }}}}
 
