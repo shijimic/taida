@@ -200,7 +200,11 @@ fn test_init_unknown_target_produces_error() {
 
 #[test]
 fn test_init_rust_addon_no_name_uses_cwd() {
-    let root = unique_temp_dir("addon_cwd");
+    // The CWD directory name becomes the project name, so it must
+    // pass name validation (lowercase + digits + hyphens only).
+    let parent = unique_temp_dir("addon-cwd-parent");
+    let root = parent.join("my-addon-cwd");
+    fs::create_dir_all(&root).unwrap();
 
     let output = Command::new(taida_bin())
         .args(["init", "--target", "rust-addon"])
@@ -223,7 +227,7 @@ fn test_init_rust_addon_no_name_uses_cwd() {
     assert!(root.join(".gitignore").exists(), ".gitignore missing in CWD");
     assert!(root.join("README.md").exists(), "README.md missing in CWD");
 
-    let _ = fs::remove_dir_all(&root);
+    let _ = fs::remove_dir_all(&parent);
 }
 
 // ── Test 7: source-only init backward compat ────────────────────
