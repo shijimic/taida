@@ -68,10 +68,10 @@ impl TaidaVersion {
         let num: u32 = num_str.parse().ok()?;
         let label = parts.next().map(|s| s.to_string());
         // Reject empty labels (e.g. "@b.10.")
-        if let Some(ref l) = label {
-            if l.is_empty() {
-                return None;
-            }
+        if let Some(ref l) = label
+            && l.is_empty()
+        {
+            return None;
         }
         Some(TaidaVersion {
             generation,
@@ -146,10 +146,10 @@ pub fn resolve_version(
             return Err(format!("version {} not found in releases", exact));
         }
         // Check if it's the same as current
-        if let Some(cur) = current {
-            if cur.tag == parsed.tag {
-                return Ok(None); // already up to date
-            }
+        if let Some(cur) = current
+            && cur.tag == parsed.tag
+        {
+            return Ok(None); // already up to date
         }
         return Ok(Some(parsed));
     }
@@ -160,10 +160,10 @@ pub fn resolve_version(
         .filter_map(|t| TaidaVersion::parse(t))
         .filter(|v| {
             // Apply generation filter
-            if let Some(ref g) = filter.generation {
-                if &v.generation != g {
-                    return false;
-                }
+            if let Some(ref g) = filter.generation
+                && &v.generation != g
+            {
+                return false;
             }
             // Apply label filter
             if let Some(ref label) = filter.label {
@@ -183,10 +183,10 @@ pub fn resolve_version(
 
     if let Some(best) = candidates.into_iter().next() {
         // Check if it's the same as current
-        if let Some(cur) = current {
-            if cur.tag == best.tag {
-                return Ok(None); // already up to date
-            }
+        if let Some(cur) = current
+            && cur.tag == best.tag
+        {
+            return Ok(None); // already up to date
         }
         Ok(Some(best))
     } else {
@@ -302,10 +302,10 @@ pub fn find_asset_url(
         .ok_or_else(|| format!("release {} has no assets array", tag))?;
 
     for asset in assets {
-        if asset["name"].as_str() == Some(asset_name) {
-            if let Some(url) = asset["browser_download_url"].as_str() {
-                return Ok(url.to_string());
-            }
+        if asset["name"].as_str() == Some(asset_name)
+            && let Some(url) = asset["browser_download_url"].as_str()
+        {
+            return Ok(url.to_string());
         }
     }
 
