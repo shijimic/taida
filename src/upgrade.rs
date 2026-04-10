@@ -237,10 +237,7 @@ pub fn fetch_release_tags(owner: &str, repo: &str) -> Result<Vec<String>, String
         if !resp.status().is_success() {
             let status = resp.status();
             let body = resp.text().unwrap_or_default();
-            return Err(format!(
-                "GitHub API error (HTTP {}): {}",
-                status, body
-            ));
+            return Err(format!("GitHub API error (HTTP {}): {}", status, body));
         }
 
         let json: serde_json::Value = resp
@@ -280,10 +277,7 @@ pub fn find_asset_url(
 ) -> Result<String, String> {
     let client = make_public_client()?;
     let base = api_url();
-    let url = format!(
-        "{}/repos/{}/{}/releases/tags/{}",
-        base, owner, repo, tag
-    );
+    let url = format!("{}/repos/{}/{}/releases/tags/{}", base, owner, repo, tag);
 
     let resp = client
         .get(&url)
@@ -322,10 +316,7 @@ pub fn find_asset_url(
 }
 
 /// Download a binary from URL and verify its SHA-256 hash.
-pub fn download_and_verify(
-    url: &str,
-    expected_sha256: Option<&str>,
-) -> Result<Vec<u8>, String> {
+pub fn download_and_verify(url: &str, expected_sha256: Option<&str>) -> Result<Vec<u8>, String> {
     let client = reqwest::blocking::Client::builder()
         .user_agent("taida-upgrade")
         .build()
@@ -378,7 +369,10 @@ pub fn platform_archive_name(tag: &str, host: &HostTarget) -> String {
 ///
 /// The archive is expected to contain `<base>/taida` where `<base>`
 /// matches the archive name without extension (e.g. `taida-@b.11-x86_64-unknown-linux-gnu`).
-pub fn extract_binary_from_tar_gz(archive_bytes: &[u8], archive_base: &str) -> Result<Vec<u8>, String> {
+pub fn extract_binary_from_tar_gz(
+    archive_bytes: &[u8],
+    archive_base: &str,
+) -> Result<Vec<u8>, String> {
     use flate2::read::GzDecoder;
     use std::io::Read;
 
@@ -387,7 +381,10 @@ pub fn extract_binary_from_tar_gz(archive_bytes: &[u8], archive_base: &str) -> R
 
     let binary_path = format!("{}/taida", archive_base);
 
-    for entry_result in archive.entries().map_err(|e| format!("failed to read tar entries: {}", e))? {
+    for entry_result in archive
+        .entries()
+        .map_err(|e| format!("failed to read tar entries: {}", e))?
+    {
         let mut entry = entry_result.map_err(|e| format!("failed to read tar entry: {}", e))?;
         let path = entry
             .path()
@@ -397,7 +394,8 @@ pub fn extract_binary_from_tar_gz(archive_bytes: &[u8], archive_base: &str) -> R
 
         if path == binary_path {
             let mut buf = Vec::new();
-            entry.read_to_end(&mut buf)
+            entry
+                .read_to_end(&mut buf)
                 .map_err(|e| format!("failed to read binary from archive: {}", e))?;
             return Ok(buf);
         }
@@ -514,9 +512,7 @@ pub fn run(config: UpgradeConfig) -> Result<(), String> {
             let host = host_target::detect_host_target().map_err(|e| e.to_string())?;
 
             #[cfg(not(feature = "native"))]
-            return Err(
-                "upgrade requires the 'native' feature for platform detection".to_string(),
-            );
+            return Err("upgrade requires the 'native' feature for platform detection".to_string());
 
             #[cfg(feature = "native")]
             {
@@ -559,10 +555,7 @@ pub fn run(config: UpgradeConfig) -> Result<(), String> {
                 };
 
                 // Download archive with optional integrity check
-                let archive_bytes = download_and_verify(
-                    &download_url,
-                    expected_sha.as_deref(),
-                )?;
+                let archive_bytes = download_and_verify(&download_url, expected_sha.as_deref())?;
 
                 // Extract binary from archive
                 let archive_base = archive_name
@@ -700,11 +693,7 @@ mod tests {
 
     #[test]
     fn resolve_by_gen() {
-        let tags = vec![
-            "@a.7".to_string(),
-            "@b.10".to_string(),
-            "@b.11".to_string(),
-        ];
+        let tags = vec!["@a.7".to_string(), "@b.10".to_string(), "@b.11".to_string()];
         let filter = VersionFilter {
             generation: Some("a".to_string()),
             label: None,
@@ -732,10 +721,7 @@ mod tests {
 
     #[test]
     fn resolve_exact() {
-        let tags = vec![
-            "@b.10.rc2".to_string(),
-            "@b.11".to_string(),
-        ];
+        let tags = vec!["@b.10.rc2".to_string(), "@b.11".to_string()];
         let filter = VersionFilter {
             generation: None,
             label: None,
@@ -839,8 +825,8 @@ def456  taida-@b.11-aarch64-apple-darwin.tar.gz\n";
 
     #[test]
     fn extract_binary_from_tar_gz_works() {
-        use flate2::write::GzEncoder;
         use flate2::Compression;
+        use flate2::write::GzEncoder;
 
         let binary_content = b"fake taida binary";
         let archive_base = "taida-@b.11-x86_64-unknown-linux-gnu";
@@ -870,8 +856,8 @@ def456  taida-@b.11-aarch64-apple-darwin.tar.gz\n";
 
     #[test]
     fn extract_binary_from_tar_gz_missing_binary() {
-        use flate2::write::GzEncoder;
         use flate2::Compression;
+        use flate2::write::GzEncoder;
 
         let archive_base = "taida-@b.11-x86_64-unknown-linux-gnu";
 
