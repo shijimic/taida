@@ -1107,6 +1107,7 @@ mod tests {
                 deps
             },
             root_dir: dir.clone(),
+            exports: Vec::new(),
         };
 
         let result = resolve_deps(&manifest);
@@ -1141,6 +1142,7 @@ mod tests {
                 deps
             },
             root_dir: dir.clone(),
+            exports: Vec::new(),
         };
 
         let result = resolve_deps(&manifest);
@@ -1178,6 +1180,7 @@ mod tests {
                 deps
             },
             root_dir: dir.clone(),
+            exports: Vec::new(),
         };
 
         let result = resolve_deps(&manifest);
@@ -1292,6 +1295,7 @@ mod tests {
                 deps
             },
             root_dir: dir.clone(),
+            exports: Vec::new(),
         };
 
         let result = resolve_deps(&manifest);
@@ -1331,6 +1335,7 @@ mod tests {
                 deps
             },
             root_dir: dir.clone(),
+            exports: Vec::new(),
         };
 
         let result = resolve_deps(&manifest);
@@ -1377,6 +1382,7 @@ mod tests {
                 deps
             },
             root_dir: dir.clone(),
+            exports: Vec::new(),
         };
 
         let result = resolve_deps(&manifest);
@@ -1425,6 +1431,7 @@ deps <= @(
                 deps
             },
             root_dir: dir.clone(),
+            exports: Vec::new(),
         };
 
         let result = resolve_deps(&manifest);
@@ -1500,6 +1507,7 @@ deps <= @(
                 deps
             },
             root_dir: dir.clone(),
+            exports: Vec::new(),
         };
 
         let result = resolve_deps(&manifest);
@@ -1539,6 +1547,7 @@ deps <= @(
                 deps
             },
             root_dir: dir.clone(),
+            exports: Vec::new(),
         };
 
         let result = resolve_deps(&manifest);
@@ -1580,6 +1589,7 @@ deps <= @(
                 deps
             },
             root_dir: dir.clone(),
+            exports: Vec::new(),
         };
 
         let result = resolve_deps(&manifest);
@@ -1632,6 +1642,7 @@ deps <= @(
                 deps
             },
             root_dir: dir.clone(),
+            exports: Vec::new(),
         };
 
         // Lockfile records os@a.1 (exact version)
@@ -1703,6 +1714,7 @@ deps <= @(
                 deps
             },
             root_dir: dir.path().clone(),
+            exports: Vec::new(),
         };
 
         let result = resolve_deps(&manifest);
@@ -1746,6 +1758,7 @@ deps <= @(
                 deps
             },
             root_dir: dir.path().clone(),
+            exports: Vec::new(),
         };
 
         // Should either succeed (resolving to itself) or produce an error,
@@ -1815,6 +1828,7 @@ deps <= @(
                 deps
             },
             root_dir: dir.path().clone(),
+            exports: Vec::new(),
         };
 
         let result = resolve_deps(&manifest);
@@ -1886,6 +1900,7 @@ deps <= @(
                 deps
             },
             root_dir: dir.path().clone(),
+            exports: Vec::new(),
         };
 
         // Must terminate (no infinite loop), regardless of whether it errors
@@ -1974,6 +1989,7 @@ deps <= @(
                 deps
             },
             root_dir: dir.path().clone(),
+            exports: Vec::new(),
         };
 
         let result = resolve_deps(&manifest);
@@ -2191,6 +2207,7 @@ deps <= @(
             entry: "main.td".to_string(),
             deps: BTreeMap::new(),
             root_dir: dir.path().clone(),
+            exports: Vec::new(),
         };
 
         // Simulate resolved packages with version-qualified names

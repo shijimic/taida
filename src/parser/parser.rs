@@ -967,17 +967,21 @@ impl Parser {
             }
         }
 
-        // B11B-012: If a package identity was parsed (path is Some),
-        // reject `@(symbols)` — the canonical surface is either
-        // `<<<@version owner/name` or `<<<@version @(symbols)`, never both.
-        if path.is_some() && self.check(&TokenKind::At) {
-            let next = self.peek_at(1).kind.clone();
-            if matches!(next, TokenKind::LParen) {
-                return Err(self.error_at_current(
-                    "Cannot combine package identity with @(symbols) in export. \
-                     Use either `<<<@version owner/name` or `<<<@version @(symbols)`, not both.",
-                ));
-            }
+        // B11-10b: After package identity, reject the Phase 9 arrow surface
+        // `<<<@version owner/name => @(symbols)`. The Phase 10 canonical
+        // form is `<<<@version owner/name @(symbols)` (no arrow).
+        //
+        // Accepted forms:
+        //   1. `<<<@version owner/name @(symbols)` — Phase 10 canonical
+        //   2. `<<<@version owner/name`             — identity only
+        //
+        // Rejected forms:
+        //   - `<<<@version owner/name => @(symbols)` — Phase 9 arrow (obsolete)
+        if path.is_some() && self.check(&TokenKind::FatArrow) {
+            return Err(self.error_at_current(
+                "The `=> @(symbols)` arrow syntax after package identity is no longer supported. \
+                 Use `<<<@version owner/name @(symbols)` directly.",
+            ));
         }
 
         // Parse symbols @(...) or single symbol or path

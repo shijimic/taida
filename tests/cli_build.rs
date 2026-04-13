@@ -675,3 +675,547 @@ fn test_same_scope_duplicate_check_vs_build_consistency() {
 
     let _ = fs::remove_dir_all(&dir);
 }
+
+// ── B11-9d: manifest.exports facade filtering across all backends ──
+
+/// B11-10e: When packages.tdm declares `<<<@version owner/name @(public)`,
+/// importing a symbol NOT in the facade (`secret`) must be rejected by ALL
+/// backends — checker, JS build, Native build, and interpreter.
+#[test]
+fn test_b11_9d_facade_hidden_symbol_rejected_all_backends() {
+    let dir = unique_temp_dir("taida_b11_9d_facade");
+    let app = dir.join("app");
+    let pkg = app.join(".taida").join("deps").join("acme").join("lib");
+    fs::create_dir_all(&app).expect("create app dir");
+    fs::create_dir_all(&pkg).expect("create pkg dir");
+
+    // Package: exports both `public` and `secret` via <<<, but facade only exposes `public`
+    write_file(
+        &pkg.join("packages.tdm"),
+        ">>> ./main.td\n<<<@a acme/lib @(public)\n",
+    );
+    write_file(
+        &pkg.join("main.td"),
+        "public <= 1\nsecret <= 2\n<<< @(public, secret)\n",
+    );
+
+    // App: tries to import `secret` which is not in the facade
+    write_file(&app.join("packages.tdm"), "<<<@a reviewer/app\n");
+    write_file(
+        &app.join("main.td"),
+        ">>> acme/lib => @(secret)\nstdout(secret)\n",
+    );
+
+    let expect_msg = "not part of the public API declared in packages.tdm";
+
+    // 1. taida check
+    let check_out = Command::new(taida_bin())
+        .current_dir(&app)
+        .arg("check")
+        .arg("main.td")
+        .output()
+        .expect("check");
+    let check_combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&check_out.stdout),
+        String::from_utf8_lossy(&check_out.stderr)
+    );
+    assert!(
+        !check_out.status.success(),
+        "taida check should reject hidden symbol, got: {}",
+        check_combined
+    );
+    assert!(
+        check_combined.contains(expect_msg),
+        "taida check error should mention facade, got: {}",
+        check_combined
+    );
+
+    // 2. taida build --target js
+    let js_out = Command::new(taida_bin())
+        .current_dir(&app)
+        .arg("build")
+        .arg("--target")
+        .arg("js")
+        .arg("main.td")
+        .output()
+        .expect("build js");
+    let js_combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&js_out.stdout),
+        String::from_utf8_lossy(&js_out.stderr)
+    );
+    assert!(
+        !js_out.status.success(),
+        "JS build should reject hidden symbol, got: {}",
+        js_combined
+    );
+    assert!(
+        js_combined.contains(expect_msg),
+        "JS build error should mention facade, got: {}",
+        js_combined
+    );
+
+    // 3. taida build --target native
+    let native_out = Command::new(taida_bin())
+        .current_dir(&app)
+        .arg("build")
+        .arg("--target")
+        .arg("native")
+        .arg("main.td")
+        .output()
+        .expect("build native");
+    let native_combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&native_out.stdout),
+        String::from_utf8_lossy(&native_out.stderr)
+    );
+    assert!(
+        !native_out.status.success(),
+        "Native build should reject hidden symbol, got: {}",
+        native_combined
+    );
+    assert!(
+        native_combined.contains(expect_msg),
+        "Native build error should mention facade, got: {}",
+        native_combined
+    );
+
+    // 4. taida (interpreter)
+    let interp_out = Command::new(taida_bin())
+        .current_dir(&app)
+        .arg("main.td")
+        .output()
+        .expect("interpreter");
+    let interp_combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&interp_out.stdout),
+        String::from_utf8_lossy(&interp_out.stderr)
+    );
+    assert!(
+        !interp_out.status.success(),
+        "Interpreter should reject hidden symbol, got: {}",
+        interp_combined
+    );
+    assert!(
+        interp_combined.contains(expect_msg),
+        "Interpreter error should mention facade, got: {}",
+        interp_combined
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// B11B-021: Importing a symbol that is declared in the facade but does NOT exist
+/// in the entry module must be rejected at compile-time across all backends.
+#[test]
+fn test_b11_021_facade_missing_symbol_rejected_all_backends() {
+    let dir = unique_temp_dir("taida_b11_021_ghost");
+    let app = dir.join("app");
+    let pkg = app.join(".taida").join("deps").join("acme").join("lib");
+    fs::create_dir_all(&app).expect("create app dir");
+    fs::create_dir_all(&pkg).expect("create pkg dir");
+
+    // Package: facade declares `ghost`, but entry module only defines `public`
+    write_file(
+        &pkg.join("packages.tdm"),
+        ">>> ./main.td\n<<<@a acme/lib @(ghost)\n",
+    );
+    write_file(&pkg.join("main.td"), "public <= 1\n<<< @(public)\n");
+
+    // App: imports `ghost` which is in the facade but missing from entry module
+    write_file(&app.join("packages.tdm"), "<<<@a reviewer/app\n");
+    write_file(
+        &app.join("main.td"),
+        ">>> acme/lib => @(ghost)\nstdout(ghost)\n",
+    );
+
+    let expect_msg = "declared in packages.tdm but not found in the entry module";
+
+    // 1. taida check
+    let check_out = Command::new(taida_bin())
+        .current_dir(&app)
+        .arg("check")
+        .arg("main.td")
+        .output()
+        .expect("check");
+    let check_combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&check_out.stdout),
+        String::from_utf8_lossy(&check_out.stderr)
+    );
+    assert!(
+        !check_out.status.success(),
+        "taida check should reject ghost symbol, got: {}",
+        check_combined
+    );
+    assert!(
+        check_combined.contains(expect_msg),
+        "taida check error should mention missing in entry module, got: {}",
+        check_combined
+    );
+
+    // 2. taida build --target js
+    let js_out = Command::new(taida_bin())
+        .current_dir(&app)
+        .arg("build")
+        .arg("--target")
+        .arg("js")
+        .arg("main.td")
+        .output()
+        .expect("build js");
+    let js_combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&js_out.stdout),
+        String::from_utf8_lossy(&js_out.stderr)
+    );
+    assert!(
+        !js_out.status.success(),
+        "JS build should reject ghost symbol, got: {}",
+        js_combined
+    );
+    assert!(
+        js_combined.contains(expect_msg),
+        "JS build error should mention missing in entry module, got: {}",
+        js_combined
+    );
+
+    // 3. taida build --target native
+    let native_out = Command::new(taida_bin())
+        .current_dir(&app)
+        .arg("build")
+        .arg("--target")
+        .arg("native")
+        .arg("main.td")
+        .output()
+        .expect("build native");
+    let native_combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&native_out.stdout),
+        String::from_utf8_lossy(&native_out.stderr)
+    );
+    assert!(
+        !native_out.status.success(),
+        "Native build should reject ghost symbol, got: {}",
+        native_combined
+    );
+    assert!(
+        native_combined.contains(expect_msg),
+        "Native build error should mention missing in entry module, got: {}",
+        native_combined
+    );
+
+    // 4. taida (interpreter)
+    let interp_out = Command::new(taida_bin())
+        .current_dir(&app)
+        .arg("main.td")
+        .output()
+        .expect("interpreter");
+    let interp_combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&interp_out.stdout),
+        String::from_utf8_lossy(&interp_out.stderr)
+    );
+    assert!(
+        !interp_out.status.success(),
+        "Interpreter should reject ghost symbol, got: {}",
+        interp_combined
+    );
+    assert!(
+        interp_combined.contains(expect_msg),
+        "Interpreter error should mention missing in entry module, got: {}",
+        interp_combined
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// B11-10e: Importing a symbol that IS in the facade should succeed.
+/// This ensures the facade filtering does not over-reject.
+#[test]
+fn test_b11_9d_facade_public_symbol_accepted() {
+    let dir = unique_temp_dir("taida_b11_9d_facade_ok");
+    let app = dir.join("app");
+    let pkg = app.join(".taida").join("deps").join("acme").join("lib");
+    fs::create_dir_all(&app).expect("create app dir");
+    fs::create_dir_all(&pkg).expect("create pkg dir");
+
+    write_file(
+        &pkg.join("packages.tdm"),
+        ">>> ./main.td\n<<<@a acme/lib @(public)\n",
+    );
+    write_file(
+        &pkg.join("main.td"),
+        "public <= 42\nsecret <= 99\n<<< @(public, secret)\n",
+    );
+
+    write_file(&app.join("packages.tdm"), "<<<@a reviewer/app\n");
+    write_file(
+        &app.join("main.td"),
+        ">>> acme/lib => @(public)\nstdout(public)\n",
+    );
+
+    // taida check should pass
+    let check_out = Command::new(taida_bin())
+        .current_dir(&app)
+        .arg("check")
+        .arg("main.td")
+        .output()
+        .expect("check");
+    assert!(
+        check_out.status.success(),
+        "taida check should accept public symbol, got: {}{}",
+        String::from_utf8_lossy(&check_out.stdout),
+        String::from_utf8_lossy(&check_out.stderr)
+    );
+
+    // interpreter should run successfully
+    let interp_out = Command::new(taida_bin())
+        .current_dir(&app)
+        .arg("main.td")
+        .output()
+        .expect("interpreter");
+    let stdout = String::from_utf8_lossy(&interp_out.stdout);
+    assert!(
+        interp_out.status.success(),
+        "Interpreter should accept public symbol, got: {}{}",
+        stdout,
+        String::from_utf8_lossy(&interp_out.stderr)
+    );
+    assert!(stdout.contains("42"), "Should print 42, got: {}", stdout);
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// B11B-022: Re-exported symbols must be accepted by all 4 backends.
+/// When the entry module imports a symbol from a helper and re-exports it,
+/// the facade check must not flag it as a ghost symbol.
+#[test]
+fn test_b11_022_facade_reexport_accepted_all_backends() {
+    let dir = unique_temp_dir("taida_b11_022_reexport");
+    let app = dir.join("app");
+    let pkg = app.join(".taida").join("deps").join("acme").join("lib");
+    fs::create_dir_all(&app).expect("create app dir");
+    fs::create_dir_all(&pkg).expect("create pkg dir");
+
+    // Package: helper.td defines reExported, main.td imports and re-exports it
+    write_file(
+        &pkg.join("helper.td"),
+        "reExported <= 42\n<<< @(reExported)\n",
+    );
+    write_file(
+        &pkg.join("main.td"),
+        ">>> ./helper.td => @(reExported)\n<<< @(reExported)\n",
+    );
+    write_file(
+        &pkg.join("packages.tdm"),
+        ">>> ./main.td\n<<<@a acme/lib @(reExported)\n",
+    );
+
+    // App: imports the re-exported symbol
+    write_file(&app.join("packages.tdm"), "<<<@a reviewer/app\n");
+    write_file(
+        &app.join("main.td"),
+        ">>> acme/lib => @(reExported)\nstdout(reExported)\n",
+    );
+
+    // 1. taida check should pass
+    let check_out = Command::new(taida_bin())
+        .current_dir(&app)
+        .arg("check")
+        .arg("main.td")
+        .output()
+        .expect("check");
+    assert!(
+        check_out.status.success(),
+        "taida check should accept re-exported symbol, got: {}{}",
+        String::from_utf8_lossy(&check_out.stdout),
+        String::from_utf8_lossy(&check_out.stderr)
+    );
+
+    // 2. taida build --target js should pass
+    let js_out = Command::new(taida_bin())
+        .current_dir(&app)
+        .arg("build")
+        .arg("--target")
+        .arg("js")
+        .arg("main.td")
+        .arg("-o")
+        .arg(dir.join("out.mjs").to_str().unwrap())
+        .output()
+        .expect("build js");
+    assert!(
+        js_out.status.success(),
+        "JS build should accept re-exported symbol, got: {}{}",
+        String::from_utf8_lossy(&js_out.stdout),
+        String::from_utf8_lossy(&js_out.stderr)
+    );
+
+    // 3. taida build --target native should pass
+    let native_out = Command::new(taida_bin())
+        .current_dir(&app)
+        .arg("build")
+        .arg("--target")
+        .arg("native")
+        .arg("main.td")
+        .arg("-o")
+        .arg(dir.join("out.c").to_str().unwrap())
+        .output()
+        .expect("build native");
+    assert!(
+        native_out.status.success(),
+        "Native build should accept re-exported symbol, got: {}{}",
+        String::from_utf8_lossy(&native_out.stdout),
+        String::from_utf8_lossy(&native_out.stderr)
+    );
+
+    // 4. Interpreter should run and print 42
+    let interp_out = Command::new(taida_bin())
+        .current_dir(&app)
+        .arg("main.td")
+        .output()
+        .expect("interpreter");
+    let stdout = String::from_utf8_lossy(&interp_out.stdout);
+    assert!(
+        interp_out.status.success(),
+        "Interpreter should accept re-exported symbol, got: {}{}",
+        stdout,
+        String::from_utf8_lossy(&interp_out.stderr)
+    );
+    assert!(stdout.contains("42"), "Should print 42, got: {}", stdout);
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// B11B-025: Identity-only facade (no symbols declared) should not interfere
+/// with imports. When packages.tdm has `<<<@version owner/name` without @(symbols),
+/// the entry module's own <<< controls what is importable.
+#[test]
+fn test_b11_025_identity_only_facade_allows_entry_exports() {
+    let dir = unique_temp_dir("taida_b11_025_identity_only");
+    let app = dir.join("app");
+    let pkg = app.join(".taida").join("deps").join("acme").join("lib");
+    fs::create_dir_all(&app).expect("create app dir");
+    fs::create_dir_all(&pkg).expect("create pkg dir");
+
+    // Package: identity-only facade (no symbols list)
+    write_file(&pkg.join("packages.tdm"), ">>> ./main.td\n<<<@a acme/lib\n");
+    write_file(
+        &pkg.join("main.td"),
+        "public <= 42\nsecret <= 99\n<<< @(public)\n",
+    );
+
+    // App: imports `public` — should be allowed by entry module's <<<
+    write_file(&app.join("packages.tdm"), "<<<@a reviewer/app\n");
+    write_file(
+        &app.join("main.td"),
+        ">>> acme/lib => @(public)\nstdout(public)\n",
+    );
+
+    // 1. taida check should pass
+    let check_out = Command::new(taida_bin())
+        .current_dir(&app)
+        .arg("check")
+        .arg("main.td")
+        .output()
+        .expect("check");
+    assert!(
+        check_out.status.success(),
+        "taida check should accept symbol from identity-only facade package, got: {}{}",
+        String::from_utf8_lossy(&check_out.stdout),
+        String::from_utf8_lossy(&check_out.stderr)
+    );
+
+    // 2. Interpreter should run and print 42
+    let interp_out = Command::new(taida_bin())
+        .current_dir(&app)
+        .arg("main.td")
+        .output()
+        .expect("interpreter");
+    let stdout = String::from_utf8_lossy(&interp_out.stdout);
+    assert!(
+        interp_out.status.success(),
+        "Interpreter should accept symbol from identity-only facade package, got: {}{}",
+        stdout,
+        String::from_utf8_lossy(&interp_out.stderr)
+    );
+    assert!(stdout.contains("42"), "Should print 42, got: {}", stdout);
+
+    // 3. Importing `secret` (not in entry <<<) should be rejected
+    write_file(
+        &app.join("main.td"),
+        ">>> acme/lib => @(secret)\nstdout(secret)\n",
+    );
+    let interp_fail = Command::new(taida_bin())
+        .current_dir(&app)
+        .arg("main.td")
+        .output()
+        .expect("interpreter");
+    assert!(
+        !interp_fail.status.success(),
+        "Interpreter should reject symbol not in entry's <<<, got: {}{}",
+        String::from_utf8_lossy(&interp_fail.stdout),
+        String::from_utf8_lossy(&interp_fail.stderr)
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// B11B-025: Submodule import should bypass facade check.
+/// When importing `acme/lib/sub`, the facade check on `acme/lib` should not apply
+/// because this is a submodule import, not a package root import.
+#[test]
+fn test_b11_025_submodule_import_bypasses_facade() {
+    let dir = unique_temp_dir("taida_b11_025_submodule");
+    let app = dir.join("app");
+    let pkg = app.join(".taida").join("deps").join("acme").join("lib");
+    fs::create_dir_all(&app).expect("create app dir");
+    fs::create_dir_all(&pkg).expect("create pkg dir");
+
+    // Package: facade only exposes `public`, but submodule has its own exports
+    write_file(
+        &pkg.join("packages.tdm"),
+        ">>> ./main.td\n<<<@a acme/lib @(public)\n",
+    );
+    write_file(&pkg.join("main.td"), "public <= 1\n<<< @(public)\n");
+    // Submodule has its own symbol
+    write_file(&pkg.join("sub.td"), "subVal <= 99\n<<< @(subVal)\n");
+
+    // App: imports from submodule — should bypass package facade
+    write_file(&app.join("packages.tdm"), "<<<@a reviewer/app\n");
+    write_file(
+        &app.join("main.td"),
+        ">>> acme/lib/sub => @(subVal)\nstdout(subVal)\n",
+    );
+
+    // Interpreter should run and print 99
+    let interp_out = Command::new(taida_bin())
+        .current_dir(&app)
+        .arg("main.td")
+        .output()
+        .expect("interpreter");
+    let stdout = String::from_utf8_lossy(&interp_out.stdout);
+    assert!(
+        interp_out.status.success(),
+        "Interpreter should accept submodule import, got: {}{}",
+        stdout,
+        String::from_utf8_lossy(&interp_out.stderr)
+    );
+    assert!(stdout.contains("99"), "Should print 99, got: {}", stdout);
+
+    // taida check should also pass
+    let check_out = Command::new(taida_bin())
+        .current_dir(&app)
+        .arg("check")
+        .arg("main.td")
+        .output()
+        .expect("check");
+    assert!(
+        check_out.status.success(),
+        "taida check should accept submodule import, got: {}{}",
+        String::from_utf8_lossy(&check_out.stdout),
+        String::from_utf8_lossy(&check_out.stderr)
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}

@@ -115,9 +115,51 @@
 
 **シグネチャ**: `=> :Str`
 
-### 操作はモールドで
+### 文字列操作
 
-以下の操作はモールドとして提供されます:
+#### replace
+
+最初に一致した部分文字列を置換します。
+
+```taida
+"hello world".replace("world", "taida")  // "hello taida"
+"aaa".replace("a", "b")  // "baa" (最初の一致のみ)
+```
+
+**シグネチャ**: `target: Str, replacement: Str => :Str`
+
+空ターゲットの場合は元の文字列を返します（no-op）。
+
+#### replaceAll
+
+すべての一致する部分文字列を置換します。
+
+```taida
+"hello world hello".replaceAll("hello", "hi")  // "hi world hi"
+"aaa".replaceAll("a", "b")  // "bbb"
+```
+
+**シグネチャ**: `target: Str, replacement: Str => :Str`
+
+空ターゲットの場合は元の文字列を返します（no-op）。
+
+#### split
+
+文字列をセパレータで分割し、リストを返します。
+
+```taida
+"a,b,c".split(",")  // @["a", "b", "c"]
+"hello".split(",")  // @["hello"] (一致なし → 単一要素)
+"abc".split("")     // @["a", "b", "c"] (文字ごとに分割)
+```
+
+**シグネチャ**: `separator: Str => :List[Str]`
+
+空セパレータの場合は各文字に分割します（`Chars[]` モールドと同等）。
+
+### 操作はモールドでも可能
+
+以下の操作はモールドとしても提供されます:
 
 | 操作 | モールド | 例 |
 |------|---------|-----|
@@ -131,7 +173,7 @@
 | 繰り返し | `Repeat[str, n]()` | `Repeat["ha", 3]()` → `"hahaha"` |
 | 逆順 | `Reverse[str]()` | `Reverse["hello"]()` → `"olleh"` |
 | パディング | `Pad[str, len]()` | `Pad["42", 5](side <= "start", char <= "0")` → `"00042"` |
-| 型変換 | `Int[str]()` / `Float[str]()` | `Int["42"]() ]=> num` → `42` |
+| 型変換 | `Int[str]()` / `Int[str, base]()` / `Float[str]()` | `Int["42"]() ]=> num` → `42`, `Int["ff", 16]() ]=> hex` → `255` |
 
 ---
 

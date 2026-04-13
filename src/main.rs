@@ -3246,6 +3246,7 @@ fn scan_expr_for_todo(expr: &Expr, file: &str, out: &mut TodoScanResult) {
         | Expr::Gorilla(_)
         | Expr::Ident(_, _)
         | Expr::EnumVariant(_, _, _)
+        | Expr::TypeLiteral(_, _, _)
         | Expr::Placeholder(_)
         | Expr::Hole(_) => {}
     }
@@ -4834,8 +4835,7 @@ fn run_publish(args: &[String]) {
             // URL. `display_package` is derived from preparation.package_name
             // which comes from `Manifest::extract_from_ast()`.
             let release_title = format!("{}@{}", display_package, preparation.version);
-            let release_notes =
-                format!("Release {} of {}", preparation.version, display_package);
+            let release_notes = format!("Release {} of {}", preparation.version, display_package);
 
             let assets = vec![
                 pkg::publish::GhReleaseAsset {
@@ -4883,10 +4883,7 @@ fn run_publish(args: &[String]) {
         }
     }
 
-    println!(
-        "Published {}@{}",
-        display_package, preparation.version
-    );
+    println!("Published {}@{}", display_package, preparation.version);
     println!("  Integrity: {}", final_integrity);
     println!("  Tag: {}", preparation.version);
     println!();

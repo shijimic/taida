@@ -52,8 +52,18 @@ fn setup_project_with_remote(root: &Path) -> (PathBuf, PathBuf) {
     run_git(&["init"], &project);
     run_git(&["config", "user.email", "test@taida.dev"], &project);
     run_git(&["config", "user.name", "Test User"], &project);
+
+    // Set origin to a GitHub-style URL so prepare_publish() accepts it.
+    // pushInsteadOf redirects push traffic to the local bare repo while
+    // git remote get-url origin still returns the GitHub URL.
+    let github_url = "https://github.com/alice/demo-pkg.git";
+    run_git(&["remote", "add", "origin", github_url], &project);
     run_git(
-        &["remote", "add", "origin", bare.to_str().unwrap()],
+        &[
+            "config",
+            &format!("url.{}.pushInsteadOf", bare.to_str().unwrap()),
+            github_url,
+        ],
         &project,
     );
 
@@ -82,7 +92,7 @@ fn test_publish_then_install_roundtrip() {
     let (pkg_dir, bare) = setup_project_with_remote(&root);
 
     // ── Step 1: Create package project ──
-    fs::write(pkg_dir.join("packages.tdm"), "<<<@a @(greet)\n").unwrap();
+    fs::write(pkg_dir.join("packages.tdm"), "<<<@a alice/demo-pkg\n").unwrap();
     fs::write(
         pkg_dir.join("main.td"),
         "greet name = stdout(\"Hello, \" + name + \"!\")\n",
@@ -150,7 +160,7 @@ fn test_publish_then_install_roundtrip() {
     // ── Step 7: Verify commit message ──
     let log = git_output(&["log", "--oneline", "-1"], &pkg_dir);
     assert!(
-        log.contains("publish: demo-pkg@a.1.alpha"),
+        log.contains("publish: alice/demo-pkg@a.1.alpha"),
         "commit message should contain publish info: {}",
         log
     );
@@ -210,7 +220,7 @@ fn test_publish_dry_run_does_not_modify_anything() {
     let root = unique_temp_dir("taida_dryrun");
     let (pkg_dir, _bare) = setup_project_with_remote(&root);
 
-    fs::write(pkg_dir.join("packages.tdm"), "<<<@a @(run)\n").unwrap();
+    fs::write(pkg_dir.join("packages.tdm"), "<<<@a alice/demo-pkg\n").unwrap();
     fs::write(pkg_dir.join("main.td"), "stdout(1)\n").unwrap();
 
     run_git(&["add", "."], &pkg_dir);
@@ -249,7 +259,7 @@ fn test_publish_dry_run_does_not_modify_anything() {
     // packages.tdm should NOT be modified
     let manifest = fs::read_to_string(pkg_dir.join("packages.tdm")).unwrap();
     assert_eq!(
-        manifest, "<<<@a @(run)\n",
+        manifest, "<<<@a alice/demo-pkg\n",
         "dry-run should not modify packages.tdm"
     );
 
@@ -271,7 +281,7 @@ fn test_publish_fails_without_auth() {
     // No auth.json
 
     run_git(&["init"], &pkg_dir);
-    fs::write(pkg_dir.join("packages.tdm"), "<<<@a @(run)\n").unwrap();
+    fs::write(pkg_dir.join("packages.tdm"), "<<<@a alice/demo-pkg\n").unwrap();
 
     let output = Command::new(env!("CARGO_BIN_EXE_taida"))
         .args(["publish"])
@@ -328,7 +338,7 @@ fn test_publish_fails_with_invalid_label() {
     let root = unique_temp_dir("taida_badlabel");
     let (pkg_dir, _bare) = setup_project_with_remote(&root);
 
-    fs::write(pkg_dir.join("packages.tdm"), "<<<@a @(run)\n").unwrap();
+    fs::write(pkg_dir.join("packages.tdm"), "<<<@a alice/demo-pkg\n").unwrap();
     fs::write(pkg_dir.join("main.td"), "stdout(1)\n").unwrap();
 
     run_git(&["add", "."], &pkg_dir);

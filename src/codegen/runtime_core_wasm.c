@@ -2861,6 +2861,29 @@ int64_t taida_error_type_matches(int64_t error_val, int64_t handler_type_str) {
     return 0;
 }
 
+/* B11B-015: Runtime type check for TypeIs with named types (WASM version).
+   Gets __type from the BuchiPack and walks the inheritance chain.
+   Returns 1 (true) or 0 (false). */
+int64_t taida_typeis_named(int64_t val, int64_t expected_type_str) {
+    if (!taida_is_buchi_pack(val)) return 0;
+    int64_t type_str = 0;
+    if (taida_pack_has_hash(val, WASM_HASH___TYPE)) {
+        type_str = taida_pack_get(val, WASM_HASH___TYPE);
+    }
+    if (type_str == 0) return 0;
+    /* Direct match */
+    if (taida_str_eq(type_str, expected_type_str)) return 1;
+    /* Walk inheritance chain */
+    int64_t current = type_str;
+    for (int i = 0; i < 64; i++) {
+        int64_t parent = wasm_find_parent_type(current);
+        if (parent == 0) break;
+        if (taida_str_eq(parent, expected_type_str)) return 1;
+        current = parent;
+    }
+    return 0;
+}
+
 /* ── W-5: Error object creation ── */
 /* FNV-1a hashes for error BuchiPack fields (same as native_runtime.c) */
 /* WFX-2: corrected FNV-1a hashes for error fields */

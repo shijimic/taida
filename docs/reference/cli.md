@@ -329,9 +329,26 @@ taida publish [--label LABEL] [--dry-run[=MODE]] [--target rust-addon]
 - `taida auth login` 済みであることを要求します（author 名の解決に使用）。
 - working tree が clean であることを要求します（未コミットの変更がある場合はエラー）。
 - `packages.tdm` と git tag (`<version>`) から次の publish version を決定します。
+- `packages.tdm` の `<<<@version owner/name` 行から package identity を解決します。`owner/name` が省略された場合はディレクトリ名にフォールバックします。
 - `packages.tdm` の `<<<@...` を決定した exact version に更新します。
 - git commit + tag (`<version>`) + push origin を実行します。
-- 成功後、`taida-community/proposals` への登録用 URL を表示します。
+- 成功後、`taida-community/proposals` への登録用 URL を表示します。package identity がある場合はそのまま使用し、二重 prefix は発生しません。
+
+`packages.tdm` の canonical surface (@b.11.rc3 以降):
+
+```taida
+>>> ./main.td
+<<<@a.1 owner/name @(hello, greet)
+```
+
+- `>>> ./main.td` はエントリポイントのみを宣言します。
+- `<<<@version owner/name @(symbols)` はバージョン、パッケージ ID、公開 API を一括で宣言します。
+- package root import 時は `packages.tdm` の export surface が正として使われます。
+
+以下の旧 surface は @b.11.rc3 で廃止されました:
+- `<<<@version owner/name => @(symbols)` (arrow 形式)
+- `>>> ./main.td => @(symbols)` を facade 宣言として使う split surface
+- `<<<@version @(symbols)` (symbols-only、パッケージ ID なし)
 
 ---
 

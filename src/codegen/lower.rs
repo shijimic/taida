@@ -62,7 +62,9 @@ pub struct Lowering {
     /// Mold 定義レジストリ（custom mold lowering 用）
     pub(crate) mold_defs: std::collections::HashMap<String, crate::parser::MoldDef>,
     /// Enum definitions: enum_name -> variants in ordinal order
-    enum_defs: std::collections::HashMap<String, Vec<String>>,
+    pub(crate) enum_defs: std::collections::HashMap<String, Vec<String>>,
+    /// B11-6d: Inheritance parent map (child_name -> parent_name) for TypeExtends resolution.
+    pub(crate) type_parents: std::collections::HashMap<String, String>,
     /// Mold 名 → solidify ヘルパー関数シンボル（mangled）
     pub(crate) mold_solidify_funcs: std::collections::HashMap<String, String>,
     /// 戻り値が Str のユーザー定義関数名セット
@@ -334,6 +336,7 @@ impl Lowering {
             field_type_tags: std::collections::HashMap::new(),
             mold_defs: std::collections::HashMap::new(),
             enum_defs: std::collections::HashMap::new(),
+            type_parents: std::collections::HashMap::new(),
             mold_solidify_funcs: std::collections::HashMap::new(),
             string_returning_funcs: std::collections::HashSet::new(),
             bool_returning_funcs: std::collections::HashSet::new(),
@@ -1147,6 +1150,7 @@ impl Lowering {
         module_path: &str,
         symbol_name: &str,
         version: Option<&str>,
+        pre_resolved_facade: Option<&crate::pkg::facade::FacadeContext>,
     ) -> Result<ImportedSymbolKind, LowerError> {
         // モジュールパスを解決
         let path = match self.resolve_import_path(module_path, version) {
@@ -1154,15 +1158,34 @@ impl Lowering {
             None => return Ok(ImportedSymbolKind::Function),
         };
 
-        // ソースを読み込んでパース
+        // B11B-023: If facade was pre-resolved, use classify_symbol_in_module
+        // for re-export-aware classification (B11B-022 fix).
+        // Facade validation was already done at the import level.
+        if let Some(ctx) = pre_resolved_facade {
+            // Symbol kind classification uses the entry module path from facade context
+            if let Some(kind) =
+                crate::pkg::facade::classify_symbol_in_module(&ctx.entry_path, symbol_name, None)
+            {
+                return Ok(match kind {
+                    crate::pkg::facade::SymbolKind::Function => ImportedSymbolKind::Function,
+                    crate::pkg::facade::SymbolKind::TypeDef => ImportedSymbolKind::TypeDef,
+                    crate::pkg::facade::SymbolKind::Value => ImportedSymbolKind::Value,
+                });
+            }
+            // If classify_symbol_in_module returns None but we have a facade,
+            // the symbol should have been caught by validate_facade already.
+            // Fall through to Function as safe default.
+            return Ok(ImportedSymbolKind::Function);
+        }
+
+        // No facade — original classification path for non-facade imports
         let source = match std::fs::read_to_string(&path) {
             Ok(s) => s,
             Err(_) => return Ok(ImportedSymbolKind::Function),
         };
         let (program, _) = crate::parser::parse(&source);
 
-        // RCB-201: Check if the module has explicit exports (<<<).
-        // If it does, verify the symbol is in the export list before classifying.
+        // Non-facade: fall back to entry module's <<< check (RCB-201)
         let export_list = Self::collect_module_export_list(&program.statements);
         if let Some(ref exports) = export_list
             && !exports.contains(symbol_name)
@@ -1188,24 +1211,16 @@ impl Lowering {
             });
         }
 
-        // シンボルの種類を判定
-        for stmt in &program.statements {
-            match stmt {
-                Statement::FuncDef(func_def) if func_def.name == symbol_name => {
-                    return Ok(ImportedSymbolKind::Function);
-                }
-                Statement::TypeDef(type_def) if type_def.name == symbol_name => {
-                    // 種類判定のみ。メタデータ登録は register_imported_typedef で行う。
-                    return Ok(ImportedSymbolKind::TypeDef);
-                }
-                Statement::InheritanceDef(inh_def) if inh_def.child == symbol_name => {
-                    return Ok(ImportedSymbolKind::TypeDef);
-                }
-                Statement::Assignment(assign) if assign.target == symbol_name => {
-                    return Ok(ImportedSymbolKind::Value);
-                }
-                _ => {}
-            }
+        // シンボルの種類を判定 — B11B-022: use classify_symbol_in_module
+        // for re-export awareness even in non-facade path
+        if let Some(kind) =
+            crate::pkg::facade::classify_symbol_in_module(&path, symbol_name, Some(&source))
+        {
+            return Ok(match kind {
+                crate::pkg::facade::SymbolKind::Function => ImportedSymbolKind::Function,
+                crate::pkg::facade::SymbolKind::TypeDef => ImportedSymbolKind::TypeDef,
+                crate::pkg::facade::SymbolKind::Value => ImportedSymbolKind::Value,
+            });
         }
 
         // 見つからなかった場合はデフォルトで関数扱い
@@ -1969,6 +1984,81 @@ impl Lowering {
                             | "taida-lang/net"
                             | "taida-lang/pool"
                     );
+
+                    // B11B-023 + B11B-026: Pre-resolve facade once per import statement
+                    // instead of per-symbol. Validates all symbols at once.
+                    let pre_resolved_facade: Option<crate::pkg::facade::FacadeContext> = {
+                        if !is_core_bundled_path
+                            && !path.starts_with("./")
+                            && !path.starts_with("../")
+                            && !path.starts_with('/')
+                            && !path.starts_with("~/")
+                            && !path.starts_with("std/")
+                            && !path.starts_with("npm:")
+                            && path.contains('/')
+                        {
+                            let source_dir_opt = self.source_dir.as_ref();
+                            if let Some(source_dir) = source_dir_opt {
+                                let root = Self::find_project_root(source_dir);
+                                let resolution = if let Some(ver) = version {
+                                    crate::pkg::resolver::resolve_package_module_versioned(
+                                        &root, path, ver,
+                                    )
+                                } else {
+                                    crate::pkg::resolver::resolve_package_module(&root, path)
+                                };
+                                if let Some(res) = resolution {
+                                    if res.submodule.is_none() {
+                                        crate::pkg::facade::resolve_facade_context(&res.pkg_dir)
+                                    } else {
+                                        None
+                                    }
+                                } else {
+                                    None
+                                }
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        }
+                    };
+
+                    // B11B-023: Validate all symbols against facade at once
+                    if let Some(ref ctx) = pre_resolved_facade {
+                        let sym_names: Vec<String> =
+                            import_stmt.symbols.iter().map(|s| s.name.clone()).collect();
+                        let violations = crate::pkg::facade::validate_facade(
+                            &ctx.facade_exports,
+                            &ctx.entry_path,
+                            &sym_names,
+                        );
+                        if let Some(v) = violations.first() {
+                            return Err(LowerError {
+                                message: match v {
+                                    crate::pkg::facade::FacadeViolation::HiddenSymbol {
+                                        name,
+                                        available,
+                                    } => {
+                                        format!(
+                                            "Symbol '{}' is not part of the public API declared in packages.tdm. \
+                                             Available exports: {}",
+                                            name,
+                                            available.join(", ")
+                                        )
+                                    }
+                                    crate::pkg::facade::FacadeViolation::GhostSymbol { name } => {
+                                        format!(
+                                            "Symbol '{}' is declared in packages.tdm but not found in the entry module. \
+                                             The entry module must export all symbols listed in the package facade.",
+                                            name
+                                        )
+                                    }
+                                },
+                            });
+                        }
+                    }
+
                     let mut import_link_symbols = Vec::new();
                     let mut needs_module_object = false;
                     for sym in &import_stmt.symbols {
@@ -2013,9 +2103,13 @@ impl Lowering {
                         } else {
                             // stdlib でないか、マッピングのない関数はユーザー関数として登録
                             // QF-16/17: シンボルの種類に応じて処理を分岐
-                            // RCB-201: classify now validates against module's export list
-                            let sym_kind =
-                                self.classify_imported_symbol(path, orig_name, version)?;
+                            // B11B-023/026: pass pre-resolved facade to avoid per-symbol manifest reads
+                            let sym_kind = self.classify_imported_symbol(
+                                path,
+                                orig_name,
+                                version,
+                                pre_resolved_facade.as_ref(),
+                            )?;
                             let module_key = self.import_module_key(path, version);
                             let init_symbol = Self::init_symbol_for_key(&module_key);
                             needs_module_object = true;
@@ -3053,6 +3147,9 @@ impl Lowering {
                         .insert(inh_def.child.clone(), all_methods);
                 }
                 // RCB-101: Register inheritance parent for error type filtering in |==
+                // B11-6d: Track inheritance for TypeExtends compile-time resolution
+                self.type_parents
+                    .insert(inh_def.child.clone(), inh_def.parent.clone());
                 let child_str_var = func.alloc_var();
                 func.push(IrInst::ConstStr(child_str_var, inh_def.child.clone()));
                 let parent_str_var = func.alloc_var();
@@ -3264,6 +3361,17 @@ impl Lowering {
                 let val = self.lower_expr(func, inner)?;
                 let result = func.alloc_var();
                 func.push(IrInst::Call(result, "taida_throw".to_string(), vec![val]));
+                Ok(result)
+            }
+            // B11-6a: TypeLiteral emits type name as string constant (used by TypeIs/TypeExtends lowering)
+            Expr::TypeLiteral(name, variant, _) => {
+                let result = func.alloc_var();
+                let s = if let Some(var) = variant {
+                    format!("{}:{}", name, var)
+                } else {
+                    name.clone()
+                };
+                func.push(IrInst::ConstStr(result, s));
                 Ok(result)
             }
             Expr::Placeholder(_) => {
@@ -3920,32 +4028,55 @@ impl Lowering {
                 // stored tag (e.g. TAIDA_TAG_BOOL for runtime-generated Packs).
                 if (name == "stdout" || name == "stderr") && args.len() == 1 {
                     let arg = &args[0];
-                    let arg_var = self.lower_expr(func, arg)?;
                     let compile_tag = self.expr_type_tag(arg);
-                    let tag_var = if compile_tag == -1 {
-                        // TAIDA_TAG_UNKNOWN — try runtime tag for FieldAccess
+
+                    // B11B-004 fix: When the arg is a FieldAccess with unknown
+                    // compile-time type, evaluate the parent object once and
+                    // derive both the field value and runtime tag from that
+                    // single evaluation.  The old code called lower_expr(arg)
+                    // (which internally evaluates obj) and then called
+                    // lower_expr(obj) again for the tag lookup, causing
+                    // side-effecting expressions like `makePack().flag` to
+                    // execute the parent twice.
+                    let (arg_var, tag_var) = if compile_tag == -1 {
                         if let Expr::FieldAccess(obj, field, _) = arg {
+                            // Evaluate parent object exactly once
                             let obj_var = self.lower_expr(func, obj)?;
                             let field_hash = simple_hash(field);
                             let hash_var = func.alloc_var();
                             func.push(IrInst::ConstInt(hash_var, field_hash as i64));
+
+                            // Get field value from the evaluated object
+                            let field_val = func.alloc_var();
+                            func.push(IrInst::Call(
+                                field_val,
+                                "taida_pack_get".to_string(),
+                                vec![obj_var, hash_var],
+                            ));
+
+                            // Get runtime tag from the same evaluated object
                             let rt_tag = func.alloc_var();
                             func.push(IrInst::Call(
                                 rt_tag,
                                 "taida_pack_get_field_tag".to_string(),
                                 vec![obj_var, hash_var],
                             ));
-                            rt_tag
+                            (field_val, rt_tag)
                         } else {
+                            // Not a FieldAccess — evaluate normally, tag unknown
+                            let val = self.lower_expr(func, arg)?;
                             let v = func.alloc_var();
                             func.push(IrInst::ConstInt(v, -1)); // TAG_UNKNOWN
-                            v
+                            (val, v)
                         }
                     } else {
+                        // Compile-time type known — evaluate normally
+                        let val = self.lower_expr(func, arg)?;
                         let v = func.alloc_var();
                         func.push(IrInst::ConstInt(v, compile_tag));
-                        v
+                        (val, v)
                     };
+
                     let tagged_rt = if name == "stdout" {
                         "taida_io_stdout_with_tag".to_string()
                     } else {
@@ -4528,9 +4659,103 @@ impl Lowering {
                     message: format!("unknown pipeline target: {}", name),
                 })
             }
+            // B11-5c: MoldInst in pipeline: replace _ with prev_result
+            Expr::MoldInst(name, type_args, fields, span) => {
+                // Bind prev_result via DefVar so Ident("__pipe_prev") resolves.
+                func.push(IrInst::DefVar("__pipe_prev".to_string(), prev_result));
+
+                // Deep-check for any Placeholder (top-level or nested, e.g. `_ > 3`)
+                let has_any_placeholder = type_args.iter().any(|a| self.expr_has_placeholder(a));
+
+                let new_type_args: Vec<Expr> = if has_any_placeholder {
+                    // Rewrite ALL Placeholder nodes to Ident("__pipe_prev"),
+                    // handling both top-level `_` and nested `_ > 3` uniformly.
+                    type_args
+                        .iter()
+                        .map(|a| self.rewrite_placeholder(a, "__pipe_prev", span))
+                        .collect()
+                } else {
+                    // No placeholder — prepend prev_result as first type arg
+                    let mut args = vec![Expr::Ident("__pipe_prev".to_string(), span.clone())];
+                    args.extend(type_args.iter().cloned());
+                    args
+                };
+
+                self.lower_mold_inst(func, name, &new_type_args, fields)
+            }
             _ => Err(LowerError {
                 message: "unsupported pipeline step".to_string(),
             }),
+        }
+    }
+
+    /// B11-5c: Check if an expression tree contains any Placeholder `_`.
+    fn expr_has_placeholder(&self, expr: &Expr) -> bool {
+        match expr {
+            Expr::Placeholder(_) => true,
+            Expr::BinaryOp(lhs, _, rhs, _) => {
+                self.expr_has_placeholder(lhs) || self.expr_has_placeholder(rhs)
+            }
+            Expr::UnaryOp(_, inner, _) => self.expr_has_placeholder(inner),
+            Expr::FuncCall(callee, args, _) => {
+                self.expr_has_placeholder(callee)
+                    || args.iter().any(|a| self.expr_has_placeholder(a))
+            }
+            Expr::MethodCall(obj, _, args, _) => {
+                self.expr_has_placeholder(obj) || args.iter().any(|a| self.expr_has_placeholder(a))
+            }
+            Expr::MoldInst(_, type_args, _, _) => {
+                type_args.iter().any(|a| self.expr_has_placeholder(a))
+            }
+            _ => false,
+        }
+    }
+
+    /// B11-5c: Rewrite all `Placeholder` nodes in an expression to `Ident(replacement)`.
+    fn rewrite_placeholder(
+        &self,
+        expr: &Expr,
+        replacement: &str,
+        span: &crate::lexer::Span,
+    ) -> Expr {
+        match expr {
+            Expr::Placeholder(_) => Expr::Ident(replacement.to_string(), span.clone()),
+            Expr::BinaryOp(lhs, op, rhs, s) => Expr::BinaryOp(
+                Box::new(self.rewrite_placeholder(lhs, replacement, span)),
+                op.clone(),
+                Box::new(self.rewrite_placeholder(rhs, replacement, span)),
+                s.clone(),
+            ),
+            Expr::UnaryOp(op, inner, s) => Expr::UnaryOp(
+                op.clone(),
+                Box::new(self.rewrite_placeholder(inner, replacement, span)),
+                s.clone(),
+            ),
+            Expr::FuncCall(callee, args, s) => Expr::FuncCall(
+                Box::new(self.rewrite_placeholder(callee, replacement, span)),
+                args.iter()
+                    .map(|a| self.rewrite_placeholder(a, replacement, span))
+                    .collect(),
+                s.clone(),
+            ),
+            Expr::MethodCall(obj, method, args, s) => Expr::MethodCall(
+                Box::new(self.rewrite_placeholder(obj, replacement, span)),
+                method.clone(),
+                args.iter()
+                    .map(|a| self.rewrite_placeholder(a, replacement, span))
+                    .collect(),
+                s.clone(),
+            ),
+            Expr::MoldInst(name, type_args, fields, s) => Expr::MoldInst(
+                name.clone(),
+                type_args
+                    .iter()
+                    .map(|a| self.rewrite_placeholder(a, replacement, span))
+                    .collect(),
+                fields.clone(),
+                s.clone(),
+            ),
+            other => other.clone(),
         }
     }
 
@@ -6026,6 +6251,22 @@ impl Lowering {
         }
     }
 
+    /// B11-6d: Check if `child` extends `parent` by walking the inheritance chain.
+    pub(crate) fn check_type_inheritance(&self, child: &str, parent: &str) -> bool {
+        let mut current = child;
+        for _ in 0..64 {
+            if let Some(p) = self.type_parents.get(current) {
+                if p == parent {
+                    return true;
+                }
+                current = p;
+            } else {
+                break;
+            }
+        }
+        false
+    }
+
     /// 式が bool 値を返すかどうかを判定
     pub(crate) fn expr_is_bool(&self, expr: &Expr) -> bool {
         match expr {
@@ -6080,6 +6321,8 @@ impl Lowering {
             }
             // WFX-3: Exists[path]() returns Bool
             Expr::MoldInst(name, _, _, _) if name == "Exists" => true,
+            // B11-6d: TypeIs/TypeExtends return Bool
+            Expr::MoldInst(name, _, _, _) if name == "TypeIs" || name == "TypeExtends" => true,
             Expr::FieldAccess(obj, field, _) => {
                 // QF-34: hasValue フィールドは Lax/Result の Bool フィールド
                 if field == "hasValue" {
@@ -6204,6 +6447,12 @@ impl Lowering {
                     | "concat" | "append" | "prepend" | "zip" | "enumerate" => 5,
                     _ => -1, // TAIDA_TAG_UNKNOWN
                 }
+            }
+            // B11-6d: TypeIs/TypeExtends return Bool (tag 2), other Molds return Pack (tag 4)
+            Expr::MoldInst(name, _, _, _)
+                if name == "TypeIs" || name == "TypeExtends" || name == "Exists" =>
+            {
+                2 // TAIDA_TAG_BOOL
             }
             Expr::MoldInst(_, _, _, _) => 4, // Mold instantiation returns a Pack
             Expr::Unmold(_, _) => -1,        // TAIDA_TAG_UNKNOWN: could be anything

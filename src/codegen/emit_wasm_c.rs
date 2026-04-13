@@ -632,6 +632,8 @@ fn runtime_func_prototype(name: &str, profile: WasmProfile) -> Result<String, Wa
         "taida_register_type_parent" => "void taida_register_type_parent(int64_t child_str, int64_t parent_str);".to_string(),
         "taida_error_type_matches" => "int64_t taida_error_type_matches(int64_t error_val, int64_t handler_type_str);".to_string(),
         "taida_error_type_check_or_rethrow" => "int64_t taida_error_type_check_or_rethrow(int64_t error_val, int64_t handler_type_str);".to_string(),
+        // B11B-015: TypeIs named type runtime check
+        "taida_typeis_named" => "int64_t taida_typeis_named(int64_t val, int64_t expected_type_str);".to_string(),
         "taida_is_error_thrown" => "int64_t taida_is_error_thrown(void);".to_string(),
         "taida_make_error" => {
             "int64_t taida_make_error(int64_t type_ptr, int64_t msg_ptr);".to_string()

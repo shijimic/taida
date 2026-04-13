@@ -3173,6 +3173,161 @@ impl Interpreter {
                 }))))
             }
 
+            // ── B11-5a: If[cond, then_value, else_value]() ──────
+            // Short-circuit: only the selected branch is evaluated.
+            "If" => {
+                if type_args.len() < 3 {
+                    return Err(RuntimeError {
+                        message: "If requires 3 arguments: If[condition, then_value, else_value]()"
+                            .into(),
+                    });
+                }
+                let cond = match self.eval_expr(&type_args[0])? {
+                    Signal::Value(v) => v.is_truthy(),
+                    other => return Ok(Some(other)),
+                };
+                if cond {
+                    match self.eval_expr(&type_args[1])? {
+                        Signal::Value(v) => Ok(Some(Signal::Value(v))),
+                        other => Ok(Some(other)),
+                    }
+                } else {
+                    match self.eval_expr(&type_args[2])? {
+                        Signal::Value(v) => Ok(Some(Signal::Value(v))),
+                        other => Ok(Some(other)),
+                    }
+                }
+            }
+
+            // ── B11-6b: TypeIs[value, :TypeName]() / TypeIs[value, EnumName:Variant]() ──
+            // Returns Bool: true if the runtime value matches the given type.
+            "TypeIs" => {
+                if type_args.len() < 2 {
+                    return Err(RuntimeError {
+                        message: "TypeIs requires 2 arguments: TypeIs[value, :TypeName]()".into(),
+                    });
+                }
+                let val = match self.eval_expr(&type_args[0])? {
+                    Signal::Value(v) => v,
+                    other => return Ok(Some(other)),
+                };
+                // The second arg is a TypeLiteral or an evaluated expression
+                let result = match &type_args[1] {
+                    // TypeLiteral with variant: enum variant check
+                    Expr::TypeLiteral(enum_name, Some(variant_name), _) => {
+                        // Look up the enum definition and find the variant ordinal
+                        if let Some(variants) = self.enum_defs.get(enum_name.as_str()) {
+                            if let Some(ordinal) = variants.iter().position(|v| v == variant_name) {
+                                // Compare against the value's int representation
+                                matches!(&val, Value::Int(n) if *n == ordinal as i64)
+                            } else {
+                                false
+                            }
+                        } else {
+                            false
+                        }
+                    }
+                    // TypeLiteral without variant: primitive/named type check
+                    Expr::TypeLiteral(type_name, None, _) => match type_name.as_str() {
+                        "Int" => matches!(val, Value::Int(_)),
+                        "Float" => matches!(val, Value::Float(_)),
+                        "Num" => matches!(val, Value::Int(_) | Value::Float(_)),
+                        "Str" => matches!(val, Value::Str(_)),
+                        "Bool" => matches!(val, Value::Bool(_)),
+                        "Bytes" => matches!(val, Value::Bytes(_)),
+                        // B11B-015: Error check includes error subtypes via __type + inheritance
+                        "Error" => match &val {
+                            Value::Error(_) => true,
+                            Value::BuchiPack(fields) => {
+                                if let Some((_, Value::Str(t))) =
+                                    fields.iter().find(|(n, _)| n == "__type")
+                                {
+                                    self.check_type_extends(t, "Error")
+                                } else {
+                                    false
+                                }
+                            }
+                            _ => false,
+                        },
+                        // B11B-015: Named type check via __type field + inheritance chain
+                        other => match &val {
+                            Value::BuchiPack(fields) => {
+                                if let Some((_, Value::Str(t))) =
+                                    fields.iter().find(|(n, _)| n == "__type")
+                                {
+                                    t == other || self.check_type_extends(t, other)
+                                } else {
+                                    false
+                                }
+                            }
+                            Value::Error(e) => {
+                                e.error_type == other
+                                    || self.check_type_extends(&e.error_type, other)
+                            }
+                            _ => false,
+                        },
+                    },
+                    // Fallback: evaluate as string and compare
+                    other => {
+                        let type_str = match self.eval_expr(other)? {
+                            Signal::Value(v) => v.to_display_string(),
+                            other_sig => return Ok(Some(other_sig)),
+                        };
+                        match type_str.as_str() {
+                            "Int" => matches!(val, Value::Int(_)),
+                            "Float" => matches!(val, Value::Float(_)),
+                            "Num" => matches!(val, Value::Int(_) | Value::Float(_)),
+                            "Str" => matches!(val, Value::Str(_)),
+                            "Bool" => matches!(val, Value::Bool(_)),
+                            "Bytes" => matches!(val, Value::Bytes(_)),
+                            "Error" => matches!(val, Value::Error(_)),
+                            _ => false,
+                        }
+                    }
+                };
+                Ok(Some(Signal::Value(Value::Bool(result))))
+            }
+
+            // ── B11-6b: TypeExtends[:TypeA, :TypeB]() ──
+            // Returns Bool: true if TypeA is the same as or a subtype of TypeB.
+            // Pure compile-time operation; interpreter uses simple name matching.
+            "TypeExtends" => {
+                if type_args.len() < 2 {
+                    return Err(RuntimeError {
+                        message: "TypeExtends requires 2 arguments: TypeExtends[:TypeA, :TypeB]()"
+                            .into(),
+                    });
+                }
+                let type_a = match &type_args[0] {
+                    Expr::TypeLiteral(name, _, _) => name.clone(),
+                    other => match self.eval_expr(other)? {
+                        Signal::Value(v) => v.to_display_string(),
+                        other_sig => return Ok(Some(other_sig)),
+                    },
+                };
+                let type_b = match &type_args[1] {
+                    Expr::TypeLiteral(name, _, _) => name.clone(),
+                    other => match self.eval_expr(other)? {
+                        Signal::Value(v) => v.to_display_string(),
+                        other_sig => return Ok(Some(other_sig)),
+                    },
+                };
+                // Same type → true
+                let result = if type_a == type_b {
+                    true
+                } else {
+                    // Check numeric hierarchy: Int < Num, Float < Num
+                    match (type_a.as_str(), type_b.as_str()) {
+                        ("Int", "Num") | ("Float", "Num") | ("Int", "Float") => true,
+                        _ => {
+                            // Check inheritance chain using type_defs_inherited
+                            self.check_type_extends(&type_a, &type_b)
+                        }
+                    }
+                };
+                Ok(Some(Signal::Value(Value::Bool(result))))
+            }
+
             // ── JS-backend-only mold types ──────────────────────
             // These molds operate on Molten values and are only available
             // in the JS transpiler backend.

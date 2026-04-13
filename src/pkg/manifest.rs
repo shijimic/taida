@@ -38,6 +38,10 @@ pub struct Manifest {
     pub deps: BTreeMap<String, Dependency>,
     /// Directory containing the manifest file.
     pub root_dir: PathBuf,
+    /// B11-10b: Package public API symbols exported by this package.
+    /// Extracted from: `<<<@version owner/name @(symbols)`
+    /// Empty if no export surface is declared.
+    pub exports: Vec<String>,
 }
 
 /// A single dependency specification.
@@ -110,6 +114,8 @@ impl Manifest {
         let mut export_count = 0;
         // B11-1b: package identity from `<<<@version owner/name`
         let mut package_id: Option<String> = None;
+        // B11-10b: export symbols from `<<<@version owner/name @(symbols)` only.
+        let mut export_symbols: Vec<String> = Vec::new();
 
         for stmt in &program.statements {
             match stmt {
@@ -140,7 +146,16 @@ impl Manifest {
                     if imp.version.is_none()
                         && (imp.path.starts_with("./") || imp.path.starts_with("../")) =>
                 {
-                    // >>> ./main.td => @(hello) — local import determines entry point
+                    // >>> ./main.td — local import determines entry point.
+                    // B11-10b: reject old split surface `>>> ./main.td => @(symbols)`.
+                    if !imp.symbols.is_empty() {
+                        return Err(
+                            "packages.tdm: `>>> ./entry.td => @(symbols)` facade surface \
+                             is no longer supported. Use `<<<@version owner/name @(symbols)` \
+                             to declare the package public API."
+                                .to_string(),
+                        );
+                    }
                     entry = imp.path.clone();
                 }
                 Statement::Export(exp) => {
@@ -157,6 +172,21 @@ impl Manifest {
                     // B11-1b: extract package identity from `<<<@version owner/name`
                     if let Some(pkg_id) = &exp.path {
                         package_id = Some(pkg_id.clone());
+                    }
+                    // B11-10b: extract export symbols only from the canonical surface
+                    // `<<<@version owner/name @(symbols)`.
+                    if !exp.symbols.is_empty() {
+                        if exp.path.is_some() {
+                            // Canonical: `<<<@version owner/name @(symbols)`
+                            export_symbols = exp.symbols.clone();
+                        } else {
+                            // Rejected: `<<<@version @(symbols)` (symbols-only without package identity)
+                            return Err(
+                                "packages.tdm: `<<<@version @(symbols)` is no longer supported. \
+                                 Use `<<<@version owner/name @(symbols)` with a package identity."
+                                    .to_string(),
+                            );
+                        }
                     }
                 }
                 // P-2: reject non-import/export statements
@@ -190,6 +220,8 @@ impl Manifest {
             }
         }
 
+        let exports = export_symbols;
+
         // B11-1b: name from package identity (<<<@version owner/name),
         // falling back to directory name for backward compatibility.
         let name = package_id.unwrap_or_else(|| {
@@ -206,6 +238,7 @@ impl Manifest {
             entry,
             deps,
             root_dir: root_dir.to_path_buf(),
+            exports,
         })
     }
 
@@ -300,6 +333,7 @@ impl Manifest {
             entry,
             deps,
             root_dir: root_dir.to_path_buf(),
+            exports: Vec::new(), // Legacy format has no export surface
         })
     }
 
@@ -339,6 +373,10 @@ impl Manifest {
             r#"// packages.tdm -- {name}
 // Dependencies:
 // >>> taida-community/example@a.1
+//
+// To publish, add the canonical export surface:
+// >>> ./main.td
+// <<<@a owner/{name} @(myExport)
 "#
         )
     }
@@ -562,8 +600,8 @@ writeFile("/tmp/evil.txt", "gotcha")
         let source = r#"
 >>> taida-lang/os@1.0.0
 >>> taida-community/http@2.1.0
->>> ./main.td => @(func)
-<<<@1.0.0 @(func)
+>>> ./main.td
+<<<@1.0.0 test/pkg @(func)
 "#;
         let manifest = Manifest::parse(source, Path::new("/tmp")).unwrap();
         assert_eq!(manifest.deps.len(), 2); // 2 registry deps (not ./main.td)
@@ -590,11 +628,11 @@ writeFile("/tmp/evil.txt", "gotcha")
     #[test]
     fn test_new_format_version_from_export() {
         let source = r#"
-<<<@2.5.3 @(myFunc)
+<<<@2.5.3 test/pkg @(myFunc)
 "#;
         let manifest = Manifest::parse(source, Path::new("/my-pkg")).unwrap();
         assert_eq!(manifest.version, "2.5.3");
-        assert_eq!(manifest.name, "my-pkg"); // derived from directory
+        assert_eq!(manifest.name, "test/pkg");
     }
 
     #[test]
@@ -648,7 +686,7 @@ description <= "A legacy app"
         let source = r#"
 >>> alice/webframework@b.12
 >>> bob/jsonutil@a
-<<<@a.3 @(MyApp)
+<<<@a.3 alice/myapp
 "#;
         let manifest = Manifest::parse(source, Path::new("/my-app")).unwrap();
         assert_eq!(manifest.deps.len(), 2);
@@ -676,8 +714,8 @@ description <= "A legacy app"
     fn test_entry_from_local_import() {
         let source = r#"
 >>> taida-lang/os@a.1
->>> ./lib.td => @(hello, greet)
-<<<@a.3 @(hello, greet)
+>>> ./lib.td
+<<<@a.3 test/pkg @(hello, greet)
 "#;
         let manifest = Manifest::parse(source, Path::new("/my-pkg")).unwrap();
         assert_eq!(manifest.entry, "./lib.td");
@@ -689,7 +727,7 @@ description <= "A legacy app"
     fn test_entry_defaults_to_main_td_without_local_import() {
         let source = r#"
 >>> taida-lang/os@a.1
-<<<@a.1 @(hello)
+<<<@a.1 test/pkg
 "#;
         let manifest = Manifest::parse(source, Path::new("/my-pkg")).unwrap();
         assert_eq!(manifest.entry, "main.td");
@@ -716,7 +754,7 @@ name <= "evil-pkg"
         let source = r#"
 >>> taida-lang/os@a.1
 hw <= "hello"
-<<<@a.1 @(hw)
+<<<@a.1 test/pkg @(hw)
 "#;
         let result = Manifest::parse(source, Path::new("/tmp"));
         assert!(result.is_err());
@@ -728,7 +766,7 @@ hw <= "hello"
         let source = r#"
 >>> taida-lang/os@a.1
 evil x = x => :Int
-<<<@a.1 @(evil)
+<<<@a.1 test/pkg @(evil)
 "#;
         let result = Manifest::parse(source, Path::new("/tmp"));
         assert!(result.is_err());
@@ -740,7 +778,7 @@ evil x = x => :Int
         let source = r#"
 >>> taida-lang/os@a.1
 stdout("hello")
-<<<@a.1 @(hello)
+<<<@a.1 test/pkg
 "#;
         let result = Manifest::parse(source, Path::new("/tmp"));
         assert!(result.is_err(), "Expression should be rejected");
@@ -757,7 +795,7 @@ stdout("hello")
         let source = r#"
 >>> taida-lang/os@a.1
 >>> alice/utils
-<<<@a.1 @(hello)
+<<<@a.1 test/pkg
 "#;
         let result = Manifest::parse(source, Path::new("/tmp"));
         assert!(result.is_err());
@@ -770,8 +808,8 @@ stdout("hello")
     fn test_p4_reject_multiple_exports() {
         let source = r#"
 >>> taida-lang/os@a.1
->>> ./main.td => @(hello, greet)
-<<<@a.1 @(hello)
+>>> ./main.td
+<<<@a.1 test/pkg @(hello)
 <<< @(greet)
 "#;
         let result = Manifest::parse(source, Path::new("/tmp"));
@@ -783,8 +821,8 @@ stdout("hello")
     fn test_p4_single_export_ok() {
         let source = r#"
 >>> taida-lang/os@a.1
->>> ./main.td => @(hello, greet)
-<<<@a.1 @(hello, greet)
+>>> ./main.td
+<<<@a.1 test/pkg @(hello, greet)
 "#;
         let result = Manifest::parse(source, Path::new("/tmp"));
         assert!(result.is_ok());
@@ -797,7 +835,7 @@ stdout("hello")
         // An export (<<<) without a version should use the default, not panic
         let source = r#"
 >>> taida-lang/os@a.1
-<<< @(hello)
+<<<
 "#;
         let result = Manifest::parse(source, Path::new("/my-pkg"));
         assert!(result.is_ok());
@@ -835,7 +873,7 @@ stdout("hello")
         // B11-1f backward compat: <<<@version without package identity
         // should still derive name from directory.
         let source = r#"
-<<<@a.3 @(MyApp)
+<<<@a.3
 "#;
         let manifest = Manifest::parse(source, Path::new("/my-pkg")).unwrap();
         assert_eq!(manifest.name, "my-pkg");
@@ -849,5 +887,87 @@ stdout("hello")
         let manifest = Manifest::parse(source, Path::new("/my-project")).unwrap();
         assert_eq!(manifest.name, "my-project");
         assert_eq!(manifest.version, "a.3");
+    }
+
+    // ── B11-10b: Manifest.exports extraction (Phase 10 canonical surface) ──
+
+    #[test]
+    fn test_b11_10b_exports_from_canonical_surface() {
+        // Phase 10 canonical: `<<<@version owner/name @(symbols)`
+        let source = r#"
+>>> ./main.td
+<<<@b.11.rc3 taida-lang/terminal @(open, close)
+"#;
+        let manifest = Manifest::parse(source, Path::new("/my-pkg")).unwrap();
+        assert_eq!(manifest.name, "taida-lang/terminal");
+        assert_eq!(manifest.version, "b.11.rc3");
+        assert_eq!(manifest.entry, "./main.td");
+        assert_eq!(manifest.exports, vec!["open", "close"]);
+    }
+
+    #[test]
+    fn test_b11_10b_exports_empty_when_no_symbols() {
+        // No export symbols declared
+        let source = r#"
+<<<@a.3 shijimic/my-pkg
+"#;
+        let manifest = Manifest::parse(source, Path::new("/my-pkg")).unwrap();
+        assert!(manifest.exports.is_empty());
+    }
+
+    #[test]
+    fn test_b11_10b_arrow_surface_rejected() {
+        // Phase 9 arrow surface `<<<@version owner/name => @(...)` is now a parse error
+        let source = r#"
+>>> ./main.td
+<<<@b.11.rc3 taida-lang/terminal => @(open, close)
+"#;
+        let result = Manifest::parse(source, Path::new("/my-pkg"));
+        assert!(result.is_err(), "Arrow surface should be rejected");
+        assert!(
+            result.unwrap_err().contains("arrow syntax"),
+            "Error should mention obsolete arrow syntax"
+        );
+    }
+
+    #[test]
+    fn test_b11_10b_split_surface_rejected() {
+        // Old split surface `>>> ./main.td => @(symbols)` is now rejected
+        let source = r#"
+>>> ./main.td => @(hello, greet)
+<<<@a.3 taida-lang/terminal
+"#;
+        let result = Manifest::parse(source, Path::new("/my-pkg"));
+        assert!(result.is_err(), "Split surface should be rejected");
+        assert!(
+            result.unwrap_err().contains("no longer supported"),
+            "Error should mention unsupported surface"
+        );
+    }
+
+    #[test]
+    fn test_b11_10b_symbols_only_surface_rejected() {
+        // `<<<@version @(symbols)` without package identity is now rejected
+        let source = r#"
+<<<@a.3 @(MyApp, MyLib)
+"#;
+        let result = Manifest::parse(source, Path::new("/my-pkg"));
+        assert!(result.is_err(), "Symbols-only surface should be rejected");
+        assert!(
+            result.unwrap_err().contains("no longer supported"),
+            "Error should mention unsupported surface"
+        );
+    }
+
+    #[test]
+    fn test_b11_10b_version_only_with_package_identity() {
+        // `<<<@version owner/name` without symbols is valid (identity-only)
+        let source = r#"
+<<<@b.11.rc3 taida-lang/terminal
+"#;
+        let manifest = Manifest::parse(source, Path::new("/my-pkg")).unwrap();
+        assert_eq!(manifest.name, "taida-lang/terminal");
+        assert_eq!(manifest.version, "b.11.rc3");
+        assert!(manifest.exports.is_empty());
     }
 }

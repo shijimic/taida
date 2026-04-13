@@ -1969,6 +1969,192 @@ impl Lowering {
                 ));
                 Ok(result)
             }
+            // B11-5c: If[cond, then, else]() → CondBranch (short-circuit)
+            "If" => {
+                if type_args.len() < 3 {
+                    return Err(LowerError {
+                        message:
+                            "If requires 3 arguments: If[condition, then_value, else_value]()"
+                                .into(),
+                    });
+                }
+                let cond_var = self.lower_expr(func, &type_args[0])?;
+                let result_var = func.alloc_var();
+
+                // Then branch: only evaluate type_args[1]
+                let (then_body, then_result) = {
+                    let saved = std::mem::take(&mut func.body);
+                    let r = self.lower_expr(func, &type_args[1])?;
+                    let body = std::mem::replace(&mut func.body, saved);
+                    (body, r)
+                };
+
+                // Else branch: only evaluate type_args[2]
+                let (else_body, else_result) = {
+                    let saved = std::mem::take(&mut func.body);
+                    let r = self.lower_expr(func, &type_args[2])?;
+                    let body = std::mem::replace(&mut func.body, saved);
+                    (body, r)
+                };
+
+                func.push(IrInst::CondBranch(
+                    result_var,
+                    vec![
+                        super::ir::CondArm {
+                            condition: Some(cond_var),
+                            body: then_body,
+                            result: then_result,
+                        },
+                        super::ir::CondArm {
+                            condition: None,
+                            body: else_body,
+                            result: else_result,
+                        },
+                    ],
+                ));
+
+                Ok(result_var)
+            }
+
+            // ── B11-6d: TypeIs[value, :TypeName]() → compile-time type check ──
+            "TypeIs" => {
+                if type_args.len() < 2 {
+                    return Err(LowerError {
+                        message: "TypeIs requires 2 arguments: TypeIs[value, :TypeName]()".into(),
+                    });
+                }
+                let result = func.alloc_var();
+                match &type_args[1] {
+                    // Enum variant check: compare ordinals at runtime
+                    Expr::TypeLiteral(enum_name, Some(variant_name), _) => {
+                        let val_var = self.lower_expr(func, &type_args[0])?;
+                        let ordinal: usize = self
+                            .enum_defs
+                            .get(enum_name.as_str())
+                            .and_then(|variants: &Vec<String>| {
+                                variants.iter().position(|v| v == variant_name)
+                            })
+                            .unwrap_or(usize::MAX);
+                        let ord_var = func.alloc_var();
+                        func.push(IrInst::ConstInt(ord_var, ordinal as i64));
+                        // Emit comparison: val == ordinal → bool
+                        func.push(IrInst::Call(
+                            result,
+                            "taida_int_eq".to_string(),
+                            vec![val_var, ord_var],
+                        ));
+                    }
+                    // Primitive type check: use compile-time type analysis
+                    Expr::TypeLiteral(type_name, None, _) => {
+                        let is_match = match type_name.as_str() {
+                            "Int" => {
+                                // Int: expression produces an int AND is not a bool
+                                match &type_args[0] {
+                                    Expr::IntLit(_, _) => Some(true),
+                                    Expr::FloatLit(_, _) => Some(false),
+                                    Expr::StringLit(_, _) | Expr::TemplateLit(_, _) => Some(false),
+                                    Expr::BoolLit(_, _) => Some(false),
+                                    Expr::EnumVariant(_, _, _) => Some(false),
+                                    _ if self.expr_is_bool(&type_args[0]) => Some(false),
+                                    _ => {
+                                        // Check if the expression is a known string type
+                                        if self.expr_is_string_full(&type_args[0]) {
+                                            Some(false)
+                                        } else {
+                                            // Assume Int for non-bool, non-string unboxed values
+                                            Some(true)
+                                        }
+                                    }
+                                }
+                            }
+                            "Float" => match &type_args[0] {
+                                Expr::FloatLit(_, _) => Some(true),
+                                _ => Some(false),
+                            },
+                            "Num" => match &type_args[0] {
+                                Expr::IntLit(_, _) | Expr::FloatLit(_, _) => Some(true),
+                                Expr::BoolLit(_, _) => Some(false),
+                                Expr::StringLit(_, _) | Expr::TemplateLit(_, _) => Some(false),
+                                _ if self.expr_is_bool(&type_args[0]) => Some(false),
+                                _ if self.expr_is_string_full(&type_args[0]) => Some(false),
+                                _ => Some(true),
+                            },
+                            "Str" => match &type_args[0] {
+                                Expr::StringLit(_, _) | Expr::TemplateLit(_, _) => Some(true),
+                                _ if self.expr_is_string_full(&type_args[0]) => Some(true),
+                                Expr::IntLit(_, _)
+                                | Expr::FloatLit(_, _)
+                                | Expr::BoolLit(_, _) => Some(false),
+                                _ => Some(false),
+                            },
+                            "Bool" => match &type_args[0] {
+                                Expr::BoolLit(_, _) => Some(true),
+                                _ if self.expr_is_bool(&type_args[0]) => Some(true),
+                                Expr::IntLit(_, _)
+                                | Expr::FloatLit(_, _)
+                                | Expr::StringLit(_, _)
+                                | Expr::TemplateLit(_, _) => Some(false),
+                                _ => Some(false),
+                            },
+                            "Bytes" => Some(false), // Bytes is rare, default false
+                            // B11B-015: Error and named types need runtime check
+                            "Error" => None,
+                            _ => None,
+                        };
+                        if let Some(b) = is_match {
+                            func.push(IrInst::ConstBool(result, b));
+                        } else {
+                            // Runtime check via taida_typeis_named
+                            let val_var = self.lower_expr(func, &type_args[0])?;
+                            let type_str = func.alloc_var();
+                            func.push(IrInst::ConstStr(type_str, type_name.to_string()));
+                            func.push(IrInst::Call(
+                                result,
+                                "taida_typeis_named".to_string(),
+                                vec![val_var, type_str],
+                            ));
+                        }
+                    }
+                    _ => {
+                        func.push(IrInst::ConstBool(result, false));
+                    }
+                }
+                Ok(result)
+            }
+
+            // ── B11-6d: TypeExtends[:TypeA, :TypeB]() → compile-time type relationship ──
+            "TypeExtends" => {
+                if type_args.len() < 2 {
+                    return Err(LowerError {
+                        message:
+                            "TypeExtends requires 2 arguments: TypeExtends[:TypeA, :TypeB]()".into(),
+                    });
+                }
+                let type_a = match &type_args[0] {
+                    Expr::TypeLiteral(name, _, _) => name.clone(),
+                    _ => String::new(),
+                };
+                let type_b = match &type_args[1] {
+                    Expr::TypeLiteral(name, _, _) => name.clone(),
+                    _ => String::new(),
+                };
+                let extends = if type_a == type_b {
+                    true
+                } else {
+                    match (type_a.as_str(), type_b.as_str()) {
+                        ("Int", "Num") | ("Float", "Num") | ("Int", "Float") => true,
+                        (a, b) if !a.is_empty() && !b.is_empty() => {
+                            // Check inheritance chain
+                            self.check_type_inheritance(a, b)
+                        }
+                        _ => false,
+                    }
+                };
+                let result = func.alloc_var();
+                func.push(IrInst::ConstBool(result, extends));
+                Ok(result)
+            }
+
             // JS-only molds -- error in native backend
             "JSNew" | "JSSet" | "JSBind" | "JSSpread" => Err(LowerError {
                 message: format!(
@@ -2190,6 +2376,10 @@ fn rewrite_expr_ident_aliases(
         }
         Expr::EnumVariant(enum_name, variant_name, s) => {
             Expr::EnumVariant(enum_name.clone(), variant_name.clone(), s.clone())
+        }
+        // B11-6a: TypeLiteral passes through unchanged (compile-time construct)
+        Expr::TypeLiteral(name, variant, s) => {
+            Expr::TypeLiteral(name.clone(), variant.clone(), s.clone())
         }
         Expr::Placeholder(s) => Expr::Placeholder(s.clone()),
         Expr::Hole(s) => Expr::Hole(s.clone()),

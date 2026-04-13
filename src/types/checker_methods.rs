@@ -16,6 +16,9 @@ impl TypeChecker {
                 "contains" | "startsWith" | "endsWith" => Some((1, 1, vec![Type::Str])),
                 "indexOf" | "lastIndexOf" => Some((1, 1, vec![Type::Str])),
                 "get" => Some((1, 1, vec![Type::Int])),
+                // B11-4e: replace / replaceAll / split
+                "replace" | "replaceAll" => Some((2, 2, vec![Type::Str, Type::Str])),
+                "split" => Some((1, 1, vec![Type::Str])),
                 _ => None,
             },
             Type::Int | Type::Float | Type::Num => match method {
@@ -186,6 +189,9 @@ impl TypeChecker {
                 "indexOf" | "lastIndexOf" => Type::Int,
                 "get" => Type::Generic("Lax".to_string(), vec![Type::Str]),
                 "toString" => Type::Str,
+                // B11-4e: replace / replaceAll / split
+                "replace" | "replaceAll" => Type::Str,
+                "split" => Type::List(Box::new(Type::Str)),
                 _ => Type::Unknown,
             },
             Type::Int | Type::Float | Type::Num => match method {

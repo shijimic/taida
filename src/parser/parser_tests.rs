@@ -1049,22 +1049,17 @@ fn test_parse_export_version_with_package_identity() {
 }
 
 #[test]
-fn test_parse_export_version_with_package_identity_and_symbols_rejected() {
-    // B11B-012: `<<<@version owner/name @(symbols)` is a forbidden surface.
-    // The canonical forms are `<<<@version owner/name` or `<<<@version @(symbols)`,
-    // never both combined.
-    let (_program, errors) = parse("<<<@b.11.rc3 taida-lang/terminal @(capitalize, truncate)");
-    assert!(
-        !errors.is_empty(),
-        "Expected parse error for package identity + @(symbols), but got none"
-    );
-    assert!(
-        errors[0]
-            .message
-            .contains("Cannot combine package identity with @(symbols)"),
-        "Error message should mention the forbidden combination, got: {}",
-        errors[0].message
-    );
+fn test_parse_export_version_with_package_identity_and_symbols_accepted() {
+    // B11-10b: `<<<@version owner/name @(symbols)` is the Phase 10 canonical surface.
+    let stmt = first_stmt("<<<@b.11.rc3 taida-lang/terminal @(capitalize, truncate)");
+    match stmt {
+        Statement::Export(exp) => {
+            assert_eq!(exp.version, Some("b.11.rc3".to_string()));
+            assert_eq!(exp.path, Some("taida-lang/terminal".to_string()));
+            assert_eq!(exp.symbols, vec!["capitalize", "truncate"]);
+        }
+        other => panic!("Expected Export, got {:?}", other),
+    }
 }
 
 #[test]
@@ -1104,6 +1099,56 @@ fn test_parse_export_version_only_bare() {
             assert_eq!(exp.version, Some("a.3".to_string()));
             assert_eq!(exp.path, None);
             assert!(exp.symbols.is_empty());
+        }
+        other => panic!("Expected Export, got {:?}", other),
+    }
+}
+
+// ── B11-10b: Phase 10 canonical surface (no arrow) ──
+
+#[test]
+fn test_parse_export_arrow_surface_rejected() {
+    // B11-10b: `<<<@version owner/name => @(symbols)` is no longer supported.
+    let (_program, errors) = parse("<<<@b.11.rc3 taida-lang/terminal => @(open, close)");
+    assert!(
+        !errors.is_empty(),
+        "Expected parse error for arrow surface, but got none"
+    );
+    assert!(
+        errors[0]
+            .message
+            .contains("arrow syntax after package identity is no longer supported"),
+        "Error message should mention obsolete arrow syntax, got: {}",
+        errors[0].message
+    );
+}
+
+#[test]
+fn test_parse_export_arrow_surface_single_symbol_rejected() {
+    // B11-10b: single-symbol arrow surface is also rejected.
+    let (_program, errors) = parse("<<<@a.3 shijimic/my-pkg => @(hello)");
+    assert!(
+        !errors.is_empty(),
+        "Expected parse error for arrow surface, but got none"
+    );
+    assert!(
+        errors[0]
+            .message
+            .contains("arrow syntax after package identity is no longer supported"),
+        "Error message should mention obsolete arrow syntax, got: {}",
+        errors[0].message
+    );
+}
+
+#[test]
+fn test_parse_export_package_identity_with_symbols_accepted() {
+    // B11-10b: `<<<@version owner/name @(symbols)` is the canonical surface.
+    let stmt = first_stmt("<<<@b.11.rc3 taida-lang/terminal @(open, close)");
+    match stmt {
+        Statement::Export(exp) => {
+            assert_eq!(exp.version, Some("b.11.rc3".to_string()));
+            assert_eq!(exp.path, Some("taida-lang/terminal".to_string()));
+            assert_eq!(exp.symbols, vec!["open", "close"]);
         }
         other => panic!("Expected Export, got {:?}", other),
     }

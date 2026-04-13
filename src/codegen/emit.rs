@@ -869,6 +869,11 @@ fn runtime_abi(name: &str) -> Result<RuntimeAbi, String> {
             params: &[Ptr, Ptr],
             returns: &[Val],
         },
+        // B11B-015: TypeIs named type runtime check
+        "taida_typeis_named" => RuntimeAbi {
+            params: &[Ptr, Ptr],
+            returns: &[Val],
+        },
 
         // ── Result[T, P] ──
         "taida_result_create" => RuntimeAbi {

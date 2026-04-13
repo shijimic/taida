@@ -111,8 +111,14 @@ fn init_rust_addon(dir: &Path, name: &str) -> Result<Vec<String>, String> {
     let crate_name = name.replace('-', "_");
 
     // ── packages.tdm ────────────────────────────────────
+    // B11-10d: Show canonical surface as a comment.
+    // The owner is unknown at init time, so the active line uses
+    // version-only form. User should update to the canonical form
+    // before publishing: `<<<@a owner/name @(exports)`
     let packages_tdm = format!(
         "// packages.tdm -- {name}\n\
+         // Canonical form (update before publishing):\n\
+         // <<<@a owner/{name} @(myExport)\n\
          <<<@a\n"
     );
     write_file(dir, "packages.tdm", &packages_tdm)?;

@@ -1067,6 +1067,8 @@ taida_val taida_int_mold_float(double v) {
 taida_val taida_int_mold_str(taida_val v) {
     const char *s = (const char *)v;
     if (!s || *s == '\0') return taida_lax_empty(0);
+    // Reject leading whitespace to match Interpreter parity (Rust parse::<i64>)
+    if (s[0] == ' ' || s[0] == '\t' || s[0] == '\n' || s[0] == '\r') return taida_lax_empty(0);
     char *end;
     taida_val result = strtol(s, &end, 10);
     if (*end != '\0') return taida_lax_empty(0);  // parse failed
@@ -1150,6 +1152,9 @@ taida_val taida_int_mold_str_base(taida_val v, taida_val base) {
     size_t i = 0;
     if (s[0] == '-') {
         negative = 1;
+        i = 1;
+        if (len == 1) return taida_lax_empty(0);
+    } else if (s[0] == '+') {
         i = 1;
         if (len == 1) return taida_lax_empty(0);
     }
@@ -2665,12 +2670,31 @@ taida_val taida_str_split(const char* s, const char* sep) {
     if (!s) return taida_list_new();
     taida_val list = taida_list_new();
     if (!sep || strlen(sep) == 0) {
-        // Split into chars
-        taida_val len = (taida_val)strlen(s);
-        for (taida_val i = 0; i < len; i++) {
-            char *c = taida_str_alloc(1);
-            c[0] = s[i];
-            list = taida_list_push(list, (taida_val)c);
+        // Split into Unicode codepoints (same logic as taida_str_chars)
+        size_t slen = 0;
+        if (!taida_read_cstr_len_safe(s, 65536, &slen) || slen == 0) return list;
+        const unsigned char *buf = (const unsigned char*)s;
+        size_t offset = 0;
+        while (offset < slen) {
+            size_t consumed = 0;
+            uint32_t cp = 0;
+            if (!taida_utf8_decode_one(buf + offset, slen - offset, &consumed, &cp) || consumed == 0) {
+                char *fallback = taida_str_alloc(1);
+                fallback[0] = (char)buf[offset];
+                list = taida_list_push(list, (taida_val)fallback);
+                offset += 1;
+                continue;
+            }
+            unsigned char utf8[4];
+            size_t out_len = 0;
+            if (!taida_utf8_encode_scalar(cp, utf8, &out_len) || out_len == 0) {
+                offset += consumed;
+                continue;
+            }
+            char *ch = taida_str_alloc(out_len);
+            memcpy(ch, utf8, out_len);
+            list = taida_list_push(list, (taida_val)ch);
+            offset += consumed;
         }
         return list;
     }
@@ -4517,6 +4541,29 @@ taida_val taida_error_type_matches(taida_val error_val, taida_val handler_type_s
         if (taida_str_eq(current, handler_type_str)) return 1;
         taida_val parent = taida_find_parent_type(current);
         if (parent == 0) break;
+        current = parent;
+    }
+    return 0;
+}
+
+// B11B-015: Runtime type check for TypeIs with named types.
+// Gets __type from the BuchiPack and walks the inheritance chain.
+// Returns 1 (true) or 0 (false).
+taida_val taida_typeis_named(taida_val val, taida_val expected_type_str) {
+    if (!taida_is_buchi_pack(val)) return 0;
+    taida_val type_str = 0;
+    if (taida_pack_has_hash(val, (taida_val)HASH___TYPE)) {
+        type_str = taida_pack_get(val, (taida_val)HASH___TYPE);
+    }
+    if (type_str == 0) return 0;
+    // Direct match
+    if (taida_str_eq(type_str, expected_type_str)) return 1;
+    // Walk inheritance chain
+    taida_val current = type_str;
+    for (int i = 0; i < 64; i++) {
+        taida_val parent = taida_find_parent_type(current);
+        if (parent == 0) break;
+        if (taida_str_eq(parent, expected_type_str)) return 1;
         current = parent;
     }
     return 0;

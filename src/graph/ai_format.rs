@@ -674,6 +674,14 @@ fn summarize_expr(expr: &Expr) -> String {
         Expr::Throw(inner, _) => {
             format!("{}.throw()", summarize_expr(inner))
         }
+
+        Expr::TypeLiteral(name, variant, _) => {
+            if let Some(var) = variant {
+                format!("{}:{}", name, var)
+            } else {
+                format!(":{}", name)
+            }
+        }
     }
 }
 

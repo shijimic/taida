@@ -48,8 +48,18 @@ fn setup_project_with_remote(root: &Path) -> (PathBuf, PathBuf) {
     run_git(&["init"], &project);
     run_git(&["config", "user.email", "test@taida.dev"], &project);
     run_git(&["config", "user.name", "Test User"], &project);
+
+    // Set origin to a GitHub-style URL so prepare_publish() accepts it.
+    // pushInsteadOf redirects push traffic to the local bare repo while
+    // git remote get-url origin still returns the GitHub URL.
+    let github_url = "https://github.com/alice/demo-pkg.git";
+    run_git(&["remote", "add", "origin", github_url], &project);
     run_git(
-        &["remote", "add", "origin", bare.to_str().unwrap()],
+        &[
+            "config",
+            &format!("url.{}.pushInsteadOf", bare.to_str().unwrap()),
+            github_url,
+        ],
         &project,
     );
 
@@ -61,7 +71,8 @@ fn test_publish_commits_tags_and_pushes() {
     let root = unique_temp_dir("taida_publish_cli");
     let (project_dir, bare) = setup_project_with_remote(&root);
 
-    fs::write(project_dir.join("packages.tdm"), "<<<@a @(run)\n").expect("write packages.tdm");
+    fs::write(project_dir.join("packages.tdm"), "<<<@a alice/demo-pkg\n")
+        .expect("write packages.tdm");
     fs::write(project_dir.join("main.td"), "stdout(\"ok\")\n").expect("write main.td");
 
     // Initial commit so we have a branch to push
@@ -128,7 +139,7 @@ fn test_publish_commits_tags_and_pushes() {
     // Verify commit message
     let log = git_output(&["log", "--oneline", "-1"], &project_dir);
     assert!(
-        log.contains("publish: demo-pkg@a.1"),
+        log.contains("publish: alice/demo-pkg@a.1"),
         "commit message should contain publish info: {}",
         log
     );
@@ -141,7 +152,8 @@ fn test_publish_with_label() {
     let root = unique_temp_dir("taida_publish_label");
     let (project_dir, bare) = setup_project_with_remote(&root);
 
-    fs::write(project_dir.join("packages.tdm"), "<<<@a @(run)\n").expect("write packages.tdm");
+    fs::write(project_dir.join("packages.tdm"), "<<<@a alice/demo-pkg\n")
+        .expect("write packages.tdm");
     fs::write(project_dir.join("main.td"), "stdout(\"ok\")\n").expect("write main.td");
 
     run_git(&["add", "."], &project_dir);
@@ -189,7 +201,7 @@ fn test_publish_second_version_increments_number() {
     let root = unique_temp_dir("taida_publish_incr");
     let (project_dir, bare) = setup_project_with_remote(&root);
 
-    fs::write(project_dir.join("packages.tdm"), "<<<@a @(run)\n").unwrap();
+    fs::write(project_dir.join("packages.tdm"), "<<<@a alice/demo-pkg\n").unwrap();
     fs::write(project_dir.join("main.td"), "stdout(\"ok\")\n").unwrap();
 
     run_git(&["add", "."], &project_dir);
@@ -257,7 +269,7 @@ fn test_publish_dry_run_makes_no_changes() {
     let root = unique_temp_dir("taida_publish_dry");
     let (project_dir, _bare) = setup_project_with_remote(&root);
 
-    fs::write(project_dir.join("packages.tdm"), "<<<@a @(run)\n").unwrap();
+    fs::write(project_dir.join("packages.tdm"), "<<<@a alice/demo-pkg\n").unwrap();
     fs::write(project_dir.join("main.td"), "stdout(\"ok\")\n").unwrap();
 
     run_git(&["add", "."], &project_dir);
@@ -286,7 +298,7 @@ fn test_publish_dry_run_makes_no_changes() {
     // packages.tdm should NOT be modified
     let manifest = fs::read_to_string(project_dir.join("packages.tdm")).unwrap();
     assert_eq!(
-        manifest, "<<<@a @(run)\n",
+        manifest, "<<<@a alice/demo-pkg\n",
         "dry-run should not modify packages.tdm"
     );
 
@@ -302,7 +314,7 @@ fn test_publish_rejects_dirty_worktree() {
     let root = unique_temp_dir("taida_publish_dirty");
     let (project_dir, _bare) = setup_project_with_remote(&root);
 
-    fs::write(project_dir.join("packages.tdm"), "<<<@a @(run)\n").unwrap();
+    fs::write(project_dir.join("packages.tdm"), "<<<@a alice/demo-pkg\n").unwrap();
     fs::write(project_dir.join("main.td"), "stdout(\"ok\")\n").unwrap();
 
     run_git(&["add", "."], &project_dir);
@@ -338,7 +350,7 @@ fn test_publish_rejects_dirty_worktree() {
     // packages.tdm should NOT be modified
     let manifest = fs::read_to_string(project_dir.join("packages.tdm")).unwrap();
     assert_eq!(
-        manifest, "<<<@a @(run)\n",
+        manifest, "<<<@a alice/demo-pkg\n",
         "dirty worktree should not modify packages.tdm"
     );
 
