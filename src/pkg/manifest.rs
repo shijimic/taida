@@ -108,6 +108,8 @@ impl Manifest {
         let mut version = "0.1.0".to_string();
         let mut entry = "main.td".to_string();
         let mut export_count = 0;
+        // B11-1b: package identity from `<<<@version owner/name`
+        let mut package_id: Option<String> = None;
 
         for stmt in &program.statements {
             match stmt {
@@ -152,6 +154,10 @@ impl Manifest {
                     if let Some(v) = &exp.version {
                         version = v.clone();
                     }
+                    // B11-1b: extract package identity from `<<<@version owner/name`
+                    if let Some(pkg_id) = &exp.path {
+                        package_id = Some(pkg_id.clone());
+                    }
                 }
                 // P-2: reject non-import/export statements
                 Statement::Import(imp) => {
@@ -184,11 +190,14 @@ impl Manifest {
             }
         }
 
-        // name is derived from directory name
-        let name = root_dir
-            .file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_default();
+        // B11-1b: name from package identity (<<<@version owner/name),
+        // falling back to directory name for backward compatibility.
+        let name = package_id.unwrap_or_else(|| {
+            root_dir
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_default()
+        });
 
         Ok(Manifest {
             name,
@@ -794,5 +803,51 @@ stdout("hello")
         assert!(result.is_ok());
         let manifest = result.unwrap();
         assert_eq!(manifest.version, "0.1.0"); // default version
+    }
+
+    // ── B11-1e: Package identity from <<< line ──
+
+    #[test]
+    fn test_package_identity_from_export() {
+        // B11B-012: `owner/name + @(symbols)` is now forbidden.
+        // Canonical form is `<<<@version owner/name` only.
+        let source = r#"
+>>> taida-lang/os@a.1
+<<<@b.11.rc3 taida-lang/terminal
+"#;
+        let manifest = Manifest::parse(source, Path::new("/my-pkg")).unwrap();
+        assert_eq!(manifest.name, "taida-lang/terminal");
+        assert_eq!(manifest.version, "b.11.rc3");
+    }
+
+    #[test]
+    fn test_package_identity_without_symbols() {
+        let source = r#"
+<<<@a.3 shijimic/my-pkg
+"#;
+        let manifest = Manifest::parse(source, Path::new("/tmp")).unwrap();
+        assert_eq!(manifest.name, "shijimic/my-pkg");
+        assert_eq!(manifest.version, "a.3");
+    }
+
+    #[test]
+    fn test_package_identity_absent_falls_back_to_dir_name() {
+        // B11-1f backward compat: <<<@version without package identity
+        // should still derive name from directory.
+        let source = r#"
+<<<@a.3 @(MyApp)
+"#;
+        let manifest = Manifest::parse(source, Path::new("/my-pkg")).unwrap();
+        assert_eq!(manifest.name, "my-pkg");
+        assert_eq!(manifest.version, "a.3");
+    }
+
+    #[test]
+    fn test_package_identity_version_only_no_symbols() {
+        // <<<@a.3 with no symbols and no package identity
+        let source = "<<<@a.3\n";
+        let manifest = Manifest::parse(source, Path::new("/my-project")).unwrap();
+        assert_eq!(manifest.name, "my-project");
+        assert_eq!(manifest.version, "a.3");
     }
 }

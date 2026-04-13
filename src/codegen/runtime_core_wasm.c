@@ -197,6 +197,17 @@ static int _wf_is_whitespace(char c) {
     return c == ' ' || c == '\t' || c == '\n' || c == '\r';
 }
 
+/* B11-2: Type tag constants (early definition for taida_io_stdout_with_tag) */
+#ifndef WASM_TAG_INT
+#define WASM_TAG_INT     0
+#define WASM_TAG_FLOAT   1
+#define WASM_TAG_BOOL    2
+#define WASM_TAG_STR     3
+#define WASM_TAG_PACK    4
+#endif
+/* B11-2: Forward declaration for polymorphic display */
+int64_t taida_polymorphic_to_string(int64_t obj);
+
 /* ── taida_io_stdout: stdout 出力（boxed 文字列ポインタ） ── */
 
 int64_t taida_io_stdout(int64_t val_ptr) {
@@ -205,6 +216,25 @@ int64_t taida_io_stdout(int64_t val_ptr) {
         int32_t len = wasm_strlen(s);
         write_stdout(s, len);
         write_stdout("\n", 1);
+    }
+    return 0;
+}
+
+/* B11-2a: Type-tagged stdout for Bool display parity (FB-3).
+   Only Bool needs special handling; all other types are correctly
+   handled by taida_polymorphic_to_string. */
+int64_t taida_io_stdout_with_tag(int64_t val, int64_t tag) {
+    if ((int)tag == WASM_TAG_BOOL) {
+        if (val) { write_stdout("true", 4); } else { write_stdout("false", 5); }
+        write_stdout("\n", 1);
+    } else {
+        int64_t str = taida_polymorphic_to_string(val);
+        const char *s = (const char *)(intptr_t)str;
+        if (s) {
+            int32_t len = wasm_strlen(s);
+            write_stdout(s, len);
+            write_stdout("\n", 1);
+        }
     }
     return 0;
 }
@@ -224,6 +254,37 @@ int64_t taida_io_stderr(int64_t val_ptr) {
         iov.buf = (int32_t)(intptr_t)"\n";
         iov.len = 1;
         __wasi_fd_write(2, &iov, 1, &nwritten);
+    }
+    return 0;
+}
+
+/* B11-2a: Type-tagged stderr for Bool display parity (FB-3). */
+int64_t taida_io_stderr_with_tag(int64_t val, int64_t tag) {
+    if ((int)tag == WASM_TAG_BOOL) {
+        const char *s = val ? "true" : "false";
+        int32_t len = val ? 4 : 5;
+        wasi_ciovec iov;
+        iov.buf = (int32_t)(intptr_t)s;
+        iov.len = len;
+        int32_t nwritten;
+        __wasi_fd_write(2, &iov, 1, &nwritten);
+        iov.buf = (int32_t)(intptr_t)"\n";
+        iov.len = 1;
+        __wasi_fd_write(2, &iov, 1, &nwritten);
+    } else {
+        int64_t str = taida_polymorphic_to_string(val);
+        const char *s = (const char *)(intptr_t)str;
+        if (s) {
+            int32_t len = wasm_strlen(s);
+            wasi_ciovec iov;
+            iov.buf = (int32_t)(intptr_t)s;
+            iov.len = len;
+            int32_t nwritten;
+            __wasi_fd_write(2, &iov, 1, &nwritten);
+            iov.buf = (int32_t)(intptr_t)"\n";
+            iov.len = 1;
+            __wasi_fd_write(2, &iov, 1, &nwritten);
+        }
     }
     return 0;
 }
@@ -312,11 +373,7 @@ int64_t taida_bool_or(int64_t a, int64_t b) { return (a || b) ? 1 : 0; }
 int64_t taida_bool_not(int64_t a) { return a ? 0 : 1; }
 
 /* ── Type tags (matching native_runtime.c TAIDA_TAG_* constants) ── */
-#define WASM_TAG_INT     0
-#define WASM_TAG_FLOAT   1
-#define WASM_TAG_BOOL    2
-#define WASM_TAG_STR     3
-#define WASM_TAG_PACK    4
+/* Note: WASM_TAG_* already defined above (B11-2 early definition) */
 
 /* ── Forward declarations for Lax/Result/Gorillax (defined in W-5 section below) ── */
 int64_t taida_lax_new(int64_t value, int64_t default_value);
@@ -1622,6 +1679,18 @@ int64_t taida_pack_get(int64_t pack_ptr, int64_t field_hash) {
         }
     }
     return 0; /* default value */
+}
+
+/* B11-2b: Get the type tag for a field by its hash. Returns -1 (UNKNOWN) if not found. */
+int64_t taida_pack_get_field_tag(int64_t pack_ptr, int64_t field_hash) {
+    int64_t *pack = (int64_t *)(intptr_t)pack_ptr;
+    int64_t count = pack[0];
+    for (int64_t i = 0; i < count; i++) {
+        if (pack[1 + i * 3] == field_hash) {
+            return pack[1 + i * 3 + 1];
+        }
+    }
+    return -1; /* TAIDA_TAG_UNKNOWN */
 }
 
 int64_t taida_pack_has_hash(int64_t pack_ptr, int64_t field_hash) {

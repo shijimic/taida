@@ -4556,6 +4556,15 @@ fn run_publish(args: &[String]) {
         }
     };
 
+    // B11-1c: When package_name already contains '/' (org/name form),
+    // display it as-is. Otherwise, prefix with author_name for backward
+    // compatibility with bare package names.
+    let display_package = if preparation.package_name.contains('/') {
+        preparation.package_name.clone()
+    } else {
+        format!("{}/{}", author_name, preparation.package_name)
+    };
+
     // ── Dry-run: Plan mode ────────────────────────────────
     //
     // B-015 invariant: `--dry-run` (plan) MUST NOT touch the
@@ -4564,7 +4573,7 @@ fn run_publish(args: &[String]) {
     // know what the real run would do.
     if dry_run == Some(DryRunMode::Plan) {
         println!("Dry run: no changes made.");
-        println!("  Package: {}/{}", author_name, preparation.package_name);
+        println!("  Package: {}", display_package);
         println!("  Version: @{}", preparation.version);
         println!("  Integrity: {}", preparation.integrity);
         if let Some(previous) = &preparation.previous_version {
@@ -4589,7 +4598,7 @@ fn run_publish(args: &[String]) {
     // to perform, so it degrades to `plan` mode gracefully.
     if dry_run == Some(DryRunMode::Build) && !is_addon_flow {
         println!("Dry run (build): no addon build required for source-only packages.");
-        println!("  Package: {}/{}", author_name, preparation.package_name);
+        println!("  Package: {}", display_package);
         println!("  Version: @{}", preparation.version);
         println!("  Integrity: {}", preparation.integrity);
         if let Some(previous) = &preparation.previous_version {
@@ -4756,7 +4765,7 @@ fn run_publish(args: &[String]) {
     // on disk so the user can inspect them.
     if dry_run == Some(DryRunMode::Build) {
         println!("Dry run (build): build + lockfile completed, git/release skipped.");
-        println!("  Package: {}/{}", author_name, preparation.package_name);
+        println!("  Package: {}", display_package);
         println!("  Version: @{}", preparation.version);
         println!("  Integrity: {}", final_integrity);
         if is_addon_flow {
@@ -4820,16 +4829,13 @@ fn run_publish(args: &[String]) {
             let canonical_cdylib_name =
                 format!("lib{}-{}.{}", library_stem, host_triple, cdylib_ext);
 
-            // RC2.6B-024: release title uses qualified org/name@version.
-            // preparation.package_name is the bare directory name;
-            // addon.toml's `package` field holds the qualified name.
-            let qualified_name = taida::addon::manifest::parse_addon_manifest(
-                &project_dir.join("native").join("addon.toml"),
-            )
-            .map(|m| m.package)
-            .unwrap_or_else(|_| preparation.package_name.clone());
-            let release_title = format!("{}@{}", qualified_name, preparation.version);
-            let release_notes = format!("Release {} of {}", preparation.version, qualified_name);
+            // B11B-002: release title uses packages.tdm's `<<<` line as
+            // single source of truth, matching `Published ...` and proposals
+            // URL. `display_package` is derived from preparation.package_name
+            // which comes from `Manifest::extract_from_ast()`.
+            let release_title = format!("{}@{}", display_package, preparation.version);
+            let release_notes =
+                format!("Release {} of {}", preparation.version, display_package);
 
             let assets = vec![
                 pkg::publish::GhReleaseAsset {
@@ -4878,8 +4884,8 @@ fn run_publish(args: &[String]) {
     }
 
     println!(
-        "Published {}/{}@{}",
-        author_name, preparation.package_name, preparation.version
+        "Published {}@{}",
+        display_package, preparation.version
     );
     println!("  Integrity: {}", final_integrity);
     println!("  Tag: {}", preparation.version);

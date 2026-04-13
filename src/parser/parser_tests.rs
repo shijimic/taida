@@ -1032,6 +1032,83 @@ fn test_parse_export_single_symbol() {
     }
 }
 
+// ── B11-1e: Package identity in export ──
+
+#[test]
+fn test_parse_export_version_with_package_identity() {
+    // <<<@b.11.rc3 taida-lang/terminal
+    let stmt = first_stmt("<<<@b.11.rc3 taida-lang/terminal");
+    match stmt {
+        Statement::Export(exp) => {
+            assert_eq!(exp.version, Some("b.11.rc3".to_string()));
+            assert_eq!(exp.path, Some("taida-lang/terminal".to_string()));
+            assert!(exp.symbols.is_empty());
+        }
+        other => panic!("Expected Export, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_parse_export_version_with_package_identity_and_symbols_rejected() {
+    // B11B-012: `<<<@version owner/name @(symbols)` is a forbidden surface.
+    // The canonical forms are `<<<@version owner/name` or `<<<@version @(symbols)`,
+    // never both combined.
+    let (_program, errors) = parse("<<<@b.11.rc3 taida-lang/terminal @(capitalize, truncate)");
+    assert!(
+        !errors.is_empty(),
+        "Expected parse error for package identity + @(symbols), but got none"
+    );
+    assert!(
+        errors[0]
+            .message
+            .contains("Cannot combine package identity with @(symbols)"),
+        "Error message should mention the forbidden combination, got: {}",
+        errors[0].message
+    );
+}
+
+#[test]
+fn test_parse_export_version_with_simple_org_name() {
+    // <<<@a.3 shijimic/my-pkg
+    let stmt = first_stmt("<<<@a.3 shijimic/my-pkg");
+    match stmt {
+        Statement::Export(exp) => {
+            assert_eq!(exp.version, Some("a.3".to_string()));
+            assert_eq!(exp.path, Some("shijimic/my-pkg".to_string()));
+            assert!(exp.symbols.is_empty());
+        }
+        other => panic!("Expected Export, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_parse_export_version_only_no_package_identity() {
+    // <<<@a.3 @(MyApp) — existing format, no package identity
+    let stmt = first_stmt("<<<@a.3 @(MyApp)");
+    match stmt {
+        Statement::Export(exp) => {
+            assert_eq!(exp.version, Some("a.3".to_string()));
+            assert_eq!(exp.path, None);
+            assert_eq!(exp.symbols, vec!["MyApp"]);
+        }
+        other => panic!("Expected Export, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_parse_export_version_only_bare() {
+    // <<<@a.3 — version only, no symbols, no package identity
+    let stmt = first_stmt("<<<@a.3");
+    match stmt {
+        Statement::Export(exp) => {
+            assert_eq!(exp.version, Some("a.3".to_string()));
+            assert_eq!(exp.path, None);
+            assert!(exp.symbols.is_empty());
+        }
+        other => panic!("Expected Export, got {:?}", other),
+    }
+}
+
 /// Test helper: split version suffix from path string.
 fn split_version_from_path(path: &str) -> (String, Option<String>) {
     if let Some(at_pos) = path.rfind('@') {

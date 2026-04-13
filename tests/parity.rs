@@ -7061,7 +7061,7 @@ stdout(parsed.contentLength)
 
 /// NET2-2a: httpParseRequestHead chunked field — 3-way parity
 /// Tests that the `chunked` field is correctly detected from Transfer-Encoding header.
-/// Note: Uses string interpolation for Bool fields to avoid native backend type tag loss.
+/// B11-2e: Native Bool display parity restored — full 3-way exact match now enforced.
 #[test]
 fn test_net2_parse_chunked_field_3way_parity() {
     if !node_available() {
@@ -7102,33 +7102,11 @@ stdout(parsed.chunked)
         "NET2-2a: chunked should be false on Interp, got: {}",
         interp
     );
-    // NB2-16+NB2-1: Native Bool display may differ (0 vs false). Check numeric lines match
-    // and chunked line is falsy (0 or false).
-    let interp_lines: Vec<&str> = interp.trim().lines().collect();
-    let native_lines: Vec<&str> = native.trim().lines().collect();
+    // B11-2e: Native Bool display parity restored (FB-3). Full 3-way exact match.
     assert_eq!(
-        interp_lines.len(),
-        native_lines.len(),
-        "NET2-2a: chunked=false line count mismatch\nInterp: {}\nNative: {}",
-        interp,
-        native
-    );
-    // First two lines (consumed, contentLength) must match exactly
-    assert_eq!(
-        interp_lines[0], native_lines[0],
-        "NET2-2a: consumed mismatch\nInterp: {}\nNative: {}",
+        interp, native,
+        "NET2-2a: chunked=false Interp vs Native mismatch\nInterp: {}\nNative: {}",
         interp, native
-    );
-    assert_eq!(
-        interp_lines[1], native_lines[1],
-        "NET2-2a: contentLength mismatch\nInterp: {}\nNative: {}",
-        interp, native
-    );
-    // Third line (chunked) must be falsy: "false" or "0"
-    assert!(
-        native_lines[2] == "false" || native_lines[2] == "0",
-        "NET2-2a: Native chunked should be false/0, got: {}",
-        native_lines[2]
     );
 
     // Test 2: Request with Transfer-Encoding: chunked → chunked = true
@@ -7162,36 +7140,18 @@ stdout(parsed.chunked)
         "NET2-2a: chunked should be true on Interp, got: {}",
         interp2
     );
-    // NB2-16+NB2-1: Check Native parity with Bool normalization
-    let interp2_lines: Vec<&str> = interp2.trim().lines().collect();
-    let native2_lines: Vec<&str> = native2.trim().lines().collect();
+    // B11-2e: Native Bool display parity restored (FB-3). Full 3-way exact match.
     assert_eq!(
-        interp2_lines.len(),
-        native2_lines.len(),
-        "NET2-2a: chunked=true line count mismatch\nInterp: {}\nNative: {}",
-        interp2,
-        native2
-    );
-    assert_eq!(
-        interp2_lines[0], native2_lines[0],
-        "NET2-2a: consumed mismatch\nInterp: {}\nNative: {}",
+        interp2, native2,
+        "NET2-2a: chunked=true Interp vs Native mismatch\nInterp: {}\nNative: {}",
         interp2, native2
-    );
-    assert_eq!(
-        interp2_lines[1], native2_lines[1],
-        "NET2-2a: contentLength mismatch\nInterp: {}\nNative: {}",
-        interp2, native2
-    );
-    // Third line (chunked) must be truthy: "true" or "1"
-    assert!(
-        native2_lines[2] == "true" || native2_lines[2] == "1",
-        "NET2-2a: Native chunked should be true/1, got: {}",
-        native2_lines[2]
     );
 }
 
 /// NET2-2a: httpParseRequestHead chunked Bool field — Interp vs JS only
-/// Tests the actual Bool value of chunked field (skips Native due to Bool display limitation).
+/// Tests the actual Bool value of chunked field.
+/// Note: B11-2e resolved the Native Bool display limitation (FB-3).
+/// Native parity is now verified in test_net2_parse_chunked_field_3way_parity.
 #[test]
 fn test_net2_parse_chunked_bool_value_interp_js_parity() {
     if !node_available() {
@@ -31047,4 +31007,95 @@ fn test_nb7_115_116_multi_data_parity_interp_native() {
         "Native must concatenate DATA bodies via memcpy into body_buf:\n{}",
         native_data_section,
     );
+}
+
+// ── B11-2d: Bool stdout display parity tests (FB-3) ──
+
+/// B11-2d: Direct Bool literal stdout — 3-way parity
+#[test]
+fn test_b11_bool_literal_stdout_parity() {
+    let source = r#"stdout(true)
+stdout(false)
+"#;
+    assert_backend_parity_for_source(source, "b11_bool_literal");
+}
+
+/// B11-2d: Bool variable stdout — 3-way parity
+#[test]
+fn test_b11_bool_variable_stdout_parity() {
+    let source = r#"x <= true
+y <= false
+stdout(x)
+stdout(y)
+"#;
+    assert_backend_parity_for_source(source, "b11_bool_variable");
+}
+
+/// B11-2d: Bool comparison operator result stdout — 3-way parity
+#[test]
+fn test_b11_bool_comparison_stdout_parity() {
+    let source = r#"stdout(1 == 1)
+stdout(1 > 2)
+stdout(3 >= 3)
+stdout(5 != 5)
+"#;
+    assert_backend_parity_for_source(source, "b11_bool_comparison");
+}
+
+/// B11-2d: Bool logical operator result stdout — 3-way parity
+#[test]
+fn test_b11_bool_logical_ops_stdout_parity() {
+    let source = r#"stdout(true && true)
+stdout(true && false)
+stdout(false || true)
+stdout(false || false)
+stdout(!true)
+stdout(!false)
+"#;
+    assert_backend_parity_for_source(source, "b11_bool_logical_ops");
+}
+
+/// B11-2d: Bool fields in typed BuchiPack stdout — 3-way parity
+#[test]
+fn test_b11_bool_typed_pack_field_stdout_parity() {
+    let source = r#"Config = @(debug: Bool, verbose: Bool)
+config <= Config(debug <= false, verbose <= true)
+stdout(config.debug)
+stdout(config.verbose)
+"#;
+    assert_backend_parity_for_source(source, "b11_bool_typed_pack_field");
+}
+
+/// B11-2d: Bool fields in anonymous BuchiPack stdout — 3-way parity
+#[test]
+fn test_b11_bool_anonymous_pack_field_stdout_parity() {
+    let source = r#"pack <= @(active <= true, hidden <= false)
+stdout(pack.active)
+stdout(pack.hidden)
+"#;
+    assert_backend_parity_for_source(source, "b11_bool_anon_pack_field");
+}
+
+/// B11-2d: Bool from function return stdout — 3-way parity
+#[test]
+fn test_b11_bool_function_return_stdout_parity() {
+    let source = r#"isPositive n =
+  n > 0 => :Bool
+
+stdout(isPositive(42))
+stdout(isPositive(0))
+"#;
+    assert_backend_parity_for_source(source, "b11_bool_func_return");
+}
+
+/// B11-2d: Bool method return stdout — 3-way parity
+#[test]
+fn test_b11_bool_method_return_stdout_parity() {
+    let source = r#"text <= "hello world"
+stdout(text.contains("world"))
+stdout(text.contains("xyz"))
+stdout(text.startsWith("hello"))
+stdout(text.endsWith("xyz"))
+"#;
+    assert_backend_parity_for_source(source, "b11_bool_method_return");
 }

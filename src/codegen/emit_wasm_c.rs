@@ -419,6 +419,14 @@ fn runtime_func_prototype(name: &str, profile: WasmProfile) -> Result<String, Wa
         "taida_io_stdout" | "taida_io_stderr" => {
             format!("int64_t {}(int64_t val);", name)
         }
+        // B11-2: Type-tagged I/O for Bool display parity
+        "taida_io_stdout_with_tag" | "taida_io_stderr_with_tag" => {
+            format!("int64_t {}(int64_t val, int64_t tag);", name)
+        }
+        // B11-2: Pack field tag lookup for runtime Bool display
+        "taida_pack_get_field_tag" => {
+            "int64_t taida_pack_get_field_tag(int64_t pack, int64_t hash);".to_string()
+        }
         // Debug 出力 (W-3: taida_debug_float 追加, W-6: taida_debug_polymorphic 追加)
         "taida_debug_int"
         | "taida_debug_str"

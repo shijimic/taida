@@ -919,6 +919,67 @@ impl Parser {
             }
         }
 
+        // B11-1a: After version, check for package identity (owner/name).
+        //
+        // `<<<@b.11.rc3 taida-lang/terminal @(symbols)`
+        //
+        // The lexer splits `taida-lang/terminal` into:
+        //   Ident("taida") Minus Ident("lang") Slash Ident("terminal")
+        //
+        // We detect the pattern by scanning ahead for a Slash token
+        // within the sequence of Ident/Minus tokens. If found, consume
+        // all tokens up to and including the name part as `path`.
+        // If no Slash is found, fall through to the existing symbol logic.
+        if version.is_some() && self.check_ident() {
+            // Lookahead: scan for Slash within Ident/Minus sequence
+            let mut offset = 0;
+            let mut has_slash = false;
+            loop {
+                let kind = &self.peek_at(offset).kind;
+                match kind {
+                    TokenKind::Ident(_) | TokenKind::Minus => offset += 1,
+                    TokenKind::Slash => {
+                        has_slash = true;
+                        break;
+                    }
+                    _ => break,
+                }
+            }
+
+            if has_slash {
+                // Consume owner/name as package identity path
+                let mut p = String::new();
+                while !self.is_at_end() {
+                    match self.peek_kind() {
+                        TokenKind::Ident(_) | TokenKind::Minus | TokenKind::Slash => {
+                            let tok = self.advance();
+                            match &tok.kind {
+                                TokenKind::Ident(s) => p.push_str(s),
+                                TokenKind::Minus => p.push('-'),
+                                TokenKind::Slash => p.push('/'),
+                                _ => unreachable!(),
+                            }
+                        }
+                        _ => break,
+                    }
+                }
+                path = Some(p);
+            }
+        }
+
+        // B11B-012: If a package identity was parsed (path is Some),
+        // reject `@(symbols)` — the canonical surface is either
+        // `<<<@version owner/name` or `<<<@version @(symbols)`, never both.
+        if path.is_some() && self.check(&TokenKind::At) {
+            let next = self.peek_at(1).kind.clone();
+            if matches!(next, TokenKind::LParen) {
+                return Err(self.error_at_current(
+                    "Cannot combine package identity with @(symbols) in export. \
+                     Use either `<<<@version owner/name` or `<<<@version @(symbols)`, not both.",
+                ));
+            }
+        }
+
         // Parse symbols @(...) or single symbol or path
         let mut symbols = Vec::new();
         if self.match_token(&TokenKind::At) {
@@ -946,7 +1007,10 @@ impl Parser {
                 }
             }
             path = Some(p);
-        } else if !self.is_at_end() && !matches!(self.peek_kind(), TokenKind::Newline) {
+        } else if path.is_none()
+            && !self.is_at_end()
+            && !matches!(self.peek_kind(), TokenKind::Newline)
+        {
             let sym = self.expect_ident()?;
             symbols.push(sym);
         }

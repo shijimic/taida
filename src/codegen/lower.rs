@@ -3910,13 +3910,49 @@ impl Lowering {
             if let Some(rt_name) = self.stdlib_runtime_funcs.get(name).cloned()
                 && !self.is_net_builtin_shadowed(name)
             {
-                // stdout/stderr: auto-convert non-string args to string
+                // B11-2b: stdout/stderr — pass raw value + type tag to
+                // taida_io_stdout_with_tag / taida_io_stderr_with_tag.
+                // The C runtime formats the value based on the tag, resolving
+                // Bool display parity (FB-3: "true"/"false" instead of "1"/"0").
+                //
+                // For FieldAccess with unknown compile-time type, emit a runtime
+                // call to taida_pack_get_field_tag to retrieve the Pack field's
+                // stored tag (e.g. TAIDA_TAG_BOOL for runtime-generated Packs).
                 if (name == "stdout" || name == "stderr") && args.len() == 1 {
                     let arg = &args[0];
                     let arg_var = self.lower_expr(func, arg)?;
-                    let str_var = self.convert_to_string(func, arg, arg_var)?;
+                    let compile_tag = self.expr_type_tag(arg);
+                    let tag_var = if compile_tag == -1 {
+                        // TAIDA_TAG_UNKNOWN — try runtime tag for FieldAccess
+                        if let Expr::FieldAccess(obj, field, _) = arg {
+                            let obj_var = self.lower_expr(func, obj)?;
+                            let field_hash = simple_hash(field);
+                            let hash_var = func.alloc_var();
+                            func.push(IrInst::ConstInt(hash_var, field_hash as i64));
+                            let rt_tag = func.alloc_var();
+                            func.push(IrInst::Call(
+                                rt_tag,
+                                "taida_pack_get_field_tag".to_string(),
+                                vec![obj_var, hash_var],
+                            ));
+                            rt_tag
+                        } else {
+                            let v = func.alloc_var();
+                            func.push(IrInst::ConstInt(v, -1)); // TAG_UNKNOWN
+                            v
+                        }
+                    } else {
+                        let v = func.alloc_var();
+                        func.push(IrInst::ConstInt(v, compile_tag));
+                        v
+                    };
+                    let tagged_rt = if name == "stdout" {
+                        "taida_io_stdout_with_tag".to_string()
+                    } else {
+                        "taida_io_stderr_with_tag".to_string()
+                    };
                     let result = func.alloc_var();
-                    func.push(IrInst::Call(result, rt_name, vec![str_var]));
+                    func.push(IrInst::Call(result, tagged_rt, vec![arg_var, tag_var]));
                     return Ok(result);
                 }
                 // stdin: optional prompt arg (pass empty string if none)

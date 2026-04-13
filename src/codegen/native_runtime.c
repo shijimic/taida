@@ -1991,7 +1991,9 @@ taida_val taida_pack_get(taida_ptr pack_ptr, taida_val field_hash) {
 }
 
 // Get the type tag for a field by its hash. Returns TAIDA_TAG_UNKNOWN if not found.
-static taida_val taida_pack_get_field_tag(taida_ptr pack_ptr, taida_val field_hash) {
+// B11-2b: Made public (non-static) so codegen can emit calls for runtime tag lookup
+// when stdout/stderr needs to format FieldAccess values with proper type display.
+taida_val taida_pack_get_field_tag(taida_ptr pack_ptr, taida_val field_hash) {
     taida_val *pack = (taida_val*)pack_ptr;
     taida_val count = pack[1];
     for (taida_val i = 0; i < count; i++) {
@@ -6993,9 +6995,37 @@ taida_val taida_io_stdout(taida_val val_ptr) {
     return 0;
 }
 
+// B11-2a: Type-tagged stdout — resolves Bool display parity (FB-3).
+// When the compiler knows the argument type at emit time, it passes
+// a compile-time tag so that Bool prints "true"/"false" instead of "1"/"0".
+// Only Bool needs special handling; all other types (Str, Int, Float,
+// Pack, List, etc.) are correctly handled by taida_polymorphic_to_string.
+taida_val taida_io_stdout_with_tag(taida_val val, taida_val tag) {
+    if ((int)tag == TAIDA_TAG_BOOL) {
+        printf("%s\n", val ? "true" : "false");
+    } else {
+        taida_val str = taida_polymorphic_to_string(val);
+        const char *s = (const char*)str;
+        if (s) printf("%s\n", s);
+    }
+    return 0;
+}
+
 taida_val taida_io_stderr(taida_val val_ptr) {
     const char *s = (const char*)val_ptr;
     if (s) fprintf(stderr, "%s\n", s);
+    return 0;
+}
+
+// B11-2a: Type-tagged stderr — mirrors taida_io_stdout_with_tag for stderr.
+taida_val taida_io_stderr_with_tag(taida_val val, taida_val tag) {
+    if ((int)tag == TAIDA_TAG_BOOL) {
+        fprintf(stderr, "%s\n", val ? "true" : "false");
+    } else {
+        taida_val str = taida_polymorphic_to_string(val);
+        const char *s = (const char*)str;
+        if (s) fprintf(stderr, "%s\n", s);
+    }
     return 0;
 }
 

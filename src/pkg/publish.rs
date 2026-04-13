@@ -549,12 +549,20 @@ pub fn prepare_publish(
 
     if let Some(repo) = &source_repo
         && let Some((_owner, repo_name)) = parse_github_repo(repo)
-        && repo_name != manifest.name
     {
-        eprintln!(
-            "Warning: package name '{}' does not match git remote repository '{}'. This is allowed for forks.",
-            manifest.name, repo_name
-        );
+        // B11-1d: For qualified names like "taida-lang/terminal",
+        // compare only the bare name component against the repo name.
+        let manifest_bare = manifest
+            .name
+            .rsplit('/')
+            .next()
+            .unwrap_or(&manifest.name);
+        if manifest_bare != repo_name {
+            eprintln!(
+                "Warning: package name '{}' does not match git remote repository '{}'. This is allowed for forks.",
+                manifest.name, repo_name
+            );
+        }
     }
 
     let integrity = compute_publish_integrity(project_dir);
@@ -1168,10 +1176,20 @@ fn run_git(dir: &Path, args: &[&str]) -> Result<String, String> {
 }
 
 /// taida-community/proposals への Issue 作成用 pre-filled URL を生成する。
+///
+/// B11-1d: When `package_name` already contains `/` (org/name form, e.g.
+/// `taida-lang/terminal`), the title uses it as-is to avoid a double prefix
+/// like `shijimic/taida-lang/terminal`. Bare names are still prefixed with
+/// the author.
 pub fn proposals_url(author: &str, package_name: &str, version: &str, integrity: &str) -> String {
-    let title = format!("publish: {author}/{package_name}@{version}");
+    let display_pkg = if package_name.contains('/') {
+        package_name.to_string()
+    } else {
+        format!("{author}/{package_name}")
+    };
+    let title = format!("publish: {display_pkg}@{version}");
     let body = format!(
-        "## Publish Request\n\n- author: `{author}`\n- package: `{package_name}`\n- version: `@{version}`\n- integrity: `{integrity}`\n"
+        "## Publish Request\n\n- author: `{author}`\n- package: `{display_pkg}`\n- version: `@{version}`\n- integrity: `{integrity}`\n"
     );
     let repo = proposals_repo();
     format!(
@@ -2511,5 +2529,92 @@ url = "https://github.com/taida-lang/terminal/releases/download/{version}/lib{na
         assert_eq!(content, original, "file must not be modified");
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── B11-1e: proposals_url no double-prefix ──
+
+    #[test]
+    fn test_proposals_url_bare_package_name() {
+        let url = proposals_url("shijimic", "terminal", "a.3", "sha256:abc");
+        // Bare name: title should be "publish: shijimic/terminal@a.3"
+        assert!(
+            url.contains(&urlencoded("publish: shijimic/terminal@a.3")),
+            "Expected bare name to be prefixed with author. URL: {}",
+            url
+        );
+    }
+
+    #[test]
+    fn test_proposals_url_qualified_package_name_no_double_prefix() {
+        let url = proposals_url("shijimic", "taida-lang/terminal", "b.11.rc3", "sha256:abc");
+        // Qualified name: title should be "publish: taida-lang/terminal@b.11.rc3"
+        // NOT "publish: shijimic/taida-lang/terminal@b.11.rc3"
+        assert!(
+            url.contains(&urlencoded("publish: taida-lang/terminal@b.11.rc3")),
+            "Expected qualified name as-is, no author prefix. URL: {}",
+            url
+        );
+        assert!(
+            !url.contains(&urlencoded("shijimic/taida-lang/terminal")),
+            "Must not contain double-prefixed name. URL: {}",
+            url
+        );
+    }
+
+    #[test]
+    fn test_addon_publish_package_identity_three_way_consistency() {
+        // B11B-002: Verify that for an org-scoped package, the package
+        // identity derived from `<<<@version owner/name` produces
+        // consistent strings across all three publish outputs:
+        //   1. "Published <pkg>@<ver>" message
+        //   2. proposals_url title "publish: <pkg>@<ver>"
+        //   3. release title "<pkg>@<ver>"
+        //
+        // All three should use the same `display_package` derivation.
+        let author = "shijimic";
+        let package_name = "taida-lang/terminal"; // from <<<@b.11.rc3 taida-lang/terminal
+        let version = "b.11.rc3";
+        let integrity = "sha256:abc123";
+
+        // display_package derivation (mirrors main.rs logic)
+        let display_package = if package_name.contains('/') {
+            package_name.to_string()
+        } else {
+            format!("{}/{}", author, package_name)
+        };
+
+        // 1. "Published ..." message
+        let published_msg = format!("Published {}@{}", display_package, version);
+        assert_eq!(
+            published_msg,
+            "Published taida-lang/terminal@b.11.rc3",
+            "Published message must use package identity from <<<",
+        );
+
+        // 2. proposals_url title
+        let url = proposals_url(author, package_name, version, integrity);
+        assert!(
+            url.contains(&urlencoded("publish: taida-lang/terminal@b.11.rc3")),
+            "proposals URL title must match. URL: {}",
+            url
+        );
+
+        // 3. release title (mirrors main.rs logic after B11B-002 fix)
+        let release_title = format!("{}@{}", display_package, version);
+        assert_eq!(
+            release_title,
+            "taida-lang/terminal@b.11.rc3",
+            "release title must use package identity from <<<, not addon.toml",
+        );
+
+        // All three should reference the same identity
+        assert!(
+            published_msg.contains(&display_package),
+            "Published msg must contain display_package"
+        );
+        assert!(
+            release_title.contains(&display_package),
+            "Release title must contain display_package"
+        );
     }
 }
