@@ -51,3 +51,6 @@ tests/fixtures/*/.taida/
 # Local development notes (untracked)
 .dev/
 .taida-test-temp-e2e/
+
+# C12-8 (FB-24): per-test tempdirs rooted at CWD via `tempfile::Builder::tempdir_in(".")`
+taida-fetcher-*/

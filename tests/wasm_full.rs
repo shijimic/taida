@@ -887,10 +887,12 @@ fn wasm_full_parity_all_examples() {
     // B11-2f: stdout restored convert_to_string path — compile_b11_features,
     // compile_hof_molds now pass (60 -> 62)
     // B11-11c: compile_b11_2f_stdout regression fixture added (62 -> 63)
+    // C12-1e: compile_c12_1_tag_table regression fixture added (63 -> 64)
+    // C12-3d: compile_c12_3_mutual_tail (tail-only mutual recursion) added (64 -> 65)
     assert_eq!(
         parity_ok.len(),
-        63,
-        "WF-5: Expected exactly 63 parity-OK examples, got {}. \
+        65,
+        "WF-5: Expected exactly 65 parity-OK examples, got {}. \
          If parity improved, update the expected count. List: {:?}",
         parity_ok.len(),
         parity_ok

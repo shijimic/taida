@@ -1,5 +1,135 @@
 # Changelog
 
+## @c.12.rc3 (in progress)
+
+In-flight release tracking the @c.12.rc3 milestone (`FUTURE_BLOCKERS.md`
+全 12 本消化）. See `.dev/C12_PROGRESS.md` for the live progress tracker.
+
+### Improvements
+
+#### `expr_type_tag` Mold-Return Single Source of Truth (FB-27 / Phase 1)
+
+- `src/types/mold_returns.rs` now centralises the mold-name → return-type
+  tag table. `src/codegen/lower.rs::expr_type_tag()` and
+  `src/types/checker.rs::infer_mold_return_type()` both consult this table.
+- Resolves the B11-2f silent regression where Str-returning molds
+  (`Upper`, `Trim`, `Join`, etc.) lost their tag when crossing a
+  user-function boundary and rendered through Pack heuristics.
+- 4 dedicated parity tests added (`test_c12_1_*_parity`).
+- Note: `convert_to_string` fallback removal in `taida_io_stdout_with_tag`
+  is intentionally deferred to C12-7 (paired with the wasm runtime
+  split — wasm-min size gate currently holds at 11KB without the split).
+
+#### `.toString()` Universal Method (FB-10 / Phase 2)
+
+- `.toString()` is now an officially supported universal method on all
+  value types (Int / Float / Bool / Str / List / BuchiPack / Lax / Result
+  / HashMap / Set / Async / Stream / etc.). Returns `:Str` directly
+  (not wrapped in `Lax`).
+- Closes FB-10 silent runtime crash where `Concat["...", n.toString()]`
+  raised `Concat: arguments must both be list or both be Bytes`. The
+  proper string-concat path is `"..." + n.toString()` — see
+  `docs/guide/01_types.md`.
+- Backend coverage gaps closed:
+  - **Interpreter**: List and BuchiPack now have `.toString()` entries.
+  - **JS**: `.toString()` calls on plain objects are routed through the
+    new `__taida_to_string` runtime helper so untyped packs render as
+    `@(field <= value, ...)` instead of JS's default `[object Object]`.
+  - **Native**: Already worked — coverage locked in by parity tests.
+- Checker rejects `.toString(arg)` with `[E1508]` even when the call is
+  nested inside a builtin argument such as `stdout(n.toString(16))`.
+  A narrow visitor (`check_tostring_arity_in_expr`) walks builtin args
+  for arity violations only, so unrelated type-inference behaviour for
+  builtin args is preserved.
+- 4 parity tests + 5 checker tests added.
+- Migration: code that previously relied on JS's `Number.prototype
+  .toString(radix)` (e.g. `n.toString(16)`) is now a compile error.
+  Use `Str[Int[n]().getOrDefault(0)]()` or define a dedicated radix
+  formatter — see `docs/guide/01_types.md`.
+
+#### Mutual-Recursion Static Detection (FB-8 / Phase 3)
+
+- **Breaking change**: non-tail mutual recursion (a cycle in the call
+  graph where at least one edge is not in tail position) is now a
+  compile-time error `[E1614]` instead of a runtime
+  `Maximum call depth (256) exceeded` crash. Closes FB-8.
+- Tail-only mutual recursion (e.g., the canonical `isEven` / `isOdd`
+  pair) continues to compile and run on all three backends — the
+  Interpreter and JS backends use the existing mutual-TCO trampoline,
+  and the Native backend executes regular calls.
+- New internal modules:
+  - `src/graph/tail_pos.rs` — per-function tail-position analyzer that
+    walks the AST and emits `CallSite { callee, is_tail, span }` for
+    every direct `FuncCall`. Conservatively treats pipeline stages,
+    lambda bodies, and error-ceiling handler bodies as non-tail of the
+    outer function.
+  - `src/graph/verify.rs::check_mutual_recursion` — new verify check
+    that runs `GraphExtractor::extract(program, GraphView::Call)`,
+    enumerates cycles via `query::find_cycles`, and rejects any cycle
+    containing a non-tail edge. Registered in `ALL_CHECKS` as
+    `"mutual-recursion"`.
+- `TypeChecker::check_program` now runs this check at the end of the
+  pass so that `taida check`, `taida build`, and the compile pipeline
+  all surface the error with `[E1614]`. The diagnostic prints the full
+  cycle path (`A -> B -> ... -> A`), the offending call site, and a
+  hint pointing at `docs/reference/tail_recursion.md`.
+- Migration: if you relied on non-tail mutual recursion, convert the
+  recursion to an accumulator-passing style (see the new
+  "非末尾の相互再帰はコンパイルエラー" section in
+  `docs/reference/tail_recursion.md`). The provided error message
+  includes the exact file and line of the offending non-tail call.
+- 8 verify unit tests + 7 tail-position unit tests + 5 checker tests +
+  4 parity tests added. New example
+  `examples/compile_c12_3_mutual_tail.td` exercises the tail-only pass
+  across the 3-way parity grid and is covered by all three wasm profile
+  parity gates.
+
+#### `taida-lang/net` Package Scope Freeze Declaration (FB-20 / Phase 10)
+
+- `taida-lang/net` is now formally frozen as an HTTP-focused server
+  package at the v7 HTTP/3 + QUIC transport bootstrap completion point
+  (Phase 12 RELEASE GATE GO, 2026-04-07). The server-side HTTP core
+  (h1 / h2 / h3) is the completion definition for this package.
+- Declaration only — no user-visible surface or runtime change. The
+  `httpServe` API, `HttpRequest` / `HttpResponse` contract, and the
+  no-silent-fallback policy remain exactly as shipped in v7.
+- Six post-H3 extension candidates are explicitly held out of the active
+  track and moved to an integration note for future reopen:
+  1. HTTP/3 client
+  2. WebTransport
+  3. QUIC datagram
+  4. `httpServe.protocol` Str → Enum migration
+  5. Strengthened compile-time capability gating (JS / WASM unsupported)
+  6. True zero-copy pursuit (bounded-copy discipline remains the rule)
+- Legacy OS passthrough (`dnsResolve` / `tcp*` / `udp*` / `socket*`)
+  will not be restored — those primitives remain the responsibility of
+  `taida-lang/os`.
+- Design notes: `.dev/NET_PROGRESS.md` (post-v7 freeze marker) and
+  `.dev/taida-logs/docs/design/net_post_h3.md` (PHILOSOPHY-aligned
+  rationale for each of the 6 candidates and the reopen flow).
+- Docs only — no code, test, or runtime behaviour changed by this item.
+
+#### Flaky Test Fix (FB-24 / Phase 8)
+
+- `src/addon/prebuild_fetcher.rs` no longer shares a single
+  `.taida-test-temp/` directory across the three `file_scheme_*` tests.
+  `make_relative_temp_file` now returns a `RelativeTempDir` RAII guard
+  that owns a per-test, uniquely-named directory under CWD and removes
+  it whole on drop, so parallel tests cannot race on `create_dir_all` /
+  `remove_file` ordering.
+- The helper deliberately does **not** use `tempfile::TempDir` because
+  `download_from_file` enforces a relative-path-only policy on
+  `file://` URLs (RC15B-101); `tempfile::TempDir::path` canonicalises
+  to an absolute path.
+- The adjacent flakiness in
+  `pkg::publish::tests::test_create_github_release_*` (tracked as
+  C12B-018 — reproduces on `main` as 2/5 runs failing) is now fixed by
+  a process-wide `ENV_MUTEX` inside the `tests` module that serialises
+  any test touching `GH_BIN` / `TAIDA_PUBLISH_RELEASE_DRIVER`.
+- Verified 20/20 passes for each of three configurations: fetcher-only,
+  publish-only, and both filters run simultaneously.
+- Test-infra only — no production code or public API change.
+
 ## @b.11.rc3
 
 Released: 2026-04-14

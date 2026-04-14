@@ -1205,6 +1205,33 @@ function __taida_format(v) {
   return String(v);
 }
 
+// C12-2b: Taida `.toString()` dispatch. Matches the interpreter's
+// `Value::to_display_string()`: strings round-trip unquoted, BuchiPacks
+// render as `@(field <= value, ...)`, lists as `@[...]`, primitives as
+// their natural string form. Typed packs (Result/Lax/HashMap/Set/etc.)
+// delegate to their own `toString()` prototype methods set up above.
+function __taida_to_string(v) {
+  if (typeof v === 'string') return v;
+  if (typeof v === 'number') return String(v);
+  if (typeof v === 'boolean') return v ? 'true' : 'false';
+  if (v === null || v === undefined) return '';
+  if (__taida_isBytes(v)) return __taida_bytes_to_string(v);
+  if (Array.isArray(v)) {
+    return '@[' + v.map(x => __taida_format(x)).join(', ') + ']';
+  }
+  if (typeof v === 'object') {
+    // Typed packs (Result, Lax, HashMap, Set, Gorillax, etc.) carry a
+    // bespoke toString prototype method — prefer that for parity with
+    // the interpreter's typed dispatch.
+    if (v.__type && typeof v.toString === 'function' && v.toString !== Object.prototype.toString) {
+      return String(v.toString());
+    }
+    const entries = Object.entries(v).filter(([k]) => !k.startsWith('__'));
+    return '@(' + entries.map(([k, val]) => k + ' <= ' + __taida_format(val)).join(', ') + ')';
+  }
+  return String(v);
+}
+
 // ── stderr — Taida error output function (prelude) ──────
 function __taida_stderr(...args) {
   for (const a of args) process.stderr.write(String(a) + '\n');

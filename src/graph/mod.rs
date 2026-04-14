@@ -10,6 +10,7 @@ pub mod verify;
 pub(crate) mod extract;
 pub(crate) mod model;
 pub(crate) mod query;
+pub(crate) mod tail_pos;
 
 /// Escape special characters for JSON strings (RFC 8259 compliant).
 ///

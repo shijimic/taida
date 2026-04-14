@@ -4035,14 +4035,24 @@ impl Lowering {
                     // of "1"/"0". Only Bool is handled via the tagged path —
                     // all other types use convert_to_string + the plain
                     // taida_io_stdout(char*) path (pre-B11 behavior), because
-                    // the runtime's polymorphic heuristics can mis-identify
-                    // strings as lists/packs when dispatched purely by tag.
+                    // the wasm runtime's tagged entry point does not yet
+                    // dispatch by tag (that work is deferred to C12-7 wasm
+                    // runtime split) and the heuristic polymorphic display
+                    // can mis-identify strings as lists/packs.
                     //
                     // B11B-004 fix: For a FieldAccess whose compile-time type
                     // is unknown, evaluate the parent object exactly once and
                     // derive both the field value and its runtime tag from
                     // that single evaluation (avoids double-eval of side
                     // effects such as `makePack().flag`).
+                    //
+                    // C12-1 (FB-27) updates `expr_type_tag()` to use the
+                    // authoritative `src/types/mold_returns.rs` table so that
+                    // the tag carried through `emit_call_arg_tags` for user
+                    // function calls is correct even when a MoldInst is
+                    // passed as an argument. The stdout codegen itself still
+                    // uses convert_to_string for non-Bool non-FieldAccess
+                    // args until the wasm runtime can be split (C12-7).
                     let use_tagged_path = compile_tag == 2 // compile-time Bool
                         || (compile_tag == -1 && matches!(arg, Expr::FieldAccess(_, _, _)));
 
@@ -6461,13 +6471,86 @@ impl Lowering {
                     _ => -1, // TAIDA_TAG_UNKNOWN
                 }
             }
-            // B11-6d: TypeIs/TypeExtends return Bool (tag 2), other Molds return Pack (tag 4)
-            Expr::MoldInst(name, _, _, _)
-                if name == "TypeIs" || name == "TypeExtends" || name == "Exists" =>
-            {
-                2 // TAIDA_TAG_BOOL
+            // C12-1b (FB-27): MoldInst return-type tag dispatch now consults the
+            // single-source-of-truth table in `src/types/mold_returns.rs` instead
+            // of hardcoding Pack (4) for every mold. This lets stdout/stderr
+            // route Str / Int / Float / Bool / List returning molds through
+            // `taida_io_stdout_with_tag` without the B11-2f `convert_to_string`
+            // fallback, which the wasm runtime was miscategorizing.
+            //
+            // Ordering: explicit handling still applies for Dynamic molds whose
+            // return tag depends on argument types (Concat / Slice / Abs / ...).
+            Expr::MoldInst(name, type_args, _, _) => {
+                if let Some(tag) = crate::types::mold_returns::mold_return_tag(name) {
+                    return tag;
+                }
+                // Dynamic / user-defined molds: try argument-based inference
+                // for the handful of cases we can resolve statically, otherwise
+                // default to Pack (4) which matches the pre-C12 behavior for
+                // user-defined molds.
+                match name.as_str() {
+                    // Reverse[str] → Str, Reverse[list] → List.
+                    "Reverse" => {
+                        if let Some(arg) = type_args.first() {
+                            if self.expr_is_string_full(arg) {
+                                return 3; // TAIDA_TAG_STR
+                            }
+                            if self.expr_is_list(arg) {
+                                return 5; // TAIDA_TAG_LIST
+                            }
+                        }
+                        -1
+                    }
+                    // Slice[str] → Str, Slice[bytes] → Bytes (tag as Str at wasm
+                    // level since bytes share the hidden-header str layout).
+                    "Slice" => {
+                        if let Some(arg) = type_args.first() {
+                            if self.expr_is_string_full(arg) {
+                                return 3;
+                            }
+                        }
+                        3 // default: Slice returns Str (checker agrees)
+                    }
+                    // Concat[list, ...] → List, Concat[bytes, ...] → Bytes (Str tag).
+                    "Concat" => {
+                        if let Some(arg) = type_args.first() {
+                            if self.expr_is_list(arg) {
+                                return 5;
+                            }
+                        }
+                        5 // default: list
+                    }
+                    // Abs / Clamp / Sum / Min / Max follow the argument's numeric tag.
+                    "Abs" | "Clamp" | "Sum" | "Min" | "Max" => {
+                        if let Some(arg) = type_args.first() {
+                            let t = self.expr_type_tag(arg);
+                            if t == 0 || t == 1 {
+                                return t;
+                            }
+                        }
+                        -1
+                    }
+                    // Map / Filter → List of transformed elements.
+                    "Map" | "Filter" => 5,
+                    // If[cond, then, else] → tag of then branch.
+                    "If" => {
+                        if type_args.len() >= 2 {
+                            self.expr_type_tag(&type_args[1])
+                        } else {
+                            -1
+                        }
+                    }
+                    "Fold" | "Foldr" | "Reduce" => {
+                        if let Some(acc) = type_args.first() {
+                            self.expr_type_tag(acc)
+                        } else {
+                            -1
+                        }
+                    }
+                    // Unknown (user-defined) mold → Pack default.
+                    _ => 4,
+                }
             }
-            Expr::MoldInst(_, _, _, _) => 4, // Mold instantiation returns a Pack
             Expr::Unmold(_, _) => -1,        // TAIDA_TAG_UNKNOWN: could be anything
             _ if self.expr_is_bool(expr) => 2,
             _ => -1, // TAIDA_TAG_UNKNOWN

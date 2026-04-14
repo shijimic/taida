@@ -31188,6 +31188,263 @@ stdout(Repeat["ab", 3]())
 }
 
 // ────────────────────────────────────────────────────────────────
+// C12-1 Phase 1 — FB-27: expr_type_tag mold-return table
+//
+// B11 Phase 2 (`taida_io_stdout_with_tag`) hardcoded Pack (tag=4) for
+// every `MoldInst`, which broke Str / Int / Float / Bool / List-returning
+// molds passed across user-function boundaries (the caller's
+// `emit_call_arg_tags` path picked up the wrong tag and the callee's
+// runtime display used Pack heuristics).
+//
+// C12-1 introduces `src/types/mold_returns.rs` as the single source of
+// truth and wires `expr_type_tag()` through it. These parity tests lock
+// in that Str-returning molds travel across user-function boundaries
+// and render identically on interpreter / JS / native — exercising the
+// NB-14 call-arg tag propagation path with a compile-time-known STR
+// tag (3) that would previously have been Pack (4).
+// ────────────────────────────────────────────────────────────────
+
+/// C12-1e: Str-returning mold passed to a user function, then stdout'd
+/// inside the callee. Exercises emit_call_arg_tags with tag=3 (STR).
+#[test]
+fn test_c12_1_str_mold_through_user_func_parity() {
+    let source = r#"print_str s =
+    stdout(s)
+print_str(Upper["hi"]())
+print_str(Lower["HELLO"]())
+print_str(Trim["  pad  "]())
+print_str(Join[@[1, 2, 3], ","]())
+"#;
+    assert_backend_parity_for_source(source, "c12_1_str_mold_through_user_func");
+    let out = run_interpreter_src(source, "c12_1_str_mold_through_user_func_expected")
+        .expect("interpreter output should exist");
+    assert_eq!(out, "HI\nhello\npad\n1,2,3");
+}
+
+/// C12-1e: Int-returning mold (Floor) passed to a user function.
+#[test]
+fn test_c12_1_int_mold_through_user_func_parity() {
+    let source = r#"print_int n =
+    stdout(n)
+print_int(Floor[3.7]())
+print_int(Ceil[3.2]())
+print_int(Round[4.5]())
+"#;
+    assert_backend_parity_for_source(source, "c12_1_int_mold_through_user_func");
+    let out = run_interpreter_src(source, "c12_1_int_mold_through_user_func_expected")
+        .expect("interpreter output should exist");
+    assert_eq!(out, "3\n4\n5");
+}
+
+// C12-1e: NOTE — Bool-returning mold passed *through* a user function
+// (e.g. `print_any v = stdout(v); print_any(TypeIs[...]())`) currently
+// still prints `1`/`0` on the native backend instead of `true`/`false`.
+// That is the FB-1 param_tag_vars-non-propagation issue and is
+// explicitly the C12-11 Phase's scope. C12-1 only fixes the compile-
+// time tag table (`src/types/mold_returns.rs`) so `expr_type_tag()` is
+// authoritative for MoldInst return types; wiring param_tag_vars into
+// stdout's tagged-dispatch path is done in C12-11. The direct literal
+// case (`print_any(true)`) also exhibits the same FB-1 gap on main.
+
+/// C12-1e: List-returning mold (Chars / Sort) passed to stdout.
+/// List-returning molds were previously tagged as Pack; with C12-1 they
+/// tag as List (5). The emit_call_arg_tags path never propagates List
+/// directly for Pack-field use, but this test guards the direct stdout
+/// display path.
+#[test]
+fn test_c12_1_list_mold_stdout_parity() {
+    let source = r#"stdout(Chars["abc"]())
+stdout(Sort[@[3, 1, 2]]())
+"#;
+    assert_backend_parity_for_source(source, "c12_1_list_mold_stdout");
+}
+
+/// C12-1e: Tag propagation round-trip — caller passes a Str mold, callee
+/// stores it into a Pack field, stdout reads the field back with the
+/// correct tag. Before C12-1, Pack field tag would be 4 (Pack) and the
+/// display would mis-route through pack_to_string for a plain string.
+#[test]
+fn test_c12_1_str_mold_pack_field_roundtrip_parity() {
+    let source = r#"wrap s =
+    @(label <= "up", value <= s)
+p <= wrap(Upper["hello"]())
+stdout(p.value)
+stdout(p.label)
+"#;
+    assert_backend_parity_for_source(source, "c12_1_str_mold_pack_field_roundtrip");
+    let out = run_interpreter_src(source, "c12_1_str_mold_pack_field_roundtrip_expected")
+        .expect("interpreter output should exist");
+    assert_eq!(out, "HELLO\nup");
+}
+
+// ────────────────────────────────────────────────────────────────
+// C12-2 Phase 2 — FB-10: `.toString()` universal method adoption
+//
+// Before C12-2, `.toString()` was implemented unevenly across the three
+// backends: the interpreter lacked it for List / BuchiPack, JS fell back
+// to `[object Object]` for untyped packs, and the checker did not reject
+// `.toString(arg)` in builtin argument contexts. C12-2 closes these
+// gaps so that `.toString()` is a universal display method returning a
+// plain `Str` — equivalent to the interpreter's `to_display_string()`
+// — and `.toString(args)` is a compile-time error (E1508).
+// ────────────────────────────────────────────────────────────────
+
+/// C12-2b: `.toString()` on primitives (Int / Float / Bool / Str).
+/// Locks in bit-exact output across the 3 backends for the base case
+/// that FB-10 reproduced with `Concat["...", n.toString()]`.
+#[test]
+fn test_c12_2_tostring_primitives_parity() {
+    let source = r#"i <= 42
+f <= 3.14
+b <= true
+s <= "hello"
+stdout(i.toString())
+stdout(f.toString())
+stdout(b.toString())
+stdout(s.toString())
+"#;
+    assert_backend_parity_for_source(source, "c12_2_tostring_primitives");
+    let out = run_interpreter_src(source, "c12_2_tostring_primitives_expected")
+        .expect("interpreter output should exist");
+    assert_eq!(out, "42\n3.14\ntrue\nhello");
+}
+
+/// C12-2b: `.toString()` on List / BuchiPack — previously the
+/// interpreter errored on List.toString and JS rendered plain packs as
+/// `[object Object]`. C12-2 patches both so all three backends produce
+/// `@[...]` / `@(field <= value, ...)`.
+#[test]
+fn test_c12_2_tostring_composite_parity() {
+    let source = r#"l <= @[1, 2, 3]
+p <= @(a <= 1, b <= 2)
+stdout(l.toString())
+stdout(p.toString())
+"#;
+    assert_backend_parity_for_source(source, "c12_2_tostring_composite");
+    let out = run_interpreter_src(source, "c12_2_tostring_composite_expected")
+        .expect("interpreter output should exist");
+    assert_eq!(out, "@[1, 2, 3]\n@(a <= 1, b <= 2)");
+}
+
+/// C12-2b: FB-10 exact reproduction — passing `.toString()` result
+/// across variable bind and into Str `+` concatenation. The interpreter
+/// must not raise the `Concat: arguments must both be list or both be
+/// Bytes` error that FB-10 originally reported.
+#[test]
+fn test_c12_2_tostring_string_concat_parity() {
+    let source = r#"status <= 404
+msg <= "HTTP Error " + status.toString()
+stdout(msg)
+"#;
+    assert_backend_parity_for_source(source, "c12_2_tostring_string_concat");
+    let out = run_interpreter_src(source, "c12_2_tostring_string_concat_expected")
+        .expect("interpreter output should exist");
+    assert_eq!(out, "HTTP Error 404");
+}
+
+/// C12-2b: `.toString()` must equal `Str[value]().getOrDefault("")`
+/// for primitives — the mold returns a Lax wrapper whereas `.toString()`
+/// is a direct string, but after unwrapping they are bit-exact.
+#[test]
+fn test_c12_2_tostring_equals_str_mold_parity() {
+    let source = r#"n <= 42
+stdout(n.toString())
+stdout(Str[n]().getOrDefault(""))
+stdout((n.toString() == Str[n]().getOrDefault("")).toString())
+"#;
+    assert_backend_parity_for_source(source, "c12_2_tostring_equals_str_mold");
+    let out = run_interpreter_src(source, "c12_2_tostring_equals_str_mold_expected")
+        .expect("interpreter output should exist");
+    assert_eq!(out, "42\n42\ntrue");
+}
+
+// ────────────────────────────────────────────────────────────────
+// C12-3 Phase 3 — FB-8: Mutual recursion static detection
+//
+// Non-tail mutual recursion previously compiled silently and crashed at
+// runtime with "Maximum call depth exceeded". C12-3 promotes this to a
+// compile-time [E1614] error via the new `mutual-recursion` verify check
+// (wired into `TypeChecker::check_program`). Tail-only mutual recursion
+// continues to compile and run correctly on all three backends.
+// ────────────────────────────────────────────────────────────────
+
+/// C12-3d: tail-only mutual recursion passes the new check and produces
+/// identical output on all three backends. This is the positive case —
+/// isEven / isOdd with calls in tail position.
+#[test]
+fn test_c12_3_tail_mutual_recursion_parity() {
+    let source = r#"isEven n =
+  | n == 0 |> 1
+  | _ |> isOdd(n - 1)
+
+isOdd n =
+  | n == 0 |> 0
+  | _ |> isEven(n - 1)
+
+stdout(isEven(0))
+stdout(isEven(4))
+stdout(isOdd(7))
+"#;
+    assert_backend_parity_for_source(source, "c12_3_tail_mutual_recursion");
+    let out = run_interpreter_src(source, "c12_3_tail_mutual_recursion_expected")
+        .expect("interpreter output should exist");
+    assert_eq!(out, "1\n1\n1");
+}
+
+/// C12-3d: non-tail mutual recursion must be rejected by all three
+/// backends (since the type checker runs on every backend). This is
+/// the negative case — A calls B inside an argument position.
+#[test]
+fn test_c12_3_non_tail_mutual_recursion_reject_parity() {
+    let source = r#"a n =
+  wrap(b(n))
+
+b n =
+  a(n)
+
+wrap x =
+  x
+
+stdout(a(0))
+"#;
+    assert_backends_reject_source(source, "c12_3_non_tail_mutual_recursion_reject");
+}
+
+/// C12-3d: three-function cycle with a single non-tail edge is also
+/// rejected. This guards the cycle-walk in `check_mutual_recursion`.
+#[test]
+fn test_c12_3_three_cycle_non_tail_reject_parity() {
+    let source = r#"alpha n =
+  beta(n)
+
+beta n =
+  gamma(n) + 1
+
+gamma n =
+  alpha(n)
+
+stdout(alpha(0))
+"#;
+    assert_backends_reject_source(source, "c12_3_three_cycle_non_tail_reject");
+}
+
+/// C12-3d: pure self-recursion must still compile — the mutual-recursion
+/// check must not regress direct recursion detection.
+#[test]
+fn test_c12_3_self_recursion_still_accepted_parity() {
+    let source = r#"countdown n =
+  | n == 0 |> 0
+  | _ |> countdown(n - 1)
+
+stdout(countdown(10))
+"#;
+    assert_backend_parity_for_source(source, "c12_3_self_recursion_still_accepted");
+    let out = run_interpreter_src(source, "c12_3_self_recursion_still_accepted_expected")
+        .expect("interpreter output should exist");
+    assert_eq!(out, "0");
+}
+
+// ────────────────────────────────────────────────────────────────
 // B11 Phase 3 — FB-9: Int[str]() / Int[str, base]() close-out
 // ────────────────────────────────────────────────────────────────
 

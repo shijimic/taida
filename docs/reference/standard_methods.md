@@ -18,6 +18,29 @@
 
 ---
 
+## `.toString()` — 全型共通の表示メソッド
+
+全ての値は `.toString()` を呼び出せます。戻り値は常に `:Str` で、
+インタプリタ / JS / Native の 3 バックエンドで同一の文字列が得られます。
+
+```taida
+42.toString()             // "42"
+3.14.toString()           // "3.14"
+true.toString()           // "true"
+"hello".toString()        // "hello"
+@[1, 2, 3].toString()     // "@[1, 2, 3]"
+@(a <= 1, b <= 2).toString()  // "@(a <= 1, b <= 2)"
+```
+
+- 引数なしで呼び出すこと。`"hex".toString(16)` のように base や precision を
+  渡そうとすると、チェッカーが `[E1508] Method 'toString' takes 0 argument(s)`
+  で拒否します（哲学 I: 暗黙の型変換なし）。
+- 数値を Lax にラップして扱いたい場合は `Str[value]()` モールドを使います。
+  `.toString()` は直接 `Str` を返すため、`+` 演算子で文字列連結する場合に
+  便利です。
+
+---
+
 ## Str — 文字列メソッド
 
 ### 状態チェック

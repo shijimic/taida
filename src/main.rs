@@ -5317,7 +5317,12 @@ mod tests {
 
         let js = fs::read_to_string(&out).unwrap();
         assert!(js.contains("const opt = __taida_solidify(Lax(42));"));
-        assert!(js.contains("__taida_stdout(opt.hasValue().toString());"));
+        // C12-2b: `.toString()` is routed through `__taida_to_string` so
+        // plain BuchiPacks render as `@(...)` instead of the JS default
+        // `[object Object]`. The receiver is still wrapped — here the
+        // hasValue() call returns a primitive Boolean, which the helper
+        // formats via `String(v)` (matches interpreter / native).
+        assert!(js.contains("__taida_stdout(__taida_to_string(opt.hasValue()));"));
 
         fs::remove_file(&out).unwrap();
         fs::remove_dir(&dir).unwrap();

@@ -1322,6 +1322,76 @@ impl TypeChecker {
         for stmt in &program.statements {
             self.check_mold_errors_in_stmt(stmt);
         }
+
+        // C12-3 / FB-8: promote non-tail mutual recursion to a
+        // compile-time error so programs that would overflow the stack at
+        // runtime (`Maximum call depth exceeded`) are rejected up front.
+        // Tail-only mutual recursion is left to pass — the Interpreter / JS
+        // backends handle it via the mutual-TCO trampoline and the Native
+        // backend treats it as a regular call (see
+        // docs/reference/tail_recursion.md).
+        self.check_mutual_recursion_errors(program);
+    }
+
+    /// Run the `mutual-recursion` verify check and surface any findings as
+    /// [`TypeError`]s attached to the checker. See
+    /// `src/graph/verify.rs::check_mutual_recursion` for the detection
+    /// semantics.
+    fn check_mutual_recursion_errors(&mut self, program: &Program) {
+        // Locate function definitions by name so we can attach an accurate
+        // span to each finding (verify returns only a line number).
+        let mut func_spans: std::collections::HashMap<String, Span> =
+            std::collections::HashMap::new();
+        for stmt in &program.statements {
+            if let Statement::FuncDef(fd) = stmt {
+                func_spans
+                    .entry(fd.name.clone())
+                    .or_insert_with(|| fd.span.clone());
+            }
+        }
+
+        // The file path is informational for the verify layer; type errors
+        // carry their own spans so we pass a neutral marker here.
+        let findings = crate::graph::verify::run_check(
+            "mutual-recursion",
+            program,
+            self.source_file
+                .as_deref()
+                .and_then(|p| p.to_str())
+                .unwrap_or("<program>"),
+        );
+        for f in findings {
+            if !matches!(f.severity, crate::graph::verify::Severity::Error) {
+                continue;
+            }
+            // Best-effort: pick the first function name in the message
+            // (formatted as "A -> B -> ... -> A") to anchor the span.
+            let span = f
+                .line
+                .map(|line| Span {
+                    line,
+                    column: 1,
+                    start: 0,
+                    end: 0,
+                })
+                .or_else(|| {
+                    // fall back: first function name mentioned in the msg
+                    f.message.split_whitespace().find_map(|tok| {
+                        let name = tok.trim_matches(|c: char| !c.is_alphanumeric() && c != '_');
+                        func_spans.get(name).cloned()
+                    })
+                })
+                .unwrap_or(Span {
+                    line: 1,
+                    column: 1,
+                    start: 0,
+                    end: 0,
+                });
+            self.errors.push(TypeError {
+                message: f.message,
+                span,
+            });
+        }
     }
 
     /// Register type definitions from a statement (first pass).
@@ -2337,6 +2407,84 @@ defaulted fields must be provided via `()`",
         }
     }
 
+    // C12-2c: Walk an expression subtree and emit E1508 for any
+    // `.toString(args)` call with a non-empty argument list. Scoped
+    // narrowly so that builtin arg contexts (e.g. `stdout(...)`) still
+    // reject `.toString(16)` without otherwise changing type inference
+    // for those args (avoids triggering E1510 on callable-variable
+    // sites and E1602 on Error-type `__type` field access).
+    fn check_tostring_arity_in_expr(&mut self, expr: &Expr) {
+        match expr {
+            Expr::MethodCall(obj, method, args, span) => {
+                self.check_tostring_arity_in_expr(obj);
+                for arg in args {
+                    self.check_tostring_arity_in_expr(arg);
+                }
+                if method == "toString" && !args.is_empty() {
+                    self.errors.push(TypeError {
+                        message: format!(
+                            "[E1508] Method 'toString' takes 0 argument(s), got {}. \
+                             Hint: `.toString()` takes no arguments — use `Str[value]()` or a \
+                             format helper if you need radix/precision control.",
+                            args.len()
+                        ),
+                        span: span.clone(),
+                    });
+                }
+            }
+            Expr::FuncCall(callee, args, _) => {
+                self.check_tostring_arity_in_expr(callee);
+                for arg in args {
+                    self.check_tostring_arity_in_expr(arg);
+                }
+            }
+            Expr::MoldInst(_, type_args, fields, _) => {
+                for arg in type_args {
+                    self.check_tostring_arity_in_expr(arg);
+                }
+                for f in fields {
+                    self.check_tostring_arity_in_expr(&f.value);
+                }
+            }
+            Expr::BuchiPack(fields, _) | Expr::TypeInst(_, fields, _) => {
+                for f in fields {
+                    self.check_tostring_arity_in_expr(&f.value);
+                }
+            }
+            Expr::Pipeline(exprs, _) => {
+                for e in exprs {
+                    self.check_tostring_arity_in_expr(e);
+                }
+            }
+            Expr::CondBranch(arms, _) => {
+                for arm in arms {
+                    if let Some(cond) = &arm.condition {
+                        self.check_tostring_arity_in_expr(cond);
+                    }
+                    for s in &arm.body {
+                        if let Statement::Expr(e) = s {
+                            self.check_tostring_arity_in_expr(e);
+                        }
+                    }
+                }
+            }
+            Expr::ListLit(items, _) => {
+                for item in items {
+                    self.check_tostring_arity_in_expr(item);
+                }
+            }
+            Expr::UnaryOp(_, inner, _) => self.check_tostring_arity_in_expr(inner),
+            Expr::BinaryOp(l, _, r, _) => {
+                self.check_tostring_arity_in_expr(l);
+                self.check_tostring_arity_in_expr(r);
+            }
+            Expr::Throw(inner, _) => self.check_tostring_arity_in_expr(inner),
+            Expr::FieldAccess(obj, _, _) => self.check_tostring_arity_in_expr(obj),
+            Expr::Lambda(_, body, _) => self.check_tostring_arity_in_expr(body),
+            _ => {}
+        }
+    }
+
     /// Type-check a statement (second pass).
     fn check_statement(&mut self, stmt: &Statement) {
         match stmt {
@@ -3243,6 +3391,19 @@ defaulted fields must be provided via `()`",
                                 ),
                                 span: span.clone(),
                             });
+                    }
+                    // C12-2c: walk builtin args specifically for
+                    // `.toString(args)` arity violations so that nested
+                    // method calls inside (e.g.) `stdout(n.toString(16))`
+                    // are still rejected. Scoped narrowly to `toString`
+                    // to avoid changing type-inference semantics for
+                    // other builtin arg contexts.
+                    if builtin_arity.is_some() && name != "debug" {
+                        for arg in args.iter() {
+                            if !matches!(arg, Expr::Hole(_) | Expr::Placeholder(_)) {
+                                self.check_tostring_arity_in_expr(arg);
+                            }
+                        }
                     }
                     let base_ty = match name.as_str() {
                         // debug returns its argument (pass-through)

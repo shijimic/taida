@@ -2188,6 +2188,18 @@ impl JsCodegen {
                     self.write(")");
                     return Ok(());
                 }
+                // C12-2b: .toString() universal adoption. Route through a
+                // runtime helper so that plain objects (BuchiPacks) format
+                // as `@(...)` instead of JS's default `[object Object]`.
+                // Primitives (Number/Boolean/String/Array/Uint8Array) already
+                // have Taida-compatible prototype patches applied, so the
+                // helper only overrides dispatch for untyped plain objects.
+                if method == "toString" && args.is_empty() {
+                    self.write("__taida_to_string(");
+                    self.gen_expr(obj)?;
+                    self.write(")");
+                    return Ok(());
+                }
                 // hasValue() is a method call on Lax — emit as method call
                 // (In new design, hasValue() is always a function, not a property)
                 // B11-4c: replace/replaceAll/split → runtime helper for edge-case parity

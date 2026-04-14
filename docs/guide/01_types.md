@@ -419,7 +419,27 @@ Bool[0]() ]=> flag           // false
 42.toString()                // "42"
 3.14.toString()              // "3.14"
 true.toString()              // "true"
+"hello".toString()           // "hello" (identity)
+@[1, 2, 3].toString()        // "@[1, 2, 3]"
+@(a <= 1, b <= 2).toString() // "@(a <= 1, b <= 2)"
 ```
+
+`.toString()` は **全ての値型で利用できる共通メソッド** です（C12.rc3 で
+3 バックエンド全てに正式採用）。Int / Float / Bool / Str / List / ぶちパック /
+Lax / Result / HashMap / Set など、どの型に対しても呼び出せて、必ず `:Str`
+を返します。文字列連結 (`+`) と組み合わせて使うのが標準的な使い方です:
+
+```taida
+status <= 404
+msg <= "HTTP Error " + status.toString()
+stdout(msg)                  // "HTTP Error 404"
+```
+
+引数は受け取りません。`n.toString(16)` のように base / precision を渡そう
+とすると、`taida check` が `[E1508] Method 'toString' takes 0 argument(s)`
+で拒否します。基数指定が必要な場合は `Str[Int[s, 16]().getOrDefault(0)]()`
+のように Int 系モールドと組み合わせるか、専用のフォーマット関数を別途定義
+します（哲学 I: 暗黙の型変換なし）。
 
 ### 型変換モールド一覧
 

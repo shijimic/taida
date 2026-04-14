@@ -4,6 +4,7 @@ use super::escape_json;
 use super::extract::GraphExtractor;
 use super::model::*;
 use super::query;
+use super::tail_pos;
 use crate::module_graph;
 use crate::parser::*;
 use serde_json::json;
@@ -415,6 +416,7 @@ pub const ALL_CHECKS: &[&str] = &[
     "no-circular-deps",
     "dead-code",
     "type-consistency",
+    "mutual-recursion",
     "unchecked-division",
     "direction-constraint",
     "unchecked-lax",
@@ -428,6 +430,7 @@ pub fn run_check(check: &str, program: &Program, file: &str) -> Vec<VerifyFindin
         "no-circular-deps" => check_no_circular_deps(program, file),
         "dead-code" => check_dead_code(program, file),
         "type-consistency" => check_type_consistency(program, file),
+        "mutual-recursion" => check_mutual_recursion(program, file),
         "unchecked-division" => check_unchecked_division(program, file),
         "direction-constraint" => check_direction_constraint(program, file),
         "unchecked-lax" => check_unchecked_lax(program, file),
@@ -548,6 +551,179 @@ fn check_type_consistency(program: &Program, file: &str) -> Vec<VerifyFinding> {
             .collect(),
         _ => vec![],
     }
+}
+
+// ── Check: mutual-recursion ───────────────────────────
+
+/// Detect mutual recursion (function call cycles) where at least one edge
+/// of the cycle is in **non-tail** position. Such a cycle is guaranteed to
+/// blow the stack at runtime and is therefore promoted to a compile-time
+/// error (C12-3 / FB-8).
+///
+/// Tail-only mutual recursion is supported by the runtime (Interpreter /
+/// JS via the `mutual_tail_call_target` trampoline) and is left to pass
+/// with no finding from this check. The Native backend emits its own
+/// warning elsewhere — here we only enforce the "unbounded stack" hard
+/// rule. A separate `mutual-recursion-native-warning` pipeline can be
+/// added in a future Phase if needed.
+///
+/// Error code: `[E1614]`.
+fn check_mutual_recursion(program: &Program, file: &str) -> Vec<VerifyFinding> {
+    // Map function name → FuncDef (source order preserved via Vec)
+    let mut func_defs: std::collections::HashMap<String, &FuncDef> =
+        std::collections::HashMap::new();
+    for stmt in &program.statements {
+        if let Statement::FuncDef(fd) = stmt {
+            func_defs.insert(fd.name.clone(), fd);
+        }
+    }
+    if func_defs.is_empty() {
+        return Vec::new();
+    }
+
+    // Build the Call graph and find cycles via the shared query engine.
+    let mut extractor = GraphExtractor::new(file);
+    let graph = extractor.extract(program, GraphView::Call);
+    let cycles = match query::find_cycles(&graph) {
+        query::QueryResult::Cycles(c) => c,
+        _ => return Vec::new(),
+    };
+    if cycles.is_empty() {
+        return Vec::new();
+    }
+
+    // Precompute per-function tail/non-tail call sites.
+    // tail_calls[fn] = set of callee names called in tail position
+    // non_tail_calls[fn] = set of callee names called in non-tail position
+    let mut tail_calls: std::collections::HashMap<String, std::collections::HashSet<String>> =
+        std::collections::HashMap::new();
+    let mut non_tail_calls: std::collections::HashMap<String, std::collections::HashSet<String>> =
+        std::collections::HashMap::new();
+    // first_non_tail_line[(caller, callee)] = earliest source line of a
+    // non-tail call — used to anchor the diagnostic.
+    let mut first_non_tail_line: std::collections::HashMap<(String, String), usize> =
+        std::collections::HashMap::new();
+    for (name, fd) in &func_defs {
+        let sites = tail_pos::collect_call_sites(fd);
+        for s in sites {
+            if s.is_tail {
+                tail_calls
+                    .entry(name.clone())
+                    .or_default()
+                    .insert(s.callee.clone());
+            } else {
+                non_tail_calls
+                    .entry(name.clone())
+                    .or_default()
+                    .insert(s.callee.clone());
+                let key = (name.clone(), s.callee.clone());
+                first_non_tail_line
+                    .entry(key)
+                    .and_modify(|l| *l = (*l).min(s.span.line))
+                    .or_insert(s.span.line);
+            }
+        }
+    }
+
+    let mut findings = Vec::new();
+    // Deduplicate: the same cycle may be reported multiple times by
+    // find_cycles for undirected-looking paths. Normalise by rotation.
+    let mut seen_cycles: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
+
+    for cycle in &cycles {
+        // `query::find_cycles` returns node *labels* along the cycle path.
+        // Filter to cycles that include at least two distinct user-defined
+        // functions — a self-recursion (single node cycle) is handled by
+        // direct-recursion analyses elsewhere and is not "mutual".
+        let user_cycle: Vec<&String> = cycle
+            .iter()
+            .filter(|lbl| func_defs.contains_key(lbl.as_str()))
+            .collect();
+        if user_cycle.len() < 2 {
+            continue;
+        }
+        let distinct: std::collections::HashSet<&str> =
+            user_cycle.iter().map(|s| s.as_str()).collect();
+        if distinct.len() < 2 {
+            continue;
+        }
+
+        // Canonicalise cycle key so the same cycle isn't reported twice
+        // regardless of the DFS entry point.
+        let mut sorted: Vec<String> = distinct.iter().map(|s| s.to_string()).collect();
+        sorted.sort();
+        let key = sorted.join("|");
+        if !seen_cycles.insert(key) {
+            continue;
+        }
+
+        // Walk the cycle edges: cycle[i] calls cycle[i+1]. If ANY such
+        // edge has a non-tail call from caller→callee, the cycle is
+        // unsafe (may overflow stack) and we reject.
+        // `user_cycle` is a path; close it by reconnecting the last to
+        // the first.
+        let mut unsafe_edge: Option<(String, String, usize)> = None;
+        let n = user_cycle.len();
+        for i in 0..n {
+            let caller = user_cycle[i].clone();
+            let callee = user_cycle[(i + 1) % n].clone();
+            if caller == callee {
+                // self edge — not a mutual edge
+                continue;
+            }
+            let has_non_tail = non_tail_calls
+                .get(&caller)
+                .map(|set| set.contains(&callee))
+                .unwrap_or(false);
+            // Conservative rule: if there is ANY non-tail call from
+            // caller to callee in the cycle, the recursion may overflow
+            // the stack at runtime. Reject. (Having additional tail calls
+            // side-by-side does not make the non-tail path safe, because
+            // at runtime the branch chosen depends on dynamic input.)
+            if has_non_tail {
+                let line = first_non_tail_line
+                    .get(&(caller.clone(), callee.clone()))
+                    .copied()
+                    .unwrap_or_else(|| {
+                        func_defs
+                            .get(&caller)
+                            .map(|fd| fd.span.line)
+                            .unwrap_or(0)
+                    });
+                unsafe_edge = Some((caller, callee, line));
+                break;
+            }
+        }
+
+        if let Some((caller, callee, line)) = unsafe_edge {
+            // Render the cycle path as "A -> B -> ... -> A" for the
+            // diagnostic message.
+            let mut path_display: Vec<String> =
+                user_cycle.iter().map(|s| (*s).clone()).collect();
+            if let Some(first) = path_display.first().cloned() {
+                path_display.push(first);
+            }
+            let msg = format!(
+                "[E1614] Mutual recursion in non-tail position: {}. \
+                 The non-tail call '{}' inside '{}' will overflow the stack at runtime. \
+                 Hint: rewrite the recursive call so it is the last operation in the function body, \
+                 or convert to an accumulator-passing style (see docs/reference/tail_recursion.md).",
+                path_display.join(" -> "),
+                callee,
+                caller,
+            );
+            findings.push(VerifyFinding {
+                check: "mutual-recursion".to_string(),
+                severity: Severity::Error,
+                message: msg,
+                file: Some(file.to_string()),
+                line: Some(line),
+            });
+        }
+    }
+
+    findings
 }
 
 // ── Check: unchecked-division ─────────────────────────

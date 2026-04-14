@@ -704,9 +704,36 @@ mod tests {
         (path, sha)
     }
 
-    /// Create a temp file in the current working directory (relative path)
-    /// so it can be used with `file://` relative-path-only constraint.
-    fn make_relative_temp_file(data: &[u8]) -> (PathBuf, String) {
+    /// RAII guard that removes a per-test temp directory when dropped.
+    ///
+    /// We cannot use `tempfile::TempDir` directly because
+    /// `download_from_file` enforces a relative-path-only policy on
+    /// `file://` URLs (RC15B-101), but `tempfile::TempDir` canonicalizes
+    /// its path to an absolute form. Instead we pick a unique relative
+    /// directory name under CWD and clean it up on drop.
+    struct RelativeTempDir {
+        path: PathBuf,
+    }
+
+    impl Drop for RelativeTempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
+    }
+
+    /// Create a temp file inside a per-test isolated directory, returned
+    /// as a relative path so it can be used with the `file://`
+    /// relative-path-only constraint enforced by `download_from_file`.
+    ///
+    /// C12-8 (FB-24): each test gets its own unique directory rooted at
+    /// the crate CWD. The returned `RelativeTempDir` guard must be kept
+    /// alive for the duration of the test; dropping it removes the
+    /// whole directory, so sibling tests never share a parent and cannot
+    /// race on `create_dir_all` / `remove_*` ordering.
+    ///
+    /// Replaces the previous `make_relative_temp_file` which stored all
+    /// test files under a shared `.taida-test-temp/` directory.
+    fn make_relative_temp_file(data: &[u8]) -> (RelativeTempDir, PathBuf, String) {
         use std::collections::hash_map::DefaultHasher;
         use std::hash::Hasher;
         use std::time::SystemTime;
@@ -715,64 +742,60 @@ mod tests {
         hasher.update(data);
         let sha = hasher.finalize_hex();
 
+        // Build a globally unique directory name. Combining process id,
+        // thread id, nanosecond timestamp, and the data hash gives
+        // enough entropy that parallel tests never collide even when
+        // invoked in rapid succession.
         let mut h = DefaultHasher::new();
+        h.write_u64(std::process::id() as u64);
         h.write_u64(
             SystemTime::now()
                 .duration_since(SystemTime::UNIX_EPOCH)
                 .unwrap()
                 .as_nanos() as u64,
         );
+        let tid = format!("{:?}", std::thread::current().id());
+        h.write(tid.as_bytes());
         h.write(sha.as_bytes());
         let unique = h.finish();
 
-        // Use a subdirectory under the CWD (the crate root) for cleanup.
-        let path = PathBuf::from(format!(
-            ".taida-test-temp/fetcher_test_{}_{}",
-            unique,
-            &sha[..16]
-        ));
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let dir_rel = PathBuf::from(format!("taida-fetcher-{:016x}", unique));
+        std::fs::create_dir_all(&dir_rel).unwrap();
+
+        let path = dir_rel.join("fetcher_test_bin");
         std::fs::write(&path, data).unwrap();
 
-        (path, sha)
+        (RelativeTempDir { path: dir_rel }, path, sha)
     }
 
     #[test]
     fn file_scheme_happy_path() {
         let data = b"test binary content";
-        let (path, sha) = make_relative_temp_file(data);
+        // C12-8 (FB-24): `_guard` owns a per-test tempdir under CWD;
+        // its Drop cleans up the whole directory, so parallel tests
+        // cannot race on a shared parent.
+        let (_guard, path, sha) = make_relative_temp_file(data);
 
-        // file:// URL with relative path: file://.taida-test-temp/xxx
+        // file:// URL with relative path: file://<tempdir>/fetcher_test_bin
         let url = format!("file://{}", path.display());
         let result = download_from_url(&url, &sha, &mut noop_progress);
         if let Err(ref e) = result {
             panic!("download failed: {:?}\nurl: {}", e, url);
         }
         assert_eq!(result.unwrap(), *data);
-
-        // Cleanup. RC2B-209: only remove our own unique file —
-        // never `remove_dir_all` the shared `.taida-test-temp`
-        // directory, otherwise we race with sibling tests
-        // (`file_scheme_progress_is_reported`,
-        // `file_scheme_integrity_mismatch`) that share the same
-        // parent directory and create their own files there
-        // concurrently.
-        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
     fn file_scheme_integrity_mismatch() {
         let data = b"test binary content";
-        let (path, _) = make_relative_temp_file(data);
+        // C12-8 (FB-24): per-test isolated tempdir (see
+        // `file_scheme_happy_path`).
+        let (_guard, path, _) = make_relative_temp_file(data);
 
         let url = format!("file://{}", path.display());
         let wrong_sha = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
         let err = download_from_url(&url, wrong_sha, &mut noop_progress).unwrap_err();
         assert!(matches!(err, FetchError::IntegrityMismatch { .. }));
-
-        // RC2B-209: see comment in `file_scheme_happy_path` —
-        // never `remove_dir_all` the shared `.taida-test-temp`.
-        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
@@ -792,7 +815,9 @@ mod tests {
         // RC15B-002: file:// reads should still fire the progress
         // callback so the CLI bar works for local sample addons.
         let data = b"ABCDEFGH";
-        let (path, sha) = make_relative_temp_file(data);
+        // C12-8 (FB-24): per-test isolated tempdir (see
+        // `file_scheme_happy_path`).
+        let (_guard, path, sha) = make_relative_temp_file(data);
         let url = format!("file://{}", path.display());
 
         let mut calls: Vec<(u64, Option<u64>)> = Vec::new();
@@ -806,11 +831,6 @@ mod tests {
         assert_eq!(calls.first().unwrap().0, 0);
         assert_eq!(calls.last().unwrap().0, data.len() as u64);
         assert_eq!(calls.last().unwrap().1, Some(data.len() as u64));
-
-        // Only remove our own unique file — never `remove_dir_all` the
-        // shared `.taida-test-temp` directory, otherwise we race with
-        // sibling tests that share the same parent directory.
-        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

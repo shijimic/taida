@@ -1453,6 +1453,26 @@ fn should_skip_path(root: &Path, path: &Path) -> bool {
 mod tests {
     use super::*;
 
+    // C12-8 / C12B-018 (FB-24 同系):
+    // The `test_create_github_release_*` tests mutate process-global
+    // environment variables (`GH_BIN`, `TAIDA_PUBLISH_RELEASE_DRIVER`)
+    // to drive the publish dispatcher. Cargo runs tests in parallel
+    // threads within a single process, so without serialization the
+    // `set_var` / `remove_var` interleave and any given test can
+    // observe another test's driver / binary override mid-run.
+    //
+    // We serialize every test that touches these env vars with a
+    // single process-wide mutex. Taking a poisoned lock is fine here
+    // — a previous panic cannot corrupt the test's own restore-logic,
+    // and we only need exclusion, not consistent internal state.
+    static ENV_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        ENV_MUTEX
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     #[test]
     fn test_plan_publish_version_same_generation() {
         let plan = plan_publish_version("a.3", &["va.3".to_string()], None).unwrap();
@@ -2331,6 +2351,11 @@ mod tests {
 
     #[test]
     fn test_create_github_release_missing_gh_binary() {
+        // C12-8 / C12B-018: serialize env-var mutations across the
+        // `test_create_github_release_*` family to prevent parallel
+        // test threads from racing on GH_BIN / TAIDA_PUBLISH_RELEASE_DRIVER.
+        let _env_guard = env_lock();
+
         let dir = std::env::temp_dir().join(format!(
             "taida_gh_missing_{}_{}",
             std::process::id(),
@@ -2343,8 +2368,9 @@ mod tests {
 
         // Point GH_BIN at a non-existent binary to force NotFound.
         // Force gh driver so this test exercises the legacy path.
-        // Safety: this is a single-threaded test scope; we restore the
-        // original value immediately after the call under test.
+        // Safety: `_env_guard` above serializes this scope across
+        // threads; we restore the originals immediately after the
+        // call under test.
         let prev_gh = std::env::var("GH_BIN").ok();
         let prev_driver = std::env::var("TAIDA_PUBLISH_RELEASE_DRIVER").ok();
         unsafe { std::env::set_var("GH_BIN", "/nonexistent/gh-test-bin-rc26") };
@@ -2380,6 +2406,9 @@ mod tests {
 
     #[test]
     fn test_create_github_release_missing_asset_file() {
+        // C12-8 / C12B-018: see `test_create_github_release_missing_gh_binary`.
+        let _env_guard = env_lock();
+
         // The test only reaches the asset-existence check if gh
         // --version + gh auth status pass. We use a mock script.
         let dir = std::env::temp_dir().join(format!(
@@ -2446,6 +2475,9 @@ mod tests {
 
     #[test]
     fn test_create_github_release_unknown_driver_rejected() {
+        // C12-8 / C12B-018: see `test_create_github_release_missing_gh_binary`.
+        let _env_guard = env_lock();
+
         let dir = std::env::temp_dir().join(format!(
             "taida_driver_unknown_{}_{}",
             std::process::id(),
@@ -2476,6 +2508,9 @@ mod tests {
 
     #[test]
     fn test_create_github_release_rest_requires_token() {
+        // C12-8 / C12B-018: see `test_create_github_release_missing_gh_binary`.
+        let _env_guard = env_lock();
+
         let dir = std::env::temp_dir().join(format!(
             "taida_rest_no_token_{}_{}",
             std::process::id(),

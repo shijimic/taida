@@ -3332,3 +3332,364 @@ C => A = @(d: Int)
         errors
     );
 }
+
+// ────────────────────────────────────────────────────────────────
+// C12-1c: mold_returns table ↔ checker builtin-mold consistency
+// ────────────────────────────────────────────────────────────────
+//
+// `src/types/mold_returns.rs` is the single source of truth for builtin
+// mold return tags. The checker (`Expr::MoldInst` branch of
+// `infer_expr_type`) maintains a richer Type-level mapping because it
+// needs Type::Generic("Lax", vec![Type::Str]) and similar. We verify
+// here that for every name with a static (non-Dynamic) tag, the
+// checker's inferred Type lowers to the same runtime tag.
+//
+// Translation rule (tag value ↔ Type):
+//   0 Int    → Type::Int
+//   1 Float  → Type::Float
+//   2 Bool   → Type::Bool
+//   3 Str    → Type::Str
+//   4 Pack   → Type::Named(...) | Type::Generic(wrapper, ...) | Molten
+//   5 List   → Type::List(_)
+//
+// This test catches cases where the checker is updated but the tag
+// table is not (or vice versa), which is exactly the FB-27 technical
+// debt we are paying down.
+
+fn type_to_tag(t: &Type) -> Option<i64> {
+    match t {
+        Type::Int => Some(0),
+        Type::Float => Some(1),
+        Type::Bool => Some(2),
+        Type::Str => Some(3),
+        Type::List(_) => Some(5),
+        // Pack-family: named types, wrapper generics, Molten, Bytes (stored
+        // as a hidden-header string → Str-like runtime tag).
+        Type::Bytes => Some(3),
+        Type::Named(_) | Type::Molten => Some(4),
+        Type::Generic(name, _) => match name.as_str() {
+            "Lax" | "Result" | "Async" | "Gorillax" | "RelaxedGorillax" | "Stream"
+            | "StreamFrom" | "HashMap" | "Set" => Some(4),
+            _ => None,
+        },
+        // Dynamic / unknown / numeric / function: cannot be compared.
+        _ => None,
+    }
+}
+
+#[test]
+fn test_c12_1_mold_returns_matches_checker() {
+    use crate::types::mold_returns;
+
+    // For each name with a static tag, construct a minimal MoldInst that
+    // the checker can infer, then confirm the tag matches.
+    //
+    // Some molds are argument-dependent for the *checker* even though the
+    // *runtime tag* is constant (e.g. Stream[x]() → Stream[T] but the
+    // tag is always Pack=4). For those cases we either construct typed
+    // args or skip. Molds that require special construction (Cage) are
+    // covered by broader parity tests and not included here.
+    // Cases the checker currently infers a concrete Type for. Molds that
+    // the checker still resolves to Type::Unknown (Length, Count, IndexOf,
+    // LastIndexOf, FindIndex, BitAnd/Or/Xor/Not, BytesToList, Find, Min,
+    // Max, ShiftL/R/RU, ByteSet, ToRadix, ...) are tracked in the tag
+    // table but left out of this consistency check until the checker
+    // catches up. That is a separate gap (not a contradiction); the tag
+    // table is the compile-time authority for codegen.
+    let cases: &[(&str, &str)] = &[
+        // Str-returning
+        ("Upper", r#"Upper["x"]()"#),
+        ("Lower", r#"Lower["X"]()"#),
+        ("Trim", r#"Trim[" x "]()"#),
+        ("Replace", r#"Replace["abc", "a", "z"]()"#),
+        ("Repeat", r#"Repeat["a", 3]()"#),
+        ("Pad", r#"Pad["a", 3, "0"]()"#),
+        ("Join", r#"Join[@[1, 2], ","]()"#),
+        ("ToFixed", r#"ToFixed[3.14, 2]()"#),
+        // Int-returning
+        ("Floor", r#"Floor[3.7]()"#),
+        ("Ceil", r#"Ceil[3.2]()"#),
+        ("Round", r#"Round[3.5]()"#),
+        ("Truncate", r#"Truncate[3.9]()"#),
+        // List-returning
+        ("Chars", r#"Chars["abc"]()"#),
+        ("Split", r#"Split["a,b", ","]()"#),
+        // Bool-returning
+        ("TypeIs", r#"TypeIs[42, :Int]()"#),
+    ];
+
+    for (mold_name, src) in cases {
+        let expected_tag =
+            mold_returns::mold_return_tag(mold_name).unwrap_or_else(|| {
+                panic!(
+                    "mold_returns::mold_return_tag({}) returned None but case declares a static tag",
+                    mold_name
+                )
+            });
+
+        // Build a program `v <= <expr>` so the checker visits the MoldInst.
+        let source = format!("v <= {src}\n");
+        let (program, parse_errors) = crate::parser::parse(&source);
+        assert!(
+            parse_errors.is_empty(),
+            "Parse errors for {}: {:?}",
+            mold_name,
+            parse_errors
+        );
+
+        let mut checker = TypeChecker::new();
+        checker.check_program(&program);
+
+        // Find the assignment and infer RHS type.
+        let Statement::Assignment(assign) = &program.statements[0] else {
+            panic!("expected Assignment for {}", mold_name);
+        };
+        let t = checker.infer_expr_type(&assign.value);
+        let actual_tag = type_to_tag(&t).unwrap_or_else(|| {
+            panic!(
+                "checker inferred unconvertible Type {:?} for {} (expected tag {})",
+                t, mold_name, expected_tag
+            )
+        });
+        assert_eq!(
+            actual_tag, expected_tag,
+            "tag mismatch for {}: mold_returns table says {} but checker inferred {:?} (tag {})",
+            mold_name, expected_tag, t, actual_tag
+        );
+    }
+}
+
+// ── C12-2: FB-10 `.toString()` universal adoption ──
+
+/// `.toString()` on Int takes no arguments. Passing `16` as a base must
+/// be rejected with E1508 — Taida does not expose a radix-based variant
+/// (unlike JavaScript's `Number.prototype.toString(radix)`).
+#[test]
+fn test_c12_2_tostring_int_with_arg_rejected() {
+    let source = "n <= 42\ns <= n.toString(16)";
+    let (_, errors) = check(source);
+    let e1508: Vec<_> = errors
+        .iter()
+        .filter(|e| e.message.contains("[E1508]") && e.message.contains("toString"))
+        .collect();
+    assert!(
+        !e1508.is_empty(),
+        "n.toString(16) should produce E1508, got: {:?}",
+        errors
+    );
+}
+
+/// C12-2c: the checker must catch `.toString(arg)` even when the method
+/// call is nested inside a builtin argument (e.g. `stdout(...)`). Before
+/// this fix, only bind-forms like `s <= n.toString(16)` were caught.
+#[test]
+fn test_c12_2_tostring_with_arg_in_builtin_rejected() {
+    let source = "n <= 42\nstdout(n.toString(16))";
+    let (_, errors) = check(source);
+    let e1508: Vec<_> = errors
+        .iter()
+        .filter(|e| e.message.contains("[E1508]") && e.message.contains("toString"))
+        .collect();
+    assert!(
+        !e1508.is_empty(),
+        "stdout(n.toString(16)) should produce E1508, got: {:?}",
+        errors
+    );
+}
+
+/// C12-2c: the recursion into builtin args must NOT emit unrelated
+/// errors (e.g. E1602 for `__type` field access on a Named error type).
+/// This guards against the rc6a_error_inheritance_basic regression.
+#[test]
+fn test_c12_2_builtin_arg_recursion_no_spurious_error() {
+    // Mirrors tests/parity.rs :: rc6a_error_inheritance_basic.
+    let source = "Error => AppError = @(code: Int)\n\
+                  err <= AppError(type <= \"AppError\", message <= \"test\", code <= 42)\n\
+                  Str[err.code]() ]=> code_str\n\
+                  stdout(err.__type + \" \" + code_str)\n";
+    let (_, errors) = check(source);
+    let e1602: Vec<_> = errors
+        .iter()
+        .filter(|e| e.message.contains("[E1602]"))
+        .collect();
+    assert!(
+        e1602.is_empty(),
+        "Error-type __type field access must not trigger E1602 after C12-2c recursion, got: {:?}",
+        errors
+    );
+}
+
+/// C12-2b: `.toString()` without arguments on primitives is valid and
+/// returns Str. No errors should be produced.
+#[test]
+fn test_c12_2_tostring_no_args_accepted() {
+    let source = "i <= 42\n\
+                  f <= 3.14\n\
+                  b <= true\n\
+                  s <= \"hi\"\n\
+                  a <= i.toString()\n\
+                  c <= f.toString()\n\
+                  d <= b.toString()\n\
+                  e <= s.toString()\n";
+    let (_, errors) = check(source);
+    let e1508: Vec<_> = errors
+        .iter()
+        .filter(|e| e.message.contains("[E1508]"))
+        .collect();
+    assert!(
+        e1508.is_empty(),
+        ".toString() with no args must not trigger E1508, got: {:?}",
+        e1508
+    );
+}
+
+/// C12-2b: `.toString()` on List / BuchiPack must type-check to Str.
+/// Before C12-2 the interpreter's List had no toString entry and JS
+/// fell back to `[object Object]`; now all three backends agree.
+#[test]
+fn test_c12_2_tostring_composite_return_type_is_str() {
+    let source = "l <= @[1, 2, 3]\np <= @(a <= 1, b <= 2)\n";
+    let (program, parse_errors) = crate::parser::parse(source);
+    assert!(parse_errors.is_empty(), "parse errors: {:?}", parse_errors);
+    let mut checker = TypeChecker::new();
+    checker.check_program(&program);
+
+    let span = Span {
+        start: 0,
+        end: 0,
+        line: 1,
+        column: 1,
+    };
+    let list_call = Expr::MethodCall(
+        Box::new(Expr::Ident("l".into(), span.clone())),
+        "toString".into(),
+        vec![],
+        span.clone(),
+    );
+    let pack_call = Expr::MethodCall(
+        Box::new(Expr::Ident("p".into(), span.clone())),
+        "toString".into(),
+        vec![],
+        span.clone(),
+    );
+
+    assert_eq!(checker.infer_expr_type(&list_call), Type::Str);
+    assert_eq!(checker.infer_expr_type(&pack_call), Type::Str);
+}
+
+// ── C12-3 / FB-8: mutual-recursion check integration ─────────────────
+// The graph-level mutual-recursion findings are promoted into TypeError
+// entries via `check_mutual_recursion_errors` so that `taida check`,
+// `taida build`, and the compile pipeline all reject non-tail mutual
+// recursion at compile time instead of silently allowing a runtime
+// "Maximum call depth exceeded" crash. See
+// `src/graph/verify.rs::check_mutual_recursion` for the detection rules.
+
+#[test]
+fn test_c12_3_mutual_recursion_tail_only_accepted_by_checker() {
+    // Classic isEven / isOdd tail-only mutual recursion must compile.
+    let source = r#"
+isEven n =
+  | n == 0 |> 1
+  | _ |> isOdd(n - 1)
+
+isOdd n =
+  | n == 0 |> 0
+  | _ |> isEven(n - 1)
+"#;
+    let (_, errors) = check(source);
+    assert!(
+        !errors.iter().any(|e| e.message.contains("[E1614]")),
+        "tail-only mutual recursion must not raise [E1614], got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn test_c12_3_mutual_recursion_non_tail_rejected_by_checker() {
+    // `a` calls `b` in a non-tail position (inside `wrap(...)` arg),
+    // `b` calls `a` in tail position. The cycle has a non-tail edge
+    // and must be rejected with [E1614].
+    let source = r#"
+a n =
+  wrap(b(n))
+
+b n =
+  a(n)
+
+wrap x =
+  x
+"#;
+    let (_, errors) = check(source);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1614]")),
+        "non-tail mutual recursion must raise [E1614], got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn test_c12_3_self_recursion_not_flagged_as_mutual() {
+    // Pure self-recursion is handled by the runtime's direct-recursion
+    // path and is not "mutual" — the check must not fire.
+    let source = r#"
+count n =
+  | n == 0 |> 0
+  | _ |> count(n - 1)
+"#;
+    let (_, errors) = check(source);
+    assert!(
+        !errors.iter().any(|e| e.message.contains("[E1614]")),
+        "self-recursion must not raise [E1614], got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn test_c12_3_mutual_recursion_three_cycle_non_tail_rejected() {
+    // A -> B -> C -> A where B's call to C is non-tail (BinaryOp).
+    let source = r#"
+alpha n =
+  beta(n)
+
+beta n =
+  gamma(n) + 1
+
+gamma n =
+  alpha(n)
+"#;
+    let (_, errors) = check(source);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1614]")),
+        "non-tail 3-cycle must raise [E1614], got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn test_c12_3_mutual_recursion_error_mentions_hint() {
+    // The diagnostic must point the user at the accumulator style /
+    // tail_recursion.md reference so fixes are easy to discover.
+    let source = r#"
+loopA n =
+  loopB(n) + 1
+
+loopB n =
+  loopA(n)
+"#;
+    let (_, errors) = check(source);
+    let e1614 = errors
+        .iter()
+        .find(|e| e.message.contains("[E1614]"))
+        .expect("expected [E1614] diagnostic");
+    assert!(
+        e1614.message.contains("Hint:"),
+        "expected Hint: section in E1614 message, got: {}",
+        e1614.message
+    );
+    assert!(
+        e1614.message.contains("tail_recursion.md"),
+        "expected tail_recursion.md reference in E1614 message, got: {}",
+        e1614.message
+    );
+}

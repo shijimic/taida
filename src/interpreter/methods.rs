@@ -108,6 +108,12 @@ impl Interpreter {
                             return self.call_function_with_values(&func, &arg_values)
                                 .map(Signal::Value);
                         }
+                        // C12-2b: .toString() universal fallback for BuchiPacks.
+                        // All types get `.toString()` as a display helper, equivalent
+                        // to the Rust side's `to_display_string()`.
+                        if method == "toString" {
+                            return Ok(Signal::Value(Value::Str(obj.to_display_string())));
+                        }
                         Err(RuntimeError {
                             message: format!("Unknown method '{}' on {}", method, obj.to_error_display(200)),
                         })
@@ -127,13 +133,20 @@ impl Interpreter {
                     })
                 }
             }
-            _ => Err(RuntimeError {
-                message: format!(
-                    "Cannot call method '{}' on {}",
-                    method,
-                    obj.to_error_display(200)
-                ),
-            }),
+            _ => {
+                // C12-2b: .toString() universal fallback for values that do not
+                // belong to any specialised dispatch table (Function, Gorilla, etc.).
+                if method == "toString" {
+                    return Ok(Signal::Value(Value::Str(obj.to_display_string())));
+                }
+                Err(RuntimeError {
+                    message: format!(
+                        "Cannot call method '{}' on {}",
+                        method,
+                        obj.to_error_display(200)
+                    ),
+                })
+            }
         }
     }
 
@@ -1395,6 +1408,10 @@ impl Interpreter {
                 }
                 Ok(Signal::Value(Value::Bool(true)))
             }
+            // Display (C12-2b: universal .toString() adoption)
+            "toString" => Ok(Signal::Value(Value::Str(
+                Value::List(items.to_vec()).to_display_string(),
+            ))),
             _ => Err(RuntimeError {
                 message: format!(
                     "Unknown list method: '{}'. Operations moved to molds: Reverse[], Concat[], Append[], Prepend[], Join[], Sum[], Sort[], Unique[], Flatten[], Find[], FindIndex[], Count[]",

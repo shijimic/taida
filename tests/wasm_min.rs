@@ -941,10 +941,12 @@ fn wasm_min_parity_all_examples() {
     // 61 = 58 (prev) + 3 (PR-3: module inlining: 09_modules, compile_module, compile_module_value)
     // 63 = 61 + 2 (B11-2f: stdout convert_to_string path — compile_b11_features, compile_hof_molds)
     // 64 = 63 + 1 (B11-11c: compile_b11_2f_stdout regression fixture)
+    // 65 = 64 + 1 (C12-1e: compile_c12_1_tag_table regression fixture)
+    // 66 = 65 + 1 (C12-3d: compile_c12_3_mutual_tail — tail-only mutual recursion)
     assert_eq!(
         parity_ok.len(),
-        64,
-        "WC-7: Expected exactly 64 parity-OK examples, got {}. \
+        66,
+        "WC-7: Expected exactly 66 parity-OK examples, got {}. \
          If parity improved, update the expected count. List: {:?}",
         parity_ok.len(),
         parity_ok

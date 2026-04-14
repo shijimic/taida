@@ -283,6 +283,42 @@ stdout(isEven(100000))
 
 Native バックエンドでは、相互再帰は通常の関数呼び出しとして実行されます。深い相互再帰ではスタックオーバーフローの可能性があるため、Interpreter または JS バックエンドの使用を推奨します。
 
+### 非末尾の相互再帰はコンパイルエラー
+
+非末尾位置での相互再帰は、実行時に必ずスタックオーバーフロー（`Maximum call depth (256) exceeded`）を起こすため、`@c.12.rc3` 以降はコンパイル時に拒否されます。
+
+```taida
+// NG: wrap(emptyNodes(n)) の emptyNodes 呼び出しは非末尾位置
+emptyDomNode n =
+  wrap(emptyNodes(n))
+
+emptyNodes n =
+  emptyDomNode(n)
+```
+
+```
+error [E1614]: Mutual recursion in non-tail position: emptyDomNode -> emptyNodes -> emptyDomNode.
+  The non-tail call 'emptyNodes' inside 'emptyDomNode' will overflow the stack at runtime.
+  Hint: rewrite the recursive call so it is the last operation in the function body,
+  or convert to an accumulator-passing style (see docs/reference/tail_recursion.md).
+```
+
+#### 検出ロジック
+
+1. `taida check` / `taida build` / `taida verify` は、プログラムから**コールグラフ**（`GraphView::Call`）を抽出する。
+2. DFS による `query::find_cycles` で関数間の循環を列挙する。
+3. サイクルに含まれる 2 関数以上のノードごとに、**呼び出し元の AST を走査し末尾位置判定を行う**（`src/graph/tail_pos.rs::collect_call_sites`）。末尾位置の規則は上記「末尾位置とは」と同一。
+4. サイクル上のいずれかのエッジに**非末尾**呼び出しが存在すれば `[E1614]` を発行してコンパイルを停止する。
+5. すべてのエッジが末尾位置であれば、検査はパスする（Interpreter / JS ではトランポリン、Native では通常呼び出しで動作）。
+
+直接再帰（`count → count`）は「相互」ではないため `mutual-recursion` チェックの対象外。従来どおりランタイムで処理されます。
+
+#### エラーが出たら
+
+1. 再帰呼び出しを**本体の最後**に移動する（関数の引数位置 / 二項演算 / `@(...)` フィールド式から外に出す）。
+2. 中間結果はアキュムレータ引数として渡す（本書「アキュムレータパターン」節を参照）。
+3. どうしても非末尾にしたい場合は、再帰ではなく通常のループ的な繰り返しに置き換える（`@[1..n]` を `.reduce(_)` するなど）。
+
 ---
 
 ## エラーシーリングとの相互作用

@@ -708,10 +708,12 @@ fn wasm_wasi_parity_all_examples() {
     // PR-3: module inlining: 58 → 61 (09_modules, compile_module, compile_module_value)
     // B11-2f: stdout convert_to_string: 61 → 63 (compile_b11_features, compile_hof_molds)
     // B11-11c: compile_b11_2f_stdout regression fixture added (63 → 64)
+    // C12-1e: compile_c12_1_tag_table regression fixture added (64 → 65)
+    // C12-3d: compile_c12_3_mutual_tail (tail-only mutual recursion) added (65 → 66)
     assert_eq!(
         parity_ok.len(),
-        64,
-        "WW-3: Expected exactly 64 parity-OK examples, got {}. \
+        66,
+        "WW-3: Expected exactly 66 parity-OK examples, got {}. \
          If parity improved, update the expected count. List: {:?}",
         parity_ok.len(),
         parity_ok
@@ -846,9 +848,11 @@ fn wasm_wasi_superset_of_wasm_min() {
     // PR-3: module inlining: 57 → 60 (09_modules, compile_module, compile_module_value)
     // B11-2f: stdout convert_to_string: 60 → 62 (compile_b11_features, compile_hof_molds)
     // B11-11c: compile_b11_2f_stdout regression fixture added (62 → 63)
+    // C12-1e: compile_c12_1_tag_table regression fixture added (63 → 64)
+    // C12-3d: compile_c12_3_mutual_tail added (64 → 65)
     assert_eq!(
-        superset_ok, 63,
-        "WW-3: Expected exactly 63 superset-verified examples, got {}. \
+        superset_ok, 65,
+        "WW-3: Expected exactly 65 superset-verified examples, got {}. \
          If superset coverage improved, update the expected count.",
         superset_ok
     );
