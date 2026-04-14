@@ -2955,14 +2955,24 @@ static void taida_regex_get_fields(taida_val regex_pack,
 // semantics identical across Interpreter (Rust `regex` crate), JS
 // (RegExp), and Native (POSIX regex.h).
 //
-// Translation table:
-//   \d → [0-9]         \D → [^0-9]
-//   \w → [0-9A-Za-z_]  \W → [^0-9A-Za-z_]
-//   \s → [ \t\n\r\f\v] \S → [^ \t\n\r\f\v]
+// Translation table (C12B-030):
+//   \d → [0-9]             \D → [^0-9]
+//   \w → [0-9A-Za-z_]      \W → [^0-9A-Za-z_]
+//   \s → [ \t\n\r\f\v]     \S → [^ \t\n\r\f\v]
+//   \x{HH}  / \xHH         → literal byte with hex code point
+//   \u{HH..} / \uHHHH      → same, encoded as UTF-8 when > 0x7F
 //
 // `\\` escapes are preserved so users can match a literal backslash.
 // Other `\X` sequences are passed through untouched (POSIX will
 // interpret `\.` / `\(` / `\)` etc. as literals).
+//
+// Documented gaps (C12 supported subset — see
+// `docs/reference/standard_methods.md` and `.dev/C12_DESIGN.md §C12-6`):
+//   - `\b` / `\B` word boundaries: POSIX ERE has no equivalent. Users
+//     who need word boundaries must target Interpreter / JS only, or
+//     emulate with `(^|[^A-Za-z0-9_])` / `([^A-Za-z0-9_]|$)`.
+//   - `s` flag (dotall): POSIX has no direct equivalent. `.` still
+//     skips `\n` on Native; Interpreter / JS honour the flag.
 //
 // Caller owns the returned buffer — free with `free()`.
 static char *taida_regex_rewrite_pattern(const char *pat) {
@@ -2971,7 +2981,7 @@ static char *taida_regex_rewrite_pattern(const char *pat) {
         empty[0] = '\0';
         return empty;
     }
-    size_t cap = strlen(pat) * 2 + 16;
+    size_t cap = strlen(pat) * 4 + 16;
     char *out = (char*)TAIDA_MALLOC(cap, "regex_pattern rewrite");
     size_t len = 0;
     #define APPEND(s, n) do { \
@@ -2979,6 +2989,16 @@ static char *taida_regex_rewrite_pattern(const char *pat) {
         while (len + _n + 1 > cap) { cap *= 2; TAIDA_REALLOC(out, cap, "regex_pattern grow"); } \
         memcpy(out + len, (s), _n); len += _n; \
     } while(0)
+    /* C12B-030 helper: parse a hex escape starting at `pat[i+1]` where
+       `pat[i]` is the leading `x` or `u`. Supports both bracketed
+       (`\x{HH}` / `\u{HHHH}`) and fixed-width (`\xHH` 2 digits,
+       `\uHHHH` 4 digits) forms. On success, encodes the code point as
+       UTF-8 into out buffer and advances `*i_inout` past the escape.
+       Returns 1 on success, 0 if the escape is malformed (caller
+       falls back to literal pass-through). */
+    #define HEX_DIGIT(ch) (((ch) >= '0' && (ch) <= '9') ? ((ch) - '0') : \
+                           ((ch) >= 'a' && (ch) <= 'f') ? ((ch) - 'a' + 10) : \
+                           ((ch) >= 'A' && (ch) <= 'F') ? ((ch) - 'A' + 10) : -1)
     for (size_t i = 0; pat[i]; ) {
         char c = pat[i];
         if (c == '\\' && pat[i+1]) {
@@ -2989,6 +3009,92 @@ static char *taida_regex_rewrite_pattern(const char *pat) {
             if (n == 'W') { APPEND("[^0-9A-Za-z_]", 13); i += 2; continue; }
             if (n == 's') { APPEND("[ \t\n\r\f\v]", 8); i += 2; continue; }
             if (n == 'S') { APPEND("[^ \t\n\r\f\v]", 9); i += 2; continue; }
+            /* C12B-030: \x{...} / \u{...} / \xHH / \uHHHH hex escapes.
+               Encode the code point as UTF-8 and append the raw bytes
+               so POSIX ERE sees them as literal characters. Locale is
+               LC_COLLATE-agnostic here because we always emit bytes
+               verbatim. */
+            if (n == 'x' || n == 'u') {
+                size_t j = i + 2;
+                uint32_t cp = 0;
+                int parsed_digits = 0;
+                int ok = 0;
+                if (pat[j] == '{') {
+                    /* Bracketed form: up to 8 hex digits. */
+                    j++;
+                    while (pat[j] && pat[j] != '}' && parsed_digits < 8) {
+                        int d = HEX_DIGIT(pat[j]);
+                        if (d < 0) break;
+                        cp = (cp << 4) | (uint32_t)d;
+                        parsed_digits++;
+                        j++;
+                    }
+                    if (pat[j] == '}' && parsed_digits > 0) {
+                        j++;
+                        ok = 1;
+                    }
+                } else {
+                    /* Fixed-width form: \xHH (2) or \uHHHH (4). */
+                    int needed = (n == 'x') ? 2 : 4;
+                    for (int k = 0; k < needed; k++) {
+                        int d = HEX_DIGIT(pat[j + k]);
+                        if (d < 0) { parsed_digits = 0; break; }
+                        cp = (cp << 4) | (uint32_t)d;
+                        parsed_digits++;
+                    }
+                    if (parsed_digits == needed) {
+                        j += needed;
+                        ok = 1;
+                    }
+                }
+                if (ok && cp <= 0x10FFFF) {
+                    /* Encode code point as UTF-8 and emit the raw bytes. */
+                    char utf[4];
+                    int utf_len;
+                    if (cp < 0x80) {
+                        utf[0] = (char)cp;
+                        utf_len = 1;
+                    } else if (cp < 0x800) {
+                        utf[0] = (char)(0xC0 | (cp >> 6));
+                        utf[1] = (char)(0x80 | (cp & 0x3F));
+                        utf_len = 2;
+                    } else if (cp < 0x10000) {
+                        utf[0] = (char)(0xE0 | (cp >> 12));
+                        utf[1] = (char)(0x80 | ((cp >> 6) & 0x3F));
+                        utf[2] = (char)(0x80 | (cp & 0x3F));
+                        utf_len = 3;
+                    } else {
+                        utf[0] = (char)(0xF0 | (cp >> 18));
+                        utf[1] = (char)(0x80 | ((cp >> 12) & 0x3F));
+                        utf[2] = (char)(0x80 | ((cp >> 6) & 0x3F));
+                        utf[3] = (char)(0x80 | (cp & 0x3F));
+                        utf_len = 4;
+                    }
+                    /* For bytes that have POSIX ERE meaning we need to
+                       escape them. Safely wrap every byte that could be
+                       a metacharacter in `[]` as a single-member class. */
+                    for (int k = 0; k < utf_len; k++) {
+                        unsigned char ub = (unsigned char)utf[k];
+                        if (ub >= 0x80) {
+                            APPEND(&utf[k], 1);
+                        } else {
+                            char ch = utf[k];
+                            if (ch == '.' || ch == '*' || ch == '+' || ch == '?' ||
+                                ch == '(' || ch == ')' || ch == '{' || ch == '}' ||
+                                ch == '|' || ch == '^' || ch == '$' || ch == '[' ||
+                                ch == ']' || ch == '\\' || ch == '/') {
+                                char esc[2] = { '\\', ch };
+                                APPEND(esc, 2);
+                            } else {
+                                APPEND(&utf[k], 1);
+                            }
+                        }
+                    }
+                    i = j;
+                    continue;
+                }
+                /* Malformed hex escape — fall through and pass literally. */
+            }
             // Any other backslash escape: keep as-is (including `\\`).
             APPEND(pat + i, 2);
             i += 2;
@@ -2999,6 +3105,7 @@ static char *taida_regex_rewrite_pattern(const char *pat) {
     }
     out[len] = '\0';
     #undef APPEND
+    #undef HEX_DIGIT
     return out;
 }
 
@@ -3024,15 +3131,62 @@ static int taida_regex_compile(const char *pattern, const char *flags, regex_t *
 }
 
 // Construct a Regex BuchiPack from (pattern_str, flags_str). Field
-// layout matches the interpreter / JS representation. Validation is
-// performed by attempting to compile once; on failure we return a
-// pack with the original fields anyway (matching the "no silent
-// undefined" guarantee at the value level — detection of a bad
-// pattern is done at Str-method dispatch time, which returns an
-// empty result).
+// layout matches the interpreter / JS representation.
+//
+// C12B-029: Validate fail-fast at construction time — mirror the
+// Interpreter (`src/interpreter/regex_eval.rs::build_regex_value`)
+// and JS (`new RegExp(...)` throw) behaviour so the 3 backends share
+// the same failure mode:
+//   1. Reject unsupported flags (anything other than `i` / `m` / `s`).
+//   2. Compile the (rewritten) pattern once; on POSIX regcomp failure,
+//      throw a :RegexError via the error ceiling rather than returning
+//      a usable pack that silently no-ops at the first method call.
 taida_val taida_regex_new(const char *pattern_s, const char *flags_s) {
     if (!pattern_s) pattern_s = "";
     if (!flags_s) flags_s = "";
+    // C12B-029: Flag validation. POSIX can only honour i/m directly,
+    // but the Interpreter / JS layer accepts `s` as well. Other flags
+    // must be rejected at construction time on every backend.
+    for (const char *fp = flags_s; *fp; fp++) {
+        char ch = *fp;
+        if (ch != 'i' && ch != 'm' && ch != 's') {
+            char buf[160];
+            snprintf(buf, sizeof(buf),
+                "Regex: unsupported flag '%c'. Supported flags: i (case-insensitive), m (multiline), s (dotall)",
+                ch);
+            taida_val err = taida_make_error("ValueError", buf);
+            return taida_throw(err);
+        }
+    }
+    // C12B-029: Pattern validation. Compile the rewritten pattern
+    // once so that malformed input (unbalanced parens, stray
+    // quantifiers, etc.) fails at `Regex(...)` instead of silently
+    // returning the input string at each Str-method call site.
+    {
+        regex_t probe;
+        int cflags = REG_EXTENDED;
+        for (const char *fp = flags_s; *fp; fp++) {
+            if (*fp == 'i') cflags |= REG_ICASE;
+            else if (*fp == 'm') cflags |= REG_NEWLINE;
+        }
+        char *rewritten = taida_regex_rewrite_pattern(pattern_s);
+        int rc = regcomp(&probe, rewritten ? rewritten : "", cflags);
+        if (rewritten) free(rewritten);
+        if (rc != 0) {
+            // Mirror POSIX regerror: callable with the failing regex_t
+            // to produce a descriptive message. We skip regfree on the
+            // error path because regfree on a not-successfully-compiled
+            // regex_t is unspecified behaviour.
+            char errbuf[96];
+            (void)regerror(rc, &probe, errbuf, sizeof(errbuf));
+            char msg[256];
+            snprintf(msg, sizeof(msg),
+                "Regex: invalid pattern '%s' — %s", pattern_s, errbuf);
+            taida_val err = taida_make_error("ValueError", msg);
+            return taida_throw(err);
+        }
+        regfree(&probe);
+    }
     taida_val pack = taida_pack_new(3);
     taida_pack_set_hash((taida_ptr)pack, 0, (taida_val)HASH_PATTERN);
     taida_pack_set_hash((taida_ptr)pack, 1, (taida_val)HASH_FLAGS);

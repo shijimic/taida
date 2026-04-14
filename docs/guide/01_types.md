@@ -437,9 +437,17 @@ stdout(msg)                  // "HTTP Error 404"
 
 引数は受け取りません。`n.toString(16)` のように base / precision を渡そう
 とすると、`taida check` が `[E1508] Method 'toString' takes 0 argument(s)`
-で拒否します。基数指定が必要な場合は `Str[Int[s, 16]().getOrDefault(0)]()`
-のように Int 系モールドと組み合わせるか、専用のフォーマット関数を別途定義
-します（哲学 I: 暗黙の型変換なし）。
+で拒否します。基数指定が必要な場合は `ToRadix[n, base]()` モールド
+（`docs/reference/mold_types.md` 参照）を使います。`ToRadix` は
+`Lax[Str]` を返すので、通常は `getOrDefault` で unwrap します:
+
+```taida
+ToRadix[255, 16]().getOrDefault("") ]=> hex   // "ff"
+ToRadix[26, 2]().getOrDefault("") ]=> bin     // "11010"
+```
+
+精度指定など `ToRadix` でカバーできないフォーマットは専用の関数を別途
+定義します（哲学 I: 暗黙の型変換なし）。
 
 ### 型変換モールド一覧
 

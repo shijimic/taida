@@ -158,16 +158,32 @@ pub(crate) struct ActiveStreamingWriter {
 // Representation rules (matches RFC 7230 § 3.3.3):
 //   - `Transfer-Encoding: chunked` present (alone) → `Chunked`
 //   - `Content-Length: N` with N > 0 and no TE:chunked → `ContentLength(N)`
-//   - `Content-Length: 0` and no TE:chunked → `Empty`
-//   - neither header present → `Empty`
+//   - `Content-Length: 0` and no TE:chunked → `Empty { had_content_length_header: true }`
+//   - neither header present → `Empty { had_content_length_header: false }`
 //   - TE:chunked + any `Content-Length` → rejected at parse time
 //     (predates `BodyEncoding` construction), so this enum never has
 //     to represent the invalid combination.
+//
+// C12B-032 refinement: the `Empty` variant now carries a
+// `had_content_length_header` bit so the internal layer can
+// distinguish between "the client sent `Content-Length: 0`" and
+// "the client sent no Content-Length / Transfer-Encoding at all".
+// Both cases still produce identical behaviour in the runtime read
+// loop, but downstream consumers (v2 chunked trailers, HTTP/2 DATA
+// frame framing, TE:identity negotiation) need the distinction to
+// implement RFC 7230 § 3.3.3 rule 6 correctly. The handler-visible
+// `contentLength: 0` / `chunked: false` flattening is preserved for
+// v1 compatibility.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum BodyEncoding {
-    /// No body bytes on the wire.
-    /// Used for absent Content-Length and `Content-Length: 0`.
-    Empty,
+    /// No body bytes on the wire. `had_content_length_header` records
+    /// whether the client explicitly sent `Content-Length: 0` (true) or
+    /// omitted Content-Length entirely (false). The two cases produce
+    /// the same read-loop behaviour but differ in RFC 7230 § 3.3.3
+    /// framing semantics (trailers / body-less response encoding).
+    Empty {
+        had_content_length_header: bool,
+    },
     /// Fixed-length body. The inner value is the non-zero byte count
     /// declared in the Content-Length header and bounds the read loop.
     ContentLength(u64),
@@ -194,9 +210,13 @@ impl BodyEncoding {
             // at parse time, so this cast is always safe.
             BodyEncoding::ContentLength(content_length_val as u64)
         } else {
-            // Either `Content-Length: 0` or the header is absent — in
-            // either case the body is empty.
-            BodyEncoding::Empty
+            // Either `Content-Length: 0` or the header is absent — the
+            // wire behaviour is identical (empty body) but we record
+            // which case we are in so RFC 7230 framing can be
+            // reconstructed without re-parsing the raw request.
+            BodyEncoding::Empty {
+                had_content_length_header: has_content_length,
+            }
         }
     }
 
@@ -206,10 +226,10 @@ impl BodyEncoding {
     ///
     /// Note: the Taida surface flattens "header absent" and
     /// `Content-Length: 0` into a single `contentLength: 0` field, so
-    /// this reverse path cannot distinguish them. Both cases map to
-    /// `Empty`, which is the same classification the runtime read
-    /// loop observes — preserving the v1 invariant that the two are
-    /// indistinguishable at the handler layer.
+    /// this reverse path cannot distinguish them and conservatively
+    /// assumes `had_content_length_header = false`. Callers that need
+    /// the true presence bit must construct the enum via
+    /// `BodyEncoding::classify` directly with the parser's signals.
     #[cfg(test)]
     pub(crate) fn from_parsed_result_value(parsed: &Value) -> Option<Self> {
         let inner = extract_result_value(parsed)?;
@@ -225,7 +245,7 @@ impl BodyEncoding {
     pub(crate) fn fixed_length(&self) -> Option<u64> {
         match self {
             BodyEncoding::ContentLength(n) => Some(*n),
-            BodyEncoding::Chunked | BodyEncoding::Empty => None,
+            BodyEncoding::Chunked | BodyEncoding::Empty { .. } => None,
         }
     }
 
@@ -233,7 +253,23 @@ impl BodyEncoding {
     /// to drain before the next request on a keep-alive connection).
     #[allow(dead_code)]
     pub(crate) fn is_empty(&self) -> bool {
-        matches!(self, BodyEncoding::Empty)
+        matches!(self, BodyEncoding::Empty { .. })
+    }
+
+    /// C12B-032: `true` when the `Empty` classification came from an
+    /// explicit `Content-Length: 0` header (as opposed to the header
+    /// being absent). Only meaningful for the `Empty` variant — the
+    /// other two variants return `false`. Used by the HTTP/2 / v2
+    /// chunked promotion path to know whether to re-emit a
+    /// `Content-Length: 0` framing header or leave it off.
+    #[allow(dead_code)]
+    pub(crate) fn had_content_length_header(&self) -> bool {
+        matches!(
+            self,
+            BodyEncoding::Empty {
+                had_content_length_header: true,
+            } | BodyEncoding::ContentLength(_)
+        )
     }
 }
 
@@ -318,19 +354,38 @@ pub(crate) enum ChunkedDecoderState {
 }
 
 impl RequestBodyState {
-    fn new(is_chunked: bool, content_length: i64, leftover: Vec<u8>) -> Self {
+    /// Construct a `RequestBodyState` from parser signals.
+    ///
+    /// C12B-032 / FB-2: `had_content_length_header` distinguishes
+    /// explicit `Content-Length: 0` (true) from an absent
+    /// Content-Length header (false). Both produce identical wire
+    /// behaviour on HTTP/1.1 (empty body) but the bit is preserved in
+    /// `BodyEncoding::Empty { had_content_length_header }` so the v2
+    /// chunked-trailers / HTTP/2 DATA promotion path can reconstruct
+    /// the correct framing without re-parsing the raw request.
+    ///
+    /// Legacy callers that did not pre-C12B-032 thread the presence
+    /// bit can use `RequestBodyState::new_legacy` below, which
+    /// conservatively infers `had_content_length_header` from the
+    /// numeric `content_length > 0` signal (the backward-compatible
+    /// reading of RFC 7230 § 3.3.3 rule 6 as of @c.12.rc3).
+    fn new(
+        is_chunked: bool,
+        content_length: i64,
+        had_content_length_header: bool,
+        leftover: Vec<u8>,
+    ) -> Self {
         let token = NEXT_REQUEST_TOKEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        // C12-12 / FB-2: derive the internal encoding once at state
-        // construction. `has_content_length` is inferred from the
-        // `content_length > 0` signal because the caller has already
-        // rejected the invalid `CL + TE:chunked` combination. Callers
-        // that pass `content_length == 0` with no TE:chunked collapse
-        // to `Empty`, which is the single classification the read
-        // loop needs. `fully_read` is now derived from `body_encoding`
-        // so the two stay in lock-step (previously it duplicated the
-        // `!is_chunked && content_length == 0` signal; funneling
-        // through `BodyEncoding::is_empty` removes the duplication).
-        let body_encoding = BodyEncoding::classify(is_chunked, content_length > 0, content_length);
+        // C12-12 / FB-2 / C12B-032: derive the internal encoding once
+        // at state construction. `had_content_length_header` now comes
+        // from the parser directly so the Empty variant preserves the
+        // presence bit per RFC 7230 § 3.3.3. `fully_read` is derived
+        // from `body_encoding` so the two stay in lock-step.
+        let body_encoding = BodyEncoding::classify(
+            is_chunked,
+            had_content_length_header,
+            content_length,
+        );
         let fully_read = body_encoding.is_empty();
         RequestBodyState {
             body_encoding,
@@ -344,6 +399,16 @@ impl RequestBodyState {
             chunked_state: ChunkedDecoderState::WaitingChunkSize,
             request_token: token,
         }
+    }
+
+    /// C12B-032 / FB-2: Legacy 3-arg constructor retained for unit
+    /// tests and legacy callers that do not yet thread the
+    /// `had_content_length_header` presence bit. Conservative
+    /// behaviour: infer the bit from `content_length > 0`, which
+    /// matches the pre-C12B-032 classification.
+    #[cfg(test)]
+    fn new_legacy(is_chunked: bool, content_length: i64, leftover: Vec<u8>) -> Self {
+        RequestBodyState::new(is_chunked, content_length, content_length > 0, leftover)
     }
 
     /// Check if there are leftover bytes available.
@@ -784,6 +849,16 @@ fn build_parse_result(
         ("bodyOffset".into(), Value::Int(consumed as i64)),
         ("contentLength".into(), Value::Int(content_length)),
         ("chunked".into(), Value::Bool(has_transfer_encoding_chunked)),
+        // C12B-032 / FB-2: internal-only presence bit. The v1 Taida
+        // surface flattens "header absent" and "Content-Length: 0"
+        // into the single `contentLength: 0` field; this extra bit
+        // lets the internal `BodyEncoding` preserve the distinction.
+        // Handlers ignore the field (unused name, prefixed with `__`
+        // by convention), so the handler-visible surface is unchanged.
+        (
+            "__hasContentLengthHeader".into(),
+            Value::Bool(has_content_length),
+        ),
     ]);
 
     make_result_success(parsed)
@@ -1511,8 +1586,11 @@ struct HttpConnection {
 
 /// Result of a non-blocking read attempt on a connection.
 enum ConnReadResult {
-    /// Complete request head parsed: (fields, head_consumed, content_length, is_chunked)
-    Ready(Vec<(String, Value)>, usize, i64, bool),
+    /// Complete request head parsed: (fields, head_consumed, content_length, is_chunked, had_content_length_header).
+    /// C12B-032 / FB-2: `had_content_length_header` distinguishes the two
+    /// "empty body" sub-cases (explicit `Content-Length: 0` vs. absent
+    /// header) so the internal `BodyEncoding` can preserve the bit.
+    Ready(Vec<(String, Value)>, usize, i64, bool, bool),
     /// Need more data (no complete head yet, not an error)
     NeedMore,
     /// Client closed the connection (EOF)
@@ -2386,7 +2464,7 @@ impl Interpreter {
                 // ── NET4-1b: Chunked TE decode ──
                 Self::read_body_chunk_chunked(body, stream)
             }
-            BodyEncoding::ContentLength(_) | BodyEncoding::Empty => {
+            BodyEncoding::ContentLength(_) | BodyEncoding::Empty { .. } => {
                 // ── NET4-1c: Content-Length body ──
                 Self::read_body_chunk_content_length(body, stream)
             }
@@ -4243,6 +4321,7 @@ impl Interpreter {
                         head_consumed,
                         content_length,
                         is_chunked,
+                        had_content_length_header,
                     ) => {
                         // We have a complete request head. Process body + handler.
                         // Advance round-robin past this connection.
@@ -4260,6 +4339,7 @@ impl Interpreter {
                             head_consumed,
                             content_length,
                             is_chunked,
+                            had_content_length_header,
                             &mut request_count,
                         );
 
@@ -5045,16 +5125,22 @@ impl Interpreter {
                         let consumed = get_field_int(inner, "consumed").unwrap_or(0) as usize;
                         let cl = get_field_int(inner, "contentLength").unwrap_or(0);
                         let is_chunked = get_field_bool(inner, "chunked").unwrap_or(false);
-                        Some((consumed, cl, is_chunked))
+                        // C12B-032: internal-only presence bit; absent in
+                        // legacy fixtures → conservative false.
+                        let had_cl_header =
+                            get_field_bool(inner, "__hasContentLengthHeader").unwrap_or(false);
+                        Some((consumed, cl, is_chunked, had_cl_header))
                     } else {
                         None
                     }
                 }
             };
-            if let Some((consumed, cl, is_chunked)) = completion_info {
+            if let Some((consumed, cl, is_chunked, had_cl_header)) = completion_info {
                 match extract_result_value_owned(parse_result) {
                     Some(fields) => {
-                        return ConnReadResult::Ready(fields, consumed, cl, is_chunked);
+                        return ConnReadResult::Ready(
+                            fields, consumed, cl, is_chunked, had_cl_header,
+                        );
                     }
                     None => return ConnReadResult::Malformed,
                 }
@@ -5083,16 +5169,24 @@ impl Interpreter {
                             let consumed = get_field_int(inner, "consumed").unwrap_or(0) as usize;
                             let cl = get_field_int(inner, "contentLength").unwrap_or(0);
                             let is_chunked = get_field_bool(inner, "chunked").unwrap_or(false);
-                            Some((consumed, cl, is_chunked))
+                            let had_cl_header = get_field_bool(inner, "__hasContentLengthHeader")
+                                .unwrap_or(false);
+                            Some((consumed, cl, is_chunked, had_cl_header))
                         } else {
                             None
                         }
                     }
                 };
                 match completion_info {
-                    Some((consumed, cl, is_chunked)) => {
+                    Some((consumed, cl, is_chunked, had_cl_header)) => {
                         match extract_result_value_owned(parse_result) {
-                            Some(fields) => ConnReadResult::Ready(fields, consumed, cl, is_chunked),
+                            Some(fields) => ConnReadResult::Ready(
+                                fields,
+                                consumed,
+                                cl,
+                                is_chunked,
+                                had_cl_header,
+                            ),
                             None => ConnReadResult::Malformed,
                         }
                     }
@@ -5125,6 +5219,7 @@ impl Interpreter {
         head_consumed: usize,
         content_length: i64,
         is_chunked: bool,
+        had_content_length_header: bool,
         request_count: &mut i64,
     ) -> ConnAction {
         const MAX_REQUEST_BUF: usize = 1_048_576; // 1 MiB
@@ -5172,7 +5267,12 @@ impl Interpreter {
 
             // v4: Create body streaming state for readBodyChunk/readBodyAll.
             // Must be created before request pack so we can embed the token.
-            let mut body_state = RequestBodyState::new(is_chunked, content_length, leftover);
+            let mut body_state = RequestBodyState::new(
+                is_chunked,
+                content_length,
+                had_content_length_header,
+                leftover,
+            );
 
             // Build request pack for handler (head only, body = empty span).
             let mut request_fields: Vec<(String, Value)> = Vec::new();
@@ -8923,12 +9023,42 @@ mod tests {
 
     #[test]
     fn test_body_encoding_classify_empty_when_all_zero() {
-        // Classifier: absent CL, no TE:chunked → Empty.
-        assert_eq!(BodyEncoding::classify(false, false, 0), BodyEncoding::Empty,);
-        // Classifier: explicit Content-Length: 0 collapses to Empty
-        // too (v1 surface cannot distinguish, v2 chunked upgrade path
-        // will promote both to the same internal no-body flow).
-        assert_eq!(BodyEncoding::classify(false, true, 0), BodyEncoding::Empty,);
+        // C12B-032: absent CL, no TE:chunked → Empty with
+        // `had_content_length_header: false`.
+        assert_eq!(
+            BodyEncoding::classify(false, false, 0),
+            BodyEncoding::Empty {
+                had_content_length_header: false,
+            },
+        );
+        // C12B-032: explicit `Content-Length: 0` collapses to Empty
+        // at the wire layer but preserves the presence bit so the v2
+        // chunked / HTTP/2 DATA promotion path can reconstruct the
+        // original framing without re-parsing the request.
+        assert_eq!(
+            BodyEncoding::classify(false, true, 0),
+            BodyEncoding::Empty {
+                had_content_length_header: true,
+            },
+        );
+    }
+
+    /// C12B-032: `Empty` must expose the two sub-cases as distinct
+    /// values so downstream consumers (v2 chunked, HTTP/2 DATA
+    /// promotion) can branch on them. Before C12B-032 these were
+    /// indistinguishable at the enum level.
+    #[test]
+    fn test_body_encoding_empty_distinguishes_absent_vs_zero() {
+        let absent = BodyEncoding::classify(false, false, 0);
+        let zero = BodyEncoding::classify(false, true, 0);
+        assert_ne!(
+            absent, zero,
+            "BodyEncoding must distinguish absent Content-Length from Content-Length: 0 \
+             (C12B-032 / FB-2). Got both as {:?}",
+            absent
+        );
+        assert!(!absent.had_content_length_header());
+        assert!(zero.had_content_length_header());
     }
 
     #[test]
@@ -8957,24 +9087,73 @@ mod tests {
 
     #[test]
     fn test_body_encoding_from_parsed_absent_body() {
-        // GET with no body headers → Empty
+        // GET with no body headers → Empty with presence bit = false.
+        // `from_parsed_result_value` reconstructs from the flat surface
+        // fields (`contentLength: 0`, `chunked: false`) so the bit is
+        // conservatively inferred as false.
         let raw = b"GET / HTTP/1.1\r\nHost: h\r\n\r\n";
         let parsed = parse_request_head(raw);
         assert_eq!(
             BodyEncoding::from_parsed_result_value(&parsed),
-            Some(BodyEncoding::Empty),
+            Some(BodyEncoding::Empty {
+                had_content_length_header: false,
+            }),
         );
     }
 
     #[test]
     fn test_body_encoding_from_parsed_content_length_zero() {
-        // Content-Length: 0 → Empty (collapses with absent at the
-        // handler surface; internal Empty covers both)
+        // C12B-032: `Content-Length: 0` and absent-CL are distinguished
+        // at the parser's internal `__hasContentLengthHeader` field.
+        // Through the handler-visible flattening, however, both appear
+        // as `contentLength: 0 / chunked: false`, so the
+        // backward-compatible `from_parsed_result_value` reconstruction
+        // yields `had_content_length_header: false`. The internal
+        // classifier path (`parse_request_head` → `ConnReadResult` →
+        // `RequestBodyState::new`) preserves the true bit — verified
+        // separately via `test_parse_head_records_cl_presence_bit`.
         let raw = b"POST / HTTP/1.1\r\nHost: h\r\nContent-Length: 0\r\n\r\n";
         let parsed = parse_request_head(raw);
         assert_eq!(
             BodyEncoding::from_parsed_result_value(&parsed),
-            Some(BodyEncoding::Empty),
+            Some(BodyEncoding::Empty {
+                had_content_length_header: false,
+            }),
+        );
+    }
+
+    /// C12B-032: the internal `__hasContentLengthHeader` field on the
+    /// parsed BuchiPack must be `true` for an explicit
+    /// `Content-Length: 0` and `false` when the header is absent, so
+    /// the `ConnReadResult::Ready` path can preserve the distinction
+    /// into `RequestBodyState::new`.
+    #[test]
+    fn test_parse_head_records_cl_presence_bit() {
+        let raw_absent = b"GET / HTTP/1.1\r\nHost: h\r\n\r\n";
+        let parsed_absent = parse_request_head(raw_absent);
+        let inner = extract_result_value(&parsed_absent).unwrap();
+        assert_eq!(
+            get_field_bool(inner, "__hasContentLengthHeader"),
+            Some(false),
+            "absent Content-Length must set __hasContentLengthHeader = false"
+        );
+
+        let raw_zero = b"POST / HTTP/1.1\r\nHost: h\r\nContent-Length: 0\r\n\r\n";
+        let parsed_zero = parse_request_head(raw_zero);
+        let inner = extract_result_value(&parsed_zero).unwrap();
+        assert_eq!(
+            get_field_bool(inner, "__hasContentLengthHeader"),
+            Some(true),
+            "explicit `Content-Length: 0` must set __hasContentLengthHeader = true"
+        );
+
+        let raw_nonzero = b"POST / HTTP/1.1\r\nHost: h\r\nContent-Length: 5\r\n\r\nhello";
+        let parsed_nonzero = parse_request_head(raw_nonzero);
+        let inner = extract_result_value(&parsed_nonzero).unwrap();
+        assert_eq!(
+            get_field_bool(inner, "__hasContentLengthHeader"),
+            Some(true),
+            "`Content-Length: 5` must also set __hasContentLengthHeader = true"
         );
     }
 
@@ -9000,13 +9179,27 @@ mod tests {
 
     #[test]
     fn test_body_encoding_accessors() {
-        assert_eq!(BodyEncoding::ContentLength(42).fixed_length(), Some(42),);
+        let empty_absent = BodyEncoding::Empty {
+            had_content_length_header: false,
+        };
+        let empty_zero = BodyEncoding::Empty {
+            had_content_length_header: true,
+        };
+        assert_eq!(BodyEncoding::ContentLength(42).fixed_length(), Some(42));
         assert_eq!(BodyEncoding::Chunked.fixed_length(), None);
-        assert_eq!(BodyEncoding::Empty.fixed_length(), None);
+        assert_eq!(empty_absent.fixed_length(), None);
+        assert_eq!(empty_zero.fixed_length(), None);
 
-        assert!(BodyEncoding::Empty.is_empty());
+        assert!(empty_absent.is_empty());
+        assert!(empty_zero.is_empty());
         assert!(!BodyEncoding::Chunked.is_empty());
         assert!(!BodyEncoding::ContentLength(1).is_empty());
+
+        // C12B-032 accessor: had_content_length_header reads the bit.
+        assert!(!empty_absent.had_content_length_header());
+        assert!(empty_zero.had_content_length_header());
+        assert!(BodyEncoding::ContentLength(1).had_content_length_header());
+        assert!(!BodyEncoding::Chunked.had_content_length_header());
     }
 
     #[test]
@@ -9016,20 +9209,44 @@ mod tests {
         // branch off a single source of truth (the existing
         // `is_chunked` / `content_length` fields remain as redundant
         // projections — see the struct doc-comment in net_eval.rs).
-        let s_empty = RequestBodyState::new(false, 0, Vec::new());
-        assert_eq!(s_empty.body_encoding, BodyEncoding::Empty);
+        //
+        // C12B-032: the legacy 3-arg constructor (`new_legacy`)
+        // conservatively infers `had_content_length_header` from
+        // `content_length > 0`. Callers that need to distinguish
+        // explicit `Content-Length: 0` from absent headers must use
+        // the 4-arg `RequestBodyState::new` directly.
+        let s_empty = RequestBodyState::new_legacy(false, 0, Vec::new());
+        assert_eq!(
+            s_empty.body_encoding,
+            BodyEncoding::Empty {
+                had_content_length_header: false,
+            }
+        );
         assert!(
             s_empty.fully_read,
             "Empty body must mark fully_read upfront"
         );
 
-        let s_cl = RequestBodyState::new(false, 7, Vec::new());
+        let s_cl = RequestBodyState::new_legacy(false, 7, Vec::new());
         assert_eq!(s_cl.body_encoding, BodyEncoding::ContentLength(7));
         assert!(!s_cl.fully_read);
 
-        let s_chunked = RequestBodyState::new(true, 0, Vec::new());
+        let s_chunked = RequestBodyState::new_legacy(true, 0, Vec::new());
         assert_eq!(s_chunked.body_encoding, BodyEncoding::Chunked);
         assert!(!s_chunked.fully_read);
+
+        // C12B-032: the 4-arg constructor preserves the presence bit
+        // so explicit `Content-Length: 0` produces a distinct value
+        // from absent-CL even though the wire behaviour is identical.
+        let s_cl_zero = RequestBodyState::new(false, 0, true, Vec::new());
+        assert_eq!(
+            s_cl_zero.body_encoding,
+            BodyEncoding::Empty {
+                had_content_length_header: true,
+            }
+        );
+        assert_ne!(s_cl_zero.body_encoding, s_empty.body_encoding);
+        assert!(s_cl_zero.fully_read, "Empty CL:0 body still fully_read");
     }
 
     // ── readBody with chunked body (NET2-2h) ──

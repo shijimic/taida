@@ -239,7 +239,17 @@ int64_t taida_io_stdout_with_tag(int64_t val, int64_t tag) {
         if (val) { write_stdout("true", 4); } else { write_stdout("false", 5); }
         write_stdout("\n", 1);
         return (int64_t)len;
-    } else {
+    }
+    /* C12B-034 fix: for WASM_TAG_STR the incoming `val` is already a
+       char*, so the fast path below is safe. For any other tag
+       (Int / Float / runtime-unknown UNKNOWN=-1 / pack / list / ...),
+       casting a non-pointer integer to `char*` and calling `wasm_strlen`
+       is undefined behaviour and can cause SIGSEGV / memory corruption
+       when a non-Bool value flows through a `param_tag_vars` ident into
+       `stdout(v)`. Route those through the polymorphic formatter so the
+       failure mode is well-defined and matches the Native backend's
+       `taida_polymorphic_to_string` contract. */
+    if ((int)tag == WASM_TAG_STR) {
         const char *s = (const char *)(intptr_t)val;
         if (s) {
             int32_t len = wasm_strlen(s);
@@ -247,6 +257,18 @@ int64_t taida_io_stdout_with_tag(int64_t val, int64_t tag) {
             write_stdout("\n", 1);
             return (int64_t)len;
         }
+        return 0;
+    }
+    /* Non-Bool, non-Str tag → let the polymorphic converter produce a
+       safe char* representation. Handles Int / Float / Pack / List /
+       UNKNOWN(-1) runtime values emitted through `param_tag_vars`. */
+    int64_t str_v = taida_polymorphic_to_string(val);
+    const char *s2 = (const char *)(intptr_t)str_v;
+    if (s2) {
+        int32_t len = wasm_strlen(s2);
+        write_stdout(s2, len);
+        write_stdout("\n", 1);
+        return (int64_t)len;
     }
     return 0;
 }
@@ -288,20 +310,30 @@ int64_t taida_io_stderr_with_tag(int64_t val, int64_t tag) {
         iov.len = 1;
         __wasi_fd_write(2, &iov, 1, &nwritten);
         return (int64_t)len;
+    }
+    /* C12B-034 fix: same rationale as taida_io_stdout_with_tag — treat
+       non-Bool / non-Str tags as polymorphic values rather than blindly
+       casting to char*. */
+    const char *s;
+    int32_t len;
+    int64_t scratch = 0;
+    if ((int)tag == WASM_TAG_STR) {
+        s = (const char *)(intptr_t)val;
     } else {
-        const char *s = (const char *)(intptr_t)val;
-        if (s) {
-            int32_t len = wasm_strlen(s);
-            wasi_ciovec iov;
-            iov.buf = (int32_t)(intptr_t)s;
-            iov.len = len;
-            int32_t nwritten;
-            __wasi_fd_write(2, &iov, 1, &nwritten);
-            iov.buf = (int32_t)(intptr_t)"\n";
-            iov.len = 1;
-            __wasi_fd_write(2, &iov, 1, &nwritten);
-            return (int64_t)len;
-        }
+        scratch = taida_polymorphic_to_string(val);
+        s = (const char *)(intptr_t)scratch;
+    }
+    if (s) {
+        len = wasm_strlen(s);
+        wasi_ciovec iov;
+        iov.buf = (int32_t)(intptr_t)s;
+        iov.len = len;
+        int32_t nwritten;
+        __wasi_fd_write(2, &iov, 1, &nwritten);
+        iov.buf = (int32_t)(intptr_t)"\n";
+        iov.len = 1;
+        __wasi_fd_write(2, &iov, 1, &nwritten);
+        return (int64_t)len;
     }
     return 0;
 }

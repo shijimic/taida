@@ -75,13 +75,16 @@ mod tests {
     /// the assembled source to detect accidental edits that would break
     /// DCE or shift static helper references across fragment boundaries.
     ///
-    /// Total bytes snapshot: 235,855 (6,463 lines). If a future change
-    /// intentionally modifies the runtime C source, update both the
-    /// fragment file and the `EXPECTED_TOTAL_LEN` constant below in the
-    /// same commit.
+    /// Total bytes snapshot: 237,295 (post-C12B-034 hardening of
+    /// `taida_io_stdout_with_tag` / `taida_io_stderr_with_tag` to route
+    /// non-Bool non-Str tags through `taida_polymorphic_to_string`
+    /// instead of casting arbitrary integers to `char*`). If a future
+    /// change intentionally modifies the runtime C source, update both
+    /// the fragment file and the `EXPECTED_TOTAL_LEN` constant below in
+    /// the same commit.
     #[test]
     fn test_runtime_core_wasm_fragment_concat_preserves_bytes() {
-        const EXPECTED_TOTAL_LEN: usize = 235_855;
+        const EXPECTED_TOTAL_LEN: usize = 237_295;
         let asm = *RUNTIME_CORE_WASM;
         assert_eq!(
             asm.len(),

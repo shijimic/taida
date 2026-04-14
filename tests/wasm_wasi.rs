@@ -713,10 +713,11 @@ fn wasm_wasi_parity_all_examples() {
     // C12-5: compile_c12_5_side_effect_returns (stdout Int return) added (66 → 67)
     // C12-4c: compile_c12_4_arm_pure_expr (`| |>` pure-expr boundary) added (67 → 68)
     // C12-11: compile_c12_11_tag_prop (param_tag_vars Bool prop) added (68 → 69)
+    // C12B-034: compile_c12b_034_wasm_nonbool_param (memory-safe non-Bool) added (69 → 70)
     assert_eq!(
         parity_ok.len(),
-        69,
-        "WW-3: Expected exactly 69 parity-OK examples, got {}. \
+        70,
+        "WW-3: Expected exactly 70 parity-OK examples, got {}. \
          If parity improved, update the expected count. List: {:?}",
         parity_ok.len(),
         parity_ok
@@ -856,9 +857,10 @@ fn wasm_wasi_superset_of_wasm_min() {
     // C12-5: compile_c12_5_side_effect_returns added (65 → 66)
     // C12-4c: compile_c12_4_arm_pure_expr added (66 → 67)
     // C12-11: compile_c12_11_tag_prop added (67 → 68)
+    // C12B-034: compile_c12b_034_wasm_nonbool_param added (68 → 69)
     assert_eq!(
-        superset_ok, 68,
-        "WW-3: Expected exactly 68 superset-verified examples, got {}. \
+        superset_ok, 69,
+        "WW-3: Expected exactly 69 superset-verified examples, got {}. \
          If superset coverage improved, update the expected count.",
         superset_ok
     );

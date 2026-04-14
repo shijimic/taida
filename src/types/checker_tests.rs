@@ -3802,3 +3802,80 @@ fn test_c12_5_stderr_in_let_binding_infers_int() {
         "stderr(...) must infer as Type::Int (C12-5 FB-18)"
     );
 }
+
+// ────────────────────────────────────────────────────────────────
+// C12B-031: Str.match / Str.search require :Regex argument
+// ────────────────────────────────────────────────────────────────
+
+/// C12B-031: `str.match("literal")` must be rejected at type-check
+/// time because `match` is a Regex-only API. Prior to the fix the
+/// checker accepted a Str argument and the runtime behaviour diverged:
+/// Interpreter / JS threw at runtime, Native silently returned an
+/// empty RegexMatch. Unifying the failure mode in the type checker
+/// closes the parity gap.
+#[test]
+fn test_c12b_031_str_match_with_string_literal_rejected() {
+    let source = r#"res <= "hello".match("h")
+stdout(res.toString())
+"#;
+    let (_, errors) = check(source);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1508]")
+            && e.message.contains("'match'")
+            && e.message.contains("Regex")),
+        "match with Str literal should be rejected with [E1508] mentioning Regex, \
+         got errors: {:?}",
+        errors
+    );
+}
+
+/// C12B-031: Mirror of the above for `search`.
+#[test]
+fn test_c12b_031_str_search_with_string_literal_rejected() {
+    let source = r#"idx <= "hello".search("l")
+stdout(idx.toString())
+"#;
+    let (_, errors) = check(source);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1508]")
+            && e.message.contains("'search'")
+            && e.message.contains("Regex")),
+        "search with Str literal should be rejected with [E1508] mentioning Regex, \
+         got errors: {:?}",
+        errors
+    );
+}
+
+/// C12B-031 positive case: `str.match(Regex(...))` must still be
+/// accepted — the tightening must not regress the canonical Regex
+/// overload path introduced in C12-6.
+#[test]
+fn test_c12b_031_str_match_with_regex_constructor_accepted() {
+    let source = r#"r <= Regex("h")
+res <= "hello".match(r)
+stdout(res.full)
+"#;
+    let (_, errors) = check(source);
+    assert!(
+        !errors.iter().any(|e| e.message.contains("[E1508]")
+            && e.message.contains("'match'")),
+        "match with Regex arg should not produce [E1508], got errors: {:?}",
+        errors
+    );
+}
+
+/// C12B-031 positive case: Mirror of the above for `search`.
+#[test]
+fn test_c12b_031_str_search_with_regex_constructor_accepted() {
+    let source = r#"r <= Regex("l")
+idx <= "hello".search(r)
+stdout(idx.toString())
+"#;
+    let (_, errors) = check(source);
+    assert!(
+        !errors.iter().any(|e| e.message.contains("[E1508]")
+            && e.message.contains("'search'")),
+        "search with Regex arg should not produce [E1508], got errors: {:?}",
+        errors
+    );
+}

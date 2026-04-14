@@ -892,10 +892,11 @@ fn wasm_full_parity_all_examples() {
     // C12-5: compile_c12_5_side_effect_returns (stdout Int return) added (65 -> 66)
     // C12-4c: compile_c12_4_arm_pure_expr (`| |>` pure-expr boundary) added (66 -> 67)
     // C12-11: compile_c12_11_tag_prop (param_tag_vars Bool prop) added (67 -> 68)
+    // C12B-034: compile_c12b_034_wasm_nonbool_param (memory-safe non-Bool) added (68 -> 69)
     assert_eq!(
         parity_ok.len(),
-        68,
-        "WF-5: Expected exactly 68 parity-OK examples, got {}. \
+        69,
+        "WF-5: Expected exactly 69 parity-OK examples, got {}. \
          If parity improved, update the expected count. List: {:?}",
         parity_ok.len(),
         parity_ok

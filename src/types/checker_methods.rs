@@ -24,9 +24,14 @@ impl TypeChecker {
                 // runtime dispatches by inspecting the value's `__type` tag.
                 "replace" | "replaceAll" => Some((2, 2, vec![Type::Unknown, Type::Str])),
                 "split" => Some((1, 1, vec![Type::Unknown])),
-                // C12-6c: match / search — Regex argument required; arity
-                // enforced, but the type constraint is accepted at runtime.
-                "match" | "search" => Some((1, 1, vec![Type::Unknown])),
+                // C12-6c / C12B-031: match / search are Regex-only APIs.
+                // The first argument must be a :Regex BuchiPack (the
+                // `Regex(...)` constructor's return value). Rejecting
+                // `str.match("a")` / `str.search("a")` at type-check time
+                // unifies the failure mode across backends (previously
+                // Interpreter/JS threw at runtime, Native silently returned
+                // an empty match — see C12B-031).
+                "match" | "search" => Some((1, 1, vec![Type::Named("Regex".to_string())])),
                 _ => None,
             },
             Type::Int | Type::Float | Type::Num => match method {

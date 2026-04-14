@@ -5,6 +5,59 @@
 In-flight release tracking the @c.12.rc3 milestone (`FUTURE_BLOCKERS.md`
 全 12 本消化）. See `.dev/C12_PROGRESS.md` for the live progress tracker.
 
+### Post-Gate Blocker Fixes (2026-04-15)
+
+Gate review surfaced 8 Must Fix blockers (`C12B-029/030/031/032/033/034/035/040`).
+All resolved in this session:
+
+- **C12B-029** — Native `Regex(...)` now fails fast at construction time
+  for unsupported flags (`/[^ims]/` characters) and invalid patterns,
+  throwing `:Error` with `type=ValueError` that matches the Interpreter
+  and JS error shape. 3 parity tests added covering all three backends.
+- **C12B-030** — Native regex pattern rewriter gains `\xHH` / `\x{HH..}` /
+  `\uHHHH` / `\u{HH..}` hex/Unicode escape support (UTF-8 encoded).
+  Documented subset: `\b` / `\B` and the `s` flag remain
+  Interpreter/JS-only on Native POSIX ERE.
+- **C12B-040** — JS regex implementation split: `Regex(...)` constructor
+  previously validated without the `u` flag but `__taida_compile_regex`
+  appended `u` at runtime, so `Regex("\x{41}")` / `Regex("\_")`
+  constructed successfully and then threw `Invalid escape` on the first
+  `.replace` / `.match` / `.search`. Fixed by routing both construct-
+  time validation and runtime compilation through a shared
+  `__taida_rewrite_pattern` helper that converts `\x{HH..}` / `\u{HH..}`
+  to JS-native `\uHHHH` (or UTF-16 surrogate pair for supplementary
+  planes) and drops the `u` flag, preserving identity-escape leniency
+  for parity with the Rust `regex` crate and POSIX ERE. 4 new parity
+  tests cover construct + first-use round-trips for bracketed hex,
+  bracketed Unicode, identity escape, and `.match`/`.search` compile
+  paths.
+- **C12B-031** — `str.match(...)` / `str.search(...)` now require a
+  `:Regex` argument at type-check time (`[E1508]`). Previously Str
+  literals silently diverged across backends (Interpreter/JS runtime
+  throw, Native empty fallback). 4 checker tests added.
+- **C12B-032** — `BodyEncoding::Empty` is now a struct variant
+  `Empty { had_content_length_header: bool }` so the internal HTTP/1.1
+  framing layer can distinguish explicit `Content-Length: 0` from an
+  absent Content-Length header. The handler-visible BuchiPack surface
+  remains flat (`contentLength: 0`, `chunked: false`) for v1
+  compatibility; the new bit flows through
+  `parse_request_head` → `ConnReadResult` → `RequestBodyState::new`.
+- **C12B-033** — `.dev/C12_PROGRESS.md` gate status line corrected from
+  "Final Gate 準備完了" to explicitly acknowledge Phase 9 PARTIAL and
+  the presence of OPEN blockers at time of write.
+- **C12B-034** — **wasm memory safety fix**: `taida_io_stdout_with_tag`
+  / `taida_io_stderr_with_tag` no longer blindly cast a non-Bool
+  `val` to `char*`. Non-Bool, non-Str tags route through
+  `taida_polymorphic_to_string` so `print_any(42)` on wasm emits `42`
+  instead of reading linear memory at address 42. New fixture
+  `examples/compile_c12b_034_wasm_nonbool_param.td` locks the
+  3-backend + 3-wasm-profile parity (`42 / hello / true / false`).
+- **C12B-035** — Phase 2 migration note in `docs/guide/01_types.md`
+  and `CHANGELOG.md` corrected: `n.toString(radix)` migrates to
+  `ToRadix[n, base]().getOrDefault("")` (returns `Lax[Str]`), not
+  the previously-listed `Str[Int[s, 16]()..]()` which performs the
+  opposite direction (hex-string → decimal-string).
+
 ### Improvements
 
 #### `expr_type_tag` Mold-Return Single Source of Truth (FB-27 / Phase 1)
@@ -44,8 +97,11 @@ In-flight release tracking the @c.12.rc3 milestone (`FUTURE_BLOCKERS.md`
 - 4 parity tests + 5 checker tests added.
 - Migration: code that previously relied on JS's `Number.prototype
   .toString(radix)` (e.g. `n.toString(16)`) is now a compile error.
-  Use `Str[Int[n]().getOrDefault(0)]()` or define a dedicated radix
-  formatter — see `docs/guide/01_types.md`.
+  Use `ToRadix[n, base]().getOrDefault("")` (returns `Lax[Str]`,
+  unwrap with `getOrDefault`) — see `docs/reference/mold_types.md §ToRadix`
+  and `docs/guide/01_types.md`. `Str[Int[s, 16]().getOrDefault(0)]()`
+  does **not** perform int → hex and was listed in error in an earlier
+  draft.
 
 #### Mutual-Recursion Static Detection (FB-8 / Phase 3)
 

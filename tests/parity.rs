@@ -31750,6 +31750,29 @@ print_any(42)
     assert_eq!(out, "hello\n42");
 }
 
+/// C12B-034 regression: Mixed-type values through a user function
+/// parameter must be memory-safe on wasm (and match Native / JS
+/// output) even when the param-tag ident path routes through the
+/// tagged stdout runtime call. Before C12B-034 the wasm
+/// `taida_io_stdout_with_tag` cast non-Bool `val` to `char*` directly,
+/// which caused SIGSEGV / UB when the parameter was e.g. an Int.
+/// Fixed by routing non-Bool non-Str tags through
+/// `taida_polymorphic_to_string` in `runtime_core_wasm/01_core.inc.c`.
+#[test]
+fn test_c12b_034_wasm_nonbool_param_safety_parity() {
+    let source = r#"print_any v =
+    stdout(v)
+print_any(42)
+print_any("hello")
+print_any(true)
+print_any(false)
+"#;
+    assert_backend_parity_for_source(source, "c12b_034_wasm_nonbool_param_safety");
+    let out = run_interpreter_src(source, "c12b_034_wasm_nonbool_param_safety_expected")
+        .expect("interpreter output should exist");
+    assert_eq!(out, "42\nhello\ntrue\nfalse");
+}
+
 // ────────────────────────────────────────────────────────────────
 // C12 Phase 6 (FB-5 Phase 2-3) — Regex type + Str method overloads
 // ────────────────────────────────────────────────────────────────
@@ -31902,6 +31925,189 @@ stdout("unreachable")
         out.as_deref() != Some("unreachable\n"),
         "program should throw before reaching stdout"
     );
+}
+
+/// C12B-029: Unsupported Regex flag must fail fast on every backend,
+/// not only the interpreter. Before the fix, Native silently returned
+/// a usable Regex pack that no-op'd at every Str method call site.
+/// After the fix, all three backends throw at `Regex(...)` so the
+/// failure mode is unified (philosophy I: "no silent undefined").
+#[test]
+fn test_c12b_029_regex_unsupported_flag_rejected_all_backends_parity() {
+    let source = r#"Regex("a", "x")
+stdout("unreachable")
+"#;
+    // The interpreter / native / JS all throw before reaching stdout;
+    // `run_*_src` returns None on a throw, and we accept either None
+    // or an output that is NOT "unreachable\n" (some backends may
+    // return an empty string rather than None). The invariant is
+    // parity: no backend must ever print "unreachable".
+    let interp = run_interpreter_src(source, "c12b_029_regex_unsupported_flag_rejected_interp");
+    assert!(
+        interp.as_deref() != Some("unreachable\n"),
+        "interpreter must not reach stdout for unsupported flag"
+    );
+    let native = run_native_src(source, "c12b_029_regex_unsupported_flag_rejected_native");
+    assert!(
+        native.as_deref() != Some("unreachable\n"),
+        "native must not reach stdout for unsupported flag, got {:?}",
+        native
+    );
+    if node_available() {
+        let js = run_js_src(source, "c12b_029_regex_unsupported_flag_rejected_js");
+        assert!(
+            js.as_deref() != Some("unreachable\n"),
+            "js must not reach stdout for unsupported flag, got {:?}",
+            js
+        );
+    }
+}
+
+/// C12B-029: Invalid Regex pattern (unbalanced paren / stray
+/// quantifier / etc.) must fail fast on every backend. Before the
+/// fix, Native silently returned a pack and then no-op'd at every
+/// `replace` / `match` / `search` call.
+#[test]
+fn test_c12b_029_regex_invalid_pattern_rejected_all_backends_parity() {
+    let source = r#"Regex("(")
+stdout("unreachable")
+"#;
+    let interp = run_interpreter_src(source, "c12b_029_regex_invalid_pattern_rejected_interp");
+    assert!(
+        interp.as_deref() != Some("unreachable\n"),
+        "interpreter must not reach stdout for invalid pattern"
+    );
+    let native = run_native_src(source, "c12b_029_regex_invalid_pattern_rejected_native");
+    assert!(
+        native.as_deref() != Some("unreachable\n"),
+        "native must not reach stdout for invalid pattern, got {:?}",
+        native
+    );
+    if node_available() {
+        let js = run_js_src(source, "c12b_029_regex_invalid_pattern_rejected_js");
+        assert!(
+            js.as_deref() != Some("unreachable\n"),
+            "js must not reach stdout for invalid pattern, got {:?}",
+            js
+        );
+    }
+}
+
+/// C12B-029 positive case: Valid Regex flag + pattern must still
+/// construct successfully on every backend — the fail-fast validation
+/// must not regress the canonical constructor path.
+#[test]
+fn test_c12b_029_regex_valid_construction_still_works_parity() {
+    let source = r#"r <= Regex("\\d+", "i")
+stdout("built:" + r.pattern)
+"#;
+    assert_backend_parity_for_source(source, "c12b_029_regex_valid_construction_still_works");
+    let out = run_interpreter_src(source, "c12b_029_regex_valid_construction_still_works_expected")
+        .expect("interpreter output should exist");
+    assert_eq!(out, "built:\\d+");
+}
+
+/// C12B-030: Hex escape `\xHH` and Unicode escape `\u{HH..}` must
+/// translate consistently across 3 backends. Before C12B-030 the
+/// Native implementation only supported `\d` / `\w` / `\s` and their
+/// complements, while JS `RegExp` silently treated `\u{41}` as the
+/// literal string `u{41}` because the `u` flag was not enabled.
+#[test]
+fn test_c12b_030_regex_hex_escape_parity() {
+    let source = r#"r <= Regex("\\x41")
+stdout("BA".replace(r, "X"))
+r2 <= Regex("\\u{41}")
+stdout("BA".replace(r2, "X"))
+"#;
+    assert_backend_parity_for_source(source, "c12b_030_regex_hex_escape");
+    let out = run_interpreter_src(source, "c12b_030_regex_hex_escape_expected")
+        .expect("interpreter output should exist");
+    assert_eq!(out, "BX\nBX");
+}
+
+/// C12B-040: Bracketed hex escape `\x{HH..}` must behave identically on
+/// 3 backends for BOTH construct and first-use. The previous JS
+/// implementation appended the `u` flag at compile_regex time but not
+/// at Regex(...) constructor time, so `Regex("\\x{41}")` would pass
+/// construction and then throw on the first `.replace` / `.match` /
+/// `.search` with `Invalid regular expression: /\x{41}/u: Invalid
+/// escape`. This test constructs the regex, reads back its pattern
+/// (construct-time success check), and then uses it (first-use
+/// success check) — any asymmetry will surface here.
+#[test]
+fn test_c12b_040_regex_bracketed_hex_construct_and_first_use_parity() {
+    let source = r#"r <= Regex("\\x{41}")
+stdout("built:" + r.pattern)
+stdout("BA".replace(r, "X"))
+"#;
+    assert_backend_parity_for_source(source, "c12b_040_regex_bracketed_hex_construct_and_first_use");
+    let out = run_interpreter_src(
+        source,
+        "c12b_040_regex_bracketed_hex_construct_and_first_use_expected",
+    )
+    .expect("interpreter output should exist");
+    assert_eq!(out, "built:\\x{41}\nBX");
+}
+
+/// C12B-040: `\u{41}` bracketed Unicode escape must also round-trip
+/// construct + first-use on all 3 backends.
+#[test]
+fn test_c12b_040_regex_bracketed_unicode_construct_and_first_use_parity() {
+    let source = r#"r <= Regex("\\u{41}")
+stdout("built:" + r.pattern)
+stdout("BA".replace(r, "X"))
+"#;
+    assert_backend_parity_for_source(source, "c12b_040_regex_bracketed_unicode_construct_and_first_use");
+    let out = run_interpreter_src(
+        source,
+        "c12b_040_regex_bracketed_unicode_construct_and_first_use_expected",
+    )
+    .expect("interpreter output should exist");
+    assert_eq!(out, "built:\\u{41}\nBX");
+}
+
+/// C12B-040: Identity escape like `\_` (no special meaning) is
+/// accepted by the Rust `regex` crate (Interpreter) and POSIX ERE
+/// (Native). The previous JS implementation enabled the `u` flag
+/// which made JS reject these escapes at first-use with `Invalid
+/// escape` — asymmetric with construct-time. With the rewrite-based
+/// fix, JS no longer uses `/u` and identity escapes pass through
+/// naturally.
+///
+/// Regression guard: `match`, `search`, `replace`, `replaceAll`,
+/// `split` all route through `__taida_compile_regex` on JS, so a
+/// single `.replace` exercises the compile path that used to fail.
+#[test]
+fn test_c12b_040_regex_identity_escape_all_backends_parity() {
+    let source = r#"r <= Regex("\\_")
+stdout("built:" + r.pattern)
+stdout("a_b".replace(r, "X"))
+"#;
+    assert_backend_parity_for_source(source, "c12b_040_regex_identity_escape");
+    let out = run_interpreter_src(source, "c12b_040_regex_identity_escape_expected")
+        .expect("interpreter output should exist");
+    assert_eq!(out, "built:\\_\naXb");
+}
+
+/// C12B-040: `match` and `search` go through `__taida_compile_regex`
+/// too, so the construct-vs-first-use asymmetry must be covered on
+/// those code paths. This test uses `\x{HH..}` with `.match` and
+/// `.search` to guard against a future regression where only
+/// `.replace` is tested.
+#[test]
+fn test_c12b_040_regex_bracketed_hex_match_and_search_parity() {
+    let source = r#"r <= Regex("\\x{41}")
+m <= "BA".match(r)
+stdout(m.full)
+stdout("BA".search(r).toString())
+"#;
+    assert_backend_parity_for_source(source, "c12b_040_regex_bracketed_hex_match_and_search");
+    let out = run_interpreter_src(
+        source,
+        "c12b_040_regex_bracketed_hex_match_and_search_expected",
+    )
+    .expect("interpreter output should exist");
+    assert_eq!(out, "A\n1");
 }
 
 // ────────────────────────────────────────────────────────────────

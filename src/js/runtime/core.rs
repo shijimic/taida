@@ -1002,13 +1002,129 @@ function __taida_is_regex(v) {
     && v.__type === 'Regex'
     && typeof v.pattern === 'string';
 }
+// C12B-040: Rewrite `\x{HH..}` / `\u{HH..}` bracketed hex escapes to
+// JS-native `\uHHHH` (or surrogate pair for supplementary planes).
+// We intentionally do NOT enable the `u` flag on the RegExp, because
+// `u` strict mode rejects harmless identity escapes like `\_` / `\/`
+// that the Rust `regex` crate (Interpreter) and POSIX ERE (Native)
+// both accept. The rewrite runs during both Regex(...) construction
+// validation and at each compile_regex(...) site, guaranteeing that
+// construction-time syntax matches first-use syntax (fixes C12B-040).
+function __taida_rewrite_pattern(pat) {
+  if (typeof pat !== 'string' || pat.length === 0) return pat;
+  let out = '';
+  let i = 0;
+  while (i < pat.length) {
+    const c = pat[i];
+    if (c === '\\' && i + 1 < pat.length) {
+      const n = pat[i + 1];
+      if ((n === 'x' || n === 'u') && pat[i + 2] === '{') {
+        // Bracketed hex escape: \x{HH..} or \u{HH..} (up to 8 hex digits).
+        let j = i + 3;
+        let digits = '';
+        while (j < pat.length && pat[j] !== '}' && digits.length < 8) {
+          const d = pat[j];
+          if ((d >= '0' && d <= '9') || (d >= 'a' && d <= 'f') || (d >= 'A' && d <= 'F')) {
+            digits += d;
+            j++;
+          } else {
+            break;
+          }
+        }
+        if (pat[j] === '}' && digits.length > 0) {
+          const cp = parseInt(digits, 16);
+          if (cp <= 0x10FFFF) {
+            if (cp <= 0xFFFF) {
+              // BMP: emit as \uHHHH (works without `u` flag in JS).
+              out += '\\u' + digits.padStart(4, '0').toUpperCase().slice(-4);
+            } else {
+              // Supplementary: emit as UTF-16 surrogate pair so JS
+              // matches the code point without the `u` flag.
+              const v = cp - 0x10000;
+              const hi = 0xD800 | (v >>> 10);
+              const lo = 0xDC00 | (v & 0x3FF);
+              out += '\\u' + hi.toString(16).toUpperCase().padStart(4, '0');
+              out += '\\u' + lo.toString(16).toUpperCase().padStart(4, '0');
+            }
+            i = j + 1;
+            continue;
+          }
+        }
+        // Malformed bracketed escape — fall through and pass literally.
+      }
+      // Non-bracketed escapes (`\xHH`, `\uHHHH`, `\d`, `\_`, etc.)
+      // are already valid in JS no-`u` mode — pass through verbatim.
+      out += pat[i];
+      out += pat[i + 1];
+      i += 2;
+      continue;
+    }
+    out += c;
+    i++;
+  }
+  return out;
+}
+// C12B-036: FIFO-bounded compile cache for Regex objects. Without this,
+// `s.replace(Regex("..."), "...")` in a tight loop recompiles the
+// pattern on every iteration. The cache keys on the (pattern, flags,
+// global) triple since the `global` parameter alters the final `g`
+// flag. Capacity is intentionally small (64 distinct combos) to bound
+// memory; when full we evict the oldest insertion. This is pure
+// performance — V8/SpiderMonkey's RegExp grammar is unchanged.
+const __TAIDA_REGEX_CACHE_CAPACITY = 64;
+// NOTE: Use __NativeMap (aliased to globalThis.Map at the top of this
+// prelude) because the local `Map` identifier is shadowed by the Taida
+// `Map(list, fn)` mold function. `new Map()` without this alias would
+// return a frozen empty array whose `.get` is Taida's patched
+// Array.prototype.get returning Lax values — producing false cache HITs
+// that corrupt every regex compile.
+const __taida_regex_cache = new __NativeMap();
+function __taida_regex_cache_get(pattern, flags, global) {
+  const key = pattern + '\u0001' + flags + '\u0001' + (global ? '1' : '0');
+  return { key: key, value: __taida_regex_cache.get(key) };
+}
+function __taida_regex_cache_put(key, re) {
+  if (__taida_regex_cache.size >= __TAIDA_REGEX_CACHE_CAPACITY) {
+    // Map iteration order is insertion order: drop the oldest.
+    const oldest = __taida_regex_cache.keys().next().value;
+    if (oldest !== undefined) __taida_regex_cache.delete(oldest);
+  }
+  __taida_regex_cache.set(key, re);
+}
 function __taida_compile_regex(rx, global) {
   // Strip `g` from user flags (`g` is controlled by the API: replaceAll
   // / replace / match / search); keep `i`, `m`, `s`. Unknown flag chars
   // were already rejected at Regex(...) construction time.
   const userFlags = typeof rx.flags === 'string' ? rx.flags.replace(/g/g, '') : '';
   const finalFlags = global ? userFlags + 'g' : userFlags;
-  return new RegExp(rx.pattern, finalFlags);
+  // C12B-036: cache lookup — skip both the rewrite pass and `new RegExp`
+  // when the same (pattern, flags, global) triple has already been
+  // compiled in this runtime.
+  //
+  // IMPORTANT: JS RegExp objects with the `g` flag carry mutable
+  // `lastIndex` state across `.test()` / `.exec()` / stringy
+  // `.match()`. We cannot safely return the same cached instance
+  // because:
+  //   (a) the caller's next `.match` / `.replace` / `.split` would
+  //       resume from the previous `lastIndex`, silently skipping
+  //       matches (observed in c12_6 parity tests), and
+  //   (b) some runtimes (Node's ESM sealed RegExp subclass in strict
+  //       mode) reject `lastIndex = 0` assignment on cached instances.
+  // We therefore cache a pre-rewritten `(pattern, flags)` template and
+  // build a fresh `RegExp` per call. The win is skipping the
+  // `__taida_rewrite_pattern` scan on repeat hits — `new RegExp(src,
+  // flags)` itself is unavoidable but still much cheaper than the
+  // full rewrite+construct path.
+  const cached = __taida_regex_cache_get(rx.pattern, finalFlags, global);
+  if (cached.value !== undefined) {
+    return new RegExp(cached.value.src, cached.value.flags);
+  }
+  // C12B-040: Rewrite bracketed hex escapes to native JS syntax instead
+  // of turning on `/u`. See __taida_rewrite_pattern for rationale.
+  const rewritten = __taida_rewrite_pattern(rx.pattern);
+  const re = new RegExp(rewritten, finalFlags);
+  __taida_regex_cache_put(cached.key, { src: rewritten, flags: finalFlags });
+  return re;
 }
 // Escape literal `$` so that JS `String.prototype.replace` does not
 // interpret `$&`, `$$`, `$1`, etc. as meta-syntax. Design lock §C12-6.
@@ -1053,9 +1169,12 @@ function __taida_regex(pattern, flags) {
   const p = typeof pattern === 'string' ? pattern : '';
   const f = typeof flags === 'string' ? flags : '';
   // Validate flags (match the interpreter's `regex_eval::validate_flags`).
+  // C12B-029: Use globalThis.Error rather than the local Taida `Error`
+  // (which is shadowed by the prelude at the top of runtime/core.rs and
+  // is frozen, so assigning __taida_error_type fails).
   for (const c of f) {
     if (c !== 'i' && c !== 'm' && c !== 's') {
-      const err = new Error(
+      const err = new globalThis.Error(
         "Regex: unsupported flag '" + c + "'. Supported flags: i (case-insensitive), m (multiline), s (dotall)"
       );
       err.__taida_error_type = 'ValueError';
@@ -1064,10 +1183,16 @@ function __taida_regex(pattern, flags) {
   }
   // Validate the pattern by compiling once. Drop `g` because user
   // flags never control the global setting here (mirrors interpreter).
+  // C12B-040: Apply the same bracketed-hex rewrite that
+  // __taida_compile_regex uses at first-use, so construct-time and
+  // use-time see the same grammar. Without this parity the user sees
+  // a successful construct that later throws on .replace / .match /
+  // .search with the same regex.
   try {
-    new RegExp(p, f.replace(/g/g, ''));
+    const rewritten = __taida_rewrite_pattern(p);
+    new RegExp(rewritten, f.replace(/g/g, ''));
   } catch (e) {
-    const err = new Error("Regex: invalid pattern '" + p + "' — " + e.message);
+    const err = new globalThis.Error("Regex: invalid pattern '" + p + "' — " + e.message);
     err.__taida_error_type = 'ValueError';
     throw err;
   }
