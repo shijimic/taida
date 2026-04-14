@@ -221,15 +221,19 @@ int64_t taida_io_stdout(int64_t val_ptr) {
 }
 
 /* B11-2a: Type-tagged stdout for Bool display parity (FB-3).
-   Only Bool needs special handling; all other types are correctly
-   handled by taida_polymorphic_to_string. */
+   B11-2f: Only Bool needs type-based dispatch. All other tags (including
+   UNKNOWN and PACK-tagged MoldInst whose actual return type is Str) must
+   fall through to the raw char* path — this matches the pre-B11
+   `taida_io_stdout(val_ptr)` behavior. polymorphic_to_string's
+   _looks_like_* heuristics mis-identify string pointers as lists/packs
+   (e.g. "5\0..." reads as a plausible list length), so we deliberately
+   avoid that dispatch path. */
 int64_t taida_io_stdout_with_tag(int64_t val, int64_t tag) {
     if ((int)tag == WASM_TAG_BOOL) {
         if (val) { write_stdout("true", 4); } else { write_stdout("false", 5); }
         write_stdout("\n", 1);
     } else {
-        int64_t str = taida_polymorphic_to_string(val);
-        const char *s = (const char *)(intptr_t)str;
+        const char *s = (const char *)(intptr_t)val;
         if (s) {
             int32_t len = wasm_strlen(s);
             write_stdout(s, len);
@@ -258,7 +262,8 @@ int64_t taida_io_stderr(int64_t val_ptr) {
     return 0;
 }
 
-/* B11-2a: Type-tagged stderr for Bool display parity (FB-3). */
+/* B11-2a: Type-tagged stderr for Bool display parity (FB-3).
+   B11-2f: Only Bool needs type-based dispatch; see stdout_with_tag. */
 int64_t taida_io_stderr_with_tag(int64_t val, int64_t tag) {
     if ((int)tag == WASM_TAG_BOOL) {
         const char *s = val ? "true" : "false";
@@ -272,8 +277,7 @@ int64_t taida_io_stderr_with_tag(int64_t val, int64_t tag) {
         iov.len = 1;
         __wasi_fd_write(2, &iov, 1, &nwritten);
     } else {
-        int64_t str = taida_polymorphic_to_string(val);
-        const char *s = (const char *)(intptr_t)str;
+        const char *s = (const char *)(intptr_t)val;
         if (s) {
             int32_t len = wasm_strlen(s);
             wasi_ciovec iov;

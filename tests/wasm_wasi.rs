@@ -706,10 +706,11 @@ fn wasm_wasi_parity_all_examples() {
     // Bug A-G + Reverse fix: 47 → 55 (8 previously known diffs now pass)
     // PR-4: async support: 55 → 58 (13_async, 14_unmold_backward, compile_async)
     // PR-3: module inlining: 58 → 61 (09_modules, compile_module, compile_module_value)
+    // B11-2f: stdout convert_to_string: 61 → 63 (compile_b11_features, compile_hof_molds)
     assert_eq!(
         parity_ok.len(),
-        61,
-        "WW-3: Expected exactly 61 parity-OK examples, got {}. \
+        63,
+        "WW-3: Expected exactly 63 parity-OK examples, got {}. \
          If parity improved, update the expected count. List: {:?}",
         parity_ok.len(),
         parity_ok
@@ -842,9 +843,10 @@ fn wasm_wasi_superset_of_wasm_min() {
     // WC-6: Collection & Pack & Type detection in core → 54
     // PR-4: async support: 54 → 57 (13_async, 14_unmold_backward, compile_async)
     // PR-3: module inlining: 57 → 60 (09_modules, compile_module, compile_module_value)
+    // B11-2f: stdout convert_to_string: 60 → 62 (compile_b11_features, compile_hof_molds)
     assert_eq!(
-        superset_ok, 60,
-        "WW-3: Expected exactly 60 superset-verified examples, got {}. \
+        superset_ok, 62,
+        "WW-3: Expected exactly 62 superset-verified examples, got {}. \
          If superset coverage improved, update the expected count.",
         superset_ok
     );

@@ -4030,60 +4030,73 @@ impl Lowering {
                     let arg = &args[0];
                     let compile_tag = self.expr_type_tag(arg);
 
-                    // B11B-004 fix: When the arg is a FieldAccess with unknown
-                    // compile-time type, evaluate the parent object once and
-                    // derive both the field value and runtime tag from that
-                    // single evaluation.  The old code called lower_expr(arg)
-                    // (which internally evaluates obj) and then called
-                    // lower_expr(obj) again for the tag lookup, causing
-                    // side-effecting expressions like `makePack().flag` to
-                    // execute the parent twice.
-                    let (arg_var, tag_var) = if compile_tag == -1 {
-                        if let Expr::FieldAccess(obj, field, _) = arg {
-                            // Evaluate parent object exactly once
-                            let obj_var = self.lower_expr(func, obj)?;
-                            let field_hash = simple_hash(field);
-                            let hash_var = func.alloc_var();
-                            func.push(IrInst::ConstInt(hash_var, field_hash as i64));
+                    // B11-2a: Bool display parity (FB-3). Bool values need the
+                    // with_tag runtime path so "true"/"false" is emitted instead
+                    // of "1"/"0". Only Bool is handled via the tagged path —
+                    // all other types use convert_to_string + the plain
+                    // taida_io_stdout(char*) path (pre-B11 behavior), because
+                    // the runtime's polymorphic heuristics can mis-identify
+                    // strings as lists/packs when dispatched purely by tag.
+                    //
+                    // B11B-004 fix: For a FieldAccess whose compile-time type
+                    // is unknown, evaluate the parent object exactly once and
+                    // derive both the field value and its runtime tag from
+                    // that single evaluation (avoids double-eval of side
+                    // effects such as `makePack().flag`).
+                    let use_tagged_path = compile_tag == 2 // compile-time Bool
+                        || (compile_tag == -1 && matches!(arg, Expr::FieldAccess(_, _, _)));
 
-                            // Get field value from the evaluated object
-                            let field_val = func.alloc_var();
-                            func.push(IrInst::Call(
-                                field_val,
-                                "taida_pack_get".to_string(),
-                                vec![obj_var, hash_var],
-                            ));
+                    if use_tagged_path {
+                        let (arg_var, tag_var) = if compile_tag == -1 {
+                            if let Expr::FieldAccess(obj, field, _) = arg {
+                                let obj_var = self.lower_expr(func, obj)?;
+                                let field_hash = simple_hash(field);
+                                let hash_var = func.alloc_var();
+                                func.push(IrInst::ConstInt(hash_var, field_hash as i64));
 
-                            // Get runtime tag from the same evaluated object
-                            let rt_tag = func.alloc_var();
-                            func.push(IrInst::Call(
-                                rt_tag,
-                                "taida_pack_get_field_tag".to_string(),
-                                vec![obj_var, hash_var],
-                            ));
-                            (field_val, rt_tag)
+                                let field_val = func.alloc_var();
+                                func.push(IrInst::Call(
+                                    field_val,
+                                    "taida_pack_get".to_string(),
+                                    vec![obj_var, hash_var],
+                                ));
+
+                                let rt_tag = func.alloc_var();
+                                func.push(IrInst::Call(
+                                    rt_tag,
+                                    "taida_pack_get_field_tag".to_string(),
+                                    vec![obj_var, hash_var],
+                                ));
+                                (field_val, rt_tag)
+                            } else {
+                                unreachable!(
+                                    "use_tagged_path guarantees FieldAccess for unknown tag"
+                                )
+                            }
                         } else {
-                            // Not a FieldAccess — evaluate normally, tag unknown
+                            // compile-time Bool
                             let val = self.lower_expr(func, arg)?;
                             let v = func.alloc_var();
-                            func.push(IrInst::ConstInt(v, -1)); // TAG_UNKNOWN
+                            func.push(IrInst::ConstInt(v, compile_tag));
                             (val, v)
-                        }
-                    } else {
-                        // Compile-time type known — evaluate normally
-                        let val = self.lower_expr(func, arg)?;
-                        let v = func.alloc_var();
-                        func.push(IrInst::ConstInt(v, compile_tag));
-                        (val, v)
-                    };
+                        };
 
-                    let tagged_rt = if name == "stdout" {
-                        "taida_io_stdout_with_tag".to_string()
-                    } else {
-                        "taida_io_stderr_with_tag".to_string()
-                    };
+                        let tagged_rt = if name == "stdout" {
+                            "taida_io_stdout_with_tag".to_string()
+                        } else {
+                            "taida_io_stderr_with_tag".to_string()
+                        };
+                        let result = func.alloc_var();
+                        func.push(IrInst::Call(result, tagged_rt, vec![arg_var, tag_var]));
+                        return Ok(result);
+                    }
+
+                    // Non-Bool: convert to string at the call site, then
+                    // emit the plain char*-based runtime call (pre-B11 path).
+                    let arg_var = self.lower_expr(func, arg)?;
+                    let str_var = self.convert_to_string(func, arg, arg_var)?;
                     let result = func.alloc_var();
-                    func.push(IrInst::Call(result, tagged_rt, vec![arg_var, tag_var]));
+                    func.push(IrInst::Call(result, rt_name, vec![str_var]));
                     return Ok(result);
                 }
                 // stdin: optional prompt arg (pass empty string if none)
