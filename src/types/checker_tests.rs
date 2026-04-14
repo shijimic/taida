@@ -2607,6 +2607,105 @@ fn test_fl3_cond_branch_int_float_mix_allowed() {
     );
 }
 
+// ── B11B-014: If mold branch type mismatch ───────────────────────
+
+#[test]
+fn test_b11_if_mold_type_mismatch() {
+    // If[cond, Int, Str]() should produce E1603
+    let source = "x <= If[false, 1, \"oops\"]()";
+    let (_, errors) = check(source);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1603]")),
+        "Expected If mold branch type mismatch [E1603], got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn test_b11_if_mold_same_type_no_error() {
+    // If[cond, Int, Int]() — no error
+    let source = "x <= If[true, 1, 2]()";
+    let (_, errors) = check(source);
+    let e1603: Vec<_> = errors
+        .iter()
+        .filter(|e| e.message.contains("[E1603]"))
+        .collect();
+    assert!(
+        e1603.is_empty(),
+        "Should not produce E1603 for same-type If branches, got: {:?}",
+        e1603
+    );
+}
+
+#[test]
+fn test_b11_if_mold_int_float_mix_allowed() {
+    // If[cond, Int, Float]() — Int/Float mix should be allowed
+    let source = "x <= If[true, 1, 2.5]()";
+    let (_, errors) = check(source);
+    let e1603: Vec<_> = errors
+        .iter()
+        .filter(|e| e.message.contains("[E1603]"))
+        .collect();
+    assert!(
+        e1603.is_empty(),
+        "Should not produce E1603 for Int/Float mix in If, got: {:?}",
+        e1603
+    );
+}
+
+// ── B11B-016: TypeExtends variant rejection ──────────────────────
+
+#[test]
+fn test_b11_type_extends_variant_rejected() {
+    // TypeExtends[EnumName:Variant, :Type]() should produce E1613
+    let source = r#"
+Enum => Status = :Ok :Fail
+x <= TypeExtends[Status:Ok, :Status]()
+"#;
+    let (_, errors) = check(source);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1613]")),
+        "Expected E1613 for TypeExtends with enum variant, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn test_b11_type_extends_no_variant_no_error() {
+    // TypeExtends[:Dog, :Animal]() — no variant, no E1613
+    let source = r#"
+Animal = @(name: Str)
+Animal => Dog = @(breed: Str)
+x <= TypeExtends[:Dog, :Animal]()
+"#;
+    let (_, errors) = check(source);
+    let e1613: Vec<_> = errors
+        .iter()
+        .filter(|e| e.message.contains("[E1613]"))
+        .collect();
+    assert!(
+        e1613.is_empty(),
+        "Should not produce E1613 for TypeExtends without variant, got: {:?}",
+        e1613
+    );
+}
+
+#[test]
+fn test_b11_type_extends_variant_rejected_in_expr_stmt() {
+    // B11B-016: TypeExtends variant rejection must also fire in expression
+    // statement context (e.g., inside stdout()), not just in assignments.
+    let source = r#"
+Enum => Status = :Ok :Fail
+stdout(TypeExtends[Status:Ok, :Status]())
+"#;
+    let (_, errors) = check(source);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1613]")),
+        "Expected E1613 for TypeExtends with enum variant in stdout(), got: {:?}",
+        errors
+    );
+}
+
 // ── FL-4: Operator type validation ────────────────────────────────
 
 #[test]

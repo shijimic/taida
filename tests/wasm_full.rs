@@ -884,10 +884,13 @@ fn wasm_full_parity_all_examples() {
     // 06_lists and 27_prelude_result fixed (Reverse mold + mapError toString)
     // PR-4: 13_async, 14_unmold_backward, compile_async now pass (54 -> 57)
     // PR-3: 09_modules, compile_module, compile_module_value now pass (57 -> 60)
+    // B11-2f: stdout restored convert_to_string path — compile_b11_features,
+    // compile_hof_molds now pass (60 -> 62)
+    // B11-11c: compile_b11_2f_stdout regression fixture added (62 -> 63)
     assert_eq!(
         parity_ok.len(),
-        60,
-        "WF-5: Expected exactly 60 parity-OK examples, got {}. \
+        63,
+        "WF-5: Expected exactly 63 parity-OK examples, got {}. \
          If parity improved, update the expected count. List: {:?}",
         parity_ok.len(),
         parity_ok

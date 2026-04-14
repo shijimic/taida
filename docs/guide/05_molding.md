@@ -375,6 +375,86 @@ Mod[10, 0]().hasValue         // false
 
 ---
 
+## 条件モールド: If
+
+`If[condition, then_value, else_value]()` は 2 分岐の条件式をモールドとして表現します。
+
+```taida
+// 基本的な条件分岐
+stdout(If[x > 0, "positive", "negative"]())
+
+// パイプラインでの使用（clamp パターン）
+150 => If[_ > 100, 100, _]() => clamped   // 100
+50 => If[_ > 100, 100, _]() => clamped    // 50
+```
+
+特徴:
+
+- **Short-circuit**: 非選択 branch は評価しません。`If[true, "ok", throw "error"]()` でエラーは発生しません
+- **パイプライン対応**: `_` で前段の値を参照できます（`_ > 3` のようにネストした `_` も可能）
+- **ネスト可能**: `If[cond, If[cond2, a, b](), c]()` のように入れ子にできます
+- **`| |>` との使い分け**: `If` は 2 分岐向き、`| |>` は複数分岐向き
+
+```taida
+// ネスト
+stdout(If[true, If[false, 1, 2](), 3]())   // 2
+
+// パイプラインで比較
+5 => If[_ > 3, "big", "small"]() => result  // "big"
+```
+
+---
+
+## 型比較モールド: TypeIs / TypeExtends
+
+型の比較をモールドで行います。
+
+### TypeIs -- 実行時の型チェック
+
+`TypeIs[value, :TypeName]()` は値の実行時の型が指定した型と一致するかを返します。
+
+```taida
+stdout(TypeIs[42, :Int]())        // true
+stdout(TypeIs["hello", :Int]())   // false
+stdout(TypeIs["hello", :Str]())   // true
+stdout(TypeIs[true, :Bool]())     // true
+stdout(TypeIs[3.14, :Float]())    // true
+stdout(TypeIs[42, :Num]())        // true（Int は Num の一種）
+```
+
+Enum variant の判定もできます:
+
+```taida
+Enum => Status = :Ok :Fail :Retry
+x <= Status:Ok()
+stdout(TypeIs[x, Status:Ok]())    // true
+stdout(TypeIs[x, Status:Fail]())  // false
+```
+
+### TypeExtends -- 型の継承関係チェック
+
+`TypeExtends[:TypeA, :TypeB]()` は TypeA が TypeB と同じか、TypeB のサブタイプかを返します。
+
+```taida
+stdout(TypeExtends[:Int, :Num]())     // true（Int は Num のサブタイプ）
+stdout(TypeExtends[:Str, :Int]())     // false（Str は Int と無関係）
+
+Animal = @(name: Str)
+Animal => Dog = @(breed: Str)
+stdout(TypeExtends[:Dog, :Animal]())  // true（Dog は Animal を継承）
+stdout(TypeExtends[:Animal, :Dog]())  // false（逆方向は不可）
+```
+
+対応する型リテラル（B11 スコープ）:
+
+- プリミティブ: `:Int`, `:Float`, `:Num`, `:Bool`, `:Str`, `:Bytes`, `:Error`
+- ユーザー定義型: `:TypeName`
+- Enum variant: `EnumName:Variant`（TypeIs のみ）
+
+B11 スコープ外: inline BuchiPack 型リテラル、関数型リテラル、汎用 generic literal
+
+---
+
 ## 型変換モールド
 
 値の型変換は型変換モールドで行います。結果は Lax で返ります。
@@ -383,6 +463,7 @@ Mod[10, 0]().hasValue         // false
 | モールド | 説明 | 成功例 | 失敗例 |
 |---------|------|--------|--------|
 | `Int[x]()` | 整数に変換 | `Int["123"]()` → 123 | `Int["abc"]()` → 0 |
+| `Int[str, base]()` | 指定基数で整数に変換 | `Int["ff", 16]()` → 255 | `Int["gg", 16]()` → 0 |
 | `Float[x]()` | 浮動小数点に変換 | `Float["3.14"]()` → 3.14 | `Float["abc"]()` → 0.0 |
 | `Str[x]()` | 文字列に変換 | `Str[42]()` → "42" | - |
 | `Bool[x]()` | 真偽値に変換 | `Bool[1]()` → true | `Bool[0]()` → false |
@@ -391,6 +472,11 @@ Mod[10, 0]().hasValue         // false
 // 文字列 → 整数
 Int["123"]() ]=> num     // 123
 Int["abc"]() ]=> num     // 0（変換失敗: デフォルト値）
+Int["+5"]() ]=> num      // 5（符号付き文字列も受理）
+
+// 文字列 → 整数（基数指定）
+Int["ff", 16]() ]=> hex  // 255
+Int["1010", 2]() ]=> bin // 10
 
 // 文字列 → 浮動小数点
 Float["3.14"]() ]=> val  // 3.14

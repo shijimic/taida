@@ -78,8 +78,17 @@ fn setup_project_with_remote(root: &Path) -> (PathBuf, PathBuf) {
     run_git(&["init"], &project);
     run_git(&["config", "user.email", "test@taida.dev"], &project);
     run_git(&["config", "user.name", "Test User"], &project);
+
+    // Set origin to a GitHub-style URL so prepare_publish() accepts it.
+    // pushInsteadOf redirects push traffic to the local bare repo.
+    let github_url = "https://github.com/alice/addon-pkg.git";
+    run_git(&["remote", "add", "origin", github_url], &project);
     run_git(
-        &["remote", "add", "origin", bare.to_str().unwrap()],
+        &[
+            "config",
+            &format!("url.{}.pushInsteadOf", bare.to_str().unwrap()),
+            github_url,
+        ],
         &project,
     );
     (project, bare)
@@ -130,7 +139,8 @@ fn test_publish_rust_addon_dry_run_auto_detect() {
     let root = unique_temp_dir("taida_publish_addon_dry");
     let (project_dir, _bare) = setup_project_with_remote(&root);
 
-    fs::write(project_dir.join("packages.tdm"), "<<<@a @(run)\n").expect("write packages.tdm");
+    fs::write(project_dir.join("packages.tdm"), "<<<@a alice/addon-pkg\n")
+        .expect("write packages.tdm");
     fs::write(project_dir.join("main.td"), "stdout(\"ok\")\n").expect("write main.td");
     write_addon_toml(&project_dir, "tester/pkg", "tester_pkg");
 
@@ -179,7 +189,7 @@ fn test_publish_rust_addon_dry_run_auto_detect() {
 
     // packages.tdm must NOT be modified and addon.lock.toml must NOT exist.
     let manifest = fs::read_to_string(project_dir.join("packages.tdm")).expect("read packages.tdm");
-    assert_eq!(manifest, "<<<@a @(run)\n");
+    assert_eq!(manifest, "<<<@a alice/addon-pkg\n");
     assert!(
         !project_dir.join("native").join("addon.lock.toml").exists(),
         "dry-run must not create addon.lock.toml"
@@ -201,7 +211,7 @@ fn test_publish_rust_addon_dry_run_explicit_flag_with_manifest() {
     let root = unique_temp_dir("taida_publish_addon_flag");
     let (project_dir, _bare) = setup_project_with_remote(&root);
 
-    fs::write(project_dir.join("packages.tdm"), "<<<@a @(run)\n").unwrap();
+    fs::write(project_dir.join("packages.tdm"), "<<<@a alice/addon-pkg\n").unwrap();
     fs::write(project_dir.join("main.td"), "stdout(\"ok\")\n").unwrap();
     write_addon_toml(&project_dir, "tester/pkg", "tester_pkg");
 
@@ -238,7 +248,7 @@ fn test_publish_rust_addon_flag_without_manifest_is_rejected() {
     let root = unique_temp_dir("taida_publish_addon_mismatch");
     let (project_dir, _bare) = setup_project_with_remote(&root);
 
-    fs::write(project_dir.join("packages.tdm"), "<<<@a @(run)\n").unwrap();
+    fs::write(project_dir.join("packages.tdm"), "<<<@a alice/addon-pkg\n").unwrap();
     fs::write(project_dir.join("main.td"), "stdout(\"ok\")\n").unwrap();
     // NO native/addon.toml deliberately.
 
@@ -278,7 +288,7 @@ fn test_publish_unknown_target_value_is_rejected() {
     let root = unique_temp_dir("taida_publish_bad_target");
     let (project_dir, _bare) = setup_project_with_remote(&root);
 
-    fs::write(project_dir.join("packages.tdm"), "<<<@a @(run)\n").unwrap();
+    fs::write(project_dir.join("packages.tdm"), "<<<@a alice/addon-pkg\n").unwrap();
     fs::write(project_dir.join("main.td"), "stdout(\"ok\")\n").unwrap();
 
     run_git(&["add", "."], &project_dir);
@@ -358,7 +368,7 @@ fn test_publish_rust_addon_full_flow_skip_release() {
     let (project_dir, bare) = setup_project_with_remote(&root);
 
     // packages.tdm + main.td.
-    fs::write(project_dir.join("packages.tdm"), "<<<@a @(run)\n").unwrap();
+    fs::write(project_dir.join("packages.tdm"), "<<<@a alice/addon-pkg\n").unwrap();
     fs::write(project_dir.join("main.td"), "stdout(\"ok\")\n").unwrap();
 
     // Cargo.toml + src/lib.rs producing a cdylib with a stem that
@@ -520,7 +530,8 @@ fn test_publish_rust_addon_dry_run_plan_explicit() {
     let root = unique_temp_dir("taida_publish_addon_plan");
     let (project_dir, _bare) = setup_project_with_remote(&root);
 
-    fs::write(project_dir.join("packages.tdm"), "<<<@a @(run)\n").expect("write packages.tdm");
+    fs::write(project_dir.join("packages.tdm"), "<<<@a alice/addon-pkg\n")
+        .expect("write packages.tdm");
     fs::write(project_dir.join("main.td"), "stdout(\"ok\")\n").expect("write main.td");
     write_addon_toml(&project_dir, "tester/pkg", "tester_pkg");
 
@@ -564,7 +575,7 @@ fn test_publish_rust_addon_dry_run_plan_explicit() {
 
     // No filesystem mutations.
     let manifest = fs::read_to_string(project_dir.join("packages.tdm")).expect("read packages.tdm");
-    assert_eq!(manifest, "<<<@a @(run)\n");
+    assert_eq!(manifest, "<<<@a alice/addon-pkg\n");
     assert!(
         !project_dir.join("native").join("addon.lock.toml").exists(),
         "dry-run=plan must not create addon.lock.toml"
@@ -598,7 +609,7 @@ fn test_publish_rust_addon_dry_run_build() {
     let (project_dir, _bare) = setup_project_with_remote(&root);
 
     // packages.tdm + main.td.
-    fs::write(project_dir.join("packages.tdm"), "<<<@a @(run)\n").unwrap();
+    fs::write(project_dir.join("packages.tdm"), "<<<@a alice/addon-pkg\n").unwrap();
     fs::write(project_dir.join("main.td"), "stdout(\"ok\")\n").unwrap();
 
     // Cargo.toml + src/lib.rs producing a cdylib.
@@ -723,7 +734,7 @@ fn test_publish_invalid_dry_run_mode_rejected() {
     let root = unique_temp_dir("taida_publish_bad_dryrun");
     let (project_dir, _bare) = setup_project_with_remote(&root);
 
-    fs::write(project_dir.join("packages.tdm"), "<<<@a @(run)\n").unwrap();
+    fs::write(project_dir.join("packages.tdm"), "<<<@a alice/addon-pkg\n").unwrap();
     fs::write(project_dir.join("main.td"), "stdout(\"ok\")\n").unwrap();
 
     run_git(&["add", "."], &project_dir);

@@ -643,6 +643,7 @@ mod tests {
             entry: "main.td".to_string(),
             deps: BTreeMap::new(),
             root_dir: dir.clone(),
+            exports: Vec::new(),
         };
 
         let dep = Dependency::Path {
@@ -689,6 +690,7 @@ mod tests {
             entry: "main.td".to_string(),
             deps: BTreeMap::new(),
             root_dir: dir.clone(),
+            exports: Vec::new(),
         };
 
         let dep = Dependency::Registry {
@@ -774,6 +776,7 @@ mod tests {
             entry: "main.td".to_string(),
             deps: BTreeMap::new(),
             root_dir: dir.clone(),
+            exports: Vec::new(),
         };
 
         let dep = Dependency::Registry {
@@ -824,6 +827,7 @@ mod tests {
             entry: "main.td".to_string(),
             deps: BTreeMap::new(),
             root_dir: PathBuf::from("/tmp"),
+            exports: Vec::new(),
         };
 
         let dep = Dependency::Registry {
@@ -873,6 +877,7 @@ mod tests {
             entry: "main.td".to_string(),
             deps: BTreeMap::new(),
             root_dir: dir.clone(),
+            exports: Vec::new(),
         };
 
         let dep = Dependency::Registry {
@@ -919,6 +924,7 @@ mod tests {
             entry: "main.td".to_string(),
             deps: BTreeMap::new(),
             root_dir: dir.clone(),
+            exports: Vec::new(),
         };
 
         let provider = CoreBundledProvider::with_bundled_root(dir.join("bundled"));

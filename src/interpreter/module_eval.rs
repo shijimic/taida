@@ -217,33 +217,46 @@ impl Interpreter {
         // RCB-213: Use resolve_package_module_versioned with longest-prefix matching
         // to support submodule imports (e.g., alice/pkg/submod@b.12 resolves to
         // .taida/deps/alice/pkg@b.12/submod.td).
-        let module_path = if let Some(version) = &import.version {
+        //
+        // B11-9d: For package root imports, also capture manifest.exports so
+        // we can use it as the authoritative facade filter.
+        let (module_path, manifest_exports_filter) = if let Some(version) = &import.version {
             let root = self.find_project_root();
             let pkg_id = &import.path;
             if let Some(resolution) =
                 crate::pkg::resolver::resolve_package_module_versioned(&root, pkg_id, version)
             {
-                let path = match resolution.submodule {
-                    Some(submodule_path) => {
-                        resolution.pkg_dir.join(format!("{}.td", submodule_path))
-                    }
+                let (path, exports_filter) = match resolution.submodule {
+                    Some(submodule_path) => (
+                        resolution.pkg_dir.join(format!("{}.td", submodule_path)),
+                        None,
+                    ),
                     None => {
                         // Package root import: read packages.tdm to determine entry point
-                        let entry =
+                        let (entry, exports) =
                             match crate::pkg::manifest::Manifest::from_dir(&resolution.pkg_dir) {
-                                Ok(Some(manifest)) => manifest.entry,
-                                _ => "main.td".to_string(),
+                                Ok(Some(manifest)) => {
+                                    let exports = if manifest.exports.is_empty() {
+                                        None
+                                    } else {
+                                        Some(manifest.exports)
+                                    };
+                                    (manifest.entry, exports)
+                                }
+                                _ => ("main.td".to_string(), None),
                             };
-                        if entry.starts_with("./") || entry.starts_with("../") {
+                        let p = if entry.starts_with("./") || entry.starts_with("../") {
                             resolution.pkg_dir.join(entry[2..].trim_start_matches('/'))
                         } else {
                             resolution.pkg_dir.join(&entry)
-                        }
+                        };
+                        (p, exports)
                     }
                 };
-                path.canonicalize().map_err(|_| RuntimeError {
+                let canonical = path.canonicalize().map_err(|_| RuntimeError {
                     message: format!("Module not found: '{}'", path.display()),
-                })?
+                })?;
+                (canonical, exports_filter)
             } else {
                 return Err(RuntimeError {
                     message: format!(
@@ -253,7 +266,36 @@ impl Interpreter {
                 });
             }
         } else {
-            self.resolve_module_path(&import.path)?
+            // B11-9d: For non-versioned package root imports, also check manifest.exports.
+            let is_package_import = !import.path.starts_with("./")
+                && !import.path.starts_with("../")
+                && !import.path.starts_with('/')
+                && !import.path.starts_with("~/")
+                && !import.path.starts_with("std/")
+                && !import.path.starts_with("npm:");
+            let exports_filter = if is_package_import {
+                let root = self.find_project_root();
+                if let Some(resolution) =
+                    crate::pkg::resolver::resolve_package_module(&root, &import.path)
+                {
+                    if resolution.submodule.is_none() {
+                        // Package root import: check manifest.exports
+                        match crate::pkg::manifest::Manifest::from_dir(&resolution.pkg_dir) {
+                            Ok(Some(manifest)) if !manifest.exports.is_empty() => {
+                                Some(manifest.exports)
+                            }
+                            _ => None,
+                        }
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+            (self.resolve_module_path(&import.path)?, exports_filter)
         };
 
         // Check for circular imports
@@ -498,6 +540,35 @@ impl Interpreter {
             .get(&module_path)
             .map(|m| m.type_methods.clone())
             .unwrap_or_default();
+
+        // B11-9d: If manifest.exports is set (package root import with facade),
+        // validate each imported symbol against the manifest facade.
+        // - Symbol not in manifest.exports → reject (not part of public API)
+        // - Symbol in manifest.exports but not in module → error (declared but missing)
+        if let Some(ref facade_exports) = manifest_exports_filter {
+            for sym in &import.symbols {
+                let name = &sym.name;
+                if !facade_exports.contains(name) {
+                    return Err(RuntimeError {
+                        message: format!(
+                            "Symbol '{}' is not part of the public API declared in packages.tdm. \
+                             Available exports: {}",
+                            name,
+                            facade_exports.join(", ")
+                        ),
+                    });
+                }
+                if !exports.contains_key(name) {
+                    return Err(RuntimeError {
+                        message: format!(
+                            "Symbol '{}' is declared in packages.tdm but not found in the entry module. \
+                             The entry module must export all symbols listed in the package facade.",
+                            name
+                        ),
+                    });
+                }
+            }
+        }
 
         // Bind imported symbols into current scope
         for sym in &import.symbols {

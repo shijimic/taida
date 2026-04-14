@@ -284,6 +284,12 @@ pub enum Expr {
     /// Enum value constructor: `Name:Variant()`
     EnumVariant(String, String, Span),
 
+    /// B11-6a: Restricted type literal inside mold args.
+    /// `:Int` → TypeLiteral("Int", None, span)
+    /// `EnumName:Variant` (without `()`) → TypeLiteral("EnumName", Some("Variant"), span)
+    /// Only valid inside `TypeIs[...]` / `TypeExtends[...]` mold brackets.
+    TypeLiteral(String, Option<String>, Span),
+
     /// Throw expression: `expr.throw()`
     Throw(Box<Expr>, Span),
 }
@@ -314,6 +320,7 @@ impl Expr {
             | Expr::Lambda(_, _, span)
             | Expr::TypeInst(_, _, span)
             | Expr::EnumVariant(_, _, span)
+            | Expr::TypeLiteral(_, _, span)
             | Expr::Throw(_, span) => span,
         }
     }

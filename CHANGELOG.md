@@ -1,5 +1,97 @@
 # Changelog
 
+## @b.11.rc3
+
+Released: 2026-04-14
+
+### New Features
+
+#### Publish Package Identity (FB-22)
+
+- `taida publish` now resolves the package name from the `<<<` line in `packages.tdm`
+- Canonical format: `<<<@gen.num.label owner/name` (e.g. `<<<@b.11.rc3 taida-lang/terminal`)
+- Existing `<<<@version` format remains valid (backward compatible)
+- `proposals_url()`, release title, and dry-run output consistently use the manifest package identity
+- Org package publishing (e.g. `taida-lang/*`) is now supported
+
+#### Native Bool Display (FB-3)
+
+- Native backend now displays `true`/`false` instead of `1`/`0` for Bool values
+- Added `taida_io_stdout_with_tag()` to native and WASM runtimes for type-aware output
+- 3-way parity restored for Bool stdout/stderr
+
+#### Str Methods: replace / replaceAll / split (FB-5)
+
+- `Str.replace(target, replacement)` -- replaces the first match
+- `Str.replaceAll(target, replacement)` -- replaces all matches
+- `Str.split(separator)` -- splits into a list of strings
+- Empty target in replace/replaceAll is a no-op (returns original string)
+- `split("")` splits into individual characters (equivalent to `Chars[]`)
+- Full 3-way parity (Interpreter / JS / Native)
+
+#### If Mold (FB-6)
+
+- `If[condition, then_value, else_value]()` -- 2-branch conditional as a mold
+- Non-selected branch is not evaluated (short-circuit)
+- Pipeline placeholder `_` supported: `150 => If[_ > 100, 100, _]()`
+- Nestable: `If[cond, If[cond2, a, b](), c]()`
+- Branch type mismatch is rejected with `[E1603]` (same as `| |>`)
+- Full 3-way parity
+
+#### TypeIs / TypeExtends Molds (FB-12)
+
+- `TypeIs[value, :TypeName]()` -- runtime type check returning Bool
+- `TypeIs[value, EnumName:Variant]()` -- enum variant check
+- `TypeExtends[:TypeA, :TypeB]()` -- compile-time type relationship check
+- Restricted type-literal surface (`:Int`, `:Str`, `:NamedType`, etc.) accepted only inside `TypeIs`/`TypeExtends` brackets
+- Named type and error subtype support via `__type` field and inheritance chain
+- `TypeExtends` rejects `EnumName:Variant` literals with `[E1613]`
+- Full 3-way parity
+
+#### Int[str]() Surface Lock (FB-9)
+
+- `Int[str]()` / `Int[str, base]()` officially documented as the canonical Str-to-Int conversion path
+- `+` sign prefix accepted in base-specified conversions across all backends
+- No `StrToInt` alias introduced (existing surface is the standard)
+
+#### packages.tdm Export Surface Simplification (FB-23 + Phase 10)
+
+- **Breaking**: Canonical surface simplified to `<<<@version owner/name @(symbols)` (no arrow)
+- `>>> ./main.td` declares entry point only (no export symbols)
+- `Manifest.exports` field -- extracted from `<<<@version owner/name @(symbols)` only
+- Package root import uses `manifest.exports` as the authoritative facade filter across all backends
+- **Breaking**: The following surfaces are no longer accepted:
+  - `<<<@version owner/name => @(symbols)` (arrow form)
+  - `>>> ./main.td => @(symbols)` as facade declaration (split surface)
+  - `<<<@version @(symbols)` without package identity (symbols-only)
+- `taida init` templates updated with canonical surface guidance
+
+### Diagnostic Codes
+
+| Code | Description |
+|------|-------------|
+| `[E1613]` | TypeExtends does not accept enum variant type literals |
+
+### Internal Changes
+
+- `taida_io_stdout_with_tag()` / `taida_io_stderr_with_tag()` in native runtime with type tag constants
+- `taida_typeis_named()` runtime function for named type / error subtype checking
+- `Expr::TypeLiteral` AST node for restricted type-literal surface in mold arguments
+- `check_mold_errors_in_expr()` / `check_mold_errors_in_stmt()` for dedicated mold validation pass
+- `CondBranch` IR for If mold in native backend
+- JS `replace()` uses callback pattern to prevent `$&`/`$$` meta-character expansion
+- `Manifest.exports: Vec<String>` for package public API facade extraction
+- Parser accepts `<<<@version owner/name @(symbols)` as canonical export surface (arrow form removed)
+- `eval_import` filters package root imports by `manifest.exports` when present
+- Checker / JS / Native import validation unified to use `manifest.exports` as facade authority
+
+### Documentation
+
+- Guide updated: `01_types.md` (replace/split methods, Int[str]() docs), `05_molding.md` (If, TypeIs, TypeExtends), `07_control_flow.md` (If mold, TypeIs/TypeExtends sections)
+- Reference updated: `mold_types.md` (If, TypeIs, TypeExtends, Int[str,base] sections), `standard_methods.md` (replace, replaceAll, split)
+
+---
+
 ## @b.10.rc2
 
 Released: 2026-04-10

@@ -606,6 +606,9 @@ impl GraphExtractor {
 
             // Hole is a partial application marker — not a dataflow node
             Expr::Hole(_) => None,
+
+            // B11-6a: TypeLiteral is a compile-time construct, not a dataflow node
+            Expr::TypeLiteral(_, _, _) => None,
         }
     }
 

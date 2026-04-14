@@ -197,6 +197,17 @@ static int _wf_is_whitespace(char c) {
     return c == ' ' || c == '\t' || c == '\n' || c == '\r';
 }
 
+/* B11-2: Type tag constants (early definition for taida_io_stdout_with_tag) */
+#ifndef WASM_TAG_INT
+#define WASM_TAG_INT     0
+#define WASM_TAG_FLOAT   1
+#define WASM_TAG_BOOL    2
+#define WASM_TAG_STR     3
+#define WASM_TAG_PACK    4
+#endif
+/* B11-2: Forward declaration for polymorphic display */
+int64_t taida_polymorphic_to_string(int64_t obj);
+
 /* ── taida_io_stdout: stdout 出力（boxed 文字列ポインタ） ── */
 
 int64_t taida_io_stdout(int64_t val_ptr) {
@@ -205,6 +216,29 @@ int64_t taida_io_stdout(int64_t val_ptr) {
         int32_t len = wasm_strlen(s);
         write_stdout(s, len);
         write_stdout("\n", 1);
+    }
+    return 0;
+}
+
+/* B11-2a: Type-tagged stdout for Bool display parity (FB-3).
+   B11-2f: Only Bool needs type-based dispatch. All other tags (including
+   UNKNOWN and PACK-tagged MoldInst whose actual return type is Str) must
+   fall through to the raw char* path — this matches the pre-B11
+   `taida_io_stdout(val_ptr)` behavior. polymorphic_to_string's
+   _looks_like_* heuristics mis-identify string pointers as lists/packs
+   (e.g. "5\0..." reads as a plausible list length), so we deliberately
+   avoid that dispatch path. */
+int64_t taida_io_stdout_with_tag(int64_t val, int64_t tag) {
+    if ((int)tag == WASM_TAG_BOOL) {
+        if (val) { write_stdout("true", 4); } else { write_stdout("false", 5); }
+        write_stdout("\n", 1);
+    } else {
+        const char *s = (const char *)(intptr_t)val;
+        if (s) {
+            int32_t len = wasm_strlen(s);
+            write_stdout(s, len);
+            write_stdout("\n", 1);
+        }
     }
     return 0;
 }
@@ -224,6 +258,37 @@ int64_t taida_io_stderr(int64_t val_ptr) {
         iov.buf = (int32_t)(intptr_t)"\n";
         iov.len = 1;
         __wasi_fd_write(2, &iov, 1, &nwritten);
+    }
+    return 0;
+}
+
+/* B11-2a: Type-tagged stderr for Bool display parity (FB-3).
+   B11-2f: Only Bool needs type-based dispatch; see stdout_with_tag. */
+int64_t taida_io_stderr_with_tag(int64_t val, int64_t tag) {
+    if ((int)tag == WASM_TAG_BOOL) {
+        const char *s = val ? "true" : "false";
+        int32_t len = val ? 4 : 5;
+        wasi_ciovec iov;
+        iov.buf = (int32_t)(intptr_t)s;
+        iov.len = len;
+        int32_t nwritten;
+        __wasi_fd_write(2, &iov, 1, &nwritten);
+        iov.buf = (int32_t)(intptr_t)"\n";
+        iov.len = 1;
+        __wasi_fd_write(2, &iov, 1, &nwritten);
+    } else {
+        const char *s = (const char *)(intptr_t)val;
+        if (s) {
+            int32_t len = wasm_strlen(s);
+            wasi_ciovec iov;
+            iov.buf = (int32_t)(intptr_t)s;
+            iov.len = len;
+            int32_t nwritten;
+            __wasi_fd_write(2, &iov, 1, &nwritten);
+            iov.buf = (int32_t)(intptr_t)"\n";
+            iov.len = 1;
+            __wasi_fd_write(2, &iov, 1, &nwritten);
+        }
     }
     return 0;
 }
@@ -312,11 +377,7 @@ int64_t taida_bool_or(int64_t a, int64_t b) { return (a || b) ? 1 : 0; }
 int64_t taida_bool_not(int64_t a) { return a ? 0 : 1; }
 
 /* ── Type tags (matching native_runtime.c TAIDA_TAG_* constants) ── */
-#define WASM_TAG_INT     0
-#define WASM_TAG_FLOAT   1
-#define WASM_TAG_BOOL    2
-#define WASM_TAG_STR     3
-#define WASM_TAG_PACK    4
+/* Note: WASM_TAG_* already defined above (B11-2 early definition) */
 
 /* ── Forward declarations for Lax/Result/Gorillax (defined in W-5 section below) ── */
 int64_t taida_lax_new(int64_t value, int64_t default_value);
@@ -1624,6 +1685,18 @@ int64_t taida_pack_get(int64_t pack_ptr, int64_t field_hash) {
     return 0; /* default value */
 }
 
+/* B11-2b: Get the type tag for a field by its hash. Returns -1 (UNKNOWN) if not found. */
+int64_t taida_pack_get_field_tag(int64_t pack_ptr, int64_t field_hash) {
+    int64_t *pack = (int64_t *)(intptr_t)pack_ptr;
+    int64_t count = pack[0];
+    for (int64_t i = 0; i < count; i++) {
+        if (pack[1 + i * 3] == field_hash) {
+            return pack[1 + i * 3 + 1];
+        }
+    }
+    return -1; /* TAIDA_TAG_UNKNOWN */
+}
+
 int64_t taida_pack_has_hash(int64_t pack_ptr, int64_t field_hash) {
     int64_t *pack = (int64_t *)(intptr_t)pack_ptr;
     int64_t count = pack[0];
@@ -2787,6 +2860,29 @@ int64_t taida_error_type_matches(int64_t error_val, int64_t handler_type_str) {
         if (taida_str_eq(current, handler_type_str)) return 1;
         int64_t parent = wasm_find_parent_type(current);
         if (parent == 0) break;
+        current = parent;
+    }
+    return 0;
+}
+
+/* B11B-015: Runtime type check for TypeIs with named types (WASM version).
+   Gets __type from the BuchiPack and walks the inheritance chain.
+   Returns 1 (true) or 0 (false). */
+int64_t taida_typeis_named(int64_t val, int64_t expected_type_str) {
+    if (!taida_is_buchi_pack(val)) return 0;
+    int64_t type_str = 0;
+    if (taida_pack_has_hash(val, WASM_HASH___TYPE)) {
+        type_str = taida_pack_get(val, WASM_HASH___TYPE);
+    }
+    if (type_str == 0) return 0;
+    /* Direct match */
+    if (taida_str_eq(type_str, expected_type_str)) return 1;
+    /* Walk inheritance chain */
+    int64_t current = type_str;
+    for (int i = 0; i < 64; i++) {
+        int64_t parent = wasm_find_parent_type(current);
+        if (parent == 0) break;
+        if (taida_str_eq(parent, expected_type_str)) return 1;
         current = parent;
     }
     return 0;

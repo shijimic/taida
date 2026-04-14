@@ -285,13 +285,67 @@ processRequest request =
 
 ---
 
+## If モールド -- 2 分岐の条件式
+
+2 分岐だけの条件分岐には `If[condition, then, else]()` モールドが使えます。`| |>` の簡潔な代替です。
+
+```taida
+// If モールド（2 分岐向き）
+result <= If[x > 0, "positive", "negative"]()
+
+// | |> 構文（複数分岐向き）
+grade <=
+  | score >= 90 |> "A"
+  | score >= 80 |> "B"
+  | _ |> "C"
+```
+
+パイプラインで `_` を使って前段の値を参照できます。
+
+```taida
+// clamp: 100 を超えたら 100 に制限
+150 => If[_ > 100, 100, _]() => clamped   // 100
+
+// 分類
+5 => If[_ > 3, "big", "small"]() => label  // "big"
+```
+
+非選択 branch は評価されません（short-circuit）。
+
+---
+
+## 型比較モールド -- TypeIs / TypeExtends
+
+型の判定にもモールドを使います。
+
+```taida
+// 実行時の型チェック
+TypeIs[42, :Int]()           // true
+TypeIs["hello", :Str]()     // true
+
+// Enum variant 判定
+Enum => Status = :Ok :Fail
+TypeIs[x, Status:Ok]()      // true（x が Status:Ok の場合）
+
+// 型の継承関係チェック
+TypeExtends[:Int, :Num]()   // true
+TypeExtends[:Dog, :Animal]()   // true（Dog が Animal を継承している場合）
+```
+
+詳細は「モールディング型」ガイドの型比較モールドセクションを参照してください。
+
+---
+
 ## まとめ
 
 | 構文 | 用途 |
 |------|------|
-| `\| cond \|> val` | 条件分岐 |
+| `\| cond \|> val` | 条件分岐（複数分岐向き） |
 | `\| _ \|> val` | デフォルトケース |
 | `\| cond \|> ><` | ゴリラが出現し、プログラムは即時終了します |
+| `If[cond, then, else]()` | 2 分岐の条件式 |
+| `TypeIs[val, :Type]()` | 実行時の型チェック |
+| `TypeExtends[:A, :B]()` | 型の継承関係チェック |
 | ネスト | 複雑な条件 |
 | 1行 | 三項演算子の代替 |
 | ガード節 | 異常系を先に弾くパターン |

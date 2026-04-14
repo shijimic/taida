@@ -215,6 +215,27 @@ impl Interpreter {
         false
     }
 
+    /// B11-6b: Check if `child_type` extends `parent_type` by walking the inheritance chain.
+    /// Used by TypeExtends mold.
+    pub(crate) fn check_type_extends(&self, child_type: &str, parent_type: &str) -> bool {
+        if child_type == parent_type {
+            return true;
+        }
+        // Walk the inheritance chain: child -> parent -> grandparent -> ...
+        let mut current = child_type;
+        for _ in 0..64 {
+            if let Some(parent) = self.type_parents.get(current) {
+                if parent == parent_type {
+                    return true;
+                }
+                current = parent;
+            } else {
+                break;
+            }
+        }
+        false
+    }
+
     /// Set the current file path for module resolution.
     pub fn set_current_file(&mut self, path: &Path) {
         self.current_file = Some(path.to_path_buf());
@@ -705,6 +726,14 @@ impl Interpreter {
             Expr::Gorilla(_) => Ok(Signal::Gorilla),
             Expr::Placeholder(_) => Ok(Signal::Value(Value::Unit)),
             Expr::Hole(_) => Ok(Signal::Value(Value::Unit)),
+            // B11-6a: TypeLiteral is only valid inside TypeIs/TypeExtends — handled by mold_eval
+            Expr::TypeLiteral(name, variant, _) => {
+                if let Some(var) = variant {
+                    Ok(Signal::Value(Value::Str(format!("{}:{}", name, var))))
+                } else {
+                    Ok(Signal::Value(Value::Str(name.clone())))
+                }
+            }
             Expr::Ident(name, _) => {
                 if let Some(val) = self.env.get(name) {
                     Ok(Signal::Value(val.clone()))

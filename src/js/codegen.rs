@@ -43,6 +43,8 @@ pub struct JsCodegen {
     /// Net builtin names that are shadowed by a parameter/local in the current scope.
     /// When a name is in this set, call-site rewriting to __taida_net_* is suppressed.
     shadowed_net_builtins: std::collections::HashSet<String>,
+    /// B11-6c: Inheritance parent map (child_name -> parent_name) for TypeExtends resolution.
+    type_parents: std::collections::HashMap<String, String>,
 }
 
 #[derive(Debug)]
@@ -88,7 +90,24 @@ impl JsCodegen {
             out_root: None,
             has_net_import: false,
             shadowed_net_builtins: std::collections::HashSet::new(),
+            type_parents: std::collections::HashMap::new(),
         }
+    }
+
+    /// B11-6c: Check if `child` extends `parent` by walking the inheritance chain.
+    fn check_type_inheritance(&self, child: &str, parent: &str) -> bool {
+        let mut current = child;
+        for _ in 0..64 {
+            if let Some(p) = self.type_parents.get(current) {
+                if p == parent {
+                    return true;
+                }
+                current = p;
+            } else {
+                break;
+            }
+        }
+        false
     }
 
     /// Set the source file, project root, and output file for package import resolution.
@@ -1099,6 +1118,9 @@ impl JsCodegen {
             "__taida_type_parents['{}'] = '{}';",
             inh_def.child, inh_def.parent
         ));
+        // B11-6c: Track inheritance for TypeExtends compile-time resolution
+        self.type_parents
+            .insert(inh_def.child.clone(), inh_def.parent.clone());
 
         // Register child type fields (parent fields + child fields) for further inheritance
         let mut all_fields: Vec<String> = parent_field_names;
@@ -1319,43 +1341,88 @@ impl JsCodegen {
             return Ok(());
         }
 
-        // Resolve the .td source path
-        let td_path = if import.path.starts_with("./")
-            || import.path.starts_with("../")
-            || import.path.starts_with('/')
-        {
-            self.resolve_import_td_path(&import.path)
-        } else if import.path.contains('/') {
-            // Package import — resolve via .taida/deps/
-            let project_root = match self.project_root.as_ref() {
-                Some(r) => r,
-                None => return Ok(()), // No project root — skip validation
-            };
-            let resolution = if let Some(ref ver) = import.version {
-                crate::pkg::resolver::resolve_package_module_versioned(
-                    project_root,
-                    &import.path,
-                    ver,
-                )
-            } else {
-                crate::pkg::resolver::resolve_package_module(project_root, &import.path)
-            };
-            resolution.and_then(|r| {
-                let path = match &r.submodule {
-                    Some(sub) => r.pkg_dir.join(format!("{}.td", sub)),
-                    None => {
-                        let entry = match crate::pkg::manifest::Manifest::from_dir(&r.pkg_dir) {
-                            Ok(Some(manifest)) => manifest.entry,
-                            _ => "main.td".to_string(),
-                        };
-                        r.pkg_dir.join(entry)
-                    }
+        // Resolve the .td source path + optional facade exports
+        let (td_path, pkg_manifest_exports): (Option<std::path::PathBuf>, Option<Vec<String>>) =
+            if import.path.starts_with("./")
+                || import.path.starts_with("../")
+                || import.path.starts_with('/')
+            {
+                (self.resolve_import_td_path(&import.path), None)
+            } else if import.path.contains('/') {
+                // Package import — resolve via .taida/deps/
+                let project_root = match self.project_root.as_ref() {
+                    Some(r) => r,
+                    None => return Ok(()), // No project root — skip validation
                 };
-                if path.exists() { Some(path) } else { None }
-            })
-        } else {
-            None
-        };
+                let resolution = if let Some(ref ver) = import.version {
+                    crate::pkg::resolver::resolve_package_module_versioned(
+                        project_root,
+                        &import.path,
+                        ver,
+                    )
+                } else {
+                    crate::pkg::resolver::resolve_package_module(project_root, &import.path)
+                };
+                match resolution {
+                    Some(r) => {
+                        match &r.submodule {
+                            Some(sub) => {
+                                let p = r.pkg_dir.join(format!("{}.td", sub));
+                                (if p.exists() { Some(p) } else { None }, None)
+                            }
+                            None => {
+                                // B11B-023: Package root import — use centralized facade validation
+                                if let Some(ctx) =
+                                    crate::pkg::facade::resolve_facade_context(&r.pkg_dir)
+                                {
+                                    let sym_names: Vec<String> =
+                                        import.symbols.iter().map(|s| s.name.clone()).collect();
+                                    let violations = crate::pkg::facade::validate_facade(
+                                        &ctx.facade_exports,
+                                        &ctx.entry_path,
+                                        &sym_names,
+                                    );
+                                    if let Some(v) = violations.first() {
+                                        return Err(JsError {
+                                        message: match v {
+                                            crate::pkg::facade::FacadeViolation::HiddenSymbol { name, available } => {
+                                                format!(
+                                                    "Symbol '{}' is not part of the public API declared in packages.tdm. \
+                                                     Available exports: {}",
+                                                    name,
+                                                    available.join(", ")
+                                                )
+                                            }
+                                            crate::pkg::facade::FacadeViolation::GhostSymbol { name } => {
+                                                format!(
+                                                    "Symbol '{}' is declared in packages.tdm but not found in the entry module. \
+                                                     The entry module must export all symbols listed in the package facade.",
+                                                    name
+                                                )
+                                            }
+                                        },
+                                    });
+                                    }
+                                    (Some(ctx.entry_path), Some(ctx.facade_exports))
+                                } else {
+                                    // No facade — resolve entry module normally
+                                    let entry = match crate::pkg::manifest::Manifest::from_dir(
+                                        &r.pkg_dir,
+                                    ) {
+                                        Ok(Some(manifest)) => manifest.entry,
+                                        _ => "main.td".to_string(),
+                                    };
+                                    let p = r.pkg_dir.join(entry);
+                                    (if p.exists() { Some(p) } else { None }, None)
+                                }
+                            }
+                        }
+                    }
+                    None => (None, None),
+                }
+            } else {
+                (None, None)
+            };
 
         let td_path = match td_path {
             Some(p) => p,
@@ -1382,6 +1449,13 @@ impl JsCodegen {
             }
         }
 
+        // B11B-023: Facade validation (membership + ghost) is now handled by
+        // pkg::facade::validate_facade() above. If we reach here with a facade,
+        // it means all symbols passed validation — proceed to normal export check.
+        if pkg_manifest_exports.is_some() {
+            return Ok(());
+        }
+
         // If no <<< found, all symbols are exported (backward compat)
         if !has_export {
             return Ok(());
@@ -1389,7 +1463,7 @@ impl JsCodegen {
 
         let exports: std::collections::HashSet<String> = export_symbols.into_iter().collect();
 
-        // Validate each imported symbol
+        // Validate each imported symbol against entry module's <<< export list
         for sym in &import.symbols {
             if !exports.contains(&sym.name) {
                 return Err(JsError {
@@ -2116,6 +2190,23 @@ impl JsCodegen {
                 }
                 // hasValue() is a method call on Lax — emit as method call
                 // (In new design, hasValue() is always a function, not a property)
+                // B11-4c: replace/replaceAll/split → runtime helper for edge-case parity
+                if method == "replace" || method == "replaceAll" || method == "split" {
+                    let helper = match method.as_str() {
+                        "replace" => "__taida_str_replace",
+                        "replaceAll" => "__taida_str_replace_all",
+                        "split" => "__taida_str_split",
+                        _ => unreachable!(),
+                    };
+                    self.write(&format!("{}(", helper));
+                    self.gen_expr(obj)?;
+                    for arg in args.iter() {
+                        self.write(", ");
+                        self.gen_expr(arg)?;
+                    }
+                    self.write(")");
+                    return Ok(());
+                }
                 self.gen_expr(obj)?;
                 // Taida .length() is a method call, but JS .length is a property.
                 // Use .length_() which is patched in the runtime.
@@ -2177,6 +2268,142 @@ impl JsCodegen {
             }
             Expr::MoldInst(name, type_args, fields, _) => {
                 // B5: MoldInst → function call with type args
+
+                // B11-5b: If[cond, then, else]() → (cond ? then : else)
+                // Short-circuit via ternary operator — non-selected branch is never evaluated.
+                if name == "If" {
+                    if type_args.len() < 3 {
+                        return Err(JsError {
+                            message:
+                                "If requires 3 arguments: If[condition, then_value, else_value]()"
+                                    .to_string(),
+                        });
+                    }
+                    self.write("(");
+                    self.gen_expr(&type_args[0])?;
+                    self.write(" ? ");
+                    self.gen_expr(&type_args[1])?;
+                    self.write(" : ");
+                    self.gen_expr(&type_args[2])?;
+                    self.write(")");
+                    return Ok(());
+                }
+
+                // B11-6c: TypeIs[value, :TypeName]() → type check expression
+                if name == "TypeIs" {
+                    if type_args.len() < 2 {
+                        return Err(JsError {
+                            message: "TypeIs requires 2 arguments: TypeIs[value, :TypeName]()"
+                                .to_string(),
+                        });
+                    }
+                    self.write("(");
+                    match &type_args[1] {
+                        Expr::TypeLiteral(type_name, None, _) => {
+                            let val_code = {
+                                let saved = std::mem::take(&mut self.output);
+                                self.gen_expr(&type_args[0])?;
+                                std::mem::replace(&mut self.output, saved)
+                            };
+                            match type_name.as_str() {
+                                "Int" => {
+                                    self.write(&format!(
+                                        "typeof {} === \"number\" && Number.isInteger({})",
+                                        val_code, val_code
+                                    ));
+                                }
+                                "Float" => {
+                                    self.write(&format!(
+                                        "typeof {} === \"number\" && !Number.isInteger({})",
+                                        val_code, val_code
+                                    ));
+                                }
+                                "Num" => {
+                                    self.write(&format!("typeof {} === \"number\"", val_code));
+                                }
+                                "Str" => {
+                                    self.write(&format!("typeof {} === \"string\"", val_code));
+                                }
+                                "Bool" => {
+                                    self.write(&format!("typeof {} === \"boolean\"", val_code));
+                                }
+                                "Bytes" => {
+                                    self.write(&format!("{} instanceof Uint8Array", val_code));
+                                }
+                                // B11B-015: Error check uses __type + inheritance chain
+                                "Error" => {
+                                    self.write(&format!(
+                                        "(function(__v){{ return typeof __v === \"object\" && __v !== null && \
+                                         __taida_is_error_subtype(__v.__type || __v.type || \"\", \"Error\"); }})({v})",
+                                        v = val_code
+                                    ));
+                                }
+                                // B11B-015: Named type check via __type field + inheritance chain
+                                other => {
+                                    // Use an IIFE to safely evaluate val_code once and
+                                    // avoid JS syntax errors with property access on literals.
+                                    self.write(&format!(
+                                        "(function(__v){{ return typeof __v === \"object\" && __v !== null && \
+                                         (__v.__type === \"{t}\" || __taida_is_error_subtype(__v.__type || \"\", \"{t}\")); }})({v})",
+                                        v = val_code,
+                                        t = other
+                                    ));
+                                }
+                            }
+                        }
+                        Expr::TypeLiteral(enum_name, Some(variant_name), _) => {
+                            // Enum variant check: value === ordinal
+                            let ordinal = self
+                                .enum_defs
+                                .get(enum_name.as_str())
+                                .and_then(|variants| {
+                                    variants.iter().position(|v| v == variant_name)
+                                })
+                                .unwrap_or(usize::MAX);
+                            self.gen_expr(&type_args[0])?;
+                            self.write(&format!(" === {}", ordinal));
+                        }
+                        _ => {
+                            // Fallback: emit false
+                            self.write("false");
+                        }
+                    }
+                    self.write(")");
+                    return Ok(());
+                }
+
+                // B11-6c: TypeExtends[:TypeA, :TypeB]() → compile-time type check
+                if name == "TypeExtends" {
+                    if type_args.len() < 2 {
+                        return Err(JsError {
+                            message:
+                                "TypeExtends requires 2 arguments: TypeExtends[:TypeA, :TypeB]()"
+                                    .to_string(),
+                        });
+                    }
+                    let type_a = match &type_args[0] {
+                        Expr::TypeLiteral(name, _, _) => name.clone(),
+                        _ => String::new(),
+                    };
+                    let type_b = match &type_args[1] {
+                        Expr::TypeLiteral(name, _, _) => name.clone(),
+                        _ => String::new(),
+                    };
+                    let result = if type_a == type_b {
+                        true
+                    } else {
+                        match (type_a.as_str(), type_b.as_str()) {
+                            ("Int", "Num") | ("Float", "Num") | ("Int", "Float") => true,
+                            (a, b) if !a.is_empty() && !b.is_empty() => {
+                                // Check inheritance chain
+                                self.check_type_inheritance(a, b)
+                            }
+                            _ => false,
+                        }
+                    };
+                    self.write(if result { "true" } else { "false" });
+                    return Ok(());
+                }
 
                 // JSNew[ClassName](...) → new ClassName(...)
                 if name == "JSNew" {
@@ -2606,6 +2833,15 @@ impl JsCodegen {
                 self.write("; })()");
                 Ok(())
             }
+            // B11-6a: TypeLiteral emits type name as string (used by TypeIs/TypeExtends codegen)
+            Expr::TypeLiteral(name, variant, _) => {
+                if let Some(var) = variant {
+                    self.write(&format!("\"{}:{}\"", name, var));
+                } else {
+                    self.write(&format!("\"{}\"", name));
+                }
+                Ok(())
+            }
         }
     }
 
@@ -2850,8 +3086,44 @@ impl JsCodegen {
                     }
                 }
                 Expr::MoldInst(name, type_args, fields, _) => {
+                    // B11-5b: If[cond, then, else]() in pipeline
+                    // → ((_) => (cond ? then : else))(__p)
+                    // The IIFE binds `_` so gen_expr emits it as the parameter name,
+                    // achieving correct short-circuit and placeholder substitution.
+                    if name == "If" && type_args.len() >= 3 {
+                        self.write("((_) => (");
+                        self.gen_expr(&type_args[0])?;
+                        self.write(" ? ");
+                        self.gen_expr(&type_args[1])?;
+                        self.write(" : ");
+                        self.gen_expr(&type_args[2])?;
+                        self.write("))(__p)");
+                    }
+                    // B11-6c: TypeIs in pipeline — bind _ to __p via IIFE
+                    else if name == "TypeIs" && type_args.len() >= 2 {
+                        self.write("((_) => ");
+                        // Reuse main TypeIs codegen by constructing a temporary MoldInst
+                        let temp = Expr::MoldInst(
+                            name.clone(),
+                            type_args.clone(),
+                            fields.clone(),
+                            type_args[0].span().clone(),
+                        );
+                        self.gen_expr(&temp)?;
+                        self.write(")(__p)");
+                    }
+                    // B11-6c: TypeExtends in pipeline — no placeholder needed, compile-time
+                    else if name == "TypeExtends" && type_args.len() >= 2 {
+                        let temp = Expr::MoldInst(
+                            name.clone(),
+                            type_args.clone(),
+                            fields.clone(),
+                            type_args[0].span().clone(),
+                        );
+                        self.gen_expr(&temp)?;
+                    }
                     // JSNew in pipeline: JSNew[ClassName](__p, ...) or JSNew[ClassName](...)
-                    if name == "JSNew" {
+                    else if name == "JSNew" {
                         if let Some(Expr::Ident(class_name, _)) = type_args.first() {
                             self.write(&format!("new {}(", class_name));
                             // Pipeline value __p as first arg, followed by fields

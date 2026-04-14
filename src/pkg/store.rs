@@ -163,12 +163,16 @@ impl GlobalStore {
             ));
         }
 
+        // Cleanup temp directory before verification so it never leaks
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+
+        // Post-fetch manifest verification: ensure the extracted package's
+        // packages.tdm identity and version match what was requested.
+        Self::verify_fetched_package(&pkg_dir, org, name, version)?;
+
         // Create completion marker
         std::fs::write(pkg_dir.join(".taida_installed"), "")
             .map_err(|e| format!("Cannot create install marker: {}", e))?;
-
-        // Cleanup temp directory
-        let _ = std::fs::remove_dir_all(&tmp_dir);
 
         Ok(pkg_dir)
     }
@@ -305,6 +309,82 @@ impl GlobalStore {
         }
 
         best.map(|(_, version)| version)
+    }
+
+    /// Post-fetch verification: ensure the extracted package's manifest
+    /// declares an identity and version consistent with what was requested.
+    ///
+    /// For packages with a `packages.tdm` that declares a qualified name
+    /// (`org/name`), the identity must exactly match `expected_org/expected_name`.
+    /// The version in the manifest must match `expected_version`.
+    ///
+    /// For addon packages with `native/addon.toml`, the `package` field
+    /// must also match the expected `org/name`.
+    ///
+    /// On mismatch, the package directory is cleaned up and an error is returned.
+    fn verify_fetched_package(
+        pkg_dir: &Path,
+        expected_org: &str,
+        expected_name: &str,
+        expected_version: &str,
+    ) -> Result<(), String> {
+        let expected_qualified = format!("{}/{}", expected_org, expected_name);
+
+        // 1. Verify packages.tdm if present
+        if let Some(manifest) = crate::pkg::manifest::Manifest::from_dir(pkg_dir).map_err(|e| {
+            let _ = std::fs::remove_dir_all(pkg_dir);
+            format!(
+                "Post-fetch verification failed for {}@{}: {}",
+                expected_qualified, expected_version, e
+            )
+        })? {
+            // If manifest declares a qualified name, it must match exactly
+            if manifest.name.contains('/') && manifest.name != expected_qualified {
+                let _ = std::fs::remove_dir_all(pkg_dir);
+                return Err(format!(
+                    "Post-fetch verification failed: package declares identity '{}' \
+                     but was fetched as '{}@{}'. The tarball content does not match \
+                     the requested package.",
+                    manifest.name, expected_qualified, expected_version
+                ));
+            }
+
+            // Version must match
+            if manifest.version != expected_version {
+                let _ = std::fs::remove_dir_all(pkg_dir);
+                return Err(format!(
+                    "Post-fetch verification failed: package declares version '{}' \
+                     but was fetched as '{}@{}'. The tarball content does not match \
+                     the requested package.",
+                    manifest.version, expected_qualified, expected_version
+                ));
+            }
+        }
+
+        // 2. Verify native/addon.toml if present
+        let addon_toml_path = pkg_dir.join("native").join("addon.toml");
+        if addon_toml_path.exists() {
+            let addon_manifest = crate::addon::manifest::parse_addon_manifest(&addon_toml_path)
+                .map_err(|e| {
+                    let _ = std::fs::remove_dir_all(pkg_dir);
+                    format!(
+                        "Post-fetch verification failed for {}@{}: \
+                         addon.toml is present but cannot be parsed: {}",
+                        expected_qualified, expected_version, e
+                    )
+                })?;
+            if addon_manifest.package != expected_qualified {
+                let _ = std::fs::remove_dir_all(pkg_dir);
+                return Err(format!(
+                    "Post-fetch verification failed: addon.toml declares package '{}' \
+                     but was fetched as '{}@{}'. The tarball content does not match \
+                     the requested package.",
+                    addon_manifest.package, expected_qualified, expected_version
+                ));
+            }
+        }
+
+        Ok(())
     }
 }
 
@@ -551,5 +631,109 @@ mod tests {
                 std::env::remove_var("USERPROFILE");
             }
         }
+    }
+
+    #[test]
+    fn test_verify_fetched_package_matching_manifest() {
+        let dir = PathBuf::from("/tmp/taida_verify_match");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("packages.tdm"), "<<<@b.11.rc3 alice/http\n").unwrap();
+
+        let result = GlobalStore::verify_fetched_package(&dir, "alice", "http", "b.11.rc3");
+        assert!(
+            result.is_ok(),
+            "matching manifest should pass: {:?}",
+            result
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_verify_fetched_package_identity_mismatch() {
+        let dir = PathBuf::from("/tmp/taida_verify_id_mismatch");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("packages.tdm"), "<<<@b.11.rc3 evil/hijacked\n").unwrap();
+
+        let result = GlobalStore::verify_fetched_package(&dir, "alice", "http", "b.11.rc3");
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .contains("Post-fetch verification failed"),
+            "should report identity mismatch"
+        );
+    }
+
+    #[test]
+    fn test_verify_fetched_package_version_mismatch() {
+        let dir = PathBuf::from("/tmp/taida_verify_ver_mismatch");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("packages.tdm"), "<<<@b.99.rc1 alice/http\n").unwrap();
+
+        let result = GlobalStore::verify_fetched_package(&dir, "alice", "http", "b.11.rc3");
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .contains("Post-fetch verification failed"),
+            "should report version mismatch"
+        );
+    }
+
+    #[test]
+    fn test_verify_fetched_package_no_manifest_ok() {
+        let dir = PathBuf::from("/tmp/taida_verify_no_manifest");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // No packages.tdm — simple packages without manifest should pass
+        let result = GlobalStore::verify_fetched_package(&dir, "alice", "http", "b.11.rc3");
+        assert!(result.is_ok(), "no manifest should pass: {:?}", result);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_verify_fetched_package_bare_name_ok() {
+        let dir = PathBuf::from("/tmp/taida_verify_bare_name");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // Legacy manifest with bare name (no org/) — should pass
+        // (bare names don't declare a qualified identity to compare against)
+        std::fs::write(dir.join("packages.tdm"), "<<<@b.11.rc3\n").unwrap();
+
+        let result = GlobalStore::verify_fetched_package(&dir, "alice", "http", "b.11.rc3");
+        assert!(
+            result.is_ok(),
+            "bare name manifest should pass: {:?}",
+            result
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_verify_fetched_package_corrupt_addon_toml_rejected() {
+        let dir = PathBuf::from("/tmp/taida_verify_corrupt_addon");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("native")).unwrap();
+        std::fs::write(dir.join("packages.tdm"), "<<<@b.11.rc3 alice/http\n").unwrap();
+        // Write a corrupt addon.toml that cannot be parsed
+        std::fs::write(
+            dir.join("native").join("addon.toml"),
+            "this is not valid toml {{{\n",
+        )
+        .unwrap();
+
+        let result = GlobalStore::verify_fetched_package(&dir, "alice", "http", "b.11.rc3");
+        assert!(result.is_err(), "corrupt addon.toml should be rejected");
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("Post-fetch verification failed")
+                && err.contains("addon.toml is present but cannot be parsed"),
+            "error should mention addon.toml parse failure, got: {}",
+            err
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

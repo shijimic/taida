@@ -419,6 +419,14 @@ fn runtime_func_prototype(name: &str, profile: WasmProfile) -> Result<String, Wa
         "taida_io_stdout" | "taida_io_stderr" => {
             format!("int64_t {}(int64_t val);", name)
         }
+        // B11-2: Type-tagged I/O for Bool display parity
+        "taida_io_stdout_with_tag" | "taida_io_stderr_with_tag" => {
+            format!("int64_t {}(int64_t val, int64_t tag);", name)
+        }
+        // B11-2: Pack field tag lookup for runtime Bool display
+        "taida_pack_get_field_tag" => {
+            "int64_t taida_pack_get_field_tag(int64_t pack, int64_t hash);".to_string()
+        }
         // Debug 出力 (W-3: taida_debug_float 追加, W-6: taida_debug_polymorphic 追加)
         "taida_debug_int"
         | "taida_debug_str"
@@ -624,6 +632,8 @@ fn runtime_func_prototype(name: &str, profile: WasmProfile) -> Result<String, Wa
         "taida_register_type_parent" => "void taida_register_type_parent(int64_t child_str, int64_t parent_str);".to_string(),
         "taida_error_type_matches" => "int64_t taida_error_type_matches(int64_t error_val, int64_t handler_type_str);".to_string(),
         "taida_error_type_check_or_rethrow" => "int64_t taida_error_type_check_or_rethrow(int64_t error_val, int64_t handler_type_str);".to_string(),
+        // B11B-015: TypeIs named type runtime check
+        "taida_typeis_named" => "int64_t taida_typeis_named(int64_t val, int64_t expected_type_str);".to_string(),
         "taida_is_error_thrown" => "int64_t taida_is_error_thrown(void);".to_string(),
         "taida_make_error" => {
             "int64_t taida_make_error(int64_t type_ptr, int64_t msg_ptr);".to_string()

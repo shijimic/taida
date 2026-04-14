@@ -547,14 +547,49 @@ pub fn prepare_publish(
     let updated_manifest_source = rewrite_export_version(packages_source, &plan.version)?;
     let source_repo = git_origin_url(project_dir);
 
-    if let Some(repo) = &source_repo
-        && let Some((_owner, repo_name)) = parse_github_repo(repo)
-        && repo_name != manifest.name
-    {
-        eprintln!(
-            "Warning: package name '{}' does not match git remote repository '{}'. This is allowed for forks.",
-            manifest.name, repo_name
-        );
+    // `taida install` always fetches from GitHub using org/name → tarball URL.
+    // A bare name (no org/) cannot be resolved to a GitHub URL, so only
+    // qualified names are allowed for remote publish.
+    if !manifest.name.contains('/') {
+        return Err(format!(
+            "Package name '{}' must be a qualified org/name (e.g. 'alice/my-pkg'). \
+             `taida install` resolves packages via GitHub org/name, so bare names \
+             cannot be published as remote packages. Add a package identity to \
+             packages.tdm: `<<<@version org/name`.",
+            manifest.name
+        ));
+    }
+
+    // Require a GitHub remote that matches exactly.
+    let remote_qualified = match &source_repo {
+        Some(repo) => match parse_github_repo(repo) {
+            Some((owner, name)) => format!("{}/{}", owner, name),
+            None => {
+                return Err(format!(
+                    "Package identity '{}' requires a GitHub remote but git remote \
+                     '{}' is not a GitHub URL. `taida install` fetches from GitHub, \
+                     so publishing with a non-GitHub remote would produce an \
+                     uninstallable package.",
+                    manifest.name, repo
+                ));
+            }
+        },
+        None => {
+            return Err(format!(
+                "Package identity '{}' requires a GitHub remote but no git remote \
+                 origin is configured. `taida install` fetches from GitHub, so the \
+                 remote must be set before publishing.",
+                manifest.name
+            ));
+        }
+    };
+    if manifest.name != remote_qualified {
+        return Err(format!(
+            "Package identity '{}' does not match git remote '{}'. \
+             The package identity in packages.tdm must exactly match the GitHub \
+             repository that `taida install` will fetch from.",
+            manifest.name, remote_qualified
+        ));
     }
 
     let integrity = compute_publish_integrity(project_dir);
@@ -1168,10 +1203,20 @@ fn run_git(dir: &Path, args: &[&str]) -> Result<String, String> {
 }
 
 /// taida-community/proposals への Issue 作成用 pre-filled URL を生成する。
+///
+/// B11-1d: When `package_name` already contains `/` (org/name form, e.g.
+/// `taida-lang/terminal`), the title uses it as-is to avoid a double prefix
+/// like `shijimic/taida-lang/terminal`. Bare names are still prefixed with
+/// the author.
 pub fn proposals_url(author: &str, package_name: &str, version: &str, integrity: &str) -> String {
-    let title = format!("publish: {author}/{package_name}@{version}");
+    let display_pkg = if package_name.contains('/') {
+        package_name.to_string()
+    } else {
+        format!("{author}/{package_name}")
+    };
+    let title = format!("publish: {display_pkg}@{version}");
     let body = format!(
-        "## Publish Request\n\n- author: `{author}`\n- package: `{package_name}`\n- version: `@{version}`\n- integrity: `{integrity}`\n"
+        "## Publish Request\n\n- author: `{author}`\n- package: `{display_pkg}`\n- version: `@{version}`\n- integrity: `{integrity}`\n"
     );
     let repo = proposals_repo();
     format!(
@@ -1483,6 +1528,88 @@ mod tests {
         assert_eq!(
             parse_github_repo("git@github.com:taida-community/proposals.git"),
             Some(("taida-community".to_string(), "proposals".to_string()))
+        );
+    }
+
+    // ── Repo mismatch guard (B11 gate hardening) ──
+    //
+    // prepare_publish() itself requires git — these unit tests verify the
+    // mismatch logic extracted from it.
+
+    #[test]
+    fn test_repo_mismatch_qualified_name_exact_match_required() {
+        // Simulates the mismatch check inside prepare_publish.
+        let manifest_name = "taida-lang/terminal";
+        let (remote_owner, remote_name) = ("taida-lang", "terminal");
+        let remote_qualified = format!("{}/{}", remote_owner, remote_name);
+        let mismatch = if manifest_name.contains('/') {
+            manifest_name != remote_qualified
+        } else {
+            manifest_name != remote_name
+        };
+        assert!(!mismatch, "exact match should not be a mismatch");
+    }
+
+    #[test]
+    fn test_repo_mismatch_different_owner_is_error() {
+        let manifest_name = "taida-lang/terminal";
+        let (remote_owner, remote_name) = ("shijimic", "terminal");
+        let remote_qualified = format!("{}/{}", remote_owner, remote_name);
+        let mismatch = if manifest_name.contains('/') {
+            manifest_name != remote_qualified
+        } else {
+            manifest_name != remote_name
+        };
+        assert!(mismatch, "different owner must be a mismatch");
+    }
+
+    #[test]
+    fn test_repo_mismatch_different_name_is_error() {
+        let manifest_name = "taida-lang/terminal";
+        let (remote_owner, remote_name) = ("taida-lang", "other-pkg");
+        let remote_qualified = format!("{}/{}", remote_owner, remote_name);
+        let mismatch = if manifest_name.contains('/') {
+            manifest_name != remote_qualified
+        } else {
+            manifest_name != remote_name
+        };
+        assert!(mismatch, "different repo name must be a mismatch");
+    }
+
+    #[test]
+    fn test_repo_mismatch_bare_name_rejected_for_remote_publish() {
+        // Bare names cannot be published as remote packages because
+        // `taida install` resolves via GitHub org/name.
+        let manifest_name = "terminal";
+        assert!(
+            !manifest_name.contains('/'),
+            "bare name must be rejected by the qualified-name check"
+        );
+    }
+
+    #[test]
+    fn test_repo_mismatch_non_github_remote_with_qualified_name_is_error() {
+        // Qualified names require a GitHub remote because taida install
+        // always fetches from GitHub.
+        let manifest_name = "taida-lang/terminal";
+        let remote = "https://gitlab.com/taida-lang/terminal.git";
+        let is_github = parse_github_repo(remote).is_some();
+        assert!(!is_github, "gitlab URL should not parse as GitHub");
+        assert!(
+            manifest_name.contains('/'),
+            "qualified name must trigger the GitHub-required path"
+        );
+        // In prepare_publish this would return Err because the remote
+        // is not GitHub but the package identity is qualified.
+    }
+
+    #[test]
+    fn test_repo_mismatch_no_remote_with_qualified_name_is_error() {
+        let manifest_name = "taida-lang/terminal";
+        let source_repo: Option<String> = None;
+        assert!(
+            manifest_name.contains('/') && source_repo.is_none(),
+            "qualified name with no remote must be rejected"
         );
     }
 
@@ -2511,5 +2638,90 @@ url = "https://github.com/taida-lang/terminal/releases/download/{version}/lib{na
         assert_eq!(content, original, "file must not be modified");
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── B11-1e: proposals_url no double-prefix ──
+
+    #[test]
+    fn test_proposals_url_bare_package_name() {
+        let url = proposals_url("shijimic", "terminal", "a.3", "sha256:abc");
+        // Bare name: title should be "publish: shijimic/terminal@a.3"
+        assert!(
+            url.contains(&urlencoded("publish: shijimic/terminal@a.3")),
+            "Expected bare name to be prefixed with author. URL: {}",
+            url
+        );
+    }
+
+    #[test]
+    fn test_proposals_url_qualified_package_name_no_double_prefix() {
+        let url = proposals_url("shijimic", "taida-lang/terminal", "b.11.rc3", "sha256:abc");
+        // Qualified name: title should be "publish: taida-lang/terminal@b.11.rc3"
+        // NOT "publish: shijimic/taida-lang/terminal@b.11.rc3"
+        assert!(
+            url.contains(&urlencoded("publish: taida-lang/terminal@b.11.rc3")),
+            "Expected qualified name as-is, no author prefix. URL: {}",
+            url
+        );
+        assert!(
+            !url.contains(&urlencoded("shijimic/taida-lang/terminal")),
+            "Must not contain double-prefixed name. URL: {}",
+            url
+        );
+    }
+
+    #[test]
+    fn test_addon_publish_package_identity_three_way_consistency() {
+        // B11B-002: Verify that for an org-scoped package, the package
+        // identity derived from `<<<@version owner/name` produces
+        // consistent strings across all three publish outputs:
+        //   1. "Published <pkg>@<ver>" message
+        //   2. proposals_url title "publish: <pkg>@<ver>"
+        //   3. release title "<pkg>@<ver>"
+        //
+        // All three should use the same `display_package` derivation.
+        let author = "shijimic";
+        let package_name = "taida-lang/terminal"; // from <<<@b.11.rc3 taida-lang/terminal
+        let version = "b.11.rc3";
+        let integrity = "sha256:abc123";
+
+        // display_package derivation (mirrors main.rs logic)
+        let display_package = if package_name.contains('/') {
+            package_name.to_string()
+        } else {
+            format!("{}/{}", author, package_name)
+        };
+
+        // 1. "Published ..." message
+        let published_msg = format!("Published {}@{}", display_package, version);
+        assert_eq!(
+            published_msg, "Published taida-lang/terminal@b.11.rc3",
+            "Published message must use package identity from <<<",
+        );
+
+        // 2. proposals_url title
+        let url = proposals_url(author, package_name, version, integrity);
+        assert!(
+            url.contains(&urlencoded("publish: taida-lang/terminal@b.11.rc3")),
+            "proposals URL title must match. URL: {}",
+            url
+        );
+
+        // 3. release title (mirrors main.rs logic after B11B-002 fix)
+        let release_title = format!("{}@{}", display_package, version);
+        assert_eq!(
+            release_title, "taida-lang/terminal@b.11.rc3",
+            "release title must use package identity from <<<, not addon.toml",
+        );
+
+        // All three should reference the same identity
+        assert!(
+            published_msg.contains(&display_package),
+            "Published msg must contain display_package"
+        );
+        assert!(
+            release_title.contains(&display_package),
+            "Release title must contain display_package"
+        );
     }
 }

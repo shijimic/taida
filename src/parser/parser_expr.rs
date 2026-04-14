@@ -280,7 +280,13 @@ impl Parser {
                     let mut depth = 1;
                     let mut arg_tokens_valid = true;
 
-                    // Simple approach: parse comma-separated expressions inside brackets
+                    // Parse comma-separated expressions inside brackets.
+                    // B11-6a: Also handles restricted type-literal surface:
+                    //   `:Int` → TypeLiteral("Int", None)
+                    //   `EnumName:Variant` (without `()`) → TypeLiteral("EnumName", Some("Variant"))
+                    // These are only valid inside mold brackets and do not leak
+                    // into general expression parsing (B11B-008).
+                    let is_type_mold = name == "TypeIs" || name == "TypeExtends";
                     loop {
                         if self.check(&TokenKind::RBracket) {
                             depth -= 1;
@@ -292,6 +298,39 @@ impl Parser {
                         if self.is_at_end() {
                             arg_tokens_valid = false;
                             break;
+                        }
+                        // B11-6a: `:TypeName` → TypeLiteral (restricted to TypeIs/TypeExtends)
+                        if is_type_mold
+                            && self.check(&TokenKind::Colon)
+                            && matches!(self.peek_at(1).kind, TokenKind::Ident(_))
+                        {
+                            let lit_span = self.current_span();
+                            self.advance(); // consume `:`
+                            let type_name = self.expect_ident()?;
+                            type_args.push(Expr::TypeLiteral(type_name, None, lit_span));
+                            self.match_token(&TokenKind::Comma);
+                            continue;
+                        }
+                        // B11-6a: `EnumName:Variant` without `()` → TypeLiteral
+                        // (restricted to TypeIs/TypeExtends)
+                        // Distinguishes from EnumVariant `Name:Variant()` by absence of `()`.
+                        if is_type_mold
+                            && matches!(self.peek_kind(), TokenKind::Ident(_))
+                            && matches!(self.peek_at(1).kind, TokenKind::Colon)
+                            && matches!(self.peek_at(2).kind, TokenKind::Ident(_))
+                            && !matches!(self.peek_at(3).kind, TokenKind::LParen)
+                        {
+                            let lit_span = self.current_span();
+                            let enum_name = self.expect_ident()?;
+                            self.advance(); // consume `:`
+                            let variant_name = self.expect_ident()?;
+                            type_args.push(Expr::TypeLiteral(
+                                enum_name,
+                                Some(variant_name),
+                                lit_span,
+                            ));
+                            self.match_token(&TokenKind::Comma);
+                            continue;
                         }
                         match self.parse_expression() {
                             Ok(arg) => type_args.push(arg),

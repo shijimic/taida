@@ -869,6 +869,11 @@ fn runtime_abi(name: &str) -> Result<RuntimeAbi, String> {
             params: &[Ptr, Ptr],
             returns: &[Val],
         },
+        // B11B-015: TypeIs named type runtime check
+        "taida_typeis_named" => RuntimeAbi {
+            params: &[Ptr, Ptr],
+            returns: &[Val],
+        },
 
         // ── Result[T, P] ──
         "taida_result_create" => RuntimeAbi {
@@ -1348,8 +1353,22 @@ fn runtime_abi(name: &str) -> Result<RuntimeAbi, String> {
             params: &[Val],
             returns: &[Val],
         },
+        // B11-2c: Type-tagged stdout/stderr for Bool display parity (FB-3)
+        "taida_io_stdout_with_tag" => RuntimeAbi {
+            params: &[Val, Val],
+            returns: &[Val],
+        },
         "taida_io_stderr" => RuntimeAbi {
             params: &[Val],
+            returns: &[Val],
+        },
+        "taida_io_stderr_with_tag" => RuntimeAbi {
+            params: &[Val, Val],
+            returns: &[Val],
+        },
+        // B11-2b: Runtime field tag lookup for FieldAccess stdout/stderr
+        "taida_pack_get_field_tag" => RuntimeAbi {
+            params: &[Val, Val],
             returns: &[Val],
         },
         "taida_io_stdin" => RuntimeAbi {

@@ -330,11 +330,17 @@ ToRadix[10, 1]().hasValue      // false
 
 ### Int[str, base]
 
-指定基数（`2..36`）で文字列を整数に変換します。
+指定基数（`2..36`）で文字列を整数に変換します。基数が範囲外の場合は変換失敗になります。符号は先頭 `+` または `-` で表現します。
 
 ```taida
 Int["ff", 16]() ]=> n          // 255
-Int["2", 2]().hasValue         // false
+Int["FF", 16]() ]=> n          // 255 (大文字も受理)
+Int["+ff", 16]() ]=> n         // 255 (+ prefix も受理)
+Int["1010", 2]() ]=> n         // 10
+Int["77", 8]() ]=> n           // 63
+Int["-ff", 16]() ]=> n         // -255
+Int["2", 2]().hasValue         // false (基数2で "2" は無効)
+Int["5", 1]().hasValue         // false (基数1は範囲外)
 ```
 
 ### UInt8 / Bytes / ByteSet / BytesToList
@@ -575,19 +581,83 @@ Mod[10, 0]().hasValue      // false
 
 ---
 
+## 条件モールディング型
+
+### If[cond, then, else]
+
+```taida
+If[condition, then_value, else_value]() => T
+```
+
+2 分岐の条件式。`condition` を評価し、truthy なら `then_value`、falsy なら `else_value` を返します。
+
+- 非選択 branch は評価しません（short-circuit）
+- パイプラインで `_` を使って前段の値を参照できます
+- ネスト可能: `If[cond, If[cond2, a, b](), c]()`
+
+```taida
+If[x > 0, "positive", "negative"]()
+150 => If[_ > 100, 100, _]()   // clamp: 100
+If[true, If[false, 1, 2](), 3]()   // 2
+```
+
+---
+
+## 型比較モールディング型
+
+### TypeIs[value, :TypeName]
+
+```taida
+TypeIs[value, :TypeName]() => Bool
+```
+
+値の実行時の型が指定した型名と一致するかを判定します。
+
+対応する型リテラル: `:Int`, `:Float`, `:Num`, `:Bool`, `:Str`, `:Bytes`, `:Error`, `:NamedType`
+
+Enum variant の判定: `TypeIs[value, EnumName:Variant]()` で特定の variant かを判定します。
+
+```taida
+TypeIs[42, :Int]()                // true
+TypeIs["hello", :Str]()          // true
+TypeIs[42, :Num]()               // true
+TypeIs[Status:Ok(), Status:Ok]() // true
+```
+
+### TypeExtends[:TypeA, :TypeB]
+
+```taida
+TypeExtends[:TypeA, :TypeB]() => Bool
+```
+
+TypeA が TypeB と同じ型か、TypeB のサブタイプかを判定します。コンパイル時に解決可能です。
+
+```taida
+TypeExtends[:Int, :Num]()        // true
+TypeExtends[:Dog, :Animal]()     // true（Dog が Animal を継承している場合）
+TypeExtends[:Str, :Int]()        // false
+```
+
+---
+
 ## 型変換モールディング型
 
 型変換モールドが `Lax[...]` を返す挙動は、`solidify` オーバーライドで定義される言語仕様です（専用のコンパイラ特別扱いではない）。
 
 ### Int[x]
 
-値を整数に変換し、Lax を返します。
+値を整数に変換し、Lax を返します。文字列から整数への変換（Str → Int）の正規経路です。
 
 ```taida
 Int["123"]() ]=> num   // 123
 Int["abc"]() ]=> num   // 0 (変換失敗: デフォルト値)
 Int[3.14]() ]=> num    // 3
+Int["+5"]() ]=> num    // 5 (符号付き文字列も受理)
 ```
+
+受理される文字列: 先頭に `+` または `-` を含むオプションの符号、続いて1桁以上の数字（`0-9`）。空文字列、小数点を含む文字列、先頭/末尾の空白、数字以外の文字を含む文字列は変換失敗になります。
+
+`Int[str, base]()` で基数を指定した変換も可能です（詳細は [数値モールド](#intstr-base) を参照）。
 
 ### Float[x]
 
@@ -864,6 +934,20 @@ Filter[list, isEven]() ]=> result
 | `Map[list, fn]()` | list, fn | - | @[U] |
 | `Fold[list, init, fn]()` | list, init, fn | - | A |
 | `Foldr[list, init, fn]()` | list, init, fn | - | A |
+
+### 条件モールド
+
+| モールド | `[]` 必須 | `()` オプション | 戻り値 |
+|---------|----------|----------------|--------|
+| `If[cond, then, else]()` | cond, then, else | - | T (then の型) |
+
+### 型比較モールド
+
+| モールド | `[]` 必須 | `()` オプション | 戻り値 |
+|---------|----------|----------------|--------|
+| `TypeIs[value, :TypeName]()` | value, :TypeName | - | Bool |
+| `TypeIs[value, EnumName:Variant]()` | value, EnumName:Variant | - | Bool |
+| `TypeExtends[:TypeA, :TypeB]()` | :TypeA, :TypeB | - | Bool |
 
 ### 演算・型変換モールド
 

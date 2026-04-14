@@ -1091,9 +1091,64 @@ impl Interpreter {
             }
             // Display
             "toString" => Ok(Signal::Value(Value::Str(s.to_string()))),
+            // B11-4b: replace / replaceAll / split methods
+            "replace" => {
+                let target = args
+                    .first()
+                    .map(|v| v.to_display_string())
+                    .unwrap_or_default();
+                let replacement = args
+                    .get(1)
+                    .map(|v| v.to_display_string())
+                    .unwrap_or_default();
+                // Empty target → no-op (B11-4a edge semantics lock)
+                if target.is_empty() {
+                    return Ok(Signal::Value(Value::Str(s.to_string())));
+                }
+                Ok(Signal::Value(Value::Str(s.replacen(
+                    &target,
+                    &replacement,
+                    1,
+                ))))
+            }
+            "replaceAll" => {
+                let target = args
+                    .first()
+                    .map(|v| v.to_display_string())
+                    .unwrap_or_default();
+                let replacement = args
+                    .get(1)
+                    .map(|v| v.to_display_string())
+                    .unwrap_or_default();
+                // Empty target → no-op (B11-4a edge semantics lock)
+                if target.is_empty() {
+                    return Ok(Signal::Value(Value::Str(s.to_string())));
+                }
+                Ok(Signal::Value(Value::Str(s.replace(&target, &replacement))))
+            }
+            "split" => {
+                let separator = args
+                    .first()
+                    .map(|v| v.to_display_string())
+                    .unwrap_or_default();
+                let parts: Vec<Value> = if separator.is_empty() {
+                    // B11-4a: split("") → chars split (like Chars[] mold)
+                    // "".split("") → empty list (matches JS/Native)
+                    if s.is_empty() {
+                        vec![]
+                    } else {
+                        s.chars().map(|ch| Value::Str(ch.to_string())).collect()
+                    }
+                } else {
+                    s.split(&separator)
+                        .map(|p| Value::Str(p.to_string()))
+                        .collect()
+                };
+                Ok(Signal::Value(Value::List(parts)))
+            }
             _ => Err(RuntimeError {
                 message: format!(
-                    "Unknown string method: '{}'. Operations moved to molds: Upper[], Lower[], Trim[], Split[], Replace[], Slice[], CharAt[], Repeat[], Reverse[], Pad[]",
+                    "Unknown string method: '{}'. Available: length, contains, startsWith, endsWith, indexOf, lastIndexOf, get, replace, replaceAll, split, toString",
                     method
                 ),
             }),

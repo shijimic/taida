@@ -14,6 +14,70 @@ use super::value::Value;
 /// the process, scope leaks have no observable effect.
 use crate::parser::*;
 
+/// Rewrite all `Placeholder` nodes in an expression tree to `Ident(replacement)`.
+/// Used by pipeline MoldInst handling to substitute nested `_` with the pipe variable name.
+fn rewrite_nested_placeholder(expr: &Expr, replacement: &str, span: &crate::lexer::Span) -> Expr {
+    match expr {
+        Expr::Placeholder(_) => Expr::Ident(replacement.to_string(), span.clone()),
+        Expr::BinaryOp(lhs, op, rhs, s) => Expr::BinaryOp(
+            Box::new(rewrite_nested_placeholder(lhs, replacement, span)),
+            op.clone(),
+            Box::new(rewrite_nested_placeholder(rhs, replacement, span)),
+            s.clone(),
+        ),
+        Expr::UnaryOp(op, inner, s) => Expr::UnaryOp(
+            op.clone(),
+            Box::new(rewrite_nested_placeholder(inner, replacement, span)),
+            s.clone(),
+        ),
+        Expr::FuncCall(callee, args, s) => Expr::FuncCall(
+            Box::new(rewrite_nested_placeholder(callee, replacement, span)),
+            args.iter()
+                .map(|a| rewrite_nested_placeholder(a, replacement, span))
+                .collect(),
+            s.clone(),
+        ),
+        Expr::MethodCall(obj, method, args, s) => Expr::MethodCall(
+            Box::new(rewrite_nested_placeholder(obj, replacement, span)),
+            method.clone(),
+            args.iter()
+                .map(|a| rewrite_nested_placeholder(a, replacement, span))
+                .collect(),
+            s.clone(),
+        ),
+        Expr::MoldInst(name, type_args, fields, s) => Expr::MoldInst(
+            name.clone(),
+            type_args
+                .iter()
+                .map(|a| rewrite_nested_placeholder(a, replacement, span))
+                .collect(),
+            fields.clone(),
+            s.clone(),
+        ),
+        other => other.clone(),
+    }
+}
+
+/// Check if an expression contains a Placeholder `_` anywhere in its tree.
+/// Used by pipeline MoldInst handling to detect nested placeholders like `_ > 3`.
+fn expr_contains_placeholder(expr: &Expr) -> bool {
+    match expr {
+        Expr::Placeholder(_) => true,
+        Expr::BinaryOp(lhs, _, rhs, _) => {
+            expr_contains_placeholder(lhs) || expr_contains_placeholder(rhs)
+        }
+        Expr::UnaryOp(_, inner, _) => expr_contains_placeholder(inner),
+        Expr::FuncCall(callee, args, _) => {
+            expr_contains_placeholder(callee) || args.iter().any(expr_contains_placeholder)
+        }
+        Expr::MethodCall(obj, _, args, _) => {
+            expr_contains_placeholder(obj) || args.iter().any(expr_contains_placeholder)
+        }
+        Expr::MoldInst(_, type_args, _, _) => type_args.iter().any(expr_contains_placeholder),
+        _ => false,
+    }
+}
+
 impl Interpreter {
     /// Evaluate a single pipeline step, applying the current value.
     ///
@@ -98,9 +162,15 @@ impl Interpreter {
             }
             Expr::MoldInst(name, type_args, fields, span) => {
                 // MoldInst in pipeline: replace _ placeholders in type_args with current value
-                let has_placeholder = type_args.iter().any(|a| matches!(a, Expr::Placeholder(_)));
+                // B11-5a: Use deep rewriting to handle both top-level `_` and nested `_ > 3`.
+                let has_any_placeholder = type_args.iter().any(expr_contains_placeholder);
 
-                if has_placeholder {
+                if has_any_placeholder {
+                    // Rewrite ALL Placeholder nodes (top-level and nested) to
+                    // Ident("__pipe_current__"). This handles cases like:
+                    // - `If[_, "a", "b"]()` — top-level _
+                    // - `If[_ > 3, "big", "small"]()` — nested _
+                    // - `If[_ > 100, 100, _]()` — mixed
                     self.env.push_scope();
                     let pipe_val_name = "__pipe_current__";
                     self.env.define_force(pipe_val_name, current);
@@ -108,13 +178,7 @@ impl Interpreter {
                     let dummy_span = crate::lexer::Span::new(0, 0, 0, 0);
                     let new_type_args: Vec<Expr> = type_args
                         .iter()
-                        .map(|arg| {
-                            if matches!(arg, Expr::Placeholder(_)) {
-                                Expr::Ident(pipe_val_name.to_string(), dummy_span.clone())
-                            } else {
-                                arg.clone()
-                            }
-                        })
+                        .map(|arg| rewrite_nested_placeholder(arg, pipe_val_name, &dummy_span))
                         .collect();
 
                     let new_expr =

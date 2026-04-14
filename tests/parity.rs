@@ -7061,7 +7061,7 @@ stdout(parsed.contentLength)
 
 /// NET2-2a: httpParseRequestHead chunked field — 3-way parity
 /// Tests that the `chunked` field is correctly detected from Transfer-Encoding header.
-/// Note: Uses string interpolation for Bool fields to avoid native backend type tag loss.
+/// B11-2e: Native Bool display parity restored — full 3-way exact match now enforced.
 #[test]
 fn test_net2_parse_chunked_field_3way_parity() {
     if !node_available() {
@@ -7102,33 +7102,11 @@ stdout(parsed.chunked)
         "NET2-2a: chunked should be false on Interp, got: {}",
         interp
     );
-    // NB2-16+NB2-1: Native Bool display may differ (0 vs false). Check numeric lines match
-    // and chunked line is falsy (0 or false).
-    let interp_lines: Vec<&str> = interp.trim().lines().collect();
-    let native_lines: Vec<&str> = native.trim().lines().collect();
+    // B11-2e: Native Bool display parity restored (FB-3). Full 3-way exact match.
     assert_eq!(
-        interp_lines.len(),
-        native_lines.len(),
-        "NET2-2a: chunked=false line count mismatch\nInterp: {}\nNative: {}",
-        interp,
-        native
-    );
-    // First two lines (consumed, contentLength) must match exactly
-    assert_eq!(
-        interp_lines[0], native_lines[0],
-        "NET2-2a: consumed mismatch\nInterp: {}\nNative: {}",
+        interp, native,
+        "NET2-2a: chunked=false Interp vs Native mismatch\nInterp: {}\nNative: {}",
         interp, native
-    );
-    assert_eq!(
-        interp_lines[1], native_lines[1],
-        "NET2-2a: contentLength mismatch\nInterp: {}\nNative: {}",
-        interp, native
-    );
-    // Third line (chunked) must be falsy: "false" or "0"
-    assert!(
-        native_lines[2] == "false" || native_lines[2] == "0",
-        "NET2-2a: Native chunked should be false/0, got: {}",
-        native_lines[2]
     );
 
     // Test 2: Request with Transfer-Encoding: chunked → chunked = true
@@ -7162,36 +7140,18 @@ stdout(parsed.chunked)
         "NET2-2a: chunked should be true on Interp, got: {}",
         interp2
     );
-    // NB2-16+NB2-1: Check Native parity with Bool normalization
-    let interp2_lines: Vec<&str> = interp2.trim().lines().collect();
-    let native2_lines: Vec<&str> = native2.trim().lines().collect();
+    // B11-2e: Native Bool display parity restored (FB-3). Full 3-way exact match.
     assert_eq!(
-        interp2_lines.len(),
-        native2_lines.len(),
-        "NET2-2a: chunked=true line count mismatch\nInterp: {}\nNative: {}",
-        interp2,
-        native2
-    );
-    assert_eq!(
-        interp2_lines[0], native2_lines[0],
-        "NET2-2a: consumed mismatch\nInterp: {}\nNative: {}",
+        interp2, native2,
+        "NET2-2a: chunked=true Interp vs Native mismatch\nInterp: {}\nNative: {}",
         interp2, native2
-    );
-    assert_eq!(
-        interp2_lines[1], native2_lines[1],
-        "NET2-2a: contentLength mismatch\nInterp: {}\nNative: {}",
-        interp2, native2
-    );
-    // Third line (chunked) must be truthy: "true" or "1"
-    assert!(
-        native2_lines[2] == "true" || native2_lines[2] == "1",
-        "NET2-2a: Native chunked should be true/1, got: {}",
-        native2_lines[2]
     );
 }
 
 /// NET2-2a: httpParseRequestHead chunked Bool field — Interp vs JS only
-/// Tests the actual Bool value of chunked field (skips Native due to Bool display limitation).
+/// Tests the actual Bool value of chunked field.
+/// Note: B11-2e resolved the Native Bool display limitation (FB-3).
+/// Native parity is now verified in test_net2_parse_chunked_field_3way_parity.
 #[test]
 fn test_net2_parse_chunked_bool_value_interp_js_parity() {
     if !node_available() {
@@ -31047,4 +31007,904 @@ fn test_nb7_115_116_multi_data_parity_interp_native() {
         "Native must concatenate DATA bodies via memcpy into body_buf:\n{}",
         native_data_section,
     );
+}
+
+// ── B11-2d: Bool stdout display parity tests (FB-3) ──
+
+/// B11-2d: Direct Bool literal stdout — 3-way parity
+#[test]
+fn test_b11_bool_literal_stdout_parity() {
+    let source = r#"stdout(true)
+stdout(false)
+"#;
+    assert_backend_parity_for_source(source, "b11_bool_literal");
+}
+
+/// B11-2d: Bool variable stdout — 3-way parity
+#[test]
+fn test_b11_bool_variable_stdout_parity() {
+    let source = r#"x <= true
+y <= false
+stdout(x)
+stdout(y)
+"#;
+    assert_backend_parity_for_source(source, "b11_bool_variable");
+}
+
+/// B11-2d: Bool comparison operator result stdout — 3-way parity
+#[test]
+fn test_b11_bool_comparison_stdout_parity() {
+    let source = r#"stdout(1 == 1)
+stdout(1 > 2)
+stdout(3 >= 3)
+stdout(5 != 5)
+"#;
+    assert_backend_parity_for_source(source, "b11_bool_comparison");
+}
+
+/// B11-2d: Bool logical operator result stdout — 3-way parity
+#[test]
+fn test_b11_bool_logical_ops_stdout_parity() {
+    let source = r#"stdout(true && true)
+stdout(true && false)
+stdout(false || true)
+stdout(false || false)
+stdout(!true)
+stdout(!false)
+"#;
+    assert_backend_parity_for_source(source, "b11_bool_logical_ops");
+}
+
+/// B11-2d: Bool fields in typed BuchiPack stdout — 3-way parity
+#[test]
+fn test_b11_bool_typed_pack_field_stdout_parity() {
+    let source = r#"Config = @(debug: Bool, verbose: Bool)
+config <= Config(debug <= false, verbose <= true)
+stdout(config.debug)
+stdout(config.verbose)
+"#;
+    assert_backend_parity_for_source(source, "b11_bool_typed_pack_field");
+}
+
+/// B11-2d: Bool fields in anonymous BuchiPack stdout — 3-way parity
+#[test]
+fn test_b11_bool_anonymous_pack_field_stdout_parity() {
+    let source = r#"pack <= @(active <= true, hidden <= false)
+stdout(pack.active)
+stdout(pack.hidden)
+"#;
+    assert_backend_parity_for_source(source, "b11_bool_anon_pack_field");
+}
+
+/// B11-2d: Bool from function return stdout — 3-way parity
+#[test]
+fn test_b11_bool_function_return_stdout_parity() {
+    let source = r#"isPositive n =
+  n > 0 => :Bool
+
+stdout(isPositive(42))
+stdout(isPositive(0))
+"#;
+    assert_backend_parity_for_source(source, "b11_bool_func_return");
+}
+
+/// B11-2d: Bool method return stdout — 3-way parity
+#[test]
+fn test_b11_bool_method_return_stdout_parity() {
+    let source = r#"text <= "hello world"
+stdout(text.contains("world"))
+stdout(text.contains("xyz"))
+stdout(text.startsWith("hello"))
+stdout(text.endsWith("xyz"))
+"#;
+    assert_backend_parity_for_source(source, "b11_bool_method_return");
+}
+
+/// B11B-004: stdout(side_effect_pack().field) must evaluate the parent
+/// expression exactly once.  The side-effect (an inner stdout) must appear
+/// once per call, proving the native FieldAccess tag-lookup path does not
+/// re-evaluate the parent object.
+#[test]
+fn test_b11_stdout_field_access_no_double_eval_parity() {
+    let source = r#"makePack =
+  stdout("side-effect")
+  @(flag <= true, value <= 42)
+
+stdout(makePack().flag)
+stdout(makePack().value)
+"#;
+    assert_backend_parity_for_source(source, "b11_stdout_field_no_double_eval");
+}
+
+/// B11B-004: stderr(side_effect_pack().field) must also evaluate the parent
+/// expression exactly once.  We verify via stdout side-effect count that the
+/// parent is not double-evaluated in the stderr tag-lookup path.
+#[test]
+fn test_b11_stderr_field_access_no_double_eval_parity() {
+    let source = r#"makePack =
+  stdout("stderr-side-effect")
+  @(flag <= false, value <= 99)
+
+stderr(makePack().flag)
+stderr(makePack().value)
+"#;
+    assert_backend_parity_for_source(source, "b11_stderr_field_no_double_eval");
+}
+
+// ────────────────────────────────────────────────────────────────
+// B11-2f regression tests — stdout convert_to_string path
+// ────────────────────────────────────────────────────────────────
+// These guard against the Phase 2 regression where polymorphic-dispatched
+// stdout mis-identified strings as lists/packs in wasm-* backends.
+// See .dev/FUTURE_BLOCKERS.md FB-27 for the underlying expr_type_tag issue.
+
+/// B11-2f: stdout("") empty string — 3-way parity.
+/// Guards against Phase 2 regression where empty strings were rendered as
+/// the pointer int (e.g. "1218").
+#[test]
+fn test_b11_stdout_empty_string_parity() {
+    let source = r#"stdout("")
+stdout("before")
+stdout("")
+stdout("after")
+"#;
+    assert_backend_parity_for_source(source, "b11_stdout_empty_string");
+    let out = run_interpreter_src(source, "b11_stdout_empty_string_expected")
+        .expect("interpreter output should exist");
+    assert_eq!(out, "\nbefore\n\nafter");
+}
+
+/// B11-2f: stdout(Join[...]()) Str-returning mold — 3-way parity.
+/// Guards against Phase 2 regression where Str-returning molds were tagged
+/// as PACK and rendered as "@[]" in wasm-* backends.
+#[test]
+fn test_b11_stdout_str_returning_mold_parity() {
+    let source = r#"lst <= @[1, 2, 3]
+stdout(Join[lst, ","]())
+stdout(Join[@[5], " "]())
+stdout(Join[@[], " "]())
+"#;
+    assert_backend_parity_for_source(source, "b11_stdout_str_mold");
+    let out = run_interpreter_src(source, "b11_stdout_str_mold_expected")
+        .expect("interpreter output should exist");
+    // Join[@[], " "]() returns "" → stdout("") emits "\n"; run_interpreter_src
+    // trims trailing whitespace, so only the inner blank line survives.
+    assert_eq!(out, "1,2,3\n5");
+}
+
+/// B11-2f: stdout(Str-returning mold chain) — 3-way parity.
+/// Covers multiple Str-returning molds back-to-back without variable binding.
+#[test]
+fn test_b11_stdout_str_mold_chain_parity() {
+    let source = r#"stdout(Upper["hi"]())
+stdout(Lower["HELLO"]())
+stdout(Trim["  pad  "]())
+stdout(Repeat["ab", 3]())
+"#;
+    assert_backend_parity_for_source(source, "b11_stdout_str_mold_chain");
+    let out = run_interpreter_src(source, "b11_stdout_str_mold_chain_expected")
+        .expect("interpreter output should exist");
+    assert_eq!(out, "HI\nhello\npad\nababab");
+}
+
+// ────────────────────────────────────────────────────────────────
+// B11 Phase 3 — FB-9: Int[str]() / Int[str, base]() close-out
+// ────────────────────────────────────────────────────────────────
+
+/// B11-3b: Int[str]() decimal conversion — 3-way parity
+#[test]
+fn test_b11_int_str_decimal_parity() {
+    let source = r#"
+// valid decimal
+i1 <= Int["42"]()
+stdout(i1.getOrDefault(-1).toString())
+stdout(i1.hasValue().toString())
+
+// negative
+i2 <= Int["-7"]()
+stdout(i2.getOrDefault(-1).toString())
+
+// zero
+i3 <= Int["0"]()
+stdout(i3.getOrDefault(-1).toString())
+
+// leading zeros
+i4 <= Int["007"]()
+stdout(i4.getOrDefault(-1).toString())
+"#;
+    assert_backend_parity_for_source(source, "b11_int_str_decimal");
+    let out = run_interpreter_src(source, "b11_int_str_decimal_expected")
+        .expect("interpreter output should exist");
+    assert_eq!(out, "42\ntrue\n-7\n0\n7");
+}
+
+/// B11-3b: Int[str]() failure cases — 3-way parity
+#[test]
+fn test_b11_int_str_failure_parity() {
+    let source = r#"
+// empty string
+e1 <= Int[""]()
+stdout(e1.getOrDefault(-1).toString())
+stdout(e1.hasValue().toString())
+
+// non-numeric
+e2 <= Int["abc"]()
+stdout(e2.getOrDefault(-1).toString())
+
+// mixed
+e3 <= Int["12abc"]()
+stdout(e3.getOrDefault(-1).toString())
+
+// float string (not integer)
+e4 <= Int["3.14"]()
+stdout(e4.getOrDefault(-1).toString())
+"#;
+    assert_backend_parity_for_source(source, "b11_int_str_failure");
+    let out = run_interpreter_src(source, "b11_int_str_failure_expected")
+        .expect("interpreter output should exist");
+    assert_eq!(out, "-1\nfalse\n-1\n-1\n-1");
+}
+
+/// B11-3b: Int[str]() plus-sign prefix — 3-way parity
+#[test]
+fn test_b11_int_str_plus_sign_parity() {
+    let source = r#"
+// plus sign should be accepted (same as interpreter)
+p1 <= Int["+5"]()
+stdout(p1.getOrDefault(-1).toString())
+stdout(p1.hasValue().toString())
+
+// negative with explicit sign
+p2 <= Int["-42"]()
+stdout(p2.getOrDefault(-1).toString())
+"#;
+    assert_backend_parity_for_source(source, "b11_int_str_plus_sign");
+    let out = run_interpreter_src(source, "b11_int_str_plus_sign_expected")
+        .expect("interpreter output should exist");
+    assert_eq!(out, "5\ntrue\n-42");
+}
+
+/// B11-3b: Int[str, base]() base conversion — 3-way parity
+#[test]
+fn test_b11_int_str_base_parity() {
+    let source = r#"
+// hex
+h1 <= Int["ff", 16]()
+stdout(h1.getOrDefault(-1).toString())
+
+// hex uppercase
+h2 <= Int["FF", 16]()
+stdout(h2.getOrDefault(-1).toString())
+
+// binary
+b1 <= Int["1010", 2]()
+stdout(b1.getOrDefault(-1).toString())
+
+// octal
+o1 <= Int["77", 8]()
+stdout(o1.getOrDefault(-1).toString())
+
+// negative hex
+nh <= Int["-ff", 16]()
+stdout(nh.getOrDefault(-1).toString())
+"#;
+    assert_backend_parity_for_source(source, "b11_int_str_base");
+    let out = run_interpreter_src(source, "b11_int_str_base_expected")
+        .expect("interpreter output should exist");
+    assert_eq!(out, "255\n255\n10\n63\n-255");
+}
+
+/// B11B-005: Int[str, base]() with + sign — 3-way parity
+/// Verifies that all 3 backends accept "+" prefix in base-specified parsing,
+/// matching Interpreter's i64::from_str_radix behavior.
+#[test]
+fn test_b11_int_str_base_plus_sign_parity() {
+    let source = r#"
+// + hex
+p1 <= Int["+ff", 16]()
+stdout(p1.hasValue().toString())
+stdout(p1.getOrDefault(-1).toString())
+
+// + binary
+p2 <= Int["+1010", 2]()
+stdout(p2.getOrDefault(-1).toString())
+
+// + octal
+p3 <= Int["+77", 8]()
+stdout(p3.getOrDefault(-1).toString())
+
+// bare + (should fail)
+p4 <= Int["+", 16]()
+stdout(p4.getOrDefault(-1).toString())
+"#;
+    assert_backend_parity_for_source(source, "b11_int_str_base_plus_sign");
+    let out = run_interpreter_src(source, "b11_int_str_base_plus_sign_expected")
+        .expect("interpreter output should exist");
+    assert_eq!(out, "true\n255\n10\n63\n-1");
+}
+
+/// B11-3b: Int[str, base]() failure cases — 3-way parity
+#[test]
+fn test_b11_int_str_base_failure_parity() {
+    let source = r#"
+// invalid digit for base
+f1 <= Int["2", 2]()
+stdout(f1.getOrDefault(-1).toString())
+
+// empty string with base
+f2 <= Int["", 16]()
+stdout(f2.getOrDefault(-1).toString())
+
+// invalid base (too low)
+f3 <= Int["5", 1]()
+stdout(f3.getOrDefault(-1).toString())
+
+// invalid base (too high)
+f4 <= Int["5", 37]()
+stdout(f4.getOrDefault(-1).toString())
+
+// non-hex char in hex
+f5 <= Int["gg", 16]()
+stdout(f5.getOrDefault(-1).toString())
+"#;
+    assert_backend_parity_for_source(source, "b11_int_str_base_failure");
+    let out = run_interpreter_src(source, "b11_int_str_base_failure_expected")
+        .expect("interpreter output should exist");
+    assert_eq!(out, "-1\n-1\n-1\n-1\n-1");
+}
+
+/// B11-3b: Int[str]() unmold / Lax methods — 3-way parity
+#[test]
+fn test_b11_int_str_lax_methods_parity() {
+    let source = r#"
+// unmold valid
+Int["99"]() ]=> v1
+stdout(v1.toString())
+
+// unmold failed -> default 0
+Int["bad"]() ]=> v2
+stdout(v2.toString())
+
+// getOrDefault
+r1 <= Int["42"]()
+stdout(r1.getOrDefault(999).toString())
+r2 <= Int["bad"]()
+stdout(r2.getOrDefault(999).toString())
+
+// hasValue / isEmpty
+ok <= Int["10"]()
+stdout(ok.hasValue().toString())
+stdout(ok.isEmpty().toString())
+fail <= Int["xyz"]()
+stdout(fail.hasValue().toString())
+stdout(fail.isEmpty().toString())
+"#;
+    assert_backend_parity_for_source(source, "b11_int_str_lax_methods");
+    let out = run_interpreter_src(source, "b11_int_str_lax_methods_expected")
+        .expect("interpreter output should exist");
+    assert_eq!(out, "99\n0\n42\n999\ntrue\nfalse\nfalse\ntrue");
+}
+
+// ============================================================
+// B11-4f: replace / replaceAll / split — 3 backend parity tests
+// ============================================================
+
+/// B11-4f: Str.replace() — first match only
+#[test]
+fn test_b11_str_replace_basic_parity() {
+    let source = r#"
+r1 <= "hello world".replace("world", "taida")
+stdout(r1)
+
+r2 <= "aaa".replace("a", "b")
+stdout(r2)
+
+r3 <= "no match".replace("xyz", "abc")
+stdout(r3)
+"#;
+    assert_backend_parity_for_source(source, "b11_str_replace_basic");
+    let out = run_interpreter_src(source, "b11_str_replace_basic_expected")
+        .expect("interpreter output should exist");
+    assert_eq!(out, "hello taida\nbaa\nno match");
+}
+
+/// B11-4f: Str.replaceAll() — all matches
+#[test]
+fn test_b11_str_replace_all_parity() {
+    let source = r#"
+r1 <= "hello world hello".replaceAll("hello", "hi")
+stdout(r1)
+
+r2 <= "aaa".replaceAll("a", "b")
+stdout(r2)
+
+r3 <= "no match".replaceAll("xyz", "abc")
+stdout(r3)
+"#;
+    assert_backend_parity_for_source(source, "b11_str_replace_all");
+    let out = run_interpreter_src(source, "b11_str_replace_all_expected")
+        .expect("interpreter output should exist");
+    assert_eq!(out, "hi world hi\nbbb\nno match");
+}
+
+/// B11-4f: Str.replace() / replaceAll() — empty target (no-op, B11-4a lock)
+#[test]
+fn test_b11_str_replace_empty_target_parity() {
+    let source = r#"
+r1 <= "hello".replace("", "X")
+stdout(r1)
+
+r2 <= "hello".replaceAll("", "X")
+stdout(r2)
+"#;
+    assert_backend_parity_for_source(source, "b11_str_replace_empty_target");
+    let out = run_interpreter_src(source, "b11_str_replace_empty_target_expected")
+        .expect("interpreter output should exist");
+    assert_eq!(out, "hello\nhello");
+}
+
+/// B11-4f: Str.split() — basic cases
+#[test]
+fn test_b11_str_split_basic_parity() {
+    let source = r#"
+parts <= "a,b,c".split(",")
+stdout(parts.length().toString())
+stdout(parts.get(0).getOrDefault("?"))
+stdout(parts.get(1).getOrDefault("?"))
+stdout(parts.get(2).getOrDefault("?"))
+"#;
+    assert_backend_parity_for_source(source, "b11_str_split_basic");
+    let out = run_interpreter_src(source, "b11_str_split_basic_expected")
+        .expect("interpreter output should exist");
+    assert_eq!(out, "3\na\nb\nc");
+}
+
+/// B11-4f: Str.split() — no separator found → single element list
+#[test]
+fn test_b11_str_split_no_match_parity() {
+    let source = r#"
+parts <= "hello".split(",")
+stdout(parts.length().toString())
+stdout(parts.get(0).getOrDefault("?"))
+"#;
+    assert_backend_parity_for_source(source, "b11_str_split_no_match");
+    let out = run_interpreter_src(source, "b11_str_split_no_match_expected")
+        .expect("interpreter output should exist");
+    assert_eq!(out, "1\nhello");
+}
+
+/// B11-4f: Str.split("") — chars split (B11-4a lock)
+#[test]
+fn test_b11_str_split_empty_separator_parity() {
+    let source = r#"
+parts <= "abc".split("")
+stdout(parts.length().toString())
+stdout(parts.get(0).getOrDefault("?"))
+stdout(parts.get(1).getOrDefault("?"))
+stdout(parts.get(2).getOrDefault("?"))
+"#;
+    assert_backend_parity_for_source(source, "b11_str_split_empty_sep");
+    let out = run_interpreter_src(source, "b11_str_split_empty_sep_expected")
+        .expect("interpreter output should exist");
+    assert_eq!(out, "3\na\nb\nc");
+}
+
+/// B11-4f: "".split("") → empty list (B11-4a lock)
+#[test]
+fn test_b11_str_split_empty_string_empty_sep_parity() {
+    let source = r#"
+parts <= "".split("")
+stdout(parts.length().toString())
+"#;
+    assert_backend_parity_for_source(source, "b11_str_split_empty_empty");
+    let out = run_interpreter_src(source, "b11_str_split_empty_empty_expected")
+        .expect("interpreter output should exist");
+    assert_eq!(out, "0");
+}
+
+/// B11-4f: "".split(",") → single empty string element (B11-4a lock)
+#[test]
+fn test_b11_str_split_empty_string_nonempty_sep_parity() {
+    let source = r#"
+parts <= "".split(",")
+stdout(parts.length().toString())
+stdout(parts.get(0).getOrDefault("MISS"))
+stdout("end")
+"#;
+    assert_backend_parity_for_source(source, "b11_str_split_empty_nonempty");
+    let out = run_interpreter_src(source, "b11_str_split_empty_nonempty_expected")
+        .expect("interpreter output should exist");
+    // parts = [""], length = 1, get(0) = "" (empty string output), then "end"
+    assert_eq!(out, "1\n\nend");
+}
+
+/// B11-4f: split with consecutive separators → empty parts preserved
+#[test]
+fn test_b11_str_split_consecutive_sep_parity() {
+    let source = r#"
+parts <= "a,,b".split(",")
+stdout(parts.length().toString())
+stdout(parts.get(0).getOrDefault("?"))
+stdout(parts.get(1).getOrDefault("?"))
+stdout(parts.get(2).getOrDefault("?"))
+"#;
+    assert_backend_parity_for_source(source, "b11_str_split_consecutive");
+    let out = run_interpreter_src(source, "b11_str_split_consecutive_expected")
+        .expect("interpreter output should exist");
+    assert_eq!(out, "3\na\n\nb");
+}
+
+/// B11-4f: replaceAll + split pipeline
+#[test]
+fn test_b11_str_replace_split_pipeline_parity() {
+    let source = r#"
+result <= "a-b-c".replaceAll("-", ",").split(",")
+stdout(result.length().toString())
+stdout(result.get(0).getOrDefault("?"))
+stdout(result.get(1).getOrDefault("?"))
+stdout(result.get(2).getOrDefault("?"))
+"#;
+    assert_backend_parity_for_source(source, "b11_str_replace_split_pipeline");
+    let out = run_interpreter_src(source, "b11_str_replace_split_pipeline_expected")
+        .expect("interpreter output should exist");
+    assert_eq!(out, "3\na\nb\nc");
+}
+
+/// B11B-006: split("") must split by Unicode codepoint, not byte
+#[test]
+fn test_b11_str_split_unicode_parity() {
+    let source = r#"
+parts <= "あいう".split("")
+stdout(parts.length().toString())
+stdout(parts.get(0).getOrDefault("?"))
+stdout(parts.get(1).getOrDefault("?"))
+stdout(parts.get(2).getOrDefault("?"))
+"#;
+    assert_backend_parity_for_source(source, "b11_str_split_unicode");
+    let out = run_interpreter_src(source, "b11_str_split_unicode_expected")
+        .expect("interpreter output should exist");
+    assert_eq!(out, "3\nあ\nい\nう");
+}
+
+/// B11B-013: replace() must treat replacement as literal string, not JS meta-syntax
+#[test]
+fn test_b11_str_replace_literal_meta_parity() {
+    let source = r#"
+r1 <= "abc".replace("b", "$&")
+stdout(r1)
+
+r2 <= "abc".replace("b", "$$")
+stdout(r2)
+
+r3 <= "abc".replaceAll("b", "$&")
+stdout(r3)
+"#;
+    assert_backend_parity_for_source(source, "b11_str_replace_literal_meta");
+    let out = run_interpreter_src(source, "b11_str_replace_literal_meta_expected")
+        .expect("interpreter output should exist");
+    assert_eq!(out, "a$&c\na$$c\na$&c");
+}
+
+// B11-5e: If mold — 3 backend parity tests
+// ============================================================
+
+/// B11-5e: If[true, then, else]() → then value
+#[test]
+fn test_b11_if_mold_basic_true_parity() {
+    let source = r#"
+stdout(If[true, 1, 2]())
+stdout(If[true, "yes", "no"]())
+"#;
+    assert_backend_parity_for_source(source, "b11_if_basic_true");
+    let out = run_interpreter_src(source, "b11_if_basic_true_expected")
+        .expect("interpreter output should exist");
+    assert_eq!(out, "1\nyes");
+}
+
+/// B11-5e: If[false, then, else]() → else value
+#[test]
+fn test_b11_if_mold_basic_false_parity() {
+    let source = r#"
+stdout(If[false, 1, 2]())
+stdout(If[false, "yes", "no"]())
+"#;
+    assert_backend_parity_for_source(source, "b11_if_basic_false");
+    let out = run_interpreter_src(source, "b11_if_basic_false_expected")
+        .expect("interpreter output should exist");
+    assert_eq!(out, "2\nno");
+}
+
+/// B11-5e: Nested If molds
+#[test]
+fn test_b11_if_mold_nested_parity() {
+    let source = r#"
+stdout(If[true, If[false, 1, 2](), 3]())
+stdout(If[false, 4, If[true, 5, 6]()]())
+stdout(If[true, If[true, "a", "b"](), If[false, "c", "d"]()]())
+"#;
+    assert_backend_parity_for_source(source, "b11_if_nested");
+    let out = run_interpreter_src(source, "b11_if_nested_expected")
+        .expect("interpreter output should exist");
+    assert_eq!(out, "2\n5\na");
+}
+
+/// B11-5e: If with pipeline and _ placeholder
+#[test]
+fn test_b11_if_mold_pipeline_parity() {
+    let source = r#"
+5 => If[_ > 3, "big", "small"]() => r1
+stdout(r1)
+
+2 => If[_ > 3, "big", "small"]() => r2
+stdout(r2)
+"#;
+    assert_backend_parity_for_source(source, "b11_if_pipeline");
+    let out = run_interpreter_src(source, "b11_if_pipeline_expected")
+        .expect("interpreter output should exist");
+    assert_eq!(out, "big\nsmall");
+}
+
+/// B11-5e: If with pipeline clamp pattern — mixed top-level and nested _
+#[test]
+fn test_b11_if_mold_pipeline_clamp_parity() {
+    let source = r#"
+150 => If[_ > 100, 100, _]() => r1
+stdout(r1)
+
+50 => If[_ > 100, 100, _]() => r2
+stdout(r2)
+"#;
+    assert_backend_parity_for_source(source, "b11_if_pipeline_clamp");
+    let out = run_interpreter_src(source, "b11_if_pipeline_clamp_expected")
+        .expect("interpreter output should exist");
+    assert_eq!(out, "100\n50");
+}
+
+/// B11-5e: If with comparison condition (non-placeholder)
+#[test]
+fn test_b11_if_mold_comparison_parity() {
+    let source = r#"
+x <= 10
+stdout(If[x > 5, "high", "low"]())
+stdout(If[x == 10, "exact", "other"]())
+stdout(If[x < 3, "small", "big"]())
+"#;
+    assert_backend_parity_for_source(source, "b11_if_comparison");
+    let out = run_interpreter_src(source, "b11_if_comparison_expected")
+        .expect("interpreter output should exist");
+    assert_eq!(out, "high\nexact\nbig");
+}
+
+/// B11-5e: If short-circuit — dead branch function is not called
+#[test]
+fn test_b11_if_mold_short_circuit_parity() {
+    // The dead branch contains a function call whose result we discard.
+    // We verify only the selected branch value appears in stdout.
+    let source = r#"
+add <= _ x y = x + y
+
+r1 <= If[true, add(1, 2), add(100, 200)]()
+stdout(r1)
+
+r2 <= If[false, add(1, 2), add(100, 200)]()
+stdout(r2)
+"#;
+    assert_backend_parity_for_source(source, "b11_if_short_circuit");
+    let out = run_interpreter_src(source, "b11_if_short_circuit_expected")
+        .expect("interpreter output should exist");
+    assert_eq!(out, "3\n300");
+}
+
+/// B11-5e: If with truthy/falsy Int values (0 = falsy, non-zero = truthy)
+#[test]
+fn test_b11_if_mold_truthy_int_parity() {
+    let source = r#"
+stdout(If[1, "truthy", "falsy"]())
+stdout(If[0, "truthy", "falsy"]())
+stdout(If[42, "truthy", "falsy"]())
+"#;
+    assert_backend_parity_for_source(source, "b11_if_truthy_int");
+    let out = run_interpreter_src(source, "b11_if_truthy_int_expected")
+        .expect("interpreter output should exist");
+    assert_eq!(out, "truthy\nfalsy\ntruthy");
+}
+
+// ── B11-6g: TypeIs / TypeExtends parity tests ──────────────────────
+
+/// B11-6g: TypeIs with Int literal
+#[test]
+fn test_b11_typeis_int_literal_parity() {
+    let source = r#"
+stdout(TypeIs[42, :Int]())
+stdout(TypeIs[42, :Str]())
+stdout(TypeIs[42, :Bool]())
+"#;
+    assert_backend_parity_for_source(source, "b11_typeis_int_literal");
+    let out = run_interpreter_src(source, "b11_typeis_int_literal_expected")
+        .expect("interpreter output should exist");
+    assert_eq!(out, "true\nfalse\nfalse");
+}
+
+/// B11-6g: TypeIs with Str literal
+#[test]
+fn test_b11_typeis_str_literal_parity() {
+    let source = r#"
+stdout(TypeIs["hello", :Str]())
+stdout(TypeIs["hello", :Int]())
+stdout(TypeIs["hello", :Bool]())
+"#;
+    assert_backend_parity_for_source(source, "b11_typeis_str_literal");
+    let out = run_interpreter_src(source, "b11_typeis_str_literal_expected")
+        .expect("interpreter output should exist");
+    assert_eq!(out, "true\nfalse\nfalse");
+}
+
+/// B11-6g: TypeIs with Bool literal
+#[test]
+fn test_b11_typeis_bool_literal_parity() {
+    let source = r#"
+stdout(TypeIs[true, :Bool]())
+stdout(TypeIs[false, :Bool]())
+stdout(TypeIs[true, :Int]())
+"#;
+    assert_backend_parity_for_source(source, "b11_typeis_bool_literal");
+    let out = run_interpreter_src(source, "b11_typeis_bool_literal_expected")
+        .expect("interpreter output should exist");
+    assert_eq!(out, "true\ntrue\nfalse");
+}
+
+/// B11-6g: TypeIs with Float literal
+#[test]
+fn test_b11_typeis_float_literal_parity() {
+    let source = r#"
+stdout(TypeIs[3.14, :Float]())
+stdout(TypeIs[3.14, :Int]())
+stdout(TypeIs[3.14, :Num]())
+"#;
+    assert_backend_parity_for_source(source, "b11_typeis_float_literal");
+    let out = run_interpreter_src(source, "b11_typeis_float_literal_expected")
+        .expect("interpreter output should exist");
+    assert_eq!(out, "true\nfalse\ntrue");
+}
+
+/// B11-6g: TypeIs with Num check (covers both Int and Float)
+#[test]
+fn test_b11_typeis_num_parity() {
+    let source = r#"
+stdout(TypeIs[42, :Num]())
+stdout(TypeIs[3.14, :Num]())
+stdout(TypeIs["hello", :Num]())
+stdout(TypeIs[true, :Num]())
+"#;
+    assert_backend_parity_for_source(source, "b11_typeis_num");
+    let out = run_interpreter_src(source, "b11_typeis_num_expected")
+        .expect("interpreter output should exist");
+    assert_eq!(out, "true\ntrue\nfalse\nfalse");
+}
+
+/// B11-6g: TypeIs with Enum variant check
+#[test]
+fn test_b11_typeis_enum_variant_parity() {
+    let source = r#"
+Enum => Status = :Ok :Fail :Retry
+x <= Status:Ok()
+stdout(TypeIs[x, Status:Ok]())
+stdout(TypeIs[x, Status:Fail]())
+stdout(TypeIs[Status:Retry(), Status:Retry]())
+stdout(TypeIs[Status:Fail(), Status:Ok]())
+"#;
+    assert_backend_parity_for_source(source, "b11_typeis_enum_variant");
+    let out = run_interpreter_src(source, "b11_typeis_enum_variant_expected")
+        .expect("interpreter output should exist");
+    assert_eq!(out, "true\nfalse\ntrue\nfalse");
+}
+
+/// B11-6g: TypeExtends with same type
+#[test]
+fn test_b11_typeextends_same_type_parity() {
+    let source = r#"
+stdout(TypeExtends[:Int, :Int]())
+stdout(TypeExtends[:Str, :Str]())
+stdout(TypeExtends[:Bool, :Bool]())
+"#;
+    assert_backend_parity_for_source(source, "b11_typeextends_same_type");
+    let out = run_interpreter_src(source, "b11_typeextends_same_type_expected")
+        .expect("interpreter output should exist");
+    assert_eq!(out, "true\ntrue\ntrue");
+}
+
+/// B11-6g: TypeExtends with numeric hierarchy
+#[test]
+fn test_b11_typeextends_numeric_hierarchy_parity() {
+    let source = r#"
+stdout(TypeExtends[:Int, :Num]())
+stdout(TypeExtends[:Float, :Num]())
+stdout(TypeExtends[:Int, :Float]())
+stdout(TypeExtends[:Str, :Num]())
+stdout(TypeExtends[:Num, :Int]())
+"#;
+    assert_backend_parity_for_source(source, "b11_typeextends_numeric");
+    let out = run_interpreter_src(source, "b11_typeextends_numeric_expected")
+        .expect("interpreter output should exist");
+    assert_eq!(out, "true\ntrue\ntrue\nfalse\nfalse");
+}
+
+/// B11-6g: TypeExtends with inheritance chain
+#[test]
+fn test_b11_typeextends_inheritance_parity() {
+    let source = r#"
+Animal = @(name: Str)
+Animal => Dog = @(breed: Str)
+Dog => Poodle = @(size: Str)
+stdout(TypeExtends[:Dog, :Animal]())
+stdout(TypeExtends[:Poodle, :Animal]())
+stdout(TypeExtends[:Poodle, :Dog]())
+stdout(TypeExtends[:Animal, :Dog]())
+"#;
+    assert_backend_parity_for_source(source, "b11_typeextends_inheritance");
+    let out = run_interpreter_src(source, "b11_typeextends_inheritance_expected")
+        .expect("interpreter output should exist");
+    assert_eq!(out, "true\ntrue\ntrue\nfalse");
+}
+
+/// B11-6g: TypeExtends with unrelated types
+#[test]
+fn test_b11_typeextends_unrelated_parity() {
+    let source = r#"
+stdout(TypeExtends[:Str, :Int]())
+stdout(TypeExtends[:Bool, :Str]())
+stdout(TypeExtends[:Int, :Bool]())
+"#;
+    assert_backend_parity_for_source(source, "b11_typeextends_unrelated");
+    let out = run_interpreter_src(source, "b11_typeextends_unrelated_expected")
+        .expect("interpreter output should exist");
+    assert_eq!(out, "false\nfalse\nfalse");
+}
+
+// ── B11B-015: TypeIs with named types and error subtypes ───────────
+
+/// B11B-015: TypeIs[value, :NamedType]() with custom named type
+#[test]
+fn test_b11_typeis_named_type_parity() {
+    let source = r#"
+Animal = @(name: Str)
+dog <= Animal(name <= "Pochi")
+stdout(TypeIs[dog, :Animal]())
+stdout(TypeIs["hello", :Animal]())
+stdout(TypeIs[42, :Animal]())
+"#;
+    assert_backend_parity_for_source(source, "b11_typeis_named_type");
+    let out = run_interpreter_src(source, "b11_typeis_named_type_expected")
+        .expect("interpreter output should exist");
+    assert_eq!(out, "true\nfalse\nfalse");
+}
+
+/// B11B-015: TypeIs with error subtype checks
+#[test]
+fn test_b11_typeis_error_subtype_parity() {
+    let source = r#"
+Error => AppError = @(code: Int)
+e <= AppError(code <= 1)
+stdout(TypeIs[e, :Error]())
+stdout(TypeIs[e, :AppError]())
+"#;
+    assert_backend_parity_for_source(source, "b11_typeis_error_subtype");
+    let out = run_interpreter_src(source, "b11_typeis_error_subtype_expected")
+        .expect("interpreter output should exist");
+    assert_eq!(out, "true\ntrue");
+}
+
+/// B11B-015: TypeIs negative case (AppError is not Animal)
+#[test]
+fn test_b11_typeis_error_subtype_negative_parity() {
+    let source = r#"
+Animal = @(name: Str)
+Error => AppError = @(code: Int)
+e <= AppError(code <= 1)
+stdout(TypeIs[e, :Animal]())
+"#;
+    assert_backend_parity_for_source(source, "b11_typeis_error_subtype_negative");
+    let out = run_interpreter_src(source, "b11_typeis_error_subtype_negative_expected")
+        .expect("interpreter output should exist");
+    assert_eq!(out, "false");
 }

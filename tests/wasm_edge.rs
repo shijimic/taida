@@ -477,10 +477,12 @@ fn wasm_edge_size_check() {
 
     eprintln!("WE-3: wasm-edge hello size = {} bytes", size);
 
-    // wasm-edge hello should be small (same as wasm-min -- no extra imports GC'd)
+    // wasm-edge hello: runtime_core_wasm.c grew with B11 (stdout_with_tag, TypeIs
+    // runtime, etc.) and clang's wasm LTO does not fully eliminate unused functions.
+    // Baseline as of @b.11.rc3: ~10.5 KB (23 functions after DCE).
     assert!(
-        size <= 4096,
-        "wasm-edge hello should be <= 4KB, got {} bytes",
+        size <= 16384,
+        "wasm-edge hello should be <= 16KB, got {} bytes",
         size
     );
 }

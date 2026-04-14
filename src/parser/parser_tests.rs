@@ -1032,6 +1032,128 @@ fn test_parse_export_single_symbol() {
     }
 }
 
+// ── B11-1e: Package identity in export ──
+
+#[test]
+fn test_parse_export_version_with_package_identity() {
+    // <<<@b.11.rc3 taida-lang/terminal
+    let stmt = first_stmt("<<<@b.11.rc3 taida-lang/terminal");
+    match stmt {
+        Statement::Export(exp) => {
+            assert_eq!(exp.version, Some("b.11.rc3".to_string()));
+            assert_eq!(exp.path, Some("taida-lang/terminal".to_string()));
+            assert!(exp.symbols.is_empty());
+        }
+        other => panic!("Expected Export, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_parse_export_version_with_package_identity_and_symbols_accepted() {
+    // B11-10b: `<<<@version owner/name @(symbols)` is the Phase 10 canonical surface.
+    let stmt = first_stmt("<<<@b.11.rc3 taida-lang/terminal @(capitalize, truncate)");
+    match stmt {
+        Statement::Export(exp) => {
+            assert_eq!(exp.version, Some("b.11.rc3".to_string()));
+            assert_eq!(exp.path, Some("taida-lang/terminal".to_string()));
+            assert_eq!(exp.symbols, vec!["capitalize", "truncate"]);
+        }
+        other => panic!("Expected Export, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_parse_export_version_with_simple_org_name() {
+    // <<<@a.3 shijimic/my-pkg
+    let stmt = first_stmt("<<<@a.3 shijimic/my-pkg");
+    match stmt {
+        Statement::Export(exp) => {
+            assert_eq!(exp.version, Some("a.3".to_string()));
+            assert_eq!(exp.path, Some("shijimic/my-pkg".to_string()));
+            assert!(exp.symbols.is_empty());
+        }
+        other => panic!("Expected Export, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_parse_export_version_only_no_package_identity() {
+    // <<<@a.3 @(MyApp) — existing format, no package identity
+    let stmt = first_stmt("<<<@a.3 @(MyApp)");
+    match stmt {
+        Statement::Export(exp) => {
+            assert_eq!(exp.version, Some("a.3".to_string()));
+            assert_eq!(exp.path, None);
+            assert_eq!(exp.symbols, vec!["MyApp"]);
+        }
+        other => panic!("Expected Export, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_parse_export_version_only_bare() {
+    // <<<@a.3 — version only, no symbols, no package identity
+    let stmt = first_stmt("<<<@a.3");
+    match stmt {
+        Statement::Export(exp) => {
+            assert_eq!(exp.version, Some("a.3".to_string()));
+            assert_eq!(exp.path, None);
+            assert!(exp.symbols.is_empty());
+        }
+        other => panic!("Expected Export, got {:?}", other),
+    }
+}
+
+// ── B11-10b: Phase 10 canonical surface (no arrow) ──
+
+#[test]
+fn test_parse_export_arrow_surface_rejected() {
+    // B11-10b: `<<<@version owner/name => @(symbols)` is no longer supported.
+    let (_program, errors) = parse("<<<@b.11.rc3 taida-lang/terminal => @(open, close)");
+    assert!(
+        !errors.is_empty(),
+        "Expected parse error for arrow surface, but got none"
+    );
+    assert!(
+        errors[0]
+            .message
+            .contains("arrow syntax after package identity is no longer supported"),
+        "Error message should mention obsolete arrow syntax, got: {}",
+        errors[0].message
+    );
+}
+
+#[test]
+fn test_parse_export_arrow_surface_single_symbol_rejected() {
+    // B11-10b: single-symbol arrow surface is also rejected.
+    let (_program, errors) = parse("<<<@a.3 shijimic/my-pkg => @(hello)");
+    assert!(
+        !errors.is_empty(),
+        "Expected parse error for arrow surface, but got none"
+    );
+    assert!(
+        errors[0]
+            .message
+            .contains("arrow syntax after package identity is no longer supported"),
+        "Error message should mention obsolete arrow syntax, got: {}",
+        errors[0].message
+    );
+}
+
+#[test]
+fn test_parse_export_package_identity_with_symbols_accepted() {
+    // B11-10b: `<<<@version owner/name @(symbols)` is the canonical surface.
+    let stmt = first_stmt("<<<@b.11.rc3 taida-lang/terminal @(open, close)");
+    match stmt {
+        Statement::Export(exp) => {
+            assert_eq!(exp.version, Some("b.11.rc3".to_string()));
+            assert_eq!(exp.path, Some("taida-lang/terminal".to_string()));
+            assert_eq!(exp.symbols, vec!["open", "close"]);
+        }
+        other => panic!("Expected Export, got {:?}", other),
+    }
+}
+
 /// Test helper: split version suffix from path string.
 fn split_version_from_path(path: &str) -> (String, Option<String>) {
     if let Some(at_pos) = path.rfind('@') {

@@ -59,6 +59,7 @@ struct MoldBindingDef<'a> {
 /// - `E1608` -- unknown enum variant
 /// - `E1611` -- JS backend capability rejection
 /// - `E1612` -- WASM backend capability rejection
+/// - `E1613` -- TypeExtends does not accept enum variant literals
 ///
 /// Some internal diagnostic messages (e.g., inheritance validation, mold binding
 /// checks) do not yet carry error codes. These are emitted during registration
@@ -724,6 +725,7 @@ impl TypeChecker {
             | Expr::Gorilla(_)
             | Expr::Placeholder(_)
             | Expr::EnumVariant(_, _, _)
+            | Expr::TypeLiteral(_, _, _)
             | Expr::Hole(_) => None,
             Expr::BuchiPack(fields, _) => fields
                 .iter()
@@ -946,15 +948,17 @@ impl TypeChecker {
             None => return,
         };
 
-        // Resolve the import path to a .td file
-        let td_path = if imp.path.starts_with("./")
+        // Resolve the import path to a .td file + optional facade exports
+        let (td_path, pkg_manifest_exports): (std::path::PathBuf, Option<Vec<String>>) = if imp
+            .path
+            .starts_with("./")
             || imp.path.starts_with("../")
             || imp.path.starts_with('/')
         {
             let source_dir = source_file.parent().unwrap_or(std::path::Path::new("."));
             let path = source_dir.join(&imp.path);
             if path.exists() {
-                path
+                (path, None)
             } else {
                 return; // Cannot resolve — let downstream handle
             }
@@ -979,28 +983,76 @@ impl TypeChecker {
                         Some(sub) => {
                             let sub_path = res.pkg_dir.join(format!("{}.td", sub));
                             if sub_path.exists() {
-                                sub_path
+                                (sub_path, None)
                             } else {
                                 return; // Cannot resolve submodule — let downstream handle
                             }
                         }
                         None => {
-                            // Package root import: read packages.tdm to determine entry point
-                            // (mirrors interpreter/JS/Native logic)
-                            let entry_name =
-                                match crate::pkg::manifest::Manifest::from_dir(&res.pkg_dir) {
-                                    Ok(Some(manifest)) => manifest.entry,
-                                    _ => "main.td".to_string(),
-                                };
-                            let entry_path = if let Some(stripped) = entry_name.strip_prefix("./") {
-                                res.pkg_dir.join(stripped)
+                            // Package root import: use centralized facade validation
+                            // B11B-023: Delegates to pkg::facade for DRY validation
+                            if let Some(ctx) =
+                                crate::pkg::facade::resolve_facade_context(&res.pkg_dir)
+                            {
+                                let sym_names: Vec<String> =
+                                    imp.symbols.iter().map(|s| s.name.clone()).collect();
+                                let violations = crate::pkg::facade::validate_facade(
+                                    &ctx.facade_exports,
+                                    &ctx.entry_path,
+                                    &sym_names,
+                                );
+                                for v in &violations {
+                                    match v {
+                                        crate::pkg::facade::FacadeViolation::HiddenSymbol {
+                                            name,
+                                            available,
+                                        } => {
+                                            self.errors.push(TypeError {
+                                                    message: format!(
+                                                        "[E1701] Symbol '{}' is not part of the public API declared in packages.tdm. \
+                                                         Available exports: {}",
+                                                        name,
+                                                        available.join(", ")
+                                                    ),
+                                                    span: imp.span.clone(),
+                                                });
+                                        }
+                                        crate::pkg::facade::FacadeViolation::GhostSymbol {
+                                            name,
+                                        } => {
+                                            self.errors.push(TypeError {
+                                                    message: format!(
+                                                        "[E1701] Symbol '{}' is declared in packages.tdm but not found in the entry module. \
+                                                         The entry module must export all symbols listed in the package facade.",
+                                                        name
+                                                    ),
+                                                    span: imp.span.clone(),
+                                                });
+                                        }
+                                    }
+                                }
+                                if !violations.is_empty() {
+                                    return;
+                                }
+                                (ctx.entry_path, Some(ctx.facade_exports))
                             } else {
-                                res.pkg_dir.join(&entry_name)
-                            };
-                            if entry_path.exists() {
-                                entry_path
-                            } else {
-                                return; // Entry not found — let downstream handle
+                                // No facade — resolve entry module normally
+                                let entry_name =
+                                    match crate::pkg::manifest::Manifest::from_dir(&res.pkg_dir) {
+                                        Ok(Some(manifest)) => manifest.entry,
+                                        _ => "main.td".to_string(),
+                                    };
+                                let entry_path =
+                                    if let Some(stripped) = entry_name.strip_prefix("./") {
+                                        res.pkg_dir.join(stripped)
+                                    } else {
+                                        res.pkg_dir.join(&entry_name)
+                                    };
+                                if entry_path.exists() {
+                                    (entry_path, None)
+                                } else {
+                                    return;
+                                }
                             }
                         }
                     }
@@ -1016,7 +1068,7 @@ impl TypeChecker {
         };
         let (program, _) = crate::parser::parse(&source);
 
-        // Collect explicit export list
+        // Collect explicit export list from entry module's <<< statements
         let mut exports = std::collections::HashSet::new();
         let mut has_export = false;
         for stmt in &program.statements {
@@ -1028,12 +1080,19 @@ impl TypeChecker {
             }
         }
 
+        // B11B-023: Facade validation (membership + ghost) is now handled by
+        // pkg::facade::validate_facade() above. If we reach here with a facade,
+        // it means all symbols passed validation — proceed to normal export check.
+        if pkg_manifest_exports.is_some() {
+            return;
+        }
+
         // If no <<< found, all symbols are exported (backward compat)
         if !has_export {
             return;
         }
 
-        // Validate each imported symbol
+        // Validate each imported symbol against entry module's <<< export list
         for sym in &imp.symbols {
             if !exports.contains(&sym.name) {
                 let export_list = if exports.is_empty() {
@@ -1254,6 +1313,14 @@ impl TypeChecker {
         // Second pass: type-check statements
         for stmt in &program.statements {
             self.check_statement(stmt);
+        }
+
+        // Third pass: check mold-specific errors (e.g., E1613) that need
+        // to fire regardless of expression context. This separate pass
+        // ensures errors are caught even inside builtin function args where
+        // infer_expr_type may not recurse.
+        for stmt in &program.statements {
+            self.check_mold_errors_in_stmt(stmt);
         }
     }
 
@@ -2171,6 +2238,105 @@ defaulted fields must be provided via `()`",
         }
     }
 
+    // ── B11B-016: Mold-specific error pass (third pass) ──────────────
+    // Recursively walks expressions to find mold patterns that need
+    // rejection regardless of expression context. Separated from
+    // infer_expr_type to avoid triggering unrelated type errors (e.g.,
+    // E1510 on closure return types) in builtin function arguments.
+
+    fn check_mold_errors_in_stmt(&mut self, stmt: &Statement) {
+        match stmt {
+            Statement::Assignment(a) => self.check_mold_errors_in_expr(&a.value),
+            Statement::Expr(e) => self.check_mold_errors_in_expr(e),
+            Statement::FuncDef(fd) => {
+                for s in &fd.body {
+                    self.check_mold_errors_in_stmt(s);
+                }
+            }
+            Statement::ErrorCeiling(ec) => {
+                for s in &ec.handler_body {
+                    self.check_mold_errors_in_stmt(s);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn check_mold_errors_in_expr(&mut self, expr: &Expr) {
+        match expr {
+            // B11B-016: TypeExtends does not accept enum variant literals
+            Expr::MoldInst(name, type_args, fields, _) => {
+                if name == "TypeExtends" {
+                    for arg in type_args {
+                        if let Expr::TypeLiteral(enum_name, Some(variant_name), lit_span) = arg {
+                            self.errors.push(TypeError {
+                                message: format!(
+                                    "[E1613] TypeExtends does not accept enum variants (`{}:{}`). \
+                                     Hint: Use TypeIs for variant checks (e.g., `TypeIs[value, {}:{}]()`).",
+                                    enum_name, variant_name, enum_name, variant_name
+                                ),
+                                span: lit_span.clone(),
+                            });
+                        }
+                    }
+                }
+                for arg in type_args {
+                    self.check_mold_errors_in_expr(arg);
+                }
+                for f in fields {
+                    self.check_mold_errors_in_expr(&f.value);
+                }
+            }
+            Expr::FuncCall(callee, args, _) => {
+                self.check_mold_errors_in_expr(callee);
+                for arg in args {
+                    self.check_mold_errors_in_expr(arg);
+                }
+            }
+            Expr::MethodCall(obj, _, args, _) => {
+                self.check_mold_errors_in_expr(obj);
+                for arg in args {
+                    self.check_mold_errors_in_expr(arg);
+                }
+            }
+            Expr::Pipeline(exprs, _) => {
+                for e in exprs {
+                    self.check_mold_errors_in_expr(e);
+                }
+            }
+            Expr::CondBranch(arms, _) => {
+                for arm in arms {
+                    if let Some(cond) = &arm.condition {
+                        self.check_mold_errors_in_expr(cond);
+                    }
+                    for s in &arm.body {
+                        self.check_mold_errors_in_stmt(s);
+                    }
+                }
+            }
+            Expr::BuchiPack(fields, _) | Expr::TypeInst(_, fields, _) => {
+                for f in fields {
+                    self.check_mold_errors_in_expr(&f.value);
+                }
+            }
+            Expr::ListLit(items, _) => {
+                for item in items {
+                    self.check_mold_errors_in_expr(item);
+                }
+            }
+            Expr::UnaryOp(_, inner, _) => self.check_mold_errors_in_expr(inner),
+            Expr::BinaryOp(l, _, r, _) => {
+                self.check_mold_errors_in_expr(l);
+                self.check_mold_errors_in_expr(r);
+            }
+            Expr::Throw(inner, _) => self.check_mold_errors_in_expr(inner),
+            Expr::FieldAccess(obj, _, _) => self.check_mold_errors_in_expr(obj),
+            Expr::Lambda(_, body, _) => self.check_mold_errors_in_expr(body),
+            // Leaf expressions — no recursion needed
+            _ => {}
+        }
+    }
+
     /// Type-check a statement (second pass).
     fn check_statement(&mut self, stmt: &Statement) {
         match stmt {
@@ -2471,6 +2637,8 @@ defaulted fields must be provided via `()`",
             Expr::Gorilla(_) => Type::Unit,
             Expr::Placeholder(_) => Type::Unknown,
             Expr::Hole(_) => Type::Unknown,
+            // B11-6a: TypeLiteral is a compile-time type reference, not a value
+            Expr::TypeLiteral(_, _, _) => Type::Str,
 
             Expr::Ident(name, span) => {
                 // Look up variable in scope
@@ -3411,6 +3579,42 @@ defaulted fields must be provided via `()`",
                         }
                     }
                     // String / Bytes operation molds
+                    // B11-5d: If[cond, then, else]() returns the type of the then branch
+                    // B11B-014: check branch type compatibility (same as | |> E1603)
+                    "If" => {
+                        if type_args.len() >= 3 {
+                            let then_ty = self.infer_expr_type(&type_args[1]);
+                            let else_ty = self.infer_expr_type(&type_args[2]);
+                            if !(then_ty == Type::Unknown
+                                || else_ty == Type::Unknown
+                                || Self::contains_unknown(&then_ty)
+                                || Self::contains_unknown(&else_ty)
+                                || self.registry.is_subtype_of(&else_ty, &then_ty)
+                                || then_ty.is_numeric() && else_ty.is_numeric())
+                            {
+                                self.errors.push(TypeError {
+                                    message: format!(
+                                        "[E1603] Condition branch type mismatch: then branch returns {}, but else branch returns {}. \
+                                         Hint: Both branches of If[] should return the same type.",
+                                        then_ty, else_ty
+                                    ),
+                                    span: mold_span.clone(),
+                                });
+                            }
+                            then_ty
+                        } else if type_args.len() >= 2 {
+                            self.infer_expr_type(&type_args[1])
+                        } else {
+                            Type::Unknown
+                        }
+                    }
+                    // B11-6e: TypeIs[value, :TypeName]() → Bool
+                    "TypeIs" => Type::Bool,
+                    // B11-6e: TypeExtends[:TypeA, :TypeB]() → Bool
+                    // Note: E1613 (variant rejection) is checked by
+                    // check_mold_errors_in_expr(), not here, to ensure it
+                    // fires regardless of expression context.
+                    "TypeExtends" => Type::Bool,
                     "Upper" | "Lower" | "Trim" | "Replace" | "Repeat" | "Pad" => Type::Str,
                     "CharAt" => Type::Generic("Lax".into(), vec![Type::Str]),
                     "Slice" => {

@@ -723,6 +723,8 @@ function __taida_parse_int_base(str, base) {
   if (str[0] === '-') {
     negative = true;
     i = 1;
+  } else if (str[0] === '+') {
+    i = 1;
   }
   if (i >= str.length) return null;
   const b = BigInt(base);
@@ -750,7 +752,7 @@ function Int_mold(value, base) {
   if (typeof value === 'bigint') return Lax(__taida_fromI64BigInt(value));
   if (typeof value === 'boolean') return Lax(value ? 1 : 0);
   if (typeof value === 'string') {
-    if (!/^-?\d+$/.test(value)) return Lax(null, 0);
+    if (!/^[+-]?\d+$/.test(value)) return Lax(null, 0);
     try {
       return Lax(__taida_fromI64BigInt(BigInt(value)));
     } catch (_) {
@@ -978,6 +980,25 @@ function Replace(str, old, rep, opts) {
   if (typeof str !== 'string') return '';
   if (opts && opts.all) return str.split(old).join(rep);
   return str.replace(old, rep);
+}
+// B11-4c: Str method helpers (edge-case parity with Interpreter/Native)
+function __taida_str_replace(s, target, rep) {
+  if (typeof s !== 'string') return '';
+  if (target === '') return s; // empty target → no-op (B11-4a)
+  // Use indexOf+slice to avoid JS replacement meta-syntax ($&, $$, etc.)
+  const idx = s.indexOf(target);
+  if (idx === -1) return s;
+  return s.slice(0, idx) + rep + s.slice(idx + target.length);
+}
+function __taida_str_replace_all(s, target, rep) {
+  if (typeof s !== 'string') return '';
+  if (target === '') return s; // empty target → no-op (B11-4a)
+  return s.split(target).join(rep);
+}
+function __taida_str_split(s, sep) {
+  if (typeof s !== 'string') return Object.freeze([]);
+  if (sep === '') return Object.freeze(s.length === 0 ? [] : Array.from(s));
+  return Object.freeze(s.split(sep));
 }
 function Slice(val, opts) {
   const start = (opts && __taida_isIntNumber(opts.start)) ? opts.start : 0;
