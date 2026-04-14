@@ -139,6 +139,104 @@ pub(crate) struct ActiveStreamingWriter {
     pub ws_close_code: i64,
 }
 
+// ── C12-12 / FB-2: Body encoding internal representation ─────
+//
+// `BodyEncoding` names the three ways an HTTP/1.1 request can frame
+// its body. It is derived from the parsed headers at handshake time
+// and consumed by the runtime (read path, keep-alive advance,
+// streaming state transitions).
+//
+// Intentionally *not* exposed in the handler-visible Taida
+// `Value::BuchiPack`. The Taida surface continues to expose only
+// the flattened `contentLength: Int` and `chunked: Bool` pair for v1
+// compatibility. The `BodyEncoding` enum is the single source of
+// truth that the internal wiring promotes to when v2 chunked /
+// trailers / HTTP/2 DATA frames gain first-class support — see
+// `.dev/taida-logs/docs/design/net_v2_chunked.md` for the upgrade
+// path.
+//
+// Representation rules (matches RFC 7230 § 3.3.3):
+//   - `Transfer-Encoding: chunked` present (alone) → `Chunked`
+//   - `Content-Length: N` with N > 0 and no TE:chunked → `ContentLength(N)`
+//   - `Content-Length: 0` and no TE:chunked → `Empty`
+//   - neither header present → `Empty`
+//   - TE:chunked + any `Content-Length` → rejected at parse time
+//     (predates `BodyEncoding` construction), so this enum never has
+//     to represent the invalid combination.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BodyEncoding {
+    /// No body bytes on the wire.
+    /// Used for absent Content-Length and `Content-Length: 0`.
+    Empty,
+    /// Fixed-length body. The inner value is the non-zero byte count
+    /// declared in the Content-Length header and bounds the read loop.
+    ContentLength(u64),
+    /// `Transfer-Encoding: chunked`. Byte count is only known after
+    /// the terminal chunk is seen.
+    Chunked,
+}
+
+impl BodyEncoding {
+    /// Classify a request body from the three signals extracted by
+    /// `parse_request_head`. Contract: `has_chunked` and
+    /// `has_content_length` are never both true (the parser rejects
+    /// that combination before calling us). `content_length_val` is
+    /// only meaningful when `has_content_length` is true.
+    pub(crate) fn classify(
+        has_chunked: bool,
+        has_content_length: bool,
+        content_length_val: i64,
+    ) -> Self {
+        if has_chunked {
+            BodyEncoding::Chunked
+        } else if has_content_length && content_length_val > 0 {
+            // content_length_val is validated non-negative and <= 2^53-1
+            // at parse time, so this cast is always safe.
+            BodyEncoding::ContentLength(content_length_val as u64)
+        } else {
+            // Either `Content-Length: 0` or the header is absent — in
+            // either case the body is empty.
+            BodyEncoding::Empty
+        }
+    }
+
+    /// Derive `BodyEncoding` from the Result BuchiPack returned by
+    /// `parse_request_head`. Used by unit tests to confirm that the
+    /// handler-visible fields agree with the internal representation.
+    ///
+    /// Note: the Taida surface flattens "header absent" and
+    /// `Content-Length: 0` into a single `contentLength: 0` field, so
+    /// this reverse path cannot distinguish them. Both cases map to
+    /// `Empty`, which is the same classification the runtime read
+    /// loop observes — preserving the v1 invariant that the two are
+    /// indistinguishable at the handler layer.
+    #[cfg(test)]
+    pub(crate) fn from_parsed_result_value(parsed: &Value) -> Option<Self> {
+        let inner = extract_result_value(parsed)?;
+        let chunked = get_field_bool(inner, "chunked")?;
+        let cl = get_field_int(inner, "contentLength")?;
+        Some(BodyEncoding::classify(chunked, cl > 0, cl))
+    }
+
+    /// Convenience accessor for the fixed body length. Returns `None`
+    /// for `Chunked` (length unknown) and `Empty` (caller does not
+    /// need to read the stream).
+    #[allow(dead_code)]
+    pub(crate) fn fixed_length(&self) -> Option<u64> {
+        match self {
+            BodyEncoding::ContentLength(n) => Some(*n),
+            BodyEncoding::Chunked | BodyEncoding::Empty => None,
+        }
+    }
+
+    /// `true` if the body is known empty at parse time (no wire bytes
+    /// to drain before the next request on a keep-alive connection).
+    #[allow(dead_code)]
+    pub(crate) fn is_empty(&self) -> bool {
+        matches!(self, BodyEncoding::Empty)
+    }
+}
+
 // ── v4 Request Body Streaming State ──────────────────────────
 
 /// Per-request body streaming state for 2-arg handlers.
@@ -149,6 +247,14 @@ pub(crate) struct ActiveStreamingWriter {
 /// `readBodyChunk` can read incrementally from the TcpStream without
 /// buffering the full body.
 pub(crate) struct RequestBodyState {
+    /// C12-12 / FB-2: canonical internal body framing.
+    /// Derived from request headers at parse time and used by the
+    /// runtime read loop. The sibling `is_chunked` / `content_length`
+    /// fields remain on the struct so existing consumers across
+    /// `net_eval.rs` (keep-alive advance, body read loop, streaming
+    /// transitions) keep compiling without a mechanical rename — they
+    /// are redundant projections of `body_encoding`.
+    pub body_encoding: BodyEncoding,
     /// Whether the request uses chunked transfer encoding.
     pub is_chunked: bool,
     /// Content-Length value from the request head (0 if absent or chunked).
@@ -213,9 +319,21 @@ pub(crate) enum ChunkedDecoderState {
 
 impl RequestBodyState {
     fn new(is_chunked: bool, content_length: i64, leftover: Vec<u8>) -> Self {
-        let fully_read = !is_chunked && content_length == 0;
         let token = NEXT_REQUEST_TOKEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        // C12-12 / FB-2: derive the internal encoding once at state
+        // construction. `has_content_length` is inferred from the
+        // `content_length > 0` signal because the caller has already
+        // rejected the invalid `CL + TE:chunked` combination. Callers
+        // that pass `content_length == 0` with no TE:chunked collapse
+        // to `Empty`, which is the single classification the read
+        // loop needs. `fully_read` is now derived from `body_encoding`
+        // so the two stay in lock-step (previously it duplicated the
+        // `!is_chunked && content_length == 0` signal; funneling
+        // through `BodyEncoding::is_empty` removes the duplication).
+        let body_encoding = BodyEncoding::classify(is_chunked, content_length > 0, content_length);
+        let fully_read = body_encoding.is_empty();
         RequestBodyState {
+            body_encoding,
             is_chunked,
             content_length,
             bytes_consumed: 0,
@@ -2254,12 +2372,24 @@ impl Interpreter {
             return Ok(Some(Signal::Value(Self::make_lax_bytes_empty())));
         }
 
-        if body.is_chunked {
-            // ── NET4-1b: Chunked TE decode ──
-            Self::read_body_chunk_chunked(body, stream)
-        } else {
-            // ── NET4-1c: Content-Length body ──
-            Self::read_body_chunk_content_length(body, stream)
+        // C12-12 / FB-2: dispatch off the canonical `BodyEncoding`
+        // enum rather than the redundant `is_chunked` / zero-length
+        // pair. The `Empty` arm is already short-circuited above via
+        // `body.fully_read`, so reaching here with `Empty` would be a
+        // state-machine bug — we defensively fall through to the
+        // Content-Length path where `remaining == 0` ends the stream
+        // cleanly. The match shape also documents the eventual v2
+        // addition (e.g. HTTP/2 DATA framing) without churning the
+        // surrounding logic.
+        match body.body_encoding {
+            BodyEncoding::Chunked => {
+                // ── NET4-1b: Chunked TE decode ──
+                Self::read_body_chunk_chunked(body, stream)
+            }
+            BodyEncoding::ContentLength(_) | BodyEncoding::Empty => {
+                // ── NET4-1c: Content-Length body ──
+                Self::read_body_chunk_content_length(body, stream)
+            }
         }
     }
 
@@ -8787,6 +8917,119 @@ mod tests {
         let inner = extract_result_value(&result).unwrap();
         assert_eq!(get_field_bool(inner, "chunked"), Some(false));
         assert_eq!(get_field_int(inner, "contentLength"), Some(5));
+    }
+
+    // ── C12-12 / FB-2: BodyEncoding internal representation ──
+
+    #[test]
+    fn test_body_encoding_classify_empty_when_all_zero() {
+        // Classifier: absent CL, no TE:chunked → Empty.
+        assert_eq!(BodyEncoding::classify(false, false, 0), BodyEncoding::Empty,);
+        // Classifier: explicit Content-Length: 0 collapses to Empty
+        // too (v1 surface cannot distinguish, v2 chunked upgrade path
+        // will promote both to the same internal no-body flow).
+        assert_eq!(BodyEncoding::classify(false, true, 0), BodyEncoding::Empty,);
+    }
+
+    #[test]
+    fn test_body_encoding_classify_content_length_positive() {
+        assert_eq!(
+            BodyEncoding::classify(false, true, 1),
+            BodyEncoding::ContentLength(1),
+        );
+        assert_eq!(
+            BodyEncoding::classify(false, true, 9_007_199_254_740_991),
+            BodyEncoding::ContentLength(9_007_199_254_740_991),
+        );
+    }
+
+    #[test]
+    fn test_body_encoding_classify_chunked_wins() {
+        // TE:chunked alone is the Chunked variant. `content_length_val`
+        // is meaningless when `has_chunked` is true (the parser rejects
+        // the CL+chunked combination before we get here), but the
+        // classifier must still preserve the chunked decision.
+        assert_eq!(
+            BodyEncoding::classify(true, false, 0),
+            BodyEncoding::Chunked,
+        );
+    }
+
+    #[test]
+    fn test_body_encoding_from_parsed_absent_body() {
+        // GET with no body headers → Empty
+        let raw = b"GET / HTTP/1.1\r\nHost: h\r\n\r\n";
+        let parsed = parse_request_head(raw);
+        assert_eq!(
+            BodyEncoding::from_parsed_result_value(&parsed),
+            Some(BodyEncoding::Empty),
+        );
+    }
+
+    #[test]
+    fn test_body_encoding_from_parsed_content_length_zero() {
+        // Content-Length: 0 → Empty (collapses with absent at the
+        // handler surface; internal Empty covers both)
+        let raw = b"POST / HTTP/1.1\r\nHost: h\r\nContent-Length: 0\r\n\r\n";
+        let parsed = parse_request_head(raw);
+        assert_eq!(
+            BodyEncoding::from_parsed_result_value(&parsed),
+            Some(BodyEncoding::Empty),
+        );
+    }
+
+    #[test]
+    fn test_body_encoding_from_parsed_content_length_positive() {
+        let raw = b"POST / HTTP/1.1\r\nHost: h\r\nContent-Length: 5\r\n\r\nhello";
+        let parsed = parse_request_head(raw);
+        assert_eq!(
+            BodyEncoding::from_parsed_result_value(&parsed),
+            Some(BodyEncoding::ContentLength(5)),
+        );
+    }
+
+    #[test]
+    fn test_body_encoding_from_parsed_chunked() {
+        let raw = b"POST / HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked\r\n\r\n";
+        let parsed = parse_request_head(raw);
+        assert_eq!(
+            BodyEncoding::from_parsed_result_value(&parsed),
+            Some(BodyEncoding::Chunked),
+        );
+    }
+
+    #[test]
+    fn test_body_encoding_accessors() {
+        assert_eq!(BodyEncoding::ContentLength(42).fixed_length(), Some(42),);
+        assert_eq!(BodyEncoding::Chunked.fixed_length(), None);
+        assert_eq!(BodyEncoding::Empty.fixed_length(), None);
+
+        assert!(BodyEncoding::Empty.is_empty());
+        assert!(!BodyEncoding::Chunked.is_empty());
+        assert!(!BodyEncoding::ContentLength(1).is_empty());
+    }
+
+    #[test]
+    fn test_request_body_state_records_encoding() {
+        // The streaming body state must expose the same `BodyEncoding`
+        // that the classifier produces so downstream consumers can
+        // branch off a single source of truth (the existing
+        // `is_chunked` / `content_length` fields remain as redundant
+        // projections — see the struct doc-comment in net_eval.rs).
+        let s_empty = RequestBodyState::new(false, 0, Vec::new());
+        assert_eq!(s_empty.body_encoding, BodyEncoding::Empty);
+        assert!(
+            s_empty.fully_read,
+            "Empty body must mark fully_read upfront"
+        );
+
+        let s_cl = RequestBodyState::new(false, 7, Vec::new());
+        assert_eq!(s_cl.body_encoding, BodyEncoding::ContentLength(7));
+        assert!(!s_cl.fully_read);
+
+        let s_chunked = RequestBodyState::new(true, 0, Vec::new());
+        assert_eq!(s_chunked.body_encoding, BodyEncoding::Chunked);
+        assert!(!s_chunked.fully_read);
     }
 
     // ── readBody with chunked body (NET2-2h) ──

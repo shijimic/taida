@@ -710,10 +710,12 @@ fn wasm_wasi_parity_all_examples() {
     // B11-11c: compile_b11_2f_stdout regression fixture added (63 → 64)
     // C12-1e: compile_c12_1_tag_table regression fixture added (64 → 65)
     // C12-3d: compile_c12_3_mutual_tail (tail-only mutual recursion) added (65 → 66)
+    // C12-5: compile_c12_5_side_effect_returns (stdout Int return) added (66 → 67)
+    // C12-4c: compile_c12_4_arm_pure_expr (`| |>` pure-expr boundary) added (67 → 68)
     assert_eq!(
         parity_ok.len(),
-        66,
-        "WW-3: Expected exactly 66 parity-OK examples, got {}. \
+        68,
+        "WW-3: Expected exactly 68 parity-OK examples, got {}. \
          If parity improved, update the expected count. List: {:?}",
         parity_ok.len(),
         parity_ok
@@ -850,9 +852,11 @@ fn wasm_wasi_superset_of_wasm_min() {
     // B11-11c: compile_b11_2f_stdout regression fixture added (62 → 63)
     // C12-1e: compile_c12_1_tag_table regression fixture added (63 → 64)
     // C12-3d: compile_c12_3_mutual_tail added (64 → 65)
+    // C12-5: compile_c12_5_side_effect_returns added (65 → 66)
+    // C12-4c: compile_c12_4_arm_pure_expr added (66 → 67)
     assert_eq!(
-        superset_ok, 65,
-        "WW-3: Expected exactly 65 superset-verified examples, got {}. \
+        superset_ok, 67,
+        "WW-3: Expected exactly 67 superset-verified examples, got {}. \
          If superset coverage improved, update the expected count.",
         superset_ok
     );

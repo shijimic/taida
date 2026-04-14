@@ -7035,10 +7035,18 @@ taida_val taida_io_stdin(taida_val prompt_ptr) {
     return (taida_val)r;
 }
 
+// C12-5 (FB-18): stdout / stderr return the UTF-8 byte length of the payload
+// as Int so that `n <= stdout("hi")` binds `n = 2`. The trailing newline added
+// for display is NOT counted — callers see the payload size they supplied.
+// Parity: interpreter and JS runtime use the same semantics (content length
+// via Rust `String::len()` / JS UTF-8 byte length, newline excluded).
 taida_val taida_io_stdout(taida_val val_ptr) {
     // For now, treat val as a string pointer
     const char *s = (const char*)val_ptr;
-    if (s) printf("%s\n", s);
+    if (s) {
+        printf("%s\n", s);
+        return (taida_val)strlen(s);
+    }
     return 0;
 }
 
@@ -7047,31 +7055,52 @@ taida_val taida_io_stdout(taida_val val_ptr) {
 // a compile-time tag so that Bool prints "true"/"false" instead of "1"/"0".
 // Only Bool needs special handling; all other types (Str, Int, Float,
 // Pack, List, etc.) are correctly handled by taida_polymorphic_to_string.
+// C12-5: returns bytes written (Int), see taida_io_stdout above.
 taida_val taida_io_stdout_with_tag(taida_val val, taida_val tag) {
+    const char *s = NULL;
+    char bool_buf[6];
+    size_t bytes = 0;
     if ((int)tag == TAIDA_TAG_BOOL) {
-        printf("%s\n", val ? "true" : "false");
-    } else {
-        taida_val str = taida_polymorphic_to_string(val);
-        const char *s = (const char*)str;
-        if (s) printf("%s\n", s);
+        s = val ? "true" : "false";
+        bytes = strlen(s);
+        memcpy(bool_buf, s, bytes);
+        bool_buf[bytes] = '\0';
+        printf("%s\n", bool_buf);
+        return (taida_val)bytes;
+    }
+    taida_val str = taida_polymorphic_to_string(val);
+    s = (const char*)str;
+    if (s) {
+        printf("%s\n", s);
+        return (taida_val)strlen(s);
     }
     return 0;
 }
 
+// C12-5: bytes written as Int.
 taida_val taida_io_stderr(taida_val val_ptr) {
     const char *s = (const char*)val_ptr;
-    if (s) fprintf(stderr, "%s\n", s);
+    if (s) {
+        fprintf(stderr, "%s\n", s);
+        return (taida_val)strlen(s);
+    }
     return 0;
 }
 
 // B11-2a: Type-tagged stderr — mirrors taida_io_stdout_with_tag for stderr.
+// C12-5: returns bytes written (Int).
 taida_val taida_io_stderr_with_tag(taida_val val, taida_val tag) {
+    const char *s = NULL;
     if ((int)tag == TAIDA_TAG_BOOL) {
-        fprintf(stderr, "%s\n", val ? "true" : "false");
-    } else {
-        taida_val str = taida_polymorphic_to_string(val);
-        const char *s = (const char*)str;
-        if (s) fprintf(stderr, "%s\n", s);
+        s = val ? "true" : "false";
+        fprintf(stderr, "%s\n", s);
+        return (taida_val)strlen(s);
+    }
+    taida_val str = taida_polymorphic_to_string(val);
+    s = (const char*)str;
+    if (s) {
+        fprintf(stderr, "%s\n", s);
+        return (taida_val)strlen(s);
     }
     return 0;
 }
@@ -20051,6 +20080,12 @@ int64_t taida_addon_call(
 int main(int argc, char **argv) {
     taida_cli_argc = argc;
     taida_cli_argv = argv;
-    taida_val result = _taida_main();
-    return (int)result;
+    /* C12-5 (FB-18): `_taida_main` now returns whatever the final expression
+     * evaluates to — in particular `stdout(...)` returns the byte count (Int)
+     * instead of Unit. Leaking that value into the process exit code would
+     * make `./program` exit non-zero for trivial `stdout("hi")` programs.
+     * Drop the return value and exit 0 for a clean run. Taida programs that
+     * want a custom exit code call `exit(n)` explicitly (no-return path). */
+    (void)_taida_main();
+    return 0;
 }

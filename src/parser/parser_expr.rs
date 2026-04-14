@@ -522,6 +522,17 @@ impl Parser {
     /// Parse the body of a condition arm after `|>`.
     /// If the body is on the same line, parse a single expression.
     /// If the body continues on the next line (indented), parse as a block.
+    ///
+    /// C12-4 (FB-17): Pure expression discipline.
+    /// An arm body must be a sequence of **let-bindings** followed by
+    /// **exactly one final result expression**. Allowed non-final
+    /// statement kinds: `<=` assignment, `]=>` unmold-forward,
+    /// `<=[` unmold-backward. Any other statement kind in a non-final
+    /// position — including a bare function-call / pipeline statement
+    /// (used for side effects) and any definition (`Name = ...`,
+    /// `Mold[] => ...`, `|== ... =`, `>>> ...`, `<<< ...`) — is
+    /// rejected with `[E1616]`. The final statement must be an
+    /// expression statement that produces the arm's value.
     pub(super) fn parse_cond_arm_body(&mut self) -> Result<Vec<Statement>, ParseError> {
         // Check if body is a multi-line block (newline follows |>)
         if matches!(self.peek_kind(), TokenKind::Newline | TokenKind::Indent(_)) {
@@ -530,11 +541,124 @@ impl Parser {
             if block.is_empty() {
                 return Err(self.error_at_current("Expected expression in condition arm body"));
             }
+            Self::validate_cond_arm_body(&block)?;
             Ok(block)
         } else {
             // Single-line body: parse expression and wrap
             let expr = self.parse_expression()?;
             Ok(vec![Statement::Expr(expr)])
+        }
+    }
+
+    /// C12-4 (FB-17): enforce the pure-expression discipline on a parsed
+    /// condition-arm body. Called after `parse_block()` so that all
+    /// error messages carry precise spans.
+    ///
+    /// Rules:
+    ///   1. The **final** statement must be `Statement::Expr(_)` — the
+    ///      arm's result expression.
+    ///   2. **Non-final** statements must be `Assignment`,
+    ///      `UnmoldForward`, or `UnmoldBackward` — i.e. let-bindings
+    ///      that name a value for subsequent statements.
+    ///   3. Any other statement kind anywhere in the arm body is
+    ///      rejected with `[E1616]`.
+    ///
+    /// The rule stops the FB-17 "context leak" pattern where a
+    /// discarded side-effect call (`writeFile(...) => _wr`, a bare
+    /// function-call statement, or a top-level definition) can hide
+    /// inside what reads like a conditional branch.
+    fn validate_cond_arm_body(block: &[Statement]) -> Result<(), ParseError> {
+        debug_assert!(!block.is_empty(), "empty arm body should be caught earlier");
+        let last_idx = block.len() - 1;
+        for (idx, stmt) in block.iter().enumerate() {
+            if idx == last_idx {
+                // Final statement must be an expression.
+                match stmt {
+                    Statement::Expr(_) => {}
+                    _ => {
+                        let span = Self::statement_span(stmt);
+                        return Err(ParseError {
+                            message: format!(
+                                "[E1616] `| |>` arm body must end with a result expression, not a {} statement. \
+                                 A condition arm is a pure expression: optional let-bindings \
+                                 (`name <= expr`, `expr ]=> name`, `name <=[ expr`) may appear, \
+                                 but the last line must produce the arm's value. \
+                                 See docs/guide/07_control_flow.md for the pure-expression rule.",
+                                Self::statement_kind_label(stmt),
+                            ),
+                            span,
+                        });
+                    }
+                }
+            } else {
+                // Non-final statement must be a let-binding.
+                match stmt {
+                    Statement::Assignment(_)
+                    | Statement::UnmoldForward(_)
+                    | Statement::UnmoldBackward(_) => {}
+                    Statement::Expr(_) => {
+                        let span = Self::statement_span(stmt);
+                        return Err(ParseError {
+                            message: "[E1616] side-effect statement is not allowed inside a `| |>` arm body. \
+                                      Only let-bindings (`name <= expr`, `expr ]=> name`, `name <=[ expr`) may \
+                                      appear before the final result expression — a bare function call or \
+                                      pipeline used for side effects breaks the pure-expression rule. \
+                                      See docs/guide/07_control_flow.md.".to_string(),
+                            span,
+                        });
+                    }
+                    _ => {
+                        let span = Self::statement_span(stmt);
+                        return Err(ParseError {
+                            message: format!(
+                                "[E1616] `{}` is not allowed inside a `| |>` arm body. \
+                                 A condition arm is a pure expression; definitions and module-level \
+                                 constructs must live at the top level of a function or module. \
+                                 See docs/guide/07_control_flow.md.",
+                                Self::statement_kind_label(stmt),
+                            ),
+                            span,
+                        });
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Human-readable label for a Statement kind, used in E1616 diagnostics.
+    fn statement_kind_label(stmt: &Statement) -> &'static str {
+        match stmt {
+            Statement::Expr(_) => "expression",
+            Statement::Assignment(_) => "assignment",
+            Statement::UnmoldForward(_) => "]=> binding",
+            Statement::UnmoldBackward(_) => "<=[ binding",
+            Statement::EnumDef(_) => "enum definition",
+            Statement::TypeDef(_) => "type definition",
+            Statement::FuncDef(_) => "function definition",
+            Statement::MoldDef(_) => "mold definition",
+            Statement::InheritanceDef(_) => "inheritance definition",
+            Statement::ErrorCeiling(_) => "error ceiling",
+            Statement::Import(_) => "import",
+            Statement::Export(_) => "export",
+        }
+    }
+
+    /// Span of a statement (covers all arms of `Statement`), for diagnostics.
+    fn statement_span(stmt: &Statement) -> Span {
+        match stmt {
+            Statement::Expr(e) => e.span().clone(),
+            Statement::Assignment(a) => a.span.clone(),
+            Statement::UnmoldForward(u) => u.span.clone(),
+            Statement::UnmoldBackward(u) => u.span.clone(),
+            Statement::EnumDef(d) => d.span.clone(),
+            Statement::TypeDef(d) => d.span.clone(),
+            Statement::FuncDef(d) => d.span.clone(),
+            Statement::MoldDef(d) => d.span.clone(),
+            Statement::InheritanceDef(d) => d.span.clone(),
+            Statement::ErrorCeiling(d) => d.span.clone(),
+            Statement::Import(d) => d.span.clone(),
+            Statement::Export(d) => d.span.clone(),
         }
     }
 

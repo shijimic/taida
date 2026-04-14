@@ -3425,7 +3425,12 @@ defaulted fields must be provided via `()`",
                         "zip" => Type::List(Box::new(Type::Unknown)),
                         "hashMap" => Type::Named("HashMap".to_string()),
                         "setOf" => Type::Named("Set".to_string()),
-                        "stdout" | "stderr" | "exit" => Type::Unit,
+                        // C12-5 (FB-18): stdout/stderr now return Int (bytes
+                        // written) instead of Unit so that `Value::Unit` stays
+                        // unobservable from Taida surface. `exit` remains Unit
+                        // because it never returns (process terminates).
+                        "stdout" | "stderr" => Type::Int,
+                        "exit" => Type::Unit,
                         "stdin" => Type::Str,
                         "argv" => Type::List(Box::new(Type::Str)),
                         "sleep" => Type::Generic("Async".to_string(), vec![Type::Unit]),

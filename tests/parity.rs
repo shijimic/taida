@@ -31445,6 +31445,194 @@ stdout(countdown(10))
 }
 
 // ────────────────────────────────────────────────────────────────
+// C12-5 Phase 5 — FB-18: `Value::Unit` elimination on stdout/stderr
+//
+// Before C12-5, `stdout(...)` / `stderr(...)` returned `Value::Unit`,
+// which conflicted with PHILOSOPHY I ("null/undefined の完全排除").
+// C12-5 changes the contract so these functions return the UTF-8 byte
+// length of the rendered payload as Int. `n <= stdout("hi")` binds
+// `n = 2`. The trailing newline added by the runtime for display is
+// NOT counted — only the bytes the caller handed in.
+//
+// The change is source-compatible for the common case `stdout(x) => _`
+// (an Int is simply discarded instead of a Unit), and unlocks the
+// previously-nonsensical `bytes <= stdout(...)` pattern that the FB
+// example requested. This block pins bit-exact 3-backend parity on
+// the new contract so the byte-count semantics cannot silently drift.
+// ────────────────────────────────────────────────────────────────
+
+/// C12-5a: core contract — `stdout("hello")` returns 5 (Int byte count)
+/// instead of Unit, and the bound Int can be `stdout`-ed again on all
+/// three backends bit-exactly.
+#[test]
+fn test_c12_5_stdout_returns_bytes_int_parity() {
+    let source = r#"n <= stdout("hello")
+stdout(n)
+"#;
+    assert_backend_parity_for_source(source, "c12_5_stdout_returns_bytes_int");
+    let out = run_interpreter_src(source, "c12_5_stdout_returns_bytes_int_expected")
+        .expect("interpreter output should exist");
+    assert_eq!(out, "hello\n5");
+}
+
+/// C12-5a: empty payload returns 0 — Int default value guarantees the
+/// bound value is well-formed (no Unit leak, no null leak). Verifies
+/// all three backends treat `stdout("")` the same way.
+#[test]
+fn test_c12_5_stdout_empty_payload_parity() {
+    let source = r#"n <= stdout("")
+stdout(n)
+"#;
+    assert_backend_parity_for_source(source, "c12_5_stdout_empty_payload");
+    let out = run_interpreter_src(source, "c12_5_stdout_empty_payload_expected")
+        .expect("interpreter output should exist");
+    assert_eq!(out, "\n0");
+}
+
+/// C12-5a: UTF-8 multi-byte payloads count by byte, not by codepoint,
+/// matching Rust `String::len()` / JS `TextEncoder` / Native
+/// `strlen()`. 「あ」 is 3 UTF-8 bytes so `stdout("あ")` returns 3.
+#[test]
+fn test_c12_5_stdout_utf8_byte_count_parity() {
+    let source = r#"n <= stdout("あ")
+stdout(n)
+n2 <= stdout("あABC")
+stdout(n2)
+"#;
+    assert_backend_parity_for_source(source, "c12_5_stdout_utf8_byte_count");
+    let out = run_interpreter_src(source, "c12_5_stdout_utf8_byte_count_expected")
+        .expect("interpreter output should exist");
+    assert_eq!(out, "あ\n3\nあABC\n6");
+}
+
+/// C12-5a: non-Str payloads — `stdout(42)` renders "42" and returns 2.
+/// `stdout(true)` renders "true" and returns 4. Pins the rule that
+/// byte count == display length (UTF-8) across the three backends.
+#[test]
+fn test_c12_5_stdout_non_str_byte_count_parity() {
+    let source = r#"n1 <= stdout(42)
+stdout(n1)
+n2 <= stdout(true)
+stdout(n2)
+"#;
+    assert_backend_parity_for_source(source, "c12_5_stdout_non_str_byte_count");
+    let out = run_interpreter_src(source, "c12_5_stdout_non_str_byte_count_expected")
+        .expect("interpreter output should exist");
+    assert_eq!(out, "42\n2\ntrue\n4");
+}
+
+/// C12-5f: `Value::Unit` is not observable from Taida surface. The
+/// bound `n` from a `stdout(...)` call is always an Int, never Unit,
+/// so feeding it straight into arithmetic works on all backends.
+/// Before C12-5 this program would have errored at runtime (Unit
+/// does not support `+ 1`).
+#[test]
+fn test_c12_5_stdout_return_is_int_arith_parity() {
+    let source = r#"n <= stdout("hi")
+stdout(n + 1)
+"#;
+    assert_backend_parity_for_source(source, "c12_5_stdout_return_is_int_arith");
+    let out = run_interpreter_src(source, "c12_5_stdout_return_is_int_arith_expected")
+        .expect("interpreter output should exist");
+    assert_eq!(out, "hi\n3");
+}
+
+/// C12-5a: source-compatibility — the canonical pre-C12 idiom of
+/// using `stdout(...)` as a bare statement (value naturally discarded
+/// at statement level) keeps working unchanged across all three
+/// backends. This is the bulk of existing Taida code and must stay
+/// silent about the return-type migration (Unit → Int).
+#[test]
+fn test_c12_5_stdout_discard_still_works_parity() {
+    let source = r#"stdout("one")
+stdout("two")
+stdout("done")
+"#;
+    assert_backend_parity_for_source(source, "c12_5_stdout_discard_still_works");
+    let out = run_interpreter_src(source, "c12_5_stdout_discard_still_works_expected")
+        .expect("interpreter output should exist");
+    assert_eq!(out, "one\ntwo\ndone");
+}
+
+/// C12-4c: the canonical FB-17 reproduction — an arm body with a
+/// bare discarded pipeline (`writeFile(...) => _wr`) followed by
+/// another discarded side effect (`RemoveFile[...]() => _rm`) is
+/// rejected by the parser on every backend.
+#[test]
+fn test_c12_4_arm_body_discarded_pipeline_reject_parity() {
+    let source = r#"validateProjectRoot =
+  | 1 == 0 |>
+    writeFile(".hk_write_check", "test") => _wr
+    RemoveFile[".hk_write_check"]() => _rm
+  | _ |>
+    "ok"
+=> :Str
+
+stdout(validateProjectRoot())
+"#;
+    assert_backends_reject_source(source, "c12_4_arm_body_discarded_pipeline_reject");
+}
+
+/// C12-4c: a bare function-call statement (no binding, no `=> _`
+/// discard) in a non-final position inside an arm body is rejected
+/// on every backend.
+#[test]
+fn test_c12_4_arm_body_bare_call_statement_reject_parity() {
+    let source = r#"check n =
+  | n < 0 |>
+    stdout("negative")
+    stdout("rejected")
+  | _ |> "ok"
+=> :Str
+
+stdout(check(-1))
+"#;
+    assert_backends_reject_source(source, "c12_4_arm_body_bare_call_statement_reject");
+}
+
+/// C12-4c: legal let-then-expression pattern continues to work with
+/// identical output across all three backends. Ensures the new parse
+/// check does not regress the quality-test idiom used in
+/// `examples/quality/b3h_cond_pipeline.td`.
+#[test]
+fn test_c12_4_arm_body_let_then_expr_parity() {
+    let source = r#"classify n =
+  | n > 0 |>
+    doubled <= n * 2
+    doubled + 1
+  | _ |>
+    zeroed <= 0
+    zeroed - 1
+=> :Int
+
+stdout(classify(5).toString())
+stdout(classify(-5).toString())
+"#;
+    assert_backend_parity_for_source(source, "c12_4_arm_body_let_then_expr");
+    let out = run_interpreter_src(source, "c12_4_arm_body_let_then_expr_expected")
+        .expect("interpreter output should exist");
+    assert_eq!(out, "11\n-1");
+}
+
+/// C12-4c: the single-line arm body form (`| cond |> expr`) is a
+/// pure expression by construction and keeps working on all three
+/// backends.
+#[test]
+fn test_c12_4_arm_body_single_line_expr_parity() {
+    let source = r#"grade <=
+  | 85 >= 90 |> "A"
+  | 85 >= 80 |> "B"
+  | _ |> "F"
+
+stdout(grade)
+"#;
+    assert_backend_parity_for_source(source, "c12_4_arm_body_single_line_expr");
+    let out = run_interpreter_src(source, "c12_4_arm_body_single_line_expr_expected")
+        .expect("interpreter output should exist");
+    assert_eq!(out, "B");
+}
+
+// ────────────────────────────────────────────────────────────────
 // B11 Phase 3 — FB-9: Int[str]() / Int[str, base]() close-out
 // ────────────────────────────────────────────────────────────────
 

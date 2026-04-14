@@ -889,10 +889,12 @@ fn wasm_full_parity_all_examples() {
     // B11-11c: compile_b11_2f_stdout regression fixture added (62 -> 63)
     // C12-1e: compile_c12_1_tag_table regression fixture added (63 -> 64)
     // C12-3d: compile_c12_3_mutual_tail (tail-only mutual recursion) added (64 -> 65)
+    // C12-5: compile_c12_5_side_effect_returns (stdout Int return) added (65 -> 66)
+    // C12-4c: compile_c12_4_arm_pure_expr (`| |>` pure-expr boundary) added (66 -> 67)
     assert_eq!(
         parity_ok.len(),
-        65,
-        "WF-5: Expected exactly 65 parity-OK examples, got {}. \
+        67,
+        "WF-5: Expected exactly 67 parity-OK examples, got {}. \
          If parity improved, update the expected count. List: {:?}",
         parity_ok.len(),
         parity_ok

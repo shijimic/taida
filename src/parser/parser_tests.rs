@@ -2014,3 +2014,152 @@ fn test_deep_buchipack_nesting_50_levels() {
     );
     assert_eq!(program.statements.len(), 1);
 }
+
+// ── C12-4 / FB-17: `| |>` pure-expression discipline ────────
+//
+// An arm body must be a sequence of let-bindings (`<=`, `]=>`, `<=[`)
+// followed by exactly one final result expression. Anything else
+// (bare function-call statement, discarded pipeline `=> _name`,
+// definitions, etc.) is rejected with `[E1616]`.
+
+#[test]
+fn test_c12_4_arm_body_pure_expression_passes() {
+    // Simplest form: arm body is a single expression.
+    let source = "grade <=\n  | 85 >= 90 |> \"A\"\n  | _ |> \"F\"";
+    let (program, errors) = parse(source);
+    assert!(errors.is_empty(), "Errors: {:?}", errors);
+    assert_eq!(program.statements.len(), 1);
+}
+
+#[test]
+fn test_c12_4_arm_body_let_then_expr_passes() {
+    // Let-binding followed by final expression is allowed.
+    let source = "\
+classify n =\n  \
+  | n > 0 |>\n    \
+    doubled <= n * 2\n    \
+    doubled + 1\n  \
+  | _ |>\n    \
+    zeroed <= 0\n    \
+    zeroed - 1\n\
+=> :Int\n";
+    let (program, errors) = parse(source);
+    assert!(errors.is_empty(), "Errors: {:?}", errors);
+    assert_eq!(program.statements.len(), 1);
+}
+
+#[test]
+fn test_c12_4_arm_body_unmold_forward_let_passes() {
+    // `]=>` unmold-forward is a legal let-binding inside an arm body.
+    let source = "\
+firstOrZero items =\n  \
+  | items.isEmpty() |> 0\n  \
+  | _ |>\n    \
+    items.first() ]=> first\n    \
+    first\n\
+=> :Int\n";
+    let (program, errors) = parse(source);
+    assert!(errors.is_empty(), "Errors: {:?}", errors);
+    assert_eq!(program.statements.len(), 1);
+}
+
+#[test]
+fn test_c12_4_arm_body_bare_call_statement_rejected() {
+    // FB-17 re-production: a bare discarded function call in the
+    // middle of an arm body is rejected.
+    let source = "\
+validate =\n  \
+  | 1 == 0 |>\n    \
+    stdout(\"a\")\n    \
+    stdout(\"b\")\n  \
+  | _ |>\n    \
+    \"ok\"\n\
+=> :Str\n";
+    let (_, errors) = parse(source);
+    assert!(
+        !errors.is_empty(),
+        "Expected [E1616] for bare call-statement in arm body"
+    );
+    assert!(
+        errors.iter().any(|e| e.message.contains("E1616")),
+        "Expected E1616, got: {:?}",
+        errors
+    );
+    assert!(
+        errors.iter().any(|e| e.message.contains("side-effect")),
+        "Expected side-effect mention, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn test_c12_4_arm_body_discarded_pipeline_rejected() {
+    // FB-17 canonical example: `writeFile(...) => _wr` is a discarded
+    // side-effect (assignment to `_wr`). The assignment itself is
+    // allowed (it is a let-binding syntactically), but the following
+    // statement must still be a final expression — here a second
+    // discarded call is what gets flagged.
+    let source = "\
+validateProjectRoot =\n  \
+  | 1 == 0 |>\n    \
+    writeFile(\".hk_write_check\", \"test\") => _wr\n    \
+    RemoveFile[\".hk_write_check\"]() => _rm\n  \
+  | _ |>\n    \
+    \"ok\"\n\
+=> :Str\n";
+    let (_, errors) = parse(source);
+    assert!(
+        !errors.is_empty(),
+        "Expected [E1616] for FB-17 canonical discard pattern, got none"
+    );
+    assert!(
+        errors.iter().any(|e| e.message.contains("E1616")),
+        "Expected E1616, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn test_c12_4_arm_body_trailing_let_binding_rejected() {
+    // The *final* statement must be an expression — a trailing
+    // let-binding with no following expression is a static error.
+    let source = "\
+broken n =\n  \
+  | n > 0 |>\n    \
+    x <= n + 1\n  \
+  | _ |> 0\n\
+=> :Int\n";
+    let (_, errors) = parse(source);
+    assert!(
+        !errors.is_empty(),
+        "Expected [E1616] for arm body ending in a let-binding"
+    );
+    assert!(
+        errors.iter().any(|e| e.message.contains("E1616")),
+        "Expected E1616, got: {:?}",
+        errors
+    );
+    assert!(
+        errors
+            .iter()
+            .any(|e| e.message.contains("must end with a result expression")),
+        "Expected end-with-result-expression mention, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn test_c12_4_arm_body_nested_cond_passes() {
+    // A nested `| |>` inside an arm body is a valid expression and
+    // should not be flagged.
+    let source = "\
+classify x =\n  \
+  | x > 100 |>\n    \
+    | x > 500 |> \"big\"\n    \
+    | _ |> \"medium\"\n  \
+  | _ |> \"small\"\n\
+=> :Str\n";
+    let (program, errors) = parse(source);
+    assert!(errors.is_empty(), "Errors: {:?}", errors);
+    assert_eq!(program.statements.len(), 1);
+}

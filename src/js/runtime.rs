@@ -1160,37 +1160,67 @@ function __taida_trampoline_async(fn) {
 }
 
 // ── stdout — Taida output function ───────────────────────
+// C12-5 (FB-18): returns the total UTF-8 byte length of the rendered content
+// (Int) so that `n <= stdout("hi")` binds `n = 2`. Mirrors the interpreter and
+// native runtime. The trailing newline added by `console.log` is NOT counted,
+// consistent with the payload the user supplied.
 function __taida_stdout(...args) {
+  let total = 0;
   for (const arg of args) {
+    let rendered;
     if (__taida_isBytes(arg)) {
-      console.log(__taida_bytes_to_string(arg));
+      rendered = __taida_bytes_to_string(arg);
     } else if (Array.isArray(arg)) {
-      console.log('@[' + arg.map(x => __taida_format(x)).join(', ') + ']');
+      rendered = '@[' + arg.map(x => __taida_format(x)).join(', ') + ']';
     } else if (arg && arg.__type === 'Async') {
       const status = arg.status;
       if (status === 'fulfilled') {
-        console.log('Async[fulfilled: ' + String(arg.__value) + ']');
+        rendered = 'Async[fulfilled: ' + String(arg.__value) + ']';
       } else if (status === 'rejected') {
-        console.log('Async[rejected: ' + String(arg.__error) + ']');
+        rendered = 'Async[rejected: ' + String(arg.__error) + ']';
       } else {
-        console.log('Async[pending]');
+        rendered = 'Async[pending]';
       }
     } else if (arg && arg.__type === 'Result') {
-      if (arg.isSuccess()) console.log('Result[' + String(arg.__value) + ']');
-      else console.log('Result(throw)');
+      if (arg.isSuccess()) rendered = 'Result[' + String(arg.__value) + ']';
+      else rendered = 'Result(throw)';
     } else if (arg && arg.__type === 'Lax') {
       // Match interpreter BuchiPack display format
       const _lhv = typeof arg.hasValue === 'function' ? arg.hasValue() : arg.hasValue;
-      console.log('@(hasValue <= ' + String(!!_lhv) + ', __value <= ' + __taida_format(arg.__value) + ', __default <= ' + __taida_format(arg.__default) + ', __type <= "Lax")');
+      rendered = '@(hasValue <= ' + String(!!_lhv) + ', __value <= ' + __taida_format(arg.__value) + ', __default <= ' + __taida_format(arg.__default) + ', __type <= "Lax")';
     } else if (arg && typeof arg === 'object' && !Array.isArray(arg)) {
       // BuchiPack-like object
       const entries = Object.entries(arg).filter(([k]) => !k.startsWith('__'));
       const formatted = entries.map(([k, v]) => k + ' <= ' + __taida_format(v)).join(', ');
-      console.log('@(' + formatted + ')');
+      rendered = '@(' + formatted + ')';
     } else {
-      console.log(typeof arg === 'boolean' ? (arg ? 'true' : 'false') : String(arg));
+      rendered = typeof arg === 'boolean' ? (arg ? 'true' : 'false') : String(arg);
     }
+    console.log(rendered);
+    // UTF-8 byte length: fall back to TextEncoder when available, otherwise
+    // compute via Buffer (Node) — stay parity-exact with Rust `.len()`.
+    total += __taida_utf8_byte_length(rendered);
   }
+  return total;
+}
+
+function __taida_utf8_byte_length(s) {
+  if (typeof TextEncoder !== 'undefined') {
+    return new TextEncoder().encode(s).length;
+  }
+  if (typeof Buffer !== 'undefined') {
+    return Buffer.byteLength(s, 'utf8');
+  }
+  // Fallback: manual UTF-8 byte counting
+  let n = 0;
+  for (let i = 0; i < s.length; i++) {
+    const code = s.charCodeAt(i);
+    if (code < 0x80) n += 1;
+    else if (code < 0x800) n += 2;
+    else if (code >= 0xD800 && code <= 0xDBFF) { n += 4; i++; }
+    else n += 3;
+  }
+  return n;
 }
 
 function __taida_format(v) {
@@ -1233,8 +1263,17 @@ function __taida_to_string(v) {
 }
 
 // ── stderr — Taida error output function (prelude) ──────
+// C12-5 (FB-18): returns total UTF-8 byte length of the written content (Int),
+// mirroring `__taida_stdout`. Emits a trailing newline to match interpreter
+// `eprintln!("{}", ...)` output, but that newline is NOT counted.
 function __taida_stderr(...args) {
-  for (const a of args) process.stderr.write(String(a) + '\n');
+  let total = 0;
+  for (const a of args) {
+    const s = String(a);
+    process.stderr.write(s + '\n');
+    total += __taida_utf8_byte_length(s);
+  }
+  return total;
 }
 
 // ── stdin — Taida input function (prelude) ───────────────

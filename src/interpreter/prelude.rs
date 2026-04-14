@@ -109,6 +109,11 @@ impl Interpreter {
 
         match name {
             // ── stdout(...args): write to output buffer (prelude) ──
+            // C12-5 (FB-18): returns the byte count (Int) of the written
+            // content so that `n <= stdout("hi")` binds `n = 2`. `Value::Unit`
+            // must not escape to Taida surface (null/undefined complete
+            // elimination, PHILOSOPHY I). Byte count excludes the implicit
+            // trailing newline so it matches the payload the user supplied.
             "stdout" => {
                 let mut parts = Vec::new();
                 for arg in args {
@@ -118,11 +123,14 @@ impl Interpreter {
                     };
                     parts.push(val.to_display_string());
                 }
-                self.output.push(parts.join(""));
-                Ok(Some(Signal::Value(Value::Unit)))
+                let joined = parts.join("");
+                let bytes = joined.len() as i64;
+                self.output.push(joined);
+                Ok(Some(Signal::Value(Value::Int(bytes))))
             }
 
             // ── stderr(...args): write to stderr (prelude) ──
+            // C12-5 (FB-18): mirrors `stdout` — returns bytes written as Int.
             "stderr" => {
                 let mut parts = Vec::new();
                 for arg in args {
@@ -132,8 +140,10 @@ impl Interpreter {
                     };
                     parts.push(val.to_display_string());
                 }
-                eprintln!("{}", parts.join(""));
-                Ok(Some(Signal::Value(Value::Unit)))
+                let joined = parts.join("");
+                let bytes = joined.len() as i64;
+                eprintln!("{}", joined);
+                Ok(Some(Signal::Value(Value::Int(bytes))))
             }
 
             // ── stdin(prompt?): read line from stdin (prelude) ──

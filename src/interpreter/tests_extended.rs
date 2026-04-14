@@ -2665,12 +2665,15 @@ stdout("hello prelude")
 
     #[test]
     fn test_prelude_stderr_no_import() {
-        // stderr is now a prelude builtin
+        // stderr is now a prelude builtin.
+        // C12-5 (FB-18): stderr now returns the payload byte count (Int)
+        // instead of `Value::Unit`. Migration test: previously this asserted
+        // `Value::Unit`, now we pin the Int(len("error msg")) contract.
         let source = r#"
 stderr("error msg")
 "#;
         let (val, _) = eval_with_output(source);
-        assert_eq!(val, Value::Unit);
+        assert_eq!(val, Value::Int("error msg".len() as i64));
     }
 
     #[test]

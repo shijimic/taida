@@ -109,6 +109,58 @@ In-flight release tracking the @c.12.rc3 milestone (`FUTURE_BLOCKERS.md`
   rationale for each of the 6 candidates and the reopen flow).
 - Docs only — no code, test, or runtime behaviour changed by this item.
 
+#### `Value::Unit` Elimination on stdout / stderr (FB-18 / Phase 5)
+
+- **Breaking change**: `stdout(...)` and `stderr(...)` now return the
+  UTF-8 byte count of the written payload as `Int`, not `Value::Unit`.
+  This brings the builtin I/O functions into alignment with
+  **PHILOSOPHY I** (「null/undefined の完全排除 — 全ての型にデフォルト
+  値を保証」): `Value::Unit` is no longer observable from the Taida
+  surface through these calls, and the common idiom
+  `bytes <= stdout("hi")` now binds `bytes = 2` instead of `Unit`.
+- The byte count excludes the implicit trailing newline. Multi-argument
+  `stdout(a, b, c)` counts the concatenated payload length (matches the
+  interpreter's `parts.join("")` rendering).
+- Source-compatibility: Taida programs that used `stdout(...)` as a bare
+  statement — the overwhelmingly common case — are unchanged. The Int
+  return value is simply discarded by the statement semantics. The
+  `stdout(x) => _` explicit-discard idiom continues to work on the
+  Interpreter and JS backends (Native rejects that pipeline form today
+  with a pre-existing `Lowering error: unsupported pipeline step`, see
+  C12B-019).
+- Native main entry (`native_runtime.c`): the C `main()` now discards
+  the return value of `_taida_main()` and exits `0`. Previously the
+  last statement's value was surfaced as the process exit code —
+  harmless while stdout returned `Unit (== 0)`, but a latent bug that
+  would have broken every script ending in a non-zero stdout byte count
+  after this migration.
+- Type checker: `stdout` / `stderr` return type promoted from
+  `Type::Unit` to `Type::Int`. `exit` keeps `Type::Unit` since it never
+  returns normally. 5 checker tests pin the new table entries.
+- Backend coverage:
+  - **Interpreter** (`src/interpreter/prelude.rs`): `Value::Int(bytes)`
+    where `bytes == joined.len()` (Rust `String::len()` UTF-8 bytes).
+  - **JS runtime** (`src/js/runtime.rs`): `__taida_stdout` / `__taida_
+    stderr` accumulate `__taida_utf8_byte_length(rendered)` across all
+    args and return the total.
+  - **Native runtime** (`src/codegen/native_runtime.c`): `taida_io_
+    stdout` / `taida_io_stdout_with_tag` / `taida_io_stderr` /
+    `taida_io_stderr_with_tag` all return `strlen(payload)` cast to
+    `taida_val` (int64_t).
+  - **wasm-* runtimes** (`src/codegen/runtime_core_wasm.c`): same
+    contract — returns the `wasm_strlen` of the rendered payload.
+- Scope discipline: this Phase only touches the functions that actually
+  returned `Value::Unit` to Taida surface today. `writeFile` currently
+  returns `Result[@(ok, code, message, kind)]` and `Exists` returns
+  `Bool` — neither is a Unit leak, so they are tracked under a separate
+  follow-up (C12B-020) rather than forced into the same migration.
+- 6 parity tests + 5 checker tests + 1 interpreter migration test added.
+  New fixture `examples/compile_c12_5_side_effect_returns.td` covers
+  ASCII / empty / Int / Bool payloads plus the arithmetic-on-return
+  pattern that would have errored pre-C12-5. All 3 wasm profile parity
+  grids (min / wasi / full) include the fixture and their expected
+  counts bumped by 1.
+
 #### Flaky Test Fix (FB-24 / Phase 8)
 
 - `src/addon/prebuild_fetcher.rs` no longer shares a single
@@ -129,6 +181,53 @@ In-flight release tracking the @c.12.rc3 milestone (`FUTURE_BLOCKERS.md`
 - Verified 20/20 passes for each of three configurations: fetcher-only,
   publish-only, and both filters run simultaneously.
 - Test-infra only — no production code or public API change.
+
+#### `| |>` Arm-Body Pure-Expression Discipline (FB-17 / Phase 4)
+
+- **Breaking change**: a condition-arm body (`| cond |> ...`) must now
+  be a sequence of **let-bindings** followed by **exactly one final
+  result expression**. Non-terminal statements must be one of:
+  `name <= expr`, `expr ]=> name`, `name <=[ expr`. Any other
+  statement kind (bare function call, discarded pipeline
+  `expr => _name`, nested definition, `|==` error ceiling, `>>>` /
+  `<<<`) in a non-final position is rejected at parse time with
+  `[E1616]`. The final statement must also be an expression — a
+  trailing let-binding with no result expression is rejected too.
+- Closes FB-17 (`| |>` の文脈渗漏): previously, discarded side-effect
+  statements like `writeFile(".hk_write_check", "test") => _wr`
+  could silently hide inside what read like a conditional branch,
+  breaking the language's invariant that `| |>` is a pure
+  expression (`PHILOSOPHY I` / `IV`: a condition arm is a single
+  graph node, not a do-block).
+- Single-line arm form (`| cond |> expr`) is unaffected — by
+  construction it is a pure expression.
+- Migration: move discarded side effects out of the arm body.
+  Pre-arm setup (`setup() => _`) belongs on a statement line
+  preceding the `| |>` expression; in-arm let-bindings that you
+  actually consume remain legal. For two-branch expressions the
+  `If[cond, then, else]()` mold (B11 Phase 5) is the short form.
+  See the new "純粋式の原則" section in
+  `docs/guide/07_control_flow.md` for worked migrations.
+- 7 parser unit tests + 4 parity tests + new
+  `examples/compile_c12_4_arm_pure_expr.td`.
+
+#### HTTP/1.1 Body Encoding Internal Representation (FB-2 / Phase 12)
+
+- Internal-only refactor: introduces `BodyEncoding` enum in
+  `src/interpreter/net_eval.rs` (`Empty` / `ContentLength(u64)` /
+  `Chunked`) as the single source of truth for how an HTTP/1.1
+  request body is read. `RequestBodyState` now carries a
+  `body_encoding` field; `read_body_chunk` dispatches off it
+  instead of juggling `is_chunked` / `content_length` /
+  `fully_read` flags independently.
+- Closes FB-2 (body span drift): ensures that `Content-Length: 0`,
+  header-absent, and `Transfer-Encoding: chunked` paths can no
+  longer drift out of sync with one another.
+- Handler API unchanged: the `HttpRequest` buchi-pack still exposes
+  `contentLength: Int` + `chunked: Bool` at the Taida surface — v1
+  is preserved. The `BodyEncoding` refinement is purely internal.
+- 9 unit tests added covering the classifier, constructor from
+  parsed headers, accessors, and `RequestBodyState` integration.
 
 ## @b.11.rc3
 

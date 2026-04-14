@@ -208,7 +208,9 @@ static int _wf_is_whitespace(char c) {
 /* B11-2: Forward declaration for polymorphic display */
 int64_t taida_polymorphic_to_string(int64_t obj);
 
-/* ── taida_io_stdout: stdout 出力（boxed 文字列ポインタ） ── */
+/* ── taida_io_stdout: stdout 出力（boxed 文字列ポインタ） ──
+   C12-5 (FB-18): returns the UTF-8 byte length of the payload as Int.
+   The trailing newline is NOT counted — matches interpreter / native. */
 
 int64_t taida_io_stdout(int64_t val_ptr) {
     const char *s = (const char *)(intptr_t)val_ptr;
@@ -216,6 +218,7 @@ int64_t taida_io_stdout(int64_t val_ptr) {
         int32_t len = wasm_strlen(s);
         write_stdout(s, len);
         write_stdout("\n", 1);
+        return (int64_t)len;
     }
     return 0;
 }
@@ -228,23 +231,28 @@ int64_t taida_io_stdout(int64_t val_ptr) {
    converts non-Str / non-Bool values to strings at the call site via
    `convert_to_string` so this wasm entry point stays minimal. A
    tag-directed dispatch tree is deferred to C12-7 (wasm binary size
-   reduction) which depends on the C12-9 runtime split. */
+   reduction) which depends on the C12-9 runtime split.
+   C12-5: returns bytes written (Int). */
 int64_t taida_io_stdout_with_tag(int64_t val, int64_t tag) {
     if ((int)tag == WASM_TAG_BOOL) {
+        int32_t len = val ? 4 : 5;
         if (val) { write_stdout("true", 4); } else { write_stdout("false", 5); }
         write_stdout("\n", 1);
+        return (int64_t)len;
     } else {
         const char *s = (const char *)(intptr_t)val;
         if (s) {
             int32_t len = wasm_strlen(s);
             write_stdout(s, len);
             write_stdout("\n", 1);
+            return (int64_t)len;
         }
     }
     return 0;
 }
 
-/* ── taida_io_stderr: stderr 出力（wasm-min では stdout にフォールバック） ── */
+/* ── taida_io_stderr: stderr 出力（wasm-min では stdout にフォールバック） ──
+   C12-5 (FB-18): returns bytes written (Int), newline excluded. */
 
 int64_t taida_io_stderr(int64_t val_ptr) {
     const char *s = (const char *)(intptr_t)val_ptr;
@@ -259,12 +267,14 @@ int64_t taida_io_stderr(int64_t val_ptr) {
         iov.buf = (int32_t)(intptr_t)"\n";
         iov.len = 1;
         __wasi_fd_write(2, &iov, 1, &nwritten);
+        return (int64_t)len;
     }
     return 0;
 }
 
 /* B11-2a: Type-tagged stderr for Bool display parity (FB-3).
-   B11-2f / C12-1: Only Bool needs type-based dispatch; see stdout_with_tag. */
+   B11-2f / C12-1: Only Bool needs type-based dispatch; see stdout_with_tag.
+   C12-5: returns bytes written (Int). */
 int64_t taida_io_stderr_with_tag(int64_t val, int64_t tag) {
     if ((int)tag == WASM_TAG_BOOL) {
         const char *s = val ? "true" : "false";
@@ -277,6 +287,7 @@ int64_t taida_io_stderr_with_tag(int64_t val, int64_t tag) {
         iov.buf = (int32_t)(intptr_t)"\n";
         iov.len = 1;
         __wasi_fd_write(2, &iov, 1, &nwritten);
+        return (int64_t)len;
     } else {
         const char *s = (const char *)(intptr_t)val;
         if (s) {
@@ -289,6 +300,7 @@ int64_t taida_io_stderr_with_tag(int64_t val, int64_t tag) {
             iov.buf = (int32_t)(intptr_t)"\n";
             iov.len = 1;
             __wasi_fd_write(2, &iov, 1, &nwritten);
+            return (int64_t)len;
         }
     }
     return 0;
