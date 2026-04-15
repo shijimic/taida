@@ -139,7 +139,7 @@ See [Creating Addons](docs/guide/13_creating_addons.md) for details.
 
 The canonical public release identifier is the Taida version, not the Rust package semver.
 
-- Current release: `@b.11.rc3`
+- Current release: `@c.12.rc3`
 - `Cargo.toml` version `2.0.0`: semver metadata for Rust tooling
 
-In release notes and public communication, `@b.11.rc3` is the primary version. `2.0.0` is supplementary.
+In release notes and public communication, `@c.12.rc3` is the primary version. `2.0.0` is supplementary.
