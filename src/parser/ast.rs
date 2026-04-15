@@ -35,6 +35,42 @@ pub enum Statement {
     UnmoldBackward(UnmoldBackwardStmt),
 }
 
+impl Statement {
+    /// C13-1: For a "value-yielding" statement (the tail of an expression
+    /// block), return a reference to the `Expr` whose value is the block
+    /// result. Tail bindings (`name <= expr`, `expr => name`, `expr ]=> name`,
+    /// `name <=[ expr`) yield their RHS source expression; a plain
+    /// `Statement::Expr(e)` yields `e`.
+    ///
+    /// Returns `None` for statements that do not produce a value
+    /// (definitions, imports, exports, error ceilings, ...).
+    ///
+    /// NB: For unmold bindings the returned `Expr` is the *source* (the
+    /// value **before** unmold). Consumers that need the unmolded result
+    /// type should unmold it themselves (e.g. the checker's
+    /// `unmold_type`), which keeps the helper purely syntactic.
+    pub fn yielded_expr(&self) -> Option<&Expr> {
+        match self {
+            Statement::Expr(e) => Some(e),
+            Statement::Assignment(a) => Some(&a.value),
+            Statement::UnmoldForward(u) => Some(&u.source),
+            Statement::UnmoldBackward(u) => Some(&u.source),
+            _ => None,
+        }
+    }
+
+    /// C13-1: True if this statement represents a tail binding form
+    /// (`name <= expr`, `expr => name`, `expr ]=> name`, `name <=[ expr`)
+    /// whose bound target should be defined in the enclosing scope
+    /// before the block result is yielded.
+    pub fn is_tail_binding(&self) -> bool {
+        matches!(
+            self,
+            Statement::Assignment(_) | Statement::UnmoldForward(_) | Statement::UnmoldBackward(_)
+        )
+    }
+}
+
 /// Enum definition: `Enum => Name = :A :B`
 #[derive(Debug, Clone, PartialEq)]
 pub struct EnumDef {

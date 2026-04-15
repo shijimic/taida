@@ -553,13 +553,17 @@ impl Interpreter {
                 // Unmold: extract the inner value from a Mold wrapper
                 // For Async values, ]=> acts as blocking await
                 // Rejected Async throws an error (caught by error ceiling)
+                //
+                // C13-1: Return the unwrapped value as the statement's
+                // signal so tail unmold `expr ]=> name` in an expression
+                // block yields the bound value.
                 match self.unmold_value(source_val)? {
                     Signal::Value(unwrapped) => {
                         // Use define() to enforce immutability for unmold targets
-                        if let Err(e) = self.env.define(&uf.target, unwrapped) {
+                        if let Err(e) = self.env.define(&uf.target, unwrapped.clone()) {
                             return Err(RuntimeError { message: e });
                         }
-                        Ok(Signal::Value(Value::Unit))
+                        Ok(Signal::Value(unwrapped))
                     }
                     Signal::Throw(err) => Ok(Signal::Throw(err)),
                     Signal::Gorilla => Ok(Signal::Gorilla),
@@ -576,19 +580,100 @@ impl Interpreter {
                 };
                 // For Async values, <=[ acts as blocking await
                 // Rejected Async throws an error (caught by error ceiling)
+                //
+                // C13-1: Return the unwrapped value as the statement's
+                // signal so tail unmold `name <=[ expr` in an expression
+                // block yields the bound value.
                 match self.unmold_value(source_val)? {
                     Signal::Value(unwrapped) => {
                         // Use define() to enforce immutability for unmold targets
-                        if let Err(e) = self.env.define(&ub.target, unwrapped) {
+                        if let Err(e) = self.env.define(&ub.target, unwrapped.clone()) {
                             return Err(RuntimeError { message: e });
                         }
-                        Ok(Signal::Value(Value::Unit))
+                        Ok(Signal::Value(unwrapped))
                     }
                     Signal::Throw(err) => Ok(Signal::Throw(err)),
                     Signal::Gorilla => Ok(Signal::Gorilla),
                     Signal::TailCall(args) => Ok(Signal::TailCall(args)),
                 }
             }
+        }
+    }
+
+    /// C13-1 / C13B-007: Return true if `expr` contains an `Expr::Ident(name, _)`
+    /// whose name appears in `bound_names`. Used to decide whether a
+    /// pipeline step explicitly consumes a pipeline-scope binding, in
+    /// which case auto-injection of the pipeline `current` as an extra
+    /// argument is suppressed.
+    pub(crate) fn expr_references_any(expr: &Expr, bound_names: &[String]) -> bool {
+        fn walk(e: &Expr, names: &[String]) -> bool {
+            match e {
+                Expr::Ident(n, _) => names.iter().any(|bn| bn == n),
+                Expr::BinaryOp(l, _, r, _) => walk(l, names) || walk(r, names),
+                Expr::UnaryOp(_, inner, _) => walk(inner, names),
+                Expr::FuncCall(callee, args, _) => {
+                    walk(callee, names) || args.iter().any(|a| walk(a, names))
+                }
+                Expr::MethodCall(obj, _, args, _) => {
+                    walk(obj, names) || args.iter().any(|a| walk(a, names))
+                }
+                Expr::FieldAccess(obj, _, _) => walk(obj, names),
+                Expr::BuchiPack(fields, _) => fields.iter().any(|f| walk(&f.value, names)),
+                Expr::ListLit(items, _) => items.iter().any(|x| walk(x, names)),
+                Expr::Pipeline(steps, _) => steps.iter().any(|s| walk(s, names)),
+                Expr::MoldInst(_, type_args, fields, _) => {
+                    type_args.iter().any(|a| walk(a, names))
+                        || fields.iter().any(|f| walk(&f.value, names))
+                }
+                Expr::Unmold(inner, _) => walk(inner, names),
+                Expr::Lambda(_, body, _) => walk(body, names),
+                Expr::TypeInst(_, fields, _) => fields.iter().any(|f| walk(&f.value, names)),
+                Expr::Throw(inner, _) => walk(inner, names),
+                Expr::CondBranch(arms, _) => arms.iter().any(|arm| {
+                    arm.condition.as_ref().is_some_and(|c| walk(c, names))
+                        || arm.body.iter().any(|s| {
+                            if let Statement::Expr(e) = s {
+                                walk(e, names)
+                            } else {
+                                false
+                            }
+                        })
+                }),
+                _ => false,
+            }
+        }
+        walk(expr, bound_names)
+    }
+
+    /// C13-1 / C13B-007: Decide whether an intermediate pipeline step
+    /// `=> name` should call `name` with the current value (classic
+    /// function-step semantics) or bind the current value to `name`
+    /// and forward it unchanged (bind-and-forward semantics).
+    ///
+    /// A name is considered callable-in-pipeline if:
+    ///   - it already resolves to a `Value::Function` in the current
+    ///     environment (user-defined function, prelude function stored
+    ///     as a Function), or
+    ///   - it resolves to a builtin sentinel `Value::Str` (used for
+    ///     addon dispatch / net builtins / crypto), or
+    ///   - it is not defined in the environment at all — in which case
+    ///     we assume it's a binding target (never an undefined function
+    ///     reference, which would have been caught by the checker).
+    ///
+    /// For any resolved *value* (Int, Str, List, BuchiPack, ...) that
+    /// is not a function-like value, the intermediate step is
+    /// bind-and-forward: we take the name as a fresh binding target.
+    pub(crate) fn is_pipeline_bindable_callable(&self, name: &str) -> bool {
+        match self.env.get(name) {
+            Some(Value::Function(_)) => true,
+            Some(Value::Str(s)) if s.starts_with("__") => {
+                // Builtin dispatch sentinels (e.g. "__net_builtin_httpServe",
+                // "__crypto_builtin_sha256", "__taida_addon_call::..."). These
+                // are callable through try_builtin_func when named as a pipeline
+                // step, so preserve classic semantics.
+                true
+            }
+            _ => false,
         }
     }
 
@@ -884,19 +969,75 @@ impl Interpreter {
                 //   - FuncCall without _: pass current as first argument
                 //   - Ident: assign current to that variable (handled at statement level)
                 //   - Other expression: evaluate with _ bound to current
+                //
+                // C13-1 / C13B-007: In a pure `=>` pipeline, an intermediate
+                // `=> name` step (where `name` is not an already-defined
+                // function) acts as a **bind-and-forward**: the current
+                // pipeline value is bound to `name` *and* passed through
+                // unchanged so later steps can reference it.  The binding
+                // is scoped to the remainder of this pipeline statement.
+                //
+                // When a later step explicitly references a bound name,
+                // classic auto-injection of `current` as the first argument
+                // is suppressed — the user has taken explicit control via
+                // the named binding.
+                let last_idx = exprs.len().saturating_sub(1);
+                let mut bound_any = false;
+                let mut bound_names: Vec<String> = Vec::new();
                 let mut current = Value::Unit;
                 for (i, expr) in exprs.iter().enumerate() {
                     if i == 0 {
                         current = match self.eval_expr(expr)? {
                             Signal::Value(v) => v,
-                            other => return Ok(other),
+                            other => {
+                                if bound_any {
+                                    self.env.pop_scope();
+                                }
+                                return Ok(other);
+                            }
+                        };
+                    } else if i < last_idx
+                        && let Expr::Ident(name, _) = expr
+                        && !self.is_pipeline_bindable_callable(name)
+                    {
+                        // Intermediate `=> name`: bind-and-forward.
+                        if !bound_any {
+                            self.env.push_scope();
+                            bound_any = true;
+                        }
+                        self.env.define_force(name, current.clone());
+                        bound_names.push(name.clone());
+                        // current is unchanged; continue to next step.
+                    } else if !bound_names.is_empty()
+                        && Self::expr_references_any(expr, &bound_names)
+                    {
+                        // The user explicitly references one of the
+                        // pipeline-scope bindings inside this step. Evaluate
+                        // the step as-written without auto-injecting
+                        // `current` as an extra argument.
+                        current = match self.eval_expr(expr)? {
+                            Signal::Value(v) => v,
+                            other => {
+                                if bound_any {
+                                    self.env.pop_scope();
+                                }
+                                return Ok(other);
+                            }
                         };
                     } else {
                         current = match self.eval_pipeline_step(expr, current)? {
                             Signal::Value(v) => v,
-                            other => return Ok(other),
+                            other => {
+                                if bound_any {
+                                    self.env.pop_scope();
+                                }
+                                return Ok(other);
+                            }
                         };
                     }
+                }
+                if bound_any {
+                    self.env.pop_scope();
                 }
                 Ok(Signal::Value(current))
             }

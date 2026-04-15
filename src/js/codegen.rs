@@ -45,6 +45,10 @@ pub struct JsCodegen {
     shadowed_net_builtins: std::collections::HashSet<String>,
     /// B11-6c: Inheritance parent map (child_name -> parent_name) for TypeExtends resolution.
     type_parents: std::collections::HashMap<String, String>,
+    /// C13-1 / C13B-007: All top-level user-defined function names. Used
+    /// by `is_js_pipeline_callable_ident` to distinguish a callable
+    /// intermediate pipeline step from a bind-and-forward target.
+    user_funcs: std::collections::HashSet<String>,
 }
 
 #[derive(Debug)]
@@ -91,6 +95,7 @@ impl JsCodegen {
             has_net_import: false,
             shadowed_net_builtins: std::collections::HashSet::new(),
             type_parents: std::collections::HashMap::new(),
+            user_funcs: std::collections::HashSet::new(),
         }
     }
 
@@ -137,6 +142,74 @@ impl JsCodegen {
         self.has_net_import
             && is_net_runtime_builtin(name)
             && !self.shadowed_net_builtins.contains(name)
+    }
+
+    /// C13-1 / C13B-007: True if `name` in an intermediate pipeline step
+    /// should be treated as a callable (classic pipeline semantics: call
+    /// it with the current value) rather than a bind-and-forward target.
+    ///
+    /// For JS codegen we recognise:
+    ///   - any built-in prelude name that has an explicit `Expr::Ident`
+    ///     branch in `gen_pipeline` (debug, stdout, typeof, ...);
+    ///   - any net builtin when `taida-lang/net` was imported;
+    ///   - any name that matches a user-defined function collected
+    ///     during pre-pass (`trampoline_funcs` / `async_funcs`).
+    fn is_js_pipeline_callable_ident(&self, name: &str) -> bool {
+        if self.user_funcs.contains(name)
+            || self.trampoline_funcs.contains(name)
+            || self.async_funcs.contains(name)
+        {
+            return true;
+        }
+        if self.has_net_import && self.should_rewrite_net_builtin(name) {
+            return true;
+        }
+        matches!(
+            name,
+            "debug"
+                | "typeof"
+                | "assert"
+                | "stdout"
+                | "stderr"
+                | "stdin"
+                | "jsonEncode"
+                | "jsonPretty"
+                | "nowMs"
+                | "sleep"
+                | "readBytes"
+                | "writeFile"
+                | "writeBytes"
+                | "appendFile"
+                | "remove"
+                | "createDir"
+                | "rename"
+                | "run"
+                | "execShell"
+                | "allEnv"
+                | "argv"
+                | "tcpConnect"
+                | "tcpListen"
+                | "tcpAccept"
+                | "socketSend"
+                | "socketSendAll"
+                | "socketRecv"
+                | "socketSendBytes"
+                | "socketRecvBytes"
+                | "socketClose"
+                | "listenerClose"
+                | "udpBind"
+                | "udpSendTo"
+                | "udpRecvFrom"
+                | "udpClose"
+                | "socketRecvExact"
+                | "dnsResolve"
+                | "poolCreate"
+                | "poolAcquire"
+                | "poolRelease"
+                | "poolClose"
+                | "poolHealth"
+                | "Regex"
+        )
     }
 
     /// Try to write a net builtin rewrite. Returns true if the name was a net
@@ -260,6 +333,16 @@ impl JsCodegen {
 
         // Pre-pass: detect functions containing ]=> (unmold) that need async generation
         self.detect_async_funcs(&program.statements);
+
+        // C13-1 / C13B-007: collect all top-level user-defined function names
+        // so intermediate pipeline `=> name` can disambiguate bind-and-forward
+        // (non-function name) from classic pipeline step (function name).
+        self.user_funcs.clear();
+        for stmt in &program.statements {
+            if let Statement::FuncDef(fd) = stmt {
+                self.user_funcs.insert(fd.name.clone());
+            }
+        }
 
         // ランタイム埋め込み
         result.push_str(&RUNTIME_JS);
@@ -858,14 +941,33 @@ impl JsCodegen {
                 for (j, handler_stmt) in ec.handler_body.iter().enumerate() {
                     self.output.clear();
                     if j == ec.handler_body.len() - 1 {
-                        // Last handler statement → implicit return
-                        if let Statement::Expr(expr) = handler_stmt {
-                            self.write_indent();
-                            self.write("return ");
-                            self.gen_expr(expr)?;
-                            self.write(";\n");
-                        } else {
-                            self.gen_statement(handler_stmt)?;
+                        // Last handler statement → implicit return.
+                        // C13-1: tail bindings yield the bound variable.
+                        match handler_stmt {
+                            Statement::Expr(expr) => {
+                                self.write_indent();
+                                self.write("return ");
+                                self.gen_expr(expr)?;
+                                self.write(";\n");
+                            }
+                            Statement::Assignment(a) => {
+                                self.gen_statement(handler_stmt)?;
+                                self.write_indent();
+                                self.write(&format!("return {};\n", a.target));
+                            }
+                            Statement::UnmoldForward(u) => {
+                                self.gen_statement(handler_stmt)?;
+                                self.write_indent();
+                                self.write(&format!("return {};\n", u.target));
+                            }
+                            Statement::UnmoldBackward(u) => {
+                                self.gen_statement(handler_stmt)?;
+                                self.write_indent();
+                                self.write(&format!("return {};\n", u.target));
+                            }
+                            _ => {
+                                self.gen_statement(handler_stmt)?;
+                            }
                         }
                     } else {
                         self.gen_statement(handler_stmt)?;
@@ -885,14 +987,33 @@ impl JsCodegen {
             let is_last = i == stmts.len() - 1;
             self.output.clear();
             if is_last {
-                // Last statement: implicit return
-                if let Statement::Expr(expr) = &stmts[i] {
-                    self.write_indent();
-                    self.write("return ");
-                    self.gen_expr(expr)?;
-                    self.write(";\n");
-                } else {
-                    self.gen_statement(&stmts[i])?;
+                // Last statement: implicit return.
+                // C13-1: tail bindings yield the bound variable.
+                match &stmts[i] {
+                    Statement::Expr(expr) => {
+                        self.write_indent();
+                        self.write("return ");
+                        self.gen_expr(expr)?;
+                        self.write(";\n");
+                    }
+                    Statement::Assignment(a) => {
+                        self.gen_statement(&stmts[i])?;
+                        self.write_indent();
+                        self.write(&format!("return {};\n", a.target));
+                    }
+                    Statement::UnmoldForward(u) => {
+                        self.gen_statement(&stmts[i])?;
+                        self.write_indent();
+                        self.write(&format!("return {};\n", u.target));
+                    }
+                    Statement::UnmoldBackward(u) => {
+                        self.gen_statement(&stmts[i])?;
+                        self.write_indent();
+                        self.write(&format!("return {};\n", u.target));
+                    }
+                    _ => {
+                        self.gen_statement(&stmts[i])?;
+                    }
                 }
             } else {
                 self.gen_statement(&stmts[i])?;
@@ -2917,6 +3038,10 @@ impl JsCodegen {
 
     /// Generate the body of a condition arm.
     /// For multi-statement bodies, generates all statements with `return` on the last expression.
+    ///
+    /// C13-1: If the last statement is a tail binding (`Assignment` /
+    /// `UnmoldForward` / `UnmoldBackward`), emit the binding as usual and
+    /// then `return <target>;` so the bound value becomes the arm result.
     fn gen_cond_arm_body(&mut self, body: &[crate::parser::Statement]) -> Result<(), JsError> {
         use crate::parser::Statement;
         if body.is_empty() {
@@ -2927,13 +3052,31 @@ impl JsCodegen {
         for (i, stmt) in body.iter().enumerate() {
             let is_last = i == body.len() - 1;
             if is_last {
-                if let Statement::Expr(expr) = stmt {
-                    self.write_indent();
-                    self.write("return ");
-                    self.gen_expr(expr)?;
-                    self.write(";\n");
-                } else {
-                    self.gen_statement(stmt)?;
+                match stmt {
+                    Statement::Expr(expr) => {
+                        self.write_indent();
+                        self.write("return ");
+                        self.gen_expr(expr)?;
+                        self.write(";\n");
+                    }
+                    Statement::Assignment(a) => {
+                        self.gen_statement(stmt)?;
+                        self.write_indent();
+                        self.write(&format!("return {};\n", a.target));
+                    }
+                    Statement::UnmoldForward(u) => {
+                        self.gen_statement(stmt)?;
+                        self.write_indent();
+                        self.write(&format!("return {};\n", u.target));
+                    }
+                    Statement::UnmoldBackward(u) => {
+                        self.gen_statement(stmt)?;
+                        self.write_indent();
+                        self.write(&format!("return {};\n", u.target));
+                    }
+                    _ => {
+                        self.gen_statement(stmt)?;
+                    }
                 }
             } else {
                 self.gen_statement(stmt)?;
@@ -3011,7 +3154,35 @@ impl JsCodegen {
         self.gen_expr(&exprs[0])?;
         self.write(";\n");
 
-        for expr in &exprs[1..] {
+        // C13-1 / C13B-007: Track pipeline-scope bindings introduced by
+        // intermediate `=> name` steps so later steps that explicitly
+        // consume them skip the classic `__p` auto-injection.
+        let last_idx = exprs.len().saturating_sub(1);
+        let mut bound_names: Vec<String> = Vec::new();
+
+        for (step_idx, expr) in exprs[1..].iter().enumerate() {
+            let i = step_idx + 1; // absolute index in exprs
+            // Intermediate `=> name` bind-and-forward: emit `const name = __p;`
+            // and leave `__p` unchanged. Skip when `name` is a function / type /
+            // mold / builtin that should be called with the current value.
+            if i < last_idx
+                && let Expr::Ident(name, _) = expr
+                && !self.is_js_pipeline_callable_ident(name)
+            {
+                self.write_indent();
+                self.write(&format!("const {} = __p;\n", name));
+                bound_names.push(name.clone());
+                continue;
+            }
+            // Step that explicitly references a bound name → no auto-inject.
+            // Emit the step expression directly and assign its result to `__p`.
+            if !bound_names.is_empty() && expr_references_any_name(expr, &bound_names) {
+                self.write_indent();
+                self.write("__p = ");
+                self.gen_expr(expr)?;
+                self.write(";\n");
+                continue;
+            }
             self.write_indent();
             self.write("__p = ");
             match expr {
@@ -3298,6 +3469,50 @@ impl JsCodegen {
         self.write("})()");
         Ok(())
     }
+}
+
+/// C13-1 / C13B-007: True if `expr` references any name in `bound_names`
+/// anywhere in its subtree. Used by `gen_pipeline` to decide whether a
+/// pipeline step should skip the classic `__p` auto-injection because the
+/// user explicitly consumed a pipeline-scope binding.
+fn expr_references_any_name(expr: &Expr, bound_names: &[String]) -> bool {
+    fn walk(e: &Expr, names: &[String]) -> bool {
+        match e {
+            Expr::Ident(n, _) => names.iter().any(|bn| bn == n),
+            Expr::BinaryOp(l, _, r, _) => walk(l, names) || walk(r, names),
+            Expr::UnaryOp(_, inner, _) => walk(inner, names),
+            Expr::FuncCall(callee, args, _) => {
+                walk(callee, names) || args.iter().any(|a| walk(a, names))
+            }
+            Expr::MethodCall(obj, _, args, _) => {
+                walk(obj, names) || args.iter().any(|a| walk(a, names))
+            }
+            Expr::FieldAccess(obj, _, _) => walk(obj, names),
+            Expr::BuchiPack(fields, _) => fields.iter().any(|f| walk(&f.value, names)),
+            Expr::ListLit(items, _) => items.iter().any(|x| walk(x, names)),
+            Expr::Pipeline(steps, _) => steps.iter().any(|s| walk(s, names)),
+            Expr::MoldInst(_, type_args, fields, _) => {
+                type_args.iter().any(|a| walk(a, names))
+                    || fields.iter().any(|f| walk(&f.value, names))
+            }
+            Expr::Unmold(inner, _) => walk(inner, names),
+            Expr::Lambda(_, body, _) => walk(body, names),
+            Expr::TypeInst(_, fields, _) => fields.iter().any(|f| walk(&f.value, names)),
+            Expr::Throw(inner, _) => walk(inner, names),
+            Expr::CondBranch(arms, _) => arms.iter().any(|arm| {
+                arm.condition.as_ref().is_some_and(|c| walk(c, names))
+                    || arm.body.iter().any(|s| {
+                        if let Statement::Expr(e) = s {
+                            walk(e, names)
+                        } else {
+                            false
+                        }
+                    })
+            }),
+            _ => false,
+        }
+    }
+    walk(expr, bound_names)
 }
 
 fn merge_field_defs(parent: &[FieldDef], child: &[FieldDef]) -> Vec<FieldDef> {

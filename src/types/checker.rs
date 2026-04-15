@@ -1199,6 +1199,55 @@ impl TypeChecker {
         }
     }
 
+    /// C13-1 / C13B-007: True if `name` in an intermediate pipeline
+    /// step should be treated as a function-like reference (classic
+    /// pipeline semantics: call it with the current value). False means
+    /// bind-and-forward: the current step's value is bound to `name` and
+    /// passed through unchanged.
+    ///
+    /// A name is considered callable if:
+    ///   - the variable is declared with a `Function` type in scope, or
+    ///   - the name is registered as a user-defined (possibly generic)
+    ///     function / type / mold, or
+    ///   - it is a known builtin identifier.
+    fn is_pipeline_callable_ident(&self, name: &str) -> bool {
+        if let Some(ty) = self.lookup_var(name)
+            && matches!(ty, Type::Function(_, _))
+        {
+            return true;
+        }
+        if self.func_types.contains_key(name)
+            || self.generic_func_defs.contains_key(name)
+            || self.declared_concrete_type_names.contains(name)
+            || self.registry.mold_defs.contains_key(name)
+        {
+            return true;
+        }
+        matches!(
+            name,
+            "debug"
+                | "toString"
+                | "toStr"
+                | "typeOf"
+                | "typeof"
+                | "jsonEncode"
+                | "jsonPretty"
+                | "nowMs"
+                | "assert"
+                | "range"
+                | "enumerate"
+                | "zip"
+                | "hashMap"
+                | "setOf"
+                | "stdout"
+                | "stderr"
+                | "exit"
+                | "stdin"
+                | "argv"
+                | "sleep"
+        )
+    }
+
     /// Look up a variable type from the scope stack (innermost first).
     pub fn lookup_var(&self, name: &str) -> Option<Type> {
         for scope in self.scope_stack.iter().rev() {
@@ -2715,11 +2764,37 @@ defaulted fields must be provided via `()`",
                     self.check_statement(body_stmt);
                 }
 
-                // FL-1: Enforce return type annotation against body's last expression
+                // FL-1 + C13-1: Enforce return type annotation against body's tail value.
+                // The tail value is:
+                //   - `Statement::Expr(e)` → the value of `e` (classic form)
+                //   - `Statement::Assignment(a)` → the bound value of `a.value`
+                //     (C13-1 tail binding `name <= expr` / `expr => name`)
+                //   - `Statement::UnmoldForward(u)` / `UnmoldBackward(u)` →
+                //     the unmolded value (C13-1 tail unmold)
                 if has_return_check {
                     let last_stmt = &fd.body[body_len - 1];
-                    if let Statement::Expr(last_expr) = last_stmt {
-                        let body_ty = self.infer_expr_type(last_expr);
+                    let body_ty_opt = match last_stmt {
+                        Statement::Expr(last_expr) => Some(self.infer_expr_type(last_expr)),
+                        Statement::Assignment(_)
+                        | Statement::UnmoldForward(_)
+                        | Statement::UnmoldBackward(_) => {
+                            // Run check_statement so the target binding is
+                            // registered (errors in RHS are surfaced here).
+                            // Then look up the bound variable's registered
+                            // type to avoid double-inference of the RHS.
+                            self.check_statement(last_stmt);
+                            let bound_name = match last_stmt {
+                                Statement::Assignment(a) => &a.target,
+                                Statement::UnmoldForward(u) => &u.target,
+                                Statement::UnmoldBackward(u) => &u.target,
+                                _ => unreachable!(),
+                            };
+                            Some(self.lookup_var(bound_name).unwrap_or(Type::Unknown))
+                        }
+                        _ => None,
+                    };
+
+                    if let Some(body_ty) = body_ty_opt {
                         if !(body_ty == Type::Unknown
                             || Self::contains_unknown(&body_ty)
                             || self.registry.is_subtype_of(&body_ty, &ret_ty)
@@ -2743,23 +2818,15 @@ defaulted fields must be provided via `()`",
                             });
                         }
                     } else {
-                        // Last statement is not an expression — check it normally.
+                        // Last statement does not yield a value.
                         self.check_statement(last_stmt);
-                        // Assignment, UnmoldForward, UnmoldBackward produce Unit implicitly.
-                        // Only report E1601 if the declared return type is not Unit.
-                        let is_unit_producing = matches!(
-                            last_stmt,
-                            Statement::Assignment(_)
-                                | Statement::UnmoldForward(_)
-                                | Statement::UnmoldBackward(_)
-                        );
                         let is_unit_ret = ret_ty == Type::Unit
                             || matches!(&ret_ty, Type::Named(n) if n == "Unit");
-                        if !(is_unit_producing && is_unit_ret) {
+                        if !is_unit_ret {
                             self.errors.push(TypeError {
                                 message: format!(
                                     "[E1601] Function '{}' declares return type {}, but the last statement is not an expression. \
-                                     Hint: The function body's last statement must be an expression that produces a value.",
+                                     Hint: The function body's last statement must be an expression or a tail binding (`name <= expr`, `expr => name`, `expr ]=> name`, `name <=[ expr`) that produces a value.",
                                     fd.name, ret_ty
                                 ),
                                 span: fd.span.clone(),
@@ -2799,58 +2866,70 @@ defaulted fields must be provided via `()`",
                         && !is_unit_ret
                         && let Some(last_stmt) = ec.handler_body.last()
                     {
-                        if let Statement::Expr(last_expr) = last_stmt {
-                            // Skip if the last expression is Gorilla (><) — never returns
-                            let is_never_returns = matches!(last_expr, Expr::Gorilla(_));
-                            if !is_never_returns {
-                                let body_ty = self.infer_expr_type(last_expr);
-                                // Also treat empty BuchiPack as Unit
-                                let is_unit_body = matches!(body_ty, Type::Unit)
-                                    || matches!(&body_ty, Type::BuchiPack(f) if f.is_empty());
-                                // RCB-241: Aligned with FuncDef return type check (FL-1 / RCB-50)
-                                if !(matches!(body_ty, Type::Unknown)
-                                    || is_unit_body
-                                    || Self::contains_unknown(&body_ty)
-                                    || self.registry.is_subtype_of(&body_ty, &declared_ret)
-                                    || body_ty.is_numeric() && declared_ret.is_numeric()
-                                    || self.contains_unresolved_type_var(&body_ty)
-                                    || self.contains_unresolved_type_var(&declared_ret)
-                                    || self.is_mold_defined_named(&body_ty))
-                                {
-                                    self.errors.push(TypeError {
-                                        message: format!(
-                                            "[E1601] Error handler declares return type {}, \
-                                                 but the handler body evaluates to {}. \
-                                                 Hint: The last expression in the |== handler \
-                                                 must produce a value compatible with the declared \
-                                                 return type.",
-                                            declared_ret, body_ty
-                                        ),
-                                        span: ec.span.clone(),
-                                    });
-                                }
-                            }
+                        // C13-1: support tail binding forms in handler body.
+                        // Skip if the last expression is Gorilla (><) — never returns.
+                        let is_never_returns =
+                            matches!(last_stmt, Statement::Expr(Expr::Gorilla(_)));
+                        let body_ty_opt = if is_never_returns {
+                            None
                         } else {
-                            // Last statement is not an expression (e.g. assignment).
-                            // Assignments produce Unit implicitly.
-                            let is_unit_producing = matches!(
-                                last_stmt,
-                                Statement::Assignment(_)
-                                    | Statement::UnmoldForward(_)
-                                    | Statement::UnmoldBackward(_)
-                            );
-                            if !(is_unit_producing && is_unit_ret) {
+                            match last_stmt {
+                                Statement::Expr(last_expr) => Some(self.infer_expr_type(last_expr)),
+                                Statement::Assignment(a) => {
+                                    // The binding was already recorded by the loop above.
+                                    // Look up the bound variable to avoid double-inference.
+                                    Some(self.lookup_var(&a.target).unwrap_or(Type::Unknown))
+                                }
+                                Statement::UnmoldForward(u) => {
+                                    Some(self.lookup_var(&u.target).unwrap_or(Type::Unknown))
+                                }
+                                Statement::UnmoldBackward(u) => {
+                                    Some(self.lookup_var(&u.target).unwrap_or(Type::Unknown))
+                                }
+                                _ => None,
+                            }
+                        };
+
+                        if let Some(body_ty) = body_ty_opt {
+                            // Also treat empty BuchiPack as Unit
+                            let is_unit_body = matches!(body_ty, Type::Unit)
+                                || matches!(&body_ty, Type::BuchiPack(f) if f.is_empty());
+                            // RCB-241: Aligned with FuncDef return type check (FL-1 / RCB-50)
+                            if !(matches!(body_ty, Type::Unknown)
+                                || is_unit_body
+                                || Self::contains_unknown(&body_ty)
+                                || self.registry.is_subtype_of(&body_ty, &declared_ret)
+                                || body_ty.is_numeric() && declared_ret.is_numeric()
+                                || self.contains_unresolved_type_var(&body_ty)
+                                || self.contains_unresolved_type_var(&declared_ret)
+                                || self.is_mold_defined_named(&body_ty))
+                            {
                                 self.errors.push(TypeError {
                                     message: format!(
                                         "[E1601] Error handler declares return type {}, \
-                                             but the last statement is not an expression. \
-                                             Hint: The |== handler body's last statement must \
-                                             be an expression that produces a value.",
-                                        declared_ret
+                                             but the handler body evaluates to {}. \
+                                             Hint: The last expression in the |== handler \
+                                             must produce a value compatible with the declared \
+                                             return type.",
+                                        declared_ret, body_ty
                                     ),
                                     span: ec.span.clone(),
                                 });
                             }
+                        } else if !is_never_returns {
+                            // Non-expression, non-binding last statement.
+                            self.errors.push(TypeError {
+                                message: format!(
+                                    "[E1601] Error handler declares return type {}, \
+                                         but the last statement is not an expression. \
+                                         Hint: The |== handler body's last statement must \
+                                         be an expression or a tail binding (`name <= expr`, \
+                                         `expr => name`, `expr ]=> name`, `name <=[ expr`) \
+                                         that produces a value.",
+                                    declared_ret
+                                ),
+                                span: ec.span.clone(),
+                            });
                         }
                     }
                 }
@@ -3696,15 +3775,39 @@ defaulted fields must be provided via `()`",
             Expr::CondBranch(arms, span) => self.check_cond_branch(arms, span),
 
             Expr::Pipeline(exprs, _) => {
-                // Pipeline: walk all expressions, set in_pipeline for non-first elements
+                // Pipeline: walk all expressions, set in_pipeline for non-first elements.
+                //
+                // C13-1 / C13B-007: In a pure `=>` pipeline, an intermediate
+                // `=> name` step acts as a bind-and-forward: the value of
+                // the preceding step is bound to `name` in a scope that
+                // covers the remaining pipeline steps. When the intermediate
+                // step is an `Expr::Ident(name)` and `name` is NOT already a
+                // known function / type / mold / builtin, we register it as
+                // a local binding carrying the current step's type rather
+                // than reporting `[E1502] Undefined variable`.
                 let old_in_pipeline = self.in_pipeline;
+                let last_idx = exprs.len().saturating_sub(1);
+                // A fresh scope holds any intermediate bind-and-forward bindings.
+                self.push_scope();
                 let mut result_type = Type::Unknown;
                 for (i, pipe_expr) in exprs.iter().enumerate() {
                     if i > 0 {
                         self.in_pipeline = true;
                     }
+                    if i > 0
+                        && i < last_idx
+                        && let Expr::Ident(name, _) = pipe_expr
+                        && !self.is_pipeline_callable_ident(name)
+                    {
+                        // Intermediate bind-and-forward: carry the current
+                        // step's type and make `name` visible to later steps.
+                        // result_type is unchanged (value passes through).
+                        self.define_var(name, result_type.clone());
+                        continue;
+                    }
                     result_type = self.infer_expr_type(pipe_expr);
                 }
+                self.pop_scope();
                 self.in_pipeline = old_in_pipeline;
                 result_type
             }
@@ -4157,11 +4260,7 @@ defaulted fields must be provided via `()`",
             for body_stmt in &first_arm.body {
                 self.check_statement(body_stmt);
             }
-            let ty = if let Some(last_expr) = first_arm.last_expr() {
-                self.infer_expr_type(last_expr)
-            } else {
-                Type::Unknown
-            };
+            let ty = self.arm_result_type(first_arm);
             self.pop_scope();
             ty
         } else {
@@ -4192,30 +4291,50 @@ defaulted fields must be provided via `()`",
             for body_stmt in &arm.body {
                 self.check_statement(body_stmt);
             }
-            if let Some(last_expr) = arm.last_expr() {
-                let arm_ty = self.infer_expr_type(last_expr);
-                if !(first_ty == Type::Unknown
-                    || arm_ty == Type::Unknown
+            let arm_ty = self.arm_result_type(arm);
+            if arm_ty != Type::Unknown
+                && !(first_ty == Type::Unknown
                     || Self::contains_unknown(&first_ty)
                     || Self::contains_unknown(&arm_ty)
                     || self.registry.is_subtype_of(&arm_ty, &first_ty)
                     // Allow Int/Float mixing (both are Num)
                     || first_ty.is_numeric() && arm_ty.is_numeric())
-                {
-                    self.errors.push(TypeError {
-                        message: format!(
-                            "[E1603] Condition branch type mismatch: first arm returns {}, but this arm returns {}. \
-                             Hint: All arms of a condition branch should return the same type.",
-                            first_ty, arm_ty
-                        ),
-                        span: span.clone(),
-                    });
-                }
+            {
+                self.errors.push(TypeError {
+                    message: format!(
+                        "[E1603] Condition branch type mismatch: first arm returns {}, but this arm returns {}. \
+                         Hint: All arms of a condition branch should return the same type.",
+                        first_ty, arm_ty
+                    ),
+                    span: span.clone(),
+                });
             }
             self.pop_scope();
         }
 
         first_ty
+    }
+
+    /// C13-1: Infer the type of an arm's result. The result is:
+    /// - `Statement::Expr(e)` → the inferred type of `e`
+    /// - `Statement::Assignment(_)` / `UnmoldForward(_)` / `UnmoldBackward(_)`
+    ///   → the registered type of the bound target (already recorded by
+    ///   the preceding `check_statement` loop).
+    /// - Anything else (definitions, imports, …) → `Type::Unknown`.
+    ///
+    /// Must be called *after* `check_statement` has processed the arm
+    /// body so that tail-binding targets are present in scope.
+    fn arm_result_type(&mut self, arm: &CondArm) -> Type {
+        let Some(last_stmt) = arm.body.last() else {
+            return Type::Unknown;
+        };
+        match last_stmt {
+            Statement::Expr(e) => self.infer_expr_type(e),
+            Statement::Assignment(a) => self.lookup_var(&a.target).unwrap_or(Type::Unknown),
+            Statement::UnmoldForward(u) => self.lookup_var(&u.target).unwrap_or(Type::Unknown),
+            Statement::UnmoldBackward(u) => self.lookup_var(&u.target).unwrap_or(Type::Unknown),
+            _ => Type::Unknown,
+        }
     }
 }
 

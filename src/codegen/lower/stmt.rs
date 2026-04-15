@@ -940,6 +940,17 @@ impl Lowering {
                     }
                     _ => {
                         self.lower_statement(&mut ir_func, stmt)?;
+                        // C13-1: A tail binding statement yields the bound
+                        // value as the function's return value.
+                        if is_last && let Some(bound_var) = Self::tail_binding_var(&ir_func, stmt) {
+                            last_var = Some(bound_var);
+                            // Use the RHS expression of the binding for the
+                            // heap-escape reachability analysis below. For an
+                            // unmold binding, the source is the `Mold[_]`
+                            // holder — reachability from it still covers the
+                            // bound value.
+                            last_expr = stmt.yielded_expr();
+                        }
                     }
                 }
             }
@@ -1101,7 +1112,9 @@ impl Lowering {
             try_fn.push(IrInst::DefVar(var_name.clone(), get_var));
         }
 
-        // Lower subsequent statements, tracking the last expression for return value
+        // Lower subsequent statements, tracking the last expression for return value.
+        // C13-1: A tail binding statement yields the bound value as the
+        // try-block's effective result.
         let mut last_try_var: Option<IrVar> = None;
         if !subsequent_stmts.is_empty() {
             // Lower all statements except possibly the last one
@@ -1113,6 +1126,9 @@ impl Lowering {
                         last_try_var = Some(self.lower_expr(&mut try_fn, expr)?);
                     } else {
                         self.lower_statement(&mut try_fn, stmt)?;
+                        if let Some(bound_var) = Self::tail_binding_var(&try_fn, stmt) {
+                            last_try_var = Some(bound_var);
+                        }
                     }
                 } else if let Statement::ErrorCeiling(ec2) = stmt {
                     // Nested ErrorCeiling: delegate to lower_error_ceiling_with_body
@@ -1207,7 +1223,9 @@ impl Lowering {
                 vec![err_var, handler_type_str],
             ));
             func.push(IrInst::DefVar(ec.error_param.clone(), checked_err));
-            // Lower handler body, capturing the last expression's result
+            // Lower handler body, capturing the last expression's result.
+            // C13-1: If the last statement is a tail binding, yield the
+            // bound value as the handler result.
             let mut last_handler_var = None;
             for (idx, stmt) in ec.handler_body.iter().enumerate() {
                 let is_last = idx == ec.handler_body.len() - 1;
@@ -1216,6 +1234,9 @@ impl Lowering {
                         last_handler_var = Some(self.lower_expr(func, expr)?);
                     } else {
                         self.lower_statement(func, stmt)?;
+                        if let Some(bound_var) = Self::tail_binding_var(func, stmt) {
+                            last_handler_var = Some(bound_var);
+                        }
                     }
                 } else {
                     self.lower_statement(func, stmt)?;
@@ -2077,6 +2098,10 @@ impl Lowering {
 
     /// Lower a condition arm body (Vec<Statement>) to IR.
     /// Returns the IR variable holding the result of the last expression.
+    ///
+    /// C13-1: A tail binding statement (`Assignment` / `UnmoldForward` /
+    /// `UnmoldBackward`) yields the bound value as the arm result, so the
+    /// IR variable produced by that statement becomes `last_var`.
     pub(super) fn lower_cond_arm_body(
         &mut self,
         func: &mut IrFunction,
@@ -2096,6 +2121,9 @@ impl Lowering {
                 }
                 _ => {
                     self.lower_statement(func, stmt)?;
+                    if is_last && let Some(bound_var) = Self::tail_binding_var(func, stmt) {
+                        last_var = bound_var;
+                    }
                 }
             }
         }
@@ -2104,6 +2132,10 @@ impl Lowering {
 
     /// Lower a condition arm body in tail position.
     /// The last expression is lowered with tail-call optimization.
+    ///
+    /// C13-1: Tail-binding statements cannot be TCO'd (the value is bound
+    /// first and then yielded), so they are lowered via the normal path
+    /// and the IR variable for the binding becomes the tail value.
     pub(super) fn lower_cond_arm_body_tail(
         &mut self,
         func: &mut IrFunction,
@@ -2127,9 +2159,38 @@ impl Lowering {
                 }
                 _ => {
                     self.lower_statement(func, stmt)?;
+                    if is_last && let Some(bound_var) = Self::tail_binding_var(func, stmt) {
+                        last_var = bound_var;
+                    }
                 }
             }
         }
         Ok(last_var)
+    }
+
+    /// C13-1: If `stmt` is a tail-binding statement that was just lowered
+    /// via `lower_statement`, return the IR variable bound by the trailing
+    /// `DefVar(target, value)` instruction so the caller can treat it as
+    /// the block's yield value.
+    ///
+    /// `lower_statement` always ends with `DefVar(assign.target, val)` for
+    /// `Assignment` / `UnmoldForward` / `UnmoldBackward`, so peeking at the
+    /// last `DefVar` whose name matches the binding target reliably
+    /// recovers the IR value.
+    fn tail_binding_var(func: &IrFunction, stmt: &Statement) -> Option<IrVar> {
+        let target = match stmt {
+            Statement::Assignment(a) => &a.target,
+            Statement::UnmoldForward(u) => &u.target,
+            Statement::UnmoldBackward(u) => &u.target,
+            _ => return None,
+        };
+        for inst in func.body.iter().rev() {
+            if let IrInst::DefVar(name, var) = inst
+                && name == target
+            {
+                return Some(*var);
+            }
+        }
+        None
     }
 }

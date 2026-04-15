@@ -550,13 +550,15 @@ impl Parser {
         }
     }
 
-    /// C12-4 (FB-17): enforce the pure-expression discipline on a parsed
-    /// condition-arm body. Called after `parse_block()` so that all
-    /// error messages carry precise spans.
+    /// C12-4 (FB-17) + C13-1: pure-expression discipline on a parsed
+    /// condition-arm body, relaxed for C13.
     ///
     /// Rules:
-    ///   1. The **final** statement must be `Statement::Expr(_)` — the
-    ///      arm's result expression.
+    ///   1. The **final** statement may be:
+    ///      - `Statement::Expr(_)` — arm's result expression (classic form), or
+    ///      - `Statement::Assignment(_)` / `Statement::UnmoldForward(_)` /
+    ///        `Statement::UnmoldBackward(_)` — C13-1 tail-binding form
+    ///        that yields the bound value as the arm's result.
     ///   2. **Non-final** statements must be `Assignment`,
     ///      `UnmoldForward`, or `UnmoldBackward` — i.e. let-bindings
     ///      that name a value for subsequent statements.
@@ -567,22 +569,54 @@ impl Parser {
     /// discarded side-effect call (`writeFile(...) => _wr`, a bare
     /// function-call statement, or a top-level definition) can hide
     /// inside what reads like a conditional branch.
+    ///
+    /// C13-1 loosens rule 1 so the tail bind (`name <= expr`,
+    /// `expr => name`, `expr ]=> name`, `name <=[ expr`) is accepted
+    /// as an expression-block result without requiring a redundant
+    /// trailing `name` line. FB-17's safety boundary is preserved:
+    /// bare call statements, discard pipelines, and nested definitions
+    /// in non-final positions remain rejected.
     fn validate_cond_arm_body(block: &[Statement]) -> Result<(), ParseError> {
         debug_assert!(!block.is_empty(), "empty arm body should be caught earlier");
+        // C13-1: FB-17 "discard pipeline" pattern — `expr => _name` where
+        // the binding target starts with an underscore — is a deliberate
+        // "throw the value away for its side effects" pattern and remains
+        // rejected at any position, including the new C13-1 tail-binding
+        // position. Discard unmolds (`]=> _x`, `_x <=[ ...`) follow the
+        // same rule.
+        for stmt in block {
+            if let Some(discard_target) = Self::discard_binding_target(stmt) {
+                let span = Self::statement_span(stmt);
+                return Err(ParseError {
+                    message: format!(
+                        "[E1616] `{} <= ...` / `... => {}` / `... ]=> {}` is a discard binding \
+                         and is not allowed inside a `| |>` arm body. The underscore-prefixed \
+                         target indicates a value being thrown away for side effects, which \
+                         breaks the pure-expression rule. Remove the binding or use a meaningful \
+                         name. See docs/guide/07_control_flow.md.",
+                        discard_target, discard_target, discard_target
+                    ),
+                    span,
+                });
+            }
+        }
         let last_idx = block.len() - 1;
         for (idx, stmt) in block.iter().enumerate() {
             if idx == last_idx {
-                // Final statement must be an expression.
+                // C13-1: final statement may be an expression OR a binding.
                 match stmt {
-                    Statement::Expr(_) => {}
+                    Statement::Expr(_)
+                    | Statement::Assignment(_)
+                    | Statement::UnmoldForward(_)
+                    | Statement::UnmoldBackward(_) => {}
                     _ => {
                         let span = Self::statement_span(stmt);
                         return Err(ParseError {
                             message: format!(
-                                "[E1616] `| |>` arm body must end with a result expression, not a {} statement. \
+                                "[E1616] `| |>` arm body must end with a result expression or a binding, not a {} statement. \
                                  A condition arm is a pure expression: optional let-bindings \
                                  (`name <= expr`, `expr ]=> name`, `name <=[ expr`) may appear, \
-                                 but the last line must produce the arm's value. \
+                                 and the last line may be either a result expression or a tail binding. \
                                  See docs/guide/07_control_flow.md for the pure-expression rule.",
                                 Self::statement_kind_label(stmt),
                             ),
@@ -624,6 +658,24 @@ impl Parser {
             }
         }
         Ok(())
+    }
+
+    /// C13-1: Return `Some(target)` if `stmt` is a discard-style binding
+    /// (`expr => _name`, `_name <= expr`, `expr ]=> _name`, `_name <=[ expr`)
+    /// — i.e. the binding target starts with `_`. The FB-17 "discard
+    /// pipeline" remains rejected inside `| |>` arm bodies.
+    fn discard_binding_target(stmt: &Statement) -> Option<&str> {
+        let target = match stmt {
+            Statement::Assignment(a) => a.target.as_str(),
+            Statement::UnmoldForward(u) => u.target.as_str(),
+            Statement::UnmoldBackward(u) => u.target.as_str(),
+            _ => return None,
+        };
+        if target.starts_with('_') {
+            Some(target)
+        } else {
+            None
+        }
     }
 
     /// Human-readable label for a Statement kind, used in E1616 diagnostics.

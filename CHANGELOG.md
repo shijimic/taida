@@ -1,5 +1,44 @@
 # Changelog
 
+## @c.13.rc3 (in progress)
+
+In-flight release tracking the @c.13.rc3 milestone. See
+`.dev/C13_PROGRESS.md` for the live progress tracker.
+
+### Language-level changes
+
+- **C13-1 — expression-block tail-binding semantics**
+  - Under C13-1 the tail statement of a `| |>` arm body, a function body,
+    or a `|==` error-ceiling body may be a binding (`name <= expr`,
+    `expr => name`, `expr ]=> name`, `name <=[ expr`). The bound value
+    becomes the block's result, so a redundant trailing `name` line is
+    no longer required.
+  - Pure `=>` single-direction pipelines now support intermediate
+    `=> name` as **bind-and-forward**: the current value is bound to
+    `name` *and* passed through unchanged. The binding is scoped to
+    the remainder of the pipeline statement, so a later step may
+    reference `name` without `[E1502] Undefined variable`.
+  - FB-17 safety is preserved: underscore-prefixed discard targets
+    (`... => _wr`, `_wr <= ...`, `... ]=> _wr`, `_wr <=[ ...`) remain
+    rejected inside `| |>` arm bodies, and non-tail bare call
+    statements / discard pipelines / nested definitions in arm bodies
+    continue to raise `[E1616]`.
+  - All three backends (Interpreter / JS / Native) evaluate tail
+    bindings identically. See `docs/guide/07_control_flow.md` for the
+    expanded rule, migration examples, and the C13-1 shorthand forms.
+
+### Migration
+
+- Existing code that ended arm bodies / function bodies / `|==` handler
+  bodies with an expression continues to compile unchanged.
+- Code that worked around the former restriction by appending a
+  redundant `name` line can now drop that final line without any
+  semantic change (the bound value is the block result either way).
+- Code that wrote intermediate `=> name` in a pipeline and relied on
+  it being "passed through" previously produced `[E1502] Undefined
+  variable` — it now resolves as a bind-and-forward step. There is
+  no silent behaviour change for code that already compiled.
+
 ## @c.12.rc3 (in progress)
 
 In-flight release tracking the @c.12.rc3 milestone (`FUTURE_BLOCKERS.md`

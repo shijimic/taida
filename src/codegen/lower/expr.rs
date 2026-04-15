@@ -1327,6 +1327,13 @@ impl Lowering {
     }
 
     /// パイプライン: `a => f(_) => g(_)` → 各段の結果を次の引数に
+    ///
+    /// C13-1 / C13B-007: An intermediate `=> name` step (where `name` is
+    /// not a user-defined function or known builtin) acts as a
+    /// **bind-and-forward**: the current value is bound to `name` via
+    /// `DefVar` and passed through unchanged. Steps that explicitly
+    /// reference the bound `name` skip the classic auto-injection of
+    /// `prev_result` as an extra argument.
     pub(super) fn lower_pipeline(
         &mut self,
         func: &mut IrFunction,
@@ -1340,13 +1347,44 @@ impl Lowering {
 
         // 最初の式を評価
         let mut current = self.lower_expr(func, &exprs[0])?;
+        let last_idx = exprs.len().saturating_sub(1);
+        let mut bound_names: Vec<String> = Vec::new();
 
-        // 残りの式について、_ を前の結果で置換して評価
-        for expr in &exprs[1..] {
+        for (step_idx, expr) in exprs[1..].iter().enumerate() {
+            let i = step_idx + 1;
+            // Intermediate `=> name` bind-and-forward
+            if i < last_idx
+                && let Expr::Ident(name, _) = expr
+                && !self.is_native_pipeline_callable_ident(name)
+            {
+                func.push(IrInst::DefVar(name.clone(), current));
+                bound_names.push(name.clone());
+                continue;
+            }
+            // Step consumes a pipeline-scope binding explicitly → evaluate
+            // as-written, no auto-inject.
+            if !bound_names.is_empty() && native_expr_references_any_name(expr, &bound_names) {
+                current = self.lower_expr(func, expr)?;
+                continue;
+            }
             current = self.lower_pipeline_step(func, expr, current)?;
         }
 
         Ok(current)
+    }
+
+    /// C13-1 / C13B-007: True if `name` is a callable reference for the
+    /// Native pipeline lowerer (user function, prelude builtin with a
+    /// pipeline form, etc.), rather than a bind-and-forward target.
+    fn is_native_pipeline_callable_ident(&self, name: &str) -> bool {
+        if self.user_funcs.contains(name) {
+            return true;
+        }
+        // `lower_pipeline_step` currently only special-cases "debug" for
+        // the Ident branch; every other prelude builtin enters the
+        // pipeline via FuncCall / MoldInst syntax. Treat "debug" as
+        // callable here so `data => debug` still invokes the builtin.
+        name == "debug"
     }
 
     pub(super) fn lower_pipeline_step(
@@ -2013,4 +2051,48 @@ impl Lowering {
 
         Ok(result_var)
     }
+}
+
+/// C13-1 / C13B-007: True if `expr` references any name in `bound_names`
+/// anywhere in its subtree. Used by `lower_pipeline` to decide whether a
+/// pipeline step should skip the classic `prev_result` auto-injection
+/// because the user explicitly consumed a pipeline-scope binding.
+fn native_expr_references_any_name(expr: &Expr, bound_names: &[String]) -> bool {
+    fn walk(e: &Expr, names: &[String]) -> bool {
+        match e {
+            Expr::Ident(n, _) => names.iter().any(|bn| bn == n),
+            Expr::BinaryOp(l, _, r, _) => walk(l, names) || walk(r, names),
+            Expr::UnaryOp(_, inner, _) => walk(inner, names),
+            Expr::FuncCall(callee, args, _) => {
+                walk(callee, names) || args.iter().any(|a| walk(a, names))
+            }
+            Expr::MethodCall(obj, _, args, _) => {
+                walk(obj, names) || args.iter().any(|a| walk(a, names))
+            }
+            Expr::FieldAccess(obj, _, _) => walk(obj, names),
+            Expr::BuchiPack(fields, _) => fields.iter().any(|f| walk(&f.value, names)),
+            Expr::ListLit(items, _) => items.iter().any(|x| walk(x, names)),
+            Expr::Pipeline(steps, _) => steps.iter().any(|s| walk(s, names)),
+            Expr::MoldInst(_, type_args, fields, _) => {
+                type_args.iter().any(|a| walk(a, names))
+                    || fields.iter().any(|f| walk(&f.value, names))
+            }
+            Expr::Unmold(inner, _) => walk(inner, names),
+            Expr::Lambda(_, body, _) => walk(body, names),
+            Expr::TypeInst(_, fields, _) => fields.iter().any(|f| walk(&f.value, names)),
+            Expr::Throw(inner, _) => walk(inner, names),
+            Expr::CondBranch(arms, _) => arms.iter().any(|arm| {
+                arm.condition.as_ref().is_some_and(|c| walk(c, names))
+                    || arm.body.iter().any(|s| {
+                        if let Statement::Expr(e) = s {
+                            walk(e, names)
+                        } else {
+                            false
+                        }
+                    })
+            }),
+            _ => false,
+        }
+    }
+    walk(expr, bound_names)
 }

@@ -2875,16 +2875,89 @@ fn test_e1604_non_bool_in_subsequent_arm() {
 // ── Fix 3: FL-1 last statement not an expression ───────────────────
 
 #[test]
-fn test_fl1_last_stmt_not_expr_with_return_type() {
-    // Function declares :Int but last statement is an assignment (not an expression)
+fn test_c13_1_tail_binding_yields_bound_value() {
+    // C13-1 migration of the former test_fl1_last_stmt_not_expr_with_return_type.
+    // Under C13-1 a trailing `name <= expr` yields the bound value as
+    // the function result, so a function declaring `=> :Int` and ending
+    // with `x <= 42` is valid (the body evaluates to 42).
     let source = "bad =\n  x <= 42\n=> :Int";
     let (_, errors) = check(source);
+    let e1601: Vec<_> = errors
+        .iter()
+        .filter(|e| e.message.contains("[E1601]"))
+        .collect();
     assert!(
+        e1601.is_empty(),
+        "C13-1: `x <= 42` as tail binding should satisfy `=> :Int`, got: {:?}",
+        e1601
+    );
+}
+
+#[test]
+fn test_c13_1_tail_binding_type_mismatch_still_reported() {
+    // C13-1: A tail binding whose RHS type does not match the declared
+    // return type must still be reported as E1601, since the bound
+    // value is what the function returns.
+    let source = "bad =\n  x <= \"not an int\"\n=> :Int";
+    let (_, errors) = check(source);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1601]")),
+        "Expected E1601 for tail-binding type mismatch (Str vs Int), got: {:?}",
         errors
-            .iter()
-            .any(|e| e.message.contains("[E1601]") && e.message.contains("not an expression")),
-        "Expected E1601 for non-expression last statement, got: {:?}",
-        errors
+    );
+}
+
+#[test]
+fn test_c13_1_func_body_tail_forward_assignment_ok() {
+    // C13-1: Function body ending with `expr => name` yields `expr`
+    // as the function result, satisfying `=> :Int`.
+    let source = "calc =\n  1 => one\n  one + 2 => total\n=> :Int";
+    let (_, errors) = check(source);
+    let e1601: Vec<_> = errors
+        .iter()
+        .filter(|e| e.message.contains("[E1601]"))
+        .collect();
+    assert!(
+        e1601.is_empty(),
+        "C13-1: `one + 2 => total` tail yields Int, got: {:?}",
+        e1601
+    );
+}
+
+#[test]
+fn test_c13_1_error_ceiling_tail_binding_ok() {
+    // C13-1: Error ceiling body ending with `name <= expr` yields the
+    // bound value as the handler result.
+    let source =
+        "handle =\n  |== err: Error =\n    fallback <= \"default\"\n  => :Str\n  \"ok\"\n=> :Str";
+    let (_, errors) = check(source);
+    let e1601: Vec<_> = errors
+        .iter()
+        .filter(|e| e.message.contains("[E1601]"))
+        .collect();
+    assert!(
+        e1601.is_empty(),
+        "C13-1: handler tail `fallback <= \"default\"` yields Str, got: {:?}",
+        e1601
+    );
+}
+
+#[test]
+fn test_c13_1_pipeline_intermediate_bind_and_forward_ok() {
+    // C13-1 / C13B-007: Intermediate `=> add_result` in a pure `=>`
+    // pipeline binds the current value and forwards it; later steps
+    // may reference `add_result` without E1502.
+    let source = "add x: Int y: Int = x + y => :Int\n\
+1 => add(3, _) => add_result => stdout(add_result)";
+    let (_, errors) = check(source);
+    let e1502: Vec<_> = errors
+        .iter()
+        .filter(|e| e.message.contains("[E1502]") && e.message.contains("add_result"))
+        .collect();
+    assert!(
+        e1502.is_empty(),
+        "C13-1: intermediate pipeline bind must not raise E1502, got: {:?}",
+        e1502
     );
 }
 

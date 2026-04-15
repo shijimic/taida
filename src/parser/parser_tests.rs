@@ -2120,9 +2120,11 @@ validateProjectRoot =\n  \
 }
 
 #[test]
-fn test_c12_4_arm_body_trailing_let_binding_rejected() {
-    // The *final* statement must be an expression — a trailing
-    // let-binding with no following expression is a static error.
+fn test_c13_1_arm_body_trailing_let_binding_accepted() {
+    // C13-1 migration of the former test_c12_4_arm_body_trailing_let_binding_rejected.
+    // Under C13-1 a trailing `name <= expr` (or `expr => name`) in a
+    // `| |>` arm body is accepted as a tail binding that yields the
+    // bound value as the arm result.
     let source = "\
 broken n =\n  \
   | n > 0 |>\n    \
@@ -2130,21 +2132,14 @@ broken n =\n  \
   | _ |> 0\n\
 => :Int\n";
     let (_, errors) = parse(source);
+    let e1616: Vec<_> = errors
+        .iter()
+        .filter(|e| e.message.contains("E1616"))
+        .collect();
     assert!(
-        !errors.is_empty(),
-        "Expected [E1616] for arm body ending in a let-binding"
-    );
-    assert!(
-        errors.iter().any(|e| e.message.contains("E1616")),
-        "Expected E1616, got: {:?}",
-        errors
-    );
-    assert!(
-        errors
-            .iter()
-            .any(|e| e.message.contains("must end with a result expression")),
-        "Expected end-with-result-expression mention, got: {:?}",
-        errors
+        e1616.is_empty(),
+        "C13-1: trailing `x <= n + 1` should be accepted as a tail binding, got: {:?}",
+        e1616
     );
 }
 
@@ -2162,4 +2157,139 @@ classify x =\n  \
     let (program, errors) = parse(source);
     assert!(errors.is_empty(), "Errors: {:?}", errors);
     assert_eq!(program.statements.len(), 1);
+}
+
+// ── C13-1: expression-block tail-binding semantics ───────────
+
+#[test]
+fn test_c13_1_arm_body_tail_assignment_accepted() {
+    // `name <= expr` at the tail of a `| |>` arm body is accepted
+    // under C13-1 and yields the bound value as the arm result.
+    let source = "\
+f x =\n  \
+  | x > 0 |>\n    \
+    doubled <= x * 2\n    \
+    result <= doubled + 1\n  \
+  | _ |> 0\n\
+=> :Int\n";
+    let (_, errors) = parse(source);
+    let e1616: Vec<_> = errors
+        .iter()
+        .filter(|e| e.message.contains("E1616"))
+        .collect();
+    assert!(
+        e1616.is_empty(),
+        "C13-1: tail `result <= doubled + 1` should be accepted, got: {:?}",
+        e1616
+    );
+}
+
+#[test]
+fn test_c13_1_arm_body_tail_forward_assignment_accepted() {
+    // `expr => name` at the tail of a `| |>` arm body is accepted
+    // under C13-1 and yields the bound value as the arm result.
+    let source = "\
+f x =\n  \
+  | x > 0 |>\n    \
+    x * 2 => doubled\n  \
+  | _ |> 0\n\
+=> :Int\n";
+    let (_, errors) = parse(source);
+    let e1616: Vec<_> = errors
+        .iter()
+        .filter(|e| e.message.contains("E1616"))
+        .collect();
+    assert!(
+        e1616.is_empty(),
+        "C13-1: tail `x * 2 => doubled` should be accepted, got: {:?}",
+        e1616
+    );
+}
+
+#[test]
+fn test_c13_1_arm_body_tail_unmold_forward_accepted() {
+    // `expr ]=> name` at the tail of a `| |>` arm body is accepted
+    // under C13-1 and yields the unmolded value.
+    let source = "\
+f x =\n  \
+  | x > 0 |>\n    \
+    lax <= Lax[x]()\n    \
+    lax ]=> n\n  \
+  | _ |> 0\n\
+=> :Int\n";
+    let (_, errors) = parse(source);
+    let e1616: Vec<_> = errors
+        .iter()
+        .filter(|e| e.message.contains("E1616"))
+        .collect();
+    assert!(
+        e1616.is_empty(),
+        "C13-1: tail `lax ]=> n` should be accepted, got: {:?}",
+        e1616
+    );
+}
+
+#[test]
+fn test_c13_1_arm_body_tail_unmold_backward_accepted() {
+    // `name <=[ expr` at the tail of a `| |>` arm body is accepted
+    // under C13-1 and yields the unmolded value.
+    let source = "\
+f x =\n  \
+  | x > 0 |>\n    \
+    lax <= Lax[x]()\n    \
+    n <=[ lax\n  \
+  | _ |> 0\n\
+=> :Int\n";
+    let (_, errors) = parse(source);
+    let e1616: Vec<_> = errors
+        .iter()
+        .filter(|e| e.message.contains("E1616"))
+        .collect();
+    assert!(
+        e1616.is_empty(),
+        "C13-1: tail `n <=[ lax` should be accepted, got: {:?}",
+        e1616
+    );
+}
+
+#[test]
+fn test_c13_1_arm_body_discard_binding_still_rejected_at_tail() {
+    // FB-17 safety: an underscore-prefixed binding target is a discard
+    // pattern and must stay rejected even at the tail position in C13-1.
+    let source = "\
+bad x =\n  \
+  | x > 0 |>\n    \
+    writeFile(\"/tmp/x\", \"y\") => _wr\n  \
+  | _ |> 0\n\
+=> :Int\n";
+    let (_, errors) = parse(source);
+    assert!(
+        errors.iter().any(|e| e.message.contains("E1616")),
+        "C13-1: `=> _wr` must stay rejected as a discard pattern, got: {:?}",
+        errors
+    );
+    assert!(
+        errors.iter().any(|e| e.message.contains("discard binding")),
+        "Expected 'discard binding' mention, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn test_c13_1_arm_body_non_final_bare_call_still_rejected() {
+    // FB-17 safety: a non-tail bare call statement (side-effect in
+    // arm body before the final result) remains rejected in C13-1.
+    let source = "\
+bad x =\n  \
+  | x > 0 |>\n    \
+    stdout(\"debug\")\n    \
+    x\n  \
+  | _ |> 0\n\
+=> :Int\n";
+    let (_, errors) = parse(source);
+    assert!(
+        errors.iter().any(|e| e.message.contains("E1616")),
+        "C13-1: bare call at non-tail must stay rejected, got: {:?}",
+        errors
+    );
 }
