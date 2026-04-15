@@ -2980,6 +2980,20 @@ impl Interpreter {
                 let _ = e; // Suppress unused warning
             }
 
+            // C12B-028: Graceful TLS / TCP close so the client receives the
+            // full response before the process exits.
+            //
+            // Without this sequence, `max_requests == 1`-style bounded servers
+            // race against curl: the process exits while response DATA frames
+            // are still in the kernel send buffer, and because curl's POST
+            // body lingers in the receive buffer, Linux sends RST instead of
+            // FIN. The client then reports "Recv failure: connection reset"
+            // and the response body is lost. See `tests/parity.rs` NB6-44 /
+            // NET6-3a-3 for the regression surface.
+            let _ = conn_stream.shutdown_write_graceful();
+            // Short best-effort drain so curl sees our close_notify / FIN.
+            conn_stream.drain_after_shutdown(16 * 1024);
+
             // Check if we should stop accepting connections
             if max_requests > 0 && total_request_count >= max_requests {
                 break;

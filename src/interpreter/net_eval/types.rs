@@ -479,6 +479,43 @@ impl ConnStream {
             ConnStream::Tls(t) => t.stream_ref().set_read_timeout(dur),
         }
     }
+
+    /// Graceful write-side shutdown.
+    ///
+    /// For TLS: send `close_notify`, flush all buffered ciphertext, then shutdown
+    /// the TCP write half. For plaintext: shutdown TCP write half directly.
+    ///
+    /// C12B-028: called on H2 `max_requests`-bounded exit so the kernel sends a
+    /// clean FIN instead of an RST when the process terminates with pending
+    /// response bytes still in-flight on the socket.
+    pub(crate) fn shutdown_write_graceful(&mut self) -> std::io::Result<()> {
+        match self {
+            ConnStream::Plain(s) => s.shutdown(std::net::Shutdown::Write),
+            ConnStream::Tls(t) => {
+                super::super::net_transport::Transport::shutdown_write(t.as_mut())
+            }
+        }
+    }
+
+    /// Read-until-EOF on the socket with a short timeout, so the peer has a
+    /// chance to observe our FIN / `close_notify` and to send its own before
+    /// we close. Keeps at most `max_bytes` worth of post-shutdown traffic out
+    /// of the kernel backlog. Any error (timeout, EOF, reset) is swallowed —
+    /// this is a best-effort linger.
+    pub(crate) fn drain_after_shutdown(&mut self, max_bytes: usize) {
+        // Use a short explicit timeout so we do not block indefinitely if the
+        // peer never closes.
+        let _ = self.set_read_timeout(Some(std::time::Duration::from_millis(200)));
+        let mut scratch = [0u8; 1024];
+        let mut drained = 0;
+        while drained < max_bytes {
+            match std::io::Read::read(self, &mut scratch) {
+                Ok(0) => break,        // clean EOF
+                Ok(n) => drained += n, // keep draining
+                Err(_) => break,       // timeout or error → done
+            }
+        }
+    }
 }
 
 /// Per-connection state for the concurrent httpServe pool.
