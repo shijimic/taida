@@ -82,9 +82,15 @@ mod tests {
     /// change intentionally modifies the runtime C source, update both
     /// the fragment file and the `EXPECTED_TOTAL_LEN` constant below in
     /// the same commit.
+    ///
+    /// C12B-016 (2026-04-15): +540 bytes for doc-comment updates describing
+    /// the new codegen two-path dispatch (compile-time-known Str literals
+    /// go through plain `taida_io_stdout(char*)`; everything else reaches
+    /// `taida_io_stdout_with_tag` polymorphic formatter). Runtime bodies
+    /// of `_with_tag` are unchanged — only comments grew.
     #[test]
     fn test_runtime_core_wasm_fragment_concat_preserves_bytes() {
-        const EXPECTED_TOTAL_LEN: usize = 237_823;
+        const EXPECTED_TOTAL_LEN: usize = 238_363;
         let asm = *RUNTIME_CORE_WASM;
         assert_eq!(
             asm.len(),

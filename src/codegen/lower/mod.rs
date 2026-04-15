@@ -266,3 +266,4 @@ mod molds;
 mod stmt;
 mod expr;
 mod infer;
+mod tag_prop;

@@ -234,7 +234,7 @@ impl WasmRuntimeCache {
         Ok(cached_obj)
     }
 
-    /// Get or compile the core runtime .o
+    /// Get or compile the core runtime .o (wasm-wasi / wasm-edge / wasm-full).
     ///
     /// C12-7 (FB-26): the core wasm runtime was split into four fragments
     /// under `runtime_core_wasm/`. The assembled source is byte-identical

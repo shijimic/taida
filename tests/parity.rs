@@ -60,6 +60,25 @@ fn read_native_runtime_source() -> String {
     out
 }
 
+/// C12B-025 (2026-04-15): `src/interpreter/net_eval.rs` was mechanically split
+/// into `src/interpreter/net_eval/{mod,types,helpers,tests}.rs`. Audit tests
+/// that look for wire-format patterns across the net runtime concatenate the
+/// non-test files so the checks remain path-stable.
+fn read_net_eval_source() -> String {
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let dir = manifest_dir.join("src/interpreter/net_eval");
+    let fragments = ["mod.rs", "types.rs", "helpers.rs"];
+    let mut out = String::new();
+    for name in fragments {
+        let path = dir.join(name);
+        let part = fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("read {}: {}", path.display(), e));
+        out.push_str(&part);
+        out.push('\n');
+    }
+    out
+}
+
 /// Run a .td file with the interpreter and return normalized stdout.
 ///
 /// Delegates to `common::run_interpreter_normalized` which applies per-line
@@ -25041,7 +25060,7 @@ stdout(result.throw.message)
 fn test_net6_5b_scatter_gather_is_default_send_path() {
     // Verify that Interpreter scatter-gather send is the default path.
     // The source code must call send_response_scatter in the serve loop.
-    let source = std::fs::read_to_string("src/interpreter/net_eval.rs").expect("read net_eval.rs");
+    let source = read_net_eval_source();
     assert!(
         source.contains("send_response_scatter"),
         "NET6-5b audit: send_response_scatter must be present in net_eval.rs"
@@ -25085,7 +25104,7 @@ fn test_net6_5b_js_scatter_gather_present() {
 fn test_net6_5b_no_format_in_hot_path_head_builder() {
     // NB6-5 fix: head builder should use write!(&mut buf) not format!()
     // for status line and header encoding in the hot path.
-    let source = std::fs::read_to_string("src/interpreter/net_eval.rs").expect("read net_eval.rs");
+    let source = read_net_eval_source();
 
     // Find the encode_response and build_streaming_head functions
     // They should contain write! instead of format! for the wire head
@@ -25104,7 +25123,7 @@ fn test_net6_5b_no_format_in_hot_path_head_builder() {
 fn test_net6_5b_websocket_word_at_a_time_mask() {
     // NB6-6 fix: WebSocket mask/unmask should use 4-byte-at-a-time XOR.
     // Interpreter: chunks_exact_mut(4) + u32::from_ne_bytes
-    let source = std::fs::read_to_string("src/interpreter/net_eval.rs").expect("read net_eval.rs");
+    let source = read_net_eval_source();
     assert!(
         source.contains("chunks_exact_mut(4)") || source.contains("from_ne_bytes"),
         "NET6-5b audit: Interpreter WebSocket mask should use word-at-a-time XOR"
@@ -27595,12 +27614,11 @@ stdout(result.throw.message)
 /// 3. The success path returns @(ok: true, requests: N)
 #[test]
 fn test_nb7_13_h3_transport_pending_source_parity() {
-    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let _manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
 
     // --- Check Interpreter source ---
-    let interp_path = manifest_dir.join("src/interpreter/net_eval.rs");
-    let interp_src = fs::read_to_string(&interp_path)
-        .unwrap_or_else(|e| panic!("NET7-12a: cannot read {:?}: {}", interp_path, e));
+    // C12B-025: net_eval was split into a directory; read concatenated source.
+    let interp_src = read_net_eval_source();
 
     // serve_h3() must call serve_h3_loop (real transport)
     assert!(
@@ -30449,7 +30467,7 @@ fn test_net7_12e_h3_allocation_materialization_audit() {
 #[test]
 fn test_net7_12f_release_truth_blocker_closure_verified() {
     // ── NB7-114 FIXED: Interpreter public H3 path connected ──
-    let net_eval_src = fs::read_to_string("src/interpreter/net_eval.rs").expect("read net_eval.rs");
+    let net_eval_src = read_net_eval_source();
     // The dlopen gate and H3TransportPending/H3QuicUnavailable paths must be gone
     assert!(
         !net_eval_src.contains("H3TransportPending"),
@@ -30531,7 +30549,7 @@ fn test_net7_12f_release_truth_blocker_closure_verified() {
 #[test]
 fn test_net7_12f_release_gate_all_criteria_met() {
     // Gate 1: h1/h2 existing contract — v1-v6 functions still present
-    let net_eval_src = fs::read_to_string("src/interpreter/net_eval.rs").expect("read net_eval.rs");
+    let net_eval_src = read_net_eval_source();
     assert!(
         net_eval_src.contains("httpServe") && net_eval_src.contains("httpParseRequestHead"),
         "NET7-12f Gate 1: h1/h2 API surface must be intact in net_eval.rs"

@@ -227,11 +227,20 @@ int64_t taida_io_stdout(int64_t val_ptr) {
    B11-2f / C12-1: Only Bool needs type-based dispatch at this layer.
    All other tags (including UNKNOWN and the statically-known STR case)
    fall through to the raw `char*` path — matching the pre-B11
-   `taida_io_stdout(val_ptr)` behaviour. The codegen side (C12-1d)
-   converts non-Str / non-Bool values to strings at the call site via
-   `convert_to_string` so this wasm entry point stays minimal. A
-   tag-directed dispatch tree is deferred to C12-7 (wasm binary size
-   reduction) which depends on the C12-9 runtime split.
+   `taida_io_stdout(val_ptr)` behaviour.
+
+   C12B-016 (2026-04-15): The codegen-side `convert_to_string` fallback
+   was removed. `stdout(...)` now dispatches in two paths at the call
+   site (see `src/codegen/lower/expr.rs`):
+
+     * compile-time-known Str (`TAG_STR == 3`) → plain
+       `taida_io_stdout(char*)` (fast path, keeps wasm-min Hello World
+       at 340 bytes).
+     * everything else → `taida_io_stdout_with_tag(val, tag)` → this
+       function. Bool is handled inline; every other tag routes through
+       `taida_polymorphic_to_string`, matching the Native backend's
+       contract and C12B-034 hardening.
+
    C12-5: returns bytes written (Int). */
 int64_t taida_io_stdout_with_tag(int64_t val, int64_t tag) {
     if ((int)tag == WASM_TAG_BOOL) {
@@ -296,6 +305,10 @@ int64_t taida_io_stderr(int64_t val_ptr) {
 
 /* B11-2a: Type-tagged stderr for Bool display parity (FB-3).
    B11-2f / C12-1: Only Bool needs type-based dispatch; see stdout_with_tag.
+   C12B-016 (2026-04-15): Same two-path dispatch as stdout_with_tag —
+   codegen routes compile-time-known Str literals through the plain
+   `taida_io_stderr(char*)` entry, and everything else reaches this
+   polymorphic dispatcher.
    C12-5: returns bytes written (Int). */
 int64_t taida_io_stderr_with_tag(int64_t val, int64_t tag) {
     if ((int)tag == WASM_TAG_BOOL) {
