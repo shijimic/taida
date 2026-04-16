@@ -145,7 +145,7 @@ pipeline and migration notes for pre-C14 addons.
 
 The canonical public release identifier is the Taida version, not the Rust package semver.
 
-- Current release: `@c.14.rc3`
-- `Cargo.toml` version `2.1.1`: semver metadata for Rust tooling
+- Current release: `@c.15.rc3`
+- `Cargo.toml` version `2.1.2`: semver metadata for Rust tooling
 
-In release notes and public communication, `@c.14.rc3` is the primary version. `2.1.1` is supplementary.
+In release notes and public communication, `@c.15.rc3` is the primary version. `2.1.2` is supplementary.

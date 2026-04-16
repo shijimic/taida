@@ -1,5 +1,38 @@
 # Changelog
 
+## @c.15.rc3
+
+### Security
+
+- **Supply chain: `taida upgrade` canonical source**. Earlier CLIs
+  hard-coded `shijimic/taida` — a personal development fork — as
+  the `taida upgrade` release source. Anyone with control of that
+  single personal account (by compromise, sale, rename, or deletion)
+  could replace published binaries and `SHA256SUMS` with attacker-
+  controlled versions, and every `taida upgrade` invocation
+  worldwide would silently trust them. The constant is now
+  `taida-lang/taida` (the canonical org), and a mandatory regression
+  test (`canonical_release_source_is_taida_lang_org`) pins it so
+  a future edit must go through a compiler failure and explicit
+  review. Stale documentation references to `shijimic/taida` as
+  "the core repo" in `docs/reference/cli.md` and the scaffold doc
+  comments in `src/pkg/init.rs` were also corrected.
+- **User migration**. `@c.13.rc3` and earlier CLIs still look at
+  `shijimic/taida` and cannot see `@c.14.rc3+` releases on the
+  canonical org. Affected users must reinstall through `install.sh`
+  or download a `@c.15.rc3+` archive from
+  `github.com/taida-lang/taida/releases` directly. Once on
+  `@c.15.rc3+`, `taida upgrade` will see canonical releases as
+  expected.
+
+### Fixes
+
+- `taida upgrade --version @c.14.rc3` (and any `--gen c --label rc3`
+  query) from a pre-fix CLI returned `version @c.14.rc3 not found in
+  releases` because the fork (where the CLI was looking) never
+  received that release. After this fix, the upgrade path points at
+  the canonical org directly and the lookup resolves.
+
 ## @c.14.rc3
 
 ### Breaking changes

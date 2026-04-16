@@ -340,7 +340,7 @@ CLI は以下の一切を行いません:
 - `git commit` / `git push origin main` / その他 `main` への書き込み
 - `gh release create` や release asset の upload
 
-release 作成の責務は addon 側 CI (`.github/workflows/release.yml`) が排他的に持ちます。Release author は `github-actions[bot]` に統一され、CLI 実行者個人のアカウントで release が作られることはありません。本体 (`shijimic/taida`) の `release.yml` と対称な 4-job (Prepare / Gate / Build / Publish) 構造を持ち、5 platform matrix で cdylib を build して 8 件の asset (5 cdylib + `addon.lock.toml` + `prebuild-targets.toml.txt` + `SHA256SUMS`) を attach します。
+release 作成の責務は addon 側 CI (`.github/workflows/release.yml`) が排他的に持ちます。Release author は `github-actions[bot]` に統一され、CLI 実行者個人のアカウントで release が作られることはありません。本体 (`taida-lang/taida`) の `release.yml` と対称な 4-job (Prepare / Gate / Build / Publish) 構造を持ち、5 platform matrix で cdylib を build して 8 件の asset (5 cdylib + `addon.lock.toml` + `prebuild-targets.toml.txt` + `SHA256SUMS`) を attach します。
 
 `taida publish` は tag push 完了後に即 exit します。CI 完了を待つことはありません。
 
