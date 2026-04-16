@@ -1780,9 +1780,14 @@ fn github_curl_api_get_optional(url: &str, accept: &str) -> Result<Option<String
         cmd.stdin(std::process::Stdio::piped());
     }
     cmd.arg(url);
-    // Capture stdout so the caller receives the body. (stderr can stay
-    // inherited -- curl's `-s` suppresses progress anyway.)
+    // Capture stdout so the caller receives the body.
     cmd.stdout(std::process::Stdio::piped());
+    // C18B-010 fix (carry from C17B-023): capture stderr so that on
+    // non-zero exit we can surface a structured `warning:` line
+    // naming the HTTP failure context. Pre-fix stderr was inherited
+    // and curl's diagnostics (TLS failure, connect timeout, etc.)
+    // interleaved with Taida's own output.
+    cmd.stderr(std::process::Stdio::piped());
 
     let mut child = cmd
         .spawn()
@@ -1800,6 +1805,16 @@ fn github_curl_api_get_optional(url: &str, accept: &str) -> Result<Option<String
         .wait_with_output()
         .map_err(|e| format!("Failed to wait for curl: {}", e))?;
     if !output.status.success() {
+        // C18B-010: surface curl's stderr (trimmed) when we fall
+        // through to the "offline / 4xx / 5xx" branch. Silent drop
+        // of diagnostics used to mask transient GitHub errors.
+        let err_text = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        if !err_text.is_empty() {
+            eprintln!(
+                "warning: GitHub request failed ({}): {}",
+                url, err_text
+            );
+        }
         return Ok(None);
     }
     Ok(Some(String::from_utf8_lossy(&output.stdout).into_owned()))
@@ -1836,6 +1851,10 @@ fn github_curl_download_to_file(url: &str, dest: &Path) -> Result<bool, String> 
     }
     cmd.arg("-o").arg(dest);
     cmd.arg(url);
+    // C18B-010 fix (carry from C17B-023): capture stderr so tarball
+    // download failures emit structured diagnostics rather than
+    // leaking curl's raw output into the parent process's stderr.
+    cmd.stderr(std::process::Stdio::piped());
 
     let mut child = cmd
         .spawn()
@@ -1848,10 +1867,22 @@ fn github_curl_download_to_file(url: &str, dest: &Path) -> Result<bool, String> 
             .map_err(|e| format!("Failed to pipe auth header to curl: {}", e))?;
         drop(stdin);
     }
-    let status = child
-        .wait()
+    let output = child
+        .wait_with_output()
         .map_err(|e| format!("Failed to wait for curl: {}", e))?;
-    Ok(status.success())
+    if !output.status.success() {
+        // C18B-010: same as `github_curl_api_get_optional`, emit a
+        // structured warning rather than silently returning Ok(false).
+        let err_text = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        if !err_text.is_empty() {
+            eprintln!(
+                "warning: GitHub download failed ({}): {}",
+                url, err_text
+            );
+        }
+        return Ok(false);
+    }
+    Ok(true)
 }
 
 /// C17B-005: Best-effort lookup of a GitHub auth token.
