@@ -278,13 +278,16 @@ taida deps
 ## `taida install`
 
 ```bash
-taida install [--force-refresh] [--allow-local-addon-build]
+taida install [--force-refresh | --no-remote-check] [--allow-local-addon-build]
 ```
 
 | オプション | 短縮 | 説明 |
 |---|---|---|
-| `--force-refresh` | - | アドオンキャッシュを無視して再ダウンロードします |
+| `--force-refresh` | - | `~/.taida/store/` の該当パッケージを破棄して再展開します (C17 以降; 従来のアドオンキャッシュ無視挙動も維持) |
+| `--no-remote-check` | - | commit SHA の remote 確認を skip し、既存 sidecar の内容だけを根拠に skip/refresh を判定します。offline / rate-limited 環境向け (C17) |
 | `--allow-local-addon-build` | - | プレビルド不在時にローカルの `cargo build` にフォールバックします |
+
+`--force-refresh` と `--no-remote-check` は排他です。両方を指定すると CLI が即エラーで拒否します。
 
 挙動:
 - `packages.tdm` をカレントから親方向に探索します。
@@ -292,6 +295,21 @@ taida install [--force-refresh] [--allow-local-addon-build]
 - アドオン依存は `native/addon.toml` の `[library.prebuild]` に従い、SHA-256検証付きでプレビルドをダウンロードします。
 - ダウンロードは `~/.taida/addon-cache/` にキャッシュされます（`taida cache clean --addons` で削除）。
 - 一部依存が解決不能でも lockfile 生成は試行し、最後に終了コード1を返します。
+
+### C17: store sidecar とステイル検知
+
+C17 以降、`taida install` は `~/.taida/store/<org>/<name>/<version>/` の直下に `_meta.toml` sidecar を書き、次回以降の install で以下の decision table を順に評価します。
+
+| cached sidecar | remote 取得結果 | 挙動 |
+|---|---|---|
+| 無し | 取得成功 | pessimistic refresh (`missing sidecar`) |
+| 有り (commit_sha が実 SHA) | 一致 | fast-path skip |
+| 有り (commit_sha が空) | 取得成功 | pessimistic refresh (`sidecar has no recorded commit sha`) |
+| 有り | 一致しない | refresh (`remote moved: sha <old>..<new>`) — tag 再配信 (retag) を検知 |
+| 有り | 取得失敗 | skip + stderr `offline, cannot verify staleness` |
+| 無し | 取得失敗 | skip + stderr strong warning (`--force-refresh` を案内) |
+
+どの経路も `taida install` の成功パス標準出力は変わりません。警告や refresh ログはすべて stderr に出るため、既存スクリプトは影響を受けません。
 
 ---
 
@@ -454,15 +472,25 @@ taida publish --force-version a.5 --retag
 
 ```bash
 taida cache clean [--addons]
+taida cache clean --store [--yes]                # C17
+taida cache clean --store-pkg <org>/<name>        # C17
+taida cache clean --all [--yes]                   # C17 で store を含むよう拡張
 ```
 
 | オプション | 短縮 | 説明 |
 |---|---|---|
 | `--addons` | - | アドオンプレビルドのキャッシュ (`~/.taida/addon-cache/`) を削除します |
+| `--store` | - | C17: `~/.taida/store/` 全体を prune します。サマリを表示してから確認プロンプト (TTY でない場合は `--yes` 必須) |
+| `--store-pkg <org>/<name>` | - | C17: 特定パッケージの全 version を store から削除します (確認プロンプトなし) |
+| `--all` | - | WASM + addon-cache + store の全てを一括 prune します (C17 以降) |
+| `--yes` | `-y` | `--store` / `--all` のプロンプトを自動で yes 応答します (CI 向け) |
 
 挙動:
-- `taida cache clean` はキャッシュを削除します。
-- `--addons` でアドオンキャッシュのみを対象にします。
+- `taida cache clean` は WASM runtime cache を削除します (既存挙動)。
+- `--addons` でアドオンキャッシュのみ。
+- `--store` は店 (`~/.taida/store/`) 全体の prune で、事前にパッケージ数と合計サイズのサマリを表示し確認します。`--store-pkg <org>/<name>` は単一パッケージに絞り、確認プロンプトを出しません。
+- `--store-pkg` は `--store` / `--all` と併用できません (排他エラー)。
+- 非 TTY (パイプ、CI) で `--store` / `--all` を使う場合は `--yes` が必須です。未指定だとエラーで中断します (store を誤って全消去しないためのガード)。
 
 ---
 

@@ -1,5 +1,69 @@
 # Changelog
 
+## @c.17.rc4
+
+### Fixes
+
+- **Installer: auto-detect tag re-publish and refresh the cached store
+  entry.** Before C17, `taida install` keyed the local store
+  (`~/.taida/store/<org>/<name>/<version>/`) only by the tag string.
+  When a package maintainer retagged (`taida publish --retag` /
+  delete + recreate) the same version against a new commit, the
+  consumer's cache kept the old tarball indefinitely -- a subsequent
+  `taida install` was a silent no-op, and `taida run` would later
+  break on the stale facade. C17 writes a `_meta.toml` provenance
+  sidecar alongside every extracted store package recording the
+  resolved commit SHA, the tarball SHA-256, and a UTC fetch timestamp.
+  On every subsequent install the sidecar is compared against the
+  remote tag's commit SHA (via the GitHub git/refs API). When the SHAs
+  disagree, the store entry is invalidated and re-extracted
+  automatically. Offline / unverifiable states emit a stderr warning
+  but never silently skip. The install success-path stdout (package
+  list, lockfile line, exit code) is unchanged.
+
+### Features
+
+- **`taida install --no-remote-check`**: skips the remote commit-SHA
+  lookup and trusts the existing store sidecar. Intended for offline
+  or rate-limited environments. Mutually exclusive with
+  `--force-refresh` (rejected at argument parsing time).
+- **`taida install --force-refresh` now also wipes the store entry**
+  for each package before re-extracting. The legacy addon-cache
+  invalidation (`~/.taida/addon-cache/`) is unchanged; store
+  invalidation is additive.
+- **`taida cache clean --store`**: prune `~/.taida/store/` after
+  showing a pre-flight summary. Requires TTY confirmation or `--yes`
+  so scripts cannot wipe the store accidentally.
+- **`taida cache clean --store-pkg <org>/<name>`**: prune a single
+  package from the store (all versions). Scope is narrow enough that
+  no confirmation is requested.
+- **`taida cache clean --all` now includes the store** in addition to
+  the WASM runtime cache and the addon prebuild cache.
+
+### Internal
+
+- `src/pkg/store.rs` gains a pinned 5-row stale-detection decision
+  table (`classify_stale`), `resolve_version_to_sha` (GitHub git/refs
+  with annotated-tag dereferencing), `invalidate_package` /
+  `read_package_meta` primitives, and a `StorePruneReport` for
+  cache-clean operations.
+- `src/pkg/provider.rs::StoreProvider` carries `force_refresh` /
+  `no_remote_check` flags and implements the decision table via
+  `apply_stale_decision` before reusing a cached entry.
+- `src/pkg/resolver.rs` adds `StoreRefreshFlags` and
+  `resolve_deps_with_flags` / `resolve_deps_locked_with_flags`.
+
+### Tests
+
+- 22 unit tests in `src/pkg/store.rs` for decision-table rows, the
+  JSON object/string extractors used to parse the git/refs response,
+  and an in-process mock server that exercises annotated-tag
+  dereferencing.
+- 7 new integration tests across `tests/installer_store_staleness.rs`,
+  `tests/installer_force_refresh.rs`, `tests/installer_offline.rs`
+  backed by a shared `tests/mock.rs` HTTP server that serves both the
+  archive tarball and the API endpoints.
+
 ## @c.16.rc4
 
 ### Fixes
