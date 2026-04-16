@@ -4375,8 +4375,8 @@ waitBoth p =
     fn test_sleep_timeout_direct_unmold_marks_function_async() {
         let src = r#"
 waitWithTimeout p =
-  Timeout[sleep(0), 100]() ]=> _done
-  1
+  Timeout[sleep(0), 100]() ]=> done
+  done
 => :Int
 "#;
         let js = transpile(src).expect("transpile should succeed");
@@ -4398,8 +4398,8 @@ waitWithTimeout p =
 waitWithTimeout p =
   s <= sleep(0)
   t <= Timeout[s, 100]()
-  t ]=> _done
-  1
+  t ]=> done
+  done
 => :Int
 "#;
         let js = transpile(src).expect("transpile should succeed");

@@ -67,7 +67,14 @@ fn read_net_eval_source() -> String {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let dir = manifest_dir.join("src/interpreter/net_eval");
     let fragments = [
-        "mod.rs", "types.rs", "helpers.rs", "h1.rs", "h2.rs", "h3.rs", "stream.rs", "ws.rs",
+        "mod.rs",
+        "types.rs",
+        "helpers.rs",
+        "h1.rs",
+        "h2.rs",
+        "h3.rs",
+        "stream.rs",
+        "ws.rs",
     ];
     let mut out = String::new();
     for name in fragments {
@@ -2736,7 +2743,7 @@ fn test_time_sleep_timeout_via_var_three_way_parity() {
 waitWithTimeout p =
   s <= sleep(0)
   t <= Timeout[s, 100]()
-  t ]=> _done
+  t ]=> done
   "ok"
 => :Str
 
@@ -3121,9 +3128,9 @@ fn web_server_single_request_source(port: u16) -> String {
 respondAndClose socket body =
   wire <= "HTTP/1.1 200 OK\r\nContent-Length: " + body.length().toString() + "\r\nConnection: close\r\n\r\n" + body
   sendAsync <= socketSendAll(socket, wire, 5000)
-  sendAsync ]=> _sent
+  sendAsync ]=> sent
   closeAsync <= socketClose(socket)
-  closeAsync ]=> _closed
+  closeAsync ]=> closed
   0
 => :Int
 
@@ -3138,11 +3145,11 @@ main dummy =
   acceptAsync <= tcpAccept(listener.__value.listener, 5000)
   acceptAsync ]=> accepted
   recvAsync <= socketRecv(accepted.__value.socket, 5000)
-  recvAsync ]=> _req
+  recvAsync ]=> req
   jsonBody <= jsonEncode(@(ok <= true))
   respondAndClose(accepted.__value.socket, jsonBody)
   lcloseAsync <= listenerClose(listener.__value.listener)
-  lcloseAsync ]=> _lclosed
+  lcloseAsync ]=> lclosed
   0
 => :Int
 

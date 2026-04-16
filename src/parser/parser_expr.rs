@@ -578,28 +578,7 @@ impl Parser {
     /// in non-final positions remain rejected.
     fn validate_cond_arm_body(block: &[Statement]) -> Result<(), ParseError> {
         debug_assert!(!block.is_empty(), "empty arm body should be caught earlier");
-        // C13-1: FB-17 "discard pipeline" pattern — `expr => _name` where
-        // the binding target starts with an underscore — is a deliberate
-        // "throw the value away for its side effects" pattern and remains
-        // rejected at any position, including the new C13-1 tail-binding
-        // position. Discard unmolds (`]=> _x`, `_x <=[ ...`) follow the
-        // same rule.
-        for stmt in block {
-            if let Some(discard_target) = Self::discard_binding_target(stmt) {
-                let span = Self::statement_span(stmt);
-                return Err(ParseError {
-                    message: format!(
-                        "[E1616] `{} <= ...` / `... => {}` / `... ]=> {}` is a discard binding \
-                         and is not allowed inside a `| |>` arm body. The underscore-prefixed \
-                         target indicates a value being thrown away for side effects, which \
-                         breaks the pure-expression rule. Remove the binding or use a meaningful \
-                         name. See docs/guide/07_control_flow.md.",
-                        discard_target, discard_target, discard_target
-                    ),
-                    span,
-                });
-            }
-        }
+        Self::reject_discard_bindings_in_expression_block(block, "`| |>` arm body")?;
         let last_idx = block.len() - 1;
         for (idx, stmt) in block.iter().enumerate() {
             if idx == last_idx {
@@ -660,10 +639,39 @@ impl Parser {
         Ok(())
     }
 
+    /// C13B-010: Reject discard bindings (`expr => _name`, `_name <= expr`,
+    /// `expr ]=> _name`, `_name <=[ expr`) at any position inside an
+    /// expression-block body — arm body, function body, `|==` handler body,
+    /// or method body. The FB-17 "throw the value away for its side effects"
+    /// pattern breaks the pure-expression rule at every C13-1 tail-binding
+    /// position, so the rejection is context-independent.
+    pub(crate) fn reject_discard_bindings_in_expression_block(
+        block: &[Statement],
+        context: &str,
+    ) -> Result<(), ParseError> {
+        for stmt in block {
+            if let Some(discard_target) = Self::discard_binding_target(stmt) {
+                let span = Self::statement_span(stmt);
+                return Err(ParseError {
+                    message: format!(
+                        "[E1616] `{} <= ...` / `... => {}` / `... ]=> {}` is a discard binding \
+                         and is not allowed inside a {}. The underscore-prefixed \
+                         target indicates a value being thrown away for side effects, which \
+                         breaks the pure-expression rule. Remove the binding or use a meaningful \
+                         name. See docs/guide/07_control_flow.md.",
+                        discard_target, discard_target, discard_target, context
+                    ),
+                    span,
+                });
+            }
+        }
+        Ok(())
+    }
+
     /// C13-1: Return `Some(target)` if `stmt` is a discard-style binding
     /// (`expr => _name`, `_name <= expr`, `expr ]=> _name`, `_name <=[ expr`)
-    /// — i.e. the binding target starts with `_`. The FB-17 "discard
-    /// pipeline" remains rejected inside `| |>` arm bodies.
+    /// — i.e. the binding target starts with `_`. Used by
+    /// `reject_discard_bindings_in_expression_block`.
     fn discard_binding_target(stmt: &Statement) -> Option<&str> {
         let target = match stmt {
             Statement::Assignment(a) => a.target.as_str(),

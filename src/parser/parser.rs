@@ -353,6 +353,10 @@ impl Parser {
                         self.advance();
                     }
                     let body = self.parse_block()?;
+                    // C13B-010: reject discard bindings (`=> _x` / `_x <=` /
+                    // `]=> _x` / `_x <=[`) anywhere in an expression-block
+                    // body — same rule as `| |>` arm body.
+                    Self::reject_discard_bindings_in_expression_block(&body, "function body")?;
                     self.skip_newlines();
                     let return_type = if self.check(&TokenKind::FatArrow) {
                         self.advance();
@@ -614,6 +618,8 @@ impl Parser {
 
         // Parse body (statements until `=> :Type` at same indentation)
         let body = self.parse_block()?;
+        // C13B-010: reject discard bindings in function body.
+        Self::reject_discard_bindings_in_expression_block(&body, "function body")?;
 
         // Skip any remaining indent/newline tokens after block
         self.skip_newlines();
@@ -1216,6 +1222,8 @@ impl Parser {
         }
 
         let handler_body = self.parse_block()?;
+        // C13B-010: reject discard bindings in `|==` handler body.
+        Self::reject_discard_bindings_in_expression_block(&handler_body, "`|==` handler body")?;
 
         // Skip any remaining indent/newline tokens after block
         self.skip_newlines();
@@ -1457,6 +1465,8 @@ impl Parser {
                     self.advance();
                 }
                 let body = self.parse_block()?;
+                // C13B-010: reject discard bindings in unmold method body.
+                Self::reject_discard_bindings_in_expression_block(&body, "unmold method body")?;
                 self.skip_newlines();
 
                 let return_type = if self.check(&TokenKind::FatArrow) {
@@ -1555,6 +1565,8 @@ impl Parser {
                 }
 
                 let body = self.parse_block()?;
+                // C13B-010: reject discard bindings in method body.
+                Self::reject_discard_bindings_in_expression_block(&body, "method body")?;
                 self.skip_newlines();
 
                 let return_type = if self.check(&TokenKind::FatArrow) {
