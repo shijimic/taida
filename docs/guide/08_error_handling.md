@@ -170,6 +170,16 @@ ValidationError(type <= "ValidationError", message <= "Invalid", field <= "email
 
 ハンドラの戻り値型（`=> :ReturnType`）は、保護領域の戻り値型と一致しなければなりません。型が合わない場合はコンパイルエラーになります。
 
+> **C13-1 の末尾バインド短縮形**: `|==` ハンドラ本体の末尾が `name <= expr` / `expr => name` / `expr ]=> name` / `name <=[ expr` であるとき、束縛された値がそのままハンドラの結果になります。例:
+>
+> ```taida
+> |== error: Error =
+>   fallback <= "default"   // 末尾バインド — ハンドラ結果は "default"
+> => :Str
+> ```
+>
+> 関数本体や `| |>` アーム本体と同じ規則が適用されます。詳細は `docs/guide/07_control_flow.md` を参照してください。
+
 ### 基本的な使用例
 
 ```taida

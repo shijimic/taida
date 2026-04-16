@@ -36,6 +36,17 @@ processData data: Str =
 
 Taida では、文字列や数値の操作はメソッドではなくモールドで行います。トリムは `Trim[str]()` に、大文字変換は `Upper[str]()` です。
 
+> **C13-1 の末尾バインド短縮形**: 関数本体の末尾が `name <= expr` / `expr => name` / `expr ]=> name` / `name <=[ expr` であるとき、束縛された値がそのまま関数の戻り値になります。上の例は以下のように書けます:
+>
+> ```taida
+> processData data: Str =
+>   cleaned <= Trim[data]()
+>   upper <= Upper[cleaned]()   // 末尾バインド — 戻り値は `upper`
+> => :Str
+> ```
+>
+> 末尾の冗長な `upper` 行は不要です。詳細は `docs/guide/07_control_flow.md` を参照してください。
+
 ### 引数なし関数
 
 引数のない関数は `= ... => :Type` の形式で定義します。

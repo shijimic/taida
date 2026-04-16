@@ -1,8 +1,10 @@
 # Changelog
 
-## @c.13.rc3 (in progress)
+## @c.13.rc3
 
-In-flight release tracking the @c.13.rc3 milestone. See
+C13 closes out the two items C12 explicitly deferred: expression-block
+tail-binding semantics (C13-1) and the remaining mechanical file-split
+debt carried over from C12B-024 / C12B-025 / C12B-026. See
 `.dev/C13_PROGRESS.md` for the live progress tracker.
 
 ### Language-level changes
@@ -27,6 +29,67 @@ In-flight release tracking the @c.13.rc3 milestone. See
     bindings identically. See `docs/guide/07_control_flow.md` for the
     expanded rule, migration examples, and the C13-1 shorthand forms.
 
+### Maintainability changes (mechanical splits — no behaviour change)
+
+All three splits are **move-only**: function bodies are preserved
+byte-for-byte, only visibility (`fn` → `pub(super) fn`) and
+cross-module paths are adjusted. Split layouts are documented in
+`.dev/C13_DESIGN.md` §§ C13-2 / C13-3 / C13-4.
+
+- **C13-2 — `src/codegen/lower/` mechanical split** (commit `34417ea`)
+  - Boundary layout:
+    - `lower/core.rs`, `lower/expr.rs`, `lower/imports.rs`,
+      `lower/infer.rs`, `lower/molds.rs`, `lower/stmt.rs`,
+      `lower/tag_prop.rs`, `lower/mod.rs` (existing splits preserved)
+    - `lower/stdlib.rs`, `lower/net.rs`, `lower/os.rs` (new fan-out
+      from the former monolithic stdlib section)
+  - Closes `C12B-024` (`lower.rs` split deferral).
+
+- **C13-3 — `src/interpreter/net_eval/` mechanical split** (commit `f6a7155`)
+  - Boundary layout (4,208-line `mod.rs` fanned out into five
+    responsibility-scoped submodules + a 346-line dispatcher `mod.rs`):
+    - `net_eval/mod.rs` — `try_net_func` dispatcher + `eval_net_bytes_arg`
+    - `net_eval/stream.rs` — v3 streaming (`startResponse` /
+      `writeChunk` / `endResponse` / `sseEvent`) + v4 body streaming
+      (`readBodyChunk` / `readBodyAll`) + chunked helpers
+    - `net_eval/ws.rs` — WebSocket implementation (`wsUpgrade` /
+      `wsSend` / `wsReceive` / `wsClose` / `wsCloseCode`) + frame I/O
+      + `finalize_websocket_close`
+    - `net_eval/h1.rs` — HTTP/1.1 accept loop (`eval_http_serve`) +
+      `try_read_request` + `dispatch_request`
+    - `net_eval/h2.rs` — HTTP/2 serve loop (`serve_h2` /
+      `h2_connection_loop` / `send_h2_response`)
+    - `net_eval/h3.rs` — HTTP/3 serve entry point (`serve_h3`)
+  - Follow-up (`C13B-008` / commit `314791a`): the `tests/parity.rs`
+    `read_net_eval_source()` fragment list was extended to include
+    `h1.rs` / `h2.rs` / `h3.rs` / `stream.rs` / `ws.rs`, restoring
+    three source-audit parity tests that went red against the new
+    layout (`test_nb7_13_h3_transport_pending_source_parity`,
+    `test_net6_5b_websocket_word_at_a_time_mask`,
+    `test_net7_12f_release_truth_blocker_closure_verified`).
+  - Closes `C12B-025` (`net_eval.rs` split deferral).
+
+- **C13-4 — `src/codegen/native_runtime/` mechanical split** (commit `75cd4c5`)
+  - Boundary layout (legacy 7-fragment 886,457-byte monolith fanned
+    out into five domain-scoped C sources + a shared header):
+    - `native_runtime/core.c` — legacy fragments 1+2 (7,838 lines,
+      317,287 bytes)
+    - `native_runtime/os.c` — legacy fragment 3 (668 lines,
+      26,425 bytes)
+    - `native_runtime/tls.c` — legacy fragment 4 (1,720 lines,
+      68,080 bytes)
+    - `native_runtime/net_h1_h2.c` — legacy fragments 5+6 (6,182 lines,
+      276,115 bytes)
+    - `native_runtime/net_h3_quic.c` — legacy fragment 7 (4,458 lines,
+      198,550 bytes)
+    - `native_runtime/runtime.h` — declarative responsibility index
+      (not part of the concatenated runtime source)
+  - Concatenated byte count 886,457 preserved from C12B-026; the new
+    invariant test
+    `test_native_runtime_c13_4_merge_preserves_historical_boundaries`
+    pins the historical inter-fragment byte boundaries.
+  - Closes `C12B-026` (`native_runtime.c` split deferral).
+
 ### Migration
 
 - Existing code that ended arm bodies / function bodies / `|==` handler
@@ -38,6 +101,10 @@ In-flight release tracking the @c.13.rc3 milestone. See
   it being "passed through" previously produced `[E1502] Undefined
   variable` — it now resolves as a bind-and-forward step. There is
   no silent behaviour change for code that already compiled.
+- The three mechanical splits are not user-visible: no public API,
+  compiled output, or runtime behaviour changes. They only affect
+  source layout inside `src/codegen/lower/`,
+  `src/interpreter/net_eval/`, and `src/codegen/native_runtime/`.
 
 ## @c.12.rc3 (in progress)
 

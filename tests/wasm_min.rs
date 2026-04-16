@@ -947,10 +947,11 @@ fn wasm_min_parity_all_examples() {
     // 68 = 67 + 1 (C12-4c: compile_c12_4_arm_pure_expr — `| |>` pure-expr boundary)
     // 69 = 68 + 1 (C12-11: compile_c12_11_tag_prop — param_tag_vars Bool prop)
     // 70 = 69 + 1 (C12B-034: compile_c12b_034_wasm_nonbool_param — memory-safe non-Bool through param)
+    // 71 = 70 + 1 (C13-1: compile_c13_1_tail_bind — tail-binding semantics)
     assert_eq!(
         parity_ok.len(),
-        70,
-        "WC-7: Expected exactly 69 parity-OK examples, got {}. \
+        71,
+        "WC-7: Expected exactly 71 parity-OK examples, got {}. \
          If parity improved, update the expected count. List: {:?}",
         parity_ok.len(),
         parity_ok
