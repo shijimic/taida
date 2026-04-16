@@ -147,10 +147,19 @@ mod tests {
     /// + `__pack_field_enum_registry`) so two packs sharing a field
     /// name with different Enum types no longer collide in `jsonEncode`
     /// (C18B-003); plus `taida_runtime_panic(msg)` for the strict
-    /// `Ordinal[]` runtime contract (C18B-005). New total: 901,974.
+    /// `Ordinal[]` runtime contract (C18B-005). Intermediate total:
+    /// 901,974.
+    ///
+    /// C18B-006 (2026-04-17): +2,272 bytes in core.c — added
+    /// `json_parse_string_raw_len` (length-aware variant) + `str_len`
+    /// field in `json_val` so the enum validation in `json_apply_schema`
+    /// uses the decoded byte count instead of `strlen(js)`. This stops
+    /// embedded-NUL JSON strings from silently truncating into a
+    /// successful variant match (carry from C16B-005). New total:
+    /// 904,246.
     #[test]
     fn test_native_runtime_fragment_concat_preserves_bytes() {
-        const EXPECTED_TOTAL_LEN: usize = 901_974;
+        const EXPECTED_TOTAL_LEN: usize = 904_246;
         let asm = *NATIVE_RUNTIME_C;
         assert_eq!(
             asm.len(),
@@ -271,11 +280,17 @@ mod tests {
         // register/lookup helpers + the preference-for-per-pack branch
         // in `json_serialize_pack_fields`). F2_PREFIX now lands at
         // offset 211,330.
+        //
+        // C18B-006 (2026-04-17): fragment 1 unchanged. Fragment 2 grew
+        // by +2,272 bytes (length-aware JSON string parser variant
+        // `json_parse_string_raw_len` + `str_len` field plumbing +
+        // `memcmp` length check in the `E{...}` enum branch of
+        // `json_apply_schema`).
         const F1_LEN: usize = 211_330;
         assert_eq!(
             CORE_SECTION.len(),
-            211_330 + 121_474,
-            "core.c total byte length must equal legacy fragment1 + fragment2 (C18B-003/005 adjusted)"
+            211_330 + 123_746,
+            "core.c total byte length must equal legacy fragment1 + fragment2 (C18B-006 adjusted)"
         );
         const F2_PREFIX: &[u8] = b"// \xE2\x94\x80\xE2\x94\x80 Error ceiling";
         let tail = &CORE_SECTION.as_bytes()[F1_LEN..F1_LEN + F2_PREFIX.len()];

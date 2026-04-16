@@ -6603,7 +6603,14 @@ typedef struct {
     int type;
     taida_val int_val;
     double float_val;
-    char *str_val;        // for strings (heap-allocated)
+    char *str_val;        // for strings (heap-allocated, NUL-terminated
+                          // for convenience but may contain embedded NULs)
+    int str_len;          // C18B-006 fix: length of `str_val` in bytes,
+                          // not counting the terminating NUL. Needed so
+                          // enum validation can compare strings with
+                          // embedded NULs against their variant names
+                          // (see the JSON_STRING branch in
+                          // `json_apply_schema` near the E{...} handler).
     struct json_array *arr;  // for arrays
     struct json_obj *obj;    // for objects
 } json_val;
@@ -6645,8 +6652,16 @@ static void json_skip_ws(const char **p) {
     while (**p == ' ' || **p == '\t' || **p == '\n' || **p == '\r') (*p)++;
 }
 
-static char *json_parse_string_raw(const char **p) {
-    if (**p != '"') return NULL;
+// C18B-006 fix: return both the decoded bytes AND the decoded length
+// through `*out_len`, so embedded-NUL JSON strings compare correctly
+// against Enum variant names and other length-aware consumers. When
+// `out_len` is NULL the caller doesn't need the length (e.g. object
+// keys which must remain C-strings).
+static char *json_parse_string_raw_len(const char **p, int *out_len) {
+    if (**p != '"') {
+        if (out_len) *out_len = 0;
+        return NULL;
+    }
     (*p)++;  // skip opening quote
     // Find end of string (handle escape sequences)
     const char *start = *p;
@@ -6657,6 +6672,7 @@ static char *json_parse_string_raw(const char **p) {
         else scan++;
         len++;
     }
+    (void)start;
     // Allocate and copy with escape handling
     char *buf = (char*)TAIDA_MALLOC(len + 1, "json_parse_str");
     int out = 0;
@@ -6682,20 +6698,36 @@ static char *json_parse_string_raw(const char **p) {
     }
     buf[out] = '\0';
     if (**p == '"') (*p)++;  // skip closing quote
+    if (out_len) *out_len = out;
     return buf;
+}
+
+// Back-compat wrapper for callers that only need the C string (e.g.
+// object keys). Preserves the pre-C18B-006 signature.
+static char *json_parse_string_raw(const char **p) {
+    return json_parse_string_raw_len(p, NULL);
 }
 
 static json_val json_parse_string(const char **p) {
     json_val v;
     v.type = JSON_STRING;
-    v.str_val = json_parse_string_raw(p);
+    int slen = 0;
+    v.str_val = json_parse_string_raw_len(p, &slen);
+    // C18B-006: `str_len` is the decoded byte count, which may be
+    // shorter than `strlen(str_val)` if the JSON input contained an
+    // escaped NUL (`\u0000`). Length-aware consumers (enum variant
+    // match in `json_apply_schema`) must use this field to avoid
+    // silently truncating at the first embedded NUL.
+    v.str_len = slen;
+    v.int_val = 0;
+    v.float_val = 0.0;
     v.arr = NULL; v.obj = NULL;
     return v;
 }
 
 static json_val json_parse_number(const char **p) {
     json_val v;
-    v.str_val = NULL; v.arr = NULL; v.obj = NULL;
+    v.str_val = NULL; v.str_len = 0; v.arr = NULL; v.obj = NULL;
     char *end;
     double d = strtod(*p, &end);
     // Check if it's an integer (no decimal point or exponent)
@@ -6722,7 +6754,7 @@ static json_val json_parse_number(const char **p) {
 static json_val json_parse_array(const char **p) {
     json_val v;
     v.type = JSON_ARRAY;
-    v.str_val = NULL; v.obj = NULL;
+    v.str_val = NULL; v.str_len = 0; v.obj = NULL;
     // M-14: TAIDA_MALLOC ensures NULL check + OOM diagnostic.
     v.arr = (json_array*)TAIDA_MALLOC(sizeof(json_array), "json_array");
     v.arr->count = 0;
@@ -6751,7 +6783,7 @@ static json_val json_parse_array(const char **p) {
 static json_val json_parse_object(const char **p) {
     json_val v;
     v.type = JSON_OBJECT;
-    v.str_val = NULL; v.arr = NULL;
+    v.str_val = NULL; v.str_len = 0; v.arr = NULL;
     // M-14: TAIDA_MALLOC ensures NULL check + OOM diagnostic.
     v.obj = (json_obj*)TAIDA_MALLOC(sizeof(json_obj), "json_obj");
     v.obj->count = 0;
@@ -6787,7 +6819,7 @@ static json_val json_parse_object(const char **p) {
 static json_val json_parse_value(const char **p) {
     json_skip_ws(p);
     json_val v;
-    v.str_val = NULL; v.arr = NULL; v.obj = NULL;
+    v.str_val = NULL; v.str_len = 0; v.arr = NULL; v.obj = NULL;
     if (**p == '"') return json_parse_string(p);
     if (**p == '{') return json_parse_object(p);
     if (**p == '[') return json_parse_array(p);
@@ -7208,6 +7240,15 @@ static taida_val json_apply_schema(json_val *jval, const char **desc) {
             // If JSON value is not a string, walk past the variants and return Lax.
             int is_string_match_candidate = (jval && jval->type == JSON_STRING && jval->str_val);
             const char *js = is_string_match_candidate ? jval->str_val : NULL;
+            // C18B-006 fix: use the parsed string's decoded byte length
+            // rather than `strlen(js)` so embedded-NUL JSON inputs
+            // (e.g. `"\u0000"` expanded by the parser) compare
+            // correctly against variant names. Variant names cannot
+            // themselves contain NUL (the descriptor format uses NUL
+            // as a terminator upstream), so any JSON string whose
+            // decoded length includes a NUL is a guaranteed mismatch
+            // instead of a false positive truncation at the NUL.
+            int js_len = is_string_match_candidate ? jval->str_len : 0;
 
             int matched = 0;
             taida_val ordinal = 0;
@@ -7221,8 +7262,8 @@ static taida_val json_apply_schema(json_val *jval, const char **desc) {
                 int vlen = (int)(d - vstart);
 
                 if (!matched && js) {
-                    // Compare: js == vstart[0..vlen] exactly.
-                    if ((int)strlen(js) == vlen && strncmp(js, vstart, (size_t)vlen) == 0) {
+                    // Compare: js[0..js_len] == vstart[0..vlen] exactly.
+                    if (js_len == vlen && memcmp(js, vstart, (size_t)vlen) == 0) {
                         ordinal = (taida_val)current_ordinal;
                         matched = 1;
                     }
