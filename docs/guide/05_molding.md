@@ -467,6 +467,7 @@ B11 スコープ外: inline BuchiPack 型リテラル、関数型リテラル、
 | `Float[x]()` | 浮動小数点に変換 | `Float["3.14"]()` → 3.14 | `Float["abc"]()` → 0.0 |
 | `Str[x]()` | 文字列に変換 | `Str[42]()` → "42" | - |
 | `Bool[x]()` | 真偽値に変換 | `Bool[1]()` → true | `Bool[0]()` → false |
+| `Ordinal[e]()` | Enum → Int（宣言 ordinal） | `Ordinal[Color:Red()]()` → 0 | 非 Enum は runtime error |
 
 ```taida
 // 文字列 → 整数
@@ -488,7 +489,42 @@ Str[42]() ]=> text       // "42"
 // 値 → 真偽値
 Bool[1]() ]=> flag       // true
 Bool[0]() ]=> flag       // false
+
+// Enum → Int（明示的な ordinal 変換）
+Enum => Color = :Red :Green :Blue
+n <= Ordinal[Color:Green()]()  // 1
 ```
+
+### `Ordinal[]` -- Enum から Int への唯一の正規経路
+
+`Ordinal[<enum_value>]()` は Enum 値を宣言順の ordinal Int に変換します (C18-3)。`.toString()` を `Int[]` で parse する workaround は fragile で推奨されません。
+
+```taida
+Enum => HiveState = :Creating :Running :Stopped
+
+// 基本形
+Ordinal[HiveState:Running()]() ]=> n
+stdout(n.toString())  // 1
+
+// 変数経由
+s <= HiveState:Stopped()
+Ordinal[s]() ]=> m
+stdout(m.toString())  // 2
+
+// Int カラム / legacy DB との比較で使う
+isLate <= Ordinal[s]() > 0
+```
+
+**失敗条件**:
+- 非 Enum の値を渡すと runtime error: `Ordinal: argument must be an Enum value`
+- 引数なし (`Ordinal[]()`) も runtime error
+
+**用途**:
+- 既存の Int カラム / binary wire フォーマットとの互換
+- 同一 Enum の ordering 比較 (C18-4) 以外で Int 比較が必要な場合
+- variant 宣言順が semantic で、将来の並び替えに備えて explicit に固定したい場合
+
+逆方向（`Int → Enum`）の `FromOrdinal[Color, 1]()` は別 track で検討中です（C18 scope 外）。
 
 ---
 
