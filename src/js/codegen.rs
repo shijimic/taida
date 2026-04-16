@@ -2628,7 +2628,12 @@ impl JsCodegen {
                             }
                         }
                         Expr::TypeLiteral(enum_name, Some(variant_name), _) => {
-                            // Enum variant check: value === ordinal
+                            // Enum variant check: unwrap `__taida_enumVal`
+                            // wrapper via `__taida_enumOrdinal` (also works
+                            // on plain numbers) and compare to the ordinal.
+                            // C18-2: Enum values are now tagged wrappers,
+                            // so a bare `=== ordinal` would compare object
+                            // reference to Number and always return false.
                             let ordinal = self
                                 .enum_defs
                                 .get(enum_name.as_str())
@@ -2636,8 +2641,9 @@ impl JsCodegen {
                                     variants.iter().position(|v| v == variant_name)
                                 })
                                 .unwrap_or(usize::MAX);
+                            self.write("__taida_enumOrdinal(");
                             self.gen_expr(&type_args[0])?;
-                            self.write(&format!(" === {}", ordinal));
+                            self.write(&format!(") === {}", ordinal));
                         }
                         _ => {
                             // Fallback: emit false

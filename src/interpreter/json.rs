@@ -327,15 +327,17 @@ pub fn json_to_typed_value(json: &serde_json::Value, schema: &JsonSchema) -> Val
             serde_json::Value::Null => Value::List(Vec::new()),
             _ => Value::List(Vec::new()),
         },
-        JsonSchema::Enum(_name, variants) => {
+        JsonSchema::Enum(name, variants) => {
             // C16: JSON wire format is the variant name Str.
-            // On match: return the ordinal as Value::Int.
-            // On mismatch/non-string/null: return Lax[Enum] with hasValue=false,
-            // __value = Int(0) (first variant is default), __default = Int(0).
+            // C18-2: On match, return `Value::EnumVal(enum_name, ordinal)`
+            // (was `Value::Int(ordinal)` in C16) so that the round-trip
+            // through `jsonEncode` emits the variant-name Str rather than
+            // the ordinal Int. Downstream `PartialEq` accepts both forms
+            // for backward compat — see `src/interpreter/value.rs`.
             match json {
                 serde_json::Value::String(s) => {
                     if let Some(ordinal) = variants.iter().position(|v| v == s) {
-                        Value::Int(ordinal as i64)
+                        Value::EnumVal(name.clone(), ordinal as i64)
                     } else {
                         make_lax_enum_inline()
                     }

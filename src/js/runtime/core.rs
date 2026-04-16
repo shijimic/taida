@@ -1531,6 +1531,11 @@ function __taida_stdout(...args) {
     let rendered;
     if (__taida_isBytes(arg)) {
       rendered = __taida_bytes_to_string(arg);
+    } else if (__taida_isEnumVal(arg)) {
+      // C18-2: Enum wrapper — print ordinal Str (matches interpreter
+      // `Value::EnumVal` display which falls back to the ordinal to
+      // preserve the `.toString()` contract from C16 / ROOT-4).
+      rendered = String(arg.__taida_enum_ordinal);
     } else if (Array.isArray(arg)) {
       rendered = '@[' + arg.map(x => __taida_format(x)).join(', ') + ']';
     } else if (arg && arg.__type === 'Async') {
@@ -1587,6 +1592,9 @@ function __taida_utf8_byte_length(s) {
 function __taida_format(v) {
   if (typeof v === 'string') return '"' + v + '"';
   if (__taida_isBytes(v)) return __taida_bytes_to_string(v);
+  // C18-2: Enum wrapper — format as its ordinal Int to match the
+  // interpreter's `to_debug_string` for `Value::EnumVal`.
+  if (__taida_isEnumVal(v)) return String(v.__taida_enum_ordinal);
   if (Array.isArray(v)) return '@[' + v.map(x => __taida_format(x)).join(', ') + ']';
   if (typeof v === 'boolean') return v ? 'true' : 'false';
   if (v && typeof v === 'object' && !Array.isArray(v) && !v.__type) {
@@ -1607,6 +1615,10 @@ function __taida_to_string(v) {
   if (typeof v === 'boolean') return v ? 'true' : 'false';
   if (v === null || v === undefined) return '';
   if (__taida_isBytes(v)) return __taida_bytes_to_string(v);
+  // C18-2: Enum wrapper (`__taida_enumVal`) — `.toString()` returns the
+  // ordinal Str (preserving the interpreter's Display contract). The
+  // variant-name Str is only used by jsonEncode via `toJSON`.
+  if (__taida_isEnumVal(v)) return String(v.__taida_enum_ordinal);
   if (Array.isArray(v)) {
     return '@[' + v.map(x => __taida_format(x)).join(', ') + ']';
   }
@@ -1775,6 +1787,17 @@ async function __taida_unmold_async(v) {
 function __taida_equals(a, b) {
   if (a === b) return true;
   if (a == null || b == null) return false;
+  // C18-2: Enum-aware equality. Enum wrappers compare by (enum_name,
+  // ordinal). An Enum compares equal to a plain Number with the same
+  // ordinal, mirroring the interpreter's `Int ↔ EnumVal` compatibility.
+  const aIsEnum = __taida_isEnumVal(a);
+  const bIsEnum = __taida_isEnumVal(b);
+  if (aIsEnum && bIsEnum) {
+    return a.__taida_enum_name === b.__taida_enum_name
+      && a.__taida_enum_ordinal === b.__taida_enum_ordinal;
+  }
+  if (aIsEnum && typeof b === 'number') return a.__taida_enum_ordinal === b;
+  if (bIsEnum && typeof a === 'number') return b.__taida_enum_ordinal === a;
   if (typeof a !== typeof b) return false;
   if (typeof a !== 'object') return a === b;
   if (Array.isArray(a) && Array.isArray(b)) {

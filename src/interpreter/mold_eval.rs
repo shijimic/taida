@@ -3218,8 +3218,19 @@ impl Interpreter {
                         // Look up the enum definition and find the variant ordinal
                         if let Some(variants) = self.enum_defs.get(enum_name.as_str()) {
                             if let Some(ordinal) = variants.iter().position(|v| v == variant_name) {
-                                // Compare against the value's int representation
-                                matches!(&val, Value::Int(n) if *n == ordinal as i64)
+                                // C18-2: Accept both the legacy `Value::Int(n)`
+                                // representation (kept for any code path that
+                                // still produces raw ints from Enum sources)
+                                // AND the C18-2 tagged `Value::EnumVal(name, n)`
+                                // where the enum name must match. The latter
+                                // prevents a cross-enum false positive.
+                                match &val {
+                                    Value::Int(n) => *n == ordinal as i64,
+                                    Value::EnumVal(n_enum, n) => {
+                                        n_enum == enum_name && *n == ordinal as i64
+                                    }
+                                    _ => false,
+                                }
                             } else {
                                 false
                             }
