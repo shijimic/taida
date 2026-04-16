@@ -1577,9 +1577,19 @@ impl Lowering {
             // BuchiPack literals (`@(state <= HiveState:Running())`) emit
             // variant-name Str via jsonEncode. `expr_enum_type_name`
             // walks the expression to find the source Enum name.
+            //
+            // C18B-003 fix: also remember the per-instance descriptor so
+            // we can emit `taida_register_pack_field_enum(pack, hash, csv)`
+            // after this field's `PackSet`. Without the per-pack
+            // registration two packs that happen to share a field name
+            // (e.g. `state`) but hold different enums
+            // (`BuildState`, `RunState`) would overwrite each other's
+            // entry in the global `__field_registry` and produce the
+            // wrong variant name during `jsonEncode`.
             let enum_descriptor = self
                 .expr_enum_type_name(&field.value)
                 .and_then(|name| self.enum_defs.get(&name).map(|v| v.join(",")));
+            let per_pack_enum_csv: Option<String> = enum_descriptor.clone();
             if let Some(csv) = enum_descriptor {
                 self.register_field_type_tag(&field.name, 5);
                 self.field_enum_descriptors
@@ -1610,6 +1620,24 @@ impl Lowering {
 
             let val = self.lower_expr(func, &field.value)?;
             func.push(IrInst::PackSet(pack_var, i, val));
+
+            // C18B-003 fix: register the enum descriptor against this
+            // pack instance so `json_serialize_pack_fields` can resolve
+            // the correct variant list even when another pack uses the
+            // same field name with a different Enum type.
+            if let Some(csv) = per_pack_enum_csv.as_ref() {
+                let hash_var2 = func.alloc_var();
+                func.push(IrInst::ConstInt(hash_var2, hash as i64));
+                let csv_var = func.alloc_var();
+                func.push(IrInst::ConstStr(csv_var, csv.clone()));
+                let reg_dummy = func.alloc_var();
+                func.push(IrInst::Call(
+                    reg_dummy,
+                    "taida_register_pack_field_enum".to_string(),
+                    vec![pack_var, hash_var2, csv_var],
+                ));
+            }
+
             // A-4c: Set type tag for this field value
             let val_tag = self.expr_type_tag(&field.value);
             if val_tag == -1 {

@@ -189,6 +189,29 @@ impl Lowering {
         for (i, (field_name, field_val)) in materialized_fields.iter().enumerate() {
             self.emit_pack_field_hash(func, pack_var, i, field_name);
             func.push(IrInst::PackSet(pack_var, i, *field_val));
+
+            // C18B-003 fix: per-pack enum descriptor registration for
+            // TypeDef-based packs. Look up the TypeDef's field type
+            // annotation and, if it's a known Enum, register the CSV
+            // under the current pack instance. This parallels the
+            // anonymous-BuchiPack path in `lower_buchi_pack`.
+            let per_pack_enum_csv = self
+                .type_field_enum_name(type_name, field_name)
+                .and_then(|enum_name| self.enum_defs.get(&enum_name).map(|v| v.join(",")));
+            if let Some(csv) = per_pack_enum_csv {
+                let hash_var = func.alloc_var();
+                let field_hash = crate::codegen::lower::simple_hash(field_name);
+                func.push(IrInst::ConstInt(hash_var, field_hash as i64));
+                let csv_var = func.alloc_var();
+                func.push(IrInst::ConstStr(csv_var, csv));
+                let reg_dummy = func.alloc_var();
+                func.push(IrInst::Call(
+                    reg_dummy,
+                    "taida_register_pack_field_enum".to_string(),
+                    vec![pack_var, hash_var, csv_var],
+                ));
+            }
+
             // A-4c: determine type tag from field_type_tags registry or TypeDef field types
             let tag = self.type_field_type_tag(type_name, field_name);
             if tag != 0 {

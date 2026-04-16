@@ -1451,6 +1451,15 @@ fn runtime_abi(name: &str) -> Result<RuntimeAbi, String> {
             params: &[Val, Ptr, Ptr],
             returns: &[Val],
         },
+        // C18B-003 fix: taida_register_pack_field_enum(pack_ptr, field_hash, variants_csv_ptr)
+        // Per-pack-instance registration so two packs sharing the same
+        // field name but holding distinct enums don't collide in the
+        // global field registry. `json_serialize_pack_fields` prefers
+        // the per-pack descriptor before falling back to the global.
+        "taida_register_pack_field_enum" => RuntimeAbi {
+            params: &[Ptr, Val, Ptr],
+            returns: &[Val],
+        },
 
         // ── taida-lang/os package — input molds ──
         "taida_os_read" => RuntimeAbi {

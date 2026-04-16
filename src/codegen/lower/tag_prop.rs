@@ -171,6 +171,35 @@ impl Lowering {
         self.field_type_tags.get(field_name).copied().unwrap_or(0)
     }
 
+    /// C18B-003 fix: Resolve a TypeDef field's annotated Enum type name,
+    /// or `None` if the field isn't declared as an Enum.
+    ///
+    /// Walks `type_field_types` for `type_name`, and if the annotation
+    /// is a `TypeExpr::Named` whose identifier is a registered Enum
+    /// (`self.enum_defs` contains it), returns the enum name. Used by
+    /// `lower_type_instantiation` to emit per-pack enum descriptors so
+    /// TypeDef-based packs sharing a field name across different enums
+    /// no longer collide in the global field registry.
+    pub(super) fn type_field_enum_name(
+        &self,
+        type_name: &str,
+        field_name: &str,
+    ) -> Option<String> {
+        let field_types = self.type_field_types.get(type_name)?;
+        for (name, ty) in field_types {
+            if name != field_name {
+                continue;
+            }
+            let ty_expr = ty.as_ref()?;
+            if let crate::parser::TypeExpr::Named(n) = ty_expr
+                && self.enum_defs.contains_key(n)
+            {
+                return Some(n.clone());
+            }
+        }
+        None
+    }
+
     /// TypeExpr から型タグへの変換（`Lowering` メソッド版）。
     ///
     /// 純関数版は `crate::codegen::tag_prop::type_expr_to_tag` にあり、

@@ -282,6 +282,13 @@ taida_val taida_register_field_type(taida_val hash, taida_ptr name_ptr, taida_va
 /// points to a comma-separated list of variant names, used by
 /// `json_serialize_pack_fields` to emit variant-name Str in jsonEncode.
 taida_val taida_register_field_enum(taida_val hash, taida_ptr name_ptr, taida_ptr variants_ptr);
+/// C18B-003 fix: Register a per-pack enum descriptor so two packs that
+/// share the same field name (e.g. `state`) but hold different enums
+/// (`BuildState`, `RunState`) no longer collide in the global field
+/// registry. Keyed by `(pack_ptr, field_hash)`; looked up at
+/// `json_serialize_pack_fields` time before falling back to the global
+/// descriptor.
+taida_val taida_register_pack_field_enum(taida_ptr pack_ptr, taida_val field_hash, taida_ptr variants_ptr);
 static const char* taida_lookup_field_name(taida_val hash);
 static int taida_lookup_field_type(taida_val hash);
 static taida_val taida_is_hashmap(taida_val ptr);
@@ -7476,6 +7483,69 @@ static const char* taida_lookup_field_enum_desc(taida_val hash) {
     return NULL;
 }
 
+// C18B-003 fix: per-pack-instance enum descriptor registry.
+// Keyed by (pack_ptr, field_hash) so two packs that share a field name
+// but carry different enums do not overwrite each other's descriptor.
+//
+// The table is bounded at `PACK_FIELD_ENUM_CAP`. When full we silently
+// drop further registrations; `json_serialize_pack_fields` then falls
+// back to the global `__field_registry.enum_desc`. The only observable
+// consequence of table exhaustion is the pre-C18B-003 behaviour, so
+// overflow cannot regress correctness below the already-released
+// surface.
+//
+// `pack_ptr` is stored as `taida_val` (i64) for simple bitwise compare.
+// The table is populated by `taida_register_pack_field_enum()` which
+// is emitted once per `PackSet` of an Enum-typed field. Both fresh
+// allocation and an existing-entry update path are provided so a pack
+// that is reused across multiple PackSet calls (rare but possible via
+// `taida_pack_set_val`) remains in sync with its last-written enum.
+#define PACK_FIELD_ENUM_CAP 1024
+static struct {
+    taida_val pack_ptr;
+    taida_val field_hash;
+    const char *enum_desc;
+} __pack_field_enum_registry[PACK_FIELD_ENUM_CAP];
+static int __pack_field_enum_registry_len = 0;
+
+taida_val taida_register_pack_field_enum(taida_val pack_ptr, taida_val field_hash, taida_val variants_ptr) {
+    if (pack_ptr == 0) return 0;
+    // Update existing entry if present (most recent write wins for a
+    // given (pack, field) pair — mirrors the single-writer contract of
+    // `PackSet`).
+    for (int i = 0; i < __pack_field_enum_registry_len; i++) {
+        if (__pack_field_enum_registry[i].pack_ptr == pack_ptr
+            && __pack_field_enum_registry[i].field_hash == field_hash) {
+            __pack_field_enum_registry[i].enum_desc = (const char*)variants_ptr;
+            return 0;
+        }
+    }
+    if (__pack_field_enum_registry_len < PACK_FIELD_ENUM_CAP) {
+        __pack_field_enum_registry[__pack_field_enum_registry_len].pack_ptr = pack_ptr;
+        __pack_field_enum_registry[__pack_field_enum_registry_len].field_hash = field_hash;
+        __pack_field_enum_registry[__pack_field_enum_registry_len].enum_desc = (const char*)variants_ptr;
+        __pack_field_enum_registry_len++;
+    }
+    return 0;
+}
+
+static const char* taida_lookup_pack_field_enum_desc(taida_val pack_ptr, taida_val field_hash) {
+    if (pack_ptr == 0) return NULL;
+    // Linear scan — tables are small (per-program, per-pack-instance).
+    // Reverse order so the most recent registration wins if the same
+    // (pack, field) is registered twice without the early-update path
+    // firing (e.g. two distinct packs that happen to share a pointer
+    // after an allocator reuse, in which case the last writer is the
+    // live pack).
+    for (int i = __pack_field_enum_registry_len - 1; i >= 0; i--) {
+        if (__pack_field_enum_registry[i].pack_ptr == pack_ptr
+            && __pack_field_enum_registry[i].field_hash == field_hash) {
+            return __pack_field_enum_registry[i].enum_desc;
+        }
+    }
+    return NULL;
+}
+
 static int taida_lookup_field_type(taida_val hash) {
     for (int i = 0; i < __field_registry_len; i++) {
         if (__field_registry[i].hash == hash) return __field_registry[i].type_tag;
@@ -7604,10 +7674,26 @@ static void json_serialize_pack_fields(char **buf, size_t *cap, size_t *len, tai
             continue;
         }
         int ftype = taida_lookup_field_type(field_hash);
+        // C18B-003 fix: prefer per-pack descriptor (keyed by pack_ptr +
+        // field_hash) over the global field registry so two enums that
+        // share the field name (`state`, `status`, `kind`, …) emit
+        // their correct variant name. Fall back to the global table
+        // when no per-pack entry exists (covers code paths that were
+        // emitted before this fix and any future callers that skip the
+        // `taida_register_pack_field_enum` emission).
+        const char *enum_desc = taida_lookup_pack_field_enum_desc((taida_val)(intptr_t)pack, field_hash);
+        // If we resolved a per-pack descriptor the field is Enum-typed
+        // even if the global type tag never got promoted to 5 (e.g.
+        // packs built by `taida_pack_new` outside of _taida_main).
+        if (enum_desc != NULL) {
+            ftype = 5;
+        } else if (ftype == 5) {
+            enum_desc = taida_lookup_field_enum_desc(field_hash);
+        }
         fields[nfields].name = fname;
         fields[nfields].val = field_val;
         fields[nfields].type_hint = ftype;
-        fields[nfields].enum_desc = (ftype == 5) ? taida_lookup_field_enum_desc(field_hash) : NULL;
+        fields[nfields].enum_desc = enum_desc;
         nfields++;
     }
     // Sort fields alphabetically by name (insertion sort — nfields is small)
