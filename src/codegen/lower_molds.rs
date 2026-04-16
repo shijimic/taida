@@ -1969,6 +1969,24 @@ impl Lowering {
                 ));
                 Ok(result)
             }
+            // C18-3: Ordinal[<enum_value>]() — explicit Enum → Int.
+            // On Native, Enum values are already stored as int32 ordinals
+            // (`Value::Int(ordinal)` in the interpreter is `int` in C).
+            // The lowering is therefore an identity on the sole argument
+            // — `Ordinal[Status:Running()]()` evaluates to the ordinal
+            // value which is the Int(n) representation. Arity-1 only.
+            "Ordinal" => {
+                if type_args.is_empty() {
+                    return Err(LowerError {
+                        message:
+                            "Ordinal requires 1 argument: Ordinal[<enum_value>]()"
+                                .into(),
+                    });
+                }
+                let arg_var = self.lower_expr(func, &type_args[0])?;
+                Ok(arg_var)
+            }
+
             // B11-5c: If[cond, then, else]() → CondBranch (short-circuit)
             "If" => {
                 if type_args.len() < 3 {

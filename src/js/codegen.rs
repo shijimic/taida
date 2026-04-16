@@ -2527,6 +2527,24 @@ impl JsCodegen {
             Expr::MoldInst(name, type_args, fields, _) => {
                 // B5: MoldInst → function call with type args
 
+                // C18-3: Ordinal[<enum_value>]() → Number(v)
+                // Enum values are `__taida_enumVal` wrappers whose `valueOf`
+                // returns the ordinal. `Number(x)` forces primitive coercion
+                // for both wrapped and raw number inputs. Arity-1 only.
+                if name == "Ordinal" {
+                    if type_args.is_empty() {
+                        return Err(JsError {
+                            message:
+                                "Ordinal requires 1 argument: Ordinal[<enum_value>]()"
+                                    .to_string(),
+                        });
+                    }
+                    self.write("__taida_enumOrdinal(");
+                    self.gen_expr(&type_args[0])?;
+                    self.write(")");
+                    return Ok(());
+                }
+
                 // B11-5b: If[cond, then, else]() → (cond ? then : else)
                 // Short-circuit via ternary operator — non-selected branch is never evaluated.
                 if name == "If" {

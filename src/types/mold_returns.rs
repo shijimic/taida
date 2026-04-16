@@ -80,6 +80,12 @@ pub fn lookup_mold_return_kind(name: &str) -> Option<MoldReturnKind> {
         "Length" | "Count" | "IndexOf" | "LastIndexOf" | "FindIndex" => Int,
         "Floor" | "Ceil" | "Round" | "Truncate" => Int,
         "BitAnd" | "BitOr" | "BitXor" | "BitNot" => Int,
+        // C18-3: `Ordinal[Enum:Variant()]()` — explicit Enum → Int.
+        // Declared here so the type checker knows the result type of the
+        // MoldInst is `Int`. The mold itself is evaluated in
+        // `src/interpreter/mold_eval.rs` (interpreter) and lowered
+        // directly (JS/Native) — see C18-3 commit.
+        "Ordinal" => Int,
 
         // ── Float-returning molds ───────────────────────────────────
         "Float" => Float,
