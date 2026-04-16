@@ -4550,8 +4550,8 @@ fn run_cache(args: &[String]) {
         println!("  clean --addons              Remove cached addon prebuild binaries");
         println!("                              (RC15B-001: prunes ~/.taida/addon-cache/)");
         println!("  clean --store [--yes]       C17: prune ~/.taida/store/ (shows a summary");
-        println!("                              then asks to confirm unless --yes is passed");
-        println!("                              or stdin is a TTY with y/Y)");
+        println!("                              first; then asks to confirm interactively on a");
+        println!("                              TTY, or requires --yes in non-TTY contexts)");
         println!(
             "  clean --store-pkg <org>/<name>   C17: prune a single store package"
         );
@@ -4744,7 +4744,7 @@ fn run_cache_clean_store(assume_yes: bool) {
         println!("No store cache found at '{}'.", summary.root.display());
         return;
     }
-    if summary.packages_removed == 0 {
+    if summary.packages_removed == 0 && summary.scratch_removed == 0 {
         println!(
             "Store cache at '{}' is already clean.",
             summary.root.display()
@@ -4760,6 +4760,15 @@ fn run_cache_clean_store(assume_yes: bool) {
         summary.packages_removed,
         mib
     );
+    // C17B-011: report scratch (leftover .tmp-*, .refresh-staging-*)
+    // separately so the user sees what is being cleaned up without the
+    // count inflating the package number.
+    if summary.scratch_removed > 0 {
+        println!(
+            "  ... and {} leftover scratch directory(ies) from past installs",
+            summary.scratch_removed
+        );
+    }
     // Preview the first few so a user can sanity-check.
     let preview_n = 10usize;
     for name in summary.packages.iter().take(preview_n) {

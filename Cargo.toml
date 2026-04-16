@@ -76,6 +76,14 @@ quinn = { version = "0.11", features = ["ring", "rustls-ring"] }
 # rcgen: runtime cert/key generation for QUIC TLS1.3
 rcgen = "0.13"
 
+# C17B-009: file locking for `~/.taida/store/` concurrent-install races.
+# We use `libc::flock` directly (Unix only) rather than pulling in fs2 or
+# nix, since flock is ~20 LoC and we already require Unix for most of the
+# installer integration tests. On Windows the lock is a no-op and we rely
+# on the higher-level mutual exclusion that cargo / taida session users
+# already observe.
+libc = "0.2"
+
 [dev-dependencies]
 # h3 crate: HTTP/3 framing + QPACK semantics (hyperium/h3 reference)
 # NB7-90: h3/h3-quinn are in dev-deps only — src/ implements hand-rolled

@@ -112,9 +112,12 @@ impl GlobalStore {
     /// `fetch_and_cache*` call re-downloads and re-extracts it.
     ///
     /// This is the shared invalidation primitive used by:
-    /// - the stale-detection decision table (`remote moved` case)
-    /// - `--force-refresh` (Phase 4)
     /// - `taida cache clean --store-pkg` (Phase 3)
+    ///
+    /// C17B-001: the stale-detection path and `--force-refresh` no longer
+    /// call this directly; they use the stage/commit/rollback trio
+    /// (`stage_invalidation` + `commit_invalidation` + `rollback_invalidation`)
+    /// so a failed fetch can restore the previous install.
     ///
     /// Path traversal is rejected up front (RCB-307 / SEC-009). Returns `Ok(())`
     /// when the directory does not exist -- invalidation is idempotent.
@@ -135,6 +138,151 @@ impl GlobalStore {
         std::fs::remove_dir_all(&pkg_dir)
             .map_err(|e| format!("Cannot remove store entry '{}': {}", pkg_dir.display(), e))?;
         Ok(())
+    }
+
+    // --------------------------------------------------------------
+    // C17B-001: stage / commit / rollback primitives
+    // --------------------------------------------------------------
+    //
+    // The stale-detection path and `--force-refresh` both need to replace
+    // `pkg_dir` with a freshly fetched extraction. The old implementation
+    // did `rm -rf pkg_dir; fetch`, which destroyed the user's install
+    // if the fetch failed. These three primitives implement a
+    // transaction-like swap:
+    //
+    //   1. `stage_invalidation`  -- rename `pkg_dir` -> `pkg_dir.refresh-staging-<pid>-<nanos>`
+    //   2. caller runs `fetch_and_cache_with_meta`
+    //   3a. on success: `commit_invalidation` -- drop the staging dir
+    //   3b. on failure: `rollback_invalidation` -- rename staging back to `pkg_dir`
+    //
+    // `stage_invalidation` returns `Ok(None)` when there was nothing to
+    // stage (uncached), or `Ok(Some(stash_path))` when a backup was made.
+    // `rollback_invalidation` first removes any partially-fetched
+    // `pkg_dir` the fetch may have left behind before restoring the
+    // backup.
+    //
+    // The staging name embeds PID + nanosecond timestamp so concurrent
+    // processes do not collide on the same suffix.
+
+    /// C17B-001: Stage an existing package directory aside so a subsequent
+    /// `fetch_and_cache_with_meta` can write a fresh extraction. Returns
+    /// the backup path (if one was created), or `None` if nothing was
+    /// cached.
+    ///
+    /// The backup uses a unique suffix (`refresh-staging-<pid>-<nanos>`)
+    /// so two processes racing will not clobber each other's stash.
+    pub fn stage_invalidation(
+        &self,
+        org: &str,
+        name: &str,
+        version: &str,
+    ) -> Result<Option<std::path::PathBuf>, String> {
+        Self::validate_path_component(org, "org")?;
+        Self::validate_path_component(name, "package name")?;
+        Self::validate_path_component(version, "version")?;
+        let pkg_dir = self.package_path(org, name, version);
+        if !pkg_dir.exists() {
+            return Ok(None);
+        }
+        let parent = pkg_dir
+            .parent()
+            .ok_or_else(|| format!("pkg_dir has no parent: {}", pkg_dir.display()))?;
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let stash = parent.join(format!(
+            "{}.refresh-staging-{}-{}",
+            version,
+            std::process::id(),
+            nanos
+        ));
+        std::fs::rename(&pkg_dir, &stash).map_err(|e| {
+            format!(
+                "Cannot stage '{}' to '{}' for refresh: {}",
+                pkg_dir.display(),
+                stash.display(),
+                e
+            )
+        })?;
+        Ok(Some(stash))
+    }
+
+    /// C17B-001: Finalise a successful refresh by removing the staged
+    /// backup. Best-effort: I/O errors bubble up so the caller can warn
+    /// the user (the new install is already in place).
+    pub fn commit_invalidation(&self, stash: &Path) -> Result<(), String> {
+        if !stash.exists() {
+            return Ok(());
+        }
+        std::fs::remove_dir_all(stash).map_err(|e| {
+            format!("Cannot remove refresh backup '{}': {}", stash.display(), e)
+        })
+    }
+
+    /// C17B-001: Roll back a failed refresh by restoring the staged
+    /// backup. Removes any partial `pkg_dir` the fetcher created before
+    /// renaming the backup back into place.
+    pub fn rollback_invalidation(&self, stash: &Path, pkg_dir: &Path) -> Result<(), String> {
+        if !stash.exists() {
+            // Nothing to restore; caller's previous install was absent to
+            // begin with.
+            return Ok(());
+        }
+        if pkg_dir.exists() {
+            std::fs::remove_dir_all(pkg_dir).map_err(|e| {
+                format!(
+                    "rollback: cannot remove partial '{}': {}",
+                    pkg_dir.display(),
+                    e
+                )
+            })?;
+        }
+        std::fs::rename(stash, pkg_dir).map_err(|e| {
+            format!(
+                "rollback: cannot rename '{}' -> '{}': {}",
+                stash.display(),
+                pkg_dir.display(),
+                e
+            )
+        })?;
+        Ok(())
+    }
+
+    /// C17B-009: Acquire an advisory lock scoped to
+    /// `<org>/<name>/<version>` so two concurrent `taida install`
+    /// processes do not race on the same store entry.
+    ///
+    /// The lock file lives at `<root>/<org>/<name>/.<version>.lock`.
+    /// On Unix we use `flock(LOCK_EX)`; the lock is held until the
+    /// returned guard is dropped (typically at the end of `resolve()`).
+    /// On non-Unix platforms the guard is a no-op (Windows is not a
+    /// supported target for the installer integration tests; higher
+    /// layers observe their own mutual exclusion).
+    ///
+    /// Returns `Err` only when we cannot create the lock file at all
+    /// (permissions / out-of-space). Contention blocks until the holder
+    /// releases; this is fine because concurrent installs of the same
+    /// package should serialise.
+    pub fn acquire_install_lock(
+        &self,
+        org: &str,
+        name: &str,
+        version: &str,
+    ) -> Result<InstallLock, String> {
+        Self::validate_path_component(org, "org")?;
+        Self::validate_path_component(name, "package name")?;
+        Self::validate_path_component(version, "version")?;
+        let lock_parent = self.root.join(org).join(name);
+        std::fs::create_dir_all(&lock_parent).map_err(|e| {
+            format!(
+                "Cannot create lock parent '{}': {}",
+                lock_parent.display(),
+                e
+            )
+        })?;
+        let lock_path = lock_parent.join(format!(".{}.lock", version));
+        InstallLock::acquire(&lock_path)
     }
 
     /// Read the sidecar for a cached package, if present.
@@ -217,9 +365,32 @@ impl GlobalStore {
 
         let archive_path = tmp_dir.join("archive.tar.gz");
 
-        // Use curl to download
-        let curl_status = std::process::Command::new("curl")
-            .args(["-fsSL", "-o"])
+        // Use curl to download. C17B-006: apply the same connect/max-time
+        // caps as `curl_get_optional` so a stalled network cannot hang
+        // install indefinitely. Tarballs can be large (a few MiB), so we
+        // give this a generous `--max-time 120`. If the limit is hit the
+        // caller reports a download failure and the stage/rollback path
+        // restores the previous install.
+        let mut curl_cmd = std::process::Command::new("curl");
+        curl_cmd.args([
+            "-fsSL",
+            "--connect-timeout",
+            "10",
+            "--max-time",
+            "120",
+            "-H",
+            "User-Agent: taida-install",
+        ]);
+        // C17B-005: authenticated archive downloads lift the anonymous
+        // rate limit. `github_auth_token()` returns `None` gracefully
+        // when no token is configured.
+        if let Some(token) = github_auth_token() {
+            curl_cmd
+                .arg("-H")
+                .arg(format!("Authorization: Bearer {}", token));
+        }
+        let curl_status = curl_cmd
+            .arg("-o")
             .arg(&archive_path)
             .arg(&url)
             .status()
@@ -642,6 +813,14 @@ pub struct StoreMeta {
     /// but SHA unknown" and falls back to pessimistic refresh.
     pub commit_sha: String,
     /// SHA-256 (hex) of the tarball before extraction.
+    ///
+    /// C17B-008 (tracked in `.dev/C17_BLOCKERS.md`): C17 writes this field
+    /// but does not yet verify it on fast-path reuse. The natural
+    /// verification point is a rehash of the cached extraction (or of the
+    /// re-downloaded tarball), which is deferred to C18+ together with
+    /// content-addressable store work. Having the field recorded now means
+    /// the future verifier has something to compare against for every
+    /// install performed under C17.
     pub tarball_sha256: String,
     /// HTTP ETag returned by the archive host, if exposed. Optional; the
     /// field is omitted from the on-disk TOML when `None`.
@@ -736,13 +915,48 @@ pub fn write_meta_atomic(path: &Path, meta: &StoreMeta) -> Result<(), StoreError
     let _ = std::fs::remove_file(&tmp_path);
 
     let serialized = serialize_meta(meta);
-    if let Err(e) = std::fs::write(&tmp_path, serialized.as_bytes()) {
-        let _ = std::fs::remove_file(&tmp_path);
-        return Err(StoreError::Io(format!(
-            "cannot write temp sidecar {}: {}",
-            tmp_path.display(),
-            e
-        )));
+    // C17B-014: Use the open/write/sync/rename/sync-dir idiom for
+    // durability. The rename is already atomic per POSIX, but without
+    // a prior fsync the kernel may still have the tmp file's data in
+    // memory; a power-loss event between rename and flush can resurrect
+    // the old sidecar (or worse, a partial new one) on next boot.
+    //
+    // We:
+    //   1. create the tmp file
+    //   2. write the serialized bytes
+    //   3. fsync the tmp fd
+    //   4. rename tmp -> target
+    //   5. fsync the parent directory (Unix)
+    //
+    // Parent-dir fsync is a no-op on non-Unix so we attempt it on Unix
+    // only; failure there is logged but not fatal (the rename already
+    // succeeded).
+    {
+        let mut f = std::fs::File::create(&tmp_path).map_err(|e| {
+            StoreError::Io(format!(
+                "cannot create temp sidecar {}: {}",
+                tmp_path.display(),
+                e
+            ))
+        })?;
+        use std::io::Write as _;
+        if let Err(e) = f.write_all(serialized.as_bytes()) {
+            let _ = std::fs::remove_file(&tmp_path);
+            return Err(StoreError::Io(format!(
+                "cannot write temp sidecar {}: {}",
+                tmp_path.display(),
+                e
+            )));
+        }
+        if let Err(e) = f.sync_all() {
+            let _ = std::fs::remove_file(&tmp_path);
+            return Err(StoreError::Io(format!(
+                "cannot fsync temp sidecar {}: {}",
+                tmp_path.display(),
+                e
+            )));
+        }
+        // `f` goes out of scope here and is closed before rename.
     }
 
     std::fs::rename(&tmp_path, path).map_err(|e| {
@@ -752,7 +966,20 @@ pub fn write_meta_atomic(path: &Path, meta: &StoreMeta) -> Result<(), StoreError
             path.display(),
             e
         ))
-    })
+    })?;
+
+    // C17B-014: Fsync the parent directory so the rename itself is
+    // persisted. On non-Unix this is a best-effort no-op (opening a
+    // directory for fsync is not portable); the rename's atomicity is
+    // still observed by crash-safety contracts on NTFS etc.
+    #[cfg(unix)]
+    {
+        if let Ok(dir) = std::fs::File::open(parent) {
+            let _ = dir.sync_all();
+        }
+    }
+
+    Ok(())
 }
 
 /// Serialize a `StoreMeta` to the on-disk TOML form.
@@ -843,11 +1070,18 @@ fn parse_meta_str(source: &str) -> Result<StoreMeta, StoreError> {
             "source" => source_field = Some(parse_basic_string(value, line_no)?),
             "version" => version = Some(parse_basic_string(value, line_no)?),
             other => {
-                // Unknown keys are tolerated (forward-compat) but reported
-                // in debug builds via the `parse_meta_str` contract being
-                // silent -- prefer ignore over error so v1 readers don't
+                // C17B-017: Unknown keys are tolerated (forward-compat).
+                // When `TAIDA_DEBUG_STORE=1` we echo them to stderr so a
+                // developer debugging sidecar evolution can see which
+                // additive fields are being skipped. In the default
+                // quiet mode nothing is printed -- v1 readers must not
                 // reject v1.x sidecars with additive fields.
-                let _ = other;
+                if std::env::var_os("TAIDA_DEBUG_STORE").is_some() {
+                    eprintln!(
+                        "  debug: _meta.toml line {}: ignoring unknown key '{}' (forward-compat)",
+                        line_no, other
+                    );
+                }
             }
         }
     }
@@ -994,17 +1228,41 @@ pub struct StorePruneReport {
     /// nothing was removed and the caller should print
     /// "No store cache found at ...".
     pub root_existed: bool,
-    /// Number of store entries (`<org>/<name>/<version>/`) removed.
+    /// Number of real store entries (`<org>/<name>/<version>/`) removed.
+    /// Excludes scratch directories (`.tmp-*`, `.refresh-staging-*`);
+    /// those are tracked separately in `scratch_removed`.
     pub packages_removed: u64,
     /// Number of bytes freed. Best-effort: computed by walking the
-    /// directory before deletion.
+    /// directory before deletion. Covers both real packages and scratch.
     pub bytes_removed: u64,
     /// Absolute path to the store root (for display).
     pub root: PathBuf,
     /// Names of the removed package entries, in deterministic order.
     /// Format: `<org>/<name>@<version>`. Used for the summary preview
-    /// before a destructive prune.
+    /// before a destructive prune. Excludes scratch directories so the
+    /// preview does not show `alice/http@.tmp-a.3`.
     pub packages: Vec<String>,
+    /// C17B-011: Number of scratch directories removed. These are
+    /// `.tmp-<ver>` (leftover extraction scratch) and
+    /// `.refresh-staging-<pid>-<nanos>` (abandoned refresh backups from a
+    /// crashed `taida install`). Counted separately from real packages so
+    /// the summary does not conflate them.
+    pub scratch_removed: u64,
+}
+
+/// C17B-011: Classify a version-level directory name.
+///
+/// - `.tmp-<ver>`                     -> scratch (extraction temp)
+/// - `.refresh-staging-<pid>-<nanos>` -> scratch (abandoned rollback backup)
+/// - `<ver>`                          -> real package directory
+fn is_scratch_dir_name(name: &str) -> bool {
+    if name.starts_with(".tmp-") {
+        return true;
+    }
+    if name.contains(".refresh-staging-") {
+        return true;
+    }
+    false
 }
 
 /// Compute a pre-flight summary of what `prune_store_root` would remove.
@@ -1091,13 +1349,20 @@ fn summarize_store_root_impl(
                         Some(s) => s.to_string(),
                         None => continue,
                     };
-                // `.tmp-<ver>` directories from failed extractions are
-                // also pruned (they are store-owned scratch space).
-                report.packages_removed += 1;
-                report.bytes_removed += dir_size_bytes(&ver_path);
-                report
-                    .packages
-                    .push(format!("{}/{}@{}", org_name, pkg_name, ver_name));
+                let bytes = dir_size_bytes(&ver_path);
+                report.bytes_removed += bytes;
+                // C17B-011: classify real packages vs Taida-owned scratch
+                // directories. Scratch shows up in the summary total
+                // footer but never in the per-package preview, so users
+                // do not see confusing entries like `alice/http@.tmp-a.3`.
+                if is_scratch_dir_name(&ver_name) {
+                    report.scratch_removed += 1;
+                } else {
+                    report.packages_removed += 1;
+                    report
+                        .packages
+                        .push(format!("{}/{}@{}", org_name, pkg_name, ver_name));
+                }
             }
         }
     }
@@ -1338,6 +1603,20 @@ pub fn resolve_version_to_sha(
     validate_component_free(name, "package name")?;
     validate_component_free(version, "version")?;
 
+    // C17B-018: Process-local memoization. `taida install` resolves the
+    // same `<org>/<name>/<version>` at most a handful of times in a
+    // single run, but when a project has multiple deps resolved via
+    // fan-out or when `--force-refresh` + lockfile paths re-enter the
+    // resolver, we avoid paying for the same GitHub API call twice.
+    //
+    // The cache key is namespaced on `TAIDA_GITHUB_API_URL` so tests
+    // that swap the mock between subtests do not observe a stale hit.
+    let api_hint = std::env::var("TAIDA_GITHUB_API_URL").unwrap_or_default();
+    let cache_key = format!("{}|{}|{}|{}", api_hint, org, name, version);
+    if let Some(cached) = sha_cache_get(&cache_key) {
+        return Ok(cached);
+    }
+
     let api = github_api_url();
     let api = api.trim_end_matches('/');
     let url = format!(
@@ -1346,7 +1625,10 @@ pub fn resolve_version_to_sha(
     );
     let body = match curl_get_optional(&url)? {
         Some(body) => body,
-        None => return Ok(None), // network unreachable
+        None => {
+            sha_cache_put(cache_key, None);
+            return Ok(None);
+        }
     };
 
     // The response is either:
@@ -1381,7 +1663,10 @@ pub fn resolve_version_to_sha(
         let tag_url = format!("{}/repos/{}/{}/git/tags/{}", api, org, name, sha);
         let body = match curl_get_optional(&tag_url)? {
             Some(b) => b,
-            None => return Ok(None),
+            None => {
+                sha_cache_put(cache_key, None);
+                return Ok(None);
+            }
         };
         let obj = extract_json_object_field(&body, "object").ok_or_else(|| {
             format!(
@@ -1395,10 +1680,43 @@ pub fn resolve_version_to_sha(
                 org, name, version
             )
         })?;
+        sha_cache_put(cache_key, Some(commit_sha.clone()));
         return Ok(Some(commit_sha));
     }
 
+    sha_cache_put(cache_key, Some(sha.clone()));
     Ok(Some(sha))
+}
+
+/// C17B-018: Process-local memoization cache for `resolve_version_to_sha`.
+///
+/// Keyed on `"{api_url}|{org}|{name}|{version}"` so tests that swap the
+/// `TAIDA_GITHUB_API_URL` mock between stages do not see stale hits. The
+/// cache is purely additive: entries live for the process lifetime.
+fn sha_cache() -> &'static std::sync::Mutex<std::collections::HashMap<String, Option<String>>> {
+    static CACHE: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<String, Option<String>>>,
+    > = std::sync::OnceLock::new();
+    CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+fn sha_cache_get(key: &str) -> Option<Option<String>> {
+    sha_cache().lock().ok()?.get(key).cloned()
+}
+
+fn sha_cache_put(key: String, value: Option<String>) {
+    if let Ok(mut guard) = sha_cache().lock() {
+        guard.insert(key, value);
+    }
+}
+
+/// C17B-018 test support: clear the memo cache. Exposed for tests that
+/// rely on back-to-back SHA resolutions returning fresh results.
+#[cfg(test)]
+pub fn _test_only_clear_sha_cache() {
+    if let Ok(mut guard) = sha_cache().lock() {
+        guard.clear();
+    }
 }
 
 /// Validation wrapper so `resolve_version_to_sha` can share the
@@ -1423,9 +1741,33 @@ fn validate_component_free(component: &str, label: &str) -> Result<(), String> {
 ///   failure, 5xx, 4xx, ...). This is the "cannot verify" branch --
 ///   callers pair it with an offline warning, never a silent skip.
 /// - `Err(msg)` only when curl itself cannot be launched.
+///
+/// C17B-005: When `GH_TOKEN` / `GITHUB_TOKEN` is set in the environment
+/// (or `~/.taida/auth.json` contains a token), add an
+/// `Authorization: Bearer <token>` header so unauthenticated rate limits
+/// (60 requests/hr/IP on GitHub) do not silently demote the stale-check
+/// into offline mode.
+///
+/// C17B-006: Cap the network wait with `--connect-timeout 10` and
+/// `--max-time 30`. A slow / dead network must not hang `taida install`
+/// indefinitely; we fall back to the offline branch instead.
 fn curl_get_optional(url: &str) -> Result<Option<String>, String> {
-    let output = std::process::Command::new("curl")
-        .args(["-fsSL", "-H", "Accept: application/vnd.github+json"])
+    let mut cmd = std::process::Command::new("curl");
+    cmd.args([
+        "-fsSL",
+        "--connect-timeout",
+        "10",
+        "--max-time",
+        "30",
+        "-H",
+        "Accept: application/vnd.github+json",
+        "-H",
+        "User-Agent: taida-install",
+    ]);
+    if let Some(token) = github_auth_token() {
+        cmd.arg("-H").arg(format!("Authorization: Bearer {}", token));
+    }
+    let output = cmd
         .arg(url)
         .output()
         .map_err(|e| format!("Failed to run curl: {}", e))?;
@@ -1433,6 +1775,31 @@ fn curl_get_optional(url: &str) -> Result<Option<String>, String> {
         return Ok(None);
     }
     Ok(Some(String::from_utf8_lossy(&output.stdout).into_owned()))
+}
+
+/// C17B-005: Best-effort lookup of a GitHub auth token.
+///
+/// Precedence (first match wins):
+///   1. `GH_TOKEN`
+///   2. `GITHUB_TOKEN`
+///   3. `~/.taida/auth.json` (`github_token` field) via `load_token`
+///
+/// Returns `None` if none are available; callers degrade gracefully to
+/// unauthenticated requests.
+///
+/// Pinned in `.dev/C17_IMPL_SPEC.md` so the precedence is auditable.
+fn github_auth_token() -> Option<String> {
+    if let Ok(t) = std::env::var("GH_TOKEN") {
+        if !t.is_empty() {
+            return Some(t);
+        }
+    }
+    if let Ok(t) = std::env::var("GITHUB_TOKEN") {
+        if !t.is_empty() {
+            return Some(t);
+        }
+    }
+    crate::auth::token::load_token().map(|t| t.github_token)
 }
 
 /// Tiny JSON object extractor: returns the substring `{...}` that is the
@@ -1559,6 +1926,102 @@ fn skip_to_value(json: &str, start: usize) -> Option<usize> {
         i += 1;
     }
     Some(i)
+}
+
+// =============================================================================
+// C17B-009: per-package install lock
+// =============================================================================
+//
+// Two `taida install` processes (e.g. monorepo CI workers, or a developer
+// running `taida install` twice in parallel shells) used to race on the
+// same `<org>/<name>/<version>/` directory. Symptoms: interleaved tar
+// output, corrupted sidecar, stray `.tmp-<version>` scratch trees.
+//
+// We take a Unix `flock(LOCK_EX)` on a lock file that lives next to the
+// package directory. The lock is advisory (co-operating processes only),
+// but Taida is the sole writer of `~/.taida/store/` so that is enough.
+//
+// On non-Unix platforms the lock is a no-op. The installer integration
+// tests that exercise this path are `#[cfg(unix)]`, matching the rest of
+// the C17 test surface.
+
+/// RAII guard for the per-package install lock. Dropping the guard
+/// releases the lock (explicit `drop(_guard)` is unnecessary).
+pub struct InstallLock {
+    // `File` holds the fd; `flock` is implicitly released when the fd is
+    // closed, which happens on drop. We keep the path around so callers
+    // can include it in error messages.
+    #[allow(dead_code)]
+    file: std::fs::File,
+    #[allow(dead_code)]
+    path: PathBuf,
+}
+
+impl InstallLock {
+    /// Acquire an exclusive advisory lock on `lock_path`. Creates the
+    /// file if it does not exist. Blocks until the lock is available.
+    ///
+    /// The file contents are irrelevant -- we only care about the flock
+    /// on the open file descriptor.
+    pub fn acquire(lock_path: &Path) -> Result<InstallLock, String> {
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(false)
+            .open(lock_path)
+            .map_err(|e| {
+                format!(
+                    "Cannot open lock file '{}': {}",
+                    lock_path.display(),
+                    e
+                )
+            })?;
+        Self::lock_blocking(&file, lock_path)?;
+        Ok(InstallLock {
+            file,
+            path: lock_path.to_path_buf(),
+        })
+    }
+
+    #[cfg(unix)]
+    fn lock_blocking(file: &std::fs::File, path: &Path) -> Result<(), String> {
+        use std::os::fd::AsRawFd;
+        // Safety: `fd` is valid for the lifetime of `file`; `flock` is
+        // safe to call with any non-negative fd.
+        let fd = file.as_raw_fd();
+        // Retry on EINTR -- we want a blocking acquire semantics.
+        loop {
+            let r = unsafe { libc::flock(fd, libc::LOCK_EX) };
+            if r == 0 {
+                return Ok(());
+            }
+            let err = std::io::Error::last_os_error();
+            if err.kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(format!(
+                "flock('{}') failed: {}",
+                path.display(),
+                err
+            ));
+        }
+    }
+
+    #[cfg(not(unix))]
+    fn lock_blocking(_file: &std::fs::File, _path: &Path) -> Result<(), String> {
+        // No-op on non-Unix platforms. Higher-level serialisation (cargo,
+        // `taida` session discipline) is relied upon there.
+        Ok(())
+    }
+}
+
+impl Drop for InstallLock {
+    fn drop(&mut self) {
+        // Close of `self.file` releases the flock automatically on Unix.
+        // Nothing to do here; we keep the impl explicit so future
+        // maintainers do not delete `self.file` thinking it is unused.
+    }
 }
 
 #[cfg(test)]
@@ -2661,12 +3124,63 @@ mod tests {
 
         let report = prune_store_root(&dir).unwrap();
         assert!(report.root_existed);
-        assert!(report.packages_removed >= 2);
+        // C17B-012: tighten assertion from `>= 2` to `== 2`. With
+        // C17B-011's scratch bucketing, the `.tmp-a.3` orphan is counted
+        // under `scratch_removed` and must not inflate the package count.
+        assert_eq!(
+            report.packages_removed, 2,
+            "real packages must be exactly 2 (alice/http@a.1 + bob/rpc@c.1); scratch excluded"
+        );
+        assert_eq!(
+            report.scratch_removed, 1,
+            "the .tmp-a.3 orphan must be bucketed as scratch, not a package"
+        );
+        // Preview must only list real packages.
+        assert_eq!(report.packages.len(), 2, "preview list excludes scratch");
+        for p in &report.packages {
+            assert!(
+                !p.contains(".tmp-"),
+                "preview must never include .tmp- scratch: {}",
+                p
+            );
+        }
 
         // Root itself is kept; org directories are gone.
         assert!(dir.exists(), "root must remain so next install needn't mkdir");
         assert!(!dir.join("alice").exists(), "org dir must be gone");
         assert!(!dir.join("bob").exists(), "org dir must be gone");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_summarize_store_root_buckets_scratch_separately() {
+        // C17B-011 guardrail: a `.refresh-staging-*` orphan (from a
+        // crashed `--force-refresh`) must not show up as a package.
+        let dir = unique_tmp_dir("summarize_scratch");
+        std::fs::create_dir_all(&dir).unwrap();
+        populate_store(
+            &dir,
+            &[("alice", "http", "a.1", 8)],
+        );
+        std::fs::create_dir_all(
+            dir.join("alice")
+                .join("http")
+                .join("a.1.refresh-staging-12345-678"),
+        )
+        .unwrap();
+        std::fs::create_dir_all(dir.join("alice").join("http").join(".tmp-b.9"))
+            .unwrap();
+
+        let report = summarize_store_root(&dir).unwrap();
+        assert_eq!(report.packages_removed, 1);
+        assert_eq!(report.scratch_removed, 2);
+        assert_eq!(report.packages.len(), 1);
+        assert!(report.packages[0].contains("alice/http@a.1"));
+        for p in &report.packages {
+            assert!(!p.contains(".refresh-staging"));
+            assert!(!p.contains(".tmp-"));
+        }
 
         let _ = std::fs::remove_dir_all(&dir);
     }
