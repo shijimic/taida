@@ -290,6 +290,17 @@ impl Lowering {
                     }
                 }
                 Statement::Import(import_stmt) => {
+                    // C18-1: Before any addon / stdlib classification,
+                    // pull in Enum type definitions exported by the target
+                    // module so `Color:Red()` in the importer can resolve
+                    // at codegen time. The call is a no-op for
+                    // `taida-lang/*` and `npm:*` paths.
+                    if !import_stmt.path.starts_with("taida-lang/")
+                        && !import_stmt.path.starts_with("npm:")
+                    {
+                        self.absorb_cross_module_enum_defs(import_stmt);
+                    }
+
                     // stdlib モジュールの関数はランタイム関数にマッピング
                     // 定数は stdlib_constants にマッピング
                     // RCB-213: version is now passed through to resolve_import_path

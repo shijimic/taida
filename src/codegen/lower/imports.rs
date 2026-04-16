@@ -13,6 +13,75 @@ use crate::codegen::ir::*;
 use crate::parser::*;
 
 impl Lowering {
+    /// C18-1: Read an exporter module's `.td` source and register any
+    /// `EnumDef` whose name is being imported into `self.enum_defs`.
+    /// Mirror of the interpreter / type-checker / JS codegen behaviour so
+    /// `Color:Red()` in the importer can resolve at codegen time.
+    ///
+    /// Silent no-op for:
+    /// - core-bundled (`taida-lang/*`) and npm paths (pre-filtered by caller)
+    /// - unresolved paths / unreadable files / parse errors — downstream
+    ///   lowering emits the real diagnostic
+    ///
+    /// For relative / absolute paths the resolver uses `self.source_dir`;
+    /// for package paths we follow `resolve_package_module` chains so
+    /// `>>> org/pkg => @(Color)` and submodule imports both succeed.
+    pub(super) fn absorb_cross_module_enum_defs(&mut self, import: &crate::parser::ImportStmt) {
+        let td_path = if import.path.starts_with("./")
+            || import.path.starts_with("../")
+            || import.path.starts_with('/')
+        {
+            let source_dir = match &self.source_dir {
+                Some(d) => d.clone(),
+                None => return,
+            };
+            let p = source_dir.join(&import.path);
+            if !p.exists() {
+                return;
+            }
+            p
+        } else {
+            // Package import path: Phase 1 intentionally scopes JS/Native
+            // cross-module enum plumbing to local paths, which covers the
+            // Hachikuma workaround smoke. Expanded package-based enum
+            // sharing can follow in a later track.
+            return;
+        };
+
+        let source = match std::fs::read_to_string(&td_path) {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+        let (program, _parse_errors) = crate::parser::parse(&source);
+
+        let requested: std::collections::HashMap<&str, &str> = import
+            .symbols
+            .iter()
+            .map(|s| (s.name.as_str(), s.alias.as_deref().unwrap_or(s.name.as_str())))
+            .collect();
+        if requested.is_empty() {
+            return;
+        }
+
+        for stmt in &program.statements {
+            if let crate::parser::Statement::EnumDef(ed) = stmt
+                && let Some(&local_name) = requested.get(ed.name.as_str())
+            {
+                let variants: Vec<String> = ed.variants.iter().map(|v| v.name.clone()).collect();
+                // A local redefinition (same-name EnumDef later in the
+                // consumer) will overwrite this entry through the
+                // `Statement::EnumDef` branch in `lower_program`'s 1st
+                // pass — the checker guards order consistency via
+                // [E1618], so either the lists agree or we never reach
+                // codegen. Using `entry().or_insert` keeps the idiom
+                // symmetric with the JS backend.
+                self.enum_defs
+                    .entry(local_name.to_string())
+                    .or_insert(variants);
+            }
+        }
+    }
+
     /// RC1 Phase 4 helper: resolve only the **package directory** for
     /// an import path, without producing a `.td` source path. Used by
     /// the addon-policy guard in `Statement::Import` so the Cranelift

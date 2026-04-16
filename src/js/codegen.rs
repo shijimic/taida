@@ -326,6 +326,17 @@ impl JsCodegen {
                     }
                 }
             }
+            // C18-1: User module enum imports (`>>> ./m.td => @(Color)`).
+            // Mirror of the interpreter / type-checker behaviour so that
+            // `Color:Red()` in the importer resolves to its exporter-ordinal
+            // at codegen time. Pulls variant list from the exporter's .td
+            // source; silently no-ops if the path cannot be resolved.
+            if let Statement::Import(import) = stmt
+                && !import.path.starts_with("taida-lang/")
+                && !import.path.starts_with("npm:")
+            {
+                self.absorb_cross_module_enum_defs(import);
+            }
         }
 
         // Pre-pass: detect mutual recursion groups and mark functions for trampolining
@@ -766,6 +777,20 @@ impl JsCodegen {
                     "__taida_registerEnumDef('{}', [{}]);\n",
                     enum_def.name,
                     variants_js.join(", ")
+                ));
+                // C18-1: Emit a JS binding for the enum name so that
+                // `<<< @(Color)` can `export { Color }` and the importer
+                // can `import { Color }` without `Color is not defined`.
+                // The binding is never referenced by generated code
+                // (EnumVariant lowers to its ordinal literal); it only
+                // exists to satisfy ESM name resolution across the
+                // module boundary, mirroring the interpreter's
+                // `Value::BuchiPack([__type: EnumDef, __name: Color])`
+                // sentinel (eval.rs:398).
+                self.write_indent();
+                self.write(&format!(
+                    "const {} = {{ __type: 'EnumDef', __name: '{}' }};\n",
+                    enum_def.name, enum_def.name
                 ));
                 Ok(())
             }
@@ -1444,6 +1469,69 @@ impl JsCodegen {
             Some(td_path)
         } else {
             None
+        }
+    }
+
+    /// C18-1: For a user-module import (`>>> ./m.td => @(Color)`), read the
+    /// exporting module and register any `EnumDef` whose name is being
+    /// imported into `self.enum_defs`. The enum is registered under the
+    /// local alias if one is provided (`@(Color: Paint)`), matching the
+    /// interpreter and type-checker semantics.
+    ///
+    /// Silently no-ops if the path cannot be resolved or the file is
+    /// unreadable / unparseable — the downstream lowering will surface
+    /// the real diagnostic. This helper only enriches enum_defs.
+    fn absorb_cross_module_enum_defs(&mut self, import: &ImportStmt) {
+        // Only relative / absolute / package-root imports matter here.
+        // We don't try to follow package import chains for Phase 1; the
+        // relative-path case covers the Hachikuma workaround use-case.
+        let td_path = if import.path.starts_with("./")
+            || import.path.starts_with("../")
+            || import.path.starts_with('/')
+        {
+            match self.resolve_import_td_path(&import.path) {
+                Some(p) => p,
+                None => return,
+            }
+        } else {
+            // Package imports: defer to validate_import_symbols's resolver.
+            // Phase 1 intentionally limits JS/Native cross-module enum
+            // plumbing to local paths since that is the only pattern
+            // required by the Hachikuma workaround smoke. Deps-backed
+            // enums can use the full resolution path in a later phase.
+            return;
+        };
+
+        let source = match std::fs::read_to_string(&td_path) {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+        let (program, _parse_errors) = crate::parser::parse(&source);
+
+        let requested: std::collections::HashMap<&str, &str> = import
+            .symbols
+            .iter()
+            .map(|s| (s.name.as_str(), s.alias.as_deref().unwrap_or(s.name.as_str())))
+            .collect();
+        if requested.is_empty() {
+            return;
+        }
+
+        for stmt in &program.statements {
+            if let Statement::EnumDef(ed) = stmt
+                && let Some(&local_name) = requested.get(ed.name.as_str())
+            {
+                let variants: Vec<String> = ed.variants.iter().map(|v| v.name.clone()).collect();
+                // Importer local redefinition wins silently only when
+                // the variant lists match — the type checker has already
+                // emitted [E1618] for mismatches, so by the time we are
+                // here either (a) there is no local redef, or (b) they
+                // agree. Either way, recording the exporter's list is
+                // safe and matches the interpreter.
+                self.enum_defs
+                    .entry(local_name.to_string())
+                    .or_insert(variants);
+            }
         }
     }
 

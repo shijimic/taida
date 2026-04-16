@@ -3953,3 +3953,207 @@ stdout(idx.toString())
         errors
     );
 }
+
+// ───── C18-1: Enum cross-module type resolution ─────
+//
+// These tests pin the guarantees introduced by Phase 1:
+//
+// 1. `>>> ./m.td => @(Color)` registers `Color` in the importer's type
+//    registry so `Color:Red()` no longer emits [E1608].
+// 2. A variant-order mismatch between importer local redefinition and the
+//    exporting module is rejected with [E1618].
+// 3. E1608 is still emitted when an enum type is used without any import.
+// 4. Function import whose return type is an Enum (ROOT-5 / #6) works end
+//    to end.
+//
+// Each test writes a temp .td file, sets source_file on the checker so the
+// module resolver can find it, then runs `check_program`.
+
+struct C18TempDir {
+    path: std::path::PathBuf,
+}
+impl C18TempDir {
+    fn new(slot: &str) -> Self {
+        let base = std::env::temp_dir().join(format!(
+            "c18-checker-{}-{}-{}",
+            slot,
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&base).expect("create temp dir");
+        Self { path: base }
+    }
+    fn write(&self, name: &str, body: &str) -> std::path::PathBuf {
+        let p = self.path.join(name);
+        std::fs::write(&p, body).expect("write temp .td");
+        p
+    }
+}
+impl Drop for C18TempDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.path);
+    }
+}
+
+fn check_file(path: &std::path::Path) -> (TypeChecker, Vec<TypeError>) {
+    let source = std::fs::read_to_string(path).expect("read temp .td");
+    let (program, parse_errors) = crate::parser::parse(&source);
+    assert!(parse_errors.is_empty(), "Parse errors: {:?}", parse_errors);
+    let mut checker = TypeChecker::new();
+    checker.set_source_file(path);
+    checker.check_program(&program);
+    let errors = checker.errors.clone();
+    (checker, errors)
+}
+
+/// C18-1 happy path: `>>> ./m.td => @(Color)` followed by `Color:Red()`
+/// no longer triggers [E1608]. The imported enum is registered in the
+/// importer's type registry with the exporting module's variant order.
+#[test]
+fn test_c18_1_enum_cross_module_resolves() {
+    let dir = C18TempDir::new("hb");
+    dir.write(
+        "enum_mod.td",
+        "Enum => Color = :Red :Green :Blue\n<<< @(Color)\n",
+    );
+    let consumer = dir.write(
+        "enum_use.td",
+        ">>> ./enum_mod.td => @(Color)\nc <= Color:Red()\n",
+    );
+    let (checker, errors) = check_file(&consumer);
+    assert!(
+        !errors
+            .iter()
+            .any(|e| e.message.contains("[E1608]")),
+        "E1608 should not fire after C18-1, got: {:?}",
+        errors
+    );
+    assert!(
+        checker.registry.is_enum_type("Color"),
+        "Color must be registered after import"
+    );
+    assert_eq!(
+        checker.registry.get_enum_variants("Color"),
+        Some(vec![
+            "Red".to_string(),
+            "Green".to_string(),
+            "Blue".to_string()
+        ])
+    );
+}
+
+/// C18-1: `>>> ./m.td => @(Color: Paint)` aliases the enum under the local
+/// name, mirroring the interpreter behaviour.
+#[test]
+fn test_c18_1_enum_cross_module_alias() {
+    let dir = C18TempDir::new("alias");
+    dir.write(
+        "enum_mod.td",
+        "Enum => Color = :Red :Green :Blue\n<<< @(Color)\n",
+    );
+    let consumer = dir.write(
+        "enum_use.td",
+        ">>> ./enum_mod.td => @(Color: Paint)\np <= Paint:Green()\n",
+    );
+    let (checker, errors) = check_file(&consumer);
+    assert!(
+        !errors
+            .iter()
+            .any(|e| e.message.contains("[E1608]")),
+        "Aliased import should register Paint; got: {:?}",
+        errors
+    );
+    assert!(checker.registry.is_enum_type("Paint"));
+    assert!(!checker.registry.is_enum_type("Color"));
+}
+
+/// C18-1: Local redefinition whose variant order differs from the exporter
+/// is rejected with [E1618]. The match case is `test_c18_1_enum_cross_module_resolves`
+/// (implicitly: no local redefinition at all, so no mismatch).
+#[test]
+fn test_c18_1_enum_variant_order_mismatch_rejected_e1618() {
+    let dir = C18TempDir::new("mismatch");
+    dir.write(
+        "enum_mod.td",
+        "Enum => Color = :Red :Green :Blue\n<<< @(Color)\n",
+    );
+    let consumer = dir.write(
+        "enum_use.td",
+        ">>> ./enum_mod.td => @(Color)\n\
+         Enum => Color = :Red :Blue :Green\n\
+         c <= Color:Red()\n",
+    );
+    let (_checker, errors) = check_file(&consumer);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1618]")),
+        "Expected [E1618] variant order mismatch, got: {:?}",
+        errors
+    );
+}
+
+/// C18-1: Local redefinition with the **same** variant order is accepted
+/// (no [E1618]), because the order matches the source of truth. Users may
+/// keep local redefinitions during transition without silent bugs.
+#[test]
+fn test_c18_1_enum_variant_order_matching_accepted() {
+    let dir = C18TempDir::new("match");
+    dir.write(
+        "enum_mod.td",
+        "Enum => Color = :Red :Green :Blue\n<<< @(Color)\n",
+    );
+    let consumer = dir.write(
+        "enum_use.td",
+        ">>> ./enum_mod.td => @(Color)\n\
+         Enum => Color = :Red :Green :Blue\n\
+         c <= Color:Red()\n",
+    );
+    let (_checker, errors) = check_file(&consumer);
+    assert!(
+        !errors.iter().any(|e| e.message.contains("[E1618]")),
+        "Matching order should not trip [E1618], got: {:?}",
+        errors
+    );
+}
+
+/// C18-1: `[E1608]` still fires when the enum is used without any import.
+/// (Regression guard — Phase 1 must not silently accept unknown enums.)
+#[test]
+fn test_c18_1_unknown_enum_without_import_still_rejected() {
+    let (_checker, errors) = check("c <= Color:Red()");
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1608]")),
+        "E1608 must fire when Color is not imported, got: {:?}",
+        errors
+    );
+}
+
+/// C18-1 (#6): Function whose return type is an Enum imported from the
+/// same module round-trips cleanly. This pins that ROOT-5 (function
+/// boundary contract) disappears once ROOT-1 is fixed.
+#[test]
+fn test_c18_1_function_returning_imported_enum_is_usable() {
+    let dir = C18TempDir::new("fnret");
+    dir.write(
+        "enum_mod.td",
+        "Enum => Color = :Red :Green :Blue\n\
+         pickColor n =\n  | n == 0 |> Color:Red()\n  | n == 1 |> Color:Green()\n  | _ |> Color:Blue()\n=> :Color\n\
+         <<< @(Color, pickColor)\n",
+    );
+    let consumer = dir.write(
+        "enum_use.td",
+        ">>> ./enum_mod.td => @(Color, pickColor)\n\
+         c <= pickColor(1)\n\
+         ok <= c == Color:Green()\n",
+    );
+    let (_checker, errors) = check_file(&consumer);
+    assert!(
+        !errors
+            .iter()
+            .any(|e| e.message.contains("[E1608]") || e.message.contains("[E1605]")),
+        "Cross-module function with Enum return should type-check, got: {:?}",
+        errors
+    );
+}
