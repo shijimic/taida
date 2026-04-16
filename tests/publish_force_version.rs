@@ -78,6 +78,7 @@ fn force_version_overrides_auto_bump() {
     // Auto-detection would yield `a.1` (initial release). We override
     // to `a.5`.
     let out = Command::new(taida_bin())
+        .env("TAIDA_PUBLISH_SKIP_GH_AUTH", "1")
         .args(["publish", "--dry-run", "--force-version", "a.5"])
         .current_dir(&project)
         .output()
@@ -104,6 +105,7 @@ fn force_version_combined_with_label() {
     let project = setup_repo(&root, "demo-pkg");
 
     let out = Command::new(taida_bin())
+        .env("TAIDA_PUBLISH_SKIP_GH_AUTH", "1")
         .args([
             "publish",
             "--dry-run",
@@ -134,6 +136,7 @@ fn force_version_rejects_non_taida_version() {
     let project = setup_repo(&root, "demo-pkg");
 
     let out = Command::new(taida_bin())
+        .env("TAIDA_PUBLISH_SKIP_GH_AUTH", "1")
         .args(["publish", "--dry-run", "--force-version", "1.0.0"])
         .current_dir(&project)
         .output()
@@ -155,6 +158,7 @@ fn force_version_actually_pushes_the_forced_tag() {
     let project = setup_repo(&root, "demo-pkg");
 
     let out = Command::new(taida_bin())
+        .env("TAIDA_PUBLISH_SKIP_GH_AUTH", "1")
         .args(["publish", "--force-version", "a.7"])
         .current_dir(&project)
         .output()
@@ -185,6 +189,7 @@ fn missing_force_version_value_errors() {
     let project = setup_repo(&root, "demo-pkg");
 
     let out = Command::new(taida_bin())
+        .env("TAIDA_PUBLISH_SKIP_GH_AUTH", "1")
         .args(["publish", "--force-version"])
         .current_dir(&project)
         .output()

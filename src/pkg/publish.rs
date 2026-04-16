@@ -411,6 +411,17 @@ pub fn tag_exists_in_list(tags: &[String], tag: &str) -> bool {
 }
 
 pub fn check_gh_auth() -> Result<(), String> {
+    // Test-only hook. Integration tests exercise the real tag-push
+    // path through a local bare repo (see `publish_force_version.rs`
+    // / `publish_tag_push.rs` / `publish_retag.rs` /
+    // `publish_api_diff_skip.rs`) and do not want to depend on a
+    // logged-in GitHub CLI session — that dependency is a CI-side
+    // environment concern, not a behaviour under test here. The
+    // escape hatch is deliberately undocumented in user-facing CLI
+    // help because production users must keep `gh auth login`.
+    if std::env::var("TAIDA_PUBLISH_SKIP_GH_AUTH").ok().as_deref() == Some("1") {
+        return Ok(());
+    }
     let output = Command::new("gh").args(["auth", "status"]).output();
     match output {
         Ok(o) if o.status.success() => Ok(()),

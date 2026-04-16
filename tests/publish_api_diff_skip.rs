@@ -119,6 +119,7 @@ fn force_version_skips_api_diff_on_parse_error() {
     let project = setup_repo_with_unparseable_facade(&root, "demo-pkg");
 
     let out = Command::new(taida_bin())
+        .env("TAIDA_PUBLISH_SKIP_GH_AUTH", "1")
         .args(["publish", "--dry-run", "--force-version", "b.1"])
         .current_dir(&project)
         .output()
@@ -163,6 +164,7 @@ fn retag_skips_api_diff_on_parse_error() {
     // existing tag). This is the terminal-repo-style recovery path:
     // the tag already exists but the tag's tree cannot be snapshotted.
     let out = Command::new(taida_bin())
+        .env("TAIDA_PUBLISH_SKIP_GH_AUTH", "1")
         .args(["publish", "--dry-run", "--retag", "--force-version", "a.1"])
         .current_dir(&project)
         .output()
@@ -210,6 +212,7 @@ fn retag_alone_also_skips_api_diff() {
     run_git(&["tag", "-d", "a.2"], &project);
 
     let out = Command::new(taida_bin())
+        .env("TAIDA_PUBLISH_SKIP_GH_AUTH", "1")
         .args(["publish", "--dry-run", "--retag", "--force-version", "a.2"])
         .current_dir(&project)
         .output()

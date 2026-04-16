@@ -99,6 +99,7 @@ fn collision_without_retag_is_rejected() {
     // Use --force-version so plan_publish targets a.1 explicitly
     // (otherwise auto-bump would pick a.2 since a.1 is the prev tag).
     let out = Command::new(taida_bin())
+        .env("TAIDA_PUBLISH_SKIP_GH_AUTH", "1")
         .args(["publish", "--dry-run", "--force-version", "a.1"])
         .current_dir(&project)
         .output()
@@ -147,6 +148,7 @@ fn retag_replaces_existing_tag() {
     // Now retag at the new HEAD. Use --force-version to keep the tag name `a.1`
     // (otherwise auto-bump would pick a.2 since HEAD differs from the tagged tree).
     let out = Command::new(taida_bin())
+        .env("TAIDA_PUBLISH_SKIP_GH_AUTH", "1")
         .args(["publish", "--retag", "--force-version", "a.1"])
         .current_dir(&project)
         .output()
@@ -177,6 +179,7 @@ fn retag_dry_run_reports_retag_flag() {
     run_git(&["tag", "-d", "a.1"], &project);
 
     let out = Command::new(taida_bin())
+        .env("TAIDA_PUBLISH_SKIP_GH_AUTH", "1")
         .args(["publish", "--dry-run", "--retag", "--force-version", "a.1"])
         .current_dir(&project)
         .output()

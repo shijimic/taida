@@ -115,6 +115,7 @@ fn dry_run_prints_plan_and_makes_no_git_changes() {
     let tags_before = git_output(&["tag", "--list"], &project);
 
     let output = Command::new(taida_bin())
+        .env("TAIDA_PUBLISH_SKIP_GH_AUTH", "1")
         .args(["publish", "--dry-run"])
         .current_dir(&project)
         .output()
@@ -165,6 +166,7 @@ fn real_publish_pushes_tag_and_exits() {
     let head_before = git_output(&["rev-parse", "HEAD"], &project);
 
     let output = Command::new(taida_bin())
+        .env("TAIDA_PUBLISH_SKIP_GH_AUTH", "1")
         .args(["publish"])
         .current_dir(&project)
         .output()
@@ -225,6 +227,7 @@ fn real_publish_does_not_push_main() {
     let remote_main_before = git_output(&["rev-parse", "refs/heads/main"], &bare);
 
     let output = Command::new(taida_bin())
+        .env("TAIDA_PUBLISH_SKIP_GH_AUTH", "1")
         .args(["publish"])
         .current_dir(&project)
         .output()
@@ -254,6 +257,7 @@ fn removed_cli_flags_are_rejected_with_migration_hint() {
 
     // --target rust-addon
     let out = Command::new(taida_bin())
+        .env("TAIDA_PUBLISH_SKIP_GH_AUTH", "1")
         .args(["publish", "--target", "rust-addon"])
         .current_dir(&project)
         .output()
@@ -268,6 +272,7 @@ fn removed_cli_flags_are_rejected_with_migration_hint() {
 
     // --dry-run=plan
     let out = Command::new(taida_bin())
+        .env("TAIDA_PUBLISH_SKIP_GH_AUTH", "1")
         .args(["publish", "--dry-run=plan"])
         .current_dir(&project)
         .output()
@@ -282,6 +287,7 @@ fn removed_cli_flags_are_rejected_with_migration_hint() {
 
     // --dry-run=build
     let out = Command::new(taida_bin())
+        .env("TAIDA_PUBLISH_SKIP_GH_AUTH", "1")
         .args(["publish", "--dry-run=build"])
         .current_dir(&project)
         .output()
@@ -300,6 +306,7 @@ fn dirty_worktree_is_rejected() {
     fs::write(project.join("main.td"), "stdout(\"dirty\")\n").unwrap();
 
     let output = Command::new(taida_bin())
+        .env("TAIDA_PUBLISH_SKIP_GH_AUTH", "1")
         .args(["publish", "--dry-run"])
         .current_dir(&project)
         .output()
@@ -326,6 +333,7 @@ fn second_publish_uses_api_diff_for_next_version() {
 
     // Round 1: initial publish.
     let out = Command::new(taida_bin())
+        .env("TAIDA_PUBLISH_SKIP_GH_AUTH", "1")
         .args(["publish"])
         .current_dir(&project)
         .output()
@@ -347,6 +355,7 @@ fn second_publish_uses_api_diff_for_next_version() {
     run_git(&["push", "origin", "main"], &project);
 
     let out = Command::new(taida_bin())
+        .env("TAIDA_PUBLISH_SKIP_GH_AUTH", "1")
         .args(["publish", "--dry-run"])
         .current_dir(&project)
         .output()
@@ -371,6 +380,7 @@ fn breaking_change_bumps_generation() {
 
     // Round 1.
     let out = Command::new(taida_bin())
+        .env("TAIDA_PUBLISH_SKIP_GH_AUTH", "1")
         .args(["publish"])
         .current_dir(&project)
         .output()
@@ -388,6 +398,7 @@ fn breaking_change_bumps_generation() {
     run_git(&["push", "origin", "main"], &project);
 
     let out = Command::new(taida_bin())
+        .env("TAIDA_PUBLISH_SKIP_GH_AUTH", "1")
         .args(["publish", "--dry-run"])
         .current_dir(&project)
         .output()
