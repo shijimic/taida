@@ -125,15 +125,17 @@ impl Lowering {
     /// `@(state <= HiveState:Running())` marks `state` as an Enum field
     /// for jsonEncode variant-name output.
     ///
-    /// Only handles the direct cases that come up in practice:
+    /// Handled cases:
     /// - `Enum:Variant()` literal
-    /// - identifier whose type we already know (via pack_vars / user_funcs)
-    /// - function call to a user-defined function whose return type is
-    ///   a known Enum name
+    /// - Identifier whose let-binding we previously recorded as Enum-typed
+    ///   (either by literal initializer, by type annotation `x: HiveState <= ...`,
+    ///   or by being copied from another known Enum variable).
+    /// - Function call to a user-defined function whose declared return
+    ///   type is a known Enum name.
     ///
-    /// Deeper inference (e.g. through pipelines, condition branches) is
-    /// intentionally skipped; the returned ordinal still encodes
-    /// correctly, only the wire-format downgrades silently to Int.
+    /// Deeper inference (through pipelines, condition branches, HOF
+    /// callbacks) is intentionally skipped; the returned ordinal still
+    /// encodes correctly, only the wire-format downgrades to Int.
     pub(crate) fn expr_enum_type_name(&self, expr: &Expr) -> Option<String> {
         match expr {
             Expr::EnumVariant(enum_name, _, _) => {
@@ -143,13 +145,10 @@ impl Lowering {
                     None
                 }
             }
+            Expr::Ident(name, _) => self.enum_vars.get(name).cloned(),
             Expr::FuncCall(callee, _, _) => {
                 if let Expr::Ident(name, _) = callee.as_ref() {
-                    // A user-defined function annotated `=> :ColorEnum`
-                    // shows up here via `func_return_type_names`. We don't
-                    // currently track this separately; return None and let
-                    // the runtime fall back to ordinal emission.
-                    let _ = name;
+                    return self.enum_returning_funcs.get(name).cloned();
                 }
                 None
             }

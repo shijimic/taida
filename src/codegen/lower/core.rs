@@ -103,6 +103,8 @@ impl Lowering {
             field_names: std::collections::HashSet::new(),
             field_type_tags: std::collections::HashMap::new(),
             field_enum_descriptors: std::collections::HashMap::new(),
+            enum_vars: std::collections::HashMap::new(),
+            enum_returning_funcs: std::collections::HashMap::new(),
             mold_defs: std::collections::HashMap::new(),
             enum_defs: std::collections::HashMap::new(),
             type_parents: std::collections::HashMap::new(),

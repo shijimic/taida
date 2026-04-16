@@ -41,6 +41,16 @@ impl Lowering {
                             crate::parser::TypeExpr::List(_) => {
                                 self.list_returning_funcs.insert(func_def.name.clone());
                             }
+                            // C18-2: Functions declared `=> :SomeEnum` should
+                            // propagate the enum type to call sites so that
+                            // `@(state <= pickColor(n))` tags `state` as an
+                            // Enum field for jsonEncode variant-name output.
+                            crate::parser::TypeExpr::Named(n)
+                                if self.enum_defs.contains_key(n) =>
+                            {
+                                self.enum_returning_funcs
+                                    .insert(func_def.name.clone(), n.clone());
+                            }
                             _ => {}
                         }
                     }
@@ -1412,6 +1422,24 @@ impl Lowering {
                 // retain-on-store: List を返す式の結果を追跡
                 if self.expr_is_list(&assign.value) {
                     self.list_vars.insert(assign.target.clone());
+                }
+                // C18-2: Enum-variant literal / known Enum var / annotation で
+                // 束縛された変数を enum_vars に記録する。
+                // `state <= HiveState:Policy()` や `state: HiveState <= ...`
+                // を後段で `@(state <= state)` 構築時に field 型として認識する。
+                if let Some(enum_name) = self.expr_enum_type_name(&assign.value) {
+                    self.enum_vars
+                        .insert(assign.target.clone(), enum_name);
+                } else if let Some(crate::parser::TypeExpr::Named(tn)) =
+                    assign.type_annotation.as_ref()
+                    && self.enum_defs.contains_key(tn)
+                {
+                    self.enum_vars.insert(assign.target.clone(), tn.clone());
+                } else if let Expr::Ident(src_name, _) = &assign.value
+                    && let Some(src_enum) = self.enum_vars.get(src_name).cloned()
+                {
+                    self.enum_vars
+                        .insert(assign.target.clone(), src_enum);
                 }
                 // QF-34: MoldInst の Lax 内部型を追跡（unmold 時の型推定用）
                 if let Expr::MoldInst(mold_name, _, _, _) = &assign.value {
