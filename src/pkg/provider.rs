@@ -588,20 +588,31 @@ impl StoreProvider {
             }
         };
 
-        let remote_sha = if self.no_remote_check {
-            None
-        } else {
-            match resolve_version_to_sha(org, name, version) {
-                Ok(sha) => sha,
-                Err(e) => {
-                    // Malformed response (distinct from "no network"):
-                    // warn but continue as if offline.
-                    eprintln!(
-                        "  warning: could not verify {}/{}@{} staleness: {}",
-                        org, name, version, e
-                    );
-                    None
-                }
+        // `--no-remote-check` short-circuit: the user has told us not to
+        // reach out. When a sidecar is present the skip is silent (the
+        // user asked for this); when it is absent we still print the
+        // strong warning so the user knows provenance is unverified.
+        if self.no_remote_check {
+            if sidecar.is_none() {
+                eprintln!(
+                    "  unknown provenance: {}/{}@{} (sidecar missing; --no-remote-check). \
+                     Re-run with --force-refresh when online.",
+                    org, name, version
+                );
+            }
+            return Ok(None);
+        }
+
+        let remote_sha = match resolve_version_to_sha(org, name, version) {
+            Ok(sha) => sha,
+            Err(e) => {
+                // Malformed response (distinct from "no network"):
+                // warn but continue as if offline.
+                eprintln!(
+                    "  warning: could not verify {}/{}@{} staleness: {}",
+                    org, name, version, e
+                );
+                None
             }
         };
 
