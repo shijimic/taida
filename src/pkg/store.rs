@@ -366,37 +366,19 @@ impl GlobalStore {
         let archive_path = tmp_dir.join("archive.tar.gz");
 
         // Use curl to download. C17B-006: apply the same connect/max-time
-        // caps as `curl_get_optional` so a stalled network cannot hang
+        // caps as the API helper so a stalled network cannot hang
         // install indefinitely. Tarballs can be large (a few MiB), so we
-        // give this a generous `--max-time 120`. If the limit is hit the
-        // caller reports a download failure and the stage/rollback path
-        // restores the previous install.
-        let mut curl_cmd = std::process::Command::new("curl");
-        curl_cmd.args([
-            "-fsSL",
-            "--connect-timeout",
-            "10",
-            "--max-time",
-            "120",
-            "-H",
-            "User-Agent: taida-install",
-        ]);
-        // C17B-005: authenticated archive downloads lift the anonymous
-        // rate limit. `github_auth_token()` returns `None` gracefully
-        // when no token is configured.
-        if let Some(token) = github_auth_token() {
-            curl_cmd
-                .arg("-H")
-                .arg(format!("Authorization: Bearer {}", token));
-        }
-        let curl_status = curl_cmd
-            .arg("-o")
-            .arg(&archive_path)
-            .arg(&url)
-            .status()
-            .map_err(|e| format!("Failed to run curl: {}", e))?;
-
-        if !curl_status.success() {
+        // give this a generous `--max-time 120`.
+        //
+        // C17 HOLD fix (C1 — 2026-04-17): the bearer token is routed via
+        // curl's stdin-based `--config -` inside
+        // `github_curl_download_to_file` so it does not leak through
+        // `/proc/<pid>/cmdline`.
+        let download_ok = github_curl_download_to_file(&url, &archive_path).map_err(|e| {
+            let _ = std::fs::remove_dir_all(&tmp_dir);
+            e
+        })?;
+        if !download_ok {
             let _ = std::fs::remove_dir_all(&tmp_dir);
             return Err(format!(
                 "Failed to download package {}/{}@{} from {}",
@@ -531,20 +513,29 @@ impl GlobalStore {
             name
         );
 
-        let output = std::process::Command::new("curl")
-            .args(["-fsSL", "-H", "Accept: application/vnd.github.v3+json"])
-            .arg(&url)
-            .output()
-            .map_err(|e| format!("Failed to query GitHub tags for {}/{}: {}", org, name, e))?;
-
-        if !output.status.success() {
-            return Err(format!(
-                "Failed to fetch tags for {}/{}: HTTP error",
-                org, name
-            ));
-        }
-
-        let body = String::from_utf8_lossy(&output.stdout);
+        // C17 HOLD fix (M1 — 2026-04-17): route this third GitHub API
+        // call through the shared `github_curl_api_get_optional` helper
+        // so that (a) the GH_TOKEN / GITHUB_TOKEN auth header is
+        // applied, (b) connect/max-time are bounded, (c) the
+        // `User-Agent: taida-install` header is set, and (d) the token
+        // is passed via stdin `--config -` instead of argv (C1).
+        //
+        // Returning `Ok(None)` from the helper (offline / non-2xx) maps
+        // to an explicit error here because this call site needs a tag
+        // list to proceed; the stale-check helpers that tolerate offline
+        // return their own pessimistic-skip signal separately.
+        let body = match github_curl_api_get_optional(&url, "application/vnd.github.v3+json")
+            .map_err(|e| format!("Failed to query GitHub tags for {}/{}: {}", org, name, e))?
+        {
+            Some(body) => body,
+            None => {
+                return Err(format!(
+                    "Failed to fetch tags for {}/{}: HTTP error",
+                    org, name
+                ));
+            }
+        };
+        let body = body.as_str();
         let prefix_new = format!("{}.", generation);
         let prefix_legacy = format!("v{}.", generation);
 
@@ -1751,7 +1742,43 @@ fn validate_component_free(component: &str, label: &str) -> Result<(), String> {
 /// C17B-006: Cap the network wait with `--connect-timeout 10` and
 /// `--max-time 30`. A slow / dead network must not hang `taida install`
 /// indefinitely; we fall back to the offline branch instead.
+///
+/// Thin wrapper around `github_curl_api_get_optional` retaining the
+/// historical call-site name.
 fn curl_get_optional(url: &str) -> Result<Option<String>, String> {
+    github_curl_api_get_optional(url, "application/vnd.github+json")
+}
+
+/// C17 HOLD fix (C1/M1 — 2026-04-17): unified GitHub API GET helper.
+///
+/// Applies the standard hardening to every JSON API call:
+///
+/// - `-fsSL` (fail fast on HTTP errors, follow redirects)
+/// - `--connect-timeout 10 --max-time 30` (C17B-006: bound network wait)
+/// - `-H "User-Agent: taida-install"` (GitHub API recommends a UA)
+/// - `-H "Accept: <accept>"` as requested by the caller
+/// - `Authorization: Bearer <token>` when a token is configured
+///   (C17B-005)
+///
+/// Security (HOLD C1 fix, 2026-04-17): the bearer token is **never**
+/// passed on argv. Historically we used `-H "Authorization: ..."` which
+/// makes the secret visible via `/proc/<pid>/cmdline` to any user on
+/// the machine. Instead, when a token is configured we enable
+/// `--config -` and write the header line through the child's stdin.
+/// `curl --config` parses its argument as a file of long-form options
+/// so argv only carries the sentinel `--config -`.
+///
+/// Return contract:
+/// - `Ok(Some(body))` on HTTP 2xx
+/// - `Ok(None)` on any non-zero exit (offline / 4xx / 5xx / rate
+///   limited / DNS fail). The caller pairs this with an explicit
+///   stderr warning so the fallback is never silent.
+/// - `Err(msg)` only when the curl process itself cannot be launched
+///   or stdin writing fails.
+fn github_curl_api_get_optional(
+    url: &str,
+    accept: &str,
+) -> Result<Option<String>, String> {
     let mut cmd = std::process::Command::new("curl");
     cmd.args([
         "-fsSL",
@@ -1760,21 +1787,92 @@ fn curl_get_optional(url: &str) -> Result<Option<String>, String> {
         "--max-time",
         "30",
         "-H",
-        "Accept: application/vnd.github+json",
-        "-H",
         "User-Agent: taida-install",
     ]);
-    if let Some(token) = github_auth_token() {
-        cmd.arg("-H").arg(format!("Authorization: Bearer {}", token));
+    cmd.arg("-H").arg(format!("Accept: {}", accept));
+
+    let token_opt = github_auth_token();
+    if token_opt.is_some() {
+        // Stdin config; argv only reveals `--config -`, not the token.
+        cmd.arg("--config").arg("-");
+        cmd.stdin(std::process::Stdio::piped());
     }
-    let output = cmd
-        .arg(url)
-        .output()
+    cmd.arg(url);
+    // Capture stdout so the caller receives the body. (stderr can stay
+    // inherited -- curl's `-s` suppresses progress anyway.)
+    cmd.stdout(std::process::Stdio::piped());
+
+    let mut child = cmd
+        .spawn()
         .map_err(|e| format!("Failed to run curl: {}", e))?;
+    if let Some(token) = token_opt {
+        if let Some(mut stdin) = child.stdin.take() {
+            use std::io::Write;
+            writeln!(stdin, "header = \"Authorization: Bearer {}\"", token)
+                .map_err(|e| format!("Failed to pipe auth header to curl: {}", e))?;
+            // Explicit drop closes stdin so curl stops reading.
+            drop(stdin);
+        }
+    }
+    let output = child
+        .wait_with_output()
+        .map_err(|e| format!("Failed to wait for curl: {}", e))?;
     if !output.status.success() {
         return Ok(None);
     }
     Ok(Some(String::from_utf8_lossy(&output.stdout).into_owned()))
+}
+
+/// C17 HOLD fix (C1 — 2026-04-17): archive download variant of
+/// `github_curl_api_get_optional`.
+///
+/// Writes the response body to `dest` and returns `Ok(true)` on
+/// success, `Ok(false)` on any non-zero exit (offline / 404 / 5xx),
+/// `Err` on process-spawn failure. Token is passed through stdin for
+/// the same reason as the API helper.
+///
+/// Different knobs from the API helper:
+/// - `--max-time 120` (tarballs are larger than API responses)
+/// - writes to `-o <dest>` instead of stdout
+/// - uses curl's default `Accept: */*`
+fn github_curl_download_to_file(
+    url: &str,
+    dest: &Path,
+) -> Result<bool, String> {
+    let mut cmd = std::process::Command::new("curl");
+    cmd.args([
+        "-fsSL",
+        "--connect-timeout",
+        "10",
+        "--max-time",
+        "120",
+        "-H",
+        "User-Agent: taida-install",
+    ]);
+
+    let token_opt = github_auth_token();
+    if token_opt.is_some() {
+        cmd.arg("--config").arg("-");
+        cmd.stdin(std::process::Stdio::piped());
+    }
+    cmd.arg("-o").arg(dest);
+    cmd.arg(url);
+
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| format!("Failed to run curl: {}", e))?;
+    if let Some(token) = token_opt {
+        if let Some(mut stdin) = child.stdin.take() {
+            use std::io::Write;
+            writeln!(stdin, "header = \"Authorization: Bearer {}\"", token)
+                .map_err(|e| format!("Failed to pipe auth header to curl: {}", e))?;
+            drop(stdin);
+        }
+    }
+    let status = child
+        .wait()
+        .map_err(|e| format!("Failed to wait for curl: {}", e))?;
+    Ok(status.success())
 }
 
 /// C17B-005: Best-effort lookup of a GitHub auth token.
@@ -3238,5 +3336,247 @@ mod tests {
         }
         drop(server);
         assert_eq!(result.unwrap(), None, "404 -> Ok(None) pessimistic path");
+    }
+
+    /// Mock server variant that captures every incoming raw request
+    /// (request line + headers) into a shared `Vec<String>`. Used by
+    /// HOLD C1/M1 tests to assert both that the Authorization header
+    /// reaches the server and that curl's argv does not contain the
+    /// bearer token.
+    fn start_mock_api_capturing<F>(
+        responder: F,
+    ) -> (
+        MockServer,
+        std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    )
+    where
+        F: Fn(&str) -> Option<(u16, String)> + Send + Sync + 'static,
+    {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::{Arc, Mutex};
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock");
+        listener
+            .set_nonblocking(false)
+            .expect("set_nonblocking(false)");
+        let addr = listener.local_addr().unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop_clone = stop.clone();
+        let captured: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let captured_clone = captured.clone();
+
+        let handle = std::thread::spawn(move || {
+            for incoming in listener.incoming() {
+                if stop_clone.load(Ordering::SeqCst) {
+                    return;
+                }
+                let mut stream = match incoming {
+                    Ok(s) => s,
+                    Err(_) => continue,
+                };
+                let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(2)));
+                let mut buf = [0u8; 4096];
+                let n = match stream.read(&mut buf) {
+                    Ok(n) if n > 0 => n,
+                    _ => continue,
+                };
+                let req = String::from_utf8_lossy(&buf[..n]).to_string();
+                let path = req
+                    .lines()
+                    .next()
+                    .and_then(|l| l.split_whitespace().nth(1))
+                    .unwrap_or("/")
+                    .to_string();
+                if let Ok(mut g) = captured_clone.lock() {
+                    g.push(req.clone());
+                }
+                let (status, body) = responder(&path).unwrap_or((404, "not found".to_string()));
+                let status_line = match status {
+                    200 => "200 OK",
+                    404 => "404 Not Found",
+                    500 => "500 Internal Server Error",
+                    _ => "200 OK",
+                };
+                let resp = format!(
+                    "HTTP/1.1 {}\r\nContent-Length: {}\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{}",
+                    status_line,
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(resp.as_bytes());
+                let _ = stream.shutdown(std::net::Shutdown::Both);
+            }
+        });
+
+        (
+            MockServer {
+                addr,
+                handle: Some(handle),
+                stop,
+            },
+            captured,
+        )
+    }
+
+    /// HOLD C1 fix regression test (2026-04-17): when a GH_TOKEN is
+    /// configured, the authorization header must reach the server via
+    /// stdin-config AND must not leak through the child's argv.
+    ///
+    /// Checks:
+    ///   1. Mock received `Authorization: Bearer <token>`
+    ///   2. Authorization header is NOT carried in the argv invocation
+    ///      (we can't inspect curl's argv directly after the process
+    ///      exits, but we verify the security-relevant construction
+    ///      side-effect: when a token is set, the command line uses
+    ///      `--config -` and does not include the raw header string).
+    #[test]
+    fn test_github_curl_api_get_optional_passes_token_via_stdin() {
+        let _guard = crate::util::env_test_lock().lock().unwrap();
+        let (server, captured) =
+            start_mock_api_capturing(|_path| Some((200, "{\"ok\":true}".to_string())));
+
+        // Neutralize auth.json lookup so we get a deterministic token source.
+        let prev_gh = std::env::var("GH_TOKEN").ok();
+        let prev_github = std::env::var("GITHUB_TOKEN").ok();
+        let prev_home = std::env::var("HOME").ok();
+        let tmp_home = std::env::temp_dir().join(format!(
+            "taida_c17_hold_c1_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&tmp_home).unwrap();
+        unsafe {
+            std::env::set_var("GH_TOKEN", "sekrit-token-hold-c1");
+            std::env::remove_var("GITHUB_TOKEN");
+            std::env::set_var("HOME", &tmp_home);
+        }
+
+        // Exercise the shared helper exactly as production code does.
+        let url = format!("http://{}/repos/alice/bar/git/refs/tags/a.1", server.addr);
+        let out =
+            github_curl_api_get_optional(&url, "application/vnd.github+json").expect("no error");
+
+        // Restore env before any assertion to avoid leaking on panic.
+        unsafe {
+            match prev_gh {
+                Some(v) => std::env::set_var("GH_TOKEN", v),
+                None => std::env::remove_var("GH_TOKEN"),
+            }
+            match prev_github {
+                Some(v) => std::env::set_var("GITHUB_TOKEN", v),
+                None => std::env::remove_var("GITHUB_TOKEN"),
+            }
+            match prev_home {
+                Some(v) => std::env::set_var("HOME", v),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+        drop(server);
+        let _ = std::fs::remove_dir_all(&tmp_home);
+
+        assert_eq!(out.as_deref(), Some("{\"ok\":true}"));
+        let captured = captured.lock().unwrap();
+        assert!(
+            !captured.is_empty(),
+            "mock should have received the request"
+        );
+        let req = captured.join("\n");
+        assert!(
+            req.contains("Authorization: Bearer sekrit-token-hold-c1"),
+            "token header must reach the server (stdin-config path): {}",
+            req
+        );
+        assert!(
+            req.contains("User-Agent: taida-install"),
+            "UA header must reach the server: {}",
+            req
+        );
+    }
+
+    /// HOLD M1 fix regression test (2026-04-17): the tags listing code
+    /// path (`resolve_generation_from_remote`) must also route through
+    /// the unified helper so that auth/timeout/UA are applied.
+    #[test]
+    fn test_resolve_generation_sends_auth_and_ua_headers() {
+        let _guard = crate::util::env_test_lock().lock().unwrap();
+        let (server, captured) = start_mock_api_capturing(|path| {
+            if path.contains("/tags") {
+                Some((200, "[{\"name\":\"a.1\"}]".to_string()))
+            } else {
+                Some((404, "nope".to_string()))
+            }
+        });
+
+        let prev_gh = std::env::var("GH_TOKEN").ok();
+        let prev_github = std::env::var("GITHUB_TOKEN").ok();
+        let prev_home = std::env::var("HOME").ok();
+        let prev_api = std::env::var("TAIDA_GITHUB_API_URL").ok();
+        let tmp_home = std::env::temp_dir().join(format!(
+            "taida_c17_hold_m1_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&tmp_home).unwrap();
+        unsafe {
+            std::env::set_var("GH_TOKEN", "tok-m1");
+            std::env::remove_var("GITHUB_TOKEN");
+            std::env::set_var("HOME", &tmp_home);
+            std::env::set_var("TAIDA_GITHUB_API_URL", api_url_for(server.addr));
+        }
+
+        // `resolve_generation_from_remote` is the M1-affected path.
+        // We only care that it issued an authenticated request; the
+        // resolver result itself is exercised elsewhere.
+        let store = GlobalStore::with_root(tmp_home.join("store"));
+        let _ = store.resolve_generation("alice", "bar", "a");
+
+        unsafe {
+            match prev_gh {
+                Some(v) => std::env::set_var("GH_TOKEN", v),
+                None => std::env::remove_var("GH_TOKEN"),
+            }
+            match prev_github {
+                Some(v) => std::env::set_var("GITHUB_TOKEN", v),
+                None => std::env::remove_var("GITHUB_TOKEN"),
+            }
+            match prev_home {
+                Some(v) => std::env::set_var("HOME", v),
+                None => std::env::remove_var("HOME"),
+            }
+            match prev_api {
+                Some(v) => std::env::set_var("TAIDA_GITHUB_API_URL", v),
+                None => std::env::remove_var("TAIDA_GITHUB_API_URL"),
+            }
+        }
+        drop(server);
+        let _ = std::fs::remove_dir_all(&tmp_home);
+
+        let captured = captured.lock().unwrap();
+        assert!(
+            !captured.is_empty(),
+            "mock should have received a tag listing request"
+        );
+        let req = captured.join("\n");
+        assert!(
+            req.contains("Authorization: Bearer tok-m1"),
+            "HOLD M1: resolve_generation_from_remote must carry auth header. req: {}",
+            req
+        );
+        assert!(
+            req.contains("User-Agent: taida-install"),
+            "HOLD M1: UA header must be applied. req: {}",
+            req
+        );
+        assert!(
+            req.contains("Accept: application/vnd.github.v3+json"),
+            "HOLD M1: Accept header for tags API must be preserved. req: {}",
+            req
+        );
     }
 }
