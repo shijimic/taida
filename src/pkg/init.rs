@@ -17,7 +17,7 @@
 //!
 //! C14-3: the `release.yml` template is sourced from
 //! `crates/addon-rs/templates/release.yml.template` and kept
-//! structurally symmetric with `shijimic/taida`'s core release
+//! structurally symmetric with `taida-lang/taida`'s core release
 //! workflow (prepare -> gate -> build -> publish, `github-actions[bot]`
 //! as release author, 5-target build matrix). Authoring tweaks go in
 //! the template file; this module only substitutes
@@ -186,7 +186,7 @@ fn init_rust_addon(dir: &Path, name: &str) -> Result<Vec<String>, String> {
     // CI workflow for tag-push-triggered release. The static template
     // lives in `crates/addon-rs/templates/release.yml.template` and is
     // kept structurally symmetric with the Taida core release workflow
-    // (`.github/workflows/release.yml` in `shijimic/taida`).
+    // (`.github/workflows/release.yml` in `taida-lang/taida`).
     //
     // Template variables:
     //   {{LIBRARY_STEM}}  → Rust crate name (underscored), used to
@@ -371,7 +371,7 @@ Echo <= echo
 /// The template lives as a sibling file so it can be edited / diffed
 /// as plain YAML, and so its structure remains symmetric with the
 /// Taida core release workflow at
-/// `.github/workflows/release.yml` in `shijimic/taida`.
+/// `.github/workflows/release.yml` in `taida-lang/taida`.
 ///
 /// Variables substituted at scaffold time:
 ///   * `{{LIBRARY_STEM}}` — underscored crate / library stem.

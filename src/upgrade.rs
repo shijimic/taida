@@ -466,8 +466,15 @@ pub fn self_replace(new_binary: &[u8]) -> Result<(), String> {
     Ok(())
 }
 
-/// The GitHub owner and repo for taida.
-const TAIDA_OWNER: &str = "shijimic";
+/// Canonical GitHub owner/repo for Taida releases.
+///
+/// `taida-lang/taida` is the source of truth. `shijimic/taida` is a
+/// development fork and must NOT be used as a release source —
+/// mirroring releases across the two caused `@c.14.rc3` to be invisible
+/// to the C13 CLI's `taida upgrade` path. The fix is to point the
+/// CLI at the canonical org and keep every external reference
+/// (`install.sh`, docs, scaffolded `release.yml`) consistent.
+const TAIDA_OWNER: &str = "taida-lang";
 const TAIDA_REPO: &str = "taida";
 
 /// Upgrade configuration parsed from CLI args.
@@ -590,6 +597,27 @@ pub fn run(config: UpgradeConfig) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── Canonical release source (security) ──
+
+    /// SECURITY: the upgrade source MUST point at the canonical
+    /// `taida-lang/taida` organization. Before this was enforced by a
+    /// test, the constant was pinned to a personal fork (`shijimic`)
+    /// which made the entire upgrade pipeline a single-account supply-
+    /// chain target — if that account were compromised, sold, renamed,
+    /// or deleted, every `taida upgrade` on the planet would either
+    /// receive attacker-controlled binaries or silently break. The
+    /// constants live alongside this test precisely so that any future
+    /// edit hits the compiler and requires an explicit review, not a
+    /// merge-by-mistake.
+    #[test]
+    fn canonical_release_source_is_taida_lang_org() {
+        assert_eq!(
+            TAIDA_OWNER, "taida-lang",
+            "upgrade source must be the canonical org, not a personal fork"
+        );
+        assert_eq!(TAIDA_REPO, "taida");
+    }
 
     // ── TaidaVersion::parse ──
 
