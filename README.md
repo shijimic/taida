@@ -96,7 +96,7 @@ taida publish                             # Tag push — CI builds & releases
 taida install                             # Download prebuilds
 ```
 
-Under @c.14.rc1 `taida publish` is tag-push-only. The addon's own
+Under @c.14.rc3 `taida publish` is tag-push-only. The addon's own
 CI (`.github/workflows/release.yml`, scaffolded by `taida init`)
 builds the 5-platform cdylib matrix and creates the GitHub Release
 as `github-actions[bot]`. See
@@ -145,7 +145,7 @@ pipeline and migration notes for pre-C14 addons.
 
 The canonical public release identifier is the Taida version, not the Rust package semver.
 
-- Current release: `@c.14.rc1`
-- `Cargo.toml` version `2.1.0`: semver metadata for Rust tooling
+- Current release: `@c.14.rc3`
+- `Cargo.toml` version `2.1.1`: semver metadata for Rust tooling
 
-In release notes and public communication, `@c.14.rc1` is the primary version. `2.1.0` is supplementary.
+In release notes and public communication, `@c.14.rc3` is the primary version. `2.1.1` is supplementary.
