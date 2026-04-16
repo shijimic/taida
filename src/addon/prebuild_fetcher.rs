@@ -245,6 +245,43 @@ fn sha256_sidecar(cache_dir: &Path) -> PathBuf {
     cache_dir.join(".manifest-sha256")
 }
 
+// ── SHA-256 placeholder detection (C14B-012) ─────────────────
+
+/// Returns `true` when `value` is an all-zero placeholder digest of the
+/// shape `"sha256:0{64}"` (case-insensitive). `taida init --target
+/// rust-addon` seeds `native/addon.toml [library.prebuild.targets]` with
+/// this placeholder so the scaffolded package type-checks before the
+/// first CI release has computed real digests, and an addon author who
+/// forgets to move the handback row after first release leaves the
+/// placeholder frozen in the tag's tree forever (the tarball is
+/// immutable — see [C14B-012]).
+///
+/// The install resolver uses this check to route to the
+/// `addon.lock.toml` release-asset fallback when an addon.toml row is
+/// still a placeholder, rather than failing with an unfixable integrity
+/// mismatch against the CI-computed digest. Without the placeholder
+/// detection, initial releases that ship a placeholder `addon.toml`
+/// become permanently unusable to consumers.
+///
+/// Rejects:
+/// - values without a `sha256:` prefix
+/// - digests whose hex body is not 64 chars long
+/// - digests containing any non-zero hex digit
+///
+/// Matches:
+/// - `"sha256:0000000000000000000000000000000000000000000000000000000000000000"`
+///   (terminal `@a.1` shape)
+/// - case-insensitive: both lowercase and uppercase hex zeros.
+pub fn is_placeholder_sha(value: &str) -> bool {
+    let Some(hex) = value.strip_prefix("sha256:") else {
+        return false;
+    };
+    if hex.len() != 64 {
+        return false;
+    }
+    hex.chars().all(|c| c == '0')
+}
+
 // ── SHA-256 verification of an existing file ───────────────────
 
 fn verify_sha256(path: &Path, expected: &str) -> Result<(), FetchError> {
@@ -831,6 +868,59 @@ mod tests {
         assert_eq!(calls.first().unwrap().0, 0);
         assert_eq!(calls.last().unwrap().0, data.len() as u64);
         assert_eq!(calls.last().unwrap().1, Some(data.len() as u64));
+    }
+
+    // ── C14B-012: placeholder SHA detection ──────────────────
+
+    #[test]
+    fn placeholder_sha_matches_all_zero_digest() {
+        // Canonical shape emitted by `taida init --target rust-addon`
+        // and persisted by terminal `@a.1`. Must be detected so the
+        // resolver can reroute to addon.lock.toml.
+        assert!(is_placeholder_sha(
+            "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+        ));
+    }
+
+    #[test]
+    fn placeholder_sha_rejects_non_zero_digest() {
+        // A real CI-computed digest must never be treated as a
+        // placeholder, otherwise we would silently skip integrity
+        // verification for legitimately-signed assets.
+        assert!(!is_placeholder_sha(
+            "sha256:d9c093feaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        ));
+        // A single non-zero digit anywhere is enough to disqualify.
+        assert!(!is_placeholder_sha(
+            "sha256:0000000000000000000000000000000000000000000000000000000000000001"
+        ));
+    }
+
+    #[test]
+    fn placeholder_sha_rejects_missing_prefix() {
+        // Without the `sha256:` prefix we cannot distinguish this
+        // from e.g. a bare hex blob in a future signature scheme.
+        assert!(!is_placeholder_sha(
+            "0000000000000000000000000000000000000000000000000000000000000000"
+        ));
+    }
+
+    #[test]
+    fn placeholder_sha_rejects_wrong_length() {
+        // SHA-256 hex is exactly 64 chars; short or long values are
+        // structurally invalid and should not trigger fallback.
+        assert!(!is_placeholder_sha("sha256:0"));
+        assert!(!is_placeholder_sha(&format!("sha256:{}", "0".repeat(63))));
+        assert!(!is_placeholder_sha(&format!("sha256:{}", "0".repeat(65))));
+    }
+
+    #[test]
+    fn placeholder_sha_rejects_empty_and_unrelated() {
+        assert!(!is_placeholder_sha(""));
+        assert!(!is_placeholder_sha("sha256:"));
+        // Other digest algorithms are structurally disjoint — not our
+        // problem (but must not be accepted as a placeholder either).
+        assert!(!is_placeholder_sha(&format!("md5:{}", "0".repeat(64))));
     }
 
     #[test]

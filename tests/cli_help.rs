@@ -108,7 +108,7 @@ fn test_subcommand_help_prints_usage_and_exits_zero() {
         (&["update", "--help"][..], "taida update"),
         (
             &["publish", "--help"][..],
-            "taida publish [--label LABEL] [--dry-run[=MODE]] [--target rust-addon]",
+            "taida publish [--label LABEL] [--force-version VERSION] [--retag] [--dry-run]",
         ),
         (
             &["doc", "--help"][..],

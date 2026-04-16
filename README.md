@@ -90,12 +90,18 @@ cargo test
 Taida supports Rust-backed native addons via `cdylib` crates:
 
 ```bash
-taida init --target rust-addon my-addon   # Scaffold
-taida publish --target rust-addon         # Build and release
+taida init --target rust-addon my-addon   # Scaffold (incl. release.yml)
+taida publish --dry-run                   # Preview next version
+taida publish                             # Tag push — CI builds & releases
 taida install                             # Download prebuilds
 ```
 
-See [Creating Addons](docs/guide/13_creating_addons.md) for details.
+Under @c.14.rc1 `taida publish` is tag-push-only. The addon's own
+CI (`.github/workflows/release.yml`, scaffolded by `taida init`)
+builds the 5-platform cdylib matrix and creates the GitHub Release
+as `github-actions[bot]`. See
+[Creating Addons](docs/guide/13_creating_addons.md) for the full
+pipeline and migration notes for pre-C14 addons.
 
 ## Documentation
 
@@ -139,7 +145,7 @@ See [Creating Addons](docs/guide/13_creating_addons.md) for details.
 
 The canonical public release identifier is the Taida version, not the Rust package semver.
 
-- Current release: `@c.13.rc3`
-- `Cargo.toml` version `2.0.0`: semver metadata for Rust tooling
+- Current release: `@c.14.rc1`
+- `Cargo.toml` version `2.1.0`: semver metadata for Rust tooling
 
-In release notes and public communication, `@c.13.rc3` is the primary version. `2.0.0` is supplementary.
+In release notes and public communication, `@c.14.rc1` is the primary version. `2.1.0` is supplementary.

@@ -1,5 +1,163 @@
 # Changelog
 
+## @c.14.rc1
+
+### Breaking changes
+
+- **`taida publish` tag-push-only redesign**: `taida publish` is now
+  a minimal CLI that only validates the manifest identity, computes
+  the next version from an API diff, creates a local git tag, and
+  pushes that tag to `origin`. It no longer runs `cargo build`,
+  computes SHA-256 digests, writes `addon.lock.toml`, rewrites
+  `packages.tdm` or `native/addon.toml`, commits, pushes to `main`,
+  or calls `gh release create`. All of those responsibilities moved
+  to CI (`.github/workflows/release.yml`). See
+  `docs/reference/cli.md#taida-publish` for the new surface and
+  `docs/guide/13_creating_addons.md#8-migration-from-pre-c14-addons`
+  for the step-by-step migration.
+- **Release author semantics unified**: addon releases are now
+  created exclusively by `github-actions[bot]` via the addon's own
+  `release.yml`. Pre-C14 releases created by the CLI user (human
+  account) no longer occur. This matches the core Taida release
+  workflow.
+- **`packages.tdm` qualified identity required**: `taida publish`
+  now rejects bare `<<<@<version>` (no `owner/name`). The
+  directory-name fallback that older surfaces permitted is gone —
+  every publishable package must declare
+  `<<<@<version> <owner>/<name>`. The `taida-lang/terminal` PR #2
+  migration commit (`db9637d`) is the reference.
+- **`addon.toml` placeholder SHA + lockfile fallback**: `taida
+  install` now detects the canonical placeholder SHA
+  (`sha256:` + 64 zeros) in `[library.prebuild.targets]` at a tag's
+  `native/addon.toml` and falls back to the release-asset
+  `addon.lock.toml` for the authoritative hash. This lets addons
+  ship a lockfile-only design on `main` while still publishing
+  verified cdylibs for tags whose `addon.toml` left the placeholder
+  value in place.
+
+### New CLI surface
+
+```
+taida publish [--label LABEL] [--force-version VERSION] [--retag] [--dry-run]
+```
+
+- `--label LABEL` attaches a pre-release label to the resolved next
+  version (`a.4` + `--label rc` → `a.4.rc`).
+- `--force-version VERSION` overrides the auto-detected version
+  entirely. Skips the API diff snapshot.
+- `--retag` force-replaces an already-pushed tag. Skips the API diff
+  snapshot.
+- `--dry-run` prints the publish plan without touching git.
+
+Automatic version bump (Phase 2a — symbol-level export set diff):
+
+| API change                                  | Bump                               |
+|---------------------------------------------|------------------------------------|
+| Initial release (no previous tag)           | `a.1` (fixed)                      |
+| Symbol removed or renamed                   | Generation (`a.3` → `b.1`)         |
+| Symbol added or internal-only               | Number (`a.3` → `a.4`)             |
+
+### New workflow template
+
+`crates/addon-rs/templates/release.yml.template` is the canonical
+C14 addon release workflow. It is symmetric with the core Taida
+`.github/workflows/release.yml` on all load-bearing axes (4-job
+`prepare → gate → build → publish` structure, `github.token`-based
+`gh release create`, Taida tag regex, 5-platform build matrix).
+
+- `taida init --target rust-addon` scaffolds the template with two
+  placeholders (`{{LIBRARY_STEM}}`, `{{CRATE_DIR}}`).
+- Existing addons must migrate manually. See
+  `docs/guide/13_creating_addons.md#8-migration-from-pre-c14-addons`.
+
+### Reference release
+
+`taida-lang/terminal@a.1` is the first addon to ship through the
+C14 pipeline and serves as the ground-truth reference implementation:
+
+- Release author: `github-actions[bot]`
+- 8 assets: 5 × `libtaida_lang_terminal-<triple>.{so,dylib,dll}`,
+  `addon.lock.toml`, `prebuild-targets.toml.txt`, `SHA256SUMS`
+- CI run: https://github.com/taida-lang/terminal/actions/runs/24495250052
+  (all 8 jobs green, ~90s end-to-end)
+- Release page: https://github.com/taida-lang/terminal/releases/tag/a.1
+
+### Migration (summary)
+
+For existing addon authors:
+
+1. Add qualified identity to `packages.tdm`:
+   `<<<@<version>` → `<<<@<version> <owner>/<name>`.
+2. Replace `.github/workflows/prebuild.yml` with the C14
+   `release.yml` template (4 jobs, 5-platform matrix, CI-owned
+   release creation).
+3. Remove obsolete CLI flags from scripts:
+   - `taida publish --target rust-addon` → `taida publish`
+   - `taida publish --dry-run=plan` → `taida publish --dry-run`
+   - `taida publish --dry-run=build` → removed (no local build)
+   - `TAIDA_PUBLISH_SKIP_RELEASE=1` → removed (CLI never creates
+     releases)
+4. Accept that release author is now `github-actions[bot]` in all
+   downstream automation / documentation.
+5. (Optional) Re-tag existing releases with
+   `taida publish --force-version <existing-version> --retag` to
+   re-publish them under the new author / asset layout.
+
+Full step-by-step migration: `docs/guide/13_creating_addons.md`
+§8. Migration blockers resolved in this cycle: `TMB-013` (identity
+on terminal), `TMB-014` (release author on terminal), plus `C14B-001`
+through `C14B-006`, `C14B-011`, `C14B-012` (taida-core side).
+
+### Internal
+
+- `src/pkg/publish.rs`: 2,762 → 807 lines. Deleted:
+  `prepare_publish`, `PublishRollback`, `rewrite_export_version`,
+  `rewrite_prebuild_url_if_needed`, `build_addon_artifacts`,
+  `compute_cdylib_sha256`, `create_github_release`,
+  `git_commit_tag_push`, `check_dirty_allowlist`,
+  `compute_publish_integrity`, `proposals_url`,
+  `proposals_repo`. Added: `PublishPlan`, `plan_publish`,
+  `render_plan`, `tag_and_push`, `validate_manifest_identity`,
+  `require_identity_matches_remote`, `check_gh_auth`,
+  `bump_number`, `bump_generation`, `attach_label`,
+  `next_version_from_diff`, `latest_taida_tag`, `DiffSkipReason`.
+- `src/pkg/api_diff.rs`: new module. Reuses the existing Taida
+  parser (`crate::parser::parse`) to snapshot export symbols from
+  `taida/*.td` at HEAD and at a tag's tree. `ApiDiff::{Initial,
+  None, Additive, Breaking}` classifies the set diff. Phases 2b
+  (function signatures), 2c (type pack fields), 2d (`addon.toml`
+  arity) are deferred to @c.14.rc2+.
+- `src/addon/prebuild_fetcher.rs::is_placeholder_sha` — detects the
+  canonical placeholder SHA (`sha256:` + 64 zeros) so the resolver
+  can route to lockfile fallback deterministically.
+- `src/pkg/resolver.rs::ShaSource` / `choose_sha_source` — pure
+  decision table between `AddonToml`, `LockfileFallback`, and
+  `NoPrebuild`, pinned by 5 unit tests.
+- `crates/addon-rs/templates/release.yml.template` — new 4-job
+  template, structural symmetry with core pinned by
+  `tests/init_release_workflow_symmetry.rs`.
+- `src/main.rs::run_publish` simplified from ~500 lines to ~140
+  lines.
+- Deleted tests (no longer reflect the real CLI):
+  `tests/publish_cli.rs`, `tests/publish_rust_addon.rs`,
+  `tests/publish_install_roundtrip.rs` (~1,492 lines total).
+- New tests: `tests/publish_tag_push.rs` (7),
+  `tests/publish_identity_validation.rs` (4),
+  `tests/publish_force_version.rs` (5),
+  `tests/publish_retag.rs` (3),
+  `tests/publish_api_diff_skip.rs` (3),
+  `tests/api_diff.rs` (10),
+  `tests/init_release_workflow_symmetry.rs` (5).
+
+### Tests
+
+- lib unit: 2,382 / 2,382 green
+- publish integration: 22 / 22 green (force_version 5, retag 3,
+  tag_push 7, identity_validation 4, api_diff_skip 3)
+- api_diff integration: 10 / 10 green
+- init workflow symmetry: 5 / 5 green
+- Red tests: 0
+
 ## @c.13.rc3
 
 ### Language changes

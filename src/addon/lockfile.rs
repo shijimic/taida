@@ -29,8 +29,9 @@
 //! * The presence of the file is the **publish marker**. No other
 //!   top-level keys are accepted in v1.
 //! * `[targets]` keys are host triples, values are the exact
-//!   `"sha256:<64 lowercase hex>"` strings produced by
-//!   [`crate::pkg::publish::compute_cdylib_sha256`].
+//!   `"sha256:<64 lowercase hex>"` strings produced by CI during the
+//!   release workflow (C14 tag-only publish delegates SHA computation
+//!   to the addon `release.yml`; the CLI never hashes local cdylibs).
 //! * Future fields (signatures, timestamps, version-pin) are reserved
 //!   for v2 and SHOULD be added as new sections rather than by bending
 //!   the `[targets]` schema.
@@ -91,8 +92,8 @@ impl AddonLockfile {
     /// Insert or overwrite a per-host SHA-256 entry.
     ///
     /// The triple is stored verbatim; validation should happen at the
-    /// call site (the parser validates on read, and
-    /// [`compute_cdylib_sha256`] validates on write).
+    /// call site (the parser validates on read; CI is responsible for
+    /// producing the canonical `"sha256:<hex>"` format on write).
     pub fn set_target(&mut self, host_triple: impl Into<String>, sha: impl Into<String>) {
         self.targets.insert(host_triple.into(), sha.into());
     }

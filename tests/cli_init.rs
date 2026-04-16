@@ -273,15 +273,19 @@ fn test_init_rust_addon_no_name_uses_cwd() {
     let _ = fs::remove_dir_all(&parent);
 }
 
-// ── Test 7: CI workflow template is generated for addon ─────────
+// ── Test 7: C14 release.yml workflow template is generated ──────
+//
+// Under C14, `taida init --target rust-addon` scaffolds the
+// tag-push-only release workflow that is structurally symmetric
+// with the Taida core workflow (prepare -> gate -> build -> publish).
 
 #[test]
-fn test_init_rust_addon_ci_workflow_exists() {
-    let root = unique_temp_dir("addon_ci");
-    let project_dir = root.join("ci-pkg");
+fn test_init_rust_addon_release_yml_exists() {
+    let root = unique_temp_dir("addon_rel");
+    let project_dir = root.join("rel-pkg");
 
     let output = Command::new(taida_bin())
-        .args(["init", "--target", "rust-addon", "ci-pkg"])
+        .args(["init", "--target", "rust-addon", "rel-pkg"])
         .current_dir(&root)
         .output()
         .expect("taida init should succeed");
@@ -301,43 +305,87 @@ fn test_init_rust_addon_ci_workflow_exists() {
 
     let content = fs::read_to_string(&workflow_path).unwrap();
 
-    // Must be valid UTF-8 and non-empty.
     assert!(!content.is_empty(), "release.yml must not be empty");
 
-    // Placeholders must be resolved (no raw {LIBRARY_STEM} or
-    // {PACKAGE_NAME} in the output).
+    // C14-3: template variables must be substituted (no raw
+    // `{{LIBRARY_STEM}}` / `{{CRATE_DIR}}` placeholders).
     assert!(
-        !content.contains("{LIBRARY_STEM}"),
-        "raw {{LIBRARY_STEM}} placeholder must be replaced"
+        !content.contains("{{LIBRARY_STEM}}"),
+        "raw {{{{LIBRARY_STEM}}}} placeholder must be substituted"
     );
     assert!(
-        !content.contains("{PACKAGE_NAME}"),
-        "raw {{PACKAGE_NAME}} placeholder must be replaced"
-    );
-
-    // The resolved library stem (ci_pkg) must appear.
-    assert!(
-        content.contains("ci_pkg"),
-        "workflow must contain resolved library stem 'ci_pkg'"
+        !content.contains("{{CRATE_DIR}}"),
+        "raw {{{{CRATE_DIR}}}} placeholder must be substituted"
     );
 
-    // Must have the Taida tag trigger, not semver.
-    assert!(content.contains("'*.*'"), "missing '*.*' tag trigger");
-
-    // Must have the four matrix targets.
+    // The resolved library stem (rel_pkg — hyphen → underscore).
     assert!(
-        content.contains("x86_64-unknown-linux-gnu"),
-        "missing linux target"
+        content.contains("LIBRARY_STEM: rel_pkg"),
+        "workflow must bake LIBRARY_STEM = 'rel_pkg' into env"
     );
     assert!(
-        content.contains("aarch64-apple-darwin"),
-        "missing macOS ARM target"
+        content.contains("CRATE_DIR: ."),
+        "workflow must bake CRATE_DIR = '.' into env"
     );
 
-    // Must reference addon.lock.toml (lockfile job).
+    // Taida version tag regex — not semver v*, not the legacy *.*.
+    assert!(
+        content.contains(r#""[a-z].[0-9]*""#),
+        "one-letter generation tag pattern missing"
+    );
+    assert!(
+        content.contains(r#""[a-z][a-z].[0-9]*""#),
+        "two-letter generation tag pattern missing"
+    );
+    assert!(
+        !content.contains("'*.*'"),
+        "legacy '*.*' wildcard pattern must be removed"
+    );
+    assert!(
+        !content.contains("'v*'"),
+        "semver v* prefix must never appear"
+    );
+
+    // 4-job core contract.
+    for job_header in ["  prepare:", "  gate:", "  build:", "  publish:"] {
+        assert!(
+            content.contains(job_header),
+            "workflow must declare job header '{job_header}'"
+        );
+    }
+
+    // All 5 matrix targets including aarch64-linux (cross).
+    for triple in [
+        "x86_64-unknown-linux-gnu",
+        "aarch64-unknown-linux-gnu",
+        "x86_64-apple-darwin",
+        "aarch64-apple-darwin",
+        "x86_64-pc-windows-msvc",
+    ] {
+        assert!(
+            content.contains(triple),
+            "build matrix must include '{triple}'"
+        );
+    }
+
+    // Publish must reference addon.lock.toml, prebuild-targets.toml.txt,
+    // SHA256SUMS, and use github.token (release author =
+    // github-actions[bot]).
     assert!(
         content.contains("addon.lock.toml"),
         "workflow must reference addon.lock.toml"
+    );
+    assert!(
+        content.contains("prebuild-targets.toml.txt"),
+        "workflow must reference prebuild-targets.toml.txt"
+    );
+    assert!(
+        content.contains("SHA256SUMS"),
+        "workflow must emit SHA256SUMS"
+    );
+    assert!(
+        content.contains("GH_TOKEN: ${{ github.token }}"),
+        "workflow must use github.token so release author = github-actions[bot]"
     );
 
     let _ = fs::remove_dir_all(&root);

@@ -537,6 +537,58 @@ enum PrebuildFailure {
     UnsupportedTarget(String),
 }
 
+/// SHA-source decision for a single `(addon, host)` pair.
+///
+/// Exposed so unit tests can assert the decision table without spinning
+/// up a release download or a real package tarball.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ShaSource {
+    /// Use the SHA already present in `addon.toml`'s
+    /// `[library.prebuild.targets]` — it is a real, non-placeholder
+    /// digest for our host triple.
+    AddonToml,
+    /// Consult `addon.lock.toml` from the release asset. Either:
+    /// - `addon.toml` has no row for our host triple, or
+    /// - `addon.toml`'s row is a `sha256:0{64}` placeholder (C14B-012).
+    LockfileFallback,
+    /// Addon declares no prebuild at all — hard `UnsupportedTarget`
+    /// error, no fallback eligible.
+    NoPrebuild,
+}
+
+/// Decide which digest source to trust for a prebuild fetch.
+///
+/// See [`ShaSource`] for the outcomes. The input is deliberately
+/// minimal — just the row that `addon.toml` carries (if any) and
+/// whether the manifest declares a prebuild URL template — so the
+/// decision can be unit-tested without threading the whole
+/// `AddonManifest` / `HostTarget` / resolver context in.
+pub(crate) fn choose_sha_source(
+    addon_toml_entry: Option<&str>,
+    has_prebuild_url: bool,
+) -> ShaSource {
+    match addon_toml_entry {
+        Some(sha) if crate::addon::prebuild_fetcher::is_placeholder_sha(sha) => {
+            // C14B-012: placeholder row cannot be trusted. Requires
+            // the manifest to at least declare a prebuild URL, since
+            // the lockfile asset only exists when a release shipped.
+            if has_prebuild_url {
+                ShaSource::LockfileFallback
+            } else {
+                ShaSource::NoPrebuild
+            }
+        }
+        Some(_) => ShaSource::AddonToml,
+        None => {
+            if has_prebuild_url {
+                ShaSource::LockfileFallback
+            } else {
+                ShaSource::NoPrebuild
+            }
+        }
+    }
+}
+
 /// Attempt to fetch a prebuild for the given package.
 ///
 /// Returns `Ok((path, expected_sha256))` with the cached binary path and the
@@ -552,25 +604,74 @@ fn try_fetch_prebuild(
     force_refresh: bool,
 ) -> Result<(PathBuf, String), PrebuildFailure> {
     // Check if the host target is supported by this addon.
-    let sha256_for_target = addon_manifest.prebuild.targets.get(host.as_triple());
-    let expected_sha256: String;
-    match sha256_for_target {
-        Some(s) => {
-            expected_sha256 = s.clone();
+    //
+    // C14B-012: `taida init --target rust-addon` seeds
+    // `[library.prebuild.targets]` with `sha256:0{64}` placeholders so
+    // the scaffolded package type-checks before the first CI release
+    // computes real digests. Those placeholders live at the tag-time
+    // commit forever (the tarball fetched by install is immutable),
+    // so treating them as "real SHAs" leads to a permanent integrity
+    // mismatch. `choose_sha_source` routes placeholder entries to the
+    // `addon.lock.toml` release-asset fallback the same way as
+    // "target absent".
+    let addon_toml_entry = addon_manifest.prebuild.targets.get(host.as_triple());
+    let source = choose_sha_source(
+        addon_toml_entry.map(String::as_str),
+        addon_manifest.prebuild.has_prebuild(),
+    );
+    let must_use_lock_fallback = matches!(source, ShaSource::LockfileFallback)
+        && addon_toml_entry
+            .map(|s| crate::addon::prebuild_fetcher::is_placeholder_sha(s))
+            .unwrap_or(false);
+
+    let expected_sha256: String = match source {
+        ShaSource::AddonToml => {
+            // Happy path: addon.toml carries a real, non-placeholder
+            // SHA for our host triple. No lockfile fetch needed.
+            addon_toml_entry
+                .expect("AddonToml implies Some entry")
+                .clone()
         }
-        None if addon_manifest.prebuild.has_prebuild() => {
-            // RC2.6 addon.lock.toml fallback: targets not in addon.toml,
-            // download addon.lock.toml from the GitHub Release asset.
+        ShaSource::NoPrebuild => {
+            // addon.toml carries no prebuild config at all and there's
+            // nothing to consult — the addon simply does not ship a
+            // prebuild for any platform.
+            return Err(PrebuildFailure::UnsupportedTarget(format!(
+                "addon '{}' is not available for your platform\n\
+                 \x20 host target:    {}",
+                addon_manifest.package,
+                host.as_triple(),
+            )));
+        }
+        ShaSource::LockfileFallback => {
+            // RC2.6 addon.lock.toml fallback (extended by C14B-012 to
+            // cover placeholder SHA-256 rows): download
+            // `addon.lock.toml` from the GitHub Release asset and use
+            // it as the authoritative SHA source. The lockfile is
+            // CI-generated at release time, so its rows match the
+            // actual cdylib uploads byte-for-byte.
             let lockfile_text = match crate::addon::prebuild_fetcher::fetch_release_lockfile(
                 &pkg.name,
                 &pkg.version,
             ) {
                 Ok(text) => text,
                 Err(e) => {
-                    return Err(PrebuildFailure::Unavailable(format!(
-                        "addon '{}' prebuild lockfile fetch failed: {}",
-                        addon_manifest.package, e
-                    )));
+                    // If we got here solely because of a placeholder, the
+                    // error message should mention the placeholder gap so
+                    // the addon author knows to upload `addon.lock.toml`.
+                    let context = if must_use_lock_fallback {
+                        format!(
+                            "addon '{}' ships a placeholder sha256 in addon.toml at this tag; \
+                             addon.lock.toml fallback is required but could not be fetched: {}",
+                            addon_manifest.package, e
+                        )
+                    } else {
+                        format!(
+                            "addon '{}' prebuild lockfile fetch failed: {}",
+                            addon_manifest.package, e
+                        )
+                    };
+                    return Err(PrebuildFailure::Unavailable(context));
                 }
             };
             let addon_lockfile = match crate::addon::lockfile::parse_lockfile_str(
@@ -586,21 +687,29 @@ fn try_fetch_prebuild(
                 }
             };
             match addon_lockfile.targets.get(host.as_triple()) {
-                Some(sha) => {
-                    expected_sha256 = sha.clone();
-                }
+                Some(sha) => sha.clone(),
                 None => {
                     // RC2.7B-009: target not registered in addon.lock.toml
-                    // -> UnsupportedTarget (never eligible for fallback)
+                    // -> UnsupportedTarget (never eligible for fallback).
+                    // Extended wording: if we got here via a placeholder
+                    // in addon.toml, the message points both at the
+                    // placeholder and the missing lockfile row.
                     let available: Vec<&str> =
                         addon_lockfile.targets.keys().map(String::as_str).collect();
+                    let hint = if must_use_lock_fallback {
+                        "addon.toml row is a placeholder sha256 and addon.lock.toml has no row for your platform"
+                    } else {
+                        "addon.toml does not list your platform and addon.lock.toml has no row for it"
+                    };
                     return Err(PrebuildFailure::UnsupportedTarget(format!(
                         "addon '{}' prebuild is not available for your platform\n\
                          \x20 host target:    {}\n\
+                         \x20 reason:         {}\n\
                          \x20 available targets in addon.lock.toml:\n\
                          \x20   - {}",
                         addon_manifest.package,
                         host.as_triple(),
+                        hint,
                         if available.is_empty() {
                             "(none)".to_string()
                         } else {
@@ -610,17 +719,7 @@ fn try_fetch_prebuild(
                 }
             }
         }
-        None => {
-            // RC2.7B-009: target not registered in addon.toml and no
-            // addon.lock.toml to consult -> UnsupportedTarget (hard error)
-            return Err(PrebuildFailure::UnsupportedTarget(format!(
-                "addon '{}' is not available for your platform\n\
-                 \x20 host target:    {}",
-                addon_manifest.package,
-                host.as_triple(),
-            )));
-        }
-    }
+    };
 
     // Strip sha256: prefix
     let expected_sha256 = expected_sha256
@@ -1082,6 +1181,59 @@ pub fn resolve_package_module_versioned(
 mod tests {
     use super::*;
     use std::fs;
+
+    // ── C14B-012: choose_sha_source decision table ─────────────
+
+    const PLACEHOLDER: &str =
+        "sha256:0000000000000000000000000000000000000000000000000000000000000000";
+    const REAL_SHA: &str =
+        "sha256:d9c093fe0123456789abcdef0123456789abcdef0123456789abcdef01234567";
+
+    #[test]
+    fn choose_sha_source_prefers_addon_toml_when_real_sha_present() {
+        // Happy path: addon.toml has a real, CI-computed digest for
+        // our host. No need to consult the lockfile asset.
+        assert_eq!(
+            choose_sha_source(Some(REAL_SHA), true),
+            ShaSource::AddonToml
+        );
+    }
+
+    #[test]
+    fn choose_sha_source_routes_placeholder_to_lockfile() {
+        // C14B-012 core contract: a `sha256:0{64}` placeholder in
+        // addon.toml must NOT be trusted. We route to the lockfile
+        // asset, which carries the real CI-computed digests.
+        assert_eq!(
+            choose_sha_source(Some(PLACEHOLDER), true),
+            ShaSource::LockfileFallback
+        );
+    }
+
+    #[test]
+    fn choose_sha_source_routes_missing_target_to_lockfile_when_prebuild_declared() {
+        // No row for this host triple in addon.toml, but the manifest
+        // declares a prebuild URL — so a lockfile asset is expected
+        // and consulted (pre-existing RC2.6 behaviour).
+        assert_eq!(choose_sha_source(None, true), ShaSource::LockfileFallback);
+    }
+
+    #[test]
+    fn choose_sha_source_no_prebuild_when_placeholder_and_no_url() {
+        // Edge case: a placeholder is present but the manifest does
+        // not declare a prebuild URL. There's no lockfile asset to
+        // consult, so the addon simply does not ship for any platform.
+        assert_eq!(
+            choose_sha_source(Some(PLACEHOLDER), false),
+            ShaSource::NoPrebuild
+        );
+    }
+
+    #[test]
+    fn choose_sha_source_no_prebuild_when_missing_and_no_url() {
+        // No row, no URL — no prebuild. Hard error downstream.
+        assert_eq!(choose_sha_source(None, false), ShaSource::NoPrebuild);
+    }
 
     #[test]
     fn test_resolve_deps_local_path() {

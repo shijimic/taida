@@ -314,27 +314,102 @@ taida update [--allow-local-addon-build]
 ## `taida publish`
 
 ```bash
-taida publish [--label LABEL] [--dry-run[=MODE]] [--target rust-addon]
+taida publish [--label LABEL] [--force-version VERSION] [--retag] [--dry-run]
 ```
 
 | オプション | 短縮 | 説明 |
 |---|---|---|
-| `--label <LABEL>` | - | publish version の末尾にラベルを付与します（例: `@a.4.rc`） |
-| `--dry-run` | - | 実際の変更を行わず、計画だけ表示します（`--dry-run=plan` と同等） |
-| `--dry-run=plan` | - | 計画を表示して終了します |
-| `--dry-run=build` | - | cargo build + lockfile まで実行し、git/release はスキップします |
-| `--target rust-addon` | - | Rust cdylib アドオンとしてビルド・リリースします |
+| `--label <LABEL>` | - | 次 version の末尾に pre-release ラベルを付与します（例: `a.4.rc`） |
+| `--force-version <VERSION>` | - | 自動判定を無視して指定 version を使います（エスケープハッチ） |
+| `--retag` | - | 既存 tag を強制上書きして re-push します |
+| `--dry-run` | - | 実際の変更を行わず、計画だけ表示します |
 
-挙動:
-- `taida auth login` 済みであることを要求します（author 名の解決に使用）。
-- working tree が clean であることを要求します（未コミットの変更がある場合はエラー）。
-- `packages.tdm` と git tag (`<version>`) から次の publish version を決定します。
-- `packages.tdm` の `<<<@version owner/name` 行から package identity を解決します。`owner/name` が省略された場合はディレクトリ名にフォールバックします。
-- `packages.tdm` の `<<<@...` を決定した exact version に更新します。
-- git commit + tag (`<version>`) + push origin を実行します。
-- 成功後、`taida-community/proposals` への登録用 URL を表示します。package identity がある場合はそのまま使用し、二重 prefix は発生しません。
+### C14 tag-only 設計
 
-`packages.tdm` の canonical surface (@b.11.rc3 以降):
+`taida publish` は **tag push のみ** を行う簡潔な CLI です。以下の 3 ステップだけを実行し、即座に終了します:
+
+1. `packages.tdm` の identity (`<<<@version owner/name`) を検証
+2. 前回 release tag と HEAD の公開 API 差分から次 version を自動決定（または `--force-version` で明示）
+3. `git tag <version>` + `git push origin <tag>`
+
+CLI は以下の一切を行いません:
+
+- `cargo build` / `cargo test` 等の local ビルド
+- `addon.lock.toml` や `prebuild-targets.toml.txt` の生成
+- `native/addon.toml` / `packages.tdm` の書き換え
+- `git commit` / `git push origin main` / その他 `main` への書き込み
+- `gh release create` や release asset の upload
+
+release 作成の責務は addon 側 CI (`.github/workflows/release.yml`) が排他的に持ちます。Release author は `github-actions[bot]` に統一され、CLI 実行者個人のアカウントで release が作られることはありません。本体 (`shijimic/taida`) の `release.yml` と対称な 4-job (Prepare / Gate / Build / Publish) 構造を持ち、5 platform matrix で cdylib を build して 8 件の asset (5 cdylib + `addon.lock.toml` + `prebuild-targets.toml.txt` + `SHA256SUMS`) を attach します。
+
+`taida publish` は tag push 完了後に即 exit します。CI 完了を待つことはありません。
+
+### 事前条件
+
+以下が揃っていない場合は publish を reject します:
+
+- working tree が clean（未コミット変更なし）
+- `origin` remote が GitHub URL を指す
+- `packages.tdm` の identity が qualified `owner/name` 形式
+- `gh auth status` が active session を返す
+- `--retag` なしで `origin/<next-version>` tag が未存在
+
+### 自動 version bump ルール
+
+前回 release tag と HEAD の `taida/*.td` export シンボル集合を比較し、次 version を決定します（`src/pkg/api_diff.rs`）:
+
+| 差分 | 次 version | 例 |
+|---|---|---|
+| 前回 tag なし（初回） | `a.1` 固定 | なし → `a.1` |
+| シンボル削除 or 改名 | 世代繰り上げ | `a.3` → `b.1` |
+| シンボル追加のみ | 番号繰り上げ | `a.3` → `a.4` |
+| 内部変更のみ（exports 不変） | 番号繰り上げ | `a.3` → `a.4` |
+
+`--force-version` または `--retag` を指定した場合、API diff snapshot は完全に bypass されます（parser 側の `E1616` 等が pre-C13 package で擬陽性を起こすのを避けるため）。この場合 plan 出力には `API diff: skipped (force-version)` / `API diff: skipped (retag)` が表示されます。
+
+### `--label` の挙動
+
+`--label rc` を渡すと、自動判定（または `--force-version` で明示）された version の末尾にラベルが付与されます:
+
+- 自動判定で `a.4` が決定 + `--label rc` → `a.4.rc`
+- `--force-version a.5` + `--label rc` → `a.5.rc`
+
+### `--retag` の挙動
+
+`--retag` は、既に push されている tag を force-replace します。通常 publish は tag 衝突を検知すると reject しますが、release CI の設定ミスや workflow ファイルの差し替えなど、同一 version で再度 CI を走らせたい場合のために用意された escape hatch です。
+
+内部では local tag 削除 → `git tag <version>` → `git push origin +refs/tags/<version>` を実行します。API diff は skip されます。
+
+### `--dry-run` の出力例
+
+```text
+$ taida publish --dry-run
+Publish plan for taida-lang/terminal:
+  Last release tag: a.1
+  API diff: added 2
+  Next version: a.2
+  Tag to push: a.2
+  Remote: origin
+  Dry-run: no git changes performed.
+```
+
+`--force-version` / `--retag` を併用した場合:
+
+```text
+$ taida publish --force-version a.5.rc --retag --dry-run
+Publish plan for taida-lang/terminal:
+  Last release tag: a.1
+  API diff: skipped (force-version)
+  Next version: a.5.rc
+  Tag to push: a.5.rc
+  Remote: origin
+  Retag: yes (will force-replace existing tag)
+  Dry-run: no git changes performed.
+```
+
+### `packages.tdm` の canonical surface
+
+C14 以降、publish する package は identity を qualified 形式で宣言する必要があります:
 
 ```taida
 >>> ./main.td
@@ -343,12 +418,35 @@ taida publish [--label LABEL] [--dry-run[=MODE]] [--target rust-addon]
 
 - `>>> ./main.td` はエントリポイントのみを宣言します。
 - `<<<@version owner/name @(symbols)` はバージョン、パッケージ ID、公開 API を一括で宣言します。
-- package root import 時は `packages.tdm` の export surface が正として使われます。
+- directory 名フォールバックは C14 で廃止されました — bare `<<<@a.1` 形式は publish が reject します。
 
-以下の旧 surface は @b.11.rc3 で廃止されました:
-- `<<<@version owner/name => @(symbols)` (arrow 形式)
-- `>>> ./main.td => @(symbols)` を facade 宣言として使う split surface
-- `<<<@version @(symbols)` (symbols-only、パッケージ ID なし)
+以下の旧 surface は廃止されています:
+
+- `<<<@version owner/name => @(symbols)` (arrow 形式、@b.11.rc3 で廃止)
+- `>>> ./main.td => @(symbols)` の split surface (@b.11.rc3 で廃止)
+- `<<<@version @(symbols)` (symbols-only、package ID なし、@b.11.rc3 で廃止)
+- `--target rust-addon` (@c.14.rc1 で廃止 — publish は target 非依存の tag push のみ)
+- `--dry-run=plan` / `--dry-run=build` (@c.14.rc1 で廃止 — `--dry-run` は plan 表示のみ)
+- `TAIDA_PUBLISH_SKIP_RELEASE` 環境変数 (@c.14.rc1 で廃止 — release 作成自体が CLI scope 外)
+
+### Examples
+
+```bash
+# 次 version を確認 (dry-run)
+taida publish --dry-run
+
+# 実 publish — tag push のみ行い、CI が release を作成する
+taida publish
+
+# pre-release ラベル付き
+taida publish --label rc
+
+# 自動判定を無視して明示 version で publish
+taida publish --force-version a.5
+
+# 既存 tag を force-replace
+taida publish --force-version a.5 --retag
+```
 
 ---
 
