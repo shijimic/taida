@@ -44,7 +44,13 @@ fn unique_temp(prefix: &str, ext: &str) -> PathBuf {
         .duration_since(std::time::UNIX_EPOCH)
         .expect("system clock should be after unix epoch")
         .as_nanos();
-    std::env::temp_dir().join(format!("{}_{}_{}.{}", prefix, std::process::id(), nanos, ext))
+    std::env::temp_dir().join(format!(
+        "{}_{}_{}.{}",
+        prefix,
+        std::process::id(),
+        nanos,
+        ext
+    ))
 }
 
 fn node_available() -> bool {
