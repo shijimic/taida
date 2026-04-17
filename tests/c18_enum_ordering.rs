@@ -20,8 +20,7 @@ fn expected_path() -> PathBuf {
 }
 
 fn read_expected() -> String {
-    fs::read_to_string(expected_path())
-        .expect("examples/quality/enum_ordering.expected must exist")
+    fs::read_to_string(expected_path()).expect("examples/quality/enum_ordering.expected must exist")
 }
 
 fn unique_temp(prefix: &str, ext: &str) -> PathBuf {

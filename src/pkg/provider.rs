@@ -1013,11 +1013,7 @@ mod tests {
         // because `eprintln!` is swallowed by cargo's default test
         // harness — the behavioural pin is "real files still get
         // enumerated, traversal doesn't error out".
-        symlink(
-            dir.join("__does_not_exist__"),
-            dir.join("dangling.lnk"),
-        )
-        .unwrap();
+        symlink(dir.join("__does_not_exist__"), dir.join("dangling.lnk")).unwrap();
 
         let mut files = Vec::new();
         let result = collect_files_recursive(&dir, &mut files);
@@ -1030,7 +1026,11 @@ mod tests {
         // would later fail on.
         let names: Vec<String> = files
             .iter()
-            .filter_map(|p| p.file_name().and_then(|n| n.to_str()).map(|s| s.to_string()))
+            .filter_map(|p| {
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .map(|s| s.to_string())
+            })
             .collect();
         assert!(
             names.contains(&"real.txt".to_string()),

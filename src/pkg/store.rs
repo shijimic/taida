@@ -1810,10 +1810,7 @@ fn github_curl_api_get_optional(url: &str, accept: &str) -> Result<Option<String
         // of diagnostics used to mask transient GitHub errors.
         let err_text = String::from_utf8_lossy(&output.stderr).trim().to_string();
         if !err_text.is_empty() {
-            eprintln!(
-                "warning: GitHub request failed ({}): {}",
-                url, err_text
-            );
+            eprintln!("warning: GitHub request failed ({}): {}", url, err_text);
         }
         return Ok(None);
     }
@@ -1875,10 +1872,7 @@ fn github_curl_download_to_file(url: &str, dest: &Path) -> Result<bool, String> 
         // structured warning rather than silently returning Ok(false).
         let err_text = String::from_utf8_lossy(&output.stderr).trim().to_string();
         if !err_text.is_empty() {
-            eprintln!(
-                "warning: GitHub download failed ({}): {}",
-                url, err_text
-            );
+            eprintln!("warning: GitHub download failed ({}): {}", url, err_text);
         }
         return Ok(false);
     }
@@ -3659,37 +3653,25 @@ mod tests {
     #[test]
     fn test_sanitize_auth_token_rejects_double_quote() {
         // C18B-007: `"` escapes out of the curl config's quoted value.
-        assert_eq!(
-            super::sanitize_auth_token("ghp_abc\"def", "TEST_SRC"),
-            None
-        );
+        assert_eq!(super::sanitize_auth_token("ghp_abc\"def", "TEST_SRC"), None);
     }
 
     #[test]
     fn test_sanitize_auth_token_rejects_backslash() {
         // C18B-007: `\` is the escape prefix inside the curl config.
-        assert_eq!(
-            super::sanitize_auth_token("ghp_abc\\def", "TEST_SRC"),
-            None
-        );
+        assert_eq!(super::sanitize_auth_token("ghp_abc\\def", "TEST_SRC"), None);
     }
 
     #[test]
     fn test_sanitize_auth_token_rejects_newline() {
         // C18B-007: `\n` in the raw token would inject a fresh config
         // directive on the following line of the curl config stream.
-        assert_eq!(
-            super::sanitize_auth_token("ghp_abc\ndef", "TEST_SRC"),
-            None
-        );
+        assert_eq!(super::sanitize_auth_token("ghp_abc\ndef", "TEST_SRC"), None);
     }
 
     #[test]
     fn test_sanitize_auth_token_rejects_cr() {
-        assert_eq!(
-            super::sanitize_auth_token("ghp_abc\rdef", "TEST_SRC"),
-            None
-        );
+        assert_eq!(super::sanitize_auth_token("ghp_abc\rdef", "TEST_SRC"), None);
     }
 
     #[test]

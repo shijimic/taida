@@ -115,7 +115,12 @@ impl Lowering {
         let requested: std::collections::HashMap<&str, &str> = import
             .symbols
             .iter()
-            .map(|s| (s.name.as_str(), s.alias.as_deref().unwrap_or(s.name.as_str())))
+            .map(|s| {
+                (
+                    s.name.as_str(),
+                    s.alias.as_deref().unwrap_or(s.name.as_str()),
+                )
+            })
             .collect();
         if requested.is_empty() {
             return;

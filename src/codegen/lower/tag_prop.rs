@@ -180,11 +180,7 @@ impl Lowering {
     /// `lower_type_instantiation` to emit per-pack enum descriptors so
     /// TypeDef-based packs sharing a field name across different enums
     /// no longer collide in the global field registry.
-    pub(super) fn type_field_enum_name(
-        &self,
-        type_name: &str,
-        field_name: &str,
-    ) -> Option<String> {
+    pub(super) fn type_field_enum_name(&self, type_name: &str, field_name: &str) -> Option<String> {
         let field_types = self.type_field_types.get(type_name)?;
         for (name, ty) in field_types {
             if name != field_name {

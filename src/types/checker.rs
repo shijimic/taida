@@ -1230,7 +1230,11 @@ impl TypeChecker {
                         } else {
                             res.pkg_dir.join(&entry_name)
                         };
-                        if entry_path.exists() { entry_path } else { return }
+                        if entry_path.exists() {
+                            entry_path
+                        } else {
+                            return;
+                        }
                     }
                 },
                 None => return,
@@ -1247,7 +1251,12 @@ impl TypeChecker {
         let requested: std::collections::HashMap<&str, &str> = imp
             .symbols
             .iter()
-            .map(|s| (s.name.as_str(), s.alias.as_deref().unwrap_or(s.name.as_str())))
+            .map(|s| {
+                (
+                    s.name.as_str(),
+                    s.alias.as_deref().unwrap_or(s.name.as_str()),
+                )
+            })
             .collect();
         if requested.is_empty() {
             return;
@@ -1257,8 +1266,7 @@ impl TypeChecker {
             if let S::EnumDef(ed) = stmt
                 && let Some(&local_name) = requested.get(ed.name.as_str())
             {
-                let variants: Vec<String> =
-                    ed.variants.iter().map(|v| v.name.clone()).collect();
+                let variants: Vec<String> = ed.variants.iter().map(|v| v.name.clone()).collect();
 
                 if let Some(existing) = self.registry.get_enum_variants(local_name) {
                     // Local redefinition already present — must match the
@@ -3328,10 +3336,9 @@ defaulted fields must be provided via `()`",
                             && !Self::contains_unknown(&left_type)
                             && !Self::contains_unknown(&right_type)
                         {
-                            let both_numeric =
-                                left_type.is_numeric() && right_type.is_numeric();
-                            let both_str = matches!(left_type, Type::Str)
-                                && matches!(right_type, Type::Str);
+                            let both_numeric = left_type.is_numeric() && right_type.is_numeric();
+                            let both_str =
+                                matches!(left_type, Type::Str) && matches!(right_type, Type::Str);
                             let same_enum = match (&left_type, &right_type) {
                                 (Type::Named(a), Type::Named(b)) => {
                                     a == b && self.registry.is_enum_type(a)

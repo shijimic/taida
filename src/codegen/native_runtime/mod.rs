@@ -142,13 +142,12 @@ mod tests {
     /// decoder. Legacy total after C18-2: 896,888.
     ///
     /// C18B-003/005 (2026-04-17): +5,086 bytes in core.c — added the
-    /// per-pack enum registry
-    /// (`taida_register_pack_field_enum` / `taida_lookup_pack_field_enum_desc`
-    /// + `__pack_field_enum_registry`) so two packs sharing a field
-    /// name with different Enum types no longer collide in `jsonEncode`
-    /// (C18B-003); plus `taida_runtime_panic(msg)` for the strict
-    /// `Ordinal[]` runtime contract (C18B-005). Intermediate total:
-    /// 901,974.
+    /// per-pack enum registry (`taida_register_pack_field_enum` /
+    /// `taida_lookup_pack_field_enum_desc` with `__pack_field_enum_registry`)
+    /// so two packs sharing a field name with different Enum types no
+    /// longer collide in `jsonEncode` (C18B-003); plus
+    /// `taida_runtime_panic(msg)` for the strict `Ordinal[]` runtime
+    /// contract (C18B-005). Intermediate total: 901,974.
     ///
     /// C18B-006 (2026-04-17): +2,272 bytes in core.c — added
     /// `json_parse_string_raw_len` (length-aware variant) + `str_len`

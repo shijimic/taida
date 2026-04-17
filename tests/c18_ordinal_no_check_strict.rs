@@ -54,8 +54,7 @@ fn write_source(src: &str) -> PathBuf {
 
 const NON_ENUM_SOURCE: &str = "stdout(Ordinal[1]().toString())\n";
 
-const EXPECTED_ERROR_SUBSTRING: &str =
-    "Ordinal: argument must be an Enum value";
+const EXPECTED_ERROR_SUBSTRING: &str = "Ordinal: argument must be an Enum value";
 
 #[test]
 fn c18b_005_interpreter_rejects_non_enum_under_no_check() {

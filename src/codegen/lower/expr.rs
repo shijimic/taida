@@ -1592,8 +1592,7 @@ impl Lowering {
             let per_pack_enum_csv: Option<String> = enum_descriptor.clone();
             if let Some(csv) = enum_descriptor {
                 self.register_field_type_tag(&field.name, 5);
-                self.field_enum_descriptors
-                    .insert(field.name.clone(), csv);
+                self.field_enum_descriptors.insert(field.name.clone(), csv);
             }
 
             // Emit inline field registration for jsonEncode (ensures library modules

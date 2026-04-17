@@ -4025,9 +4025,7 @@ fn test_c18_1_enum_cross_module_resolves() {
     );
     let (checker, errors) = check_file(&consumer);
     assert!(
-        !errors
-            .iter()
-            .any(|e| e.message.contains("[E1608]")),
+        !errors.iter().any(|e| e.message.contains("[E1608]")),
         "E1608 should not fire after C18-1, got: {:?}",
         errors
     );
@@ -4060,9 +4058,7 @@ fn test_c18_1_enum_cross_module_alias() {
     );
     let (checker, errors) = check_file(&consumer);
     assert!(
-        !errors
-            .iter()
-            .any(|e| e.message.contains("[E1608]")),
+        !errors.iter().any(|e| e.message.contains("[E1608]")),
         "Aliased import should register Paint; got: {:?}",
         errors
     );

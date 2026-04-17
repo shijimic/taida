@@ -3373,9 +3373,7 @@ impl Interpreter {
             "Ordinal" => {
                 if type_args.is_empty() {
                     return Err(RuntimeError {
-                        message:
-                            "Ordinal requires 1 argument: Ordinal[<enum_value>]()"
-                                .into(),
+                        message: "Ordinal requires 1 argument: Ordinal[<enum_value>]()".into(),
                     });
                 }
                 let v = match self.eval_expr(&type_args[0])? {

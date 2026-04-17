@@ -40,12 +40,7 @@ fn unique_temp(prefix: &str) -> PathBuf {
         .duration_since(std::time::UNIX_EPOCH)
         .expect("system clock should be after unix epoch")
         .as_nanos();
-    std::env::temp_dir().join(format!(
-        "{}_{}_{}",
-        prefix,
-        std::process::id(),
-        nanos
-    ))
+    std::env::temp_dir().join(format!("{}_{}_{}", prefix, std::process::id(), nanos))
 }
 
 /// Build `<project>/.taida/deps/acme/lib/main.td` that defines a
@@ -76,8 +71,11 @@ fn set_up_project() -> PathBuf {
     // is `<tmp>/` (JS codegen reads `pkg_root` directly rather than
     // walking `.taida/`).
     fs::create_dir_all(project.join(".taida")).expect("mkdir .taida");
-    fs::write(project.join("packages.tdm"), "[package]\nname = \"c18b_004_scratch\"\n")
-        .expect("write packages.tdm");
+    fs::write(
+        project.join("packages.tdm"),
+        "[package]\nname = \"c18b_004_scratch\"\n",
+    )
+    .expect("write packages.tdm");
 
     let deps_root = project.join(".taida").join("deps").join("acme").join("lib");
     fs::create_dir_all(&deps_root).expect("mkdir .taida/deps/acme/lib");
