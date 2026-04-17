@@ -1568,7 +1568,12 @@ impl JsCodegen {
         let requested: std::collections::HashMap<&str, &str> = import
             .symbols
             .iter()
-            .map(|s| (s.name.as_str(), s.alias.as_deref().unwrap_or(s.name.as_str())))
+            .map(|s| {
+                (
+                    s.name.as_str(),
+                    s.alias.as_deref().unwrap_or(s.name.as_str()),
+                )
+            })
             .collect();
         if requested.is_empty() {
             return;
@@ -1856,6 +1861,43 @@ impl JsCodegen {
                 symbols.join(", "),
                 js_path
             ));
+        }
+
+        // C18B-011 fix: Register absorbed imported enums into the consumer
+        // module's `__taida_enumDefs` registry so that consumer-side
+        // `jsonEncode(@(state <= ImportedEnum:X()))` emits the variant-name
+        // Str via `__taida_enumVal(...).toJSON()` instead of falling back to
+        // the raw ordinal.
+        //
+        // `self.enum_defs` was previously populated by
+        // `absorb_cross_module_enum_defs` (under the local alias). The
+        // registry itself is a per-module `const` declared by the embedded
+        // runtime, so producer-module registration does not carry over to
+        // the consumer. We therefore re-register the enum on the consumer
+        // side here, mirroring the symmetry required by C18-2 across the
+        // 3 backends. `Statement::EnumDef` at line 767 handles the
+        // declaring-module side of the same symmetry.
+        //
+        // We only register for imports that could plausibly carry a user
+        // enum — i.e. anything not bundled by the embedded JS runtime.
+        // `taida-lang/net`'s `HttpProtocol` is an exception and is already
+        // registered by its own code path at line 317 via `self.enum_defs`
+        // pre-seeding; we still re-emit here because the net branch
+        // `return`s above before reaching this point.
+        if !import.path.starts_with("taida-lang/") && !import.path.starts_with("npm:") {
+            for sym in &import.symbols {
+                let local_name = sym.alias.as_deref().unwrap_or(sym.name.as_str());
+                if let Some(variants) = self.enum_defs.get(local_name) {
+                    let variants_js: Vec<String> =
+                        variants.iter().map(|v| format!("'{}'", v)).collect();
+                    self.write_indent();
+                    self.write(&format!(
+                        "__taida_registerEnumDef('{}', [{}]);\n",
+                        local_name,
+                        variants_js.join(", ")
+                    ));
+                }
+            }
         }
         Ok(())
     }
@@ -2575,10 +2617,7 @@ impl JsCodegen {
                 // variant-name Str. Arithmetic / comparison with the
                 // ordinal continues to work via `valueOf`. See
                 // `src/js/runtime/core.rs::__taida_enumVal`.
-                self.write(&format!(
-                    "__taida_enumVal('{}', {})",
-                    enum_name, ordinal
-                ));
+                self.write(&format!("__taida_enumVal('{}', {})", enum_name, ordinal));
                 Ok(())
             }
             Expr::MoldInst(name, type_args, fields, _) => {
@@ -2597,9 +2636,8 @@ impl JsCodegen {
                 if name == "Ordinal" {
                     if type_args.is_empty() {
                         return Err(JsError {
-                            message:
-                                "Ordinal requires 1 argument: Ordinal[<enum_value>]()"
-                                    .to_string(),
+                            message: "Ordinal requires 1 argument: Ordinal[<enum_value>]()"
+                                .to_string(),
                         });
                     }
                     self.write("__taida_enumOrdinalStrict(");
