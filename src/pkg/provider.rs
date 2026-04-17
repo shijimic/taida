@@ -963,6 +963,20 @@ fn collect_files_recursive(dir: &Path, files: &mut Vec<PathBuf>) -> Result<(), s
                 files.push(path);
             } else if path.is_dir() {
                 collect_files_recursive(&path, files)?;
+            } else {
+                // C18B-009 fix (carry from C17B-022): anything that is
+                // neither a regular file nor a directory — broken
+                // symlink, socket, FIFO, device node, etc. — used to
+                // be silently dropped from the integrity-hash walk.
+                // That silently diverged the hash from the actual
+                // on-disk state and prevented downstream cache
+                // invalidation. Emit a `warning:` line to stderr so
+                // the drop is visible; the hash still excludes the
+                // entry because there is no stable content to read.
+                eprintln!(
+                    "warning: skipping non-regular entry during integrity walk: {}",
+                    path.display()
+                );
             }
         }
     }
@@ -972,6 +986,65 @@ fn collect_files_recursive(dir: &Path, files: &mut Vec<PathBuf>) -> Result<(), s
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // C18B-009 regression: `collect_files_recursive` must still
+    // enumerate real files when broken symlinks are present in the
+    // traversal root. The symlink target is deliberately missing so
+    // the entry's `is_file()` is false, forcing the non-file branch.
+    //
+    // Platform note: `std::os::unix::fs::symlink` is only available
+    // on Unix. On non-Unix targets this test is compiled out; the
+    // regression surface (package tarballs produced on Unix CI) is
+    // fully covered on those targets.
+    #[cfg(unix)]
+    #[test]
+    fn test_collect_files_recursive_skips_broken_symlink_but_reports() {
+        use std::os::unix::fs::symlink;
+
+        let dir = PathBuf::from("/tmp/taida_test_c18b_009_broken_symlink");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // Real regular file that MUST be enumerated.
+        std::fs::write(dir.join("real.txt"), b"hello").unwrap();
+        // Broken symlink pointing at a non-existent target. Before
+        // the C18B-009 fix this entry was silently skipped; after the
+        // fix it is still skipped (there is no content to hash) but
+        // the skip emits a warning. We don't assert on stderr here
+        // because `eprintln!` is swallowed by cargo's default test
+        // harness — the behavioural pin is "real files still get
+        // enumerated, traversal doesn't error out".
+        symlink(dir.join("__does_not_exist__"), dir.join("dangling.lnk")).unwrap();
+
+        let mut files = Vec::new();
+        let result = collect_files_recursive(&dir, &mut files);
+        assert!(
+            result.is_ok(),
+            "broken-symlink traversal must not return Err"
+        );
+        // The regular file must be present. The broken symlink must
+        // not poison the Vec with a bogus path that read_to_string
+        // would later fail on.
+        let names: Vec<String> = files
+            .iter()
+            .filter_map(|p| {
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .map(|s| s.to_string())
+            })
+            .collect();
+        assert!(
+            names.contains(&"real.txt".to_string()),
+            "real file must be enumerated; got: {:?}",
+            names
+        );
+        assert!(
+            !names.contains(&"dangling.lnk".to_string()),
+            "broken symlink must not be enumerated (no stable content); got: {:?}",
+            names
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn test_workspace_provider_resolves_path_dep() {

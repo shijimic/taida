@@ -1,5 +1,105 @@
 # Changelog
 
+## @c.18.rc4
+
+Close 4 of the 6 Enum limitations identified by Hachikuma Phase F (2026-04-16).
+The 5th (JSON mold Enum validate) shipped in `@c.16.rc4`; the 6th (function
+boundary contract dependency) auto-resolves once Enum types cross module
+boundaries.
+
+### Features
+
+#### New: Cross-module Enum type resolution (Hachikuma #1 / #6)
+
+`>>> ./m.td => @(Color)` followed by `Color:Red()` in the importer no longer
+triggers `[E1608] Unknown enum type`. The type checker now parses the
+exporting module and registers its EnumDefs into the importer's type
+registry. Aliased imports (`>>> ... => @(Color: Paint)`) are honoured.
+
+**New diagnostic `[E1618]`**: Variant-order mismatch across module boundary.
+When an importer keeps a local `Enum => Color = ...` redefinition, its
+variant order must match the exporting module's exactly — otherwise ordinals
+silently diverge and `jsonEncode` / ordering comparison break. The checker
+now catches this at compile time with a clear mismatch diagnostic.
+
+(E1618 was allocated because E1610 is already used for cyclic-inheritance
+detection; see the inline docstring in `src/types/checker.rs`.)
+
+#### New: `jsonEncode` emits variant-name Str
+
+`jsonEncode(@(state <= HiveState:Running()))` now returns
+`{"state":"Running"}` on all three backends, symmetric with the C16
+`JSON[raw, Schema]()` decoder which already accepts the variant-name Str.
+Round-trip is now guaranteed:
+
+```taida
+rec <= @(state <= HiveState:Running())
+raw <= jsonEncode(rec)                 // {"state":"Running"}
+JSON[raw, Status]() ]=> rec2
+rec2.state == HiveState:Running()      // true
+```
+
+**Migration**: If pre-C18 code depended on the ordinal Int wire format
+(`{"state":1}`), wrap the Enum value in `Ordinal[]` before encoding:
+
+```taida
+payload <= @(state_id <= Ordinal[rec.state]())
+jsonEncode(payload)                    // {"state_id":1}
+```
+
+The internal representation (`Value::Int(ordinal)` / `int32` in native)
+and the `.toString()` contract (returns ordinal Str) are unchanged —
+`jsonEncode` is the only observable behaviour that switches.
+
+#### New: `Ordinal[enum]()` mold — explicit Enum → Int
+
+The sanctioned path for converting an Enum value to its declared ordinal:
+
+```taida
+Enum => HiveState = :Creating :Running :Stopped
+
+Ordinal[HiveState:Running()]()         // 1
+Ordinal[HiveState:Stopped()]() > 0     // true — Int space comparison
+```
+
+Replaces the fragile `.toString()`-parsing `initResumeStateOrdinal` helper
+from Hachikuma. Arity-1 only; non-Enum arguments produce a typed
+runtime error.
+
+The inverse direction (`FromOrdinal[Color, 1]()`) is C18 scope-out.
+
+#### New: Same-Enum ordering comparisons
+
+Same-Enum ordering (`<` / `>` / `>=`) now uses the declared ordinal order:
+
+```taida
+HiveState:Creating() < HiveState:Running()    // true
+HiveState:Running() >= HiveState:Creating()   // true
+
+ready s =
+  | s >= HiveState:Running() |> "yes"
+  | _ |> "no"
+=> :Str
+```
+
+Cross-Enum ordering and Enum↔Int ordering continue to emit `[E1605]` —
+use `Ordinal[]` (above) to bridge to Int explicitly. The declared order
+of an Enum is now a semantic contract; treat variant reorderings as
+breaking changes.
+
+### Notes
+
+- Enum definition syntax (`Enum => Name = :A :B :C`) and the
+  "最初のバリアントがデフォルト" rule are unchanged.
+- Enum internal representation (`Value::Int(ordinal)` in the interpreter,
+  `int32` in native, tagged `__taida_enumVal` wrapper in JS for
+  `jsonEncode` toJSON support) is additive; existing code paths that
+  read Enum values as Int ordinals continue to work.
+- `.toString()` still returns the ordinal Str; the variant-name Str is
+  exclusively the `jsonEncode` / wire-format representation.
+- All 3 backends (Interpreter / JS / Native) pass the 4 new parity
+  tests in `examples/quality/enum_*.td`.
+
 ## @c.17.rc4
 
 ### Fixes

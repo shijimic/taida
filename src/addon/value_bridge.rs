@@ -599,6 +599,15 @@ pub fn build_host_input_value(value: &Value) -> Result<*mut TaidaAddonValueV1, B
         Value::Json(_) => Err(BridgeError::UnsupportedInput { kind: "Json" }),
         Value::Molten => Err(BridgeError::UnsupportedInput { kind: "Molten" }),
         Value::Stream(_) => Err(BridgeError::UnsupportedInput { kind: "Stream" }),
+        // C18-2: EnumVal marshals to the addon ABI as a plain Int(ordinal).
+        // The addon protocol has no dedicated Enum tag; the variant name
+        // is a language-level concept used only by jsonEncode. Ordinal
+        // round-trips are sufficient for existing addon contracts.
+        Value::EnumVal(_, n) => {
+            let payload =
+                Box::into_raw(Box::new(TaidaAddonIntPayload { value: *n })) as *mut c_void;
+            Ok(alloc_value(TaidaAddonValueTag::Int, payload))
+        }
     }
 }
 

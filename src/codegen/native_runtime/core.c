@@ -278,6 +278,17 @@ taida_ptr taida_json_encode(taida_val val);
 taida_ptr taida_json_pretty(taida_val val);
 taida_val taida_register_field_name(taida_val hash, taida_ptr name_ptr);
 taida_val taida_register_field_type(taida_val hash, taida_ptr name_ptr, taida_val type_tag);
+/// C18-2: Register `field_hash` as an Enum-typed field. `variants_ptr`
+/// points to a comma-separated list of variant names, used by
+/// `json_serialize_pack_fields` to emit variant-name Str in jsonEncode.
+taida_val taida_register_field_enum(taida_val hash, taida_ptr name_ptr, taida_ptr variants_ptr);
+/// C18B-003 fix: Register a per-pack enum descriptor so two packs that
+/// share the same field name (e.g. `state`) but hold different enums
+/// (`BuildState`, `RunState`) no longer collide in the global field
+/// registry. Keyed by `(pack_ptr, field_hash)`; looked up at
+/// `json_serialize_pack_fields` time before falling back to the global
+/// descriptor.
+taida_val taida_register_pack_field_enum(taida_ptr pack_ptr, taida_val field_hash, taida_ptr variants_ptr);
 static const char* taida_lookup_field_name(taida_val hash);
 static int taida_lookup_field_type(taida_val hash);
 static taida_val taida_is_hashmap(taida_val ptr);
@@ -496,6 +507,22 @@ taida_val taida_get_return_tag(void) {
 }
 
 void taida_gorilla(void) { exit(1); }
+
+// C18B-005 fix: print a `RuntimeError: <msg>` line to stderr and exit
+// with status 1. Used by the native Ordinal[] lowering to reject
+// non-Enum arguments — mirrors the interpreter's
+// `mold_eval.rs::Ordinal` RuntimeError shape, and the JS runtime's
+// `__taida_enumOrdinalStrict` throw path. Keeping stderr (not stdout)
+// matches how the interpreter prints RuntimeError messages so parity
+// tests can diff `.expected` against stdout only.
+taida_val taida_runtime_panic(const char *msg) {
+    if (msg) {
+        fprintf(stderr, "Runtime error: %s\n", msg);
+    } else {
+        fprintf(stderr, "Runtime error\n");
+    }
+    exit(1);
+}
 
 taida_val taida_debug_int(taida_val value) {
     printf("%" PRId64 "\n", value);
@@ -6576,7 +6603,14 @@ typedef struct {
     int type;
     taida_val int_val;
     double float_val;
-    char *str_val;        // for strings (heap-allocated)
+    char *str_val;        // for strings (heap-allocated, NUL-terminated
+                          // for convenience but may contain embedded NULs)
+    int str_len;          // C18B-006 fix: length of `str_val` in bytes,
+                          // not counting the terminating NUL. Needed so
+                          // enum validation can compare strings with
+                          // embedded NULs against their variant names
+                          // (see the JSON_STRING branch in
+                          // `json_apply_schema` near the E{...} handler).
     struct json_array *arr;  // for arrays
     struct json_obj *obj;    // for objects
 } json_val;
@@ -6618,8 +6652,16 @@ static void json_skip_ws(const char **p) {
     while (**p == ' ' || **p == '\t' || **p == '\n' || **p == '\r') (*p)++;
 }
 
-static char *json_parse_string_raw(const char **p) {
-    if (**p != '"') return NULL;
+// C18B-006 fix: return both the decoded bytes AND the decoded length
+// through `*out_len`, so embedded-NUL JSON strings compare correctly
+// against Enum variant names and other length-aware consumers. When
+// `out_len` is NULL the caller doesn't need the length (e.g. object
+// keys which must remain C-strings).
+static char *json_parse_string_raw_len(const char **p, int *out_len) {
+    if (**p != '"') {
+        if (out_len) *out_len = 0;
+        return NULL;
+    }
     (*p)++;  // skip opening quote
     // Find end of string (handle escape sequences)
     const char *start = *p;
@@ -6630,6 +6672,7 @@ static char *json_parse_string_raw(const char **p) {
         else scan++;
         len++;
     }
+    (void)start;
     // Allocate and copy with escape handling
     char *buf = (char*)TAIDA_MALLOC(len + 1, "json_parse_str");
     int out = 0;
@@ -6655,20 +6698,36 @@ static char *json_parse_string_raw(const char **p) {
     }
     buf[out] = '\0';
     if (**p == '"') (*p)++;  // skip closing quote
+    if (out_len) *out_len = out;
     return buf;
+}
+
+// Back-compat wrapper for callers that only need the C string (e.g.
+// object keys). Preserves the pre-C18B-006 signature.
+static char *json_parse_string_raw(const char **p) {
+    return json_parse_string_raw_len(p, NULL);
 }
 
 static json_val json_parse_string(const char **p) {
     json_val v;
     v.type = JSON_STRING;
-    v.str_val = json_parse_string_raw(p);
+    int slen = 0;
+    v.str_val = json_parse_string_raw_len(p, &slen);
+    // C18B-006: `str_len` is the decoded byte count, which may be
+    // shorter than `strlen(str_val)` if the JSON input contained an
+    // escaped NUL (`\u0000`). Length-aware consumers (enum variant
+    // match in `json_apply_schema`) must use this field to avoid
+    // silently truncating at the first embedded NUL.
+    v.str_len = slen;
+    v.int_val = 0;
+    v.float_val = 0.0;
     v.arr = NULL; v.obj = NULL;
     return v;
 }
 
 static json_val json_parse_number(const char **p) {
     json_val v;
-    v.str_val = NULL; v.arr = NULL; v.obj = NULL;
+    v.str_val = NULL; v.str_len = 0; v.arr = NULL; v.obj = NULL;
     char *end;
     double d = strtod(*p, &end);
     // Check if it's an integer (no decimal point or exponent)
@@ -6695,7 +6754,7 @@ static json_val json_parse_number(const char **p) {
 static json_val json_parse_array(const char **p) {
     json_val v;
     v.type = JSON_ARRAY;
-    v.str_val = NULL; v.obj = NULL;
+    v.str_val = NULL; v.str_len = 0; v.obj = NULL;
     // M-14: TAIDA_MALLOC ensures NULL check + OOM diagnostic.
     v.arr = (json_array*)TAIDA_MALLOC(sizeof(json_array), "json_array");
     v.arr->count = 0;
@@ -6724,7 +6783,7 @@ static json_val json_parse_array(const char **p) {
 static json_val json_parse_object(const char **p) {
     json_val v;
     v.type = JSON_OBJECT;
-    v.str_val = NULL; v.arr = NULL;
+    v.str_val = NULL; v.str_len = 0; v.arr = NULL;
     // M-14: TAIDA_MALLOC ensures NULL check + OOM diagnostic.
     v.obj = (json_obj*)TAIDA_MALLOC(sizeof(json_obj), "json_obj");
     v.obj->count = 0;
@@ -6760,7 +6819,7 @@ static json_val json_parse_object(const char **p) {
 static json_val json_parse_value(const char **p) {
     json_skip_ws(p);
     json_val v;
-    v.str_val = NULL; v.arr = NULL; v.obj = NULL;
+    v.str_val = NULL; v.str_len = 0; v.arr = NULL; v.obj = NULL;
     if (**p == '"') return json_parse_string(p);
     if (**p == '{') return json_parse_object(p);
     if (**p == '[') return json_parse_array(p);
@@ -7181,6 +7240,15 @@ static taida_val json_apply_schema(json_val *jval, const char **desc) {
             // If JSON value is not a string, walk past the variants and return Lax.
             int is_string_match_candidate = (jval && jval->type == JSON_STRING && jval->str_val);
             const char *js = is_string_match_candidate ? jval->str_val : NULL;
+            // C18B-006 fix: use the parsed string's decoded byte length
+            // rather than `strlen(js)` so embedded-NUL JSON inputs
+            // (e.g. `"\u0000"` expanded by the parser) compare
+            // correctly against variant names. Variant names cannot
+            // themselves contain NUL (the descriptor format uses NUL
+            // as a terminator upstream), so any JSON string whose
+            // decoded length includes a NUL is a guaranteed mismatch
+            // instead of a false positive truncation at the NUL.
+            int js_len = is_string_match_candidate ? jval->str_len : 0;
 
             int matched = 0;
             taida_val ordinal = 0;
@@ -7194,8 +7262,8 @@ static taida_val json_apply_schema(json_val *jval, const char **desc) {
                 int vlen = (int)(d - vstart);
 
                 if (!matched && js) {
-                    // Compare: js == vstart[0..vlen] exactly.
-                    if ((int)strlen(js) == vlen && strncmp(js, vstart, (size_t)vlen) == 0) {
+                    // Compare: js[0..js_len] == vstart[0..vlen] exactly.
+                    if (js_len == vlen && memcmp(js, vstart, (size_t)vlen) == 0) {
                         ordinal = (taida_val)current_ordinal;
                         matched = 1;
                     }
@@ -7393,8 +7461,15 @@ taida_val taida_float_mul(taida_val a, taida_val b) { return _d2l(_to_double(a) 
 // Populated by taida_register_field_name() calls emitted at compile time.
 
 #define FIELD_REGISTRY_CAP 256
-// type_tag: 0=unknown, 1=Int, 2=Float, 3=Str, 4=Bool
-static struct { taida_val hash; const char *name; int type_tag; } __field_registry[FIELD_REGISTRY_CAP];
+// type_tag: 0=unknown, 1=Int, 2=Float, 3=Str, 4=Bool, 5=Enum (C18-2)
+// When type_tag == 5, `enum_desc` points to "VariantA,VariantB,..." so the
+// encoder can emit the variant name Str for a given ordinal.
+static struct {
+    taida_val hash;
+    const char *name;
+    int type_tag;
+    const char *enum_desc;
+} __field_registry[FIELD_REGISTRY_CAP];
 static int __field_registry_len = 0;
 
 taida_val taida_register_field_name(taida_val hash, taida_val name_ptr) {
@@ -7406,6 +7481,7 @@ taida_val taida_register_field_name(taida_val hash, taida_val name_ptr) {
         __field_registry[__field_registry_len].hash = hash;
         __field_registry[__field_registry_len].name = (const char*)name_ptr;
         __field_registry[__field_registry_len].type_tag = 0;
+        __field_registry[__field_registry_len].enum_desc = NULL;
         __field_registry_len++;
     }
     return 0;
@@ -7423,6 +7499,28 @@ taida_val taida_register_field_type(taida_val hash, taida_val name_ptr, taida_va
         __field_registry[__field_registry_len].hash = hash;
         __field_registry[__field_registry_len].name = (const char*)name_ptr;
         __field_registry[__field_registry_len].type_tag = (int)type_tag;
+        __field_registry[__field_registry_len].enum_desc = NULL;
+        __field_registry_len++;
+    }
+    return 0;
+}
+
+// C18-2: register a field as an Enum-typed field with variant descriptor.
+// `variants_ptr` points to a comma-separated list of variant names
+// (e.g. "Creating,Running,Stopped") emitted by the native lowering.
+taida_val taida_register_field_enum(taida_val hash, taida_val name_ptr, taida_val variants_ptr) {
+    for (int i = 0; i < __field_registry_len; i++) {
+        if (__field_registry[i].hash == hash) {
+            __field_registry[i].type_tag = 5;
+            __field_registry[i].enum_desc = (const char*)variants_ptr;
+            return 0;
+        }
+    }
+    if (__field_registry_len < FIELD_REGISTRY_CAP) {
+        __field_registry[__field_registry_len].hash = hash;
+        __field_registry[__field_registry_len].name = (const char*)name_ptr;
+        __field_registry[__field_registry_len].type_tag = 5;
+        __field_registry[__field_registry_len].enum_desc = (const char*)variants_ptr;
         __field_registry_len++;
     }
     return 0;
@@ -7431,6 +7529,76 @@ taida_val taida_register_field_type(taida_val hash, taida_val name_ptr, taida_va
 static const char* taida_lookup_field_name(taida_val hash) {
     for (int i = 0; i < __field_registry_len; i++) {
         if (__field_registry[i].hash == hash) return __field_registry[i].name;
+    }
+    return NULL;
+}
+
+static const char* taida_lookup_field_enum_desc(taida_val hash) {
+    for (int i = 0; i < __field_registry_len; i++) {
+        if (__field_registry[i].hash == hash) return __field_registry[i].enum_desc;
+    }
+    return NULL;
+}
+
+// C18B-003 fix: per-pack-instance enum descriptor registry.
+// Keyed by (pack_ptr, field_hash) so two packs that share a field name
+// but carry different enums do not overwrite each other's descriptor.
+//
+// The table is bounded at `PACK_FIELD_ENUM_CAP`. When full we silently
+// drop further registrations; `json_serialize_pack_fields` then falls
+// back to the global `__field_registry.enum_desc`. The only observable
+// consequence of table exhaustion is the pre-C18B-003 behaviour, so
+// overflow cannot regress correctness below the already-released
+// surface.
+//
+// `pack_ptr` is stored as `taida_val` (i64) for simple bitwise compare.
+// The table is populated by `taida_register_pack_field_enum()` which
+// is emitted once per `PackSet` of an Enum-typed field. Both fresh
+// allocation and an existing-entry update path are provided so a pack
+// that is reused across multiple PackSet calls (rare but possible via
+// `taida_pack_set_val`) remains in sync with its last-written enum.
+#define PACK_FIELD_ENUM_CAP 1024
+static struct {
+    taida_val pack_ptr;
+    taida_val field_hash;
+    const char *enum_desc;
+} __pack_field_enum_registry[PACK_FIELD_ENUM_CAP];
+static int __pack_field_enum_registry_len = 0;
+
+taida_val taida_register_pack_field_enum(taida_val pack_ptr, taida_val field_hash, taida_val variants_ptr) {
+    if (pack_ptr == 0) return 0;
+    // Update existing entry if present (most recent write wins for a
+    // given (pack, field) pair — mirrors the single-writer contract of
+    // `PackSet`).
+    for (int i = 0; i < __pack_field_enum_registry_len; i++) {
+        if (__pack_field_enum_registry[i].pack_ptr == pack_ptr
+            && __pack_field_enum_registry[i].field_hash == field_hash) {
+            __pack_field_enum_registry[i].enum_desc = (const char*)variants_ptr;
+            return 0;
+        }
+    }
+    if (__pack_field_enum_registry_len < PACK_FIELD_ENUM_CAP) {
+        __pack_field_enum_registry[__pack_field_enum_registry_len].pack_ptr = pack_ptr;
+        __pack_field_enum_registry[__pack_field_enum_registry_len].field_hash = field_hash;
+        __pack_field_enum_registry[__pack_field_enum_registry_len].enum_desc = (const char*)variants_ptr;
+        __pack_field_enum_registry_len++;
+    }
+    return 0;
+}
+
+static const char* taida_lookup_pack_field_enum_desc(taida_val pack_ptr, taida_val field_hash) {
+    if (pack_ptr == 0) return NULL;
+    // Linear scan — tables are small (per-program, per-pack-instance).
+    // Reverse order so the most recent registration wins if the same
+    // (pack, field) is registered twice without the early-update path
+    // firing (e.g. two distinct packs that happen to share a pointer
+    // after an allocator reuse, in which case the last writer is the
+    // live pack).
+    for (int i = __pack_field_enum_registry_len - 1; i >= 0; i--) {
+        if (__pack_field_enum_registry[i].pack_ptr == pack_ptr
+            && __pack_field_enum_registry[i].field_hash == field_hash) {
+            return __pack_field_enum_registry[i].enum_desc;
+        }
     }
     return NULL;
 }
@@ -7498,12 +7666,59 @@ static void json_append_indent(char **buf, size_t *cap, size_t *len, int indent,
     }
 }
 
+// C18-2: Emit a variant-name Str for an Enum-typed field. `ordinal` is
+// the Int(ordinal) stored in the BuchiPack field; `variants_csv` is the
+// comma-separated variant list registered via `taida_register_field_enum`.
+// Falls back to emitting the raw ordinal number when the descriptor is
+// missing or the ordinal is out of range.
+static void json_append_enum_variant(char **buf, size_t *cap, size_t *len, taida_val ordinal, const char *variants_csv) {
+    if (!variants_csv) {
+        char num[32];
+        snprintf(num, sizeof(num), "%" PRId64 "", ordinal);
+        json_append(buf, cap, len, num);
+        return;
+    }
+    int64_t idx = 0;
+    const char *start = variants_csv;
+    const char *p = variants_csv;
+    while (*p) {
+        if (*p == ',') {
+            if (idx == ordinal) {
+                int vlen = (int)(p - start);
+                char buf_name[128];
+                int copy_len = vlen < (int)sizeof(buf_name) - 1 ? vlen : (int)sizeof(buf_name) - 1;
+                memcpy(buf_name, start, (size_t)copy_len);
+                buf_name[copy_len] = '\0';
+                json_append_escaped_str(buf, cap, len, buf_name);
+                return;
+            }
+            idx++;
+            start = p + 1;
+        }
+        p++;
+    }
+    // Last variant (no trailing comma)
+    if (idx == ordinal) {
+        int vlen = (int)(p - start);
+        char buf_name[128];
+        int copy_len = vlen < (int)sizeof(buf_name) - 1 ? vlen : (int)sizeof(buf_name) - 1;
+        memcpy(buf_name, start, (size_t)copy_len);
+        buf_name[copy_len] = '\0';
+        json_append_escaped_str(buf, cap, len, buf_name);
+        return;
+    }
+    // Out of range — fall back to ordinal Int.
+    char num[32];
+    snprintf(num, sizeof(num), "%" PRId64 "", ordinal);
+    json_append(buf, cap, len, num);
+}
+
 // Helper: serialize a BuchiPack's fields as JSON object
 // Fields are sorted alphabetically (matching interpreter/JS behavior).
 // All __ fields are skipped (__type, __value, __default, __entries, __items).
 static void json_serialize_pack_fields(char **buf, size_t *cap, size_t *len, taida_val *pack, taida_val fc, int indent, int depth) {
-    // Collect visible fields: (name, val, type_hint, index for stable sort)
-    typedef struct { const char *name; taida_val val; int type_hint; } JsonField;
+    // Collect visible fields: (name, val, type_hint, enum_desc, index for stable sort)
+    typedef struct { const char *name; taida_val val; int type_hint; const char *enum_desc; } JsonField;
     JsonField fields[100];
     int nfields = 0;
     for (taida_val i = 0; i < fc && nfields < 100; i++) {
@@ -7516,9 +7731,26 @@ static void json_serialize_pack_fields(char **buf, size_t *cap, size_t *len, tai
             continue;
         }
         int ftype = taida_lookup_field_type(field_hash);
+        // C18B-003 fix: prefer per-pack descriptor (keyed by pack_ptr +
+        // field_hash) over the global field registry so two enums that
+        // share the field name (`state`, `status`, `kind`, …) emit
+        // their correct variant name. Fall back to the global table
+        // when no per-pack entry exists (covers code paths that were
+        // emitted before this fix and any future callers that skip the
+        // `taida_register_pack_field_enum` emission).
+        const char *enum_desc = taida_lookup_pack_field_enum_desc((taida_val)(intptr_t)pack, field_hash);
+        // If we resolved a per-pack descriptor the field is Enum-typed
+        // even if the global type tag never got promoted to 5 (e.g.
+        // packs built by `taida_pack_new` outside of _taida_main).
+        if (enum_desc != NULL) {
+            ftype = 5;
+        } else if (ftype == 5) {
+            enum_desc = taida_lookup_field_enum_desc(field_hash);
+        }
         fields[nfields].name = fname;
         fields[nfields].val = field_val;
         fields[nfields].type_hint = ftype;
+        fields[nfields].enum_desc = enum_desc;
         nfields++;
     }
     // Sort fields alphabetically by name (insertion sort — nfields is small)
@@ -7539,7 +7771,12 @@ static void json_serialize_pack_fields(char **buf, size_t *cap, size_t *len, tai
         json_append_escaped_str(buf, cap, len, fields[i].name);
         json_append_char(buf, cap, len, ':');
         if (indent > 0) json_append_char(buf, cap, len, ' ');
-        json_serialize_typed(buf, cap, len, fields[i].val, indent, depth + 1, fields[i].type_hint);
+        // C18-2: Enum-typed field → emit variant name Str via descriptor.
+        if (fields[i].type_hint == 5) {
+            json_append_enum_variant(buf, cap, len, fields[i].val, fields[i].enum_desc);
+        } else {
+            json_serialize_typed(buf, cap, len, fields[i].val, indent, depth + 1, fields[i].type_hint);
+        }
     }
     if (indent > 0 && nfields > 0) json_append_indent(buf, cap, len, indent, depth);
     json_append_char(buf, cap, len, '}');

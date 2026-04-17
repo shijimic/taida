@@ -40,6 +40,12 @@ pub fn json_to_taida_value(json: &serde_json::Value) -> Value {
 }
 
 /// Convert a Taida Value to a serde_json::Value.
+///
+/// C18-2 contract: Enum values (`Value::EnumVal(enum_name, ordinal)`) are
+/// emitted as the variant name Str (e.g. `"Running"`). This makes
+/// `jsonEncode` symmetric with the C16 `JSON[raw, Schema]()` decoder,
+/// which accepts the variant-name Str wire format. `Value::Int` values
+/// that are not tagged as EnumVal continue to emit as JSON numbers.
 pub fn taida_value_to_json(val: &Value) -> serde_json::Value {
     match val {
         Value::Int(n) => serde_json::Value::Number(serde_json::Number::from(*n)),
@@ -68,6 +74,76 @@ pub fn taida_value_to_json(val: &Value) -> serde_json::Value {
         }
         Value::Unit => serde_json::Value::Object(serde_json::Map::new()),
         Value::Json(j) => j.clone(),
+        // C18-2: Emit Enum as variant name Str. If the enum_name is not
+        // registered (shouldn't happen — EnumVal is only produced by the
+        // evaluator after enum_defs registration), fall back to the ordinal
+        // Int for safety.
+        Value::EnumVal(enum_name, ordinal) => {
+            // The shared enum defs aren't accessible from this free function,
+            // so this fallback path relies on the caller to pass an enriched
+            // variant. See `taida_value_to_json_with_enum_defs` for the
+            // lookup-aware version (used by stdlib_json_encode through the
+            // `Interpreter`).
+            let _ = enum_name;
+            serde_json::Value::Number(serde_json::Number::from(*ordinal))
+        }
+        _ => serde_json::Value::Null,
+    }
+}
+
+/// C18-2: Enrich `taida_value_to_json` with an `enum_defs` registry so
+/// Enum values can be emitted as their declared variant-name Str. This is
+/// the wire form used by `jsonEncode` and symmetric with the C16
+/// `JSON[raw, Schema]()` decoder. See `src/interpreter/prelude.rs`
+/// for the `jsonEncode` dispatch that routes through this function.
+pub fn taida_value_to_json_with_enum_defs(
+    val: &Value,
+    enum_defs: &std::collections::HashMap<String, Vec<String>>,
+) -> serde_json::Value {
+    match val {
+        Value::Int(n) => serde_json::Value::Number(serde_json::Number::from(*n)),
+        Value::Float(n) => {
+            if let Some(num) = serde_json::Number::from_f64(*n) {
+                serde_json::Value::Number(num)
+            } else {
+                serde_json::Value::Null
+            }
+        }
+        Value::Str(s) => serde_json::Value::String(s.clone()),
+        Value::Bool(b) => serde_json::Value::Bool(*b),
+        Value::List(items) => serde_json::Value::Array(
+            items
+                .iter()
+                .map(|item| taida_value_to_json_with_enum_defs(item, enum_defs))
+                .collect(),
+        ),
+        Value::BuchiPack(fields) => {
+            let mut map = serde_json::Map::new();
+            for (field_name, field_val) in fields {
+                if field_name == "__type" {
+                    continue;
+                }
+                map.insert(
+                    field_name.clone(),
+                    taida_value_to_json_with_enum_defs(field_val, enum_defs),
+                );
+            }
+            serde_json::Value::Object(map)
+        }
+        Value::Unit => serde_json::Value::Object(serde_json::Map::new()),
+        Value::Json(j) => j.clone(),
+        Value::EnumVal(enum_name, ordinal) => {
+            if let Some(variants) = enum_defs.get(enum_name)
+                && let Some(variant_name) = variants.get(*ordinal as usize)
+            {
+                serde_json::Value::String(variant_name.clone())
+            } else {
+                // Enum not found in registry: defensive fallback to ordinal
+                // Int. This path should only hit for values fabricated via
+                // Rust-level Value construction outside the evaluator.
+                serde_json::Value::Number(serde_json::Number::from(*ordinal))
+            }
+        }
         _ => serde_json::Value::Null,
     }
 }
@@ -251,15 +327,17 @@ pub fn json_to_typed_value(json: &serde_json::Value, schema: &JsonSchema) -> Val
             serde_json::Value::Null => Value::List(Vec::new()),
             _ => Value::List(Vec::new()),
         },
-        JsonSchema::Enum(_name, variants) => {
+        JsonSchema::Enum(name, variants) => {
             // C16: JSON wire format is the variant name Str.
-            // On match: return the ordinal as Value::Int.
-            // On mismatch/non-string/null: return Lax[Enum] with hasValue=false,
-            // __value = Int(0) (first variant is default), __default = Int(0).
+            // C18-2: On match, return `Value::EnumVal(enum_name, ordinal)`
+            // (was `Value::Int(ordinal)` in C16) so that the round-trip
+            // through `jsonEncode` emits the variant-name Str rather than
+            // the ordinal Int. Downstream `PartialEq` accepts both forms
+            // for backward compat — see `src/interpreter/value.rs`.
             match json {
                 serde_json::Value::String(s) => {
                     if let Some(ordinal) = variants.iter().position(|v| v == s) {
-                        Value::Int(ordinal as i64)
+                        Value::EnumVal(name.clone(), ordinal as i64)
                     } else {
                         make_lax_enum_inline()
                     }
@@ -386,6 +464,14 @@ pub fn default_for_schema(schema: &JsonSchema) -> Value {
 
 /// jsonEncode(value) -> Str
 /// Converts a Taida value to a compact JSON string.
+///
+/// C18-2: This legacy function does NOT use the enum-aware variant-name
+/// encoder because it has no access to `enum_defs`. The prelude dispatcher
+/// in `src/interpreter/prelude.rs` routes `jsonEncode` through the
+/// enum-aware path (`taida_value_to_json_with_enum_defs`). This
+/// function is retained for the standalone test suite and any caller
+/// that does not have an `Interpreter` instance.
+#[cfg(test)]
 pub fn stdlib_json_encode(args: &[Value]) -> Result<Value, String> {
     let val = args.first().unwrap_or(&Value::Unit);
     match val {
@@ -397,8 +483,9 @@ pub fn stdlib_json_encode(args: &[Value]) -> Result<Value, String> {
     }
 }
 
-/// jsonPretty(value) -> Str
-/// Converts a Taida value to a pretty-printed JSON string.
+/// jsonPretty(value) -> Str — see `stdlib_json_encode` for the C18-2
+/// variant-name contract. Retained for tests.
+#[cfg(test)]
 pub fn stdlib_json_pretty(args: &[Value]) -> Result<Value, String> {
     let val = args.first().unwrap_or(&Value::Unit);
     let json = taida_value_to_json(val);

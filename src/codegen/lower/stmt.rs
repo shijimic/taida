@@ -41,6 +41,14 @@ impl Lowering {
                             crate::parser::TypeExpr::List(_) => {
                                 self.list_returning_funcs.insert(func_def.name.clone());
                             }
+                            // C18-2: Functions declared `=> :SomeEnum` should
+                            // propagate the enum type to call sites so that
+                            // `@(state <= pickColor(n))` tags `state` as an
+                            // Enum field for jsonEncode variant-name output.
+                            crate::parser::TypeExpr::Named(n) if self.enum_defs.contains_key(n) => {
+                                self.enum_returning_funcs
+                                    .insert(func_def.name.clone(), n.clone());
+                            }
                             _ => {}
                         }
                     }
@@ -109,7 +117,21 @@ impl Lowering {
                                     "Float" => 2,
                                     "Str" => 3,
                                     "Bool" => 4,
-                                    _ => 0,
+                                    // C18-2: Enum-typed field → tag 5 (Enum).
+                                    // Look up variants so the runtime can emit
+                                    // the variant-name Str via
+                                    // `taida_register_field_enum`.
+                                    other => {
+                                        if let Some(variants) = self.enum_defs.get(other) {
+                                            // Record the descriptor so we can emit
+                                            // the register_field_enum call later.
+                                            self.field_enum_descriptors
+                                                .insert(field_def.name.clone(), variants.join(","));
+                                            5
+                                        } else {
+                                            0
+                                        }
+                                    }
                                 },
                                 _ => 0,
                             };
@@ -290,6 +312,17 @@ impl Lowering {
                     }
                 }
                 Statement::Import(import_stmt) => {
+                    // C18-1: Before any addon / stdlib classification,
+                    // pull in Enum type definitions exported by the target
+                    // module so `Color:Red()` in the importer can resolve
+                    // at codegen time. The call is a no-op for
+                    // `taida-lang/*` and `npm:*` paths.
+                    if !import_stmt.path.starts_with("taida-lang/")
+                        && !import_stmt.path.starts_with("npm:")
+                    {
+                        self.absorb_cross_module_enum_defs(import_stmt);
+                    }
+
                     // stdlib モジュールの関数はランタイム関数にマッピング
                     // 定数は stdlib_constants にマッピング
                     // RCB-213: version is now passed through to resolve_import_path
@@ -617,7 +650,26 @@ impl Lowering {
             for name in &sorted_names {
                 let hash = simple_hash(name);
                 let type_tag = self.field_type_tags.get(name).copied().unwrap_or(0);
-                if type_tag > 0 {
+                if type_tag == 5 {
+                    // C18-2: Enum field — register with variants CSV.
+                    let variants_csv = self
+                        .field_enum_descriptors
+                        .get(name)
+                        .cloned()
+                        .unwrap_or_default();
+                    let hash_var = main_fn.alloc_var();
+                    reg_insts.push(IrInst::ConstInt(hash_var, hash as i64));
+                    let name_var = main_fn.alloc_var();
+                    reg_insts.push(IrInst::ConstStr(name_var, name.clone()));
+                    let variants_var = main_fn.alloc_var();
+                    reg_insts.push(IrInst::ConstStr(variants_var, variants_csv));
+                    let result_var = main_fn.alloc_var();
+                    reg_insts.push(IrInst::Call(
+                        result_var,
+                        "taida_register_field_enum".to_string(),
+                        vec![hash_var, name_var, variants_var],
+                    ));
+                } else if type_tag > 0 {
                     // Use register_field_type (with type tag)
                     let hash_var = main_fn.alloc_var();
                     reg_insts.push(IrInst::ConstInt(hash_var, hash as i64));
@@ -1368,6 +1420,22 @@ impl Lowering {
                 // retain-on-store: List を返す式の結果を追跡
                 if self.expr_is_list(&assign.value) {
                     self.list_vars.insert(assign.target.clone());
+                }
+                // C18-2: Enum-variant literal / known Enum var / annotation で
+                // 束縛された変数を enum_vars に記録する。
+                // `state <= HiveState:Policy()` や `state: HiveState <= ...`
+                // を後段で `@(state <= state)` 構築時に field 型として認識する。
+                if let Some(enum_name) = self.expr_enum_type_name(&assign.value) {
+                    self.enum_vars.insert(assign.target.clone(), enum_name);
+                } else if let Some(crate::parser::TypeExpr::Named(tn)) =
+                    assign.type_annotation.as_ref()
+                    && self.enum_defs.contains_key(tn)
+                {
+                    self.enum_vars.insert(assign.target.clone(), tn.clone());
+                } else if let Expr::Ident(src_name, _) = &assign.value
+                    && let Some(src_enum) = self.enum_vars.get(src_name).cloned()
+                {
+                    self.enum_vars.insert(assign.target.clone(), src_enum);
                 }
                 // QF-34: MoldInst の Lax 内部型を追跡（unmold 時の型推定用）
                 if let Expr::MoldInst(mold_name, _, _, _) = &assign.value {

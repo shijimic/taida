@@ -149,6 +149,13 @@ fn runtime_abi(name: &str) -> Result<RuntimeAbi, String> {
             params: &[],
             returns: &[],
         },
+        // C18B-005 fix: runtime abort with message. Used by the
+        // Ordinal[] lowering to reject non-Enum arguments at run time
+        // with the same shape as the interpreter's RuntimeError.
+        "taida_runtime_panic" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Val],
+        },
 
         // ── 整数演算 ──
         "taida_int_add" | "taida_int_sub" | "taida_int_mul" | "taida_poly_add" => RuntimeAbi {
@@ -1442,6 +1449,22 @@ fn runtime_abi(name: &str) -> Result<RuntimeAbi, String> {
         },
         "taida_register_field_type" => RuntimeAbi {
             params: &[Val, Ptr, Val],
+            returns: &[Val],
+        },
+        // C18-2: taida_register_field_enum(hash, name_ptr, variants_csv_ptr)
+        // variants_csv_ptr is a C string "Red,Green,Blue" which the runtime
+        // splits at encode-time to find the variant name by ordinal.
+        "taida_register_field_enum" => RuntimeAbi {
+            params: &[Val, Ptr, Ptr],
+            returns: &[Val],
+        },
+        // C18B-003 fix: taida_register_pack_field_enum(pack_ptr, field_hash, variants_csv_ptr)
+        // Per-pack-instance registration so two packs sharing the same
+        // field name but holding distinct enums don't collide in the
+        // global field registry. `json_serialize_pack_fields` prefers
+        // the per-pack descriptor before falling back to the global.
+        "taida_register_pack_field_enum" => RuntimeAbi {
+            params: &[Ptr, Val, Ptr],
             returns: &[Val],
         },
 

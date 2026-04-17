@@ -359,6 +359,84 @@ function __taida_registerEnumDef(name, variants) {
   __taida_enumDefs[name] = variants;
 }
 
+// C18-2: Construct a tagged Enum value that coerces to its ordinal Int for
+// arithmetic / comparison but emits its declared variant-name Str when
+// `JSON.stringify` is invoked (via `toJSON`). Mirrors the interpreter's
+// `Value::EnumVal(enum_name, ordinal)` variant.
+//
+// The return is wrapped in a Number subclass equivalent so that:
+//  - `a === b` (ordinal equality) still works with `Number.prototype`
+//    primitive coercion under `==`;
+//  - strict `===` against a primitive number requires `Number(a) === b`
+//    — we handle this at the callsites that matter (binary ops below);
+//  - `JSON.stringify` uses `toJSON` automatically (emits variant name);
+//  - `typeof` reports `'object'`, not `'number'` — this is acceptable
+//    because `typeof` on Enum values was never a contract, whereas the
+//    ordinal equality / arithmetic was. If a future test relies on
+//    `typeof`, we can revisit.
+function __taida_enumVal(enumName, ordinal) {
+  // Using a function-object wrapper — `new Number(ordinal)` is rejected
+  // by eslint in many configs, and assigning enumerable own properties
+  // keeps the object inspectable. `valueOf` drives primitive coercion
+  // (arithmetic, comparisons, ==). `toJSON` drives JSON.stringify.
+  const obj = Object.create(null);
+  obj.__taida_enum_name = enumName;
+  obj.__taida_enum_ordinal = ordinal;
+  obj.valueOf = function () { return ordinal; };
+  obj.toJSON = function () {
+    const variants = __taida_enumDefs[enumName];
+    if (variants && ordinal >= 0 && ordinal < variants.length) {
+      return variants[ordinal];
+    }
+    return ordinal;
+  };
+  obj.toString = function () { return String(ordinal); };
+  return obj;
+}
+
+// C18-2: Detect a tagged Enum value produced by `__taida_enumVal`.
+function __taida_isEnumVal(v) {
+  return v !== null && typeof v === 'object' && typeof v.__taida_enum_name === 'string' && typeof v.__taida_enum_ordinal === 'number';
+}
+
+// C18-2: Ordinal-coerce a value (enum wrapper or primitive number) for use
+// in arithmetic / comparison contexts that require a primitive.
+function __taida_enumOrdinal(v) {
+  if (__taida_isEnumVal(v)) return v.__taida_enum_ordinal;
+  return v;
+}
+
+// C18B-005 fix: strict ordinal extractor for the `Ordinal[]` mold.
+// Mirrors the interpreter contract at
+// `src/interpreter/mold_eval.rs:3373-3394`: rejects non-Enum inputs
+// so `--no-check` cannot silently erase misuse. The companion Native
+// check lives in `taida_ordinal_strict` in `core.c`.
+function __taida_enumOrdinalStrict(v) {
+  if (__taida_isEnumVal(v)) return v.__taida_enum_ordinal;
+  let got;
+  if (v === null || v === undefined) {
+    got = 'Unit';
+  } else if (typeof v === 'number') {
+    got = Number.isInteger(v) ? 'Int' : 'Float';
+  } else if (typeof v === 'string') {
+    got = 'Str';
+  } else if (typeof v === 'boolean') {
+    got = 'Bool';
+  } else if (Array.isArray(v)) {
+    got = 'List';
+  } else if (typeof v === 'object') {
+    got = v.__type ? v.__type : 'Pack';
+  } else {
+    got = typeof v;
+  }
+  throw new __TaidaError(
+    'RuntimeError',
+    'Ordinal: argument must be an Enum value, got ' + got + '. '
+      + 'Hint: pass an Enum variant such as `Ordinal[Color:Red()]()`.',
+    {}
+  );
+}
+
 // C16: Lax[Enum] shape identical to interpreter / native.
 //   @(hasValue=false, __value=Int(0), __default=Int(0), __type="Lax")
 // First-variant-is-default rule is encoded via Int(0). Delegates to
@@ -1484,6 +1562,11 @@ function __taida_stdout(...args) {
     let rendered;
     if (__taida_isBytes(arg)) {
       rendered = __taida_bytes_to_string(arg);
+    } else if (__taida_isEnumVal(arg)) {
+      // C18-2: Enum wrapper — print ordinal Str (matches interpreter
+      // `Value::EnumVal` display which falls back to the ordinal to
+      // preserve the `.toString()` contract from C16 / ROOT-4).
+      rendered = String(arg.__taida_enum_ordinal);
     } else if (Array.isArray(arg)) {
       rendered = '@[' + arg.map(x => __taida_format(x)).join(', ') + ']';
     } else if (arg && arg.__type === 'Async') {
@@ -1540,6 +1623,9 @@ function __taida_utf8_byte_length(s) {
 function __taida_format(v) {
   if (typeof v === 'string') return '"' + v + '"';
   if (__taida_isBytes(v)) return __taida_bytes_to_string(v);
+  // C18-2: Enum wrapper — format as its ordinal Int to match the
+  // interpreter's `to_debug_string` for `Value::EnumVal`.
+  if (__taida_isEnumVal(v)) return String(v.__taida_enum_ordinal);
   if (Array.isArray(v)) return '@[' + v.map(x => __taida_format(x)).join(', ') + ']';
   if (typeof v === 'boolean') return v ? 'true' : 'false';
   if (v && typeof v === 'object' && !Array.isArray(v) && !v.__type) {
@@ -1560,6 +1646,10 @@ function __taida_to_string(v) {
   if (typeof v === 'boolean') return v ? 'true' : 'false';
   if (v === null || v === undefined) return '';
   if (__taida_isBytes(v)) return __taida_bytes_to_string(v);
+  // C18-2: Enum wrapper (`__taida_enumVal`) — `.toString()` returns the
+  // ordinal Str (preserving the interpreter's Display contract). The
+  // variant-name Str is only used by jsonEncode via `toJSON`.
+  if (__taida_isEnumVal(v)) return String(v.__taida_enum_ordinal);
   if (Array.isArray(v)) {
     return '@[' + v.map(x => __taida_format(x)).join(', ') + ']';
   }
@@ -1728,6 +1818,17 @@ async function __taida_unmold_async(v) {
 function __taida_equals(a, b) {
   if (a === b) return true;
   if (a == null || b == null) return false;
+  // C18-2: Enum-aware equality. Enum wrappers compare by (enum_name,
+  // ordinal). An Enum compares equal to a plain Number with the same
+  // ordinal, mirroring the interpreter's `Int ↔ EnumVal` compatibility.
+  const aIsEnum = __taida_isEnumVal(a);
+  const bIsEnum = __taida_isEnumVal(b);
+  if (aIsEnum && bIsEnum) {
+    return a.__taida_enum_name === b.__taida_enum_name
+      && a.__taida_enum_ordinal === b.__taida_enum_ordinal;
+  }
+  if (aIsEnum && typeof b === 'number') return a.__taida_enum_ordinal === b;
+  if (bIsEnum && typeof a === 'number') return b.__taida_enum_ordinal === a;
   if (typeof a !== typeof b) return false;
   if (typeof a !== 'object') return a === b;
   if (Array.isArray(a) && Array.isArray(b)) {
@@ -1953,6 +2054,9 @@ if (!String.prototype.__taida_str_patched) {
 
 // ── Helper: sort object keys for deterministic JSON output ──
 function __taidaSortKeys(obj) {
+  // C18-2: Pass Enum wrappers through untouched so JSON.stringify invokes
+  // their `toJSON` method and emits the variant-name Str.
+  if (__taida_isEnumVal(obj)) return obj;
   if (Array.isArray(obj)) return obj.map(__taidaSortKeys);
   if (obj && typeof obj === 'object' && !(obj instanceof __TaidaJSON)) {
     const sorted = {};

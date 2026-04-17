@@ -1257,7 +1257,15 @@ impl Interpreter {
                             enum_name, variant_name
                         ),
                     })?;
-                Ok(Signal::Value(Value::Int(ordinal as i64)))
+                // C18-2 / C18-4: Return a tagged `EnumVal` so jsonEncode can
+                // emit the variant name and Ordinal[] / ordering can assert
+                // the source enum. `EnumVal` compares equal to
+                // `Value::Int(ordinal)` (see `impl PartialEq`) so existing
+                // callers that compared against Int ordinals still work.
+                Ok(Signal::Value(Value::EnumVal(
+                    enum_name.clone(),
+                    ordinal as i64,
+                )))
             }
 
             Expr::TypeInst(name, fields, _) => {

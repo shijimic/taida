@@ -88,6 +88,7 @@ struct MoldBindingDef<'a> {
 /// - `E1606` -- logical operator type mismatch
 /// - `E1607` -- unary operator type mismatch
 /// - `E1608` -- unknown enum variant
+/// - `E1618` -- enum variant order mismatch across module boundary (C18-1)
 /// - `E1611` -- JS backend capability rejection
 /// - `E1612` -- WASM backend capability rejection
 /// - `E1613` -- TypeExtends does not accept enum variant literals
@@ -1151,6 +1152,148 @@ impl TypeChecker {
                     ),
                     span: imp.span.clone(),
                 });
+            }
+        }
+    }
+
+    /// C18-1: Register Enum (and future TypeDef) types that cross the module
+    /// boundary so that `Color:Red()` in the importer does not trigger
+    /// `[E1608] Unknown enum type 'Color'.`.
+    ///
+    /// Behaviour:
+    /// 1. Resolve the import path (relative, package, or submodule) using the same
+    ///    logic as `validate_import_symbols`.
+    /// 2. Parse the target module and collect every `EnumDef` whose name is being
+    ///    imported by the current statement.
+    /// 3. If the importer has **not** already defined an enum with the same local
+    ///    name, register it into `self.registry`. The wire-order is the import
+    ///    origin (source of truth).
+    /// 4. If the importer **has** already defined the enum locally (common pattern
+    ///    during the C18 transition), check that the variant list is identical;
+    ///    any mismatch emits `[E1618] Enum '<name>' variant order mismatch across
+    ///    module boundary.` to catch the silent-bug risk raised in ROOT-5.
+    ///
+    /// Notes:
+    /// - `[E1618]` is allocated for this check because `[E1610]` is already
+    ///   occupied by cyclic-inheritance detection. The design rationale is
+    ///   recorded in `.dev/C18_BLOCKERS.md` (C18B-001).
+    /// - Aliased imports (`>>> ./m.td => @(Color: Paint)`) register the enum
+    ///   under the alias, mirroring the interpreter behaviour.
+    fn register_imported_types(&mut self, imp: &crate::parser::ImportStmt) {
+        use crate::parser::Statement as S;
+
+        // Core bundled packages are handled elsewhere (net / crypto).
+        if imp.path.starts_with("npm:") || imp.path.starts_with("taida-lang/") {
+            return;
+        }
+
+        // Same path-resolution strategy as `validate_import_symbols`.
+        let source_file = match &self.source_file {
+            Some(f) => f.clone(),
+            None => return,
+        };
+
+        let td_path: std::path::PathBuf = if imp.path.starts_with("./")
+            || imp.path.starts_with("../")
+            || imp.path.starts_with('/')
+        {
+            let source_dir = source_file.parent().unwrap_or(std::path::Path::new("."));
+            let path = source_dir.join(&imp.path);
+            if path.exists() { path } else { return }
+        } else {
+            // Package import — resolve via .taida/deps/
+            let source_dir = source_file.parent().unwrap_or(std::path::Path::new("."));
+            let project_root = Self::find_project_root(source_dir);
+            let resolution = if let Some(ref ver) = imp.version {
+                crate::pkg::resolver::resolve_package_module_versioned(
+                    &project_root,
+                    &imp.path,
+                    ver,
+                )
+            } else {
+                crate::pkg::resolver::resolve_package_module(&project_root, &imp.path)
+            };
+            match resolution {
+                Some(res) => match &res.submodule {
+                    Some(sub) => {
+                        let sub_path = res.pkg_dir.join(format!("{}.td", sub));
+                        if sub_path.exists() { sub_path } else { return }
+                    }
+                    None => {
+                        let entry_name =
+                            match crate::pkg::manifest::Manifest::from_dir(&res.pkg_dir) {
+                                Ok(Some(manifest)) => manifest.entry,
+                                _ => "main.td".to_string(),
+                            };
+                        let entry_path = if let Some(stripped) = entry_name.strip_prefix("./") {
+                            res.pkg_dir.join(stripped)
+                        } else {
+                            res.pkg_dir.join(&entry_name)
+                        };
+                        if entry_path.exists() {
+                            entry_path
+                        } else {
+                            return;
+                        }
+                    }
+                },
+                None => return,
+            }
+        };
+
+        let source = match std::fs::read_to_string(&td_path) {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+        let (program, _) = crate::parser::parse(&source);
+
+        // Build a map of imported-symbol-name → local-alias (or the same name).
+        let requested: std::collections::HashMap<&str, &str> = imp
+            .symbols
+            .iter()
+            .map(|s| {
+                (
+                    s.name.as_str(),
+                    s.alias.as_deref().unwrap_or(s.name.as_str()),
+                )
+            })
+            .collect();
+        if requested.is_empty() {
+            return;
+        }
+
+        for stmt in &program.statements {
+            if let S::EnumDef(ed) = stmt
+                && let Some(&local_name) = requested.get(ed.name.as_str())
+            {
+                let variants: Vec<String> = ed.variants.iter().map(|v| v.name.clone()).collect();
+
+                if let Some(existing) = self.registry.get_enum_variants(local_name) {
+                    // Local redefinition already present — must match the
+                    // exported module's order exactly.
+                    if existing != variants {
+                        self.errors.push(TypeError {
+                            message: format!(
+                                "[E1618] Enum '{}' variant order mismatch across module boundary. \
+                                 Defined at '{}': [{}]. Imported as: [{}]. \
+                                 Hint: Align local redefinition order with the exporting module, \
+                                 or remove the local redefinition and rely on the imported type.",
+                                local_name,
+                                td_path.display(),
+                                variants.join(", "),
+                                existing.join(", ")
+                            ),
+                            span: imp.span.clone(),
+                        });
+                    }
+                } else {
+                    // No local redefinition — register as if declared here.
+                    self.registry.register_enum(local_name, variants);
+                    self.declared_concrete_type_names
+                        .insert(local_name.to_string());
+                    self.declared_header_arities
+                        .insert(local_name.to_string(), 0);
+                }
             }
         }
     }
@@ -2939,6 +3082,12 @@ defaulted fields must be provided via `()`",
             Statement::Import(imp) => {
                 // RCB-201: Validate imported symbols against module's export list
                 self.validate_import_symbols(imp);
+                // C18-1: Register Enum types (and future TypeDefs) that cross the
+                // module boundary so that `Color:Red()` in the importer resolves
+                // without hitting [E1608]. Also detects variant-order mismatch
+                // between a local redefinition and the imported module and emits
+                // [E1618] when they disagree.
+                self.register_imported_types(imp);
                 // Register imported symbols as Unknown
                 // (We don't have cross-module type info yet)
                 for sym in &imp.symbols {
@@ -3173,20 +3322,36 @@ defaulted fields must be provided via `()`",
                         Type::Bool
                     }
                     BinOp::Lt | BinOp::Gt | BinOp::GtEq => {
-                        // FL-4: Ordering operators require numeric or string operands
+                        // FL-4: Ordering operators require numeric or string operands.
+                        //
+                        // C18-4: Same-Enum ordering is also allowed. `>=` / `<=` /
+                        // `<` / `>` compare the declared ordinal position of the
+                        // two variants. Cross-Enum and Enum↔Int ordering stays
+                        // rejected with `[E1605]` — use `Ordinal[]` to obtain
+                        // the Int explicitly (added in C18-3). The declared
+                        // order of an Enum is therefore semantic; see
+                        // `docs/guide/01_types.md` for the author contract.
                         if left_type != Type::Unknown
                             && right_type != Type::Unknown
                             && !Self::contains_unknown(&left_type)
                             && !Self::contains_unknown(&right_type)
                         {
-                            let valid = (left_type.is_numeric() && right_type.is_numeric())
-                                || (matches!(left_type, Type::Str)
-                                    && matches!(right_type, Type::Str));
+                            let both_numeric = left_type.is_numeric() && right_type.is_numeric();
+                            let both_str =
+                                matches!(left_type, Type::Str) && matches!(right_type, Type::Str);
+                            let same_enum = match (&left_type, &right_type) {
+                                (Type::Named(a), Type::Named(b)) => {
+                                    a == b && self.registry.is_enum_type(a)
+                                }
+                                _ => false,
+                            };
+                            let valid = both_numeric || both_str || same_enum;
                             if !valid {
                                 self.errors.push(TypeError {
                                     message: format!(
                                         "[E1605] Cannot compare {} with {} using {:?}. \
-                                         Hint: Ordering comparison requires numeric or string operands.",
+                                         Hint: Ordering comparison requires numeric, string, or same-Enum operands. \
+                                         For Enum↔Int comparisons use `Ordinal[<enum>]()` to obtain the Int first.",
                                         left_type, right_type, op
                                     ),
                                     span: span.clone(),

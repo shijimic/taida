@@ -326,6 +326,17 @@ impl JsCodegen {
                     }
                 }
             }
+            // C18-1: User module enum imports (`>>> ./m.td => @(Color)`).
+            // Mirror of the interpreter / type-checker behaviour so that
+            // `Color:Red()` in the importer resolves to its exporter-ordinal
+            // at codegen time. Pulls variant list from the exporter's .td
+            // source; silently no-ops if the path cannot be resolved.
+            if let Statement::Import(import) = stmt
+                && !import.path.starts_with("taida-lang/")
+                && !import.path.starts_with("npm:")
+            {
+                self.absorb_cross_module_enum_defs(import);
+            }
         }
 
         // Pre-pass: detect mutual recursion groups and mark functions for trampolining
@@ -766,6 +777,20 @@ impl JsCodegen {
                     "__taida_registerEnumDef('{}', [{}]);\n",
                     enum_def.name,
                     variants_js.join(", ")
+                ));
+                // C18-1: Emit a JS binding for the enum name so that
+                // `<<< @(Color)` can `export { Color }` and the importer
+                // can `import { Color }` without `Color is not defined`.
+                // The binding is never referenced by generated code
+                // (EnumVariant lowers to its ordinal literal); it only
+                // exists to satisfy ESM name resolution across the
+                // module boundary, mirroring the interpreter's
+                // `Value::BuchiPack([__type: EnumDef, __name: Color])`
+                // sentinel (eval.rs:398).
+                self.write_indent();
+                self.write(&format!(
+                    "const {} = {{ __type: 'EnumDef', __name: '{}' }};\n",
+                    enum_def.name, enum_def.name
                 ));
                 Ok(())
             }
@@ -1447,6 +1472,131 @@ impl JsCodegen {
         }
     }
 
+    /// C18-1: For a user-module import (`>>> ./m.td => @(Color)`), read the
+    /// exporting module and register any `EnumDef` whose name is being
+    /// imported into `self.enum_defs`. The enum is registered under the
+    /// local alias if one is provided (`@(Color: Paint)`), matching the
+    /// interpreter and type-checker semantics.
+    ///
+    /// Silently no-ops if the path cannot be resolved or the file is
+    /// unreadable / unparseable — the downstream lowering will surface
+    /// the real diagnostic. This helper only enriches enum_defs.
+    fn absorb_cross_module_enum_defs(&mut self, import: &ImportStmt) {
+        // C18B-004 fix: resolve local, absolute, and package imports
+        // so that `>>> acme/lib => @(Color)` (deps-backed enum import)
+        // works on the JS backend too — not only the relative-path
+        // variant required by the original Hachikuma workaround smoke.
+        //
+        // The resolution path mirrors `validate_import_symbols` and
+        // the checker's `absorb_cross_module_enum_defs` so all three
+        // agree on which `.td` file owns the exported enum.
+        let td_path = if import.path.starts_with("./")
+            || import.path.starts_with("../")
+            || import.path.starts_with('/')
+        {
+            match self.resolve_import_td_path(&import.path) {
+                Some(p) => p,
+                None => return,
+            }
+        } else if import.path.starts_with("npm:")
+            || import.path == "taida-lang/net"
+            || import.path == "taida-lang/js"
+            || import.path == "taida-lang/os"
+            || import.path == "taida-lang/crypto"
+            || import.path == "taida-lang/pool"
+        {
+            // Core-bundled / npm packages — nothing to absorb.
+            return;
+        } else if import.path.contains('/') {
+            // Package import (e.g. `acme/lib` or `acme/lib/sub`) — use
+            // the `.taida/deps/` resolver the same way the checker
+            // does. Silent no-op on resolver / IO failure matches the
+            // checker side; downstream lowering produces the real
+            // diagnostic if anything is wrong.
+            let project_root = match self.project_root.as_ref() {
+                Some(r) => r.clone(),
+                None => return,
+            };
+            let resolution = if let Some(ref ver) = import.version {
+                crate::pkg::resolver::resolve_package_module_versioned(
+                    &project_root,
+                    &import.path,
+                    ver,
+                )
+            } else {
+                crate::pkg::resolver::resolve_package_module(&project_root, &import.path)
+            };
+            let resolution = match resolution {
+                Some(r) => r,
+                None => return,
+            };
+            match &resolution.submodule {
+                Some(sub) => {
+                    let p = resolution.pkg_dir.join(format!("{}.td", sub));
+                    if !p.exists() {
+                        return;
+                    }
+                    p
+                }
+                None => {
+                    let entry_name =
+                        match crate::pkg::manifest::Manifest::from_dir(&resolution.pkg_dir) {
+                            Ok(Some(manifest)) => manifest.entry,
+                            _ => "main.td".to_string(),
+                        };
+                    let entry_path = if let Some(stripped) = entry_name.strip_prefix("./") {
+                        resolution.pkg_dir.join(stripped)
+                    } else {
+                        resolution.pkg_dir.join(&entry_name)
+                    };
+                    if !entry_path.exists() {
+                        return;
+                    }
+                    entry_path
+                }
+            }
+        } else {
+            return;
+        };
+
+        let source = match std::fs::read_to_string(&td_path) {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+        let (program, _parse_errors) = crate::parser::parse(&source);
+
+        let requested: std::collections::HashMap<&str, &str> = import
+            .symbols
+            .iter()
+            .map(|s| {
+                (
+                    s.name.as_str(),
+                    s.alias.as_deref().unwrap_or(s.name.as_str()),
+                )
+            })
+            .collect();
+        if requested.is_empty() {
+            return;
+        }
+
+        for stmt in &program.statements {
+            if let Statement::EnumDef(ed) = stmt
+                && let Some(&local_name) = requested.get(ed.name.as_str())
+            {
+                let variants: Vec<String> = ed.variants.iter().map(|v| v.name.clone()).collect();
+                // Importer local redefinition wins silently only when
+                // the variant lists match — the type checker has already
+                // emitted [E1618] for mismatches, so by the time we are
+                // here either (a) there is no local redef, or (b) they
+                // agree. Either way, recording the exporter's list is
+                // safe and matches the interpreter.
+                self.enum_defs
+                    .entry(local_name.to_string())
+                    .or_insert(variants);
+            }
+        }
+    }
+
     /// RCB-201: Validate that all imported symbols are exported by the target module.
     /// Reads and parses the target .td file, checks for explicit `<<<` declarations,
     /// and returns an error if any imported symbol is not in the export list.
@@ -1711,6 +1861,43 @@ impl JsCodegen {
                 symbols.join(", "),
                 js_path
             ));
+        }
+
+        // C18B-011 fix: Register absorbed imported enums into the consumer
+        // module's `__taida_enumDefs` registry so that consumer-side
+        // `jsonEncode(@(state <= ImportedEnum:X()))` emits the variant-name
+        // Str via `__taida_enumVal(...).toJSON()` instead of falling back to
+        // the raw ordinal.
+        //
+        // `self.enum_defs` was previously populated by
+        // `absorb_cross_module_enum_defs` (under the local alias). The
+        // registry itself is a per-module `const` declared by the embedded
+        // runtime, so producer-module registration does not carry over to
+        // the consumer. We therefore re-register the enum on the consumer
+        // side here, mirroring the symmetry required by C18-2 across the
+        // 3 backends. `Statement::EnumDef` at line 767 handles the
+        // declaring-module side of the same symmetry.
+        //
+        // We only register for imports that could plausibly carry a user
+        // enum — i.e. anything not bundled by the embedded JS runtime.
+        // `taida-lang/net`'s `HttpProtocol` is an exception and is already
+        // registered by its own code path at line 317 via `self.enum_defs`
+        // pre-seeding; we still re-emit here because the net branch
+        // `return`s above before reaching this point.
+        if !import.path.starts_with("taida-lang/") && !import.path.starts_with("npm:") {
+            for sym in &import.symbols {
+                let local_name = sym.alias.as_deref().unwrap_or(sym.name.as_str());
+                if let Some(variants) = self.enum_defs.get(local_name) {
+                    let variants_js: Vec<String> =
+                        variants.iter().map(|v| format!("'{}'", v)).collect();
+                    self.write_indent();
+                    self.write(&format!(
+                        "__taida_registerEnumDef('{}', [{}]);\n",
+                        local_name,
+                        variants_js.join(", ")
+                    ));
+                }
+            }
         }
         Ok(())
     }
@@ -2426,11 +2613,38 @@ impl JsCodegen {
                     .ok_or_else(|| JsError {
                         message: format!("Unknown enum variant '{}:{}()'", enum_name, variant_name),
                     })?;
-                self.write(&ordinal.to_string());
+                // C18-2: Emit a tagged wrapper whose `toJSON` returns the
+                // variant-name Str. Arithmetic / comparison with the
+                // ordinal continues to work via `valueOf`. See
+                // `src/js/runtime/core.rs::__taida_enumVal`.
+                self.write(&format!("__taida_enumVal('{}', {})", enum_name, ordinal));
                 Ok(())
             }
             Expr::MoldInst(name, type_args, fields, _) => {
                 // B5: MoldInst → function call with type args
+
+                // C18-3: Ordinal[<enum_value>]() → strict Enum → Int.
+                //
+                // C18B-005 fix: call `__taida_enumOrdinalStrict` (not the
+                // permissive `__taida_enumOrdinal`) so non-Enum arguments
+                // raise a `RuntimeError` whose message matches the
+                // interpreter's exactly. Pre-fix, `Ordinal[42]()`
+                // silently returned `42` under JS / Native while the
+                // interpreter errored, which diverged 3-backend parity
+                // and invalidated the IMPL_SPEC comment claiming that
+                // non-Enum inputs are rejected.
+                if name == "Ordinal" {
+                    if type_args.is_empty() {
+                        return Err(JsError {
+                            message: "Ordinal requires 1 argument: Ordinal[<enum_value>]()"
+                                .to_string(),
+                        });
+                    }
+                    self.write("__taida_enumOrdinalStrict(");
+                    self.gen_expr(&type_args[0])?;
+                    self.write(")");
+                    return Ok(());
+                }
 
                 // B11-5b: If[cond, then, else]() → (cond ? then : else)
                 // Short-circuit via ternary operator — non-selected branch is never evaluated.
@@ -2515,7 +2729,12 @@ impl JsCodegen {
                             }
                         }
                         Expr::TypeLiteral(enum_name, Some(variant_name), _) => {
-                            // Enum variant check: value === ordinal
+                            // Enum variant check: unwrap `__taida_enumVal`
+                            // wrapper via `__taida_enumOrdinal` (also works
+                            // on plain numbers) and compare to the ordinal.
+                            // C18-2: Enum values are now tagged wrappers,
+                            // so a bare `=== ordinal` would compare object
+                            // reference to Number and always return false.
                             let ordinal = self
                                 .enum_defs
                                 .get(enum_name.as_str())
@@ -2523,8 +2742,9 @@ impl JsCodegen {
                                     variants.iter().position(|v| v == variant_name)
                                 })
                                 .unwrap_or(usize::MAX);
+                            self.write("__taida_enumOrdinal(");
                             self.gen_expr(&type_args[0])?;
-                            self.write(&format!(" === {}", ordinal));
+                            self.write(&format!(") === {}", ordinal));
                         }
                         _ => {
                             // Fallback: emit false

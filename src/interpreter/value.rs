@@ -43,6 +43,24 @@ pub enum Value {
     /// Stream value — time-series mold type. Values flow over time.
     /// `]=>` collects all values into `@[T]` (blocking).
     Stream(StreamValue),
+    /// C18-2 / C18-3: Tagged enum value — the ordinal carries its owning
+    /// enum name so that `jsonEncode` can emit the variant name Str and
+    /// `Ordinal[]` can assert the argument came from an Enum variant.
+    ///
+    /// Interop with `Value::Int(ordinal)`:
+    /// - equality: `Int(n) == EnumVal(_, n)` (same ordinal matches).
+    /// - ordering: same-enum `EnumVal` pairs compare by ordinal; cross-
+    ///   enum or Enum↔Int ordering still falls through to `None`.
+    /// - arithmetic: addition / subtraction treat EnumVal like Int(n).
+    /// - `.toString()` / `to_display_string()` returns the ordinal as a
+    ///   Str, preserving the C16 contract (the variant-name representation
+    ///   is only used by jsonEncode, not by display).
+    ///
+    /// This is strictly additive: every existing code path that produces
+    /// `Value::Int(ordinal)` for an Enum continues to work. Code paths
+    /// that need the enum identity (Phase 2 jsonEncode, Phase 3 Ordinal[],
+    /// Phase 4 ordering) use pattern-match on `EnumVal`.
+    EnumVal(String, i64),
 }
 
 /// A function closure.
@@ -240,6 +258,9 @@ impl Value {
                 serde_json::Value::Array(a) => !a.is_empty(),
                 serde_json::Value::Object(o) => !o.is_empty(),
             },
+            // C18-2: EnumVal shares Int(ordinal) truthiness: the first
+            // variant (ordinal 0) is falsy, every other variant is truthy.
+            Value::EnumVal(_, n) => *n != 0,
         }
     }
 
@@ -342,6 +363,11 @@ impl Value {
                 StreamStatus::Active => "Stream[active]".to_string(),
                 StreamStatus::Completed => format!("Stream[completed: {} items]", s.items.len()),
             },
+            // C18-2: `.toString()` and display preserve the ordinal Str
+            // contract (`docs/guide/01_types.md:609` and ROOT-4 in
+            // `.dev/C18_BLOCKERS.md`). jsonEncode uses a dedicated path
+            // to emit the variant name.
+            Value::EnumVal(_, n) => n.to_string(),
         }
     }
 
@@ -409,6 +435,20 @@ impl PartialEq for Value {
             (Value::Json(a), Value::Json(b)) => a == b,
             (Value::Molten, Value::Molten) => true,
             (Value::Stream(a), Value::Stream(b)) => a.status == b.status && a.items == b.items,
+            // C18-2: EnumVal equality — same enum + same ordinal. Cross-enum
+            // `EnumVal` comparisons return false (the type checker blocks them
+            // with [E1605]; this is a defence in depth). `EnumVal` is also
+            // equal to `Int(ordinal)` and `Float(ordinal)` with the same
+            // numeric value so that existing callers who look at ordinals
+            // directly continue to work (e.g. the JSON schema code returns
+            // `Value::Int(ordinal)` from `JSON[..., Enum]()`).
+            (Value::EnumVal(a_name, a_n), Value::EnumVal(b_name, b_n)) => {
+                a_name == b_name && a_n == b_n
+            }
+            (Value::EnumVal(_, n), Value::Int(m)) | (Value::Int(m), Value::EnumVal(_, n)) => n == m,
+            (Value::EnumVal(_, n), Value::Float(f)) | (Value::Float(f), Value::EnumVal(_, n)) => {
+                (*n as f64) == *f
+            }
             _ => false,
         }
     }
@@ -423,6 +463,15 @@ impl PartialOrd for Value {
             (Value::Float(a), Value::Int(b)) => a.partial_cmp(&(*b as f64)),
             (Value::Str(a), Value::Str(b)) => a.partial_cmp(b),
             (Value::Bool(a), Value::Bool(b)) => a.partial_cmp(b),
+            // C18-4: Same-enum `EnumVal` pairs order by ordinal (declared
+            // order is the contract). Cross-enum and Enum↔Int ordering stays
+            // `None` so the type checker's [E1605] path still fires when it
+            // has to (the checker never reaches here for cross-enum cases,
+            // but this is defence in depth for runtime comparisons inside
+            // `--no-check` builds).
+            (Value::EnumVal(a_name, a_n), Value::EnumVal(b_name, b_n)) if a_name == b_name => {
+                a_n.partial_cmp(b_n)
+            }
             _ => None,
         }
     }

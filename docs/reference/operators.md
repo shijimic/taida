@@ -100,6 +100,36 @@ is_small <= x < 10 || x == 10
 is_small <= !(x > 10)
 ```
 
+### オペランド型のルール
+
+| 演算子 | 受理する組み合わせ | エラー |
+|--------|-------------------|--------|
+| `==` / `!=` | 任意の同型 or numeric 同士 or 構造的 subtyping | 互換性のない型は `[E1605]` |
+| `<` / `>` / `>=` | numeric 同士、Str 同士、**同一 Enum 同士** (C18-4) | 異 Enum / Enum ↔ Int は `[E1605]` |
+
+#### Enum ordering (C18-4)
+
+同一 Enum のバリアント同士は、**宣言順** をもとに順序比較できます:
+
+```taida
+Enum => HiveState = :Creating :Running :Stopped
+
+c <= HiveState:Creating()
+r <= HiveState:Running()
+
+stdout((c < r).toString())   // true — Creating(0) < Running(1)
+stdout((r >= c).toString())  // true
+```
+
+許可されるのは同一 Enum 同士のみ。異なる Enum 同士 / Enum と Int の比較は `[E1605]` で reject されます。Int 混在が必要な場合は `Ordinal[]` モールド経由で明示的に Int に変換してください:
+
+```taida
+// Int カラムとの比較 — Ordinal[] で Int 空間に揃える
+Ordinal[r]() > 0  // true
+```
+
+Enum の宣言順は semantic です。順序変更は既存 call site の ordering 結果を暗黙に変える可能性があるため、variant 順の追加・並び替えは破壊的変更として扱ってください。
+
 ---
 
 ## 論理演算子

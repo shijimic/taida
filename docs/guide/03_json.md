@@ -311,6 +311,40 @@ prettyStr <= jsonPretty(pilot)
 // }'
 ```
 
+### Enum フィールドは variant 名 Str で出力 (C18-2)
+
+`jsonEncode` は Enum 値を宣言した variant 名の Str で出力します（ordinal Int ではありません）。これは `JSON[raw, Schema]()` の decode 側（「Enum 型フィールドの検査」節）と対称な wire 形式で、encode → decode の round-trip が保証されます。
+
+```taida
+Enum => HiveState = :Creating :Running :Stopped
+Status = @(state: HiveState, count: Int)
+
+rec <= Status(state <= HiveState:Running(), count <= 42)
+stdout(jsonEncode(rec))
+// {"count":42,"state":"Running"}
+```
+
+round-trip の確認:
+
+```taida
+// encode
+raw <= jsonEncode(rec)
+
+// decode — 同じ schema を噛ませて戻す
+JSON[raw, Status]() ]=> rec2
+stdout(rec2.state == HiveState:Running())  // true
+```
+
+**変換規則**: variant 名はそのまま wire に出ます。snake_case / camelCase への自動変換は行いません。命名は開発者側の責任です。
+
+**既存の ordinal Int 出力が必要な場合**: C18-3 の `Ordinal[]` モールドで Int に明示変換してから encode してください。
+
+```taida
+// Int カラムとの互換が必要な場合
+payload <= @(state_id <= Ordinal[rec.state]())
+stdout(jsonEncode(payload))  // {"state_id":1}
+```
+
 ---
 
 ## 実用パターン

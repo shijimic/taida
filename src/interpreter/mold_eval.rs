@@ -3218,8 +3218,19 @@ impl Interpreter {
                         // Look up the enum definition and find the variant ordinal
                         if let Some(variants) = self.enum_defs.get(enum_name.as_str()) {
                             if let Some(ordinal) = variants.iter().position(|v| v == variant_name) {
-                                // Compare against the value's int representation
-                                matches!(&val, Value::Int(n) if *n == ordinal as i64)
+                                // C18-2: Accept both the legacy `Value::Int(n)`
+                                // representation (kept for any code path that
+                                // still produces raw ints from Enum sources)
+                                // AND the C18-2 tagged `Value::EnumVal(name, n)`
+                                // where the enum name must match. The latter
+                                // prevents a cross-enum false positive.
+                                match &val {
+                                    Value::Int(n) => *n == ordinal as i64,
+                                    Value::EnumVal(n_enum, n) => {
+                                        n_enum == enum_name && *n == ordinal as i64
+                                    }
+                                    _ => false,
+                                }
                             } else {
                                 false
                             }
@@ -3343,6 +3354,43 @@ impl Interpreter {
             "JSSpread" => Err(RuntimeError {
                 message: "JSSpread is only available in the JS transpiler backend".to_string(),
             }),
+
+            // ── C18-3: Ordinal[Enum:Variant()]() — explicit Enum → Int ──
+            //
+            // Returns the ordinal of an Enum value as an Int. This is the
+            // sanctioned path for interop with Int-typed columns / wire
+            // formats. Accepts any Enum value (`EnumVal(_, n)` produced by
+            // `Expr::EnumVariant`) and returns `Int(n)`.
+            //
+            // Rejects:
+            //   - non-Enum values (Int, Str, Float, Bool, etc.) with a
+            //     deterministic RuntimeError so the author cannot silently
+            //     use `Ordinal[]` as a generic identity function;
+            //   - zero arguments (`Ordinal[]()` is meaningless).
+            //
+            // Note: the inverse direction (`FromOrdinal[Color, 1]()`) is
+            // C18 scope-out. See `.dev/C18_DESIGN.md` §Scope外.
+            "Ordinal" => {
+                if type_args.is_empty() {
+                    return Err(RuntimeError {
+                        message: "Ordinal requires 1 argument: Ordinal[<enum_value>]()".into(),
+                    });
+                }
+                let v = match self.eval_expr(&type_args[0])? {
+                    Signal::Value(v) => v,
+                    other => return Ok(Some(other)),
+                };
+                match v {
+                    Value::EnumVal(_, ordinal) => Ok(Some(Signal::Value(Value::Int(ordinal)))),
+                    other => Err(RuntimeError {
+                        message: format!(
+                            "Ordinal: argument must be an Enum value, got {}. \
+                             Hint: pass an Enum variant such as `Ordinal[Color:Red()]()`.",
+                            Self::type_name_of(&other)
+                        ),
+                    }),
+                }
+            }
 
             _ => Ok(None),
         }

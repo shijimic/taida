@@ -343,6 +343,25 @@ Int["2", 2]().hasValue         // false (基数2で "2" は無効)
 Int["5", 1]().hasValue         // false (基数1は範囲外)
 ```
 
+### Ordinal[enum] (C18-3)
+
+Enum 値を宣言順の ordinal Int に変換します。Enum 表現力強化 (C18) で追加。
+
+```taida
+Enum => HiveState = :Creating :Running :Stopped
+
+Ordinal[HiveState:Running()]()  // 1
+Ordinal[HiveState:Creating()]() // 0
+Ordinal[HiveState:Stopped()]()  // 2
+```
+
+- **引数**: Enum 値ちょうど 1 つ。非 Enum を渡すと runtime error。
+- **戻り値**: `Int`（`Lax[Int]` ではない — 変換は常に成功する）。
+- **逆方向** (`Int → Enum`): C18 では未実装。別 track の `FromOrdinal[]` で検討中。
+- **用途**: 既存 Int カラム / binary wire との互換、`Ordinal[] > 0` のような Int 空間でのしきい値比較、将来の variant 並び替えに備えた explicit 固定。
+
+`.toString()` で得た Str を `Int[]` で parse する workaround は fragile なので使わないでください。
+
 ### UInt8 / Bytes / ByteSet / BytesToList
 
 バイト列境界のモールド群です。`Bytes` は不変で、更新は新しい値を返します。
@@ -1001,6 +1020,7 @@ Filter[list, isEven]() ]=> result
 | `Float[x]()` | x | - | Lax[Float] |
 | `Str[x]()` | x | - | Lax[Str] |
 | `Bool[x]()` | x | - | Lax[Bool] |
+| `Ordinal[e]()` | e: Enum | - | Int |
 | `UInt8[x]()` | x | - | Lax[Int] |
 | `Bytes[x]()` | x | fill | Lax[Bytes] |
 | `ByteSet[bytes, idx, value]()` | bytes, idx, value | - | Lax[Bytes] |

@@ -54,6 +54,12 @@ impl Interpreter {
             Value::Json(_) => "JSON",
             Value::Molten => "Molten",
             Value::Stream(_) => "Stream",
+            // C18-2: EnumVal reports as "Int" so that prelude `typeOf` /
+            // `typeof` builtins return the same type name they did before
+            // Phase 2. Existing user code expects Enum values to `typeOf`
+            // as Int because the internal representation has always been
+            // Int(ordinal); we preserve that observable behaviour.
+            Value::EnumVal(_, _) => "Int",
         }
     }
 
@@ -269,10 +275,20 @@ impl Interpreter {
                 } else {
                     Value::Unit
                 };
-                match crate::interpreter::json::stdlib_json_encode(&[val]) {
-                    Ok(result) => Ok(Some(Signal::Value(result))),
-                    Err(e) => Err(RuntimeError { message: e }),
-                }
+                // C18-2: route through the enum-aware encoder so that
+                // Enum values (`Value::EnumVal(enum_name, ordinal)`) are
+                // emitted as their declared variant-name Str, symmetric
+                // with the C16 `JSON[raw, Schema]()` decoder.
+                let json = match &val {
+                    Value::Json(j) => j.clone(),
+                    _ => crate::interpreter::json::taida_value_to_json_with_enum_defs(
+                        &val,
+                        &self.enum_defs,
+                    ),
+                };
+                Ok(Some(Signal::Value(Value::Str(
+                    serde_json::to_string(&json).unwrap_or_default(),
+                ))))
             }
 
             // ── jsonDecode — ABOLISHED (Molten Iron) ──
@@ -292,10 +308,18 @@ impl Interpreter {
                 } else {
                     Value::Unit
                 };
-                match crate::interpreter::json::stdlib_json_pretty(&[val]) {
-                    Ok(result) => Ok(Some(Signal::Value(result))),
-                    Err(e) => Err(RuntimeError { message: e }),
-                }
+                // C18-2: route through the enum-aware encoder for variant-
+                // name Str output; matches jsonEncode / C16 symmetry.
+                let json = match &val {
+                    Value::Json(j) => j.clone(),
+                    _ => crate::interpreter::json::taida_value_to_json_with_enum_defs(
+                        &val,
+                        &self.enum_defs,
+                    ),
+                };
+                Ok(Some(Signal::Value(Value::Str(
+                    serde_json::to_string_pretty(&json).unwrap_or_default(),
+                ))))
             }
 
             // ── jsonFrom — ABOLISHED (Molten Iron) ──

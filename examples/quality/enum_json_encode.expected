@@ -1,0 +1,5 @@
+{"state":"Running"}
+{"state":"Creating"}
+{"state":"Stopped"}
+{"count":42,"state":"Running"}
+[{"count":10,"state":"Creating"},{"count":11,"state":"Running"},{"count":12,"state":"Stopped"}]

@@ -120,6 +120,42 @@ impl Lowering {
         }
     }
 
+    /// C18-2: If `expr` is (or produces) a known Enum value, return the
+    /// enum type name. Used by anonymous BuchiPack field registration so
+    /// `@(state <= HiveState:Running())` marks `state` as an Enum field
+    /// for jsonEncode variant-name output.
+    ///
+    /// Handled cases:
+    /// - `Enum:Variant()` literal
+    /// - Identifier whose let-binding we previously recorded as Enum-typed
+    ///   (either by literal initializer, by type annotation `x: HiveState <= ...`,
+    ///   or by being copied from another known Enum variable).
+    /// - Function call to a user-defined function whose declared return
+    ///   type is a known Enum name.
+    ///
+    /// Deeper inference (through pipelines, condition branches, HOF
+    /// callbacks) is intentionally skipped; the returned ordinal still
+    /// encodes correctly, only the wire-format downgrades to Int.
+    pub(crate) fn expr_enum_type_name(&self, expr: &Expr) -> Option<String> {
+        match expr {
+            Expr::EnumVariant(enum_name, _, _) => {
+                if self.enum_defs.contains_key(enum_name) {
+                    Some(enum_name.clone())
+                } else {
+                    None
+                }
+            }
+            Expr::Ident(name, _) => self.enum_vars.get(name).cloned(),
+            Expr::FuncCall(callee, _, _) => {
+                if let Expr::Ident(name, _) = callee.as_ref() {
+                    return self.enum_returning_funcs.get(name).cloned();
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+
     /// A-4c: TypeDef のフィールド型注釈から型タグを決定する
     pub(super) fn type_field_type_tag(&self, type_name: &str, field_name: &str) -> i64 {
         if let Some(field_types) = self.type_field_types.get(type_name) {
@@ -133,6 +169,31 @@ impl Lowering {
         }
         // Fallback to global field_type_tags
         self.field_type_tags.get(field_name).copied().unwrap_or(0)
+    }
+
+    /// C18B-003 fix: Resolve a TypeDef field's annotated Enum type name,
+    /// or `None` if the field isn't declared as an Enum.
+    ///
+    /// Walks `type_field_types` for `type_name`, and if the annotation
+    /// is a `TypeExpr::Named` whose identifier is a registered Enum
+    /// (`self.enum_defs` contains it), returns the enum name. Used by
+    /// `lower_type_instantiation` to emit per-pack enum descriptors so
+    /// TypeDef-based packs sharing a field name across different enums
+    /// no longer collide in the global field registry.
+    pub(super) fn type_field_enum_name(&self, type_name: &str, field_name: &str) -> Option<String> {
+        let field_types = self.type_field_types.get(type_name)?;
+        for (name, ty) in field_types {
+            if name != field_name {
+                continue;
+            }
+            let ty_expr = ty.as_ref()?;
+            if let crate::parser::TypeExpr::Named(n) = ty_expr
+                && self.enum_defs.contains_key(n)
+            {
+                return Some(n.clone());
+            }
+        }
+        None
     }
 
     /// TypeExpr から型タグへの変換（`Lowering` メソッド版）。

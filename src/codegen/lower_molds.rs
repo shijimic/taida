@@ -1969,6 +1969,81 @@ impl Lowering {
                 ));
                 Ok(result)
             }
+            // C18-3: Ordinal[<enum_value>]() — explicit Enum → Int.
+            // On Native, Enum values are already stored as int32 ordinals
+            // (`Value::Int(ordinal)` in the interpreter is `int` in C).
+            // The lowering is therefore an identity on the sole argument
+            // — `Ordinal[Status:Running()]()` evaluates to the ordinal
+            // value which is the Int(n) representation. Arity-1 only.
+            //
+            // C18B-005 fix: when the static type of the argument is known
+            // and is NOT a registered Enum, emit a `taida_runtime_panic`
+            // call so non-Enum inputs are rejected at run time with the
+            // same message shape as the interpreter. Native doesn't carry
+            // a runtime tag distinguishing "Enum ordinal int" from "plain
+            // int", so we rely on compile-time type propagation via
+            // `expr_enum_type_name` / `expr_type_tag`. When the type is
+            // genuinely unknown at lowering time we keep identity
+            // semantics (graceful degradation — same behaviour as the
+            // post-fix JS path when runtime information is missing).
+            "Ordinal" => {
+                if type_args.is_empty() {
+                    return Err(LowerError {
+                        message:
+                            "Ordinal requires 1 argument: Ordinal[<enum_value>]()"
+                                .into(),
+                    });
+                }
+                let is_known_enum = self
+                    .expr_enum_type_name(&type_args[0])
+                    .is_some();
+                // `expr_type_tag`: 0=Int, 1=Float, 2=Bool, 3=Str,
+                // 4=Pack, 5=List, 6=Closure, -1=Unknown.
+                //
+                // Enum ordinals are stored as 0 (Int) at the IR level,
+                // so static_tag==0 is ambiguous with "plain Int misuse"
+                // and must also be rejected when the expression is
+                // NOT an Enum expression we recognise. `-1` (Unknown)
+                // keeps the historical identity behaviour — we cannot
+                // prove misuse at compile time without sacrificing a
+                // large amount of legitimate cross-function Enum flow.
+                let static_tag = self.expr_type_tag(&type_args[0]);
+                let static_nonenum_misuse = !is_known_enum && static_tag >= 0;
+                if static_nonenum_misuse {
+                    let type_label = match static_tag {
+                        0 => "Int",
+                        1 => "Float",
+                        2 => "Bool",
+                        3 => "Str",
+                        4 => "Pack",
+                        5 => "List",
+                        6 => "Closure",
+                        _ => "unknown",
+                    };
+                    let msg = format!(
+                        "Ordinal: argument must be an Enum value, got {}. \
+                         Hint: pass an Enum variant such as `Ordinal[Color:Red()]()`.",
+                        type_label
+                    );
+                    let msg_var = func.alloc_var();
+                    func.push(IrInst::ConstStr(msg_var, msg));
+                    let panic_dummy = func.alloc_var();
+                    func.push(IrInst::Call(
+                        panic_dummy,
+                        "taida_runtime_panic".to_string(),
+                        vec![msg_var],
+                    ));
+                    // `taida_runtime_panic` never returns, but the IR
+                    // flow graph expects a value from this expression.
+                    // Emit a zero to keep downstream lowering happy.
+                    let z = func.alloc_var();
+                    func.push(IrInst::ConstInt(z, 0));
+                    return Ok(z);
+                }
+                let arg_var = self.lower_expr(func, &type_args[0])?;
+                Ok(arg_var)
+            }
+
             // B11-5c: If[cond, then, else]() → CondBranch (short-circuit)
             "If" => {
                 if type_args.len() < 3 {

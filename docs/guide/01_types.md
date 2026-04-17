@@ -593,6 +593,88 @@ stdout(myStatus == Status:Retry())  // true
 
 enum値は ordinal（0始まりの Int）として評価されます。`Status:Ok()` は `0`、`Status:Fail()` は `1`、`Status:Retry()` は `2` です。
 
+### モジュール越境 (C18-1)
+
+Enum 型は `<<< @(...)` で export、`>>> ./mod.td => @(...)` で import できます。import 先では `Status:Ok()` を直接使えます。
+
+```taida
+// status.td
+Enum => Status = :Ok :Fail :Retry
+<<< @(Status)
+
+// main.td
+>>> ./status.td => @(Status)
+
+s <= Status:Ok()
+stdout(s)  // 0
+```
+
+**順序整合性**: import 先で同名の `Enum => Status = ...` を **再定義** している場合、variant の並びが import 元と一致している必要があります。不整合は `[E1618]` で検出されます。
+
+```
+[E1618] Enum 'Status' variant order mismatch across module boundary.
+```
+
+Enum の宣言順は semantic です。import 元で順序を変更すると、既存 call site の ordinal が暗黙に変わり、`jsonEncode` 出力や ordering 比較 (C18-4) に影響します。順序変更時は all imports を grep して確認してください。
+
+### 順序比較 (C18-4)
+
+同一 Enum のバリアント同士は、宣言順を使って比較できます:
+
+```taida
+Enum => HiveState = :Creating :Running :Stopped
+
+a <= HiveState:Creating()
+b <= HiveState:Running()
+stdout((a < b).toString())   // true — Creating(0) < Running(1)
+stdout((b >= a).toString())  // true
+
+ready s =
+  | s >= HiveState:Running() |> "yes"
+  | _ |> "no"
+=> :Str
+```
+
+許可されるのは:
+- 同一 Enum 同士: `HiveState:A() < HiveState:B()`
+
+拒否（`[E1605]`）されるのは:
+- 異なる Enum 同士: `HiveState:A() < OtherEnum:B()`
+- Enum と Int: `HiveState:A() > 0` — 明示的な Int 変換が必要
+
+Enum ↔ Int で比較したい場合は、`Ordinal[]` モールド（次節）経由で Int 側に揃えてください。
+
+### `Ordinal[]` モールド (C18-3)
+
+`Ordinal[Enum:Variant()]()` で Enum 値を宣言 ordinal の Int に変換します:
+
+```taida
+Enum => HiveState = :Creating :Running :Stopped
+
+n <= Ordinal[HiveState:Running()]()
+stdout(n.toString())  // 1
+
+// Int カラムとの比較 — C18-4 の ordering を使わず、
+// 明示的に Int 空間へ降ろしてから比較する。
+state <= HiveState:Stopped()
+ok <= Ordinal[state]() > 0
+```
+
+`Ordinal[]` は Enum → Int の **唯一の正規経路** です。`.toString()` の戻り値を `Int[]` で parse する workaround は fragile なので使わないでください（`.toString()` の将来仕様変更で壊れます）。
+
+### JSON wire 形式 (C18-2)
+
+`jsonEncode` は Enum フィールドを **variant 名 Str** で出力します（C16 の `JSON[raw, Schema]()` decoder と対称）:
+
+```taida
+Enum => HiveState = :Creating :Running :Stopped
+
+rec <= @(state <= HiveState:Running())
+stdout(jsonEncode(rec))  // {"state":"Running"}
+```
+
+詳細は `docs/guide/03_json.md` 参照。
+
 ### ビルトイン enum: HttpProtocol
 
 `taida-lang/net` パッケージは `HttpProtocol` enum をエクスポートします:
