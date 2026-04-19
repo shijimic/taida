@@ -1,5 +1,102 @@
 # Changelog
 
+## @c.19.rc4
+
+Add TTY-passthrough variants of the process-execution APIs so Taida
+programs can launch interactive TUI applications (nvim, less, fzf,
+git commit, etc.). Closes the Hachikuma Phase 3 P-3-13 (B-006) external
+editor integration blocker.
+
+### Features
+
+#### New: `runInteractive(program, args)` / `execShellInteractive(command)`
+
+`taida-lang/os` gains two new functions that match `run` / `execShell`
+argument-wise but hand the parent process's stdin / stdout / stderr
+directly to the child instead of capturing them through pipes. This is
+the mode you want when the child is a terminal UI that needs to read
+keystrokes and draw on the TTY.
+
+```taida
+>>> taida-lang/os => @(runInteractive)
+
+// Drop the user into $EDITOR, then pick up the exit code afterwards.
+r <= runInteractive("nvim", @["/tmp/draft.md"])
+stdout("editor exit: " + r.__value.code.toString())
+```
+
+Return type: `Gorillax[@(code: Int)]`.
+
+Key differences vs. the captured variants:
+
+| API                   | stdio          | Inner shape                          | Intended use           |
+|-----------------------|----------------|--------------------------------------|------------------------|
+| `run`                 | pipes (captured) | `@(stdout: Str, stderr: Str, code: Int)` | programmatic output parsing |
+| `execShell`           | pipes (captured) | `@(stdout: Str, stderr: Str, code: Int)` | shell expansion + output parsing |
+| `runInteractive`      | inherited TTY  | `@(code: Int)`                       | TUI apps (nvim, fzf, …) |
+| `execShellInteractive`| inherited TTY  | `@(code: Int)`                       | TUI apps + shell glob |
+
+Signal death uses the `128 + signal` POSIX convention on all three
+backends. Windows is best-effort (POSIX is the first-class target).
+
+#### Affected backends
+
+All three backends ship parity implementations:
+
+- **Interpreter** (`src/interpreter/os_eval.rs`): `Command::status()`
+  with default (inherited) stdio.
+- **JS** (`src/js/runtime/os.rs`): `child_process.spawnSync(..., { stdio: 'inherit' })`.
+- **Native** (`src/codegen/native_runtime/os.c`): `fork()` + `execvp`
+  with **no** `dup2` in the child.
+
+The 3-backend contract is pinned by `tests/c19_interactive_exec.rs` and
+`examples/quality/c19_interactive_exec/*.td`.
+
+### Non-goals (scope-out, for future tracks)
+
+- async / non-blocking interactive exec (the child owns the foreground TTY)
+- pty allocation (`openpty` / `forkpty`) — belongs in a future `taida-lang/tty` addon
+- automatic raw-mode save / restore on behalf of `terminal` addon users
+  (the caller is responsible for `rawModeLeave` / `rawModeEnter` around the handoff)
+- stdin write-through API for interactive children
+
+### Backward compatibility
+
+Pure additive change: existing `run` / `execShell` behaviour and return
+shape are byte-identical to `@c.18.rc4`. `OS_SYMBOLS[0..35]` keeps the
+pre-C19 ordering; the two new entries live at indices 35 and 36.
+
+### Follow-up hardening (C19B, same release)
+
+Two gaps surfaced in the C19 code-review HOLD are fixed in the same
+release:
+
+- **C19B-001 — Native `execvp` failure is now an `IoError`.** Before the
+  fix, Native collapsed child-side `execvp` failure into `_exit(127)`,
+  indistinguishable from a program that merely exited with 127. The
+  parent now reads the child's `errno` through a CLOEXEC self-pipe and
+  emits a proper `IoError{code, kind, message}` on ENOENT / EACCES /
+  etc. — matching Interpreter and JS. Normalized `err.errno` sign on JS
+  so all three backends report the positive POSIX errno (e.g. `2` for
+  ENOENT).
+- **C19B-002 — Checker pins `Gorillax[@(code: Int)]`.** Before the fix,
+  `runInteractive(...).__value.stdout` silently passed `taida check`
+  because os symbols fell through to `Type::Unknown`. The checker now
+  registers typed signatures for `runInteractive` /
+  `execShellInteractive`, resolves `.__value` through the Gorillax
+  envelope, and rejects access to any field not in the pinned `@(code:
+  Int)` inner shape. Captured `run` / `execShell` remain Unknown-typed
+  and non-interfering, as promised by the C19 design.
+- Native `Gorillax` had a long-standing field-hash mismatch (`__error`
+  stored under `HASH___DEFAULT`). Fixed by introducing `HASH___ERROR`
+  and threading it through `taida_gorillax_{new,err,relax}`, which
+  unblocks `r.__error.<field>` on the Native backend for the first time.
+
+The new failure-path parity is pinned by
+`examples/quality/c19_interactive_exec/os_interactive_enoent.{td,expected}`
+and the three `c19_run_interactive_enoent_*` tests in
+`tests/c19_interactive_exec.rs`.
+
 ## @c.18.rc4
 
 Close 4 of the 6 Enum limitations identified by Hachikuma Phase F (2026-04-16).
