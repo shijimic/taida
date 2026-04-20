@@ -1082,6 +1082,44 @@ impl Interpreter {
                     }
                 }
 
+                // C20B-014 (ROOT-17): User-defined function called via mold syntax.
+                //
+                // Pre-C20B-014, `Fn[arg, arg]()` for a user-defined function
+                // `Fn` silently entered the generic mold-wrap path below and
+                // returned `@(__value <= first_arg, __type <= "Fn")` instead
+                // of invoking the function. `taida check` did not detect this
+                // (checker fell through to `Type::Unknown`), the Interpreter
+                // silently wrapped, Native failed at lowering with
+                // "unsupported mold type", and only JS accidentally worked
+                // (its `__taida_solidify(Fn(...))` fallback calls the fn).
+                //
+                // Fix: if `name` resolves to a `Value::Function` in scope
+                // AND no MoldDef is registered for the same name, dispatch
+                // the call as `Fn(args)` with `type_args` used positionally.
+                // `fields` (named `k <= v` slots) are rejected — user
+                // functions have no named-field ABI.
+                //
+                // Guard ordering: this branch runs *after* builtin molds
+                // (`try_operation_mold`) and addon sentinels, so shadowing
+                // a builtin mold name with a local user fn does not change
+                // behaviour. It runs *before* generic mold instantiation,
+                // so user fns are no longer wrapped.
+                if self.mold_defs.get(name).is_none()
+                    && let Some(Value::Function(func)) = self.env.get(name).cloned()
+                {
+                    if !fields.is_empty() {
+                        return Err(RuntimeError {
+                            message: format!(
+                                "User-defined function '{}' called via mold syntax \
+                                 cannot accept named fields '()'. \
+                                 Pass arguments positionally: {}[arg1, arg2]() or {}(arg1, arg2).",
+                                name, name, name
+                            ),
+                        });
+                    }
+                    return self.call_function(&func, type_args);
+                }
+
                 // Generic/custom mold instantiation.
                 let mut named_values = HashMap::<String, Value>::new();
                 for field in fields {

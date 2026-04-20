@@ -37,7 +37,7 @@ const OS_NET_DEFAULT_TIMEOUT_MS: i64 = 30_000;
 
 pub struct Lowering {
     /// ユーザー定義関数名のセット
-    user_funcs: std::collections::HashSet<String>,
+    pub(crate) user_funcs: std::collections::HashSet<String>,
     /// 関数名 → パラメータ定義（実効デフォルト補完/arity診断用）
     func_param_defs: std::collections::HashMap<String, Vec<crate::parser::Param>>,
     /// TypeDef 名 → フィールド名リスト

@@ -85,6 +85,7 @@
 | `E1508` | メソッド呼び出しの引数個数または型が不一致 | TypeChecker | — |
 | `E1509` | generic function の型変数が declared constraint を満たさない | TypeChecker | — |
 | `E1510` | inference-only generic function の型変数が parameter annotation / call から束縛・推論できない、または concrete type 名と衝突する | TypeChecker | — |
+| `E1511` | ユーザー定義関数を mold 構文 `Fn[args]()` で呼ぶ際に named fields `()` を渡せない — `Fn[a, b]()` か `Fn(a, b)` のみ | TypeChecker | C20B-014 |
 
 ## 帯域ルール
 

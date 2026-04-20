@@ -4509,6 +4509,38 @@ defaulted fields must be provided via `()`",
                         // Look up in mold definitions
                         if self.registry.mold_defs.contains_key(name) {
                             Type::Named(name.clone())
+                        } else if let Some(fn_ty) = self
+                            .lookup_var(name)
+                            .filter(|ty| matches!(ty, Type::Function(_, _)))
+                        {
+                            // C20B-014 (ROOT-17): user-defined function called via
+                            // mold syntax `Fn[args]()`. Pre-fix, the checker fell
+                            // through to `Type::Unknown` and the Interpreter
+                            // silently wrapped the result as a mold struct.
+                            // Post-fix, Interpreter dispatches to the function
+                            // directly (eval.rs) and Native lowers the same way
+                            // (lower_molds.rs). Match here so downstream type
+                            // inference and unification see the real return type
+                            // rather than `Unknown`. Named fields `()` on a
+                            // user-fn mold-syntax call are rejected with
+                            // `[E1511]` to mirror the runtime error and surface
+                            // the misuse at `taida check` time.
+                            if !fields.is_empty() {
+                                self.errors.push(TypeError {
+                                    message: format!(
+                                        "[E1511] User-defined function '{}' called via mold syntax \
+                                         cannot accept named fields '()'. \
+                                         Pass arguments positionally: {}[arg1, arg2]() or {}(arg1, arg2).",
+                                        name, name, name
+                                    ),
+                                    span: mold_span.clone(),
+                                });
+                            }
+                            if let Type::Function(_, ret) = fn_ty {
+                                *ret
+                            } else {
+                                Type::Unknown
+                            }
                         } else {
                             Type::Unknown
                         }

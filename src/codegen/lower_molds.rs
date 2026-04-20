@@ -2281,6 +2281,33 @@ impl Lowering {
             }),
             _ => {
                 let Some(mold_def) = self.mold_defs.get(type_name).cloned() else {
+                    // C20B-014 (ROOT-17): user-defined function called via mold syntax.
+                    //
+                    // Pre-C20B-014, `Fn[args]()` for a user function hit this
+                    // `unsupported mold type` error at lowering time, even though
+                    // the program is semantically valid (Interpreter wrapped,
+                    // JS `__taida_solidify(Fn(...))` accidentally worked).
+                    // Fix: when `type_name` is not a mold but *is* a registered
+                    // user function, lower as a plain function call with
+                    // `type_args` as positional arguments. Named `fields` are
+                    // rejected — user functions have no named-field ABI.
+                    if self.user_funcs.contains(type_name) {
+                        if !fields.is_empty() {
+                            return Err(LowerError {
+                                message: format!(
+                                    "User-defined function '{}' called via mold syntax \
+                                     cannot accept named fields '()'. \
+                                     Pass arguments positionally: {}[arg1, arg2]() or {}(arg1, arg2).",
+                                    type_name, type_name, type_name
+                                ),
+                            });
+                        }
+                        let callee = Expr::Ident(
+                            type_name.to_string(),
+                            crate::lexer::Span::new(0, 0, 0, 0),
+                        );
+                        return self.lower_func_call(func, &callee, type_args);
+                    }
                     return Err(LowerError {
                         message: format!("unsupported mold type: {}", type_name),
                     });

@@ -128,6 +128,37 @@ Also:
   in-tree Taida code relied on the legacy shape; migrate to
   `HttpRequest["POST", url](body <= "...")`.
 
+### User-defined functions called via mold syntax (C20B-014 / ROOT-17)
+
+User-defined functions invoked as `Fn[arg1, arg2]()` now dispatch to
+the function instead of silently returning a `@(__value, __type)` mold
+wrapper. This closes a 2.1.3-era regression that silently passed
+`taida check` but crashed Hachikuma's TUI at every one of 81 call
+sites (`CursorMoveTo[r, c]()`, `PadWidth[t, w]()`,
+`TruncateWidth[t, w]()`, …). The diagnostic surface aligns:
+
+- **Interpreter** (`src/interpreter/eval.rs`): before the generic
+  mold-wrap path, `MoldInst` now detects `Value::Function` in scope
+  with no matching `MoldDef` and dispatches to `call_function` with
+  `type_args` treated positionally.
+- **Native lowering** (`src/codegen/lower_molds.rs`): before the
+  `unsupported mold type` error, the `_` arm consults
+  `self.user_funcs` and lowers through `lower_func_call` for known
+  user functions. Previously `Fn[args]()` failed at build time.
+- **Checker** (`src/types/checker.rs`): the `MoldInst` fallback now
+  returns the function's registered return type instead of
+  `Type::Unknown`, so downstream type inference matches runtime
+  behaviour. Named `()` fields on a user-fn mold-syntax call are
+  rejected with new diagnostic `[E1511]` — user functions have no
+  named-field ABI.
+- **JS** is unchanged. Its existing
+  `__taida_solidify(Fn(args))` generic fallback already dispatched to
+  the user function correctly; the regression test pins that the
+  behaviour matches the Interpreter's new shape.
+
+Both `Fn[args]()` and `Fn(args)` are valid and produce identical
+results across all three backends.
+
 ### Tests
 
 - `tests/c20_parser_silent_bugs.rs` (parser unit, 8 cases)
@@ -138,9 +169,12 @@ Also:
   round-trip)
 - `tests/c20_http_dash_header.rs` (3 backends × 2 header shapes +
   JS arity guard, 7 cases)
+- `tests/c20b_014_mold_user_fn_call.rs` (3 backends + 2 checker cases,
+  5 cases — pins user-fn mold-syntax dispatch and `[E1511]` rejection)
 - `examples/quality/c20_parser/*` (2 pins)
 - `examples/quality/c20_stdin/*` (4 pins)
 - `examples/quality/c20_stdinline/*` (3 pins)
+- `examples/quality/c20_mold_user_fn/*` (1 pin)
 
 ## @c.19.rc4
 

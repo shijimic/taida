@@ -309,7 +309,7 @@ impl Lowering {
         Ok(effective_args)
     }
 
-    pub(super) fn lower_func_call(
+    pub(crate) fn lower_func_call(
         &mut self,
         func: &mut IrFunction,
         callee: &Expr,
