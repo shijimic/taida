@@ -393,3 +393,319 @@ stdout(JSON[raw, ThisDoesNotExist]().__value.x.toString())
         combined
     );
 }
+
+// ── Interpreter: REPL reuse after body-level RuntimeError ──
+//
+// Regression guard for the C20B-015 3rd reopen (2026-04-22 review).
+//
+// Pre-fix: `call_function` evaluated the body with
+// `eval_statements(&current_func.body)?` — the `?` operator early-returned
+// on `RuntimeError`, skipping the pops and root-scope restore. The
+// defining-module overlay on `self.type_defs` / `self.enum_defs` stayed in
+// place, and `self.active_function` / `self.call_depth` / closure + local
+// scopes were also left unrestored. The REPL reuses one `Interpreter`
+// across inputs, so the leak made a subsequent top-level
+// `JSON[raw, Schema]()` silently resolve against the imported module's
+// private typedefs.
+//
+// Post-fix: body evaluation binds the `Result` and runs the cleanup path
+// on every exit (Ok / Err), then propagates. The second `eval_program`
+// below must see the *caller*'s scope, not the imported module's overlay.
+//
+// Repro shape:
+//   1. `schema_mod.td` defines a private `Schema = @(name: Str)` and
+//      exports `load raw: Str` whose body does
+//      `parsed <= JSON[raw, UnknownTypeThatDoesNotExist]()`. This body
+//      raises a `RuntimeError("Unknown schema type 'UnknownTypeThatDoesNotExist'")`
+//      from inside `resolve_json_schema`. The `load` function *did* get
+//      its defining-module overlay pushed (it carries `module_type_defs`
+//      containing `Schema`), but the inner `JSON[..., UnknownType...]()`
+//      still errors because neither the overlay nor the caller's scope
+//      has that name.
+//   2. caller program 1: `>>> ./schema_mod.td => @(load)` followed by
+//      `wrap raw: Str = load(raw) => :Str` and `wrap("{...}")`. This
+//      errors at runtime — the user's first REPL input fails.
+//   3. caller program 2 (simulating the next REPL line on the *same*
+//      `Interpreter`): `raw <= "{\"name\":\"leak\"}"` then
+//      `JSON[raw, Schema]().__value.name`. Pre-fix: overlay leaked,
+//      `Schema` resolved to the imported private typedef, `"leak"` was
+//      printed. Post-fix: overlay was restored by cleanup after program 1
+//      errored, so `Schema` is unknown in the caller's scope and
+//      `eval_program` returns `Err("Unknown schema type 'Schema'")`.
+
+#[test]
+fn c20b_015_interpreter_body_error_does_not_leak_overlay_to_next_repl_input() {
+    use std::sync::Mutex;
+    use taida::interpreter::Interpreter;
+    use taida::parser::parse;
+
+    // Serialise current-file path mutation: `set_current_file` uses process-
+    // global state transitions via `std::env::set_current_dir` is not used,
+    // but the import resolver keys off the interpreter's `current_file`,
+    // which is instance-local. Still, having one static Mutex guarantees
+    // that parallel cargo test runs that also `set_current_file` cannot
+    // race on the filesystem fixture directory.
+    static LOCK: Mutex<()> = Mutex::new(());
+    let _g = LOCK.lock().expect("lock must not be poisoned");
+
+    let tmp = unique_temp("c20b015_repl_reuse", "dir");
+    fs::create_dir_all(&tmp).expect("mkdir");
+
+    // Imported module: defines a private `Schema`. Its exported `load`
+    // attempts to resolve an unknown schema inside its body, raising a
+    // `RuntimeError` *while the defining-module overlay is active*.
+    let schema_mod = "\
+Schema = @(name: Str)
+
+load raw: Str =
+  parsed <= JSON[raw, UnknownTypeThatDoesNotExist]()
+  | parsed.hasValue |> parsed.__value.name
+  | _ |> \"no\"
+=> :Str
+
+<<< @(load)
+";
+    fs::write(tmp.join("schema_mod.td"), schema_mod).expect("write schema_mod");
+
+    // Program 1: run imported `load` through a local wrapper. Body evaluation
+    // of `load` errors with "Unknown schema type 'UnknownTypeThatDoesNotExist'".
+    // The wrapper's mutual tail-call retarget to `load` pushes the overlay.
+    let prog1_src = "\
+>>> ./schema_mod.td => @(load)
+
+wrap raw: Str = load(raw) => :Str
+
+stdout(wrap(\"{\\\"name\\\":\\\"ignored\\\"}\"))
+";
+    let caller_path = tmp.join("caller.td");
+    fs::write(&caller_path, prog1_src).expect("write caller");
+
+    // Parse program 1.
+    let (prog1, errs1) = parse(prog1_src);
+    assert!(errs1.is_empty(), "program 1 must parse: {:?}", errs1);
+
+    let mut interp = Interpreter::new();
+    interp.set_current_file(&caller_path);
+
+    // Program 1 MUST error — the inner `JSON[..., UnknownType...]` raises
+    // a RuntimeError from inside the imported function body. If this does
+    // NOT error, the repro harness is wrong (not a regression of the
+    // cleanup fix).
+    let r1 = interp.eval_program(&prog1);
+    assert!(
+        r1.is_err(),
+        "program 1 was expected to error (imported function body raises RuntimeError); \
+         got Ok({:?}). Output buffer: {:?}",
+        r1,
+        interp.output
+    );
+
+    // Program 2: simulated next REPL input on the SAME `Interpreter`.
+    // Tries to use `Schema` at the caller's top level. Because the caller
+    // did NOT import `Schema` (only `load`), this must fail with
+    // "Unknown schema type 'Schema'". Pre-fix: the overlay leaked from
+    // the errored program 1 and `Schema` silently resolved to the private
+    // typedef from `schema_mod.td`, returning `"leak"`.
+    //
+    // NB: use a fresh variable name (`probeJson`, not `raw`) so that this
+    // assertion specifically pins the TYPE OVERLAY leak (user-reported
+    // symptom: `JSON[..., Schema]()` silently returned `"leak"`). Pre-fix,
+    // the local scope also leaked — `raw` would have collided — but the
+    // underlying `?`-skipped cleanup bug manifests in BOTH the scope leak
+    // and the type-overlay leak. Pinning the overlay explicitly matches
+    // the bug report.
+    let prog2_src = "\
+probeJson <= \"{\\\"name\\\":\\\"leak\\\"}\"
+stdout(JSON[probeJson, Schema]().__value.name)
+";
+    let (prog2, errs2) = parse(prog2_src);
+    assert!(errs2.is_empty(), "program 2 must parse: {:?}", errs2);
+
+    let r2 = interp.eval_program(&prog2);
+    let _ = fs::remove_dir_all(&tmp);
+
+    let r2_err = match r2 {
+        Err(e) => e.to_string(),
+        Ok(v) => panic!(
+            "program 2 unexpectedly succeeded (overlay leaked from program 1). \
+             Result = {:?}. stdout buffer: {:?}",
+            v, interp.output
+        ),
+    };
+    assert!(
+        r2_err.contains("Unknown schema type") && r2_err.contains("Schema"),
+        "program 2 error must reject 'Schema' as unknown in caller's scope \
+         (confirms overlay was cleaned up after program 1's body-level error). \
+         Got: {}",
+        r2_err
+    );
+}
+
+// ── Interpreter: direct body-level RuntimeError cleans scope within one program ──
+//
+// Companion to the REPL-reuse pin above: guards the same invariant using a
+// single `eval_program` call. If the first top-level `load(...)` errors
+// inside the imported function body, the overlay must be torn down before
+// the program returns its `Err`. We assert this by observing that a
+// subsequent `JSON[raw, Schema]()` in the SAME program — placed above the
+// error-raising call so the caller's top-level scope is set up — does not
+// leak. This check does not rely on REPL-specific behaviour.
+
+#[test]
+fn c20b_015_interpreter_body_error_restores_caller_scope_eagerly() {
+    use taida::interpreter::Interpreter;
+    use taida::parser::parse;
+
+    let tmp = unique_temp("c20b015_eager_cleanup", "dir");
+    fs::create_dir_all(&tmp).expect("mkdir");
+
+    let schema_mod = "\
+Schema = @(name: Str)
+
+load raw: Str =
+  parsed <= JSON[raw, UnknownTypeThatDoesNotExist]()
+  | parsed.hasValue |> parsed.__value.name
+  | _ |> \"no\"
+=> :Str
+
+<<< @(load)
+";
+    fs::write(tmp.join("schema_mod.td"), schema_mod).expect("write schema_mod");
+
+    // Program: runs the imported `load` through a wrapper. When it errors,
+    // the program aborts. We then look at the interpreter's `type_defs`
+    // via a second `eval_program` call that tries to resolve `Schema` in
+    // the caller — if the overlay was cleaned up eagerly, it must be
+    // unknown in the caller's scope.
+    let src = "\
+>>> ./schema_mod.td => @(load)
+
+wrap raw: Str = load(raw) => :Str
+
+stdout(wrap(\"{\\\"name\\\":\\\"x\\\"}\"))
+";
+    let caller_path = tmp.join("caller.td");
+    fs::write(&caller_path, src).expect("write caller");
+
+    let (prog, errs) = parse(src);
+    assert!(errs.is_empty(), "must parse: {:?}", errs);
+
+    let mut interp = Interpreter::new();
+    interp.set_current_file(&caller_path);
+    let r = interp.eval_program(&prog);
+    assert!(r.is_err(), "expected body-level RuntimeError, got Ok({:?})", r);
+
+    // Run a probe program to check that the caller's scope does not see
+    // the private `Schema`. If cleanup happened eagerly at the point of
+    // error, the probe will fail with "Unknown schema type 'Schema'".
+    // Fresh variable name (`probeJson`) to isolate the overlay assertion
+    // from the independent scope-leak signal.
+    let probe_src = "\
+probeJson <= \"{\\\"name\\\":\\\"leak\\\"}\"
+stdout(JSON[probeJson, Schema]().__value.name)
+";
+    let (probe, probe_errs) = parse(probe_src);
+    assert!(probe_errs.is_empty(), "probe must parse: {:?}", probe_errs);
+    let pr = interp.eval_program(&probe);
+    let _ = fs::remove_dir_all(&tmp);
+    let pr_err = match pr {
+        Err(e) => e.to_string(),
+        Ok(v) => panic!(
+            "probe unexpectedly succeeded (overlay leak from errored program). \
+             Result = {:?}. stdout: {:?}",
+            v, interp.output
+        ),
+    };
+    assert!(
+        pr_err.contains("Unknown schema type") && pr_err.contains("Schema"),
+        "probe must reject 'Schema' in caller's scope. Got: {}",
+        pr_err
+    );
+}
+
+// ── Interpreter: body-level error must pop local & closure scopes ──
+//
+// Companion pin for the scope-leak half of the 3rd reopen. Pre-fix, the
+// closure + local scopes pushed inside `call_function` were never popped
+// on a body `RuntimeError` because `?` bypassed the restore path. This
+// manifests as a phantom binding in the caller's next-input scope.
+//
+// This test deliberately uses a parameter name that also appears as a
+// top-level `<=` binding in the next REPL input. Pre-fix: the function's
+// parameter `payload` stayed alive in a still-pushed local scope, and
+// the subsequent top-level `payload <= "..."` tripped over "Variable
+// 'payload' is already defined in this scope". Post-fix: the local scope
+// was popped even on the error path, so the second program runs cleanly.
+
+#[test]
+fn c20b_015_interpreter_body_error_pops_pushed_scopes() {
+    use taida::interpreter::Interpreter;
+    use taida::parser::parse;
+
+    let tmp = unique_temp("c20b015_scope_pop", "dir");
+    fs::create_dir_all(&tmp).expect("mkdir");
+
+    let schema_mod = "\
+Schema = @(name: Str)
+
+load payload: Str =
+  parsed <= JSON[payload, UnknownTypeThatDoesNotExist]()
+  | parsed.hasValue |> parsed.__value.name
+  | _ |> \"no\"
+=> :Str
+
+<<< @(load)
+";
+    fs::write(tmp.join("schema_mod.td"), schema_mod).expect("write schema_mod");
+
+    let prog1_src = "\
+>>> ./schema_mod.td => @(load)
+stdout(load(\"{\\\"name\\\":\\\"x\\\"}\"))
+";
+    let caller_path = tmp.join("caller.td");
+    fs::write(&caller_path, prog1_src).expect("write caller");
+
+    let (prog1, errs1) = parse(prog1_src);
+    assert!(errs1.is_empty(), "prog1 must parse: {:?}", errs1);
+
+    let mut interp = Interpreter::new();
+    interp.set_current_file(&caller_path);
+    let r1 = interp.eval_program(&prog1);
+    assert!(
+        r1.is_err(),
+        "prog1 must error (body-level Unknown schema). Got: {:?}",
+        r1
+    );
+
+    // REPL input 2: redefines `payload` at the top level. Pre-fix, the
+    // pushed local scope from `load`'s failed call leaked, `payload` was
+    // still bound, and `payload <= ...` errored with "already defined".
+    // Post-fix, cleanup popped the local scope on the error path.
+    let prog2_src = "\
+payload <= \"ok\"
+stdout(payload)
+";
+    let (prog2, errs2) = parse(prog2_src);
+    assert!(errs2.is_empty(), "prog2 must parse: {:?}", errs2);
+
+    let r2 = interp.eval_program(&prog2);
+    let _ = fs::remove_dir_all(&tmp);
+    match r2 {
+        Ok(_) => {
+            assert!(
+                interp
+                    .output
+                    .iter()
+                    .any(|line| line.trim_end_matches('\n') == "ok"),
+                "prog2 should have printed 'ok'; stdout buffer: {:?}",
+                interp.output
+            );
+        }
+        Err(e) => panic!(
+            "prog2 must succeed after prog1's body-level error (local scope from \
+             failed call leaked pre-fix: parameter name 'payload' remained bound). \
+             Got: {}",
+            e
+        ),
+    }
+}

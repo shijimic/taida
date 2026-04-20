@@ -1771,14 +1771,22 @@ impl Interpreter {
             return Ok(signal);
         }
 
-        let result = self.eval_statements(&func.body)?;
+        // C20B-015 / ROOT-18 (3rd reopen): body evaluation must NOT use `?`.
+        // A `RuntimeError` from the body would skip every cleanup step below,
+        // leaving the overlayed TypeDef / enum registries, pushed scopes,
+        // saved `active_function` and bumped `call_depth` in place. In REPL
+        // mode the interpreter is reused across inputs, so the leak lets a
+        // subsequent `JSON[raw, Schema]()` silently resolve against an
+        // imported module's private typedefs. Capture the result, run the
+        // cleanup path unconditionally, then propagate.
+        let result = self.eval_statements(&func.body);
         self.env.pop_scope(); // pop local scope
         self.env.pop_scope(); // pop closure scope
         self.pop_func_module_scope(prev_td, prev_ed, td_changed);
         self.active_function = prev_active;
         self.call_depth -= 1;
 
-        Ok(result)
+        result
     }
 
     /// Helper: call a function with pre-evaluated argument values.
@@ -1832,26 +1840,31 @@ impl Interpreter {
             };
         }
 
-        let result = self.eval_statements(&func.body)?;
+        // C20B-015 / ROOT-18 (3rd reopen): body evaluation must NOT use `?`.
+        // Same cleanup invariant as `call_function_preserving_signals`: the
+        // overlayed TypeDef / enum registries and pushed scopes must be
+        // torn down before propagating any `RuntimeError` from the body.
+        let body_result = self.eval_statements(&func.body);
         self.env.pop_scope(); // pop local scope
         self.env.pop_scope(); // pop closure scope
         self.pop_func_module_scope(prev_td, prev_ed, td_changed);
         self.active_function = prev_active;
         self.call_depth -= 1;
 
-        match result {
-            Signal::Value(v) => Ok(v),
-            Signal::TailCall(_) => Err(RuntimeError {
+        match body_result {
+            Ok(Signal::Value(v)) => Ok(v),
+            Ok(Signal::TailCall(_)) => Err(RuntimeError {
                 message: "Unexpected tail call in list operation".to_string(),
             }),
-            Signal::Throw(err) => {
+            Ok(Signal::Throw(err)) => {
                 // Store thrown value so that error ceiling can recover it
                 self.pending_throw = Some(err.clone());
                 Err(RuntimeError {
                     message: format!("Unhandled error in list operation: {}", err),
                 })
             }
-            Signal::Gorilla => Ok(Value::Gorilla),
+            Ok(Signal::Gorilla) => Ok(Value::Gorilla),
+            Err(err) => Err(err),
         }
     }
 
@@ -1959,8 +1972,35 @@ impl Interpreter {
                 }
             }
 
-            // Execute body (with error ceiling support)
-            let result = self.eval_statements(&current_func.body)?;
+            // Execute body (with error ceiling support).
+            //
+            // C20B-015 / ROOT-18 (3rd reopen): body evaluation must NOT use
+            // `?`. A `RuntimeError` from the body would skip the pops and
+            // root-scope restore, leaving `self.type_defs` / `self.enum_defs`
+            // holding the defining-module overlay, the closure + local scopes
+            // pushed, and `self.active_function` / `self.call_depth` bumped.
+            // The REPL reuses this interpreter across inputs, so the leak
+            // would make a subsequent top-level `JSON[raw, Schema]()`
+            // silently resolve against an imported module's private schemas
+            // (or — for enum / TypeDef aliasing — quietly hit wrong data).
+            // Bind the result, run cleanup on every failure path, then
+            // propagate. On the non-error paths we still need the ability
+            // to continue the trampoline (self-TCO) or retarget (mutual
+            // TCO) without tearing down the root-scope snapshot, which is
+            // handled inside the `Ok(result)` match below.
+            let body_result = self.eval_statements(&current_func.body);
+            let result = match body_result {
+                Ok(signal) => signal,
+                Err(err) => {
+                    self.env.pop_scope(); // pop local scope
+                    self.env.pop_scope(); // pop closure scope
+                    self.type_defs = saved_td_root.clone();
+                    self.enum_defs = saved_ed_root.clone();
+                    self.active_function = prev_active;
+                    self.call_depth -= 1;
+                    return Err(err);
+                }
+            };
 
             self.env.pop_scope(); // pop local scope
             self.env.pop_scope(); // pop closure scope
