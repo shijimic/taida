@@ -709,3 +709,231 @@ stdout(payload)
         ),
     }
 }
+
+// ── Interpreter: user-defined method body-level error must pop pushed scopes ──
+//
+// Symmetric-fix pin for the `eval_user_method` path (methods.rs:201). The
+// `call_function*` paths in eval.rs were hardened by Pattern B (capture
+// `Result` without `?`, always run cleanup, propagate); `eval_user_method`
+// had the same shape — two `push_scope` calls followed by
+// `eval_statements(&body)?` — and would leak both the instance-fields
+// scope and the parameter/local scope when a method body raised a
+// `RuntimeError`. Unlike `call_function`, `eval_user_method` does not
+// touch typedef/enum overlays, `active_function`, or `call_depth`, so
+// the repro focuses on the pure scope-pop invariant.
+//
+// Repro shape (REPL reuse):
+//   1. `Greeter = @(name: Str; greet = ... => :Str)` defines a method
+//      whose body raises a RuntimeError (calling an undefined symbol
+//      inside a conditional branch that actually fires at runtime).
+//   2. prog1 instantiates `Greeter` and invokes `.greet()`, which errors.
+//   3. prog2 (on the same `Interpreter`) rebinds the parameter name at
+//      the top level. Pre-fix: the method's local scope was still pushed,
+//      the parameter binding leaked, and `victim <= "..."` errored with
+//      "already defined in this scope". Post-fix: cleanup popped both
+//      scopes on the error path.
+#[test]
+fn c20b_015_interpreter_user_method_body_error_pops_pushed_scopes() {
+    use taida::interpreter::Interpreter;
+    use taida::parser::parse;
+
+    // prog1: define a user type `Greeter` with a method `greet victim`
+    // whose body tries to call an undefined function. The reference to
+    // `notAFunction` resolves during evaluation (not parse), so the
+    // body raises a RuntimeError *while the two method scopes are
+    // pushed*.
+    let prog1_src = "\
+Greeter = @(
+  name: Str
+  greet victim: Str =
+    notAFunction(victim)
+  => :Str
+)
+
+g <= Greeter(name <= \"alice\")
+stdout(g.greet(\"bob\"))
+";
+    let (prog1, errs1) = parse(prog1_src);
+    assert!(errs1.is_empty(), "prog1 must parse: {:?}", errs1);
+
+    let mut interp = Interpreter::new();
+    let r1 = interp.eval_program(&prog1);
+    assert!(
+        r1.is_err(),
+        "prog1 must error (method body calls undefined `notAFunction`). Got: {:?}",
+        r1
+    );
+
+    // prog2: rebind `victim` at the top level. Pre-fix, the local scope
+    // from `greet`'s failed invocation leaked, and the parameter binding
+    // `victim = "bob"` remained alive. The `<=` binding would then
+    // collide with the surviving scope entry. Post-fix: local and
+    // instance-fields scopes were both popped on the Err path.
+    let prog2_src = "\
+victim <= \"ok\"
+stdout(victim)
+";
+    let (prog2, errs2) = parse(prog2_src);
+    assert!(errs2.is_empty(), "prog2 must parse: {:?}", errs2);
+
+    let r2 = interp.eval_program(&prog2);
+    match r2 {
+        Ok(_) => {
+            assert!(
+                interp
+                    .output
+                    .iter()
+                    .any(|line| line.trim_end_matches('\n') == "ok"),
+                "prog2 should have printed 'ok'; stdout buffer: {:?}",
+                interp.output
+            );
+        }
+        Err(e) => panic!(
+            "prog2 must succeed after prog1's method-body error \
+             (local scope from failed `.greet(\"bob\")` leaked pre-fix: \
+             parameter `victim` remained bound at the top level). Got: {}",
+            e
+        ),
+    }
+}
+
+// ── Interpreter: user-defined method body-level error must pop instance-fields scope ──
+//
+// Companion pin: the outer scope pushed by `eval_user_method` carries the
+// instance's fields (e.g. `name` from `Greeter`). Pre-fix, an error from
+// the method body would also leak those instance-field bindings into the
+// caller's scope. Post-fix, both the local scope and the instance-fields
+// scope are popped on the Err path.
+#[test]
+fn c20b_015_interpreter_user_method_body_error_pops_instance_fields_scope() {
+    use taida::interpreter::Interpreter;
+    use taida::parser::parse;
+
+    // `name` is an instance field of `Greeter`; the method body errors
+    // before returning. Pre-fix, `name` would leak at the top level of
+    // the caller's environment because the instance-fields scope was
+    // never popped.
+    let prog1_src = "\
+Greeter = @(
+  name: Str
+  greet =
+    notAFunction(name)
+  => :Str
+)
+
+g <= Greeter(name <= \"alice\")
+stdout(g.greet())
+";
+    let (prog1, errs1) = parse(prog1_src);
+    assert!(errs1.is_empty(), "prog1 must parse: {:?}", errs1);
+
+    let mut interp = Interpreter::new();
+    let r1 = interp.eval_program(&prog1);
+    assert!(
+        r1.is_err(),
+        "prog1 must error (method body calls undefined `notAFunction`). Got: {:?}",
+        r1
+    );
+
+    // Read `name` at the top level on the same Interpreter WITHOUT
+    // rebinding it. Pre-fix: the instance-fields scope leaked and the
+    // binding `name = "alice"` was reachable via `env.get()` (which
+    // searches all scopes), so `stdout(name)` would silently print
+    // "alice". Note that `name <=` would NOT have caught this leak on
+    // its own, because `define()` only checks the innermost scope and
+    // the innermost scope in the leak is the (empty) local scope — it
+    // would succeed and shadow the instance field. Reading `name`
+    // without rebinding exercises the full `env.get()` lookup and
+    // catches the instance-fields-scope leak directly.
+    //
+    // Post-fix: instance-fields scope was popped on the Err path, so
+    // `name` is undefined at the top level and `eval_program` returns
+    // an "Undefined variable 'name'" error.
+    let prog2_src = "\
+stdout(name)
+";
+    let (prog2, errs2) = parse(prog2_src);
+    assert!(errs2.is_empty(), "prog2 must parse: {:?}", errs2);
+
+    let r2 = interp.eval_program(&prog2);
+    match r2 {
+        Ok(_) => panic!(
+            "prog2 unexpectedly succeeded — instance-fields scope from failed \
+             `.greet()` leaked pre-fix: `name` was still bound at the top level. \
+             stdout buffer: {:?}",
+            interp.output
+        ),
+        Err(e) => {
+            let msg = e.to_string();
+            assert!(
+                msg.contains("name")
+                    && (msg.contains("Undefined")
+                        || msg.contains("undefined")
+                        || msg.contains("not defined")
+                        || msg.contains("not found")),
+                "prog2 must fail with an undefined-variable error for `name` \
+                 (confirms instance-fields scope was popped on the error path). \
+                 Got: {}",
+                msg
+            );
+        }
+    }
+}
+
+// ── Interpreter: user-defined method success path semantics unchanged ──
+//
+// Guard that the symmetric fix did not alter success-path behaviour: a
+// method that returns normally must still pop both scopes, and a caller
+// binding a variable with the same name as a method parameter must
+// succeed without "already defined" errors.
+#[test]
+fn c20b_015_interpreter_user_method_success_path_unchanged() {
+    use taida::interpreter::Interpreter;
+    use taida::parser::parse;
+
+    let src = "\
+Greeter = @(
+  name: Str
+  greet victim: Str =
+    name
+  => :Str
+)
+
+g <= Greeter(name <= \"alice\")
+stdout(g.greet(\"bob\"))
+stdout(\"\\n\")
+victim <= \"after\"
+stdout(victim)
+stdout(\"\\n\")
+name <= \"top\"
+stdout(name)
+";
+    let (prog, errs) = parse(src);
+    assert!(errs.is_empty(), "prog must parse: {:?}", errs);
+
+    let mut interp = Interpreter::new();
+    let r = interp.eval_program(&prog);
+    assert!(
+        r.is_ok(),
+        "success-path program must evaluate cleanly; got: {:?}. stdout: {:?}",
+        r,
+        interp.output
+    );
+
+    let joined: String = interp.output.iter().cloned().collect();
+    assert!(
+        joined.contains("alice"),
+        "method call should have returned instance field `name` (\"alice\"). stdout: {:?}",
+        interp.output
+    );
+    assert!(
+        joined.contains("after"),
+        "top-level `victim` binding should have printed \"after\". stdout: {:?}",
+        interp.output
+    );
+    assert!(
+        joined.contains("top"),
+        "top-level `name` binding should have printed \"top\". stdout: {:?}",
+        interp.output
+    );
+}
