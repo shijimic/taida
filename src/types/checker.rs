@@ -4509,22 +4509,31 @@ defaulted fields must be provided via `()`",
                         // Look up in mold definitions
                         if self.registry.mold_defs.contains_key(name) {
                             Type::Named(name.clone())
-                        } else if let Some(fn_ty) = self
-                            .lookup_var(name)
-                            .filter(|ty| matches!(ty, Type::Function(_, _)))
+                        } else if self.generic_func_defs.contains_key(name)
+                            || self.func_types.contains_key(name)
+                            || matches!(
+                                self.lookup_var(name),
+                                Some(Type::Function(_, _))
+                            )
                         {
-                            // C20B-014 (ROOT-17): user-defined function called via
-                            // mold syntax `Fn[args]()`. Pre-fix, the checker fell
-                            // through to `Type::Unknown` and the Interpreter
-                            // silently wrapped the result as a mold struct.
-                            // Post-fix, Interpreter dispatches to the function
-                            // directly (eval.rs) and Native lowers the same way
-                            // (lower_molds.rs). Match here so downstream type
-                            // inference and unification see the real return type
-                            // rather than `Unknown`. Named fields `()` on a
-                            // user-fn mold-syntax call are rejected with
-                            // `[E1511]` to mirror the runtime error and surface
-                            // the misuse at `taida check` time.
+                            // C20B-014 (ROOT-17) + C20B-016 (ROOT-19):
+                            // user-defined function called via mold syntax
+                            // `Fn[args]()`. Pre-C20B-016 this branch only
+                            // rejected named fields and returned the raw
+                            // function return type — arity, type-mismatch,
+                            // partial-application and generic-inference
+                            // validation were silently skipped, so
+                            // `add[1, "x"]()` passed `taida check` while
+                            // `add(1, "x")` correctly surfaced `[E1506]`.
+                            //
+                            // Post-fix: reject named fields first, then
+                            // synthesize the equivalent `FuncCall` and
+                            // delegate to the normal function-call path.
+                            // This is the exact same AST shape the parser
+                            // would have produced for `Fn(args)`, so every
+                            // downstream rule (generic-func E1301 / E1506 /
+                            // E1505, non-generic E1301 / E1506, function
+                            // value E1301 / E1506 / E1505) fires uniformly.
                             if !fields.is_empty() {
                                 self.errors.push(TypeError {
                                     message: format!(
@@ -4536,11 +4545,19 @@ defaulted fields must be provided via `()`",
                                     span: mold_span.clone(),
                                 });
                             }
-                            if let Type::Function(_, ret) = fn_ty {
-                                *ret
-                            } else {
-                                Type::Unknown
-                            }
+                            // Synthesize `name(type_args)` with the mold
+                            // span and recurse. The callee span is the
+                            // `mold_span` itself; positional args are the
+                            // `type_args` list (which for `Fn[a, b]()` are
+                            // the runtime values, cf. lower_molds.rs).
+                            let synth_callee =
+                                Expr::Ident(name.clone(), mold_span.clone());
+                            let synth_call = Expr::FuncCall(
+                                Box::new(synth_callee),
+                                type_args.clone(),
+                                mold_span.clone(),
+                            );
+                            self.infer_expr_type(&synth_call)
                         } else {
                             Type::Unknown
                         }

@@ -315,3 +315,126 @@ fn c20b_014_checker_accepts_user_fn_mold_syntax() {
         stderr
     );
 }
+
+// ── C20B-016 (ROOT-19): user-fn mold syntax must reuse normal
+//    function-call arity / type / partial validation ──
+//
+// Pre-C20B-016: the user-fn mold-syntax fallback only rejected named
+// fields and returned the raw function return type. Arity mismatches
+// (E1301), type mismatches (E1506) and partial-application errors
+// (E1505) that `Fn(args)` catches were silently skipped for
+// `Fn[args]()`, producing runtime crashes on code that `taida check`
+// accepted.
+//
+// Fix: delegate to the normal `Expr::FuncCall` path via a synthesised
+// call expression. These tests pin the `Fn[args]()` diagnostics to
+// match `Fn(args)` exactly.
+
+fn run_check(src: &str, prefix: &str) -> (std::process::Output, String) {
+    let src_path = unique_temp(prefix, "td");
+    fs::write(&src_path, src).expect("write src");
+    let out = Command::new(taida_bin())
+        .arg("check")
+        .arg(&src_path)
+        .output()
+        .expect("failed to spawn check");
+    let _ = fs::remove_file(&src_path);
+    let combined = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    (out, combined)
+}
+
+#[test]
+fn c20b_016_type_mismatch_mold_syntax_emits_e1506() {
+    // The pinned repro: `add[1, "x"]()` must surface `[E1506]` at check
+    // time, mirroring the `add(1, "x")` diagnostic.
+    let src = "add a: Int b: Int = a + b => :Int\nresult <= add[1, \"x\"]()\nstdout(result.toString())\n";
+    let (out, combined) = run_check(src, "c20b016_type");
+    assert!(
+        !out.status.success(),
+        "[C20B-016] `add[1, \"x\"]()` was accepted by taida check — regression. combined:\n{}",
+        combined
+    );
+    assert!(
+        combined.contains("[E1506]") && combined.contains("add"),
+        "[C20B-016] expected `[E1506]` on 'add', got:\n{}",
+        combined
+    );
+}
+
+#[test]
+fn c20b_016_type_mismatch_parenthesis_syntax_emits_e1506() {
+    // Sanity anchor: `add(1, "x")` emits the same diagnostic. Confirms
+    // the two syntaxes land on the same code path.
+    let src = "add a: Int b: Int = a + b => :Int\nresult <= add(1, \"x\")\nstdout(result.toString())\n";
+    let (out, combined) = run_check(src, "c20b016_type_paren");
+    assert!(
+        !out.status.success(),
+        "`add(1, \"x\")` baseline check drift. combined:\n{}",
+        combined
+    );
+    assert!(
+        combined.contains("[E1506]") && combined.contains("add"),
+        "expected `[E1506]` on 'add' for paren syntax, got:\n{}",
+        combined
+    );
+}
+
+#[test]
+fn c20b_016_arity_overflow_mold_syntax_emits_e1301() {
+    // `add[1, 2, 3]()` passes too many args — must hit [E1301].
+    let src = "add a: Int b: Int = a + b => :Int\nresult <= add[1, 2, 3]()\nstdout(result.toString())\n";
+    let (out, combined) = run_check(src, "c20b016_arity");
+    assert!(
+        !out.status.success(),
+        "[C20B-016] arity overflow via mold syntax accepted. combined:\n{}",
+        combined
+    );
+    assert!(
+        combined.contains("[E1301]") && combined.contains("add"),
+        "[C20B-016] expected `[E1301]` on 'add', got:\n{}",
+        combined
+    );
+}
+
+#[test]
+fn c20b_016_valid_mold_syntax_call_passes_check_and_runs() {
+    // `add[1, 2]()` is the canonical valid form and must keep working:
+    // checker passes, interpreter produces `3`.
+    let src = "add a: Int b: Int = a + b => :Int\nresult <= add[1, 2]()\nstdout(result.toString())\nstdout(\"\\n\")\n";
+    let src_path = unique_temp("c20b016_valid", "td");
+    fs::write(&src_path, src).expect("write src");
+    // Check phase
+    let check = Command::new(taida_bin())
+        .arg("check")
+        .arg(&src_path)
+        .output()
+        .expect("spawn check");
+    assert!(
+        check.status.success(),
+        "[C20B-016] valid `add[1, 2]()` rejected by check: stdout={} stderr={}",
+        String::from_utf8_lossy(&check.stdout),
+        String::from_utf8_lossy(&check.stderr)
+    );
+    // Run phase (interpreter)
+    let run = Command::new(taida_bin())
+        .arg(&src_path)
+        .output()
+        .expect("spawn run");
+    let _ = fs::remove_file(&src_path);
+    assert!(
+        run.status.success(),
+        "[C20B-016] valid `add[1, 2]()` failed at runtime. stdout={} stderr={}",
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&run.stdout).to_string();
+    assert!(
+        stdout.trim_end() == "3",
+        "[C20B-016] expected stdout '3', got '{}'",
+        stdout
+    );
+}
