@@ -1,6 +1,6 @@
 # Changelog
 
-## @c.21.rc4 (in progress)
+## @c.21.rc4
 
 Restore 3-backend Float semantics and open the WASM SIMD path that
 bonsai-wasm Phase 0 identified as a one-shot blocker for writing
@@ -154,7 +154,7 @@ the goal that motivated C21 in the first place.
   (Native / WASM × the two previously-JS-only fixtures), reflecting
   the scope-expanded pin.
 
-## @c.22.rc1 (in progress)
+## @c.22.rc1
 
 Restore observable I/O symmetry in the interpreter and harden the CLI
 against pipe-chain termination. Post-C20 smoke (Hachikuma Phase 11
