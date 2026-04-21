@@ -102,6 +102,68 @@ function __taida_is_float(v) {
   return typeof v === 'number' && Number.isFinite(v) && !Number.isInteger(v);
 }
 
+// C21B-seed-04 re-fix (2026-04-22): `Float[x]()` in Taida always produces
+// a Float-typed Lax, regardless of input representation. JS Number has no
+// Int/Float tag, so an integer-valued Float (e.g. `Float[3]()` yielding
+// `Lax[3.0]`) was rendering as `Lax[3]`. Here we build the Lax with a
+// `__floatHint: true` marker so the stdout/debug/toString formatters use
+// Float-aware rendering (`3.0`, `0.0`) for `__value` and `__default`.
+// Always used when the codegen sees `Float[...]()` — this is purely a
+// display-side tag; arithmetic and equality paths stay untouched (no
+// deopt). Matches the interpreter's `Value::Float` tag.
+function Float_mold_f(value) {
+  let num;
+  if (typeof value === 'number') num = value;
+  else if (typeof value === 'bigint') num = Number(value);
+  else if (typeof value === 'boolean') num = value ? 1.0 : 0.0;
+  else if (typeof value === 'string') {
+    const f = parseFloat(value);
+    if (isNaN(f)) {
+      return Object.freeze({
+        __type: 'Lax',
+        __floatHint: true,
+        __value: 0.0,
+        __default: 0.0,
+        hasValue: __taida_hasValue(false),
+        isEmpty() { return true; },
+        getOrDefault(def) { return def; },
+        map(fn) { return this; },
+        flatMap(fn) { return this; },
+        unmold() { return 0.0; },
+        toString() { return 'Lax(default: 0.0)'; },
+      });
+    }
+    num = f;
+  } else {
+    return Object.freeze({
+      __type: 'Lax',
+      __floatHint: true,
+      __value: 0.0,
+      __default: 0.0,
+      hasValue: __taida_hasValue(false),
+      isEmpty() { return true; },
+      getOrDefault(def) { return def; },
+      map(fn) { return this; },
+      flatMap(fn) { return this; },
+      unmold() { return 0.0; },
+      toString() { return 'Lax(default: 0.0)'; },
+    });
+  }
+  return Object.freeze({
+    __type: 'Lax',
+    __floatHint: true,
+    __value: num,
+    __default: 0.0,
+    hasValue: __taida_hasValue(true),
+    isEmpty() { return false; },
+    getOrDefault(def) { return num; },
+    map(fn) { const r = fn(num); return (r && r.__type === 'Lax') ? r : Lax(r); },
+    flatMap(fn) { const r = fn(num); return (r && r.__type === 'Lax') ? r : Lax(r); },
+    unmold() { return num; },
+    toString() { return 'Lax(' + __taida_float_render(num) + ')'; },
+  });
+}
+
 function __taida_ensureNotNull(value, defaultValue) {
   return (value === null || value === undefined) ? defaultValue : value;
 }
@@ -1650,9 +1712,16 @@ function __taida_stdout(...args) {
       if (arg.isSuccess()) rendered = 'Result[' + String(arg.__value) + ']';
       else rendered = 'Result(throw)';
     } else if (arg && arg.__type === 'Lax') {
-      // Match interpreter BuchiPack display format
+      // Match interpreter BuchiPack display format.
+      // C21B-seed-04 re-fix: when the Lax was produced by `Float_mold_f`
+      // (i.e. a Taida `Float[...]()` call), its __value / __default are
+      // Float-semantic even if they round to integer JS Numbers. Render
+      // them via __taida_float_render so `Lax[3.0]` prints with `.0`.
       const _lhv = typeof arg.hasValue === 'function' ? arg.hasValue() : arg.hasValue;
-      rendered = '@(hasValue <= ' + String(!!_lhv) + ', __value <= ' + __taida_format(arg.__value) + ', __default <= ' + __taida_format(arg.__default) + ', __type <= "Lax")';
+      const _fmt = arg.__floatHint === true
+        ? (n => typeof n === 'number' ? __taida_float_render(n) : __taida_format(n))
+        : __taida_format;
+      rendered = '@(hasValue <= ' + String(!!_lhv) + ', __value <= ' + _fmt(arg.__value) + ', __default <= ' + _fmt(arg.__default) + ', __type <= "Lax")';
     } else if (arg && typeof arg === 'object' && !Array.isArray(arg)) {
       // BuchiPack-like object
       const entries = Object.entries(arg).filter(([k]) => !k.startsWith('__'));
@@ -1696,6 +1765,13 @@ function __taida_format(v) {
   if (__taida_isEnumVal(v)) return String(v.__taida_enum_ordinal);
   if (Array.isArray(v)) return '@[' + v.map(x => __taida_format(x)).join(', ') + ']';
   if (typeof v === 'boolean') return v ? 'true' : 'false';
+  // C21B-seed-04 re-fix: nested Float-hinted Lax — render __value/__default
+  // as Float (with `.0`) so `@[Float[3.0]()]` etc. matches the interpreter.
+  if (v && v.__type === 'Lax' && v.__floatHint === true) {
+    const _lhv = typeof v.hasValue === 'function' ? v.hasValue() : v.hasValue;
+    const _fmt = n => typeof n === 'number' ? __taida_float_render(n) : __taida_format(n);
+    return '@(hasValue <= ' + String(!!_lhv) + ', __value <= ' + _fmt(v.__value) + ', __default <= ' + _fmt(v.__default) + ', __type <= "Lax")';
+  }
   if (v && typeof v === 'object' && !Array.isArray(v) && !v.__type) {
     const entries = Object.entries(v).filter(([k]) => !k.startsWith('__'));
     return '@(' + entries.map(([k, val]) => k + ' <= ' + __taida_format(val)).join(', ') + ')';

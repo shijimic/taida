@@ -97,6 +97,27 @@ the goal that motivated C21 in the first place.
   dynamic `map`/`fold` callbacks fall back to `Number.isInteger`. This
   is a language-spec limitation of JS `Number`, not a C21 regression.
 
+### Fixed
+
+- JS local binding Float-origin propagation (C21B-seed-04 reopen,
+  Phase 5 re-fix): the initial Phase 5 landing only covered terminal
+  sites whose argument was a `FloatLit` / Float-origin arithmetic /
+  `=> :Float` user-fn call. A subsequent review confirmed that
+  `x <= 3.0; stdout(Float[x]())` / `stdout(x)` / `stdout(x.toString())`
+  still diverged in JS because `is_float_origin_expr(Expr::Ident)`
+  returned `false`. `src/js/codegen.rs` grows a scope-aware tracker
+  (`float_origin_vars` / `int_origin_vars` / `float_list_vars`) that is
+  pushed / popped across function boundaries. Typed parameters
+  (`x: Float`, `a: @[Float]`), annotated bindings (`x: Float <= ...`),
+  Float-origin RHS bindings (`x <= 3.0`, `x <= floatExpr`), and unmold
+  targets rooted in Float lists (`a.get(i) ]=> av`) now carry the tag.
+  `Float[x]()` routes to a new `Float_mold_f` runtime helper that tags
+  the resulting `Lax` with `__floatHint: true`; the stdout / format
+  path renders `__value` / `__default` through `__taida_float_render`
+  when the tag is present. Arithmetic paths stay untouched (no deopt).
+  `tests/c21_js_float_binding.rs` pins both REOPEN repros plus a
+  one-level-deeper `triple(4.0) → local → Float[y]()` case.
+
 ## @c.22.rc1 (in progress)
 
 Restore observable I/O symmetry in the interpreter and harden the CLI
