@@ -10,19 +10,18 @@
 //! `triple(4.0)` と `dotProductAt(...)` の出力が完全に一致する。
 //! Interpreter をリファレンスとし、他 backend は Interpreter に揃える。
 //!
-//! Status (Phase 1 land 時点の snapshot)
+//! Status (Phase 5 land 時点の snapshot)
 //! ---------------------------------------
 //! * Interpreter: `12.0` / `11.0` を正しく返す (リファレンス)
-//! * JS:         `12`  / `11`  — `.0` が落ちる (Phase 5 で修正)
+//! * JS:         `12.0` / `11.0` — Phase 5 で seed-04 (Float→Str parity) を解消済
 //! * Native:     Verifier errors で compile 失敗 (C21B-008 新ブロッカー)
 //! * WASM-wasi:  `4622945017495814144` / `0` — seed-01/03 (Phase 2/4 で修正)
 //!
-//! Phase 1 (本ファイル) では Interpreter の正解のみを assert し、
-//! JS / Native / WASM は Phase 2/4/5 完了待ちの XFAIL (#[ignore]) として登録する。
-//! `#[ignore = "..."]` には解除予定 Phase を明記し、Phase land 時に単純削除で
-//! 通常 test 化できる状態で land する。
+//! JS parity は Phase 5 で統合済。Native / WASM は Phase 2/4 land 待ちの
+//! XFAIL (#[ignore]) として残す。`#[ignore = "..."]` には解除予定 Phase を
+//! 明記し、Phase land 時に単純削除で通常 test 化できる状態で維持する。
 //!
-//! 恒久 `#[ignore]` は禁止。Phase 5 完了時点で全て解除予定。
+//! 恒久 `#[ignore]` は禁止。残る XFAIL は Phase 2/4 完了時点で解除予定。
 
 mod common;
 
@@ -180,23 +179,37 @@ fn dot_product_interpreter_reference() {
 }
 
 // ---------------------------------------------------------------------------
-// JS — seed-04 近縁 (`.0` が落ちる)。Phase 5 で解消予定。
+// JS — Phase 5 で seed-04 (Float→Str parity) 解消済。通常 test として常時緑化。
 // ---------------------------------------------------------------------------
 
 #[test]
-#[ignore = "C21 Phase 5 (seed-04 / Float→Str parity) 完了時に解除予定。\
-            現在: JS は `12` (`.0` が落ちる) を返す"]
 fn triple_js_parity() {
+    if which_node().is_none() {
+        // node 未インストール環境ではスキップ (WASM と同様の扱い)
+        return;
+    }
     let out = run_js(triple_td()).expect("js run should succeed");
     assert_eq!(out, "12.0", "JS must match interpreter reference");
 }
 
 #[test]
-#[ignore = "C21 Phase 5 (seed-04 / Float→Str parity) 完了時に解除予定。\
-            現在: JS は `11` を返す"]
 fn dot_product_js_parity() {
+    if which_node().is_none() {
+        return;
+    }
     let out = run_js(dot_product_td()).expect("js run should succeed");
     assert_eq!(out, "11.0", "JS must match interpreter reference");
+}
+
+/// Utility: return Some(()) iff `node` is discoverable on PATH. Mirrors
+/// the `wasmtime_bin()` gating used below so CI hosts without Node.js
+/// skip the JS tests cleanly instead of failing.
+fn which_node() -> Option<()> {
+    Command::new("node")
+        .arg("--version")
+        .output()
+        .ok()
+        .and_then(|o| if o.status.success() { Some(()) } else { None })
 }
 
 // ---------------------------------------------------------------------------
@@ -253,24 +266,13 @@ fn dot_product_wasm_wasi_parity() {
 
 // ---------------------------------------------------------------------------
 // Snapshot tests: Phase 1 時点の「壊れっぷり」を記録として残す。
-// Phase 2-5 の修正で失敗するようになったら、そのまま削除して Parity test に置き換える。
-// これらは実際に走らせ、Phase 1 land 直後の状態を固定化する。
+// Phase land 時に失敗するようになったら、そのまま削除して Parity test に置き換える。
+//
+// 履歴:
+//   - triple_snapshot_js_current_behavior: Phase 5 land (seed-04 解消) で
+//     `12` → `12.0` になり削除済。同時に triple_js_parity / dot_product_js_parity
+//     の `#[ignore]` を解除し通常 test 化した。
 // ---------------------------------------------------------------------------
-
-#[test]
-fn triple_snapshot_js_current_behavior() {
-    // Phase 5 完了時に削除予定。
-    // 現状 JS は `12` (.0 なし) を返す。これが変わったら Phase 5 で parity が取れた証拠。
-    let out = match run_js(triple_td()) {
-        Some(o) => o,
-        None => return, // node 未インストール環境では skip
-    };
-    assert_eq!(
-        out, "12",
-        "Phase 1 snapshot: JS は現在 `12` を返す。Phase 5 修正後は `12.0` になるはず — \
-         その時点で本 test を削除し triple_js_parity の #[ignore] を外すこと"
-    );
-}
 
 #[test]
 fn triple_snapshot_wasm_wasi_current_behavior() {
