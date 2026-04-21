@@ -1,6 +1,18 @@
 # Changelog
 
-## @c.21.rc4
+## @c.22.rc5
+
+Two concurrent tracks land together in a single RC bump. Track A
+(formerly the `@c.21.rc4` draft) restores 3-backend Float semantics
+and opens the WASM SIMD path. Track B (formerly the `@c.22.rc1`
+draft) restores I/O symmetry and hardens the CLI against pipe-chain
+termination. Both tracks share the same merge, so the RC counter
+advances monotonically from `@c.20.rc4` to `@c.22.rc5` — the `22`
+reflects the active generation, the `rc5` keeps the incremental
+index `taida upgrade` and label-based selectors rely on. The two
+drafts' change-notes are kept as subsections below for traceability.
+
+### Track A — 4-backend Float parity + WASM SIMD path open
 
 Restore 3-backend Float semantics and open the WASM SIMD path that
 bonsai-wasm Phase 0 identified as a one-shot blocker for writing
@@ -154,7 +166,7 @@ the goal that motivated C21 in the first place.
   (Native / WASM × the two previously-JS-only fixtures), reflecting
   the scope-expanded pin.
 
-## @c.22.rc1
+### Track B — stream I/O + SIGPIPE tolerance
 
 Restore observable I/O symmetry in the interpreter and harden the CLI
 against pipe-chain termination. Post-C20 smoke (Hachikuma Phase 11
