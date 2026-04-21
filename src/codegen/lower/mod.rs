@@ -119,6 +119,11 @@ pub struct Lowering {
     list_vars: std::collections::HashSet<String>,
     /// List を返すユーザー定義関数名セット（retain-on-store 型タグ推論用）
     list_returning_funcs: std::collections::HashSet<String>,
+    /// C21-4: List 変数の要素型名 (`"Float"` / `"Int"` / `"Str"` / `"Bool"`)。
+    /// `a: @[Float]` のような型注釈付きパラメータ / 代入から取り出し、
+    /// `a.get(i) ]=> av` の unmold 結果型推論 (= `av` を float_vars に入れる) に使う。
+    /// これが無いと内積計算 `av * bv` が `taida_int_mul` に降り、Float bits が破壊される。
+    list_element_types: std::collections::HashMap<String, String>,
     /// TypeDef 名 → メソッド定義リスト（メソッド名, FuncDef）
     type_method_defs: std::collections::HashMap<String, Vec<(String, crate::parser::FuncDef)>>,
     /// トップレベルで定義される変数名のセット（Native グローバル変数テーブル用）

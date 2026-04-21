@@ -445,7 +445,7 @@ impl Lowering {
                 }
             }
             // MethodCall results: hasValue() -> bool
-            Expr::MethodCall(_, method, _, _) => {
+            Expr::MethodCall(recv, method, _, _) => {
                 if matches!(
                     method.as_str(),
                     "hasValue"
@@ -470,6 +470,15 @@ impl Lowering {
                         | "isZero"
                 ) {
                     self.bool_vars.insert(target.to_string());
+                }
+                // C21-4: `a.get(i) ]=> av` — if `a` is a typed `@[Float]` list,
+                // tag `av` as a Float so the subsequent `av * bv` arithmetic
+                // lowers to `taida_float_mul` (not `taida_int_mul`).
+                if method.as_str() == "get"
+                    && let Expr::Ident(recv_name, _) = recv.as_ref()
+                    && let Some(elem_ty) = self.list_element_types.get(recv_name).cloned()
+                {
+                    self.track_unmold_type_by_mold_name(target, &elem_ty);
                 }
             }
             _ => {}
