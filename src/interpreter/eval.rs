@@ -337,14 +337,25 @@ impl Interpreter {
                         };
 
                         if type_matches {
-                            // Error type matches — run the handler
+                            // Error type matches — run the handler.
+                            //
+                            // C20B-017 / ROOT-20: handler body may itself raise a
+                            // `RuntimeError` (undefined variable, method lookup failure,
+                            // etc.). We MUST pop the handler scope on both Ok and Err
+                            // paths, otherwise the leaked scope causes outer
+                            // `call_function*` cleanup to peel off the wrong layer and
+                            // let the enclosing closure scope leak across REPL inputs.
+                            //
+                            // Pattern B: split the `?` from the call so `pop_scope`
+                            // runs before we propagate any error.
                             self.env.push_scope();
                             self.env.define_force(&ec.error_param, err);
 
-                            let handler_result = self.eval_statements(&ec.handler_body)?;
+                            let handler_result = self.eval_statements(&ec.handler_body);
                             self.env.pop_scope();
+                            let handler_signal = handler_result?;
 
-                            match handler_result {
+                            match handler_signal {
                                 Signal::Value(v) => return Ok(Signal::Value(v)),
                                 Signal::TailCall(args) => return Ok(Signal::TailCall(args)),
                                 Signal::Throw(err) => return Ok(Signal::Throw(err)),
