@@ -10,18 +10,22 @@
 //! `triple(4.0)` と `dotProductAt(...)` の出力が完全に一致する。
 //! Interpreter をリファレンスとし、他 backend は Interpreter に揃える。
 //!
-//! Status (Phase 5 land 時点の snapshot)
-//! ---------------------------------------
+//! Status (Phase 2 + Phase 4 land 時点の final snapshot)
+//!
 //! * Interpreter: `12.0` / `11.0` を正しく返す (リファレンス)
-//! * JS:         `12.0` / `11.0` — Phase 5 で seed-04 (Float→Str parity) を解消済
-//! * Native:     Verifier errors で compile 失敗 (C21B-008 新ブロッカー)
-//! * WASM-wasi:  `4622945017495814144` / `0` — seed-01/03 (Phase 2/4 で修正)
+//! * JS: `12.0` / `11.0` — Phase 5 で seed-04 解消済
+//! * Native: `12.0` / `11.0` — Phase 4 で C21B-008 (Cranelift verifier
+//!   errors) 解消済: `ConstFloat` を emit 即 bitcast して boxed i64 に
+//!   正規化、`taida_io_stdout_with_tag` で FLOAT tag を `taida_float_to_str`
+//!   経由にルートする
+//! * WASM-wasi: `12.0` / `11.0` — Phase 2/4 で seed-01/03/C21B-009
+//!   解消済: (a) `@[Float]` 要素の unmold 経路 (`a.get(i) ]=> av`) で
+//!   element type を `list_element_types` に伝播して `av*bv` を
+//!   `taida_float_mul` に降ろす、(b) `taida_io_stdout_with_tag` が
+//!   FLOAT tag で `taida_float_to_str` (bit-pattern decode) を呼ぶ。
 //!
-//! JS parity は Phase 5 で統合済。Native / WASM は Phase 2/4 land 待ちの
-//! XFAIL (#[ignore]) として残す。`#[ignore = "..."]` には解除予定 Phase を
-//! 明記し、Phase land 時に単純削除で通常 test 化できる状態で維持する。
-//!
-//! 恒久 `#[ignore]` は禁止。残る XFAIL は Phase 2/4 完了時点で解除予定。
+//! 全 XFAIL は解除済。新しい regression は snapshot ではなく
+//! 4-backend parity test が検出する。
 
 mod common;
 
@@ -213,39 +217,32 @@ fn which_node() -> Option<()> {
 }
 
 // ---------------------------------------------------------------------------
-// Native — 新ブロッカー: Float 関数戻り値で Cranelift verifier errors。
-// Phase 4 の Float → Str ABI 統一作業 (seed-05 audit ペア) で解消予定。
+// Native — Phase 4 で C21B-008 (`ConstFloat` → CallUser/Return で raw f64 が
+// i64 ABI slot に漏れて Cranelift verifier errors) + FLOAT tag stdout dispatch
+// を修正。現在は parity 成立。
 // ---------------------------------------------------------------------------
 
 #[test]
-#[ignore = "C21 Phase 4 (seed-05 / native Float unbox audit) 完了時に解除予定。\
-            現在: `triple x: Float => :Float` の native build が \
-            `Emit error: define_function failed: Compilation error: Verifier errors` で失敗"]
 fn triple_native_parity() {
     let out = run_native(triple_td()).expect("native build+run should succeed");
     assert_eq!(out, "12.0", "native must match interpreter reference");
 }
 
 #[test]
-#[ignore = "C21 Phase 4 (seed-05 / native Float unbox audit) 完了時に解除予定。\
-            現在: native build が verifier errors で失敗"]
 fn dot_product_native_parity() {
     let out = run_native(dot_product_td()).expect("native build+run should succeed");
     assert_eq!(out, "11.0", "native must match interpreter reference");
 }
 
 // ---------------------------------------------------------------------------
-// WASM-wasi — seed-01 / seed-03。Phase 2 (unbox) + Phase 4 (Float→Str ABI) 完了時に解除。
+// WASM-wasi — Phase 2 (`@[Float]` 要素 unmold の型タグ伝播) + Phase 4
+// (FLOAT tag を `taida_float_to_str` にルート) で seed-01 / seed-03 / C21B-009 解消。
 // ---------------------------------------------------------------------------
 
 #[test]
-#[ignore = "C21 Phase 2 (seed-01 WASM Float unbox) + Phase 4 (seed-03 Float→Str ABI) \
-            完了時に解除予定。\
-            現在: `stdout(triple(4.0))` は `4622945017495814144` \
-            (= 0x4028000000000000 = 12.0 の f64 bit pattern) を出力する"]
 fn triple_wasm_wasi_parity() {
     if wasmtime_bin().is_none() {
-        // wasmtime が無い環境では skip (XFAIL として扱うので actual assertion は不要)
+        // wasmtime が無い環境では skip (CI 未設定環境での early-exit)
         return;
     }
     let out = run_wasm_wasi(triple_td()).expect("wasm-wasi build+run should succeed");
@@ -253,9 +250,6 @@ fn triple_wasm_wasi_parity() {
 }
 
 #[test]
-#[ignore = "C21 Phase 2 (seed-01 WASM Float unbox) + Phase 4 (seed-03 Float→Str ABI) \
-            完了時に解除予定。\
-            現在: 内積計算が seed-01 により `0` を返す (hot loop で Float 演算が壊れる)"]
 fn dot_product_wasm_wasi_parity() {
     if wasmtime_bin().is_none() {
         return;
@@ -265,30 +259,9 @@ fn dot_product_wasm_wasi_parity() {
 }
 
 // ---------------------------------------------------------------------------
-// Snapshot tests: Phase 1 時点の「壊れっぷり」を記録として残す。
-// Phase land 時に失敗するようになったら、そのまま削除して Parity test に置き換える。
-//
-// 履歴:
-//   - triple_snapshot_js_current_behavior: Phase 5 land (seed-04 解消) で
-//     `12` → `12.0` になり削除済。同時に triple_js_parity / dot_product_js_parity
-//     の `#[ignore]` を解除し通常 test 化した。
+// Snapshot 系 test (Phase 1 時点の壊れっぷりを固定) は Phase 2/4 修正により
+// 全て解除済み。履歴のみドキュメント留め:
+//   - triple_snapshot_js_current_behavior   — Phase 5 で削除 (seed-04 解消)
+//   - triple_snapshot_wasm_wasi_current_behavior — Phase 4 で削除
+//     (上記 `triple_wasm_wasi_parity` に通常 test 化)
 // ---------------------------------------------------------------------------
-
-#[test]
-fn triple_snapshot_wasm_wasi_current_behavior() {
-    // Phase 2/4 完了時に削除予定。
-    // 現状 WASM-wasi は f64 の i64 bit pattern を吐く。これが変わったら修正が効いた証拠。
-    if wasmtime_bin().is_none() {
-        return;
-    }
-    let out = match run_wasm_wasi(triple_td()) {
-        Some(o) => o,
-        None => return, // ビルド失敗時も skip (環境問題と区別しない)
-    };
-    assert_eq!(
-        out, "4622945017495814144",
-        "Phase 1 snapshot: WASM-wasi は現在 f64 bit pattern を返す。\
-         修正後は `12.0` になる — その時点で本 test を削除し triple_wasm_wasi_parity の \
-         #[ignore] を外すこと"
-    );
-}
