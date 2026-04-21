@@ -247,7 +247,24 @@ int64_t taida_make_error(int64_t type_ptr, int64_t msg_ptr) {
 
 /* WASM_HASH_HAS_VALUE, __VALUE, __DEFAULT, __TYPE defined in W-5f monadic type hash section */
 
+/* C21B-seed-07: Register Lax's four field names so
+   `_wasm_pack_to_string_full` can surface them in the interpreter-parity
+   stdout form `@(hasValue <= …, __value <= …, __default <= …, __type <=
+   "Lax")`. Without this, the lookup returns NULL and the field is skipped
+   entirely — the symptom observed on wasm-wasi was `@()` for any Lax
+   produced by `Int[x]()` / `Float[x]()` / `Bool[x]()` / `Str[x]()`. */
+static int _wasm_lax_names_registered = 0;
+static void _wasm_register_lax_field_names(void) {
+    if (_wasm_lax_names_registered) return;
+    _wasm_lax_names_registered = 1;
+    taida_register_field_name(WASM_HASH_HAS_VALUE, (int64_t)(intptr_t)"hasValue");
+    taida_register_field_name(WASM_HASH___VALUE,   (int64_t)(intptr_t)"__value");
+    taida_register_field_name(WASM_HASH___DEFAULT, (int64_t)(intptr_t)"__default");
+    taida_register_field_name(WASM_HASH___TYPE,    (int64_t)(intptr_t)"__type");
+}
+
 int64_t taida_lax_new(int64_t value, int64_t default_value) {
+    _wasm_register_lax_field_names();
     int64_t pack = taida_pack_new(4);
     taida_pack_set_hash(pack, 0, WASM_HASH_HAS_VALUE);
     taida_pack_set(pack, 0, 1);  /* hasValue = true */
@@ -258,10 +275,14 @@ int64_t taida_lax_new(int64_t value, int64_t default_value) {
     taida_pack_set(pack, 2, default_value);
     taida_pack_set_hash(pack, 3, WASM_HASH___TYPE);
     taida_pack_set(pack, 3, (int64_t)(intptr_t)"Lax");
+    /* Tag the __type slot as STR so `_wasm_pack_to_string_full` quotes it
+       correctly (matches interpreter's `__type <= "Lax"`). */
+    taida_pack_set_tag(pack, 3, WASM_TAG_STR);
     return pack;
 }
 
 int64_t taida_lax_empty(int64_t default_value) {
+    _wasm_register_lax_field_names();
     int64_t pack = taida_pack_new(4);
     taida_pack_set_hash(pack, 0, WASM_HASH_HAS_VALUE);
     taida_pack_set(pack, 0, 0);  /* hasValue = false */
@@ -272,6 +293,7 @@ int64_t taida_lax_empty(int64_t default_value) {
     taida_pack_set(pack, 2, default_value);
     taida_pack_set_hash(pack, 3, WASM_HASH___TYPE);
     taida_pack_set(pack, 3, (int64_t)(intptr_t)"Lax");
+    taida_pack_set_tag(pack, 3, WASM_TAG_STR);
     return pack;
 }
 
@@ -750,33 +772,46 @@ void taida_gorilla(void) {
 
 /* ── W-5: Type conversion molds (returning Lax) ── */
 /* These wrap taida_lax_new with conversion logic, matching native_runtime.c */
+/*
+ * C21B-seed-07: stamp the per-field primitive tag on `__value` (index 1)
+ * and `__default` (index 2) so the new `_wasm_pack_to_display_string_full`
+ * dispatcher can render Float / Str correctly in the interpreter-parity
+ * full form. The Float and Bool molds already had this stamping (kept for
+ * historical reasons); Int and Str now follow suit.
+ */
+
+static inline int64_t _lax_tag_vd(int64_t lax, int64_t tag) {
+    taida_pack_set_tag(lax, 1, tag);
+    taida_pack_set_tag(lax, 2, tag);
+    return lax;
+}
 
 int64_t taida_str_mold_int(int64_t v) {
-    return taida_lax_new(taida_int_to_str(v), (int64_t)(intptr_t)"");
+    return _lax_tag_vd(taida_lax_new(taida_int_to_str(v), (int64_t)(intptr_t)""), WASM_TAG_STR);
 }
 
 int64_t taida_str_mold_float(int64_t v) {
-    return taida_lax_new(taida_float_to_str(v), (int64_t)(intptr_t)"");
+    return _lax_tag_vd(taida_lax_new(taida_float_to_str(v), (int64_t)(intptr_t)""), WASM_TAG_STR);
 }
 
 int64_t taida_str_mold_bool(int64_t v) {
-    return taida_lax_new(taida_str_from_bool(v), (int64_t)(intptr_t)"");
+    return _lax_tag_vd(taida_lax_new(taida_str_from_bool(v), (int64_t)(intptr_t)""), WASM_TAG_STR);
 }
 
 int64_t taida_str_mold_str(int64_t v) {
-    return taida_lax_new(v, (int64_t)(intptr_t)"");
+    return _lax_tag_vd(taida_lax_new(v, (int64_t)(intptr_t)""), WASM_TAG_STR);
 }
 
 int64_t taida_int_mold_int(int64_t v) {
-    return taida_lax_new(v, 0);
+    return _lax_tag_vd(taida_lax_new(v, 0), WASM_TAG_INT);
 }
 
 int64_t taida_int_mold_float(int64_t v) {
-    return taida_lax_new(taida_float_to_int(v), 0);
+    return _lax_tag_vd(taida_lax_new(taida_float_to_int(v), 0), WASM_TAG_INT);
 }
 
 int64_t taida_int_mold_bool(int64_t v) {
-    return taida_lax_new(v != 0 ? 1 : 0, 0);
+    return _lax_tag_vd(taida_lax_new(v != 0 ? 1 : 0, 0), WASM_TAG_INT);
 }
 
 int64_t taida_float_mold_int(int64_t v) {

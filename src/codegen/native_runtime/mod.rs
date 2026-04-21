@@ -224,9 +224,26 @@ mod tests {
     /// prints `12.0` on native (was a raw i64 bit pattern) and avoids
     /// spurious `3.14 → 3.1400000000000001` rendering. New total:
     /// 929,510.
+    ///
+    /// C21B-seed-07 (2026-04-22): +6,295 bytes in core.c — primitive-mold
+    /// Lax constructors (`taida_{int,float,bool,str}_mold_*`) now stamp
+    /// the output primitive tag on the Lax's `__value` / `__default`
+    /// fields via a new `taida_lax_tag_value_default` helper; the pack
+    /// display paths (`taida_pack_to_display_string` / `_full`) consult
+    /// the per-field tag before falling back to the legacy global
+    /// field-name/type registry; and `taida_io_stdout_with_tag` /
+    /// `_stderr_with_tag` route any runtime-detected BuchiPack (Lax /
+    /// Result / Gorillax / user-defined) through the full-form display.
+    /// Fixes the C21B-seed-07 symptom where `stdout(Float[x]())` decoded
+    /// the Lax pointer as an f64 bit pattern via the FLOAT fast path (→
+    /// `3.958e-315`) and `stdout(Int[x]())` printed the short
+    /// `.toString()` form `Lax(3)` instead of the interpreter's full
+    /// `@(hasValue <= true, __value <= 3, __default <= 0, __type <=
+    /// "Lax")`. F1 moves from 214,240 to 216,753; F2 moves from 134,257
+    /// to 138,039. New total: 935,805.
     #[test]
     fn test_native_runtime_fragment_concat_preserves_bytes() {
-        const EXPECTED_TOTAL_LEN: usize = 929_510;
+        const EXPECTED_TOTAL_LEN: usize = 935_805;
         let asm = *NATIVE_RUNTIME_C;
         assert_eq!(
             asm.len(),
@@ -391,11 +408,25 @@ mod tests {
         // (seed-03 / C21B-008 fix — `stdout(triple(4.0))` prints `12.0`
         // instead of the boxed f64 bit pattern). F1 moves from 212,118
         // to 214,240; F2 moves from 133,151 to 134,257.
-        const F1_LEN: usize = 214_240;
+        //
+        // C21B-seed-07 (2026-04-22): fragment 1 grew by +2,513 bytes —
+        // the primitive-mold tag-stamp helper, reworked primitive
+        // mold constructors (`taida_{int,float,bool,str}_mold_*`), and
+        // per-field-tag dispatch branches in
+        // `taida_pack_to_display_string` / `_full`. Fragment 2 grew by
+        // +3,782 bytes — buchi-pack detour branches in
+        // `taida_io_stdout_with_tag` / `taida_io_stderr_with_tag`
+        // routing any runtime-detected pack through
+        // `taida_stdout_display_string` so interpreter-parity
+        // `@(hasValue <= …, __value <= …, __default <= …, __type <=
+        // "Lax")` output is preserved for Lax returns from
+        // `Int[]/Float[]/Bool[]/Str[]`. F1 moves from 214,240 to
+        // 216,753; F2 moves from 134,257 to 138,039.
+        const F1_LEN: usize = 216_753;
         assert_eq!(
             CORE_SECTION.len(),
-            214_240 + 134_257,
-            "core.c total byte length must equal legacy fragment1 + fragment2 (C21-4 adjusted)"
+            216_753 + 138_039,
+            "core.c total byte length must equal legacy fragment1 + fragment2 (C21B-seed-07 adjusted)"
         );
         const F2_PREFIX: &[u8] = b"// \xE2\x94\x80\xE2\x94\x80 Error ceiling";
         let tail = &CORE_SECTION.as_bytes()[F1_LEN..F1_LEN + F2_PREFIX.len()];

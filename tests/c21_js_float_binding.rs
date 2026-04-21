@@ -284,3 +284,73 @@ fn float_local_to_string_wasm_parity() {
         "wasm-wasi must match interpreter — stdout(x) / x.toString() on Float local must print `3.0`"
     );
 }
+
+// ---------------------------------------------------------------------------
+// C21B-seed-07 (2026-04-22): Native / WASM parity for the `Float[x]()`
+// mold-call shape. These were split out of the original re-fix as
+// "pre-existing regression" but are now fixed:
+//
+// * `src/codegen/native_runtime/core.c` — each primitive mold
+//   (`taida_{int,float,bool,str}_mold_*`) stamps the output tag on the
+//   Lax's `__value` / `__default` fields; `taida_pack_to_display_string`
+//   / `_full` consult the per-field tag so Float values render through
+//   `taida_float_to_str`; `taida_io_stdout_with_tag` / `_stderr_with_tag`
+//   route any runtime-detected BuchiPack through
+//   `taida_stdout_display_string` which uses the `_full` form.
+// * `src/codegen/runtime_core_wasm/{01_core,02_containers}.inc.c` —
+//   symmetric changes on wasm: Lax field-name registration, per-field
+//   tag dispatch in `_wasm_pack_to_string` / `_full`, new
+//   `_wasm_stdout_display_string` + tight `_is_pack_for_stdout` guard
+//   (List / HashMap / Set / Async excluded so `stdout(@[1,2,3])` still
+//   prints the list form).
+// * `src/types/mold_returns.rs` — `Int`/`Float`/`Bool`/`Str` moved to
+//   the `Pack` table so `expr_type_tag(Float[x]())` no longer reports
+//   the primitive output type and mis-routes the Lax pointer through
+//   the FLOAT fast path.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn float_local_binding_native_parity() {
+    let out = run_native(float_local_binding_td()).expect("native build+run should succeed");
+    assert_eq!(
+        out, EXPECTED_FLOAT_LOCAL_BINDING,
+        "native must match interpreter — Float[x]() / Int[x]() on Float local \
+         must render as full-form Lax packs with `__value <= 3.0` / `__value <= 3`"
+    );
+}
+
+#[test]
+fn float_local_binding_wasm_parity() {
+    if common::wasmtime_bin().is_none() {
+        return;
+    }
+    let out = run_wasm_wasi(float_local_binding_td()).expect("wasm build+run should succeed");
+    assert_eq!(
+        out, EXPECTED_FLOAT_LOCAL_BINDING,
+        "wasm-wasi must match interpreter — Float[x]() / Int[x]() on Float local \
+         must render as full-form Lax packs with `__value <= 3.0` / `__value <= 3`"
+    );
+}
+
+#[test]
+fn float_fn_result_local_native_parity() {
+    let out = run_native(float_fn_result_local_td()).expect("native build+run should succeed");
+    assert_eq!(
+        out, EXPECTED_FLOAT_FN_RESULT_LOCAL,
+        "native must match interpreter — Float[triple(4.0)-via-local]() \
+         must render as a full-form Lax[12.0] pack"
+    );
+}
+
+#[test]
+fn float_fn_result_local_wasm_parity() {
+    if common::wasmtime_bin().is_none() {
+        return;
+    }
+    let out = run_wasm_wasi(float_fn_result_local_td()).expect("wasm build+run should succeed");
+    assert_eq!(
+        out, EXPECTED_FLOAT_FN_RESULT_LOCAL,
+        "wasm-wasi must match interpreter — Float[triple(4.0)-via-local]() \
+         must render as a full-form Lax[12.0] pack"
+    );
+}

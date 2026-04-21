@@ -118,6 +118,42 @@ the goal that motivated C21 in the first place.
   `tests/c21_js_float_binding.rs` pins both REOPEN repros plus a
   one-level-deeper `triple(4.0) → local → Float[y]()` case.
 
+- Native / WASM Float Lax parity for local bindings (C21B-seed-07,
+  Phase 4 補修): the Phase 5 re-fix split out a pre-existing Native /
+  WASM divergence — `x <= 3.0; stdout(Float[x]())` printed
+  `3.958204945e-315` on native and subnormal garbage on wasm-wasi
+  because `mold_returns.rs` declared `Float[x]()` as returning a bare
+  `Float` (tag 1), so `lower_stdout_with_tag` routed the Lax pointer
+  through the `TAIDA_TAG_FLOAT` fast path which `memcpy`'d the pointer
+  bits as an f64. `Int[x]()` printed the short `Lax(3)` `.toString()`
+  form instead of the interpreter's full
+  `@(hasValue <= true, __value <= 3, __default <= 0, __type <= "Lax")`.
+  The fix spans three layers: (1) `src/types/mold_returns.rs` re-
+  classifies `Int` / `Float` / `Bool` / `Str` as `Pack` (the actual
+  runtime return type, a `taida_lax_new(...)` result); (2) native
+  `src/codegen/native_runtime/core.c` adds a
+  `taida_lax_tag_value_default` helper so every
+  `taida_{int,float,bool,str}_mold_*` function stamps the per-field tag
+  on the Lax's `__value` / `__default` slots, and
+  `taida_pack_to_display_string` / `_full` honor that tag before
+  falling back to the global registry, and
+  `taida_io_stdout_with_tag` / `_stderr_with_tag` route any runtime-
+  detected BuchiPack through `taida_stdout_display_string` (the
+  `_full` entry) so interpreter-parity `@(hasValue <= …, __value <=
+  …, __default <= …, __type <= "Lax")` emerges; (3) wasm
+  `src/codegen/runtime_core_wasm/{01_core,02_containers}.inc.c` land
+  symmetric changes: Lax field-name registration on first
+  `taida_lax_new` call, per-field tag dispatch in the new
+  `_wasm_pack_to_string_full`, tight `_is_pack_for_stdout` guard that
+  excludes Lists / HashMaps / Sets / Async objects (so
+  `stdout(@[1,2,3])` still renders as a list, not as `@()`). All four
+  pre-existing `Float[x]()` Lax divergences in
+  `examples/quality/c21b_float_fn_boundary/{float_local_binding,
+  float_fn_result_local}.td` now match the interpreter on 4 backends.
+  `tests/c21_js_float_binding.rs` adds four new parity assertions
+  (Native / WASM × the two previously-JS-only fixtures), reflecting
+  the scope-expanded pin.
+
 ## @c.22.rc1 (in progress)
 
 Restore observable I/O symmetry in the interpreter and harden the CLI
