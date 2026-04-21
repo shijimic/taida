@@ -110,6 +110,23 @@ stdout(message)  // "Hello, World!"
 
 `stdout` はプレリュードに含まれるビルトイン関数です。import は不要です。
 
+### I/O は行指向 + 即時 flush
+
+`stdout(...)` と `debug(...)` はプログラム実行中に**1 行ずつ即座に端末へ書き出されます**（C22 以降）。進捗表示やスピナー、printf-デバッグが動いている最中にリアルタイムで観測できます。戻り値は書き出した UTF-8 バイト数（`Int`）で、暗黙の末尾改行 `\n` はバイト数に含めません。
+
+| API | 出力先 | タイミング | 暗黙 `\n` |
+|---|---|---|---|
+| `stdout(msg)` | stdout | 即 flush（CLI） / eval 後一括（REPL・in-process テスト） | あり |
+| `stderr(msg)` | stderr | 即 flush | あり |
+| `debug(value)` | stdout | 即 flush（CLI） / eval 後一括（REPL・in-process テスト） | あり |
+| `stdin(prompt?)` | stdin | プロンプトは即 flush | — |
+
+REPL と Rust 側の in-process テスト API (`Interpreter::new()`) は後方互換のため**バッファモード**のまま残してあります。`taida <file>` / `taida run <file>` だけが内部で `Interpreter::new_streaming()` を使い、即 flush に切り替わります。Taida の surface API には変更はなく、既存のコードはそのまま動きます。
+
+改行を付けずに生のバイト列を端末に書きたい場合（ANSI エスケープ連続送信、TUI 描画など）は `stdout()` ではなく `taida-lang/terminal` パッケージの raw write API を使ってください。`stdout()` は行指向 I/O のままにしておき、TUI 用途は責務を分けるのが方針です。
+
+`taida script.td | head -1` のようなパイプライン合成も後続の `stdout()` が `EPIPE` で黙って失敗するだけで、プロセスは exit 0 で終了します。
+
 ---
 
 ## 基本的な構文

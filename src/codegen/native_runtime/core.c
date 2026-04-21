@@ -1117,40 +1117,58 @@ taida_val taida_mod_mold(taida_val a, taida_val b) {
 
 // ── Type conversion molds (Str/Int/Float/Bool) ──────────────
 // Each returns a Lax BuchiPack. Str default="", Int default=0, Float default=0.0, Bool default=false(0).
+//
+// C21B-seed-07: After constructing the Lax we stamp the `__value` (index 1)
+// and `__default` (index 2) per-field tags with the mold's output primitive
+// type. Without these tags, `taida_pack_to_display_string_full` cannot tell
+// a Float bit-pattern apart from an Int and ends up rendering `Lax[3.0]` as
+// `Lax[4613937818241073152]` or — worse — decoding a pack *pointer* as
+// double bits via the FLOAT fast path in stdout_with_tag. See also the
+// mold_returns.rs change that routes `Int[]/Float[]/Bool[]/Str[]` through
+// the PACK tag path rather than their primitive output type.
+
+// Helper: tag `__value` and `__default` of a Lax pack with the given primitive
+// tag (`TAIDA_TAG_INT`/FLOAT/BOOL/STR). Must be called AFTER `taida_lax_new`
+// or `taida_lax_empty` — both paths zero the tag slots for scalars by default.
+static inline taida_val taida_lax_tag_value_default(taida_val lax, taida_val tag) {
+    taida_pack_set_tag(lax, 1, tag);
+    taida_pack_set_tag(lax, 2, tag);
+    return lax;
+}
 
 // Str[x]() — always succeeds
 taida_val taida_str_mold_int(taida_val v) {
-    return taida_lax_new(taida_str_from_int(v), (taida_val)"");
+    return taida_lax_tag_value_default(taida_lax_new(taida_str_from_int(v), (taida_val)""), TAIDA_TAG_STR);
 }
 taida_val taida_str_mold_float(double v) {
-    return taida_lax_new(taida_str_from_float(v), (taida_val)"");
+    return taida_lax_tag_value_default(taida_lax_new(taida_str_from_float(v), (taida_val)""), TAIDA_TAG_STR);
 }
 taida_val taida_str_mold_bool(taida_val v) {
-    return taida_lax_new(taida_str_from_bool(v), (taida_val)"");
+    return taida_lax_tag_value_default(taida_lax_new(taida_str_from_bool(v), (taida_val)""), TAIDA_TAG_STR);
 }
 taida_val taida_str_mold_str(taida_val v) {
-    return taida_lax_new(v, (taida_val)"");
+    return taida_lax_tag_value_default(taida_lax_new(v, (taida_val)""), TAIDA_TAG_STR);
 }
 
 // Int[x]() — Str parse can fail
 taida_val taida_int_mold_int(taida_val v) {
-    return taida_lax_new(v, 0);
+    return taida_lax_tag_value_default(taida_lax_new(v, 0), TAIDA_TAG_INT);
 }
 taida_val taida_int_mold_float(double v) {
-    return taida_lax_new((taida_val)v, 0);
+    return taida_lax_tag_value_default(taida_lax_new((taida_val)v, 0), TAIDA_TAG_INT);
 }
 taida_val taida_int_mold_str(taida_val v) {
     const char *s = (const char *)v;
-    if (!s || *s == '\0') return taida_lax_empty(0);
+    if (!s || *s == '\0') return taida_lax_tag_value_default(taida_lax_empty(0), TAIDA_TAG_INT);
     // Reject leading whitespace to match Interpreter parity (Rust parse::<i64>)
-    if (s[0] == ' ' || s[0] == '\t' || s[0] == '\n' || s[0] == '\r') return taida_lax_empty(0);
+    if (s[0] == ' ' || s[0] == '\t' || s[0] == '\n' || s[0] == '\r') return taida_lax_tag_value_default(taida_lax_empty(0), TAIDA_TAG_INT);
     char *end;
     taida_val result = strtol(s, &end, 10);
-    if (*end != '\0') return taida_lax_empty(0);  // parse failed
-    return taida_lax_new(result, 0);
+    if (*end != '\0') return taida_lax_tag_value_default(taida_lax_empty(0), TAIDA_TAG_INT);  // parse failed
+    return taida_lax_tag_value_default(taida_lax_new(result, 0), TAIDA_TAG_INT);
 }
 taida_val taida_int_mold_bool(taida_val v) {
-    return taida_lax_new(v ? 1 : 0, 0);
+    return taida_lax_tag_value_default(taida_lax_new(v ? 1 : 0, 0), TAIDA_TAG_INT);
 }
 
 taida_val taida_int_mold_auto(taida_val v) {
@@ -1160,7 +1178,7 @@ taida_val taida_int_mold_auto(taida_val v) {
     if (taida_ptr_is_readable(v, sizeof(taida_val))) {
         taida_val tag = ((taida_val*)v)[0];
         if (taida_has_magic_header(tag)) {
-            return taida_lax_empty(0);
+            return taida_lax_tag_value_default(taida_lax_empty(0), TAIDA_TAG_INT);
         }
     }
 
@@ -1175,39 +1193,39 @@ taida_val taida_int_mold_auto(taida_val v) {
 // Float[x]() — Str parse can fail, result stored as bitcast taida_val
 taida_val taida_float_mold_int(taida_val v) {
     double d = (double)v;
-    return taida_lax_new(_d2l(d), _d2l(0.0));
+    return taida_lax_tag_value_default(taida_lax_new(_d2l(d), _d2l(0.0)), TAIDA_TAG_FLOAT);
 }
 taida_val taida_float_mold_float(double v) {
-    return taida_lax_new(_d2l(v), _d2l(0.0));
+    return taida_lax_tag_value_default(taida_lax_new(_d2l(v), _d2l(0.0)), TAIDA_TAG_FLOAT);
 }
 taida_val taida_float_mold_str(taida_val v) {
     const char *s = (const char *)v;
-    if (!s || *s == '\0') return taida_lax_empty(_d2l(0.0));
+    if (!s || *s == '\0') return taida_lax_tag_value_default(taida_lax_empty(_d2l(0.0)), TAIDA_TAG_FLOAT);
     char *end;
     double result = strtod(s, &end);
-    if (*end != '\0') return taida_lax_empty(_d2l(0.0));  // parse failed
-    return taida_lax_new(_d2l(result), _d2l(0.0));
+    if (*end != '\0') return taida_lax_tag_value_default(taida_lax_empty(_d2l(0.0)), TAIDA_TAG_FLOAT);  // parse failed
+    return taida_lax_tag_value_default(taida_lax_new(_d2l(result), _d2l(0.0)), TAIDA_TAG_FLOAT);
 }
 taida_val taida_float_mold_bool(taida_val v) {
-    return taida_lax_new(_d2l(v ? 1.0 : 0.0), _d2l(0.0));
+    return taida_lax_tag_value_default(taida_lax_new(_d2l(v ? 1.0 : 0.0), _d2l(0.0)), TAIDA_TAG_FLOAT);
 }
 
 // Bool[x]() — Str accepts only "true"/"false"
 taida_val taida_bool_mold_int(taida_val v) {
-    return taida_lax_new(v != 0 ? 1 : 0, 0);
+    return taida_lax_tag_value_default(taida_lax_new(v != 0 ? 1 : 0, 0), TAIDA_TAG_BOOL);
 }
 taida_val taida_bool_mold_float(double v) {
-    return taida_lax_new(v != 0.0 ? 1 : 0, 0);
+    return taida_lax_tag_value_default(taida_lax_new(v != 0.0 ? 1 : 0, 0), TAIDA_TAG_BOOL);
 }
 taida_val taida_bool_mold_str(taida_val v) {
     const char *s = (const char *)v;
-    if (!s) return taida_lax_empty(0);
-    if (strcmp(s, "true") == 0) return taida_lax_new(1, 0);
-    if (strcmp(s, "false") == 0) return taida_lax_new(0, 0);
-    return taida_lax_empty(0);  // not "true" or "false"
+    if (!s) return taida_lax_tag_value_default(taida_lax_empty(0), TAIDA_TAG_BOOL);
+    if (strcmp(s, "true") == 0) return taida_lax_tag_value_default(taida_lax_new(1, 0), TAIDA_TAG_BOOL);
+    if (strcmp(s, "false") == 0) return taida_lax_tag_value_default(taida_lax_new(0, 0), TAIDA_TAG_BOOL);
+    return taida_lax_tag_value_default(taida_lax_empty(0), TAIDA_TAG_BOOL);  // not "true" or "false"
 }
 taida_val taida_bool_mold_bool(taida_val v) {
-    return taida_lax_new(v, 0);
+    return taida_lax_tag_value_default(taida_lax_new(v, 0), TAIDA_TAG_BOOL);
 }
 
 static int taida_char_to_digit(int c) {
@@ -1218,28 +1236,29 @@ static int taida_char_to_digit(int c) {
 }
 
 taida_val taida_int_mold_str_base(taida_val v, taida_val base) {
-    if (base < 2 || base > 36) return taida_lax_empty(0);
+    // C21B-seed-07: propagate INT tag to Lax fields for display parity.
+    if (base < 2 || base > 36) return taida_lax_tag_value_default(taida_lax_empty(0), TAIDA_TAG_INT);
     const char *s = (const char*)v;
     size_t len = 0;
-    if (!taida_read_cstr_len_safe(s, 4096, &len) || len == 0) return taida_lax_empty(0);
+    if (!taida_read_cstr_len_safe(s, 4096, &len) || len == 0) return taida_lax_tag_value_default(taida_lax_empty(0), TAIDA_TAG_INT);
 
     int negative = 0;
     size_t i = 0;
     if (s[0] == '-') {
         negative = 1;
         i = 1;
-        if (len == 1) return taida_lax_empty(0);
+        if (len == 1) return taida_lax_tag_value_default(taida_lax_empty(0), TAIDA_TAG_INT);
     } else if (s[0] == '+') {
         i = 1;
-        if (len == 1) return taida_lax_empty(0);
+        if (len == 1) return taida_lax_tag_value_default(taida_lax_empty(0), TAIDA_TAG_INT);
     }
 
     uint64_t acc = 0;
     uint64_t limit = negative ? ((uint64_t)INT64_MAX + 1ULL) : (uint64_t)INT64_MAX;
     for (; i < len; i++) {
         int d = taida_char_to_digit((unsigned char)s[i]);
-        if (d < 0 || d >= base) return taida_lax_empty(0);
-        if (acc > (limit - (uint64_t)d) / (uint64_t)base) return taida_lax_empty(0);
+        if (d < 0 || d >= base) return taida_lax_tag_value_default(taida_lax_empty(0), TAIDA_TAG_INT);
+        if (acc > (limit - (uint64_t)d) / (uint64_t)base) return taida_lax_tag_value_default(taida_lax_empty(0), TAIDA_TAG_INT);
         acc = acc * (uint64_t)base + (uint64_t)d;
     }
 
@@ -1250,7 +1269,7 @@ taida_val taida_int_mold_str_base(taida_val v, taida_val base) {
     } else {
         out = (int64_t)acc;
     }
-    return taida_lax_new((taida_val)out, 0);
+    return taida_lax_tag_value_default(taida_lax_new((taida_val)out, 0), TAIDA_TAG_INT);
 }
 
 taida_val taida_uint8_mold(taida_val v) {
@@ -3712,8 +3731,49 @@ double taida_float_abs(double a) { return a < 0 ? -a : a; }
 taida_val taida_float_to_int(double a) { return (taida_val)a; }
 
 taida_val taida_float_to_str(double a) {
+    // C21-4: Match the interpreter's Rust-f64::Display contract — integer
+    // values render as "X.0" (not "X"), non-integers use the **shortest**
+    // decimal representation that round-trips back to the same f64.
+    // This mirrors Rust's Grisu/Ryu-based `f64::to_string` which Taida's
+    // interpreter delegates to via `n.to_string()`. The previous `%g`
+    // dropped the trailing ".0" and sometimes lost precision; switching
+    // naively to `%.17g` added spurious trailing digits (symptom:
+    // `3.14` → `3.1400000000000001`). The loop below picks the shortest
+    // precision that survives a round-trip, matching Rust's behaviour
+    // for every double in practice while remaining self-contained.
     char tmp[64];
-    snprintf(tmp, sizeof(tmp), "%g", a);
+    if (isnan(a)) { snprintf(tmp, sizeof(tmp), "NaN"); }
+    else if (isinf(a)) { snprintf(tmp, sizeof(tmp), a < 0 ? "-inf" : "inf"); }
+    else if (a == 0.0) { snprintf(tmp, sizeof(tmp), "0.0"); }
+    else if (a == floor(a) && fabs(a) < 1e16) {
+        // Integer-valued float in the exact range — always "X.0".
+        snprintf(tmp, sizeof(tmp), "%.1f", a);
+    } else {
+        // Find the smallest precision p in [1..17] such that
+        // `strtod(sprintf("%.*g", p, a))` round-trips. That is the
+        // shortest decimal form, matching Rust's f64::Display.
+        int chosen = 17;
+        for (int p = 1; p <= 17; p++) {
+            snprintf(tmp, sizeof(tmp), "%.*g", p, a);
+            double back = strtod(tmp, NULL);
+            if (back == a) { chosen = p; break; }
+        }
+        if (chosen != 17) {
+            // tmp already holds the chosen rendering.
+        } else {
+            snprintf(tmp, sizeof(tmp), "%.17g", a);
+        }
+        // If the output lacks a '.' (e.g. `%g` elided the fraction on
+        // an integer-looking float outside the above range), append ".0"
+        // so the Rust-style invariant holds.
+        if (!strchr(tmp, '.') && !strchr(tmp, 'e') && !strchr(tmp, 'E')
+            && !strchr(tmp, 'n') && !strchr(tmp, 'i')) {
+            size_t l = strlen(tmp);
+            if (l + 2 < sizeof(tmp)) {
+                tmp[l] = '.'; tmp[l+1] = '0'; tmp[l+2] = '\0';
+            }
+        }
+    }
     return (taida_val)taida_str_new_copy(tmp);
 }
 
@@ -5836,7 +5896,8 @@ static taida_val taida_pack_to_display_string(taida_val pack_ptr) {
     int count = 0;
     for (taida_val i = 0; i < fc; i++) {
         taida_val field_hash = pack[2 + i * 3];
-        taida_val field_val = pack[2 + i * 3 + 2];
+        taida_val field_tag  = pack[2 + i * 3 + 1];
+        taida_val field_val  = pack[2 + i * 3 + 2];
         const char *fname = taida_lookup_field_name(field_hash);
         if (!fname) continue;
         // Skip internal __ fields for display
@@ -5850,12 +5911,24 @@ static taida_val taida_pack_to_display_string(taida_val pack_ptr) {
         memcpy(buf + len, fname, nlen); len += nlen;
         memcpy(buf + len, " <= ", 4); len += 4;
         buf[len] = '\0';
-        // Check if field is Bool via registry
+        // C21B-seed-07: per-field tag takes precedence over the global
+        // field-name/type registry (see _full counterpart for the rationale).
         int ftype = taida_lookup_field_type(field_hash);
-        if (ftype == 4) {
+        int render_bool  = (field_tag == TAIDA_TAG_BOOL) || (field_tag == 0 && ftype == 4);
+        int render_float = (field_tag == TAIDA_TAG_FLOAT);
+        if (render_bool) {
             // Bool: display as true/false
             const char *bv = field_val ? "true" : "false";
             size_t sl = strlen(bv); while (len + sl + 1 > cap) { cap *= 2; TAIDA_REALLOC(buf, cap, "to_string"); } memcpy(buf + len, bv, sl); len += sl; buf[len] = '\0';
+        } else if (render_float) {
+            double d;
+            memcpy(&d, &field_val, sizeof(double));
+            taida_val fstr = taida_float_to_str(d);
+            const char *fs = (const char*)fstr;
+            if (fs) {
+                size_t sl = strlen(fs); while (len + sl + 1 > cap) { cap *= 2; TAIDA_REALLOC(buf, cap, "to_string"); } memcpy(buf + len, fs, sl); len += sl; buf[len] = '\0';
+            }
+            taida_str_release(fstr);
         } else {
             // Append value (debug string: strings are quoted)
             taida_val val_str = taida_value_to_debug_string(field_val);
@@ -5877,6 +5950,13 @@ static taida_val taida_pack_to_display_string(taida_val pack_ptr) {
 
 // TF-15: Pack to display string with ALL fields (including __ internal fields).
 // Matches interpreter's to_display_string() for BuchiPack which shows all fields.
+//
+// C21B-seed-07: The per-field tag (`pack[2 + i*3 + 1]`) is now authoritative
+// for primitive rendering — the global field-name/type registry is only
+// consulted as a safety net for compile-time-tagged Bool fields (which
+// predate the per-field tag propagation on Lax constructors). Without this,
+// a Lax built by `taida_float_mold_float` would render its `__value` as the
+// raw int64 bit-pattern of the f64 (= `4613937818241073152` for `3.0`).
 static taida_val taida_pack_to_display_string_full(taida_val pack_ptr) {
     taida_val *pack = (taida_val*)pack_ptr;
     taida_val fc = pack[1];
@@ -5889,7 +5969,8 @@ static taida_val taida_pack_to_display_string_full(taida_val pack_ptr) {
     int count = 0;
     for (taida_val i = 0; i < fc; i++) {
         taida_val field_hash = pack[2 + i * 3];
-        taida_val field_val = pack[2 + i * 3 + 2];
+        taida_val field_tag  = pack[2 + i * 3 + 1];
+        taida_val field_val  = pack[2 + i * 3 + 2];
         const char *fname = taida_lookup_field_name(field_hash);
         if (!fname) continue;
         // NOTE: Unlike taida_pack_to_display_string, we do NOT skip __ fields
@@ -5902,11 +5983,28 @@ static taida_val taida_pack_to_display_string_full(taida_val pack_ptr) {
         memcpy(buf + len, fname, nlen); len += nlen;
         memcpy(buf + len, " <= ", 4); len += 4;
         buf[len] = '\0';
-        // Check if field is Bool via registry
+        // Per-field tag takes precedence over the global registry. The
+        // registry is only consulted when the per-field tag is the default
+        // zero (= TAIDA_TAG_INT) AND the registry entry explicitly marks
+        // the field as Bool (legacy pattern used by Lax's `hasValue`).
         int ftype = taida_lookup_field_type(field_hash);
-        if (ftype == 4) {
+        // Note: taida_lookup_field_type uses tag *4* to mean Bool (legacy
+        // convention pre-dating C21B-seed-07). Keep that mapping intact so
+        // Lax's `hasValue` field continues to print `true`/`false`.
+        int render_bool   = (field_tag == TAIDA_TAG_BOOL) || (field_tag == 0 && ftype == 4);
+        int render_float  = (field_tag == TAIDA_TAG_FLOAT);
+        if (render_bool) {
             const char *bv = field_val ? "true" : "false";
             size_t sl = strlen(bv); while (len + sl + 1 > cap) { cap *= 2; TAIDA_REALLOC(buf, cap, "to_string_full"); } memcpy(buf + len, bv, sl); len += sl; buf[len] = '\0';
+        } else if (render_float) {
+            double d;
+            memcpy(&d, &field_val, sizeof(double));
+            taida_val fstr = taida_float_to_str(d);
+            const char *fs = (const char*)fstr;
+            if (fs) {
+                size_t sl = strlen(fs); while (len + sl + 1 > cap) { cap *= 2; TAIDA_REALLOC(buf, cap, "to_string_full"); } memcpy(buf + len, fs, sl); len += sl; buf[len] = '\0';
+            }
+            taida_str_release(fstr);
         } else {
             taida_val val_str = taida_value_to_debug_string(field_val);
             const char *vs = (const char*)val_str;
@@ -8248,6 +8346,42 @@ taida_val taida_io_stdout_with_tag(taida_val val, taida_val tag) {
         printf("%s\n", bool_buf);
         return (taida_val)bytes;
     }
+    // C21B-seed-07: BuchiPack values (including Lax / Result / Gorillax and
+    // user-defined packs) must route through `taida_stdout_display_string`
+    // which uses `_full` rendering — interpreter parity requires showing
+    // ALL fields including `__value` / `__default` / `__type`. Without this,
+    // the FLOAT fast-path below would kick in for `stdout(Float[x]())`
+    // (because `mold_returns.rs` historically claimed `Float[]()` returns
+    // FLOAT even though it actually returns Lax) and the pack pointer would
+    // be decoded as an f64 bit-pattern, printing subnormal garbage.
+    // Detecting the pack at runtime defences against any other caller that
+    // hands a Lax / user pack with a mis-stated tag (e.g. UNKNOWN = -1).
+    if (val >= 4096 && taida_is_buchi_pack(val)) {
+        taida_val str = taida_stdout_display_string(val);
+        s = (const char*)str;
+        if (s) {
+            printf("%s\n", s);
+            return (taida_val)strlen(s);
+        }
+        return 0;
+    }
+    // C21-4 / seed-03 / seed-05: FLOAT tag path — the boxed i64 carries
+    // the f64 bit pattern, so decode via memcpy and format with the
+    // Rust-display-compatible renderer `taida_float_to_str`. Without
+    // this, the value falls through to `taida_polymorphic_to_string`
+    // which has no tag context and the runtime prints the raw i64
+    // (symptom: `stdout(triple(4.0))` → `4622382067542392832`).
+    if ((int)tag == TAIDA_TAG_FLOAT) {
+        double d;
+        memcpy(&d, &val, sizeof(double));
+        taida_val fstr = taida_float_to_str(d);
+        s = (const char*)fstr;
+        if (s) {
+            printf("%s\n", s);
+            return (taida_val)strlen(s);
+        }
+        return 0;
+    }
     taida_val str = taida_polymorphic_to_string(val);
     s = (const char*)str;
     if (s) {
@@ -8275,6 +8409,29 @@ taida_val taida_io_stderr_with_tag(taida_val val, taida_val tag) {
         s = val ? "true" : "false";
         fprintf(stderr, "%s\n", s);
         return (taida_val)strlen(s);
+    }
+    // C21B-seed-07: symmetric with stdout — route buchi packs through
+    // `taida_stdout_display_string` for full-form interpreter parity.
+    if (val >= 4096 && taida_is_buchi_pack(val)) {
+        taida_val str = taida_stdout_display_string(val);
+        s = (const char*)str;
+        if (s) {
+            fprintf(stderr, "%s\n", s);
+            return (taida_val)strlen(s);
+        }
+        return 0;
+    }
+    // C21-4: FLOAT tag path — same rationale as taida_io_stdout_with_tag.
+    if ((int)tag == TAIDA_TAG_FLOAT) {
+        double d;
+        memcpy(&d, &val, sizeof(double));
+        taida_val fstr = taida_float_to_str(d);
+        s = (const char*)fstr;
+        if (s) {
+            fprintf(stderr, "%s\n", s);
+            return (taida_val)strlen(s);
+        }
+        return 0;
     }
     taida_val str = taida_polymorphic_to_string(val);
     s = (const char*)str;

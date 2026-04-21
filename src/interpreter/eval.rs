@@ -85,8 +85,41 @@ pub(crate) struct PoolState {
 /// The Taida interpreter.
 pub struct Interpreter {
     pub env: Environment,
-    /// Output buffer (for testing — captures print output)
+    /// Output buffer (for testing — captures print output).
+    ///
+    /// Used in **buffered mode** (`stream_stdout == false`) — the default for
+    /// `Interpreter::new()`. REPL (`main.rs:5091-5108`), in-process Rust test
+    /// harness (`tests_extended.rs::eval_with_output`), and JS codegen embedding
+    /// all rely on this Vec being populated by `stdout` / `debug` builtins.
+    ///
+    /// In **stream mode** (`stream_stdout == true`, via `Interpreter::new_streaming()`)
+    /// this Vec is left empty — `stdout` / `debug` write directly to the real
+    /// `io::stdout()` / `io::stderr()` with immediate flush. (C22-2 / C22B-002)
     pub output: Vec<String>,
+    /// Stream mode flag (C22-2 / C22B-002).
+    ///
+    /// `false` (default): buffered mode — `stdout` / `debug` push to `self.output`.
+    /// `true`: stream mode — `stdout` writes to real stdout with immediate flush,
+    /// `debug` writes to real stderr. CLI `taida run <file>` uses stream mode;
+    /// REPL / test / JS codegen embedding uses buffered mode.
+    ///
+    /// The stream/buffered split is **internal to the Rust API** and has no
+    /// Taida surface effect (`stdout()` still returns `Int` bytes and adds the
+    /// implicit `\n`). The 3-backend generated code (JS / Native / WASM) is
+    /// unaffected — it emits its own I/O directly.
+    pub stream_stdout: bool,
+    /// Number of stdout-visible emissions (from `stdout` **or** `debug`
+    /// builtins) seen so far (C22-2).
+    ///
+    /// In stream mode, `output` Vec is always empty, so `main.rs` cannot use
+    /// `output.is_empty()` to decide whether to print the final value. This
+    /// counter replaces that check: after `eval_program`, if
+    /// `stdout_emissions == 0` and the final value is not `Unit`, print it
+    /// (matches existing buffered behavior where `output.is_empty()` conveys
+    /// the same signal). Named "emissions" rather than "stdout_count" because
+    /// `debug` also increments it — both builtins surface to stdout in stream
+    /// mode (see `prelude.rs` for the debug→stdout design rationale).
+    pub stdout_emissions: usize,
     /// Current file path (for resolving relative imports)
     pub(crate) current_file: Option<PathBuf>,
     /// Cache of loaded modules (canonical path -> exports)
@@ -168,6 +201,8 @@ impl Interpreter {
         Self {
             env: Environment::new(),
             output: Vec::new(),
+            stream_stdout: false,
+            stdout_emissions: 0,
             current_file: None,
             loaded_modules: HashMap::new(),
             loading_modules: HashSet::new(),
@@ -191,6 +226,30 @@ impl Interpreter {
             call_depth: 0,
             active_streaming_writer: None,
         }
+    }
+
+    /// Construct a new Interpreter in **stream mode** (C22-2 / C22B-002).
+    ///
+    /// In stream mode, `stdout(...)` writes directly to the real `io::stdout()`
+    /// with immediate flush (line-by-line), and `debug(...)` writes directly to
+    /// `io::stderr()`. The `output` Vec is **not** populated.
+    ///
+    /// This is the mode used by the CLI `taida run <file>` / `taida <file>`
+    /// execution path (`main.rs::run_file_cmd`), restoring POSIX-standard
+    /// immediate-flush behavior so that TUI / progress / spinner / printf-debug
+    /// all work as expected.
+    ///
+    /// REPL, in-process Rust test harness, and JS codegen embedding continue
+    /// to use `Interpreter::new()` (buffered mode) where the `output` Vec is
+    /// required for their own display / capture logic.
+    ///
+    /// The public contract of `stdout` / `debug` is unchanged — still returns
+    /// `Int` bytes, still appends the implicit `\n` on each invocation. Only
+    /// the flush timing differs between the two modes.
+    pub fn new_streaming() -> Self {
+        let mut interp = Self::new();
+        interp.stream_stdout = true;
+        interp
     }
 
     /// RCB-101: Check if `thrown_type` IS-A `handler_type` by walking the inheritance chain.

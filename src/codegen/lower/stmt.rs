@@ -578,6 +578,36 @@ impl Lowering {
                 }
                 if self.expr_is_list(&assign.value) {
                     self.list_vars.insert(assign.target.clone());
+                    // C21-4: Infer homogeneous element type from ListLit.
+                    // If every element of `@[...]` has the same primitive
+                    // type (FloatLit / IntLit / StringLit / BoolLit), record
+                    // it so later unmold via `a.get(i) ]=> av` can tag `av`.
+                    if let Expr::ListLit(elems, _) = &assign.value
+                        && !elems.is_empty()
+                    {
+                        let elem_ty = match &elems[0] {
+                            Expr::FloatLit(_, _) => Some("Float"),
+                            Expr::IntLit(_, _) => Some("Int"),
+                            Expr::StringLit(_, _) | Expr::TemplateLit(_, _) => Some("Str"),
+                            Expr::BoolLit(_, _) => Some("Bool"),
+                            _ => None,
+                        };
+                        if let Some(ty) = elem_ty {
+                            let homogeneous = elems.iter().all(|e| {
+                                matches!(
+                                    (ty, e),
+                                    ("Float", Expr::FloatLit(_, _))
+                                        | ("Int", Expr::IntLit(_, _))
+                                        | ("Str", Expr::StringLit(_, _) | Expr::TemplateLit(_, _))
+                                        | ("Bool", Expr::BoolLit(_, _))
+                                )
+                            });
+                            if homogeneous {
+                                self.list_element_types
+                                    .insert(assign.target.clone(), ty.to_string());
+                            }
+                        }
+                    }
                 }
                 // QF-34: MoldInst の Lax 内部型を追跡（unmold 時の型推定用）
                 if let Expr::MoldInst(mold_name, _, _, _) = &assign.value {
@@ -775,8 +805,13 @@ impl Lowering {
                     crate::parser::TypeExpr::Named(name) if name == "Bool" => {
                         self.bool_vars.insert(param.name.clone());
                     }
-                    crate::parser::TypeExpr::List(_) => {
+                    crate::parser::TypeExpr::List(inner) => {
                         self.list_vars.insert(param.name.clone());
+                        // C21-4: Remember element type for `@[Float]` unmold tracking
+                        if let crate::parser::TypeExpr::Named(elem) = inner.as_ref() {
+                            self.list_element_types
+                                .insert(param.name.clone(), elem.clone());
+                        }
                     }
                     crate::parser::TypeExpr::BuchiPack(_) => {
                         self.pack_vars.insert(param.name.clone());

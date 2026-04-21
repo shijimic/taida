@@ -1,5 +1,248 @@
 # Changelog
 
+## @c.22.rc5
+
+Two concurrent tracks land together in a single RC bump. Track A
+(formerly the `@c.21.rc4` draft) restores 3-backend Float semantics
+and opens the WASM SIMD path. Track B (formerly the `@c.22.rc1`
+draft) restores I/O symmetry and hardens the CLI against pipe-chain
+termination. Both tracks share the same merge, so the RC counter
+advances monotonically from `@c.20.rc4` to `@c.22.rc5` — the `22`
+reflects the active generation, the `rc5` keeps the incremental
+index `taida upgrade` and label-based selectors rely on. The two
+drafts' change-notes are kept as subsections below for traceability.
+
+### Track A — 4-backend Float parity + WASM SIMD path open
+
+Restore 3-backend Float semantics and open the WASM SIMD path that
+bonsai-wasm Phase 0 identified as a one-shot blocker for writing
+matmul-shaped numeric code in Taida. The observable behaviour changes
+cluster into four mutually-reinforcing fixes (C21-1 through C21-5) plus
+the `-msimd128` profile split (C21-3) that this release tag is pinned
+on. The Taida surface — `3.0` vs `3`, `Float[x]()` / `Int[x]()`,
+`@[Float]`, `:Float`, arithmetic operators — is unchanged; every fix
+lives inside codegen / runtime helpers.
+
+### Interpreter is the reference, the other three backends line up behind it
+
+- **C21-1 (regression guard, Phase 1)**: `examples/quality/c21b_float_fn_boundary/triple.{td,expected}`
+  (`triple(4.0) => 12.0`) and `dot_product.{td,expected}`
+  (`dotProductAt(@[1.0,2.0], @[3.0,4.0], 0, 2, 0.0) => 11.0`) pin the
+  minimal Float-function-boundary behaviour across Interpreter / JS /
+  Native / WASM-wasi with `tests/c21_float_fn_boundary.rs`. This fixture
+  would have caught every Phase 2-5 bug before it reached bonsai-wasm.
+- **C21-2 (Wasm Float hot loop, Phase 2)**: `@[Float]`-element
+  `a.get(i) ]=> av` now propagates the element type through
+  `track_unmold_type`, so `av * bv` lowers to `taida_float_mul` instead
+  of `taida_int_mul`. Fixes the "internal dot product silently computes
+  0" class of bug observed in bonsai-wasm's hot loop.
+- **C21-4 (Float → Str ABI, Phase 4)**: the native Cranelift path
+  bitcasts `ConstFloat` into the boxed `value_ty` on emit (fixes the
+  `define_function failed: Compilation error: Verifier errors` that
+  blocked every `=> :Float` function in native builds). The native
+  `taida_float_to_str` now matches Rust's `f64::Display`
+  (shortest-round-trip `%.*g` + `strtod` loop + integer-form `X.0`);
+  both native and WASM `taida_io_stdout_with_tag` / `_stderr_with_tag`
+  route the `FLOAT` tag through that formatter so `stdout(triple(4.0))`
+  no longer leaks the i64 bit-pattern.
+- **C21-5 (JS `Int[x]` / `Float[x]` parity, Phase 5)**: JS
+  `Number.isInteger(3.0) === true` closed the door on the naive
+  `typeof+isInteger` checker; we now carry a compile-time
+  `is_float_origin_expr` / `is_int_origin_expr` analysis in
+  `src/js/codegen.rs`, specialize `stdout` / `debug` / `stderr` /
+  `.toString()` call sites for Float-origin arguments
+  (`__taida_stdout_f`, `__taida_debug_f`, `__taida_to_string_f`,
+  `__taida_float_render`) and fold `Int[floatLit]()` / `Float[intLit]()`
+  statically. Arithmetic paths are untouched — zero deopt for the hot
+  case, compile-time fold covers every literal / single-bind case that
+  used to diverge from Interpreter / Native.
+
+### `-msimd128` profile split (C21-3, this tag's pin)
+
+`WASM_CLANG_FLAGS` was a single profile-agnostic constant that lacked
+`-msimd128`. That silently closed the SIMD door at the clang layer for
+every `wasm-*` target, so even after C21-2 taught the wasm codegen to
+emit f64 Float operations LLVM's auto-vectorizer could not consider
+`v128.*` lowerings. `src/codegen/driver.rs` now splits the flags:
+
+- `WASM_CLANG_FLAGS_COMMON` (`--target=wasm32-unknown-wasi`, `-nostdlib`,
+  `-O2`, `-c`) stays the same.
+- `wasm_clang_flags_for(profile)` appends `-msimd128` for `Wasi`,
+  `Edge`, `Full` — and **nothing** for `Min`, so consumers who pick
+  `--target wasm-min` for minimal-runtime compatibility still get a
+  `.wasm` that does not request the `simd128` feature.
+- `WasmRuntimeCache` is profile-aware: `rt_core` / `rt_wasi` / `rt_edge`
+  / `rt_full` now take a `WasmProfile`, their cache keys hash the
+  per-profile flag vector so a wasm-min `rt_core.o` is never served to
+  a wasm-wasi build (and vice versa), and the stale-entry cleanup
+  preserves every live profile's key for the same source.
+
+Result: on `examples/quality/c21b_wasm_simd/matmul_small.td`
+(sum-of-squares of 8 Floats), the disassembled `.wasm` now contains
+`v128.*` and `i8x16.*` instructions under `wasm-wasi` while `wasm-min`
+stays at zero SIMD opcodes. `tests/c21_wasm_simd.rs` locks both
+directions in place. On bonsai-wasm's `bench/matmul.td` smoke the same
+shift is visible (v128 count: `0 → 27`, f64 count: `5 → 10`), which was
+the goal that motivated C21 in the first place.
+
+### Tests
+
+- `tests/c21_float_fn_boundary.rs` — 8 cross-backend tests (Interpreter
+  reference + JS / Native / WASM-wasi parity × 2 fixtures).
+- `tests/c21_wasm_simd.rs` — 3 tests: `wasm-wasi` disassembly must
+  contain Float ops and at least one SIMD-family opcode; `wasm-min`
+  disassembly must contain zero SIMD opcodes; matmul_small runs
+  correctly under wasmtime and prints `204.0`.
+- `src/codegen/driver.rs::tests::test_cache_key_differs_on_source_change`
+  gains a fourth key comparing `wasm-min` vs `wasm-wasi` with identical
+  source + clang version, asserting that the profile-specific flag
+  change alone produces a distinct cache key.
+
+### Out of scope
+
+- Taida-level `@[Float<f32>]` / `@[Float<f64>]` quantifier additions are
+  a language-surface change and stay deferred.
+- Manual `v128.*` intrinsic exposure from Taida source remains
+  out-of-bounds (Taida-first design — auto-vectorize only).
+- JS closure-crossing dynamic Float/Int discrimination is still
+  best-effort; the compile-time analysis covers every single-bind case,
+  dynamic `map`/`fold` callbacks fall back to `Number.isInteger`. This
+  is a language-spec limitation of JS `Number`, not a C21 regression.
+
+### Fixed
+
+- JS local binding Float-origin propagation (C21B-seed-04 reopen,
+  Phase 5 re-fix): the initial Phase 5 landing only covered terminal
+  sites whose argument was a `FloatLit` / Float-origin arithmetic /
+  `=> :Float` user-fn call. A subsequent review confirmed that
+  `x <= 3.0; stdout(Float[x]())` / `stdout(x)` / `stdout(x.toString())`
+  still diverged in JS because `is_float_origin_expr(Expr::Ident)`
+  returned `false`. `src/js/codegen.rs` grows a scope-aware tracker
+  (`float_origin_vars` / `int_origin_vars` / `float_list_vars`) that is
+  pushed / popped across function boundaries. Typed parameters
+  (`x: Float`, `a: @[Float]`), annotated bindings (`x: Float <= ...`),
+  Float-origin RHS bindings (`x <= 3.0`, `x <= floatExpr`), and unmold
+  targets rooted in Float lists (`a.get(i) ]=> av`) now carry the tag.
+  `Float[x]()` routes to a new `Float_mold_f` runtime helper that tags
+  the resulting `Lax` with `__floatHint: true`; the stdout / format
+  path renders `__value` / `__default` through `__taida_float_render`
+  when the tag is present. Arithmetic paths stay untouched (no deopt).
+  `tests/c21_js_float_binding.rs` pins both REOPEN repros plus a
+  one-level-deeper `triple(4.0) → local → Float[y]()` case.
+
+- Native / WASM Float Lax parity for local bindings (C21B-seed-07,
+  Phase 4 補修): the Phase 5 re-fix split out a pre-existing Native /
+  WASM divergence — `x <= 3.0; stdout(Float[x]())` printed
+  `3.958204945e-315` on native and subnormal garbage on wasm-wasi
+  because `mold_returns.rs` declared `Float[x]()` as returning a bare
+  `Float` (tag 1), so `lower_stdout_with_tag` routed the Lax pointer
+  through the `TAIDA_TAG_FLOAT` fast path which `memcpy`'d the pointer
+  bits as an f64. `Int[x]()` printed the short `Lax(3)` `.toString()`
+  form instead of the interpreter's full
+  `@(hasValue <= true, __value <= 3, __default <= 0, __type <= "Lax")`.
+  The fix spans three layers: (1) `src/types/mold_returns.rs` re-
+  classifies `Int` / `Float` / `Bool` / `Str` as `Pack` (the actual
+  runtime return type, a `taida_lax_new(...)` result); (2) native
+  `src/codegen/native_runtime/core.c` adds a
+  `taida_lax_tag_value_default` helper so every
+  `taida_{int,float,bool,str}_mold_*` function stamps the per-field tag
+  on the Lax's `__value` / `__default` slots, and
+  `taida_pack_to_display_string` / `_full` honor that tag before
+  falling back to the global registry, and
+  `taida_io_stdout_with_tag` / `_stderr_with_tag` route any runtime-
+  detected BuchiPack through `taida_stdout_display_string` (the
+  `_full` entry) so interpreter-parity `@(hasValue <= …, __value <=
+  …, __default <= …, __type <= "Lax")` emerges; (3) wasm
+  `src/codegen/runtime_core_wasm/{01_core,02_containers}.inc.c` land
+  symmetric changes: Lax field-name registration on first
+  `taida_lax_new` call, per-field tag dispatch in the new
+  `_wasm_pack_to_string_full`, tight `_is_pack_for_stdout` guard that
+  excludes Lists / HashMaps / Sets / Async objects (so
+  `stdout(@[1,2,3])` still renders as a list, not as `@()`). All four
+  pre-existing `Float[x]()` Lax divergences in
+  `examples/quality/c21b_float_fn_boundary/{float_local_binding,
+  float_fn_result_local}.td` now match the interpreter on 4 backends.
+  `tests/c21_js_float_binding.rs` adds four new parity assertions
+  (Native / WASM × the two previously-JS-only fixtures), reflecting
+  the scope-expanded pin.
+
+### Track B — stream I/O + SIGPIPE tolerance
+
+Restore observable I/O symmetry in the interpreter and harden the CLI
+against pipe-chain termination. Post-C20 smoke (Hachikuma Phase 11
+TUI-First) exposed that `stderr` / `stdin` already flushed eagerly
+while `stdout` / `debug` silently accumulated into an internal Vec
+and only surfaced after `eval_program` returned — breaking progress
+output, spinners, printf-debugging, and TUI rendering. The same
+audit found that `taida run file.td | head -N` exited 141 because
+the process carried the default SIGPIPE disposition.
+
+### Interpreter — `stdout` / `debug` two-mode API
+
+`Interpreter` now carries a `stream_stdout: bool` flag and exposes
+two public constructors:
+
+- `Interpreter::new()` keeps the legacy buffered behaviour. REPL,
+  the in-process `eval_with_output` test harness, and the JS
+  codegen embedding path all stay on this mode unchanged, so every
+  existing call site works without modification.
+- `Interpreter::new_streaming()` switches `stdout` / `debug` to
+  `writeln!(io::stdout().lock(), "{}", line)` + `flush().ok()`.
+  `taida <file>` / `taida run <file>` now use this variant so
+  progress output hits the terminal line-by-line, matching the
+  POSIX-standard behaviour every other CLI tool ships with.
+
+Taida surface is unchanged: `stdout(...)` / `debug(...)` still
+accept the same arguments, still return the written byte count as
+`Int`, still append the implicit trailing newline, and still
+suppress the "final value auto-display" when stdout has been
+emitted to. No Taida source needs to be edited.
+
+Design note on `debug` routing: an earlier IMPL_SPEC draft routed
+stream-mode `debug` to stderr for symmetry with `stderr()`. That
+would have broken 3-backend parity — JS (`console.log`) and Native
+(`taida_debug_*` → `printf`) already emit to stdout, and the
+`test_native_compile_parity` harness diffs captured stdout across
+backends. The interpreter was the outlier, so it lines up with the
+other two: stream-mode `debug` writes to stdout as well. The
+observable symptom (progress / printf-debug surfaces in real time)
+is still fixed; only the stream differs from the original plan.
+
+### CLI — SIGPIPE tolerance
+
+`fn main()` now installs `signal(SIGPIPE, SIG_IGN)` once at startup
+(unix only, behind `#[cfg(unix)]`). Combined with the `writeln!` +
+`flush().ok()` pattern above, `taida run script.td | head -N` now
+exits cleanly — the `stdout` builtin silently absorbs `EPIPE` and
+returns a zero byte count, matching the standard `ripgrep` / `bat`
+convention. Process-wide signal disposition is touched in exactly
+one place; individual `stdout` / `debug` call sites do not
+re-install handlers.
+
+### Tests
+
+- `tests/c22_stdout_stream.rs` (5 tests) pins the Rust API parity
+  between `Interpreter::new()` and `Interpreter::new_streaming()`,
+  including the byte-count return and the implicit trailing newline.
+- `tests/c22_sigpipe.rs` (4 tests) exercises `taida | head`, stdout
+  close, stream-mode `debug` routing to stdout, and the mixed
+  stdout/debug ordering contract.
+- `tests/c22_stdout_stream_parity.rs` (6 tests) drives the three
+  backends (Interpreter / JS / Native) subprocess-style against
+  `examples/quality/c22_stdout_stream/progress_loop.{td,expected}`
+  and `debug_stream.{td,expected}` so a future regression in
+  either backend's stdout routing is caught immediately.
+
+### Out of scope
+
+- REPL remains on buffered mode; its return-value indentation
+  machinery is Vec-dependent and will move in a dedicated track.
+- Raw-mode / alt-screen auto-leave on panic, SIGHUP, SIGTERM is
+  parked as a follow-up (future FB entry).
+- Addon-level raw-write path (`terminal.Write`) and the SIGWINCH
+  install-order race moved to the TM track (TMB-016 / TMB-017) so
+  `taida-lang/terminal` and the main repo can ship independently.
+
 ## @c.20.rc4 (in progress)
 
 Complete the Hachikuma Phase 8-10 / Phase D follow-up track: parser

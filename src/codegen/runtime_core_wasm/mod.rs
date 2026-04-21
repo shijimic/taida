@@ -88,9 +88,31 @@ mod tests {
     /// go through plain `taida_io_stdout(char*)`; everything else reaches
     /// `taida_io_stdout_with_tag` polymorphic formatter). Runtime bodies
     /// of `_with_tag` are unchanged — only comments grew.
+    ///
+    /// C21-4 (2026-04-21): +1103 bytes for the new FLOAT-tag fast path in
+    /// `taida_io_stdout_with_tag` / `taida_io_stderr_with_tag` (dispatch
+    /// the boxed f64 bit-pattern through `taida_float_to_str`) plus its
+    /// forward declaration at the top of the file. Fixes `stdout(...)`
+    /// of a function-returned Float rendering as the raw i64 bit pattern
+    /// (symptom `4622945017495814144` for `stdout(triple(4.0))`).
+    ///
+    /// C21B-seed-07 (2026-04-22): +6,195 bytes across the four fragments.
+    /// `01_core.inc.c` grew to add `_wasm_pack_to_string_full` +
+    /// `_wasm_stdout_display_string`, per-field-tag Float/Bool dispatch
+    /// in the existing `_wasm_pack_to_string`, and BuchiPack-aware
+    /// detour branches in `taida_io_stdout_with_tag` /
+    /// `_stderr_with_tag` (symmetric with the native
+    /// `taida_stdout_display_string` routing). `02_containers.inc.c`
+    /// grew to stamp the per-field primitive tag on `__value` /
+    /// `__default` for `taida_{int,str}_mold_*` via the new
+    /// `_lax_tag_vd` helper (Float/Bool mold constructors already
+    /// carried the stamping). Fixes `stdout(Float[x]())` on wasm-wasi
+    /// rendering a pack pointer as subnormal f64 bits and
+    /// `stdout(Int[x]())` emitting the short `Lax(3)` toString form
+    /// instead of the interpreter's full `@(hasValue <= …, …)` shape.
     #[test]
     fn test_runtime_core_wasm_fragment_concat_preserves_bytes() {
-        const EXPECTED_TOTAL_LEN: usize = 238_363;
+        const EXPECTED_TOTAL_LEN: usize = 248_033;
         let asm = *RUNTIME_CORE_WASM;
         assert_eq!(
             asm.len(),

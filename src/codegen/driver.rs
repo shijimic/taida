@@ -18,7 +18,48 @@ type ModuleImports = Vec<(String, Vec<String>, Option<String>)>;
 
 /// L-1: Shared clang flags used for both cache key computation and compilation.
 /// Keeping them in one place prevents cache_key / wasm_clang_base_args drift.
-const WASM_CLANG_FLAGS: &[&str] = &["--target=wasm32-unknown-wasi", "-nostdlib", "-O2", "-c"];
+///
+/// C21-3 (seed-02): `WASM_CLANG_FLAGS` was a single profile-agnostic constant
+/// that lacked `-msimd128`. That closed the SIMD path at the clang layer even
+/// after Phase 2 taught the wasm codegen to emit f64 Float operations. We now
+/// split the flags into a profile-independent base plus per-profile extensions:
+///
+/// * `wasm-min` — stays on the original flag set (no `-msimd128`). It exists
+///   precisely for environments that do not want to require the simd128
+///   feature, so we must not silently upgrade it.
+/// * `wasm-wasi` / `wasm-edge` / `wasm-full` — add `-msimd128` so clang's wasm
+///   backend is allowed to lower f32/f64 hot loops to `v128.*` when the
+///   auto-vectorizer finds a match. wasmtime 42+ and the target edge runtimes
+///   all default-enable the simd128 feature, so this is compatible with the
+///   existing execution story.
+///
+/// Cache keys are profile-scoped via `cache_key()` so wasm-min never picks up
+/// a cached `rt_core.o` that was built with `-msimd128` and vice versa.
+const WASM_CLANG_FLAGS_COMMON: &[&str] =
+    &["--target=wasm32-unknown-wasi", "-nostdlib", "-O2", "-c"];
+const WASM_CLANG_FLAGS_MIN: &[&str] = &[];
+const WASM_CLANG_FLAGS_WASI: &[&str] = &["-msimd128"];
+const WASM_CLANG_FLAGS_EDGE: &[&str] = &["-msimd128"];
+const WASM_CLANG_FLAGS_FULL: &[&str] = &["-msimd128"];
+
+/// Return the merged clang flag list for a given wasm profile.
+///
+/// Order: profile-agnostic base (target, nostdlib, `-O2`, `-c`) first, then
+/// profile-specific additions (`-msimd128` for every profile except `Min`).
+/// This is the authoritative ordering used by both the cache key hash and the
+/// actual clang invocation; if the two diverged, cached runtime objects would
+/// silently serve the wrong profile's bytes.
+pub(crate) fn wasm_clang_flags_for(profile: emit_wasm_c::WasmProfile) -> Vec<&'static str> {
+    let mut v: Vec<&'static str> = WASM_CLANG_FLAGS_COMMON.to_vec();
+    let extra: &[&'static str] = match profile {
+        emit_wasm_c::WasmProfile::Min => WASM_CLANG_FLAGS_MIN,
+        emit_wasm_c::WasmProfile::Wasi => WASM_CLANG_FLAGS_WASI,
+        emit_wasm_c::WasmProfile::Edge => WASM_CLANG_FLAGS_EDGE,
+        emit_wasm_c::WasmProfile::Full => WASM_CLANG_FLAGS_FULL,
+    };
+    v.extend_from_slice(extra);
+    v
+}
 
 /// Process-wide counter to produce unique .o file names.
 static OBJ_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -125,12 +166,17 @@ impl WasmRuntimeCache {
         })
     }
 
-    /// Compute a cache key for the given runtime source + toolchain.
+    /// Compute a cache key for the given runtime source + toolchain + profile.
     ///
     /// N-1: Uses FNV-1a (matching the project convention) instead of
     /// `std::hash::DefaultHasher` whose algorithm is not guaranteed
     /// stable across Rust versions.
-    fn cache_key(&self, source: &str) -> String {
+    ///
+    /// C21-3: the per-profile clang flag vector (`wasm_clang_flags_for`) is
+    /// hashed here, so `rt_core` compiled for `wasm-min` (no `-msimd128`) and
+    /// `rt_core` compiled for `wasm-wasi` (with `-msimd128`) land on distinct
+    /// cache entries even though the C source itself is identical.
+    fn cache_key(&self, source: &str, profile: emit_wasm_c::WasmProfile) -> String {
         let mut state: u64 = 0xcbf29ce484222325; // FNV-1a offset basis
         for byte in source.bytes() {
             state ^= byte as u64;
@@ -141,8 +187,8 @@ impl WasmRuntimeCache {
             state ^= byte as u64;
             state = state.wrapping_mul(0x100000001b3);
         }
-        // Mix in clang flags that affect output (L-1: shared via WASM_CLANG_FLAGS)
-        for flag in WASM_CLANG_FLAGS {
+        // Mix in clang flags that affect output — profile-specific (C21-3 seed-02).
+        for flag in wasm_clang_flags_for(profile) {
             for byte in flag.bytes() {
                 state ^= byte as u64;
                 state = state.wrapping_mul(0x100000001b3);
@@ -155,8 +201,17 @@ impl WasmRuntimeCache {
     ///
     /// N-3: When a new cache entry is created, stale .o files for the same
     /// runtime `name` but with a different key are automatically removed.
-    fn get_or_compile(&self, name: &str, source: &str) -> Result<PathBuf, CompileError> {
-        let key = self.cache_key(source);
+    ///
+    /// C21-3: `profile` selects the per-profile clang flag set (affects the
+    /// cache key) so e.g. a `-msimd128`-free `rt_core.o` cached for `wasm-min`
+    /// is never reused by `wasm-wasi` after we split the flags.
+    fn get_or_compile(
+        &self,
+        name: &str,
+        source: &str,
+        profile: emit_wasm_c::WasmProfile,
+    ) -> Result<PathBuf, CompileError> {
+        let key = self.cache_key(source, profile);
         let cached_obj = self.cache_dir.join(format!("{}.{}.o", name, key));
 
         if cached_obj.exists() {
@@ -178,7 +233,7 @@ impl WasmRuntimeCache {
             message: format!("failed to write runtime source to cache: {}", e),
         })?;
 
-        let clang_args = wasm_clang_base_args(&self.include_dir);
+        let clang_args = wasm_clang_base_args(&self.include_dir, profile);
         let status = run_wasm_clang_object(
             &self.clang,
             &clang_args,
@@ -215,7 +270,23 @@ impl WasmRuntimeCache {
         })?;
 
         // N-3: Clean up stale cache entries for the same runtime name.
-        // Pattern: `{name}.{old_key}.o` where old_key != current key.
+        // Pattern: `{name}.{old_key}.o` where old_key is not a currently-valid
+        // key for any known profile.
+        //
+        // C21-3: before the profile-aware cache key split, every flag change
+        // would invalidate exactly one entry and the cleanup could wipe all
+        // other `{name}.*.o` blindly. Now wasm-min and wasm-wasi/edge/full
+        // coexist side-by-side, so we must preserve every key that another
+        // currently-known profile would produce for the *same* source.
+        let mut live_keys: Vec<String> = Vec::with_capacity(4);
+        for p in [
+            emit_wasm_c::WasmProfile::Min,
+            emit_wasm_c::WasmProfile::Wasi,
+            emit_wasm_c::WasmProfile::Edge,
+            emit_wasm_c::WasmProfile::Full,
+        ] {
+            live_keys.push(self.cache_key(source, p));
+        }
         let stale_prefix = format!("{}.", name);
         if let Ok(entries) = fs::read_dir(&self.cache_dir) {
             for entry in entries.flatten() {
@@ -226,6 +297,12 @@ impl WasmRuntimeCache {
                     && !fname_str.contains(".tmp.")
                     && entry.path() != cached_obj
                 {
+                    // Preserve entries whose embedded key is live for any
+                    // known profile; only wipe truly-stale leftovers.
+                    let middle = &fname_str[stale_prefix.len()..fname_str.len() - ".o".len()];
+                    if live_keys.iter().any(|k| k == middle) {
+                        continue;
+                    }
                     let _ = fs::remove_file(entry.path());
                 }
             }
@@ -234,34 +311,38 @@ impl WasmRuntimeCache {
         Ok(cached_obj)
     }
 
-    /// Get or compile the core runtime .o (wasm-wasi / wasm-edge / wasm-full).
+    /// Get or compile the core runtime .o (wasm-min / wasm-wasi / wasm-edge / wasm-full).
     ///
     /// C12-7 (FB-26): the core wasm runtime was split into four fragments
     /// under `runtime_core_wasm/`. The assembled source is byte-identical
     /// to the pre-split monolithic file (see
     /// `runtime_core_wasm::RUNTIME_CORE_WASM`), so the cache key remains
     /// stable across the refactor.
-    pub fn rt_core(&self) -> Result<PathBuf, CompileError> {
+    ///
+    /// C21-3: `profile` feeds the cache key so the `-msimd128`-free wasm-min
+    /// build does not accidentally share an entry with the `-msimd128`-enabled
+    /// wasi/edge/full builds.
+    pub fn rt_core(&self, profile: emit_wasm_c::WasmProfile) -> Result<PathBuf, CompileError> {
         let source: &str = &crate::codegen::runtime_core_wasm::RUNTIME_CORE_WASM;
-        self.get_or_compile("rt_core", source)
+        self.get_or_compile("rt_core", source, profile)
     }
 
     /// Get or compile the WASI I/O runtime .o
-    pub fn rt_wasi(&self) -> Result<PathBuf, CompileError> {
+    pub fn rt_wasi(&self, profile: emit_wasm_c::WasmProfile) -> Result<PathBuf, CompileError> {
         let source = include_str!("runtime_wasi_io.c");
-        self.get_or_compile("rt_wasi", source)
+        self.get_or_compile("rt_wasi", source, profile)
     }
 
     /// Get or compile the edge host runtime .o
-    pub fn rt_edge(&self) -> Result<PathBuf, CompileError> {
+    pub fn rt_edge(&self, profile: emit_wasm_c::WasmProfile) -> Result<PathBuf, CompileError> {
         let source = include_str!("runtime_edge_host.c");
-        self.get_or_compile("rt_edge", source)
+        self.get_or_compile("rt_edge", source, profile)
     }
 
     /// Get or compile the full runtime .o
-    pub fn rt_full(&self) -> Result<PathBuf, CompileError> {
+    pub fn rt_full(&self, profile: emit_wasm_c::WasmProfile) -> Result<PathBuf, CompileError> {
         let source = include_str!("runtime_full_wasm.c");
-        self.get_or_compile("rt_full", source)
+        self.get_or_compile("rt_full", source, profile)
     }
 
     /// Return the clang path discovered during cache init.
@@ -287,6 +368,12 @@ impl WasmRuntimeCache {
     ///               (e.g. `"_wasm_tmp"`, `"_wasm_wasi_tmp"`).
     /// `extra_ld_args`: additional wasm-ld flags for profile-specific linking
     ///                  (e.g. `--export=memory` for edge profile).
+    /// `profile`: C21-3 — drives the clang flag set applied to the generated C
+    ///            (only `Min` skips `-msimd128`). This must match whatever the
+    ///            runtime `.o` files in `rt_objs` were built with, or the link
+    ///            step would fuse objects with mismatched SIMD feature
+    ///            requirements. Callers obtain both from the same profile.
+    #[allow(clippy::too_many_arguments)]
     fn link_wasm_cached(
         &self,
         rt_objs: &[PathBuf],
@@ -294,6 +381,7 @@ impl WasmRuntimeCache {
         wasm_path: &Path,
         tmp_suffix: &str,
         extra_ld_args: &[&str],
+        profile: emit_wasm_c::WasmProfile,
     ) -> Result<(), CompileError> {
         let tmp_base = wasm_path.with_extension(tmp_suffix);
         let gen_c_path = tmp_base.with_extension("gen.c");
@@ -303,7 +391,7 @@ impl WasmRuntimeCache {
             message: format!("failed to write generated C: {}", e),
         })?;
 
-        let clang_args = wasm_clang_base_args(self.include_dir());
+        let clang_args = wasm_clang_base_args(self.include_dir(), profile);
         let gen_status = run_wasm_clang_object(
             self.clang(),
             &clang_args,
@@ -873,8 +961,11 @@ fn write_wasm_stdint_header(include_dir: &Path) -> Result<(), CompileError> {
     Ok(())
 }
 
-fn wasm_clang_base_args(include_dir: &Path) -> Vec<String> {
-    let mut args: Vec<String> = WASM_CLANG_FLAGS.iter().map(|s| s.to_string()).collect();
+fn wasm_clang_base_args(include_dir: &Path, profile: emit_wasm_c::WasmProfile) -> Vec<String> {
+    let mut args: Vec<String> = wasm_clang_flags_for(profile)
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
     args.push("-I".to_string());
     args.push(include_dir.display().to_string());
     args
@@ -1258,11 +1349,15 @@ fn wasm_frontend(
 ///   e.g. `[("rt", runtime_core_wasm.c)]` for wasm-min,
 ///        `[("rt_core", ...), ("rt_wasi", ...)]` for wasm-wasi.
 /// `tmp_suffix`: unique suffix to avoid temp file collisions between profiles.
+/// `profile`: C21-3 — picks the clang flag set; `Min` skips `-msimd128`,
+///   the other three enable it so LLVM's wasm auto-vectorizer is permitted
+///   to lower f32/f64 hot loops to `v128.*` instructions.
 fn wasm_compile_and_link_uncached(
     generated_c: &str,
     wasm_path: &Path,
     runtime_sources: &[(&str, &str)],
     tmp_suffix: &str,
+    profile: emit_wasm_c::WasmProfile,
 ) -> Result<(), CompileError> {
     let tmp_base = wasm_path.with_extension(tmp_suffix);
     let gen_c_path = tmp_base.with_extension("gen.c");
@@ -1306,7 +1401,7 @@ fn wasm_compile_and_link_uncached(
         return Err(err);
     }
 
-    let clang_args = wasm_clang_base_args(&include_dir);
+    let clang_args = wasm_clang_base_args(&include_dir, profile);
 
     // 生成 C をコンパイル
     let gen_status = run_wasm_clang_object(
@@ -1435,12 +1530,19 @@ pub fn compile_file_wasm_cached(
     output_path: Option<&Path>,
     cache: Option<&WasmRuntimeCache>,
 ) -> Result<PathBuf, CompileError> {
-    let (generated_c, wasm_path) =
-        wasm_frontend(input_path, output_path, emit_wasm_c::WasmProfile::Min)?;
+    let profile = emit_wasm_c::WasmProfile::Min;
+    let (generated_c, wasm_path) = wasm_frontend(input_path, output_path, profile)?;
 
     if let Some(rt_cache) = cache {
-        let rt_obj = rt_cache.rt_core()?;
-        rt_cache.link_wasm_cached(&[rt_obj], &generated_c, &wasm_path, "_wasm_tmp", &[])?;
+        let rt_obj = rt_cache.rt_core(profile)?;
+        rt_cache.link_wasm_cached(
+            &[rt_obj],
+            &generated_c,
+            &wasm_path,
+            "_wasm_tmp",
+            &[],
+            profile,
+        )?;
         return Ok(wasm_path);
     }
 
@@ -1449,6 +1551,7 @@ pub fn compile_file_wasm_cached(
         &wasm_path,
         &[("rt", &crate::codegen::runtime_core_wasm::RUNTIME_CORE_WASM)],
         "_wasm_tmp",
+        profile,
     )?;
 
     Ok(wasm_path)
@@ -1477,18 +1580,19 @@ pub fn compile_file_wasm_wasi_cached(
     output_path: Option<&Path>,
     cache: Option<&WasmRuntimeCache>,
 ) -> Result<PathBuf, CompileError> {
-    let (generated_c, wasm_path) =
-        wasm_frontend(input_path, output_path, emit_wasm_c::WasmProfile::Wasi)?;
+    let profile = emit_wasm_c::WasmProfile::Wasi;
+    let (generated_c, wasm_path) = wasm_frontend(input_path, output_path, profile)?;
 
     if let Some(rt_cache) = cache {
-        let rt_core = rt_cache.rt_core()?;
-        let rt_wasi = rt_cache.rt_wasi()?;
+        let rt_core = rt_cache.rt_core(profile)?;
+        let rt_wasi = rt_cache.rt_wasi(profile)?;
         rt_cache.link_wasm_cached(
             &[rt_core, rt_wasi],
             &generated_c,
             &wasm_path,
             "_wasm_wasi_tmp",
             &[],
+            profile,
         )?;
         return Ok(wasm_path);
     }
@@ -1504,6 +1608,7 @@ pub fn compile_file_wasm_wasi_cached(
             ("rt_wasi", include_str!("runtime_wasi_io.c")),
         ],
         "_wasm_wasi_tmp",
+        profile,
     )?;
 
     Ok(wasm_path)
@@ -1530,18 +1635,19 @@ pub fn compile_file_wasm_edge_cached(
     output_path: Option<&Path>,
     cache: Option<&WasmRuntimeCache>,
 ) -> Result<WasmEdgeOutput, CompileError> {
-    let (generated_c, wasm_path) =
-        wasm_frontend(input_path, output_path, emit_wasm_c::WasmProfile::Edge)?;
+    let profile = emit_wasm_c::WasmProfile::Edge;
+    let (generated_c, wasm_path) = wasm_frontend(input_path, output_path, profile)?;
 
     if let Some(rt_cache) = cache {
-        let rt_core = rt_cache.rt_core()?;
-        let rt_edge = rt_cache.rt_edge()?;
+        let rt_core = rt_cache.rt_core(profile)?;
+        let rt_edge = rt_cache.rt_edge(profile)?;
         rt_cache.link_wasm_cached(
             &[rt_core, rt_edge],
             &generated_c,
             &wasm_path,
             "_wasm_edge_tmp",
             &[],
+            profile,
         )?;
         let glue_path = generate_edge_js_glue(&wasm_path)?;
         return Ok(WasmEdgeOutput {
@@ -1561,6 +1667,7 @@ pub fn compile_file_wasm_edge_cached(
             ("rt_edge", include_str!("runtime_edge_host.c")),
         ],
         "_wasm_edge_tmp",
+        profile,
     )?;
 
     // WE-2d: Generate JS glue alongside the .wasm
@@ -1597,19 +1704,20 @@ pub fn compile_file_wasm_full_cached(
     output_path: Option<&Path>,
     cache: Option<&WasmRuntimeCache>,
 ) -> Result<PathBuf, CompileError> {
-    let (generated_c, wasm_path) =
-        wasm_frontend(input_path, output_path, emit_wasm_c::WasmProfile::Full)?;
+    let profile = emit_wasm_c::WasmProfile::Full;
+    let (generated_c, wasm_path) = wasm_frontend(input_path, output_path, profile)?;
 
     if let Some(rt_cache) = cache {
-        let rt_core = rt_cache.rt_core()?;
-        let rt_wasi = rt_cache.rt_wasi()?;
-        let rt_full = rt_cache.rt_full()?;
+        let rt_core = rt_cache.rt_core(profile)?;
+        let rt_wasi = rt_cache.rt_wasi(profile)?;
+        let rt_full = rt_cache.rt_full(profile)?;
         rt_cache.link_wasm_cached(
             &[rt_core, rt_wasi, rt_full],
             &generated_c,
             &wasm_path,
             "_wasm_full_tmp",
             &[],
+            profile,
         )?;
         return Ok(wasm_path);
     }
@@ -1626,6 +1734,7 @@ pub fn compile_file_wasm_full_cached(
             ("rt_full", include_str!("runtime_full_wasm.c")),
         ],
         "_wasm_full_tmp",
+        profile,
     )?;
 
     Ok(wasm_path)
@@ -2151,7 +2260,11 @@ mod tests {
 
         // We cannot easily construct a WasmRuntimeCache without clang,
         // so test the FNV-1a logic directly with the same algorithm.
-        fn fnv1a_cache_key(source: &str, version: &str) -> String {
+        fn fnv1a_cache_key(
+            source: &str,
+            version: &str,
+            profile: emit_wasm_c::WasmProfile,
+        ) -> String {
             let mut state: u64 = 0xcbf29ce484222325;
             for byte in source.bytes() {
                 state ^= byte as u64;
@@ -2161,8 +2274,9 @@ mod tests {
                 state ^= byte as u64;
                 state = state.wrapping_mul(0x100000001b3);
             }
-            // L-1: Use the same shared constant as cache_key()
-            for flag in WASM_CLANG_FLAGS {
+            // L-1: mix in per-profile clang flags (C21-3 seed-02: the flag
+            // vector differs by profile, so the cache key must too).
+            for flag in wasm_clang_flags_for(profile) {
                 for byte in flag.bytes() {
                     state ^= byte as u64;
                     state = state.wrapping_mul(0x100000001b3);
@@ -2171,9 +2285,28 @@ mod tests {
             format!("{:016x}", state)
         }
 
-        let key_a = fnv1a_cache_key("int main() { return 0; }", "clang 17.0.0");
-        let key_b = fnv1a_cache_key("int main() { return 1; }", "clang 17.0.0");
-        let key_c = fnv1a_cache_key("int main() { return 0; }", "clang 18.0.0");
+        let key_a = fnv1a_cache_key(
+            "int main() { return 0; }",
+            "clang 17.0.0",
+            emit_wasm_c::WasmProfile::Wasi,
+        );
+        let key_b = fnv1a_cache_key(
+            "int main() { return 1; }",
+            "clang 17.0.0",
+            emit_wasm_c::WasmProfile::Wasi,
+        );
+        let key_c = fnv1a_cache_key(
+            "int main() { return 0; }",
+            "clang 18.0.0",
+            emit_wasm_c::WasmProfile::Wasi,
+        );
+        // C21-3: wasm-min and wasm-wasi differ only in `-msimd128`, so
+        // identical source + version must still land on distinct keys.
+        let key_d = fnv1a_cache_key(
+            "int main() { return 0; }",
+            "clang 17.0.0",
+            emit_wasm_c::WasmProfile::Min,
+        );
 
         assert_ne!(
             key_a, key_b,
@@ -2183,9 +2316,17 @@ mod tests {
             key_a, key_c,
             "different clang version should produce different keys"
         );
+        assert_ne!(
+            key_a, key_d,
+            "different profile (-msimd128 vs no -msimd128) should produce different keys"
+        );
 
         // Same inputs should produce the same key
-        let key_a2 = fnv1a_cache_key("int main() { return 0; }", "clang 17.0.0");
+        let key_a2 = fnv1a_cache_key(
+            "int main() { return 0; }",
+            "clang 17.0.0",
+            emit_wasm_c::WasmProfile::Wasi,
+        );
         assert_eq!(key_a, key_a2, "same inputs should produce identical keys");
 
         // Key should be a 16-char hex string

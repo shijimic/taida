@@ -285,6 +285,36 @@ taida graph summary ./src/main.td
 
 ---
 
+## ランタイム観測 — `debug()` の flush タイミング
+
+構造的イントロスペクションは**実行前**にコードを眺めるための道具ですが、パイプラインの途中に `debug()` を差し込むと**実行中**に値を観察できます。
+
+```taida
+scores <= @[95, 82, 78, 91]
+scores => Filter[_, _ x = x > 80]() => debug => Map[_, _ x = x * 2]() => result
+```
+
+`debug(value)` は渡された値をそのまま返すため、パイプラインを切断せずに観測地点を挟めます。単独で値を print したいときや、ラベル付きで `[label] Type: repr` 形式を出したいときは以下を使います。
+
+```taida
+debug("ping")                 // "ping" を出力
+debug(user, "load_user")      // "[load_user] BuchiPack: @(name: ..., age: ...)" を出力
+```
+
+### flush タイミング（C22 以降）
+
+| 実行モード | `stdout(...)` | `debug(...)` | 備考 |
+|---|---|---|---|
+| CLI (`taida <file>` / `taida run <file>`) | 呼び出し毎に即 flush | 呼び出し毎に即 flush | 長時間実行のスクリプトで進捗・トレースをリアルタイム観測できる |
+| REPL (`taida repl`) | eval 完了後に一括出力 | eval 完了後に一括出力 | return-value 字下げ表示との視覚分離のためバッファモードを維持 |
+| Rust 側 in-process test | eval 完了後に `interpreter.output` から取得 | 同左 | `Interpreter::new()` 経由のテスト互換性を維持 |
+
+`debug` の stream mode 出力先は **stdout** です（stderr ではありません）。これは JS バックエンド（`console.log`）・Native バックエンド（`printf`）との 3 バックエンドパリティを保証するための設計判断で、`test_native_compile_parity` 系の captured-stdout diff を破らない形に揃えています。
+
+長時間ループの中で `debug(x)` を差し込めば、プログラムが止まらずとも途中経過がそのまま端末に流れてくるため、printf-デバッグが機能します。これは post-C20 で「`stdout` / `debug` だけが Vec にバッファされて終了まで 1 バイトも見えない」問題の対称性回復として修正されました。Taida の surface API 仕様は変わっていないため、既存コードの書き換えは不要です。
+
+---
+
 ## 他言語との比較
 
 | 特性 | Taida | TypeScript | Rust | Python |

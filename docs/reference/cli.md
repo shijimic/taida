@@ -110,6 +110,21 @@ taida build [--target native|js|wasm-min|wasm-wasi|wasm-edge|wasm-full] [--relea
 - `--target wasm-*`:
   - `.wasm` 成果物を生成します。
   - 対応ターゲットは `wasm-min`, `wasm-wasi`, `wasm-edge`, `wasm-full` です。
+  - **WASM SIMD (`simd128`) 有効化ポリシー (C21-3)**: 生成される `.wasm` が
+    要求する WebAssembly feature は profile ごとに異なります。
+    clang への `-msimd128` 指定は以下の通り：
+
+    | profile | `-msimd128` | 生成 wasm の feature 要求 | 推奨 runtime |
+    |---|---|---|---|
+    | `wasm-min` | なし | simd128 非要求。**後方互換の最小バイナリ** | simd128 非対応 runtime でも実行可 |
+    | `wasm-wasi` | あり | `simd128` 要求 | wasmtime 42+（default enabled） |
+    | `wasm-edge` | あり | `simd128` 要求 | Cloudflare Workers 等 edge runtime（simd128 対応済） |
+    | `wasm-full` | あり | `simd128` 要求 | wasmtime 42+ |
+
+    `-msimd128` が付与された profile では LLVM の wasm auto-vectorizer が
+    f32/f64 の hot loop を `v128.*` / `f32x4.*` / `f64x2.*` に降ろすことが
+    許可されます（実際に SIMD 命令が出るかは LLVM の判断）。simd128 feature
+    非対応の実行環境がターゲットなら `--target wasm-min` を選んでください。
 - 既定では parse + type check を実行します（`--no-check` で type check をスキップ）。
 - `--release` では `TODO` / `Stub` を検出すると終了します（file入力時は import 依存も再帰走査）。
 - `--diag-format jsonl` では compile 診断を `taida.diagnostic.v1` JSONL で出力します（parse/type/verify/codegen/io）。

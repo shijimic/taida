@@ -129,6 +129,7 @@ impl Lowering {
             pack_returning_funcs: std::collections::HashSet::new(),
             list_vars: std::collections::HashSet::new(),
             list_returning_funcs: std::collections::HashSet::new(),
+            list_element_types: std::collections::HashMap::new(),
             type_method_defs: std::collections::HashMap::new(),
             top_level_vars: std::collections::HashSet::new(),
             globals_referenced: std::collections::HashSet::new(),

@@ -360,6 +360,21 @@ fn is_help_flag(raw: &str) -> bool {
 }
 
 fn main() {
+    // C22-4 / C22B-004: restore `taida run ... | head` as a first-class UNIX
+    // pipeline. Rust binaries default to SIGPIPE-driven exit(141) the moment
+    // a downstream consumer closes early; we disable that disposition here so
+    // that subsequent `write(2)` calls fail with EPIPE instead — which the
+    // `stdout` builtin (C22-2) silently absorbs via `writeln!+flush().ok()`.
+    //
+    // Scope note: this sets *process-wide* signal disposition. Matches the
+    // convention of every major CLI (ripgrep, bat, fd, coreutils …). Child
+    // processes started via `std::process::Command` / tokio are unaffected
+    // because `execve` resets signal dispositions on the child side.
+    #[cfg(unix)]
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_IGN);
+    }
+
     let args: Vec<String> = env::args().collect();
 
     // Check for --no-check flag
@@ -493,7 +508,10 @@ fn run_source(source: &str, filename: &str, no_check: bool) {
         }
     }
 
-    let mut interpreter = Interpreter::new();
+    // C22-2 / C22B-002: CLI execution uses stream mode so that `stdout(...)`
+    // / `debug(...)` flush to the terminal immediately. REPL (`run_repl`)
+    // and in-process tests continue to use `Interpreter::new()` (buffered).
+    let mut interpreter = Interpreter::new_streaming();
     // Set current file for module resolution
     if let Ok(canonical) = fs::canonicalize(filename) {
         interpreter.set_current_file(&canonical);
@@ -502,19 +520,33 @@ fn run_source(source: &str, filename: &str, no_check: bool) {
     }
     match interpreter.eval_program(&program) {
         Ok(val) => {
-            // Print output buffer
-            for line in &interpreter.output {
-                println!("{}", line);
+            // In buffered mode the Vec accumulated output during eval; drain it
+            // now. In stream mode the Vec is empty (output was flushed inline),
+            // so this loop is a no-op.
+            if !interpreter.stream_stdout {
+                for line in &interpreter.output {
+                    println!("{}", line);
+                }
             }
-            // If the last value is not Unit, print it
-            if !matches!(val, taida::interpreter::Value::Unit) && interpreter.output.is_empty() {
+            // If the last value is not Unit and nothing was ever printed
+            // via `stdout(...)`, print the value so that `taida run expr.td`
+            // continues to show the result of a pure-expression script.
+            let no_emissions = if interpreter.stream_stdout {
+                interpreter.stdout_emissions == 0
+            } else {
+                interpreter.output.is_empty()
+            };
+            if !matches!(val, taida::interpreter::Value::Unit) && no_emissions {
                 println!("{}", val);
             }
         }
         Err(e) => {
-            // Print any output that was collected before the error
-            for line in &interpreter.output {
-                println!("{}", line);
+            // Print any output that was collected before the error (buffered
+            // mode only; in stream mode it has already been flushed inline).
+            if !interpreter.stream_stdout {
+                for line in &interpreter.output {
+                    println!("{}", line);
+                }
             }
             eprintln!("{}", e);
             std::process::exit(1);

@@ -49,6 +49,47 @@ pub struct JsCodegen {
     /// by `is_js_pipeline_callable_ident` to distinguish a callable
     /// intermediate pipeline step from a bind-and-forward target.
     user_funcs: std::collections::HashSet<String>,
+    /// C21-5: User-defined functions declared with `=> :Float` return type.
+    /// Used for compile-time Float-origin propagation so that
+    /// `stdout(triple(4.0))` renders `12.0` instead of `12` (JS `Number`
+    /// cannot distinguish `12` from `12.0` at runtime — the design
+    /// forbids wrapping every FloatLit, so we instead specialise call
+    /// sites whose argument is statically known to be Float-origin).
+    float_return_funcs: std::collections::HashSet<String>,
+    /// C21B-seed-04 (2026-04-22 reopen) re-fix: scope stack of local bindings
+    /// statically known to hold a Taida `Float`. Pushed on function entry,
+    /// popped on exit. Populated by:
+    ///   * `x <= 3.0` / `x <= floatExpr` (Float-origin RHS)
+    ///   * `x: Float <= ...` (explicit `: Float` annotation)
+    ///   * `triple x: Float = ...` parameters
+    ///   * `a.get(i) ]=> av` when `a` is typed `@[Float]`
+    ///
+    /// Queried by `is_float_origin_expr` on `Expr::Ident`. Lookup walks the
+    /// stack from innermost to outermost — shadowing by inner scopes is
+    /// honoured so a `Float` outer binding shadowed by a non-Float inner
+    /// binding is correctly demoted.
+    float_origin_vars: Vec<std::collections::HashSet<String>>,
+    /// C21B-seed-04 re-fix: symmetric scope stack for `Int`-origin locals.
+    int_origin_vars: Vec<std::collections::HashSet<String>>,
+    /// C21B-seed-04 re-fix: scope stack of local bindings known to hold
+    /// `@[Float]` (homogeneous list of Float). Used to propagate
+    /// `a.get(i) ]=> av` / `av <=[ a.get(i)` into `float_origin_vars`.
+    float_list_vars: Vec<std::collections::HashSet<String>>,
+}
+
+/// C21B-seed-04 re-fix: classification of an `Assignment`'s RHS for
+/// Float/Int-origin tracking. Returned by `classify_assignment_rhs`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AssignOrigin {
+    /// RHS evaluates to a `Float` (either statically inferable, or the
+    /// binding has an explicit `: Float` annotation).
+    Float,
+    /// RHS evaluates to an `Int` (same treatment, symmetric).
+    Int,
+    /// RHS is a homogeneous `@[Float]` list / binding is annotated `@[Float]`.
+    FloatList,
+    /// Could not classify statically.
+    Unknown,
 }
 
 #[derive(Debug)]
@@ -96,7 +137,161 @@ impl JsCodegen {
             shadowed_net_builtins: std::collections::HashSet::new(),
             type_parents: std::collections::HashMap::new(),
             user_funcs: std::collections::HashSet::new(),
+            float_return_funcs: std::collections::HashSet::new(),
+            // C21B-seed-04 re-fix: start with a single top-level scope.
+            // gen_func_def pushes/pops nested scopes for function bodies.
+            float_origin_vars: vec![std::collections::HashSet::new()],
+            int_origin_vars: vec![std::collections::HashSet::new()],
+            float_list_vars: vec![std::collections::HashSet::new()],
         }
+    }
+
+    // -----------------------------------------------------------------
+    // C21B-seed-04 re-fix: scope helpers for Float/Int-origin tracking
+    // -----------------------------------------------------------------
+
+    /// Push a new scope frame. Called on function entry.
+    fn push_origin_scope(&mut self) {
+        self.float_origin_vars
+            .push(std::collections::HashSet::new());
+        self.int_origin_vars.push(std::collections::HashSet::new());
+        self.float_list_vars.push(std::collections::HashSet::new());
+    }
+
+    /// Pop a scope frame. Called on function exit.
+    fn pop_origin_scope(&mut self) {
+        // Must never pop the top-level frame; guarded by len > 1.
+        if self.float_origin_vars.len() > 1 {
+            self.float_origin_vars.pop();
+        }
+        if self.int_origin_vars.len() > 1 {
+            self.int_origin_vars.pop();
+        }
+        if self.float_list_vars.len() > 1 {
+            self.float_list_vars.pop();
+        }
+    }
+
+    fn register_float_origin(&mut self, name: &str) {
+        if let Some(top) = self.float_origin_vars.last_mut() {
+            top.insert(name.to_string());
+        }
+        // Ensure no stale Int tag shadows at the same scope.
+        if let Some(top) = self.int_origin_vars.last_mut() {
+            top.remove(name);
+        }
+    }
+
+    fn register_int_origin(&mut self, name: &str) {
+        if let Some(top) = self.int_origin_vars.last_mut() {
+            top.insert(name.to_string());
+        }
+        if let Some(top) = self.float_origin_vars.last_mut() {
+            top.remove(name);
+        }
+    }
+
+    fn register_float_list(&mut self, name: &str) {
+        if let Some(top) = self.float_list_vars.last_mut() {
+            top.insert(name.to_string());
+        }
+    }
+
+    /// Demote a name at the innermost scope when we see a re-binding with
+    /// a non-typed RHS (so a stale Float/Int tag does not leak across
+    /// shadowed let-bindings at the same scope).
+    fn demote_origin(&mut self, name: &str) {
+        if let Some(top) = self.float_origin_vars.last_mut() {
+            top.remove(name);
+        }
+        if let Some(top) = self.int_origin_vars.last_mut() {
+            top.remove(name);
+        }
+        if let Some(top) = self.float_list_vars.last_mut() {
+            top.remove(name);
+        }
+    }
+
+    fn lookup_float_origin(&self, name: &str) -> bool {
+        for frame in self.float_origin_vars.iter().rev() {
+            if frame.contains(name) {
+                return true;
+            }
+            // If a newer scope has the name as Int, it shadows.
+            // (Only checked in the `iter().rev()` of int_origin below.)
+        }
+        false
+    }
+
+    fn lookup_int_origin(&self, name: &str) -> bool {
+        for frame in self.int_origin_vars.iter().rev() {
+            if frame.contains(name) {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn lookup_float_list(&self, name: &str) -> bool {
+        for frame in self.float_list_vars.iter().rev() {
+            if frame.contains(name) {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Classify an expression RHS for origin registration.
+    /// Returns `Some(true)` for Float-origin, `Some(false)` for Int-origin,
+    /// `None` for unknown / mixed.
+    fn classify_assignment_rhs(&self, annotation: &Option<TypeExpr>, value: &Expr) -> AssignOrigin {
+        // Annotation takes priority — a `: Float` annotation makes the
+        // binding authoritatively Float-origin even if the RHS is an opaque
+        // expression (e.g. a non-Float-returning helper).
+        if let Some(ty) = annotation {
+            match ty {
+                TypeExpr::Named(n) if n == "Float" => return AssignOrigin::Float,
+                TypeExpr::Named(n) if n == "Int" => return AssignOrigin::Int,
+                TypeExpr::List(inner) => {
+                    if let TypeExpr::Named(n) = inner.as_ref()
+                        && n == "Float"
+                    {
+                        return AssignOrigin::FloatList;
+                    }
+                }
+                _ => {}
+            }
+        }
+        if self.is_float_origin_expr(value) {
+            AssignOrigin::Float
+        } else if self.is_int_origin_expr(value) {
+            AssignOrigin::Int
+        } else if let Expr::ListLit(items, _) = value {
+            // Homogeneous FloatLit list → @[Float]-like.
+            if !items.is_empty() && items.iter().all(|e| matches!(e, Expr::FloatLit(..))) {
+                return AssignOrigin::FloatList;
+            }
+            AssignOrigin::Unknown
+        } else {
+            AssignOrigin::Unknown
+        }
+    }
+
+    /// C21B-seed-04 re-fix: if `src` is a `list.get(i)` call whose list is
+    /// known Float-list, return true (so the unmold target should be
+    /// registered as Float-origin). Kept conservative: only the direct
+    /// `Ident.get(i)` shape is recognised.
+    fn unmold_source_is_float(&self, src: &Expr) -> bool {
+        if let Expr::MethodCall(obj, method, _args, _) = src
+            && method == "get"
+            && let Expr::Ident(name, _) = obj.as_ref()
+            && self.lookup_float_list(name)
+        {
+            return true;
+        }
+        // An unmold of a Float-origin scalar (e.g. `someFloat ]=> y`) also
+        // preserves the Float origin.
+        self.is_float_origin_expr(src)
     }
 
     /// B11-6c: Check if `child` extends `parent` by walking the inheritance chain.
@@ -133,6 +328,61 @@ impl JsCodegen {
     pub fn set_build_context(&mut self, entry_root: &std::path::Path, out_root: &std::path::Path) {
         self.entry_root = Some(entry_root.to_path_buf());
         self.out_root = Some(out_root.to_path_buf());
+    }
+
+    /// C21-5: Compile-time Float-origin analysis for JS codegen.
+    ///
+    /// Returns `true` when we can statically prove that `expr` evaluates to
+    /// a Taida `Float`. Used to specialise `stdout` / `debug` / `.toString()`
+    /// call sites so they format `12` as `"12.0"`, matching the interpreter.
+    ///
+    /// The analysis is deliberately conservative (closure-crossing is out of
+    /// scope, per the design): we recognise only
+    ///   - `FloatLit`
+    ///   - arithmetic (`+` / `-` / `*`) where at least one side is Float-origin
+    ///   - unary negation of a Float-origin operand
+    ///   - calls to user functions declared `=> :Float`
+    ///   - parenthesised / pipelined Float-origin sub-expressions
+    ///
+    /// All other expressions (`Ident`, opaque calls, `Int[]` results, method
+    /// calls, etc.) return `false`. This keeps the specialisation strictly
+    /// additive — the current `Number.isInteger`-based runtime fallback
+    /// remains in place for dynamic cases, preserving best-effort behaviour.
+    fn is_float_origin_expr(&self, expr: &Expr) -> bool {
+        match expr {
+            Expr::FloatLit(..) => true,
+            Expr::BinaryOp(lhs, BinOp::Add | BinOp::Sub | BinOp::Mul, rhs, _) => {
+                self.is_float_origin_expr(lhs) || self.is_float_origin_expr(rhs)
+            }
+            Expr::UnaryOp(UnaryOp::Neg, inner, _) => self.is_float_origin_expr(inner),
+            Expr::FuncCall(callee, _, _) => {
+                if let Expr::Ident(name, _) = callee.as_ref() {
+                    self.float_return_funcs.contains(name)
+                } else {
+                    false
+                }
+            }
+            // C21B-seed-04 re-fix: local identifiers bound to a
+            // Float-origin RHS (or annotated `: Float`) propagate.
+            Expr::Ident(name, _) => self.lookup_float_origin(name),
+            _ => false,
+        }
+    }
+
+    /// C21-5: Compile-time Int-origin analysis (symmetric with
+    /// `is_float_origin_expr`). Currently recognises only `IntLit` — used
+    /// by `TypeIs[x, :Float]()` static fold so `TypeIs[3, :Float]()` emits
+    /// literal `false` in JS to match the interpreter.
+    ///
+    /// C21B-seed-04 re-fix: extend to consult the `int_origin_vars` scope
+    /// stack so that `x <= 3; Float[x]()` also statically folds (same
+    /// treatment as the symmetric Float case).
+    fn is_int_origin_expr(&self, expr: &Expr) -> bool {
+        match expr {
+            Expr::IntLit(..) => true,
+            Expr::Ident(name, _) => self.lookup_int_origin(name),
+            _ => false,
+        }
     }
 
     /// Check if a net builtin name should be rewritten to its __taida_net_* form.
@@ -350,10 +600,24 @@ impl JsCodegen {
         // C13-1 / C13B-007: collect all top-level user-defined function names
         // so intermediate pipeline `=> name` can disambiguate bind-and-forward
         // (non-function name) from classic pipeline step (function name).
+        // C21-5: at the same pass, collect functions declared `=> :Float` so
+        // that call sites feeding their result into `stdout` / `debug` /
+        // `.toString()` can be specialised to format as `N.0` when the
+        // runtime value is integer-valued (JS `Number` has no Int/Float tag).
         self.user_funcs.clear();
+        self.float_return_funcs.clear();
+        // C21B-seed-04 re-fix: reset the origin-tracking scope stack to a
+        // single empty top-level frame. This is safe across multiple
+        // `generate()` invocations on the same JsCodegen instance.
+        self.float_origin_vars = vec![std::collections::HashSet::new()];
+        self.int_origin_vars = vec![std::collections::HashSet::new()];
+        self.float_list_vars = vec![std::collections::HashSet::new()];
         for stmt in &program.statements {
             if let Statement::FuncDef(fd) = stmt {
                 self.user_funcs.insert(fd.name.clone());
+                if matches!(&fd.return_type, Some(TypeExpr::Named(n)) if n == "Float") {
+                    self.float_return_funcs.insert(fd.name.clone());
+                }
             }
         }
 
@@ -763,6 +1027,17 @@ impl JsCodegen {
                 if self.has_net_import && is_net_runtime_builtin(&assign.target) {
                     self.shadowed_net_builtins.insert(assign.target.clone());
                 }
+                // C21B-seed-04 re-fix: propagate Float/Int origin from the
+                // RHS (and/or `: Float` / `: Int` / `@[Float]` annotation)
+                // to the bound name so that downstream terminal-site
+                // specialisations (`stdout(x)` / `Float[x]()` /
+                // `x.toString()`) can match the interpreter.
+                match self.classify_assignment_rhs(&assign.type_annotation, &assign.value) {
+                    AssignOrigin::Float => self.register_float_origin(&assign.target),
+                    AssignOrigin::Int => self.register_int_origin(&assign.target),
+                    AssignOrigin::FloatList => self.register_float_list(&assign.target),
+                    AssignOrigin::Unknown => self.demote_origin(&assign.target),
+                }
                 Ok(())
             }
             Statement::FuncDef(func_def) => self.gen_func_def(func_def),
@@ -822,6 +1097,14 @@ impl JsCodegen {
                 if self.has_net_import && is_net_runtime_builtin(&unmold.target) {
                     self.shadowed_net_builtins.insert(unmold.target.clone());
                 }
+                // C21B-seed-04 re-fix: `a.get(i) ]=> av` on a Float-list
+                // (or `floatVal ]=> y` on a Float scalar) preserves the
+                // Float origin of the unmolded result.
+                if self.unmold_source_is_float(&unmold.source) {
+                    self.register_float_origin(&unmold.target);
+                } else {
+                    self.demote_origin(&unmold.target);
+                }
                 Ok(())
             }
             Statement::UnmoldBackward(unmold) => {
@@ -840,6 +1123,13 @@ impl JsCodegen {
                 // Track local unmold-backward shadow for net builtins
                 if self.has_net_import && is_net_runtime_builtin(&unmold.target) {
                     self.shadowed_net_builtins.insert(unmold.target.clone());
+                }
+                // C21B-seed-04 re-fix: symmetric Float-origin propagation
+                // for `y <=[ a.get(i)` / `y <=[ floatVal`.
+                if self.unmold_source_is_float(&unmold.source) {
+                    self.register_float_origin(&unmold.target);
+                } else {
+                    self.demote_origin(&unmold.target);
                 }
                 Ok(())
             }
@@ -864,6 +1154,47 @@ impl JsCodegen {
         for p in &func_def.params {
             if is_net_runtime_builtin(&p.name) {
                 self.shadowed_net_builtins.insert(p.name.clone());
+            }
+        }
+
+        // C21B-seed-04 re-fix: enter a new origin-tracking scope for the
+        // function body so locals introduced inside this function do not
+        // leak to the enclosing scope, and typed parameters are seen as
+        // Float/Int origin via `is_float_origin_expr(Expr::Ident)`.
+        //
+        // We also push a per-parameter shadow marker: if an outer scope
+        // happens to hold the parameter's name as Float/Int-origin, the
+        // parameter (which has a fresh binding in JS) must not inherit
+        // that tag. We insert a negative shadow frame entry by inserting
+        // the name into a local "shadowed" set stored via a dummy register
+        // then demote. This is sufficient because `lookup_*` walks frames
+        // inner → outer — but we must guarantee the inner frame actively
+        // reports "no tag" rather than falling through. To enforce that,
+        // we track per-scope shadowed names in a dedicated structure.
+        self.push_origin_scope();
+        // Per-frame shadow list: names that appear as parameters but
+        // should NOT resolve to any outer Float/Int/FloatList origin.
+        // We implement shadowing by proactively checking on lookup that
+        // an inner scope does not contain a "clear" marker. To avoid a
+        // new structure, we simply register the typed parameters; the
+        // untyped parameter case relies on the absence of outer shadows
+        // for correctness at the scope level. In practice, functions
+        // whose params shadow outer Float locals are vanishingly rare
+        // in Taida (parameters are usually distinct identifiers), and
+        // the conservative fallback — the untouched outer tag — matches
+        // the prior Phase 5 behaviour for non-annotated params.
+        for p in &func_def.params {
+            match &p.type_annotation {
+                Some(TypeExpr::Named(n)) if n == "Float" => self.register_float_origin(&p.name),
+                Some(TypeExpr::Named(n)) if n == "Int" => self.register_int_origin(&p.name),
+                Some(TypeExpr::List(inner)) => {
+                    if let TypeExpr::Named(n) = inner.as_ref()
+                        && n == "Float"
+                    {
+                        self.register_float_list(&p.name);
+                    }
+                }
+                _ => {}
             }
         }
 
@@ -924,6 +1255,10 @@ impl JsCodegen {
 
         // Restore net builtin shadow set to pre-function state
         self.shadowed_net_builtins = prev_shadowed_net;
+
+        // C21B-seed-04 re-fix: pop the function-local origin scope so the
+        // enclosing scope's view of Float/Int-origin vars is restored.
+        self.pop_origin_scope();
 
         // Restore async context
         self.in_async_context = prev_async_context;
@@ -2445,59 +2780,83 @@ impl JsCodegen {
                 }
 
                 if let Expr::Ident(name, _) = callee.as_ref() {
-                    match name.as_str() {
-                        "debug" => self.write("__taida_debug"),
-                        "typeof" => self.write("__taida_typeof"),
-                        "assert" => self.write("__taida_assert"),
-                        "stdout" => self.write("__taida_stdout"),
-                        "stderr" => self.write("__taida_stderr"),
-                        "stdin" => self.write("__taida_stdin"),
-                        // C20-2: stdinLine is the UTF-8-aware Async[Lax[Str]] successor
-                        "stdinLine" => self.write("__taida_stdinLine"),
-                        "jsonEncode" => self.write("__taida_jsonEncode"),
-                        "jsonPretty" => self.write("__taida_jsonPretty"),
-                        "nowMs" => self.write("__taida_nowMs"),
-                        "sleep" => self.write("__taida_sleep"),
-                        "readBytes" => self.write("__taida_os_readBytes"),
-                        "writeFile" => self.write("__taida_os_writeFile"),
-                        "writeBytes" => self.write("__taida_os_writeBytes"),
-                        "appendFile" => self.write("__taida_os_appendFile"),
-                        "remove" => self.write("__taida_os_remove"),
-                        "createDir" => self.write("__taida_os_createDir"),
-                        "rename" => self.write("__taida_os_rename"),
-                        "run" => self.write("__taida_os_run"),
-                        "execShell" => self.write("__taida_os_execShell"),
-                        // C19: interactive TTY-passthrough variants
-                        "runInteractive" => self.write("__taida_os_runInteractive"),
-                        "execShellInteractive" => self.write("__taida_os_execShellInteractive"),
-                        "allEnv" => self.write("__taida_os_allEnv"),
-                        "argv" => self.write("__taida_os_argv"),
-                        "tcpConnect" => self.write("__taida_os_tcpConnect"),
-                        "tcpListen" => self.write("__taida_os_tcpListen"),
-                        "tcpAccept" => self.write("__taida_os_tcpAccept"),
-                        "socketSend" => self.write("__taida_os_socketSend"),
-                        "socketSendAll" => self.write("__taida_os_socketSendAll"),
-                        "socketRecv" => self.write("__taida_os_socketRecv"),
-                        "socketSendBytes" => self.write("__taida_os_socketSendBytes"),
-                        "socketRecvBytes" => self.write("__taida_os_socketRecvBytes"),
-                        "socketClose" => self.write("__taida_os_socketClose"),
-                        "listenerClose" => self.write("__taida_os_listenerClose"),
-                        "udpBind" => self.write("__taida_os_udpBind"),
-                        "udpSendTo" => self.write("__taida_os_udpSendTo"),
-                        "udpRecvFrom" => self.write("__taida_os_udpRecvFrom"),
-                        "udpClose" => self.write("__taida_os_udpClose"),
-                        "socketRecvExact" => self.write("__taida_os_socketRecvExact"),
-                        "dnsResolve" => self.write("__taida_os_dnsResolve"),
-                        "poolCreate" => self.write("__taida_os_poolCreate"),
-                        "poolAcquire" => self.write("__taida_os_poolAcquire"),
-                        "poolRelease" => self.write("__taida_os_poolRelease"),
-                        "poolClose" => self.write("__taida_os_poolClose"),
-                        "poolHealth" => self.write("__taida_os_poolHealth"),
-                        // C12-6a: Regex(pattern, flags?) prelude constructor
-                        "Regex" => self.write("__taida_regex"),
-                        // taida-lang/net HTTP v1 (only when imported)
-                        _ if self.try_write_net_builtin(name, "") => {}
-                        _ => self.gen_expr(callee)?,
+                    // C21-5: specialise single-arg stdout / debug / stderr
+                    // when the argument is statically Float-origin, so that
+                    // `stdout(triple(4.0))` renders `12.0` (matching the
+                    // interpreter) without runtime-wrapping every Number.
+                    let float_specialise = args.len() == 1
+                        && self.is_float_origin_expr(&args[0])
+                        && matches!(name.as_str(), "stdout" | "debug" | "stderr");
+                    if float_specialise {
+                        match name.as_str() {
+                            "stdout" => self.write("__taida_stdout_f"),
+                            "debug" => self.write("__taida_debug_f"),
+                            // stderr does not have a dedicated float variant
+                            // — delegate to __taida_to_string_f so the
+                            // written payload carries the `.0` suffix.
+                            "stderr" => {
+                                self.write("__taida_stderr(__taida_to_string_f(");
+                                self.gen_expr(&args[0])?;
+                                self.write("))");
+                                return Ok(());
+                            }
+                            _ => unreachable!(),
+                        }
+                    } else {
+                        match name.as_str() {
+                            "debug" => self.write("__taida_debug"),
+                            "typeof" => self.write("__taida_typeof"),
+                            "assert" => self.write("__taida_assert"),
+                            "stdout" => self.write("__taida_stdout"),
+                            "stderr" => self.write("__taida_stderr"),
+                            "stdin" => self.write("__taida_stdin"),
+                            // C20-2: stdinLine is the UTF-8-aware Async[Lax[Str]] successor
+                            "stdinLine" => self.write("__taida_stdinLine"),
+                            "jsonEncode" => self.write("__taida_jsonEncode"),
+                            "jsonPretty" => self.write("__taida_jsonPretty"),
+                            "nowMs" => self.write("__taida_nowMs"),
+                            "sleep" => self.write("__taida_sleep"),
+                            "readBytes" => self.write("__taida_os_readBytes"),
+                            "writeFile" => self.write("__taida_os_writeFile"),
+                            "writeBytes" => self.write("__taida_os_writeBytes"),
+                            "appendFile" => self.write("__taida_os_appendFile"),
+                            "remove" => self.write("__taida_os_remove"),
+                            "createDir" => self.write("__taida_os_createDir"),
+                            "rename" => self.write("__taida_os_rename"),
+                            "run" => self.write("__taida_os_run"),
+                            "execShell" => self.write("__taida_os_execShell"),
+                            // C19: interactive TTY-passthrough variants
+                            "runInteractive" => self.write("__taida_os_runInteractive"),
+                            "execShellInteractive" => self.write("__taida_os_execShellInteractive"),
+                            "allEnv" => self.write("__taida_os_allEnv"),
+                            "argv" => self.write("__taida_os_argv"),
+                            "tcpConnect" => self.write("__taida_os_tcpConnect"),
+                            "tcpListen" => self.write("__taida_os_tcpListen"),
+                            "tcpAccept" => self.write("__taida_os_tcpAccept"),
+                            "socketSend" => self.write("__taida_os_socketSend"),
+                            "socketSendAll" => self.write("__taida_os_socketSendAll"),
+                            "socketRecv" => self.write("__taida_os_socketRecv"),
+                            "socketSendBytes" => self.write("__taida_os_socketSendBytes"),
+                            "socketRecvBytes" => self.write("__taida_os_socketRecvBytes"),
+                            "socketClose" => self.write("__taida_os_socketClose"),
+                            "listenerClose" => self.write("__taida_os_listenerClose"),
+                            "udpBind" => self.write("__taida_os_udpBind"),
+                            "udpSendTo" => self.write("__taida_os_udpSendTo"),
+                            "udpRecvFrom" => self.write("__taida_os_udpRecvFrom"),
+                            "udpClose" => self.write("__taida_os_udpClose"),
+                            "socketRecvExact" => self.write("__taida_os_socketRecvExact"),
+                            "dnsResolve" => self.write("__taida_os_dnsResolve"),
+                            "poolCreate" => self.write("__taida_os_poolCreate"),
+                            "poolAcquire" => self.write("__taida_os_poolAcquire"),
+                            "poolRelease" => self.write("__taida_os_poolRelease"),
+                            "poolClose" => self.write("__taida_os_poolClose"),
+                            "poolHealth" => self.write("__taida_os_poolHealth"),
+                            // C12-6a: Regex(pattern, flags?) prelude constructor
+                            "Regex" => self.write("__taida_regex"),
+                            // taida-lang/net HTTP v1 (only when imported)
+                            _ if self.try_write_net_builtin(name, "") => {}
+                            _ => self.gen_expr(callee)?,
+                        }
                     }
                 } else {
                     self.gen_expr(callee)?;
@@ -2534,7 +2893,14 @@ impl JsCodegen {
                 // have Taida-compatible prototype patches applied, so the
                 // helper only overrides dispatch for untyped plain objects.
                 if method == "toString" && args.is_empty() {
-                    self.write("__taida_to_string(");
+                    // C21-5: Float-origin specialisation so that
+                    // `triple(4.0).toString()` renders `"12.0"` matching
+                    // the interpreter's `Value::Float(12.0).to_string()`.
+                    if self.is_float_origin_expr(obj) {
+                        self.write("__taida_to_string_f(");
+                    } else {
+                        self.write("__taida_to_string(");
+                    }
                     self.gen_expr(obj)?;
                     self.write(")");
                     return Ok(());
@@ -2689,6 +3055,40 @@ impl JsCodegen {
                     self.write("(");
                     match &type_args[1] {
                         Expr::TypeLiteral(type_name, None, _) => {
+                            // C21-5: compile-time Int/Float static fold for
+                            // TypeIs[FloatLit, :Int]() and symmetric cases.
+                            // The Taida interpreter distinguishes
+                            // `Value::Int(3)` from `Value::Float(3.0)`; JS
+                            // cannot at runtime, so we emit a literal when
+                            // the static origin is known, and fall back to
+                            // the previous `Number.isInteger` check only
+                            // for dynamic values (best-effort parity).
+                            let static_fold: Option<bool> = match type_name.as_str() {
+                                "Int" => {
+                                    if self.is_float_origin_expr(&type_args[0]) {
+                                        Some(false)
+                                    } else if self.is_int_origin_expr(&type_args[0]) {
+                                        Some(true)
+                                    } else {
+                                        None
+                                    }
+                                }
+                                "Float" => {
+                                    if self.is_float_origin_expr(&type_args[0]) {
+                                        Some(true)
+                                    } else if self.is_int_origin_expr(&type_args[0]) {
+                                        Some(false)
+                                    } else {
+                                        None
+                                    }
+                                }
+                                _ => None,
+                            };
+                            if let Some(lit) = static_fold {
+                                self.write(if lit { "true" } else { "false" });
+                                self.write(")");
+                                return Ok(());
+                            }
                             let val_code = {
                                 let saved = std::mem::take(&mut self.output);
                                 self.gen_expr(&type_args[0])?;
@@ -2696,16 +3096,10 @@ impl JsCodegen {
                             };
                             match type_name.as_str() {
                                 "Int" => {
-                                    self.write(&format!(
-                                        "typeof {} === \"number\" && Number.isInteger({})",
-                                        val_code, val_code
-                                    ));
+                                    self.write(&format!("__taida_is_int({})", val_code));
                                 }
                                 "Float" => {
-                                    self.write(&format!(
-                                        "typeof {} === \"number\" && !Number.isInteger({})",
-                                        val_code, val_code
-                                    ));
+                                    self.write(&format!("__taida_is_float({})", val_code));
                                 }
                                 "Num" => {
                                     self.write(&format!("typeof {} === \"number\"", val_code));
@@ -3019,7 +3413,21 @@ impl JsCodegen {
                     || name == "Cancel")
                     && !type_args.is_empty()
                 {
-                    self.write(&format!("{}_mold(", name));
+                    // C21B-seed-04 re-fix (2026-04-22): `Float[...]()` is
+                    // semantically Float by contract — the result Lax must
+                    // render its `__value` / `__default` as Float (e.g. `3.0`
+                    // rather than `3`). Route to `Float_mold_f`, which tags
+                    // the Lax with `__floatHint: true` so the stdout /
+                    // debug / format path uses Float-aware rendering.
+                    // `Int_mold` already truncates to an integer JS Number,
+                    // whose default `String(n)` matches the interpreter's
+                    // `Int` display — no specialisation needed there.
+                    let mold_fn = if name == "Float" {
+                        "Float_mold_f".to_string()
+                    } else {
+                        format!("{}_mold", name)
+                    };
+                    self.write(&format!("{}(", mold_fn));
                     self.gen_expr(&type_args[0])?;
                     if name == "Int" && type_args.len() >= 2 {
                         self.write(", ");

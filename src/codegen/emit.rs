@@ -2389,8 +2389,28 @@ impl Emitter {
                 ectx.val_map.insert(*dst, val);
             }
             IrInst::ConstFloat(dst, value) => {
-                let val = builder.ins().f64const(*value);
-                ectx.val_map.insert(*dst, val);
+                // C21-4 / C21B-008: Normalize ConstFloat to the boxed value_ty
+                // (i64 bit-pattern) immediately. This matches the IR layer's
+                // "all IrVars are untyped / emit resolves to boxed value_ty"
+                // invariant documented in src/codegen/ir.rs and matches the
+                // wasm-c emit behaviour (`_d2l(...)`).
+                //
+                // Without this normalization, a raw f64 value escapes into
+                // CallUser args / Return / DefVar / TailCall / GlobalSet where
+                // the enclosing signature expects i64, producing Cranelift
+                // verifier errors like
+                //   `define_function failed: Compilation error: Verifier errors`
+                // on any `.td` that returns a Float literal through a
+                // user function (C21B-008).
+                //
+                // Runtime calls that expect F64 params (e.g. `taida_float_to_str`)
+                // are already handled by the i64 → F64 bitcast in `IrInst::Call`
+                // below (see RuntimeAbi params vs expected_type matching).
+                let raw = builder.ins().f64const(*value);
+                let boxed = builder
+                    .ins()
+                    .bitcast(ectx.value_ty, clif::MemFlags::new(), raw);
+                ectx.val_map.insert(*dst, boxed);
             }
             IrInst::ConstStr(dst, _) => {
                 // W-0 note: ConstStr の結果は意味的にはヒープ参照（Ptr）だが、

@@ -60,6 +60,22 @@ PHILOSOPHY I（「null/undefined の完全排除」）に沿った設計です
 — 副作用関数もデフォルト値を持つ `Int` を返し、常に何かを返す
 という不変条件を保ちます。
 
+#### 出力系 API の flush タイミング比較（C22 以降）
+
+| API | 出力先 | CLI (`taida <file>`) | REPL / in-process test | 暗黙 `\n` | 戻り値 |
+|---|---|---|---|---|---|
+| `stdout(...)` | stdout | 呼び出し毎に即 flush | eval 完了後に一括出力 | あり | `Int`（バイト数） |
+| `stderr(...)` | stderr | 呼び出し毎に即 flush | 呼び出し毎に即 flush | あり | `Int`（バイト数） |
+| `debug(v)` / `debug(v, label)` | stdout | 呼び出し毎に即 flush | eval 完了後に一括出力 | あり | `v` をそのまま返す |
+| `stdin(prompt?)` | stdin（入力） | prompt は即 flush | prompt は即 flush | — | `Str`（EOF で `""`） |
+| `stdinLine(prompt?)` | stdin（入力） | prompt は即 flush | prompt は即 flush | — | `Async[Lax[Str]]` |
+
+CLI モード（`taida <file>` / `taida run <file>`）とは別に、REPL および Rust 側の in-process テスト API（`Interpreter::new()`）では後方互換のため `stdout` / `debug` を内部バッファに積み、評価完了後にまとめて出力する**バッファモード**を維持しています。Taida の surface API は両モードで完全に同じで、既存コードは無改修で動きます。
+
+`debug` の stream mode 出力先は **stdout** です（stderr ではありません）。JS バックエンド（`console.log`）・Native バックエンド（`printf`）と一致させることで 3 バックエンドパリティを保証しています。
+
+パイプ合成時の挙動: `taida script.td | head -N` のように下流 reader が先に stdout を閉じると、後続の `stdout()` 呼び出しは `EPIPE` を黙って吸収して 0 バイトを返すだけで、プロセスは exit 0 で終了します（`ripgrep` / `bat` と同じ一般的な CLI 規約）。
+
 ### JSON シリアライズ
 
 | 関数 | 説明 | 例 |

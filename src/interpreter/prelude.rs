@@ -131,7 +131,26 @@ impl Interpreter {
                 }
                 let joined = parts.join("");
                 let bytes = joined.len() as i64;
-                self.output.push(joined);
+                // C22-2 / C22B-002: 2-mode split.
+                // - stream mode: write to real stdout with immediate flush so that
+                //   progress / spinner / TUI (via terminal.Write) / printf-debug
+                //   all surface to the user in real time. `writeln!` + `flush().ok()`
+                //   (not `println!`) is deliberate — C22-4 (SIGPIPE) relies on the
+                //   write error being silently absorbed, and `println!` panics on
+                //   BrokenPipe. The implicit `\n` is preserved (existing behavior).
+                // - buffered mode: keep the legacy `self.output.push` so REPL /
+                //   in-process test harness / JS codegen embedding continue to
+                //   capture output via the Vec.
+                if self.stream_stdout {
+                    use std::io::Write;
+                    let stdout = std::io::stdout();
+                    let mut lock = stdout.lock();
+                    let _ = writeln!(lock, "{}", joined);
+                    let _ = lock.flush();
+                    self.stdout_emissions += 1;
+                } else {
+                    self.output.push(joined);
+                }
                 Ok(Some(Signal::Value(Value::Int(bytes))))
             }
 
@@ -399,16 +418,39 @@ impl Interpreter {
                 } else {
                     None
                 };
-                if let Some(label) = label {
+                let line = if let Some(label) = label {
                     let type_name = Self::type_name_of(&val);
-                    self.output.push(format!(
-                        "[{}] {}: {}",
-                        label,
-                        type_name,
-                        val.to_debug_string()
-                    ));
+                    format!("[{}] {}: {}", label, type_name, val.to_debug_string())
                 } else {
-                    self.output.push(val.to_display_string());
+                    val.to_display_string()
+                };
+                // C22-2 / C22B-002: 2-mode split, symmetric with `stdout`.
+                //
+                // Stream mode: `debug` writes to **stdout** (not stderr). This
+                // matches the observable behavior of the JS backend
+                // (`__taida_debug` uses `console.log`, which writes to stdout
+                // on Node.js) and the WASM / Native backends (all of which
+                // emit `debug` output to stdout). Routing to stderr would
+                // break 3-backend parity on `test_native_compile_parity` and
+                // similar tests that diff captured stdout across backends.
+                //
+                // The flush-timing difference with `stdout` is still the
+                // primary win: previously `debug` accumulated in the Vec and
+                // only surfaced after `eval_program` returned, making it
+                // unusable for progress / printf-debug in long-running CLI
+                // scripts. Stream mode flushes each `debug` call immediately.
+                //
+                // Buffered mode keeps the legacy Vec push for REPL / test
+                // captures that depend on Vec contents.
+                if self.stream_stdout {
+                    use std::io::Write;
+                    let stdout = std::io::stdout();
+                    let mut lock = stdout.lock();
+                    let _ = writeln!(lock, "{}", line);
+                    let _ = lock.flush();
+                    self.stdout_emissions += 1;
+                } else {
+                    self.output.push(line);
                 }
                 Ok(Some(Signal::Value(val)))
             }

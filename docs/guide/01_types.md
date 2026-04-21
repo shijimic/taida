@@ -28,6 +28,18 @@ rate <= 0.5
 
 **デフォルト値**: `0.0`
 
+**4-backend parity** (Interpreter / JS / Native / WASM):
+`3.0` と `3` は Taida parser で `FloatLit` / `IntLit` として区別されます。
+`Int[x]()` / `Float[x]()` の判定・`stdout(3.0)` の表示・関数戻り値を跨いだ
+Float → Str 変換のいずれも 4 backend で同一出力になります
+(C21-1〜C21-5)。
+
+WASM では `wasm-wasi` / `wasm-edge` / `wasm-full` 3 profile に `-msimd128`
+が付与されているため、Float の hot loop を LLVM の auto-vectorizer が
+`v128.*` / `f64x2.*` に降ろし得ます (C21-3)。`wasm-min` は後方互換のため
+simd128 を要求しない最小バイナリのままです。詳細は
+[reference/cli.md](../reference/cli.md) を参照してください。
+
 ### Str -- 文字列
 
 ```taida

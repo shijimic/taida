@@ -207,6 +207,35 @@ static int _wf_is_whitespace(char c) {
 #endif
 /* B11-2: Forward declaration for polymorphic display */
 int64_t taida_polymorphic_to_string(int64_t obj);
+/* C21-4: Forward declaration for FLOAT tag fast path in stdout_with_tag */
+int64_t taida_float_to_str(int64_t val);
+/* C21B-seed-07: forward declarations for the BuchiPack-aware stdout
+   dispatcher used by `stdout_with_tag` / `stderr_with_tag` below. All
+   three definitions sit further down in the file because they depend
+   on the Lax / Pack helpers declared later. `_looks_like_list` and
+   `_is_wasm_hashmap` are used by `_is_pack_for_stdout` to distinguish
+   a pack pointer from a List / HashMap / Set at runtime. */
+static int _looks_like_pack(int64_t val);
+static int _looks_like_list(int64_t ptr);
+static int _is_wasm_hashmap(int64_t ptr);
+static int _is_wasm_set(int64_t ptr);
+static int _wasm_is_async_obj(int64_t ptr);
+static int64_t _wasm_stdout_display_string(int64_t obj);
+
+/* Tight BuchiPack check — `_looks_like_pack` alone false-positives on
+   Lists and HashMaps because its structural signature (fc in 1..100 +
+   first hash non-zero) overlaps with the list header layout (cap=small,
+   len<=cap produces a `fc` in that range). `stdout_with_tag` must not
+   reroute a List through the pack-display path, or `@[1, 2, 3]` gets
+   rendered as `@()`.  */
+static int _is_pack_for_stdout(int64_t val) {
+    if (val < 4096) return 0;
+    if (_looks_like_list(val)) return 0;
+    if (_is_wasm_hashmap(val)) return 0;
+    if (_is_wasm_set(val)) return 0;
+    if (_wasm_is_async_obj(val)) return 0;
+    return _looks_like_pack(val);
+}
 
 /* ── taida_io_stdout: stdout 出力（boxed 文字列ポインタ） ──
    C12-5 (FB-18): returns the UTF-8 byte length of the payload as Int.
@@ -249,6 +278,29 @@ int64_t taida_io_stdout_with_tag(int64_t val, int64_t tag) {
         write_stdout("\n", 1);
         return (int64_t)len;
     }
+    /* C21B-seed-07: BuchiPack values (including Lax / Result / Gorillax
+       and user-defined packs) must render in the interpreter-parity
+       full form `@(f <= …, …)`. Detect at runtime so a value whose
+       compile-time tag was mis-stated (e.g. `Float[x]()` previously
+       tagged as FLOAT by `mold_returns.rs`) still routes correctly.
+       The runtime detector catches:
+         * `mold_returns.rs` fallout: `Int[]/Float[]/Bool[]/Str[]`
+           compile-time tag is now Pack (4) — the branch below handles it.
+         * UNKNOWN (-1) / Int / Float values that happen to be a valid
+           pack pointer at runtime (e.g. user-fn return type not
+           statically inferred).
+       The 4096 guard keeps low integers from mis-identifying as packs. */
+    if (_is_pack_for_stdout(val)) {
+        int64_t str_v = _wasm_stdout_display_string(val);
+        const char *sp = (const char *)(intptr_t)str_v;
+        if (sp) {
+            int32_t len = wasm_strlen(sp);
+            write_stdout(sp, len);
+            write_stdout("\n", 1);
+            return (int64_t)len;
+        }
+        return 0;
+    }
     /* C12B-034 fix: for WASM_TAG_STR the incoming `val` is already a
        char*, so the fast path below is safe. For any other tag
        (Int / Float / runtime-unknown UNKNOWN=-1 / pack / list / ...),
@@ -268,8 +320,24 @@ int64_t taida_io_stdout_with_tag(int64_t val, int64_t tag) {
         }
         return 0;
     }
-    /* Non-Bool, non-Str tag → let the polymorphic converter produce a
-       safe char* representation. Handles Int / Float / Pack / List /
+    /* C21-4 / seed-03: Float tag path — decode the i64 bit-pattern via
+       `taida_float_to_str` so `stdout(triple(4.0))` prints `12.0` instead
+       of the raw bit pattern. Without this, the value flows through
+       `taida_polymorphic_to_string` → `_wasm_value_to_display_string`
+       which has no tag context and renders the f64 bits as an int64_t. */
+    if ((int)tag == WASM_TAG_FLOAT) {
+        int64_t str_v = taida_float_to_str(val);
+        const char *sf = (const char *)(intptr_t)str_v;
+        if (sf) {
+            int32_t len = wasm_strlen(sf);
+            write_stdout(sf, len);
+            write_stdout("\n", 1);
+            return (int64_t)len;
+        }
+        return 0;
+    }
+    /* Non-Bool, non-Str, non-Float tag → let the polymorphic converter
+       produce a safe char* representation. Handles Int / Pack / List /
        UNKNOWN(-1) runtime values emitted through `param_tag_vars`. */
     int64_t str_v = taida_polymorphic_to_string(val);
     const char *s2 = (const char *)(intptr_t)str_v;
@@ -324,14 +392,40 @@ int64_t taida_io_stderr_with_tag(int64_t val, int64_t tag) {
         __wasi_fd_write(2, &iov, 1, &nwritten);
         return (int64_t)len;
     }
+    /* C21B-seed-07: symmetric with stdout — render buchi packs in
+       interpreter-parity full form. Runtime detection catches the
+       `Float[x]()`/`Int[x]()`/`Bool[x]()`/`Str[x]()` Lax-return shape
+       that used to crash through a FLOAT / STR fast path below. */
+    if (_is_pack_for_stdout(val)) {
+        int64_t str_v = _wasm_stdout_display_string(val);
+        const char *sp = (const char *)(intptr_t)str_v;
+        if (sp) {
+            int32_t plen = wasm_strlen(sp);
+            wasi_ciovec iov;
+            iov.buf = (int32_t)(intptr_t)sp;
+            iov.len = plen;
+            int32_t nwritten;
+            __wasi_fd_write(2, &iov, 1, &nwritten);
+            iov.buf = (int32_t)(intptr_t)"\n";
+            iov.len = 1;
+            __wasi_fd_write(2, &iov, 1, &nwritten);
+            return (int64_t)plen;
+        }
+        return 0;
+    }
     /* C12B-034 fix: same rationale as taida_io_stdout_with_tag — treat
        non-Bool / non-Str tags as polymorphic values rather than blindly
-       casting to char*. */
+       casting to char*.
+       C21-4: FLOAT tag routes through taida_float_to_str (bit-pattern
+       decode) so the i64 bits are rendered as a proper "12.0" decimal. */
     const char *s;
     int32_t len;
     int64_t scratch = 0;
     if ((int)tag == WASM_TAG_STR) {
         s = (const char *)(intptr_t)val;
+    } else if ((int)tag == WASM_TAG_FLOAT) {
+        scratch = taida_float_to_str(val);
+        s = (const char *)(intptr_t)scratch;
     } else {
         scratch = taida_polymorphic_to_string(val);
         s = (const char *)(intptr_t)scratch;
@@ -1259,7 +1353,8 @@ static int64_t _wasm_pack_to_string(int64_t pack_ptr) {
     int count = 0;
     for (int64_t i = 0; i < fc; i++) {
         int64_t field_hash = pack[1 + i * 3];
-        int64_t field_val = pack[1 + i * 3 + 2];
+        int64_t field_tag  = pack[1 + i * 3 + 1];
+        int64_t field_val  = pack[1 + i * 3 + 2];
         const char *fname = _wasm_lookup_field_name(field_hash);
         if (!fname) continue;
         /* Skip internal __ fields for display (same as native) */
@@ -1267,11 +1362,19 @@ static int64_t _wasm_pack_to_string(int64_t pack_ptr) {
         if (count > 0) _sb_append(&sb, ", ");
         _sb_append(&sb, fname);
         _sb_append(&sb, " <= ");
-        /* Check if field is Bool via type registry */
+        /* C21B-seed-07: the per-field tag is authoritative for Float /
+           Bool rendering (matches the native `taida_pack_to_display_string`
+           rewrite). The legacy registry lookup (ftype == 4 => Bool) is kept
+           as a fallback for pre-seed-07 packs that only populated the
+           global field-name/type table. */
         int64_t ftype = _wasm_lookup_field_type(field_hash);
-        if (ftype == 4) {
-            /* Bool type tag = 4 in native convention */
+        int render_bool  = (field_tag == WASM_TAG_BOOL) || (field_tag == 0 && ftype == 4);
+        int render_float = (field_tag == WASM_TAG_FLOAT);
+        if (render_bool) {
             _sb_append(&sb, field_val ? "true" : "false");
+        } else if (render_float) {
+            int64_t fs = taida_float_to_str(field_val);
+            _sb_append(&sb, (const char *)(intptr_t)fs);
         } else {
             int64_t val_str = _wasm_value_to_debug_string(field_val);
             _sb_append(&sb, (const char *)(intptr_t)val_str);
@@ -1280,6 +1383,63 @@ static int64_t _wasm_pack_to_string(int64_t pack_ptr) {
     }
     _sb_append(&sb, ")");
     return _sb_finish(&sb);
+}
+
+/* C21B-seed-07: Pack-to-display-string in "full" form — matches the
+   interpreter's `to_display_string()` for BuchiPack which shows ALL
+   fields, including the `__`-prefixed internals used by Lax / Result /
+   Gorillax / primitive-mold return values. Symmetric with native's
+   `taida_pack_to_display_string_full`. The per-field tag dispatches
+   Float / Bool rendering the same way the non-full variant does. */
+static int64_t _wasm_pack_to_string_full(int64_t pack_ptr) {
+    int64_t *pack = (int64_t *)(intptr_t)pack_ptr;
+    int64_t fc = pack[0];
+    _wasm_strbuf sb;
+    _sb_init(&sb);
+    _sb_append(&sb, "@(");
+    int count = 0;
+    for (int64_t i = 0; i < fc; i++) {
+        int64_t field_hash = pack[1 + i * 3];
+        int64_t field_tag  = pack[1 + i * 3 + 1];
+        int64_t field_val  = pack[1 + i * 3 + 2];
+        const char *fname = _wasm_lookup_field_name(field_hash);
+        if (!fname) continue;
+        /* Unlike `_wasm_pack_to_string`, we do NOT skip __ fields here. */
+        if (count > 0) _sb_append(&sb, ", ");
+        _sb_append(&sb, fname);
+        _sb_append(&sb, " <= ");
+        int64_t ftype = _wasm_lookup_field_type(field_hash);
+        int render_bool  = (field_tag == WASM_TAG_BOOL) || (field_tag == 0 && ftype == 4);
+        int render_float = (field_tag == WASM_TAG_FLOAT);
+        if (render_bool) {
+            _sb_append(&sb, field_val ? "true" : "false");
+        } else if (render_float) {
+            int64_t fs = taida_float_to_str(field_val);
+            _sb_append(&sb, (const char *)(intptr_t)fs);
+        } else {
+            int64_t val_str = _wasm_value_to_debug_string(field_val);
+            _sb_append(&sb, (const char *)(intptr_t)val_str);
+        }
+        count++;
+    }
+    _sb_append(&sb, ")");
+    return _sb_finish(&sb);
+}
+
+/* C21B-seed-07: stdout-display entry point for BuchiPack — matches the
+   native `taida_stdout_display_string` contract. When the value is a pack
+   (fc=4 Lax / fc=3 Result / user packs / Gorillax), the interpreter-parity
+   stdout rendering shows ALL fields including `__value` / `__default` /
+   `__type`. `.toString()` still uses the short forms (`Lax(v)` /
+   `Result(v)` / `Gorillax(v)`) — that split mirrors the interpreter's
+   `to_display_string()` vs. `to_string()` separation. */
+static int64_t _wasm_stdout_display_string(int64_t obj) {
+    if (obj == 0) return (int64_t)(intptr_t)"0";
+    /* Use the same runtime guard as stdout_with_tag so Lists / HashMaps
+       / Sets / Async do not accidentally take the pack path — their
+       structural signatures overlap with `_looks_like_pack`. */
+    if (_is_pack_for_stdout(obj)) return _wasm_pack_to_string_full(obj);
+    return _wasm_value_to_display_string(obj);
 }
 
 /* W-5f: Detect Lax, Result, Gorillax, RelaxedGorillax by pack structure.
