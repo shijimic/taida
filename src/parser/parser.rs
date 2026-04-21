@@ -404,10 +404,8 @@ impl Parser {
                 // that a multi-line `| ... |> ...` guard is rejected with
                 // `[E0303]` instead of silently swallowing later
                 // statements. Restored after the expression parses.
-                let saved_ctx = std::mem::replace(
-                    &mut self.cond_branch_context,
-                    CondBranchContext::LetRhs,
-                );
+                let saved_ctx =
+                    std::mem::replace(&mut self.cond_branch_context, CondBranchContext::LetRhs);
                 let value = self.parse_expression();
                 self.cond_branch_context = saved_ctx;
                 let value = value?;
@@ -435,10 +433,8 @@ impl Parser {
                 // Allow multi-line rhs (parity with the untyped `<=` form).
                 self.skip_newlines();
                 // C20-1 (ROOT-5): same LetRhs guard as the untyped form.
-                let saved_ctx = std::mem::replace(
-                    &mut self.cond_branch_context,
-                    CondBranchContext::LetRhs,
-                );
+                let saved_ctx =
+                    std::mem::replace(&mut self.cond_branch_context, CondBranchContext::LetRhs);
                 let value = self.parse_expression();
                 self.cond_branch_context = saved_ctx;
                 let value = value?;

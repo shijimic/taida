@@ -2872,7 +2872,8 @@ fn test_e1604_bool_condition_no_error() {
 fn test_e1604_non_bool_in_subsequent_arm() {
     // Second arm has a non-Bool condition
     // C20-1 (ROOT-5): wrap in parens for the rhs multi-line guard.
-    let source = "x <= 5\ny <= (\n  | x > 3 |> \"big\"\n  | 42 |> \"medium\"\n  | _ |> \"small\"\n)";
+    let source =
+        "x <= 5\ny <= (\n  | x > 3 |> \"big\"\n  | 42 |> \"medium\"\n  | _ |> \"small\"\n)";
     let (_, errors) = check(source);
     assert!(
         errors.iter().any(|e| e.message.contains("[E1604]")),

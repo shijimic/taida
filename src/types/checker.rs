@@ -4511,10 +4511,7 @@ defaulted fields must be provided via `()`",
                             Type::Named(name.clone())
                         } else if self.generic_func_defs.contains_key(name)
                             || self.func_types.contains_key(name)
-                            || matches!(
-                                self.lookup_var(name),
-                                Some(Type::Function(_, _))
-                            )
+                            || matches!(self.lookup_var(name), Some(Type::Function(_, _)))
                         {
                             // C20B-014 (ROOT-17) + C20B-016 (ROOT-19):
                             // user-defined function called via mold syntax
@@ -4550,8 +4547,7 @@ defaulted fields must be provided via `()`",
                             // `mold_span` itself; positional args are the
                             // `type_args` list (which for `Fn[a, b]()` are
                             // the runtime values, cf. lower_molds.rs).
-                            let synth_callee =
-                                Expr::Ident(name.clone(), mold_span.clone());
+                            let synth_callee = Expr::Ident(name.clone(), mold_span.clone());
                             let synth_call = Expr::FuncCall(
                                 Box::new(synth_callee),
                                 type_args.clone(),

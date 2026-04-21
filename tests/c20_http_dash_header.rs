@@ -139,10 +139,7 @@ fn run_js(source: &str, label: &str) -> String {
         label,
         String::from_utf8_lossy(&build.stderr)
     );
-    let run = Command::new("node")
-        .arg(&mjs)
-        .output()
-        .expect("node run");
+    let run = Command::new("node").arg(&mjs).output().expect("node run");
     let _ = fs::remove_file(&mjs);
     assert!(
         run.status.success(),

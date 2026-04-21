@@ -29,7 +29,7 @@
 //! These are parser unit-scope guards — no backend parity is required
 //! (parse / check phase only).
 
-use taida::parser::{parse, Expr, Statement};
+use taida::parser::{Expr, Statement, parse};
 
 // ── ROOT-4: one-line `|==` must not eat the rest of the module ──────
 

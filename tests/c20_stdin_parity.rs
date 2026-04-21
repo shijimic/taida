@@ -104,7 +104,9 @@ fn stdin_payload(stem: &str) -> Vec<u8> {
 // ---- backend drivers ---------------------------------------------
 
 fn run_with_stdin(cmd: &mut Command, input: &[u8]) -> std::process::Output {
-    cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    cmd.stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
     let mut child = cmd.spawn().expect("failed to spawn child");
     {
         let mut stdin = child.stdin.take().expect("stdin");

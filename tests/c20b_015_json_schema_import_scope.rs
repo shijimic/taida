@@ -209,8 +209,8 @@ fn c20b_015_json_schema_scope_native_matches_interpreter() {
 fn c20b_015_interpreter_also_works_when_caller_imports_typedef() {
     let tmp = unique_temp("c20b015_both", "dir");
     fs::create_dir_all(&tmp).expect("mkdir");
-    let schema_src = fs::read_to_string(fixture_dir().join("schema_mod.td"))
-        .expect("read schema_mod.td");
+    let schema_src =
+        fs::read_to_string(fixture_dir().join("schema_mod.td")).expect("read schema_mod.td");
     fs::write(tmp.join("schema_mod.td"), schema_src).expect("write schema_mod.td");
     let caller_both = "\
 >>> ./schema_mod.td => @(loadUser, UserSchema)
@@ -251,8 +251,8 @@ stdout(\"\\n\")
 fn c20b_015_interpreter_overlay_does_not_leak_to_caller_scope() {
     let tmp = unique_temp("c20b015_leak", "dir");
     fs::create_dir_all(&tmp).expect("mkdir");
-    let schema_src = fs::read_to_string(fixture_dir().join("schema_mod.td"))
-        .expect("read schema_mod.td");
+    let schema_src =
+        fs::read_to_string(fixture_dir().join("schema_mod.td")).expect("read schema_mod.td");
     fs::write(tmp.join("schema_mod.td"), schema_src).expect("write schema_mod.td");
     let leaky_caller = "\
 >>> ./schema_mod.td => @(loadUser)
@@ -593,7 +593,11 @@ stdout(wrap(\"{\\\"name\\\":\\\"x\\\"}\"))
     let mut interp = Interpreter::new();
     interp.set_current_file(&caller_path);
     let r = interp.eval_program(&prog);
-    assert!(r.is_err(), "expected body-level RuntimeError, got Ok({:?})", r);
+    assert!(
+        r.is_err(),
+        "expected body-level RuntimeError, got Ok({:?})",
+        r
+    );
 
     // Run a probe program to check that the caller's scope does not see
     // the private `Schema`. If cleanup happened eagerly at the point of

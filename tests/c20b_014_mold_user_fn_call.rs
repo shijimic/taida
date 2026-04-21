@@ -93,18 +93,16 @@ fn assert_mold_call_parity_in_output(stdout: &str, backend: &str) {
     while i + 1 < lines.len() {
         let tag = lines[i];
         let val = lines[i + 1];
-        if let Some(rest) = tag.strip_prefix("mold") {
-            if let Some(n_str) = rest.strip_suffix('=') {
-                if let Ok(n) = n_str.parse::<usize>() {
-                    mold_values.push((n, val.to_string()));
-                }
-            }
-        } else if let Some(rest) = tag.strip_prefix("call") {
-            if let Some(n_str) = rest.strip_suffix('=') {
-                if let Ok(n) = n_str.parse::<usize>() {
-                    call_values.push((n, val.to_string()));
-                }
-            }
+        if let Some(rest) = tag.strip_prefix("mold")
+            && let Some(n_str) = rest.strip_suffix('=')
+            && let Ok(n) = n_str.parse::<usize>()
+        {
+            mold_values.push((n, val.to_string()));
+        } else if let Some(rest) = tag.strip_prefix("call")
+            && let Some(n_str) = rest.strip_suffix('=')
+            && let Ok(n) = n_str.parse::<usize>()
+        {
+            call_values.push((n, val.to_string()));
         }
         i += 1;
     }
@@ -141,7 +139,9 @@ fn assert_mold_call_parity_in_output(stdout: &str, backend: &str) {
         assert!(
             !mv.contains("__value") && !mv.contains("__type"),
             "[{}] C20B-014 regression: mold{} leaked a mold wrapper: '{}'",
-            backend, mi, mv
+            backend,
+            mi,
+            mv
         );
     }
 }
@@ -265,7 +265,8 @@ fn c20b_014_checker_rejects_named_fields_on_user_fn_mold_call() {
     // User function `greet` takes 1 arg. `greet["x"](extra <= "y")` is
     // invalid — user fns have no named-field ABI. This must surface as
     // `[E1511]` at `taida check` time.
-    let src = "greet name = \"hi \" + name => :Str\nmsg <= greet[\"x\"](extra <= \"y\")\nstdout(msg)\n";
+    let src =
+        "greet name = \"hi \" + name => :Str\nmsg <= greet[\"x\"](extra <= \"y\")\nstdout(msg)\n";
     let src_path = unique_temp("c20b014_fields_src", "td");
     fs::write(&src_path, src).expect("write src");
     let out = Command::new(taida_bin())
@@ -351,7 +352,8 @@ fn run_check(src: &str, prefix: &str) -> (std::process::Output, String) {
 fn c20b_016_type_mismatch_mold_syntax_emits_e1506() {
     // The pinned repro: `add[1, "x"]()` must surface `[E1506]` at check
     // time, mirroring the `add(1, "x")` diagnostic.
-    let src = "add a: Int b: Int = a + b => :Int\nresult <= add[1, \"x\"]()\nstdout(result.toString())\n";
+    let src =
+        "add a: Int b: Int = a + b => :Int\nresult <= add[1, \"x\"]()\nstdout(result.toString())\n";
     let (out, combined) = run_check(src, "c20b016_type");
     assert!(
         !out.status.success(),
@@ -369,7 +371,8 @@ fn c20b_016_type_mismatch_mold_syntax_emits_e1506() {
 fn c20b_016_type_mismatch_parenthesis_syntax_emits_e1506() {
     // Sanity anchor: `add(1, "x")` emits the same diagnostic. Confirms
     // the two syntaxes land on the same code path.
-    let src = "add a: Int b: Int = a + b => :Int\nresult <= add(1, \"x\")\nstdout(result.toString())\n";
+    let src =
+        "add a: Int b: Int = a + b => :Int\nresult <= add(1, \"x\")\nstdout(result.toString())\n";
     let (out, combined) = run_check(src, "c20b016_type_paren");
     assert!(
         !out.status.success(),
@@ -386,7 +389,8 @@ fn c20b_016_type_mismatch_parenthesis_syntax_emits_e1506() {
 #[test]
 fn c20b_016_arity_overflow_mold_syntax_emits_e1301() {
     // `add[1, 2, 3]()` passes too many args — must hit [E1301].
-    let src = "add a: Int b: Int = a + b => :Int\nresult <= add[1, 2, 3]()\nstdout(result.toString())\n";
+    let src =
+        "add a: Int b: Int = a + b => :Int\nresult <= add[1, 2, 3]()\nstdout(result.toString())\n";
     let (out, combined) = run_check(src, "c20b016_arity");
     assert!(
         !out.status.success(),

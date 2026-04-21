@@ -1774,7 +1774,8 @@ fn test_docs_sample_condition_branch_parses() {
     // multi-arm guard on the `<=` rhs. That shape is now rejected
     // with [E0303]; the updated sample uses the parenthesised escape
     // hatch which preserves the same runtime semantics.
-    let source = "grade <= (\n  | score >= 90 |> \"A\"\n  | score >= 80 |> \"B\"\n  | _ |> \"F\"\n)";
+    let source =
+        "grade <= (\n  | score >= 90 |> \"A\"\n  | score >= 80 |> \"B\"\n  | _ |> \"F\"\n)";
     let (program, errors) = parse(source);
     assert!(
         errors.is_empty(),

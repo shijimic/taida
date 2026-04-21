@@ -442,10 +442,8 @@ impl Parser {
                 //       | _    |> b
                 //     )
                 self.skip_newlines();
-                let saved_ctx = std::mem::replace(
-                    &mut self.cond_branch_context,
-                    CondBranchContext::TopLevel,
-                );
+                let saved_ctx =
+                    std::mem::replace(&mut self.cond_branch_context, CondBranchContext::TopLevel);
                 let expr_result = self.parse_expression();
                 self.cond_branch_context = saved_ctx;
                 let expr = expr_result?;

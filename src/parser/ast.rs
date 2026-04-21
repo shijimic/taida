@@ -17,18 +17,13 @@ pub struct Program {
 ///
 /// A parenthesised `(| ... |> ...)` resets to `TopLevel`, so `name <= (...)`
 /// stays a legal escape hatch.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum CondBranchContext {
     /// Top-level / function body / inside parentheses — multi-line arms permitted.
+    #[default]
     TopLevel,
     /// `<=` (or typed `: T <=`) right-hand side — multi-line arms rejected with `[E0303]`.
     LetRhs,
-}
-
-impl Default for CondBranchContext {
-    fn default() -> Self {
-        CondBranchContext::TopLevel
-    }
 }
 
 /// A statement in Taida.

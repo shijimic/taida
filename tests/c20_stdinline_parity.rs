@@ -367,9 +367,7 @@ fn c20_stdin_line_checker_rejects_too_many_args() {
     let stdout = String::from_utf8_lossy(&out.stdout);
     let combined = format!("{}{}", stderr, stdout);
     assert!(
-        combined.contains("E1507")
-            || combined.contains("stdinLine")
-            || !out.status.success(),
+        combined.contains("E1507") || combined.contains("stdinLine") || !out.status.success(),
         "`taida check` must reject 2-arg stdinLine as an arity violation. combined={}",
         combined
     );

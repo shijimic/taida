@@ -1117,7 +1117,7 @@ impl Interpreter {
                 // a builtin mold name with a local user fn does not change
                 // behaviour. It runs *before* generic mold instantiation,
                 // so user fns are no longer wrapped.
-                if self.mold_defs.get(name).is_none()
+                if !self.mold_defs.contains_key(name)
                     && let Some(Value::Function(func)) = self.env.get(name).cloned()
                 {
                     if !fields.is_empty() {
@@ -1701,6 +1701,7 @@ impl Interpreter {
     /// This preserves F-56 behaviour (caller's typedef shadows imported one)
     /// while ensuring JSON schema resolution inside the imported function
     /// body has access to every symbol the defining module saw.
+    #[allow(clippy::type_complexity)]
     pub(crate) fn push_func_module_scope(
         &mut self,
         func: &FuncValue,
