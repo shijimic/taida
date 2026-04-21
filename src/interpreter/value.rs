@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::sync::{Arc, Mutex};
 
-use crate::parser::{Param, Statement};
+use crate::parser::{FieldDef, Param, Statement};
 
 /// A runtime value in Taida.
 #[derive(Debug, Clone)]
@@ -75,6 +75,22 @@ pub struct FuncValue {
     /// RCB-242: Declared return type from function definition (if any).
     /// Used for introspection. Runtime type enforcement is handled by the checker.
     pub return_type: Option<crate::parser::TypeExpr>,
+    /// C20B-015 / ROOT-18: TypeDef registry from the function's defining module.
+    ///
+    /// When a function is imported into another module and references a schema
+    /// via `JSON[raw, Schema]()`, the schema must be resolved against the
+    /// defining module's TypeDef scope, not the caller module's. This field
+    /// carries the defining module's full TypeDef table (including non-
+    /// exported typedefs) so that `resolve_json_schema` can find the schema
+    /// even when the caller never imported it.
+    ///
+    /// `None` for locally-defined functions — resolution falls back to
+    /// `Interpreter::type_defs` as before. Also `None` for lambdas / partials /
+    /// internal helpers — those can only reference the currently-visible scope.
+    pub module_type_defs: Option<Arc<HashMap<String, Vec<FieldDef>>>>,
+    /// C20B-015 / ROOT-18: Enum registry from the function's defining module.
+    /// Same semantics as `module_type_defs` but for enum declarations.
+    pub module_enum_defs: Option<Arc<HashMap<String, Vec<String>>>>,
 }
 
 /// An error value.

@@ -630,8 +630,10 @@ fn test_molten_rejects_type_args() {
 
 #[test]
 fn test_cond_branch_type() {
-    // Condition branch should infer type from first arm
-    let source = "x <= 5\ny <=\n  | x > 3 |> \"big\"\n  | _ |> \"small\"";
+    // C20-1 (ROOT-5): multi-line rhs guard now requires the
+    // parenthesised escape hatch. The semantic the test pins
+    // (type inferred from the first arm) is unchanged.
+    let source = "x <= 5\ny <= (\n  | x > 3 |> \"big\"\n  | _ |> \"small\"\n)";
     let (checker, _errors) = check(source);
     assert_eq!(checker.lookup_var("y"), Some(Type::Str));
 }
@@ -2566,7 +2568,8 @@ fn test_fl2_named_type_valid_field_no_error() {
 #[test]
 fn test_fl3_cond_branch_type_mismatch() {
     // First arm returns Int, second returns Str
-    let source = "x <= 5\ny <=\n  | x > 3 |> 1\n  | _ |> \"oops\"";
+    // C20-1 (ROOT-5): wrap in parens for the rhs multi-line guard.
+    let source = "x <= 5\ny <= (\n  | x > 3 |> 1\n  | _ |> \"oops\"\n)";
     let (_, errors) = check(source);
     assert!(
         errors.iter().any(|e| e.message.contains("[E1603]")),
@@ -2578,7 +2581,8 @@ fn test_fl3_cond_branch_type_mismatch() {
 #[test]
 fn test_fl3_cond_branch_same_type_no_error() {
     // Both arms return Str — no error
-    let source = "x <= 5\ny <=\n  | x > 3 |> \"big\"\n  | _ |> \"small\"";
+    // C20-1 (ROOT-5): wrap in parens for the rhs multi-line guard.
+    let source = "x <= 5\ny <= (\n  | x > 3 |> \"big\"\n  | _ |> \"small\"\n)";
     let (_, errors) = check(source);
     let e1603: Vec<_> = errors
         .iter()
@@ -2594,7 +2598,8 @@ fn test_fl3_cond_branch_same_type_no_error() {
 #[test]
 fn test_fl3_cond_branch_int_float_mix_allowed() {
     // Int/Float mixing should be allowed (both are Num)
-    let source = "x <= 5\ny <=\n  | x > 3 |> 1\n  | _ |> 2.5";
+    // C20-1 (ROOT-5): wrap in parens for the rhs multi-line guard.
+    let source = "x <= 5\ny <= (\n  | x > 3 |> 1\n  | _ |> 2.5\n)";
     let (_, errors) = check(source);
     let e1603: Vec<_> = errors
         .iter()
@@ -2819,7 +2824,8 @@ fn test_fl4_valid_numeric_comparison_no_error() {
 #[test]
 fn test_e1604_non_bool_condition_int() {
     // `| 42 |>` — condition is Int, not Bool
-    let source = "y <=\n  | 42 |> \"yes\"\n  | _ |> \"no\"";
+    // C20-1 (ROOT-5): wrap in parens for the rhs multi-line guard.
+    let source = "y <= (\n  | 42 |> \"yes\"\n  | _ |> \"no\"\n)";
     let (_, errors) = check(source);
     assert!(
         errors
@@ -2833,7 +2839,8 @@ fn test_e1604_non_bool_condition_int() {
 #[test]
 fn test_e1604_non_bool_condition_str() {
     // `| "hello" |>` — condition is Str, not Bool
-    let source = "y <=\n  | \"hello\" |> 1\n  | _ |> 2";
+    // C20-1 (ROOT-5): wrap in parens for the rhs multi-line guard.
+    let source = "y <= (\n  | \"hello\" |> 1\n  | _ |> 2\n)";
     let (_, errors) = check(source);
     assert!(
         errors
@@ -2847,7 +2854,8 @@ fn test_e1604_non_bool_condition_str() {
 #[test]
 fn test_e1604_bool_condition_no_error() {
     // Valid Bool condition — no E1604
-    let source = "x <= 5\ny <=\n  | x > 3 |> \"big\"\n  | _ |> \"small\"";
+    // C20-1 (ROOT-5): wrap in parens for the rhs multi-line guard.
+    let source = "x <= 5\ny <= (\n  | x > 3 |> \"big\"\n  | _ |> \"small\"\n)";
     let (_, errors) = check(source);
     let e1604: Vec<_> = errors
         .iter()
@@ -2863,7 +2871,9 @@ fn test_e1604_bool_condition_no_error() {
 #[test]
 fn test_e1604_non_bool_in_subsequent_arm() {
     // Second arm has a non-Bool condition
-    let source = "x <= 5\ny <=\n  | x > 3 |> \"big\"\n  | 42 |> \"medium\"\n  | _ |> \"small\"";
+    // C20-1 (ROOT-5): wrap in parens for the rhs multi-line guard.
+    let source =
+        "x <= 5\ny <= (\n  | x > 3 |> \"big\"\n  | 42 |> \"medium\"\n  | _ |> \"small\"\n)";
     let (_, errors) = check(source);
     assert!(
         errors.iter().any(|e| e.message.contains("[E1604]")),

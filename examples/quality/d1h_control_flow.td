@@ -1,13 +1,15 @@
 // D-1h: docs/guide/07_control_flow.md code examples
 
 // Basic condition
+// C20-5: multi-line rhs multi-arm guard is rejected with [E0303]; wrap in parens.
 score <= 85
-grade <=
+grade <= (
   | score >= 90 |> "A"
   | score >= 80 |> "B"
   | score >= 70 |> "C"
   | score >= 60 |> "D"
   | _ |> "F"
+)
 stdout(grade)
 
 // 1-line condition
@@ -17,25 +19,27 @@ stdout(sign)
 
 // Pattern match on value
 status <= "success"
-message <=
+message <= (
   | status == "success" |> "Operation completed"
   | status == "error" |> "Operation failed"
   | status == "pending" |> "Operation in progress"
   | _ |> "Unknown status"
+)
 stdout(message)
 
 // BuchiPack field matching
 response <= @(code <= 200, data <= "OK")
-result <=
+result <= (
   | response.code == 200 |> "Success: " + response.data
   | response.code == 404 |> "Not found"
   | response.code >= 500 |> "Server error"
   | _ |> "Unknown response"
+)
 stdout(result)
 
 // Nested conditions
 staff <= @(age <= 29, role <= "commander", active <= true)
-accessLevel <=
+accessLevel <= (
   | staff.role == "commander" |>
     | staff.active |> "full"
     | _ |> "readonly"
@@ -43,6 +47,7 @@ accessLevel <=
     | staff.age >= 18 |> "standard"
     | _ |> "limited"
   | _ |> "none"
+)
 stdout(accessLevel)
 
 // Tail recursion: sum

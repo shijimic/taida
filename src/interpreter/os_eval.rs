@@ -124,6 +124,19 @@ fn make_lax_failure(default_val: Value) -> Value {
     ])
 }
 
+/// C20-2: pub(crate) re-exports so that `prelude.rs::stdinLine` (and
+/// any other prelude-scope builder that needs to hand back a Lax[T])
+/// can build `Lax` values without duplicating the BuchiPack shape.
+pub(crate) fn make_lax_success_pub(val: Value) -> Value {
+    make_lax_success(val)
+}
+
+/// C20-2: pub(crate) counterpart for `make_lax_failure`. See
+/// `make_lax_success_pub` above.
+pub(crate) fn make_lax_failure_pub(default_val: Value) -> Value {
+    make_lax_failure(default_val)
+}
+
 /// Create an os Result success value: @(ok=true, code=0, message="").
 fn make_result_success(inner: Value) -> Value {
     Value::BuchiPack(vec![
@@ -915,13 +928,51 @@ impl Interpreter {
                 for field in fields {
                     match field.name.as_str() {
                         "headers" => {
-                            if let Signal::Value(Value::BuchiPack(hfields)) =
-                                self.eval_expr(&field.value)?
-                            {
-                                for (k, v) in &hfields {
-                                    if let Value::Str(vs) = v {
-                                        extra_headers.push((k.clone(), vs.clone()));
+                            // C20-4 (C19B-007): accept two shapes for headers.
+                            //   * Legacy: `@(content_type <= "...")` — a
+                            //     BuchiPack whose field identifiers double
+                            //     as wire header names. Identifier syntax
+                            //     forbids `-`, so dash-bearing headers
+                            //     (`x-api-key`, `anthropic-version`) are
+                            //     unreachable this way.
+                            //   * New: `@[@(name <= "x-api-key", value <= "...")]`
+                            //     — a List of records. Any UTF-8 string is a
+                            //     valid wire header name in this shape.
+                            match self.eval_expr(&field.value)? {
+                                Signal::Value(Value::BuchiPack(hfields)) => {
+                                    for (k, v) in &hfields {
+                                        if let Value::Str(vs) = v {
+                                            extra_headers.push((k.clone(), vs.clone()));
+                                        }
                                     }
+                                }
+                                Signal::Value(Value::List(items)) => {
+                                    for item in items {
+                                        if let Value::BuchiPack(rec) = item {
+                                            let mut name: Option<String> = None;
+                                            let mut val: Option<String> = None;
+                                            for (k, v) in &rec {
+                                                match (k.as_str(), v) {
+                                                    ("name", Value::Str(s)) => {
+                                                        name = Some(s.clone());
+                                                    }
+                                                    ("value", Value::Str(s)) => {
+                                                        val = Some(s.clone());
+                                                    }
+                                                    _ => {}
+                                                }
+                                            }
+                                            if let (Some(n), Some(v)) = (name, val) {
+                                                extra_headers.push((n, v));
+                                            }
+                                        }
+                                    }
+                                }
+                                other => {
+                                    // Unknown shape — silently ignore to
+                                    // stay consistent with the existing
+                                    // tolerant behaviour of this field.
+                                    let _ = other;
                                 }
                             }
                         }

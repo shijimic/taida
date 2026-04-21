@@ -399,6 +399,10 @@ impl Interpreter {
             // QF-17: モジュール内で定義された TypeDef 情報を取得
             let module_type_defs = self.type_defs.clone();
             let module_type_methods = self.type_methods.clone();
+            // C20B-015 / ROOT-18: Snapshot enum_defs from the defining module so
+            // exported functions can resolve their own JSON schemas even when the
+            // caller module does not import the typedef.
+            let module_enum_defs = self.enum_defs.clone();
 
             // Restore state
             self.env = prev_env;
@@ -443,6 +447,19 @@ impl Interpreter {
             // 2. Then, rebuild module_exports using the enriched values.
             let module_exports = {
                 let full_env = module_env.snapshot();
+                // C20B-015 / ROOT-18: Share the defining module's typedef / enum
+                // registries across every enriched function. Arc-wrapped so we pay
+                // only the clone-of-Arc cost per function, not the full map clone.
+                let module_td_arc = if module_type_defs.is_empty() {
+                    None
+                } else {
+                    Some(std::sync::Arc::new(module_type_defs.clone()))
+                };
+                let module_ed_arc = if module_enum_defs.is_empty() {
+                    None
+                } else {
+                    Some(std::sync::Arc::new(module_enum_defs.clone()))
+                };
                 // Pass 1: Create enriched versions of all Function values
                 let mut enriched_env: std::collections::HashMap<String, Value> =
                     std::collections::HashMap::new();
@@ -456,6 +473,15 @@ impl Interpreter {
                         }
                         let mut enriched_fv = fv.clone();
                         enriched_fv.closure = std::sync::Arc::new(new_closure);
+                        // C20B-015 / ROOT-18: attach defining-module scope so
+                        // `JSON[raw, Schema]()` inside this function can resolve
+                        // Schema even after the function crosses a module boundary.
+                        if enriched_fv.module_type_defs.is_none() {
+                            enriched_fv.module_type_defs = module_td_arc.clone();
+                        }
+                        if enriched_fv.module_enum_defs.is_none() {
+                            enriched_fv.module_enum_defs = module_ed_arc.clone();
+                        }
                         enriched_env.insert(name.clone(), Value::Function(enriched_fv));
                     } else {
                         enriched_env.insert(name.clone(), value.clone());
@@ -960,7 +986,7 @@ impl Interpreter {
         // listed symbols survive. Otherwise every top-level binding is
         // exported (same rule as regular modules).
         let all_symbols = module_env.snapshot();
-        let exports: std::collections::HashMap<String, Value> = if exported_symbols.is_empty() {
+        let mut exports: std::collections::HashMap<String, Value> = if exported_symbols.is_empty() {
             all_symbols.into_iter().collect()
         } else {
             all_symbols
@@ -968,6 +994,33 @@ impl Interpreter {
                 .filter(|(k, _)| exported_symbols.contains(k))
                 .collect()
         };
+
+        // C20B-015 / ROOT-18: Attach the facade's TypeDef / enum scope onto
+        // any exported function so that `JSON[raw, Schema]()` inside a facade
+        // helper resolves against the facade's own typedefs, not the
+        // importing module's.
+        {
+            let facade_td_arc = if module_type_defs.is_empty() {
+                None
+            } else {
+                Some(std::sync::Arc::new(module_type_defs.clone()))
+            };
+            let facade_ed_arc = if self.enum_defs.is_empty() {
+                None
+            } else {
+                Some(std::sync::Arc::new(self.enum_defs.clone()))
+            };
+            for value in exports.values_mut() {
+                if let Value::Function(fv) = value {
+                    if fv.module_type_defs.is_none() {
+                        fv.module_type_defs = facade_td_arc.clone();
+                    }
+                    if fv.module_enum_defs.is_none() {
+                        fv.module_enum_defs = facade_ed_arc.clone();
+                    }
+                }
+            }
+        }
 
         // Persist TypeDef / method metadata for exported symbols so
         // user code can pattern-match on facade-declared types if the

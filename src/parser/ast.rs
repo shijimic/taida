@@ -6,6 +6,26 @@ pub struct Program {
     pub statements: Vec<Statement>,
 }
 
+/// C20-1 (ROOT-5): Context tag used while parsing a `| cond |> body` branch.
+///
+/// The parser switches into `LetRhs` while reading the right-hand side of
+/// a `<=` binding (`name <= expr` / `name: T <= expr`). In that context a
+/// multi-line `| cond |> A | _ |> B` is ambiguous with the enclosing block
+/// (`parse_cond_branch` historically swallowed subsequent top-level statements
+/// as continuation arms). `TopLevel` is the default and preserves the classic
+/// top-level / `| |>` match expression semantics.
+///
+/// A parenthesised `(| ... |> ...)` resets to `TopLevel`, so `name <= (...)`
+/// stays a legal escape hatch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CondBranchContext {
+    /// Top-level / function body / inside parentheses — multi-line arms permitted.
+    #[default]
+    TopLevel,
+    /// `<=` (or typed `: T <=`) right-hand side — multi-line arms rejected with `[E0303]`.
+    LetRhs,
+}
+
 /// A statement in Taida.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Statement {

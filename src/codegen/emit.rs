@@ -1415,6 +1415,12 @@ fn runtime_abi(name: &str) -> Result<RuntimeAbi, String> {
             params: &[Ptr],
             returns: &[Ptr],
         },
+        // C20-2: Async[Lax[Str]] — linenoise-backed UTF-8-aware line editor.
+        // Returned pointer is a fulfilled Async wrapping a Lax pack.
+        "taida_io_stdin_line" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Ptr],
+        },
         "taida_sha256" => RuntimeAbi {
             params: &[Val],
             returns: &[Ptr],

@@ -428,7 +428,27 @@ impl Parser {
             // Parenthesized expression
             TokenKind::LParen => {
                 self.advance(); // consume `(`
-                let expr = self.parse_expression()?;
+                // C20-1 (ROOT-5): parentheses restore `TopLevel` context so
+                // that a parenthesised multi-line guard (`name <= (| ... |> ...)`)
+                // is legal — the parens make the boundary unambiguous, so
+                // the `[E0303]` restriction that applies to bare `<=` rhs
+                // does not apply inside `(...)`.
+                //
+                // Allow an optional newline+indent immediately after `(`
+                // so that the parenthesised escape hatch can be written
+                // on multiple lines:
+                //     name <= (
+                //       | cond |> a
+                //       | _    |> b
+                //     )
+                self.skip_newlines();
+                let saved_ctx =
+                    std::mem::replace(&mut self.cond_branch_context, CondBranchContext::TopLevel);
+                let expr_result = self.parse_expression();
+                self.cond_branch_context = saved_ctx;
+                let expr = expr_result?;
+                // Tolerate a trailing newline before `)` as well.
+                self.skip_newlines();
                 self.expect(&TokenKind::RParen)?;
                 Ok(expr)
             }
@@ -476,6 +496,7 @@ impl Parser {
         // Only `|` tokens at this same column belong to this CondBranch;
         // deeper-indented `|` tokens belong to a nested CondBranch.
         let branch_column = self.peek().span.column;
+        let branch_line = self.peek().span.line;
 
         while self.check(&TokenKind::Pipe) {
             let arm_span = self.current_span();
@@ -513,6 +534,27 @@ impl Parser {
             self.skip_newlines();
             if !self.check(&TokenKind::Pipe) || self.peek().span.column != branch_column {
                 self.pos = save_pos;
+            } else {
+                // C20-1 (ROOT-5 / C19B-009): a continuation `|` arm appears
+                // on a later line than the first arm. In `<=` rhs context
+                // this is the exact shape that silently swallows the
+                // enclosing block's subsequent statements. Reject with
+                // `[E0303]` — see the companion guard in
+                // `parse_cond_arm_body` for the escape hatches (parens,
+                // helper function, `If[]()`). Single-line multi-arm
+                // guards (`name <= | a |> 1 | _ |> 2`) stay legal because
+                // `self.peek().span.line == branch_line` in that case.
+                if self.cond_branch_context == CondBranchContext::LetRhs
+                    && self.peek().span.line != branch_line
+                {
+                    return Err(self.error_at_current(
+                        "[E0303] 単一方向制約違反 — `<=` の右辺に複数行の `| cond |> body` \
+                         多アーム条件を書くことはできません。代替: \
+                         `name <= If[cond, then, else]()`、または `pickX = | ... |> ... | _ |> ...` \
+                         のようなヘルパ関数抽出、または `name <= (| ... |> ... | _ |> ...)` のように \
+                         丸括弧で包んでください (see docs/reference/diagnostic_codes.md#E0303).",
+                    ));
+                }
             }
         }
 
@@ -535,6 +577,14 @@ impl Parser {
     /// expression statement that produces the arm's value.
     pub(super) fn parse_cond_arm_body(&mut self) -> Result<Vec<Statement>, ParseError> {
         // Check if body is a multi-line block (newline follows |>)
+        //
+        // NB: The C20-1 (ROOT-5) silent-bug guard lives in
+        // `parse_cond_branch` — it fires when a continuation `|` arm
+        // is seen on a later line while in `LetRhs` context. A single
+        // arm with a multi-line body inside a single-arm CondBranch is
+        // still legal here (the subsequent block boundary is
+        // unambiguous when there is no sibling `|` to steal indent
+        // tokens from).
         if matches!(self.peek_kind(), TokenKind::Newline | TokenKind::Indent(_)) {
             // Multi-line body: parse as block
             let block = self.parse_block()?;

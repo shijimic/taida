@@ -223,10 +223,23 @@ impl Interpreter {
             };
             self.env.define_force(&param.name, val);
         }
-        let result = self.eval_statements(&func_def.body)?;
+        // C20B-015 (symmetric fix): body evaluation must NOT use `?`.
+        // A `RuntimeError` from the body would skip the two pops below,
+        // leaving the pushed instance-fields scope and local scope in
+        // place. In REPL mode the interpreter is reused across inputs,
+        // so the leak would let a subsequent input collide with a
+        // method parameter / instance field at the top level. This
+        // mirrors the Pattern B cleanup applied to the three
+        // `call_function*` body-evaluation paths in eval.rs.
+        //
+        // Note: `eval_user_method` does not touch `type_defs` /
+        // `enum_defs` overlays, `active_function`, or `call_depth`, so
+        // the cleanup here is limited to the two scope pops. Success
+        // path semantics are unchanged.
+        let body_result = self.eval_statements(&func_def.body);
         self.env.pop_scope(); // pop local scope
         self.env.pop_scope(); // pop instance fields scope
-        Ok(result)
+        body_result
     }
 
     // ── Optional ABOLISHED (v0.8.0) — use Lax[T] instead ────

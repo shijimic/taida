@@ -481,7 +481,39 @@ fn test_parse_field_access() {
 
 #[test]
 fn test_parse_condition_branch() {
+    // C20-1 (ROOT-5): a multi-line multi-arm guard on the `<=` rhs is
+    // now rejected with [E0303]. The canonical way to express the
+    // same semantics is to wrap the branch in parentheses (which
+    // resets the parser's branch context to `TopLevel`) or to use a
+    // single-line form / helper function. Here we exercise the
+    // parenthesised escape hatch so the historical assertion —
+    // "a multi-arm conditional binds to the Assignment's value" —
+    // still holds.
+    let source = "grade <= (\n  | score >= 90 |> \"A\"\n  | _ |> \"F\"\n)";
+    let (program, errors) = parse(source);
+    assert!(errors.is_empty(), "Errors: {:?}", errors);
+    assert!(!program.statements.is_empty());
+}
+
+#[test]
+fn test_parse_condition_branch_rhs_multiline_rejected() {
+    // C20-1 (ROOT-5 / C19B-009): bare multi-line rhs guard is rejected.
+    // This is the inverse of `test_parse_condition_branch` and pins
+    // the silent-bug禁圧 guardrail.
     let source = "grade <=\n  | score >= 90 |> \"A\"\n  | _ |> \"F\"";
+    let (_, errors) = parse(source);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E0303]")),
+        "Expected [E0303] for multi-line rhs multi-arm guard, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn test_parse_condition_branch_rhs_single_line_accepted() {
+    // Single-line form stays legal because `|` tokens are unambiguous
+    // when they all live on the same physical line.
+    let source = "grade <= | 90 >= 80 |> \"A\" | _ |> \"F\"";
     let (program, errors) = parse(source);
     assert!(errors.is_empty(), "Errors: {:?}", errors);
     assert!(!program.statements.is_empty());
@@ -1284,7 +1316,12 @@ fn test_parse_nested_pack_missing_closing_paren_error() {
 
 #[test]
 fn test_parse_cond_branch_malformed_nested_arm_error() {
-    let source = "score <= 95\ngrade <=\n  | score >= 90 |> \"A\"\n  | _ > \"F\"";
+    // C20-1 (ROOT-5): the original source placed the multi-line
+    // CondBranch on a `<=` rhs, which now trips [E0303] *before* the
+    // malformed `|>` is ever examined. Keep the "Expected PipeGt"
+    // assertion by moving the branch into a top-level / function-body
+    // context (where multi-line arms remain legal).
+    let source = "classify score =\n  | score >= 90 |> \"A\"\n  | _ > \"F\"\n=> :Str";
     let (_, errors) = parse(source);
     assert!(
         !errors.is_empty(),
@@ -1733,7 +1770,12 @@ fn test_docs_sample_assignment_parses() {
 
 #[test]
 fn test_docs_sample_condition_branch_parses() {
-    let source = "grade <=\n  | score >= 90 |> \"A\"\n  | score >= 80 |> \"B\"\n  | _ |> \"F\"";
+    // C20-1 (ROOT-5): the historical docs sample placed a multi-line
+    // multi-arm guard on the `<=` rhs. That shape is now rejected
+    // with [E0303]; the updated sample uses the parenthesised escape
+    // hatch which preserves the same runtime semantics.
+    let source =
+        "grade <= (\n  | score >= 90 |> \"A\"\n  | score >= 80 |> \"B\"\n  | _ |> \"F\"\n)";
     let (program, errors) = parse(source);
     assert!(
         errors.is_empty(),
@@ -2024,8 +2066,10 @@ fn test_deep_buchipack_nesting_50_levels() {
 
 #[test]
 fn test_c12_4_arm_body_pure_expression_passes() {
-    // Simplest form: arm body is a single expression.
-    let source = "grade <=\n  | 85 >= 90 |> \"A\"\n  | _ |> \"F\"";
+    // C20-1 (ROOT-5): rewritten to exercise the parenthesised escape
+    // hatch for a multi-line rhs guard — pin the same pure-expression
+    // discipline without tripping [E0303].
+    let source = "grade <= (\n  | 85 >= 90 |> \"A\"\n  | _ |> \"F\"\n)";
     let (program, errors) = parse(source);
     assert!(errors.is_empty(), "Errors: {:?}", errors);
     assert_eq!(program.statements.len(), 1);

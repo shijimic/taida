@@ -84,6 +84,15 @@ rcgen = "0.13"
 # already observe.
 libc = "0.2"
 
+# C20-2: UTF-8-aware line editor for the new `stdinLine` prelude API
+# (Interpreter backend). MIT/Apache-2.0 dual license; we disable default
+# features so the history / completion / hinter stubs are not pulled in —
+# only the core editor, which is ~300 KB and gives us multibyte-aware
+# Backspace / arrow-key handling on POSIX and Windows alike.
+# The other backends use `node:readline/promises` (JS) and the vendored
+# `linenoise` source (Native) to keep 3-backend parity.
+rustyline = { version = "14", default-features = false }
+
 [dev-dependencies]
 # h3 crate: HTTP/3 framing + QPACK semantics (hyperium/h3 reference)
 # NB7-90: h3/h3-quinn are in dev-deps only — src/ implements hand-rolled

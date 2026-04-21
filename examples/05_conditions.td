@@ -2,12 +2,17 @@
 
 score <= 85
 
-grade <=
+// C20-1 (ROOT-5): multi-line `| |>` guards on the right-hand side of
+// `<=` now require the parenthesised escape hatch. The parens make
+// the branch's boundary unambiguous so subsequent top-level
+// statements cannot be silently absorbed into the last arm.
+grade <= (
   | score >= 90 |> "A"
   | score >= 80 |> "B"
   | score >= 70 |> "C"
   | score >= 60 |> "D"
   | _ |> "F"
+)
 
 stdout(`Score: ${score}, Grade: ${grade}`)
 

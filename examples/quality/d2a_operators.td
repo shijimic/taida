@@ -21,11 +21,13 @@ back_val <=[ Div[20, 4]()
 stdout(back_val.toString())
 
 // | |> condition
+// C20-5: multi-line rhs multi-arm guard is rejected with [E0303]; wrap in parens.
 score <= 85
-grade <=
+grade <= (
   | score >= 90 |> "A"
   | score >= 80 |> "B"
   | _ |> "C"
+)
 stdout(grade)
 
 // |== error ceiling

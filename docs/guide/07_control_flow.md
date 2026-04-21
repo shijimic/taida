@@ -25,14 +25,21 @@ Taida には if/else も switch も三項演算子もありません。あるの
 ```taida
 score <= 85
 
-grade <=
+grade <= (
   | score >= 90 |> "A"
   | score >= 80 |> "B"
   | score >= 70 |> "C"
   | score >= 60 |> "D"
   | _ |> "F"
+)
 // grade: "B"
 ```
+
+> **Note (C20):** `<=` の右辺に **複数行** の `| cond |> body` 多アーム条件を
+> 直接書くと [`E0303`](../reference/diagnostic_codes.md#e0303) で拒否されます。
+> 上記のように丸括弧で包む（escape hatch）、`If[cond, then, else]()` を使う、
+> またはヘルパ関数に抽出してください。単一行の多アームはそのまま書けます
+> （下の「1行で書く」参照）。
 
 ### 1行で書く
 
@@ -45,9 +52,10 @@ sign <= | x >= 0 |> "positive" | _ |> "negative"
 `&&` や `||` で条件を組み合わせることができます。
 
 ```taida
-canDrive <=
+canDrive <= (
   | age >= 18 && hasLicense |> true
   | _ |> false
+)
 ```
 
 ---
@@ -59,11 +67,12 @@ canDrive <=
 ```taida
 status <= "success"
 
-message <=
+message <= (
   | status == "success" |> "Operation completed"
   | status == "error" |> "Operation failed"
   | status == "pending" |> "Operation in progress"
   | _ |> "Unknown status"
+)
 ```
 
 ### ぶちパックのフィールドによるマッチ
@@ -71,11 +80,12 @@ message <=
 ```taida
 response <= @(code <= 200, data <= "OK")
 
-result <=
+result <= (
   | response.code == 200 |> "Success: " + response.data
   | response.code == 404 |> "Not found"
   | response.code >= 500 |> "Server error"
   | _ |> "Unknown response"
+)
 ```
 
 ### ネストした条件
@@ -85,7 +95,7 @@ result <=
 ```taida
 staff <= @(age <= 29, role <= "commander", active <= true)
 
-accessLevel <=
+accessLevel <= (
   | staff.role == "commander" |>
     | staff.active |> "full"
     | _ |> "readonly"
@@ -93,6 +103,7 @@ accessLevel <=
     | staff.age >= 18 |> "standard"
     | _ |> "limited"
   | _ |> "none"
+)
 // accessLevel: "full"
 ```
 
@@ -444,11 +455,12 @@ processRequest request =
 // If モールド（2 分岐向き）
 result <= If[x > 0, "positive", "negative"]()
 
-// | |> 構文（複数分岐向き）
-grade <=
+// | |> 構文（複数分岐向き、rhs 多行は丸括弧で包む）
+grade <= (
   | score >= 90 |> "A"
   | score >= 80 |> "B"
   | _ |> "C"
+)
 ```
 
 パイプラインで `_` を使って前段の値を参照できます。

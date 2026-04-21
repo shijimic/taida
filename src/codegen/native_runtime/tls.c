@@ -384,53 +384,115 @@ static taida_val taida_os_http_failure_lax(void) {
     return taida_lax_empty(taida_os_http_default_response());
 }
 
-static char *taida_os_http_headers_to_lines(taida_val headers_ptr) {
-    if (!headers_ptr || !taida_is_buchi_pack(headers_ptr)) {
-        char *empty = (char*)TAIDA_MALLOC(1, "http_headers_empty");
-        empty[0] = '\0';
-        return empty;
+/*
+ * C20-4 (C19B-007): append one wire header to the growing `buf` in
+ * "Name: Value\r\n" form, stripping CR/LF from both sides to keep the
+ * RCB-304 CRLF-injection guard intact. Used by both shapes
+ * (BuchiPack / List-of-record) so the raw HTTP and curl paths share
+ * the same sanitization.
+ */
+static int taida_os_http_append_header_line(
+    char **buf,
+    size_t *cap,
+    size_t *len,
+    const char *name,
+    const char *value
+) {
+    if (!name || !*name) return 1; // skip empty name silently
+    if (!value) value = "";
+
+    char *safe_name = strdup(name);
+    char *safe_value = strdup(value);
+    if (!safe_name || !safe_value) {
+        free(safe_name);
+        free(safe_value);
+        return 0;
+    }
+    for (char *p = safe_name; *p; p++) { if (*p == '\r' || *p == '\n') *p = ' '; }
+    for (char *p = safe_value; *p; p++) { if (*p == '\r' || *p == '\n') *p = ' '; }
+
+    size_t need = strlen(safe_name) + strlen(safe_value) + 4;
+    while (*len + need + 1 > *cap) {
+        *cap *= 2;
+        TAIDA_REALLOC(*buf, *cap, "http_response");
     }
 
-    taida_val *pack = (taida_val*)headers_ptr;
+    int n = snprintf(*buf + *len, *cap - *len, "%s: %s\r\n", safe_name, safe_value);
+    free(safe_name);
+    free(safe_value);
+    if (n < 0) return 0;
+    *len += (size_t)n;
+    return 1;
+}
+
+/*
+ * C20-4 (C19B-007): extract a Str field value from a BuchiPack given
+ * the pre-hashed field name. Returns a malloc'd copy (caller frees)
+ * or NULL if the field is absent / not a Str.
+ */
+static char *taida_os_http_pack_str_field(taida_val pack_ptr, taida_val field_hash) {
+    if (!pack_ptr || !taida_is_buchi_pack(pack_ptr)) return NULL;
+    taida_val *pack = (taida_val*)pack_ptr;
     taida_val fc = pack[1];
+    for (taida_val i = 0; i < fc; i++) {
+        if (pack[2 + i * 3] == field_hash) {
+            taida_val value_str_ptr = taida_value_to_display_string(pack[2 + i * 3 + 2]);
+            const char *s = (const char*)value_str_ptr;
+            char *copy = s ? strdup(s) : NULL;
+            taida_str_release(value_str_ptr);
+            return copy;
+        }
+    }
+    return NULL;
+}
+
+static char *taida_os_http_headers_to_lines(taida_val headers_ptr) {
     size_t cap = 128;
     size_t len = 0;
     char *buf = (char*)TAIDA_MALLOC(cap, "http_headers");
     buf[0] = '\0';
 
-    for (taida_val i = 0; i < fc; i++) {
-        taida_val field_hash = pack[2 + i * 3];
-        taida_val field_val = pack[2 + i * 3 + 2];
-        const char *name = taida_lookup_field_name(field_hash);
-        if (!name || !name[0]) continue;
+    if (!headers_ptr) return buf;
 
-        taida_val value_str_ptr = taida_value_to_display_string(field_val);
-        const char *value_str = (const char*)value_str_ptr;
-        if (!value_str) value_str = "";
+    if (taida_is_buchi_pack(headers_ptr)) {
+        taida_val *pack = (taida_val*)headers_ptr;
+        taida_val fc = pack[1];
+        for (taida_val i = 0; i < fc; i++) {
+            taida_val field_hash = pack[2 + i * 3];
+            taida_val field_val = pack[2 + i * 3 + 2];
+            const char *name = taida_lookup_field_name(field_hash);
+            if (!name || !name[0]) continue;
 
-        /* RCB-304: Strip CR/LF from header name and value to prevent CRLF injection */
-        char *safe_name = strdup(name);
-        char *safe_value = strdup(value_str);
-        for (char *p = safe_name; *p; p++) { if (*p == '\r' || *p == '\n') *p = ' '; }
-        for (char *p = safe_value; *p; p++) { if (*p == '\r' || *p == '\n') *p = ' '; }
-
-        size_t need = strlen(safe_name) + strlen(safe_value) + 4;
-        while (len + need + 1 > cap) {
-            cap *= 2;
-            TAIDA_REALLOC(buf, cap, "http_response");
+            taida_val value_str_ptr = taida_value_to_display_string(field_val);
+            const char *value_str = (const char*)value_str_ptr;
+            int ok = taida_os_http_append_header_line(&buf, &cap, &len, name, value_str);
+            taida_str_release(value_str_ptr);
+            if (!ok) {
+                free(buf);
+                char *empty = (char*)TAIDA_MALLOC(1, "http_headers_err");
+                empty[0] = '\0';
+                return empty;
+            }
         }
+        return buf;
+    }
 
-        int n = snprintf(buf + len, cap - len, "%s: %s\r\n", safe_name, safe_value);
-        free(safe_name);
-        free(safe_value);
-        taida_str_release(value_str_ptr);
-        if (n < 0) {
-            free(buf);
-            char *empty = (char*)TAIDA_MALLOC(1, "http_headers_err");
-            empty[0] = '\0';
-            return empty;
+    // C20-4: list-of-record shape `@[@(name <= "...", value <= "...")]`.
+    if (taida_is_list(headers_ptr)) {
+        taida_val count = taida_list_length(headers_ptr);
+        taida_val *list = (taida_val*)headers_ptr;
+        taida_val name_hash = taida_str_hash((taida_val)"name");
+        taida_val value_hash = taida_str_hash((taida_val)"value");
+        for (taida_val i = 0; i < count; i++) {
+            taida_val rec = list[4 + i];
+            char *hn = taida_os_http_pack_str_field(rec, name_hash);
+            char *hv = taida_os_http_pack_str_field(rec, value_hash);
+            if (hn && hv && hn[0]) {
+                (void)taida_os_http_append_header_line(&buf, &cap, &len, hn, hv);
+            }
+            free(hn);
+            free(hv);
         }
-        len += (size_t)n;
     }
     return buf;
 }
@@ -572,44 +634,61 @@ static taida_val taida_os_http_do_curl(const char *method, const char *url, taid
     free(q_method);
     free(q_url);
 
-    if (headers_ptr && taida_is_buchi_pack(headers_ptr)) {
-        taida_val *pack = (taida_val*)headers_ptr;
-        taida_val fc = pack[1];
-        for (taida_val i = 0; i < fc; i++) {
-            taida_val field_hash = pack[2 + i * 3];
-            taida_val field_val = pack[2 + i * 3 + 2];
-            const char *name = taida_lookup_field_name(field_hash);
-            if (!name || !name[0]) continue;
+    // C20-4 (C19B-007): render each wire header via `-H 'Name: Value'`.
+    // Accept both BuchiPack (legacy) and list-of-record
+    // (`@[@(name <= "x-api-key", value <= "...")]`) shapes.
+    {
+        // Small helper closure-esque block: format one safe `-H` arg.
+        #define C20_HTTP_ADD_CURL_HEADER(name_cstr, value_cstr) do { \
+            const char *hn = (name_cstr); \
+            const char *hv = (value_cstr) ? (value_cstr) : ""; \
+            if (hn && hn[0]) { \
+                size_t _hv_len = strlen(hn) + strlen(hv) + 2; \
+                char *_pair = (char*)malloc(_hv_len + 1); \
+                if (_pair) { \
+                    snprintf(_pair, _hv_len + 1, "%s: %s", hn, hv); \
+                    char *_q = taida_os_shell_quote(_pair); \
+                    free(_pair); \
+                    if (_q) { \
+                        (void)taida_os_cmd_append(&cmd, &cmd_cap, &cmd_len, " -H "); \
+                        (void)taida_os_cmd_append(&cmd, &cmd_cap, &cmd_len, _q); \
+                        free(_q); \
+                    } \
+                } \
+            } \
+        } while (0)
 
-            taida_val value_str_ptr = taida_value_to_display_string(field_val);
-            const char *value_str = (const char*)value_str_ptr;
-            if (!value_str) value_str = "";
+        if (headers_ptr && taida_is_buchi_pack(headers_ptr)) {
+            taida_val *pack = (taida_val*)headers_ptr;
+            taida_val fc = pack[1];
+            for (taida_val i = 0; i < fc; i++) {
+                taida_val field_hash = pack[2 + i * 3];
+                taida_val field_val = pack[2 + i * 3 + 2];
+                const char *name = taida_lookup_field_name(field_hash);
+                if (!name || !name[0]) continue;
 
-            size_t hv_len = strlen(name) + strlen(value_str) + 2;
-            char *header_pair = (char*)malloc(hv_len + 1);
-            if (!header_pair) {
+                taida_val value_str_ptr = taida_value_to_display_string(field_val);
+                const char *value_str = (const char*)value_str_ptr;
+                C20_HTTP_ADD_CURL_HEADER(name, value_str);
                 taida_str_release(value_str_ptr);
-                free(cmd);
-                return taida_async_resolved(taida_os_http_failure_lax());
             }
-            snprintf(header_pair, hv_len + 1, "%s: %s", name, value_str);
-            taida_str_release(value_str_ptr);
-
-            char *q_header = taida_os_shell_quote(header_pair);
-            free(header_pair);
-            if (!q_header) {
-                free(cmd);
-                return taida_async_resolved(taida_os_http_failure_lax());
-            }
-
-            int ok = taida_os_cmd_append(&cmd, &cmd_cap, &cmd_len, " -H ")
-                && taida_os_cmd_append(&cmd, &cmd_cap, &cmd_len, q_header);
-            free(q_header);
-            if (!ok) {
-                free(cmd);
-                return taida_async_resolved(taida_os_http_failure_lax());
+        } else if (headers_ptr && taida_is_list(headers_ptr)) {
+            taida_val count = taida_list_length(headers_ptr);
+            taida_val *list = (taida_val*)headers_ptr;
+            taida_val name_hash = taida_str_hash((taida_val)"name");
+            taida_val value_hash = taida_str_hash((taida_val)"value");
+            for (taida_val i = 0; i < count; i++) {
+                taida_val rec = list[4 + i];
+                char *hn = taida_os_http_pack_str_field(rec, name_hash);
+                char *hv = taida_os_http_pack_str_field(rec, value_hash);
+                if (hn && hv) {
+                    C20_HTTP_ADD_CURL_HEADER(hn, hv);
+                }
+                free(hn);
+                free(hv);
             }
         }
+        #undef C20_HTTP_ADD_CURL_HEADER
     }
 
     if (body_str[0] != '\0') {

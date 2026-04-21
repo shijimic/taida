@@ -31688,10 +31688,14 @@ stdout(classify(-5).toString())
 /// backends.
 #[test]
 fn test_c12_4_arm_body_single_line_expr_parity() {
-    let source = r#"grade <=
+    // C20-1 (ROOT-5): multi-line rhs guards now require the
+    // parenthesised escape hatch. The semantics (type is Str,
+    // "B" is selected) are unchanged.
+    let source = r#"grade <= (
   | 85 >= 90 |> "A"
   | 85 >= 80 |> "B"
   | _ |> "F"
+)
 
 stdout(grade)
 "#;

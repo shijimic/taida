@@ -1466,6 +1466,7 @@ impl TypeChecker {
                 | "stderr"
                 | "exit"
                 | "stdin"
+                | "stdinLine"
                 | "argv"
                 | "sleep"
         )
@@ -3319,6 +3320,7 @@ defaulted fields must be provided via `()`",
                             | "stderr"
                             | "exit"
                             | "stdin"
+                            | "stdinLine"
                             | "argv"
                             | "sleep"
                     )
@@ -3889,7 +3891,16 @@ defaulted fields must be provided via `()`",
                         "stdout" => Some((1, 1)),
                         "stderr" => Some((1, 1)),
                         "exit" => Some((1, 1)),
-                        "stdin" => Some((1, 1)),
+                        // C20-3 (ROOT-13): prompt is optional. The prelude
+                        // runtime, Native lowering and LSP / docs all treat
+                        // `stdin()` (no-prompt) as valid. Before C20 the
+                        // checker rejected it with [E1507].
+                        "stdin" => Some((0, 1)),
+                        // C20-2: stdinLine is the UTF-8-aware successor to
+                        // `stdin`. Prompt is optional; result is
+                        // `Async[Lax[Str]]` and callers must unmold via
+                        // `]=>` to get the inner `Lax[Str]`.
+                        "stdinLine" => Some((0, 1)),
                         "argv" => Some((0, 0)),
                         "sleep" => Some((1, 1)),
                         // C12 Phase 6 (FB-5): Regex(pattern, flags?)
@@ -3964,6 +3975,17 @@ defaulted fields must be provided via `()`",
                         "stdout" | "stderr" => Type::Int,
                         "exit" => Type::Unit,
                         "stdin" => Type::Str,
+                        // C20-2: `stdinLine` pins its result to
+                        // `Async[Lax[Str]]` so that callers are forced to
+                        // unmold via `]=>` and then reason about the Lax
+                        // (failure on EOF / IO error returns the default
+                        // `""`). Direct `<=` binding leaves the Async in
+                        // place — the Lax is not reachable without an
+                        // unmold, which matches Taida's Async discipline.
+                        "stdinLine" => Type::Generic(
+                            "Async".to_string(),
+                            vec![Type::Generic("Lax".to_string(), vec![Type::Str])],
+                        ),
                         "argv" => Type::List(Box::new(Type::Str)),
                         "sleep" => Type::Generic("Async".to_string(), vec![Type::Unit]),
                         // C12 Phase 6 (FB-5): Regex(pattern, flags?)
@@ -4487,6 +4509,51 @@ defaulted fields must be provided via `()`",
                         // Look up in mold definitions
                         if self.registry.mold_defs.contains_key(name) {
                             Type::Named(name.clone())
+                        } else if self.generic_func_defs.contains_key(name)
+                            || self.func_types.contains_key(name)
+                            || matches!(self.lookup_var(name), Some(Type::Function(_, _)))
+                        {
+                            // C20B-014 (ROOT-17) + C20B-016 (ROOT-19):
+                            // user-defined function called via mold syntax
+                            // `Fn[args]()`. Pre-C20B-016 this branch only
+                            // rejected named fields and returned the raw
+                            // function return type — arity, type-mismatch,
+                            // partial-application and generic-inference
+                            // validation were silently skipped, so
+                            // `add[1, "x"]()` passed `taida check` while
+                            // `add(1, "x")` correctly surfaced `[E1506]`.
+                            //
+                            // Post-fix: reject named fields first, then
+                            // synthesize the equivalent `FuncCall` and
+                            // delegate to the normal function-call path.
+                            // This is the exact same AST shape the parser
+                            // would have produced for `Fn(args)`, so every
+                            // downstream rule (generic-func E1301 / E1506 /
+                            // E1505, non-generic E1301 / E1506, function
+                            // value E1301 / E1506 / E1505) fires uniformly.
+                            if !fields.is_empty() {
+                                self.errors.push(TypeError {
+                                    message: format!(
+                                        "[E1511] User-defined function '{}' called via mold syntax \
+                                         cannot accept named fields '()'. \
+                                         Pass arguments positionally: {}[arg1, arg2]() or {}(arg1, arg2).",
+                                        name, name, name
+                                    ),
+                                    span: mold_span.clone(),
+                                });
+                            }
+                            // Synthesize `name(type_args)` with the mold
+                            // span and recurse. The callee span is the
+                            // `mold_span` itself; positional args are the
+                            // `type_args` list (which for `Fn[a, b]()` are
+                            // the runtime values, cf. lower_molds.rs).
+                            let synth_callee = Expr::Ident(name.clone(), mold_span.clone());
+                            let synth_call = Expr::FuncCall(
+                                Box::new(synth_callee),
+                                type_args.clone(),
+                                mold_span.clone(),
+                            );
+                            self.infer_expr_type(&synth_call)
                         } else {
                             Type::Unknown
                         }

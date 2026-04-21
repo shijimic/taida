@@ -3,11 +3,13 @@
 
 prefix <= "Result"
 
+// C20-5: multi-line rhs multi-arm guard is rejected with [E0303]; wrap in parens.
 classify x =
-  label <=
+  label <= (
     | x > 0 |> "positive"
     | x == 0 |> "zero"
     | _ |> "negative"
+  )
   prefix + ":" + label
 => :Str
 

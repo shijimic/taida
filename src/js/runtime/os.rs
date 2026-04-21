@@ -492,14 +492,38 @@ async function __taida_os_httpPost(url, body) {
 }
 
 // HttpRequest[method, url](headers, body) -> Promise<Lax[@(status, body, headers)]>
+//
+// C20-4 (C19B-007): `reqHeaders` now accepts two shapes to mirror the
+// interpreter and native backends:
+//
+//   * BuchiPack object — legacy `headers <= @(content_type <= "...")`
+//     (each own-enumerable key is treated as a wire header name; the
+//     identifier ban on `-` means dash-bearing headers are unreachable
+//     this way).
+//   * Array of records — new `headers <= @[@(name <= "x-api-key",
+//     value <= "...")]`. Each entry with Str `name` + Str `value`
+//     contributes one wire header; arbitrary UTF-8 is allowed in the
+//     name, so `x-api-key`, `anthropic-version`, etc. are expressible.
 async function __taida_os_httpRequest(method, url, reqHeaders, body) {
   try {
     const opts = { method: method || 'GET' };
     if (body) opts.body = body;
-    if (reqHeaders && typeof reqHeaders === 'object') {
+    if (reqHeaders) {
       const h = {};
-      for (const [k, v] of Object.entries(reqHeaders)) {
-        if (typeof v === 'string') h[k] = v;
+      if (Array.isArray(reqHeaders)) {
+        for (const rec of reqHeaders) {
+          if (rec && typeof rec === 'object') {
+            const n = rec.name;
+            const v = rec.value;
+            if (typeof n === 'string' && typeof v === 'string' && n.length > 0) {
+              h[n] = v;
+            }
+          }
+        }
+      } else if (typeof reqHeaders === 'object') {
+        for (const [k, v] of Object.entries(reqHeaders)) {
+          if (typeof v === 'string') h[k] = v;
+        }
       }
       if (Object.keys(h).length > 0) opts.headers = h;
     }

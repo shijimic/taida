@@ -51,10 +51,12 @@ remove(path)
 pickEditor =
   visual <= EnvVar["VISUAL"]()
   editor <= EnvVar["EDITOR"]()
-  picked <=
+  // C20 / E0303: 複数行の rhs 多アーム条件は丸括弧で包む。
+  picked <= (
     | visual.hasValue |> visual.__value
     | editor.hasValue |> editor.__value
     | _                 |> "nvim"
+  )
   picked
 => :Str
 ```
@@ -126,6 +128,35 @@ after  <= Read[path]().getOrDefault("")
 | before == after |> stdout("no changes")
 | _                |> applyChanges(after)
 ```
+
+---
+
+## 5. エディタ起動前の対話プロンプト（C20-2 以降）
+
+`runInteractive` / `execShellInteractive` に渡す前の「どのファイルを編集しますか？」「コミットメッセージのドラフトを書きますか？」のようなプロンプトは、`stdinLine` を使って UTF-8-aware に受け取ると日本語 / 中国語 / 絵文字入力が編集中に壊れません。従来の `stdin` は kernel cooked mode のため Backspace が 1 バイト単位で働き、multibyte 文字が途中まで残る不具合 (ROOT-7) がありました。
+
+```taida
+>>> taida-lang/os => @(runInteractive, writeFile, Read, EnvVar)
+
+// ── プロンプト部は stdinLine（UTF-8 対応）──
+stdinLine("タイトル: ") ]=> titleLax
+title <= titleLax.getOrDefault("（無題）")
+
+path <= "/tmp/taida_editor_draft_" + title + ".md"
+writeFile(path, "# " + title + "\n\n")
+
+// ── エディタ起動は runInteractive（TTY passthrough）──
+editor <= EnvVar["EDITOR"]().getOrDefault("nvim")
+r      <= runInteractive(editor, @[path])
+
+| !r.hasValue |> stderr("editor failed")
+| _           |> stdout(Read[path]().getOrDefault(""))
+```
+
+**注意**:
+
+- `stdinLine` は raw mode を内部で一時的に有効化してから戻します。呼び出し直後に `RawModeEnter[]()` を再実行したい TUI は、`stdinLine ]=> line` の直後に入れてください（`runInteractive` との順序は 4 節と同じ）。
+- `stdinLine` の戻り型は `Async[Lax[Str]]` なので `]=>` で unmold し、**その中の Lax** を `.getOrDefault("")` で取り出します。`<= stdinLine(...)` と書くと Async がそのまま変数に入るだけで line は取れません。
 
 ---
 

@@ -535,8 +535,17 @@ fn prelude_completions() -> Vec<CompletionItem> {
         ),
         (
             "stdin",
-            "stdin() => :Str -- read line from stdin",
-            "Read a line from standard input. Returns Str.",
+            "stdin() => :Str -- read line from stdin (cooked mode)",
+            "Read a line from standard input. Returns Str (empty on EOF / error). \
+             For UTF-8-aware editing (multibyte Backspace), use `stdinLine` instead.",
+        ),
+        (
+            "stdinLine",
+            "stdinLine(prompt?) => :Async[Lax[Str]] -- UTF-8-aware line editor",
+            "Read a line with UTF-8-aware editing (rustyline / readline/promises \
+             / linenoise-derived). Returns Async[Lax[Str]]; use `]=>` to unmold, \
+             e.g. `stdinLine(\"name: \") ]=> line`. EOF / Ctrl-C / Ctrl-D collapse \
+             to Lax.failure(\"\").",
         ),
         (
             "argv",

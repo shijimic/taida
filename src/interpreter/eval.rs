@@ -337,14 +337,25 @@ impl Interpreter {
                         };
 
                         if type_matches {
-                            // Error type matches — run the handler
+                            // Error type matches — run the handler.
+                            //
+                            // C20B-017 / ROOT-20: handler body may itself raise a
+                            // `RuntimeError` (undefined variable, method lookup failure,
+                            // etc.). We MUST pop the handler scope on both Ok and Err
+                            // paths, otherwise the leaked scope causes outer
+                            // `call_function*` cleanup to peel off the wrong layer and
+                            // let the enclosing closure scope leak across REPL inputs.
+                            //
+                            // Pattern B: split the `?` from the call so `pop_scope`
+                            // runs before we propagate any error.
                             self.env.push_scope();
                             self.env.define_force(&ec.error_param, err);
 
-                            let handler_result = self.eval_statements(&ec.handler_body)?;
+                            let handler_result = self.eval_statements(&ec.handler_body);
                             self.env.pop_scope();
+                            let handler_signal = handler_result?;
 
-                            match handler_result {
+                            match handler_signal {
                                 Signal::Value(v) => return Ok(Signal::Value(v)),
                                 Signal::TailCall(args) => return Ok(Signal::TailCall(args)),
                                 Signal::Throw(err) => return Ok(Signal::Throw(err)),
@@ -440,6 +451,8 @@ impl Interpreter {
                     body: fd.body.clone(),
                     closure,
                     return_type: fd.return_type.clone(),
+                    module_type_defs: None,
+                    module_enum_defs: None,
                 });
                 // Use define() to prevent overwriting existing variables/functions.
                 // define_force is reserved for internal use only (pipeline, closures, params, prelude).
@@ -1082,6 +1095,44 @@ impl Interpreter {
                     }
                 }
 
+                // C20B-014 (ROOT-17): User-defined function called via mold syntax.
+                //
+                // Pre-C20B-014, `Fn[arg, arg]()` for a user-defined function
+                // `Fn` silently entered the generic mold-wrap path below and
+                // returned `@(__value <= first_arg, __type <= "Fn")` instead
+                // of invoking the function. `taida check` did not detect this
+                // (checker fell through to `Type::Unknown`), the Interpreter
+                // silently wrapped, Native failed at lowering with
+                // "unsupported mold type", and only JS accidentally worked
+                // (its `__taida_solidify(Fn(...))` fallback calls the fn).
+                //
+                // Fix: if `name` resolves to a `Value::Function` in scope
+                // AND no MoldDef is registered for the same name, dispatch
+                // the call as `Fn(args)` with `type_args` used positionally.
+                // `fields` (named `k <= v` slots) are rejected — user
+                // functions have no named-field ABI.
+                //
+                // Guard ordering: this branch runs *after* builtin molds
+                // (`try_operation_mold`) and addon sentinels, so shadowing
+                // a builtin mold name with a local user fn does not change
+                // behaviour. It runs *before* generic mold instantiation,
+                // so user fns are no longer wrapped.
+                if !self.mold_defs.contains_key(name)
+                    && let Some(Value::Function(func)) = self.env.get(name).cloned()
+                {
+                    if !fields.is_empty() {
+                        return Err(RuntimeError {
+                            message: format!(
+                                "User-defined function '{}' called via mold syntax \
+                                 cannot accept named fields '()'. \
+                                 Pass arguments positionally: {}[arg1, arg2]() or {}(arg1, arg2).",
+                                name, name, name
+                            ),
+                        });
+                    }
+                    return self.call_function(&func, type_args);
+                }
+
                 // Generic/custom mold instantiation.
                 let mut named_values = HashMap::<String, Value>::new();
                 for field in fields {
@@ -1196,6 +1247,8 @@ impl Interpreter {
                         body: func_def.body.clone(),
                         closure: Arc::new(closure),
                         return_type: func_def.return_type.clone(),
+                        module_type_defs: None,
+                        module_enum_defs: None,
                     });
                     result_fields.push(("__unmold".to_string(), unmold_func));
                 }
@@ -1217,6 +1270,8 @@ impl Interpreter {
                         body: func_def.body.clone(),
                         closure: Arc::new(closure),
                         return_type: func_def.return_type.clone(),
+                        module_type_defs: None,
+                        module_enum_defs: None,
                     };
                     return self.call_function_preserving_signals(&solidify_func, &[]);
                 }
@@ -1241,6 +1296,8 @@ impl Interpreter {
                     body: vec![Statement::Expr(*body.clone())],
                     closure,
                     return_type: None,
+                    module_type_defs: None,
+                    module_enum_defs: None,
                 })))
             }
 
@@ -1504,6 +1561,8 @@ impl Interpreter {
             body,
             closure,
             return_type: None,
+            module_type_defs: None,
+            module_enum_defs: None,
         })))
     }
 
@@ -1627,6 +1686,63 @@ impl Interpreter {
         Ok(None)
     }
 
+    /// C20B-015 / ROOT-18: Overlay a function's defining-module TypeDef / enum
+    /// registries onto the interpreter's live registries before executing the
+    /// function body. Returns the previous state so the caller can restore it
+    /// after the body runs.
+    ///
+    /// Lambdas / partials / internal helpers have `module_type_defs == None`
+    /// and this method is a no-op for them — they must see whatever TypeDefs
+    /// the currently-executing caller sees (that is the lexical-scope rule
+    /// for functions defined inline).
+    ///
+    /// Overlay semantics: defining-module entries are layered *under* the
+    /// current entries, i.e. a local TypeDef with the same name still wins.
+    /// This preserves F-56 behaviour (caller's typedef shadows imported one)
+    /// while ensuring JSON schema resolution inside the imported function
+    /// body has access to every symbol the defining module saw.
+    #[allow(clippy::type_complexity)]
+    pub(crate) fn push_func_module_scope(
+        &mut self,
+        func: &FuncValue,
+    ) -> (
+        HashMap<String, Vec<FieldDef>>,
+        HashMap<String, Vec<String>>,
+        bool,
+    ) {
+        let prev_td = self.type_defs.clone();
+        let prev_ed = self.enum_defs.clone();
+        let mut changed = false;
+        if let Some(mtd) = &func.module_type_defs {
+            for (k, v) in mtd.iter() {
+                self.type_defs.entry(k.clone()).or_insert_with(|| v.clone());
+            }
+            changed = true;
+        }
+        if let Some(med) = &func.module_enum_defs {
+            for (k, v) in med.iter() {
+                self.enum_defs.entry(k.clone()).or_insert_with(|| v.clone());
+            }
+            changed = true;
+        }
+        (prev_td, prev_ed, changed)
+    }
+
+    /// Restore TypeDef / enum registries that were captured by
+    /// `push_func_module_scope`. No-op if `push_func_module_scope` reported
+    /// `changed == false`.
+    pub(crate) fn pop_func_module_scope(
+        &mut self,
+        prev_td: HashMap<String, Vec<FieldDef>>,
+        prev_ed: HashMap<String, Vec<String>>,
+        changed: bool,
+    ) {
+        if changed {
+            self.type_defs = prev_td;
+            self.enum_defs = prev_ed;
+        }
+    }
+
     /// Helper: call a function with pre-evaluated argument values,
     /// preserving all Signal variants (including Throw) for the caller to handle.
     /// Used for __unmold calls where Signal::Throw must be catchable by |==.
@@ -1649,6 +1765,8 @@ impl Interpreter {
         // Internal callback paths (list ops, unmold hooks) should not inherit
         // outer-function tail-call context.
         let prev_active = self.active_function.take();
+        // C20B-015 / ROOT-18: overlay defining-module typedef scope
+        let (prev_td, prev_ed, td_changed) = self.push_func_module_scope(func);
         // Closure scope
         self.env.push_scope();
         for (name, val) in func.closure.iter() {
@@ -1659,18 +1777,28 @@ impl Interpreter {
         if let Some(signal) = self.bind_params_with_effective_defaults(func, arg_values)? {
             self.env.pop_scope();
             self.env.pop_scope();
+            self.pop_func_module_scope(prev_td, prev_ed, td_changed);
             self.active_function = prev_active;
             self.call_depth -= 1;
             return Ok(signal);
         }
 
-        let result = self.eval_statements(&func.body)?;
+        // C20B-015 / ROOT-18 (3rd reopen): body evaluation must NOT use `?`.
+        // A `RuntimeError` from the body would skip every cleanup step below,
+        // leaving the overlayed TypeDef / enum registries, pushed scopes,
+        // saved `active_function` and bumped `call_depth` in place. In REPL
+        // mode the interpreter is reused across inputs, so the leak lets a
+        // subsequent `JSON[raw, Schema]()` silently resolve against an
+        // imported module's private typedefs. Capture the result, run the
+        // cleanup path unconditionally, then propagate.
+        let result = self.eval_statements(&func.body);
         self.env.pop_scope(); // pop local scope
         self.env.pop_scope(); // pop closure scope
+        self.pop_func_module_scope(prev_td, prev_ed, td_changed);
         self.active_function = prev_active;
         self.call_depth -= 1;
 
-        Ok(result)
+        result
     }
 
     /// Helper: call a function with pre-evaluated argument values.
@@ -1693,6 +1821,8 @@ impl Interpreter {
         // Internal callback paths (Map/Filter/etc.) should not inherit
         // outer-function tail-call context.
         let prev_active = self.active_function.take();
+        // C20B-015 / ROOT-18: overlay defining-module typedef scope
+        let (prev_td, prev_ed, td_changed) = self.push_func_module_scope(func);
         // Closure scope
         self.env.push_scope();
         for (name, val) in func.closure.iter() {
@@ -1703,6 +1833,7 @@ impl Interpreter {
         if let Some(signal) = self.bind_params_with_effective_defaults(func, arg_values)? {
             self.env.pop_scope(); // pop local scope
             self.env.pop_scope(); // pop closure scope
+            self.pop_func_module_scope(prev_td, prev_ed, td_changed);
             self.active_function = prev_active;
             self.call_depth -= 1;
             return match signal {
@@ -1721,25 +1852,31 @@ impl Interpreter {
             };
         }
 
-        let result = self.eval_statements(&func.body)?;
+        // C20B-015 / ROOT-18 (3rd reopen): body evaluation must NOT use `?`.
+        // Same cleanup invariant as `call_function_preserving_signals`: the
+        // overlayed TypeDef / enum registries and pushed scopes must be
+        // torn down before propagating any `RuntimeError` from the body.
+        let body_result = self.eval_statements(&func.body);
         self.env.pop_scope(); // pop local scope
         self.env.pop_scope(); // pop closure scope
+        self.pop_func_module_scope(prev_td, prev_ed, td_changed);
         self.active_function = prev_active;
         self.call_depth -= 1;
 
-        match result {
-            Signal::Value(v) => Ok(v),
-            Signal::TailCall(_) => Err(RuntimeError {
+        match body_result {
+            Ok(Signal::Value(v)) => Ok(v),
+            Ok(Signal::TailCall(_)) => Err(RuntimeError {
                 message: "Unexpected tail call in list operation".to_string(),
             }),
-            Signal::Throw(err) => {
+            Ok(Signal::Throw(err)) => {
                 // Store thrown value so that error ceiling can recover it
                 self.pending_throw = Some(err.clone());
                 Err(RuntimeError {
                     message: format!("Unhandled error in list operation: {}", err),
                 })
             }
-            Signal::Gorilla => Ok(Value::Gorilla),
+            Ok(Signal::Gorilla) => Ok(Value::Gorilla),
+            Err(err) => Err(err),
         }
     }
 
@@ -1788,6 +1925,30 @@ impl Interpreter {
         // current_func tracks which function to execute (may change for mutual recursion)
         let mut current_func = func.clone();
         let mut current_args = arg_values;
+        // C20B-015 / ROOT-18: overlay defining-module typedef scope.
+        //
+        // Invariant: on *every* exit path from this trampoline we restore
+        // `self.type_defs` / `self.enum_defs` to the snapshot captured here
+        // (`saved_td_root` / `saved_ed_root`), regardless of which callee
+        // within the tail-call chain actually required an overlay.
+        //
+        // Before the fix, the initial callee's `td_changed` flag gated the
+        // restore. When the initial callee was a *local* function
+        // (`td_changed == false`) and a mutual tail-call retargeted to an
+        // *imported* function (whose overlay push succeeded), the exit
+        // path skipped the restore and the imported function's private
+        // TypeDefs leaked into the caller's scope permanently. Pinned by
+        // `c20b_015_interpreter_mutual_tail_call_does_not_leak_overlay`.
+        //
+        // The unconditional clone-and-restore is the only correct contract
+        // here: any subset of iterations may or may not push an overlay,
+        // but the caller's pre-call scope is always `saved_*_root` and
+        // must be the state we return to. Cost: `HashMap::clone` of the
+        // root registries, paid per top-level function call (not per
+        // trampoline iteration).
+        let saved_td_root = self.type_defs.clone();
+        let saved_ed_root = self.enum_defs.clone();
+        let _ = self.push_func_module_scope(&current_func);
         loop {
             // Create closure scope (separate from local scope so user variables
             // can shadow captured names without "already defined" errors)
@@ -1805,6 +1966,8 @@ impl Interpreter {
                 Ok(Some(signal)) => {
                     self.env.pop_scope(); // pop local scope
                     self.env.pop_scope(); // pop closure scope
+                    self.type_defs = saved_td_root.clone();
+                    self.enum_defs = saved_ed_root.clone();
                     self.active_function = prev_active;
                     self.call_depth -= 1;
                     return Ok(signal);
@@ -1813,14 +1976,43 @@ impl Interpreter {
                 Err(err) => {
                     self.env.pop_scope(); // pop local scope
                     self.env.pop_scope(); // pop closure scope
+                    self.type_defs = saved_td_root.clone();
+                    self.enum_defs = saved_ed_root.clone();
                     self.active_function = prev_active;
                     self.call_depth -= 1;
                     return Err(err);
                 }
             }
 
-            // Execute body (with error ceiling support)
-            let result = self.eval_statements(&current_func.body)?;
+            // Execute body (with error ceiling support).
+            //
+            // C20B-015 / ROOT-18 (3rd reopen): body evaluation must NOT use
+            // `?`. A `RuntimeError` from the body would skip the pops and
+            // root-scope restore, leaving `self.type_defs` / `self.enum_defs`
+            // holding the defining-module overlay, the closure + local scopes
+            // pushed, and `self.active_function` / `self.call_depth` bumped.
+            // The REPL reuses this interpreter across inputs, so the leak
+            // would make a subsequent top-level `JSON[raw, Schema]()`
+            // silently resolve against an imported module's private schemas
+            // (or — for enum / TypeDef aliasing — quietly hit wrong data).
+            // Bind the result, run cleanup on every failure path, then
+            // propagate. On the non-error paths we still need the ability
+            // to continue the trampoline (self-TCO) or retarget (mutual
+            // TCO) without tearing down the root-scope snapshot, which is
+            // handled inside the `Ok(result)` match below.
+            let body_result = self.eval_statements(&current_func.body);
+            let result = match body_result {
+                Ok(signal) => signal,
+                Err(err) => {
+                    self.env.pop_scope(); // pop local scope
+                    self.env.pop_scope(); // pop closure scope
+                    self.type_defs = saved_td_root.clone();
+                    self.enum_defs = saved_ed_root.clone();
+                    self.active_function = prev_active;
+                    self.call_depth -= 1;
+                    return Err(err);
+                }
+            };
 
             self.env.pop_scope(); // pop local scope
             self.env.pop_scope(); // pop closure scope
@@ -1846,6 +2038,16 @@ impl Interpreter {
                             current_func = target_func.clone();
                             self.active_function = Some(target_name);
                             current_args = new_args;
+                            // C20B-015 / ROOT-18: target function may be from
+                            // a different module. Reset to the caller's
+                            // saved root scope, then re-overlay with the new
+                            // function's defining-module scope. This keeps
+                            // overlays scoped to exactly the iterations that
+                            // need them and never leaks a previous iteration's
+                            // overlay into a later iteration's scope.
+                            self.type_defs = saved_td_root.clone();
+                            self.enum_defs = saved_ed_root.clone();
+                            let _ = self.push_func_module_scope(&current_func);
                             continue;
                         } else {
                             // Target function not found in any scope — fall back to
@@ -1853,6 +2055,8 @@ impl Interpreter {
                             // where a non-recursive function call in tail position was
                             // speculatively treated as a mutual tail call.
                             self.active_function = prev_active.clone();
+                            self.type_defs = saved_td_root.clone();
+                            self.enum_defs = saved_ed_root.clone();
                             // Re-evaluate the original function body without tail call optimization.
                             // We need to re-execute the function with the original args but
                             // as a normal call. Instead, we reconstruct the call.
@@ -1872,7 +2076,9 @@ impl Interpreter {
                     continue;
                 }
                 other => {
-                    // Normal result: restore and return
+                    // Normal result: restore and return.
+                    self.type_defs = saved_td_root.clone();
+                    self.enum_defs = saved_ed_root.clone();
                     self.active_function = prev_active;
                     self.call_depth -= 1;
                     return Ok(other);

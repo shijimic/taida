@@ -3866,13 +3866,16 @@ check(10, 20, 30)
 
     #[test]
     fn test_f46_multiline_cond_branch_still_works() {
-        // Multi-line condition branches at statement level should still work.
+        // C20-1 (ROOT-5): multi-line rhs guards now require parens. The
+        // parenthesised form is the canonical escape hatch and the
+        // `medium` semantics the test pins is unchanged.
         let src = r#"
 x <= 5
-result <=
+result <= (
   | x > 10 |> "big"
   | x > 3 |> "medium"
   | _ |> "small"
+)
 stdout(result)
 "#;
         let (_val, output) = eval_with_output(src);

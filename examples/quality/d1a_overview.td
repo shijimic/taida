@@ -31,12 +31,14 @@ result <= add(3, 5)
 stdout(result.toString())
 
 // Condition
+// C20-5: multi-line rhs multi-arm guard is rejected with [E0303]; wrap in parens.
 score <= 85
-grade <=
+grade <= (
   | score >= 90 |> "A"
   | score >= 80 |> "B"
   | score >= 70 |> "C"
   | _ |> "D"
+)
 stdout(grade)
 
 // Pipeline (using step-by-step, not pipeline syntax)

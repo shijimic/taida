@@ -176,14 +176,63 @@ impl Interpreter {
                         }
                         Ok(Some(Signal::Value(Value::Str(line))))
                     }
-                    Err(e) => Ok(Some(Signal::Throw(Value::Error(
-                        super::value::ErrorValue {
-                            error_type: "IoError".to_string(),
-                            message: format!("Cannot read from stdin: {}", e),
-                            fields: Vec::new(),
-                        },
-                    )))),
+                    // C20-3 (ROOT-9): previously threw IoError, but JS and
+                    // Native silently returned "" on failure, breaking
+                    // 3-backend parity. Align on the silently-empty fallback
+                    // (default-value guarantee). Callers that need
+                    // error-awareness must switch to the new `stdinLine`
+                    // API which returns `Async[Lax[Str]]`.
+                    Err(_) => Ok(Some(Signal::Value(Value::Str(String::new())))),
                 }
+            }
+
+            // ── stdinLine(prompt?): UTF-8-aware read line (prelude) ──
+            //
+            // C20-2 (ROOT-7): the cooked-mode `stdin` above deletes one
+            // byte at a time when Backspace is pressed, which corrupts
+            // multibyte UTF-8 codepoints. `stdinLine` instead delegates
+            // to `rustyline`, whose default editor treats Backspace as a
+            // char-wide deletion and implements arrow-key / Ctrl-U / etc.
+            // line-editing that callers expect from a modern REPL.
+            //
+            // Return shape: `Async[Lax[Str]]`. The Async wrapper exists
+            // purely so that the JS backend (node:readline/promises is
+            // async-only) and the Interpreter / Native backends (rustyline
+            // / linenoise are synchronous) can share a single surface
+            // type. The wrapper is fulfilled immediately on this backend;
+            // callers unmold it with `]=> line` to obtain the `Lax[Str]`.
+            //
+            // Failure modes (all collapse to `Lax[Str].failure("")` so the
+            // default-value guarantee is preserved):
+            //   * `DefaultEditor::new()` failed (no TTY, no tcgetattr, …)
+            //   * `readline` returned `Eof` (pipe / ^D)
+            //   * `readline` returned `Interrupted` (^C)
+            //   * any other IO / utf-8 error
+            "stdinLine" => {
+                use rustyline::{DefaultEditor, error::ReadlineError};
+                let prompt = if let Some(arg) = args.first() {
+                    match self.eval_expr(arg)? {
+                        Signal::Value(v) => v.to_display_string(),
+                        other => return Ok(Some(other)),
+                    }
+                } else {
+                    String::new()
+                };
+                let inner = match DefaultEditor::new() {
+                    Ok(mut rl) => match rl.readline(&prompt) {
+                        Ok(line) => super::os_eval::make_lax_success_pub(Value::Str(line)),
+                        Err(ReadlineError::Eof)
+                        | Err(ReadlineError::Interrupted)
+                        | Err(_) => super::os_eval::make_lax_failure_pub(Value::Str(String::new())),
+                    },
+                    Err(_) => super::os_eval::make_lax_failure_pub(Value::Str(String::new())),
+                };
+                Ok(Some(Signal::Value(Value::Async(AsyncValue {
+                    status: AsyncStatus::Fulfilled,
+                    value: Box::new(inner),
+                    error: Box::new(Value::Unit),
+                    task: None,
+                }))))
             }
 
             // ── nowMs(): wall-clock epoch milliseconds (prelude) ──

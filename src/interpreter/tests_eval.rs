@@ -616,13 +616,16 @@ result <= numbers.get(10).unmold()
 
     #[test]
     fn test_eval_condition_branch() {
-        let source = "score <= 95\ngrade <=\n  | score >= 90 |> \"A\"\n  | score >= 80 |> \"B\"\n  | _ |> \"F\"\ngrade";
+        // C20-1 (ROOT-5): multi-line rhs guards now require the
+        // parenthesised escape hatch. Semantics unchanged.
+        let source = "score <= 95\ngrade <= (\n  | score >= 90 |> \"A\"\n  | score >= 80 |> \"B\"\n  | _ |> \"F\"\n)\ngrade";
         assert_eq!(eval_ok(source), Value::Str("A".to_string()));
     }
 
     #[test]
     fn test_eval_condition_branch_default() {
-        let source = "score <= 50\ngrade <=\n  | score >= 90 |> \"A\"\n  | _ |> \"F\"\ngrade";
+        // C20-1 (ROOT-5): see note above.
+        let source = "score <= 50\ngrade <= (\n  | score >= 90 |> \"A\"\n  | _ |> \"F\"\n)\ngrade";
         assert_eq!(eval_ok(source), Value::Str("F".to_string()));
     }
 

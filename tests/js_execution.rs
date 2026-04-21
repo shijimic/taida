@@ -197,9 +197,11 @@ fn test_js_exec_conditions() {
         "conditions",
         r#"
 x <= 10
-result <= | x > 5 |> "big"
-          | x > 0 |> "small"
-          | _ |> "zero"
+result <= (
+  | x > 5 |> "big"
+  | x > 0 |> "small"
+  | _ |> "zero"
+)
 stdout(result)
 "#,
     );

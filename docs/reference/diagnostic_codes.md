@@ -25,6 +25,22 @@
 |--------|-----------|---------|
 | `E0301` | 単一方向制約違反 — `=>` と `<=` の混在禁止 | Parser / Verify |
 | `E0302` | 単一方向制約違反 — `]=>` と `<=[` の混在禁止 | Parser / Verify |
+| `E0303` | 単一方向制約違反 — `<=` の右辺に複数行の `\| cond \|> body` 多アーム条件を書けない (C20-1 silent-bug 禁圧) | Parser |
+
+#### `E0303` — `<=` 右辺の複数行多アーム条件は禁止
+
+**フェーズ**: Parser (`src/parser/parser_expr.rs::parse_cond_branch`)
+
+**契機**: C20-1 (ROOT-5 / C19B-009) silent-bug 禁圧。`name <= | cond |> A | _ |> B` を複数行に分けて書くと、旧 parser は続きの top-level 文を greedy に arm body として吸収していた (`taida check` は通り、module load で symbol が消える)。**`CondBranchContext::LetRhs`** を `<=` 束縛の rhs で設定し、continuation arm が別行に現れたら `[E0303]` を発射する。
+
+**代替手段**:
+
+1. `name <= If[cond, then, else]()` — 二肢条件の素直な表現
+2. ヘルパ関数抽出 — `pickName ctx = | ... |> ... | _ |> ...`
+3. 丸括弧でラップ — `name <= (| ... |> ... | _ |> ...)` (括弧が `CondBranchContext` を `TopLevel` に戻すため、多行形式でも境界が一意になる)
+
+**許容される形**: single-line (すべての `|` が同じ物理行にある `name <= | a |> 1 | _ |> 2`) / top-level / function body / 括弧包み。
+
 
 ### 型エラー (`E04xx`)
 
@@ -69,6 +85,7 @@
 | `E1508` | メソッド呼び出しの引数個数または型が不一致 | TypeChecker | — |
 | `E1509` | generic function の型変数が declared constraint を満たさない | TypeChecker | — |
 | `E1510` | inference-only generic function の型変数が parameter annotation / call から束縛・推論できない、または concrete type 名と衝突する | TypeChecker | — |
+| `E1511` | ユーザー定義関数を mold 構文 `Fn[args]()` で呼ぶ際に named fields `()` を渡せない — `Fn[a, b]()` か `Fn(a, b)` のみ | TypeChecker | C20B-014 |
 
 ## 帯域ルール
 

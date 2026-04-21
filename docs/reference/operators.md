@@ -462,9 +462,10 @@ lax <= Div[10, 3]()
 // unmold()で値を取得（メソッド形式）
 x <= lax.unmold()  // 3
 
-result <=
+result <= (
   | x > 10 |> "large"
   | _ |> "small"
+)
 ```
 
 ---
@@ -605,10 +606,12 @@ sum3()   // 30
 ### 条件付き処理
 
 ```taida
-value <=
+// 複数行の多アーム条件は丸括弧で包みます（E0303）。
+value <= (
   | condition1 |> result1
   | condition2 |> result2
   | _ |> defaultResult
+)
 ```
 
 ### エラー処理

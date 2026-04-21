@@ -1,5 +1,181 @@
 # Changelog
 
+## @c.20.rc4 (in progress)
+
+Complete the Hachikuma Phase 8-10 / Phase D follow-up track: parser
+silent-bug elimination, stdin UX alignment across three backends, and
+a list-of-record shape for `HttpRequest` headers so dash-bearing names
+like `x-api-key` are finally reachable from Taida.
+
+### Parser — new diagnostic `E0303`
+
+`name <= | cond |> A | _ |> B` written across multiple physical lines
+on the right-hand side of `<=` silently greedy-absorbed the next
+statement as a continuation arm (C19B-009 / ROOT-5). One-line
+`|== error: Error = <expr>` dropped every subsequent top-level
+definition from the loaded module (C19B-008 / ROOT-4). Both shapes
+checker-green'd and broke at runtime.
+
+Now:
+
+- One-line `|== error: Error = <expr>` parses as a single-expression
+  handler body and leaves surrounding definitions intact (equivalent
+  to the multi-line block form).
+- Multi-line multi-arm `| cond |> A | _ |> B` on the right-hand side
+  of `<=` is rejected with
+  `[E0303] rhs of \`<=\` cannot contain a multi-arm conditional`.
+  Use `If[cond, then, else]()`, extract a helper, or wrap the
+  conditional in parentheses (`name <= (| ... |> ...)`), which
+  restores the top-level parsing context.
+- Single-line rhs guards (`name <= | a |> 1 | _ |> 2` on one
+  physical line) remain a legal one-shot shape.
+- Top-level / function-body `| cond |> body` is untouched.
+
+### New: `stdinLine(prompt?) => :Async[Lax[Str]]`
+
+Hachikuma Phase D's Japanese interview flow exposed ROOT-7: kernel
+cooked-mode Backspace deletes one byte at a time, corrupting
+multibyte UTF-8 when users edit their typing. C20-2 introduces a
+dedicated prelude API that routes through a UTF-8-aware line editor
+on all three backends:
+
+- Interpreter: `rustyline` (MIT/Apache-2.0), default editor with
+  codepoint-wide Backspace, arrow keys, and Ctrl-U line clear.
+- JS: `node:readline/promises` + `rl.question()`; TTY mode enables
+  the full editor, pipe mode falls back to line-buffered reads.
+- Native: a trimmed derivative of linenoise (BSD-2-Clause, see
+  `LICENSES/linenoise.LICENSE`) — termios raw mode, UTF-8
+  codepoint-aware Backspace, pipe input drops through to `getline`.
+
+```taida
+stdinLine("お名前: ") ]=> line
+stdout("こんにちは、" + line.getOrDefault("旅人"))
+```
+
+Shape and discipline:
+
+- Return type is **`Async[Lax[Str]]`** across all three backends. The
+  Async wrapper exists so the JS path (async-only readline) and the
+  Interpreter / Native paths (sync editors) share one surface. Callers
+  **must** unmold with `]=>` to obtain the inner `Lax[Str]`; `<=`
+  binding leaves the Async in place.
+- Any failure (EOF, pipe close, Ctrl-C, Ctrl-D on empty line, missing
+  `node:readline/promises`, `termios` error, …) collapses to
+  `Lax(null, "")` so the default-value guarantee is preserved —
+  `.getOrDefault("")` and `.isEmpty()` both keep working.
+- Prompt is optional; non-Str prompts are display-stringified before
+  being written, matching the ROOT-14 parity rule already applied to
+  `stdin`.
+- Out of scope: history, tab completion, multi-line edit. A future
+  `taida-lang/readline` addon will layer those features on top.
+
+### `stdin` — three-backend parity (no new API)
+
+`stdin(prompt?)` now behaves identically on Interpreter, JS, and
+Native:
+
+- Returns `""` on EOF / read error everywhere (Interpreter used to
+  throw `IoError`; JS and Native already silently returned empty).
+  Callers that need failure awareness should use the new
+  `stdinLine => :Lax[Str]` API (see next section).
+- Prompt is optional on every backend including the type checker
+  (`stdin()` is now valid; previously `[E1507]` rejected it).
+- JS decodes stdin via a streaming `TextDecoder('utf-8', { stream })`
+  over a 4 KiB chunk buffer — multibyte codepoints survive chunk
+  boundaries instead of collapsing to U+FFFD.
+- JS stringifies non-Str prompts via `String(prompt)` inside the
+  try/catch so `stdin(1)` / `stdin(@(...))` no longer crashes Node
+  with `ERR_INVALID_ARG_TYPE`.
+- Native replaces the fixed `char[4096]` stack buffer with
+  `getline(3)` on POSIX / a `fgets` realloc loop on Windows, so long
+  pasted lines are read completely instead of bleeding the tail into
+  the next `stdin` call.
+
+### `HttpRequest` — list-of-record headers
+
+Dash-bearing HTTP headers (`x-api-key`, `anthropic-version`,
+`content-type`, ...) are no longer reachable via buchi-pack
+identifier keys. C20 adds a second accepted shape:
+
+```taida
+resp <= HttpRequest["POST", "https://api.example.com/v1/echo"](
+  headers <= @[
+    @(name <= "x-api-key", value <= "secret-k"),
+    @(name <= "anthropic-version", value <= "2023-06-01"),
+  ],
+  body <= "{}",
+) ]=> await
+```
+
+Both shapes are supported on all three backends:
+
+- Legacy: `headers <= @(ident <= "value")` — identifier becomes the
+  wire header name as before.
+- New: `headers <= @[@(name <= "...", value <= "...")]` — any UTF-8
+  is legal in the wire name.
+
+Also:
+- JS `HttpRequest[method]()` (fewer than 2 type args) now fails at
+  `taida build --target js` time with
+  `HttpRequest requires at least 2 type arguments`, matching the
+  Interpreter and Native rejection path instead of emitting
+  syntactically invalid JavaScript.
+- Native lowering's undocumented third-type-arg body fallback
+  (`HttpRequest["POST", url, body]()`) has been removed. Interpreter
+  and JS always consulted the `body <= ...` field only, so this shape
+  silently sent a body on Native while the other two backends sent an
+  empty string — a cross-backend parity trap (C20B-012 / ROOT-15). No
+  in-tree Taida code relied on the legacy shape; migrate to
+  `HttpRequest["POST", url](body <= "...")`.
+
+### User-defined functions called via mold syntax (C20B-014 / ROOT-17)
+
+User-defined functions invoked as `Fn[arg1, arg2]()` now dispatch to
+the function instead of silently returning a `@(__value, __type)` mold
+wrapper. This closes a 2.1.3-era regression that silently passed
+`taida check` but crashed Hachikuma's TUI at every one of 81 call
+sites (`CursorMoveTo[r, c]()`, `PadWidth[t, w]()`,
+`TruncateWidth[t, w]()`, …). The diagnostic surface aligns:
+
+- **Interpreter** (`src/interpreter/eval.rs`): before the generic
+  mold-wrap path, `MoldInst` now detects `Value::Function` in scope
+  with no matching `MoldDef` and dispatches to `call_function` with
+  `type_args` treated positionally.
+- **Native lowering** (`src/codegen/lower_molds.rs`): before the
+  `unsupported mold type` error, the `_` arm consults
+  `self.user_funcs` and lowers through `lower_func_call` for known
+  user functions. Previously `Fn[args]()` failed at build time.
+- **Checker** (`src/types/checker.rs`): the `MoldInst` fallback now
+  returns the function's registered return type instead of
+  `Type::Unknown`, so downstream type inference matches runtime
+  behaviour. Named `()` fields on a user-fn mold-syntax call are
+  rejected with new diagnostic `[E1511]` — user functions have no
+  named-field ABI.
+- **JS** is unchanged. Its existing
+  `__taida_solidify(Fn(args))` generic fallback already dispatched to
+  the user function correctly; the regression test pins that the
+  behaviour matches the Interpreter's new shape.
+
+Both `Fn[args]()` and `Fn(args)` are valid and produce identical
+results across all three backends.
+
+### Tests
+
+- `tests/c20_parser_silent_bugs.rs` (parser unit, 8 cases)
+- `tests/c20_stdin_parity.rs` (3 backends × 4 fixtures + checker
+  no-prompt + JS non-Str prompt guard, 14 cases)
+- `tests/c20_stdinline_parity.rs` (3 backends × 3 fixtures + 3 checker
+  cases, 12 cases — pins `Async[Lax[Str]]` surface, EOF failure, UTF-8
+  round-trip)
+- `tests/c20_http_dash_header.rs` (3 backends × 2 header shapes +
+  JS arity guard, 7 cases)
+- `tests/c20b_014_mold_user_fn_call.rs` (3 backends + 2 checker cases,
+  5 cases — pins user-fn mold-syntax dispatch and `[E1511]` rejection)
+- `examples/quality/c20_parser/*` (2 pins)
+- `examples/quality/c20_stdin/*` (4 pins)
+- `examples/quality/c20_stdinline/*` (3 pins)
+- `examples/quality/c20_mold_user_fn/*` (1 pin)
+
 ## @c.19.rc4
 
 Add TTY-passthrough variants of the process-execution APIs so Taida

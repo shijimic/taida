@@ -10,6 +10,9 @@ debug(double(5))
 nums <= @[1, 2, 3]
 debug(nums)
 
-result <= | asuka.age > 25 |> "adult"
-          | _ |> "young"
+// C20-1 (ROOT-5): parenthesise multi-line rhs guard.
+result <= (
+  | asuka.age > 25 |> "adult"
+  | _ |> "young"
+)
 debug(result)

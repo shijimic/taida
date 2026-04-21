@@ -309,7 +309,7 @@ impl Lowering {
         Ok(effective_args)
     }
 
-    pub(super) fn lower_func_call(
+    pub(crate) fn lower_func_call(
         &mut self,
         func: &mut IrFunction,
         callee: &Expr,
@@ -803,6 +803,24 @@ impl Lowering {
                 }
                 // stdin: optional prompt arg (pass empty string if none)
                 if name == "stdin" {
+                    let prompt_var = if let Some(arg) = args.first() {
+                        let arg_var = self.lower_expr(func, arg)?;
+                        self.convert_to_string(func, arg, arg_var)?
+                    } else {
+                        let empty = func.alloc_var();
+                        func.push(IrInst::ConstStr(empty, String::new()));
+                        empty
+                    };
+                    let result = func.alloc_var();
+                    func.push(IrInst::Call(result, rt_name, vec![prompt_var]));
+                    return Ok(result);
+                }
+                // C20-2: stdinLine — mirrors `stdin` arity / prompt
+                // stringification but the runtime returns Async[Lax[Str]]
+                // rather than a bare Str. The prompt is optional and is
+                // display-stringified when present so non-Str prompts
+                // parity-match the interpreter / JS behaviour.
+                if name == "stdinLine" {
                     let prompt_var = if let Some(arg) = args.first() {
                         let arg_var = self.lower_expr(func, arg)?;
                         self.convert_to_string(func, arg, arg_var)?

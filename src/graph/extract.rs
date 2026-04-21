@@ -1696,7 +1696,8 @@ mod tests {
 
     #[test]
     fn test_dataflow_condition_branch() {
-        let source = "x <= 10\ny <=\n  | x > 5 |> \"big\"\n  | _ |> \"small\"";
+        // C20-1 (ROOT-5): wrap multi-line rhs guard in parens.
+        let source = "x <= 10\ny <= (\n  | x > 5 |> \"big\"\n  | _ |> \"small\"\n)";
         let graph = parse_and_extract(source, GraphView::Dataflow);
         assert!(graph.nodes.iter().any(|n| n.kind == NodeKind::Condition));
         assert!(

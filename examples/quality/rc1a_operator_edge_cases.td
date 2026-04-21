@@ -58,12 +58,14 @@ stdout(big_ones2)
 // === 3. Condition operators: |, |> ===
 
 // 3a: Basic condition
+// C20-5: multi-line rhs multi-arm guard is rejected with [E0303]; wrap in parens.
 val3 <= 15
-grade <=
+grade <= (
   | val3 >= 90 |> "A"
   | val3 >= 80 |> "B"
   | val3 >= 70 |> "C"
   | _ |> "F"
+)
 stdout(grade)
 
 // 3b: Single-line condition
@@ -72,19 +74,21 @@ stdout(sign)
 
 // 3c: Nested condition
 staff <= @(role <= "commander", active <= true)
-access <=
+access <= (
   | staff.role == "commander" |>
     | staff.active |> "full"
     | _ |> "readonly"
   | _ |> "none"
+)
 stdout(access)
 
 // 3d: Condition with complex expressions
 nums <= @[1, 2, 3, 4, 5]
-category <=
+category <= (
   | nums.length() > 10 |> "large"
   | nums.length() > 3 |> "medium"
   | _ |> "small"
+)
 stdout(category)
 
 // === 4. Error ceiling |== ===

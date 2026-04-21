@@ -272,6 +272,9 @@ taida_val taida_list_all(taida_ptr list_ptr, taida_fn_ptr fn_ptr);
 taida_val taida_list_none(taida_ptr list_ptr, taida_fn_ptr fn_ptr);
 // Prelude functions
 taida_ptr taida_io_stdin(taida_ptr prompt_ptr);
+// C20-2: UTF-8-aware Async[Lax[Str]] line editor. See implementation
+// near the bottom of this file for the full prologue.
+taida_ptr taida_io_stdin_line(taida_ptr prompt_ptr);
 taida_ptr taida_sha256(taida_val value);
 taida_val taida_time_now_ms(void);
 taida_val taida_time_sleep(taida_val ms);
@@ -8155,31 +8158,60 @@ taida_val taida_sha256(taida_val value) {
     return out;
 }
 
+// C20-3 (ROOT-8): previously a fixed 4096-byte stack buffer truncated
+// long paste input; the unread tail would bleed into the next `stdin`
+// call and break 3-backend parity (Interpreter / JS both use dynamic
+// buffers). Switch to a dynamic growth strategy: `getline(3)` on POSIX
+// and a realloc-loop around `fgets` on Windows.
 taida_val taida_io_stdin(taida_val prompt_ptr) {
-    // Print prompt if provided
     const char *prompt = (const char*)prompt_ptr;
     if (prompt && prompt[0] != '\0') {
         printf("%s", prompt);
         fflush(stdout);
     }
-    // Read a line from stdin
-    char line[4096];
-    if (fgets(line, sizeof(line), stdin) == NULL) {
-        // EOF or error — return empty string
-        return (taida_val)taida_str_alloc(0);
-    }
-    // Strip trailing newline
-    size_t slen = strlen(line);
-    if (slen > 0 && line[slen - 1] == '\n') {
-        line[slen - 1] = '\0';
-        slen--;
-        if (slen > 0 && line[slen - 1] == '\r') {
-            line[slen - 1] = '\0';
-            slen--;
+#if defined(_WIN32)
+    // Windows fallback: realloc loop around fgets. `getline` is not
+    // part of the Windows CRT. We grow the buffer until `\n` is seen
+    // or EOF / error is reached.
+    size_t cap = 1024;
+    char *buf = (char*)TAIDA_MALLOC(cap, "stdin_buf");
+    size_t len = 0;
+    for (;;) {
+        if (fgets(buf + len, (int)(cap - len), stdin) == NULL) {
+            if (len == 0) {
+                free(buf);
+                return (taida_val)taida_str_alloc(0);
+            }
+            break; // EOF with data already read
+        }
+        len += strlen(buf + len);
+        if (len > 0 && buf[len - 1] == '\n') break;
+        if (cap - len <= 1) {
+            cap *= 2;
+            TAIDA_REALLOC(buf, cap, "stdin_buf");
         }
     }
-    char *r = taida_str_alloc(slen);
-    memcpy(r, line, slen);
+    size_t ulen = len;
+#else
+    char *buf = NULL;
+    size_t cap = 0;
+    ssize_t got = getline(&buf, &cap, stdin);
+    if (got < 0) {
+        // EOF or error. `getline` may have allocated buf even on
+        // failure — free it to avoid leaks.
+        free(buf);
+        return (taida_val)taida_str_alloc(0);
+    }
+    size_t ulen = (size_t)got;
+#endif
+    // Strip trailing \n / \r\n.
+    if (ulen > 0 && buf[ulen - 1] == '\n') {
+        ulen--;
+        if (ulen > 0 && buf[ulen - 1] == '\r') ulen--;
+    }
+    char *r = taida_str_alloc(ulen);
+    memcpy(r, buf, ulen);
+    free(buf);
     return (taida_val)r;
 }
 
@@ -8251,5 +8283,215 @@ taida_val taida_io_stderr_with_tag(taida_val val, taida_val tag) {
         return (taida_val)strlen(s);
     }
     return 0;
+}
+
+// ─── C20-2: stdinLine — UTF-8-aware Async[Lax[Str]] line editor ─────────
+//
+// Derived from linenoise (https://github.com/antirez/linenoise,
+// BSD-2-Clause). Only the minimum subset needed to fix ROOT-7 (cooked-
+// mode kernel Backspace corrupting multibyte UTF-8) is included:
+//
+//   * termios raw-mode TTY input on POSIX (linenoise's `enableRawMode`).
+//   * UTF-8 codepoint-aware Backspace (linenoise's `linenoiseEditBackspace`
+//     simplified to strip whole codepoints from the buffer in one step).
+//   * ^C → treated as cancelled read, returns Lax failure with default "".
+//   * ^D on empty line → EOF, returns Lax failure.
+//   * Pipe / non-TTY input → falls back to getline (Phase 3's stdin path).
+//
+// Explicitly NOT implemented: history, tab completion, multi-line edit,
+// arrow-key cursor movement, window-size tracking. Callers that want a
+// full readline experience should install the future
+// `taida-lang/readline` addon. Taida's `stdinLine` is intentionally a
+// minimal surface so the 3-backend parity is auditable.
+//
+// License: BSD-2-Clause, see `LICENSES/linenoise.LICENSE` at the repo
+// root for the full text and attribution.
+#include <termios.h>
+#include <unistd.h>
+
+// Helper: wrap a Lax pack in a fulfilled Async. Taida surface is
+// Async[Lax[Str]] across all 3 backends.
+static taida_val taida_io_stdin_line_async_wrap(taida_val lax) {
+    taida_val *obj = (taida_val*)TAIDA_MALLOC(7 * sizeof(taida_val), "stdinLine_async");
+    obj[0] = TAIDA_ASYNC_MAGIC | 1;  // magic + refcount
+    obj[1] = 1;                       // fulfilled
+    obj[2] = lax;
+    obj[3] = 0;                       // no error
+    obj[4] = 0;                       // no thread
+    obj[5] = TAIDA_TAG_PACK;          // Lax is a Pack
+    obj[6] = TAIDA_TAG_UNKNOWN;
+    return (taida_val)obj;
+}
+
+// Build Lax[Str].failure("") wrapped in Async (3-backend parity shape).
+static taida_val taida_io_stdin_line_failure(void) {
+    taida_val empty = (taida_val)taida_str_alloc(0);
+    return taida_io_stdin_line_async_wrap(taida_lax_empty(empty));
+}
+
+// Build Lax[Str].success(line) wrapped in Async.
+// `buf` is copied into a fresh taida_str so ownership semantics are clean.
+static taida_val taida_io_stdin_line_success(const char *buf, size_t n) {
+    char *r = taida_str_alloc(n);
+    if (n > 0) memcpy(r, buf, n);
+    return taida_io_stdin_line_async_wrap(taida_lax_new((taida_val)r, (taida_val)""));
+}
+
+// Fallback: non-TTY (pipe / redirect). Use getline semantics shared with
+// `taida_io_stdin` so long lines and UTF-8 payloads survive intact. No
+// in-band editing is performed (the kernel already buffered the line).
+static taida_val taida_io_stdin_line_fallback(const char *prompt) {
+    if (prompt && prompt[0] != '\0') { printf("%s", prompt); fflush(stdout); }
+    char *buf = NULL;
+    size_t cap = 0;
+    ssize_t got = getline(&buf, &cap, stdin);
+    if (got < 0) {
+        free(buf);
+        return taida_io_stdin_line_failure();
+    }
+    size_t ulen = (size_t)got;
+    if (ulen > 0 && buf[ulen - 1] == '\n') {
+        ulen--;
+        if (ulen > 0 && buf[ulen - 1] == '\r') ulen--;
+    }
+    taida_val result = taida_io_stdin_line_success(buf, ulen);
+    free(buf);
+    return result;
+}
+
+// Find the start of the previous UTF-8 codepoint inside `buf[0..len)`.
+// Returns the byte offset of the codepoint start, or 0 if the buffer
+// is empty or all continuation bytes.
+static size_t tl_utf8_prev_start(const char *buf, size_t len) {
+    if (len == 0) return 0;
+    size_t i = len - 1;
+    while (i > 0 && ((unsigned char)buf[i] & 0xC0) == 0x80) {
+        i--;
+    }
+    return i;
+}
+
+taida_val taida_io_stdin_line(taida_val prompt_ptr) {
+    const char *prompt = (const char*)prompt_ptr;
+
+    // Non-TTY (pipe / redirect): fall back to getline so that e.g.
+    // `echo "..." | taida run` still works. Editing keys are irrelevant
+    // when the kernel has already framed the line.
+    if (!isatty(STDIN_FILENO) || !isatty(STDOUT_FILENO)) {
+        return taida_io_stdin_line_fallback(prompt);
+    }
+
+    struct termios saved_termios, raw_termios;
+    if (tcgetattr(STDIN_FILENO, &saved_termios) == -1) {
+        // Cannot enter raw mode — still return a Lax shape.
+        return taida_io_stdin_line_fallback(prompt);
+    }
+    raw_termios = saved_termios;
+    // linenoise: disable canonical mode + echo so we own the edit loop.
+    raw_termios.c_lflag &= ~(ECHO | ICANON | IEXTEN | ISIG);
+    raw_termios.c_iflag &= ~(BRKINT | ICRNL | INPCK | ISTRIP | IXON);
+    raw_termios.c_cflag |= CS8;
+    raw_termios.c_oflag &= ~(OPOST);
+    raw_termios.c_cc[VMIN] = 1;
+    raw_termios.c_cc[VTIME] = 0;
+    if (tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw_termios) == -1) {
+        return taida_io_stdin_line_fallback(prompt);
+    }
+
+    // Print prompt (raw mode means \r\n needs explicit \r).
+    if (prompt && prompt[0] != '\0') {
+        ssize_t pw = write(STDOUT_FILENO, prompt, strlen(prompt));
+        (void)pw;
+    }
+
+    size_t cap = 256;
+    size_t len = 0;
+    char *buf = (char*)TAIDA_MALLOC(cap, "stdinLine_edit");
+    int completed = 0; // 1 = Enter pressed, 0 = EOF / Ctrl-C
+
+    while (1) {
+        unsigned char c;
+        ssize_t nread = read(STDIN_FILENO, &c, 1);
+        if (nread <= 0) {
+            // EOF (pipe closure mid-read on a TTY is rare but possible).
+            break;
+        }
+
+        if (c == 13 /* \r */ || c == 10 /* \n */) {
+            // Enter: echo \r\n so the next shell prompt starts on a fresh
+            // line, then break out of the edit loop.
+            ssize_t ew = write(STDOUT_FILENO, "\r\n", 2); (void)ew;
+            completed = 1;
+            break;
+        }
+        if (c == 3 /* Ctrl-C */) {
+            // Cancel — restore termios and return Lax failure.
+            ssize_t ew = write(STDOUT_FILENO, "^C\r\n", 4); (void)ew;
+            break;
+        }
+        if (c == 4 /* Ctrl-D */) {
+            if (len == 0) {
+                // EOF on empty line → Lax failure.
+                ssize_t ew = write(STDOUT_FILENO, "\r\n", 2); (void)ew;
+                break;
+            }
+            continue;
+        }
+        if (c == 127 /* DEL / Backspace */ || c == 8 /* BS */) {
+            // UTF-8-aware Backspace: delete the last full codepoint.
+            if (len > 0) {
+                size_t prev = tl_utf8_prev_start(buf, len);
+                len = prev;
+                // Move cursor back 1 display column (approximation —
+                // CJK / emoji are ≥ 2 columns but one codepoint, so
+                // the visual blank may leave a stray space on wide
+                // characters. Acceptable for a minimal editor.)
+                ssize_t ew = write(STDOUT_FILENO, "\b \b", 3); (void)ew;
+            }
+            continue;
+        }
+        if (c == 21 /* Ctrl-U */) {
+            // Clear the current line buffer, redraw prompt.
+            while (len > 0) {
+                ssize_t ew = write(STDOUT_FILENO, "\b \b", 3); (void)ew;
+                len--;
+            }
+            continue;
+        }
+        if (c < 32) {
+            // Ignore other control chars. Arrow keys arrive as 3-byte
+            // ESC sequences — best-effort consume by reading the next
+            // 2 bytes and discarding. History / cursor movement is
+            // intentionally not implemented in this minimal editor.
+            if (c == 27) {
+                unsigned char seq[2];
+                if (read(STDIN_FILENO, &seq[0], 1) == 1) {
+                    ssize_t _r = read(STDIN_FILENO, &seq[1], 1);
+                    (void)_r;
+                }
+            }
+            continue;
+        }
+
+        // Regular byte (ASCII or UTF-8 codepoint start / continuation).
+        // Buffer it, echo as-is. Terminal renders UTF-8 correctly so
+        // multibyte characters appear as a single glyph.
+        if (len + 1 >= cap) {
+            cap *= 2;
+            TAIDA_REALLOC(buf, cap, "stdinLine_edit");
+        }
+        buf[len++] = (char)c;
+        ssize_t ew = write(STDOUT_FILENO, (const char*)&c, 1); (void)ew;
+    }
+
+    tcsetattr(STDIN_FILENO, TCSAFLUSH, &saved_termios);
+
+    if (!completed) {
+        free(buf);
+        return taida_io_stdin_line_failure();
+    }
+    taida_val result = taida_io_stdin_line_success(buf, len);
+    free(buf);
+    return result;
 }
 

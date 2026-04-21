@@ -97,7 +97,8 @@ result <= outer(3)  // 18 (3 + 10 + 5)
 
 ```taida
 processValue value: Int =
-  result <=
+  // 複数行の多アーム条件は丸括弧で包みます（C20 / E0303）。
+  result <= (
     | value > 100 |>
       message <= "large"  // この分岐内でのみ有効
       message
@@ -106,6 +107,7 @@ processValue value: Int =
       message
     | _ |>
       "small"
+  )
 
   // message はここからアクセス不可
   result
@@ -119,12 +121,13 @@ processValue value: Int =
 ```taida
 processValue value: Int =
   // 分岐全体の結果を result に代入
-  result <=
+  result <= (
     | value > 100 |>
       message <= "large: " + value
       @(category <= "large", display <= message)
     | _ |>
       @(category <= "small", display <= "small value")
+  )
 
   // result を通じてアクセス
   result.category  // OK
@@ -239,7 +242,7 @@ processRequest request: Request =
     request.data
   => :Data
 
-  result <=
+  result <= (
     | request.valid |>
       // === 分岐スコープ ===
       data <= helper()
@@ -247,6 +250,7 @@ processRequest request: Request =
     | _ |>
       // === 別の分岐スコープ ===
       @(error <= "invalid")
+  )
 
   result
 => :Result

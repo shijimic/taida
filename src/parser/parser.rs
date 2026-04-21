@@ -31,6 +31,11 @@ pub struct Parser {
     errors: Vec<ParseError>,
     /// Current recursion depth for expression parsing (RCB-301).
     depth: usize,
+    /// C20-1 (ROOT-5): Context while reading a `| cond |> body` branch.
+    /// Switched to `LetRhs` while parsing the right-hand side of a `<=`
+    /// assignment so that a multi-line multi-arm guard is rejected with
+    /// `[E0303]` instead of greedily swallowing later top-level statements.
+    pub(crate) cond_branch_context: CondBranchContext,
 }
 
 impl Parser {
@@ -86,6 +91,7 @@ impl Parser {
             pos: 0,
             errors: Vec::new(),
             depth: 0,
+            cond_branch_context: CondBranchContext::TopLevel,
         }
     }
 
@@ -394,7 +400,15 @@ impl Parser {
             TokenKind::LtEq => {
                 self.advance(); // consume `<=`
                 self.skip_newlines(); // allow multiline (e.g., condition branch on next line)
-                let value = self.parse_expression()?;
+                // C20-1 (ROOT-5): mark this `<=` rhs as a LetRhs context so
+                // that a multi-line `| ... |> ...` guard is rejected with
+                // `[E0303]` instead of silently swallowing later
+                // statements. Restored after the expression parses.
+                let saved_ctx =
+                    std::mem::replace(&mut self.cond_branch_context, CondBranchContext::LetRhs);
+                let value = self.parse_expression();
+                self.cond_branch_context = saved_ctx;
+                let value = value?;
                 // Single-direction constraint: <= used, => must not follow on same line
                 if self.check(&TokenKind::FatArrow) {
                     return Err(ParseError {
@@ -416,7 +430,14 @@ impl Parser {
                 self.advance(); // consume `:`
                 let type_ann = self.parse_type_expr()?;
                 self.expect(&TokenKind::LtEq)?;
-                let value = self.parse_expression()?;
+                // Allow multi-line rhs (parity with the untyped `<=` form).
+                self.skip_newlines();
+                // C20-1 (ROOT-5): same LetRhs guard as the untyped form.
+                let saved_ctx =
+                    std::mem::replace(&mut self.cond_branch_context, CondBranchContext::LetRhs);
+                let value = self.parse_expression();
+                self.cond_branch_context = saved_ctx;
+                let value = value?;
                 Ok(Statement::Assignment(Assignment {
                     target: name,
                     type_annotation: Some(type_ann),
@@ -1216,14 +1237,59 @@ impl Parser {
         self.expect(&TokenKind::Colon)?;
         let error_type = self.parse_type_expr()?;
         self.expect(&TokenKind::Eq)?;
-        // Only skip Newline tokens, NOT Indent tokens — parse_block needs them
-        while matches!(self.peek_kind(), TokenKind::Newline) {
-            self.advance();
-        }
 
-        let handler_body = self.parse_block()?;
-        // C13B-010: reject discard bindings in `|==` handler body.
-        Self::reject_discard_bindings_in_expression_block(&handler_body, "`|==` handler body")?;
+        // C20-1 (ROOT-4 / C19B-008): one-line vs multi-line dispatch.
+        //
+        // Historical behaviour (multi-line only): `= ` is followed by a
+        // Newline, we swallow the newline(s) and fall into `parse_block`,
+        // which uses the first indented statement's column as the block
+        // indent. This is fine for the canonical multi-line form:
+        //
+        //     |== error: Error =
+        //       "caught: " + error.message
+        //     => :Str
+        //     | ... |> ...
+        //
+        // But the one-line form `|== error: Error = <expr>` writes the
+        // expression on the same line. In that case `peek_kind()` is the
+        // first token of the expression (e.g. `Ident` / `StringLit` /
+        // `False`), not `Newline`. If we drop into `parse_block`, the
+        // block indent becomes that expression's column and the block
+        // keeps consuming every same-column top-level definition after
+        // it — silently erasing `=> :Type`, handler arms, and every
+        // subsequent `stdout(...)`. `taida check` is happy because the
+        // AST is syntactically valid; the module loader later fails to
+        // find the vanished symbols (ROOT-4).
+        //
+        // Fix: if `= ` is immediately followed by an expression token
+        // (no Newline in between), parse a single expression and wrap it
+        // as `vec![Statement::Expr(expr)]`. This matches the semantics
+        // of the multi-line form where the block contains exactly one
+        // expression statement.
+        let handler_body = if matches!(self.peek_kind(), TokenKind::Newline) {
+            // Multi-line form — legacy behaviour.
+            // Only skip Newline tokens, NOT Indent tokens — parse_block needs them.
+            while matches!(self.peek_kind(), TokenKind::Newline) {
+                self.advance();
+            }
+            let block = self.parse_block()?;
+            // C13B-010: reject discard bindings in `|==` handler body.
+            Self::reject_discard_bindings_in_expression_block(&block, "`|==` handler body")?;
+            block
+        } else {
+            // C20-1: one-line form. Read a single expression and wrap it
+            // so that module-level statements after `|==` remain visible
+            // to the rest of `parse`. The trailing Newline after the
+            // expression is consumed by `skip_newlines()` below so that
+            // `=> :Type` (if present) parses as the handler's return
+            // type annotation, not as an orphaned arrow.
+            let expr = self.parse_expression()?;
+            let body = vec![Statement::Expr(expr)];
+            // Reject discard bindings / pure expressions that are a bare
+            // `_` — keeps parity with the multi-line form's guard.
+            Self::reject_discard_bindings_in_expression_block(&body, "`|==` handler body")?;
+            body
+        };
 
         // Skip any remaining indent/newline tokens after block
         self.skip_newlines();

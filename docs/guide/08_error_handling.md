@@ -170,6 +170,8 @@ ValidationError(type <= "ValidationError", message <= "Invalid", field <= "email
 
 ハンドラの戻り値型（`=> :ReturnType`）は、保護領域の戻り値型と一致しなければなりません。型が合わない場合はコンパイルエラーになります。
 
+> **C20-1 の one-line / multi-line 等価性**: `|== error: T = <expr>` を `=` の後に改行せず 1 行で書いた場合も、`|== error: T =\n  <expr>` の複数行で書いた場合も、意味は完全に等価です (ハンドラ本体は単一式 `Statement::Expr(<expr>)`)。**どちらの書式を使っても後続の top-level 定義・`stdout(...)`・`=> :Type` 注釈は失われません**。旧 parser では one-line 形式が後続を silent に吸収してしまう bug があり、C20-1 で `parse_error_ceiling` の one-line / multi-line dispatch を追加することで禁圧されました。
+
 > **C13-1 の末尾バインド短縮形**: `|==` ハンドラ本体の末尾が `name <= expr` / `expr => name` / `expr ]=> name` / `name <=[ expr` であるとき、束縛された値がそのままハンドラの結果になります。例:
 >
 > ```taida

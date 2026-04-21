@@ -15,6 +15,8 @@ impl Lowering {
             "stdout" => Some("taida_io_stdout"),
             "stderr" => Some("taida_io_stderr"),
             "stdin" => Some("taida_io_stdin"),
+            // C20-2: UTF-8-aware line editor. Returns Async[Lax[Str]].
+            "stdinLine" => Some("taida_io_stdin_line"),
             _ => None,
         }
     }

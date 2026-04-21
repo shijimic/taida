@@ -4996,6 +4996,8 @@ fn make_streaming_handler(stmts: Vec<Statement>) -> Value {
         body: stmts,
         closure: Arc::new(std::collections::HashMap::new()),
         return_type: None,
+        module_type_defs: None,
+        module_enum_defs: None,
     })
 }
 
@@ -6764,6 +6766,8 @@ fn test_http_serve_tls_arg_non_pack_rejected() {
             body: vec![],
             closure: std::sync::Arc::new(std::collections::HashMap::new()),
             return_type: None,
+            module_type_defs: None,
+            module_enum_defs: None,
         }),
     );
 
@@ -6807,6 +6811,8 @@ fn test_http_serve_tls_cert_key_returns_phase2_error() {
             body: vec![],
             closure: std::sync::Arc::new(std::collections::HashMap::new()),
             return_type: None,
+            module_type_defs: None,
+            module_enum_defs: None,
         }),
     );
 

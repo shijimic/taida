@@ -335,9 +335,10 @@ searchPilots query: Str limit: Int includeInactive: Bool =
     )
     results ]=> pilots
 
-    filtered <=
+    filtered <= (
       | includeInactive |> pilots
       | _ |> Filter[pilots, _ u = u.active]() ]=> active; active
+    )
 
     Take[filtered, limit]() ]=> limited
     limited
