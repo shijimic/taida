@@ -11,6 +11,13 @@ env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: "-D warnings"
 
+# C24 Phase 5 (RC-SLOW-5 / C24B-008): cancel stale CI runs from force-pushes.
+# PR branch pushes continue to target the PR ref; the concurrency group keys
+# on both workflow+ref so different PRs don't cancel each other.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   check:
     name: Check
@@ -26,9 +33,16 @@ jobs:
             ~/.cargo/git/db/
             ~/.cargo/git/checkouts/
             target/
+          # C24 Phase 5 (RC-SLOW-6 / C24B-008 adjacent): share a
+          # `cargo-base` warm cache across jobs so check / test / parity /
+          # e2e / clippy no longer each bring their own cold target/
+          # build. Job-specific key takes first priority on exact match;
+          # missing cases fall through `cargo-base` before giving up.
           key: ${{ runner.os }}-cargo-${{ github.job }}-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-${{ github.job }}-
+            ${{ runner.os }}-cargo-base-${{ hashFiles('**/Cargo.lock') }}
+            ${{ runner.os }}-cargo-base-
             ${{ runner.os }}-cargo-
       - run: cargo check --all-targets
 
@@ -57,9 +71,14 @@ jobs:
             ~/.cargo/git/db/
             ~/.cargo/git/checkouts/
             target/
-          key: ${{ runner.os }}-cargo-${{ github.job }}-${{ hashFiles('**/Cargo.lock') }}
+          # Write canonical cargo-base cache from Unit Tests (largest
+          # target/ of all jobs). Other jobs restore it via `cargo-base`
+          # restore-keys.
+          key: ${{ runner.os }}-cargo-base-${{ hashFiles('**/Cargo.lock') }}-${{ github.run_id }}
           restore-keys: |
+            ${{ runner.os }}-cargo-base-${{ hashFiles('**/Cargo.lock') }}
             ${{ runner.os }}-cargo-${{ github.job }}-
+            ${{ runner.os }}-cargo-base-
             ${{ runner.os }}-cargo-
       - run: cargo nextest run --all-targets --profile ci
 
@@ -81,6 +100,8 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ github.job }}-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-${{ github.job }}-
+            ${{ runner.os }}-cargo-base-${{ hashFiles('**/Cargo.lock') }}
+            ${{ runner.os }}-cargo-base-
             ${{ runner.os }}-cargo-
       - uses: actions/setup-node@v5
         with:
@@ -105,6 +126,8 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ github.job }}-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-${{ github.job }}-
+            ${{ runner.os }}-cargo-base-${{ hashFiles('**/Cargo.lock') }}
+            ${{ runner.os }}-cargo-base-
             ${{ runner.os }}-cargo-
       - run: cargo build --release
       - name: Run E2E smoke tests
@@ -129,6 +152,8 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ github.job }}-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-${{ github.job }}-
+            ${{ runner.os }}-cargo-base-${{ hashFiles('**/Cargo.lock') }}
+            ${{ runner.os }}-cargo-base-
             ${{ runner.os }}-cargo-
       - run: cargo clippy --all-targets -- -D warnings
 
