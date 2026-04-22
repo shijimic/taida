@@ -1978,28 +1978,39 @@ impl Lowering {
         let list_var = func.alloc_var();
         func.push(IrInst::Call(list_var, "taida_list_new".to_string(), vec![]));
 
-        // Set elem_type_tag based on first element's type (checker guarantees homogeneity)
-        if let Some(first) = items.first() {
-            let tag = self.expr_type_tag(first);
-            let tag_var = func.alloc_var();
-            func.push(IrInst::ConstInt(tag_var, tag));
-            let dummy = func.alloc_var();
-            func.push(IrInst::Call(
-                dummy,
-                "taida_list_set_elem_tag".to_string(),
-                vec![list_var, tag_var],
-            ));
-        }
+        // C23B-007 (2026-04-22): call `taida_list_set_elem_tag` for EVERY
+        // element so heterogeneous literals like `@[1, "a", 2]` downgrade
+        // to the HETEROGENEOUS(-2) sentinel. Previously we stamped only
+        // the first element's tag (trusting a "checker guarantees
+        // homogeneity" invariant that no longer holds — the interpreter
+        // accepts `@[1, "a", 2]` verbatim, so the checker must too). The
+        // first call transitions UNKNOWN → the first tag; each subsequent
+        // mismatched call transitions that to HETEROGENEOUS which latches
+        // (runtime-side `taida_list_set_elem_tag` rejects re-promotion).
 
         // taida_list_push は realloc で新ポインタを返す可能性がある
         // 最新のポインタを追跡する
         let mut current_list = list_var;
         for item in items {
+            // C23B-007: stamp this element's tag BEFORE the push so the
+            // per-element downgrade logic in `taida_list_set_elem_tag`
+            // can latch onto HETEROGENEOUS as soon as two primitive
+            // types disagree. For homogeneous lists the tag converges
+            // to that primitive tag after the first call and stays put
+            // (subsequent calls are no-ops).
+            let tag = self.expr_type_tag(item);
+            let tag_var = func.alloc_var();
+            func.push(IrInst::ConstInt(tag_var, tag));
+            let tag_dummy = func.alloc_var();
+            func.push(IrInst::Call(
+                tag_dummy,
+                "taida_list_set_elem_tag".to_string(),
+                vec![current_list, tag_var],
+            ));
             let item_var = self.lower_expr(func, item)?;
             // retain-on-store: Pack/List/Closure 要素を格納する際に retain。
             // taida_release の List 再帰 release と対になり、double-free を防ぐ。
             // Pack フィールド格納時の retain-on-store (A-4c) と同じパターン。
-            let tag = self.expr_type_tag(item);
             self.emit_retain_if_heap_tag(func, item_var, tag);
             let result = func.alloc_var();
             func.push(IrInst::Call(

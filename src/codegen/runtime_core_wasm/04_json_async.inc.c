@@ -186,16 +186,20 @@ static int _wc_looks_like_string(int64_t val) {
     return 1;
 }
 
+/* C23B-005 / C23B-006 (2026-04-22): these detectors delegate to the
+   `01_core.inc.c` implementations (`_is_wasm_hashmap` / `_is_wasm_set`)
+   which enforce the dual-magic positive identification. Keeping the
+   `_wc_*` wrappers makes it easy to audit all JSON / async call sites
+   that relied on the old single-marker heuristic. */
+static int _is_wasm_hashmap(int64_t ptr);
+static int _is_wasm_set(int64_t ptr);
+
 static int _wc_is_hashmap(int64_t ptr) {
-    if (ptr == 0 || ptr < 0 || ptr > 0xFFFFFFFF) return 0;
-    int64_t *data = (int64_t *)(intptr_t)ptr;
-    return data[3] == WASM_HM_MARKER_VAL;
+    return _is_wasm_hashmap(ptr);
 }
 
 static int _wc_is_set(int64_t ptr) {
-    if (ptr == 0 || ptr < 0 || ptr > 0xFFFFFFFF) return 0;
-    int64_t *data = (int64_t *)(intptr_t)ptr;
-    return data[3] == WASM_SET_MARKER_VAL;
+    return _is_wasm_set(ptr);
 }
 
 static int _wc_is_valid_ptr(int64_t val, unsigned int min_bytes) {
@@ -1011,9 +1015,16 @@ static void _wc_json_serialize_typed(_wc_json_buf *jb, int64_t val, int indent, 
         int64_t cap = hm[0];
         _wc_jb_append_char(jb, '{');
         int64_t count = 0;
-        for (int64_t i = 0; i < cap; i++) {
-            int64_t sh = hm[WASM_HM_HEADER + i * 3];
-            int64_t sk = hm[WASM_HM_HEADER + i * 3 + 1];
+        /* C23B-008 (2026-04-22): insertion-order walk via the new
+           side-index so JSON output matches interpreter / JS ordering.
+           `WASM_HM_ORD_HEADER_SLOT` / `WASM_HM_ORD_SLOT` are defined in
+           01_core.inc.c alongside `WASM_HM_HEADER`. */
+        int64_t next_ord = hm[WASM_HM_ORD_HEADER_SLOT(cap)];
+        for (int64_t oi = 0; oi < next_ord; oi++) {
+            int64_t slot = hm[WASM_HM_ORD_SLOT(cap, oi)];
+            if (slot < 0 || slot >= cap) continue;
+            int64_t sh = hm[WASM_HM_HEADER + slot * 3];
+            int64_t sk = hm[WASM_HM_HEADER + slot * 3 + 1];
             if (sh != 0 && !(sh == 1 && sk == 0)) {
                 if (count > 0) _wc_jb_append_char(jb, ',');
                 if (indent > 0) _wc_jb_append_indent(jb, indent, depth + 1);
@@ -1022,7 +1033,7 @@ static void _wc_json_serialize_typed(_wc_json_buf *jb, int64_t val, int indent, 
                 _wc_jb_append_escaped_str(jb, key_str);
                 _wc_jb_append_char(jb, ':');
                 if (indent > 0) _wc_jb_append_char(jb, ' ');
-                _wc_json_serialize_typed(jb, hm[WASM_HM_HEADER + i * 3 + 2], indent, depth + 1, 0);
+                _wc_json_serialize_typed(jb, hm[WASM_HM_HEADER + slot * 3 + 2], indent, depth + 1, 0);
                 count++;
             }
         }

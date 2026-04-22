@@ -1,5 +1,634 @@
 # Changelog
 
+## @c.23.rc6
+
+Single-scope follow-up that finishes the `Str[...]()` mold family
+4-backend parity work flagged by the `@c.22.rc5` (PR #36) Codex review
+as FB-34 and expanded by a follow-up audit into three root-cause
+blockers. The Taida surface is unchanged — `Str[...]()` still returns
+`Lax[Str]`, the Lax / ぶちパック contracts are intact, and the
+interpreter's `Str[x]()` semantics stay put as the source of truth.
+What moves is the JS / Native / WASM-wasi rendering of non-primitive
+`Str[x]()` results plus the WASM primitive/Lax display, all of which
+had been drifting away from the interpreter.
+
+### Interpreter is still the reference; the other three backends now line up behind it
+
+- **C23B-001 (WASM primitive / Lax `Str[...]()`) — FIXED**:
+  `src/codegen/runtime_core_wasm/02_containers.inc.c` now has
+  `_taida_float_to_str_mold`, which strips the trailing `.0` that
+  `taida_float_to_str` emits for integer-valued floats. That
+  matches the interpreter's `f.to_string()` contract
+  (`Str[3.0]() -> "3"` / `Str[-5.0]() -> "-5"`) without disturbing
+  the `Value::to_display_string`-style `"3.0"` rendering used by
+  `stdout(Float)`. `src/codegen/runtime_core_wasm/01_core.inc.c` also
+  adds a `WASM_TAG_STR` arm to `_wasm_pack_to_string` and
+  `_wasm_pack_to_string_full`, so the Lax's `__value` / `__default`
+  fields on a `Str` mold now render as explicitly-quoted char* (`""`,
+  `"abc"`) instead of falling back to the `_wasm_value_to_debug_string`
+  integer-pointer path, which previously leaked raw data-section
+  offsets (`1250`, `1254`, etc.) into the output.
+- **C23B-002 (Native / WASM non-primitive `Str[...]()`) — FIXED**:
+  `src/codegen/lower_molds.rs` no longer falls through to
+  `taida_str_mold_int` for anything that is not a compile-time-known
+  Float / Str / Bool / Int literal. Non-primitive arguments (List /
+  ぶちパック / Lax / Result / …) now route through a new generic
+  `taida_str_mold_any`, defined in
+  `src/codegen/native_runtime/core.c` and
+  `src/codegen/runtime_core_wasm/02_containers.inc.c`. The helper
+  re-uses the existing `taida_stdout_display_string` /
+  `_wasm_stdout_display_string` entries — the same full-form pack
+  rendering that `stdout` produces — so
+  `Str[@[1,2,3]]() -> "@[1, 2, 3]"`,
+  `Str[@(a <= 1)]() -> "@(a <= 1)"`, and
+  `Str[Int[3.0]()]() -> "@(hasValue <= true, __value <= 3, __default <= 0, __type <= "Lax")"`
+  line up exactly with the interpreter. No new magic bits; all tag
+  plumbing (`TAIDA_TAG_STR` / `WASM_TAG_STR` on `__value` / `__default`
+  via `_lax_tag_vd` / `taida_lax_tag_value_default`) is the same
+  mechanism `C21B-seed-07` introduced.
+- **C23B-003 (JS `Str_mold`, with reopen) — FIXED**:
+  `src/js/runtime/core.rs` no longer uses `String(value)` in `Str_mold`.
+  A new `__taida_display_string` helper mirrors the interpreter's
+  `Value::to_display_string()` contract case-by-case — `Int`, `Float`,
+  `Bool` use the natural JS number / boolean formatting; arrays render
+  as `@[...]`; plain objects render as `@(field <= value, ...)` skipping
+  `__` internals; typed packs (Lax / Result / Async) render their full
+  form including `__`-prefixed internals and, for Lax, honour the
+  `__floatHint` that C21B-seed-04 / C21B-seed-07 propagate for Float-
+  origin bindings. `Str[@(a <= 1)]()` and `Str[Int[3.0]()]()` now
+  match the other three backends byte-for-byte instead of rendering
+  `[object Object]` or the short-form `Lax(3)`.
+
+  The reopen resolution extends `__taida_display_string` to every
+  `__type`-carrying runtime object (HashMap / Set / Stream / TODO /
+  Gorillax / RelaxedGorillax / Molten) so their interpreter-shaped
+  display strings stay intact instead of falling through to the
+  plain-pack branch (which was leaking JS method source bodies as
+  pack fields). `Str[hashMap().set("a", 1)]()` and `Str[setOf(@[1, 2, 3])]()`
+  now produce the interpreter's `BuchiPack(__entries/__items, __type)`
+  full form on JS. The same reopen adds the two missing native / wasm
+  pieces to keep 4-backend parity end-to-end:
+
+  * `src/codegen/native_runtime/core.c` gains
+    `taida_hashmap_to_display_string_full` /
+    `taida_set_to_display_string_full` and routes
+    `taida_stdout_display_string` through them, so
+    `Str[hashMap()...]()` / `Str[setOf(...)]()` no longer yield the
+    short-form `HashMap({"a": 1})` / `Set({1, 2, 3})` (the
+    `.toString()` format). It also registers the `__error` field name
+    (which `taida_pack_to_display_string_full` needs for Gorillax
+    packs), triggers the registration from `taida_gorillax_new` /
+    `taida_gorillax_err`, stamps the Gorillax `__error` slot with
+    `TAIDA_TAG_PACK`, and teaches the full-form helper to render a
+    PACK-tagged `0` slot as `@()` (interpreter
+    `Value::Unit.to_debug_string` parity). `Str[Gorillax[v]()]()` now
+    renders `@(hasValue <= true, __value <= v, __error <= @(),
+    __type <= "Gorillax")` on native instead of collapsing to `@()`.
+  * `src/codegen/runtime_core_wasm/01_core.inc.c` mirrors the native
+    change with `_wasm_hashmap_to_display_string_full` /
+    `_wasm_set_to_display_string_full` and routes
+    `_wasm_stdout_display_string` through them.
+
+  Wasm Gorillax still stores `isOk` (not `hasValue`) in its first
+  pack slot — a pre-existing divergence tracked as **C23B-004**
+  (separate track after `@c.23.rc6`) and explicitly scoped out of
+  the 4-backend fixture via `WASM_SKIP_FIXTURES` in
+  `tests/c23_str_parity.rs`. Stream molds are interpreter + JS only
+  (native / wasm lowering unsupported) and gated via
+  `STREAM_ONLY_FIXTURES` in the same test.
+
+- **C23B-003 reopen 2 (nested typed runtime object recursion) — FIXED**:
+  The first reopen addressed the top-level rendering of HashMap / Set
+  / Gorillax but left the *nested* render paths using the short-form
+  debug helper. `hashMap().set("k", hashMap().set("a", 1))` and
+  friends therefore collapsed the inner HashMap to
+  `HashMap({"a": 1})` on every non-interpreter backend. The reopen-2
+  fix teaches every full-form helper to recurse through itself when
+  descending into field / entry values:
+
+  * `src/js/runtime/core.rs` — when `__taida_format` encounters a
+    `__type`-tagged object it now delegates to `__taida_display_string`,
+    which already has the per-`__type` full-form dispatch. Previously
+    `__taida_format` fell through to `String(v)` and called the
+    runtime object's short-form `.toString()` prototype.
+  * `src/codegen/native_runtime/core.c` — new
+    `taida_value_to_debug_string_full` mirrors the short-form
+    `taida_value_to_debug_string` but dispatches HashMap / Set /
+    BuchiPack to their full-form helpers, then the existing
+    `taida_hashmap_to_display_string_full`,
+    `taida_set_to_display_string_full`, and
+    `taida_pack_to_display_string_full` call the new variant instead
+    of the short-form helper for their nested values. A List branch
+    is also added to `taida_stdout_display_string` so top-level
+    `Str[@[hashMap()...]]()` uses the new variant on its items.
+  * `src/codegen/runtime_core_wasm/01_core.inc.c` — symmetric changes
+    add `_wasm_value_to_debug_string_full`, route the three
+    `_wasm_*_display_string_full` helpers through it, and give
+    `_wasm_stdout_display_string` a List branch that does the same.
+
+  The interpreter reference (`Value::BuchiPack.to_display_string()`
+  walks field values via `to_debug_string()` which recurses back
+  into `to_display_string()` for non-Str values) is now honoured
+  identically on all four backends for nested HashMap-in-HashMap,
+  Set-in-HashMap, List-of-HashMap, and BuchiPack-carrying-HashMap.
+
+- **C23B-003 reopen 3 (WASM empty pack `@()` detection) — FIXED**:
+  The reopen-2 fix taught every full-form helper to recurse, but the
+  wasm `_wasm_value_to_debug_string_full` still gated pack rendering
+  behind `_looks_like_pack`, which requires `field_count >= 1` to
+  avoid false-positives against List / HashMap / Set header layouts.
+  Empty packs (`@()` / `Value::Unit`) allocated by
+  `taida_pack_new(0)` carry `field_count == 0` and therefore fell
+  through to the integer fallback — rendering a raw heap pointer
+  (e.g. `73088`) instead of `"@()"`. Native never hit this because
+  its `TAIDA_PACK_MAGIC` header lets `taida_is_buchi_pack` match
+  `fc == 0` directly; JS and the interpreter already rendered empty
+  objects as `@()`. The reopen-3 fix adds a dedicated wasm detector:
+
+  * `src/codegen/runtime_core_wasm/01_core.inc.c` gains
+    `_looks_like_empty_pack`, which accepts any pointer that (a) is
+    in the bump-allocator's live range (`__heap_base <= addr <
+    bump_ptr` — the same invariant `_wasm_is_string_ptr` uses), (b)
+    reads a single zero int64_t, and (c) is not simultaneously a
+    List / HashMap / Set header. The bump-range guard is essential:
+    a pure memory-peek detector false-positives on small integer
+    outputs such as `5050` (tail-recursion Fibonacci) and `8080` (in
+    `localhost:8080` string interpolation), both caught by
+    `tests/wasm_full.rs::wasm_full_parity_all_examples` while
+    developing the fix. The detector is wired into four display
+    helpers — `_wasm_value_to_debug_string_full` (nested pack fields
+    / hashmap entries / set items), `_wasm_value_to_debug_string`
+    (short-form fallback), `_wasm_value_to_display_string`
+    (short-form display fallback), and `_wasm_stdout_display_string`
+    (top-level `stdout(@())`). Each check sits between the richer
+    detectors (`_looks_like_pack`, `_is_wasm_hashmap`, `_is_wasm_set`)
+    and the raw-pointer fallback, so existing typed-pack rendering
+    is never shadowed and integer pointers never win over the empty-
+    pack rendering.
+
+  `Str[@()]()`, `Str[@(u <= @())]()`,
+  `Str[hashMap().set("u", @())]()`, and `Str[@[@()]]()` now all emit
+  the interpreter string on wasm. `stdout(@())` also renders `@()`
+  directly instead of the bump-allocator offset.
+
+- **C23B-003 reopen 4 (WASM tag-based empty-pack identification + richer compile-time Int check) — FIXED**:
+  The reopen-3 detector used a heap-range + zero-slot heuristic
+  (`__heap_base <= addr < bump_ptr && *(int64_t*)addr == 0`) to
+  recognise empty packs. A later review surfaced a HIGH-severity
+  false-positive: dynamic Int expressions routed through the generic
+  `Str[...]()` path (`taida_str_mold_any`) hand untagged int64_t
+  values to the display helpers, and if the integer happens to fall
+  inside the bump arena on an 8-byte-aligned zero chunk, the
+  heuristic fires and renders the integer as `"@()"`. The canonical
+  repro — `a <= 36000; b <= 37088; stdout(Str[a + b]())` — emitted
+  `__value <= "@()"` on wasm where interpreter / JS / native all emit
+  `"73088"`. The reopen-4 fix replaces the heuristic with a
+  positive-identification magic sentinel and hardens the lowering
+  side so as many dynamic Int shapes as possible never reach the
+  runtime heuristic:
+
+  * **Tag-based identification.**
+    `src/codegen/runtime_core_wasm/01_core.inc.c` `taida_pack_new(0)`
+    now allocates two int64_t slots instead of one, writing
+    `[field_count=0, WASM_EMPTY_PACK_MAGIC]` where
+    `WASM_EMPTY_PACK_MAGIC = 0x5441494450414B55LL` (the seven-byte
+    printable string "TAIDPAKU" — TAIDA + PACK + Unit). Non-empty
+    packs are unchanged — their `field_count >= 1` already
+    disambiguates them, and `pack[1]` continues to hold
+    `field0_hash`. `_looks_like_empty_pack` now tests exactly
+    `data[0] == 0 && data[1] == WASM_EMPTY_PACK_MAGIC` (plus wasm32
+    pointer + 8-byte-alignment guards). The heap-range / bump_ptr /
+    List-HashMap-Set negation checks are gone — integer values can
+    no longer false-match the detector no matter what is sitting in
+    memory at that offset.
+  * **Compile-time Int fast-path widening.**
+    `src/codegen/lower_molds.rs` `Str` dispatch now consults
+    `Lowering::expr_is_int` (from `src/codegen/lower/infer.rs`)
+    instead of a local syntactic `expr_is_int_literal`. That
+    recognises int-typed bindings via `int_vars`, arithmetic on
+    Int operands via `BinaryOp::{Add,Sub,Mul}`, int-returning
+    methods (`length` / `indexOf` / `lastIndexOf` / `count`), and
+    int-returning user functions via `int_returning_funcs`. Those
+    shapes now short-circuit to `taida_str_mold_int` at compile
+    time, so the dynamic-Int values never enter the runtime
+    heuristic stack at all — defence-in-depth on top of the
+    detector-level fix. `expr_is_int`'s visibility widens from
+    `pub(super)` to `pub(crate)` (no logic change) so the sibling
+    `lower_molds.rs` module outside the `lower/` submodule can
+    call it.
+
+  Four regression fixtures pin the fix:
+  `str_from_dynamic_int` (`Str[a + b]()` with `a + b = 73088`),
+  `str_from_dynamic_int_zero` (`Str[5 - 5]()`),
+  `str_from_dynamic_int_negative` (`Str[-x]()` on an int_var), and
+  `str_from_dynamic_int_funcall` (`Str[double(36544)]()` with
+  `double n = n * 2 => :Int`). All four now render the integer
+  value on every backend byte-for-byte. JS / Native were already
+  correct (JS uses `__type`-based dispatch, Native uses
+  `TAIDA_PACK_MAGIC` for empty packs — neither relies on address
+  heuristics), so the reopen-4 work is wasm-scoped.
+
+  Follow-up audit during the reopen-4 work uncovered a separate
+  pre-existing wasm heuristic bug — `_looks_like_list` accepts any
+  pointer whose `data[0]` (cap) is in `8..=65536` and `data[1]`
+  (len) is in `0..=cap`, which false-matches on Int values such as
+  73088 stored uninterpretted inside a List / ぶちパック. That
+  stack-overflows `Str[@[73088]]()` and friends on wasm. Originally
+  filed as **C23B-005 (TRACKED)** for a later release track.
+
+- **C23B-005 reopen + widen + C23B-006 (WASM collection detectors
+  false-positive on untagged large Ints) — FIXED**: a deeper audit
+  during the @c.23.rc6 review showed the bug class extended far
+  beyond `_looks_like_list`: `_is_wasm_hashmap` relied on a 4-byte
+  `"HMAP" = 0x484D4150` marker at `data[3]` and would recursively
+  re-render any HashMap value slot holding a large Int (e.g.
+  `hashMap().set("x", 73088)` collapsed 73088 to an empty HashMap),
+  and `_is_wasm_set` layered on top of `_looks_like_list` and
+  inherited the same stack-overflow. All four WASM collection
+  detectors (`_looks_like_list`, `_is_wasm_set`, `_is_wasm_hashmap`,
+  `_looks_like_pack`) have been unified onto a single tag-based
+  positive-identification scheme:
+
+  * **Wide 8-byte printable-ASCII magic sentinels** replace every
+    prior structural heuristic (cap-range for List, 4-byte
+    `"HMAP"` / `"SET\0"` for HashMap / Set, `fc-range + first_hash`
+    for Pack). The new constants — `WASM_LIST_MAGIC` ("TAIDLST"),
+    `WASM_SET_MAGIC` ("TAIDSET"), `WASM_HM_MAGIC` ("TAIDHMP"),
+    `WASM_PACK_MAGIC` ("TAIDPKK") — are stamped by the
+    corresponding allocation paths (`taida_list_new`,
+    `taida_set_new`, `taida_hashmap_new` /
+    `_wasm_hashmap_new_with_cap` / `taida_hashmap_set` resize,
+    `taida_pack_new(fc>=1)`) and carry 64 bits of entropy so they
+    cannot arise from user arithmetic.
+  * **Dual-magic identification** for List / Set / HashMap. Every
+    allocation stamps the magic at BOTH a head position (`data[3]`)
+    AND a shape-dependent trailing position (`data[WASM_LIST_ELEMS
+    + cap]` for lists and sets, `data[WASM_HM_HEADER + cap * 3]`
+    for hashmaps). Detectors verify both, giving 128 bits of
+    entropy. This closes the last residual attack path where a
+    user-supplied large Int stored inside one collection's value
+    slot happened to equal the base pointer of a *different*
+    collection in the same bump arena — single-magic identification
+    would still succeed because that real collection carries the
+    head magic legitimately, but the trailing magic at the
+    cap-dependent offset cannot simultaneously align for both the
+    fake (integer as pointer) and real (pointer to collection)
+    interpretations. Pack uses a single trailing magic plus
+    `data[0]` in `1..=100`; the `fc`-range constraint supplies the
+    provenance the dual scheme would otherwise provide.
+  * **Tag-aware element rendering** (`_wasm_render_elem_tagged_debug`
+    and `_wasm_render_elem_tagged_debug_full`). The list's
+    `elem_type_tag` (slot 2), the hashmap's `value_type_tag`
+    (slot 2), and the pack's per-field `field_tag` are threaded
+    into every collection-member rendering loop. Primitive Int /
+    Float / Bool / Str members dispatch directly via the tag
+    without going through any structural detector — defence-in-depth
+    on top of the dual-magic check. `taida_hashmap_set_value_tag`
+    and `taida_list_set_elem_tag` are hardened to downgrade the
+    stored tag to UNKNOWN (-1) on type conflict (e.g.
+    `hashMap().set("name", "Asuka").set("age", 14)` now leaves
+    `hm[2] = -1` instead of silently overwriting with the last
+    inserted value's type). Heterogeneous containers fall back to
+    structural dispatch, which is safe thanks to the dual-magic
+    detectors.
+  * **`_is_wasm_hashmap` / `_is_wasm_set` in
+    `src/codegen/runtime_full_wasm.c`** were mirroring the old
+    4-byte markers and have been retargeted to the same wide
+    sentinels so the wasm-full profile matches the wasm-wasi
+    behaviour. Forward declarations for `_wf_is_valid_ptr` and the
+    magic constants appear early in the file so the detector
+    helpers can reference them without reordering.
+  * **`_wc_is_hashmap` / `_wc_is_set` in
+    `src/codegen/runtime_core_wasm/04_json_async.inc.c`** now
+    delegate to the hardened `_is_wasm_hashmap` / `_is_wasm_set`
+    in fragment 1, eliminating the duplicate (and now-stale)
+    4-byte marker checks that JSON / async code previously relied
+    on.
+
+  Five regression fixtures pin the fix across all four backends:
+  `str_from_hashmap_with_large_int` (C23B-006 direct repro),
+  `str_from_set_with_large_int` (`setOf(@[73088])` stack overflow
+  repro), `str_from_list_with_large_int` (`Str[@[73088, 42000]]()`),
+  `str_from_pack_with_large_int` (`Str[@(x <= 73088)]()`), and
+  `str_from_nested_collection_with_large_int` (nested: HashMap
+  containing `@[73088]`). Every backend (Interpreter / JS / Native /
+  WASM-wasi) renders them byte-for-byte identically. JS and Native
+  were already correct (JS uses `__type`-based dispatch, Native
+  uses `TAIDA_PACK_MAGIC` / `TAIDA_LIST_MAGIC` / `TAIDA_HMAP_MAGIC`
+  positive identification that already satisfies the provenance
+  requirement), so the reopen lands wasm-scoped.
+
+  > **Why not per-entry type tags instead?** Adding per-entry tags
+  > to HashMap would require a layout change and cascade through
+  > every reader in the runtime. The dual-magic approach achieves
+  > equivalent safety without touching the hot-path load of
+  > `hm[WASM_HM_HEADER + slot * 3 + 2]`. Tag-aware rendering on top
+  > reuses the already-tracked per-container elem / value / field
+  > tags that the lowering installs for homogeneous containers,
+  > giving us the fast path without the layout cost.
+
+- **C23B-007 (WASM tag re-promotion into heterogeneous containers)
+  — FIXED**: the `taida_list_set_elem_tag` /
+  `taida_hashmap_set_value_tag` downgrade path that C23B-005 installed
+  reused the UNKNOWN (-1) sentinel to mean both "not set yet" and
+  "downgraded from type conflict". That made the downgrade reversible:
+  a subsequent `.push()` / `.set()` carrying a fresh primitive tag
+  would see `existing == -1`, treat the container as unset, and
+  re-promote it to that new tag. The renderer would then force every
+  member through that tag's fast path — strings emerged as raw
+  pointer integers (`@[1, "a", 2]` → `@[1, 1127, 2]`), string-valued
+  HashMap entries showed as pointer Ints (`.set("a", 1).set("b",
+  "x").set("c", 2)` → `value <= 1058` for "x"). Resolution:
+
+  * Split the sentinel. `WASM_TAG_HETEROGENEOUS = -2` (and symmetric
+    `TAIDA_TAG_HETEROGENEOUS = -2` on native) joins `WASM_TAG_UNKNOWN
+    = -1` as a terminal state. `taida_list_set_elem_tag` /
+    `taida_hashmap_set_value_tag` now follow the four-case latch:
+    `HETEROG → keep`, `UNKNOWN → stamp`, `equal → no-op`,
+    `different → HETEROG`. Once HETEROG, never re-promote.
+  * Renderers do not need changes: `_wasm_render_elem_tagged_debug` /
+    `_full` already fall through to the structural dispatcher
+    (`_wasm_value_to_debug_string(_full)`) for any non-primitive
+    tag, so the new -2 lands on the per-element structural path
+    automatically. Native `taida_list_to_display_string` /
+    `taida_hashmap_to_display_string_full` already use structural
+    per-element dispatch.
+  * `src/codegen/lower/expr.rs::lower_list_lit` had been stamping the
+    element tag only once, trusting a "checker guarantees homogeneity"
+    comment that no longer held (the interpreter accepts
+    `@[1, "a", 2]` verbatim). We now call `taida_list_set_elem_tag`
+    for every element. Homogeneous list literals still converge to
+    the primitive tag on the first call (subsequent calls are no-ops);
+    heterogeneous literals latch to HETEROG as soon as the second
+    disagreeing tag appears.
+
+  Four fixtures pin the repros and adjacent shapes:
+  `str_from_mixed_list` (the C23B-007 direct List repro),
+  `str_from_mixed_hashmap` (the HashMap three-value-type variant),
+  `str_from_mixed_set` (Sets share the list header, so the fix
+  applies), and `str_from_nested_mixed` (outer heterogeneous list
+  wrapping an inner heterogeneous list — both levels latch
+  independently). All four render byte-for-byte identically on
+  Interpreter / JS / Native / WASM-wasi.
+
+- **C23B-008 (Multi-entry HashMap display emits bucket order, not
+  insertion order) — FIXED**: `taida_hashmap_to_display_string_full`
+  (native) and `_wasm_hashmap_to_display_string_full` (wasm) iterated
+  the open-addressing bucket array. Interpreter and JS represent
+  HashMap as a `Vec<(k, v)>` (interpreter) / `Array` (JS) of insertion
+  order, so `hashMap().set("a", 1).set("b", 2)` came out as "b", "a"
+  on native / wasm. The same drift affected `taida_hashmap_entries`,
+  `taida_hashmap_keys`, `taida_hashmap_values`, `taida_hashmap_merge`,
+  `taida_hashmap_to_string` (short form), the native JSON serializer
+  `json_serialize_typed`, and the wasm JSON `_wc_json_serialize_typed`
+  — anywhere iteration order was observable. Resolution:
+
+  * Both runtimes now append an insertion-order side-index to every
+    HashMap allocation: `[next_ord, order_array[cap]]`. `next_ord` is
+    a monotonic ordinal counter (never decremented, even after
+    `.remove()`). `order_array[i]` stores the bucket slot of the i-th
+    insertion, or `-1` for a hole left by `.remove()`. The layout is
+    appended after the trailing magic (wasm) or the entry array
+    (native); existing header / entry offsets are unchanged, so the
+    dual-magic detection from C23B-005 / C23B-006 keeps working
+    unchanged.
+  * New offset macros centralise the math:
+    `WASM_HM_ORD_HEADER_SLOT` / `WASM_HM_ORD_SLOT` on the wasm side,
+    `TAIDA_HM_ORD_HEADER_SLOT` / `TAIDA_HM_ORD_SLOT` /
+    `TAIDA_HM_TOTAL_SLOTS` on native. `_wasm_hashmap_new_with_cap` /
+    `taida_hashmap_new_with_cap` bump their allocations by `1 + cap`
+    slots, calloc-zero; `next_ord` starts at 0.
+  * `taida_hashmap_set` records `order_array[next_ord++] = slot` on
+    a new insertion; updates of an existing key leave the ordinal
+    untouched (first-insertion-wins, matching the interpreter's
+    `Vec` update). The tombstone-reuse path records the ordinal the
+    same way. `taida_hashmap_remove` nulls the matching
+    `order_array[i]` slot to `-1`; `next_ord` stays put.
+  * `taida_hashmap_resize` now walks the OLD order array in
+    insertion order and re-inserts each surviving entry into the
+    new table, rebuilding the new side-index as it goes.
+    `taida_hashmap_set_internal` (native) returns the new bucket
+    slot (or `-1` for an update in place) so the caller can record
+    the ordinal. The wasm `taida_hashmap_set` inline resize path
+    applies the same order-preserving rebuild.
+  * `taida_hashmap_clone` grows its allocation to include the new
+    side-index and copies it verbatim (same bucket layout → same
+    slot indices remain valid).
+  * Display / iteration helpers on both runtimes —
+    `taida_hashmap_to_display_string_full`,
+    `taida_hashmap_to_string`, `taida_hashmap_entries`,
+    `taida_hashmap_keys`, `taida_hashmap_values`,
+    `taida_hashmap_merge`, plus the native / wasm JSON serializers
+    — now walk `order_array[0..next_ord]` and skip holes /
+    tombstoned buckets.
+  * JS required no runtime change: `__taida_createHashMap` already
+    stored `__entries` as an Array (insertion-ordered by
+    construction), and `__taida_display_string` /
+    `__taida_format` walked it in Array order.
+  * Interpreter is the source of truth and was untouched.
+
+  Four fixtures pin the behaviour:
+  `str_from_multi_entry_hashmap` (the direct two-entry repro),
+  `str_from_large_hashmap` (16 keys, crosses the wasm 70% / native
+  75% resize boundary — proves the resize rebuild preserves
+  insertion order), `str_from_hashmap_after_remove` (remove the
+  middle entry, verify the hole is skipped and the surrounding
+  entries stay in their original order), and
+  `str_from_hashmap_update_preserves_order` (re-`.set()` an existing
+  key, verify the ordinal stays put so the final order is still
+  first-insertion-wins).
+
+- **C23B-008 reopen (HashMap.merge() overlap-key ordinal divergence)
+  — FIXED**: the reopen-5 fix above pinned HashMap display / iteration
+  to insertion order, but a follow-up review (reopen-7) showed that
+  `.merge()` itself still diverged from the interpreter on overlap
+  keys. The interpreter (`src/interpreter/methods.rs:787-822`) does
+  `merged.retain(|e| e.key != other_key); merged.push(other_entry)`
+  for each `other` entry, which MOVES every overlap key to other's
+  position with other's value. JS called `merged[idx] = oe`, and
+  native / wasm cloned self then called `taida_hashmap_set` per
+  `other` entry — both variants update in place and preserve self's
+  ordinal for overlap keys. Repro: self = `[a, b]`, other = `[c, b, d]`;
+  interpreter emits `[a, c, b, d]`, the three broken backends emitted
+  `[a, b, c, d]`. Resolution:
+
+  * All three backends (native / wasm / JS) now build a fresh result
+    map and fill it in the order interpreter would emit — step 1
+    walks self in self-order and copies entries whose key is absent
+    from other; step 2 walks other in other-order and appends every
+    entry (all guaranteed new to the fresh map). Value retention
+    flows through the normal `taida_hashmap_set` / `__taida_createHashMap`
+    code paths.
+  * `taida_hashmap_set` is NOT modified — its update-in-place ordinal
+    preservation is still required for plain `.set("k", v)` chains
+    (interpreter's `Vec<(k, v)>` update semantics keep the position
+    of a re-`.set()` key). Only `.merge()` needed the retain-then-push
+    variant, and it achieves that by avoiding `.set()` on overlap
+    keys entirely (they never reach the fresh result as self entries).
+  * Six fixtures pin the behaviour:
+    `str_from_hashmap_merge_overlap` (the direct review repro —
+    `a=[a,b].merge([c,b,d])` ⇒ `[a,c,b,d]`),
+    `str_from_hashmap_merge_non_overlap` (degenerate no-overlap path,
+    self-order + other-order),
+    `str_from_hashmap_merge_full_overlap` (every self key in other,
+    result = other in other-order with other's values),
+    `str_from_hashmap_merge_empty_self` (empty self ⇒ result = other),
+    `str_from_hashmap_merge_empty_other` (empty other ⇒ result =
+    self), `str_from_hashmap_merge_resize` (16-entry merge with two
+    overlap keys crossing the 0.75 load-factor resize on the fresh
+    result map — exercises `taida_hashmap_resize` + side-index
+    rebuild during the fill loop).
+  * The reopen-7 audit also flagged an independent divergence in
+    `HashMap.entries()` across backends — interpreter returns
+    `@(key <= …, value <= …)`, JS returns `@(first <= …, second <= …)`
+    (wrong field names), and native / wasm render the pair pack as
+    empty `@()` (pair content does not reach the renderer). This is
+    tracked as **C23B-009** and resolved inside the same release (see
+    below).
+
+- **C23B-009 (HashMap.entries() 4-backend divergence) — FIXED**: an
+  independent divergence from the reopen-7 audit. The documented
+  contract (`docs/reference/standard_library.md:238`) and the
+  interpreter (`src/interpreter/methods.rs:761-783`) both use
+  `@[@(key, value)]` for `.entries()`. Previously:
+
+  * **JS** (`src/js/runtime/core.rs:2555` `entries()`): emitted
+    `Object.freeze({ first: e.key, second: e.value })` — a legacy
+    convention inadvertently shared with `zip()` / `Zip[]()` (those
+    stay `first`/`second` because the interpreter itself does; only
+    `.entries()` was wrong). Fix: rename to `{key, value}`. The
+    `hashMap(entries)` constructor (line ~2600) still accepts
+    `.first` / `.second` fallback for back-compat with user-built
+    pair lists.
+  * **Native** (`src/codegen/native_runtime/core.c::taida_hashmap_entries`):
+    stamped the correct FNV-1a hashes (`HASH_KEY` /
+    `HASH_VAL`) and tags but never called
+    `taida_register_field_name` for them. When
+    `taida_pack_to_display_string_full` looked them up it got NULL
+    and silently skipped every field, emitting `@()`. Fix: idempotent
+    registration of `"key"` / `"value"` inside the entries helper
+    (guarded by a static flag so the cost is paid once per program).
+  * **WASM** (`src/codegen/runtime_core_wasm/01_core.inc.c::taida_hashmap_entries`):
+    symmetric to native's missing registry entry — plus the wasm
+    implementation didn't stamp per-field tags on the pair pack, so
+    even if the names had been found the values would have rendered
+    through the untagged fallback path. Fix: register `"key"` /
+    `"value"` idempotently, stamp `WASM_TAG_STR` on `key`, propagate
+    the hashmap's `value_type_tag` onto `value`, and flag the outer
+    list's `elem_type_tag = WASM_TAG_PACK` so every pair dispatches
+    through `_wasm_render_elem_tagged_debug_full`.
+  * **Interpreter**: unchanged (source of truth).
+
+  Repro:
+  ```taida
+  m <= hashMap().set("a", 1).set("b", 2)
+  stdout(Str[m.entries()]())
+  ```
+  All four backends now emit
+  `@(hasValue <= true, __value <= "@[@(key <= "a", value <= 1), @(key <= "b", value <= 2)]", __default <= "", __type <= "Lax")`.
+
+  The shape is non-breaking: JS's `{first, second}` field names were
+  never part of the documented API, and the hashMap() constructor's
+  back-compat fallback still reads them so user code that built pair
+  lists via `@(first <= k, second <= v)` continues to work. Pre-fix
+  audit covered `.keys()`, `.values()`, `.size()`, `.has()`,
+  `.merge()`, `Set.toList()`, `List.first()`, `zip()` / `Zip[]`, and
+  `enumerate()` — all parity-clean on interpreter/JS; `zip()` /
+  `enumerate()` silently return empty on native / wasm (pre-existing
+  divergence, not on the `Str[...]()` family path, outside the C23B
+  scope).
+
+### Regression guard
+
+- `tests/c23_str_parity.rs` drives forty-six fixtures under
+  `examples/quality/c23b_str_parity/` — `str_from_float_int_form`,
+  `str_from_float_frac_form`, `str_from_bool`, `str_from_str`,
+  `str_from_list`, `str_from_pack`, `str_from_lax`, the
+  C23B-003-reopen additions `str_from_hashmap`, `str_from_set`,
+  `str_from_gorillax`, `str_from_stream`, the reopen-2
+  additions `str_from_nested_hashmap`, `str_from_nested_set`,
+  `str_from_list_of_hashmap`, `str_from_pack_with_hashmap`, the
+  reopen-3 additions `str_from_empty_pack`,
+  `str_from_pack_with_empty_pack`, `str_from_hashmap_with_empty_pack`,
+  `str_from_list_with_empty_pack`, the reopen-4 additions
+  `str_from_dynamic_int`, `str_from_dynamic_int_zero`,
+  `str_from_dynamic_int_negative`, `str_from_dynamic_int_funcall`,
+  the C23B-005 reopen + C23B-006 additions
+  `str_from_hashmap_with_large_int`, `str_from_set_with_large_int`,
+  `str_from_list_with_large_int`, `str_from_pack_with_large_int`,
+  `str_from_nested_collection_with_large_int`, the C23B-007
+  additions `str_from_mixed_list`, `str_from_mixed_hashmap`,
+  `str_from_mixed_set`, `str_from_nested_mixed`, and the C23B-008
+  additions `str_from_multi_entry_hashmap`, `str_from_large_hashmap`,
+  `str_from_hashmap_after_remove`,
+  `str_from_hashmap_update_preserves_order`, and the C23B-008
+  reopen-7 merge-semantics additions
+  `str_from_hashmap_merge_overlap`, `str_from_hashmap_merge_non_overlap`,
+  `str_from_hashmap_merge_full_overlap`,
+  `str_from_hashmap_merge_empty_self`,
+  `str_from_hashmap_merge_empty_other`,
+  `str_from_hashmap_merge_resize`, and the C23B-009
+  `.entries()` additions `str_from_hashmap_entries`,
+  `str_from_hashmap_entries_empty`,
+  `str_from_hashmap_entries_single`,
+  `str_from_hashmap_entries_after_remove` — through all four
+  backends where each backend supports the mold. The interpreter
+  fixture test also pins the `.expected` files so a future
+  interpreter change cannot silently drift them away from the
+  source of truth. `WASM_SKIP_FIXTURES` excludes
+  `str_from_gorillax` from the wasm run (tracked as C23B-004) and
+  `STREAM_ONLY_FIXTURES` excludes `str_from_stream` from both
+  native and wasm (Stream lowering unsupported on those backends).
+
+### Byte-length assertions
+
+- `src/codegen/runtime_core_wasm/mod.rs` `EXPECTED_TOTAL_LEN`:
+  248,033 → 251,707 → 254,479 → 259,848 → 265,494 → 267,429 →
+  283,669 → 292,933 → 293,560 → 295,319 (+3,674 initial, +2,772 in
+  C23B-003 reopen, +5,369 in C23B-003 reopen 2, +5,646 in C23B-003
+  reopen 3, +1,935 in C23B-003 reopen 4, +16,240 for C23B-005 reopen
+  + C23B-006, +9,264 for C23B-007 + C23B-008, +627 for C23B-008
+  reopen-7: rewrote `taida_hashmap_merge` from clone-then-set to
+  the interpreter's retain-then-push algorithm — fresh result map,
+  self entries whose key ∉ other in self-order, then every other
+  entry in other-order; +1,759 for C23B-009: wasm
+  `taida_hashmap_entries` now idempotently registers `"key"` /
+  `"value"` in `_wasm_field_registry`, stamps per-field tags
+  (`WASM_TAG_STR` on key, hashmap value_type_tag on value) and
+  flags the returned list's `elem_type_tag = WASM_TAG_PACK`).
+- `src/codegen/native_runtime/mod.rs` `EXPECTED_TOTAL_LEN`:
+  935,805 → 936,859 → 943,160 → 950,197 → 958,672 → 960,607 → 961,515
+  (+1,054 initial, +6,301 in C23B-003 reopen, +7,037 in C23B-003
+  reopen 2 for `taida_value_to_debug_string_full` + List dispatch
+  in `taida_stdout_display_string`, +8,475 for C23B-007 + C23B-008,
+  +1,935 for C23B-008 reopen-7: the native `taida_hashmap_merge`
+  symmetric rewrite; +908 for C23B-009: native
+  `taida_hashmap_entries` idempotent registration of `"key"` /
+  `"value"` via `taida_register_field_name`).
+  `F1_LEN` moves 218,772 → 226,482 → 228,417 → 229,325 (+7,710 for
+  C23B-007 / C23B-008 absorbing the `TAIDA_TAG_HETEROGENEOUS`
+  define + `TAIDA_HM_ORD_*` macros + the `set_elem_tag` /
+  `set_value_tag` latch bodies + the HashMap insertion-order
+  scaffolding in `_new_with_cap` / `_set` / `_resize` / `_remove` /
+  `_clone` / `_keys` / `_values` / `_entries` / `_merge` /
+  `_to_string`, plus +1,935 for C23B-008 reopen-7 on `_merge`, plus
+  +908 for C23B-009 on `_entries`). F2 moves 150,412 →
+  151,177 (+765, absorbing the
+  `taida_hashmap_to_display_string_full` and
+  `json_serialize_typed` HashMap walk switches).
+
+### What we did NOT touch
+
+- No change to `src/interpreter/mold_eval.rs`, `src/interpreter/eval.rs`,
+  or the wider interpreter — C23 treats the interpreter as the
+  reference and only modifies codegen / runtime helpers / JS runtime.
+- No change to `src/types/mold_returns.rs`'s Pack classification
+  (C21B-seed-07 land is left intact).
+- No change to `src/codegen/driver.rs`, `src/codegen/lower/*.rs`
+  (except `src/codegen/lower_molds.rs`, which is the only C23 scope
+  file in that tree), or any C21 / C22 work-stream entry point.
+- `.dev/official-package-repos/terminal/` is untouched.
+
 ## @c.22.rc5
 
 Two concurrent tracks land together in a single RC bump. Track A

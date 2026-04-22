@@ -1533,7 +1533,19 @@ impl Lowering {
             }
             // -- Type conversion molds (v0.5.0) --
             "Str" => {
-                // Str[x]() -> type conversion to Str, returning Lax
+                // Str[x]() -> type conversion to Str, returning Lax.
+                //
+                // C23-2: The interpreter implements `Str[x]()` as
+                // `format!("{}", other)` for any non-primitive value —
+                // i.e. List / Pack / Lax / Result are rendered via
+                // `to_display_string()`. The previous dispatch fell
+                // through to `taida_str_mold_int` for anything that was
+                // not compile-time-known Float / Str / Bool, which
+                // stringified non-primitive heap pointers as raw
+                // integers. For non-primitive cases we now route through
+                // `taida_str_mold_any`, which calls the backend's
+                // stdout-display helper to obtain the full-form display
+                // string (matching the interpreter).
                 if type_args.is_empty() {
                     return Err(LowerError {
                         message: "Str requires 1 argument: Str[x]()".into(),
@@ -1546,9 +1558,38 @@ impl Lowering {
                     "taida_str_mold_str"
                 } else if self.expr_is_bool(&type_args[0]) {
                     "taida_str_mold_bool"
-                } else {
-                    // Default: treat as Int
+                } else if self.expr_is_int(&type_args[0]) {
+                    // Compile-time-known Int: literal, negated literal,
+                    // int-typed binding (via `int_vars`), arithmetic on
+                    // Int operands, int-returning method/function call.
+                    // Using the integer fast path avoids having
+                    // `taida_str_mold_any` mis-interpret an Int value as
+                    // a pointer:
+                    //   - `_looks_like_string` false-positives on small
+                    //     positive offsets that fall in the static data
+                    //     section (the reason the `expr_is_int_literal`
+                    //     shape existed in the initial C23-2 land).
+                    //   - `_looks_like_empty_pack` false-positives on
+                    //     Int values whose bit pattern lands on an
+                    //     8-byte-aligned zero chunk inside the bump
+                    //     arena. This was the C23B-003 reopen 4
+                    //     regression (`Str[a + b]()` for bump-sized
+                    //     sums) — now fixed at the detector level via
+                    //     a magic sentinel, but routing through
+                    //     `taida_str_mold_int` here still short-circuits
+                    //     the whole heuristic stack for any shape we
+                    //     can decide at compile time.
+                    // Richer check (`expr_is_int`) lives in
+                    // `src/codegen/lower/infer.rs` and recognises
+                    // bindings / arithmetic / method calls / function
+                    // calls with `:Int` return types.
                     "taida_str_mold_int"
+                } else {
+                    // Unknown at compile time (function parameter, local binding,
+                    // BuchiPack literal, list, typed pack, …). Route through the
+                    // generic helper which dispatches at runtime via
+                    // `taida_stdout_display_string` / `_wasm_stdout_display_string`.
+                    "taida_str_mold_any"
                 };
                 let result = func.alloc_var();
                 func.push(IrInst::Call(result, runtime_fn.to_string(), vec![val]));

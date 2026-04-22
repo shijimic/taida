@@ -752,6 +752,9 @@ fn runtime_func_prototype(name: &str, profile: WasmProfile) -> Result<String, Wa
         "taida_str_mold_float" => "int64_t taida_str_mold_float(int64_t v);".to_string(),
         "taida_str_mold_bool" => "int64_t taida_str_mold_bool(int64_t v);".to_string(),
         "taida_str_mold_str" => "int64_t taida_str_mold_str(int64_t v);".to_string(),
+        // C23-2: generic Str[x]() entry — defined alongside the primitive
+        // mold helpers in `02_containers.inc.c`.
+        "taida_str_mold_any" => "int64_t taida_str_mold_any(int64_t v);".to_string(),
         "taida_int_mold_int" => "int64_t taida_int_mold_int(int64_t v);".to_string(),
         "taida_int_mold_float" => "int64_t taida_int_mold_float(int64_t v);".to_string(),
         "taida_int_mold_bool" => "int64_t taida_int_mold_bool(int64_t v);".to_string(),

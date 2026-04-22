@@ -1,0 +1,2 @@
+@(hasValue <= true, __value <= "abc", __default <= "", __type <= "Lax")
+@(hasValue <= true, __value <= "", __default <= "", __type <= "Lax")

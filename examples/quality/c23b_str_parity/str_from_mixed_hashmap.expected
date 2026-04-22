@@ -1,0 +1,1 @@
+@(hasValue <= true, __value <= "@(__entries <= @[@(key <= "a", value <= 1), @(key <= "b", value <= "x"), @(key <= "c", value <= 2)], __type <= "HashMap")", __default <= "", __type <= "Lax")

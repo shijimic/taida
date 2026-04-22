@@ -790,8 +790,37 @@ int64_t taida_str_mold_int(int64_t v) {
     return _lax_tag_vd(taida_lax_new(taida_int_to_str(v), (int64_t)(intptr_t)""), WASM_TAG_STR);
 }
 
+/* C23-4: Rust-`f64::to_string`-compatible formatter for `Str[Float]()`.
+   The shared `taida_float_to_str` renders integer-form floats with a trailing
+   `.0` to match `Value::to_display_string` (so `stdout(3.0)` prints `3.0`),
+   but the interpreter's `Str[3.0]() -> Lax[Str]` stores `f.to_string()` which
+   uses the shortest-round-trip form WITHOUT a trailing `.0` for integer-
+   valued floats (`"3"` / `"-5"` / `"0"`). This local helper mirrors that
+   contract by dropping the `.0` suffix produced by `fmt_g` on integer-valued
+   floats, while keeping fractional / NaN / inf / exponential forms intact.
+   See `src/interpreter/mold_eval.rs:2057` for the reference. */
+static int64_t _taida_float_to_str_mold(int64_t val) {
+    int64_t raw = taida_float_to_str(val);
+    const char *s = (const char *)(intptr_t)raw;
+    if (!s) return raw;
+    int len = 0;
+    while (s[len]) len++;
+    /* Strip a trailing `.0` (but not `.14`, `.0e5`, `.1`, …) so that
+       `3.0`/`-5.0`/`0.0` collapse to `3`/`-5`/`0`. NaN / inf / exponent forms
+       have no trailing `.0` so they pass through unchanged. */
+    if (len >= 3 && s[len - 2] == '.' && s[len - 1] == '0') {
+        int keep = len - 2;
+        char *buf = (char *)wasm_alloc(keep + 1);
+        if (!buf) return raw;
+        for (int i = 0; i < keep; i++) buf[i] = s[i];
+        buf[keep] = '\0';
+        return (int64_t)(intptr_t)buf;
+    }
+    return raw;
+}
+
 int64_t taida_str_mold_float(int64_t v) {
-    return _lax_tag_vd(taida_lax_new(taida_float_to_str(v), (int64_t)(intptr_t)""), WASM_TAG_STR);
+    return _lax_tag_vd(taida_lax_new(_taida_float_to_str_mold(v), (int64_t)(intptr_t)""), WASM_TAG_STR);
 }
 
 int64_t taida_str_mold_bool(int64_t v) {
@@ -800,6 +829,18 @@ int64_t taida_str_mold_bool(int64_t v) {
 
 int64_t taida_str_mold_str(int64_t v) {
     return _lax_tag_vd(taida_lax_new(v, (int64_t)(intptr_t)""), WASM_TAG_STR);
+}
+
+/* C23-2: generic Str[x]() entry for non-primitive values (List/Pack/Lax/
+   Result/…). Routes through `_wasm_stdout_display_string` so BuchiPacks
+   render as full-form (`@(field <= value, …)` including `__`-prefixed
+   internals), matching the interpreter's `format!("{}", other)` contract
+   instead of the short-form `Lax(v)` / pointer-integer fallback used by
+   `_wasm_value_to_display_string`. Symmetric with native's
+   `taida_str_mold_any`. */
+int64_t taida_str_mold_any(int64_t v) {
+    int64_t str = _wasm_stdout_display_string(v);
+    return _lax_tag_vd(taida_lax_new(str, (int64_t)(intptr_t)""), WASM_TAG_STR);
 }
 
 int64_t taida_int_mold_int(int64_t v) {

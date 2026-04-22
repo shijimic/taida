@@ -1,0 +1,3 @@
+@(hasValue <= true, __value <= "3", __default <= "", __type <= "Lax")
+@(hasValue <= true, __value <= "-5", __default <= "", __type <= "Lax")
+@(hasValue <= true, __value <= "0", __default <= "", __type <= "Lax")

@@ -1177,6 +1177,13 @@ fn runtime_abi(name: &str) -> Result<RuntimeAbi, String> {
             params: &[Ptr],
             returns: &[Ptr],
         },
+        // C23-2: generic `Str[x]()` entry for non-primitive values (List / Pack /
+        // Lax / Result / …). Takes an opaque `taida_val` (Ptr) and returns a
+        // Lax[Str] (Ptr).
+        "taida_str_mold_any" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Ptr],
+        },
         "taida_int_mold_int" => RuntimeAbi {
             params: &[Val],
             returns: &[Ptr],

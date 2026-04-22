@@ -70,15 +70,27 @@ extern void *memcpy(void *dest, const void *src, unsigned long n);
 // Type/pointer detection helpers (used by full-specific overrides and Bytes)
 // ---------------------------------------------------------------------------
 
-/// Helper: check if a pointer looks like a WASM list (same heuristic as core)
+/* C23B-005 (2026-04-22) — magic constants + validator forward decl so
+   the detector helpers can reference them without reordering the
+   file. The actual definitions live further down; these must stay in
+   sync with the `01_core.inc.c` stamps. */
+#define WF_HM_MAGIC_FWD  0x54414944484D5000LL  /* "TAIDHMP\0" */
+#define WF_SET_MAGIC_FWD 0x5441494453455400LL  /* "TAIDSET\0" */
+#define WF_LIST_MAGIC_FWD 0x544149444C535400LL /* "TAIDLST\0" */
+static int _wf_is_valid_ptr(int64_t val, unsigned int min_bytes);
+
+/// Helper: check if a pointer is a positively-identified WASM list.
+/// C23B-005 (2026-04-22): matches the `WASM_LIST_MAGIC` stamp that
+/// `taida_list_new` writes at `data[3]`. The previous cap/len range
+/// heuristic false-positived on any untagged large Int that aliased a
+/// heap allocation. Stays in sync with `_looks_like_list` in
+/// `src/codegen/runtime_core_wasm/01_core.inc.c`.
 static int _wf_looks_like_list(int64_t ptr) {
-    if (ptr == 0) return 0;
-    if (ptr < 0 || ptr > 0xFFFFFFFF) return 0;
+    if (!_wf_is_valid_ptr(ptr, 32)) return 0;
+    unsigned int addr = (unsigned int)(uint64_t)ptr;
+    if ((addr & 7u) != 0) return 0;
     int64_t *data = (int64_t *)(intptr_t)ptr;
-    int64_t cap = data[0];
-    int64_t len = data[1];
-    if (cap >= 8 && cap <= 65536 && len >= 0 && len <= cap) return 1;
-    return 0;
+    return data[3] == WF_LIST_MAGIC_FWD || data[3] == WF_SET_MAGIC_FWD;
 }
 
 /// Helper: check if a value looks like a valid string pointer in WASM linear memory.
@@ -101,8 +113,15 @@ static int _wf_looks_like_string(int64_t val) {
 }
 
 #define WF_LIST_ELEMS 4
-#define WF_HM_MARKER_VAL 0x484D4150LL
-#define WF_SET_MARKER_VAL 0x53455421LL
+/* C23B-005 / C23B-006 (2026-04-22): wide 8-byte printable-ASCII magic
+   sentinels matched to the `01_core.inc.c` allocation stamps. The
+   previous 4-byte markers false-positived on any int64_t whose memory
+   at offset 24 happened to alias those 32-bit values. These constants
+   MUST stay in sync with `WASM_HM_MAGIC` / `WASM_SET_MAGIC` /
+   `WASM_LIST_MAGIC` in `src/codegen/runtime_core_wasm/01_core.inc.c`. */
+#define WF_HM_MARKER_VAL  0x54414944484D5000LL  /* "TAIDHMP\0" */
+#define WF_SET_MARKER_VAL 0x5441494453455400LL  /* "TAIDSET\0" */
+#define WF_LIST_MARKER_VAL 0x544149444C535400LL /* "TAIDLST\0" */
 #define WF_HASH_HAS_VALUE   0x9e9c6dc733414d60LL
 #define WF_HASH___VALUE     0x0a7fc9f13472bbe0LL
 #define WF_HASH_THROW       0x5a5fe3720c9584cfLL
@@ -117,13 +136,21 @@ static int _wf_is_valid_ptr(int64_t val, unsigned int min_bytes) {
 }
 
 static int _wf_is_hashmap(int64_t ptr) {
-    if (ptr == 0 || ptr < 0 || ptr > 0xFFFFFFFF) return 0;
+    /* C23B-005 / C23B-006: positive identification with bounds + alignment
+       checks. The 8-byte magic (matched against the `01_core.inc.c`
+       allocation stamp) is essentially collision-free, so alignment +
+       bounds suffice as provenance. */
+    if (!_wf_is_valid_ptr(ptr, 32)) return 0;
+    unsigned int addr = (unsigned int)(uint64_t)ptr;
+    if ((addr & 7u) != 0) return 0;
     int64_t *data = (int64_t *)(intptr_t)ptr;
     return data[3] == WF_HM_MARKER_VAL;
 }
 
 static int _wf_is_set(int64_t ptr) {
-    if (ptr == 0 || ptr < 0 || ptr > 0xFFFFFFFF) return 0;
+    if (!_wf_is_valid_ptr(ptr, 32)) return 0;
+    unsigned int addr = (unsigned int)(uint64_t)ptr;
+    if ((addr & 7u) != 0) return 0;
     int64_t *data = (int64_t *)(intptr_t)ptr;
     return data[3] == WF_SET_MARKER_VAL;
 }

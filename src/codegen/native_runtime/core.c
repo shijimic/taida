@@ -102,6 +102,15 @@ typedef intptr_t  taida_fn_ptr;  // 関数ポインタ
 #define TAIDA_TAG_HMAP    7
 #define TAIDA_TAG_SET     8
 #define TAIDA_TAG_UNKNOWN -1
+// C23B-007 (2026-04-22): HETEROGENEOUS sentinel distinct from UNKNOWN.
+// Used by taida_list_set_elem_tag / taida_hashmap_set_value_tag after a
+// type-conflict downgrade so a subsequent .set()/.push() with a fresh
+// primitive tag cannot re-promote a mixed container back to a single
+// primitive tag. Mirror of WASM_TAG_HETEROGENEOUS. Retain/release treats
+// HETEROGENEOUS the same as UNKNOWN (the "leak rather than crash"
+// conservative path) — the container's lifetime memory accounting was
+// already leaky for unknown-tag containers before this change.
+#define TAIDA_TAG_HETEROGENEOUS -2
 
 // ============================================================================
 // NO-4: Native Ownership Rules (runtime helper 監査ルール)
@@ -131,6 +140,29 @@ typedef intptr_t  taida_fn_ptr;  // 関数ポインタ
 // HashMap layout macros (needed by taida_release before HashMap section)
 #define HM_HEADER 4  // number of header slots before entries
 #define TAIDA_HASHMAP_TOMBSTONE_HASH ((taida_val)1)
+// C23B-008 (2026-04-22): HashMap insertion-order side-index.
+// After the `cap * 3` entry slots we append:
+//   [next_ord, order_array[cap]]
+// where `next_ord` is a monotonic ordinal counter and `order_array[i]`
+// stores the bucket slot of the i-th insertion (or -1 for a hole left
+// by a subsequent .remove()). Display / iteration helpers walk
+// `order_array[0..next_ord]` so Native ordering matches interpreter /
+// JS insertion-order semantics (interpreter stores HashMap as
+// BuchiPack(__entries <= @[(k,v), ...]) — a Vec<(name, value)> that
+// preserves insertion order, `src/interpreter/methods.rs:674-702`).
+//
+// Layout (native, no trailing magic — cap=16 example):
+//   [0]   refcount+magic
+//   [1]   capacity (= 16)
+//   [2]   length
+//   [3]   value_type_tag
+//   [4..52)  entries (16 entries * 3 slots = 48)
+//   [52]  next_ord
+//   [53..69)  order_array (16 slots)
+// Total: HM_HEADER + cap*3 + 1 + cap
+#define TAIDA_HM_ORD_HEADER_SLOT(cap) ((HM_HEADER) + (cap) * 3)
+#define TAIDA_HM_ORD_SLOT(cap, i)     (TAIDA_HM_ORD_HEADER_SLOT(cap) + 1 + (i))
+#define TAIDA_HM_TOTAL_SLOTS(cap)     ((HM_HEADER) + (cap) * 3 + 1 + (cap))
 #define HM_SLOT_EMPTY(h, k)     ((h) == 0 && (k) == 0)
 #define HM_SLOT_TOMBSTONE(h, k) ((h) == TAIDA_HASHMAP_TOMBSTONE_HASH && (k) == 0)
 #define HM_SLOT_OCCUPIED(h, k)  (!HM_SLOT_EMPTY(h, k) && !HM_SLOT_TOMBSTONE(h, k))
@@ -316,6 +348,10 @@ static int taida_read_cstr_len_safe(const char *s, size_t max_len, size_t *out_l
 static taida_val taida_value_to_display_string(taida_val val);
 static taida_val taida_value_to_debug_string(taida_val val);
 static taida_val taida_throw_to_display_string(taida_val throw_val);
+// C23-2: generic Str[x]() entry — forward declare the stdout-display helper so
+// that `taida_str_mold_any` (defined near the other str-mold helpers up in the
+// file) can route through the full-form BuchiPack rendering used by stdout.
+taida_val taida_stdout_display_string(taida_val obj);
 taida_val taida_typeof(taida_val val, taida_val tag);
 taida_val taida_polymorphic_contains(taida_val obj, taida_val needle);
 taida_val taida_polymorphic_index_of(taida_val obj, taida_val needle);
@@ -855,6 +891,9 @@ static void taida_retain_and_tag_field(taida_val pack, taida_val field_idx, taid
 }
 
 // TF-15: Register Lax internal field names so display_string can render them
+// C23B-003 reopen: also register `__error` (used by Gorillax/RelaxedGorillax)
+// so `taida_pack_to_display_string_full` emits those fields instead of
+// silently skipping them (was rendering `@()` for Gorillax `Str[...]()`).
 static void taida_register_lax_field_names(void) {
     static int registered = 0;
     if (registered) return;
@@ -862,6 +901,7 @@ static void taida_register_lax_field_names(void) {
     taida_register_field_name((taida_val)HASH_HAS_VALUE, (taida_val)"hasValue");
     taida_register_field_name((taida_val)HASH___VALUE, (taida_val)"__value");
     taida_register_field_name((taida_val)HASH___DEFAULT, (taida_val)"__default");
+    taida_register_field_name((taida_val)HASH___ERROR, (taida_val)"__error");
     taida_register_field_name((taida_val)HASH___TYPE, (taida_val)"__type");
     // Register hasValue as Bool type for correct display (true/false instead of 0/1)
     taida_register_field_type((taida_val)HASH_HAS_VALUE, (taida_val)"hasValue", 4);
@@ -991,6 +1031,11 @@ static int taida_is_molten(taida_val ptr) {
 // Field 2 is __error (not __default like Lax).
 
 taida_val taida_gorillax_new(taida_val value) {
+    // C23B-003 reopen: ensure `__error` / `__type` / `hasValue` / `__value`
+    // field names are in the registry so `taida_pack_to_display_string_full`
+    // (used by `Str[Gorillax[...]]()`) emits all four fields instead of
+    // silently skipping them. The Lax registration also covers these.
+    taida_register_lax_field_names();
     taida_val pack = taida_pack_new(4);
     taida_pack_set_hash(pack, 0, (taida_val)HASH_HAS_VALUE);
     taida_pack_set(pack, 0, 1);  // hasValue = true
@@ -1003,12 +1048,17 @@ taida_val taida_gorillax_new(taida_val value) {
     // FNV-1a hash lets user code actually look up `.__error` at runtime.
     taida_pack_set_hash(pack, 2, (taida_val)HASH___ERROR);
     taida_pack_set(pack, 2, 0);  // __error = Unit (no error)
+    // C23B-003 reopen: tag `__error` as PACK so that
+    // `taida_pack_to_display_string_full` renders Unit as `@()` instead of
+    // `0` (matches interpreter `Value::Unit.to_debug_string()`).
+    taida_pack_set_tag(pack, 2, TAIDA_TAG_PACK);
     taida_pack_set_hash(pack, 3, (taida_val)HASH___TYPE);
     taida_pack_set(pack, 3, (taida_val)__gorillax_type_str);
     return pack;
 }
 
 taida_val taida_gorillax_err(taida_val error) {
+    taida_register_lax_field_names();  // C23B-003 reopen — register __error
     taida_val pack = taida_pack_new(4);
     taida_pack_set_hash(pack, 0, (taida_val)HASH_HAS_VALUE);
     taida_pack_set(pack, 0, 0);  // hasValue = false
@@ -1148,6 +1198,19 @@ taida_val taida_str_mold_bool(taida_val v) {
 }
 taida_val taida_str_mold_str(taida_val v) {
     return taida_lax_tag_value_default(taida_lax_new(v, (taida_val)""), TAIDA_TAG_STR);
+}
+
+// C23-2: generic Str[x]() entry for non-primitive values (List/Pack/Lax/Result/…).
+// The interpreter implements `Str[x]()` as `format!("{}", other)` which is the
+// same as `to_display_string()` — for BuchiPacks that means the full-form
+// `@(field <= value, ...)` including `__`-prefixed internals, which is what
+// `taida_stdout_display_string` produces (and is distinct from the short-form
+// `taida_value_to_display_string` Lax rendering `Lax(3)`). Wrap the resulting
+// string in a Lax with STR tags on value/default, matching the primitive Str
+// molds above.
+taida_val taida_str_mold_any(taida_val v) {
+    taida_val str = taida_stdout_display_string(v);
+    return taida_lax_tag_value_default(taida_lax_new(str, (taida_val)""), TAIDA_TAG_STR);
 }
 
 // Int[x]() — Str parse can fail
@@ -2387,7 +2450,20 @@ taida_ptr taida_list_new(void) {
 }
 
 void taida_list_set_elem_tag(taida_ptr list_ptr, taida_val tag) {
-    ((taida_val*)list_ptr)[3] = tag;
+    // C23B-007 (2026-04-22): sentinel-separated downgrade logic (mirror of
+    // wasm `taida_list_set_elem_tag`). Codegen calls this on every list-push
+    // site, so for mixed lists like `@[1, "a", 2]` the naive overwrite would
+    // end up with the last element's tag and confuse downstream tag-aware
+    // consumers. Latch on HETEROGENEOUS(-2) so once downgraded the container
+    // stays mixed for its lifetime; re-promotion is forbidden.
+    taida_val *list = (taida_val*)list_ptr;
+    taida_val existing = list[3];
+    if (existing == TAIDA_TAG_HETEROGENEOUS) return;
+    if (existing == TAIDA_TAG_UNKNOWN || existing == tag) {
+        list[3] = tag;
+    } else {
+        list[3] = TAIDA_TAG_HETEROGENEOUS;
+    }
 }
 
 taida_ptr taida_list_push(taida_ptr list_ptr, taida_val item) {
@@ -4519,7 +4595,12 @@ static int taida_hashmap_key_eq(taida_val key_a, taida_val key_b) {
 static taida_val taida_hashmap_new_with_cap(taida_val cap) {
     // M-02: Guard against non-positive cap and cap * 3 overflow.
     if (cap <= 0) cap = 16;
-    size_t slots = taida_safe_add((size_t)HM_HEADER, taida_safe_mul((size_t)cap, 3, "hm_new_with_cap slots"), "hm_new_with_cap total");
+    // C23B-008 (2026-04-22): allocate extra `1 + cap` slots for the
+    // insertion-order side-index. `calloc` zero-initialises everything,
+    // so `next_ord` starts at 0 and `order_array` is all zeros (never
+    // read while `next_ord == 0`).
+    size_t slots = taida_safe_add((size_t)HM_HEADER, taida_safe_mul((size_t)cap, 3, "hm_new_with_cap slots"), "hm_new_with_cap entries");
+    slots = taida_safe_add(slots, (size_t)(1 + cap), "hm_new_with_cap ord");
     size_t alloc_size = taida_safe_mul(slots, sizeof(taida_val), "hm_new_with_cap bytes");
     taida_val *hm = (taida_val*)calloc(1, alloc_size);
     if (!hm) { fprintf(stderr, "taida: out of memory (taida_hashmap_new_with_cap)\n"); exit(1); }
@@ -4527,19 +4608,39 @@ static taida_val taida_hashmap_new_with_cap(taida_val cap) {
     hm[1] = cap;  // capacity
     hm[2] = 0;    // length
     hm[3] = TAIDA_TAG_UNKNOWN;  // value_type_tag (unknown until set)
+    // next_ord (hm[TAIDA_HM_ORD_HEADER_SLOT(cap)]) and order_array are
+    // already zero thanks to calloc.
     return (taida_val)hm;
 }
 
 void taida_hashmap_set_value_tag(taida_val hm_ptr, taida_val tag) {
-    ((taida_val*)hm_ptr)[3] = tag;
+    // C23B-007 (2026-04-22): sentinel-separated downgrade logic (mirror of
+    // wasm `taida_hashmap_set_value_tag`). See the list variant above for
+    // the full rationale; in short, mixed-value HashMaps like
+    // `.set("a", 1).set("b", "x").set("c", 2)` must stay HETEROGENEOUS(-2)
+    // once they've seen two incompatible primitive tags, and must never
+    // re-promote. Native HashMap iteration (retain/release, display) treats
+    // HETEROGENEOUS identically to UNKNOWN — same leak-rather-than-crash
+    // behaviour as before for tag-ambiguous containers.
+    taida_val *hm = (taida_val*)hm_ptr;
+    taida_val existing = hm[3];
+    if (existing == TAIDA_TAG_HETEROGENEOUS) return;
+    if (existing == TAIDA_TAG_UNKNOWN || existing == tag) {
+        hm[3] = tag;
+    } else {
+        hm[3] = TAIDA_TAG_HETEROGENEOUS;
+    }
 }
 
 taida_val taida_hashmap_new(void) {
     return taida_hashmap_new_with_cap(16);
 }
 
-// Internal set used by resize (does not trigger resize)
-static void taida_hashmap_set_internal(taida_val *hm, taida_val cap, taida_val key_hash, taida_val key_ptr, taida_val value) {
+// Internal set used by resize (does not trigger resize).
+// C23B-008: returns the bucket slot where the insert landed (so the
+// caller can record it in the insertion-order side-index), or -1 when
+// an existing key was updated in place (no new ordinal allocated).
+static taida_val taida_hashmap_set_internal(taida_val *hm, taida_val cap, taida_val key_hash, taida_val key_ptr, taida_val value) {
     uint64_t uh = (uint64_t)key_hash;
     taida_val idx = (taida_val)(uh % (uint64_t)cap);
     for (taida_val i = 0; i < cap; i++) {
@@ -4551,18 +4652,23 @@ static void taida_hashmap_set_internal(taida_val *hm, taida_val cap, taida_val k
             hm[HM_HEADER + slot * 3 + 1] = key_ptr;
             hm[HM_HEADER + slot * 3 + 2] = value;
             hm[2]++;
-            return;
+            return slot;
         }
         if (sh == key_hash && taida_hashmap_key_eq(sk, key_ptr)) {
             hm[HM_HEADER + slot * 3 + 2] = value;
-            return;
+            return -1;
         }
     }
+    return -1;
 }
 
 // Resize the hashmap to new_cap (re-hash all occupied entries)
 // This is a MOVE operation — entries transfer ownership from old to new.
 // No retain/release needed; the old table's raw memory is freed.
+// C23B-008 (2026-04-22): walk the OLD insertion-order side-index so the
+// new table's entries keep the same insertion sequence (required for
+// parity with interpreter / JS). Tombstoned / removed entries are
+// skipped. Rebuild the new side-index as we go.
 static taida_val taida_hashmap_resize(taida_val hm_ptr, taida_val new_cap) {
     taida_val *old_hm = (taida_val*)hm_ptr;
     taida_val old_cap = old_hm[1];
@@ -4570,13 +4676,21 @@ static taida_val taida_hashmap_resize(taida_val hm_ptr, taida_val new_cap) {
     taida_val *new_hm = (taida_val*)new_hm_ptr;
     // NO-1: propagate value_type_tag from old to new
     new_hm[3] = old_hm[3];
-    for (taida_val i = 0; i < old_cap; i++) {
-        taida_val sh = old_hm[HM_HEADER + i * 3];
-        taida_val sk = old_hm[HM_HEADER + i * 3 + 1];
-        if (HM_SLOT_OCCUPIED(sh, sk)) {
-            taida_hashmap_set_internal(new_hm, new_cap, sh, sk, old_hm[HM_HEADER + i * 3 + 2]);
+    taida_val old_next_ord = old_hm[TAIDA_HM_ORD_HEADER_SLOT(old_cap)];
+    taida_val new_next_ord = 0;
+    for (taida_val oi = 0; oi < old_next_ord; oi++) {
+        taida_val slot = old_hm[TAIDA_HM_ORD_SLOT(old_cap, oi)];
+        if (slot < 0 || slot >= old_cap) continue;  // removed or invalid
+        taida_val sh = old_hm[HM_HEADER + slot * 3];
+        taida_val sk = old_hm[HM_HEADER + slot * 3 + 1];
+        if (!HM_SLOT_OCCUPIED(sh, sk)) continue;
+        taida_val new_slot = taida_hashmap_set_internal(new_hm, new_cap, sh, sk, old_hm[HM_HEADER + slot * 3 + 2]);
+        if (new_slot >= 0) {
+            new_hm[TAIDA_HM_ORD_SLOT(new_cap, new_next_ord)] = new_slot;
+            new_next_ord++;
         }
     }
+    new_hm[TAIDA_HM_ORD_HEADER_SLOT(new_cap)] = new_next_ord;
     free(old_hm);
     return new_hm_ptr;
 }
@@ -4615,6 +4729,10 @@ taida_val taida_hashmap_set(taida_val hm_ptr, taida_val key_hash, taida_val key_
             taida_hashmap_key_retain(key_ptr);
             taida_hashmap_val_retain(value, val_tag);
             hm[2]++;
+            // C23B-008 (2026-04-22): record the insertion ordinal.
+            taida_val next_ord = hm[TAIDA_HM_ORD_HEADER_SLOT(cap)];
+            hm[TAIDA_HM_ORD_SLOT(cap, next_ord)] = target;
+            hm[TAIDA_HM_ORD_HEADER_SLOT(cap)] = next_ord + 1;
             return hm_ptr;
         }
         if (HM_SLOT_TOMBSTONE(sh, sk)) {
@@ -4628,6 +4746,9 @@ taida_val taida_hashmap_set(taida_val hm_ptr, taida_val key_hash, taida_val key_
             taida_hashmap_val_release(old_val, val_tag);
             taida_hashmap_val_retain(value, val_tag);
             hm[HM_HEADER + slot * 3 + 2] = value;
+            // C23B-008: update-in-place keeps the existing insertion
+            // ordinal (no side-index change), so display order remains
+            // first-insertion-wins — matches interpreter semantics.
             return hm_ptr;
         }
     }
@@ -4640,6 +4761,10 @@ taida_val taida_hashmap_set(taida_val hm_ptr, taida_val key_hash, taida_val key_
         taida_hashmap_key_retain(key_ptr);
         taida_hashmap_val_retain(value, val_tag);
         hm[2]++;
+        // C23B-008: record ordinal for the tombstone-reuse insertion.
+        taida_val next_ord = hm[TAIDA_HM_ORD_HEADER_SLOT(cap)];
+        hm[TAIDA_HM_ORD_SLOT(cap, next_ord)] = first_tombstone;
+        hm[TAIDA_HM_ORD_HEADER_SLOT(cap)] = next_ord + 1;
     }
     return hm_ptr;
 }
@@ -4703,6 +4828,16 @@ taida_val taida_hashmap_remove(taida_val hm_ptr, taida_val key_hash, taida_val k
             hm[HM_HEADER + slot * 3 + 1] = 0;
             hm[HM_HEADER + slot * 3 + 2] = 0;
             hm[2]--;
+            // C23B-008 (2026-04-22): hole out the ordinal slot so
+            // display / iteration skip it. `next_ord` stays as a
+            // monotonic upper bound (never decremented).
+            taida_val next_ord = hm[TAIDA_HM_ORD_HEADER_SLOT(cap)];
+            for (taida_val oi = 0; oi < next_ord; oi++) {
+                if (hm[TAIDA_HM_ORD_SLOT(cap, oi)] == slot) {
+                    hm[TAIDA_HM_ORD_SLOT(cap, oi)] = -1;
+                    break;
+                }
+            }
             return hm_ptr;
         }
     }
@@ -4715,9 +4850,14 @@ taida_val taida_hashmap_keys(taida_val hm_ptr) {
     taida_val list = taida_list_new();
     // NO-1: keys are always Str — set elem_type_tag and retain each key
     ((taida_val*)list)[3] = TAIDA_TAG_STR;
-    for (taida_val i = 0; i < cap; i++) {
-        taida_val sh = hm[HM_HEADER + i * 3];
-        taida_val sk = hm[HM_HEADER + i * 3 + 1];
+    // C23B-008 (2026-04-22): insertion-order walk so .keys() matches
+    // interpreter / JS ordering.
+    taida_val next_ord = hm[TAIDA_HM_ORD_HEADER_SLOT(cap)];
+    for (taida_val oi = 0; oi < next_ord; oi++) {
+        taida_val slot = hm[TAIDA_HM_ORD_SLOT(cap, oi)];
+        if (slot < 0 || slot >= cap) continue;
+        taida_val sh = hm[HM_HEADER + slot * 3];
+        taida_val sk = hm[HM_HEADER + slot * 3 + 1];
         if (HM_SLOT_OCCUPIED(sh, sk)) {
             taida_hashmap_key_retain(sk);
             list = taida_list_push(list, sk);
@@ -4733,11 +4873,15 @@ taida_val taida_hashmap_values(taida_val hm_ptr) {
     taida_val list = taida_list_new();
     // NO-1: propagate value_type_tag to the returned list and retain each value
     ((taida_val*)list)[3] = val_tag;
-    for (taida_val i = 0; i < cap; i++) {
-        taida_val sh = hm[HM_HEADER + i * 3];
-        taida_val sk = hm[HM_HEADER + i * 3 + 1];
+    // C23B-008: insertion-order walk.
+    taida_val next_ord = hm[TAIDA_HM_ORD_HEADER_SLOT(cap)];
+    for (taida_val oi = 0; oi < next_ord; oi++) {
+        taida_val slot = hm[TAIDA_HM_ORD_SLOT(cap, oi)];
+        if (slot < 0 || slot >= cap) continue;
+        taida_val sh = hm[HM_HEADER + slot * 3];
+        taida_val sk = hm[HM_HEADER + slot * 3 + 1];
         if (HM_SLOT_OCCUPIED(sh, sk)) {
-            taida_val v = hm[HM_HEADER + i * 3 + 2];
+            taida_val v = hm[HM_HEADER + slot * 3 + 2];
             taida_hashmap_val_retain(v, val_tag);
             list = taida_list_push(list, v);
         }
@@ -4755,6 +4899,9 @@ taida_val taida_hashmap_is_empty(taida_val hm_ptr) {
 
 // Clone a hashmap (for immutable set/remove/merge semantics)
 // Cloned entries share ownership with the original, so retain all keys+values.
+// C23B-008 (2026-04-22): bump allocation size to include the insertion-
+// order side-index and copy it verbatim (same bucket layout → same slot
+// indices remain valid).
 static taida_val taida_hashmap_clone(taida_val hm_ptr) {
     taida_val *hm = (taida_val*)hm_ptr;
     taida_val cap = hm[1];
@@ -4764,7 +4911,10 @@ static taida_val taida_hashmap_clone(taida_val hm_ptr) {
         fprintf(stderr, "taida: invalid hashmap cap %" PRId64 " in taida_hashmap_clone\n", (int64_t)cap);
         exit(1);
     }
-    size_t total = taida_safe_add((size_t)HM_HEADER, taida_safe_mul((size_t)cap, 3, "hm_clone slots"), "hm_clone total");
+    size_t total = taida_safe_add((size_t)HM_HEADER, taida_safe_mul((size_t)cap, 3, "hm_clone slots"), "hm_clone entries");
+    // C23B-008: include the insertion-order side-index (1 + cap slots)
+    // at the end of the allocation.
+    total = taida_safe_add(total, (size_t)(1 + cap), "hm_clone ord");
     size_t alloc_size = taida_safe_mul(total, sizeof(taida_val), "hm_clone bytes");
     taida_val *new_hm = (taida_val*)TAIDA_MALLOC(alloc_size, "hashmap_clone");
     memcpy(new_hm, hm, alloc_size);
@@ -4812,7 +4962,15 @@ taida_val taida_hashmap_get_lax(taida_val hm_ptr, taida_val key_hash, taida_val 
     return taida_lax_empty(0);
 }
 
-// Entries: returns list of BuchiPack @(key, value)
+// Entries: returns list of BuchiPack @(key, value).
+// C23B-008 (2026-04-22): insertion-order walk so .entries() matches
+// interpreter / JS ordering.
+// C23B-009 (2026-04-22): idempotently register `"key"` / `"value"` in the
+// field-name registry so `taida_pack_to_display_string_full` can resolve
+// them. Without this registration, `taida_lookup_field_name` returned NULL
+// and every pair pack printed as `@()` — diverging from interpreter's
+// `@(key <= …, value <= …)` shape documented in
+// `docs/reference/standard_library.md:238`.
 taida_val taida_hashmap_entries(taida_val hm_ptr) {
     taida_val *hm = (taida_val*)hm_ptr;
     taida_val cap = hm[1];
@@ -4823,9 +4981,21 @@ taida_val taida_hashmap_entries(taida_val hm_ptr) {
     // FNV-1a hashes for "key" and "value"
     #define HASH_KEY   0x3dc94a19365b10ecULL
     #define HASH_VAL   0x7ce4fd9430e80ceaULL
-    for (taida_val i = 0; i < cap; i++) {
-        taida_val sh = hm[HM_HEADER + i * 3];
-        taida_val sk = hm[HM_HEADER + i * 3 + 1];
+    // C23B-009: register pair field names once. `taida_register_field_name`
+    // is idempotent (skips duplicates). Using static-string literals so the
+    // registry can hold the pointer indefinitely without ownership issues.
+    static int __entries_names_registered = 0;
+    if (!__entries_names_registered) {
+        __entries_names_registered = 1;
+        taida_register_field_name((taida_val)HASH_KEY, (taida_val)"key");
+        taida_register_field_name((taida_val)HASH_VAL, (taida_val)"value");
+    }
+    taida_val next_ord = hm[TAIDA_HM_ORD_HEADER_SLOT(cap)];
+    for (taida_val oi = 0; oi < next_ord; oi++) {
+        taida_val slot = hm[TAIDA_HM_ORD_SLOT(cap, oi)];
+        if (slot < 0 || slot >= cap) continue;
+        taida_val sh = hm[HM_HEADER + slot * 3];
+        taida_val sk = hm[HM_HEADER + slot * 3 + 1];
         if (HM_SLOT_OCCUPIED(sh, sk)) {
             taida_val pair = taida_pack_new(2);
             taida_pack_set_hash(pair, 0, (taida_val)HASH_KEY);
@@ -4835,7 +5005,7 @@ taida_val taida_hashmap_entries(taida_val hm_ptr) {
             taida_pack_set(pair, 0, sk);
             taida_pack_set_hash(pair, 1, (taida_val)HASH_VAL);
             taida_pack_set_tag(pair, 1, val_tag);
-            taida_val v = hm[HM_HEADER + i * 3 + 2];
+            taida_val v = hm[HM_HEADER + slot * 3 + 2];
             taida_hashmap_val_retain(v, val_tag);
             taida_pack_set(pair, 1, v);
             list = taida_list_push(list, pair);
@@ -4844,22 +5014,65 @@ taida_val taida_hashmap_entries(taida_val hm_ptr) {
     return list;
 }
 
-// Merge two hashmaps (other overwrites this)
+// Merge two hashmaps (other overwrites this).
+// C23B-008 reopen (2026-04-22): interpreter semantics for merge are NOT
+// "update-in-place for overlap keys". `src/interpreter/methods.rs:787-822`
+// does `merged.retain(|e| e.key != other_key); merged.push(other_entry)`
+// for every other entry, which MOVES any overlap key to other's position
+// (with other's value). The previous implementation called
+// `taida_hashmap_set(clone_of_self, other_entry)` for each other entry,
+// which updated in place and preserved self's ordinal — divergent from
+// interpreter (repro: `a=[a,b]`, `b=[c,b,d]`, interpreter gives
+// `[a,c,b,d]`, buggy backends gave `[a,b,c,d]`).
+//
+// New algorithm (mirrors interpreter retain+push):
+//   1. Build a fresh empty HashMap.
+//   2. Walk self in insertion order; insert entries whose key is NOT in
+//      other. These land in self-order at the front of the side-index.
+//   3. Walk other in insertion order; insert each entry (all of these are
+//      new to the fresh map since step 2 filtered the overlap keys out).
+//      Values and ordinals come from other. Value retention flows through
+//      `taida_hashmap_set` exactly as a fresh `.set()` chain.
+//
+// This exactly reproduces `retain-then-push` ordering without needing to
+// touch the `taida_hashmap_set` contract (which must keep preserving
+// ordinal on .set-on-existing for the plain `.set()` path).
 taida_val taida_hashmap_merge(taida_val hm_ptr, taida_val other_ptr) {
-    taida_val new_hm = taida_hashmap_clone(hm_ptr);
+    taida_val *self = (taida_val*)hm_ptr;
     taida_val *other = (taida_val*)other_ptr;
-    taida_val cap = other[1];
-    for (taida_val i = 0; i < cap; i++) {
-        taida_val sh = other[HM_HEADER + i * 3];
-        taida_val sk = other[HM_HEADER + i * 3 + 1];
-        if (HM_SLOT_OCCUPIED(sh, sk)) {
-            new_hm = taida_hashmap_set(new_hm, sh, sk, other[HM_HEADER + i * 3 + 2]);
-        }
+    taida_val self_cap = self[1];
+    taida_val other_cap = other[1];
+
+    taida_val result = taida_hashmap_new();
+
+    // Step 1: self entries whose key is absent from `other` (self-order).
+    taida_val self_next_ord = self[TAIDA_HM_ORD_HEADER_SLOT(self_cap)];
+    for (taida_val oi = 0; oi < self_next_ord; oi++) {
+        taida_val slot = self[TAIDA_HM_ORD_SLOT(self_cap, oi)];
+        if (slot < 0 || slot >= self_cap) continue;
+        taida_val sh = self[HM_HEADER + slot * 3];
+        taida_val sk = self[HM_HEADER + slot * 3 + 1];
+        if (!HM_SLOT_OCCUPIED(sh, sk)) continue;
+        if (taida_hashmap_has(other_ptr, sh, sk)) continue;
+        result = taida_hashmap_set(result, sh, sk, self[HM_HEADER + slot * 3 + 2]);
     }
-    return new_hm;
+
+    // Step 2: all other entries in other-order (guaranteed new to result).
+    taida_val other_next_ord = other[TAIDA_HM_ORD_HEADER_SLOT(other_cap)];
+    for (taida_val oi = 0; oi < other_next_ord; oi++) {
+        taida_val slot = other[TAIDA_HM_ORD_SLOT(other_cap, oi)];
+        if (slot < 0 || slot >= other_cap) continue;
+        taida_val sh = other[HM_HEADER + slot * 3];
+        taida_val sk = other[HM_HEADER + slot * 3 + 1];
+        if (!HM_SLOT_OCCUPIED(sh, sk)) continue;
+        result = taida_hashmap_set(result, sh, sk, other[HM_HEADER + slot * 3 + 2]);
+    }
+    return result;
 }
 
 // HashMap.toString() -> "HashMap({key1: val1, key2: val2})"
+// C23B-008 (2026-04-22): insertion-order walk so .toString() matches
+// interpreter / JS ordering byte-for-byte.
 taida_val taida_hashmap_to_string(taida_val hm_ptr) {
     taida_val *hm = (taida_val*)hm_ptr;
     taida_val cap = hm[1];
@@ -4871,11 +5084,14 @@ taida_val taida_hashmap_to_string(taida_val hm_ptr) {
     size_t off = 9;
     taida_val count = 0;
 
-    for (taida_val i = 0; i < cap; i++) {
-        taida_val sh = hm[HM_HEADER + i * 3];
-        taida_val sk = hm[HM_HEADER + i * 3 + 1];
+    taida_val next_ord = hm[TAIDA_HM_ORD_HEADER_SLOT(cap)];
+    for (taida_val oi = 0; oi < next_ord; oi++) {
+        taida_val slot = hm[TAIDA_HM_ORD_SLOT(cap, oi)];
+        if (slot < 0 || slot >= cap) continue;
+        taida_val sh = hm[HM_HEADER + slot * 3];
+        taida_val sk = hm[HM_HEADER + slot * 3 + 1];
         if (HM_SLOT_OCCUPIED(sh, sk)) {
-            taida_val value = hm[HM_HEADER + i * 3 + 2];
+            taida_val value = hm[HM_HEADER + slot * 3 + 2];
 
             taida_val key_str_ptr = taida_value_to_debug_string(sk);
             taida_val val_str_ptr = taida_value_to_debug_string(value);
@@ -5805,6 +6021,16 @@ static int taida_is_buchi_pack(taida_val ptr) {
 // formatting (e.g., item_str in list display) are released within the function.
 static taida_val taida_value_to_display_string(taida_val val);
 static taida_val taida_value_to_debug_string(taida_val val);
+// C23B-003 reopen 2: debug-string variant that recurses into the
+// synthetic full-form helpers for HashMap / Set / BuchiPack. Used only
+// inside `taida_hashmap_to_display_string_full` / `_set_…_full` /
+// `taida_pack_to_display_string_full` so nested typed runtime objects
+// keep their full-form rendering (matching the interpreter's
+// `Value::to_debug_string()` on BuchiPack, which itself recurses).
+static taida_val taida_value_to_debug_string_full(taida_val val);
+static taida_val taida_hashmap_to_display_string_full(taida_val hm_ptr);
+static taida_val taida_set_to_display_string_full(taida_val set_ptr);
+static taida_val taida_pack_to_display_string_full(taida_val pack_ptr);
 
 // Convert a list to display string: @[item1, item2, ...]
 static taida_val taida_list_to_display_string(taida_val list_ptr) {
@@ -5993,6 +6219,10 @@ static taida_val taida_pack_to_display_string_full(taida_val pack_ptr) {
         // Lax's `hasValue` field continues to print `true`/`false`.
         int render_bool   = (field_tag == TAIDA_TAG_BOOL) || (field_tag == 0 && ftype == 4);
         int render_float  = (field_tag == TAIDA_TAG_FLOAT);
+        // C23B-003 reopen: `__error == 0` with a PACK-tagged slot represents
+        // `Value::Unit` (absence of error) on Gorillax. The interpreter's
+        // `to_debug_string()` on `Value::Unit` returns `"@()"`, not `"0"`.
+        int render_unit_pack = (field_tag == TAIDA_TAG_PACK && field_val == 0);
         if (render_bool) {
             const char *bv = field_val ? "true" : "false";
             size_t sl = strlen(bv); while (len + sl + 1 > cap) { cap *= 2; TAIDA_REALLOC(buf, cap, "to_string_full"); } memcpy(buf + len, bv, sl); len += sl; buf[len] = '\0';
@@ -6005,8 +6235,19 @@ static taida_val taida_pack_to_display_string_full(taida_val pack_ptr) {
                 size_t sl = strlen(fs); while (len + sl + 1 > cap) { cap *= 2; TAIDA_REALLOC(buf, cap, "to_string_full"); } memcpy(buf + len, fs, sl); len += sl; buf[len] = '\0';
             }
             taida_str_release(fstr);
+        } else if (render_unit_pack) {
+            const char *uv = "@()";
+            size_t sl = 3; while (len + sl + 1 > cap) { cap *= 2; TAIDA_REALLOC(buf, cap, "to_string_full"); } memcpy(buf + len, uv, sl); len += sl; buf[len] = '\0';
         } else {
-            taida_val val_str = taida_value_to_debug_string(field_val);
+            // C23B-003 reopen 2: nested typed runtime objects must keep
+            // their full-form rendering. The short-form
+            // `taida_value_to_debug_string` would dispatch HashMap / Set
+            // to their `HashMap({...})` / `Set({...})` `.toString()`
+            // helpers. Using `_full` ensures `@(__entries <= …, __type <= …)`
+            // shows up recursively (matches interpreter's
+            // `BuchiPack.to_display_string()` which walks fields via
+            // `to_debug_string()` → recursive `to_display_string()`).
+            taida_val val_str = taida_value_to_debug_string_full(field_val);
             const char *vs = (const char*)val_str;
             if (vs) {
                 size_t sl = strlen(vs); while (len + sl + 1 > cap) { cap *= 2; TAIDA_REALLOC(buf, cap, "to_string_full"); } memcpy(buf + len, vs, sl); len += sl; buf[len] = '\0';
@@ -6091,6 +6332,74 @@ static taida_val taida_value_to_debug_string(taida_val val) {
     char tmp[32]; snprintf(tmp, sizeof(tmp), "%" PRId64 "", val); return (taida_val)taida_str_new_copy(tmp);
 }
 
+// C23B-003 reopen 2: recursive debug-string variant for nested typed
+// runtime objects. Used *inside* the full-form helpers so nested
+// HashMap / Set / BuchiPack keep their interpreter-parity full-form
+// rendering instead of collapsing to the short-form `.toString()`
+// dispatch that `taida_value_to_debug_string` uses for flat
+// `.toString()` callers.
+//
+// Interpreter reference: `Value::BuchiPack.to_display_string()` walks
+// fields calling `to_debug_string()` which, for non-Str values, is the
+// same recursive `to_display_string()` — so nested HashMap (which the
+// interpreter models as `BuchiPack(__entries, __type)`) expands to the
+// full `@(__entries <= …, __type <= "HashMap")` form, not the short
+// `HashMap({…})` form.
+static taida_val taida_value_to_debug_string_full(taida_val val) {
+    if (val == 0) return (taida_val)taida_str_new_copy("0");
+    if (taida_is_hashmap(val)) return taida_hashmap_to_display_string_full(val);
+    if (taida_is_set(val)) return taida_set_to_display_string_full(val);
+    if (taida_is_async(val)) return taida_async_to_string(val);
+    if (taida_is_list(val)) {
+        // List itself uses `@[...]` format (already matches interpreter);
+        // its items must recurse through the full-form helper so nested
+        // HashMap/Set/Pack inside the list stay in full form.
+        taida_val *list = (taida_val*)val;
+        taida_val list_len = list[2];
+        size_t cap = 64;
+        size_t len = 0;
+        char *buf = (char*)TAIDA_MALLOC(cap, "list_to_string_full");
+        buf[0] = '\0';
+        { const char *s = "@["; size_t sl = 2; while (len + sl + 1 > cap) { cap *= 2; TAIDA_REALLOC(buf, cap, "to_string_full"); } memcpy(buf + len, s, sl); len += sl; buf[len] = '\0'; }
+        for (taida_val i = 0; i < list_len; i++) {
+            if (i > 0) {
+                const char *s = ", "; size_t sl = 2; while (len + sl + 1 > cap) { cap *= 2; TAIDA_REALLOC(buf, cap, "to_string_full"); } memcpy(buf + len, s, sl); len += sl; buf[len] = '\0';
+            }
+            taida_val item = list[4 + i];
+            taida_val item_str = taida_value_to_debug_string_full(item);
+            const char *is = (const char*)item_str;
+            if (is) {
+                size_t sl = strlen(is); while (len + sl + 1 > cap) { cap *= 2; TAIDA_REALLOC(buf, cap, "to_string_full"); } memcpy(buf + len, is, sl); len += sl; buf[len] = '\0';
+            }
+            taida_str_release(item_str);
+        }
+        while (len + 2 > cap) { cap *= 2; TAIDA_REALLOC(buf, cap, "to_string_full"); }
+        buf[len++] = ']'; buf[len] = '\0';
+        taida_val result = (taida_val)taida_str_new_copy(buf);
+        free(buf);
+        return result;
+    }
+    if (taida_is_bytes(val)) return taida_bytes_to_display_string(val);
+    if (taida_is_buchi_pack(val)) {
+        // Route every pack shape through the full-form renderer so
+        // nested Lax / Result / user-packs all render with their
+        // `__`-prefixed internals exposed (matches interpreter's
+        // `BuchiPack.to_display_string()`).
+        return taida_pack_to_display_string_full(val);
+    }
+    // Quoted string for non-pack Str (same as the short helper).
+    const char *s = (const char*)val;
+    size_t sl = 0;
+    if (taida_read_cstr_len_safe(s, 65536, &sl)) {
+        char *r = taida_str_alloc(sl + 2);
+        r[0] = '"';
+        memcpy(r + 1, s, sl);
+        r[sl + 1] = '"';
+        return (taida_val)r;
+    }
+    char tmp[32]; snprintf(tmp, sizeof(tmp), "%" PRId64 "", val); return (taida_val)taida_str_new_copy(tmp);
+}
+
 // Polymorphic .getOrDefault(fallback) — works on Result, Lax
 taida_val taida_polymorphic_get_or_default(taida_val obj, taida_val def) {
     if (obj == 0 || obj < 4096) return def;
@@ -6154,10 +6463,165 @@ taida_val taida_polymorphic_to_string(taida_val obj) {
 // TF-15: stdout display — renders BuchiPacks with ALL fields (including __ internal fields)
 // matching the interpreter's to_display_string() behavior.
 // .toString() methods use taida_polymorphic_to_string which produces Lax(...)/Result(...) forms.
+//
+// C23B-003 reopen: HashMap / Set are not `BuchiPack` in the native runtime
+// (they carry dedicated magic-tagged layouts) but the interpreter represents
+// them as `BuchiPack(__entries <= ..., __type <= "HashMap")` /
+// `BuchiPack(__items <= ..., __type <= "Set")` (see
+// `src/interpreter/prelude.rs:618-621` and `:644-647`). For `Str[...]()` to
+// match the interpreter byte-for-byte we must therefore emit the synthetic
+// full-form pack shape, not the short-form `HashMap({...})` /
+// `Set({...})` that `taida_hashmap_to_string` / `taida_set_to_string`
+// produce for `.toString()`.
+static taida_val taida_hashmap_to_display_string_full(taida_val hm_ptr) {
+    taida_val *hm = (taida_val*)hm_ptr;
+    taida_val cap = hm[1];
+    size_t buf_size = 256;
+    size_t off = 0;
+    char *buf = (char*)TAIDA_MALLOC(buf_size, "hm_display_full");
+    memcpy(buf, "@(__entries <= @[", 17); off = 17;
+    taida_val count = 0;
+    // C23B-008 (2026-04-22): walk the insertion-order side-index so the
+    // emitted pair sequence matches the interpreter's Vec<(k,v)> order.
+    // Holes (order slot == -1) and tombstoned entries (bucket no longer
+    // occupied) are both skipped.
+    taida_val next_ord = hm[TAIDA_HM_ORD_HEADER_SLOT(cap)];
+    for (taida_val oi = 0; oi < next_ord; oi++) {
+        taida_val slot = hm[TAIDA_HM_ORD_SLOT(cap, oi)];
+        if (slot < 0 || slot >= cap) continue;
+        taida_val sh = hm[HM_HEADER + slot * 3];
+        taida_val sk = hm[HM_HEADER + slot * 3 + 1];
+        if (HM_SLOT_OCCUPIED(sh, sk)) {
+            taida_val value = hm[HM_HEADER + slot * 3 + 2];
+            // C23B-003 reopen 2: nested typed runtime objects must recurse
+            // through the full-form helper so nested HashMap/Set/BuchiPack
+            // keep their `@(__entries …)` / `@(__items …)` / full pack
+            // shape instead of collapsing to the `.toString()` short-form.
+            taida_val key_str_ptr = taida_value_to_debug_string_full(sk);
+            taida_val val_str_ptr = taida_value_to_debug_string_full(value);
+            const char *key_str = (const char*)key_str_ptr;
+            const char *val_str = (const char*)val_str_ptr;
+            if (!key_str) key_str = "\"\"";
+            if (!val_str) val_str = "0";
+            size_t klen = strlen(key_str);
+            size_t vlen = strlen(val_str);
+            // "@(key <= <k>, value <= <v>)" + optional ", " prefix
+            size_t needed = klen + vlen + 22;
+            if (count > 0) needed += 2;
+            while (off + needed + 32 > buf_size) {
+                buf_size *= 2;
+                TAIDA_REALLOC(buf, buf_size, "hm_display_full");
+            }
+            if (count > 0) { memcpy(buf + off, ", ", 2); off += 2; }
+            memcpy(buf + off, "@(key <= ", 9); off += 9;
+            memcpy(buf + off, key_str, klen); off += klen;
+            memcpy(buf + off, ", value <= ", 11); off += 11;
+            memcpy(buf + off, val_str, vlen); off += vlen;
+            buf[off++] = ')';
+            buf[off] = '\0';
+            taida_str_release(key_str_ptr);
+            taida_str_release(val_str_ptr);
+            count++;
+        }
+    }
+    const char *suffix = "], __type <= \"HashMap\")";
+    size_t slen = strlen(suffix);
+    while (off + slen + 1 > buf_size) {
+        buf_size *= 2;
+        TAIDA_REALLOC(buf, buf_size, "hm_display_full");
+    }
+    memcpy(buf + off, suffix, slen); off += slen;
+    buf[off] = '\0';
+    taida_val result = (taida_val)taida_str_new_copy(buf);
+    free(buf);
+    return result;
+}
+
+static taida_val taida_set_to_display_string_full(taida_val set_ptr) {
+    // Set uses List layout internally (same as taida_list_to_display_string):
+    //   set[0] = magic, set[1] = capacity, set[2] = length, set[3] = type_tag,
+    //   set[4..4+len] = items.
+    taida_val *set = (taida_val*)set_ptr;
+    taida_val set_len = set[2];
+    size_t buf_size = 256;
+    size_t off = 0;
+    char *buf = (char*)TAIDA_MALLOC(buf_size, "set_display_full");
+    memcpy(buf, "@(__items <= @[", 15); off = 15;
+    for (taida_val i = 0; i < set_len; i++) {
+        taida_val item = set[4 + i];
+        // C23B-003 reopen 2: recurse into full-form for nested
+        // HashMap/Set/Pack items.
+        taida_val item_str = taida_value_to_debug_string_full(item);
+        const char *is = (const char*)item_str;
+        if (!is) is = "0";
+        size_t ilen = strlen(is);
+        size_t needed = ilen + 2;
+        if (i > 0) needed += 2;
+        while (off + needed + 32 > buf_size) {
+            buf_size *= 2;
+            TAIDA_REALLOC(buf, buf_size, "set_display_full");
+        }
+        if (i > 0) { memcpy(buf + off, ", ", 2); off += 2; }
+        memcpy(buf + off, is, ilen); off += ilen;
+        buf[off] = '\0';
+        taida_str_release(item_str);
+    }
+    const char *suffix = "], __type <= \"Set\")";
+    size_t slen = strlen(suffix);
+    while (off + slen + 1 > buf_size) {
+        buf_size *= 2;
+        TAIDA_REALLOC(buf, buf_size, "set_display_full");
+    }
+    memcpy(buf + off, suffix, slen); off += slen;
+    buf[off] = '\0';
+    taida_val result = (taida_val)taida_str_new_copy(buf);
+    free(buf);
+    return result;
+}
+
 taida_val taida_stdout_display_string(taida_val obj) {
     if (obj == 0) return (taida_val)taida_str_new_copy("0");
+    // C23B-003 reopen: route HashMap / Set through their synthetic full-form
+    // helpers so `Str[...]()` matches the interpreter's
+    // `BuchiPack(__entries/__items, __type)` rendering instead of the
+    // short-form `HashMap({...})` / `Set({...})` that
+    // `taida_value_to_display_string` would produce for `.toString()`.
+    if (taida_is_hashmap(obj)) return taida_hashmap_to_display_string_full(obj);
+    if (taida_is_set(obj)) return taida_set_to_display_string_full(obj);
     if (taida_is_buchi_pack(obj)) {
         return taida_pack_to_display_string_full(obj);
+    }
+    // C23B-003 reopen 2: Lists must recurse through the full-form
+    // debug-string so nested HashMap / Set / Pack items keep their
+    // interpreter-parity shape (e.g. `Str[@[hashMap()...]]()` matches
+    // the interpreter's `@[@(__entries <= …, __type <= "HashMap"), …]`).
+    // `taida_list_to_display_string` alone would use the short-form
+    // debug helper and collapse nested HashMaps to `HashMap({…})`.
+    if (taida_is_list(obj)) {
+        taida_val *list = (taida_val*)obj;
+        taida_val list_len = list[2];
+        size_t cap = 64;
+        size_t len = 0;
+        char *buf = (char*)TAIDA_MALLOC(cap, "list_display_full");
+        buf[0] = '\0';
+        { const char *s = "@["; size_t sl = 2; while (len + sl + 1 > cap) { cap *= 2; TAIDA_REALLOC(buf, cap, "to_string_full"); } memcpy(buf + len, s, sl); len += sl; buf[len] = '\0'; }
+        for (taida_val i = 0; i < list_len; i++) {
+            if (i > 0) {
+                const char *s = ", "; size_t sl = 2; while (len + sl + 1 > cap) { cap *= 2; TAIDA_REALLOC(buf, cap, "to_string_full"); } memcpy(buf + len, s, sl); len += sl; buf[len] = '\0';
+            }
+            taida_val item = list[4 + i];
+            taida_val item_str = taida_value_to_debug_string_full(item);
+            const char *is = (const char*)item_str;
+            if (is) {
+                size_t sl = strlen(is); while (len + sl + 1 > cap) { cap *= 2; TAIDA_REALLOC(buf, cap, "to_string_full"); } memcpy(buf + len, is, sl); len += sl; buf[len] = '\0';
+            }
+            taida_str_release(item_str);
+        }
+        while (len + 2 > cap) { cap *= 2; TAIDA_REALLOC(buf, cap, "to_string_full"); }
+        buf[len++] = ']'; buf[len] = '\0';
+        taida_val result = (taida_val)taida_str_new_copy(buf);
+        free(buf);
+        return result;
     }
     return taida_value_to_display_string(obj);
 }
@@ -7946,9 +8410,14 @@ static void json_serialize_typed(char **buf, size_t *cap, size_t *len, taida_val
         taida_val hm_cap = hm[1];
         json_append_char(buf, cap, len, '{');
         taida_val count = 0;
-        for (taida_val i = 0; i < hm_cap; i++) {
-            taida_val slot_hash = hm[HM_HEADER + i * 3];
-            taida_val slot_key = hm[HM_HEADER + i * 3 + 1];
+        // C23B-008 (2026-04-22): walk the insertion-order side-index so
+        // JSON output mirrors interpreter / JS ordering.
+        taida_val next_ord = hm[TAIDA_HM_ORD_HEADER_SLOT(hm_cap)];
+        for (taida_val oi = 0; oi < next_ord; oi++) {
+            taida_val slot = hm[TAIDA_HM_ORD_SLOT(hm_cap, oi)];
+            if (slot < 0 || slot >= hm_cap) continue;
+            taida_val slot_hash = hm[HM_HEADER + slot * 3];
+            taida_val slot_key = hm[HM_HEADER + slot * 3 + 1];
             if (HM_SLOT_OCCUPIED(slot_hash, slot_key)) {
                 if (count > 0) json_append_char(buf, cap, len, ',');
                 if (indent > 0) json_append_indent(buf, cap, len, indent, depth + 1);
@@ -7957,7 +8426,7 @@ static void json_serialize_typed(char **buf, size_t *cap, size_t *len, taida_val
                 json_append_escaped_str(buf, cap, len, key_str);
                 json_append_char(buf, cap, len, ':');
                 if (indent > 0) json_append_char(buf, cap, len, ' ');
-                json_serialize_typed(buf, cap, len, hm[HM_HEADER + i * 3 + 2], indent, depth + 1, 0);
+                json_serialize_typed(buf, cap, len, hm[HM_HEADER + slot * 3 + 2], indent, depth + 1, 0);
                 count++;
             }
         }

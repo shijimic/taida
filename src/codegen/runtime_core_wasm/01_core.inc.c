@@ -205,6 +205,17 @@ static int _wf_is_whitespace(char c) {
 #define WASM_TAG_STR     3
 #define WASM_TAG_PACK    4
 #endif
+/* C23B-007 (2026-04-22): HETEROGENEOUS sentinel, distinct from UNKNOWN(-1).
+   Used by `taida_list_set_elem_tag` / `taida_hashmap_set_value_tag` after a
+   type-conflict downgrade so subsequent `.set()` / `.push()` calls cannot
+   re-promote the container to a single primitive tag. Renderers that read
+   `list[2]` / `hm[2]` must treat -2 the same as -1 (fall back to per-element
+   structural dispatch), but the setters must NOT treat -2 as "unset" — once
+   heterogeneous, the container stays heterogeneous for its lifetime. */
+#ifndef WASM_TAG_UNKNOWN
+#define WASM_TAG_UNKNOWN       -1
+#define WASM_TAG_HETEROGENEOUS -2
+#endif
 /* B11-2: Forward declaration for polymorphic display */
 int64_t taida_polymorphic_to_string(int64_t obj);
 /* C21-4: Forward declaration for FLOAT tag fast path in stdout_with_tag */
@@ -216,6 +227,25 @@ int64_t taida_float_to_str(int64_t val);
    `_is_wasm_hashmap` are used by `_is_pack_for_stdout` to distinguish
    a pack pointer from a List / HashMap / Set at runtime. */
 static int _looks_like_pack(int64_t val);
+/* C23B-003 reopen 3: empty pack (`@()` / `Value::Unit`) is allocated by
+   `taida_pack_new(0)` and stores `field_count = 0` in its first slot.
+   `_looks_like_pack` rejects this because it requires `fc >= 1` (the
+   heuristic was tuned to avoid Lists / HashMaps whose header layout
+   overlaps with non-empty pack signatures). So without a dedicated
+   detector, any nested `@()` inside a Lax / Pack / HashMap / Set / List
+   falls through to `taida_int_to_str(val)` and renders as a raw pointer
+   integer — breaking 4-backend parity with interpreter / JS / native,
+   all of which render it as the string `"@()"`.
+   C23B-003 reopen 4 (2026-04-22): switched from a heap-range + zero-slot
+   heuristic to a positive-identification magic sentinel. `taida_pack_new(0)`
+   now stamps `WASM_EMPTY_PACK_MAGIC` in slot[1], so we can identify an
+   empty pack by exact tag match instead of address guesses. This closes
+   the HIGH-severity false-positive where dynamic Int expressions
+   (e.g. `Str[a + b]()`) whose bit pattern happens to fall inside the
+   bump arena and point at a zero int64_t chunk were mis-rendered as
+   `@()`. */
+#define WASM_EMPTY_PACK_MAGIC 0x5441494450414B55LL  /* "TAIDPAKU" (U=Unit) */
+static int _looks_like_empty_pack(int64_t val);
 static int _looks_like_list(int64_t ptr);
 static int _is_wasm_hashmap(int64_t ptr);
 static int _is_wasm_set(int64_t ptr);
@@ -1096,44 +1126,111 @@ int64_t taida_float_to_str(int64_t val) {
 /* W-4: Forward declarations for list functions (used by polymorphic helpers) */
 int64_t taida_list_length(int64_t list_ptr);
 
-/* W-4f2: Collection type markers for polymorphic dispatch */
-#define WASM_SET_MARKER_VAL  0x53455400LL  /* "SET\0" */
+/* C23B-005 reopen / C23B-006 (2026-04-22): Wide (8-byte) printable-ASCII
+   magic sentinels for positive identification of every WASM collection.
+   The pre-C23B-005 detectors relied on structural heuristics (cap/len
+   ranges for List, 4-byte `"HMAP"` / `"SET\0"` markers at `data[3]` for
+   HashMap / Set) that false-positived on untagged Int64 values living
+   inside a HashMap value slot or a Pack field — `memory[addr + 24]`
+   could coincidentally equal the 32-bit marker, causing integers like
+   `73088` to be re-rendered as empty HashMaps or to send the renderer
+   into a stack-overflow list recursion.
+   The wide sentinels below are 64 bits of `TAIDA`-prefixed printable
+   ASCII — they cannot arise from arithmetic on user-supplied integers
+   and they cannot collide with FNV-1a hashes stored in Pack field
+   slots (which always have `data[0] >= 1` in non-empty packs, gating
+   pack dispatch before these sentinels are ever checked). All four
+   detectors below now require (a) a valid linear-memory address, (b)
+   8-byte alignment (every heap allocation goes through `wasm_alloc`
+   which rounds up to 8-byte boundaries), and (c) the sentinel at the
+   designated slot. This supersedes every cap/len / fc-range / first-
+   hash-non-zero heuristic, closing C23B-005 (list / set / pack
+   collection false-positives on large Int members) and C23B-006
+   (HashMap false-positive on untagged Int members). Symmetric with
+   the native runtime's `TAIDA_PACK_MAGIC` / `TAIDA_LIST_MAGIC`
+   positive identification.
+   Allocation shapes are:
+     - List / Set: `[cap, len, elem_tag, MAGIC, elems...]`
+     - HashMap:    `[cap, len, value_tag, MAGIC, entries...]`
+     - Non-empty Pack: `[fc, hash0, tag0, val0, hash1, ..., MAGIC]`
+       (one extra slot appended after the last field; existing readers
+       that only touch indices `0..1+fc*3)` are unaffected)
+     - Empty Pack:  `[0, EMPTY_PACK_MAGIC]` (already tag-based via
+       reopen 4) */
+#define WASM_LIST_MAGIC 0x544149444C535400LL  /* "TAIDLST\0" */
+#define WASM_SET_MAGIC  0x5441494453455400LL  /* "TAIDSET\0" */
+#define WASM_HM_MAGIC   0x54414944484D5000LL  /* "TAIDHMP\0" */
+#define WASM_PACK_MAGIC 0x54414944504B4B00LL  /* "TAIDPKK\0" (non-empty) */
+/* Back-compat aliases so the remaining call sites in the file keep
+   compiling until every reference is renamed. Each alias points to the
+   widened sentinel so the allocation stamp and the detector check
+   remain consistent. */
+#define WASM_SET_MARKER_VAL  WASM_SET_MAGIC
+#define WASM_HM_MARKER_VAL   WASM_HM_MAGIC
 /* W-4f2: Collection type markers and layout constants */
 #define WASM_HM_HEADER 4
-#define WASM_HM_MARKER_VAL 0x484D4150LL  /* "HMAP" — distinguishes HashMap from List/Set */
 
 /* W-4f2: List/Set element offset — header is [cap, len, elem_tag, type_marker] = 4 slots */
 #define WASM_LIST_ELEMS 4
 
+/* C23B-008 (2026-04-22): HashMap insertion-order side-index offsets.
+   After the `cap * 3` entry slots and the trailing magic we append:
+     [next_ord, order_array[cap]]
+   so display / iteration helpers can walk entries in their insertion
+   order (matches the interpreter's `Vec<(k,v)>` semantics; JS already
+   preserves insertion order via its `__entries` Array). See the
+   `_wasm_hashmap_new_with_cap` comment for the allocation layout. */
+#define WASM_HM_ORD_HEADER_SLOT(cap) ((WASM_HM_HEADER) + (cap) * 3 + 1)
+#define WASM_HM_ORD_SLOT(cap, i)     (WASM_HM_ORD_HEADER_SLOT(cap) + 1 + (i))
+
 /* ── W-3f/W-4: taida_polymorphic_length (wasm-min: string + list) ── */
 
-/* Helper: check if a pointer looks like a list (bump-allocated).
-   Lists have [capacity(int64), length(int64), ...] where capacity >= 16.
-   Strings have printable ASCII/UTF-8 as first byte.
-   We check the first int64_t: if it's a reasonable capacity (8-65536),
-   it's likely a list. */
-static int _looks_like_list(int64_t ptr) {
-    if (ptr == 0) return 0;
-    if (ptr < 0 || ptr > 0xFFFFFFFF) return 0;
-    unsigned int pages = __builtin_wasm_memory_size(0);
-    unsigned int mem_size = pages * 65536;
-    unsigned int addr = (unsigned int)ptr;
-    /* Need at least 4 int64_t slots (header: cap, len, elem_tag, type_marker) */
-    if (addr + 32 > mem_size) return 0;
-    int64_t *data = (int64_t *)(intptr_t)ptr;
+/* C23B-005 (2026-04-22) forward decl. `_wasm_is_valid_ptr` sits later in
+   this fragment but is needed here for the tag-based collection
+   detectors. `bump_ptr` / `__heap_base` were already declared near the
+   allocator. */
+static int _wasm_is_valid_ptr(int64_t val, unsigned int min_bytes);
+
+/* Helper: verify that a list/set allocation has the shape-dependent
+   trailing magic at `data[WASM_LIST_ELEMS + cap]`, in addition to the
+   head magic at `data[3]`. This is the C23B-005 reopen fix — single-
+   magic identification was still foolable because a user-supplied
+   large Int stored as a collection member could coincidentally point
+   at another list's base and match the head magic legitimately. The
+   trailing magic lives at an offset dependent on `data[0]` (cap),
+   so the attacker would need to also satisfy `memory[addr + (4+cap)*8] == MAGIC`
+   — vanishingly unlikely to collide. */
+static int _check_list_trailing_magic(int64_t *data, int64_t expected_magic, unsigned int base_addr) {
     int64_t cap = data[0];
-    int64_t len = data[1];
-    /* Valid list: capacity is a reasonable power-of-2-ish number,
-       length is non-negative and <= capacity */
-    if (cap >= 8 && cap <= 65536 && len >= 0 && len <= cap) return 1;
+    if (cap < 8 || cap > 0x100000) return 0;  /* taida_list_new starts at 16, grows via *2 */
+    unsigned int tail_bytes = (unsigned int)(WASM_LIST_ELEMS + cap + 1) * 8u;
+    unsigned int mem_size = (unsigned int)__builtin_wasm_memory_size(0) * 65536u;
+    if ((uint64_t)base_addr + (uint64_t)tail_bytes > (uint64_t)mem_size) return 0;
+    return data[WASM_LIST_ELEMS + cap] == expected_magic;
+}
+
+/* C23B-005 (2026-04-22): positive identification for bump-allocated
+   lists. Checks BOTH head and trailing magics (see
+   `_check_list_trailing_magic` above). */
+static int _looks_like_list(int64_t ptr) {
+    if (!_wasm_is_valid_ptr(ptr, 32)) return 0;
+    unsigned int addr = (unsigned int)(uint64_t)ptr;
+    if ((addr & 7u) != 0) return 0;
+    int64_t *data = (int64_t *)(intptr_t)ptr;
+    if (data[3] == WASM_LIST_MAGIC) return _check_list_trailing_magic(data, WASM_LIST_MAGIC, addr);
+    if (data[3] == WASM_SET_MAGIC) return _check_list_trailing_magic(data, WASM_SET_MAGIC, addr);
     return 0;
 }
 
-/* W-4f2: Check if a pointer is a Set (has WASM_SET_MARKER_VAL at slot[3]) */
+/* C23B-005 (2026-04-22): positive identification for bump-allocated
+   sets. Requires the distinct set sentinel at both head and tail. */
 static int _is_wasm_set(int64_t ptr) {
-    if (!_looks_like_list(ptr)) return 0;
+    if (!_wasm_is_valid_ptr(ptr, 32)) return 0;
+    unsigned int addr = (unsigned int)(uint64_t)ptr;
+    if ((addr & 7u) != 0) return 0;
     int64_t *data = (int64_t *)(intptr_t)ptr;
-    return data[3] == WASM_SET_MARKER_VAL;
+    if (data[3] != WASM_SET_MAGIC) return 0;
+    return _check_list_trailing_magic(data, WASM_SET_MAGIC, addr);
 }
 
 int64_t taida_polymorphic_length(int64_t ptr) {
@@ -1175,34 +1272,118 @@ static int _looks_like_string(int64_t val) {
     return 1;
 }
 
-/* W-4f2: Check if a value looks like a BuchiPack.
-   Pack layout: [field_count, field0_hash, field0_tag, field0_value, ...]
-   field_count is typically small (1-50), and field hashes are large int64_t values. */
+/* C23B-005 (2026-04-22): positive identification for non-empty
+   BuchiPacks. Layout is `[fc, hash0, tag0, val0, ..., WASM_PACK_MAGIC]`
+   — the sentinel is appended after the last field by `taida_pack_new`
+   (when fc >= 1). Existing pack readers only touch indices
+   `0..1+fc*3)`, so the extra slot is backward-compatible. The empty
+   pack case (`fc == 0`) is matched separately by
+   `_looks_like_empty_pack` via `WASM_EMPTY_PACK_MAGIC` at pack[1].
+   The old detector used `fc in 1..100 && data[1] != 0` which
+   false-positived on any untagged Int that pointed at memory whose
+   first int64_t happened to land in that range — the exact bug class
+   C23B-005 tracks. */
 static int _looks_like_pack(int64_t val) {
-    if (val == 0) return 0;
-    if (val < 0 || val > 0xFFFFFFFF) return 0;
-    unsigned int pages = __builtin_wasm_memory_size(0);
-    unsigned int mem_size = pages * 65536;
-    unsigned int addr = (unsigned int)val;
-    /* Need at least 1 int64_t (field_count) */
-    if (addr + 8 > mem_size) return 0;
+    if (!_wasm_is_valid_ptr(val, 16)) return 0;
+    unsigned int addr = (unsigned int)(uint64_t)val;
+    if ((addr & 7u) != 0) return 0;
     int64_t *data = (int64_t *)(intptr_t)val;
     int64_t fc = data[0];
-    /* Valid pack: field_count is small and positive */
+    /* fc must be strictly positive — empty pack is matched separately. */
     if (fc < 1 || fc > 100) return 0;
-    /* Verify there's enough memory for the full pack */
-    int64_t total_bytes = (1 + fc * 3) * 8;
-    if (addr + (unsigned int)total_bytes > mem_size) return 0;
-    /* Check that at least the first field hash is a non-zero large value
-       (field hashes from FNV-1a are typically large numbers) */
-    int64_t first_hash = data[1];
-    if (first_hash == 0) return 0;
+    unsigned int mem_size = (unsigned int)__builtin_wasm_memory_size(0) * 65536u;
+    /* Need slots [0..1+fc*3] inclusive, i.e. (2 + fc*3) int64_t = 16 + fc*24 bytes. */
+    uint64_t need_bytes = (uint64_t)(2 + fc * 3) * 8ULL;
+    if ((uint64_t)addr + need_bytes > (uint64_t)mem_size) return 0;
+    return data[1 + fc * 3] == WASM_PACK_MAGIC;
+}
+
+/* C23B-003 reopen 3: detect an empty BuchiPack (`@()` literal / Unit).
+   `taida_pack_new(0)` allocates a single int64_t slot initialised to `0`
+   (the `field_count` header). Unlike the native runtime — which stamps a
+   distinctive `TAIDA_PACK_MAGIC` header — the wasm runtime carries no
+   magic byte on pack allocations, so we match via address-range
+   heuristics rather than a memory marker:
+     1. `val` must be a bump-allocator address: `addr >= __heap_base` AND
+        `addr < bump_ptr`. This is the SAME invariant `_wasm_is_string_ptr`
+        uses to separate heap-allocated pointers from arbitrary integers,
+        and it is essential here: without it, any small integer printed
+        through the polymorphic display dispatch (e.g. `5050` from
+        `examples/12_tail_recursion.td`, or `8080` in `:8080` string
+        interpolation) would happen to index into the static data section,
+        read 8 zero bytes at that offset, and be falsely re-rendered as
+        `@()`. The pure memory-peek detector we started with failed this
+        way on the `wasm_full` regression suite.
+     2. `addr + 8 <= mem_size` so the int64_t read is in bounds.
+     3. `*(int64_t*)val == 0` — the `field_count` slot of an empty pack
+        is zero (`taida_pack_new(0)` zero-initialises the allocation).
+     4. Not a List / HashMap / Set header. In practice `_looks_like_list`
+        already rejects zero caps (`cap >= 8`), and HashMap / Set need
+        richer header shapes, but running the guards here keeps the
+        invariant explicit and makes the detector commute freely with the
+        other dispatchers.
+   Callers must place this check AFTER the non-empty pack / list / hashmap
+   / set / async / error detectors so richer signatures still win on
+   overlapping bit patterns, and BEFORE `_looks_like_string` / the integer
+   fallback so nested `@()` rendering beats raw-pointer stringification. */
+static int _looks_like_empty_pack(int64_t val) {
+    /* C23B-003 reopen 4: positive identification via a magic sentinel
+       stored in `pack[1]` by `taida_pack_new(0)`. Requires:
+         1. A valid linear-memory address (wasm32 ⇒ 32-bit),
+         2. Room for at least two int64_t slots (16 bytes),
+         3. `data[0] == 0` — the `field_count` slot,
+         4. `data[1] == WASM_EMPTY_PACK_MAGIC` — the sentinel.
+       This supersedes the previous heap-range + zero-slot heuristic
+       that false-positive'd on dynamic Int expressions whose bit
+       patterns landed inside the bump arena. The magic (`0x5441…4B55`,
+       = "TAIDPAKU") has 7 of 8 bytes in the printable ASCII range —
+       user code cannot produce it via arithmetic on small integers,
+       and FNV-1a hashes stored in `pack[1]` of non-empty packs are
+       gated by `data[0] >= 1`, which we reject at step 3. */
+    if (val <= 0 || val > 0xFFFFFFFFLL) return 0;
+    unsigned int addr = (unsigned int)(uint64_t)val;
+    unsigned int mem_size = (unsigned int)__builtin_wasm_memory_size(0) * 65536u;
+    if (addr + 16 > mem_size) return 0;
+    if ((addr & 7u) != 0) return 0;  /* pack is 8-byte aligned */
+    int64_t *data = (int64_t *)(intptr_t)val;
+    if (data[0] != 0) return 0;
+    if (data[1] != WASM_EMPTY_PACK_MAGIC) return 0;
     return 1;
 }
 
 /* Forward declarations for toString helpers */
 static int64_t _wasm_value_to_display_string(int64_t val);
 static int64_t _wasm_value_to_debug_string(int64_t val);
+/* C23B-003 reopen 2: recursive debug-string variant that keeps nested
+   typed runtime objects (HashMap / Set / BuchiPack) in their synthetic
+   full-form shape. Symmetric with native's
+   `taida_value_to_debug_string_full`. Used only inside the full-form
+   helpers below so nested HashMap/Set/Pack render as
+   `@(__entries <= …, __type <= "HashMap")` /
+   `@(__items <= …, __type <= "Set")` / `@(…, __type <= …)` instead of
+   collapsing to the short-form `.toString()` output. The helper also
+   calls `_wasm_is_error` / `_wasm_error_to_string`, which are defined
+   later in this fragment — forward-declare them here. */
+static int64_t _wasm_value_to_debug_string_full(int64_t val);
+/* C23B-005 (2026-04-22): tag-aware debug-string dispatcher. When the
+   caller knows the element's primitive tag (e.g. a list's stored
+   `elem_type_tag`, or a pack field's `field_tag`), this helper bypasses
+   the structural detectors and renders via the primitive-specific
+   formatter. That closes the last residual false-positive path in the
+   tag-based collection identification: even if a hashmap / list has
+   been positively identified at the top level, its element slots may
+   carry untagged Int64 values whose bit pattern happens to point at
+   another heap allocation whose `data[3]` coincidentally matches a
+   collection magic. Dispatching by the KNOWN element tag eliminates
+   that probabilistic path entirely. `tag == -1` (UNKNOWN) falls back
+   to the existing structural detector. */
+static int64_t _wasm_render_elem_tagged_debug(int64_t val, int64_t tag);
+static int64_t _wasm_render_elem_tagged_debug_full(int64_t val, int64_t tag);
+static int64_t _wasm_hashmap_to_display_string_full(int64_t hm_ptr);
+static int64_t _wasm_set_to_display_string_full(int64_t set_ptr);
+static int64_t _wasm_pack_to_string_full(int64_t pack_ptr);
+static int _wasm_is_error(int64_t val);
+static int64_t _wasm_error_to_string(int64_t val);
 static int _is_wasm_hashmap(int64_t ptr);
 static const char *_wasm_lookup_field_name(int64_t hash);
 static int64_t _wasm_lookup_field_type(int64_t hash);
@@ -1286,18 +1467,27 @@ static int64_t _sb_finish(_wasm_strbuf *sb) {
 static int64_t _wasm_hashmap_to_string(int64_t hm_ptr) {
     int64_t *hm = (int64_t *)(intptr_t)hm_ptr;
     int64_t cap = hm[0];
+    /* C23B-005 / C23B-006 / C23B-007: `hm[2]` is reliable now — see the
+       `_wasm_hashmap_to_display_string_full` comment and the hardened
+       `taida_hashmap_set_value_tag` (HETEROGENEOUS latch). */
+    int64_t value_tag = hm[2];
     _wasm_strbuf sb;
     _sb_init(&sb);
     _sb_append(&sb, "HashMap({");
+    /* C23B-008 (2026-04-22): iterate the insertion-order side-index so
+       `.toString()` emits the same sequence as interpreter / JS. */
+    int64_t next_ord = hm[WASM_HM_ORD_HEADER_SLOT(cap)];
     int64_t count = 0;
-    for (int64_t i = 0; i < cap; i++) {
-        int64_t sh = hm[WASM_HM_HEADER + i * 3];
-        int64_t sk = hm[WASM_HM_HEADER + i * 3 + 1];
+    for (int64_t oi = 0; oi < next_ord; oi++) {
+        int64_t slot = hm[WASM_HM_ORD_SLOT(cap, oi)];
+        if (slot < 0 || slot >= cap) continue;
+        int64_t sh = hm[WASM_HM_HEADER + slot * 3];
+        int64_t sk = hm[WASM_HM_HEADER + slot * 3 + 1];
         if (WASM_HM_SLOT_OCCUPIED(sh, sk)) {
-            int64_t value = hm[WASM_HM_HEADER + i * 3 + 2];
+            int64_t value = hm[WASM_HM_HEADER + slot * 3 + 2];
             if (count > 0) _sb_append(&sb, ", ");
             int64_t key_str = _wasm_value_to_debug_string(sk);
-            int64_t val_str = _wasm_value_to_debug_string(value);
+            int64_t val_str = _wasm_render_elem_tagged_debug(value, value_tag);
             _sb_append(&sb, (const char *)(intptr_t)key_str);
             _sb_append(&sb, ": ");
             _sb_append(&sb, (const char *)(intptr_t)val_str);
@@ -1312,14 +1502,15 @@ static int64_t _wasm_hashmap_to_string(int64_t hm_ptr) {
 static int64_t _wasm_set_to_string(int64_t set_ptr) {
     int64_t *list = (int64_t *)(intptr_t)set_ptr;
     int64_t len = list[1];
+    /* C23B-005: honour the set's elem_type_tag. */
+    int64_t elem_tag = list[2];
     _wasm_strbuf sb;
     _sb_init(&sb);
     _sb_append(&sb, "Set({");
     for (int64_t i = 0; i < len; i++) {
         if (i > 0) _sb_append(&sb, ", ");
-        /* Native uses snprintf(int64_t) for set elements — integers only */
         int64_t elem = list[WASM_LIST_ELEMS + i];
-        int64_t elem_str = _wasm_value_to_display_string(elem);
+        int64_t elem_str = _wasm_render_elem_tagged_debug(elem, elem_tag);
         _sb_append(&sb, (const char *)(intptr_t)elem_str);
     }
     _sb_append(&sb, "})");
@@ -1330,13 +1521,20 @@ static int64_t _wasm_set_to_string(int64_t set_ptr) {
 static int64_t _wasm_list_to_string(int64_t list_ptr) {
     int64_t *list = (int64_t *)(intptr_t)list_ptr;
     int64_t len = list[1];
+    /* C23B-005: consult the list's stored elem_type_tag so primitive
+       elements dispatch through the tag-aware renderer instead of the
+       structural detectors. Closes stack-overflow / short-form drift
+       on `@[<large Int>]` etc. where a bare Int element aliased a
+       heap allocation whose layout happened to match a collection
+       sentinel. */
+    int64_t elem_tag = list[2];
     _wasm_strbuf sb;
     _sb_init(&sb);
     _sb_append(&sb, "@[");
     for (int64_t i = 0; i < len; i++) {
         if (i > 0) _sb_append(&sb, ", ");
         int64_t item = list[WASM_LIST_ELEMS + i];
-        int64_t item_str = _wasm_value_to_debug_string(item);
+        int64_t item_str = _wasm_render_elem_tagged_debug(item, elem_tag);
         _sb_append(&sb, (const char *)(intptr_t)item_str);
     }
     _sb_append(&sb, "]");
@@ -1370,11 +1568,39 @@ static int64_t _wasm_pack_to_string(int64_t pack_ptr) {
         int64_t ftype = _wasm_lookup_field_type(field_hash);
         int render_bool  = (field_tag == WASM_TAG_BOOL) || (field_tag == 0 && ftype == 4);
         int render_float = (field_tag == WASM_TAG_FLOAT);
+        int render_str   = (field_tag == WASM_TAG_STR);
+        /* C23B-005 (2026-04-22): explicit Int branch. Packs default
+           `field_tag = 0` (INT), so without a dedicated branch an
+           untagged large Int value would fall through to the generic
+           structural dispatcher and false-match a collection detector
+           whose allocation layout happened to alias the Int's bit
+           pattern. We take `field_tag == WASM_TAG_INT` AND `ftype`
+           says it's an Int (ftype 1/3 for Int / literal-Int in the
+           legacy registry) to avoid stealing from the legacy Bool
+           fallback (`ftype == 4`). */
+        int render_int = (field_tag == WASM_TAG_INT) && !render_bool;
         if (render_bool) {
             _sb_append(&sb, field_val ? "true" : "false");
         } else if (render_float) {
             int64_t fs = taida_float_to_str(field_val);
             _sb_append(&sb, (const char *)(intptr_t)fs);
+        } else if (render_str) {
+            /* C23-4: WASM_TAG_STR is authoritative for Str primitive fields
+               (set by `taida_{int,str,float,bool}_mold_*` via `_lax_tag_vd`).
+               The generic `_wasm_value_to_debug_string` false-positives on
+               low-addressed int values (e.g. empty string at a low static
+               address is misread as 0-length pack), rendering `__default`
+               as a raw pointer integer. Rendering the char* directly with
+               explicit double-quotes matches the interpreter's BuchiPack
+               full-form contract (`val.to_debug_string()` for Str wraps in
+               `"..."`). */
+            const char *sv = (const char *)(intptr_t)field_val;
+            _sb_append(&sb, "\"");
+            if (sv) _sb_append(&sb, sv);
+            _sb_append(&sb, "\"");
+        } else if (render_int) {
+            int64_t is = taida_int_to_str(field_val);
+            _sb_append(&sb, (const char *)(intptr_t)is);
         } else {
             int64_t val_str = _wasm_value_to_debug_string(field_val);
             _sb_append(&sb, (const char *)(intptr_t)val_str);
@@ -1411,18 +1637,239 @@ static int64_t _wasm_pack_to_string_full(int64_t pack_ptr) {
         int64_t ftype = _wasm_lookup_field_type(field_hash);
         int render_bool  = (field_tag == WASM_TAG_BOOL) || (field_tag == 0 && ftype == 4);
         int render_float = (field_tag == WASM_TAG_FLOAT);
+        int render_str   = (field_tag == WASM_TAG_STR);
+        /* C23B-005 (2026-04-22): explicit Int branch — see the
+           `_wasm_pack_to_string` counterpart comment. */
+        int render_int = (field_tag == WASM_TAG_INT) && !render_bool;
         if (render_bool) {
             _sb_append(&sb, field_val ? "true" : "false");
         } else if (render_float) {
             int64_t fs = taida_float_to_str(field_val);
             _sb_append(&sb, (const char *)(intptr_t)fs);
+        } else if (render_str) {
+            /* C23-4: symmetric with `_wasm_pack_to_string` — render
+               WASM_TAG_STR fields as explicitly-quoted char* so
+               `__value <= ""` / `__default <= ""` come through as the
+               interpreter's `Value::to_debug_string()` for `Value::Str`
+               (which wraps strings in double quotes), rather than
+               degrading to pointer-integer fallback inside
+               `_wasm_value_to_debug_string`. */
+            const char *sv = (const char *)(intptr_t)field_val;
+            _sb_append(&sb, "\"");
+            if (sv) _sb_append(&sb, sv);
+            _sb_append(&sb, "\"");
+        } else if (render_int) {
+            int64_t is = taida_int_to_str(field_val);
+            _sb_append(&sb, (const char *)(intptr_t)is);
         } else {
-            int64_t val_str = _wasm_value_to_debug_string(field_val);
+            /* C23B-003 reopen 2: nested typed runtime objects must
+               keep their full-form rendering; `_wasm_value_to_debug_string`
+               would otherwise dispatch HashMap / Set to their short-form
+               `.toString()` helpers (`HashMap({...})` / `Set({...})`),
+               breaking 4-backend parity with the interpreter. Use the
+               full-form variant so nested Pack / HashMap / Set continue
+               to expose `__`-prefixed internals recursively. */
+            int64_t val_str = _wasm_value_to_debug_string_full(field_val);
             _sb_append(&sb, (const char *)(intptr_t)val_str);
         }
         count++;
     }
     _sb_append(&sb, ")");
+    return _sb_finish(&sb);
+}
+
+/* C23B-005 (2026-04-22): tag-aware element renderer. When the caller
+   knows the primitive tag of `val` (e.g. from `list[2]` elem_type_tag,
+   or a pack field's stored `field_tag`), dispatch directly to the
+   primitive-specific formatter and skip every structural detector.
+   That makes Int / Float / Bool / Str elements unconditionally
+   render as their primitive string form, even if the underlying
+   int64_t bit pattern happens to alias a heap address whose memory
+   at `data[3]` coincidentally matches a collection sentinel. The
+   helpers fall back to the structural detectors (`_wasm_value_to_debug_string`
+   / `_wasm_value_to_debug_string_full`) when `tag == -1` (UNKNOWN),
+   so lists / packs that did not propagate an element tag still get
+   rendered via the usual path. This is the defence-in-depth partner
+   for the `WASM_LIST_MAGIC` / `WASM_HM_MAGIC` / `WASM_SET_MAGIC` /
+   `WASM_PACK_MAGIC` positive identification at the detector level. */
+static int64_t _wasm_render_elem_tagged_debug(int64_t val, int64_t tag) {
+    if (tag == WASM_TAG_INT) return taida_int_to_str(val);
+    if (tag == WASM_TAG_FLOAT) return taida_float_to_str(val);
+    if (tag == WASM_TAG_BOOL) return val ? (int64_t)(intptr_t)"true" : (int64_t)(intptr_t)"false";
+    if (tag == WASM_TAG_STR) {
+        const char *s = (const char *)(intptr_t)val;
+        int slen = s ? wasm_strlen(s) : 0;
+        char *buf = (char *)wasm_alloc(slen + 3);
+        if (!buf) return val;
+        buf[0] = '"';
+        for (int i = 0; i < slen; i++) buf[1 + i] = s[i];
+        buf[slen + 1] = '"';
+        buf[slen + 2] = '\0';
+        return (int64_t)(intptr_t)buf;
+    }
+    /* Unknown / Pack tag — fall back to the structural dispatcher. */
+    return _wasm_value_to_debug_string(val);
+}
+
+static int64_t _wasm_render_elem_tagged_debug_full(int64_t val, int64_t tag) {
+    if (tag == WASM_TAG_INT) return taida_int_to_str(val);
+    if (tag == WASM_TAG_FLOAT) return taida_float_to_str(val);
+    if (tag == WASM_TAG_BOOL) return val ? (int64_t)(intptr_t)"true" : (int64_t)(intptr_t)"false";
+    if (tag == WASM_TAG_STR) {
+        const char *s = (const char *)(intptr_t)val;
+        int slen = s ? wasm_strlen(s) : 0;
+        char *buf = (char *)wasm_alloc(slen + 3);
+        if (!buf) return val;
+        buf[0] = '"';
+        for (int i = 0; i < slen; i++) buf[1 + i] = s[i];
+        buf[slen + 1] = '"';
+        buf[slen + 2] = '\0';
+        return (int64_t)(intptr_t)buf;
+    }
+    /* Unknown / Pack tag — fall back to the full-form recursive dispatcher. */
+    return _wasm_value_to_debug_string_full(val);
+}
+
+/* C23B-003 reopen 2: recursive debug-string variant for nested typed
+   runtime objects. Mirrors native's `taida_value_to_debug_string_full`.
+   Must be defined BEFORE `_wasm_hashmap_to_display_string_full` /
+   `_wasm_set_to_display_string_full` / `_wasm_pack_to_string_full` call
+   it — but each of those uses it from the function body, so forward
+   declarations at the top of this fragment keep the ordering valid. */
+static int64_t _wasm_value_to_debug_string_full(int64_t val) {
+    if (val == 0) return (int64_t)(intptr_t)"0";
+    if (_is_wasm_hashmap(val)) return _wasm_hashmap_to_display_string_full(val);
+    if (_is_wasm_set(val)) return _wasm_set_to_display_string_full(val);
+    /* C23B-003 reopen 3: render empty packs (`@()`) with their interpreter-
+       parity string. Must be checked BEFORE `_looks_like_pack` (which
+       requires `fc >= 1`) and BEFORE the int fallback which would otherwise
+       emit the raw heap pointer of the `taida_pack_new(0)` allocation. */
+    if (_looks_like_empty_pack(val)) return (int64_t)(intptr_t)"@()";
+    /* List items recurse through the full-form helper so nested
+       HashMap/Set/Pack inside a list keep their full shape. */
+    if (_looks_like_list(val)) {
+        int64_t *list = (int64_t *)(intptr_t)val;
+        int64_t len = list[1];
+        /* C23B-005: honour the stored elem_type_tag so primitive items
+           bypass the structural detectors. */
+        int64_t elem_tag = list[2];
+        _wasm_strbuf sb;
+        _sb_init(&sb);
+        _sb_append(&sb, "@[");
+        for (int64_t i = 0; i < len; i++) {
+            if (i > 0) _sb_append(&sb, ", ");
+            int64_t item = list[WASM_LIST_ELEMS + i];
+            int64_t item_str = _wasm_render_elem_tagged_debug_full(item, elem_tag);
+            _sb_append(&sb, (const char *)(intptr_t)item_str);
+        }
+        _sb_append(&sb, "]");
+        return _sb_finish(&sb);
+    }
+    /* PR-4: Check Async before monadic types (unchanged from
+       `_wasm_value_to_debug_string`). Async uses its short-form string
+       because the interpreter's `Async.to_display_string()` is itself a
+       short-form (`Async[fulfilled: …]` etc.) — not a full-form
+       BuchiPack. */
+    if (_wasm_is_async_obj(val)) return _wasm_async_to_string(val);
+    /* Check Error before generic pack (unchanged). */
+    if (_wasm_is_error(val)) return _wasm_error_to_string(val);
+    /* All pack shapes (Lax / Result / Gorillax / user packs) must
+       recurse through the full-form helper so nested typed values
+       continue to render with their `__`-prefixed internals. */
+    if (_looks_like_pack(val)) return _wasm_pack_to_string_full(val);
+    if (_looks_like_string(val)) {
+        const char *s = (const char *)(intptr_t)val;
+        int slen = wasm_strlen(s);
+        char *buf = (char *)wasm_alloc(slen + 3);
+        if (!buf) return val;
+        buf[0] = '"';
+        for (int i = 0; i < slen; i++) buf[1 + i] = s[i];
+        buf[slen + 1] = '"';
+        buf[slen + 2] = '\0';
+        return (int64_t)(intptr_t)buf;
+    }
+    return taida_int_to_str(val);
+}
+
+/* C23B-003 reopen: HashMap / Set are not `BuchiPack` in the wasm runtime
+   (they carry dedicated header markers) but the interpreter represents them
+   as `BuchiPack(__entries <= ..., __type <= "HashMap")` /
+   `BuchiPack(__items <= ..., __type <= "Set")` (see
+   `src/interpreter/prelude.rs:618-621` and `:644-647`). For `Str[...]()` to
+   match the interpreter byte-for-byte we must therefore emit the synthetic
+   full-form pack shape, not the short-form `HashMap({...})` / `Set({...})`
+   that `_wasm_hashmap_to_string` / `_wasm_set_to_string` produce for
+   `.toString()`. Symmetric with native's
+   `taida_hashmap_to_display_string_full` / `taida_set_to_display_string_full`. */
+static int64_t _wasm_hashmap_to_display_string_full(int64_t hm_ptr) {
+    int64_t *hm = (int64_t *)(intptr_t)hm_ptr;
+    int64_t cap = hm[0];
+    /* C23B-005 / C23B-006 (2026-04-22): `hm[2]` is now reliable thanks
+       to the hardened `taida_hashmap_set_value_tag` (downgrades to
+       UNKNOWN(-1) on type conflict — C23B-007 promoted this further
+       to HETEROGENEOUS(-2) so a downgraded tag cannot re-promote on a
+       subsequent `.set()`). For homogeneous HashMaps the primitive tag
+       dispatches the tag-aware renderer which bypasses structural
+       detectors entirely. For heterogeneous HashMaps the tag is -2
+       (HETEROGENEOUS) or -1 (UNKNOWN) and the tagged renderer falls
+       back to `_wasm_value_to_debug_string_full` per element so mixed
+       value types each render through their own structural dispatch
+       (closes the `.set("a", 1).set("b", "x").set("c", 2)` regression
+       where the tag system would lose `"x"` to a raw pointer Int). */
+    int64_t value_tag = hm[2];
+    _wasm_strbuf sb;
+    _sb_init(&sb);
+    _sb_append(&sb, "@(__entries <= @[");
+    /* C23B-008 (2026-04-22): iterate via the insertion-order side-index
+       (`order_array[0..next_ord]`) instead of walking buckets, so the
+       emitted pair sequence matches interpreter / JS byte-for-byte. Each
+       `order_array[oi]` holds either a bucket slot (>= 0) or -1 (hole
+       from a subsequent `.remove()` call); skip holes and also
+       defensively skip slots whose buckets have since been tombstoned. */
+    int64_t next_ord = hm[WASM_HM_ORD_HEADER_SLOT(cap)];
+    int64_t count = 0;
+    for (int64_t oi = 0; oi < next_ord; oi++) {
+        int64_t slot = hm[WASM_HM_ORD_SLOT(cap, oi)];
+        if (slot < 0 || slot >= cap) continue;
+        int64_t sh = hm[WASM_HM_HEADER + slot * 3];
+        int64_t sk = hm[WASM_HM_HEADER + slot * 3 + 1];
+        if (WASM_HM_SLOT_OCCUPIED(sh, sk)) {
+            int64_t value = hm[WASM_HM_HEADER + slot * 3 + 2];
+            if (count > 0) _sb_append(&sb, ", ");
+            int64_t key_str = _wasm_value_to_debug_string_full(sk);
+            int64_t val_str = _wasm_render_elem_tagged_debug_full(value, value_tag);
+            _sb_append(&sb, "@(key <= ");
+            _sb_append(&sb, (const char *)(intptr_t)key_str);
+            _sb_append(&sb, ", value <= ");
+            _sb_append(&sb, (const char *)(intptr_t)val_str);
+            _sb_append(&sb, ")");
+            count++;
+        }
+    }
+    _sb_append(&sb, "], __type <= \"HashMap\")");
+    return _sb_finish(&sb);
+}
+
+static int64_t _wasm_set_to_display_string_full(int64_t set_ptr) {
+    int64_t *list = (int64_t *)(intptr_t)set_ptr;
+    int64_t len = list[1];
+    /* C23B-005: honour the set's elem_type_tag so primitive members
+       dispatch through the tag-aware renderer. Sets share the list
+       header layout. */
+    int64_t elem_tag = list[2];
+    _wasm_strbuf sb;
+    _sb_init(&sb);
+    _sb_append(&sb, "@(__items <= @[");
+    for (int64_t i = 0; i < len; i++) {
+        if (i > 0) _sb_append(&sb, ", ");
+        int64_t elem = list[WASM_LIST_ELEMS + i];
+        /* C23B-003 reopen 2 / C23B-005: prefer the tag-aware renderer;
+           for non-primitive members the fallback recurses through
+           `_wasm_value_to_debug_string_full`. */
+        int64_t elem_str = _wasm_render_elem_tagged_debug_full(elem, elem_tag);
+        _sb_append(&sb, (const char *)(intptr_t)elem_str);
+    }
+    _sb_append(&sb, "], __type <= \"Set\")");
     return _sb_finish(&sb);
 }
 
@@ -1435,6 +1882,47 @@ static int64_t _wasm_pack_to_string_full(int64_t pack_ptr) {
    `to_display_string()` vs. `to_string()` separation. */
 static int64_t _wasm_stdout_display_string(int64_t obj) {
     if (obj == 0) return (int64_t)(intptr_t)"0";
+    /* C23B-003 reopen: route HashMap / Set through their synthetic full-form
+       helpers so `Str[...]()` matches the interpreter's
+       `BuchiPack(__entries/__items, __type)` rendering instead of the
+       short-form `HashMap({...})` / `Set({...})` that
+       `_wasm_value_to_display_string` would produce for `.toString()`. */
+    if (_is_wasm_hashmap(obj)) return _wasm_hashmap_to_display_string_full(obj);
+    if (_is_wasm_set(obj)) return _wasm_set_to_display_string_full(obj);
+    /* C23B-003 reopen 3: top-level `stdout(@())` / `Str[@()]()` must render
+       as the interpreter's `Value::Unit.to_debug_string()` output `"@()"`
+       rather than the raw heap pointer (the `taida_pack_new(0)` allocation
+       stores `field_count = 0`, which `_looks_like_pack` rejects and which
+       `_is_pack_for_stdout` therefore also rejects). Checked before
+       `_looks_like_list` to avoid any path where the list branch below
+       could be reached on an empty pack (it wouldn't — `_looks_like_list`
+       needs `cap >= 8` — but keeping the ordering tight mirrors the other
+       early-return checks and makes the intent explicit). */
+    if (_looks_like_empty_pack(obj)) return (int64_t)(intptr_t)"@()";
+    /* C23B-003 reopen 2: Lists must render items through the full-form
+       debug helper so nested HashMap/Set/Pack keep their interpreter
+       shape. `_wasm_list_to_string` alone would dispatch those items
+       to the short-form `_wasm_value_to_debug_string` and collapse the
+       nested HashMap/Set to `HashMap({…})` / `Set({…})`. */
+    if (_looks_like_list(obj)) {
+        int64_t *list = (int64_t *)(intptr_t)obj;
+        int64_t len = list[1];
+        /* C23B-005: dispatch list items by the stored elem_type_tag so
+           primitive elements (Int / Float / Bool / Str) bypass the
+           structural collection detectors entirely. */
+        int64_t elem_tag = list[2];
+        _wasm_strbuf sb;
+        _sb_init(&sb);
+        _sb_append(&sb, "@[");
+        for (int64_t i = 0; i < len; i++) {
+            if (i > 0) _sb_append(&sb, ", ");
+            int64_t item = list[WASM_LIST_ELEMS + i];
+            int64_t item_str = _wasm_render_elem_tagged_debug_full(item, elem_tag);
+            _sb_append(&sb, (const char *)(intptr_t)item_str);
+        }
+        _sb_append(&sb, "]");
+        return _sb_finish(&sb);
+    }
     /* Use the same runtime guard as stdout_with_tag so Lists / HashMaps
        / Sets / Async do not accidentally take the pack path — their
        structural signatures overlap with `_looks_like_pack`. */
@@ -1660,6 +2148,10 @@ static int64_t _wasm_value_to_display_string(int64_t val) {
     if (_wasm_is_error(val)) return _wasm_error_to_string(val);
     /* Check Pack (field_count + hash pattern) */
     if (_looks_like_pack(val)) return _wasm_pack_to_string(val);
+    /* C23B-003 reopen 3: empty packs (`@()`) have `fc == 0` and slip past
+       `_looks_like_pack`. Without this branch, `stdout(@())` on wasm-wasi
+       prints the raw heap pointer (e.g. `73040`) instead of `@()`. */
+    if (_looks_like_empty_pack(val)) return (int64_t)(intptr_t)"@()";
     /* Check if it's a string */
     if (_looks_like_string(val)) return val;
     /* Fallback: integer */
@@ -1682,6 +2174,10 @@ static int64_t _wasm_value_to_debug_string(int64_t val) {
     /* Check Error before generic pack */
     if (_wasm_is_error(val)) return _wasm_error_to_string(val);
     if (_looks_like_pack(val)) return _wasm_pack_to_string(val);
+    /* C23B-003 reopen 3: same empty-pack fallback as the display helper so
+       `_wasm_list_to_string` / `_wasm_pack_to_string` rendering nested
+       `@()` don't collapse to pointer integers in the short-form path. */
+    if (_looks_like_empty_pack(val)) return (int64_t)(intptr_t)"@()";
     /* Check if it's a string — quote it for debug */
     if (_looks_like_string(val)) {
         const char *s = (const char *)(intptr_t)val;
@@ -1805,12 +2301,42 @@ static int64_t _wasm_lookup_field_type(int64_t hash) {
    Total allocation: (1 + field_count * 3) * sizeof(int64_t) */
 
 int64_t taida_pack_new(int64_t field_count) {
-    int64_t slots = 1 + field_count * 3;
+    /* C23B-003 reopen 4 (2026-04-22): empty packs (`@()` / `Value::Unit`)
+       used to allocate a single int64_t slot `[0]`. `_looks_like_empty_pack`
+       then relied on a bump-range + `*(int64_t*)addr == 0` heuristic to
+       distinguish the empty pack pointer from an arbitrary int value.
+       That heuristic false-positives on dynamic Int expressions (e.g.
+       `Str[a + b]()` when `a + b` lands inside the bump arena and the
+       memory at that offset happens to be zero), causing wasm to render
+       the integer as `@()`. Fix: stamp a magic sentinel in the slot
+       immediately after `field_count` for empty packs. Non-empty packs
+       are unaffected — their `field_count >= 1` already disambiguates
+       them from empty packs, and they keep `[field_count, field0_hash,
+       field0_tag, field0_value, …]` layout. Detectors now identify an
+       empty pack by `data[0] == 0 && data[1] == WASM_EMPTY_PACK_MAGIC`,
+       which is collision-free with any int64_t value produced by user
+       code (the magic has high bits set and a unique trailing-byte
+       pattern — see the `WASM_EMPTY_PACK_MAGIC` definition below). */
+    if (field_count == 0) {
+        int64_t *pack = (int64_t *)wasm_alloc(16);
+        if (!pack) return 0;
+        pack[0] = 0;
+        pack[1] = WASM_EMPTY_PACK_MAGIC;
+        return (int64_t)(intptr_t)pack;
+    }
+    /* C23B-005 (2026-04-22): append a magic sentinel slot after the last
+       field so `_looks_like_pack` can positive-identify non-empty packs
+       without the fc-range + first-hash heuristic. Layout becomes
+       `[fc, hash0, tag0, val0, hash1, ..., WASM_PACK_MAGIC]`. All
+       existing readers only touch slots `[0..1+fc*3)`, so appending
+       one extra slot is fully backward compatible. */
+    int64_t slots = 1 + field_count * 3 + 1;  /* + magic tail */
     int64_t *pack = (int64_t *)wasm_alloc((unsigned int)(slots * 8));
     if (!pack) return 0;
     pack[0] = field_count;
     /* Zero-initialize all field slots (hash=0, tag=0=INT, value=0) */
-    for (int64_t i = 1; i < slots; i++) pack[i] = 0;
+    for (int64_t i = 1; i < 1 + field_count * 3; i++) pack[i] = 0;
+    pack[1 + field_count * 3] = WASM_PACK_MAGIC;
     return (int64_t)(intptr_t)pack;
 }
 
@@ -1945,19 +2471,44 @@ int64_t taida_pack_has_hash(int64_t pack_ptr, int64_t field_hash) {
 
 int64_t taida_list_new(void) {
     int64_t initial_cap = 16;
-    int64_t slots = WASM_LIST_ELEMS + initial_cap;  /* header(4) + elements */
+    /* C23B-005 reopen (2026-04-22): allocate one extra slot at
+       `list[WASM_LIST_ELEMS + initial_cap]` to stamp a trailing
+       magic, giving lists 128 bits of identification entropy. See the
+       `_is_wasm_hashmap` comment for the rationale. */
+    int64_t slots = WASM_LIST_ELEMS + initial_cap + 1;  /* header(4) + elements + trailing magic */
     int64_t *list = (int64_t *)wasm_alloc((unsigned int)(slots * 8));
     if (!list) return 0;
-    list[0] = initial_cap;  /* capacity */
-    list[1] = 0;            /* length */
-    list[2] = -1;           /* elem_type_tag (UNKNOWN) */
-    list[3] = 0;            /* type_marker (0 = plain list) */
+    list[0] = initial_cap;       /* capacity */
+    list[1] = 0;                 /* length */
+    list[2] = -1;                /* elem_type_tag (UNKNOWN) */
+    list[3] = WASM_LIST_MAGIC;   /* head magic */
+    list[WASM_LIST_ELEMS + initial_cap] = WASM_LIST_MAGIC;  /* trailing magic */
     return (int64_t)(intptr_t)list;
 }
 
 void taida_list_set_elem_tag(int64_t list_ptr, int64_t tag) {
     int64_t *list = (int64_t *)(intptr_t)list_ptr;
-    list[2] = tag;
+    /* C23B-005 (2026-04-22): downgrade on type conflict so mixed lists
+       cannot pin a single primitive tag for all elements.
+       C23B-007 (2026-04-22): use a dedicated HETEROGENEOUS sentinel
+       (-2) instead of reusing UNKNOWN (-1). Previously a downgraded
+       list was indistinguishable from an unset one, so a subsequent
+       `.push()` with a fresh primitive tag would RE-PROMOTE the
+       container back to a primitive tag and the renderer would then
+       force every element through that tag — e.g. `@[1, "a", 2]`
+       got rendered as `@[1, 1127, 2]` because after the string was
+       downgraded the trailing `2` re-promoted the list to INT. Now:
+         existing == UNKNOWN(-1)    → stamp the new tag (first write)
+         existing == HETEROGENEOUS  → keep (never re-promote)
+         existing == new_tag        → no-op
+         otherwise                  → downgrade to HETEROGENEOUS(-2) */
+    int64_t existing = list[2];
+    if (existing == WASM_TAG_HETEROGENEOUS) return;
+    if (existing == WASM_TAG_UNKNOWN || existing == tag) {
+        list[2] = tag;
+    } else {
+        list[2] = WASM_TAG_HETEROGENEOUS;
+    }
 }
 
 int64_t taida_list_push(int64_t list_ptr, int64_t item) {
@@ -1965,14 +2516,20 @@ int64_t taida_list_push(int64_t list_ptr, int64_t item) {
     int64_t cap = list[0];
     int64_t len = list[1];
     if (len >= cap) {
-        /* Grow: allocate new list with double capacity, copy over */
+        /* Grow: allocate new list with double capacity, copy over.
+           C23B-005 reopen: include one extra slot for the trailing
+           magic, stamped after the copy propagates the head magic. */
         int64_t new_cap = cap * 2;
-        int64_t new_slots = WASM_LIST_ELEMS + new_cap;
+        int64_t new_slots = WASM_LIST_ELEMS + new_cap + 1;
         int64_t *new_list = (int64_t *)wasm_alloc((unsigned int)(new_slots * 8));
         if (!new_list) return list_ptr;
         /* Copy header + existing elements */
         for (int64_t i = 0; i < WASM_LIST_ELEMS + len; i++) new_list[i] = list[i];
         new_list[0] = new_cap;
+        /* Re-stamp trailing magic at new end — the head magic at
+           list[3] was already copied and reflects either the
+           list-new stamp or the set-new overwrite. */
+        new_list[WASM_LIST_ELEMS + new_cap] = list[3];  /* same magic as head */
         list = new_list;
         list_ptr = (int64_t)(intptr_t)new_list;
     }
@@ -2019,16 +2576,43 @@ static int _wasm_streq(const char *a, const char *b) {
     return *a == *b;
 }
 
+/* C23B-008 (2026-04-22): see the `WASM_HM_ORD_*` macros near the top of
+   this file (colocated with `WASM_HM_HEADER`) for the insertion-order
+   side-index layout. `_wasm_hashmap_new_with_cap` stamps the magic +
+   ord header; all mutators and iterators consult those macros. */
 static int64_t _wasm_hashmap_new_with_cap(int64_t cap) {
-    int64_t slots = WASM_HM_HEADER + cap * 3;
+    /* C23B-005 / C23B-006 (2026-04-22): allocate one extra slot at the
+       end and stamp `WASM_HM_MAGIC` there as a *second* magic sentinel.
+       This defeats the memory-overlap attack where an untagged large
+       Int value (stored in a HashMap value slot) happens to equal the
+       base pointer of another HashMap allocation in the same bump
+       arena: single-magic detection would pass because that real
+       HashMap has the magic at `data[3]`, but the trailing magic at
+       `data[WASM_HM_HEADER + cap*3]` is at a different offset that
+       cannot simultaneously align for both the fake and real
+       interpretations. 2 × 64 = 128 bits of entropy makes false
+       identification effectively impossible.
+       C23B-008 (2026-04-22): additionally allocate `1 + cap` slots at
+       the end for the insertion-order side-index (`next_ord` + order
+       array). The trailing-magic position is UNCHANGED so `_is_wasm_hashmap`
+       still probes `data[WASM_HM_HEADER + cap*3]` — the extra slots sit
+       at higher offsets that only HashMap-order-aware code accesses. */
+    int64_t slots = WASM_HM_HEADER + cap * 3 + 1 + 1 + cap;  /* + trailing magic + next_ord + order_array[cap] */
     int64_t *hm = (int64_t *)wasm_alloc((unsigned int)(slots * 8));
     if (!hm) return 0;
-    /* Zero-initialize everything (empty slots have hash=0, key=0) */
+    /* Zero-initialize everything (empty slots have hash=0, key=0).
+       This also initialises `next_ord = 0` and every `order_array[i] = 0`;
+       `order_array[i]` is only consulted for indices `i < next_ord`, and
+       while the container is empty `next_ord == 0` so the zeros are never
+       read. Once populated, set() will overwrite the relevant slots. */
     for (int64_t i = 0; i < slots; i++) hm[i] = 0;
     hm[0] = cap;
     hm[1] = 0;     /* length */
     hm[2] = -1;    /* value_type_tag = UNKNOWN */
-    hm[3] = WASM_HM_MARKER_VAL;  /* type marker for polymorphic dispatch */
+    hm[3] = WASM_HM_MARKER_VAL;              /* head magic */
+    hm[WASM_HM_HEADER + cap * 3] = WASM_HM_MAGIC;  /* trailing magic */
+    /* next_ord (hm[WASM_HM_HEADER + cap*3 + 1]) and order_array (the
+       `cap` slots after that) are left zero-initialised. */
     return (int64_t)(intptr_t)hm;
 }
 
@@ -2038,7 +2622,30 @@ int64_t taida_hashmap_new(void) {
 
 void taida_hashmap_set_value_tag(int64_t hm_ptr, int64_t tag) {
     int64_t *hm = (int64_t *)(intptr_t)hm_ptr;
-    hm[2] = tag;
+    /* C23B-005 / C23B-006 (2026-04-22): the codegen calls this on every
+       `.set()`, not just the first one. For homogeneous HashMaps the
+       tag is stable; for heterogeneous HashMaps (e.g.
+       `hashMap().set("name", "Asuka").set("age", 14)`) the subsequent
+       calls would silently overwrite an already-established tag with
+       a different primitive type, leaving `hm[2]` misleadingly
+       pointing at the last-inserted value's type. When that conflict
+       happens we downgrade to HETEROGENEOUS(-2) so display helpers fall
+       back to structural dispatch rather than trust a wrong tag.
+       First-write (tag transitioning from UNKNOWN) is kept intact.
+       C23B-007 (2026-04-22): introduced the HETEROGENEOUS(-2) sentinel
+       distinct from UNKNOWN(-1). Reusing -1 meant a three-way mix like
+       `.set("a", 1).set("b", "x").set("c", 2)` would downgrade after
+       the second call but then silently RE-PROMOTE to INT on the third
+       call, letting the renderer emit the pointer of "x" as an Int
+       (`value <= 1058`). The HETEROGENEOUS latch makes the downgrade
+       terminal. */
+    int64_t existing = hm[2];
+    if (existing == WASM_TAG_HETEROGENEOUS) return;
+    if (existing == WASM_TAG_UNKNOWN || existing == tag) {
+        hm[2] = tag;
+    } else {
+        hm[2] = WASM_TAG_HETEROGENEOUS;
+    }
 }
 
 /* FNV-1a hash for string keys */
@@ -2065,28 +2672,41 @@ int64_t taida_hashmap_set(int64_t hm_ptr, int64_t key_hash, int64_t key_ptr, int
         int64_t *new_hm = (int64_t *)(intptr_t)new_hm_ptr;
         new_hm[2] = hm[2]; /* propagate value_type_tag */
         new_hm[3] = WASM_HM_MARKER_VAL;  /* propagate type marker */
-        /* Re-hash all occupied entries */
-        for (int64_t i = 0; i < cap; i++) {
-            int64_t sh = hm[WASM_HM_HEADER + i * 3];
-            int64_t sk = hm[WASM_HM_HEADER + i * 3 + 1];
-            if (sh != 0 || sk != 0) {
-                /* Insert into new table */
-                uint64_t uh = (uint64_t)sh;
-                int64_t idx = (int64_t)(uh % (uint64_t)new_cap);
-                for (int64_t j = 0; j < new_cap; j++) {
-                    int64_t slot = (idx + j) % new_cap;
-                    int64_t esh = new_hm[WASM_HM_HEADER + slot * 3];
-                    int64_t esk = new_hm[WASM_HM_HEADER + slot * 3 + 1];
-                    if (esh == 0 && esk == 0) {
-                        new_hm[WASM_HM_HEADER + slot * 3] = sh;
-                        new_hm[WASM_HM_HEADER + slot * 3 + 1] = sk;
-                        new_hm[WASM_HM_HEADER + slot * 3 + 2] = hm[WASM_HM_HEADER + i * 3 + 2];
-                        new_hm[1]++;
-                        break;
-                    }
+        /* C23B-008 (2026-04-22): preserve insertion order across resize
+           by walking the OLD order array (`order_array[0..old_next_ord]`)
+           and re-inserting each entry into the new table in the same
+           sequence. Removed entries (`old_order[i] == -1` or whose bucket
+           has since been emptied) are skipped. The new table's order
+           side-index is rebuilt as we go — `new_next_ord` grows
+           monotonically from 0. */
+        int64_t old_next_ord = hm[WASM_HM_ORD_HEADER_SLOT(cap)];
+        int64_t new_next_ord = 0;
+        for (int64_t oi = 0; oi < old_next_ord; oi++) {
+            int64_t slot = hm[WASM_HM_ORD_SLOT(cap, oi)];
+            if (slot < 0 || slot >= cap) continue;  /* removed or invalid */
+            int64_t sh = hm[WASM_HM_HEADER + slot * 3];
+            int64_t sk = hm[WASM_HM_HEADER + slot * 3 + 1];
+            if (sh == 0 && sk == 0) continue;  /* bucket emptied */
+            int64_t sval = hm[WASM_HM_HEADER + slot * 3 + 2];
+            /* Insert into new table */
+            uint64_t uh = (uint64_t)sh;
+            int64_t idx = (int64_t)(uh % (uint64_t)new_cap);
+            for (int64_t j = 0; j < new_cap; j++) {
+                int64_t nslot = (idx + j) % new_cap;
+                int64_t esh = new_hm[WASM_HM_HEADER + nslot * 3];
+                int64_t esk = new_hm[WASM_HM_HEADER + nslot * 3 + 1];
+                if (esh == 0 && esk == 0) {
+                    new_hm[WASM_HM_HEADER + nslot * 3] = sh;
+                    new_hm[WASM_HM_HEADER + nslot * 3 + 1] = sk;
+                    new_hm[WASM_HM_HEADER + nslot * 3 + 2] = sval;
+                    new_hm[1]++;
+                    new_hm[WASM_HM_ORD_SLOT(new_cap, new_next_ord)] = nslot;
+                    new_next_ord++;
+                    break;
                 }
             }
         }
+        new_hm[WASM_HM_ORD_HEADER_SLOT(new_cap)] = new_next_ord;
         hm = new_hm;
         hm_ptr = new_hm_ptr;
         cap = new_cap;
@@ -2100,15 +2720,23 @@ int64_t taida_hashmap_set(int64_t hm_ptr, int64_t key_hash, int64_t key_ptr, int
         int64_t sh = hm[WASM_HM_HEADER + slot * 3];
         int64_t sk = hm[WASM_HM_HEADER + slot * 3 + 1];
         if (sh == 0 && sk == 0) {
-            /* Empty slot — insert */
+            /* Empty slot — insert. C23B-008: record the insertion ordinal
+               in the order side-index so display / iteration honour the
+               first-insertion-wins ordering that interpreter / JS use. */
             hm[WASM_HM_HEADER + slot * 3] = key_hash;
             hm[WASM_HM_HEADER + slot * 3 + 1] = key_ptr;
             hm[WASM_HM_HEADER + slot * 3 + 2] = value;
             hm[1]++;
+            int64_t next_ord = hm[WASM_HM_ORD_HEADER_SLOT(cap)];
+            hm[WASM_HM_ORD_SLOT(cap, next_ord)] = slot;
+            hm[WASM_HM_ORD_HEADER_SLOT(cap)] = next_ord + 1;
             return hm_ptr;
         }
         if (sh == key_hash && _wasm_streq((const char *)(intptr_t)sk, (const char *)(intptr_t)key_ptr)) {
-            /* Existing key — update value */
+            /* Existing key — update value in place. C23B-008: do NOT touch
+               the order side-index; the first insertion's position is
+               preserved, matching interpreter semantics (updating an
+               existing key keeps its original Vec index). */
             hm[WASM_HM_HEADER + slot * 3 + 2] = value;
             return hm_ptr;
         }
@@ -2171,6 +2799,15 @@ static int64_t _wasm_hashmap_clone(int64_t hm_ptr) {
         new_hm[WASM_HM_HEADER + i * 3 + 2] = hm[WASM_HM_HEADER + i * 3 + 2];
     }
     new_hm[1] = hm[1]; /* copy length */
+    /* C23B-008 (2026-04-22): propagate the insertion-order side-index
+       so the clone iterates in the same order as the original. We copy
+       both `next_ord` and every `order_array` slot verbatim since the
+       bucket layout is identical (same cap → same hash → same slots). */
+    int64_t next_ord = hm[WASM_HM_ORD_HEADER_SLOT(cap)];
+    new_hm[WASM_HM_ORD_HEADER_SLOT(cap)] = next_ord;
+    for (int64_t i = 0; i < next_ord; i++) {
+        new_hm[WASM_HM_ORD_SLOT(cap, i)] = hm[WASM_HM_ORD_SLOT(cap, i)];
+    }
     return new_hm_ptr;
 }
 
@@ -2197,18 +2834,36 @@ int64_t taida_hashmap_get_lax(int64_t hm_ptr, int64_t key_hash, int64_t key_ptr)
     return taida_lax_empty(0);
 }
 
-/* ── W-4f: HashMap type detection helper ── */
-/* Check if a pointer is a HashMap by looking for the type marker at index 3. */
+/* C23B-006 / C23B-005 reopen (2026-04-22): positive identification for
+   bump-allocated HashMaps via TWO 8-byte printable-ASCII sentinels —
+   one at `data[3]` (head), one at `data[WASM_HM_HEADER + cap * 3]`
+   (trailing). Single-magic identification was still foolable when a
+   user-supplied large Int living inside one HashMap's value slot
+   coincidentally pointed at the base address of another HashMap
+   allocation (both structures legitimately carry the head magic at
+   `data[3]`). Requiring the trailing magic at the shape-dependent
+   offset `data[WASM_HM_HEADER + cap * 3]` closes that attack because
+   an attacker would need TWO independent 64-bit matches (128 bits
+   total entropy) at offsets determined by the pointed-to memory's
+   own `data[0]` value — astronomically unlikely to collide.
+   `_wasm_hashmap_new_with_cap` allocates one extra slot for the
+   trailing magic; all existing HashMap readers only touch the
+   original layout `[cap, len, value_tag, head_magic, entries...]`. */
 static int _is_wasm_hashmap(int64_t ptr) {
-    if (ptr == 0) return 0;
-    if (ptr < 0 || ptr > 0xFFFFFFFF) return 0;
-    unsigned int pages = __builtin_wasm_memory_size(0);
-    unsigned int mem_size = pages * 65536;
-    unsigned int addr = (unsigned int)ptr;
-    /* Need at least 4 int64_t header slots */
-    if (addr + 32 > mem_size) return 0;
+    if (!_wasm_is_valid_ptr(ptr, 32)) return 0;
+    unsigned int addr = (unsigned int)(uint64_t)ptr;
+    if ((addr & 7u) != 0) return 0;
     int64_t *data = (int64_t *)(intptr_t)ptr;
-    return data[3] == WASM_HM_MARKER_VAL;
+    if (data[3] != WASM_HM_MAGIC) return 0;
+    /* Verify trailing magic. `data[0]` is the capacity — reject
+       non-positive or wildly out-of-range caps before reading the
+       trailing slot to keep the bounds check safe. */
+    int64_t cap = data[0];
+    if (cap <= 0 || cap > 0x100000) return 0;  /* 2^20 entries max = paranoid */
+    unsigned int tail_bytes = (unsigned int)(WASM_HM_HEADER + cap * 3 + 1) * 8u;
+    unsigned int mem_size = (unsigned int)__builtin_wasm_memory_size(0) * 65536u;
+    if ((uint64_t)addr + (uint64_t)tail_bytes > (uint64_t)mem_size) return 0;
+    return data[WASM_HM_HEADER + cap * 3] == WASM_HM_MAGIC;
 }
 
 /* ── W-4f: taida_value_hash — polymorphic hash for collection keys ── */
@@ -2229,85 +2884,147 @@ int64_t taida_value_hash(int64_t val) {
 
 /* ── W-4f: HashMap additional methods ── */
 
-/* HashMap.keys() -> List of key pointers */
+/* HashMap.keys() -> List of key pointers.
+   C23B-008 (2026-04-22): walk via the insertion-order side-index so
+   the returned list matches interpreter / JS ordering. */
 int64_t taida_hashmap_keys(int64_t hm_ptr) {
     int64_t *hm = (int64_t *)(intptr_t)hm_ptr;
     int64_t cap = hm[0];
     int64_t list = taida_list_new();
-    for (int64_t i = 0; i < cap; i++) {
-        int64_t sh = hm[WASM_HM_HEADER + i * 3];
-        int64_t sk = hm[WASM_HM_HEADER + i * 3 + 1];
-        if (sh != 0 || sk != 0) {
+    int64_t next_ord = hm[WASM_HM_ORD_HEADER_SLOT(cap)];
+    for (int64_t oi = 0; oi < next_ord; oi++) {
+        int64_t slot = hm[WASM_HM_ORD_SLOT(cap, oi)];
+        if (slot < 0 || slot >= cap) continue;
+        int64_t sh = hm[WASM_HM_HEADER + slot * 3];
+        int64_t sk = hm[WASM_HM_HEADER + slot * 3 + 1];
+        if (WASM_HM_SLOT_OCCUPIED(sh, sk)) {
             list = taida_list_push(list, sk);
         }
     }
     return list;
 }
 
-/* HashMap.values() -> List of values */
+/* HashMap.values() -> List of values.
+   C23B-008 (2026-04-22): insertion-order walk, same rationale. */
 int64_t taida_hashmap_values(int64_t hm_ptr) {
     int64_t *hm = (int64_t *)(intptr_t)hm_ptr;
     int64_t cap = hm[0];
     int64_t list = taida_list_new();
-    for (int64_t i = 0; i < cap; i++) {
-        int64_t sh = hm[WASM_HM_HEADER + i * 3];
-        int64_t sk = hm[WASM_HM_HEADER + i * 3 + 1];
-        if (sh != 0 || sk != 0) {
-            list = taida_list_push(list, hm[WASM_HM_HEADER + i * 3 + 2]);
+    int64_t next_ord = hm[WASM_HM_ORD_HEADER_SLOT(cap)];
+    for (int64_t oi = 0; oi < next_ord; oi++) {
+        int64_t slot = hm[WASM_HM_ORD_SLOT(cap, oi)];
+        if (slot < 0 || slot >= cap) continue;
+        int64_t sh = hm[WASM_HM_HEADER + slot * 3];
+        int64_t sk = hm[WASM_HM_HEADER + slot * 3 + 1];
+        if (WASM_HM_SLOT_OCCUPIED(sh, sk)) {
+            list = taida_list_push(list, hm[WASM_HM_HEADER + slot * 3 + 2]);
         }
     }
     return list;
 }
 
-/* HashMap.entries() -> List of BuchiPack @(key, value) */
+/* HashMap.entries() -> List of BuchiPack @(key, value).
+   C23B-008 (2026-04-22): insertion-order walk.
+   C23B-009 (2026-04-22): (1) idempotently register "key" / "value" in
+   `_wasm_field_registry` so `_wasm_pack_to_string_full` resolves the field
+   names (unregistered hashes returned NULL → pairs rendered as `@()`,
+   diverging from interpreter and the documented
+   `docs/reference/standard_library.md:238` shape of `@[@(key, value)]`).
+   (2) Stamp per-field tags (`WASM_TAG_STR` on `key`, the hashmap's stored
+   `value_type_tag` on `value`) so primitives render through the tagged
+   fast-path instead of `_wasm_value_to_debug_string` heuristics. Also
+   flag the outer list's `elem_type_tag` = PACK so that list rendering
+   descends into each pair via the full-form helper. */
 int64_t taida_hashmap_entries(int64_t hm_ptr) {
     int64_t *hm = (int64_t *)(intptr_t)hm_ptr;
     int64_t cap = hm[0];
+    int64_t val_tag = hm[2];  /* value_type_tag from hashmap header */
     int64_t list = taida_list_new();
+    /* entries returns List[Pack] — stamp elem_type_tag = PACK for tagged
+       rendering in `_wasm_render_elem_tagged_debug*`. */
+    ((int64_t *)(intptr_t)list)[2] = WASM_TAG_PACK;
     /* FNV-1a hashes for "key" and "value" (same as native runtime) */
     #define WASM_HASH_KEY   0x3dc94a19365b10ecLL
     #define WASM_HASH_VAL   0x7ce4fd9430e80ceaLL
-    for (int64_t i = 0; i < cap; i++) {
-        int64_t sh = hm[WASM_HM_HEADER + i * 3];
-        int64_t sk = hm[WASM_HM_HEADER + i * 3 + 1];
-        if (sh != 0 || sk != 0) {
+    /* C23B-009: register pair field names once. `taida_register_field_name`
+       is idempotent (skips duplicates). */
+    static int __wasm_entries_names_registered = 0;
+    if (!__wasm_entries_names_registered) {
+        __wasm_entries_names_registered = 1;
+        taida_register_field_name(WASM_HASH_KEY, (int64_t)(intptr_t)"key");
+        taida_register_field_name(WASM_HASH_VAL, (int64_t)(intptr_t)"value");
+    }
+    int64_t next_ord = hm[WASM_HM_ORD_HEADER_SLOT(cap)];
+    for (int64_t oi = 0; oi < next_ord; oi++) {
+        int64_t slot = hm[WASM_HM_ORD_SLOT(cap, oi)];
+        if (slot < 0 || slot >= cap) continue;
+        int64_t sh = hm[WASM_HM_HEADER + slot * 3];
+        int64_t sk = hm[WASM_HM_HEADER + slot * 3 + 1];
+        if (WASM_HM_SLOT_OCCUPIED(sh, sk)) {
             int64_t pair = taida_pack_new(2);
             taida_pack_set_hash(pair, 0, WASM_HASH_KEY);
+            /* C23B-009: key is always Str (HashMap key contract). */
+            taida_pack_set_tag(pair, 0, WASM_TAG_STR);
             taida_pack_set(pair, 0, sk);
             taida_pack_set_hash(pair, 1, WASM_HASH_VAL);
-            taida_pack_set(pair, 1, hm[WASM_HM_HEADER + i * 3 + 2]);
+            /* C23B-009: propagate hashmap value_type_tag onto the value slot
+               so primitive values render correctly via the pack full-form
+               helper (matches native's `val_tag` propagation). */
+            taida_pack_set_tag(pair, 1, val_tag);
+            taida_pack_set(pair, 1, hm[WASM_HM_HEADER + slot * 3 + 2]);
             list = taida_list_push(list, pair);
         }
     }
     return list;
 }
 
-/* HashMap.merge(other) -> new HashMap with other's entries overwriting */
+/* HashMap.merge(other) -> new HashMap with other's entries overwriting.
+   C23B-008 reopen (2026-04-22): interpreter semantics for merge are
+   retain-then-push (`src/interpreter/methods.rs:787-822`) — any overlap
+   key is REMOVED from self and re-appended at other's position with
+   other's value. The previous wasm implementation copied self then
+   called `taida_hashmap_set` per other entry; `taida_hashmap_set`
+   updates in place for existing keys (preserving self's ordinal), so
+   overlap keys ended up at self's position instead of other's. Repro:
+   `a=[a,b]`, `b=[c,b,d]` expected `[a,c,b,d]`, got `[a,b,c,d]`.
+
+   Fix (matches native + JS): allocate a fresh HashMap and fill it in
+   the order interpreter would emit: first the self entries whose key
+   is absent from other (self-order), then every other entry in
+   other-order (guaranteed fresh to the result map).
+
+   Note: `taida_hashmap_set` must keep its update-in-place ordinal
+   semantics for plain `.set("k", v)` chains, so we cannot change set
+   itself — we just avoid going through it for overlap keys. */
 int64_t taida_hashmap_merge(int64_t hm_ptr, int64_t other_ptr) {
+    int64_t *self = (int64_t *)(intptr_t)hm_ptr;
     int64_t *other = (int64_t *)(intptr_t)other_ptr;
-    int64_t cap = other[0];
-    /* Start with a copy of hm (in wasm-min, just use the original since bump allocator) */
-    /* Actually, we need a new copy. Iterate hm first, then apply other's entries. */
-    int64_t *hm = (int64_t *)(intptr_t)hm_ptr;
-    int64_t hm_cap = hm[0];
+    int64_t self_cap = self[0];
+    int64_t other_cap = other[0];
+
     int64_t result = taida_hashmap_new();
-    int64_t *r = (int64_t *)(intptr_t)result;
-    r[2] = hm[2]; /* propagate value_type_tag */
-    /* Copy from hm */
-    for (int64_t i = 0; i < hm_cap; i++) {
-        int64_t sh = hm[WASM_HM_HEADER + i * 3];
-        int64_t sk = hm[WASM_HM_HEADER + i * 3 + 1];
-        if (sh != 0 || sk != 0) {
-            result = taida_hashmap_set(result, sh, sk, hm[WASM_HM_HEADER + i * 3 + 2]);
-        }
+
+    /* Step 1: self entries whose key is absent from other (self-order). */
+    int64_t self_next_ord = self[WASM_HM_ORD_HEADER_SLOT(self_cap)];
+    for (int64_t oi = 0; oi < self_next_ord; oi++) {
+        int64_t slot = self[WASM_HM_ORD_SLOT(self_cap, oi)];
+        if (slot < 0 || slot >= self_cap) continue;
+        int64_t sh = self[WASM_HM_HEADER + slot * 3];
+        int64_t sk = self[WASM_HM_HEADER + slot * 3 + 1];
+        if (!WASM_HM_SLOT_OCCUPIED(sh, sk)) continue;
+        if (taida_hashmap_has(other_ptr, sh, sk)) continue;
+        result = taida_hashmap_set(result, sh, sk, self[WASM_HM_HEADER + slot * 3 + 2]);
     }
-    /* Overwrite/add from other */
-    for (int64_t i = 0; i < cap; i++) {
-        int64_t sh = other[WASM_HM_HEADER + i * 3];
-        int64_t sk = other[WASM_HM_HEADER + i * 3 + 1];
-        if (sh != 0 || sk != 0) {
-            result = taida_hashmap_set(result, sh, sk, other[WASM_HM_HEADER + i * 3 + 2]);
-        }
+
+    /* Step 2: all other entries in other-order (all new to result). */
+    int64_t other_next_ord = other[WASM_HM_ORD_HEADER_SLOT(other_cap)];
+    for (int64_t oi = 0; oi < other_next_ord; oi++) {
+        int64_t slot = other[WASM_HM_ORD_SLOT(other_cap, oi)];
+        if (slot < 0 || slot >= other_cap) continue;
+        int64_t sh = other[WASM_HM_HEADER + slot * 3];
+        int64_t sk = other[WASM_HM_HEADER + slot * 3 + 1];
+        if (!WASM_HM_SLOT_OCCUPIED(sh, sk)) continue;
+        result = taida_hashmap_set(result, sh, sk, other[WASM_HM_HEADER + slot * 3 + 2]);
     }
     return result;
 }
@@ -2330,6 +3047,19 @@ static int64_t taida_hashmap_remove(int64_t hm_ptr, int64_t key_hash, int64_t ke
             hm[WASM_HM_HEADER + slot * 3 + 1] = 0;
             hm[WASM_HM_HEADER + slot * 3 + 2] = 0;
             hm[1]--;
+            /* C23B-008 (2026-04-22): null out the corresponding order
+               slot so display / iteration helpers skip this ordinal. We
+               walk `order_array[0..next_ord]` to find the slot index,
+               then overwrite it with -1 (HOLE). `next_ord` itself is not
+               decremented — it's a monotonic high-water mark used only
+               as an upper bound for iteration. */
+            int64_t next_ord = hm[WASM_HM_ORD_HEADER_SLOT(cap)];
+            for (int64_t oi = 0; oi < next_ord; oi++) {
+                if (hm[WASM_HM_ORD_SLOT(cap, oi)] == slot) {
+                    hm[WASM_HM_ORD_SLOT(cap, oi)] = -1;
+                    break;
+                }
+            }
             return hm_ptr;
         }
     }
@@ -2343,7 +3073,16 @@ static int64_t taida_hashmap_remove(int64_t hm_ptr, int64_t key_hash, int64_t ke
 
 int64_t taida_set_new(void) {
     int64_t set = taida_list_new();
-    if (set) ((int64_t *)(intptr_t)set)[3] = WASM_SET_MARKER_VAL;
+    if (set) {
+        /* C23B-005: overwrite both the head and trailing magic with
+           the Set sentinel so `_is_wasm_set`'s dual-magic check
+           succeeds. `taida_list_new` stamped the list magic at both
+           positions; we retag both here. */
+        int64_t *s = (int64_t *)(intptr_t)set;
+        int64_t cap = s[0];
+        s[3] = WASM_SET_MARKER_VAL;
+        s[WASM_LIST_ELEMS + cap] = WASM_SET_MARKER_VAL;
+    }
     return set;
 }
 
@@ -2379,6 +3118,10 @@ int64_t taida_set_add(int64_t set_ptr, int64_t item) {
     int64_t *old = (int64_t *)(intptr_t)set_ptr;
     int64_t len = old[1];
     int64_t new_set = taida_set_new();
+    /* C23B-005: propagate elem_type_tag so the tag-aware renderer can
+       still dispatch primitive elements correctly after an immutable
+       `.add` clone. */
+    taida_list_set_elem_tag(new_set, old[2]);
     for (int64_t i = 0; i < len; i++) {
         new_set = taida_list_push(new_set, old[WASM_LIST_ELEMS + i]);
     }
@@ -2390,6 +3133,13 @@ int64_t taida_set_from_list(int64_t list_ptr) {
     int64_t *list = (int64_t *)(intptr_t)list_ptr;
     int64_t len = list[1];
     int64_t set = taida_set_new();
+    /* C23B-005: propagate the source list's elem_type_tag so the
+       resulting Set's `list[2]` slot carries the primitive tag
+       needed by the tag-aware renderer. Without this, `setOf(@[73088])`
+       would leave the Set with `elem_tag = -1` (UNKNOWN) and the
+       structural dispatcher would false-match the large Int against a
+       collection sentinel. */
+    taida_list_set_elem_tag(set, list[2]);
     for (int64_t i = 0; i < len; i++) {
         set = taida_set_add(set, list[WASM_LIST_ELEMS + i]);
     }

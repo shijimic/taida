@@ -402,7 +402,13 @@ impl Lowering {
 
     /// NB-31: 式が Int を返すかどうかを判定（noncallable_type_tag 用）
     /// arithmetic 演算、Int-returning メソッド/関数、int_vars を網羅する。
-    pub(super) fn expr_is_int(&self, expr: &Expr) -> bool {
+    ///
+    /// C23B-003 reopen 4 (2026-04-22): visibility widened from
+    /// `pub(super)` to `pub(crate)` so the sibling `lower_molds.rs`
+    /// module (`src/codegen/lower_molds.rs`, not under `lower/`) can
+    /// use the richer Int check in the `Str[x]()` fast-path dispatch.
+    /// No behavioural change — only the call surface widened.
+    pub(crate) fn expr_is_int(&self, expr: &Expr) -> bool {
         match expr {
             Expr::IntLit(_, _) => true,
             Expr::UnaryOp(UnaryOp::Neg, inner, _) => self.expr_is_int(inner),

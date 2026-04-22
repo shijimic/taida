@@ -110,9 +110,198 @@ mod tests {
     /// rendering a pack pointer as subnormal f64 bits and
     /// `stdout(Int[x]())` emitting the short `Lax(3)` toString form
     /// instead of the interpreter's full `@(hasValue <= …, …)` shape.
+    ///
+    /// C23-2 / C23-4 (2026-04-22): +3,674 bytes across two fragments.
+    /// `02_containers.inc.c` adds `taida_str_mold_any` (generic `Str[x]()`
+    /// entry for non-primitive values, routes through
+    /// `_wasm_stdout_display_string`) and `_taida_float_to_str_mold` (Rust
+    /// `f64::to_string`-compatible formatter that strips the trailing `.0`
+    /// on integer-valued floats to match the interpreter's
+    /// `Str[3.0]() -> "3"` contract). `01_core.inc.c` extends both
+    /// `_wasm_pack_to_string` and `_wasm_pack_to_string_full` with a
+    /// `WASM_TAG_STR` render branch so `__value <= ""` / `__default <= ""`
+    /// render as quoted char* instead of degrading into the
+    /// `_wasm_value_to_debug_string` integer-pointer fallback. Fixes
+    /// C23B-001 (wasm primitive/Lax `Str[...]()` parity) and C23B-002
+    /// (native/wasm non-primitive `Str[...]()` pointer stringification).
+    ///
+    /// C23B-003 reopen (2026-04-22): +2,772 bytes in `01_core.inc.c`.
+    /// Added `_wasm_hashmap_to_display_string_full` and
+    /// `_wasm_set_to_display_string_full` (synthetic full-form pack
+    /// renderers that mirror the interpreter's
+    /// `BuchiPack(__entries/__items, __type)` layout for HashMap/Set) and
+    /// routed `_wasm_stdout_display_string` through them so `Str[hm]()` /
+    /// `Str[s]()` on wasm no longer yield the short-form `HashMap({…})` /
+    /// `Set({…})` strings. Symmetric with native's
+    /// `taida_hashmap_to_display_string_full` /
+    /// `taida_set_to_display_string_full`.
+    ///
+    /// C23B-003 reopen 2 (2026-04-22): +5,369 bytes in `01_core.inc.c`.
+    /// Added `_wasm_value_to_debug_string_full` (recursive debug-string
+    /// variant that keeps nested typed runtime objects in full-form
+    /// shape) plus its forward declaration block, replaced the three
+    /// call sites inside `_wasm_hashmap_to_display_string_full`,
+    /// `_wasm_set_to_display_string_full`, and `_wasm_pack_to_string_full`
+    /// that previously called the short-form `_wasm_value_to_debug_string`,
+    /// and added a List branch in `_wasm_stdout_display_string` that
+    /// also routes list items through the full-form helper (so
+    /// `Str[@[hashMap()...]]()` no longer emits the short-form
+    /// `HashMap({…})` items). Fixes the HIGH-severity regression where
+    /// `hashMap().set("k", hashMap().set("a", 1))` collapsed the nested
+    /// HashMap to the `.toString()` short-form `HashMap({"a": 1})`.
+    /// Symmetric with native's `taida_value_to_debug_string_full`.
+    /// EXPECTED_TOTAL_LEN: 254,479 → 259,848.
+    ///
+    /// C23B-003 reopen 3 (2026-04-22): +5,646 bytes in `01_core.inc.c`.
+    /// Added `_looks_like_empty_pack` detector (matches the
+    /// `taida_pack_new(0)` layout that `_looks_like_pack` rejects because
+    /// it requires `fc >= 1`) and routed it through
+    /// `_wasm_value_to_debug_string_full`, `_wasm_value_to_debug_string`,
+    /// `_wasm_value_to_display_string`, and `_wasm_stdout_display_string`
+    /// so that nested or top-level `@()` render as the interpreter-parity
+    /// string `"@()"` instead of the raw heap pointer integer. The
+    /// detector uses the same bump-allocator address-range heuristic as
+    /// `_wasm_is_string_ptr` (`__heap_base <= addr < bump_ptr`) — a
+    /// tighter guard than `_wasm_is_valid_ptr`, which would accept static
+    /// data-section offsets and false-positive on small integer outputs
+    /// such as `5050` (tail-recursion Fibonacci) / `8080` (interpolated
+    /// port number), both caught by `tests/wasm_full.rs`. Fixes WASM-only
+    /// divergence found on `Str[@()]()` /
+    /// `Str[hashMap().set("u", @())]()` / `Str[@(u <= @())]()` /
+    /// `Str[@[@()]]()`. The four added fixtures (`str_from_empty_pack` /
+    /// `str_from_pack_with_empty_pack` /
+    /// `str_from_hashmap_with_empty_pack` /
+    /// `str_from_list_with_empty_pack`) pin byte-for-byte 4-backend
+    /// parity. EXPECTED_TOTAL_LEN: 259,848 → 265,494.
+    ///
+    /// C23B-003 reopen 4 (2026-04-22): +1,935 bytes in `01_core.inc.c`.
+    /// Replaced the heap-range + zero-slot heuristic in
+    /// `_looks_like_empty_pack` with a positive-identification magic
+    /// sentinel (`WASM_EMPTY_PACK_MAGIC = 0x5441494450414B55`, stamped
+    /// in `pack[1]` by `taida_pack_new(0)`). The old heuristic
+    /// false-positive'd on dynamic Int expressions whose bit patterns
+    /// happened to land inside the bump arena and point at an
+    /// 8-byte-aligned zero chunk, rendering integers as `@()`
+    /// (repro: `a <= 36000; b <= 37088; stdout(Str[a + b]())` printed
+    /// `__value <= "@()"` instead of `"73088"`). Also widened the
+    /// `Str[x]()` fast-path dispatch in `src/codegen/lower_molds.rs`
+    /// from `expr_is_int_literal` (literal only) to
+    /// `Lowering::expr_is_int` (richer: int_vars / arithmetic /
+    /// int-returning calls) so more dynamic Int shapes short-circuit
+    /// directly through `taida_str_mold_int` at compile time,
+    /// defence-in-depth on top of the detector-level fix.
+    /// EXPECTED_TOTAL_LEN: 265,494 → 267,429.
+    ///
+    /// C23B-005 reopen + widen + C23B-006 (2026-04-22): +3,541 bytes in
+    /// `01_core.inc.c`. Unified every WASM collection detector
+    /// (`_looks_like_list`, `_is_wasm_set`, `_is_wasm_hashmap`,
+    /// `_looks_like_pack`) onto positive-identification 8-byte magic
+    /// sentinels — `WASM_LIST_MAGIC` ("TAIDLST") at `list[3]`,
+    /// `WASM_SET_MAGIC` ("TAIDSET") at `set[3]`, `WASM_HM_MAGIC`
+    /// ("TAIDHMP") at `hm[3]`, and `WASM_PACK_MAGIC` ("TAIDPKK")
+    /// appended to the tail of every non-empty BuchiPack. The old
+    /// structural heuristics (cap ∈ 8..=65_536 for List, 4-byte
+    /// `"HMAP"` / `"SET\0"` markers at `data[3]`, fc ∈ 1..=100 +
+    /// `first_hash != 0` for Pack) false-positived on any untagged
+    /// Int64 whose bit pattern happened to point at heap memory
+    /// matching one of those signatures — a HashMap value slot
+    /// holding a raw `73088` re-rendered the integer as an empty
+    /// HashMap (C23B-006), and list, pack, or set members with a
+    /// large Int sent the renderer into stack-overflow recursion
+    /// (C23B-005). Allocation paths (`taida_list_new`,
+    /// `taida_pack_new(fc>=1)`, `taida_set_new`, `taida_hashmap_new`,
+    /// `_wasm_hashmap_new_with_cap`, plus resize sites) now stamp the
+    /// matching sentinel; detectors require `_wasm_is_valid_ptr` with
+    /// 8-byte alignment and exact sentinel match. Also added the
+    /// tag-aware element renderers (`_wasm_render_elem_tagged_debug`
+    /// and `_wasm_render_elem_tagged_debug_full`) and threaded the
+    /// list or set `elem_type_tag` (slot 2), hashmap `value_type_tag`
+    /// (slot 2), and pack `field_tag` into every collection-member
+    /// rendering loop so primitive Int, Float, Bool, or Str members
+    /// dispatch by tag instead of through the structural detectors.
+    /// This is the defence-in-depth partner for the magic-sentinel
+    /// detector change — when a list element carries `WASM_TAG_INT`,
+    /// we render with `taida_int_to_str` regardless of whether the
+    /// Int value happens to alias a heap address matching any
+    /// collection magic. `taida_set_from_list` and `taida_set_add`
+    /// now propagate the source `elem_type_tag` across immutable
+    /// clone paths.
+    /// EXPECTED_TOTAL_LEN: 270,970 then 278,235.
+    ///
+    /// C23B-005 reopen 2 + C23B-006 (2026-04-22): +5,248 bytes in
+    /// `01_core.inc.c`. Dual-magic collection identification — every
+    /// List / Set / HashMap allocation now stamps the 8-byte magic
+    /// at BOTH a head position (`data[3]`) and a shape-dependent
+    /// trailing position (`data[WASM_LIST_ELEMS + cap]` for lists /
+    /// sets, `data[WASM_HM_HEADER + cap * 3]` for hashmaps). Detectors
+    /// (`_looks_like_list` / `_is_wasm_set` / `_is_wasm_hashmap`)
+    /// verify both positions, giving 128 bits of identification
+    /// entropy that cannot be spoofed by an untagged Int whose bit
+    /// pattern merely points at another collection's base — an
+    /// attacker would need the trailing magic to ALSO align at the
+    /// cap-dependent offset, which is vanishingly unlikely.
+    /// `taida_list_push` / `taida_set_new` / `_wasm_hashmap_new_with_cap`
+    /// propagate the trailing magic across grow paths. Also hardened
+    /// `taida_hashmap_set_value_tag` and `taida_list_set_elem_tag` to
+    /// downgrade heterogeneous containers to UNKNOWN(-1) instead of
+    /// silently overwriting with the last inserted value's tag —
+    /// that lets the tag-aware renderer safely fast-path
+    /// homogeneous primitive containers while keeping the structural
+    /// fallback correct for heterogeneous ones.
+    /// EXPECTED_TOTAL_LEN: 278,235 → 283,669 (includes the
+    /// `04_json_async.inc.c` `_wc_is_hashmap` / `_wc_is_set`
+    /// delegation wrappers that forward to the hardened
+    /// `_is_wasm_hashmap` / `_is_wasm_set` in `01_core.inc.c`).
+    ///
+    /// C23B-007 / C23B-008 (2026-04-22): 283,669 → 292,933 (+9,264).
+    /// The two deltas are:
+    /// - C23B-007: introduced `WASM_TAG_HETEROGENEOUS = -2`, taught
+    ///   `taida_list_set_elem_tag` / `taida_hashmap_set_value_tag` to
+    ///   latch on it so once a mixed container is downgraded it can't
+    ///   re-promote to a primitive tag on a subsequent `.push()` /
+    ///   `.set()`. The renderers already treat non-primitive tags as
+    ///   "fall back to structural dispatch", so no renderer changes
+    ///   were needed.
+    /// - C23B-008: added the HashMap insertion-order side-index
+    ///   (`[next_ord, order_array[cap]]` appended after the trailing
+    ///   magic). `_wasm_hashmap_new_with_cap` allocates +`1+cap` slots
+    ///   and stamps `next_ord = 0`; `taida_hashmap_set` / `_remove` /
+    ///   `_clone` / `_resize` maintain the ordering; display /
+    ///   `taida_hashmap_keys` / `_values` / `_entries` / `_merge` /
+    ///   JSON serialize walk it so output matches interpreter / JS
+    ///   byte-for-byte. Added two macros (`WASM_HM_ORD_HEADER_SLOT`,
+    ///   `WASM_HM_ORD_SLOT`) to centralise the offset math.
+    ///
+    /// C23B-008 reopen (2026-04-22): 292,933 → 293,560 (+627).
+    /// The wasm `taida_hashmap_merge` was rewritten from
+    /// "copy self then call `taida_hashmap_set` per other entry" (which
+    /// preserves self's ordinal for overlap keys, diverging from
+    /// interpreter) to the interpreter's retain-then-push algorithm
+    /// (fresh map; fill with self-entries whose key ∉ other in
+    /// self-order; then append every other entry in other-order).
+    /// Repro: `a=[a,b].merge([c,b,d])` — interpreter emits `[a,c,b,d]`,
+    /// buggy wasm emitted `[a,b,c,d]`. Matches the symmetric
+    /// native fix (`src/codegen/native_runtime/core.c::taida_hashmap_merge`)
+    /// and the JS fix (`src/js/runtime/core.rs::__taida_createHashMap.merge`).
+    ///
+    /// C23B-009 (2026-04-22): 293,560 → 295,319 (+1,759, all inside
+    /// `01_core.inc.c::taida_hashmap_entries`). The wasm entries() helper
+    /// now (a) idempotently registers the `"key"` / `"value"` field
+    /// names into `_wasm_field_registry` so `_wasm_pack_to_string_full`
+    /// resolves them (previously unregistered → NULL → every pair
+    /// rendered as `@()`), (b) stamps `WASM_TAG_STR` on the `key` slot
+    /// and propagates the hashmap's `value_type_tag` onto the `value`
+    /// slot so primitives render through the tagged fast-path, and
+    /// (c) stamps `WASM_TAG_PACK` on the returned list's
+    /// `elem_type_tag` so the outer list dispatches into pair packs via
+    /// `_wasm_render_elem_tagged_debug_full`. Paired with the JS rename
+    /// of `{first, second}` → `{key, value}` and the symmetric native
+    /// `taida_register_field_name` calls so all four backends now
+    /// emit `@(key <= …, value <= …)` for `.entries()`, matching the
+    /// interpreter and `docs/reference/standard_library.md:238`.
     #[test]
     fn test_runtime_core_wasm_fragment_concat_preserves_bytes() {
-        const EXPECTED_TOTAL_LEN: usize = 248_033;
+        const EXPECTED_TOTAL_LEN: usize = 295_319;
         let asm = *RUNTIME_CORE_WASM;
         assert_eq!(
             asm.len(),

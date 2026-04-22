@@ -241,9 +241,56 @@ mod tests {
     /// `@(hasValue <= true, __value <= 3, __default <= 0, __type <=
     /// "Lax")`. F1 moves from 214,240 to 216,753; F2 moves from 134,257
     /// to 138,039. New total: 935,805.
+    ///
+    /// C23B-003 reopen (2026-04-22): +6,301 bytes in core.c. Added
+    /// `taida_hashmap_to_display_string_full` and
+    /// `taida_set_to_display_string_full` (synthetic full-form pack
+    /// renderers mirroring the interpreter's
+    /// `BuchiPack(__entries/__items, __type)` layout for HashMap/Set);
+    /// `taida_stdout_display_string` now routes through those helpers so
+    /// `Str[hm]()` / `Str[s]()` emit the interpreter's full form instead
+    /// of the short-form `HashMap({…})` / `Set({…})`. Additionally,
+    /// `taida_register_lax_field_names` also registers `__error`, and
+    /// `taida_gorillax_new` calls the registration + tags its `__error`
+    /// slot as `TAIDA_TAG_PACK` so `taida_pack_to_display_string_full`
+    /// renders Unit as `@()` (matches interpreter `Value::Unit.to_debug_string`)
+    /// — fixes `Str[Gorillax[v]()]()` rendering as `@()`. F1 moves from
+    /// 216,753 to 223,054 (the other fragments are unchanged). New
+    /// total: 943,160.
+    ///
+    /// C23B-003 reopen 2 (2026-04-22): F2 grew by +7,037 bytes from the
+    /// new `taida_value_to_debug_string_full` helper + the three call
+    /// sites in `taida_hashmap_to_display_string_full` /
+    /// `taida_set_to_display_string_full` /
+    /// `taida_pack_to_display_string_full` that route nested typed
+    /// runtime objects (HashMap / Set / BuchiPack) through the full-form
+    /// recursion, plus a List branch in `taida_stdout_display_string`
+    /// that uses the same full-form helper so top-level
+    /// `Str[@[hashMap()...]]()` produces `@[@(__entries <= …, __type <=
+    /// "HashMap"), …]` instead of collapsing the items to the
+    /// `HashMap({…})` short form. Without these changes, nested
+    /// HashMap-in-HashMap / Set-in-HashMap / List-of-HashMap collapsed
+    /// back to short-form `.toString()` output, breaking 4-backend
+    /// parity with the interpreter's `Value::to_debug_string()` →
+    /// recursive `to_display_string()` contract on BuchiPack. Total:
+    /// 943,160 → 950,197.
+    ///
+    /// C23B-007 / C23B-008 (2026-04-22): 950,197 → 958,672 (+8,475).
+    /// - C23B-007 native symmetry: introduced `TAIDA_TAG_HETEROGENEOUS
+    ///   = -2`, taught `taida_list_set_elem_tag` /
+    ///   `taida_hashmap_set_value_tag` to latch on it once two
+    ///   disagreeing primitive tags collide. Retain/release keep the
+    ///   UNKNOWN leak-rather-than-crash behaviour for the new sentinel.
+    /// - C23B-008 native HashMap insertion-order side-index: added
+    ///   macros (`TAIDA_HM_ORD_HEADER_SLOT`, `TAIDA_HM_ORD_SLOT`,
+    ///   `TAIDA_HM_TOTAL_SLOTS`) and grew the allocation by `1 + cap`
+    ///   slots. `taida_hashmap_set` / `_remove` / `_clone` /
+    ///   `_resize` / `_entries` / `_keys` / `_values` / `_merge` /
+    ///   `taida_hashmap_to_string` / `taida_hashmap_to_display_string_full` /
+    ///   JSON serializer walk the new side-index.
     #[test]
     fn test_native_runtime_fragment_concat_preserves_bytes() {
-        const EXPECTED_TOTAL_LEN: usize = 935_805;
+        const EXPECTED_TOTAL_LEN: usize = 961_515;
         let asm = *NATIVE_RUNTIME_C;
         assert_eq!(
             asm.len(),
@@ -422,11 +469,81 @@ mod tests {
         // "Lax")` output is preserved for Lax returns from
         // `Int[]/Float[]/Bool[]/Str[]`. F1 moves from 214,240 to
         // 216,753; F2 moves from 134,257 to 138,039.
-        const F1_LEN: usize = 216_753;
+        //
+        // C23-2 (2026-04-22): fragment 1 grew by +1,054 bytes — forward
+        // declaration of `taida_stdout_display_string` plus the new
+        // generic `taida_str_mold_any` helper (routes `Str[x]()` for
+        // non-primitive values through the full-form stdout-display
+        // helper, fixing C23B-002 raw-pointer stringification of
+        // `Str[@[…]]` / `Str[@(…)]` / `Str[Int[3.0]()]` on Native).
+        // Fragment 2 is unchanged. F1 moves from 216,753 to 217,807;
+        // F2 stays at 138,039.
+        //
+        // C23B-003 reopen (2026-04-22): core.c grew by +6,301 bytes
+        // across the F1 and F2 regions. F1 (core primitives, bytes
+        // [0..F1_LEN)) grew by +965 bytes via the
+        // `taida_register_lax_field_names` addition and the
+        // Gorillax-constructor registration calls plus the new
+        // `render_unit_pack` branch in `taida_pack_to_display_string_full`.
+        // F2 (error/display/stdout-display helpers, bytes [F1_LEN..))
+        // grew by +5,336 bytes for `taida_hashmap_to_display_string_full`
+        // / `taida_set_to_display_string_full` / the
+        // `taida_stdout_display_string` routing update. F1 moves from
+        // 217,807 to 218,772; F2 moves from 138,039 to 143,375.
+        //
+        // C23B-003 reopen 2 (2026-04-22): F2 grew by another +7,037
+        // bytes — `taida_value_to_debug_string_full` (recursive
+        // debug-string variant for nested typed runtime objects), the
+        // forward declarations, the three call-site swaps inside the
+        // existing `*_to_display_string_full` helpers, and the new
+        // List-branch inside `taida_stdout_display_string` that uses
+        // the full-form helper on list items. F1 is unchanged. F2
+        // moves from 143,375 to 150,412.
+        //
+        // C23B-007 / C23B-008 (2026-04-22): F1 grew by +7,710 bytes
+        // and F2 grew by +765 bytes.
+        // - F1 (core primitives) absorbed:
+        //   (a) `TAIDA_TAG_HETEROGENEOUS = -2` define plus the three
+        //       `TAIDA_HM_ORD_*` layout macros (C23B-007 / C23B-008).
+        //   (b) `taida_list_set_elem_tag` / `taida_hashmap_set_value_tag`
+        //       downgrade logic bodies (C23B-007).
+        //   (c) HashMap insertion-order side-index scaffolding:
+        //       `_new_with_cap` allocation bump, `_set` / `_resize` /
+        //       `_remove` / `_clone` / `_keys` / `_values` / `_entries`
+        //       / `_merge` / `_to_string` all walk the new side-index
+        //       (C23B-008).
+        // - F2 (error + display helpers) absorbed:
+        //   the `taida_hashmap_to_display_string_full` walk switch and
+        //   the `json_serialize_typed` HashMap branch rewrite.
+        // F1 moves from 218,772 to 226,482; F2 moves from 150,412 to
+        // 151,177.
+        //
+        // C23B-008 reopen (2026-04-22): F1 grew by +1,935 bytes. The
+        // native `taida_hashmap_merge` was rewritten from
+        // "clone self; for each other entry call taida_hashmap_set"
+        // (which preserves self's ordinal for overlap keys because
+        // `taida_hashmap_set` updates in place) to the interpreter's
+        // retain-then-push algorithm (fresh result map; fill with
+        // self-entries whose key ∉ other in self-order; then append
+        // every other entry in other-order). The previous implementation
+        // emitted `[a, b, c, d]` for `a=[a,b].merge([c,b,d])`; interpreter
+        // emits `[a, c, b, d]`. Fix is body-only inside F1. F2 is
+        // unchanged.
+        // F1 moves from 226,482 to 228,417; F2 stays at 151,177.
+        //
+        // C23B-009 (2026-04-22): F1 grew by +908 bytes. The native
+        // `taida_hashmap_entries` now idempotently registers the `"key"` /
+        // `"value"` field names via `taida_register_field_name` so that
+        // `taida_pack_to_display_string_full` resolves them (previously
+        // lookup returned NULL and every pair pack rendered as `@()`,
+        // diverging from interpreter / JS / documented
+        // `docs/reference/standard_library.md:238` shape). F2 is unchanged.
+        // F1 moves from 228,417 to 229,325; F2 stays at 151,177.
+        const F1_LEN: usize = 229_325;
         assert_eq!(
             CORE_SECTION.len(),
-            216_753 + 138_039,
-            "core.c total byte length must equal legacy fragment1 + fragment2 (C21B-seed-07 adjusted)"
+            229_325 + 151_177,
+            "core.c total byte length must equal legacy fragment1 + fragment2 (C23B-009 adjusted)"
         );
         const F2_PREFIX: &[u8] = b"// \xE2\x94\x80\xE2\x94\x80 Error ceiling";
         let tail = &CORE_SECTION.as_bytes()[F1_LEN..F1_LEN + F2_PREFIX.len()];

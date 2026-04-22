@@ -992,8 +992,162 @@ function Mod_mold(a, b, opts) {
 }
 
 // ── Type Conversion Mold types (Str/Int/Float/Bool → Lax) ──
+
+// C23-3: Interpreter-parity display string for `Str[x]()`.
+// The interpreter implements `Str[x]()` as `format!("{}", other)`, i.e.
+// `Value::to_display_string()`, which for a BuchiPack renders ALL fields
+// (including `__`-prefixed internals) via each field's `to_debug_string()`.
+// The JS backend previously used `String(value)`, which on plain objects
+// collapses to `[object Object]` and on typed packs (Lax/Result/…) calls
+// their short-form `.toString()` (`Lax(3)`). Both break 4-backend parity
+// with the interpreter. This helper mirrors the interpreter contract:
+//   Int / Float → natural number string (shortest round-trip, no `.0`)
+//   Bool        → `"true"` / `"false"`
+//   Str         → unquoted
+//   Array       → `@[item0, item1, ...]` (items via `__taida_format`)
+//   Lax typed   → `@(hasValue <= ..., __value <= ..., __default <= ..., __type <= "Lax")`
+//   Result / Async typed → full-form pack (all fields, including `__`-prefixed)
+//   HashMap / Set / TODO / Gorillax / RelaxedGorillax → synthetic full-form
+//       pack rebuilt from the interpreter's underlying `BuchiPack` layout
+//       (C23B-003 reopen — the original C23-3 fix missed these runtime-object
+//       types and fell through to the plain-pack branch, which either leaked
+//       method source bodies or stripped the `__`-prefixed data the
+//       interpreter actually carries in those pack shapes). See
+//       `src/interpreter/prelude.rs` (hashMap / setOf) and
+//       `src/interpreter/mold_eval.rs` (TODO / Gorillax).
+//   Stream       → `Stream[completed: N items]` / `Stream[active]`
+//       (`src/interpreter/value.rs:378-381`; interpreter-only type —
+//       native/wasm don't support Stream lowering yet).
+//   Molten       → `"Molten"` (`src/interpreter/value.rs:377`).
+//   Error value  → `Error(type: message)` style (interpreter parity; the
+//       JS runtime uses `__TaidaError` instances so this branch only fires
+//       for BuchiPack-shaped error wrappers).
+//   Plain pack   → `@(field <= value, ...)` (skips `__` fields for user
+//       packs, matching the interpreter's `to_display_string` on
+//       `Value::BuchiPack` for non-typed packs — the full form only kicks
+//       in when `__type` is present, handled above).
+// Symmetric with native's `taida_stdout_display_string` and wasm's
+// `_wasm_stdout_display_string`.
+function __taida_display_string(v) {
+  if (typeof v === 'string') return v;
+  if (typeof v === 'number') return String(v);
+  if (typeof v === 'boolean') return v ? 'true' : 'false';
+  if (v === null || v === undefined) return '';
+  if (__taida_isBytes(v)) return __taida_bytes_to_string(v);
+  if (__taida_isEnumVal(v)) return String(v.__taida_enum_ordinal);
+  if (Array.isArray(v)) {
+    return '@[' + v.map(x => __taida_format(x)).join(', ') + ']';
+  }
+  if (typeof v === 'object') {
+    // Typed pack: render the full form so the interpreter's
+    // `to_display_string()` contract holds (all fields visible, including
+    // `__`-prefixed internals). Lax carries an optional `__floatHint` for
+    // C21B-seed-04 Float-origin rendering.
+    if (v.__type === 'Lax') {
+      const _lhv = typeof v.hasValue === 'function' ? v.hasValue() : v.hasValue;
+      const _fmt = v.__floatHint === true
+        ? (n => typeof n === 'number' ? __taida_float_render(n) : __taida_format(n))
+        : __taida_format;
+      return '@(hasValue <= ' + String(!!_lhv)
+        + ', __value <= ' + _fmt(v.__value)
+        + ', __default <= ' + _fmt(v.__default)
+        + ', __type <= "Lax")';
+    }
+    if (v.__type === 'Result') {
+      // Mirror interpreter Result.to_display_string (full form).
+      const ok = typeof v.isSuccess === 'function' ? v.isSuccess() : !v.__isError;
+      if (ok) {
+        return '@(__value <= ' + __taida_format(v.__value)
+          + ', __isError <= false, throw <= @())';
+      }
+      return '@(__value <= @(), __isError <= true, throw <= '
+        + __taida_format(v.__error !== undefined ? v.__error : {}) + ')';
+    }
+    if (v.__type === 'Async') {
+      const status = v.status;
+      if (status === 'fulfilled') return 'Async[fulfilled: ' + __taida_format(v.__value) + ']';
+      if (status === 'rejected') return 'Async[rejected: ' + __taida_format(v.__error) + ']';
+      return 'Async[pending]';
+    }
+    // C23B-003 reopen — HashMap: interpreter represents HashMap as
+    // `BuchiPack(__entries <= @[@(key <= K, value <= V), ...], __type <= "HashMap")`
+    // (`src/interpreter/prelude.rs:618-621`). `Str[hm]()` therefore renders
+    // through `Value::BuchiPack.to_display_string()` = full-form pack.
+    // The JS runtime stores HashMap as a frozen object carrying method
+    // fields alongside `__entries`, so we must explicitly rebuild the
+    // synthetic pack shape instead of iterating the JS object's own keys
+    // (which would leak method source bodies as pack fields).
+    if (v.__type === 'HashMap') {
+      const entries = Array.isArray(v.__entries) ? v.__entries : [];
+      const entryStrs = entries.map(e =>
+        '@(key <= ' + __taida_format(e.key)
+          + ', value <= ' + __taida_format(e.value) + ')'
+      );
+      return '@(__entries <= @[' + entryStrs.join(', ')
+        + '], __type <= "HashMap")';
+    }
+    // C23B-003 reopen — Set: interpreter `BuchiPack(__items <= @[...], __type <= "Set")`
+    // (`src/interpreter/prelude.rs:644-647`).
+    if (v.__type === 'Set') {
+      const items = Array.isArray(v.__items) ? v.__items : [];
+      return '@(__items <= @[' + items.map(x => __taida_format(x)).join(', ')
+        + '], __type <= "Set")';
+    }
+    // C23B-003 reopen — Stream: interpreter uses `Value::Stream` (not a
+    // BuchiPack), so `to_display_string()` returns
+    // `"Stream[completed: N items]"` / `"Stream[active]"`
+    // (`src/interpreter/value.rs:378-381`). Native/wasm don't support
+    // Stream lowering yet; parity is enforced only for interpreter+JS.
+    if (v.__type === 'Stream') {
+      if (v.__status === 'active') return 'Stream[active]';
+      const items = Array.isArray(v.__items) ? v.__items : [];
+      return 'Stream[completed: ' + items.length + ' items]';
+    }
+    // C23B-003 reopen — TODO: interpreter `BuchiPack` with fields
+    // `id / task / sol / unm / __value / __default / __type`
+    // (`src/interpreter/mold_eval.rs:1793-1801`).
+    if (v.__type === 'TODO') {
+      return '@(id <= ' + __taida_format(v.id)
+        + ', task <= ' + __taida_format(v.task)
+        + ', sol <= ' + __taida_format(v.sol)
+        + ', unm <= ' + __taida_format(v.unm)
+        + ', __value <= ' + __taida_format(v.__value)
+        + ', __default <= ' + __taida_format(v.__default)
+        + ', __type <= "TODO")';
+    }
+    // C23B-003 reopen — Gorillax / RelaxedGorillax: interpreter
+    // `BuchiPack(hasValue, __value, __error, __type)`
+    // (`src/interpreter/mold_eval.rs:1824-1829`). The interpreter always
+    // emits `__error`; a missing error is `@()` (Value::Unit) — not `null`.
+    if (v.__type === 'Gorillax' || v.__type === 'RelaxedGorillax') {
+      const hv = typeof v.hasValue === 'function' ? v.hasValue() : v.hasValue;
+      const err = v.__error;
+      // Unit-equivalent absence of error renders as `@()`, matching the
+      // interpreter's `Value::Unit.to_display_string()`.
+      const errStr = (err === null || err === undefined) ? '@()' : __taida_format(err);
+      return '@(hasValue <= ' + String(!!hv)
+        + ', __value <= ' + __taida_format(v.__value)
+        + ', __error <= ' + errStr
+        + ', __type <= "' + v.__type + '")';
+    }
+    // Molten is an opaque interpreter value; `Value::Molten.to_display_string()`
+    // returns `"Molten"`.
+    if (v.__type === 'Molten') return 'Molten';
+    // Plain BuchiPack-like object (user data) — skip `__` internal fields
+    // to match the interpreter's `to_display_string` on `Value::BuchiPack`
+    // for non-typed packs.
+    const entries = Object.entries(v).filter(([k]) => !k.startsWith('__'));
+    return '@(' + entries.map(([k, val]) => k + ' <= ' + __taida_format(val)).join(', ') + ')';
+  }
+  return String(v);
+}
+
 function Str_mold(value) {
-  return Lax(String(value));
+  // C23-3: route through the interpreter-parity display helper so that
+  // Pack / Lax / Result / Async / List values produce full-form Taida
+  // display strings rather than JS's `String(value)` coercion
+  // (`[object Object]`, `Lax(3)`, …).
+  return Lax(__taida_display_string(value));
 }
 function __taida_parse_int_base(str, base) {
   if (!__taida_isIntNumber(base) || base < 2 || base > 36) return null;
@@ -1772,6 +1926,18 @@ function __taida_format(v) {
     const _fmt = n => typeof n === 'number' ? __taida_float_render(n) : __taida_format(n);
     return '@(hasValue <= ' + String(!!_lhv) + ', __value <= ' + _fmt(v.__value) + ', __default <= ' + _fmt(v.__default) + ', __type <= "Lax")';
   }
+  // C23B-003 reopen 2: nested typed runtime objects (HashMap / Set /
+  // Gorillax / RelaxedGorillax / TODO / Stream / Molten / Lax / Result
+  // / Async) must recurse through `__taida_display_string` so nested
+  // HashMap/Set expand to their synthetic full-form pack shape instead
+  // of falling through to `String(v)` which invokes the prototype
+  // `.toString()` short-form (`HashMap({...})` / `Set({...})`) and
+  // breaks 4-backend parity. This mirrors the interpreter's
+  // `Value::to_debug_string()` on BuchiPack which recursively calls
+  // `to_display_string()` on each field value.
+  if (v && typeof v === 'object' && v.__type) {
+    return __taida_display_string(v);
+  }
   if (v && typeof v === 'object' && !Array.isArray(v) && !v.__type) {
     const entries = Object.entries(v).filter(([k]) => !k.startsWith('__'));
     return '@(' + entries.map(([k, val]) => k + ' <= ' + __taida_format(val)).join(', ') + ')';
@@ -2387,7 +2553,18 @@ function __taida_createHashMap(entries) {
       return Object.freeze(_entries.map(e => e.value));
     },
     entries() {
-      return Object.freeze(_entries.map(e => Object.freeze({ first: e.key, second: e.value })));
+      // C23B-009 (2026-04-22): interpreter (`src/interpreter/methods.rs:761-783`)
+      // emits `@(key <= …, value <= …)` pairs and
+      // `docs/reference/standard_library.md:238` documents the return
+      // shape as `@[@(key, value)]`. Previously this runtime emitted
+      // `{ first, second }` (legacy `zip()`-style convention), which
+      // produced `@(first <= "a", second <= 1)` under `Str[m.entries()]()`
+      // and diverged from interpreter / Native / WASM (post-fix) /
+      // documented API. Fix: use `key` / `value` field names. Note the
+      // `hashMap(entries)` constructor at line ~2600 still accepts
+      // `.first`/`.second` inputs for back-compat with user code that
+      // built its own pair list — the fix is only to the output shape.
+      return Object.freeze(_entries.map(e => Object.freeze({ key: e.key, value: e.value })));
     },
     size() {
       return _entries.length;
@@ -2397,15 +2574,18 @@ function __taida_createHashMap(entries) {
     },
     merge(other) {
       if (!other || other.__type !== 'HashMap') return hm;
-      const merged = [..._entries];
-      for (const oe of other.__entries) {
-        const idx = merged.findIndex(e => __taida_equals(e.key, oe.key));
-        if (idx >= 0) {
-          merged[idx] = oe;
-        } else {
-          merged.push(oe);
-        }
-      }
+      // C23B-008 reopen (2026-04-22): interpreter semantics (see
+      // src/interpreter/methods.rs:787-822) are retain-then-push — any
+      // overlap key is removed from self and re-appended at other's
+      // position with other's value. The previous implementation did
+      // update-in-place (`merged[idx] = oe`), which preserved self's
+      // ordinal. Repro: `a=[a,b]`, `b=[c,b,d]`; interpreter → `[a,c,b,d]`,
+      // broken backends → `[a,b,c,d]`. Fix: keep only self entries whose
+      // key is absent from other (self-order), then append every other
+      // entry (other-order).
+      const otherKeys = other.__entries.map(e => e.key);
+      const kept = _entries.filter(e => !otherKeys.some(k => __taida_equals(e.key, k)));
+      const merged = kept.concat(other.__entries);
       return __taida_createHashMap(merged);
     },
     // Format: `HashMap({key1: val1, key2: val2})` — matches interpreter output.
