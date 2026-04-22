@@ -210,65 +210,99 @@ fn fixture_expected(name: &str) -> String {
 // Interpreter reference — pin `.expected` against the source of truth first.
 // ---------------------------------------------------------------------------
 
-#[test]
-fn interpreter_matches_expected_fixtures() {
-    for name in C24B_FIXTURES {
-        let td = fixture_td(name);
-        let out = run_interpreter(&td).expect("interpreter should succeed");
-        let exp = fixture_expected(name);
-        assert_eq!(
-            out, exp,
-            "interpreter output for {} drifted from .expected (source of truth)",
-            name
-        );
-    }
+// C24 Phase 5 (RC-SLOW-2 / C24B-006): per-fixture decomposition.
+
+fn check_interpreter_fixture(name: &str) {
+    let td = fixture_td(name);
+    let out = run_interpreter(&td).expect("interpreter should succeed");
+    let exp = fixture_expected(name);
+    assert_eq!(
+        out, exp,
+        "interpreter output for {} drifted from .expected (source of truth)",
+        name
+    );
 }
 
-#[test]
-fn js_matches_interpreter() {
+fn check_js_fixture(name: &str) {
     if which_node().is_none() {
-        return; // CI hosts without Node skip cleanly.
+        return;
     }
-    for name in C24B_FIXTURES {
-        let td = fixture_td(name);
-        let exp = fixture_expected(name);
-        let out = run_js(&td).unwrap_or_else(|| panic!("js build+run failed for {}", name));
-        assert_eq!(
-            out, exp,
-            "JS output for {} diverged from interpreter reference (C24-B regression?)",
-            name
-        );
-    }
+    let td = fixture_td(name);
+    let exp = fixture_expected(name);
+    let out = run_js(&td).unwrap_or_else(|| panic!("js build+run failed for {}", name));
+    assert_eq!(
+        out, exp,
+        "JS output for {} diverged from interpreter reference (C24-B regression?)",
+        name
+    );
 }
 
-#[test]
-fn native_matches_interpreter() {
-    for name in C24B_FIXTURES {
-        let td = fixture_td(name);
-        let exp = fixture_expected(name);
-        let out = run_native(&td).unwrap_or_else(|| panic!("native build+run failed for {}", name));
-        assert_eq!(
-            out, exp,
-            "Native output for {} diverged from interpreter reference (C24-B regression?)",
-            name
-        );
-    }
+fn check_native_fixture(name: &str) {
+    let td = fixture_td(name);
+    let exp = fixture_expected(name);
+    let out = run_native(&td).unwrap_or_else(|| panic!("native build+run failed for {}", name));
+    assert_eq!(
+        out, exp,
+        "Native output for {} diverged from interpreter reference (C24-B regression?)",
+        name
+    );
 }
 
-#[test]
-fn wasm_wasi_matches_interpreter() {
+fn check_wasm_wasi_fixture(name: &str) {
     if wasmtime_bin().is_none() {
-        return; // hosts without wasmtime skip cleanly.
+        return;
     }
-    for name in C24B_FIXTURES {
-        let td = fixture_td(name);
-        let exp = fixture_expected(name);
-        let out =
-            run_wasm_wasi(&td).unwrap_or_else(|| panic!("wasm-wasi build+run failed for {}", name));
-        assert_eq!(
-            out, exp,
-            "wasm-wasi output for {} diverged from interpreter reference (C24-B regression?)",
-            name
-        );
+    let td = fixture_td(name);
+    let exp = fixture_expected(name);
+    let out =
+        run_wasm_wasi(&td).unwrap_or_else(|| panic!("wasm-wasi build+run failed for {}", name));
+    assert_eq!(
+        out, exp,
+        "wasm-wasi output for {} diverged from interpreter reference (C24-B regression?)",
+        name
+    );
+}
+
+macro_rules! c24_per_fixture_tests {
+    ($($name:ident),* $(,)?) => {
+        $(
+            mod $name {
+                use super::*;
+                #[test] fn interp() { check_interpreter_fixture(stringify!($name)); }
+                #[test] fn js() { check_js_fixture(stringify!($name)); }
+                #[test] fn native() { check_native_fixture(stringify!($name)); }
+                #[test] fn wasm_wasi() { check_wasm_wasi_fixture(stringify!($name)); }
+            }
+        )*
+    };
+}
+
+c24_per_fixture_tests!(
+    str_from_zip,
+    str_from_zip_uneven,
+    str_from_enumerate,
+    str_from_enumerate_empty,
+    str_from_zip_fn,
+    str_from_enumerate_fn,
+);
+
+#[test]
+fn c24b_fixture_list_sync_guard() {
+    // The per-fixture macro invocation above must mirror C24B_FIXTURES.
+    let macro_list: &[&str] = &[
+        "str_from_zip",
+        "str_from_zip_uneven",
+        "str_from_enumerate",
+        "str_from_enumerate_empty",
+        "str_from_zip_fn",
+        "str_from_enumerate_fn",
+    ];
+    assert_eq!(
+        C24B_FIXTURES.len(),
+        macro_list.len(),
+        "C24B_FIXTURES count != c24_per_fixture_tests!() invocation count",
+    );
+    for (a, b) in C24B_FIXTURES.iter().zip(macro_list) {
+        assert_eq!(a, b);
     }
 }

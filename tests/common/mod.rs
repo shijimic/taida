@@ -14,6 +14,8 @@
 // Not all test crates use every function in this module.
 #![allow(dead_code)]
 
+pub mod fixture_lists;
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::OnceLock;

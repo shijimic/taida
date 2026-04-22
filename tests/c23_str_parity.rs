@@ -387,89 +387,216 @@ fn fixture_expected(name: &str) -> String {
 // drift away from the source of truth (`src/interpreter/mold_eval.rs` `Str`).
 // ---------------------------------------------------------------------------
 
-#[test]
-fn interpreter_matches_expected_fixtures() {
-    for name in FIXTURES {
-        let td = fixture_td(name);
-        let out = run_interpreter(&td).expect("interpreter should succeed");
-        let exp = fixture_expected(name);
-        assert_eq!(
-            out, exp,
-            "interpreter output for {} drifted from .expected (source of truth)",
-            name
-        );
-    }
+// ---------------------------------------------------------------------------
+// C24 Phase 5 (RC-SLOW-2 / C24B-006): per-fixture decomposition.
+//
+// Previously, `interpreter_matches_expected_fixtures`, `js_matches_interpreter`,
+// `native_matches_interpreter`, and `wasm_wasi_matches_interpreter` each
+// iterated FIXTURES serially in a tight loop. The native variant was the
+// 3rd-slowest test in CI (warm 36s → 53s under load). `c24_fixture_macros!`
+// below expands one `#[test]` per (FIXTURE × backend), letting nextest
+// parallelize across all of them.
+// ---------------------------------------------------------------------------
+
+fn check_interpreter_fixture(name: &str) {
+    let td = fixture_td(name);
+    let out = run_interpreter(&td).expect("interpreter should succeed");
+    let exp = fixture_expected(name);
+    assert_eq!(
+        out, exp,
+        "interpreter output for {} drifted from .expected (source of truth)",
+        name
+    );
 }
 
-// ---------------------------------------------------------------------------
-// JS parity (C23-3)
-// ---------------------------------------------------------------------------
-
-#[test]
-fn js_matches_interpreter() {
+fn check_js_fixture(name: &str) {
     if which_node().is_none() {
-        return; // CI hosts without Node skip cleanly.
+        return;
     }
-    for name in FIXTURES {
-        let td = fixture_td(name);
-        let exp = fixture_expected(name);
-        let out = run_js(&td).unwrap_or_else(|| panic!("js build+run failed for {}", name));
-        assert_eq!(
-            out, exp,
-            "JS output for {} diverged from interpreter reference (C23B-003 regression?)",
-            name
-        );
-    }
+    let td = fixture_td(name);
+    let exp = fixture_expected(name);
+    let out = run_js(&td).unwrap_or_else(|| panic!("js build+run failed for {}", name));
+    assert_eq!(
+        out, exp,
+        "JS output for {} diverged from interpreter reference (C23B-003 regression?)",
+        name
+    );
 }
 
-// ---------------------------------------------------------------------------
-// Native parity (C23-2)
-// ---------------------------------------------------------------------------
-
-#[test]
-fn native_matches_interpreter() {
-    for name in FIXTURES {
-        if is_native_skipped(name) {
-            // Native lowering doesn't support this fixture's mold yet
-            // (see `STREAM_ONLY_FIXTURES` / `run_native`'s
-            // `unsupported mold type` failure path).
-            continue;
-        }
-        let td = fixture_td(name);
-        let exp = fixture_expected(name);
-        let out = run_native(&td).unwrap_or_else(|| panic!("native build+run failed for {}", name));
-        assert_eq!(
-            out, exp,
-            "Native output for {} diverged from interpreter reference (C23B-002 / C23B-003 regression?)",
-            name
-        );
+fn check_native_fixture(name: &str) {
+    if is_native_skipped(name) {
+        return;
     }
+    let td = fixture_td(name);
+    let exp = fixture_expected(name);
+    let out = run_native(&td).unwrap_or_else(|| panic!("native build+run failed for {}", name));
+    assert_eq!(
+        out, exp,
+        "Native output for {} diverged from interpreter reference (C23B-002 / C23B-003 regression?)",
+        name
+    );
 }
 
-// ---------------------------------------------------------------------------
-// WASM-wasi parity (C23-2 generic path + C23-4 primitive/Lax path)
-// ---------------------------------------------------------------------------
-
-#[test]
-fn wasm_wasi_matches_interpreter() {
+fn check_wasm_wasi_fixture(name: &str) {
     if wasmtime_bin().is_none() {
-        return; // hosts without wasmtime skip cleanly (mirrors c21_float_fn_boundary).
+        return;
+    }
+    if is_wasm_skipped(name) {
+        return;
+    }
+    let td = fixture_td(name);
+    let exp = fixture_expected(name);
+    let out =
+        run_wasm_wasi(&td).unwrap_or_else(|| panic!("wasm-wasi build+run failed for {}", name));
+    assert_eq!(
+        out, exp,
+        "WASM-wasi output for {} diverged from interpreter reference (C23B-001 / C23B-002 / C23B-003 regression?)",
+        name
+    );
+}
+
+/// Expand one `#[test]` per (fixture × backend). Using a single
+/// `macro_rules!` with a comma-separated fixture list keeps the per-fixture
+/// tests close to the FIXTURES constant — touch one, update the other.
+macro_rules! c23_per_fixture_tests {
+    ($($name:ident),* $(,)?) => {
+        $(
+            mod $name {
+                use super::*;
+                #[test] fn interp() { check_interpreter_fixture(stringify!($name)); }
+                #[test] fn js() { check_js_fixture(stringify!($name)); }
+                #[test] fn native() { check_native_fixture(stringify!($name)); }
+                #[test] fn wasm_wasi() { check_wasm_wasi_fixture(stringify!($name)); }
+            }
+        )*
+    };
+}
+
+c23_per_fixture_tests!(
+    str_from_float_int_form,
+    str_from_float_frac_form,
+    str_from_bool,
+    str_from_str,
+    str_from_list,
+    str_from_pack,
+    str_from_lax,
+    str_from_hashmap,
+    str_from_set,
+    str_from_gorillax,
+    str_from_stream,
+    str_from_nested_hashmap,
+    str_from_nested_set,
+    str_from_list_of_hashmap,
+    str_from_pack_with_hashmap,
+    str_from_empty_pack,
+    str_from_pack_with_empty_pack,
+    str_from_hashmap_with_empty_pack,
+    str_from_list_with_empty_pack,
+    str_from_dynamic_int,
+    str_from_dynamic_int_zero,
+    str_from_dynamic_int_negative,
+    str_from_dynamic_int_funcall,
+    str_from_hashmap_with_large_int,
+    str_from_set_with_large_int,
+    str_from_list_with_large_int,
+    str_from_pack_with_large_int,
+    str_from_nested_collection_with_large_int,
+    str_from_mixed_list,
+    str_from_mixed_hashmap,
+    str_from_mixed_set,
+    str_from_nested_mixed,
+    str_from_multi_entry_hashmap,
+    str_from_large_hashmap,
+    str_from_hashmap_after_remove,
+    str_from_hashmap_update_preserves_order,
+    str_from_hashmap_merge_overlap,
+    str_from_hashmap_merge_non_overlap,
+    str_from_hashmap_merge_full_overlap,
+    str_from_hashmap_merge_empty_self,
+    str_from_hashmap_merge_empty_other,
+    str_from_hashmap_merge_resize,
+    str_from_hashmap_entries,
+    str_from_hashmap_entries_empty,
+    str_from_hashmap_entries_single,
+    str_from_hashmap_entries_after_remove,
+);
+
+/// List of fixtures registered via `c23_per_fixture_tests!` above. Kept
+/// in sync with the macro invocation — adding a fixture to FIXTURES
+/// without extending the macro is caught by this aggregate test.
+const MACRO_FIXTURES: &[&str] = &[
+    "str_from_float_int_form",
+    "str_from_float_frac_form",
+    "str_from_bool",
+    "str_from_str",
+    "str_from_list",
+    "str_from_pack",
+    "str_from_lax",
+    "str_from_hashmap",
+    "str_from_set",
+    "str_from_gorillax",
+    "str_from_stream",
+    "str_from_nested_hashmap",
+    "str_from_nested_set",
+    "str_from_list_of_hashmap",
+    "str_from_pack_with_hashmap",
+    "str_from_empty_pack",
+    "str_from_pack_with_empty_pack",
+    "str_from_hashmap_with_empty_pack",
+    "str_from_list_with_empty_pack",
+    "str_from_dynamic_int",
+    "str_from_dynamic_int_zero",
+    "str_from_dynamic_int_negative",
+    "str_from_dynamic_int_funcall",
+    "str_from_hashmap_with_large_int",
+    "str_from_set_with_large_int",
+    "str_from_list_with_large_int",
+    "str_from_pack_with_large_int",
+    "str_from_nested_collection_with_large_int",
+    "str_from_mixed_list",
+    "str_from_mixed_hashmap",
+    "str_from_mixed_set",
+    "str_from_nested_mixed",
+    "str_from_multi_entry_hashmap",
+    "str_from_large_hashmap",
+    "str_from_hashmap_after_remove",
+    "str_from_hashmap_update_preserves_order",
+    "str_from_hashmap_merge_overlap",
+    "str_from_hashmap_merge_non_overlap",
+    "str_from_hashmap_merge_full_overlap",
+    "str_from_hashmap_merge_empty_self",
+    "str_from_hashmap_merge_empty_other",
+    "str_from_hashmap_merge_resize",
+    "str_from_hashmap_entries",
+    "str_from_hashmap_entries_empty",
+    "str_from_hashmap_entries_single",
+    "str_from_hashmap_entries_after_remove",
+];
+
+#[test]
+fn fixture_list_matches_macro_expansion() {
+    assert_eq!(
+        FIXTURES.len(),
+        MACRO_FIXTURES.len(),
+        "FIXTURES count ({}) does not match c23_per_fixture_tests!() macro invocation count ({}). \
+         Update both lists together.",
+        FIXTURES.len(),
+        MACRO_FIXTURES.len(),
+    );
+    for (i, (a, b)) in FIXTURES.iter().zip(MACRO_FIXTURES.iter()).enumerate() {
+        assert_eq!(
+            a, b,
+            "FIXTURES[{}] = {:?} but MACRO_FIXTURES[{}] = {:?}; lists must be in the same order.",
+            i, a, i, b,
+        );
     }
     for name in FIXTURES {
-        if is_wasm_skipped(name) {
-            // `WASM_SKIP_FIXTURES` / `STREAM_ONLY_FIXTURES` — see the
-            // module doc comment for why these fixtures aren't enforced
-            // on wasm-wasi in the C23 track.
-            continue;
-        }
-        let td = fixture_td(name);
-        let exp = fixture_expected(name);
-        let out =
-            run_wasm_wasi(&td).unwrap_or_else(|| panic!("wasm-wasi build+run failed for {}", name));
-        assert_eq!(
-            out, exp,
-            "WASM-wasi output for {} diverged from interpreter reference (C23B-001 / C23B-002 / C23B-003 regression?)",
+        assert!(
+            fixture_td(name).exists(),
+            "FIXTURES entry `{}` missing .td file",
             name
         );
+        // fixture_expected() reads from disk; panic if missing is enough.
+        let _ = fixture_expected(name);
     }
 }

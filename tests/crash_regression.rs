@@ -155,113 +155,83 @@ fn run_native(td_path: &Path) -> Result<String, String> {
     Ok(normalize(&String::from_utf8_lossy(&run_output.stdout)))
 }
 
-#[test]
-fn test_crash_regression_corpus_three_way() {
+// C24 Phase 5 (RC-SLOW-2 / C24B-006): per-fixture decomposition of
+// `test_crash_regression_corpus_three_way`. The original was a single
+// 10-17s test iterating `tests/crash_regression/*.td` serially; now each
+// fixture becomes its own `#[test]`.
+
+fn run_crash_regression_fixture(stem: &str) {
     if !cc_available() {
-        eprintln!("SKIP: cc not available, skipping crash-regression native checks");
+        eprintln!(
+            "SKIP: cc not available, skipping crash-regression for {}",
+            stem
+        );
         return;
     }
+
     let has_node = node_available();
+    let td_path = crash_regression_dir().join(format!("{}.td", stem));
 
-    let dir = crash_regression_dir();
-    let mut entries: Vec<_> = fs::read_dir(&dir)
-        .expect("tests/crash_regression directory should exist")
-        .filter_map(|e| e.ok())
-        .filter(|e| e.file_name().to_string_lossy().ends_with(".td"))
-        .collect();
-    entries.sort_by_key(|e| e.file_name());
+    let interp =
+        run_interpreter(&td_path).unwrap_or_else(|e| panic!("{}: interpreter failed\n{}", stem, e));
+    let native = run_native(&td_path).unwrap_or_else(|e| panic!("{}: native failed\n{}", stem, e));
 
-    assert!(
-        !entries.is_empty(),
-        "No crash-regression corpus files found in {}",
-        dir.display()
-    );
-
-    let mut passed = 0usize;
-    let mut failures = Vec::new();
-
-    for entry in &entries {
-        let td_path = entry.path();
-        let name = td_path
-            .file_stem()
-            .expect("file stem")
-            .to_string_lossy()
-            .to_string();
-
-        let interp = match run_interpreter(&td_path) {
-            Ok(out) => out,
-            Err(err) => {
-                failures.push(format!("{}: interpreter failed\n{}", name, err));
-                continue;
-            }
-        };
-
-        let native = match run_native(&td_path) {
-            Ok(out) => out,
-            Err(err) => {
-                failures.push(format!("{}: native failed\n{}", name, err));
-                continue;
-            }
-        };
-
-        if native != interp {
-            // AT-9: Show full output diff, not just first 4 lines
-            failures.push(format!(
-                "{}: interpreter/native mismatch\n  interp ({} lines):\n{}\n  native ({} lines):\n{}",
-                name,
-                interp.lines().count(),
-                interp.lines().map(|l| format!("    {}", l)).collect::<Vec<_>>().join("\n"),
-                native.lines().count(),
-                native.lines().map(|l| format!("    {}", l)).collect::<Vec<_>>().join("\n"),
-            ));
-            continue;
-        }
-
-        if has_node {
-            let js = match run_js(&td_path) {
-                Ok(out) => out,
-                Err(err) => {
-                    failures.push(format!("{}: js failed\n{}", name, err));
-                    continue;
-                }
-            };
-
-            if js != interp {
-                // AT-9: Show full output diff, not just first 4 lines
-                failures.push(format!(
-                    "{}: interpreter/js mismatch\n  interp ({} lines):\n{}\n  js ({} lines):\n{}",
-                    name,
-                    interp.lines().count(),
-                    interp
-                        .lines()
-                        .map(|l| format!("    {}", l))
-                        .collect::<Vec<_>>()
-                        .join("\n"),
-                    js.lines().count(),
-                    js.lines()
-                        .map(|l| format!("    {}", l))
-                        .collect::<Vec<_>>()
-                        .join("\n"),
-                ));
-                continue;
-            }
-        }
-
-        passed += 1;
-    }
-
-    eprintln!(
-        "Crash regression corpus: {}/{} passed (js_checked: {})",
-        passed,
-        entries.len(),
-        has_node
-    );
-
-    if !failures.is_empty() {
+    if native != interp {
         panic!(
-            "{} crash-regression case(s) failed:\n\n{}",
-            failures.len(),
-            failures.join("\n\n"),
+            "{}: interpreter/native mismatch\n  interp ({} lines):\n{}\n  native ({} lines):\n{}",
+            stem,
+            interp.lines().count(),
+            interp
+                .lines()
+                .map(|l| format!("    {}", l))
+                .collect::<Vec<_>>()
+                .join("\n"),
+            native.lines().count(),
+            native
+                .lines()
+                .map(|l| format!("    {}", l))
+                .collect::<Vec<_>>()
+                .join("\n"),
         );
     }
+
+    if has_node {
+        let js = run_js(&td_path).unwrap_or_else(|e| panic!("{}: js failed\n{}", stem, e));
+        if js != interp {
+            panic!(
+                "{}: interpreter/js mismatch\n  interp ({} lines):\n{}\n  js ({} lines):\n{}",
+                stem,
+                interp.lines().count(),
+                interp
+                    .lines()
+                    .map(|l| format!("    {}", l))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+                js.lines().count(),
+                js.lines()
+                    .map(|l| format!("    {}", l))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            );
+        }
+    }
 }
+
+mod crash_regression_fixture_list {
+    include!(concat!(env!("OUT_DIR"), "/crash_regression_fixtures.rs"));
+}
+
+#[test]
+fn test_crash_regression_corpus_nonempty() {
+    assert!(
+        !crash_regression_fixture_list::CRASH_REGRESSION_FIXTURES.is_empty(),
+        "No crash-regression corpus files found"
+    );
+}
+
+macro_rules! c24_fixture_runner {
+    ($stem:expr) => {
+        run_crash_regression_fixture($stem)
+    };
+}
+include!(concat!(env!("OUT_DIR"), "/crash_regression_tests.rs"));

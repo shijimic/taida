@@ -821,131 +821,123 @@ fn test_interpreter_js_parity() {
 // =========================================================================
 // Test 2: Three-way parity for compile_*.td (Interpreter vs JS vs Native)
 // =========================================================================
-#[test]
-fn test_three_way_parity() {
-    let has_node = node_available();
-    let has_cc = cc_available();
+//
+// C24 Phase 5 (RC-SLOW-2 / C24B-006): Decomposed from a single 40s
+// collection-runner test into one per-fixture `#[test]`. The monolithic
+// version hid fixture-level failures behind one test name and forced
+// strict sequential iteration; per-fixture tests allow nextest to fan out
+// across CPUs and surface individual failures.
 
-    if !has_cc {
-        eprintln!("SKIP: cc not available, skipping three-way parity tests");
+/// Run three-way parity for a single compile_* fixture.
+///
+/// Semantics match the original `test_three_way_parity` loop body:
+///   1. Run interpreter (reference). If it fails, the test fails.
+///   2. Run native. If build/run fails, require the failure mode to be
+///      "unsupported mold type: Stream" AND stem to be in the
+///      `native_expected_rejects` allowlist. JS parity is still checked
+///      when a native reject is expected.
+///   3. If native succeeded, interp must equal native.
+///   4. If node is available, interp must equal JS (JS transpile failures
+///      are tolerated — compile_* is primarily native-focused).
+fn run_three_way_parity_fixture(stem: &str) {
+    if !cc_available() {
+        eprintln!(
+            "SKIP: cc not available, skipping three-way parity for {}",
+            stem
+        );
         return;
     }
 
+    let has_node = node_available();
+    let path = examples_dir().join(format!("{}.td", stem));
+
+    let interp = run_interpreter(&path)
+        .unwrap_or_else(|| panic!("{}: interpreter failed (reference implementation)", stem));
+
     let native_expected_rejects = native_expected_reject_list();
-    let dir = examples_dir();
-    let mut entries: Vec<_> = fs::read_dir(&dir)
-        .expect("examples/ directory should exist")
-        .filter_map(|e| e.ok())
-        .filter(|e| {
-            let name = e.file_name().to_string_lossy().to_string();
-            name.starts_with("compile_") && name.ends_with(".td")
-        })
-        .collect();
-    entries.sort_by_key(|e| e.file_name());
 
-    assert!(!entries.is_empty(), "No compile_*.td files found");
-
-    let mut passed = 0;
-    let mut native_rejected = Vec::new();
-    let mut failures = Vec::new();
-
-    for entry in &entries {
-        let path = entry.path();
-        let name = path.file_stem().unwrap().to_string_lossy().to_string();
-
-        let interp = match run_interpreter(&path) {
-            Some(o) => o,
-            None => {
-                failures.push(format!("{}: interpreter failed", name));
-                continue;
+    match run_native_with_error(&path) {
+        Ok(native) => {
+            assert!(
+                !native_expected_rejects.contains(&stem),
+                "{}: native was expected to reject but succeeded — update native_expected_reject_list",
+                stem,
+            );
+            if interp != native {
+                panic!(
+                    "{}: Interpreter vs Native mismatch\n  interp: {:?}\n  native: {:?}",
+                    stem,
+                    interp.lines().take(3).collect::<Vec<_>>(),
+                    native.lines().take(3).collect::<Vec<_>>(),
+                );
             }
-        };
-
-        // Native check
-        let native = match run_native_with_error(&path) {
-            Ok(o) => o,
-            Err(err) => {
-                if native_expected_rejects.contains(&name.as_str()) {
-                    assert!(
-                        err.contains("unsupported mold type: Stream"),
-                        "{}: expected Stream capability reject, got: {}",
-                        name,
-                        err
+            if has_node
+                && let Some(js) = run_js(&path)
+                && interp != js
+            {
+                panic!(
+                    "{}: Interpreter vs JS mismatch\n  interp: {:?}\n  js:     {:?}",
+                    stem,
+                    interp.lines().take(3).collect::<Vec<_>>(),
+                    js.lines().take(3).collect::<Vec<_>>(),
+                );
+            }
+        }
+        Err(err) => {
+            if !native_expected_rejects.contains(&stem) {
+                panic!("{}: native compile/run failed\n  {}", stem, err);
+            }
+            assert!(
+                err.contains("unsupported mold type: Stream"),
+                "{}: expected Stream capability reject, got: {}",
+                stem,
+                err,
+            );
+            if has_node {
+                let js = run_js(&path)
+                    .unwrap_or_else(|| panic!("{}: JS transpile/execution failed", stem));
+                if interp != js {
+                    panic!(
+                        "{}: Interpreter vs JS mismatch\n  interp: {:?}\n  js:     {:?}",
+                        stem,
+                        interp.lines().take(3).collect::<Vec<_>>(),
+                        js.lines().take(3).collect::<Vec<_>>(),
                     );
-                    if has_node {
-                        let js = run_js(&path)
-                            .unwrap_or_else(|| panic!("{}: JS transpile/execution failed", name));
-                        if interp != js {
-                            failures.push(format!(
-                                "{}: Interpreter vs JS mismatch\n  interp: {:?}\n  js:     {:?}",
-                                name,
-                                interp.lines().take(3).collect::<Vec<_>>(),
-                                js.lines().take(3).collect::<Vec<_>>(),
-                            ));
-                            continue;
-                        }
-                    }
-                    native_rejected.push(name.clone());
-                    continue;
                 }
-                failures.push(format!("{}: native compile/run failed\n  {}", name, err));
-                continue;
             }
-        };
-
-        if interp != native {
-            failures.push(format!(
-                "{}: Interpreter vs Native mismatch\n  interp: {:?}\n  native: {:?}",
-                name,
-                interp.lines().take(3).collect::<Vec<_>>(),
-                native.lines().take(3).collect::<Vec<_>>(),
-            ));
-            continue;
         }
-
-        // JS check (if node available)
-        if has_node
-            && let Some(js) = run_js(&path)
-            && interp != js
-        {
-            failures.push(format!(
-                "{}: Interpreter vs JS mismatch\n  interp: {:?}\n  js:     {:?}",
-                name,
-                interp.lines().take(3).collect::<Vec<_>>(),
-                js.lines().take(3).collect::<Vec<_>>(),
-            ));
-            continue;
-        }
-        // If JS transpile fails for compile_* files, that's OK -- they are
-        // primarily Native-focused tests
-
-        passed += 1;
-    }
-
-    eprintln!(
-        "Three-way parity: {}/{} passed, {} expected native rejected",
-        passed,
-        passed + failures.len() + native_rejected.len(),
-        native_rejected.len(),
-    );
-
-    let expected_rejected: Vec<String> = native_expected_rejects
-        .iter()
-        .map(|name| name.to_string())
-        .collect();
-    assert_eq!(
-        native_rejected, expected_rejected,
-        "native expected-reject allowlist drifted"
-    );
-
-    if !failures.is_empty() {
-        panic!(
-            "{} three-way parity test(s) failed:\n\n{}",
-            failures.len(),
-            failures.join("\n\n"),
-        );
     }
 }
+
+/// Aggregate guard: verifies the native-reject allowlist is well-formed
+/// (every referenced stem exists as a fixture). The "is the list up to
+/// date?" check is enforced by the per-fixture tests themselves: they
+/// panic with a descriptive message if a fixture listed in
+/// `native_expected_reject_list()` unexpectedly compiles (meaning the
+/// list needs pruning). That makes this guard cheap — no extra
+/// compilation is performed here.
+#[test]
+fn test_three_way_parity_allowlist_guard() {
+    use common::fixture_lists::COMPILE_TD_FIXTURES;
+    for stem in native_expected_reject_list() {
+        assert!(
+            COMPILE_TD_FIXTURES.contains(&stem),
+            "native_expected_reject_list references unknown fixture `{}`",
+            stem,
+        );
+    }
+    assert!(
+        !COMPILE_TD_FIXTURES.is_empty(),
+        "No compile_*.td fixtures found"
+    );
+}
+
+macro_rules! c24_fixture_runner {
+    ($stem:expr) => {
+        run_three_way_parity_fixture($stem)
+    };
+}
+include!(concat!(env!("OUT_DIR"), "/examples_compile_td_tests.rs"));
 
 // =========================================================================
 // Test 3: Interpreter vs Native parity for numbered examples (FL-17)
@@ -971,112 +963,92 @@ fn native_numbered_known_failures() -> Vec<&'static str> {
     vec![]
 }
 
-#[test]
-fn test_numbered_examples_native_parity() {
+// C24 Phase 5 (RC-SLOW-2 / C24B-006): per-fixture decomposition. The
+// original `test_numbered_examples_native_parity` looped over every
+// numbered example (01_hello, 02_variables, ..., 30_class_like_methods)
+// sequentially — now each fixture becomes its own `#[test]`, using a
+// dedicated macro that forwards into a shared runner.
+
+/// Run native-parity for a single numbered example stem.
+fn run_numbered_parity_fixture(stem: &str) {
     if !cc_available() {
-        eprintln!("SKIP: cc not available, skipping numbered examples native parity");
+        eprintln!(
+            "SKIP: cc not available, skipping numbered parity for {}",
+            stem
+        );
         return;
     }
 
-    let known_failures = native_numbered_known_failures();
-    let skip = interpreter_skip_list();
-    let dir = examples_dir();
-    let mut entries: Vec<_> = fs::read_dir(&dir)
-        .expect("examples/ directory should exist")
-        .filter_map(|e| e.ok())
-        .filter(|e| {
-            let name = e.file_name().to_string_lossy().to_string();
-            // Numbered examples: start with a digit, end with .td
-            name.ends_with(".td")
-                && name.starts_with(|c: char| c.is_ascii_digit())
-                && !skip.iter().any(|s| name == format!("{}.td", s))
-        })
-        .collect();
-    entries.sort_by_key(|e| e.file_name());
+    if interpreter_skip_list().contains(&stem) {
+        // Fixtures the interpreter intentionally skips — original test
+        // excluded these up-front.
+        return;
+    }
 
+    let path = examples_dir().join(format!("{}.td", stem));
+    let is_known_failure = native_numbered_known_failures().contains(&stem);
+
+    let interp = match run_interpreter(&path) {
+        Some(o) => o,
+        None => {
+            if is_known_failure {
+                return; // Documented interpreter failure.
+            }
+            panic!(
+                "{}: interpreter failed (reference implementation error)",
+                stem
+            );
+        }
+    };
+
+    let native = match run_native(&path) {
+        Some(o) => o,
+        None => {
+            if is_known_failure {
+                return; // Documented native failure.
+            }
+            panic!("{}: native compile/run failed", stem);
+        }
+    };
+
+    if interp == native {
+        if is_known_failure {
+            panic!(
+                "{}: is in known-failures list but now passes — remove from \
+                 native_numbered_known_failures allowlist",
+                stem,
+            );
+        }
+        // passed
+    } else if !is_known_failure {
+        panic!(
+            "{}: output mismatch\n  interp:  {:?}\n  native:  {:?}",
+            stem,
+            interp.lines().take(3).collect::<Vec<_>>(),
+            native.lines().take(3).collect::<Vec<_>>(),
+        );
+    }
+    // else: expected-failure, quietly ok
+}
+
+/// Sanity guard: the numbered-fixture list in build.rs must be non-empty
+/// and match the on-disk pattern.
+#[test]
+fn test_numbered_examples_fixture_list_nonempty() {
+    use common::fixture_lists::NUMBERED_TD_FIXTURES;
     assert!(
-        !entries.is_empty(),
+        !NUMBERED_TD_FIXTURES.is_empty(),
         "No numbered example .td files found in examples/"
     );
+}
 
-    let mut passed = 0;
-    let mut expected_failed = 0;
-    let mut unexpected_failures = Vec::new();
-    let mut unexpected_passes = Vec::new();
-
-    for entry in &entries {
-        let path = entry.path();
-        let name = path.file_stem().unwrap().to_string_lossy().to_string();
-        let is_known_failure = known_failures.contains(&name.as_str());
-
-        let interp = match run_interpreter(&path) {
-            Some(o) => o,
-            None => {
-                // AT-3: Record interpreter failures instead of silently skipping.
-                // Interpreter is the reference implementation; failures must be visible.
-                if !is_known_failure {
-                    unexpected_failures.push(format!(
-                        "{}: interpreter failed (reference implementation error)",
-                        name,
-                    ));
-                } else {
-                    expected_failed += 1;
-                }
-                continue;
-            }
+mod numbered_parity {
+    macro_rules! c24_fixture_runner {
+        ($stem:expr) => {
+            super::run_numbered_parity_fixture($stem)
         };
-
-        let native = match run_native(&path) {
-            Some(o) => o,
-            None => {
-                if is_known_failure {
-                    expected_failed += 1;
-                    continue;
-                }
-                unexpected_failures.push(format!("{}: native compile/run failed", name,));
-                continue;
-            }
-        };
-
-        if interp == native {
-            if is_known_failure {
-                unexpected_passes.push(name.clone());
-            }
-            passed += 1;
-        } else if is_known_failure {
-            expected_failed += 1;
-        } else {
-            unexpected_failures.push(format!(
-                "{}: output mismatch\n  interp:  {:?}\n  native:  {:?}",
-                name,
-                interp.lines().take(3).collect::<Vec<_>>(),
-                native.lines().take(3).collect::<Vec<_>>(),
-            ));
-        }
     }
-
-    eprintln!(
-        "Numbered-examples native parity: {}/{} passed, {} known failures",
-        passed,
-        passed + unexpected_failures.len() + expected_failed,
-        expected_failed,
-    );
-
-    if !unexpected_passes.is_empty() {
-        panic!(
-            "{} examples in known-failures list now PASS -- remove from allowlist: {:?}",
-            unexpected_passes.len(),
-            unexpected_passes,
-        );
-    }
-
-    if !unexpected_failures.is_empty() {
-        panic!(
-            "{} numbered-example native parity test(s) failed:\n\n{}",
-            unexpected_failures.len(),
-            unexpected_failures.join("\n\n"),
-        );
-    }
+    include!(concat!(env!("OUT_DIR"), "/examples_numbered_td_tests.rs"));
 }
 
 #[test]
@@ -5341,157 +5313,112 @@ stdout(dog.__type + "=" + dog.breed + " " + cat.__type + "=" + ci)
 // against its content. Otherwise, the interpreter output is used as
 // the reference (same parity approach as other tests).
 // =========================================================================
-#[test]
-fn test_quality_cross_module_parity() {
+// C24 Phase 5 (RC-SLOW-2 / C24B-006): per-fixture decomposition of the
+// former `test_quality_cross_module_parity` (15s warm). Each quality
+// directory becomes a `#[test]`.
+
+const QUALITY_CROSS_MODULE_ERROR_TESTS: &[&str] = &[
+    "b10a_circular_direct",
+    "b10b_circular_indirect",
+    "b10d_self_import",
+    "b10e_circular_typedef",
+    "b10f_circular_closure",
+    "b10h_cross_backend_circular",
+];
+
+fn run_quality_cross_module_parity_fixture(dir_name: &str) {
+    if !cc_available() {
+        eprintln!(
+            "SKIP: cc not available, skipping cross-module parity for {}",
+            dir_name
+        );
+        return;
+    }
+
+    if QUALITY_CROSS_MODULE_ERROR_TESTS.contains(&dir_name) {
+        return;
+    }
+
     let has_node = node_available();
-    let has_cc = cc_available();
-
-    if !has_cc {
-        eprintln!("SKIP: cc not available, skipping cross-module quality parity tests");
-        return;
-    }
-
-    let quality_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("examples")
-        .join("quality");
+        .join("quality")
+        .join(dir_name);
+    let main_td = if dir.join("main.td").exists() {
+        dir.join("main.td")
+    } else {
+        dir.join("main.tdm")
+    };
 
-    if !quality_dir.exists() {
-        eprintln!("SKIP: examples/quality/ directory does not exist");
-        return;
-    }
+    let Some(interp) = run_interpreter(&main_td) else {
+        return; // silently skip — matches original behavior
+    };
 
-    // Collect subdirectories that contain main.td or main.tdm
-    // RCB-213: main.tdm is used for versioned import tests (versioned imports
-    // are only allowed in .tdm files).
-    let mut test_dirs: Vec<PathBuf> = fs::read_dir(&quality_dir)
-        .expect("examples/quality/ should be readable")
-        .filter_map(|e| e.ok())
-        .filter(|e| e.file_type().map(|ft| ft.is_dir()).unwrap_or(false))
-        .filter(|e| e.path().join("main.td").exists() || e.path().join("main.tdm").exists())
-        .map(|e| e.path())
-        .collect();
-    test_dirs.sort();
-
-    if test_dirs.is_empty() {
-        eprintln!("SKIP: no cross-module test directories found in examples/quality/");
-        return;
-    }
-
-    // Tests that are expected to fail in the interpreter (error tests, etc.)
-    let error_tests: Vec<&str> = vec![
-        "b10a_circular_direct",
-        "b10b_circular_indirect",
-        "b10d_self_import",
-        "b10e_circular_typedef",
-        "b10f_circular_closure",
-        "b10h_cross_backend_circular",
-    ];
-
-    let mut passed = 0;
-    let mut skipped = 0;
-    let mut failures = Vec::new();
-
-    for dir in &test_dirs {
-        let dir_name = dir.file_name().unwrap().to_string_lossy().to_string();
-        // RCB-213: prefer main.td, fall back to main.tdm for versioned import tests
-        let main_td = if dir.join("main.td").exists() {
-            dir.join("main.td")
-        } else {
-            dir.join("main.tdm")
-        };
-
-        // Skip known error tests (circular imports, etc.)
-        if error_tests.iter().any(|t| dir_name == *t) {
-            skipped += 1;
-            continue;
-        }
-
-        // Run interpreter (reference implementation)
-        let interp = match run_interpreter(&main_td) {
-            Some(o) => o,
-            None => {
-                skipped += 1;
-                continue;
-            }
-        };
-
-        // If an `expected` file exists, verify interpreter matches it
-        let expected_path = dir.join("expected");
-        if expected_path.exists() {
-            let expected = normalize(
-                &fs::read_to_string(&expected_path).expect("expected file should be readable"),
+    let expected_path = dir.join("expected");
+    if expected_path.exists() {
+        let expected = normalize(
+            &fs::read_to_string(&expected_path).expect("expected file should be readable"),
+        );
+        if interp != expected {
+            panic!(
+                "{}: interpreter output does not match expected\n  interp:    {:?}\n  expected:  {:?}",
+                dir_name,
+                interp.lines().take(5).collect::<Vec<_>>(),
+                expected.lines().take(5).collect::<Vec<_>>(),
             );
-            if interp != expected {
-                failures.push(format!(
-                    "{}: interpreter output does not match expected\n  interp:    {:?}\n  expected:  {:?}",
-                    dir_name,
-                    interp.lines().take(5).collect::<Vec<_>>(),
-                    expected.lines().take(5).collect::<Vec<_>>(),
-                ));
-                continue;
-            }
         }
+    }
 
-        // JS parity check
-        if has_node {
-            match run_js_project(&main_td, &dir_name) {
-                Some(js) => {
-                    if interp != js {
-                        failures.push(format!(
-                            "{}: Interpreter vs JS mismatch\n  interp: {:?}\n  js:     {:?}",
-                            dir_name,
-                            interp.lines().take(5).collect::<Vec<_>>(),
-                            js.lines().take(5).collect::<Vec<_>>(),
-                        ));
-                        continue;
-                    }
-                }
-                None => {
-                    failures.push(format!("{}: JS build/execution failed", dir_name));
-                    continue;
-                }
-            }
-        }
-
-        // Native parity check
-        match run_native_with_error(&main_td) {
-            Ok(native) => {
-                if interp != native {
-                    failures.push(format!(
-                        "{}: Interpreter vs Native mismatch\n  interp: {:?}\n  native: {:?}",
+    if has_node {
+        match run_js_project(&main_td, dir_name) {
+            Some(js) => {
+                if interp != js {
+                    panic!(
+                        "{}: Interpreter vs JS mismatch\n  interp: {:?}\n  js:     {:?}",
                         dir_name,
                         interp.lines().take(5).collect::<Vec<_>>(),
-                        native.lines().take(5).collect::<Vec<_>>(),
-                    ));
-                    continue;
+                        js.lines().take(5).collect::<Vec<_>>(),
+                    );
                 }
             }
-            Err(err) => {
-                failures.push(format!(
-                    "{}: Native compile/run failed\n  {}",
-                    dir_name, err
-                ));
-                continue;
+            None => panic!("{}: JS build/execution failed", dir_name),
+        }
+    }
+
+    match run_native_with_error(&main_td) {
+        Ok(native) => {
+            if interp != native {
+                panic!(
+                    "{}: Interpreter vs Native mismatch\n  interp: {:?}\n  native: {:?}",
+                    dir_name,
+                    interp.lines().take(5).collect::<Vec<_>>(),
+                    native.lines().take(5).collect::<Vec<_>>(),
+                );
             }
         }
-
-        passed += 1;
+        Err(err) => panic!("{}: Native compile/run failed\n  {}", dir_name, err),
     }
+}
 
-    eprintln!(
-        "Cross-module quality parity: {}/{} passed, {} skipped",
-        passed,
-        passed + failures.len(),
-        skipped,
-    );
-
-    if !failures.is_empty() {
-        panic!(
-            "{} cross-module quality parity test(s) failed:\n\n{}",
-            failures.len(),
-            failures.join("\n\n"),
+#[test]
+fn test_quality_cross_module_parity_allowlist_guard() {
+    use common::fixture_lists::QUALITY_CROSS_MODULE_FIXTURES;
+    for t in QUALITY_CROSS_MODULE_ERROR_TESTS {
+        assert!(
+            QUALITY_CROSS_MODULE_FIXTURES.contains(t),
+            "QUALITY_CROSS_MODULE_ERROR_TESTS references unknown dir `{}`",
+            t,
         );
     }
+}
+
+mod quality_cross_module_parity {
+    macro_rules! c24_fixture_runner {
+        ($stem:expr) => {
+            super::run_quality_cross_module_parity_fixture($stem)
+        };
+    }
+    include!(concat!(env!("OUT_DIR"), "/quality_cross_module_tests.rs"));
 }
 
 // ── taida-lang/net: Phase 3 JS parity tests ──────────────────────

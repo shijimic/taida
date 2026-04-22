@@ -162,103 +162,82 @@ fn expected_native_reject_examples() -> Vec<&'static str> {
     ]
 }
 
-/// Generate a test for each compile_*.td file.
-/// We use a single test function that iterates over all files and reports
-/// individual failures, rather than generating separate test functions,
-/// because the list of files may change.
-#[test]
-fn test_native_compile_parity() {
-    let examples_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples");
-    let mut entries: Vec<_> = fs::read_dir(&examples_dir)
-        .expect("examples/ directory should exist")
-        .filter_map(|e| e.ok())
-        .filter(|e| {
-            let name = e.file_name().to_string_lossy().to_string();
-            name.starts_with("compile_") && name.ends_with(".td")
-        })
-        .collect();
-    entries.sort_by_key(|e| e.file_name());
+// C24 Phase 5 (RC-SLOW-2 / C24B-006): per-fixture decomposition. The
+// original `test_native_compile_parity` iterated over every compile_*.td
+// sequentially and was the 4th slowest test in CI (33s warm). Now each
+// fixture gets its own `#[test]` that forwards into
+// `run_native_compile_parity_fixture`, letting nextest parallelize.
 
-    assert!(
-        !entries.is_empty(),
-        "No compile_*.td files found in examples/"
-    );
-
-    let expected_rejects = expected_native_reject_examples();
-    let mut passed = 0;
-    let mut failed = 0;
-    let mut rejected = Vec::new();
-    let mut failures = Vec::new();
-
-    for entry in &entries {
-        let path = entry.path();
-        let name = path.file_stem().unwrap().to_string_lossy().to_string();
-
-        // Skip compile_module -- it requires module imports with relative paths
-        // which may not resolve correctly from the temp directory
-        if name == "compile_module" {
-            continue;
-        }
-
-        let interp_output = match run_interpreter(&path) {
-            Some(o) => o,
-            None => {
-                failures.push(format!("{}: interpreter failed", name));
-                failed += 1;
-                continue;
-            }
-        };
-
-        let native_output = match compile_and_run(&path) {
-            Some(o) => o,
-            None => {
-                if expected_rejects.contains(&name.as_str()) {
-                    rejected.push(name.clone());
-                    continue;
-                }
-                failures.push(format!("{}: compile/run failed", name));
-                failed += 1;
-                continue;
-            }
-        };
-
-        let interp_norm = normalize(&interp_output);
-        let native_norm = normalize(&native_output);
-
-        if interp_norm == native_norm {
-            passed += 1;
-        } else {
-            failures.push(format!(
-                "{}: output mismatch\n  interpreter: {:?}\n  native:      {:?}",
-                name,
-                interp_output.lines().take(5).collect::<Vec<_>>(),
-                native_output.lines().take(5).collect::<Vec<_>>(),
-            ));
-            failed += 1;
-        }
+/// Run interp vs native parity for a single compile_* fixture.
+fn run_native_compile_parity_fixture(stem: &str) {
+    // compile_module requires module imports with relative paths which
+    // may not resolve correctly from the temp directory used by this
+    // test harness — skipped in the original loop, preserved here.
+    if stem == "compile_module" {
+        return;
     }
 
-    eprintln!(
-        "Native compile parity: {}/{} passed, {} expected rejected",
-        passed,
-        passed + failed + rejected.len(),
-        rejected.len()
-    );
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("examples")
+        .join(format!("{}.td", stem));
+    let expected_rejects = expected_native_reject_examples();
+    let is_expected_reject = expected_rejects.contains(&stem);
 
-    let expected_rejected: Vec<String> = expected_rejects
-        .iter()
-        .map(|name| name.to_string())
-        .collect();
-    assert_eq!(
-        rejected, expected_rejected,
-        "native expected-reject allowlist drifted"
-    );
+    let interp_output =
+        run_interpreter(&path).unwrap_or_else(|| panic!("{}: interpreter failed", stem));
 
-    if !failures.is_empty() {
-        let msg = failures.join("\n\n");
-        panic!("{} native compile test(s) failed:\n\n{}", failed, msg);
+    let native_output = match compile_and_run(&path) {
+        Some(o) => o,
+        None => {
+            if is_expected_reject {
+                return; // documented rejection
+            }
+            panic!("{}: compile/run failed", stem);
+        }
+    };
+
+    if is_expected_reject {
+        panic!(
+            "{}: expected to be rejected but compiled and ran — update \
+             expected_native_reject_examples",
+            stem,
+        );
+    }
+
+    let interp_norm = normalize(&interp_output);
+    let native_norm = normalize(&native_output);
+
+    if interp_norm != native_norm {
+        panic!(
+            "{}: output mismatch\n  interpreter: {:?}\n  native:      {:?}",
+            stem,
+            interp_output.lines().take(5).collect::<Vec<_>>(),
+            native_output.lines().take(5).collect::<Vec<_>>(),
+        );
     }
 }
+
+/// Guard: allowlist references valid fixtures.
+#[test]
+fn test_native_compile_parity_allowlist_guard() {
+    use common::fixture_lists::COMPILE_TD_FIXTURES;
+    for stem in expected_native_reject_examples() {
+        assert!(
+            COMPILE_TD_FIXTURES.contains(&stem),
+            "expected_native_reject_examples references unknown fixture `{}`",
+            stem,
+        );
+    }
+    assert!(!COMPILE_TD_FIXTURES.is_empty(), "No compile_*.td fixtures");
+}
+
+// Per-fixture tests emitted by build.rs.
+macro_rules! c24_fixture_runner {
+    ($stem:expr) => {
+        run_native_compile_parity_fixture($stem)
+    };
+}
+include!(concat!(env!("OUT_DIR"), "/examples_compile_td_tests.rs"));
 
 #[test]
 fn test_native_stream_example_is_explicitly_rejected() {
@@ -1885,110 +1864,81 @@ stdout(r)
 //
 // RCB-214: Sweep multi-module test directories in examples/quality/.
 // Each directory contains a main.td (entry point) and optional helper
-// modules. If an `expected` file is present, native output is compared
-// against it. Otherwise, the interpreter output is used as the reference.
+// modules. Interpreter output is the reference; native must match.
+//
+// C24 Phase 5 (RC-SLOW-2 / C24B-006): The original
+// `test_quality_cross_module_native` looped over 29 module directories
+// sequentially (warm 13s). Decomposed to one `#[test]` per directory.
 // =========================================================================
-#[test]
-fn test_quality_cross_module_native() {
-    let quality_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+
+/// Directories that intentionally fail (circular imports, etc.) — the
+/// original test skipped these entirely.
+const QUALITY_CROSS_MODULE_ERROR_TESTS: &[&str] = &[
+    "b10a_circular_direct",
+    "b10b_circular_indirect",
+    "b10d_self_import",
+    "b10e_circular_typedef",
+    "b10f_circular_closure",
+    "b10h_cross_backend_circular",
+];
+
+fn run_quality_cross_module_native_fixture(dir_name: &str) {
+    if QUALITY_CROSS_MODULE_ERROR_TESTS.contains(&dir_name) {
+        return; // Documented interpreter-level error test.
+    }
+
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("examples")
-        .join("quality");
+        .join("quality")
+        .join(dir_name);
 
-    if !quality_dir.exists() {
-        eprintln!("SKIP: examples/quality/ directory does not exist");
+    // RCB-213: prefer main.td, fall back to main.tdm for versioned imports.
+    let main_td = if dir.join("main.td").exists() {
+        dir.join("main.td")
+    } else {
+        dir.join("main.tdm")
+    };
+
+    // Interpreter is the reference. If it fails, the original loop silently
+    // bumped `skipped`; preserve that behavior.
+    let Some(interp) = run_interpreter(&main_td) else {
         return;
-    }
+    };
 
-    // Collect subdirectories that contain main.td or main.tdm
-    // RCB-213: main.tdm is used for versioned import tests.
-    let mut test_dirs: Vec<PathBuf> = fs::read_dir(&quality_dir)
-        .expect("examples/quality/ should be readable")
-        .filter_map(|e| e.ok())
-        .filter(|e| e.file_type().map(|ft| ft.is_dir()).unwrap_or(false))
-        .filter(|e| e.path().join("main.td").exists() || e.path().join("main.tdm").exists())
-        .map(|e| e.path())
-        .collect();
-    test_dirs.sort();
+    let Some(native) = compile_and_run(&main_td) else {
+        panic!("{}: native compile/run failed", dir_name);
+    };
 
-    if test_dirs.is_empty() {
-        eprintln!("SKIP: no cross-module test directories found in examples/quality/");
-        return;
-    }
+    let interp_norm = normalize(&interp);
+    let native_norm = normalize(&native);
 
-    // Tests that are expected to fail (error tests like circular imports)
-    let error_tests: Vec<&str> = vec![
-        "b10a_circular_direct",
-        "b10b_circular_indirect",
-        "b10d_self_import",
-        "b10e_circular_typedef",
-        "b10f_circular_closure",
-        "b10h_cross_backend_circular",
-    ];
-
-    let mut passed = 0;
-    let mut skipped = 0;
-    let mut failures = Vec::new();
-
-    for dir in &test_dirs {
-        let dir_name = dir.file_name().unwrap().to_string_lossy().to_string();
-        // RCB-213: prefer main.td, fall back to main.tdm for versioned import tests
-        let main_td = if dir.join("main.td").exists() {
-            dir.join("main.td")
-        } else {
-            dir.join("main.tdm")
-        };
-
-        // Skip known error tests
-        if error_tests.iter().any(|t| dir_name == *t) {
-            skipped += 1;
-            continue;
-        }
-
-        // Run interpreter (reference)
-        let interp = match run_interpreter(&main_td) {
-            Some(o) => o,
-            None => {
-                skipped += 1;
-                continue;
-            }
-        };
-
-        // Run native
-        let native = match compile_and_run(&main_td) {
-            Some(o) => o,
-            None => {
-                failures.push(format!("{}: native compile/run failed", dir_name));
-                continue;
-            }
-        };
-
-        let interp_norm = normalize(&interp);
-        let native_norm = normalize(&native);
-
-        if interp_norm == native_norm {
-            passed += 1;
-        } else {
-            failures.push(format!(
-                "{}: output mismatch\n  interpreter: {:?}\n  native:      {:?}",
-                dir_name,
-                interp.lines().take(5).collect::<Vec<_>>(),
-                native.lines().take(5).collect::<Vec<_>>(),
-            ));
-        }
-    }
-
-    eprintln!(
-        "Cross-module quality (native): {}/{} passed, {} skipped",
-        passed,
-        passed + failures.len(),
-        skipped,
-    );
-
-    if !failures.is_empty() {
+    if interp_norm != native_norm {
         panic!(
-            "{} cross-module quality native test(s) failed:\n\n{}",
-            failures.len(),
-            failures.join("\n\n"),
+            "{}: output mismatch\n  interpreter: {:?}\n  native:      {:?}",
+            dir_name,
+            interp.lines().take(5).collect::<Vec<_>>(),
+            native.lines().take(5).collect::<Vec<_>>(),
         );
     }
+}
+
+#[test]
+fn test_quality_cross_module_native_allowlist_guard() {
+    use common::fixture_lists::QUALITY_CROSS_MODULE_FIXTURES;
+    for t in QUALITY_CROSS_MODULE_ERROR_TESTS {
+        assert!(
+            QUALITY_CROSS_MODULE_FIXTURES.contains(t),
+            "QUALITY_CROSS_MODULE_ERROR_TESTS references unknown dir `{}`",
+            t,
+        );
+    }
+}
+
+mod quality_cross_module_native {
+    macro_rules! c24_fixture_runner {
+        ($stem:expr) => {
+            super::run_quality_cross_module_native_fixture($stem)
+        };
+    }
+    include!(concat!(env!("OUT_DIR"), "/quality_cross_module_tests.rs"));
 }

@@ -523,231 +523,204 @@ fn run_wasm_cached_or_compile(
     })
 }
 
-/// WW-3a: Comprehensive parity test for wasm-wasi.
-/// For every .td file in examples/ that successfully compiles with wasm-wasi,
-/// the wasm output must match the native backend output exactly.
-/// Excludes wasm_wasi_env.td (needs --env args) and file I/O tests (need --dir).
-#[test]
-fn wasm_wasi_parity_all_examples() {
-    let wasmtime = match wasmtime_bin() {
-        Some(p) => p,
+// ---------------------------------------------------------------------------
+// WW-3a: Per-fixture parity tests for wasm-wasi.
+//
+// C24 Phase 5 (RC-SLOW-2 / C24B-006): Previously a single test
+// `wasm_wasi_parity_all_examples` iterated over `examples/*.td` in a tight
+// loop. That hid fixture-level failures behind one test name and prevented
+// nextest from parallelizing across fixtures. Now build.rs enumerates the
+// fixtures at compile time and emits one `#[test]` per fixture that forwards
+// into `run_wasm_wasi_parity_fixture`. The allowlists and exact-count
+// guards are kept as a separate aggregate test (`wasm_wasi_parity_allowlist_guard`).
+// ---------------------------------------------------------------------------
+
+/// Stems that need special wasmtime args (env injection, dir access) or are
+/// covered by a different test profile.
+const WASI_SKIP_STEMS: &[&str] = &[
+    "wasm_wasi_env",                 // needs --env
+    "wasm_wasi_file_io",             // needs --dir, creates temp files
+    "wasm_wasi_exists",              // needs --dir, creates temp files
+    "wasm_wasi_write_failure",       // needs --dir
+    "wasm_wasi_write_failure_shape", // needs --dir
+    "wasm_edge_env",                 // wasm-edge profile, needs taida_host imports
+    "net_http_hello",                // server blocks on httpServe waiting for connections
+];
+
+/// Examples that wasm-wasi cannot compile (unsupported features).
+/// If this list shrinks, update the count in the aggregate guard — that's progress.
+const WASI_EXPECTED_REJECTED: &[&str] = &[
+    "net_http_parse_encode", // net package import cannot resolve in standalone wasm compile
+];
+
+/// Examples where the native backend itself fails.
+const WASI_EXPECTED_NATIVE_FAIL: &[&str] = &[
+    "compile_stream",
+    "helper_val",
+    "module_math",
+    "module_utils",
+    "transpile_npm",
+    // RC1 Phase 4: addon-backed packages are interpreter-dispatch
+    // only in RC1; Cranelift native backend deliberately rejects
+    // them with a deterministic compile-time error.
+    "addon_echo",
+    // RC1.5-4: addon-backed example, native dispatch only
+    "addon_terminal",
+];
+
+/// Known pre-existing parity diffs — expected to fail but not a regression.
+/// Kept for symmetry with the other runners; currently empty (Bug A-G
+/// + Reverse fix closed all known diffs).
+const WASI_EXPECTED_PARITY_DIFF: &[&str] = &[];
+
+/// Run the parity check for a single fixture stem. Used by the per-fixture
+/// `#[test]` functions generated in `$OUT_DIR/examples_all_td_tests.rs`.
+fn run_wasm_wasi_parity_fixture(stem: &str) {
+    // Fixtures needing wasmtime args are covered by other tests.
+    if WASI_SKIP_STEMS.contains(&stem) {
+        return;
+    }
+
+    let Some(wasmtime) = wasmtime_bin() else {
+        eprintln!("wasmtime not found, skipping wasm-wasi parity for {}", stem);
+        return;
+    };
+
+    let td_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("examples")
+        .join(format!("{}.td", stem));
+
+    // Try native build first.
+    let native_out = match run_native(&td_path) {
+        Some(s) => s,
         None => {
-            eprintln!("wasmtime not found, skipping wasm-wasi parity test");
-            return;
+            if WASI_EXPECTED_NATIVE_FAIL.contains(&stem) {
+                return; // Documented native failure.
+            }
+            panic!(
+                "WW-3 REGRESSION: native backend unexpectedly failed for {}. \
+                 If this is now a real native failure, add to WASI_EXPECTED_NATIVE_FAIL.",
+                stem
+            );
         }
     };
 
-    let examples_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples");
-    let mut td_files: Vec<_> = std::fs::read_dir(&examples_dir)
-        .expect("examples/ directory should exist")
-        .filter_map(|e| e.ok())
-        .map(|e| e.path())
-        .filter(|p| p.extension().is_some_and(|ext| ext == "td"))
-        .collect();
-    td_files.sort();
-
-    // Skip files that need special wasmtime args (env injection, dir access)
-    // Also skip wasm_edge_* examples (different profile, tested in wasm_edge.rs)
-    let skip_stems: Vec<&str> = vec![
-        "wasm_wasi_env",                 // needs --env
-        "wasm_wasi_file_io",             // needs --dir, creates temp files
-        "wasm_wasi_exists",              // needs --dir, creates temp files
-        "wasm_wasi_write_failure",       // needs --dir
-        "wasm_wasi_write_failure_shape", // needs --dir
-        "wasm_edge_env",                 // wasm-edge profile, needs taida_host imports
-        "net_http_hello",                // server blocks on httpServe waiting for connections
-    ];
-
-    let mut parity_ok = Vec::new();
-    let mut parity_fail = Vec::new();
-    let mut compile_rejected = Vec::new();
-    let mut native_fail = Vec::new();
-
-    for td_path in &td_files {
-        let stem = td_path.file_stem().unwrap().to_string_lossy().to_string();
-
-        // Skip files that need special runtime args
-        if skip_stems.contains(&stem.as_str()) {
-            continue;
+    // Try wasm-wasi compile + run. Cache the .wasm so superset tests can reuse it.
+    let parity_wasm_path = std::env::temp_dir().join(format!("taida_ww3_parity_{}.wasm", stem));
+    let compile_output = Command::new(taida_bin())
+        .args(["build", "--target", "wasm-wasi"])
+        .arg(&td_path)
+        .arg("-o")
+        .arg(&parity_wasm_path)
+        .output()
+        .ok();
+    let wasm_output = compile_output.and_then(|co| {
+        if !co.status.success() {
+            return None;
         }
-
-        // Try native build first
-        let native_output = run_native(td_path);
-        if native_output.is_none() {
-            native_fail.push(stem.clone());
-            continue;
-        }
-        let native_out = native_output.unwrap();
-
-        // Try wasm-wasi compile + run.
-        // RC-8b: Save to cache so superset tests can reuse without recompiling.
-        let parity_wasm_path = std::env::temp_dir().join(format!("taida_ww3_parity_{}.wasm", stem));
-        let compile_output = Command::new(taida_bin())
-            .args(["build", "--target", "wasm-wasi"])
-            .arg(td_path)
-            .arg("-o")
+        cache_wasm("wasm-wasi", stem, &parity_wasm_path);
+        let run = Command::new(&wasmtime)
             .arg(&parity_wasm_path)
             .output()
-            .ok();
-        let wasm_output = compile_output.and_then(|co| {
-            if !co.status.success() {
-                return None;
-            }
-            // RC-8b: Cache the .wasm before running wasmtime
-            cache_wasm("wasm-wasi", &stem, &parity_wasm_path);
-            let run = Command::new(&wasmtime)
-                .arg(&parity_wasm_path)
-                .output()
-                .ok()?;
-            let _ = std::fs::remove_file(&parity_wasm_path);
-            if !run.status.success() {
-                return None;
-            }
-            Some(String::from_utf8_lossy(&run.stdout).trim_end().to_string())
-        });
-        if wasm_output.is_none() {
-            compile_rejected.push(stem.clone());
-            continue;
+            .ok()?;
+        let _ = std::fs::remove_file(&parity_wasm_path);
+        if !run.status.success() {
+            return None;
         }
-        let wasm_out = wasm_output.unwrap();
+        Some(String::from_utf8_lossy(&run.stdout).trim_end().to_string())
+    });
 
-        if native_out == wasm_out {
-            parity_ok.push(stem.clone());
-        } else {
-            parity_fail.push((stem.clone(), native_out, wasm_out));
+    let wasm_out = match wasm_output {
+        Some(s) => s,
+        None => {
+            if WASI_EXPECTED_REJECTED.contains(&stem) {
+                return; // Documented rejection.
+            }
+            panic!(
+                "WW-3 REGRESSION: wasm-wasi unexpectedly could not compile/run {}. \
+                 If this is now a real regression, add to WASI_EXPECTED_REJECTED.",
+                stem
+            );
         }
-    }
+    };
 
-    eprintln!(
-        "WW-3 Parity: {} OK, {} rejected, {} native-fail",
-        parity_ok.len(),
-        compile_rejected.len(),
-        native_fail.len()
-    );
-
-    // All previously known parity diffs have been fixed (Bug A-G + Reverse mold).
-    let expected_parity_diff: Vec<&str> = vec![];
-
-    let unexpected_parity_fail: Vec<_> = parity_fail
-        .iter()
-        .filter(|(stem, _, _)| !expected_parity_diff.contains(&stem.as_str()))
-        .collect();
-
-    if !unexpected_parity_fail.is_empty() {
-        let mut msg = format!(
-            "WW-3 PARITY FAILED for {} example(s):\n",
-            unexpected_parity_fail.len()
+    if native_out != wasm_out {
+        if WASI_EXPECTED_PARITY_DIFF.contains(&stem) {
+            return; // Documented diff.
+        }
+        panic!(
+            "WW-3 PARITY FAILED for {}: native='{}' vs wasm-wasi='{}'",
+            stem,
+            native_out.chars().take(200).collect::<String>(),
+            wasm_out.chars().take(200).collect::<String>(),
         );
-        for (stem, native, wasm) in &unexpected_parity_fail {
-            msg.push_str(&format!(
-                "\n  {}: native='{}' vs wasm-wasi='{}'\n",
-                stem,
-                native.chars().take(100).collect::<String>(),
-                wasm.chars().take(100).collect::<String>()
-            ));
-        }
-        panic!("{}", msg);
+    }
+}
+
+/// Aggregate regression guard: verifies that the allowlists and expected
+/// parity count remain consistent with the fixture set on disk.
+///
+/// This test does not re-run any fixtures — it only inspects the static
+/// fixture list and allowlists. The per-fixture tests generated from
+/// `ALL_TD_FIXTURES` (see `$OUT_DIR/examples_all_td_tests.rs`) enforce the
+/// actual parity check. Keeping the aggregate count in a separate, cheap
+/// test ensures we catch silent drift: if a new fixture is added and
+/// happens to parity-match, the count here must be updated deliberately.
+#[test]
+fn wasm_wasi_parity_allowlist_guard() {
+    use common::fixture_lists::ALL_TD_FIXTURES;
+
+    let all = ALL_TD_FIXTURES;
+
+    // Guard: every entry in the allowlists must exist in the fixture set.
+    for stem in WASI_SKIP_STEMS
+        .iter()
+        .chain(WASI_EXPECTED_REJECTED)
+        .chain(WASI_EXPECTED_NATIVE_FAIL)
+        .chain(WASI_EXPECTED_PARITY_DIFF)
+    {
+        assert!(
+            all.contains(stem),
+            "WW-3: allowlist references unknown fixture `{}`; check spelling or remove from list",
+            stem
+        );
     }
 
-    // --- Strict regression guards (exact counts, not thresholds) ---
+    // Exact expected parity count = all fixtures
+    //   - ones we skip (runtime-arg dependent)
+    //   - ones wasm-wasi rejects (documented)
+    //   - ones native rejects (documented)
+    //   - ones with known diff (documented)
+    let expected_parity_ok = all.len()
+        - WASI_SKIP_STEMS.len()
+        - WASI_EXPECTED_REJECTED.len()
+        - WASI_EXPECTED_NATIVE_FAIL.len()
+        - WASI_EXPECTED_PARITY_DIFF.len();
 
-    // Expected allowlist: examples that wasm-wasi cannot compile (unsupported features).
-    // If this list shrinks, update the count — that's progress.
-    // If it grows, the test fails — that's a regression.
-    // NTH-6: allowlist reduced after NTH-5 poly_add string support enabled
-    // 3 examples (07_closures, compile_lambda, wasm_min_pi_approx) now pass parity.
-    // WC-3: updated after list molds moved to core. Many list examples now compile.
-    // Removed: 10_list_operations, 11_introspection, 16_unmold_both_directions,
-    //          compile_hof_molds, compile_list, compile_list_map, compile_list_molds,
-    //          compile_rc, compile_str_molds, compile_num_molds, todo_app
-    // WC-6: Many examples removed from rejected list — now compile with core
-    // extensions. Some produce parity diffs (expected_parity_diff above),
-    // others pass parity (28_prelude_collections, 30_class_like_methods,
-    // compile_hashmap_set, compile_lax, compile_pack_field_call).
-    let expected_rejected: Vec<&str> = vec![
-        // PR-4: 13_async, 14_unmold_backward, compile_async now pass with wasm async support
-        // PR-3: 09_modules, compile_module, compile_module_value now pass with module inlining
-        "net_http_parse_encode", // net package import cannot resolve in standalone wasm compile
-    ];
-
-    // Expected allowlist: examples where native backend itself fails.
-    let expected_native_fail: Vec<&str> = vec![
-        "compile_stream",
-        "helper_val",
-        "module_math",
-        "module_utils",
-        "transpile_npm",
-        // net_http_hello: moved to skip_stems (blocks on httpServe)
-        // RC1 Phase 4: addon-backed packages are interpreter-dispatch
-        // only in RC1; Cranelift native backend deliberately rejects
-        // them with a deterministic compile-time error.
-        "addon_echo",
-        // RC1.5-4: addon-backed example, native dispatch only
-        "addon_terminal",
-    ];
-
-    // Detect regressions: any new rejected/native-fail example not in the allowlist
-    let unexpected_rejected: Vec<&String> = compile_rejected
-        .iter()
-        .filter(|s| !expected_rejected.contains(&s.as_str()))
-        .collect();
-    assert!(
-        unexpected_rejected.is_empty(),
-        "WW-3 REGRESSION: unexpected compile_rejected examples: {:?}",
-        unexpected_rejected
-    );
-
-    let unexpected_native_fail: Vec<&String> = native_fail
-        .iter()
-        .filter(|s| !expected_native_fail.contains(&s.as_str()))
-        .collect();
-    assert!(
-        unexpected_native_fail.is_empty(),
-        "WW-3 REGRESSION: unexpected native_fail examples: {:?}",
-        unexpected_native_fail
-    );
-
-    // Exact parity count — if this changes, update deliberately.
-    // WC-4: JSON in core → 42
-    // WC-6: Collection & Pack & Type detection in core → 47
-    // Bug A-G + Reverse fix: 47 → 55 (8 previously known diffs now pass)
-    // PR-4: async support: 55 → 58 (13_async, 14_unmold_backward, compile_async)
-    // PR-3: module inlining: 58 → 61 (09_modules, compile_module, compile_module_value)
-    // B11-2f: stdout convert_to_string: 61 → 63 (compile_b11_features, compile_hof_molds)
-    // B11-11c: compile_b11_2f_stdout regression fixture added (63 → 64)
-    // C12-1e: compile_c12_1_tag_table regression fixture added (64 → 65)
-    // C12-3d: compile_c12_3_mutual_tail (tail-only mutual recursion) added (65 → 66)
-    // C12-5: compile_c12_5_side_effect_returns (stdout Int return) added (66 → 67)
-    // C12-4c: compile_c12_4_arm_pure_expr (`| |>` pure-expr boundary) added (67 → 68)
-    // C12-11: compile_c12_11_tag_prop (param_tag_vars Bool prop) added (68 → 69)
-    // C12B-034: compile_c12b_034_wasm_nonbool_param (memory-safe non-Bool) added (69 → 70)
-    // C13-1: compile_c13_1_tail_bind (tail-binding semantics) added (70 → 71)
+    // Historical target count (WC-4 through C13-1): 71
+    // If the fixture set changes and parity improves, update here deliberately.
     assert_eq!(
-        parity_ok.len(),
+        expected_parity_ok,
         71,
-        "WW-3: Expected exactly 71 parity-OK examples, got {}. \
-         If parity improved, update the expected count. List: {:?}",
-        parity_ok.len(),
-        parity_ok
-    );
-
-    // Guard against allowlist growing (regressions)
-    assert!(
-        compile_rejected.len() <= expected_rejected.len(),
-        "WW-3: compile_rejected count ({}) exceeds expected allowlist ({}). \
-         A previously compilable example regressed.",
-        compile_rejected.len(),
-        expected_rejected.len()
-    );
-
-    assert!(
-        native_fail.len() <= expected_native_fail.len(),
-        "WW-3: native_fail count ({}) exceeds expected allowlist ({}). \
-         A previously working native example regressed.",
-        native_fail.len(),
-        expected_native_fail.len()
+        "WW-3: parity-OK count drift — got {} = |fixtures {}| - |skip {}| - |rejected {}| - \
+         |native_fail {}| - |diff {}|. Expected 71. Update this constant deliberately.",
+        expected_parity_ok,
+        all.len(),
+        WASI_SKIP_STEMS.len(),
+        WASI_EXPECTED_REJECTED.len(),
+        WASI_EXPECTED_NATIVE_FAIL.len(),
+        WASI_EXPECTED_PARITY_DIFF.len(),
     );
 }
+
+// Per-fixture tests: build.rs emits one `#[test] fn fixture_all_td_<stem>() { ... }`
+// per fixture stem in `ALL_TD_FIXTURES`. The macro forwards to our runner.
+macro_rules! c24_fixture_runner {
+    ($stem:expr) => {
+        run_wasm_wasi_parity_fixture($stem)
+    };
+}
+include!(concat!(env!("OUT_DIR"), "/examples_all_td_tests.rs"));
 
 /// WW-3b: Superset property -- everything wasm-min can compile and run,
 /// wasm-wasi must also compile, run, and produce identical output.
