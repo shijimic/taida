@@ -38,6 +38,17 @@ pub mod backend_policy;
 pub mod build;
 pub mod manifest;
 
+// C25B-030 Phase 1G: shared addon-facade static analyser. Extracted
+// from `src/codegen/lower/imports.rs` so the D26-planned WASM
+// backend can consume the same `AddonFacadeSummary` shape without
+// re-deriving the recursive `>>>` walker or the reachability
+// expansion. The interpreter's addon-facade path
+// (`src/interpreter/module_eval.rs::load_addon_facade`) continues
+// to execute the facade dynamically — it runs as Taida's
+// reference implementation — but every codegen backend routes
+// through this module.
+pub mod facade;
+
 // RC1.5: install-time pipeline
 pub mod host_target;
 pub mod prebuild_fetcher;

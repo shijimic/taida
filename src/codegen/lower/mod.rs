@@ -279,30 +279,34 @@ struct AddonFuncRef {
 /// constraints is tracked as C25B-030 Phase 1E-γ (module-graph
 /// integration and full sibling module linkage via
 /// `src/addon/facade.rs`).
+/// C25B-030 Phase 1G: the codegen's addon-facade view is now a
+/// thin wrapper around the shared `crate::addon::facade::
+/// AddonFacadeSummary` produced by the backend-agnostic loader.
+/// We keep the private `struct` shape instead of a `pub use` to
+/// preserve the lowering crate's encapsulation (downstream code
+/// should route through `lower_addon_import`, not build facade
+/// summaries by hand).
 #[derive(Debug, Default, Clone)]
 struct AddonFacadeSummary {
-    /// Map `FacadeName` -> lowercase addon function name, when the
-    /// facade writes `FacadeName <= lowercaseFn`. Aliases are
-    /// resolved back to the manifest `[functions]` table so the
-    /// arity comes from the ABI, not the facade.
     aliases: std::collections::HashMap<String, String>,
-    /// Map `FacadeName` -> the buchi-pack expression, when the
-    /// facade writes `FacadeName <= @(...)`. Replayed verbatim at
-    /// the top of `_taida_main` during the 3rd pass.
     pack_bindings: std::collections::HashMap<String, Expr>,
-    /// Set of names explicitly listed in the facade's `<<<`
-    /// export statement. When empty, every alias / pack binding is
-    /// implicitly exported.
     exports: std::collections::HashSet<String>,
-    /// C25B-030 Phase 1E-β: map `FacadeFnName` -> the full
-    /// [`FuncDef`] AST harvested from the facade file. Includes
-    /// both exported public functions and facade-private helpers
-    /// (names starting with `_`) — every local FuncDef must be
-    /// collected so that internal calls between facade functions
-    /// resolve. Only entries whose key ends up in `exports` are
-    /// visible to user code; the rest stay private under their
-    /// mangled link symbol.
     facade_funcs: std::collections::HashMap<String, FuncDef>,
+}
+
+impl AddonFacadeSummary {
+    /// Adopt the shared facade loader's output verbatim. Field
+    /// shapes are identical so this is a move, not a conversion;
+    /// the method exists purely to pin the codegen/addon
+    /// boundary in one grep-friendly place.
+    pub(super) fn from_shared(shared: crate::addon::facade::AddonFacadeSummary) -> Self {
+        Self {
+            aliases: shared.aliases,
+            pack_bindings: shared.pack_bindings,
+            exports: shared.exports,
+            facade_funcs: shared.facade_funcs,
+        }
+    }
 }
 
 #[derive(Debug)]
