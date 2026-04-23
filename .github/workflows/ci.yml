@@ -25,31 +25,71 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
-      - uses: actions/cache@v5
+      # C25B-003 Phase 2B: migrate from hand-rolled actions/cache to
+      # Swatinem/rust-cache@v2. Advantages:
+      #  - save-on-success semantics avoid polluting the cache with broken
+      #    artefacts from failed runs
+      #  - incremental target cleanup (rust-cache prunes unreferenced
+      #    .rmeta / .rlib before upload) keeps restore size bounded
+      #  - shared-key allows explicit cross-job cache sharing without the
+      #    hand-maintained `cargo-base` restore-keys fallback
+      #  - automatic `cargo-home` + per-job target partitioning
+      - uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            ~/.cargo/git/checkouts/
-            target/
-          # C24 Phase 5 (RC-SLOW-6 / C24B-008 adjacent): share a
-          # `cargo-base` warm cache across jobs so check / test / parity /
-          # e2e / clippy no longer each bring their own cold target/
-          # build. Job-specific key takes first priority on exact match;
-          # missing cases fall through `cargo-base` before giving up.
-          key: ${{ runner.os }}-cargo-${{ github.job }}-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-${{ github.job }}-
-            ${{ runner.os }}-cargo-base-${{ hashFiles('**/Cargo.lock') }}
-            ${{ runner.os }}-cargo-base-
-            ${{ runner.os }}-cargo-
+          shared-key: cargo-base
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: cargo check --all-targets
+
+  # C25B-003 Phase 2D: build test binaries exactly once via `cargo nextest
+  # archive` and reuse the archive in the downstream `test` job. Previously
+  # `check` and `test` each produced their own .rmeta/.rlib via
+  # `cargo check --all-targets` followed by `cargo nextest run --all-targets`,
+  # and the cross-job Swatinem cache (Phase 2B) only partially closed the gap
+  # (the `test` job still had to re-link test binaries under its own
+  # partition). The archive job produces a single tarball
+  # (`taida-nextest.tar.zst`) containing every test binary plus the host
+  # `target/debug/taida` CLI; consumers use
+  # `cargo nextest run --archive-file ...` and skip compilation entirely.
+  #
+  # Archive consumer safety: Taida integration tests no longer rely on
+  # `env!("CARGO_BIN_EXE_taida")` compile-time absolute paths. They resolve
+  # the CLI at runtime from the archive-extracted workspace (`target/debug/taida`)
+  # or a runtime env override, so archive-build and archive-consumer runners may
+  # differ without `ENOENT`.
+  #
+  # Why not reuse for `parity` / `e2e`?
+  #   - `parity` shells out to `tests/run_backend_parity.sh` which invokes
+  #     `cargo test --test <name>` three times. Those code paths expect
+  #     live cargo metadata (not an archive); leaving them on Swatinem
+  #     cache keeps the backend-parity semantics unchanged.
+  #   - `e2e` needs `target/release/taida` (a CLI, not a test binary).
+  #     nextest archive doesn't ship release artifacts.
+  build-archive:
+    name: Build Test Archive
+    runs-on: ubuntu-latest
+    needs: check
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@nextest
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: cargo-base
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Build nextest archive
+        run: cargo nextest archive --all-targets --archive-file taida-nextest.tar.zst
+      - name: Upload nextest archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: nextest-archive
+          path: taida-nextest.tar.zst
+          retention-days: 1
+          if-no-files-found: error
 
   test:
     name: Unit Tests
     runs-on: ubuntu-latest
-    needs: check
+    needs: build-archive
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
@@ -63,24 +103,15 @@ jobs:
           mkdir -p "$HOME/.wasmtime/bin"
           mv "$HOME/.wasmtime-bin" "$HOME/.wasmtime/bin/wasmtime"
           echo "$HOME/.wasmtime/bin" >> $GITHUB_PATH
-      - uses: actions/cache@v5
+      - name: Download nextest archive
+        uses: actions/download-artifact@v4
         with:
-          path: |
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            ~/.cargo/git/checkouts/
-            target/
-          # Write canonical cargo-base cache from Unit Tests (largest
-          # target/ of all jobs). Other jobs restore it via `cargo-base`
-          # restore-keys.
-          key: ${{ runner.os }}-cargo-base-${{ hashFiles('**/Cargo.lock') }}-${{ github.run_id }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-base-${{ hashFiles('**/Cargo.lock') }}
-            ${{ runner.os }}-cargo-${{ github.job }}-
-            ${{ runner.os }}-cargo-base-
-            ${{ runner.os }}-cargo-
-      - run: cargo nextest run --all-targets --profile ci
+          name: nextest-archive
+      # `cargo nextest run --archive-file` skips compilation entirely and
+      # loads test binaries directly from the archive. `--workspace-remap .`
+      # tells nextest the repository root at test-run time (fixture paths in
+      # `tests/**/*.rs` resolve relative to workspace root at runtime).
+      - run: cargo nextest run --archive-file taida-nextest.tar.zst --workspace-remap . --profile ci
 
   parity:
     name: Backend Parity
@@ -89,20 +120,10 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
-      - uses: actions/cache@v5
+      - uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            ~/.cargo/git/checkouts/
-            target/
-          key: ${{ runner.os }}-cargo-${{ github.job }}-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-${{ github.job }}-
-            ${{ runner.os }}-cargo-base-${{ hashFiles('**/Cargo.lock') }}
-            ${{ runner.os }}-cargo-base-
-            ${{ runner.os }}-cargo-
+          shared-key: cargo-base
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - uses: actions/setup-node@v5
         with:
           node-version: "22"
@@ -115,20 +136,10 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
-      - uses: actions/cache@v5
+      - uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            ~/.cargo/git/checkouts/
-            target/
-          key: ${{ runner.os }}-cargo-${{ github.job }}-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-${{ github.job }}-
-            ${{ runner.os }}-cargo-base-${{ hashFiles('**/Cargo.lock') }}
-            ${{ runner.os }}-cargo-base-
-            ${{ runner.os }}-cargo-
+          shared-key: cargo-base
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: cargo build --release
       - name: Run E2E smoke tests
         run: TAIDA_BIN=./target/release/taida ./tests/e2e_smoke.sh
@@ -141,20 +152,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
-      - uses: actions/cache@v5
+      - uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            ~/.cargo/git/checkouts/
-            target/
-          key: ${{ runner.os }}-cargo-${{ github.job }}-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-${{ github.job }}-
-            ${{ runner.os }}-cargo-base-${{ hashFiles('**/Cargo.lock') }}
-            ${{ runner.os }}-cargo-base-
-            ${{ runner.os }}-cargo-
+          shared-key: cargo-base
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: cargo clippy --all-targets -- -D warnings
 
   fmt:

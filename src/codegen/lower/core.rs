@@ -172,6 +172,8 @@ impl Lowering {
             return_type_inferred_params: std::collections::HashSet::new(),
             addon_func_refs: std::collections::HashMap::new(),
             addon_facade_pack_bindings: Vec::new(),
+            addon_facade_funcs: Vec::new(),
+            addon_facade_mangled: std::collections::HashSet::new(),
             addon_backend: crate::addon::AddonBackend::Native,
         }
     }

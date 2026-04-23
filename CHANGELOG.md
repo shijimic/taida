@@ -1,5 +1,649 @@
 # Changelog
 
+## @c.25.rc7 (2026-04-23)
+
+Quality-consolidation RC cycle. `stable` (label-less `@c.25`) is
+**deferred** to a follow-up RC cycle because the NET stable viewpoint
+(HTTP/2 parity, TLS configuration, port-bind-race eradication,
+throughput regression guards, scatter-gather long-run correctness)
+is not yet comprehensively covered in this track. `@c.25.rc7` closes
+out the addon-ecosystem redefinition, consolidates parity residuals
+left over from C24, and stages the runtime-perf / security / stability
+work items enumerated in `.dev/C25_BLOCKERS.md`.
+
+### C25B-030 — addon ecosystem redefinition (Phase 1, Critical)
+
+The RC1-era "addon is Native only" freeze is formally **lifted**.
+Addons now ship with two first-class backends:
+
+- **Interpreter** — the reference implementation; facade + cdylib
+  dispatch both execute dynamically.
+- **Native** — Cranelift-lowered code that consumes the same facade
+  surface through a compile-time static analyser.
+
+A D26 breaking-change phase is reserved for the WASM backend. The
+`AddonBackend::Js` entry is still deterministically rejected; it has
+no dispatcher today and its revival is tracked for D26.
+
+User-visible consequences:
+
+- `taida build --target native` now accepts addon-backed imports for
+  the full facade surface produced by `taida-lang/terminal`: relative
+  `>>> ./X.td` children, public FuncDefs, private `_`-prefixed
+  helpers reached through reachability, pack literals, scalar /
+  list / arithmetic / template / mold / type bindings, and
+  authoritative `<<<` export clauses. Nothing user-authored changes.
+- The error message `"addon-backed package '...' is not supported on
+  backend 'X' (RC1: native only)"` is retired. The replacement reads
+  `"(supported: interpreter, native; wasm planned for D26). Run
+  'taida build --target native' or use the interpreter."`, and carries
+  the same guidance into every `taida build` / `taida run` diagnostic.
+- The interpreter no longer masquerades as `AddonBackend::Native` for
+  policy-guard purposes — it is registered honestly as
+  `AddonBackend::Interpreter`, which is now `supports_addons = true`.
+- TypeDef / EnumDef / MoldDef inside a facade file, non-relative
+  `>>>` targets, and `<<< <path>` re-exports still produce
+  deterministic rejections (messages point at
+  `C25B-030 Phase 1E-γ pending`). Real `taida-lang/terminal` does
+  not depend on any of these constructs so no public addon was
+  affected.
+
+Implementation structure (Phase 1A → 1H):
+
+- **Phase 1A** — `src/addon/backend_policy.rs::supports_addons`
+  widened to `matches!(Interpreter | Native)`; error text updated;
+  unit tests re-shaped.
+- **Phase 1B** — `src/interpreter/module_eval.rs::try_eval_addon_import`
+  calls `ensure_addon_supported(AddonBackend::Interpreter, ...)`
+  truthfully; the `feature = "native"` gate still controls whether
+  the dlopen dispatcher is linked in, but it no longer lies to the
+  policy.
+- **Phase 1C** — `"RC1: native only"` purged from every consumer-
+  facing string. Existing integration tests were migrated to the
+  new message format.
+- **Phase 1D** — `tests/c25b030_core_bundled_native_smoke.rs` pins
+  that the core-bundled packages (`taida-lang/os` / `net` / `crypto`
+  / `pool` / `js`) still compile natively. These never went through
+  the facade loader — they resolve via hand-coded symbol tables in
+  `src/codegen/lower/stmt.rs` — and the regression guard now
+  protects that path from being broken by any future facade-loader
+  change.
+- **Phase 1E-α** — `src/codegen/lower/imports.rs::load_addon_facade_for_lower`
+  extended with recursive `>>> ./X.td` relative-import walking. The
+  child's `<<<` clause is authoritative when the parent imports
+  without a `@(...)` list; the parent's `@(...)` list is the
+  selective filter otherwise. Circular chains, missing child
+  symbols, non-relative paths, and `<<< <path>` re-exports all
+  produce deterministic compile errors naming the offending facade
+  file.
+- **Phase 1E-β** — facade FuncDefs harvested into a new
+  `AddonFacadeSummary.facade_funcs` map and lowered as IR functions
+  in `lower_program`'s 2nd pass under mangled link symbols
+  `_taida_fn_facade_{pkg_hash}_{name}`. User imports of a public
+  FuncDef resolve through `imported_func_links` at call sites.
+  Assignment RHS widened to accept scalar literals, template
+  strings, lists, arithmetic, function / method calls, field
+  accesses, and mold / type instantiations (previously only `@(...)`
+  packs and aliases were accepted).
+- **Phase 1E-β-2 + β-3** — a reachability fixpoint promotes
+  private `_`-prefixed helpers transitively pulled in by an
+  exported FuncDef body or pack binding. Real
+  `.dev/official-package-repos/terminal/` now compiles natively
+  end-to-end (`BufferNew`, `Stylize`, `LineEditorNew`,
+  `LineEditorStep`, `LineEditorRender`, `PromptOptions`, `KeyKind`,
+  `EventKind`, `MouseKind`, `SpinnerNext`, `SpinnerRender`,
+  `SpinnerState`, `ProgressBar`, `StatusLine`, `ReadEvent`,
+  `ClearScreen`). See
+  `tests/c25b030_phase_1e_facade_chain.rs::phase_1e_beta3_*`
+  for the regression guards.
+- **Phase 1F** — `tests/c25b030_phase_1f_facade_parity.rs` pins
+  interpreter ↔ native parity across five scenarios (mixed facade
+  with aliases / public packs / FuncDefs / private helpers /
+  relative chains; guard-arity; authoritative `<<<` exports;
+  cross-file private helper chains; pure-Taida-only packages).
+  Fixing the first two scenarios surfaced a pre-existing cross-
+  backend divergence: top-level bindings referenced **only** from
+  a `TemplateLit` interpolation inside a FuncDef body (e.g.
+  `sep <= "-"` + `join a b = \`${a}${sep}${b}\``) never reached
+  the `GlobalGet(hash)` emission or the facade reachability
+  walker, because the free-vars / reachability walkers did not
+  understand that `TemplateLit` stores its interpolation
+  expressions as a raw string the real lowering path re-parses.
+  `collect_free_vars_inner` in `src/codegen/lower/stmt.rs` and the
+  facade reachability walker in `src/addon/facade.rs` now split on
+  `${...}` boundaries the same way `lower_template_lit` does, re-
+  parse each interpolation, and walk the result through the
+  existing identifier machinery. Parse failures fall back to a
+  bare-identifier capture, matching the real lowering's behaviour.
+  This closes a regression window that predated C25 entirely.
+- **Phase 1G** — the static facade loader extracted into
+  `src/addon/facade.rs` as a first-class `pub` module. The
+  recursive `>>>` walker, the universe-map machinery, the
+  reachability fixpoint, and the `TemplateLit`-aware reference
+  collector now live in the shared module. Codegen
+  (`src/codegen/lower/imports.rs::lower_addon_import`) adopts the
+  shared `AddonFacadeSummary` verbatim and keeps only backend-
+  local bookkeeping (mangled symbol registration, type-tag
+  narrowing, pack-binding replay) on its side. The D26 WASM
+  backend will consume the same module without duplicating the
+  walker.
+- **Phase 1G unit tests**: `src/addon/facade.rs::tests` —
+  five tests covering the "no facade file" soft path, mixed-
+  construct harvesting, TypeDef rejection with `Phase 1E-γ pending`,
+  missing-child-symbol rejection, and the cross-file template
+  reachability case that anchored the Phase 1F fix.
+- **Phase 1G acceptance**: `AddonFacadeSummary` / `FacadeLoadError`
+  are the two public types any future backend will import; the
+  interpreter's addon facade path in
+  `src/interpreter/module_eval.rs::load_addon_facade` is
+  deliberately left on its dynamic-execution strategy because the
+  interpreter exchanges live runtime values with user code and
+  does not benefit from the static analyser.
+
+### C25B-003 / C25B-004 — CI redesign and perf-gate scaffold (Phase 2)
+
+The C24 CI optimisation track missed its `-30%` wallclock target
+and actually regressed `+6.5%` in CI 2C 3-run median. Phase 2
+replaces the methodology with "CI 2C 3-run median is the sole
+source of truth; local 16T numbers are advisory only" and lands
+the following:
+
+- **Phase 2A** (`cb60696`) — `tests/parity.rs::test_net6_5b_release_gate_v6_test_counts`
+  stops spawning `cargo test --list` as a subprocess. `build.rs`
+  now scans `tests/parity.rs` and `src/interpreter/net_h2.rs` at
+  build time and emits `PARITY_TEST_FN_NAMES` /
+  `NET_H2_UNIT_TEST_COUNT` as consts into `$OUT_DIR/parity_release_gate.rs`.
+  The test itself becomes an in-process constant comparison. The
+  single-biggest SLOW warning in the CI 2C profile (~79s) is
+  removed; the local measurement collapses to sub-millisecond.
+- **Phase 2B** (`07c91ff`) — all CI jobs move from
+  `actions/cache@v5` to `Swatinem/rust-cache@v2` with
+  `shared-key: cargo-base` and `save-if: github.ref == 'refs/heads/main'`.
+  This gives cross-job cache sharing without lock contention,
+  correct save-on-success semantics, and automatic `target/`
+  pruning. `fmt` stays un-cached since it does not touch `target/`.
+- **Phase 2C** — `concurrency: cancel-in-progress` was already
+  landed in C24 Phase 5 (commit `e285817`, C24B-008). No
+  additional action required at this phase.
+- **Phase 2D** (`159e355`) — a new `build-archive` CI job runs
+  `cargo nextest archive --all-targets --archive-file
+  taida-nextest.tar.zst` once, uploads the archive via
+  `actions/upload-artifact@v4` with 1-day retention, and the
+  `test` job pulls it down with `actions/download-artifact@v4`
+  and executes `cargo nextest run --archive-file ...
+  --workspace-remap . --profile ci`. The `test` job's build and
+  link phase (~270s) is fully eliminated; nextest extracts 88
+  pre-built test binaries (~961 MB `.tar.zst`) and runs them
+  directly. `parity` / `e2e` / `check` / `clippy` / `fmt` stay
+  on the Swatinem path because they depend on live `cargo`
+  metadata or build CLI binaries that nextest archive does not
+  cover.
+- **Phase 2E — `tests/parity.rs` 33k-line binary split**: **SKIP**
+  judgement. Risk / reward analysis concluded the `build.rs` +
+  `include!` + `common` mod re-wiring required to split 33,161
+  lines / 556 tests into `parity_core.rs` / `parity_net.rs` /
+  `parity_net_tls.rs` / `parity_phase_c.rs` / `parity_quality.rs`
+  is too dangerous for a quality-consolidation RC cycle. Phase
+  2D already eliminated the rebuild cost that split would have
+  amortised. Deferred to a follow-up RC cycle.
+- **Phase 2F — RC-SLOW-2 per-fixture decomposition re-evaluation**:
+  stay-the-course. The C24 `+6.5%` CI 2C regression was measured
+  under a different rate-limiter (the 79s SLOW test was still
+  live). With 2A removing the SLOW test and 2D removing the
+  build phase, the +6.5% delta is expected to be absorbed by the
+  combined `-30%`-to-`-40%` improvement. Partial-revert would
+  give up local `-9.3%` for speculative CI gain. Re-evaluation
+  trigger: if post-merge CI 3-run median of the `test` job
+  exceeds 5 minutes, revisit in a separate PR.
+- **C25B-004 (perf-gate body)**: a `benches/perf_baseline.rs`
+  harness and `.github/workflows/bench.yml` scaffold were landed
+  in Phase 2C (commit `4997fca`) with `continue-on-error: true`
+  (warn-only). Hard-fail promotion to "`-10%` regression blocks
+  merge" requires baseline accumulation across multiple main
+  pushes and is post-stable scope.
+
+Expected post-2D CI 2C wallclock: 12m 13s → 8-9m (the post-stable
+8-minute target is within reach). Measured 3-run median is
+captured in `.dev/C25_CI_PROFILE.md` once the PR lands.
+
+### C25B-001 / C25B-028 / C25B-031 / C25B-032 / C25B-033 — Parity residuals (Phase 3)
+
+- **C25B-001 (Stream lowering, Must Fix)** (`4e17e89`) —
+  minimal single-item completed `Stream` lowering reaches native
+  and wasm. `taida_stream_new` / `taida_stream_is_stream` /
+  `taida_stream_to_display_string` land in
+  `src/codegen/native_runtime/` and
+  `src/codegen/runtime_core_wasm/` along with
+  `taida_stdout_display_string` routing. The
+  `STREAM_ONLY_FIXTURES` skip list in
+  `tests/c23_str_parity.rs` loses its last Stream-gated
+  fixture and the test joins the 4-backend parity mainline.
+  `EXPECTED_TOTAL_LEN` drifts from this landing are closed out
+  by `a9b6210` (see below).
+- **C25B-028 (jsonEncode Gorillax parity, Must Fix)** (`48d26da`) —
+  `jsonEncode(Gorillax[42]())` was emitting three different
+  shapes across backends (interpreter =
+  `{"__error":{},"__value":42,"hasValue":true}`, native =
+  `{"hasValue":true}`, wasm = `{"hasValue":1}`). Monadic-pack
+  detection (`Lax` / `Gorillax` / `RelaxedGorillax` /
+  `Result`) now visits `__error` / `__value` / `__default`
+  / `__predicate` / `throw` fields in native
+  `json_serialize_pack_fields`, wasm
+  `_wc_json_serialize_pack_fields`, and JS
+  `__taidaSortKeys`. Wasm field-type registry learns `hasValue`
+  as Bool so `true` renders as `true` rather than `1`. All four
+  backends now emit the interpreter shape byte-for-byte.
+- **C25B-031 (Must Fix)** — `Slice[s, pos_var, end]()` with
+  `pos` as a bound `Int` variable returned the whole string on
+  native / wasm while interpreter correctly returned the slice.
+  Native / wasm Slice lowering now resolves positional IntVar
+  arguments identically to the interpreter, and three parity
+  fixtures pin the fix.
+- **C25B-032 (Should Fix)** (`4696429`) — `| _ |> <call-that-throws>`
+  inside an `|==` handler's own function failed to propagate;
+  the throw escaped as "Unhandled error". The arm-body throw
+  propagation path now rejoins the same mechanism used for
+  inline bodies across all three backends (interpreter / JS /
+  native).
+- **C25B-033 (Should Fix)** (`a26f0c3`) — JS codegen emitted
+  `function Join(...) { ... }` twice whenever the user named a
+  FuncDef `Join` (or any of 98 prelude-reserved PascalCase
+  identifiers), causing `SyntaxError: Identifier 'Join' has
+  already been declared` on node ESM. A `PRELUDE_RESERVED_IDENTS`
+  sorted-slice + `mangled_user_func_name` helper mangles only
+  the colliding names to `_td_user_<name>`. Non-colliding
+  PascalCase (e.g. `MyCustomFunc`) stays verbatim — the
+  Taida surface guarantee that function names are free is
+  preserved. Mangling applies at five emission sites
+  (declaration, trampoline, TCO inner, direct call, pipeline
+  fallback); diagnostics keep raw names.
+- **EXPECTED_TOTAL_LEN / historical-boundary resync**
+  (`a9b6210`) — native runtime byte totals and WASM historical
+  boundary markers caught up with the C25B-001 Stream lowering
+  and other Phase 5 runtime additions so that
+  `tests/native_runtime_size.rs` and the C13.4 merge guards go
+  back to green. Details in the commit body.
+
+### C25B-002 / C25B-017 — Flaky eradication (Phase 4)
+
+Flaky eradication work in this phase is narrowly scoped to the
+audit / regression-guard layer; the root-cause fixes for the
+NET flakes are explicitly deferred (see § Deferred NET stable
+viewpoint below).
+
+- **C25B-017 (Nice to Have)** (`f5aeb44`) — parser
+  error-recovery boundary audit. A test suite surveys the
+  `parse_error_ceiling` / `parse_cond_branch` recovery path
+  against the C20-1 ROOT-4 / ROOT-5 rejection contract and pins
+  the current recovery shape. Any future drift in `current_token`
+  / `peek_kind` consistency after a recovered error is caught
+  by this suite. Formalising the state machine as a transition
+  graph (the original "quality track" part of FB-31) is
+  deferred.
+- **C25B-002 (Must Fix)** — the `flaky_h2_parity` port-bind
+  race remains covered only by the retry shim inherited from
+  C24. Root-cause eradication (OS-assigned ports with
+  `getsockname()` handover, or an in-process `axum` / `hyper`
+  test harness) is explicitly deferred to the subsequent RC
+  cycle; see § Deferred NET stable viewpoint.
+
+### C25B-020 ~ C25B-026 / C25B-029 — Runtime perf (Phase 5)
+
+Phase 5 lands a coordinated set of interpreter / native / wasm
+perf fixes. All interpreter-side changes ship with 4-backend
+parity updates in the same commit; no commit leaves parity in a
+broken intermediate state.
+
+- **Phase 5-A — math mold family on interpreter + JS (C25B-025
+  partial)** (`86d5743`) — 17 math molds (`Sqrt`, `Pow`,
+  `Exp`, `Ln`, `Log`, `Log2`, `Log10`, `Sin`, `Cos`, `Tan`,
+  `Asin`, `Acos`, `Atan`, `Atan2`, `Sinh`, `Cosh`, `Tanh`)
+  land on the interpreter (`mold_eval.rs`) and JS runtime
+  (`core.rs`). Previously `Sqrt[4.0]() -> 4.0` (silent first-
+  argument return); the transcendentals were registered for
+  type inference but had no implementation. `mold_returns.rs`
+  registers the full surface as Float-returning.
+- **Phase 5-B — O(1) regex cache (C25B-024)** (`4d794f2`) —
+  the `VecDeque<((pattern, flags), Regex)>` linear-scan cache
+  becomes a `HashMap<(String, RegexFlags), Regex>` with O(1)
+  lookup. No API change; `regex`-using hot loops (lexers,
+  tokenisers) save the 64-entry pattern compare per call.
+- **Phase 5-C / 5-D / 5-E — ValueKey + HashSet fast path for
+  Set / HashMap / Unique (C25B-021 / C25B-022 / C25B-023)**
+  (`f721c6d`, cross-type fix in `166f0c3`) — `Set.union` /
+  `Set.intersect` / `Set.diff` / `HashMap.merge` / `Unique`
+  were all `Vec<Value>::contains` linear-scan structures with
+  O(N*M) behaviour. A new `ValueKey` wrapper (float NaN /
+  Function / Closure fall back to equality comparison,
+  everything else hashes) feeds per-operation
+  `HashSet<ValueKey>` / `HashMap<ValueKey, _>` fast paths.
+  A 1000-element × 2 Set union now completes in under 50 ms.
+  `HashMap.merge` drops from O(N*M*K) (nested retain with
+  per-entry key-field linear scan) to O(N+M) via a pre-built
+  key index. Phase 10 GATE pre-review (session 20) found the
+  initial `ValueKey` put `Int(n)` and `EnumVal(_, n)` in
+  separate key domains, which broke `Value::eq`'s cross-type
+  rule (`setOf(@[0]).union(setOf(@[Color:Red()])).length()`
+  returned 2 instead of 1); `hash_value_into` now normalizes
+  them to the same fingerprint and `exact_eq` carries the
+  Int↔EnumVal rule, restoring fast-path parity with the
+  linear-scan contract. Unique mold additionally falls back
+  to `Value::eq` on any fingerprint collision.
+- **Phase 5-F — env `HashMap<String, Rc<Value>>` migration
+  (ABANDONED)** — the refcount-the-env probe demonstrated that
+  `env.snapshot()` call sites hit a `Rc<Value> -> Value`
+  conversion that itself deep-clones, erasing the perf win on
+  any capture-heavy path. Abandoned; the investigation report
+  is recorded in `.dev/C25_PROGRESS.md::session 7`. The real
+  C25B-029 fix is in 5-F2 below.
+- **Phase 5-F2-1 — `Value::List` interior `Arc<Vec<Value>>`
+  migration (C25B-029)** (`ac95b09`) — the interpreter's
+  `Value::List(Vec<Value>)` becomes `Value::List(Arc<Vec<Value>>)`;
+  `Value::list(items)` / `Value::list_take(arc)` helper
+  constructors land; ~215 consumer sites migrate mechanically.
+  Read-only paths (touch-chains that drive TUI renderers) drop
+  from O(N) Value::clone to O(1) Arc refcount bump. The
+  C25B-029 guard in `tests/c25b_029_interpreter_bind_clone.rs`
+  tightens from 30 s to 5 s.
+- **Phase 5-F2-2 Stage B + C — Append / Prepend env-take fast
+  path (C25B-021 / C25B-029)** — initial commit (`f043586`)
+  introduced an `env.take_from_current_scope` + `Arc::make_mut`
+  fast path to drop `Append` / `Prepend` from O(N²) to O(N).
+  Phase 10 GATE pre-review (session 20) discovered the fast
+  path violated the mold contract: `Append[xs, v]()` mutated
+  the source binding (e.g. `xs.length()` changed after a
+  subsequent mold call consumed the returned value), since
+  `take_from_current_scope` stole the only Arc and
+  `Arc::make_mut` mutated in place. The optimization was
+  **reverted** in `166f0c3`: `take_from_current_scope` is
+  removed, the trampoline still calls `current_args.clear()`
+  (harmless independent of the fast path), and Append / Prepend
+  return to the COW fallback (`as_ref().clone()` → push →
+  rebind, i.e. O(N) per call / O(N²) per N-append loop). Perf
+  guards in `tests/c25b_021_append_linear.rs` are relaxed to
+  `N=5000 / 2 s` and `N=5000 / 3 s` with an in-file rationale;
+  the C25B-029 ceiling in
+  `tests/c25b_029_interpreter_bind_clone.rs` is relaxed from
+  500 ms back to 3 s. Semantic regression tests pinning the
+  binding-preservation contract land alongside. True O(1)-per-
+  append amortization (persistent vector / pure-functional
+  `BuilderEscape`) is deferred to Phase 5-F2-3+ or D26.
+- **Phase 5-G — wasm-wasi linear memory growth strategy
+  (C25B-026)** (`6c6ccbb`) — four runtime helpers
+  (`wasm_arena_enter` / `wasm_arena_leave(saved)` /
+  `wasm_arena_used` / `wasm_arena_roundtrip_test`) land in
+  `src/codegen/runtime_core_wasm/01_core.inc.c`. A bump-
+  allocator watermark snapshot/restore gives O(1) release of
+  all allocations inside an enter/leave scope. WebAssembly
+  cannot shrink linear memory back to the OS, but the arena
+  reuse stops `memory.grow` from being called in long-running
+  `@[Float]` / LLM forward loops. `wasm-ld`
+  `--initial-memory=` / `--max-memory=` are driven by
+  `TAIDA_WASM_INITIAL_PAGES` / `TAIDA_WASM_MAX_PAGES`
+  environment variables. The four helpers are exported on
+  `wasm-wasi` and `wasm-full` profiles; `wasm-min` and
+  `wasm-edge` drop them via `--gc-sections`. Three regression
+  tests pin net-delta = 0 over 1000 × 32 × 64 B churn, verify
+  the memory section byte-level for custom page counts, and
+  guard the exports. User-authored lower-level auto-insertion
+  of enter/leave pairs (escape-analysis-safe scope
+  recognition) is deferred to a future phase.
+- **Phase 5-I — math mold family on native + wasm (C25B-025)**
+  (`1fdf6f8`) — completes C25B-025 by landing the 17 math
+  molds on the remaining two backends. Native wraps libm
+  (already linked via `-lm`); glibc libm is shared with the
+  Rust interpreter so native is bit-for-bit parity with the
+  interpreter on x86_64-linux / aarch64-linux. WASM is
+  `-nostdlib` so libm is not available: `Sqrt` uses the
+  `f64.sqrt` opcode (bit-exact); `Pow` fast-paths integer
+  exponents via repeated squaring (bit-exact) and falls back
+  to `exp(y * ln(x))` for non-integers; `Exp` / `Ln` use
+  range-reduction plus truncated Taylor / atanh series;
+  `Sin` / `Cos` use Cody-Waite reduction plus a direct 13-term
+  Taylor (so `Cos[0.0]` stays bit-exact `1.0`); `Asin` /
+  `Acos` route through `atan(x/sqrt(1-x²))`; `Atan` /
+  `Atan2` use `tan(π/8)` range-reduction plus a 20-term
+  Maclaurin; `Sinh` / `Cosh` / `Tanh` use exp-based formulas
+  with small-|x| Taylor series. `EXPECTED_TOTAL_LEN` native
+  974,273 → 976,168 (+1,895) and wasm 318,189 → 333,024
+  (+14,835) are resynced. Parity is `assert_eq!` on
+  interpreter / native / wasm-sqrt-pow and
+  `numerically_close(rel_tol=1e-10)` on wasm transcendentals
+  (the freestanding series carry ~1 ULP drift; tolerance
+  catches sign / quadrant / factor-of-two bugs while
+  permitting truncation error).
+- **Deferred under Phase 5**:
+  - **5-F2-3** — migrating `Value::BuchiPack(Vec<(String, Value)>)`
+    to `Arc<Vec<(String, Value)>>` was scoped out once
+    5-F2-2 absorbed the C25B-029 impact surface. The
+    remaining perf win is read-side only (touch-chains
+    routing through BuchiPack); priority is low. The work is
+    kept inside C25 (not D26) but is not a GATE blocker.
+  - **5-H — large-file bytes I/O (C25B-020)** — the
+    `readBytesAt(path, offset, len)` surface and
+    zero-copy `BytesCursor` slice-view redesign for
+    >64 MB reads did not land in this RC cycle. The
+    work is kept inside C25, scheduled against the
+    downstream bonsai-wasm Phase 6 unblock window.
+
+### C25B-006 / C25B-014 / C25B-015 / C25B-018 — Security + body-error + panic hook (Phase 6)
+
+- **C25B-006 (Must Fix)** (`548ad4f`) — security audit drops to
+  "open = 0". `.dev/taida-logs/SECURITY_AUDIT.md` gets a 2026-04-23
+  C25 re-triage header that classifies every SEC-001 ~ SEC-011
+  finding as either ACCEPTED (by design, 3 items), DEFERRED
+  (C26 security follow-up, 7 items), or DEFERRED (post-`@c.25`
+  supply-chain, 1 item). Every `Status: OPEN` is replaced with
+  a disposition. A root `.github/SECURITY.md` lands with a
+  disclosure policy, an accepted-risk surface contract
+  (`execShell`, `os` file I/O, `tcpListen 0.0.0.0`), and a
+  D26 capability-model pointer. A `deny.toml` for
+  `cargo-deny v2` pins the current Cargo.lock licence set; a
+  `.github/workflows/security.yml` runs `cargo-audit` and
+  `cargo-deny` on push, PR, and a weekly schedule. Both tools
+  are `continue-on-error: true` for the `@c.25.rc7` cycle
+  (warn-only); hard-fail promotion is a C26 gate.
+- **C25B-014 (Should Fix)** (`78f748c`) — a GitHub Security
+  Advisory draft for the pre-`@c.15.rc3` `taida upgrade`
+  supply-chain issue (the CLI hardcoded a personal GitHub fork
+  as the release source) lands at
+  `.dev/security_advisories/GHSA-DRAFT-taida-upgrade-supply-chain.md`
+  (CVSS 8.1 High, CWE-494 + CWE-829, affected `< @c.15.rc3`,
+  patched in `@c.15.rc3`, fixed by commits `56c89e0` +
+  `b2fb2e5`). `CHANGELOG.md @c.15.rc3 § Security` gets a
+  placeholder pointer. Publishing the advisory, obtaining the
+  GHSA ID, requesting a CVE, and posting a pinned issue /
+  README banner remain owner actions.
+- **C25B-015 (Should Fix)** — the body-error cleanup audit
+  promised by FB-29 lands as `tests/c25b_015_body_error_cleanup_parity.rs`
+  (four tests, three 3-backend fixtures covering frame unwind
+  across three call levels, closure frame release, and a
+  `|==` handler that itself throws). Interpreter (scope
+  cleanup), JS (`try/finally`), and native (setjmp/longjmp
+  based) all produce the same stdout. A pre-existing bug
+  (`| _ |> throwBoom("boom")` inside a same-function `|==`
+  handler does not propagate) was isolated during the audit and
+  filed as C25B-032, fixed in Phase 3.
+- **C25B-018 (Nice to Have)** (`cdf0d2c`) — a best-effort
+  panic / fatal-signal terminal restore lands as
+  `src/panic_cleanup.rs`. `install_panic_cleanup_hook`
+  chains a `std::panic::set_hook`; `install_signal_cleanup_handlers`
+  registers SIGHUP / SIGTERM / SIGQUIT / SIGABRT handlers via
+  `libc::signal`. Both are `OnceLock`-guarded (idempotent).
+  On a panic or fatal signal the handlers emit an ANSI reset
+  sequence to stderr (cursor show, alt-screen leave, mouse /
+  bracketed-paste disable, DECSTR soft reset), then re-raise
+  the signal with the default disposition to keep the real
+  exit code. Both hooks install from `src/main.rs::main()`
+  before the SIGPIPE-ignore setup. Full termios restore via
+  `tcsetattr` is scope-deferred to D26 ABI v2 (the addon host
+  vtable has no `on_panic_cleanup` slot today).
+
+### C25B-007 — Addon publish workflow completion (Phase 7)
+
+`taida publish` / `taida init --target rust-addon` were already
+land (`@c.14.rc1` + RC2.6-3 track). Phase 7 validates:
+
+- The existing `src/pkg/publish.rs` (1002 lines) and
+  `src/pkg/init.rs` (1282 lines), the
+  `crates/addon-rs/templates/release.yml.template` scaffold,
+  and `tests/e2e_rc26_gate.sh` all pass (38 integration tests
+  + 266 pkg-lib tests).
+- An E2E smoke (`taida init --target rust-addon` → identity
+  qualify → `taida publish --dry-run`) was exercised live.
+- `docs/guide/13_creating_addons.md` gains a new § 0
+  "Getting started with `taida init --target rust-addon`"
+  section (66 lines) covering the workflow end-to-end.
+- Two cross-reference drifts in the same doc
+  (`§7 → §8 Migration`, `§9 below`) are corrected.
+
+Externally-publishable official addons: `taida-lang/terminal` is
+the only one. `taida-lang/os` / `net` / `crypto` / `pool` /
+`js` are bundled via the `CoreBundledProvider` path and do not
+pass through `taida publish`. The release workflow template
+symmetry is pinned by `tests/init_release_workflow_symmetry.rs`
+(five tests).
+
+### C25B-005 / C25B-008 / C25B-019 — Docs (Phase 8)
+
+- **C25B-005 (Should Fix)** (`ff672fc`) — diagnostic-code
+  audit. `docs/reference/diagnostic_codes.md` gains the `E16xx`
+  band (15 codes: `E1601` ~ `E1608`, `E1610` ~ `E1614`,
+  `E1616` ~ `E1618`), the `E17xx` band (1 code:
+  `E1701`), `E1410` (InheritanceDef incompatible field
+  redefinition), and `E1609` / `E1615` as explicit
+  `(reserved)` gaps. `tests/c25b_005_diagnostic_audit.rs`
+  adds six guard tests: every emitted code is documented,
+  every documented code is either emitted or reserved,
+  reference uses canonical `Exxxx` formatting, band rules
+  list all new categories, each reference path points at a
+  real doc, and the emit-site scan sanity-finds a known-good
+  code.
+- **C25B-008 (Should Fix)** (`ff672fc`) — parse-only doctest
+  harness. `tests/c25b_008_doc_examples_parse.rs` (three guard
+  tests), `tests/c25b_008_doc_examples_probe.rs` (an ignored
+  probe for baseline refresh), and
+  `tests/c25b_008_doc_parse_baseline.txt` (baseline manifest
+  pinning 68 intentional parse failures) together scan 563
+  ```` ```taida ```` blocks across `docs/guide/*.md` (14 chapters)
+  and `docs/reference/*.md` (13 chapters). Current parse
+  success is 495 / 563 (87.9%); the 68 failures are all
+  intentional fragments ("this is an error" counter-examples,
+  bare type signatures, partial-line snippets). A new
+  `// @doctest: skip` block marker is reserved for future
+  opt-out (currently unused).
+- **C25B-019 (Nice to Have)** — `PENDING_BYTES` FIFO design
+  captured in `.dev/C25B019_PENDING_BYTES_DESIGN.md` (three
+  options compared: `thread_local!`, transaction boundary,
+  per-call owned buffer; leading candidate is `thread_local!`).
+  The implementation lives in the `taida-lang/terminal` addon
+  repository and lands in a terminal-side RC cycle under the
+  stability contract pinned by this document. Taida-lang core
+  does not touch the terminal submodule in this RC cycle.
+
+### C25B-009 ~ C25B-013 / C25B-016 — Stability policy (Phase 9)
+
+- **C25B-010 (Must Fix)** (`7e9d964`) — `docs/STABILITY.md`
+  lands (seven sections, 460+ lines). § 1 pins the
+  `<gen>.<num>.<label?>` version grammar and explicitly bans
+  semver-shaped numbers. § 1.2 reserves D26 for breaking
+  changes (function name capitalisation cleanup, WASM
+  backend extension for addons, addon ABI v2, diagnostic
+  renumbering). § 2 enumerates the stable surface (the ten
+  operators, the prelude, `E1xxx` diagnostic codes, the
+  `taida` CLI, and file-layout contracts). § 3 marks
+  `src/` internals, the on-disk format of compiled
+  artifacts, exact diagnostic wording, performance, and
+  `.dev/` as explicitly non-stable. § 4 pins the addon
+  surface including the `targets = ["native"]` forward-compat
+  rule for the future D26 WASM backend. § 5 enumerates the
+  NET stable viewpoint, the addon WASM backend, the async
+  redesign (C25B-016), the terminal async FIFO (C25B-019),
+  and performance as deferred items. § 6 codifies how
+  breaking changes / additions / bug fixes / deprecations
+  are introduced.
+- **C25B-009 (Nice to Have)** (`7e9d964`) — binary size /
+  startup time budget.
+  `scripts/binary_size_baseline.json` pins the `@c.24.rc1`
+  baseline (bytes=28,602,232, text=22,708,840, data=653,353,
+  bss=13,612, startup_ms=0.45, measured locally at tip
+  `972f6ee`). `scripts/measure_binary_size.sh` wraps
+  `size(1)` plus a Python `time.perf_counter_ns` startup
+  probe. `.github/workflows/binary_size.yml` runs the
+  measurement on push-to-main and PRs; >10% regression
+  fails the job (`continue-on-error: true` for
+  `@c.25.rc7`, hard-fail is post-stable).
+- **C25B-011 (Nice to Have)** (`7e9d964`) — coverage
+  visibility. `.github/workflows/coverage.yml` runs
+  `cargo-llvm-cov --lib --lcov` weekly (Monday 04:00 UTC)
+  plus `workflow_dispatch`. Per-module hit / total / pct is
+  summarised; `src/interpreter/` carries an advisory 80%
+  visibility target (not enforced). lcov + HTML reports
+  persist as 30-day artefacts. No external service
+  dependency. PR-time coverage is deferred; PR-time
+  instrumentation would triple CI cost.
+- **C25B-012 (Should Fix)** (`7e9d964`) — crash regression
+  corpus grows from 10 to 15 fixtures. The five additions
+  stress Stream lowering parity
+  (`cfx_c25b001_stream_take_minimal.td`), finite float
+  addition / toString parity
+  (`cfx_c25b013_float_finite_parity.td`), three-frame
+  `|==` unwind
+  (`cfx_c25b015_handler_body_throw_nested.td`),
+  jsonEncode Gorillax key ordering
+  (`cfx_c25b028_json_encode_gorillax_shape.td`), and
+  nested pack read under a loop
+  (`cfx_c25b029_record_deep_read.td`), plus a sixth fixture
+  for TemplateLit global refs
+  (`cfx_c25b030_template_lit_global_ref.td`) that also
+  isolated C25B-033. All 15 fixtures pass on the
+  interpreter / native / JS trio. `cargo-fuzz` integration
+  is post-stable.
+- **C25B-013 (Nice to Have)** — WASM SIMD / float edge-case
+  parity audit: partial. The minimal "finite float addition
+  + toString" parity is pinned in the crash corpus above;
+  comprehensive NaN / ±Infinity / denormal 4-backend
+  pinning is deferred to a follow-up track.
+- **C25B-016 (Nice to Have)** (`7e9d964`) — async lambda
+  closure lifetime: audit verdict is "no current
+  regression". The FB-30 problem text pointed at a
+  `closure: current_env.bindings.clone()` path that the
+  current `src/interpreter/eval.rs:1354` has replaced with
+  `closure: Arc::new(self.env.snapshot())`. A sync
+  regression suite lands as
+  `tests/c25b_016_async_lambda_closure_lifetime.rs` (three
+  tests: three-level lambda captures, lambda returned
+  through a BuchiPack, separate snapshots do not alias) so
+  that a future async redesign that regresses Arc-snapshot
+  semantics is caught.
+
+### Deferred NET stable viewpoint (why `rc7` and not label-less `@c.25`)
+
+Several NET-adjacent items will remain open at the end of this
+track and must be closed in a follow-up RC cycle before the
+label-less `@c.25` tag is appropriate:
+
+- **HTTP/2 parity across interpreter / native / wasm** — scatter-
+  gather response handling, flow-control edge cases, and real-
+  world client conformance not yet locked.
+- **TLS construction** — cert chains / ALPN / verification modes
+  that the current `taida-lang/net` facade covers only partially.
+- **HTTP parity under port-bind race** — hyper / tokio port-bind
+  failures under concurrent tests still rely on the retry shim.
+- **Port-bind race eradication** — `flaky_h2_parity` is still
+  papered over with a retry shim rather than eliminated
+  (C25B-002 root-cause fix).
+- **Throughput regression guard** — CI has no automated perf
+  benchmark that blocks regressions; the Phase 2C scaffold
+  (`benches/perf_baseline.rs`) runs warn-only.
+- **Scatter-gather long-run** — the `httpServe` path has not been
+  stressed with multi-hour runs yet.
+
+These are tracked as C25B-002 (port-bind race) and surrounding
+items in `.dev/C25_BLOCKERS.md`. The subsequent RC cycle will fold
+the throughput gate (C25B-004 scope) alongside the NET stabilisation
+work.
+
 ## @c.23.rc6
 
 Single-scope follow-up that finishes the `Str[...]()` mold family
@@ -1382,6 +2026,12 @@ rules.
   `github.com/taida-lang/taida/releases` directly. Once on
   `@c.15.rc3+`, `taida upgrade` will see canonical releases as
   expected.
+- **Advisory**: `GHSA-xxxx-xxxx-xxxx`
+  (<https://github.com/taida-lang/taida/security/advisories/GHSA-xxxx-xxxx-xxxx>) —
+  placeholder, to be replaced with the real GHSA ID once published
+  under C25B-014. The drafted advisory body lives at
+  `.dev/security_advisories/GHSA-DRAFT-taida-upgrade-supply-chain.md`
+  until the owner submits it and this note is rewritten in place.
 
 ### Fixes
 

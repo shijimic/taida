@@ -5,6 +5,8 @@
 //! modes. The tests are filesystem-level: they check file existence,
 //! content properties, and — where possible — parse correctness.
 
+mod common;
+
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
@@ -25,8 +27,8 @@ fn unique_temp_dir(prefix: &str) -> PathBuf {
     p
 }
 
-fn taida_bin() -> String {
-    env!("CARGO_BIN_EXE_taida").to_string()
+fn taida_bin() -> PathBuf {
+    common::taida_bin()
 }
 
 // ── Test 1: addon scaffold creates all expected files ────────────

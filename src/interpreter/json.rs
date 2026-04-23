@@ -28,7 +28,7 @@ pub fn json_to_taida_value(json: &serde_json::Value) -> Value {
             }
         }
         serde_json::Value::String(s) => Value::Str(s.clone()),
-        serde_json::Value::Array(arr) => Value::List(arr.iter().map(json_to_taida_value).collect()),
+        serde_json::Value::Array(arr) => Value::list(arr.iter().map(json_to_taida_value).collect()),
         serde_json::Value::Object(obj) => {
             let fields: Vec<(String, Value)> = obj
                 .iter()
@@ -322,10 +322,10 @@ pub fn json_to_typed_value(json: &serde_json::Value, schema: &JsonSchema) -> Val
                     .iter()
                     .map(|elem| json_to_typed_value(elem, elem_schema))
                     .collect();
-                Value::List(items)
+                Value::list(items)
             }
-            serde_json::Value::Null => Value::List(Vec::new()),
-            _ => Value::List(Vec::new()),
+            serde_json::Value::Null => Value::list(Vec::new()),
+            _ => Value::list(Vec::new()),
         },
         JsonSchema::Enum(name, variants) => {
             // C16: JSON wire format is the variant name Str.
@@ -455,7 +455,7 @@ pub fn default_for_schema(schema: &JsonSchema) -> Value {
             result_fields.push(("__type".to_string(), Value::Str(type_name.clone())));
             Value::BuchiPack(result_fields)
         }
-        JsonSchema::List(_) => Value::List(Vec::new()),
+        JsonSchema::List(_) => Value::list(Vec::new()),
         // C16: Enum default is the first variant's ordinal (= Int(0)).
         // This matches Taida's "最初のバリアントがデフォルト" rule.
         JsonSchema::Enum(_, _) => Value::Int(0),
@@ -811,7 +811,7 @@ mod tests {
             default_for_schema(&JsonSchema::List(Box::new(JsonSchema::Primitive(
                 PrimitiveType::Int
             )))),
-            Value::List(Vec::new())
+            Value::list(Vec::new())
         );
     }
 
@@ -1119,6 +1119,6 @@ mod tests {
             }],
         );
         let list = JsonSchema::List(Box::new(user));
-        assert_eq!(default_for_schema(&list), Value::List(Vec::new()));
+        assert_eq!(default_for_schema(&list), Value::list(Vec::new()));
     }
 }

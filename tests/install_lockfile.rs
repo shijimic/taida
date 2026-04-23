@@ -1,3 +1,5 @@
+mod common;
+
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
@@ -18,7 +20,7 @@ fn test_install_without_deps_writes_lockfile_under_dot_taida() {
         .expect("write packages.tdm");
     fs::write(project_dir.join("main.td"), "stdout(\"ok\")\n").expect("write main.td");
 
-    let output = Command::new(env!("CARGO_BIN_EXE_taida"))
+    let output = Command::new(common::taida_bin())
         .arg("install")
         .current_dir(&project_dir)
         .output()

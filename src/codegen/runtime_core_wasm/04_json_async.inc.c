@@ -932,8 +932,75 @@ static void _wc_jb_append_indent(_wc_json_buf *jb, int indent, int depth) {
 /* Forward declare */
 static void _wc_json_serialize_typed(_wc_json_buf *jb, int64_t val, int indent, int depth, int type_hint);
 
-/* Helper: serialize pack fields as JSON object (alphabetically sorted) */
+/* Helper: check whether a wasm value is a Gorillax / RelaxedGorillax
+   (fc=4, hash0=HASH_HAS_VALUE, hash2=HASH___ERROR). Mirrors
+   `_wasm_is_gorillax` in 01_core.inc.c but staying local to 04 to avoid
+   a forward-declare edit in 01. */
+static int _wc_is_gorillax_local(int64_t val) {
+    if (!_wc_is_valid_ptr(val, 104)) return 0;
+    int64_t *p = (int64_t *)(intptr_t)val;
+    if (p[0] != 4 || p[1] != WASM_HASH_HAS_VALUE) return 0;
+    return p[1 + 2 * 3] == WASM_HASH___ERROR ? 1 : 0;
+}
+
+/* Helper: check whether a wasm value is a monadic pack
+   (Lax / Gorillax / RelaxedGorillax / Result) via structural probing.
+   Used by C25B-028 to expand `__*` fields in jsonEncode output. */
+static int _wc_is_monadic_pack(int64_t val) {
+    return _wc_is_lax(val) || _wc_is_result(val) || _wc_is_gorillax_local(val);
+}
+
+/* Helper: check whether the pack is a Lax specifically
+   (slot 2 hash = WASM_HASH___DEFAULT). */
+static int _wc_is_lax_specifically(int64_t *pack) {
+    if (pack[0] != 4) return 0;
+    if (pack[1] != WASM_HASH_HAS_VALUE) return 0;
+    return pack[1 + 2 * 3] == WASM_HASH___DEFAULT ? 1 : 0;
+}
+
+/* Helper: serialize pack fields as JSON object (alphabetically sorted)
+ *
+ * C25B-028: monadic packs (Lax / Gorillax / RelaxedGorillax / Result)
+ * expose `__value` / `__default` / `__error` / `__predicate` so the
+ * jsonEncode output matches the interpreter. Non-monadic user BuchiPacks
+ * continue to hide all `__*` fields. `__type` is always skipped.
+ *
+ * For Lax payloads whose slot-1 (`__value`) is Int-like or Str-like, the
+ * mirror slot (`__default`) is forced to the same type_hint so a raw `0`
+ * doesn't render as `{}` and an empty-string ptr (or unset) renders as
+ * `""`. Matches the native runtime C25B-028 fix.
+ */
 static void _wc_json_serialize_pack_fields(_wc_json_buf *jb, int64_t *pack, int64_t fc, int indent, int depth) {
+    int is_monadic = _wc_is_monadic_pack((int64_t)(intptr_t)pack);
+    int lax_default_force_type = 0; /* 0 none, 1 Int, 3 Str */
+    if (is_monadic && _wc_is_lax_specifically(pack)) {
+        int64_t value_slot_tag = pack[1 + 1 * 3 + 1];
+        int64_t value_slot_val = pack[1 + 1 * 3 + 2];
+        if (value_slot_tag == WASM_TAG_STR) {
+            lax_default_force_type = 3;
+        } else if (value_slot_tag == WASM_TAG_BOOL) {
+            lax_default_force_type = 1;
+        } else if (value_slot_tag == WASM_TAG_INT) {
+            /* WASM_TAG_INT (0) is the "untagged" sentinel as well. We
+               cannot reliably separate Int(42) from a low-address Str
+               literal at this point without lowering-side tagging
+               (both satisfy `_wc_looks_like_string` on wasm linear
+               memory). Default to Int — the common case for
+               `Lax[<IntLit>]()`. String-typed Lax is tagged STR when
+               constructed through `Str[x]()` / `CharAt[...]()` via
+               `_lax_tag_vd`, so the first branch above wins for those
+               paths. `Lax["literal"]()` without any Str mold is a
+               known edge case; tracked as follow-up for fully-typed
+               Lax payloads.
+               TODO (D26+): propagate payload type from lowering so we
+               can disambiguate Int vs Str in raw `Lax[val]()` too. */
+            if (value_slot_val == 0 || value_slot_val < 0 ||
+                (value_slot_val > 0 && value_slot_val < 0x100000000LL)) {
+                lax_default_force_type = 1;
+            }
+        }
+    }
+
     typedef struct { const char *name; int64_t val; int type_hint; } _WcJsonField;
     _WcJsonField fields[100];
     int nfields = 0;
@@ -943,8 +1010,44 @@ static void _wc_json_serialize_pack_fields(_wc_json_buf *jb, int64_t *pack, int6
         int64_t fname_ptr = taida_lookup_field_name(field_hash);
         const char *fname = (const char *)(intptr_t)fname_ptr;
         if (!fname) continue;
-        if (fname[0] == '_' && fname[1] == '_') continue;
+        /* Always skip __type (internal metadata). */
+        if (fname[0] == '_' && fname[1] == '_' && fname[2] == 't' &&
+            fname[3] == 'y' && fname[4] == 'p' && fname[5] == 'e' &&
+            fname[6] == '\0') continue;
+        /* Non-monadic packs hide all __ fields. Monadic packs expose
+           them so jsonEncode matches the interpreter. */
+        if (!is_monadic && fname[0] == '_' && fname[1] == '_') continue;
+
         int64_t ftype = taida_lookup_field_type(field_hash, 0);
+        /* `_wasm_lookup_field_type` returns -1 (not 0) for unregistered
+           hashes; normalise to 0 so downstream "unset" checks work. */
+        if (ftype < 0) ftype = 0;
+        /* Pull per-slot tag when the global registry has no type. */
+        if (ftype == 0 && is_monadic) {
+            int64_t slot_tag = pack[1 + i * 3 + 1];
+            if (slot_tag == WASM_TAG_STR) ftype = 3;
+            else if (slot_tag == WASM_TAG_BOOL) ftype = 4;
+        }
+        /* Lax payload force (see sibling comment above). Applies to
+           `__value` and `__default` in Lax packs so both render with
+           the same T-type (matching interpreter). */
+        int is_lax_value_or_default =
+            (lax_default_force_type != 0 &&
+             fname[0] == '_' && fname[1] == '_' &&
+             ((fname[2] == 'v' && fname[3] == 'a' && fname[4] == 'l' &&
+               fname[5] == 'u' && fname[6] == 'e' && fname[7] == '\0') ||
+              (fname[2] == 'd' && fname[3] == 'e' && fname[4] == 'f' &&
+               fname[5] == 'a' && fname[6] == 'u' && fname[7] == 'l' &&
+               fname[8] == 't' && fname[9] == '\0')));
+        if (is_lax_value_or_default) {
+            /* Override whatever the registry/slot-tag picked up: Lax's
+               `__value` and `__default` share the same T and the
+               override was derived from the `__value` slot's shape. */
+            ftype = lax_default_force_type;
+            if (ftype == 3 && field_val == 0) {
+                field_val = (int64_t)(intptr_t)"";
+            }
+        }
         fields[nfields].name = fname;
         fields[nfields].val = field_val;
         fields[nfields].type_hint = (int)ftype;
@@ -977,17 +1080,20 @@ static void _wc_json_serialize_typed(_wc_json_buf *jb, int64_t val, int indent, 
         _wc_jb_append(jb, val ? "true" : "false");
         return;
     }
+    /* C25B-028: Int/Float type hint takes precedence over the val==0
+       Unit fallback so `Value::Int(0)` renders as `"0"` not `"{}"`.
+       Matches native runtime's fix and interpreter `taida_value_to_json`. */
+    if (type_hint == 1 || type_hint == 2) {
+        char *num = _wc_i64_to_str(val);
+        _wc_jb_append(jb, num);
+        return;
+    }
     if (val == 0) {
         if (type_hint == 3) {
             _wc_jb_append(jb, "\"\"");
         } else {
             _wc_jb_append(jb, "{}");
         }
-        return;
-    }
-    if (type_hint == 1 || type_hint == 2) {
-        char *num = _wc_i64_to_str(val);
-        _wc_jb_append(jb, num);
         return;
     }
     if (type_hint == 3) {
@@ -1057,8 +1163,10 @@ static void _wc_json_serialize_typed(_wc_json_buf *jb, int64_t val, int indent, 
         return;
     }
 
-    /* Check monadic types (Result, Lax) */
-    if (_wc_is_result(val) || _wc_is_lax(val)) {
+    /* Check monadic types (Result, Lax, Gorillax / RelaxedGorillax).
+       C25B-028: include Gorillax family so jsonEncode expands `__error`
+       and normalises `hasValue` through the monadic branch above. */
+    if (_wc_is_result(val) || _wc_is_lax(val) || _wc_is_gorillax_local(val)) {
         int64_t *pack = (int64_t *)(intptr_t)val;
         int64_t fc = pack[0];
         _wc_json_serialize_pack_fields(jb, pack, fc, indent, depth);
@@ -1084,6 +1192,13 @@ static void _wc_json_serialize_typed(_wc_json_buf *jb, int64_t val, int indent, 
     if (_wc_is_valid_ptr(val, 8)) {
         int64_t *obj = (int64_t *)(intptr_t)val;
         int64_t fc = obj[0];
+        /* C25B-028: recognise an explicit empty BuchiPack (fc=0,
+           allocated via `taida_pack_new(0)`) as `{}`. Gorillax's
+           `__error` slot stores such a pack on the success branch. */
+        if (fc == 0) {
+            _wc_jb_append(jb, "{}");
+            return;
+        }
         if (fc > 0 && fc < 200) {
             int64_t hash0 = obj[1];
             if (hash0 > 0x10000 || hash0 < 0) {

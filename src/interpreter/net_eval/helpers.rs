@@ -430,7 +430,7 @@ pub(crate) fn build_parse_result(
         ("path".into(), path_span),
         ("query".into(), query_span),
         ("version".into(), version),
-        ("headers".into(), Value::List(headers_list)),
+        ("headers".into(), Value::list(headers_list)),
         ("bodyOffset".into(), Value::Int(consumed as i64)),
         ("contentLength".into(), Value::Int(content_length)),
         ("chunked".into(), Value::Bool(has_transfer_encoding_chunked)),

@@ -540,7 +540,7 @@ pub fn build_host_input_value(value: &Value) -> Result<*mut TaidaAddonValueV1, B
             // Build each child first; rollback on failure so partial
             // allocations don't leak.
             let mut built: Vec<*mut TaidaAddonValueV1> = Vec::with_capacity(items.len());
-            for item in items {
+            for item in items.iter() {
                 match build_host_input_value(item) {
                     Ok(p) => built.push(p),
                     Err(e) => {
@@ -761,7 +761,7 @@ unsafe fn read_value_by_ref(v: &TaidaAddonValueV1) -> Result<Value, BridgeError>
                     items.push(child);
                 }
             }
-            Ok(Value::List(items))
+            Ok(Value::list(items))
         }
         Some(TaidaAddonValueTag::Pack) => {
             if v.payload.is_null() {
@@ -876,7 +876,7 @@ mod tests {
 
     #[test]
     fn roundtrip_empty_list() {
-        match roundtrip(Value::List(vec![])) {
+        match roundtrip(Value::list(vec![])) {
             Value::List(items) => assert!(items.is_empty()),
             other => panic!("expected List, got {other:?}"),
         }
@@ -884,10 +884,10 @@ mod tests {
 
     #[test]
     fn roundtrip_nested_list() {
-        let value = Value::List(vec![
+        let value = Value::list(vec![
             Value::Int(1),
             Value::Str("two".to_string()),
-            Value::List(vec![Value::Bool(true), Value::Float(3.5)]),
+            Value::list(vec![Value::Bool(true), Value::Float(3.5)]),
         ]);
         let back = roundtrip(value.clone());
         // Compare via Debug — Value doesn't implement PartialEq.
@@ -909,7 +909,7 @@ mod tests {
             ("version".to_string(), Value::Int(2)),
             (
                 "tags".to_string(),
-                Value::List(vec![
+                Value::list(vec![
                     Value::Str("alpha".to_string()),
                     Value::Str("beta".to_string()),
                 ]),

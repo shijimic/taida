@@ -77,6 +77,151 @@ pub struct JsCodegen {
     float_list_vars: Vec<std::collections::HashSet<String>>,
 }
 
+/// C25B-033: PascalCase identifiers declared as top-level `function X(...)`
+/// in the JS runtime prelude (`src/js/runtime/{core,os,net}.rs`). When a
+/// user-defined FuncDef collides with any name in this set, the JS backend
+/// must mangle the emission to avoid a `SyntaxError: Identifier 'X' has
+/// already been declared` on Node ESM evaluation.
+///
+/// The 4-backend reference (interpreter / native / wasm) accepts PascalCase
+/// user FuncDefs unconditionally; only the JS backend had this collision,
+/// so the mangling lives here and is surface-transparent (the Taida-level
+/// name is unchanged on every other backend and in every diagnostic).
+///
+/// Kept as a sorted `&[&str]` so `binary_search` is O(log n). Must stay in
+/// sync with the prelude sources; a `#[test]` in `tests/c25b_033_*` pins
+/// representative names to catch drift.
+const PRELUDE_RESERVED_IDENTS: &[&str] = &[
+    "Abs",
+    "Acos",
+    "All",
+    "Append",
+    "Asin",
+    "Async",
+    "AsyncReject",
+    "Atan",
+    "Atan2",
+    "BitAnd",
+    "BitNot",
+    "BitOr",
+    "BitXor",
+    "Bool_mold",
+    "ByteSet",
+    "BytesCursorRemaining_mold",
+    "BytesCursorTake_mold",
+    "BytesCursorU8_mold",
+    "BytesCursor_mold",
+    "BytesToList",
+    "Bytes_mold",
+    "Cage_mold",
+    "Cancel_mold",
+    "Ceil",
+    "CharAt",
+    "Char_mold",
+    "Chars",
+    "Clamp",
+    "CodePoint_mold",
+    "Concat",
+    "Cos",
+    "Cosh",
+    "Count",
+    "Div_mold",
+    "Drop",
+    "DropWhile",
+    "Enumerate",
+    "Err",
+    "Error",
+    "Exp",
+    "Filter",
+    "Find",
+    "FindIndex",
+    "Flatten",
+    "Float_mold",
+    "Float_mold_f",
+    "Floor",
+    "Fold",
+    "Foldr",
+    "Gorillax",
+    "Int_mold",
+    "JSON_mold",
+    "Join",
+    "Lax",
+    "Ln",
+    "Log",
+    "Log10",
+    "Log2",
+    "Lower",
+    "Map",
+    "Mod_mold",
+    "None",
+    "Ok",
+    "Optional",
+    "Pad",
+    "Pow",
+    "Prepend",
+    "Race",
+    "Reduce",
+    "Regex",
+    "Repeat",
+    "Replace",
+    "Result",
+    "Reverse",
+    "Round",
+    "ShiftL",
+    "ShiftR",
+    "ShiftRU",
+    "Sin",
+    "Sinh",
+    "Slice",
+    "Some",
+    "Sort",
+    "Split",
+    "Sqrt",
+    "StreamFrom",
+    "Stream_mold",
+    "Str_mold",
+    "Sum",
+    "Take",
+    "TakeWhile",
+    "Tan",
+    "Tanh",
+    "Timeout",
+    "ToFixed",
+    "ToRadix",
+    "Trim",
+    "Truncate",
+    "U16BEDecode_mold",
+    "U16BE_mold",
+    "U16LEDecode_mold",
+    "U16LE_mold",
+    "U32BEDecode_mold",
+    "U32BE_mold",
+    "U32LEDecode_mold",
+    "U32LE_mold",
+    "UInt8_mold",
+    "Unique",
+    "Upper",
+    "Utf8Decode_mold",
+    "Utf8Encode_mold",
+    "Zip",
+];
+
+/// C25B-033: Returns true when `name` is reserved by the JS runtime prelude
+/// (see `PRELUDE_RESERVED_IDENTS`). Call sites emitting a user FuncDef
+/// reference must consult this to decide whether to mangle.
+fn is_prelude_reserved_ident(name: &str) -> bool {
+    PRELUDE_RESERVED_IDENTS.binary_search(&name).is_ok()
+}
+
+/// C25B-033: Mangled JS emission form for a user FuncDef whose Taida-level
+/// name collides with a prelude reserved identifier. The `_td_user_` prefix
+/// is chosen so it cannot collide with the `__taida_*` runtime namespace
+/// (double-underscore) nor with user surface names (user PascalCase is
+/// preserved verbatim when non-colliding).
+fn mangled_user_func_name(name: &str) -> String {
+    format!("_td_user_{}", name)
+}
+
 /// C21B-seed-04 re-fix: classification of an `Assignment`'s RHS for
 /// Float/Int-origin tracking. Returned by `classify_assignment_rhs`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -462,6 +607,24 @@ impl JsCodegen {
                 | "poolHealth"
                 | "Regex"
         )
+    }
+
+    /// C25B-033: Returns the JS emission form for a reference to a user
+    /// FuncDef `name`. If `name` is a user-defined function AND collides with
+    /// a prelude reserved identifier (e.g. `Join`, `Concat`, `Sum`), this
+    /// returns the mangled form `_td_user_<name>`. Otherwise returns the name
+    /// unchanged.
+    ///
+    /// Used by every JS emission site that writes a user FuncDef reference:
+    /// the `function Foo(...)` declaration, the trampoline `const Foo = ...`
+    /// wrapper, direct call sites (`Expr::Ident` in callee position), and the
+    /// pipeline fallback `{name}(__p)` step.
+    fn js_user_func_ident(&self, name: &str) -> String {
+        if self.user_funcs.contains(name) && is_prelude_reserved_ident(name) {
+            mangled_user_func_name(name)
+        } else {
+            name.to_string()
+        }
     }
 
     /// Try to write a net builtin rewrite. Returns true if the name was a net
@@ -1198,13 +1361,19 @@ impl JsCodegen {
             }
         }
 
+        // C25B-033: user FuncDefs that collide with prelude reserved
+        // identifiers (e.g. `Join`, `Concat`, `Sum`) must be emitted under a
+        // mangled name to avoid `SyntaxError: Identifier 'X' has already
+        // been declared` on Node ESM evaluation. Non-colliding names are
+        // kept verbatim for debuggability.
+        let emitted_name = self.js_user_func_ident(&func_def.name);
         if needs_trampoline {
             // Trampoline-based TCO: generate inner function, then trampoline wrapper
             let async_prefix = if needs_async { "async " } else { "" };
             self.write_indent();
             self.write(&format!(
                 "const __inner_{} = {async_prefix}function({}) {{\n",
-                func_def.name,
+                emitted_name,
                 params.join(", ")
             ));
 
@@ -1231,14 +1400,14 @@ impl JsCodegen {
             };
             self.write(&format!(
                 "const {} = {}(__inner_{});\n\n",
-                func_def.name, trampoline_fn, func_def.name
+                emitted_name, trampoline_fn, emitted_name
             ));
         } else {
             self.write_indent();
             let async_prefix = if needs_async { "async " } else { "" };
             self.write(&format!(
                 "{async_prefix}function {}({}) {{\n",
-                func_def.name,
+                emitted_name,
                 params.join(", ")
             ));
 
@@ -2560,7 +2729,12 @@ impl JsCodegen {
                 Ok(())
             }
             Expr::Ident(name, _) => {
-                self.write(name);
+                // C25B-033: user FuncDef references whose Taida-level name
+                // collides with a prelude reserved identifier are emitted
+                // under the mangled form `_td_user_<name>`. Non-colliding
+                // identifiers (the common case) are written verbatim.
+                let emitted = self.js_user_func_ident(name);
+                self.write(&emitted);
                 Ok(())
             }
             Expr::Placeholder(_) => {
@@ -2679,7 +2853,11 @@ impl JsCodegen {
                     && let Expr::Ident(name, _) = callee.as_ref()
                     && self.current_tco_funcs.contains(name)
                 {
-                    self.write(&format!("new __TaidaTailCall(__inner_{}, [", name));
+                    // C25B-033: TCO inner helper also follows the mangled
+                    // user-func name when the Taida name collides with a
+                    // prelude reserved identifier.
+                    let inner_name = self.js_user_func_ident(name);
+                    self.write(&format!("new __TaidaTailCall(__inner_{}, [", inner_name));
                     for (i, arg) in args.iter().enumerate() {
                         if i > 0 {
                             self.write(", ");
@@ -4121,7 +4299,14 @@ impl JsCodegen {
                     "poolHealth" => self.write("__taida_os_poolHealth(__p)"),
                     // taida-lang/net HTTP v1 (only when imported)
                     _ if self.try_write_net_builtin(name, "(__p)") => {}
-                    _ => self.write(&format!("{}(__p)", name)),
+                    // C25B-033: pipeline fallback — if the name is a user
+                    // FuncDef that collides with a prelude reserved ident,
+                    // emit the mangled form so `x => MyJoin` resolves to
+                    // `_td_user_MyJoin(__p)` (non-colliding names unchanged).
+                    _ => {
+                        let emitted = self.js_user_func_ident(name);
+                        self.write(&format!("{}(__p)", emitted));
+                    }
                 },
                 // C12B-020: `expr => _` is a no-op transform that discards
                 // the pipeline value while keeping the preceding expression's

@@ -19,7 +19,7 @@ impl Interpreter {
             Value::Str(_) => Value::Str(String::new()),
             Value::Bytes(_) => Value::Bytes(Vec::new()),
             Value::Bool(_) => Value::Bool(false),
-            Value::List(_) => Value::List(Vec::new()),
+            Value::List(_) => Value::list(Vec::new()),
             Value::BuchiPack(_) => Value::BuchiPack(Vec::new()),
             Value::Json(_) => Value::Json(serde_json::Value::Object(serde_json::Map::new())),
             Value::Stream(_) => Value::default_stream(),
@@ -231,7 +231,7 @@ impl Interpreter {
                         }
                     }
                 }
-                Ok(Signal::Value(Value::List(items)))
+                Ok(Signal::Value(Value::list(items)))
             }
             Value::Json(_) => {
                 // JSON is opaque (Molten Iron) — cannot unmold without schema

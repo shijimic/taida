@@ -16,6 +16,7 @@
 
 #![cfg(unix)]
 
+mod common;
 mod mock;
 
 use std::fs;
@@ -36,7 +37,7 @@ fn unique_temp_dir(prefix: &str) -> PathBuf {
 }
 
 fn taida_bin() -> PathBuf {
-    PathBuf::from(env!("CARGO_BIN_EXE_taida"))
+    common::taida_bin()
 }
 
 /// URL pointing at a closed TCP port. `curl -fsSL` exits non-zero, which

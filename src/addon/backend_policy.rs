@@ -1,26 +1,38 @@
 //! Backend support policy for addon-backed packages.
 //!
-//! `.dev/RC1_DESIGN.md` Section E (Backend policy) and the Phase 0 Frozen
-//! Contracts in `.dev/RC1_IMPL_SPEC.md` require that addon-backed packages
-//! are *only* honoured by the Native backend, and that any other backend
-//! produces a **deterministic error** at the import boundary -- not a
-//! silent fallback, not a runtime callsite trap.
+//! **C25 redefinition (C25B-030 Phase 1A)**: the RC1 "addon is Native only"
+//! freeze is lifted. Addon-backed packages are now formally supported on
+//! both the `Native` and `Interpreter` backends (the interpreter is the
+//! reference implementation and always ships the dispatch path). WASM
+//! backends are planned for D26 (breaking change phase). The `Js` backend
+//! remains unsupported until a JS-side dispatcher is designed.
+//!
+//! Historical note: the original RC1 freeze (see `.dev/RC1_DESIGN.md`
+//! Section E and `.dev/RC1_IMPL_SPEC.md` Phase 0 Frozen Contracts) forced
+//! the interpreter to masquerade as `AddonBackend::Native` to pass the
+//! policy guard. That dishonest state is removed in C25; the interpreter
+//! binary now calls `ensure_addon_supported(AddonBackend::Interpreter, ...)`
+//! truthfully.
 //!
 //! This module is the single decision point. The Native dispatcher (RC1
-//! Phase 4) and the import-resolver guard (also Phase 4) both call into
+//! Phase 4), the interpreter's addon import handler, and the import-
+//! resolver guard for every other backend all call into
 //! `ensure_addon_supported` so the policy lives in one place across all
 //! backends.
 //!
-//! The module is intentionally `cfg`-free so that even non-Native builds
-//! can ask "is this backend allowed?" and bail out cleanly.
+//! The module is intentionally `cfg`-free so that even builds without
+//! the `native` feature can ask "is this backend allowed?" and bail out
+//! cleanly.
 
 use std::fmt;
 
 /// All backends that may attempt to consume an addon-backed package.
 ///
-/// `Native` is the only supported variant for RC1. Adding a new backend
-/// here is a deliberate, RC-level decision -- the policy table below
-/// must be updated in lockstep.
+/// **C25 policy (C25B-030)**: `Native` and `Interpreter` are first-class
+/// addon backends. `Js` and the WASM variants remain unsupported.
+/// WASM backends are planned for D26 (breaking change phase). Adding a
+/// new backend to the supported set is a deliberate, RC-level decision --
+/// the policy table below must be updated in lockstep.
 ///
 /// The enum is `#[non_exhaustive]` so future RCs can extend it without
 /// breaking pattern matches in package-resolution code that has already
@@ -28,19 +40,20 @@ use std::fmt;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum AddonBackend {
-    /// Cranelift + native runtime. Only backend that can dlopen addons.
+    /// Cranelift + native runtime. Dlopens cdylib addons directly.
     Native,
-    /// Tree-walking interpreter. RC1 design lock = unsupported.
+    /// Tree-walking interpreter. C25 first-class addon backend
+    /// (reference implementation).
     Interpreter,
-    /// JavaScript codegen. RC1 design lock = unsupported.
+    /// JavaScript codegen. No addon dispatcher yet (D26+).
     Js,
-    /// `wasm-min` target. RC1 design lock = unsupported.
+    /// `wasm-min` target. No addon dispatcher yet (D26).
     WasmMin,
-    /// `wasm-wasi` target. RC1 design lock = unsupported.
+    /// `wasm-wasi` target. No addon dispatcher yet (D26).
     WasmWasi,
-    /// `wasm-edge` target. RC1 design lock = unsupported.
+    /// `wasm-edge` target. No addon dispatcher yet (D26).
     WasmEdge,
-    /// `wasm-full` target. RC1 design lock = unsupported.
+    /// `wasm-full` target. No addon dispatcher yet (D26).
     WasmFull,
 }
 
@@ -63,10 +76,11 @@ impl AddonBackend {
 
     /// `true` iff this backend may load addon-backed packages.
     ///
-    /// RC1 freeze: `Native` only. Do not add `_ => true` arms here -- new
-    /// backends must be explicitly enrolled.
+    /// **C25 policy (C25B-030)**: `Native` and `Interpreter` are supported.
+    /// `Js` and WASM variants remain unsupported. Do not add `_ => true`
+    /// arms here -- new backends must be explicitly enrolled.
     pub fn supports_addons(self) -> bool {
-        matches!(self, Self::Native)
+        matches!(self, Self::Native | Self::Interpreter)
     }
 }
 
@@ -100,12 +114,15 @@ impl AddonBackendError {
 
 impl fmt::Display for AddonBackendError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        // Deterministic single-line message. RC1_IMPL_SPEC Phase 0 Frozen
-        // Contracts require this string to be classifiable by the import
-        // resolver and the LSP, so we keep punctuation simple and stable.
+        // Deterministic single-line message. The substring `"is not
+        // supported on backend"` is stable and classifiable by the import
+        // resolver and the LSP. C25B-030 replaces the historical
+        // `(RC1: native only)` tail with
+        // `(supported: interpreter, native; wasm planned for D26)` so
+        // the message is actionable: users can see a working target.
         write!(
             f,
-            "addon-backed package '{}' is not supported on backend '{}' (RC1: native only)",
+            "addon-backed package '{}' is not supported on backend '{}' (supported: interpreter, native; wasm planned for D26). Run 'taida build --target native' or use the interpreter.",
             self.package,
             self.backend.label()
         )
@@ -139,11 +156,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn native_is_the_only_supported_backend() {
-        // RC1 design lock: native only. Updating this list without bumping
-        // the RC is a contract break.
+    fn interpreter_and_native_are_supported() {
+        // C25B-030 policy lock: Interpreter and Native are first-class
+        // addon backends; Js / WASM variants remain unsupported.
+        // Updating this list without bumping the generation counter is a
+        // contract break.
         assert!(AddonBackend::Native.supports_addons());
-        assert!(!AddonBackend::Interpreter.supports_addons());
+        assert!(AddonBackend::Interpreter.supports_addons());
         assert!(!AddonBackend::Js.supports_addons());
         assert!(!AddonBackend::WasmMin.supports_addons());
         assert!(!AddonBackend::WasmWasi.supports_addons());
@@ -158,21 +177,29 @@ mod tests {
     }
 
     #[test]
-    fn ensure_supported_rejects_interpreter() {
-        let err = ensure_addon_supported(AddonBackend::Interpreter, "taida-lang/terminal")
-            .expect_err("interpreter must be rejected");
-        assert_eq!(err.backend, AddonBackend::Interpreter);
+    fn ensure_supported_accepts_interpreter() {
+        // C25B-030: the interpreter is a first-class addon backend.
+        let res = ensure_addon_supported(AddonBackend::Interpreter, "taida-lang/terminal");
+        assert!(res.is_ok());
+    }
+
+    #[test]
+    fn ensure_supported_rejects_js() {
+        // Js has no addon dispatcher yet (D26+).
+        let err = ensure_addon_supported(AddonBackend::Js, "taida-lang/terminal")
+            .expect_err("js must be rejected");
+        assert_eq!(err.backend, AddonBackend::Js);
         assert_eq!(err.package, "taida-lang/terminal");
     }
 
     #[test]
     fn error_message_is_deterministic() {
-        // Phase 0 Frozen Contracts: message must be stable so callers can
-        // route on it. We pin the exact text here.
+        // The message must be stable so callers (CLI / LSP) can route
+        // on the substring. We pin the exact text here.
         let err = AddonBackendError::new(AddonBackend::Js, "taida-lang/terminal");
         assert_eq!(
             err.to_string(),
-            "addon-backed package 'taida-lang/terminal' is not supported on backend 'js' (RC1: native only)"
+            "addon-backed package 'taida-lang/terminal' is not supported on backend 'js' (supported: interpreter, native; wasm planned for D26). Run 'taida build --target native' or use the interpreter."
         );
     }
 
@@ -191,12 +218,12 @@ mod tests {
 
     #[test]
     fn rejected_backends_share_one_message_format() {
-        // Smoke check that the policy is uniform: every non-Native
-        // variant must produce the same shape of message so the LSP /
-        // CLI can pattern-match a single substring ("is not supported on
-        // backend").
+        // Smoke check that the policy is uniform: every rejected backend
+        // must produce the same shape of message so the LSP / CLI can
+        // pattern-match a single substring ("is not supported on
+        // backend"). C25B-030: Interpreter and Native no longer appear
+        // here because they are supported.
         for b in [
-            AddonBackend::Interpreter,
             AddonBackend::Js,
             AddonBackend::WasmMin,
             AddonBackend::WasmWasi,
@@ -205,7 +232,10 @@ mod tests {
         ] {
             let err = ensure_addon_supported(b, "p").unwrap_err();
             assert!(err.to_string().contains("is not supported on backend"));
-            assert!(err.to_string().contains("(RC1: native only)"));
+            assert!(
+                err.to_string()
+                    .contains("(supported: interpreter, native; wasm planned for D26)")
+            );
         }
     }
 }

@@ -202,6 +202,37 @@ pub struct Lowering {
     /// Keyed by the local binding name. The order field controls
     /// replay ordering so facade authors can express value dependencies.
     addon_facade_pack_bindings: Vec<(String, Expr)>,
+    /// C25B-030 Phase 1E-β: facade-declared FuncDefs harvested across
+    /// every addon-backed package imported by the current lowering
+    /// run.
+    ///
+    /// Each entry is `(local_name, func_def, mangled_link_symbol)`
+    /// where `local_name` is the name the facade author wrote
+    /// (e.g. `ClearScreen` or `_makeCellsLoop`) and
+    /// `mangled_link_symbol` is the IR function symbol actually
+    /// emitted (e.g. `_taida_fn_facade_<hash>_ClearScreen`). The
+    /// mangle carries a per-addon hash so FuncDefs from two
+    /// different addons can coexist without colliding, and so user
+    /// code can still declare a local `ClearScreen` without trouble.
+    ///
+    /// Populated during `lower_addon_import` via the facade loader
+    /// and drained during `lower_program`'s 2nd pass: each FuncDef
+    /// is fed through [`Lowering::lower_func_def`] under the
+    /// mangled name. User imports of a facade symbol rewrite to the
+    /// mangled symbol through `imported_func_links` so call sites
+    /// go through the normal `resolve_user_func_symbol` path.
+    ///
+    /// Deduplicated by mangled symbol: if the same facade file is
+    /// imported twice (two user imports referencing the same addon)
+    /// only the first entry wins. The loader canonicalises paths
+    /// before deriving the mangle so this check is O(1).
+    addon_facade_funcs: Vec<(String, FuncDef, String)>,
+    /// C25B-030 Phase 1E-β: set of mangled facade link symbols
+    /// already collected. Used by the facade loader for O(1)
+    /// dedup when the same addon is referenced by more than one
+    /// import statement (`>>> taida-lang/terminal => @(A)` then
+    /// `>>> taida-lang/terminal => @(B)`).
+    addon_facade_mangled: std::collections::HashSet<String>,
     /// RC2.5: the addon backend this lowering run targets. Only `Native`
     /// accepts addon imports; all WASM targets and JS/Interpreter path
     /// through the backend-policy error with a deterministic message.
@@ -223,29 +254,59 @@ struct AddonFuncRef {
     arity: u32,
 }
 
-/// RC2.5 Phase 2: shallow summary of an addon facade file.
+/// RC2.5 Phase 2 / C25B-030 Phase 1E-α + 1E-β: shallow summary of an
+/// addon facade file.
 ///
-/// Facades are read only for their top-level bindings: alias
-/// assignments (`Name <= lowercaseFn`), pure-Taida pack assignments
-/// (`Name <= @(...)`), and a single `<<<` export clause. The full
-/// module loader is out of scope for RC2.5 v1; any construct we do
-/// not recognise trips a deterministic compile error in
-/// `load_addon_facade_for_lower`.
+/// Facades are parsed for top-level bindings and passed through to
+/// the native lowering pipeline. The following constructs are
+/// understood:
+///
+/// - Alias assignments `Name <= lowercaseFn` (`aliases`)
+/// - Pure-Taida pack assignments `Name <= @(...)` (`pack_bindings`)
+/// - Facade-internal relative imports `>>> ./X.td => @(syms...)`
+///   (C25B-030 Phase 1E-α) — the referenced file is recursively
+///   loaded under the same rules and its exports for the requested
+///   symbols are merged into the parent summary
+/// - **Function definitions** `Name args = body => :Type`
+///   (C25B-030 Phase 1E-β) — lowered as sibling IR functions under
+///   a mangled symbol derived from the addon package id so they do
+///   not collide with user-defined functions of the same name.
+/// - A single `<<<` export clause (`exports`)
+///
+/// TypeDef / EnumDef / MoldDef statements are still rejected
+/// deterministically; the public addon authoring contract only
+/// requires FuncDef + Assignment + Import. Lifting those remaining
+/// constraints is tracked as C25B-030 Phase 1E-γ (module-graph
+/// integration and full sibling module linkage via
+/// `src/addon/facade.rs`).
+/// C25B-030 Phase 1G: the codegen's addon-facade view is now a
+/// thin wrapper around the shared `crate::addon::facade::
+/// AddonFacadeSummary` produced by the backend-agnostic loader.
+/// We keep the private `struct` shape instead of a `pub use` to
+/// preserve the lowering crate's encapsulation (downstream code
+/// should route through `lower_addon_import`, not build facade
+/// summaries by hand).
 #[derive(Debug, Default, Clone)]
 struct AddonFacadeSummary {
-    /// Map `FacadeName` -> lowercase addon function name, when the
-    /// facade writes `FacadeName <= lowercaseFn`. Aliases are
-    /// resolved back to the manifest `[functions]` table so the
-    /// arity comes from the ABI, not the facade.
     aliases: std::collections::HashMap<String, String>,
-    /// Map `FacadeName` -> the buchi-pack expression, when the
-    /// facade writes `FacadeName <= @(...)`. Replayed verbatim at
-    /// the top of `_taida_main` during the 3rd pass.
     pack_bindings: std::collections::HashMap<String, Expr>,
-    /// Set of names explicitly listed in the facade's `<<<`
-    /// export statement. When empty, every alias / pack binding is
-    /// implicitly exported.
     exports: std::collections::HashSet<String>,
+    facade_funcs: std::collections::HashMap<String, FuncDef>,
+}
+
+impl AddonFacadeSummary {
+    /// Adopt the shared facade loader's output verbatim. Field
+    /// shapes are identical so this is a move, not a conversion;
+    /// the method exists purely to pin the codegen/addon
+    /// boundary in one grep-friendly place.
+    pub(super) fn from_shared(shared: crate::addon::facade::AddonFacadeSummary) -> Self {
+        Self {
+            aliases: shared.aliases,
+            pack_bindings: shared.pack_bindings,
+            exports: shared.exports,
+            facade_funcs: shared.facade_funcs,
+        }
+    }
 }
 
 #[derive(Debug)]

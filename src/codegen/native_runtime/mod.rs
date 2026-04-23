@@ -299,7 +299,44 @@ mod tests {
         // stamped via `taida_pack_set_tag` no longer fall into the
         // pointer-dereference path and segfault). See the F1_LEN test
         // body below for the detailed breakdown.
-        const EXPECTED_TOTAL_LEN: usize = 965_529;
+        //
+        // C25B-028 (2026-04-23, commit 48d26da): +5,544 bytes in core.c
+        // from the `jsonEncode(Gorillax/Lax/Result)` 4-backend parity fix.
+        // Monadic-pack detection + `__error` / `__value` / `__default` /
+        // `__predicate` / `throw` / `hasValue` emission paths were added
+        // to `json_serialize_pack_fields` so native now matches the
+        // interpreter's `{"__error":{},"__value":42,"hasValue":true}`
+        // output instead of dropping fields / emitting booleans as 1/0.
+        // Split across F1 and F2 — see the F1_LEN body below for the
+        // per-region accounting.
+        //
+        // C25B-001 Phase 3 (2026-04-23, commit 4e17e89): +3,200 bytes in
+        // core.c from the minimal Stream lowering (`taida_stream_new` /
+        // `taida_stream_is_stream` / `taida_stream_to_display_string` +
+        // routing from `taida_stdout_display_string`) that closes the
+        // native Stream parity gap covered by `STREAM_ONLY_FIXTURES`.
+        // Split across F1 and F2 — see the F1_LEN body below.
+        //
+        // Cumulative C25 delta: +8,744 bytes on core.c. Other fragments
+        // (os / tls / net_h1_h2 / net_h3_quic) are unchanged. New total:
+        // 965,529 → 974,273.
+        //
+        // C25B-025 Phase 5-I (2026-04-23): +1,895 bytes in core.c from
+        // the math mold family (taida_float_sqrt / _pow / _exp / _ln /
+        // _log2 / _log10 / _log / _sin / _cos / _tan / _asin / _acos /
+        // _atan / _atan2 / _sinh / _cosh / _tanh). All 17 helpers are
+        // thin wrappers over glibc libm (linked via -lm in driver.rs)
+        // which on x86_64-linux / aarch64-linux is the same libm that
+        // Rust's `f64::sqrt` / `f64::exp` / ... delegate to via the
+        // LLVM `@llvm.*.f64` intrinsics — giving bit-for-bit parity
+        // with the interpreter. Inserted ahead of the `// ── Error
+        // ceiling` marker so F1_LEN absorbs the full delta; F2
+        // (error/display/stdout-display) is unchanged. F1_LEN moves
+        // from 233,853 to 235,748; F2_LEN stays at 159,407. Total
+        // core.c size moves from 393,260 to 395,155. Other fragments
+        // (os / tls / net_h1_h2 / net_h3_quic) are unchanged. New
+        // total: 974,273 → 976,168.
+        const EXPECTED_TOTAL_LEN: usize = 976_168;
         let asm = *NATIVE_RUNTIME_C;
         assert_eq!(
             asm.len(),
@@ -588,11 +625,39 @@ mod tests {
         //    `__type <= 4522605`). The string is a static C literal so
         //    TAIDA_TAG_STR is rendering-only — release / free paths
         //    continue to skip via the existing `value > 4096` gate.
-        const F1_LEN: usize = 231_022;
+        //
+        // C25B-028 (commit 48d26da): core.c grew by +5,544 bytes from
+        // the jsonEncode(Gorillax/Lax/Result) 4-backend parity fix
+        // (monadic-pack detection + `__error`/`__value`/`__default`/
+        // `__predicate`/`throw`/`hasValue` emission in
+        // `json_serialize_pack_fields`).
+        //
+        // C25B-001 Phase 3 (commit 4e17e89): core.c grew by +3,200 bytes
+        // from the minimal Stream lowering (`taida_stream_new` /
+        // `taida_stream_is_stream` / `taida_stream_to_display_string` +
+        // routing hook in `taida_stdout_display_string`). Closes the
+        // native Stream parity gap previously skipped via
+        // `STREAM_ONLY_FIXTURES`.
+        //
+        // Aggregate C25 delta (core.c only, both commits combined):
+        //  - F1 (bytes [0..F1_LEN), ending just before "// ── Error
+        //    ceiling"): +2,831 bytes. F1_LEN moves from 231,022 to
+        //    233,853.
+        //  - F2 (bytes [F1_LEN..end)): +5,913 bytes. F2_LEN moves from
+        //    153,494 to 159,407.
+        //  - Per-commit F1/F2 split is absorbed into the aggregate: we
+        //    re-anchor against the observed byte offset of the
+        //    "Error ceiling" marker rather than trying to attribute
+        //    each byte to a specific commit, since the two commits
+        //    were landed consecutively and together form the current
+        //    C25 native_runtime drift.
+        // C25B-025 Phase 5-I: F1 absorbs +1,895 bytes (math mold family)
+        // inserted ahead of the "Error ceiling" marker. F2 unchanged.
+        const F1_LEN: usize = 235_748;
         assert_eq!(
             CORE_SECTION.len(),
-            231_022 + 153_494,
-            "core.c total byte length must equal legacy fragment1 + fragment2 (C24-B adjusted)"
+            235_748 + 159_407,
+            "core.c total byte length must equal legacy fragment1 + fragment2 (C25B-001 / C25B-028 / C25B-025 adjusted)"
         );
         const F2_PREFIX: &[u8] = b"// \xE2\x94\x80\xE2\x94\x80 Error ceiling";
         let tail = &CORE_SECTION.as_bytes()[F1_LEN..F1_LEN + F2_PREFIX.len()];

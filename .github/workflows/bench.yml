@@ -1,0 +1,61 @@
+name: Bench
+
+# C25B-004 perf regression gate (@c.25.rc7).
+#
+# Separate workflow from CI so bench noise does not block PR merges while
+# baselines are still stabilising. `continue-on-error` on the entire job
+# is intentional: until several weeks of main-baseline data accumulate,
+# bench output is informational.
+#
+# The job re-runs on:
+#   - manual `workflow_dispatch` (for ad-hoc comparisons)
+#   - main push (to refresh the main baseline)
+#
+# A `pull_request` trigger is deliberately NOT added yet. Once the main
+# baseline is stable (tracked in `.dev/C25_CI_PROFILE.md`), a follow-up
+# change will add pull_request + upload-artifact diffing + 10%-regression
+# comment-on-pr. Adding it prematurely would spam PRs with
+# noise-dominated deltas.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-D warnings"
+
+concurrency:
+  group: bench-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  bench:
+    name: Perf baselines
+    runs-on: ubuntu-latest
+    # Informational until baselines stabilise (C25B-004 scaffold phase).
+    continue-on-error: true
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: cargo-base
+          save-if: false
+      - name: Run perf_baseline bench
+        run: |
+          # --sample-size 20 keeps wall-clock < 10 min while preserving
+          # enough samples for criterion's bootstrap CI to tighten.
+          cargo bench --bench perf_baseline -- --sample-size 20 --output-format bencher | tee bench-results.txt
+      - name: Upload bench results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: perf-baseline-${{ github.sha }}
+          path: |
+            bench-results.txt
+            target/criterion/**/estimates.json
+          if-no-files-found: warn
+          retention-days: 30

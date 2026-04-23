@@ -174,10 +174,12 @@ impl Interpreter {
         // packages share the resolution order documented in
         // `.dev/RC1_DESIGN.md` Phase 4 Lock.
         //
-        // Native-only behaviour: this whole branch is gated on
-        // `feature = "native"`. On non-native interpreter builds, the
-        // addon backend policy guard runs at the package boundary
-        // (compile-time error before any source is touched).
+        // C25B-030: the interpreter is a first-class addon backend.
+        // The `feature = "native"` gate here selects whether the
+        // interpreter binary was built WITH the dlopen dispatcher
+        // linked in. The policy guard (`ensure_addon_supported`) passes
+        // for `Interpreter` in both cases; what differs is whether we
+        // can actually call into a cdylib addon at runtime.
         #[cfg(feature = "native")]
         {
             if let Some(signal) = self.try_eval_addon_import(import)? {
@@ -186,23 +188,34 @@ impl Interpreter {
         }
         #[cfg(not(feature = "native"))]
         {
-            // Defensive: even on non-native builds the design lock says
-            // addon-backed packages must produce the deterministic
-            // unsupported-backend error rather than silently falling
-            // through to "package not found".
+            // Defensive: on interpreter builds without the native dlopen
+            // dispatcher, an addon-backed package is structurally
+            // unreachable. We produce a deterministic error at the
+            // import boundary rather than silently falling through to
+            // "package not found" (or, worse, producing a bogus
+            // source-load error later).
             if let Some(pkg_dir) = self.try_locate_addon_pkg_dir(import) {
                 if pkg_dir.join("native").join("addon.toml").exists() {
-                    // The non-native interpreter binary is the
-                    // `Interpreter` backend in the policy table.
-                    let err = crate::addon::ensure_addon_supported(
+                    // Policy guard first — for Interpreter this returns
+                    // Ok(()) so we fall through to the feature-gate
+                    // error below. The guard is still called so future
+                    // policy restrictions (e.g. allowlist) keep a single
+                    // decision point.
+                    crate::addon::ensure_addon_supported(
                         crate::addon::AddonBackend::Interpreter,
                         &import.path,
-                    );
-                    if let Err(policy_err) = err {
-                        return Err(RuntimeError {
-                            message: policy_err.to_string(),
-                        });
-                    }
+                    )
+                    .map_err(|e| RuntimeError {
+                        message: e.to_string(),
+                    })?;
+
+                    return Err(RuntimeError {
+                        message: format!(
+                            "addon-backed package '{}' requires a taida binary built with the \
+                             'native' feature (addon dispatcher not linked in this build)",
+                            import.path
+                        ),
+                    });
                 }
             }
         }
@@ -781,13 +794,14 @@ impl Interpreter {
             return Ok(None);
         }
 
-        // Backend policy guard. Native interpreter is supported, every
-        // other backend is rejected with a deterministic message. The
-        // interpreter binary built with `feature = "native"` runs as
-        // the `Native` backend for addon-policy purposes (the
-        // interpreter is the reference implementation that ships the
-        // dispatch path).
-        crate::addon::ensure_addon_supported(crate::addon::AddonBackend::Native, &import.path)
+        // Backend policy guard. C25B-030 Phase 1B: the interpreter is a
+        // first-class addon backend (reference implementation), so we
+        // call `ensure_addon_supported` with `AddonBackend::Interpreter`
+        // truthfully rather than masquerading as `Native`. The actual
+        // dlopen dispatch is still gated on `feature = "native"` below
+        // (see `try_addon_func` in `addon_eval.rs`); the policy guard
+        // only answers "is this backend allowed to consume addons?".
+        crate::addon::ensure_addon_supported(crate::addon::AddonBackend::Interpreter, &import.path)
             .map_err(|e| RuntimeError {
                 message: e.to_string(),
             })?;

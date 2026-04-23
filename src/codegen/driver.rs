@@ -424,6 +424,16 @@ impl WasmRuntimeCache {
             "--gc-sections",
         ]);
         cmd.args(extra_ld_args);
+        // C25B-026 / Phase 5-G: honour TAIDA_WASM_{INITIAL,MAX}_PAGES
+        // and (for the long-running-workload profiles) export the
+        // arena-release helpers so harnesses and the future
+        // lowerer-inserted enter/leave pairs can reach them.
+        for flag in wasm_memory_ld_flags() {
+            cmd.arg(flag);
+        }
+        for flag in wasm_arena_export_flags(profile) {
+            cmd.arg(flag);
+        }
         for rt_obj in rt_objs {
             cmd.arg(rt_obj);
         }
@@ -1352,6 +1362,66 @@ fn wasm_frontend(
 /// `profile`: C21-3 — picks the clang flag set; `Min` skips `-msimd128`,
 ///   the other three enable it so LLVM's wasm auto-vectorizer is permitted
 ///   to lower f32/f64 hot loops to `v128.*` instructions.
+/// C25B-026 / Phase 5-G: translate `TAIDA_WASM_INITIAL_PAGES` /
+/// `TAIDA_WASM_MAX_PAGES` env vars into wasm-ld flags.
+///
+/// Each WASM page is 64 KiB. The env vars accept a positive integer
+/// page count; anything else is silently ignored (so mis-set vars do
+/// not break builds). Callers pass the returned strings into
+/// `extra_ld_args` alongside any profile-specific flags (e.g.
+/// `--export=memory` for wasm-edge).
+///
+/// Example: `TAIDA_WASM_INITIAL_PAGES=64 TAIDA_WASM_MAX_PAGES=256` →
+/// `["--initial-memory=4194304", "--max-memory=16777216"]`.
+///
+/// This is the runtime knob called out by `C25B-026` for tuning
+/// linear-memory growth strategy per build, paired with the runtime-C
+/// `wasm_arena_enter` / `wasm_arena_leave` arena-scope helpers.
+/// C25B-026 / Phase 5-G: wasm-ld flags that export the arena-release
+/// helpers (`wasm_arena_enter` / `wasm_arena_leave` / `wasm_arena_used`
+/// plus the `wasm_arena_roundtrip_test` test harness) so `--gc-sections`
+/// keeps them and wasmtime / host harnesses can invoke them directly.
+///
+/// The symbols are infrastructure for long-running workloads (LLM
+/// forward, `@[Float]` numeric kernels) that the wasm-wasi and wasm-full
+/// profiles target. The wasm-min profile is size-gated (the `wasm_min`
+/// integration test asserts a 512-byte hard ceiling on hello.wasm)
+/// and wasm-edge is for Cloudflare Workers' short-lived request /
+/// response model, so neither needs the arena helpers linked in. We
+/// return an empty flag set for those profiles, letting `--gc-sections`
+/// drop the helpers entirely and keeping the minimal-size profile
+/// within its gate.
+pub(crate) fn wasm_arena_export_flags(profile: emit_wasm_c::WasmProfile) -> Vec<&'static str> {
+    match profile {
+        emit_wasm_c::WasmProfile::Wasi | emit_wasm_c::WasmProfile::Full => vec![
+            "--export=wasm_arena_enter",
+            "--export=wasm_arena_leave",
+            "--export=wasm_arena_used",
+            "--export=wasm_arena_roundtrip_test",
+        ],
+        emit_wasm_c::WasmProfile::Min | emit_wasm_c::WasmProfile::Edge => Vec::new(),
+    }
+}
+
+pub(crate) fn wasm_memory_ld_flags() -> Vec<String> {
+    let mut out = Vec::new();
+    if let Ok(v) = std::env::var("TAIDA_WASM_INITIAL_PAGES")
+        && let Ok(pages) = v.trim().parse::<u32>()
+        && pages > 0
+    {
+        let bytes: u64 = (pages as u64) * 65_536;
+        out.push(format!("--initial-memory={}", bytes));
+    }
+    if let Ok(v) = std::env::var("TAIDA_WASM_MAX_PAGES")
+        && let Ok(pages) = v.trim().parse::<u32>()
+        && pages > 0
+    {
+        let bytes: u64 = (pages as u64) * 65_536;
+        out.push(format!("--max-memory={}", bytes));
+    }
+    out
+}
+
 fn wasm_compile_and_link_uncached(
     generated_c: &str,
     wasm_path: &Path,
@@ -1482,6 +1552,15 @@ fn wasm_compile_and_link_uncached(
         "--strip-all",
         "--gc-sections",
     ]);
+    // C25B-026 / Phase 5-G: honour TAIDA_WASM_{INITIAL,MAX}_PAGES and
+    // (for the long-running-workload profiles) export the arena-release
+    // helpers.
+    for flag in wasm_memory_ld_flags() {
+        cmd.arg(flag);
+    }
+    for flag in wasm_arena_export_flags(profile) {
+        cmd.arg(flag);
+    }
     for (_, o_path) in &rt_files {
         cmd.arg(o_path);
     }

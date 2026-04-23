@@ -1,0 +1,95 @@
+name: Security
+
+# C25B-006: continuous supply-chain monitoring via cargo-audit
+# (RustSec advisory DB lookup) + cargo-deny (licences / multiple
+# versions / yanked crates / sources allow-list). Runs on every push
+# to the main RC branches and weekly on a fixed schedule so advisories
+# published between pushes are still surfaced.
+#
+# During the `@c.25.rc7` RC cycle the two jobs are **warn-only**:
+# advisories are reported as GitHub Actions warnings and do not block
+# the pipeline. The hard-fail gate is planned for the next C-generation
+# RC cycle once the advisory baseline has been curated for one full
+# release window.
+#
+# Scope isolation (Phase 6 driver): this workflow is brand-new and
+# lives in its own file. The existing `.github/workflows/ci.yml` is
+# not touched — CI wallclock is the Phase 2 driver's domain.
+
+on:
+  push:
+    branches: [main, develop, feat/c25]
+  pull_request:
+    branches: [main, develop]
+  schedule:
+    # Every Monday 06:00 UTC. Weekly cadence catches advisories
+    # published between pushes without adding noticeable load.
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+# Serialise duplicate runs on the same ref; `schedule` dispatches are
+# uniquely identified by run_id so the concurrency lock does not
+# collapse them with push-triggered runs.
+concurrency:
+  group: security-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  cargo-audit:
+    name: cargo-audit (RustSec DB)
+    runs-on: ubuntu-latest
+    # Warn-only during @c.25.rc7. When the policy flips in @c.26.rc*,
+    # remove this line to make the job a hard gate.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Cache cargo-audit binary
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/bin/cargo-audit
+            ~/.cargo/advisory-db
+          key: ${{ runner.os }}-cargo-audit-v1-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-audit-v1-
+      - name: Install cargo-audit
+        run: |
+          if ! command -v cargo-audit >/dev/null 2>&1; then
+            cargo install cargo-audit --locked
+          fi
+      - name: Run cargo-audit
+        # `--deny warnings` would turn warnings into failures; we
+        # explicitly do *not* pass it. The job is informational for
+        # @c.25.rc7. (`--ignore-source` was removed in cargo-audit
+        # 0.21+; rely on default source policy.)
+        run: cargo audit
+
+  cargo-deny:
+    name: cargo-deny (licences / bans / sources)
+    runs-on: ubuntu-latest
+    # Warn-only during @c.25.rc7 (same promotion path as cargo-audit).
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Cache cargo-deny binary
+        uses: actions/cache@v5
+        with:
+          path: ~/.cargo/bin/cargo-deny
+          key: ${{ runner.os }}-cargo-deny-v1-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-deny-v1-
+      - name: Install cargo-deny
+        run: |
+          if ! command -v cargo-deny >/dev/null 2>&1; then
+            cargo install cargo-deny --locked
+          fi
+      - name: Run cargo-deny check
+        # `advisories`, `bans`, `licenses`, `sources` checks in one
+        # pass. Config lives at `./deny.toml`. `--log-level warn` is
+        # the default; kept explicit so future edits see it.
+        run: cargo deny --log-level warn check advisories bans licenses sources

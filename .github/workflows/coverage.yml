@@ -1,0 +1,130 @@
+name: coverage
+
+# C25B-011: Coverage visibility (cargo-llvm-cov).
+#
+# Policy:
+#   1. Run cargo-llvm-cov on a schedule (weekly, Monday 04:00 UTC) and
+#      on explicit workflow_dispatch. We do NOT run on every PR during
+#      @c.25.rc7 because the instrumented build is ~3x slower than the
+#      regular release build and would double the CI bill.
+#   2. Emit lcov + HTML and upload as artifact. No upload to Codecov
+#      or similar (adds external service dependency; visibility-first).
+#   3. No hard-fail threshold during @c.25.rc7. We pin a *visibility*
+#      target of 80% line coverage for `src/interpreter/` (the source-of-
+#      truth backend) and surface it in the job summary. Enforcement is
+#      a post-stable follow-up (see docs/STABILITY.md §5.5).
+#   4. Main ci.yml is not modified (scope separation with Phase 2 driver).
+
+on:
+  schedule:
+    - cron: "0 4 * * 1"
+  workflow_dispatch: {}
+
+jobs:
+  coverage:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+
+      - name: install rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+
+      - name: install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+
+      - name: shared cargo cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: cargo-cov
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: ensure node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: generate lcov (lib only)
+        run: |
+          cargo llvm-cov --lib --lcov --output-path lcov.info
+
+      - name: generate html report
+        run: |
+          cargo llvm-cov --lib --html --output-dir target/llvm-cov/html
+
+      - name: summarise
+        run: |
+          set -euo pipefail
+          python3 - lcov.info >> "$GITHUB_STEP_SUMMARY" <<'PY'
+          import sys, re, collections
+          path = sys.argv[1]
+          per_file = collections.defaultdict(lambda: {"lf": 0, "lh": 0})
+          current = None
+          with open(path) as f:
+              for line in f:
+                  line = line.strip()
+                  if line.startswith("SF:"):
+                      current = line[3:]
+                  elif line.startswith("LF:") and current:
+                      per_file[current]["lf"] = int(line[3:])
+                  elif line.startswith("LH:") and current:
+                      per_file[current]["lh"] = int(line[3:])
+                  elif line == "end_of_record":
+                      current = None
+          # Aggregate by top-level module under src/.
+          modules = collections.defaultdict(lambda: {"lf": 0, "lh": 0})
+          for p, v in per_file.items():
+              m = re.search(r"/src/([^/]+)/", p)
+              if not m:
+                  m = re.search(r"/src/([^/]+)\.rs$", p)
+              if not m:
+                  continue
+              key = m.group(1)
+              modules[key]["lf"] += v["lf"]
+              modules[key]["lh"] += v["lh"]
+          total_lf = sum(v["lf"] for v in modules.values())
+          total_lh = sum(v["lh"] for v in modules.values())
+          total_pct = 100.0 * total_lh / total_lf if total_lf else 0.0
+          print("## coverage summary (cargo-llvm-cov, --lib)")
+          print()
+          print(f"**Total lines:** {total_lh} / {total_lf} ({total_pct:.2f}%)")
+          print()
+          print("| module | hit | total | pct | visibility target |")
+          print("|---|---:|---:|---:|---|")
+          targets = {"interpreter": 80.0}
+          for key in sorted(modules):
+              lf = modules[key]["lf"]; lh = modules[key]["lh"]
+              pct = 100.0 * lh / lf if lf else 0.0
+              tgt = targets.get(key)
+              if tgt is None:
+                  note = "-"
+              elif pct >= tgt:
+                  note = f">= {tgt}% (target met)"
+              else:
+                  note = f">= {tgt}% (gap {tgt - pct:.2f}%)"
+              print(f"| `{key}` | {lh} | {lf} | {pct:.2f}% | {note} |")
+          print()
+          print("Policy: 80% visibility target for `src/interpreter/` only.")
+          print("No hard-fail during @c.25.rc7; see docs/STABILITY.md §5.5.")
+          PY
+
+      - name: upload lcov
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-lcov-${{ github.sha }}
+          path: lcov.info
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: upload html report
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-html-${{ github.sha }}
+          path: target/llvm-cov/html
+          if-no-files-found: error
+          retention-days: 30

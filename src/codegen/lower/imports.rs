@@ -251,12 +251,156 @@ impl Lowering {
         //     imported symbol that is not exported falls through to
         //     the `[functions]` lookup.
         //
-        // Anything more sophisticated (facade-defined function bodies,
-        // facade-level imports, etc.) is out of scope for RC2.5 v1 and
-        // triggers a deterministic compile error so the limitation is
-        // visible at build time rather than causing silent divergence
-        // between the interpreter and the native backend.
-        let facade = Self::load_addon_facade_for_lower(pkg_dir, &manifest, import_path)?;
+        // C25B-030 Phase 1E-α + 1E-β: the facade loader now accepts
+        // `>>>` relative imports (1E-α) and FuncDef statements (1E-β)
+        // in addition to the RC2.5 v1 alias + pack-literal surface.
+        // The only remaining restrictions are TypeDef / EnumDef /
+        // MoldDef (tracked for 1E-γ) and non-relative `>>>` paths.
+        // C25B-030 Phase 1G: the recursive facade walker + reachability
+        // expansion live in `src/addon/facade.rs`. Translate its
+        // `AddonFacadeSummary` into the codegen-local type below and
+        // fold its diagnostics into `LowerError` so callers see a
+        // consistent error shape.
+        let facade = crate::addon::facade::load_facade_summary(pkg_dir, &manifest, import_path)
+            .map_err(|e| LowerError { message: e.message })?
+            .map(AddonFacadeSummary::from_shared);
+
+        // C25B-030 Phase 1E-β: register every facade FuncDef (public
+        // + private helpers) with a mangled link symbol so sibling
+        // facade functions can call each other and so user imports
+        // of a public facade FuncDef resolve to the mangled symbol.
+        // The mangle includes a package-id hash to avoid collisions
+        // when two addons ship a FuncDef of the same name.
+        //
+        // Dedup: if the same addon is imported twice (two `>>>`
+        // statements referencing the same package id) we still only
+        // collect each FuncDef once — `addon_facade_mangled` is a
+        // set of already-registered mangled symbols.
+        if let Some(facade_summary) = &facade {
+            let pkg_hash = simple_hash(&manifest.package);
+            for (fn_local_name, fn_def) in &facade_summary.facade_funcs {
+                let mangled = format!("_taida_fn_facade_{:016x}_{}", pkg_hash, fn_local_name);
+                if !self.addon_facade_mangled.insert(mangled.clone()) {
+                    // Already registered via an earlier import
+                    // statement pointing at the same facade. Skip —
+                    // we keep the first registration's FuncDef AST.
+                    continue;
+                }
+                // Track the FuncDef so it is lowered in the 2nd
+                // pass of lower_program.
+                self.addon_facade_funcs.push((
+                    fn_local_name.clone(),
+                    fn_def.clone(),
+                    mangled.clone(),
+                ));
+                // Make sibling / cross-facade calls resolve:
+                // - Public names are overwritten by the user import
+                //   binding below (alias support).
+                // - Private helpers (`_`-prefixed) become reachable
+                //   under their raw name throughout the current
+                //   lowering run.
+                self.user_funcs.insert(fn_local_name.clone());
+                self.imported_func_links
+                    .insert(fn_local_name.clone(), mangled.clone());
+                if fn_def.name != *fn_local_name {
+                    self.user_funcs.insert(fn_def.name.clone());
+                    self.imported_func_links
+                        .insert(fn_def.name.clone(), mangled.clone());
+                    self.register_facade_func_signature(&fn_def.name, fn_def);
+                }
+                // Track arity / return-type tags for downstream
+                // inference (same as the main module's FuncDef 1st
+                // pass).
+                self.register_facade_func_signature(fn_local_name, fn_def);
+            }
+            // C25B-030 Phase 1E-β-2 / 1E-β-3-2: pre-register every
+            // facade pack / value binding (both private `_`-prefixed
+            // helpers and public packs like `LineEditorState` /
+            // `CompletionState` / `LineEditorAction`) under its raw
+            // name. User imports of a public pack still go through
+            // the per-symbol loop below (which honours aliasing);
+            // pre-registering here in addition ensures that a
+            // harvested facade FuncDef body — pulled in transitively
+            // via `facade_expand_reachable_symbols` — can still
+            // resolve a reference to the public pack even when the
+            // user only imported the function (e.g. the user wrote
+            // `>>> taida-lang/terminal => @(LineEditorNew)` and the
+            // body of `LineEditorNew` references the public
+            // `LineEditorState` pack without the user ever naming
+            // it).
+            //
+            // Dedup semantics:
+            //   - If the user imports `LineEditorState` without
+            //     alias, the per-symbol loop will use the same
+            //     `alias == orig_name == local_name`, so the two
+            //     markers collide and the per-symbol loop's
+            //     `addon_facade_mangled.insert(marker)` returns
+            //     false — the pre-reg wins with identical content.
+            //   - If the user aliases `LineEditorState as MyState`,
+            //     the per-symbol loop builds a different marker
+            //     (`...value_{hash}_MyState`) and its registration
+            //     runs side-by-side with the raw-name pre-reg.
+            //     The facade FuncDef body's raw-name reference
+            //     still resolves; the user's main body sees the
+            //     alias.
+            //
+            // `addon_facade_mangled` doubles as a deterministic
+            // dedup set — we prefix the value-binding marker with
+            // a distinct `facade_value::` namespace to avoid
+            // colliding with FuncDef mangles.
+            for (local_name, value_expr) in &facade_summary.pack_bindings {
+                let marker = format!("_taida_facade_value_{:016x}_{}", pkg_hash, local_name);
+                if !self.addon_facade_mangled.insert(marker) {
+                    continue;
+                }
+                self.addon_facade_pack_bindings
+                    .push((local_name.clone(), value_expr.clone()));
+                self.top_level_vars.insert(local_name.clone());
+                // Narrowed flagging mirrors the per-symbol loop
+                // below: only real `@(...)` packs become
+                // `pack_vars`; scalar / list / arithmetic
+                // bindings take the appropriate primitive tag.
+                if matches!(value_expr, Expr::BuchiPack(_, _)) {
+                    self.pack_vars.insert(local_name.clone());
+                } else if matches!(value_expr, Expr::ListLit(_, _)) {
+                    self.list_vars.insert(local_name.clone());
+                } else if matches!(value_expr, Expr::IntLit(_, _)) {
+                    self.int_vars.insert(local_name.clone());
+                } else if matches!(value_expr, Expr::FloatLit(_, _)) {
+                    self.float_vars.insert(local_name.clone());
+                } else if matches!(value_expr, Expr::StringLit(_, _) | Expr::TemplateLit(_, _)) {
+                    self.string_vars.insert(local_name.clone());
+                } else if matches!(value_expr, Expr::BoolLit(_, _)) {
+                    self.bool_vars.insert(local_name.clone());
+                }
+            }
+            // Private aliases (facade author wrote
+            // `_MyAlias <= terminalSize` as an internal rename).
+            // Rare in practice but cheap to support. The alias
+            // resolves to the manifest function's arity just like
+            // public aliases.
+            for (local_name, target_fn) in &facade_summary.aliases {
+                if !local_name.starts_with('_') {
+                    continue;
+                }
+                let marker = format!("_taida_facade_alias_{:016x}_{}", pkg_hash, local_name);
+                if !self.addon_facade_mangled.insert(marker) {
+                    continue;
+                }
+                if let Some(arity) = manifest.functions.get(target_fn) {
+                    self.addon_func_refs.insert(
+                        local_name.clone(),
+                        AddonFuncRef {
+                            package_id: manifest.package.clone(),
+                            cdylib_path: cdylib_str.clone(),
+                            function_name: target_fn.clone(),
+                            arity: *arity,
+                        },
+                    );
+                    self.user_funcs.insert(local_name.clone());
+                }
+            }
+        }
 
         for sym in &import_stmt.symbols {
             let orig_name = sym.name.clone();
@@ -312,25 +456,76 @@ impl Lowering {
                     }
                     continue;
                 }
-                if let Some(pack_expr) = facade.pack_bindings.get(&orig_name) {
+                if let Some(value_expr) = facade.pack_bindings.get(&orig_name) {
                     // Pure-Taida facade value. Record the binding so
                     // the 3rd pass can replay it in `_taida_main`
                     // before user statements execute.
+                    //
+                    // Phase 1E-α treated every `pack_bindings` entry
+                    // as a pack literal. Phase 1E-β widened the
+                    // accepted RHS so we now distinguish based on
+                    // the actual Expr shape — only real
+                    // `Expr::BuchiPack` bindings get the `pack_vars`
+                    // / `top_level_vars` flags so downstream
+                    // field-access semantics stay honest for
+                    // scalar / list / arithmetic bindings.
                     self.addon_facade_pack_bindings
-                        .push((alias.clone(), pack_expr.clone()));
+                        .push((alias.clone(), value_expr.clone()));
                     self.top_level_vars.insert(alias.clone());
-                    // Packs are tracked so field access / jsonEncode
-                    // resolution pick the pack path.
-                    self.pack_vars.insert(alias.clone());
+                    if matches!(value_expr, Expr::BuchiPack(_, _)) {
+                        self.pack_vars.insert(alias.clone());
+                    } else if matches!(value_expr, Expr::ListLit(_, _)) {
+                        self.list_vars.insert(alias.clone());
+                    }
+                    // Track primitive scalar tags so downstream
+                    // type inference (arithmetic, string
+                    // interpolation) picks the right class.
+                    if matches!(value_expr, Expr::IntLit(_, _)) {
+                        self.int_vars.insert(alias.clone());
+                    } else if matches!(value_expr, Expr::FloatLit(_, _)) {
+                        self.float_vars.insert(alias.clone());
+                    } else if matches!(value_expr, Expr::StringLit(_, _) | Expr::TemplateLit(_, _))
+                    {
+                        self.string_vars.insert(alias.clone());
+                    } else if matches!(value_expr, Expr::BoolLit(_, _)) {
+                        self.bool_vars.insert(alias.clone());
+                    }
                     continue;
                 }
-                // Exported by the facade but neither an alias nor a
-                // pack binding: out of Phase 2 scope.
+                if let Some(fn_def) = facade.facade_funcs.get(&orig_name) {
+                    // C25B-030 Phase 1E-β: facade FuncDef.
+                    //
+                    // The FuncDef was already harvested into
+                    // `self.addon_facade_funcs` (with a mangled
+                    // link symbol) in the block above this per-
+                    // symbol loop. Here we only bind the user-
+                    // facing alias to that mangled symbol so call
+                    // sites `alias(...)` resolve through the
+                    // normal user-function path.
+                    let pkg_hash = simple_hash(&manifest.package);
+                    let mangled = format!("_taida_fn_facade_{:016x}_{}", pkg_hash, orig_name);
+                    self.user_funcs.insert(alias.clone());
+                    self.imported_func_links.insert(alias.clone(), mangled);
+                    // Re-register signature metadata under the
+                    // alias name so the type-inference paths
+                    // (string_returning_funcs, pack_returning_funcs,
+                    // bool_returning_funcs, func_param_defs) all
+                    // agree with the aliased call site.
+                    self.register_facade_func_signature(&alias, fn_def);
+                    continue;
+                }
+                // Exported by the facade but none of the known
+                // forms matched. This should be unreachable given
+                // the facade loader's invariants (`exports` is
+                // always a subset of aliases | pack_bindings |
+                // facade_funcs) but we still emit a defensive
+                // compile error so future loader bugs do not leak
+                // into silent divergence.
                 return Err(LowerError {
                     message: format!(
-                        "addon facade for '{}' exports '{}' using an unsupported form \
-                         (only `Name <= lowercaseFn` aliases and `Name <= @(...)` packs \
-                         are supported in RC2.5 v1)",
+                        "addon facade for '{}' exports '{}' via an unknown binding form. \
+                         This is a facade-loader invariant violation; please file a bug \
+                         with the facade contents reproducing the issue.",
                         import_path, orig_name
                     ),
                 });
@@ -445,143 +640,62 @@ impl Lowering {
         }
     }
 
-    /// RC2.5 Phase 2: parse the optional Taida-side facade for an
-    /// addon-backed package, if one exists at `<pkg_dir>/taida/<stem>.td`.
+    /// C25B-030 Phase 1E-β: register the arity, parameter defs, and
+    /// return-type inference hints for a facade-declared FuncDef
+    /// under `local_name`.
     ///
-    /// Returns `Ok(None)` if no facade file is present (lowercase-only
-    /// addons work without a facade). Returns a populated
-    /// [`AddonFacadeSummary`] when a facade exists; the summary is
-    /// intentionally shallow — only top-level assignments and a single
-    /// `<<< @(...)` export statement are supported in RC2.5 v1. Any
-    /// other construct (nested imports, function definitions, etc.)
-    /// triggers a deterministic compile error so unsupported facades
-    /// fail loudly rather than silently diverging between backends.
-    pub(super) fn load_addon_facade_for_lower(
-        pkg_dir: &std::path::Path,
-        manifest: &crate::addon::manifest::AddonManifest,
-        import_path: &str,
-    ) -> Result<Option<AddonFacadeSummary>, LowerError> {
-        let stem = manifest
-            .package
-            .rsplit('/')
-            .next()
-            .unwrap_or(manifest.package.as_str());
-        let facade_path = pkg_dir.join("taida").join(format!("{}.td", stem));
-        if !facade_path.exists() {
-            return Ok(None);
-        }
-
-        let source = std::fs::read_to_string(&facade_path).map_err(|e| LowerError {
-            message: format!(
-                "cannot read addon facade '{}' for '{}': {}",
-                facade_path.display(),
-                import_path,
-                e
-            ),
-        })?;
-        let (program, parse_errors) = crate::parser::parse(&source);
-        if !parse_errors.is_empty() {
-            return Err(LowerError {
-                message: format!(
-                    "parse errors in addon facade '{}' for '{}': {}",
-                    facade_path.display(),
-                    import_path,
-                    parse_errors
-                        .iter()
-                        .map(|e| e.to_string())
-                        .collect::<Vec<_>>()
-                        .join("; ")
-                ),
-            });
-        }
-
-        let mut summary = AddonFacadeSummary::default();
-
-        for stmt in &program.statements {
-            match stmt {
-                Statement::Assignment(assign) => match &assign.value {
-                    // `Name <= Ident(B)` → alias if B is a known addon fn
-                    Expr::Ident(target_fn, _) => {
-                        if manifest.functions.contains_key(target_fn) {
-                            summary
-                                .aliases
-                                .insert(assign.target.clone(), target_fn.clone());
-                        } else {
-                            // Could still be a facade-internal name,
-                            // but RC2.5 v1 does not support chained
-                            // aliasing. Flag it explicitly.
-                            return Err(LowerError {
-                                message: format!(
-                                    "addon facade '{}' aliases '{}' to '{}' which is not listed \
-                                     in [functions] (chained facade aliasing is not supported in \
-                                     RC2.5 v1)",
-                                    facade_path.display(),
-                                    assign.target,
-                                    target_fn
-                                ),
-                            });
-                        }
-                    }
-                    // `Name <= @(...)` → pure-Taida pack binding
-                    Expr::BuchiPack(_, _) => {
-                        summary
-                            .pack_bindings
-                            .insert(assign.target.clone(), assign.value.clone());
-                    }
-                    // Anything else is out of scope for RC2.5 v1.
-                    _ => {
-                        return Err(LowerError {
-                            message: format!(
-                                "addon facade '{}' binds '{}' to an unsupported expression shape \
-                                 (RC2.5 v1 supports `Name <= lowercaseFn` aliases and \
-                                 `Name <= @(...)` pack literals only)",
-                                facade_path.display(),
-                                assign.target
-                            ),
-                        });
-                    }
-                },
-                Statement::Export(export_stmt) => {
-                    if export_stmt.path.is_some() {
-                        return Err(LowerError {
-                            message: format!(
-                                "addon facade '{}' uses re-export with path which is not supported",
-                                facade_path.display()
-                            ),
-                        });
-                    }
-                    for sym in &export_stmt.symbols {
-                        summary.exports.insert(sym.clone());
-                    }
+    /// `local_name` is the binding the caller is registering the
+    /// signature under: during the facade-wide registration pass
+    /// this is the facade's raw FuncDef name (e.g. `ClearScreen`);
+    /// during the per-symbol user-import loop this is the user's
+    /// alias (e.g. `MyClear` from `>>> ... => @(ClearScreen: MyClear)`).
+    ///
+    /// Mirrors the logic in `lower_program`'s 1st pass for ordinary
+    /// FuncDefs (see `stmt.rs`), but applied to facade FuncDefs
+    /// which do not live in the main program's AST. Only the type-
+    /// inference hints that actually affect downstream lowering
+    /// (string / bool / int / float return classes, pack/list
+    /// returns) are replicated here — the body-based fallbacks like
+    /// the TCO detection are recomputed in `lower_func_def` when
+    /// the FuncDef is actually lowered.
+    pub(super) fn register_facade_func_signature(
+        &mut self,
+        local_name: &str,
+        fn_def: &crate::parser::FuncDef,
+    ) {
+        self.func_param_defs
+            .insert(local_name.to_string(), fn_def.params.clone());
+        if let Some(ref rt) = fn_def.return_type {
+            match rt {
+                crate::parser::TypeExpr::Named(n) if n == "Str" => {
+                    self.string_returning_funcs.insert(local_name.to_string());
                 }
-                // Comments are not Statement nodes; anything else
-                // is a parse construct we do not permit in a facade.
-                _ => {
-                    return Err(LowerError {
-                        message: format!(
-                            "addon facade '{}' contains an unsupported top-level construct \
-                             (RC2.5 v1 facades may only use assignments and `<<<` exports)",
-                            facade_path.display()
-                        ),
-                    });
+                crate::parser::TypeExpr::Named(n) if n == "Bool" => {
+                    self.bool_returning_funcs.insert(local_name.to_string());
                 }
+                crate::parser::TypeExpr::Named(n) if n == "Float" => {
+                    self.float_returning_funcs.insert(local_name.to_string());
+                }
+                crate::parser::TypeExpr::Named(n) if n == "Int" || n == "Num" => {
+                    self.int_returning_funcs.insert(local_name.to_string());
+                }
+                crate::parser::TypeExpr::List(_) => {
+                    self.list_returning_funcs.insert(local_name.to_string());
+                }
+                _ => {}
             }
         }
-
-        // If no explicit export statement was found, fall back to
-        // exporting every top-level binding we understood. This
-        // matches the facade behaviour of "export everything that
-        // reached the top level".
-        if summary.exports.is_empty() {
-            for k in summary.aliases.keys() {
-                summary.exports.insert(k.clone());
-            }
-            for k in summary.pack_bindings.keys() {
-                summary.exports.insert(k.clone());
-            }
+        // Body-based inference (F-58/F-60 / C12-11 equivalents) —
+        // the minimum we need so `BufferNew` / `_bufferNewInner`
+        // style helpers that build a pack literal get tagged as
+        // pack-returning. Kept narrow on purpose; the richer
+        // heuristics fire inside `lower_func_def`.
+        if Self::func_body_returns_pack(&fn_def.body) {
+            self.pack_returning_funcs.insert(local_name.to_string());
         }
-
-        Ok(Some(summary))
+        if Self::func_body_returns_list(&fn_def.body) {
+            self.list_returning_funcs.insert(local_name.to_string());
+        }
     }
 
     /// RC2.5 Phase 2: emit the IR for a single addon function call.
@@ -1181,6 +1295,15 @@ impl Lowering {
 
         self.emit_imported_module_inits(&mut init_fn);
         self.bind_imported_values(&mut init_fn);
+
+        let facade_bindings = std::mem::take(&mut self.addon_facade_pack_bindings);
+        for (name, expr) in &facade_bindings {
+            let val = self.lower_expr(&mut init_fn, expr)?;
+            init_fn.push(IrInst::DefVar(name.clone(), val));
+            let hash = self.global_var_hash(name);
+            init_fn.push(IrInst::GlobalSet(hash, val));
+        }
+        self.addon_facade_pack_bindings = facade_bindings;
 
         for stmt in &program.statements {
             match stmt {

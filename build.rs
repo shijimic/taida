@@ -118,6 +118,38 @@ fn main() {
         &crash_td,
     );
 
+    // ----- tests/parity.rs + src/interpreter/net_h2.rs (NET6-5b release gate) -----
+    //
+    // C25B-003 Phase 2: eliminate cargo subprocess spawn from
+    // `test_net6_5b_release_gate_v6_test_counts`. Previously the test shelled
+    // out to `cargo test --test parity -- --list` and `cargo test --lib --
+    // --list net_h2`, which on CI (2C) took ~79s/run due to cargo freshness
+    // checks + spawn overhead + core contention (single SLOW test that alone
+    // accounted for ~12% of CI wallclock, per PR #38 3-run median).
+    //
+    // Replacement: scan the source files at build time, emit
+    //   - PARITY_TEST_FN_NAMES: &[&str]   -- fn identifiers discovered in
+    //     tests/parity.rs with `#[test]` on a preceding line
+    //   - NET_H2_UNIT_TEST_COUNT: usize   -- count of `#[test]` attributes
+    //     inside the `#[cfg(test)] mod tests { ... }` region of net_h2.rs
+    // The release gate test then reads these consts and performs pure
+    // in-process assertions. Runtime drops from ~79s to sub-millisecond.
+    let parity_rs = manifest_dir.join("tests").join("parity.rs");
+    let net_h2_rs = manifest_dir
+        .join("src")
+        .join("interpreter")
+        .join("net_h2.rs");
+    println!("cargo:rerun-if-changed={}", parity_rs.display());
+    println!("cargo:rerun-if-changed={}", net_h2_rs.display());
+
+    let parity_fn_names = scan_test_fn_names(&parity_rs);
+    let net_h2_test_count = count_cfg_test_attrs_in_tests_mod(&net_h2_rs);
+    write_parity_release_gate(
+        &out_dir.join("parity_release_gate.rs"),
+        &parity_fn_names,
+        net_h2_test_count,
+    );
+
     // ----- examples/quality/*/main.{td,tdm} (quality_cross_module_*) -----
     let mut cross_module_dirs: Vec<String> = Vec::new();
     if quality_dir.exists()
@@ -206,6 +238,122 @@ fn write_stem_list(out_path: &Path, const_name: &str, stems: &[String]) {
 /// The including test crate defines `run_fixture` (or uses a provided macro)
 /// to specialize per-runner. The macro indirection lets the same generated
 /// file be `include!`d by multiple test binaries if needed.
+/// Scan a Rust source file for `fn <name>(` identifiers preceded (possibly
+/// across blank lines and doc-comments) by a `#[test]` attribute. Returns
+/// only names starting with `test_` (the NET6-5b release gate convention).
+///
+/// The scanner is deliberately simple: it walks lines top-to-bottom and
+/// tracks whether the most recent non-comment / non-blank line was a
+/// `#[test]` attribute. This matches the grep pattern used historically
+/// by the release gate without requiring a full Rust parser.
+fn scan_test_fn_names(path: &Path) -> Vec<String> {
+    let source = match fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(_) => return Vec::new(),
+    };
+    let mut names = Vec::new();
+    let mut pending_test_attr = false;
+    for raw in source.lines() {
+        let line = raw.trim_start();
+        if line.is_empty() || line.starts_with("//") {
+            continue;
+        }
+        if line.starts_with("#[test]") || line.starts_with("#[tokio::test") {
+            pending_test_attr = true;
+            continue;
+        }
+        if pending_test_attr {
+            let after_fn = line
+                .strip_prefix("fn ")
+                .or_else(|| line.strip_prefix("async fn "))
+                .or_else(|| line.strip_prefix("pub fn "))
+                .or_else(|| line.strip_prefix("pub async fn "));
+            if let Some(rest) = after_fn
+                && let Some(end) = rest.find('(')
+            {
+                let name = rest[..end].trim();
+                if name.starts_with("test_") && is_valid_rust_ident(name) {
+                    names.push(name.to_string());
+                }
+            }
+            pending_test_attr = false;
+        }
+    }
+    names
+}
+
+/// Count `#[test]` attributes inside the first `#[cfg(test)] mod tests { ... }`
+/// region of a source file. Uses simple brace-depth tracking scoped to the
+/// region start, which suffices for our `net_h2.rs` layout.
+fn count_cfg_test_attrs_in_tests_mod(path: &Path) -> usize {
+    let source = match fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(_) => return 0,
+    };
+    let mut in_tests_mod = false;
+    let mut depth: i32 = 0;
+    let mut count: usize = 0;
+    let mut lines = source.lines().peekable();
+    while let Some(line) = lines.next() {
+        let trimmed = line.trim_start();
+        if !in_tests_mod {
+            if trimmed.starts_with("#[cfg(test)]") {
+                let mut found_mod = false;
+                for lookahead in lines.by_ref() {
+                    let la = lookahead.trim_start();
+                    if la.is_empty() || la.starts_with("//") {
+                        continue;
+                    }
+                    if la.starts_with("mod tests") || la.starts_with("pub mod tests") {
+                        found_mod = true;
+                    }
+                    break;
+                }
+                if found_mod {
+                    in_tests_mod = true;
+                    depth = 1;
+                    continue;
+                }
+            }
+            continue;
+        }
+        for ch in line.chars() {
+            match ch {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth <= 0 {
+                        return count;
+                    }
+                }
+                _ => {}
+            }
+        }
+        if trimmed.starts_with("#[test]") || trimmed.starts_with("#[tokio::test") {
+            count += 1;
+        }
+    }
+    count
+}
+
+fn write_parity_release_gate(out_path: &Path, fn_names: &[String], net_h2_count: usize) {
+    let mut out = String::new();
+    out.push_str("// @generated by build.rs -- DO NOT EDIT\n");
+    out.push_str("// C25B-003 Phase 2: NET6-5b release gate source-scan artefact.\n");
+    out.push_str("#[allow(dead_code)]\n");
+    out.push_str("pub const PARITY_TEST_FN_NAMES: &[&str] = &[\n");
+    for name in fn_names {
+        out.push_str(&format!("    {:?},\n", name));
+    }
+    out.push_str("];\n");
+    out.push_str("#[allow(dead_code)]\n");
+    out.push_str(&format!(
+        "pub const NET_H2_UNIT_TEST_COUNT: usize = {};\n",
+        net_h2_count
+    ));
+    fs::write(out_path, out).expect("failed to write generated parity release gate consts");
+}
+
 fn write_per_fixture_tests(out_path: &Path, category: &str, stems: &[String]) {
     let mut out = String::new();
     out.push_str("// @generated by build.rs -- DO NOT EDIT\n");

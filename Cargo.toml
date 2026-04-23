@@ -100,5 +100,18 @@ rustyline = { version = "14", default-features = false }
 h3 = "0.0.8"
 h3-quinn = "0.0.10"
 
+# C25B-004: perf regression gate. `criterion` drives the `benches/` corpus,
+# invoked by `cargo bench` locally and by the dedicated bench workflow in
+# CI (.github/workflows/bench.yml). Kept as dev-dep so production builds
+# / release binaries do not pull it in.
+criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
+
+# C25B-004 scaffold: one bench target; disable harness so criterion owns
+# the test harness. Additional axes (cold-compile, native runtime) will be
+# added in Phase 2 follow-up.
+[[bench]]
+name = "perf_baseline"
+harness = false
+
 [profile.dev]
 codegen-units = 256  # Explicit: Rust default for dev is 256

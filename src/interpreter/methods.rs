@@ -1,5 +1,6 @@
 use super::eval::{Interpreter, RuntimeError, Signal};
 use super::value::{AsyncStatus, AsyncValue, StreamStatus, StreamValue, Value};
+use super::value_key::ValueKey;
 /// Method dispatch for Taida values (auto-mold methods).
 ///
 /// This module contains eval_method_call and all type-specific method
@@ -11,6 +12,34 @@ use super::value::{AsyncStatus, AsyncValue, StreamStatus, StreamValue, Value};
 ///
 /// These are `impl Interpreter` methods split from eval.rs for maintainability.
 use crate::parser::FuncDef;
+use std::collections::HashSet;
+
+/// C25B-022 (Phase 5-C) / C25B-023 (Phase 5-E) — fast-path helper.
+///
+/// Try to build a set of `u64` fingerprints (derived from `ValueKey`)
+/// over `items`. Returns `None` if any element is not key-eligible
+/// (see `value_key.rs` for the classification); the caller must then
+/// fall back to the pre-existing `Vec::contains` linear scan, which
+/// preserves full `Value::eq` semantics including Int↔Float↔EnumVal
+/// coercion. When `Some(fingerprints)` is returned, callers can probe
+/// membership in O(1) and skip the O(N) linear walk.
+///
+/// Using a fingerprint (not `ValueKey<'a>` directly) sidesteps the
+/// lifetime plumbing that would be required to carry borrowed
+/// `ValueKey<'a>` values across the `eval_*_method` entry points —
+/// all of which operate on owned `Vec<Value>` captured from the
+/// receiver. Fingerprint collision risk is u64-wide and negligible
+/// for the scales we're targeting (tens of thousands of entries).
+/// On a fingerprint hit the caller still runs `Value::eq` to confirm
+/// so false positives are impossible.
+fn try_build_fingerprint_set(items: &[Value]) -> Option<HashSet<u64>> {
+    let mut set = HashSet::with_capacity(items.len());
+    for it in items {
+        let key = ValueKey::new(it)?;
+        set.insert(key.fingerprint());
+    }
+    Some(set)
+}
 
 impl Interpreter {
     /// Evaluate auto-mold method calls on values.
@@ -629,12 +658,12 @@ impl Interpreter {
         method: &str,
         args: &[Value],
     ) -> Result<Signal, RuntimeError> {
-        let entries = fields
+        let entries: Vec<Value> = fields
             .iter()
             .find(|(n, _)| n == "__entries")
             .and_then(|(_, v)| {
                 if let Value::List(items) = v {
-                    Some(items.clone())
+                    Some(items.as_ref().clone())
                 } else {
                     None
                 }
@@ -644,7 +673,7 @@ impl Interpreter {
         match method {
             "get" => {
                 let key = args.first().cloned().unwrap_or(Value::Str(String::new()));
-                for entry in &entries {
+                for entry in entries.iter() {
                     if let Value::BuchiPack(ef) = entry {
                         let entry_key = ef.iter().find(|(n, _)| n == "key").map(|(_, v)| v);
                         if entry_key == Some(&key) {
@@ -676,7 +705,7 @@ impl Interpreter {
                 let value = args.get(1).cloned().unwrap_or(Value::Unit);
                 let mut new_entries = Vec::new();
                 let mut found = false;
-                for entry in &entries {
+                for entry in entries.iter() {
                     if let Value::BuchiPack(ef) = entry {
                         let entry_key = ef.iter().find(|(n, _)| n == "key").map(|(_, v)| v);
                         if entry_key == Some(&key) {
@@ -697,7 +726,7 @@ impl Interpreter {
                     ]));
                 }
                 Ok(Signal::Value(Value::BuchiPack(vec![
-                    ("__entries".into(), Value::List(new_entries)),
+                    ("__entries".into(), Value::list(new_entries)),
                     ("__type".into(), Value::Str("HashMap".into())),
                 ])))
             }
@@ -715,7 +744,7 @@ impl Interpreter {
                     })
                     .collect();
                 Ok(Signal::Value(Value::BuchiPack(vec![
-                    ("__entries".into(), Value::List(new_entries)),
+                    ("__entries".into(), Value::list(new_entries)),
                     ("__type".into(), Value::Str("HashMap".into())),
                 ])))
             }
@@ -741,7 +770,7 @@ impl Interpreter {
                         }
                     })
                     .collect();
-                Ok(Signal::Value(Value::List(keys)))
+                Ok(Signal::Value(Value::list(keys)))
             }
             "values" => {
                 let values: Vec<Value> = entries
@@ -756,7 +785,7 @@ impl Interpreter {
                         }
                     })
                     .collect();
-                Ok(Signal::Value(Value::List(values)))
+                Ok(Signal::Value(Value::list(values)))
             }
             "entries" => {
                 let pairs: Vec<Value> = entries
@@ -780,18 +809,18 @@ impl Interpreter {
                         }
                     })
                     .collect();
-                Ok(Signal::Value(Value::List(pairs)))
+                Ok(Signal::Value(Value::list(pairs)))
             }
             "size" => Ok(Signal::Value(Value::Int(entries.len() as i64))),
             "isEmpty" => Ok(Signal::Value(Value::Bool(entries.is_empty()))),
             "merge" => {
                 let other = args.first().cloned().unwrap_or(Value::Unit);
-                let other_entries = if let Value::BuchiPack(of) = &other {
+                let other_entries: Vec<Value> = if let Value::BuchiPack(of) = &other {
                     of.iter()
                         .find(|(n, _)| n == "__entries")
                         .and_then(|(_, v)| {
                             if let Value::List(items) = v {
-                                Some(items.clone())
+                                Some(items.as_ref().clone())
                             } else {
                                 None
                             }
@@ -800,23 +829,58 @@ impl Interpreter {
                 } else {
                     Vec::new()
                 };
-                let mut merged = entries;
-                for other_entry in other_entries {
-                    if let Value::BuchiPack(ref oef) = other_entry {
-                        let other_key = oef.iter().find(|(n, _)| n == "key").map(|(_, v)| v);
-                        // Remove existing entry with same key
-                        merged.retain(|e| {
-                            if let Value::BuchiPack(ef) = e {
-                                ef.iter().find(|(n, _)| n == "key").map(|(_, v)| v) != other_key
-                            } else {
-                                true
-                            }
-                        });
+                // C25B-023 (Phase 5-E) fast path: pre-hash the set of
+                // `other` keys. The original implementation walked the
+                // full `merged` Vec on every other_entry and did a
+                // BuchiPack field scan for "key" — O(N*M*K). With the
+                // HashSet we can do a single pass over `merged`
+                // retaining only entries whose key is *not* in
+                // `other_keys`, then append all of `other_entries`.
+                //
+                // If any key is not hashable (Float, Function, etc.)
+                // we fall back to the O(N*M) path to preserve the
+                // original Value::eq semantics (which coerce Int↔Float↔
+                // EnumVal).
+                let extract_key = |entry: &Value| -> Option<Value> {
+                    if let Value::BuchiPack(ef) = entry {
+                        ef.iter().find(|(n, _)| n == "key").map(|(_, v)| v.clone())
+                    } else {
+                        None
                     }
-                    merged.push(other_entry);
+                };
+                let other_keys: Vec<Value> = other_entries.iter().filter_map(extract_key).collect();
+                let mut merged: Vec<Value> = entries;
+                if let Some(other_key_fps) = try_build_fingerprint_set(&other_keys) {
+                    merged.retain(|e| match extract_key(e) {
+                        Some(k) => match ValueKey::new(&k) {
+                            Some(vk) if other_key_fps.contains(&vk.fingerprint()) => {
+                                // Confirm with Value::eq (guards against
+                                // hypothetical fingerprint collision).
+                                !other_keys.iter().any(|ok| ok == &k)
+                            }
+                            Some(_) => true,
+                            None => !other_keys.iter().any(|ok| ok == &k),
+                        },
+                        None => true,
+                    });
+                    merged.extend(other_entries);
+                } else {
+                    for other_entry in other_entries {
+                        if let Value::BuchiPack(ref oef) = other_entry {
+                            let other_key = oef.iter().find(|(n, _)| n == "key").map(|(_, v)| v);
+                            merged.retain(|e| {
+                                if let Value::BuchiPack(ef) = e {
+                                    ef.iter().find(|(n, _)| n == "key").map(|(_, v)| v) != other_key
+                                } else {
+                                    true
+                                }
+                            });
+                        }
+                        merged.push(other_entry);
+                    }
                 }
                 Ok(Signal::Value(Value::BuchiPack(vec![
-                    ("__entries".into(), Value::List(merged)),
+                    ("__entries".into(), Value::list(merged)),
                     ("__type".into(), Value::Str("HashMap".into())),
                 ])))
             }
@@ -858,12 +922,12 @@ impl Interpreter {
         method: &str,
         args: &[Value],
     ) -> Result<Signal, RuntimeError> {
-        let items = fields
+        let items: Vec<Value> = fields
             .iter()
             .find(|(n, _)| n == "__items")
             .and_then(|(_, v)| {
                 if let Value::List(items) = v {
-                    Some(items.clone())
+                    Some(items.as_ref().clone())
                 } else {
                     None
                 }
@@ -878,7 +942,7 @@ impl Interpreter {
                     new_items.push(item);
                 }
                 Ok(Signal::Value(Value::BuchiPack(vec![
-                    ("__items".into(), Value::List(new_items)),
+                    ("__items".into(), Value::list(new_items)),
                     ("__type".into(), Value::Str("Set".into())),
                 ])))
             }
@@ -886,7 +950,7 @@ impl Interpreter {
                 let item = args.first().cloned().unwrap_or(Value::Unit);
                 let new_items: Vec<Value> = items.into_iter().filter(|i| i != &item).collect();
                 Ok(Signal::Value(Value::BuchiPack(vec![
-                    ("__items".into(), Value::List(new_items)),
+                    ("__items".into(), Value::list(new_items)),
                     ("__type".into(), Value::Str("Set".into())),
                 ])))
             }
@@ -896,12 +960,12 @@ impl Interpreter {
             }
             "union" => {
                 let other = args.first().cloned().unwrap_or(Value::Unit);
-                let other_items = if let Value::BuchiPack(of) = &other {
+                let other_items: Vec<Value> = if let Value::BuchiPack(of) = &other {
                     of.iter()
                         .find(|(n, _)| n == "__items")
                         .and_then(|(_, v)| {
                             if let Value::List(items) = v {
-                                Some(items.clone())
+                                Some(items.as_ref().clone())
                             } else {
                                 None
                             }
@@ -910,25 +974,58 @@ impl Interpreter {
                 } else {
                     Vec::new()
                 };
+                // C25B-022 (Phase 5-C) fast path: HashSet of existing
+                // fingerprints. If both sides are fully hashable, each
+                // `contains` probe becomes O(1), dropping the union
+                // cost from O(N*M) to O(N+M). Mixed-Float / Function
+                // operands fall back to the original `Vec::contains`.
                 let mut result = items;
-                for item in other_items {
-                    if !result.contains(&item) {
-                        result.push(item);
+                if let Some(mut seen) = try_build_fingerprint_set(&result) {
+                    for item in other_items {
+                        if let Some(key) = ValueKey::new(&item) {
+                            let fp = key.fingerprint();
+                            if seen.insert(fp) {
+                                // Confirm with Value::eq against any
+                                // previously-inserted entry that hashed
+                                // to the same bucket. For the key-
+                                // eligible subset this coincides with
+                                // ValueKey::eq, so a hit-check is only
+                                // needed when an existing fingerprint
+                                // is present (seen.insert already told
+                                // us `false` in that case, so we skip).
+                                result.push(item);
+                            } else if !result.iter().any(|e| e == &item) {
+                                // Extremely rare fingerprint collision:
+                                // keep Value::eq authoritative. 64-bit
+                                // hash; collision probability ≈ 0.
+                                result.push(item);
+                            }
+                        } else if !result.contains(&item) {
+                            // Item is not key-eligible (e.g. Float).
+                            // Linear scan preserves Value::eq semantics.
+                            result.push(item);
+                        }
+                    }
+                } else {
+                    for item in other_items {
+                        if !result.contains(&item) {
+                            result.push(item);
+                        }
                     }
                 }
                 Ok(Signal::Value(Value::BuchiPack(vec![
-                    ("__items".into(), Value::List(result)),
+                    ("__items".into(), Value::list(result)),
                     ("__type".into(), Value::Str("Set".into())),
                 ])))
             }
             "intersect" => {
                 let other = args.first().cloned().unwrap_or(Value::Unit);
-                let other_items = if let Value::BuchiPack(of) = &other {
+                let other_items: Vec<Value> = if let Value::BuchiPack(of) = &other {
                     of.iter()
                         .find(|(n, _)| n == "__items")
                         .and_then(|(_, v)| {
                             if let Value::List(items) = v {
-                                Some(items.clone())
+                                Some(items.as_ref().clone())
                             } else {
                                 None
                             }
@@ -937,23 +1034,42 @@ impl Interpreter {
                 } else {
                     Vec::new()
                 };
-                let result: Vec<Value> = items
-                    .into_iter()
-                    .filter(|item| other_items.contains(item))
-                    .collect();
+                // C25B-022 (Phase 5-C) fast path: pre-hash `other_items`
+                // and probe each `items` entry in O(1).
+                let result: Vec<Value> =
+                    if let Some(other_fps) = try_build_fingerprint_set(&other_items) {
+                        items
+                            .into_iter()
+                            .filter(|item| match ValueKey::new(item) {
+                                Some(k) if other_fps.contains(&k.fingerprint()) => {
+                                    // Confirm via Value::eq to guard against
+                                    // the (astronomically unlikely) 64-bit
+                                    // fingerprint collision.
+                                    other_items.iter().any(|o| o == item)
+                                }
+                                Some(_) => false,
+                                None => other_items.contains(item),
+                            })
+                            .collect()
+                    } else {
+                        items
+                            .into_iter()
+                            .filter(|item| other_items.contains(item))
+                            .collect()
+                    };
                 Ok(Signal::Value(Value::BuchiPack(vec![
-                    ("__items".into(), Value::List(result)),
+                    ("__items".into(), Value::list(result)),
                     ("__type".into(), Value::Str("Set".into())),
                 ])))
             }
             "diff" => {
                 let other = args.first().cloned().unwrap_or(Value::Unit);
-                let other_items = if let Value::BuchiPack(of) = &other {
+                let other_items: Vec<Value> = if let Value::BuchiPack(of) = &other {
                     of.iter()
                         .find(|(n, _)| n == "__items")
                         .and_then(|(_, v)| {
                             if let Value::List(items) = v {
-                                Some(items.clone())
+                                Some(items.as_ref().clone())
                             } else {
                                 None
                             }
@@ -962,16 +1078,31 @@ impl Interpreter {
                 } else {
                     Vec::new()
                 };
-                let result: Vec<Value> = items
-                    .into_iter()
-                    .filter(|item| !other_items.contains(item))
-                    .collect();
+                // C25B-022 (Phase 5-C) fast path — symmetric to intersect.
+                let result: Vec<Value> =
+                    if let Some(other_fps) = try_build_fingerprint_set(&other_items) {
+                        items
+                            .into_iter()
+                            .filter(|item| match ValueKey::new(item) {
+                                Some(k) if other_fps.contains(&k.fingerprint()) => {
+                                    !other_items.iter().any(|o| o == item)
+                                }
+                                Some(_) => true,
+                                None => !other_items.contains(item),
+                            })
+                            .collect()
+                    } else {
+                        items
+                            .into_iter()
+                            .filter(|item| !other_items.contains(item))
+                            .collect()
+                    };
                 Ok(Signal::Value(Value::BuchiPack(vec![
-                    ("__items".into(), Value::List(result)),
+                    ("__items".into(), Value::list(result)),
                     ("__type".into(), Value::Str("Set".into())),
                 ])))
             }
-            "toList" => Ok(Signal::Value(Value::List(items))),
+            "toList" => Ok(Signal::Value(Value::list(items))),
             "size" => Ok(Signal::Value(Value::Int(items.len() as i64))),
             "isEmpty" => Ok(Signal::Value(Value::Bool(items.is_empty()))),
             "toString" => {
@@ -1179,7 +1310,7 @@ impl Interpreter {
                 if let Some((pat, flags)) = args.first().and_then(super::regex_eval::as_regex) {
                     match super::regex_eval::split(s, &pat, &flags) {
                         Ok(parts) => {
-                            return Ok(Signal::Value(Value::List(
+                            return Ok(Signal::Value(Value::list(
                                 parts.into_iter().map(Value::Str).collect(),
                             )));
                         }
@@ -1203,7 +1334,7 @@ impl Interpreter {
                         .map(|p| Value::Str(p.to_string()))
                         .collect()
                 };
-                Ok(Signal::Value(Value::List(parts)))
+                Ok(Signal::Value(Value::list(parts)))
             }
             // C12-6c: match / search methods — Regex arg required.
             // Surface a RuntimeError if the first arg isn't a Regex
@@ -1483,7 +1614,7 @@ impl Interpreter {
             }
             // Display (C12-2b: universal .toString() adoption)
             "toString" => Ok(Signal::Value(Value::Str(
-                Value::List(items.to_vec()).to_display_string(),
+                Value::list(items.to_vec()).to_display_string(),
             ))),
             _ => Err(RuntimeError {
                 message: format!(

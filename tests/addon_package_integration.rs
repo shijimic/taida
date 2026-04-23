@@ -30,11 +30,14 @@
 
 #![cfg(feature = "native")]
 
+mod common;
+
+use common::taida_bin as resolve_taida_bin;
 use std::path::PathBuf;
 use std::process::Command;
 
 fn taida_bin() -> PathBuf {
-    PathBuf::from(env!("CARGO_BIN_EXE_taida"))
+    resolve_taida_bin()
 }
 
 fn manifest_dir() -> PathBuf {
@@ -421,8 +424,8 @@ stdout(echo("x"))
     let combined = format!("{}{}", stderr, stdout);
     assert!(
         combined.contains("not supported on backend 'js'")
-            || combined.contains("(RC1: native only)"),
-        "diagnostic must classify the JS rejection, got: {}",
+            && combined.contains("supported: interpreter, native; wasm planned for D26"),
+        "diagnostic must classify the JS rejection with the C25B-030 template, got: {}",
         combined
     );
 

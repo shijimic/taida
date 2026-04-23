@@ -29,6 +29,8 @@
 
 #![cfg(feature = "native")]
 
+mod common;
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -38,7 +40,7 @@ use taida::addon::{TAIDA_ADDON_ABI_VERSION, TAIDA_ADDON_ENTRY_SYMBOL};
 // ── Helpers ─────────────────────────────────────────────────
 
 fn taida_bin() -> PathBuf {
-    PathBuf::from(env!("CARGO_BIN_EXE_taida"))
+    common::taida_bin()
 }
 
 /// Locate the external `taida-lang/terminal` repository on disk.
@@ -302,8 +304,8 @@ stdout("unreachable")
     );
     assert!(
         combined.contains("not supported on backend 'js'")
-            || combined.contains("(RC1: native only)"),
-        "diagnostic must use the RC1 backend-policy template, got: {}",
+            && combined.contains("supported: interpreter, native; wasm planned for D26"),
+        "diagnostic must use the C25B-030 backend-policy template, got: {}",
         combined
     );
 

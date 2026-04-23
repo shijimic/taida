@@ -13,6 +13,7 @@
 
 #![cfg(unix)]
 
+mod common;
 mod mock;
 
 use std::fs;
@@ -33,7 +34,7 @@ fn unique_temp_dir(prefix: &str) -> PathBuf {
 }
 
 fn taida_bin() -> PathBuf {
-    PathBuf::from(env!("CARGO_BIN_EXE_taida"))
+    common::taida_bin()
 }
 
 /// C17B-003: pre-C17 install (`.taida_installed` present, `_meta.toml`

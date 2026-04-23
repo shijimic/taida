@@ -6,6 +6,8 @@
 
 #![cfg(feature = "community")]
 
+mod common;
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -66,8 +68,8 @@ fn setup_repo(root: &Path, pkg: &str) -> PathBuf {
     project
 }
 
-fn taida_bin() -> String {
-    env!("CARGO_BIN_EXE_taida").to_string()
+fn taida_bin() -> PathBuf {
+    common::taida_bin()
 }
 
 #[test]

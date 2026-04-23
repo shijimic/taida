@@ -105,7 +105,11 @@ pub fn lookup_mold_return_kind(name: &str) -> Option<MoldReturnKind> {
         // fast-path in `stdout_with_tag` which decoded the pointer as
         // f64 bits and printed subnormal garbage.
         "Float" => Pack,
-        "Sqrt" | "Pow" => Float,
+        // C25B-025 (Phase 5-A): math molds. All return Float, including
+        // those that take Int inputs (Int is widened to f64 first).
+        "Sqrt" | "Pow" | "Exp" | "Ln" | "Log" | "Log2" | "Log10" => Float,
+        "Sin" | "Cos" | "Tan" | "Asin" | "Acos" | "Atan" | "Atan2" => Float,
+        "Sinh" | "Cosh" | "Tanh" => Float,
 
         // ── Bool-returning molds ────────────────────────────────────
         // C21B-seed-07: `Bool[x]()` returns a Lax[Bool] pack.

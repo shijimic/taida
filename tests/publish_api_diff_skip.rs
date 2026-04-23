@@ -16,6 +16,8 @@
 
 #![cfg(feature = "community")]
 
+mod common;
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -45,8 +47,8 @@ fn run_git(args: &[&str], dir: &Path) {
     );
 }
 
-fn taida_bin() -> String {
-    env!("CARGO_BIN_EXE_taida").to_string()
+fn taida_bin() -> PathBuf {
+    common::taida_bin()
 }
 
 /// Build a repo whose `taida/bad.td` contains Taida source that the

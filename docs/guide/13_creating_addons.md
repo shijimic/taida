@@ -12,14 +12,138 @@ This guide is aimed at addon *authors*. See `docs/reference/addon_manifest.md`
 for the manifest reference and forward-compat policy, and
 `docs/reference/cli.md` for the `taida publish` CLI contract.
 
+### Backend policy (what runs your addon) — @c.25.rc7 redefinition
+
+Under `@c.25.rc7` the supported backend matrix for addons is:
+
+| Backend        | Status      | What happens at import                                                                 |
+|----------------|-------------|----------------------------------------------------------------------------------------|
+| Interpreter    | **Supported** | Addon facade runs as a dynamic module; cdylib functions dispatch via `dlopen` when the interpreter binary is built with `feature = "native"` (the default). |
+| Native (AOT)   | **Supported** | Addon facade is statically analysed into an `AddonFacadeSummary` by `src/addon/facade.rs` and lowered through `src/codegen/lower/imports.rs`. FuncDefs become IR functions; pack / scalar / list / template bindings are replayed into the module init path. |
+| JS transpiler  | **Rejected**  | There is no JS-side addon dispatcher today. The import produces a deterministic error. |
+| WASM (min / wasi) | **Rejected** | Reserved for the D26 breaking-change phase. The D26 wasm backend will reuse the `src/addon/facade.rs` static analyser so authors will not have to re-write facades. |
+
+Authors targeting interpreter + native do not need to write two
+facade files. The same `taida/<stem>.td` must work on both — the
+interpreter resolves user imports against the facade's live
+environment snapshot, and the native backend resolves against the
+`AddonFacadeSummary` extracted by the shared loader. Every construct
+accepted on one path is accepted on the other (see
+[What the native backend understands inside a facade](#what-the-native-backend-understands-inside-a-facade)
+immediately below).
+
+### What the native backend understands inside a facade
+
+The facade loader accepts the following top-level constructs. Each
+bullet names the C25B-030 Phase that unlocked it, for cross-
+referencing the blocker audit in `.dev/C25_BLOCKERS.md`:
+
+- **Aliases** (RC2.5 v1) — `FacadeName <= lowercaseAddonFn`, where
+  `lowercaseAddonFn` appears in the manifest's `[functions]` table.
+- **Pack literals** (RC2.5 v1) — `FacadeName <= @(field <= value, ...)`.
+- **Scalar / list / arithmetic / template bindings** (Phase 1E-β) —
+  `N <= 0`, `msg <= "hello"`, `greet <= \`hi, ${who}\``, arithmetic
+  expressions, function / method calls, field accesses, mold /
+  type instantiations.
+- **FuncDefs** (Phase 1E-β) — `Name args = body => :Type`. Both
+  exported (public) and private (`_`-prefixed) FuncDefs are
+  collected; privates promoted into the summary through
+  transitive reachability from an exported FuncDef body or pack
+  binding.
+- **Relative imports** (Phase 1E-α) — `>>> ./child.td =>
+  @(Sym1, Sym2)`. Non-relative paths (`>>> taida-lang/foo`,
+  `>>> npm:*`, versioned imports) are rejected.
+- **Export declarations** — `<<< @(Sym1, Sym2)`. When present, the
+  `<<<` clause is authoritative — symbols absent from it cannot be
+  named in user imports.
+
+Still deferred to C25B-030 Phase 1E-γ (no real addon in the
+ecosystem uses these today, so the rejection is informational):
+
+- `TypeDef` / `EnumDef` / `MoldDef` statements inside a facade.
+- `<<< <path>` re-exports.
+
+If your facade depends on any of these, compile errors at
+`taida build --target native` will point you at the Phase 1E-γ
+tracker. Interim workaround: expose a facade FuncDef that wraps
+the missing construct with a pure-Taida surface the loader does
+understand.
+
 Under @c.14.rc1 the publish and release workflow was redesigned to be
 **tag-push-only**: `taida publish` just pushes a git tag and exits,
 and the addon repository's own CI (`.github/workflows/release.yml`,
 scaffolded by `taida init --target rust-addon`) builds and publishes
 the release as `github-actions[bot]`. See
 [§3 The release workflow](#3-the-release-workflow) below for the
-symmetric 4-job pipeline, and [§7 Migration from pre-C14 addons](#7-migration-from-pre-c14-addons)
+symmetric 4-job pipeline, and [§8 Migration from pre-C14 addons](#8-migration-from-pre-c14-addons)
 for the steps existing addons need to take.
+
+---
+
+## 0. Getting started with `taida init --target rust-addon`
+
+The fastest path from nothing to a publishable addon is the
+built-in scaffold. `taida init --target rust-addon` writes the
+complete on-disk layout you need — Rust crate, facade, manifest,
+and the C14 release workflow — in one step:
+
+```bash
+$ taida init --target rust-addon my-addon
+Initialized Taida project 'my-addon' (rust-addon) in my-addon
+  packages.tdm
+  Cargo.toml
+  src/lib.rs
+  native/addon.toml
+  taida/my-addon.td
+  .gitignore
+  README.md
+  .github/workflows/release.yml
+```
+
+What you get:
+
+- **`packages.tdm`** with a `<<<@a` placeholder identity. Before
+  your first publish, replace it with the qualified form
+  `<<<@a owner/my-addon @(MyExport, ...)` — `taida publish`
+  will reject a bare identity.
+- **`Cargo.toml`** with `crate-type = ["rlib", "cdylib"]` and
+  `taida-addon = "2.0"` (the ABI v1 author crate).
+- **`src/lib.rs`** with a minimal `declare_addon!` entry point
+  exporting a sample `echo` function through
+  `taida_addon_get_v1`.
+- **`native/addon.toml`** with `abi = 1`, an `OWNER/...`
+  placeholder in `package` / `url`, and an empty
+  `[library.prebuild.targets]` table. CI fills the SHA-256
+  target entries at release time through the `addon.lock.toml`
+  path (see §3 and §5 below).
+- **`taida/<name>.td`** — your Taida-side facade. Imports from
+  this package resolve against the symbols this file exports.
+- **`.github/workflows/release.yml`** — the C14 template,
+  symmetric with Taida core's own release workflow. See §3.
+
+Next steps:
+
+1. Replace `OWNER` in `native/addon.toml` (two places) with your
+   GitHub org or user.
+2. Replace the `<<<@a` placeholder in `packages.tdm` with the
+   qualified form and declare your exports.
+3. `cargo build --release` to verify the cdylib compiles.
+4. (Optional) point `native/addon.toml`'s `prebuild.url` at a
+   relative `file://target/release/lib<name>.so` to test
+   `taida install` locally against your own build output —
+   see §6.
+5. When you are ready to cut the first release, push the
+   repository to GitHub and run `taida publish --dry-run`
+   to preview the version bump. `taida publish` (without
+   `--dry-run`) creates and pushes the tag; CI does the
+   rest (§3, §4).
+
+The same scaffold is what the `taida-lang/terminal` addon is
+built on — its `.github/workflows/release.yml` is the template
+in this repo with the two placeholders substituted. If the
+scaffold ever drifts from terminal's working setup, the
+symmetry is re-asserted by
+`tests/init_release_workflow_symmetry.rs`.
 
 ---
 

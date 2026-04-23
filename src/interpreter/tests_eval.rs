@@ -758,7 +758,10 @@ result <= numbers.get(10).unmold()
     fn test_list_sort_by() {
         let source = "neg x =\n  0 - x\n=> :Int\nresult <= Sort[@[3, 1, 2]](by <= neg)\nresult";
         if let Value::List(items) = eval_ok(source) {
-            assert_eq!(items, vec![Value::Int(3), Value::Int(2), Value::Int(1)]);
+            assert_eq!(
+                items.as_slice(),
+                &[Value::Int(3), Value::Int(2), Value::Int(1)]
+            );
         } else {
             panic!("Expected list");
         }
@@ -768,7 +771,10 @@ result <= numbers.get(10).unmold()
     fn test_list_take() {
         let source = "Take[@[1, 2, 3, 4, 5], 3]()";
         if let Value::List(items) = eval_ok(source) {
-            assert_eq!(items, vec![Value::Int(1), Value::Int(2), Value::Int(3)]);
+            assert_eq!(
+                items.as_slice(),
+                &[Value::Int(1), Value::Int(2), Value::Int(3)]
+            );
         } else {
             panic!("Expected list");
         }
@@ -778,7 +784,10 @@ result <= numbers.get(10).unmold()
     fn test_list_drop() {
         let source = "Drop[@[1, 2, 3, 4, 5], 2]()";
         if let Value::List(items) = eval_ok(source) {
-            assert_eq!(items, vec![Value::Int(3), Value::Int(4), Value::Int(5)]);
+            assert_eq!(
+                items.as_slice(),
+                &[Value::Int(3), Value::Int(4), Value::Int(5)]
+            );
         } else {
             panic!("Expected list");
         }
@@ -834,8 +843,8 @@ result <= numbers.get(10).unmold()
     fn test_mold_split() {
         if let Value::List(items) = eval_ok("Split[\"a,b,c\", \",\"]()") {
             assert_eq!(
-                items,
-                vec![
+                items.as_slice(),
+                &[
                     Value::Str("a".into()),
                     Value::Str("b".into()),
                     Value::Str("c".into())
@@ -892,7 +901,10 @@ result <= numbers.get(10).unmold()
     #[test]
     fn test_mold_reverse_list() {
         if let Value::List(items) = eval_ok("Reverse[@[1, 2, 3]]()") {
-            assert_eq!(items, vec![Value::Int(3), Value::Int(2), Value::Int(1)]);
+            assert_eq!(
+                items.as_slice(),
+                &[Value::Int(3), Value::Int(2), Value::Int(1)]
+            );
         } else {
             panic!("Expected list");
         }
@@ -1104,8 +1116,8 @@ Utf8Decode[bb]()",
 
         if let Value::List(items) = eval_ok(r#"Chars["A😀é"]()"#) {
             assert_eq!(
-                items,
-                vec![
+                items.as_slice(),
+                &[
                     Value::Str("A".into()),
                     Value::Str("😀".into()),
                     Value::Str("é".into())
@@ -1121,8 +1133,8 @@ Utf8Decode[bb]()",
     fn test_mold_concat() {
         if let Value::List(items) = eval_ok("Concat[@[1, 2], @[3, 4]]()") {
             assert_eq!(
-                items,
-                vec![Value::Int(1), Value::Int(2), Value::Int(3), Value::Int(4)]
+                items.as_slice(),
+                &[Value::Int(1), Value::Int(2), Value::Int(3), Value::Int(4)]
             );
         } else {
             panic!("Expected list");
@@ -1132,7 +1144,10 @@ Utf8Decode[bb]()",
     #[test]
     fn test_mold_append() {
         if let Value::List(items) = eval_ok("Append[@[1, 2], 3]()") {
-            assert_eq!(items, vec![Value::Int(1), Value::Int(2), Value::Int(3)]);
+            assert_eq!(
+                items.as_slice(),
+                &[Value::Int(1), Value::Int(2), Value::Int(3)]
+            );
         } else {
             panic!("Expected list");
         }
@@ -1141,7 +1156,10 @@ Utf8Decode[bb]()",
     #[test]
     fn test_mold_prepend() {
         if let Value::List(items) = eval_ok("Prepend[@[2, 3], 1]()") {
-            assert_eq!(items, vec![Value::Int(1), Value::Int(2), Value::Int(3)]);
+            assert_eq!(
+                items.as_slice(),
+                &[Value::Int(1), Value::Int(2), Value::Int(3)]
+            );
         } else {
             panic!("Expected list");
         }
@@ -1163,7 +1181,10 @@ Utf8Decode[bb]()",
     #[test]
     fn test_mold_sort() {
         if let Value::List(items) = eval_ok("Sort[@[3, 1, 2]]()") {
-            assert_eq!(items, vec![Value::Int(1), Value::Int(2), Value::Int(3)]);
+            assert_eq!(
+                items.as_slice(),
+                &[Value::Int(1), Value::Int(2), Value::Int(3)]
+            );
         } else {
             panic!("Expected list");
         }
@@ -1172,7 +1193,10 @@ Utf8Decode[bb]()",
     #[test]
     fn test_mold_sort_reverse() {
         if let Value::List(items) = eval_ok("Sort[@[3, 1, 2]](reverse <= true)") {
-            assert_eq!(items, vec![Value::Int(3), Value::Int(2), Value::Int(1)]);
+            assert_eq!(
+                items.as_slice(),
+                &[Value::Int(3), Value::Int(2), Value::Int(1)]
+            );
         } else {
             panic!("Expected list");
         }
@@ -1181,7 +1205,10 @@ Utf8Decode[bb]()",
     #[test]
     fn test_mold_unique() {
         if let Value::List(items) = eval_ok("Unique[@[1, 2, 2, 3, 3]]()") {
-            assert_eq!(items, vec![Value::Int(1), Value::Int(2), Value::Int(3)]);
+            assert_eq!(
+                items.as_slice(),
+                &[Value::Int(1), Value::Int(2), Value::Int(3)]
+            );
         } else {
             panic!("Expected list");
         }
@@ -1191,8 +1218,8 @@ Utf8Decode[bb]()",
     fn test_mold_flatten() {
         if let Value::List(items) = eval_ok("Flatten[@[@[1, 2], @[3, 4]]]()") {
             assert_eq!(
-                items,
-                vec![Value::Int(1), Value::Int(2), Value::Int(3), Value::Int(4)]
+                items.as_slice(),
+                &[Value::Int(1), Value::Int(2), Value::Int(3), Value::Int(4)]
             );
         } else {
             panic!("Expected list");
@@ -1262,7 +1289,7 @@ Utf8Decode[bb]()",
     fn test_mold_pipeline_list() {
         let source = "isEven x =\n  Mod[x, 2]() ]=> r\n  r == 0\n=> :Bool\n@[1, 2, 3, 4, 5] => Filter[_, isEven]() => Map[_, _ x = x * 2]() => result\nresult";
         if let Value::List(items) = eval_ok(source) {
-            assert_eq!(items, vec![Value::Int(4), Value::Int(8)]);
+            assert_eq!(items.as_slice(), &[Value::Int(4), Value::Int(8)]);
         } else {
             panic!("Expected list");
         }

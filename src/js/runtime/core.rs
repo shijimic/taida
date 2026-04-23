@@ -1676,14 +1676,29 @@ function __taida_str_search(s, rx) {
   const prefix = s.slice(0, m.index);
   return Array.from(prefix).length;
 }
-function Slice(val, opts) {
-  const start = (opts && __taida_isIntNumber(opts.start)) ? opts.start : 0;
+function Slice(val, optsOrStart, maybeEnd) {
+  // C25B-031: support both forms —
+  //   named:      Slice[val]({start, end})         → optsOrStart is an object
+  //   positional: Slice[val, start, end]()         → optsOrStart is an Int
+  // This matches the interpreter, which prefers positional type_args over
+  // named fields.
+  let start = 0;
+  let endOpt = undefined;
+  if (__taida_isIntNumber(optsOrStart)) {
+    start = optsOrStart;
+    if (__taida_isIntNumber(maybeEnd)) {
+      endOpt = maybeEnd;
+    }
+  } else if (optsOrStart && typeof optsOrStart === 'object') {
+    if (__taida_isIntNumber(optsOrStart.start)) start = optsOrStart.start;
+    if (__taida_isIntNumber(optsOrStart.end)) endOpt = optsOrStart.end;
+  }
   if (typeof val === 'string') {
-    const end = (opts && __taida_isIntNumber(opts.end)) ? opts.end : val.length;
+    const end = (endOpt !== undefined) ? endOpt : val.length;
     return val.slice(start, end);
   }
   if (val instanceof Uint8Array) {
-    const end = (opts && __taida_isIntNumber(opts.end)) ? opts.end : val.length;
+    const end = (endOpt !== undefined) ? endOpt : val.length;
     const s = Math.max(0, Math.min(val.length, start));
     const e = Math.max(0, Math.min(val.length, end));
     const from = Math.min(s, e);
@@ -1716,6 +1731,35 @@ function Ceil(num) { return typeof num === 'number' ? Math.ceil(num) : 0; }
 function Round(num) { return typeof num === 'number' ? Math.round(num) : 0; }
 function Truncate(num) { return typeof num === 'number' ? Math.trunc(num) : 0; }
 function Clamp(num, min, max) { return typeof num === 'number' ? Math.min(Math.max(num, min), max) : 0; }
+// C25B-025 (Phase 5-A): math molds. All return Number; interpreter
+// widens Int inputs to f64 first so these accept either. Matches the
+// interpreter's `f64::sqrt` etc. semantics (NaN / ±Infinity preserved).
+function Sqrt(num) { return typeof num === 'number' ? Math.sqrt(num) : 0; }
+function Pow(base, exp) {
+  return (typeof base === 'number' && typeof exp === 'number') ? Math.pow(base, exp) : 0;
+}
+function Exp(num) { return typeof num === 'number' ? Math.exp(num) : 0; }
+function Ln(num) { return typeof num === 'number' ? Math.log(num) : 0; }
+function Log2(num) { return typeof num === 'number' ? Math.log2(num) : 0; }
+function Log10(num) { return typeof num === 'number' ? Math.log10(num) : 0; }
+function Log(value, base) {
+  if (typeof value !== 'number') return 0;
+  if (base === undefined) return Math.log(value);
+  if (typeof base !== 'number') return 0;
+  return Math.log(value) / Math.log(base);
+}
+function Sin(num) { return typeof num === 'number' ? Math.sin(num) : 0; }
+function Cos(num) { return typeof num === 'number' ? Math.cos(num) : 0; }
+function Tan(num) { return typeof num === 'number' ? Math.tan(num) : 0; }
+function Asin(num) { return typeof num === 'number' ? Math.asin(num) : 0; }
+function Acos(num) { return typeof num === 'number' ? Math.acos(num) : 0; }
+function Atan(num) { return typeof num === 'number' ? Math.atan(num) : 0; }
+function Atan2(y, x) {
+  return (typeof y === 'number' && typeof x === 'number') ? Math.atan2(y, x) : 0;
+}
+function Sinh(num) { return typeof num === 'number' ? Math.sinh(num) : 0; }
+function Cosh(num) { return typeof num === 'number' ? Math.cosh(num) : 0; }
+function Tanh(num) { return typeof num === 'number' ? Math.tanh(num) : 0; }
 
 // ── List Mold types (new operation molds) ───────────────
 function Concat(list, other) {
@@ -2487,17 +2531,55 @@ if (!String.prototype.__taida_str_patched) {
 }
 
 // ── Helper: sort object keys for deterministic JSON output ──
+//
+// C25B-028: monadic packs (Lax / Gorillax / RelaxedGorillax / Result) must
+// match the interpreter's `jsonEncode` output, which renders the `__*`
+// fields verbatim with two normalizations:
+//   - `hasValue` is exposed as a real Bool (the JS `Gorillax()` / `Lax()`
+//     constructors store it as a callable that returns a bool — JSON would
+//     otherwise drop the key).
+//   - `__error` / `__predicate` / `throw` fields hold internal error
+//     callables or null; the interpreter represents the absent-error case
+//     as `Value::Unit` which serializes as `{}`. We normalise `null` and
+//     functions to `{}` here to match.
+//   - `__default` is passed through when present (Lax).
+function __taida_is_monadic_pack_obj(obj) {
+  return obj && typeof obj === 'object' &&
+    (obj.__type === 'Lax' || obj.__type === 'Gorillax' ||
+     obj.__type === 'RelaxedGorillax' || obj.__type === 'Result');
+}
+function __taida_normalise_monadic_field(k, v) {
+  if (k === 'hasValue') {
+    // Callable wrapper from `__taida_hasValue` — unwrap to boolean.
+    if (typeof v === 'function') return !!v();
+    return !!v;
+  }
+  // Absent-error sentinels (null / function / undefined) render as `{}` to
+  // match the interpreter's `Value::Unit` → `serde_json` empty object.
+  if ((k === '__error' || k === '__predicate' || k === 'throw') &&
+      (v === null || v === undefined || typeof v === 'function')) {
+    return Object.freeze({});
+  }
+  return v;
+}
 function __taidaSortKeys(obj) {
   // C18-2: Pass Enum wrappers through untouched so JSON.stringify invokes
   // their `toJSON` method and emits the variant-name Str.
   if (__taida_isEnumVal(obj)) return obj;
   if (Array.isArray(obj)) return obj.map(__taidaSortKeys);
   if (obj && typeof obj === 'object' && !(obj instanceof __TaidaJSON)) {
+    const isMonadic = __taida_is_monadic_pack_obj(obj);
     const sorted = {};
     for (const k of Object.keys(obj).sort()) {
       // Skip __type — internal metadata, not user data
       if (k === '__type') continue;
-      sorted[k] = __taidaSortKeys(obj[k]);
+      let v = obj[k];
+      // Skip any remaining function-valued fields outside the monadic
+      // carve-out — JSON.stringify already drops them, but being explicit
+      // here keeps the key-order deterministic.
+      if (typeof v === 'function' && !(isMonadic && k === 'hasValue')) continue;
+      if (isMonadic) v = __taida_normalise_monadic_field(k, v);
+      sorted[k] = __taidaSortKeys(v);
     }
     return sorted;
   }

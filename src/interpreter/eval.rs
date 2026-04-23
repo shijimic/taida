@@ -753,7 +753,10 @@ impl Interpreter {
     /// Used for error-ceiling protected code so that function calls in tail
     /// position actually execute within the ceiling's scope instead of being
     /// deferred via Signal::TailCall (which would bypass the catch handler).
-    fn eval_statements_no_tco(&mut self, stmts: &[Statement]) -> Result<Signal, RuntimeError> {
+    pub(crate) fn eval_statements_no_tco(
+        &mut self,
+        stmts: &[Statement],
+    ) -> Result<Signal, RuntimeError> {
         let mut last_value = Value::Unit;
         for (i, stmt) in stmts.iter().enumerate() {
             // Check for nested error ceilings (delegate to full eval_statements)
@@ -923,7 +926,7 @@ impl Interpreter {
                     };
                     result_items.push(value);
                 }
-                Ok(Signal::Value(Value::List(result_items)))
+                Ok(Signal::Value(Value::list(result_items)))
             }
 
             Expr::BinaryOp(left, op, right, _) => {
@@ -1508,7 +1511,7 @@ impl Interpreter {
                     }
                 }
             },
-            TypeExpr::List(_) => Ok(Value::List(Vec::new())),
+            TypeExpr::List(_) => Ok(Value::list(Vec::new())),
             TypeExpr::BuchiPack(fields) => {
                 let mut result = Vec::new();
                 for field_def in fields.iter().filter(|f| !f.is_method) {
@@ -2019,8 +2022,21 @@ impl Interpreter {
             // Create local scope for parameters and function body
             self.env.push_scope();
             // Bind parameters using effective defaults.
+            //
+            // C25B-021 / Phase 5-F2-2 Stage B: after binding, release our
+            // hold on `current_args` so the env becomes the unique Arc
+            // owner for any Value::List passed as an argument. Without
+            // this, the Append / Prepend unique-ownership fast path
+            // always sees rc>=2 and falls back to a full Vec clone,
+            // making the tail-recursive Append loop O(N²).
+            //
+            // `bind_params_with_effective_defaults` still clones each
+            // slot internally, but once it returns the slots themselves
+            // are no longer needed for this trampoline iteration — we'll
+            // receive a fresh TailCall(new_args) if tail-recursion loops.
             let bind_outcome =
                 self.bind_params_with_effective_defaults(&current_func, &current_args);
+            current_args.clear();
             match bind_outcome {
                 Ok(Some(signal)) => {
                     self.env.pop_scope(); // pop local scope

@@ -321,7 +321,23 @@ impl Interpreter {
 
     /// Evaluate a condition arm body (Vec<Statement>).
     /// Returns the value of the last expression statement.
+    ///
+    /// # C25B-032: no-TCO inside non-tail arm bodies
+    ///
+    /// `eval_cond_arm_body` is the **non-tail** variant, reached from
+    /// `eval_cond_branch` which is itself dispatched by `eval_expr` (NOT
+    /// `eval_expr_tail`). That means the surrounding function-body scope
+    /// is not in tail position at this CondBranch, so the arm body's
+    /// last statement must also not be treated as a tail-call site —
+    /// otherwise a mutual tail call (e.g. `| _ |> throwBoom(...)`) would
+    /// escape via `Signal::TailCall`, bypass the enclosing
+    /// `|== error: Error = ...` handler in `call_function`'s trampoline,
+    /// and surface as an unhandled error.
+    ///
+    /// The tail variant lives in `eval_cond_arm_body_tail` (in `eval.rs`),
+    /// which *is* reached from `eval_expr_tail::CondBranch` and therefore
+    /// legitimately retains TCO.
     fn eval_cond_arm_body(&mut self, body: &[Statement]) -> Result<Signal, RuntimeError> {
-        self.eval_statements(body)
+        self.eval_statements_no_tco(body)
     }
 }

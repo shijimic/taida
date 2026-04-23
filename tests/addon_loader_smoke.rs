@@ -261,10 +261,10 @@ fn echo_round_trips_nested_list() {
             return;
         }
     };
-    let input = Value::List(vec![
+    let input = Value::list(vec![
         Value::Int(1),
         Value::Str("two".to_string()),
-        Value::List(vec![Value::Bool(true), Value::Float(2.5)]),
+        Value::list(vec![Value::Bool(true), Value::Float(2.5)]),
     ]);
     let result = addon
         .call_function("echo", std::slice::from_ref(&input))
@@ -288,7 +288,7 @@ fn echo_round_trips_buchi_pack() {
         ("version".to_string(), Value::Int(2)),
         (
             "tags".to_string(),
-            Value::List(vec![
+            Value::list(vec![
                 Value::Str("alpha".to_string()),
                 Value::Str("beta".to_string()),
             ]),

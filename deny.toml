@@ -1,0 +1,80 @@
+# cargo-deny configuration — C25B-006 continuous dependency audit.
+#
+# During the `@c.25.rc7` RC cycle this config is **warn-only** in CI
+# (`.github/workflows/security.yml` passes `--quiet` + omits `--deny`)
+# so that a new upstream advisory cannot block a Taida push. The hard-
+# fail gate is planned for `@c.26.rc*` once the advisory baseline has
+# been curated for a full release cycle.
+#
+# Related: `.github/SECURITY.md`, `.dev/taida-logs/docs/archive/SECURITY_AUDIT.md`,
+# C25_BLOCKERS.md::C25B-006.
+
+[graph]
+# Scan all targets cargo knows about, including build scripts and dev-
+# dependencies. Dev-deps matter because `h3` / `h3-quinn` (NET interop
+# test helpers) are dev-only.
+all-features = true
+
+[advisories]
+# cargo-audit-style database lookup. `warn` on non-security advisories
+# during `@c.25.rc7` (unmaintained / yanked / unsound get flagged but
+# do not fail the gate); vulnerabilities remain hard-fail. Hard-fail
+# promotion of the softer categories is deferred to `@c.26.rc*`.
+db-path = "~/.cargo/advisory-db"
+db-urls = ["https://github.com/RustSec/advisory-db"]
+yanked = "warn"
+# cargo-deny 0.18+ introduced an `unmaintained` setting that defaults
+# to failing on workspace-reachable unmaintained advisories. We pin it
+# to `none` during @c.25.rc7 so RUSTSEC-2025-0134 (rustls-pemfile) —
+# which is a transitive dep with no drop-in replacement — does not
+# block the RC. Hard-fail promotion tracks with vulnerability /
+# yanked policy, post-stable.
+unmaintained = "none"
+ignore = []
+
+[licenses]
+# Allow-list modelled on the Taida Cargo.lock as of `@c.25.rc7`. The
+# list is deliberately explicit so a new dependency pulling in a
+# different licence triggers an explicit review rather than a silent
+# accept.
+version = 2
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "CC0-1.0",
+    "CDLA-Permissive-2.0",
+    "ISC",
+    "MIT",
+    "MIT-0",
+    "MPL-2.0",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "Zlib",
+]
+# Crates whose SPDX expression confuses cargo-deny but whose licence
+# we have reviewed out-of-band can be listed here. Kept empty to force
+# explicit review.
+exceptions = []
+
+[bans]
+# `warn` (not `deny`) during @c.25.rc7.
+multiple-versions = "warn"
+wildcards = "warn"
+# Crates we deliberately refuse to pull in.
+deny = []
+# Crates we deliberately allow multiple versions of (duplicates that
+# come from the tokio / cranelift ecosystems). Expand only when the
+# duplicate is genuinely irreducible.
+skip = []
+skip-tree = []
+
+[sources]
+unknown-registry = "warn"
+unknown-git = "warn"
+# Crates-io + a small explicit allow-list for git dependencies. As of
+# `@c.25.rc7` Taida has no git deps.
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

@@ -576,7 +576,7 @@ impl Interpreter {
                     match self.eval_expr(arg)? {
                         Signal::Value(Value::List(items)) => {
                             let mut entries = Vec::new();
-                            for item in &items {
+                            for item in items.iter() {
                                 if let Value::BuchiPack(fields) = item {
                                     // Try tuple-like @(first, second) or @(key, value) patterns
                                     if fields.len() >= 2 {
@@ -616,7 +616,7 @@ impl Interpreter {
                     Vec::new()
                 };
                 Ok(Some(Signal::Value(Value::BuchiPack(vec![
-                    ("__entries".into(), Value::List(entries)),
+                    ("__entries".into(), Value::list(entries)),
                     ("__type".into(), Value::Str("HashMap".into())),
                 ]))))
             }
@@ -628,7 +628,7 @@ impl Interpreter {
                         Signal::Value(Value::List(items)) => {
                             // Deduplicate
                             let mut unique = Vec::new();
-                            for item in items {
+                            for item in Value::list_take(items) {
                                 if !unique.contains(&item) {
                                     unique.push(item);
                                 }
@@ -642,7 +642,7 @@ impl Interpreter {
                     Vec::new()
                 };
                 Ok(Some(Signal::Value(Value::BuchiPack(vec![
-                    ("__items".into(), Value::List(items)),
+                    ("__items".into(), Value::list(items)),
                     ("__type".into(), Value::Str("Set".into())),
                 ]))))
             }
@@ -683,14 +683,14 @@ impl Interpreter {
                     0
                 };
                 let list: Vec<Value> = (start..end).map(Value::Int).collect();
-                Ok(Some(Signal::Value(Value::List(list))))
+                Ok(Some(Signal::Value(Value::list(list))))
             }
 
             // ── enumerate(list): add indices ──
             "enumerate" => {
                 let list = if let Some(arg) = args.first() {
                     match self.eval_expr(arg)? {
-                        Signal::Value(Value::List(items)) => items,
+                        Signal::Value(Value::List(items)) => Value::list_take(items),
                         Signal::Value(_) => Vec::new(),
                         other => return Ok(Some(other)),
                     }
@@ -707,14 +707,14 @@ impl Interpreter {
                         ])
                     })
                     .collect();
-                Ok(Some(Signal::Value(Value::List(result))))
+                Ok(Some(Signal::Value(Value::list(result))))
             }
 
             // ── zip(a, b): combine two lists ──
             "zip" => {
                 let list_a = if let Some(arg) = args.first() {
                     match self.eval_expr(arg)? {
-                        Signal::Value(Value::List(items)) => items,
+                        Signal::Value(Value::List(items)) => Value::list_take(items),
                         Signal::Value(_) => Vec::new(),
                         other => return Ok(Some(other)),
                     }
@@ -723,7 +723,7 @@ impl Interpreter {
                 };
                 let list_b = if let Some(arg) = args.get(1) {
                     match self.eval_expr(arg)? {
-                        Signal::Value(Value::List(items)) => items,
+                        Signal::Value(Value::List(items)) => Value::list_take(items),
                         Signal::Value(_) => Vec::new(),
                         other => return Ok(Some(other)),
                     }
@@ -735,7 +735,7 @@ impl Interpreter {
                     .zip(list_b)
                     .map(|(a, b)| Value::BuchiPack(vec![("first".into(), a), ("second".into(), b)]))
                     .collect();
-                Ok(Some(Signal::Value(Value::List(result))))
+                Ok(Some(Signal::Value(Value::list(result))))
             }
 
             // ── assert(cond, msg): throw if condition is false ──

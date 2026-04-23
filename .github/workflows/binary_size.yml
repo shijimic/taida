@@ -1,0 +1,132 @@
+name: binary-size
+
+# C25B-009: Binary-size / startup-time budget gate.
+#
+# Policy (see docs/STABILITY.md §5.5 for the non-contractual nature of
+# performance numbers, and .dev/C25_BLOCKERS.md::C25B-009 for the
+# rationale of this gate):
+#
+#   1. Baseline is pinned in .dev/binary_size_baseline.json at the merge
+#      commit of @c.24.rc1 (commit 0fd0029, measured 2026-04-23).
+#   2. On every push to main and every PR, we rebuild `taida` in release
+#      mode and compare against baseline.
+#   3. A +10% regression in byte size, text-section size, or startup
+#      wallclock emits a PR annotation and fails this job. The main ci.yml
+#      workflow is untouched (scope separation — Phase 2 driver owns
+#      ci.yml wallclock).
+#   4. This workflow runs `continue-on-error: true` during the @c.25.rc7
+#      cycle to let the numbers settle. Hard-fail is promoted later.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch: {}
+
+jobs:
+  measure:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+
+      - name: install rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: shared cargo cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: cargo-base
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: build release
+        run: cargo build --release --bin taida
+
+      - name: measure
+        id: measure
+        run: |
+          set -euo pipefail
+          BIN=target/release/taida
+          test -x "$BIN"
+          BYTES=$(stat -c%s "$BIN")
+          TEXT=$(size "$BIN" | awk 'NR==2 {print $1}')
+          DATA=$(size "$BIN" | awk 'NR==2 {print $2}')
+          BSS=$(size "$BIN" | awk 'NR==2 {print $3}')
+          # Warm-up 3, measure avg of 20 runs in ms. We cannot rely on
+          # hyperfine being present on every runner, so use bash's
+          # EPOCHREALTIME for wallclock.
+          for _ in 1 2 3; do "$BIN" --version > /dev/null; done
+          PY='
+          import os, subprocess, time, sys
+          bin = sys.argv[1]
+          N = 20
+          total = 0.0
+          for _ in range(N):
+              t0 = time.perf_counter_ns()
+              subprocess.run([bin, "--version"], stdout=subprocess.DEVNULL, check=True)
+              total += (time.perf_counter_ns() - t0)
+          print("%.6f" % (total / N / 1e6))
+          '
+          STARTUP_MS=$(python3 -c "$PY" "$BIN")
+          echo "bytes=$BYTES"      | tee -a "$GITHUB_OUTPUT"
+          echo "text=$TEXT"        | tee -a "$GITHUB_OUTPUT"
+          echo "data=$DATA"        | tee -a "$GITHUB_OUTPUT"
+          echo "bss=$BSS"          | tee -a "$GITHUB_OUTPUT"
+          echo "startup_ms=$STARTUP_MS" | tee -a "$GITHUB_OUTPUT"
+          {
+            echo "## binary-size report"
+            echo ""
+            echo "| metric | current |"
+            echo "|---|---|"
+            echo "| bytes | $BYTES |"
+            echo "| text  | $TEXT |"
+            echo "| data  | $DATA |"
+            echo "| bss   | $BSS |"
+            echo "| startup (ms, avg 20) | $STARTUP_MS |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: compare against baseline
+        run: |
+          set -euo pipefail
+          BASELINE=scripts/binary_size_baseline.json
+          if [ ! -f "$BASELINE" ]; then
+            echo "no baseline file at $BASELINE, skipping compare"
+            echo "(run scripts/measure_binary_size.sh to refresh it.)"
+            exit 0
+          fi
+          CUR_BYTES=${{ steps.measure.outputs.bytes }}
+          CUR_TEXT=${{ steps.measure.outputs.text }}
+          CUR_STARTUP=${{ steps.measure.outputs.startup_ms }}
+          python3 - <<PY
+          import json, sys
+          cur = {"bytes": int("$CUR_BYTES"), "text": int("$CUR_TEXT"), "startup_ms": float("$CUR_STARTUP")}
+          with open("$BASELINE") as f:
+              base = json.load(f)
+          def pct(now, was):
+              if was == 0: return 0.0
+              return (now - was) / was * 100.0
+          lines = []
+          status = 0
+          for key in ("bytes", "text", "startup_ms"):
+              p = pct(cur[key], base[key])
+              marker = "OK" if p <= 10.0 else "REGRESSION"
+              if p > 10.0: status = 1
+              lines.append(f"{key}: {base[key]} -> {cur[key]} ({p:+.2f}%) {marker}")
+          print("\n".join(lines))
+          if status:
+              print("\n::error::binary-size regression >10% vs @c.24.rc1 baseline")
+              sys.exit(1)
+          PY
+
+      - name: upload size JSON artefact
+        uses: actions/upload-artifact@v4
+        with:
+          name: binary-size-${{ github.sha }}
+          path: |
+            target/release/taida
+          if-no-files-found: error
+          retention-days: 14

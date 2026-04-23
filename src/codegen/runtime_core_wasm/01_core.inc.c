@@ -140,6 +140,117 @@ void *wasm_alloc(unsigned int size) {
     return (void *)(unsigned long)result;
 }
 
+/* C25B-026 / Phase 5-G (2026-04-23): Arena-scoped bump release.
+ *
+ * The WASM bump allocator never frees, so a long-running loop that
+ * produces short-lived allocations (`@[Float]` per-iteration scratch,
+ * LLM forward-pass per-token kernels) grows `bump_ptr` linearly until
+ * `memory.grow` runs out of pages and traps.
+ *
+ * These three helpers expose a watermark-style "arena frame" over the
+ * existing bump allocator:
+ *   * `wasm_arena_enter()` snapshots the current `bump_ptr` and
+ *     returns it as an opaque i32 handle.
+ *   * `wasm_arena_leave(saved)` restores `bump_ptr` to the snapshot,
+ *     effectively releasing every allocation made since the matching
+ *     `enter`. No memory is handed back to the host (WebAssembly has
+ *     no `memory.shrink`), but the pages become reusable — the next
+ *     `wasm_alloc` call reuses the same addresses without triggering
+ *     a new `memory.grow`.
+ *   * `wasm_arena_used()` returns the number of bytes currently held
+ *     in the heap since initialisation, useful for regression tests.
+ *
+ * These helpers are infrastructure; Taida user code does not call them
+ * directly. The lowerer can inject enter/leave pairs around
+ * escape-analysis-safe scopes (Phase 5-I or later). Today the helpers
+ * let regression tests assert that a bounded-scope loop does not
+ * monotonically leak heap across iterations.
+ *
+ * The allocator lazy-initialises `bump_ptr` on first `wasm_alloc`; the
+ * helpers call `wasm_alloc(0)` to force initialisation so a caller
+ * that enters an arena before any allocation still observes a stable
+ * `__heap_base` snapshot.
+ *
+ * The symbols are NOT marked `__attribute__((used))` — we intentionally
+ * rely on `wasm-ld --gc-sections` to drop them for size-sensitive
+ * profiles (wasm-min / wasm-edge). The wasm-wasi and wasm-full
+ * compilation paths add `--export=wasm_arena_{enter,leave,used,
+ * roundtrip_test}` via `wasm_arena_export_flags` in
+ * `src/codegen/driver.rs`, and those `--export=` flags simultaneously
+ * pin the symbols against GC and make them callable from wasmtime /
+ * host harnesses. For wasm-min / wasm-edge the symbols fall out of
+ * the module entirely, preserving the `tests/wasm_min.rs::
+ * wasm_min_size_gate` 512-byte hello.wasm ceiling.
+ */
+
+int32_t wasm_arena_enter(void) {
+    if (bump_ptr == 0) {
+        /* Force lazy init so the first enter captures a real __heap_base. */
+        (void)wasm_alloc(0);
+    }
+    return (int32_t)bump_ptr;
+}
+
+void wasm_arena_leave(int32_t saved) {
+    unsigned int target = (unsigned int)saved;
+    /* Guard against restoring forward (nested / corrupted callers).
+     * A forward restore would alias live data owned by the outer
+     * arena, which is strictly worse than leaking a frame. Silently
+     * ignore such calls — the caller made a pairing mistake. */
+    if (target == 0 || target > bump_ptr) {
+        return;
+    }
+    bump_ptr = target;
+}
+
+int32_t wasm_arena_used(void) {
+    if (bump_ptr == 0) {
+        return 0;
+    }
+    extern unsigned int __heap_base;
+    unsigned int base = (unsigned int)(unsigned long)&__heap_base;
+    base = (base + 7) & ~7u;
+    if (bump_ptr < base) {
+        return 0;
+    }
+    return (int32_t)(bump_ptr - base);
+}
+
+/* C25B-026 / Phase 5-G regression self-test.
+ *
+ * Exported solely so `tests/wasm_wasi.rs::wasm_wasi_arena_release_is_bounded`
+ * can invoke it via `wasmtime --invoke` to confirm that an enter / leave
+ * pair around a bounded loop releases every allocation made inside the
+ * scope. The function performs `iters` rounds of
+ *   saved = wasm_arena_enter();
+ *   for (j = 0; j < inner; j++) (void)wasm_alloc(64);
+ *   wasm_arena_leave(saved);
+ * and returns the final `wasm_arena_used()` minus the baseline before
+ * the first enter. If the arena release works, the delta is 0. If it
+ * leaks (old behaviour), the delta is `iters * inner * 64` bytes.
+ *
+ * `iters` and `inner` are int32_t; the function takes no real arguments
+ * (wasmtime's `--invoke` passes decimal args via command line, but we
+ * hardcode the loop shape to keep the test harness trivial). Parameters
+ * are two int32_t so that if we ever want to parametrise from the
+ * harness, the hook is already there. */
+int32_t wasm_arena_roundtrip_test(int32_t iters, int32_t inner) {
+    if (iters <= 0) iters = 128;
+    if (inner <= 0) inner = 16;
+    /* Force init + capture baseline. */
+    (void)wasm_alloc(0);
+    int32_t baseline = wasm_arena_used();
+    for (int32_t i = 0; i < iters; i++) {
+        int32_t saved = wasm_arena_enter();
+        for (int32_t j = 0; j < inner; j++) {
+            (void)wasm_alloc(64);
+        }
+        wasm_arena_leave(saved);
+    }
+    int32_t end = wasm_arena_used();
+    return end - baseline;
+}
+
 /* ── strlen (no libc) ── */
 
 int32_t wasm_strlen(const char *s) {
@@ -1880,8 +1991,17 @@ static int64_t _wasm_set_to_display_string_full(int64_t set_ptr) {
    `__type`. `.toString()` still uses the short forms (`Lax(v)` /
    `Result(v)` / `Gorillax(v)`) — that split mirrors the interpreter's
    `to_display_string()` vs. `to_string()` separation. */
+/* C25B-001 forward declarations (definitions live in 02_containers.inc.c). */
+static int _wasm_is_stream_pack(int64_t obj);
+static int64_t _wasm_stream_to_display_string(int64_t stream_ptr);
+
 static int64_t _wasm_stdout_display_string(int64_t obj) {
     if (obj == 0) return (int64_t)(intptr_t)"0";
+    /* C25B-001: Stream packs render as `Stream[completed: N items]`
+       (matching the interpreter's `Value::Stream` display shape).
+       Must precede the generic pack path so `Str[Stream[...]]()`
+       doesn't stringify the internal `__stream_*` fields. */
+    if (_wasm_is_stream_pack(obj)) return _wasm_stream_to_display_string(obj);
     /* C23B-003 reopen: route HashMap / Set through their synthetic full-form
        helpers so `Str[...]()` matches the interpreter's
        `BuchiPack(__entries/__items, __type)` rendering instead of the

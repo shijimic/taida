@@ -14,6 +14,32 @@ document.
 
 ---
 
+## Backend support policy (`@c.25.rc7` redefinition)
+
+The manifest schema does **not** change between backends — the same
+`native/addon.toml` is authoritative for every backend that
+supports addons. What differs is whether a given Taida backend
+currently routes an addon-backed import through its dispatcher:
+
+| Backend        | `supports_addons` | Notes |
+|----------------|-------------------|-------|
+| Interpreter    | **Yes**           | Dispatches through `dlopen` when the interpreter binary is built with `feature = "native"` (the default build). The addon facade runs as a dynamic Taida module in a dedicated environment. |
+| Native (AOT)   | **Yes**           | Lowered at build time. The facade is statically analysed by `src/addon/facade.rs` into an `AddonFacadeSummary`; facade FuncDefs become IR functions, pack / scalar / list / template bindings are replayed into the module init path, and cdylib calls go through `taida_addon_call`. |
+| JS transpiler  | **No**            | No JS-side dispatcher exists. Imports produce a deterministic error message pointing at `Run 'taida build --target native' or use the interpreter`. |
+| WASM (min / wasi) | **No**         | Deferred to the D26 breaking-change phase. The D26 wasm backend will reuse the `src/addon/facade.rs` static analyser so published manifests do not need to change. |
+
+The error text for unsupported backends was standardised at `@c.25.rc7`
+under C25B-030: `"addon-backed package 'X' is not supported on
+backend 'Y' (supported: interpreter, native; wasm planned for D26).
+Run 'taida build --target native' or use the interpreter."`
+
+See `docs/guide/13_creating_addons.md` for the author-facing view of
+which facade constructs the native backend's static analyser
+understands, and `.dev/C25_BLOCKERS.md::C25B-030` for the
+implementation-side acceptance criteria.
+
+---
+
 ## Required top-level keys
 
 ```toml

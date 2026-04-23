@@ -16,6 +16,8 @@
 | `E13xx` | 関数呼び出しエラー | TypeChecker | 引数過多、arity 不一致 |
 | `E14xx` | モールド束縛エラー | TypeChecker | 必須引数不足、重複オプション、未定義フィールド |
 | `E15xx` | 定義・意味論エラー | TypeChecker | 重複定義、禁止構文の明示拒否 |
+| `E16xx` | 型推論・演算意味論エラー | TypeChecker | 戻り型不一致、列挙型不整合、演算子型不整合 |
+| `E17xx` | モジュール境界エラー | TypeChecker | `packages.tdm` 公開 API 不整合 |
 
 ## 現在の割り当て
 
@@ -70,6 +72,7 @@
 | `E1407` | Mold / Inheritance header の arity・prefix・重複・親種別が不正 | TypeChecker |
 | `E1408` | MoldInst の `[]` 引数が concrete header 型に一致しない | TypeChecker |
 | `E1409` | MoldInst の `[]` 引数が constrained header 型に一致しない | TypeChecker |
+| `E1410` | InheritanceDef の子フィールドが親の型と互換でない再定義 | TypeChecker |
 
 ### 定義・意味論エラー (`E15xx`)
 
@@ -86,6 +89,35 @@
 | `E1509` | generic function の型変数が declared constraint を満たさない | TypeChecker | — |
 | `E1510` | inference-only generic function の型変数が parameter annotation / call から束縛・推論できない、または concrete type 名と衝突する | TypeChecker | — |
 | `E1511` | ユーザー定義関数を mold 構文 `Fn[args]()` で呼ぶ際に named fields `()` を渡せない — `Fn[a, b]()` か `Fn(a, b)` のみ | TypeChecker | C20B-014 |
+
+### 型推論・演算意味論エラー (`E16xx`)
+
+| コード | メッセージ | フェーズ | 関連 |
+|--------|-----------|---------|------|
+| `E1601` | 関数 / エラーハンドラの戻り型が宣言と不一致 | TypeChecker | — |
+| `E1602` | BuchiPack / TypeDef の参照先にフィールドが存在しない | TypeChecker | — |
+| `E1603` | `If` / cond-branch の then / else の戻り型が不一致 | TypeChecker | B11B-014 |
+| `E1604` | cond-branch の条件式が `Bool` 型ではない | TypeChecker | — |
+| `E1605` | 比較演算 (`<` / `<=` / `>` / `>=` / `==` / `!=`) のオペランド型が不整合 | TypeChecker | — |
+| `E1606` | 論理演算 (`&&` / `\|\|`) のオペランド型が `Bool` ではない | TypeChecker | — |
+| `E1607` | 単項演算 (`-` / `!`) のオペランド型が不整合 | TypeChecker | — |
+| `E1608` | 未定義の列挙型 / 列挙 variant が参照された | TypeChecker | — |
+| `E1609` | (予約) | — | — |
+| `E1610` | 継承関係 (`Inheritance`) に循環検出 | TypeChecker | — |
+| `E1611` | JS バックエンドが受け付けない API capability (例: `httpServe(..., tls <= @(..., protocol <= Http2()))`) | TypeChecker | — |
+| `E1612` | WASM バックエンドが受け付けない API capability (例: `taida-lang/net` の `httpServe`) | TypeChecker | — |
+| `E1613` | `TypeExtends` が enum variant リテラルを受け付けない | TypeChecker | — |
+| `E1614` | (tail-only mutual recursion detection guard — 発火は negative 形で検査、ハンドラ経路の保険コード) | TypeChecker | — |
+| `E1615` | (予約) | — | — |
+| `E1616` | cond-branch の arm body で bare call-statement (副作用のみの式) を禁止 | Parser | — |
+| `E1617` | Regex invariant 違反 (wasm profile での `Regex` 参照、`__`-prefix field の衝突など) | TypeChecker / emit_wasm_c | C12B-023 |
+| `E1618` | モジュール境界越しの enum variant 並び順不一致 | TypeChecker | C18-1 |
+
+### モジュール境界エラー (`E17xx`)
+
+| コード | メッセージ | フェーズ | 関連 |
+|--------|-----------|---------|------|
+| `E1701` | `packages.tdm` で宣言された公開 API とエントリモジュールの実シンボル群が不整合 (未公開 symbol import / 宣言済み symbol 欠如 / module 内シンボル未発見) | TypeChecker | RC2 |
 
 ## 帯域ルール
 
@@ -105,6 +137,8 @@
 | `E13xx` | TypeChecker | 関数呼び出し意味論。arity 不一致、デフォルト値制約 |
 | `E14xx` | TypeChecker | モールド束縛意味論。フィールド重複、引数不足 |
 | `E15xx` | TypeChecker | 定義・意味論。重複定義、禁止構文の明示拒否 |
+| `E16xx` | TypeChecker / Parser | 型推論・演算意味論。戻り型、比較、論理、cond-branch、循環継承 |
+| `E17xx` | TypeChecker | モジュール境界 (`packages.tdm`) 公開 API 不整合 |
 
 #### 2. Backend 層（コード生成時に検出）
 
@@ -130,6 +164,8 @@
 - **前段ゲート内の重複なし**: `E01xx`-`E05xx` は入力処理の順序に沿った連番。`E13xx`-`E15xx` は TypeChecker 内の意味分類。両者は帯域が重複しない
 - **`E03xx` の Parser / Verify 共有**: `E0301`/`E0302` は Parser と Verify の両方で検出される。これは同一の制約違反を2箇所で検出するための意図的な共有であり、帯域重複ではない
 - **`E10xx`-`E12xx` は予約**: 将来の TypeChecker 拡張用に確保。現在は未使用
+- **`E16xx` の Parser / TypeChecker 共有**: `E1616` は Parser が cond-branch の arm body を検査する時点で発射される。`E1617` は TypeChecker と `emit_wasm_c` の 2 箇所で発射される (同じ不変条件の検査を異なる段で別側面から行う意図的共有)。`E1609` / `E1615` は将来拡張用に予約された欠番
+- **`E05xx` / `E06xx` / `E07xx` / `E08xx` / `E09xx` はカテゴリ予約**: 現時点で具体的な `E####` コードは未割当。モジュール解決 / ランタイム / codegen / パッケージ / グラフ各段のエラーは将来この帯域から採番する
 
 ### フォーマットの統一
 

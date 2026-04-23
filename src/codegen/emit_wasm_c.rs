@@ -740,6 +740,9 @@ fn runtime_func_prototype(name: &str, profile: WasmProfile) -> Result<String, Wa
         }
         // W-5: Error/Molten/Stub helpers
         "taida_molten_new" => "int64_t taida_molten_new(void);".to_string(),
+        // C25B-001: minimal Stream wrapper (runtime lives in
+        // runtime_core_wasm/02_containers.inc.c).
+        "taida_stream_new" => "int64_t taida_stream_new(int64_t inner_value);".to_string(),
         "taida_stub_new" => "int64_t taida_stub_new(int64_t message);".to_string(),
         "taida_todo_new" => {
             "int64_t taida_todo_new(int64_t id, int64_t task, int64_t sol, int64_t unm);"
@@ -834,6 +837,30 @@ fn runtime_func_prototype(name: &str, profile: WasmProfile) -> Result<String, Wa
         "taida_float_abs" | "taida_float_ceil" | "taida_float_floor"
         | "taida_float_round" => {
             format!("int64_t {}(int64_t a);", name)
+        }
+        // C25B-025 Phase 5-I: math mold family. Manual freestanding
+        // implementations in runtime_core_wasm/03_typeof_list.inc.c
+        // (Sqrt uses the `f64.sqrt` wasm opcode via `__builtin_sqrt`;
+        // the rest use range-reduced series / Newton iteration — see
+        // the C source for per-function algorithm notes).
+        "taida_float_sqrt"
+        | "taida_float_exp"
+        | "taida_float_ln"
+        | "taida_float_log2"
+        | "taida_float_log10"
+        | "taida_float_sin"
+        | "taida_float_cos"
+        | "taida_float_tan"
+        | "taida_float_asin"
+        | "taida_float_acos"
+        | "taida_float_atan"
+        | "taida_float_sinh"
+        | "taida_float_cosh"
+        | "taida_float_tanh" => {
+            format!("int64_t {}(int64_t a);", name)
+        }
+        "taida_float_pow" | "taida_float_log" | "taida_float_atan2" => {
+            format!("int64_t {}(int64_t a, int64_t b);", name)
         }
         "taida_float_to_fixed" => "int64_t taida_float_to_fixed(int64_t a, int64_t b);".to_string(),
         "taida_float_clamp" => "int64_t taida_float_clamp(int64_t a, int64_t lo, int64_t hi);".to_string(),

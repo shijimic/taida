@@ -35,9 +35,12 @@
 //!     The WASM Gorillax first-field was unified from `isOk` to
 //!     `hasValue` so every backend now emits the same full-form pack.
 //!     `WASM_SKIP_FIXTURES` is now empty.
-//!   * `str_from_stream` — interpreter + JS only (see
-//!     `STREAM_ONLY_FIXTURES`). Native / wasm lowering do not yet support
-//!     Stream (`unsupported mold type: Stream`).
+//!   * `str_from_stream` — fully 4-backend since C25B-001 (2026-04-23).
+//!     Native + wasm now emit a minimal Stream pack via `taida_stream_new`
+//!     which `Str[stream]()` renders as `Lax[Str]("Stream[completed: N
+//!     items]")`. `STREAM_ONLY_FIXTURES` is now empty; the lazy-transform
+//!     chain (Map / Filter / Take / TakeWhile) remains interpreter-only
+//!     and is tracked as a C26+ feature.
 
 mod common;
 
@@ -339,7 +342,15 @@ const FIXTURES: &[&str] = &[
 
 /// Fixtures that interpreter + JS support but the other backends cannot
 /// currently exercise (backend lowering limitation, tracked outside C23).
-const STREAM_ONLY_FIXTURES: &[&str] = &["str_from_stream"];
+///
+/// C25B-001 (2026-04-23): `str_from_stream` removed. Minimal native /
+/// wasm Stream lowering landed in this phase — the fixture is now
+/// exercised on all 4 backends. See `taida_stream_new` in
+/// `src/codegen/native_runtime/core.c` and `_wasm_stream_new` in
+/// `src/codegen/runtime_core_wasm/02_containers.inc.c`. Lazy transform
+/// chain (Map / Filter / Take / TakeWhile) remains interpreter-only
+/// for now; tracked as a C26+ feature.
+const STREAM_ONLY_FIXTURES: &[&str] = &[];
 
 /// Fixtures skipped on wasm-wasi because of a pre-existing backend
 /// divergence (not a C23 regression, not solvable inside the C23 track).
@@ -363,8 +374,10 @@ fn is_wasm_skipped(name: &str) -> bool {
 }
 
 fn is_native_skipped(name: &str) -> bool {
-    // Native doesn't support Stream lowering; other typed values are
-    // matched via the native fixes in this same commit.
+    // C25B-001 (2026-04-23): native + wasm now both support the minimal
+    // Stream form (`Stream[val]()` → completed single-item stream). No
+    // C23-era fixtures are currently skipped on native; keep the helper
+    // for future expansion.
     is_stream_only(name)
 }
 

@@ -675,9 +675,9 @@ impl Interpreter {
                                 std::cmp::Ordering::Equal
                             }
                         });
-                        Ok(Some(Signal::Value(make_lax_success(Value::List(names)))))
+                        Ok(Some(Signal::Value(make_lax_success(Value::list(names)))))
                     }
-                    Err(_) => Ok(Some(Signal::Value(make_lax_failure(Value::List(
+                    Err(_) => Ok(Some(Signal::Value(make_lax_failure(Value::list(
                         Vec::new(),
                     ))))),
                 }
@@ -947,11 +947,11 @@ impl Interpreter {
                                     }
                                 }
                                 Signal::Value(Value::List(items)) => {
-                                    for item in items {
+                                    for item in items.iter() {
                                         if let Value::BuchiPack(rec) = item {
                                             let mut name: Option<String> = None;
                                             let mut val: Option<String> = None;
-                                            for (k, v) in &rec {
+                                            for (k, v) in rec.iter() {
                                                 match (k.as_str(), v) {
                                                     ("name", Value::Str(s)) => {
                                                         name = Some(s.clone());
@@ -1177,7 +1177,7 @@ impl Interpreter {
                     match self.eval_expr(arg)? {
                         Signal::Value(Value::List(items)) => {
                             let mut strs = Vec::new();
-                            for item in &items {
+                            for item in items.iter() {
                                 if let Value::Str(s) = item {
                                     strs.push(s.clone());
                                 } else {
@@ -1277,7 +1277,7 @@ impl Interpreter {
                     match self.eval_expr(arg)? {
                         Signal::Value(Value::List(items)) => {
                             let mut strs = Vec::new();
-                            for item in &items {
+                            for item in items.iter() {
                                 if let Value::Str(s) = item {
                                     strs.push(s.clone());
                                 } else {
@@ -1372,7 +1372,7 @@ impl Interpreter {
                     .collect();
 
                 Ok(Some(Signal::Value(Value::BuchiPack(vec![
-                    ("__entries".into(), Value::List(entries)),
+                    ("__entries".into(), Value::list(entries)),
                     ("__type".into(), Value::Str("HashMap".into())),
                 ]))))
             }
@@ -1382,7 +1382,7 @@ impl Interpreter {
                 // Interpreter mode is typically: taida <script.td> [args...]
                 // Expose only user args to match JS/native runtime behavior.
                 let argv: Vec<Value> = std::env::args().skip(2).map(Value::Str).collect();
-                Ok(Some(Signal::Value(Value::List(argv))))
+                Ok(Some(Signal::Value(Value::list(argv))))
             }
 
             // ── dnsResolve(host[, timeoutMs]) → Async[Result[@(addresses: @[Str]), _]] ──
@@ -1430,7 +1430,7 @@ impl Interpreter {
                             }
 
                             let inner =
-                                Value::BuchiPack(vec![("addresses".into(), Value::List(out))]);
+                                Value::BuchiPack(vec![("addresses".into(), Value::list(out))]);
                             let _ = tx.send(Ok(make_result_success(inner)));
                         }
                     }

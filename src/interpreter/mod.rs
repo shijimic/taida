@@ -24,6 +24,9 @@ mod tests_eval;
 mod tests_extended;
 mod unmold;
 pub mod value;
+/// C25B-021 / C25B-022 / C25B-023 common foundation (Phase 5-D):
+/// hashable view over `Value` for HashSet / HashMap fast paths.
+pub(crate) mod value_key;
 
 pub use env::*;
 pub use eval::*;

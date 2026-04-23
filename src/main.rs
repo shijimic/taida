@@ -360,6 +360,15 @@ fn is_help_flag(raw: &str) -> bool {
 }
 
 fn main() {
+    // C25B-018: install the panic hook + fatal-signal cleanup handlers
+    // **before** we otherwise perturb signal dispositions below. This
+    // way a panic during very early startup (before `filtered_args`
+    // parsing etc.) still runs the terminal-state-restoration path,
+    // and the SIGPIPE-ignore below is unaffected (SIGPIPE is not in
+    // our cleanup signal set).
+    taida::panic_cleanup::install_panic_cleanup_hook();
+    taida::panic_cleanup::install_signal_cleanup_handlers();
+
     // C22-4 / C22B-004: restore `taida run ... | head` as a first-class UNIX
     // pipeline. Rust binaries default to SIGPIPE-driven exit(141) the moment
     // a downstream consumer closes early; we disable that disposition here so

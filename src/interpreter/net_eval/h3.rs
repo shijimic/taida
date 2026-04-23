@@ -131,7 +131,7 @@ impl Interpreter {
                     ("value".into(), Value::Str(req.authority.clone())),
                 ]));
             }
-            request_fields.push(("headers".into(), Value::List(header_values)));
+            request_fields.push(("headers".into(), Value::list(header_values)));
 
             // Body.
             let raw_len = req.body.len();

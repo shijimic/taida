@@ -915,7 +915,7 @@ impl Interpreter {
                 } else {
                     Value::BuchiPack(vec![
                         ("status".into(), Value::Int(200)),
-                        ("headers".into(), Value::List(vec![])),
+                        ("headers".into(), Value::list(vec![])),
                         ("body".into(), Value::Str(String::new())),
                     ])
                 };

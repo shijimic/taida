@@ -634,6 +634,41 @@ impl Lowering {
             }
         }
 
+        // C25B-030 Phase 1E-β: lower facade-declared FuncDefs
+        // harvested during `lower_addon_import`. Each entry is
+        // `(local_name, FuncDef, mangled_link_symbol)`; we
+        // temporarily rewrite the FuncDef so `lower_func_def`'s
+        // `resolve_user_func_symbol` returns the mangled symbol
+        // directly without tripping the usual user-function
+        // export-symbol mangling. The mangle is stable across
+        // multiple imports of the same addon (see
+        // `addon_facade_mangled` dedup in `lower_addon_import`).
+        //
+        // We drain the vec so repeated calls to `lower_program`
+        // on the same `Lowering` do not re-emit duplicate IR
+        // functions. Should that ever happen in practice
+        // (e.g. testing harnesses) the caller has to reset the
+        // `Lowering` state first.
+        let facade_funcs = std::mem::take(&mut self.addon_facade_funcs);
+        for (local_name, func_def, mangled) in &facade_funcs {
+            // Route the body's `resolve_user_func_symbol(local_name)`
+            // through the mangled link so self- and sibling-calls
+            // (including recursion and cross-FuncDef dispatch inside
+            // the same facade) land on the correct symbol.
+            self.imported_func_links
+                .insert(local_name.clone(), mangled.clone());
+            if func_def.name != *local_name {
+                self.imported_func_links
+                    .insert(func_def.name.clone(), mangled.clone());
+            }
+            let ir_func = self.lower_func_def(func_def)?;
+            module.functions.push(ir_func);
+        }
+        // Put the harvested list back so post-lowering consumers
+        // (e.g. driver.rs diagnostics, potential test harnesses)
+        // can still observe what was emitted.
+        self.addon_facade_funcs = facade_funcs;
+
         // ライブラリモジュールの場合、モジュール単位の init 関数を生成
         if module.is_library {
             self.generate_module_init_func(&mut module, program)?;
@@ -647,17 +682,30 @@ impl Lowering {
             self.emit_imported_module_inits(&mut main_fn);
             self.bind_imported_values(&mut main_fn);
 
-            // RC2.5 Phase 2: replay addon facade pack bindings before
-            // any user statement runs. The bindings are synthetic
-            // `Name <= @(...)` assignments harvested from the addon's
-            // `taida/<stem>.td` facade during `lower_addon_import`; they
-            // are the native-backend equivalent of the
-            // `module_eval::load_addon_facade` path used by the
-            // interpreter (e.g. `KeyKind <= @(Char <= 0, ...)`).
+            // RC2.5 Phase 2 / C25B-030 Phase 1E-β-2: replay addon
+            // facade pack/value bindings before any user statement
+            // runs. The bindings are synthetic `Name <= @(...)`
+            // (or scalar) assignments harvested from the addon's
+            // `taida/<stem>.td` facade tree during
+            // `lower_addon_import`; they are the native-backend
+            // equivalent of the `module_eval::load_addon_facade`
+            // path used by the interpreter.
+            //
+            // Each binding is emitted with both `DefVar` (so user
+            // code in main runs with a local scope binding) and
+            // `GlobalSet` (so facade FuncDef bodies compiled
+            // elsewhere in the IR can `GlobalGet(hash)` the
+            // binding at runtime). Without the `GlobalSet`, a
+            // facade FuncDef body that references a private
+            // `_Cell` / `_KK_Char` helper would read 0 from the
+            // uninitialised global slot and behave as if the
+            // binding never existed.
             let facade_bindings = std::mem::take(&mut self.addon_facade_pack_bindings);
             for (name, expr) in &facade_bindings {
                 let val = self.lower_expr(&mut main_fn, expr)?;
                 main_fn.push(IrInst::DefVar(name.clone(), val));
+                let hash = self.global_var_hash(name);
+                main_fn.push(IrInst::GlobalSet(hash, val));
             }
             // Put the bindings back so repeat calls to lower_program
             // (if any) would still see them. In practice lower_program
@@ -861,6 +909,20 @@ impl Lowering {
         // determined at compile time. This reads the type tag that the caller set via
         // taida_set_call_arg_tag(), enabling Bool/Int disambiguation in pack field tags.
         let prev_param_tag_vars = std::mem::take(&mut self.param_tag_vars);
+        // C25B-030 Phase 1E-β-3: snapshot and reset `return_tag_vars`
+        // across function boundaries. `IrVar`s are allocated per
+        // IR function, so an entry like `return_tag_vars[14] = 15`
+        // recorded while lowering function A aliases with var 14
+        // in function B's fresh `alloc_var()` counter, producing
+        // a Cranelift verifier error (`set_return_tag` argument
+        // references a value defined only inside a CondBranch arm,
+        // not in the outer block). The lambda path in
+        // `lower_lambda` already snapshots/restores this field;
+        // `lower_func_def` was missing the same discipline which
+        // became load-bearing once facade FuncDefs (Phase 1E-β)
+        // started lowering dozens of sibling functions in one
+        // `lower_program` invocation.
+        let prev_return_tag_vars = std::mem::take(&mut self.return_tag_vars);
         for (i, param) in func_def.params.iter().enumerate() {
             // Only emit for parameters that don't have a compile-time type
             let has_known_type = self.bool_vars.contains(&param.name)
@@ -1111,6 +1173,11 @@ impl Lowering {
         self.shadowed_net_builtins = prev_shadowed_net;
         // NB-14: Restore param_tag_vars to pre-function state
         self.param_tag_vars = prev_param_tag_vars;
+        // C25B-030 Phase 1E-β-3: restore return_tag_vars (see snapshot
+        // comment above — cross-function IrVar aliasing breaks
+        // Cranelift verification once facade FuncDefs stream through
+        // the same `Lowering` instance).
+        self.return_tag_vars = prev_return_tag_vars;
         // NB3-4 fix: Restore return_type_inferred_params to pre-function state
         self.return_type_inferred_params = prev_return_type_inferred_params;
         // NB3-4: Restore var_aliases, lambda_param_counts, lambda_vars, closure_vars
@@ -1963,6 +2030,158 @@ impl Lowering {
                     inner_bound.insert(p.name.as_str());
                 }
                 self.collect_free_vars_inner(body, &inner_bound, free, seen);
+            }
+            // C25B-030 Phase 1F: `TemplateLit` stores the raw
+            // interpolated source (`"${a}${sep}${b}"` etc.); the
+            // real interpolation expressions are re-parsed during
+            // `lower_template_lit`. Before Phase 1F this arm fell
+            // into the `_ => {}` catch-all, so a top-level binding
+            // referenced only from a template (e.g. `sep <= "-"` at
+            // module top level, then `join a b = \`${a}${sep}${b}\``
+            // as a FuncDef) was never added to `globals_referenced`
+            // and no `GlobalGet(hash)` was emitted at the head of
+            // the FuncDef body. The native binary read 0 from the
+            // uninitialised global slot and printed `ab` instead of
+            // `a-b`, diverging from the interpreter which eagerly
+            // resolves `sep` through lexical scope.
+            //
+            // The fix splits the template on `${...}` boundaries
+            // (same logic as `src/codegen/lower/expr.rs::
+            // lower_template_lit`) and re-parses each interpolation
+            // as a standalone expression so the normal free-var
+            // walker runs over it. Parse failures fall back to a
+            // bare-identifier capture, mirroring the real
+            // lowering's behaviour.
+            Expr::TemplateLit(template, _) => {
+                Self::collect_free_vars_in_template(template, bound, free, seen);
+            }
+            _ => {}
+        }
+    }
+
+    /// C25B-030 Phase 1F helper: walk a `TemplateLit` body for
+    /// free-variable references. Mirrors
+    /// `lower_template_lit`'s `${...}` parser so the free-var
+    /// collection sees exactly the same identifiers the native
+    /// lowering will later resolve. Structurally identical to
+    /// `facade_collect_refs_in_template` in
+    /// `src/codegen/lower/imports.rs`; kept as a sibling to avoid
+    /// coupling the `Lowering` struct's method signature to the
+    /// facade-loader universe maps.
+    fn collect_free_vars_in_template(
+        template: &str,
+        bound: &std::collections::HashSet<&str>,
+        free: &mut Vec<String>,
+        seen: &mut std::collections::HashSet<String>,
+    ) {
+        let chars: Vec<char> = template.chars().collect();
+        let mut i = 0;
+        while i < chars.len() {
+            if chars[i] == '$' && i + 1 < chars.len() && chars[i + 1] == '{' {
+                i += 2;
+                let start = i;
+                let mut depth = 1;
+                while i < chars.len() && depth > 0 {
+                    if chars[i] == '{' {
+                        depth += 1;
+                    }
+                    if chars[i] == '}' {
+                        depth -= 1;
+                    }
+                    if depth > 0 {
+                        i += 1;
+                    }
+                }
+                let expr_str: String = chars[start..i].iter().collect();
+                let trimmed = expr_str.trim();
+                let (program, errors) = crate::parser::parse(trimmed);
+                if errors.is_empty()
+                    && !program.statements.is_empty()
+                    && let Statement::Expr(ref parsed_expr) = program.statements[0]
+                {
+                    Self::collect_free_vars_in_parsed_expr(parsed_expr, bound, free, seen);
+                } else if !trimmed.is_empty() && !bound.contains(trimmed) && !seen.contains(trimmed)
+                {
+                    // `lower_template_lit`'s fallback path: treat
+                    // the trimmed string as a bare identifier.
+                    seen.insert(trimmed.to_string());
+                    free.push(trimmed.to_string());
+                }
+                if i < chars.len() {
+                    i += 1;
+                }
+            } else {
+                i += 1;
+            }
+        }
+    }
+
+    /// Free-function variant of the free-vars walker used by the
+    /// template interpolation path. Does not consult `self` — the
+    /// enclosing `collect_free_vars_in_body` filter applies its
+    /// `top_level_vars` / `imported_value_names` pass after the
+    /// walk, so we can stay associative here.
+    fn collect_free_vars_in_parsed_expr(
+        expr: &Expr,
+        bound: &std::collections::HashSet<&str>,
+        free: &mut Vec<String>,
+        seen: &mut std::collections::HashSet<String>,
+    ) {
+        match expr {
+            Expr::Ident(name, _) if !bound.contains(name.as_str()) && !seen.contains(name) => {
+                seen.insert(name.clone());
+                free.push(name.clone());
+            }
+            Expr::BinaryOp(lhs, _, rhs, _) => {
+                Self::collect_free_vars_in_parsed_expr(lhs, bound, free, seen);
+                Self::collect_free_vars_in_parsed_expr(rhs, bound, free, seen);
+            }
+            Expr::UnaryOp(_, operand, _) => {
+                Self::collect_free_vars_in_parsed_expr(operand, bound, free, seen);
+            }
+            Expr::FuncCall(callee, args, _) => {
+                Self::collect_free_vars_in_parsed_expr(callee, bound, free, seen);
+                for arg in args {
+                    Self::collect_free_vars_in_parsed_expr(arg, bound, free, seen);
+                }
+            }
+            Expr::FieldAccess(obj, _, _) => {
+                Self::collect_free_vars_in_parsed_expr(obj, bound, free, seen);
+            }
+            Expr::MethodCall(obj, _, args, _) => {
+                Self::collect_free_vars_in_parsed_expr(obj, bound, free, seen);
+                for arg in args {
+                    Self::collect_free_vars_in_parsed_expr(arg, bound, free, seen);
+                }
+            }
+            Expr::Pipeline(exprs, _) => {
+                for e in exprs {
+                    Self::collect_free_vars_in_parsed_expr(e, bound, free, seen);
+                }
+            }
+            Expr::BuchiPack(fields, _) | Expr::TypeInst(_, fields, _) => {
+                for field in fields {
+                    Self::collect_free_vars_in_parsed_expr(&field.value, bound, free, seen);
+                }
+            }
+            Expr::ListLit(items, _) => {
+                for item in items {
+                    Self::collect_free_vars_in_parsed_expr(item, bound, free, seen);
+                }
+            }
+            Expr::MoldInst(_, args, fields, _) => {
+                for arg in args {
+                    Self::collect_free_vars_in_parsed_expr(arg, bound, free, seen);
+                }
+                for field in fields {
+                    Self::collect_free_vars_in_parsed_expr(&field.value, bound, free, seen);
+                }
+            }
+            Expr::Unmold(inner, _) | Expr::Throw(inner, _) => {
+                Self::collect_free_vars_in_parsed_expr(inner, bound, free, seen);
+            }
+            Expr::TemplateLit(nested, _) => {
+                Self::collect_free_vars_in_template(nested, bound, free, seen);
             }
             _ => {}
         }

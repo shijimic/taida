@@ -482,7 +482,21 @@ int64_t taida_relaxed_gorillax_err(int64_t error) {
 
 /* WASM_HASH___PREDICATE, WASM_HASH_THROW defined in W-5f monadic type hash section */
 
+/* C25B-028: register Result's `__predicate` / `throw` field names so
+   jsonEncode (and any other name-lookup based renderer) can see them.
+   Idempotent — mirrors the C23B-009 pattern used for Lax / Gorillax. */
+static int _wasm_result_names_registered = 0;
+static void _wasm_register_result_field_names(void) {
+    if (_wasm_result_names_registered) return;
+    _wasm_result_names_registered = 1;
+    taida_register_field_name(WASM_HASH___VALUE,     (int64_t)(intptr_t)"__value");
+    taida_register_field_name(WASM_HASH___PREDICATE, (int64_t)(intptr_t)"__predicate");
+    taida_register_field_name(WASM_HASH_THROW,       (int64_t)(intptr_t)"throw");
+    taida_register_field_name(WASM_HASH___TYPE,      (int64_t)(intptr_t)"__type");
+}
+
 int64_t taida_result_create(int64_t value, int64_t throw_val, int64_t predicate) {
+    _wasm_register_result_field_names();
     int64_t pack = taida_pack_new(4);
     taida_pack_set_hash(pack, 0, WASM_HASH___VALUE);
     taida_pack_set(pack, 0, value);
@@ -492,7 +506,86 @@ int64_t taida_result_create(int64_t value, int64_t throw_val, int64_t predicate)
     taida_pack_set(pack, 2, throw_val);
     taida_pack_set_hash(pack, 3, WASM_HASH___TYPE);
     taida_pack_set(pack, 3, (int64_t)(intptr_t)"Result");
+    taida_pack_set_tag(pack, 3, WASM_TAG_STR);
     return pack;
+}
+
+/* C25B-001: Stream[val]() — minimal wasm wrapper. Mirrors
+   src/codegen/native_runtime/core.c::taida_stream_new. Produces a pack
+   whose `Str[]()` rendering matches the interpreter's
+   `Value::Stream -> "Stream[completed: N items]"` shape. Full lazy
+   transform chain remains interpreter-only until a later Phase.
+
+   Layout: fc=3 pack
+     field 0: __stream_status = "completed" (Str)
+     field 1: __stream_count  = 1 (Int)
+     field 2: __type          = "Stream" (Str)
+*/
+#define WASM_HASH_STREAM_STATUS 0x6d32b928f2c5d8aeLL  /* FNV-1a("__stream_status") */
+#define WASM_HASH_STREAM_COUNT  0x1c0dd3a9e6fd1178LL  /* FNV-1a("__stream_count") */
+
+static int _wasm_stream_names_registered = 0;
+static void _wasm_register_stream_field_names(void) {
+    if (_wasm_stream_names_registered) return;
+    _wasm_stream_names_registered = 1;
+    taida_register_field_name(WASM_HASH_STREAM_STATUS, (int64_t)(intptr_t)"__stream_status");
+    taida_register_field_name(WASM_HASH_STREAM_COUNT,  (int64_t)(intptr_t)"__stream_count");
+}
+
+int64_t taida_stream_new(int64_t inner_value) {
+    (void)inner_value; /* Minimal impl: retain only the item count (=1). */
+    _wasm_register_stream_field_names();
+    int64_t pack = taida_pack_new(3);
+    taida_pack_set_hash(pack, 0, WASM_HASH_STREAM_STATUS);
+    taida_pack_set(pack, 0, (int64_t)(intptr_t)"completed");
+    taida_pack_set_tag(pack, 0, WASM_TAG_STR);
+    taida_pack_set_hash(pack, 1, WASM_HASH_STREAM_COUNT);
+    taida_pack_set(pack, 1, 1);
+    taida_pack_set_tag(pack, 1, WASM_TAG_INT);
+    taida_pack_set_hash(pack, 2, WASM_HASH___TYPE);
+    taida_pack_set(pack, 2, (int64_t)(intptr_t)"Stream");
+    taida_pack_set_tag(pack, 2, WASM_TAG_STR);
+    return pack;
+}
+
+/* C25B-001: forward declare `taida_str_alloc` so Stream display can
+   use the bump allocator; the definition lives later in this file. */
+int64_t taida_str_alloc(int64_t len_raw);
+
+/* C25B-001: Stream pack detector (fc=3, hash0=HASH_STREAM_STATUS). */
+static int _wasm_is_stream_pack(int64_t obj) {
+    if (obj <= 0 || obj > 0xFFFFFFFF) return 0;
+    unsigned int pages = __builtin_wasm_memory_size(0);
+    unsigned int mem_size = pages * 65536;
+    if ((unsigned int)obj + 24 > mem_size) return 0;
+    int64_t *p = (int64_t *)(intptr_t)obj;
+    if (p[0] != 3) return 0;
+    return p[1] == WASM_HASH_STREAM_STATUS ? 1 : 0;
+}
+
+/* C25B-001: render Stream as `Stream[completed: N items]` (Str heap-
+   allocated via _wasm_str_heap helper). */
+static int64_t _wasm_stream_to_display_string(int64_t stream_ptr) {
+    int64_t *p = (int64_t *)(intptr_t)stream_ptr;
+    int64_t count = p[1 + 1 * 3 + 2]; /* slot 1 value */
+    int64_t count_str = taida_int_to_str(count);
+    /* Manual concatenation: "Stream[completed: " + count_str + " items]" */
+    const char *prefix = "Stream[completed: ";
+    const char *suffix = " items]";
+    const char *cs = (const char *)(intptr_t)count_str;
+    int plen = 0; while (prefix[plen]) plen++;
+    int clen = 0; while (cs && cs[clen]) clen++;
+    int slen = 0; while (suffix[slen]) slen++;
+    int total = plen + clen + slen;
+    /* Allocate through taida's bump allocator so the result is a
+       well-formed Str pointer in linear memory. */
+    char *buf = (char *)(intptr_t)taida_str_alloc(total);
+    int off = 0;
+    for (int i = 0; i < plen; i++) buf[off++] = prefix[i];
+    for (int i = 0; i < clen; i++) buf[off++] = cs[i];
+    for (int i = 0; i < slen; i++) buf[off++] = suffix[i];
+    buf[off] = '\0';
+    return (int64_t)(intptr_t)buf;
 }
 
 /* W-5g: Helper — check if Result has error (matching native taida_result_is_error_check).

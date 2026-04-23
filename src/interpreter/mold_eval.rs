@@ -8,6 +8,35 @@ use super::value::{AsyncStatus, AsyncValue, StreamStatus, StreamTransform, Strea
 /// These are `impl Interpreter` methods split from eval.rs for maintainability.
 use crate::parser::Expr;
 
+/// C25B-025 (Phase 5-A): helper for single-argument numeric molds that
+/// return Float (Sqrt / Exp / Ln / Sin / Cos / ...). Accepts Int (widens
+/// to f64) or Float. Any other value produces a descriptive runtime
+/// error including the mold name. Non-value signals (Throw / TailCall)
+/// are propagated.
+fn eval_unary_math(
+    interp: &mut Interpreter,
+    type_args: &[Expr],
+    name: &str,
+    op: fn(f64) -> f64,
+) -> Result<Option<Signal>, RuntimeError> {
+    if type_args.is_empty() {
+        return Err(RuntimeError {
+            message: format!("{} requires 1 argument: {}[num]()", name, name),
+        });
+    }
+    let num = match interp.eval_expr(&type_args[0])? {
+        Signal::Value(Value::Int(n)) => n as f64,
+        Signal::Value(Value::Float(n)) => n,
+        Signal::Value(v) => {
+            return Err(RuntimeError {
+                message: format!("{}: argument must be numeric, got {}", name, v),
+            });
+        }
+        other => return Ok(Some(other)),
+    };
+    Ok(Some(Signal::Value(Value::Float(op(num)))))
+}
+
 fn make_lax_value(has_value: bool, value: Value, default: Value) -> Value {
     Value::BuchiPack(vec![
         ("hasValue".into(), Value::Bool(has_value)),
@@ -273,7 +302,7 @@ impl Interpreter {
                 };
                 let parts: Vec<Value> =
                     s.split(&delim).map(|p| Value::Str(p.to_string())).collect();
-                Ok(Some(Signal::Value(Value::List(parts))))
+                Ok(Some(Signal::Value(Value::list(parts))))
             }
             "Chars" => {
                 if type_args.len() != 1 {
@@ -291,7 +320,7 @@ impl Interpreter {
                     other => return Ok(Some(other)),
                 };
                 let chars: Vec<Value> = s.chars().map(|ch| Value::Str(ch.to_string())).collect();
-                Ok(Some(Signal::Value(Value::List(chars))))
+                Ok(Some(Signal::Value(Value::list(chars))))
             }
             "Replace" => {
                 if type_args.len() < 3 {
@@ -488,9 +517,9 @@ impl Interpreter {
                 match val {
                     Value::Str(s) => Ok(Some(Signal::Value(Value::Str(s.chars().rev().collect())))),
                     Value::List(items) => {
-                        let mut reversed = items;
+                        let mut reversed = Value::list_take(items);
                         reversed.reverse();
-                        Ok(Some(Signal::Value(Value::List(reversed))))
+                        Ok(Some(Signal::Value(Value::list(reversed))))
                     }
                     _ => Err(RuntimeError {
                         message: format!("Reverse: argument must be a string or list, got {}", val),
@@ -668,6 +697,126 @@ impl Interpreter {
                     other => return Ok(Some(other)),
                 };
                 Ok(Some(Signal::Value(Value::Int(num.trunc() as i64))))
+            }
+            // C25B-025 (Phase 5-A): math molds.
+            //
+            // Previously `Sqrt[4.0]()` / `Pow[2.0, 10]()` flowed through the
+            // generic mold-instantiation fallback in `eval_expr::MoldInst`
+            // and produced `@(__value <= <first-arg>, __type <= "Sqrt")` —
+            // a silent wrong result (type inference registered `Float`,
+            // but the value was actually a Lax-shaped BuchiPack).
+            // Transcendentals (`Sin` / `Cos` / etc.) had no registration
+            // at all and therefore required the `__value` unwrap.
+            //
+            // These interpreter implementations delegate to `f64::sqrt`,
+            // `f64::powf`, etc. NaN / ±Infinity / denormal are preserved
+            // as Rust's `f64` semantics. Accepting `Int` widens to `f64`
+            // first; `Pow[Int, Int]` returns Float per `mold_returns.rs`.
+            "Sqrt" => eval_unary_math(self, type_args, "Sqrt", f64::sqrt),
+            "Exp" => eval_unary_math(self, type_args, "Exp", f64::exp),
+            "Ln" => eval_unary_math(self, type_args, "Ln", f64::ln),
+            "Log2" => eval_unary_math(self, type_args, "Log2", f64::log2),
+            "Log10" => eval_unary_math(self, type_args, "Log10", f64::log10),
+            "Sin" => eval_unary_math(self, type_args, "Sin", f64::sin),
+            "Cos" => eval_unary_math(self, type_args, "Cos", f64::cos),
+            "Tan" => eval_unary_math(self, type_args, "Tan", f64::tan),
+            "Asin" => eval_unary_math(self, type_args, "Asin", f64::asin),
+            "Acos" => eval_unary_math(self, type_args, "Acos", f64::acos),
+            "Atan" => eval_unary_math(self, type_args, "Atan", f64::atan),
+            "Sinh" => eval_unary_math(self, type_args, "Sinh", f64::sinh),
+            "Cosh" => eval_unary_math(self, type_args, "Cosh", f64::cosh),
+            "Tanh" => eval_unary_math(self, type_args, "Tanh", f64::tanh),
+            "Pow" => {
+                if type_args.len() < 2 {
+                    return Err(RuntimeError {
+                        message: "Pow requires 2 arguments: Pow[base, exp]()".into(),
+                    });
+                }
+                let base = match self.eval_expr(&type_args[0])? {
+                    Signal::Value(Value::Int(n)) => n as f64,
+                    Signal::Value(Value::Float(n)) => n,
+                    Signal::Value(v) => {
+                        return Err(RuntimeError {
+                            message: format!("Pow: base must be numeric, got {}", v),
+                        });
+                    }
+                    other => return Ok(Some(other)),
+                };
+                let exp_val = match self.eval_expr(&type_args[1])? {
+                    Signal::Value(Value::Int(n)) => n as f64,
+                    Signal::Value(Value::Float(n)) => n,
+                    Signal::Value(v) => {
+                        return Err(RuntimeError {
+                            message: format!("Pow: exponent must be numeric, got {}", v),
+                        });
+                    }
+                    other => return Ok(Some(other)),
+                };
+                Ok(Some(Signal::Value(Value::Float(base.powf(exp_val)))))
+            }
+            "Log" => {
+                // Log[value, base]() — explicit base. Base defaults to e
+                // if omitted (so `Log[x]()` == `Ln[x]()` semantically).
+                if type_args.is_empty() {
+                    return Err(RuntimeError {
+                        message: "Log requires 1-2 arguments: Log[value]() or Log[value, base]()"
+                            .into(),
+                    });
+                }
+                let val = match self.eval_expr(&type_args[0])? {
+                    Signal::Value(Value::Int(n)) => n as f64,
+                    Signal::Value(Value::Float(n)) => n,
+                    Signal::Value(v) => {
+                        return Err(RuntimeError {
+                            message: format!("Log: value must be numeric, got {}", v),
+                        });
+                    }
+                    other => return Ok(Some(other)),
+                };
+                let result = if type_args.len() >= 2 {
+                    let base = match self.eval_expr(&type_args[1])? {
+                        Signal::Value(Value::Int(n)) => n as f64,
+                        Signal::Value(Value::Float(n)) => n,
+                        Signal::Value(v) => {
+                            return Err(RuntimeError {
+                                message: format!("Log: base must be numeric, got {}", v),
+                            });
+                        }
+                        other => return Ok(Some(other)),
+                    };
+                    val.log(base)
+                } else {
+                    val.ln()
+                };
+                Ok(Some(Signal::Value(Value::Float(result))))
+            }
+            "Atan2" => {
+                if type_args.len() < 2 {
+                    return Err(RuntimeError {
+                        message: "Atan2 requires 2 arguments: Atan2[y, x]()".into(),
+                    });
+                }
+                let y = match self.eval_expr(&type_args[0])? {
+                    Signal::Value(Value::Int(n)) => n as f64,
+                    Signal::Value(Value::Float(n)) => n,
+                    Signal::Value(v) => {
+                        return Err(RuntimeError {
+                            message: format!("Atan2: y must be numeric, got {}", v),
+                        });
+                    }
+                    other => return Ok(Some(other)),
+                };
+                let x = match self.eval_expr(&type_args[1])? {
+                    Signal::Value(Value::Int(n)) => n as f64,
+                    Signal::Value(Value::Float(n)) => n,
+                    Signal::Value(v) => {
+                        return Err(RuntimeError {
+                            message: format!("Atan2: x must be numeric, got {}", v),
+                        });
+                    }
+                    other => return Ok(Some(other)),
+                };
+                Ok(Some(Signal::Value(Value::Float(y.atan2(x)))))
             }
             "Clamp" => {
                 if type_args.len() < 3 {
@@ -1180,9 +1329,9 @@ impl Interpreter {
                 };
                 match (left, right) {
                     (Value::List(list), Value::List(other)) => {
-                        let mut result = list;
-                        result.extend(other);
-                        Ok(Some(Signal::Value(Value::List(result))))
+                        let mut result = Value::list_take(list);
+                        result.extend(Value::list_take(other));
+                        Ok(Some(Signal::Value(Value::list(result))))
                     }
                     (Value::Bytes(mut a), Value::Bytes(b)) => {
                         a.extend(b);
@@ -1261,7 +1410,7 @@ impl Interpreter {
                     other => return Ok(Some(other)),
                 };
                 let items = bytes.into_iter().map(|b| Value::Int(b as i64)).collect();
-                Ok(Some(Signal::Value(Value::List(items))))
+                Ok(Some(Signal::Value(Value::list(items))))
             }
             "Append" => {
                 if type_args.len() < 2 {
@@ -1269,6 +1418,35 @@ impl Interpreter {
                         message: "Append requires 2 arguments: Append[list, val]()".into(),
                     });
                 }
+                // C25B-021 REOPEN fix (2026-04-23, session 20):
+                //
+                // An earlier Stage-B attempt took the binding out of the
+                // innermost scope via `Environment::take_from_current_scope`,
+                // pushed into the `Arc<Vec>` under unique ownership via
+                // `Arc::make_mut`, and rebound the *new* list back into env.
+                // That gave O(N) amortized on the tail-recursive
+                // `build(Append[acc, i](), ...)` pattern, but it silently
+                // mutated the binding `acc` — so for code like
+                //
+                //   xs = @[1, 2]
+                //   newxs = Append[xs, 9]()
+                //   print(xs.length())   // expected 2, saw 3
+                //
+                // the semantic contract was broken. `Append` must be
+                // non-destructive on the argument binding.
+                //
+                // Fix: revert to the clone-based path. `list_take` tries
+                // `Arc::try_unwrap`; when env still holds a clone it falls
+                // back to a single `Vec::clone` of the element slice. In
+                // the tail-recursive loop, `current_args.clear()` (the
+                // trampoline-level release in `call_function`) still
+                // releases the caller's Arc after parameter binding, so
+                // env is often the sole holder and try_unwrap succeeds —
+                // the common case remains cheap. Only the specific
+                // "observer in the same scope retained the old binding"
+                // case costs a full clone, which is the original O(N²)
+                // worst case. Acceptable trade-off until persistent-Vec
+                // land; semantic correctness is non-negotiable.
                 let list = match self.eval_expr(&type_args[0])? {
                     Signal::Value(Value::List(items)) => items,
                     Signal::Value(v) => {
@@ -1282,9 +1460,9 @@ impl Interpreter {
                     Signal::Value(v) => v,
                     other => return Ok(Some(other)),
                 };
-                let mut result = list;
+                let mut result = Value::list_take(list);
                 result.push(val);
-                Ok(Some(Signal::Value(Value::List(result))))
+                Ok(Some(Signal::Value(Value::list(result))))
             }
             "Prepend" => {
                 if type_args.len() < 2 {
@@ -1292,6 +1470,10 @@ impl Interpreter {
                         message: "Prepend requires 2 arguments: Prepend[list, val]()".into(),
                     });
                 }
+                // C25B-021 REOPEN fix (2026-04-23, session 20):
+                // See the Append arm above — the env-take path destroyed
+                // the `Prepend[xs, v]()` → `xs` unchanged contract, so
+                // we revert to the clone-based path.
                 let list = match self.eval_expr(&type_args[0])? {
                     Signal::Value(Value::List(items)) => items,
                     Signal::Value(v) => {
@@ -1306,8 +1488,8 @@ impl Interpreter {
                     other => return Ok(Some(other)),
                 };
                 let mut result = vec![val];
-                result.extend(list);
-                Ok(Some(Signal::Value(Value::List(result))))
+                result.extend(Value::list_take(list));
+                Ok(Some(Signal::Value(Value::list(result))))
             }
             "Join" => {
                 if type_args.len() < 2 {
@@ -1386,10 +1568,10 @@ impl Interpreter {
                     .unwrap_or(false);
                 let by_fn = self.eval_mold_option(fields, "by")?;
 
-                let mut sorted = if let Some(Value::Function(func)) = by_fn {
+                let mut sorted: Vec<Value> = if let Some(Value::Function(func)) = by_fn {
                     // Sort by key extraction function
                     let mut keyed: Vec<(Value, Value)> = Vec::new();
-                    for item in &list {
+                    for item in list.iter() {
                         let key =
                             self.call_function_with_values(&func, std::slice::from_ref(item))?;
                         keyed.push((item.clone(), key));
@@ -1399,14 +1581,14 @@ impl Interpreter {
                     });
                     keyed.into_iter().map(|(item, _)| item).collect()
                 } else {
-                    let mut items = list;
+                    let mut items = Value::list_take(list);
                     items.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
                     items
                 };
                 if reverse {
                     sorted.reverse();
                 }
-                Ok(Some(Signal::Value(Value::List(sorted))))
+                Ok(Some(Signal::Value(Value::list(sorted))))
             }
             "Unique" => {
                 if type_args.is_empty() {
@@ -1425,28 +1607,90 @@ impl Interpreter {
                 };
                 let by_fn = self.eval_mold_option(fields, "by")?;
 
+                // C25B-021 派生 (Phase 5-C): replace the per-item
+                // `Vec::contains` linear scan (O(N²)) with a HashSet
+                // fingerprint probe (O(N)) when every produced key is
+                // hashable. Float / Function / Async keys fall back to
+                // the original linear path so `Value::eq` semantics are
+                // preserved for cross-type coercions.
+                use crate::interpreter::value_key::ValueKey;
+                use std::collections::HashSet;
+
                 let unique = if let Some(Value::Function(func)) = by_fn {
+                    // Each `seen_keys[i]` is the canonical key value for
+                    // the key-of-item pattern; when a fingerprint collides
+                    // we fall back to Value::eq against `seen_keys` so
+                    // that distinct-name EnumVals with the same ordinal
+                    // (C25B-022 REOPEN scenario) are not incorrectly
+                    // folded together.
+                    let mut seen_fps: HashSet<u64> = HashSet::new();
                     let mut seen_keys: Vec<Value> = Vec::new();
+                    let mut fallback_armed = false;
                     let mut result: Vec<Value> = Vec::new();
-                    for item in &list {
+                    for item in list.iter() {
                         let key =
                             self.call_function_with_values(&func, std::slice::from_ref(item))?;
-                        if !seen_keys.contains(&key) {
-                            seen_keys.push(key);
-                            result.push(item.clone());
+                        if fallback_armed {
+                            if !seen_keys.contains(&key) {
+                                seen_keys.push(key);
+                                result.push(item.clone());
+                            }
+                        } else if let Some(vk) = ValueKey::new(&key) {
+                            let fp = vk.fingerprint();
+                            if seen_fps.insert(fp) {
+                                seen_keys.push(key);
+                                result.push(item.clone());
+                            } else if !seen_keys.iter().any(|k| k == &key) {
+                                // Rare fingerprint collision (e.g.
+                                // EnumVal("A",0) vs EnumVal("B",0)).
+                                // Value::eq is authoritative.
+                                seen_keys.push(key);
+                                result.push(item.clone());
+                            }
+                        } else {
+                            // Key turned out not to be hashable. Replay
+                            // the fingerprints we already added into the
+                            // fallback list and continue with linear
+                            // contains for the remainder.
+                            fallback_armed = true;
+                            if !seen_keys.contains(&key) {
+                                seen_keys.push(key);
+                                result.push(item.clone());
+                            }
                         }
                     }
                     result
                 } else {
-                    let mut result: Vec<Value> = Vec::new();
-                    for item in &list {
-                        if !result.contains(item) {
-                            result.push(item.clone());
+                    // Fast path: build a fingerprint set up front if the
+                    // entire list is hashable. On fingerprint collision
+                    // we defer to Value::eq against already-emitted
+                    // result items so cross-EnumVal-name inputs with the
+                    // same ordinal are preserved as distinct.
+                    if list.iter().all(|v| ValueKey::new(v).is_some()) {
+                        let mut seen: HashSet<u64> = HashSet::new();
+                        let mut result: Vec<Value> = Vec::new();
+                        for item in list.iter() {
+                            let vk = ValueKey::new(item).expect("hashability pre-checked above");
+                            let fp = vk.fingerprint();
+                            if seen.insert(fp) {
+                                result.push(item.clone());
+                            } else if !result.iter().any(|e| e == item) {
+                                // Rare collision — preserve Value::eq.
+                                result.push(item.clone());
+                            }
                         }
+                        result
+                    } else {
+                        let mut result: Vec<Value> = Vec::new();
+                        for item in list.iter() {
+                            if !result.contains(item) {
+                                result.push(item.clone());
+                            }
+                        }
+                        result
                     }
-                    result
                 };
-                Ok(Some(Signal::Value(Value::List(unique))))
+                Ok(Some(Signal::Value(Value::list(unique))))
             }
             "Flatten" => {
                 if type_args.is_empty() {
@@ -1464,14 +1708,14 @@ impl Interpreter {
                     other => return Ok(Some(other)),
                 };
                 let mut flat = Vec::new();
-                for item in &list {
+                for item in list.iter() {
                     if let Value::List(inner) = item {
-                        flat.extend(inner.clone());
+                        flat.extend(inner.iter().cloned());
                     } else {
                         flat.push(item.clone());
                     }
                 }
-                Ok(Some(Signal::Value(Value::List(flat))))
+                Ok(Some(Signal::Value(Value::list(flat))))
             }
             "Find" => {
                 if type_args.len() < 2 {
@@ -1497,7 +1741,7 @@ impl Interpreter {
                     }
                     other => return Ok(Some(other)),
                 };
-                for item in &list {
+                for item in list.iter() {
                     let result =
                         self.call_function_with_values(&func, std::slice::from_ref(item))?;
                     if result.is_truthy() {
@@ -1587,7 +1831,7 @@ impl Interpreter {
                     other => return Ok(Some(other)),
                 };
                 let mut count = 0i64;
-                for item in &list {
+                for item in list.iter() {
                     let result =
                         self.call_function_with_values(&func, std::slice::from_ref(item))?;
                     if result.is_truthy() {
@@ -1630,7 +1874,7 @@ impl Interpreter {
                         ])
                     })
                     .collect();
-                Ok(Some(Signal::Value(Value::List(zipped))))
+                Ok(Some(Signal::Value(Value::list(zipped))))
             }
             "Enumerate" => {
                 if type_args.is_empty() {
@@ -1657,7 +1901,7 @@ impl Interpreter {
                         ])
                     })
                     .collect();
-                Ok(Some(Signal::Value(Value::List(enumerated))))
+                Ok(Some(Signal::Value(Value::list(enumerated))))
             }
 
             _ => self.try_core_mold(name, type_args, fields),
@@ -2213,10 +2457,10 @@ impl Interpreter {
                     Value::List(items) => {
                         let mut out = Vec::with_capacity(items.len());
                         let mut ok = true;
-                        for item in items {
+                        for item in items.iter() {
                             if let Value::Int(n) = item {
-                                if (0..=255).contains(&n) {
-                                    out.push(n as u8);
+                                if (0..=255).contains(n) {
+                                    out.push(*n as u8);
                                 } else {
                                     ok = false;
                                     break;
@@ -2409,12 +2653,12 @@ impl Interpreter {
                     }
                 };
                 let mut result = Vec::new();
-                for item in &items {
+                for item in items.iter() {
                     let mapped =
                         self.call_function_with_values(&func, std::slice::from_ref(item))?;
                     result.push(mapped);
                 }
-                Ok(Some(Signal::Value(Value::List(result))))
+                Ok(Some(Signal::Value(Value::list(result))))
             }
 
             "Filter" => {
@@ -2467,13 +2711,13 @@ impl Interpreter {
                     }
                 };
                 let mut result = Vec::new();
-                for item in &items {
+                for item in items.iter() {
                     let keep = self.call_function_with_values(&func, std::slice::from_ref(item))?;
                     if keep.is_truthy() {
                         result.push(item.clone());
                     }
                 }
-                Ok(Some(Signal::Value(Value::List(result))))
+                Ok(Some(Signal::Value(Value::list(result))))
             }
 
             "Fold" | "Reduce" => {
@@ -2496,8 +2740,8 @@ impl Interpreter {
                     Signal::Value(v) => v,
                     other => return Ok(Some(other)),
                 };
-                let items = match &list_val {
-                    Value::List(items) => items.clone(),
+                let items: Vec<Value> = match &list_val {
+                    Value::List(items) => items.as_ref().clone(),
                     Value::Stream(s) => self.collect_stream_items(s)?,
                     _ => {
                         return Err(RuntimeError {
@@ -2546,8 +2790,8 @@ impl Interpreter {
                     Signal::Value(v) => v,
                     other => return Ok(Some(other)),
                 };
-                let items = match &list_val {
-                    Value::List(items) => items.clone(),
+                let items: Vec<Value> = match &list_val {
+                    Value::List(items) => items.as_ref().clone(),
                     Value::Stream(s) => self.collect_stream_items(s)?,
                     _ => {
                         return Err(RuntimeError {
@@ -2614,8 +2858,8 @@ impl Interpreter {
                         status: s.status,
                     }))));
                 }
-                let items = match &list_val {
-                    Value::List(items) => items.clone(),
+                let items: Vec<Value> = match &list_val {
+                    Value::List(items) => items.as_ref().clone(),
                     _ => {
                         return Err(RuntimeError {
                             message: format!(
@@ -2626,7 +2870,7 @@ impl Interpreter {
                     }
                 };
                 let result: Vec<Value> = items.into_iter().take(n).collect();
-                Ok(Some(Signal::Value(Value::List(result))))
+                Ok(Some(Signal::Value(Value::list(result))))
             }
 
             "TakeWhile" => {
@@ -2679,7 +2923,7 @@ impl Interpreter {
                     }
                 };
                 let mut result = Vec::new();
-                for item in &items {
+                for item in items.iter() {
                     let keep = self.call_function_with_values(&func, std::slice::from_ref(item))?;
                     if keep.is_truthy() {
                         result.push(item.clone());
@@ -2687,7 +2931,7 @@ impl Interpreter {
                         break;
                     }
                 }
-                Ok(Some(Signal::Value(Value::List(result))))
+                Ok(Some(Signal::Value(Value::list(result))))
             }
 
             "Drop" => {
@@ -2706,8 +2950,8 @@ impl Interpreter {
                     Signal::Value(v) => v,
                     other => return Ok(Some(other)),
                 };
-                let items = match &list_val {
-                    Value::List(items) => items.clone(),
+                let items: Vec<Value> = match &list_val {
+                    Value::List(items) => items.as_ref().clone(),
                     Value::Stream(s) => self.collect_stream_items(s)?,
                     _ => {
                         return Err(RuntimeError {
@@ -2730,7 +2974,7 @@ impl Interpreter {
                     }
                 };
                 let result: Vec<Value> = items.into_iter().skip(n).collect();
-                Ok(Some(Signal::Value(Value::List(result))))
+                Ok(Some(Signal::Value(Value::list(result))))
             }
 
             "DropWhile" => {
@@ -2749,8 +2993,8 @@ impl Interpreter {
                     Signal::Value(v) => v,
                     other => return Ok(Some(other)),
                 };
-                let items = match &list_val {
-                    Value::List(items) => items.clone(),
+                let items: Vec<Value> = match &list_val {
+                    Value::List(items) => items.as_ref().clone(),
                     Value::Stream(s) => self.collect_stream_items(s)?,
                     _ => {
                         return Err(RuntimeError {
@@ -2786,7 +3030,7 @@ impl Interpreter {
                     }
                     result.push(item.clone());
                 }
-                Ok(Some(Signal::Value(Value::List(result))))
+                Ok(Some(Signal::Value(Value::list(result))))
             }
 
             // ── JSON Mold Type (Molten Iron) ─────────────────
@@ -2918,7 +3162,7 @@ impl Interpreter {
 
                 // First, resolve any pending async values
                 let mut resolved_items = Vec::new();
-                for item in &items {
+                for item in items.iter() {
                     match item {
                         Value::Async(a) => {
                             let resolved = self.resolve_async(a)?;
@@ -2947,7 +3191,7 @@ impl Interpreter {
                 }
                 Ok(Some(Signal::Value(Value::Async(AsyncValue {
                     status: AsyncStatus::Fulfilled,
-                    value: Box::new(Value::List(results)),
+                    value: Box::new(Value::list(results)),
                     error: Box::new(Value::Unit),
                     task: None,
                 }))))
@@ -2976,7 +3220,7 @@ impl Interpreter {
                 };
 
                 // Check for already-resolved items first (fast path)
-                for item in &items {
+                for item in items.iter() {
                     if let Value::Async(a) = item
                         && a.status == AsyncStatus::Fulfilled
                         && a.task.is_none()
@@ -3155,8 +3399,8 @@ impl Interpreter {
                     Signal::Value(v) => v,
                     other => return Ok(Some(other)),
                 };
-                let items = match list_val {
-                    Value::List(items) => items,
+                let items: Vec<Value> = match &list_val {
+                    Value::List(items) => items.as_ref().clone(),
                     _ => {
                         return Err(RuntimeError {
                             message: format!(

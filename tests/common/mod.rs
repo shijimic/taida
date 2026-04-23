@@ -26,17 +26,78 @@ use std::sync::OnceLock;
 
 /// Get the path to the built `taida` binary.
 ///
-/// Tries `CARGO_BIN_EXE_taida` first (set by `cargo test`), then falls back
-/// to `target/debug/taida` relative to the manifest directory.
+/// Runtime lookup only. This intentionally avoids `env!("CARGO_BIN_EXE_taida")`
+/// because nextest archive execution may run the test binary on a different
+/// machine than the one that compiled it. In that mode the compile-time
+/// absolute path baked into `env!` points at the archive-build runner and
+/// fails with `ENOENT`, even though the archive itself contains the `taida`
+/// host binary (`target/debug/taida`).
+///
+/// Search order:
+///
+/// 1. `TAIDA_BIN` runtime env override (used by ad-hoc local runs)
+/// 2. `CARGO_BIN_EXE_taida` runtime env if the harness provides it
+/// 3. Relative candidates from the current working directory, current test
+///    binary location, and the compile-time manifest dir:
+///    - `<root>/taida`
+///    - `<root>/debug/taida`
+///    - `<root>/release/taida`
+///    - `<root>/target/debug/taida`
+///    - `<root>/target/release/taida`
 pub fn taida_bin() -> PathBuf {
-    let mut path = PathBuf::from(env!("CARGO_BIN_EXE_taida"));
-    if !path.exists() {
-        path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("target")
-            .join("debug")
-            .join("taida");
+    #[cfg(windows)]
+    const BIN_NAME: &str = "taida.exe";
+    #[cfg(not(windows))]
+    const BIN_NAME: &str = "taida";
+
+    for env_name in ["TAIDA_BIN", "CARGO_BIN_EXE_taida"] {
+        if let Some(path) = std::env::var_os(env_name).map(PathBuf::from)
+            && path.exists()
+        {
+            return path;
+        }
     }
-    path
+
+    let mut roots = Vec::new();
+    if let Ok(cwd) = std::env::current_dir() {
+        roots.push(cwd);
+    }
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(parent) = exe.parent()
+    {
+        for ancestor in parent.ancestors() {
+            roots.push(ancestor.to_path_buf());
+        }
+    }
+    roots.push(PathBuf::from(env!("CARGO_MANIFEST_DIR")));
+
+    let mut candidates = Vec::new();
+    for root in roots {
+        for candidate in [
+            root.join(BIN_NAME),
+            root.join("debug").join(BIN_NAME),
+            root.join("release").join(BIN_NAME),
+            root.join("target").join("debug").join(BIN_NAME),
+            root.join("target").join("release").join(BIN_NAME),
+        ] {
+            if !candidates.iter().any(|p: &PathBuf| p == &candidate) {
+                candidates.push(candidate);
+            }
+        }
+    }
+
+    if let Some(path) = candidates.iter().find(|p| p.exists()) {
+        return path.clone();
+    }
+
+    panic!(
+        "could not locate taida binary; searched:\n{}",
+        candidates
+            .iter()
+            .map(|p| format!("  - {}", p.display()))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
 }
 
 /// Find the `wasmtime` binary for running compiled `.wasm` files.

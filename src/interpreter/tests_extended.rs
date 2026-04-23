@@ -209,7 +209,10 @@ f2 x =
         let result = eval_ok("Reverse[@[1, 2, 3]]() ]=> x\nx");
         match result {
             Value::List(items) => {
-                assert_eq!(items, vec![Value::Int(3), Value::Int(2), Value::Int(1)]);
+                assert_eq!(
+                    items.as_slice(),
+                    &[Value::Int(3), Value::Int(2), Value::Int(1)]
+                );
             }
             _ => panic!("Expected List"),
         }
@@ -244,7 +247,10 @@ f2 x =
         let result = eval_ok("Append[@[1, 2], 3]() ]=> x\nx");
         match result {
             Value::List(items) => {
-                assert_eq!(items, vec![Value::Int(1), Value::Int(2), Value::Int(3)]);
+                assert_eq!(
+                    items.as_slice(),
+                    &[Value::Int(1), Value::Int(2), Value::Int(3)]
+                );
             }
             _ => panic!("Expected List"),
         }
@@ -255,7 +261,10 @@ f2 x =
         let result = eval_ok("Sort[@[3, 1, 2]]() ]=> x\nx");
         match result {
             Value::List(items) => {
-                assert_eq!(items, vec![Value::Int(1), Value::Int(2), Value::Int(3)]);
+                assert_eq!(
+                    items.as_slice(),
+                    &[Value::Int(1), Value::Int(2), Value::Int(3)]
+                );
             }
             _ => panic!("Expected List"),
         }
@@ -710,8 +719,8 @@ doubled
         match result {
             Value::List(items) => {
                 assert_eq!(
-                    items,
-                    vec![
+                    items.as_slice(),
+                    &[
                         Value::Int(2),
                         Value::Int(4),
                         Value::Int(6),
@@ -739,8 +748,8 @@ evens
         match result {
             Value::List(items) => {
                 assert_eq!(
-                    items,
-                    vec![
+                    items.as_slice(),
+                    &[
                         Value::Int(2),
                         Value::Int(4),
                         Value::Int(6),
@@ -783,7 +792,10 @@ first3
         let result = eval_ok(source);
         match result {
             Value::List(items) => {
-                assert_eq!(items, vec![Value::Int(1), Value::Int(2), Value::Int(3)]);
+                assert_eq!(
+                    items.as_slice(),
+                    &[Value::Int(1), Value::Int(2), Value::Int(3)]
+                );
             }
             _ => panic!("Expected List, got {:?}", result),
         }
@@ -799,7 +811,10 @@ rest
         let result = eval_ok(source);
         match result {
             Value::List(items) => {
-                assert_eq!(items, vec![Value::Int(3), Value::Int(4), Value::Int(5)]);
+                assert_eq!(
+                    items.as_slice(),
+                    &[Value::Int(3), Value::Int(4), Value::Int(5)]
+                );
             }
             _ => panic!("Expected List, got {:?}", result),
         }
@@ -815,7 +830,10 @@ under4
         let result = eval_ok(source);
         match result {
             Value::List(items) => {
-                assert_eq!(items, vec![Value::Int(1), Value::Int(2), Value::Int(3)]);
+                assert_eq!(
+                    items.as_slice(),
+                    &[Value::Int(1), Value::Int(2), Value::Int(3)]
+                );
             }
             _ => panic!("Expected List, got {:?}", result),
         }
@@ -831,7 +849,7 @@ from4
         let result = eval_ok(source);
         match result {
             Value::List(items) => {
-                assert_eq!(items, vec![Value::Int(4), Value::Int(5)]);
+                assert_eq!(items.as_slice(), &[Value::Int(4), Value::Int(5)]);
             }
             _ => panic!("Expected List, got {:?}", result),
         }
@@ -880,8 +898,8 @@ processed
         match result {
             Value::List(items) => {
                 assert_eq!(
-                    items,
-                    vec![
+                    items.as_slice(),
+                    &[
                         Value::Int(1),
                         Value::Int(2),
                         Value::Int(3),
@@ -1308,7 +1326,10 @@ results
 "#;
         match eval_ok(source) {
             Value::List(items) => {
-                assert_eq!(items, vec![Value::Int(1), Value::Int(2), Value::Int(3)]);
+                assert_eq!(
+                    items.as_slice(),
+                    &[Value::Int(1), Value::Int(2), Value::Int(3)]
+                );
             }
             other => panic!("Expected List, got {:?}", other),
         }
@@ -1457,7 +1478,7 @@ doubled
 "#;
         assert_eq!(
             eval_ok(source),
-            Value::List(vec![Value::Int(2), Value::Int(4), Value::Int(6)])
+            Value::list(vec![Value::Int(2), Value::Int(4), Value::Int(6)])
         );
     }
 
@@ -1474,7 +1495,7 @@ evens
 "#;
         assert_eq!(
             eval_ok(source),
-            Value::List(vec![Value::Int(2), Value::Int(4)])
+            Value::list(vec![Value::Int(2), Value::Int(4)])
         );
     }
 
@@ -2396,7 +2417,7 @@ m <= hashMap().set("a", 1)
 "#;
         assert_eq!(
             eval_ok(source),
-            Value::List(vec![Value::Bool(true), Value::Bool(false)])
+            Value::list(vec![Value::Bool(true), Value::Bool(false)])
         );
     }
 
@@ -2446,7 +2467,7 @@ merged <= m1.merge(m2)
 "#;
         assert_eq!(
             eval_ok(source),
-            Value::List(vec![Value::Int(1), Value::Int(3), Value::Int(4)])
+            Value::list(vec![Value::Int(1), Value::Int(3), Value::Int(4)])
         );
     }
 
@@ -2488,7 +2509,7 @@ s <= setOf(@[1, 2, 3])
 "#;
         assert_eq!(
             eval_ok(source),
-            Value::List(vec![Value::Bool(true), Value::Bool(false)])
+            Value::list(vec![Value::Bool(true), Value::Bool(false)])
         );
     }
 
@@ -2565,7 +2586,7 @@ s <= setOf(@[1, 2, 3])
     fn test_prelude_range() {
         assert_eq!(
             eval_ok("range(0, 5)"),
-            Value::List(vec![
+            Value::list(vec![
                 Value::Int(0),
                 Value::Int(1),
                 Value::Int(2),
@@ -2573,8 +2594,8 @@ s <= setOf(@[1, 2, 3])
                 Value::Int(4),
             ])
         );
-        assert_eq!(eval_ok("range(3, 3)"), Value::List(vec![]));
-        assert_eq!(eval_ok("range(0, 1)"), Value::List(vec![Value::Int(0)]));
+        assert_eq!(eval_ok("range(3, 3)"), Value::list(vec![]));
+        assert_eq!(eval_ok("range(0, 1)"), Value::list(vec![Value::Int(0)]));
     }
 
     #[test]
@@ -3409,7 +3430,7 @@ result
         let val = eval_ok(source);
         assert_eq!(
             val,
-            Value::List(vec![Value::Int(2), Value::Int(4), Value::Int(6)])
+            Value::list(vec![Value::Int(2), Value::Int(4), Value::Int(6)])
         );
     }
 
@@ -3536,7 +3557,7 @@ result
         let (tx1, rx1) = tokio::sync::oneshot::channel();
         let (tx2, rx2) = tokio::sync::oneshot::channel();
 
-        let list = Value::List(vec![
+        let list = Value::list(vec![
             Value::Async(AsyncValue {
                 status: AsyncStatus::Pending,
                 value: Box::new(Value::Unit),
@@ -3563,7 +3584,7 @@ result
         let (program, errors) = crate::parser::parse("All[async_list]() ]=> results\nresults");
         assert!(errors.is_empty());
         let val = interpreter.eval_program(&program).unwrap();
-        assert_eq!(val, Value::List(vec![Value::Int(10), Value::Int(20)]));
+        assert_eq!(val, Value::list(vec![Value::Int(10), Value::Int(20)]));
     }
 
     #[test]
@@ -3576,7 +3597,7 @@ result
             "asyncs <= @[Async[1](), Async[2](), Async[3]()]\nAll[asyncs]() ]=> results\nresults";
         assert_eq!(
             eval_ok(source),
-            Value::List(vec![Value::Int(1), Value::Int(2), Value::Int(3)])
+            Value::list(vec![Value::Int(1), Value::Int(2), Value::Int(3)])
         );
         // Race
         assert_eq!(eval_ok("Race[@[Async[99]()]]() ]=> w\nw"), Value::Int(99));
@@ -3610,7 +3631,7 @@ s <= Stream[42]()
 s ]=> result
 result
 "#;
-        assert_eq!(eval_ok(source), Value::List(vec![Value::Int(42)]));
+        assert_eq!(eval_ok(source), Value::list(vec![Value::Int(42)]));
     }
 
     #[test]
@@ -3622,7 +3643,7 @@ result
 "#;
         assert_eq!(
             eval_ok(source),
-            Value::List(vec![Value::Int(1), Value::Int(2), Value::Int(3)])
+            Value::list(vec![Value::Int(1), Value::Int(2), Value::Int(3)])
         );
     }
 
@@ -3636,7 +3657,7 @@ result
 "#;
         assert_eq!(
             eval_ok(source),
-            Value::List(vec![Value::Int(10), Value::Int(20), Value::Int(30)])
+            Value::list(vec![Value::Int(10), Value::Int(20), Value::Int(30)])
         );
     }
 
@@ -3654,7 +3675,7 @@ result
 "#;
         assert_eq!(
             eval_ok(source),
-            Value::List(vec![Value::Int(2), Value::Int(4), Value::Int(6)])
+            Value::list(vec![Value::Int(2), Value::Int(4), Value::Int(6)])
         );
     }
 
@@ -3668,7 +3689,7 @@ result
 "#;
         assert_eq!(
             eval_ok(source),
-            Value::List(vec![Value::Int(10), Value::Int(20), Value::Int(30)])
+            Value::list(vec![Value::Int(10), Value::Int(20), Value::Int(30)])
         );
     }
 
@@ -3682,7 +3703,7 @@ result
 "#;
         assert_eq!(
             eval_ok(source),
-            Value::List(vec![Value::Int(1), Value::Int(2), Value::Int(3)])
+            Value::list(vec![Value::Int(1), Value::Int(2), Value::Int(3)])
         );
     }
 
@@ -3702,7 +3723,7 @@ result
 "#;
         assert_eq!(
             eval_ok(source),
-            Value::List(vec![Value::Int(20), Value::Int(40), Value::Int(60)])
+            Value::list(vec![Value::Int(20), Value::Int(40), Value::Int(60)])
         );
     }
 
@@ -3752,7 +3773,7 @@ s <= StreamFrom[@[]]()
 s ]=> result
 result
 "#;
-        assert_eq!(eval_ok(source), Value::List(vec![]));
+        assert_eq!(eval_ok(source), Value::list(vec![]));
     }
 
     #[test]
@@ -3768,7 +3789,7 @@ result
 "#;
         assert_eq!(
             eval_ok(source),
-            Value::List(vec![Value::Int(2), Value::Int(4), Value::Int(6)])
+            Value::list(vec![Value::Int(2), Value::Int(4), Value::Int(6)])
         );
     }
 
@@ -3793,7 +3814,7 @@ mapped
 "#;
         assert_eq!(
             eval_ok(source),
-            Value::List(vec![
+            Value::list(vec![
                 Value::Int(2),
                 Value::Int(4),
                 Value::Int(6),

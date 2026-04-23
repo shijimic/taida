@@ -253,7 +253,7 @@ fn test_encode_200_text() {
         ("status".into(), Value::Int(200)),
         (
             "headers".into(),
-            Value::List(vec![Value::BuchiPack(vec![
+            Value::list(vec![Value::BuchiPack(vec![
                 ("name".into(), Value::Str("content-type".into())),
                 ("value".into(), Value::Str("text/plain".into())),
             ])]),
@@ -277,7 +277,7 @@ fn test_encode_200_text() {
 fn test_encode_404_empty() {
     let response = Value::BuchiPack(vec![
         ("status".into(), Value::Int(404)),
-        ("headers".into(), Value::List(vec![])),
+        ("headers".into(), Value::list(vec![])),
         ("body".into(), Value::Str(String::new())),
     ]);
     let result = encode_response(&response);
@@ -295,7 +295,7 @@ fn test_encode_404_empty() {
 fn test_encode_binary_body() {
     let response = Value::BuchiPack(vec![
         ("status".into(), Value::Int(200)),
-        ("headers".into(), Value::List(vec![])),
+        ("headers".into(), Value::list(vec![])),
         ("body".into(), Value::Bytes(vec![0x00, 0xFF, 0x42])),
     ]);
     let result = encode_response(&response);
@@ -313,7 +313,7 @@ fn test_encode_user_content_length_preserved() {
         ("status".into(), Value::Int(200)),
         (
             "headers".into(),
-            Value::List(vec![Value::BuchiPack(vec![
+            Value::list(vec![Value::BuchiPack(vec![
                 ("name".into(), Value::Str("Content-Length".into())),
                 ("value".into(), Value::Str("99".into())),
             ])]),
@@ -553,7 +553,7 @@ fn test_parse_content_length_leading_zeros_over_max_safe() {
 #[test]
 fn test_encode_missing_status() {
     let response = Value::BuchiPack(vec![
-        ("headers".into(), Value::List(vec![])),
+        ("headers".into(), Value::list(vec![])),
         ("body".into(), Value::Str("Hello".into())),
     ]);
     let result = encode_response(&response);
@@ -565,7 +565,7 @@ fn test_encode_missing_status() {
 fn test_encode_wrong_type_status() {
     let response = Value::BuchiPack(vec![
         ("status".into(), Value::Str("200".into())),
-        ("headers".into(), Value::List(vec![])),
+        ("headers".into(), Value::list(vec![])),
         ("body".into(), Value::Str("Hello".into())),
     ]);
     let result = encode_response(&response);
@@ -577,7 +577,7 @@ fn test_encode_wrong_type_status() {
 fn test_encode_status_out_of_range() {
     let response = Value::BuchiPack(vec![
         ("status".into(), Value::Int(99)),
-        ("headers".into(), Value::List(vec![])),
+        ("headers".into(), Value::list(vec![])),
         ("body".into(), Value::Str("Hello".into())),
     ]);
     let result = encode_response(&response);
@@ -600,7 +600,7 @@ fn test_encode_missing_headers() {
 fn test_encode_missing_body() {
     let response = Value::BuchiPack(vec![
         ("status".into(), Value::Int(200)),
-        ("headers".into(), Value::List(vec![])),
+        ("headers".into(), Value::list(vec![])),
     ]);
     let result = encode_response(&response);
     assert!(is_result_failure(&result));
@@ -613,7 +613,7 @@ fn test_encode_crlf_in_header_name() {
         ("status".into(), Value::Int(200)),
         (
             "headers".into(),
-            Value::List(vec![Value::BuchiPack(vec![
+            Value::list(vec![Value::BuchiPack(vec![
                 ("name".into(), Value::Str("Bad\r\nHeader".into())),
                 ("value".into(), Value::Str("ok".into())),
             ])]),
@@ -631,7 +631,7 @@ fn test_encode_crlf_in_header_value() {
         ("status".into(), Value::Int(200)),
         (
             "headers".into(),
-            Value::List(vec![Value::BuchiPack(vec![
+            Value::list(vec![Value::BuchiPack(vec![
                 ("name".into(), Value::Str("X-Test".into())),
                 ("value".into(), Value::Str("inject\r\nEvil: header".into())),
             ])]),
@@ -647,7 +647,7 @@ fn test_encode_crlf_in_header_value() {
 fn test_encode_wrong_type_body() {
     let response = Value::BuchiPack(vec![
         ("status".into(), Value::Int(200)),
-        ("headers".into(), Value::List(vec![])),
+        ("headers".into(), Value::list(vec![])),
         ("body".into(), Value::Int(42)),
     ]);
     let result = encode_response(&response);
@@ -661,7 +661,7 @@ fn test_encode_header_name_not_str() {
         ("status".into(), Value::Int(200)),
         (
             "headers".into(),
-            Value::List(vec![Value::BuchiPack(vec![
+            Value::list(vec![Value::BuchiPack(vec![
                 ("name".into(), Value::Int(42)),
                 ("value".into(), Value::Str("ok".into())),
             ])]),
@@ -682,7 +682,7 @@ fn test_encode_header_name_exceeds_limit() {
         ("status".into(), Value::Int(200)),
         (
             "headers".into(),
-            Value::List(vec![Value::BuchiPack(vec![
+            Value::list(vec![Value::BuchiPack(vec![
                 ("name".into(), Value::Str(long_name)),
                 ("value".into(), Value::Str("ok".into())),
             ])]),
@@ -705,7 +705,7 @@ fn test_encode_header_value_exceeds_limit() {
         ("status".into(), Value::Int(200)),
         (
             "headers".into(),
-            Value::List(vec![Value::BuchiPack(vec![
+            Value::list(vec![Value::BuchiPack(vec![
                 ("name".into(), Value::Str("X-Data".into())),
                 ("value".into(), Value::Str(long_value)),
             ])]),
@@ -728,7 +728,7 @@ fn test_encode_header_name_at_limit_ok() {
         ("status".into(), Value::Int(200)),
         (
             "headers".into(),
-            Value::List(vec![Value::BuchiPack(vec![
+            Value::list(vec![Value::BuchiPack(vec![
                 ("name".into(), Value::Str(name)),
                 ("value".into(), Value::Str("ok".into())),
             ])]),
@@ -746,7 +746,7 @@ fn test_encode_header_value_at_limit_ok() {
         ("status".into(), Value::Int(200)),
         (
             "headers".into(),
-            Value::List(vec![Value::BuchiPack(vec![
+            Value::list(vec![Value::BuchiPack(vec![
                 ("name".into(), Value::Str("X-Data".into())),
                 ("value".into(), Value::Str(value)),
             ])]),
@@ -763,7 +763,7 @@ fn test_encode_header_value_at_limit_ok() {
 fn test_encode_204_empty_body_ok() {
     let response = Value::BuchiPack(vec![
         ("status".into(), Value::Int(204)),
-        ("headers".into(), Value::List(vec![])),
+        ("headers".into(), Value::list(vec![])),
         ("body".into(), Value::Str(String::new())),
     ]);
     let result = encode_response(&response);
@@ -785,7 +785,7 @@ fn test_encode_204_empty_body_ok() {
 fn test_encode_204_with_body_rejected() {
     let response = Value::BuchiPack(vec![
         ("status".into(), Value::Int(204)),
-        ("headers".into(), Value::List(vec![])),
+        ("headers".into(), Value::list(vec![])),
         ("body".into(), Value::Str("oops".into())),
     ]);
     let result = encode_response(&response);
@@ -797,7 +797,7 @@ fn test_encode_204_with_body_rejected() {
 fn test_encode_304_with_body_rejected() {
     let response = Value::BuchiPack(vec![
         ("status".into(), Value::Int(304)),
-        ("headers".into(), Value::List(vec![])),
+        ("headers".into(), Value::list(vec![])),
         ("body".into(), Value::Str("cached".into())),
     ]);
     let result = encode_response(&response);
@@ -809,7 +809,7 @@ fn test_encode_304_with_body_rejected() {
 fn test_encode_205_with_body_rejected() {
     let response = Value::BuchiPack(vec![
         ("status".into(), Value::Int(205)),
-        ("headers".into(), Value::List(vec![])),
+        ("headers".into(), Value::list(vec![])),
         ("body".into(), Value::Str("data".into())),
     ]);
     let result = encode_response(&response);
@@ -821,7 +821,7 @@ fn test_encode_205_with_body_rejected() {
 fn test_encode_205_empty_body_ok() {
     let response = Value::BuchiPack(vec![
         ("status".into(), Value::Int(205)),
-        ("headers".into(), Value::List(vec![])),
+        ("headers".into(), Value::list(vec![])),
         ("body".into(), Value::Str(String::new())),
     ]);
     let result = encode_response(&response);
@@ -840,7 +840,7 @@ fn test_encode_205_empty_body_ok() {
 fn test_encode_1xx_with_body_rejected() {
     let response = Value::BuchiPack(vec![
         ("status".into(), Value::Int(100)),
-        ("headers".into(), Value::List(vec![])),
+        ("headers".into(), Value::list(vec![])),
         ("body".into(), Value::Str("data".into())),
     ]);
     let result = encode_response(&response);
@@ -855,7 +855,7 @@ fn test_encode_204_content_length_stripped() {
         ("status".into(), Value::Int(204)),
         (
             "headers".into(),
-            Value::List(vec![Value::BuchiPack(vec![
+            Value::list(vec![Value::BuchiPack(vec![
                 ("name".into(), Value::Str("Content-Length".into())),
                 ("value".into(), Value::Str("0".into())),
             ])]),
@@ -879,7 +879,7 @@ fn test_encode_204_content_length_stripped() {
 fn test_encode_429_reason_phrase() {
     let response = Value::BuchiPack(vec![
         ("status".into(), Value::Int(429)),
-        ("headers".into(), Value::List(vec![])),
+        ("headers".into(), Value::list(vec![])),
         ("body".into(), Value::Str(String::new())),
     ]);
     let result = encode_response(&response);
@@ -897,7 +897,7 @@ fn test_encode_429_reason_phrase() {
 fn test_encode_unknown_status_no_fake_reason() {
     let response = Value::BuchiPack(vec![
         ("status".into(), Value::Int(599)),
-        ("headers".into(), Value::List(vec![])),
+        ("headers".into(), Value::list(vec![])),
         ("body".into(), Value::Str(String::new())),
     ]);
     let result = encode_response(&response);
@@ -1160,7 +1160,7 @@ fn test_encode_multiple_headers() {
         ("status".into(), Value::Int(200)),
         (
             "headers".into(),
-            Value::List(vec![
+            Value::list(vec![
                 Value::BuchiPack(vec![
                     ("name".into(), Value::Str("Content-Type".into())),
                     ("value".into(), Value::Str("application/json".into())),
@@ -1200,7 +1200,7 @@ fn test_encode_multiple_headers_order_preserved() {
         ("status".into(), Value::Int(200)),
         (
             "headers".into(),
-            Value::List(vec![
+            Value::list(vec![
                 Value::BuchiPack(vec![
                     ("name".into(), Value::Str("X-First".into())),
                     ("value".into(), Value::Str("1".into())),
@@ -1246,7 +1246,7 @@ fn test_encode_duplicate_header_names_preserved() {
         ("status".into(), Value::Int(200)),
         (
             "headers".into(),
-            Value::List(vec![
+            Value::list(vec![
                 Value::BuchiPack(vec![
                     ("name".into(), Value::Str("Set-Cookie".into())),
                     ("value".into(), Value::Str("a=1".into())),

@@ -149,7 +149,7 @@ impl Interpreter {
             match self.eval_expr(arg)? {
                 Signal::Value(Value::List(items)) => {
                     let mut out = Vec::new();
-                    for item in &items {
+                    for item in items.iter() {
                         if let Value::BuchiPack(fields) = item {
                             let name = get_field_str(fields, "name").unwrap_or_default();
                             let value = get_field_str(fields, "value").unwrap_or_default();

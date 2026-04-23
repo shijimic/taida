@@ -23,8 +23,31 @@ pub enum Value {
     Bool(bool),
     /// Buchi pack (named fields, ordered)
     BuchiPack(Vec<(String, Value)>),
-    /// List of values
-    List(Vec<Value>),
+    /// List of values.
+    ///
+    /// # C25B-029 / Phase 5-F2-1 (2026-04-23): interior `Arc<Vec<Value>>`
+    ///
+    /// The interior was migrated from plain `Vec<Value>` to
+    /// `Arc<Vec<Value>>` so that `Value::clone()` on a list becomes an
+    /// `Arc::clone()` (one atomic increment) instead of a full
+    /// element-by-element deep-clone. Pattern-match bindings such as
+    /// `Value::List(items)` now yield `items: Arc<Vec<Value>>`, which
+    /// derefs transparently to `&Vec<Value>` for read operations.
+    ///
+    /// * **Construction**: prefer [`Value::list`] (wraps in `Arc::new`).
+    /// * **Iteration from a match binding**: `items.iter()` works via
+    ///   deref; `for x in &*items` and `for x in items.as_ref()` are
+    ///   both valid.
+    /// * **Mutation with COW**: `Arc::make_mut(&mut inner)` clones if
+    ///   shared, otherwise mutates in place.
+    /// * **Consuming the inner `Vec<Value>`**: `Arc::try_unwrap(arc)`
+    ///   returns `Ok(Vec)` if unique, else `Err(Arc)`; fall back to
+    ///   `(*arc).clone()` or `arc.as_ref().clone()` for unconditional
+    ///   ownership.
+    ///
+    /// Equality, ordering, display, hashing semantics are unchanged
+    /// because `Arc<T>` transparently forwards read access to `T`.
+    List(Arc<Vec<Value>>),
     /// Function closure
     Function(FuncValue),
     /// Gorilla — immediate program termination
@@ -201,7 +224,22 @@ impl Value {
 
     /// Default value for List.
     pub fn default_list() -> Self {
-        Value::List(Vec::new())
+        Value::List(Arc::new(Vec::new()))
+    }
+
+    /// Construct a `Value::List` from an owned `Vec<Value>`, hiding the
+    /// `Arc` wrapping. See the doc comment on `Value::List` for the
+    /// rationale (Phase 5-F2-1 interior migration).
+    pub fn list(items: Vec<Value>) -> Self {
+        Value::List(Arc::new(items))
+    }
+
+    /// COW helper: take ownership of the inner `Vec<Value>` from an
+    /// `Arc<Vec<Value>>`. If the `Arc` is uniquely owned, avoids allocation;
+    /// otherwise clones the vec. Used at all legacy consumer sites that
+    /// previously moved `Vec<Value>` out of `Value::List`. Phase 5-F2-1.
+    pub fn list_take(items: Arc<Vec<Value>>) -> Vec<Value> {
+        Arc::try_unwrap(items).unwrap_or_else(|arc| (*arc).clone())
     }
 
     /// Default value for BuchiPack (empty).
@@ -240,7 +278,7 @@ impl Value {
             Some(Value::Bytes(_)) => Value::Bytes(Vec::new()),
             Some(Value::Bool(_)) => Value::Bool(false),
             Some(Value::BuchiPack(_)) => Value::BuchiPack(Vec::new()),
-            Some(Value::List(_)) => Value::List(Vec::new()),
+            Some(Value::List(_)) => Value::list(Vec::new()),
             Some(Value::Json(_)) => Value::default_json(),
             Some(Value::Molten) => Value::Molten,
             Some(Value::Stream(_)) => Value::default_stream(),
@@ -505,7 +543,7 @@ mod tests {
         assert_eq!(Value::default_str(), Value::Str(String::new()));
         assert_eq!(Value::default_bytes(), Value::Bytes(Vec::new()));
         assert_eq!(Value::default_bool(), Value::Bool(false));
-        assert_eq!(Value::default_list(), Value::List(Vec::new()));
+        assert_eq!(Value::default_list(), Value::list(Vec::new()));
     }
 
     // ── BT-18: Default value guarantee exhaustive tests ──
