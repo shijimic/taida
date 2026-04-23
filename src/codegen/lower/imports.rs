@@ -302,6 +302,12 @@ impl Lowering {
                 self.user_funcs.insert(fn_local_name.clone());
                 self.imported_func_links
                     .insert(fn_local_name.clone(), mangled.clone());
+                if fn_def.name != *fn_local_name {
+                    self.user_funcs.insert(fn_def.name.clone());
+                    self.imported_func_links
+                        .insert(fn_def.name.clone(), mangled.clone());
+                    self.register_facade_func_signature(&fn_def.name, fn_def);
+                }
                 // Track arity / return-type tags for downstream
                 // inference (same as the main module's FuncDef 1st
                 // pass).
@@ -1289,6 +1295,15 @@ impl Lowering {
 
         self.emit_imported_module_inits(&mut init_fn);
         self.bind_imported_values(&mut init_fn);
+
+        let facade_bindings = std::mem::take(&mut self.addon_facade_pack_bindings);
+        for (name, expr) in &facade_bindings {
+            let val = self.lower_expr(&mut init_fn, expr)?;
+            init_fn.push(IrInst::DefVar(name.clone(), val));
+            let hash = self.global_var_hash(name);
+            init_fn.push(IrInst::GlobalSet(hash, val));
+        }
+        self.addon_facade_pack_bindings = facade_bindings;
 
         for stmt in &program.statements {
             match stmt {

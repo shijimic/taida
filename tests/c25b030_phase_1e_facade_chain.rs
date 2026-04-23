@@ -266,6 +266,58 @@ stdout(`cha=${KeyKind.Char}`)
     let _ = std::fs::remove_dir_all(&project);
 }
 
+/// Phase 1E-α: aliasing a child facade symbol at the import site
+/// (`>>> ./child.td => @(Join2: Glue)`) must rewrite the local
+/// binding name seen by the parent facade body. This mirrors
+/// ordinary module import semantics and prevents sibling-name
+/// collisions inside the facade tree.
+#[test]
+fn phase_1e_alpha_child_import_alias_is_honoured_inside_parent_facade() {
+    let project = unique_temp_dir("alias_child_import");
+    let _ = std::fs::remove_dir_all(&project);
+    std::fs::create_dir_all(&project).unwrap();
+
+    let terminal_td = r#"
+>>> ./strings.td => @(Join2: Glue)
+
+Greet who =
+  Glue("hi", who)
+=> :Str
+
+<<< @(Greet)
+"#;
+    let strings_td = r#"
+Join2 a b =
+  `${a}-${b}`
+=> :Str
+
+<<< @(Join2)
+"#;
+    write_terminal_fixture(&project, terminal_td, &[("strings.td", strings_td)]);
+
+    let main_td = r#">>> taida-lang/terminal => @(Greet)
+stdout(Greet("taida"))
+"#;
+
+    let (ok, stdout, stderr) = build_native(&project, main_td);
+    assert!(
+        ok,
+        "Phase 1E-α: child import alias inside facade must build on native. \
+         stdout={}, stderr={}",
+        stdout, stderr
+    );
+
+    let run = Command::new(project.join("main.bin"))
+        .current_dir(&project)
+        .output()
+        .expect("run produced binary");
+    assert!(run.status.success(), "binary must exit 0");
+    let out = String::from_utf8_lossy(&run.stdout);
+    assert!(out.contains("hi-taida"), "got: {:?}", out);
+
+    let _ = std::fs::remove_dir_all(&project);
+}
+
 // ── Negative: error contracts for unsupported constructs ──
 
 /// `>>>` paths other than relative (`./`, `../`) are rejected with
@@ -1034,6 +1086,57 @@ stdout(`default=${State.text}`)
         "user-side pack default broken: {:?}",
         out
     );
+
+    let _ = std::fs::remove_dir_all(&project);
+}
+
+/// Review regression: library modules route through
+/// `generate_module_init_func` instead of `_taida_main`, so addon
+/// facade value bindings must be replayed there as well. Otherwise
+/// exported functions that read those values observe an uninitialised
+/// global slot.
+#[test]
+fn phase_1e_review_library_module_replays_addon_facade_values_in_init() {
+    let project = unique_temp_dir("review_library_init");
+    let _ = std::fs::remove_dir_all(&project);
+    std::fs::create_dir_all(&project).unwrap();
+
+    let terminal_td = r#"
+Mark <= "!"
+
+<<< @(Mark)
+"#;
+    write_terminal_fixture(&project, terminal_td, &[]);
+
+    let helper_td = r#"
+>>> taida-lang/terminal => @(Mark)
+
+Shout who =
+  `${who}${Mark}`
+=> :Str
+
+<<< @(Shout)
+"#;
+    std::fs::write(project.join("helper.td"), helper_td).expect("write helper.td");
+
+    let main_td = r#">>> ./helper.td => @(Shout)
+stdout(Shout("go"))
+"#;
+    let (ok, stdout, stderr) = build_native(&project, main_td);
+    assert!(
+        ok,
+        "Phase 1E review: library module using addon facade value must build. \
+         stdout={}, stderr={}",
+        stdout, stderr
+    );
+
+    let run = Command::new(project.join("main.bin"))
+        .current_dir(&project)
+        .output()
+        .expect("run produced binary");
+    assert!(run.status.success(), "binary must exit 0");
+    let out = String::from_utf8_lossy(&run.stdout);
+    assert!(out.contains("go!"), "got: {:?}", out);
 
     let _ = std::fs::remove_dir_all(&project);
 }

@@ -657,6 +657,10 @@ impl Lowering {
             // the same facade) land on the correct symbol.
             self.imported_func_links
                 .insert(local_name.clone(), mangled.clone());
+            if func_def.name != *local_name {
+                self.imported_func_links
+                    .insert(func_def.name.clone(), mangled.clone());
+            }
             let ir_func = self.lower_func_def(func_def)?;
             module.functions.push(ir_func);
         }

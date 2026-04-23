@@ -259,7 +259,7 @@ fn load_facade_file(
     let mut local_packs: HashMap<String, Expr> = HashMap::new();
     let mut local_funcs: HashMap<String, FuncDef> = HashMap::new();
     let mut local_exports: HashSet<String> = HashSet::new();
-    let mut child_imports: Vec<(PathBuf, HashSet<String>)> = Vec::new();
+    let mut child_imports: Vec<(PathBuf, HashMap<String, String>)> = Vec::new();
 
     for stmt in &program.statements {
         match stmt {
@@ -370,11 +370,16 @@ fn load_facade_file(
                         ),
                     });
                 }
-                let requested: HashSet<String> = if import_stmt.symbols.is_empty() {
-                    HashSet::new()
-                } else {
-                    import_stmt.symbols.iter().map(|s| s.name.clone()).collect()
-                };
+                let requested: HashMap<String, String> = import_stmt
+                    .symbols
+                    .iter()
+                    .map(|s| {
+                        (
+                            s.name.clone(),
+                            s.alias.clone().unwrap_or_else(|| s.name.clone()),
+                        )
+                    })
+                    .collect();
                 child_imports.push((child_path, requested));
             }
             Statement::Export(export_stmt) => {
@@ -458,22 +463,54 @@ fn load_facade_file(
     }
 
     for (child_path, requested) in child_imports {
-        let child_restrict = if requested.is_empty() {
-            None
-        } else {
-            Some(&requested)
-        };
+        if requested.is_empty() {
+            load_facade_file(
+                &child_path,
+                manifest,
+                import_path,
+                None,
+                out_summary,
+                visiting,
+                universe_funcs,
+                universe_packs,
+                universe_aliases,
+            )?;
+            continue;
+        }
+
+        let requested_names: HashSet<String> = requested.keys().cloned().collect();
+        let mut child_summary = AddonFacadeSummary::default();
         load_facade_file(
             &child_path,
             manifest,
             import_path,
-            child_restrict,
-            out_summary,
+            Some(&requested_names),
+            &mut child_summary,
             visiting,
             universe_funcs,
             universe_packs,
             universe_aliases,
         )?;
+
+        for (orig_name, local_name) in &requested {
+            if let Some(target) = child_summary.aliases.get(orig_name) {
+                out_summary
+                    .aliases
+                    .insert(local_name.clone(), target.clone());
+                universe_aliases
+                    .insert(local_name.clone(), target.clone());
+            }
+            if let Some(expr) = child_summary.pack_bindings.get(orig_name) {
+                out_summary
+                    .pack_bindings
+                    .insert(local_name.clone(), expr.clone());
+                universe_packs.insert(local_name.clone(), expr.clone());
+            }
+            if let Some(fd) = child_summary.facade_funcs.get(orig_name) {
+                out_summary.facade_funcs.insert(local_name.clone(), fd.clone());
+                universe_funcs.insert(local_name.clone(), fd.clone());
+            }
+        }
     }
 
     let use_set: HashSet<String> = if let Some(set) = restrict_to {
