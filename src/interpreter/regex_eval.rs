@@ -30,13 +30,13 @@
 use super::value::Value;
 use regex::{Regex, RegexBuilder};
 use std::cell::RefCell;
-use std::collections::VecDeque;
+use std::collections::HashMap;
 
 /// Internal tag marker stored in `Value::BuchiPack` `__type` for
 /// Regex values.
 pub(crate) const REGEX_TYPE_TAG: &str = "Regex";
 
-/// C12B-036: per-thread FIFO cache for compiled regex objects.
+/// C12B-036 / C25B-024: per-thread cache for compiled regex objects.
 ///
 /// Each Str-method overload (`replace`, `replaceAll`, `split`, `match`,
 /// `search`) and `build_regex_value` used to call [`compile`] — which
@@ -44,18 +44,21 @@ pub(crate) const REGEX_TYPE_TAG: &str = "Regex";
 /// (`values => map(v => v.replace(Regex("..."), "..."))`) this means
 /// the same pattern is re-parsed on every iteration. The cache below
 /// stashes the most recently used `(pattern, flags)` pairs so that
-/// subsequent calls return the shared `Regex` in O(n) (n = capacity,
-/// here 64) without any re-parsing.
+/// subsequent calls return the shared `Regex` without any re-parsing.
 ///
 /// Notes:
 /// * Thread-local: `Regex` is `Sync + Send` but we keep the cache
 ///   private per thread to avoid locking on the hot path. The worst
 ///   case is a small per-thread memory footprint.
-/// * FIFO (not LRU): preserves insertion order via `VecDeque`.
-///   We did not adopt full LRU because the expected working set for
-///   Regex keys in a program is small (usually < capacity) and FIFO
-///   is simpler + branch-free for the common "cache hit on first
-///   entry" path.
+/// * **C25B-024 migration (2026-04-23)**: the C12B-036 VecDeque-based
+///   FIFO cache was replaced with a `HashMap<(String, String), Regex>`
+///   + eviction-order `VecDeque<(String, String)>` to keep lookups at
+///   O(1) while preserving the fixed capacity of 64. Previous
+///   behaviour walked the entire VecDeque on every cache lookup, which
+///   dominated regex-heavy loops (lexers, tokenisers, template
+///   substitution). Per-lookup cost drops from O(capacity) to O(1)
+///   hash. FIFO semantics preserved so behaviour under saturation is
+///   identical.
 /// * Capacity 64 mirrors the JS runtime's `__TAIDA_REGEX_CACHE_CAPACITY`
 ///   so the three backends behave similarly under memory pressure.
 /// * Invalid patterns are never cached: [`compile`] returns `Err`
@@ -63,8 +66,13 @@ pub(crate) const REGEX_TYPE_TAG: &str = "Regex";
 const REGEX_CACHE_CAPACITY: usize = 64;
 
 thread_local! {
-    static REGEX_CACHE: RefCell<VecDeque<((String, String), Regex)>> =
-        RefCell::new(VecDeque::with_capacity(REGEX_CACHE_CAPACITY));
+    /// The compiled regex table, keyed on (pattern, flags).
+    static REGEX_CACHE: RefCell<HashMap<(String, String), Regex>> =
+        RefCell::new(HashMap::with_capacity(REGEX_CACHE_CAPACITY));
+    /// FIFO eviction order — the key at the front is the next to evict
+    /// when the table reaches capacity.
+    static REGEX_CACHE_ORDER: RefCell<std::collections::VecDeque<(String, String)>> =
+        RefCell::new(std::collections::VecDeque::with_capacity(REGEX_CACHE_CAPACITY));
 }
 
 /// Return a compiled `Regex` for `(pattern, flags)` from the thread-local
@@ -73,22 +81,26 @@ thread_local! {
 /// true share rather than a fresh compile.
 fn cached_compile(pattern: &str, flags: &str) -> Result<Regex, String> {
     let key = (pattern.to_string(), flags.to_string());
-    let hit = REGEX_CACHE.with(|cell| {
-        cell.borrow()
-            .iter()
-            .find(|((p, f), _)| p == &key.0 && f == &key.1)
-            .map(|(_, re)| re.clone())
-    });
+    // Fast O(1) hash lookup.
+    let hit = REGEX_CACHE.with(|cell| cell.borrow().get(&key).cloned());
     if let Some(re) = hit {
         return Ok(re);
     }
     let re = compile(pattern, flags)?;
     REGEX_CACHE.with(|cell| {
-        let mut q = cell.borrow_mut();
-        if q.len() >= REGEX_CACHE_CAPACITY {
-            q.pop_front();
-        }
-        q.push_back((key, re.clone()));
+        REGEX_CACHE_ORDER.with(|order_cell| {
+            let mut map = cell.borrow_mut();
+            let mut order = order_cell.borrow_mut();
+            if map.len() >= REGEX_CACHE_CAPACITY
+                && let Some(oldest) = order.pop_front()
+            {
+                map.remove(&oldest);
+            }
+            if !map.contains_key(&key) {
+                order.push_back(key.clone());
+            }
+            map.insert(key, re.clone());
+        });
     });
     Ok(re)
 }
