@@ -271,15 +271,29 @@ label-less `@c.25` release is deferred.
 
 ### 5.1. NET stable viewpoint
 
-- HTTP/2 parity across backends.
-- TLS configuration surface.
-- Port-bind race eradication (C25B-002).
-- Throughput regression guards for net fixtures.
-- Scatter-gather long-run correctness.
+The following NET-adjacent items are the reason `@c.25.rc7` keeps
+its `rc` label and the label-less `@c.25` stable tag is deferred:
+
+- **HTTP/2 parity across interpreter / native / wasm** —
+  scatter-gather response handling, flow-control edge cases, and
+  real-world client conformance are not yet locked.
+- **TLS construction** — cert chains, ALPN, and verification modes
+  that the current `taida-lang/net` facade covers only partially.
+- **HTTP parity under port-bind race** — hyper / tokio port-bind
+  failures under concurrent tests still lean on the retry shim.
+- **Port-bind race eradication (C25B-002)** — `flaky_h2_parity`
+  is still papered over with a retry shim rather than
+  eliminated at the root.
+- **Throughput regression guard (C25B-004)** — the
+  `benches/perf_baseline.rs` harness runs `continue-on-error`;
+  there is no automated perf benchmark that blocks regressions.
+- **Scatter-gather long-run** — the `httpServe` path has not
+  been stressed with multi-hour runs yet.
 
 These are expected to close out in a follow-up RC cycle (`@c.25.rcN+`
-or `@c.26.rcM`, decision deferred) before the label-less `@c.25` is
-tagged.
+or `@c.26.rcM`, decision deferred) before the label-less `@c.25`
+is tagged. The label-less `@c.25` tag **will not** be declared
+inside the `@c.25.rc7` cycle.
 
 ### 5.2. Addon WASM backend
 
