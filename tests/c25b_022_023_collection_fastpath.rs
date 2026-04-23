@@ -166,6 +166,130 @@ stdout(merged.get(1499))
     );
 }
 
+/// Semantic regression — `Set.union` must honour `Value::eq`'s
+/// `Int(n) == EnumVal(_, n)` cross-type rule. Session-20 review
+/// found that the Phase 5-C fingerprint fast path treated them as
+/// distinct, so `setOf(@[0]).union(setOf(@[Color:Red()]))` reported
+/// size 2 instead of size 1.
+#[test]
+fn c25b_022_set_union_int_enumval_cross_type_eq() {
+    let src = r#"
+Enum => Color = :Red :Green :Blue
+
+a <= setOf(@[0])
+b <= setOf(@[Color:Red()])
+u <= a.union(b)
+stdout(u.size())
+"#;
+    let out = run_taida_fixture_with_timeout(src, Duration::from_secs(5));
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(
+        lines[0], "1",
+        "Int(0) and Color:Red() share ordinal 0 and are Value::eq-equal, \
+         so Set.union must dedupe them (got {:?})",
+        lines
+    );
+}
+
+/// Semantic regression — `Set.intersect` must likewise honour
+/// cross-type equality.
+#[test]
+fn c25b_022_set_intersect_int_enumval_cross_type_eq() {
+    let src = r#"
+Enum => Color = :Red :Green :Blue
+
+a <= setOf(@[0, 1, 2])
+b <= setOf(@[Color:Red(), Color:Green()])
+i2 <= a.intersect(b)
+stdout(i2.size())
+"#;
+    let out = run_taida_fixture_with_timeout(src, Duration::from_secs(5));
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(
+        lines[0], "2",
+        "Color:Red() (ordinal 0) matches Int(0), Color:Green() (ordinal 1) \
+         matches Int(1), so intersect size must be 2 (got {:?})",
+        lines
+    );
+}
+
+/// Semantic regression — `Set.diff` must remove cross-type
+/// equivalents.
+#[test]
+fn c25b_022_set_diff_int_enumval_cross_type_eq() {
+    let src = r#"
+Enum => Color = :Red :Green :Blue
+
+a <= setOf(@[0, 1, 2])
+b <= setOf(@[Color:Red()])
+d <= a.diff(b)
+stdout(d.size())
+"#;
+    let out = run_taida_fixture_with_timeout(src, Duration::from_secs(5));
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(
+        lines[0], "2",
+        "Color:Red() (ordinal 0) == Int(0), so diff must drop Int(0) \
+         from {{0,1,2}} and leave size 2 (got {:?})",
+        lines
+    );
+}
+
+/// Semantic regression — `HashMap.merge` must treat
+/// `Int(0)` and `EnumVal("Color", 0)` as the same key, so B's value
+/// overwrites A's.
+#[test]
+fn c25b_023_hashmap_merge_int_enumval_key_overwrite() {
+    let src = r#"
+Enum => Color = :Red :Green :Blue
+
+a <= hashMap().set(0, "int")
+b <= hashMap().set(Color:Red(), "enum")
+merged <= a.merge(b)
+stdout(merged.size())
+stdout(merged.get(0))
+"#;
+    let out = run_taida_fixture_with_timeout(src, Duration::from_secs(5));
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(
+        lines[0], "1",
+        "Int(0) key and Color:Red() key are Value::eq-equal, so merge \
+         must fold to a single entry (got {:?})",
+        lines
+    );
+    assert!(
+        lines[1].contains("enum"),
+        "B-side value (\"enum\") must win on key collision: got {}",
+        lines[1]
+    );
+}
+
+/// Semantic regression — distinct EnumVals with the same ordinal
+/// but different enum names must remain distinct. This is the
+/// fingerprint-collision case; the Value::eq confirmation path at
+/// the caller must keep them separate.
+#[test]
+fn c25b_022_set_union_distinct_enums_same_ordinal_stay_distinct() {
+    let src = r#"
+Enum => Color = :Red :Green :Blue
+Enum => Shape = :Circle :Square :Triangle
+
+a <= setOf(@[Color:Red()])
+b <= setOf(@[Shape:Circle()])
+u <= a.union(b)
+stdout(u.size())
+"#;
+    let out = run_taida_fixture_with_timeout(src, Duration::from_secs(5));
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(
+        lines[0], "2",
+        "Color:Red() (ordinal 0) and Shape:Circle() (ordinal 0) are \
+         different per Value::eq (different enum names), so Set.union \
+         must keep both (got {:?})",
+        lines
+    );
+}
+
 /// Unique on a 1000-element list with mostly-duplicate Str keys.
 /// Pre-fix the seen_keys linear scan dominated; Phase 5-C's
 /// fingerprint HashSet brings it to O(N).

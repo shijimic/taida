@@ -96,23 +96,6 @@ impl Environment {
             .is_some_and(|scope| scope.contains_key(name))
     }
 
-    /// C25B-021 / Phase 5-F2-2 (Stage B): take a binding out of the
-    /// innermost scope if present, returning ownership to the caller.
-    ///
-    /// Used by Append / Prepend to avoid env-holding an extra `Arc<Vec>`
-    /// reference while the mold is executing. The caller is obligated to
-    /// rebind via `define_force` before control escapes the mold — on
-    /// every exit path, including error paths — otherwise the function
-    /// parameter semantically vanishes from the scope and subsequent
-    /// statements observing the same name would find it undefined.
-    ///
-    /// Returns `None` if the variable is not defined in the innermost
-    /// scope (outer/closure scopes are not touched to avoid cross-scope
-    /// ownership surprises).
-    pub fn take_from_current_scope(&mut self, name: &str) -> Option<Value> {
-        self.scopes.last_mut()?.remove(name)
-    }
-
     /// Create a snapshot of the current environment for closures.
     pub fn snapshot(&self) -> HashMap<String, Value> {
         let mut result = HashMap::new();

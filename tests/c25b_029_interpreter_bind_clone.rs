@@ -85,35 +85,35 @@ stdout(b11.rows)
 /// Arc clone of `acc` across body evaluation, so `list_take`
 /// always fell back to a full Vec clone.
 ///
-/// Phase 5-F2-2 Stage B (2026-04-23, this commit) added two
-/// complementary changes:
-///
-///   1. The trampoline now `current_args.clear()` immediately
-///      after binding parameters, so the env becomes the unique
-///      Arc holder for each arg.
-///
-///   2. `Append` / `Prepend` take the first argument out of the
-///      innermost scope when it is a bare Ident whose name does
-///      not appear in the remaining type-args, then use
-///      `Arc::make_mut` to mutate in place. With (1) providing
-///      the unique-ownership invariant, this turns the inner loop
-///      into O(1) amortized per element (O(N) overall).
+/// Phase 5-F2-2 Stage B (commit `f043586`) originally landed two
+/// complementary changes: a trampoline-level `current_args.clear()`
+/// release and an `Append` / `Prepend` env-take-and-make-mut fast
+/// path. The latter silently mutated the source binding (see
+/// C25B-021 REOPEN) and was reverted in session 20 (2026-04-23).
 ///
 /// Measured wall-clock on the developer laptop (2026-04-23):
 ///
-/// * pre-5-F2-1  (List=Vec)           ≈ 3.6 s
-/// * post-5-F2-1 (List=Arc<Vec>)      ≈ 1.8 s
-/// * post-5-F2-2 (this commit)        ≈ 0.004 s (four milliseconds)
+/// * pre-5-F2-1    (List=Vec)                    ≈ 3.6 s
+/// * post-5-F2-1   (List=Arc<Vec>)               ≈ 1.8 s
+/// * post-5-F2-2 B (env-take fast path)          ≈ 4 ms
+/// * post-session-20 (env-take reverted)         ≈ 1.8 s
 ///
-/// The ceiling tightens from 5 s to **500 ms** — well above the
-/// measured 4 ms but low enough that any accidental reintroduction
-/// of the quadratic deep-clone shape will trip the guard within a
-/// fraction of a CI budget rather than silently running seconds
-/// long. Tightening further (e.g. to 50 ms) is risky because some
-/// CI runners are 10× slower than the development machine on
-/// subprocess spawn cost alone, and this test shells out to the
-/// `taida` binary.
-const MAX_DURATION: Duration = Duration::from_millis(500);
+/// The session-20 revert restores the semantic contract at the
+/// cost of re-quadratic Append in the `buildCells` loop. The
+/// `touch()` chain itself remains O(chain) thanks to the
+/// `Value::List` interior-Arc migration landed in 5-F2-1; the
+/// regression is confined to the accumulator-build phase.
+///
+/// We raise the ceiling from 500 ms to **3 s** to accommodate the
+/// O(N²) Append cost at N=4800. This is consistent with
+/// `tests/c25b_021_append_linear.rs` which now pins N=5000 under
+/// 2 s. The guard still catches the pre-5-F2-1 deep-clone
+/// regression (which ran 3.6 s even without any Append cost).
+///
+/// A persistent-Vec or builder-scoped mutable-list primitive is
+/// the proper fix and is deferred to a post-stable RC (tracked as
+/// Phase 5-F2 in `.dev/C25_PROGRESS.md`).
+const MAX_DURATION: Duration = Duration::from_secs(3);
 
 #[test]
 fn c25b_029_bufferlike_touch_chain_does_not_freeze() {
@@ -137,8 +137,11 @@ fn c25b_029_bufferlike_touch_chain_does_not_freeze() {
     assert!(
         elapsed < MAX_DURATION,
         "C25B-029 clone probe took {}ms — regressed past {}ms ceiling. \
-         Phase 5-F2 (Value interior-Arc migration, D26 or subsequent \
-         RC) still pending; see .dev/C25_PROGRESS.md",
+         After session-20's Append/Prepend semantic-correctness revert \
+         the buildCells accumulator is O(N²), but the touch() chain \
+         itself must remain O(chain) via List's interior-Arc shape. \
+         Post-stable RC: land persistent-Vec or builder-scoped list \
+         primitive to restore 4 ms envelope.",
         elapsed.as_millis(),
         MAX_DURATION.as_millis()
     );

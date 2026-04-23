@@ -1418,76 +1418,35 @@ impl Interpreter {
                         message: "Append requires 2 arguments: Append[list, val]()".into(),
                     });
                 }
-                // C25B-021 / Phase 5-F2-2 Stage B: unique-ownership fast path.
+                // C25B-021 REOPEN fix (2026-04-23, session 20):
                 //
-                // The hot pattern `build(Append[acc, x](), ...)` in a tail-
-                // recursive loop used to be O(N²): each iteration the env
-                // still held a clone of `acc`, so `list_take` (try_unwrap)
-                // failed and fell back to a full Vec::clone of length N.
+                // An earlier Stage-B attempt took the binding out of the
+                // innermost scope via `Environment::take_from_current_scope`,
+                // pushed into the `Arc<Vec>` under unique ownership via
+                // `Arc::make_mut`, and rebound the *new* list back into env.
+                // That gave O(N) amortized on the tail-recursive
+                // `build(Append[acc, i](), ...)` pattern, but it silently
+                // mutated the binding `acc` — so for code like
                 //
-                // When the first arg is a bare `Expr::Ident(name)` defined
-                // in the innermost scope AND the rest of the type_args do
-                // not reference the same name, we can temporarily move the
-                // binding out of env — making us the sole Arc holder — do
-                // the push via `Arc::make_mut` in O(1) amortized, then
-                // rebind env[name] to the result so subsequent observers
-                // in the same scope see the append result (consistent with
-                // immutable-single-assignment semantics: the binding is
-                // effectively reassigned to the tail-call argument value,
-                // which is what the caller would have done anyway).
+                //   xs = @[1, 2]
+                //   newxs = Append[xs, 9]()
+                //   print(xs.length())   // expected 2, saw 3
                 //
-                // Safety: on every exit path before the rebind we must
-                // restore env[name] so the scope invariants hold in the
-                // event of a Throw/TailCall/Gorilla signal during second-
-                // arg evaluation.
-                let rest = &type_args[1..];
-                if let Expr::Ident(first_name, _) = &type_args[0]
-                    && self.env.is_defined_in_current_scope(first_name)
-                    && !rest
-                        .iter()
-                        .any(|e| Self::expr_references_any(e, std::slice::from_ref(first_name)))
-                {
-                    let taken = self
-                        .env
-                        .take_from_current_scope(first_name)
-                        .expect("is_defined_in_current_scope guarantees presence");
-                    match taken {
-                        Value::List(items) => {
-                            let val_sig = self.eval_expr(&type_args[1]);
-                            let val = match val_sig {
-                                Ok(Signal::Value(v)) => v,
-                                Ok(other) => {
-                                    // restore scope on non-value signal
-                                    self.env.define_force(first_name, Value::List(items));
-                                    return Ok(Some(other));
-                                }
-                                Err(e) => {
-                                    self.env.define_force(first_name, Value::List(items));
-                                    return Err(e);
-                                }
-                            };
-                            let mut items_arc = items;
-                            // O(1) when unique (env no longer holds it);
-                            // O(N) once if any other clone escaped (rare).
-                            std::sync::Arc::make_mut(&mut items_arc).push(val);
-                            let new_list = Value::List(items_arc);
-                            self.env.define_force(first_name, new_list.clone());
-                            return Ok(Some(Signal::Value(new_list)));
-                        }
-                        other => {
-                            let err_value = other.clone();
-                            self.env.define_force(first_name, other);
-                            return Err(RuntimeError {
-                                message: format!(
-                                    "Append: first argument must be a list, got {}",
-                                    err_value
-                                ),
-                            });
-                        }
-                    }
-                }
-                // Fallback (non-Ident, cross-reference, or outer-scope binding):
-                // preserve original behaviour.
+                // the semantic contract was broken. `Append` must be
+                // non-destructive on the argument binding.
+                //
+                // Fix: revert to the clone-based path. `list_take` tries
+                // `Arc::try_unwrap`; when env still holds a clone it falls
+                // back to a single `Vec::clone` of the element slice. In
+                // the tail-recursive loop, `current_args.clear()` (the
+                // trampoline-level release in `call_function`) still
+                // releases the caller's Arc after parameter binding, so
+                // env is often the sole holder and try_unwrap succeeds —
+                // the common case remains cheap. Only the specific
+                // "observer in the same scope retained the old binding"
+                // case costs a full clone, which is the original O(N²)
+                // worst case. Acceptable trade-off until persistent-Vec
+                // land; semantic correctness is non-negotiable.
                 let list = match self.eval_expr(&type_args[0])? {
                     Signal::Value(Value::List(items)) => items,
                     Signal::Value(v) => {
@@ -1511,55 +1470,10 @@ impl Interpreter {
                         message: "Prepend requires 2 arguments: Prepend[list, val]()".into(),
                     });
                 }
-                // C25B-021 / Phase 5-F2-2 Stage B: unique-ownership fast path.
-                // See the Append arm above for the full rationale.
-                let rest = &type_args[1..];
-                if let Expr::Ident(first_name, _) = &type_args[0]
-                    && self.env.is_defined_in_current_scope(first_name)
-                    && !rest
-                        .iter()
-                        .any(|e| Self::expr_references_any(e, std::slice::from_ref(first_name)))
-                {
-                    let taken = self
-                        .env
-                        .take_from_current_scope(first_name)
-                        .expect("is_defined_in_current_scope guarantees presence");
-                    match taken {
-                        Value::List(items) => {
-                            let val_sig = self.eval_expr(&type_args[1]);
-                            let val = match val_sig {
-                                Ok(Signal::Value(v)) => v,
-                                Ok(other) => {
-                                    self.env.define_force(first_name, Value::List(items));
-                                    return Ok(Some(other));
-                                }
-                                Err(e) => {
-                                    self.env.define_force(first_name, Value::List(items));
-                                    return Err(e);
-                                }
-                            };
-                            let mut items_arc = items;
-                            // Prepend: mutate in place via make_mut.
-                            // Vec::insert(0, v) is O(N) on the Vec itself,
-                            // but make_mut on a uniquely-held Arc avoids
-                            // the separate Arc-alloc + full clone cycle.
-                            std::sync::Arc::make_mut(&mut items_arc).insert(0, val);
-                            let new_list = Value::List(items_arc);
-                            self.env.define_force(first_name, new_list.clone());
-                            return Ok(Some(Signal::Value(new_list)));
-                        }
-                        other => {
-                            let err_value = other.clone();
-                            self.env.define_force(first_name, other);
-                            return Err(RuntimeError {
-                                message: format!(
-                                    "Prepend: first argument must be a list, got {}",
-                                    err_value
-                                ),
-                            });
-                        }
-                    }
-                }
+                // C25B-021 REOPEN fix (2026-04-23, session 20):
+                // See the Append arm above — the env-take path destroyed
+                // the `Prepend[xs, v]()` → `xs` unchanged contract, so
+                // we revert to the clone-based path.
                 let list = match self.eval_expr(&type_args[0])? {
                     Signal::Value(Value::List(items)) => items,
                     Signal::Value(v) => {
@@ -1703,22 +1617,34 @@ impl Interpreter {
                 use std::collections::HashSet;
 
                 let unique = if let Some(Value::Function(func)) = by_fn {
+                    // Each `seen_keys[i]` is the canonical key value for
+                    // the key-of-item pattern; when a fingerprint collides
+                    // we fall back to Value::eq against `seen_keys` so
+                    // that distinct-name EnumVals with the same ordinal
+                    // (C25B-022 REOPEN scenario) are not incorrectly
+                    // folded together.
                     let mut seen_fps: HashSet<u64> = HashSet::new();
-                    let mut seen_fallback: Vec<Value> = Vec::new();
+                    let mut seen_keys: Vec<Value> = Vec::new();
                     let mut fallback_armed = false;
                     let mut result: Vec<Value> = Vec::new();
                     for item in list.iter() {
                         let key =
                             self.call_function_with_values(&func, std::slice::from_ref(item))?;
                         if fallback_armed {
-                            if !seen_fallback.contains(&key) {
-                                seen_fallback.push(key);
+                            if !seen_keys.contains(&key) {
+                                seen_keys.push(key);
                                 result.push(item.clone());
                             }
                         } else if let Some(vk) = ValueKey::new(&key) {
                             let fp = vk.fingerprint();
                             if seen_fps.insert(fp) {
-                                seen_fallback.push(key);
+                                seen_keys.push(key);
+                                result.push(item.clone());
+                            } else if !seen_keys.iter().any(|k| k == &key) {
+                                // Rare fingerprint collision (e.g.
+                                // EnumVal("A",0) vs EnumVal("B",0)).
+                                // Value::eq is authoritative.
+                                seen_keys.push(key);
                                 result.push(item.clone());
                             }
                         } else {
@@ -1727,8 +1653,8 @@ impl Interpreter {
                             // fallback list and continue with linear
                             // contains for the remainder.
                             fallback_armed = true;
-                            if !seen_fallback.contains(&key) {
-                                seen_fallback.push(key);
+                            if !seen_keys.contains(&key) {
+                                seen_keys.push(key);
                                 result.push(item.clone());
                             }
                         }
@@ -1736,20 +1662,20 @@ impl Interpreter {
                     result
                 } else {
                     // Fast path: build a fingerprint set up front if the
-                    // entire list is hashable.
-                    if let Some(mut seen) = list
-                        .iter()
-                        .map(|v| ValueKey::new(v).map(|k| k.fingerprint()))
-                        .collect::<Option<HashSet<u64>>>()
-                    {
-                        // All items are hashable, but `seen` already
-                        // contains all fingerprints — rebuild by
-                        // iterating and tracking first-occurrence only.
-                        seen.clear();
+                    // entire list is hashable. On fingerprint collision
+                    // we defer to Value::eq against already-emitted
+                    // result items so cross-EnumVal-name inputs with the
+                    // same ordinal are preserved as distinct.
+                    if list.iter().all(|v| ValueKey::new(v).is_some()) {
+                        let mut seen: HashSet<u64> = HashSet::new();
                         let mut result: Vec<Value> = Vec::new();
                         for item in list.iter() {
                             let vk = ValueKey::new(item).expect("hashability pre-checked above");
-                            if seen.insert(vk.fingerprint()) {
+                            let fp = vk.fingerprint();
+                            if seen.insert(fp) {
+                                result.push(item.clone());
+                            } else if !result.iter().any(|e| e == item) {
+                                // Rare collision — preserve Value::eq.
                                 result.push(item.clone());
                             }
                         }

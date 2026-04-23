@@ -34,17 +34,42 @@
 //! * `Error` — carries runtime metadata; not a stable key.
 //! * `Molten` / `Json` — opaque to the Taida surface.
 //!
-//! # Cross-type equality (trade-off)
+//! # Cross-type equality (C25B-022 / C25B-023 REOPEN fix, 2026-04-23)
 //!
 //! `Value::eq` treats `Int(n)`, `EnumVal(_, n)` and `Float(n as f64)` as
-//! equal when they share the same numeric ordinal. `ValueKey` does not
-//! preserve this cross-type equivalence — `Int(3)` and `EnumVal(X, 3)`
-//! hash to different buckets, and callers that insert a mix will miss
-//! fast-path hits for those specific cross-type pairs. This is an
-//! accepted trade-off: the programs we want to accelerate (vocabularies,
-//! token tables, ScreenBuffer cell grids) do not mix these variants.
-//! When the fast path misses, the caller falls back to a linear
-//! contains() check which preserves full `Value::eq` semantics.
+//! equal when they share the same numeric ordinal (see `value.rs:465`
+//! `PartialEq for Value`, C18-2 rule). An earlier iteration of
+//! `ValueKey` deliberately *diverged* from this rule and treated
+//! `Int(3)` / `EnumVal(X, 3)` as distinct keys — see the original
+//! comment block in `f721c6d`. That divergence caused
+//! `setOf(@[0]).union(setOf(@[Color:Red()]))` to report size 2 instead
+//! of size 1, and the analogous break in `HashMap.merge`.
+//!
+//! The current design restores `Value::eq` as the single source of
+//! truth for the fast paths:
+//!
+//!   * `Int(n)` and `EnumVal(_, n)` hash to the same fingerprint
+//!     (numeric ordinal tag, EnumVal name ignored for hashing).
+//!   * `ValueKey::eq` mirrors `Value::eq`'s cross-type rule for the
+//!     hashable subset — `Int(n) == EnumVal(_, n)` returns true.
+//!   * Intra-Enum equality still requires matching names: two
+//!     `EnumVal(a, n)` / `EnumVal(b, n)` with different enum names
+//!     hash to the same fingerprint (by design) but `ValueKey::eq`
+//!     reports them as different — the caller's Value::eq confirmation
+//!     path upgrades the fingerprint collision into a correct linear
+//!     disambiguation.
+//!   * `Float(f)` is still excluded from key domain (no `Eq`), so the
+//!     `Int(n) ↔ Float(n)` cross-type rule is handled by the linear
+//!     fallback path at the caller.
+//!
+//! The callers (`Set.union`, `Set.intersect`, `Set.diff`,
+//! `HashMap.merge`, `Unique`) already confirm fingerprint hits with
+//! `Value::eq` before committing, so this normalization is safe: it
+//! tightens the hash distribution to match Value::eq's equivalence
+//! classes without relying on Value::eq to also be transitive (which
+//! it is not across Enum↔Int, strictly speaking — two EnumVals with
+//! different names are not Value::eq'd even though both match a
+//! common Int).
 //!
 //! # Contract on borrowed data
 //!
@@ -119,8 +144,11 @@ fn is_hashable(v: &Value) -> bool {
     }
 }
 
-/// Exact structural equality for key-eligible values. BuchiPack is
-/// order-independent (matches `Value::eq`).
+/// Structural equality for key-eligible values, aligned with
+/// `Value::eq` (C25B-022 / C25B-023 REOPEN fix). BuchiPack is
+/// order-independent. `Int(n)` and `EnumVal(_, n)` compare equal
+/// (matches `Value::eq` line 502). Intra-enum equality still requires
+/// matching names (matches `Value::eq` line 499-501).
 fn exact_eq(a: &Value, b: &Value) -> bool {
     match (a, b) {
         (Value::Int(x), Value::Int(y)) => x == y,
@@ -130,6 +158,8 @@ fn exact_eq(a: &Value, b: &Value) -> bool {
         (Value::Unit, Value::Unit) => true,
         (Value::Gorilla, Value::Gorilla) => true,
         (Value::EnumVal(na, nb_a), Value::EnumVal(nb, nb_b)) => na == nb && nb_a == nb_b,
+        // Cross-type: Int(n) == EnumVal(_, n). See module docs.
+        (Value::Int(x), Value::EnumVal(_, y)) | (Value::EnumVal(_, y), Value::Int(x)) => x == y,
         (Value::List(xs), Value::List(ys)) => {
             xs.len() == ys.len() && xs.iter().zip(ys.iter()).all(|(a, b)| exact_eq(a, b))
         }
@@ -147,8 +177,17 @@ fn exact_eq(a: &Value, b: &Value) -> bool {
 /// Hash a key-eligible value. BuchiPack is order-independent: we hash
 /// the XOR-reduction of per-field hashes so that `@(a<=1, b<=2)` and
 /// `@(b<=2, a<=1)` produce the same fingerprint.
+///
+/// C25B-022 / C25B-023 REOPEN fix (2026-04-23): `Int(n)` and
+/// `EnumVal(_, n)` hash to the same fingerprint (tag `0u8` + ordinal
+/// `n`) so that `Value::eq`'s cross-type rule is honoured by the fast
+/// paths. Two distinct `EnumVal(a, n)` / `EnumVal(b, n)` also collide
+/// on fingerprint (by design); the caller's Value::eq confirmation
+/// resolves that back into correct inequality.
 fn hash_value_into<H: Hasher>(v: &Value, state: &mut H) {
     // Tag each variant so that `Int(0)` and `Bool(false)` don't collide.
+    // Int and EnumVal share the same tag to match Value::eq's Int↔Enum
+    // cross-type rule (line 502 of value.rs).
     match v {
         Value::Int(n) => {
             0u8.hash(state);
@@ -172,9 +211,13 @@ fn hash_value_into<H: Hasher>(v: &Value, state: &mut H) {
         Value::Gorilla => {
             5u8.hash(state);
         }
-        Value::EnumVal(name, n) => {
-            6u8.hash(state);
-            name.hash(state);
+        Value::EnumVal(_name, n) => {
+            // Same tag + ordinal as Int(n) so `Int(3)` and
+            // `EnumVal(Color, 3)` share a fingerprint, matching
+            // Value::eq's cross-type coercion. The enum name is not
+            // part of the fingerprint — inter-enum disambiguation is
+            // deferred to the Value::eq confirmation path.
+            0u8.hash(state);
             n.hash(state);
         }
         Value::List(items) => {
@@ -299,12 +342,45 @@ mod tests {
     }
 
     #[test]
-    fn value_key_int_and_enum_do_not_collide() {
-        // Intentional cross-type divergence from Value::eq — see module docs.
+    fn value_key_int_and_enum_collide_per_value_eq() {
+        // C25B-022 / C25B-023 REOPEN fix (2026-04-23): Int(n) and
+        // EnumVal(_, n) must share a ValueKey so that the fast paths
+        // match `Value::eq`'s Int↔Enum cross-type coercion.
         let int = Value::Int(3);
         let enum_v = Value::EnumVal("Color".into(), 3);
         let ki = ValueKey::new(&int).unwrap();
         let ke = ValueKey::new(&enum_v).unwrap();
-        assert_ne!(ki, ke, "Int(3) and EnumVal(_, 3) are distinct ValueKeys");
+        assert_eq!(ki, ke, "Int(3) and EnumVal(_, 3) must be equal ValueKeys");
+        assert_eq!(
+            ki.fingerprint(),
+            ke.fingerprint(),
+            "Int(3) and EnumVal(_, 3) must hash identically"
+        );
+    }
+
+    #[test]
+    fn value_key_distinct_enums_same_ordinal_have_ne_via_exact_eq() {
+        // Intra-enum disambiguation: EnumVal("A", 0) and EnumVal("B", 0)
+        // are NOT Value::eq'd (line 499-501 of value.rs: names must
+        // match). Their fingerprints intentionally collide, but
+        // `ValueKey::eq` must still report them as distinct so that
+        // the fast path's Value::eq confirmation step disambiguates
+        // them. The caller handles the rare fingerprint-collision
+        // upgrade — here we just pin that the ValueKey eq works.
+        let a = Value::EnumVal("Color".into(), 0);
+        let b = Value::EnumVal("Foo".into(), 0);
+        let ka = ValueKey::new(&a).unwrap();
+        let kb = ValueKey::new(&b).unwrap();
+        assert_ne!(
+            ka, kb,
+            "EnumVal(\"Color\", 0) != EnumVal(\"Foo\", 0) per Value::eq"
+        );
+        // Fingerprint collision is expected (and handled downstream).
+        assert_eq!(
+            ka.fingerprint(),
+            kb.fingerprint(),
+            "EnumVals with same ordinal intentionally collide on fingerprint \
+             (Value::eq disambiguates at the caller)"
+        );
     }
 }
