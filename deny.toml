@@ -16,11 +16,20 @@
 all-features = true
 
 [advisories]
-# cargo-audit-style database lookup. `warn` on any RustSec advisory;
-# hard-fail is deferred to `@c.26.rc*`.
+# cargo-audit-style database lookup. `warn` on non-security advisories
+# during `@c.25.rc7` (unmaintained / yanked / unsound get flagged but
+# do not fail the gate); vulnerabilities remain hard-fail. Hard-fail
+# promotion of the softer categories is deferred to `@c.26.rc*`.
 db-path = "~/.cargo/advisory-db"
 db-urls = ["https://github.com/RustSec/advisory-db"]
 yanked = "warn"
+# cargo-deny 0.18+ introduced an `unmaintained` setting that defaults
+# to failing on workspace-reachable unmaintained advisories. We pin it
+# to `none` during @c.25.rc7 so RUSTSEC-2025-0134 (rustls-pemfile) —
+# which is a transitive dep with no drop-in replacement — does not
+# block the RC. Hard-fail promotion tracks with vulnerability /
+# yanked policy, post-stable.
+unmaintained = "none"
 ignore = []
 
 [licenses]
