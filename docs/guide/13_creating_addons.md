@@ -12,6 +12,61 @@ This guide is aimed at addon *authors*. See `docs/reference/addon_manifest.md`
 for the manifest reference and forward-compat policy, and
 `docs/reference/cli.md` for the `taida publish` CLI contract.
 
+### Backend policy (what runs your addon) — @c.25.rc7 redefinition
+
+Under `@c.25.rc7` the supported backend matrix for addons is:
+
+| Backend        | Status      | What happens at import                                                                 |
+|----------------|-------------|----------------------------------------------------------------------------------------|
+| Interpreter    | **Supported** | Addon facade runs as a dynamic module; cdylib functions dispatch via `dlopen` when the interpreter binary is built with `feature = "native"` (the default). |
+| Native (AOT)   | **Supported** | Addon facade is statically analysed into an `AddonFacadeSummary` by `src/addon/facade.rs` and lowered through `src/codegen/lower/imports.rs`. FuncDefs become IR functions; pack / scalar / list / template bindings are replayed into the module init path. |
+| JS transpiler  | **Rejected**  | There is no JS-side addon dispatcher today. The import produces a deterministic error. |
+| WASM (min / wasi) | **Rejected** | Reserved for the D26 breaking-change phase. The D26 wasm backend will reuse the `src/addon/facade.rs` static analyser so authors will not have to re-write facades. |
+
+Authors targeting interpreter + native do not need to write two
+facade files. The same `taida/<stem>.td` must work on both — the
+interpreter resolves user imports against the facade's live
+environment snapshot, and the native backend resolves against the
+`AddonFacadeSummary` extracted by the shared loader. Every construct
+accepted on one path is accepted on the other (see §9 below).
+
+### What the native backend understands inside a facade
+
+The facade loader accepts the following top-level constructs. Each
+bullet names the C25B-030 Phase that unlocked it, for cross-
+referencing the blocker audit in `.dev/C25_BLOCKERS.md`:
+
+- **Aliases** (RC2.5 v1) — `FacadeName <= lowercaseAddonFn`, where
+  `lowercaseAddonFn` appears in the manifest's `[functions]` table.
+- **Pack literals** (RC2.5 v1) — `FacadeName <= @(field <= value, ...)`.
+- **Scalar / list / arithmetic / template bindings** (Phase 1E-β) —
+  `N <= 0`, `msg <= "hello"`, `greet <= \`hi, ${who}\``, arithmetic
+  expressions, function / method calls, field accesses, mold /
+  type instantiations.
+- **FuncDefs** (Phase 1E-β) — `Name args = body => :Type`. Both
+  exported (public) and private (`_`-prefixed) FuncDefs are
+  collected; privates promoted into the summary through
+  transitive reachability from an exported FuncDef body or pack
+  binding.
+- **Relative imports** (Phase 1E-α) — `>>> ./child.td =>
+  @(Sym1, Sym2)`. Non-relative paths (`>>> taida-lang/foo`,
+  `>>> npm:*`, versioned imports) are rejected.
+- **Export declarations** — `<<< @(Sym1, Sym2)`. When present, the
+  `<<<` clause is authoritative — symbols absent from it cannot be
+  named in user imports.
+
+Still deferred to C25B-030 Phase 1E-γ (no real addon in the
+ecosystem uses these today, so the rejection is informational):
+
+- `TypeDef` / `EnumDef` / `MoldDef` statements inside a facade.
+- `<<< <path>` re-exports.
+
+If your facade depends on any of these, compile errors at
+`taida build --target native` will point you at the Phase 1E-γ
+tracker. Interim workaround: expose a facade FuncDef that wraps
+the missing construct with a pure-Taida surface the loader does
+understand.
+
 Under @c.14.rc1 the publish and release workflow was redesigned to be
 **tag-push-only**: `taida publish` just pushes a git tag and exits,
 and the addon repository's own CI (`.github/workflows/release.yml`,

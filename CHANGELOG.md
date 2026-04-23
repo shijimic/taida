@@ -1,5 +1,168 @@
 # Changelog
 
+## @c.25.rc7 (in progress)
+
+Quality-consolidation RC cycle. `stable` (label-less `@c.25`) is
+**deferred** to a follow-up RC cycle because the NET stable viewpoint
+(HTTP/2 parity, TLS configuration, port-bind-race eradication,
+throughput regression guards, scatter-gather long-run correctness)
+is not yet comprehensively covered in this track. `@c.25.rc7` closes
+out the addon-ecosystem redefinition, consolidates parity residuals
+left over from C24, and stages the runtime-perf / security / stability
+work items enumerated in `.dev/C25_BLOCKERS.md`.
+
+### C25B-030 — addon ecosystem redefinition (Phase 1, Critical)
+
+The RC1-era "addon is Native only" freeze is formally **lifted**.
+Addons now ship with two first-class backends:
+
+- **Interpreter** — the reference implementation; facade + cdylib
+  dispatch both execute dynamically.
+- **Native** — Cranelift-lowered code that consumes the same facade
+  surface through a compile-time static analyser.
+
+A D26 breaking-change phase is reserved for the WASM backend. The
+`AddonBackend::Js` entry is still deterministically rejected; it has
+no dispatcher today and its revival is tracked for D26.
+
+User-visible consequences:
+
+- `taida build --target native` now accepts addon-backed imports for
+  the full facade surface produced by `taida-lang/terminal`: relative
+  `>>> ./X.td` children, public FuncDefs, private `_`-prefixed
+  helpers reached through reachability, pack literals, scalar /
+  list / arithmetic / template / mold / type bindings, and
+  authoritative `<<<` export clauses. Nothing user-authored changes.
+- The error message `"addon-backed package '...' is not supported on
+  backend 'X' (RC1: native only)"` is retired. The replacement reads
+  `"(supported: interpreter, native; wasm planned for D26). Run
+  'taida build --target native' or use the interpreter."`, and carries
+  the same guidance into every `taida build` / `taida run` diagnostic.
+- The interpreter no longer masquerades as `AddonBackend::Native` for
+  policy-guard purposes — it is registered honestly as
+  `AddonBackend::Interpreter`, which is now `supports_addons = true`.
+- TypeDef / EnumDef / MoldDef inside a facade file, non-relative
+  `>>>` targets, and `<<< <path>` re-exports still produce
+  deterministic rejections (messages point at
+  `C25B-030 Phase 1E-γ pending`). Real `taida-lang/terminal` does
+  not depend on any of these constructs so no public addon was
+  affected.
+
+Implementation structure (Phase 1A → 1H):
+
+- **Phase 1A** — `src/addon/backend_policy.rs::supports_addons`
+  widened to `matches!(Interpreter | Native)`; error text updated;
+  unit tests re-shaped.
+- **Phase 1B** — `src/interpreter/module_eval.rs::try_eval_addon_import`
+  calls `ensure_addon_supported(AddonBackend::Interpreter, ...)`
+  truthfully; the `feature = "native"` gate still controls whether
+  the dlopen dispatcher is linked in, but it no longer lies to the
+  policy.
+- **Phase 1C** — `"RC1: native only"` purged from every consumer-
+  facing string. Existing integration tests were migrated to the
+  new message format.
+- **Phase 1D** — `tests/c25b030_core_bundled_native_smoke.rs` pins
+  that the core-bundled packages (`taida-lang/os` / `net` / `crypto`
+  / `pool` / `js`) still compile natively. These never went through
+  the facade loader — they resolve via hand-coded symbol tables in
+  `src/codegen/lower/stmt.rs` — and the regression guard now
+  protects that path from being broken by any future facade-loader
+  change.
+- **Phase 1E-α** — `src/codegen/lower/imports.rs::load_addon_facade_for_lower`
+  extended with recursive `>>> ./X.td` relative-import walking. The
+  child's `<<<` clause is authoritative when the parent imports
+  without a `@(...)` list; the parent's `@(...)` list is the
+  selective filter otherwise. Circular chains, missing child
+  symbols, non-relative paths, and `<<< <path>` re-exports all
+  produce deterministic compile errors naming the offending facade
+  file.
+- **Phase 1E-β** — facade FuncDefs harvested into a new
+  `AddonFacadeSummary.facade_funcs` map and lowered as IR functions
+  in `lower_program`'s 2nd pass under mangled link symbols
+  `_taida_fn_facade_{pkg_hash}_{name}`. User imports of a public
+  FuncDef resolve through `imported_func_links` at call sites.
+  Assignment RHS widened to accept scalar literals, template
+  strings, lists, arithmetic, function / method calls, field
+  accesses, and mold / type instantiations (previously only `@(...)`
+  packs and aliases were accepted).
+- **Phase 1E-β-2 + β-3** — a reachability fixpoint promotes
+  private `_`-prefixed helpers transitively pulled in by an
+  exported FuncDef body or pack binding. Real
+  `.dev/official-package-repos/terminal/` now compiles natively
+  end-to-end (`BufferNew`, `Stylize`, `LineEditorNew`,
+  `LineEditorStep`, `LineEditorRender`, `PromptOptions`, `KeyKind`,
+  `EventKind`, `MouseKind`, `SpinnerNext`, `SpinnerRender`,
+  `SpinnerState`, `ProgressBar`, `StatusLine`, `ReadEvent`,
+  `ClearScreen`). See
+  `tests/c25b030_phase_1e_facade_chain.rs::phase_1e_beta3_*`
+  for the regression guards.
+- **Phase 1F** — `tests/c25b030_phase_1f_facade_parity.rs` pins
+  interpreter ↔ native parity across five scenarios (mixed facade
+  with aliases / public packs / FuncDefs / private helpers /
+  relative chains; guard-arity; authoritative `<<<` exports;
+  cross-file private helper chains; pure-Taida-only packages).
+  Fixing the first two scenarios surfaced a pre-existing cross-
+  backend divergence: top-level bindings referenced **only** from
+  a `TemplateLit` interpolation inside a FuncDef body (e.g.
+  `sep <= "-"` + `join a b = \`${a}${sep}${b}\``) never reached
+  the `GlobalGet(hash)` emission or the facade reachability
+  walker, because the free-vars / reachability walkers did not
+  understand that `TemplateLit` stores its interpolation
+  expressions as a raw string the real lowering path re-parses.
+  `collect_free_vars_inner` in `src/codegen/lower/stmt.rs` and the
+  facade reachability walker in `src/addon/facade.rs` now split on
+  `${...}` boundaries the same way `lower_template_lit` does, re-
+  parse each interpolation, and walk the result through the
+  existing identifier machinery. Parse failures fall back to a
+  bare-identifier capture, matching the real lowering's behaviour.
+  This closes a regression window that predated C25 entirely.
+- **Phase 1G** — the static facade loader extracted into
+  `src/addon/facade.rs` as a first-class `pub` module. The
+  recursive `>>>` walker, the universe-map machinery, the
+  reachability fixpoint, and the `TemplateLit`-aware reference
+  collector now live in the shared module. Codegen
+  (`src/codegen/lower/imports.rs::lower_addon_import`) adopts the
+  shared `AddonFacadeSummary` verbatim and keeps only backend-
+  local bookkeeping (mangled symbol registration, type-tag
+  narrowing, pack-binding replay) on its side. The D26 WASM
+  backend will consume the same module without duplicating the
+  walker.
+- **Phase 1G unit tests**: `src/addon/facade.rs::tests` —
+  five tests covering the "no facade file" soft path, mixed-
+  construct harvesting, TypeDef rejection with `Phase 1E-γ pending`,
+  missing-child-symbol rejection, and the cross-file template
+  reachability case that anchored the Phase 1F fix.
+- **Phase 1G acceptance**: `AddonFacadeSummary` / `FacadeLoadError`
+  are the two public types any future backend will import; the
+  interpreter's addon facade path in
+  `src/interpreter/module_eval.rs::load_addon_facade` is
+  deliberately left on its dynamic-execution strategy because the
+  interpreter exchanges live runtime values with user code and
+  does not benefit from the static analyser.
+
+### Deferred NET stable viewpoint (why `rc7` and not label-less `@c.25`)
+
+Several NET-adjacent items will remain open at the end of this
+track and must be closed in a follow-up RC cycle before the
+label-less `@c.25` tag is appropriate:
+
+- **HTTP/2 parity across interpreter / native / wasm** — scatter-
+  gather response handling, flow-control edge cases, and real-
+  world client conformance not yet locked.
+- **TLS construction** — cert chains / ALPN / verification modes
+  that the current `taida-lang/net` facade covers only partially.
+- **Port-bind race eradication** — `flaky_h2_parity` is still
+  papered over with a retry shim rather than eliminated.
+- **Throughput regression guard** — CI has no automated perf
+  benchmark that blocks regressions.
+- **Scatter-gather long-run** — the `httpServe` path has not been
+  stressed with multi-hour runs yet.
+
+These are tracked as C25B-002 (port-bind race) and surrounding
+items in `.dev/C25_BLOCKERS.md`. The subsequent RC cycle will fold
+the throughput gate (C25B-004 scope) alongside the NET stabilisation
+work.
+
 ## @c.23.rc6
 
 Single-scope follow-up that finishes the `Str[...]()` mold family
