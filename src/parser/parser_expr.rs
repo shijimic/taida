@@ -381,6 +381,19 @@ impl Parser {
                     let save = self.pos;
                     self.advance(); // consume `(`
 
+                    // C26B-019: allow newlines after `(` before the first field
+                    // so multi-line TypeDef constructors like
+                    //   Ctx(
+                    //     a <= x,
+                    //     b <= x,
+                    //   )
+                    // are recognised as type instantiations (matching the
+                    // parity with `@(...)` literals). The lookahead below must
+                    // see the first ident/<= pair, so we skip continuation
+                    // whitespace here. `parse_buchi_field_list` already
+                    // re-skips newlines internally.
+                    self.skip_newlines();
+
                     // Check if args look like buchi fields (name <= value)
                     if self.check_ident() {
                         let peek_ahead = self.peek_at(1);
@@ -774,6 +787,11 @@ impl Parser {
 
     pub(super) fn parse_arg_list(&mut self) -> Result<Vec<Expr>, ParseError> {
         let mut args = Vec::new();
+        // C26B-019: allow newlines after `(` so multi-line constructor and
+        // function calls parse the same as `@(...)` literals and bracket
+        // argument lists. Newlines inside `(` ... `)` are never statement
+        // terminators in Taida — the parenthesis pair is a continuation group.
+        self.skip_newlines();
         // Empty arg list: `f()`
         if self.check(&TokenKind::RParen) {
             return Ok(args);
@@ -787,9 +805,16 @@ impl Parser {
             } else {
                 args.push(self.parse_expression()?);
             }
+            // C26B-019: permit an optional line break between the slot and
+            // the separator / closing paren so `Ctx(\n  a <= x,\n  b <= x\n)`
+            // parses identically to the single-line form.
+            self.skip_newlines();
             // After each slot, expect comma or rparen
             if self.check(&TokenKind::Comma) {
                 self.advance(); // consume comma
+                // C26B-019: newlines after a comma are also continuation
+                // whitespace (trailing comma + closing paren on the next line).
+                self.skip_newlines();
                 // If RParen follows, there's one more trailing hole
                 if self.check(&TokenKind::RParen) {
                     let span = self.current_span();

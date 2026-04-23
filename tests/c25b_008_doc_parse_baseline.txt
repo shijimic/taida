@@ -5,8 +5,6 @@ docs/guide/02_strict_typing.md:19
 docs/guide/02_strict_typing.md:257
 docs/guide/03_json.md:354
 docs/guide/03_json.md:51
-docs/guide/04_buchi_pack.md:107
-docs/guide/04_buchi_pack.md:191
 docs/guide/04_buchi_pack.md:224
 docs/guide/05_molding.md:112
 docs/guide/05_molding.md:31
@@ -26,7 +24,6 @@ docs/guide/09_functions.md:192
 docs/guide/09_functions.md:296
 docs/guide/10_modules.md:180
 docs/guide/10_modules.md:186
-docs/guide/10_modules.md:235
 docs/guide/11_async.md:81
 docs/guide/12_introspection.md:224
 docs/guide/12_introspection.md:235
