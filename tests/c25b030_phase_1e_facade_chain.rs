@@ -799,3 +799,225 @@ stdout(`cha=${KeyKind.Char}`)
 
     let _ = std::fs::remove_dir_all(&project);
 }
+
+// ── Phase 1E-β-3: cross-facade-FuncDef IrVar hygiene ──────────
+//
+// These tests guard two regressions that Phase 1E-β-3 fixed when
+// the real `taida-lang/terminal` facade (7 files, dozens of
+// private FuncDef helpers, several public packs used inside
+// reachable FuncDef bodies) was pointed at `taida build --target
+// native`:
+//
+//   1. `Lowering::return_tag_vars` is keyed on `IrVar`, but IrVars
+//      are per-function. `lower_func_def` previously did not
+//      snapshot/restore this field across function boundaries, so
+//      an entry recorded while lowering facade FuncDef `A`
+//      aliased with a fresh IrVar in facade FuncDef `B`, driving
+//      a Cranelift verifier error on `taida_set_return_tag` args.
+//      Fix: mirror the lambda-path snapshot/restore in
+//      `lower_func_def`.
+//
+//   2. Public facade pack bindings reachable only through a
+//      reachability-promoted FuncDef (e.g. `LineEditorState`
+//      referenced inside `LineEditorNew`'s body, but never named
+//      in the user import) were not pre-registered into
+//      `top_level_vars` / `addon_facade_pack_bindings` because
+//      the pre-reg loop filtered on `local_name.starts_with('_')`.
+//      Fix: widen the pre-reg to every facade pack binding,
+//      dedup'ing against the user's per-symbol binding via the
+//      existing `addon_facade_mangled` marker.
+//
+// Together these let a single `>>> taida-lang/terminal =>
+// @(LineEditorNew)` — with the real-world facade shape —
+// compile on native and produce interpreter-parity output.
+
+/// Phase 1E-β-3-1: facade FuncDef siblings with CondBranch /
+/// CallUser combinations must compile without a Cranelift
+/// verifier error. Reproduction distilled from
+/// `terminal/taida/widgets.td::_statusLineTruncate`.
+///
+/// Before the fix the `define_function` call for the second
+/// sibling FuncDef rejected the IR because `taida_set_return_tag`
+/// referenced a value `IrVar` that was only defined inside one of
+/// the CondBranch arms — a shadow from the previous sibling's
+/// `return_tag_vars` map leaking across the function boundary.
+#[test]
+fn phase_1e_beta3_sibling_funcdefs_with_condbranch_share_no_return_tag_state() {
+    let project = unique_temp_dir("beta3_return_tag_hygiene");
+    let _ = std::fs::remove_dir_all(&project);
+    std::fs::create_dir_all(&project).unwrap();
+
+    // The first FuncDef (`PadLeft`) records a couple of
+    // return_tag entries via its inner CallUser. The second
+    // FuncDef (`Truncate`) has a CondBranch whose arms call
+    // sibling helpers; its outer `Return`'s IrVar counter
+    // re-uses low numbers that aliased with the leaked map
+    // before the fix. Exercising both in the same facade puts
+    // them through the same `Lowering` pass.
+    let terminal_td = r#"
+_plus_one n =
+  n + 1
+=> :Int
+
+PadLeft n =
+  If[n > 0, _plus_one(n), 0]()
+=> :Int
+
+_append_x s =
+  s + "x"
+=> :Str
+
+Truncate s width =
+  avail <= width - 1
+  If[avail < 1, _append_x(s), _append_x(s) + "!"]()
+=> :Str
+
+<<< @(PadLeft, Truncate)
+"#;
+    write_terminal_fixture(&project, terminal_td, &[]);
+
+    let main_td = r#">>> taida-lang/terminal => @(PadLeft, Truncate)
+stdout(`pad=${PadLeft(3)}`)
+stdout(Truncate("hi", 5))
+stdout(Truncate("hi", 0))
+"#;
+    let (ok, stdout, stderr) = build_native(&project, main_td);
+    assert!(
+        ok,
+        "Phase 1E-β-3-1: two facade FuncDefs with CondBranch + CallUser \
+         must not collide through `return_tag_vars`. stdout={}, stderr={}",
+        stdout, stderr
+    );
+
+    let run = Command::new(project.join("main.bin"))
+        .current_dir(&project)
+        .output()
+        .expect("run produced binary");
+    let out = String::from_utf8_lossy(&run.stdout);
+    assert!(out.contains("pad=4"), "PadLeft path broken: {:?}", out);
+    assert!(out.contains("hix!"), "Truncate else-arm broken: {:?}", out);
+    assert!(out.contains("hix"), "Truncate then-arm broken: {:?}", out);
+
+    let _ = std::fs::remove_dir_all(&project);
+}
+
+/// Phase 1E-β-3-2: a user import that only names a facade FuncDef
+/// must still get every public pack binding that the FuncDef body
+/// references pre-registered into `top_level_vars`. Reproduction
+/// distilled from `terminal/taida/prompt.td::LineEditorNew`,
+/// which constructs a `LineEditorState` pack internally without
+/// the user ever naming the pack in their import.
+///
+/// Before the fix this built cleanly but segfaulted at runtime
+/// because the `GlobalGet` for the public pack returned 0 (the
+/// binding was never replayed into `_taida_main`'s global slot).
+#[test]
+fn phase_1e_beta3_public_pack_reachable_via_funcdef_is_registered() {
+    let project = unique_temp_dir("beta3_public_pack_reach");
+    let _ = std::fs::remove_dir_all(&project);
+    std::fs::create_dir_all(&project).unwrap();
+
+    // Only `MakeState` is listed in the user's import. Its body
+    // uses the public `State` pack binding as a TypeInst template
+    // (equivalent to `LineEditorState(...)` in the real facade).
+    // `State` starts with an uppercase letter so the pre-1E-β-3
+    // `local_name.starts_with('_')` guard would skip it.
+    let terminal_td = r#"
+State <= @(
+  text   <= ""
+  cursor <= 0
+  action <= 0
+)
+
+MakeState initial =
+  State(text <= initial, cursor <= initial.length(), action <= 0)
+
+<<< @(MakeState)
+"#;
+    write_terminal_fixture(&project, terminal_td, &[]);
+
+    let main_td = r#">>> taida-lang/terminal => @(MakeState)
+st <=[ MakeState("hello")
+stdout(`text=${st.text}`)
+stdout(`cursor=${st.cursor}`)
+stdout(`action=${st.action}`)
+"#;
+    let (ok, stdout, stderr) = build_native(&project, main_td);
+    assert!(
+        ok,
+        "Phase 1E-β-3-2: public pack referenced only through a \
+         user-imported FuncDef must compile. stdout={}, stderr={}",
+        stdout, stderr
+    );
+
+    let run = Command::new(project.join("main.bin"))
+        .current_dir(&project)
+        .output()
+        .expect("run produced binary");
+    let out = String::from_utf8_lossy(&run.stdout);
+    assert!(
+        out.contains("text=hello"),
+        "MakeState body must resolve public `State` pack handle at \
+         runtime — segfault / zero-pack indicates the pack binding \
+         was not replayed; got: {:?}",
+        out
+    );
+    assert!(out.contains("cursor=5"), "cursor must pick up initial.length(): {:?}", out);
+    assert!(out.contains("action=0"), "action default must flow through: {:?}", out);
+
+    let _ = std::fs::remove_dir_all(&project);
+}
+
+/// Phase 1E-β-3-2: if the user imports both a FuncDef and the
+/// public pack it references, neither binding clobbers the
+/// other. The dedup via `addon_facade_mangled` means the raw-name
+/// pre-reg and the per-symbol user-import loop collapse into a
+/// single `addon_facade_pack_bindings` entry even when the user
+/// explicitly names the pack.
+#[test]
+fn phase_1e_beta3_public_pack_user_imported_and_reached_via_funcdef() {
+    let project = unique_temp_dir("beta3_public_pack_both_paths");
+    let _ = std::fs::remove_dir_all(&project);
+    std::fs::create_dir_all(&project).unwrap();
+
+    let terminal_td = r#"
+State <= @(
+  text   <= "?"
+  action <= 0
+)
+
+MakeState initial =
+  State(text <= initial, action <= 0)
+
+<<< @(State, MakeState)
+"#;
+    write_terminal_fixture(&project, terminal_td, &[]);
+
+    // User imports both `MakeState` and `State`. The facade
+    // body's `State(...)` call site and the user's `State.text`
+    // read must both resolve against the same binding without
+    // duplicate replay.
+    let main_td = r#">>> taida-lang/terminal => @(MakeState, State)
+st <=[ MakeState("hi")
+stdout(`via_func=${st.text}`)
+stdout(`default=${State.text}`)
+"#;
+    let (ok, stdout, stderr) = build_native(&project, main_td);
+    assert!(
+        ok,
+        "Phase 1E-β-3-2: user-imported public pack must coexist \
+         with the reachability-pulled pre-registration. \
+         stdout={}, stderr={}",
+        stdout, stderr
+    );
+
+    let run = Command::new(project.join("main.bin"))
+        .current_dir(&project)
+        .output()
+        .expect("run produced binary");
+    let out = String::from_utf8_lossy(&run.stdout);
+    assert!(out.contains("via_func=hi"), "FuncDef body path broken: {:?}", out);
+    assert!(out.contains("default=?"), "user-side pack default broken: {:?}", out);
+
+    let _ = std::fs::remove_dir_all(&project);
+}

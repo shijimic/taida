@@ -300,22 +300,42 @@ impl Lowering {
                 // pass).
                 self.register_facade_func_signature(fn_local_name, fn_def);
             }
-            // C25B-030 Phase 1E-β-2: pre-register private pack /
-            // value bindings that `facade_expand_reachable_symbols`
-            // pulled into the summary. User imports of a public
-            // pack still go through the per-symbol loop below
-            // (which honours aliasing); private `_`-prefixed
-            // bindings are pre-registered here so facade FuncDef
-            // bodies can reach them during lowering.
+            // C25B-030 Phase 1E-β-2 / 1E-β-3-2: pre-register every
+            // facade pack / value binding (both private `_`-prefixed
+            // helpers and public packs like `LineEditorState` /
+            // `CompletionState` / `LineEditorAction`) under its raw
+            // name. User imports of a public pack still go through
+            // the per-symbol loop below (which honours aliasing);
+            // pre-registering here in addition ensures that a
+            // harvested facade FuncDef body — pulled in transitively
+            // via `facade_expand_reachable_symbols` — can still
+            // resolve a reference to the public pack even when the
+            // user only imported the function (e.g. the user wrote
+            // `>>> taida-lang/terminal => @(LineEditorNew)` and the
+            // body of `LineEditorNew` references the public
+            // `LineEditorState` pack without the user ever naming
+            // it).
+            //
+            // Dedup semantics:
+            //   - If the user imports `LineEditorState` without
+            //     alias, the per-symbol loop will use the same
+            //     `alias == orig_name == local_name`, so the two
+            //     markers collide and the per-symbol loop's
+            //     `addon_facade_mangled.insert(marker)` returns
+            //     false — the pre-reg wins with identical content.
+            //   - If the user aliases `LineEditorState as MyState`,
+            //     the per-symbol loop builds a different marker
+            //     (`...value_{hash}_MyState`) and its registration
+            //     runs side-by-side with the raw-name pre-reg.
+            //     The facade FuncDef body's raw-name reference
+            //     still resolves; the user's main body sees the
+            //     alias.
             //
             // `addon_facade_mangled` doubles as a deterministic
             // dedup set — we prefix the value-binding marker with
             // a distinct `facade_value::` namespace to avoid
             // colliding with FuncDef mangles.
             for (local_name, value_expr) in &facade_summary.pack_bindings {
-                if !local_name.starts_with('_') {
-                    continue;
-                }
                 let marker = format!("_taida_facade_value_{:016x}_{}", pkg_hash, local_name);
                 if !self.addon_facade_mangled.insert(marker) {
                     continue;
