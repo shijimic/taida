@@ -29,6 +29,8 @@
 
 #![cfg(feature = "native")]
 
+mod common;
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -38,7 +40,7 @@ use taida::addon::{TAIDA_ADDON_ABI_VERSION, TAIDA_ADDON_ENTRY_SYMBOL};
 // ── Helpers ─────────────────────────────────────────────────
 
 fn taida_bin() -> PathBuf {
-    PathBuf::from(env!("CARGO_BIN_EXE_taida"))
+    common::taida_bin()
 }
 
 /// Locate the external `taida-lang/terminal` repository on disk.

@@ -13,6 +13,8 @@
 //! *not* a diff of the YAML bodies — the build matrix entries and
 //! step names legitimately differ. It pins the shared contract only.
 
+mod common;
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -33,8 +35,8 @@ fn unique_temp_dir(prefix: &str) -> PathBuf {
     p
 }
 
-fn taida_bin() -> String {
-    env!("CARGO_BIN_EXE_taida").to_string()
+fn taida_bin() -> PathBuf {
+    common::taida_bin()
 }
 
 fn repo_root() -> PathBuf {

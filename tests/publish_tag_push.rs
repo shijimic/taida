@@ -14,6 +14,8 @@
 
 #![cfg(feature = "community")]
 
+mod common;
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -97,8 +99,8 @@ fn write_initial_commit(project: &Path, pkg_identity: &str) {
     run_git(&["push", "-u", "origin", "main"], project);
 }
 
-fn taida_bin() -> String {
-    env!("CARGO_BIN_EXE_taida").to_string()
+fn taida_bin() -> PathBuf {
+    common::taida_bin()
 }
 
 // ───────────────────────────────────────────────────────────

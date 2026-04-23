@@ -44,13 +44,16 @@
 
 #![cfg(feature = "native")]
 
+mod common;
+
+use common::taida_bin as resolve_taida_bin;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 // ── Shared fixture helpers ──────────────────────────────────
 
 fn taida_bin() -> PathBuf {
-    PathBuf::from(env!("CARGO_BIN_EXE_taida"))
+    resolve_taida_bin()
 }
 
 fn unique_temp_dir(prefix: &str) -> PathBuf {

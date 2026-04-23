@@ -9,6 +9,9 @@
 
 #![cfg(feature = "native")]
 
+mod common;
+
+use common::taida_bin as resolve_taida_bin;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -22,7 +25,7 @@ fn unique_temp_dir(prefix: &str) -> PathBuf {
 }
 
 fn taida_bin() -> PathBuf {
-    PathBuf::from(env!("CARGO_BIN_EXE_taida"))
+    resolve_taida_bin()
 }
 
 fn manifest_dir() -> PathBuf {

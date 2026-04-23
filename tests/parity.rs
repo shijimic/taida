@@ -18896,7 +18896,7 @@ fn test_net4_nb10_ws_upgrade_fake_req_rejected_3way() {
     use std::io::Write as _;
     use std::process::Command;
 
-    let taida_bin = env!("CARGO_BIN_EXE_taida");
+    let taida_bin = taida_bin();
 
     let source = r#">>> taida-lang/net => @(httpServe, wsUpgrade, startResponse, endResponse)
 
@@ -18927,7 +18927,7 @@ stdout(r.requests)
     // older runtime-level rejection is now unreachable (source fails to
     // parse-check).
     for backend_hint in &["interp", "js", "native"] {
-        let output = Command::new(taida_bin)
+        let output = Command::new(&taida_bin)
             .args(["check", src_path.to_str().unwrap()])
             .output()
             .expect("run taida check");

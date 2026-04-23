@@ -46,12 +46,14 @@
 //! 3-backend parity: interpreter, JS, native. WASM lowering inherits JS
 //! `try/catch` semantics and is not affected.
 
+mod common;
+
 use std::fs;
+use std::path::PathBuf;
 use std::process::Command;
 
-fn taida_bin() -> &'static str {
-    // Default to the debug binary built alongside the test binary.
-    env!("CARGO_BIN_EXE_taida")
+fn taida_bin() -> PathBuf {
+    common::taida_bin()
 }
 
 fn write_fixture(body: &str, name: &str) -> std::path::PathBuf {

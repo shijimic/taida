@@ -1,3 +1,5 @@
+mod common;
+
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
@@ -40,7 +42,7 @@ deps <= @(
     fs::create_dir_all(lock_path.parent().unwrap()).expect("create lockfile parent");
     fs::write(&lock_path, "LOCK_SENTINEL\n").expect("write lock sentinel");
 
-    let output = Command::new(env!("CARGO_BIN_EXE_taida"))
+    let output = Command::new(common::taida_bin())
         .arg("deps")
         .current_dir(&project_dir)
         .output()
