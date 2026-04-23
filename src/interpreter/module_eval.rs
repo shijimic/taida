@@ -73,9 +73,16 @@ impl Interpreter {
         })?;
 
         // RCB-303: Reject imports that escape the project root (path traversal).
-        // Only check relative imports (`./` or `../`); absolute and package imports
-        // are either trusted paths or resolved through the package system.
-        if import_path.starts_with("./") || import_path.starts_with("../") {
+        // Relative imports (`./` or `../`) and absolute path imports (`/...`)
+        // are both sandboxed to the project root. Package imports are resolved
+        // through the package system and are trusted by construction.
+        // C26B-007 SEC-003: extend RCB-303 to cover absolute path imports so
+        // `>>> /etc/passwd.td` / `>>> /tmp/evil.td` cannot be used to probe
+        // the filesystem or leak file contents through parser error messages.
+        if import_path.starts_with("./")
+            || import_path.starts_with("../")
+            || import_path.starts_with('/')
+        {
             let project_root = self.find_project_root();
             if let Ok(root_canonical) = project_root.canonicalize()
                 && !canonical.starts_with(&root_canonical)

@@ -83,8 +83,19 @@ fn unique_obj_path(input_path: &Path) -> PathBuf {
         .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or("taida_obj");
-    let dir = input_path.parent().unwrap_or(Path::new(".")); // see doc above
-    dir.join(format!("{}.{}.{}.o", stem, pid, seq))
+    // C26B-007 SEC-010: write intermediate .o artifacts to the OS temp
+    // directory instead of next to the source. This prevents stale
+    // artifacts from leaking in `examples/` / user source trees when a
+    // build aborts partway through, and removes the symlink-race surface
+    // (predictable PID+counter names in a user-writable source directory).
+    // `std::env::temp_dir()` is world-writable but unique per-file via
+    // PID+counter, so name collisions are avoided across concurrent
+    // builds. Intentional cleanup is still performed by the caller
+    // (driver.rs:617-620) on both success and failure paths; the temp-dir
+    // location just means leaks no longer pollute the source tree when
+    // cleanup is skipped (e.g. on panic).
+    let dir = std::env::temp_dir();
+    dir.join(format!("taida-{}.{}.{}.o", stem, pid, seq))
 }
 
 #[derive(Debug)]

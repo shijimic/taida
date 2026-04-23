@@ -6,19 +6,27 @@ name: Security
 # to the main RC branches and weekly on a fixed schedule so advisories
 # published between pushes are still surfaced.
 #
-# During the `@c.25.rc7` RC cycle the two jobs are **warn-only**:
-# advisories are reported as GitHub Actions warnings and do not block
-# the pipeline. The hard-fail gate is planned for the next C-generation
-# RC cycle once the advisory baseline has been curated for one full
-# release window.
+# C26B-007 Sub-phase 7.2 (2026-04-24): promoted both jobs from
+# warn-only to hard-fail. The advisory baseline has been curated for a
+# full `@c.25.rc7` release window (no outstanding vulnerabilities in
+# the workspace graph as of 2026-04-24) so a fresh advisory that the
+# cargo-audit / cargo-deny gate surfaces now blocks the pipeline.
 #
-# Scope isolation (Phase 6 driver): this workflow is brand-new and
-# lives in its own file. The existing `.github/workflows/ci.yml` is
-# not touched — CI wallclock is the Phase 2 driver's domain.
+# C26B-007 Sub-phase 7.3 (2026-04-24): added `c-static-analysis` job.
+# Assembles the native_runtime C fragments in the same order used by
+# the runtime (`native_runtime/mod.rs::NATIVE_RUNTIME_C`) and runs
+# gcc -Wall -Wextra -Wformat-security + cppcheck on the TU. Uses a
+# delta-based gate against the baseline recorded in
+# `.dev/C26_C_STATIC_ANALYSIS.md` so a new warning introduced by any
+# change to the C fragments fails the job.
+#
+# Scope isolation (Phase 6 driver): this workflow lives in its own
+# file. The existing `.github/workflows/ci.yml` is not touched — CI
+# wallclock is the Phase 2 driver's domain.
 
 on:
   push:
-    branches: [main, develop, feat/c25]
+    branches: [main, develop, feat/c25, feat/c26]
   pull_request:
     branches: [main, develop]
   schedule:
@@ -41,9 +49,9 @@ jobs:
   cargo-audit:
     name: cargo-audit (RustSec DB)
     runs-on: ubuntu-latest
-    # Warn-only during @c.25.rc7. When the policy flips in @c.26.rc*,
-    # remove this line to make the job a hard gate.
-    continue-on-error: true
+    # C26B-007 Sub-phase 7.2: hard-fail gate. `continue-on-error` was
+    # `true` during @c.25.rc7; it is removed here so any advisory that
+    # cargo-audit surfaces blocks the pipeline.
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
@@ -62,17 +70,16 @@ jobs:
             cargo install cargo-audit --locked
           fi
       - name: Run cargo-audit
-        # `--deny warnings` would turn warnings into failures; we
-        # explicitly do *not* pass it. The job is informational for
-        # @c.25.rc7. (`--ignore-source` was removed in cargo-audit
-        # 0.21+; rely on default source policy.)
+        # `cargo audit` exits non-zero on vulnerability or unmaintained
+        # advisories. Under C26B-007 Sub-phase 7.2 that non-zero exit
+        # fails the job (hard-fail gate).
         run: cargo audit
 
   cargo-deny:
     name: cargo-deny (licences / bans / sources)
     runs-on: ubuntu-latest
-    # Warn-only during @c.25.rc7 (same promotion path as cargo-audit).
-    continue-on-error: true
+    # C26B-007 Sub-phase 7.2: hard-fail gate (same rationale as
+    # cargo-audit above). `continue-on-error` removed.
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
@@ -90,6 +97,71 @@ jobs:
           fi
       - name: Run cargo-deny check
         # `advisories`, `bans`, `licenses`, `sources` checks in one
-        # pass. Config lives at `./deny.toml`. `--log-level warn` is
-        # the default; kept explicit so future edits see it.
+        # pass. Config lives at `./deny.toml`. Under C26B-007 Sub-phase
+        # 7.2 the hard-fail categories in deny.toml (vulnerability /
+        # yanked) now block the gate.
         run: cargo deny --log-level warn check advisories bans licenses sources
+
+  c-static-analysis:
+    name: C static analysis (native_runtime TU)
+    runs-on: ubuntu-latest
+    # C26B-007 Sub-phase 7.3: assemble the native_runtime C fragments
+    # in the same concatenation order as
+    # `native_runtime/mod.rs::NATIVE_RUNTIME_C` and run gcc + cppcheck
+    # on the assembled TU. Hard-fails on a delta against the baseline
+    # in `.dev/C26_C_STATIC_ANALYSIS.md`.
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install analyzers
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends cppcheck gcc
+      - name: Assemble native_runtime TU
+        # Order must match src/codegen/native_runtime/mod.rs:91-105
+        # (CORE -> OS -> TLS -> NET_H1_H2 -> NET_H3_QUIC).
+        run: |
+          mkdir -p /tmp/c-analysis
+          cat src/codegen/native_runtime/core.c \
+              src/codegen/native_runtime/os.c \
+              src/codegen/native_runtime/tls.c \
+              src/codegen/native_runtime/net_h1_h2.c \
+              src/codegen/native_runtime/net_h3_quic.c \
+              > /tmp/c-analysis/native_runtime_assembled.c
+          echo "Assembled TU: $(wc -l < /tmp/c-analysis/native_runtime_assembled.c) lines"
+      - name: gcc -Wall -Wextra (delta gate)
+        # Baseline recorded in .dev/C26_C_STATIC_ANALYSIS.md: 78 warnings.
+        # A new warning (any category) fails the job.
+        run: |
+          set -euo pipefail
+          gcc -fsyntax-only -Wall -Wextra -Wformat-security \
+              /tmp/c-analysis/native_runtime_assembled.c \
+              2> /tmp/c-analysis/gcc.log || true
+          count=$(grep -cE "warning:" /tmp/c-analysis/gcc.log || true)
+          echo "gcc warning count: ${count} (baseline: 78)"
+          if [ "${count}" -gt 78 ]; then
+              echo "::error::gcc warnings increased: ${count} > 78 baseline."
+              echo "See .dev/C26_C_STATIC_ANALYSIS.md for the allowlist/fix-queue policy."
+              grep -E "warning:" /tmp/c-analysis/gcc.log | head -80
+              exit 1
+          fi
+      - name: cppcheck (security categories)
+        # cppcheck has no "baseline count" first-run file committed to
+        # the repo; the first CI run establishes the count which is
+        # then transcribed into .dev/C26_C_STATIC_ANALYSIS.md. Until
+        # then the step only fails on `error`-severity findings (which
+        # are high-confidence bugs).
+        run: |
+          set -euo pipefail
+          cppcheck --enable=warning,style,performance,portability \
+                   --suppress=missingIncludeSystem \
+                   --error-exitcode=1 \
+                   --quiet \
+                   /tmp/c-analysis/native_runtime_assembled.c \
+                   2> /tmp/c-analysis/cppcheck.log || rc=$?
+          rc=${rc:-0}
+          echo "cppcheck findings (first 60 lines):"
+          head -60 /tmp/c-analysis/cppcheck.log || true
+          if [ "${rc}" -ne 0 ]; then
+              echo "::error::cppcheck reported error-severity finding (exit ${rc})."
+              exit 1
+          fi

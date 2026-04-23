@@ -1,13 +1,33 @@
 # cargo-deny configuration — C25B-006 continuous dependency audit.
 #
-# During the `@c.25.rc7` RC cycle this config is **warn-only** in CI
-# (`.github/workflows/security.yml` passes `--quiet` + omits `--deny`)
-# so that a new upstream advisory cannot block a Taida push. The hard-
-# fail gate is planned for `@c.26.rc*` once the advisory baseline has
-# been curated for a full release cycle.
+# C26B-007 Sub-phase 7.2 (2026-04-24): the companion workflow
+# `.github/workflows/security.yml` removed `continue-on-error: true`
+# for both `cargo-audit` and `cargo-deny` jobs, promoting the gate to
+# hard-fail. This config matches:
+#
+#   * `[advisories]` — vulnerabilities block the gate (default cargo-deny
+#     behaviour). Yanked / unmaintained remain `warn` / `none` because
+#     the workspace currently has one yanked transitive dep
+#     (`fastrand 2.4.0` via `h3`) that requires a dependency lockfile
+#     bump to resolve; promoting yanked to `deny` before that bump
+#     would red the gate without a user-facing surface change. The bump
+#     is tracked as an independent deps-hygiene follow-up and does not
+#     block the C26 stable gate.
+#
+#   * `[bans]` — multiple-versions / wildcards are still `warn` to keep
+#     the tokio / cranelift ecosystem duplicates visible without hard-
+#     failing. Promotion to `deny` is a dependency-tree cleanup task,
+#     not a stable blocker.
+#
+#   * `[licenses]` — allowlist is hard-fail by construction (a license
+#     outside the list fails the gate).
+#
+#   * `[sources]` — unknown-registry / unknown-git remain `warn`.
+#     Promotion requires auditing every git dep. Taida currently has
+#     zero git deps so the risk surface is empty either way.
 #
 # Related: `.github/SECURITY.md`, `.dev/taida-logs/docs/archive/SECURITY_AUDIT.md`,
-# C25_BLOCKERS.md::C25B-006.
+# `.dev/C26_BLOCKERS.md::C26B-007`.
 
 [graph]
 # Scan all targets cargo knows about, including build scripts and dev-
@@ -16,19 +36,17 @@
 all-features = true
 
 [advisories]
-# cargo-audit-style database lookup. `warn` on non-security advisories
-# during `@c.25.rc7` (unmaintained / yanked / unsound get flagged but
-# do not fail the gate); vulnerabilities remain hard-fail. Hard-fail
-# promotion of the softer categories is deferred to `@c.26.rc*`.
+# cargo-audit-style database lookup.
+# - vulnerabilities: hard-fail (cargo-deny default).
+# - yanked: `warn`. See the header comment for rationale (requires an
+#   independent lockfile bump; tracked separately).
+# - unmaintained: `none` (disabled) because RUSTSEC-2025-0134
+#   (rustls-pemfile) is a transitive dep with no drop-in replacement.
+#   Promotion to `warn` / `deny` is a dependency-tree cleanup task and
+#   does not block the C26 stable gate.
 db-path = "~/.cargo/advisory-db"
 db-urls = ["https://github.com/RustSec/advisory-db"]
 yanked = "warn"
-# cargo-deny 0.18+ introduced an `unmaintained` setting that defaults
-# to failing on workspace-reachable unmaintained advisories. We pin it
-# to `none` during @c.25.rc7 so RUSTSEC-2025-0134 (rustls-pemfile) —
-# which is a transitive dep with no drop-in replacement — does not
-# block the RC. Hard-fail promotion tracks with vulnerability /
-# yanked policy, post-stable.
 unmaintained = "none"
 ignore = []
 

@@ -486,6 +486,12 @@ async fn http_request_async_via_curl(
     extra_headers: &[(String, String)],
     body: &str,
 ) -> Option<Value> {
+    // C26B-007 SEC-005: strip CR/LF from method / url before passing to curl
+    // for defense-in-depth; curl treats these as exec args so CRLF cannot
+    // inject HTTP headers via the command itself, but a malicious method
+    // like "GET\r\n" is still nonsensical and should be rejected upfront.
+    let safe_method = method.replace(['\r', '\n'], "");
+    let safe_url = url.replace(['\r', '\n'], "");
     let mut cmd = tokio::process::Command::new("curl");
     cmd.arg("-sS")
         .arg("-i")
@@ -495,8 +501,8 @@ async fn http_request_async_via_curl(
         .arg("--max-filesize")
         .arg("104857600") // 100 MB
         .arg("-X")
-        .arg(method)
-        .arg(url);
+        .arg(&safe_method)
+        .arg(&safe_url);
     for (k, v) in extra_headers {
         // RCB-304: Strip CR/LF from header values to prevent CRLF injection
         let safe_k = k.replace(['\r', '\n'], "");
@@ -541,10 +547,18 @@ async fn http_request_async(
         Err(_) => return make_http_failure(),
     };
 
+    // C26B-007 SEC-005: Strip CR/LF from method, path, host to prevent
+    // HTTP request smuggling via CRLF injection into the raw TCP request.
+    // Header values were already sanitised under RCB-304; method/path/host
+    // interpolation was the remaining gap.
+    let safe_method = method.replace(['\r', '\n'], "");
+    let safe_path = path.replace(['\r', '\n'], "");
+    let safe_host = host.replace(['\r', '\n'], "");
+
     // Build HTTP request
     let mut request = format!(
         "{} {} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n",
-        method, path, host
+        safe_method, safe_path, safe_host
     );
     if !body.is_empty() {
         request.push_str(&format!("Content-Length: {}\r\n", body.len()));
