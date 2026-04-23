@@ -556,6 +556,20 @@ fn runtime_abi(name: &str) -> Result<RuntimeAbi, String> {
             params: &[F64, F64, F64],
             returns: &[F64],
         },
+        // C25B-025 Phase 5-I: math mold family (native uses libm; wasm
+        // uses manual implementations in 03_typeof_list.inc.c — ABI is
+        // identical on both sides so this entry serves both paths).
+        "taida_float_sqrt" | "taida_float_exp" | "taida_float_ln" | "taida_float_log2"
+        | "taida_float_log10" | "taida_float_sin" | "taida_float_cos" | "taida_float_tan"
+        | "taida_float_asin" | "taida_float_acos" | "taida_float_atan" | "taida_float_sinh"
+        | "taida_float_cosh" | "taida_float_tanh" => RuntimeAbi {
+            params: &[F64],
+            returns: &[F64],
+        },
+        "taida_float_pow" | "taida_float_log" | "taida_float_atan2" => RuntimeAbi {
+            params: &[F64, F64],
+            returns: &[F64],
+        },
         // Num state check methods (Int)
         "taida_int_is_positive" => RuntimeAbi {
             params: &[Val],

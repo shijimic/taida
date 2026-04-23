@@ -38,6 +38,32 @@ impl Lowering {
                 // float 変数への参照
                 self.float_vars.contains(name) || self.stdlib_constants.contains_key(name)
             }
+            // C25B-025 Phase 5-I: math mold family returns Float. Must
+            // match the `Float` entries in `src/types/mold_returns.rs`
+            // so nested calls (`Sqrt[Pow[2.0, 3]()]`) skip the
+            // int→float widening in the outer mold's lowering.
+            Expr::MoldInst(name, _, _, _) => {
+                matches!(
+                    name.as_str(),
+                    "Sqrt"
+                        | "Pow"
+                        | "Exp"
+                        | "Ln"
+                        | "Log"
+                        | "Log2"
+                        | "Log10"
+                        | "Sin"
+                        | "Cos"
+                        | "Tan"
+                        | "Asin"
+                        | "Acos"
+                        | "Atan"
+                        | "Atan2"
+                        | "Sinh"
+                        | "Cosh"
+                        | "Tanh"
+                )
+            }
             _ => false,
         }
     }

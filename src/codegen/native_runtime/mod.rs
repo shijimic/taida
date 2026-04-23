@@ -320,7 +320,23 @@ mod tests {
         // Cumulative C25 delta: +8,744 bytes on core.c. Other fragments
         // (os / tls / net_h1_h2 / net_h3_quic) are unchanged. New total:
         // 965,529 → 974,273.
-        const EXPECTED_TOTAL_LEN: usize = 974_273;
+        //
+        // C25B-025 Phase 5-I (2026-04-23): +1,895 bytes in core.c from
+        // the math mold family (taida_float_sqrt / _pow / _exp / _ln /
+        // _log2 / _log10 / _log / _sin / _cos / _tan / _asin / _acos /
+        // _atan / _atan2 / _sinh / _cosh / _tanh). All 17 helpers are
+        // thin wrappers over glibc libm (linked via -lm in driver.rs)
+        // which on x86_64-linux / aarch64-linux is the same libm that
+        // Rust's `f64::sqrt` / `f64::exp` / ... delegate to via the
+        // LLVM `@llvm.*.f64` intrinsics — giving bit-for-bit parity
+        // with the interpreter. Inserted ahead of the `// ── Error
+        // ceiling` marker so F1_LEN absorbs the full delta; F2
+        // (error/display/stdout-display) is unchanged. F1_LEN moves
+        // from 233,853 to 235,748; F2_LEN stays at 159,407. Total
+        // core.c size moves from 393,260 to 395,155. Other fragments
+        // (os / tls / net_h1_h2 / net_h3_quic) are unchanged. New
+        // total: 974,273 → 976,168.
+        const EXPECTED_TOTAL_LEN: usize = 976_168;
         let asm = *NATIVE_RUNTIME_C;
         assert_eq!(
             asm.len(),
@@ -635,11 +651,13 @@ mod tests {
         //    each byte to a specific commit, since the two commits
         //    were landed consecutively and together form the current
         //    C25 native_runtime drift.
-        const F1_LEN: usize = 233_853;
+        // C25B-025 Phase 5-I: F1 absorbs +1,895 bytes (math mold family)
+        // inserted ahead of the "Error ceiling" marker. F2 unchanged.
+        const F1_LEN: usize = 235_748;
         assert_eq!(
             CORE_SECTION.len(),
-            233_853 + 159_407,
-            "core.c total byte length must equal legacy fragment1 + fragment2 (C25B-001 / C25B-028 adjusted)"
+            235_748 + 159_407,
+            "core.c total byte length must equal legacy fragment1 + fragment2 (C25B-001 / C25B-028 / C25B-025 adjusted)"
         );
         const F2_PREFIX: &[u8] = b"// \xE2\x94\x80\xE2\x94\x80 Error ceiling";
         let tail = &CORE_SECTION.as_bytes()[F1_LEN..F1_LEN + F2_PREFIX.len()];

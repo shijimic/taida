@@ -412,9 +412,34 @@ mod tests {
     /// `.isOk()` method dispatches to this slot (that method lives on
     /// `Result` and routes through `taida_result_is_ok`), so no
     /// compatibility shim is required.
+    ///
+    /// C25B-025 Phase 5-I (2026-04-23): 318,189 → 331,894 (+13,705).
+    /// Added the math mold family to `03_typeof_list.inc.c`:
+    /// `taida_float_sqrt` / `_pow` / `_exp` / `_ln` / `_log2` / `_log10`
+    /// / `_log` / `_sin` / `_cos` / `_tan` / `_asin` / `_acos` / `_atan`
+    /// / `_atan2` / `_sinh` / `_cosh` / `_tanh`. Freestanding
+    /// implementations are required because wasm-ld `-nostdlib` does
+    /// not link libm: `Sqrt` uses the `f64.sqrt` wasm opcode via
+    /// `__builtin_sqrt`; `Pow` has an integer-exponent fast path
+    /// (via repeated squaring) and falls back to `exp(y * ln(x))` for
+    /// non-integer exponents; `Exp` / `Ln` use range reduction plus
+    /// truncated Taylor / atanh series; `Sin` / `Cos` use Cody-Waite
+    /// reduction + a 13-term Taylor polynomial; `Asin` / `Acos` are
+    /// expressed in terms of `Atan(x / sqrt(1 - x^2))`; `Atan` uses
+    /// the tan(pi/8) reduction shortcut + a 20-term Maclaurin; `Atan2`
+    /// resolves the quadrant via sign tests; `Sinh` / `Cosh` / `Tanh`
+    /// use the exp-based identities with small-|x| series paths to
+    /// avoid cancellation. These are NOT bit-exact with glibc libm
+    /// (so the 4-backend parity test in
+    /// `tests/c25b_025_math_molds.rs` compares wasm vs interpreter
+    /// with a relative-ULP tolerance) but remain within ~1e-12
+    /// relative for the Phase 5-I fixture inputs. Native remains
+    /// bit-for-bit with the interpreter because both delegate to the
+    /// same libm on Linux / macOS. Closes the Phase 5-I scope for
+    /// C25B-025 (math mold family on native + wasm backends).
     #[test]
     fn test_runtime_core_wasm_fragment_concat_preserves_bytes() {
-        const EXPECTED_TOTAL_LEN: usize = 318_189;
+        const EXPECTED_TOTAL_LEN: usize = 333_024;
         let asm = *RUNTIME_CORE_WASM;
         assert_eq!(
             asm.len(),

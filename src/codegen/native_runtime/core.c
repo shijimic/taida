@@ -3932,6 +3932,43 @@ double taida_float_clamp(double a, double lo, double hi) {
     return a;
 }
 
+// ── Math mold family (C25B-025 Phase 5-I, 2026-04-23) ────
+//
+// Native implementations for the math mold family added to the
+// interpreter + JS in Phase 5-A (commit 86d5743). Native delegates
+// to glibc libm, which Rust's `f64::sqrt` / `f64::exp` / ... also
+// call through the LLVM `@llvm.*.f64` intrinsics on x86_64-linux
+// and aarch64-linux, giving us bit-for-bit parity with the
+// interpreter on all practical Linux / macOS targets. NaN /
+// ±Infinity / denormal are preserved by libm.
+//
+// Accept `double` only — the lowering (`src/codegen/lower_molds.rs`)
+// widens Int arguments to Float via `taida_int_to_float` before the
+// call (same way the interpreter's `eval_unary_math` widens Int to
+// f64). `Pow[Int, Int]` returns Float per `src/types/mold_returns.rs`.
+
+double taida_float_sqrt(double a) { return sqrt(a); }
+double taida_float_pow(double base, double e) { return pow(base, e); }
+double taida_float_exp(double a) { return exp(a); }
+double taida_float_ln(double a) { return log(a); }
+double taida_float_log2(double a) { return log2(a); }
+double taida_float_log10(double a) { return log10(a); }
+// `Log[value, base]()` — `value` log of `base`. Matches interpreter's
+// `val.log(base)` which is `ln(val) / ln(base)`.
+double taida_float_log(double value, double base) {
+    return log(value) / log(base);
+}
+double taida_float_sin(double a) { return sin(a); }
+double taida_float_cos(double a) { return cos(a); }
+double taida_float_tan(double a) { return tan(a); }
+double taida_float_asin(double a) { return asin(a); }
+double taida_float_acos(double a) { return acos(a); }
+double taida_float_atan(double a) { return atan(a); }
+double taida_float_atan2(double y, double x) { return atan2(y, x); }
+double taida_float_sinh(double a) { return sinh(a); }
+double taida_float_cosh(double a) { return cosh(a); }
+double taida_float_tanh(double a) { return tanh(a); }
+
 // ── Num state check methods ──────────────────────────────
 // For Int: isNaN=false, isInfinite=false, isFinite=true always
 // For Float: need actual NaN/Inf checks

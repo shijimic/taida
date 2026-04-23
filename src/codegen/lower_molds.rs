@@ -556,6 +556,180 @@ impl Lowering {
                 }
                 Ok(result)
             }
+            // C25B-025 Phase 5-I: math mold family. Interpreter + JS
+            // land in Phase 5-A (commit 86d5743). Native delegates to
+            // libm (`sqrt`, `pow`, `sin`, ...); wasm uses manual
+            // freestanding implementations in
+            // `runtime_core_wasm/03_typeof_list.inc.c`. All molds
+            // return Float per `src/types/mold_returns.rs` and widen
+            // Int arguments to Float via `taida_int_to_float` first
+            // (same as interpreter's `eval_unary_math` which accepts
+            // either Int or Float and widens Int to f64).
+            "Sqrt" | "Exp" | "Ln" | "Log2" | "Log10" | "Sin" | "Cos" | "Tan" | "Asin"
+            | "Acos" | "Atan" | "Sinh" | "Cosh" | "Tanh" => {
+                if type_args.is_empty() {
+                    return Err(LowerError {
+                        message: format!("{} requires 1 argument: {}[num]()", type_name, type_name),
+                    });
+                }
+                let num = self.lower_expr(func, &type_args[0])?;
+                let is_float = self.expr_returns_float(&type_args[0]);
+                let float_val = if is_float {
+                    num
+                } else {
+                    let tmp = func.alloc_var();
+                    func.push(IrInst::Call(
+                        tmp,
+                        "taida_int_to_float".to_string(),
+                        vec![num],
+                    ));
+                    tmp
+                };
+                let runtime_fn = match type_name {
+                    "Sqrt" => "taida_float_sqrt",
+                    "Exp" => "taida_float_exp",
+                    "Ln" => "taida_float_ln",
+                    "Log2" => "taida_float_log2",
+                    "Log10" => "taida_float_log10",
+                    "Sin" => "taida_float_sin",
+                    "Cos" => "taida_float_cos",
+                    "Tan" => "taida_float_tan",
+                    "Asin" => "taida_float_asin",
+                    "Acos" => "taida_float_acos",
+                    "Atan" => "taida_float_atan",
+                    "Sinh" => "taida_float_sinh",
+                    "Cosh" => "taida_float_cosh",
+                    "Tanh" => "taida_float_tanh",
+                    _ => unreachable!(),
+                };
+                let result = func.alloc_var();
+                func.push(IrInst::Call(result, runtime_fn.to_string(), vec![float_val]));
+                Ok(result)
+            }
+            "Pow" => {
+                // Pow[base, exp]() -> Float
+                if type_args.len() < 2 {
+                    return Err(LowerError {
+                        message: "Pow requires 2 arguments: Pow[base, exp]()".into(),
+                    });
+                }
+                let base_raw = self.lower_expr(func, &type_args[0])?;
+                let exp_raw = self.lower_expr(func, &type_args[1])?;
+                let base = if self.expr_returns_float(&type_args[0]) {
+                    base_raw
+                } else {
+                    let tmp = func.alloc_var();
+                    func.push(IrInst::Call(
+                        tmp,
+                        "taida_int_to_float".to_string(),
+                        vec![base_raw],
+                    ));
+                    tmp
+                };
+                let exp_val = if self.expr_returns_float(&type_args[1]) {
+                    exp_raw
+                } else {
+                    let tmp = func.alloc_var();
+                    func.push(IrInst::Call(
+                        tmp,
+                        "taida_int_to_float".to_string(),
+                        vec![exp_raw],
+                    ));
+                    tmp
+                };
+                let result = func.alloc_var();
+                func.push(IrInst::Call(
+                    result,
+                    "taida_float_pow".to_string(),
+                    vec![base, exp_val],
+                ));
+                Ok(result)
+            }
+            "Log" => {
+                // Log[value, base]() -> Float. Matches interpreter:
+                // `val.log(base)` = `ln(val) / ln(base)`. When base is
+                // omitted, interpreter falls through to `val.ln()`; we
+                // don't lower that single-arg form here because it
+                // would shadow the 2-arg form, and the fixture always
+                // supplies both. Single-arg callers should use Ln.
+                if type_args.len() < 2 {
+                    return Err(LowerError {
+                        message: "Log requires 2 arguments at the codegen boundary: \
+                                  Log[value, base](). For natural-log use Ln[value]()."
+                            .into(),
+                    });
+                }
+                let val_raw = self.lower_expr(func, &type_args[0])?;
+                let base_raw = self.lower_expr(func, &type_args[1])?;
+                let val = if self.expr_returns_float(&type_args[0]) {
+                    val_raw
+                } else {
+                    let tmp = func.alloc_var();
+                    func.push(IrInst::Call(
+                        tmp,
+                        "taida_int_to_float".to_string(),
+                        vec![val_raw],
+                    ));
+                    tmp
+                };
+                let base = if self.expr_returns_float(&type_args[1]) {
+                    base_raw
+                } else {
+                    let tmp = func.alloc_var();
+                    func.push(IrInst::Call(
+                        tmp,
+                        "taida_int_to_float".to_string(),
+                        vec![base_raw],
+                    ));
+                    tmp
+                };
+                let result = func.alloc_var();
+                func.push(IrInst::Call(
+                    result,
+                    "taida_float_log".to_string(),
+                    vec![val, base],
+                ));
+                Ok(result)
+            }
+            "Atan2" => {
+                // Atan2[y, x]() -> Float
+                if type_args.len() < 2 {
+                    return Err(LowerError {
+                        message: "Atan2 requires 2 arguments: Atan2[y, x]()".into(),
+                    });
+                }
+                let y_raw = self.lower_expr(func, &type_args[0])?;
+                let x_raw = self.lower_expr(func, &type_args[1])?;
+                let y = if self.expr_returns_float(&type_args[0]) {
+                    y_raw
+                } else {
+                    let tmp = func.alloc_var();
+                    func.push(IrInst::Call(
+                        tmp,
+                        "taida_int_to_float".to_string(),
+                        vec![y_raw],
+                    ));
+                    tmp
+                };
+                let x = if self.expr_returns_float(&type_args[1]) {
+                    x_raw
+                } else {
+                    let tmp = func.alloc_var();
+                    func.push(IrInst::Call(
+                        tmp,
+                        "taida_int_to_float".to_string(),
+                        vec![x_raw],
+                    ));
+                    tmp
+                };
+                let result = func.alloc_var();
+                func.push(IrInst::Call(
+                    result,
+                    "taida_float_atan2".to_string(),
+                    vec![y, x],
+                ));
+                Ok(result)
+            }
             "BitAnd" => {
                 if type_args.len() < 2 {
                     return Err(LowerError {
