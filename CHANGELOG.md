@@ -1545,6 +1545,12 @@ rules.
   `github.com/taida-lang/taida/releases` directly. Once on
   `@c.15.rc3+`, `taida upgrade` will see canonical releases as
   expected.
+- **Advisory**: `GHSA-xxxx-xxxx-xxxx`
+  (<https://github.com/taida-lang/taida/security/advisories/GHSA-xxxx-xxxx-xxxx>) —
+  placeholder, to be replaced with the real GHSA ID once published
+  under C25B-014. The drafted advisory body lives at
+  `.dev/security_advisories/GHSA-DRAFT-taida-upgrade-supply-chain.md`
+  until the owner submits it and this note is rewritten in place.
 
 ### Fixes
 
