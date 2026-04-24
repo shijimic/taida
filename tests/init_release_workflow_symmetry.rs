@@ -12,6 +12,32 @@
 //! anchors with a freshly scaffolded addon workflow. The test is
 //! *not* a diff of the YAML bodies — the build matrix entries and
 //! step names legitimately differ. It pins the shared contract only.
+//!
+//! ## C26B-028 (SEC-011 drift fix, 2026-04-24)
+//!
+//! SEC-011 (C26B-007 Sub-phase 7.4) added two Sigstore/SLSA jobs to
+//! the core workflow: `sign` (cosign keyless) and `provenance` (SLSA
+//! Level 3 via `slsa-github-generator`). The core workflow now
+//! declares six jobs in order:
+//!
+//!   prepare -> gate -> build -> sign -> provenance -> publish
+//!
+//! The addon scaffold intentionally does NOT sign its artefacts —
+//! SEC-011 is the obligation of the Taida core release only, not of
+//! every addon. Addons keep the original four-job contract:
+//!
+//!   prepare -> gate -> build -> publish
+//!
+//! Symmetry therefore means:
+//!
+//! 1. The addon job list is exactly `prepare -> gate -> build ->
+//!    publish` (the shared *core contract*, historically the whole
+//!    core workflow).
+//! 2. The core workflow declares the same four jobs in the same
+//!    relative order, and inserts `sign` + `provenance` **between**
+//!    `build` and `publish`. `sign` and `provenance` are pinned here
+//!    as SEC-011 invariants — they must never be silently removed
+//!    from the core workflow without bumping this test.
 
 mod common;
 
@@ -86,25 +112,89 @@ fn scaffold_addon(root: &Path, name: &str) -> String {
     fs::read_to_string(&workflow).expect("scaffolded release.yml must be readable")
 }
 
+/// The four jobs that both the core and addon workflows share.
+/// These are the *core contract* — removing any of them from either
+/// workflow is a breaking change to the release pipeline.
+const SHARED_CORE_CONTRACT: &[&str] = &["prepare", "gate", "build", "publish"];
+
+/// SEC-011 (C26B-007 Sub-phase 7.4) invariant: the core workflow
+/// declares these two jobs between `build` and `publish`. They are
+/// pinned here so that a future release.yml edit that silently drops
+/// Sigstore signing or SLSA provenance fails this test instead of
+/// shipping unsigned releases.
+const CORE_SEC011_JOBS: &[&str] = &["sign", "provenance"];
+
 #[test]
 fn test_jobs_match_core_contract() {
     let core = fs::read_to_string(repo_root().join(".github/workflows/release.yml"))
         .expect("core release.yml must exist");
     let core_jobs = declared_job_order(&core);
+
+    // Core workflow post-SEC-011: 6 jobs in fixed order.
+    // prepare -> gate -> build -> sign -> provenance -> publish
+    let expected_core_jobs = vec!["prepare", "gate", "build", "sign", "provenance", "publish"];
     assert_eq!(
-        core_jobs,
-        vec!["prepare", "gate", "build", "publish"],
-        "core release.yml must use the 4-stage contract (regression guard): {:?}",
+        core_jobs, expected_core_jobs,
+        "core release.yml must declare the 6-stage SEC-011 pipeline \
+         (prepare -> gate -> build -> sign -> provenance -> publish); \
+         got: {:?}",
         core_jobs
     );
 
+    // SEC-011 invariant: sign + provenance must be present in the
+    // core workflow. This is the pinning role added in C26B-028 so
+    // that a future edit that silently drops these jobs fails here
+    // instead of shipping unsigned releases.
+    for sec011_job in CORE_SEC011_JOBS {
+        assert!(
+            core_jobs.iter().any(|j| j == sec011_job),
+            "core release.yml must retain SEC-011 job `{}` \
+             (C26B-007 Sub-phase 7.4 invariant); got: {:?}",
+            sec011_job,
+            core_jobs
+        );
+    }
+    // And they must sit between `build` and `publish` so `publish`
+    // observes signed artefacts + provenance.
+    let build_idx = core_jobs.iter().position(|j| j == "build").unwrap();
+    let publish_idx = core_jobs.iter().position(|j| j == "publish").unwrap();
+    for sec011_job in CORE_SEC011_JOBS {
+        let idx = core_jobs.iter().position(|j| j == sec011_job).unwrap();
+        assert!(
+            build_idx < idx && idx < publish_idx,
+            "core release.yml SEC-011 job `{}` must sit between \
+             `build` and `publish`; got order: {:?}",
+            sec011_job,
+            core_jobs
+        );
+    }
+
+    // The core workflow, with SEC-011 jobs removed, must equal the
+    // shared core contract. This guarantees the four foundational
+    // stages are still present and in the canonical order.
+    let core_jobs_without_sec011: Vec<&str> = core_jobs
+        .iter()
+        .map(String::as_str)
+        .filter(|j| !CORE_SEC011_JOBS.contains(j))
+        .collect();
+    assert_eq!(
+        core_jobs_without_sec011, SHARED_CORE_CONTRACT,
+        "core release.yml minus SEC-011 jobs must equal the shared \
+         core contract {:?}; got: {:?}",
+        SHARED_CORE_CONTRACT, core_jobs_without_sec011
+    );
+
+    // Addon scaffold still uses the bare 4-job contract. Addons do
+    // not sign artefacts — SEC-011 is a core-release obligation.
     let tmp = unique_temp_dir("jobs");
     let addon = scaffold_addon(&tmp, "sym-pkg");
     let addon_jobs = declared_job_order(&addon);
     assert_eq!(
-        addon_jobs, core_jobs,
-        "addon release.yml must match the core job order: {:?} vs {:?}",
-        addon_jobs, core_jobs
+        addon_jobs, SHARED_CORE_CONTRACT,
+        "addon release.yml must declare the shared 4-stage core \
+         contract {:?} (addons do not sign — SEC-011 is core-only); \
+         got: {:?}",
+        SHARED_CORE_CONTRACT, addon_jobs
     );
     let _ = fs::remove_dir_all(&tmp);
 }
