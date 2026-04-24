@@ -35396,3 +35396,645 @@ stdout(result.throw.message)
         js_stdout
     );
 }
+
+// ════════════════════════════════════════════════════════════════════
+// C26B-001 Round 3 (wE): h2 method variation (PUT / DELETE / PATCH)
+// ════════════════════════════════════════════════════════════════════
+//
+// Per RFC 9113 h2 carries HTTP semantics unchanged (methods live in
+// `:method` pseudo-header). These 3 cases pin interp/native h2 handling
+// for non-GET/POST methods with body echo via `req.method`. JS rejects
+// with H2Unsupported (no server started) to preserve the 3-backend
+// contract documented in STABILITY § 5.1.
+//
+// Together with the existing 4 C26B-001-* cases + 3 baseline h2 pins
+// (test_net6_1b_h2_protocol_rejected_3way_parity /
+// test_net6_4b_h2_3backend_divergence_documented /
+// test_net6_5a_h2_no_tls_rejected_all_backends) this brings h2 parity
+// pin count to 10 (meets blocker Acceptance).
+//
+// D27 escalation checklist (3 points, all NO):
+//   1. httpServe / taida-lang/net mold signature unchanged (additive
+//      tests only, new fixtures pin `req.method` echo pattern already
+//      in use by NB6-44 tests at lines 26915-26996).
+//   2. No STABILITY-pinned error string is modified.
+//   3. No existing tests/parity.rs assertion is rewritten (append only).
+fn c26b001_r3_h2_method_variation_test(
+    method_slug: &'static str, // e.g. "put", "delete", "patch"
+    method_upper: &'static str, // e.g. "PUT", "DELETE", "PATCH"
+    case_tag: &'static str, // e.g. "c26b001_5" for unique temp paths
+) {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+    if !cc_available() {
+        eprintln!("SKIP: cc not available");
+        return;
+    }
+    if !openssl_available() {
+        eprintln!("SKIP: openssl not available");
+        return;
+    }
+    if !curl_h2_available() {
+        eprintln!("SKIP: curl --http2 not available");
+        return;
+    }
+
+    // Serving source: handler echoes req.method into body so the client
+    // can observe the method roundtrip. Uses same maxRequests=1 shape as
+    // C26B-001-2 / C26B-001-3 to keep test footprint minimal.
+    let serving_source = |port: u16, cert: &str, key: &str| {
+        format!(
+            r#">>> taida-lang/net => @(httpServe)
+
+handler req =
+  @(status <= 200, headers <= @[@(name <= "x-method", value <= "{method}")], body <= req.method)
+=> :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
+
+asyncResult <= httpServe({port}, handler, 1, 10000, 128, @(cert <= "{cert}", key <= "{key}", protocol <= "h2"))
+asyncResult ]=> result
+result ]=> r
+stdout(r.requests)
+"#,
+            method = method_upper,
+            port = port,
+            cert = cert,
+            key = key
+        )
+    };
+
+    let mut serving_results: Vec<(String, String, &'static str)> = Vec::new();
+
+    for backend in &["interp", "native"] {
+        let cert_path =
+            unique_temp_path("taida_h2_cert", &format!("{}_{}", case_tag, backend), "pem");
+        let key_path =
+            unique_temp_path("taida_h2_key", &format!("{}_{}", case_tag, backend), "pem");
+
+        if !gen_self_signed_cert(&cert_path, &key_path) {
+            eprintln!("SKIP: cert gen failed for {}", backend);
+            return;
+        }
+
+        let port = find_free_loopback_port();
+        let source = serving_source(
+            port,
+            cert_path.to_str().unwrap_or(""),
+            key_path.to_str().unwrap_or(""),
+        );
+
+        let dir = setup_net_project(
+            &source,
+            &format!("{}_{}_{}", case_tag, method_slug, backend),
+        );
+        let td_path = dir.join("main.td");
+
+        let mut child: Child = match *backend {
+            "interp" => Command::new(taida_bin())
+                .arg(&td_path)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .spawn()
+                .expect("spawn interp h2 method-variation server"),
+            "native" => {
+                let bin_path = unique_temp_path(
+                    &format!("taida_{}_native", case_tag),
+                    &format!("{}_{}", method_slug, port),
+                    "bin",
+                );
+                let compile = Command::new(taida_bin())
+                    .arg("build")
+                    .arg("--target")
+                    .arg("native")
+                    .arg(&td_path)
+                    .arg("-o")
+                    .arg(&bin_path)
+                    .output()
+                    .expect("compile native");
+                assert!(
+                    compile.status.success(),
+                    "C26B-001 r3 {} native compile failed: {}",
+                    method_upper,
+                    String::from_utf8_lossy(&compile.stderr)
+                );
+                let child = Command::new(&bin_path)
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::null())
+                    .spawn()
+                    .expect("spawn native h2 method-variation");
+                let _ = fs::remove_file(&bin_path);
+                child
+            }
+            _ => unreachable!(),
+        };
+
+        let mut ready = false;
+        for _ in 0..50 {
+            thread::sleep(Duration::from_millis(100));
+            if TcpStream::connect(format!("127.0.0.1:{}", port)).is_ok() {
+                ready = true;
+                break;
+            }
+        }
+
+        if !ready {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = fs::remove_file(&cert_path);
+            let _ = fs::remove_file(&key_path);
+            cleanup_net_project(&dir);
+            panic!(
+                "C26B-001 r3 {} {}: h2 server not ready on port {}",
+                method_upper, backend, port
+            );
+        }
+
+        // Use curl -X <METHOD> to issue a non-GET/POST request. For PUT
+        // and PATCH we also send a tiny body to exercise the HEADERS+DATA
+        // framing path on those methods; DELETE goes body-less. Handler
+        // echoes req.method so the client can assert method roundtrip.
+        let mut args: Vec<String> = vec![
+            "--http2".into(),
+            "--insecure".into(),
+            "--silent".into(),
+            "--max-time".into(),
+            "5".into(),
+            "-X".into(),
+            method_upper.into(),
+        ];
+        if matches!(method_upper, "PUT" | "PATCH") {
+            args.push("--data".into());
+            args.push(format!("c26b001-r3-{}-body", method_slug));
+        }
+        args.push(format!("https://127.0.0.1:{}/resource/42", port));
+
+        let mut curl_out = Command::new("curl")
+            .args(&args)
+            .output()
+            .expect("curl method variation");
+        for _ in 0..3 {
+            if !curl_out.stdout.is_empty() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(500));
+            curl_out = Command::new("curl")
+                .args(&args)
+                .output()
+                .expect("curl method variation retry");
+        }
+
+        let server_out = child.wait_with_output().expect("wait for server");
+        let _ = fs::remove_file(&cert_path);
+        let _ = fs::remove_file(&key_path);
+        cleanup_net_project(&dir);
+
+        let body = String::from_utf8_lossy(&curl_out.stdout).to_string();
+        let server_stdout = normalize(&String::from_utf8_lossy(&server_out.stdout));
+        serving_results.push((body, server_stdout, backend));
+    }
+
+    assert_eq!(
+        serving_results.len(),
+        2,
+        "C26B-001 r3 {}: expected serving results for interp + native",
+        method_upper
+    );
+    for (body, count, backend) in &serving_results {
+        assert!(
+            body.contains(method_upper),
+            "C26B-001 r3 {} {}: expected body to contain method '{}', got: {:?}",
+            method_upper,
+            backend,
+            method_upper,
+            body
+        );
+        assert_eq!(
+            count, "1",
+            "C26B-001 r3 {} {}: expected server to log '1' request, got: {:?}",
+            method_upper, backend, count
+        );
+    }
+    let (interp_body, _, _) = &serving_results[0];
+    let (native_body, _, _) = &serving_results[1];
+    assert_eq!(
+        interp_body, native_body,
+        "C26B-001 r3 {}: interp and native h2 method-echo bodies diverge: interp={:?} native={:?}",
+        method_upper, interp_body, native_body
+    );
+
+    // ── JS rejecting branch ──
+    let port_j = find_free_loopback_port();
+    let (cert_j, key_j) = match generate_self_signed_cert(&format!("{}_js", case_tag)) {
+        Some(paths) => paths,
+        None => {
+            eprintln!("SKIP: cert gen failed for JS branch");
+            return;
+        }
+    };
+    let js_source = format!(
+        r#">>> taida-lang/net => @(httpServe)
+
+handler req =
+  @(status <= 200, headers <= @[], body <= req.method)
+=> :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
+
+asyncResult <= httpServe({port}, handler, 1, 5000, 128, @(cert <= "{cert}", key <= "{key}", protocol <= "h2"))
+asyncResult ]=> result
+stdout(result.throw.message)
+"#,
+        port = port_j,
+        cert = cert_j.display(),
+        key = key_j.display()
+    );
+
+    let dir_j = setup_net_project(&js_source, &format!("{}_{}_js", case_tag, method_slug));
+    let js_path = unique_temp_path(
+        &format!("taida_{}_js", case_tag),
+        method_slug,
+        "mjs",
+    );
+    let transpile = Command::new(taida_bin())
+        .arg("build")
+        .arg("--target")
+        .arg("js")
+        .arg(dir_j.join("main.td"))
+        .arg("-o")
+        .arg(&js_path)
+        .output()
+        .expect("transpile JS");
+    assert!(
+        transpile.status.success(),
+        "C26B-001 r3 {}: JS transpile failed: {}",
+        method_upper,
+        String::from_utf8_lossy(&transpile.stderr)
+    );
+
+    let js_run = Command::new("node").arg(&js_path).output().expect("node");
+    let js_stdout = normalize(&String::from_utf8_lossy(&js_run.stdout));
+    let _ = fs::remove_file(&js_path);
+    let _ = fs::remove_file(&cert_j);
+    let _ = fs::remove_file(&key_j);
+    cleanup_net_project(&dir_j);
+
+    assert!(
+        js_stdout.contains("HTTP/2") || js_stdout.contains("h2"),
+        "C26B-001 r3 {} js: expected H2Unsupported mentioning HTTP/2 or h2, got: {:?}",
+        method_upper, js_stdout
+    );
+    assert!(
+        js_stdout.contains("not supported"),
+        "C26B-001 r3 {} js: expected 'not supported' in H2Unsupported message, got: {:?}",
+        method_upper, js_stdout
+    );
+}
+
+/// C26B-001-5: h2 PUT method variation — 3-backend semantics parity.
+/// Exercises HEADERS(no END_STREAM) + DATA(END_STREAM) framing for a
+/// non-POST body-carrying method. handler echoes req.method so client
+/// can verify the method was roundtripped intact.
+#[test]
+fn test_net6_c26b001_5_h2_method_put_3backend_parity() {
+    c26b001_r3_h2_method_variation_test("put", "PUT", "c26b001_5");
+}
+
+/// C26B-001-6: h2 DELETE method variation — 3-backend semantics parity.
+/// Body-less DELETE exercises HEADERS(END_STREAM) framing path. handler
+/// echoes req.method ("DELETE") for verification.
+#[test]
+fn test_net6_c26b001_6_h2_method_delete_3backend_parity() {
+    c26b001_r3_h2_method_variation_test("delete", "DELETE", "c26b001_6");
+}
+
+/// C26B-001-7: h2 PATCH method variation — 3-backend semantics parity.
+/// PATCH is a newer idempotent-optional method (RFC 5789) that frameworks
+/// often overlook. Body-carrying so exercises HEADERS + DATA path.
+#[test]
+fn test_net6_c26b001_7_h2_method_patch_3backend_parity() {
+    c26b001_r3_h2_method_variation_test("patch", "PATCH", "c26b001_7");
+}
+
+// ════════════════════════════════════════════════════════════════════
+// C26B-022 Step 2 (wE Round 3): HTTP wire byte upper limit enforcement
+// ════════════════════════════════════════════════════════════════════
+//
+// Interpreter h1 parser rejects oversized method / path at the parser
+// boundary with 400 Bad Request, so that Native codegen's fixed-size
+// stack buffers (`char method[16]`, `char path[2048]`) cannot silently
+// truncate. Option confirmation: Step 3 Option B (parser reject) per
+// Phase 0 Design Lock.
+//
+// Limits (from src/interpreter/net_eval/h1.rs):
+//   HTTP_WIRE_MAX_METHOD_LEN = 16
+//   HTTP_WIRE_MAX_PATH_LEN   = 2048
+//   HTTP_WIRE_MAX_AUTHORITY_LEN = 256  (reserved, Host header follow-up)
+//
+// This test pins interpreter h1 behaviour only (the first landed step).
+// JS / Native backends inherit the limit through the codegen struct
+// field sizes; full 3-backend parity for oversized inputs comes in a
+// follow-up session when the authority path is completed.
+//
+// D27 escalation checklist (3 points, all NO):
+//   1. No public mold signature changed (internal parser behaviour only).
+//   2. No STABILITY-pinned error string altered ("400 Bad Request" is
+//      an industry-standard HTTP status line, not a Taida-pinned token).
+//   3. No existing parity.rs assertion modified (append only).
+#[test]
+fn test_net6_c26b022_oversized_method_interp_rejects_400() {
+    // Start an interpreter h1 server, send a raw HTTP request with an
+    // oversized method (17 chars > 16 limit), and assert the reply is
+    // 400 Bad Request.
+    let port = find_free_loopback_port();
+    let source = format!(
+        r#">>> taida-lang/net => @(httpServe)
+
+handler req =
+  @(status <= 200, headers <= @[], body <= "should-never-reach-handler")
+=> :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
+
+asyncResult <= httpServe({port}, handler, 1, 5000, 4)
+asyncResult ]=> result
+result ]=> r
+stdout(r.ok)
+stdout(r.requests)
+"#
+    );
+
+    let dir = setup_net_project(&source, "c26b022_oversized_method_interp");
+    let td_path = dir.join("main.td");
+    let mut child = Command::new(taida_bin())
+        .arg(&td_path)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn interp h1 server for c26b022");
+
+    // Wait for server readiness
+    let mut ready = false;
+    for _ in 0..50 {
+        thread::sleep(Duration::from_millis(100));
+        if TcpStream::connect(format!("127.0.0.1:{}", port)).is_ok() {
+            ready = true;
+            break;
+        }
+    }
+    if !ready {
+        let _ = child.kill();
+        let _ = child.wait();
+        cleanup_net_project(&dir);
+        panic!("C26B-022 interp: server not ready on port {}", port);
+    }
+
+    // Craft an oversized method (17 chars: "VERYLONGMETHODXYZ" = 17 bytes).
+    // The request line is otherwise RFC-compliant so httparse will parse
+    // it successfully; the wire-limit check should then reject it.
+    let oversized_method = "VERYLONGMETHODXYZ"; // 17 chars > 16 limit
+    assert!(oversized_method.len() > 16, "test setup: method must exceed limit");
+    let request = format!(
+        "{} / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+        oversized_method
+    );
+
+    let mut stream = TcpStream::connect(format!("127.0.0.1:{}", port))
+        .expect("connect for oversized method");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .expect("set read timeout");
+    stream
+        .set_write_timeout(Some(Duration::from_secs(5)))
+        .expect("set write timeout");
+    std::io::Write::write_all(&mut stream, request.as_bytes())
+        .expect("write oversized-method request");
+
+    let mut response = Vec::new();
+    let mut buf = [0u8; 4096];
+    loop {
+        match std::io::Read::read(&mut stream, &mut buf) {
+            Ok(0) => break,
+            Ok(n) => response.extend_from_slice(&buf[..n]),
+            Err(_) => break,
+        }
+    }
+
+    let output = child.wait_with_output().expect("wait for server");
+    cleanup_net_project(&dir);
+
+    let response_str = String::from_utf8_lossy(&response);
+    assert!(
+        response_str.starts_with("HTTP/1.1 400 "),
+        "C26B-022 interp: expected '400 Bad Request' for oversized method, \
+         got response: {:?}",
+        response_str
+    );
+    assert!(
+        !response_str.contains("should-never-reach-handler"),
+        "C26B-022 interp: handler must NOT be invoked on oversized method, \
+         unexpected payload: {:?}",
+        response_str
+    );
+
+    let server_stdout = normalize(&String::from_utf8_lossy(&output.stdout));
+    // Server should still log requests=1 (the 400 counts toward budget).
+    assert!(
+        server_stdout.contains("true"),
+        "C26B-022 interp: expected server ok=true, got: {:?}",
+        server_stdout
+    );
+}
+
+#[test]
+fn test_net6_c26b022_oversized_path_interp_rejects_400() {
+    // Send a request with a path of 2049 chars (> 2048 limit). The
+    // request line is otherwise well-formed so httparse accepts it;
+    // only the wire-limit check should reject.
+    let port = find_free_loopback_port();
+    let source = format!(
+        r#">>> taida-lang/net => @(httpServe)
+
+handler req =
+  @(status <= 200, headers <= @[], body <= "should-never-reach-handler")
+=> :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
+
+asyncResult <= httpServe({port}, handler, 1, 5000, 4)
+asyncResult ]=> result
+result ]=> r
+stdout(r.ok)
+stdout(r.requests)
+"#
+    );
+
+    let dir = setup_net_project(&source, "c26b022_oversized_path_interp");
+    let td_path = dir.join("main.td");
+    let mut child = Command::new(taida_bin())
+        .arg(&td_path)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn interp h1 server for c26b022 path");
+
+    let mut ready = false;
+    for _ in 0..50 {
+        thread::sleep(Duration::from_millis(100));
+        if TcpStream::connect(format!("127.0.0.1:{}", port)).is_ok() {
+            ready = true;
+            break;
+        }
+    }
+    if !ready {
+        let _ = child.kill();
+        let _ = child.wait();
+        cleanup_net_project(&dir);
+        panic!("C26B-022 path: server not ready on port {}", port);
+    }
+
+    // Build a 2049-byte path starting with '/' so it passes basic
+    // grammar but exceeds the 2048 cap.
+    let mut path = String::from("/");
+    path.push_str(&"a".repeat(2048)); // total length = 2049
+    assert!(path.len() > 2048, "test setup: path must exceed limit");
+    let request = format!(
+        "GET {} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+        path
+    );
+
+    let mut stream = TcpStream::connect(format!("127.0.0.1:{}", port))
+        .expect("connect for oversized path");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .expect("set read timeout");
+    stream
+        .set_write_timeout(Some(Duration::from_secs(5)))
+        .expect("set write timeout");
+    std::io::Write::write_all(&mut stream, request.as_bytes())
+        .expect("write oversized-path request");
+
+    let mut response = Vec::new();
+    let mut buf = [0u8; 4096];
+    loop {
+        match std::io::Read::read(&mut stream, &mut buf) {
+            Ok(0) => break,
+            Ok(n) => response.extend_from_slice(&buf[..n]),
+            Err(_) => break,
+        }
+    }
+
+    let output = child.wait_with_output().expect("wait for server");
+    cleanup_net_project(&dir);
+
+    let response_str = String::from_utf8_lossy(&response);
+    assert!(
+        response_str.starts_with("HTTP/1.1 400 "),
+        "C26B-022 interp: expected '400 Bad Request' for oversized path, \
+         got response: {:?}",
+        response_str
+    );
+    assert!(
+        !response_str.contains("should-never-reach-handler"),
+        "C26B-022 interp: handler must NOT be invoked on oversized path, \
+         unexpected payload: {:?}",
+        response_str
+    );
+
+    let server_stdout = normalize(&String::from_utf8_lossy(&output.stdout));
+    assert!(
+        server_stdout.contains("true"),
+        "C26B-022 interp: expected server ok=true, got: {:?}",
+        server_stdout
+    );
+}
+
+#[test]
+fn test_net6_c26b022_within_limit_method_interp_accepts() {
+    // Boundary test: method exactly at 16 bytes ("OPTIONSOPTIONSXX") must
+    // be accepted. This pins the "at-limit" side of the boundary so the
+    // check cannot silently become "off by one".
+    let port = find_free_loopback_port();
+    let source = format!(
+        r#">>> taida-lang/net => @(httpServe)
+
+handler req =
+  @(status <= 200, headers <= @[], body <= "at-limit-ok")
+=> :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
+
+asyncResult <= httpServe({port}, handler, 1, 5000, 4)
+asyncResult ]=> result
+result ]=> r
+stdout(r.ok)
+stdout(r.requests)
+"#
+    );
+
+    let dir = setup_net_project(&source, "c26b022_within_limit_method_interp");
+    let td_path = dir.join("main.td");
+    let mut child = Command::new(taida_bin())
+        .arg(&td_path)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn interp h1 server for c26b022 boundary");
+
+    let mut ready = false;
+    for _ in 0..50 {
+        thread::sleep(Duration::from_millis(100));
+        if TcpStream::connect(format!("127.0.0.1:{}", port)).is_ok() {
+            ready = true;
+            break;
+        }
+    }
+    if !ready {
+        let _ = child.kill();
+        let _ = child.wait();
+        cleanup_net_project(&dir);
+        panic!("C26B-022 boundary: server not ready on port {}", port);
+    }
+
+    // Exactly 16-byte method token — must be accepted.
+    let at_limit_method = "OPTIONSOPTIONSXX"; // 16 bytes = limit
+    assert_eq!(at_limit_method.len(), 16, "test setup");
+    let request = format!(
+        "{} / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+        at_limit_method
+    );
+
+    let mut stream = TcpStream::connect(format!("127.0.0.1:{}", port))
+        .expect("connect for at-limit method");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .expect("set read timeout");
+    std::io::Write::write_all(&mut stream, request.as_bytes())
+        .expect("write at-limit-method request");
+
+    let mut response = Vec::new();
+    let mut buf = [0u8; 4096];
+    loop {
+        match std::io::Read::read(&mut stream, &mut buf) {
+            Ok(0) => break,
+            Ok(n) => response.extend_from_slice(&buf[..n]),
+            Err(_) => break,
+        }
+    }
+
+    let output = child.wait_with_output().expect("wait for server");
+    cleanup_net_project(&dir);
+
+    let response_str = String::from_utf8_lossy(&response);
+    assert!(
+        response_str.starts_with("HTTP/1.1 200 "),
+        "C26B-022 interp: expected '200 OK' for at-limit method (16 bytes), \
+         got response: {:?}",
+        response_str
+    );
+    assert!(
+        response_str.contains("at-limit-ok"),
+        "C26B-022 interp: expected handler body 'at-limit-ok' on at-limit \
+         method, got: {:?}",
+        response_str
+    );
+
+    let server_stdout = normalize(&String::from_utf8_lossy(&output.stdout));
+    assert!(
+        server_stdout.contains("true"),
+        "C26B-022 interp: expected server ok=true, got: {:?}",
+        server_stdout
+    );
+}
