@@ -510,6 +510,18 @@ impl JsCodegen {
             // C21B-seed-04 re-fix: local identifiers bound to a
             // Float-origin RHS (or annotated `: Float`) propagate.
             Expr::Ident(name, _) => self.lookup_float_origin(name),
+            // C26B-011 (Phase 11): `Div[a, b]()` / `Mod[a, b]()` returns
+            // a Float-tagged Lax when either operand is Float-origin (the
+            // JS runtime `Div_mold` sets `__floatHint: true` in that
+            // path). When the result is unmolded into a scalar, the
+            // scalar carries Float origin so `debug(r) / stdout(r)` can
+            // dispatch to `__taida_debug_f` / `__taida_stdout_f` and
+            // render `0.0` / `inf` / `-inf` / `NaN` via
+            // `__taida_float_render`. Without this, `Div[1.0, 0.0]() ]=>
+            // r` drifts to `debug(r)` → `String(0)` → `"0"`.
+            Expr::MoldInst(name, type_args, _, _) if name == "Div" || name == "Mod" => {
+                type_args.iter().any(|a| self.is_float_origin_expr(a))
+            }
             _ => false,
         }
     }

@@ -166,6 +166,13 @@ fn runtime_abi(name: &str) -> Result<RuntimeAbi, String> {
             params: &[Val, Val],
             returns: &[Ptr],
         },
+        // C26B-011 (Phase 11): Float-hint variants. Takes raw f64s so
+        // `Div[1.0, 0.0]()` / `Div[1.0, 2.0]()` produce FLOAT-tagged
+        // Lax (matches interpreter and JS `__floatHint: true` Lax).
+        "taida_div_mold_f" | "taida_mod_mold_f" => RuntimeAbi {
+            params: &[F64, F64],
+            returns: &[Ptr],
+        },
         "taida_bit_and" | "taida_bit_or" | "taida_bit_xor" => RuntimeAbi {
             params: &[Val, Val],
             returns: &[Val],

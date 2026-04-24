@@ -1705,35 +1705,115 @@ impl Lowering {
             }
             "Div" => {
                 // Div[a, b]() -> taida_div_mold(a, b) -> returns Lax
+                //
+                // C26B-011 (Phase 11): if at least one operand is Float,
+                // dispatch to `taida_div_mold_f` so the returned Lax is
+                // tagged FLOAT (matches interpreter — which returns
+                // `Value::Float` in its Lax __value/__default, and JS
+                // which sets `__floatHint: true` on the Lax). Int args
+                // are widened to f64 via `taida_int_to_float` before the
+                // call; the Float-hint runtime uses hardware division
+                // so NaN / ±Infinity / denormal propagate per IEEE 754.
                 if type_args.len() < 2 {
                     return Err(LowerError {
                         message: "Div requires 2 type arguments".to_string(),
                     });
                 }
-                let a = self.lower_expr(func, &type_args[0])?;
-                let b = self.lower_expr(func, &type_args[1])?;
+                let a_raw = self.lower_expr(func, &type_args[0])?;
+                let b_raw = self.lower_expr(func, &type_args[1])?;
+                let a_is_float = self.expr_returns_float(&type_args[0]);
+                let b_is_float = self.expr_returns_float(&type_args[1]);
+                if a_is_float || b_is_float {
+                    let a = if a_is_float {
+                        a_raw
+                    } else {
+                        let tmp = func.alloc_var();
+                        func.push(IrInst::Call(
+                            tmp,
+                            "taida_int_to_float".to_string(),
+                            vec![a_raw],
+                        ));
+                        tmp
+                    };
+                    let b = if b_is_float {
+                        b_raw
+                    } else {
+                        let tmp = func.alloc_var();
+                        func.push(IrInst::Call(
+                            tmp,
+                            "taida_int_to_float".to_string(),
+                            vec![b_raw],
+                        ));
+                        tmp
+                    };
+                    let result = func.alloc_var();
+                    func.push(IrInst::Call(
+                        result,
+                        "taida_div_mold_f".to_string(),
+                        vec![a, b],
+                    ));
+                    return Ok(result);
+                }
                 let result = func.alloc_var();
                 func.push(IrInst::Call(
                     result,
                     "taida_div_mold".to_string(),
-                    vec![a, b],
+                    vec![a_raw, b_raw],
                 ));
                 Ok(result)
             }
             "Mod" => {
                 // Mod[a, b]() -> taida_mod_mold(a, b) -> returns Lax
+                //
+                // C26B-011 (Phase 11): Float-hint dispatch — see the Div
+                // comment above. `fmod(a, b)` is used for the Float path
+                // to match Rust's `%` operator on f64 / interpreter
+                // `Value::Float % Value::Float`.
                 if type_args.len() < 2 {
                     return Err(LowerError {
                         message: "Mod requires 2 type arguments".to_string(),
                     });
                 }
-                let a = self.lower_expr(func, &type_args[0])?;
-                let b = self.lower_expr(func, &type_args[1])?;
+                let a_raw = self.lower_expr(func, &type_args[0])?;
+                let b_raw = self.lower_expr(func, &type_args[1])?;
+                let a_is_float = self.expr_returns_float(&type_args[0]);
+                let b_is_float = self.expr_returns_float(&type_args[1]);
+                if a_is_float || b_is_float {
+                    let a = if a_is_float {
+                        a_raw
+                    } else {
+                        let tmp = func.alloc_var();
+                        func.push(IrInst::Call(
+                            tmp,
+                            "taida_int_to_float".to_string(),
+                            vec![a_raw],
+                        ));
+                        tmp
+                    };
+                    let b = if b_is_float {
+                        b_raw
+                    } else {
+                        let tmp = func.alloc_var();
+                        func.push(IrInst::Call(
+                            tmp,
+                            "taida_int_to_float".to_string(),
+                            vec![b_raw],
+                        ));
+                        tmp
+                    };
+                    let result = func.alloc_var();
+                    func.push(IrInst::Call(
+                        result,
+                        "taida_mod_mold_f".to_string(),
+                        vec![a, b],
+                    ));
+                    return Ok(result);
+                }
                 let result = func.alloc_var();
                 func.push(IrInst::Call(
                     result,
                     "taida_mod_mold".to_string(),
-                    vec![a, b],
+                    vec![a_raw, b_raw],
                 ));
                 Ok(result)
             }

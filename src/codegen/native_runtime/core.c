@@ -350,6 +350,10 @@ static int taida_read_cstr_len_safe(const char *s, size_t max_len, size_t *out_l
 static taida_val taida_value_to_display_string(taida_val val);
 static taida_val taida_value_to_debug_string(taida_val val);
 static taida_val taida_throw_to_display_string(taida_val throw_val);
+// C26B-011 (Phase 11): forward-declare `taida_float_to_str` so
+// `taida_debug_float` (defined early in the file) can route through
+// the same Rust-f64::Display formatter used everywhere else.
+taida_val taida_float_to_str(double a);
 // C23-2: generic Str[x]() entry — forward declare the stdout-display helper so
 // that `taida_str_mold_any` (defined near the other str-mold helpers up in the
 // file) can route through the full-form BuchiPack rendering used by stdout.
@@ -575,7 +579,14 @@ taida_val taida_debug_int(taida_val value) {
 }
 
 taida_val taida_debug_float(double value) {
-    printf("%g\n", value);
+    // C26B-011 (Phase 11): route through `taida_float_to_str` so the
+    // output matches the interpreter's Rust-f64::Display contract —
+    // "X.0" for integer-valued floats, "NaN"/"inf"/"-inf" for IEEE 754
+    // specials, shortest round-trip form for everything else. The old
+    // `%g` dropped trailing ".0" and used "inf"/"-inf" without sign
+    // parity with `taida_float_to_str`.
+    const char *s = (const char *)taida_float_to_str(value);
+    if (s) printf("%s\n", s); else printf("0.0\n");
     return 0;
 }
 
@@ -1251,6 +1262,39 @@ static inline taida_val taida_lax_tag_value_default(taida_val lax, taida_val tag
     taida_pack_set_tag(lax, 1, tag);
     taida_pack_set_tag(lax, 2, tag);
     return lax;
+}
+
+// C26B-011 (Phase 11): Float-hint variants. Called when the lowering
+// sees at least one Float operand on `Div[a, b]()` / `Mod[a, b]()`.
+// Arguments are IEEE 754 doubles; the result is a FLOAT-tagged Lax so
+// `taida_lax_to_string` / `__value` slot rendering goes through
+// `taida_float_to_str` (Rust-f64 parity: `.0`, `inf`/`-inf`/`NaN`).
+//
+// Division semantics mirror the interpreter (`src/interpreter/mold_eval.rs`
+// `Div` branch Float/Float case): b == 0.0 → Lax empty with default 0.0
+// (no NaN / Inf coercion — Taida's Div is Lax-safe). For non-zero b we
+// let the hardware produce `a / b` directly so special cases like
+// `Div[1.0, Infinity]()` → `Lax(0.0)` match Rust / C libm exactly.
+//
+// Placement note: must live AFTER `taida_lax_tag_value_default` is defined
+// (the helper is `static inline` so there is no forward declaration).
+taida_val taida_div_mold_f(double a, double b) {
+    if (b == 0.0) {
+        return taida_lax_tag_value_default(
+            taida_lax_empty(_d2l(0.0)), TAIDA_TAG_FLOAT);
+    }
+    return taida_lax_tag_value_default(
+        taida_lax_new(_d2l(a / b), _d2l(0.0)), TAIDA_TAG_FLOAT);
+}
+taida_val taida_mod_mold_f(double a, double b) {
+    if (b == 0.0) {
+        return taida_lax_tag_value_default(
+            taida_lax_empty(_d2l(0.0)), TAIDA_TAG_FLOAT);
+    }
+    // fmod(a, b): IEEE 754 remainder matching Rust's `%` operator on f64
+    // and interpreter's `a % b` on Value::Float. Preserves sign of `a`.
+    return taida_lax_tag_value_default(
+        taida_lax_new(_d2l(fmod(a, b)), _d2l(0.0)), TAIDA_TAG_FLOAT);
 }
 
 // Str[x]() — always succeeds
@@ -2206,6 +2250,17 @@ taida_ptr taida_pack_set_tag(taida_ptr pack_ptr, taida_val index, taida_val tag)
     taida_val *pack = (taida_val*)pack_ptr;
     pack[2 + index * 3 + 1] = tag;
     return pack_ptr;
+}
+
+// C26B-011: positional tag getter (by slot index, not hash) — used by
+// Lax.toString() / Result.toString() short-form renderers so `__value` /
+// `__default` slots tagged FLOAT render via `taida_float_to_str`
+// (Rust-f64 parity: `0.0` / `inf` / `-inf` / `NaN`). Without this path
+// the short-form fell through to `taida_value_to_display_string(val)` →
+// untagged fallback → `%lld` rendering, dropping Float-origin `.0`.
+static taida_val taida_pack_get_tag_idx(taida_ptr pack_ptr, taida_val index) {
+    taida_val *pack = (taida_val*)pack_ptr;
+    return pack[2 + index * 3 + 1];
 }
 
 taida_val taida_pack_get(taida_ptr pack_ptr, taida_val field_hash) {
@@ -6034,16 +6089,36 @@ taida_val taida_lax_flat_map(taida_val lax_ptr, taida_val fn_ptr) {
 }
 
 // Lax.toString() — "Lax(value)" or "Lax(default: value)"
+//
+// C26B-011 (Phase 11): honour the FLOAT tag on `__value` / `__default`
+// slots so Float-origin Lax renders `0.0` / `inf` / `-inf` / `NaN` to
+// match interpreter (Rust f64 Display) and JS (`__taida_float_render`).
+// Before this fix, `Div[1.0, 0.0]()` / `Div[1.0, 2.0]()` in native fell
+// through to `taida_value_to_display_string` which treated the f64 bit
+// pattern as an Int pointer and either rendered `0` (matching `b == 0`
+// short-circuit where the default was plain `0`) or lost the `.0`
+// entirely. `taida_float_to_str` already has NaN/Inf/denormal parity
+// with Rust — we just need to route FLOAT-tagged slots through it.
 taida_val taida_lax_to_string(taida_val lax_ptr) {
     taida_val val = taida_pack_get_idx(lax_ptr, 1);
     taida_val def = taida_pack_get_idx(lax_ptr, 2);
-    taida_val rendered = taida_pack_get_idx(lax_ptr, 0)
-        ? taida_value_to_display_string(val)
-        : taida_value_to_display_string(def);
+    int hasv = (int)taida_pack_get_idx(lax_ptr, 0);
+    taida_val slot_tag = taida_pack_get_tag_idx(lax_ptr, hasv ? 1 : 2);
+    taida_val rendered;
+    if (slot_tag == TAIDA_TAG_FLOAT) {
+        double d;
+        taida_val bits = hasv ? val : def;
+        memcpy(&d, &bits, sizeof(double));
+        rendered = taida_float_to_str(d);
+    } else {
+        rendered = hasv
+            ? taida_value_to_display_string(val)
+            : taida_value_to_display_string(def);
+    }
     const char *rs = (const char*)rendered;
     size_t need = strlen(rs) + 24;
     char *buf = taida_str_alloc(need);
-    if (taida_pack_get_idx(lax_ptr, 0)) {
+    if (hasv) {
         snprintf(buf, need + 1, "Lax(%s)", rs);
     } else {
         snprintf(buf, need + 1, "Lax(default: %s)", rs);

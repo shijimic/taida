@@ -336,7 +336,24 @@ mod tests {
         // core.c size moves from 393,260 to 395,155. Other fragments
         // (os / tls / net_h1_h2 / net_h3_quic) are unchanged. New
         // total: 974,273 → 976,168.
-        const EXPECTED_TOTAL_LEN: usize = 976_168;
+        //
+        // C26B-011 Phase 11 (2026-04-24): +3,834 bytes in core.c from
+        // the Float-origin parity work for `Div` / `Mod` / math molds.
+        //   - F1: +2,889 bytes (`taida_div_mold_f` + `taida_mod_mold_f`
+        //     placed after `taida_lax_tag_value_default` definition,
+        //     `taida_pack_get_tag_idx` positional getter near the
+        //     pack helpers, `taida_float_to_str` forward declaration
+        //     + doc comment, `taida_debug_float` rewrite to route
+        //     through `taida_float_to_str` for NaN/Inf/"X.0" parity).
+        //   - F2: +945 bytes (`taida_lax_to_string` now honours FLOAT
+        //     tag on `__value` / `__default` slots so Float-origin
+        //     `Lax(0.0)` doesn't render as `Lax(0)` via the untagged
+        //     `taida_value_to_display_string` fallback).
+        // F1_LEN moves from 235,748 to 238,637; F2_LEN from 159,407
+        // to 160,352. Total core.c size moves from 395,155 to 398,989.
+        // Other fragments (os / tls / net_h1_h2 / net_h3_quic) are
+        // unchanged. New total: 976,168 → 980,002.
+        const EXPECTED_TOTAL_LEN: usize = 980_002;
         let asm = *NATIVE_RUNTIME_C;
         assert_eq!(
             asm.len(),
@@ -653,11 +670,15 @@ mod tests {
         //    C25 native_runtime drift.
         // C25B-025 Phase 5-I: F1 absorbs +1,895 bytes (math mold family)
         // inserted ahead of the "Error ceiling" marker. F2 unchanged.
-        const F1_LEN: usize = 235_748;
+        // C26B-011 Phase 11: F1 absorbs +2,889 bytes (Float-hint Div/Mod
+        // variants, `taida_pack_get_tag_idx` helper, `taida_float_to_str`
+        // forward declaration, `taida_debug_float` rewrite). F2 absorbs
+        // +945 bytes (`taida_lax_to_string` FLOAT-tag aware rendering).
+        const F1_LEN: usize = 238_637;
         assert_eq!(
             CORE_SECTION.len(),
-            235_748 + 159_407,
-            "core.c total byte length must equal legacy fragment1 + fragment2 (C25B-001 / C25B-028 / C25B-025 adjusted)"
+            238_637 + 160_352,
+            "core.c total byte length must equal legacy fragment1 + fragment2 (C25B-001 / C25B-028 / C25B-025 / C26B-011 adjusted)"
         );
         const F2_PREFIX: &[u8] = b"// \xE2\x94\x80\xE2\x94\x80 Error ceiling";
         let tail = &CORE_SECTION.as_bytes()[F1_LEN..F1_LEN + F2_PREFIX.len()];

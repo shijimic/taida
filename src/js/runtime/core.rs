@@ -48,9 +48,23 @@ function __taida_debug(...args) {
 // wrappers, etc.) fall through to the same formatting path as the
 // non-`_f` helpers so parity is preserved for mixed-type output.
 function __taida_float_render(v) {
-  if (typeof v === 'number' && Number.isFinite(v) && Number.isInteger(v)) {
-    // Match Rust's `format!("{:.1}", n)` used by the interpreter.
-    return v.toFixed(1);
+  if (typeof v === 'number') {
+    // C26B-011 (Phase 11): IEEE 754 special values — match Rust's
+    // `f64::Display` (what the interpreter uses via `n.to_string()`):
+    //   NaN         → "NaN"
+    //   +Infinity   → "inf"
+    //   -Infinity   → "-inf"
+    // JS' default `String(v)` produces "NaN" (OK) but "Infinity" /
+    // "-Infinity" which drifts from interpreter and native. Native
+    // already routes through `taida_float_to_str` for the same mapping
+    // (see `src/codegen/native_runtime/core.c::taida_float_to_str`).
+    if (Number.isNaN(v)) return 'NaN';
+    if (v === Infinity) return 'inf';
+    if (v === -Infinity) return '-inf';
+    if (Number.isFinite(v) && Number.isInteger(v)) {
+      // Match Rust's `format!("{:.1}", n)` used by the interpreter.
+      return v.toFixed(1);
+    }
   }
   return String(v);
 }
@@ -868,29 +882,39 @@ function __taida_hasValue(val) {
   return fn;
 }
 
-function Lax(value, typedDefault) {
+function Lax(value, typedDefault, floatHint) {
   const _hasValue = value !== null && value !== undefined;
   const _default = _hasValue ? __taida_lax_default(value) : (typedDefault !== undefined ? typedDefault : 0);
   const _val = _hasValue ? value : _default;
-  return Object.freeze({
+  // C26B-011 (Phase 11): `floatHint` is forwarded by Float-origin mold
+  // callers (e.g. `Div_mold` for Float/Int mixed or Float/Float) so the
+  // short-form `.toString()` renders `__value` / `__default` via
+  // `__taida_float_render` (which handles `0.0`/`inf`/`-inf`/`NaN`).
+  // Without this the default `String(0.0)` collapses to `"0"` and the
+  // interpreter's `Lax(default: 0.0)` drifts.
+  const _floatHint = floatHint === true;
+  const pack = {
     __type: 'Lax',
     __value: _val,
     __default: _default,
     hasValue: __taida_hasValue(_hasValue),
     isEmpty() { return !_hasValue; },
     getOrDefault(def) { return _hasValue ? _val : def; },
-    map(fn) { return _hasValue ? Lax(fn(_val)) : this; },
+    map(fn) { return _hasValue ? Lax(fn(_val), undefined, _floatHint) : this; },
     flatMap(fn) {
       if (!_hasValue) return this;
       const result = fn(_val);
       if (result && result.__type === 'Lax') return result;
-      return Lax(result);
+      return Lax(result, undefined, _floatHint);
     },
     unmold() { return _hasValue ? _val : _default; },
     toString() {
-      return _hasValue ? 'Lax(' + String(_val) + ')' : 'Lax(default: ' + String(_default) + ')';
+      const fmt = _floatHint ? __taida_float_render : String;
+      return _hasValue ? 'Lax(' + fmt(_val) + ')' : 'Lax(default: ' + fmt(_default) + ')';
     },
-  });
+  };
+  if (_floatHint) pack.__floatHint = true;
+  return Object.freeze(pack);
 }
 
 function __taida_molten() {
@@ -973,21 +997,29 @@ function Cage_mold(cageValue, cageFn) {
 }
 
 // ── Div/Mod Mold types (safe division returning Lax) ──
+//
+// C26B-011 (Phase 11): propagate `__floatHint` through to the returned
+// Lax so `.toString()` renders `0.0` / `inf` / `-inf` / `NaN` per Rust
+// f64 Display. Before this fix, `Div[1.0, 2.0]()` returned `Lax(0.5)`
+// (OK) but `Div[1.0, 0.0]()` returned `Lax(default: 0)` because the
+// default-only path called `Lax(null, def)` without a hint — the
+// fallback `String(0.0)` is `"0"` in JS, drifting from interpreter.
 function Div_mold(a, b, opts) {
   if (opts === undefined) opts = {};
-  const isFloat = opts.__floatHint || (typeof a === 'number' && (!Number.isInteger(a) || (typeof b === 'number' && !Number.isInteger(b))));
+  const isFloat = !!(opts.__floatHint || (typeof a === 'number' && (!Number.isInteger(a) || (typeof b === 'number' && !Number.isInteger(b)))));
   const def = opts.default !== undefined ? opts.default : (isFloat ? 0.0 : 0);
-  if (b === 0) return Lax(null, def);
-  if (isFloat) return Lax(a / b);
+  if (b === 0) return Lax(null, def, isFloat);
+  if (isFloat) return Lax(a / b, undefined, true);
   const result = Number.isInteger(a) && Number.isInteger(b) ? Math.trunc(a / b) : a / b;
   const lax = Lax(result);
   return lax;
 }
 function Mod_mold(a, b, opts) {
   if (opts === undefined) opts = {};
-  const isFloat = opts.__floatHint || (typeof a === 'number' && (!Number.isInteger(a) || (typeof b === 'number' && !Number.isInteger(b))));
+  const isFloat = !!(opts.__floatHint || (typeof a === 'number' && (!Number.isInteger(a) || (typeof b === 'number' && !Number.isInteger(b)))));
   const def = opts.default !== undefined ? opts.default : (isFloat ? 0.0 : 0);
-  if (b === 0) return Lax(null, def);
+  if (b === 0) return Lax(null, def, isFloat);
+  if (isFloat) return Lax(a % b, undefined, true);
   return Lax(a % b);
 }
 
