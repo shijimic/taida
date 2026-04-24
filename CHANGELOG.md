@@ -54,9 +54,12 @@ and owned by a later phase / worktree. A canonical snapshot lives at
   gates, throughput drift boundary, backend-specific tolerances,
   and a REPORT.md template. The 24 h run itself is the stable-gate
   blocker and is still pending.
-- **C26B-006** — HTTP parity retry shim retired once C26B-003 roots
-  out the underlying port-bind race (staged for the wJ NET-rest
-  worktree; C26B-003 being FIXED makes the shim safe to remove).
+- **C26B-006** `[FIXED]` — HTTP parity retry shim retired at
+  Round 4 / wJ (`c3805ff`). With C26B-003's root-cause fix in
+  place, `tests/parity.rs` now binds to `0.0.0.0:0` and recovers
+  the concrete port via `getsockname()` without any retry
+  wrapper. No existing `parity.rs` assertion was rewritten — the
+  shim was already effectively a no-op after C26B-003.
 - **C26B-026** `[FIXED]` — Native h2 HPACK encode path now
   preserves custom response headers (Round 2 / wC, fix in
   `src/codegen/native_runtime/net_h1_h2.c::h2_extract_response_fields`).
@@ -110,7 +113,14 @@ addition under §6.2).
     `taida publish` workflow, with a verify-on-install step for
     `taida install` (Round 2 / wB).
 - **C26B-008** — C25B-014 advisory publication + CVE request
-  (owner action).
+  (owner action). Advisory staged at
+  `docs/advisory/C25B-014-advisory.md` (Round 6 / wR), with
+  publication procedure at `docs/advisory/README.md` and an
+  optional owner helper at `scripts/advisory/publish-advisory.sh`.
+  The agent does not publish; the owner runs the `gh` CLI steps
+  from a trusted session. The pre-existing draft under
+  `.dev/security_advisories/GHSA-DRAFT-*` remains authoritative
+  until the GHSA ID is assigned and cross-referenced here.
 
 #### Cluster 3 — Parser quality (Phase 9)
 
@@ -142,7 +152,12 @@ the arena option is D27-deferred. The lock itself landed with
 zero code — it is a gating artefact so follow-up sessions land
 3-backend simultaneously without breaking parity.
 
-- **C26B-010** — valgrind + peak-RSS + coverage integration.
+- **C26B-010** `[FIXED]` — Memory-leak CI gate. `.github/workflows/memory.yml`
+  added at Round 4 / wM (`e444f81`): every-push valgrind smoke over
+  `examples/quality/c26_mem_smoke/{hello,list,string}_smoke.td` plus a
+  weekly heaptrack run, with reproduction helpers at `scripts/mem/`.
+  Peak-RSS drift against this baseline is contractual for the
+  `@c.26` gate; the 24 h soak (C26B-005) is orthogonal.
 - **C26B-012** — `PENDING_BYTES` FIFO ordering (terminal addon
   concurrent `ReadEvent()`) + BuchiPack interior Arc migration.
 - **C26B-018** — `Str` primitive super-linear paths resolved via
@@ -150,16 +165,37 @@ zero code — it is a gating artefact so follow-up sessions land
   `StringRepeatJoin` mold. Option (D) `StringBuilder` is explicitly
   **discarded** (conflicts with Taida's immutable-first philosophy
   — not deferred, not revisited at D27).
+  - (B) + (C) `[FIXED]` at Round 4 / wK (`3e4c667`): byte-level
+    primitive paths (`src/interpreter/mold_eval.rs` +
+    `src/js/runtime/core.rs` + `src/codegen/native_runtime/core.c`)
+    and the `StringRepeatJoin` mold lowered across 3-backend,
+    pinned by `tests/c26b_018_byte_primitive.rs` and
+    `tests/c26b_018_repeat_join.rs`.
+  - (A) char-index cache for `Value::Str` — **OPEN**. Deferred to
+    the next Cluster 4 session (the cross-cut on 500+ call sites
+    is incompatible with the 2 h Round-5 window without risking
+    the green baseline). Not a regression: the hot `Str`
+    super-linear path is bounded by (B) + (C) in the interim.
 - **C26B-020** — **Downstream-blocking hard blocker.** Three
   pillars, all required for DONE:
   1. `[FIXED]` `readBytesAt(path, offset, len) -> Bytes` API;
      `readBytes` gets a runtime-configurable 64 MB ceiling. Landed
      across 3-backend; scale test pins 1 GB file × 64 × 16 MB
      chunked read in under 2 s.
-  2. `BytesCursorTake` zero-copy via `Arc<[u8]>` + offset/len view.
-     Gated on the Cluster 4 common-abstraction lock (Arc +
-     try_unwrap COW family, `.dev/C26_CLUSTER4_ABSTRACTION.md`,
-     LOCKED at wG Round 3). **OPEN**.
+  2. `[FIXED]` `BytesCursorTake` zero-copy via `Arc<Vec<u8>>` +
+     offset/len view. Landed at Round 5 / wO (`f15c145`):
+     `Value::Bytes` migrated to `Arc<Vec<u8>>`;
+     `parse_bytes_cursor` returns `(Arc<Vec<u8>>, usize)`; each
+     `BytesCursorTake(size)` is now an `Arc::clone` (O(1)
+     refcount bump) rather than a full-buffer memcpy. New
+     helpers: `Value::bytes(Vec<u8>)` constructor and
+     `Value::bytes_take(Arc<Vec<u8>>)` (try_unwrap fast path,
+     clone fallback). Regression guards in
+     `tests/c26b_020_bytes_cursor_zero_copy.rs`: Arc::ptr_eq
+     invariant + 256 MB × 16 < 500 ms baseline +
+     (`TAIDA_BIG_BYTES=1`) 1 GB × 64 < 2 s acceptance.
+     `EXPECTED_TOTAL_LEN` is unchanged (Value layout is
+     internal). D27 escalation checklist: 3/3 NO.
   3. `[FIXED]` `readBytesAt` + related molds lowered for
      `wasm-wasi` / `wasm-full` at Round 3 / wI via a new
      `src/codegen/runtime_wasi_io.c` (WASI preview1 `path_open` +
@@ -167,9 +203,9 @@ zero code — it is a gating artefact so follow-up sessions land
      Regression guard: `tests/c26b_020_wasm_bytes_at.rs`. This is
      the **only** wasm-scope addition in gen-C NET work.
 
-  Pillar 2 remains **OPEN** against the locked Arc-COW abstraction;
-  part-land of pillars 1 + 3 cannot flip C26B-020 as a whole to
-  DONE.
+  All three pillars are now **FIXED**. The downstream `bonsai-wasm`
+  Phase 6 unblock is material; the end-to-end acceptance smoke
+  still runs against the stable gate.
 - **C26B-024** — Native list / `BuchiPack` clone-heavy paths fixed;
   `bench_router.td` hard-gates `Native ≤ JS × 2` with `sys/real
   ≤ 30%`.
@@ -233,8 +269,14 @@ zero code — it is a gating artefact so follow-up sessions land
     2048`). The check runs after `parse_request_head` and before
     `dispatch_request`, so over-limit inputs are rejected before
     the handler is invoked. Additive widening per §6.2; no
-    existing assertion is altered. Authority (256) + Native / h2
-    / h3 parser-side enforcement remain **OPEN**.
+    existing assertion is altered.
+  - Authority (256) enforcement `[FIXED]` at Round 4 / wJ
+    (`c3805ff`) across h1 / h2 / h3
+    (`src/interpreter/net_eval/h1.rs`, `h2.rs`, `h3.rs`);
+    over-limit authorities return `400 Bad Request` symmetrically
+    with the method / path ceilings.
+  - **OPEN** residual: `-Wformat-truncation` promotion to
+    warning-as-error in CI.
 - **C26B-023** `[FIXED, docs-path]` — 2-arg `httpServe` handler
   `req.body` empty-span caveat documented in
   `docs/reference/net_api.md` (§3.2 / §8) at Round 3 / wH,
@@ -270,7 +312,7 @@ zero code — it is a gating artefact so follow-up sessions land
   - `SECURITY_AUDIT.md` open = 0; SEC-011 recorded complete.
   - Sigstore + SLSA-signed official addon release.
 
-### Round 1 + Round 2 + Round 3 — commits already on `feat/c26`
+### Round 1 – Round 6 — commits already on `feat/c26`
 
 Round 1 merge order: P3 (C26B-003) → P10 pillar 1 (C26B-020) →
 P11 (C26B-011) → P12 (C26B-014 / 015 / 021 / 025), then Phase 7
@@ -290,9 +332,29 @@ wH (C26B-016 `StrOf` + C26B-017 partial-app closure capture +
 C26B-023 2-arg body docs), wI (C26B-020 pillar 3 wasm-wasi /
 wasm-full lowering).
 
-Round 4 / wN — this session — is a docs-only amendment (STABILITY
-§5.1 / §5.5 / §5.6 + CHANGELOG + `net_api.md`) that re-syncs the
-FIXED set to the landed commits above.
+Round 4 additions: wJ (`c3805ff`, C26B-006 retry-shim removal +
+C26B-002 TLS observability surface tranche + C26B-022 authority
+byte ceiling across h1 / h2 / h3), wK (`3e4c667`, C26B-018 (B)
+byte-level primitive paths + (C) `StringRepeatJoin` mold
+3-backend), wM (`e444f81`, C26B-010 memory-leak CI gate —
+valgrind smoke on every push + weekly heaptrack, plus
+`scripts/mem/` helpers), wN (`a146b76`, docs-only re-sync of
+STABILITY / CHANGELOG / `net_api.md` to Round 3 FIXED set).
+
+Round 5 additions: wO (`853900f`, C26B-020 pillar 2 —
+`Value::Bytes` migrated to `Arc<Vec<u8>>` with
+`parse_bytes_cursor` returning `(Arc<Vec<u8>>, usize)` so every
+`BytesCursorTake(size)` becomes an `Arc::clone`; acceptance
+scales to 1 GB × 64 < 2 s under `TAIDA_BIG_BYTES=1`).
+
+Round 6 / wR — this session — amends STABILITY §5.5 / §5.6 and
+the CHANGELOG `@c.26` section to re-sync the FIXED set through
+Round 5, and stages the C26B-008 GHSA advisory template under
+`docs/advisory/` so the owner can publish without reaching into
+`.dev/`. Publication and CVE request remain a strictly manual
+step. Parallel Round 6 worktrees (wP `Value::Str` Arc migration;
+wQ `Value::BuchiPack` Arc migration; wS Float denormal parity +
+C26B-022 Native fixture) operate on disjoint file sets.
 
 ### Docs / infrastructure landed alongside
 
