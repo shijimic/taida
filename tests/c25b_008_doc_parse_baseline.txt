@@ -50,6 +50,8 @@ docs/reference/documentation_comments.md:82
 docs/reference/documentation_comments.md:92
 docs/reference/mold_types.md:33
 docs/reference/naming_conventions.md:227
+docs/reference/net_api.md:258
+docs/reference/net_api.md:273
 docs/reference/operators.md:205
 docs/reference/operators.md:348
 docs/reference/operators.md:517
