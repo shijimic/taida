@@ -808,7 +808,17 @@ impl Interpreter {
         match expr {
             // Function call in tail position — check for TCO opportunity
             Expr::FuncCall(callee, args, _) => {
-                if let Expr::Ident(name, _) = callee.as_ref() {
+                // C26B-017: A partial application `f(a, )` (with Hole args) is
+                // NOT a real function call — it returns a closure. Falling
+                // through to the TCO path would evaluate each Hole as
+                // `Value::Unit` and issue a spurious tail call to `f` with
+                // Unit-filled args, breaking closure capture (symptom:
+                // `Cannot add <n> and @()` when the partial is the last
+                // expression of a function body). Route partial applications
+                // to the normal evaluator so `eval_partial_application` can
+                // build the proper closure value.
+                let is_partial_application = args.iter().any(|a| matches!(a, Expr::Hole(_)));
+                if !is_partial_application && let Expr::Ident(name, _) = callee.as_ref() {
                     let is_self_call = self.active_function.as_deref() == Some(name);
                     // Check if the callee is a user-defined function (for mutual recursion).
                     // Only attempt mutual TCO when inside a function context AND the

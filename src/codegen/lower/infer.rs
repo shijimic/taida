@@ -115,6 +115,8 @@ impl Lowering {
                     | "Pad"
                     | "Join"
                     | "ToFixed"
+                    // C26B-016 (@c.26, Option B+): `StrOf[span, raw]()` returns Str.
+                    | "StrOf"
             ),
             Expr::BinaryOp(_, BinOp::Concat, _, _) => true,
             Expr::CondBranch(arms, _) => {
@@ -536,7 +538,9 @@ impl Lowering {
         match mold_name {
             // Note: Reverse is polymorphic (Str or List), so NOT included here
             "Str" | "Upper" | "Lower" | "Trim" | "Replace" | "Slice" | "CharAt" | "Repeat"
-            | "Pad" | "Join" | "ToFixed" => {
+            | "Pad" | "Join" | "ToFixed"
+            // C26B-016 (@c.26, Option B+): `StrOf[span, raw]()` returns Str.
+            | "StrOf" => {
                 self.string_vars.insert(target.to_string());
             }
             "Bool" => {

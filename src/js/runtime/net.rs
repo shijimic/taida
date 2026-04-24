@@ -96,6 +96,26 @@ function __taida_net_SpanSlice(span, raw, subStart, subEnd) {
   return { start: baseStart + s, len: e - s };
 }
 
+// ── C26B-016 (@c.26, Option B+): `StrOf[span, raw]()` — cold-path span → Str ──
+// Materialize a span pack into an owned JS string via UTF-8 decode. Invalid
+// UTF-8 or OOB span → empty string (tolerant semantics, consistent with
+// Span* family). Differs from `Utf8Decode` (which returns `Lax[Str]`) — this
+// returns a raw Str directly, matching the interpreter's `StrOf` mold.
+function __taida_net_StrOf(span, raw) {
+  const offsets = __taida_net_spanPackToOffsets(span);
+  const buf = __taida_net_rawToBuffer(raw);
+  if (!offsets || !buf) { return ""; }
+  const start = offsets[0];
+  const len = offsets[1];
+  if (start + len > buf.length) { return ""; }
+  if (len === 0) { return ""; }
+  try {
+    return buf.toString('utf8', start, start + len);
+  } catch (e) {
+    return "";
+  }
+}
+
 // Helper: create net Result success (reuses __taida_result_create)
 function __taida_net_result_ok(inner) {
   return __taida_result_create(inner, null, null);

@@ -300,6 +300,124 @@ impl Lowering {
                 ));
                 Ok(result)
             }
+            // ── C26B-016 (@c.26, Option B+): `StrOf[span, raw]() -> Str` ──
+            // Cold-path materialization of a span into an owned Str.
+            // This lowering is a **pure IR composition** using existing C
+            // runtime helpers — it deliberately does NOT add a new
+            // `taida_net_StrOf` runtime function (avoids core.c churn during
+            // Round 3 and coexists cleanly with the clone-heavy abstraction
+            // work in wG).
+            //
+            // IR sequence:
+            //   start = taida_pack_get(span, hash("start"))
+            //   len   = taida_pack_get(span, hash("len"))
+            //   end   = taida_int_add(start, len)
+            //   bytes = taida_slice_mold(raw, start, end)
+            //   lax   = taida_utf8_decode_mold(bytes)
+            //   str   = taida_lax_get_or_default(lax, "")
+            //
+            // This matches `StrOf` interpreter / JS semantics: invalid UTF-8
+            // or OOB span → empty string (tolerant; `taida_slice_mold` clamps
+            // end to buf_len, and `taida_utf8_decode_mold` returns an empty
+            // Lax on UTF-8 failure which `get_or_default("")` then materializes).
+            "StrOf" => {
+                if type_args.len() < 2 {
+                    return Err(LowerError {
+                        message: "StrOf requires 2 arguments: StrOf[span, raw]()".into(),
+                    });
+                }
+                let span = self.lower_expr(func, &type_args[0])?;
+                let raw_is_str = self.expr_is_string_full(&type_args[1]);
+                let raw = self.lower_expr(func, &type_args[1])?;
+
+                // start = taida_pack_get(span, hash("start"))
+                let start_hash_var = func.alloc_var();
+                let start_hash = crate::codegen::lower::simple_hash("start") as i64;
+                func.push(IrInst::ConstInt(start_hash_var, start_hash));
+                let start_val = func.alloc_var();
+                func.push(IrInst::Call(
+                    start_val,
+                    "taida_pack_get".to_string(),
+                    vec![span, start_hash_var],
+                ));
+
+                // len = taida_pack_get(span, hash("len"))
+                let len_hash_var = func.alloc_var();
+                let len_hash = crate::codegen::lower::simple_hash("len") as i64;
+                func.push(IrInst::ConstInt(len_hash_var, len_hash));
+                let len_val = func.alloc_var();
+                func.push(IrInst::Call(
+                    len_val,
+                    "taida_pack_get".to_string(),
+                    vec![span, len_hash_var],
+                ));
+
+                // end = taida_int_add(start, len)
+                let end_val = func.alloc_var();
+                func.push(IrInst::Call(
+                    end_val,
+                    "taida_int_add".to_string(),
+                    vec![start_val, len_val],
+                ));
+
+                // If raw is known at lower time to be a Str, convert to Bytes first
+                // so `taida_slice_mold` → Bytes (not character-based Str slice) and
+                // `taida_utf8_decode_mold` succeeds. When raw is Bytes (the common
+                // `req.raw` case), skip the conversion.
+                let raw_bytes = if raw_is_str {
+                    // enc_lax = taida_utf8_encode_mold(raw)
+                    let enc_lax = func.alloc_var();
+                    func.push(IrInst::Call(
+                        enc_lax,
+                        "taida_utf8_encode_mold".to_string(),
+                        vec![raw],
+                    ));
+                    // default for encode = empty bytes via ConstStr("") (runtime
+                    // permits using empty Str as Bytes fallback here because
+                    // taida_lax_get_or_default is type-polymorphic at C level)
+                    let empty_bytes_default = func.alloc_var();
+                    func.push(IrInst::ConstStr(empty_bytes_default, String::new()));
+                    // bytes = taida_lax_get_or_default(enc_lax, "")
+                    let bytes_from_str = func.alloc_var();
+                    func.push(IrInst::Call(
+                        bytes_from_str,
+                        "taida_lax_get_or_default".to_string(),
+                        vec![enc_lax, empty_bytes_default],
+                    ));
+                    bytes_from_str
+                } else {
+                    raw
+                };
+
+                // bytes = taida_slice_mold(rawBytes, start, end)
+                let bytes_val = func.alloc_var();
+                func.push(IrInst::Call(
+                    bytes_val,
+                    "taida_slice_mold".to_string(),
+                    vec![raw_bytes, start_val, end_val],
+                ));
+
+                // lax = taida_utf8_decode_mold(bytes)
+                let lax_val = func.alloc_var();
+                func.push(IrInst::Call(
+                    lax_val,
+                    "taida_utf8_decode_mold".to_string(),
+                    vec![bytes_val],
+                ));
+
+                // default = "" (empty Str)
+                let default_val = func.alloc_var();
+                func.push(IrInst::ConstStr(default_val, String::new()));
+
+                // str = taida_lax_get_or_default(lax, "")
+                let result = func.alloc_var();
+                func.push(IrInst::Call(
+                    result,
+                    "taida_lax_get_or_default".to_string(),
+                    vec![lax_val, default_val],
+                ));
+                Ok(result)
+            }
             "Slice" => {
                 if type_args.is_empty() {
                     return Err(LowerError {

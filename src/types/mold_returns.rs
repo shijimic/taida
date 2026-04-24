@@ -136,6 +136,9 @@ pub fn lookup_mold_return_kind(name: &str) -> Option<MoldReturnKind> {
         "Pad" | "PadLeft" | "PadRight" => Str,
         "Join" => Str,
         "ToFixed" | "ToRadix" => Str,
+        // C26B-016 (@c.26, Option B+): `StrOf[span, raw]()` materializes a
+        // span pack into an owned `Str` (cold-path counterpart to SpanEquals).
+        "StrOf" => Str,
         // CharAt returns `Lax[Str]` at the checker level (Pack at
         // runtime because Lax is a Pack). Treat as Pack for tag purposes.
         "CharAt" => Pack,
@@ -231,6 +234,13 @@ mod tests {
             mold_return_tag("SpanSlice"),
             Some(4),
             "SpanSlice should be Pack (4) — returns @(start, len) sub-span"
+        );
+        // C26B-016 (@c.26, Option B+): `StrOf[span, raw]()` materializes a
+        // span pack into an owned Str (Str tag = 3).
+        assert_eq!(
+            mold_return_tag("StrOf"),
+            Some(3),
+            "StrOf should be Str (3) — returns owned materialized string"
         );
     }
 
