@@ -94,6 +94,22 @@ for fixture in "${FIXTURES[@]}"; do
     failed_names+=("${name}")
     echo "FAIL :: ${name} (rc=${rc}, definite=${definite_bytes}B, indirect=${indirect_bytes}B, possibly=${possible_bytes}B)"
     echo "       see ${log}"
+    # Dump captured stdout/stderr and the valgrind log so CI runs are
+    # debuggable when the smoke crashes before valgrind can write its
+    # leak summary (e.g. unsupported syscall on a newer runner kernel).
+    echo "--- ${name} stdout/stderr (captured) ---"
+    if [[ -s "${stdout_log}" ]]; then
+      sed 's/^/  /' "${stdout_log}"
+    else
+      echo "  (empty)"
+    fi
+    echo "--- ${name} valgrind log ---"
+    if [[ -s "${log}" ]]; then
+      sed 's/^/  /' "${log}"
+    else
+      echo "  (missing or empty — valgrind exited before writing)"
+    fi
+    echo "--- end ${name} ---"
   else
     echo "OK   :: ${name} (definite=0B, indirect=${indirect_bytes}B, possibly=${possible_bytes}B)"
   fi

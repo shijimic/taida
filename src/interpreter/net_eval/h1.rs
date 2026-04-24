@@ -121,15 +121,11 @@ pub(crate) fn check_http_wire_limits(
 ) -> Option<&'static str> {
     for (k, v) in parsed_fields {
         match k.as_str() {
-            "method" => {
-                if span_len(v) > HTTP_WIRE_MAX_METHOD_LEN {
-                    return Some("method");
-                }
+            "method" if span_len(v) > HTTP_WIRE_MAX_METHOD_LEN => {
+                return Some("method");
             }
-            "path" => {
-                if span_len(v) > HTTP_WIRE_MAX_PATH_LEN {
-                    return Some("path");
-                }
+            "path" if span_len(v) > HTTP_WIRE_MAX_PATH_LEN => {
+                return Some("path");
             }
             "headers" => {
                 if let Value::List(items) = v {
