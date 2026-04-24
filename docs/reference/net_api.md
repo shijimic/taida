@@ -15,7 +15,7 @@ Taida の NET surface は **zero-copy span** を基本単位とします:
 - `httpServe` handler / `httpParseRequestHead` が返す `req` pack の `method` / `path` / `query` / `headers[i].name` / `headers[i].value` / `body` は **`@(start: Int, len: Int)` の span pack** で、元の `req.raw: Bytes` に対する view です。
 - 原本の `Bytes` を clone せず、必要になった時点で user が明示的に **span → Str** または **span-aware 比較** を呼ぶ形にしています。これは C26B-018 / C26B-024 の clone-heavy 抑制方針 (`src/interpreter/value.rs` の Arc + try_unwrap COW 共通 abstraction) と一致する設計です。
 - span pack を受け取る公開 mold 群は `§ 4 span-aware 比較 mold` を参照。
-- 「`req.method` を自動で `Str` に昇格する」設計 (Option A) は `tests/parity.rs` 既存 assertion (`body <= req.method` 等) を破壊するため D28 送り (`.dev/D28_BLOCKERS.md`、旧 D26 / D27) に pin 済みです。gen-C では Option B+ (span 保持 + span-aware 公開 mold 追加) で ergonomics を解決します。
+- 「`req.method` を自動で `Str` に昇格する」設計 (Option A) は **不採用が最終確定**しています。span pack を zero-copy の基本単位として永続保持し、ergonomics は Option B+ (span-aware 公開 mold 群 = `§ 4` の `SpanEquals` / `SpanStartsWith` / `SpanContains` / `SpanSlice` / `StrOf`) で解決します。C26B-016 Round 2-3 (2026-04-24) で 3-backend land 済。
 
 ---
 
