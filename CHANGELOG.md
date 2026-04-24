@@ -36,8 +36,14 @@ and owned by a later phase / worktree. A canonical snapshot lives at
   rejects with `H2Unsupported` in every case. The `§5.1 → FIXED`
   flip is held on the rest of Cluster 1 (C26B-002 TLS,
   C26B-006 retry shim), but the test-pin target is met.
-- **C26B-002** — TLS construction (cert chains, ALPN, verification
-  modes) locked across 3-backend.
+- **C26B-002** `[FIXED during 2026-04-25 review]` — TLS
+  construction matrix pinned across 3-backend. See the
+  Round 11 wι review amendment below for the five new
+  `test_net6_1c_c26b002_{1..5}_*` cases in `tests/parity.rs`
+  (missing cert, key-only, plaintext fallback, invalid-PEM,
+  unknown-protocol-token). Live cert-rotation + ALPN matrix
+  coverage remains in the C26B-005 soak runbook because
+  those branches are runtime-dependent.
 - **C26B-003** `[FIXED]` — **Critical**. Port-bind race eradication
   (inherited from C25B-002). Root cause fixed; 100 consecutive local
   CI-equivalent runs pass with no retry-shim firing. Candidate
@@ -163,11 +169,13 @@ zero code — it is a gating artefact so follow-up sessions land
   weekly heaptrack run, with reproduction helpers at `scripts/mem/`.
   Peak-RSS drift against this baseline is contractual for the
   `@c.26` gate; the 24 h soak (C26B-005) is orthogonal.
-- **2026-04-25 review correction** — the previous "agent-side FULLY READY"
-  wording is downgraded to **HOLD**. C26B-029 fixed two CI false-green
-  holes (`bench.yml` NET throughput suppression and `perf-router` missing
-  emit lines), but C26B-002 / C26B-005 / C26B-013 / C26B-030 remain
-  OPEN or REOPEN before the label-less `@c.26` tag.
+- **2026-04-25 review correction** — the "agent-side FULLY READY"
+  wording is downgraded to **HOLD**. C26B-029 (CI false-green
+  holes) + C26B-030 (SEC-011 install-side verify wiring) +
+  C26B-002 (3-backend TLS construction pin) all FIXED during
+  the review follow-up. **C26B-005** (24 h soak PASS record)
+  remains the last REOPEN item and is a user-action blocker
+  on the `@c.26` tag; see the Round 11 wι review amendment.
 - **C26B-012** — `PENDING_BYTES` FIFO ordering (terminal addon
   concurrent `ReadEvent()`) + BuchiPack interior Arc migration.
   - BuchiPack `[FIXED]` at Round 6 / wQ (`6f72f7c`): `Value::BuchiPack`
@@ -791,6 +799,124 @@ Round 10 `EXPECTED_TOTAL_LEN` rolls from 998,598 B (Round 8
 wT) to **1,012,971 B**; F1 absorbs the full +14,373-byte delta.
 No other fragment, backend, or wasm profile is touched.
 
+### Round 11 additions (all merged on `feat/c26`)
+
+- **Round 11 / wη** (`4bc7369` ci → `5e03422` merge, **C26B-024
+  Step 1 CI perf regression gate wiring**) — closes the final
+  open Step of C26B-024. `.github/workflows/perf-router.yml`
+  (122 lines, new) runs the `bench_router.td` gate on every
+  PR / push / schedule / dispatch; the main branch auto-updates
+  `.github/bench-baselines/perf_router.json` (new, machine-readable
+  JSON with `native_js_ratio_max=3.0` / `sys_real_ratio_max=0.40`
+  / `min_samples_required=5`). `scripts/bench/perf_router_gate.py`
+  (200 lines) parses `PERF_ROUTER_*` emit lines + drives the
+  sample-count state machine + EWMA baseline update. The
+  opt-in `c26b_024_router_perf_gate` test is `#[ignore]`-gated;
+  none of the three existing Round 10 parity tests were
+  modified. Thresholds derived from local 16T measurements
+  (Native / JS = 1.97, sys / real = 8.7 %) with 1.5× / 4×
+  headroom for CI 2C variance (local ≠ CI lesson). Sampling
+  phase is warn-only by design; hard-fail starts at sample
+  count ≥ 5. Worktree contract was fully respected.
+- **Round 11 / wθ** (`e22ef29` docs → `fe6f526` merge, **C26B-013
+  rolling docs amendment — Round 9 + Round 10 narrative**) —
+  catch-up section above.
+- **Round 11 / wζ** (`4692fd8` in the `taida-lang/terminal`
+  submodule, **C26B-012 `PENDING_BYTES` FIFO FIXED**) —
+  landed outside the language repo because the change body is
+  entirely inside the `terminal` addon
+  (`.dev/official-package-repos/terminal/`). Replaces the old
+  `static PENDING_BYTES: Mutex<VecDeque<u8>>` with
+  `thread_local!(static PENDING_BYTES: RefCell<VecDeque<u8>>)`
+  (Case A from `.dev/C25B019_PENDING_BYTES_DESIGN.md`). Regression
+  guard: new `pending_bytes_queue_isolation_across_threads`
+  stress test pins cross-thread byte isolation (two OS threads
+  push distinct sequences, drain independently, no theft). The
+  `ReadEvent[]()` public signature is unchanged; the host-side
+  contract (always call from a dedicated blocking thread / single
+  OS thread per stdin stream) is documented in
+  `docs/guide/11_async.md` § `Async と addon の blocking I/O`.
+  The terminal submodule still needs `origin` push + PR merge +
+  `@a.x` release tag publish before downstream addon consumers
+  can pick it up — user action.
+
+### Round 11 wι review amendment (2026-04-25)
+
+A review on 2026-04-25 downgraded the previous "agent-side
+FULLY READY" wording to **HOLD**. Four items were surfaced:
+
+- **C26B-029** `[FIXED during review]` — CI perf gate
+  false-green hardening. `.github/workflows/bench.yml` had
+  `continue-on-error: true` plus `|| true` on the NET
+  throughput step; `scripts/bench/parse_net_throughput.py` could
+  not parse the `NET6-3b-3` `throughput=… total_bytes=… elapsed=…`
+  line format (treating missing samples as acceptable); and
+  `scripts/bench/perf_router_gate.py` returned exit 0 when its
+  `PERF_ROUTER_*` emit lines were absent. All three false-green
+  holes fixed in the same review session (commit `cfb8b0b`).
+- **C26B-030** `[FIXED during review follow-up]` — SEC-011
+  install-side verify wiring gap. Release-side Sigstore signing
+  + SLSA provenance shipped at Round 2 / wB, and
+  `scripts/release/verify-signatures.sh` existed; however the
+  actual `taida install` / `install.sh` consumption path did
+  not invoke the verifier. Closed by:
+  - **New `src/addon/signature_verify.rs`** module — resolves
+    a per-URL `VerifyPolicy` (`Disabled` / `BestEffort` /
+    `Required`), fetches `<artefact>.cosign.bundle` next to
+    the prebuild, shells out to `cosign verify-blob` under the
+    pinned identity regex (`^https://github.com/taida-lang/`)
+    and OIDC issuer (`https://token.actions.githubusercontent.com`).
+    `TAIDA_VERIFY_SIGNATURES` selects the policy; unset means
+    `BestEffort` for first-party URLs and `Disabled`
+    elsewhere. A `TAIDA_SEC011_FAKE_VERIFY` env handshake lets
+    integration tests exercise both pass and fail paths
+    without needing the `cosign` binary on every CI runner.
+  - **`src/pkg/resolver.rs::try_fetch_prebuild`** calls the
+    verifier after the SHA-256 check; failures map to
+    `PrebuildFailure::IntegrityMismatch` so the install
+    aborts on any signature rejection.
+  - **New `install.sh`** at repo root — the public installer.
+    Downloads `taida-<TAG>-<TRIPLE>.tar.gz`, the matching
+    `.cosign.bundle`, and `SHA256SUMS` + `SHA256SUMS.cosign.bundle`.
+    Enforces SHA-256 against the signed sums file then runs
+    `cosign verify-blob` on both the tarball and the sums.
+    `TAIDA_VERIFY_SIGNATURES=required` mode fails the install
+    if any bundle is missing or `cosign` is not on `PATH`.
+  - Regression guard: `tests/c26b_030_sec011_install_verify.rs`
+    (10 cases) pins the `Disabled` / `BestEffort` / `Required`
+    decision table + fake-ok / fake-fail / fake-missing-cosign
+    paths. Unit tests in the new module pin URL matcher
+    tightness and policy-resolution edge cases.
+- **C26B-002** `[REOPEN → FIXED during review follow-up]` —
+  TLS construction 3-backend parity pin. The existing
+  `test_net5_3b_tls_*` cases covered interpreter + JS only;
+  the 2026-04-25 review flagged the missing native branch.
+  Closed by five new 3-backend parity tests in `tests/parity.rs`
+  (`test_net6_1c_c26b002_{1..5}_*`) that cover the cert-missing,
+  key-only, plaintext-fallback, invalid-PEM-content, and
+  unknown-protocol-token permutations across interpreter / JS /
+  native. Live cert rotation + ALPN matrix remains in the
+  C26B-005 soak runbook (live TLS handshakes are runtime-
+  dependent; the construction-time contract being pinned here
+  is what `cargo test --release` can deterministically
+  reproduce).
+- **C26B-005** `[REOPEN]` — 24 h soak PASS evidence remains
+  open. Runbook landed at Round 2 / wA, but the 24 h run itself
+  is a user action and no PASS record currently lives in the
+  repo. The review amendment adds a new **fast-soak proxy**
+  (`scripts/soak/fast-soak-proxy.sh`, 30-min to 3-hour short
+  run) so developers can get a first-order leak / drift signal
+  during the iteration loop; a proxy PASS does **not** close
+  the C26B-005 acceptance (only a documented 24 h PASS does).
+  `.dev/C26_SOAK_RUNBOOK.md` gained § 0.1 (acceptance
+  ownership) and § 7.1 (fast-soak-proxy usage) to make the
+  split explicit.
+
+Review amendment `EXPECTED_TOTAL_LEN` unchanged (no `src/`
+C-fragment bytes moved; the SEC-011 wiring is pure Rust).
+All `cargo test --lib` (2539) + `cargo test --release --test parity`
+(667) pass under the review amendments.
+
 **Worktree contract — Round 10 post-mortem (1 line):** the
 Round 10 / wε integration session briefly wrote a partial-leak
 fragment outside its isolation worktree before being corrected;
@@ -833,19 +959,33 @@ first half of the C26B-024 FIXED narrative, and the Round 10
 3/3 NO — no mold signature / pinned error string / existing
 parity assertion is altered by this docs amendment.
 
-### `@c.26` GATE-READY status (agent side)
+### `@c.26` GATE status (agent side, 2026-04-25 review update)
 
-As of this wθ amendment, **all agent-side Must Fix / Critical
-C26 blockers are FIXED**. The only residual OPEN item on the
-stable-gate checklist is:
+The previous wθ **GATE-READY** claim is downgraded to **HOLD**
+following the 2026-04-25 review. The OPEN / REOPEN residuals
+are now:
 
-- **C26B-012** `PENDING_BYTES` FIFO (terminal addon concurrent
-  `ReadEvent()`) — **user-side only**. The BuchiPack interior
-  Arc migration half of C26B-012 landed at Round 6 / wQ
-  (agent side, `6f72f7c`); the FIFO half lives in the
-  `terminal` submodule and is owned by the downstream addon
-  author, not the language agent. The stable-gate checklist
-  tracks it as a user-action item.
+- **C26B-002** `[FIXED during review follow-up]` — 3-backend
+  TLS construction parity pin (five new
+  `test_net6_1c_c26b002_{1..5}_*` cases in `tests/parity.rs`).
+- **C26B-005** `[REOPEN]` — 24 h soak PASS record remains a
+  user action; runbook + fast-soak proxy are both landed but
+  the PASS evidence lives outside the repo until the user
+  runs it.
+- **C26B-012** `PENDING_BYTES` FIFO — **user-side only** from
+  this repo's perspective. Agent-side work is closed (wζ
+  Round 11, commit `4692fd8` in the `terminal` submodule).
+  The submodule still needs upstream push / PR / release tag
+  before consumers see the fix.
+- **C26B-013** rolling amendment — this section + §5.6.1
+  (`docs/STABILITY.md`) + `.dev/C26_PROGRESS.md` tracker
+  stayed out of sync with Round 10 / 11 before the 2026-04-25
+  review; now re-synced under the Round 11 wι amendment.
+- **C26B-029** `[FIXED during review]` — CI perf gate
+  false-green hardening (two scripts + one workflow).
+- **C26B-030** `[FIXED during review follow-up]` — SEC-011
+  install-side cosign verify wiring (`src/addon/signature_verify.rs`
+  + resolver hook + public `install.sh`).
 
 The `@c.26` Phase 14 promotion gate itself remains a
 **user-approved tag**; the agent does not cut `@c.26.rcM` /

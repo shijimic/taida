@@ -339,8 +339,15 @@ assignments below are pinned by the 2026-04-24 Phase 0 Design Lock:
   (3 custom headers + content-type; interpreter / native dumps
   byte-equal; JS H2Unsupported branch excluded).
 - **TLS construction** — cert chains, ALPN, and verification modes
-  that the current `taida-lang/net` facade covers only partially
-  (C26B-002, Must Fix, 3-backend).
+  that the current `taida-lang/net` facade covers. **3-backend
+  construction-matrix pin FIXED at Round 11 wι review
+  follow-up (2026-04-25)**: five new `test_net6_1c_c26b002_*`
+  cases in `tests/parity.rs` pin symmetric behaviour across
+  interpreter / JS / native for the missing-cert, key-only,
+  plaintext-fallback (`tls = @()`), invalid-PEM-content, and
+  unknown-protocol-token permutations. Live cert-rotation and
+  full ALPN negotiation remain runtime-dependent and are
+  observed through the C26B-005 soak runbook.
 - **Port-bind race eradication** — **FIXED (2026-04-24, C26 Phase 3)**.
   C26B-003 landed the root-cause fix for the H2 parity flaky-bind
   timeout inherited from C25B-002. 100 consecutive CI-equivalent
@@ -849,27 +856,32 @@ OPEN (owned by C26):
   Round 7 / wV-a; only the denormal rendering audit remains
   under this pin.
 
-### 5.6.1. `@c.26` GATE status (informational, review update)
+### 5.6.1. `@c.26` GATE status (informational, 2026-04-25 review)
 
-As of the 2026-04-25 review, the previous wθ **GATE-READY**
-claim is downgraded to **HOLD**. The review found source-of-truth
-drift and CI false-green holes. The CI holes are fixed under
-C26B-029, but the stable tag must wait for the OPEN / REOPEN items
-below.
+As of the 2026-04-25 review amendment, the previous wθ
+**GATE-READY** claim is downgraded to **HOLD**. The review
+surfaced four items (source-of-truth drift, CI false-green
+holes, the install-side half of SEC-011, and the 3-backend
+TLS construction pin); three are now FIXED under the review
+follow-up (C26B-002, C26B-029, C26B-030) and the last one
+(C26B-005 — the 24 h soak PASS record itself) is a
+user-action blocker.
 
 | Agent-side blocker | Status | Landing |
 | --- | --- | --- |
 | C26B-001 (h2 3-backend parity, 10-case pin) | FIXED | Round 1 + Round 2 + Round 3 / wE |
+| C26B-002 (full 3-backend TLS construction pin) | FIXED (review follow-up) | Round 11 wι (`test_net6_1c_c26b002_{1..5}_*`) |
 | C26B-003 (port-bind race eradication, Critical) | FIXED | C26 Phase 3 |
 | C26B-004 (perf-gate hard-fail) | FIXED after review hardening | Round 2 / wB + C26B-029 |
-| C26B-005 (soak runbook) | REOPEN: 24 h PASS evidence required | Round 2 / wA + review 2026-04-25 |
+| C26B-005 (soak runbook + 24 h PASS) | REOPEN: 24 h PASS evidence is a user action | Round 2 / wA runbook + Round 11 wι fast-soak proxy |
 | C26B-006 (retry-shim retirement) | FIXED | Round 4 / wJ |
-| C26B-007 (SEC-002..010 + SEC-011 Sigstore/SLSA) | PARTIAL: release signing exists; install-side verify tracked by C26B-030 | Round 2 / wB + Round 9 / wβ + review 2026-04-25 |
+| C26B-007 (SEC-002..010 + SEC-011 Sigstore/SLSA) | FIXED (release + install sides) | Round 2 / wB + Round 9 / wβ + Round 11 wι C26B-030 |
 | C26B-008 (GHSA advisory) | CLOSED (zero install base) | Round 8 / wX2 |
 | C26B-009 (parser FSM + arm-body throw) | FIXED | Round 1 |
 | C26B-010 (memory-leak CI gate) | FIXED | Round 4 / wM |
 | C26B-011 (float parity incl. signed-zero JS) | FIXED | Round 6 / wS + Round 7 / wV-a |
 | C26B-012 (BuchiPack Arc + terminal PENDING_BYTES) | FIXED in code; terminal publish remains user action | Round 6 / wQ + Round 11 wζ |
+| C26B-013 (rolling docs amendment) | FIXED (review follow-up) | Round 11 wθ + Round 11 wι |
 | C26B-014 (core-bundled import-less) | FIXED | Round 1 |
 | C26B-015 (path traversal) | FIXED | Round 1 |
 | C26B-016 (span-aware mold family + StrOf) | FIXED | Round 2 / wD + Round 3 / wH |
@@ -880,41 +892,46 @@ below.
 | C26B-021 (stdout line-buffer, Option B) | FIXED | Round 1 |
 | C26B-022 (HTTP wire byte ceilings, Step 3 Option B) | FIXED (interp-side h1/h2/h3) | Round 3 / wE + Round 4 / wJ |
 | C26B-023 (2-arg body docs-path) | FIXED (docs) | Round 3 / wH |
-| C26B-024 (Native clone-heavy + perf-router gate) | FIXED after review hardening | Round 8 / wT + Round 10 / wε + C26B-029 |
+| C26B-024 (Native clone-heavy + perf-router gate) | FIXED (Step 1–4 + review hardening) | Round 8 / wT + Round 10 / wε + Round 11 / wη + C26B-029 |
 | C26B-025 (publish self-identity) | FIXED | Round 1 |
 | C26B-026 (Native h2 HPACK custom headers) | FIXED | Round 2 / wC |
 | C26B-027 (doc_examples_parse regression) | FIXED | Round 9 / wα |
 | C26B-028 (release workflow symmetry + SEC-011 invariants) | FIXED | Round 9 / wβ |
 | C26B-029 (CI perf gate false-green hardening) | FIXED | Review 2026-04-25 |
-| C26B-030 (SEC-011 install-side verify wiring) | OPEN | Review 2026-04-25 |
+| C26B-030 (SEC-011 install-side verify wiring) | FIXED | Review 2026-04-25 (Round 11 wι) |
 
-Remaining OPEN / REOPEN items:
+Remaining OPEN / REOPEN items on the stable-gate checklist:
 
-- **C26B-002** — full 3-backend TLS construction pin is still
-  inconsistent across the progress files.
-- **C26B-005** — 24 h soak PASS evidence is required; runbook-only
-  is not enough for the original acceptance.
-- **C26B-013** — docs final amendment remains open because this
-  section, CHANGELOG, and C26 progress files still contain stale
-  Round 8-11 narratives.
-- **C26B-030** — SEC-011 install-side verify wiring gap.
+- **C26B-005** — 24 h soak PASS record is the last remaining
+  user action. `.dev/C26_SOAK_RUNBOOK.md` § 0.1 pins the
+  acceptance as user-owned; the fast-soak proxy
+  (`scripts/soak/fast-soak-proxy.sh`) provides a 30-min to
+  3-hour short run for iteration but does **not** close the
+  acceptance. A PASS record lands in `.dev/C26_PROGRESS.md`
+  Phase 5 session log when the user runs the full 24 h soak.
 - **C26B-012 terminal publish** — terminal submodule commit
-  `4692fd8` still needs upstream push / PR / release tag before
-  users can consume it.
-- Phase 14 GATE promotion itself — user-approved tag (`@c.26.rcM`
-  → `@c.26`). The agent does not cut either tag under any
-  condition.
-- Downstream `bonsai-wasm` Phase 6 acceptance smoke
-  (C26B-020 acceptance).
-- First signed official addon release (SEC-011 publish-side
-  signing + install-side verify both FIXED; the first signed
-  release itself is a user action).
+  `4692fd8` still needs upstream push / PR / release tag
+  before downstream users can pick up the FIFO fix.
+- **Phase 14 GATE promotion itself** — user-approved
+  `@c.26.rcM` → `@c.26` tag sequence. The agent does not
+  cut either tag under any condition.
+- **Downstream `bonsai-wasm` Phase 6 acceptance smoke**
+  (C26B-020 acceptance; user action).
+- **First signed official addon release** — SEC-011
+  publish-side signing + install-side verify both FIXED;
+  producing and tagging the first actually-signed release
+  is user action.
 
-This subsection is informational (as is the rest of §5.6) and
-is not part of the stable-surface contract. It will be removed
-once `@c.26` is tagged. D27 escalation checklist for wθ: 3/3 NO
-— docs-only amendment, no mold signature / pinned error string
-/ existing parity assertion touched.
+This subsection is informational (as is the rest of §5.6)
+and is not part of the stable-surface contract. It is
+removed once `@c.26` is tagged. D27 escalation checklist
+for the Round 11 wι review amendment: 3/3 NO — no public
+mold signature / pinned error string / existing parity
+assertion altered. The new `test_net6_1c_c26b002_*` cases
+are additive; the new `src/addon/signature_verify.rs`
+module is an install-time hook that fails closed only when
+the operator explicitly opts in with
+`TAIDA_VERIFY_SIGNATURES=required`.
 
 ---
 
