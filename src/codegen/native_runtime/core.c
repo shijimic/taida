@@ -207,6 +207,35 @@ typedef intptr_t  taida_fn_ptr;  // 関数ポインタ
     } while (!__atomic_compare_exchange_n(_hdr, &_old, _new, 0, __ATOMIC_ACQ_REL, __ATOMIC_RELAXED)); \
 } while (0)
 
+// C26B-024 (Round 8 / wT): thread-local 4-field Pack freelist infrastructure.
+// Hoisted here (above `taida_release` definition) so the release path can
+// consult the freelist before falling through to free(). The commentary and
+// rationale live alongside `taida_pack_new` in the BuchiPack runtime section
+// below. See the note there for invariants and semantics.
+#define TAIDA_PACK_FREELIST_MAX 32
+#define TAIDA_PACK_FC_FOR_FREELIST 4  // Lax / Result shape; 14 slots * 8B = 112B
+
+static __thread taida_val *taida_pack4_freelist[TAIDA_PACK_FREELIST_MAX];
+static __thread int taida_pack4_freelist_count = 0;
+
+// Pop a pre-allocated 4-field pack from the per-thread freelist.
+// Returns NULL if the freelist is empty — caller must fall back to malloc.
+static inline taida_val *taida_pack4_freelist_pop(void) {
+    if (taida_pack4_freelist_count == 0) return NULL;
+    return taida_pack4_freelist[--taida_pack4_freelist_count];
+}
+
+// Push a released 4-field pack onto the per-thread freelist.
+// Returns 1 if reused, 0 if the freelist is full (caller must free()).
+// The pack is expected to already be logically dead (refcount 0,
+// children released). We do NOT zero the slots here — taida_pack_new
+// re-initialises every slot on reuse.
+static inline int taida_pack4_freelist_push(taida_val *obj) {
+    if (taida_pack4_freelist_count >= TAIDA_PACK_FREELIST_MAX) return 0;
+    taida_pack4_freelist[taida_pack4_freelist_count++] = obj;
+    return 1;
+}
+
 extern taida_val _taida_main(void);
 static int taida_cli_argc = 0;
 static char **taida_cli_argv = NULL;
@@ -2137,6 +2166,15 @@ taida_val taida_release(taida_ptr ptr) {
                     }
                 }
             }
+            // C26B-024 (Round 8 / wT): try the 4-field pack freelist before
+            // falling back to free(). Keeps the Lax/Result hot path allocation-
+            // free on the fast case; bounded at TAIDA_PACK_FREELIST_MAX so
+            // runaway producers cannot bloat per-thread RSS.
+            if (TAIDA_IS_PACK(ptr) && obj[1] == TAIDA_PACK_FC_FOR_FREELIST) {
+                if (taida_pack4_freelist_push(obj)) {
+                    return 0;  // recycled — skip free()
+                }
+            }
             free(obj);
             return 0;
         }
@@ -2226,12 +2264,52 @@ static void taida_str_release(taida_val ptr) {
 // Pack layout (A-4b): [magic+rc, field_count, hash0, tag0, val0, hash1, tag1, val1, ...]
 // Stride = 3 per field: [hash, type_tag, value]
 
+// C26B-024 (Round 8 / wT): thread-local freelist for fixed-size packs.
+// The hottest path in the Native runtime is the Lax wrapper allocation
+// (`taida_lax_new` + `taida_lax_empty` — called on every `list.get(i)`,
+// every `.get(i) ]=> x`, and every `pack.field ]=> x`). Each Lax is a
+// 4-field pack (112 bytes: 2-slot header + 4*3 field slots * 8 bytes).
+// In bench_router.td @ N=1000 / M=5000 this dominates sys time (2m0s
+// of 2m31s wall = 80% sys). A bounded thread-local freelist lets the
+// hot loop reuse the same 32 buffers, converting malloc/free churn
+// into a stack pop/push.
+//
+// Invariants preserved:
+//   - All freelist entries have refcount 0 (already released).
+//   - Field count slots are re-initialised on every pack_new path, so
+//     reused buffers cannot leak stale children from a previous lease.
+//   - Bounded (max 32 per thread) — capped memory footprint.
+//   - Thread-local (__thread) — no atomic / lock overhead on the hot
+//     path. Each pthread worker (e.g. Async executor) owns its own
+//     freelist; cross-thread release falls through to free() which
+//     is correct semantics just without the reuse win.
+//
+// (Macros + static-storage definitions have been hoisted to the early
+// "Magic Numbers" section so `taida_release` at the top of this file
+// can consult the freelist before falling through to free().)
+
 taida_ptr taida_pack_new(taida_val field_count) {
     // M-01: Guard against negative field_count (taida_val is int64_t) and
     // overflow in the size calculation (2 + field_count * 3) * sizeof(taida_val).
     if (field_count < 0) {
         fprintf(stderr, "taida: invalid field_count %" PRId64 " in taida_pack_new\n", (int64_t)field_count);
         exit(1);
+    }
+    // C26B-024 fast path: try the 4-field thread-local freelist before
+    // hitting malloc. Lax / Result / Gorillax short-form all use 4 fields,
+    // so this path covers the majority of hot-loop pack allocations.
+    if (field_count == TAIDA_PACK_FC_FOR_FREELIST) {
+        taida_val *cached = taida_pack4_freelist_pop();
+        if (cached) {
+            cached[0] = TAIDA_PACK_MAGIC | 1;  // magic + refcount = 1
+            cached[1] = field_count;
+            for (taida_val i = 0; i < field_count; i++) {
+                cached[2 + i * 3] = 0;     // hash
+                cached[2 + i * 3 + 1] = 0; // tag = INT (default)
+                cached[2 + i * 3 + 2] = 0; // value
+            }
+            return (taida_ptr)cached;
+        }
     }
     size_t fc = (size_t)field_count;
     size_t slots = taida_safe_add(2, taida_safe_mul(fc, 3, "pack_new fields"), "pack_new header");

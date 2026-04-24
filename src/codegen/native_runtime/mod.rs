@@ -408,7 +408,20 @@ mod tests {
         //            signbit(a) != 0, matching Rust f64::Display +
         //            interpreter `format!("{:.1}", -0.0)` output)
         // New total: 992,085 + 1,904 + 511 = 994,500.
-        const EXPECTED_TOTAL_LEN: usize = 994_500;
+        //
+        // Round 8 (wT, 2026-04-24) adds:
+        //   +4,098 (C26B-024 core.c: thread-local 4-field Pack freelist +
+        //            freelist-routed release path for Lax / Result /
+        //            Gorillax short-form pack allocations. Converts the
+        //            Lax malloc/free churn in the bench_router.td hot
+        //            loop into a stack pop/push. Bounded at 32 entries /
+        //            thread, fields re-initialised on reuse so no stale
+        //            child leak. Definitions hoisted to the Magic-Numbers
+        //            section so `taida_release` (earlier in the file) can
+        //            consult the freelist before free(). See
+        //            `taida_pack4_freelist_{pop,push}`.)
+        // New total: 994,500 + 4,098 = 998,598.
+        const EXPECTED_TOTAL_LEN: usize = 998_598;
         let asm = *NATIVE_RUNTIME_C;
         assert_eq!(
             asm.len(),
@@ -753,11 +766,19 @@ mod tests {
         // line ~4007 — well before the "Error ceiling" marker — so F1
         // absorbs the full delta. F2 unchanged.
         // F1_LEN moves: 247,269 + 511 = 247,780.
-        const F1_LEN: usize = 247_780;
+        // C26B-024 (@c.26, wT Round 8, 2026-04-24): F1 absorbs +4,098
+        // bytes for the thread-local 4-field Pack freelist. The helpers
+        // (`taida_pack4_freelist_{pop,push}`) + macros are hoisted to
+        // the Magic-Numbers section so `taida_release` can consult them;
+        // the fast-path branches in `taida_pack_new` / `taida_release`
+        // and the rationale comment also live in F1 — well before the
+        // "Error ceiling" marker. F2 unchanged.
+        // F1_LEN moves: 247,780 + 4,098 = 251,878.
+        const F1_LEN: usize = 251_878;
         assert_eq!(
             CORE_SECTION.len(),
-            247_780 + 160_352,
-            "core.c total byte length must equal legacy fragment1 + fragment2 (C25B-001 / C25B-028 / C25B-025 / C26B-011 / C26B-020 / C26B-016 / C26B-018 / C26B-011-wS adjusted)"
+            251_878 + 160_352,
+            "core.c total byte length must equal legacy fragment1 + fragment2 (C25B-001 / C25B-028 / C25B-025 / C26B-011 / C26B-020 / C26B-016 / C26B-018 / C26B-011-wS / C26B-024 adjusted)"
         );
         const F2_PREFIX: &[u8] = b"// \xE2\x94\x80\xE2\x94\x80 Error ceiling";
         let tail = &CORE_SECTION.as_bytes()[F1_LEN..F1_LEN + F2_PREFIX.len()];
