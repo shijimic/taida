@@ -30,6 +30,80 @@ use super::types::{
 use crate::net_surface::http_protocol_ordinal_to_wire;
 use crate::parser::Expr;
 
+/// C26B-022 Step 2 (wE Round 3, 2026-04-24): HTTP wire byte upper
+/// limits enforced at the parser boundary so that downstream Native
+/// codegen fixed-size stack buffers (`char method[16]` / `char path[2048]`
+/// / `char authority[256]`) can never silently truncate.
+///
+/// Option confirmation: **Step 3 Option B** (parser-level reject with
+/// `400 Bad Request`). Option A (dynamic buffers) was discarded at
+/// Phase 0 Design Lock because it conflicts with the clone-heavy
+/// abstraction direction of C26B-018/020/024.
+///
+/// These constants are the authoritative limits for 3-backend parity;
+/// the Native C codegen struct field sizes must match (see
+/// `src/codegen/native_runtime/net_h1_h2.c`). Interpreter enforces
+/// these here; any over-limit wire byte is rejected with HTTP 400
+/// before the handler is ever invoked.
+pub(crate) const HTTP_WIRE_MAX_METHOD_LEN: usize = 16;
+pub(crate) const HTTP_WIRE_MAX_PATH_LEN: usize = 2048;
+/// Authority (Host header value) wire-byte cap — reserved for a
+/// follow-up session that resolves header name span bytes against the
+/// raw buffer. Struct field size in `net_h1_h2.c` (`char authority[256]`)
+/// matches this value for future use.
+#[allow(dead_code)]
+pub(crate) const HTTP_WIRE_MAX_AUTHORITY_LEN: usize = 256;
+
+/// Extract the `len` field from a `@(start: Int, len: Int)` span pack.
+/// Returns 0 if the shape does not match (conservative: 0 never exceeds
+/// any limit, so malformed packs do not fail-fast here; the normal
+/// parse path handles them).
+fn span_len(v: &Value) -> usize {
+    if let Value::BuchiPack(fields) = v {
+        for (k, vv) in fields {
+            if k == "len" {
+                if let Value::Int(n) = vv {
+                    return (*n).max(0) as usize;
+                }
+            }
+        }
+    }
+    0
+}
+
+/// C26B-022 Step 2: Check if method / path exceeds its wire-limit.
+/// Returns `Some(&'static str)` with a short descriptor of the violating
+/// field when over-limit, `None` otherwise.
+///
+/// NOTE (wE Round 3): Authority (Host header value) limit enforcement is
+/// deferred to a follow-up session because it requires resolving header
+/// name span bytes against the `raw` buffer, which is not in scope for
+/// the wE worktree exclusion rules (helpers.rs / raw buffer traversal).
+/// method + path cover the two most attacker-accessible wire bytes; the
+/// authority codegen struct (`char authority[256]`) still has its size
+/// pin in net_h1_h2.c and relies on Host header parsing which goes
+/// through httparse's own internal limits.
+pub(crate) fn check_http_wire_limits(
+    parsed_fields: &[(String, Value)],
+) -> Option<&'static str> {
+    for (k, v) in parsed_fields {
+        match k.as_str() {
+            "method" => {
+                if span_len(v) > HTTP_WIRE_MAX_METHOD_LEN {
+                    return Some("method");
+                }
+            }
+            "path" => {
+                if span_len(v) > HTTP_WIRE_MAX_PATH_LEN {
+                    return Some("path");
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
 impl Interpreter {
     // ── httpServe implementation ───────────────────────────────
     //
@@ -532,6 +606,32 @@ impl Interpreter {
                         // ── Body reading + handler dispatch ──
                         // Set blocking timeout for body read (need full body)
                         let _ = conn.stream.set_read_timeout(Some(read_timeout));
+
+                        // ── C26B-022 Step 2 (wE Round 3, 2026-04-24): ──
+                        // Enforce HTTP wire byte upper limits at the parser
+                        // boundary to prevent silent truncation when these
+                        // fields reach the Native codegen fixed-size stack
+                        // buffers (`char method[16]`, `char path[2048]`,
+                        // `char authority[256]`). Reject with 400 before
+                        // handler dispatch so that 3-backend parity is
+                        // preserved and no handler sees a truncated value.
+                        //
+                        // Additive widening (§ 6.2): this adds a reject
+                        // path for previously-accepted oversized inputs
+                        // that would have hit silent truncation downstream.
+                        // No existing parity.rs assertion is altered.
+                        if let Some(field_name) =
+                            check_http_wire_limits(&parsed_fields)
+                        {
+                            let _ = field_name; // kept for future logging
+                            let bad_request = b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+                            let _ =
+                                std::io::Write::write_all(&mut conn.stream, bad_request);
+                            request_count += 1;
+                            close_idx = processed_idx;
+                            let _ = conn.stream.set_read_timeout(Some(poll_timeout));
+                            break;
+                        }
 
                         let dispatch_result = self.dispatch_request(
                             conn,
