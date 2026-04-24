@@ -5252,7 +5252,6 @@ taida_val taida_value_hash(taida_val val) {
 static int taida_hashmap_key_eq(taida_val key_a, taida_val key_b) {
     if (key_a == key_b) return 1;
     // For string comparison, ensure both are valid pointers
-    // cppcheck-suppress knownConditionTrueFalse
     if (!taida_hashmap_key_valid(key_a) || !taida_hashmap_key_valid(key_b)) return 0;
 
     const char *sa = (const char*)key_a;
@@ -5368,7 +5367,6 @@ static taida_val taida_hashmap_resize(taida_val hm_ptr, taida_val new_cap) {
 }
 
 taida_val taida_hashmap_set(taida_val hm_ptr, taida_val key_hash, taida_val key_ptr, taida_val value) {
-    // cppcheck-suppress knownConditionTrueFalse
     if (!taida_hashmap_key_valid(key_ptr)) {
         return hm_ptr;
     }
@@ -5443,7 +5441,6 @@ taida_val taida_hashmap_set(taida_val hm_ptr, taida_val key_hash, taida_val key_
 }
 
 taida_val taida_hashmap_get(taida_val hm_ptr, taida_val key_hash, taida_val key_ptr) {
-    // cppcheck-suppress knownConditionTrueFalse
     if (!taida_hashmap_key_valid(key_ptr)) return 0;
 
     taida_val *hm = (taida_val*)hm_ptr;
@@ -5462,7 +5459,6 @@ taida_val taida_hashmap_get(taida_val hm_ptr, taida_val key_hash, taida_val key_
 }
 
 taida_val taida_hashmap_has(taida_val hm_ptr, taida_val key_hash, taida_val key_ptr) {
-    // cppcheck-suppress knownConditionTrueFalse
     if (!taida_hashmap_key_valid(key_ptr)) return 0;
 
     taida_val *hm = (taida_val*)hm_ptr;
@@ -5481,7 +5477,6 @@ taida_val taida_hashmap_has(taida_val hm_ptr, taida_val key_hash, taida_val key_
 }
 
 taida_val taida_hashmap_remove(taida_val hm_ptr, taida_val key_hash, taida_val key_ptr) {
-    // cppcheck-suppress knownConditionTrueFalse
     if (!taida_hashmap_key_valid(key_ptr)) return hm_ptr;
 
     taida_val *hm = (taida_val*)hm_ptr;
@@ -5621,7 +5616,6 @@ taida_val taida_hashmap_remove_immut(taida_val hm_ptr, taida_val key_hash, taida
 
 // Get returning Lax (Lax[value]() or empty Lax)
 taida_val taida_hashmap_get_lax(taida_val hm_ptr, taida_val key_hash, taida_val key_ptr) {
-    // cppcheck-suppress knownConditionTrueFalse
     if (!taida_hashmap_key_valid(key_ptr)) return taida_lax_empty(0);
 
     taida_val *hm = (taida_val*)hm_ptr;
