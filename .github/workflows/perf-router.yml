@@ -1,0 +1,163 @@
+name: Perf Router
+
+# C26B-024 Step 1 perf regression gate (@c.26, wη Round 11, 2026-04-24).
+#
+# Guards the `Native real / JS real <= 3.0×` and `Native sys / real <= 0.40`
+# invariants for the full router bench fixture
+# (`examples/quality/c26_native_router_bench/router.td`). These thresholds
+# are CI-2C-adjusted versions of the wε Round 10 Step 4 acceptance bars
+# (2.0× and 0.30) — see `.github/workflows/perf-router-baseline.md` for the
+# derivation.
+#
+# Gate state machine (mirrors C26B-004 bench.yml but with tighter sample
+# count because the router fixture is a single-process E2E measurement,
+# not a criterion micro-bench):
+#   - `pull_request`: reads the baseline, runs the gate. While
+#     `state.sample_count < 5`, violations are WARN-only. Once >= 5,
+#     they hard-fail.
+#   - `push` to main: same gate + baseline update (sample_count++, EWMA
+#     the medians). Commits the updated JSON back to main.
+#   - `schedule` / `workflow_dispatch`: gate-only, no baseline update.
+#
+# Scope isolation: this workflow owns
+# `.github/workflows/perf-router.yml`,
+# `.github/workflows/perf-router-baseline.md`,
+# `.github/bench-baselines/perf_router.json`, and
+# `scripts/bench/perf_router_gate.py`. It never writes to
+# `perf_baseline.json` (owned by `bench.yml` / C26B-004) or touches the
+# NET throughput benches.
+#
+# D27 escalation checklist (all NO):
+#   - surface change?           NO (adds a workflow + gated test)
+#   - error string change?      NO (new emit lines, no existing errors touched)
+#   - existing assertion edit?  NO (parity tests and bench.yml untouched)
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main, develop, feat/c26]
+  schedule:
+    # Weekly Sunday 06:00 UTC — catches slow drift without adding to the
+    # nightly bench.yml cron.
+    - cron: "0 6 * * 0"
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-D warnings"
+
+concurrency:
+  group: perf-router-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  perf-router:
+    name: Router perf gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: cargo-base
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "22"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Build taida CLI (release)
+        # The gate uses `--target native` which shells out to `cc`. We
+        # build `taida` in release mode so the build phase of the
+        # measurement itself is not pathologically slow.
+        run: cargo build --release --bin taida
+
+      - name: Run perf-router gate (measurement)
+        id: measure
+        env:
+          TAIDA_PERF_ROUTER_ENABLED: "1"
+          TAIDA_PERF_ROUTER_RUNS: "3"
+          # STRICT is deliberately unset — the in-test gate emits WARN:
+          # lines but does not fail. The Python gate below is the
+          # authoritative decision point, because it also accounts for
+          # the sample_count warm-up phase.
+          TAIDA_BIN: ${{ github.workspace }}/target/release/taida
+        run: |
+          set -euo pipefail
+          # Run only the perf-gate test; --ignored picks it up, --exact
+          # prevents partial-name matches, --nocapture surfaces the
+          # PERF_ROUTER_* emit lines into the log.
+          cargo test --release --test c26b_024_router_bench_parity \
+              -- --ignored --exact --nocapture \
+              c26b_024_router_perf_gate \
+              2>&1 | tee cargo-test-perf-router.log
+
+      - name: Apply perf-router gate (baseline compare)
+        id: gate
+        run: |
+          python3 scripts/bench/perf_router_gate.py \
+              --test-log cargo-test-perf-router.log \
+              --baseline .github/bench-baselines/perf_router.json
+
+      - name: Upload perf-router log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: perf-router-${{ github.sha }}
+          path: |
+            cargo-test-perf-router.log
+          if-no-files-found: warn
+          retention-days: 30
+
+  # Baseline update job — runs only on main push. Accumulates
+  # sample_count and EWMA-updates medians in perf_router.json, then
+  # commits the change back to main. PRs skip this job entirely.
+  update-baseline:
+    name: Update perf-router baseline (main only)
+    runs-on: ubuntu-latest
+    needs: perf-router
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Download perf-router log
+        uses: actions/download-artifact@v4
+        with:
+          name: perf-router-${{ github.sha }}
+          path: perf-artifacts
+      - name: Update baseline JSON
+        run: |
+          python3 scripts/bench/perf_router_gate.py \
+              --test-log perf-artifacts/cargo-test-perf-router.log \
+              --baseline .github/bench-baselines/perf_router.json \
+              --update-baseline \
+              --sha "${{ github.sha }}"
+      - name: Commit baseline update
+        run: |
+          set -euo pipefail
+          if git diff --quiet .github/bench-baselines/perf_router.json; then
+              echo "perf-router baseline unchanged; nothing to commit"
+              exit 0
+          fi
+          git config user.name  "taida-bench-bot"
+          git config user.email "taida-bench-bot@users.noreply.github.com"
+          git add .github/bench-baselines/perf_router.json
+          git commit -m "chore(bench): C26B-024 Step 1 update perf-router baseline (auto)
+
+sha: ${{ github.sha }}
+workflow: ${{ github.workflow }}
+run: ${{ github.run_id }}"
+          git push origin HEAD:main

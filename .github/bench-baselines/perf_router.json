@@ -1,0 +1,40 @@
+{
+  "schema_version": 1,
+  "description": "C26B-024 Step 1 (wη Round 11) perf regression gate baseline. Pins the Native/JS real-time ratio and the Native sys/real ratio for the router bench fixture (examples/quality/c26_native_router_bench/router.td). Intended target = wε Round 10 acceptance (Native/JS <= 2.0, sys/real <= 0.30 on local 16T). The CI 2C thresholds include headroom for noise + reduced parallelism; see .github/workflows/perf-router-baseline.md for the derivation.",
+  "owner": "C26 Phase 10 (C26B-024 Step 1)",
+  "last_updated": "2026-04-24",
+  "min_samples_required": 5,
+  "sampling_policy": "The first min_samples_required successful runs on main push accumulate into sample_count. While sample_count < min_samples_required, threshold violations are WARN-only (no hard-fail). Once sample_count >= min_samples_required, violations hard-fail the job. Manual override: set `strict: true` to force hard-fail immediately; set `strict: false` to keep WARN-only regardless of sample_count.",
+  "target_env": "GitHub Actions ubuntu-latest 2-vCPU runner (CI 2C)",
+  "local_reference_env": "Linux x86_64, gcc, 16T (wε Round 10 measurement)",
+  "fixture": "examples/quality/c26_native_router_bench/router.td",
+  "fixture_scale": "N=50 + N=200 routes, M=500 iter, 6 scenarios (best/worst/miss × 2 sizes)",
+  "thresholds": {
+    "native_js_ratio_max": {
+      "value": 3.0,
+      "local_reference": 2.0,
+      "headroom_multiplier": 1.5,
+      "rationale": "wε Round 10 local 16T measured Native/JS = 2.0 (acceptance bar). CI 2C has less parallelism, more malloc contention on a shared glibc arena, and node startup variance; 1.5× headroom keeps the gate informative without false positives. If 5+ CI samples land consistently below 2.5, tighten to 2.5."
+    },
+    "sys_real_ratio_max": {
+      "value": 0.40,
+      "local_reference": 0.09,
+      "headroom_multiplier": 4.4,
+      "rationale": "wε Round 10 local 16T measured sys/real = 0.09. CI kernels have higher syscall overhead + runner-level tracing, and shorter absolute wall times make sys/real noisier. The published C26B-024 Step 4 acceptance bar is 0.30 (30%); 0.40 gives 1.33× headroom above that so the gate catches regressions approaching 50% (the prior wT Round 8 waypoint) while tolerating CI noise."
+    }
+  },
+  "state": {
+    "sample_count": 0,
+    "median_native_js_ratio": 0.0,
+    "median_native_sys_ratio": 0.0,
+    "last_run_sha": null,
+    "last_run_at": null,
+    "strict": null,
+    "notes": [
+      "Populated by the perf-router.yml workflow on successful runs.",
+      "strict=null means: enforce once sample_count >= min_samples_required.",
+      "Set strict=true to force hard-fail before sample accumulation.",
+      "Set strict=false to keep WARN-only even after the threshold."
+    ]
+  }
+}
