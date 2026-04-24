@@ -502,6 +502,95 @@ impl Lowering {
                 ));
                 Ok(result)
             }
+            // ── C26B-018 (B) byte-level primitives ──────────────────
+            "ByteAt" => {
+                if type_args.len() < 2 {
+                    return Err(LowerError {
+                        message: "ByteAt requires 2 arguments: ByteAt[str, idx]()".into(),
+                    });
+                }
+                let s = self.lower_expr(func, &type_args[0])?;
+                let idx = self.lower_expr(func, &type_args[1])?;
+                let raw = func.alloc_var();
+                func.push(IrInst::Call(
+                    raw,
+                    "taida_str_byte_at".to_string(),
+                    vec![s, idx],
+                ));
+                // ByteAt returns Lax[Int] (has_value=false → default 0).
+                let default_val = func.alloc_var();
+                func.push(IrInst::ConstInt(default_val, 0));
+                // Sentinel: taida_str_byte_at returns -1 for OOB; we
+                // encode "hasValue" at the runtime layer (see
+                // taida_str_byte_at_lax helper below in core.c).
+                let result = func.alloc_var();
+                func.push(IrInst::Call(
+                    result,
+                    "taida_str_byte_at_lax".to_string(),
+                    vec![s, idx, default_val],
+                ));
+                // raw is unused on this path (dead-store elimination
+                // keeps it out of the final codegen); we compute it only
+                // to keep the variable-slot alloc pattern consistent
+                // with other byte-level molds in case future Int-tag
+                // projection wants a non-Lax fast path.
+                let _ = raw;
+                Ok(result)
+            }
+            "ByteSlice" => {
+                if type_args.len() < 3 {
+                    return Err(LowerError {
+                        message:
+                            "ByteSlice requires 3 arguments: ByteSlice[str, start, end]()"
+                                .into(),
+                    });
+                }
+                let s = self.lower_expr(func, &type_args[0])?;
+                let start = self.lower_expr(func, &type_args[1])?;
+                let end = self.lower_expr(func, &type_args[2])?;
+                let result = func.alloc_var();
+                func.push(IrInst::Call(
+                    result,
+                    "taida_str_byte_slice".to_string(),
+                    vec![s, start, end],
+                ));
+                Ok(result)
+            }
+            "ByteLength" => {
+                if type_args.is_empty() {
+                    return Err(LowerError {
+                        message: "ByteLength requires 1 argument: ByteLength[str]()".into(),
+                    });
+                }
+                let s = self.lower_expr(func, &type_args[0])?;
+                let result = func.alloc_var();
+                func.push(IrInst::Call(
+                    result,
+                    "taida_str_byte_length".to_string(),
+                    vec![s],
+                ));
+                Ok(result)
+            }
+            // ── C26B-018 (C) StringRepeatJoin ───────────────────────
+            "StringRepeatJoin" => {
+                if type_args.len() < 3 {
+                    return Err(LowerError {
+                        message:
+                            "StringRepeatJoin requires 3 arguments: StringRepeatJoin[str, n, sep]()"
+                                .into(),
+                    });
+                }
+                let s = self.lower_expr(func, &type_args[0])?;
+                let n = self.lower_expr(func, &type_args[1])?;
+                let sep = self.lower_expr(func, &type_args[2])?;
+                let result = func.alloc_var();
+                func.push(IrInst::Call(
+                    result,
+                    "taida_str_repeat_join".to_string(),
+                    vec![s, n, sep],
+                ));
+                Ok(result)
+            }
             "Reverse" => {
                 // Polymorphic: works on both Str and List
                 // In native backend, we use taida_str_reverse for strings

@@ -534,6 +534,213 @@ impl Interpreter {
                 };
                 Ok(Some(Signal::Value(Value::Str(s.repeat(n)))))
             }
+            // ── C26B-018 (B) byte-level primitives (UTF-8 byte view) ──
+            // These operate on the raw UTF-8 byte stream (not Unicode
+            // scalar values). They give O(1) / O(len) predictable
+            // complexity for hot-path parsers where the caller already
+            // knows they are dealing with ASCII or byte-boundary-safe
+            // offsets. Added as a pure additive mold (§ 6.2 widening) —
+            // existing `CharAt` / `Slice` / `.length()` semantics are
+            // **unchanged** (still Unicode-scalar for surface safety).
+            "ByteAt" => {
+                if type_args.len() < 2 {
+                    return Err(RuntimeError {
+                        message: "ByteAt requires 2 arguments: ByteAt[str, idx]()".into(),
+                    });
+                }
+                let s = match self.eval_expr(&type_args[0])? {
+                    Signal::Value(Value::Str(s)) => s,
+                    Signal::Value(v) => {
+                        return Err(RuntimeError {
+                            message: format!("ByteAt: first argument must be a string, got {}", v),
+                        });
+                    }
+                    other => return Ok(Some(other)),
+                };
+                let idx = match self.eval_expr(&type_args[1])? {
+                    Signal::Value(Value::Int(n)) => n,
+                    Signal::Value(v) => {
+                        return Err(RuntimeError {
+                            message: format!(
+                                "ByteAt: second argument must be an integer, got {}",
+                                v
+                            ),
+                        });
+                    }
+                    other => return Ok(Some(other)),
+                };
+                let bytes = s.as_bytes();
+                if idx < 0 || (idx as usize) >= bytes.len() {
+                    Ok(Some(Signal::Value(make_lax_value(
+                        false,
+                        Value::Int(0),
+                        Value::Int(0),
+                    ))))
+                } else {
+                    let b = bytes[idx as usize] as i64;
+                    Ok(Some(Signal::Value(make_lax_value(
+                        true,
+                        Value::Int(b),
+                        Value::Int(0),
+                    ))))
+                }
+            }
+            "ByteSlice" => {
+                if type_args.len() < 3 {
+                    return Err(RuntimeError {
+                        message:
+                            "ByteSlice requires 3 arguments: ByteSlice[str, start, end]()"
+                                .into(),
+                    });
+                }
+                let s = match self.eval_expr(&type_args[0])? {
+                    Signal::Value(Value::Str(s)) => s,
+                    Signal::Value(v) => {
+                        return Err(RuntimeError {
+                            message: format!(
+                                "ByteSlice: first argument must be a string, got {}",
+                                v
+                            ),
+                        });
+                    }
+                    other => return Ok(Some(other)),
+                };
+                let start = match self.eval_expr(&type_args[1])? {
+                    Signal::Value(Value::Int(n)) => n,
+                    Signal::Value(v) => {
+                        return Err(RuntimeError {
+                            message: format!(
+                                "ByteSlice: second argument must be an integer, got {}",
+                                v
+                            ),
+                        });
+                    }
+                    other => return Ok(Some(other)),
+                };
+                let end = match self.eval_expr(&type_args[2])? {
+                    Signal::Value(Value::Int(n)) => n,
+                    Signal::Value(v) => {
+                        return Err(RuntimeError {
+                            message: format!(
+                                "ByteSlice: third argument must be an integer, got {}",
+                                v
+                            ),
+                        });
+                    }
+                    other => return Ok(Some(other)),
+                };
+                let bytes = s.as_bytes();
+                let len = bytes.len() as i64;
+                let s_i = start.clamp(0, len) as usize;
+                let e_i = end.clamp(0, len) as usize;
+                let (lo, hi) = if s_i <= e_i { (s_i, e_i) } else { (e_i, s_i) };
+                // Preserve exact bytes; if the slice lands on a UTF-8
+                // boundary mid-sequence, we fall back to a lossless
+                // String::from_utf8_lossy → owned. This matches "return
+                // what was there" semantics; callers who need scalar
+                // safety should use Slice (not ByteSlice).
+                let slice = &bytes[lo..hi];
+                let out = match std::str::from_utf8(slice) {
+                    Ok(v) => v.to_string(),
+                    Err(_) => String::from_utf8_lossy(slice).into_owned(),
+                };
+                Ok(Some(Signal::Value(Value::Str(out))))
+            }
+            "ByteLength" => {
+                if type_args.is_empty() {
+                    return Err(RuntimeError {
+                        message: "ByteLength requires 1 argument: ByteLength[str]()".into(),
+                    });
+                }
+                let s = match self.eval_expr(&type_args[0])? {
+                    Signal::Value(Value::Str(s)) => s,
+                    Signal::Value(v) => {
+                        return Err(RuntimeError {
+                            message: format!(
+                                "ByteLength: argument must be a string, got {}",
+                                v
+                            ),
+                        });
+                    }
+                    other => return Ok(Some(other)),
+                };
+                Ok(Some(Signal::Value(Value::Int(s.len() as i64))))
+            }
+            // ── C26B-018 (C) StringRepeatJoin ─────────────────────────
+            // Single-allocation repeat + join primitive. Surface-level
+            // equivalent of `Join[Array(str; n), sep]()` but computes
+            // total length up front and allocates once, avoiding the
+            // O(N²) reallocation cascade in chained `+` concat idioms
+            // observed in terminal / hachikuma tui primitives.
+            //
+            // `StringRepeatJoin[str, n, sep]() -> Str`
+            //   n <= 0      → ""
+            //   n == 1      → str (sep never emitted)
+            //   n >= 2      → str + sep + str + sep + ... + str (n copies, n-1 seps)
+            "StringRepeatJoin" => {
+                if type_args.len() < 3 {
+                    return Err(RuntimeError {
+                        message:
+                            "StringRepeatJoin requires 3 arguments: StringRepeatJoin[str, n, sep]()"
+                                .into(),
+                    });
+                }
+                let s = match self.eval_expr(&type_args[0])? {
+                    Signal::Value(Value::Str(s)) => s,
+                    Signal::Value(v) => {
+                        return Err(RuntimeError {
+                            message: format!(
+                                "StringRepeatJoin: first argument must be a string, got {}",
+                                v
+                            ),
+                        });
+                    }
+                    other => return Ok(Some(other)),
+                };
+                let n = match self.eval_expr(&type_args[1])? {
+                    Signal::Value(Value::Int(n)) => n,
+                    Signal::Value(v) => {
+                        return Err(RuntimeError {
+                            message: format!(
+                                "StringRepeatJoin: second argument must be an integer, got {}",
+                                v
+                            ),
+                        });
+                    }
+                    other => return Ok(Some(other)),
+                };
+                let sep = match self.eval_expr(&type_args[2])? {
+                    Signal::Value(Value::Str(s)) => s,
+                    Signal::Value(v) => {
+                        return Err(RuntimeError {
+                            message: format!(
+                                "StringRepeatJoin: third argument must be a string, got {}",
+                                v
+                            ),
+                        });
+                    }
+                    other => return Ok(Some(other)),
+                };
+                if n <= 0 {
+                    return Ok(Some(Signal::Value(Value::Str(String::new()))));
+                }
+                let n = n as usize;
+                if n == 1 {
+                    return Ok(Some(Signal::Value(Value::Str(s))));
+                }
+                // Pre-compute the total length to allocate once.
+                let total = s
+                    .len()
+                    .saturating_mul(n)
+                    .saturating_add(sep.len().saturating_mul(n - 1));
+                let mut out = String::with_capacity(total);
+                out.push_str(&s);
+                for _ in 1..n {
+                    out.push_str(&sep);
+                    out.push_str(&s);
+                }
+                Ok(Some(Signal::Value(Value::Str(out))))
+            }
             "Reverse" => {
                 // Polymorphic: works on both Str and List
                 if type_args.is_empty() {

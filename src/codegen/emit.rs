@@ -443,6 +443,27 @@ fn runtime_abi(name: &str) -> Result<RuntimeAbi, String> {
             params: &[Ptr, Val],
             returns: &[Ptr],
         },
+        // C26B-018 (B)(C): byte-level primitives + single-alloc repeat/join.
+        "taida_str_byte_at" => RuntimeAbi {
+            params: &[Ptr, Val],
+            returns: &[Val],
+        },
+        "taida_str_byte_at_lax" => RuntimeAbi {
+            params: &[Ptr, Val, Val],
+            returns: &[Ptr],
+        },
+        "taida_str_byte_slice" => RuntimeAbi {
+            params: &[Ptr, Val, Val],
+            returns: &[Ptr],
+        },
+        "taida_str_byte_length" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Val],
+        },
+        "taida_str_repeat_join" => RuntimeAbi {
+            params: &[Ptr, Val, Ptr],
+            returns: &[Ptr],
+        },
         "taida_str_reverse" => RuntimeAbi {
             params: &[Ptr],
             returns: &[Ptr],

@@ -396,8 +396,10 @@ mod tests {
         //   +  839 (C26B-021 net_h3_quic.c)
         //   +5,339 (C26B-016 core.c F1 span mold helpers)
         //   +  617 (C26B-026 net_h1_h2.c HPACK fix)
-        // New total: 976,168 + 12,764 = 988,932.
-        const EXPECTED_TOTAL_LEN: usize = 988_932;
+        //   +3,153 (C26B-018 (B)(C) core.c F1 byte-level primitives
+        //            + StringRepeatJoin: forward decls + 5 fn impls)
+        // New total: 976,168 + 12,764 + 3,153 = 992,085.
+        const EXPECTED_TOTAL_LEN: usize = 992_085;
         let asm = *NATIVE_RUNTIME_C;
         assert_eq!(
             asm.len(),
@@ -727,11 +729,20 @@ mod tests {
         // `SpanSlice`). All added immediately before the "Error ceiling"
         // marker so F1 absorbs the full delta. F2 unchanged.
         // F1_LEN moves: 238,777 + 5,339 = 244,116.
-        const F1_LEN: usize = 244_116;
+        // C26B-018 (B)(C) (@c.26, wK Round 4): F1 absorbs +3,261 bytes
+        // for the byte-level primitives (`taida_str_byte_at`,
+        // `taida_str_byte_at_lax`, `taida_str_byte_slice`,
+        // `taida_str_byte_length`) and `taida_str_repeat_join` plus
+        // their 5 forward declarations. Functions were inserted
+        // immediately after `taida_str_repeat` — well before the
+        // "Error ceiling" marker — so F1 absorbs the full delta. F2
+        // unchanged.
+        // F1_LEN moves: 244,116 + 3,153 = 247,269.
+        const F1_LEN: usize = 247_269;
         assert_eq!(
             CORE_SECTION.len(),
-            244_116 + 160_352,
-            "core.c total byte length must equal legacy fragment1 + fragment2 (C25B-001 / C25B-028 / C25B-025 / C26B-011 / C26B-020 / C26B-016 adjusted)"
+            247_269 + 160_352,
+            "core.c total byte length must equal legacy fragment1 + fragment2 (C25B-001 / C25B-028 / C25B-025 / C26B-011 / C26B-020 / C26B-016 / C26B-018 adjusted)"
         );
         const F2_PREFIX: &[u8] = b"// \xE2\x94\x80\xE2\x94\x80 Error ceiling";
         let tail = &CORE_SECTION.as_bytes()[F1_LEN..F1_LEN + F2_PREFIX.len()];

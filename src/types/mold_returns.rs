@@ -139,6 +139,14 @@ pub fn lookup_mold_return_kind(name: &str) -> Option<MoldReturnKind> {
         // C26B-016 (@c.26, Option B+): `StrOf[span, raw]()` materializes a
         // span pack into an owned `Str` (cold-path counterpart to SpanEquals).
         "StrOf" => Str,
+        // C26B-018 (B)(C): byte-level primitive + single-alloc repeat/join.
+        // `ByteSlice` / `StringRepeatJoin` return bare Str (fast-path, no Lax
+        // wrapper — OOB cases produce empty Str rather than Lax(missing) for
+        // hot-loop friendliness). `ByteLength` returns bare Int.
+        "ByteSlice" | "StringRepeatJoin" => Str,
+        "ByteLength" => Int,
+        // `ByteAt` returns `Lax[Int]` (Pack at runtime).
+        "ByteAt" => Pack,
         // CharAt returns `Lax[Str]` at the checker level (Pack at
         // runtime because Lax is a Pack). Treat as Pack for tag purposes.
         "CharAt" => Pack,
@@ -209,6 +217,9 @@ mod tests {
             "Join",
             "ToFixed",
             "ToRadix",
+            // C26B-018 (B)(C): byte-level slice + single-alloc repeat/join.
+            "ByteSlice",
+            "StringRepeatJoin",
         ] {
             assert_eq!(mold_return_tag(name), Some(3), "{name} should be Str (3)");
         }
@@ -262,6 +273,8 @@ mod tests {
             "BitOr",
             "BitXor",
             "BitNot",
+            // C26B-018 (B): `ByteLength` returns bare Int (bytes in UTF-8 encoding).
+            "ByteLength",
         ] {
             assert_eq!(mold_return_tag(name), Some(0), "{name} should be Int (0)");
         }
@@ -337,6 +350,8 @@ mod tests {
             "ShiftL",
             "ShiftR",
             "ByteSet",
+            // C26B-018 (B): `ByteAt` returns Lax[Int] (Pack at runtime).
+            "ByteAt",
         ] {
             assert_eq!(mold_return_tag(name), Some(4), "{name} should be Pack (4)");
         }

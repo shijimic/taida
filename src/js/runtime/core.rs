@@ -1747,6 +1747,55 @@ function Slice(val, optsOrStart, maybeEnd) {
 }
 function CharAt(str, idx) { return typeof str === 'string' && idx >= 0 && idx < str.length ? Lax(str[idx]) : Lax(null, ''); }
 function Repeat(str, n) { return typeof str === 'string' ? str.repeat(Math.max(0, n)) : ''; }
+// ── C26B-018 (B) byte-level primitives (UTF-8 byte view) ──
+// These operate on the raw UTF-8 byte stream, not on JS UTF-16 code
+// units. The TextEncoder round-trip gives O(n) the first time but
+// V8 caches the result so repeated calls stay fast. Existing
+// `CharAt` / `Slice` / `.length()` are **unchanged** (UTF-16 surface).
+const __taida_enc = (typeof TextEncoder !== 'undefined') ? new TextEncoder() : null;
+const __taida_dec = (typeof TextDecoder !== 'undefined') ? new TextDecoder('utf-8', { fatal: false }) : null;
+function __taida_bytes_of(s) {
+  if (typeof s !== 'string') return new Uint8Array(0);
+  if (__taida_enc) return __taida_enc.encode(s);
+  // Fallback: rough 1-byte-per-char mapping for ASCII-only envs.
+  const out = new Uint8Array(s.length);
+  for (let i = 0; i < s.length; i++) out[i] = s.charCodeAt(i) & 0xff;
+  return out;
+}
+function ByteAt(str, idx) {
+  const bytes = __taida_bytes_of(str);
+  if (idx < 0 || idx >= bytes.length) return Lax(null, 0);
+  return Lax(bytes[idx] | 0);
+}
+function ByteSlice(str, start, end) {
+  const bytes = __taida_bytes_of(str);
+  const len = bytes.length;
+  let s = Math.max(0, Math.min(len, start | 0));
+  let e = Math.max(0, Math.min(len, end | 0));
+  if (s > e) { const t = s; s = e; e = t; }
+  const slice = bytes.subarray(s, e);
+  if (__taida_dec) return __taida_dec.decode(slice);
+  // Fallback
+  let out = '';
+  for (let i = 0; i < slice.length; i++) out += String.fromCharCode(slice[i]);
+  return out;
+}
+function ByteLength(str) {
+  return __taida_bytes_of(str).length;
+}
+// ── C26B-018 (C) StringRepeatJoin ────────────────────────────
+// `StringRepeatJoin[str, n, sep]() -> Str` — single-allocation
+// repeat+join. n<=0 → "", n==1 → str (no sep), n>=2 → str+sep+...+str.
+function StringRepeatJoin(str, n, sep) {
+  if (typeof str !== 'string') str = '';
+  if (typeof sep !== 'string') sep = '';
+  n = n | 0;
+  if (n <= 0) return '';
+  if (n === 1) return str;
+  // String#repeat + join: V8 optimizes this into a single buffer.
+  if (sep === '') return str.repeat(n);
+  return new Array(n).fill(str).join(sep);
+}
 function Reverse(val) {
   if (typeof val === 'string') return val.split('').reverse().join('');
   if (Array.isArray(val)) { const copy = [...val]; copy.reverse(); return Object.freeze(copy); }

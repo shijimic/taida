@@ -460,6 +460,12 @@ taida_val taida_codepoint_mold_str(taida_val value);
 taida_val taida_utf8_encode_mold(taida_val value);
 taida_val taida_utf8_decode_mold(taida_val value);
 taida_val taida_slice_mold(taida_val value, taida_val start, taida_val end);
+// C26B-018 (B)(C): byte-level primitives + single-alloc repeat/join.
+taida_val taida_str_byte_at(const char* s, taida_val idx);
+taida_ptr taida_str_byte_at_lax(const char* s, taida_val idx, taida_val default_value);
+taida_val taida_str_byte_slice(const char* s, taida_val start, taida_val end);
+taida_val taida_str_byte_length(const char* s);
+taida_val taida_str_repeat_join(const char* s, taida_val n, const char* sep);
 // NB-14: Call-site arg tag propagation (Bool/Int disambiguation)
 void taida_push_call_tags(void);
 void taida_pop_call_tags(void);
@@ -3104,6 +3110,74 @@ taida_val taida_str_repeat(const char* s, taida_val n) {
     char *r = taida_str_alloc(total);
     for (taida_val i = 0; i < n; i++) {
         memcpy(r + i * slen, s, slen);
+    }
+    return (taida_val)r;
+}
+
+// ── C26B-018 (B) byte-level primitives ──────────────────────────
+// These operate on the raw UTF-8 byte stream. They are additive
+// molds (§ 6.2 widening); existing CharAt/Slice/Length semantics
+// are unchanged.
+taida_val taida_str_byte_at(const char* s, taida_val idx) {
+    if (!s) return -1;
+    taida_val len = (taida_val)strlen(s);
+    if (idx < 0 || idx >= len) return -1;
+    return (taida_val)(unsigned char)s[idx];
+}
+taida_ptr taida_str_byte_at_lax(const char* s, taida_val idx, taida_val default_value) {
+    if (!s) return taida_lax_empty(default_value);
+    taida_val len = (taida_val)strlen(s);
+    if (idx < 0 || idx >= len) {
+        return taida_lax_empty(default_value);
+    }
+    taida_val b = (taida_val)(unsigned char)s[idx];
+    return taida_lax_new(b, default_value);
+}
+taida_val taida_str_byte_slice(const char* s, taida_val start, taida_val end) {
+    if (!s) { char *r = taida_str_alloc(0); return (taida_val)r; }
+    taida_val len = (taida_val)strlen(s);
+    if (start < 0) start = 0;
+    if (start > len) start = len;
+    if (end < 0) end = 0;
+    if (end > len) end = len;
+    if (end < start) { taida_val t = start; start = end; end = t; }
+    taida_val slen = end - start;
+    char *r = taida_str_alloc(slen);
+    memcpy(r, s + start, slen);
+    return (taida_val)r;
+}
+taida_val taida_str_byte_length(const char* s) {
+    if (!s) return 0;
+    return (taida_val)strlen(s);
+}
+// ── C26B-018 (C) StringRepeatJoin ───────────────────────────────
+// Single-allocation repeat + join. Computes total length up front
+// and allocates once.
+taida_val taida_str_repeat_join(const char* s, taida_val n, const char* sep) {
+    if (n <= 0) { char *r = taida_str_alloc(0); return (taida_val)r; }
+    if (!s) s = "";
+    if (!sep) sep = "";
+    taida_val slen = (taida_val)strlen(s);
+    taida_val seplen = (taida_val)strlen(sep);
+    if (n == 1) {
+        char *r = taida_str_alloc(slen);
+        memcpy(r, s, slen);
+        return (taida_val)r;
+    }
+    // Overflow check: total = slen*n + seplen*(n-1)
+    if (slen > 0 && n > (taida_val)(((size_t)-1) / 4) / slen) {
+        char *r = taida_str_alloc(0); return (taida_val)r;
+    }
+    if (seplen > 0 && (n - 1) > (taida_val)(((size_t)-1) / 4) / seplen) {
+        char *r = taida_str_alloc(0); return (taida_val)r;
+    }
+    taida_val total = slen * n + seplen * (n - 1);
+    char *r = taida_str_alloc(total);
+    char *dst = r;
+    memcpy(dst, s, slen); dst += slen;
+    for (taida_val i = 1; i < n; i++) {
+        memcpy(dst, sep, seplen); dst += seplen;
+        memcpy(dst, s, slen); dst += slen;
     }
     return (taida_val)r;
 }

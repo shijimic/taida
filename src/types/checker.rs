@@ -4402,6 +4402,10 @@ defaulted fields must be provided via `()`",
                     // fires regardless of expression context.
                     "TypeExtends" => Type::Bool,
                     "Upper" | "Lower" | "Trim" | "Replace" | "Repeat" | "Pad" => Type::Str,
+                    // C26B-018 (B)(C): byte-level primitive + single-alloc repeat/join
+                    "ByteSlice" | "StringRepeatJoin" => Type::Str,
+                    "ByteLength" => Type::Int,
+                    "ByteAt" => Type::Generic("Lax".into(), vec![Type::Int]),
                     "CharAt" => Type::Generic("Lax".into(), vec![Type::Str]),
                     "Slice" => {
                         if let Some(first_arg) = type_args.first() {
