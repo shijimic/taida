@@ -328,7 +328,7 @@ impl Interpreter {
             message: format!("{}: missing bytes argument", func_name),
         })?;
         match self.eval_expr(arg)? {
-            Signal::Value(Value::Bytes(b)) => Ok(b),
+            Signal::Value(Value::Bytes(b)) => Ok(Value::bytes_take(b)),
             Signal::Value(Value::Str(s)) => Ok(s.into_bytes()),
             Signal::Value(v) => Err(RuntimeError {
                 message: format!("{}: argument must be Bytes or Str, got {}", func_name, v),

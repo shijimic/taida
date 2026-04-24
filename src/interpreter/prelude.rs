@@ -100,7 +100,7 @@ impl Interpreter {
                 other => return Ok(Some(other)),
             };
             let bytes: Vec<u8> = match val {
-                Value::Bytes(b) => b,
+                Value::Bytes(b) => Value::bytes_take(b),
                 Value::Str(s) => s.into_bytes(),
                 other => other.to_display_string().into_bytes(),
             };

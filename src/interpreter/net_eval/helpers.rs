@@ -819,7 +819,7 @@ pub(crate) fn encode_response(response: &Value) -> Value {
         buf.extend_from_slice(&body_bytes);
     }
 
-    let result = Value::BuchiPack(vec![("bytes".into(), Value::Bytes(buf))]);
+    let result = Value::BuchiPack(vec![("bytes".into(), Value::bytes(buf))]);
     make_result_success(result)
 }
 
@@ -975,8 +975,8 @@ pub(crate) fn extract_response_fields(response: &Value) -> Result<ResponseFields
     // memory; the 2-arg streaming path avoids this clone by writing chunks directly.
     // A future `Value::into_bytes()` consuming method could eliminate this clone, but
     // would require changes to the Value type across the codebase.
-    let body_bytes = match fields.iter().find(|(k, _)| k == "body") {
-        Some((_, Value::Bytes(b))) => b.clone(),
+    let body_bytes: Vec<u8> = match fields.iter().find(|(k, _)| k == "body") {
+        Some((_, Value::Bytes(b))) => (**b).clone(),
         Some((_, Value::Str(s))) => s.as_bytes().to_vec(),
         Some((_, v)) => {
             return Err(format!(
@@ -1096,10 +1096,10 @@ pub(crate) fn eval_read_body(req: &Value) -> Result<Value, RuntimeError> {
 
     // Return body slice as Bytes
     if body_len == 0 {
-        Ok(Value::Bytes(vec![]))
+        Ok(Value::bytes(vec![]))
     } else {
         let end = body_start.saturating_add(body_len).min(raw.len());
         let start = body_start.min(end);
-        Ok(Value::Bytes(raw[start..end].to_vec()))
+        Ok(Value::bytes(raw[start..end].to_vec()))
     }
 }

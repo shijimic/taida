@@ -17,7 +17,7 @@ impl Interpreter {
             Value::Int(_) => Value::Int(0),
             Value::Float(_) => Value::Float(0.0),
             Value::Str(_) => Value::Str(String::new()),
-            Value::Bytes(_) => Value::Bytes(Vec::new()),
+            Value::Bytes(_) => Value::bytes(Vec::new()),
             Value::Bool(_) => Value::Bool(false),
             Value::List(_) => Value::list(Vec::new()),
             Value::BuchiPack(_) => Value::BuchiPack(Vec::new()),

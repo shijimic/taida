@@ -536,7 +536,7 @@ impl Interpreter {
                             .unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned());
                         ("text", Value::Str(text))
                     } else {
-                        ("binary", Value::Bytes(payload))
+                        ("binary", Value::bytes(payload))
                     };
                     let inner = Value::BuchiPack(vec![
                         ("type".into(), Value::Str(type_str.into())),

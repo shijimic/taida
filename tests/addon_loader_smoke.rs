@@ -30,7 +30,7 @@ use std::path::PathBuf;
 
 use taida::addon::abi_crate as taida_addon;
 use taida::addon::call::AddonCallError;
-use taida::addon::loader::{AddonLoadError, load_addon};
+use taida::addon::loader::{load_addon, AddonLoadError};
 use taida::addon::{TAIDA_ADDON_ABI_VERSION, TAIDA_ADDON_ENTRY_SYMBOL};
 use taida::interpreter::value::Value;
 
@@ -229,10 +229,10 @@ fn echo_round_trips_bytes() {
     };
     let input = vec![0x00u8, 0x01, 0xff, 0x7f, 0x42];
     let result = addon
-        .call_function("echo", &[Value::Bytes(input.clone())])
+        .call_function("echo", &[Value::bytes(input.clone())])
         .expect("echo(Bytes) must succeed");
     match result {
-        Value::Bytes(b) => assert_eq!(b, input),
+        Value::Bytes(b) => assert_eq!(&**b, &input),
         other => panic!("expected Bytes, got {other:?}"),
     }
 }

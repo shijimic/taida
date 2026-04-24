@@ -1,6 +1,6 @@
 #[cfg(test)]
 mod tests {
-    use crate::interpreter::eval::{Interpreter, eval};
+    use crate::interpreter::eval::{eval, Interpreter};
     use crate::interpreter::value::Value;
 
     fn eval_ok(source: &str) -> Value {
@@ -1067,7 +1067,7 @@ result <= numbers.get(10).unmold()
                 );
                 assert_eq!(
                     fields.iter().find(|(k, _)| k == "__value").unwrap().1,
-                    Value::Bytes(vec![65, 66])
+                    Value::bytes(vec![65, 66])
                 );
             }
             _ => panic!("expected Lax pack"),
