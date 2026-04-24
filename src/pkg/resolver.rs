@@ -859,7 +859,46 @@ fn try_fetch_prebuild(
     };
 
     match fetch_result {
-        Ok(path) => Ok((path, expected_sha256)),
+        Ok(path) => {
+            // C26B-030 / SEC-011: run cosign bundle verification after
+            // the SHA-256 check succeeds. Policy is resolved per-URL so
+            // non-official mirrors stay `Disabled` by default, first-
+            // party github.com/taida-lang/* URLs get `BestEffort`, and
+            // anyone who wants hard-fail coverage sets
+            // `TAIDA_VERIFY_SIGNATURES=required`. Integrity is already
+            // proven against the manifest SHA-256 at this point —
+            // cosign adds the supply-chain identity proof on top.
+            use crate::addon::signature_verify::{
+                VerifyError, VerifyOutcome, VerifyPolicy, verify_artifact,
+            };
+            let policy = VerifyPolicy::resolve(&url);
+            match verify_artifact(&path, &url, policy) {
+                Ok(VerifyOutcome::Verified) => {
+                    eprintln!("  SEC-011 verify: OK ({})", pkg.name);
+                }
+                Ok(VerifyOutcome::Warned(reason)) => {
+                    eprintln!("  SEC-011 verify: WARN ({}): {reason}", pkg.name);
+                }
+                Ok(VerifyOutcome::Skipped) => {
+                    // Silent by design — non-official URLs and explicit
+                    // `TAIDA_VERIFY_SIGNATURES=0` both resolve here.
+                }
+                Err(VerifyError::SignatureRejected { stderr }) => {
+                    return Err(PrebuildFailure::IntegrityMismatch(format!(
+                        "SEC-011 signature verification rejected '{}': {}",
+                        pkg.name,
+                        stderr.trim()
+                    )));
+                }
+                Err(e) => {
+                    return Err(PrebuildFailure::IntegrityMismatch(format!(
+                        "SEC-011 signature verification failed for '{}': {e}",
+                        pkg.name
+                    )));
+                }
+            }
+            Ok((path, expected_sha256))
+        }
         Err(FetchError::IntegrityMismatch { expected, actual }) => {
             Err(PrebuildFailure::IntegrityMismatch(format!(
                 "addon integrity check failed for '{}'\n\

@@ -10,7 +10,7 @@ Release automation for the Taida main repository. Invoked by
 | `secret-scan.sh` | Pre-release gate: scans the working tree for secrets. Invoked from the release gate job. |
 | `package-unix.sh` | Packages the Unix release tarball (`taida-<tag>-<triple>.tar.gz`). |
 | `package-windows.ps1` | Packages the Windows release ZIP (`taida-<tag>-<triple>.zip`). |
-| `verify-signatures.sh` | **(C26B-007 Sub-phase 7.4 / SEC-011)** verifies a downloaded release artefact against its Sigstore cosign bundle. Consumed by `install.sh` and `taida install`. |
+| `verify-signatures.sh` | **(C26B-007 Sub-phase 7.4 / SEC-011)** verifies a downloaded release artefact against its Sigstore cosign bundle. Consumed by `install.sh` (the root-level public installer, which inlines the same cosign invocation so the `curl \| bash` flow stays self-contained) and by `taida install` (through `src/addon/signature_verify.rs` — C26B-030). Both callers default to the `best-effort` policy with `TAIDA_VERIFY_SIGNATURES=required` to fail closed. |
 
 ## SEC-011 — Sigstore + SLSA (C26B-007 Sub-phase 7.4)
 
