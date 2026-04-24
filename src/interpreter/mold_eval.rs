@@ -2730,6 +2730,55 @@ impl Interpreter {
                 };
                 Ok(Some(Signal::Value(Value::Bool(result))))
             }
+            // ── C26B-016 (@c.26, Option B+): StrOf mold ──
+            // `StrOf[span, raw]() -> Str` — cold-path materialization of a
+            // span pack into an owned `Str`. Unlike `SpanEquals` / `SpanStartsWith`
+            // (zero-copy hot-path comparisons), `StrOf` allocates a new Str and
+            // is intended for logging / JSON parsing / anywhere the user needs
+            // an owned string copy.
+            //
+            // Invalid UTF-8 span / OOB span → empty `Str` (tolerant semantics,
+            // consistent with Span* family). This differs from `Utf8Decode`
+            // which returns `Lax[Str]` — `StrOf` returns `Str` directly for
+            // convenience in cold-path use (see `docs/reference/net_api.md §4.1`).
+            //
+            // Native backend does not yet wire a dedicated runtime helper
+            // (`taida_net_StrOf`); users on native should use the equivalent
+            // `Utf8Decode[Slice[raw, span.start, span.start + span.len]]().getOrDefault("")`
+            // composition. Tracked in `.dev/C26_BLOCKERS.md::C26B-016 native strOf`.
+            "StrOf" => {
+                if type_args.len() < 2 {
+                    return Err(RuntimeError {
+                        message: "StrOf requires 2 arguments: StrOf[span, raw]()"
+                            .into(),
+                    });
+                }
+                let span = match self.eval_expr(&type_args[0])? {
+                    Signal::Value(v) => v,
+                    other => return Ok(Some(other)),
+                };
+                let raw = match self.eval_expr(&type_args[1])? {
+                    Signal::Value(v) => v,
+                    other => return Ok(Some(other)),
+                };
+                let result = match (extract_span_pack(&span), raw_as_bytes(&raw)) {
+                    (Some((start, len)), Some(bytes)) => {
+                        let end = start.saturating_add(len);
+                        if end <= bytes.len() {
+                            // Valid span range: try UTF-8 decode. Invalid UTF-8
+                            // falls back to empty string (tolerant).
+                            std::str::from_utf8(&bytes[start..end])
+                                .map(|s| s.to_string())
+                                .unwrap_or_default()
+                        } else {
+                            String::new()
+                        }
+                    }
+                    _ => String::new(),
+                };
+                Ok(Some(Signal::Value(Value::Str(result))))
+            }
+
             "SpanSlice" => {
                 if type_args.len() < 4 {
                     return Err(RuntimeError {

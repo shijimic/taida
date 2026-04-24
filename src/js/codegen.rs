@@ -184,6 +184,7 @@ const PRELUDE_RESERVED_IDENTS: &[&str] = &[
     "StreamFrom",
     "Stream_mold",
     "Str_mold",
+    "StrOf",
     "Sum",
     "Take",
     "TakeWhile",
@@ -3725,18 +3726,22 @@ impl JsCodegen {
                 // SpanEquals / SpanStartsWith / SpanContains / SpanSlice — accept a
                 // span pack `@(start, len)` + raw (Bytes/Str) + needle, dispatch to
                 // the JS runtime helpers defined in `src/js/runtime/core.rs`.
+                // `StrOf[span, raw]()` is the cold-path counterpart (2-arg,
+                // returns Str via UTF-8 decode).
                 if name == "SpanEquals"
                     || name == "SpanStartsWith"
                     || name == "SpanContains"
                     || name == "SpanSlice"
+                    || name == "StrOf"
                 {
-                    let required_arity = if name == "SpanSlice" { 4 } else { 3 };
+                    let required_arity = match name.as_str() {
+                        "SpanSlice" => 4,
+                        "StrOf" => 2,
+                        _ => 3,
+                    };
                     if type_args.len() < required_arity {
                         return Err(JsError {
-                            message: format!(
-                                "{} requires {} arguments",
-                                name, required_arity
-                            ),
+                            message: format!("{} requires {} arguments", name, required_arity),
                         });
                     }
                     self.write(&format!("__taida_net_{}(", name));

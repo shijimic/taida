@@ -45,7 +45,13 @@ handler req: BuchiPack writer: BuchiPack = ... => :Unit
 
 `writer` pack は下記 `writer.write(bytes)` / `writer.end()` などを持つ streaming API。Interpreter / Native で **`src/interpreter/net_eval/h1.rs:840`** の経路を通ります。
 
-> **Known issue (C26B-023, Must Fix)**: 2-arg form で handler 内から `req.body` を直接参照すると span の `len` が 0 になる edge case あり。body を読む場合は `readBody(req)` / `readBodyChunk(req)` / `readBodyAll(req)` を使うこと。現状は diagnostic 無しで silent breakage になるため C26 で runtime warning 追加予定 (`diagnostic_codes.md` の新 E1xxx を C26B-023 FIXED 時に pin)。
+> **Important — 2-arg handler body handling (C26B-023)**: 2-arg form で handler 内から `req.body` を直接参照すると span の `len` が 0 になります (streaming 前提で body は eagerly 読まれない仕様)。**body を読む場合は必ず `readBody(req)` / `readBodyChunk(req)` / `readBodyAll(req)` のいずれかを使用**してください:
+>
+> - `readBody(req)` — 1-arg / 2-arg 両対応。2-arg では `readBodyAll` と同等 (stream を全読)。
+> - `readBodyChunk(req)` — 2-arg 専用。chunk 単位で `Lax[Bytes]` を返す。残り chunk が無い場合 `Lax` の `hasValue = false`。
+> - `readBodyAll(req)` — 2-arg 専用。body を最後まで読んで `Bytes` を返す。
+>
+> 1-arg handler での `Slice[req.raw, req.body.start, req.body.start + req.body.len]` パスを 2-arg にそのまま持ち込むと **silent に空 Bytes が返る**ため注意。Phase 4 (1-arg) → Phase 5 (2-arg + streaming) の移行で最頻発するハマりどころです。詳細は §3.2 / §8 を参照。
 
 ---
 
@@ -96,13 +102,25 @@ handler req: BuchiPack writer: BuchiPack = ... => :Unit
 
 以下の public mold を `taida-lang/net` から公開します。3-backend (Interpreter / JS / Native) で parity 保証。
 
-### 4.1 `strOf(span, raw) -> Str`
+### 4.1 `StrOf[span, raw]() -> Str`
 
 ```
-m <= strOf(req.method, req.raw)      // "GET"
+m <= StrOf[req.method, req.raw]()     // "GET"
 ```
 
-span を明示的に `Str` に変換します。`Str[req.raw](start <= req.method.start, end <= req.method.start + req.method.len)` の糖衣で、**new allocation を発生させる cold path 用**。
+span を明示的に `Str` に変換します (PascalCase mold form、Span* family と統一)。**new allocation を発生させる cold path 用**で、ログ出力 / デバッグ / JSON parse 前の materialize に使用します。
+
+- hot path (request ごとの router match 等) では `SpanEquals` / `SpanStartsWith` を使い、materialization を避けてください。
+- invalid UTF-8 span / OOB span は **empty `Str`** を返します (tolerant semantics、`Utf8Decode` の Lax と違い直接 Str を返す。cold-path 簡便さを優先)。
+
+等価な既存構文:
+
+```
+// 下記も動作 (char-based Slice、cold path の alternative):
+m <= Slice[req.raw](start <= req.method.start, end <= req.method.start + req.method.len)
+```
+
+> **C26 Round 3 (wH) land scope**: Interpreter / JS / Native 3-backend に `StrOf` mold として land (2026-04-24)。Native 実装は `taida_pack_get` + `taida_slice_mold` + `taida_utf8_decode_mold` + `taida_lax_get_or_default` の IR composition (`src/codegen/lower_molds.rs::StrOf`) で、新 C runtime helper 追加なしに実現 (core.c / net_h1_h2.c 不変)。`tests/c26b_016_strof_parity.rs` で 3-backend parity pin。既存の `Str[raw](start, end)` 形式は alternative として継続 support。
 
 ### 4.2 `SpanEquals[span, raw, needle: Str]() -> Bool`
 
@@ -190,7 +208,71 @@ WASM バックエンドは gen-C では rejected、D27 送り (`docs/STABILITY.m
 
 ---
 
-## 8. References
+## 8. 2-arg handler body handling patterns (C26B-023)
+
+### 8.1 Correct pattern — `readBody` (recommended default)
+
+```taida
+>>> taida-lang/net => @(httpServe, readBody, startResponse, endResponse)
+
+handler req writer =
+  body <= readBody(req)                 // OK (1-arg / 2-arg 両対応)
+  // body is `Bytes`; decode to Str if needed
+  bodyStr <= Utf8Decode[body]().getOrDefault("")
+  startResponse(writer, 200, @[@(name <= "content-type", value <= "text/plain")])
+  endResponse(writer, bodyStr)
+=> :Unit
+```
+
+### 8.2 Anti-pattern — direct `req.body` span slice (silent breakage)
+
+```taida
+// NG — 2-arg form では空 Bytes を返す
+handler req writer =
+  bodyBytes <= Slice[req.raw, req.body.start, req.body.start + req.body.len]
+  // bodyBytes は len=0 の空 Bytes になる (silent breakage)
+  ...
+=> :Unit
+```
+
+この anti-pattern は 1-arg handler で正しく動くため、1-arg → 2-arg 移行時に気づかず残る。**diagnostic (runtime warning) 追加は C26B-023 FIXED 時に `diagnostic_codes.md` に新 E1xxx として pin 予定**。
+
+### 8.3 Streaming chunk pattern — `readBodyChunk`
+
+大きな body を chunk ごとに処理する場合は `readBodyChunk`:
+
+```taida
+handler req writer =
+  // chunk ごとに Lax[Bytes] を返す。hasValue=false で終端
+  chunk1 <= readBodyChunk(req)
+  chunk1 |
+    @(hasValue <= true) <= processChunk(chunk1.value)
+    _ <= stdout("EOF")
+  ...
+=> :Unit
+```
+
+### 8.4 Why 2-arg `req.body` span is intentionally empty
+
+2-arg handler は streaming 前提で設計されており、handler 呼び出し時点で body を eagerly 読まない (socket に残したまま)。そのため `req.body` pack は `@(start: bodyOffset, len: 0)` で差し込まれます (1-arg form の `body span = buffered body` とは別 shape)。
+
+`__body_stream` sentinel が内部的に pack に入っており、`readBody*` 系はこの sentinel を検出して socket から直接読み出します。**user 側からこの sentinel を直接触る必要はありません** — `readBody*` のいずれかを呼べば透過的に動作します。
+
+### 8.5 Implementation references
+
+- Interpreter: `src/interpreter/net_eval/mod.rs:118-227` (`readBody` / `readBodyChunk` / `readBodyAll` の 1-arg / 2-arg 分岐)
+- `__body_stream` sentinel: `src/interpreter/net_eval/helpers.rs::is_body_stream_request`
+- Native: `src/codegen/native_runtime/net_h1_h2.c:721-750` (`taida_net_read_body`)
+- JS: `src/js/runtime/net.rs::__taida_net_readBody` (v4: 2-arg body-deferred で `readBodyAll` alias)
+
+### 8.6 3-backend parity tests
+
+- 新規 `tests/c26b_023_two_arg_handler_body.rs` (C26B-023 で land、本 docs と一貫性 pin)
+- 既存 `tests/parity.rs::parity_http_read_body_*` (Content-Length / empty / chunked の readBody 経路)
+
+---
+
+## 9. References
 
 - `docs/STABILITY.md` §2.2 / §5.1 — surface 保証範囲と NET stable viewpoint
 - `.dev/C26_BLOCKERS.md` — 開発中 blocker の live worklist
