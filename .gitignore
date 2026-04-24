@@ -52,5 +52,10 @@ tests/fixtures/*/.taida/
 .dev/
 .taida-test-temp-e2e/
 
+# C26B-005 fast-soak proxy regenerates this fixture on each run
+# (scripts/soak/fast-soak-proxy.sh). Keep it out of tracking so the
+# checked-in copy cannot drift from the proxy heredoc.
+/examples/quality/c26_soak_fixture/
+
 # C12-8 (FB-24): per-test tempdirs rooted at CWD via `tempfile::Builder::tempdir_in(".")`
 taida-fetcher-*/
