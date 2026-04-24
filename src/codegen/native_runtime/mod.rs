@@ -398,8 +398,17 @@ mod tests {
         //   +  617 (C26B-026 net_h1_h2.c HPACK fix)
         //   +3,153 (C26B-018 (B)(C) core.c F1 byte-level primitives
         //            + StringRepeatJoin: forward decls + 5 fn impls)
-        // New total: 976,168 + 12,764 + 3,153 = 992,085.
-        const EXPECTED_TOTAL_LEN: usize = 992_085;
+        // Round 6 (wS, 2026-04-24) adds:
+        //   +1,904 (C26B-022 Step 2 net_h1_h2.c: method 16 / path 2048 /
+        //            Host-value 256 wire-byte reject in
+        //            taida_net_http_parse_request_head; 400 Bad Request
+        //            parity with Interpreter h1 parser)
+        //   +  511 (C26B-011 core.c: signed-zero branch in
+        //            taida_float_to_str — emits "-0.0" when
+        //            signbit(a) != 0, matching Rust f64::Display +
+        //            interpreter `format!("{:.1}", -0.0)` output)
+        // New total: 992,085 + 1,904 + 511 = 994,500.
+        const EXPECTED_TOTAL_LEN: usize = 994_500;
         let asm = *NATIVE_RUNTIME_C;
         assert_eq!(
             asm.len(),
@@ -738,11 +747,17 @@ mod tests {
         // "Error ceiling" marker — so F1 absorbs the full delta. F2
         // unchanged.
         // F1_LEN moves: 244,116 + 3,153 = 247,269.
-        const F1_LEN: usize = 247_269;
+        // C26B-011 (@c.26, wS Round 6, 2026-04-24): F1 absorbs +511 bytes
+        // for the signed-zero branch in `taida_float_to_str` (emits
+        // "-0.0" when signbit(a) != 0). `taida_float_to_str` sits at
+        // line ~4007 — well before the "Error ceiling" marker — so F1
+        // absorbs the full delta. F2 unchanged.
+        // F1_LEN moves: 247,269 + 511 = 247,780.
+        const F1_LEN: usize = 247_780;
         assert_eq!(
             CORE_SECTION.len(),
-            247_269 + 160_352,
-            "core.c total byte length must equal legacy fragment1 + fragment2 (C25B-001 / C25B-028 / C25B-025 / C26B-011 / C26B-020 / C26B-016 / C26B-018 adjusted)"
+            247_780 + 160_352,
+            "core.c total byte length must equal legacy fragment1 + fragment2 (C25B-001 / C25B-028 / C25B-025 / C26B-011 / C26B-020 / C26B-016 / C26B-018 / C26B-011-wS adjusted)"
         );
         const F2_PREFIX: &[u8] = b"// \xE2\x94\x80\xE2\x94\x80 Error ceiling";
         let tail = &CORE_SECTION.as_bytes()[F1_LEN..F1_LEN + F2_PREFIX.len()];
@@ -763,11 +778,18 @@ mod tests {
         // `h2_extract_response_fields` (Lax unwrap via raw `hlist[4+j]`
         // + header_cap raised to H2_MAX_HEADERS). F5_LEN unchanged;
         // fragment 6 baseline moves from 91,152 to 91,769.
-        const F5_LEN: usize = 184_963;
+        // C26B-022 Step 2 (@c.26, wS Round 6, 2026-04-24): fragment 5
+        // (HTTP/1 parser + worker) absorbs +1,904 bytes for the
+        // parser-level wire-byte reject in
+        // `taida_net_http_parse_request_head` (method 16 / path 2048 /
+        // Host-value 256). Inserted entirely before the "// ── Native
+        // HTTP/2 server" divider, so F5 grows and F6 is unchanged.
+        // F5_LEN moves: 184,963 + 1,904 = 186,867.
+        const F5_LEN: usize = 186_867;
         assert_eq!(
             NET_H1_H2_SECTION.len(),
-            184_963 + 91_769,
-            "net_h1_h2.c total byte length must equal legacy fragment5 + fragment6"
+            186_867 + 91_769,
+            "net_h1_h2.c total byte length must equal legacy fragment5 + fragment6 (C26B-026 / C26B-022-wS adjusted)"
         );
         const F6_PREFIX: &[u8] = b"// \xE2\x94\x80\xE2\x94\x80 Native HTTP/2 server";
         let tail = &NET_H1_H2_SECTION.as_bytes()[F5_LEN..F5_LEN + F6_PREFIX.len()];

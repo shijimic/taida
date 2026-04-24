@@ -4018,7 +4018,16 @@ taida_val taida_float_to_str(double a) {
     char tmp[64];
     if (isnan(a)) { snprintf(tmp, sizeof(tmp), "NaN"); }
     else if (isinf(a)) { snprintf(tmp, sizeof(tmp), a < 0 ? "-inf" : "inf"); }
-    else if (a == 0.0) { snprintf(tmp, sizeof(tmp), "0.0"); }
+    else if (a == 0.0) {
+        // C26B-011 (wS Round 6, 2026-04-24): signed-zero parity. Rust
+        // f64::Display emits "-0" for a `-0.0`, and Taida's interpreter
+        // applies `format!("{:.1}", n)` because `(-0.0).floor() == -0.0`
+        // and `(-0.0).is_finite()` — yielding "-0.0". Previously Native
+        // ignored sign because `a == 0.0` matches both ±0.0. Use
+        // `signbit(a)` to distinguish the two IEEE-754 zeros and match
+        // interpreter output byte-for-byte.
+        snprintf(tmp, sizeof(tmp), signbit(a) ? "-0.0" : "0.0");
+    }
     else if (a == floor(a) && fabs(a) < 1e16) {
         // Integer-valued float in the exact range — always "X.0".
         snprintf(tmp, sizeof(tmp), "%.1f", a);

@@ -238,6 +238,18 @@ taida_val taida_net_http_parse_request_head(taida_val input) {
     int method_start_idx = 0;
     int method_len = method_end;
 
+    // C26B-022 Step 2 (wS Round 6, 2026-04-24): HTTP wire byte upper
+    // limits must be enforced at the Native parser boundary so that the
+    // fixed-size struct fields downstream (`char method[16]` in
+    // net_h1_h2.c H2RequestFields and net_h3_quic.c H3RequestFields)
+    // cannot silently truncate. Must match the interpreter constants in
+    // src/interpreter/net_eval/h1.rs::HTTP_WIRE_MAX_METHOD_LEN (=16).
+    // Option confirmation: Step 3 Option B (parser reject with 400).
+    if (method_len > 16) {
+        if (free_data) free(data);
+        return taida_net_result_fail("ParseError", "Malformed HTTP request: method exceeds wire-byte limit");
+    }
+
     // Path + query: between first SP and last SP
     int uri_start = method_end + 1;
     int uri_end = version_start - 1;
@@ -255,6 +267,13 @@ taida_val taida_net_http_parse_request_head(taida_val input) {
             query_len = uri_end - (i + 1);
             break;
         }
+    }
+
+    // C26B-022 Step 2 (wS Round 6): path wire-byte cap = 2048 (matches
+    // HTTP_WIRE_MAX_PATH_LEN in h1.rs and `char path[2048]` field).
+    if (path_len > 2048) {
+        if (free_data) free(data);
+        return taida_net_result_fail("ParseError", "Malformed HTTP request: path exceeds wire-byte limit");
     }
 
     // Parse headers
@@ -315,6 +334,25 @@ taida_val taida_net_http_parse_request_head(taida_val input) {
         taida_pack_set(header_pack, 1, taida_net_make_span((taida_val)val_start, (taida_val)val_len));
         taida_pack_set_tag(header_pack, 1, TAIDA_TAG_PACK);
         headers_list = taida_list_push(headers_list, header_pack);
+
+        // C26B-022 Step 2 (wS Round 6): authority wire-byte cap = 256.
+        // Host is the HTTP/1.x equivalent of the H2/H3 `:authority`
+        // pseudo-header; the `char authority[256]` struct field in
+        // H2RequestFields / H3RequestFields backs both paths, so reject
+        // over-limit Host values at parse time to match h1.rs.
+        if (name_len == 4) {
+            const char *host_expected = "host";
+            int is_host = 1;
+            for (size_t k = 0; k < 4; k++) {
+                char c = (char)data[name_start + k];
+                if (c >= 'A' && c <= 'Z') c += 32;
+                if (c != host_expected[k]) { is_host = 0; break; }
+            }
+            if (is_host && val_len > 256) {
+                if (free_data) free(data);
+                return taida_net_result_fail("ParseError", "Malformed HTTP request: authority exceeds wire-byte limit");
+            }
+        }
 
         // Check Content-Length (case-insensitive)
         if (name_len == 14) {
