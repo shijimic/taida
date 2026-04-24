@@ -868,9 +868,10 @@ FULLY READY" wording to **HOLD**. Four items were surfaced:
     and OIDC issuer (`https://token.actions.githubusercontent.com`).
     `TAIDA_VERIFY_SIGNATURES` selects the policy; unset means
     `BestEffort` for first-party URLs and `Disabled`
-    elsewhere. A `TAIDA_SEC011_FAKE_VERIFY` env handshake lets
-    integration tests exercise both pass and fail paths
-    without needing the `cosign` binary on every CI runner.
+    elsewhere. Integration tests inject a temporary fake `cosign`
+    executable into `PATH` to exercise both pass and fail paths
+    without needing the real binary on every CI runner; the
+    production verifier has no env-var bypass.
   - **`src/pkg/resolver.rs::try_fetch_prebuild`** calls the
     verifier after the SHA-256 check; failures map to
     `PrebuildFailure::IntegrityMismatch` so the install

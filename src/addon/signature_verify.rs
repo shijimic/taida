@@ -32,10 +32,8 @@
 //! would itself need audit. The `cosign` binary is the verification
 //! truth; we only wire it up.
 //!
-//! The module is test-oriented: URLs containing `file://` bypass the
-//! real cosign invocation via the `TAIDA_SEC011_FAKE_VERIFY` env
-//! handshake (see [`run_cosign_verify`]) so the integration test can
-//! drive both pass and fail paths without requiring cosign to be
+//! Tests use a temporary fake `cosign` executable on `PATH` so the
+//! same process-spawn path is exercised without requiring cosign to be
 //! installed on every developer laptop / CI machine.
 
 use std::path::{Path, PathBuf};
@@ -286,35 +284,9 @@ const COSIGN_OIDC_ISSUER: &str = "https://token.actions.githubusercontent.com";
 /// Run `cosign verify-blob` against `artifact` using the bundle at
 /// `bundle_path`. Returns `Ok(())` on verified, `Err` otherwise.
 ///
-/// The function checks `TAIDA_SEC011_FAKE_VERIFY` before spawning
-/// `cosign`. The env var is honoured only inside `#[cfg(test)]` and
-/// the `c26b_030_*` integration test path:
-///
-/// - `TAIDA_SEC011_FAKE_VERIFY=ok`   → pretend verification passed.
-/// - `TAIDA_SEC011_FAKE_VERIFY=fail` → pretend cosign rejected the
-///   signature.
-/// - `TAIDA_SEC011_FAKE_VERIFY=missing_cosign` → pretend cosign is
-///   not installed.
-///
-/// Any other value (or unset) invokes the real `cosign` binary. The
-/// production flow therefore never changes its behaviour based on the
-/// env var unless a caller explicitly sets it, so there is no way to
-/// downgrade install security in the wild by setting the env.
+/// Production flow never honours a test bypass environment variable:
+/// it always resolves and executes `cosign` from `PATH`.
 pub fn run_cosign_verify(artifact: &Path, bundle_path: &Path) -> Result<(), VerifyError> {
-    if let Ok(fake) = std::env::var("TAIDA_SEC011_FAKE_VERIFY") {
-        match fake.as_str() {
-            "ok" => return Ok(()),
-            "fail" => {
-                return Err(VerifyError::SignatureRejected {
-                    stderr: "fake verify: signature rejected (TAIDA_SEC011_FAKE_VERIFY=fail)"
-                        .to_string(),
-                });
-            }
-            "missing_cosign" => return Err(VerifyError::CosignUnavailable),
-            _ => {}
-        }
-    }
-
     // Detect cosign availability explicitly so the `Required`-policy
     // error path can surface `CosignUnavailable` distinctly from
     // `SignatureRejected`.
@@ -411,6 +383,9 @@ pub fn verify_artifact(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Mutex, MutexGuard};
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn official_url_detection() {
@@ -492,26 +467,43 @@ mod tests {
     struct EnvGuard {
         key: &'static str,
         prev: Option<String>,
+        _lock: MutexGuard<'static, ()>,
     }
 
     impl EnvGuard {
         fn set(key: &'static str, value: &str) -> Self {
+            let lock = match ENV_LOCK.lock() {
+                Ok(g) => g,
+                Err(p) => p.into_inner(),
+            };
             let prev = std::env::var(key).ok();
             // SAFETY: tests for SEC-011 env parsing; production code
             // never writes this env var.
             unsafe {
                 std::env::set_var(key, value);
             }
-            Self { key, prev }
+            Self {
+                key,
+                prev,
+                _lock: lock,
+            }
         }
 
         fn unset(key: &'static str) -> Self {
+            let lock = match ENV_LOCK.lock() {
+                Ok(g) => g,
+                Err(p) => p.into_inner(),
+            };
             let prev = std::env::var(key).ok();
             // SAFETY: as above.
             unsafe {
                 std::env::remove_var(key);
             }
-            Self { key, prev }
+            Self {
+                key,
+                prev,
+                _lock: lock,
+            }
         }
     }
 

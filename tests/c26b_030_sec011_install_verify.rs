@@ -24,10 +24,11 @@
 //! 6. `Required` policy + bundle present + fake `missing_cosign` →
 //!    `VerifyError::CosignUnavailable`.
 //!
-//! The `TAIDA_SEC011_FAKE_VERIFY` env handshake lets the test drive
+//! A temporary fake `cosign` executable on `PATH` lets the test drive
 //! cosign's own exit code without requiring the real binary on every
-//! CI runner — the production path ignores the env var unless a caller
-//! explicitly sets it (see module docs).
+//! CI runner. This intentionally exercises the same production
+//! `Command::new("cosign")` path; there is no environment-variable
+//! bypass inside the verifier.
 //!
 //! This test is the regression guard for the C26B-030 acceptance:
 //!   - signature-bundle-missing rejects install when policy is hard
@@ -50,10 +51,10 @@ use taida::addon::signature_verify::{
 
 // ── env-var serialisation guard ─────────────────────────────────
 //
-// The module honours both `TAIDA_VERIFY_SIGNATURES` and
-// `TAIDA_SEC011_FAKE_VERIFY`. Multiple `#[test]`s inside this file
-// would race on those envs if they ran in parallel, so we gate the
-// whole section behind a process-global mutex.
+// The module honours `TAIDA_VERIFY_SIGNATURES`; these tests also
+// mutate `PATH` to inject a fake `cosign`. Multiple `#[test]`s inside
+// this file would race on those envs if they ran in parallel, so we
+// gate the whole section behind a process-global mutex.
 
 use std::sync::Mutex;
 
@@ -65,17 +66,20 @@ fn with_env_guard<F: FnOnce()>(f: F) {
         Ok(g) => g,
         Err(p) => p.into_inner(),
     };
+    let prev_path = std::env::var("PATH").ok();
     // Always start from a known-clean env. Unsafe because
     // `std::env::remove_var` is unsafe on 1.74+; tests are the
     // only caller that writes this var.
     unsafe {
         std::env::remove_var("TAIDA_VERIFY_SIGNATURES");
-        std::env::remove_var("TAIDA_SEC011_FAKE_VERIFY");
     }
     f();
     unsafe {
         std::env::remove_var("TAIDA_VERIFY_SIGNATURES");
-        std::env::remove_var("TAIDA_SEC011_FAKE_VERIFY");
+        match prev_path {
+            Some(path) => std::env::set_var("PATH", path),
+            None => std::env::remove_var("PATH"),
+        }
     }
 }
 
@@ -106,6 +110,51 @@ fn write_artifact(dir: &Path, name: &str, body: &[u8]) -> PathBuf {
     let p = dir.join(name);
     fs::write(&p, body).unwrap();
     p
+}
+
+fn install_fake_cosign(dir: &Path, mode: &str) {
+    let bin = dir.join("fake-bin");
+    fs::create_dir_all(&bin).unwrap();
+    let cosign = bin.join("cosign");
+    fs::write(
+        &cosign,
+        format!(
+            r#"#!/usr/bin/env bash
+set -euo pipefail
+if [ "${{1:-}}" = "version" ]; then
+  exit 0
+fi
+if [ "${{1:-}}" = "verify-blob" ]; then
+  case "{mode}" in
+    ok) exit 0 ;;
+    fail) echo "fake verify: signature rejected" >&2; exit 1 ;;
+  esac
+fi
+echo "unexpected fake cosign invocation: $*" >&2
+exit 2
+"#
+        ),
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&cosign).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&cosign, perms).unwrap();
+    }
+    let old_path = std::env::var("PATH").unwrap_or_default();
+    unsafe {
+        std::env::set_var("PATH", format!("{}:{old_path}", bin.display()));
+    }
+}
+
+fn hide_real_cosign(dir: &Path) {
+    let empty = dir.join("empty-path");
+    fs::create_dir_all(&empty).unwrap();
+    unsafe {
+        std::env::set_var("PATH", empty);
+    }
 }
 
 // ── tests ───────────────────────────────────────────────────────
@@ -170,9 +219,7 @@ fn c26b030_required_passes_on_fake_ok() {
         // bundle step is a no-op.
         let bundle = bundle_path_for(&artifact);
         fs::write(&bundle, b"fake-bundle-content").unwrap();
-        unsafe {
-            std::env::set_var("TAIDA_SEC011_FAKE_VERIFY", "ok");
-        }
+        install_fake_cosign(td.path(), "ok");
         let url = format!("file://{}", artifact.display());
         let outcome = verify_artifact(&artifact, &url, VerifyPolicy::Required).unwrap();
         assert_eq!(outcome, VerifyOutcome::Verified);
@@ -186,9 +233,7 @@ fn c26b030_required_rejects_on_fake_signature_failure() {
         let artifact = write_artifact(td.path(), "libx.so", b"payload");
         let bundle = bundle_path_for(&artifact);
         fs::write(&bundle, b"fake-bundle-content").unwrap();
-        unsafe {
-            std::env::set_var("TAIDA_SEC011_FAKE_VERIFY", "fail");
-        }
+        install_fake_cosign(td.path(), "fail");
         let url = format!("file://{}", artifact.display());
         let err = verify_artifact(&artifact, &url, VerifyPolicy::Required).unwrap_err();
         match err {
@@ -207,9 +252,7 @@ fn c26b030_required_surfaces_cosign_unavailable_distinctly() {
         let artifact = write_artifact(td.path(), "libx.so", b"payload");
         let bundle = bundle_path_for(&artifact);
         fs::write(&bundle, b"fake-bundle-content").unwrap();
-        unsafe {
-            std::env::set_var("TAIDA_SEC011_FAKE_VERIFY", "missing_cosign");
-        }
+        hide_real_cosign(td.path());
         let url = format!("file://{}", artifact.display());
         let err = verify_artifact(&artifact, &url, VerifyPolicy::Required).unwrap_err();
         assert!(
@@ -226,9 +269,7 @@ fn c26b030_best_effort_downgrades_cosign_unavailable_to_warning() {
         let artifact = write_artifact(td.path(), "libx.so", b"payload");
         let bundle = bundle_path_for(&artifact);
         fs::write(&bundle, b"fake-bundle-content").unwrap();
-        unsafe {
-            std::env::set_var("TAIDA_SEC011_FAKE_VERIFY", "missing_cosign");
-        }
+        hide_real_cosign(td.path());
         let url = format!("file://{}", artifact.display());
         let outcome = verify_artifact(&artifact, &url, VerifyPolicy::BestEffort).unwrap();
         match outcome {

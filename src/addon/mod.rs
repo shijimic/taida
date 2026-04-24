@@ -56,9 +56,8 @@ pub mod prebuild_fetcher;
 // Pairs with `.github/workflows/release.yml`'s `sign` + `provenance`
 // jobs and `scripts/release/verify-signatures.sh` so the signature
 // the release workflow generates is actually consumed at install
-// time. Kept feature-flag-free because the fake-verify handshake
-// (`TAIDA_SEC011_FAKE_VERIFY`) is used by integration tests that
-// must compile without the `community` HTTPS stack too.
+// time. Kept feature-flag-free so local/offline tests can exercise
+// `file://` bundle handling without the `community` HTTPS stack.
 pub mod signature_verify;
 pub mod url_template;
 
