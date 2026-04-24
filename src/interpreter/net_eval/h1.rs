@@ -47,44 +47,77 @@ use crate::parser::Expr;
 /// before the handler is ever invoked.
 pub(crate) const HTTP_WIRE_MAX_METHOD_LEN: usize = 16;
 pub(crate) const HTTP_WIRE_MAX_PATH_LEN: usize = 2048;
-/// Authority (Host header value) wire-byte cap — reserved for a
-/// follow-up session that resolves header name span bytes against the
-/// raw buffer. Struct field size in `net_h1_h2.c` (`char authority[256]`)
-/// matches this value for future use.
-#[allow(dead_code)]
+/// Authority (Host header value) wire-byte cap. Struct field size in
+/// `net_h1_h2.c` (`char authority[256]`) and `net_h3_quic.c` matches this
+/// value to guarantee no silent truncation on Native codegen.
 pub(crate) const HTTP_WIRE_MAX_AUTHORITY_LEN: usize = 256;
 
-/// Extract the `len` field from a `@(start: Int, len: Int)` span pack.
-/// Returns 0 if the shape does not match (conservative: 0 never exceeds
-/// any limit, so malformed packs do not fail-fast here; the normal
-/// parse path handles them).
-fn span_len(v: &Value) -> usize {
+/// Extract the `start` and `len` fields from a `@(start: Int, len: Int)`
+/// span pack. Returns `(0, 0)` if the shape does not match (conservative:
+/// zero-length never exceeds any limit, so malformed packs do not
+/// fail-fast here; the normal parse path handles them).
+fn span_start_len(v: &Value) -> (usize, usize) {
     if let Value::BuchiPack(fields) = v {
+        let mut start = 0usize;
+        let mut len = 0usize;
         for (k, vv) in fields {
-            if k == "len" {
-                if let Value::Int(n) = vv {
-                    return (*n).max(0) as usize;
+            if let Value::Int(n) = vv {
+                match k.as_str() {
+                    "start" => start = (*n).max(0) as usize,
+                    "len" => len = (*n).max(0) as usize,
+                    _ => {}
                 }
             }
         }
+        return (start, len);
     }
-    0
+    (0, 0)
 }
 
-/// C26B-022 Step 2: Check if method / path exceeds its wire-limit.
+fn span_len(v: &Value) -> usize {
+    span_start_len(v).1
+}
+
+/// Compare a header name span against an ASCII-lowercase reference name
+/// (case-insensitive). Returns true on match; returns false on any bound
+/// violation so over-limit / malformed spans never claim to be "Host".
+fn span_equals_ascii_ci(raw: &[u8], start: usize, len: usize, reference: &[u8]) -> bool {
+    if len != reference.len() {
+        return false;
+    }
+    let end = match start.checked_add(len) {
+        Some(e) => e,
+        None => return false,
+    };
+    if end > raw.len() {
+        return false;
+    }
+    raw[start..end]
+        .iter()
+        .zip(reference.iter())
+        .all(|(a, b)| a.eq_ignore_ascii_case(b))
+}
+
+/// C26B-022 Step 2 (wJ Round 4, 2026-04-24 authority extension):
+/// Check if method / path / Host-header-value exceeds its wire-limit.
+///
 /// Returns `Some(&'static str)` with a short descriptor of the violating
 /// field when over-limit, `None` otherwise.
 ///
-/// NOTE (wE Round 3): Authority (Host header value) limit enforcement is
-/// deferred to a follow-up session because it requires resolving header
-/// name span bytes against the `raw` buffer, which is not in scope for
-/// the wE worktree exclusion rules (helpers.rs / raw buffer traversal).
-/// method + path cover the two most attacker-accessible wire bytes; the
-/// authority codegen struct (`char authority[256]`) still has its size
-/// pin in net_h1_h2.c and relies on Host header parsing which goes
-/// through httparse's own internal limits.
+/// The `raw` buffer is required so that header name/value spans (which
+/// are zero-copy references into the HTTP request buffer) can be
+/// resolved to concrete byte slices. The `headers` field is iterated;
+/// for each entry whose `name` span case-insensitively equals `b"host"`,
+/// its `value` span length is compared against
+/// [`HTTP_WIRE_MAX_AUTHORITY_LEN`].
+///
+/// Host is the HTTP/1.1 equivalent of the H2/H3 `:authority` pseudo-
+/// header; the Native codegen struct field (`char authority[256]`) is
+/// populated from whichever is present, so enforcement on `Host` here
+/// keeps the 3-backend parity story consistent.
 pub(crate) fn check_http_wire_limits(
     parsed_fields: &[(String, Value)],
+    raw: &[u8],
 ) -> Option<&'static str> {
     for (k, v) in parsed_fields {
         match k.as_str() {
@@ -96,6 +129,33 @@ pub(crate) fn check_http_wire_limits(
             "path" => {
                 if span_len(v) > HTTP_WIRE_MAX_PATH_LEN {
                     return Some("path");
+                }
+            }
+            "headers" => {
+                if let Value::List(items) = v {
+                    for header in items.iter() {
+                        if let Value::BuchiPack(hf) = header {
+                            // Resolve name + value spans from header pack
+                            let mut name_span: Option<&Value> = None;
+                            let mut value_span: Option<&Value> = None;
+                            for (hk, hv) in hf {
+                                match hk.as_str() {
+                                    "name" => name_span = Some(hv),
+                                    "value" => value_span = Some(hv),
+                                    _ => {}
+                                }
+                            }
+                            if let (Some(ns), Some(vs)) = (name_span, value_span) {
+                                let (n_start, n_len) = span_start_len(ns);
+                                if span_equals_ascii_ci(raw, n_start, n_len, b"host") {
+                                    let (_, v_len) = span_start_len(vs);
+                                    if v_len > HTTP_WIRE_MAX_AUTHORITY_LEN {
+                                        return Some("authority");
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             }
             _ => {}
@@ -607,7 +667,7 @@ impl Interpreter {
                         // Set blocking timeout for body read (need full body)
                         let _ = conn.stream.set_read_timeout(Some(read_timeout));
 
-                        // ── C26B-022 Step 2 (wE Round 3, 2026-04-24): ──
+                        // ── C26B-022 Step 2 (wE Round 3 + wJ Round 4): ──
                         // Enforce HTTP wire byte upper limits at the parser
                         // boundary to prevent silent truncation when these
                         // fields reach the Native codegen fixed-size stack
@@ -616,12 +676,20 @@ impl Interpreter {
                         // handler dispatch so that 3-backend parity is
                         // preserved and no handler sees a truncated value.
                         //
+                        // wJ Round 4 (2026-04-24): extended to cover
+                        // the Host header value (authority, 256 bytes),
+                        // which is the HTTP/1.1 equivalent of the H2/H3
+                        // `:authority` pseudo-header. The raw buffer
+                        // slice is passed through so that the zero-copy
+                        // header name span can be resolved to compare
+                        // case-insensitively against "host".
+                        //
                         // Additive widening (§ 6.2): this adds a reject
                         // path for previously-accepted oversized inputs
                         // that would have hit silent truncation downstream.
                         // No existing parity.rs assertion is altered.
                         if let Some(field_name) =
-                            check_http_wire_limits(&parsed_fields)
+                            check_http_wire_limits(&parsed_fields, &conn.buf[..conn.total_read])
                         {
                             let _ = field_name; // kept for future logging
                             let bad_request = b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";

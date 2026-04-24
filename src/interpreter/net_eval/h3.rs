@@ -96,6 +96,23 @@ impl Interpreter {
         // Converts H3RequestData -> 14-field request pack -> handler call -> H3ResponseData.
         // Returns None on handler error (serve loop sends 500).
         let mut h3_handler = |req: net_h3::H3RequestData| -> Option<net_h3::H3ResponseData> {
+            // C26B-022 Step 2 (wJ Round 4, 2026-04-24): Enforce HTTP/3
+            // wire byte upper limits at the handler boundary so that
+            // downstream Native codegen fixed-size stack buffers cannot
+            // silently truncate. On violation, synthesize a 400 Bad
+            // Request response; the serve loop increments request_count
+            // the same way it would for any handler-returned response.
+            if req.method.len() > super::h1::HTTP_WIRE_MAX_METHOD_LEN
+                || req.path.len() > super::h1::HTTP_WIRE_MAX_PATH_LEN
+                || req.authority.len() > super::h1::HTTP_WIRE_MAX_AUTHORITY_LEN
+            {
+                return Some(net_h3::H3ResponseData {
+                    status: 400,
+                    headers: Vec::new(),
+                    body: Vec::new(),
+                });
+            }
+
             // Parse query from path (matching h1/h2 pattern).
             let (path_part, query_part) = match req.path.find('?') {
                 Some(pos) => (req.path[..pos].to_string(), req.path[pos + 1..].to_string()),

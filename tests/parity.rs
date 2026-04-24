@@ -1657,13 +1657,16 @@ fn test_tcp_accept_sendall_recvexact_three_way_parity() {
         vec!["interp", "native"]
     };
 
+    // C26B-006 (wJ Round 4, 2026-04-24): retry shim撤廃。
+    // C26B-003 FIXED (port allocator race-free) + C26B-026 FIXED (HPACK) の
+    // 組み合わせで port-bind / HPACK 由来の flakiness が消失したため、
+    // naive 1-shot で 3-backend 100x 連続 green 確認済。
+    // 既存 assertion semantics は不変 (D27 escalation 3 点全 NO)。
     for backend in backends {
-        let mut last_error = None;
-        for _attempt in 0..3 {
-            let port = find_free_loopback_port();
-            let (rx, client_handle) = spawn_tcp_client_for_accept(port);
-            let source = format!(
-                r#"
+        let port = find_free_loopback_port();
+        let (rx, client_handle) = spawn_tcp_client_for_accept(port);
+        let source = format!(
+            r#"
 listenerRes <= tcpListen({port}, 1000)
 listenerRes ]=> l
 acceptRes <= tcpAccept(l.__value.listener, 5000)
@@ -1686,87 +1689,76 @@ stdout(s.__value.bytesSent.toString())
 stdout(c.__value.ok.toString())
 stdout(lc.__value.ok.toString())
 "#
-            );
+        );
 
-            let out = match backend {
-                "interp" => run_interpreter_src(&source, "tcp_accept_interp"),
-                "js" => run_js_src(&source, "tcp_accept_js"),
-                "native" => run_native_src(&source, "tcp_accept_native"),
-                _ => None,
-            };
+        let out = match backend {
+            "interp" => run_interpreter_src(&source, "tcp_accept_interp"),
+            "js" => run_js_src(&source, "tcp_accept_js"),
+            "native" => run_native_src(&source, "tcp_accept_native"),
+            _ => None,
+        };
 
-            let outcome = (|| -> Result<(), String> {
-                let out = out.ok_or_else(|| {
-                    format!(
-                        "{} backend failed for tcp accept/sendAll/recvExact parity",
-                        backend
-                    )
-                })?;
+        let outcome = (|| -> Result<(), String> {
+            let out = out.ok_or_else(|| {
+                format!(
+                    "{} backend failed for tcp accept/sendAll/recvExact parity",
+                    backend
+                )
+            })?;
 
-                let lines: Vec<&str> = out.lines().collect();
-                if lines.len() != 5 {
-                    return Err(format!(
-                        "{} backend output shape mismatch for tcp accept/sendAll/recvExact parity: {:?}",
-                        backend, out
-                    ));
-                }
-                if !(lines[0] == "true" || lines[0] == "1") {
-                    return Err(format!(
-                        "{} backend expected socketRecvExact success marker, got {:?}",
-                        backend, lines[0]
-                    ));
-                }
-                if lines[1] != "ping" {
-                    return Err(format!(
-                        "{} backend expected decoded request payload, got {:?}",
-                        backend, lines[1]
-                    ));
-                }
-                if lines[2] != "4" {
-                    return Err(format!(
-                        "{} backend expected bytesSent=4 for socketSendAll, got {:?}",
-                        backend, lines[2]
-                    ));
-                }
-                if !(lines[3] == "true" || lines[3] == "1") {
-                    return Err(format!(
-                        "{} backend expected socketClose success marker, got {:?}",
-                        backend, lines[3]
-                    ));
-                }
-                if !(lines[4] == "true" || lines[4] == "1") {
-                    return Err(format!(
-                        "{} backend expected listenerClose success marker, got {:?}",
-                        backend, lines[4]
-                    ));
-                }
-
-                let echoed = rx
-                    .recv_timeout(Duration::from_secs(5))
-                    .map_err(|_| format!("{} backend: no tcp reply captured by client", backend))?;
-                if echoed != "pong" {
-                    return Err(format!(
-                        "{} backend returned unexpected response payload to client: {:?}",
-                        backend, echoed
-                    ));
-                }
-
-                Ok(())
-            })();
-
-            let _ = client_handle.join();
-            match outcome {
-                Ok(()) => {
-                    last_error = None;
-                    break;
-                }
-                Err(err) => {
-                    last_error = Some(err);
-                }
+            let lines: Vec<&str> = out.lines().collect();
+            if lines.len() != 5 {
+                return Err(format!(
+                    "{} backend output shape mismatch for tcp accept/sendAll/recvExact parity: {:?}",
+                    backend, out
+                ));
             }
-        }
+            if !(lines[0] == "true" || lines[0] == "1") {
+                return Err(format!(
+                    "{} backend expected socketRecvExact success marker, got {:?}",
+                    backend, lines[0]
+                ));
+            }
+            if lines[1] != "ping" {
+                return Err(format!(
+                    "{} backend expected decoded request payload, got {:?}",
+                    backend, lines[1]
+                ));
+            }
+            if lines[2] != "4" {
+                return Err(format!(
+                    "{} backend expected bytesSent=4 for socketSendAll, got {:?}",
+                    backend, lines[2]
+                ));
+            }
+            if !(lines[3] == "true" || lines[3] == "1") {
+                return Err(format!(
+                    "{} backend expected socketClose success marker, got {:?}",
+                    backend, lines[3]
+                ));
+            }
+            if !(lines[4] == "true" || lines[4] == "1") {
+                return Err(format!(
+                    "{} backend expected listenerClose success marker, got {:?}",
+                    backend, lines[4]
+                ));
+            }
 
-        if let Some(err) = last_error {
+            let echoed = rx
+                .recv_timeout(Duration::from_secs(5))
+                .map_err(|_| format!("{} backend: no tcp reply captured by client", backend))?;
+            if echoed != "pong" {
+                return Err(format!(
+                    "{} backend returned unexpected response payload to client: {:?}",
+                    backend, echoed
+                ));
+            }
+
+            Ok(())
+        })();
+
+        let _ = client_handle.join();
+        if let Err(err) = outcome {
             panic!("{}", err);
         }
     }
@@ -1787,12 +1779,12 @@ fn test_udp_send_recv_loopback_parity() {
         vec!["interp", "native"]
     };
 
+    // C26B-006 (wJ Round 4, 2026-04-24): retry shim撤廃。naive 1-shot に戻す。
+    // 根治条件は test_tcp_accept_sendall_recvexact_three_way_parity と同様。
     for backend in backends {
-        let mut last_error = None;
-        for _attempt in 0..3 {
-            let (port, rx, handle) = spawn_udp_echo_server();
-            let source = format!(
-                r#"
+        let (port, rx, handle) = spawn_udp_echo_server();
+        let source = format!(
+            r#"
 sock <= udpBind("127.0.0.1", 0, 200)
 sock ]=> s
 payloadLax <= Bytes["ping"]()
@@ -1810,76 +1802,65 @@ stdout(recv.hasValue.toString())
 stdout(msg)
 stdout(closed.__value.ok.toString())
 "#
-            );
+        );
 
-            let out = match backend {
-                "interp" => run_interpreter_src(&source, "udp_interp"),
-                "js" => run_js_src(&source, "udp_js"),
-                "native" => run_native_src(&source, "udp_native"),
-                _ => None,
-            };
+        let out = match backend {
+            "interp" => run_interpreter_src(&source, "udp_interp"),
+            "js" => run_js_src(&source, "udp_js"),
+            "native" => run_native_src(&source, "udp_native"),
+            _ => None,
+        };
 
-            let outcome = (|| -> Result<(), String> {
-                let out =
-                    out.ok_or_else(|| format!("{} backend failed for udp loopback", backend))?;
-                let lines: Vec<&str> = out.lines().collect();
-                if lines.len() != 4 {
-                    return Err(format!(
-                        "{} backend output shape mismatch for udp loopback: {:?}",
-                        backend, out
-                    ));
-                }
-                if lines[0] != "4" {
-                    return Err(format!(
-                        "{} backend expected bytesSent=4 for udp loopback, got {:?}",
-                        backend, lines[0]
-                    ));
-                }
-                if !(lines[1] == "true" || lines[1] == "1") {
-                    return Err(format!(
-                        "{} backend expected truthy udp recv marker, got {:?}",
-                        backend, lines[1]
-                    ));
-                }
-                if lines[2] != "pong" {
-                    return Err(format!(
-                        "{} backend expected udp echoed payload, got {:?}",
-                        backend, lines[2]
-                    ));
-                }
-                if !(lines[3] == "true" || lines[3] == "1") {
-                    return Err(format!(
-                        "{} backend expected udpClose success marker, got {:?}",
-                        backend, lines[3]
-                    ));
-                }
-
-                let req = rx
-                    .recv_timeout(Duration::from_secs(5))
-                    .map_err(|_| format!("{} backend: no udp payload captured", backend))?;
-                if req != "ping" {
-                    return Err(format!(
-                        "{} backend sent unexpected udp payload: {:?}",
-                        backend, req
-                    ));
-                }
-
-                Ok(())
-            })();
-
-            let _ = handle.join();
-            match outcome {
-                Ok(()) => {
-                    last_error = None;
-                    break;
-                }
-                Err(err) => {
-                    last_error = Some(err);
-                }
+        let outcome = (|| -> Result<(), String> {
+            let out =
+                out.ok_or_else(|| format!("{} backend failed for udp loopback", backend))?;
+            let lines: Vec<&str> = out.lines().collect();
+            if lines.len() != 4 {
+                return Err(format!(
+                    "{} backend output shape mismatch for udp loopback: {:?}",
+                    backend, out
+                ));
             }
-        }
+            if lines[0] != "4" {
+                return Err(format!(
+                    "{} backend expected bytesSent=4 for udp loopback, got {:?}",
+                    backend, lines[0]
+                ));
+            }
+            if !(lines[1] == "true" || lines[1] == "1") {
+                return Err(format!(
+                    "{} backend expected truthy udp recv marker, got {:?}",
+                    backend, lines[1]
+                ));
+            }
+            if lines[2] != "pong" {
+                return Err(format!(
+                    "{} backend expected udp echoed payload, got {:?}",
+                    backend, lines[2]
+                ));
+            }
+            if !(lines[3] == "true" || lines[3] == "1") {
+                return Err(format!(
+                    "{} backend expected udpClose success marker, got {:?}",
+                    backend, lines[3]
+                ));
+            }
 
-        if let Some(err) = last_error {
+            let req = rx
+                .recv_timeout(Duration::from_secs(5))
+                .map_err(|_| format!("{} backend: no udp payload captured", backend))?;
+            if req != "ping" {
+                return Err(format!(
+                    "{} backend sent unexpected udp payload: {:?}",
+                    backend, req
+                ));
+            }
+
+            Ok(())
+        })();
+
+        let _ = handle.join();
+        if let Err(err) = outcome {
             panic!("{}", err);
         }
     }
@@ -36035,6 +36016,208 @@ stdout(r.requests)
     assert!(
         server_stdout.contains("true"),
         "C26B-022 interp: expected server ok=true, got: {:?}",
+        server_stdout
+    );
+}
+
+// ════════════════════════════════════════════════════════════════════
+// C26B-022 Step 2 (wJ Round 4, 2026-04-24): authority extension
+// ════════════════════════════════════════════════════════════════════
+//
+// Extends the wE Round 3 wire-byte enforcement to cover the Host header
+// value (authority, 256-byte cap). This is the HTTP/1.1 equivalent of
+// the H2/H3 `:authority` pseudo-header; the Native codegen struct field
+// `char authority[256]` backs both paths, so silent truncation on
+// oversized Host values is prevented at the parser boundary with a
+// 400 Bad Request response.
+//
+// D27 escalation checklist (3 points, all NO):
+//   1. No public mold signature changed.
+//   2. No STABILITY-pinned error string altered (standard "400" status).
+//   3. Append-only: no existing parity.rs assertion modified.
+
+#[test]
+fn test_net6_c26b022_oversized_host_header_interp_rejects_400() {
+    let port = find_free_loopback_port();
+    let source = format!(
+        r#">>> taida-lang/net => @(httpServe)
+
+handler req =
+  @(status <= 200, headers <= @[], body <= "should-never-reach-handler")
+=> :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
+
+asyncResult <= httpServe({port}, handler, 1, 5000, 4)
+asyncResult ]=> result
+result ]=> r
+stdout(r.ok)
+stdout(r.requests)
+"#
+    );
+
+    let dir = setup_net_project(&source, "c26b022_oversized_host_interp");
+    let td_path = dir.join("main.td");
+    let mut child = Command::new(taida_bin())
+        .arg(&td_path)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn interp h1 server for c26b022 host");
+
+    let mut ready = false;
+    for _ in 0..50 {
+        thread::sleep(Duration::from_millis(100));
+        if TcpStream::connect(format!("127.0.0.1:{}", port)).is_ok() {
+            ready = true;
+            break;
+        }
+    }
+    if !ready {
+        let _ = child.kill();
+        let _ = child.wait();
+        cleanup_net_project(&dir);
+        panic!("C26B-022 host: server not ready on port {}", port);
+    }
+
+    // 257-byte Host value (cap is 256).
+    let oversized_host = "a".repeat(257);
+    assert!(oversized_host.len() > 256, "test setup");
+    let request = format!(
+        "GET / HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n",
+        oversized_host
+    );
+
+    let mut stream = TcpStream::connect(format!("127.0.0.1:{}", port))
+        .expect("connect for oversized host");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .expect("set read timeout");
+    std::io::Write::write_all(&mut stream, request.as_bytes())
+        .expect("write oversized-host request");
+
+    let mut response = Vec::new();
+    let mut buf = [0u8; 4096];
+    loop {
+        match std::io::Read::read(&mut stream, &mut buf) {
+            Ok(0) => break,
+            Ok(n) => response.extend_from_slice(&buf[..n]),
+            Err(_) => break,
+        }
+    }
+
+    let output = child.wait_with_output().expect("wait for server");
+    cleanup_net_project(&dir);
+
+    let response_str = String::from_utf8_lossy(&response);
+    assert!(
+        response_str.starts_with("HTTP/1.1 400 "),
+        "C26B-022 interp authority: expected '400 Bad Request' for \
+         oversized Host header, got response: {:?}",
+        response_str
+    );
+    assert!(
+        !response_str.contains("should-never-reach-handler"),
+        "C26B-022 interp authority: handler must NOT be invoked on \
+         oversized Host header, got: {:?}",
+        response_str
+    );
+
+    let server_stdout = normalize(&String::from_utf8_lossy(&output.stdout));
+    assert!(
+        server_stdout.contains("true"),
+        "C26B-022 interp authority: expected server ok=true, got: {:?}",
+        server_stdout
+    );
+}
+
+#[test]
+fn test_net6_c26b022_at_limit_host_header_interp_accepts() {
+    // Boundary check: Host value exactly at 256 bytes must be accepted.
+    let port = find_free_loopback_port();
+    let source = format!(
+        r#">>> taida-lang/net => @(httpServe)
+
+handler req =
+  @(status <= 200, headers <= @[], body <= "host-at-limit-ok")
+=> :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
+
+asyncResult <= httpServe({port}, handler, 1, 5000, 4)
+asyncResult ]=> result
+result ]=> r
+stdout(r.ok)
+stdout(r.requests)
+"#
+    );
+
+    let dir = setup_net_project(&source, "c26b022_host_at_limit_interp");
+    let td_path = dir.join("main.td");
+    let mut child = Command::new(taida_bin())
+        .arg(&td_path)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn interp h1 server for c26b022 host boundary");
+
+    let mut ready = false;
+    for _ in 0..50 {
+        thread::sleep(Duration::from_millis(100));
+        if TcpStream::connect(format!("127.0.0.1:{}", port)).is_ok() {
+            ready = true;
+            break;
+        }
+    }
+    if !ready {
+        let _ = child.kill();
+        let _ = child.wait();
+        cleanup_net_project(&dir);
+        panic!("C26B-022 host boundary: server not ready on port {}", port);
+    }
+
+    let at_limit_host = "a".repeat(256);
+    assert_eq!(at_limit_host.len(), 256, "test setup");
+    let request = format!(
+        "GET / HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n",
+        at_limit_host
+    );
+
+    let mut stream = TcpStream::connect(format!("127.0.0.1:{}", port))
+        .expect("connect for at-limit host");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .expect("set read timeout");
+    std::io::Write::write_all(&mut stream, request.as_bytes())
+        .expect("write at-limit-host request");
+
+    let mut response = Vec::new();
+    let mut buf = [0u8; 4096];
+    loop {
+        match std::io::Read::read(&mut stream, &mut buf) {
+            Ok(0) => break,
+            Ok(n) => response.extend_from_slice(&buf[..n]),
+            Err(_) => break,
+        }
+    }
+
+    let output = child.wait_with_output().expect("wait for server");
+    cleanup_net_project(&dir);
+
+    let response_str = String::from_utf8_lossy(&response);
+    assert!(
+        response_str.starts_with("HTTP/1.1 200 "),
+        "C26B-022 interp authority: expected '200 OK' for at-limit Host \
+         (256 bytes), got: {:?}",
+        response_str
+    );
+    assert!(
+        response_str.contains("host-at-limit-ok"),
+        "C26B-022 interp authority: expected handler body on at-limit Host, \
+         got: {:?}",
+        response_str
+    );
+
+    let server_stdout = normalize(&String::from_utf8_lossy(&output.stdout));
+    assert!(
+        server_stdout.contains("true"),
+        "C26B-022 interp authority: expected server ok=true, got: {:?}",
         server_stdout
     );
 }

@@ -338,6 +338,21 @@ impl Interpreter {
                         }
                     };
 
+                // C26B-022 Step 2 (wJ Round 4, 2026-04-24): Enforce HTTP/2
+                // wire byte upper limits at the parser boundary so that
+                // downstream Native codegen fixed-size stack buffers cannot
+                // silently truncate. RST_STREAM with REFUSED_STREAM (0x7)
+                // when :method / :path / :authority exceeds its cap.
+                // Limits mirror the H1 path (16 / 2048 / 256 bytes) and
+                // the Native struct sizes in `net_h1_h2.c`.
+                if method.len() > super::h1::HTTP_WIRE_MAX_METHOD_LEN
+                    || path.len() > super::h1::HTTP_WIRE_MAX_PATH_LEN
+                    || authority.len() > super::h1::HTTP_WIRE_MAX_AUTHORITY_LEN
+                {
+                    let _ = send_rst_stream(stream, stream_id, 0x7); // REFUSED_STREAM
+                    continue;
+                }
+
                 // Parse query from path
                 let (path_part, query_part) = match path.find('?') {
                     Some(pos) => (&path[..pos], &path[pos + 1..]),
