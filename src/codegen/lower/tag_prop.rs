@@ -99,9 +99,7 @@ impl Lowering {
             Expr::MoldInst(name, _, _, _) if name == "TypeIs" || name == "TypeExtends" => true,
             // C26B-016 (@c.26, Option B+): span-aware Bool molds
             Expr::MoldInst(name, _, _, _)
-                if name == "SpanEquals"
-                    || name == "SpanStartsWith"
-                    || name == "SpanContains" =>
+                if name == "SpanEquals" || name == "SpanStartsWith" || name == "SpanContains" =>
             {
                 true
             }

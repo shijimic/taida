@@ -55,7 +55,10 @@ fn run_wasm(wasm: &Path, wasmtime: &Path) -> Option<String> {
         .output()
         .ok()?;
     if !out.status.success() {
-        eprintln!("wasmtime exec failed: {}", String::from_utf8_lossy(&out.stderr));
+        eprintln!(
+            "wasmtime exec failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
         return None;
     }
     Some(String::from_utf8_lossy(&out.stdout).trim_end().to_string())
@@ -170,8 +173,7 @@ fn c26b_020_wasm_min_rejects_read_bytes_at() {
     let td = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("examples/quality/c26_wasm_bytes/readBytesAt_basic.td");
     let wasm = std::env::temp_dir().join("c26b020_min.wasm");
-    let err = compile_wasm(&td, "wasm-min", &wasm)
-        .expect_err("wasm-min must reject readBytesAt");
+    let err = compile_wasm(&td, "wasm-min", &wasm).expect_err("wasm-min must reject readBytesAt");
     assert!(
         err.contains("wasm-min does not support OS operations"),
         "wasm-min reject diagnostic should mention OS operations, got: {}",
@@ -187,8 +189,7 @@ fn c26b_020_wasm_edge_rejects_read_bytes_at() {
     let td = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("examples/quality/c26_wasm_bytes/readBytesAt_basic.td");
     let wasm = std::env::temp_dir().join("c26b020_edge.wasm");
-    let err = compile_wasm(&td, "wasm-edge", &wasm)
-        .expect_err("wasm-edge must reject readBytesAt");
+    let err = compile_wasm(&td, "wasm-edge", &wasm).expect_err("wasm-edge must reject readBytesAt");
     assert!(
         err.contains("wasm-edge does not support 'taida_os_read_bytes_at'"),
         "wasm-edge reject diagnostic should mention taida_os_read_bytes_at, got: {}",

@@ -329,7 +329,7 @@ impl Interpreter {
         })?;
         match self.eval_expr(arg)? {
             Signal::Value(Value::Bytes(b)) => Ok(Value::bytes_take(b)),
-            Signal::Value(Value::Str(s)) => Ok(s.into_bytes()),
+            Signal::Value(Value::Str(s)) => Ok(Value::str_take(s).into_bytes()),
             Signal::Value(v) => Err(RuntimeError {
                 message: format!("{}: argument must be Bytes or Str, got {}", func_name, v),
             }),

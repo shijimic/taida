@@ -30,7 +30,7 @@ use std::path::PathBuf;
 
 use taida::addon::abi_crate as taida_addon;
 use taida::addon::call::AddonCallError;
-use taida::addon::loader::{load_addon, AddonLoadError};
+use taida::addon::loader::{AddonLoadError, load_addon};
 use taida::addon::{TAIDA_ADDON_ABI_VERSION, TAIDA_ADDON_ENTRY_SYMBOL};
 use taida::interpreter::value::Value;
 
@@ -210,10 +210,10 @@ fn echo_round_trips_str() {
     };
     let input = "Taida Lang — AI 協業時代のプログラミング言語".to_string();
     let result = addon
-        .call_function("echo", &[Value::Str(input.clone())])
+        .call_function("echo", &[Value::str(input.clone())])
         .expect("echo(Str) must succeed");
     match result {
-        Value::Str(s) => assert_eq!(s, input),
+        Value::Str(s) => assert_eq!(s.as_str(), input),
         other => panic!("expected Str, got {other:?}"),
     }
 }
@@ -263,7 +263,7 @@ fn echo_round_trips_nested_list() {
     };
     let input = Value::list(vec![
         Value::Int(1),
-        Value::Str("two".to_string()),
+        Value::str("two".to_string()),
         Value::list(vec![Value::Bool(true), Value::Float(2.5)]),
     ]);
     let result = addon
@@ -284,13 +284,13 @@ fn echo_round_trips_buchi_pack() {
         }
     };
     let input = Value::BuchiPack(vec![
-        ("name".to_string(), Value::Str("Taida".to_string())),
+        ("name".to_string(), Value::str("Taida".to_string())),
         ("version".to_string(), Value::Int(2)),
         (
             "tags".to_string(),
             Value::list(vec![
-                Value::Str("alpha".to_string()),
-                Value::Str("beta".to_string()),
+                Value::str("alpha".to_string()),
+                Value::str("beta".to_string()),
             ]),
         ),
     ]);

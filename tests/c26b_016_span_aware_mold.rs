@@ -176,11 +176,7 @@ stdout(SpanStartsWith[span, raw, "/xyz"]())
 stdout(SpanStartsWith[span, raw, "/api/foo"]())
 stdout(SpanStartsWith[span, raw, "/api/foo/bar"]())
 "#;
-    parity_assert(
-        "span_starts",
-        source,
-        "true\nfalse\ntrue\nfalse",
-    );
+    parity_assert("span_starts", source, "true\nfalse\ntrue\nfalse");
 }
 
 /// SpanContains: positive / empty-needle / negative.

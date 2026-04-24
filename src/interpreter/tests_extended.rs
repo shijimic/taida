@@ -84,7 +84,7 @@ f2 x =
     fn test_eval_string_upper() {
         assert_eq!(
             eval_ok("Upper[\"hello\"]() ]=> x\nx"),
-            Value::Str("HELLO".to_string())
+            Value::str("HELLO".to_string())
         );
     }
 
@@ -92,7 +92,7 @@ f2 x =
     fn test_eval_string_lower() {
         assert_eq!(
             eval_ok("Lower[\"HELLO\"]() ]=> x\nx"),
-            Value::Str("hello".to_string())
+            Value::str("hello".to_string())
         );
     }
 
@@ -100,7 +100,7 @@ f2 x =
     fn test_eval_string_trim() {
         assert_eq!(
             eval_ok("Trim[\"  hello  \"]() ]=> x\nx"),
-            Value::Str("hello".to_string())
+            Value::str("hello".to_string())
         );
     }
 
@@ -118,9 +118,9 @@ f2 x =
         match result {
             Value::List(items) => {
                 assert_eq!(items.len(), 3);
-                assert_eq!(items[0], Value::Str("a".to_string()));
-                assert_eq!(items[1], Value::Str("b".to_string()));
-                assert_eq!(items[2], Value::Str("c".to_string()));
+                assert_eq!(items[0], Value::str("a".to_string()));
+                assert_eq!(items[1], Value::str("b".to_string()));
+                assert_eq!(items[2], Value::str("c".to_string()));
             }
             _ => panic!("Expected List, got {:?}", result),
         }
@@ -130,7 +130,7 @@ f2 x =
     fn test_eval_string_replace() {
         assert_eq!(
             eval_ok("Replace[\"hello world\", \"world\", \"taida\"]() ]=> x\nx"),
-            Value::Str("hello taida".to_string())
+            Value::str("hello taida".to_string())
         );
     }
 
@@ -146,7 +146,7 @@ f2 x =
     fn test_eval_num_to_string() {
         assert_eq!(
             eval_ok("x <= 42.toString()\nx"),
-            Value::Str("42".to_string())
+            Value::str("42".to_string())
         );
     }
 
@@ -222,7 +222,7 @@ f2 x =
     fn test_eval_list_join() {
         assert_eq!(
             eval_ok("Join[@[\"a\", \"b\", \"c\"], \",\"]() ]=> x\nx"),
-            Value::Str("a,b,c".to_string())
+            Value::str("a,b,c".to_string())
         );
     }
 
@@ -276,7 +276,7 @@ f2 x =
     fn test_eval_bool_to_string() {
         assert_eq!(
             eval_ok("x <= true.toString()\nx"),
-            Value::Str("true".to_string())
+            Value::str("true".to_string())
         );
     }
 
@@ -294,7 +294,7 @@ f2 x =
         let (val, output) = eval_with_output("debug(\"Hello, Taida!\")");
         assert_eq!(output, vec!["Hello, Taida!"]);
         // debug returns the value
-        assert_eq!(val, Value::Str("Hello, Taida!".to_string()));
+        assert_eq!(val, Value::str("Hello, Taida!".to_string()));
     }
 
     #[test]
@@ -342,7 +342,7 @@ f2 x =
     #[test]
     fn test_eval_type_def_and_instantiation() {
         let source = "Person = @(name: Str, age: Int)\nalice <= Person(name <= \"Alice\", age <= 30)\nalice.name";
-        assert_eq!(eval_ok(source), Value::Str("Alice".to_string()));
+        assert_eq!(eval_ok(source), Value::str("Alice".to_string()));
     }
 
     #[test]
@@ -362,7 +362,7 @@ Person = @(name: Str, country <= "JP")
 alice <= Person(name <= "Alice")
 alice.country
 "#;
-        assert_eq!(eval_ok(source), Value::Str("JP".to_string()));
+        assert_eq!(eval_ok(source), Value::str("JP".to_string()));
     }
 
     #[test]
@@ -373,7 +373,7 @@ Person => Employee = @(department: Str)
 e <= Employee(name <= "Shinji")
 e.department
 "#;
-        assert_eq!(eval_ok(source), Value::Str(String::new()));
+        assert_eq!(eval_ok(source), Value::str(String::new()));
     }
 
     // ── Complex Programs ──
@@ -395,7 +395,7 @@ z
 config <= @(server <= @(host <= "localhost", port <= 8080))
 config.server.host
 "#;
-        assert_eq!(eval_ok(source), Value::Str("localhost".to_string()));
+        assert_eq!(eval_ok(source), Value::str("localhost".to_string()));
     }
 
     // ── Error Ceiling Runtime ──
@@ -448,7 +448,7 @@ process x =
 result <= process(-5)
 result
 "#;
-        assert_eq!(eval_ok(source), Value::Str("Negative value".to_string()));
+        assert_eq!(eval_ok(source), Value::str("Negative value".to_string()));
     }
 
     #[test]
@@ -570,7 +570,7 @@ process text =
 r <= process("")
 r
 "#;
-        assert_eq!(eval_ok(source), Value::Str("Invalid".to_string()));
+        assert_eq!(eval_ok(source), Value::str("Invalid".to_string()));
     }
 
     // ── Module System ──
@@ -628,7 +628,7 @@ double x =
         let mut interp = crate::interpreter::eval::Interpreter::new();
         interp.set_current_file(&main_file);
         let result = interp.eval_program(&program).unwrap();
-        assert_eq!(result, Value::Str("Hello, World".to_string()));
+        assert_eq!(result, Value::str("Hello, World".to_string()));
 
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -862,7 +862,7 @@ words <= @["a", "b", "c"]
 Foldr[words, "", _ acc x = x + acc]() ]=> concat
 concat
 "#;
-        assert_eq!(eval_ok(source), Value::Str("abc".to_string()));
+        assert_eq!(eval_ok(source), Value::str("abc".to_string()));
     }
 
     #[test]
@@ -994,7 +994,7 @@ total
         let result = interp.eval_program(&program).unwrap();
         assert_eq!(
             result,
-            Value::Str(
+            Value::str(
                 "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad".to_string()
             )
         );
@@ -1076,7 +1076,7 @@ repeatStr str n acc =
 
 result <= repeatStr("ab", 3, "")
 result"#;
-        assert_eq!(eval_ok(source), Value::Str("ababab".to_string()));
+        assert_eq!(eval_ok(source), Value::str("ababab".to_string()));
     }
 
     #[test]
@@ -1200,7 +1200,7 @@ a
         match eval_ok(source) {
             Value::Async(a) => {
                 assert_eq!(a.status, AsyncStatus::Rejected);
-                assert_eq!(*a.error, Value::Str("something went wrong".to_string()));
+                assert_eq!(*a.error, Value::str("something went wrong".to_string()));
             }
             other => panic!("Expected Async, got {:?}", other),
         }
@@ -1225,7 +1225,7 @@ a <= Async["hello"]()
 a ]=> val
 val
 "#;
-        assert_eq!(eval_ok(source), Value::Str("hello".to_string()));
+        assert_eq!(eval_ok(source), Value::str("hello".to_string()));
     }
 
     #[test]
@@ -1245,7 +1245,7 @@ handleError unused =
 result <= handleError(0)
 result
 "#;
-        assert_eq!(eval_ok(source), Value::Str("caught".to_string()));
+        assert_eq!(eval_ok(source), Value::str("caught".to_string()));
     }
 
     #[test]
@@ -1352,7 +1352,7 @@ handleError unused =
 result <= handleError(0)
 result
 "#;
-        assert_eq!(eval_ok(source), Value::Str("all_failed".to_string()));
+        assert_eq!(eval_ok(source), Value::str("all_failed".to_string()));
     }
 
     #[test]
@@ -1394,7 +1394,7 @@ handleError unused =
 
 handleError(0)
 "#;
-        assert_eq!(eval_ok(source), Value::Str("CancelledError".to_string()));
+        assert_eq!(eval_ok(source), Value::str("CancelledError".to_string()));
     }
 
     #[test]
@@ -1405,7 +1405,7 @@ a.toString()
 "#;
         assert_eq!(
             eval_ok(source),
-            Value::Str("Async[fulfilled: 42]".to_string())
+            Value::str("Async[fulfilled: 42]".to_string())
         );
     }
 
@@ -1444,7 +1444,7 @@ fetchData key: Str =
 result <= fetchData("test")
 result
 "#;
-        assert_eq!(eval_ok(source), Value::Str("default".to_string()));
+        assert_eq!(eval_ok(source), Value::str("default".to_string()));
     }
 
     // ── UnmoldBackward <=[ Tests ──────────────────────────────
@@ -1466,7 +1466,7 @@ opt <= Lax["hello"]()
 s <=[ opt
 s
 "#;
-        assert_eq!(eval_ok(source), Value::Str("hello".to_string()));
+        assert_eq!(eval_ok(source), Value::str("hello".to_string()));
     }
 
     #[test]
@@ -1530,7 +1530,7 @@ getVersion =
 
 getVersion()
 "#;
-        assert_eq!(eval_ok(source), Value::Str("1.0.0".to_string()));
+        assert_eq!(eval_ok(source), Value::str("1.0.0".to_string()));
     }
 
     #[test]
@@ -1557,7 +1557,7 @@ getDefaults =
 d <= getDefaults()
 d.name
 "#;
-        assert_eq!(eval_ok(source), Value::Str("default".to_string()));
+        assert_eq!(eval_ok(source), Value::str("default".to_string()));
     }
 
     #[test]
@@ -1668,7 +1668,7 @@ raw <= "{\"value\": null}"
 JSON[raw, Data]() ]=> result
 result.value
 "#;
-        assert_eq!(eval_ok(source), Value::Str(String::new()));
+        assert_eq!(eval_ok(source), Value::str(String::new()));
     }
 
     #[test]
@@ -1855,7 +1855,7 @@ data <= "hello"
 data => result
 result
 "#;
-        assert_eq!(eval_ok(source), Value::Str("hello".to_string()));
+        assert_eq!(eval_ok(source), Value::str("hello".to_string()));
     }
 
     #[test]
@@ -1950,7 +1950,7 @@ result
             );
             assert_eq!(
                 fields.iter().find(|(n, _)| n == "__type").map(|(_, v)| v),
-                Some(&Value::Str("Lax".into()))
+                Some(&Value::str("Lax".into()))
             );
         } else {
             panic!("Expected BuchiPack, got {:?}", val);
@@ -2038,12 +2038,12 @@ Lax(21).flatMap(safeLax).getOrDefault(0)
 
     #[test]
     fn test_lax_to_string() {
-        assert_eq!(eval_ok("Lax(42).toString()"), Value::Str("Lax(42)".into()));
+        assert_eq!(eval_ok("Lax(42).toString()"), Value::str("Lax(42)".into()));
     }
 
     #[test]
     fn test_lax_typeof() {
-        assert_eq!(eval_ok("typeof(Lax(42))"), Value::Str("Lax".into()));
+        assert_eq!(eval_ok("typeof(Lax(42))"), Value::str("Lax".into()));
     }
 
     #[test]
@@ -2055,7 +2055,7 @@ Lax(21).flatMap(safeLax).getOrDefault(0)
                     .iter()
                     .find(|(n, _)| n == "__default")
                     .map(|(_, v)| v),
-                Some(&Value::Str(String::new()))
+                Some(&Value::str(String::new()))
             );
         } else {
             panic!("Expected BuchiPack, got {:?}", val);
@@ -2079,7 +2079,7 @@ Lax(21).flatMap(safeLax).getOrDefault(0)
             );
             assert_eq!(
                 fields.iter().find(|(n, _)| n == "__type").map(|(_, v)| v),
-                Some(&Value::Str("Result".into()))
+                Some(&Value::str("Result".into()))
             );
         } else {
             panic!("Expected BuchiPack, got {:?}", val);
@@ -2096,7 +2096,7 @@ Result[0](throw <= NotFound(message <= "not found"))
         if let Value::BuchiPack(fields) = &val {
             assert_eq!(
                 fields.iter().find(|(n, _)| n == "__type").map(|(_, v)| v),
-                Some(&Value::Str("Result".into()))
+                Some(&Value::str("Result".into()))
             );
             // throw field should contain an error
             let throw_val = fields.iter().find(|(n, _)| n == "throw").map(|(_, v)| v);
@@ -2178,7 +2178,7 @@ Result[0](throw <= Fail(message <= "fail")).mapError(addPrefix).toString()
 "#;
         assert_eq!(
             eval_ok(source),
-            Value::Str("Result(throw <= Error: fail)".into())
+            Value::str("Result(throw <= Error: fail)".into())
         );
     }
 
@@ -2186,7 +2186,7 @@ Result[0](throw <= Fail(message <= "fail")).mapError(addPrefix).toString()
     fn test_result_to_string() {
         assert_eq!(
             eval_ok("Result[42]().toString()"),
-            Value::Str("Result(42)".into())
+            Value::str("Result(42)".into())
         );
         let source = r#"
 Error => NotFound = @(message: Str)
@@ -2194,7 +2194,7 @@ Result[0](throw <= NotFound(message <= "not found")).toString()
 "#;
         assert_eq!(
             eval_ok(source),
-            Value::Str("Result(throw <= not found)".into())
+            Value::str("Result(throw <= not found)".into())
         );
     }
 
@@ -2259,7 +2259,7 @@ Error => ValidationError = @(field: Str)
 Result[15, _ x = x >= 18](throw <= ValidationError(type <= "ValidationError", message <= "Must be 18+", field <= "age")) ]=> validAge
 validAge.toString()
 "#;
-        assert_eq!(eval_ok(source), Value::Str("caught".into()));
+        assert_eq!(eval_ok(source), Value::str("caught".into()));
     }
 
     #[test]
@@ -2358,7 +2358,7 @@ Result[21, _ = false]().map(double).isError()
     fn test_result_predicate_to_string() {
         assert_eq!(
             eval_ok("Result[42, _ = true]().toString()"),
-            Value::Str("Result(42)".into())
+            Value::str("Result(42)".into())
         );
         // _ = false means predicate fails → toString should show throw
         let source = "Result[42, _ = false]().toString()";
@@ -2383,7 +2383,7 @@ Result[21, _ = false]().map(double).isError()
         if let Value::BuchiPack(fields) = &val {
             assert_eq!(
                 fields.iter().find(|(n, _)| n == "__type").map(|(_, v)| v),
-                Some(&Value::Str("HashMap".into()))
+                Some(&Value::str("HashMap".into()))
             );
         } else {
             panic!("Expected BuchiPack, got {:?}", val);
@@ -2397,7 +2397,7 @@ m <= hashMap()
 m2 <= m.set("name", "Alice")
 m2.get("name").getOrDefault("")
 "#;
-        assert_eq!(eval_ok(source), Value::Str("Alice".into()));
+        assert_eq!(eval_ok(source), Value::str("Alice".into()));
     }
 
     #[test]
@@ -2406,7 +2406,7 @@ m2.get("name").getOrDefault("")
 m <= hashMap()
 m.get("missing").getOrDefault("default")
 "#;
-        assert_eq!(eval_ok(source), Value::Str("default".into()));
+        assert_eq!(eval_ok(source), Value::str("default".into()));
     }
 
     #[test]
@@ -2489,7 +2489,7 @@ entries.length()
         if let Value::BuchiPack(fields) = &val {
             assert_eq!(
                 fields.iter().find(|(n, _)| n == "__type").map(|(_, v)| v),
-                Some(&Value::Str("Set".into()))
+                Some(&Value::str("Set".into()))
             );
         } else {
             panic!("Expected BuchiPack, got {:?}", val);
@@ -2569,17 +2569,17 @@ s <= setOf(@[1, 2, 3])
 
     #[test]
     fn test_prelude_typeof() {
-        assert_eq!(eval_ok("typeof(42)"), Value::Str("Int".into()));
-        assert_eq!(eval_ok("typeof(3.14)"), Value::Str("Float".into()));
-        assert_eq!(eval_ok(r#"typeof("hello")"#), Value::Str("Str".into()));
-        assert_eq!(eval_ok("typeof(true)"), Value::Str("Bool".into()));
-        assert_eq!(eval_ok("typeof(@[1,2])"), Value::Str("List".into()));
-        assert_eq!(eval_ok("typeof(@(x <= 1))"), Value::Str("BuchiPack".into()));
+        assert_eq!(eval_ok("typeof(42)"), Value::str("Int".into()));
+        assert_eq!(eval_ok("typeof(3.14)"), Value::str("Float".into()));
+        assert_eq!(eval_ok(r#"typeof("hello")"#), Value::str("Str".into()));
+        assert_eq!(eval_ok("typeof(true)"), Value::str("Bool".into()));
+        assert_eq!(eval_ok("typeof(@[1,2])"), Value::str("List".into()));
+        assert_eq!(eval_ok("typeof(@(x <= 1))"), Value::str("BuchiPack".into()));
         // Optional is abolished — typeof(Optional[1]()) would error
-        assert_eq!(eval_ok("typeof(Lax[1]())"), Value::Str("Lax".into()));
-        assert_eq!(eval_ok("typeof(Result[1]())"), Value::Str("Result".into()));
-        assert_eq!(eval_ok("typeof(hashMap())"), Value::Str("HashMap".into()));
-        assert_eq!(eval_ok("typeof(setOf(@[]))"), Value::Str("Set".into()));
+        assert_eq!(eval_ok("typeof(Lax[1]())"), Value::str("Lax".into()));
+        assert_eq!(eval_ok("typeof(Result[1]())"), Value::str("Result".into()));
+        assert_eq!(eval_ok("typeof(hashMap())"), Value::str("HashMap".into()));
+        assert_eq!(eval_ok("typeof(setOf(@[]))"), Value::str("Set".into()));
     }
 
     #[test]
@@ -2777,7 +2777,7 @@ handle =
 handle()
 "#,
         );
-        assert_eq!(v, Value::Str("RangeError".to_string()));
+        assert_eq!(v, Value::str("RangeError".to_string()));
     }
 
     #[test]
@@ -2797,7 +2797,7 @@ handle =
 handle()
 "#,
         );
-        assert_eq!(v, Value::Str("RangeError".to_string()));
+        assert_eq!(v, Value::str("RangeError".to_string()));
     }
 
     #[test]
@@ -2845,7 +2845,7 @@ Greeter = @(
 g <= Greeter(name <= "Alice")
 result <= g.greet()
 "#;
-        assert_eq!(eval_ok(source), Value::Str("Alice".to_string()));
+        assert_eq!(eval_ok(source), Value::str("Alice".to_string()));
     }
 
     #[test]
@@ -2879,7 +2879,7 @@ Person => Employee = @(
 e <= Employee(name <= "Bob", age <= 30, department <= "Eng")
 result <= e.greet()
 "#;
-        assert_eq!(eval_ok(source), Value::Str("Bob".to_string()));
+        assert_eq!(eval_ok(source), Value::str("Bob".to_string()));
     }
 
     #[test]
@@ -2898,7 +2898,7 @@ Person => Pilot = @(
 p <= Pilot(name <= "Asuka", age <= 14, seq <= 2)
 result <= p.info()
 "#;
-        assert_eq!(eval_ok(source), Value::Str("Asuka #2".to_string()));
+        assert_eq!(eval_ok(source), Value::str("Asuka #2".to_string()));
     }
 
     #[test]
@@ -2933,7 +2933,7 @@ raw <= '{"name":"Alice","age":30}'
 JSON[raw, User]() ]=> user
 user.name
 "#;
-        assert_eq!(eval_ok(source), Value::Str("Alice".to_string()));
+        assert_eq!(eval_ok(source), Value::str("Alice".to_string()));
     }
 
     #[test]
@@ -2955,7 +2955,7 @@ raw <= '{"name":"Alice","age":30,"extra":"ignored"}'
 JSON[raw, User]() ]=> user
 user.name
 "#;
-        assert_eq!(eval_ok(source), Value::Str("Alice".to_string()));
+        assert_eq!(eval_ok(source), Value::str("Alice".to_string()));
     }
 
     #[test]
@@ -2988,7 +2988,7 @@ raw <= '{"name":null,"age":null}'
 JSON[raw, User]() ]=> user
 user.name
 "#;
-        assert_eq!(eval_ok(source), Value::Str(String::new()));
+        assert_eq!(eval_ok(source), Value::str(String::new()));
     }
 
     #[test]
@@ -3000,7 +3000,7 @@ raw <= '{"name":"Asuka","address":{"city":"Tokyo-3","zip":"999"}}'
 JSON[raw, User]() ]=> user
 user.address.city
 "#;
-        assert_eq!(eval_ok(source), Value::Str("Tokyo-3".to_string()));
+        assert_eq!(eval_ok(source), Value::str("Tokyo-3".to_string()));
     }
 
     #[test]
@@ -3023,7 +3023,7 @@ JSON[raw, @[Pilot]]() ]=> pilots
 pilots.get(0) ]=> first
 first.name
 "#;
-        assert_eq!(eval_ok(source), Value::Str("Asuka".to_string()));
+        assert_eq!(eval_ok(source), Value::str("Asuka".to_string()));
     }
 
     #[test]
@@ -3043,7 +3043,7 @@ raw <= '"hello"'
 JSON[raw, Str]() ]=> s
 s
 "#;
-        assert_eq!(eval_ok(source), Value::Str("hello".to_string()));
+        assert_eq!(eval_ok(source), Value::str("hello".to_string()));
     }
 
     #[test]
@@ -3092,7 +3092,7 @@ JSON[raw, UserInfo]() ]=> user
 JSON[raw, StatsInfo]() ]=> stats
 user.name
 "#;
-        assert_eq!(eval_ok(source), Value::Str("Asuka".to_string()));
+        assert_eq!(eval_ok(source), Value::str("Asuka".to_string()));
     }
 
     #[test]
@@ -3143,7 +3143,7 @@ JSON[raw, User]() ]=> user
 user.name
 "#;
         // name should be "" (default for Str)
-        assert_eq!(eval_ok(source), Value::Str(String::new()));
+        assert_eq!(eval_ok(source), Value::str(String::new()));
     }
 
     #[test]
@@ -3179,7 +3179,7 @@ JSON[raw, User]() ]=> user
 user.name
 "#;
         // null should become "" (Str default)
-        assert_eq!(eval_ok(source), Value::Str(String::new()));
+        assert_eq!(eval_ok(source), Value::str(String::new()));
     }
 
     #[test]
@@ -3228,7 +3228,7 @@ user.age
 items <= @["hello", "world"]
 result <= items.first().unmold()
 "#;
-        assert_eq!(eval_ok(source), Value::Str("hello".to_string()));
+        assert_eq!(eval_ok(source), Value::str("hello".to_string()));
     }
 
     #[test]
@@ -3264,7 +3264,7 @@ result <= items.get(99)
                 let has_value = fields.iter().find(|(k, _)| k == "hasValue");
                 assert_eq!(has_value.map(|(_, v)| v), Some(&Value::Bool(false)));
                 let typ = fields.iter().find(|(k, _)| k == "__type");
-                assert_eq!(typ.map(|(_, v)| v), Some(&Value::Str("Lax".to_string())));
+                assert_eq!(typ.map(|(_, v)| v), Some(&Value::str("Lax".to_string())));
             }
             other => panic!("Expected BuchiPack (Lax), got {:?}", other),
         }
@@ -3283,9 +3283,9 @@ result <= items.get(1)
                 let has_value = fields.iter().find(|(k, _)| k == "hasValue");
                 assert_eq!(has_value.map(|(_, v)| v), Some(&Value::Bool(true)));
                 let inner = fields.iter().find(|(k, _)| k == "__value");
-                assert_eq!(inner.map(|(_, v)| v), Some(&Value::Str("b".to_string())));
+                assert_eq!(inner.map(|(_, v)| v), Some(&Value::str("b".to_string())));
                 let typ = fields.iter().find(|(k, _)| k == "__type");
-                assert_eq!(typ.map(|(_, v)| v), Some(&Value::Str("Lax".to_string())));
+                assert_eq!(typ.map(|(_, v)| v), Some(&Value::str("Lax".to_string())));
             }
             other => panic!("Expected BuchiPack (Lax), got {:?}", other),
         }
@@ -3298,7 +3298,7 @@ result <= items.get(1)
 items <= @["cherry", "apple", "banana"]
 result <= items.max().unmold()
 "#;
-        assert_eq!(eval_ok(source), Value::Str("cherry".to_string()));
+        assert_eq!(eval_ok(source), Value::str("cherry".to_string()));
     }
 
     // ── Div/Mod mold tests ──
@@ -3406,7 +3406,7 @@ testFn dummy: Int =
 result <= testFn(0)
 error_var
 "#;
-        assert_eq!(eval_ok(source), Value::Str("outer".into()));
+        assert_eq!(eval_ok(source), Value::str("outer".into()));
     }
 
     #[test]
@@ -3512,7 +3512,7 @@ result
 
         // Send immediately — well within any timeout
         std::thread::spawn(move || {
-            tx.send(Ok(Value::Str("done".into()))).unwrap();
+            tx.send(Ok(Value::str("done".into()))).unwrap();
         });
 
         let interpreter = crate::interpreter::eval::Interpreter::new();
@@ -3522,7 +3522,7 @@ result
         assert!(result.is_some());
         let resolved = result.unwrap();
         assert_eq!(resolved.status, AsyncStatus::Fulfilled);
-        assert_eq!(*resolved.value, Value::Str("done".into()));
+        assert_eq!(*resolved.value, Value::str("done".into()));
     }
 
     #[test]
@@ -3619,7 +3619,7 @@ handleReject unused =
 
 handleReject(0)
 "#;
-        assert_eq!(eval_ok(source), Value::Str("caught".into()));
+        assert_eq!(eval_ok(source), Value::str("caught".into()));
     }
 
     // ── Stream[T] Mold Type ──
@@ -3735,7 +3735,7 @@ s.toString()
 "#;
         assert_eq!(
             eval_ok(source),
-            Value::Str("Stream[completed: 3 items]".into())
+            Value::str("Stream[completed: 3 items]".into())
         );
     }
 

@@ -401,18 +401,18 @@ impl Interpreter {
                 if in_bundled("os") {
                     for sym in super::os_eval::OS_SYMBOLS {
                         self.env
-                            .define_force(sym, Value::Str(format!("__os_builtin_{}", sym)));
+                            .define_force(sym, Value::str(format!("__os_builtin_{}", sym)));
                     }
                 } else if in_bundled("crypto") {
                     {
                         let sym = "sha256";
                         self.env
-                            .define_force(sym, Value::Str(format!("__crypto_builtin_{}", sym)));
+                            .define_force(sym, Value::str(format!("__crypto_builtin_{}", sym)));
                     }
                 } else if in_bundled("net") {
                     for sym in super::net_eval::NET_SYMBOLS {
                         self.env
-                            .define_force(sym, Value::Str(format!("__net_builtin_{}", sym)));
+                            .define_force(sym, Value::str(format!("__net_builtin_{}", sym)));
                     }
                 } else if in_bundled("pool") {
                     for sym in [
@@ -423,7 +423,7 @@ impl Interpreter {
                         "poolHealth",
                     ] {
                         self.env
-                            .define_force(sym, Value::Str(format!("__pool_builtin_{}", sym)));
+                            .define_force(sym, Value::str(format!("__pool_builtin_{}", sym)));
                     }
                 }
             }
@@ -797,7 +797,7 @@ impl Interpreter {
     ///      - an `addon.toml` `[functions]` entry.
     /// 5. Binds each requested symbol into the current env. Facade
     ///    exports are bound by value; addon functions are bound as
-    ///    sentinels `Value::Str("__taida_addon_call::<pkg>::<fn>")` that
+    ///    sentinels `Value::str("__taida_addon_call::<pkg>::<fn>")` that
     ///    `try_addon_func` (in `addon_eval.rs`) routes through
     ///    `LoadedAddon::call_function`.
     ///
@@ -870,7 +870,7 @@ impl Interpreter {
                 // (`__os_builtin_*`, `__net_builtin_*`, etc.) use
                 // single-segment underscore names, so collision is
                 // structurally impossible.
-                Value::Str(format!(
+                Value::str(format!(
                     "__taida_addon_call::{}::{}",
                     resolved.package_id, orig_name
                 ))
@@ -904,7 +904,7 @@ impl Interpreter {
     /// The facade file lives at `<pkg_dir>/taida/<stem>.td` where
     /// `<stem>` is the final `/`-segment of the package id. Inside the
     /// facade, every manifest `[functions]` entry is pre-bound as an
-    /// addon sentinel (`Value::Str(__taida_addon_call::<pkg>::<fn>)`)
+    /// addon sentinel (`Value::str(__taida_addon_call::<pkg>::<fn>)`)
     /// so the facade can assign `TerminalSize <= terminalSize` to
     /// rename the Rust function under a Taida-side name, or combine
     /// addon calls with pure-Taida companion values such as the
@@ -994,7 +994,7 @@ impl Interpreter {
         // addon calls with pure-Taida values (`KeyKind`, wrapper funcs).
         for fn_name in resolved.manifest.functions.keys() {
             let sentinel = format!("__taida_addon_call::{}::{}", resolved.package_id, fn_name);
-            self.env.define_force(fn_name, Value::Str(sentinel));
+            self.env.define_force(fn_name, Value::str(sentinel));
         }
 
         let exec_result = self.eval_program(&program);

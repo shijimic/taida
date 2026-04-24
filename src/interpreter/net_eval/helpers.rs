@@ -167,7 +167,7 @@ pub(crate) fn make_result_success(inner: Value) -> Value {
         ("__value".into(), inner),
         ("throw".into(), Value::Unit),
         ("__predicate".into(), Value::Unit),
-        ("__type".into(), Value::Str("Result".into())),
+        ("__type".into(), Value::str("Result".into())),
     ])
 }
 
@@ -176,19 +176,19 @@ pub(crate) fn make_result_failure_msg(kind: &str, message: impl Into<String>) ->
     let inner = Value::BuchiPack(vec![
         ("ok".into(), Value::Bool(false)),
         ("code".into(), Value::Int(-1)),
-        ("message".into(), Value::Str(message.clone())),
-        ("kind".into(), Value::Str(kind.to_string())),
+        ("message".into(), Value::str(message.clone())),
+        ("kind".into(), Value::str(kind.to_string())),
     ]);
     let error_val = Value::Error(ErrorValue {
         error_type: "HttpError".into(),
         message,
-        fields: vec![("kind".into(), Value::Str(kind.to_string()))],
+        fields: vec![("kind".into(), Value::str(kind.to_string()))],
     });
     Value::BuchiPack(vec![
         ("__value".into(), inner),
         ("throw".into(), error_val),
         ("__predicate".into(), Value::Unit),
-        ("__type".into(), Value::Str("Result".into())),
+        ("__type".into(), Value::str("Result".into())),
     ])
 }
 
@@ -270,7 +270,7 @@ pub(crate) fn get_field_int(fields: &[(String, Value)], key: &str) -> Option<i64
 /// Get a Str field from a BuchiPack field list.
 pub(crate) fn get_field_str(fields: &[(String, Value)], key: &str) -> Option<String> {
     match fields.iter().find(|(k, _)| k == key) {
-        Some((_, Value::Str(s))) => Some(s.clone()),
+        Some((_, Value::Str(s))) => Some((**s).clone()),
         _ => None,
     }
 }
@@ -921,8 +921,8 @@ pub(crate) fn extract_response_fields(response: &Value) -> Result<ResponseFields
                 ));
             }
         };
-        let name = match hf.iter().find(|(k, _)| k == "name") {
-            Some((_, Value::Str(s))) => s.clone(),
+        let name: String = match hf.iter().find(|(k, _)| k == "name") {
+            Some((_, Value::Str(s))) => (**s).clone(),
             _ => {
                 return Err(format!(
                     "httpEncodeResponse: headers[{}].name must be Str",
@@ -930,8 +930,8 @@ pub(crate) fn extract_response_fields(response: &Value) -> Result<ResponseFields
                 ));
             }
         };
-        let value = match hf.iter().find(|(k, _)| k == "value") {
-            Some((_, Value::Str(s))) => s.clone(),
+        let value: String = match hf.iter().find(|(k, _)| k == "value") {
+            Some((_, Value::Str(s))) => (**s).clone(),
             _ => {
                 return Err(format!(
                     "httpEncodeResponse: headers[{}].value must be Str",
@@ -1033,7 +1033,7 @@ pub(crate) fn status_reason(code: i64) -> &'static str {
 pub(crate) fn is_body_stream_request(req: &Value) -> bool {
     if let Value::BuchiPack(fields) = req {
         fields.iter().any(|(k, v)| {
-            k == "__body_stream" && matches!(v, Value::Str(s) if s == "__v4_body_stream")
+            k == "__body_stream" && matches!(v, Value::Str(s) if s.as_str() == "__v4_body_stream")
         })
     } else {
         false

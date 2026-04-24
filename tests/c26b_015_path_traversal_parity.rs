@@ -138,10 +138,7 @@ fn c26b_015_interpreter_accepts_in_project_parent_import() {
         "interp must accept ../src/bar.td; stderr: {}",
         String::from_utf8_lossy(&run.stderr)
     );
-    assert_eq!(
-        String::from_utf8_lossy(&run.stdout).trim(),
-        "bar-x"
-    );
+    assert_eq!(String::from_utf8_lossy(&run.stdout).trim(), "bar-x");
     let _ = fs::remove_dir_all(&dir);
 }
 
@@ -169,10 +166,7 @@ fn c26b_015_js_accepts_in_project_parent_import() {
     );
     let run = Command::new("node").arg(&js).output().expect("run js");
     assert!(run.status.success(), "node exit non-zero");
-    assert_eq!(
-        String::from_utf8_lossy(&run.stdout).trim(),
-        "bar-x"
-    );
+    assert_eq!(String::from_utf8_lossy(&run.stdout).trim(), "bar-x");
     let _ = fs::remove_dir_all(&dir);
 }
 

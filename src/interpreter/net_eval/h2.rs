@@ -361,9 +361,9 @@ impl Interpreter {
 
                 // Build request pack for handler (h2 requests use 1-arg handler path).
                 let mut request_fields: Vec<(String, Value)> = vec![
-                    ("method".into(), Value::Str(method)),
-                    ("path".into(), Value::Str(path_part.to_string())),
-                    ("query".into(), Value::Str(query_part.to_string())),
+                    ("method".into(), Value::str(method)),
+                    ("path".into(), Value::str(path_part.to_string())),
+                    ("query".into(), Value::str(query_part.to_string())),
                     (
                         "version".into(),
                         Value::BuchiPack(vec![
@@ -377,15 +377,15 @@ impl Interpreter {
                 let mut header_values: Vec<Value> = Vec::new();
                 for (name, value) in &regular_headers {
                     header_values.push(Value::BuchiPack(vec![
-                        ("name".into(), Value::Str(name.clone())),
-                        ("value".into(), Value::Str(value.clone())),
+                        ("name".into(), Value::str(name.clone())),
+                        ("value".into(), Value::str(value.clone())),
                     ]));
                 }
                 // Add :authority as host header for compatibility
                 if !authority.is_empty() {
                     header_values.push(Value::BuchiPack(vec![
-                        ("name".into(), Value::Str("host".into())),
-                        ("value".into(), Value::Str(authority.clone())),
+                        ("name".into(), Value::str("host".into())),
+                        ("value".into(), Value::str(authority.clone())),
                     ]));
                 }
                 request_fields.push(("headers".into(), Value::list(header_values)));
@@ -396,11 +396,11 @@ impl Interpreter {
                 request_fields.push(("bodyOffset".into(), Value::Int(0)));
                 request_fields.push(("contentLength".into(), Value::Int(raw_len as i64)));
                 request_fields.push(("raw".into(), Value::bytes(body)));
-                request_fields.push(("remoteHost".into(), Value::Str(peer_addr.ip().to_string())));
+                request_fields.push(("remoteHost".into(), Value::str(peer_addr.ip().to_string())));
                 request_fields.push(("remotePort".into(), Value::Int(peer_addr.port() as i64)));
                 request_fields.push(("keepAlive".into(), Value::Bool(true)));
                 request_fields.push(("chunked".into(), Value::Bool(false)));
-                request_fields.push(("protocol".into(), Value::Str("h2".into())));
+                request_fields.push(("protocol".into(), Value::str("h2".into())));
 
                 let request_pack = Value::BuchiPack(request_fields);
 

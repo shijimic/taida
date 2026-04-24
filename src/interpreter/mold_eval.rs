@@ -44,7 +44,7 @@ fn make_lax_value(has_value: bool, value: Value, default: Value) -> Value {
         ("hasValue".into(), Value::Bool(has_value)),
         ("__value".into(), value),
         ("__default".into(), default),
-        ("__type".into(), Value::Str("Lax".into())),
+        ("__type".into(), Value::str("Lax".into())),
     ])
 }
 
@@ -59,7 +59,7 @@ fn make_bytes_cursor_arc(bytes: Arc<Vec<u8>>, offset: i64) -> Value {
         ("bytes".into(), Value::Bytes(bytes)),
         ("offset".into(), Value::Int(clamped)),
         ("length".into(), Value::Int(length)),
-        ("__type".into(), Value::Str("BytesCursor".into())),
+        ("__type".into(), Value::str("BytesCursor".into())),
     ])
 }
 
@@ -175,7 +175,7 @@ impl Interpreter {
             Expr::Ident(name, _) => match name.as_str() {
                 "Int" | "Num" => Ok(Value::Int(0)),
                 "Float" => Ok(Value::Float(0.0)),
-                "Str" => Ok(Value::Str(String::new())),
+                "Str" => Ok(Value::str(String::new())),
                 "Bool" => Ok(Value::Bool(false)),
                 "Molten" => Ok(Value::Molten),
                 _ => Ok(Value::Unit),
@@ -269,7 +269,7 @@ impl Interpreter {
                     }
                     other => return Ok(Some(other)),
                 };
-                Ok(Some(Signal::Value(Value::Str(s.to_uppercase()))))
+                Ok(Some(Signal::Value(Value::str(s.to_uppercase()))))
             }
             "Lower" => {
                 if type_args.is_empty() {
@@ -286,7 +286,7 @@ impl Interpreter {
                     }
                     other => return Ok(Some(other)),
                 };
-                Ok(Some(Signal::Value(Value::Str(s.to_lowercase()))))
+                Ok(Some(Signal::Value(Value::str(s.to_lowercase()))))
             }
             "Trim" => {
                 if type_args.is_empty() {
@@ -315,9 +315,9 @@ impl Interpreter {
                     (true, true) => s.trim().to_string(),
                     (true, false) => s.trim_start().to_string(),
                     (false, true) => s.trim_end().to_string(),
-                    (false, false) => s,
+                    (false, false) => Value::str_take(s),
                 };
-                Ok(Some(Signal::Value(Value::Str(result))))
+                Ok(Some(Signal::Value(Value::str(result))))
             }
             "Split" => {
                 if type_args.len() < 2 {
@@ -343,8 +343,10 @@ impl Interpreter {
                     }
                     other => return Ok(Some(other)),
                 };
-                let parts: Vec<Value> =
-                    s.split(&delim).map(|p| Value::Str(p.to_string())).collect();
+                let parts: Vec<Value> = s
+                    .split(delim.as_str())
+                    .map(|p| Value::str(p.to_string()))
+                    .collect();
                 Ok(Some(Signal::Value(Value::list(parts))))
             }
             "Chars" => {
@@ -362,7 +364,7 @@ impl Interpreter {
                     }
                     other => return Ok(Some(other)),
                 };
-                let chars: Vec<Value> = s.chars().map(|ch| Value::Str(ch.to_string())).collect();
+                let chars: Vec<Value> = s.chars().map(|ch| Value::str(ch.to_string())).collect();
                 Ok(Some(Signal::Value(Value::list(chars))))
             }
             "Replace" => {
@@ -406,11 +408,11 @@ impl Interpreter {
                     .map(|v| v.is_truthy())
                     .unwrap_or(false);
                 let result = if replace_all {
-                    s.replace(&old, &new_str)
+                    s.replace(old.as_str(), new_str.as_str())
                 } else {
-                    s.replacen(&old, &new_str, 1)
+                    s.replacen(old.as_str(), new_str.as_str(), 1)
                 };
-                Ok(Some(Signal::Value(Value::Str(result))))
+                Ok(Some(Signal::Value(Value::str(result))))
             }
             "Slice" if !type_args.is_empty() && type_args.len() <= 3 => {
                 // Slice[str|bytes](start <= n, end <= m)  — 1 type arg + optional fields
@@ -450,7 +452,7 @@ impl Interpreter {
                             .skip(clamped_start)
                             .take(clamped_end.saturating_sub(clamped_start))
                             .collect();
-                        Ok(Some(Signal::Value(Value::Str(result))))
+                        Ok(Some(Signal::Value(Value::str(result))))
                     }
                     Value::Bytes(bytes) => {
                         let end = if type_args.len() >= 3 {
@@ -500,19 +502,19 @@ impl Interpreter {
                 };
                 match s.chars().nth(idx) {
                     Some(c) => {
-                        let value = Value::Str(c.to_string());
+                        let value = Value::str(c.to_string());
                         Ok(Some(Signal::Value(make_lax_value(
                             true,
                             value,
-                            Value::Str(String::new()),
+                            Value::str(String::new()),
                         ))))
                     }
                     None => {
                         // Out of bounds: return Lax with hasValue=false
                         Ok(Some(Signal::Value(make_lax_value(
                             false,
-                            Value::Str(String::new()),
-                            Value::Str(String::new()),
+                            Value::str(String::new()),
+                            Value::str(String::new()),
                         ))))
                     }
                 }
@@ -544,7 +546,7 @@ impl Interpreter {
                     }
                     other => return Ok(Some(other)),
                 };
-                Ok(Some(Signal::Value(Value::Str(s.repeat(n)))))
+                Ok(Some(Signal::Value(Value::str(s.repeat(n)))))
             }
             // ── C26B-018 (B) byte-level primitives (UTF-8 byte view) ──
             // These operate on the raw UTF-8 byte stream (not Unicode
@@ -600,9 +602,8 @@ impl Interpreter {
             "ByteSlice" => {
                 if type_args.len() < 3 {
                     return Err(RuntimeError {
-                        message:
-                            "ByteSlice requires 3 arguments: ByteSlice[str, start, end]()"
-                                .into(),
+                        message: "ByteSlice requires 3 arguments: ByteSlice[str, start, end]()"
+                            .into(),
                     });
                 }
                 let s = match self.eval_expr(&type_args[0])? {
@@ -656,7 +657,7 @@ impl Interpreter {
                     Ok(v) => v.to_string(),
                     Err(_) => String::from_utf8_lossy(slice).into_owned(),
                 };
-                Ok(Some(Signal::Value(Value::Str(out))))
+                Ok(Some(Signal::Value(Value::str(out))))
             }
             "ByteLength" => {
                 if type_args.is_empty() {
@@ -668,10 +669,7 @@ impl Interpreter {
                     Signal::Value(Value::Str(s)) => s,
                     Signal::Value(v) => {
                         return Err(RuntimeError {
-                            message: format!(
-                                "ByteLength: argument must be a string, got {}",
-                                v
-                            ),
+                            message: format!("ByteLength: argument must be a string, got {}", v),
                         });
                     }
                     other => return Ok(Some(other)),
@@ -734,7 +732,7 @@ impl Interpreter {
                     other => return Ok(Some(other)),
                 };
                 if n <= 0 {
-                    return Ok(Some(Signal::Value(Value::Str(String::new()))));
+                    return Ok(Some(Signal::Value(Value::str(String::new()))));
                 }
                 let n = n as usize;
                 if n == 1 {
@@ -751,7 +749,7 @@ impl Interpreter {
                     out.push_str(&sep);
                     out.push_str(&s);
                 }
-                Ok(Some(Signal::Value(Value::Str(out))))
+                Ok(Some(Signal::Value(Value::str(out))))
             }
             "Reverse" => {
                 // Polymorphic: works on both Str and List
@@ -765,7 +763,7 @@ impl Interpreter {
                     other => return Ok(Some(other)),
                 };
                 match val {
-                    Value::Str(s) => Ok(Some(Signal::Value(Value::Str(s.chars().rev().collect())))),
+                    Value::Str(s) => Ok(Some(Signal::Value(Value::str(s.chars().rev().collect())))),
                     Value::List(items) => {
                         let mut reversed = Value::list_take(items);
                         reversed.reverse();
@@ -802,13 +800,25 @@ impl Interpreter {
                     }
                     other => return Ok(Some(other)),
                 };
-                let side = self
+                let side: String = self
                     .eval_mold_option(fields, "side")?
-                    .and_then(|v| if let Value::Str(s) = v { Some(s) } else { None })
+                    .and_then(|v| {
+                        if let Value::Str(s) = v {
+                            Some((*s).clone())
+                        } else {
+                            None
+                        }
+                    })
                     .unwrap_or_else(|| "start".to_string());
-                let pad_char = self
+                let pad_char: String = self
                     .eval_mold_option(fields, "char")?
-                    .and_then(|v| if let Value::Str(s) = v { Some(s) } else { None })
+                    .and_then(|v| {
+                        if let Value::Str(s) = v {
+                            Some((*s).clone())
+                        } else {
+                            None
+                        }
+                    })
                     .unwrap_or_else(|| " ".to_string());
                 if s.len() >= target_len {
                     Ok(Some(Signal::Value(Value::Str(s))))
@@ -819,7 +829,7 @@ impl Interpreter {
                     } else {
                         format!("{}{}", padding, s)
                     };
-                    Ok(Some(Signal::Value(Value::Str(result))))
+                    Ok(Some(Signal::Value(Value::str(result))))
                 }
             }
 
@@ -852,7 +862,7 @@ impl Interpreter {
                     }
                     other => return Ok(Some(other)),
                 };
-                Ok(Some(Signal::Value(Value::Str(format!(
+                Ok(Some(Signal::Value(Value::str(format!(
                     "{:.prec$}",
                     num,
                     prec = digits
@@ -1280,15 +1290,15 @@ impl Interpreter {
                 if !(2..=36).contains(&base) {
                     return Ok(Some(Signal::Value(make_lax_value(
                         false,
-                        Value::Str(String::new()),
-                        Value::Str(String::new()),
+                        Value::str(String::new()),
+                        Value::str(String::new()),
                     ))));
                 }
                 let out = to_radix_i64(val, base as u32);
                 Ok(Some(Signal::Value(make_lax_value(
                     true,
-                    Value::Str(out),
-                    Value::Str(String::new()),
+                    Value::str(out),
+                    Value::str(String::new()),
                 ))))
             }
             "U16BE" | "U16LE" => {
@@ -1680,10 +1690,7 @@ impl Interpreter {
                     }
                     other => return Ok(Some(other)),
                 };
-                let items = bytes
-                    .iter()
-                    .map(|b| Value::Int(*b as i64))
-                    .collect();
+                let items = bytes.iter().map(|b| Value::Int(*b as i64)).collect();
                 Ok(Some(Signal::Value(Value::list(items))))
             }
             "Append" => {
@@ -1790,7 +1797,7 @@ impl Interpreter {
                     other => return Ok(Some(other)),
                 };
                 let result: Vec<String> = list.iter().map(|v| v.to_display_string()).collect();
-                Ok(Some(Signal::Value(Value::Str(result.join(&sep)))))
+                Ok(Some(Signal::Value(Value::str(result.join(&sep)))))
             }
             "Sum" => {
                 if type_args.is_empty() {
@@ -2024,7 +2031,7 @@ impl Interpreter {
                             ("hasValue".into(), Value::Bool(true)),
                             ("__value".into(), item.clone()),
                             ("__default".into(), default_val),
-                            ("__type".into(), Value::Str("Lax".into())),
+                            ("__type".into(), Value::str("Lax".into())),
                         ]))));
                     }
                 }
@@ -2038,7 +2045,7 @@ impl Interpreter {
                     ("hasValue".into(), Value::Bool(false)),
                     ("__value".into(), default_val.clone()),
                     ("__default".into(), default_val),
-                    ("__type".into(), Value::Str("Lax".into())),
+                    ("__type".into(), Value::str("Lax".into())),
                 ]))))
             }
             "FindIndex" => {
@@ -2231,7 +2238,7 @@ impl Interpreter {
                     ("__value".into(), inner_value),
                     ("__predicate".into(), predicate),
                     ("throw".into(), throw_value),
-                    ("__type".into(), Value::Str("Result".into())),
+                    ("__type".into(), Value::str("Result".into())),
                 ]))))
             }
 
@@ -2315,7 +2322,7 @@ impl Interpreter {
                     ("unm".into(), unm.clone()),
                     ("__value".into(), sol),
                     ("__default".into(), unm),
-                    ("__type".into(), Value::Str("TODO".into())),
+                    ("__type".into(), Value::str("TODO".into())),
                 ]))))
             }
 
@@ -2343,7 +2350,7 @@ impl Interpreter {
                     ("hasValue".into(), Value::Bool(true)),
                     ("__value".into(), inner_value),
                     ("__error".into(), Value::Unit),
-                    ("__type".into(), Value::Str("Gorillax".into())),
+                    ("__type".into(), Value::str("Gorillax".into())),
                 ]))))
             }
 
@@ -2384,13 +2391,13 @@ impl Interpreter {
                         ("hasValue".into(), Value::Bool(true)),
                         ("__value".into(), result),
                         ("__error".into(), Value::Unit),
-                        ("__type".into(), Value::Str("Gorillax".into())),
+                        ("__type".into(), Value::str("Gorillax".into())),
                     ])))),
                     Ok(Signal::Throw(err)) => Ok(Some(Signal::Value(Value::BuchiPack(vec![
                         ("hasValue".into(), Value::Bool(false)),
                         ("__value".into(), Value::Unit),
                         ("__error".into(), err),
-                        ("__type".into(), Value::Str("Gorillax".into())),
+                        ("__type".into(), Value::str("Gorillax".into())),
                     ])))),
                     Ok(Signal::Gorilla) => Ok(Some(Signal::Gorilla)),
                     Ok(Signal::TailCall(_)) => Err(RuntimeError {
@@ -2407,7 +2414,7 @@ impl Interpreter {
                                 fields: Vec::new(),
                             }),
                         ),
-                        ("__type".into(), Value::Str("Gorillax".into())),
+                        ("__type".into(), Value::str("Gorillax".into())),
                     ])))),
                 }
             }
@@ -2571,16 +2578,16 @@ impl Interpreter {
                     other => return Ok(Some(other)),
                 };
                 let result_val = match &input {
-                    Value::Int(n) => Value::Str(n.to_string()),
-                    Value::Float(f) => Value::Str(f.to_string()),
-                    Value::Bool(b) => Value::Str(b.to_string()),
+                    Value::Int(n) => Value::str(n.to_string()),
+                    Value::Float(f) => Value::str(f.to_string()),
+                    Value::Bool(b) => Value::str(b.to_string()),
                     Value::Str(s) => Value::Str(s.clone()),
-                    other => Value::Str(format!("{}", other)),
+                    other => Value::str(format!("{}", other)),
                 };
                 Ok(Some(Signal::Value(make_lax_value(
                     true,
                     result_val,
-                    Value::Str(String::new()),
+                    Value::str(String::new()),
                 ))))
             }
 
@@ -2720,7 +2727,7 @@ impl Interpreter {
 
                 let bytes_opt: Option<Vec<u8>> = match input {
                     Value::Bytes(v) => Some(Value::bytes_take(v)),
-                    Value::Str(s) => Some(s.into_bytes()),
+                    Value::Str(s) => Some(Value::str_take(s).into_bytes()),
                     Value::Int(len) => {
                         if len < 0 || !(0..=255).contains(&fill) {
                             None
@@ -2783,11 +2790,11 @@ impl Interpreter {
                     _ => None,
                 };
                 let has_value = out.is_some();
-                let value = Value::Str(out.unwrap_or_default());
+                let value = Value::str(out.unwrap_or_default());
                 Ok(Some(Signal::Value(make_lax_value(
                     has_value,
                     value,
-                    Value::Str(String::new()),
+                    Value::str(String::new()),
                 ))))
             }
 
@@ -2825,7 +2832,7 @@ impl Interpreter {
                     other => return Ok(Some(other)),
                 };
                 let bytes = if let Value::Str(s) = input {
-                    Some(s.into_bytes())
+                    Some(Value::str_take(s).into_bytes())
                 } else {
                     None
                 };
@@ -2861,7 +2868,7 @@ impl Interpreter {
                     other => return Ok(Some(other)),
                 };
                 let needle: Vec<u8> = match self.eval_expr(&type_args[2])? {
-                    Signal::Value(Value::Str(s)) => s.into_bytes(),
+                    Signal::Value(Value::Str(s)) => Value::str_take(s).into_bytes(),
                     Signal::Value(Value::Bytes(b)) => Value::bytes_take(b),
                     Signal::Value(v) => {
                         return Err(RuntimeError {
@@ -2902,7 +2909,7 @@ impl Interpreter {
                     other => return Ok(Some(other)),
                 };
                 let prefix: Vec<u8> = match self.eval_expr(&type_args[2])? {
-                    Signal::Value(Value::Str(s)) => s.into_bytes(),
+                    Signal::Value(Value::Str(s)) => Value::str_take(s).into_bytes(),
                     Signal::Value(Value::Bytes(b)) => Value::bytes_take(b),
                     Signal::Value(v) => {
                         return Err(RuntimeError {
@@ -2943,7 +2950,7 @@ impl Interpreter {
                     other => return Ok(Some(other)),
                 };
                 let needle: Vec<u8> = match self.eval_expr(&type_args[2])? {
-                    Signal::Value(Value::Str(s)) => s.into_bytes(),
+                    Signal::Value(Value::Str(s)) => Value::str_take(s).into_bytes(),
                     Signal::Value(Value::Bytes(b)) => Value::bytes_take(b),
                     Signal::Value(v) => {
                         return Err(RuntimeError {
@@ -3019,7 +3026,7 @@ impl Interpreter {
                     }
                     _ => String::new(),
                 };
-                Ok(Some(Signal::Value(Value::Str(result))))
+                Ok(Some(Signal::Value(Value::str(result))))
             }
 
             "SpanSlice" => {
@@ -3083,11 +3090,11 @@ impl Interpreter {
                     None
                 };
                 let has_value = out.is_some();
-                let value = Value::Str(out.unwrap_or_default());
+                let value = Value::str(out.unwrap_or_default());
                 Ok(Some(Signal::Value(make_lax_value(
                     has_value,
                     value,
-                    Value::Str(String::new()),
+                    Value::str(String::new()),
                 ))))
             }
 
@@ -3571,10 +3578,10 @@ impl Interpreter {
                                     ("hasValue".into(), Value::Bool(false)),
                                     ("__value".into(), default_val.clone()),
                                     ("__default".into(), default_val),
-                                    ("__type".into(), Value::Str("Lax".into())),
+                                    ("__type".into(), Value::str("Lax".into())),
                                     (
                                         "__error".into(),
-                                        Value::Str(format!("JSON parse error: {}", e)),
+                                        Value::str(format!("JSON parse error: {}", e)),
                                     ),
                                 ]))));
                             }
@@ -3600,7 +3607,7 @@ impl Interpreter {
                     ("hasValue".into(), Value::Bool(true)),
                     ("__value".into(), typed_value),
                     ("__default".into(), default_val),
-                    ("__type".into(), Value::Str("Lax".into())),
+                    ("__type".into(), Value::str("Lax".into())),
                 ]))))
             }
 
@@ -4017,7 +4024,7 @@ impl Interpreter {
                                 if let Some((_, Value::Str(t))) =
                                     fields.iter().find(|(n, _)| n == "__type")
                                 {
-                                    t == other || self.check_type_extends(t, other)
+                                    t.as_str() == other || self.check_type_extends(t, other)
                                 } else {
                                     false
                                 }

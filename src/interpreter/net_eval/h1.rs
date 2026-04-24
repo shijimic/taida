@@ -18,10 +18,10 @@
 use super::super::eval::{Interpreter, RuntimeError, Signal};
 use super::super::value::Value;
 use super::helpers::{
-    build_streaming_head, chunked_body_complete, chunked_in_place_compact, determine_keep_alive,
-    extract_result_value, extract_result_value_owned, get_field_bool, get_field_int,
-    get_field_value, make_fulfilled_async, make_result_failure_msg, make_result_success, make_span,
-    parse_request_head, send_response_scatter, ChunkedBodyError,
+    ChunkedBodyError, build_streaming_head, chunked_body_complete, chunked_in_place_compact,
+    determine_keep_alive, extract_result_value, extract_result_value_owned, get_field_bool,
+    get_field_int, get_field_value, make_fulfilled_async, make_result_failure_msg,
+    make_result_success, make_span, parse_request_head, send_response_scatter,
 };
 use super::types::{
     ActiveStreamingWriter, ConnAction, ConnReadResult, ConnStream, HttpConnection,
@@ -318,7 +318,7 @@ impl Interpreter {
                         if let Some((_, proto_val)) = fields.iter().find(|(k, _)| k == "protocol") {
                             match proto_val {
                                 Value::Str(proto) => {
-                                    requested_protocol = Some(proto.clone());
+                                    requested_protocol = Some((**proto).clone());
                                 }
                                 Value::Int(ordinal) => {
                                     if let Some(protocol) = http_protocol_ordinal_to_wire(*ordinal)
@@ -362,8 +362,8 @@ impl Interpreter {
 
                         match (cert, key) {
                             (Some(Value::Str(c)), Some(Value::Str(k))) => {
-                                tls_cert_path = Some(c);
-                                tls_key_path = Some(k);
+                                tls_cert_path = Some(Value::str_take(c));
+                                tls_key_path = Some(Value::str_take(k));
                             }
                             (Some(Value::Str(_)), _) => {
                                 // NB5-16: Return Result failure(TlsError) for startup config errors
@@ -965,7 +965,7 @@ impl Interpreter {
             request_fields.push(("contentLength".into(), Value::Int(content_length)));
             request_fields.push((
                 "remoteHost".into(),
-                Value::Str(conn.peer_addr.ip().to_string()),
+                Value::str(conn.peer_addr.ip().to_string()),
             ));
             request_fields.push((
                 "remotePort".into(),
@@ -976,7 +976,7 @@ impl Interpreter {
             // v4: sentinel to identify this request pack as body-streaming capable.
             request_fields.push((
                 "__body_stream".into(),
-                Value::Str("__v4_body_stream".into()),
+                Value::str("__v4_body_stream".into()),
             ));
             // NB4-7: Request-scoped token for identity verification.
             request_fields.push((
@@ -989,7 +989,7 @@ impl Interpreter {
             // Create writer BuchiPack with sentinel for identification.
             let writer_pack = Value::BuchiPack(vec![(
                 "__writer_id".into(),
-                Value::Str("__v3_streaming_writer".into()),
+                Value::str("__v3_streaming_writer".into()),
             )]);
 
             // NET3-2 + NET4-1a: Install active_streaming_writer with body_state pointer.
@@ -1083,7 +1083,7 @@ impl Interpreter {
                     Value::BuchiPack(vec![
                         ("status".into(), Value::Int(200)),
                         ("headers".into(), Value::list(vec![])),
-                        ("body".into(), Value::Str(String::new())),
+                        ("body".into(), Value::str(String::new())),
                     ])
                 };
 
@@ -1309,7 +1309,7 @@ impl Interpreter {
             request_fields.push(("contentLength".into(), Value::Int(final_content_length)));
             request_fields.push((
                 "remoteHost".into(),
-                Value::Str(conn.peer_addr.ip().to_string()),
+                Value::str(conn.peer_addr.ip().to_string()),
             ));
             request_fields.push((
                 "remotePort".into(),
