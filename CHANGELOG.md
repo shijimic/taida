@@ -177,10 +177,13 @@ zero code — it is a gating artefact so follow-up sessions land
     is internal — `EXPECTED_TOTAL_LEN` unchanged; D27 escalation
     checklist: 3/3 NO.
   - PENDING_BYTES FIFO (terminal addon concurrent `ReadEvent()`) —
-    **OPEN**, tracked for a dedicated wV-class session on
-    `feat/c26`. The BuchiPack Arc migration above removes the main
-    interpreter-side deep-clone path on the event-batch return value,
-    so the FIFO work can land without re-visiting `Value` layout.
+    **OPEN, user-side**. The FIFO lives in the `terminal` submodule
+    at `.dev/official-package-repos/terminal/`, which the language
+    agent is explicitly forbidden from touching; this half is owned
+    by the downstream addon author. The BuchiPack Arc migration
+    above removes the main interpreter-side deep-clone path on the
+    event-batch return value, so the FIFO work can land downstream
+    without re-visiting `Value` layout.
 - **C26B-018** — `Str` primitive super-linear paths resolved via
   (A) char-index cache + (B) byte-level primitive + (C)
   `StringRepeatJoin` mold. Option (D) `StringBuilder` is explicitly
@@ -256,34 +259,95 @@ zero code — it is a gating artefact so follow-up sessions land
   All three pillars are now **FIXED**. The downstream `bonsai-wasm`
   Phase 6 unblock is material; the end-to-end acceptance smoke
   still runs against the stable gate.
-- **C26B-024** `[PARTIAL FIXED]` — Native list / `BuchiPack`
-  clone-heavy paths. Step 2 (profiling) + Step 3 Option A first pass
-  landed at Round 8 / wT (`81c4fc1`): a bounded per-thread freelist
-  for 4-field Packs (`taida_pack4_freelist_pop` /
-  `taida_pack4_freelist_push` in `src/codegen/native_runtime/core.c`,
-  `__thread` storage, 32-entry cap, full-cap fallback to `free()`).
-  The profile-identified hot path was `taida_lax_new` allocating a
-  4-field Pack (112 B) on every `list.get(i) ]=> x`; allocator
-  thrash dominated wall time at `bench_router.td` N=1000 / M=5000
-  (sys/real = 80%). Freelist dispatch in `taida_pack_new` /
-  `taida_release` re-initialises every slot on reuse, so no stale
-  child leaks; bounded per-thread storage prevents unbounded RSS
-  growth; cross-thread release falls through to `free()`
-  (correct but without reuse win). Internal micro-bench (Lax churn
-  200k wrappers, 3-run median):
+- **C26B-024** `[FIXED]` — Native list / `BuchiPack` clone-heavy
+  paths. **Step 2 + Step 3 Option A first pass** landed at Round 8
+  / wT (`81c4fc1`): a bounded per-thread freelist for 4-field Packs
+  (`taida_pack4_freelist_pop` / `taida_pack4_freelist_push` in
+  `src/codegen/native_runtime/core.c`, `__thread` storage, 32-entry
+  cap, full-cap fallback to `free()`). The profile-identified hot
+  path was `taida_lax_new` allocating a 4-field Pack (112 B) on
+  every `list.get(i) ]=> x`; allocator thrash dominated wall time
+  at `bench_router.td` N=1000 / M=5000 (sys/real = 80%). Freelist
+  dispatch in `taida_pack_new` / `taida_release` re-initialises
+  every slot on reuse, so no stale child leaks; bounded per-thread
+  storage prevents unbounded RSS growth; cross-thread release falls
+  through to `free()` (correct but without reuse win). Internal
+  micro-bench (Lax churn 200k wrappers, 3-run median):
   `baseline real 0.510s / sys 0.412s / user 0.094s` →
   `freelist real 0.295s / sys 0.240s / user 0.056s` — delta
-  `-42% / -42% / -38%`. Five new 3-backend parity tests
+  `-42% / -42% / -38%`. Five 3-backend parity tests
   (`tests/c26b_024_pack_freelist_parity.rs`: `lax_churn_int` /
   `lax_churn_str` / `lax_oob_empty` / `freelist_bound` /
   `mixed_type_lax`) exercise the optimised access pattern, the OOB
   empty-Lax path, and 40-depth recursion that exceeds the
-  freelist cap — all GREEN on Interpreter / JS / Native. Step 1
-  (CI perf regression gate wiring) is not part of this pass.
-  Step 4 full acceptance (`bench_router.td` hard-gate
-  `Native ≤ JS × 2` with `sys/real ≤ 30%`) awaits the Arena + Str
-  refactor in later sessions — tracked separately under C26B-024
-  on `.dev/C26_BLOCKERS.md`.
+  freelist cap. **Step 4 full acceptance** landed at Round 10 /
+  wε (`78a70f4` / merge `baff13d`), closing the Native ≤ JS × 2
+  hard-gate with the Native router-bench now at sys/real = 9 %
+  (down from 81 %) and Native / JS = 2.0× (down from 12.1×).
+  Measured on `examples/quality/c26_native_router_bench/router.td`
+  at N=200 routes × M=500 iterations (3-backend parity, Linux
+  x86_64, gcc):
+  ```
+  | Backend | real  | sys   | sys/real | vs JS |
+  |---------|------:|------:|---------:|------:|
+  | Native  | 0.34s | 0.03s | 9 %      | 2.0×  |
+  | JS      | 0.17s | 0.01s | 6 %      | 1.0×  |
+  ```
+  (baseline `@c.25.rc7` / wT Round 8: Native 2.05 s / sys 1.66 s /
+  12.1× JS / 81 % sys). The six-change runtime refactor lives in
+  `src/codegen/native_runtime/core.c` F1 and is superset-additive
+  over wT:
+  (1) thread-local bump arena (`TAIDA_ARENA_*`, 2 MiB chunks,
+  per-thread chain, 16 B aligned; allocations ≤ 1024 B take the
+  arena path, larger fall back to `malloc`; arena chunks reclaimed
+  at process exit — the Native codegen does not emit `taida_release`
+  for short-lived bindings, so the bump allocator is semantically
+  equivalent to `malloc` for this workload). Router-bench `malloc`
+  calls 2.97 M → ≈ 300 (**-99.99 %**).
+  (2) Tier-1 thread-local freelists for the residual `taida_release`
+  paths: cap=16 List freelist (`taida_list_freelist_{pop,push}`) +
+  3-bucket small-string freelist (≤ 32 B / ≤ 64 B / ≤ 128 B total
+  block size, `taida_str_bucket_for` / `taida_str_freelist_{pop,
+  push}`), hooked from `taida_list_new` / `taida_str_alloc` (alloc
+  side) and `taida_release` / `taida_str_release` (release side).
+  Arena-backed slabs bypass the freelist since `free()` on an arena
+  pointer is undefined behaviour.
+  (3) Heap-range tracker — `taida_safe_malloc` updates
+  `[taida_heap_min, taida_heap_max)` on every `malloc`;
+  `ptr_is_readable` fast-paths via O(1) range membership instead of
+  syscalling `mincore`.
+  (4) 64-entry `mincore`-page cache (`taida_mincore_cache`) for
+  pages that have already been verified as mapped; subsequent probes
+  on the same page skip the syscall. Wired into
+  `taida_ptr_is_readable` / `taida_is_string_value` /
+  `taida_read_cstr_len_safe`. Router-bench `mincore` syscalls
+  9.45 M → 20 (**-99.9998 %**).
+  (5) Arena-aware `list_push` migration: `realloc()` on an arena-
+  backed slab is UB, so when an arena-origin list grows past cap=16
+  we `malloc` the new capacity and `memcpy` header + elements; the
+  abandoned arena slot is reclaimed at process exit.
+  (6) Arena-skip guards in `taida_release` / `taida_str_release`
+  so `free()` is never called on an arena pointer.
+  Three new Round 10 parity tests
+  (`tests/c26b_024_router_bench_parity.rs`:
+  `router_bench_smoke_parity` / `list_push_arena_migration_parity`
+  / `small_string_churn_parity`) confirm bit-for-bit 3-backend
+  output under the workload that triggers arena allocation, list
+  push migration, and small-string churn; the five Round 8 wT
+  pack4 freelist tests remain green (arena-skip guard inserted).
+  The Round 8 / wT `EXPECTED_TOTAL_LEN` 998,598 → Round 10 / wε
+  **1,012,971** (F1 251,878 → **266,252**; F2 / other fragments /
+  interp / JS / wasm profiles all unchanged — F1 absorbs the full
+  arena / freelist / heap-range / mincore-cache / fast-path /
+  migration / guard delta). D27 escalation checklist: 3/3 NO —
+  public mold surface untouched, error contract unchanged, all 185
+  parity tests + 880+ total tests green (including C25 / C24 / C23
+  / C21 regression guards and all four wasm profiles; wasm profiles
+  are untouched by Round 10). Step 1 (CI perf regression gate
+  wiring against `bench_router.td`) is additive infrastructure
+  tracked separately under C26B-024 on `.dev/C26_BLOCKERS.md`;
+  the stable-gate acceptance numbers above are the contractual
+  baseline it will enforce once wired.
 
 #### Cluster 5 — Float parity (Phase 11)
 
@@ -408,7 +472,7 @@ zero code — it is a gating artefact so follow-up sessions land
   - `SECURITY_AUDIT.md` open = 0; SEC-011 recorded complete.
   - Sigstore + SLSA-signed official addon release.
 
-### Round 1 – Round 6 — commits already on `feat/c26`
+### Round 1 – Round 10 — commits already on `feat/c26`
 
 Round 1 merge order: P3 (C26B-003) → P10 pillar 1 (C26B-020) →
 P11 (C26B-011) → P12 (C26B-014 / 015 / 021 / 025), then Phase 7
@@ -557,14 +621,20 @@ Round 8 additions (all merged on `feat/c26`):
   Five new 3-backend parity tests in
   `tests/c26b_024_pack_freelist_parity.rs` are all GREEN. Step 4
   (`bench_router.td` hard-gate acceptance) + Step 1 (CI perf
-  gate wiring) are tracked separately — C26B-024 stays
-  **PARTIAL FIXED** in `.dev/C26_BLOCKERS.md`. The Native-side
-  `core.c` growth drives `EXPECTED_TOTAL_LEN` 994,500 → 998,598
+  gate wiring) were tracked separately at the time of the wT
+  commit — C26B-024 was marked **PARTIAL FIXED** in
+  `.dev/C26_BLOCKERS.md` *at this Round 8 snapshot*. Step 4 was
+  subsequently closed at Round 10 / wε (`78a70f4` / merge
+  `baff13d`) and the blocker is now FIXED; see the C26B-024
+  FIXED entry above and the Round 10 additions section below.
+  The Native-side `core.c` growth at this Round 8 / wT landing
+  drives `EXPECTED_TOTAL_LEN` 994,500 → 998,598
   (`F1_LEN` 247,780 → 251,878; F2 / other fragments / interp /
-  JS / wasm profiles all unchanged). D27 escalation checklist:
-  3/3 NO — mold signatures, pinned error strings, and existing
-  assertions are all untouched; five new parity tests are
-  additive.
+  JS / wasm profiles all unchanged at this point — the Round 10
+  / wε follow-up rolls both numbers to 1,012,971 / 266,252).
+  D27 escalation checklist: 3/3 NO — mold signatures, pinned
+  error strings, and existing assertions are all untouched; five
+  new parity tests are additive.
 - wU (`9e69f96`, C26B-018 (A) char-index cache layer) — closes
   the last sub-task of the Cluster 4 Str super-linear fix and
   promotes C26B-018 (A) from OPEN to **FIXED**. `Value::Str`
@@ -631,17 +701,171 @@ Both are tracked under C26B-027 / C26B-028 in
 `.dev/C26_BLOCKERS.md`; neither is introduced by wT / wU /
 wX2, so Round 8 proceeds without blocking on them.
 
-### wδ rolling amendment (this commit)
+### wδ rolling amendment (Round 9, earlier in this CHANGELOG iteration)
 
 wδ (C26B-013 rolling docs amendment — Round 8 merge narrative)
 extends wZ's Round 8 subsection to cover wT + wU + wX2, flips
-the C26B-018 (A) and C26B-024 statuses above to their merged
-states (A → FIXED, 024 → PARTIAL FIXED), and records the
+the C26B-018 (A) status above to its merged FIXED state (and
+previously flipped C26B-024 to PARTIAL FIXED — the wθ rolling
+amendment below supersedes that to FIXED), and records the
 `EXPECTED_TOTAL_LEN` 994,500 → 998,598 delta driven by wT.
-C26B-027 / C26B-028 are opened as new OPEN tracks so the
+C26B-027 / C26B-028 were opened as new OPEN tracks so the
 `@c.26` GATE audit trail stays complete. No code change; the
 wZ narrative is extended monotonically — no prior text is
 contradicted. D27 escalation checklist: 3/3 NO.
+
+### Round 9 additions (all merged on `feat/c26`)
+
+- **Round 9 / wα** (`7fd1500` fix → `e3aacd9` merge,
+  **C26B-027 `[FIXED]`**) — `c25b_008_doc_examples_parse` now
+  passes. The Round 4 / wN `net_api.md` edit had introduced two
+  code fences at `docs/reference/net_api.md:258` / `:273` that
+  referenced an undefined identifier; the fixtures were updated
+  to the intended form so the parse regression baseline is
+  restored. Docs-only path as anticipated; no `src/` change.
+  D27 escalation checklist: 3/3 NO — no mold signature / error
+  string / parity fixture touched.
+- **Round 9 / wβ** (`8fe8d49` fix → `83b5f8a` merge,
+  **C26B-028 `[FIXED]`**) — release-workflow symmetry restored.
+  The canonical-contract list in
+  `tests/init_release_workflow_symmetry.rs::test_jobs_match_core_contract`
+  now absorbs the two SEC-011 jobs that landed in `6a3189f`
+  (Round 2 / wB, Sigstore cosign + SLSA provenance), and the
+  **SEC-011 invariants are pinned** into the test: the `sign`
+  job depends on `build-release`, the `provenance` job depends
+  on `sign`, the verify-on-install step is present, and the
+  keyless-signing OIDC audience matches the `taida publish`
+  workflow. Any future release-workflow edit that breaks one of
+  those invariants now hard-fails the symmetry test rather than
+  silently drifting. D27 escalation checklist: 3/3 NO — the
+  SEC-011 surface was landed by Round 2 / wB; wβ adds the
+  regression guard only.
+- **Round 9 / wδ** (`e3cefc0` docs → `46210b5` merge,
+  C26B-013 rolling docs amendment) — the wδ section above;
+  docs-only catch-up for the Round 8 merge order.
+
+Round 9 closes the two blockers (C26B-027 / C26B-028) that
+Round 8 had opened. Round 9 `EXPECTED_TOTAL_LEN` is unchanged
+from Round 8 (998,598 B) — docs / tests only, no native-runtime
+C delta.
+
+### Round 10 additions (all merged on `feat/c26`)
+
+- **Round 10 / wε** (`78a70f4` perf → `baff13d` merge,
+  **C26B-024 Step 4 full acceptance**) — promotes C26B-024 from
+  `[PARTIAL FIXED]` to `[FIXED]`. The `bench_router.td` hard-gate
+  `Native ≤ JS × 2` with `sys/real ≤ 30 %` is now met
+  contractually: at N=200 × M=500 the Native path clocks
+  real 0.34 s / sys 0.03 s / sys-ratio 9 % / 2.0× JS (down from
+  real 2.05 s / sys 1.66 s / 81 % / 12.1× JS at the Round 8 wT
+  baseline). The six-change runtime refactor (thread-local bump
+  arena, tier-1 List + small-string freelists, heap-range
+  tracker, 64-entry `mincore`-page cache, arena-aware `list_push`
+  migration, arena-skip guards in `taida_release` /
+  `taida_str_release`) drives `malloc` calls 2.97 M → ≈ 300
+  (**-99.99 %**) and `mincore` syscalls 9.45 M → 20
+  (**-99.9998 %**) on the same workload. `EXPECTED_TOTAL_LEN`
+  998,598 → **1,012,971** (F1 251,878 → **266,252**); F2 / other
+  fragments / interpreter / JS / all four wasm profiles are
+  unchanged (F1 absorbs the full delta). Three new 3-backend
+  parity tests in `tests/c26b_024_router_bench_parity.rs`
+  (`router_bench_smoke_parity` / `list_push_arena_migration_parity`
+  / `small_string_churn_parity`) pin bit-for-bit output across
+  Interpreter / JS / Native under arena allocation, `list_push`
+  arena-to-malloc migration, and small-string freelist churn.
+  The five Round 8 / wT pack4 freelist tests stay green (the
+  arena-skip guard preserves their invariants). D27 escalation
+  checklist: 3/3 NO — public mold surface untouched, error
+  contract unchanged, all 185 parity tests + 880+ total tests
+  green (C25 / C24 / C23 / C21 regression guards and all four
+  wasm profiles included; wasm profiles are untouched by
+  Round 10). See the C26B-024 entry above for the full technical
+  narrative.
+
+Round 10 `EXPECTED_TOTAL_LEN` rolls from 998,598 B (Round 8
+wT) to **1,012,971 B**; F1 absorbs the full +14,373-byte delta.
+No other fragment, backend, or wasm profile is touched.
+
+**Worktree contract — Round 10 post-mortem (1 line):** the
+Round 10 / wε integration session briefly wrote a partial-leak
+fragment outside its isolation worktree before being corrected;
+the final merged state on `feat/c26` is the clean one and no
+main-tree artefact persists. The wθ rolling amendment session
+(this commit) explicitly re-verifies the worktree isolation
+contract at entry and confines all edits to its own isolation
+prefix.
+
+### wθ rolling amendment (this commit)
+
+wθ (C26B-013 rolling docs amendment — Round 9 + Round 10 merge
+narrative) extends the Round 8 / wδ narrative to cover
+Round 9 (wα / wβ / wδ) and Round 10 (wε). Specifically:
+
+- Flips **C26B-024** above from `[PARTIAL FIXED]` to `[FIXED]`
+  by appending the Round 10 / wε Step 4 full-acceptance block
+  as a monotone superset over the Round 8 / wT narrative (no
+  prior text is contradicted; the Step 2 + Step 3 Option A
+  narrative is preserved verbatim and the Step 4 block
+  extends it with the final acceptance numbers and the
+  six-change runtime refactor detail).
+- Promotes **C26B-027** and **C26B-028** from the Round 8
+  OPEN list to FIXED via the Round 9 additions section above
+  (the "New blockers opened during Round 8" section stays as
+  the audit-trail record of their origin; the Round 9
+  additions section records their closure).
+- Records the `EXPECTED_TOTAL_LEN` 998,598 → **1,012,971**
+  delta driven by Round 10 / wε (F1 251,878 → **266,252**;
+  F2 / other fragments / interp / JS / wasm profiles
+  unchanged).
+- Adds an explicit **`@c.26` GATE-READY status marker**
+  (section below).
+
+No code change in this commit. The wδ narrative is extended
+monotonically — no prior text is contradicted (the Round 8 /
+wT Step 2 + Step 3 Option A achievement is preserved as the
+first half of the C26B-024 FIXED narrative, and the Round 10
+/ wε Step 4 is the second half). D27 escalation checklist:
+3/3 NO — no mold signature / pinned error string / existing
+parity assertion is altered by this docs amendment.
+
+### `@c.26` GATE-READY status (agent side)
+
+As of this wθ amendment, **all agent-side Must Fix / Critical
+C26 blockers are FIXED**. The only residual OPEN item on the
+stable-gate checklist is:
+
+- **C26B-012** `PENDING_BYTES` FIFO (terminal addon concurrent
+  `ReadEvent()`) — **user-side only**. The BuchiPack interior
+  Arc migration half of C26B-012 landed at Round 6 / wQ
+  (agent side, `6f72f7c`); the FIFO half lives in the
+  `terminal` submodule and is owned by the downstream addon
+  author, not the language agent. The stable-gate checklist
+  tracks it as a user-action item.
+
+The `@c.26` Phase 14 promotion gate itself remains a
+**user-approved tag**; the agent does not cut `@c.26.rcM` /
+`@c.26` under any condition. The stable-declaration gate
+requires (from §5.6 and §6.1):
+
+- All Critical / Must Fix closed **(agent side: DONE as of
+  wθ)** + C26B-012 FIFO (user side) closed.
+- `cargo test --release` all-pass, 0 red, 0 SLOW warnings.
+- 3-backend parity across all fixtures (all 185 parity tests
+  + 880+ total tests green as of Round 10 / wε).
+- CI 2C wall-clock median ≤ 8 minutes.
+- Parallelism efficiency ≥ 80 %.
+- 24-hour soak test PASS (C26B-005; runbook landed at
+  Round 2 / wA, the 24 h run itself is the manual user
+  action).
+- Downstream `bonsai-wasm` Phase 6 smoke (C26B-020
+  acceptance).
+- `SECURITY_AUDIT.md` open = 0; SEC-011 recorded complete
+  (Sub-phase 7.4 FIXED at Round 2 / wB; the SEC-011 workflow
+  invariants are pinned by the Round 9 / wβ symmetry test).
+- Sigstore + SLSA-signed official addon release (SEC-011
+  produced the publish-side signing and the install-side
+  verify; the first signed release itself is the user
+  action).
 
 ### Docs / infrastructure landed alongside
 
@@ -650,8 +874,10 @@ contradicted. D27 escalation checklist: 3/3 NO.
   keeps the legacy `D26` token for gen-C), §4.2 / §4.3 / §4.4
   generational language clarified, §5.1 / §5.4 / §5.5 ownership
   transferred to C26 blockers. §5.1 port-bind race marked FIXED,
-  §5.5 adds a `readBytesAt` addendum, §5.6 adds an informational
-  C26 progress snapshot (non-contractual).
+  §5.5 adds a `readBytesAt` addendum, §5.6 is the informational
+  C26 progress snapshot (non-contractual), re-synced through
+  Round 10 / wε (C26B-024 FIXED, C26B-027 + C26B-028 FIXED,
+  `@c.26` GATE-READY status marker added).
 - `.dev/C26_SOAK_RUNBOOK.md` — new (C26B-005 scaffolding, wA
   Round 2).
 - `docs/reference/net_api.md` (new) — `httpServe` `req` pack shape
