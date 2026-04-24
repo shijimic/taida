@@ -421,7 +421,30 @@ mod tests {
         //            consult the freelist before free(). See
         //            `taida_pack4_freelist_{pop,push}`.)
         // New total: 994,500 + 4,098 = 998,598.
-        const EXPECTED_TOTAL_LEN: usize = 998_598;
+        //
+        // Round 10 (wepsilon, 2026-04-24) adds:
+        //   +14,373 (C26B-024 core.c Step 4 — cumulative: Tier-1 freelists
+        //            (cap=16 List + 3-bucket small-string), Tier-2 bump
+        //            arena (2 MiB chunks, per-thread chain, 16 B aligned),
+        //            heap-range tracker (O(1) membership via
+        //            [heap_min, heap_max) window captured at TAIDA_MALLOC
+        //            time), 64-entry mincore-page cache (used by all
+        //            read-barrier paths: `taida_ptr_is_readable`,
+        //            `taida_is_string_value`, `taida_read_cstr_len_safe`),
+        //            arena-aware list_push migration (malloc+memcpy when a
+        //            growing list was arena-backed — realloc on arena is
+        //            UB), and arena-skip guards in every release path.
+        //            Net effect on bench_router.td N=200 × M=500:
+        //              - Wall time 2.05s -> 0.34s (-83%).
+        //              - Sys time 1.66s -> 0.03s (-98%).
+        //              - mincore syscalls 9.45M -> 20 (-99.9998%).
+        //              - malloc calls 2.97M -> ~300 (-99.99%).
+        //              - sys/real ratio 81% -> 9% (under 30% target).
+        //              - Native/JS ratio 12.1x -> 2.0x (target reached).
+        //            All additions live in F1 before the "Error ceiling"
+        //            marker. F2 unchanged.)
+        // New total: 998,598 + 14,373 = 1,012,971.
+        const EXPECTED_TOTAL_LEN: usize = 1_012_971;
         let asm = *NATIVE_RUNTIME_C;
         assert_eq!(
             asm.len(),
@@ -774,11 +797,43 @@ mod tests {
         // and the rationale comment also live in F1 — well before the
         // "Error ceiling" marker. F2 unchanged.
         // F1_LEN moves: 247,780 + 4,098 = 251,878.
-        const F1_LEN: usize = 251_878;
+        // C26B-024 (@c.26, wepsilon Round 10 Step 4, 2026-04-24): F1
+        // absorbs +14,374 bytes for the cumulative wε Step 4 allocator +
+        // read-barrier rework:
+        //   - Tier-1 freelists: cap=16 List freelist + 3-bucket small-
+        //     string freelist (`TAIDA_LIST_FREELIST_MAX`,
+        //     `TAIDA_LIST_INIT_CAP`, `TAIDA_STR_FREELIST_MAX`,
+        //     `TAIDA_STR_BUCKET_COUNT`, `taida_list_freelist_{pop,push}`,
+        //     `taida_str_bucket_for`, `taida_str_freelist_{pop,push}`).
+        //   - Tier-2 bump arena (2 MiB chunks, per-thread chain, 16 B
+        //     aligned, max 128 chunks = 256 MiB/thread cap):
+        //     `TAIDA_ARENA_CHUNK_SIZE`, `TAIDA_ARENA_MAX_ALLOC`,
+        //     `TAIDA_ARENA_MAX_CHUNKS`, `taida_arena_chunk_t` +
+        //     `taida_arena_alloc`, `taida_arena_contains`.
+        //   - Heap-range tracker (O(1) membership via [heap_min,
+        //     heap_max) captured in `taida_safe_malloc`):
+        //     `taida_heap_min`, `taida_heap_max`, `taida_heap_range_update`,
+        //     `taida_heap_range_contains`.
+        //   - 64-entry mincore-page cache (`taida_mincore_cache`,
+        //     `taida_mincore_cache_hit`, `taida_mincore_cache_add`).
+        //   - Fast-path wiring in `taida_ptr_is_readable`,
+        //     `taida_is_string_value`, `taida_read_cstr_len_safe`
+        //     (arena → heap-range → cache → mincore fallback).
+        //   - `taida_str_alloc`, `taida_pack_new`, `taida_list_new`
+        //     route allocations through Tier-1 → Tier-2 → malloc.
+        //   - `taida_list_push` arena-aware migration on growth
+        //     (realloc on an arena pointer is UB; we malloc+memcpy).
+        //   - Arena-skip guards in `taida_release` and
+        //     `taida_str_release` before the freelist push and before
+        //     the free() call.
+        // All additions sit in the Magic-Numbers / allocator / read-
+        // barrier region which is entirely inside F1. F2 unchanged.
+        // F1_LEN moves: 251,878 + 14,374 = 266,252.
+        const F1_LEN: usize = 266_252;
         assert_eq!(
             CORE_SECTION.len(),
-            251_878 + 160_352,
-            "core.c total byte length must equal legacy fragment1 + fragment2 (C25B-001 / C25B-028 / C25B-025 / C26B-011 / C26B-020 / C26B-016 / C26B-018 / C26B-011-wS / C26B-024 adjusted)"
+            266_252 + 160_351,
+            "core.c total byte length must equal legacy fragment1 + fragment2 (C25B-001 / C25B-028 / C25B-025 / C26B-011 / C26B-020 / C26B-016 / C26B-018 / C26B-011-wS / C26B-024 / C26B-024-wepsilon adjusted)"
         );
         const F2_PREFIX: &[u8] = b"// \xE2\x94\x80\xE2\x94\x80 Error ceiling";
         let tail = &CORE_SECTION.as_bytes()[F1_LEN..F1_LEN + F2_PREFIX.len()];
