@@ -359,24 +359,45 @@ mod tests {
         // `setvbuf(stdout/stderr, _IOLBF, 0)` stdout line-buffering fix
         // at the top of main(). Does not affect core.c so F1_LEN /
         // F2_LEN unchanged. Only the grand total shifts.
+        // C26B-026 (@c.26 Round 2, wC): +617 bytes in net_h1_h2.c to fix
+        // `h2_extract_response_fields` silently dropping custom response
+        // headers. Previously `taida_list_get` returned a Lax-wrapped
+        // entry and the "name" / "value" lookup on the wrapper returned 0,
+        // so every handler-returned header was filtered out before HPACK
+        // encoding (wire response ended up with only `:status` +
+        // `content-length`). Fix reads `hlist[4 + j]` directly to mirror
+        // the h1 encode path. Also raises the in-function header cap from
+        // 32 to H2_MAX_HEADERS (128) for parity with the HPACK block
+        // encoder which already allows 128. Does not affect core.c so
+        // F1_LEN / F2_LEN unchanged.
         // Combined delta on top of 976,168:
         //   +3,834 (C26B-011 core.c)
         //   +2,135 (C26B-020 os.c + F1 forward decl)
         //   +  839 (C26B-021 net_h3_quic.c)
-        // New total: 976,168 + 6,808 = 982,976.
+        //   +  617 (C26B-026 net_h1_h2.c)
+        // New total after Round 1: 976,168 + 7,425 = 983,593.
         //
-        // C26B-016 (@c.26, Option B+): +5,339 bytes in core.c (F1) from the
-        // span-aware comparison mold helpers (`taida_net_span_extract`,
-        // `taida_net_raw_as_bytes`, `taida_net_needle_as_bytes`,
-        // `taida_net_SpanEquals` / `SpanStartsWith` / `SpanContains` /
-        // `SpanSlice`). All four public helpers are byte-level comparisons
-        // over a `@(start, len)` span pack view into a Bytes/Str raw buffer,
-        // matching interpreter + JS parity. Placed immediately before the
-        // `// ── Error ceiling` divider so F1 absorbs the full delta; F2
-        // (error/display/stdout-display) is unchanged. Other fragments
-        // (os / tls / net_h1_h2 / net_h3_quic) are unchanged.
-        // New total: 982,976 + 5,339 = 988,315.
-        const EXPECTED_TOTAL_LEN: usize = 988_315;
+        // C26B-016 (@c.26, Option B+, Round 2 wD): +5,339 bytes in core.c
+        // (F1) from the span-aware comparison mold helpers
+        // (`taida_net_span_extract`, `taida_net_raw_as_bytes`,
+        // `taida_net_needle_as_bytes`, `taida_net_SpanEquals` /
+        // `SpanStartsWith` / `SpanContains` / `SpanSlice`). All four public
+        // helpers are byte-level comparisons over a `@(start, len)` span
+        // pack view into a Bytes/Str raw buffer, matching interpreter +
+        // JS parity. Placed immediately before the `// ── Error ceiling`
+        // divider so F1 absorbs the full delta; F2 unchanged.
+        // C26B-026 (@c.26, Round 2 wC): +617 bytes in net_h1_h2.c for
+        // the HPACK custom header preservation fix (h2_extract_response_fields
+        // switched from Lax-wrapping taida_list_get() to hlist[4+j] raw
+        // inner pack access) + header_cap 32 → H2_MAX_HEADERS (128).
+        // Combined Round 1 + Round 2 delta on top of 976,168:
+        //   +3,834 (C26B-011 core.c)
+        //   +2,135 (C26B-020 os.c + F1 forward decl)
+        //   +  839 (C26B-021 net_h3_quic.c)
+        //   +5,339 (C26B-016 core.c F1 span mold helpers)
+        //   +  617 (C26B-026 net_h1_h2.c HPACK fix)
+        // New total: 976,168 + 12,764 = 988,932.
+        const EXPECTED_TOTAL_LEN: usize = 988_932;
         let asm = *NATIVE_RUNTIME_C;
         assert_eq!(
             asm.len(),
@@ -725,10 +746,16 @@ mod tests {
         // offset 184,963 inside NET_H1_H2_SECTION must be the first byte
         // of the former fragment 6 (06_net_h2.inc.c), which historically
         // begins with "// ── Native HTTP/2 server".
+        //
+        // C26B-026 (@c.26 Round 2, wC): fragment 6 (net_h2 server) gained
+        // +617 bytes for the HPACK custom header fix inside
+        // `h2_extract_response_fields` (Lax unwrap via raw `hlist[4+j]`
+        // + header_cap raised to H2_MAX_HEADERS). F5_LEN unchanged;
+        // fragment 6 baseline moves from 91,152 to 91,769.
         const F5_LEN: usize = 184_963;
         assert_eq!(
             NET_H1_H2_SECTION.len(),
-            184_963 + 91_152,
+            184_963 + 91_769,
             "net_h1_h2.c total byte length must equal legacy fragment5 + fragment6"
         );
         const F6_PREFIX: &[u8] = b"// \xE2\x94\x80\xE2\x94\x80 Native HTTP/2 server";

@@ -5352,20 +5352,29 @@ static void h2_extract_response_fields(taida_val response, H2ResponseFields *out
     }
 
     // headers: @[@(name: Str, value: Str)]
+    // C26B-026 fix: `taida_list_get` wraps each entry in a Lax pack
+    // (hasValue/__value/__default/__type). The h1 encode path reads raw
+    // `hlist[4+i]` to skip the Lax wrapper; mirror that here. Previously we
+    // called `taida_list_get(...)` and then `taida_pack_get(entry, "name")`
+    // which returned 0 because the Lax pack has no "name" field, causing
+    // every custom response header to be silently dropped before HPACK
+    // encoding. The response therefore ended up with only `:status` +
+    // `content-length`.
     taida_val hdrs_hash = taida_str_hash((taida_val)"headers");
     taida_val hdrs_val = taida_pack_get(response, hdrs_hash);
-    int header_cap = 32;
+    int header_cap = H2_MAX_HEADERS;  // parity with h1 serve (64 hdr cap)
     out->headers = (H2Header*)TAIDA_MALLOC(sizeof(H2Header) * (size_t)header_cap, "h2_resp_headers");
     if (!out->headers) return;
     out->header_count = 0;
 
     if (TAIDA_IS_LIST(hdrs_val)) {
-        int64_t list_len = (int64_t)taida_list_length(hdrs_val);
+        taida_val *hlist = (taida_val*)hdrs_val;
+        int64_t list_len = (int64_t)hlist[2];
+        taida_val name_h = taida_str_hash((taida_val)"name");
+        taida_val val_h  = taida_str_hash((taida_val)"value");
         for (int64_t j = 0; j < list_len && out->header_count < header_cap; j++) {
-            taida_val entry = taida_list_get(hdrs_val, (taida_val)j);
+            taida_val entry = hlist[4 + j];  // raw inner pack (no Lax wrap)
             if (!TAIDA_IS_PACK(entry)) continue;
-            taida_val name_h = taida_str_hash((taida_val)"name");
-            taida_val val_h  = taida_str_hash((taida_val)"value");
             taida_val n = taida_pack_get(entry, name_h);
             taida_val v = taida_pack_get(entry, val_h);
             if (!n || n <= 4096 || !v || v <= 4096) continue;

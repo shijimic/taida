@@ -35056,3 +35056,343 @@ fn c26b_003_sequential_100x_allocate_then_bind() {
         fails
     );
 }
+
+/// C26B-026: Native h2 HPACK encode must preserve custom response headers.
+///
+/// Regression pin for the Round 1 finding where a handler that returns
+/// three custom headers via `headers <= @[@(name, value), ...]` ended up
+/// with a `curl --http2 -D -` dump that contained only `:status` and
+/// `content-length` — custom headers were silently dropped before HPACK
+/// encode because `taida_list_get` in the Native h2 response extractor
+/// returned a Lax-wrapped entry, and the subsequent `taida_pack_get` for
+/// "name" / "value" on that Lax wrapper returned 0 (wrapper has no such
+/// fields), so every entry failed the pointer guard and got skipped.
+///
+/// Fix: read the inner pack pointer directly from the list entry slot
+/// (`hlist[4 + j]`) to mirror the h1 encode path, which had the correct
+/// behavior from the start.
+///
+/// Shape:
+///   - interp + native serve h2 with 3 distinct custom response headers
+///     (`x-c26b026-a/b/c`), fetch with `curl --http2 --insecure -D -`,
+///     assert each header name + value appears in the dumped header block
+///   - JS rejects with H2Unsupported (never serves h2)
+///
+/// Assertions are additive (new test, no rewrite of existing fixtures).
+/// D27 escalation 3 点: signature変更なし / pin 済 error 文字列変更なし /
+/// 既存 assertion 書き換えなし → C26 scope in 確定。
+#[test]
+fn test_net6_c26b026_h2_multiple_custom_headers_3backend_parity() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+    if !cc_available() {
+        eprintln!("SKIP: cc not available");
+        return;
+    }
+    if !openssl_available() {
+        eprintln!("SKIP: openssl not available");
+        return;
+    }
+    if !curl_h2_available() {
+        eprintln!("SKIP: curl --http2 not available");
+        return;
+    }
+
+    let serving_source = |port: u16, cert: &str, key: &str| {
+        format!(
+            r#">>> taida-lang/net => @(httpServe)
+
+handler req =
+  @(status <= 200,
+    headers <= @[
+      @(name <= "x-c26b026-a", value <= "alpha"),
+      @(name <= "x-c26b026-b", value <= "bravo"),
+      @(name <= "x-c26b026-c", value <= "charlie"),
+      @(name <= "content-type", value <= "text/plain"),
+    ],
+    body <= "c26b026-payload")
+=> :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
+
+asyncResult <= httpServe({port}, handler, 1, 10000, 128, @(cert <= "{cert}", key <= "{key}", protocol <= "h2"))
+asyncResult ]=> result
+result ]=> r
+stdout(r.requests)
+"#,
+            port = port,
+            cert = cert,
+            key = key
+        )
+    };
+
+    // (body, header_dump, server_stdout, backend)
+    let mut serving_results: Vec<(String, String, String, &'static str)> = Vec::new();
+
+    for backend in &["interp", "native"] {
+        let cert_path = unique_temp_path("taida_h2_cert", &format!("c26b026_{}", backend), "pem");
+        let key_path = unique_temp_path("taida_h2_key", &format!("c26b026_{}", backend), "pem");
+
+        if !gen_self_signed_cert(&cert_path, &key_path) {
+            eprintln!("SKIP: cert gen failed for {}", backend);
+            return;
+        }
+
+        let port = find_free_loopback_port();
+        let source = serving_source(
+            port,
+            cert_path.to_str().unwrap_or(""),
+            key_path.to_str().unwrap_or(""),
+        );
+
+        let dir = setup_net_project(&source, &format!("c26b026_hdrs_{}", backend));
+        let td_path = dir.join("main.td");
+
+        let mut child: Child = match *backend {
+            "interp" => Command::new(taida_bin())
+                .arg(&td_path)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .spawn()
+                .expect("spawn interp h2 c26b026 server"),
+            "native" => {
+                let bin_path =
+                    unique_temp_path("taida_c26b026_native", &format!("{}", port), "bin");
+                let compile = Command::new(taida_bin())
+                    .arg("build")
+                    .arg("--target")
+                    .arg("native")
+                    .arg(&td_path)
+                    .arg("-o")
+                    .arg(&bin_path)
+                    .output()
+                    .expect("compile native");
+                assert!(
+                    compile.status.success(),
+                    "C26B-026 native compile failed: {}",
+                    String::from_utf8_lossy(&compile.stderr)
+                );
+                let child = Command::new(&bin_path)
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::null())
+                    .spawn()
+                    .expect("spawn native h2 c26b026");
+                let _ = fs::remove_file(&bin_path);
+                child
+            }
+            _ => unreachable!(),
+        };
+
+        let mut ready = false;
+        for _ in 0..50 {
+            thread::sleep(Duration::from_millis(100));
+            if TcpStream::connect(format!("127.0.0.1:{}", port)).is_ok() {
+                ready = true;
+                break;
+            }
+        }
+
+        if !ready {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = fs::remove_file(&cert_path);
+            let _ = fs::remove_file(&key_path);
+            cleanup_net_project(&dir);
+            panic!(
+                "C26B-026 {}: h2 custom-headers server not ready on port {}",
+                backend, port
+            );
+        }
+
+        // `-D -` dumps response headers to stdout before the body.
+        // Retry up to 3x if stdout is transiently empty.
+        let mut curl_out = Command::new("curl")
+            .args([
+                "--http2",
+                "--insecure",
+                "--silent",
+                "--max-time",
+                "5",
+                "-D",
+                "-",
+                &format!("https://127.0.0.1:{}/hdrs", port),
+            ])
+            .output()
+            .expect("curl headers");
+        for _ in 0..3 {
+            if !curl_out.stdout.is_empty() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(500));
+            curl_out = Command::new("curl")
+                .args([
+                    "--http2",
+                    "--insecure",
+                    "--silent",
+                    "--max-time",
+                    "5",
+                    "-D",
+                    "-",
+                    &format!("https://127.0.0.1:{}/hdrs", port),
+                ])
+                .output()
+                .expect("curl headers retry");
+        }
+
+        let server_out = child.wait_with_output().expect("wait for server");
+        let _ = fs::remove_file(&cert_path);
+        let _ = fs::remove_file(&key_path);
+        cleanup_net_project(&dir);
+
+        let raw = String::from_utf8_lossy(&curl_out.stdout).to_string();
+        // Split dump: everything up to the blank line is the header block;
+        // the rest is the body. `-D -` with `--silent` writes headers then
+        // body to stdout.
+        let (header_dump, body_part) = match raw.find("\r\n\r\n") {
+            Some(idx) => (raw[..idx].to_string(), raw[idx + 4..].to_string()),
+            None => match raw.find("\n\n") {
+                Some(idx) => (raw[..idx].to_string(), raw[idx + 2..].to_string()),
+                None => (raw.clone(), String::new()),
+            },
+        };
+        let server_stdout = normalize(&String::from_utf8_lossy(&server_out.stdout));
+        serving_results.push((body_part, header_dump, server_stdout, backend));
+    }
+
+    assert_eq!(
+        serving_results.len(),
+        2,
+        "C26B-026: expected serving results for interp + native"
+    );
+
+    // Per-backend structural asserts.
+    for (body, hdr_dump, count, backend) in &serving_results {
+        assert!(
+            body.contains("c26b026-payload"),
+            "C26B-026 {}: expected body 'c26b026-payload', got: {:?}",
+            backend,
+            body
+        );
+        // All three custom headers must appear in the dumped header block
+        // (name + value). HTTP/2 lowercases header names on the wire, so
+        // match name case-insensitively against the canonical lowercase.
+        for (hname, hval) in &[
+            ("x-c26b026-a", "alpha"),
+            ("x-c26b026-b", "bravo"),
+            ("x-c26b026-c", "charlie"),
+        ] {
+            let low = hdr_dump.to_ascii_lowercase();
+            assert!(
+                low.contains(hname),
+                "C26B-026 {}: custom header name {:?} missing from dump:\n{}",
+                backend, hname, hdr_dump
+            );
+            assert!(
+                hdr_dump.contains(hval),
+                "C26B-026 {}: custom header value {:?} missing from dump:\n{}",
+                backend, hval, hdr_dump
+            );
+        }
+        assert_eq!(
+            count, "1",
+            "C26B-026 {}: expected server to log '1' request, got: {:?}",
+            backend, count
+        );
+    }
+
+    // Cross-backend equivalence: for each header, both backends must dump it.
+    let (ib, ih, _, _) = &serving_results[0];
+    let (nb, nh, _, _) = &serving_results[1];
+    assert_eq!(
+        ib, nb,
+        "C26B-026: interp and native h2 bodies diverge: interp={:?} native={:?}",
+        ib, nb
+    );
+    for (hname, hval) in &[
+        ("x-c26b026-a", "alpha"),
+        ("x-c26b026-b", "bravo"),
+        ("x-c26b026-c", "charlie"),
+    ] {
+        let ilo = ih.to_ascii_lowercase();
+        let nlo = nh.to_ascii_lowercase();
+        assert!(
+            ilo.contains(hname) && nlo.contains(hname),
+            "C26B-026: header name {:?} parity broken (interp={} native={})",
+            hname,
+            ilo.contains(hname),
+            nlo.contains(hname)
+        );
+        assert!(
+            ih.contains(hval) && nh.contains(hval),
+            "C26B-026: header value {:?} parity broken (interp={} native={})",
+            hval,
+            ih.contains(hval),
+            nh.contains(hval)
+        );
+    }
+
+    // ── JS rejecting branch ──
+    let port_j = find_free_loopback_port();
+    let (cert_j, key_j) = match generate_self_signed_cert("c26b026_js") {
+        Some(paths) => paths,
+        None => {
+            eprintln!("SKIP: cert gen failed for JS branch");
+            return;
+        }
+    };
+    let js_source = format!(
+        r#">>> taida-lang/net => @(httpServe)
+
+handler req =
+  @(status <= 200, headers <= @[], body <= "c26b026-payload")
+=> :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
+
+asyncResult <= httpServe({port}, handler, 1, 5000, 128, @(cert <= "{cert}", key <= "{key}", protocol <= "h2"))
+asyncResult ]=> result
+stdout(result.throw.message)
+"#,
+        port = port_j,
+        cert = cert_j.display(),
+        key = key_j.display()
+    );
+
+    let dir_j = setup_net_project(&js_source, "c26b026_hdrs_js");
+    let js_path = unique_temp_path("taida_c26b026_js", "hdrs", "mjs");
+    let transpile = Command::new(taida_bin())
+        .arg("build")
+        .arg("--target")
+        .arg("js")
+        .arg(dir_j.join("main.td"))
+        .arg("-o")
+        .arg(&js_path)
+        .output()
+        .expect("transpile JS");
+    assert!(
+        transpile.status.success(),
+        "C26B-026: JS transpile failed: {}",
+        String::from_utf8_lossy(&transpile.stderr)
+    );
+
+    let js_run = Command::new("node").arg(&js_path).output().expect("node");
+    let js_stdout = normalize(&String::from_utf8_lossy(&js_run.stdout));
+    let _ = fs::remove_file(&js_path);
+    let _ = fs::remove_file(&cert_j);
+    let _ = fs::remove_file(&key_j);
+    cleanup_net_project(&dir_j);
+
+    assert!(
+        js_stdout.contains("HTTP/2") || js_stdout.contains("h2"),
+        "C26B-026 js: expected H2Unsupported mentioning HTTP/2 or h2, got: {:?}",
+        js_stdout
+    );
+    assert!(
+        js_stdout.contains("not supported"),
+        "C26B-026 js: expected 'not supported' in H2Unsupported message, got: {:?}",
+        js_stdout
+    );
+    assert!(
+        !js_stdout.contains("c26b026-payload"),
+        "C26B-026 js: JS must NOT serve h2; unexpected payload leak: {:?}",
+        js_stdout
+    );
+}
