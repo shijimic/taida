@@ -23172,6 +23172,522 @@ stdout(r.requests)
     }
 }
 
+// ── C26B-002: TLS construction 3-backend parity pin ───────────────
+//
+// C26B-002 acceptance: TLS config matrix (missing cert / missing key /
+// plaintext @() fallback / invalid-pem content / protocol-literal
+// validation) must behave symmetrically across all three backends
+// (interpreter / JS / native). The 2026-04-25 review found the
+// existing `test_net5_3b_tls_*` cases were only 2-backend (interp +
+// JS) so the 3-backend pin was incomplete; these cases close that
+// gap by adding a native branch to every construction-level
+// permutation. The `httpServe` body is intentionally dead — we do
+// not bring up an actual TLS listener — because the failure mode
+// being pinned is *construction-time* (parser / checker / runtime
+// config validator), which is what `cargo test --release` can
+// deterministically exercise in all three backends.
+//
+// Live cert-rotation and ALPN matrix coverage is runtime-dependent
+// (needs cert fixtures + real TLS negotiation); those cases stay in
+// the C26B-005 soak runbook per the 2026-04-24 Phase 0 Design Lock.
+// The 3-backend parity pin here is the contract that `docs/STABILITY.md
+// § 5.1` TLS-construction bullet promises.
+
+/// C26B-002-1: TLS config with missing cert path — 3-backend
+/// construction-time error parity.
+///
+/// Every backend must surface an error that mentions "cert" or "tls"
+/// (case-insensitive substrings). We do not pin the exact string (per
+/// `STABILITY § 2.3` diagnostic messages are not contractual) but we
+/// pin the classification: construction of a TLS server with a
+/// non-existent cert path is an error on every backend, never a
+/// silent fallback.
+#[test]
+fn test_net6_1c_c26b002_1_tls_missing_cert_3backend_parity() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+
+    for backend in &["interp", "js", "native"] {
+        let port = find_free_loopback_port();
+        let source = format!(
+            r#">>> taida-lang/net => @(httpServe)
+
+handler req =
+  @(status <= 200, headers <= @[], body <= "unreachable")
+=> :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
+
+asyncResult <= httpServe({port}, handler, 1, 5000, 128, @(cert <= "/nonexistent_cert_c26b002.pem", key <= "/nonexistent_key_c26b002.pem"))
+asyncResult ]=> result
+stdout(result.throw.message)
+"#
+        );
+
+        let dir = setup_net_project(&source, &format!("c26b002_1_{backend}"));
+        let td_path = dir.join("main.td");
+
+        let combined = match *backend {
+            "interp" => {
+                let out = Command::new(taida_bin())
+                    .arg(&td_path)
+                    .output()
+                    .expect("spawn interpreter");
+                let mut buf = String::from_utf8_lossy(&out.stdout).to_string();
+                buf.push('\n');
+                buf.push_str(&String::from_utf8_lossy(&out.stderr));
+                buf
+            }
+            "js" => {
+                let js_path = unique_temp_path("taida_c26b002_1_js", backend, "mjs");
+                let transpile = Command::new(taida_bin())
+                    .arg("build")
+                    .arg("--target")
+                    .arg("js")
+                    .arg(&td_path)
+                    .arg("-o")
+                    .arg(&js_path)
+                    .output()
+                    .expect("transpile");
+                assert!(
+                    transpile.status.success(),
+                    "C26B-002-1 JS transpile failed: {}",
+                    String::from_utf8_lossy(&transpile.stderr)
+                );
+                let out = Command::new("node")
+                    .arg(&js_path)
+                    .output()
+                    .expect("run node");
+                let _ = fs::remove_file(&js_path);
+                let mut buf = String::from_utf8_lossy(&out.stdout).to_string();
+                buf.push('\n');
+                buf.push_str(&String::from_utf8_lossy(&out.stderr));
+                buf
+            }
+            "native" => {
+                let bin_path = unique_temp_path("taida_c26b002_1_native", backend, "bin");
+                let compile = Command::new(taida_bin())
+                    .arg("build")
+                    .arg("--target")
+                    .arg("native")
+                    .arg(&td_path)
+                    .arg("-o")
+                    .arg(&bin_path)
+                    .output()
+                    .expect("compile native");
+                assert!(
+                    compile.status.success(),
+                    "C26B-002-1 native compile failed: {}",
+                    String::from_utf8_lossy(&compile.stderr)
+                );
+                let out = Command::new(&bin_path).output().expect("run native");
+                let _ = fs::remove_file(&bin_path);
+                let mut buf = String::from_utf8_lossy(&out.stdout).to_string();
+                buf.push('\n');
+                buf.push_str(&String::from_utf8_lossy(&out.stderr));
+                buf
+            }
+            _ => unreachable!(),
+        };
+        cleanup_net_project(&dir);
+
+        let low = combined.to_lowercase();
+        assert!(
+            low.contains("cert") || low.contains("tls"),
+            "C26B-002-1 {}: expected TLS/cert error output, got: {:?}",
+            backend,
+            combined
+        );
+    }
+}
+
+/// C26B-002-2: TLS config with a key but no cert — 3-backend
+/// construction-time error parity.
+#[test]
+fn test_net6_1c_c26b002_2_tls_key_only_3backend_parity() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+
+    for backend in &["interp", "js", "native"] {
+        let port = find_free_loopback_port();
+        let source = format!(
+            r#">>> taida-lang/net => @(httpServe)
+
+handler req =
+  @(status <= 200, headers <= @[], body <= "unreachable")
+=> :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
+
+asyncResult <= httpServe({port}, handler, 1, 5000, 128, @(key <= "/nonexistent_key_c26b002.pem"))
+asyncResult ]=> result
+stdout(result.throw.message)
+"#
+        );
+
+        let dir = setup_net_project(&source, &format!("c26b002_2_{backend}"));
+        let td_path = dir.join("main.td");
+
+        let combined = match *backend {
+            "interp" => {
+                let out = Command::new(taida_bin())
+                    .arg(&td_path)
+                    .output()
+                    .expect("spawn interpreter");
+                let mut buf = String::from_utf8_lossy(&out.stdout).to_string();
+                buf.push('\n');
+                buf.push_str(&String::from_utf8_lossy(&out.stderr));
+                buf
+            }
+            "js" => {
+                let js_path = unique_temp_path("taida_c26b002_2_js", backend, "mjs");
+                let transpile = Command::new(taida_bin())
+                    .arg("build")
+                    .arg("--target")
+                    .arg("js")
+                    .arg(&td_path)
+                    .arg("-o")
+                    .arg(&js_path)
+                    .output()
+                    .expect("transpile");
+                assert!(transpile.status.success(), "C26B-002-2 JS transpile failed");
+                let out = Command::new("node")
+                    .arg(&js_path)
+                    .output()
+                    .expect("run node");
+                let _ = fs::remove_file(&js_path);
+                let mut buf = String::from_utf8_lossy(&out.stdout).to_string();
+                buf.push('\n');
+                buf.push_str(&String::from_utf8_lossy(&out.stderr));
+                buf
+            }
+            "native" => {
+                let bin_path = unique_temp_path("taida_c26b002_2_native", backend, "bin");
+                let compile = Command::new(taida_bin())
+                    .arg("build")
+                    .arg("--target")
+                    .arg("native")
+                    .arg(&td_path)
+                    .arg("-o")
+                    .arg(&bin_path)
+                    .output()
+                    .expect("compile native");
+                assert!(
+                    compile.status.success(),
+                    "C26B-002-2 native compile failed: {}",
+                    String::from_utf8_lossy(&compile.stderr)
+                );
+                let out = Command::new(&bin_path).output().expect("run native");
+                let _ = fs::remove_file(&bin_path);
+                let mut buf = String::from_utf8_lossy(&out.stdout).to_string();
+                buf.push('\n');
+                buf.push_str(&String::from_utf8_lossy(&out.stderr));
+                buf
+            }
+            _ => unreachable!(),
+        };
+        cleanup_net_project(&dir);
+
+        let low = combined.to_lowercase();
+        assert!(
+            low.contains("cert") || low.contains("tls") || low.contains("key"),
+            "C26B-002-2 {}: expected TLS/cert/key error output, got: {:?}",
+            backend,
+            combined
+        );
+    }
+}
+
+/// C26B-002-3: TLS config `@()` plaintext fallback — 3-backend
+/// serving parity. Supersedes the existing NET6-1c-2 (which was
+/// construction-only); here we additionally drive a live request to
+/// pin that the plaintext fallback is accepted symmetrically.
+///
+/// This case exists as a *positive* construction-parity pin alongside
+/// the negative cases above — C26B-002 acceptance demands the matrix
+/// include both accept and reject branches.
+#[test]
+fn test_net6_1c_c26b002_3_tls_plaintext_fallback_3backend_parity() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+
+    for backend in &["interp", "js", "native"] {
+        let port = find_free_loopback_port();
+        let source = format!(
+            r#">>> taida-lang/net => @(httpServe)
+
+handler req =
+  @(status <= 200, headers <= @[], body <= "c26b002-3-ok")
+=> :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
+
+asyncResult <= httpServe({port}, handler, 1, 5000, 128, @())
+asyncResult ]=> result
+result ]=> r
+stdout(r.requests)
+"#
+        );
+
+        let request = b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+        let (resp, stdout) = spawn_and_request_v3(&source, backend, port, request);
+
+        assert!(
+            resp.contains("200 OK") && resp.contains("c26b002-3-ok"),
+            "C26B-002-3 {}: plaintext fallback should serve 200 OK, got: {:?}",
+            backend,
+            resp
+        );
+        assert_eq!(
+            stdout, "1",
+            "C26B-002-3 {}: expected 1 request count, got: {:?}",
+            backend, stdout
+        );
+    }
+}
+
+/// C26B-002-4: `tls = @(cert <= "valid-extension.pem", key <= "another.pem")`
+/// where both paths point to files that exist on disk but do not
+/// contain valid PEM content. This exercises the TLS construction
+/// layer *past* file-exists checks: the backend must surface a
+/// parse / invalid-content error rather than hanging or silently
+/// falling back. 3-backend parity.
+#[test]
+fn test_net6_1c_c26b002_4_tls_invalid_pem_content_3backend_parity() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+
+    // Prepare files with non-PEM content that still exist on disk.
+    let tmp = std::env::temp_dir().join(format!(
+        "c26b002_4_{}_{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::create_dir_all(&tmp).unwrap();
+    let cert_path = tmp.join("not_a_cert.pem");
+    let key_path = tmp.join("not_a_key.pem");
+    fs::write(&cert_path, "this is not a PEM certificate\n").unwrap();
+    fs::write(&key_path, "this is not a PEM private key\n").unwrap();
+
+    for backend in &["interp", "js", "native"] {
+        let port = find_free_loopback_port();
+        let source = format!(
+            r#">>> taida-lang/net => @(httpServe)
+
+handler req =
+  @(status <= 200, headers <= @[], body <= "unreachable")
+=> :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
+
+asyncResult <= httpServe({port}, handler, 1, 5000, 128, @(cert <= "{cert}", key <= "{key}"))
+asyncResult ]=> result
+stdout(result.throw.message)
+"#,
+            cert = cert_path.display(),
+            key = key_path.display(),
+        );
+
+        let dir = setup_net_project(&source, &format!("c26b002_4_{backend}"));
+        let td_path = dir.join("main.td");
+
+        let combined = match *backend {
+            "interp" => {
+                let out = Command::new(taida_bin())
+                    .arg(&td_path)
+                    .output()
+                    .expect("spawn interpreter");
+                let mut buf = String::from_utf8_lossy(&out.stdout).to_string();
+                buf.push('\n');
+                buf.push_str(&String::from_utf8_lossy(&out.stderr));
+                buf
+            }
+            "js" => {
+                let js_path = unique_temp_path("taida_c26b002_4_js", backend, "mjs");
+                let transpile = Command::new(taida_bin())
+                    .arg("build")
+                    .arg("--target")
+                    .arg("js")
+                    .arg(&td_path)
+                    .arg("-o")
+                    .arg(&js_path)
+                    .output()
+                    .expect("transpile");
+                assert!(transpile.status.success(), "C26B-002-4 JS transpile failed");
+                let out = Command::new("node")
+                    .arg(&js_path)
+                    .output()
+                    .expect("run node");
+                let _ = fs::remove_file(&js_path);
+                let mut buf = String::from_utf8_lossy(&out.stdout).to_string();
+                buf.push('\n');
+                buf.push_str(&String::from_utf8_lossy(&out.stderr));
+                buf
+            }
+            "native" => {
+                let bin_path = unique_temp_path("taida_c26b002_4_native", backend, "bin");
+                let compile = Command::new(taida_bin())
+                    .arg("build")
+                    .arg("--target")
+                    .arg("native")
+                    .arg(&td_path)
+                    .arg("-o")
+                    .arg(&bin_path)
+                    .output()
+                    .expect("compile native");
+                assert!(
+                    compile.status.success(),
+                    "C26B-002-4 native compile failed: {}",
+                    String::from_utf8_lossy(&compile.stderr)
+                );
+                let out = Command::new(&bin_path).output().expect("run native");
+                let _ = fs::remove_file(&bin_path);
+                let mut buf = String::from_utf8_lossy(&out.stdout).to_string();
+                buf.push('\n');
+                buf.push_str(&String::from_utf8_lossy(&out.stderr));
+                buf
+            }
+            _ => unreachable!(),
+        };
+        cleanup_net_project(&dir);
+
+        let low = combined.to_lowercase();
+        assert!(
+            low.contains("cert")
+                || low.contains("tls")
+                || low.contains("pem")
+                || low.contains("key")
+                || low.contains("invalid"),
+            "C26B-002-4 {}: expected TLS/cert/pem error for non-PEM content, got: {:?}",
+            backend,
+            combined
+        );
+    }
+
+    let _ = fs::remove_dir_all(&tmp);
+}
+
+/// C26B-002-5: `tls = @(protocol <= "invalid-proto-token")` is
+/// rejected at construction time on all 3 backends.
+///
+/// This is the protocol-literal validation half of the construction
+/// matrix (the numeric-literal half is already pinned by
+/// `test_nb6_10_non_str_protocol_rejected_3way_parity`). Both pins
+/// must survive for C26B-002 to be acceptable — a silent fallback on
+/// any backend would leak user-supplied tokens into the ALPN
+/// negotiation and break the handshake with zero diagnostic.
+#[test]
+fn test_net6_1c_c26b002_5_tls_unknown_protocol_string_rejected_3backend_parity() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+
+    for backend in &["interp", "js", "native"] {
+        let port = find_free_loopback_port();
+        let source = format!(
+            r#">>> taida-lang/net => @(httpServe)
+
+handler req =
+  @(status <= 200, headers <= @[], body <= "unreachable")
+=> :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
+
+asyncResult <= httpServe({port}, handler, 1, 5000, 128, @(protocol <= "invalid-proto-token"))
+asyncResult ]=> result
+stdout(result.throw.message)
+"#
+        );
+
+        let dir = setup_net_project(&source, &format!("c26b002_5_{backend}"));
+        let td_path = dir.join("main.td");
+
+        let combined = match *backend {
+            "interp" => {
+                let out = Command::new(taida_bin())
+                    .arg(&td_path)
+                    .output()
+                    .expect("spawn interpreter");
+                let mut buf = String::from_utf8_lossy(&out.stdout).to_string();
+                buf.push('\n');
+                buf.push_str(&String::from_utf8_lossy(&out.stderr));
+                buf
+            }
+            "js" => {
+                let js_path = unique_temp_path("taida_c26b002_5_js", backend, "mjs");
+                let transpile = Command::new(taida_bin())
+                    .arg("build")
+                    .arg("--target")
+                    .arg("js")
+                    .arg(&td_path)
+                    .arg("-o")
+                    .arg(&js_path)
+                    .output()
+                    .expect("transpile");
+                // May fail at transpile OR at run — both classifications
+                // are acceptable for C26B-002-5, we assert the negative
+                // signal appears somewhere.
+                let transpile_stderr = String::from_utf8_lossy(&transpile.stderr).to_string();
+                if !transpile.status.success() {
+                    let _ = fs::remove_file(&js_path);
+                    transpile_stderr
+                } else {
+                    let out = Command::new("node")
+                        .arg(&js_path)
+                        .output()
+                        .expect("run node");
+                    let _ = fs::remove_file(&js_path);
+                    let mut buf = String::from_utf8_lossy(&out.stdout).to_string();
+                    buf.push('\n');
+                    buf.push_str(&String::from_utf8_lossy(&out.stderr));
+                    buf
+                }
+            }
+            "native" => {
+                let bin_path = unique_temp_path("taida_c26b002_5_native", backend, "bin");
+                let compile = Command::new(taida_bin())
+                    .arg("build")
+                    .arg("--target")
+                    .arg("native")
+                    .arg(&td_path)
+                    .arg("-o")
+                    .arg(&bin_path)
+                    .output()
+                    .expect("compile native");
+                let compile_stderr = String::from_utf8_lossy(&compile.stderr).to_string();
+                if !compile.status.success() {
+                    compile_stderr
+                } else {
+                    let out = Command::new(&bin_path).output().expect("run native");
+                    let _ = fs::remove_file(&bin_path);
+                    let mut buf = String::from_utf8_lossy(&out.stdout).to_string();
+                    buf.push('\n');
+                    buf.push_str(&String::from_utf8_lossy(&out.stderr));
+                    buf
+                }
+            }
+            _ => unreachable!(),
+        };
+        cleanup_net_project(&dir);
+
+        let low = combined.to_lowercase();
+        // Every backend must surface the token name or a protocol /
+        // tls / invalid / unknown classifier. No silent success.
+        assert!(
+            low.contains("invalid-proto-token")
+                || low.contains("protocol")
+                || low.contains("tls")
+                || low.contains("invalid")
+                || low.contains("unknown"),
+            "C26B-002-5 {}: expected rejection of unknown TLS protocol token, got: {:?}",
+            backend,
+            combined
+        );
+    }
+}
+
 /// NB6-10-1: httpServe with a raw numeric protocol literal is rejected at compile time.
 #[test]
 fn test_nb6_10_non_str_protocol_rejected_3way_parity() {
