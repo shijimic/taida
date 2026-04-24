@@ -1080,6 +1080,17 @@ fn runtime_func_prototype(name: &str, profile: WasmProfile) -> Result<String, Wa
         "taida_os_exists" if profile == WasmProfile::Wasi || profile == WasmProfile::Full => {
             "int64_t taida_os_exists(int64_t path_ptr);".to_string()
         }
+        // C26B-020 柱 3: readBytesAt(path, offset, len) -> Lax[Bytes]
+        // Implemented in runtime_wasi_io.c (wasm-wasi / wasm-full link
+        // this object; wasm-full additionally links runtime_full_wasm.c
+        // which supplies Bytes constructors but the wasi-side produces
+        // layout-compatible Bytes values via static helpers).
+        "taida_os_read_bytes_at"
+            if profile == WasmProfile::Wasi || profile == WasmProfile::Full =>
+        {
+            "int64_t taida_os_read_bytes_at(int64_t path_ptr, int64_t offset, int64_t len);"
+                .to_string()
+        }
         // WE-2: wasm-edge OS API functions (env only, no file I/O)
         "taida_os_env_var" if profile == WasmProfile::Edge => {
             "int64_t taida_os_env_var(int64_t name_ptr);".to_string()
@@ -1088,7 +1099,10 @@ fn runtime_func_prototype(name: &str, profile: WasmProfile) -> Result<String, Wa
             "int64_t taida_os_all_env(void);".to_string()
         }
         // wasm-edge does not support file I/O
-        "taida_os_read" | "taida_os_write_file" | "taida_os_exists"
+        "taida_os_read"
+        | "taida_os_write_file"
+        | "taida_os_exists"
+        | "taida_os_read_bytes_at"
             if profile == WasmProfile::Edge =>
         {
             return Err(WasmCEmitError {
@@ -1105,6 +1119,7 @@ fn runtime_func_prototype(name: &str, profile: WasmProfile) -> Result<String, Wa
         | "taida_os_read"
         | "taida_os_write_file"
         | "taida_os_exists"
+        | "taida_os_read_bytes_at"
             if profile == WasmProfile::Min =>
         {
             return Err(WasmCEmitError {

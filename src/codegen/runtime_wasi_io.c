@@ -658,3 +658,127 @@ int64_t taida_os_exists(int64_t path_ptr) {
     __wasi_fd_close(file_fd);
     return wasi_os_result_success_bool(1);
 }
+
+/* ── C26B-020 柱 3: readBytesAt(path, offset, len) → Lax[Bytes] ──
+ *
+ * wasm-wasi / wasm-full lowering for the chunked-read API landed as
+ * `readBytesAt` on Interpreter / JS / Native in Round 1 wD.  Semantics
+ * mirror `src/codegen/native_runtime/os.c::taida_os_read_bytes_at`
+ * and `src/interpreter/os_eval.rs::readBytesAt` byte-for-byte:
+ *   - offset < 0 or len < 0        → Lax failure (default empty Bytes)
+ *   - len == 0                     → Lax success (empty Bytes)
+ *   - len > 64 MB chunk ceiling    → Lax failure
+ *   - offset >= file size          → Lax success (empty Bytes)
+ *   - offset + len > file size     → Lax success (truncated tail)
+ *   - any IO / path-resolve error  → Lax failure
+ *
+ * Bytes representation here mirrors `runtime_full_wasm.c::taida_bytes_*`
+ * (layout: [MAGIC, len, byte0, byte1, ...] with one i64 per byte).
+ * The constructors below are `static` so that wasm-full, which links
+ * both rt_wasi and rt_full, does not see duplicate symbols.  Any
+ * Bytes value produced here is layout-compatible with rt_full's
+ * `_wf_is_bytes()` / `taida_bytes_len()` and round-trips through
+ * `Utf8Decode` / `.hasValue` / `@size` identically on wasm-full.
+ */
+
+/* Must match runtime_full_wasm.c::WF_BYTES_MAGIC exactly (layout
+ * interop — wasm-full links both objects, so values must tag-compare
+ * equal).  Static linkage means the symbol itself is file-local; only
+ * the produced Bytes pointer is shared. */
+#define WASI_BYTES_MAGIC 0x5441494442595400LL  /* "TAIDBYT\0" */
+
+static int64_t wasi_bytes_default_value(void) {
+    int64_t *bytes = (int64_t *)wasm_alloc(3 * 8);
+    if (!bytes) return 0;
+    bytes[0] = WASI_BYTES_MAGIC;
+    bytes[1] = 0;  /* len */
+    bytes[2] = 0;
+    return (int64_t)(intptr_t)bytes;
+}
+
+static int64_t wasi_bytes_from_raw(const unsigned char *src, int64_t len) {
+    if (len < 0) len = 0;
+    /* +2 i64 header, +len i64 for one byte-per-slot (matches rt_full). */
+    int64_t *bytes = (int64_t *)wasm_alloc((unsigned int)((2 + len) * 8));
+    if (!bytes) return wasi_bytes_default_value();
+    bytes[0] = WASI_BYTES_MAGIC;
+    bytes[1] = len;
+    for (int64_t i = 0; i < len; i++) bytes[2 + i] = (int64_t)src[i];
+    return (int64_t)(intptr_t)bytes;
+}
+
+int64_t taida_os_read_bytes_at(int64_t path_ptr, int64_t offset, int64_t len) {
+    const char *path = (const char *)(intptr_t)path_ptr;
+    if (!path) return taida_lax_empty(wasi_bytes_default_value());
+    if (offset < 0 || len < 0) return taida_lax_empty(wasi_bytes_default_value());
+    /* 64 MB chunk ceiling — matches interpreter / native. */
+    if (len > 64LL * 1024LL * 1024LL) return taida_lax_empty(wasi_bytes_default_value());
+    if (len == 0) {
+        /* Lax success with an empty Bytes value. */
+        int64_t empty = wasi_bytes_from_raw((const unsigned char *)"", 0);
+        return taida_lax_new(empty, wasi_bytes_default_value());
+    }
+
+    int32_t path_len = wasi_strlen(path);
+    if (path_len == 0) return taida_lax_empty(wasi_bytes_default_value());
+
+    wasi_resolved_path rp = resolve_preopened_path(path, path_len);
+
+    wasi_fd file_fd = -1;
+    int32_t err = __wasi_path_open(
+        rp.fd,
+        1,  /* dirflags: LOOKUPFLAGS_SYMLINK_FOLLOW */
+        rp.rel_path,
+        rp.rel_path_len,
+        0,  /* oflags: none */
+        WASI_RIGHT_FD_READ | WASI_RIGHT_FD_SEEK,
+        0,
+        0,
+        &file_fd
+    );
+    if (err != 0) return taida_lax_empty(wasi_bytes_default_value());
+
+    /* Seek to offset.  If the underlying fd does not support seek or
+     * the offset is past EOF, fd_seek will set newoffset to a value
+     * past the end; the subsequent fd_read will just return 0 bytes
+     * and we surface an empty Lax success, matching the interpreter
+     * "beyond-EOF → empty success" branch. */
+    int64_t new_off = 0;
+    err = __wasi_fd_seek(file_fd, offset, WASI_SEEK_SET, &new_off);
+    if (err != 0) {
+        __wasi_fd_close(file_fd);
+        return taida_lax_empty(wasi_bytes_default_value());
+    }
+
+    /* Read up to `len` bytes.  Tolerate short reads at EOF: loop
+     * fd_read until we've filled the buffer or EOF is reached. */
+    unsigned char *buf = (unsigned char *)wasm_alloc((unsigned int)len);
+    if (!buf) {
+        __wasi_fd_close(file_fd);
+        return taida_lax_empty(wasi_bytes_default_value());
+    }
+
+    int64_t filled = 0;
+    int32_t io_err = 0;
+    while (filled < len) {
+        wasi_iovec iov;
+        iov.buf = (int32_t)(intptr_t)(buf + filled);
+        iov.len = (int32_t)(len - filled);
+        int32_t nread = 0;
+        int32_t r = __wasi_fd_read(file_fd, &iov, 1, &nread);
+        if (r != 0) { io_err = r; break; }
+        if (nread == 0) break;  /* EOF */
+        filled += nread;
+    }
+    __wasi_fd_close(file_fd);
+
+    if (io_err != 0) {
+        return taida_lax_empty(wasi_bytes_default_value());
+    }
+
+    /* Even with filled < len (truncated tail or beyond-EOF), we return
+     * Lax success with whatever bytes we managed to read.  This matches
+     * the interpreter / native contract. */
+    int64_t bytes = wasi_bytes_from_raw(buf, filled);
+    return taida_lax_new(bytes, wasi_bytes_default_value());
+}
