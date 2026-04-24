@@ -182,8 +182,23 @@ jobs:
           #   * `shiftTooManyBitsSigned` on `taida_shift_r`'s arithmetic
           #     right shift — deliberate implementation-defined behaviour
           #     contracted by the Taida surface, documented at the site.
+          #
+          # `legacyUninitvar` is suppressed globally. It is cppcheck's
+          # pre-value-flow checker and is superseded by the modern
+          # `uninitvar` (which stays enabled and did catch the real
+          # json_val scalar-init miss fixed in a18e765). Upstream
+          # cppcheck documents `legacyUninitvar` as producing
+          # false positives on patterns like:
+          #     char *p = NULL; p = factory(); if (p) use(p);
+          #     H3Header arr[N]; memset(arr, 0, sizeof arr); snprintf(arr[0]....);
+          # where every byte is defined on every reachable path but the
+          # legacy dataflow still reports uninit. Keeping it enabled
+          # means the gate plays whack-a-mole across the HTTP parsers
+          # without surfacing any real bug; the modern `uninitvar` is
+          # the signal we want.
           cppcheck --enable=warning,performance,portability \
                    --suppress=missingIncludeSystem \
+                   --suppress=legacyUninitvar \
                    --inline-suppr \
                    --error-exitcode=1 \
                    --quiet \

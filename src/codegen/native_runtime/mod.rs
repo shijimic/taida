@@ -444,7 +444,11 @@ mod tests {
         //            All additions live in F1 before the "Error ceiling"
         //            marker. F2 unchanged.)
         // New total: 998,598 + 14,373 = 1,012,971.
-        const EXPECTED_TOTAL_LEN: usize = 1_012_971;
+        // CI red 2026-04-24 follow-up: +2,009 bytes from the cppcheck
+        // gate clean-up in a18e765 (json_val scalar init, stack
+        // H2/H3Header memset, hn/hv NULL-init split, inline-suppress
+        // comments at three call sites).
+        const EXPECTED_TOTAL_LEN: usize = 1_014_980;
         let asm = *NATIVE_RUNTIME_C;
         assert_eq!(
             asm.len(),
@@ -829,11 +833,19 @@ mod tests {
         // All additions sit in the Magic-Numbers / allocator / read-
         // barrier region which is entirely inside F1. F2 unchanged.
         // F1_LEN moves: 251,878 + 14,374 = 266,252.
-        const F1_LEN: usize = 266_252;
+        // 2026-04-24 cppcheck clean-up (a18e765):
+        //   F1 += 881 bytes (shift / retain / release inline-suppress
+        //     comments on lines 847, 2459, 2478 inside F1).
+        //   F2 += 409 bytes (json_parse_array / json_parse_object
+        //     scalar init + preceding comment on lines 8207, 8236
+        //     which sit in F2, past the "// ── Error ceiling" marker).
+        //   F1_LEN: 266,252 + 881 = 267,133.
+        //   F2_LEN: 160,351 + 409 = 160,760.
+        const F1_LEN: usize = 267_133;
         assert_eq!(
             CORE_SECTION.len(),
-            266_252 + 160_351,
-            "core.c total byte length must equal legacy fragment1 + fragment2 (C25B-001 / C25B-028 / C25B-025 / C26B-011 / C26B-020 / C26B-016 / C26B-018 / C26B-011-wS / C26B-024 / C26B-024-wepsilon adjusted)"
+            267_133 + 160_760,
+            "core.c total byte length must equal legacy fragment1 + fragment2 (C25B-001 / C25B-028 / C25B-025 / C26B-011 / C26B-020 / C26B-016 / C26B-018 / C26B-011-wS / C26B-024 / C26B-024-wepsilon adjusted; CI-red 2026-04-24 cppcheck clean-up adds 881/409 to F1/F2)"
         );
         const F2_PREFIX: &[u8] = b"// \xE2\x94\x80\xE2\x94\x80 Error ceiling";
         let tail = &CORE_SECTION.as_bytes()[F1_LEN..F1_LEN + F2_PREFIX.len()];
@@ -861,11 +873,15 @@ mod tests {
         // Host-value 256). Inserted entirely before the "// ── Native
         // HTTP/2 server" divider, so F5 grows and F6 is unchanged.
         // F5_LEN moves: 184,963 + 1,904 = 186,867.
+        // 2026-04-24 cppcheck clean-up (a18e765): the
+        // h2_send_response_headers memset + 4-line comment sits
+        // inside fragment 6 (HTTP/2 server), so F5_LEN is unchanged
+        // and F6 grows: 91,769 + 355 = 92,124.
         const F5_LEN: usize = 186_867;
         assert_eq!(
             NET_H1_H2_SECTION.len(),
-            186_867 + 91_769,
-            "net_h1_h2.c total byte length must equal legacy fragment5 + fragment6 (C26B-026 / C26B-022-wS adjusted)"
+            186_867 + 92_124,
+            "net_h1_h2.c total byte length must equal legacy fragment5 + fragment6 (C26B-026 / C26B-022-wS adjusted; CI-red 2026-04-24 cppcheck clean-up adds 355 to F6)"
         );
         const F6_PREFIX: &[u8] = b"// \xE2\x94\x80\xE2\x94\x80 Native HTTP/2 server";
         let tail = &NET_H1_H2_SECTION.as_bytes()[F5_LEN..F5_LEN + F6_PREFIX.len()];
