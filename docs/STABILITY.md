@@ -404,7 +404,7 @@ work items (`C26B-010` / `C26B-012` / `C26B-018` / `C26B-020`
 / `C26B-024`) land alongside the gate promotion so the baseline
 is measured against the post-fix runtime.
 
-**Bytes I/O addendum (C26B-020 pillars 1 + 3, 2026-04-24):**
+**Bytes I/O addendum (C26B-020 all three pillars, 2026-04-24):**
 The `readBytesAt(path: Str, offset: Int, len: Int) -> Bytes` API
 is landed across 3-backend (interpreter / JS / native) **and**
 lowered for the `wasm-wasi` / `wasm-full` targets (Round 3 / wI:
@@ -413,17 +413,25 @@ new `src/codegen/runtime_wasi_io.c` WASI preview1
 preserved). The previous 64 MB ceiling of `readBytes` is
 runtime-configurable on every target.
 
-The full `@c.26` stable gate still requires pillar 2 (zero-copy
-`BytesCursorTake` via `Arc<[u8]>` + offset/len view) to land
-alongside the rest of the Cluster 4 runtime-perf work, which is
-gated on the common-abstraction lock at
-`.dev/C26_CLUSTER4_ABSTRACTION.md` (Arc + try_unwrap COW family,
-LOCKED 2026-04-24 in the wG round 3 decide-only session).
+**Pillar 2 landed at Round 5 / wO** (commit `f15c145`). The
+`Value::Bytes` variant now wraps `Arc<Vec<u8>>` internally
+(`src/interpreter/value.rs`), so each `BytesCursorTake(size)` call
+performs an `Arc::clone` (O(1) refcount bump) instead of
+copying the entire byte buffer. `parse_bytes_cursor` returns
+`(Arc<Vec<u8>>, usize)` to preserve the zero-copy path through
+`make_bytes_cursor_arc`; destructive consumers use the new
+`Value::bytes_take` helper (try-unwrap fast path, clone fallback)
+so uniquely-owned buffers move in place. Acceptance pins:
+256 MB × 16 chunks < 500 ms baseline and (with `TAIDA_BIG_BYTES=1`)
+1 GB × 64 chunks < 2 s, with `Arc::ptr_eq` invariants asserted
+in `tests/c26b_020_bytes_cursor_zero_copy.rs`.
 
-Until pillar 2 lands, the bytes I/O surface is **partially**
-contractual: the `readBytesAt` signature is pinned across all four
-targets (interpreter / JS / native / wasm-wasi+full), but the
-zero-copy guarantee for `BytesCursorTake` remains unlanded.
+The bytes I/O surface is therefore now **fully** contractual: the
+`readBytesAt` signature is pinned across all four targets
+(interpreter / JS / native / wasm-wasi+full), and the zero-copy
+guarantee for `BytesCursorTake` has landed against the locked
+Cluster 4 Arc + try_unwrap COW family abstraction
+(`.dev/C26_CLUSTER4_ABSTRACTION.md`).
 
 ### 5.6. C26 fix-track progress snapshot (informational)
 
@@ -432,7 +440,7 @@ land. It is not part of the stable surface contract and may be
 removed once `@c.26` is tagged. Canonical worklist is
 `.dev/C26_BLOCKERS.md`.
 
-FIXED on `feat/c26` (Round 1 + Round 2 + Round 3):
+FIXED on `feat/c26` (Round 1 + Round 2 + Round 3 + Round 4 + Round 5):
 
 - **C26B-001** (Must Fix) — h2 3-backend parity pin reached 10
   cases (baseline GET / POST + C26B-001-{1..7}) at Round 3 / wE,
@@ -477,15 +485,58 @@ FIXED on `feat/c26` (Round 1 + Round 2 + Round 3):
 - **C26B-020** pillar 3 — `wasm-wasi` / `wasm-full` lowering of
   `readBytesAt` via `src/codegen/runtime_wasi_io.c`
   (WASI preview1 `path_open` + `fd_read`) landed at Round 3 / wI.
-  Pillar 2 (`BytesCursorTake` zero-copy) is still OPEN and gated
-  on the Cluster 4 common-abstraction lock.
+- **C26B-020** pillar 2 — `Value::Bytes` migrated to
+  `Arc<Vec<u8>>` at Round 5 / wO (commit `f15c145`);
+  `parse_bytes_cursor` returns `(Arc<Vec<u8>>, usize)` and
+  `BytesCursorTake(size)` is now an `Arc::clone` (O(1)) rather
+  than a full-buffer memcpy. Regression guards:
+  `tests/c26b_020_bytes_cursor_zero_copy.rs` (256 MB × 16 < 500 ms
+  baseline; `TAIDA_BIG_BYTES=1` scales to 1 GB × 64 < 2 s;
+  `Arc::ptr_eq` proves the refcount-only path). All three pillars
+  of C26B-020 are now FIXED; the downstream `bonsai-wasm` Phase 6
+  unblock is material (acceptance-smoke still pending for the
+  stable gate).
+- **C26B-018** (B) + (C) — byte-level primitive paths +
+  `StringRepeatJoin` mold landed at Round 4 / wK (commit
+  `3e4c667`) across 3-backend
+  (`src/interpreter/mold_eval.rs` / `src/js/runtime/core.rs` /
+  `src/codegen/native_runtime/core.c`). Regression guards:
+  `tests/c26b_018_byte_primitive.rs` +
+  `tests/c26b_018_repeat_join.rs`. Option (A) char-index cache
+  remains OPEN (deferred to the next Cluster 4 session per the
+  wO commit note; the Str super-linear hot path is bounded by
+  (B) + (C) in the interim).
+- **C26B-006** `[FIXED]` — HTTP parity retry shim retired at
+  Round 4 / wJ (commit `c3805ff`). C26B-003 root-cause fix made
+  the shim safe to remove; `tests/parity.rs` now binds to
+  `0.0.0.0:0` and reads the concrete port via `getsockname()`
+  with no retry wrapper. No existing assertion was rewritten
+  (the shim's previous body was a no-op after C26B-003 landed).
+- **C26B-022** authority (256 byte) — wire-parser enforcement
+  landed at Round 4 / wJ (commit `c3805ff`) across h1 / h2 / h3
+  (`src/interpreter/net_eval/{h1,h2,h3}.rs`); over-limit
+  authorities return `400 Bad Request` symmetrically with the
+  method / path limits from Round 3 / wE. The
+  `-Wformat-truncation` warning-as-error CI gate promotion
+  remains tracked as an OPEN residual below.
+- **C26B-010** `[FIXED]` — Valgrind smoke on every push + weekly
+  heaptrack run wired into `.github/workflows/memory.yml`
+  (commit `e444f81`, Round 4 / wM). Smoke fixtures under
+  `examples/quality/c26_mem_smoke/` (hello / list / string) pin
+  the baseline; helper scripts at `scripts/mem/` automate the
+  local reproduction. Peak-RSS drift rejects are contractual
+  against this snapshot for the `@c.26` gate; the 24 h soak
+  (C26B-005) is orthogonal and still pending.
 - **C26B-021** — native `stdout` / `stderr` line-buffered at the
   C entry point via `setvbuf(_IOLBF, 0)` (Option B pinned).
 - **C26B-022** Step 2 — interpreter-side h1 wire-parser
   enforcement of method (16 byte) + path (2048 byte) ceilings
   landed at Round 3 / wE (rejecting over-limit requests with
-  `400 Bad Request`). Authority (256 byte) and the Native /
-  h2 / h3 paths remain partial (see OPEN below).
+  `400 Bad Request`). The authority (256 byte) companion landed
+  at Round 4 / wJ (see entry above); together the Step 2 scope
+  is complete for interpreter-side h1 / h2 / h3. Native
+  parser-side symmetry and the `-Wformat-truncation` CI
+  promotion remain in the OPEN residuals below.
 - **C26B-023** docs-path — `docs/reference/net_api.md` 2-arg
   handler `req.body` empty-span caveat + `readBody` /
   `readBodyChunk` / `readBodyAll` usage matrix landed at Round 3
@@ -509,20 +560,35 @@ Design decisions locked without code (informational):
 
 OPEN (owned by C26, not yet landed):
 
-- **C26B-002** — TLS construction across 3-backend.
-- **C26B-006** — HTTP retry-shim retirement (staged for the wJ
-  NET-rest worktree; C26B-003 is FIXED so the shim is now safe to
-  remove).
+- **C26B-002** — TLS construction across 3-backend. Round 4 / wJ
+  landed a TLS-observability surface tranche (interpreter
+  `net_eval/h1.rs` + `h3.rs`); the full 3-backend TLS
+  construction pin is still OPEN.
 - **C26B-008** — C25B-014 advisory publication + CVE request
-  (owner action).
-- **C26B-010** / **C26B-012** / **C26B-018** / **C26B-020**
-  pillar 2 / **C26B-024** — Cluster 4 runtime perf items, to land
-  against the locked Arc-COW abstraction above.
-- **C26B-013** — ongoing docs amendment (this §5.6 snapshot is
-  part of the C26B-013 track).
-- **C26B-022** residuals — authority-byte limit (256) + Native /
-  h2 / h3 parser-side enforcement. The `-Wformat-truncation`
-  warning-as-error CI gate promotion also belongs here.
+  **(owner action)**. Advisory staging moved to `docs/advisory/`
+  at Round 6 / wR so the owner can submit it via `gh api` without
+  hunting inside `.dev/`. The agent does not publish; the
+  publication / CVE request remains a strictly manual step.
+- **C26B-018 (A)** char-index cache for `Value::Str`,
+  **C26B-012** `PENDING_BYTES` FIFO + BuchiPack interior Arc
+  migration, and **C26B-024** Native list / BuchiPack clone-heavy
+  paths — the three remaining Cluster 4 items. All land against
+  the locked Arc + try_unwrap COW abstraction; each is cross-cut
+  on 500+ call sites and is scheduled across the next Phase 10
+  sessions.
+- **C26B-013** — ongoing docs amendment (this §5.6 snapshot, the
+  `docs/advisory/` scaffold, and CHANGELOG re-syncs are part of
+  the C26B-013 track).
+- **C26B-022** residuals — (a) `-Wformat-truncation` promotion
+  to warning-as-error in CI, and (b) Native-side parser
+  enforcement of the method / path / authority ceilings. The
+  interpreter-side h1 / h2 / h3 enforcement itself is FIXED
+  as of Round 4 / wJ; the Native companion is tracked in
+  parallel Round-6 worktree wS.
+- **Float denormal 3-backend rendering parity** (tracked under
+  C26B-011's follow-up pin) — acceptance fixture still pending
+  a cross-backend render audit; tracked for the next Cluster 5
+  session.
 
 ---
 
