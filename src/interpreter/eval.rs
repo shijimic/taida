@@ -468,8 +468,8 @@ impl Interpreter {
                 let _ = self.env.define(
                     &ed.name,
                     Value::pack(vec![
-                        ("__type".to_string(), Value::Str("EnumDef".to_string())),
-                        ("__name".to_string(), Value::Str(ed.name.clone())),
+                        ("__type".to_string(), Value::str("EnumDef".to_string())),
+                        ("__name".to_string(), Value::str(ed.name.clone())),
                     ]),
                 );
                 Ok(Signal::Value(Value::Unit))
@@ -495,8 +495,8 @@ impl Interpreter {
                 let _ = self.env.define(
                     &td.name,
                     Value::pack(vec![
-                        ("__type".to_string(), Value::Str("TypeDef".to_string())),
-                        ("__name".to_string(), Value::Str(td.name.clone())),
+                        ("__type".to_string(), Value::str("TypeDef".to_string())),
+                        ("__name".to_string(), Value::str(td.name.clone())),
                     ]),
                 );
                 Ok(Signal::Value(Value::Unit))
@@ -602,8 +602,8 @@ impl Interpreter {
                 let _ = self.env.define(
                     &inh.child,
                     Value::pack(vec![
-                        ("__type".to_string(), Value::Str("TypeDef".to_string())),
-                        ("__name".to_string(), Value::Str(inh.child.clone())),
+                        ("__type".to_string(), Value::str("TypeDef".to_string())),
+                        ("__name".to_string(), Value::str(inh.child.clone())),
                     ]),
                 );
                 Ok(Signal::Value(Value::Unit))
@@ -886,11 +886,11 @@ impl Interpreter {
         match expr {
             Expr::IntLit(n, _) => Ok(Signal::Value(Value::Int(*n))),
             Expr::FloatLit(n, _) => Ok(Signal::Value(Value::Float(*n))),
-            Expr::StringLit(s, _) => Ok(Signal::Value(Value::Str(s.clone()))),
+            Expr::StringLit(s, _) => Ok(Signal::Value(Value::str(s.clone()))),
             Expr::TemplateLit(s, _) => {
                 // Template string interpolation: replace ${...} with evaluated values
                 let result = self.eval_template_string(s)?;
-                Ok(Signal::Value(Value::Str(result)))
+                Ok(Signal::Value(Value::str(result)))
             }
             Expr::BoolLit(b, _) => Ok(Signal::Value(Value::Bool(*b))),
             Expr::Gorilla(_) => Ok(Signal::Gorilla),
@@ -899,9 +899,9 @@ impl Interpreter {
             // B11-6a: TypeLiteral is only valid inside TypeIs/TypeExtends — handled by mold_eval
             Expr::TypeLiteral(name, variant, _) => {
                 if let Some(var) = variant {
-                    Ok(Signal::Value(Value::Str(format!("{}:{}", name, var))))
+                    Ok(Signal::Value(Value::str(format!("{}:{}", name, var))))
                 } else {
-                    Ok(Signal::Value(Value::Str(name.clone())))
+                    Ok(Signal::Value(Value::str(name.clone())))
                 }
             }
             Expr::Ident(name, _) => {
@@ -1138,7 +1138,7 @@ impl Interpreter {
                 // The RC2 design uses mold syntax for effectful addon
                 // queries (`TerminalSize[]()`, `ReadKey[]()`). When a
                 // mold name is bound in the current env to an addon
-                // sentinel (`Value::Str("__taida_addon_call::...")`),
+                // sentinel (`Value::str("__taida_addon_call::...")`),
                 // we dispatch through the addon call path with the
                 // positional `type_args` as arguments and no named
                 // fields. This preserves the normal mold path for
@@ -1326,7 +1326,7 @@ impl Interpreter {
                 }
 
                 // Add a __type field to track the type
-                result_fields.push(("__type".to_string(), Value::Str(name.clone())));
+                result_fields.push(("__type".to_string(), Value::str(name.clone())));
                 let instance = Value::pack(result_fields.clone());
 
                 // `solidify` overrides what Name[args]() evaluates to.
@@ -1435,7 +1435,7 @@ impl Interpreter {
                 } else {
                     result_fields = provided_fields;
                 }
-                result_fields.push(("__type".to_string(), Value::Str(name.clone())));
+                result_fields.push(("__type".to_string(), Value::str(name.clone())));
                 Ok(Signal::Value(Value::pack(result_fields)))
             }
 
@@ -1494,7 +1494,7 @@ impl Interpreter {
             TypeExpr::Named(name) => match name.as_str() {
                 "Int" | "Num" => Ok(Value::Int(0)),
                 "Float" => Ok(Value::Float(0.0)),
-                "Str" => Ok(Value::Str(String::new())),
+                "Str" => Ok(Value::str(String::new())),
                 "Bytes" => Ok(Value::bytes(Vec::new())),
                 "Bool" => Ok(Value::Bool(false)),
                 "JSON" => Ok(Value::default_json()),
@@ -1503,7 +1503,7 @@ impl Interpreter {
                     if visiting.contains(name) {
                         return Ok(Value::pack(vec![(
                             "__type".to_string(),
-                            Value::Str(name.clone()),
+                            Value::str(name.clone()),
                         )]));
                     }
                     if let Some(type_fields) = self.type_defs.get(name).cloned() {
@@ -1514,7 +1514,7 @@ impl Interpreter {
                             fields.push((field_def.name.clone(), default_val));
                         }
                         visiting.remove(name);
-                        fields.push(("__type".to_string(), Value::Str(name.clone())));
+                        fields.push(("__type".to_string(), Value::str(name.clone())));
                         Ok(Value::pack(fields))
                     } else {
                         Ok(Value::Unit)
@@ -1541,7 +1541,7 @@ impl Interpreter {
                         ("hasValue".to_string(), Value::Bool(false)),
                         ("__value".to_string(), inner.clone()),
                         ("__default".to_string(), inner),
-                        ("__type".to_string(), Value::Str("Lax".to_string())),
+                        ("__type".to_string(), Value::str("Lax".to_string())),
                     ]));
                 }
                 Ok(Value::Unit)

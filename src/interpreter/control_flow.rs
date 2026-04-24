@@ -249,7 +249,7 @@ impl Interpreter {
                 (Value::Float(a), Value::Int(b)) => Ok(Signal::Value(Value::Float(a + *b as f64))),
                 (Value::Str(a), Value::Str(b)) => {
                     // String concatenation with + between two strings
-                    Ok(Signal::Value(Value::Str(format!("{}{}", a, b))))
+                    Ok(Signal::Value(Value::str(format!("{}{}", a, b))))
                 }
                 _ => Err(RuntimeError {
                     message: format!("Cannot add {} and {}", left, right),
@@ -288,7 +288,7 @@ impl Interpreter {
             BinOp::Concat => {
                 let left_str = left.to_display_string();
                 let right_str = right.to_display_string();
-                Ok(Signal::Value(Value::Str(format!(
+                Ok(Signal::Value(Value::str(format!(
                     "{}{}",
                     left_str, right_str
                 ))))

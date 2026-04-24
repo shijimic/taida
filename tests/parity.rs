@@ -1812,8 +1812,7 @@ stdout(closed.__value.ok.toString())
         };
 
         let outcome = (|| -> Result<(), String> {
-            let out =
-                out.ok_or_else(|| format!("{} backend failed for udp loopback", backend))?;
+            let out = out.ok_or_else(|| format!("{} backend failed for udp loopback", backend))?;
             let lines: Vec<&str> = out.lines().collect();
             if lines.len() != 4 {
                 return Err(format!(
@@ -35266,12 +35265,16 @@ stdout(r.requests)
             assert!(
                 low.contains(hname),
                 "C26B-026 {}: custom header name {:?} missing from dump:\n{}",
-                backend, hname, hdr_dump
+                backend,
+                hname,
+                hdr_dump
             );
             assert!(
                 hdr_dump.contains(hval),
                 "C26B-026 {}: custom header value {:?} missing from dump:\n{}",
-                backend, hval, hdr_dump
+                backend,
+                hval,
+                hdr_dump
             );
         }
         assert_eq!(
@@ -35401,9 +35404,9 @@ stdout(result.throw.message)
 //   2. No STABILITY-pinned error string is modified.
 //   3. No existing tests/parity.rs assertion is rewritten (append only).
 fn c26b001_r3_h2_method_variation_test(
-    method_slug: &'static str, // e.g. "put", "delete", "patch"
+    method_slug: &'static str,  // e.g. "put", "delete", "patch"
     method_upper: &'static str, // e.g. "PUT", "DELETE", "PATCH"
-    case_tag: &'static str, // e.g. "c26b001_5" for unique temp paths
+    case_tag: &'static str,     // e.g. "c26b001_5" for unique temp paths
 ) {
     if !node_available() {
         eprintln!("SKIP: node not available");
@@ -35630,11 +35633,7 @@ stdout(result.throw.message)
     );
 
     let dir_j = setup_net_project(&js_source, &format!("{}_{}_js", case_tag, method_slug));
-    let js_path = unique_temp_path(
-        &format!("taida_{}_js", case_tag),
-        method_slug,
-        "mjs",
-    );
+    let js_path = unique_temp_path(&format!("taida_{}_js", case_tag), method_slug, "mjs");
     let transpile = Command::new(taida_bin())
         .arg("build")
         .arg("--target")
@@ -35661,12 +35660,14 @@ stdout(result.throw.message)
     assert!(
         js_stdout.contains("HTTP/2") || js_stdout.contains("h2"),
         "C26B-001 r3 {} js: expected H2Unsupported mentioning HTTP/2 or h2, got: {:?}",
-        method_upper, js_stdout
+        method_upper,
+        js_stdout
     );
     assert!(
         js_stdout.contains("not supported"),
         "C26B-001 r3 {} js: expected 'not supported' in H2Unsupported message, got: {:?}",
-        method_upper, js_stdout
+        method_upper,
+        js_stdout
     );
 }
 
@@ -35770,14 +35771,17 @@ stdout(r.requests)
     // The request line is otherwise RFC-compliant so httparse will parse
     // it successfully; the wire-limit check should then reject it.
     let oversized_method = "VERYLONGMETHODXYZ"; // 17 chars > 16 limit
-    assert!(oversized_method.len() > 16, "test setup: method must exceed limit");
+    assert!(
+        oversized_method.len() > 16,
+        "test setup: method must exceed limit"
+    );
     let request = format!(
         "{} / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
         oversized_method
     );
 
-    let mut stream = TcpStream::connect(format!("127.0.0.1:{}", port))
-        .expect("connect for oversized method");
+    let mut stream =
+        TcpStream::connect(format!("127.0.0.1:{}", port)).expect("connect for oversized method");
     stream
         .set_read_timeout(Some(Duration::from_secs(5)))
         .expect("set read timeout");
@@ -35878,8 +35882,8 @@ stdout(r.requests)
         path
     );
 
-    let mut stream = TcpStream::connect(format!("127.0.0.1:{}", port))
-        .expect("connect for oversized path");
+    let mut stream =
+        TcpStream::connect(format!("127.0.0.1:{}", port)).expect("connect for oversized path");
     stream
         .set_read_timeout(Some(Duration::from_secs(5)))
         .expect("set read timeout");
@@ -35977,8 +35981,8 @@ stdout(r.requests)
         at_limit_method
     );
 
-    let mut stream = TcpStream::connect(format!("127.0.0.1:{}", port))
-        .expect("connect for at-limit method");
+    let mut stream =
+        TcpStream::connect(format!("127.0.0.1:{}", port)).expect("connect for at-limit method");
     stream
         .set_read_timeout(Some(Duration::from_secs(5)))
         .expect("set read timeout");
@@ -36086,8 +36090,8 @@ stdout(r.requests)
         oversized_host
     );
 
-    let mut stream = TcpStream::connect(format!("127.0.0.1:{}", port))
-        .expect("connect for oversized host");
+    let mut stream =
+        TcpStream::connect(format!("127.0.0.1:{}", port)).expect("connect for oversized host");
     stream
         .set_read_timeout(Some(Duration::from_secs(5)))
         .expect("set read timeout");
@@ -36179,8 +36183,8 @@ stdout(r.requests)
         at_limit_host
     );
 
-    let mut stream = TcpStream::connect(format!("127.0.0.1:{}", port))
-        .expect("connect for at-limit host");
+    let mut stream =
+        TcpStream::connect(format!("127.0.0.1:{}", port)).expect("connect for at-limit host");
     stream
         .set_read_timeout(Some(Duration::from_secs(5)))
         .expect("set read timeout");

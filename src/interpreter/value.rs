@@ -15,8 +15,30 @@ pub enum Value {
     Int(i64),
     /// Floating-point value
     Float(f64),
-    /// String value
-    Str(String),
+    /// String value.
+    ///
+    /// # C26B-018 (A) / Round 6 wP (2026-04-24): interior `Arc<String>`
+    ///
+    /// Migrated from plain `String` to `Arc<String>` so that
+    /// `Value::clone()` on Str becomes an `Arc::clone()` (one atomic
+    /// increment) instead of a full byte-by-byte deep-clone. This
+    /// follows the same pattern as C25B-029 `Value::List` and C26B-020
+    /// 柱 2 `Value::Bytes` interior Arc migrations. Cluster 4 abstraction
+    /// (Round 3 wG LOCKED): Arc + try_unwrap COW.
+    ///
+    /// * **Construction**: prefer [`Value::str`] (wraps in `Arc::new`).
+    /// * **Reading from a match binding**: `s.as_str()` / `&s[..]` work
+    ///   via deref; `s.len()` / `s.is_empty()` / `s.chars()` forward
+    ///   transparently through `Arc<String>`.
+    /// * **Consuming the inner `String`**: use [`Value::str_take`] —
+    ///   `Arc::try_unwrap` fast path, else `(*arc).clone()` fallback.
+    ///
+    /// Equality, ordering, display, hashing semantics are unchanged
+    /// because `Arc<T>` transparently forwards read access to `T`.
+    ///
+    /// The char-index cache optimization (C26B-018 (A) goal) is deferred
+    /// to a follow-up iteration; this commit lands the O(1) clone foundation.
+    Str(Arc<String>),
     /// Bytes value (immutable byte sequence).
     ///
     /// # C26B-020 柱 2 / Round 5 wO (2026-04-24): interior `Arc<Vec<u8>>`
@@ -251,7 +273,22 @@ impl Value {
 
     /// Default value for Str.
     pub fn default_str() -> Self {
-        Value::Str(String::new())
+        Value::Str(Arc::new(String::new()))
+    }
+
+    /// Construct a `Value::Str` from an owned `String`, hiding the
+    /// `Arc` wrapping. See the doc comment on `Value::Str` for the
+    /// rationale (C26B-018 (A) interior migration, Round 6 wP).
+    pub fn str(s: String) -> Self {
+        Value::Str(Arc::new(s))
+    }
+
+    /// COW helper: take ownership of the inner `String` from an
+    /// `Arc<String>`. If the `Arc` is uniquely owned, avoids allocation;
+    /// otherwise clones the String. Used at legacy consumer sites that
+    /// previously moved `String` out of `Value::Str`. C26B-018 (A).
+    pub fn str_take(s: Arc<String>) -> String {
+        Arc::try_unwrap(s).unwrap_or_else(|arc| (*arc).clone())
     }
 
     /// Default value for Bytes.
@@ -347,7 +384,7 @@ impl Value {
         match items.first() {
             Some(Value::Int(_)) => Value::Int(0),
             Some(Value::Float(_)) => Value::Float(0.0),
-            Some(Value::Str(_)) => Value::Str(String::new()),
+            Some(Value::Str(_)) => Value::default_str(),
             Some(Value::Bytes(_)) => Value::bytes(Vec::new()),
             Some(Value::Bool(_)) => Value::Bool(false),
             Some(Value::BuchiPack(_)) => Value::default_buchi(),
@@ -413,8 +450,8 @@ impl Value {
     pub fn get_error_field(&self, name: &str) -> Option<Value> {
         if let Value::Error(err) = self {
             match name {
-                "type" => Some(Value::Str(err.error_type.clone())),
-                "message" => Some(Value::Str(err.message.clone())),
+                "type" => Some(Value::str(err.error_type.clone())),
+                "message" => Some(Value::str(err.message.clone())),
                 _ => err
                     .fields
                     .iter()
@@ -437,7 +474,7 @@ impl Value {
                     n.to_string()
                 }
             }
-            Value::Str(s) => s.clone(),
+            Value::Str(s) => (**s).clone(),
             Value::Bytes(bytes) => {
                 let elems: Vec<String> = bytes.iter().map(|b| b.to_string()).collect();
                 format!("Bytes[@[{}]]", elems.join(", "))
@@ -613,7 +650,7 @@ mod tests {
         // PHILOSOPHY.md: all types must have default values
         assert_eq!(Value::default_int(), Value::Int(0));
         assert_eq!(Value::default_float(), Value::Float(0.0));
-        assert_eq!(Value::default_str(), Value::Str(String::new()));
+        assert_eq!(Value::default_str(), Value::str(String::new()));
         assert_eq!(Value::default_bytes(), Value::bytes(Vec::new()));
         assert_eq!(Value::default_bool(), Value::Bool(false));
         assert_eq!(Value::default_list(), Value::list(Vec::new()));
@@ -668,10 +705,10 @@ mod tests {
         let int_items = vec![Value::Int(1), Value::Int(2)];
         assert_eq!(Value::default_for_list(&int_items), Value::Int(0));
 
-        let str_items = vec![Value::Str("a".to_string())];
+        let str_items = vec![Value::str("a".to_string())];
         assert_eq!(
             Value::default_for_list(&str_items),
-            Value::Str(String::new())
+            Value::str(String::new())
         );
 
         let float_items = vec![Value::Float(1.5)];
@@ -688,8 +725,8 @@ mod tests {
         assert!(!Value::Bool(false).is_truthy());
         assert!(Value::Int(1).is_truthy());
         assert!(!Value::Int(0).is_truthy());
-        assert!(Value::Str("hello".to_string()).is_truthy());
-        assert!(!Value::Str(String::new()).is_truthy());
+        assert!(Value::str("hello".to_string()).is_truthy());
+        assert!(!Value::str(String::new()).is_truthy());
         assert!(!Value::Unit.is_truthy());
     }
 
@@ -700,8 +737,8 @@ mod tests {
         // Int-Float cross comparison
         assert_eq!(Value::Int(42), Value::Float(42.0));
         assert_eq!(
-            Value::Str("hello".to_string()),
-            Value::Str("hello".to_string())
+            Value::str("hello".to_string()),
+            Value::str("hello".to_string())
         );
         assert_eq!(Value::bytes(vec![1, 2]), Value::bytes(vec![1, 2]));
     }
@@ -711,14 +748,14 @@ mod tests {
         assert!(Value::Int(1) < Value::Int(2));
         assert!(Value::Float(1.0) < Value::Float(2.0));
         assert!(Value::Int(1) < Value::Float(2.0));
-        assert!(Value::Str("a".to_string()) < Value::Str("b".to_string()));
+        assert!(Value::str("a".to_string()) < Value::str("b".to_string()));
     }
 
     #[test]
     fn test_display() {
         assert_eq!(Value::Int(42).to_string(), "42");
         assert_eq!(Value::Float(314.0 / 100.0).to_string(), "3.14");
-        assert_eq!(Value::Str("hello".to_string()).to_string(), "hello");
+        assert_eq!(Value::str("hello".to_string()).to_string(), "hello");
         assert_eq!(Value::bytes(vec![1, 2]).to_string(), "Bytes[@[1, 2]]");
         assert_eq!(Value::Bool(true).to_string(), "true");
         assert_eq!(Value::Unit.to_string(), "@()");
@@ -727,12 +764,12 @@ mod tests {
     #[test]
     fn test_buchi_pack_field_access() {
         let pack = Value::pack(vec![
-            ("name".to_string(), Value::Str("Alice".to_string())),
+            ("name".to_string(), Value::str("Alice".to_string())),
             ("age".to_string(), Value::Int(30)),
         ]);
         assert_eq!(
             pack.get_field("name"),
-            Some(&Value::Str("Alice".to_string()))
+            Some(&Value::str("Alice".to_string()))
         );
         assert_eq!(pack.get_field("age"), Some(&Value::Int(30)));
         assert_eq!(pack.get_field("email"), None);
@@ -836,19 +873,23 @@ mod tests {
         // Empty completed stream → false
         assert!(!Value::default_stream().is_truthy());
         // Active stream → true
-        assert!(Value::Stream(StreamValue {
-            items: Vec::new(),
-            transforms: Vec::new(),
-            status: StreamStatus::Active,
-        })
-        .is_truthy());
+        assert!(
+            Value::Stream(StreamValue {
+                items: Vec::new(),
+                transforms: Vec::new(),
+                status: StreamStatus::Active,
+            })
+            .is_truthy()
+        );
         // Completed with items → true
-        assert!(Value::Stream(StreamValue {
-            items: vec![Value::Int(1)],
-            transforms: Vec::new(),
-            status: StreamStatus::Completed,
-        })
-        .is_truthy());
+        assert!(
+            Value::Stream(StreamValue {
+                items: vec![Value::Int(1)],
+                transforms: Vec::new(),
+                status: StreamStatus::Completed,
+            })
+            .is_truthy()
+        );
     }
 
     #[test]

@@ -80,7 +80,8 @@ impl Interpreter {
             Signal::Value(Value::BuchiPack(fields)) => {
                 // Check sentinel.
                 let is_valid = fields.iter().any(|(k, v)| {
-                    k == "__ws_id" && matches!(v, Value::Str(s) if s == "__v4_websocket_conn")
+                    k == "__ws_id"
+                        && matches!(v, Value::Str(s) if s.as_str() == "__v4_websocket_conn")
                 });
                 if !is_valid {
                     return Err(RuntimeError {
@@ -347,7 +348,7 @@ impl Interpreter {
 
         // Create WsConn BuchiPack with identity token.
         let ws_pack = Value::pack(vec![
-            ("__ws_id".into(), Value::Str("__v4_websocket_conn".into())),
+            ("__ws_id".into(), Value::str("__v4_websocket_conn".into())),
             ("__ws_token".into(), Value::Int(ws_token as i64)),
         ]);
 
@@ -362,7 +363,7 @@ impl Interpreter {
             ("hasValue".into(), Value::Bool(true)),
             ("__value".into(), inner),
             ("__default".into(), Value::pack(vec![])),
-            ("__type".into(), Value::Str("Lax".into())),
+            ("__type".into(), Value::str("Lax".into())),
         ])
     }
 
@@ -372,7 +373,7 @@ impl Interpreter {
             ("hasValue".into(), Value::Bool(false)),
             ("__value".into(), Value::pack(vec![])),
             ("__default".into(), Value::pack(vec![])),
-            ("__type".into(), Value::Str("Lax".into())),
+            ("__type".into(), Value::str("Lax".into())),
         ])
     }
 
@@ -534,12 +535,12 @@ impl Interpreter {
                         // Text frames carry UTF-8: return Str so wsSend(ws, data) echoes as text.
                         let text = String::from_utf8(payload)
                             .unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned());
-                        ("text", Value::Str(text))
+                        ("text", Value::str(text))
                     } else {
                         ("binary", Value::bytes(payload))
                     };
                     let inner = Value::pack(vec![
-                        ("type".into(), Value::Str(type_str.into())),
+                        ("type".into(), Value::str(type_str.into())),
                         ("data".into(), data_val),
                     ]);
                     return Ok(Some(Signal::Value(Self::make_lax_ws_frame_value(inner))));
@@ -647,7 +648,7 @@ impl Interpreter {
             ("hasValue".into(), Value::Bool(true)),
             ("__value".into(), inner),
             ("__default".into(), Value::pack(vec![])),
-            ("__type".into(), Value::Str("Lax".into())),
+            ("__type".into(), Value::str("Lax".into())),
         ])
     }
 
@@ -657,7 +658,7 @@ impl Interpreter {
             ("hasValue".into(), Value::Bool(false)),
             ("__value".into(), Value::pack(vec![])),
             ("__default".into(), Value::pack(vec![])),
-            ("__type".into(), Value::Str("Lax".into())),
+            ("__type".into(), Value::str("Lax".into())),
         ])
     }
 

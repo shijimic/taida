@@ -1,6 +1,6 @@
 #[cfg(test)]
 mod tests {
-    use crate::interpreter::eval::{eval, Interpreter};
+    use crate::interpreter::eval::{Interpreter, eval};
     use crate::interpreter::value::Value;
 
     fn eval_ok(source: &str) -> Value {
@@ -21,7 +21,7 @@ mod tests {
 
     #[test]
     fn test_eval_string() {
-        assert_eq!(eval_ok("\"hello\""), Value::Str("hello".to_string()));
+        assert_eq!(eval_ok("\"hello\""), Value::str("hello".to_string()));
     }
 
     #[test]
@@ -182,7 +182,7 @@ mod tests {
                 .1
                 .clone();
             assert_eq!(has_value, Value::Bool(true));
-            assert_eq!(value, Value::Str("42".into()));
+            assert_eq!(value, Value::str("42".into()));
         }
     }
 
@@ -204,7 +204,7 @@ mod tests {
                     .1
                     .clone();
                 assert_eq!(has_value, Value::Bool(true));
-                assert_eq!(value, Value::Str("true".into()));
+                assert_eq!(value, Value::str("true".into()));
             }
             _ => panic!("Expected BuchiPack, got {:?}", result),
         }
@@ -439,7 +439,7 @@ mod tests {
     fn test_str_mold_unmold() {
         // Str[42]() ]=> text, text should be "42"
         let result = eval_ok("Str[42]() ]=> text\ntext");
-        assert_eq!(result, Value::Str("42".into()));
+        assert_eq!(result, Value::str("42".into()));
     }
 
     #[test]
@@ -494,7 +494,7 @@ mod tests {
     fn test_eval_string_concat() {
         assert_eq!(
             eval_ok("x <= \"hello\" + \" \" + \"world\""),
-            Value::Str("hello world".to_string())
+            Value::str("hello world".to_string())
         );
     }
 
@@ -538,7 +538,7 @@ mod tests {
             Value::BuchiPack(fields) => {
                 assert_eq!(fields.len(), 2);
                 assert_eq!(fields[0].0, "name");
-                assert_eq!(fields[0].1, Value::Str("Alice".to_string()));
+                assert_eq!(fields[0].1, Value::str("Alice".to_string()));
                 assert_eq!(fields[1].0, "age");
                 assert_eq!(fields[1].1, Value::Int(30));
             }
@@ -550,7 +550,7 @@ mod tests {
     fn test_eval_field_access() {
         assert_eq!(
             eval_ok("user <= @(name <= \"Alice\", age <= 30)\nuser.name"),
-            Value::Str("Alice".to_string())
+            Value::str("Alice".to_string())
         );
     }
 
@@ -619,14 +619,14 @@ result <= numbers.get(10).unmold()
         // C20-1 (ROOT-5): multi-line rhs guards now require the
         // parenthesised escape hatch. Semantics unchanged.
         let source = "score <= 95\ngrade <= (\n  | score >= 90 |> \"A\"\n  | score >= 80 |> \"B\"\n  | _ |> \"F\"\n)\ngrade";
-        assert_eq!(eval_ok(source), Value::Str("A".to_string()));
+        assert_eq!(eval_ok(source), Value::str("A".to_string()));
     }
 
     #[test]
     fn test_eval_condition_branch_default() {
         // C20-1 (ROOT-5): see note above.
         let source = "score <= 50\ngrade <= (\n  | score >= 90 |> \"A\"\n  | _ |> \"F\"\n)\ngrade";
-        assert_eq!(eval_ok(source), Value::Str("F".to_string()));
+        assert_eq!(eval_ok(source), Value::str("F".to_string()));
     }
 
     // ── Immutability ──
@@ -810,24 +810,24 @@ result <= numbers.get(10).unmold()
     // Str molds
     #[test]
     fn test_mold_upper() {
-        assert_eq!(eval_ok("Upper[\"hello\"]()"), Value::Str("HELLO".into()));
+        assert_eq!(eval_ok("Upper[\"hello\"]()"), Value::str("HELLO".into()));
     }
 
     #[test]
     fn test_mold_lower() {
-        assert_eq!(eval_ok("Lower[\"HELLO\"]()"), Value::Str("hello".into()));
+        assert_eq!(eval_ok("Lower[\"HELLO\"]()"), Value::str("hello".into()));
     }
 
     #[test]
     fn test_mold_trim() {
-        assert_eq!(eval_ok("Trim[\"  hello  \"]()"), Value::Str("hello".into()));
+        assert_eq!(eval_ok("Trim[\"  hello  \"]()"), Value::str("hello".into()));
     }
 
     #[test]
     fn test_mold_trim_start_only() {
         assert_eq!(
             eval_ok("Trim[\"  hello  \"](end <= false)"),
-            Value::Str("hello  ".into())
+            Value::str("hello  ".into())
         );
     }
 
@@ -835,7 +835,7 @@ result <= numbers.get(10).unmold()
     fn test_mold_trim_end_only() {
         assert_eq!(
             eval_ok("Trim[\"  hello  \"](start <= false)"),
-            Value::Str("  hello".into())
+            Value::str("  hello".into())
         );
     }
 
@@ -845,9 +845,9 @@ result <= numbers.get(10).unmold()
             assert_eq!(
                 items.as_slice(),
                 &[
-                    Value::Str("a".into()),
-                    Value::Str("b".into()),
-                    Value::Str("c".into())
+                    Value::str("a".into()),
+                    Value::str("b".into()),
+                    Value::str("c".into())
                 ]
             );
         } else {
@@ -859,7 +859,7 @@ result <= numbers.get(10).unmold()
     fn test_mold_replace() {
         assert_eq!(
             eval_ok("Replace[\"hello world\", \"o\", \"0\"]()"),
-            Value::Str("hell0 world".into())
+            Value::str("hell0 world".into())
         );
     }
 
@@ -867,7 +867,7 @@ result <= numbers.get(10).unmold()
     fn test_mold_replace_all() {
         assert_eq!(
             eval_ok("Replace[\"hello world\", \"o\", \"0\"](all <= true)"),
-            Value::Str("hell0 w0rld".into())
+            Value::str("hell0 w0rld".into())
         );
     }
 
@@ -875,7 +875,7 @@ result <= numbers.get(10).unmold()
     fn test_mold_slice() {
         assert_eq!(
             eval_ok("Slice[\"hello\"](start <= 1, end <= 3)"),
-            Value::Str("el".into())
+            Value::str("el".into())
         );
     }
 
@@ -884,18 +884,18 @@ result <= numbers.get(10).unmold()
         // CharAt returns Lax[Str]; unmold with ]=> to get the inner value
         assert_eq!(
             eval_ok("CharAt[\"hello\", 1]() ]=> x\nx"),
-            Value::Str("e".into())
+            Value::str("e".into())
         );
     }
 
     #[test]
     fn test_mold_repeat() {
-        assert_eq!(eval_ok("Repeat[\"ha\", 3]()"), Value::Str("hahaha".into()));
+        assert_eq!(eval_ok("Repeat[\"ha\", 3]()"), Value::str("hahaha".into()));
     }
 
     #[test]
     fn test_mold_reverse_str() {
-        assert_eq!(eval_ok("Reverse[\"hello\"]()"), Value::Str("olleh".into()));
+        assert_eq!(eval_ok("Reverse[\"hello\"]()"), Value::str("olleh".into()));
     }
 
     #[test]
@@ -914,7 +914,7 @@ result <= numbers.get(10).unmold()
     fn test_mold_pad_start() {
         assert_eq!(
             eval_ok("Pad[\"42\", 5](side <= \"start\")"),
-            Value::Str("   42".into())
+            Value::str("   42".into())
         );
     }
 
@@ -922,7 +922,7 @@ result <= numbers.get(10).unmold()
     fn test_mold_pad_end() {
         assert_eq!(
             eval_ok("Pad[\"42\", 5](side <= \"end\")"),
-            Value::Str("42   ".into())
+            Value::str("42   ".into())
         );
     }
 
@@ -930,14 +930,14 @@ result <= numbers.get(10).unmold()
     fn test_mold_pad_with_char() {
         assert_eq!(
             eval_ok("Pad[\"42\", 5](side <= \"start\", char <= \"0\")"),
-            Value::Str("00042".into())
+            Value::str("00042".into())
         );
     }
 
     // Num molds
     #[test]
     fn test_mold_tofixed() {
-        assert_eq!(eval_ok("ToFixed[3.14159, 2]()"), Value::Str("3.14".into()));
+        assert_eq!(eval_ok("ToFixed[3.14159, 2]()"), Value::str("3.14".into()));
     }
 
     #[test]
@@ -1019,7 +1019,7 @@ result <= numbers.get(10).unmold()
                 );
                 assert_eq!(
                     fields.iter().find(|(k, _)| k == "__value").unwrap().1,
-                    Value::Str("ff".into())
+                    Value::str("ff".into())
                 );
             }
             _ => panic!("expected Lax pack"),
@@ -1078,7 +1078,7 @@ result <= numbers.get(10).unmold()
             Value::BuchiPack(fields) => {
                 assert_eq!(
                     fields.iter().find(|(k, _)| k == "__value").unwrap().1,
-                    Value::Str("A".into())
+                    Value::str("A".into())
                 );
             }
             _ => panic!("expected Lax pack"),
@@ -1108,7 +1108,7 @@ Utf8Decode[bb]()",
                 );
                 assert_eq!(
                     fields.iter().find(|(k, _)| k == "__value").unwrap().1,
-                    Value::Str("pong".into())
+                    Value::str("pong".into())
                 );
             }
             _ => panic!("expected Lax pack"),
@@ -1118,9 +1118,9 @@ Utf8Decode[bb]()",
             assert_eq!(
                 items.as_slice(),
                 &[
-                    Value::Str("A".into()),
-                    Value::Str("😀".into()),
-                    Value::Str("é".into())
+                    Value::str("A".into()),
+                    Value::str("😀".into()),
+                    Value::str("é".into())
                 ]
             );
         } else {
@@ -1169,7 +1169,7 @@ Utf8Decode[bb]()",
     fn test_mold_join() {
         assert_eq!(
             eval_ok("Join[@[\"a\", \"b\", \"c\"], \",\"]()"),
-            Value::Str("a,b,c".into())
+            Value::str("a,b,c".into())
         );
     }
 
@@ -1275,14 +1275,14 @@ Utf8Decode[bb]()",
     #[test]
     fn test_mold_foldr_new_order() {
         let source = "words <= @[\"a\", \"b\", \"c\"]\nFoldr[words, \"\", _ acc x = x + acc]() ]=> result\nresult";
-        assert_eq!(eval_ok(source), Value::Str("abc".into()));
+        assert_eq!(eval_ok(source), Value::str("abc".into()));
     }
 
     // Pipeline with molds
     #[test]
     fn test_mold_pipeline_str() {
         let source = "\"  hello  \" => Trim[_]() => Upper[_]() => result\nresult";
-        assert_eq!(eval_ok(source), Value::Str("HELLO".into()));
+        assert_eq!(eval_ok(source), Value::str("HELLO".into()));
     }
 
     #[test]
@@ -1458,7 +1458,7 @@ result"#;
 )
 w <= Wrapper["hello"](tag <= "greeting")
 w.unmold()"#;
-        assert_eq!(eval_ok(source), Value::Str("hello".to_string()));
+        assert_eq!(eval_ok(source), Value::str("hello".to_string()));
     }
 
     #[test]
@@ -1516,7 +1516,7 @@ val"#;
 )
 box <= Container["data"](count <= 7)
 box.describe()"#;
-        assert_eq!(eval_ok(source), Value::Str("count: 7".to_string()));
+        assert_eq!(eval_ok(source), Value::str("count: 7".to_string()));
     }
 
     #[test]
@@ -1573,7 +1573,7 @@ PlusOne[41]()"#;
   => :Str
 )
 SelfType[1]()"#;
-        assert_eq!(eval_ok(source), Value::Str("SelfType".to_string()));
+        assert_eq!(eval_ok(source), Value::str("SelfType".to_string()));
     }
 
     #[test]
@@ -1629,7 +1629,7 @@ validate x: Int =
   s
 => :Str
 validate(0)"#;
-        assert_eq!(eval_ok(source), Value::Str("caught".to_string()));
+        assert_eq!(eval_ok(source), Value::str("caught".to_string()));
     }
 
     #[test]
@@ -1650,7 +1650,7 @@ check x: Int =
   "unreachable"
 => :Str
 check(1)"#;
-        assert_eq!(eval_ok(source), Value::Str("handled".to_string()));
+        assert_eq!(eval_ok(source), Value::str("handled".to_string()));
     }
 
     // ── Molten type tests ──────────────────────────────
@@ -1742,7 +1742,7 @@ t <= TODO[Stub["User data shape TBD"]]()
 t ]=> out
 typeof(out)
 "#;
-        assert_eq!(eval_ok(source), Value::Str("Molten".to_string()));
+        assert_eq!(eval_ok(source), Value::str("Molten".to_string()));
     }
 
     #[test]
@@ -2078,12 +2078,12 @@ c.hasValue()"#;
 
     #[test]
     fn test_bt5_upper_empty_string() {
-        assert_eq!(eval_ok(r#"Upper[""]() "#), Value::Str(String::new()));
+        assert_eq!(eval_ok(r#"Upper[""]() "#), Value::str(String::new()));
     }
 
     #[test]
     fn test_bt5_reverse_empty_string() {
-        assert_eq!(eval_ok(r#"Reverse[""]() "#), Value::Str(String::new()));
+        assert_eq!(eval_ok(r#"Reverse[""]() "#), Value::str(String::new()));
     }
 
     #[test]
@@ -2185,7 +2185,7 @@ x.hasValue"#,
         let result = eval_ok(r#"Slice["",0,0]() "#);
         assert_eq!(
             result,
-            Value::Str(String::new()),
+            Value::str(String::new()),
             "Slice of empty string should return empty string"
         );
     }
@@ -2449,7 +2449,7 @@ p.y.hasValue"#,
         // Upper["hello"]() should work — basic ASCII
         assert_eq!(
             eval_ok(r#"Upper["hello"]()"#),
-            Value::Str("HELLO".to_string())
+            Value::str("HELLO".to_string())
         );
     }
 
@@ -2458,14 +2458,14 @@ p.y.hasValue"#,
         // Reverse on ASCII string
         assert_eq!(
             eval_ok(r#"Reverse["abc"]()"#),
-            Value::Str("cba".to_string())
+            Value::str("cba".to_string())
         );
     }
 
     #[test]
     fn test_bt13_reverse_empty() {
         // Reverse[""]() should return ""
-        assert_eq!(eval_ok(r#"Reverse[""]()"#), Value::Str(String::new()));
+        assert_eq!(eval_ok(r#"Reverse[""]()"#), Value::str(String::new()));
     }
 
     // ── BT-18: Type conversion failure default consistency tests ──
@@ -2498,7 +2498,7 @@ p.y.hasValue"#,
         let result = eval_ok(r#"Bool[0]().__type"#);
         assert_eq!(
             result,
-            Value::Str("Lax".to_string()),
+            Value::str("Lax".to_string()),
             "Lax __type should be 'Lax' (the mold type, not the inner type)"
         );
     }

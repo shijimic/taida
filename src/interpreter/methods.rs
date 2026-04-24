@@ -141,7 +141,7 @@ impl Interpreter {
                         // All types get `.toString()` as a display helper, equivalent
                         // to the Rust side's `to_display_string()`.
                         if method == "toString" {
-                            return Ok(Signal::Value(Value::Str(obj.to_display_string())));
+                            return Ok(Signal::Value(Value::str(obj.to_display_string())));
                         }
                         Err(RuntimeError {
                             message: format!("Unknown method '{}' on {}", method, obj.to_error_display(200)),
@@ -166,7 +166,7 @@ impl Interpreter {
                 // C12-2b: .toString() universal fallback for values that do not
                 // belong to any specialised dispatch table (Function, Gorilla, etc.).
                 if method == "toString" {
-                    return Ok(Signal::Value(Value::Str(obj.to_display_string())));
+                    return Ok(Signal::Value(Value::str(obj.to_display_string())));
                 }
                 Err(RuntimeError {
                     message: format!(
@@ -198,7 +198,7 @@ impl Interpreter {
                     .find(|(n, _)| n == "message")
                     .and_then(|(_, v)| {
                         if let Value::Str(s) = v {
-                            Some(s.clone())
+                            Some((**s).clone())
                         } else {
                             None
                         }
@@ -209,7 +209,7 @@ impl Interpreter {
                             .find(|(n, _)| n == "__type")
                             .and_then(|(_, v)| {
                                 if let Value::Str(s) = v {
-                                    Some(s.clone())
+                                    Some((**s).clone())
                                 } else {
                                     None
                                 }
@@ -217,7 +217,7 @@ impl Interpreter {
                     })
                     .unwrap_or_else(|| throw_val.to_display_string())
             }
-            Value::Str(s) => s.clone(),
+            Value::Str(s) => (**s).clone(),
             other => other.to_display_string(),
         }
     }
@@ -357,7 +357,7 @@ impl Interpreter {
                     ("__value".into(), result),
                     ("__predicate".into(), Value::Unit),
                     ("throw".into(), Value::Unit),
-                    ("__type".into(), Value::Str("Result".into())),
+                    ("__type".into(), Value::str("Result".into())),
                 ])))
             }
             "flatMap" => {
@@ -376,7 +376,7 @@ impl Interpreter {
                 if let Value::BuchiPack(ref result_fields) = result {
                     let is_result = result_fields
                         .iter()
-                        .any(|(n, v)| n == "__type" && v == &Value::Str("Result".into()));
+                        .any(|(n, v)| n == "__type" && v == &Value::str("Result".into()));
                     if is_result {
                         return Ok(Signal::Value(result));
                     }
@@ -385,7 +385,7 @@ impl Interpreter {
                     ("__value".into(), result),
                     ("__predicate".into(), Value::Unit),
                     ("throw".into(), Value::Unit),
-                    ("__type".into(), Value::Str("Result".into())),
+                    ("__type".into(), Value::str("Result".into())),
                 ])))
             }
             "mapError" => {
@@ -402,7 +402,7 @@ impl Interpreter {
                 };
                 // Pass the error's display string to the mapping function
                 let error_display = Self::throw_val_to_display_str(&throw_val);
-                let result = self.call_function_with_values(&func, &[Value::Str(error_display)])?;
+                let result = self.call_function_with_values(&func, &[Value::str(error_display)])?;
                 let new_throw = Value::Error(super::value::ErrorValue {
                     error_type: "ResultError".into(),
                     message: result.to_display_string(),
@@ -412,18 +412,18 @@ impl Interpreter {
                     ("__value".into(), Value::Unit),
                     ("__predicate".into(), Value::Unit),
                     ("throw".into(), new_throw),
-                    ("__type".into(), Value::Str("Result".into())),
+                    ("__type".into(), Value::str("Result".into())),
                 ])))
             }
             "toString" => {
                 if is_success {
-                    Ok(Signal::Value(Value::Str(format!(
+                    Ok(Signal::Value(Value::str(format!(
                         "Result({})",
                         inner_value.to_display_string()
                     ))))
                 } else {
                     let err_display = Self::throw_val_to_display_str(&throw_val);
-                    Ok(Signal::Value(Value::Str(format!(
+                    Ok(Signal::Value(Value::str(format!(
                         "Result(throw <= {})",
                         err_display
                     ))))
@@ -468,17 +468,17 @@ impl Interpreter {
                     ("hasValue".into(), Value::Bool(has_value)),
                     ("__value".into(), inner_value),
                     ("__error".into(), error_value),
-                    ("__type".into(), Value::Str("RelaxedGorillax".into())),
+                    ("__type".into(), Value::str("RelaxedGorillax".into())),
                 ])))
             }
             "toString" => {
                 if has_value {
-                    Ok(Signal::Value(Value::Str(format!(
+                    Ok(Signal::Value(Value::str(format!(
                         "Gorillax({})",
                         inner_value.to_display_string()
                     ))))
                 } else {
-                    Ok(Signal::Value(Value::Str("Gorillax(><)".to_string())))
+                    Ok(Signal::Value(Value::str("Gorillax(><)".to_string())))
                 }
             }
             _ => Err(RuntimeError {
@@ -511,12 +511,12 @@ impl Interpreter {
             "isEmpty" => Ok(Signal::Value(Value::Bool(!has_value))),
             "toString" => {
                 if has_value {
-                    Ok(Signal::Value(Value::Str(format!(
+                    Ok(Signal::Value(Value::str(format!(
                         "RelaxedGorillax({})",
                         inner_value.to_display_string()
                     ))))
                 } else {
-                    Ok(Signal::Value(Value::Str(
+                    Ok(Signal::Value(Value::str(
                         "RelaxedGorillax(escaped)".to_string(),
                     )))
                 }
@@ -569,7 +569,7 @@ impl Interpreter {
                         ("hasValue".into(), Value::Bool(false)),
                         ("__value".into(), default_value.clone()),
                         ("__default".into(), default_value),
-                        ("__type".into(), Value::Str("Lax".into())),
+                        ("__type".into(), Value::str("Lax".into())),
                     ])));
                 }
                 let func = match args.first() {
@@ -585,7 +585,7 @@ impl Interpreter {
                     ("hasValue".into(), Value::Bool(true)),
                     ("__value".into(), result),
                     ("__default".into(), default_value),
-                    ("__type".into(), Value::Str("Lax".into())),
+                    ("__type".into(), Value::str("Lax".into())),
                 ])))
             }
             "flatMap" => {
@@ -594,7 +594,7 @@ impl Interpreter {
                         ("hasValue".into(), Value::Bool(false)),
                         ("__value".into(), default_value.clone()),
                         ("__default".into(), default_value),
-                        ("__type".into(), Value::Str("Lax".into())),
+                        ("__type".into(), Value::str("Lax".into())),
                     ])));
                 }
                 let func = match args.first() {
@@ -610,7 +610,7 @@ impl Interpreter {
                 if let Value::BuchiPack(ref result_fields) = result {
                     let is_lax = result_fields
                         .iter()
-                        .any(|(n, v)| n == "__type" && v == &Value::Str("Lax".into()));
+                        .any(|(n, v)| n == "__type" && v == &Value::str("Lax".into()));
                     if is_lax {
                         return Ok(Signal::Value(result));
                     }
@@ -620,7 +620,7 @@ impl Interpreter {
                     ("hasValue".into(), Value::Bool(true)),
                     ("__value".into(), result),
                     ("__default".into(), default_value),
-                    ("__type".into(), Value::Str("Lax".into())),
+                    ("__type".into(), Value::str("Lax".into())),
                 ])))
             }
             "unmold" => {
@@ -633,12 +633,12 @@ impl Interpreter {
             }
             "toString" => {
                 if has_value {
-                    Ok(Signal::Value(Value::Str(format!(
+                    Ok(Signal::Value(Value::str(format!(
                         "Lax({})",
                         inner_value.to_display_string()
                     ))))
                 } else {
-                    Ok(Signal::Value(Value::Str(format!(
+                    Ok(Signal::Value(Value::str(format!(
                         "Lax(default: {})",
                         default_value.to_display_string()
                     ))))
@@ -672,7 +672,7 @@ impl Interpreter {
 
         match method {
             "get" => {
-                let key = args.first().cloned().unwrap_or(Value::Str(String::new()));
+                let key = args.first().cloned().unwrap_or(Value::str(String::new()));
                 for entry in entries.iter() {
                     if let Value::BuchiPack(ef) = entry {
                         let entry_key = ef.iter().find(|(n, _)| n == "key").map(|(_, v)| v);
@@ -687,7 +687,7 @@ impl Interpreter {
                                 ("hasValue".into(), Value::Bool(true)),
                                 ("__value".into(), value),
                                 ("__default".into(), default_value),
-                                ("__type".into(), Value::Str("Lax".into())),
+                                ("__type".into(), Value::str("Lax".into())),
                             ])));
                         }
                     }
@@ -697,11 +697,11 @@ impl Interpreter {
                     ("hasValue".into(), Value::Bool(false)),
                     ("__value".into(), Value::Unit),
                     ("__default".into(), Value::Unit),
-                    ("__type".into(), Value::Str("Lax".into())),
+                    ("__type".into(), Value::str("Lax".into())),
                 ])))
             }
             "set" => {
-                let key = args.first().cloned().unwrap_or(Value::Str(String::new()));
+                let key = args.first().cloned().unwrap_or(Value::str(String::new()));
                 let value = args.get(1).cloned().unwrap_or(Value::Unit);
                 let mut new_entries = Vec::new();
                 let mut found = false;
@@ -727,11 +727,11 @@ impl Interpreter {
                 }
                 Ok(Signal::Value(Value::pack(vec![
                     ("__entries".into(), Value::list(new_entries)),
-                    ("__type".into(), Value::Str("HashMap".into())),
+                    ("__type".into(), Value::str("HashMap".into())),
                 ])))
             }
             "remove" => {
-                let key = args.first().cloned().unwrap_or(Value::Str(String::new()));
+                let key = args.first().cloned().unwrap_or(Value::str(String::new()));
                 let new_entries: Vec<Value> = entries
                     .into_iter()
                     .filter(|entry| {
@@ -745,11 +745,11 @@ impl Interpreter {
                     .collect();
                 Ok(Signal::Value(Value::pack(vec![
                     ("__entries".into(), Value::list(new_entries)),
-                    ("__type".into(), Value::Str("HashMap".into())),
+                    ("__type".into(), Value::str("HashMap".into())),
                 ])))
             }
             "has" => {
-                let key = args.first().cloned().unwrap_or(Value::Str(String::new()));
+                let key = args.first().cloned().unwrap_or(Value::str(String::new()));
                 let found = entries.iter().any(|entry| {
                     if let Value::BuchiPack(ef) = entry {
                         ef.iter().find(|(n, _)| n == "key").map(|(_, v)| v) == Some(&key)
@@ -881,7 +881,7 @@ impl Interpreter {
                 }
                 Ok(Signal::Value(Value::pack(vec![
                     ("__entries".into(), Value::list(merged)),
-                    ("__type".into(), Value::Str("HashMap".into())),
+                    ("__type".into(), Value::str("HashMap".into())),
                 ])))
             }
             "toString" => {
@@ -903,7 +903,7 @@ impl Interpreter {
                         }
                     })
                     .collect();
-                Ok(Signal::Value(Value::Str(format!(
+                Ok(Signal::Value(Value::str(format!(
                     "HashMap({{{}}})",
                     pairs.join(", ")
                 ))))
@@ -943,7 +943,7 @@ impl Interpreter {
                 }
                 Ok(Signal::Value(Value::pack(vec![
                     ("__items".into(), Value::list(new_items)),
-                    ("__type".into(), Value::Str("Set".into())),
+                    ("__type".into(), Value::str("Set".into())),
                 ])))
             }
             "remove" => {
@@ -951,7 +951,7 @@ impl Interpreter {
                 let new_items: Vec<Value> = items.into_iter().filter(|i| i != &item).collect();
                 Ok(Signal::Value(Value::pack(vec![
                     ("__items".into(), Value::list(new_items)),
-                    ("__type".into(), Value::Str("Set".into())),
+                    ("__type".into(), Value::str("Set".into())),
                 ])))
             }
             "has" => {
@@ -1015,7 +1015,7 @@ impl Interpreter {
                 }
                 Ok(Signal::Value(Value::pack(vec![
                     ("__items".into(), Value::list(result)),
-                    ("__type".into(), Value::Str("Set".into())),
+                    ("__type".into(), Value::str("Set".into())),
                 ])))
             }
             "intersect" => {
@@ -1059,7 +1059,7 @@ impl Interpreter {
                     };
                 Ok(Signal::Value(Value::pack(vec![
                     ("__items".into(), Value::list(result)),
-                    ("__type".into(), Value::Str("Set".into())),
+                    ("__type".into(), Value::str("Set".into())),
                 ])))
             }
             "diff" => {
@@ -1099,7 +1099,7 @@ impl Interpreter {
                     };
                 Ok(Signal::Value(Value::pack(vec![
                     ("__items".into(), Value::list(result)),
-                    ("__type".into(), Value::Str("Set".into())),
+                    ("__type".into(), Value::str("Set".into())),
                 ])))
             }
             "toList" => Ok(Signal::Value(Value::list(items))),
@@ -1107,7 +1107,7 @@ impl Interpreter {
             "isEmpty" => Ok(Signal::Value(Value::Bool(items.is_empty()))),
             "toString" => {
                 let strs: Vec<String> = items.iter().map(|i| i.to_debug_string()).collect();
-                Ok(Signal::Value(Value::Str(format!(
+                Ok(Signal::Value(Value::str(format!(
                     "Set({{{}}})",
                     strs.join(", ")
                 ))))
@@ -1137,18 +1137,18 @@ impl Interpreter {
                         ("hasValue".into(), Value::Bool(true)),
                         ("__value".into(), Value::Int(bytes[idx as usize] as i64)),
                         ("__default".into(), Value::Int(0)),
-                        ("__type".into(), Value::Str("Lax".into())),
+                        ("__type".into(), Value::str("Lax".into())),
                     ])))
                 } else {
                     Ok(Signal::Value(Value::pack(vec![
                         ("hasValue".into(), Value::Bool(false)),
                         ("__value".into(), Value::Int(0)),
                         ("__default".into(), Value::Int(0)),
-                        ("__type".into(), Value::Str("Lax".into())),
+                        ("__type".into(), Value::str("Lax".into())),
                     ])))
                 }
             }
-            "toString" => Ok(Signal::Value(Value::Str(
+            "toString" => Ok(Signal::Value(Value::str(
                 Value::bytes(bytes.to_vec()).to_string(),
             ))),
             _ => Err(RuntimeError {
@@ -1233,21 +1233,21 @@ impl Interpreter {
                         .to_string();
                     Ok(Signal::Value(Value::pack(vec![
                         ("hasValue".into(), Value::Bool(true)),
-                        ("__value".into(), Value::Str(ch)),
-                        ("__default".into(), Value::Str(String::new())),
-                        ("__type".into(), Value::Str("Lax".into())),
+                        ("__value".into(), Value::str(ch)),
+                        ("__default".into(), Value::str(String::new())),
+                        ("__type".into(), Value::str("Lax".into())),
                     ])))
                 } else {
                     Ok(Signal::Value(Value::pack(vec![
                         ("hasValue".into(), Value::Bool(false)),
-                        ("__value".into(), Value::Str(String::new())),
-                        ("__default".into(), Value::Str(String::new())),
-                        ("__type".into(), Value::Str("Lax".into())),
+                        ("__value".into(), Value::str(String::new())),
+                        ("__default".into(), Value::str(String::new())),
+                        ("__type".into(), Value::str("Lax".into())),
                     ])))
                 }
             }
             // Display
-            "toString" => Ok(Signal::Value(Value::Str(s.to_string()))),
+            "toString" => Ok(Signal::Value(Value::str(s.to_string()))),
             // B11-4b: replace / replaceAll / split methods
             // C12-6c: Regex overload — if the first arg is a Regex
             // BuchiPack, dispatch to the regex engine; otherwise fall
@@ -1259,7 +1259,7 @@ impl Interpreter {
                         .map(|v| v.to_display_string())
                         .unwrap_or_default();
                     match super::regex_eval::replace_first(s, &pat, &flags, &replacement) {
-                        Ok(out) => return Ok(Signal::Value(Value::Str(out))),
+                        Ok(out) => return Ok(Signal::Value(Value::str(out))),
                         Err(msg) => return Err(RuntimeError { message: msg }),
                     }
                 }
@@ -1273,9 +1273,9 @@ impl Interpreter {
                     .unwrap_or_default();
                 // Empty target → no-op (B11-4a edge semantics lock)
                 if target.is_empty() {
-                    return Ok(Signal::Value(Value::Str(s.to_string())));
+                    return Ok(Signal::Value(Value::str(s.to_string())));
                 }
-                Ok(Signal::Value(Value::Str(s.replacen(
+                Ok(Signal::Value(Value::str(s.replacen(
                     &target,
                     &replacement,
                     1,
@@ -1288,7 +1288,7 @@ impl Interpreter {
                         .map(|v| v.to_display_string())
                         .unwrap_or_default();
                     match super::regex_eval::replace_all(s, &pat, &flags, &replacement) {
-                        Ok(out) => return Ok(Signal::Value(Value::Str(out))),
+                        Ok(out) => return Ok(Signal::Value(Value::str(out))),
                         Err(msg) => return Err(RuntimeError { message: msg }),
                     }
                 }
@@ -1302,16 +1302,16 @@ impl Interpreter {
                     .unwrap_or_default();
                 // Empty target → no-op (B11-4a edge semantics lock)
                 if target.is_empty() {
-                    return Ok(Signal::Value(Value::Str(s.to_string())));
+                    return Ok(Signal::Value(Value::str(s.to_string())));
                 }
-                Ok(Signal::Value(Value::Str(s.replace(&target, &replacement))))
+                Ok(Signal::Value(Value::str(s.replace(&target, &replacement))))
             }
             "split" => {
                 if let Some((pat, flags)) = args.first().and_then(super::regex_eval::as_regex) {
                     match super::regex_eval::split(s, &pat, &flags) {
                         Ok(parts) => {
                             return Ok(Signal::Value(Value::list(
-                                parts.into_iter().map(Value::Str).collect(),
+                                parts.into_iter().map(Value::str).collect(),
                             )));
                         }
                         Err(msg) => return Err(RuntimeError { message: msg }),
@@ -1327,11 +1327,11 @@ impl Interpreter {
                     if s.is_empty() {
                         vec![]
                     } else {
-                        s.chars().map(|ch| Value::Str(ch.to_string())).collect()
+                        s.chars().map(|ch| Value::str(ch.to_string())).collect()
                     }
                 } else {
                     s.split(&separator)
-                        .map(|p| Value::Str(p.to_string()))
+                        .map(|p| Value::str(p.to_string()))
                         .collect()
                 };
                 Ok(Signal::Value(Value::list(parts)))
@@ -1393,7 +1393,7 @@ impl Interpreter {
 
         match method {
             // Display
-            "toString" => Ok(Signal::Value(Value::Str(val.to_display_string()))),
+            "toString" => Ok(Signal::Value(Value::str(val.to_display_string()))),
             // State checks (remain as methods)
             "isNaN" => Ok(Signal::Value(Value::Bool(float_val.is_nan()))),
             "isInfinite" => Ok(Signal::Value(Value::Bool(float_val.is_infinite()))),
@@ -1432,14 +1432,14 @@ impl Interpreter {
                         ("hasValue".into(), Value::Bool(true)),
                         ("__value".into(), val.clone()),
                         ("__default".into(), default_val),
-                        ("__type".into(), Value::Str("Lax".into())),
+                        ("__type".into(), Value::str("Lax".into())),
                     ])))
                 } else {
                     Ok(Signal::Value(Value::pack(vec![
                         ("hasValue".into(), Value::Bool(false)),
                         ("__value".into(), Value::Int(0)),
                         ("__default".into(), Value::Int(0)),
-                        ("__type".into(), Value::Str("Lax".into())),
+                        ("__type".into(), Value::str("Lax".into())),
                     ])))
                 }
             }
@@ -1450,14 +1450,14 @@ impl Interpreter {
                         ("hasValue".into(), Value::Bool(true)),
                         ("__value".into(), val.clone()),
                         ("__default".into(), default_val),
-                        ("__type".into(), Value::Str("Lax".into())),
+                        ("__type".into(), Value::str("Lax".into())),
                     ])))
                 } else {
                     Ok(Signal::Value(Value::pack(vec![
                         ("hasValue".into(), Value::Bool(false)),
                         ("__value".into(), Value::Int(0)),
                         ("__default".into(), Value::Int(0)),
-                        ("__type".into(), Value::Str("Lax".into())),
+                        ("__type".into(), Value::str("Lax".into())),
                     ])))
                 }
             }
@@ -1475,7 +1475,7 @@ impl Interpreter {
                         ("hasValue".into(), Value::Bool(true)),
                         ("__value".into(), val),
                         ("__default".into(), default_val),
-                        ("__type".into(), Value::Str("Lax".into())),
+                        ("__type".into(), Value::str("Lax".into())),
                     ])))
                 } else {
                     let default_val = custom_default.unwrap_or_else(|| {
@@ -1489,7 +1489,7 @@ impl Interpreter {
                         ("hasValue".into(), Value::Bool(false)),
                         ("__value".into(), default_val.clone()),
                         ("__default".into(), default_val),
-                        ("__type".into(), Value::Str("Lax".into())),
+                        ("__type".into(), Value::str("Lax".into())),
                     ])))
                 }
             }
@@ -1517,7 +1517,7 @@ impl Interpreter {
                         ("hasValue".into(), Value::Bool(false)),
                         ("__value".into(), Value::Int(0)),
                         ("__default".into(), Value::Int(0)),
-                        ("__type".into(), Value::Str("Lax".into())),
+                        ("__type".into(), Value::str("Lax".into())),
                     ])))
                 } else {
                     let max_val = items
@@ -1530,7 +1530,7 @@ impl Interpreter {
                         ("hasValue".into(), Value::Bool(true)),
                         ("__value".into(), max_val),
                         ("__default".into(), default_val),
-                        ("__type".into(), Value::Str("Lax".into())),
+                        ("__type".into(), Value::str("Lax".into())),
                     ])))
                 }
             }
@@ -1540,7 +1540,7 @@ impl Interpreter {
                         ("hasValue".into(), Value::Bool(false)),
                         ("__value".into(), Value::Int(0)),
                         ("__default".into(), Value::Int(0)),
-                        ("__type".into(), Value::Str("Lax".into())),
+                        ("__type".into(), Value::str("Lax".into())),
                     ])))
                 } else {
                     let min_val = items
@@ -1553,7 +1553,7 @@ impl Interpreter {
                         ("hasValue".into(), Value::Bool(true)),
                         ("__value".into(), min_val),
                         ("__default".into(), default_val),
-                        ("__type".into(), Value::Str("Lax".into())),
+                        ("__type".into(), Value::str("Lax".into())),
                     ])))
                 }
             }
@@ -1613,7 +1613,7 @@ impl Interpreter {
                 Ok(Signal::Value(Value::Bool(true)))
             }
             // Display (C12-2b: universal .toString() adoption)
-            "toString" => Ok(Signal::Value(Value::Str(
+            "toString" => Ok(Signal::Value(Value::str(
                 Value::list(items.to_vec()).to_display_string(),
             ))),
             _ => Err(RuntimeError {
@@ -1633,7 +1633,7 @@ impl Interpreter {
         _args: &[Value],
     ) -> Result<Signal, RuntimeError> {
         match method {
-            "toString" => Ok(Signal::Value(Value::Str(val.to_string()))),
+            "toString" => Ok(Signal::Value(Value::str(val.to_string()))),
             _ => Err(RuntimeError {
                 message: format!(
                     "Unknown bool method: '{}'. Use Int[bool]() for conversion",
@@ -1663,7 +1663,7 @@ impl Interpreter {
             "isEmpty" => Ok(Signal::Value(Value::Bool(
                 stream_val.items.is_empty() && stream_val.status == StreamStatus::Completed,
             ))),
-            "toString" => Ok(Signal::Value(Value::Str(
+            "toString" => Ok(Signal::Value(Value::str(
                 Value::Stream(stream_val.clone()).to_display_string(),
             ))),
             _ => Err(RuntimeError {
@@ -1758,7 +1758,7 @@ impl Interpreter {
                     _ => Ok(Signal::Value(args[0].clone())),
                 }
             }
-            "toString" => Ok(Signal::Value(Value::Str(
+            "toString" => Ok(Signal::Value(Value::str(
                 Value::Async(async_val.clone()).to_display_string(),
             ))),
             _ => Err(RuntimeError {

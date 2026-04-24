@@ -48,7 +48,8 @@ impl Interpreter {
         match self.eval_expr(arg0)? {
             Signal::Value(Value::BuchiPack(fields)) => {
                 let is_valid = fields.iter().any(|(k, v)| {
-                    k == "__writer_id" && matches!(v, Value::Str(s) if s == "__v3_streaming_writer")
+                    k == "__writer_id"
+                        && matches!(v, Value::Str(s) if s.as_str() == "__v3_streaming_writer")
                 });
                 if !is_valid {
                     return Err(RuntimeError {
@@ -372,7 +373,7 @@ impl Interpreter {
         // Evaluate event name (arg 1).
         let event_name: String = if let Some(arg) = args.get(1) {
             match self.eval_expr(arg)? {
-                Signal::Value(Value::Str(s)) => s,
+                Signal::Value(Value::Str(s)) => Value::str_take(s),
                 Signal::Value(v) => {
                     return Err(RuntimeError {
                         message: format!("sseEvent: event must be Str, got {}", v),
@@ -389,7 +390,7 @@ impl Interpreter {
         // Evaluate data (arg 2).
         let data: String = if let Some(arg) = args.get(2) {
             match self.eval_expr(arg)? {
-                Signal::Value(Value::Str(s)) => s,
+                Signal::Value(Value::Str(s)) => Value::str_take(s),
                 Signal::Value(v) => {
                     return Err(RuntimeError {
                         message: format!("sseEvent: data must be Str, got {}", v),
@@ -567,7 +568,7 @@ impl Interpreter {
             ("hasValue".into(), Value::Bool(true)),
             ("__value".into(), Value::bytes(data)),
             ("__default".into(), Value::bytes(vec![])),
-            ("__type".into(), Value::Str("Lax".into())),
+            ("__type".into(), Value::str("Lax".into())),
         ])
     }
 
@@ -577,7 +578,7 @@ impl Interpreter {
             ("hasValue".into(), Value::Bool(false)),
             ("__value".into(), Value::bytes(vec![])),
             ("__default".into(), Value::bytes(vec![])),
-            ("__type".into(), Value::Str("Lax".into())),
+            ("__type".into(), Value::str("Lax".into())),
         ])
     }
 

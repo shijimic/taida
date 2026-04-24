@@ -46,12 +46,12 @@
 //!    *internal* helpers the host uses to construct borrowed input
 //!    vectors. They are symmetric and must always be used in pairs.
 
-use core::ffi::{c_char, c_void, CStr};
+use core::ffi::{CStr, c_char, c_void};
 
 use taida_addon::{
-    TaidaAddonBoolPayload, TaidaAddonBytesPayload, TaidaAddonErrorV1, TaidaAddonFloatPayload,
-    TaidaAddonIntPayload, TaidaAddonListPayload, TaidaAddonPackEntryV1, TaidaAddonPackPayload,
-    TaidaAddonValueTag, TaidaAddonValueV1, TaidaHostV1, TAIDA_ADDON_ABI_VERSION,
+    TAIDA_ADDON_ABI_VERSION, TaidaAddonBoolPayload, TaidaAddonBytesPayload, TaidaAddonErrorV1,
+    TaidaAddonFloatPayload, TaidaAddonIntPayload, TaidaAddonListPayload, TaidaAddonPackEntryV1,
+    TaidaAddonPackPayload, TaidaAddonValueTag, TaidaAddonValueV1, TaidaHostV1,
 };
 
 use crate::interpreter::value::Value;
@@ -713,7 +713,7 @@ unsafe fn read_value_by_ref(v: &TaidaAddonValueV1) -> Result<Value, BridgeError>
                 unsafe { core::slice::from_raw_parts(p.ptr, p.len) }
             };
             match core::str::from_utf8(bytes) {
-                Ok(s) => Ok(Value::Str(s.to_string())),
+                Ok(s) => Ok(Value::str(s.to_string())),
                 Err(_) => Err(BridgeError::InvalidStrEncoding),
             }
         }
@@ -859,8 +859,8 @@ mod tests {
 
     #[test]
     fn roundtrip_str() {
-        match roundtrip(Value::Str("こんにちは".to_string())) {
-            Value::Str(s) => assert_eq!(s, "こんにちは"),
+        match roundtrip(Value::str("こんにちは".to_string())) {
+            Value::Str(s) => assert_eq!(s.as_str(), "こんにちは"),
             other => panic!("expected Str, got {other:?}"),
         }
     }
@@ -886,7 +886,7 @@ mod tests {
     fn roundtrip_nested_list() {
         let value = Value::list(vec![
             Value::Int(1),
-            Value::Str("two".to_string()),
+            Value::str("two".to_string()),
             Value::list(vec![Value::Bool(true), Value::Float(3.5)]),
         ]);
         let back = roundtrip(value.clone());
@@ -905,13 +905,13 @@ mod tests {
     #[test]
     fn roundtrip_pack_with_fields() {
         let value = Value::pack(vec![
-            ("name".to_string(), Value::Str("Taida".to_string())),
+            ("name".to_string(), Value::str("Taida".to_string())),
             ("version".to_string(), Value::Int(2)),
             (
                 "tags".to_string(),
                 Value::list(vec![
-                    Value::Str("alpha".to_string()),
-                    Value::Str("beta".to_string()),
+                    Value::str("alpha".to_string()),
+                    Value::str("beta".to_string()),
                 ]),
             ),
         ]);

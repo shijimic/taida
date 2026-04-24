@@ -121,9 +121,9 @@ impl Interpreter {
 
             // Build request pack matching h2 1-arg handler contract.
             let mut request_fields: Vec<(String, Value)> = vec![
-                ("method".into(), Value::Str(req.method)),
-                ("path".into(), Value::Str(path_part)),
-                ("query".into(), Value::Str(query_part)),
+                ("method".into(), Value::str(req.method)),
+                ("path".into(), Value::str(path_part)),
+                ("query".into(), Value::str(query_part)),
                 (
                     "version".into(),
                     Value::pack(vec![
@@ -137,15 +137,15 @@ impl Interpreter {
             let mut header_values: Vec<Value> = Vec::new();
             for (name, value) in &req.headers {
                 header_values.push(Value::pack(vec![
-                    ("name".into(), Value::Str(name.clone())),
-                    ("value".into(), Value::Str(value.clone())),
+                    ("name".into(), Value::str(name.clone())),
+                    ("value".into(), Value::str(value.clone())),
                 ]));
             }
             // Add :authority as host header for compatibility (same as h2).
             if !req.authority.is_empty() {
                 header_values.push(Value::pack(vec![
-                    ("name".into(), Value::Str("host".into())),
-                    ("value".into(), Value::Str(req.authority.clone())),
+                    ("name".into(), Value::str("host".into())),
+                    ("value".into(), Value::str(req.authority.clone())),
                 ]));
             }
             request_fields.push(("headers".into(), Value::list(header_values)));
@@ -158,7 +158,7 @@ impl Interpreter {
             request_fields.push(("raw".into(), Value::bytes(req.body)));
             request_fields.push((
                 "remoteHost".into(),
-                Value::Str(req.remote_addr.ip().to_string()),
+                Value::str(req.remote_addr.ip().to_string()),
             ));
             request_fields.push((
                 "remotePort".into(),
@@ -166,7 +166,7 @@ impl Interpreter {
             ));
             request_fields.push(("keepAlive".into(), Value::Bool(true)));
             request_fields.push(("chunked".into(), Value::Bool(false)));
-            request_fields.push(("protocol".into(), Value::Str("h3".into())));
+            request_fields.push(("protocol".into(), Value::str("h3".into())));
 
             let request_pack = Value::pack(request_fields);
 

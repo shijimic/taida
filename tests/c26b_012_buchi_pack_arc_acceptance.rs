@@ -35,11 +35,11 @@ use taida::interpreter::value::Value;
 #[test]
 fn buchipack_clone_is_refcount_bump_not_deep_copy() {
     let fields = vec![
-        ("name".to_string(), Value::Str("Taida".to_string())),
+        ("name".to_string(), Value::str("Taida".to_string())),
         ("version".to_string(), Value::Int(26)),
         (
             "tags".to_string(),
-            Value::list(vec![Value::Str("c26".to_string())]),
+            Value::list(vec![Value::str("c26".to_string())]),
         ),
     ];
     let v1 = Value::pack(fields);
@@ -108,7 +108,7 @@ fn buchipack_take_clones_when_shared() {
 #[test]
 fn buchipack_pack_then_take_round_trips_fields() {
     let fields = vec![
-        ("first".to_string(), Value::Str("one".to_string())),
+        ("first".to_string(), Value::str("one".to_string())),
         ("second".to_string(), Value::Int(2)),
         ("third".to_string(), Value::Bool(true)),
         ("fourth".to_string(), Value::list(vec![Value::Int(4)])),
