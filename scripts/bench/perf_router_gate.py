@@ -8,6 +8,7 @@ and exits with the appropriate status:
 
 - exit 0: no violations, or violations in warn-only mode
 - exit 1: violations in strict mode
+- exit 2: malformed/missing measurement input
 
 Warn-only mode is active when `state.sample_count < min_samples_required`
 (unless `state.strict` is forced true/false).
@@ -107,16 +108,14 @@ def main() -> int:
     missing = [k for k in needed if k not in measured]
     if missing:
         print(
-            "WARN: no PERF_ROUTER_* lines found (test likely skipped — "
+            "ERROR: no PERF_ROUTER_* lines found (test likely skipped — "
             "TAIDA_PERF_ROUTER_ENABLED not set, or cc/node unavailable): "
             f"missing={missing}",
             file=sys.stderr,
         )
-        # Treat a skipped test as a no-op so the workflow does not
-        # hard-fail on infrastructure gaps. A regression to "test
-        # silently skipped" is instead caught by the workflow's
-        # separate presence assertion on the emit lines.
-        return 0
+        # Enforce the workflow's presence assertion here so a silently
+        # skipped perf test cannot masquerade as a green gate.
+        return 2
 
     with args.baseline.open("r", encoding="utf-8") as f:
         baseline = json.load(f)

@@ -163,6 +163,11 @@ zero code — it is a gating artefact so follow-up sessions land
   weekly heaptrack run, with reproduction helpers at `scripts/mem/`.
   Peak-RSS drift against this baseline is contractual for the
   `@c.26` gate; the 24 h soak (C26B-005) is orthogonal.
+- **2026-04-25 review correction** — the previous "agent-side FULLY READY"
+  wording is downgraded to **HOLD**. C26B-029 fixed two CI false-green
+  holes (`bench.yml` NET throughput suppression and `perf-router` missing
+  emit lines), but C26B-002 / C26B-005 / C26B-013 / C26B-030 remain
+  OPEN or REOPEN before the label-less `@c.26` tag.
 - **C26B-012** — `PENDING_BYTES` FIFO ordering (terminal addon
   concurrent `ReadEvent()`) + BuchiPack interior Arc migration.
   - BuchiPack `[FIXED]` at Round 6 / wQ (`6f72f7c`): `Value::BuchiPack`

@@ -849,24 +849,27 @@ OPEN (owned by C26):
   Round 7 / wV-a; only the denormal rendering audit remains
   under this pin.
 
-### 5.6.1. `@c.26` GATE-READY status (informational, agent side)
+### 5.6.1. `@c.26` GATE status (informational, review update)
 
-As of the wθ rolling amendment (this commit), **all agent-side
-Must Fix / Critical C26 blockers are FIXED** on `feat/c26`.
+As of the 2026-04-25 review, the previous wθ **GATE-READY**
+claim is downgraded to **HOLD**. The review found source-of-truth
+drift and CI false-green holes. The CI holes are fixed under
+C26B-029, but the stable tag must wait for the OPEN / REOPEN items
+below.
 
 | Agent-side blocker | Status | Landing |
 | --- | --- | --- |
 | C26B-001 (h2 3-backend parity, 10-case pin) | FIXED | Round 1 + Round 2 + Round 3 / wE |
 | C26B-003 (port-bind race eradication, Critical) | FIXED | C26 Phase 3 |
-| C26B-004 (perf-gate hard-fail) | FIXED | Round 2 / wB |
-| C26B-005 (soak runbook) | FIXED (runbook); 24 h run = user action | Round 2 / wA |
+| C26B-004 (perf-gate hard-fail) | FIXED after review hardening | Round 2 / wB + C26B-029 |
+| C26B-005 (soak runbook) | REOPEN: 24 h PASS evidence required | Round 2 / wA + review 2026-04-25 |
 | C26B-006 (retry-shim retirement) | FIXED | Round 4 / wJ |
-| C26B-007 (SEC-002..010 + SEC-011 Sigstore/SLSA) | FIXED | Round 2 / wB + Round 9 / wβ invariant pin |
+| C26B-007 (SEC-002..010 + SEC-011 Sigstore/SLSA) | PARTIAL: release signing exists; install-side verify tracked by C26B-030 | Round 2 / wB + Round 9 / wβ + review 2026-04-25 |
 | C26B-008 (GHSA advisory) | CLOSED (zero install base) | Round 8 / wX2 |
 | C26B-009 (parser FSM + arm-body throw) | FIXED | Round 1 |
 | C26B-010 (memory-leak CI gate) | FIXED | Round 4 / wM |
 | C26B-011 (float parity incl. signed-zero JS) | FIXED | Round 6 / wS + Round 7 / wV-a |
-| C26B-012 (BuchiPack Arc migration, agent half) | FIXED | Round 6 / wQ |
+| C26B-012 (BuchiPack Arc + terminal PENDING_BYTES) | FIXED in code; terminal publish remains user action | Round 6 / wQ + Round 11 wζ |
 | C26B-014 (core-bundled import-less) | FIXED | Round 1 |
 | C26B-015 (path traversal) | FIXED | Round 1 |
 | C26B-016 (span-aware mold family + StrOf) | FIXED | Round 2 / wD + Round 3 / wH |
@@ -877,22 +880,30 @@ Must Fix / Critical C26 blockers are FIXED** on `feat/c26`.
 | C26B-021 (stdout line-buffer, Option B) | FIXED | Round 1 |
 | C26B-022 (HTTP wire byte ceilings, Step 3 Option B) | FIXED (interp-side h1/h2/h3) | Round 3 / wE + Round 4 / wJ |
 | C26B-023 (2-arg body docs-path) | FIXED (docs) | Round 3 / wH |
-| C26B-024 (Native clone-heavy Step 4) | FIXED | Round 8 / wT + Round 10 / wε |
+| C26B-024 (Native clone-heavy + perf-router gate) | FIXED after review hardening | Round 8 / wT + Round 10 / wε + C26B-029 |
 | C26B-025 (publish self-identity) | FIXED | Round 1 |
 | C26B-026 (Native h2 HPACK custom headers) | FIXED | Round 2 / wC |
 | C26B-027 (doc_examples_parse regression) | FIXED | Round 9 / wα |
 | C26B-028 (release workflow symmetry + SEC-011 invariants) | FIXED | Round 9 / wβ |
+| C26B-029 (CI perf gate false-green hardening) | FIXED | Review 2026-04-25 |
+| C26B-030 (SEC-011 install-side verify wiring) | OPEN | Review 2026-04-25 |
 
-Remaining OPEN items outside the agent's authority:
+Remaining OPEN / REOPEN items:
 
-- **C26B-012 `PENDING_BYTES` FIFO** — user-side (terminal
-  submodule). The language agent is explicitly forbidden from
-  touching `.dev/official-package-repos/terminal/`.
+- **C26B-002** — full 3-backend TLS construction pin is still
+  inconsistent across the progress files.
+- **C26B-005** — 24 h soak PASS evidence is required; runbook-only
+  is not enough for the original acceptance.
+- **C26B-013** — docs final amendment remains open because this
+  section, CHANGELOG, and C26 progress files still contain stale
+  Round 8-11 narratives.
+- **C26B-030** — SEC-011 install-side verify wiring gap.
+- **C26B-012 terminal publish** — terminal submodule commit
+  `4692fd8` still needs upstream push / PR / release tag before
+  users can consume it.
 - Phase 14 GATE promotion itself — user-approved tag (`@c.26.rcM`
   → `@c.26`). The agent does not cut either tag under any
   condition.
-- 24 h soak run (C26B-005) — manual user action against the
-  landed `.dev/C26_SOAK_RUNBOOK.md`.
 - Downstream `bonsai-wasm` Phase 6 acceptance smoke
   (C26B-020 acceptance).
 - First signed official addon release (SEC-011 publish-side

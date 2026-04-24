@@ -83,14 +83,9 @@ jobs:
       - name: Run NET6-3b h2 throughput benchmarks
         id: net_bench
         # The three h2 benches are gated by RUN_BENCHMARKS=1. They
-        # auto-SKIP when curl --http2 is unavailable; the parse script
-        # below tolerates an empty match set.
-        # `continue-on-error` is deliberately placed on this step
-        # only (not the job) because missing system curl --http2 must
-        # not block the criterion gate above. A real regression inside
-        # the NET benches is caught by compare_baseline.py once the
-        # baseline accumulates >=30 samples.
-        continue-on-error: true
+        # must emit all three NET6-3b-{2,3,4} measurement lines.
+        # Missing curl --http2 or a skipped bench is a gate failure,
+        # not a silently green run.
         env:
           RUN_BENCHMARKS: "1"
         run: |
@@ -100,7 +95,7 @@ jobs:
               test_net6_3b_native_h2_64kib_data_benchmark \
               test_net6_3b_native_h2_32_stream_multiplex_benchmark \
               -- --nocapture --test-threads=1 \
-              2>&1 | tee cargo-test-net.log || true
+              2>&1 | tee cargo-test-net.log
 
       - name: Parse NET6-3b h2 benchmark lines into bencher format
         run: |

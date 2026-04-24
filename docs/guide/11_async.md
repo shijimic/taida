@@ -188,6 +188,14 @@ stdout((end - start).toString())
 
 ---
 
+## Blocking Addon Caveat
+
+`terminal.ReadEvent[]()` のように OS の blocking I/O を内部で使う addon は、Taida 側の `Async[T]` から呼ぶ場合でも、同じ入力ストリームにつき dedicated blocking thread から呼び出してください。C26B-012 以降の `taida-lang/terminal` は `PENDING_BYTES` を thread-local framing context として保持するため、複数 OS thread から同じ stdin を並行に読む設計では thread ごとに独立した未消費 byte queue になります。
+
+Tokio などの multi-thread runtime では、`spawn_blocking` 相当の単一専用 worker に `ReadEvent[]()` を寄せるのが契約です。これは public signature を変えずに FIFO を保証するための host-side 制約です。
+
+---
+
 ## まとめ
 
 | 概念 | 構文 |
