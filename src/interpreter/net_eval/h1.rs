@@ -18,10 +18,10 @@
 use super::super::eval::{Interpreter, RuntimeError, Signal};
 use super::super::value::Value;
 use super::helpers::{
-    ChunkedBodyError, build_streaming_head, chunked_body_complete, chunked_in_place_compact,
-    determine_keep_alive, extract_result_value, extract_result_value_owned, get_field_bool,
-    get_field_int, get_field_value, make_fulfilled_async, make_result_failure_msg,
-    make_result_success, make_span, parse_request_head, send_response_scatter,
+    build_streaming_head, chunked_body_complete, chunked_in_place_compact, determine_keep_alive,
+    extract_result_value, extract_result_value_owned, get_field_bool, get_field_int,
+    get_field_value, make_fulfilled_async, make_result_failure_msg, make_result_success, make_span,
+    parse_request_head, send_response_scatter, ChunkedBodyError,
 };
 use super::types::{
     ActiveStreamingWriter, ConnAction, ConnReadResult, ConnStream, HttpConnection,
@@ -693,8 +693,7 @@ impl Interpreter {
                         {
                             let _ = field_name; // kept for future logging
                             let bad_request = b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
-                            let _ =
-                                std::io::Write::write_all(&mut conn.stream, bad_request);
+                            let _ = std::io::Write::write_all(&mut conn.stream, bad_request);
                             request_count += 1;
                             close_idx = processed_idx;
                             let _ = conn.stream.set_read_timeout(Some(poll_timeout));
@@ -952,7 +951,7 @@ impl Interpreter {
 
             // Build request pack for handler (head only, body = empty span).
             let mut request_fields: Vec<(String, Value)> = Vec::new();
-            request_fields.push(("raw".into(), Value::Bytes(raw_bytes)));
+            request_fields.push(("raw".into(), Value::bytes(raw_bytes)));
 
             for key in &["method", "path", "query", "version", "headers"] {
                 if let Some(v) = get_field_value(&parsed_fields, key) {
@@ -1297,7 +1296,7 @@ impl Interpreter {
 
             // ── Build request pack for handler ──
             let mut request_fields: Vec<(String, Value)> = Vec::new();
-            request_fields.push(("raw".into(), Value::Bytes(raw_bytes)));
+            request_fields.push(("raw".into(), Value::bytes(raw_bytes)));
 
             for key in &["method", "path", "query", "version", "headers"] {
                 if let Some(v) = get_field_value(&parsed_fields, key) {

@@ -17,8 +17,25 @@ pub enum Value {
     Float(f64),
     /// String value
     Str(String),
-    /// Bytes value (immutable byte sequence)
-    Bytes(Vec<u8>),
+    /// Bytes value (immutable byte sequence).
+    ///
+    /// # C26B-020 柱 2 / Round 5 wO (2026-04-24): interior `Arc<Vec<u8>>`
+    ///
+    /// Migrated from plain `Vec<u8>` to `Arc<Vec<u8>>` so that
+    /// `Value::clone()` on Bytes becomes an `Arc::clone()` (one atomic
+    /// increment) instead of a full byte-by-byte deep-clone. This
+    /// unblocks `BytesCursorTake` zero-copy paths, where multi-MB / GB
+    /// buffers are threaded through every `take(size)` step.
+    ///
+    /// * **Construction**: prefer [`Value::bytes`] (wraps in `Arc::new`).
+    /// * **Reading from a match binding**: `bytes.iter()` / `bytes.len()`
+    ///   / `bytes.is_empty()` work via deref; `&**bytes` yields `&[u8]`.
+    /// * **Consuming the inner `Vec<u8>`**: use [`Value::bytes_take`] —
+    ///   `Arc::try_unwrap` fast path, else `(*arc).clone()` fallback.
+    ///
+    /// Equality, ordering, display, hashing semantics are unchanged
+    /// because `Arc<T>` transparently forwards read access to `T`.
+    Bytes(Arc<Vec<u8>>),
     /// Boolean value
     Bool(bool),
     /// Buchi pack (named fields, ordered)
@@ -214,7 +231,22 @@ impl Value {
 
     /// Default value for Bytes.
     pub fn default_bytes() -> Self {
-        Value::Bytes(Vec::new())
+        Value::Bytes(Arc::new(Vec::new()))
+    }
+
+    /// Construct a `Value::Bytes` from an owned `Vec<u8>`, hiding the
+    /// `Arc` wrapping. See the doc comment on `Value::Bytes` for the
+    /// rationale (C26B-020 柱 2 interior migration).
+    pub fn bytes(data: Vec<u8>) -> Self {
+        Value::Bytes(Arc::new(data))
+    }
+
+    /// COW helper: take ownership of the inner `Vec<u8>` from an
+    /// `Arc<Vec<u8>>`. If the `Arc` is uniquely owned, avoids allocation;
+    /// otherwise clones the vec. Used at legacy consumer sites that
+    /// previously moved `Vec<u8>` out of `Value::Bytes`. C26B-020 柱 2.
+    pub fn bytes_take(data: Arc<Vec<u8>>) -> Vec<u8> {
+        Arc::try_unwrap(data).unwrap_or_else(|arc| (*arc).clone())
     }
 
     /// Default value for Bool.
@@ -275,7 +307,7 @@ impl Value {
             Some(Value::Int(_)) => Value::Int(0),
             Some(Value::Float(_)) => Value::Float(0.0),
             Some(Value::Str(_)) => Value::Str(String::new()),
-            Some(Value::Bytes(_)) => Value::Bytes(Vec::new()),
+            Some(Value::Bytes(_)) => Value::bytes(Vec::new()),
             Some(Value::Bool(_)) => Value::Bool(false),
             Some(Value::BuchiPack(_)) => Value::BuchiPack(Vec::new()),
             Some(Value::List(_)) => Value::list(Vec::new()),
@@ -541,7 +573,7 @@ mod tests {
         assert_eq!(Value::default_int(), Value::Int(0));
         assert_eq!(Value::default_float(), Value::Float(0.0));
         assert_eq!(Value::default_str(), Value::Str(String::new()));
-        assert_eq!(Value::default_bytes(), Value::Bytes(Vec::new()));
+        assert_eq!(Value::default_bytes(), Value::bytes(Vec::new()));
         assert_eq!(Value::default_bool(), Value::Bool(false));
         assert_eq!(Value::default_list(), Value::list(Vec::new()));
     }
@@ -630,7 +662,7 @@ mod tests {
             Value::Str("hello".to_string()),
             Value::Str("hello".to_string())
         );
-        assert_eq!(Value::Bytes(vec![1, 2]), Value::Bytes(vec![1, 2]));
+        assert_eq!(Value::bytes(vec![1, 2]), Value::bytes(vec![1, 2]));
     }
 
     #[test]
@@ -646,7 +678,7 @@ mod tests {
         assert_eq!(Value::Int(42).to_string(), "42");
         assert_eq!(Value::Float(314.0 / 100.0).to_string(), "3.14");
         assert_eq!(Value::Str("hello".to_string()).to_string(), "hello");
-        assert_eq!(Value::Bytes(vec![1, 2]).to_string(), "Bytes[@[1, 2]]");
+        assert_eq!(Value::bytes(vec![1, 2]).to_string(), "Bytes[@[1, 2]]");
         assert_eq!(Value::Bool(true).to_string(), "true");
         assert_eq!(Value::Unit.to_string(), "@()");
     }
@@ -763,23 +795,19 @@ mod tests {
         // Empty completed stream → false
         assert!(!Value::default_stream().is_truthy());
         // Active stream → true
-        assert!(
-            Value::Stream(StreamValue {
-                items: Vec::new(),
-                transforms: Vec::new(),
-                status: StreamStatus::Active,
-            })
-            .is_truthy()
-        );
+        assert!(Value::Stream(StreamValue {
+            items: Vec::new(),
+            transforms: Vec::new(),
+            status: StreamStatus::Active,
+        })
+        .is_truthy());
         // Completed with items → true
-        assert!(
-            Value::Stream(StreamValue {
-                items: vec![Value::Int(1)],
-                transforms: Vec::new(),
-                status: StreamStatus::Completed,
-            })
-            .is_truthy()
-        );
+        assert!(Value::Stream(StreamValue {
+            items: vec![Value::Int(1)],
+            transforms: Vec::new(),
+            status: StreamStatus::Completed,
+        })
+        .is_truthy());
     }
 
     #[test]

@@ -263,7 +263,7 @@ fn test_encode_200_text() {
     let result = encode_response(&response);
     let inner = extract_result_inner(&result);
     let bytes = match inner.iter().find(|(k, _)| k == "bytes") {
-        Some((_, Value::Bytes(b))) => b.clone(),
+        Some((_, Value::Bytes(b))) => (**b).clone(),
         _ => panic!("no bytes"),
     };
     let text = String::from_utf8(bytes).unwrap();
@@ -283,7 +283,7 @@ fn test_encode_404_empty() {
     let result = encode_response(&response);
     let inner = extract_result_inner(&result);
     let bytes = match inner.iter().find(|(k, _)| k == "bytes") {
-        Some((_, Value::Bytes(b))) => b.clone(),
+        Some((_, Value::Bytes(b))) => (**b).clone(),
         _ => panic!("no bytes"),
     };
     let text = String::from_utf8(bytes).unwrap();
@@ -296,12 +296,12 @@ fn test_encode_binary_body() {
     let response = Value::BuchiPack(vec![
         ("status".into(), Value::Int(200)),
         ("headers".into(), Value::list(vec![])),
-        ("body".into(), Value::Bytes(vec![0x00, 0xFF, 0x42])),
+        ("body".into(), Value::bytes(vec![0x00, 0xFF, 0x42])),
     ]);
     let result = encode_response(&response);
     let inner = extract_result_inner(&result);
     let bytes = match inner.iter().find(|(k, _)| k == "bytes") {
-        Some((_, Value::Bytes(b))) => b.clone(),
+        Some((_, Value::Bytes(b))) => (**b).clone(),
         _ => panic!("no bytes"),
     };
     assert!(bytes.ends_with(&[0x00, 0xFF, 0x42]));
@@ -323,7 +323,7 @@ fn test_encode_user_content_length_preserved() {
     let result = encode_response(&response);
     let inner = extract_result_inner(&result);
     let bytes = match inner.iter().find(|(k, _)| k == "bytes") {
-        Some((_, Value::Bytes(b))) => b.clone(),
+        Some((_, Value::Bytes(b))) => (**b).clone(),
         _ => panic!("no bytes"),
     };
     let text = String::from_utf8(bytes).unwrap();
@@ -770,7 +770,7 @@ fn test_encode_204_empty_body_ok() {
     assert!(!is_result_failure(&result));
     let inner = extract_result_inner(&result);
     let bytes = match inner.iter().find(|(k, _)| k == "bytes") {
-        Some((_, Value::Bytes(b))) => b.clone(),
+        Some((_, Value::Bytes(b))) => (**b).clone(),
         _ => panic!("no bytes"),
     };
     let text = String::from_utf8(bytes).unwrap();
@@ -828,7 +828,7 @@ fn test_encode_205_empty_body_ok() {
     assert!(!is_result_failure(&result));
     let inner = extract_result_inner(&result);
     let bytes = match inner.iter().find(|(k, _)| k == "bytes") {
-        Some((_, Value::Bytes(b))) => b.clone(),
+        Some((_, Value::Bytes(b))) => (**b).clone(),
         _ => panic!("no bytes"),
     };
     let text = String::from_utf8(bytes).unwrap();
@@ -866,7 +866,7 @@ fn test_encode_204_content_length_stripped() {
     assert!(!is_result_failure(&result));
     let inner = extract_result_inner(&result);
     let bytes = match inner.iter().find(|(k, _)| k == "bytes") {
-        Some((_, Value::Bytes(b))) => b.clone(),
+        Some((_, Value::Bytes(b))) => (**b).clone(),
         _ => panic!("no bytes"),
     };
     let text = String::from_utf8(bytes).unwrap();
@@ -886,7 +886,7 @@ fn test_encode_429_reason_phrase() {
     assert!(!is_result_failure(&result));
     let inner = extract_result_inner(&result);
     let bytes = match inner.iter().find(|(k, _)| k == "bytes") {
-        Some((_, Value::Bytes(b))) => b.clone(),
+        Some((_, Value::Bytes(b))) => (**b).clone(),
         _ => panic!("no bytes"),
     };
     let text = String::from_utf8(bytes).unwrap();
@@ -904,7 +904,7 @@ fn test_encode_unknown_status_no_fake_reason() {
     assert!(!is_result_failure(&result));
     let inner = extract_result_inner(&result);
     let bytes = match inner.iter().find(|(k, _)| k == "bytes") {
-        Some((_, Value::Bytes(b))) => b.clone(),
+        Some((_, Value::Bytes(b))) => (**b).clone(),
         _ => panic!("no bytes"),
     };
     let text = String::from_utf8(bytes).unwrap();
@@ -1181,7 +1181,7 @@ fn test_encode_multiple_headers() {
     assert!(!is_result_failure(&result));
     let inner = extract_result_inner(&result);
     let bytes = match inner.iter().find(|(k, _)| k == "bytes") {
-        Some((_, Value::Bytes(b))) => b.clone(),
+        Some((_, Value::Bytes(b))) => (**b).clone(),
         _ => panic!("no bytes"),
     };
     let text = String::from_utf8(bytes).unwrap();
@@ -1221,7 +1221,7 @@ fn test_encode_multiple_headers_order_preserved() {
     assert!(!is_result_failure(&result));
     let inner = extract_result_inner(&result);
     let bytes = match inner.iter().find(|(k, _)| k == "bytes") {
-        Some((_, Value::Bytes(b))) => b.clone(),
+        Some((_, Value::Bytes(b))) => (**b).clone(),
         _ => panic!("no bytes"),
     };
     let text = String::from_utf8(bytes).unwrap();
@@ -1263,7 +1263,7 @@ fn test_encode_duplicate_header_names_preserved() {
     assert!(!is_result_failure(&result));
     let inner = extract_result_inner(&result);
     let bytes = match inner.iter().find(|(k, _)| k == "bytes") {
-        Some((_, Value::Bytes(b))) => b.clone(),
+        Some((_, Value::Bytes(b))) => (**b).clone(),
         _ => panic!("no bytes"),
     };
     let text = String::from_utf8(bytes).unwrap();
@@ -1594,12 +1594,10 @@ fn test_http_serve_missing_args() {
         .define_force("httpServe", Value::Str("__net_builtin_httpServe".into()));
     let result = interp.try_net_func("httpServe", &[]);
     assert!(result.is_err());
-    assert!(
-        result
-            .unwrap_err()
-            .message
-            .contains("missing argument 'port'")
-    );
+    assert!(result
+        .unwrap_err()
+        .message
+        .contains("missing argument 'port'"));
 }
 
 #[test]
@@ -1611,12 +1609,10 @@ fn test_http_serve_missing_handler() {
     let args = vec![Expr::IntLit(8080, dummy_span())];
     let result = interp.try_net_func("httpServe", &args);
     assert!(result.is_err());
-    assert!(
-        result
-            .unwrap_err()
-            .message
-            .contains("missing argument 'handler'")
-    );
+    assert!(result
+        .unwrap_err()
+        .message
+        .contains("missing argument 'handler'"));
 }
 
 #[test]
@@ -2045,11 +2041,11 @@ fn test_nb3_head_plus_body_exactly_fits_returns_200() {
     // Let's just compute iteratively.
     let max = 1_048_576usize;
     let template_len = header_template.len() + header_suffix.len(); // 48 + 4 = 52
-    // head_consumed = template_len + cl_digits_len
-    // We need head_consumed + cl_value == max
-    // cl_value = max - head_consumed = max - template_len - cl_digits_len
-    // For 6-digit CL: cl = max - 52 - 6 = 1048518, which is 7 digits → contradiction
-    // For 7-digit CL: cl = max - 52 - 7 = 1048517, which is 7 digits ✓
+                                                                    // head_consumed = template_len + cl_digits_len
+                                                                    // We need head_consumed + cl_value == max
+                                                                    // cl_value = max - head_consumed = max - template_len - cl_digits_len
+                                                                    // For 6-digit CL: cl = max - 52 - 6 = 1048518, which is 7 digits → contradiction
+                                                                    // For 7-digit CL: cl = max - 52 - 7 = 1048517, which is 7 digits ✓
     let cl_digits = 7;
     let cl_value = max - template_len - cl_digits;
     assert_eq!(
@@ -2315,7 +2311,7 @@ fn test_read_body_content_length() {
     let body_start = 35i64; // "hello" starts at offset 35
     let body_len = 5i64;
     let req = Value::BuchiPack(vec![
-        ("raw".into(), Value::Bytes(raw)),
+        ("raw".into(), Value::bytes(raw)),
         (
             "body".into(),
             Value::BuchiPack(vec![
@@ -2325,7 +2321,7 @@ fn test_read_body_content_length() {
         ),
     ]);
     let result = eval_read_body(&req).unwrap();
-    assert_eq!(result, Value::Bytes(b"hello".to_vec()));
+    assert_eq!(result, Value::bytes(b"hello".to_vec()));
 }
 
 #[test]
@@ -2333,7 +2329,7 @@ fn test_read_body_no_body() {
     // body.len == 0 should return empty Bytes
     let raw = b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n".to_vec();
     let req = Value::BuchiPack(vec![
-        ("raw".into(), Value::Bytes(raw)),
+        ("raw".into(), Value::bytes(raw)),
         (
             "body".into(),
             Value::BuchiPack(vec![
@@ -2343,7 +2339,7 @@ fn test_read_body_no_body() {
         ),
     ]);
     let result = eval_read_body(&req).unwrap();
-    assert_eq!(result, Value::Bytes(vec![]));
+    assert_eq!(result, Value::bytes(vec![]));
 }
 
 #[test]
@@ -3553,7 +3549,7 @@ fn test_read_body_chunked() {
     let body_len = compacted_body.len() as i64;
 
     let req = Value::BuchiPack(vec![
-        ("raw".into(), Value::Bytes(raw)),
+        ("raw".into(), Value::bytes(raw)),
         (
             "body".into(),
             Value::BuchiPack(vec![
@@ -3563,7 +3559,7 @@ fn test_read_body_chunked() {
         ),
     ]);
     let result = eval_read_body(&req).unwrap();
-    assert_eq!(result, Value::Bytes(b"Wikipedia i".to_vec()));
+    assert_eq!(result, Value::bytes(b"Wikipedia i".to_vec()));
 }
 
 // ── httpServe integration test: chunked body (NET2-2i) ──
@@ -4661,12 +4657,10 @@ fn test_v3_api_sentinel_without_import() {
     let mut interp = Interpreter::new();
     let args: Vec<Expr> = vec![];
     // Without sentinel, these should return None (not dispatched)
-    assert!(
-        interp
-            .try_net_func("startResponse", &args)
-            .unwrap()
-            .is_none()
-    );
+    assert!(interp
+        .try_net_func("startResponse", &args)
+        .unwrap()
+        .is_none());
     assert!(interp.try_net_func("writeChunk", &args).unwrap().is_none());
     assert!(interp.try_net_func("endResponse", &args).unwrap().is_none());
     assert!(interp.try_net_func("sseEvent", &args).unwrap().is_none());
@@ -4780,8 +4774,8 @@ fn make_two_arg_noop_handler_expr() -> Expr {
 /// Allocate a unique, bindable port for tests using a monotonic counter.
 /// Same pattern as tests/parity.rs — avoids the TOCTOU race of bind(0)+drop.
 fn v3_free_port() -> u16 {
-    use std::sync::Once;
     use std::sync::atomic::{AtomicU16, Ordering};
+    use std::sync::Once;
 
     static INIT: Once = Once::new();
     static COUNTER: AtomicU16 = AtomicU16::new(0);
@@ -5325,7 +5319,7 @@ fn test_v3_write_chunk_bytes_fast_path() {
         // Pre-set the bytes data in the environment
         interp
             .env
-            .define_force("__test_bytes_data", Value::Bytes(bytes_data_clone));
+            .define_force("__test_bytes_data", Value::bytes(bytes_data_clone));
         interp.env.define_force("__handler", handler);
         let args = vec![
             Expr::IntLit(server_port as i64, dummy_span()),

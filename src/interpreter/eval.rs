@@ -1495,7 +1495,7 @@ impl Interpreter {
                 "Int" | "Num" => Ok(Value::Int(0)),
                 "Float" => Ok(Value::Float(0.0)),
                 "Str" => Ok(Value::Str(String::new())),
-                "Bytes" => Ok(Value::Bytes(Vec::new())),
+                "Bytes" => Ok(Value::bytes(Vec::new())),
                 "Bool" => Ok(Value::Bool(false)),
                 "JSON" => Ok(Value::default_json()),
                 "Molten" => Ok(Value::default_molten()),

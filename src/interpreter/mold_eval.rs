@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use super::eval::{Interpreter, RuntimeError, Signal};
 use super::value::{AsyncStatus, AsyncValue, StreamStatus, StreamTransform, StreamValue, Value};
 /// Operation mold evaluation for the Taida interpreter.
@@ -46,12 +48,17 @@ fn make_lax_value(has_value: bool, value: Value, default: Value) -> Value {
     ])
 }
 
-fn make_bytes_cursor(bytes: Vec<u8>, offset: i64) -> Value {
+/// C26B-020 柱 2: zero-copy BytesCursor constructor.
+///
+/// Accepts an already-shared `Arc<Vec<u8>>`; cloning the Arc is O(1)
+/// atomic refcount bump rather than a full byte-by-byte memcpy.
+fn make_bytes_cursor_arc(bytes: Arc<Vec<u8>>, offset: i64) -> Value {
     let clamped = offset.clamp(0, bytes.len() as i64);
+    let length = bytes.len() as i64;
     Value::BuchiPack(vec![
-        ("bytes".into(), Value::Bytes(bytes.clone())),
+        ("bytes".into(), Value::Bytes(bytes)),
         ("offset".into(), Value::Int(clamped)),
-        ("length".into(), Value::Int(bytes.len() as i64)),
+        ("length".into(), Value::Int(length)),
         ("__type".into(), Value::Str("BytesCursor".into())),
     ])
 }
@@ -60,15 +67,20 @@ fn make_bytes_cursor_step(value: Value, cursor: Value) -> Value {
     Value::BuchiPack(vec![("value".into(), value), ("cursor".into(), cursor)])
 }
 
-fn parse_bytes_cursor(value: Value, mold_name: &str) -> Result<(Vec<u8>, usize), RuntimeError> {
+fn parse_bytes_cursor(
+    value: Value,
+    mold_name: &str,
+) -> Result<(Arc<Vec<u8>>, usize), RuntimeError> {
     let Value::BuchiPack(fields) = value else {
         return Err(RuntimeError {
             message: format!("{}: argument must be BytesCursor, got {}", mold_name, value),
         });
     };
 
+    // C26B-020 柱 2: clone the Arc (refcount bump) instead of deep-copying
+    // the Vec. This is the hot-path zero-copy for GB-scale buffers.
     let bytes = match fields.iter().find(|(name, _)| name == "bytes") {
-        Some((_, Value::Bytes(v))) => v.clone(),
+        Some((_, Value::Bytes(v))) => Arc::clone(v),
         Some((_, v)) => {
             return Err(RuntimeError {
                 message: format!("{}: cursor.bytes must be Bytes, got {}", mold_name, v),
@@ -454,7 +466,7 @@ impl Interpreter {
                         let (clamped_start, clamped_end) =
                             clamp_slice_bounds(bytes.len(), start, end);
                         let result = bytes[clamped_start..clamped_end].to_vec();
-                        Ok(Some(Signal::Value(Value::Bytes(result))))
+                        Ok(Some(Signal::Value(Value::bytes(result))))
                     }
                     _ => Ok(None), // Not a supported Slice target, fall through
                 }
@@ -1297,8 +1309,8 @@ impl Interpreter {
                 if !(0..=u16::MAX as i64).contains(&value) {
                     return Ok(Some(Signal::Value(make_lax_value(
                         false,
-                        Value::Bytes(Vec::new()),
-                        Value::Bytes(Vec::new()),
+                        Value::bytes(Vec::new()),
+                        Value::bytes(Vec::new()),
                     ))));
                 }
                 let n = value as u16;
@@ -1309,8 +1321,8 @@ impl Interpreter {
                 };
                 Ok(Some(Signal::Value(make_lax_value(
                     true,
-                    Value::Bytes(bytes),
-                    Value::Bytes(Vec::new()),
+                    Value::bytes(bytes),
+                    Value::bytes(Vec::new()),
                 ))))
             }
             "U32BE" | "U32LE" => {
@@ -1331,8 +1343,8 @@ impl Interpreter {
                 if !(0..=u32::MAX as i64).contains(&value) {
                     return Ok(Some(Signal::Value(make_lax_value(
                         false,
-                        Value::Bytes(Vec::new()),
-                        Value::Bytes(Vec::new()),
+                        Value::bytes(Vec::new()),
+                        Value::bytes(Vec::new()),
                     ))));
                 }
                 let n = value as u32;
@@ -1353,8 +1365,8 @@ impl Interpreter {
                 };
                 Ok(Some(Signal::Value(make_lax_value(
                     true,
-                    Value::Bytes(bytes),
-                    Value::Bytes(Vec::new()),
+                    Value::bytes(bytes),
+                    Value::bytes(Vec::new()),
                 ))))
             }
             "U16BEDecode" | "U16LEDecode" => {
@@ -1453,7 +1465,7 @@ impl Interpreter {
                     }
                     None => 0,
                 };
-                Ok(Some(Signal::Value(make_bytes_cursor(bytes, offset))))
+                Ok(Some(Signal::Value(make_bytes_cursor_arc(bytes, offset))))
             }
             "BytesCursorRemaining" => {
                 if type_args.is_empty() {
@@ -1492,9 +1504,13 @@ impl Interpreter {
                     }
                     other => return Ok(Some(other)),
                 };
-                let current_cursor = make_bytes_cursor(bytes.clone(), offset as i64);
+                // C26B-020 柱 2: zero-copy. `bytes` is already Arc<Vec<u8>>,
+                // so Arc::clone is refcount bump (O(1)) and the underlying
+                // buffer is shared between current_cursor / default_step /
+                // next_cursor without memcpy.
+                let current_cursor = make_bytes_cursor_arc(Arc::clone(&bytes), offset as i64);
                 let default_step =
-                    make_bytes_cursor_step(Value::Bytes(Vec::new()), current_cursor.clone());
+                    make_bytes_cursor_step(Value::bytes(Vec::new()), current_cursor.clone());
                 if size < 0 {
                     return Ok(Some(Signal::Value(make_lax_value(
                         false,
@@ -1510,9 +1526,17 @@ impl Interpreter {
                         default_step,
                     ))));
                 }
+                // Zero-copy hot path: chunk is a slice-to-owned `Vec<u8>`
+                // of exactly `size` bytes. This is the one remaining copy
+                // per `take(size)` call (N bytes, not the full buffer).
+                // A future enhancement would emit a `BytesView { buf, offset,
+                // len }` variant to avoid even this O(size) copy; deferred
+                // until a separate variant lands to keep parity with JS/C
+                // surface semantics ( `Value::Bytes` consumers still expect
+                // a standalone `Arc<Vec<u8>>`).
                 let chunk = bytes[offset..offset + size].to_vec();
-                let next_cursor = make_bytes_cursor(bytes, (offset + size) as i64);
-                let step = make_bytes_cursor_step(Value::Bytes(chunk), next_cursor);
+                let next_cursor = make_bytes_cursor_arc(bytes, (offset + size) as i64);
+                let step = make_bytes_cursor_step(Value::bytes(chunk), next_cursor);
                 Ok(Some(Signal::Value(make_lax_value(
                     true,
                     step,
@@ -1531,7 +1555,9 @@ impl Interpreter {
                     other => return Ok(Some(other)),
                 };
                 let (bytes, offset) = parse_bytes_cursor(cursor_val, "BytesCursorU8")?;
-                let current_cursor = make_bytes_cursor(bytes.clone(), offset as i64);
+                // C26B-020 柱 2: Arc::clone refcount bump (O(1)) instead of
+                // full deep-copy of the buffer.
+                let current_cursor = make_bytes_cursor_arc(Arc::clone(&bytes), offset as i64);
                 let default_step = make_bytes_cursor_step(Value::Int(0), current_cursor.clone());
                 if offset >= bytes.len() {
                     return Ok(Some(Signal::Value(make_lax_value(
@@ -1541,7 +1567,7 @@ impl Interpreter {
                     ))));
                 }
                 let value = bytes[offset] as i64;
-                let next_cursor = make_bytes_cursor(bytes, (offset + 1) as i64);
+                let next_cursor = make_bytes_cursor_arc(bytes, (offset + 1) as i64);
                 let step = make_bytes_cursor_step(Value::Int(value), next_cursor);
                 Ok(Some(Signal::Value(make_lax_value(
                     true,
@@ -1571,9 +1597,14 @@ impl Interpreter {
                         result.extend(Value::list_take(other));
                         Ok(Some(Signal::Value(Value::list(result))))
                     }
-                    (Value::Bytes(mut a), Value::Bytes(b)) => {
-                        a.extend(b);
-                        Ok(Some(Signal::Value(Value::Bytes(a))))
+                    (Value::Bytes(a), Value::Bytes(b)) => {
+                        // C26B-020 柱 2: COW extend. If `a` is uniquely
+                        // owned, take its Vec via try_unwrap (zero-copy);
+                        // otherwise clone (fallback). `b` is iterated by
+                        // reference via Arc deref.
+                        let mut result = Value::bytes_take(a);
+                        result.extend(b.iter().copied());
+                        Ok(Some(Signal::Value(Value::bytes(result))))
                     }
                     (a, b) => Err(RuntimeError {
                         message: format!(
@@ -1620,16 +1651,18 @@ impl Interpreter {
                 if idx < 0 || (idx as usize) >= bytes.len() || !(0..=255).contains(&value) {
                     return Ok(Some(Signal::Value(make_lax_value(
                         false,
-                        Value::Bytes(Vec::new()),
-                        Value::Bytes(Vec::new()),
+                        Value::bytes(Vec::new()),
+                        Value::bytes(Vec::new()),
                     ))));
                 }
-                let mut out = bytes.clone();
+                // C26B-020 柱 2: COW write. Take ownership via try_unwrap
+                // if possible (O(1)), else deep-clone once (O(n)).
+                let mut out = Value::bytes_take(bytes);
                 out[idx as usize] = value as u8;
                 Ok(Some(Signal::Value(make_lax_value(
                     true,
-                    Value::Bytes(out),
-                    Value::Bytes(Vec::new()),
+                    Value::bytes(out),
+                    Value::bytes(Vec::new()),
                 ))))
             }
             "BytesToList" => {
@@ -1647,7 +1680,10 @@ impl Interpreter {
                     }
                     other => return Ok(Some(other)),
                 };
-                let items = bytes.into_iter().map(|b| Value::Int(b as i64)).collect();
+                let items = bytes
+                    .iter()
+                    .map(|b| Value::Int(*b as i64))
+                    .collect();
                 Ok(Some(Signal::Value(Value::list(items))))
             }
             "Append" => {
@@ -2683,7 +2719,7 @@ impl Interpreter {
                     .unwrap_or(0);
 
                 let bytes_opt: Option<Vec<u8>> = match input {
-                    Value::Bytes(v) => Some(v),
+                    Value::Bytes(v) => Some(Value::bytes_take(v)),
                     Value::Str(s) => Some(s.into_bytes()),
                     Value::Int(len) => {
                         if len < 0 || !(0..=255).contains(&fill) {
@@ -2713,11 +2749,11 @@ impl Interpreter {
                     _ => None,
                 };
                 let has_value = bytes_opt.is_some();
-                let value = Value::Bytes(bytes_opt.unwrap_or_default());
+                let value = Value::bytes(bytes_opt.unwrap_or_default());
                 Ok(Some(Signal::Value(make_lax_value(
                     has_value,
                     value,
-                    Value::Bytes(Vec::new()),
+                    Value::bytes(Vec::new()),
                 ))))
             }
 
@@ -2794,11 +2830,11 @@ impl Interpreter {
                     None
                 };
                 let has_value = bytes.is_some();
-                let value = Value::Bytes(bytes.unwrap_or_default());
+                let value = Value::bytes(bytes.unwrap_or_default());
                 Ok(Some(Signal::Value(make_lax_value(
                     has_value,
                     value,
-                    Value::Bytes(Vec::new()),
+                    Value::bytes(Vec::new()),
                 ))))
             }
 
@@ -2824,9 +2860,9 @@ impl Interpreter {
                     Signal::Value(v) => v,
                     other => return Ok(Some(other)),
                 };
-                let needle = match self.eval_expr(&type_args[2])? {
+                let needle: Vec<u8> = match self.eval_expr(&type_args[2])? {
                     Signal::Value(Value::Str(s)) => s.into_bytes(),
-                    Signal::Value(Value::Bytes(b)) => b,
+                    Signal::Value(Value::Bytes(b)) => Value::bytes_take(b),
                     Signal::Value(v) => {
                         return Err(RuntimeError {
                             message: format!(
@@ -2865,9 +2901,9 @@ impl Interpreter {
                     Signal::Value(v) => v,
                     other => return Ok(Some(other)),
                 };
-                let prefix = match self.eval_expr(&type_args[2])? {
+                let prefix: Vec<u8> = match self.eval_expr(&type_args[2])? {
                     Signal::Value(Value::Str(s)) => s.into_bytes(),
-                    Signal::Value(Value::Bytes(b)) => b,
+                    Signal::Value(Value::Bytes(b)) => Value::bytes_take(b),
                     Signal::Value(v) => {
                         return Err(RuntimeError {
                             message: format!(
@@ -2906,9 +2942,9 @@ impl Interpreter {
                     Signal::Value(v) => v,
                     other => return Ok(Some(other)),
                 };
-                let needle = match self.eval_expr(&type_args[2])? {
+                let needle: Vec<u8> = match self.eval_expr(&type_args[2])? {
                     Signal::Value(Value::Str(s)) => s.into_bytes(),
-                    Signal::Value(Value::Bytes(b)) => b,
+                    Signal::Value(Value::Bytes(b)) => Value::bytes_take(b),
                     Signal::Value(v) => {
                         return Err(RuntimeError {
                             message: format!(
@@ -3042,7 +3078,7 @@ impl Interpreter {
                     other => return Ok(Some(other)),
                 };
                 let out = if let Value::Bytes(bytes) = input {
-                    String::from_utf8(bytes).ok()
+                    String::from_utf8(Value::bytes_take(bytes)).ok()
                 } else {
                     None
                 };

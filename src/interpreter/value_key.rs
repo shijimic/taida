@@ -92,7 +92,11 @@ impl<'a> ValueKey<'a> {
     /// Wrap `v` as a `ValueKey` iff every recursive component is
     /// key-eligible. See module docs for the classification.
     pub(crate) fn new(v: &'a Value) -> Option<Self> {
-        if is_hashable(v) { Some(Self(v)) } else { None }
+        if is_hashable(v) {
+            Some(Self(v))
+        } else {
+            None
+        }
     }
 
     /// Construct a hash fingerprint independent of storage order for
@@ -269,7 +273,7 @@ mod tests {
         assert!(ValueKey::new(&Value::Unit).is_some());
         assert!(ValueKey::new(&Value::Gorilla).is_some());
         assert!(ValueKey::new(&Value::EnumVal("X".into(), 2)).is_some());
-        assert!(ValueKey::new(&Value::Bytes(vec![1, 2, 3])).is_some());
+        assert!(ValueKey::new(&Value::bytes(vec![1, 2, 3])).is_some());
     }
 
     #[test]
@@ -291,7 +295,7 @@ mod tests {
         assert!(ValueKey::new(&pure).is_some());
         let nested = Value::list(vec![Value::list(vec![
             Value::Int(1),
-            Value::Bytes(vec![5]),
+            Value::bytes(vec![5]),
         ])]);
         assert!(ValueKey::new(&nested).is_some());
     }

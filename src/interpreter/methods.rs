@@ -1149,7 +1149,7 @@ impl Interpreter {
                 }
             }
             "toString" => Ok(Signal::Value(Value::Str(
-                Value::Bytes(bytes.to_vec()).to_string(),
+                Value::bytes(bytes.to_vec()).to_string(),
             ))),
             _ => Err(RuntimeError {
                 message: format!(

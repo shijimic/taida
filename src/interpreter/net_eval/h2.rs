@@ -395,7 +395,7 @@ impl Interpreter {
                 request_fields.push(("body".into(), make_span(0, raw_len)));
                 request_fields.push(("bodyOffset".into(), Value::Int(0)));
                 request_fields.push(("contentLength".into(), Value::Int(raw_len as i64)));
-                request_fields.push(("raw".into(), Value::Bytes(body)));
+                request_fields.push(("raw".into(), Value::bytes(body)));
                 request_fields.push(("remoteHost".into(), Value::Str(peer_addr.ip().to_string())));
                 request_fields.push(("remotePort".into(), Value::Int(peer_addr.port() as i64)));
                 request_fields.push(("keepAlive".into(), Value::Bool(true)));

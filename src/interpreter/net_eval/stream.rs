@@ -565,8 +565,8 @@ impl Interpreter {
     pub(super) fn make_lax_bytes_value(data: Vec<u8>) -> Value {
         Value::BuchiPack(vec![
             ("hasValue".into(), Value::Bool(true)),
-            ("__value".into(), Value::Bytes(data)),
-            ("__default".into(), Value::Bytes(vec![])),
+            ("__value".into(), Value::bytes(data)),
+            ("__default".into(), Value::bytes(vec![])),
             ("__type".into(), Value::Str("Lax".into())),
         ])
     }
@@ -575,8 +575,8 @@ impl Interpreter {
     pub(super) fn make_lax_bytes_empty() -> Value {
         Value::BuchiPack(vec![
             ("hasValue".into(), Value::Bool(false)),
-            ("__value".into(), Value::Bytes(vec![])),
-            ("__default".into(), Value::Bytes(vec![])),
+            ("__value".into(), Value::bytes(vec![])),
+            ("__default".into(), Value::bytes(vec![])),
             ("__type".into(), Value::Str("Lax".into())),
         ])
     }
@@ -1017,7 +1017,7 @@ impl Interpreter {
 
         // If body is already fully read, return empty Bytes.
         if body.fully_read {
-            return Ok(Some(Signal::Value(Value::Bytes(vec![]))));
+            return Ok(Some(Signal::Value(Value::bytes(vec![]))));
         }
 
         // Aggregate all remaining body bytes.
@@ -1110,6 +1110,6 @@ impl Interpreter {
             body.fully_read = true;
         }
 
-        Ok(Some(Signal::Value(Value::Bytes(all_bytes))))
+        Ok(Some(Signal::Value(Value::bytes(all_bytes))))
     }
 }

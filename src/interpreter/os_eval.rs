@@ -413,7 +413,7 @@ fn make_udp_recv_default_payload() -> Value {
     Value::BuchiPack(vec![
         ("host".into(), Value::Str(String::new())),
         ("port".into(), Value::Int(0)),
-        ("data".into(), Value::Bytes(Vec::new())),
+        ("data".into(), Value::bytes(Vec::new())),
         ("truncated".into(), Value::Bool(false)),
     ])
 }
@@ -1039,23 +1039,17 @@ impl Interpreter {
                 match std::fs::metadata(&path) {
                     Ok(meta) => {
                         if meta.len() > MAX_READ_SIZE {
-                            return Ok(Some(Signal::Value(make_lax_failure(Value::Bytes(
-                                Vec::new(),
-                            )))));
+                            return Ok(Some(Signal::Value(make_lax_failure(Value::bytes(Vec::new())))));
                         }
                     }
                     Err(_) => {
-                        return Ok(Some(Signal::Value(make_lax_failure(Value::Bytes(
-                            Vec::new(),
-                        )))));
+                        return Ok(Some(Signal::Value(make_lax_failure(Value::bytes(Vec::new())))));
                     }
                 }
 
                 match std::fs::read(&path) {
-                    Ok(content) => Ok(Some(Signal::Value(make_lax_success(Value::Bytes(content))))),
-                    Err(_) => Ok(Some(Signal::Value(make_lax_failure(Value::Bytes(
-                        Vec::new(),
-                    ))))),
+                    Ok(content) => Ok(Some(Signal::Value(make_lax_success(Value::bytes(content))))),
+                    Err(_) => Ok(Some(Signal::Value(make_lax_failure(Value::bytes(Vec::new()))))),
                 }
             }
 
@@ -1084,28 +1078,20 @@ impl Interpreter {
                 let len = self.eval_os_i64_arg(args, 2, "readBytesAt", "len")?;
 
                 if offset < 0 || len < 0 {
-                    return Ok(Some(Signal::Value(make_lax_failure(Value::Bytes(
-                        Vec::new(),
-                    )))));
+                    return Ok(Some(Signal::Value(make_lax_failure(Value::bytes(Vec::new())))));
                 }
                 if (len as u64) > MAX_READ_SIZE {
-                    return Ok(Some(Signal::Value(make_lax_failure(Value::Bytes(
-                        Vec::new(),
-                    )))));
+                    return Ok(Some(Signal::Value(make_lax_failure(Value::bytes(Vec::new())))));
                 }
                 if len == 0 {
-                    return Ok(Some(Signal::Value(make_lax_success(Value::Bytes(
-                        Vec::new(),
-                    )))));
+                    return Ok(Some(Signal::Value(make_lax_success(Value::bytes(Vec::new())))));
                 }
 
                 use std::io::{Read, Seek, SeekFrom};
                 match std::fs::File::open(&path) {
                     Ok(mut f) => {
                         if f.seek(SeekFrom::Start(offset as u64)).is_err() {
-                            return Ok(Some(Signal::Value(make_lax_failure(Value::Bytes(
-                                Vec::new(),
-                            )))));
+                            return Ok(Some(Signal::Value(make_lax_failure(Value::bytes(Vec::new())))));
                         }
                         let mut buf = vec![0u8; len as usize];
                         // read_exact would fail at EOF even for legitimate
@@ -1119,17 +1105,15 @@ impl Interpreter {
                                 Ok(n) => filled += n,
                                 Err(_) => {
                                     return Ok(Some(Signal::Value(make_lax_failure(
-                                        Value::Bytes(Vec::new()),
+                                        Value::bytes(Vec::new()),
                                     ))));
                                 }
                             }
                         }
                         buf.truncate(filled);
-                        Ok(Some(Signal::Value(make_lax_success(Value::Bytes(buf)))))
+                        Ok(Some(Signal::Value(make_lax_success(Value::bytes(buf)))))
                     }
-                    Err(_) => Ok(Some(Signal::Value(make_lax_failure(Value::Bytes(
-                        Vec::new(),
-                    ))))),
+                    Err(_) => Ok(Some(Signal::Value(make_lax_failure(Value::bytes(Vec::new()))))),
                 }
             }
 
@@ -2002,7 +1986,7 @@ impl Interpreter {
                     use tokio::io::AsyncReadExt;
 
                     let Some(stream_handle) = socket_handle else {
-                        let _ = tx.send(Ok(make_lax_failure(Value::Bytes(Vec::new()))));
+                        let _ = tx.send(Ok(make_lax_failure(Value::bytes(Vec::new()))));
                         return;
                     };
 
@@ -2016,13 +2000,13 @@ impl Interpreter {
                     .await
                     {
                         Ok(Ok(0)) => {
-                            let _ = tx.send(Ok(make_lax_failure(Value::Bytes(Vec::new()))));
+                            let _ = tx.send(Ok(make_lax_failure(Value::bytes(Vec::new()))));
                         }
                         Ok(Ok(n)) => {
-                            let _ = tx.send(Ok(make_lax_success(Value::Bytes(buf[..n].to_vec()))));
+                            let _ = tx.send(Ok(make_lax_success(Value::bytes(buf[..n].to_vec()))));
                         }
                         Ok(Err(_)) | Err(_) => {
-                            let _ = tx.send(Ok(make_lax_failure(Value::Bytes(Vec::new()))));
+                            let _ = tx.send(Ok(make_lax_failure(Value::bytes(Vec::new()))));
                         }
                     }
                 });
@@ -2073,7 +2057,7 @@ impl Interpreter {
                     use tokio::io::AsyncReadExt;
 
                     let Some(stream_handle) = socket_handle else {
-                        let _ = tx.send(Ok(make_lax_failure(Value::Bytes(Vec::new()))));
+                        let _ = tx.send(Ok(make_lax_failure(Value::bytes(Vec::new()))));
                         return;
                     };
 
@@ -2087,10 +2071,10 @@ impl Interpreter {
                     .await
                     {
                         Ok(Ok(_)) => {
-                            let _ = tx.send(Ok(make_lax_success(Value::Bytes(buf))));
+                            let _ = tx.send(Ok(make_lax_success(Value::bytes(buf))));
                         }
                         Ok(Err(_)) | Err(_) => {
-                            let _ = tx.send(Ok(make_lax_failure(Value::Bytes(Vec::new()))));
+                            let _ = tx.send(Ok(make_lax_failure(Value::bytes(Vec::new()))));
                         }
                     }
                 });
@@ -2282,7 +2266,7 @@ impl Interpreter {
                             let payload = Value::BuchiPack(vec![
                                 ("host".into(), Value::Str(peer.ip().to_string())),
                                 ("port".into(), Value::Int(peer.port() as i64)),
-                                ("data".into(), Value::Bytes(buf[..n].to_vec())),
+                                ("data".into(), Value::bytes(buf[..n].to_vec())),
                                 ("truncated".into(), Value::Bool(false)),
                             ]);
                             let _ = tx.send(Ok(make_lax_success(payload)));
@@ -2764,7 +2748,7 @@ impl Interpreter {
             message: format!("{}: missing argument '{}'", func_name, arg_name),
         })?;
         match self.eval_expr(arg)? {
-            Signal::Value(Value::Bytes(bytes)) => Ok(bytes),
+            Signal::Value(Value::Bytes(bytes)) => Ok(Value::bytes_take(bytes)),
             Signal::Value(Value::Str(s)) => Ok(s.into_bytes()),
             Signal::Value(v) => Err(RuntimeError {
                 message: format!("{}: {} must be Bytes, got {}", func_name, arg_name, v),

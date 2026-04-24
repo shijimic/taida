@@ -46,12 +46,12 @@
 //!    *internal* helpers the host uses to construct borrowed input
 //!    vectors. They are symmetric and must always be used in pairs.
 
-use core::ffi::{CStr, c_char, c_void};
+use core::ffi::{c_char, c_void, CStr};
 
 use taida_addon::{
-    TAIDA_ADDON_ABI_VERSION, TaidaAddonBoolPayload, TaidaAddonBytesPayload, TaidaAddonErrorV1,
-    TaidaAddonFloatPayload, TaidaAddonIntPayload, TaidaAddonListPayload, TaidaAddonPackEntryV1,
-    TaidaAddonPackPayload, TaidaAddonValueTag, TaidaAddonValueV1, TaidaHostV1,
+    TaidaAddonBoolPayload, TaidaAddonBytesPayload, TaidaAddonErrorV1, TaidaAddonFloatPayload,
+    TaidaAddonIntPayload, TaidaAddonListPayload, TaidaAddonPackEntryV1, TaidaAddonPackPayload,
+    TaidaAddonValueTag, TaidaAddonValueV1, TaidaHostV1, TAIDA_ADDON_ABI_VERSION,
 };
 
 use crate::interpreter::value::Value;
@@ -731,7 +731,7 @@ unsafe fn read_value_by_ref(v: &TaidaAddonValueV1) -> Result<Value, BridgeError>
                 // SAFETY: host-built slice.
                 unsafe { core::slice::from_raw_parts(p.ptr, p.len) }.to_vec()
             };
-            Ok(Value::Bytes(bytes))
+            Ok(Value::bytes(bytes))
         }
         Some(TaidaAddonValueTag::List) => {
             if v.payload.is_null() {
@@ -868,8 +868,8 @@ mod tests {
     #[test]
     fn roundtrip_bytes() {
         let data = vec![0x00, 0xff, 0x7f, 0x80];
-        match roundtrip(Value::Bytes(data.clone())) {
-            Value::Bytes(b) => assert_eq!(b, data),
+        match roundtrip(Value::bytes(data.clone())) {
+            Value::Bytes(b) => assert_eq!(&**b, &data),
             other => panic!("expected Bytes, got {other:?}"),
         }
     }
