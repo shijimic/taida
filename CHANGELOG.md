@@ -19,20 +19,32 @@ All items below are **Must Fix** or **Critical** under the 2026-04-24
 Phase 0 Design Lock (`DEFERRED` / `Should Fix` / `CONDITIONAL` /
 `tentative` are retired). Live worklist: `.dev/C26_BLOCKERS.md`.
 
+**Status legend**: `[FIXED]` = landed on `feat/c26`; otherwise = open
+and owned by a later phase / worktree. A canonical snapshot lives at
+`docs/STABILITY.md §5.6` and is re-synced on each RC tag.
+
 #### Cluster 1 — NET stable viewpoint (Phase 1–6)
 
 - **C26B-001** — HTTP/2 parity across 3-backend (interpreter / JS /
   native). `@c.25.rc7` shipped with partial pin only.
 - **C26B-002** — TLS construction (cert chains, ALPN, verification
   modes) locked across 3-backend.
-- **C26B-003** — **Critical**. Port-bind race eradication (inherited
-  from C25B-002). Candidate solutions 1 → 2 → 3 tried in order with
-  the D27-escalation checklist applied per candidate.
+- **C26B-003** `[FIXED]` — **Critical**. Port-bind race eradication
+  (inherited from C25B-002). Root cause fixed; 100 consecutive local
+  CI-equivalent runs pass with no retry-shim firing. Candidate
+  solution 1 (`0.0.0.0:0` bind + `getsockname()`) sufficed; the
+  D27-escalation checklist evaluated all-NO on the landed patch.
 - **C26B-004** — Throughput regression gate promoted from
   `continue-on-error` to hard-fail on 10% regression against a
   30-sample baseline.
 - **C26B-005** — Scatter-gather 24-hour soak verification via a
-  manual runbook (`.dev/C26_SOAK_RUNBOOK.md`, new).
+  manual runbook. `.dev/C26_SOAK_RUNBOOK.md` is **landed**
+  (2026-04-24, Round 2 / wA) with environment setup, tmux /
+  `systemd-run` session layout, per-30s RSS / fd / thread monitor,
+  valgrind (pre-soak 1 h) + heaptrack (3 × 1 h windows) leak
+  gates, throughput drift boundary, backend-specific tolerances,
+  and a REPORT.md template. The 24 h run itself is the stable-gate
+  blocker and is still pending.
 - **C26B-006** — HTTP parity retry shim retired once C26B-003 roots
   out the underlying port-bind race.
 
@@ -48,16 +60,51 @@ addition under §6.2).
   sub-phase 7.4 **SEC-011**: Sigstore (cosign keyless) signing +
   SLSA provenance attestation wired into the `taida publish`
   workflow. Verify-on-install step added to `taida install`.
+  - Sub-phase 7.1 `[FIXED]` — SEC-002 / 003 / 005 / 007 / 008 /
+    009 / 010 localised fixes (see
+    `.dev/taida-logs/docs/archive/SECURITY_AUDIT.md` once owner
+    action lands). `.o` artefacts now land in `std::env::temp_dir()`
+    so the source tree stays clean even when cleanup is skipped on
+    panic (SEC-010).
+  - Sub-phase 7.2 `[FIXED]` — `.github/workflows/security.yml` had
+    `continue-on-error: true` stripped from the `cargo-audit` /
+    `cargo-deny` jobs; hard-fail is now the default gate. The
+    rationale for leaving `yanked` / `unmaintained` as warnings
+    (the fastrand 2.4.0 transitive yank requires a dependency
+    change that is scoped to a separate task) is pinned in
+    `deny.toml`.
+  - Sub-phase 7.3 `[FIXED]` — a `c-static-analysis` job was added
+    to `.github/workflows/security.yml` that assembles the
+    native-runtime C translation unit in `NATIVE_RUNTIME_C` order
+    (`core → os → tls → net_h1_h2 → net_h3_quic`) and runs
+    `gcc -Wall -Wextra -Wformat-security` + `cppcheck
+    --enable=warning,style,performance,portability
+    --error-exitcode=1`. The gcc warning baseline is pinned at
+    `78`; any increase hard-fails. The allow / fix-queue policy
+    lives at `.dev/C26_C_STATIC_ANALYSIS.md`.
+  - Sub-phase 7.4 (SEC-011) — still **OPEN**, owned by worktree
+    `taida-wB`.
 - **C26B-008** — C25B-014 advisory publication + CVE request
   (owner action).
 
 #### Cluster 3 — Parser quality (Phase 9)
 
-- **C26B-009** — State-machine transition-graph formalisation for
-  `parse_error_ceiling` / `parse_cond_branch` recovery paths.
-  `| _ |> <throw>` arm-body throw propagation bug fixed.
-- **C26B-019** — Multi-line `TypeDef` constructor parse; `taida
-  check` vs `taida build` parser divergence eliminated.
+- **C26B-009** `[FIXED]` — State-machine transition-graph
+  formalisation for `parse_error_ceiling` / `parse_cond_branch`
+  recovery paths landed at `.dev/C26_PARSER_FSM.md` (8 sections,
+  stable node IDs `CondBranch:*` / `EC:*` / `SYNC:*`, E0301 /
+  E0303 / C13B-010 / C12-4 cross-referenced). The `| _ |> <throw>`
+  arm-body throw propagation bug was already fixed at C25
+  commit `4696429`; regression pinned by
+  `tests/c25b_032_arm_body_throw_propagation.rs`.
+- **C26B-019** `[FIXED]` — Multi-line `TypeDef(field <= v, ...)`
+  constructor parse works end-to-end; `parse_arg_list` now calls
+  `skip_newlines()` at entry / after slot / after comma, and
+  `parse_primary_expr` calls it before the `TypeInst` lookahead.
+  The `taida check` vs `taida build` parser divergence turned out
+  to be shared-parser lookahead insufficiency (not a second parser
+  implementation) and is eliminated by the same fix. Widening per
+  §6.2. Docs example addendum is owned by C26B-013.
 
 #### Cluster 4 — Runtime perf / memory (Phase 10)
 
@@ -76,36 +123,50 @@ abstraction is pinned.
   — not deferred, not revisited at D27).
 - **C26B-020** — **Downstream-blocking hard blocker.** Three
   pillars, all required for DONE:
-  1. `readBytesAt(path, offset, len) -> Bytes` API; `readBytes`
-     gets a runtime-configurable 64 MB ceiling.
+  1. `[FIXED]` `readBytesAt(path, offset, len) -> Bytes` API;
+     `readBytes` gets a runtime-configurable 64 MB ceiling. Landed
+     across 3-backend; scale test pins 1 GB file × 64 × 16 MB
+     chunked read in under 2 s.
   2. `BytesCursorTake` zero-copy via `Arc<[u8]>` + offset/len view.
   3. `BytesCursor` + related molds (`readBytesAt`,
      `BytesCursorTake`, `BytesCursorAdvance`,
      `BytesCursorRemaining`) lowered for `wasm-wasi` / `wasm-edge`
      / `wasm-full`. This is the **only** wasm-scope addition in
      gen-C NET work.
+
+  Pillars 2 and 3 are still **OPEN** and gated on the Cluster 4
+  common-abstraction decision. Part-land cannot flip C26B-020 to
+  DONE.
 - **C26B-024** — Native list / `BuchiPack` clone-heavy paths fixed;
   `bench_router.td` hard-gates `Native ≤ JS × 2` with `sys/real
   ≤ 30%`.
 
 #### Cluster 5 — Float parity (Phase 11)
 
-- **C26B-011** — NaN / ±Infinity / denormal parity across 3-backend;
-  `Div[1.0, 0.0]()` Lax-default rendering divergence resolved;
-  `Mul[1.5, 2.0]()` native-build exit-code-1 fixed.
+- **C26B-011** `[FIXED]` — NaN / ±Infinity / denormal parity across
+  3-backend (`Div` / `Mod` / math molds), `Div[1.0, 0.0]()` Lax
+  default rendering divergence resolved, and `Mul[1.5, 2.0]()`
+  native-build exit-code-1 isolated and fixed.
 
 #### Cluster 6 — Surface fixes (Phase 12) & docs (Phase 13)
 
 - **C26B-013** — Stability / CHANGELOG / `net_api.md` (new) /
   Stream-lowering doc updates / 2nd-party inbox rule
   (`.dev/C26_PROGRESS.md` § NEW-E).
-- **C26B-014** — Core-bundled packages (`taida-lang/os`, `net`,
-  `crypto`, `pool`, `js`) resolvable without an explicit
+- **C26B-014** `[FIXED]` — Core-bundled packages (`taida-lang/os`,
+  `net`, `crypto`, `pool`, `js`) resolvable without an explicit
   `packages.tdm` entry. **Option B pinned** (implementation brought
-  in line with docs — widening, not breaking).
-- **C26B-015** — Native-backend path-traversal check no longer
-  rejects project-root-internal `..` imports; parity across
-  3-backend (root-escape is still rejected).
+  in line with docs — widening, not breaking). The interpreter
+  resolver now calls `CoreBundledProvider::materialize_core_bundled`
+  on `resolve_package_module` failure; the native backend's existing
+  `is_core_bundled_path` branch (C25B-030) covers the codegen side
+  with no changes. Regression guard:
+  `tests/c26b_014_core_bundled_importless.rs` (interpreter × 4 +
+  native × 2).
+- **C26B-015** `[FIXED]` — Native-backend path-traversal check no
+  longer rejects project-root-internal `..` imports; parity across
+  3-backend (root-escape is still rejected via the canonicalized
+  component walk).
 - **C26B-016** — `httpServe` handler `req` pack shape pinned in
   `docs/reference/net_api.md` (new). **Option B+ pinned**: the
   zero-copy span pack (`make_span`,
@@ -118,9 +179,10 @@ abstraction is pinned.
   from an outer function no longer collapses to `@()`; closure
   capture works across return boundaries (3-backend parity:
   `makeAdder(10)(7) == 17`).
-- **C26B-021** — `stdout` / `stderr` now line-buffered at the C
-  entry point via `setvbuf(_IOLBF, 0)`. **Option B pinned**
-  (per-call `fflush` is not adopted).
+- **C26B-021** `[FIXED]` — `stdout` / `stderr` now line-buffered at
+  the C entry point via `setvbuf(_IOLBF, 0)`. **Option B pinned**
+  (per-call `fflush` is not adopted, because the per-call overhead
+  is higher than the one-shot entry-point setup).
 - **C26B-022** — HTTP wire parser enforces method 16 / path 2048 /
   authority 256 byte ceilings; over-limit requests emit `400 Bad
   Request`. **Step 3 Option B pinned**. `-Wformat-truncation` is
@@ -128,9 +190,17 @@ abstraction is pinned.
 - **C26B-023** — 2-arg `httpServe` handler: `req.body` empty-span
   edge case emits a runtime warning; `readBody(req)` /
   `readBodyChunk` / `readBodyAll` usage pinned in `net_api.md`.
-- **C26B-025** — `taida publish` validates `packages.tdm`
-  self-identity (`<<<@version` vs tag) before push; `--retag`
-  respects the same check; `--bump-manifest` auto-rewrites.
+- **C26B-025** `[FIXED]` — `taida publish` validates `packages.tdm`
+  self-identity (`<<<@version` vs `next_version`) at `plan_publish()`
+  and rejects a stale manifest before any tag is pushed. `--retag`,
+  `--force-version`, and `--label` all pass through the same check;
+  label addenda (manifest `a.7` + `--label rc3` → tag `a.7.rc3`) are
+  accepted as a legitimate match. The optional `--bump-manifest`
+  auto-rewrite is deferred to D27 (listed under
+  `.dev/D27_BLOCKERS.md`); the C26 cut rejects the stale case.
+  Regression guards:
+  `tests/c26b_025_publish_rejects_stale_manifest_self_identity.rs` +
+  `tests/c26b_025_publish_accepts_label_addendum.rs`.
 
 #### Cluster 7 — Stable GATE (Phase 14)
 
@@ -146,13 +216,27 @@ abstraction is pinned.
   - `SECURITY_AUDIT.md` open = 0; SEC-011 recorded complete.
   - Sigstore + SLSA-signed official addon release.
 
+### Round 1 + wA Round 2 — commits already on `feat/c26`
+
+Merge order: P3 (C26B-003) → P10 pillar 1 (C26B-020) → P11
+(C26B-011) → P12 (C26B-014 / 015 / 021 / 025), then Phase 7
+sub-phases 7.1–7.3 (C26B-007) and Phase 9 (C26B-009 / 019) in
+parallel sessions. The wA Round 2 worktree adds the
+`.dev/C26_SOAK_RUNBOOK.md` runbook (C26B-005 scaffolding) and
+syncs `docs/STABILITY.md` / this `CHANGELOG.md` to the landed
+FIXED set.
+
 ### Docs / infrastructure landed alongside
 
 - `docs/STABILITY.md` — `Target: @c.26`, §1 `@c.25`-skip pin,
   §1.2 D26→D27 rename (prose-only; the pinned runtime error string
   keeps the legacy `D26` token for gen-C), §4.2 / §4.3 / §4.4
   generational language clarified, §5.1 / §5.4 / §5.5 ownership
-  transferred to C26 blockers.
+  transferred to C26 blockers. §5.1 port-bind race marked FIXED,
+  §5.5 adds a `readBytesAt` addendum, §5.6 adds an informational
+  C26 progress snapshot (non-contractual).
+- `.dev/C26_SOAK_RUNBOOK.md` — new (C26B-005 scaffolding, wA
+  Round 2).
 - `docs/reference/net_api.md` (new) — `httpServe` `req` pack shape
   (1-arg / 2-arg table), span-aware mold reference, perf guidance
   (hot path `SpanEquals`, cold path `strOf`).

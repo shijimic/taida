@@ -317,9 +317,13 @@ below are pinned by the 2026-04-24 Phase 0 Design Lock:
 - **TLS construction** — cert chains, ALPN, and verification modes
   that the current `taida-lang/net` facade covers only partially
   (C26B-002, Must Fix, 3-backend).
-- **Port-bind race eradication** — `flaky_h2_parity` currently leans
-  on a retry shim; C26B-003 tracks the root-cause fix (Critical,
-  inherited from C25B-002).
+- **Port-bind race eradication** — **FIXED (2026-04-24, C26 Phase 3)**.
+  C26B-003 landed the root-cause fix for the H2 parity flaky-bind
+  timeout inherited from C25B-002. 100 consecutive CI-equivalent
+  runs of the former flaky fixtures pass with no retry shim firing
+  (the shim itself is retired by C26B-006). The MEMORY note
+  `project_flaky_h2_parity.md` is archived. Listed here for
+  audit continuity; the gating item for §5.1 is no longer C26B-003.
 - **Throughput regression guard hard-fail promotion** — the
   `benches/perf_baseline.rs` harness is `continue-on-error` today;
   C26B-004 promotes it to hard-fail on 10% regression against a
@@ -374,6 +378,70 @@ regression against a 30-sample baseline. Related runtime-perf
 work items (`C26B-010` / `C26B-012` / `C26B-018` / `C26B-020`
 / `C26B-024`) land alongside the gate promotion so the baseline
 is measured against the post-fix runtime.
+
+**Bytes I/O addendum (C26B-020 pillar 1 partial, 2026-04-24):**
+The `readBytesAt(path: Str, offset: Int, len: Int) -> Bytes` API
+is landed across 3-backend (interpreter / JS / native) and the
+previous 64 MB ceiling of `readBytes` is runtime-configurable.
+The full `@c.26` stable gate still requires pillars 2 (zero-copy
+`BytesCursorTake`) and 3 (`wasm-wasi` / `wasm-edge` / `wasm-full`
+lowering) to land; until then the bytes I/O surface is
+**partially** contractual (only the 3-backend `readBytesAt`
+signature is pinned).
+
+### 5.6. C26 fix-track progress snapshot (informational)
+
+This subsection is **informational** and updated as C26 blockers
+land. It is not part of the stable surface contract and may be
+removed once `@c.26` is tagged. Canonical worklist is
+`.dev/C26_BLOCKERS.md`.
+
+FIXED on `feat/c26` (Round 1 + early Round 2):
+
+- **C26B-003** (Critical) — port-bind race root cause.
+- **C26B-007** sub-phase 7.1 / 7.2 / 7.3 — SEC-002〜010 localised
+  fixes, `cargo-audit` / `cargo-deny` promoted to hard-fail,
+  C static analysis (`cppcheck` + `gcc -Wall -Wextra
+  -Wformat-security`) wired into `.github/workflows/security.yml`
+  with a pinned warning baseline. Sub-phase 7.4 (SEC-011
+  Sigstore + SLSA) is still OPEN and owned by C26 Cluster 2.
+- **C26B-009** — parser state-machine transition graph
+  (`.dev/C26_PARSER_FSM.md`) + arm-body throw propagation.
+- **C26B-011** — Float parity (NaN / ±Inf / denormal) + Div /
+  Mul divergence resolved across 3-backend.
+- **C26B-014** — core-bundled packages (`taida-lang/os`, `net`,
+  `crypto`, `pool`, `js`) resolvable without an explicit
+  `packages.tdm` entry (Option B pinned, widening).
+- **C26B-015** — native-backend path traversal no longer rejects
+  project-root-internal `..` imports; root-escape still rejected.
+- **C26B-019** — multi-line `TypeDef(field <= v, ...)`
+  constructor parse + `taida check` vs `taida build` parser
+  divergence eliminated (widening, §6.2).
+- **C26B-020** pillar 1 — `readBytesAt(path, offset, len)`
+  3-backend API (see §5.5 addendum).
+- **C26B-021** — native `stdout` / `stderr` line-buffered at the
+  C entry point via `setvbuf(_IOLBF, 0)` (Option B pinned).
+- **C26B-025** — `taida publish` rejects stale `packages.tdm`
+  self-identity before tag push.
+
+OPEN (owned by C26, not yet landed):
+
+- **C26B-001** / **C26B-002** / **C26B-004** / **C26B-005** /
+  **C26B-006** — remaining NET stable viewpoint items (HTTP/2
+  residuals, TLS config, throughput hard-fail promotion, 24h
+  soak, retry shim retirement).
+- **C26B-007** sub-phase 7.4 — SEC-011 Sigstore cosign + SLSA
+  provenance wired into `taida publish` workflow.
+- **C26B-008** — C25B-014 advisory publication + CVE request
+  (owner action).
+- **C26B-010** / **C26B-012** / **C26B-018** / **C26B-020**
+  pillars 2 & 3 / **C26B-024** — Cluster 4 runtime perf items,
+  gated on the common abstraction decision.
+- **C26B-013** — ongoing docs amendment (this §5.6 snapshot is
+  part of the C26B-013 track).
+- **C26B-016** / **C26B-017** / **C26B-022** / **C26B-023** /
+  **C26B-026** — remaining Cluster 6 surface / Cluster 1 NET
+  items.
 
 ---
 
