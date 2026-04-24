@@ -152,8 +152,18 @@ jobs:
         # are high-confidence bugs).
         run: |
           set -euo pipefail
+          # `redundantCondition` is suppressed because the native runtime
+          # intentionally guards pointer arguments with the idiom
+          # `if (p == 0 || p < 4096) return ...;` — the first clause
+          # documents the null case and the second catches deref into
+          # the reserved low page when a caller supplies a bogus but
+          # non-zero id. cppcheck flags the first clause as redundant
+          # from a pure boolean-algebra standpoint, but the intent is
+          # a deliberate defence-in-depth pattern. The same applies to
+          # the `value == K || value < THRESHOLD` tag-compare idiom.
           cppcheck --enable=warning,style,performance,portability \
                    --suppress=missingIncludeSystem \
+                   --suppress=redundantCondition \
                    --error-exitcode=1 \
                    --quiet \
                    /tmp/c-analysis/native_runtime_assembled.c \
