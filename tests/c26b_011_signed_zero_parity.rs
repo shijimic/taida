@@ -1,32 +1,41 @@
-//! C26B-011 (wS Round 6, 2026-04-24) — IEEE-754 signed-zero formatting
-//! parity stretch.
+//! C26B-011 (wS Round 6 + wV-a Round 7, 2026-04-24) — IEEE-754
+//! signed-zero formatting parity.
 //!
 //! # Scope
 //!
-//! Pins interpreter (reference) ↔ Native parity for `-0.0` rendering.
-//! Before the wS fix `taida_float_to_str` tested `a == 0.0` which is
-//! true for both `+0.0` and `-0.0`, so Native silently dropped the
-//! minus sign. The wS patch dispatches on `signbit(a)` so the output
-//! matches Rust f64::Display → interpreter `format!("{:.1}", n)` for
-//! both zeros.
+//! Pins 3-backend parity (interpreter reference ↔ JS ↔ Native) for
+//! `-0.0` rendering via `debug`. Before wS, `taida_float_to_str`
+//! tested `a == 0.0` which is true for both `+0.0` and `-0.0`, so
+//! Native silently dropped the minus sign; wS dispatched on
+//! `signbit(a)` so Native matches Rust f64::Display.
 //!
-//! # JS follow-up (explicitly out of wS scope)
+//! # wV-a Round 7 JS completion
 //!
 //! The JS runtime's `__taida_float_render` was patched in wS to use
-//! `Object.is(v, -0)` as the negative-zero probe (runtime change only,
-//! safe / idempotent). However the JS codegen's Float-literal emission
-//! currently produces integer-valued literals (e.g. `-1.0` → `-1`), so
-//! `-1.0 * 0.0` lowers to `-1 * 0` and `__taida_mul` uses the Int fast
-//! path, returning `+0`. That codegen-level gap is a distinct,
-//! pre-existing issue and is out of scope for wS (a 2-hour auto-mode
-//! stretch session). JS parity for signed-zero will be completed in a
-//! follow-up round once the Float-literal emission path is revisited.
+//! `Object.is(v, -0)` as the negative-zero probe (runtime change
+//! only, safe / idempotent). This wV-a follow-up lands two JS-side
+//! completions so the JS backend joins the parity:
+//!
+//!  1. `__taida_float_render` now renders `-0` integer-valued floats
+//!     as `"-0.0"` (the previous `(-0).toFixed(1) === "0.0"` drift
+//!     is fixed).
+//!  2. `__taida_mul` preserves the negative-zero sign bit when either
+//!     operand is `-0` or the Number-path product is `-0`, rather
+//!     than routing through the BigInt fast-path (BigInt has no
+//!     `-0` concept, so `BigInt(-1) * BigInt(0) = 0n` collapses the
+//!     sign).
+//!
+//! Together these ensure `-1.0 * 0.0` renders as `"-0.0"` across all
+//! three backends.
 //!
 //! # D27 escalation checklist (3 points, all NO)
 //!
-//! 1. No public mold signature changed.
+//! 1. No public mold signature changed. Runtime helpers are internal
+//!    (`__taida_*` namespace, non-contractual).
 //! 2. No STABILITY-pinned error string altered.
-//! 3. Append-only: new test file, no existing assertion modified.
+//! 3. Append-only: the existing `signed_zero_interpreter_reference`
+//!    and `signed_zero_native_parity` assertions are preserved;
+//!    `signed_zero_js_parity` is added alongside.
 
 mod common;
 
@@ -66,16 +75,57 @@ fn cc_available() -> bool {
         .unwrap_or(false)
 }
 
+fn node_available() -> bool {
+    Command::new("node")
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+fn run_js(td_path: &Path) -> Option<String> {
+    if !node_available() {
+        return None;
+    }
+    let stem = td_path.file_stem()?.to_string_lossy().to_string();
+    let js_path =
+        std::env::temp_dir().join(format!("c26b011_sz_{}_{}.mjs", std::process::id(), stem));
+    let build = Command::new(taida_bin())
+        .args(["build", "--target", "js"])
+        .arg(td_path)
+        .arg("-o")
+        .arg(&js_path)
+        .output()
+        .ok()?;
+    if !build.status.success() {
+        eprintln!(
+            "js build failed for {}: {}",
+            td_path.display(),
+            String::from_utf8_lossy(&build.stderr)
+        );
+        let _ = std::fs::remove_file(&js_path);
+        return None;
+    }
+    let run = Command::new("node").arg(&js_path).output().ok()?;
+    let _ = std::fs::remove_file(&js_path);
+    if !run.status.success() {
+        eprintln!(
+            "js run failed for {}: {}",
+            td_path.display(),
+            String::from_utf8_lossy(&run.stderr)
+        );
+        return None;
+    }
+    Some(normalize(&String::from_utf8_lossy(&run.stdout)))
+}
+
 fn run_native(td_path: &Path) -> Option<String> {
     if !cc_available() {
         return None;
     }
     let stem = td_path.file_stem()?.to_string_lossy().to_string();
-    let bin_path = std::env::temp_dir().join(format!(
-        "c26b011_sz_{}_{}.bin",
-        std::process::id(),
-        stem
-    ));
+    let bin_path =
+        std::env::temp_dir().join(format!("c26b011_sz_{}_{}.bin", std::process::id(), stem));
     let build = Command::new(taida_bin())
         .args(["build", "--target", "native"])
         .arg(td_path)
@@ -128,5 +178,20 @@ fn signed_zero_native_parity() {
     assert_eq!(
         native, expected,
         "Native must match interpreter for -0.0 rendering (signbit path in taida_float_to_str)"
+    );
+}
+
+#[test]
+fn signed_zero_js_parity() {
+    if !node_available() {
+        eprintln!("node unavailable; skipping signed-zero JS parity test");
+        return;
+    }
+    let path = fixture();
+    let js = run_js(&path).expect("js run");
+    let expected = read_expected();
+    assert_eq!(
+        js, expected,
+        "JS must match interpreter for -0.0 rendering (Object.is(v, -0) path in __taida_float_render + signed-zero preservation in __taida_mul)"
     );
 }

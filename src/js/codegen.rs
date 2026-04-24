@@ -2721,7 +2721,33 @@ impl JsCodegen {
                 Ok(())
             }
             Expr::FloatLit(val, _) => {
-                self.write(&val.to_string());
+                // C26B-011 / Round 7 wV-a: preserve IEEE-754 signed zero
+                // in JS Float literal codegen. Rust `f64::to_string()`
+                // renders -0.0 as "-0" (no decimal point, indistinguishable
+                // from integer -0), and also renders +0.0 as "0". When
+                // the literal is a Float-origin value (e.g. an `x: Float`
+                // binding or a `-0.0` source literal) we must emit JS that
+                // will compare equal to the interpreter / native Float
+                // value under `Object.is(...)`.
+                //
+                // Note: the arithmetic path (`-1.0 * 0.0`) is already
+                // parity-safe as of wS Round 6 (runtime `__taida_float_render`
+                // handles -0.0 via `Object.is`). This fix covers the
+                // pre-existing literal codegen divergence noted in
+                // `examples/quality/c26_float_edge/signed_zero_parity.td`.
+                if val.is_sign_negative() && *val == 0.0 {
+                    self.write("-0");
+                } else if val.is_nan() {
+                    self.write("(0/0)");
+                } else if val.is_infinite() {
+                    if val.is_sign_negative() {
+                        self.write("(-1/0)");
+                    } else {
+                        self.write("(1/0)");
+                    }
+                } else {
+                    self.write(&val.to_string());
+                }
                 Ok(())
             }
             Expr::StringLit(val, _) => {

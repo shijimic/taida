@@ -62,6 +62,12 @@ function __taida_float_render(v) {
     if (v === Infinity) return 'inf';
     if (v === -Infinity) return '-inf';
     if (Number.isFinite(v) && Number.isInteger(v)) {
+      // C26B-011 / Round 7 wV-a: IEEE-754 signed zero. `Number.isInteger(-0)`
+      // is true, and `(-0).toFixed(1)` returns "0.0" (sign drops),
+      // diverging from the interpreter's `format!("{:.1}", -0.0)` which
+      // yields "-0.0". Detect the sign bit explicitly via `Object.is`
+      // before falling through to `.toFixed(1)`.
+      if (Object.is(v, -0)) return '-0.0';
       // Match Rust's `format!("{:.1}", n)` used by the interpreter.
       return v.toFixed(1);
     }
@@ -237,7 +243,19 @@ function __taida_sub(a, b) {
 }
 
 function __taida_mul(a, b) {
+  // C26B-011 / Round 7 wV-a: IEEE-754 signed-zero preservation for
+  // Float arithmetic. When either operand already carries the
+  // negative-zero sign bit, or when the Number-path product is -0
+  // (e.g. `-1 * 0 === -0`), routing through the BigInt fast-path
+  // would collapse the sign (BigInt has no -0). Stay on the Number
+  // multiplication path in those cases so `__taida_float_render`
+  // can observe the sign bit via `Object.is(v, -0)` and render
+  // "-0.0", matching the interpreter's `format!("{:.1}", -0.0)`.
   if (__taida_isIntNumber(a) && __taida_isIntNumber(b)) {
+    const prod = a * b;
+    if (Object.is(prod, -0) || Object.is(a, -0) || Object.is(b, -0)) {
+      return prod;
+    }
     return __taida_fromI64BigInt(__taida_toI64BigInt(a) * __taida_toI64BigInt(b));
   }
   return a * b;
