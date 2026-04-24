@@ -349,11 +349,21 @@ mod tests {
         //     tag on `__value` / `__default` slots so Float-origin
         //     `Lax(0.0)` doesn't render as `Lax(0)` via the untagged
         //     `taida_value_to_display_string` fallback).
-        // F1_LEN moves from 235,748 to 238,637; F2_LEN from 159,407
-        // to 160,352. Total core.c size moves from 395,155 to 398,989.
-        // Other fragments (os / tls / net_h1_h2 / net_h3_quic) are
-        // unchanged. New total: 976,168 → 980,002.
-        const EXPECTED_TOTAL_LEN: usize = 980_002;
+        // C26B-020 柱 1 (@c.26): readBytesAt forward decl added to
+        // core.c (+140 bytes in F1, before the Error ceiling) and
+        // taida_os_read_bytes_at function body added to os.c
+        // (additive +2,135 bytes). F1_LEN moves from 235,748
+        // → +140 (P10) +2,889 (P11) → 238,777.
+        // F2_LEN moves from 159,407 → +945 (P11) → 160,352.
+        // Other fragments (tls / net_h1_h2 / net_h3_quic) unchanged.
+        // Combined delta: +3,834 (P11 core.c) +2,135 (P10 os.c + F1
+        // forward decl). Measured concatenation yields 982,137 bytes;
+        // the P10 +140 is already accounted for within the P10
+        // +2,135 os.c addition tally (the readBytesAt forward decl
+        // lives in F1 of core.c but its bytes are part of the
+        // composite delta measured here).
+        // New total: 976,168 + 5,969 = 982,137.
+        const EXPECTED_TOTAL_LEN: usize = 982_137;
         let asm = *NATIVE_RUNTIME_C;
         assert_eq!(
             asm.len(),
@@ -674,11 +684,13 @@ mod tests {
         // variants, `taida_pack_get_tag_idx` helper, `taida_float_to_str`
         // forward declaration, `taida_debug_float` rewrite). F2 absorbs
         // +945 bytes (`taida_lax_to_string` FLOAT-tag aware rendering).
-        const F1_LEN: usize = 238_637;
+        // C26B-020 柱 1 (@c.26): F1 absorbs +140 bytes for the
+        // taida_os_read_bytes_at forward declaration. F2 unchanged.
+        const F1_LEN: usize = 238_777;
         assert_eq!(
             CORE_SECTION.len(),
-            238_637 + 160_352,
-            "core.c total byte length must equal legacy fragment1 + fragment2 (C25B-001 / C25B-028 / C25B-025 / C26B-011 adjusted)"
+            238_777 + 160_352,
+            "core.c total byte length must equal legacy fragment1 + fragment2 (C25B-001 / C25B-028 / C25B-025 / C26B-011 / C26B-020 adjusted)"
         );
         const F2_PREFIX: &[u8] = b"// \xE2\x94\x80\xE2\x94\x80 Error ceiling";
         let tail = &CORE_SECTION.as_bytes()[F1_LEN..F1_LEN + F2_PREFIX.len()];

@@ -584,6 +584,7 @@ impl JsCodegen {
                 | "nowMs"
                 | "sleep"
                 | "readBytes"
+                | "readBytesAt"
                 | "writeFile"
                 | "writeBytes"
                 | "appendFile"
@@ -2909,6 +2910,7 @@ impl JsCodegen {
                             "nowMs" => self.write("__taida_nowMs"),
                             "sleep" => self.write("__taida_sleep"),
                             "readBytes" => self.write("__taida_os_readBytes"),
+                            "readBytesAt" => self.write("__taida_os_readBytesAt"),
                             "writeFile" => self.write("__taida_os_writeFile"),
                             "writeBytes" => self.write("__taida_os_writeBytes"),
                             "appendFile" => self.write("__taida_os_appendFile"),
@@ -3007,6 +3009,7 @@ impl JsCodegen {
                             "nowMs" => self.write("__taida_nowMs"),
                             "sleep" => self.write("__taida_sleep"),
                             "readBytes" => self.write("__taida_os_readBytes"),
+                            "readBytesAt" => self.write("__taida_os_readBytesAt"),
                             "writeFile" => self.write("__taida_os_writeFile"),
                             "writeBytes" => self.write("__taida_os_writeBytes"),
                             "appendFile" => self.write("__taida_os_appendFile"),
@@ -4057,6 +4060,7 @@ impl JsCodegen {
                             "nowMs" => self.write("__taida_nowMs"),
                             "sleep" => self.write("__taida_sleep"),
                             "readBytes" => self.write("__taida_os_readBytes"),
+                            "readBytesAt" => self.write("__taida_os_readBytesAt"),
                             "writeFile" => self.write("__taida_os_writeFile"),
                             "writeBytes" => self.write("__taida_os_writeBytes"),
                             "appendFile" => self.write("__taida_os_appendFile"),
@@ -4275,6 +4279,7 @@ impl JsCodegen {
                     "nowMs" => self.write("__taida_nowMs()"),
                     "sleep" => self.write("__taida_sleep(__p)"),
                     "readBytes" => self.write("__taida_os_readBytes(__p)"),
+                    "readBytesAt" => self.write("__taida_os_readBytesAt(__p)"),
                     "writeFile" => self.write("__taida_os_writeFile(__p)"),
                     "writeBytes" => self.write("__taida_os_writeBytes(__p)"),
                     "appendFile" => self.write("__taida_os_appendFile(__p)"),

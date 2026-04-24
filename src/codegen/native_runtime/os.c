@@ -143,6 +143,59 @@ taida_val taida_os_read_bytes(taida_val path_ptr) {
     return taida_lax_new(bytes, taida_bytes_default_value());
 }
 
+// ── C26B-020 柱 1: readBytesAt(path, offset, len) → Lax[Bytes] ──
+//
+// Chunked file read. Semantics mirror the interpreter:
+//   - offset < 0 or len < 0       → Lax failure (default empty Bytes)
+//   - len == 0                    → Lax success (empty Bytes)
+//   - len > 64 MB chunk ceiling   → Lax failure
+//   - offset >= file size         → Lax success (empty Bytes, short read)
+//   - offset + len > file size    → Lax success (truncated tail)
+//   - IO error                    → Lax failure
+taida_val taida_os_read_bytes_at(taida_val path_ptr, taida_val offset, taida_val len) {
+    const char *path = (const char*)path_ptr;
+    if (!path) return taida_lax_empty(taida_bytes_default_value());
+    if (offset < 0 || len < 0) return taida_lax_empty(taida_bytes_default_value());
+    if (len > 64 * 1024 * 1024) return taida_lax_empty(taida_bytes_default_value());
+    if (len == 0) {
+        taida_val empty = taida_bytes_from_raw(NULL, 0);
+        return taida_lax_new(empty, taida_bytes_default_value());
+    }
+
+    FILE *f = fopen(path, "rb");
+    if (!f) return taida_lax_empty(taida_bytes_default_value());
+
+    if (fseeko(f, (off_t)offset, SEEK_SET) != 0) {
+        fclose(f);
+        return taida_lax_empty(taida_bytes_default_value());
+    }
+
+    unsigned char *buf = (unsigned char*)malloc((size_t)len);
+    if (!buf) {
+        fclose(f);
+        return taida_lax_empty(taida_bytes_default_value());
+    }
+
+    // Tolerate short reads at EOF: loop fread until full or EOF.
+    size_t filled = 0;
+    while (filled < (size_t)len) {
+        size_t got = fread(buf + filled, 1, (size_t)len - filled, f);
+        if (got == 0) break;
+        filled += got;
+    }
+    int io_err = ferror(f);
+    fclose(f);
+
+    if (io_err) {
+        free(buf);
+        return taida_lax_empty(taida_bytes_default_value());
+    }
+
+    taida_val bytes = taida_bytes_from_raw(buf, (taida_val)filled);
+    free(buf);
+    return taida_lax_new(bytes, taida_bytes_default_value());
+}
+
 // ── String comparator for qsort ──────────────────────────
 static int taida_cmp_strings(const void *a, const void *b) {
     return strcmp(*(const char**)a, *(const char**)b);

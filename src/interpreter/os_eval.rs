@@ -29,6 +29,7 @@ fn signal_name(sig: &Signal) -> &'static str {
 ///
 /// Binary file query function:
 ///   readBytes(path) -> Lax[Bytes]
+///   readBytesAt(path, offset, len) -> Lax[Bytes]  (C26B-020 柱 1, chunked)
 ///
 /// Dangerous side-effect functions (-> Gorillax):
 ///   run(program, args), execShell(command)
@@ -99,6 +100,11 @@ pub(crate) const OS_SYMBOLS: &[&str] = &[
     // The child inherits the parent's TTY so it can render TUIs like nvim / vim / less.
     "runInteractive",
     "execShellInteractive",
+    // ── C26B-020 柱 1: chunked / large-file bytes read ──
+    // readBytesAt(path, offset, len) -> Lax[Bytes]
+    // Addition (§ 6.2 widening) for @c.26 — enables downstream (bonsai-wasm
+    // GGUF dequant etc.) to stream files larger than MAX_READ_SIZE 64 MB.
+    "readBytesAt",
 ];
 
 // ── Helpers ─────────────────────────────────────────────────
@@ -1047,6 +1053,80 @@ impl Interpreter {
 
                 match std::fs::read(&path) {
                     Ok(content) => Ok(Some(Signal::Value(make_lax_success(Value::Bytes(content))))),
+                    Err(_) => Ok(Some(Signal::Value(make_lax_failure(Value::Bytes(
+                        Vec::new(),
+                    ))))),
+                }
+            }
+
+            // ── C26B-020 柱 1: readBytesAt(path, offset, len) → Lax[Bytes] ──
+            //
+            // Chunked file read for large files (> 64 MB MAX_READ_SIZE).
+            //
+            // Semantics:
+            //   - offset < 0 or len < 0             → Lax failure, default Bytes[]
+            //   - path not found / IO error        → Lax failure, default Bytes[]
+            //   - offset >= file_size              → Lax success with empty Bytes
+            //   - offset + len > file_size         → Lax success with truncated
+            //                                         Bytes (bytes available from
+            //                                         offset to EOF). Final chunk
+            //                                         may be shorter than `len`.
+            //   - len == 0                         → Lax success with empty Bytes
+            //   - len > 64 MB chunk ceiling        → Lax failure, default Bytes[]
+            //
+            // The per-call chunk ceiling is intentionally kept at MAX_READ_SIZE
+            // so that a single readBytesAt call never allocates more than 64 MB
+            // even when called on a multi-GB file. Callers stream larger files
+            // by iterating (offset, len = chunk_size) pairs.
+            "readBytesAt" => {
+                let path = self.eval_os_str_arg(args, 0, "readBytesAt", "path")?;
+                let offset = self.eval_os_i64_arg(args, 1, "readBytesAt", "offset")?;
+                let len = self.eval_os_i64_arg(args, 2, "readBytesAt", "len")?;
+
+                if offset < 0 || len < 0 {
+                    return Ok(Some(Signal::Value(make_lax_failure(Value::Bytes(
+                        Vec::new(),
+                    )))));
+                }
+                if (len as u64) > MAX_READ_SIZE {
+                    return Ok(Some(Signal::Value(make_lax_failure(Value::Bytes(
+                        Vec::new(),
+                    )))));
+                }
+                if len == 0 {
+                    return Ok(Some(Signal::Value(make_lax_success(Value::Bytes(
+                        Vec::new(),
+                    )))));
+                }
+
+                use std::io::{Read, Seek, SeekFrom};
+                match std::fs::File::open(&path) {
+                    Ok(mut f) => {
+                        if f.seek(SeekFrom::Start(offset as u64)).is_err() {
+                            return Ok(Some(Signal::Value(make_lax_failure(Value::Bytes(
+                                Vec::new(),
+                            )))));
+                        }
+                        let mut buf = vec![0u8; len as usize];
+                        // read_exact would fail at EOF even for legitimate
+                        // partial tail reads; use a loop of read() that
+                        // tolerates short reads and stops on EOF so that
+                        // offset + len > file_size returns the available tail.
+                        let mut filled = 0usize;
+                        while filled < buf.len() {
+                            match f.read(&mut buf[filled..]) {
+                                Ok(0) => break, // EOF
+                                Ok(n) => filled += n,
+                                Err(_) => {
+                                    return Ok(Some(Signal::Value(make_lax_failure(
+                                        Value::Bytes(Vec::new()),
+                                    ))));
+                                }
+                            }
+                        }
+                        buf.truncate(filled);
+                        Ok(Some(Signal::Value(make_lax_success(Value::Bytes(buf)))))
+                    }
                     Err(_) => Ok(Some(Signal::Value(make_lax_failure(Value::Bytes(
                         Vec::new(),
                     ))))),
@@ -2700,6 +2780,35 @@ impl Interpreter {
         }
     }
 
+    /// Helper: evaluate an `Int` argument for os functions.
+    /// Used by readBytesAt (offset, len) — enforces Int type for callers that
+    /// legitimately need 64-bit file offsets.
+    fn eval_os_i64_arg(
+        &mut self,
+        args: &[Expr],
+        index: usize,
+        func_name: &str,
+        arg_name: &str,
+    ) -> Result<i64, RuntimeError> {
+        let arg = args.get(index).ok_or_else(|| RuntimeError {
+            message: format!("{}: missing argument '{}'", func_name, arg_name),
+        })?;
+        match self.eval_expr(arg)? {
+            Signal::Value(Value::Int(n)) => Ok(n),
+            Signal::Value(v) => Err(RuntimeError {
+                message: format!("{}: {} must be an Int, got {}", func_name, arg_name, v),
+            }),
+            other => Err(RuntimeError {
+                message: format!(
+                    "{}: unexpected signal evaluating '{}': {}",
+                    func_name,
+                    arg_name,
+                    signal_name(&other)
+                ),
+            }),
+        }
+    }
+
     /// Helper: evaluate optional timeout argument in milliseconds.
     /// If omitted, returns DEFAULT_NETWORK_TIMEOUT_MS.
     fn eval_os_timeout_arg(
@@ -3517,9 +3626,11 @@ stdout(lax.hasValue)"#;
     #[test]
     fn test_os_symbols_count() {
         // C18 layout: 35 symbols. C19 appends 2 more (runInteractive,
-        // execShellInteractive) at the end. Total expected = 37.
-        assert_eq!(OS_SYMBOLS.len(), 37);
+        // execShellInteractive). C26B-020 柱 1 appends 1 more (readBytesAt).
+        // Total expected = 38.
+        assert_eq!(OS_SYMBOLS.len(), 38);
         assert!(OS_SYMBOLS.contains(&"readBytes"));
+        assert!(OS_SYMBOLS.contains(&"readBytesAt"));
         assert!(OS_SYMBOLS.contains(&"writeBytes"));
         assert!(OS_SYMBOLS.contains(&"argv"));
         assert!(OS_SYMBOLS.contains(&"ReadAsync"));

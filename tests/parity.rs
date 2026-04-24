@@ -1398,6 +1398,114 @@ stdout(text)
     }
 }
 
+// C26B-020 柱 1: readBytesAt(path, offset, len) -> Lax[Bytes] 3-backend parity.
+//
+// Writes a 16-byte payload, then reads three slices to exercise the chunk /
+// truncated-tail / beyond-EOF branches of the interpreter + JS + native
+// implementations. All three backends must agree byte-for-byte.
+#[test]
+fn test_file_read_bytes_at_three_way_parity() {
+    let has_node = node_available();
+    let has_cc = cc_available();
+    if !has_cc {
+        eprintln!("SKIP: cc not available, skipping readBytesAt parity");
+        return;
+    }
+
+    let backends = if has_node {
+        vec!["interp", "js", "native"]
+    } else {
+        vec!["interp", "native"]
+    };
+
+    for backend in backends {
+        let path = unique_temp_path("taida_os_bytes_at", backend, "bin");
+        let path_s = path.to_string_lossy().replace('\\', "\\\\");
+        // Payload: 16 bytes "ABCDEFGHIJKLMNOP". We then read:
+        //   (a) offset=0, len=4   -> "ABCD"   (normal chunk)
+        //   (b) offset=12, len=8  -> "MNOP"   (truncated tail, 4 bytes)
+        //   (c) offset=32, len=4  -> ""       (beyond-EOF, empty success)
+        let source = format!(
+            r#"
+payloadLax <= Bytes["ABCDEFGHIJKLMNOP"]()
+payloadLax ]=> payload
+writeRes <= writeBytes("{path}", payload)
+stdout(writeRes.isSuccess().toString())
+chunkA <= readBytesAt("{path}", 0, 4)
+stdout(chunkA.hasValue.toString())
+decA <= Utf8Decode[chunkA.__value]()
+decA ]=> textA
+stdout(textA)
+chunkB <= readBytesAt("{path}", 12, 8)
+stdout(chunkB.hasValue.toString())
+decB <= Utf8Decode[chunkB.__value]()
+decB ]=> textB
+stdout(textB)
+chunkC <= readBytesAt("{path}", 32, 4)
+stdout(chunkC.hasValue.toString())
+"#,
+            path = path_s
+        );
+
+        let out = match backend {
+            "interp" => run_interpreter_src(&source, "readBytesAt_interp"),
+            "js" => run_js_src(&source, "readBytesAt_js"),
+            "native" => run_native_src(&source, "readBytesAt_native"),
+            _ => None,
+        }
+        .unwrap_or_else(|| panic!("{} backend failed for readBytesAt parity", backend));
+
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(
+            lines.len(),
+            6,
+            "{} backend output shape mismatch for readBytesAt parity: {:?}",
+            backend,
+            out
+        );
+        // writeBytes success
+        assert!(
+            lines[0] == "true" || lines[0] == "1",
+            "{} backend expected writeBytes success marker, got {:?}",
+            backend,
+            lines[0]
+        );
+        // chunk A: normal chunk, offset=0 len=4
+        assert!(
+            lines[1] == "true" || lines[1] == "1",
+            "{} backend expected readBytesAt(0,4) success, got {:?}",
+            backend,
+            lines[1]
+        );
+        assert_eq!(
+            lines[2], "ABCD",
+            "{} backend expected readBytesAt(0,4)=ABCD",
+            backend
+        );
+        // chunk B: truncated tail, offset=12 len=8 -> 4 bytes "MNOP"
+        assert!(
+            lines[3] == "true" || lines[3] == "1",
+            "{} backend expected readBytesAt(12,8) success (truncated tail), got {:?}",
+            backend,
+            lines[3]
+        );
+        assert_eq!(
+            lines[4], "MNOP",
+            "{} backend expected readBytesAt(12,8)=MNOP (truncated tail)",
+            backend
+        );
+        // chunk C: beyond EOF -> empty success
+        assert!(
+            lines[5] == "true" || lines[5] == "1",
+            "{} backend expected readBytesAt(32,4) empty success (beyond EOF), got {:?}",
+            backend,
+            lines[5]
+        );
+
+        let _ = fs::remove_file(&path);
+    }
+}
+
 #[test]
 fn test_tcp_send_recv_loopback_parity() {
     let has_node = node_available();

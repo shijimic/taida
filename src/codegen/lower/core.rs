@@ -47,6 +47,11 @@ impl Lowering {
         stdlib_runtime_funcs.insert("enumerate".to_string(), "taida_list_enumerate".to_string());
         // Core-bundled os side-effect/query/async functions (import-less parity with interpreter/JS)
         stdlib_runtime_funcs.insert("readBytes".to_string(), "taida_os_read_bytes".to_string());
+        // C26B-020 柱 1: chunked read for large files (addition, widening § 6.2)
+        stdlib_runtime_funcs.insert(
+            "readBytesAt".to_string(),
+            "taida_os_read_bytes_at".to_string(),
+        );
         stdlib_runtime_funcs.insert("writeFile".to_string(), "taida_os_write_file".to_string());
         stdlib_runtime_funcs.insert("writeBytes".to_string(), "taida_os_write_bytes".to_string());
         stdlib_runtime_funcs.insert("appendFile".to_string(), "taida_os_append_file".to_string());

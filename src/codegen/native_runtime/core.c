@@ -382,6 +382,8 @@ static taida_val _d2l(double v);
 // OS package forward declarations
 taida_val taida_os_read(taida_val path_ptr);
 taida_val taida_os_read_bytes(taida_val path_ptr);
+// C26B-020 柱 1: chunked file read for large files
+taida_val taida_os_read_bytes_at(taida_val path_ptr, taida_val offset, taida_val len);
 taida_val taida_os_list_dir(taida_val path_ptr);
 taida_val taida_os_stat(taida_val path_ptr);
 taida_val taida_os_exists(taida_val path_ptr);

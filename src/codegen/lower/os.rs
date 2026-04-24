@@ -20,6 +20,8 @@ impl Lowering {
     pub(super) fn os_func_mapping(sym: &str) -> Option<&'static str> {
         match sym {
             "readBytes" => Some("taida_os_read_bytes"),
+            // C26B-020 柱 1: chunked read API
+            "readBytesAt" => Some("taida_os_read_bytes_at"),
             "writeFile" => Some("taida_os_write_file"),
             "writeBytes" => Some("taida_os_write_bytes"),
             "appendFile" => Some("taida_os_append_file"),

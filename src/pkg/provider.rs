@@ -222,8 +222,9 @@ impl CoreBundledProvider {
 //   EnvVar[name]()     -- environment variable (read-only)
 //
 // Binary file APIs:
-//   readBytes(path)            -- read file as Bytes (64MB limit)
-//   writeBytes(path, content)  -- write Bytes payload to file
+//   readBytes(path)                      -- read file as Bytes (64MB limit)
+//   readBytesAt(path, offset, len)       -- chunked read (C26B-020 柱 1)
+//   writeBytes(path, content)            -- write Bytes payload to file
 //
 // Side-effect APIs (functions -> Result):
 //   writeFile(path, content)    -- write file (create or overwrite)
@@ -271,7 +272,7 @@ impl CoreBundledProvider {
 //   listenerClose(listener)
 //   udpClose(socket)            -- alias of socketClose
 
-<<< @(Read, ListDir, Stat, Exists, readBytes, writeFile, writeBytes, appendFile, remove, createDir, rename, run, execShell, runInteractive, execShellInteractive, EnvVar, allEnv, argv, ReadAsync, HttpGet, HttpPost, HttpRequest, tcpConnect, tcpListen, tcpAccept, socketSend, socketSendAll, socketRecv, socketSendBytes, socketRecvBytes, socketRecvExact, udpBind, udpSendTo, udpRecvFrom, socketClose, listenerClose, udpClose)
+<<< @(Read, ListDir, Stat, Exists, readBytes, readBytesAt, writeFile, writeBytes, appendFile, remove, createDir, rename, run, execShell, runInteractive, execShellInteractive, EnvVar, allEnv, argv, ReadAsync, HttpGet, HttpPost, HttpRequest, tcpConnect, tcpListen, tcpAccept, socketSend, socketSendAll, socketRecv, socketSendBytes, socketRecvBytes, socketRecvExact, udpBind, udpSendTo, udpRecvFrom, socketClose, listenerClose, udpClose)
 "#
     }
 

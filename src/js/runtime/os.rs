@@ -152,6 +152,35 @@ function __taida_os_readBytes(path) {
   }
 }
 
+// C26B-020 柱 1: chunked / large-file bytes read.
+// Mirrors the Interpreter semantics from os_eval.rs:
+//   - negative offset/len   → Lax failure (default Bytes[])
+//   - len > 64 MB ceiling   → Lax failure (default Bytes[])
+//   - len == 0              → Lax success with empty Bytes
+//   - offset >= file size   → Lax success with empty Bytes
+//   - offset + len > size   → Lax success with truncated tail
+function __taida_os_readBytesAt(path, offset, len) {
+  if (!__os_fs) return __taida_lax_from_bytes(new Uint8Array(0), false);
+  const off = typeof offset === 'bigint' ? Number(offset) : (offset | 0);
+  const n = typeof len === 'bigint' ? Number(len) : (len | 0);
+  if (off < 0 || n < 0) return __taida_lax_from_bytes(new Uint8Array(0), false);
+  if (n > __OS_MAX_READ_SIZE) return __taida_lax_from_bytes(new Uint8Array(0), false);
+  if (n === 0) return __taida_lax_from_bytes(new Uint8Array(0), true);
+  let fd = -1;
+  try {
+    const buf = Buffer.alloc(n);
+    fd = __os_fs.openSync(path, 'r');
+    const filled = __os_fs.readSync(fd, buf, 0, n, off);
+    __os_fs.closeSync(fd);
+    fd = -1;
+    const view = filled === n ? new Uint8Array(buf) : new Uint8Array(buf.buffer, buf.byteOffset, filled);
+    return __taida_lax_from_bytes(view, true);
+  } catch (e) {
+    if (fd !== -1) { try { __os_fs.closeSync(fd); } catch (_) {} }
+    return __taida_lax_from_bytes(new Uint8Array(0), false);
+  }
+}
+
 function __taida_os_listdir(path) {
   if (!__os_fs) return Lax(null, Object.freeze([]));
   try {
