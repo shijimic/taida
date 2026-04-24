@@ -227,6 +227,79 @@ impl Lowering {
                 ));
                 Ok(result)
             }
+            // ── C26B-016 (@c.26, Option B+): span-aware comparison molds ──
+            // Dispatches to the C runtime helpers in native_runtime/core.c.
+            // SpanEquals / SpanStartsWith / SpanContains → Bool (taida_val 0/1).
+            // SpanSlice → Pack (sub-span `@(start, len)`).
+            "SpanEquals" => {
+                if type_args.len() < 3 {
+                    return Err(LowerError {
+                        message: "SpanEquals requires 3 arguments: SpanEquals[span, raw, needle]()".into(),
+                    });
+                }
+                let span = self.lower_expr(func, &type_args[0])?;
+                let raw = self.lower_expr(func, &type_args[1])?;
+                let needle = self.lower_expr(func, &type_args[2])?;
+                let result = func.alloc_var();
+                func.push(IrInst::Call(
+                    result,
+                    "taida_net_SpanEquals".to_string(),
+                    vec![span, raw, needle],
+                ));
+                Ok(result)
+            }
+            "SpanStartsWith" => {
+                if type_args.len() < 3 {
+                    return Err(LowerError {
+                        message: "SpanStartsWith requires 3 arguments: SpanStartsWith[span, raw, prefix]()".into(),
+                    });
+                }
+                let span = self.lower_expr(func, &type_args[0])?;
+                let raw = self.lower_expr(func, &type_args[1])?;
+                let prefix = self.lower_expr(func, &type_args[2])?;
+                let result = func.alloc_var();
+                func.push(IrInst::Call(
+                    result,
+                    "taida_net_SpanStartsWith".to_string(),
+                    vec![span, raw, prefix],
+                ));
+                Ok(result)
+            }
+            "SpanContains" => {
+                if type_args.len() < 3 {
+                    return Err(LowerError {
+                        message: "SpanContains requires 3 arguments: SpanContains[span, raw, needle]()".into(),
+                    });
+                }
+                let span = self.lower_expr(func, &type_args[0])?;
+                let raw = self.lower_expr(func, &type_args[1])?;
+                let needle = self.lower_expr(func, &type_args[2])?;
+                let result = func.alloc_var();
+                func.push(IrInst::Call(
+                    result,
+                    "taida_net_SpanContains".to_string(),
+                    vec![span, raw, needle],
+                ));
+                Ok(result)
+            }
+            "SpanSlice" => {
+                if type_args.len() < 4 {
+                    return Err(LowerError {
+                        message: "SpanSlice requires 4 arguments: SpanSlice[span, raw, start, end]()".into(),
+                    });
+                }
+                let span = self.lower_expr(func, &type_args[0])?;
+                let raw = self.lower_expr(func, &type_args[1])?;
+                let sub_start = self.lower_expr(func, &type_args[2])?;
+                let sub_end = self.lower_expr(func, &type_args[3])?;
+                let result = func.alloc_var();
+                func.push(IrInst::Call(
+                    result,
+                    "taida_net_SpanSlice".to_string(),
+                    vec![span, raw, sub_start, sub_end],
+                ));
+                Ok(result)
+            }
             "Slice" => {
                 if type_args.is_empty() {
                     return Err(LowerError {

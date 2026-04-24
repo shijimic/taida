@@ -95,6 +95,37 @@ fn parse_bytes_cursor(value: Value, mold_name: &str) -> Result<(Vec<u8>, usize),
     Ok((bytes, offset))
 }
 
+/// C26B-016 (Option B+): extract `(start, len)` from a span pack
+/// `@(start: Int, len: Int)`. Returns None if the value is not a
+/// BuchiPack with both fields present as Int.
+fn extract_span_pack(value: &Value) -> Option<(usize, usize)> {
+    let Value::BuchiPack(fields) = value else {
+        return None;
+    };
+    let start = fields.iter().find_map(|(k, v)| match v {
+        Value::Int(n) if k == "start" => Some(*n),
+        _ => None,
+    })?;
+    let len = fields.iter().find_map(|(k, v)| match v {
+        Value::Int(n) if k == "len" => Some(*n),
+        _ => None,
+    })?;
+    if start < 0 || len < 0 {
+        return None;
+    }
+    Some((start as usize, len as usize))
+}
+
+/// C26B-016: resolve the raw byte buffer backing a span. Accepts `Bytes`
+/// directly or `Str` (UTF-8 re-encoded). Returns None for other types.
+fn raw_as_bytes(value: &Value) -> Option<std::borrow::Cow<'_, [u8]>> {
+    match value {
+        Value::Bytes(b) => Some(std::borrow::Cow::Borrowed(b.as_slice())),
+        Value::Str(s) => Some(std::borrow::Cow::Borrowed(s.as_bytes())),
+        _ => None,
+    }
+}
+
 fn clamp_slice_bounds(len: usize, start: i64, end: i64) -> (usize, usize) {
     let len_i = len as i64;
     let s = start.clamp(0, len_i) as usize;
@@ -2562,6 +2593,190 @@ impl Interpreter {
                     value,
                     Value::Bytes(Vec::new()),
                 ))))
+            }
+
+            // ── C26B-016 (Option B+): span-aware comparison molds ──
+            // Accepts a span pack `@(start: Int, len: Int)` + raw Bytes and
+            // provides zero-copy (byte-level) comparison / sub-span helpers
+            // without materializing a Str. Matches `docs/reference/net_api.md §4`.
+            // Parsing: span pack is resolved via fields "start" / "len"; out-of-bounds
+            // is treated as Bool(false) / empty span rather than runtime error,
+            // matching router-like tolerance semantics (hot path).
+            "SpanEquals" => {
+                if type_args.len() < 3 {
+                    return Err(RuntimeError {
+                        message: "SpanEquals requires 3 arguments: SpanEquals[span, raw, needle]()"
+                            .into(),
+                    });
+                }
+                let span = match self.eval_expr(&type_args[0])? {
+                    Signal::Value(v) => v,
+                    other => return Ok(Some(other)),
+                };
+                let raw = match self.eval_expr(&type_args[1])? {
+                    Signal::Value(v) => v,
+                    other => return Ok(Some(other)),
+                };
+                let needle = match self.eval_expr(&type_args[2])? {
+                    Signal::Value(Value::Str(s)) => s.into_bytes(),
+                    Signal::Value(Value::Bytes(b)) => b,
+                    Signal::Value(v) => {
+                        return Err(RuntimeError {
+                            message: format!(
+                                "SpanEquals: needle must be Str or Bytes, got {}",
+                                v
+                            ),
+                        });
+                    }
+                    other => return Ok(Some(other)),
+                };
+                let result = match (extract_span_pack(&span), raw_as_bytes(&raw)) {
+                    (Some((start, len)), Some(bytes)) => {
+                        let end = start.saturating_add(len);
+                        if end <= bytes.len() && len == needle.len() {
+                            bytes[start..end] == needle[..]
+                        } else {
+                            false
+                        }
+                    }
+                    _ => false,
+                };
+                Ok(Some(Signal::Value(Value::Bool(result))))
+            }
+            "SpanStartsWith" => {
+                if type_args.len() < 3 {
+                    return Err(RuntimeError {
+                        message: "SpanStartsWith requires 3 arguments: SpanStartsWith[span, raw, prefix]()"
+                            .into(),
+                    });
+                }
+                let span = match self.eval_expr(&type_args[0])? {
+                    Signal::Value(v) => v,
+                    other => return Ok(Some(other)),
+                };
+                let raw = match self.eval_expr(&type_args[1])? {
+                    Signal::Value(v) => v,
+                    other => return Ok(Some(other)),
+                };
+                let prefix = match self.eval_expr(&type_args[2])? {
+                    Signal::Value(Value::Str(s)) => s.into_bytes(),
+                    Signal::Value(Value::Bytes(b)) => b,
+                    Signal::Value(v) => {
+                        return Err(RuntimeError {
+                            message: format!(
+                                "SpanStartsWith: prefix must be Str or Bytes, got {}",
+                                v
+                            ),
+                        });
+                    }
+                    other => return Ok(Some(other)),
+                };
+                let result = match (extract_span_pack(&span), raw_as_bytes(&raw)) {
+                    (Some((start, len)), Some(bytes)) => {
+                        let end = start.saturating_add(len);
+                        if end <= bytes.len() && len >= prefix.len() {
+                            bytes[start..start + prefix.len()] == prefix[..]
+                        } else {
+                            false
+                        }
+                    }
+                    _ => false,
+                };
+                Ok(Some(Signal::Value(Value::Bool(result))))
+            }
+            "SpanContains" => {
+                if type_args.len() < 3 {
+                    return Err(RuntimeError {
+                        message: "SpanContains requires 3 arguments: SpanContains[span, raw, needle]()"
+                            .into(),
+                    });
+                }
+                let span = match self.eval_expr(&type_args[0])? {
+                    Signal::Value(v) => v,
+                    other => return Ok(Some(other)),
+                };
+                let raw = match self.eval_expr(&type_args[1])? {
+                    Signal::Value(v) => v,
+                    other => return Ok(Some(other)),
+                };
+                let needle = match self.eval_expr(&type_args[2])? {
+                    Signal::Value(Value::Str(s)) => s.into_bytes(),
+                    Signal::Value(Value::Bytes(b)) => b,
+                    Signal::Value(v) => {
+                        return Err(RuntimeError {
+                            message: format!(
+                                "SpanContains: needle must be Str or Bytes, got {}",
+                                v
+                            ),
+                        });
+                    }
+                    other => return Ok(Some(other)),
+                };
+                let result = match (extract_span_pack(&span), raw_as_bytes(&raw)) {
+                    (Some((start, len)), Some(bytes)) => {
+                        let end = start.saturating_add(len);
+                        if end <= bytes.len() && !needle.is_empty() && len >= needle.len() {
+                            bytes[start..end]
+                                .windows(needle.len())
+                                .any(|w| w == needle.as_slice())
+                        } else if needle.is_empty() {
+                            // Empty needle is always contained (stdlib convention).
+                            true
+                        } else {
+                            false
+                        }
+                    }
+                    _ => false,
+                };
+                Ok(Some(Signal::Value(Value::Bool(result))))
+            }
+            "SpanSlice" => {
+                if type_args.len() < 4 {
+                    return Err(RuntimeError {
+                        message: "SpanSlice requires 4 arguments: SpanSlice[span, raw, start, end]()"
+                            .into(),
+                    });
+                }
+                let span = match self.eval_expr(&type_args[0])? {
+                    Signal::Value(v) => v,
+                    other => return Ok(Some(other)),
+                };
+                let _raw = match self.eval_expr(&type_args[1])? {
+                    Signal::Value(v) => v,
+                    other => return Ok(Some(other)),
+                };
+                let sub_start = match self.eval_expr(&type_args[2])? {
+                    Signal::Value(Value::Int(n)) => n,
+                    Signal::Value(v) => {
+                        return Err(RuntimeError {
+                            message: format!(
+                                "SpanSlice: start must be Int, got {}",
+                                v
+                            ),
+                        });
+                    }
+                    other => return Ok(Some(other)),
+                };
+                let sub_end = match self.eval_expr(&type_args[3])? {
+                    Signal::Value(Value::Int(n)) => n,
+                    Signal::Value(v) => {
+                        return Err(RuntimeError {
+                            message: format!(
+                                "SpanSlice: end must be Int, got {}",
+                                v
+                            ),
+                        });
+                    }
+                    other => return Ok(Some(other)),
+                };
+                let (base_start, base_len) = extract_span_pack(&span).unwrap_or((0, 0));
+                let (a, b) = clamp_slice_bounds(base_len, sub_start, sub_end);
+                let new_start = base_start.saturating_add(a);
+                let new_len = b.saturating_sub(a);
+                Ok(Some(Signal::Value(Value::BuchiPack(vec![
+                    ("start".into(), Value::Int(new_start as i64)),
+                    ("len".into(), Value::Int(new_len as i64)),
+                ]))))
             }
 
             // Utf8Decode[bytes](): conversion to Lax[Str].

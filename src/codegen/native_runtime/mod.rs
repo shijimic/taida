@@ -364,7 +364,19 @@ mod tests {
         //   +2,135 (C26B-020 os.c + F1 forward decl)
         //   +  839 (C26B-021 net_h3_quic.c)
         // New total: 976,168 + 6,808 = 982,976.
-        const EXPECTED_TOTAL_LEN: usize = 982_976;
+        //
+        // C26B-016 (@c.26, Option B+): +5,339 bytes in core.c (F1) from the
+        // span-aware comparison mold helpers (`taida_net_span_extract`,
+        // `taida_net_raw_as_bytes`, `taida_net_needle_as_bytes`,
+        // `taida_net_SpanEquals` / `SpanStartsWith` / `SpanContains` /
+        // `SpanSlice`). All four public helpers are byte-level comparisons
+        // over a `@(start, len)` span pack view into a Bytes/Str raw buffer,
+        // matching interpreter + JS parity. Placed immediately before the
+        // `// ── Error ceiling` divider so F1 absorbs the full delta; F2
+        // (error/display/stdout-display) is unchanged. Other fragments
+        // (os / tls / net_h1_h2 / net_h3_quic) are unchanged.
+        // New total: 982,976 + 5,339 = 988,315.
+        const EXPECTED_TOTAL_LEN: usize = 988_315;
         let asm = *NATIVE_RUNTIME_C;
         assert_eq!(
             asm.len(),
@@ -687,11 +699,18 @@ mod tests {
         // +945 bytes (`taida_lax_to_string` FLOAT-tag aware rendering).
         // C26B-020 柱 1 (@c.26): F1 absorbs +140 bytes for the
         // taida_os_read_bytes_at forward declaration. F2 unchanged.
-        const F1_LEN: usize = 238_777;
+        // C26B-016 (@c.26, Option B+): F1 absorbs +5,339 bytes for the
+        // span-aware comparison mold helpers (`taida_net_span_extract`,
+        // `taida_net_raw_as_bytes`, `taida_net_needle_as_bytes`,
+        // `taida_net_SpanEquals` / `SpanStartsWith` / `SpanContains` /
+        // `SpanSlice`). All added immediately before the "Error ceiling"
+        // marker so F1 absorbs the full delta. F2 unchanged.
+        // F1_LEN moves: 238,777 + 5,339 = 244,116.
+        const F1_LEN: usize = 244_116;
         assert_eq!(
             CORE_SECTION.len(),
-            238_777 + 160_352,
-            "core.c total byte length must equal legacy fragment1 + fragment2 (C25B-001 / C25B-028 / C25B-025 / C26B-011 / C26B-020 adjusted)"
+            244_116 + 160_352,
+            "core.c total byte length must equal legacy fragment1 + fragment2 (C25B-001 / C25B-028 / C25B-025 / C26B-011 / C26B-020 / C26B-016 adjusted)"
         );
         const F2_PREFIX: &[u8] = b"// \xE2\x94\x80\xE2\x94\x80 Error ceiling";
         let tail = &CORE_SECTION.as_bytes()[F1_LEN..F1_LEN + F2_PREFIX.len()];

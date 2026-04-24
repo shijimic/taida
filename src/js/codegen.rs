@@ -175,6 +175,10 @@ const PRELUDE_RESERVED_IDENTS: &[&str] = &[
     "Slice",
     "Some",
     "Sort",
+    "SpanContains",
+    "SpanEquals",
+    "SpanSlice",
+    "SpanStartsWith",
     "Split",
     "Sqrt",
     "StreamFrom",
@@ -3717,6 +3721,35 @@ impl JsCodegen {
                     self.write(" })");
                     return Ok(());
                 }
+                // ── C26B-016 (@c.26, Option B+): span-aware comparison molds ──
+                // SpanEquals / SpanStartsWith / SpanContains / SpanSlice — accept a
+                // span pack `@(start, len)` + raw (Bytes/Str) + needle, dispatch to
+                // the JS runtime helpers defined in `src/js/runtime/core.rs`.
+                if name == "SpanEquals"
+                    || name == "SpanStartsWith"
+                    || name == "SpanContains"
+                    || name == "SpanSlice"
+                {
+                    let required_arity = if name == "SpanSlice" { 4 } else { 3 };
+                    if type_args.len() < required_arity {
+                        return Err(JsError {
+                            message: format!(
+                                "{} requires {} arguments",
+                                name, required_arity
+                            ),
+                        });
+                    }
+                    self.write(&format!("__taida_net_{}(", name));
+                    for (i, arg) in type_args.iter().take(required_arity).enumerate() {
+                        if i > 0 {
+                            self.write(", ");
+                        }
+                        self.gen_expr(arg)?;
+                    }
+                    self.write(")");
+                    return Ok(());
+                }
+
                 // Molten[]() → __taida_molten()
                 if name == "Molten" {
                     if !type_args.is_empty() {

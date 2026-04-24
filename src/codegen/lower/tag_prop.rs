@@ -97,6 +97,14 @@ impl Lowering {
             Expr::MoldInst(name, _, _, _) if name == "Exists" => true,
             // B11-6d: TypeIs/TypeExtends return Bool
             Expr::MoldInst(name, _, _, _) if name == "TypeIs" || name == "TypeExtends" => true,
+            // C26B-016 (@c.26, Option B+): span-aware Bool molds
+            Expr::MoldInst(name, _, _, _)
+                if name == "SpanEquals"
+                    || name == "SpanStartsWith"
+                    || name == "SpanContains" =>
+            {
+                true
+            }
             Expr::FieldAccess(obj, field, _) => {
                 // QF-34: hasValue フィールドは Lax/Result の Bool フィールド
                 if field == "hasValue" {

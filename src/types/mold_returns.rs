@@ -115,6 +115,11 @@ pub fn lookup_mold_return_kind(name: &str) -> Option<MoldReturnKind> {
         // C21B-seed-07: `Bool[x]()` returns a Lax[Bool] pack.
         "Bool" => Pack,
         "TypeIs" | "TypeExtends" | "Exists" | "Contains" => Bool,
+        // C26B-016 (@c.26, Option B+): span-aware comparison molds.
+        // All three return `Bool` deterministically; their inputs are a span
+        // pack (`@(start: Int, len: Int)`) + raw Bytes/Str + a needle.
+        // `SpanSlice` is classified under Pack-returning molds below.
+        "SpanEquals" | "SpanStartsWith" | "SpanContains" => Bool,
 
         // ── Str-returning molds ─────────────────────────────────────
         // NB: B11-2f previously routed these through `convert_to_string`
@@ -150,6 +155,8 @@ pub fn lookup_mold_return_kind(name: &str) -> Option<MoldReturnKind> {
         "Find" => Pack,                          // Lax[T]
         "ShiftL" | "ShiftR" | "ShiftRU" => Pack, // Lax[Int]
         "ByteSet" => Pack,                       // Lax[Bytes]
+        // C26B-016 (@c.26, Option B+): sub-span pack `@(start: Int, len: Int)`.
+        "SpanSlice" => Pack,
 
         // ── Dynamic (argument-dependent) ────────────────────────────
         // These molds' return kinds depend on argument types at the
@@ -211,6 +218,20 @@ mod tests {
         for name in ["TypeIs", "TypeExtends", "Exists", "Contains"] {
             assert_eq!(mold_return_tag(name), Some(2), "{name} should be Bool (2)");
         }
+    }
+
+    #[test]
+    fn span_aware_molds_map_to_expected_tags() {
+        // C26B-016 (@c.26, Option B+): span-aware comparison molds return Bool,
+        // `SpanSlice` returns a Pack (sub-span `@(start, len)`).
+        for name in ["SpanEquals", "SpanStartsWith", "SpanContains"] {
+            assert_eq!(mold_return_tag(name), Some(2), "{name} should be Bool (2)");
+        }
+        assert_eq!(
+            mold_return_tag("SpanSlice"),
+            Some(4),
+            "SpanSlice should be Pack (4) — returns @(start, len) sub-span"
+        );
     }
 
     #[test]

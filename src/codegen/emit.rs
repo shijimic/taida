@@ -1342,6 +1342,26 @@ fn runtime_abi(name: &str) -> Result<RuntimeAbi, String> {
             returns: &[Ptr],
         },
 
+        // ── C26B-016 (@c.26, Option B+): span-aware comparison molds ──
+        // Span = pack ptr, raw = bytes/str ptr, needle/prefix = str/bytes ptr.
+        // Return: Bool (Val) or sub-span pack (Ptr).
+        "taida_net_SpanEquals" => RuntimeAbi {
+            params: &[Ptr, Ptr, Ptr],
+            returns: &[Val],
+        },
+        "taida_net_SpanStartsWith" => RuntimeAbi {
+            params: &[Ptr, Ptr, Ptr],
+            returns: &[Val],
+        },
+        "taida_net_SpanContains" => RuntimeAbi {
+            params: &[Ptr, Ptr, Ptr],
+            returns: &[Val],
+        },
+        "taida_net_SpanSlice" => RuntimeAbi {
+            params: &[Ptr, Ptr, Val, Val],
+            returns: &[Ptr],
+        },
+
         // ── JSON — Molten Iron ──
         "taida_json_schema_cast" => RuntimeAbi {
             params: &[Ptr, Ptr],

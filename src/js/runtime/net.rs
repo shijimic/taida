@@ -10,6 +10,92 @@
 pub(super) const NET_JS: &str = r#"
 // ── taida-lang/net: HTTP v1 runtime ─────────────────────────────
 
+// ── C26B-016 (@c.26, Option B+): span-aware comparison helpers ──
+// A span pack is `@(start: Int, len: Int)` — a view over a raw Bytes/Str.
+// `raw` can be a Buffer, Uint8Array, or Str. `needle` / `prefix` may be
+// Str or Buffer. Invalid inputs return `false` / empty sub-span (tolerant
+// hot-path semantics, matching the interpreter).
+function __taida_net_spanPackToOffsets(span) {
+  if (span && typeof span === 'object' && 'start' in span && 'len' in span) {
+    const start = Number(span.start);
+    const len = Number(span.len);
+    if (Number.isFinite(start) && Number.isFinite(len) && start >= 0 && len >= 0) {
+      return [start | 0, len | 0];
+    }
+  }
+  return null;
+}
+function __taida_net_rawToBuffer(raw) {
+  if (Buffer.isBuffer(raw)) { return raw; }
+  if (raw instanceof Uint8Array) { return Buffer.from(raw); }
+  if (typeof raw === 'string') { return Buffer.from(raw, 'utf8'); }
+  return null;
+}
+function __taida_net_needleToBuffer(needle) {
+  if (Buffer.isBuffer(needle)) { return needle; }
+  if (needle instanceof Uint8Array) { return Buffer.from(needle); }
+  if (typeof needle === 'string') { return Buffer.from(needle, 'utf8'); }
+  return null;
+}
+function __taida_net_SpanEquals(span, raw, needle) {
+  const offsets = __taida_net_spanPackToOffsets(span);
+  const buf = __taida_net_rawToBuffer(raw);
+  const needleBuf = __taida_net_needleToBuffer(needle);
+  if (!offsets || !buf || !needleBuf) { return false; }
+  const start = offsets[0];
+  const len = offsets[1];
+  if (start + len > buf.length) { return false; }
+  if (len !== needleBuf.length) { return false; }
+  for (let i = 0; i < len; i++) {
+    if (buf[start + i] !== needleBuf[i]) { return false; }
+  }
+  return true;
+}
+function __taida_net_SpanStartsWith(span, raw, prefix) {
+  const offsets = __taida_net_spanPackToOffsets(span);
+  const buf = __taida_net_rawToBuffer(raw);
+  const prefixBuf = __taida_net_needleToBuffer(prefix);
+  if (!offsets || !buf || !prefixBuf) { return false; }
+  const start = offsets[0];
+  const len = offsets[1];
+  if (start + len > buf.length) { return false; }
+  if (len < prefixBuf.length) { return false; }
+  for (let i = 0; i < prefixBuf.length; i++) {
+    if (buf[start + i] !== prefixBuf[i]) { return false; }
+  }
+  return true;
+}
+function __taida_net_SpanContains(span, raw, needle) {
+  const offsets = __taida_net_spanPackToOffsets(span);
+  const buf = __taida_net_rawToBuffer(raw);
+  const needleBuf = __taida_net_needleToBuffer(needle);
+  if (!offsets || !buf || !needleBuf) { return false; }
+  const start = offsets[0];
+  const len = offsets[1];
+  if (start + len > buf.length) { return false; }
+  if (needleBuf.length === 0) { return true; }
+  if (len < needleBuf.length) { return false; }
+  outer: for (let i = 0; i + needleBuf.length <= len; i++) {
+    for (let j = 0; j < needleBuf.length; j++) {
+      if (buf[start + i + j] !== needleBuf[j]) { continue outer; }
+    }
+    return true;
+  }
+  return false;
+}
+function __taida_net_SpanSlice(span, raw, subStart, subEnd) {
+  const offsets = __taida_net_spanPackToOffsets(span);
+  const baseStart = offsets ? offsets[0] : 0;
+  const baseLen = offsets ? offsets[1] : 0;
+  let s = Number(subStart) | 0;
+  let e = Number(subEnd) | 0;
+  if (s < 0) { s = 0; }
+  if (s > baseLen) { s = baseLen; }
+  if (e < s) { e = s; }
+  if (e > baseLen) { e = baseLen; }
+  return { start: baseStart + s, len: e - s };
+}
+
 // Helper: create net Result success (reuses __taida_result_create)
 function __taida_net_result_ok(inner) {
   return __taida_result_create(inner, null, null);

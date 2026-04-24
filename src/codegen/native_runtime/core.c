@@ -5612,6 +5612,125 @@ taida_val taida_collection_size(taida_val ptr) {
     return ((taida_val*)ptr)[2];
 }
 
+// ── C26B-016 (@c.26, Option B+): span-aware comparison molds ──
+// A span pack is `@(start: Int, len: Int)`, a view over a raw Bytes/Str.
+// Invalid spans (non-pack, missing fields, out-of-bounds) yield false /
+// empty sub-span; matches the interpreter's tolerant hot-path semantics.
+static int taida_net_span_extract(taida_val span, taida_val *out_start, taida_val *out_len) {
+    if (!taida_ptr_is_readable(span, 16)) return 0;
+    taida_val *pack = (taida_val*)span;
+    if ((pack[0] & TAIDA_MAGIC_MASK) != TAIDA_PACK_MAGIC) return 0;
+    taida_val hash_start = taida_str_hash((taida_val)"start");
+    taida_val hash_len = taida_str_hash((taida_val)"len");
+    taida_val start = taida_pack_get(span, hash_start);
+    taida_val len = taida_pack_get(span, hash_len);
+    if (start < 0 || len < 0) return 0;
+    if (out_start) *out_start = start;
+    if (out_len) *out_len = len;
+    return 1;
+}
+
+// Resolve raw (Bytes or Str) to a contiguous byte view. Returns 1 on success
+// with *out_buf pointing into the underlying storage and *out_buf_len set.
+// For Bytes we unpack via `bytes[2 + i]` into a scratch buffer (alloc then
+// let caller free); for Str we return the char* directly. To keep the
+// interface simple, we always materialize a temp `char*` for Bytes input.
+static int taida_net_raw_as_bytes(taida_val raw, const unsigned char **out_buf,
+                                   taida_val *out_len, unsigned char **out_owned) {
+    *out_owned = NULL;
+    if (TAIDA_IS_BYTES(raw)) {
+        taida_val *bytes = (taida_val*)raw;
+        taida_val len = bytes[1];
+        if (len < 0) return 0;
+        unsigned char *tmp = (unsigned char*)taida_str_alloc((size_t)len);
+        for (taida_val i = 0; i < len; i++) tmp[i] = (unsigned char)bytes[2 + i];
+        *out_buf = tmp;
+        *out_len = len;
+        *out_owned = tmp;
+        return 1;
+    }
+    if (taida_is_string_value(raw)) {
+        const char *s = (const char *)raw;
+        *out_buf = (const unsigned char *)s;
+        *out_len = (taida_val)strlen(s);
+        return 1;
+    }
+    return 0;
+}
+
+static int taida_net_needle_as_bytes(taida_val needle, const unsigned char **out_buf,
+                                      taida_val *out_len, unsigned char **out_owned) {
+    return taida_net_raw_as_bytes(needle, out_buf, out_len, out_owned);
+}
+
+taida_val taida_net_SpanEquals(taida_val span, taida_val raw, taida_val needle) {
+    taida_val start, len;
+    if (!taida_net_span_extract(span, &start, &len)) return 0;
+    const unsigned char *buf = NULL; taida_val buf_len = 0; unsigned char *own_buf = NULL;
+    if (!taida_net_raw_as_bytes(raw, &buf, &buf_len, &own_buf)) return 0;
+    const unsigned char *nbuf = NULL; taida_val nlen = 0; unsigned char *own_n = NULL;
+    if (!taida_net_needle_as_bytes(needle, &nbuf, &nlen, &own_n)) { return 0; }
+    taida_val result = 0;
+    if (start + len <= buf_len && len == nlen && memcmp(buf + start, nbuf, (size_t)len) == 0) {
+        result = 1;
+    }
+    return result;
+}
+
+taida_val taida_net_SpanStartsWith(taida_val span, taida_val raw, taida_val prefix) {
+    taida_val start, len;
+    if (!taida_net_span_extract(span, &start, &len)) return 0;
+    const unsigned char *buf = NULL; taida_val buf_len = 0; unsigned char *own_buf = NULL;
+    if (!taida_net_raw_as_bytes(raw, &buf, &buf_len, &own_buf)) return 0;
+    const unsigned char *pbuf = NULL; taida_val plen = 0; unsigned char *own_p = NULL;
+    if (!taida_net_needle_as_bytes(prefix, &pbuf, &plen, &own_p)) return 0;
+    taida_val result = 0;
+    if (start + len <= buf_len && len >= plen && memcmp(buf + start, pbuf, (size_t)plen) == 0) {
+        result = 1;
+    }
+    return result;
+}
+
+taida_val taida_net_SpanContains(taida_val span, taida_val raw, taida_val needle) {
+    taida_val start, len;
+    if (!taida_net_span_extract(span, &start, &len)) return 0;
+    const unsigned char *buf = NULL; taida_val buf_len = 0; unsigned char *own_buf = NULL;
+    if (!taida_net_raw_as_bytes(raw, &buf, &buf_len, &own_buf)) return 0;
+    const unsigned char *nbuf = NULL; taida_val nlen = 0; unsigned char *own_n = NULL;
+    if (!taida_net_needle_as_bytes(needle, &nbuf, &nlen, &own_n)) return 0;
+    taida_val result = 0;
+    if (start + len > buf_len) { result = 0; }
+    else if (nlen == 0) { result = 1; }
+    else if (len < nlen) { result = 0; }
+    else {
+        for (taida_val i = 0; i + nlen <= len; i++) {
+            if (memcmp(buf + start + i, nbuf, (size_t)nlen) == 0) { result = 1; break; }
+        }
+    }
+    return result;
+}
+
+taida_val taida_net_SpanSlice(taida_val span, taida_val raw, taida_val sub_start, taida_val sub_end) {
+    (void)raw;
+    taida_val base_start = 0, base_len = 0;
+    taida_net_span_extract(span, &base_start, &base_len);
+    taida_val s = sub_start, e = sub_end;
+    if (s < 0) s = 0;
+    if (s > base_len) s = base_len;
+    if (e < s) e = s;
+    if (e > base_len) e = base_len;
+    taida_val new_start = base_start + s;
+    taida_val new_len = e - s;
+    taida_val pack = taida_pack_new(2);
+    taida_pack_set_hash(pack, 0, taida_str_hash((taida_val)"start"));
+    taida_pack_set(pack, 0, new_start);
+    taida_pack_set_tag(pack, 0, TAIDA_TAG_INT);
+    taida_pack_set_hash(pack, 1, taida_str_hash((taida_val)"len"));
+    taida_pack_set(pack, 1, new_len);
+    taida_pack_set_tag(pack, 1, TAIDA_TAG_INT);
+    return pack;
+}
+
 // ── Error ceiling (setjmp/longjmp) ───────────────────────
 // Uses setjmp/longjmp for error catching. The key function is
 // taida_error_try_call which wraps setjmp and calls a function pointer.
