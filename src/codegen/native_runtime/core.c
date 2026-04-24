@@ -844,6 +844,12 @@ taida_val taida_shift_l(taida_val x, taida_val n) {
 
 taida_val taida_shift_r(taida_val x, taida_val n) {
     if (n < 0 || n > 63) return taida_lax_empty(0);
+    // Deliberate arithmetic right shift on int64_t (sign-preserving).
+    // All mainstream targets (gcc, clang, msvc on x86-64/aarch64/arm64)
+    // implement signed `>>` as arithmetic shift, which is the contract
+    // surfaced to Taida users. The language spec leaves it
+    // implementation-defined, hence cppcheck's portability warning.
+    // cppcheck-suppress shiftTooManyBitsSigned
     int64_t shifted = ((int64_t)x) >> (unsigned int)n;
     return taida_lax_new((taida_val)shifted, 0);
 }
@@ -2455,7 +2461,11 @@ void taida_str_retain(taida_val ptr) {
     if (ptr == 0) return;
     if (ptr > 0 && ptr < 4096) return;
     if (ptr < 0) return;
-    // Check hidden header at ptr - 16
+    // Check hidden header at ptr - 16. The guards above fully rule out
+    // null / reserved-low-page / negative ptr values; cppcheck's value
+    // analysis does not see the `ptr < 4096` lower bound as excluding
+    // ptr==0 from the arithmetic path.
+    // cppcheck-suppress nullPointerArithmeticRedundantCheck
     taida_val *hdr = ((taida_val*)ptr) - 2;
     if (!taida_ptr_is_readable((taida_val)hdr, sizeof(taida_val))) return;
     taida_val tag = hdr[0];
@@ -2474,7 +2484,10 @@ static void taida_str_release(taida_val ptr) {
     if (ptr == 0) return;
     if (ptr > 0 && ptr < 4096) return;
     if (ptr < 0) return;
-    // Check hidden header at ptr - 16
+    // Check hidden header at ptr - 16. Same rationale as taida_str_retain:
+    // the preceding three guards fully exclude null / reserved / negative
+    // ptr from this arithmetic path.
+    // cppcheck-suppress nullPointerArithmeticRedundantCheck
     taida_val *hdr = ((taida_val*)ptr) - 2;
     if (!taida_ptr_is_readable((taida_val)hdr, sizeof(taida_val))) return;
     taida_val tag = hdr[0];
@@ -8194,8 +8207,14 @@ static json_val json_parse_number(const char **p) {
 }
 
 static json_val json_parse_array(const char **p) {
+    // Zero-init all scalar fields so the return-by-value copy is fully
+    // defined even on paths that do not populate int_val / float_val
+    // (callers branch on `type` before reading those, but cppcheck
+    // cannot prove that and flags uninitvar).
     json_val v;
     v.type = JSON_ARRAY;
+    v.int_val = 0;
+    v.float_val = 0.0;
     v.str_val = NULL; v.str_len = 0; v.obj = NULL;
     // M-14: TAIDA_MALLOC ensures NULL check + OOM diagnostic.
     v.arr = (json_array*)TAIDA_MALLOC(sizeof(json_array), "json_array");
@@ -8223,8 +8242,11 @@ static json_val json_parse_array(const char **p) {
 }
 
 static json_val json_parse_object(const char **p) {
+    // Zero-init scalar fields; see json_parse_array for rationale.
     json_val v;
     v.type = JSON_OBJECT;
+    v.int_val = 0;
+    v.float_val = 0.0;
     v.str_val = NULL; v.str_len = 0; v.arr = NULL;
     // M-14: TAIDA_MALLOC ensures NULL check + OOM diagnostic.
     v.obj = (json_obj*)TAIDA_MALLOC(sizeof(json_obj), "json_obj");

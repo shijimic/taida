@@ -5112,8 +5112,13 @@ static int h2_send_response_headers(int fd, H2HpackDynTable *enc_dyn,
                                      uint32_t stream_id, int status_code,
                                      const H2Header *extra_headers, int extra_count,
                                      int end_stream, uint32_t peer_max_frame_size) {
-    // Build header list
+    // Build header list. Zero-init the full array so cppcheck's
+    // legacyUninitvar solver sees every struct member as defined before
+    // the snprintf() writes into the first element; in practice the
+    // loop below only uses `count` entries, but a cold memset on a
+    // stack array this small is below the noise floor.
     H2Header all_headers[H2_MAX_HEADERS];
+    memset(all_headers, 0, sizeof(all_headers));
     int count = 0;
     // :status pseudo-header first
     snprintf(all_headers[0].name, sizeof(all_headers[0].name), ":status");

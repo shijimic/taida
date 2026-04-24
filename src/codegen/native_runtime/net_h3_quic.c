@@ -1702,6 +1702,7 @@ static int h3_decoder_apply(H3DecoderState *state, const H3DecoderInstruction *i
 // a full encode → decode cycle.
 static int h3_selftest_qpack_roundtrip(void) {
     H3Header input[4];
+    memset(input, 0, sizeof(input));
     // Header 0: static table hit (:status 200 uses indexed field line)
     // We test with regular headers only for the round-trip
     snprintf(input[0].name, sizeof(input[0].name), "content-type");
@@ -1754,6 +1755,7 @@ static int h3_selftest_request_validation(void) {
     // Test 1: Valid request with all required pseudo-headers
     {
         H3Header hdrs[4];
+        memset(hdrs, 0, sizeof(hdrs));
         snprintf(hdrs[0].name, sizeof(hdrs[0].name), ":method");
         snprintf(hdrs[0].value, sizeof(hdrs[0].value), "GET");
         snprintf(hdrs[1].name, sizeof(hdrs[1].name), ":path");
@@ -1771,6 +1773,7 @@ static int h3_selftest_request_validation(void) {
     // Test 2: Missing :scheme should fail (NB7-10 fix)
     {
         H3Header hdrs[2];
+        memset(hdrs, 0, sizeof(hdrs));
         snprintf(hdrs[0].name, sizeof(hdrs[0].name), ":method");
         snprintf(hdrs[0].value, sizeof(hdrs[0].value), "GET");
         snprintf(hdrs[1].name, sizeof(hdrs[1].name), ":path");
@@ -1784,6 +1787,7 @@ static int h3_selftest_request_validation(void) {
     // Test 3: Empty :scheme value should fail
     {
         H3Header hdrs[3];
+        memset(hdrs, 0, sizeof(hdrs));
         snprintf(hdrs[0].name, sizeof(hdrs[0].name), ":method");
         snprintf(hdrs[0].value, sizeof(hdrs[0].value), "GET");
         snprintf(hdrs[1].name, sizeof(hdrs[1].name), ":path");
@@ -1799,6 +1803,7 @@ static int h3_selftest_request_validation(void) {
     // Test 4: Empty :method value should fail
     {
         H3Header hdrs[3];
+        memset(hdrs, 0, sizeof(hdrs));
         snprintf(hdrs[0].name, sizeof(hdrs[0].name), ":method");
         hdrs[0].value[0] = '\0'; // empty
         snprintf(hdrs[1].name, sizeof(hdrs[1].name), ":path");
@@ -1814,6 +1819,7 @@ static int h3_selftest_request_validation(void) {
     // Test 5: Duplicate :scheme should fail
     {
         H3Header hdrs[4];
+        memset(hdrs, 0, sizeof(hdrs));
         snprintf(hdrs[0].name, sizeof(hdrs[0].name), ":method");
         snprintf(hdrs[0].value, sizeof(hdrs[0].value), "GET");
         snprintf(hdrs[1].name, sizeof(hdrs[1].name), ":path");
@@ -1831,6 +1837,7 @@ static int h3_selftest_request_validation(void) {
     // Test 6: Ordering violation (regular before pseudo)
     {
         H3Header hdrs[3];
+        memset(hdrs, 0, sizeof(hdrs));
         snprintf(hdrs[0].name, sizeof(hdrs[0].name), "host");
         snprintf(hdrs[0].value, sizeof(hdrs[0].value), "localhost");
         snprintf(hdrs[1].name, sizeof(hdrs[1].name), ":method");
@@ -1846,6 +1853,7 @@ static int h3_selftest_request_validation(void) {
     // Test 7: Unknown pseudo-header should fail
     {
         H3Header hdrs[4];
+        memset(hdrs, 0, sizeof(hdrs));
         snprintf(hdrs[0].name, sizeof(hdrs[0].name), ":method");
         snprintf(hdrs[0].value, sizeof(hdrs[0].value), "GET");
         snprintf(hdrs[1].name, sizeof(hdrs[1].name), ":path");

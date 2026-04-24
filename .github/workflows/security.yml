@@ -172,8 +172,19 @@ jobs:
         # baseline in `.dev/C26_C_STATIC_ANALYSIS.md`.
         run: |
           set -euo pipefail
+          # `--inline-suppr` enables the handful of `// cppcheck-suppress`
+          # comments in core.c for call-site-specific false positives
+          # that survive the scope reduction above (documented in-place):
+          #   * `nullPointerArithmeticRedundantCheck` on the string
+          #     refcount hidden-header pointer arithmetic — already
+          #     guarded by an explicit `ptr == 0 || ptr < 4096 || ptr < 0`
+          #     triplet that cppcheck's solver does not fully absorb.
+          #   * `shiftTooManyBitsSigned` on `taida_shift_r`'s arithmetic
+          #     right shift — deliberate implementation-defined behaviour
+          #     contracted by the Taida surface, documented at the site.
           cppcheck --enable=warning,performance,portability \
                    --suppress=missingIncludeSystem \
+                   --inline-suppr \
                    --error-exitcode=1 \
                    --quiet \
                    /tmp/c-analysis/native_runtime_assembled.c \

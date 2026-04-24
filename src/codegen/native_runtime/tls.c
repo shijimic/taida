@@ -679,8 +679,10 @@ static taida_val taida_os_http_do_curl(const char *method, const char *url, taid
             taida_val value_hash = taida_str_hash((taida_val)"value");
             for (taida_val i = 0; i < count; i++) {
                 taida_val rec = list[4 + i];
-                char *hn = taida_os_http_pack_str_field(rec, name_hash);
-                char *hv = taida_os_http_pack_str_field(rec, value_hash);
+                char *hn = NULL;
+                char *hv = NULL;
+                hn = taida_os_http_pack_str_field(rec, name_hash);
+                hv = taida_os_http_pack_str_field(rec, value_hash);
                 if (hn && hv) {
                     C20_HTTP_ADD_CURL_HEADER(hn, hv);
                 }
