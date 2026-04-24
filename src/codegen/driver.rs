@@ -701,19 +701,38 @@ fn resolve_module_path(base_dir: &Path, module_path: &str, version: Option<&str>
             PathBuf::from(format!("<unresolved package: {}>", module_path))
         }
     };
-    // RCB-303: Reject relative imports that escape the project root (path traversal).
+    // RCB-303 / C26B-015: Reject relative imports that escape the project root.
+    //
+    // The check runs even if the target file has not been created yet
+    // (native backend evaluates imports before source is staged). The
+    // previous implementation fell back to `module_path.contains("..")`
+    // when either canonicalize() failed, which rejected perfectly
+    // legitimate in-project imports such as `examples/foo` referencing
+    // `../src/bar` — both paths resolve under the same project root but
+    // the intermediate file had not been read yet so canonicalize()
+    // returned ENOENT.
+    //
+    // The fix walks path components manually: start at base_dir's
+    // absolute form, apply each component (`..` pops, `.` skips,
+    // normal names push), and check the result stays inside the
+    // project root. We only accept paths whose lexical normalisation
+    // is contained; a true escape (e.g. `../../../etc/passwd`) still
+    // reports itself because the lexical walk surfaces components that
+    // exit the root. Symlink-based escapes are handled by the
+    // canonicalize() fast path (which still runs when possible).
     if module_path.starts_with("./") || module_path.starts_with("../") {
         let project_root = find_project_root(base_dir);
-        let reject = if let Ok(resolved) = path.canonicalize() {
-            if let Ok(root_canonical) = project_root.canonicalize() {
-                !resolved.starts_with(&root_canonical)
-            } else {
-                // Cannot canonicalize project root — reject if path contains ".."
-                module_path.contains("..")
-            }
+        let reject = if let (Ok(resolved), Ok(root_canonical)) =
+            (path.canonicalize(), project_root.canonicalize())
+        {
+            // Fast path: both sides exist on disk — trust the canonical
+            // comparison (handles symlinks correctly).
+            !resolved.starts_with(&root_canonical)
         } else {
-            // Cannot canonicalize target — reject if path contains ".."
-            module_path.contains("..")
+            // Slow path: target has not been written yet (native build
+            // stage) or the project root is not canonicalizable for an
+            // unrelated reason. Resolve lexically.
+            lexical_escapes_root(&path, &project_root)
         };
         if reject {
             return PathBuf::from(format!("<path traversal rejected: {}>", module_path));
@@ -721,6 +740,72 @@ fn resolve_module_path(base_dir: &Path, module_path: &str, version: Option<&str>
     }
 
     path
+}
+
+/// C26B-015: Lexically determine whether `path` escapes `project_root`.
+///
+/// Called when either side cannot be canonicalized (typically because
+/// the imported file has not been materialised on disk yet — native
+/// build stage). The function:
+///
+/// 1. Picks the best absolute form for each input (`canonicalize()`
+///    result if available, otherwise `absolutize()` the component
+///    sequence against cwd).
+/// 2. Walks the components of the target path, popping on `..`,
+///    skipping `.`, pushing otherwise. Result is the lexical
+///    resolution of the path — no disk access.
+/// 3. Returns true if the resolved path is NOT a prefix of (or equal
+///    to) the project root's absolute form.
+///
+/// This accepts legitimate in-project traversals (`examples/foo.td`
+/// importing `../src/bar.td` where both live under the same project
+/// root) while still rejecting real escapes (`../../outside.td`).
+fn lexical_escapes_root(path: &Path, project_root: &Path) -> bool {
+    use std::path::Component;
+
+    fn absolutize(p: &Path) -> PathBuf {
+        if p.is_absolute() {
+            p.to_path_buf()
+        } else {
+            std::env::current_dir()
+                .map(|cwd| cwd.join(p))
+                .unwrap_or_else(|_| p.to_path_buf())
+        }
+    }
+
+    // Resolve both sides to their best-available absolute form.
+    let root_abs = project_root
+        .canonicalize()
+        .unwrap_or_else(|_| absolutize(project_root));
+    let path_abs = path.canonicalize().unwrap_or_else(|_| absolutize(path));
+
+    // Walk path components and normalise `.` / `..` lexically.
+    let mut resolved: Vec<Component<'_>> = Vec::new();
+    for comp in path_abs.components() {
+        match comp {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                // Pop unless we are already at a root/prefix component.
+                if let Some(last) = resolved.last() {
+                    match last {
+                        Component::RootDir | Component::Prefix(_) => {
+                            // Stay at root — `..` from `/` is `/`.
+                        }
+                        _ => {
+                            resolved.pop();
+                        }
+                    }
+                }
+            }
+            other => resolved.push(other),
+        }
+    }
+    let mut normalised = PathBuf::new();
+    for c in &resolved {
+        normalised.push(c.as_os_str());
+    }
+
+    !normalised.starts_with(&root_abs)
 }
 
 /// RCB-103: Find project root by walking up from the given directory.

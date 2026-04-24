@@ -4447,6 +4447,19 @@ int64_t taida_addon_call(
 int main(int argc, char **argv) {
     taida_cli_argc = argc;
     taida_cli_argv = argv;
+    /* C26B-021 (Option B): force line-buffered stdio so that native output
+     * timing matches Interpreter (Rust println!) / JS (Node console.log) when
+     * the process is attached to a pipe. POSIX libc defaults stdout to
+     * fully buffered (4KB/8KB) when stdout is not a tty, which broke
+     * 3-backend observability parity for curl-driven HTTP trace logs:
+     * Interpreter/JS emitted trace-per-request in real time, but Native
+     * buffered them until server shutdown. setvbuf at process entry
+     * restores line-buffered semantics everywhere with a single init call
+     * (lower overhead than per-call fflush). _IOLBF flushes on every '\n'
+     * and at stdio close, which matches the observable behaviour of the
+     * other two backends. */
+    setvbuf(stdout, NULL, _IOLBF, 0);
+    setvbuf(stderr, NULL, _IOLBF, 0);
     /* C12-5 (FB-18): `_taida_main` now returns whatever the final expression
      * evaluates to — in particular `stdout(...)` returns the byte count (Int)
      * instead of Unit. Leaking that value into the process exit code would

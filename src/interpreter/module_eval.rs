@@ -57,6 +57,24 @@ impl Interpreter {
                         }
                     }
                 }
+            } else if let Some(bundled) =
+                crate::pkg::provider::CoreBundledProvider::materialize_core_bundled(import_path)
+            {
+                // C26B-014: core-bundled packages (`taida-lang/os`,
+                // `taida-lang/net`, `taida-lang/crypto`, `taida-lang/js`,
+                // `taida-lang/pool`) can be imported without a
+                // packages.tdm declaration. `docs/reference/os_api.md`
+                // and `docs/guide/10_modules.md` promise both the
+                // imported and import-less call forms; this branch
+                // materializes the bundled stub on-demand so the
+                // runtime path agrees with the checker
+                // (`install_core_bundled_os_pins` in src/types/checker.rs).
+                // Option B (Design Lock 2026-04-24): implementation
+                // follows docs. Package imports into packages.tdm still
+                // work via the `resolve_package_module` branch above
+                // (deps-installed precedence preserved).
+                let bundled_dir = bundled.map_err(|e| RuntimeError { message: e })?;
+                bundled_dir.join("main.td")
             } else {
                 return Err(RuntimeError {
                     message: format!(

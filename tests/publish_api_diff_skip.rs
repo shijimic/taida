@@ -119,6 +119,15 @@ fn force_version_skips_api_diff_on_parse_error() {
     // `api_diff: parse errors:` and fail the test.
     let root = unique_temp_dir("force_version_skips_diff");
     let project = setup_repo_with_unparseable_facade(&root, "demo-pkg");
+    // C26B-025: manifest self-identity must match the tag.
+    fs::write(
+        project.join("packages.tdm"),
+        "<<<@b.1 alice/demo-pkg\n",
+    )
+    .unwrap();
+    run_git(&["add", "packages.tdm"], &project);
+    run_git(&["commit", "-m", "bump manifest to b.1"], &project);
+    run_git(&["push", "origin", "main"], &project);
 
     let out = Command::new(taida_bin())
         .env("TAIDA_PUBLISH_SKIP_GH_AUTH", "1")
@@ -212,6 +221,16 @@ fn retag_alone_also_skips_api_diff() {
     run_git(&["tag", "a.2"], &project);
     run_git(&["push", "origin", "refs/tags/a.2"], &project);
     run_git(&["tag", "-d", "a.2"], &project);
+
+    // C26B-025: manifest self-identity must match the tag.
+    fs::write(
+        project.join("packages.tdm"),
+        "<<<@a.2 alice/demo-pkg\n",
+    )
+    .unwrap();
+    run_git(&["add", "packages.tdm"], &project);
+    run_git(&["commit", "-m", "bump manifest to a.2"], &project);
+    run_git(&["push", "origin", "main"], &project);
 
     let out = Command::new(taida_bin())
         .env("TAIDA_PUBLISH_SKIP_GH_AUTH", "1")

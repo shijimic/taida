@@ -352,18 +352,19 @@ mod tests {
         // C26B-020 柱 1 (@c.26): readBytesAt forward decl added to
         // core.c (+140 bytes in F1, before the Error ceiling) and
         // taida_os_read_bytes_at function body added to os.c
-        // (additive +2,135 bytes). F1_LEN moves from 235,748
-        // → +140 (P10) +2,889 (P11) → 238,777.
+        // (additive +2,135 bytes total, including the F1 forward decl).
+        // F1_LEN moves from 235,748 → +140 (P10) +2,889 (P11) → 238,777.
         // F2_LEN moves from 159,407 → +945 (P11) → 160,352.
-        // Other fragments (tls / net_h1_h2 / net_h3_quic) unchanged.
-        // Combined delta: +3,834 (P11 core.c) +2,135 (P10 os.c + F1
-        // forward decl). Measured concatenation yields 982,137 bytes;
-        // the P10 +140 is already accounted for within the P10
-        // +2,135 os.c addition tally (the readBytesAt forward decl
-        // lives in F1 of core.c but its bytes are part of the
-        // composite delta measured here).
-        // New total: 976,168 + 5,969 = 982,137.
-        const EXPECTED_TOTAL_LEN: usize = 982_137;
+        // C26B-021 (@c.26): +839 bytes in net_h3_quic.c for the
+        // `setvbuf(stdout/stderr, _IOLBF, 0)` stdout line-buffering fix
+        // at the top of main(). Does not affect core.c so F1_LEN /
+        // F2_LEN unchanged. Only the grand total shifts.
+        // Combined delta on top of 976,168:
+        //   +3,834 (C26B-011 core.c)
+        //   +2,135 (C26B-020 os.c + F1 forward decl)
+        //   +  839 (C26B-021 net_h3_quic.c)
+        // New total: 976,168 + 6,808 = 982,976.
+        const EXPECTED_TOTAL_LEN: usize = 982_976;
         let asm = *NATIVE_RUNTIME_C;
         assert_eq!(
             asm.len(),

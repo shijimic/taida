@@ -210,6 +210,54 @@ impl CoreBundledProvider {
         org == "taida-lang" && matches!(name, "os" | "js" | "crypto" | "net" | "pool")
     }
 
+    /// C26B-014: materialize a core-bundled package on-demand even when
+    /// `packages.tdm` does not declare it. `resolve()` requires a full
+    /// `Manifest` because it participates in the `taida deps` pipeline;
+    /// at runtime we only need the bundled directory path so that
+    /// `resolve_module_path` can hand it to the import evaluator.
+    ///
+    /// Returns the bundled directory (containing `main.td`) or an
+    /// error string if the stub cannot be materialized. The function
+    /// is idempotent — existing stubs with matching source are reused.
+    ///
+    /// `import_path` is the full import path (e.g. `taida-lang/os`).
+    pub fn materialize_core_bundled(import_path: &str) -> Option<Result<PathBuf, String>> {
+        let (org, name) = import_path.split_once('/')?;
+        if !Self::is_core_bundled(org, name) {
+            return None;
+        }
+        let bundled_root = Self::global_bundled_root();
+        let bundled_dir = bundled_root.join(name);
+        if let Err(e) = std::fs::create_dir_all(&bundled_dir) {
+            return Some(Err(format!(
+                "Cannot create bundled dir for '{}': {}",
+                name, e
+            )));
+        }
+        let main_td = bundled_dir.join("main.td");
+        let source: &str = match name {
+            "os" => Self::os_package_source(),
+            "js" => Self::js_package_source(),
+            "crypto" => Self::crypto_package_source(),
+            "net" => Self::net_package_source(),
+            "pool" => Self::pool_package_source(),
+            _ => return None,
+        };
+        let needs_write = match std::fs::read_to_string(&main_td) {
+            Ok(existing) => existing != source,
+            Err(_) => true,
+        };
+        if needs_write {
+            if let Err(e) = std::fs::write(&main_td, source) {
+                return Some(Err(format!(
+                    "Cannot write bundled source for '{}': {}",
+                    name, e
+                )));
+            }
+        }
+        Some(Ok(bundled_dir))
+    }
+
     /// Generate the os package stub source.
     fn os_package_source() -> &'static str {
         r#"// taida-lang/os — Core bundled package

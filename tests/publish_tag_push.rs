@@ -352,8 +352,15 @@ fn second_publish_uses_api_diff_for_next_version() {
         "hello <= 1\ngreet <= 2\n<<< @(hello, greet)\n",
     )
     .unwrap();
+    // C26B-025: manifest self-identity must match the tag that will
+    // be pushed. `--dry-run` still enforces the check.
+    fs::write(
+        project.join("packages.tdm"),
+        "<<<@a.2 alice/demo-pkg\n",
+    )
+    .unwrap();
     run_git(&["add", "."], &project);
-    run_git(&["commit", "-m", "add greet"], &project);
+    run_git(&["commit", "-m", "add greet + bump manifest"], &project);
     run_git(&["push", "origin", "main"], &project);
 
     let out = Command::new(taida_bin())
@@ -395,8 +402,15 @@ fn breaking_change_bumps_generation() {
         "farewell <= 1\n<<< @(farewell)\n",
     )
     .unwrap();
+    // C26B-025: breaking change bumps generation -> b.1, so manifest
+    // must be bumped to match.
+    fs::write(
+        project.join("packages.tdm"),
+        "<<<@b.1 alice/demo-pkg\n",
+    )
+    .unwrap();
     run_git(&["add", "."], &project);
-    run_git(&["commit", "-m", "rename hello -> farewell"], &project);
+    run_git(&["commit", "-m", "rename hello -> farewell + bump manifest"], &project);
     run_git(&["push", "origin", "main"], &project);
 
     let out = Command::new(taida_bin())

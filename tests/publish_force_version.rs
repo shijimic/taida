@@ -72,10 +72,28 @@ fn taida_bin() -> PathBuf {
     common::taida_bin()
 }
 
+/// C26B-025: rewrite `packages.tdm` self-identity to match the
+/// version about to be published, then amend the initial commit so
+/// the working tree stays clean for `taida publish`.
+fn bump_manifest_to(project: &Path, pkg: &str, version: &str) {
+    fs::write(
+        project.join("packages.tdm"),
+        format!("<<<@{} alice/{}\n", version, pkg),
+    )
+    .unwrap();
+    run_git(&["add", "packages.tdm"], project);
+    run_git(&["commit", "--amend", "--no-edit"], project);
+    // Re-push the amended main so the bare remote agrees.
+    run_git(&["push", "-f", "origin", "main"], project);
+}
+
 #[test]
 fn force_version_overrides_auto_bump() {
     let root = unique_temp_dir("force_version_simple");
     let project = setup_repo(&root, "demo-pkg");
+    // C26B-025: manifest must match the tag. --force-version a.5
+    // requires packages.tdm to declare <<<@a.5.
+    bump_manifest_to(&project, "demo-pkg", "a.5");
 
     // Auto-detection would yield `a.1` (initial release). We override
     // to `a.5`.
@@ -105,6 +123,11 @@ fn force_version_overrides_auto_bump() {
 fn force_version_combined_with_label() {
     let root = unique_temp_dir("force_version_label");
     let project = setup_repo(&root, "demo-pkg");
+    // C26B-025: Manifest declares the stable base version `a.5`;
+    // `--label rc` attaches the label so the tag becomes `a.5.rc`.
+    // This is the supported "label addendum" form — manifest does
+    // not need to encode the label.
+    bump_manifest_to(&project, "demo-pkg", "a.5");
 
     let out = Command::new(taida_bin())
         .env("TAIDA_PUBLISH_SKIP_GH_AUTH", "1")
@@ -158,6 +181,8 @@ fn force_version_actually_pushes_the_forced_tag() {
     let root = unique_temp_dir("force_version_e2e");
     let bare = root.join("remote.git");
     let project = setup_repo(&root, "demo-pkg");
+    // C26B-025: manifest must agree with the tag.
+    bump_manifest_to(&project, "demo-pkg", "a.7");
 
     let out = Command::new(taida_bin())
         .env("TAIDA_PUBLISH_SKIP_GH_AUTH", "1")
@@ -183,6 +208,71 @@ fn force_version_actually_pushes_the_forced_tag() {
         "remote tags missing 'a.7': {}",
         tags_str
     );
+}
+
+/// C26B-025: publish must refuse when `packages.tdm` self-identity
+/// disagrees with the tag about to be pushed. This is the primary
+/// regression guard for the terminal `@a.7` incident.
+#[test]
+fn c26b_025_publish_rejects_stale_manifest_self_identity() {
+    let root = unique_temp_dir("c26b_025_stale_manifest");
+    let project = setup_repo(&root, "demo-pkg");
+    // Manifest stays at <<<@a.1 but we try to publish as a.7 —
+    // mismatched base version (not a label addendum).
+    let out = Command::new(taida_bin())
+        .env("TAIDA_PUBLISH_SKIP_GH_AUTH", "1")
+        .args(["publish", "--dry-run", "--force-version", "a.7"])
+        .current_dir(&project)
+        .output()
+        .expect("run");
+    assert!(
+        !out.status.success(),
+        "publish must reject when manifest self-identity is stale"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("packages.tdm self-identity")
+            && stderr.contains("<<<@a.1")
+            && stderr.contains("'a.7'"),
+        "stderr must pinpoint both current manifest version and desired tag: {}",
+        stderr
+    );
+    assert!(
+        stderr.contains("Bump"),
+        "stderr must instruct operator to bump manifest: {}",
+        stderr
+    );
+}
+
+/// C26B-025: label addendum ("manifest a.5" + "--label rc" = tag
+/// "a.5.rc") is a legitimate match and must NOT be rejected. This
+/// keeps the common RC workflow ergonomic.
+#[test]
+fn c26b_025_publish_accepts_label_addendum() {
+    let root = unique_temp_dir("c26b_025_label_ok");
+    let project = setup_repo(&root, "demo-pkg");
+    bump_manifest_to(&project, "demo-pkg", "a.5");
+    let out = Command::new(taida_bin())
+        .env("TAIDA_PUBLISH_SKIP_GH_AUTH", "1")
+        .args([
+            "publish",
+            "--dry-run",
+            "--force-version",
+            "a.5",
+            "--label",
+            "rc1",
+        ])
+        .current_dir(&project)
+        .output()
+        .expect("run");
+    assert!(
+        out.status.success(),
+        "label addendum must pass:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("Tag to push: a.5.rc1"));
 }
 
 #[test]
