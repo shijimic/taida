@@ -295,20 +295,14 @@ fn c27b_021_wd_mod_precision_pi_4backend_numeric_parity() {
 /// that was already correct but was untested at the numeric level.
 #[test]
 fn c27b_021_wd_mod_basic_value_4backend_numeric_parity() {
-    check_4backend_parity(
-        "examples/quality/c27_wasm_arith/mod_basic_value.td",
-        "1.0",
-    );
+    check_4backend_parity("examples/quality/c27_wasm_arith/mod_basic_value.td", "1.0");
 }
 
 /// Signed zero must survive `Mod[-0.0, 1.0]()` on every backend
 /// (IEEE 754 fmod sign rule preserves dividend sign).
 #[test]
 fn c27b_021_wd_mod_signed_zero_4backend_numeric_parity() {
-    check_4backend_parity(
-        "examples/quality/c27_wasm_arith/mod_signed_zero.td",
-        "-0.0",
-    );
+    check_4backend_parity("examples/quality/c27_wasm_arith/mod_signed_zero.td", "-0.0");
 }
 
 /// `Mod[-7.0, 3.0]()` -> -1.0 (sign of dividend).
@@ -324,10 +318,7 @@ fn c27b_021_wd_mod_neg_dividend_4backend_numeric_parity() {
 /// sign follows dividend).
 #[test]
 fn c27b_021_wd_mod_neg_divisor_4backend_numeric_parity() {
-    check_4backend_parity(
-        "examples/quality/c27_wasm_arith/mod_neg_divisor.td",
-        "1.0",
-    );
+    check_4backend_parity("examples/quality/c27_wasm_arith/mod_neg_divisor.td", "1.0");
 }
 
 /// `Div[1.0, 3.0]()` bit-pattern parity (covers `taida_float_to_str`

@@ -210,6 +210,7 @@ fn collect_unsupported_insts(insts: &[IrInst], _out: &mut Vec<String>) {
             | IrInst::Return(_)
             | IrInst::Retain(_)
             | IrInst::Release(_)
+            | IrInst::ReleaseAuto(_)
             | IrInst::GlobalSet(_, _)
             | IrInst::GlobalGet(_, _)
             | IrInst::TailCall(_) => {}
@@ -1640,7 +1641,7 @@ fn emit_inst(
             writeln!(c, "{}return v_{};", indent, var).unwrap();
         }
         // wasm-min で未サポートの命令
-        IrInst::Retain(_) | IrInst::Release(_) => {
+        IrInst::Retain(_) | IrInst::Release(_) | IrInst::ReleaseAuto(_) => {
             // RC 操作は wasm-min では無視（ヒープなし）
             writeln!(c, "{}/* retain/release skipped (wasm-min) */", indent).unwrap();
         }

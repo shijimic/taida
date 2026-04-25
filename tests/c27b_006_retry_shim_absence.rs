@@ -105,8 +105,8 @@ fn c27b_006_naive_one_shot_preserved() {
     // so this asymmetric guard catches re-addition cleanly.
     let source = read_parity_source();
 
-    let tcp_body = extract_function_body(&source, FUNCTIONS_TO_VERIFY[0])
-        .expect("tcp accept fn body");
+    let tcp_body =
+        extract_function_body(&source, FUNCTIONS_TO_VERIFY[0]).expect("tcp accept fn body");
     let tcp_listen_count = tcp_body.matches("tcpListen(").count();
     assert_eq!(
         tcp_listen_count, 1,
@@ -115,8 +115,8 @@ fn c27b_006_naive_one_shot_preserved() {
         tcp_listen_count
     );
 
-    let udp_body = extract_function_body(&source, FUNCTIONS_TO_VERIFY[1])
-        .expect("udp echo fn body");
+    let udp_body =
+        extract_function_body(&source, FUNCTIONS_TO_VERIFY[1]).expect("udp echo fn body");
     let udp_bind_count = udp_body.matches("udpBind(").count();
     assert_eq!(
         udp_bind_count, 1,
@@ -133,8 +133,7 @@ fn c27b_006_no_outer_connect_retry_loop() {
     // already do single-shot connect.
     let source = read_parity_source();
     for fn_name in FUNCTIONS_TO_VERIFY {
-        let body = extract_function_body(&source, fn_name)
-            .expect("fn body for retry-loop scan");
+        let body = extract_function_body(&source, fn_name).expect("fn body for retry-loop scan");
         // Heuristic: the bad pattern is `for _ in 0..N` where N is a
         // small literal, with a `TcpStream::connect` somewhere inside.
         // We forbid both the `for _ in 0..` loop AND any `tcp_connect_retry`
@@ -143,7 +142,8 @@ fn c27b_006_no_outer_connect_retry_loop() {
             assert!(
                 !body.contains(forbidden),
                 "c27b_006: function `{}` reintroduced banned helper `{}`",
-                fn_name, forbidden
+                fn_name,
+                forbidden
             );
         }
         // Conservative check: a `for _ in 0..` followed within ~200

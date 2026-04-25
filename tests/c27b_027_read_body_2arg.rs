@@ -118,11 +118,7 @@ fn cleanup(dir: &std::path::Path) {
 
 /// Spawn the server (3-backend), wait until bound, send request with body,
 /// collect response bytes, return (response_str, server_stdout).
-fn spawn_2arg_server_and_post_body(
-    backend: &str,
-    port: u16,
-    body: &[u8],
-) -> (String, String) {
+fn spawn_2arg_server_and_post_body(backend: &str, port: u16, body: &[u8]) -> (String, String) {
     let body_len = body.len();
     // 2-arg handler: read body via readBody(req), echo back as response body.
     let source = format!(
@@ -302,8 +298,7 @@ fn assert_echo_parity(case_label: &str, body: &[u8]) {
 
         // Assert the echoed body contains the original body text.
         assert!(
-            echoed_text.contains(&body_text)
-                || (body_len == 0 && echoed_text.is_empty()),
+            echoed_text.contains(&body_text) || (body_len == 0 && echoed_text.is_empty()),
             "c27b_027/{}/{}: echoed body did not contain original ({} bytes). echoed bytes (first 200 chars): {:?}",
             case_label,
             backend,

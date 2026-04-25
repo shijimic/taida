@@ -9,6 +9,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::emit::Emitter;
 use super::emit_wasm_c;
+use super::lifetime;
 use super::lower::Lowering;
 use super::rc_opt;
 use crate::module_graph;
@@ -533,6 +534,11 @@ fn compile_to_object(input_path: &Path) -> Result<(PathBuf, ModuleImports), Comp
     let mut ir_module = lowering.lower_program(&program).map_err(|e| CompileError {
         message: format!("{}", e),
     })?;
+
+    // C27B-018 Option B (wf018B): lifetime tracking — insert
+    // ReleaseAuto for short-lived bindings whose function-end Release
+    // is unreachable (TCO loops, CondArm-local bindings).
+    lifetime::insert_release_for_dead_bindings(&mut ir_module);
 
     // RC 最適化パス: 不要な Retain/Release を除去
     rc_opt::optimize(&mut ir_module);

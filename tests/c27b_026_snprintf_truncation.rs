@@ -58,15 +58,15 @@ fn c27b_026_pseudo_too_long_constants_present() {
     // Sanity: the new error_reason constants must exist in both
     // net_h1_h2.c and net_h3_quic.c. A future refactor that removes
     // them without replacement re-opens the silent truncation hole.
-    let h12 = fs::read_to_string("src/codegen/native_runtime/net_h1_h2.c")
-        .expect("read net_h1_h2.c");
+    let h12 =
+        fs::read_to_string("src/codegen/native_runtime/net_h1_h2.c").expect("read net_h1_h2.c");
     assert!(
         h12.contains("H2_REQ_ERR_PSEUDO_TOO_LONG"),
         "C27B-026 regression: H2_REQ_ERR_PSEUDO_TOO_LONG missing from net_h1_h2.c"
     );
 
-    let h3 = fs::read_to_string("src/codegen/native_runtime/net_h3_quic.c")
-        .expect("read net_h3_quic.c");
+    let h3 =
+        fs::read_to_string("src/codegen/native_runtime/net_h3_quic.c").expect("read net_h3_quic.c");
     assert!(
         h3.contains("H3_REQ_ERR_PSEUDO_TOO_LONG"),
         "C27B-026 regression: H3_REQ_ERR_PSEUDO_TOO_LONG missing from net_h3_quic.c"
@@ -79,8 +79,8 @@ fn c27b_026_pseudo_header_snprintf_sites_use_bounded_memcpy() {
     // use snprintf(... "%s", headers[i].value) any more — gcc cannot
     // prove that form safe and the -Wformat-truncation warnings re-
     // appear. The bounded memcpy form replaces them.
-    let h12 = fs::read_to_string("src/codegen/native_runtime/net_h1_h2.c")
-        .expect("read net_h1_h2.c");
+    let h12 =
+        fs::read_to_string("src/codegen/native_runtime/net_h1_h2.c").expect("read net_h1_h2.c");
     assert!(
         !h12.contains(r#"snprintf(out->method, sizeof(out->method), "%s", headers[i].value)"#),
         "C27B-026 regression: net_h1_h2.c h2_extract_request_fields :method site reverted to snprintf"
@@ -90,7 +90,9 @@ fn c27b_026_pseudo_header_snprintf_sites_use_bounded_memcpy() {
         "C27B-026 regression: net_h1_h2.c h2_extract_request_fields :path site reverted to snprintf"
     );
     assert!(
-        !h12.contains(r#"snprintf(out->authority, sizeof(out->authority), "%s", headers[i].value)"#),
+        !h12.contains(
+            r#"snprintf(out->authority, sizeof(out->authority), "%s", headers[i].value)"#
+        ),
         "C27B-026 regression: net_h1_h2.c h2_extract_request_fields :authority site reverted to snprintf"
     );
     assert!(
@@ -98,8 +100,8 @@ fn c27b_026_pseudo_header_snprintf_sites_use_bounded_memcpy() {
         "C27B-026 regression: net_h1_h2.c h2_extract_request_fields :scheme site reverted to snprintf"
     );
 
-    let h3 = fs::read_to_string("src/codegen/native_runtime/net_h3_quic.c")
-        .expect("read net_h3_quic.c");
+    let h3 =
+        fs::read_to_string("src/codegen/native_runtime/net_h3_quic.c").expect("read net_h3_quic.c");
     assert!(
         !h3.contains(r#"snprintf(out->method, sizeof(out->method), "%s", headers[i].value)"#),
         "C27B-026 regression: net_h3_quic.c h3_extract_request_fields :method site reverted to snprintf"

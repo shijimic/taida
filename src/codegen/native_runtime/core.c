@@ -2575,6 +2575,36 @@ static void taida_str_release(taida_val ptr) {
     // Static strings: no header → no-op
 }
 
+// C27B-018 Option B (@c.27 Round 3, wf018B): runtime-dispatched release
+// helper for short-lived bindings emitted by the codegen lifetime
+// tracking pass. The codegen does not statically know whether a binding
+// holds a heap-string (hidden header at ptr-16) or a tagged Pack/List/
+// Closure/HMap/Set/Bytes/Async (magic header at ptr+0); this helper
+// inspects both possibilities at runtime and dispatches to the right
+// release path. No-op for static strings (no hidden header) and for
+// non-heap small ptrs.
+void taida_release_any(taida_val ptr) {
+    if (ptr == 0) return;
+    if (ptr > 0 && ptr < 4096) return;
+    if (ptr < 0) return;
+    // Try heap-string hidden header at ptr - 16 first; the layout puts
+    // a TAIDA_STR_MAGIC|rc word followed by a length word two slots
+    // before the user-visible char* pointer.
+    taida_val *hdr = ((taida_val*)ptr) - 2;
+    if (taida_ptr_is_readable((taida_val)hdr, sizeof(taida_val))) {
+        taida_val htag = hdr[0];
+        if ((htag & TAIDA_MAGIC_MASK) == TAIDA_STR_MAGIC) {
+            taida_str_release(ptr);
+            return;
+        }
+    }
+    // Otherwise dispatch to the standard release path which inspects
+    // the magic header at ptr+0 (Pack/List/Closure/HMap/Set/Bytes/Async).
+    // taida_release internally guards on readability and magic so a
+    // foreign or non-heap pointer is a safe no-op.
+    taida_release(ptr);
+}
+
 // ── BuchiPack runtime ─────────────────────────────────────
 // Pack layout (A-4b): [magic+rc, field_count, hash0, tag0, val0, hash1, tag1, val1, ...]
 // Stride = 3 per field: [hash, type_tag, value]
