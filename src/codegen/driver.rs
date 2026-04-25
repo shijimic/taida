@@ -593,6 +593,18 @@ pub fn compile_file(
     let result = (|| -> Result<PathBuf, CompileError> {
         while let Some((module_path, _symbols, importer_dir, version)) = pending_imports.pop() {
             let dep_path = resolve_module_path(&importer_dir, &module_path, version.as_deref());
+            // C27B-022: Surface the canonical 3-backend path-traversal
+            // rejection message instead of leaking the placeholder via
+            // "failed to read '<path traversal rejected: ...>'".
+            if let Some(rejected) = traversal_rejection_path(&dep_path) {
+                return Err(CompileError {
+                    message: format!(
+                        "Import path '{}' resolves outside the project root. \
+                         Path traversal beyond the project boundary is not allowed.",
+                        rejected
+                    ),
+                });
+            }
             let canonical = dep_path.canonicalize().unwrap_or(dep_path.clone());
             if compiled.contains(&canonical) {
                 continue;
@@ -701,7 +713,8 @@ fn resolve_module_path(base_dir: &Path, module_path: &str, version: Option<&str>
             PathBuf::from(format!("<unresolved package: {}>", module_path))
         }
     };
-    // RCB-303 / C26B-015: Reject relative imports that escape the project root.
+    // RCB-303 / C26B-015 / C27B-022: Reject imports that escape the
+    // project root.
     //
     // The check runs even if the target file has not been created yet
     // (native backend evaluates imports before source is staged). The
@@ -720,7 +733,16 @@ fn resolve_module_path(base_dir: &Path, module_path: &str, version: Option<&str>
     // reports itself because the lexical walk surfaces components that
     // exit the root. Symlink-based escapes are handled by the
     // canonicalize() fast path (which still runs when possible).
-    if module_path.starts_with("./") || module_path.starts_with("../") {
+    //
+    // C27B-022: extend the same guard to absolute path imports
+    // (`>>> /etc/passwd.td`) so that JS / Native / Interpreter agree
+    // on rejecting filesystem probes via absolute paths. Interpreter
+    // already gained this protection via SEC-003 (C26B-007); Native
+    // is brought into 3-backend parity here.
+    if module_path.starts_with("./")
+        || module_path.starts_with("../")
+        || module_path.starts_with('/')
+    {
         let project_root = find_project_root(base_dir);
         let reject = if let (Ok(resolved), Ok(root_canonical)) =
             (path.canonicalize(), project_root.canonicalize())
@@ -806,6 +828,19 @@ fn lexical_escapes_root(path: &Path, project_root: &Path) -> bool {
     }
 
     !normalised.starts_with(&root_abs)
+}
+
+/// C27B-022: Detect the `<path traversal rejected: ...>` placeholder
+/// produced by `resolve_module_path()` when a relative or absolute
+/// import escapes the project root, and recover the original module
+/// path string so the caller can emit the canonical 3-backend
+/// rejection message. Returns `None` if `path` is a real on-disk path.
+fn traversal_rejection_path(path: &Path) -> Option<String> {
+    let s = path.to_string_lossy();
+    let prefix = "<path traversal rejected: ";
+    let suffix = ">";
+    let stripped = s.strip_prefix(prefix)?.strip_suffix(suffix)?;
+    Some(stripped.to_string())
 }
 
 /// RCB-103: Find project root by walking up from the given directory.
@@ -1206,6 +1241,20 @@ fn inline_wasm_module_imports_with_backend(
             continue;
         }
 
+        // C27B-022: When `resolve_module_path` rejected the import for
+        // path traversal, surface the canonical 3-backend message instead
+        // of leaking the placeholder via "failed to read module
+        // '<path traversal rejected: ...>'". Keeps native parity with
+        // interpreter / JS rejection wording.
+        if let Some(rejected) = traversal_rejection_path(&dep_path) {
+            return Err(CompileError {
+                message: format!(
+                    "Import path '{}' resolves outside the project root. \
+                     Path traversal beyond the project boundary is not allowed.",
+                    rejected
+                ),
+            });
+        }
         let dep_source = fs::read_to_string(&dep_path).map_err(|e| CompileError {
             message: format!("failed to read module '{}': {}", dep_path.display(), e),
         })?;
