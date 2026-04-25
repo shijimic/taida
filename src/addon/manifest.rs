@@ -16,6 +16,15 @@
 //! package = "taida-lang/addon-rs-sample"
 //! library = "taida_addon_sample"
 //!
+//! # Optional. When omitted, the loader explicitly injects ["native"].
+//! # The omitted form and an explicit `targets = ["native"]` parse to a
+//! # bit-identical `AddonManifest`. Adding a non-`native` entry is a
+//! # parse error today (currently the only valid entry is `"native"`);
+//! # future generations may widen the allowlist, but never narrow it
+//! # silently — see `docs/reference/addon_manifest.md` for the
+//! # compatibility contract.
+//! targets = ["native"]
+//!
 //! # Required function table. Maps declared function names -> arities.
 //! [functions]
 //! noop = 0
@@ -35,6 +44,11 @@
 //!    platform suffix).
 //! 5. `[functions]` table MUST exist and contain at least one entry.
 //! 6. Each function arity MUST be a non-negative integer.
+//! 7. `targets`, when present, MUST be a non-empty array of strings
+//!    drawn from the supported allowlist (currently `{"native"}`).
+//!    When absent, the parser explicitly injects `vec!["native"]` so
+//!    the omitted form and `targets = ["native"]` produce a
+//!    bit-identical [`AddonManifest`].
 //!
 //! Any violation -> `AddonManifestError::*` with a deterministic
 //! single-line `Display` for diagnostic routing.
@@ -53,6 +67,28 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 
 use taida_addon::{TAIDA_ADDON_ABI_VERSION, TAIDA_ADDON_ENTRY_SYMBOL};
+
+/// D28B-021: closed allowlist for the top-level `targets` array.
+///
+/// The list is intentionally tiny so additions are visible review
+/// events. `"native"` is the only currently shipping addon dispatch
+/// target; `"wasm"` is reserved for the post-stable wasm dispatcher
+/// (POST-STABLE-001) and must be added here in lock-step with the
+/// dispatcher landing — silently accepting unknown entries would
+/// erase the stable compatibility guarantee documented in
+/// `docs/reference/addon_manifest.md`.
+pub const SUPPORTED_ADDON_TARGETS: &[&str] = &["native"];
+
+/// D28B-021: default value injected when `targets` is omitted.
+///
+/// Returning the same `Vec<String>` for both the absent and the
+/// `targets = ["native"]` cases is the structural half of the
+/// "bit-identical" contract — combined with sorted-key TOML emission
+/// it lets `tests/d28b_021_*.rs` md5 the parsed manifest and assert
+/// equality regardless of how the author wrote the source.
+pub fn default_addon_targets() -> Vec<String> {
+    vec!["native".to_string()]
+}
 
 // ── RC1.5: Prebuild distribution config ───────────────────────
 
@@ -118,6 +154,15 @@ pub struct AddonManifest {
     pub library: String,
     /// `[functions]` table: function name -> declared arity.
     pub functions: BTreeMap<String, u32>,
+    /// D28B-021: top-level `targets` array. Always populated after
+    /// parsing — when the source omits `targets`, the parser injects
+    /// [`default_addon_targets`] so the omitted form and an explicit
+    /// `targets = ["native"]` produce a bit-identical struct.
+    ///
+    /// Entries are validated against [`SUPPORTED_ADDON_TARGETS`] at
+    /// parse time; unknown entries are rejected with
+    /// [`AddonManifestError::UnknownAddonTarget`] (`[E2001]`).
+    pub targets: Vec<String>,
     /// RC1.5: `[library.prebuild]` section. `None` if absent (RC1 addon).
     pub prebuild: PrebuildConfig,
 }
@@ -198,6 +243,22 @@ pub enum AddonManifestError {
     PrebuildSignatureUnknownTarget { path: PathBuf, target: String },
     /// RC15B-005: duplicate `[library.prebuild.signatures.<target>]` for the same target.
     PrebuildDuplicateSignatureTarget { path: PathBuf, target: String },
+    /// D28B-021 (`[E2001]`): top-level `targets` contains an entry
+    /// that is not in [`SUPPORTED_ADDON_TARGETS`].
+    ///
+    /// The error is raised early — before any dispatcher is consulted —
+    /// so unknown targets cannot silently fall back to a default. The
+    /// `target` field carries the offending string verbatim (case
+    /// preserved) for the diagnostic.
+    UnknownAddonTarget { path: PathBuf, target: String },
+    /// D28B-021 (`[E2002]`): top-level `targets` was present but the
+    /// array was empty (`targets = []`). An empty array is rejected
+    /// rather than silently treated as the default — silent treatment
+    /// would let an author opt out of the contract by writing `[]`.
+    EmptyAddonTargets { path: PathBuf },
+    /// D28B-021: top-level `targets` was the wrong type (e.g. a string
+    /// or integer rather than an array of strings).
+    AddonTargetsTypeMismatch { path: PathBuf, detail: String },
 }
 
 impl fmt::Display for AddonManifestError {
@@ -348,6 +409,25 @@ impl fmt::Display for AddonManifestError {
                 target,
                 path.display()
             ),
+            Self::UnknownAddonTarget { path, target } => write!(
+                f,
+                "addon manifest error: [E2001] unknown addon target '{}' in '{}' (supported: {})",
+                target,
+                path.display(),
+                SUPPORTED_ADDON_TARGETS.join(", ")
+            ),
+            Self::EmptyAddonTargets { path } => write!(
+                f,
+                "addon manifest error: [E2002] 'targets' must be a non-empty array in '{}' (omit the key to accept the default {:?})",
+                path.display(),
+                SUPPORTED_ADDON_TARGETS
+            ),
+            Self::AddonTargetsTypeMismatch { path, detail } => write!(
+                f,
+                "addon manifest error: 'targets' in '{}' must be an array of strings ({})",
+                path.display(),
+                detail
+            ),
         }
     }
 }
@@ -415,6 +495,46 @@ pub fn parse_addon_manifest_str(
             path: path.to_path_buf(),
         });
     }
+
+    // D28B-021: validate top-level `targets`. The parser explicitly
+    // injects [`default_addon_targets`] when the key is absent so the
+    // omitted form and an explicit `targets = ["native"]` produce a
+    // bit-identical [`AddonManifest`].
+    let targets = match raw.top_level.get("targets") {
+        None => default_addon_targets(),
+        Some(RawValue::StrArray(items)) => {
+            if items.is_empty() {
+                return Err(AddonManifestError::EmptyAddonTargets {
+                    path: path.to_path_buf(),
+                });
+            }
+            for entry in items {
+                if !SUPPORTED_ADDON_TARGETS.contains(&entry.as_str()) {
+                    return Err(AddonManifestError::UnknownAddonTarget {
+                        path: path.to_path_buf(),
+                        target: entry.clone(),
+                    });
+                }
+            }
+            // Deterministic order: keep author-given order, but
+            // collapse duplicate entries so the bit-identical contract
+            // covers `targets = ["native", "native"]` too.
+            let mut seen = std::collections::BTreeSet::new();
+            let mut deduped = Vec::with_capacity(items.len());
+            for entry in items {
+                if seen.insert(entry.clone()) {
+                    deduped.push(entry.clone());
+                }
+            }
+            deduped
+        }
+        Some(other) => {
+            return Err(AddonManifestError::AddonTargetsTypeMismatch {
+                path: path.to_path_buf(),
+                detail: format!("got {}", other.kind_label()),
+            });
+        }
+    };
 
     // Validate [functions] table.
     let functions_raw = raw
@@ -594,6 +714,7 @@ pub fn parse_addon_manifest_str(
         package,
         library,
         functions,
+        targets,
         prebuild,
     })
 }
@@ -639,6 +760,10 @@ struct ParsedToml {
 enum RawValue {
     Int(i64),
     Str(String),
+    /// D28B-021: inline array of strings, used only for the top-level
+    /// `targets = ["native", ...]` key. Other keys still reject arrays
+    /// via [`require_str`] / [`require_int`] type checks.
+    StrArray(Vec<String>),
 }
 
 impl RawValue {
@@ -646,6 +771,7 @@ impl RawValue {
         match self {
             RawValue::Int(_) => "integer",
             RawValue::Str(_) => "string",
+            RawValue::StrArray(_) => "array of strings",
         }
     }
 }
@@ -874,6 +1000,24 @@ fn parse_value(path: &Path, line_no: usize, raw: &str) -> Result<RawValue, Addon
         return Ok(RawValue::Str(inner.to_string()));
     }
 
+    // D28B-021: inline array of strings — `["a", "b"]`.
+    // The parser is intentionally minimal: it only handles a single
+    // line of `["a", "b", ...]` with simple `"..."` string literals.
+    // Multi-line arrays are not part of the v1 schema and are rejected
+    // as a syntax error so authors get a clear failure rather than a
+    // partially-consumed continuation line.
+    if let Some(rest) = trimmed.strip_prefix('[') {
+        let inner = rest
+            .strip_suffix(']')
+            .ok_or_else(|| AddonManifestError::Syntax {
+                path: path.to_path_buf(),
+                line: line_no,
+                message: "array literal must close with ']' on the same line".to_string(),
+            })?;
+        let items = parse_str_array_items(path, line_no, inner)?;
+        return Ok(RawValue::StrArray(items));
+    }
+
     // Integer literal.
     if let Ok(n) = trimmed.parse::<i64>() {
         return Ok(RawValue::Int(n));
@@ -882,8 +1026,74 @@ fn parse_value(path: &Path, line_no: usize, raw: &str) -> Result<RawValue, Addon
     Err(AddonManifestError::Syntax {
         path: path.to_path_buf(),
         line: line_no,
-        message: format!("expected string \"...\" or integer, got '{}'", trimmed),
+        message: format!(
+            "expected string \"...\", integer, or array [\"...\", ...], got '{}'",
+            trimmed
+        ),
     })
+}
+
+/// D28B-021: parse the inside of a single-line `["a", "b"]` array.
+/// Returns the extracted strings in order; rejects empty entries,
+/// embedded escapes, and stray characters between elements.
+fn parse_str_array_items(
+    path: &Path,
+    line_no: usize,
+    inner: &str,
+) -> Result<Vec<String>, AddonManifestError> {
+    let trimmed = inner.trim();
+    if trimmed.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut items = Vec::new();
+    let mut rest = trimmed;
+    loop {
+        rest = rest.trim_start();
+        if !rest.starts_with('"') {
+            return Err(AddonManifestError::Syntax {
+                path: path.to_path_buf(),
+                line: line_no,
+                message: format!(
+                    "array element must start with '\"', got '{}'",
+                    rest.chars().next().unwrap_or(' ')
+                ),
+            });
+        }
+        // Find the closing quote without supporting escapes.
+        let after_open = &rest[1..];
+        let close_idx = after_open
+            .find('"')
+            .ok_or_else(|| AddonManifestError::Syntax {
+                path: path.to_path_buf(),
+                line: line_no,
+                message: "unterminated string literal in array".to_string(),
+            })?;
+        let item = &after_open[..close_idx];
+        if item.contains('\\') {
+            return Err(AddonManifestError::Syntax {
+                path: path.to_path_buf(),
+                line: line_no,
+                message: "array string literals must be simple \"...\" (no escapes)".to_string(),
+            });
+        }
+        items.push(item.to_string());
+        rest = after_open[close_idx + 1..].trim_start();
+        if rest.is_empty() {
+            return Ok(items);
+        }
+        let after_comma = rest
+            .strip_prefix(',')
+            .ok_or_else(|| AddonManifestError::Syntax {
+                path: path.to_path_buf(),
+                line: line_no,
+                message: format!("expected ',' or end of array, got '{}'", rest),
+            })?;
+        rest = after_comma.trim_start();
+        // Permit trailing comma.
+        if rest.is_empty() {
+            return Ok(items);
+        }
+    }
 }
 
 fn is_valid_key(key: &str) -> bool {

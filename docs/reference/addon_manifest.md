@@ -26,25 +26,21 @@ currently routes an addon-backed import through its dispatcher:
 | Interpreter    | **Yes**           | Dispatches through `dlopen` when the interpreter binary is built with `feature = "native"` (the default build). The addon facade runs as a dynamic Taida module in a dedicated environment. |
 | Native (AOT)   | **Yes**           | Lowered at build time. The facade is statically analysed by `src/addon/facade.rs` into an `AddonFacadeSummary`; facade FuncDefs become IR functions, pack / scalar / list / template bindings are replayed into the module init path, and cdylib calls go through `taida_addon_call`. |
 | JS transpiler  | **No**            | No JS-side dispatcher exists. Imports produce a deterministic error message pointing at `Run 'taida build --target native' or use the interpreter`. |
-| WASM (min / wasi) | **No**         | The wasm dispatcher is deferred to the gen-D breaking-change phase (see `docs/STABILITY.md` §1.2). When it lands it will reuse the `src/addon/facade.rs` static analyser so published manifests do not need to change. |
+| WASM (min / wasi) | **No**         | The wasm dispatcher is not currently shipped. When it lands it will reuse the `src/addon/facade.rs` static analyser so published manifests do not need to change. The compatibility contract for that future widening is described under `targets` below — manifests authored today opt into `["native"]` and must not be auto-rerouted to `wasm` without a manifest edit. |
 
 ### Error text for unsupported backends
 
-The error message emitted on an unsupported backend is fixed for the
-gen-C generation:
+The error message emitted on an unsupported backend is fixed:
 
 ```
 addon-backed package 'X' is not supported on backend 'Y' (supported:
-interpreter, native; wasm planned for D26). Run 'taida build --target
-native' or use the interpreter.
+interpreter, native). Run 'taida build --target native' or use the
+interpreter.
 ```
 
-The literal `D26` token inside the error string is a pinned surface
-artefact and is **not** renamed mid-generation (see
-`docs/STABILITY.md` §4.2). Tooling that matches on the policy should
-prefer the `"supported: interpreter, native"` prefix over the
-trailing label. The rename to a gen-D wasm dispatcher is deferred to
-the gen-D boundary.
+Tooling that matches on the policy should prefer the
+`"supported: interpreter, native"` prefix; the surface text is
+covered by `docs/STABILITY.md` §4.2.
 
 See `docs/guide/13_creating_addons.md` for the author-facing view of
 which facade constructs the native backend's static analyser
@@ -64,6 +60,61 @@ library = "my_addon"                     # string — cdylib filename stem (no l
 `abi`, `entry`, `package`, and `library` are all required. Any
 mismatch with the frozen ABI v1 constants is a parse error, not a
 load-time warning.
+
+## `targets` (optional, top-level)
+
+```toml
+targets = ["native"]
+```
+
+`targets` declares the set of Taida backends the addon expects its
+cdylib to be dispatched through. The field is **optional** at the
+source level but **always populated** in the parsed manifest:
+
+- **Default (key omitted)**: the parser explicitly injects
+  `["native"]`. The omitted form and an explicit
+  `targets = ["native"]` produce a **bit-identical**
+  `AddonManifest` — same struct values, same diagnostic strings.
+- **Allowed entries**: drawn from a closed allowlist. The current
+  allowlist is `{"native"}`; any other entry (including `"wasm"`,
+  `"Native"`, `"unknown"`) is rejected at parse time.
+- **Empty array**: `targets = []` is rejected. Authors who want
+  the default must omit the key entirely; an empty array would
+  otherwise let an addon opt out of the contract by writing a
+  technically-valid value.
+- **Duplicates**: collapsed silently — `targets = ["native", "native"]`
+  is normalised to `["native"]` so the bit-identical guarantee
+  survives author typos.
+- **Wrong type**: a string, integer, or table value for `targets`
+  is rejected as `AddonTargetsTypeMismatch`.
+
+### Compatibility contract
+
+The contract is the addon-side counterpart of the stable promise
+in `docs/STABILITY.md` §6 (breaking-change policy):
+
+1. **The default value is part of the surface.** Today every
+   manifest that omits `targets` resolves to `["native"]`. This
+   default is pinned for the lifetime of the current generation.
+2. **Default changes are gen-bumps.** The default value (or the
+   meaning of the omitted form) may only change at a generation
+   boundary — never within a generation, never as a silent fallback
+   in a point release. A widened allowlist (e.g. adding `"wasm"`
+   when the wasm dispatcher lands) MAY arrive within a generation,
+   but only as an additive change: existing manifests that say
+   `targets = ["native"]` keep behaving identically.
+3. **Unknown targets reject early.** The parser refuses unknown
+   entries with `[E2001] unknown addon target` rather than falling
+   back to the default. Silent fallback would be a foot-gun that
+   forces the dispatcher to guess what the author meant.
+
+### Diagnostic codes
+
+| Code     | Variant                       | When |
+|----------|-------------------------------|------|
+| `E2001`  | `UnknownAddonTarget`          | A `targets` entry is not in the supported allowlist (currently `{"native"}`). |
+| `E2002`  | `EmptyAddonTargets`           | `targets = []` — the array was present but empty. |
+| (none)   | `AddonTargetsTypeMismatch`    | `targets` was the wrong shape (e.g. a bare string or integer). |
 
 ## `[functions]`
 
@@ -232,6 +283,9 @@ use:
 | `PrebuildInvalidSignatureFormat`       | Signature value not `gpg:<opaque>` |
 | `PrebuildSignatureUnknownTarget`       | Signature key not a canonical triple |
 | `PrebuildDuplicateSignatureTarget`     | Same target listed twice under `signatures` |
+| `UnknownAddonTarget` (`E2001`)         | Top-level `targets` entry not in the supported allowlist |
+| `EmptyAddonTargets` (`E2002`)          | Top-level `targets = []` (empty array) |
+| `AddonTargetsTypeMismatch`             | Top-level `targets` was not an array of strings |
 
 ---
 

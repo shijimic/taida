@@ -18,6 +18,7 @@
 | `E15xx` | 定義・意味論エラー | TypeChecker | 重複定義、禁止構文の明示拒否 |
 | `E16xx` | 型推論・演算意味論エラー | TypeChecker | 戻り型不一致、列挙型不整合、演算子型不整合 |
 | `E17xx` | モジュール境界エラー | TypeChecker | `packages.tdm` 公開 API 不整合 |
+| `E20xx` | アドオンマニフェストエラー | Addon manifest parser | `targets` 互換契約違反、未知ターゲット |
 
 ## 現在の割り当て
 
@@ -118,6 +119,16 @@
 | コード | メッセージ | フェーズ |
 |--------|-----------|---------|
 | `E1701` | `packages.tdm` で宣言された公開 API とエントリモジュールの実シンボル群が不整合 (未公開 symbol import / 宣言済み symbol 欠如 / module 内シンボル未発見) | TypeChecker |
+
+### アドオンマニフェストエラー (`E20xx`)
+
+`native/addon.toml` の parser が発射する診断。詳細仕様は
+`docs/reference/addon_manifest.md` を参照。
+
+| コード | メッセージ | フェーズ |
+|--------|-----------|---------|
+| `E2001` | `targets` 配列のエントリが許可リスト（現在は `{"native"}`）に含まれない | Addon manifest parser |
+| `E2002` | `targets = []` — 空配列は許容しない（key を省略するとデフォルト `["native"]` が適用される） | Addon manifest parser |
 
 ## 帯域ルール
 

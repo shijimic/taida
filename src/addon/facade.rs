@@ -815,6 +815,7 @@ mod tests {
             package: package.to_string(),
             library: "taida_lang_test".to_string(),
             functions,
+            targets: crate::addon::manifest::default_addon_targets(),
             prebuild: PrebuildConfig::default(),
         }
     }
