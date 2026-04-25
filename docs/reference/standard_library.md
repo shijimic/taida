@@ -165,6 +165,19 @@ stdout(token)  // ba7816bf8f01cfea...f20015ad
 
 `UnsafePointer` はコア言語に導入しません。必要な低レベル連携は不透明ハンドル（`Molten`）+ 専用APIで隔離します。
 
+### Span pack 冷路変換
+
+`taida-lang/net` の `httpServe` / `httpParseRequestHead` が返す
+`@(start: Int, len: Int)` 形式の **span pack** は、元の `Bytes` を
+clone せず view として保持する zero-copy primitive です。span を
+明示的に `Str` へ materialize する **cold path** mold は
+[`docs/reference/net_api.md §4.1`](./net_api.md) を参照してください
+(`StrOf[span, raw]() -> Str` mold form で 3 backend parity 保証)。
+
+hot path (router の比較等) は `SpanEquals` / `SpanStartsWith` /
+`SpanContains` / `SpanSlice` (詳細は同 `net_api.md §4`) を使い、
+materialization を避けます。
+
 ---
 
 ## プリリュード型コンストラクタ

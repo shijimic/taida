@@ -174,3 +174,42 @@ Interactive 版:
 ```
 @(code: Int)
 ```
+
+---
+
+## 7. パス境界ポリシー（import / module loader）
+
+`>>> ./X.td` や `>>> ./sub/Y.td` といった相対 import は
+**プロジェクトルート（`.tdproj` のあるディレクトリ）** を境界とします。
+3 backend (Interpreter / JS / Native) で同一の境界判定とエラー
+メッセージを返します。
+
+| パターン | 例 | 結果 |
+|---------|-----|------|
+| プロジェクトルート内に閉じた `..` | `>>> ./sub/../sibling.td` | **許容**（解決後パスが root 内にあるため） |
+| プロジェクトルート内に閉じた nested `..` | `>>> ./sub/nested/../../sibling.td` | **許容** |
+| プロジェクトルート外への relative traversal | `>>> ./../outside.td` | **reject** |
+| プロジェクトルート外への absolute path | `>>> /tmp/outside/file.td` | **reject**（3 backend symmetric） |
+
+reject 時は 3 backend で **同一の error 文字列** を返します:
+
+```
+Import path '<exact import token>' resolves outside the project root. Path traversal beyond the project boundary is not allowed.
+```
+
+`<exact import token>` には import 元コードに書かれた文字列がそのまま
+入ります（`./../outside.td` であればそのリテラル、`/tmp/outside/file.td`
+であればそのリテラル）。lexical-vs-resolved の区別はなく、wire 上は
+入力 token を保ったまま fail-fast します。
+
+実装参照:
+
+- Interpreter: `src/interpreter/module_eval.rs`
+- JS codegen: `src/js/codegen.rs`
+- Native codegen: `src/codegen/driver.rs`
+- 3 backend parity guard: `tests/c27b_022_path_traversal_parity.rs`
+  (5 cases × 3 backends = 15) / `tests/c26b_015_path_traversal_parity.rs`
+
+> **Note**: SEC-009 (`src/pkg/store.rs::validate_path_component`) は
+> pkg-store URL component validation で、本セクションの import path
+> 境界判定とは domain disjoint です（重複なし）。

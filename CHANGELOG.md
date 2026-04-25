@@ -1,5 +1,183 @@
 # Changelog
 
+## @c.27 (in progress — gen-C stable, third candidate)
+
+**Fix-only RC cycle, third wave.** The label-less `@c.25` and `@c.26`
+tags were both **skipped** (see `docs/STABILITY.md` §1.3 / §5.6); the
+gen-C stable tag is now being pursued as `@c.27`. Intermediate tags
+are `@c.27.rcM`. No breaking changes land here — everything breaking
+is deferred to the D28 generation (`.dev/D28_BLOCKERS.md`; the
+rename history `D26 → D27 → D28` is documented in
+`docs/STABILITY.md` §1.2).
+
+The build-number rule is one-way: `@c.27.rcM` does **not**
+auto-promote to `@c.27`. The stable tag is a separate build with
+its own number, cut by the user only after the Phase 14 GATE
+verdict in `.dev/C27_PROGRESS.md` reaches **GO**.
+
+### Phase 0 Design Lock (2026-04-25)
+
+- C27 inherits the C26 Phase 14 GATE verdict (`feat/c26` merged at
+  `6c4fa5f`). 7 of the 13 originally tentative C27B-001..013
+  blockers were closed out by C26 work and flipped to
+  `CLOSED (not required)` (C27B-002 / 004 / 007 / 008 / 009 / 011 /
+  013); 6 remain `confirmed Must Fix` (C27B-001 / 003 / 005 / 006 /
+  010 / 012). Six new blockers (C27B-022..027) were opened from
+  C26 residuals (C26B-015 / 016 PARTIAL / 017 / 021 / 022 / 023)
+  per the DEFERRED-zero policy. Snapshot:
+  19 `OPEN (confirmed)` + 7 `CLOSED (not required)` +
+  1 `FIXED (historical)` + 0 `D28 ESCALATED` + 0 `tentative`.
+- The Phase 14 GATE evidence template (Blocker closure / 3-backend
+  parity / Backend matrix / NET soak / Security / Perf-memory /
+  Docs hygiene / PHILOSOPHY consistency / `@c.27.rcM` operation
+  discipline) is fixed in `.dev/C27_PROGRESS.md` and reproduced
+  in `docs/STABILITY.md §5.6`.
+
+### Round 1 (2026-04-25, parallel worktrees wA / wB / wC / wD)
+
+`feat/c27` merge sequence: `666b938` (wC) → `d79a884` (wA) →
+`d6ca943` (wD) → review fixes.
+
+- **C27B-014 / C27B-015 / C27B-017** `[FIXED after fA review fix]`
+  (wA: `d79a884`, fA review: `dc4b985`) — NET soak proxy
+  infrastructure. Three-fold land in one merge: (1) **C27B-014
+  port-bind announcement** — `httpServe` 1-arg / 2-arg paths now
+  emit a deterministic `[port=<N>]` line on stdout under the
+  opt-in env-var `TAIDA_NET_ANNOUNCE_PORT=1` (default OFF, so
+  existing surface is non-breaking; `src/interpreter/net_eval/h1.rs:493`
+  + JS / Native equivalents). (2) **C27B-015 fast-soak proxy
+  multi-backend dispatch** — `scripts/soak/fast-soak-proxy.sh`
+  gains `--backend {interp,js,native}`, supporting parallel
+  3-backend soak runs against ports 18081 / 18082 / 18083.
+  (3) **C27B-017 CI smoke** — new `.github/workflows/soak-smoke.yml`
+  runs `--duration-min 1 --backend interp` as a 1-min smoke on
+  every push (heredoc / parse-error catches without
+  consuming CI wallclock). The fA review fix exported the
+  `TAIDA_NET_ANNOUNCE_PORT` env-var to the proxy job and added a
+  CI assertion that the announce line is grep-matchable from the
+  proxy log (so the `USE_ANNOUNCE` branch is gated on a real CI
+  hard-fail, not a silent fallback to fixed-port).
+- **C27B-018 / C27B-028** — native `taida_str_alloc` arena leak
+  Option A trial uncovered a Critical async/Str RC corruption
+  (silent byte rewrite at offset 142 in
+  `numbered_parity::fixture_numbered_13_async`); both blockers
+  remain `OPEN` and are paired-fixed under wH in Round 2. The
+  Option A 1-line guard removal is **not** landed on `feat/c27`
+  yet — `4 GB plateau` is **not** an acceptable stable basis,
+  per the C27B-018 Acceptance.
+- **C27B-019** `[FIXED]` (wC: `666b938`) — `docs/reference/`
+  hygiene sweep. 7 + 3 files migrated their RC-tag-narrative /
+  blocker-ID-laden notes to `CHANGELOG.md`, leaving the
+  reference body **ID-free** / **tag-free** / **date-free**:
+  `addon_manifest.md` / `cli.md` / `graph_model.md` /
+  `mold_types.md` / `net_api.md` / `os_api.md` /
+  `tail_recursion.md` (initial 7) plus
+  `diagnostic_codes.md` / `standard_methods.md` (re-sweep
+  pickups), and the WASM SIMD note in `cli.md`. New
+  `docs/reference/README.md` pins the writing guide
+  (sections 1–6: responsibility split / forbidden patterns /
+  justified exceptions / what to write / sweep regex /
+  CHANGELOG cross-reference). The Round 1 review (M-1) flagged
+  that the Stream-parity historical context disappeared from
+  the reference; that context is now restored as a `@c.25.rc7`
+  CHANGELOG sub-bullet (see C25B-001 entry below). The Round 1
+  review (L-1) flagged that the sweep regex was hard-coded to
+  `C2[0-9]B-[0-9]` / `@c\.[0-9]`; the regex is now generalised
+  in `docs/reference/README.md §5` to
+  `[A-Z][0-9]+B-[0-9]+` / `@[a-z]\.[0-9]+` so D28 / D29 /
+  C28 cycles inherit the same discipline without manual regex
+  edits per generation. Sweep stays at 0 hits
+  (`grep -nE "Round [0-9]+|[A-Z][0-9]+B-[0-9]+|@[a-z]\.[0-9]+|FIXED" docs/reference/ --exclude=README.md`),
+  with the version-syntax samples in
+  `naming_conventions.md` / `operators.md` / `cli.md` /
+  `standard_library.md:113` documented as justified exceptions.
+- **C27B-020 / C27B-021** `[FIXED after fD review fix]`
+  (wD: `d6ca943`, fD review: `8fbdab2`) — wasm widening
+  addition (`STABILITY §6.2`): wasm-wasi bytes mold +
+  wasm-full polymorphic_length lowering, plus wasm Float
+  Div + bitwise / shift mold lowering. The fD review fix
+  swapped in MUSL `fmod` for `taida_mod_mold_f` so 4-backend
+  numeric parity holds across interpreter / JS / native /
+  wasm under the new wasm code path. `core_wasm` FROZEN region
+  untouched; lowering lives in the wasm-full / wasm-wasi
+  runtime extension surface only.
+- **C27B-022** `[FIXED after fJ review fix]`
+  (wJ: `29a9ea3`, fJ review: `d2e5615`) — Native backend
+  path traversal `..` reject 3-backend parity. JS / Native /
+  Interpreter all converge on the same boundary judgement
+  (project-root-internal `..` allowed, root-escape rejected)
+  and emit the same canonical error string
+  (`"Import path '<token>' resolves outside the project
+  root. Path traversal beyond the project boundary is not
+  allowed."`). 15 cases (5 × 3 backends) in
+  `tests/c27b_022_path_traversal_parity.rs`; 4 of the
+  C26B-015 cases also remain green. The fJ review tightened
+  the assertion to a regex full-match
+  (`assert_canonical_reject_strict`) and renamed the
+  Case 3 helper to `boundary` → `direct_child`. Documented
+  in `docs/reference/os_api.md §7` (Path traversal policy).
+- **C27B-024** `[FIXED guard]` (wG: `55f3ad7`, fG empirical:
+  `d3ba552`) — Interpreter closure capture bug regression
+  guard. The actual fix landed in C26 (`73fd0a1`,
+  Round 3 / wH); C27 wG added a 3-backend × 5-case parity
+  guard in `tests/c27b_024_closure_capture_return.rs`
+  (1-arg partial / 2-arg hole-in-first / nested closure /
+  CondBranch arm body partial / Pack-field projection
+  partial). The fG review reverted the 4-line guard at
+  `eval.rs:820-821` to confirm 5/5 RED with the same
+  HI-005-original symptom (`Cannot add <n> and @()`),
+  proving the guard is still load-bearing.
+
+### Round 2 (2026-04-25, parallel worktrees wE / wH / wI)
+
+Round 2 scope reflects the Phase 0 Design Lock verdict
+(wF dropped — Cluster 2 SEC fully closed in C26;
+wG narrowed to closure capture; wJ added for path traversal):
+
+- **wE (NET tls-h2)** — C27B-001 (h2 ≥10 cases + STABILITY §5.1
+  flip) + C27B-003 (port-bind race Critical) + C27B-006 (retry
+  shim retirement evidence pin) + C27B-027 NET portion.
+- **wH (Runtime perf)** — C27B-010 (valgrind / RSS hard-fail +
+  Coverage subset) + C27B-018 (native arena leak Option A,
+  paired with C27B-028 silent-byte-corruption fix) +
+  C27B-025 (Native stdout `setvbuf(_IOLBF)`) + C27B-026
+  (snprintf truncation Step 3 Option B).
+- **wI (Docs final amendment)** — this section + the
+  `@c.27` GATE snapshot in `docs/STABILITY.md §5.6` +
+  C27B-023 (`strOf` cold path docs) + C27B-027 docs portion +
+  C27B-022 docs amendment portion. Round 1 review M-1
+  (Stream parity historical context) and L-1 (README sweep
+  regex generalise) folded in.
+
+### Open at Round 2 boundary
+
+- **C27B-001** (h2 ≥10 cases + STABILITY §5.1 flip) — wE.
+- **C27B-003 (Critical)** (port-bind race recurrence on CI) — wE.
+- **C27B-005** (24 h soak PASS record — user action) +
+  agent-side proxy infra (014 / 015 / 017) FIXED.
+- **C27B-006** (retry shim retirement evidence pin) — wE.
+- **C27B-010 / C27B-018 / C27B-025 / C27B-026 / C27B-028** — wH.
+- **C27B-012** (this rolling docs amendment, continues
+  through GATE) — wI.
+- **C27B-023** (`strOf` cold path mold) — see status note
+  in this Round-1 wC entry; the `StrOf[span, raw]()` mold-form
+  is already 3-backend parity-pinned (Interpreter / JS /
+  Native via IR composition), and the function-form
+  `strOf(span, raw)` extension is **not landed on `feat/c27`
+  yet** — tracked under C27B-023 for Round 3 or D28
+  re-evaluation per `.dev/C27_BLOCKERS.md`.
+
+The Phase 14 GATE evidence template
+(`.dev/C27_PROGRESS.md` Phase 14 GATE evidence template)
+will be filled at GATE time with the merge-SHA / acceptance
+log per row. `EXPECTED_TOTAL_LEN` baseline at the Round 2
+boundary remains the C26 Round 10 / wε contractual value
+(see `docs/STABILITY.md §5.5 / §5.6`); any C27 wH change
+that touches Native runtime byte-length must update
+`EXPECTED_TOTAL_LEN` / `F1_LEN` in lock-step.
+
+---
+
 ## @c.26 (in progress — gen-C stable, second candidate)
 
 **Fix-only RC cycle.** The label-less `@c.25` tag was **skipped**
@@ -1273,7 +1451,17 @@ captured in `.dev/C25_CI_PROFILE.md` once the PR lands.
   `tests/c23_str_parity.rs` loses its last Stream-gated
   fixture and the test joins the 4-backend parity mainline.
   `EXPECTED_TOTAL_LEN` drifts from this landing are closed out
-  by `a9b6210` (see below).
+  by `a9b6210` (see below). **Historical context (RC2.x →
+  `@c.25.rc7`)**: prior to this landing, `Str[stream]()` was
+  parity-pinned for Interpreter / JS only — native and wasm
+  fixtures lived behind `STREAM_ONLY_FIXTURES` because the
+  display-string routing was missing on those backends. With
+  `4e17e89` + the `a9b6210` boundary resync, all four backends
+  now produce byte-for-byte identical output for the
+  Stream-gated fixtures, and `STREAM_ONLY_FIXTURES` is held
+  empty by `tests/c23_str_parity.rs` going forward (any
+  regression that re-introduces a backend-specific Stream
+  divergence breaks the parity test).
 - **C25B-028 (jsonEncode Gorillax parity, Must Fix)** (`48d26da`) —
   `jsonEncode(Gorillax[42]())` was emitting three different
   shapes across backends (interpreter =
