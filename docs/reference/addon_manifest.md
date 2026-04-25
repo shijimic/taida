@@ -3,9 +3,9 @@
 > **PHILOSOPHY.md — IV.** キモい言語だ。だが、書くのも読むのもAI。眺めるのが人間の仕事。
 
 This reference documents the `native/addon.toml` schema accepted by
-the Rust addon foundation introduced in RC1 and extended by the
-install-time pipeline in RC1.5. For a walkthrough of how to write
-and ship an addon, see `docs/guide/13_creating_addons.md`.
+the Rust addon foundation. For a walkthrough of how to write and
+ship an addon, see `docs/guide/13_creating_addons.md`. Tag-by-tag
+land history is in `CHANGELOG.md`.
 
 The parser is intentionally a **hand-written strict subset of TOML**
 implemented in `src/addon/manifest.rs`. It is not the upstream `toml`
@@ -14,7 +14,7 @@ document.
 
 ---
 
-## Backend support policy (`@c.25.rc7` redefinition)
+## Backend support policy
 
 The manifest schema does **not** change between backends — the same
 `native/addon.toml` is authoritative for every backend that
@@ -26,24 +26,29 @@ currently routes an addon-backed import through its dispatcher:
 | Interpreter    | **Yes**           | Dispatches through `dlopen` when the interpreter binary is built with `feature = "native"` (the default build). The addon facade runs as a dynamic Taida module in a dedicated environment. |
 | Native (AOT)   | **Yes**           | Lowered at build time. The facade is statically analysed by `src/addon/facade.rs` into an `AddonFacadeSummary`; facade FuncDefs become IR functions, pack / scalar / list / template bindings are replayed into the module init path, and cdylib calls go through `taida_addon_call`. |
 | JS transpiler  | **No**            | No JS-side dispatcher exists. Imports produce a deterministic error message pointing at `Run 'taida build --target native' or use the interpreter`. |
-| WASM (min / wasi) | **No**         | Deferred to the D28 breaking-change phase (see `docs/STABILITY.md` §1.2 for the D26→D27→D28 rename trail). The D28 wasm backend will reuse the `src/addon/facade.rs` static analyser so published manifests do not need to change. |
+| WASM (min / wasi) | **No**         | The wasm dispatcher is deferred to the gen-D breaking-change phase (see `docs/STABILITY.md` §1.2). When it lands it will reuse the `src/addon/facade.rs` static analyser so published manifests do not need to change. |
 
-The error text for unsupported backends was standardised at `@c.25.rc7`
-under C25B-030 and is pinned for the whole gen-C generation:
-`"addon-backed package 'X' is not supported on backend 'Y' (supported:
+### Error text for unsupported backends
+
+The error message emitted on an unsupported backend is fixed for the
+gen-C generation:
+
+```
+addon-backed package 'X' is not supported on backend 'Y' (supported:
 interpreter, native; wasm planned for D26). Run 'taida build --target
-native' or use the interpreter."`
+native' or use the interpreter.
+```
 
 The literal `D26` token inside the error string is a pinned surface
-artefact and is **not** renamed mid-generation (see `docs/STABILITY.md`
-§4.2). Tooling that matches on the policy should prefer the
-`"supported: interpreter, native"` prefix over the trailing `D26`
-label. The rename to `D28` is deferred to the gen-D boundary.
+artefact and is **not** renamed mid-generation (see
+`docs/STABILITY.md` §4.2). Tooling that matches on the policy should
+prefer the `"supported: interpreter, native"` prefix over the
+trailing label. The rename to a gen-D wasm dispatcher is deferred to
+the gen-D boundary.
 
 See `docs/guide/13_creating_addons.md` for the author-facing view of
 which facade constructs the native backend's static analyser
-understands, and `.dev/C26_BLOCKERS.md` / `.dev/C25_BLOCKERS.md`
-(archived) for the implementation-side acceptance criteria.
+understands.
 
 ---
 
@@ -73,7 +78,7 @@ as it appears in Taida source; values are the declared arity as a
 non-negative integer. Non-integer arities and duplicate keys are
 rejected at parse time.
 
-## `[library.prebuild]` (RC1.5, optional)
+## `[library.prebuild]` (optional)
 
 ```toml
 [library.prebuild]
@@ -81,15 +86,15 @@ url = "https://example.com/releases/{version}/lib{name}-{target}.{ext}"
 ```
 
 Declares where `taida install` should fetch the prebuild cdylib. If
-this section is absent, the addon is in RC1-style "developer
-places the `.so` manually" mode. If this section is present:
+this section is absent, the addon falls back to a "developer places
+the `.so` manually" mode. If this section is present:
 
 - `url` is required and must be a string.
 - Template variables are `{version}`, `{target}`, `{ext}`, `{name}`.
 - Unknown variables, unbalanced braces, and `{{` / `}}` escapes are
   rejected at parse time.
 
-### `[library.prebuild.targets]` (RC1.5, required when `[library.prebuild]` is present)
+### `[library.prebuild.targets]` (required when `[library.prebuild]` is present)
 
 ```toml
 [library.prebuild.targets]
@@ -98,9 +103,8 @@ places the `.so` manually" mode. If this section is present:
 ```
 
 - Keys must be canonical target triples accepted by
-  `HostTarget::from_triple` (the 5 RC1.5 v1 baseline targets plus
-  the RC15B-003 extensions listed in
-  `docs/guide/13_creating_addons.md`).
+  `HostTarget::from_triple`. The full list of supported triples is
+  documented in `docs/guide/13_creating_addons.md`.
 - Values must be `sha256:` + exactly 64 **lowercase** hex characters.
   Uppercase hex is rejected to enforce canonical form across
   platforms.
@@ -109,7 +113,7 @@ places the `.so` manually" mode. If this section is present:
   traversal attacks by stopping attacker-controlled keys long
   before they reach `path.join()`.
 
-### `[library.prebuild.signatures]` (RC15B-005, reserved)
+### `[library.prebuild.signatures]` (reserved)
 
 ```toml
 [library.prebuild.signatures]
@@ -129,7 +133,7 @@ places the `.so` manually" mode. If this section is present:
 
 ---
 
-## RC15B-106: HTTPS download limits
+## HTTPS download limits
 
 When `taida install` downloads a prebuild over HTTPS it configures
 the HTTP client with the following explicit policies:
@@ -151,14 +155,14 @@ loops quickly.
 For `file://` URLs, the fetcher rejects:
 
 - Absolute paths (e.g. `file:///etc/passwd`)
-- Any path containing `..` components (RC15B-101)
+- Any path containing `..` components (path-traversal guard)
 - Any URL scheme other than `file://` or `https://`
 
 These checks run **before** any filesystem access or network I/O.
 
 ---
 
-## RC15B-107: Unknown-key forward-compatibility policy
+## Unknown-key forward-compatibility policy
 
 The manifest parser is **strict**: any section header or top-level
 key not listed in this document is a parse error. This is a
@@ -176,10 +180,9 @@ Forward-compat rules for **manifest authors**:
    before using it, and document the minimum supported
    `taida` version in your addon's README.
 2. **Adding a new optional key** inside an existing reserved
-   section (for example, adding `signatures` to
-   `[library.prebuild]` in RC15B-005) is also an ABI bump —
-   authors must update the parser in lock-step, and older taidas
-   will refuse to load manifests that carry the new key.
+   section is also an ABI bump — authors must update the parser
+   in lock-step, and older taidas will refuse to load manifests
+   that carry the new key.
 3. **Writing a manifest with a future key** on an older taida is
    expected to fail. This is a feature, not a bug: silent
    tolerance would mean that a key which becomes load-bearing in a
@@ -196,9 +199,9 @@ Forward-compat rules for **host tool implementers**:
    `parse_addon_manifest_str`, plus tests that cover both the
    happy path and at least one failure case.
 3. The hand-written `is_valid_key` / target-keyed section
-   detection must be updated consistently — see the
-   `[library.prebuild.signatures]` addition in RC15B-005 for the
-   pattern.
+   detection must be updated consistently — `[library.prebuild.signatures]`
+   is the canonical example of the pattern (target-triple keyed
+   section with strict prefix validation).
 
 ---
 
@@ -225,29 +228,28 @@ use:
 | `PrebuildUnknownUrlVariable`           | `{foo}` not in `{version|target|ext|name}` |
 | `PrebuildUnbalancedBrace`              | Lone `{` or `}` in URL template |
 | `PrebuildDuplicateTarget`              | Same target listed twice under `targets` |
-| `PrebuildUnknownTarget` (RC15B-103)    | Target key not in `HostTarget::from_triple` |
-| `PrebuildInvalidSignatureFormat` (RC15B-005) | Signature value not `gpg:<opaque>` |
-| `PrebuildSignatureUnknownTarget` (RC15B-005) | Signature key not a canonical triple |
-| `PrebuildDuplicateSignatureTarget` (RC15B-005) | Same target listed twice under `signatures` |
+| `PrebuildUnknownTarget`                | Target key not in `HostTarget::from_triple` |
+| `PrebuildInvalidSignatureFormat`       | Signature value not `gpg:<opaque>` |
+| `PrebuildSignatureUnknownTarget`       | Signature key not a canonical triple |
+| `PrebuildDuplicateSignatureTarget`     | Same target listed twice under `signatures` |
 
 ---
 
-## C17: `_meta.toml` store sidecar
+## `_meta.toml` store sidecar
 
-Starting with `@c.17.rc4`, `taida install` writes a provenance sidecar
-next to every extracted store package at
-`~/.taida/store/<org>/<name>/<version>/_meta.toml`. The sidecar is
-auto-generated and should not be edited by hand.
+`taida install` writes a provenance sidecar next to every extracted
+store package at `~/.taida/store/<org>/<name>/<version>/_meta.toml`.
+The sidecar is auto-generated and should not be edited by hand.
 
 ```toml
-# auto-generated by taida install (C17)
+# auto-generated by taida install
 # Do not edit by hand.
 schema_version = 1
-commit_sha = "0cd5588720ac44e58a01e8f8831a62c023fab5cf"
-tarball_sha256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-fetched_at = "2026-04-16T12:20:16Z"
-source = "github:taida-lang/terminal"
-version = "a.1"
+commit_sha = "<40-char hex commit SHA the version tag pointed at>"
+tarball_sha256 = "<64-char hex SHA-256 of the tarball before extraction>"
+fetched_at = "<RFC-3339 UTC timestamp>"
+source = "github:<org>/<name>"
+version = "<version string as requested>"
 ```
 
 | Field | Purpose |

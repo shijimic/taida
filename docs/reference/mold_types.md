@@ -711,18 +711,33 @@ Str[Int[3.0]()]() ]=> t  // 内側 Lax の full-form 表示:
 - `Str` → そのまま（クォート無し）
 - それ以外 (List / ぶちパック / Lax / Result / Async / HashMap / Set / Gorillax / TODO / Molten …) → 各値の display 文字列（ぶちパックは `__` で始まる内部フィールドも含む full-form、nested な HashMap / Set / ぶちパックも再帰的に full-form に展開）
 
-**既知の例外 (C23 時点、`tests/c23_str_parity.rs` でも明示的に skip 指定)**:
+**既知の例外** (`tests/c23_str_parity.rs` でも明示的に skip 指定):
 
-- `Str[Gorillax[v]()]()` の WASM-wasi 出力は、WASM ランタイムが Gorillax の第 1 フィールドを `isOk` で保持している関係で Interpreter / JS / Native の `hasValue` と異なります（**C23B-004** として別トラック）。`.dev/C23_BLOCKERS.md` に詳細記録。
-- `Stream` 型は C25B-001 Phase 3 で Native / WASM-wasi への lowering が land 済です（`@c.25.rc7`）。`tests/c23_str_parity.rs::STREAM_ONLY_FIXTURES` は空 (0 件) を維持しており、`Str[stream]()` は 4 バックエンド全てで parity を保証します。以前 RC2.x 系で存在していた Interpreter + JS 限定 parity 制約は C25 で解消されました。
+- `Str[Gorillax[v]()]()` の WASM-wasi 出力は、WASM ランタイムが Gorillax の第 1 フィールドを `isOk` で保持している関係で Interpreter / JS / Native の `hasValue` と異なります。
 
-> **Note**: C23B-005 reopen + widen + C23B-006 (@c.23.rc6) で WASM の全 collection detector (`_looks_like_list` / `_is_wasm_set` / `_is_wasm_hashmap` / `_looks_like_pack`) を 8 バイト printable ASCII magic sentinel + 128-bit dual-magic positive identification に統一しました。List / ぶちパック / Set / HashMap の要素 / フィールド / 値スロットに **untagged な大きな Int 値** が入っていても (`@[73088]`, `hashMap().set("x", 73088)`, `setOf(@[73088])` 等) 4 バックエンド全てで byte-for-byte 一致を保証します。併せて `taida_hashmap_set_value_tag` / `taida_list_set_elem_tag` を heterogeneous downgrade 対応に強化し、タグ認識の高速パスを安全化しました。
->
-> **Note (C23B-007 / C23B-008, @c.23.rc6)**: 前者で WASM の tag latching を `WASM_TAG_HETEROGENEOUS = -2` 専用 sentinel に分離し、型混在コンテナが後続の `.push()` / `.set()` で誤って primitive tag に再昇格する穴を塞ぎました (`@[1, "a", 2]` / `.set("a", 1).set("b", "x").set("c", 2)` が 4 backend で byte-for-byte 一致)。後者で Native / WASM の HashMap allocation 末尾に `[next_ord, order_array[cap]]` 挿入順 side-index を追加し、display / entries / keys / values / merge / JSON serialize がすべて insertion 順で walk するように変更しました (`hashMap().set("a", 1).set("b", 2)` が `"a"` → `"b"` の順で出力される、interpreter / JS と一致)。JS は元から `__entries` が Array で insertion 順を保持しており、interpreter の `Vec<(k,v)>` が source of truth です。
->
-> **Note (C23B-008 reopen-7, @c.23.rc6)**: `HashMap.merge(other)` の overlap key (self と other 双方に存在する key) の扱いを **interpreter の retain-then-push semantics** に揃えました。`a.merge(b)` は (1) self のうち other に含まれない key のみを self-order で残し、(2) 続けて other の全エントリを other-order で append します。結果として overlap key は **other 側の位置** に移動し、value は other のものになります。例: `a = hashMap().set("a",1).set("b",2)`, `b = hashMap().set("c",3).set("b",20).set("d",4)` のとき `a.merge(b)` は 4 backend 全てで `[a <= 1, c <= 3, b <= 20, d <= 4]` を返します。以前は JS / Native / WASM が update-in-place で self 側の位置を保持し `[a,b,c,d]` を返していました。
->
-> **Note (C23B-009, @c.23.rc6)**: `HashMap.entries()` が返すペアのフィールド名を **`key` / `value`** に統一しました (`docs/reference/standard_library.md` の `@[@(key, value)]` 仕様と、interpreter `src/interpreter/methods.rs:761-783` の実装に合わせ)。従来は JS のみ legacy な `first` / `second` を使用し (`zip()` との誤った共有)、Native / WASM はペアのフィールド名を field-name registry に登録していなかったため `@()` に退化していました。Fix: JS を `{key, value}` に rename、Native / WASM は `taida_hashmap_entries` で `HASH_KEY` / `HASH_VAL` ↔ `"key"` / `"value"` を idempotent 登録。WASM は同時にペア pack の field tag (`WASM_TAG_STR` for key、hashmap の `value_type_tag` for value) と外側 list の `elem_type_tag = WASM_TAG_PACK` を stamp し、tagged 高速パスを経由するようにしました。`zip()` / `Zip[]()` は interpreter 実装が `first` / `second` を使う仕様のため変更なし (4 backend 一致) — `.entries()` と `zip()` のフィールド名が異なる点に注意してください。
+`Stream` 型は 4 バックエンド (Interpreter / JS / Native / WASM-wasi) で `Str[stream]()` の parity を保証します。
+
+### Collection 検出と heterogeneous semantics (現在の動作)
+
+WASM ランタイムの全 collection detector (`_looks_like_list` / `_is_wasm_set` / `_is_wasm_hashmap` / `_looks_like_pack`) は 8 バイト printable ASCII magic sentinel + 128-bit dual-magic positive identification で統一されています。List / ぶちパック / Set / HashMap の要素 / フィールド / 値スロットに **untagged な大きな Int 値** が入っていても (`@[73088]`, `hashMap().set("x", 73088)`, `setOf(@[73088])` 等)、4 バックエンド全てで byte-for-byte 一致します。`taida_hashmap_set_value_tag` / `taida_list_set_elem_tag` は heterogeneous downgrade に対応し、タグ認識の高速パスを安全化しています。
+
+WASM の tag latching は `WASM_TAG_HETEROGENEOUS = -2` 専用 sentinel に分離されており、型混在コンテナが後続の `.push()` / `.set()` で誤って primitive tag に再昇格しません (`@[1, "a", 2]` / `.set("a", 1).set("b", "x").set("c", 2)` が 4 backend で byte-for-byte 一致)。
+
+Native / WASM の HashMap allocation は末尾に `[next_ord, order_array[cap]]` 挿入順 side-index を持ち、display / entries / keys / values / merge / JSON serialize はすべて insertion 順で walk します (`hashMap().set("a", 1).set("b", 2)` は `"a"` → `"b"` の順で出力)。Interpreter の `Vec<(k,v)>` が source of truth です。
+
+### `HashMap.merge(other)` の semantics
+
+`a.merge(b)` は **retain-then-push semantics** に従います: (1) self のうち other に含まれない key のみを self-order で残し、(2) 続けて other の全エントリを other-order で append します。結果として overlap key は **other 側の位置** に移動し、value は other のものになります。
+
+```taida
+a = hashMap().set("a", 1).set("b", 2)
+b = hashMap().set("c", 3).set("b", 20).set("d", 4)
+a.merge(b)  // [a <= 1, c <= 3, b <= 20, d <= 4] (4 backend 一致)
+```
+
+### `HashMap.entries()` のフィールド名
+
+`HashMap.entries()` が返すペア pack のフィールド名は **`key` / `value`** に統一されています (`standard_library.md` の `@[@(key, value)]` 仕様と一致)。`zip()` / `Zip[]()` は別仕様で `first` / `second` を使うため、`.entries()` と `zip()` のフィールド名が異なる点に注意してください。
 
 ### Bool[x]
 

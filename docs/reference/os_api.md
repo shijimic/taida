@@ -174,12 +174,3 @@ Interactive 版:
 ```
 @(code: Int)
 ```
-
----
-
-## 7. バージョン履歴
-
-| バージョン | 変更 |
-|------------|------|
-| `@c.19.rc4` | `runInteractive` / `execShellInteractive` 追加。checker で `Gorillax[@(code: Int)]` を pin。Native の `__error` フィールドハッシュを修正 |
-| `@c.18.rc4` 以前 | `run` / `execShell` （captured 版のみ）が存在 |
