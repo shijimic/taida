@@ -157,6 +157,11 @@ pub struct TypeChecker {
     net_http_serve_symbols: HashSet<String>,
     /// Local enum names that resolve to taida-lang/net's `HttpProtocol`.
     net_http_protocol_type_names: HashSet<String>,
+    /// D28B-023 / D28B-024: stack of type parameter declarations for the
+    /// enclosing generic functions. Pushed on `Statement::FuncDef` body
+    /// entry, popped on exit. Used to resolve constrained type variables
+    /// inside the body (e.g. arithmetic on `T <= :Num`, calling `F <= :T => :T`).
+    current_func_type_params: Vec<Vec<TypeParam>>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -218,6 +223,7 @@ impl TypeChecker {
             compile_target: CompileTarget::Neutral,
             net_http_serve_symbols: HashSet::new(),
             net_http_protocol_type_names: HashSet::new(),
+            current_func_type_params: Vec::new(),
         };
         // C19B-002 (import-less): the C19 interactive variants are core-bundled
         // in `src/codegen/lower/core.rs` (import-less parity with interpreter/
@@ -925,6 +931,46 @@ impl TypeChecker {
     /// either the body type or the declared return type contains such
     /// a variable, the return-type check must be suppressed because
     /// the checker cannot meaningfully compare them.
+    /// D28B-023 / D28B-024: look up an active enclosing function's `TypeParam`
+    /// by name, walking the stack of nested generic functions inside-out.
+    /// Returns `None` if the name does not refer to any active type parameter.
+    fn lookup_active_type_param(&self, name: &str) -> Option<&TypeParam> {
+        for frame in self.current_func_type_params.iter().rev() {
+            if let Some(tp) = frame.iter().find(|tp| tp.name == name) {
+                return Some(tp);
+            }
+        }
+        None
+    }
+
+    /// D28B-024: returns true when `name` is an active generic type parameter
+    /// whose declared subtype constraint is a numeric primitive (`Num` / `Int`
+    /// / `Float`). Such a type variable is treated as numeric for arithmetic
+    /// (`+` / `-` / `*`) and ordering operators inside the function body.
+    fn type_param_is_numeric(&self, name: &str) -> bool {
+        let Some(tp) = self.lookup_active_type_param(name) else {
+            return false;
+        };
+        matches!(
+            tp.constraint.as_ref(),
+            Some(TypeExpr::Named(n)) if n == "Num" || n == "Int" || n == "Float"
+        )
+    }
+
+    /// D28B-023: if `name` is an active generic type parameter whose
+    /// declared subtype constraint is a function type (e.g. `F <= :T => :T`),
+    /// return the resolved `Type::Function(...)` for that constraint.
+    /// Returns `None` for non-function constraints (or unconstrained vars).
+    fn type_param_function_constraint(&self, name: &str) -> Option<Type> {
+        let tp = self.lookup_active_type_param(name)?;
+        let constraint = tp.constraint.as_ref()?;
+        if matches!(constraint, TypeExpr::Function(_, _)) {
+            Some(self.registry.resolve_type(constraint))
+        } else {
+            None
+        }
+    }
+
     fn contains_unresolved_type_var(&self, ty: &Type) -> bool {
         match ty {
             Type::Named(name) => self.registry.get_type_fields(name).is_none(),
@@ -3012,6 +3058,12 @@ defaulted fields must be provided via `()`",
                 // Push new scope for function body
                 self.push_scope();
 
+                // D28B-023 / D28B-024: make this function's generic type
+                // parameters visible to the body so that constrained type
+                // variables can resolve operator dispatch (`+` on `T <= :Num`)
+                // and call dispatch (`fn(x)` where `fn: F <= :T => :T`).
+                self.current_func_type_params.push(fd.type_params.clone());
+
                 // Validate defaults left-to-right and register params in scope order.
                 self.validate_function_param_defaults(fd, &param_types);
 
@@ -3104,6 +3156,8 @@ defaulted fields must be provided via `()`",
                     }
                 }
 
+                // D28B-023 / D28B-024: balance the type-param stack push above.
+                self.current_func_type_params.pop();
                 self.pop_scope();
             }
             Statement::Expr(expr) => {
@@ -3407,12 +3461,46 @@ defaulted fields must be provided via `()`",
             Expr::BinaryOp(left, op, right, span) => {
                 let left_type = self.infer_expr_type(left);
                 let right_type = self.infer_expr_type(right);
+                // D28B-024: a Type::Named(T) where T is an active generic
+                // type parameter constrained by a numeric primitive
+                // (`T <= :Num` / `:Int` / `:Float`) should be treated as
+                // numeric for arithmetic and ordering. Helper closures
+                // capture this judgement uniformly across operator arms.
+                let left_is_numeric_var =
+                    matches!(&left_type, Type::Named(n) if self.type_param_is_numeric(n));
+                let right_is_numeric_var =
+                    matches!(&right_type, Type::Named(n) if self.type_param_is_numeric(n));
+                let left_is_numeric_ext = left_type.is_numeric() || left_is_numeric_var;
+                let right_is_numeric_ext = right_type.is_numeric() || right_is_numeric_var;
                 match op {
                     BinOp::Add | BinOp::Sub | BinOp::Mul => {
-                        if left_type.is_numeric() && right_type.is_numeric() {
-                            if matches!(left_type, Type::Float) || matches!(right_type, Type::Float)
+                        if left_is_numeric_ext && right_is_numeric_ext {
+                            // D28B-024: when both operands are the SAME
+                            // generic numeric type variable, preserve it
+                            // (so a body declared `=> :T` type-checks
+                            // against the body's tail value of type T).
+                            // Mixed `T` + concrete numeric, or two
+                            // different numeric type variables, widen to
+                            // a concrete numeric primitive (Int / Float)
+                            // following the existing precedence rule:
+                            // any Float operand widens to Float, else Int.
+                            if let (Type::Named(l), Type::Named(r)) = (&left_type, &right_type)
+                                && l == r
+                                && self.type_param_is_numeric(l)
+                            {
+                                left_type.clone()
+                            } else if matches!(left_type, Type::Float)
+                                || matches!(right_type, Type::Float)
                             {
                                 Type::Float
+                            } else if left_is_numeric_var || right_is_numeric_var {
+                                // At least one side is a generic numeric
+                                // var; cannot statically pick Int vs Float
+                                // without inference at the call site, so
+                                // surface as Num and let return-type
+                                // compatibility (subtype: Int<:Num,
+                                // Float<:Num) absorb the imprecision.
+                                Type::Num
                             } else {
                                 Type::Int
                             }
@@ -3442,6 +3530,10 @@ defaulted fields must be provided via `()`",
                             && !Self::contains_unknown(&right_type)
                             && left_type != right_type
                             && !(left_type.is_numeric() && right_type.is_numeric())
+                            // D28B-024: equality between generic numeric
+                            // type variables (or such a variable and a
+                            // concrete numeric primitive) is allowed.
+                            && !(left_is_numeric_ext && right_is_numeric_ext)
                             // Allow structurally compatible types (e.g. BuchiPack subtypes)
                             && !self.registry.is_subtype_of(&left_type, &right_type)
                             && !self.registry.is_subtype_of(&right_type, &left_type)
@@ -3481,7 +3573,11 @@ defaulted fields must be provided via `()`",
                                 }
                                 _ => false,
                             };
-                            let valid = both_numeric || both_str || same_enum;
+                            // D28B-024: ordering between generic numeric
+                            // type variables (or such a variable and a
+                            // concrete numeric primitive) is allowed.
+                            let both_numeric_ext = left_is_numeric_ext && right_is_numeric_ext;
+                            let valid = both_numeric || both_numeric_ext || both_str || same_enum;
                             if !valid {
                                 self.errors.push(TypeError {
                                     message: format!(
@@ -3859,15 +3955,105 @@ defaulted fields must be provided via `()`",
                         }
                         return *ret;
                     }
+                    // D28B-023: variable's declared type is a generic type
+                    // parameter whose subtype constraint is a function type
+                    // (e.g. `applyFn[T, F <= :T => :T] x: T fn: F = fn(x)`),
+                    // so resolving `fn(x)` should dispatch on the constraint's
+                    // function shape rather than fall through to [E1510].
+                    if let Some(Type::Named(var_name)) = self.lookup_var(name)
+                        && let Some(Type::Function(params, ret)) =
+                            self.type_param_function_constraint(&var_name)
+                    {
+                        if args.len() > params.len() {
+                            self.errors.push(TypeError {
+                                message: format!(
+                                    "[E1301] Function value '{}' takes at most {} argument(s), got {}. Hint: Remove extra arguments or adjust the function type.",
+                                    name, params.len(), args.len()
+                                ),
+                                span: span.clone(),
+                            });
+                        }
+                        if hole_count > 0 && args.len() != params.len() {
+                            self.errors.push(TypeError {
+                                message: format!(
+                                    "[E1505] Partial application of '{}' requires exactly {} slot(s) (got {}). \
+                                     Hint: Provide a value or empty slot for each parameter.",
+                                    name, params.len(), args.len()
+                                ),
+                                span: span.clone(),
+                            });
+                        }
+                        // E1506: argument type compatibility against the
+                        // declared function-constraint params. Skip when
+                        // either side mentions an unresolved type variable
+                        // (the body of the enclosing generic function does
+                        // not bind T to a concrete type yet).
+                        for (i, arg) in args.iter().enumerate() {
+                            if matches!(arg, Expr::Hole(_) | Expr::Placeholder(_)) {
+                                continue;
+                            }
+                            let Some(expected_ty) = params.get(i) else {
+                                continue;
+                            };
+                            if *expected_ty == Type::Unknown
+                                || self.contains_unresolved_type_var(expected_ty)
+                            {
+                                continue;
+                            }
+                            let actual_ty = self.infer_expr_type(arg);
+                            if actual_ty == Type::Unknown
+                                || self.contains_unresolved_type_var(&actual_ty)
+                            {
+                                continue;
+                            }
+                            if !self.registry.is_subtype_of(&actual_ty, expected_ty) {
+                                self.errors.push(TypeError {
+                                    message: format!(
+                                        "[E1506] Argument {} of '{}' has type {}, expected {}. \
+                                         Hint: Pass a value of the correct type, or use an explicit conversion.",
+                                        i + 1, name, actual_ty, expected_ty
+                                    ),
+                                    span: span.clone(),
+                                });
+                            }
+                        }
+                        if hole_count > 0 {
+                            let hole_param_types: Vec<Type> = args
+                                .iter()
+                                .enumerate()
+                                .filter(|(_, a)| matches!(a, Expr::Hole(_)))
+                                .map(|(i, _)| params.get(i).cloned().unwrap_or(Type::Unknown))
+                                .collect();
+                            return Type::Function(hole_param_types, ret);
+                        }
+                        return *ret;
+                    }
                     // FL-23: Check if variable is a non-function type being called
                     if let Some(var_ty) = self.lookup_var(name)
                         && !matches!(var_ty, Type::Unknown)
                     {
+                        // D28B-023: when the rejected variable's type is an
+                        // active generic type parameter (a Named type that
+                        // is not registered as a concrete type) but it has
+                        // no function-type constraint, the user likely
+                        // declared `[T] x: T fn: T` (no constraint) or
+                        // `[T, F <= :SomeNonFunction] fn: F`. Append a
+                        // targeted hint so the diagnostic guides toward
+                        // adding `<= :A => :B` or providing the function
+                        // type at the call site.
+                        let hint_extra = match &var_ty {
+                            Type::Named(n) if self.lookup_active_type_param(n).is_some() => {
+                                " For higher-order generic functions, declare the \
+                                 callable with a function-type constraint, e.g. \
+                                 `[T, F <= :T => :T] x: T fn: F = fn(x) => :T`."
+                            }
+                            _ => "",
+                        };
                         self.errors.push(TypeError {
                             message: format!(
                                 "[E1510] Cannot call '{}' of type {} as a function. \
-                                 Hint: Only functions and molds can be called.",
-                                name, var_ty
+                                 Hint: Only functions and molds can be called.{}",
+                                name, var_ty, hint_extra
                             ),
                             span: span.clone(),
                         });
