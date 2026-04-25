@@ -51,6 +51,51 @@ Taida固有演算子とは別カテゴリの、一般的なプログラミング
 
 ---
 
+## 型表記の文脈別ルール
+
+`:` は Taida では **「これが型ですよ」を明示する concrete type literal marker** として働きます。文脈ごとに `:Type` 必須 / 選択可 / 禁止が分かれます。
+
+### `:` マーカーが必須の文脈（concrete type literal）
+
+| 文脈 | 構文例 | 役割 |
+|------|--------|------|
+| 関数型注釈の戻り値部分 | `... => :T` | 戻り値の type literal |
+| 関数定義の戻り値 | `body => :Int` | 戻り値の type literal |
+| `<=` 制約 / 型 literal binding | `T <= :Type` | 制約 / バインドの type literal |
+| mold 具象型 slot | `[X, :Int]` | mold の type literal 引数 |
+| `TypeIs[v, :Int]()` | `TypeIs[v, :Int]()` | type literal 引数 |
+
+### 引数 / フィールド型注釈は二系統構文（形式 A / 形式 B）
+
+引数とフィールドの型注釈は **どちらの書式も valid**。書き手の選択です。
+
+| 書式 | 構文例 | `:` の役割 |
+|------|--------|-----------|
+| 形式 A（コロン分離） | `arg: Type`, `field: Type` | `:` は delimiter、`Type` は識別子 |
+| 形式 B（スペース分離） | `arg :Type`, `field :Type` | `:Type` は type literal marker 付き |
+
+形式 A は後置型注釈言語（TypeScript / Rust / Kotlin / Swift / Scala / Python type hints）との親和性のために維持され、形式 B は `:` マーカー意味論と一貫します。
+
+### 禁止される表記
+
+| 表記 | 理由 |
+|------|------|
+| `arg: :Type` | 形式 A delimiter 直後に形式 B literal の混同（`: :` 二連続） |
+| `=> Type`（戻り値、`:` 無し） | parser が lenient 受理するが、戻り値は concrete type literal が必要な文脈のため lint 警告対象 |
+
+### 関数型注釈の引数部分
+
+関数型 `T => :U` の **引数部分** (`T`) は識別子位置のため `:` 不要。**戻り値部分** (`:U`) は type literal 必須。
+
+```taida
+// 関数を引数として受ける
+applyFn fn: Int => :Int =
+  fn(42)
+=> :Int
+```
+
+---
+
 ## 算術演算子
 
 数値に対する基本的な演算を行います。優先順位はRustに準拠します。
@@ -267,7 +312,7 @@ riskyOperation()
 - `Div[x, y]()` / `Mod[x, y]()` — 0 除算時
 - `Int[str]()` / `Float[str]()` などの型変換モールド — パース失敗時
 - `.get(idx)` / `.first()` / `.last()` などの安全アクセス — 範囲外時
-- **`JSON[raw, Schema]()`**（C16 以降） — パース失敗時、**および Schema 内の Enum 型フィールドが JSON 側の variant 集合に一致しなかった / キー欠落 / null だった場合**。silent coercion は行わず、該当フィールドは `Lax[Enum]` で返ります。
+- **`JSON[raw, Schema]()`** — パース失敗時、**および Schema 内の Enum 型フィールドが JSON 側の variant 集合に一致しなかった / キー欠落 / null だった場合**。silent coercion は行わず、該当フィールドは `Lax[Enum]` で返ります。
 
 Lax 境界は `|==` ではなく、`hasValue` / `getOrDefault` / `|` による分岐で処理します:
 

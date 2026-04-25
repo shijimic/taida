@@ -36,7 +36,7 @@ processData data: Str =
 
 Taida では、文字列や数値の操作はメソッドではなくモールドで行います。トリムは `Trim[str]()` に、大文字変換は `Upper[str]()` です。
 
-> **C13-1 の末尾バインド短縮形**: 関数本体の末尾が `name <= expr` / `expr => name` / `expr ]=> name` / `name <=[ expr` であるとき、束縛された値がそのまま関数の戻り値になります。上の例は以下のように書けます:
+> **末尾バインド短縮形**: 関数本体の末尾が `name <= expr` / `expr => name` / `expr ]=> name` / `name <=[ expr` であるとき、束縛された値がそのまま関数の戻り値になります。上の例は以下のように書けます:
 >
 > ```taida
 > processData data: Str =

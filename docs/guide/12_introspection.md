@@ -301,7 +301,7 @@ debug("ping")                 // "ping" を出力
 debug(user, "load_user")      // "[load_user] BuchiPack: @(name: ..., age: ...)" を出力
 ```
 
-### flush タイミング（C22 以降）
+### flush タイミング
 
 | 実行モード | `stdout(...)` | `debug(...)` | 備考 |
 |---|---|---|---|
@@ -311,7 +311,7 @@ debug(user, "load_user")      // "[load_user] BuchiPack: @(name: ..., age: ...)"
 
 `debug` の stream mode 出力先は **stdout** です（stderr ではありません）。これは JS バックエンド（`console.log`）・Native バックエンド（`printf`）との 3 バックエンドパリティを保証するための設計判断で、`test_native_compile_parity` 系の captured-stdout diff を破らない形に揃えています。
 
-長時間ループの中で `debug(x)` を差し込めば、プログラムが止まらずとも途中経過がそのまま端末に流れてくるため、printf-デバッグが機能します。これは post-C20 で「`stdout` / `debug` だけが Vec にバッファされて終了まで 1 バイトも見えない」問題の対称性回復として修正されました。Taida の surface API 仕様は変わっていないため、既存コードの書き換えは不要です。
+長時間ループの中で `debug(x)` を差し込めば、プログラムが止まらずとも途中経過がそのまま端末に流れてくるため、printf-デバッグが機能します。
 
 ---
 

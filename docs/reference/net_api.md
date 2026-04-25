@@ -2,7 +2,7 @@
 
 > Core bundled package. `>>> taida-lang/net => @(...)` で import、または import 無しで直接呼び出し可能（両経路とも checker で同じ型 signature に pin されます）。
 
-3-backend (Interpreter / JS / Native) で parity を保証します。タグ別の land 履歴と blocker 単位の進捗は `CHANGELOG.md` および `.dev/` トラッカーを参照してください。
+3-backend (Interpreter / JS / Native) で parity を保証します。タグ別の land 履歴は `CHANGELOG.md` を参照してください。
 
 ---
 
@@ -200,7 +200,7 @@ response を wire bytes に encode します。
 | path | **2048 byte** | `char path[2048]` (Native) |
 | authority | **256 byte** | `char authority[256]` (Host header) |
 
-> **Implementation note**: Interpreter h1 path は `HTTP_WIRE_MAX_METHOD_LEN = 16` / `HTTP_WIRE_MAX_PATH_LEN = 2048` を `src/interpreter/net_eval/h1.rs` に導入し、`parse_request_head` 後・`dispatch_request` 前で enforcement します。Native / h2 / h3 への enforcement の現況は `CHANGELOG.md` および `.dev/` トラッカーを参照してください。
+> **Implementation note**: Interpreter h1 path は `HTTP_WIRE_MAX_METHOD_LEN = 16` / `HTTP_WIRE_MAX_PATH_LEN = 2048` を `src/interpreter/net_eval/h1.rs` に導入し、`parse_request_head` 後・`dispatch_request` 前で enforcement します。Native / h2 / h3 への enforcement の現況は `CHANGELOG.md` を参照してください。
 
 ---
 
@@ -214,11 +214,11 @@ HTTP client。TLS 自動判定 (`https://` なら TLS)。
 
 ## 7. Backend scope
 
-`taida-lang/net` の API surface は **3-backend (Interpreter / JS / Native)** で parity を保証します。WASM バックエンド (`wasm-min` / `wasm-wasi` / `wasm-edge` / `wasm-full`) は gen-C では `httpServe` / `httpRequest` を提供しません — 該当 capability を呼び出した場合 `[E1612]` を返します。WASM 向け NET dispatcher は gen-D 以降の breaking-change phase で扱います (`docs/STABILITY.md` §1.2 / §4.2 / §5.2)。
+`taida-lang/net` の API surface は **3-backend (Interpreter / JS / Native)** で parity を保証します。WASM バックエンド (`wasm-min` / `wasm-wasi` / `wasm-edge` / `wasm-full`) は `httpServe` / `httpRequest` を提供しません — 該当 capability を呼び出した場合 `[E1612]` を返します。WASM 向け NET dispatcher の現状方針は `docs/STABILITY.md` §1.2 / §4.2 / §5.2 を参照してください。
 
 例外として `readBytesAt` (bytes I/O) の `wasm-wasi` / `wasm-full` lowering のみ widening addition として land 済です。
 
-進行中の blocker、land 履歴、24 h soak の現況は `CHANGELOG.md` および `.dev/` トラッカーを参照してください。
+進行中の blocker や 24 h soak の現況、land 履歴は `CHANGELOG.md` を参照してください。
 
 ---
 
