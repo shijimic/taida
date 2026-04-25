@@ -436,10 +436,11 @@ true.toString()              // "true"
 @(a <= 1, b <= 2).toString() // "@(a <= 1, b <= 2)"
 ```
 
-`.toString()` は **全ての値型で利用できる共通メソッド** です（C12.rc3 で
-3 バックエンド全てに正式採用）。Int / Float / Bool / Str / List / ぶちパック /
-Lax / Result / HashMap / Set など、どの型に対しても呼び出せて、必ず `:Str`
-を返します。文字列連結 (`+`) と組み合わせて使うのが標準的な使い方です:
+`.toString()` は **全ての値型で利用できる共通メソッド** です。Int / Float /
+Bool / Str / List / ぶちパック / Lax / Result / HashMap / Set など、どの型に
+対しても呼び出せて、必ず `:Str` を返します。3 バックエンド (Interpreter / JS /
+Native) で挙動が一致します。文字列連結 (`+`) と組み合わせて使うのが標準的な
+使い方です:
 
 ```taida
 status <= 404

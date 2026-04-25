@@ -1,5 +1,123 @@
 # Changelog
 
+<!--
+  Template for the gen-D stable initial release entry.
+  Heading literal `@d.X` and `YYYY-MM-DD` are placeholders; the
+  release-cutting user replaces X with the final build number and
+  the date with the tag-push day at Phase 12 GATE. The §1-§9
+  structure is fixed (Phase 0 Lock, D28B-022); only the section
+  bodies fill in concrete verdicts.
+-->
+
+## @d.X — Stable initial release (YYYY-MM-DD)
+
+> **Status: PLACEHOLDER.** This entry is a template invested ahead
+> of the Phase 12 GATE. The version literal `@d.X`, the date, and
+> every `<TBD>` placeholder below are filled in only after user
+> approval at the GATE. Until then the entry is informational and
+> must not be interpreted as a released stable tag.
+
+### §1 Stable initial release
+
+This is the first label-less stable tag of the **gen-D** generation
+and the first stable tag of Taida Lang as a whole. All four pillars
+of `PHILOSOPHY.md` (depth-free input, null/undefined elimination,
+no implicit conversion, default-value guarantee under the
+single-direction constraint) are honoured by the surface contracts
+documented in `docs/STABILITY.md`.
+
+- Predecessor RC chain: `@c.25.rc7` → C26 / C27 fix-only RC cycle
+  series (label-less `@c.26` / `@c.27` were skipped per
+  `docs/STABILITY.md` §1.3 / §5.6).
+- Build number: `X = <TBD>` (CI build counter, fixed only at tag
+  push).
+- Tag scope: 4-backend parity (Interpreter / JS / Native /
+  wasm-wasi). wasm-edge / wasm-full are widening additions with
+  no regressions. wasm-min remains the floor.
+
+### §2 Breaking changes from `@c.27` to `@d.X`
+
+The gen increment from C → D is the explicit signal that this
+release contains breaking changes. All renames are mechanical and
+covered by `taida upgrade --d28`.
+
+- Naming-rule normalisation (D28B-007 / D28B-008): symbols that
+  violated the 7-category naming rules locked at Phase 0
+  (`docs/reference/naming_conventions.md`) were renamed. Mold-form
+  (PascalCase) and function-form (camelCase) names continue to
+  coexist where both are rule-compliant.
+- `<TBD: list of renamed symbols, including `strOf` function-form
+  reaffirmation per D28B-015>`
+- `<TBD: addon manifest `targets` contract surfacing per D28B-021,
+  including the `["native"]` default-inject contract>`
+- `<TBD: any further breaking surface changes landed in Round 3 wJ
+  / wK or Round 4 wL>`
+
+The single source of truth for breaking-change policy is
+`docs/STABILITY.md` §6.
+
+### §3 Migration guide
+
+- Run `taida upgrade --d28` against your project root to apply the
+  rename rewrites. The tool is single-direction; commit a clean
+  state before invoking it.
+- Manual review checklist: `<TBD: explicit checklist items not
+  covered by the rewriter>`
+- Addon authors: see `docs/reference/addon_manifest.md` for the
+  `targets` field contract pinned by D28B-021.
+
+### §4 NET stabilisation
+
+- HTTP/2 4-backend parity (D28B-002): `<TBD>`
+- Throughput regression hard-fail gate (D28B-005 + D28B-013):
+  `<TBD>`
+- Scatter-gather + 24h soak verification (D28B-006 + D28B-014):
+  `<TBD>`
+- TLS configuration (D28B-003): observation only, no active scope.
+- Port-bind race (D28B-004): closed in C27 (C27B-003 FIXED).
+- Native runtime path leak audit (D28B-012): `<TBD>`
+
+### §5 Addon ecosystem
+
+- Manifest `targets` field contract (D28B-021): default
+  `["native"]` is loader-injected explicitly; missing-`targets`
+  and explicit-`["native"]` are bit-identical at every observable
+  surface; default changes after stable are admissible only across
+  generations (`docs/STABILITY.md` §1.2 / §6).
+- WASM addon dispatcher (D28B-010): **post-stable**. Deferred to
+  D29 / E gen widening. See `.dev/FUTURE_BLOCKERS.md`.
+- Bundled package surfaces: `taida-lang/os`, `taida-lang/net`,
+  `taida-lang/terminal` (see `docs/guide/14_os_package.md`,
+  `docs/guide/15_net_package.md`, `docs/guide/16_terminal_package.md`).
+
+### §6 Memory and performance hard-fail gates
+
+- Memory hard-fail gates (D28B-013): `<TBD>`
+- Throughput baseline + percentage-drop gate (D28B-005 + D28B-013):
+  `<TBD>`
+- Coverage / RSS / FD / thread / unbounded-allocator gates:
+  `<TBD>`
+
+### §7 24h soak verification
+
+- 24h scatter-gather soak runbook: `<TBD: pass / artefact link>`
+- 30-min fast-soak-proxy 4-backend smoke: `<TBD>`
+
+### §8 Known gaps
+
+- POST-STABLE-001: WASM addon dispatcher (D28B-010) — D29 / E gen
+  widening.
+- `<TBD: any Should Fix items deferred to post-stable per the
+  3-point post-stable check>`
+
+### §9 Acknowledgements
+
+`<TBD: contributor list, soak runners, reviewers, and addon
+ecosystem maintainers who participated in the gen-D stable
+qualification track>`
+
+---
+
 ## @c.27 (in progress — gen-C stable, third candidate)
 
 **Fix-only RC cycle, third wave.** The label-less `@c.25` and `@c.26`

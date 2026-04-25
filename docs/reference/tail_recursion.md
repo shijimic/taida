@@ -352,8 +352,8 @@ processItemsTail items: @[Item] acc: @[Result] =
 より複雑なケースでは、継続渡しスタイルを使って末尾再帰に変換できます。
 
 ```taida
-// 継続渡しスタイルでの階乗
-factorialCPS n: Int cont: :Int => :Int =
+// 継続渡しスタイルでの階乗（形式 A: コロン分離）
+factorialCPS n: Int cont: Int => :Int =
   | n < 1 |> cont(1)
   | _ |> factorialCPS(n - 1, _ result = cont(n * result))
 => :Int
@@ -362,6 +362,15 @@ factorialCPS n: Int cont: :Int => :Int =
 factorial10 <= factorialCPS(10, _ x = x)
 // factorial10: 3628800
 ```
+
+> **型注釈の二系統構文**: 引数の型注釈には 2 つの書式が並列に valid です。
+>
+> - **形式 A (コロン分離) `arg: Type`** — `arg:` の `:` は引数名と型の delimiter、続く `Type` は識別子。後置型注釈言語 (TypeScript / Rust / Kotlin / Swift / Scala / Python type hints) との親和性のために維持されています。例: `n: Int`, `cont: Int => :Int`。
+> - **形式 B (スペース分離) `arg :Type`** — `:Type` は concrete type literal marker 付き。`:` マーカー意味論（「これが型ですよ」を明示）と一貫します。例: `n :Int`, `cont :Int => :Int`。
+>
+> どちらの形式も書き手の選択で valid です。ただし `arg: :Type` のように形式 A の delimiter 直後に形式 B の type literal を書く混同 (`: :` 二連続) は parser が reject します。
+>
+> 関数型注釈の **戻り値部分** は `:Type` (`:` マーカー必須) です。詳細は [`docs/reference/operators.md`](./operators.md) の「型表記の文脈別ルール」を参照してください。
 
 ---
 

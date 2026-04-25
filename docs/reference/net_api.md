@@ -2,7 +2,7 @@
 
 > Core bundled package. `>>> taida-lang/net => @(...)` で import、または import 無しで直接呼び出し可能（両経路とも checker で同じ型 signature に pin されます）。
 
-3-backend (Interpreter / JS / Native) で parity を保証します。タグ別の land 履歴と blocker 単位の進捗は `CHANGELOG.md` および `.dev/` トラッカーを参照してください。
+3-backend (Interpreter / JS / Native) で parity を保証します。タグ別の land 履歴は `CHANGELOG.md` を参照してください。
 
 ---
 
@@ -200,31 +200,157 @@ response を wire bytes に encode します。
 | path | **2048 byte** | `char path[2048]` (Native) |
 | authority | **256 byte** | `char authority[256]` (Host header) |
 
-> **Implementation note**: Interpreter h1 path は `HTTP_WIRE_MAX_METHOD_LEN = 16` / `HTTP_WIRE_MAX_PATH_LEN = 2048` を `src/interpreter/net_eval/h1.rs` に導入し、`parse_request_head` 後・`dispatch_request` 前で enforcement します。Native / h2 / h3 への enforcement の現況は `CHANGELOG.md` および `.dev/` トラッカーを参照してください。
+> **Implementation note**: Interpreter h1 path は `HTTP_WIRE_MAX_METHOD_LEN = 16` / `HTTP_WIRE_MAX_PATH_LEN = 2048` を `src/interpreter/net_eval/h1.rs` に導入し、`parse_request_head` 後・`dispatch_request` 前で enforcement します。Native / h2 / h3 への enforcement の現況は `CHANGELOG.md` を参照してください。
 
 ---
 
 ## 6. Client
 
-### 6.1 `httpRequest(url: Str, ?opts: BuchiPack) -> Gorillax[...]`
+HTTP client は `taida-lang/os` 側のモールド `HttpRequest[method, url](headers, body)` で提供します (歴史的経緯と OS 境界カテゴリの統一のため)。`taida-lang/net` から re-export はしていません。
 
-HTTP client。TLS 自動判定 (`https://` なら TLS)。
+### 6.1 `HttpRequest[method, url](headers, body)`
+
+```
+HttpRequest[method: Str, url: Str](
+  headers: BuchiPack | List[@(name: Str, value: Str)],
+  body: Str | Bytes
+) -> Async[Lax[@(status: Int, body: Str, headers: BuchiPack)]]
+```
+
+- `method` — `"GET"` / `"POST"` / `"PUT"` / `"DELETE"` / `"HEAD"` / `"OPTIONS"` / `"PATCH"`。type-arg 1 番目で指定。
+- `url` — type-arg 2 番目。`https://` で始まれば自動で TLS、`http://` で平文。
+- `headers` — 2 形式受理 (`§ 6.1.1` 参照)。
+- `body` — `Str` / `Bytes`。GET / HEAD で空にする場合は `""`。
+
+戻り値 pack shape:
+
+| Field | Type | 意味 |
+|-------|------|------|
+| `status` | `Int` | HTTP status code (`200` / `404` / `500` 等) |
+| `body` | `Str` | response body (UTF-8 decode 済み)。binary が必要な場合は別 API を使う |
+| `headers` | `BuchiPack` | response headers (lower-cased name keys) |
+
+#### 6.1.1 `headers` 引数の 2 形式
+
+| 形式 | 構文 | 制約 |
+|------|------|------|
+| ぶちパック | `@(content_type <= "application/json")` | フィールド識別子がそのまま wire header 名。`-` や `.` を含むヘッダ名は書けない |
+| 名前-値ペアリスト | `@[@(name <= "x-api-key", value <= "secret"), ...]` | 任意の UTF-8 header 名が使える。`-` 含む header 名はこちら必須 |
+
+両形式とも 3 バックエンドで等価。
+
+`HttpRequest["GET"]()` のように type-arg が 2 未満の呼び出しは Interpreter / JS / Native すべてで reject されます。
 
 ---
 
-## 7. Backend scope
+## 7. WebSocket
 
-`taida-lang/net` の API surface は **3-backend (Interpreter / JS / Native)** で parity を保証します。WASM バックエンド (`wasm-min` / `wasm-wasi` / `wasm-edge` / `wasm-full`) は gen-C では `httpServe` / `httpRequest` を提供しません — 該当 capability を呼び出した場合 `[E1612]` を返します。WASM 向け NET dispatcher は gen-D 以降の breaking-change phase で扱います (`docs/STABILITY.md` §1.2 / §4.2 / §5.2)。
+`taida-lang/net` から export される 5 関数で WebSocket Upgrade / 双方向通信 / クローズを扱います。すべて 2-arg `httpServe` ハンドラの内部からのみ呼び出し可能です。
+
+### 7.1 `wsUpgrade(req, writer)`
+
+```
+wsUpgrade(req: BuchiPack, writer: BuchiPack) -> Lax[@(ws: WsToken, ...)]
+```
+
+HTTP Upgrade を実行し、以降の WebSocket 通信用 token を返します。**handler の冒頭** (`startResponse` / `writeChunk` / `endResponse` より前) で 1 度だけ呼べます。
+
+- `req` は handler 引数の 1 番目 (request pack)。
+- `writer` は handler 引数の 2 番目 (streaming writer)。
+- 戻り値の `__value.ws` を以降の `wsSend` / `wsReceive` / `wsClose` に渡します。
+- `Sec-WebSocket-Version: 13` (RFC 6455) 固定。GET method 以外、または `Sec-WebSocket-Key` 欠落時は `Lax.failure`。
+
+### 7.2 `wsSend(ws, data)`
+
+```
+wsSend(ws: WsToken, data: Str | Bytes) -> Lax[Unit]
+```
+
+`Str` を渡すと text frame (`opcode 0x1`)、`Bytes` を渡すと binary frame (`opcode 0x2`) として送出。
+
+### 7.3 `wsReceive(ws)`
+
+```
+wsReceive(ws: WsToken) -> Lax[@(type: Str, data: Str | Bytes)]
+```
+
+単一 frame を受信。
+
+| `type` | `data` の型 | 意味 |
+|--------|------------|------|
+| `"text"` | `Str` | UTF-8 text frame |
+| `"binary"` | `Bytes` | binary frame |
+| `"close"` | `Bytes` | close frame ペイロード (close code を含む。`wsCloseCode` で抽出) |
+| `"ping"` | `Bytes` | ping frame ペイロード (応答は wsSend で pong を送る運用、現状自動応答は無し) |
+| `"pong"` | `Bytes` | pong frame ペイロード |
+
+### 7.4 `wsClose(ws, ?code)`
+
+```
+wsClose(ws: WsToken[, code: Int]) -> Lax[Unit]
+```
+
+close frame を送り接続を閉じる。`code` 省略時は `1000` (normal closure)。`1001` (going away) / `1011` (internal error) など RFC 6455 §7.4 の status code を渡せます。
+
+### 7.5 `wsCloseCode(received)`
+
+```
+wsCloseCode(received: BuchiPack) -> Lax[Int]
+```
+
+`wsReceive` で `type == "close"` の frame を受け取った場合に close code を取り出します。`received` に close 以外の frame を渡すと `Lax.failure`。
+
+---
+
+## 8. Server-Sent Events
+
+### 8.1 `sseEvent(writer, event, data)`
+
+```
+sseEvent(writer: BuchiPack, event: Str, data: Str) -> Lax[Int]
+```
+
+SSE wire フォーマット (`event:`, `data:`, `\n\n`) を 1 イベント分書き込みます。
+
+- `event` — SSE `event:` フィールド (空文字列で省略)。
+- `data` — `data:` フィールド。`\n` を含む場合、SSE 仕様に従って複数の `data:` 行に展開。
+- 戻り値は書き込んだ wire bytes 数。
+
+ブラウザ側は `EventSource` API で受信できます。`Content-Type: text/event-stream` の chunk transfer-encoding response として実装されており、`startResponse` を別途呼ぶ必要はありません (1 回目の `sseEvent` で自動送出)。
+
+---
+
+## 9. HttpProtocol enum
+
+`taida-lang/net` から `HttpProtocol` enum が export されます。
+
+```
+Enum => HttpProtocol = :H1 :H2 :H3
+```
+
+| variant | 意味 |
+|---------|------|
+| `:H1` | HTTP/1.1 (cleartext or TLS) |
+| `:H2` | HTTP/2 over TLS (h2) |
+| `:H3` | HTTP/3 over QUIC |
+
+`httpServe` の `opts` 引数で `protocol <= "h2"` のように指定する形式と enum value の両方を受理します。詳しくは `httpServe` の `opts` 仕様を参照してください。
+
+---
+
+## 10. Backend scope
+
+`taida-lang/net` の API surface は **3-backend (Interpreter / JS / Native)** で parity を保証します。WASM バックエンド (`wasm-min` / `wasm-wasi` / `wasm-edge` / `wasm-full`) は `httpServe` / `httpRequest` を提供しません — 該当 capability を呼び出した場合 `[E1612]` を返します。WASM 向け NET dispatcher の現状方針は `docs/STABILITY.md` §1.2 / §4.2 / §5.2 を参照してください。
 
 例外として `readBytesAt` (bytes I/O) の `wasm-wasi` / `wasm-full` lowering のみ widening addition として land 済です。
 
-進行中の blocker、land 履歴、24 h soak の現況は `CHANGELOG.md` および `.dev/` トラッカーを参照してください。
+進行中の blocker や 24 h soak の現況、land 履歴は `CHANGELOG.md` を参照してください。
 
 ---
 
-## 8. 2-arg handler body handling patterns
+## 11. 2-arg handler body handling patterns
 
-### 8.1 Correct pattern — `readBody` (recommended default)
+### 11.1 Correct pattern — `readBody` (recommended default)
 
 ```taida
 >>> taida-lang/net => @(httpServe, readBody, startResponse, endResponse)
@@ -238,7 +364,7 @@ handler req writer =
 => :Unit
 ```
 
-### 8.2 Anti-pattern — direct `req.body` span slice (silent breakage)
+### 11.2 Anti-pattern — direct `req.body` span slice (silent breakage)
 
 ```taida
 // NG — 2-arg form では空 Bytes を返す
@@ -251,7 +377,7 @@ handler req writer =
 
 この anti-pattern は 1-arg handler で正しく動くため、1-arg → 2-arg 移行時に気づかず残ります。runtime warning 追加の現況は `CHANGELOG.md` を参照してください。
 
-### 8.3 Streaming chunk pattern — `readBodyChunk`
+### 11.3 Streaming chunk pattern — `readBodyChunk`
 
 大きな body を chunk ごとに処理する場合は `readBodyChunk`:
 
@@ -266,27 +392,27 @@ handler req writer =
 => :Unit
 ```
 
-### 8.4 Why 2-arg `req.body` span is intentionally empty
+### 11.4 Why 2-arg `req.body` span is intentionally empty
 
 2-arg handler は streaming 前提で設計されており、handler 呼び出し時点で body を eagerly 読まない (socket に残したまま)。そのため `req.body` pack は `@(start: bodyOffset, len: 0)` で差し込まれます (1-arg form の `body span = buffered body` とは別 shape)。
 
 `__body_stream` sentinel が内部的に pack に入っており、`readBody*` 系はこの sentinel を検出して socket から直接読み出します。**user 側からこの sentinel を直接触る必要はありません** — `readBody*` のいずれかを呼べば透過的に動作します。
 
-### 8.5 Implementation references
+### 11.5 Implementation references
 
 - Interpreter: `src/interpreter/net_eval/mod.rs:118-227` (`readBody` / `readBodyChunk` / `readBodyAll` の 1-arg / 2-arg 分岐)
 - `__body_stream` sentinel: `src/interpreter/net_eval/helpers.rs::is_body_stream_request`
 - Native: `src/codegen/native_runtime/net_h1_h2.c:721-750` (`taida_net_read_body`)
 - JS: `src/js/runtime/net.rs::__taida_net_readBody` (v4: 2-arg body-deferred で `readBodyAll` alias)
 
-### 8.6 3-backend parity tests
+### 11.6 3-backend parity tests
 
 - `tests/c26b_023_two_arg_handler_body.rs` — 2-arg handler body handling parity (本 docs と一貫性 pin)
 - `tests/parity.rs::parity_http_read_body_*` — Content-Length / empty / chunked の readBody 経路
 
 ---
 
-## 9. References
+## 12. References
 
 - `docs/STABILITY.md` §2.2 / §5.1 — surface 保証範囲と NET stable viewpoint
 - `CHANGELOG.md` — タグ別の land 履歴と blocker 単位の進捗

@@ -13,7 +13,8 @@
 | API | Signature | 備考 |
 |-----|-----------|------|
 | `Read[path]()` | `Str -> Lax[Str]` | UTF-8 テキスト、64MB 上限、BOM は除去しない |
-| `readBytes(path)` | `Str -> Lax[Bytes]` | バイナリ、64MB 上限 |
+| `readBytes(path)` | `Str -> Lax[Bytes]` | バイナリ全読、64MB 上限 |
+| `readBytesAt(path, offset, len)` | `(Str, Int, Int) -> Lax[Bytes]` | チャンク読み込み。`offset` は 0-indexed、1 回呼び出しの `len` 上限は 64MB。EOF 越えは可読部分のみ返す。`offset` / `len` 不正は `Lax` の default |
 | `ListDir[path]()` | `Str -> Lax[@[Str]]` | ファイル名のみ（パス無し） |
 | `Stat[path]()` | `Str -> Lax[@(size: Int, modified: Int, isDir: Bool)]` | `modified` は epoch ミリ秒 |
 | `Exists[path]()` | `Str -> Bool` | symlink は follow する |
@@ -49,7 +50,7 @@ stdout / stderr を pipe で捕捉し、文字列として返します。
 - fork/exec 失敗 → `__error` は `IoError` （`kind`, `code` = POSIX errno）
 - 非ゼロ exit → `__error` は `ProcessError` （`code`, `stdout`, `stderr`）
 
-### 2.2 Interactive 版（C19 以降）
+### 2.2 Interactive 版
 
 親の stdin / stdout / stderr を子に継承させます。戻り値は exit code のみ。
 
@@ -120,34 +121,34 @@ stdout("こんにちは、" + line.getOrDefault("旅人"))
 | `HttpPost[url, body]()` | `(Str, Str) -> Async[Lax[Str]]` |
 | `HttpRequest[method, url](headers, body)` | `(Str, Str, BuchiPack \| List[@(name: Str, value: Str)], Str) -> Async[Lax[@(status: Int, body: Str, headers: BuchiPack)]]` |
 
-`HttpRequest` の `headers` 引数は 2 形式を受け付けます（C20-4 以降、どちらも 3 バックエンドで等価）:
+`HttpRequest` の `headers` 引数は 2 形式を受け付けます（どちらも 3 バックエンドで等価）:
 
-- 旧: `headers <= @(content_type <= "application/json")` — buchi-pack。フィールド識別子がそのまま wire header 名になります（`-` や `.` は識別子に使えないので `x-api-key` 等は書けません）。
-- 新: `headers <= @[@(name <= "x-api-key", value <= "secret"), @(name <= "anthropic-version", value <= "2023-06-01")]` — `List[@(name: Str, value: Str)]`。任意 UTF-8 header 名が使えます。
+- buchi-pack 形式: `headers <= @(content_type <= "application/json")` — フィールド識別子がそのまま wire header 名になります（`-` や `.` は識別子に使えないので `x-api-key` 等は書けません）。
+- 名前-値ペアリスト形式: `headers <= @[@(name <= "x-api-key", value <= "secret"), @(name <= "anthropic-version", value <= "2023-06-01")]` — `List[@(name: Str, value: Str)]`。任意 UTF-8 header 名が使えます。
 
-新規コードは新形式を推奨します。`HttpRequest["GET"]()` のように type arg が 2 未満の呼び出しは Interpreter / JS / Native すべてで拒否されます（JS backend は `taida build --target js` 時点で arity error）。
+`-` を含む header 名 (`x-api-key` 等) を扱う場合はペアリスト形式を使用してください。`HttpRequest["GET"]()` のように type arg が 2 未満の呼び出しは Interpreter / JS / Native すべてで拒否されます（JS backend は `taida build --target js` 時点で arity error）。
 
 ---
 
 ## 5. 非同期ソケット（関数）
 
-| API | Signature |
-|-----|-----------|
-| `tcpConnect(host, port[, timeoutMs])` | `(Str, Int[, Int]) -> Async[Result[TcpSocket, IoError]]` |
-| `tcpListen(port[, timeoutMs])` | `(Int[, Int]) -> Async[Result[TcpListener, IoError]]` |
-| `tcpAccept(listener[, timeoutMs])` | `(TcpListener[, Int]) -> Async[Result[TcpSocket, IoError]]` |
-| `socketSend(socket, data[, timeoutMs])` | `(TcpSocket, Str[, Int]) -> Async[Result[Int, IoError]]` |
-| `socketSendAll(socket, data[, timeoutMs])` | `(TcpSocket, Str[, Int]) -> Async[Result[Unit, IoError]]` |
-| `socketRecv(socket[, timeoutMs])` | `(TcpSocket[, Int]) -> Async[Result[Str, IoError]]` |
-| `socketSendBytes(socket, data[, timeoutMs])` | `(TcpSocket, Bytes[, Int]) -> Async[Result[Int, IoError]]` |
-| `socketRecvBytes(socket[, timeoutMs])` | `(TcpSocket[, Int]) -> Async[Result[Bytes, IoError]]` |
-| `socketRecvExact(socket, size[, timeoutMs])` | `(TcpSocket, Int[, Int]) -> Async[Result[Bytes, IoError]]` |
-| `udpBind(host, port[, timeoutMs])` | `(Str, Int[, Int]) -> Async[Result[UdpSocket, IoError]]` |
-| `udpSendTo(socket, host, port, data[, timeoutMs])` | `(UdpSocket, Str, Int, Str[, Int]) -> Async[Result[Int, IoError]]` |
-| `udpRecvFrom(socket[, timeoutMs])` | `(UdpSocket[, Int]) -> Async[Result[@(data: Str, host: Str, port: Int), IoError]]` |
-| `socketClose(socket)` | `TcpSocket -> Result[Unit, IoError]` |
-| `listenerClose(listener)` | `TcpListener -> Result[Unit, IoError]` |
-| `udpClose(socket)` | `UdpSocket -> Result[Unit, IoError]` （`socketClose` のエイリアス） |
+| API | Signature | 備考 |
+|-----|-----------|------|
+| `tcpConnect(host, port[, timeoutMs])` | `(Str, Int[, Int]) -> Async[Result[TcpSocket, IoError]]` | TCP client 接続 |
+| `tcpListen(port[, timeoutMs])` | `(Int[, Int]) -> Async[Result[TcpListener, IoError]]` | TCP server bind + listen |
+| `tcpAccept(listener[, timeoutMs])` | `(TcpListener[, Int]) -> Async[Result[TcpSocket, IoError]]` | accept 1 connection |
+| `socketSend(socket, data[, timeoutMs])` | `(TcpSocket, Str[, Int]) -> Async[Result[Int, IoError]]` | partial send 可、戻り値は送信 byte 数 |
+| `socketSendAll(socket, data[, timeoutMs])` | `(TcpSocket, Str[, Int]) -> Async[Result[Unit, IoError]]` | 全 byte 送信完了まで block |
+| `socketRecv(socket[, timeoutMs])` | `(TcpSocket[, Int]) -> Async[Result[Str, IoError]]` | best-effort 受信 |
+| `socketSendBytes(socket, data[, timeoutMs])` | `(TcpSocket, Bytes[, Int]) -> Async[Result[Int, IoError]]` | binary 送信 |
+| `socketRecvBytes(socket[, timeoutMs])` | `(TcpSocket[, Int]) -> Async[Result[Bytes, IoError]]` | binary 受信 |
+| `socketRecvExact(socket, size[, timeoutMs])` | `(TcpSocket, Int[, Int]) -> Async[Result[Bytes, IoError]]` | `size` byte 揃うまで待機 |
+| `udpBind(host, port[, timeoutMs])` | `(Str, Int[, Int]) -> Async[Result[UdpSocket, IoError]]` | UDP socket bind |
+| `udpSendTo(socket, host, port, data[, timeoutMs])` | `(UdpSocket, Str, Int, Str[, Int]) -> Async[Result[Int, IoError]]` | UDP datagram 送信 |
+| `udpRecvFrom(socket[, timeoutMs])` | `(UdpSocket[, Int]) -> Async[Result[@(data: Str, host: Str, port: Int), IoError]]` | UDP datagram 受信 |
+| `socketClose(socket)` | `TcpSocket -> Result[Unit, IoError]` | TCP socket（`tcpConnect` / `tcpAccept` の戻り値）を閉じる |
+| `listenerClose(listener)` | `TcpListener -> Result[Unit, IoError]` | TCP listener（`tcpListen` の戻り値）を閉じる。`tcpAccept` で受理済 socket は別途 `socketClose` 必須 |
+| `udpClose(socket)` | `UdpSocket -> Result[Unit, IoError]` | UDP socket（`udpBind` の戻り値）を閉じる。socket type が異なるため `socketClose` と呼び分け必須（型不整合は `[E1602]` で reject） |
 
 ---
 
@@ -207,9 +208,8 @@ Import path '<exact import token>' resolves outside the project root. Path trave
 - Interpreter: `src/interpreter/module_eval.rs`
 - JS codegen: `src/js/codegen.rs`
 - Native codegen: `src/codegen/driver.rs`
-- 3 backend parity guard: `tests/c27b_022_path_traversal_parity.rs`
-  (5 cases × 3 backends = 15) / `tests/c26b_015_path_traversal_parity.rs`
+- 3 backend parity guard は `tests/` 配下の path traversal parity fixtures（5 cases × 3 backends）
 
-> **Note**: SEC-009 (`src/pkg/store.rs::validate_path_component`) は
-> pkg-store URL component validation で、本セクションの import path
+> **Note**: pkg-store URL component validation
+> (`src/pkg/store.rs::validate_path_component`) は本セクションの import path
 > 境界判定とは domain disjoint です（重複なし）。

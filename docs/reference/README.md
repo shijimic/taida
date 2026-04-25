@@ -50,24 +50,25 @@
 下記は禁止要素のパターンに見えますが、**現在の動作を説明するために
 本質的に必要**なため例外として許容します:
 
-- **採番ルール例** (`naming_conventions.md`, `operators.md`):
+- **採番ルール例** (`docs/reference/naming_conventions.md` / `docs/reference/operators.md`):
   `@a.1`, `@b.1.breaking`, `@x.34.gen-2-stable` 等は version 文字列の
   構文を説明するためのプレースホルダ的サンプル。実在のタグを参照して
-  いるわけではない。`naming_conventions.md:163-176` /
-  `operators.md:334,342,363` が該当。
-- **CLI フラグの構文例** (`cli.md` `--version <VERSION>`):
-  `--version @b.10.rc2` のような例は flag のシンタックスを示すサンプル。
-  実在 release への参照ではない。`cli.md:448-453,586-592` が該当。
-- **package version sample** (`standard_library.md:113`):
-  `>>> taida-lang/crypto@a.1 => @(sha256)` の `@a.1` は import 構文の
-  サンプル。実在の crypto package 版を pin しているわけではなく、
-  「version 付き import が書ける」という構文の例示。
-- **error 文字列内の pinned literal** (`addon_manifest.md`):
-  `"wasm planned for D26"` のように **error message 自体に literal
-  として焼かれている** 文字列は surface の一部。リファレンスは「この
-  literal が固定されている」事実を pin する責務を負う。`@D26` literal
-  は STABILITY § 4.2 の pinned surface token として gen-C 全体で
-  維持される (gen-D 切替で書き換え予定)。
+  いるわけではない。`naming_conventions.md` 末尾の Versioning 節 / `operators.md` の `>>>` / `<<<` モジュール演算子節が該当。
+- **CLI フラグの構文例** (`docs/reference/cli.md` `--version <VERSION>` / `<<<@a.1` 形式):
+  `--version @b.10.rc2`, `<<<@a.1 owner/name`, `@gen.num` 等は flag / 識別子構文を
+  示すサンプル。実在 release への参照ではない。`taida publish` / `taida cache`
+  / `taida install` の章が該当。
+- **package version 構文サンプル** (`docs/reference/standard_library.md`
+  の crypto 例 / `docs/guide/10_modules.md` の packages.tdm 章 /
+  `docs/guide/13_creating_addons.md` の `packages.tdm` migration ステップ):
+  `>>> taida-lang/crypto@a.1 => @(sha256)`, `>>> taida-lang/os@a.1`,
+  `<<<@a.3 @(hello, greet)`, `<<<@a.1 <owner>/<name>` 等の `@a.1` / `@a.3` は
+  import / export 構文のサンプル。実在パッケージの版を pin しているわけ
+  ではなく、「version 付き import / export が書ける」という構文の例示。
+- **error 文字列内の pinned literal** (`docs/reference/addon_manifest.md`):
+  error message 自体に literal として焼かれている文字列は surface の
+  一部。リファレンスは「この literal が固定されている」事実を pin する
+  責務を負う。
 - **本 README 自身**: 禁止パターンを列挙する責務上、`C26B-001`,
   `D28B-003`, `@c.14.rc1`, `@d.28`, `Round 3`, `[FIXED]` 等のサンプル
   文字列が **本 README ファイル内にのみ** 現れます。レビュー時の

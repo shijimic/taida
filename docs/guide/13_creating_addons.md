@@ -1,4 +1,4 @@
-# Creating Addons (@c.14.rc1)
+# Creating Addons
 
 > **PHILOSOPHY.md — IV.** キモい言語だ。だが、書くのも読むのもAI。眺めるのが人間の仕事。
 
@@ -12,16 +12,16 @@ This guide is aimed at addon *authors*. See `docs/reference/addon_manifest.md`
 for the manifest reference and forward-compat policy, and
 `docs/reference/cli.md` for the `taida publish` CLI contract.
 
-### Backend policy (what runs your addon) — @c.25.rc7 redefinition
+### Backend policy (what runs your addon)
 
-Under `@c.25.rc7` the supported backend matrix for addons is:
+The supported backend matrix for addons is:
 
 | Backend        | Status      | What happens at import                                                                 |
 |----------------|-------------|----------------------------------------------------------------------------------------|
 | Interpreter    | **Supported** | Addon facade runs as a dynamic module; cdylib functions dispatch via `dlopen` when the interpreter binary is built with `feature = "native"` (the default). |
 | Native (AOT)   | **Supported** | Addon facade is statically analysed into an `AddonFacadeSummary` by `src/addon/facade.rs` and lowered through `src/codegen/lower/imports.rs`. FuncDefs become IR functions; pack / scalar / list / template bindings are replayed into the module init path. |
 | JS transpiler  | **Rejected**  | There is no JS-side addon dispatcher today. The import produces a deterministic error. |
-| WASM (min / wasi) | **Rejected** | Reserved for the D28 breaking-change phase (see `docs/STABILITY.md` §1.2 for the D26→D27→D28 rename trail). The D28 wasm backend will reuse the `src/addon/facade.rs` static analyser so authors will not have to re-write facades. |
+| WASM (min / wasi) | **Rejected** | The wasm dispatcher is not currently exposed. Future widening will reuse the `src/addon/facade.rs` static analyser so authors will not have to re-write facades. See `docs/STABILITY.md` §1.2. |
 
 Authors targeting interpreter + native do not need to write two
 facade files. The same `taida/<stem>.td` must work on both — the
@@ -34,49 +34,47 @@ immediately below).
 
 ### What the native backend understands inside a facade
 
-The facade loader accepts the following top-level constructs. Each
-bullet names the C25B-030 Phase that unlocked it, for cross-
-referencing the blocker audit in `.dev/C25_BLOCKERS.md`:
+The facade loader accepts the following top-level constructs:
 
-- **Aliases** (RC2.5 v1) — `FacadeName <= lowercaseAddonFn`, where
+- **Aliases** — `FacadeName <= lowercaseAddonFn`, where
   `lowercaseAddonFn` appears in the manifest's `[functions]` table.
-- **Pack literals** (RC2.5 v1) — `FacadeName <= @(field <= value, ...)`.
-- **Scalar / list / arithmetic / template bindings** (Phase 1E-β) —
+- **Pack literals** — `FacadeName <= @(field <= value, ...)`.
+- **Scalar / list / arithmetic / template bindings** —
   `N <= 0`, `msg <= "hello"`, `greet <= \`hi, ${who}\``, arithmetic
   expressions, function / method calls, field accesses, mold /
   type instantiations.
-- **FuncDefs** (Phase 1E-β) — `Name args = body => :Type`. Both
+- **FuncDefs** — `Name args = body => :Type`. Both
   exported (public) and private (`_`-prefixed) FuncDefs are
   collected; privates promoted into the summary through
   transitive reachability from an exported FuncDef body or pack
   binding.
-- **Relative imports** (Phase 1E-α) — `>>> ./child.td =>
+- **Relative imports** — `>>> ./child.td =>
   @(Sym1, Sym2)`. Non-relative paths (`>>> taida-lang/foo`,
   `>>> npm:*`, versioned imports) are rejected.
 - **Export declarations** — `<<< @(Sym1, Sym2)`. When present, the
   `<<<` clause is authoritative — symbols absent from it cannot be
   named in user imports.
 
-Still deferred to C25B-030 Phase 1E-γ (no real addon in the
-ecosystem uses these today, so the rejection is informational):
+Currently rejected (no real addon in the ecosystem uses these today,
+so the rejection is informational):
 
 - `TypeDef` / `EnumDef` / `MoldDef` statements inside a facade.
 - `<<< <path>` re-exports.
 
 If your facade depends on any of these, compile errors at
-`taida build --target native` will point you at the Phase 1E-γ
-tracker. Interim workaround: expose a facade FuncDef that wraps
+`taida build --target native` will indicate which construct was
+rejected. Interim workaround: expose a facade FuncDef that wraps
 the missing construct with a pure-Taida surface the loader does
 understand.
 
-Under @c.14.rc1 the publish and release workflow was redesigned to be
-**tag-push-only**: `taida publish` just pushes a git tag and exits,
-and the addon repository's own CI (`.github/workflows/release.yml`,
-scaffolded by `taida init --target rust-addon`) builds and publishes
-the release as `github-actions[bot]`. See
-[§3 The release workflow](#3-the-release-workflow) below for the
-symmetric 4-job pipeline, and [§8 Migration from pre-C14 addons](#8-migration-from-pre-c14-addons)
-for the steps existing addons need to take.
+The publish and release workflow is **tag-push-only**: `taida publish`
+just pushes a git tag and exits, and the addon repository's own CI
+(`.github/workflows/release.yml`, scaffolded by `taida init --target
+rust-addon`) builds and publishes the release as
+`github-actions[bot]`. See [§3 The release workflow](#3-the-release-workflow)
+below for the symmetric 4-job pipeline, and [§8 Migrating older
+addons](#8-migrating-older-addons) for the steps existing addons
+may need to take.
 
 ---
 
@@ -157,7 +155,7 @@ my-addon/
   Cargo.toml                    # cdylib crate
   src/lib.rs                    # addon entry point
   native/
-    addon.toml                  # RC1.5 install-time manifest
+    addon.toml                  # install-time manifest
 ```
 
 `Cargo.toml` must declare the crate as a `cdylib`:
@@ -173,8 +171,8 @@ and depend on the in-tree `taida-addon` crate for the ABI types.
 
 ## 2. The addon.toml manifest
 
-A minimal manifest without prebuild distribution (RC1 mode — users must
-place the `.so` themselves) looks like:
+A minimal manifest without prebuild distribution (users must place
+the `.so` themselves) looks like:
 
 ```toml
 abi = 1
@@ -187,7 +185,7 @@ greet = 1
 ```
 
 To ship a prebuild that `taida install` can fetch, add a
-`[library.prebuild]` section (RC1.5):
+`[library.prebuild]` section:
 
 ```toml
 [library.prebuild]
@@ -217,16 +215,16 @@ rejected at manifest parse time — there is no tolerance for typos.
 
 | Triple | Status |
 |--------|--------|
-| `x86_64-unknown-linux-gnu`  | Baseline (RC1.5 v1) |
-| `aarch64-unknown-linux-gnu` | Baseline (RC1.5 v1) |
-| `x86_64-apple-darwin`       | Baseline (RC1.5 v1) |
-| `aarch64-apple-darwin`      | Baseline (RC1.5 v1) |
-| `x86_64-pc-windows-msvc`    | Baseline (RC1.5 v1) |
-| `x86_64-unknown-linux-musl`  | Extension (RC15B-003) |
-| `aarch64-unknown-linux-musl` | Extension (RC15B-003) |
-| `i686-unknown-linux-gnu`     | Extension (RC15B-003) |
-| `riscv64gc-unknown-linux-gnu`| Extension (RC15B-003) |
-| `x86_64-unknown-freebsd`     | Extension (RC15B-003) |
+| `x86_64-unknown-linux-gnu`  | Baseline |
+| `aarch64-unknown-linux-gnu` | Baseline |
+| `x86_64-apple-darwin`       | Baseline |
+| `aarch64-apple-darwin`      | Baseline |
+| `x86_64-pc-windows-msvc`    | Baseline |
+| `x86_64-unknown-linux-musl`  | Extension |
+| `aarch64-unknown-linux-musl` | Extension |
+| `i686-unknown-linux-gnu`     | Extension |
+| `riscv64gc-unknown-linux-gnu`| Extension |
+| `x86_64-unknown-freebsd`     | Extension |
 
 You do not have to ship binaries for every target — only the ones you
 have tested. Users on unlisted targets will get a deterministic
@@ -242,7 +240,7 @@ structured error on mismatch — there is no silent fallback.
 
 ### Reserved: `[library.prebuild.signatures]`
 
-RC15B-005 reserves a `signatures` sub-table for future GPG / detached
+A `signatures` sub-table is reserved for future GPG / detached
 signature verification:
 
 ```toml
@@ -261,12 +259,12 @@ intended forward-compat policy (see
 
 ## 3. The release workflow
 
-From @c.14.rc1 onward, the addon release pipeline is a **4-job CI
-workflow** (`.github/workflows/release.yml`) that is structurally
-symmetric with the Taida core's own `release.yml`. `taida init
---target rust-addon` scaffolds this workflow automatically when you
-create a new addon crate. Existing addons must migrate
-([§7](#7-migration-from-pre-c14-addons)).
+The addon release pipeline is a **4-job CI workflow**
+(`.github/workflows/release.yml`) that is structurally symmetric
+with the Taida core's own `release.yml`. `taida init --target
+rust-addon` scaffolds this workflow automatically when you create
+a new addon crate. Older addons that pre-date this layout may
+need migration (see [§8 Migrating older addons](#8-migrating-older-addons)).
 
 The template lives at
 `crates/addon-rs/templates/release.yml.template` in the Taida
@@ -309,8 +307,8 @@ The 5-platform matrix is:
 
 The `publish` job authenticates with `GH_TOKEN: ${{ github.token }}`,
 so the **release author is always `github-actions[bot]`** — never the
-person who ran `taida publish`. This is a non-negotiable contract of
-@c.14.rc1 (`.dev/C14_DESIGN.md` §非交渉条件 5).
+person who ran `taida publish`. This is a non-negotiable contract
+of the addon release pipeline.
 
 ### Release assets
 
@@ -320,19 +318,19 @@ A successful `publish` job attaches 8 assets to the GitHub Release:
 - `addon.lock.toml` — CI-generated lockfile listing the SHA-256 of
   each of the 5 cdylibs. `taida install` reads this as the
   authoritative source of truth.
-- `prebuild-targets.toml.txt` — a TOML fragment you could paste into
-  `[library.prebuild.targets]` if you ever needed to, but as of C14
-  the lockfile is the primary mechanism.
+- `prebuild-targets.toml.txt` — a TOML fragment that could be pasted
+  into `[library.prebuild.targets]` if needed, but the lockfile is
+  the primary mechanism in the current pipeline.
 - `SHA256SUMS` — flat text listing of every asset's SHA-256 for
   human verification.
 
 ### Reference implementation
 
-`taida-lang/terminal@a.1` is the canonical reference: it was the
-first addon released through the C14 pipeline, and its CI run is
-available at the addon's GitHub Actions tab. Both the workflow file
-(matching the template with `LIBRARY_STEM=taida_lang_terminal`) and
-the release asset structure can be used as a ground-truth example.
+`taida-lang/terminal` is the canonical reference: it is published
+through this pipeline, and its CI run is available at the addon's
+GitHub Actions tab. Both the workflow file (matching the template
+with `LIBRARY_STEM=taida_lang_terminal`) and the release asset
+structure can be used as a ground-truth example.
 
 ---
 
@@ -383,9 +381,10 @@ one-line summary is:
 | `--retag`                   | Force-replace an already-pushed tag (skips API diff)        |
 
 `--force-version` and `--retag` deliberately bypass the API diff
-snapshot so that pre-@c.13 packages (which may contain now-rejected
-discard-binding syntax, `[E1616]`) can still be re-tagged without
-tripping the Taida parser on the old tag's `taida/*.td`.
+snapshot so that older packages (which may contain syntax now
+rejected by the parser, e.g. discard-binding `[E1616]`) can still
+be re-tagged without tripping the Taida parser on the old tag's
+`taida/*.td`.
 
 ---
 
@@ -401,10 +400,10 @@ section, `taida install`:
 3. **SHA source selection**: if the `addon.toml` at the tag contains
    a placeholder SHA (`sha256:` + 64 zeros), the resolver falls back
    to the release asset `addon.lock.toml` for the authoritative
-   hash. This is the expected path for C14 addons whose initial
-   release author left `[library.prebuild.targets]` as placeholders
-   and relies on CI to publish the canonical lockfile
-   (`src/pkg/resolver.rs::choose_sha_source`, C14B-012).
+   hash. This is the expected path when an addon's initial release
+   author left `[library.prebuild.targets]` as placeholders and
+   relies on CI to publish the canonical lockfile
+   (`src/pkg/resolver.rs::choose_sha_source`).
 4. Expands `{version}`, `{target}`, `{ext}`, `{name}` in the URL
    template.
 5. Downloads the binary over HTTPS (up to 10 redirects) or reads a
@@ -443,7 +442,7 @@ Constraints:
 
 - Only **relative** paths are accepted under `file://`. Absolute
   paths and `..` components are rejected before any filesystem
-  access (RC15B-101).
+  access.
 - The path is resolved relative to the project root containing
   `packages.tdm`.
 - The SHA-256 must be updated every time you rebuild, because the
@@ -457,12 +456,13 @@ exercised in `tests/addon_terminal_install_e2e.rs`.
 ## 7. Checklist before releasing
 
 - [ ] `packages.tdm` declares a qualified identity
-      (`<<<@<version> <owner>/<name>`) — bare `<<<@a.1` is rejected
-      by `taida publish` in @c.14.rc1
-- [ ] `.github/workflows/release.yml` is the C14 template (4 jobs,
-      5-platform matrix, `github-actions[bot]` release author).
-      Existing addons still on `prebuild.yml` must migrate —
-      see [§8](#8-migration-from-pre-c14-addons)
+      (`<<<@<version> <owner>/<name>`) — a bare `<<<@<version>`
+      with no `<owner>/<name>` is rejected by `taida publish`
+- [ ] `.github/workflows/release.yml` is the standard template
+      (4 jobs, 5-platform matrix, `github-actions[bot]` release
+      author). Older addons that still use a `prebuild.yml`
+      workflow must migrate — see
+      [§8 Migrating older addons](#8-migrating-older-addons)
 - [ ] The tag you plan to push does not already exist on origin
       (or you've passed `--retag` intentionally)
 - [ ] `cargo build --release` succeeds locally (the CI matrix will
@@ -477,42 +477,41 @@ exercised in `tests/addon_terminal_install_e2e.rs`.
 
 ---
 
-## 8. Migration from pre-C14 addons
+## 8. Migrating older addons
 
-Pre-@c.14.rc1 addons (those that used
-`taida publish --target rust-addon` with `prebuild.yml` workflows
-and author=CLI-runner releases) need three mechanical changes to
-run cleanly under the C14 publish pipeline. `taida-lang/terminal`'s
-PR #2 + PR #3 + PR #4 + PR #5 are the canonical reference commits.
+Older addons (those that used `taida publish --target rust-addon`
+with `prebuild.yml` workflows and author=CLI-runner releases) need
+mechanical changes to run cleanly under the current publish pipeline.
 
 ### Step 1 — Add identity to `packages.tdm`
 
-Change:
+Change a packages.tdm that uses a bare version with no owner /
+name:
 
 ```taida
-// packages.tdm (pre-C14)
+// older form
 <<<@a.1
 >>> ./main.td => @(...)
 ```
 
-to:
+to the qualified-identity form:
 
 ```taida
-// packages.tdm (C14+)
+// current form
 >>> ./main.td
 <<<@a.1 <owner>/<name> @(...)
 ```
 
-`taida publish` will refuse to run against a bare `<<<@a.1` (no
-identity) because the resolver has no way to derive a fetch URL
+`taida publish` will refuse to run against a bare `<<<@<version>`
+(no identity) because the resolver has no way to derive a fetch URL
 without qualifying `owner/name`.
 
-### Step 2 — Replace `prebuild.yml` with the C14 `release.yml` template
+### Step 2 — Replace `prebuild.yml` with the current `release.yml` template
 
-The pre-C14 `prebuild.yml` workflow had only 2 jobs (Build +
+The older `prebuild.yml` workflow had only 2 jobs (Build +
 Release-attach) and assumed the CLI had already run
-`gh release create` as the CLI user. In C14 the CI owns release
-creation.
+`gh release create` as the CLI user. In the current pipeline the CI
+owns release creation.
 
 Option A — clean scaffold: in a *separate* scratch checkout, run
 `taida init --target rust-addon my-addon`, copy the generated
@@ -536,7 +535,7 @@ Either way, open a PR that:
 
 ### Step 3 — Accept placeholder `addon.toml` + CI-generated `addon.lock.toml`
 
-The C14 template publishes an `addon.lock.toml` asset as the
+The current template publishes an `addon.lock.toml` asset as the
 authoritative SHA source. In your tracked
 `native/addon.toml` you can either (a) keep
 `[library.prebuild.targets]` with placeholder (`sha256:` + 64 zeros)
@@ -556,18 +555,18 @@ decision matrix.
 Any `Makefile`, shell alias, or CI script that calls
 `taida publish` must stop passing the now-removed options:
 
-| Pre-C14                          | Replacement under C14                      |
-|----------------------------------|---------------------------------------------|
-| `taida publish --target rust-addon` | `taida publish` (target is implicit)    |
-| `taida publish --dry-run=plan`   | `taida publish --dry-run`                  |
-| `taida publish --dry-run=build`  | Removed — local build happens in CI only   |
-| `TAIDA_PUBLISH_SKIP_RELEASE=1`   | Removed — the CLI never creates releases now |
+| Older form                       | Current replacement                           |
+|----------------------------------|-----------------------------------------------|
+| `taida publish --target rust-addon` | `taida publish` (target is implicit)       |
+| `taida publish --dry-run=plan`   | `taida publish --dry-run`                     |
+| `taida publish --dry-run=build`  | Removed — local build happens in CI only      |
+| `TAIDA_PUBLISH_SKIP_RELEASE=1`   | Removed — the CLI never creates releases now  |
 
 ### Step 5 — (Optional) Re-tag your initial release
 
-If your addon's existing `a.1` tag was pushed by the pre-C14 CLI
+If your addon's existing `a.1` tag was pushed by an older CLI
 (meaning the release author is a person, not `github-actions[bot]`),
-you can re-run the C14 pipeline against the same tag:
+you can re-run the current pipeline against the same tag:
 
 ```bash
 taida publish --force-version a.1 --retag
@@ -579,6 +578,6 @@ and the full 8-asset payload (5 cdylibs + `addon.lock.toml` +
 `prebuild-targets.toml.txt` + `SHA256SUMS`).
 
 `--force-version` and `--retag` together ensure the API diff
-snapshot is skipped, so pre-C13 source in your old tag's
-`taida/*.td` (containing now-rejected discard-binding syntax, for
-example) does not block the re-tag through the Taida parser.
+snapshot is skipped, so older source in your old tag's `taida/*.td`
+(containing syntax now rejected by the parser, for example) does
+not block the re-tag through the Taida parser.
