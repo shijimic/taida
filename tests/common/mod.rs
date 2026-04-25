@@ -36,8 +36,17 @@ use std::sync::OnceLock;
 /// Search order:
 ///
 /// 1. `TAIDA_BIN` runtime env override (used by ad-hoc local runs)
-/// 2. `CARGO_BIN_EXE_taida` runtime env if the harness provides it
-/// 3. Relative candidates from the current working directory, current test
+/// 2. Canonical `<manifest>/target/release/taida` (or `target/debug/taida`)
+///    — chosen ahead of `CARGO_BIN_EXE_taida` because cargo can cache
+///    multiple bin fingerprints under `target/<profile>/deps/taida-XXXX`
+///    and silently point `CARGO_BIN_EXE_taida` at a stale one when test
+///    builds race with bin builds (observed on `feat/c27` Round 1 fix
+///    verification: a fresh `cargo build --release --bin taida` updated
+///    the canonical path, but a subsequent `cargo test --release` ran
+///    against a previously-cached bin via `CARGO_BIN_EXE_taida` and
+///    re-linked `target/release/taida` to the older fingerprint).
+/// 3. `CARGO_BIN_EXE_taida` runtime env (last-resort fallback)
+/// 4. Relative candidates from the current working directory, current test
 ///    binary location, and the compile-time manifest dir:
 ///    - `<root>/taida`
 ///    - `<root>/debug/taida`
@@ -50,12 +59,26 @@ pub fn taida_bin() -> PathBuf {
     #[cfg(not(windows))]
     const BIN_NAME: &str = "taida";
 
-    for env_name in ["TAIDA_BIN", "CARGO_BIN_EXE_taida"] {
-        if let Some(path) = std::env::var_os(env_name).map(PathBuf::from)
-            && path.exists()
-        {
-            return path;
+    if let Some(path) = std::env::var_os("TAIDA_BIN").map(PathBuf::from)
+        && path.exists()
+    {
+        return path;
+    }
+
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    for canonical in [
+        manifest.join("target").join("release").join(BIN_NAME),
+        manifest.join("target").join("debug").join(BIN_NAME),
+    ] {
+        if canonical.exists() {
+            return canonical;
         }
+    }
+
+    if let Some(path) = std::env::var_os("CARGO_BIN_EXE_taida").map(PathBuf::from)
+        && path.exists()
+    {
+        return path;
     }
 
     let mut roots = Vec::new();
@@ -69,7 +92,7 @@ pub fn taida_bin() -> PathBuf {
             roots.push(ancestor.to_path_buf());
         }
     }
-    roots.push(PathBuf::from(env!("CARGO_MANIFEST_DIR")));
+    roots.push(manifest.clone());
 
     let mut candidates = Vec::new();
     for root in roots {
