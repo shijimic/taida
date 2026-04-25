@@ -1,36 +1,50 @@
 name: Bench
 
-# C26B-004 perf regression gate (@c.26).
+# D28B-005 / D28B-013 perf regression gates (@d.X).
 #
-# Phase 4 hard-fail promotion: the criterion `perf_baseline` bench and
-# the RUN_BENCHMARKS=1 NET6-3b h2 throughput tests are now gated with
-# a +10% regression tolerance (see `scripts/bench/compare_baseline.py`).
-# Baseline is tracked in `.github/bench-baselines/perf_baseline.json`.
+# Two parallel hard-fail gates run in this workflow:
 #
-# Gate state machine:
-#   - `pull_request`: runs the gate against the committed baseline.
-#     Benches whose baseline has fewer than `min_samples_required`
-#     (30) samples emit WARN but do not fail the job. Benches that
+#   1. **Throughput regression** (D28B-005, inherits from C26B-004).
+#      `benches/perf_baseline.rs` + the RUN_BENCHMARKS=1 NET6-3b h2
+#      throughput tests are gated with a +10% tolerance against the
+#      committed 30-sample EWMA baseline at
+#      `.github/bench-baselines/perf_baseline.json`.
+#
+#   2. **Peak RSS regression** (D28B-013 acceptance #2). The
+#      `examples/quality/d28_perf_smoke/*.td` fixtures are measured
+#      via `/usr/bin/time -v` (see `scripts/perf/measure_peak_rss.sh`)
+#      and gated with the same +10% tolerance + 30-sample EWMA logic
+#      against `scripts/perf/peak_rss_baseline.json`.
+#
+# Both gates use `scripts/bench/compare_baseline.py` so the state
+# machine is identical:
+#   - `pull_request`: runs both gates against the committed baselines.
+#     Per-bench/per-fixture entries with fewer than `min_samples_required`
+#     (30) samples emit WARN and do not fail the job. Entries that
 #     have met the sample-count threshold and regress beyond
 #     tolerance fail the job hard.
-#   - `push` to main: runs the bench, updates the baseline JSON
-#     (EWMA median + increment sample_count), and commits the updated
-#     baseline back to main via the `update-baseline` job.
+#   - `push` to main: runs both, updates both baseline JSONs (EWMA
+#     median + increment sample_count), and commits the updates back
+#     to main via the `update-baseline` job.
 #   - `schedule` / `workflow_dispatch`: same as PR (gate-only, no
 #     baseline update).
 #
 # Scope isolation: this workflow owns `.github/workflows/bench.yml`,
-# `scripts/bench/**`, and `.github/bench-baselines/**`. It does not
-# touch `.github/workflows/ci.yml`, `security.yml`, or `release.yml`.
+# `scripts/bench/**`, `scripts/perf/**`, `.github/bench-baselines/**`,
+# and `examples/quality/d28_perf_smoke/**`. It does not touch
+# `.github/workflows/ci.yml`, `security.yml`, `release.yml`,
+# `coverage.yml`, or `memory.yml`.
 #
-# `continue-on-error` was removed as part of C26B-004 Phase 4 promotion.
-# Benches that were warn-only during C25 are hard-fail under @c.26.
+# `continue-on-error` is intentionally not set: warn-only suppression
+# is now handled inside `compare_baseline.py` on a per-bench basis via
+# `min_samples_required`. The 30-sample window protects newly-added
+# fixtures from gating before their EWMA stabilises.
 
 on:
   push:
     branches: [main]
   pull_request:
-    branches: [main, develop, feat/c26]
+    branches: [main, develop, feat/c26, feat/d28]
   schedule:
     # Nightly at 05:00 UTC to collect samples on a quiet schedule and
     # catch slow drift between PRs.
@@ -52,10 +66,10 @@ jobs:
   bench:
     name: Perf baselines
     runs-on: ubuntu-latest
-    # C26B-004 hard-fail: removed `continue-on-error`. Warn-only
+    # D28B-005 / D28B-013 hard-fail: no `continue-on-error`. Warn-only
     # suppression is now handled inside `compare_baseline.py` on a
     # per-bench basis via `min_samples_required`.
-    timeout-minutes: 45
+    timeout-minutes: 50
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
@@ -67,6 +81,11 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+      - name: Install /usr/bin/time (for peak RSS gate)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends time
+          /usr/bin/time --version
 
       - name: Run perf_baseline bench
         # --sample-size 20 keeps wall-clock < 10 min while preserving
@@ -108,14 +127,40 @@ jobs:
               cat bench-results-net.txt >> bench-results.txt
           fi
 
-      - name: Compare against baseline (regression gate)
-        # Hard-fail gate. Benches below the min-samples threshold in
-        # the baseline JSON emit WARN and do not trigger failure; see
-        # `compare_baseline.py` for the state machine.
+      - name: Compare against throughput baseline (regression gate)
+        # D28B-005 hard-fail gate. Benches below the min-samples
+        # threshold in the baseline JSON emit WARN and do not trigger
+        # failure; see `compare_baseline.py` for the state machine.
         run: |
           python3 scripts/bench/compare_baseline.py \
               --bencher-out bench-results.txt \
               --baseline .github/bench-baselines/perf_baseline.json \
+              --tolerance-pct 10.0 \
+              --min-samples 30
+
+      - name: Build release taida binary (for peak RSS gate)
+        # The peak-RSS gate measures /usr/bin/time -v on a release
+        # build of the taida CLI. Reuse the cargo cache populated by
+        # the `cargo bench` step above.
+        run: cargo build --release --bin taida
+
+      - name: Measure peak RSS on d28_perf_smoke fixtures
+        # D28B-013 acceptance #2. The script writes
+        # target/perf-rss/peak_rss_results.txt in bencher format so
+        # compare_baseline.py can ingest it.
+        run: |
+          set -euo pipefail
+          ./scripts/perf/measure_peak_rss.sh ./target/release/taida
+          # Copy the results into the workspace root so the upload-
+          # artifact step picks it up alongside the throughput data.
+          cp target/perf-rss/peak_rss_results.txt bench-results-rss.txt
+
+      - name: Compare against peak-RSS baseline (regression gate)
+        # D28B-013 hard-fail gate. Same state machine as throughput.
+        run: |
+          python3 scripts/bench/compare_baseline.py \
+              --bencher-out bench-results-rss.txt \
+              --baseline scripts/perf/peak_rss_baseline.json \
               --tolerance-pct 10.0 \
               --min-samples 30
 
@@ -127,15 +172,18 @@ jobs:
           path: |
             bench-results.txt
             bench-results-net.txt
+            bench-results-rss.txt
             cargo-test-net.log
             target/criterion/**/estimates.json
+            target/perf-rss/**/*.log
           if-no-files-found: warn
           retention-days: 30
 
-  # C26B-004: main-branch baseline collection job. Uses the bench run
-  # results from the `bench` job to advance the committed baseline JSON
-  # (EWMA median + increment sample_count) and commits the update back
-  # to main. PR runs skip this job via the `if:` guard.
+  # D28B-005 / D28B-013: main-branch baseline collection job. Uses
+  # the bench run results from the `bench` job to advance both
+  # committed baseline JSONs (EWMA median + increment sample_count)
+  # and commits the updates back to main. PR runs skip this job via
+  # the `if:` guard.
   update-baseline:
     name: Update baseline (main only)
     runs-on: ubuntu-latest
@@ -156,23 +204,37 @@ jobs:
         with:
           name: perf-baseline-${{ github.sha }}
           path: bench-artifacts
-      - name: Update baseline JSON
+      - name: Update throughput baseline JSON
         run: |
           python3 scripts/bench/update_baseline.py \
               --bencher-out bench-artifacts/bench-results.txt \
               --baseline .github/bench-baselines/perf_baseline.json
-      - name: Commit baseline update
-        # Only commit if the baseline actually changed.
+      - name: Update peak-RSS baseline JSON
+        if: hashFiles('bench-artifacts/bench-results-rss.txt') != ''
+        run: |
+          python3 scripts/bench/update_baseline.py \
+              --bencher-out bench-artifacts/bench-results-rss.txt \
+              --baseline scripts/perf/peak_rss_baseline.json
+      - name: Commit baseline updates
+        # Only commit if at least one baseline actually changed.
         run: |
           set -euo pipefail
-          if git diff --quiet .github/bench-baselines/perf_baseline.json; then
-              echo "baseline unchanged; nothing to commit"
+          changed=0
+          if ! git diff --quiet .github/bench-baselines/perf_baseline.json; then
+              changed=1
+          fi
+          if ! git diff --quiet scripts/perf/peak_rss_baseline.json; then
+              changed=1
+          fi
+          if [[ "${changed}" -eq 0 ]]; then
+              echo "baselines unchanged; nothing to commit"
               exit 0
           fi
           git config user.name  "taida-bench-bot"
           git config user.email "taida-bench-bot@users.noreply.github.com"
           git add .github/bench-baselines/perf_baseline.json
-          git commit -m "chore(bench): C26B-004 update perf baseline (auto)
+          git add scripts/perf/peak_rss_baseline.json
+          git commit -m "chore(bench): D28B-005 / D28B-013 update perf + RSS baselines (auto)
 
 sha: ${{ github.sha }}
 workflow: ${{ github.workflow }}

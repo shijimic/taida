@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "description": "D28B-013 acceptance #2: peak RSS regression gate baseline. Populated by main-branch bench.yml runs (collect phase). Each entry's `sample_count` must reach `min_samples_required` before the gate applies its +10% tolerance hard-fail. Until then, the entry is treated as WARN-only. Schema is intentionally identical to .github/bench-baselines/perf_baseline.json so compare_baseline.py can ingest both via the same parser. The `ns_median` slot stores peak RSS in KiB (the gate compares relative %, units cancel).",
+  "min_samples_required": 30,
+  "tolerance_pct": 10.0,
+  "owner": "D28 Round 2 wH (D28B-013)",
+  "last_updated": "2026-04-26",
+  "update_policy": "main-branch push bench.yml job auto-refreshes ns_median (= peak RSS KiB) and increments sample_count. Manual edits are discouraged except to add/remove fixtures. When a fixture is intentionally changed (algorithmic change in the .td source), reset its sample_count to 0 and document the reason in `notes`.",
+  "benches": {
+    "rss_peak_rss_arith": {
+      "ns_median": 0.0,
+      "sample_count": 0,
+      "notes": "populated by scripts/bench/update_baseline.py on main push; arith-only baseline (interpreter static memory floor)"
+    },
+    "rss_peak_rss_list": {
+      "ns_median": 0.0,
+      "sample_count": 0,
+      "notes": "populated by scripts/bench/update_baseline.py on main push; List/BuchiPack Arc/try_unwrap COW refcount path"
+    },
+    "rss_peak_rss_string": {
+      "ns_median": 0.0,
+      "sample_count": 0,
+      "notes": "populated by scripts/bench/update_baseline.py on main push; Str primitive allocation + Repeat path"
+    }
+  }
+}

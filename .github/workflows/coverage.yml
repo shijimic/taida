@@ -1,29 +1,45 @@
 name: coverage
 
-# C25B-011: Coverage visibility (cargo-llvm-cov).
+# D28B-013 acceptance #3: Coverage hard-fail gate (cargo-llvm-cov).
 #
-# Policy:
+# Policy (Phase 0 Design Lock 2026-04-26 verdict):
 #   1. Run cargo-llvm-cov on a schedule (weekly, Monday 04:00 UTC) and
-#      on explicit workflow_dispatch. We do NOT run on every PR during
-#      @c.25.rc7 because the instrumented build is ~3x slower than the
-#      regular release build and would double the CI bill.
-#   2. Emit lcov + HTML and upload as artifact. No upload to Codecov
+#      on explicit workflow_dispatch. We do NOT run on every PR at
+#      `@d.X` because the instrumented build is ~3x slower than the
+#      regular release build and would double the CI bill. The
+#      trade-off is recorded in `docs/STABILITY.md §5.5`.
+#   2. Emit lcov + HTML and upload as artefact. No upload to Codecov
 #      or similar (adds external service dependency; visibility-first).
-#   3. No hard-fail threshold during @c.25.rc7. We pin a *visibility*
-#      target of 80% line coverage for `src/interpreter/` (the source-of-
-#      truth backend) and surface it in the job summary. Enforcement is
-#      a post-stable follow-up (see docs/STABILITY.md §5.5).
-#   4. Main ci.yml is not modified (scope separation with Phase 2 driver).
+#   3. **Hard-fail thresholds (D28B-013):**
+#      - `src/interpreter/`: line ≥ 80 %, branch ≥ 70 %.
+#      The interpreter is the Source-of-Truth backend (4-backend
+#      parity is anchored on it), so its coverage gate ships with
+#      `@d.X`. JS / native / wasm backends remain visibility-only at
+#      this generation.
+#   4. Main `ci.yml` is not modified (scope separation with the perf
+#      cluster; coverage workflow is independent and gated by its own
+#      concurrency group).
+#   5. `continue-on-error: true` is removed at `@d.X`. A failure here
+#      blocks the next stable follow-up release until either the
+#      threshold recovers or the threshold is renegotiated via the
+#      gen-bump policy at `docs/STABILITY.md §6`.
 
 on:
   schedule:
     - cron: "0 4 * * 1"
   workflow_dispatch: {}
 
+env:
+  CARGO_TERM_COLOR: always
+
+concurrency:
+  group: coverage-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   coverage:
     runs-on: ubuntu-latest
-    continue-on-error: true
+    # D28B-013 hard-fail: continue-on-error removed.
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
@@ -57,13 +73,13 @@ jobs:
         run: |
           cargo llvm-cov --lib --html --output-dir target/llvm-cov/html
 
-      - name: summarise
+      - name: summarise + threshold gate
         run: |
           set -euo pipefail
           python3 - lcov.info >> "$GITHUB_STEP_SUMMARY" <<'PY'
           import sys, re, collections
           path = sys.argv[1]
-          per_file = collections.defaultdict(lambda: {"lf": 0, "lh": 0})
+          per_file = collections.defaultdict(lambda: {"lf": 0, "lh": 0, "bf": 0, "bh": 0})
           current = None
           with open(path) as f:
               for line in f:
@@ -74,10 +90,14 @@ jobs:
                       per_file[current]["lf"] = int(line[3:])
                   elif line.startswith("LH:") and current:
                       per_file[current]["lh"] = int(line[3:])
+                  elif line.startswith("BRF:") and current:
+                      per_file[current]["bf"] = int(line[4:])
+                  elif line.startswith("BRH:") and current:
+                      per_file[current]["bh"] = int(line[4:])
                   elif line == "end_of_record":
                       current = None
           # Aggregate by top-level module under src/.
-          modules = collections.defaultdict(lambda: {"lf": 0, "lh": 0})
+          modules = collections.defaultdict(lambda: {"lf": 0, "lh": 0, "bf": 0, "bh": 0})
           for p, v in per_file.items():
               m = re.search(r"/src/([^/]+)/", p)
               if not m:
@@ -87,6 +107,8 @@ jobs:
               key = m.group(1)
               modules[key]["lf"] += v["lf"]
               modules[key]["lh"] += v["lh"]
+              modules[key]["bf"] += v["bf"]
+              modules[key]["bh"] += v["bh"]
           total_lf = sum(v["lf"] for v in modules.values())
           total_lh = sum(v["lh"] for v in modules.values())
           total_pct = 100.0 * total_lh / total_lf if total_lf else 0.0
@@ -94,23 +116,42 @@ jobs:
           print()
           print(f"**Total lines:** {total_lh} / {total_lf} ({total_pct:.2f}%)")
           print()
-          print("| module | hit | total | pct | visibility target |")
-          print("|---|---:|---:|---:|---|")
-          targets = {"interpreter": 80.0}
+          print("| module | line hit | line total | line % | branch hit | branch total | branch % | gate |")
+          print("|---|---:|---:|---:|---:|---:|---:|---|")
+          # D28B-013 acceptance #3: hard-fail thresholds.
+          line_targets = {"interpreter": 80.0}
+          branch_targets = {"interpreter": 70.0}
+          gate_failed = False
           for key in sorted(modules):
               lf = modules[key]["lf"]; lh = modules[key]["lh"]
-              pct = 100.0 * lh / lf if lf else 0.0
-              tgt = targets.get(key)
-              if tgt is None:
-                  note = "-"
-              elif pct >= tgt:
-                  note = f">= {tgt}% (target met)"
+              bf = modules[key]["bf"]; bh = modules[key]["bh"]
+              line_pct = 100.0 * lh / lf if lf else 0.0
+              br_pct  = 100.0 * bh / bf if bf else 0.0
+              line_tgt = line_targets.get(key)
+              br_tgt  = branch_targets.get(key)
+              if line_tgt is None and br_tgt is None:
+                  gate = "(visibility only)"
               else:
-                  note = f">= {tgt}% (gap {tgt - pct:.2f}%)"
-              print(f"| `{key}` | {lh} | {lf} | {pct:.2f}% | {note} |")
+                  parts = []
+                  if line_tgt is not None:
+                      ok = line_pct >= line_tgt
+                      parts.append(f"line >= {line_tgt}% {'PASS' if ok else 'FAIL'}")
+                      if not ok:
+                          gate_failed = True
+                  if br_tgt is not None:
+                      ok = br_pct >= br_tgt
+                      parts.append(f"branch >= {br_tgt}% {'PASS' if ok else 'FAIL'}")
+                      if not ok:
+                          gate_failed = True
+                  gate = " / ".join(parts)
+              print(f"| `{key}` | {lh} | {lf} | {line_pct:.2f}% | {bh} | {bf} | {br_pct:.2f}% | {gate} |")
           print()
-          print("Policy: 80% visibility target for `src/interpreter/` only.")
-          print("No hard-fail during @c.25.rc7; see docs/STABILITY.md §5.5.")
+          print("Policy (D28B-013 acceptance #3): `src/interpreter/` line >= 80%, branch >= 70% (hard-fail).")
+          print("Other modules are visibility-only at @d.X; promotion is post-stable scope.")
+          if gate_failed:
+              print()
+              print("**::error:: D28B-013 coverage gate FAILED — see threshold violations above.**")
+              sys.exit(1)
           PY
 
       - name: upload lcov

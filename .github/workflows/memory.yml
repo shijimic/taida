@@ -1,8 +1,13 @@
 name: memory
 
-# C26B-010: Memory leak definite-detection gate.
+# D28B-013 acceptance #1: valgrind definitely-lost hard-fail gate.
+# (Inherits the C26B-010 implementation; promoted unchanged into
+# `@d.X` because the gate already hard-fails on any `definitely
+# lost` byte. The Phase 0 Design Lock 2026-04-26 verdict is to
+# leave the policy intact and rely on the bench.yml peak-RSS gate
+# for the regression-budget half of the memory acceptance set.)
 #
-# Policy (stall-prevention scope, additive — ci.yml is not modified):
+# Policy (additive — ci.yml is not modified):
 #   1. Run valgrind memcheck against the smoke fixtures in
 #      examples/quality/c26_mem_smoke/ on every PR and on pushes to main.
 #      Fail the job on any `definitely lost` byte via
@@ -13,9 +18,10 @@ name: memory
 #      same fixtures. Artefacts are uploaded for follow-up analysis;
 #      this job does NOT hard-fail — it exists for timeline visibility
 #      only, complementing the memcheck gate.
-#   3. Peak-RSS gating is intentionally NOT duplicated here; it lives
-#      with the perf gate in .github/workflows/bench.yml (C26B-004)
-#      which already owns the EWMA baseline machinery.
+#   3. Peak-RSS gating is owned by `.github/workflows/bench.yml`
+#      (D28B-013 acceptance #2) which uses the same EWMA baseline
+#      state machine as the throughput gate. See
+#      `scripts/perf/README.md` for the gate matrix.
 #   4. No existing workflow is touched (security.yml, bench.yml,
 #      coverage.yml, release.yml, ci.yml). This workflow is
 #      independent and gated by its own concurrency group.

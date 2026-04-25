@@ -363,9 +363,24 @@ assignments below are pinned by the 2026-04-24 Phase 0 Design Lock:
   `project_flaky_h2_parity.md` is archived. Listed here for
   audit continuity; the gating item for §5.1 is no longer C26B-003.
 - **Throughput regression guard hard-fail promotion** —
-  **FIXED (2026-04-24, Round 2 / wB)**. C26B-004 promoted the
+  **FIXED (2026-04-24, Round 2 / wB; carried into `@d.X` by
+  D28B-005, Round 2 wH 2026-04-26)**. C26B-004 promoted the
   `benches/perf_baseline.rs` harness from `continue-on-error` to
-  hard-fail on 10 % regression against a 30-sample baseline.
+  hard-fail on 10 % regression against a 30-sample baseline. At
+  `@d.X` (D28B-005), the same harness is reaffirmed: `bench.yml`
+  carries no `continue-on-error` flag, the regression engine
+  (`scripts/bench/compare_baseline.py`) gates with
+  `--tolerance-pct 10.0 --min-samples 30`, and the contract is
+  pinned by the `tests/d28b_013_perf_gate_invariants.rs` invariant
+  test so a future workflow regression is caught at the test
+  layer. The committed throughput baseline at
+  `.github/bench-baselines/perf_baseline.json` accumulates samples
+  via the `update-baseline` job on every main-push; entries with
+  `sample_count < 30` emit per-bench `WARN` instead of `FAIL`
+  during the bootstrap window. Per-bench gates include
+  `test_net6_3b_native_h2_32_request_throughput_benchmark`,
+  `test_net6_3b_native_h2_64kib_data_benchmark`, and
+  `test_net6_3b_native_h2_32_stream_multiplex_benchmark`.
 - **Scatter-gather long-run** — the `httpServe` path is verified
   under a 24-hour soak test via a manual runbook
   (`.dev/C26_SOAK_RUNBOOK.md`, C26B-005, Must Fix). Runbook
@@ -407,16 +422,54 @@ behaviour under concurrent event-read becomes contractual at
 
 ### 5.5. Performance
 
-No wallclock / RSS / throughput guarantee is made for any program
-at `@c.25.rc7`. The perf-gate harness (`benches/perf_baseline.rs`,
-inherited from C25B-004) tracks regressions but is
-`continue-on-error` throughout the `@c.25.*` track. Hard-fail
-gating is **C26 scope** (C26B-004, Must Fix): the label-less
-`@c.26` tag ships with the gate promoted to hard-fail on 10%
-regression against a 30-sample baseline. Related runtime-perf
-work items (`C26B-010` / `C26B-012` / `C26B-018` / `C26B-020`
-/ `C26B-024`) land alongside the gate promotion so the baseline
-is measured against the post-fix runtime.
+**FIXED at `@d.X`** (D28B-005 throughput, D28B-013 memory + perf
++ coverage hard-fail gates, Round 2 wH 2026-04-26). The four
+gates that ship with the stable initial release are:
+
+| Gate | Workflow | Trigger | Hard-fail policy |
+|------|----------|---------|-----------------|
+| Throughput regression | `bench.yml` | PR + main-push + nightly cron | +10% slow-down vs 30-sample EWMA baseline |
+| Peak RSS regression | `bench.yml` | PR + main-push + nightly cron | +10% RSS growth vs 30-sample EWMA baseline |
+| Valgrind definitely-lost | `memory.yml` | PR + push | any `definitely lost` byte |
+| Coverage threshold | `coverage.yml` | weekly cron + manual | line ≥ 80% / branch ≥ 70% on `src/interpreter/` |
+
+The perf-gate harness (`benches/perf_baseline.rs`, inherited
+from C25B-004 → C26B-004 hard-fail) is reaffirmed without policy
+change. The peak-RSS gate is new at `@d.X` (D28B-013 acceptance
+#2): the regression engine is the same
+`scripts/bench/compare_baseline.py` invoked against
+`scripts/perf/peak_rss_baseline.json`, with
+`/usr/bin/time -v` capturing peak RSS in KiB across the
+`examples/quality/d28_perf_smoke/*.td` fixtures (see
+`scripts/perf/README.md` and `scripts/perf/gate_summary.md` for
+the full runbook). The coverage gate is removed from
+`continue-on-error` and ships with hard-fail thresholds for the
+Source-of-Truth interpreter backend; JS / native / wasm
+backends remain visibility-only at this generation by design
+(promotion is post-stable scope).
+
+The coverage gate is intentionally **not** PR-triggered at
+`@d.X`. The instrumented build is ~3x slower than a regular
+release build and would double PR latency. The trade-off,
+documented at the 2026-04-26 Phase 0 Design Lock: the gate
+runs on weekly cron + `workflow_dispatch` only, but is hard-
+fail when run, and a regression below the threshold blocks the
+next stable follow-up release.
+
+The structural shape of all four gates (no
+`continue-on-error: true`, the exact tolerance / min-samples /
+threshold literals, the schema parity between the throughput
+and peak-RSS baselines, and the existence of the
+`d28_perf_smoke` fixtures) is pinned by the
+`tests/d28b_013_perf_gate_invariants.rs` invariant test so a
+future workflow-side regression is caught independently of CI
+itself. Related runtime-perf work items
+(`C26B-010` / `C26B-012` / `C26B-018` / `C26B-020` /
+`C26B-024`) land alongside the gate promotion so the baseline
+is measured against the post-fix runtime; the leak-fix half
+that survived into D28 is owned by D28B-012 (NET runtime path
+leak) under the Round 2 wF worktree and the 24-hour soak
+verification by D28B-014 (Round 2 wI).
 
 **Bytes I/O addendum (C26B-020 all three pillars, 2026-04-24):**
 The `readBytesAt(path: Str, offset: Int, len: Int) -> Bytes` API
