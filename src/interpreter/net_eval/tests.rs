@@ -48,7 +48,7 @@ fn test_ws_frame_write() {
     // Create a pair of connected streams to test frame write.
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
-    let mut client = std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
+    let mut client = connect_with_retry(port);
     let (server_tcp, _) = listener.accept().unwrap();
     let mut server = ConnStream::Plain(server_tcp);
 
@@ -1281,6 +1281,44 @@ fn dummy_span() -> Span {
     Span::new(0, 0, 1, 1)
 }
 
+/// C27B-003 root-cause fix (C27 wE, 2026-04-25):
+/// Replace blind `sleep(100ms)` + bare `TcpStream::connect(...).unwrap()` with
+/// poll-until-bound loop. The pre-existing pattern assumed 100 ms was enough
+/// for a freshly spawned interpreter thread to reach `TcpListener::bind()`,
+/// but on busy CI 2C runners the actual time-to-bind can spike to 300 ms-1.5 s
+/// (compilation cache, mold init, env setup), causing the very first
+/// `connect()` to surface ConnectionRefused (errno 111). This is the dominant
+/// remaining failure mode of `test_http_serve_max_requests_3` and siblings
+/// after C26B-003 closed the kernel-ephemeral port collision window.
+///
+/// The fix is to wait for the actual bind, not for a wall-clock guess. We
+/// poll up to `max_attempts` times with `sleep_ms` between attempts (default
+/// 200 × 10 ms = 2 s ceiling, well above worst-observed CI bind latency).
+///
+/// This is a test-helper-only change: production surface is unchanged
+/// (D27/D28 escalation 3 points all NO).
+fn connect_with_retry(port: u16) -> std::net::TcpStream {
+    const MAX_ATTEMPTS: usize = 200;
+    const SLEEP_MS: u64 = 10;
+    for attempt in 0..MAX_ATTEMPTS {
+        match std::net::TcpStream::connect(format!("127.0.0.1:{}", port)) {
+            Ok(s) => return s,
+            Err(e) if e.kind() == std::io::ErrorKind::ConnectionRefused => {
+                std::thread::sleep(std::time::Duration::from_millis(SLEEP_MS));
+                continue;
+            }
+            Err(e) => panic!(
+                "connect_with_retry: unexpected error on attempt {} for port {}: {:?}",
+                attempt, port, e
+            ),
+        }
+    }
+    panic!(
+        "connect_with_retry: server on port {} never became reachable after {} attempts",
+        port, MAX_ATTEMPTS
+    );
+}
+
 /// Build a simple handler lambda expression that returns 200 OK with a given body.
 fn make_handler_expr(body_text: &str) -> Expr {
     Expr::Lambda(
@@ -1384,7 +1422,7 @@ fn test_http_serve_max_requests_1_self_terminates() {
     std::thread::sleep(std::time::Duration::from_millis(100));
 
     // Send an HTTP request
-    let mut client = std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
+    let mut client = connect_with_retry(port);
     std::io::Write::write_all(&mut client, b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n").unwrap();
 
     // Read response
@@ -1454,7 +1492,7 @@ fn test_http_serve_request_pack_has_all_fields() {
     std::thread::sleep(std::time::Duration::from_millis(100));
 
     // Send POST request with body
-    let mut client = std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
+    let mut client = connect_with_retry(port);
     std::io::Write::write_all(
         &mut client,
         b"POST /data?key=val HTTP/1.1\r\nHost: localhost\r\nContent-Length: 5\r\n\r\nhello",
@@ -1511,7 +1549,7 @@ fn test_http_serve_max_requests_3() {
 
     // Send 3 requests
     for _ in 0..3 {
-        let mut client = std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
+        let mut client = connect_with_retry(port);
         std::io::Write::write_all(&mut client, b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")
             .unwrap();
         let mut response = Vec::new();
@@ -1562,7 +1600,7 @@ fn test_http_serve_malformed_request_returns_400() {
     std::thread::sleep(std::time::Duration::from_millis(100));
 
     // Send malformed request
-    let mut client = std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
+    let mut client = connect_with_retry(port);
     std::io::Write::write_all(&mut client, b"NOT_HTTP\x00\x01\x02\r\n\r\n").unwrap();
 
     let mut response = Vec::new();
@@ -1656,7 +1694,7 @@ fn test_http_serve_split_head() {
 
     std::thread::sleep(std::time::Duration::from_millis(100));
 
-    let mut client = std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
+    let mut client = connect_with_retry(port);
 
     // Send head in two fragments with a small delay between them
     std::io::Write::write_all(&mut client, b"GET / HT").unwrap();
@@ -1716,7 +1754,7 @@ fn test_http_serve_split_body() {
 
     std::thread::sleep(std::time::Duration::from_millis(100));
 
-    let mut client = std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
+    let mut client = connect_with_retry(port);
 
     // Send complete head with Content-Length, but body arrives in a separate write
     std::io::Write::write_all(
@@ -1784,7 +1822,7 @@ fn test_http_serve_incomplete_body_returns_400() {
 
     std::thread::sleep(std::time::Duration::from_millis(100));
 
-    let mut client = std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
+    let mut client = connect_with_retry(port);
 
     // Send head claiming 100-byte body, but only send 5 bytes then close
     std::io::Write::write_all(
@@ -1848,13 +1886,13 @@ fn test_http_serve_eof_during_head_does_not_count_request() {
 
     // Connect and immediately close (EOF before any HTTP data).
     // This idle connection should NOT consume the request budget.
-    let client = std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
+    let client = connect_with_retry(port);
     drop(client); // close immediately
 
     std::thread::sleep(std::time::Duration::from_millis(200));
 
     // Now send a real request — this should succeed and consume the budget.
-    let mut real = std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
+    let mut real = connect_with_retry(port);
     let _ = real.set_read_timeout(Some(std::time::Duration::from_secs(3)));
     let req = b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
     let _ = std::io::Write::write_all(&mut real, req);
@@ -1913,7 +1951,7 @@ fn test_http_serve_close_after_partial_head() {
 
     std::thread::sleep(std::time::Duration::from_millis(100));
 
-    let mut client = std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
+    let mut client = connect_with_retry(port);
 
     // Send partial HTTP request (no \r\n\r\n terminator) then close
     std::io::Write::write_all(&mut client, b"GET /hello HTTP/1.1\r\nHost: loc").unwrap();
@@ -1986,7 +2024,7 @@ fn test_nb3_head_plus_body_exceeds_limit_returns_413() {
         cl_value
     );
 
-    let mut client = std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
+    let mut client = connect_with_retry(port);
     let _ = client.set_write_timeout(Some(std::time::Duration::from_secs(3)));
     std::io::Write::write_all(&mut client, request.as_bytes()).unwrap();
 
@@ -2083,7 +2121,7 @@ fn test_nb3_head_plus_body_exactly_fits_returns_200() {
 
     std::thread::sleep(std::time::Duration::from_millis(100));
 
-    let mut client = std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
+    let mut client = connect_with_retry(port);
     let _ = client.set_write_timeout(Some(std::time::Duration::from_secs(5)));
     // Send head + exactly cl_value bytes of body
     std::io::Write::write_all(&mut client, request_head.as_bytes()).unwrap();
@@ -2153,7 +2191,7 @@ fn test_nb28_timeout_closes_connection() {
 
     // Connect but send NO data — the server should timeout after ~500ms
     let start = std::time::Instant::now();
-    let mut client = std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
+    let mut client = connect_with_retry(port);
 
     // Set a generous read timeout on the client side so we don't hang forever
     let _ = client.set_read_timeout(Some(std::time::Duration::from_secs(5)));
@@ -2198,7 +2236,7 @@ fn test_nb28_timeout_closes_connection() {
 
     // Idle close did not consume budget. Send a real request to terminate the server.
     std::thread::sleep(std::time::Duration::from_millis(100));
-    let mut real = std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
+    let mut real = connect_with_retry(port);
     let _ = real.set_read_timeout(Some(std::time::Duration::from_secs(3)));
     let req = b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
     let _ = std::io::Write::write_all(&mut real, req);
@@ -2746,7 +2784,7 @@ fn test_keep_alive_two_requests_one_connection() {
     std::thread::sleep(std::time::Duration::from_millis(100));
 
     // Send 2 requests on the SAME connection (HTTP/1.1 default keep-alive)
-    let mut client = std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
+    let mut client = connect_with_retry(port);
     std::io::Write::write_all(
         &mut client,
         b"GET /first HTTP/1.1\r\nHost: localhost\r\n\r\n",
@@ -2820,7 +2858,7 @@ fn test_keep_alive_connection_close_terminates() {
     std::thread::sleep(std::time::Duration::from_millis(100));
 
     // Send request with Connection: close
-    let mut client = std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
+    let mut client = connect_with_retry(port);
     std::io::Write::write_all(
         &mut client,
         b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
@@ -2880,7 +2918,7 @@ fn test_keep_alive_http10_explicit_keep_alive() {
     std::thread::sleep(std::time::Duration::from_millis(100));
 
     // HTTP/1.0 with explicit Connection: keep-alive
-    let mut client = std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
+    let mut client = connect_with_retry(port);
     std::io::Write::write_all(
         &mut client,
         b"GET /first HTTP/1.0\r\nHost: localhost\r\nConnection: keep-alive\r\n\r\n",
@@ -2957,7 +2995,7 @@ fn test_keep_alive_http10_default_close() {
     std::thread::sleep(std::time::Duration::from_millis(100));
 
     // HTTP/1.0 without Connection header → default close
-    let mut client = std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
+    let mut client = connect_with_retry(port);
     std::io::Write::write_all(&mut client, b"GET / HTTP/1.0\r\nHost: localhost\r\n\r\n").unwrap();
 
     let mut response = Vec::new();
@@ -2978,7 +3016,7 @@ fn test_keep_alive_http10_default_close() {
     // Connection should be closed after this single request.
     // Server is still running (maxRequests=2, only used 1).
     // Send another connection to consume the second request and terminate.
-    let mut client2 = std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
+    let mut client2 = connect_with_retry(port);
     std::io::Write::write_all(
         &mut client2,
         b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
@@ -3035,7 +3073,7 @@ fn test_keep_alive_max_requests_across_connections() {
     std::thread::sleep(std::time::Duration::from_millis(100));
 
     // Connection 1: send 2 requests (keep-alive)
-    let mut client1 = std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
+    let mut client1 = connect_with_retry(port);
     std::io::Write::write_all(
         &mut client1,
         b"GET /req1 HTTP/1.1\r\nHost: localhost\r\n\r\n",
@@ -3054,7 +3092,7 @@ fn test_keep_alive_max_requests_across_connections() {
     drop(client1);
 
     // Connection 2: send 1 request (this is the 3rd overall → triggers maxRequests)
-    let mut client2 = std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
+    let mut client2 = connect_with_retry(port);
     std::io::Write::write_all(
         &mut client2,
         b"GET /req3 HTTP/1.1\r\nHost: localhost\r\n\r\n",
@@ -3593,7 +3631,7 @@ fn test_http_serve_chunked_body() {
 
     std::thread::sleep(std::time::Duration::from_millis(100));
 
-    let mut client = std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
+    let mut client = connect_with_retry(port);
     client
         .set_read_timeout(Some(std::time::Duration::from_millis(500)))
         .unwrap();
@@ -3644,7 +3682,7 @@ fn test_http_serve_rejects_cl_and_chunked() {
 
     std::thread::sleep(std::time::Duration::from_millis(100));
 
-    let mut client = std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
+    let mut client = connect_with_retry(port);
     client
         .set_read_timeout(Some(std::time::Duration::from_millis(500)))
         .unwrap();
@@ -3690,7 +3728,7 @@ fn test_http_serve_malformed_chunk() {
 
     std::thread::sleep(std::time::Duration::from_millis(100));
 
-    let mut client = std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
+    let mut client = connect_with_retry(port);
     client
         .set_read_timeout(Some(std::time::Duration::from_millis(500)))
         .unwrap();
@@ -3736,7 +3774,7 @@ fn test_http_serve_chunked_then_normal_keep_alive() {
 
     std::thread::sleep(std::time::Duration::from_millis(100));
 
-    let mut client = std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
+    let mut client = connect_with_retry(port);
     client
         .set_read_timeout(Some(std::time::Duration::from_millis(500)))
         .unwrap();
@@ -3800,7 +3838,7 @@ fn test_http_serve_chunked_large_body() {
 
     std::thread::sleep(std::time::Duration::from_millis(100));
 
-    let mut client = std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
+    let mut client = connect_with_retry(port);
     client
         .set_read_timeout(Some(std::time::Duration::from_millis(1000)))
         .unwrap();
@@ -3864,8 +3902,8 @@ fn test_concurrent_two_clients_both_get_responses() {
     std::thread::sleep(std::time::Duration::from_millis(100));
 
     // Connect two clients simultaneously before sending any data
-    let mut client1 = std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
-    let mut client2 = std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
+    let mut client1 = connect_with_retry(port);
+    let mut client2 = connect_with_retry(port);
 
     // Both send requests
     std::io::Write::write_all(
@@ -3946,8 +3984,8 @@ fn test_concurrent_max_connections_limit() {
 
     // Connect 3 clients. maxConnections=2, so only 2 can be in the pool at once.
     // The third will be accepted after one of the first two closes.
-    let mut client1 = std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
-    let mut client2 = std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
+    let mut client1 = connect_with_retry(port);
+    let mut client2 = connect_with_retry(port);
 
     // Send requests on first two
     std::io::Write::write_all(
@@ -3979,7 +4017,7 @@ fn test_concurrent_max_connections_limit() {
 
     // Third client can now connect (after slots free up)
     std::thread::sleep(std::time::Duration::from_millis(50));
-    let mut client3 = std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
+    let mut client3 = connect_with_retry(port);
     std::io::Write::write_all(
         &mut client3,
         b"GET /c3 HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
@@ -4030,7 +4068,7 @@ fn test_concurrent_max_requests_across_connections() {
     std::thread::sleep(std::time::Duration::from_millis(100));
 
     // Client 1: keep-alive, sends 2 requests
-    let mut client1 = std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
+    let mut client1 = connect_with_retry(port);
     std::io::Write::write_all(&mut client1, b"GET /r1 HTTP/1.1\r\nHost: localhost\r\n\r\n")
         .unwrap();
     let r1 = read_responses(&mut client1, 1);
@@ -4042,7 +4080,7 @@ fn test_concurrent_max_requests_across_connections() {
     assert!(!r2.is_empty() && r2[0].contains("200 OK"));
 
     // Client 2: sends 1 request (should be the 3rd total, hitting maxRequests)
-    let mut client2 = std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
+    let mut client2 = connect_with_retry(port);
     std::io::Write::write_all(
         &mut client2,
         b"GET /r3 HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
@@ -4091,7 +4129,7 @@ fn test_concurrent_buffer_isolation() {
     std::thread::sleep(std::time::Duration::from_millis(100));
 
     // Client 1: POST with body "AAAA"
-    let mut client1 = std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
+    let mut client1 = connect_with_retry(port);
     std::io::Write::write_all(
         &mut client1,
         b"POST /c1 HTTP/1.1\r\nHost: localhost\r\nContent-Length: 4\r\nConnection: close\r\n\r\nAAAA",
@@ -4099,7 +4137,7 @@ fn test_concurrent_buffer_isolation() {
     .unwrap();
 
     // Client 2: POST with body "BBBB"
-    let mut client2 = std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
+    let mut client2 = connect_with_retry(port);
     std::io::Write::write_all(
         &mut client2,
         b"POST /c2 HTTP/1.1\r\nHost: localhost\r\nContent-Length: 4\r\nConnection: close\r\n\r\nBBBB",
@@ -4158,7 +4196,7 @@ fn test_concurrent_max_connections_default() {
     std::thread::sleep(std::time::Duration::from_millis(100));
 
     // Single client should work fine with default maxConnections
-    let mut client = std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
+    let mut client = connect_with_retry(port);
     std::io::Write::write_all(
         &mut client,
         b"GET /test HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
@@ -4207,10 +4245,10 @@ fn test_concurrent_keep_alive_with_multiple_connections() {
     std::thread::sleep(std::time::Duration::from_millis(100));
 
     // Client 1: keep-alive, 2 requests
-    let mut client1 = std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
+    let mut client1 = connect_with_retry(port);
 
     // Client 2: single request with Connection: close
-    let mut client2 = std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
+    let mut client2 = connect_with_retry(port);
 
     // Client 1 first request
     std::io::Write::write_all(
@@ -4278,7 +4316,7 @@ fn test_concurrent_chunked_body() {
     std::thread::sleep(std::time::Duration::from_millis(100));
 
     // Client 1: normal Content-Length request
-    let mut client1 = std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
+    let mut client1 = connect_with_retry(port);
     std::io::Write::write_all(
         &mut client1,
         b"POST /normal HTTP/1.1\r\nHost: localhost\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello",
@@ -4286,7 +4324,7 @@ fn test_concurrent_chunked_body() {
     .unwrap();
 
     // Client 2: chunked request
-    let mut client2 = std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
+    let mut client2 = connect_with_retry(port);
     std::io::Write::write_all(
         &mut client2,
         b"POST /chunked HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n5\r\nworld\r\n0\r\n\r\n",
@@ -4346,7 +4384,7 @@ fn test_keep_alive_partial_timeout_returns_400() {
     std::thread::sleep(std::time::Duration::from_millis(100));
 
     // Phase 1: send a complete request on keep-alive connection
-    let mut client = std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
+    let mut client = connect_with_retry(port);
     let _ = client.set_read_timeout(Some(std::time::Duration::from_secs(5)));
     std::io::Write::write_all(
         &mut client,
@@ -4391,7 +4429,7 @@ fn test_keep_alive_partial_timeout_returns_400() {
 
     // Server should count the partial as a request (total=2).
     // Send one more request on a fresh connection to reach maxRequests=3.
-    let mut client2 = std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
+    let mut client2 = connect_with_retry(port);
     let _ = client2.set_read_timeout(Some(std::time::Duration::from_secs(5)));
     std::io::Write::write_all(
         &mut client2,
@@ -4447,7 +4485,7 @@ fn test_slow_split_request_within_timeout_succeeds() {
 
     std::thread::sleep(std::time::Duration::from_millis(100));
 
-    let mut client = std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
+    let mut client = connect_with_retry(port);
     let _ = client.set_read_timeout(Some(std::time::Duration::from_secs(5)));
 
     // Send first half of the request head
@@ -4839,7 +4877,7 @@ fn test_v3_two_arg_handler_one_shot_fallback() {
 
     std::thread::sleep(std::time::Duration::from_millis(200));
 
-    let mut client = std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
+    let mut client = connect_with_retry(port);
     std::io::Write::write_all(
         &mut client,
         b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
@@ -4919,7 +4957,7 @@ fn test_v3_two_arg_handler_no_return_fallback() {
 
     std::thread::sleep(std::time::Duration::from_millis(200));
 
-    let mut client = std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
+    let mut client = connect_with_retry(port);
     std::io::Write::write_all(
         &mut client,
         b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
@@ -5142,7 +5180,7 @@ fn test_v3_write_chunk_basic() {
 
     std::thread::sleep(std::time::Duration::from_millis(200));
 
-    let mut client = std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
+    let mut client = connect_with_retry(port);
     std::io::Write::write_all(
         &mut client,
         b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
@@ -5214,7 +5252,7 @@ fn test_v3_end_response_empty_body() {
 
     std::thread::sleep(std::time::Duration::from_millis(200));
 
-    let mut client = std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
+    let mut client = connect_with_retry(port);
     std::io::Write::write_all(
         &mut client,
         b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
@@ -5276,7 +5314,7 @@ fn test_v3_end_response_idempotent() {
 
     std::thread::sleep(std::time::Duration::from_millis(200));
 
-    let mut client = std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
+    let mut client = connect_with_retry(port);
     std::io::Write::write_all(
         &mut client,
         b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
@@ -5338,7 +5376,7 @@ fn test_v3_write_chunk_bytes_fast_path() {
 
     std::thread::sleep(std::time::Duration::from_millis(200));
 
-    let mut client = std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
+    let mut client = connect_with_retry(port);
     std::io::Write::write_all(
         &mut client,
         b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
@@ -5418,7 +5456,7 @@ fn test_v3_write_chunk_str_no_aggregate() {
 
     std::thread::sleep(std::time::Duration::from_millis(200));
 
-    let mut client = std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
+    let mut client = connect_with_retry(port);
     std::io::Write::write_all(
         &mut client,
         b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
@@ -5489,7 +5527,7 @@ fn test_v3_start_response_write_chunk_end_response() {
 
     std::thread::sleep(std::time::Duration::from_millis(200));
 
-    let mut client = std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
+    let mut client = connect_with_retry(port);
     std::io::Write::write_all(
         &mut client,
         b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
@@ -5565,7 +5603,7 @@ fn test_v3_write_chunk_empty_is_noop() {
 
     std::thread::sleep(std::time::Duration::from_millis(200));
 
-    let mut client = std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
+    let mut client = connect_with_retry(port);
     std::io::Write::write_all(
         &mut client,
         b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
@@ -5620,7 +5658,7 @@ fn test_v3_auto_end_on_handler_return() {
 
     std::thread::sleep(std::time::Duration::from_millis(200));
 
-    let mut client = std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
+    let mut client = connect_with_retry(port);
     std::io::Write::write_all(
         &mut client,
         b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
@@ -5686,7 +5724,7 @@ fn test_v3_reserved_header_rejection_in_handler() {
 
     std::thread::sleep(std::time::Duration::from_millis(200));
 
-    let mut client = std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
+    let mut client = connect_with_retry(port);
     std::io::Write::write_all(
         &mut client,
         b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
@@ -5738,7 +5776,7 @@ fn test_v3_bodyless_status_rejects_write_chunk() {
 
     std::thread::sleep(std::time::Duration::from_millis(200));
 
-    let mut client = std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
+    let mut client = connect_with_retry(port);
     std::io::Write::write_all(
         &mut client,
         b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
@@ -5783,7 +5821,7 @@ fn test_v3_chunked_wire_format() {
 
     std::thread::sleep(std::time::Duration::from_millis(200));
 
-    let mut client = std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
+    let mut client = connect_with_retry(port);
     std::io::Write::write_all(
         &mut client,
         b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
@@ -5851,7 +5889,7 @@ fn test_v3_implicit_head_commit() {
 
     std::thread::sleep(std::time::Duration::from_millis(200));
 
-    let mut client = std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
+    let mut client = connect_with_retry(port);
     std::io::Write::write_all(
         &mut client,
         b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
@@ -5909,7 +5947,7 @@ fn test_v3_sse_event_basic() {
 
     std::thread::sleep(std::time::Duration::from_millis(200));
 
-    let mut client = std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
+    let mut client = connect_with_retry(port);
     std::io::Write::write_all(
         &mut client,
         b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
@@ -5985,7 +6023,7 @@ fn test_v3_sse_auto_content_type() {
 
     std::thread::sleep(std::time::Duration::from_millis(200));
 
-    let mut client = std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
+    let mut client = connect_with_retry(port);
     std::io::Write::write_all(
         &mut client,
         b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
@@ -6039,7 +6077,7 @@ fn test_v3_sse_respects_user_content_type() {
 
     std::thread::sleep(std::time::Duration::from_millis(200));
 
-    let mut client = std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
+    let mut client = connect_with_retry(port);
     std::io::Write::write_all(
         &mut client,
         b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
@@ -6095,7 +6133,7 @@ fn test_v3_sse_multiline_data() {
 
     std::thread::sleep(std::time::Duration::from_millis(200));
 
-    let mut client = std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
+    let mut client = connect_with_retry(port);
     std::io::Write::write_all(
         &mut client,
         b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
@@ -6140,7 +6178,7 @@ fn test_v3_sse_empty_event_name() {
 
     std::thread::sleep(std::time::Duration::from_millis(200));
 
-    let mut client = std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
+    let mut client = connect_with_retry(port);
     std::io::Write::write_all(
         &mut client,
         b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
@@ -6217,7 +6255,7 @@ fn test_v3_sse_event_after_end() {
 
     std::thread::sleep(std::time::Duration::from_millis(200));
 
-    let mut client = std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
+    let mut client = connect_with_retry(port);
     std::io::Write::write_all(
         &mut client,
         b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
@@ -6263,7 +6301,7 @@ fn test_v3_sse_implicit_head() {
 
     std::thread::sleep(std::time::Duration::from_millis(200));
 
-    let mut client = std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
+    let mut client = connect_with_retry(port);
     std::io::Write::write_all(
         &mut client,
         b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
@@ -6334,7 +6372,7 @@ fn test_v3_sse_mixed_with_write_chunk() {
 
     std::thread::sleep(std::time::Duration::from_millis(200));
 
-    let mut client = std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
+    let mut client = connect_with_retry(port);
     std::io::Write::write_all(
         &mut client,
         b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
@@ -6393,7 +6431,7 @@ fn test_v3_write_chunk_then_sse_event_errors() {
 
     std::thread::sleep(std::time::Duration::from_millis(200));
 
-    let mut client = std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
+    let mut client = connect_with_retry(port);
     std::io::Write::write_all(
         &mut client,
         b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
@@ -6451,7 +6489,7 @@ fn test_v3_content_type_only_then_write_chunk_then_sse_event_errors() {
 
     std::thread::sleep(std::time::Duration::from_millis(200));
 
-    let mut client = std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
+    let mut client = connect_with_retry(port);
     std::io::Write::write_all(
         &mut client,
         b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
@@ -6509,7 +6547,7 @@ fn test_v3_explicit_sse_headers_then_write_chunk_then_sse() {
 
     std::thread::sleep(std::time::Duration::from_millis(200));
 
-    let mut client = std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
+    let mut client = connect_with_retry(port);
     std::io::Write::write_all(
         &mut client,
         b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
@@ -6573,7 +6611,7 @@ fn test_v3_sse_wire_format_exact() {
 
     std::thread::sleep(std::time::Duration::from_millis(200));
 
-    let mut client = std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
+    let mut client = connect_with_retry(port);
     std::io::Write::write_all(
         &mut client,
         b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
@@ -6647,7 +6685,7 @@ fn test_v3_sse_bodyless_status_rejected() {
 
     std::thread::sleep(std::time::Duration::from_millis(200));
 
-    let mut client = std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
+    let mut client = connect_with_retry(port);
     std::io::Write::write_all(
         &mut client,
         b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
