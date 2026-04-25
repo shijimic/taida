@@ -197,3 +197,183 @@ fn c26b_020_wasm_edge_rejects_read_bytes_at() {
     );
     let _ = std::fs::remove_file(&wasm);
 }
+
+// ===========================================================================
+// C27B-020 (2026-04-25) follow-up: bytes mold lowering parity.
+//
+// Two new fixtures verify the wasm-side fixes:
+//   1. `bytes_length_parity.td`: `chunk ]=> bytes; bytes.length()` returns
+//      the actual byte count on every backend (regression guard for the
+//      silent-0 bug where `taida_polymorphic_length` mis-dispatched Bytes).
+//   2. `bytes_cursor_chain.td`: full `BytesCursor` -> `BytesCursorTake` ->
+//      `U32LEDecode` chain compiles and runs on wasm-wasi (previously
+//      rejected at compile time) and wasm-full.
+//
+// 4-backend identity is verified against the interpreter's output so that
+// any future regression flips at least one backend.
+// ===========================================================================
+
+fn write_payload_named(name: &str, content: &[u8]) -> TempFile {
+    let path = PathBuf::from(name);
+    std::fs::write(&path, content).expect("write payload");
+    TempFile(path)
+}
+
+fn run_interp(td: &Path) -> Option<String> {
+    let out = Command::new(taida_bin()).arg(td).output().ok()?;
+    if !out.status.success() {
+        eprintln!(
+            "interpreter failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        return None;
+    }
+    Some(String::from_utf8_lossy(&out.stdout).trim_end().to_string())
+}
+
+fn run_native(td: &Path) -> Option<String> {
+    let exe = std::env::temp_dir().join(format!(
+        "c27b020_native_{}_{}",
+        std::process::id(),
+        td.file_stem().and_then(|s| s.to_str()).unwrap_or("x")
+    ));
+    let status = Command::new(taida_bin())
+        .args(["build", "--target", "native"])
+        .arg(td)
+        .arg("-o")
+        .arg(&exe)
+        .output()
+        .ok()?;
+    if !status.status.success() {
+        eprintln!(
+            "native compile failed: {}",
+            String::from_utf8_lossy(&status.stderr)
+        );
+        return None;
+    }
+    let out = Command::new(&exe).output().ok()?;
+    let _ = std::fs::remove_file(&exe);
+    if !out.status.success() {
+        eprintln!("native run failed");
+        return None;
+    }
+    Some(String::from_utf8_lossy(&out.stdout).trim_end().to_string())
+}
+
+fn run_js(td: &Path) -> Option<String> {
+    if Command::new("node").arg("--version").output().is_err() {
+        eprintln!("SKIP: node unavailable");
+        return None;
+    }
+    let js = std::env::temp_dir().join(format!(
+        "c27b020_js_{}_{}.js",
+        std::process::id(),
+        td.file_stem().and_then(|s| s.to_str()).unwrap_or("x")
+    ));
+    let status = Command::new(taida_bin())
+        .args(["build", "--target", "js"])
+        .arg(td)
+        .arg("-o")
+        .arg(&js)
+        .output()
+        .ok()?;
+    if !status.status.success() {
+        eprintln!(
+            "js compile failed: {}",
+            String::from_utf8_lossy(&status.stderr)
+        );
+        return None;
+    }
+    let out = Command::new("node").arg(&js).output().ok()?;
+    let _ = std::fs::remove_file(&js);
+    if !out.status.success() {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&out.stdout).trim_end().to_string())
+}
+
+/// 4-backend `bytes.length()` parity guard. The fixture's payload is a
+/// 16-byte file but the read takes 4 bytes — every backend must report 4.
+#[test]
+fn c27b_020_bytes_length_parity_4backend() {
+    let td = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("examples/quality/c27_wasm_bytes_extras/bytes_length_parity.td");
+
+    let _payload = write_payload_named("_c27b_020_len_tmp.bin", b"ABCDEFGHIJKLMNOP");
+
+    let interp = run_interp(&td).expect("interpreter run");
+    assert_eq!(interp, "4", "interpreter bytes.length() expected 4");
+
+    let native = run_native(&td).expect("native run");
+    assert_eq!(native, interp, "native parity");
+
+    if let Some(js) = run_js(&td) {
+        assert_eq!(js, interp, "JS parity");
+    }
+
+    let wasmtime = match wasmtime_bin() {
+        Some(p) => p,
+        None => {
+            eprintln!("SKIP: wasmtime unavailable for wasi/full");
+            return;
+        }
+    };
+
+    let wasi = std::env::temp_dir().join("c27b020_len_wasi.wasm");
+    compile_wasm(&td, "wasm-wasi", &wasi).expect("wasm-wasi compile");
+    let wasi_out = run_wasm(&wasi, &wasmtime).expect("wasm-wasi run");
+    let _ = std::fs::remove_file(&wasi);
+    assert_eq!(
+        wasi_out, interp,
+        "wasm-wasi parity (regression guard against silent-0)"
+    );
+
+    let full = std::env::temp_dir().join("c27b020_len_full.wasm");
+    compile_wasm(&td, "wasm-full", &full).expect("wasm-full compile");
+    let full_out = run_wasm(&full, &wasmtime).expect("wasm-full run");
+    let _ = std::fs::remove_file(&full);
+    assert_eq!(
+        full_out, interp,
+        "wasm-full parity (regression guard against silent-0)"
+    );
+}
+
+/// 3-step parsing fixture: chunk → BytesCursor → BytesCursorTake →
+/// U32LEDecode. The 4 bytes "TEST" decode (LE) to 0x54534554 = 1414743380.
+#[test]
+fn c27b_020_bytes_cursor_chain_parity() {
+    let td = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("examples/quality/c27_wasm_bytes_extras/bytes_cursor_chain.td");
+
+    let _payload = write_payload_named("_c27b_020_chain_tmp.bin", b"TEST");
+
+    let interp = run_interp(&td).expect("interpreter run");
+    assert_eq!(interp, "1414743380", "interpreter U32LEDecode of TEST");
+
+    let native = run_native(&td).expect("native run");
+    assert_eq!(native, interp, "native parity");
+
+    if let Some(js) = run_js(&td) {
+        assert_eq!(js, interp, "JS parity");
+    }
+
+    let wasmtime = match wasmtime_bin() {
+        Some(p) => p,
+        None => {
+            eprintln!("SKIP: wasmtime unavailable for wasi/full");
+            return;
+        }
+    };
+
+    let wasi = std::env::temp_dir().join("c27b020_chain_wasi.wasm");
+    compile_wasm(&td, "wasm-wasi", &wasi).expect("wasm-wasi compile (was C27B-020 reject)");
+    let wasi_out = run_wasm(&wasi, &wasmtime).expect("wasm-wasi run");
+    let _ = std::fs::remove_file(&wasi);
+    assert_eq!(wasi_out, interp, "wasm-wasi cursor chain parity");
+
+    let full = std::env::temp_dir().join("c27b020_chain_full.wasm");
+    compile_wasm(&td, "wasm-full", &full).expect("wasm-full compile");
+    let full_out = run_wasm(&full, &wasmtime).expect("wasm-full run");
+    let _ = std::fs::remove_file(&full);
+    assert_eq!(full_out, interp, "wasm-full cursor chain parity");
+}

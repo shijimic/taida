@@ -33,7 +33,7 @@
 
 **フェーズ**: Parser (`src/parser/parser_expr.rs::parse_cond_branch`)
 
-**契機**: C20-1 (ROOT-5 / C19B-009) silent-bug 禁圧。`name <= | cond |> A | _ |> B` を複数行に分けて書くと、旧 parser は続きの top-level 文を greedy に arm body として吸収していた (`taida check` は通り、module load で symbol が消える)。**`CondBranchContext::LetRhs`** を `<=` 束縛の rhs で設定し、continuation arm が別行に現れたら `[E0303]` を発射する。
+**契機**: silent-bug 禁圧。`name <= | cond |> A | _ |> B` を複数行に分けて書くと、parser が続きの top-level 文を greedy に arm body として吸収する穴があった (`taida check` は通り、module load で symbol が消える)。**`CondBranchContext::LetRhs`** を `<=` 束縛の rhs で設定し、continuation arm が別行に現れたら `[E0303]` を発射します。
 
 **代替手段**:
 
@@ -76,48 +76,48 @@
 
 ### 定義・意味論エラー (`E15xx`)
 
-| コード | メッセージ | フェーズ | 関連 |
-|--------|-----------|---------|------|
-| `E1501` | 同一スコープでの名前の再定義・関数オーバーロード禁止 | TypeChecker | QF-45, QF-46 |
-| `E1502` | 旧 `_` 部分適用構文の使用禁止 — 空スロット `f(5, )` を使うこと | TypeChecker | QF-42 |
-| `E1503` | TypeDef/BuchiPack インスタンス化での部分適用禁止 | TypeChecker | QF-43 |
-| `E1504` | パイプライン外での `Mold[_]()` 直接束縛禁止 | TypeChecker | QF-44 |
-| `E1505` | 部分適用のスロット数が arity と不一致 | TypeChecker | — |
-| `E1506` | 関数引数の型が宣言されたパラメータ型と不一致 | TypeChecker | — |
-| `E1507` | ビルトイン関数の引数個数が arity 範囲外 | TypeChecker | — |
-| `E1508` | メソッド呼び出しの引数個数または型が不一致 | TypeChecker | — |
-| `E1509` | generic function の型変数が declared constraint を満たさない | TypeChecker | — |
-| `E1510` | inference-only generic function の型変数が parameter annotation / call から束縛・推論できない、または concrete type 名と衝突する | TypeChecker | — |
-| `E1511` | ユーザー定義関数を mold 構文 `Fn[args]()` で呼ぶ際に named fields `()` を渡せない — `Fn[a, b]()` か `Fn(a, b)` のみ | TypeChecker | C20B-014 |
+| コード | メッセージ | フェーズ |
+|--------|-----------|---------|
+| `E1501` | 同一スコープでの名前の再定義・関数オーバーロード禁止 | TypeChecker |
+| `E1502` | 旧 `_` 部分適用構文の使用禁止 — 空スロット `f(5, )` を使うこと | TypeChecker |
+| `E1503` | TypeDef/BuchiPack インスタンス化での部分適用禁止 | TypeChecker |
+| `E1504` | パイプライン外での `Mold[_]()` 直接束縛禁止 | TypeChecker |
+| `E1505` | 部分適用のスロット数が arity と不一致 | TypeChecker |
+| `E1506` | 関数引数の型が宣言されたパラメータ型と不一致 | TypeChecker |
+| `E1507` | ビルトイン関数の引数個数が arity 範囲外 | TypeChecker |
+| `E1508` | メソッド呼び出しの引数個数または型が不一致 | TypeChecker |
+| `E1509` | generic function の型変数が declared constraint を満たさない | TypeChecker |
+| `E1510` | inference-only generic function の型変数が parameter annotation / call から束縛・推論できない、または concrete type 名と衝突する | TypeChecker |
+| `E1511` | ユーザー定義関数を mold 構文 `Fn[args]()` で呼ぶ際に named fields `()` を渡せない — `Fn[a, b]()` か `Fn(a, b)` のみ | TypeChecker |
 
 ### 型推論・演算意味論エラー (`E16xx`)
 
-| コード | メッセージ | フェーズ | 関連 |
-|--------|-----------|---------|------|
-| `E1601` | 関数 / エラーハンドラの戻り型が宣言と不一致 | TypeChecker | — |
-| `E1602` | BuchiPack / TypeDef の参照先にフィールドが存在しない | TypeChecker | — |
-| `E1603` | `If` / cond-branch の then / else の戻り型が不一致 | TypeChecker | B11B-014 |
-| `E1604` | cond-branch の条件式が `Bool` 型ではない | TypeChecker | — |
-| `E1605` | 比較演算 (`<` / `<=` / `>` / `>=` / `==` / `!=`) のオペランド型が不整合 | TypeChecker | — |
-| `E1606` | 論理演算 (`&&` / `\|\|`) のオペランド型が `Bool` ではない | TypeChecker | — |
-| `E1607` | 単項演算 (`-` / `!`) のオペランド型が不整合 | TypeChecker | — |
-| `E1608` | 未定義の列挙型 / 列挙 variant が参照された | TypeChecker | — |
-| `E1609` | (予約) | — | — |
-| `E1610` | 継承関係 (`Inheritance`) に循環検出 | TypeChecker | — |
-| `E1611` | JS バックエンドが受け付けない API capability (例: `httpServe(..., tls <= @(..., protocol <= Http2()))`) | TypeChecker | — |
-| `E1612` | WASM バックエンドが受け付けない API capability (例: `taida-lang/net` の `httpServe`) | TypeChecker | — |
-| `E1613` | `TypeExtends` が enum variant リテラルを受け付けない | TypeChecker | — |
-| `E1614` | (tail-only mutual recursion detection guard — 発火は negative 形で検査、ハンドラ経路の保険コード) | TypeChecker | — |
-| `E1615` | (予約) | — | — |
-| `E1616` | cond-branch の arm body で bare call-statement (副作用のみの式) を禁止 | Parser | — |
-| `E1617` | Regex invariant 違反 (wasm profile での `Regex` 参照、`__`-prefix field の衝突など) | TypeChecker / emit_wasm_c | C12B-023 |
-| `E1618` | モジュール境界越しの enum variant 並び順不一致 | TypeChecker | C18-1 |
+| コード | メッセージ | フェーズ |
+|--------|-----------|---------|
+| `E1601` | 関数 / エラーハンドラの戻り型が宣言と不一致 | TypeChecker |
+| `E1602` | BuchiPack / TypeDef の参照先にフィールドが存在しない | TypeChecker |
+| `E1603` | `If` / cond-branch の then / else の戻り型が不一致 | TypeChecker |
+| `E1604` | cond-branch の条件式が `Bool` 型ではない | TypeChecker |
+| `E1605` | 比較演算 (`<` / `<=` / `>` / `>=` / `==` / `!=`) のオペランド型が不整合 | TypeChecker |
+| `E1606` | 論理演算 (`&&` / `\|\|`) のオペランド型が `Bool` ではない | TypeChecker |
+| `E1607` | 単項演算 (`-` / `!`) のオペランド型が不整合 | TypeChecker |
+| `E1608` | 未定義の列挙型 / 列挙 variant が参照された | TypeChecker |
+| `E1609` | (予約) | — |
+| `E1610` | 継承関係 (`Inheritance`) に循環検出 | TypeChecker |
+| `E1611` | JS バックエンドが受け付けない API capability (例: `httpServe(..., tls <= @(..., protocol <= Http2()))`) | TypeChecker |
+| `E1612` | WASM バックエンドが受け付けない API capability (例: `taida-lang/net` の `httpServe`) | TypeChecker |
+| `E1613` | `TypeExtends` が enum variant リテラルを受け付けない | TypeChecker |
+| `E1614` | (tail-only mutual recursion detection guard — 発火は negative 形で検査、ハンドラ経路の保険コード) | TypeChecker |
+| `E1615` | (予約) | — |
+| `E1616` | cond-branch の arm body で bare call-statement (副作用のみの式) を禁止 | Parser |
+| `E1617` | Regex invariant 違反 (wasm profile での `Regex` 参照、`__`-prefix field の衝突など) | TypeChecker / emit_wasm_c |
+| `E1618` | モジュール境界越しの enum variant 並び順不一致 | TypeChecker |
 
 ### モジュール境界エラー (`E17xx`)
 
-| コード | メッセージ | フェーズ | 関連 |
-|--------|-----------|---------|------|
-| `E1701` | `packages.tdm` で宣言された公開 API とエントリモジュールの実シンボル群が不整合 (未公開 symbol import / 宣言済み symbol 欠如 / module 内シンボル未発見) | TypeChecker | RC2 |
+| コード | メッセージ | フェーズ |
+|--------|-----------|---------|
+| `E1701` | `packages.tdm` で宣言された公開 API とエントリモジュールの実シンボル群が不整合 (未公開 symbol import / 宣言済み symbol 欠如 / module 内シンボル未発見) | TypeChecker |
 
 ## 帯域ルール
 

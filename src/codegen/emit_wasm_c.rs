@@ -210,6 +210,7 @@ fn collect_unsupported_insts(insts: &[IrInst], _out: &mut Vec<String>) {
             | IrInst::Return(_)
             | IrInst::Retain(_)
             | IrInst::Release(_)
+            | IrInst::ReleaseAuto(_)
             | IrInst::GlobalSet(_, _)
             | IrInst::GlobalGet(_, _)
             | IrInst::TailCall(_) => {}
@@ -342,6 +343,20 @@ pub fn emit_c(ir_module: &IrModule, profile: WasmProfile) -> Result<String, Wasm
         .unwrap();
         // WF-3 fix: core's int_mold_str returns raw value, full needs Lax wrapper
         writeln!(c, "#define taida_int_mold_str taida_int_mold_str_full").unwrap();
+    }
+
+    // C27B-020 (2026-04-25): redirect polymorphic_length so Bytes is
+    // dispatched correctly on both wasm-wasi and wasm-full. Core's version
+    // only handles list / string -- Bytes pointers fall into the string
+    // branch and silently return 0 (the magic's low byte is 0x00). The
+    // override `taida_polymorphic_length_bytes_aware` lives in
+    // runtime_wasi_io.c (linked by both Wasi and Full).
+    if profile == WasmProfile::Wasi || profile == WasmProfile::Full {
+        writeln!(
+            c,
+            "#define taida_polymorphic_length taida_polymorphic_length_bytes_aware"
+        )
+        .unwrap();
     }
 
     // W-3: f64 -> i64 bitcast helper (union-based, no libc dependency)
@@ -1172,6 +1187,97 @@ fn runtime_func_prototype(name: &str, profile: WasmProfile) -> Result<String, Wa
                 ),
             });
         }
+        // C27B-020 / 021 (2026-04-25): wasm widening (addition only).
+        // These prototypes were historically only registered for wasm-full
+        // (`wasm_full_runtime_prototype`), but the underlying functions have
+        // been migrated to `runtime_wasi_io.c` so wasm-wasi can use them too.
+        // wasm-full keeps working because rt_wasi is also linked into it.
+        // Order matters: place this arm BEFORE the catch-all `_ if Full`
+        // below, so the 2-profile guard wins for the listed names.
+
+        // C27B-021: Bitwise and shift, plus Float Div / Mod molds
+        // (Lax-returning, FLOAT-tagged for parity with native C26B-011).
+        "taida_bit_and" | "taida_bit_or" | "taida_bit_xor"
+            if profile == WasmProfile::Wasi || profile == WasmProfile::Full =>
+        {
+            format!("int64_t {}(int64_t a, int64_t b);", name)
+        }
+        "taida_bit_not" if profile == WasmProfile::Wasi || profile == WasmProfile::Full => {
+            "int64_t taida_bit_not(int64_t a);".to_string()
+        }
+        "taida_shift_l" | "taida_shift_r" | "taida_shift_ru"
+            if profile == WasmProfile::Wasi || profile == WasmProfile::Full =>
+        {
+            format!("int64_t {}(int64_t a, int64_t b);", name)
+        }
+        "taida_div_mold_f" | "taida_mod_mold_f"
+            if profile == WasmProfile::Wasi || profile == WasmProfile::Full =>
+        {
+            format!("int64_t {}(int64_t a_bits, int64_t b_bits);", name)
+        }
+
+        // C27B-020: Bytes constructors / cursor / encode/decode molds.
+        // wasm-wasi previously rejected these at compile time; now both
+        // wasi and full link rt_wasi which provides the implementations.
+        "taida_bytes_default_value" | "taida_bytes_clone" | "taida_bytes_len"
+        | "taida_bytes_to_list" | "taida_bytes_to_display_string"
+            if profile == WasmProfile::Wasi || profile == WasmProfile::Full =>
+        {
+            format!("int64_t {}(int64_t v);", name)
+        }
+        "taida_bytes_from_raw" if profile == WasmProfile::Wasi || profile == WasmProfile::Full => {
+            "int64_t taida_bytes_from_raw(int64_t ptr, int64_t len);".to_string()
+        }
+        "taida_bytes_new_filled"
+            if profile == WasmProfile::Wasi || profile == WasmProfile::Full =>
+        {
+            "int64_t taida_bytes_new_filled(int64_t len, int64_t fill);".to_string()
+        }
+        "taida_bytes_get_lax" if profile == WasmProfile::Wasi || profile == WasmProfile::Full => {
+            "int64_t taida_bytes_get_lax(int64_t bytes, int64_t idx);".to_string()
+        }
+        "taida_bytes_set" if profile == WasmProfile::Wasi || profile == WasmProfile::Full => {
+            "int64_t taida_bytes_set(int64_t bytes, int64_t idx, int64_t val);".to_string()
+        }
+        "taida_bytes_mold" if profile == WasmProfile::Wasi || profile == WasmProfile::Full => {
+            "int64_t taida_bytes_mold(int64_t v, int64_t fill);".to_string()
+        }
+        "taida_bytes_cursor_new"
+            if profile == WasmProfile::Wasi || profile == WasmProfile::Full =>
+        {
+            "int64_t taida_bytes_cursor_new(int64_t bytes, int64_t offset);".to_string()
+        }
+        "taida_bytes_cursor_u8" | "taida_bytes_cursor_remaining"
+            if profile == WasmProfile::Wasi || profile == WasmProfile::Full =>
+        {
+            format!("int64_t {}(int64_t cursor);", name)
+        }
+        "taida_bytes_cursor_take" | "taida_bytes_cursor_step"
+            if profile == WasmProfile::Wasi || profile == WasmProfile::Full =>
+        {
+            format!("int64_t {}(int64_t cursor, int64_t n);", name)
+        }
+        "taida_bytes_cursor_unpack"
+            if profile == WasmProfile::Wasi || profile == WasmProfile::Full =>
+        {
+            "int64_t taida_bytes_cursor_unpack(int64_t cursor, int64_t schema);".to_string()
+        }
+        "taida_u16be_mold" | "taida_u16le_mold" | "taida_u32be_mold" | "taida_u32le_mold"
+        | "taida_u16be_decode_mold" | "taida_u16le_decode_mold"
+        | "taida_u32be_decode_mold" | "taida_u32le_decode_mold"
+        | "taida_uint8_mold" | "taida_uint8_mold_float"
+            if profile == WasmProfile::Wasi || profile == WasmProfile::Full =>
+        {
+            format!("int64_t {}(int64_t v);", name)
+        }
+        "taida_utf8_encode_mold" | "taida_utf8_decode_mold"
+        | "taida_utf8_encode_scalar" | "taida_utf8_decode_one"
+        | "taida_utf8_single_scalar"
+            if profile == WasmProfile::Wasi || profile == WasmProfile::Full =>
+        {
+            format!("int64_t {}(int64_t v);", name)
+        }
+
         // WF-2: wasm-full extended runtime functions (Tier 1)
         _ if profile == WasmProfile::Full => {
             // wasm-full accepts all runtime functions -- prototype is generated
@@ -1535,7 +1641,7 @@ fn emit_inst(
             writeln!(c, "{}return v_{};", indent, var).unwrap();
         }
         // wasm-min で未サポートの命令
-        IrInst::Retain(_) | IrInst::Release(_) => {
+        IrInst::Retain(_) | IrInst::Release(_) | IrInst::ReleaseAuto(_) => {
             // RC 操作は wasm-min では無視（ヒープなし）
             writeln!(c, "{}/* retain/release skipped (wasm-min) */", indent).unwrap();
         }

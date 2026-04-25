@@ -1804,6 +1804,23 @@ async function __taida_net_httpServe(port, handler, maxRequests, timeoutMs, maxC
       });
     }
 
+    // C27B-014: opt-in port announcement for soak proxy / runbook.
+    // Default OFF. When TAIDA_NET_ANNOUNCE_PORT=1, emit one stdout
+    // line with the actually-bound port (resolved via server.address()
+    // so port=0 callers learn the OS-assigned value). 3-backend parity
+    // with interpreter / native (h1 + h2) on env var name + surface.
+    server.on('listening', () => {
+      try {
+        if (typeof process !== 'undefined' && process.env && process.env.TAIDA_NET_ANNOUNCE_PORT === '1') {
+          const addr = server.address();
+          if (addr && typeof addr === 'object' && typeof addr.port === 'number') {
+            const host = addr.address || '127.0.0.1';
+            console.log('listening on ' + host + ':' + addr.port);
+          }
+        }
+      } catch (_) { /* swallow — announcement is best-effort */ }
+    });
+
     server.listen(port, '127.0.0.1');
   });
 }

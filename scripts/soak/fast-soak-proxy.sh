@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# C26B-005 fast-soak proxy.
+# C26B-005 / C27B-015 / C27B-017 fast-soak proxy.
 #
 # This is a **proxy** for the 24h NET scatter-gather soak test pinned
 # at `.dev/C26_SOAK_RUNBOOK.md`. The real acceptance is the full 24h
@@ -12,12 +12,52 @@
 # Usage:
 #   ./scripts/soak/fast-soak-proxy.sh [--duration-min N] [--backend interp|js|native]
 #
+# Backend dispatch (C27B-015):
+#   --backend interp  → target/release/taida <fixture>           (port 18081)
+#   --backend js      → taida build --target js --run + node     (port 18082)
+#   --backend native  → taida build --target native --run        (port 18083)
+#
+# Each backend uses a distinct port so all three can be launched in
+# parallel from three terminals (or three CI shards) without bind
+# contention. CSV / log / projection paths are per-invocation
+# tempdirs, so parallel runs do not clobber each other.
+#
+# A backend's exit code is independent — JS / native build failures
+# cannot be hidden by a successful interpreter run, because each
+# invocation starts at most one server process.
+#
+# Optional env vars:
+#   TAIDA_NET_ANNOUNCE_PORT=1  Inline-exported to every spawned server
+#                              (interp / js / native) by this script
+#                              regardless of whether the caller sets
+#                              it. Causes `httpServe` to print one
+#                              stdout line of the form
+#                              `listening on 127.0.0.1:NNNNN` before
+#                              the first accept(). The caller can also
+#                              set it explicitly to be defensive.
+#                              See `.dev/C27_BLOCKERS.md::C27B-014`.
+#
+#   USE_ANNOUNCE=1             Opt-in: instead of probing the fixed
+#                              per-backend PORT via /dev/tcp, parse the
+#                              `listening on <host>:<port>` line out of
+#                              the server LOG and overwrite PORT with
+#                              the announced value. Required for the
+#                              port=0 / OS-assigned-port flow used by
+#                              the soak runbook. Default OFF (legacy
+#                              fixed-port TCP probe is preserved so
+#                              existing CI smoke and parallel runs are
+#                              unchanged).
+#
+# CI smoke (C27B-017): `.github/workflows/soak-smoke.yml` runs this
+# script with `--duration-min 1 --backend interp`. The job fails
+# fast on parse errors, bind failures, and missing VERDICT lines.
+#
 # The script:
 #   1. Builds a release binary.
 #   2. Launches `examples/quality/c26_soak_fixture/main.td` (a
-#      `httpServe` scatter-gather loop) on port 0.
-#   3. Reads the chosen port from the server's stdout.
-#   4. Runs `wrk` or a curl loop against the server for N minutes.
+#      `httpServe` scatter-gather loop) on the per-backend port.
+#   3. Probes the port via /dev/tcp until ready.
+#   4. Runs a curl loop against the server for N minutes.
 #   5. Samples RSS + fd count every 30s into a CSV.
 #   6. Extrapolates a 24h projection (linear fit) and flags drift
 #      above 10% / hour as a FAIL signal.
@@ -36,7 +76,14 @@ while [ $# -gt 0 ]; do
         --duration-min) DURATION_MIN="$2"; shift 2 ;;
         --backend) BACKEND="$2"; shift 2 ;;
         -h|--help)
-            sed -n '1,30p' "$0" | sed 's/^# \{0,1\}//'
+            # Print the leading docblock (file header through the end of
+            # the descriptive comments). C27B-015 / wA Round 2: the
+            # docblock now extends past line 60 because of the multi-
+            # backend, TAIDA_NET_ANNOUNCE_PORT inline-export, and
+            # USE_ANNOUNCE=1 LOG-readback notes, so widen the slice to
+            # the line right above `set -euo pipefail` to cover the
+            # full header.
+            sed -n '1,72p' "$0" | sed 's/^# \{0,1\}//'
             exit 0
             ;;
         *) echo "unknown arg: $1" >&2; exit 1 ;;
@@ -105,10 +152,17 @@ TAIDA
 # Dispatch per backend. All three paths produce a long-running server
 # process whose PID is captured in SERVER_PID so the sampling loop can
 # read /proc/<pid>/status.
+# Forward TAIDA_NET_ANNOUNCE_PORT=1 to every spawned server so the
+# bind path emits `listening on 127.0.0.1:NNNNN` on its own stdout
+# line (see `.dev/C27_BLOCKERS.md::C27B-014`). The proxy's caller can
+# also set this env var explicitly; we re-export it here defensively
+# so the 3 launch paths agree even if invoked through `env -i` or a
+# CI step that does not propagate the parent env (e.g. a sudo step).
+# This is the contract the docblock at the top of this script claims.
 case "${BACKEND}" in
     interp)
         echo "==> launching interpreter server on port ${PORT} (log: ${LOG})"
-        "${REPO_ROOT}/target/release/taida" "${FIXTURE}" > "${LOG}" 2>&1 &
+        TAIDA_NET_ANNOUNCE_PORT=1 "${REPO_ROOT}/target/release/taida" "${FIXTURE}" > "${LOG}" 2>&1 &
         SERVER_PID=$!
         ;;
     js)
@@ -124,7 +178,7 @@ case "${BACKEND}" in
             exit 2
         fi
         echo "==> launching node runtime on port ${PORT} (log: ${LOG})"
-        node "${BUILT_JS}" > "${LOG}" 2>&1 &
+        TAIDA_NET_ANNOUNCE_PORT=1 node "${BUILT_JS}" > "${LOG}" 2>&1 &
         SERVER_PID=$!
         ;;
     native)
@@ -136,36 +190,89 @@ case "${BACKEND}" in
             exit 2
         fi
         echo "==> launching native binary on port ${PORT} (log: ${LOG})"
-        "${BUILT_NATIVE}" > "${LOG}" 2>&1 &
+        TAIDA_NET_ANNOUNCE_PORT=1 "${BUILT_NATIVE}" > "${LOG}" 2>&1 &
         SERVER_PID=$!
         ;;
 esac
 trap 'kill ${SERVER_PID} 2>/dev/null || true; echo "logs at ${OUTDIR}"' EXIT
 
-# Wait for bind. The interpreter does not emit a "listening on" line
-# today (see .dev/C27_BLOCKERS.md::C27B-014), so we probe the port
-# directly with a quick TCP connect.
-READY=0
-for _ in $(seq 1 60); do
-    if (exec 3<>/dev/tcp/127.0.0.1/${PORT}) 2>/dev/null; then
-        exec 3>&- 3<&-
-        READY=1
-        break
-    fi
-    # Fail fast if the server already died (parse error etc.).
-    if ! kill -0 "${SERVER_PID}" 2>/dev/null; then
-        echo "server exited before bind" >&2
+# Wait for bind. Two modes:
+#
+#   USE_ANNOUNCE=1 (opt-in)  — read the actually-bound port back from
+#     the server's stdout LOG, parsing the
+#     `listening on <host>:<port>` line emitted by the
+#     `TAIDA_NET_ANNOUNCE_PORT=1` opt-in surface (C27B-014). This is
+#     what unblocks the port=0 / OS-assigned-port flow the soak
+#     runbook (`.dev/C26_SOAK_RUNBOOK.md § 2.1`) needs. PORT is
+#     overwritten with the announced value.
+#
+#   USE_ANNOUNCE unset / =0  — keep the legacy fixed-port TCP probe.
+#     This is the default for the per-backend fixed ports
+#     (interp=18081 / js=18082 / native=18083) so existing CI smoke
+#     and parallel multi-backend runs keep working unchanged.
+#
+# Either path fails fast if the server process exits before we get a
+# usable signal (parse error / panic / bind error).
+if [ "${USE_ANNOUNCE:-0}" = "1" ]; then
+    ANNOUNCED=""
+    for _ in $(seq 1 150); do
+        if [ -s "${LOG}" ]; then
+            ANNOUNCED=$(grep -m1 -oE 'listening on [^[:space:]]+:[0-9]+' "${LOG}" 2>/dev/null | awk '{print $3}' || true)
+            if [ -n "${ANNOUNCED}" ]; then
+                break
+            fi
+        fi
+        if ! kill -0 "${SERVER_PID}" 2>/dev/null; then
+            echo "server exited before announce" >&2
+            cat "${LOG}" >&2
+            exit 2
+        fi
+        sleep 0.2
+    done
+    if [ -z "${ANNOUNCED}" ]; then
+        echo "server did not announce a listening port within 30s (USE_ANNOUNCE=1)" >&2
+        echo "hint: ensure TAIDA_NET_ANNOUNCE_PORT=1 is set for the spawned server" >&2
         cat "${LOG}" >&2
         exit 2
     fi
-    sleep 0.5
-done
-if [ "${READY}" -ne 1 ]; then
-    echo "server did not bind 127.0.0.1:${PORT} within 30s" >&2
-    cat "${LOG}" >&2
-    exit 2
+    PORT="${ANNOUNCED##*:}"
+    echo "  server listening on ${ANNOUNCED} (pid=${SERVER_PID}, USE_ANNOUNCE=1)"
+else
+    READY=0
+    for _ in $(seq 1 60); do
+        if (exec 3<>/dev/tcp/127.0.0.1/${PORT}) 2>/dev/null; then
+            exec 3>&- 3<&-
+            READY=1
+            break
+        fi
+        # Fail fast if the server already died (parse error etc.).
+        if ! kill -0 "${SERVER_PID}" 2>/dev/null; then
+            echo "server exited before bind" >&2
+            cat "${LOG}" >&2
+            exit 2
+        fi
+        sleep 0.5
+    done
+    if [ "${READY}" -ne 1 ]; then
+        echo "server did not bind 127.0.0.1:${PORT} within 30s" >&2
+        cat "${LOG}" >&2
+        exit 2
+    fi
+    echo "  server listening on 127.0.0.1:${PORT} (pid=${SERVER_PID})"
+    # If the server emitted a `listening on …` line to its LOG (the
+    # opt-in announcement enabled by TAIDA_NET_ANNOUNCE_PORT=1, which
+    # this script sets inline on every backend launch), surface it on
+    # the proxy's own stdout. CI (`.github/workflows/soak-smoke.yml`)
+    # asserts on this line as a plumbing canary for C27B-014; local
+    # operators get a confirmation line they can paste into the runbook.
+    # Stays a no-op if the env var was filtered out by some wrapper.
+    if [ -s "${LOG}" ]; then
+        ANNOUNCE_LINE=$(grep -m1 -E 'listening on [^[:space:]]+:[0-9]+' "${LOG}" 2>/dev/null || true)
+        if [ -n "${ANNOUNCE_LINE}" ]; then
+            echo "  server-announce: ${ANNOUNCE_LINE}"
+        fi
+    fi
 fi
-echo "  server listening on 127.0.0.1:${PORT} (pid=${SERVER_PID})"
 
 # Load generator: curl loop. wrk would be faster but is not always
 # present; the purpose is steady scatter-gather traffic, not peak

@@ -90,6 +90,15 @@ pub enum IrInst {
     /// Release: refcount-- (0になったらfree)
     /// 引数: Ptr（boxed value_ty として渡される）
     Release(IrVar),
+    /// ReleaseAuto: 短命 binding 用の runtime-dispatched release。
+    /// `Release` (= `taida_release`) は Pack/List/Closure 等の magic-header
+    /// 付き値しか解放できないが、heap string は hidden header を持つ別
+    /// レイアウトのため `taida_str_release` を呼ぶ必要がある。
+    /// `ReleaseAuto` は両方のレイアウトを runtime に判定して dispatch する
+    /// `taida_release_any` ヘルパーへ展開され、codegen の lifetime tracking
+    /// pass が dead binding の last use 直後に挿入する。
+    /// (C27B-018 Option B / @c.27 Round 3 wf018B)
+    ReleaseAuto(IrVar),
 
     /// 末尾再帰呼び出し: 引数を再代入してエントリブロックにジャンプ
     /// TailCall(args) — 引数の IrVar リスト

@@ -1,12 +1,13 @@
 # Taida Lang Stability Policy
 
-> Target: **`@c.26`** (gen-C stable — second candidate)
-> Status: **provisional** — the label-less `@c.25` tag was **skipped**
-> (see §1.3 below); the gen-C stable tag is now being pursued through
-> the C26 fix-only RC cycle. Intermediate tags are `@c.26.rcM`. The
-> policy contract in this document is pinned for the whole gen-C
-> generation (`@c.25.*` and `@c.26.*`) so downstream tooling, packagers,
-> and addon authors have a fixed target before stable is declared.
+> Target: **`@c.27`** (gen-C stable — third candidate)
+> Status: **provisional** — the label-less `@c.25` and `@c.26` tags
+> were both **skipped** (see §1.3 / §5.6 below); the gen-C stable tag
+> is now being pursued through the C27 fix-only RC cycle.
+> Intermediate tags are `@c.27.rcM`. The policy contract in this
+> document is pinned for the whole gen-C generation (`@c.25.*`,
+> `@c.26.*`, and `@c.27.*`) so downstream tooling, packagers, and
+> addon authors have a fixed target before stable is declared.
 
 Related references:
 
@@ -446,12 +447,119 @@ guarantee for `BytesCursorTake` has landed against the locked
 Cluster 4 Arc + try_unwrap COW family abstraction
 (`.dev/C26_CLUSTER4_ABSTRACTION.md`).
 
-### 5.6. C26 fix-track progress snapshot (informational)
+### 5.6. C26 + C27 fix-track progress snapshot (informational)
 
-This subsection is **informational** and updated as C26 blockers
-land. It is not part of the stable surface contract and may be
-removed once `@c.26` is tagged. Canonical worklist is
-`.dev/C26_BLOCKERS.md`.
+This subsection is **informational** and updated as fix-track
+blockers land. It is not part of the stable surface contract and
+may be removed once `@c.27` (or its successor) is tagged. Canonical
+worklists:
+
+- `.dev/C27_BLOCKERS.md` — current cycle (gen-C stable, **third
+  candidate**, opened 2026-04-25 after C26 verdict).
+- `.dev/C26_BLOCKERS.md` — predecessor cycle (gen-C stable, second
+  candidate, `feat/c26` merged at `6c4fa5f`; the label-less `@c.26`
+  tag was deferred to C27 per the Phase 14 GATE verdict).
+
+The §5.6.0 subsection below holds the **`@c.27` GATE snapshot**
+(current target). The §5.6.1 subsection holds the historical
+**`@c.26` GATE status** retained as the inheritance basis for
+which C26 blockers carry over to C27 versus close out
+(`CLOSED (not required)`). The §5.6 main body below the snapshots
+is the FIXED / OPEN catalogue carried forward from C26 with C27
+overlays.
+
+#### 5.6.0. `@c.27` GATE snapshot (informational, 2026-04-25)
+
+The label-less `@c.27` tag is the **third candidate** for gen-C
+stable. The label-less `@c.25` tag was skipped (see §1.3); the
+label-less `@c.26` tag was deferred to C27 (see §5.6.1 below).
+C27 is a fix-only RC cycle inheriting C26 residuals; no breaking
+changes land here (see `MEMORY/project_c27_fix_cycle_track.md`).
+
+Phase 0 Design Lock verdict (2026-04-25):
+
+- C26 Phase 14 GATE inputs are absorbed: 7 of the 13 originally
+  tentative C27B-001..013 blockers were closed out by C26 work
+  and flipped to `CLOSED (not required)` (C27B-002 / 004 / 007 /
+  008 / 009 / 011 / 013); 6 remain `confirmed Must Fix`
+  (C27B-001 / 003 / 005 / 006 / 010 / 012). Six new blockers
+  (C27B-022..027) were opened from C26 residuals
+  (C26B-015 / 016 PARTIAL / 017 / 021 / 022 / 023) per the
+  DEFERRED-zero policy.
+- Final scope: **19 OPEN (confirmed)** + **7 CLOSED
+  (not required)** + **1 FIXED (historical)** + **0 D28
+  ESCALATED** + **0 tentative**. Critical 1 (C27B-003) +
+  Must Fix 18.
+- Phase configuration: Phase 2 / 4 / 7 / 8 / 9 / 11 / 13 are
+  empty (their owning blockers were CLOSED at Phase 0).
+  New sub-phases 5b (NET surface integrity, C27B-022) and 9b
+  (Interpreter eval semantics, C27B-024) added. wasm widening
+  (C27B-020 / 021) handled as an independent stream under
+  §6.2 (addition only).
+
+Round 1 + Round 1 review fix verdict (2026-04-25, on `feat/c27`):
+
+- C27B-014 (port-bind announcement, opt-in env-var) — **FIXED**
+  after fA review fix (`d79a884` → `dc4b985`).
+- C27B-015 (proxy multi-backend dispatch) — **FIXED** after
+  fA review fix.
+- C27B-017 (CI smoke 1-min) — **FIXED** after fA review fix.
+- C27B-019 (`docs/reference/` hygiene sweep) — **FIXED**
+  (`666b938`); `docs/reference/README.md` writing guide pinned;
+  generalised sweep regex
+  (`[A-Z][0-9]+B-[0-9]+` / `@[a-z]\.[0-9]+`) holds the reference
+  body at 0 hits modulo the documented version-syntax exceptions.
+- C27B-020 / C27B-021 (wasm widening, addition only) —
+  **FIXED** after fD review fix (`d6ca943` → `8fbdab2`); MUSL
+  `fmod` for `taida_mod_mold_f` restores 4-backend numeric parity.
+- C27B-022 (path traversal `..` 3-backend parity) — **FIXED**
+  after fJ review fix (`29a9ea3` → `d2e5615`); 15 cases
+  (5 × 3 backends) green; canonical reject error string
+  unified across Interpreter / JS / Native; documented in
+  `docs/reference/os_api.md §7`.
+- C27B-024 (closure capture regression guard) — **FIXED**
+  guard (`55f3ad7` → `d3ba552` empirical); 5/5 RED reproduces
+  the HI-005-original symptom when the
+  `eval.rs:820-821` 4-line guard is reverted, proving the
+  guard is load-bearing.
+- C27B-018 (native arena leak Option A) + C27B-028
+  (Async/Str RC corruption Critical) — paired-fix scheduled
+  for wH (Round 2). The Option A 1-line guard removal is
+  **not** landed yet — `4 GB plateau` is not an acceptable
+  stable basis per the C27B-018 acceptance.
+
+Round 2 worktree map (2026-04-25, in flight):
+
+- wE (NET tls-h2): C27B-001 / 003 / 006 / 027 NET portion.
+- wH (Runtime perf): C27B-010 / 018 / 025 / 026 / 028.
+- wI (Docs final amendment, this commit): C27B-012 / 023 /
+  C27B-027 docs portion / C27B-022 docs amendment portion +
+  Round 1 review M-1 / L-1 follow-up.
+
+| GATE evidence row | Status (Round 2 boundary) |
+| --- | --- |
+| Blocker closure (`OPEN` / `tentative` / `PARTIAL` = 0) | **HOLD** — 13 OPEN remain across wE / wH / GATE prep (C27B-001 / 003 / 005 / 006 / 010 / 012 / 018 / 023 / 025 / 026 / 027 / 028 / Phase 14 itself); 6 FIXED on `feat/c27` Round 1 (C27B-014 / 015 / 017 / 019 / 020 / 021 / 022 / 024). |
+| 3-backend parity (Interpreter / JS / Native) | **PENDING** — `cargo test --release --lib` baseline ≥ 2535 holds (1 known C27B-003 port-bind flaky on local 16T); `cargo test --release --test parity` baseline ≥ 662 inherited from C26 Round 10 / wε; new C27B-022 / 024 fixtures additive. |
+| Backend matrix (interp / JS / native + wasm-min / wasi / edge / full) | **PENDING** — wasm widening (C27B-020 / 021) added without regression to existing wasm profiles per Round 1 fD review. |
+| NET soak (24 h soak runbook + fast-soak proxy 30-min smoke 3-backend) | **HOLD** — agent-side proxy infra (014 / 015 / 017) FIXED; user-side 24 h PASS record (C27B-005) outstanding. |
+| Security (audit / deny / Sigstore / SLSA / install-side verify) | **GREEN inherited** from C26 Round 11 wι (C26B-007 / 008 / 030 all FIXED); C27 introduces no security workflow change. |
+| Perf / memory (RSS / FD / thread / throughput hard-fail; SLOW = 0; parallel ≥ 80%) | **HOLD** — C27B-018 native arena leak gate; 4 GB plateau not acceptable; Option A trial revealed C27B-028 silent corruption requiring paired fix in wH. |
+| Docs hygiene (`grep -nE "Round [0-9]+\|[A-Z][0-9]+B-[0-9]+\|@[a-z]\.[0-9]+\|FIXED" docs/reference/ --exclude=README.md` 0 件) | **GREEN** modulo justified version-syntax exceptions (documented in `docs/reference/README.md §3`). `@c.27` snapshot landed in this §5.6.0; `CHANGELOG.md @c.27` section landed; M-1 Stream historical context restored to C25B-001 entry; L-1 sweep regex generalised. |
+| PHILOSOPHY consistency (no new syntax / operator / breaking rename) | **GREEN** — all Round 1 fixes are surface-additive or internal refactors; C27B-019 / 023 docs amendments do not introduce new operators or break operator-10-only / single-direction constraints. |
+| `@c.27.rcM` operation discipline (rcM not stable input; agent does not cut tags) | **GREEN** — no `@c.27*` tag has been cut on `feat/c27`; all RC tags are user-cut after GATE verdict. |
+
+This subsection is informational (as is the rest of §5.6) and is
+not part of the stable-surface contract. It will be removed
+once `@c.27` is tagged. D28 escalation checklist for the wI
+docs amendment that landed this snapshot: 3/3 NO — no public
+mold signature / pinned error string / existing parity
+assertion altered; reference body remains ID-free / tag-free /
+date-free; CHANGELOG narrative restoration is additive.
+
+#### 5.6. (continued) C26 inheritance catalogue (informational)
+
+The remainder of §5.6 below holds the C26 FIXED / OPEN
+catalogue carried forward as the inheritance basis for §5.6.0.
 
 FIXED on `feat/c26` (Round 1 + Round 2 + Round 3 + Round 4 + Round 5 + Round 6 + Round 7 + Round 8 (wY + wZ + wT + wU + wX2) + wδ rolling amendment + Round 9 (wα + wβ + wδ) + Round 10 (wε) + wθ rolling amendment):
 
@@ -862,7 +970,16 @@ OPEN (owned by C26):
   Round 7 / wV-a; only the denormal rendering audit remains
   under this pin.
 
-### 5.6.1. `@c.26` GATE status (informational, 2026-04-25 review)
+#### 5.6.1. `@c.26` GATE status (historical, retained as the C27 inheritance basis; 2026-04-25 review)
+
+> **Historical note**: this subsection is retained from the C26
+> Phase 14 GATE review. It documents the per-blocker landing
+> verdict that C27 Phase 0 Design Lock used to determine which
+> C27B-001..013 to flip to `CLOSED (not required)` versus
+> `confirmed Must Fix`. The `GATE-READY → HOLD` downgrade applied
+> to `@c.26`; the label-less `@c.26` tag was deferred to C27
+> rather than re-issued (see §5.6.0 above for the current
+> `@c.27` snapshot).
 
 As of the 2026-04-25 review amendment, the previous wθ
 **GATE-READY** claim is downgraded to **HOLD**. The review

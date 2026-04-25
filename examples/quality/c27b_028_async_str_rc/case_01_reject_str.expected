@@ -1,0 +1,4 @@
+Rejected: Async[rejected: something went wrong]
+Short: Async[rejected: short err]
+Long: Async[rejected: a slightly longer error message indeed]
+Resolved: Async[fulfilled: resolved value]

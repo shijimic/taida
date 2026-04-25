@@ -5286,6 +5286,23 @@ typedef struct {
 #define H2_REQ_ERR_DUPLICATE_PSEUDO 4
 // error_reason values for empty pseudo-header values
 #define H2_REQ_ERR_EMPTY_PSEUDO     5
+// C27B-026 Step 3 Option B: pseudo-header value exceeds the wire-byte
+// upper limit enforced by the parser (mirrors HTTP_WIRE_MAX_* in
+// src/interpreter/net_eval/h1.rs and the H1 parser checks above).
+// Catches truncation that would otherwise have been silenced by
+// snprintf into a fixed-size struct field.
+#define H2_REQ_ERR_PSEUDO_TOO_LONG  6
+
+// C27B-026 Step 3 Option B helper: bounded copy via memcpy + pre-
+// length check (gcc cannot follow snprintf-with-runtime-check, so
+// the -Wformat-truncation warning only stays silent for the memcpy
+// form). Mirrors H3_COPY_PSEUDO in net_h3_quic.c. Used inside
+// h2_extract_request_fields below.
+#define H2_COPY_PSEUDO(dst, dst_size, seen) do { \
+    size_t v_len = strlen(headers[i].value); \
+    if (v_len >= (dst_size)) { out->error_reason = H2_REQ_ERR_PSEUDO_TOO_LONG; free(regs); return; } \
+    memcpy((dst), headers[i].value, v_len); (dst)[v_len] = '\0'; (seen) = 1; \
+} while (0)
 
 static void h2_extract_request_fields(const H2Header *headers, int count, H2RequestFields *out) {
     memset(out, 0, sizeof(*out));
@@ -5308,39 +5325,21 @@ static void h2_extract_request_fields(const H2Header *headers, int count, H2Requ
                 free(regs);
                 return; // ordering violation
             }
+            // C27B-026 Step 3 Option B: bounded copy + cap check; see
+            // H2_COPY_PSEUDO macro defined above for details.
+            // RFC 9113 Section 8.3.1: each pseudo-header MUST NOT appear more than once.
             if (strcmp(headers[i].name, ":method") == 0) {
-                // RFC 9113 Section 8.3.1: each pseudo-header MUST NOT appear more than once
-                if (saw_method) {
-                    out->error_reason = H2_REQ_ERR_DUPLICATE_PSEUDO;
-                    free(regs);
-                    return;
-                }
-                saw_method = 1;
-                snprintf(out->method, sizeof(out->method), "%s", headers[i].value);
+                if (saw_method) { out->error_reason = H2_REQ_ERR_DUPLICATE_PSEUDO; free(regs); return; }
+                H2_COPY_PSEUDO(out->method, sizeof(out->method), saw_method);
             } else if (strcmp(headers[i].name, ":path") == 0) {
-                if (saw_path) {
-                    out->error_reason = H2_REQ_ERR_DUPLICATE_PSEUDO;
-                    free(regs);
-                    return;
-                }
-                saw_path = 1;
-                snprintf(out->path, sizeof(out->path), "%s", headers[i].value);
+                if (saw_path) { out->error_reason = H2_REQ_ERR_DUPLICATE_PSEUDO; free(regs); return; }
+                H2_COPY_PSEUDO(out->path, sizeof(out->path), saw_path);
             } else if (strcmp(headers[i].name, ":authority") == 0) {
-                if (saw_authority) {
-                    out->error_reason = H2_REQ_ERR_DUPLICATE_PSEUDO;
-                    free(regs);
-                    return;
-                }
-                saw_authority = 1;
-                snprintf(out->authority, sizeof(out->authority), "%s", headers[i].value);
+                if (saw_authority) { out->error_reason = H2_REQ_ERR_DUPLICATE_PSEUDO; free(regs); return; }
+                H2_COPY_PSEUDO(out->authority, sizeof(out->authority), saw_authority);
             } else if (strcmp(headers[i].name, ":scheme") == 0) {
-                if (saw_scheme) {
-                    out->error_reason = H2_REQ_ERR_DUPLICATE_PSEUDO;
-                    free(regs);
-                    return;
-                }
-                saw_scheme = 1;
-                snprintf(scheme, sizeof(scheme), "%s", headers[i].value);
+                if (saw_scheme) { out->error_reason = H2_REQ_ERR_DUPLICATE_PSEUDO; free(regs); return; }
+                H2_COPY_PSEUDO(scheme, sizeof(scheme), saw_scheme);
             } else {
                 // Unknown pseudo-header: reject as PROTOCOL_ERROR
                 // (matches Interpreter: H2Error::Stream with ERROR_PROTOCOL_ERROR)
@@ -6115,6 +6114,20 @@ static H2ServeResult taida_net_h2_serve(int port, taida_val handler, int handler
     }
     if (listen(sockfd, 128) < 0) {
         close(sockfd); taida_ossl.SSL_CTX_free(ssl_ctx); return fail_result;
+    }
+
+    // C27B-014: opt-in port announcement (h2 path). Same env var name
+    // and surface format as h1 / interpreter / JS. Default OFF.
+    {
+        const char *announce = getenv("TAIDA_NET_ANNOUNCE_PORT");
+        if (announce && announce[0] == '1' && announce[1] == '\0') {
+            struct sockaddr_in bound_addr;
+            socklen_t bound_len = sizeof(bound_addr);
+            if (getsockname(sockfd, (struct sockaddr*)&bound_addr, &bound_len) == 0) {
+                printf("listening on 127.0.0.1:%u\n", (unsigned int)ntohs(bound_addr.sin_port));
+                fflush(stdout);
+            }
+        }
     }
 
     int64_t request_count = 0;

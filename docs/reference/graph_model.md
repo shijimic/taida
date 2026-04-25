@@ -310,8 +310,8 @@ taida graph --type dataflow --format json ./src/main.td
   ],
   "metadata": {
     "source_files": ["main.td"],
-    "generated_at": "2026-02-26T10:00:00Z",
-    "taida_version": "0.1.0"
+    "generated_at": "<ISO-8601 UTC timestamp>",
+    "taida_version": "<@gen.num[.label] string from the producing taida binary>"
   }
 }
 ```

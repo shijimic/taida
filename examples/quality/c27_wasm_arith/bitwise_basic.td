@@ -1,0 +1,16 @@
+// C27B-021 (2026-04-25): Bitwise / shift smoke.
+// All ops 4-backend identical including the Lax-wrapping shifts.
+v1 <= BitAnd[5, 3]()
+v2 <= BitOr[5, 2]()
+v3 <= BitXor[5, 6]()
+v4 <= BitNot[0]()
+v5 <= ShiftL[1, 3]().getOrDefault(0)
+v6 <= ShiftR[16, 2]().getOrDefault(0)
+v7 <= ShiftRU[16, 2]().getOrDefault(0)
+stdout(v1.toString())
+stdout(v2.toString())
+stdout(v3.toString())
+stdout(v4.toString())
+stdout(v5.toString())
+stdout(v6.toString())
+stdout(v7.toString())

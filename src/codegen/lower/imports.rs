@@ -890,8 +890,13 @@ impl Lowering {
 
         let resolved = path.canonicalize().unwrap_or(path);
 
-        // RCB-303: Reject relative imports that escape the project root (path traversal).
-        if (module_path.starts_with("./") || module_path.starts_with("../"))
+        // RCB-303 / C27B-022: Reject imports that escape the project
+        // root (path traversal). Covers `./`, `../` AND absolute `/`
+        // imports for 3-backend parity with Interpreter (SEC-003 land
+        // via C26B-007) and Native (`driver.rs::resolve_module_path`).
+        if (module_path.starts_with("./")
+            || module_path.starts_with("../")
+            || module_path.starts_with('/'))
             && let Ok(sd) = source_dir.canonicalize()
         {
             let project_root = Self::find_project_root(&sd);

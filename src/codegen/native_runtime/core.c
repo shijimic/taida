@@ -276,20 +276,31 @@ static inline int taida_list_freelist_push(taida_val *obj) {
 // Profiling bench_router.td @ routes=200 x iter=500 shows ~2.97M malloc
 // calls, of which ~1.88M are <=32B (str_alloc for short strings: digits,
 // single path segments, concat results). Bucket strategy: three size
-// classes (<=32B, <=64B, <=128B total). Bounded at TAIDA_STR_FREELIST_MAX
-// per bucket per thread. __thread storage. On alloc, consult matching
-// bucket; on release (rc drops to 0), push to matching bucket if not full.
+// classes. Bounded at TAIDA_STR_FREELIST_MAX per bucket per thread.
+// __thread storage. On alloc, consult matching bucket; on release
+// (rc drops to 0), push to matching bucket if not full.
+//
+// C27B-018 (Round 2 wH): bucket coverage extended from {32, 64, 128}
+// to {32, 64, 128, 256, 512, 1024} to cover the 16-1024 B str range
+// the soak fixture exercises (Repeat["x", 512]() etc.). The size
+// mismatch issue inside a bucket (an aligned 48-byte slot can be
+// pop'd for a 50-byte request) is guarded by the capacity check in
+// taida_str_alloc which reads hdr[1] (set by taida_str_release on
+// push) and falls through if the slot is too small.
 #define TAIDA_STR_FREELIST_MAX 32
-#define TAIDA_STR_BUCKET_COUNT 3
+#define TAIDA_STR_BUCKET_COUNT 6
 
 static __thread taida_val *taida_str_freelist[TAIDA_STR_BUCKET_COUNT][TAIDA_STR_FREELIST_MAX];
 static __thread int taida_str_freelist_count[TAIDA_STR_BUCKET_COUNT] = {0};
 
 
 static inline int taida_str_bucket_for(size_t total) {
-    if (total <=  32) return 0;
-    if (total <=  64) return 1;
-    if (total <= 128) return 2;
+    if (total <=   32) return 0;
+    if (total <=   64) return 1;
+    if (total <=  128) return 2;
+    if (total <=  256) return 3;
+    if (total <=  512) return 4;
+    if (total <= 1024) return 5;
     return -1;
 }
 
@@ -2365,18 +2376,30 @@ taida_val taida_release(taida_ptr ptr) {
                 }
             }
             // C26B-024 (Round 8 / wT + Round 10 / wepsilon): try the 4-field pack
-            // freelist before falling back to free(). Arena-backed packs are
-            // skipped so they don't end up being free()d later.
+            // freelist before falling back to free().
+            //
+            // C27B-018 (Round 2 wH): the pack4 freelist uses an exact-size
+            // pool (every entry is a 4-field pack with the same byte
+            // footprint), so unlike the small-string freelist there is no
+            // bucket-vs-aligned-size mismatch to guard against. Arena-
+            // backed packs are now safely pushed and recycled — the
+            // freelist itself never free()s an entry it returned (alloc
+            // re-uses the cached pointer as-is), so pushing an arena
+            // pointer is sound. The arena chunks stay alive until process
+            // exit, so the cached pointer remains valid.
             if (TAIDA_IS_PACK(ptr) && obj[1] == TAIDA_PACK_FC_FOR_FREELIST) {
-                if (!taida_arena_contains(obj) && taida_pack4_freelist_push(obj)) {
+                if (taida_pack4_freelist_push(obj)) {
                     return 0;  // recycled — skip free()
                 }
             }
             // C26B-024 (Round 10 / wepsilon Step 4): try the cap=16 list freelist
-            // before falling back to free(). Arena-backed slabs are skipped
-            // since the freelist eventually free()s.
+            // before falling back to free().
+            //
+            // C27B-018 (Round 2 wH): same reasoning as the pack4 freelist —
+            // entries are uniformly cap=16 lists, so push/pop sizes match
+            // exactly. Arena-backed slabs are now safely recycled.
             if (TAIDA_IS_LIST(ptr) && obj[1] == TAIDA_LIST_INIT_CAP) {
-                if (!taida_arena_contains(obj) && taida_list_freelist_push(obj)) {
+                if (taida_list_freelist_push(obj)) {
                     return 0;  // recycled -- skip free()
                 }
             }
@@ -2414,8 +2437,26 @@ static char* taida_str_alloc(size_t len) {
     // size-bucket.
     int bucket = taida_str_bucket_for(total);
     if (bucket >= 0) {
-        taida_val *cached = taida_str_freelist_pop(bucket);
-        if (cached) {
+        // C27B-018 / C27B-028 (Round 2 wH): freelist slots are tagged with
+        // their actual data-area capacity (stored in hdr[1] by the push
+        // side). A bucket only guarantees the slot's *aligned* size ≤ the
+        // bucket max, but the slot itself may have been allocated for a
+        // smaller string (16-byte alignment means a slot for total=36 has
+        // only 32 bytes of data area, while another caller in the same
+        // bucket may want up to 48 bytes). Verify cap before reuse; on
+        // mismatch drop the slot (bounded leak) and fall through to the
+        // arena. Retry up to TAIDA_STR_FREELIST_MAX times so we don't
+        // spin if the bucket is full of too-small slots.
+        for (int attempt = 0; attempt < TAIDA_STR_FREELIST_MAX; attempt++) {
+            taida_val *cached = taida_str_freelist_pop(bucket);
+            if (!cached) break;
+            taida_val cap = cached[1];
+            // Need len + 1 (NUL) bytes of data area.
+            if ((taida_val)(len + 1) > cap) {
+                // Slot too small for this allocation. Drop it (popped, not
+                // re-pushed) so we don't keep examining the same slot.
+                continue;
+            }
             cached[0] = TAIDA_STR_MAGIC | 1;
             cached[1] = (taida_val)len;
             char *bytes = (char*)(cached + 2);
@@ -2494,19 +2535,34 @@ static void taida_str_release(taida_val ptr) {
     if ((tag & TAIDA_MAGIC_MASK) == TAIDA_STR_MAGIC) {
         taida_val rc = tag & TAIDA_RC_MASK;
         if (rc <= 1) {
-            // C26B-024 (Round 10 / wepsilon Step 4): try the small-string
-            // bucketed freelist before free(). The bucket is derived from
-            // the stored length; since taida_str_alloc routes by the same
-            // (16 + len + 1) total, release and alloc map to the same bucket.
-            // Arena-backed headers are skipped since the freelist eventually
-            // free()s, and free() on an arena pointer is undefined.
+            // C27B-018 Option A (Round 2 wH): try the small-string bucketed
+            // freelist before free(). Both arena and malloc-backed headers
+            // are pushed — the freelist code path never free()s an entry
+            // it returned (alloc re-uses cached pointers as-is and only
+            // updates header fields), so an arena slot pushed here is safe
+            // to recycle. The arena chunks themselves stay alive until
+            // process exit, so the cached pointer remains valid.
+            //
+            // C27B-028 (Round 2 wH paired-fix): the freelist push must
+            // record the slot's *aligned data-area capacity* in hdr[1]
+            // (overwriting the now-zero-rc str length). The pop side reads
+            // this back to ensure a smaller slot is never re-used for a
+            // larger string. Arena alloc rounds to 16-byte multiples, and
+            // we conservatively assume the same for malloc'd slots even
+            // though glibc may give us more — under-counting is safe.
             size_t slen = (size_t)hdr[1];
             size_t rel_total = sizeof(taida_val) * 2 + slen + 1;
             int bucket = taida_str_bucket_for(rel_total);
-            if (bucket >= 0 && !taida_arena_contains(hdr)) {
+            if (bucket >= 0) {
+                size_t aligned_total = (rel_total + 15) & ~((size_t)15);
+                size_t cap = aligned_total - sizeof(taida_val) * 2;
+                hdr[1] = (taida_val)cap;
                 if (taida_str_freelist_push(bucket, hdr)) {
                     return;  // recycled -- skip free()
                 }
+                // Push refused (freelist full): restore hdr[1] for the
+                // arena/free fall-throughs which inspect nothing further.
+                hdr[1] = (taida_val)slen;
             }
             if (taida_arena_contains(hdr)) {
                 return;  // arena-backed: process exit reclaims
@@ -2517,6 +2573,37 @@ static void taida_str_release(taida_val ptr) {
         }
     }
     // Static strings: no header → no-op
+}
+
+// C27B-018 Option B (@c.27 Round 3, wf018B): runtime-dispatched release
+// helper for short-lived bindings emitted by the codegen lifetime
+// tracking pass. The codegen does not statically know whether a binding
+// holds a heap-string (hidden header at ptr-16) or a tagged Pack/List/
+// Closure/HMap/Set/Bytes/Async (magic header at ptr+0); this helper
+// inspects both possibilities at runtime and dispatches to the right
+// release path. No-op for static strings (no hidden header) and for
+// non-heap small ptrs.
+void taida_release_any(taida_val ptr) {
+    if (ptr == 0) return;
+    if (ptr > 0 && ptr < 4096) return;
+    if (ptr < 0) return;
+    // Try heap-string hidden header at ptr - 16 first; the layout puts
+    // a TAIDA_STR_MAGIC|rc word followed by a length word two slots
+    // before the user-visible char* pointer.
+    // cppcheck-suppress nullPointerArithmeticRedundantCheck
+    taida_val *hdr = ((taida_val*)ptr) - 2;
+    if (taida_ptr_is_readable((taida_val)hdr, sizeof(taida_val))) {
+        taida_val htag = hdr[0];
+        if ((htag & TAIDA_MAGIC_MASK) == TAIDA_STR_MAGIC) {
+            taida_str_release(ptr);
+            return;
+        }
+    }
+    // Otherwise dispatch to the standard release path which inspects
+    // the magic header at ptr+0 (Pack/List/Closure/HMap/Set/Bytes/Async).
+    // taida_release internally guards on readability and magic so a
+    // foreign or non-heap pointer is a safe no-op.
+    taida_release(ptr);
 }
 
 // ── BuchiPack runtime ─────────────────────────────────────

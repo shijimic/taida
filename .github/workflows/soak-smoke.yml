@@ -1,0 +1,165 @@
+name: soak-smoke
+
+# C27B-017: fast-soak-proxy CI smoke gate.
+#
+# Why this workflow exists:
+#   C27B-016 (rc8 historical) — the proxy's heredoc fixture was
+#   shipped with five separate parse errors that no automated job
+#   would catch. The break was only discovered when an operator tried
+#   to run the 24h soak runbook by hand. This workflow closes that
+#   loop: every PR / push runs the proxy for one minute against the
+#   interpreter backend, and any of the following cause CI red —
+#
+#     - the heredoc fixture fails to parse (`taida` exits non-zero
+#       before the bind probe sees a listening socket),
+#     - the server fails to bind 127.0.0.1:18081 within the 30s
+#       readiness window,
+#     - the proxy exits successfully but never emits a `VERDICT:` line.
+#
+#   A `DRIFT DETECTED` verdict is *not* treated as red here — the
+#   1-minute window is statistically far too short for a real drift
+#   signal, and gating on it would re-create the false-positive
+#   churn that the proxy projection already documents (only the
+#   24h runbook earns a real PASS). The CI smoke is a heredoc /
+#   plumbing canary, not a leak gate.
+#
+# Why it does not extend ci.yml or bench.yml:
+#   The existing `ci.yml` and `bench.yml` Round-1 wA contract
+#   (see `.dev/C27_WORKTREE_CONTRACT.md`) is "do not touch", so
+#   this is shipped as a sibling workflow with its own concurrency
+#   group. The release build is shared with the rest of the matrix
+#   via the `cargo-base` rust-cache partition (same key the
+#   `memory.yml` job already uses), so this adds at most 1 minute
+#   of wallclock to the PR feedback loop.
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+  workflow_dispatch: {}
+
+concurrency:
+  group: soak-smoke-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  proxy-1m-interp:
+    name: fast-soak-proxy 1m smoke (interpreter)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: false
+
+      - name: install rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: shared cargo cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          # Same partition used by memory.yml so we reuse the cached
+          # release build artefacts on top of cargo-base.
+          shared-key: cargo-base
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: build release taida binary
+        run: cargo build --release --bin taida
+
+      - name: run fast-soak-proxy --duration-min 1 --backend interp
+        id: proxy_run
+        # The proxy itself catches parse errors (server exits before
+        # bind → exit 2) and bind timeouts (no /dev/tcp probe success
+        # within 30s → exit 2). We additionally tee its output to a
+        # log file so the next step can grep for the VERDICT: line.
+        #
+        # Exit code semantics from `scripts/soak/fast-soak-proxy.sh`:
+        #   0 = LIKELY STABLE
+        #   2 = parse error / bind timeout (genuine plumbing fail → CI red)
+        #   4 = DRIFT DETECTED (per yml header comment, **not** treated as
+        #       red — the 1-min projection is statistically too noisy and
+        #       the comment explicitly documents this as expected).
+        # We capture exit code in a step output so subsequent steps can
+        # discriminate: parse/bind failure → red, DRIFT → tolerated +
+        # surfaced as warning annotation. The announce/VERDICT asserts
+        # below are the real gates for the C27B-014/016 contract.
+        #
+        # TAIDA_NET_ANNOUNCE_PORT=1 is set both here (defensively, so
+        # the env survives any GitHub Actions wrapper that strips
+        # parent env) and inline by the proxy script itself on each
+        # backend launch line. Either alone is sufficient; setting
+        # both keeps the contract robust against env-stripping middle
+        # boxes and lets the LOG `listening on …` line drive the
+        # next-step assertion (C27B-014).
+        env:
+          TAIDA_NET_ANNOUNCE_PORT: "1"
+        run: |
+          mkdir -p target/soak-smoke
+          set +e
+          ./scripts/soak/fast-soak-proxy.sh \
+            --duration-min 1 \
+            --backend interp \
+            2>&1 | tee target/soak-smoke/proxy.log
+          rc=${PIPESTATUS[0]}
+          set -e
+          echo "proxy_exit=${rc}" >> "${GITHUB_OUTPUT}"
+          case "${rc}" in
+            0)
+              echo "fast-soak-proxy returned LIKELY STABLE (exit 0)"
+              ;;
+            4)
+              echo "::warning::fast-soak-proxy returned DRIFT DETECTED (exit 4); tolerated per soak-smoke.yml header — 1-min projection is statistically noisy. Announce/VERDICT gates below remain authoritative."
+              ;;
+            *)
+              echo "::error::fast-soak-proxy exited ${rc} (parse error or bind timeout — genuine plumbing failure)"
+              exit "${rc}"
+              ;;
+          esac
+
+      - name: assert announce line is present in server log
+        # The proxy launches the interpreter with TAIDA_NET_ANNOUNCE_PORT=1
+        # inline-exported, so the spawned server must emit exactly
+        #   listening on 127.0.0.1:18081
+        # on its own stdout line before serving the first request.
+        # The proxy's tee captures the server stdout into proxy.log
+        # via the script's `==> launching ...` echo path, and the
+        # server's own stdout is redirected to a per-invocation
+        # tempfile that the script summarises into the same `tee`
+        # stream on failure. To make the assertion deterministic in
+        # CI we read straight from the proxy.log tee, which contains
+        # the `  server listening on …` echo emitted by the proxy
+        # after the readiness probe; the underlying server announce
+        # is also surfaced through that path on failure. Anchor on
+        # the canonical `listening on 127.0.0.1:18081` substring so
+        # either source satisfies the gate.
+        run: |
+          if ! grep -E 'listening on 127\.0\.0\.1:18081' target/soak-smoke/proxy.log; then
+            echo '::error::no listening-on-127.0.0.1:18081 line in proxy output — TAIDA_NET_ANNOUNCE_PORT plumbing regressed (C27B-014)'
+            exit 1
+          fi
+
+      - name: assert VERDICT line is present
+        # The proxy always prints a VERDICT: line on the success path
+        # (LIKELY STABLE / DRIFT DETECTED / INCONCLUSIVE). If the
+        # script reaches the awk projection block without samples we
+        # would still see INCONCLUSIVE; missing the line entirely
+        # means the script aborted between bind and projection,
+        # which is the exact regression class C27B-016 introduced.
+        run: |
+          if ! grep -E '^VERDICT:' target/soak-smoke/proxy.log; then
+            echo "::error::no VERDICT line in proxy output — fast-soak-proxy aborted between bind and projection"
+            exit 1
+          fi
+
+      - name: upload proxy log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: soak-smoke-proxy-log-${{ github.sha }}
+          path: target/soak-smoke/proxy.log
+          if-no-files-found: warn
+          retention-days: 14

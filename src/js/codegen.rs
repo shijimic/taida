@@ -2438,16 +2438,41 @@ impl JsCodegen {
     /// This handles the case where `../shared` from `src/main.td` is flattened to
     /// `out_root/shared.mjs` alongside `out_root/main.mjs` (correct: `./shared.mjs`).
     ///
-    /// Also performs RCB-303 path traversal rejection for `..` imports.
+    /// Also performs RCB-303 / C27B-022 path traversal rejection for
+    /// `..` AND absolute `/` imports (3-backend parity with Interpreter
+    /// SEC-003 land and Native `driver.rs::resolve_module_path`).
     fn resolve_local_import_js_path(&self, import_path: &str) -> Result<String, JsError> {
         use std::path::{Path, PathBuf};
 
-        // RCB-303: Check path traversal for `..` imports
-        if import_path.contains("..")
-            && let (Some(project_root), Some(source_file)) = (&self.project_root, &self.source_file)
+        // RCB-303 / C27B-022: Check path traversal for `..` AND absolute
+        // `/` imports. The error message mirrors the interpreter's
+        // wording verbatim so 3-backend regression tests can assert the
+        // same string across Interpreter / JS / Native.
+        //
+        // C27B-022 parity fix: when `self.project_root` is not set
+        // (build invoked outside a `packages.tdm` tree), fall back to
+        // walking up from `self.source_file` for `taida.toml` /
+        // `.taida` / `.git` markers — the same set Native and
+        // Interpreter recognise. This closes a 3-backend parity hole
+        // where JS would silently accept absolute escapes when the
+        // project was anchored on `taida.toml` only.
+        if (import_path.contains("..") || import_path.starts_with('/'))
+            && let Some(source_file) = self.source_file.as_ref()
         {
             let source_dir = source_file.parent().unwrap_or(Path::new("."));
-            let td_path = source_dir.join(import_path);
+            let project_root_buf;
+            let project_root: &Path = match self.project_root.as_ref() {
+                Some(p) => p.as_path(),
+                None => {
+                    project_root_buf = js_find_project_root(source_dir);
+                    project_root_buf.as_path()
+                }
+            };
+            let td_path = if Path::new(import_path).is_absolute() {
+                PathBuf::from(import_path)
+            } else {
+                source_dir.join(import_path)
+            };
             let reject = if let Ok(canonical) = td_path.canonicalize() {
                 if let Ok(root_canonical) = project_root.canonicalize() {
                     !canonical.starts_with(&root_canonical)
@@ -2460,7 +2485,8 @@ impl JsCodegen {
             if reject {
                 return Err(JsError {
                     message: format!(
-                        "Import path '{}' resolves outside the project root. Path traversal is not allowed.",
+                        "Import path '{}' resolves outside the project root. \
+                         Path traversal beyond the project boundary is not allowed.",
                         import_path
                     ),
                 });
@@ -4833,6 +4859,29 @@ fn stmts_contain_async_unmold(stmts: &[Statement]) -> bool {
 }
 
 /// Compute relative path from `base` directory to `target` file.
+/// C27B-022: Walk up from `start_dir` looking for project-root markers
+/// (`packages.tdm`, `taida.toml`, `.taida`, `.git`). Mirrors the marker
+/// set used by `interpreter::module_eval::find_project_root` and
+/// `codegen::driver::find_project_root` so the JS path-traversal guard
+/// agrees with Native / Interpreter on what counts as the project
+/// boundary. Falls back to `start_dir` if no marker is found.
+fn js_find_project_root(start_dir: &std::path::Path) -> std::path::PathBuf {
+    let mut dir = start_dir.to_path_buf();
+    loop {
+        if dir.join("packages.tdm").exists()
+            || dir.join("taida.toml").exists()
+            || dir.join(".taida").exists()
+            || dir.join(".git").exists()
+        {
+            return dir;
+        }
+        if !dir.pop() {
+            break;
+        }
+    }
+    start_dir.to_path_buf()
+}
+
 fn pathdiff(base: &std::path::Path, target: &std::path::Path) -> Option<std::path::PathBuf> {
     use std::path::PathBuf;
 

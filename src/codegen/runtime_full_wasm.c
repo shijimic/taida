@@ -426,34 +426,15 @@ do_core:;
 }
 
 // ===========================================================================
-// Bitwise operations (7 functions)
+// C27B-021 (2026-04-25): Bitwise / Shift moved to runtime_wasi_io.c so
+// wasm-wasi can use them too. wasm-full still gets these symbols via
+// rt_wasi (which is linked alongside rt_full). Removing them here avoids
+// duplicate-symbol errors. The new `taida_div_mold_f` / `taida_mod_mold_f`
+// (Float div/mod, C26B-011 semantics) also live in rt_wasi.
 // ===========================================================================
 
-int64_t taida_bit_and(int64_t a, int64_t b) { return (int64_t)(((uint64_t)a) & ((uint64_t)b)); }
-int64_t taida_bit_or(int64_t a, int64_t b) { return (int64_t)(((uint64_t)a) | ((uint64_t)b)); }
-int64_t taida_bit_xor(int64_t a, int64_t b) { return (int64_t)(((uint64_t)a) ^ ((uint64_t)b)); }
-int64_t taida_bit_not(int64_t x) { return (int64_t)(~((uint64_t)x)); }
-
-int64_t taida_shift_l(int64_t x, int64_t n) {
-    if (n < 0 || n > 63) return taida_lax_empty(0);
-    uint64_t shifted = ((uint64_t)x) << (unsigned int)n;
-    return taida_lax_new((int64_t)shifted, 0);
-}
-
-int64_t taida_shift_r(int64_t x, int64_t n) {
-    if (n < 0 || n > 63) return taida_lax_empty(0);
-    int64_t shifted = ((int64_t)x) >> (unsigned int)n;
-    return taida_lax_new(shifted, 0);
-}
-
-int64_t taida_shift_ru(int64_t x, int64_t n) {
-    if (n < 0 || n > 63) return taida_lax_empty(0);
-    uint64_t shifted = ((uint64_t)x) >> (unsigned int)n;
-    return taida_lax_new((int64_t)shifted, 0);
-}
-
 // ===========================================================================
-// Global get/set (2 functions)
+// Global get/set (2 functions, wasm-full only)
 // ===========================================================================
 
 #define WF_GLOBAL_TABLE_SIZE 64
@@ -486,19 +467,28 @@ int64_t taida_global_get(int64_t key) {
 }
 
 // ===========================================================================
-// Bytes runtime (21 functions)
+// C27B-020 / 021 (2026-04-25): Bytes runtime + UTF-8 molds moved to
+// runtime_wasi_io.c so wasm-wasi can use them too.  wasm-full picks up
+// these symbols from rt_wasi (which is linked alongside rt_full).
+//
+// What stays here:
+//   - `taida_polymorphic_length_full` (#define-redirect target for
+//     `taida_polymorphic_length`, fixes silent-0 on Bytes that
+//     `runtime_core_wasm` cannot dispatch on -- core is FROZEN).
+//
+// `_wf_is_bytes` is reintroduced inline below for the polymorphic length
+// override; it must stay layout-compatible with rt_wasi's `_wi_is_bytes`
+// (WF_BYTES_MAGIC == WASI_BYTES_MAGIC).
 // ===========================================================================
 
-// Bytes layout (WASM): [BYTES_MAGIC, len, byte0, byte1, ...]
-// No RC header in WASM -- bump allocator.
-#define WF_BYTES_MAGIC 0x5441494442595400LL  // "TAIDBYT\0"
+// `taida_polymorphic_length_bytes_aware` (the redirect target) lives in
+// runtime_wasi_io.c so the same override serves both wasm-wasi and
+// wasm-full. See `emit_wasm_c.rs::emit_c` for the `#define` injection.
 
-static int _wf_is_bytes(int64_t val) {
-    if (!_wf_is_valid_ptr(val, 16)) return 0;
-    int64_t *p = (int64_t *)(intptr_t)val;
-    return (p[0] & 0xFFFFFFFFFFFFFF00LL) == WF_BYTES_MAGIC;
-}
-
+#if 0
+// === ARCHIVED (C27B-020/021 migration): the following bytes/utf8/cursor
+// === implementations moved to runtime_wasi_io.c.  Kept as historical
+// === reference behind `#if 0` so rt_full continues to compile cleanly.
 int64_t taida_bytes_default_value(void) {
     int64_t *bytes = (int64_t *)wasm_alloc(3 * 8);
     bytes[0] = WF_BYTES_MAGIC;
@@ -931,3 +921,4 @@ int64_t taida_utf8_decode_one(int64_t v) {
 int64_t taida_utf8_single_scalar(int64_t v) {
     return taida_codepoint_mold_str(v);
 }
+#endif  // archived bytes/utf8 block (C27B-020/021 migration)
