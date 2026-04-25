@@ -1071,6 +1071,12 @@ fn runtime_abi(name: &str) -> Result<RuntimeAbi, String> {
             params: &[Ptr],
             returns: &[Val],
         },
+        // C27B-018 Option B (wf018B): runtime-dispatched release for
+        // short-lived bindings (heap-string vs Pack/List/Closure).
+        "taida_release_any" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[],
+        },
 
         // ── Async ──
         "taida_async_ok" => RuntimeAbi {
@@ -2119,6 +2125,9 @@ impl Emitter {
                 IrInst::Release(_) => {
                     self.ensure_runtime_func("taida_release")?;
                 }
+                IrInst::ReleaseAuto(_) => {
+                    self.ensure_runtime_func("taida_release_any")?;
+                }
                 IrInst::GlobalSet(_, _) => {
                     self.ensure_runtime_func("taida_global_set")?;
                 }
@@ -2759,6 +2768,12 @@ impl Emitter {
             IrInst::Release(var) => {
                 let val = ectx.val_map[var];
                 if let Some(&func_ref) = ectx.func_refs.get("taida_release") {
+                    builder.ins().call(func_ref, &[val]);
+                }
+            }
+            IrInst::ReleaseAuto(var) => {
+                let val = ectx.val_map[var];
+                if let Some(&func_ref) = ectx.func_refs.get("taida_release_any") {
                     builder.ins().call(func_ref, &[val]);
                 }
             }

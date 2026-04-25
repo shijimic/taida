@@ -176,8 +176,16 @@ fn announce_port_off_by_default_interpreter() {
         out
     );
     // Existing fixture surface is preserved.
-    assert!(out.contains("true"), "expected fixture body in stdout: {}", out);
-    assert!(out.contains('1'), "expected request count in stdout: {}", out);
+    assert!(
+        out.contains("true"),
+        "expected fixture body in stdout: {}",
+        out
+    );
+    assert!(
+        out.contains('1'),
+        "expected request count in stdout: {}",
+        out
+    );
 }
 
 #[test]

@@ -38,8 +38,8 @@ fn c27b_025_setvbuf_call_present_in_main() {
     // Read the C source for net_h3_quic.c and assert the setvbuf
     // calls sit inside main(). Catches accidental removal during
     // codegen refactors.
-    let src = fs::read_to_string("src/codegen/native_runtime/net_h3_quic.c")
-        .expect("read net_h3_quic.c");
+    let src =
+        fs::read_to_string("src/codegen/native_runtime/net_h3_quic.c").expect("read net_h3_quic.c");
     let main_pos = src
         .find("int main(int argc, char **argv) {")
         .expect("main entry must exist in net_h3_quic.c");
@@ -126,7 +126,10 @@ fn c27b_025_3backend_stdout_content_parity() {
             "js build failed: {:?}",
             String::from_utf8_lossy(&jbuild.stderr)
         );
-        let js_run = Command::new("node").arg(&js_path).output().expect("node run");
+        let js_run = Command::new("node")
+            .arg(&js_path)
+            .output()
+            .expect("node run");
         assert!(
             js_run.status.success(),
             "node failed: {:?}",

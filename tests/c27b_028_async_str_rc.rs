@@ -135,8 +135,8 @@ fn fixture_expected(name: &str) -> String {
         "examples/quality/c27b_028_async_str_rc/{}.expected",
         name
     ));
-    let raw = std::fs::read_to_string(&path)
-        .unwrap_or_else(|e| panic!("read {}: {}", path.display(), e));
+    let raw =
+        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {}", path.display(), e));
     normalize(&raw)
 }
 

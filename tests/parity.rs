@@ -36990,7 +36990,10 @@ fn c27b001_h2_single_request_test(
             let _ = fs::remove_file(&cert_path);
             let _ = fs::remove_file(&key_path);
             cleanup_net_project(&dir);
-            panic!("{} {}: server not ready on port {}", case_tag, backend, port);
+            panic!(
+                "{} {}: server not ready on port {}",
+                case_tag, backend, port
+            );
         }
 
         let url = format!("https://127.0.0.1:{}/", port);
@@ -37042,7 +37045,10 @@ fn c27b001_h2_single_request_test(
         assert!(
             body.contains(expected_body_substring),
             "{} {}: expected body to contain {:?}, got: {:?}",
-            case_tag, backend, expected_body_substring, body
+            case_tag,
+            backend,
+            expected_body_substring,
+            body
         );
         assert_eq!(
             count, "1",
@@ -37157,8 +37163,7 @@ fn test_net6_c27b001_10_h2_keep_alive_two_requests_3backend_parity() {
     for backend in &["interp", "native"] {
         let cert_path =
             unique_temp_path("taida_h2_cert", &format!("c27b001_10_{}", backend), "pem");
-        let key_path =
-            unique_temp_path("taida_h2_key", &format!("c27b001_10_{}", backend), "pem");
+        let key_path = unique_temp_path("taida_h2_key", &format!("c27b001_10_{}", backend), "pem");
         if !gen_self_signed_cert(&cert_path, &key_path) {
             eprintln!("SKIP c27b001_10: cert gen failed for {}", backend);
             return;
@@ -37192,11 +37197,8 @@ stdout(r.requests)
                 .spawn()
                 .expect("spawn interp h2 server c27b001_10"),
             "native" => {
-                let bin_path = unique_temp_path(
-                    "taida_c27b001_10_native",
-                    &format!("{}", port),
-                    "bin",
-                );
+                let bin_path =
+                    unique_temp_path("taida_c27b001_10_native", &format!("{}", port), "bin");
                 let compile = Command::new(taida_bin())
                     .arg("build")
                     .arg("--target")
@@ -37274,7 +37276,9 @@ stdout(r.requests)
                 .expect("curl c27b001_10 retry");
         }
 
-        let server_out = child.wait_with_output().expect("wait for server c27b001_10");
+        let server_out = child
+            .wait_with_output()
+            .expect("wait for server c27b001_10");
         let _ = fs::remove_file(&cert_path);
         let _ = fs::remove_file(&key_path);
         cleanup_net_project(&dir);
@@ -37297,7 +37301,9 @@ stdout(r.requests)
         assert!(
             *occ >= 2,
             "c27b001_10 {}: expected payload marker to appear ≥2 times, got {}, raw count: {:?}",
-            backend, occ, count
+            backend,
+            occ,
+            count
         );
         assert_eq!(
             count, "2",

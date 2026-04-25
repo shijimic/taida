@@ -98,7 +98,9 @@ fn freelist_recycle_native_completes_quickly() {
     let bin = build_native(&td).expect("native build should succeed");
 
     let start = Instant::now();
-    let out = Command::new(&bin).output().expect("native binary should run");
+    let out = Command::new(&bin)
+        .output()
+        .expect("native binary should run");
     let elapsed = start.elapsed();
     let _ = std::fs::remove_file(&bin);
 
@@ -128,7 +130,9 @@ fn freelist_recycle_three_way_parity_invariant() {
     assert_eq!(interp.trim(), "0", "interpreter output drift");
 
     let bin = build_native(&recycle_td).expect("native build should succeed");
-    let out = Command::new(&bin).output().expect("native binary should run");
+    let out = Command::new(&bin)
+        .output()
+        .expect("native binary should run");
     let _ = std::fs::remove_file(&bin);
     assert!(out.status.success(), "native binary failed: {:?}", out);
     let native = normalize(&String::from_utf8_lossy(&out.stdout));

@@ -501,7 +501,15 @@ mod tests {
         //     net_h3_quic   : +815   (H3_COPY_PSEUDO + cap check)
         //                     -------- + -------- + -------- = +4,702
         //   Total : 1,016,366 + 4,702 = 1,021,068.
-        const EXPECTED_TOTAL_LEN: usize = 1_021_068;
+        // C27B-018 Option B (@c.27 Round 3, wf018B): +1,404 bytes in core.c F1
+        //   for `taida_release_any` runtime-dispatched release helper used
+        //   by the codegen lifetime tracking pass to release short-lived
+        //   heap-string bindings (e.g. `s <= Repeat["x", 32]()`) at their
+        //   last use point inside CondBranch arms / TCO loops where the
+        //   function-end Release path is unreachable.
+        //   Externally linkable (non-`static`) so emitted user code in
+        //   `_entry.c` can reference the helper.
+        const EXPECTED_TOTAL_LEN: usize = 1_022_472;
         let asm = *NATIVE_RUNTIME_C;
         assert_eq!(
             asm.len(),
@@ -909,10 +917,16 @@ mod tests {
         // All inside the Magic-Numbers / allocator / read-barrier
         // region (F1), F2 unchanged.
         // F1_LEN: 267,133 + 2,732 + 535 = 270,400.
-        const F1_LEN: usize = 270_400;
+        // C27B-018 Option B (wf018B): +1,404 bytes for `taida_release_any`
+        //   helper inserted just after `taida_str_release` (still inside
+        //   F1, well before the "// ── Error ceiling" marker).
+        //   Externally linkable (non-`static`) so emitted user code in
+        //   `_entry.c` can reference the helper.
+        // F1_LEN: 270,400 + 1,404 = 271,804.
+        const F1_LEN: usize = 271_804;
         assert_eq!(
             CORE_SECTION.len(),
-            270_400 + 160_760,
+            271_804 + 160_760,
             "core.c total byte length must equal legacy fragment1 + fragment2 (C25B-001 / C25B-028 / C25B-025 / C26B-011 / C26B-020 / C26B-016 / C26B-018 / C26B-011-wS / C26B-024 / C26B-024-wepsilon adjusted; CI-red 2026-04-24 cppcheck clean-up adds 881/409 to F1/F2)"
         );
         const F2_PREFIX: &[u8] = b"// \xE2\x94\x80\xE2\x94\x80 Error ceiling";
