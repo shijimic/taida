@@ -39,10 +39,14 @@ fn run_interpreter(td_path: &Path) -> Option<String> {
 }
 
 fn tmp_artifact(td_path: &Path, suffix: &str) -> PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
     let stem = td_path.file_stem().unwrap().to_string_lossy();
+    let seq = SEQ.fetch_add(1, Ordering::SeqCst);
     std::env::temp_dir().join(format!(
-        "c27b_028_{}_{}.{}",
+        "c27b_028_{}_{}_{}.{}",
         std::process::id(),
+        seq,
         stem,
         suffix
     ))
