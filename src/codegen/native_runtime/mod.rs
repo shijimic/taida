@@ -495,11 +495,13 @@ mod tests {
         //
         //   Total delta:
         //     core.c F1     : +2,732 (str/pack/list freelist cap)
+        //                   + +535   (extend buckets to 6: max 1024 B)
+        //                            = +3,267
         //     net_h1_h2 F6  : +620   (H2_COPY_PSEUDO + cap check)
         //     net_h3_quic   : +815   (H3_COPY_PSEUDO + cap check)
-        //                     -------- + -------- + -------- = +4,167
-        //   Total : 1,016,366 + 4,167 = 1,020,533.
-        const EXPECTED_TOTAL_LEN: usize = 1_020_533;
+        //                     -------- + -------- + -------- = +4,702
+        //   Total : 1,016,366 + 4,702 = 1,021,068.
+        const EXPECTED_TOTAL_LEN: usize = 1_021_068;
         let asm = *NATIVE_RUNTIME_C;
         assert_eq!(
             asm.len(),
@@ -899,13 +901,18 @@ mod tests {
         //   +659  bytes for removing the `!taida_arena_contains(obj)`
         //          guards on the pack4 / cap=16 list freelists +
         //          expanded explanatory comments.
+        //   +535  bytes for extending bucket coverage from {32, 64,
+        //          128} to {32, 64, 128, 256, 512, 1024} so 512 B
+        //          response bodies (the soak fixture pattern) flow
+        //          through the freelist instead of leaking through
+        //          the arena.
         // All inside the Magic-Numbers / allocator / read-barrier
         // region (F1), F2 unchanged.
-        // F1_LEN: 267,133 + 2,732 = 269,865.
-        const F1_LEN: usize = 269_865;
+        // F1_LEN: 267,133 + 2,732 + 535 = 270,400.
+        const F1_LEN: usize = 270_400;
         assert_eq!(
             CORE_SECTION.len(),
-            269_865 + 160_760,
+            270_400 + 160_760,
             "core.c total byte length must equal legacy fragment1 + fragment2 (C25B-001 / C25B-028 / C25B-025 / C26B-011 / C26B-020 / C26B-016 / C26B-018 / C26B-011-wS / C26B-024 / C26B-024-wepsilon adjusted; CI-red 2026-04-24 cppcheck clean-up adds 881/409 to F1/F2)"
         );
         const F2_PREFIX: &[u8] = b"// \xE2\x94\x80\xE2\x94\x80 Error ceiling";

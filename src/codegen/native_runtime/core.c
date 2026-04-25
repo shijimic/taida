@@ -276,20 +276,31 @@ static inline int taida_list_freelist_push(taida_val *obj) {
 // Profiling bench_router.td @ routes=200 x iter=500 shows ~2.97M malloc
 // calls, of which ~1.88M are <=32B (str_alloc for short strings: digits,
 // single path segments, concat results). Bucket strategy: three size
-// classes (<=32B, <=64B, <=128B total). Bounded at TAIDA_STR_FREELIST_MAX
-// per bucket per thread. __thread storage. On alloc, consult matching
-// bucket; on release (rc drops to 0), push to matching bucket if not full.
+// classes. Bounded at TAIDA_STR_FREELIST_MAX per bucket per thread.
+// __thread storage. On alloc, consult matching bucket; on release
+// (rc drops to 0), push to matching bucket if not full.
+//
+// C27B-018 (Round 2 wH): bucket coverage extended from {32, 64, 128}
+// to {32, 64, 128, 256, 512, 1024} to cover the 16-1024 B str range
+// the soak fixture exercises (Repeat["x", 512]() etc.). The size
+// mismatch issue inside a bucket (an aligned 48-byte slot can be
+// pop'd for a 50-byte request) is guarded by the capacity check in
+// taida_str_alloc which reads hdr[1] (set by taida_str_release on
+// push) and falls through if the slot is too small.
 #define TAIDA_STR_FREELIST_MAX 32
-#define TAIDA_STR_BUCKET_COUNT 3
+#define TAIDA_STR_BUCKET_COUNT 6
 
 static __thread taida_val *taida_str_freelist[TAIDA_STR_BUCKET_COUNT][TAIDA_STR_FREELIST_MAX];
 static __thread int taida_str_freelist_count[TAIDA_STR_BUCKET_COUNT] = {0};
 
 
 static inline int taida_str_bucket_for(size_t total) {
-    if (total <=  32) return 0;
-    if (total <=  64) return 1;
-    if (total <= 128) return 2;
+    if (total <=   32) return 0;
+    if (total <=   64) return 1;
+    if (total <=  128) return 2;
+    if (total <=  256) return 3;
+    if (total <=  512) return 4;
+    if (total <= 1024) return 5;
     return -1;
 }
 
