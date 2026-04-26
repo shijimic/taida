@@ -97,6 +97,16 @@ typedef intptr_t  taida_fn_ptr;  // 関数ポインタ
 #define TAIDA_SET_MAGIC   0x5441494453455400LL // "TAIDSET\0"
 #define TAIDA_ASYNC_MAGIC 0x5441494441535900LL // "TAIDASY\0"
 #define TAIDA_BYTES_MAGIC 0x5441494442595400LL // "TAIDBYT\0"
+// D29B-003 (Track-β, 2026-04-27): Contiguous Bytes representation.
+// Layout: [magic|rc, len, data_ptr, ...inline payload bytes packed in following slots].
+// `data_ptr` is a `const unsigned char *` pointing either at the inline payload
+// (slots starting at offset 24 from header base) or at an externally owned buffer
+// (e.g. per-request arena). When emitted via taida_bytes_contig_new(src, len) we
+// always allocate in a single block and set data_ptr to the inline area, so the
+// header + payload live contiguously in one allocation. This unblocks
+// payload-level zero-copy writev (D29B-003 acceptance) by letting callers reflect
+// `data_ptr` directly into iovec without the legacy taida_val[] byte-loop.
+#define TAIDA_BYTES_CONTIG_MAGIC 0x54414944424E4300LL // "TAIDBNC\0"
 #define TAIDA_CLOSURE_MAGIC 0x54414944434C4F00LL // "TAIDCLO\0"
 
 // Type tags for BuchiPack field values (A-4a)
@@ -182,6 +192,16 @@ typedef intptr_t  taida_fn_ptr;  // 関数ポインタ
 #define TAIDA_IS_SET(ptr)   (taida_ptr_is_readable(ptr, 8) && (((taida_val*)ptr)[0] & TAIDA_MAGIC_MASK) == TAIDA_SET_MAGIC)
 #define TAIDA_IS_ASYNC(ptr) (taida_ptr_is_readable(ptr, 8) && (((taida_val*)ptr)[0] & TAIDA_MAGIC_MASK) == TAIDA_ASYNC_MAGIC)
 #define TAIDA_IS_BYTES(ptr) (taida_ptr_is_readable(ptr, 8) && (((taida_val*)ptr)[0] & TAIDA_MAGIC_MASK) == TAIDA_BYTES_MAGIC)
+// D29B-003 (Track-β): contiguous Bytes type check. Payload sits inline after
+// the 24-byte header (magic|rc + len + data_ptr); we require the header to be
+// readable, not the full payload, since data_ptr may point outside the header
+// for arena-backed contig bytes.
+#define TAIDA_IS_BYTES_CONTIG(ptr) (taida_ptr_is_readable(ptr, 24) && (((taida_val*)ptr)[0] & TAIDA_MAGIC_MASK) == TAIDA_BYTES_CONTIG_MAGIC)
+// D29B-003 (Track-β): polymorphic Bytes check accepting both legacy and contig
+// representations. Hot-path consumers (writev, SpanEquals reflection) use this
+// to handle either representation; legacy consumers using TAIDA_IS_BYTES alone
+// continue to see only the original taida_val[] form for backward compatibility.
+#define TAIDA_IS_ANY_BYTES(ptr) (TAIDA_IS_BYTES(ptr) || TAIDA_IS_BYTES_CONTIG(ptr))
 #define TAIDA_IS_CLOSURE(ptr) (taida_ptr_is_readable(ptr, sizeof(taida_val) * 3) && (((taida_val*)ptr)[0] & TAIDA_MAGIC_MASK) == TAIDA_CLOSURE_MAGIC)
 
 // NB-31: Callable check — closure OR readable non-heap-tagged pointer (function pointer).
@@ -700,6 +720,11 @@ taida_val taida_str_match_regex(const char *s, taida_val regex_pack);
 taida_val taida_str_search_regex(const char *s, taida_val regex_pack);
 static taida_val taida_bytes_new_filled(taida_val len, unsigned char fill);
 static taida_val taida_bytes_from_raw(const unsigned char *data, taida_val len);
+// D29B-003 (Track-β): contiguous Bytes primitives. See definitions in the
+// Bytes section below for the layout invariant and lifetime contract.
+static taida_val taida_bytes_contig_new(const unsigned char *data, taida_val len);
+static const unsigned char *taida_bytes_contig_data(taida_val ptr);
+static taida_val taida_bytes_contig_len(taida_val ptr);
 static taida_val taida_bytes_clone(taida_val bytes_ptr);
 static taida_val taida_bytes_len(taida_val bytes_ptr);
 static taida_val taida_bytes_default_value(void);
@@ -2338,7 +2363,10 @@ static int taida_has_magic_header(taida_val tag) {
            magic == TAIDA_SET_MAGIC ||
            magic == TAIDA_ASYNC_MAGIC ||
            magic == TAIDA_CLOSURE_MAGIC ||
-           magic == TAIDA_BYTES_MAGIC;
+           magic == TAIDA_BYTES_MAGIC ||
+           // D29B-003 (Track-β, 2026-04-27): contig Bytes participates in
+           // standard retain/release lifecycle just like legacy Bytes.
+           magic == TAIDA_BYTES_CONTIG_MAGIC;
 }
 
 taida_val taida_retain(taida_ptr ptr) {
@@ -2868,6 +2896,8 @@ static taida_val taida_runtime_detect_tag(taida_val value) {
     if (taida_is_list(value)) return TAIDA_TAG_LIST;
     if (taida_is_buchi_pack(value)) return TAIDA_TAG_PACK;
     if (TAIDA_IS_BYTES(value)) return TAIDA_TAG_STR;  // Bytes is string-like
+    // D29B-003 (Track-β, 2026-04-27): contig Bytes shares the string-like tag.
+    if (TAIDA_IS_BYTES_CONTIG(value)) return TAIDA_TAG_STR;
     if (TAIDA_IS_CLOSURE(value)) return TAIDA_TAG_CLOSURE;
     if (taida_is_hashmap(value)) return TAIDA_TAG_HMAP;
     if (taida_is_set(value)) return TAIDA_TAG_SET;
@@ -3319,6 +3349,56 @@ static taida_val taida_bytes_from_raw(const unsigned char *data, taida_val len) 
         bytes[2 + i] = (taida_val)data[i];
     }
     return out;
+}
+
+// D29B-003 (Track-β, 2026-04-27): contiguous Bytes constructor.
+// Allocates a single contiguous block holding [magic|rc, len, data_ptr,
+// inline payload]. data_ptr points at the inline payload region (offset 24
+// from the header base), so the wire-bytes form is reachable via direct
+// pointer reflection — no taida_val[] 8x expansion, no per-call materialize
+// loop on consumption. Used by readBody / readBodyChunk / readBodyAll
+// producers and by test fixtures that exercise the writev zero-copy path.
+// rc=1 on entry; standard taida_retain / taida_release lifecycle applies.
+// Header alignment matches taida_val (8 byte) so payload starts at slot [3].
+static taida_val taida_bytes_contig_new(const unsigned char *data, taida_val len) {
+    if (len < 0) len = 0;
+    // Bound the payload size to keep us under the safe-malloc ceiling. The
+    // header is 3 * sizeof(taida_val) = 24 bytes, plus payload bytes
+    // (rounded up so the total is 8-aligned for taida_val* readback).
+    if ((size_t)len > (size_t)(SIZE_MAX - 32)) {
+        fprintf(stderr, "taida: bytes length too large (bytes_contig_new): %" PRId64 "\n", len);
+        exit(1);
+    }
+    size_t header = 3 * sizeof(taida_val);
+    size_t payload_aligned = ((size_t)len + 7) & ~((size_t)7);
+    size_t total = taida_safe_add(header, payload_aligned, "bytes_contig_new total");
+    unsigned char *block = (unsigned char *)TAIDA_MALLOC(total, "bytes_contig_new");
+    taida_val *hdr = (taida_val *)block;
+    hdr[0] = TAIDA_BYTES_CONTIG_MAGIC | 1;
+    hdr[1] = len;
+    unsigned char *payload = block + header;
+    if (data && len > 0) memcpy(payload, data, (size_t)len);
+    // Zero out tail padding so reads stay deterministic if anyone overshoots.
+    if (payload_aligned > (size_t)len) {
+        memset(payload + len, 0, payload_aligned - (size_t)len);
+    }
+    hdr[2] = (taida_val)(uintptr_t)payload;
+    return (taida_val)hdr;
+}
+
+// D29B-003 (Track-β): borrow the contiguous payload pointer from a
+// TAIDA_BYTES_CONTIG-tagged value. Returns NULL if `ptr` is not a contig
+// Bytes. Caller must NOT free the returned pointer — the lifetime is tied
+// to the bytes header (released via taida_release like any other heap obj).
+static const unsigned char *taida_bytes_contig_data(taida_val ptr) {
+    if (!TAIDA_IS_BYTES_CONTIG(ptr)) return NULL;
+    return (const unsigned char *)(uintptr_t)((taida_val *)ptr)[2];
+}
+
+// D29B-003 (Track-β): borrow the contiguous Bytes length.
+static taida_val taida_bytes_contig_len(taida_val ptr) {
+    if (!TAIDA_IS_BYTES_CONTIG(ptr)) return 0;
+    return ((taida_val *)ptr)[1];
 }
 
 static taida_val taida_bytes_clone(taida_val bytes_ptr) {
@@ -5360,7 +5440,9 @@ static int _taida_is_callable_impl(taida_val val) {
         if (magic == TAIDA_PACK_MAGIC || magic == TAIDA_LIST_MAGIC ||
             magic == TAIDA_STR_MAGIC || magic == TAIDA_HMAP_MAGIC ||
             magic == TAIDA_SET_MAGIC || magic == TAIDA_ASYNC_MAGIC ||
-            magic == TAIDA_BYTES_MAGIC) return 0;
+            magic == TAIDA_BYTES_MAGIC ||
+            // D29B-003 (Track-β): contig Bytes is a heap data type, not callable.
+            magic == TAIDA_BYTES_CONTIG_MAGIC) return 0;
     }
     // Assume callable: function pointer or large integer (rare edge case)
     return 1;
@@ -6231,6 +6313,10 @@ taida_val taida_polymorphic_length(taida_val ptr) {
     if (TAIDA_IS_BYTES(ptr)) {
         return ((taida_val*)ptr)[1];
     }
+    // D29B-003 (Track-β, 2026-04-27): contig Bytes also stores len at slot [1].
+    if (TAIDA_IS_BYTES_CONTIG(ptr)) {
+        return ((taida_val*)ptr)[1];
+    }
     // Treat as string
     size_t sl = 0;
     if (taida_read_cstr_len_safe((const char*)ptr, 65536, &sl)) return (taida_val)sl;
@@ -6361,6 +6447,32 @@ static int taida_net_raw_as_bytes(taida_val raw, const unsigned char **out_buf,
 static int taida_net_needle_as_bytes(taida_val needle, const unsigned char **out_buf,
                                       taida_val *out_len, unsigned char **out_owned) {
     return taida_net_raw_as_bytes(needle, out_buf, out_len, out_owned);
+}
+
+// D29B-003 (Track-β, 2026-04-27): borrow-only variant of taida_net_raw_as_bytes.
+// Returns 1 on success with *out_buf borrowing from caller-owned storage:
+//   - TAIDA_BYTES_CONTIG: direct contig payload pointer (no allocation, no leak)
+//   - String: direct C string pointer
+// Returns 0 for the legacy taida_val[] Bytes form (caller must fall back to
+// the materialize path) so the existing TAIDA_BYTES_MAGIC consumers remain
+// unchanged. Used by writev hot paths to avoid the per-request alloc that
+// taida_net_raw_as_bytes incurs when raw is Bytes-shaped (D29B-012 leak fix
+// is Track-η scope; Track-β only adds the borrow path for the contig case).
+static int taida_net_raw_as_bytes_view(taida_val raw,
+                                        const unsigned char **out_buf,
+                                        taida_val *out_len) {
+    if (TAIDA_IS_BYTES_CONTIG(raw)) {
+        *out_buf = taida_bytes_contig_data(raw);
+        *out_len = taida_bytes_contig_len(raw);
+        return 1;
+    }
+    if (taida_is_string_value(raw)) {
+        const char *s = (const char *)raw;
+        *out_buf = (const unsigned char *)s;
+        *out_len = (taida_val)strlen(s);
+        return 1;
+    }
+    return 0;
 }
 
 taida_val taida_net_SpanEquals(taida_val span, taida_val raw, taida_val needle) {

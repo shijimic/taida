@@ -568,7 +568,26 @@ mod tests {
         //   at a zeroed slot.
         // EXPECTED_TOTAL_LEN: 1,032,350 + 2,612 (D28B-025) + 425
         //   (D28B-026) = 1,035,387.
-        const EXPECTED_TOTAL_LEN: usize = 1_035_387;
+        // D29B-003 (Track-β, 2026-04-27): +10,698 bytes total — split as
+        //   core.c +6,407 (TAIDA_BYTES_CONTIG_MAGIC + TAIDA_IS_BYTES_CONTIG /
+        //   TAIDA_IS_ANY_BYTES macros + taida_bytes_contig_new /
+        //   taida_bytes_contig_data / taida_bytes_contig_len primitives +
+        //   taida_net_raw_as_bytes_view borrow helper + recognition in
+        //   taida_has_magic_header / _taida_is_callable_impl /
+        //   taida_runtime_detect_tag / taida_polymorphic_length) and
+        //   net_h1_h2.c +4,291 (3 writev sites with TAIDA_BYTES_CONTIG
+        //   fast-path branches alongside legacy taida_val[] fallback +
+        //   body_is_contig flag plumbing through scatter / encode paths).
+        //   readBody / readBodyAll / readBodyChunk producers remain on the
+        //   legacy taida_val[] form pending a follow-up sub-Lock that
+        //   polymorphizes the remaining Bytes dispatchers (length already
+        //   handles both forms; decode/get/concat/append still need the
+        //   same treatment before producers can flip to contig).
+        //   EXPECTED_TOTAL_LEN: 1,035,387 + 10,698 = 1,046,085.
+        //   Track-β is the 4th (last) TIER 1 merge, so successor tracks
+        //   (TIER 2 ε / TIER 3 ζ η) will rebase on top and accumulate
+        //   their own deltas onto this base.
+        const EXPECTED_TOTAL_LEN: usize = 1_046_085;
         let asm = *NATIVE_RUNTIME_C;
         assert_eq!(
             asm.len(),
@@ -995,11 +1014,22 @@ mod tests {
         //   chunks[0].base == NULL would leave active_chunk pointing
         //   at a zeroed slot). All inside F1, F2 unchanged.
         //   F1_LEN: 276,686 + 425 = 277,111.
-        const F1_LEN: usize = 277_111;
+        // D29B-003 (Track-β, 2026-04-27): +6,407 bytes in F1 for
+        //   TAIDA_BYTES_CONTIG_MAGIC + TAIDA_IS_BYTES_CONTIG /
+        //   TAIDA_IS_ANY_BYTES macros + taida_bytes_contig_new /
+        //   taida_bytes_contig_data / taida_bytes_contig_len primitives +
+        //   taida_net_raw_as_bytes_view borrow helper +
+        //   recognition in taida_has_magic_header / _taida_is_callable_impl /
+        //   taida_runtime_detect_tag / taida_polymorphic_length. All
+        //   additions land inside F1 (Magic-Numbers / allocator /
+        //   type primitives region, well before the "// ── Error
+        //   ceiling" marker). F2 unchanged.
+        //   F1_LEN: 277,111 + 6,407 = 283,518.
+        const F1_LEN: usize = 283_518;
         assert_eq!(
             CORE_SECTION.len(),
-            277_111 + 160_760,
-            "core.c total byte length must equal legacy fragment1 + fragment2 (C25B-001 / C25B-028 / C25B-025 / C26B-011 / C26B-020 / C26B-016 / C26B-018 / C26B-011-wS / C26B-024 / C26B-024-wepsilon adjusted; CI-red 2026-04-24 cppcheck clean-up adds 881/409 to F1/F2; @c.27 PR41 CI-red follow-up adds 61 to F1 for the cppcheck-suppress comment on the new taida_release_any helper; D28B-012 wF adds 4,821 to F1 for taida_arena_request_reset; D28B-026 review follow-up adds 425 to F1 for the active_chunk defensive corner)"
+            283_518 + 160_760,
+            "core.c total byte length must equal legacy fragment1 + fragment2 (C25B-001 / C25B-028 / C25B-025 / C26B-011 / C26B-020 / C26B-016 / C26B-018 / C26B-011-wS / C26B-024 / C26B-024-wepsilon adjusted; CI-red 2026-04-24 cppcheck clean-up adds 881/409 to F1/F2; @c.27 PR41 CI-red follow-up adds 61 to F1 for the cppcheck-suppress comment on the new taida_release_any helper; D28B-012 wF adds 4,821 to F1 for taida_arena_request_reset; D28B-026 review follow-up adds 425 to F1 for the active_chunk defensive corner; D29B-003 Track-β adds 6,407 to F1 for TAIDA_BYTES_CONTIG primitives + writev hot-path reflection)"
         );
         const F2_PREFIX: &[u8] = b"// \xE2\x94\x80\xE2\x94\x80 Error ceiling";
         let tail = &CORE_SECTION.as_bytes()[F1_LEN..F1_LEN + F2_PREFIX.len()];
@@ -1079,11 +1109,23 @@ mod tests {
         //   branch (filter loop + filtered header copy + cleanup
         //   free + multi-paragraph commentary). All inside fragment
         //   6, F5 unchanged. F6 grows: 96,830 + 2,612 = 99,442.
-        const F5_LEN: usize = 188_398;
+        // D29B-003 (Track-β, 2026-04-27): +4,291 bytes inside fragment 5
+        //   for the TAIDA_BYTES_CONTIG hot-path branches in three writev
+        //   sites (taida_net_send_response_scatter Bytes body branch +
+        //   taida_net_write_chunk stack/heap payload branches +
+        //   taida_net_encode_response Bytes body memcpy fast path) plus
+        //   the body_is_contig flag plumbing through encode/scatter
+        //   request packs. readBody / readBodyAll / readBodyChunk
+        //   producers remain on the legacy taida_val[] form pending the
+        //   polymorphic-Bytes-dispatcher follow-up sub-Lock. All
+        //   insertions live well before the "// ── Native HTTP/2 server"
+        //   divider so F5 grows and F6 (HTTP/2 server) is unchanged.
+        //   F5_LEN moves: 188,398 + 4,291 = 192,689.
+        const F5_LEN: usize = 192_689;
         assert_eq!(
             NET_H1_H2_SECTION.len(),
-            188_398 + 99_442,
-            "net_h1_h2.c total byte length must equal legacy fragment5 + fragment6 (C26B-026 / C26B-022-wS / C27B-014 / C27B-026 / D28B-012 wF / D28B-002 wG / D28B-025 review follow-up adjusted)"
+            192_689 + 99_442,
+            "net_h1_h2.c total byte length must equal legacy fragment5 + fragment6 (C26B-026 / C26B-022-wS / C27B-014 / C27B-026 / D28B-012 wF / D28B-002 wG / D28B-025 review follow-up / D29B-003 Track-β contig writev hot-path adjusted)"
         );
         const F6_PREFIX: &[u8] = b"// \xE2\x94\x80\xE2\x94\x80 Native HTTP/2 server";
         let tail = &NET_H1_H2_SECTION.as_bytes()[F5_LEN..F5_LEN + F6_PREFIX.len()];

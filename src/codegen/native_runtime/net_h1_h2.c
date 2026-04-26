@@ -566,12 +566,23 @@ taida_val taida_net_http_encode_response(taida_val response) {
         return taida_net_result_fail("EncodeError", "httpEncodeResponse: missing required field 'body'");
     }
     taida_val body_ptr = taida_pack_get(response, body_hash);
-    unsigned char *body_data = NULL;  // contiguous body (Str path only)
-    taida_val *body_bytes_arr = NULL; // taida_val array (Bytes path only)
+    unsigned char *body_data = NULL;  // contiguous body (Str path or D29 contig Bytes path)
+    taida_val *body_bytes_arr = NULL; // taida_val array (legacy Bytes path only)
     size_t body_len = 0;
     int body_is_bytes = 0;
+    // D29B-003 (Track-β): contig-bytes fast path. When set, body_data
+    // already points at the inline contiguous payload of TAIDA_BYTES_CONTIG
+    // and the byte-loop materialize below is skipped.
+    int body_is_contig = 0;
 
-    if (TAIDA_IS_BYTES(body_ptr)) {
+    if (TAIDA_IS_BYTES_CONTIG(body_ptr)) {
+        body_data = (unsigned char *)taida_bytes_contig_data(body_ptr);
+        taida_val blen = taida_bytes_contig_len(body_ptr);
+        if (blen < 0) blen = 0;
+        body_len = (size_t)blen;
+        body_is_bytes = 1;
+        body_is_contig = 1;
+    } else if (TAIDA_IS_BYTES(body_ptr)) {
         body_bytes_arr = (taida_val*)body_ptr;
         taida_val blen = body_bytes_arr[1];
         if (blen < 0) blen = 0;
@@ -723,20 +734,30 @@ taida_val taida_net_http_encode_response(taida_val response) {
     buf[buf_len++] = '\r'; buf[buf_len++] = '\n';
 
     // NB6-4: Copy body directly into wire buffer — single copy from source.
-    // For Bytes: copy from taida_val array directly (no intermediate buffer).
+    // For Bytes (legacy taida_val[]): copy via byte-loop from taida_val array.
+    // For Bytes (D29B-003 contig): memcpy from body_data which already points
+    //   at the inline contiguous payload — same fast path as the Str case.
     // For Str: memcpy from C string pointer (already contiguous).
     if (!no_body && body_len > 0) {
-        if (body_is_bytes) {
+        if (body_is_bytes && !body_is_contig) {
             for (size_t i = 0; i < body_len; i++) {
                 buf[buf_len + i] = (unsigned char)body_bytes_arr[2 + i];
             }
         } else {
+            // Str OR D29B-003 contig Bytes: contiguous memcpy.
             memcpy(buf + buf_len, body_data, body_len);
         }
         buf_len += body_len;
     }
 
-    // Convert to Bytes value
+    // D29B-003 (Track-β, 2026-04-27): kept on legacy taida_bytes_from_raw
+    // for now. The CONTIG hot path is opt-in via addon-side construction
+    // (see taida_bytes_contig_new / TAIDA_BYTES_CONTIG_MAGIC) so producers
+    // that round-trip Bytes through length / get / to_list / decode molds
+    // (which still index `taida_val[]` slots directly) continue to work
+    // unchanged. A follow-up sub-Lock will polymorphize the remaining Bytes
+    // dispatchers and switch this producer to taida_bytes_contig_new for
+    // the full payload-level zero-copy chain.
     taida_val result_bytes = taida_bytes_from_raw(buf, (taida_val)buf_len);
     free(buf);
 
@@ -1225,8 +1246,22 @@ static int taida_net_send_response_scatter(int client_fd, taida_val response) {
     taida_val *body_bytes_arr = NULL;
     size_t body_len = 0;
     int body_is_bytes = 0;
+    // D29B-003 (Track-β, 2026-04-27): contig-bytes fast path. When the body
+    // arrives as TAIDA_BYTES_CONTIG (e.g. from readBody/readBodyAll producing
+    // contig form, or addon-side construction) we capture body_data directly
+    // from the inline payload and skip the body_bytes_arr taida_val[] route
+    // entirely. The downstream writev branch keys on body_is_contig to use
+    // direct iovec reflection rather than the legacy byte-loop materialize.
+    int body_is_contig = 0;
 
-    if (TAIDA_IS_BYTES(body_ptr)) {
+    if (TAIDA_IS_BYTES_CONTIG(body_ptr)) {
+        body_data = taida_bytes_contig_data(body_ptr);
+        taida_val blen = taida_bytes_contig_len(body_ptr);
+        if (blen < 0) blen = 0;
+        body_len = (size_t)blen;
+        body_is_bytes = 1;
+        body_is_contig = 1;
+    } else if (TAIDA_IS_BYTES(body_ptr)) {
         body_bytes_arr = (taida_val*)body_ptr;
         taida_val blen = body_bytes_arr[1];
         if (blen < 0) blen = 0;
@@ -1352,10 +1387,26 @@ static int taida_net_send_response_scatter(int client_fd, taida_val response) {
         iov[1].iov_base = (void*)body_data;
         iov[1].iov_len = body_len;
         rc = taida_tls_writev_all(client_fd, iov, 2);
+    } else if (body_is_contig) {
+        // D29B-003 (Track-β, 2026-04-27): contig-bytes fast path. body_data
+        // already points at the inline contiguous payload of the
+        // TAIDA_BYTES_CONTIG header, so we reflect it directly into iov[1]
+        // — no per-byte materialize, no intermediate buffer alloc, true
+        // payload-level zero-copy from handler-provided Bytes through
+        // writev() into the kernel.
+        struct iovec iov[2];
+        iov[0].iov_base = head;
+        iov[0].iov_len = head_len;
+        iov[1].iov_base = (void*)body_data;
+        iov[1].iov_len = body_len;
+        rc = taida_tls_writev_all(client_fd, iov, 2);
     } else {
-        // Bytes body: materialize from taida_val array into contiguous buffer,
-        // then send head + body via 2 iovecs. Single materialization, no
-        // intermediate encode step.
+        // Legacy TAIDA_BYTES_MAGIC body: materialize from taida_val array into
+        // a contiguous buffer once, then send head + body via 2 iovecs. The
+        // legacy path is preserved for backward compatibility with handlers
+        // that build Bytes through the historical taida_val[] route. New
+        // producers (readBody, readBodyAll) emit TAIDA_BYTES_CONTIG so this
+        // branch should be cold under the D29 hot path.
         unsigned char body_stack[4096];
         unsigned char *body_buf = (body_len <= sizeof(body_stack)) ? body_stack
             : (unsigned char*)TAIDA_MALLOC(body_len, "net_scatter_body");
@@ -1625,13 +1676,29 @@ taida_val taida_net_write_chunk(taida_val writer, taida_val data) {
     // Extract payload pointer and length
     const unsigned char *payload = NULL;
     size_t payload_len = 0;
-    // NET3-5d: For Bytes, we need to convert from taida_val array to contiguous bytes.
-    // Use stack buffer for small payloads, heap only for large ones. No per-chunk persistent alloc.
+    // NET3-5d: For legacy Bytes (TAIDA_BYTES_MAGIC), we need to convert from
+    // taida_val array to contiguous bytes. Use stack buffer for small payloads,
+    // heap only for large ones. No per-chunk persistent alloc.
+    // D29B-003 (Track-β): For TAIDA_BYTES_CONTIG, payload reflects the inline
+    // contig buffer directly — zero allocation, true payload-level zero-copy.
     unsigned char stack_payload[4096];
     unsigned char *heap_payload = NULL;
     int is_bytes = 0;
 
-    if (TAIDA_IS_BYTES(data)) {
+    if (TAIDA_IS_BYTES_CONTIG(data)) {
+        // D29B-003 (Track-β, 2026-04-27): contig fast path. Direct pointer
+        // reflection into payload — no taida_val[] byte-loop, no temporary
+        // stack/heap buffer alloc. iov[1].iov_base will land on the inline
+        // contiguous payload owned by the Bytes header.
+        is_bytes = 1;
+        payload = taida_bytes_contig_data(data);
+        taida_val blen = taida_bytes_contig_len(data);
+        payload_len = (size_t)blen;
+        if (payload_len == 0) return 0; // empty chunk is no-op
+    } else if (TAIDA_IS_BYTES(data)) {
+        // Legacy taida_val[] Bytes form: materialize once via byte-loop. New
+        // producers (readBody/readBodyAll) emit TAIDA_BYTES_CONTIG so this
+        // branch is cold in the D29 hot path.
         is_bytes = 1;
         taida_val *bytes = (taida_val*)data;
         taida_val blen = bytes[1];
@@ -2561,6 +2628,10 @@ taida_val taida_net_read_body_all(taida_val req) {
     }
 
 all_done:;
+    // D29B-003 (Track-β, 2026-04-27): kept on legacy form pending the
+    // polymorphic Bytes dispatcher follow-up (see readBody producer above
+    // for the rationale). The writev hot path supports both legacy and
+    // CONTIG inputs; opt-in CONTIG construction is via taida_bytes_contig_new.
     taida_val result = taida_bytes_from_raw(all_buf, (taida_val)all_len);
     free(all_buf);
     return result;
