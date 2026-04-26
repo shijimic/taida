@@ -35,7 +35,7 @@
 //! - [`TLS_SECTION`] (1,720 行, `tls.c`): NET5-4a OpenSSL dlopen /
 //!   TLS-aware I/O wrappers / HTTP/1.1 over raw TCP / TCP socket APIs /
 //!   pool package runtime
-//! - [`NET_H1_H2_SECTION`] (6,182 行, `net_h1_h2.c`): taida-lang/net HTTP
+//! - [`NET_H1_H2_SECTION`] (6,336 行, `net_h1_h2.c`): taida-lang/net HTTP
 //!   v1 runtime (httpParseRequestHead / httpEncodeResponse / readBody /
 //!   keep-alive / chunked / streaming / WebSocket / thread pool) +
 //!   Native HTTP/2 server (HPACK / H2 frames / taida_net_h2_serve)
@@ -526,8 +526,28 @@ mod tests {
         //   conn_done so early-exit paths (head_malformed, EOF before
         //   head, body parse error, WebSocket close, request limit
         //   exhausted on partial connection) are covered.
-        // EXPECTED_TOTAL_LEN: 1,022,533 + 6,352 = 1,028,885.
-        const EXPECTED_TOTAL_LEN: usize = 1_028_885;
+        // D28B-002 (Round 2 wG, 2026-04-26): +3,465 bytes in
+        //   net_h1_h2.c only -- the wF helper itself is reused, no
+        //   change to core.c. Adds two `taida_release` calls (req_pack
+        //   + response, leaked at refcount level pre-wG) and two
+        //   `taida_arena_request_reset` call sites in
+        //   `taida_net_h2_serve_connection`:
+        //     1. per-stream boundary, right after
+        //        `h2_conn_remove_closed_streams`: catches the typical
+        //        h2 use case (multi-request keep-alive streams sharing
+        //        one connection).
+        //     2. just after `h2_conn_free` at the conn_done label:
+        //        catches all early-exit paths inside the frame loop
+        //        (preface mismatch, frame size errors, GOAWAY exits,
+        //        HPACK decode errors).
+        //   Closes the h2 twin of D28B-012 -- pre-wG the h2 path
+        //   leaked at ~2.5 MiB / 1k requests (linear, ~3.6 GB / 24h
+        //   under D28B-014 24h soak load), measured in
+        //   tests/d28b_002_h2_arena_leak.rs. Post-wG growth must drop
+        //   below the same 5,120 KiB / 1k req cap the h1 leak test
+        //   uses; observed drop is ~10x (~250 KiB / 1k req or less).
+        // EXPECTED_TOTAL_LEN: 1,028,885 + 3,465 = 1,032,350.
+        const EXPECTED_TOTAL_LEN: usize = 1_032_350;
         let asm = *NATIVE_RUNTIME_C;
         assert_eq!(
             asm.len(),
@@ -1005,11 +1025,30 @@ mod tests {
         //   loop, one at conn_done covering early-exit paths),
         //   well before the "// ── Native HTTP/2 server" divider.
         //   F5_LEN moves: 186,867 + 1,531 = 188,398. F6 unchanged.
+        // D28B-002 (Round 2 wG, 2026-04-26): +3,465 bytes inside
+        //   fragment 6 (HTTP/2 server) for the h2 leak fix:
+        //     * 2 new `taida_release` calls (req_pack + response)
+        //       inside `taida_net_h2_serve_connection`'s per-stream
+        //       block, immediately after `h2_response_fields_free`
+        //       and before `h2_conn_remove_closed_streams`.
+        //     * 2 new `taida_arena_request_reset()` call sites in
+        //       the same function: one at the per-stream boundary
+        //       (after `h2_conn_remove_closed_streams`), one at
+        //       conn_done after `h2_conn_free` for early-exit
+        //       paths.
+        //     * Multi-paragraph commentary documenting the safety
+        //       invariants (which structures are arena-backed vs
+        //       malloc-backed, why the main-thread arena reset is
+        //       safe given `taida_net_h2_serve` runs on the app's
+        //       main thread).
+        //   All insertions are well after the
+        //   "// ── Native HTTP/2 server" divider so F5_LEN is
+        //   unchanged. F6 grows: 93,365 + 3,465 = 96,830.
         const F5_LEN: usize = 188_398;
         assert_eq!(
             NET_H1_H2_SECTION.len(),
-            188_398 + 93_365,
-            "net_h1_h2.c total byte length must equal legacy fragment5 + fragment6 (C26B-026 / C26B-022-wS / C27B-014 / C27B-026 / D28B-012 wF adjusted)"
+            188_398 + 96_830,
+            "net_h1_h2.c total byte length must equal legacy fragment5 + fragment6 (C26B-026 / C26B-022-wS / C27B-014 / C27B-026 / D28B-012 wF / D28B-002 wG adjusted)"
         );
         const F6_PREFIX: &[u8] = b"// \xE2\x94\x80\xE2\x94\x80 Native HTTP/2 server";
         let tail = &NET_H1_H2_SECTION.as_bytes()[F5_LEN..F5_LEN + F6_PREFIX.len()];

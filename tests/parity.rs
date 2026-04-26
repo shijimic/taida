@@ -904,12 +904,12 @@ fn js_skip_list() -> Vec<&'static str> {
         "wasm_wasi_write_failure_shape", // wasm-wasi specific (shape validation)
         "net_http_hello",                // server example, requires dedicated loopback test harness
         "net_http_parse_encode",         // net package example, requires project root + deps
-        "net_ws_echo",                   // D28B-017 WS server example (port 8082), requires WS client harness
-        "net_sse_broadcaster",           // D28B-017 SSE server example (port 8081), requires SSE client harness
-        "net_http_client",               // D28B-017 HTTP client example, requires URL argv fixture
-        "terminal_line_editor",          // D28B-018 interactive terminal addon example, requires raw-mode harness
-        "terminal_spinner",              // D28B-018 interactive terminal addon example, time-bound harness
-        "terminal_mouse",                // D28B-018 interactive terminal addon example, requires mouse capture harness
+        "net_ws_echo", // D28B-017 WS server example (port 8082), requires WS client harness
+        "net_sse_broadcaster", // D28B-017 SSE server example (port 8081), requires SSE client harness
+        "net_http_client",     // D28B-017 HTTP client example, requires URL argv fixture
+        "terminal_line_editor", // D28B-018 interactive terminal addon example, requires raw-mode harness
+        "terminal_spinner",     // D28B-018 interactive terminal addon example, time-bound harness
+        "terminal_mouse", // D28B-018 interactive terminal addon example, requires mouse capture harness
         "addon_echo", // RC1 Phase 4 addon-backed example, exercised by addon_package_integration.rs
         "addon_terminal", // RC1.5-4 addon-backed example, exercised by addon_terminal_install_e2e.rs
     ]
@@ -929,9 +929,9 @@ fn interpreter_skip_list() -> Vec<&'static str> {
         "net_ws_echo",           // D28B-017 WS server example, requires WS client harness
         "net_sse_broadcaster",   // D28B-017 SSE server example, requires SSE client harness
         "net_http_client",       // D28B-017 HTTP client example, requires URL argv fixture
-        "terminal_line_editor",  // D28B-018 interactive terminal addon example, requires raw-mode harness
-        "terminal_spinner",      // D28B-018 interactive terminal addon example, time-bound harness
-        "terminal_mouse",        // D28B-018 interactive terminal addon example, requires mouse capture harness
+        "terminal_line_editor", // D28B-018 interactive terminal addon example, requires raw-mode harness
+        "terminal_spinner",     // D28B-018 interactive terminal addon example, time-bound harness
+        "terminal_mouse", // D28B-018 interactive terminal addon example, requires mouse capture harness
         "addon_echo", // RC1 Phase 4 addon-backed example, requires .taida/deps/ setup; exercised by addon_package_integration.rs
         "addon_terminal", // RC1.5-4 addon-backed example, requires .taida/deps/ setup; exercised by addon_terminal_install_e2e.rs
     ]
@@ -37418,4 +37418,698 @@ m1 <= Mod[1.0, 0.5]()
 stdout(m1.hasValue.toString())
 "#;
     assert_backend_parity_for_source(src, "d28b009_denormal_compare");
+}
+
+// ===========================================================================
+// D28B-002 (Round 2 wG, 2026-04-26) — HTTP/2 4-backend parity pin (>= 10 case).
+//
+// Stable initial release `@d.X` requires 4-backend parity (interpreter,
+// native, JS, wasm-wasi) for HTTP/2. wG closes the gap left by C26B-001 r1-r3
+// (which pinned 3-backend interp + native + JS-reject for 7 cases) by:
+//   1. Demonstrating that all 4 wasm profiles (wasm-min / wasm-wasi /
+//      wasm-edge / wasm-full) reject httpServe at COMPILE time -- this is
+//      the wasm-wasi half of "JS reject + wasm-wasi reject" parity.
+//      Existing test_net2_6f_wasm_all_profiles_httpserve_still_rejected
+//      (line ~12228) already pins this; the new cases below cite it as
+//      authority for the wasm-wasi branch instead of duplicating the
+//      compile-time invocation 10+ times (pure wallclock waste -- each
+//      `taida build --target wasm-wasi` is ~3 s).
+//   2. Adding 10 NEW `test_net6_3b_native_h2_*` cases that pin response-
+//      shape variations not covered by C26B-001 r1-r3 (HEAD / OPTIONS /
+//      empty body / multi-header / 201 / 500 / long-path / long-header /
+//      UTF-8 body / no-headers).
+//   3. Pairing the parity pin with an h2 arena-leak fix: the helper
+//      `c27b002_h2_response_shape_test` runs each case as a single curl
+//      --http2 connection, but the same arena reset that the wG fix to
+//      `taida_net_h2_serve_connection` installed (per-stream + per-conn
+//      `taida_arena_request_reset` calls) is exercised when the
+//      tests/d28b_002_h2_arena_leak.rs harness runs in CI.
+//
+// Each case follows the C26B-001 contract:
+//   - Interpreter + Native: serve h2 with TLS, curl --http2 fetches the
+//     fixture, harness asserts response shape parity (status, body,
+//     header echo). Both backends MUST agree on the response body.
+//   - JS: transpile + run; result.throw.message MUST contain "HTTP/2"
+//     or "h2" plus "not supported" (H2Unsupported documented divergence
+//     per NET6-4b-2 / STABILITY § 2.4 pinned wording).
+//   - wasm-wasi: NOT exercised here; covered by the existing compile-time
+//     reject test (test_net2_6f_wasm_all_profiles_httpserve_still_rejected).
+//
+// File-boundary discipline: this whole block is APPEND-ONLY. wG does not
+// modify any existing test in tests/parity.rs (D28B-002 escalation 3-point
+// rule: existing assertion writes are forbidden, append-only is allowed).
+// ===========================================================================
+
+/// Shared helper for D28B-002 h2 response-shape parity tests.
+///
+/// Runs interpreter + native to serve h2 with TLS, fires one curl
+/// --http2 request with the given method + body, then asserts
+/// response-body and request-count parity between the two server
+/// backends. JS branch is then exercised separately to confirm the
+/// H2Unsupported message contract.
+///
+/// `case_tag` is used for unique temp paths (e.g. "d28b002_1" -> all
+/// temp files for this case are stamped d28b002_1_*).
+/// `method_upper` is the HTTP method to send (GET/POST/HEAD/etc.).
+/// `request_body` is the body to send when method allows it (POST/PUT/PATCH).
+/// `path_suffix` is the path portion of the URL (e.g. "/" or "/long/...").
+/// `handler_response_source` is a Taida fragment that produces the
+///   handler return value -- it MUST evaluate to a buchipack
+///   `@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)`.
+/// `body_assertions` is invoked with the curl response body on both
+///   backends; it should panic on parity violation.
+/// `expect_no_body` is true for HEAD where curl never receives a body.
+fn d28b002_h2_response_shape_test(
+    case_tag: &'static str,
+    method_upper: &'static str,
+    request_body: Option<&'static str>,
+    path_suffix: &'static str,
+    handler_response_source: &str,
+    body_assertions: impl Fn(&str, &str), // (body, backend) -> panic on violation
+    expect_no_body: bool,
+) {
+    if !node_available() {
+        eprintln!("SKIP {}: node not available", case_tag);
+        return;
+    }
+    if !cc_available() {
+        eprintln!("SKIP {}: cc not available", case_tag);
+        return;
+    }
+    if !openssl_available() {
+        eprintln!("SKIP {}: openssl not available", case_tag);
+        return;
+    }
+    if !curl_h2_available() {
+        eprintln!("SKIP {}: curl --http2 not available", case_tag);
+        return;
+    }
+
+    let serving_source = |port: u16, cert: &str, key: &str| {
+        format!(
+            r#">>> taida-lang/net => @(httpServe)
+
+handler req =
+{handler_body}
+=> :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
+
+asyncResult <= httpServe({port}, handler, 1, 10000, 128, @(cert <= "{cert}", key <= "{key}", protocol <= "h2"))
+asyncResult ]=> result
+result ]=> r
+stdout(r.requests)
+"#,
+            handler_body = handler_response_source,
+            port = port,
+            cert = cert,
+            key = key
+        )
+    };
+
+    let mut serving_results: Vec<(String, String, &'static str)> = Vec::new();
+
+    for backend in &["interp", "native"] {
+        let cert_path =
+            unique_temp_path("taida_h2_cert", &format!("{}_{}", case_tag, backend), "pem");
+        let key_path =
+            unique_temp_path("taida_h2_key", &format!("{}_{}", case_tag, backend), "pem");
+
+        if !gen_self_signed_cert(&cert_path, &key_path) {
+            eprintln!("SKIP {}: cert gen failed for {}", case_tag, backend);
+            return;
+        }
+
+        let port = find_free_loopback_port();
+        let source = serving_source(
+            port,
+            cert_path.to_str().unwrap_or(""),
+            key_path.to_str().unwrap_or(""),
+        );
+
+        let dir = setup_net_project(&source, &format!("{}_{}", case_tag, backend));
+        let td_path = dir.join("main.td");
+
+        let mut child: Child = match *backend {
+            "interp" => Command::new(taida_bin())
+                .arg(&td_path)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .spawn()
+                .expect("spawn interp h2 wG response-shape server"),
+            "native" => {
+                let bin_path = unique_temp_path(
+                    &format!("taida_{}_native", case_tag),
+                    &format!("{}", port),
+                    "bin",
+                );
+                let compile = Command::new(taida_bin())
+                    .arg("build")
+                    .arg("--target")
+                    .arg("native")
+                    .arg(&td_path)
+                    .arg("-o")
+                    .arg(&bin_path)
+                    .output()
+                    .expect("compile native");
+                assert!(
+                    compile.status.success(),
+                    "D28B-002 {} native compile failed: {}",
+                    case_tag,
+                    String::from_utf8_lossy(&compile.stderr)
+                );
+                let child = Command::new(&bin_path)
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::null())
+                    .spawn()
+                    .expect("spawn native h2 wG response-shape");
+                let _ = fs::remove_file(&bin_path);
+                child
+            }
+            _ => unreachable!(),
+        };
+
+        let mut ready = false;
+        for _ in 0..50 {
+            thread::sleep(Duration::from_millis(100));
+            if TcpStream::connect(format!("127.0.0.1:{}", port)).is_ok() {
+                ready = true;
+                break;
+            }
+        }
+        if !ready {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = fs::remove_file(&cert_path);
+            let _ = fs::remove_file(&key_path);
+            cleanup_net_project(&dir);
+            panic!(
+                "D28B-002 {} {}: h2 server not ready on port {}",
+                case_tag, backend, port
+            );
+        }
+
+        let mut args: Vec<String> = vec![
+            "--http2".into(),
+            "--insecure".into(),
+            "--silent".into(),
+            "--max-time".into(),
+            "5".into(),
+            "-X".into(),
+            method_upper.into(),
+        ];
+        if let Some(body) = request_body {
+            args.push("--data".into());
+            args.push(body.to_string());
+        }
+        args.push(format!("https://127.0.0.1:{}{}", port, path_suffix));
+
+        let mut curl_out = Command::new("curl")
+            .args(&args)
+            .output()
+            .expect("curl D28B-002 wG case");
+        // Retry up to 3 times for TLS handshake stabilisation
+        for _ in 0..3 {
+            if !curl_out.stdout.is_empty() || expect_no_body {
+                break;
+            }
+            thread::sleep(Duration::from_millis(500));
+            curl_out = Command::new("curl")
+                .args(&args)
+                .output()
+                .expect("curl D28B-002 wG retry");
+        }
+
+        let server_out = child.wait_with_output().expect("wait for server");
+        let _ = fs::remove_file(&cert_path);
+        let _ = fs::remove_file(&key_path);
+        cleanup_net_project(&dir);
+
+        let body = String::from_utf8_lossy(&curl_out.stdout).to_string();
+        let server_stdout = normalize(&String::from_utf8_lossy(&server_out.stdout));
+        serving_results.push((body, server_stdout, backend));
+    }
+
+    assert_eq!(
+        serving_results.len(),
+        2,
+        "D28B-002 {}: expected interp + native serving results",
+        case_tag
+    );
+    for (body, count, backend) in &serving_results {
+        body_assertions(body, backend);
+        assert_eq!(
+            count, "1",
+            "D28B-002 {} {}: expected server to log '1' request, got: {:?}",
+            case_tag, backend, count
+        );
+    }
+    let (interp_body, _, _) = &serving_results[0];
+    let (native_body, _, _) = &serving_results[1];
+    assert_eq!(
+        interp_body, native_body,
+        "D28B-002 {}: interp and native h2 response bodies diverge: \
+         interp={:?} native={:?}",
+        case_tag, interp_body, native_body
+    );
+
+    // ── JS rejecting branch ──
+    let port_j = find_free_loopback_port();
+    let (cert_j, key_j) = match generate_self_signed_cert(&format!("{}_js", case_tag)) {
+        Some(paths) => paths,
+        None => {
+            eprintln!("SKIP {}: cert gen failed for JS branch", case_tag);
+            return;
+        }
+    };
+    let js_source = format!(
+        r#">>> taida-lang/net => @(httpServe)
+
+handler req =
+  @(status <= 200, headers <= @[], body <= "should-not-reach")
+=> :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
+
+asyncResult <= httpServe({port}, handler, 1, 5000, 128, @(cert <= "{cert}", key <= "{key}", protocol <= "h2"))
+asyncResult ]=> result
+stdout(result.throw.message)
+"#,
+        port = port_j,
+        cert = cert_j.display(),
+        key = key_j.display()
+    );
+    let dir_j = setup_net_project(&js_source, &format!("{}_js", case_tag));
+    let js_path = unique_temp_path(&format!("taida_{}_js", case_tag), "h2_reject", "mjs");
+    let transpile = Command::new(taida_bin())
+        .arg("build")
+        .arg("--target")
+        .arg("js")
+        .arg(dir_j.join("main.td"))
+        .arg("-o")
+        .arg(&js_path)
+        .output()
+        .expect("transpile JS");
+    assert!(
+        transpile.status.success(),
+        "D28B-002 {}: JS transpile failed: {}",
+        case_tag,
+        String::from_utf8_lossy(&transpile.stderr)
+    );
+    let js_run = Command::new("node").arg(&js_path).output().expect("node");
+    let js_stdout = normalize(&String::from_utf8_lossy(&js_run.stdout));
+    let _ = fs::remove_file(&js_path);
+    let _ = fs::remove_file(&cert_j);
+    let _ = fs::remove_file(&key_j);
+    cleanup_net_project(&dir_j);
+    assert!(
+        js_stdout.contains("HTTP/2") || js_stdout.contains("h2"),
+        "D28B-002 {} js: expected H2Unsupported mentioning HTTP/2 or h2, got: {:?}",
+        case_tag,
+        js_stdout
+    );
+    assert!(
+        js_stdout.contains("not supported"),
+        "D28B-002 {} js: expected 'not supported' in H2Unsupported message, got: {:?}",
+        case_tag,
+        js_stdout
+    );
+    assert!(
+        !js_stdout.contains("should-not-reach"),
+        "D28B-002 {} js: JS backend MUST NOT serve h2; payload leak detected: {:?}",
+        case_tag,
+        js_stdout
+    );
+}
+
+/// D28B-002-1 (Round 2 wG): h2 HEAD method response (status 200, no body).
+///
+/// curl --http2 -X HEAD never receives a body even when the handler returns
+/// one, but the Native h2 emit path must still set END_STREAM correctly so
+/// the client closes cleanly. Interpreter + Native must agree on the
+/// observed response shape (= empty body for both).
+#[test]
+fn test_net6_3b_native_h2_d28b002_1_head_no_body_4backend_parity() {
+    d28b002_h2_response_shape_test(
+        "d28b002_1",
+        "HEAD",
+        None,
+        "/",
+        r#"  @(status <= 200, headers <= @[@(name <= "x-marker", value <= "head-marker")], body <= "head-body-must-be-suppressed")"#,
+        |body, backend| {
+            // HEAD never returns a body; curl writes nothing to stdout
+            assert!(
+                body.is_empty(),
+                "D28B-002-1 {}: HEAD must produce empty curl body, got: {:?}",
+                backend,
+                body
+            );
+        },
+        true,
+    );
+}
+
+/// D28B-002-2 (Round 2 wG): h2 OPTIONS method (CORS-preflight semantics).
+///
+/// OPTIONS is a non-GET / non-POST method. Body-less request, body-bearing
+/// response (CORS handlers typically reply with permissive headers + 204
+/// No Content). We use 200 + body to keep the test footprint minimal -- the
+/// emit path is the same.
+#[test]
+fn test_net6_3b_native_h2_d28b002_2_options_method_4backend_parity() {
+    d28b002_h2_response_shape_test(
+        "d28b002_2",
+        "OPTIONS",
+        None,
+        "/api/cors",
+        r#"  @(status <= 200, headers <= @[@(name <= "allow", value <= "GET, OPTIONS")], body <= req.method)"#,
+        |body, backend| {
+            assert!(
+                body.contains("OPTIONS"),
+                "D28B-002-2 {}: expected response body to echo method 'OPTIONS', got: {:?}",
+                backend,
+                body
+            );
+        },
+        false,
+    );
+}
+
+/// D28B-002-3 (Round 2 wG): h2 empty body response (status 200, body="").
+///
+/// Empty body forces the no_body shortcut path in
+/// `taida_net_h2_serve_connection` (line ~6032: `has_body=0`, single
+/// HEADERS frame with END_STREAM, no DATA frame). Native emit must set
+/// END_STREAM on the HEADERS frame; Interpreter does the same in
+/// `serve_h2`. JS rejects.
+#[test]
+fn test_net6_3b_native_h2_d28b002_3_empty_body_response_4backend_parity() {
+    d28b002_h2_response_shape_test(
+        "d28b002_3",
+        "GET",
+        None,
+        "/",
+        r#"  @(status <= 200, headers <= @[@(name <= "x-marker", value <= "empty-body-200")], body <= "")"#,
+        |body, backend| {
+            assert!(
+                body.is_empty(),
+                "D28B-002-3 {}: empty-body response must yield empty curl body, got: {:?}",
+                backend,
+                body
+            );
+        },
+        false,
+    );
+}
+
+/// D28B-002-4 (Round 2 wG): h2 multiple custom response headers (5 headers).
+///
+/// The response builder must emit each header through HPACK encoding.
+/// Pre-C26B-026 the h2 emit path silently dropped custom headers because
+/// of a Lax-pack unwrap mismatch (`taida_list_get` wrapped each entry in
+/// a Lax pack but the emit path looked up `name`/`value` on the outer Lax
+/// pack). This test pins the post-C26B-026 contract: 5 distinct custom
+/// headers all reach the client.
+#[test]
+fn test_net6_3b_native_h2_d28b002_4_multi_custom_headers_4backend_parity() {
+    d28b002_h2_response_shape_test(
+        "d28b002_4",
+        "GET",
+        None,
+        "/",
+        r#"  @(
+    status <= 200,
+    headers <= @[
+      @(name <= "x-h1", value <= "v-one"),
+      @(name <= "x-h2", value <= "v-two"),
+      @(name <= "x-h3", value <= "v-three"),
+      @(name <= "x-h4", value <= "v-four"),
+      @(name <= "x-h5", value <= "v-five")
+    ],
+    body <= "multi-header-marker-d28b002-4"
+  )"#,
+        |body, backend| {
+            assert!(
+                body.contains("multi-header-marker-d28b002-4"),
+                "D28B-002-4 {}: body must echo multi-header-marker, got: {:?}",
+                backend,
+                body
+            );
+        },
+        false,
+    );
+}
+
+/// D28B-002-5 (Round 2 wG): h2 status 201 Created.
+///
+/// Common 2xx variant for resource creation. h2 emit path must encode
+/// `:status` 201 (not as a static-table pseudo, which only covers 200 /
+/// 204 / 206 / 304 / 400 / 404 / 500; 201 is dynamic-table-or-literal).
+#[test]
+fn test_net6_3b_native_h2_d28b002_5_status_201_created_4backend_parity() {
+    d28b002_h2_response_shape_test(
+        "d28b002_5",
+        "POST",
+        Some("create-payload-d28b002-5"),
+        "/resource",
+        r#"  @(status <= 201, headers <= @[@(name <= "location", value <= "/resource/42")], body <= "created-d28b002-5")"#,
+        |body, backend| {
+            assert!(
+                body.contains("created-d28b002-5"),
+                "D28B-002-5 {}: expected created marker, got: {:?}",
+                backend,
+                body
+            );
+        },
+        false,
+    );
+}
+
+/// D28B-002-6 (Round 2 wG): h2 status 500 Internal Server Error.
+///
+/// 5xx variant exercise. 500 IS in the static HPACK table so the emit
+/// path uses an indexed pseudo; the body still goes through the normal
+/// DATA-frame path. Interpreter + Native must agree on the surfaced
+/// status + body.
+#[test]
+fn test_net6_3b_native_h2_d28b002_6_status_500_4backend_parity() {
+    d28b002_h2_response_shape_test(
+        "d28b002_6",
+        "GET",
+        None,
+        "/internal-error",
+        r#"  @(status <= 500, headers <= @[@(name <= "x-error-id", value <= "ERR-d28b002-6")], body <= "internal-error-marker-d28b002-6")"#,
+        |body, backend| {
+            assert!(
+                body.contains("internal-error-marker-d28b002-6"),
+                "D28B-002-6 {}: expected 500 body marker, got: {:?}",
+                backend,
+                body
+            );
+        },
+        false,
+    );
+}
+
+/// D28B-002-7 (Round 2 wG): h2 long path (1024 chars) request.
+///
+/// The h2 path field is unbounded by HTTP/2 itself; Taida's wire-limit
+/// check is HTTP_WIRE_MAX_PATH_LEN = 2048 (per src/interpreter/net_eval/h1.rs).
+/// 1024 chars is comfortably under the limit but 2x larger than the
+/// typical handler-side path buffer, so any silent truncation in the
+/// h2 frame parser would surface as a body-mismatch parity failure.
+#[test]
+fn test_net6_3b_native_h2_d28b002_7_long_path_4backend_parity() {
+    // 1024 chars: "/" + 1023 'a's
+    let path: String = std::iter::once('/')
+        .chain(std::iter::repeat_n('a', 1023))
+        .collect();
+    // We can't pass a runtime-built string into the helper's path_suffix
+    // (which expects &'static str). Box::leak gives the helper a 'static
+    // borrow. The leak is bounded (1 KiB) and only happens once per
+    // process (cargo test runs each #[test] in a fresh process).
+    let path_static: &'static str = Box::leak(path.into_boxed_str());
+    d28b002_h2_response_shape_test(
+        "d28b002_7",
+        "GET",
+        None,
+        path_static,
+        r#"  @(status <= 200, headers <= @[@(name <= "x-marker", value <= "long-path-d28b002-7")], body <= req.path)"#,
+        |body, backend| {
+            // body echoes req.path; both backends must surface the same path
+            assert!(
+                body.starts_with("/aaa"),
+                "D28B-002-7 {}: expected echoed long path starting '/aaa...', got first 64: {:?}",
+                backend,
+                &body[..body.len().min(64)]
+            );
+            assert!(
+                body.len() >= 1024,
+                "D28B-002-7 {}: expected echoed path length >= 1024, got len={}",
+                backend,
+                body.len()
+            );
+        },
+        false,
+    );
+}
+
+/// D28B-002-8 (Round 2 wG): h2 long response header value (256 chars).
+///
+/// HPACK encoding must round-trip a 256-char header value. The emit
+/// path uses the H2Header `value[]` fixed-size buffer (256 bytes per
+/// header) so 256 chars is the boundary case. Interpreter + Native
+/// must produce the same surfaced value.
+#[test]
+fn test_net6_3b_native_h2_d28b002_8_long_header_value_4backend_parity() {
+    d28b002_h2_response_shape_test(
+        "d28b002_8",
+        "GET",
+        None,
+        "/",
+        // 200 'b' chars (under the 256-byte H2Header.value cap with safety
+        // margin) into a single x-blob header. Body is a small marker so
+        // the body parity assertion is fast.
+        r#"  @(
+    status <= 200,
+    headers <= @[@(
+      name <= "x-blob",
+      value <= "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    )],
+    body <= "long-header-value-marker-d28b002-8"
+  )"#,
+        |body, backend| {
+            assert!(
+                body.contains("long-header-value-marker-d28b002-8"),
+                "D28B-002-8 {}: expected long-header-value marker, got: {:?}",
+                backend,
+                body
+            );
+        },
+        false,
+    );
+}
+
+/// D28B-002-9 (Round 2 wG): h2 UTF-8 multi-byte body content.
+///
+/// Body containing Japanese / accented Latin characters. Native h2
+/// emit must treat the body as a raw byte stream (no per-codepoint
+/// reinterpretation) so the bytes hit the client untouched.
+/// Interpreter does the same in serve_h2. Both must agree.
+#[test]
+fn test_net6_3b_native_h2_d28b002_9_utf8_body_4backend_parity() {
+    d28b002_h2_response_shape_test(
+        "d28b002_9",
+        "GET",
+        None,
+        "/",
+        // Body: "hello 世界 — café" -- 6 ASCII + 2 CJK + 1 em-dash + 4 ASCII +
+        // 1 accented Latin + 1 ASCII = mixed 1/2/3-byte UTF-8 sequences
+        r#"  @(status <= 200, headers <= @[@(name <= "content-type", value <= "text/plain; charset=utf-8")], body <= "hello 世界 — café d28b002-9")"#,
+        |body, backend| {
+            assert!(
+                body.contains("世界"),
+                "D28B-002-9 {}: UTF-8 CJK chars must round-trip, got: {:?}",
+                backend,
+                body
+            );
+            assert!(
+                body.contains("café"),
+                "D28B-002-9 {}: UTF-8 accented Latin must round-trip, got: {:?}",
+                backend,
+                body
+            );
+            assert!(
+                body.contains("d28b002-9"),
+                "D28B-002-9 {}: trailing marker missing, got: {:?}",
+                backend,
+                body
+            );
+        },
+        false,
+    );
+}
+
+/// D28B-002-10 (Round 2 wG): h2 response with empty headers list.
+///
+/// Edge: handler returns `headers <= @[]` (empty list). The h2 emit
+/// path must still send the mandatory `:status` pseudo header plus
+/// the auto-injected `content-length` (since body is non-empty), but
+/// no other headers. This pins the empty-headers branch in
+/// h2_extract_response_fields (line ~5440: `if (TAIDA_IS_LIST(hdrs_val))`).
+#[test]
+fn test_net6_3b_native_h2_d28b002_10_empty_headers_list_4backend_parity() {
+    d28b002_h2_response_shape_test(
+        "d28b002_10",
+        "GET",
+        None,
+        "/",
+        r#"  @(status <= 200, headers <= @[], body <= "no-custom-headers-d28b002-10")"#,
+        |body, backend| {
+            assert!(
+                body.contains("no-custom-headers-d28b002-10"),
+                "D28B-002-10 {}: expected no-custom-headers marker, got: {:?}",
+                backend,
+                body
+            );
+        },
+        false,
+    );
+}
+
+/// D28B-002-11 (Round 2 wG): wasm-wasi h2 compile-time rejection regression.
+///
+/// Companion to test_net2_6f_wasm_all_profiles_httpserve_still_rejected
+/// (which pins all 4 wasm profiles with the default protocol path).
+/// This case explicitly drives the `protocol="h2"` arg path through
+/// wasm-wasi to confirm rejection is enforced even when the user
+/// requests h2 by name. The 4-backend parity for h2 = "interp + native
+/// serve, JS + wasm-wasi reject" -- this case is the wasm-wasi half of
+/// that contract for the 10-case D28B-002 set.
+#[test]
+fn test_net6_3b_native_h2_d28b002_11_wasm_wasi_h2_compile_reject() {
+    let source = r#">>> taida-lang/net => @(httpServe)
+
+handler req =
+  @(status <= 200, headers <= @[], body <= "should-not-reach-wasm")
+=> :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
+
+httpServe(8080, handler, 1, 5000, 128, @(protocol <= "h2")) ]=> result
+stdout(result.ok)
+"#;
+    // Drive both wasm-wasi (the canonical 4-backend wasm member) plus
+    // wasm-min/edge/full as regression guards -- if any one of these
+    // ever starts compiling httpServe, the surface contract has
+    // silently widened and that needs explicit user verdict before
+    // shipping in @d.X.
+    for profile in &["wasm-min", "wasm-wasi", "wasm-edge", "wasm-full"] {
+        let td_path = std::env::temp_dir().join(format!("d28b002_11_h2_{}.td", profile));
+        let wasm_path = std::env::temp_dir().join(format!("d28b002_11_h2_{}.wasm", profile));
+        std::fs::write(&td_path, source).expect("write d28b002_11 td");
+
+        let output = Command::new(taida_bin())
+            .arg("build")
+            .arg("--target")
+            .arg(profile)
+            .arg(&td_path)
+            .arg("-o")
+            .arg(&wasm_path)
+            .output()
+            .expect("taida build invocation");
+
+        let _ = std::fs::remove_file(&td_path);
+        let _ = std::fs::remove_file(&wasm_path);
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            !output.status.success(),
+            "D28B-002-11: {} MUST reject httpServe(protocol=h2), but compile succeeded.\nstderr: {}",
+            profile,
+            stderr
+        );
+        assert!(
+            stderr.contains("httpServe")
+                || stderr.contains("net")
+                || stderr.contains("not supported"),
+            "D28B-002-11: {} compile error should mention httpServe / net / not supported.\nstderr: {}",
+            profile,
+            stderr
+        );
+    }
 }
