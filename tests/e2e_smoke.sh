@@ -99,43 +99,39 @@ echo ""
 # =========================================================================
 echo "=== Section 2: Type-Check Examples ==="
 
-# Server examples that block on accept() until a client connects —
-# running them through the interpreter in a smoke test would hang the
-# whole CI job indefinitely. Symmetric with the per-backend per-fixture
-# runners' skip lists (tests/wasm_wasi.rs::WASI_SKIP_STEMS,
-# tests/wasm_full.rs::FULL_SKIP_STEMS, tests/wasm_min.rs::WASM_MIN_SKIP_STEMS)
-# which already filter this fixture for the same reason. Type-checking
-# the source would be valuable but the current harness conflates the
-# two, so skip outright for now.
-TYPECHECK_SKIP_STEMS="net_http_hello"
+# Use `taida check` (parse + typecheck only, no execution) so that server /
+# interactive / network-bound examples like `httpServe(...)` /
+# `wsReceive(...)` / raw-mode terminal fixtures cannot hang the smoke job
+# waiting for I/O. The previous form `$TAIDA "$td_file"` actually executed
+# the file — that conflated typecheck with run and required a per-fixture
+# skip list (kept symmetric with WASI_SKIP_STEMS / FULL_SKIP_STEMS) that
+# rotted every time a new server / interactive example landed (most
+# recently the D28B-017/018 set). `taida check` finishes in O(ms) for
+# every example regardless of what runtime I/O it would trigger.
+#
+# Known-broken legacy fixtures (kept matching the same exclusion list used
+# by tests/d28b_008_lint_invariants.rs so that one decision tracks them):
+CHECK_SKIP_STEMS="addon_terminal"
 
 typecheck_pass=0
 typecheck_fail=0
 for td_file in "$PROJECT_DIR"/examples/*.td; do
   basename=$(basename "$td_file")
   stem="${basename%.td}"
-  # Skip server examples that would block on accept().
   skip_this=0
-  for s in $TYPECHECK_SKIP_STEMS; do
+  for s in $CHECK_SKIP_STEMS; do
     if [ "$stem" = "$s" ]; then skip_this=1; break; fi
   done
   if [ "$skip_this" = "1" ]; then
-    skip "typecheck: $basename (server blocks on accept() — listed in TYPECHECK_SKIP_STEMS)"
+    skip "typecheck: $basename (known-broken legacy fixture — listed in CHECK_SKIP_STEMS)"
     continue
   fi
 
-  # Run with type checking (default)
-  if $TAIDA "$td_file" >/dev/null 2>&1; then
+  if $TAIDA check "$td_file" >/dev/null 2>&1; then
     typecheck_pass=$((typecheck_pass + 1))
   else
-    # Try with --no-check to see if it's a type-check issue or runtime
-    if $TAIDA --no-check "$td_file" >/dev/null 2>&1; then
-      fail "typecheck: $basename (type-check fails but runs with --no-check)"
-      typecheck_fail=$((typecheck_fail + 1))
-    else
-      # Both fail, skip (probably I/O dependent)
-      skip "typecheck: $basename (requires I/O or external deps)"
-    fi
+    fail "typecheck: $basename (taida check failed)"
+    typecheck_fail=$((typecheck_fail + 1))
   fi
 done
 
