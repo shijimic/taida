@@ -6,10 +6,10 @@
 >>> taida-lang/net => @(httpParseRequestHead, httpEncodeResponse)
 
 // Parse a raw HTTP request
-bytesLax <= Bytes["GET /hello?name=taida HTTP/1.1\r\nHost: localhost\r\nAccept: text/plain\r\n\r\n"]()
-bytesLax ]=> bytes
-parseResult <= httpParseRequestHead(bytes)
-parseResult ]=> parsed
+bytes_lax <= Bytes["GET /hello?name=taida HTTP/1.1\r\nHost: localhost\r\nAccept: text/plain\r\n\r\n"]()
+bytes_lax ]=> bytes
+parse_result <= httpParseRequestHead(bytes)
+parse_result ]=> parsed
 
 // Note: use consumed (Int) instead of complete (Bool) for 3-backend parity
 stdout(parsed.consumed)
@@ -24,6 +24,6 @@ resp <= @(
   headers <= @[@(name <= "content-type", value <= "text/plain")],
   body <= "Hello, taida!"
 )
-encodeResult <= httpEncodeResponse(resp)
-encodeResult ]=> encoded
+encode_result <= httpEncodeResponse(resp)
+encode_result ]=> encoded
 stdout(encoded.bytes.length())

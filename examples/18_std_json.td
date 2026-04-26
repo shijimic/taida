@@ -18,8 +18,8 @@ stdout("Pilot2 age (default): " + pilot2.age.toString())
 stdout("Pilot2 active (default): " + pilot2.active.toString())
 
 // Schema handles null (null -> default)
-withNull <= '{"name": null, "age": null, "active": null}'
-JSON[withNull, Pilot]() ]=> pilot3
+with_null <= '{"name": null, "age": null, "active": null}'
+JSON[with_null, Pilot]() ]=> pilot3
 stdout("Null name -> empty: '" + pilot3.name + "'")
 
 // Convert Taida value to JSON string (output direction — still works)
@@ -33,15 +33,15 @@ stdout(pretty)
 
 // List schema
 PilotEntry = @(name: Str, sync_rate: Int)
-listRaw <= '[{"name": "Asuka", "syncRate": 78}, {"name": "Rei", "syncRate": 65}]'
-JSON[listRaw, @[PilotEntry]]() ]=> pilots
+list_raw <= '[{"name": "Asuka", "syncRate": 78}, {"name": "Rei", "syncRate": 65}]'
+JSON[list_raw, @[PilotEntry]]() ]=> pilots
 stdout("Number of pilots: " + pilots.length().toString())
 
 // Nested schema
 Address = @(city: Str, zip: Str)
 Person = @(name: Str, address: Address)
-nestedRaw <= '{"name": "Asuka", "address": {"city": "Tokyo-3", "zip": "999"}}'
-JSON[nestedRaw, Person]() ]=> person
+nested_raw <= '{"name": "Asuka", "address": {"city": "Tokyo-3", "zip": "999"}}'
+JSON[nested_raw, Person]() ]=> person
 stdout("City: " + person.address.city)
 
 // Lax result check
@@ -50,13 +50,13 @@ result <= JSON['{"x": 42}', Data]()
 stdout("Has value: " + result.hasValue.toString())
 
 // Parse error returns Lax with hasValue=false
-badResult <= JSON["not valid json", Data]()
-stdout("Bad parse has value: " + badResult.hasValue.toString())
+bad_result <= JSON["not valid json", Data]()
+stdout("Bad parse has value: " + bad_result.hasValue.toString())
 
 // Multiple schemas on same data
 UserInfo = @(name: Str, age: Int)
 StatsInfo = @(score: Float, rank: Int)
-multiRaw <= '{"name": "Asuka", "age": 14, "score": 95.5, "rank": 3}'
-JSON[multiRaw, UserInfo]() ]=> user
-JSON[multiRaw, StatsInfo]() ]=> stats
+multi_raw <= '{"name": "Asuka", "age": 14, "score": 95.5, "rank": 3}'
+JSON[multi_raw, UserInfo]() ]=> user
+JSON[multi_raw, StatsInfo]() ]=> stats
 stdout("User: " + user.name + ", Rank: " + stats.rank.toString())

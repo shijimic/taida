@@ -22,7 +22,7 @@ printPerishable item =
     | isExpiring(item) |> " [EXPIRING]"
     | _ |> ""
   )
-  stdout("  " + item.name + " - $" + item.price.toString() + " x " + item.qty.toString() + " (days left: " + item.daysLeft.toString() + ")" + tag)
+  stdout("  " + item.name + " - $" + item.price.toString() + " x " + item.qty.toString() + " (days left: " + item.days_left.toString() + ")" + tag)
   0
 => :Int
 

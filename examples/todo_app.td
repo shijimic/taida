@@ -28,8 +28,8 @@ showTodos list =
 => :Int
 
 addTodo list title =
-  newItem <= @(title <= title, done <= false)
-  Append[list, newItem]()
+  new_item <= @(title <= title, done <= false)
+  Append[list, new_item]()
 
 toggleAt index pair =
   | pair.index == index |>
@@ -76,21 +76,21 @@ showTodos(list5)
 
 // Statistics using mold operations
 total <= list5.length()
-doneCount <= Count[list5, isDone]()
-pendingCount <= total - doneCount
+done_count <= Count[list5, isDone]()
+pending_count <= total - done_count
 stdout("")
 stdout("--- Statistics ---")
-stdout("  Total: " + total.toString() + " | Done: " + doneCount.toString() + " | Pending: " + pendingCount.toString())
+stdout("  Total: " + total.toString() + " | Done: " + done_count.toString() + " | Pending: " + pending_count.toString())
 
 allDone <= list5.all(isDone)
 | allDone |> stdout("  All tasks complete!")
 | _ |> stdout("  Some tasks remain.")
 
 // Find[] -- locate first pending item
-pendingTodo <= Find[list5, isNotDone]()
+pending_todo <= Find[list5, isNotDone]()
 stdout("")
-| pendingTodo.hasValue |>
-  stdout("Next pending: " + pendingTodo.__value.title)
+| pending_todo.hasValue |>
+  stdout("Next pending: " + pending_todo.__value.title)
 | _ |>
   stdout("No pending tasks!")
 
@@ -111,8 +111,8 @@ showTodos(list6)
 // Take[] / Drop[]
 stdout("")
 stdout("--- First 1 item (take) ---")
-firstOne <= Take[list6, 1]()
-showTodos(firstOne)
+first_one <= Take[list6, 1]()
+showTodos(first_one)
 
 stdout("")
 stdout("--- Remaining after drop 1 ---")
@@ -125,15 +125,15 @@ neg x =
 => :Int
 
 nums <= @[5, 2, 8, 1, 9]
-sortedDesc <= Sort[nums](by <= neg)
+sorted_desc <= Sort[nums](by <= neg)
 stdout("")
 stdout("--- sortBy (descending) ---")
-stdout("  " + Join[sortedDesc, ", "]())
+stdout("  " + Join[sorted_desc, ", "]())
 
 // Zip[] demo
-pilotNames <= @["Asuka", "Rei", "Shinji"]
-pilotScores <= @[95, 87, 92]
-zipped <= Zip[pilotNames, pilotScores]()
+pilot_names <= @["Asuka", "Rei", "Shinji"]
+pilot_scores <= @[95, 87, 92]
+zipped <= Zip[pilot_names, pilot_scores]()
 
 showPair p =
   stdout("  " + p.first + ": " + p.second.toString())

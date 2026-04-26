@@ -368,16 +368,8 @@ pub fn emit_c(ir_module: &IrModule, profile: WasmProfile) -> Result<String, Wasm
         // parity. The override `taida_debug_float_d28b009` /
         // `taida_float_to_str_d28b009` lives in runtime_wasi_io.c and is
         // linked by both Wasi and Full profiles.
-        writeln!(
-            c,
-            "#define taida_debug_float taida_debug_float_d28b009"
-        )
-        .unwrap();
-        writeln!(
-            c,
-            "#define taida_float_to_str taida_float_to_str_d28b009"
-        )
-        .unwrap();
+        writeln!(c, "#define taida_debug_float taida_debug_float_d28b009").unwrap();
+        writeln!(c, "#define taida_float_to_str taida_float_to_str_d28b009").unwrap();
     }
 
     // W-3: f64 -> i64 bitcast helper (union-based, no libc dependency)

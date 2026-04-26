@@ -58,11 +58,8 @@ fn run_interpreter(td: &Path) -> Option<String> {
 }
 
 fn run_native(td: &Path, label: &str) -> Option<String> {
-    let exe: PathBuf = std::env::temp_dir().join(format!(
-        "d28b009_native_{}_{}",
-        std::process::id(),
-        label
-    ));
+    let exe: PathBuf =
+        std::env::temp_dir().join(format!("d28b009_native_{}_{}", std::process::id(), label));
     let build = Command::new(taida_bin())
         .args(["build", "--target", "native"])
         .arg(td)
@@ -91,11 +88,7 @@ fn run_js(td: &Path, label: &str) -> Option<String> {
         eprintln!("SKIP: node unavailable");
         return None;
     }
-    let js = std::env::temp_dir().join(format!(
-        "d28b009_js_{}_{}.mjs",
-        std::process::id(),
-        label
-    ));
+    let js = std::env::temp_dir().join(format!("d28b009_js_{}_{}.mjs", std::process::id(), label));
     let build = Command::new(taida_bin())
         .args(["build", "--target", "js"])
         .arg(td)
@@ -171,11 +164,8 @@ fn check_4backend(stem: &str) {
         }
     };
 
-    let wasi = std::env::temp_dir().join(format!(
-        "d28b009_{}_{}_wasi.wasm",
-        std::process::id(),
-        stem
-    ));
+    let wasi =
+        std::env::temp_dir().join(format!("d28b009_{}_{}_wasi.wasm", std::process::id(), stem));
     compile_wasm(&td, "wasm-wasi", &wasi).expect("wasm-wasi compile (D28B-009)");
     let wasi_out = run_wasm(&wasi, &wasmtime).expect("wasm-wasi run");
     let _ = std::fs::remove_file(&wasi);
@@ -183,11 +173,8 @@ fn check_4backend(stem: &str) {
 
     // wasm-full also links rt_wasi, so the override applies. Regression
     // guard so the same renderer / mod_mold_f override holds for full.
-    let full = std::env::temp_dir().join(format!(
-        "d28b009_{}_{}_full.wasm",
-        std::process::id(),
-        stem
-    ));
+    let full =
+        std::env::temp_dir().join(format!("d28b009_{}_{}_full.wasm", std::process::id(), stem));
     compile_wasm(&td, "wasm-full", &full).expect("wasm-full compile (D28B-009)");
     let full_out = run_wasm(&full, &wasmtime).expect("wasm-full run");
     let _ = std::fs::remove_file(&full);
@@ -247,10 +234,8 @@ fn d28b_009_c26b011_nan_inf_pin_4backend() {
             return;
         }
     };
-    let wasi = std::env::temp_dir().join(format!(
-        "d28b009_c26nan_{}_wasi.wasm",
-        std::process::id()
-    ));
+    let wasi =
+        std::env::temp_dir().join(format!("d28b009_c26nan_{}_wasi.wasm", std::process::id()));
     compile_wasm(&td, "wasm-wasi", &wasi).expect("wasm-wasi compile");
     let wasi_out = run_wasm(&wasi, &wasmtime).expect("wasm-wasi run");
     let _ = std::fs::remove_file(&wasi);
@@ -283,10 +268,7 @@ fn d28b_009_c26b011_signed_zero_pin_4backend() {
             return;
         }
     };
-    let wasi = std::env::temp_dir().join(format!(
-        "d28b009_c26sz_{}_wasi.wasm",
-        std::process::id()
-    ));
+    let wasi = std::env::temp_dir().join(format!("d28b009_c26sz_{}_wasi.wasm", std::process::id()));
     compile_wasm(&td, "wasm-wasi", &wasi).expect("wasm-wasi compile");
     let wasi_out = run_wasm(&wasi, &wasmtime).expect("wasm-wasi run");
     let _ = std::fs::remove_file(&wasi);

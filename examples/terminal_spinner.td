@@ -20,5 +20,5 @@ renderTick state remaining: Int =
 
 initial <= SpinnerState
 total <= renderTick(initial, 8)
-finalClear <= Write[](ClearLine())
+final_clear <= Write[](ClearLine())
 stdout("done after " + (total + 8).toString() + " ticks")

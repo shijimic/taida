@@ -62,6 +62,7 @@ Commands:
   transpile   Alias for `build --target js`
   todo        Scan TODO/Stub molds
   check       Run parse/type/verify front gate
+  lint        D28B-008 naming-convention lint (E1801..E1809)
   graph       AI-oriented structural JSON for codebase comprehension
   verify      Run structural verification checks
   inspect     Print summary + verification
@@ -408,6 +409,7 @@ fn main() {
                 std::process::exit(1);
             }
             "check" => run_check_cmd(&filtered_args[2..]),
+            "lint" => run_lint_cmd(&filtered_args[2..]),
             "compile" => {
                 eprintln!(
                     "Error: `taida compile` has been removed. Use `taida build --target native` instead."
@@ -759,6 +761,131 @@ fn run_check_cmd(args: &[String]) {
     }
 
     if errors > 0 {
+        std::process::exit(1);
+    }
+}
+
+// ── Lint subcommand (D28B-008) ──────────────────────────
+
+fn print_lint_help() {
+    println!(
+        "\
+Usage:
+  taida lint [--quiet] <PATH>
+
+Description:
+  Run the D28B-008 naming-convention lint pass over <PATH>. <PATH> may be
+  a single .td file or a directory (.td files are collected recursively).
+  The lint pins the D28B-001 (Phase 0 2026-04-26) category-based naming
+  rules and emits diagnostics in the E1801..E1809 band.
+
+Exit codes:
+  0   No lint diagnostics surfaced.
+  1   At least one E18xx diagnostic was reported.
+  2   Argument / IO / parse / type error (lint cannot run cleanly).
+
+Options:
+  --quiet         Suppress diagnostic output, exit code only.
+  --help, -h      Show this help.
+
+Examples:
+  taida lint examples
+  taida lint --quiet src/main.td"
+    );
+}
+
+fn run_lint_cmd(args: &[String]) {
+    use taida::parser::lint::lint_program_with_source;
+
+    let mut quiet = false;
+    let mut path: Option<String> = None;
+
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--help" | "-h" => {
+                print_lint_help();
+                return;
+            }
+            "--quiet" | "-q" => quiet = true,
+            raw if raw.starts_with('-') => {
+                eprintln!("Unknown option for lint: {}", raw);
+                eprintln!("Run `taida lint --help` for usage.");
+                std::process::exit(2);
+            }
+            _ => {
+                if path.is_some() {
+                    eprintln!("Only one <PATH> is accepted for taida lint.");
+                    std::process::exit(2);
+                }
+                path = Some(args[i].clone());
+            }
+        }
+        i += 1;
+    }
+
+    let target = match path {
+        Some(p) => p,
+        None => {
+            eprintln!("Missing <PATH> argument.");
+            eprintln!("Run `taida lint --help` for usage.");
+            std::process::exit(2);
+        }
+    };
+
+    let target_path = Path::new(&target);
+    let td_files: Vec<PathBuf> = if target_path.is_dir() {
+        let files = collect_td_files(target_path);
+        if files.is_empty() {
+            eprintln!("No .td files found in '{}'", target);
+            std::process::exit(2);
+        }
+        files
+    } else {
+        vec![target_path.to_path_buf()]
+    };
+
+    let mut total_diags: usize = 0;
+    let mut had_parse_error: bool = false;
+
+    for td_file in &td_files {
+        let file_str = td_file.to_string_lossy().to_string();
+        let source = match fs::read_to_string(td_file) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("{}: read error: {}", file_str, e);
+                had_parse_error = true;
+                continue;
+            }
+        };
+        let (program, parse_errors) = parse(&source);
+        if !parse_errors.is_empty() {
+            // Lint cannot run cleanly when parse errors are present.
+            // Skip this file and report.
+            had_parse_error = true;
+            if !quiet {
+                eprintln!(
+                    "{}: parse errors prevent lint ({} error(s))",
+                    file_str,
+                    parse_errors.len()
+                );
+            }
+            continue;
+        }
+        let diags = lint_program_with_source(&program, &source);
+        total_diags += diags.len();
+        if !quiet {
+            for d in &diags {
+                println!("{}", d.render(&file_str));
+            }
+        }
+    }
+
+    if had_parse_error {
+        // Argument-level failure (lint could not clean-run somewhere)
+        std::process::exit(2);
+    }
+    if total_diags > 0 {
         std::process::exit(1);
     }
 }

@@ -6,13 +6,13 @@ value <=[ lax
 stdout(`Unmold backward: ${value}`)
 
 // With string
-strLax <= Lax["hello"]()
-strVal <=[ strLax
-stdout(`String unmold: ${strVal}`)
+str_lax <= Lax["hello"]()
+str_val <=[ str_lax
+stdout(`String unmold: ${str_val}`)
 
 // Async unmold backward
-asyncVal <= Async[100]()
-result <=[ asyncVal
+async_val <= Async[100]()
+result <=[ async_val
 stdout(`Async unmold backward: ${result}`)
 
 // Map then unmold backward

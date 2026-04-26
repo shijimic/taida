@@ -14,7 +14,7 @@ Pilot = @(id: Int, name: Str, active: Bool)
 ApiResponse = @(pilots: @[Pilot], total: Int)
 
 // Simulated API response (in real usage, this comes from http)
-rawResponse <= '{"pilots":[{"id":1,"name":"Asuka","active":true},{"id":2,"name":"Rei","active":false},{"id":3,"name":"Shinji","active":true}],"total":3}'
+raw_response <= '{"pilots":[{"id":1,"name":"Asuka","active":true},{"id":2,"name":"Rei","active":false},{"id":3,"name":"Shinji","active":true}],"total":3}'
 
 // ── Error ceiling for the whole program ──────────────────
 
@@ -25,15 +25,15 @@ rawResponse <= '{"pilots":[{"id":1,"name":"Asuka","active":true},{"id":2,"name":
 
 // ── Step 1: Cast JSON through schema ─────────────────────
 
-JSON[rawResponse, ApiResponse]() ]=> data
+JSON[raw_response, ApiResponse]() ]=> data
 
 stdout("=== API Client Demo ===")
 stdout("")
 
 // ── Step 2: Access typed values ──────────────────────────
 
-totalCount <= data.total
-stdout("Total pilots: " + totalCount.toString())
+total_count <= data.total
+stdout("Total pilots: " + total_count.toString())
 
 // ── Step 3: Work with typed pilot list ───────────────────
 
@@ -78,7 +78,7 @@ stdout("All active: " + allActive.toString())
 stdout("")
 stdout("=== Building Request Payload ===")
 
-requestData <= @(
+request_data <= @(
   action <= "update",
   targets <= @[1, 3],
   metadata <= @(
@@ -88,7 +88,7 @@ requestData <= @(
 )
 
 // Convert Taida value to JSON string (output direction — still works)
-payload <= jsonEncode(requestData)
+payload <= jsonEncode(request_data)
 stdout("Request payload:")
 stdout("  " + payload)
 
@@ -98,7 +98,7 @@ stdout("")
 stdout("=== JSON Round-Trip ===")
 
 // Parse the payload back with a schema
-RequestData = @(action: Str, metadata: @(updatedBy: Str, reason: Str))
+RequestData = @(action: Str, metadata: @(updated_by: Str, reason: Str))
 JSON[payload, RequestData]() ]=> parsed
 
 stdout("Action: " + parsed.action)

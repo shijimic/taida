@@ -167,3 +167,62 @@ jobs:
         with:
           components: rustfmt
       - run: cargo fmt --all -- --check
+
+  # D28B-008 Round 3 wK — naming-convention lint hard-fail.
+  #
+  # Pins the D28B-001 (Phase 0 2026-04-26 Lock) category-based naming
+  # rules at the parser/AST level via `taida lint`. Diagnostic codes
+  # E1801..E1809 are emitted on violations; this job fails (`continue-on-error`
+  # is intentionally NOT set) if any user-facing example regresses.
+  #
+  # Scope (curated to user-facing tutorials + reference packages):
+  #   - Top-level `examples/*.td` minus compiler regression fixtures
+  #     (`compile_*.td`) and known-incompatible legacy fixtures
+  #     (`addon_terminal.td` has parse errors).
+  #   - `examples/complex/` (multi-file demo apps).
+  #   - `examples/embedding/` (host-language embedding samples).
+  #
+  # Out of scope (intentional violations testing compiler edge cases):
+  #   - `examples/compile_*.td` (codegen regression fixtures with
+  #     deliberate snake_case function names testing tag propagation
+  #     and JSON field aliasing).
+  #   - `examples/quality/` (compiler regression test fixtures).
+  #   - `examples/wasm_min_pi_approx.td` is in the user-facing scope
+  #     (now compliant after the wK sweep).
+  #
+  # See `docs/reference/naming_conventions.md` (D28B-001 Lock) and
+  # `docs/reference/diagnostic_codes.md` (E18xx band) for the full
+  # rules and exemptions.
+  lint:
+    name: Lint (D28B-008 naming conventions)
+    runs-on: ubuntu-latest
+    needs: check
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: cargo-base
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Build taida CLI (debug)
+        run: cargo build --bin taida
+      - name: Lint top-level user-facing examples
+        run: |
+          set -e
+          # Curated scope — exclude compile_*.td (codegen regression
+          # fixtures), addon_terminal.td (baseline parse errors), and
+          # the quality/ subtree (compiler quality gate fixtures).
+          for f in $(ls examples/*.td | grep -vE 'examples/(compile_|addon_terminal)'); do
+            ./target/debug/taida lint --quiet "$f" || {
+              echo "Lint failed for $f:"
+              ./target/debug/taida lint "$f"
+              exit 1
+            }
+          done
+      - name: Lint complex examples
+        run: ./target/debug/taida lint --quiet examples/complex
+      - name: Lint embedding examples (if any present)
+        run: |
+          if [ -d examples/embedding ]; then
+            ./target/debug/taida lint --quiet examples/embedding
+          fi
