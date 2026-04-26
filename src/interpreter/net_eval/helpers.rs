@@ -289,7 +289,44 @@ pub(crate) fn get_field_value<'a>(fields: &'a [(String, Value)], key: &str) -> O
 
 // ── httpParseRequestHead ────────────────────────────────────
 
+/// Compute the offset of `needle` within `haystack`, when `needle` is a
+/// subslice of `haystack` (i.e. shares the same allocation).
+///
+/// D29B-008 Lock-E (E2): Safe replacement for raw pointer arithmetic
+/// `needle.as_ptr() as usize - haystack.as_ptr() as usize`. The pointer
+/// comparison is wrapped in a range check so that, if `needle` is **not**
+/// actually a subslice of `haystack` (e.g. a future refactor returns owned
+/// data from the parser), we return `None` and the caller falls back to
+/// `make_span(0, 0)` instead of computing a garbage offset that would
+/// silently corrupt span shape.
+///
+/// Empty `needle` returns `Some(0)` (treated as a zero-length span at the
+/// start of `haystack`).
+fn bytes_subslice_offset(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    let h_start = haystack.as_ptr() as usize;
+    let h_end = h_start.saturating_add(haystack.len());
+    let n_start = needle.as_ptr() as usize;
+    let n_end = n_start.saturating_add(needle.len());
+    if n_start >= h_start && n_end <= h_end {
+        Some(n_start - h_start)
+    } else {
+        None
+    }
+}
+
 /// Parse HTTP/1.1 request head from raw bytes.
+///
+/// **SIGNATURE PIN (D29B-008)**: This function MUST keep the signature
+/// `pub(crate) fn parse_request_head(bytes: &[u8]) -> Value`. Do NOT change
+/// it to take `Arc<Vec<u8>>` or other owning types. The downstream
+/// `build_parse_result` relies on `bytes_subslice_offset` to recover spans
+/// from httparse's `&str` / `&[u8]` outputs; that helper REQUIRES `bytes`
+/// and the parser-returned subslices to share the same allocation. An
+/// `Arc` wrapper that gets cloned between this function and the parser
+/// would silently produce wrong offsets. The dedicated CI test
+/// `tests/d29b_008_parse_request_head_signature_pin.rs` enforces this
+/// invariant by string-matching the signature line at build time.
+///
 /// Returns Result[@(complete, consumed, method, path, query, version, headers, bodyOffset, contentLength), _]
 pub(crate) fn parse_request_head(bytes: &[u8]) -> Value {
     let mut header_buf = [httparse::EMPTY_HEADER; 64];
@@ -312,26 +349,36 @@ pub(crate) fn build_parse_result(
     consumed: usize,
     complete: bool,
 ) -> Value {
-    let base = bytes.as_ptr() as usize;
+    // D29B-008: pointer arithmetic via raw `as usize - base` is replaced
+    // with `bytes_subslice_offset` which performs a range check on the
+    // subslice pointer before computing the offset. This eliminates the
+    // silent UB risk where a future signature change (e.g. taking
+    // `Arc<Vec<u8>>` and cloning it) would produce garbage offsets.
 
     // method span
     let method_span = if let Some(method) = req.method {
-        let start = method.as_ptr() as usize - base;
-        make_span(start, method.len())
+        match bytes_subslice_offset(bytes, method.as_bytes()) {
+            Some(start) => make_span(start, method.len()),
+            None => make_span(0, 0),
+        }
     } else {
         make_span(0, 0)
     };
 
     // path + query spans (split on '?')
     let (path_span, query_span) = if let Some(full_path) = req.path {
-        let path_start = full_path.as_ptr() as usize - base;
-        if let Some(q_pos) = full_path.find('?') {
-            (
-                make_span(path_start, q_pos),
-                make_span(path_start + q_pos + 1, full_path.len() - q_pos - 1),
-            )
-        } else {
-            (make_span(path_start, full_path.len()), make_span(0, 0))
+        match bytes_subslice_offset(bytes, full_path.as_bytes()) {
+            Some(path_start) => {
+                if let Some(q_pos) = full_path.find('?') {
+                    (
+                        make_span(path_start, q_pos),
+                        make_span(path_start + q_pos + 1, full_path.len() - q_pos - 1),
+                    )
+                } else {
+                    (make_span(path_start, full_path.len()), make_span(0, 0))
+                }
+            }
+            None => (make_span(0, 0), make_span(0, 0)),
         }
     } else {
         (make_span(0, 0), make_span(0, 0))
@@ -355,11 +402,21 @@ pub(crate) fn build_parse_result(
         if header.name.is_empty() {
             break;
         }
-        let name_start = header.name.as_ptr() as usize - base;
-        let value_start = header.value.as_ptr() as usize - base;
+        // D29B-008: subslice-checked offset computation in place of
+        // `header.name.as_ptr() as usize - base`. None means the parser
+        // returned data outside `bytes` (should not happen with httparse,
+        // which is contractually zero-copy, but defended against here).
+        let name_span = match bytes_subslice_offset(bytes, header.name.as_bytes()) {
+            Some(name_start) => make_span(name_start, header.name.len()),
+            None => make_span(0, 0),
+        };
+        let value_span = match bytes_subslice_offset(bytes, header.value) {
+            Some(value_start) => make_span(value_start, header.value.len()),
+            None => make_span(0, 0),
+        };
         headers_list.push(Value::pack(vec![
-            ("name".into(), make_span(name_start, header.name.len())),
-            ("value".into(), make_span(value_start, header.value.len())),
+            ("name".into(), name_span),
+            ("value".into(), value_span),
         ]));
         // NET2-2a: Detect Transfer-Encoding: chunked
         if header.name.eq_ignore_ascii_case("transfer-encoding") {
