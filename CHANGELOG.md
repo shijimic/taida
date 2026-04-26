@@ -250,23 +250,28 @@ breaking-change manifest).
 
 - **Sustained scatter-gather soak runbook**
   (`.dev/D28_SOAK_RUNBOOK.md`):
-  derived from `.dev/C26_SOAK_RUNBOOK.md`, extended to 4-backend
-  acceptance and pinned against the wF arena-reset baseline.
-  D28 Round 2 review 縮約: primary acceptance is **3h sustained ×
-  4-backend × 1-pass** (旧 24h は industry SLA convention 由来の
-  holdover で技術的合理性なし、`.dev/C26_PROGRESS.md` L195 の
-  「2-4h sustained で 95% regression cover」結論と整合)。
+  derived from `.dev/C26_SOAK_RUNBOOK.md`, extended to 3-backend
+  acceptance (interpreter / JS / native) and pinned against the
+  wF arena-reset baseline. D28 Round 2 review 縮約: primary
+  acceptance is **3h sustained × 3-backend × 1-pass** (旧 24h は
+  industry SLA convention 由来の holdover で技術的合理性なし、
+  `.dev/C26_PROGRESS.md` L195 の「2-4h sustained で 95%
+  regression cover」結論と整合)。soak 実走時に発覚: **wasm-wasi
+  は `[E1612] wasm-wasi does not support taida-lang/net HTTP API
+  'httpServe'` で原理的に scatter-gather soak が起動できない**た
+  め scope 外、wasm-wasi networking は `.dev/FUTURE_BLOCKERS.md
+  ::POST-STABLE-002` で post-stable improvement として追跡。
   24h extended runs remain available as an optional release-note
   supplement (`run-24h-soak.sh --duration-hr 24`) but are not
   acceptance conditions. Acceptance ownership is split between agent (runbook
   + automation maintenance, detached-run wrapper) and user
   (final PASS record approval, tag push). `<TBD: PASS record link
   or Phase 12 GATE artefact reference>`
-- **30-min fast-soak-proxy 4-backend smoke**: post-fix native
+- **30-min fast-soak-proxy 3-backend smoke**: post-fix native
   baseline shows RSS 5,108 KiB → 5,556 KiB on a 30-min smoke
   (rate 911 KiB / h; samples 2..60 are bit-identical at
   5,556 KiB; the proxy's `DRIFT DETECTED` verdict is an artefact
-  of its cold-start projection model). `<TBD: 4-backend smoke
+  of its cold-start projection model). `<TBD: 3-backend smoke
   evidence linkage at Phase 12 GATE>`
 
 ### §8 Known gaps
