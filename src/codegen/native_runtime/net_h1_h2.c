@@ -6090,8 +6090,56 @@ static void taida_net_h2_serve_connection(int client_fd, H2ServeCtx *ctx) {
 
                 h2_response_fields_free(&resp);
 
+                /* D28B-002 (Round 2 wG): release request + response packs.
+                 *
+                 * h2_extract_response_fields() above copied every field
+                 * we still need into malloc-backed buffers in `resp`,
+                 * and h2_response_fields_free(&resp) just released
+                 * those copies. The taida_val req_pack and response
+                 * were leaked at the refcount level pre-wG -- their
+                 * arena-backed slots stayed reachable forever via the
+                 * orphaned refcount, even though no code dereferenced
+                 * them after this point. Drive the refcounts to 0 so
+                 * the arena reset below has the same safety footing
+                 * as the h1 worker's per-iteration reset. */
+                taida_release(req_pack);
+                taida_release(response);
+
                 s->state = H2_STREAM_CLOSED;
                 h2_conn_remove_closed_streams(&conn);
+
+                /* D28B-002 (Round 2 wG): per-stream arena boundary.
+                 *
+                 * Every per-request taida_val (the 14-field request
+                 * pack, header 2-field packs, body Bytes, str_new_copy
+                 * strings for method / path / query / authority / peer
+                 * host / protocol, plus the handler-returned response
+                 * pack) has had its refcount driven to 0 just above.
+                 * Their arena-backed slots are logically dead but the
+                 * bump arena offset has not rewound -- this is the h2
+                 * twin of D28B-012 (4 GB plateau / 4.7 GB/h drift on
+                 * the h1 worker), measured at ~2.5 MiB / 1k req on
+                 * the h2 path before this fix.
+                 *
+                 * Safety: H2Conn (heap-malloc'd at L5635), the
+                 * encoder/decoder HPACK dyn tables (strdup-backed),
+                 * surviving H2Stream entries (request_headers /
+                 * request_body all TAIDA_MALLOC'd), and the handler
+                 * closure (lives on this same main thread but is
+                 * refcount-tracked, not arena-bound) are all
+                 * unaffected by an arena reset. The connection's
+                 * scratch buffers (continuation_buf etc.) are
+                 * realloc-backed.
+                 *
+                 * Single-thread caveat: taida_net_h2_serve runs on
+                 * the application's main thread (no worker pool, no
+                 * pthread_create here), so this resets the same
+                 * __thread arena that the h1 worker thread version
+                 * resets. wF (D28B-012 fix) installed the helper as
+                 * `static` in core.c so this file already has access
+                 * to it through the build's translation-unit
+                 * concatenation (mod.rs F0_LEN..F6_LEN). */
+                taida_arena_request_reset();
             }
         }
     }
@@ -6103,6 +6151,19 @@ h2_conn_done:
     h2_conn_free(&conn);
     #undef conn
     free(connp);
+
+    /* D28B-002 (Round 2 wG): connection-boundary arena reset.
+     *
+     * Catches the early-exit paths inside the frame loop (preface
+     * mismatch, h2_send_server_settings failure, frame read errors,
+     * GOAWAY exits, HPACK decode errors, h2_continuation_append
+     * overflow, oversized header list) where the per-stream reset
+     * could not fire because the loop bailed before reaching the
+     * `completed_stream_id` block. Idempotent if already drained
+     * (the freelist drain loops exit on count == 0 and the
+     * keep-chunk[0]-rewind path is a no-op when chunk[0] is at
+     * offset 0). */
+    taida_arena_request_reset();
 }
 
 typedef struct { int64_t requests; } H2ServeResult;
