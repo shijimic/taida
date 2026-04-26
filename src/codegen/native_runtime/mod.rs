@@ -509,7 +509,25 @@ mod tests {
         //   function-end Release path is unreachable.
         //   Externally linkable (non-`static`) so emitted user code in
         //   `_entry.c` can reference the helper.
-        const EXPECTED_TOTAL_LEN: usize = 1_022_533;
+        // D28B-012 (Round 2 wF, 2026-04-26): +6,352 bytes for the
+        //   `taida_arena_request_reset` helper in core.c (+4,821) and
+        //   the two call sites + commentary in net_h1_h2.c (+1,531).
+        //   Root cause fix for the 4 GB plateau / 4.7 GiB/h drift in
+        //   the fast-soak proxy under `httpServe` 1-arg handlers: the
+        //   per-thread bump arena absorbs request packs (13 fields),
+        //   span packs (2 fields), and Repeat-allocated body strings
+        //   that fall outside the four fixed-size freelist buckets,
+        //   never rewinding even after `taida_release` drives every
+        //   per-request taida_val to refcount 0. The new helper
+        //   drains thread-local pack/list/str freelists separating
+        //   arena vs malloc origins, then frees all arena chunks
+        //   except chunk[0] and rewinds chunk[0]'s offset to 0. Called
+        //   at the bottom of every keep-alive iteration plus at
+        //   conn_done so early-exit paths (head_malformed, EOF before
+        //   head, body parse error, WebSocket close, request limit
+        //   exhausted on partial connection) are covered.
+        // EXPECTED_TOTAL_LEN: 1,022,533 + 6,352 = 1,028,885.
+        const EXPECTED_TOTAL_LEN: usize = 1_028_885;
         let asm = *NATIVE_RUNTIME_C;
         assert_eq!(
             asm.len(),
@@ -923,11 +941,17 @@ mod tests {
         //   Externally linkable (non-`static`) so emitted user code in
         //   `_entry.c` can reference the helper.
         // F1_LEN: 270,400 + 1,404 = 271,804.
-        const F1_LEN: usize = 271_865;
+        // D28B-012 (Round 2 wF, 2026-04-26): +4,821 bytes for the
+        //   `taida_arena_request_reset` helper inserted just after
+        //   `taida_arena_alloc` (well before the "// ── Error
+        //   ceiling" marker, so the new bytes live entirely inside
+        //   F1). F1_LEN moves: 271,865 + 4,821 = 276,686. F2_LEN
+        //   unchanged.
+        const F1_LEN: usize = 276_686;
         assert_eq!(
             CORE_SECTION.len(),
-            271_865 + 160_760,
-            "core.c total byte length must equal legacy fragment1 + fragment2 (C25B-001 / C25B-028 / C25B-025 / C26B-011 / C26B-020 / C26B-016 / C26B-018 / C26B-011-wS / C26B-024 / C26B-024-wepsilon adjusted; CI-red 2026-04-24 cppcheck clean-up adds 881/409 to F1/F2; @c.27 PR41 CI-red follow-up adds 61 to F1 for the cppcheck-suppress comment on the new taida_release_any helper)"
+            276_686 + 160_760,
+            "core.c total byte length must equal legacy fragment1 + fragment2 (C25B-001 / C25B-028 / C25B-025 / C26B-011 / C26B-020 / C26B-016 / C26B-018 / C26B-011-wS / C26B-024 / C26B-024-wepsilon adjusted; CI-red 2026-04-24 cppcheck clean-up adds 881/409 to F1/F2; @c.27 PR41 CI-red follow-up adds 61 to F1 for the cppcheck-suppress comment on the new taida_release_any helper; D28B-012 wF adds 4,821 to F1 for taida_arena_request_reset)"
         );
         const F2_PREFIX: &[u8] = b"// \xE2\x94\x80\xE2\x94\x80 Error ceiling";
         let tail = &CORE_SECTION.as_bytes()[F1_LEN..F1_LEN + F2_PREFIX.len()];
@@ -973,11 +997,19 @@ mod tests {
         // (the macro form keeps the function body within the 80-line
         // scan window of NB7-10 selftest). F5_LEN unchanged; F6 grows:
         //   92,745 + 620 = 93,365.
-        const F5_LEN: usize = 186_867;
+        // D28B-012 (Round 2 wF, 2026-04-26): +1,531 bytes inside
+        //   fragment 5 (HTTP/1 worker keep-alive loop) for the two
+        //   `taida_arena_request_reset` call sites + commentary
+        //   blocks. Both insertions live in `net_worker_thread`
+        //   (one at the bottom of the per-iteration keep-alive
+        //   loop, one at conn_done covering early-exit paths),
+        //   well before the "// ── Native HTTP/2 server" divider.
+        //   F5_LEN moves: 186,867 + 1,531 = 188,398. F6 unchanged.
+        const F5_LEN: usize = 188_398;
         assert_eq!(
             NET_H1_H2_SECTION.len(),
-            186_867 + 93_365,
-            "net_h1_h2.c total byte length must equal legacy fragment5 + fragment6 (C26B-026 / C26B-022-wS / C27B-014 / C27B-026 adjusted)"
+            188_398 + 93_365,
+            "net_h1_h2.c total byte length must equal legacy fragment5 + fragment6 (C26B-026 / C26B-022-wS / C27B-014 / C27B-026 / D28B-012 wF adjusted)"
         );
         const F6_PREFIX: &[u8] = b"// \xE2\x94\x80\xE2\x94\x80 Native HTTP/2 server";
         let tail = &NET_H1_H2_SECTION.as_bytes()[F5_LEN..F5_LEN + F6_PREFIX.len()];

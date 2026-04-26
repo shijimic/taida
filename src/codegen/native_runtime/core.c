@@ -426,6 +426,109 @@ static void *taida_arena_alloc(size_t size) {
     return base;
 }
 
+/* D28B-012 (Round 2 wF): per-request arena + freelist reset.
+ *
+ * Root cause of the 4 GB plateau / 4.7 GB/h drift observed in the
+ * fast-soak proxy under the `httpServe` 1-arg handler hot loop:
+ *
+ *   - Per-request the worker thread builds a 13-field request pack,
+ *     plus several `taida_net_make_span` (2-field) packs, plus a
+ *     handler-returned response pack with body / headers, plus the
+ *     `Repeat["x", 512]()` body string. None of these match the four
+ *     fixed-size freelist buckets (pack-fc-4, list-cap-16, str
+ *     buckets {32,64,128,256,512,1024}) by exact shape — the 13-field
+ *     request and 2-field span packs in particular fall through to the
+ *     bump arena (`taida_arena_alloc`).
+ *   - The arena is per-thread, capped at TAIDA_ARENA_MAX_CHUNKS (128) *
+ *     TAIDA_ARENA_CHUNK_SIZE (2 MiB) = 256 MiB / thread. With
+ *     min(maxConnections, 16) worker threads the steady-state cap is
+ *     ~4 GiB, matching the observed plateau exactly.
+ *   - When `taida_release` runs on an arena-backed pack/list/string,
+ *     it drops the refcount to 0 and returns without doing anything
+ *     (arena slots were designed as "process-exit reclaims"). The
+ *     arena offset never rewinds, so each request consumes fresh
+ *     arena bytes until the chunk is full and a new chunk is malloc'd.
+ *
+ * Fix: introduce a `request boundary` reset that the NET worker calls
+ * after `taida_release(request)` + `taida_release(response)` at the
+ * tail of each keep-alive iteration. At that boundary, every per-
+ * request taida_val has had its refcount driven to zero, so any
+ * arena-backed slot is logically dead.
+ *
+ *   Step 1 - drain the per-thread small-object freelists, separating
+ *   arena-backed slots (about to be reclaimed by the arena reset) from
+ *   malloc-backed slots (must be free()'d to avoid leaking them).
+ *   Step 2 - free every arena chunk except chunk[0]; rewind chunk[0]'s
+ *   offset to 0 so the next request begins from a fresh slab without
+ *   an alloc/free round-trip on every iteration.
+ *
+ * Safety invariants:
+ *   - Caller must guarantee NO live taida_val references arena memory
+ *     across the boundary. The httpServe worker satisfies this because
+ *     the request and response packs are released earlier in the same
+ *     iteration and the handler is a pure function (no closure capture
+ *     of arena values, the closure was created on the main thread
+ *     which has its own __thread arena).
+ *   - The pool->handler closure pointer is allocated on the main
+ *     thread (not via this worker thread's arena) so resetting this
+ *     thread's arena does not affect it.
+ *   - Strings allocated via Tier 3 (malloc fallback when alloc > 1024
+ *     B) are not arena-backed and are unaffected by this reset.
+ */
+static void taida_arena_request_reset(void) {
+    /* Drain pack4 freelist: arena entries die with arena reset, malloc
+     * entries must be freed. Distinguish via taida_arena_contains. */
+    for (int i = 0; i < taida_pack4_freelist_count; i++) {
+        taida_val *obj = taida_pack4_freelist[i];
+        if (obj && !taida_arena_contains(obj)) {
+            free(obj);
+        }
+    }
+    taida_pack4_freelist_count = 0;
+
+    /* Drain cap-16 list freelist: same dual-origin handling. */
+    for (int i = 0; i < taida_list_freelist_count; i++) {
+        taida_val *obj = taida_list_freelist[i];
+        if (obj && !taida_arena_contains(obj)) {
+            free(obj);
+        }
+    }
+    taida_list_freelist_count = 0;
+
+    /* Drain all 6 string buckets. Each bucket entry is a header pointer
+     * (hdr); the user-visible `char*` is hdr+2. taida_arena_contains
+     * takes the hdr pointer directly. */
+    for (int b = 0; b < TAIDA_STR_BUCKET_COUNT; b++) {
+        for (int i = 0; i < taida_str_freelist_count[b]; i++) {
+            taida_val *hdr = taida_str_freelist[b][i];
+            if (hdr && !taida_arena_contains(hdr)) {
+                free(hdr);
+            }
+        }
+        taida_str_freelist_count[b] = 0;
+    }
+
+    /* Free every arena chunk except chunk[0]. Keep chunk[0] alive and
+     * rewind its offset to 0 so the next request starts hot without an
+     * alloc round-trip. If no chunks were ever allocated this is a
+     * no-op. */
+    if (taida_arena_chunk_count > 1) {
+        for (int i = 1; i < taida_arena_chunk_count; i++) {
+            free(taida_arena_chunks[i].base);
+            taida_arena_chunks[i].base = NULL;
+            taida_arena_chunks[i].offset = 0;
+            taida_arena_chunks[i].size = 0;
+        }
+        taida_arena_chunk_count = 1;
+    }
+    if (taida_arena_chunk_count == 1 && taida_arena_chunks[0].base) {
+        taida_arena_chunks[0].offset = 0;
+        taida_arena_active_chunk = 0;
+    } else if (taida_arena_chunk_count == 0) {
+        taida_arena_active_chunk = -1;
+    }
+}
+
 extern taida_val _taida_main(void);
 static int taida_cli_argc = 0;
 static char **taida_cli_argv = NULL;
