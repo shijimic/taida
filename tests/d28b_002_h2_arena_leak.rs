@@ -319,7 +319,7 @@ fn d28b_002_native_h2_arena_reset_bounds_rss() {
         let _ = std::fs::remove_file(&key_path);
         let _ = std::fs::remove_dir_all(&dir);
         panic!(
-            "d28b_002: warm-up only completed {warmup}/50 h2 requests; \
+            "d28b_002: warm-up only completed {warmup}/30 h2 requests; \
              likely TLS handshake or curl --parallel issue"
         );
     }

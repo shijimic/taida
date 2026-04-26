@@ -304,8 +304,8 @@ stdout("unreachable")
     );
     assert!(
         combined.contains("not supported on backend 'js'")
-            && combined.contains("supported: interpreter, native; wasm planned for D26"),
-        "diagnostic must use the C25B-030 backend-policy template, got: {}",
+            && combined.contains("supported: interpreter, native, wasm-full"),
+        "diagnostic must use the D28B-010 backend-policy template, got: {}",
         combined
     );
 

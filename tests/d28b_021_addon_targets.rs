@@ -68,11 +68,18 @@ fn d28b_021_default_addon_targets_helper_returns_native() {
 }
 
 #[test]
-fn d28b_021_supported_targets_is_native_only() {
+fn d28b_021_supported_targets_pinned_at_d28() {
     // D28B-021 contract: stable 後の default / allowlist 変更は次 gen
     // でしか許容しない。本 assertion は accidental allowlist 拡張を
     // CI で捕捉する。
-    assert_eq!(SUPPORTED_ADDON_TARGETS, &["native"]);
+    //
+    // D28B-010 (@d.X widening): added `"wasm-full"` to the allowlist
+    // as a §6.2 addition (the set of accepted targets grows; no
+    // existing manifest is reinterpreted because addons that omit
+    // `targets` continue to default to `["native"]`). Future widenings
+    // beyond @d.X must update this assertion in lock-step with
+    // `AddonBackend::supports_addons` and the documentation tables.
+    assert_eq!(SUPPORTED_ADDON_TARGETS, &["native", "wasm-full"]);
 }
 
 // ── Acceptance 2: 欠落 と `targets = ["native"]` 明示の bit-identical ──

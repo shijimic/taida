@@ -25,8 +25,9 @@ currently routes an addon-backed import through its dispatcher:
 |----------------|-------------------|-------|
 | Interpreter    | **Yes**           | Dispatches through `dlopen` when the interpreter binary is built with `feature = "native"` (the default build). The addon facade runs as a dynamic Taida module in a dedicated environment. |
 | Native (AOT)   | **Yes**           | Lowered at build time. The facade is statically analysed by `src/addon/facade.rs` into an `AddonFacadeSummary`; facade FuncDefs become IR functions, pack / scalar / list / template bindings are replayed into the module init path, and cdylib calls go through `taida_addon_call`. |
+| WasmFull       | **Yes** (D28B-010, @d.X) | Reuses the registry / facade path used by Native and Interpreter. Manifest authors opt in by adding `"wasm-full"` to the top-level `targets` array. cdylib loading at @d.X reuses the host's native loader (a wasm-side dispatcher inside the wasm sandbox is post-stable scope). |
 | JS transpiler  | **No**            | No JS-side dispatcher exists. Imports produce a deterministic error message pointing at `Run 'taida build --target native' or use the interpreter`. |
-| WASM (min / wasi) | **No**         | The wasm dispatcher is not currently shipped. When it lands it will reuse the `src/addon/facade.rs` static analyser so published manifests do not need to change. The compatibility contract for that future widening is described under `targets` below — manifests authored today opt into `["native"]` and must not be auto-rerouted to `wasm` without a manifest edit. |
+| WasmMin / WasmWasi / WasmEdge | **No** | No addon dispatcher in the @d.X stable contract. These backends remain rejected even when the manifest declares `targets = ["wasm-full"]`; they are *separate* wasm profiles, not aliases. |
 
 ### Error text for unsupported backends
 
@@ -34,12 +35,14 @@ The error message emitted on an unsupported backend is fixed:
 
 ```
 addon-backed package 'X' is not supported on backend 'Y' (supported:
-interpreter, native). Run 'taida build --target native' or use the
-interpreter.
+interpreter, native, wasm-full). Run 'taida build --target native' or
+use the interpreter; for wasm targets, only 'wasm-full' supports addons.
 ```
 
 Tooling that matches on the policy should prefer the
-`"supported: interpreter, native"` prefix; the surface text is
+`"supported: interpreter, native"` prefix; the prefix is preserved
+verbatim across the gen-C → gen-D transition (the trailing list grew
+to include `wasm-full` as a §6.2 widening). The surface text is
 covered by `docs/STABILITY.md` §4.2.
 
 See `docs/guide/13_creating_addons.md` for the author-facing view of
@@ -75,9 +78,11 @@ source level but **always populated** in the parsed manifest:
   `["native"]`. The omitted form and an explicit
   `targets = ["native"]` produce a **bit-identical**
   `AddonManifest` — same struct values, same diagnostic strings.
-- **Allowed entries**: drawn from a closed allowlist. The current
-  allowlist is `{"native"}`; any other entry (including `"wasm"`,
-  `"Native"`, `"unknown"`) is rejected at parse time.
+- **Allowed entries**: drawn from a closed allowlist. The @d.X
+  allowlist is `{"native", "wasm-full"}` (D28B-010 added
+  `"wasm-full"` as a §6.2 widening); any other entry (including
+  `"wasm"`, `"wasm-min"`, `"wasm-wasi"`, `"wasm-edge"`, `"Native"`,
+  `"unknown"`) is rejected at parse time.
 - **Empty array**: `targets = []` is rejected. Authors who want
   the default must omit the key entirely; an empty array would
   otherwise let an addon opt out of the contract by writing a
@@ -112,7 +117,7 @@ in `docs/STABILITY.md` §6 (breaking-change policy):
 
 | Code     | Variant                       | When |
 |----------|-------------------------------|------|
-| `E2001`  | `UnknownAddonTarget`          | A `targets` entry is not in the supported allowlist (currently `{"native"}`). |
+| `E2001`  | `UnknownAddonTarget`          | A `targets` entry is not in the supported allowlist (`@d.X`: `{"native", "wasm-full"}`). |
 | `E2002`  | `EmptyAddonTargets`           | `targets = []` — the array was present but empty. |
 | (none)   | `AddonTargetsTypeMismatch`    | `targets` was the wrong shape (e.g. a bare string or integer). |
 

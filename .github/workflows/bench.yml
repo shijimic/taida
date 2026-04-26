@@ -131,23 +131,24 @@ jobs:
         # D28B-005 hard-fail gate. Benches below the min-samples
         # threshold in the baseline JSON emit WARN and do not trigger
         # failure; see `compare_baseline.py` for the state machine.
+        # D28B-027: --gate-id pins log lines to D28B-005 instead of
+        # the historical C26B-004 default (script accepts both for
+        # backward compat but CI logs should name the actual gate).
         run: |
           python3 scripts/bench/compare_baseline.py \
               --bencher-out bench-results.txt \
               --baseline .github/bench-baselines/perf_baseline.json \
               --tolerance-pct 10.0 \
-              --min-samples 30
-
-      - name: Build release taida binary (for peak RSS gate)
-        # The peak-RSS gate measures /usr/bin/time -v on a release
-        # build of the taida CLI. Reuse the cargo cache populated by
-        # the `cargo bench` step above.
-        run: cargo build --release --bin taida
+              --min-samples 30 \
+              --gate-id D28B-005
 
       - name: Measure peak RSS on d28_perf_smoke fixtures
         # D28B-013 acceptance #2. The script writes
         # target/perf-rss/peak_rss_results.txt in bencher format so
-        # compare_baseline.py can ingest it.
+        # compare_baseline.py can ingest it. Reuses the release binary
+        # already built by `cargo bench` above (D28B-027 removed the
+        # redundant `cargo build --release --bin taida` step that just
+        # hit the cargo cache and added log noise).
         run: |
           set -euo pipefail
           ./scripts/perf/measure_peak_rss.sh ./target/release/taida
@@ -157,12 +158,14 @@ jobs:
 
       - name: Compare against peak-RSS baseline (regression gate)
         # D28B-013 hard-fail gate. Same state machine as throughput.
+        # D28B-027: --gate-id pins log lines to D28B-013 (peak-RSS).
         run: |
           python3 scripts/bench/compare_baseline.py \
               --bencher-out bench-results-rss.txt \
               --baseline scripts/perf/peak_rss_baseline.json \
               --tolerance-pct 10.0 \
-              --min-samples 30
+              --min-samples 30 \
+              --gate-id D28B-013
 
       - name: Upload bench results
         if: always()

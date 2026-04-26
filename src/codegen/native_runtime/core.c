@@ -524,7 +524,14 @@ static void taida_arena_request_reset(void) {
     if (taida_arena_chunk_count == 1 && taida_arena_chunks[0].base) {
         taida_arena_chunks[0].offset = 0;
         taida_arena_active_chunk = 0;
-    } else if (taida_arena_chunk_count == 0) {
+    } else {
+        /* D28B-026: defensive reset for the corner where chunk_count == 1
+         * but chunks[0].base == NULL (today unreachable from
+         * taida_arena_alloc, but guarding here closes a future-proofing
+         * gap: leaving active_chunk at its old value would let the next
+         * arena_alloc read c->size from a zeroed slot). The else branch
+         * also covers the chunk_count == 0 case originally handled with
+         * an explicit if. */
         taida_arena_active_chunk = -1;
     }
 }

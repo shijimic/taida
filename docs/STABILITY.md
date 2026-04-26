@@ -108,15 +108,16 @@ for the live worklist. Anything in that list is out-of-scope for
 C25, C26, and C27 (the fix-only RC cycle series) even if it is
 otherwise attractive.
 
-> **Error-string note.** The legacy substring `wasm planned for D26`
-> remains in the runtime diagnostic emitted by
-> `src/addon/backend_policy.rs` (see §4.2). That substring is a
-> **pinned surface token** for the entire gen-C generation and will
-> not be renamed to `D27` / `D28` mid-generation; doing so would
-> break tooling that matches on the substring. The rename to `D28`
-> in prose here is documentation-only. The token is planned to be
-> rewritten at the gen-D boundary alongside the other breaking
-> changes.
+> **Error-string note.** Through the gen-C generation, the
+> diagnostic emitted by `src/addon/backend_policy.rs` (see §4.2)
+> carried the legacy substring `wasm planned for D26`. **D28B-010
+> (@d.X)** rewrites the diagnostic at the gen-D boundary in
+> lock-step with the wasm-full addon backend widening: the new
+> token list is `(supported: interpreter, native, wasm-full)` and
+> tooling that matches on the substring `"supported: interpreter,
+> native"` continues to work transparently (the prefix is preserved
+> as the stable matchable token across the gen-C → gen-D boundary).
+> The legacy `D26` reference has been removed.
 
 ### 1.3. `@c.25` label skip
 
@@ -238,20 +239,22 @@ Across the whole gen-C generation (`@c.25.*` and `@c.26.*`):
 
 - `Native` — supported.
 - `Interpreter` — supported (first-class, not a degraded fallback).
+- `WasmFull` — **supported at @d.X** (D28B-010 widening, §6.2
+  addition). The wasm-full backend reuses the same registry / facade
+  path as Native and Interpreter; manifest authors opt in by adding
+  `"wasm-full"` to the top-level `targets` array.
 - `Js` — deterministically rejected; no dispatcher exists.
-- `Wasm` — deterministically rejected; planned for the D28
-  breaking-change phase (see §1.2).
+- `WasmMin` / `WasmWasi` / `WasmEdge` — deterministically rejected;
+  no addon dispatcher in the stable contract at @d.X.
 
-The error message `"(supported: interpreter, native; wasm planned for
-D26). Run 'taida build --target native' or use the interpreter."` is
-part of the stable surface for the gen-C generation — tooling is
-permitted to match on the substring `"supported: interpreter, native"`
-to detect the current policy. The literal `D26` token inside that
-string is a pinned surface artefact from C25B-030 and is **not**
-renamed to `D27` / `D28` mid-generation; the rename is a gen-D
-breaking change (see §1.2). New code should match on the
-`"supported: interpreter, native"` prefix rather than the trailing
-`D26` token.
+The error message `"(supported: interpreter, native, wasm-full).
+Run 'taida build --target native' or use the interpreter; for wasm
+targets, only 'wasm-full' supports addons."` is part of the stable
+surface — tooling is permitted to match on the substring
+`"supported: interpreter, native"` to detect the current policy.
+That prefix is preserved verbatim across the gen-C → gen-D boundary
+to keep existing matchers working; the trailing list grew to include
+`wasm-full` as a §6.2 widening.
 
 ### 4.3. `targets` field (forward-compat pin)
 
@@ -318,19 +321,23 @@ RC cycle** (`.dev/C26_BLOCKERS.md::C26B-001〜C26B-006` + C26B-026).
 They block the label-less `@c.26` tag until FIXED; the severity
 assignments below are pinned by the 2026-04-24 Phase 0 Design Lock:
 
-- **HTTP/2 parity across interpreter / native / JS** —
-  scatter-gather response handling, flow-control edge cases, and
-  real-world client conformance (C26B-001, Must Fix, 3-backend).
-  **Acceptance reached for the test-pin target (2026-04-24, Round 3
-  / wE)**: C26B-001 now pins 10 h2 3-backend parity cases (7 new
-  `test_net6_c26b001_*` cases — baseline GET, POST, GET+query,
-  status 404, large body, + method PUT / DELETE / PATCH — plus 3
-  pre-existing baseline fixtures). JS branch rejects with
-  `H2Unsupported` per §5.1 in every case. The remaining gating
-  work is the Sub-finding custom-header fix (C26B-026, below) and
-  TLS construction (C26B-002). The `§5.1 → FIXED` flip is held
-  until the rest of Cluster 1 (C26B-002 / C26B-004 / C26B-005 /
-  C26B-006) also lands; the 10-case pin itself is stable.
+- **HTTP/2 parity across interpreter / native / JS / wasm-wasi** —
+  **FIXED at `@d.X`** (D28B-002 4-backend pin + D28B-012 + D28B-002
+  paired arena-leak fix, Round 2 / wF + wG 2026-04-26; D28B-025
+  Round 2 review follow-up sealed RFC 9113 §8.1.1 no-body
+  content-length conformance). `tests/parity.rs` now pins 11 h2
+  4-backend parity cases (`test_net6_3b_native_h2_d28b002_1..11_*`)
+  on top of the 10 C26B-001 cases inherited from gen-C; the JS
+  branch rejects with `H2Unsupported` and the wasm-wasi branch
+  reuses the JS rejection path. The h2 server response path's
+  per-stream and per-connection arena boundaries are sealed by
+  `taida_arena_request_reset` calls in
+  `taida_net_h2_serve_connection` (paired twin of the h1 fix
+  D28B-012, ~1,000× RSS-growth improvement) and the no-body
+  status response path strips `content-length` /
+  `transfer-encoding` before HPACK encode (D28B-025), so the
+  combination of 4-backend test pin + arena-leak fix + RFC 9113
+  conformance closes the historical Cluster 1 gating.
 - **Native h2 HPACK custom-header preservation** —
   **FIXED (2026-04-24, Round 2 / wC)**. C26B-026 (discovered as a
   sub-finding of C26B-001 Session 2 on 2026-04-24) was a Native h2
@@ -395,12 +402,28 @@ C26B-020 pillar 3 (a widening addition, §6.2).
 
 ### 5.2. Addon WASM backend
 
-Gen-C locks `AddonBackend::Wasm` as "rejected, planned for D28"
-(see §1.2 for the D26→D27→D28 rename trail). The stable surface
-contract at §4.2 explicitly permits D28 to add WASM support
-without a `<gen>` bump, because doing so only widens the set of
-accepted backends. The `targets` default-to-`["native"]` rule at
-§4.3 ensures no existing addon is reinterpreted by the widening.
+**Gen-D widens the addon backend set to include `WasmFull`**
+(D28B-010, §6.2 addition). The widening is structurally a §6.2
+addition — the set of accepted backends grows; no existing addon
+is reinterpreted — so it does not require a generation bump beyond
+the gen-C → gen-D transition that is already happening at @d.X.
+`AddonBackend::WasmFull` joins `Native` and `Interpreter` as a
+first-class addon backend; manifest authors opt in by listing
+`"wasm-full"` in the top-level `targets` array. Addons that omit
+`targets` continue to default to `["native"]` (D28B-021 contract
+preserved), so no existing addon is reinterpreted by the widening.
+
+`WasmMin`, `WasmWasi`, and `WasmEdge` remain unsupported at @d.X.
+Adding any of them to the supported set is a future widening and
+must be made in lock-step with `AddonBackend::supports_addons` in
+`src/addon/backend_policy.rs`, the manifest allowlist
+`SUPPORTED_ADDON_TARGETS`, and the `addon_manifest.md` reference.
+
+cdylib loading on the wasm-full backend at @d.X reuses the host's
+native loader (the wasm-full target compiles to a wasm module that
+calls back into the host runtime for addon dispatch). A wasm-side
+dispatcher (cdylib loaded inside the wasm module sandbox) is
+post-stable scope and tracked separately as a future improvement.
 
 ### 5.3. Async redesign
 
@@ -423,15 +446,36 @@ behaviour under concurrent event-read becomes contractual at
 ### 5.5. Performance
 
 **FIXED at `@d.X`** (D28B-005 throughput, D28B-013 memory + perf
-+ coverage hard-fail gates, Round 2 wH 2026-04-26). The four
-gates that ship with the stable initial release are:
++ coverage hard-fail gates, Round 2 wH 2026-04-26). The "FIXED"
+designation here pins the **gate policy contract** — workflow
+structure, hard-fail flags, tolerance / min-samples literals,
+fixture set — not the empirical baseline collection (D28B-027
+clarification, Round 2 review follow-up). The committed baselines
+ship at `sample_count: 0` for the peak-RSS gate; per-bench
+`update-baseline` jobs accumulate samples on every main-push and
+the gate runs in WARN-only mode while `sample_count <
+min_samples_required`. Empirical baseline stabilisation is the
+**post-tag 30 main-push window**; until then a real regression in
+that window is observable via the WARN line in CI logs but does
+not hard-fail the PR. The four gates that ship with the stable
+initial release are:
 
 | Gate | Workflow | Trigger | Hard-fail policy |
 |------|----------|---------|-----------------|
-| Throughput regression | `bench.yml` | PR + main-push + nightly cron | +10% slow-down vs 30-sample EWMA baseline |
-| Peak RSS regression | `bench.yml` | PR + main-push + nightly cron | +10% RSS growth vs 30-sample EWMA baseline |
+| Throughput regression | `bench.yml` | PR + main-push + nightly cron | +10% slow-down vs 30-sample-gating-threshold + 10-sample-alpha-window EWMA baseline |
+| Peak RSS regression | `bench.yml` | PR + main-push + nightly cron | +10% RSS growth vs 30-sample-gating-threshold + 10-sample-alpha-window EWMA baseline |
 | Valgrind definitely-lost | `memory.yml` | PR + push | any `definitely lost` byte |
 | Coverage threshold | `coverage.yml` | weekly cron + manual | line ≥ 80% / branch ≥ 70% on `src/interpreter/` |
+
+The "30-sample-gating-threshold + 10-sample-alpha-window" phrase
+above is precise: 30 is the `min_samples_required` field — the
+number of accumulated bench samples the baseline must hold before
+the gate switches from WARN to hard-fail (D28B-027 terminology
+clarification; the older "30-sample EWMA window" phrasing
+conflated the two). 10 is the `--max-alpha-window` argument used
+by `scripts/bench/update_baseline.py`, which determines how
+quickly the EWMA reflects new samples (`alpha = 1 / min(sc + 1,
+window)`).
 
 The perf-gate harness (`benches/perf_baseline.rs`, inherited
 from C25B-004 → C26B-004 hard-fail) is reaffirmed without policy

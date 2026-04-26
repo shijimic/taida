@@ -6,15 +6,25 @@ runs, main-push runs, and weekly cron runs.
 
 The gates are **independent** (each owns its own workflow file) and
 share only the regression-comparison engine
-(`scripts/bench/compare_baseline.py`) so the `+10%` tolerance + 30-
-sample EWMA logic is identical across throughput and peak RSS.
+(`scripts/bench/compare_baseline.py`) so the `+10%` tolerance +
+30-sample-gating-threshold + 10-sample-alpha-window EWMA logic is
+identical across throughput and peak RSS.
+
+> **D28B-027 terminology note (Round 2 wH follow-up)**: 30 is the
+> `min_samples_required` field — the count at which the gate
+> switches from WARN to hard-fail. 10 is the `--max-alpha-window`
+> argument used by `scripts/bench/update_baseline.py` (`alpha = 1 /
+> min(sample_count + 1, window)`), which controls how quickly the
+> EWMA reflects new samples. The earlier "30-sample EWMA window"
+> phrasing in this file conflated the two; the precise term is
+> "30-sample gating threshold + 10-sample alpha-window".
 
 ## Gate matrix
 
 | Gate | Workflow | Trigger | Hard-fail policy | Owns |
 |------|----------|---------|-----------------|------|
-| Throughput regression | `bench.yml` | PR + main-push + nightly cron + manual | +10% slow-down vs 30-sample EWMA | D28B-005 |
-| Peak RSS regression | `bench.yml` | PR + main-push + nightly cron + manual | +10% RSS growth vs 30-sample EWMA | D28B-013 #2 |
+| Throughput regression | `bench.yml` | PR + main-push + nightly cron + manual | +10% slow-down vs 30-sample-gating-threshold + 10-sample-alpha-window EWMA | D28B-005 |
+| Peak RSS regression | `bench.yml` | PR + main-push + nightly cron + manual | +10% RSS growth vs 30-sample-gating-threshold + 10-sample-alpha-window EWMA | D28B-013 #2 |
 | Valgrind definitely-lost | `memory.yml` | PR + push + manual | any `definitely lost` byte | D28B-013 #1 |
 | Coverage threshold | `coverage.yml` | weekly cron + manual | line ≥ 80% / branch ≥ 70% on `src/interpreter/` | D28B-013 #3 |
 
@@ -33,8 +43,17 @@ Each row is described in detail below.
   `scripts/bench/parse_net_throughput.py`.
 - **Acceptance** (D28B-005):
   - baseline 30 samples or more accumulated per bench (auto via
-    main-push `update-baseline` job).
-  - +10% slowdown causes hard-fail.
+    main-push `update-baseline` job; 30 is the gating threshold,
+    not the alpha window — see top-of-file note).
+  - +10% slowdown causes hard-fail (D28B-027 trade-off note: the
+    `ns_median: 0.0` short-circuit path in `compare_baseline.py`
+    means a real regression in the bootstrap window — before any
+    samples accumulate — surfaces as `WARN` rather than `FAIL`.
+    This is by design: failing PRs on a pristine baseline would
+    block all merges. The trade-off is acceptable because the
+    Phase 12 GATE evidence requires a green bench.yml run on the
+    actual `feat/d28` HEAD, so the bootstrap window cannot hide a
+    regression past the stable tag).
   - `test_net6_3b_native_h2_32_request_throughput_benchmark`,
     `test_net6_3b_native_h2_64kib_data_benchmark`, and
     `test_net6_3b_native_h2_32_stream_multiplex_benchmark` are part
@@ -86,8 +105,10 @@ reset cycle.
   bencher-format lines where the `ns/iter` slot stores peak RSS
   in KiB (units cancel under relative %).
 - **Acceptance** (D28B-013 #2):
-  - 30-sample EWMA per fixture (auto via main-push).
-  - +10% RSS growth causes hard-fail.
+  - 30-sample gating threshold + 10-sample alpha-window per
+    fixture (auto via main-push).
+  - +10% RSS growth causes hard-fail (same bootstrap trade-off as
+    the throughput gate — see §1).
   - `docs/STABILITY.md §5.5` Memory line is FIXED at `@d.X`.
 
 ### Adding a fixture to the RSS gate

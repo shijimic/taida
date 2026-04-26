@@ -1,10 +1,16 @@
 #!/usr/bin/env python3
-# C26B-004: Perf regression gate — baseline comparison.
+# Perf regression gate — baseline comparison.
+#
+# Origin: C26B-004 (throughput gate). D28B-013 reused the same engine
+# for the peak-RSS gate; D28B-027 (Round 2 wH follow-up) split out the
+# `--gate-id` flag so log lines are not hard-coded to "C26B-004" when
+# a different gate ID is the actual caller.
 #
 # Reads a criterion bencher-format result file (produced by
 # `cargo bench ... --output-format bencher`) and compares each
 # benchmark against the committed baseline JSON at
-# `.github/bench-baselines/perf_baseline.json`.
+# `.github/bench-baselines/perf_baseline.json` (throughput) or
+# `scripts/perf/peak_rss_baseline.json` (peak-RSS).
 #
 # Exit codes:
 #   0 — all benchmarks within tolerance (or baseline is still
@@ -22,6 +28,7 @@
 #       --baseline .github/bench-baselines/perf_baseline.json \
 #       --tolerance-pct 10.0 \
 #       --min-samples 30 \
+#       --gate-id D28B-005 \
 #       [--require-baseline]
 #
 # Scope: this script is invoked from .github/workflows/bench.yml.
@@ -98,7 +105,17 @@ def main() -> int:
         help="Fail if any bench in the bencher output is missing from "
         "the baseline (used after baseline has stabilised).",
     )
+    ap.add_argument(
+        "--gate-id",
+        type=str,
+        default="C26B-004",
+        help="Identifier prefixed to log / error lines. Defaults to "
+        "C26B-004 for backward compatibility; bench.yml passes "
+        "D28B-005 for throughput and D28B-013 for peak-RSS so the "
+        "actual gate is identifiable in CI logs (D28B-027).",
+    )
     args = ap.parse_args()
+    gate = args.gate_id
 
     bencher_out = Path(args.bencher_out)
     baseline_path = Path(args.baseline)
@@ -121,13 +138,13 @@ def main() -> int:
 
     baseline = load_baseline(baseline_path)
 
-    print(f"C26B-004 regression gate: parsed {len(results)} benches")
+    print(f"{gate} regression gate: parsed {len(results)} benches")
     print(
-        f"C26B-004 regression gate: baseline has {len(baseline)} entries "
+        f"{gate} regression gate: baseline has {len(baseline)} entries "
         f"(schema at {baseline_path})"
     )
-    print(f"C26B-004 regression gate: tolerance = +{args.tolerance_pct:.2f}%")
-    print(f"C26B-004 regression gate: min samples = {args.min_samples}")
+    print(f"{gate} regression gate: tolerance = +{args.tolerance_pct:.2f}%")
+    print(f"{gate} regression gate: min samples = {args.min_samples}")
 
     regressions: list[str] = []
     missing: list[str] = []
@@ -178,7 +195,7 @@ def main() -> int:
     exit_code = 0
     if regressions:
         print("")
-        print("::error::C26B-004 regression gate: hard-fail")
+        print(f"::error::{gate} regression gate: hard-fail")
         for line in regressions:
             print(f"  - {line}")
         exit_code = 1
@@ -186,7 +203,7 @@ def main() -> int:
     if args.require_baseline and missing:
         print("")
         print(
-            "::error::C26B-004 regression gate: missing baseline entries "
+            f"::error::{gate} regression gate: missing baseline entries "
             "(require-baseline set)"
         )
         for name in missing:
@@ -196,7 +213,7 @@ def main() -> int:
 
     if exit_code == 0:
         print("")
-        print("C26B-004 regression gate: PASS")
+        print(f"{gate} regression gate: PASS")
     return exit_code
 
 

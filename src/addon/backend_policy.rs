@@ -3,9 +3,19 @@
 //! **C25 redefinition (C25B-030 Phase 1A)**: the RC1 "addon is Native only"
 //! freeze is lifted. Addon-backed packages are now formally supported on
 //! both the `Native` and `Interpreter` backends (the interpreter is the
-//! reference implementation and always ships the dispatch path). WASM
-//! backends are planned for D26 (breaking change phase). The `Js` backend
-//! remains unsupported until a JS-side dispatcher is designed.
+//! reference implementation and always ships the dispatch path).
+//!
+//! **D28B-010 widening (@d.X stable initial release)**: `WasmFull` joins
+//! `Native` and `Interpreter` as a first-class addon backend. wasm-full
+//! is the only wasm profile in the stable contract that exposes the
+//! addon dispatcher; wasm-min / wasm-wasi / wasm-edge remain unsupported
+//! at @d.X. The widening is a `docs/STABILITY.md § 6.2` addition (the
+//! set of accepted backends grows; no existing addon is reinterpreted),
+//! so it does not require a generation bump. Manifest authors who want
+//! to declare wasm-full compatibility add `"wasm-full"` to the top-level
+//! `targets` array; addons that omit `targets` continue to default to
+//! `["native"]` (D28B-021 contract preserved). The `Js` backend remains
+//! unsupported until a JS-side dispatcher is designed.
 //!
 //! Historical note: the original RC1 freeze (see `.dev/RC1_DESIGN.md`
 //! Section E and `.dev/RC1_IMPL_SPEC.md` Phase 0 Frozen Contracts) forced
@@ -29,10 +39,12 @@ use std::fmt;
 /// All backends that may attempt to consume an addon-backed package.
 ///
 /// **C25 policy (C25B-030)**: `Native` and `Interpreter` are first-class
-/// addon backends. `Js` and the WASM variants remain unsupported.
-/// WASM backends are planned for D26 (breaking change phase). Adding a
-/// new backend to the supported set is a deliberate, RC-level decision --
-/// the policy table below must be updated in lockstep.
+/// addon backends. **D28B-010 (@d.X)**: `WasmFull` joins them as a
+/// first-class addon backend (§6.2 widening). `Js`, `WasmMin`,
+/// `WasmWasi`, and `WasmEdge` remain unsupported. Adding a new backend
+/// to the supported set is a deliberate, RC-level decision -- the
+/// policy table below must be updated in lockstep with the manifest
+/// `SUPPORTED_ADDON_TARGETS` allowlist and `docs/STABILITY.md § 5.2`.
 ///
 /// The enum is `#[non_exhaustive]` so future RCs can extend it without
 /// breaking pattern matches in package-resolution code that has already
@@ -45,15 +57,20 @@ pub enum AddonBackend {
     /// Tree-walking interpreter. C25 first-class addon backend
     /// (reference implementation).
     Interpreter,
-    /// JavaScript codegen. No addon dispatcher yet (D26+).
+    /// JavaScript codegen. No addon dispatcher yet (post-stable).
     Js,
-    /// `wasm-min` target. No addon dispatcher yet (D26).
+    /// `wasm-min` target. No addon dispatcher (out of @d.X stable).
     WasmMin,
-    /// `wasm-wasi` target. No addon dispatcher yet (D26).
+    /// `wasm-wasi` target. No addon dispatcher (out of @d.X stable).
     WasmWasi,
-    /// `wasm-edge` target. No addon dispatcher yet (D26).
+    /// `wasm-edge` target. No addon dispatcher (out of @d.X stable).
     WasmEdge,
-    /// `wasm-full` target. No addon dispatcher yet (D26).
+    /// `wasm-full` target. **D28B-010 (@d.X)**: addon dispatcher
+    /// supported via the same registry / facade path used by Native and
+    /// Interpreter. Manifest authors opt in by adding `"wasm-full"` to
+    /// `targets`. cdylib loading on wasm-full reuses the host's native
+    /// loader at this generation; a wasm-side dispatcher (cdylib loaded
+    /// inside the wasm module) is post-stable scope.
     WasmFull,
 }
 
@@ -77,10 +94,12 @@ impl AddonBackend {
     /// `true` iff this backend may load addon-backed packages.
     ///
     /// **C25 policy (C25B-030)**: `Native` and `Interpreter` are supported.
-    /// `Js` and WASM variants remain unsupported. Do not add `_ => true`
-    /// arms here -- new backends must be explicitly enrolled.
+    /// **D28B-010 (@d.X)**: `WasmFull` is enrolled as a first-class
+    /// addon backend (§6.2 widening). `Js`, `WasmMin`, `WasmWasi`, and
+    /// `WasmEdge` remain unsupported. Do not add `_ => true` arms here
+    /// -- new backends must be explicitly enrolled.
     pub fn supports_addons(self) -> bool {
-        matches!(self, Self::Native | Self::Interpreter)
+        matches!(self, Self::Native | Self::Interpreter | Self::WasmFull)
     }
 }
 
@@ -116,13 +135,14 @@ impl fmt::Display for AddonBackendError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         // Deterministic single-line message. The substring `"is not
         // supported on backend"` is stable and classifiable by the import
-        // resolver and the LSP. C25B-030 replaces the historical
-        // `(RC1: native only)` tail with
-        // `(supported: interpreter, native; wasm planned for D26)` so
-        // the message is actionable: users can see a working target.
+        // resolver and the LSP. D28B-010 replaces the C25-era
+        // `(supported: interpreter, native; wasm planned for D26)` tail
+        // with the @d.X-stable list `(supported: interpreter, native,
+        // wasm-full)` so the message is actionable: users can see all
+        // working targets without an obsolete reference to D26.
         write!(
             f,
-            "addon-backed package '{}' is not supported on backend '{}' (supported: interpreter, native; wasm planned for D26). Run 'taida build --target native' or use the interpreter.",
+            "addon-backed package '{}' is not supported on backend '{}' (supported: interpreter, native, wasm-full). Run 'taida build --target native' or use the interpreter; for wasm targets, only 'wasm-full' supports addons.",
             self.package,
             self.backend.label()
         )
@@ -156,18 +176,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn interpreter_and_native_are_supported() {
-        // C25B-030 policy lock: Interpreter and Native are first-class
-        // addon backends; Js / WASM variants remain unsupported.
-        // Updating this list without bumping the generation counter is a
-        // contract break.
+    fn interpreter_native_and_wasm_full_are_supported() {
+        // C25B-030 + D28B-010 policy lock: Interpreter, Native, and
+        // WasmFull are first-class addon backends; Js / WasmMin /
+        // WasmWasi / WasmEdge remain unsupported. Updating this list
+        // without bumping the generation counter is a contract break
+        // (D28B-010 widening was a §6.2 addition; future widenings
+        // beyond @d.X must use the same gen-aware process).
         assert!(AddonBackend::Native.supports_addons());
         assert!(AddonBackend::Interpreter.supports_addons());
+        assert!(AddonBackend::WasmFull.supports_addons());
         assert!(!AddonBackend::Js.supports_addons());
         assert!(!AddonBackend::WasmMin.supports_addons());
         assert!(!AddonBackend::WasmWasi.supports_addons());
         assert!(!AddonBackend::WasmEdge.supports_addons());
-        assert!(!AddonBackend::WasmFull.supports_addons());
     }
 
     #[test]
@@ -195,11 +217,12 @@ mod tests {
     #[test]
     fn error_message_is_deterministic() {
         // The message must be stable so callers (CLI / LSP) can route
-        // on the substring. We pin the exact text here.
+        // on the substring. We pin the exact text here. D28B-010 updated
+        // the supported list to include wasm-full.
         let err = AddonBackendError::new(AddonBackend::Js, "taida-lang/terminal");
         assert_eq!(
             err.to_string(),
-            "addon-backed package 'taida-lang/terminal' is not supported on backend 'js' (supported: interpreter, native; wasm planned for D26). Run 'taida build --target native' or use the interpreter."
+            "addon-backed package 'taida-lang/terminal' is not supported on backend 'js' (supported: interpreter, native, wasm-full). Run 'taida build --target native' or use the interpreter; for wasm targets, only 'wasm-full' supports addons."
         );
     }
 
@@ -222,20 +245,30 @@ mod tests {
         // must produce the same shape of message so the LSP / CLI can
         // pattern-match a single substring ("is not supported on
         // backend"). C25B-030: Interpreter and Native no longer appear
-        // here because they are supported.
+        // here because they are supported. D28B-010: WasmFull also
+        // moves to the supported set; only Js / WasmMin / WasmWasi /
+        // WasmEdge remain rejected.
         for b in [
             AddonBackend::Js,
             AddonBackend::WasmMin,
             AddonBackend::WasmWasi,
             AddonBackend::WasmEdge,
-            AddonBackend::WasmFull,
         ] {
             let err = ensure_addon_supported(b, "p").unwrap_err();
             assert!(err.to_string().contains("is not supported on backend"));
             assert!(
                 err.to_string()
-                    .contains("(supported: interpreter, native; wasm planned for D26)")
+                    .contains("(supported: interpreter, native, wasm-full)")
             );
         }
+    }
+
+    #[test]
+    fn ensure_supported_accepts_wasm_full() {
+        // D28B-010: WasmFull is a first-class addon backend at @d.X.
+        // The widening is a §6.2 addition (no existing addon is
+        // reinterpreted) and must remain pinned across the @d.* series.
+        let res = ensure_addon_supported(AddonBackend::WasmFull, "taida-lang/terminal");
+        assert!(res.is_ok());
     }
 }

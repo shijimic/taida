@@ -169,9 +169,22 @@ stdout(token)  // ba7816bf8f01cfea...f20015ad
 `taida-lang/net` の `httpServe` / `httpParseRequestHead` が返す
 `@(start: Int, len: Int)` 形式の **span pack** は、元の `Bytes` を
 clone せず view として保持する zero-copy primitive です。span を
-明示的に `Str` へ materialize する **cold path** mold は
-[`docs/reference/net_api.md §4.1`](./net_api.md) を参照してください
-(`StrOf[span, raw]() -> Str` mold form で 3 backend parity 保証)。
+明示的に `Str` へ materialize する **cold path** は二系統提供:
+
+- **mold form** `StrOf[span, raw]() -> Str` (3-backend parity 保証、
+  詳細は [`docs/reference/net_api.md §4.1`](./net_api.md))
+- **function form** `strOf(span, raw) -> Str` (D28B-015 で追加、
+  4-backend parity: interpreter / JS / native / wasm-full の中で
+  3-backend 完全 GREEN、wasm-full は compile-only pin。
+  mold form と意味論的に等価で、`callSign(req).path` 等の関数呼び出し
+  式チェーンで「`StrOf[...]()` の括弧二重」を避けたいときに使う):
+
+```taida
+// mold form と function form は同じ結果を返す
+str_a <= strOf(req.path, req.bytes)
+str_b <= StrOf[req.path, req.bytes]()
+strEq(str_a, str_b) ]=> equal // true
+```
 
 hot path (router の比較等) は `SpanEquals` / `SpanStartsWith` /
 `SpanContains` / `SpanSlice` (詳細は同 `net_api.md §4`) を使い、

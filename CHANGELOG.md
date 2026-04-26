@@ -177,11 +177,24 @@ breaking-change manifest).
   / non-string `targets` values are rejected with `[E2002]`.
   Default changes after stable are admissible only at the next
   generation bump (`docs/STABILITY.md` §1.2 / §6.5.3).
-- **WASM addon dispatcher** (D28B-010): POST-STABLE. Deferred to
-  the gen-D widening track or to gen-E. Tracked as
-  POST-STABLE-001 in `.dev/FUTURE_BLOCKERS.md`. The Phase 0
-  Design Lock confirmed that the existing addon ecosystem
-  (Native + Interpreter targets) is sufficient for `@d.X`.
+- **WasmFull addon backend** (D28B-010): FIXED. Originally
+  deferred at Phase 0 Design Lock, brought back into D28 scope by
+  the 2026-04-26 user verdict and landed as a `docs/STABILITY.md
+  § 6.2` widening (the set of accepted backends grows; no existing
+  addon is reinterpreted). `AddonBackend::WasmFull` now passes
+  `supports_addons()`; the manifest allowlist
+  `SUPPORTED_ADDON_TARGETS` widens to `{"native", "wasm-full"}`;
+  the runtime diagnostic emitted on a rejected backend now reads
+  `(supported: interpreter, native, wasm-full)` (the
+  `"supported: interpreter, native"` prefix is preserved verbatim
+  for tooling that matches on it). cdylib loading on the
+  wasm-full backend reuses the host's native loader at
+  `@d.X`; a wasm-side dispatcher inside the wasm sandbox is a
+  post-stable improvement. `WasmMin` / `WasmWasi` / `WasmEdge`
+  remain rejected — only `WasmFull` is widened. Pinned by
+  `tests/d28b_010_wasm_full_addon.rs` (8 cases).
+  `.dev/FUTURE_BLOCKERS.md::POST-STABLE-001` is archived as
+  `Cancelled`.
 - **Bundled package surfaces**: `taida-lang/os`,
   `taida-lang/net`, `taida-lang/terminal` are documented in
   `docs/guide/14_os_package.md`, `docs/guide/15_net_package.md`
@@ -205,11 +218,15 @@ breaking-change manifest).
   list,string}.td` (interpreter floor / List+BuchiPack COW
   path / Str primitive 4096-iter Repeat path), converts
   `/usr/bin/time -v` "Maximum resident set size" into the
-  bencher format, and fails the build if the
-  +10% / 30-sample-EWMA-window threshold is breached. The
-  baseline JSON is `scripts/perf/peak_rss_baseline.json`
-  (zero-init at land; populates over the first 30 main-push
-  builds).
+  bencher format, and fails the build if the +10% threshold is
+  breached versus the baseline EWMA. D28B-027 clarified the
+  baseline terminology: the 30 in "30-sample" refers to
+  `min_samples_required` (the gating threshold at which the gate
+  switches from WARN to hard-fail), and the EWMA itself uses a
+  10-sample alpha-window (`alpha = 1 / min(sample_count + 1,
+  10)`). The baseline JSON is
+  `scripts/perf/peak_rss_baseline.json` (zero-init at land;
+  populates over the first 30 main-push builds).
 - **Throughput regression gate** (D28B-005 + D28B-013): see §4.
 - **Coverage gate** (D28B-013 #3): FIXED. `coverage.yml` removed
   `continue-on-error: true`; the embedded summariser asserts
@@ -239,8 +256,6 @@ breaking-change manifest).
 
 ### §8 Known gaps
 
-- **POST-STABLE-001**: WASM addon dispatcher (D28B-010) deferred
-  to gen-D widening or gen-E (`.dev/FUTURE_BLOCKERS.md`).
 - **wasm-full `strOf` runtime gap**: `taida_pack_get` ->
   `taida_slice_mold` chain in the wasm runtime returns the
   underlying integer field for span-pack inputs rather than

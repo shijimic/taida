@@ -546,8 +546,29 @@ mod tests {
         //   tests/d28b_002_h2_arena_leak.rs. Post-wG growth must drop
         //   below the same 5,120 KiB / 1k req cap the h1 leak test
         //   uses; observed drop is ~10x (~250 KiB / 1k req or less).
-        // EXPECTED_TOTAL_LEN: 1,028,885 + 3,465 = 1,032,350.
-        const EXPECTED_TOTAL_LEN: usize = 1_032_350;
+        // D28B-025 (Round 2 review follow-up, 2026-04-26): +2,612 bytes
+        //   in net_h1_h2.c (h2 server response path). RFC 9113
+        //   §8.1.1 + RFC 9110 §6.4 forbid content-length /
+        //   transfer-encoding on no-body responses (1xx / 204 / 205 /
+        //   304); h1 path already strips them but the h2 `!has_body`
+        //   branch was passing `resp.headers` straight through HPACK
+        //   encode. The fix allocates a filtered header copy when the
+        //   response is no_body AND a stripped header is present (cheap
+        //   bypass otherwise), passes the filtered array to
+        //   `h2_send_response_headers`, and frees it afterwards. On
+        //   allocation failure, falls back to the original headers
+        //   (degraded mode but still preferable to dropping the
+        //   request). Regression pinned by
+        //   `tests/d28b_025_h2_no_body_content_length.rs`.
+        // D28B-026 (Round 2 review follow-up, 2026-04-26): +425 bytes
+        //   in core.c — defensive `taida_arena_active_chunk = -1`
+        //   else-branch in `taida_arena_request_reset` to close the
+        //   future-proofing corner where chunk_count == 1 but
+        //   chunks[0].base == NULL would leave active_chunk pointing
+        //   at a zeroed slot.
+        // EXPECTED_TOTAL_LEN: 1,032,350 + 2,612 (D28B-025) + 425
+        //   (D28B-026) = 1,035,387.
+        const EXPECTED_TOTAL_LEN: usize = 1_035_387;
         let asm = *NATIVE_RUNTIME_C;
         assert_eq!(
             asm.len(),
@@ -967,11 +988,18 @@ mod tests {
         //   ceiling" marker, so the new bytes live entirely inside
         //   F1). F1_LEN moves: 271,865 + 4,821 = 276,686. F2_LEN
         //   unchanged.
-        const F1_LEN: usize = 276_686;
+        // D28B-026 (Round 2 review follow-up, 2026-04-26): +425 bytes
+        //   in F1 for the defensive `taida_arena_active_chunk = -1`
+        //   else-branch in `taida_arena_request_reset` (closes a
+        //   future-proofing corner where chunk_count == 1 but
+        //   chunks[0].base == NULL would leave active_chunk pointing
+        //   at a zeroed slot). All inside F1, F2 unchanged.
+        //   F1_LEN: 276,686 + 425 = 277,111.
+        const F1_LEN: usize = 277_111;
         assert_eq!(
             CORE_SECTION.len(),
-            276_686 + 160_760,
-            "core.c total byte length must equal legacy fragment1 + fragment2 (C25B-001 / C25B-028 / C25B-025 / C26B-011 / C26B-020 / C26B-016 / C26B-018 / C26B-011-wS / C26B-024 / C26B-024-wepsilon adjusted; CI-red 2026-04-24 cppcheck clean-up adds 881/409 to F1/F2; @c.27 PR41 CI-red follow-up adds 61 to F1 for the cppcheck-suppress comment on the new taida_release_any helper; D28B-012 wF adds 4,821 to F1 for taida_arena_request_reset)"
+            277_111 + 160_760,
+            "core.c total byte length must equal legacy fragment1 + fragment2 (C25B-001 / C25B-028 / C25B-025 / C26B-011 / C26B-020 / C26B-016 / C26B-018 / C26B-011-wS / C26B-024 / C26B-024-wepsilon adjusted; CI-red 2026-04-24 cppcheck clean-up adds 881/409 to F1/F2; @c.27 PR41 CI-red follow-up adds 61 to F1 for the cppcheck-suppress comment on the new taida_release_any helper; D28B-012 wF adds 4,821 to F1 for taida_arena_request_reset; D28B-026 review follow-up adds 425 to F1 for the active_chunk defensive corner)"
         );
         const F2_PREFIX: &[u8] = b"// \xE2\x94\x80\xE2\x94\x80 Error ceiling";
         let tail = &CORE_SECTION.as_bytes()[F1_LEN..F1_LEN + F2_PREFIX.len()];
@@ -1044,11 +1072,18 @@ mod tests {
         //   All insertions are well after the
         //   "// ── Native HTTP/2 server" divider so F5_LEN is
         //   unchanged. F6 grows: 93,365 + 3,465 = 96,830.
+        // D28B-025 (Round 2 review follow-up, 2026-04-26): +2,612
+        //   bytes inside fragment 6 (HTTP/2 server) for the RFC 9113
+        //   §8.1.1 no-body content-length / transfer-encoding strip
+        //   in `taida_net_h2_serve_connection`'s `if (!has_body)`
+        //   branch (filter loop + filtered header copy + cleanup
+        //   free + multi-paragraph commentary). All inside fragment
+        //   6, F5 unchanged. F6 grows: 96,830 + 2,612 = 99,442.
         const F5_LEN: usize = 188_398;
         assert_eq!(
             NET_H1_H2_SECTION.len(),
-            188_398 + 96_830,
-            "net_h1_h2.c total byte length must equal legacy fragment5 + fragment6 (C26B-026 / C26B-022-wS / C27B-014 / C27B-026 / D28B-012 wF / D28B-002 wG adjusted)"
+            188_398 + 99_442,
+            "net_h1_h2.c total byte length must equal legacy fragment5 + fragment6 (C26B-026 / C26B-022-wS / C27B-014 / C27B-026 / D28B-012 wF / D28B-002 wG / D28B-025 review follow-up adjusted)"
         );
         const F6_PREFIX: &[u8] = b"// \xE2\x94\x80\xE2\x94\x80 Native HTTP/2 server";
         let tail = &NET_H1_H2_SECTION.as_bytes()[F5_LEN..F5_LEN + F6_PREFIX.len()];

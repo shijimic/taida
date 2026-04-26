@@ -68,16 +68,21 @@ use std::path::{Path, PathBuf};
 
 use taida_addon::{TAIDA_ADDON_ABI_VERSION, TAIDA_ADDON_ENTRY_SYMBOL};
 
-/// D28B-021: closed allowlist for the top-level `targets` array.
+/// D28B-021 + D28B-010: closed allowlist for the top-level `targets`
+/// array.
 ///
 /// The list is intentionally tiny so additions are visible review
-/// events. `"native"` is the only currently shipping addon dispatch
-/// target; `"wasm"` is reserved for the post-stable wasm dispatcher
-/// (POST-STABLE-001) and must be added here in lock-step with the
-/// dispatcher landing — silently accepting unknown entries would
-/// erase the stable compatibility guarantee documented in
-/// `docs/reference/addon_manifest.md`.
-pub const SUPPORTED_ADDON_TARGETS: &[&str] = &["native"];
+/// events. `"native"` is the cdylib dispatch target; `"wasm-full"` was
+/// added at @d.X (D28B-010) as a §6.2 widening — wasm-full is the
+/// only wasm profile that exposes the addon dispatcher contract at
+/// stable. wasm-min / wasm-wasi / wasm-edge remain unsupported and
+/// the `AddonBackend::supports_addons` policy rejects them at the
+/// import resolver before manifest parsing is even attempted.
+/// Additions to this list must be made in lock-step with
+/// `AddonBackend::supports_addons` in `src/addon/backend_policy.rs`,
+/// the policy table at `docs/STABILITY.md § 5.2`, and the receivable
+/// values listed in `docs/reference/addon_manifest.md`.
+pub const SUPPORTED_ADDON_TARGETS: &[&str] = &["native", "wasm-full"];
 
 /// D28B-021: default value injected when `targets` is omitted.
 ///

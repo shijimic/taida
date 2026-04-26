@@ -1,6 +1,17 @@
 {
   "schema_version": 1,
-  "description": "D28B-013 acceptance #2: peak RSS regression gate baseline. Populated by main-branch bench.yml runs (collect phase). Each entry's `sample_count` must reach `min_samples_required` before the gate applies its +10% tolerance hard-fail. Until then, the entry is treated as WARN-only. Schema is intentionally identical to .github/bench-baselines/perf_baseline.json so compare_baseline.py can ingest both via the same parser. The `ns_median` slot stores peak RSS in KiB (the gate compares relative %, units cancel).",
+  "description": [
+    "D28B-013 acceptance #2: peak RSS regression gate baseline.",
+    "Populated by main-branch bench.yml runs (collect phase).",
+    "Each entry's `sample_count` must reach `min_samples_required`",
+    "before the gate applies its +10% tolerance hard-fail. Until",
+    "then, the entry is treated as WARN-only. Schema is intentionally",
+    "identical to .github/bench-baselines/perf_baseline.json so",
+    "compare_baseline.py can ingest both via the same parser.",
+    "The `ns_median` slot stores peak RSS in KiB (the gate compares",
+    "relative %, units cancel). D28B-027: description split to a JSON",
+    "array for readable git diffs (consumers should join on space)."
+  ],
   "min_samples_required": 30,
   "tolerance_pct": 10.0,
   "owner": "D28 Round 2 wH (D28B-013)",

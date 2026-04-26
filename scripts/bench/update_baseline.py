@@ -1,8 +1,20 @@
 #!/usr/bin/env python3
-# C26B-004: Update `perf_baseline.json` with a new sample from a
-# main-branch bench run. The baseline stores a running median (computed
-# as EWMA with alpha = 1/min(sample_count+1, 10)) and increments
-# `sample_count` each run.
+# C26B-004 / D28B-005 / D28B-013: Update the perf baseline JSON
+# (`perf_baseline.json` for throughput, `peak_rss_baseline.json`
+# for peak-RSS) with a new sample from a main-branch bench run.
+#
+# The baseline stores a running median computed as an EWMA with
+# `alpha = 1 / min(sample_count + 1, --max-alpha-window)` (default
+# alpha-window = 10) and increments `sample_count` each run.
+#
+# D28B-027 terminology note (Round 2 wH follow-up): the alpha-
+# window above (default 10) is distinct from the
+# `min_samples_required` field in the baseline JSON (default 30),
+# which is the gating threshold at which `compare_baseline.py`
+# switches a bench from WARN to hard-fail. The earlier "30-sample
+# EWMA window" phrasing in this file conflated the two; the
+# precise terminology is "30-sample gating threshold + 10-sample
+# alpha-window".
 #
 # This keeps the baseline drift-resistant (heavy samples converge
 # slowly, transient spikes fade) without retaining per-sample history

@@ -6034,12 +6034,56 @@ static void taida_net_h2_serve_connection(int client_fd, H2ServeCtx *ctx) {
                 int has_body = resp.ok && resp.body && resp.body_len > 0 && !no_body;
 
                 if (!has_body) {
+                    /* D28B-025: RFC 9113 §8.1.1 + RFC 9110 §6.4 forbid
+                     * content-length / transfer-encoding on no-body
+                     * responses (1xx / 204 / 205 / 304). Strip them
+                     * before HPACK encode if a user handler set them.
+                     * h1 path has the same protection at no_body status
+                     * codes; h2 was missing the symmetric guard prior
+                     * to D28B-025. Use a filtered copy so the original
+                     * `resp.headers` (owned by the response pack) is
+                     * untouched and freed correctly by the caller. */
+                    H2Header *send_hdrs = resp.headers;
+                    int send_count = resp.header_count;
+                    H2Header *filtered = NULL;
+                    if (no_body && resp.header_count > 0) {
+                        int needs_strip = 0;
+                        for (int hi = 0; hi < resp.header_count; hi++) {
+                            if (strcasecmp(resp.headers[hi].name, "content-length") == 0 ||
+                                strcasecmp(resp.headers[hi].name, "transfer-encoding") == 0) {
+                                needs_strip = 1; break;
+                            }
+                        }
+                        if (needs_strip) {
+                            filtered = (H2Header*)TAIDA_MALLOC(
+                                sizeof(H2Header) * (size_t)resp.header_count,
+                                "h2_resp_hdrs_strip"
+                            );
+                            if (filtered) {
+                                int fc = 0;
+                                for (int hi = 0; hi < resp.header_count; hi++) {
+                                    if (strcasecmp(resp.headers[hi].name, "content-length") != 0 &&
+                                        strcasecmp(resp.headers[hi].name, "transfer-encoding") != 0) {
+                                        filtered[fc++] = resp.headers[hi];
+                                    }
+                                }
+                                send_hdrs = filtered;
+                                send_count = fc;
+                            }
+                            /* On allocation failure, fall back to the
+                             * original headers — the protocol-correct
+                             * outcome is still better than dropping the
+                             * request, and OOM is already a degraded
+                             * mode. */
+                        }
+                    }
                     h2_send_response_headers(
                         client_fd, &conn.encoder_dyn,
                         (uint32_t)completed_stream_id, resp.status,
-                        resp.headers, resp.header_count,
+                        send_hdrs, send_count,
                         1 /*end_stream*/, conn.peer_max_frame_size
                     );
+                    if (filtered) free(filtered);
                 } else {
                     // Add content-length if not present
                     int has_cl = 0;

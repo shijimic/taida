@@ -78,7 +78,11 @@ while [ $# -gt 0 ]; do
         --fixture) FIXTURE="$2"; shift 2 ;;
         --port) PORT="$2"; shift 2 ;;
         -h|--help)
-            sed -n '1,72p' "$0" | sed 's/^# \{0,1\}//'
+            # D28B-028: clamp to the actual usage block (lines 1-63);
+            # the previous `1,72p` reached past the comment header into
+            # `set -euo pipefail` and the arg-parse loop, which leaked
+            # implementation lines into --help output.
+            sed -n '1,63p' "$0" | sed 's/^# \{0,1\}//'
             exit 0
             ;;
         *) echo "unknown arg: $1" >&2; exit 1 ;;
@@ -231,6 +235,12 @@ case "${BACKEND}" in
         # wasmtime preopen TCP listener. The exact CLI surface for
         # this is documented at `docs/STABILITY.md § 5.2`; if it
         # changes the runbook references the wasmtime version pin.
+        # D28B-028: MALLOC_ARENA_MAX / TAIDA_NET_ANNOUNCE_PORT env-vars
+        # are intentionally NOT set for the wasm-wasi backend — wasmtime
+        # has its own allocator and the announce mechanism is
+        # interpreter / native / JS only. Runbook § 4.3 documents this
+        # asymmetry; the launch line below mirrors that documented
+        # behaviour.
         setsid nohup wasmtime run --tcplisten "0.0.0.0:${PORT}" "${BUILT_WASM}" \
             > "${SERVER_LOG}" 2>&1 &
         echo $! > "${SERVER_PID}"
@@ -268,12 +278,26 @@ log "    server ready on 127.0.0.1:${PORT}"
 # preferred load gens for the manual procedure (§ 2.1.2). The signal
 # we care about is sustained traffic, not peak rps.
 log "==> launching curl load generator (log: ${LOAD_LOG})"
+# D28B-028: write a one-line header so an operator inspecting an empty
+# loadgen.log knows the runner started. The previous version sent
+# stdout to /dev/null and only appended stderr; on a healthy run the
+# log was completely empty, which looked like a runner crash.
+echo "# loadgen started $(date -Iseconds) — curl keep-alive loop, http://127.0.0.1:${PORT}/" > "${LOAD_LOG}"
+echo "# format: <iso-timestamp>,<http_code>" >> "${LOAD_LOG}"
 (
     while kill -0 "${PID}" 2>/dev/null; do
         # `--max-time 5` means a stuck connection cannot block the
         # loop indefinitely; that matters at the 24h tail when the
         # server may be in the middle of a cleanup path.
-        curl -sS --max-time 5 "http://127.0.0.1:${PORT}/" > /dev/null 2>>"${LOAD_LOG}" || true
+        # D28B-028: capture HTTP code via --write-out so loadgen.log
+        # shows liveness; only sample once per second to keep the log
+        # bounded over 24h (~86k lines max).
+        ts=$(date -Iseconds)
+        code=$(curl -sS --max-time 5 "http://127.0.0.1:${PORT}/" \
+                    --output /dev/null --write-out '%{http_code}' \
+                    2>>"${LOAD_LOG}" || echo "000")
+        echo "${ts},${code}" >> "${LOAD_LOG}"
+        sleep 1
     done
 ) &
 echo $! > "${LOAD_PID}"
@@ -320,7 +344,11 @@ log "==> soak window closed (${DURATION_HR}h elapsed)"
     echo "  end      = $(date -d @${END_TS} -Iseconds)"
     echo ""
     awk -F, 'NR > 1 {
-        if (NR == 2) { t0=$1; rss0=$2; fd0=$4; thr0=$5; utime0=$6; stime0=$6 }
+        # D28B-028: stime0 was assigned $6 (a typo for $7) — utime0 / stime0 are
+        # not consumed in the END block today (CPU drift is not yet a verdict
+        # axis), but the typo would silently produce wrong values if a future
+        # CPU-drift check is added. Fixed to $7.
+        if (NR == 2) { t0=$1; rss0=$2; fd0=$4; thr0=$5; utime0=$6; stime0=$7 }
         tn=$1; rssn=$2; fdn=$4; thrn=$5; utimen=$6; stimen=$7
         n=NR-1
     }
