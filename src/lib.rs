@@ -30,5 +30,10 @@ pub mod pkg;
 pub mod types;
 #[cfg(feature = "community")]
 pub mod upgrade;
+/// D28B-007: AST-aware code rewriter for the @c.X → @d.X migration.
+/// Implements the `taida upgrade --d28 <path>` subcommand which rewrites
+/// regulation-violating symbols to comply with the D28B-001 (Phase 0
+/// 2026-04-26 Lock) category-based naming rules.
+pub mod upgrade_d28;
 pub mod util;
 pub mod version;

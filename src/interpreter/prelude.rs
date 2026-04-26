@@ -768,6 +768,54 @@ impl Interpreter {
                 Ok(Some(Signal::Value(Value::Bool(true))))
             }
 
+            // ── D28B-015: `strOf(span, raw)` lowercase function-form ──
+            // Cold-path span → owned Str materialization, the function-form
+            // counterpart of the existing `StrOf[span, raw]()` mold (registered
+            // in `mold_eval.rs::lookup_mold_call`).
+            //
+            // The 2026-04-26 D28B-001 naming-rules Lock justifies the
+            // co-existence: `Str` / `StrOf` are mold/PascalCase, `strOf` is the
+            // function/camelCase entry. They produce identical results in all
+            // 4 backends (interpreter / JS / native / wasm-full).
+            //
+            // Semantics (matching `StrOf` mold, `mold_eval.rs:3004`):
+            //   - extract `(start, len)` from span pack
+            //   - clamp `end = start + len` against `raw.len()`
+            //   - try UTF-8 decode the slice; invalid UTF-8 → empty Str
+            //   - non-pack span / non-Bytes/Str raw → empty Str (tolerant)
+            "strOf" => {
+                if args.len() < 2 {
+                    return Err(RuntimeError {
+                        message: "strOf requires 2 arguments: strOf(span, raw)".into(),
+                    });
+                }
+                let span = match self.eval_expr(&args[0])? {
+                    Signal::Value(v) => v,
+                    other => return Ok(Some(other)),
+                };
+                let raw = match self.eval_expr(&args[1])? {
+                    Signal::Value(v) => v,
+                    other => return Ok(Some(other)),
+                };
+                let result = match (
+                    super::mold_eval::extract_span_pack(&span),
+                    super::mold_eval::raw_as_bytes(&raw),
+                ) {
+                    (Some((start, len)), Some(bytes)) => {
+                        let end = start.saturating_add(len);
+                        if end <= bytes.len() {
+                            std::str::from_utf8(&bytes[start..end])
+                                .map(|s| s.to_string())
+                                .unwrap_or_default()
+                        } else {
+                            String::new()
+                        }
+                    }
+                    _ => String::new(),
+                };
+                Ok(Some(Signal::Value(Value::str(result))))
+            }
+
             // ── Net functions (sentinel-guarded), then OS functions ──
             _ => match self.try_net_func(name, args)? {
                 Some(signal) => Ok(Some(signal)),

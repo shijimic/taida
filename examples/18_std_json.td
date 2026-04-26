@@ -32,7 +32,7 @@ stdout("Pretty:")
 stdout(pretty)
 
 // List schema
-PilotEntry = @(name: Str, syncRate: Int)
+PilotEntry = @(name: Str, sync_rate: Int)
 listRaw <= '[{"name": "Asuka", "syncRate": 78}, {"name": "Rei", "syncRate": 65}]'
 JSON[listRaw, @[PilotEntry]]() ]=> pilots
 stdout("Number of pilots: " + pilots.length().toString())

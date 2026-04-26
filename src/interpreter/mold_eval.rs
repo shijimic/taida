@@ -110,7 +110,13 @@ fn parse_bytes_cursor(
 /// C26B-016 (Option B+): extract `(start, len)` from a span pack
 /// `@(start: Int, len: Int)`. Returns None if the value is not a
 /// BuchiPack with both fields present as Int.
-fn extract_span_pack(value: &Value) -> Option<(usize, usize)> {
+///
+/// D28B-015: exposed as `pub(crate)` so the `strOf(span, raw)` function-form
+/// builtin (in `prelude.rs`) can reuse the same span-extraction logic as the
+/// `StrOf[span, raw]()` mold form. Keeping a single extractor preserves
+/// 4-backend parity (interpreter / JS / native / wasm-full all use identical
+/// span-pack semantics: `start: Int`, `len: Int`, both non-negative).
+pub(crate) fn extract_span_pack(value: &Value) -> Option<(usize, usize)> {
     let Value::BuchiPack(fields) = value else {
         return None;
     };
@@ -130,7 +136,11 @@ fn extract_span_pack(value: &Value) -> Option<(usize, usize)> {
 
 /// C26B-016: resolve the raw byte buffer backing a span. Accepts `Bytes`
 /// directly or `Str` (UTF-8 re-encoded). Returns None for other types.
-fn raw_as_bytes(value: &Value) -> Option<std::borrow::Cow<'_, [u8]>> {
+///
+/// D28B-015: exposed as `pub(crate)` so the `strOf(span, raw)` function-form
+/// builtin (in `prelude.rs`) can reuse the same byte-extraction logic as the
+/// `StrOf[span, raw]()` mold form (cf. `extract_span_pack`).
+pub(crate) fn raw_as_bytes(value: &Value) -> Option<std::borrow::Cow<'_, [u8]>> {
     match value {
         Value::Bytes(b) => Some(std::borrow::Cow::Borrowed(b.as_slice())),
         Value::Str(s) => Some(std::borrow::Cow::Borrowed(s.as_bytes())),

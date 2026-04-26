@@ -4074,6 +4074,15 @@ defaulted fields must be provided via `()`",
                         "zip" => Some((2, 2)),
                         "hashMap" => Some((0, 1)),
                         "setOf" => Some((1, 1)),
+                        // D28B-015: `strOf(span, raw)` lowercase function-form
+                        // (function counterpart of `StrOf[span, raw]()` mold).
+                        // The 2026-04-26 D28B-001 naming-rules Lock justifies
+                        // the co-existence of mold form (PascalCase) and
+                        // function form (camelCase). 4-backend parity (interp /
+                        // JS / native / wasm-full) — see `interpreter/prelude.rs`,
+                        // `js/codegen.rs`, `codegen/lower_molds.rs` (function
+                        // dispatch hooks delegate to existing StrOf paths).
+                        "strOf" => Some((2, 2)),
                         "stdout" => Some((1, 1)),
                         "stderr" => Some((1, 1)),
                         "exit" => Some((1, 1)),
@@ -4144,6 +4153,10 @@ defaulted fields must be provided via `()`",
                             }
                         }
                         "toString" | "toStr" => Type::Str,
+                        // D28B-015: `strOf(span, raw)` returns owned Str
+                        // (cold-path span materialization, function counterpart
+                        // of `StrOf[span, raw]()` mold).
+                        "strOf" => Type::Str,
                         "typeOf" | "typeof" => Type::Str,
                         "jsonEncode" | "jsonPretty" => Type::Str,
                         "nowMs" => Type::Int,

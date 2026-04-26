@@ -970,12 +970,18 @@ fn print_upgrade_help() {
         "\
 Usage:
   taida upgrade [--check] [--gen GEN] [--label LABEL] [--version VERSION]
+  taida upgrade --d28 [--check] [--dry-run] <PATH>
 
 Options:
-  --check          Check for updates without installing
+  --check          Check for updates without installing (binary mode)
+                   or report non-compliant files without rewriting (--d28 mode)
   --gen GEN        Filter by generation (e.g. b)
   --label LABEL    Filter by label (e.g. rc2)
   --version VER    Upgrade to an exact version (e.g. @b.10.rc2)
+  --d28 PATH       D28B-007 code-migration mode: rewrite .td files to comply
+                   with the D28B-001 naming rules. Run `taida upgrade --d28
+                   --help` for details.
+  --dry-run        (--d28 only) Print rewrites without modifying files.
 
 Notes:
   --gen and --label can be combined.
@@ -988,7 +994,9 @@ Examples:
   taida upgrade --check
   taida upgrade --label rc2
   taida upgrade --gen b
-  taida upgrade --version @b.10.rc2"
+  taida upgrade --version @b.10.rc2
+  taida upgrade --d28 examples/03_buchi_pack.td
+  taida upgrade --d28 --check src/"
     );
 }
 
@@ -998,6 +1006,15 @@ fn run_upgrade(args: &[String]) {
 
     if args.len() == 1 && is_help_flag(args[0].as_str()) {
         print_upgrade_help();
+        return;
+    }
+
+    // ── D28B-007: `taida upgrade --d28 <path>` (code migration mode) ──
+    // Detects the --d28 flag and delegates to `taida::upgrade_d28::run`.
+    // This is a separate code-rewrite mode from the binary self-upgrade
+    // mode (which is the default behaviour without --d28).
+    if args.iter().any(|a| a == "--d28") {
+        run_upgrade_d28(args);
         return;
     }
 
@@ -1068,6 +1085,127 @@ fn run_upgrade(args: &[String]) {
         eprintln!("Error: {}", e);
         std::process::exit(1);
     }
+}
+
+/// D28B-007: `taida upgrade --d28 <path>` — AST-aware code rewriter.
+///
+/// Rewrites `.td` source files to comply with the D28B-001 Phase 0 Lock
+/// (2026-04-26) category-based naming rules. Operates on parsed AST
+/// (not on text patterns) so the rewrite respects category × value-type
+/// (e.g. `@(callSign <= "Eva-02")` → `@(call_sign <= "Eva-02")` because
+/// the value is a non-function string, but `@(handler <= myFn)` is left
+/// unchanged because the value is a function).
+///
+/// Flags:
+///   --d28          Activate D28 code-migration mode (required)
+///   --check        Report rewrites that would happen, exit 1 if any
+///   --dry-run      Print rewrites but do not modify files
+///   <PATH>         File or directory to process (recurses into directories)
+#[cfg(feature = "community")]
+fn run_upgrade_d28(args: &[String]) {
+    use std::path::PathBuf;
+    use taida::upgrade_d28::{UpgradeD28Config, run};
+
+    let mut path: Option<PathBuf> = None;
+    let mut check_only = false;
+    let mut dry_run = false;
+
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--d28" => {} // already detected
+            "--help" | "-h" => {
+                print_upgrade_d28_help();
+                return;
+            }
+            "--check" => {
+                check_only = true;
+            }
+            "--dry-run" => {
+                dry_run = true;
+            }
+            other if other.starts_with("--") => {
+                eprintln!("Error: unknown option '{}' for upgrade --d28", other);
+                eprintln!("Run `taida upgrade --d28 --help` for usage.");
+                std::process::exit(1);
+            }
+            other => {
+                if path.is_some() {
+                    eprintln!("Error: only one path argument is allowed");
+                    std::process::exit(1);
+                }
+                path = Some(PathBuf::from(other));
+            }
+        }
+        i += 1;
+    }
+
+    let Some(path) = path else {
+        eprintln!("Error: --d28 requires a path argument");
+        eprintln!("Run `taida upgrade --d28 --help` for usage.");
+        std::process::exit(1);
+    };
+
+    if !path.exists() {
+        eprintln!("Error: path does not exist: {}", path.display());
+        std::process::exit(1);
+    }
+
+    let config = UpgradeD28Config {
+        path,
+        check_only,
+        dry_run,
+    };
+
+    match run(config) {
+        Ok((total_rewrites, files_changed)) => {
+            if total_rewrites == 0 {
+                println!("All files compliant with D28B-001 naming rules.");
+            } else if dry_run {
+                println!(
+                    "[dry-run] {} rewrite(s) across {} file(s) would be applied.",
+                    total_rewrites, files_changed
+                );
+            } else {
+                println!(
+                    "Applied {} rewrite(s) across {} file(s).",
+                    total_rewrites, files_changed
+                );
+            }
+        }
+        Err(msg) => {
+            eprintln!("{}", msg);
+            std::process::exit(1);
+        }
+    }
+}
+
+#[cfg(feature = "community")]
+fn print_upgrade_d28_help() {
+    println!(
+        "\
+Usage:
+  taida upgrade --d28 [--check] [--dry-run] <PATH>
+
+Description:
+  Rewrites .td source files to comply with the D28B-001 (Phase 0 2026-04-26
+  Lock) category-based naming rules. Operates on parsed AST so the rewrite
+  respects category x value-type. Idempotent: running the tool twice on the
+  same source produces identical output.
+
+Flags:
+  --d28          Activate D28 code-migration mode (required for this mode).
+  --check        Report rewrites that would happen and exit non-zero if any
+                 file is non-compliant. No files are modified.
+  --dry-run      Print rewrites but do not modify files.
+  -h, --help     Show this help.
+
+Examples:
+  taida upgrade --d28 examples/03_buchi_pack.td
+  taida upgrade --d28 --check src/
+  taida upgrade --d28 --dry-run my_project/
+"
+    );
 }
 
 fn print_build_usage_and_exit() -> ! {

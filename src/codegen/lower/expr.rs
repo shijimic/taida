@@ -703,6 +703,108 @@ impl Lowering {
                 return self.lower_debug_call(func, args);
             }
 
+            // ── D28B-015: `strOf(span, raw)` lowercase function-form ──
+            // Lowers identically to the existing `StrOf[span, raw]()` mold
+            // (`lower_molds.rs::StrOf` arm) — pure IR composition with no new
+            // C runtime symbol. Naming Lock D28B-001: function form is
+            // camelCase, mold form is PascalCase, both valid prelude entries
+            // with bit-identical 4-backend semantics.
+            //
+            // User-defined `strOf` shadows the prelude builtin: only intercept
+            // when the name is NOT a user FuncDef (matches the interpreter's
+            // try_builtin_func dispatch order: user functions resolve first).
+            if name == "strOf" && !self.user_funcs.contains(name) {
+                if args.len() != 2 {
+                    return Err(LowerError {
+                        message: format!(
+                            "strOf requires exactly 2 arguments: strOf(span, raw), got {}",
+                            args.len()
+                        ),
+                    });
+                }
+                let span = self.lower_expr(func, &args[0])?;
+                let raw_is_str = self.expr_is_string_full(&args[1]);
+                let raw = self.lower_expr(func, &args[1])?;
+
+                // start = taida_pack_get(span, hash("start"))
+                let start_hash_var = func.alloc_var();
+                let start_hash = crate::codegen::lower::simple_hash("start") as i64;
+                func.push(IrInst::ConstInt(start_hash_var, start_hash));
+                let start_val = func.alloc_var();
+                func.push(IrInst::Call(
+                    start_val,
+                    "taida_pack_get".to_string(),
+                    vec![span, start_hash_var],
+                ));
+
+                // len = taida_pack_get(span, hash("len"))
+                let len_hash_var = func.alloc_var();
+                let len_hash = crate::codegen::lower::simple_hash("len") as i64;
+                func.push(IrInst::ConstInt(len_hash_var, len_hash));
+                let len_val = func.alloc_var();
+                func.push(IrInst::Call(
+                    len_val,
+                    "taida_pack_get".to_string(),
+                    vec![span, len_hash_var],
+                ));
+
+                // end = taida_int_add(start, len)
+                let end_val = func.alloc_var();
+                func.push(IrInst::Call(
+                    end_val,
+                    "taida_int_add".to_string(),
+                    vec![start_val, len_val],
+                ));
+
+                // raw_bytes = (raw_is_str ? utf8_encode_mold(raw) lax-default to "" : raw)
+                let raw_bytes = if raw_is_str {
+                    let enc_lax = func.alloc_var();
+                    func.push(IrInst::Call(
+                        enc_lax,
+                        "taida_utf8_encode_mold".to_string(),
+                        vec![raw],
+                    ));
+                    let empty_bytes_default = func.alloc_var();
+                    func.push(IrInst::ConstStr(empty_bytes_default, String::new()));
+                    let bytes_from_str = func.alloc_var();
+                    func.push(IrInst::Call(
+                        bytes_from_str,
+                        "taida_lax_get_or_default".to_string(),
+                        vec![enc_lax, empty_bytes_default],
+                    ));
+                    bytes_from_str
+                } else {
+                    raw
+                };
+
+                // bytes = taida_slice_mold(raw_bytes, start, end)
+                let bytes_val = func.alloc_var();
+                func.push(IrInst::Call(
+                    bytes_val,
+                    "taida_slice_mold".to_string(),
+                    vec![raw_bytes, start_val, end_val],
+                ));
+
+                // lax = taida_utf8_decode_mold(bytes)
+                let lax_val = func.alloc_var();
+                func.push(IrInst::Call(
+                    lax_val,
+                    "taida_utf8_decode_mold".to_string(),
+                    vec![bytes_val],
+                ));
+
+                // str = taida_lax_get_or_default(lax, "")
+                let default_val = func.alloc_var();
+                func.push(IrInst::ConstStr(default_val, String::new()));
+                let result = func.alloc_var();
+                func.push(IrInst::Call(
+                    result,
+                    "taida_lax_get_or_default".to_string(),
+                    vec![lax_val, default_val],
+                ));
+                return Ok(result);
+            }
+
             if name == "typeof" || name == "typeOf" {
                 if args.len() != 1 {
                     return Err(LowerError {

@@ -2970,6 +2970,10 @@ impl JsCodegen {
                             "jsonPretty" => self.write("__taida_jsonPretty"),
                             "nowMs" => self.write("__taida_nowMs"),
                             "sleep" => self.write("__taida_sleep"),
+                            // D28B-015: `strOf(span, raw)` lowercase function-form
+                            // delegates to the existing `__taida_net_StrOf`
+                            // runtime helper (always present in `RUNTIME_JS`).
+                            "strOf" => self.write("__taida_net_StrOf"),
                             "readBytes" => self.write("__taida_os_readBytes"),
                             "readBytesAt" => self.write("__taida_os_readBytesAt"),
                             "writeFile" => self.write("__taida_os_writeFile"),
@@ -3069,6 +3073,10 @@ impl JsCodegen {
                             "jsonPretty" => self.write("__taida_jsonPretty"),
                             "nowMs" => self.write("__taida_nowMs"),
                             "sleep" => self.write("__taida_sleep"),
+                            // D28B-015: `strOf(span, raw)` lowercase function-form
+                            // delegates to the existing `__taida_net_StrOf`
+                            // runtime helper (always present in `RUNTIME_JS`).
+                            "strOf" => self.write("__taida_net_StrOf"),
                             "readBytes" => self.write("__taida_os_readBytes"),
                             "readBytesAt" => self.write("__taida_os_readBytesAt"),
                             "writeFile" => self.write("__taida_os_writeFile"),
@@ -4153,6 +4161,10 @@ impl JsCodegen {
                             "jsonPretty" => self.write("__taida_jsonPretty"),
                             "nowMs" => self.write("__taida_nowMs"),
                             "sleep" => self.write("__taida_sleep"),
+                            // D28B-015: `strOf(span, raw)` lowercase function-form
+                            // delegates to the existing `__taida_net_StrOf`
+                            // runtime helper (always present in `RUNTIME_JS`).
+                            "strOf" => self.write("__taida_net_StrOf"),
                             "readBytes" => self.write("__taida_os_readBytes"),
                             "readBytesAt" => self.write("__taida_os_readBytesAt"),
                             "writeFile" => self.write("__taida_os_writeFile"),

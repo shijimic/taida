@@ -1,9 +1,9 @@
 // === Taida Lang: Buchi Pack ===
-pilot <= @(name <= "Asuka", age <= 14, callSign <= "Eva-02")
+pilot <= @(name <= "Asuka", age <= 14, call_sign <= "Eva-02")
 
 stdout(`Name: ${pilot.name}`)
 stdout(`Age: ${pilot.age}`)
-stdout(`CallSign: ${pilot.callSign}`)
+stdout(`CallSign: ${pilot.call_sign}`)
 
 // Nested buchi pack
 staff <= @(

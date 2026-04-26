@@ -82,7 +82,7 @@ requestData <= @(
   action <= "update",
   targets <= @[1, 3],
   metadata <= @(
-    updatedBy <= "admin",
+    updated_by <= "admin",
     reason <= "batch activation"
   )
 )
