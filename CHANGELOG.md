@@ -153,13 +153,21 @@ breaking-change manifest).
   collapsed to 0.89 MiB / h on a 30-min smoke (~5,400×
   improvement); the 4 GiB plateau is gone. The h2 server got the
   paired fix above.
-- **Scatter-gather + 24h soak verification** (D28B-006 +
-  D28B-014): D28B-006 FIXED + D28B-014 PARTIAL. The 24h runbook
+- **Scatter-gather + 3h sustained soak verification** (D28B-006 +
+  D28B-014): D28B-006 FIXED + D28B-014 PARTIAL (3h sustained
+  acceptance, D28 Round 2 review 縮約 — 旧 24h は industry SLA
+  convention 由来の holdover で技術的合理性なしとして廃止、
+  `.dev/C26_PROGRESS.md` L195 の auto-decider verdict と整合).
+  The 3h sustained runbook
   (`.dev/D28_SOAK_RUNBOOK.md`), the detached-run automation
-  wrapper (`scripts/soak/run_24h_soak.sh`), and the
+  wrapper (`scripts/soak/run-24h-soak.sh` — script name is legacy,
+  default duration is now `--duration-hr 3`), and the
   scatter-gather smoke regression test all landed; the actual
-  24h × 4-backend × 1-pass execution is user-actionable and is
+  3h × 4-backend × 1-pass execution is user-actionable and is
   closed at the Phase 12 GATE on user-supplied PASS records.
+  Either `fast-soak-proxy.sh --duration-min 180` (single-tool
+  primary path) or `run-24h-soak.sh --duration-hr 3` (multi-
+  backend dispatch) can close the acceptance.
 - **TLS configuration** (D28B-003): OBSERVATION only. No active
   scope — verdict inherited from the C26 / C27 cycles. The
   three-way TLS-config parity test remains green.
@@ -238,15 +246,22 @@ breaking-change manifest).
 - `STABILITY § 5.5 Memory` is FIXED at `@d.X` and lists all four
   gates with their tolerance / sample / scope settings.
 
-### §7 24h soak verification
+### §7 Sustained soak verification (3h primary, 24h optional extended)
 
-- **24h scatter-gather soak runbook** (`.dev/D28_SOAK_RUNBOOK.md`):
+- **Sustained scatter-gather soak runbook**
+  (`.dev/D28_SOAK_RUNBOOK.md`):
   derived from `.dev/C26_SOAK_RUNBOOK.md`, extended to 4-backend
   acceptance and pinned against the wF arena-reset baseline.
-  Acceptance ownership is split between agent (runbook +
-  automation maintenance, detached-run wrapper) and user (final
-  PASS record approval, tag push). `<TBD: PASS record link or
-  Phase 12 GATE artefact reference>`
+  D28 Round 2 review 縮約: primary acceptance is **3h sustained ×
+  4-backend × 1-pass** (旧 24h は industry SLA convention 由来の
+  holdover で技術的合理性なし、`.dev/C26_PROGRESS.md` L195 の
+  「2-4h sustained で 95% regression cover」結論と整合)。
+  24h extended runs remain available as an optional release-note
+  supplement (`run-24h-soak.sh --duration-hr 24`) but are not
+  acceptance conditions. Acceptance ownership is split between agent (runbook
+  + automation maintenance, detached-run wrapper) and user
+  (final PASS record approval, tag push). `<TBD: PASS record link
+  or Phase 12 GATE artefact reference>`
 - **30-min fast-soak-proxy 4-backend smoke**: post-fix native
   baseline shows RSS 5,108 KiB → 5,556 KiB on a 30-min smoke
   (rate 911 KiB / h; samples 2..60 are bit-identical at

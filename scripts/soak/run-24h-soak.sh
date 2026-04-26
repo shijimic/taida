@@ -1,7 +1,15 @@
 #!/usr/bin/env bash
-# D28B-014 (Round 2 wI) — 24h NET soak runner for `.dev/D28_SOAK_RUNBOOK.md`.
+# D28B-014 (Round 2 wI; D28 Round 2 review follow-up縮約 2026-04-26)
+# — sustained NET soak runner for `.dev/D28_SOAK_RUNBOOK.md`.
 #
-# This script automates the 24h scatter-gather soak run that closes
+# Script name (`run-24h-soak.sh`) is legacy from the original 24h-as-
+# acceptance era. After the D28 Round 2 review (acceptance縮約: 24h →
+# 3h sustained, see `.dev/C26_PROGRESS.md` L195 + `.dev/D28_BLOCKERS
+# .md::D28B-014`), the **default duration is 3h** (D28B-014 primary
+# acceptance). The script still supports any --duration-hr including
+# 24 for extended runs.
+#
+# This script automates the scatter-gather soak run that closes
 # D28B-014 (and D28B-006 by absorption). It is deliberately a thin
 # wrapper over the procedure documented in
 # `.dev/D28_SOAK_RUNBOOK.md § 2`, not a replacement for that runbook.
@@ -12,13 +20,16 @@
 #
 # Compared to `fast-soak-proxy.sh`:
 #
-#   * fast-soak-proxy is hard-capped at 180 minutes (3h) because it
-#     uses a per-invocation /tmp/fastsoak.XXXXXX directory not sized
-#     for 24h of CSV samples and because its purpose is the iteration
-#     loop signal, not the acceptance run.
-#   * This script has no upper duration cap; it writes to a stable
-#     `~/soak-logs/d28/<backend>/<date>/` directory and uses
-#     `setsid nohup` so the run survives terminal disconnect.
+#   * fast-soak-proxy is hard-capped at 180 minutes (3h), which now
+#     coincides exactly with the D28B-014 primary acceptance duration.
+#     Use fast-soak-proxy when you want a single 3h smoke that closes
+#     the acceptance, or use this script for the same 3h with the
+#     stable output directory + PID files + 4-backend dispatch.
+#   * This script has no upper duration cap; --duration-hr accepts
+#     any positive value (3 default, 24 for extended optional runs).
+#     Output goes to a stable `~/soak-logs/d28/<backend>/<date>/`
+#     directory; `setsid nohup` makes the run survive terminal
+#     disconnect (especially relevant for 24h extended runs).
 #   * This script does *not* return PASS/FAIL by itself; the human
 #     judgement loop in runbook § 4 reads the monitor.csv after the
 #     window closes and writes the REPORT.md (§ 5.2).
@@ -34,9 +45,10 @@
 #
 # Defaults:
 #   --backend native
-#   --duration-hr 24
+#   --duration-hr 3        (D28B-014 primary acceptance — D28縮約後)
 #   --output ~/soak-logs/d28/<backend>/<YYYY-MM-DD>/
 #   --fixture examples/quality/d28b_014_24h_soak_fixture/server.td
+#                          (fixture 名は legacy、3h / 24h 兼用)
 #   --port 18100
 #
 # Backends:
@@ -65,7 +77,7 @@
 set -euo pipefail
 
 BACKEND="native"
-DURATION_HR=24
+DURATION_HR=3   # D28B-014 primary acceptance (D28 Round 2 review 縮約 2026-04-26)
 OUTPUT=""
 FIXTURE=""
 PORT=18100
@@ -78,11 +90,13 @@ while [ $# -gt 0 ]; do
         --fixture) FIXTURE="$2"; shift 2 ;;
         --port) PORT="$2"; shift 2 ;;
         -h|--help)
-            # D28B-028: clamp to the actual usage block (lines 1-63);
-            # the previous `1,72p` reached past the comment header into
-            # `set -euo pipefail` and the arg-parse loop, which leaked
-            # implementation lines into --help output.
-            sed -n '1,63p' "$0" | sed 's/^# \{0,1\}//'
+            # D28B-028: clamp to the usage block (lines 1-75 after the
+            # D28B-014 縮約 header expansion); the previous `1,72p` and
+            # earlier `1,63p` were both off after the docstring grew. The
+            # actual usage header now ends at line 75 (last `# See ...`
+            # line), and `set -euo pipefail` is on line 77, so 1,75p is
+            # the right truncation.
+            sed -n '1,75p' "$0" | sed 's/^# \{0,1\}//'
             exit 0
             ;;
         *) echo "unknown arg: $1" >&2; exit 1 ;;
