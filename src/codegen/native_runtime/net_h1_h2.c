@@ -4121,6 +4121,23 @@ static void *net_worker_thread(void *arg) {
                 }
             }
 
+            /* D28B-012 (Round 2 wF): per-request arena boundary.
+             *
+             * Every per-request taida_val (request pack, response pack,
+             * span packs, body string, parse_inner subgraph) has been
+             * released to refcount 0 above. Their arena-backed slots
+             * are logically dead but the bump arena offset has not
+             * rewound — that is the 4 GB plateau / 4.7 GB/h drift root
+             * cause D28B-012 escalates from C27B-029.
+             *
+             * `buf` (the per-connection scratch buffer at line 3568) is
+             * TAIDA_MALLOC-backed, not arena, so the buffer advance
+             * above is unaffected by this reset. The pool->handler
+             * closure was created on the main thread (separate __thread
+             * arena) and is also unaffected. No live taida_val
+             * references this thread's arena across this boundary. */
+            taida_arena_request_reset();
+
             // Close if not keep-alive or limit reached
             if (!keep_alive || limit_hit) break;
         }
@@ -4137,6 +4154,17 @@ static void *net_worker_thread(void *arg) {
         buf = NULL;
         total_read = 0;
         buf_cap = 8192;
+
+        /* D28B-012 (Round 2 wF): connection-boundary arena reset.
+         *
+         * Catches the early-exit paths (head_malformed, EOF before
+         * head, body parse error, WebSocket close, request limit
+         * exhausted on a partial connection) where the per-iteration
+         * reset above could not fire. Idempotent if already drained:
+         * the freelist drain loops exit immediately on count==0 and
+         * the chunk-keep-one-rewind path is a no-op when chunk[0] is
+         * already at offset 0. */
+        taida_arena_request_reset();
 
         // Re-allocate buffer for next connection
         // (will be done at top of next keep-alive loop iteration)
