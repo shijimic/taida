@@ -435,7 +435,7 @@ fn apply_rewrites(source: &str, mut rewrites: Vec<Rewrite>) -> (String, usize) {
     }
     // Sort by start desc so byte-offset shifting after a replacement does
     // not invalidate earlier (lower-indexed) rewrite positions.
-    rewrites.sort_by(|a, b| b.start.cmp(&a.start));
+    rewrites.sort_by_key(|b| std::cmp::Reverse(b.start));
     rewrites
         .dedup_by(|a, b| a.start == b.start && a.end == b.end && a.replacement == b.replacement);
 
