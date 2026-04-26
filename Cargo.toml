@@ -106,6 +106,13 @@ h3-quinn = "0.0.10"
 # / release binaries do not pull it in.
 criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
 
+# D29B-006 (Track-α, Phase 2): heap profiler used by zero-allocation guard
+# tests (e.g. `tests/d29b_006_span_eq_needle_zero_alloc.rs`). The profiler
+# is opt-in per test crate via `#[global_allocator] static A: dhat::Alloc =
+# dhat::Alloc;` and `dhat::Profiler::builder().testing().build()`. Pinned
+# at 0.3.x for stable API surface.
+dhat = "0.3"
+
 # C25B-004 scaffold: one bench target; disable harness so criterion owns
 # the test harness. Additional axes (cold-compile, native runtime) will be
 # added in Phase 2 follow-up.
