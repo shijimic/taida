@@ -1155,6 +1155,155 @@ by the compiler or CLI when the deprecated symbol is used. The
 symbol is **not** removed until the next `<gen>` bump. The minimum
 deprecation window is one full generation.
 
+### 6.5. gen-D rationale and `@d.X` breaking-change manifest
+
+This subsection enumerates the breaking changes that justify the
+generation bump from `gen-C` to `gen-D` and that land at the
+label-less `@d.X` tag (X is fixed by the CI build counter at the
+Phase 12 GATE; the literal `@d.X` is used wherever the ordinal is
+not yet known). Each item maps to a §1.1 bullet so downstream
+tooling and addon authors can audit how each change is justified
+under the policy in §6.1.
+
+The single source of truth for the per-item acceptance evidence is
+`.dev/D28_BLOCKERS.md`; this subsection is the surface-side
+manifest pinned for the entire gen-D generation.
+
+#### 6.5.1. Naming-rule lock and rule-violator normalisation
+
+- **Locked rules** (D28B-001, `docs/reference/naming_conventions.md`):
+  the seven naming categories (class-like type / mold type / schema
+  PascalCase, function camelCase, buchi-pack field with
+  function-value camelCase / non-function-value snake_case,
+  variable holding function value camelCase / variable holding
+  non-function value snake_case, constant SCREAMING_SNAKE_CASE,
+  error variant PascalCase) and the type-variable convention
+  (single capital letter such as `T`, `U`, `E`, `K`, `V`, `P`, `R`)
+  are pinned for the whole gen-D generation.
+- **Why this is breaking** (§1.1 bullet 2 — *Removing or renaming
+  a prelude function, mold, or type*): symbols that violated the
+  locked rules (for example buchi-pack non-function-value fields
+  spelled `callSign`, `syncRate`, `updatedBy`) are renamed to the
+  rule-conformant casing (`call_sign`, `sync_rate`, `updated_by`).
+  Programs that referenced the old names by literal field access
+  must be updated. Mechanical rewriting is provided by
+  `taida upgrade --d28` (see §6.6).
+- **Mold-form / function-form coexistence** (D28B-015):
+  `Map[xs](_)` / `map(xs, _)`, `StrOf[span, raw]()` / `strOf(span, raw)`
+  remain simultaneously valid; the lock confirmed that PascalCase
+  mold-form and camelCase function-form occupy different naming
+  categories and need not be unified.
+
+#### 6.5.2. Lint hard-fail (E1801..E1809)
+
+- **New diagnostic codes** (D28B-008, `docs/reference/diagnostic_codes.md`):
+  E1801 buchi-pack non-function-value field rule violation,
+  E1802 buchi-pack function-value field rule violation,
+  E1803 schema field rule violation, E1804 PascalCase
+  type-shape rule violation, E1805 reserved (constants, requires
+  usage tracking — currently AST-only detection is impractical),
+  E1806 type-variable single-letter rule violation, E1807 function
+  rule violation, E1808 variable casing rule violation, E1809
+  return-type `:` marker omission.
+- **Why this is breaking** (§1.1 bullet 5 — *Removing or renaming a
+  diagnostic code `E1xxx` used in tooling*, by addition / band
+  expansion): the E18xx band is now reserved for naming-rule lints
+  and is enforced as a CI hard-fail on the curated user-facing
+  scope (`examples/*.td` minus `compile_*.td` and minus
+  `examples/quality/`). Tooling that previously assumed the E18xx
+  band was unused must be updated.
+
+#### 6.5.3. Addon manifest `targets` field contract (D28B-021)
+
+- **Default-inject contract**: `targets` is a new manifest field.
+  Manifests that omit `targets` are treated bit-identically to
+  manifests that declare `targets = ["native"]`; the loader
+  injects the default explicitly rather than silently falling
+  through. Unknown target strings are rejected at load time with
+  diagnostic `[E2001] unknown addon target` and `[E2002] addon
+  manifest targets must be a list of strings`.
+- **Why this is breaking** (§1.1 bullet 6 — *Incompatible changes
+  to the addon manifest schema*): the schema is widened to admit
+  the field, but the rejection of unknown target strings is a new
+  fail-closed surface that did not exist in gen-C.
+- **Stable-after default-change policy**: once `@d.X` is tagged,
+  the default value of `targets` (`["native"]`) is itself part of
+  the surface contract. Changing it is a breaking change and is
+  admissible only at the next generation bump (`@e.*`). A widening
+  that adds a new admissible target string (e.g. `"wasm"`) without
+  changing the default is additive and lands at a `<num>` bump.
+
+#### 6.5.4. Migration tooling: `taida upgrade --d28` is the
+single-direction rewriter
+
+- **Tool** (D28B-007, `src/upgrade_d28.rs`,
+  `taida upgrade --d28 [--check] [--dry-run] <PATH>`): three-pass
+  AST visitor that (1) collects rule-violating buchi-pack and
+  schema-field rewrites, (2) propagates renamed field reads, and
+  (3) tokenises template-string interpolations (parser does not
+  re-parse template strings, so the third pass is textual but
+  rename-set-aware).
+- **Idempotency**: applying the tool twice to the same source
+  produces identical output (pinned by unit test in
+  `src/upgrade_d28.rs::tests::idempotent_*`).
+- **Single direction**: there is no inverse tool. Users are
+  expected to commit a clean tree before invoking
+  `taida upgrade --d28`.
+
+#### 6.5.5. Auxiliary rules
+
+- **`.td` filenames**: snake_case (D28B-001 auxiliary).
+- **Module imports**: `<author>/<package>` slug pair, each in
+  kebab-case (D28B-001 auxiliary).
+- **Argument / field type-annotation forms A and B**: both
+  `arg: Type` (form A, identifier without `:` prefix) and
+  `arg :Type` (form B, type literal with `:` prefix) are valid;
+  the writer chooses. The mixed form `arg: :Type` is rejected by
+  the parser. The return-type position (`=> Type` vs `=> :Type`)
+  is parsed leniently for backward compatibility but lints (E1809)
+  warn when the `:` marker is absent.
+- **`docs/reference/operators.md`**: opens with the per-context
+  type-notation rules table that documents which positions
+  require the `:` marker and which positions are
+  identifier-position (D28B-016 acceptance landed in Round 1 wA).
+
+### 6.6. Migration tooling
+
+`taida upgrade --d28` is the canonical migration tool for
+moving gen-C source to gen-D. It is intentionally
+single-direction:
+
+1. The user commits a clean tree.
+2. `taida upgrade --d28 <PATH>` rewrites `.td` and `.tdm` files
+   in place; `--dry-run` prints the diff without writing;
+   `--check` exits non-zero if any rewrites would be applied
+   (suitable for CI gates that want to assert
+   "this tree has been upgraded").
+3. The rewriter handles the mechanical buchi-pack and schema-field
+   case conversions (see §6.5.1). Symbols outside its three-pass
+   scope (for instance free identifiers used in dynamic addon
+   `Lookup[...]` calls) require manual review; the tool emits a
+   `taida upgrade --d28: residual references` warning when it
+   detects such identifiers.
+4. The tool itself is part of the gen-D surface and is pinned by
+   `tests/d28b_007_upgrade_d28.rs`. Output stability is required
+   by the `idempotent_*` tests; a future regression that breaks
+   idempotency is itself a breaking change against §6.5.4.
+
+A migration guide (in addition to this section) is published at
+`CHANGELOG.md` §3 (gen-D entry) per §6.1 step 4.
+
+### 6.7. Stable-after surface lock
+
+After the `@d.X` tag is pushed, the stable-surface contract in
+§§ 2-4 is in effect for the entire gen-D generation
+(`@d.X.*` `<num>` increments). All breaking-change additions
+proposed during gen-D follow §6.1 and land only at the next
+generation bump (`@e.*`). The tracking files for those proposals
+are `.dev/FUTURE_BLOCKERS.md` (post-stable items deliberately
+deferred) and a future `.dev/E*_BLOCKERS.md` (will be created when
+gen-E planning starts).
+
 ---
 
 ## 7. Scope note
