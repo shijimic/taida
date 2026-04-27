@@ -1128,46 +1128,156 @@ static taida_val h3_dispatch_request(H3ServeCtx *ctx, taida_val request_pack) {
 static taida_val h3_build_request_pack(H3RequestFields *fields,
                                         const unsigned char *body, size_t body_len,
                                         const char *peer_host, int peer_port) {
-    // Header list @[@(name: Str, value: Str)]
-    taida_val hdr_list = taida_list_new();
-    for (int i = 0; i < fields->regular_count; i++) {
-        taida_val entry = taida_pack_new(2);
-        taida_pack_set_hash(entry, 0, taida_str_hash((taida_val)"name"));
-        taida_pack_set(entry, 0, (taida_val)taida_str_new_copy(fields->regular_headers[i].name));
-        taida_pack_set_tag(entry, 0, TAIDA_TAG_STR);
-        taida_pack_set_hash(entry, 1, taida_str_hash((taida_val)"value"));
-        taida_pack_set(entry, 1, (taida_val)taida_str_new_copy(fields->regular_headers[i].value));
-        taida_pack_set_tag(entry, 1, TAIDA_TAG_STR);
-        hdr_list = taida_list_append(hdr_list, entry);
-    }
-    // :authority as host header
-    if (fields->authority[0] != '\0') {
-        taida_val entry = taida_pack_new(2);
-        taida_pack_set_hash(entry, 0, taida_str_hash((taida_val)"name"));
-        taida_pack_set(entry, 0, (taida_val)taida_str_new_copy("host"));
-        taida_pack_set_tag(entry, 0, TAIDA_TAG_STR);
-        taida_pack_set_hash(entry, 1, taida_str_hash((taida_val)"value"));
-        taida_pack_set(entry, 1, (taida_val)taida_str_new_copy(fields->authority));
-        taida_pack_set_tag(entry, 1, TAIDA_TAG_STR);
-        hdr_list = taida_list_append(hdr_list, entry);
-    }
+    // D29B-011 (Track-ζ Lock-H, 2026-04-27): mirror h2_build_request_pack.
+    // QPACK has the same dynamic-table reallocation problem as HPACK, so
+    // we copy decoded pseudo / regular header bytes into a per-request
+    // arena alongside the body, then expose every Str-shaped field as
+    // span packs into that arena. This brings h3 to byte-identical span
+    // shape with h1 / h2 and lets SpanEquals[req.method, req.raw, "GET"]()
+    // succeed under h3 instead of silently returning false.
+    //
+    // Strategy V1-A (sub-Lock Phase-5_..._track-zeta_sub-Lock.md):
+    // single arena layout
+    //   [body | method | path | query | n1 v1 n2 v2 ... | "host" authority]
 
-    // Split path and query
+    // Split path and query first so we know their lengths for arena sizing.
     char path_part[2048], query_part[2048];
     const char *qmark = strchr(fields->path, '?');
+    size_t path_part_len, query_part_len;
     if (qmark) {
         size_t plen = (size_t)(qmark - fields->path);
         if (plen >= sizeof(path_part)) plen = sizeof(path_part) - 1;
         memcpy(path_part, fields->path, plen);
         path_part[plen] = '\0';
+        path_part_len = plen;
         snprintf(query_part, sizeof(query_part), "%s", qmark + 1);
+        query_part_len = strlen(query_part);
     } else {
         snprintf(path_part, sizeof(path_part), "%s", fields->path);
+        path_part_len = strlen(path_part);
         query_part[0] = '\0';
+        query_part_len = 0;
     }
 
-    // Body as Bytes
-    taida_val raw_bytes = taida_bytes_from_raw(body, (taida_val)body_len);
+    size_t method_len = strlen(fields->method);
+
+    // Compute arena capacity: body + method + path + query + every header
+    // name/value, plus the synthesized host header when :authority is set.
+    // The H3RequestFields layout caps regular_count at H3_MAX_HEADERS;
+    // we use the same bound here.
+    size_t arena_size = body_len + method_len + path_part_len + query_part_len;
+    size_t header_lens[H3_MAX_HEADERS][2];
+    for (int i = 0; i < fields->regular_count && i < H3_MAX_HEADERS; i++) {
+        header_lens[i][0] = strlen(fields->regular_headers[i].name);
+        header_lens[i][1] = strlen(fields->regular_headers[i].value);
+        arena_size += header_lens[i][0] + header_lens[i][1];
+    }
+    size_t authority_len = strlen(fields->authority);
+    int has_host = authority_len > 0 ? 1 : 0;
+    if (has_host) {
+        arena_size += 4 /* "host" */ + authority_len;
+    }
+
+    unsigned char *arena = (unsigned char*)TAIDA_MALLOC(arena_size > 0 ? arena_size : 1, "h3_arena");
+    if (!arena) {
+        // OOM: degrade to legacy form (body-only raw, Str packs).
+        arena_size = 0;
+    }
+
+    // 1. body
+    if (arena && body_len > 0) memcpy(arena, body, body_len);
+    size_t cursor = body_len;
+
+    // 2. method / path / query
+    size_t method_start = cursor;
+    if (arena && method_len > 0) memcpy(arena + cursor, fields->method, method_len);
+    cursor += method_len;
+
+    size_t path_start = cursor;
+    if (arena && path_part_len > 0) memcpy(arena + cursor, path_part, path_part_len);
+    cursor += path_part_len;
+
+    size_t query_start = cursor;
+    if (arena && query_part_len > 0) memcpy(arena + cursor, query_part, query_part_len);
+    cursor += query_part_len;
+
+    // 3. headers (regular)
+    size_t header_starts[H3_MAX_HEADERS][2];
+    for (int i = 0; i < fields->regular_count && i < H3_MAX_HEADERS; i++) {
+        header_starts[i][0] = cursor;
+        if (arena && header_lens[i][0] > 0) {
+            memcpy(arena + cursor, fields->regular_headers[i].name, header_lens[i][0]);
+        }
+        cursor += header_lens[i][0];
+        header_starts[i][1] = cursor;
+        if (arena && header_lens[i][1] > 0) {
+            memcpy(arena + cursor, fields->regular_headers[i].value, header_lens[i][1]);
+        }
+        cursor += header_lens[i][1];
+    }
+
+    // 4. :authority -> host header
+    size_t host_name_start = 0, host_value_start = 0;
+    if (has_host) {
+        host_name_start = cursor;
+        if (arena) memcpy(arena + cursor, "host", 4);
+        cursor += 4;
+        host_value_start = cursor;
+        if (arena && authority_len > 0) memcpy(arena + cursor, fields->authority, authority_len);
+        cursor += authority_len;
+    }
+
+    // 5. raw = Bytes(arena). Free the staging arena after taida_bytes_from_raw
+    // memcpys it into the taida_val[] slot layout.
+    taida_val raw_bytes;
+    if (arena) {
+        raw_bytes = taida_bytes_from_raw(arena, (taida_val)arena_size);
+        free(arena);
+    } else {
+        raw_bytes = taida_bytes_from_raw(body, (taida_val)body_len);
+    }
+
+    // 6. Header list: span packs into the arena (or fall back to Str on OOM)
+    taida_val hdr_list = taida_list_new();
+    for (int i = 0; i < fields->regular_count && i < H3_MAX_HEADERS; i++) {
+        taida_val entry = taida_pack_new(2);
+        taida_pack_set_hash(entry, 0, taida_str_hash((taida_val)"name"));
+        taida_pack_set_hash(entry, 1, taida_str_hash((taida_val)"value"));
+        if (arena_size > 0) {
+            taida_pack_set(entry, 0, taida_net_make_span(
+                (taida_val)header_starts[i][0], (taida_val)header_lens[i][0]));
+            taida_pack_set_tag(entry, 0, TAIDA_TAG_PACK);
+            taida_pack_set(entry, 1, taida_net_make_span(
+                (taida_val)header_starts[i][1], (taida_val)header_lens[i][1]));
+            taida_pack_set_tag(entry, 1, TAIDA_TAG_PACK);
+        } else {
+            taida_pack_set(entry, 0, (taida_val)taida_str_new_copy(
+                fields->regular_headers[i].name));
+            taida_pack_set_tag(entry, 0, TAIDA_TAG_STR);
+            taida_pack_set(entry, 1, (taida_val)taida_str_new_copy(
+                fields->regular_headers[i].value));
+            taida_pack_set_tag(entry, 1, TAIDA_TAG_STR);
+        }
+        hdr_list = taida_list_append(hdr_list, entry);
+    }
+    if (has_host) {
+        taida_val entry = taida_pack_new(2);
+        taida_pack_set_hash(entry, 0, taida_str_hash((taida_val)"name"));
+        taida_pack_set_hash(entry, 1, taida_str_hash((taida_val)"value"));
+        if (arena_size > 0) {
+            taida_pack_set(entry, 0, taida_net_make_span((taida_val)host_name_start, 4));
+            taida_pack_set_tag(entry, 0, TAIDA_TAG_PACK);
+            taida_pack_set(entry, 1, taida_net_make_span(
+                (taida_val)host_value_start, (taida_val)authority_len));
+            taida_pack_set_tag(entry, 1, TAIDA_TAG_PACK);
+        } else {
+            taida_pack_set(entry, 0, (taida_val)taida_str_new_copy("host"));
+            taida_pack_set_tag(entry, 0, TAIDA_TAG_STR);
+            taida_pack_set(entry, 1, (taida_val)taida_str_new_copy(fields->authority));
+            taida_pack_set_tag(entry, 1, TAIDA_TAG_STR);
+        }
+        hdr_list = taida_list_append(hdr_list, entry);
+    }
 
     // version pack @(major: 3, minor: 0) — HTTP/3
     taida_val version_pack = taida_pack_new(2);
@@ -1188,15 +1298,27 @@ static taida_val h3_build_request_pack(H3RequestFields *fields,
         f++; \
     } while(0)
 
-    SET_FIELD_H3("method",      (taida_val)taida_str_new_copy(fields->method), TAIDA_TAG_STR);
-    SET_FIELD_H3("path",        (taida_val)taida_str_new_copy(path_part),       TAIDA_TAG_STR);
-    SET_FIELD_H3("query",       (taida_val)taida_str_new_copy(query_part),      TAIDA_TAG_STR);
+    // D29B-011: method/path/query are span packs into req.raw on the
+    // arena fast path. On OOM fallback they remain Str (legacy form).
+    if (arena_size > 0) {
+        SET_FIELD_H3("method", taida_net_make_span((taida_val)method_start, (taida_val)method_len), TAIDA_TAG_PACK);
+        SET_FIELD_H3("path",   taida_net_make_span((taida_val)path_start,   (taida_val)path_part_len),   TAIDA_TAG_PACK);
+        SET_FIELD_H3("query",  taida_net_make_span((taida_val)query_start,  (taida_val)query_part_len),  TAIDA_TAG_PACK);
+    } else {
+        SET_FIELD_H3("method", (taida_val)taida_str_new_copy(fields->method), TAIDA_TAG_STR);
+        SET_FIELD_H3("path",   (taida_val)taida_str_new_copy(path_part),       TAIDA_TAG_STR);
+        SET_FIELD_H3("query",  (taida_val)taida_str_new_copy(query_part),      TAIDA_TAG_STR);
+    }
     SET_FIELD_H3("version",     version_pack,                                 TAIDA_TAG_PACK);
     SET_FIELD_H3("headers",     hdr_list,                                     TAIDA_TAG_LIST);
-    SET_FIELD_H3("body",        raw_bytes,                                    TAIDA_TAG_PACK);
+    // body span references the leading body_len bytes of the arena (offset 0)
+    SET_FIELD_H3("body",        taida_net_make_span(0, (taida_val)body_len),  TAIDA_TAG_PACK);
     SET_FIELD_H3("bodyOffset",  (taida_val)0,                                 TAIDA_TAG_INT);
     SET_FIELD_H3("contentLength",(taida_val)(int64_t)body_len,                TAIDA_TAG_INT);
-    taida_retain(raw_bytes);
+    // D29B-011: post-arena, body field is now a span pack (not a Bytes
+    // ref), so raw_bytes is referenced exactly once via the "raw" field.
+    // The previous taida_retain(raw_bytes) covered the dual-field shape;
+    // with body now a span the extra retain would cause a leak.
     SET_FIELD_H3("raw",         raw_bytes,                                    TAIDA_TAG_PACK);
     SET_FIELD_H3("remoteHost",  (taida_val)taida_str_new_copy(peer_host),       TAIDA_TAG_STR);
     SET_FIELD_H3("remotePort",  (taida_val)(int64_t)peer_port,                TAIDA_TAG_INT);

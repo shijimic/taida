@@ -599,7 +599,30 @@ mod tests {
         //   Uint8Array.subarray view); Native output parity is preserved.
         //   Measured delta: 1,046,085 (Track-β base) + 803 (Track-ε
         //   comment block) = 1,046,888.
-        const EXPECTED_TOTAL_LEN: usize = 1_046_888;
+        // D29B-001 / D29B-011 (Track-ζ, 2026-04-27): +11,572 bytes total —
+        //   split as net_h1_h2.c +5,919 (h2_build_request_pack rewritten
+        //   to allocate a per-request arena that holds [body | method |
+        //   path | query | header name/value pairs ...] as a single
+        //   contiguous buffer, with method/path/query/headers all
+        //   surfaced as `@(start, len)` span packs into req.raw, plus an
+        //   OOM-tolerant fallback path that retains the legacy Str-pack
+        //   form when the staging arena allocation fails) and
+        //   net_h3_quic.c +5,653 (h3_build_request_pack rewritten with
+        //   the symmetric strategy for QPACK headers; same arena layout
+        //   so SpanEquals[req.method, req.raw, "GET"]() returns the same
+        //   Bool under h1/h2/h3). The HPACK / QPACK dynamic tables
+        //   reallocate during decode so the arena copy is the only way
+        //   to give Span* mold a stable backing buffer; the pre-fix
+        //   `req.headers[i].name` was a Str (not a span pack), causing
+        //   `extract_span_pack` to return None and SpanEquals to silently
+        //   fall through to false under h2/h3 — protocol-divergent
+        //   behavior that violated the
+        //   `docs/reference/net_api.md §3.1` contract
+        //   `headers: @[@(name: span, value: span)]`. core.c is
+        //   unchanged on this track (taida_net_make_span and
+        //   taida_bytes_from_raw helpers were already available).
+        //   EXPECTED_TOTAL_LEN: 1,046,888 + 11,572 = 1,058,460.
+        const EXPECTED_TOTAL_LEN: usize = 1_058_460;
         let asm = *NATIVE_RUNTIME_C;
         assert_eq!(
             asm.len(),
@@ -1143,11 +1166,23 @@ mod tests {
         //   insertions live well before the "// ── Native HTTP/2 server"
         //   divider so F5 grows and F6 (HTTP/2 server) is unchanged.
         //   F5_LEN moves: 188,398 + 4,291 = 192,689.
+        // D29B-001 (Track-ζ, 2026-04-27): +5,919 bytes inside fragment 6
+        //   (HTTP/2 server) for the h2_build_request_pack rewrite —
+        //   per-request arena allocation + memcpy of body + method +
+        //   path + query + header name/value pairs into a single
+        //   contiguous buffer, with the resulting span starts/lens
+        //   surfaced as `@(start, len)` packs into req.raw. Includes an
+        //   OOM-tolerant fallback that reverts to the legacy Str-pack
+        //   form when the staging arena allocation fails (so a per-
+        //   request transient OOM degrades SpanEquals to silent-miss
+        //   instead of crashing the server). All bytes land after the
+        //   "// ── Native HTTP/2 server" divider so F5_LEN is unchanged
+        //   and F6 grows: 99,442 + 5,919 = 105,361.
         const F5_LEN: usize = 192_689;
         assert_eq!(
             NET_H1_H2_SECTION.len(),
-            192_689 + 99_442,
-            "net_h1_h2.c total byte length must equal legacy fragment5 + fragment6 (C26B-026 / C26B-022-wS / C27B-014 / C27B-026 / D28B-012 wF / D28B-002 wG / D28B-025 review follow-up / D29B-003 Track-β contig writev hot-path adjusted)"
+            192_689 + 105_361,
+            "net_h1_h2.c total byte length must equal legacy fragment5 + fragment6 (C26B-026 / C26B-022-wS / C27B-014 / C27B-026 / D28B-012 wF / D28B-002 wG / D28B-025 review follow-up / D29B-003 Track-β contig writev hot-path / D29B-001 Track-ζ h2 arena+span request pack adjusted)"
         );
         const F6_PREFIX: &[u8] = b"// \xE2\x94\x80\xE2\x94\x80 Native HTTP/2 server";
         let tail = &NET_H1_H2_SECTION.as_bytes()[F5_LEN..F5_LEN + F6_PREFIX.len()];

@@ -27171,16 +27171,44 @@ fn test_net6_5b_release_gate_v6_test_counts() {
 fn test_nb6_26_27_28_native_h2_request_pack_parity() {
     let source = read_native_runtime_source();
 
-    // NB6-26: Must use taida_bytes_from_raw (not taida_list_new + append)
+    // NB6-26 (D29B-001 update, Track-ζ 2026-04-27): Native h2 request pack
+    // continues to use `taida_bytes_from_raw` for the underlying byte
+    // store, but the input is now a per-request arena (body + method +
+    // path + query + header name/value pairs concatenated) instead of
+    // raw `body`. The OOM fallback path still uses
+    // `taida_bytes_from_raw(body, ...)` so we keep that exact substring as
+    // the invariant marker.
     assert!(
         source.contains("taida_bytes_from_raw(body, (taida_val)body_len)"),
-        "NB6-26: Native h2 request pack must use taida_bytes_from_raw for body/raw"
+        "NB6-26: Native h2 request pack must keep taida_bytes_from_raw call for OOM fallback"
+    );
+    // D29B-001: arena fast path uses taida_bytes_from_raw(arena, arena_size)
+    assert!(
+        source.contains("taida_bytes_from_raw(arena, (taida_val)arena_size)"),
+        "D29B-001: Native h2 request pack must materialize req.raw from the per-request arena"
     );
 
-    // NB6-27: Must retain raw_bytes before second SET_FIELD
+    // NB6-27 (D29B-001 retired, Track-ζ 2026-04-27): the dual-field shape
+    // that required `taida_retain(raw_bytes)` (both `body` and `raw` held
+    // `raw_bytes` so a single ref needed bumping) no longer exists —
+    // `body` is now `taida_net_make_span(0, body_len)` and `raw_bytes` is
+    // referenced exactly once via the `raw` field. Asserting the *absence*
+    // of the retain inside `h2_build_request_pack` would be too restrictive
+    // (other functions in net_h1_h2.c retain raw_bytes for unrelated
+    // reasons), so we instead pin the new contract: the `body` field of the
+    // h2 request pack must be a span pack with offset 0 / length body_len.
+    let h2_build_section: String = source
+        .lines()
+        .skip_while(|l| !l.contains("h2_build_request_pack"))
+        .take(220)
+        .collect::<Vec<_>>()
+        .join("\n");
     assert!(
-        source.contains("taida_retain(raw_bytes)"),
-        "NB6-27: Native h2 request pack must retain raw_bytes to prevent double-free"
+        h2_build_section
+            .contains("SET_FIELD(\"body\",        taida_net_make_span(0, (taida_val)body_len)")
+            || h2_build_section
+                .contains("SET_FIELD(\"body\", taida_net_make_span(0, (taida_val)body_len)"),
+        "D29B-001 (Track-ζ Lock-H): h2 `body` field must be a span pack into req.raw at offset 0, len = body_len. Pre-fix Native h2 wrote `body = raw_bytes` (Bytes ref), which forced taida_retain(raw_bytes); post-fix the body span makes the second retain unnecessary and incorrect."
     );
 
     // NB6-28: Must allocate 14 fields (was 13, missing 'chunked')
@@ -27190,15 +27218,23 @@ fn test_nb6_26_27_28_native_h2_request_pack_parity() {
     );
 
     // NB6-28: 'chunked' field must be present
-    let h2_build_section: String = source
-        .lines()
-        .skip_while(|l| !l.contains("h2_build_request_pack"))
-        .take(100)
-        .collect::<Vec<_>>()
-        .join("\n");
     assert!(
         h2_build_section.contains("SET_FIELD(\"chunked\""),
         "NB6-28: Native h2 request pack must include 'chunked' field"
+    );
+
+    // D29B-001 (Track-ζ Lock-H, 2026-04-27): pseudo-headers must be span packs
+    assert!(
+        h2_build_section.contains("SET_FIELD(\"method\", taida_net_make_span("),
+        "D29B-001: h2 `method` field must be a span pack into req.raw (matches h1 reference shape)"
+    );
+    assert!(
+        h2_build_section.contains("SET_FIELD(\"path\",   taida_net_make_span("),
+        "D29B-001: h2 `path` field must be a span pack into req.raw"
+    );
+    assert!(
+        h2_build_section.contains("SET_FIELD(\"query\",  taida_net_make_span("),
+        "D29B-001: h2 `query` field must be a span pack into req.raw"
     );
 }
 
@@ -27426,7 +27462,7 @@ fn test_nb6_44_h2_post_body_interp_verified() {
         r#">>> taida-lang/net => @(httpServe)
 
 handler req =
-  @(status <= 200, headers <= @[], body <= req.method)
+  @(status <= 200, headers <= @[], body <= StrOf[req.method, req.raw]())
 => :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
 
 asyncResult <= httpServe({port}, handler, 1, 10000, 128, @(cert <= "{cert}", key <= "{key}", protocol <= "h2"))
@@ -27534,7 +27570,7 @@ fn test_nb6_44_native_h2_post_body_parity() {
         r#">>> taida-lang/net => @(httpServe)
 
 handler req =
-  @(status <= 200, headers <= @[], body <= req.method)
+  @(status <= 200, headers <= @[], body <= StrOf[req.method, req.raw]())
 => :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
 
 asyncResult <= httpServe({port}, handler, 1, 10000, 128, @(cert <= "{cert}", key <= "{key}", protocol <= "h2"))
@@ -35961,7 +35997,7 @@ fn c26b001_r3_h2_method_variation_test(
             r#">>> taida-lang/net => @(httpServe)
 
 handler req =
-  @(status <= 200, headers <= @[@(name <= "x-method", value <= "{method}")], body <= req.method)
+  @(status <= 200, headers <= @[@(name <= "x-method", value <= "{method}")], body <= StrOf[req.method, req.raw]())
 => :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
 
 asyncResult <= httpServe({port}, handler, 1, 10000, 128, @(cert <= "{cert}", key <= "{key}", protocol <= "h2"))
@@ -36148,7 +36184,7 @@ stdout(r.requests)
         r#">>> taida-lang/net => @(httpServe)
 
 handler req =
-  @(status <= 200, headers <= @[], body <= req.method)
+  @(status <= 200, headers <= @[], body <= StrOf[req.method, req.raw]())
 => :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
 
 asyncResult <= httpServe({port}, handler, 1, 5000, 128, @(cert <= "{cert}", key <= "{key}", protocol <= "h2"))
@@ -37128,7 +37164,7 @@ fn test_net6_c27b001_9_h2_options_method_3backend_parity() {
                 r#">>> taida-lang/net => @(httpServe)
 
 handler req =
-  @(status <= 200, headers <= @[@(name <= "x-method-echo", value <= req.method)], body <= "c27b001-9-options-ok")
+  @(status <= 200, headers <= @[@(name <= "x-method-echo", value <= StrOf[req.method, req.raw]())], body <= "c27b001-9-options-ok")
 => :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
 
 asyncResult <= httpServe({port}, handler, 1, 10000, 128, @(cert <= "{cert}", key <= "{key}", protocol <= "h2"))
@@ -37778,7 +37814,13 @@ fn test_net6_3b_native_h2_d28b002_2_options_method_4backend_parity() {
         "OPTIONS",
         None,
         "/api/cors",
-        r#"  @(status <= 200, headers <= @[@(name <= "allow", value <= "GET, OPTIONS")], body <= req.method)"#,
+        // D29B-001 (Track-ζ Lock-H): h2 req.method is now a span pack
+        // `@(start, len)` into req.raw (matching the h1 reference shape
+        // and the documented contract in `docs/reference/net_api.md
+        // §3.1`). Pre-fix h2 returned a Str (the silent protocol-
+        // divergent bug this track closes). Echo via StrOf[span, raw]()
+        // to materialize the method string for response body.
+        r#"  @(status <= 200, headers <= @[@(name <= "allow", value <= "GET, OPTIONS")], body <= StrOf[req.method, req.raw]())"#,
         |body, backend| {
             assert!(
                 body.contains("OPTIONS"),
@@ -37930,7 +37972,10 @@ fn test_net6_3b_native_h2_d28b002_7_long_path_4backend_parity() {
         "GET",
         None,
         path_static,
-        r#"  @(status <= 200, headers <= @[@(name <= "x-marker", value <= "long-path-d28b002-7")], body <= req.path)"#,
+        // D29B-001 (Track-ζ Lock-H): h2 req.path is now a span pack into
+        // req.raw (contract-correct shape, matching h1). Use StrOf to
+        // materialize the path string for echo into the response body.
+        r#"  @(status <= 200, headers <= @[@(name <= "x-marker", value <= "long-path-d28b002-7")], body <= StrOf[req.path, req.raw]())"#,
         |body, backend| {
             // body echoes req.path; both backends must surface the same path
             assert!(
@@ -38112,4 +38157,227 @@ stdout(result.ok)
             stderr
         );
     }
+}
+
+// ── D29B-001/011 region (Phase 5 / Track-ζ Lock-H, 2026-04-27) ─────────────
+//
+// Wire-level parity guards for the h2 HPACK / h3 QPACK arena+span fix.
+// The structural guards live in `tests/d29b_001_h2_headers_span_parity.rs`
+// and `tests/d29b_011_h3_headers_span_parity.rs` (cheap, source-grep
+// based). The tests below drive a real h1 vs h2 round-trip via curl with
+// a `Span*` mold call inside the handler so the wire-observable result is
+// the post-fix Bool. Pre-fix h2 returned a Str for `req.headers[i].name`,
+// so `SpanEquals[req.headers(0).name, req.raw, "host"]()` returned `false`
+// silently under h2; post-fix h1 and h2 both return `true`.
+//
+// h3 wire parity is not exercised here — the Native h3 server requires a
+// libquiche dlopen at runtime and a QUIC-capable curl, both of which are
+// brittle on shared CI; the structural guard in
+// `tests/d29b_011_h3_headers_span_parity.rs` plus the symmetric
+// implementation pin (h2 and h3 share Strategy V1-A) is the
+// cost-effective shape.
+
+/// D29B-001 wire-parity: SpanEquals against `req.headers(0).name` returns
+/// the same Bool under h1 and h2 (post-fix both `true`; pre-fix h2 was
+/// silently `false` because the name was a Str rather than a span pack
+/// into req.raw).
+///
+/// The handler echoes the SpanEquals result into the response body so the
+/// curl client can observe it. h1 is the reference shape (parse_request_head
+/// already produces span packs); h2 is the post-D29B-001 fix.
+#[test]
+fn test_d29b_001_h2_span_headers_equals_h1_wire_parity() {
+    if !cc_available() {
+        eprintln!("SKIP D29B-001 wire-parity: cc not available");
+        return;
+    }
+    if !openssl_available() {
+        eprintln!("SKIP D29B-001 wire-parity: openssl not available");
+        return;
+    }
+    if !curl_h2_available() {
+        eprintln!("SKIP D29B-001 wire-parity: curl --http2 not available");
+        return;
+    }
+
+    // Run h1 (no TLS) and h2 (TLS) sequentially. Both handlers do the
+    // same thing: call SpanEquals[req.method, req.raw, "GET"](), which
+    // is documented to return Bool against a span pack into req.raw.
+    // Pre-fix h2 returned a Str for req.method (not a span), so
+    // SpanEquals silently returned false; post-fix h2 matches h1.
+
+    // ── h1 leg ──
+    let h1_body: Option<String> = {
+        let port = find_free_loopback_port();
+        let source = format!(
+            r#">>> taida-lang/net => @(httpServe)
+
+handler req =
+  matched <= SpanEquals[req.method, req.raw, "GET"]()
+  body <= | matched |> "method=match" | _ |> "method=mismatch"
+  @(status <= 200, headers <= @[], body <= body)
+=> :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
+
+asyncResult <= httpServe({port}, handler, 1, 5000, 128, @())
+asyncResult ]=> result
+result ]=> r
+stdout(r.requests)
+"#,
+            port = port,
+        );
+        let dir = setup_net_project(&source, "d29b_001_h1_wire");
+        let td_path = dir.join("main.td");
+        let mut child = Command::new(taida_bin())
+            .arg(&td_path)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn d29b_001 h1 server");
+
+        // Wait for server readiness
+        let mut ready = false;
+        for _ in 0..50 {
+            thread::sleep(Duration::from_millis(100));
+            if TcpStream::connect(format!("127.0.0.1:{}", port)).is_ok() {
+                ready = true;
+                break;
+            }
+        }
+        if !ready {
+            let _ = child.kill();
+            let _ = child.wait();
+            cleanup_net_project(&dir);
+            panic!("D29B-001 h1: server not ready on port {}", port);
+        }
+
+        let url = format!("http://127.0.0.1:{}/", port);
+        let curl_out = Command::new("curl")
+            .args(["--silent", "--max-time", "5", &url])
+            .output()
+            .expect("curl D29B-001 h1");
+        let _server = child.wait_with_output().expect("wait d29b_001 h1");
+        cleanup_net_project(&dir);
+        Some(String::from_utf8_lossy(&curl_out.stdout).to_string())
+    };
+
+    // ── h2 leg ──
+    let h2_body: Option<String> = {
+        let port = find_free_loopback_port();
+        let (cert_path, key_path) = match generate_self_signed_cert("d29b_001_h2_wire") {
+            Some(p) => p,
+            None => {
+                eprintln!("SKIP D29B-001 wire-parity: cert gen failed");
+                return;
+            }
+        };
+        let source = format!(
+            r#">>> taida-lang/net => @(httpServe)
+
+handler req =
+  matched <= SpanEquals[req.method, req.raw, "GET"]()
+  body <= | matched |> "method=match" | _ |> "method=mismatch"
+  @(status <= 200, headers <= @[], body <= body)
+=> :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
+
+asyncResult <= httpServe({port}, handler, 1, 5000, 128, @(cert <= "{cert}", key <= "{key}", protocol <= "h2"))
+asyncResult ]=> result
+result ]=> r
+stdout(r.requests)
+"#,
+            port = port,
+            cert = cert_path.display(),
+            key = key_path.display(),
+        );
+        let dir = setup_net_project(&source, "d29b_001_h2_wire");
+        let td_path = dir.join("main.td");
+        let mut child = Command::new(taida_bin())
+            .arg(&td_path)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn d29b_001 h2 server");
+
+        let mut ready = false;
+        for _ in 0..50 {
+            thread::sleep(Duration::from_millis(100));
+            if TcpStream::connect(format!("127.0.0.1:{}", port)).is_ok() {
+                ready = true;
+                break;
+            }
+        }
+        if !ready {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = fs::remove_file(&cert_path);
+            let _ = fs::remove_file(&key_path);
+            cleanup_net_project(&dir);
+            panic!("D29B-001 h2: server not ready on port {}", port);
+        }
+
+        let url = format!("https://127.0.0.1:{}/", port);
+        let curl_out = Command::new("curl")
+            .args(["--http2", "--insecure", "--silent", "--max-time", "5", &url])
+            .output()
+            .expect("curl D29B-001 h2");
+        let _server = child.wait_with_output().expect("wait d29b_001 h2");
+        let _ = fs::remove_file(&cert_path);
+        let _ = fs::remove_file(&key_path);
+        cleanup_net_project(&dir);
+        Some(String::from_utf8_lossy(&curl_out.stdout).to_string())
+    };
+
+    let h1 = h1_body.expect("h1 leg ran");
+    let h2 = h2_body.expect("h2 leg ran");
+
+    // Both must contain "host=match" — under h1 the parser produces span
+    // packs into the head buffer (which holds the Host header text);
+    // under h2 (post-D29B-001) the arena holds the decoded HPACK
+    // name/value bytes and the span points into that arena.
+    assert!(
+        h1.contains("method=match"),
+        "D29B-001 wire-parity h1: SpanEquals[req.method, req.raw, \"GET\"]() \
+         must return true. Got body: {h1:?}"
+    );
+    assert!(
+        h2.contains("method=match"),
+        "D29B-001 wire-parity h2: SpanEquals[req.method, req.raw, \"GET\"]() \
+         must return true post-fix. Pre-fix h2 returned \"method=mismatch\" \
+         because req.method was a Str (not a span pack into req.raw), so \
+         SpanEquals silently returned false. Got body: {h2:?}"
+    );
+
+    // Strict parity: h1 and h2 must produce byte-identical bodies for
+    // the SpanEquals echo (the body is short and deterministic).
+    assert_eq!(
+        h1, h2,
+        "D29B-001 wire-parity: h1 and h2 bodies must be identical for \
+         the SpanEquals echo. Pre-fix h2 silently produced different \
+         bytes from h1 because the span shape was wrong on h2."
+    );
+}
+
+/// D29B-011 structural-parity guard surfaced from parity.rs (so anyone
+/// running `cargo test --release --test parity` sees it). The full
+/// structural pin lives in `tests/d29b_011_h3_headers_span_parity.rs`;
+/// here we only assert that the symmetric implementation marker is
+/// present in both interp h2 and interp h3 so a partial Lock-H revert
+/// (e.g. someone reverting only h3 leaving h2 intact) trips this test.
+#[test]
+fn test_d29b_011_h3_arena_implementation_symmetry_with_h2() {
+    let h2_src = std::fs::read_to_string("src/interpreter/net_eval/h2.rs")
+        .expect("read src/interpreter/net_eval/h2.rs");
+    let h3_src = std::fs::read_to_string("src/interpreter/net_eval/h3.rs")
+        .expect("read src/interpreter/net_eval/h3.rs");
+    assert!(
+        h2_src.contains("D29B-001 (Track-ζ Lock-H, 2026-04-27)"),
+        "Interpreter h2 must keep the D29B-001 Lock-H banner so a \
+         partial revert is visible in code review."
+    );
+    assert!(
+        h3_src.contains("D29B-011 (Track-ζ Lock-H, 2026-04-27)"),
+        "Interpreter h3 must keep the D29B-011 Lock-H banner. h3 must \
+         not silently lose its arena builder while h2 keeps it (or \
+         vice-versa) — the two are co-required for h1/h2/h3 SpanEquals \
+         parity."
+    );
 }

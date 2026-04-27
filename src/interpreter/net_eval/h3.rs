@@ -119,11 +119,71 @@ impl Interpreter {
                 None => (req.path.clone(), String::new()),
             };
 
+            // D29B-011 (Track-ζ Lock-H, 2026-04-27): build a per-request arena
+            // mirroring the h2 strategy in `h2.rs::serve_h2`. QPACK has the
+            // same dynamic-table reallocation problem as HPACK, so the only
+            // way to give Span* mold a stable backing buffer is to copy the
+            // decoded pseudo / regular header bytes into a fresh arena
+            // alongside the body. This brings h3 to byte-identical span
+            // shape with h1 (parse_request_head -> span packs) and h2
+            // (post-D29B-001 arena) and lets `SpanEquals[req.method,
+            // req.raw, "GET"]()` succeed under h3 instead of silently
+            // returning false.
+            //
+            // Arena layout (Strategy V1-A from
+            // `Phase-5_..._track-zeta_sub-Lock.md`):
+            //   [body | method | path | query | n1 v1 n2 v2 ... | "host" authority]
+            // body lives at offset 0 so the existing `body` span and
+            // `bodyOffset = 0` invariants are preserved.
+            let body_len = req.body.len();
+            let mut arena_cap = body_len + req.method.len() + path_part.len() + query_part.len();
+            for (name, value) in &req.headers {
+                arena_cap += name.len() + value.len();
+            }
+            if !req.authority.is_empty() {
+                arena_cap += 4 /* "host" */ + req.authority.len();
+            }
+
+            let mut arena: Vec<u8> = Vec::with_capacity(arena_cap);
+            arena.extend_from_slice(&req.body);
+
+            let method_start = arena.len();
+            let method_len = req.method.len();
+            arena.extend_from_slice(req.method.as_bytes());
+
+            let path_start = arena.len();
+            let path_len = path_part.len();
+            arena.extend_from_slice(path_part.as_bytes());
+
+            let query_start = arena.len();
+            let query_len = query_part.len();
+            arena.extend_from_slice(query_part.as_bytes());
+
+            let mut header_spans: Vec<(usize, usize, usize, usize)> =
+                Vec::with_capacity(req.headers.len() + 1);
+            for (name, value) in &req.headers {
+                let n_start = arena.len();
+                let n_len = name.len();
+                arena.extend_from_slice(name.as_bytes());
+                let v_start = arena.len();
+                let v_len = value.len();
+                arena.extend_from_slice(value.as_bytes());
+                header_spans.push((n_start, n_len, v_start, v_len));
+            }
+            if !req.authority.is_empty() {
+                let n_start = arena.len();
+                arena.extend_from_slice(b"host");
+                let v_start = arena.len();
+                let v_len = req.authority.len();
+                arena.extend_from_slice(req.authority.as_bytes());
+                header_spans.push((n_start, 4, v_start, v_len));
+            }
+
             // Build request pack matching h2 1-arg handler contract.
             let mut request_fields: Vec<(String, Value)> = vec![
-                ("method".into(), Value::str(req.method)),
-                ("path".into(), Value::str(path_part)),
-                ("query".into(), Value::str(query_part)),
+                ("method".into(), make_span(method_start, method_len)),
+                ("path".into(), make_span(path_start, path_len)),
+                ("query".into(), make_span(query_start, query_len)),
                 (
                     "version".into(),
                     Value::pack(vec![
@@ -133,29 +193,27 @@ impl Interpreter {
                 ),
             ];
 
-            // Convert H3 headers to the same format as h1/h2.
-            let mut header_values: Vec<Value> = Vec::new();
-            for (name, value) in &req.headers {
+            let mut header_values: Vec<Value> = Vec::with_capacity(header_spans.len());
+            for (n_start, n_len, v_start, v_len) in &header_spans {
                 header_values.push(Value::pack(vec![
-                    ("name".into(), Value::str(name.clone())),
-                    ("value".into(), Value::str(value.clone())),
-                ]));
-            }
-            // Add :authority as host header for compatibility (same as h2).
-            if !req.authority.is_empty() {
-                header_values.push(Value::pack(vec![
-                    ("name".into(), Value::str("host".into())),
-                    ("value".into(), Value::str(req.authority.clone())),
+                    ("name".into(), make_span(*n_start, *n_len)),
+                    ("value".into(), make_span(*v_start, *v_len)),
                 ]));
             }
             request_fields.push(("headers".into(), Value::list(header_values)));
 
-            // Body.
-            let raw_len = req.body.len();
-            request_fields.push(("body".into(), make_span(0, raw_len)));
+            // Body span still references the leading `body_len` bytes of the
+            // arena (offset 0). bodyOffset = 0 keeps existing addons that
+            // slice via `Slice[req.raw, bodyOffset, bodyOffset + contentLength]`
+            // pointing at the body region.
+            request_fields.push(("body".into(), make_span(0, body_len)));
             request_fields.push(("bodyOffset".into(), Value::Int(0)));
-            request_fields.push(("contentLength".into(), Value::Int(raw_len as i64)));
-            request_fields.push(("raw".into(), Value::bytes(req.body)));
+            request_fields.push(("contentLength".into(), Value::Int(body_len as i64)));
+            // raw = arena (body + headers concat). Track-ε's Arc<BytesValue>
+            // interior wrapping keeps `req.raw` zero-copy on subsequent
+            // clones; the arena allocation cost is a single Vec::with_capacity
+            // sized exactly for the request, no re-alloc during build.
+            request_fields.push(("raw".into(), Value::bytes(arena)));
             request_fields.push((
                 "remoteHost".into(),
                 Value::str(req.remote_addr.ip().to_string()),
