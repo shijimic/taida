@@ -38381,3 +38381,20 @@ fn test_d29b_011_h3_arena_implementation_symmetry_with_h2() {
          parity."
     );
 }
+// ---------------------------------------------------------------------------
+// D29B-005 / D29B-012 region (Track-η Phase 6, 2026-04-27)
+// ---------------------------------------------------------------------------
+//
+// The Span* hot-path zero-copy + leak-fix regression tests live in dedicated
+// top-level binaries to keep this monolithic parity.rs focused on backend
+// output parity (not runtime memory accounting). See:
+//
+//   * tests/d29b_005_dhat_alloc_count.rs            -- interpreter dhat
+//   * tests/d29b_005_native_use_after_reset.rs       -- Native req.raw lifetime
+//   * tests/d29b_005_js_buffer_identity.rs           -- JS Uint8Array forwarding
+//   * tests/d29b_012_native_span_zero_alloc_no_leak.rs -- valgrind leak guard
+//   * tests/d29b_012_native_span_alloc_count.rs       -- valgrind alloc balance
+//
+// Lock-Phase6 verdicts (sub-Lock A..E) are recorded in
+// `.dev/D29_SESSION_PLANS/Phase-6_2026-04-27-0937_track-eta_sub-Lock.md` and
+// the FIXED status flip is recorded in `.dev/D29_BLOCKERS.md`.

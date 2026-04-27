@@ -49,14 +49,16 @@ slow-timeout = { period = "60s", terminate-after = 10 }
 [test-groups]
 net-serial = { max-threads = 1 }
 
-# NB: Track-η (Phase 6) is expected to add `d29b_005_*` NET regression test
-# binaries; that landing commit must extend this filter alternation. Listing
-# a non-existent binary here makes nextest hard-fail, so we only enumerate
-# binaries that exist on `feat/d29` after Phase 8 land.
+# Track-η (Phase 6, 2026-04-27, Lock-Phase6 land): added `d29b_005_*`
+# (NET binders: js_buffer_identity spawns a Node.js HTTP server on a
+# loopback port; native_use_after_reset spawns a Native HTTP/1 server)
+# and `d29b_012_*` (valgrind-wrapped Native HTTP/1 server). The
+# dhat_alloc_count test is in-process interpreter only — no port bind —
+# so it is intentionally excluded.
 [[profile.default.overrides]]
-filter = "binary(/^c26b_022/) | binary(/^c27b_003/) | binary(/^c27b_014/) | binary(/^c27b_027/) | binary(/^d28b_012/) | binary(/^d29b_009/)"
+filter = "binary(/^c26b_022/) | binary(/^c27b_003/) | binary(/^c27b_014/) | binary(/^c27b_027/) | binary(/^d28b_012/) | binary(/^d29b_009/) | binary(/^d29b_005_js_buffer_identity/) | binary(/^d29b_005_native_use_after_reset/) | binary(/^d29b_012/)"
 test-group = "net-serial"
 
 [[profile.ci.overrides]]
-filter = "binary(/^c26b_022/) | binary(/^c27b_003/) | binary(/^c27b_014/) | binary(/^c27b_027/) | binary(/^d28b_012/) | binary(/^d29b_009/)"
+filter = "binary(/^c26b_022/) | binary(/^c27b_003/) | binary(/^c27b_014/) | binary(/^c27b_027/) | binary(/^d28b_012/) | binary(/^d29b_009/) | binary(/^d29b_005_js_buffer_identity/) | binary(/^d29b_005_native_use_after_reset/) | binary(/^d29b_012/)"
 test-group = "net-serial"

@@ -3471,18 +3471,36 @@ taida_val taida_str_slice(const char* s, taida_val start, taida_val end) {
 }
 
 taida_val taida_slice_mold(taida_val value, taida_val start, taida_val end) {
+    if (TAIDA_IS_BYTES_CONTIG(value)) {
+        // D29B-004 Track-η Phase 6 (Lock-Phase6-B Option β-2, 2026-04-27):
+        // CONTIG inputs (e.g. produced by Track-β writev hot-path or any
+        // future BytesContiguous emitter) admit a slice-range fast path —
+        // we copy only the requested [s, e) window into a fresh CONTIG
+        // payload (1 alloc + 1 memcpy bounded by the slice width, not the
+        // source length) and reuse the existing CONTIG magic. No new magic
+        // is introduced; 4-backend output parity is preserved (same bytes
+        // returned). True zero-copy `Arc::clone` semantics across CONTIG
+        // payloads remains a follow-up after the Bytes producer flip
+        // (D29B-015 / β-2 TIER 4) lands and the codegen lifetime tracker
+        // can prove the source outlives every view.
+        const unsigned char *src = taida_bytes_contig_data(value);
+        taida_val total = taida_bytes_contig_len(value);
+        taida_val s = start;
+        taida_val e = end;
+        if (s < 0) s = 0;
+        if (s > total) s = total;
+        if (e < 0 || e > total) e = total;
+        if (e < s) e = s;
+        return taida_bytes_contig_new(src + s, e - s);
+    }
     if (TAIDA_IS_BYTES(value)) {
-        // D29B-004 / Track-ε note (2026-04-27): the Native ABI uses the
-        // `taida_val[]` Bytes representation (8-fold inline expansion), so
-        // a true zero-copy "view sharing the underlying buffer" requires a
-        // new magic (e.g. TAIDA_BYTES_VIEW_MAGIC carrying a base pointer
-        // + offset + len). Track-β added TAIDA_BYTES_CONTIG_MAGIC for
-        // writev output paths but not for Slice input/output. Adding view
-        // semantics to Native Slice is a Track-η (Phase 6) follow-up that
-        // integrates with `taida_net_raw_as_bytes` leak fix and is gated
-        // on the BytesContiguous → BytesView unification work.
-        // Native output parity with interpreter/JS is preserved (same
-        // bytes returned); only the alloc/memcpy path remains here.
+        // D29B-004 / Track-ε note (2026-04-27, Lock-Phase6-B fallback):
+        // Legacy `taida_val[]` Bytes (8-fold inline expansion) are still
+        // produced by emitters that have not yet flipped to CONTIG (e.g.
+        // bytes literals, body builders prior to D29B-015). For these
+        // inputs we keep the materialize-via-bytes_new_filled path; alloc
+        // count parity with the previous behavior is intentional, the
+        // CONTIG fast path above is the alloc-reduction lane.
         taida_val *bytes = (taida_val*)value;
         taida_val len = bytes[1];
         taida_val s = start;
@@ -6428,22 +6446,49 @@ static int taida_net_span_extract(taida_val span, taida_val *out_start, taida_va
 }
 
 // Resolve raw (Bytes or Str) to a contiguous byte view. Returns 1 on success
-// with *out_buf pointing into the underlying storage and *out_buf_len set.
-// For Bytes we unpack via `bytes[2 + i]` into a scratch buffer (alloc then
-// let caller free); for Str we return the char* directly. To keep the
-// interface simple, we always materialize a temp `char*` for Bytes input.
+// with *out_buf pointing into the underlying storage and *out_len set.
+//
+// D29B-012 Track-η Phase 6 (Lock-Phase6-A Option D, 2026-04-27): the legacy
+// `unsigned char **out_owned` raw-pointer escape was leaking through tier 1
+// (freelist), tier 2 (arena), tier 3 (pure malloc) because the three Span*
+// callers never invoked free() on the materialized scratch. We replace the
+// out-param with `taida_val *out_owner` carrying a release-handle:
+//   * 0 / TAIDA_NULL_VAL  → caller borrows from underlying storage
+//                           (CONTIG payload pointer, or C string pointer)
+//                           and MUST NOT release.
+//   * non-zero            → caller MUST `taida_str_release(*out_owner)` once
+//                           the borrow goes out of scope. The release helper
+//                           dispatches automatically to freelist push (tier 1),
+//                           arena no-op (tier 2), or free() (tier 3) — leak 0
+//                           on every backing tier.
+//
+// Fast paths (alloc 0) covered:
+//   * TAIDA_BYTES_CONTIG raw  → borrow contig payload directly (Track-β land)
+//   * String raw / needle      → borrow C string pointer
+// Materialize path (1 alloc + 1 release, leak 0):
+//   * Legacy TAIDA_BYTES (taida_val[] inline form) → unpack to scratch,
+//     return its release handle. Producer flip to CONTIG (D29B-015 / β-2
+//     TIER 4) eliminates this remaining alloc.
 static int taida_net_raw_as_bytes(taida_val raw, const unsigned char **out_buf,
-                                   taida_val *out_len, unsigned char **out_owned) {
-    *out_owned = NULL;
+                                   taida_val *out_len, taida_val *out_owner) {
+    *out_owner = 0;
+    if (TAIDA_IS_BYTES_CONTIG(raw)) {
+        // Lock-Phase6-A fast path: zero-copy borrow from contig payload
+        // (already land via Track-β writev hot-path producer flip).
+        *out_buf = taida_bytes_contig_data(raw);
+        *out_len = taida_bytes_contig_len(raw);
+        return 1;
+    }
     if (TAIDA_IS_BYTES(raw)) {
         taida_val *bytes = (taida_val*)raw;
         taida_val len = bytes[1];
         if (len < 0) return 0;
-        unsigned char *tmp = (unsigned char*)taida_str_alloc((size_t)len);
+        char *scratch = taida_str_alloc((size_t)len);
+        unsigned char *tmp = (unsigned char *)scratch;
         for (taida_val i = 0; i < len; i++) tmp[i] = (unsigned char)bytes[2 + i];
         *out_buf = tmp;
         *out_len = len;
-        *out_owned = tmp;
+        *out_owner = (taida_val)scratch;  // release-handle: see comment above
         return 1;
     }
     if (taida_is_string_value(raw)) {
@@ -6456,8 +6501,8 @@ static int taida_net_raw_as_bytes(taida_val raw, const unsigned char **out_buf,
 }
 
 static int taida_net_needle_as_bytes(taida_val needle, const unsigned char **out_buf,
-                                      taida_val *out_len, unsigned char **out_owned) {
-    return taida_net_raw_as_bytes(needle, out_buf, out_len, out_owned);
+                                      taida_val *out_len, taida_val *out_owner) {
+    return taida_net_raw_as_bytes(needle, out_buf, out_len, out_owner);
 }
 
 // D29B-003 (Track-β, 2026-04-27): borrow-only variant of taida_net_raw_as_bytes.
@@ -6486,41 +6531,59 @@ static int taida_net_raw_as_bytes_view(taida_val raw,
     return 0;
 }
 
+// D29B-012 Track-η Phase 6 (Lock-Phase6-A Option D, 2026-04-27): each Span*
+// helper acquires a release-handle (out_owner) for raw and needle separately
+// and is responsible for calling `taida_str_release` on each non-zero handle
+// before returning, regardless of branch. Static error path retained: any
+// resolver failure releases handles already acquired so no partial leak.
 taida_val taida_net_SpanEquals(taida_val span, taida_val raw, taida_val needle) {
     taida_val start, len;
     if (!taida_net_span_extract(span, &start, &len)) return 0;
-    const unsigned char *buf = NULL; taida_val buf_len = 0; unsigned char *own_buf = NULL;
+    const unsigned char *buf = NULL; taida_val buf_len = 0; taida_val own_buf = 0;
     if (!taida_net_raw_as_bytes(raw, &buf, &buf_len, &own_buf)) return 0;
-    const unsigned char *nbuf = NULL; taida_val nlen = 0; unsigned char *own_n = NULL;
-    if (!taida_net_needle_as_bytes(needle, &nbuf, &nlen, &own_n)) { return 0; }
+    const unsigned char *nbuf = NULL; taida_val nlen = 0; taida_val own_n = 0;
+    if (!taida_net_needle_as_bytes(needle, &nbuf, &nlen, &own_n)) {
+        if (own_buf) taida_str_release(own_buf);
+        return 0;
+    }
     taida_val result = 0;
     if (start + len <= buf_len && len == nlen && memcmp(buf + start, nbuf, (size_t)len) == 0) {
         result = 1;
     }
+    if (own_buf) taida_str_release(own_buf);
+    if (own_n) taida_str_release(own_n);
     return result;
 }
 
 taida_val taida_net_SpanStartsWith(taida_val span, taida_val raw, taida_val prefix) {
     taida_val start, len;
     if (!taida_net_span_extract(span, &start, &len)) return 0;
-    const unsigned char *buf = NULL; taida_val buf_len = 0; unsigned char *own_buf = NULL;
+    const unsigned char *buf = NULL; taida_val buf_len = 0; taida_val own_buf = 0;
     if (!taida_net_raw_as_bytes(raw, &buf, &buf_len, &own_buf)) return 0;
-    const unsigned char *pbuf = NULL; taida_val plen = 0; unsigned char *own_p = NULL;
-    if (!taida_net_needle_as_bytes(prefix, &pbuf, &plen, &own_p)) return 0;
+    const unsigned char *pbuf = NULL; taida_val plen = 0; taida_val own_p = 0;
+    if (!taida_net_needle_as_bytes(prefix, &pbuf, &plen, &own_p)) {
+        if (own_buf) taida_str_release(own_buf);
+        return 0;
+    }
     taida_val result = 0;
     if (start + len <= buf_len && len >= plen && memcmp(buf + start, pbuf, (size_t)plen) == 0) {
         result = 1;
     }
+    if (own_buf) taida_str_release(own_buf);
+    if (own_p) taida_str_release(own_p);
     return result;
 }
 
 taida_val taida_net_SpanContains(taida_val span, taida_val raw, taida_val needle) {
     taida_val start, len;
     if (!taida_net_span_extract(span, &start, &len)) return 0;
-    const unsigned char *buf = NULL; taida_val buf_len = 0; unsigned char *own_buf = NULL;
+    const unsigned char *buf = NULL; taida_val buf_len = 0; taida_val own_buf = 0;
     if (!taida_net_raw_as_bytes(raw, &buf, &buf_len, &own_buf)) return 0;
-    const unsigned char *nbuf = NULL; taida_val nlen = 0; unsigned char *own_n = NULL;
-    if (!taida_net_needle_as_bytes(needle, &nbuf, &nlen, &own_n)) return 0;
+    const unsigned char *nbuf = NULL; taida_val nlen = 0; taida_val own_n = 0;
+    if (!taida_net_needle_as_bytes(needle, &nbuf, &nlen, &own_n)) {
+        if (own_buf) taida_str_release(own_buf);
+        return 0;
+    }
     taida_val result = 0;
     if (start + len > buf_len) { result = 0; }
     else if (nlen == 0) { result = 1; }
@@ -6530,6 +6593,8 @@ taida_val taida_net_SpanContains(taida_val span, taida_val raw, taida_val needle
             if (memcmp(buf + start + i, nbuf, (size_t)nlen) == 0) { result = 1; break; }
         }
     }
+    if (own_buf) taida_str_release(own_buf);
+    if (own_n) taida_str_release(own_n);
     return result;
 }
 
