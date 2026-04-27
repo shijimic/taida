@@ -587,7 +587,19 @@ mod tests {
         //   Track-β is the 4th (last) TIER 1 merge, so successor tracks
         //   (TIER 2 ε / TIER 3 ζ η) will rebase on top and accumulate
         //   their own deltas onto this base.
-        const EXPECTED_TOTAL_LEN: usize = 1_046_085;
+        // D29B-004 (Track-ε, 2026-04-27): +803 bytes in core.c
+        //   (taida_slice_mold inline comment block documenting that
+        //   Native Slice[bytes] retains the legacy taida_val[] memcpy
+        //   path — true zero-copy view requires a new
+        //   TAIDA_BYTES_VIEW_MAGIC carrying base+offset+len, deferred to
+        //   Track-η Phase 6 where it can integrate with the
+        //   taida_net_raw_as_bytes leak fix and the BytesContiguous →
+        //   BytesView unification work). The interpreter and JS backends
+        //   are zero-copy in this Phase (Value::bytes_view + Arc::ptr_eq;
+        //   Uint8Array.subarray view); Native output parity is preserved.
+        //   Measured delta: 1,046,085 (Track-β base) + 803 (Track-ε
+        //   comment block) = 1,046,888.
+        const EXPECTED_TOTAL_LEN: usize = 1_046_888;
         let asm = *NATIVE_RUNTIME_C;
         assert_eq!(
             asm.len(),
@@ -1025,11 +1037,21 @@ mod tests {
         //   type primitives region, well before the "// ── Error
         //   ceiling" marker). F2 unchanged.
         //   F1_LEN: 277,111 + 6,407 = 283,518.
-        const F1_LEN: usize = 283_518;
+        // D29B-004 (Track-ε, 2026-04-27): +803 bytes in F1 for the
+        //   taida_slice_mold inline comment block (TAIDA_IS_BYTES branch)
+        //   documenting that Native Slice[bytes] retains the legacy
+        //   taida_val[] memcpy and that true zero-copy view requires a
+        //   future TAIDA_BYTES_VIEW_MAGIC integration with Track-η /
+        //   BytesContiguous unification (deferred to Phase 6). The
+        //   comment lives entirely inside taida_slice_mold which is well
+        //   before the "// ── Error ceiling" marker, so all bytes land in
+        //   F1. F2 unchanged.
+        //   F1_LEN: 283,518 + 803 = 284,321.
+        const F1_LEN: usize = 284_321;
         assert_eq!(
             CORE_SECTION.len(),
-            283_518 + 160_760,
-            "core.c total byte length must equal legacy fragment1 + fragment2 (C25B-001 / C25B-028 / C25B-025 / C26B-011 / C26B-020 / C26B-016 / C26B-018 / C26B-011-wS / C26B-024 / C26B-024-wepsilon adjusted; CI-red 2026-04-24 cppcheck clean-up adds 881/409 to F1/F2; @c.27 PR41 CI-red follow-up adds 61 to F1 for the cppcheck-suppress comment on the new taida_release_any helper; D28B-012 wF adds 4,821 to F1 for taida_arena_request_reset; D28B-026 review follow-up adds 425 to F1 for the active_chunk defensive corner; D29B-003 Track-β adds 6,407 to F1 for TAIDA_BYTES_CONTIG primitives + writev hot-path reflection)"
+            284_321 + 160_760,
+            "core.c total byte length must equal legacy fragment1 + fragment2 (C25B-001 / C25B-028 / C25B-025 / C26B-011 / C26B-020 / C26B-016 / C26B-018 / C26B-011-wS / C26B-024 / C26B-024-wepsilon adjusted; CI-red 2026-04-24 cppcheck clean-up adds 881/409 to F1/F2; @c.27 PR41 CI-red follow-up adds 61 to F1 for the cppcheck-suppress comment on the new taida_release_any helper; D28B-012 wF adds 4,821 to F1 for taida_arena_request_reset; D28B-026 review follow-up adds 425 to F1 for the active_chunk defensive corner; D29B-003 Track-β adds 6,407 to F1 for TAIDA_BYTES_CONTIG primitives + writev hot-path reflection; D29B-004 Track-ε adds 803 to F1 for taida_slice_mold inline note documenting deferred Native zero-copy view integration)"
         );
         const F2_PREFIX: &[u8] = b"// \xE2\x94\x80\xE2\x94\x80 Error ceiling";
         let tail = &CORE_SECTION.as_bytes()[F1_LEN..F1_LEN + F2_PREFIX.len()];

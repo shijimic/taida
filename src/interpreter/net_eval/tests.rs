@@ -263,7 +263,7 @@ fn test_encode_200_text() {
     let result = encode_response(&response);
     let inner = extract_result_inner(&result);
     let bytes = match inner.iter().find(|(k, _)| k == "bytes") {
-        Some((_, Value::Bytes(b))) => (**b).clone(),
+        Some((_, Value::Bytes(b))) => b.as_slice().to_vec(),
         _ => panic!("no bytes"),
     };
     let text = String::from_utf8(bytes).unwrap();
@@ -283,7 +283,7 @@ fn test_encode_404_empty() {
     let result = encode_response(&response);
     let inner = extract_result_inner(&result);
     let bytes = match inner.iter().find(|(k, _)| k == "bytes") {
-        Some((_, Value::Bytes(b))) => (**b).clone(),
+        Some((_, Value::Bytes(b))) => b.as_slice().to_vec(),
         _ => panic!("no bytes"),
     };
     let text = String::from_utf8(bytes).unwrap();
@@ -301,7 +301,7 @@ fn test_encode_binary_body() {
     let result = encode_response(&response);
     let inner = extract_result_inner(&result);
     let bytes = match inner.iter().find(|(k, _)| k == "bytes") {
-        Some((_, Value::Bytes(b))) => (**b).clone(),
+        Some((_, Value::Bytes(b))) => b.as_slice().to_vec(),
         _ => panic!("no bytes"),
     };
     assert!(bytes.ends_with(&[0x00, 0xFF, 0x42]));
@@ -323,7 +323,7 @@ fn test_encode_user_content_length_preserved() {
     let result = encode_response(&response);
     let inner = extract_result_inner(&result);
     let bytes = match inner.iter().find(|(k, _)| k == "bytes") {
-        Some((_, Value::Bytes(b))) => (**b).clone(),
+        Some((_, Value::Bytes(b))) => b.as_slice().to_vec(),
         _ => panic!("no bytes"),
     };
     let text = String::from_utf8(bytes).unwrap();
@@ -770,7 +770,7 @@ fn test_encode_204_empty_body_ok() {
     assert!(!is_result_failure(&result));
     let inner = extract_result_inner(&result);
     let bytes = match inner.iter().find(|(k, _)| k == "bytes") {
-        Some((_, Value::Bytes(b))) => (**b).clone(),
+        Some((_, Value::Bytes(b))) => b.as_slice().to_vec(),
         _ => panic!("no bytes"),
     };
     let text = String::from_utf8(bytes).unwrap();
@@ -828,7 +828,7 @@ fn test_encode_205_empty_body_ok() {
     assert!(!is_result_failure(&result));
     let inner = extract_result_inner(&result);
     let bytes = match inner.iter().find(|(k, _)| k == "bytes") {
-        Some((_, Value::Bytes(b))) => (**b).clone(),
+        Some((_, Value::Bytes(b))) => b.as_slice().to_vec(),
         _ => panic!("no bytes"),
     };
     let text = String::from_utf8(bytes).unwrap();
@@ -866,7 +866,7 @@ fn test_encode_204_content_length_stripped() {
     assert!(!is_result_failure(&result));
     let inner = extract_result_inner(&result);
     let bytes = match inner.iter().find(|(k, _)| k == "bytes") {
-        Some((_, Value::Bytes(b))) => (**b).clone(),
+        Some((_, Value::Bytes(b))) => b.as_slice().to_vec(),
         _ => panic!("no bytes"),
     };
     let text = String::from_utf8(bytes).unwrap();
@@ -886,7 +886,7 @@ fn test_encode_429_reason_phrase() {
     assert!(!is_result_failure(&result));
     let inner = extract_result_inner(&result);
     let bytes = match inner.iter().find(|(k, _)| k == "bytes") {
-        Some((_, Value::Bytes(b))) => (**b).clone(),
+        Some((_, Value::Bytes(b))) => b.as_slice().to_vec(),
         _ => panic!("no bytes"),
     };
     let text = String::from_utf8(bytes).unwrap();
@@ -904,7 +904,7 @@ fn test_encode_unknown_status_no_fake_reason() {
     assert!(!is_result_failure(&result));
     let inner = extract_result_inner(&result);
     let bytes = match inner.iter().find(|(k, _)| k == "bytes") {
-        Some((_, Value::Bytes(b))) => (**b).clone(),
+        Some((_, Value::Bytes(b))) => b.as_slice().to_vec(),
         _ => panic!("no bytes"),
     };
     let text = String::from_utf8(bytes).unwrap();
@@ -1181,7 +1181,7 @@ fn test_encode_multiple_headers() {
     assert!(!is_result_failure(&result));
     let inner = extract_result_inner(&result);
     let bytes = match inner.iter().find(|(k, _)| k == "bytes") {
-        Some((_, Value::Bytes(b))) => (**b).clone(),
+        Some((_, Value::Bytes(b))) => b.as_slice().to_vec(),
         _ => panic!("no bytes"),
     };
     let text = String::from_utf8(bytes).unwrap();
@@ -1221,7 +1221,7 @@ fn test_encode_multiple_headers_order_preserved() {
     assert!(!is_result_failure(&result));
     let inner = extract_result_inner(&result);
     let bytes = match inner.iter().find(|(k, _)| k == "bytes") {
-        Some((_, Value::Bytes(b))) => (**b).clone(),
+        Some((_, Value::Bytes(b))) => b.as_slice().to_vec(),
         _ => panic!("no bytes"),
     };
     let text = String::from_utf8(bytes).unwrap();
@@ -1263,7 +1263,7 @@ fn test_encode_duplicate_header_names_preserved() {
     assert!(!is_result_failure(&result));
     let inner = extract_result_inner(&result);
     let bytes = match inner.iter().find(|(k, _)| k == "bytes") {
-        Some((_, Value::Bytes(b))) => (**b).clone(),
+        Some((_, Value::Bytes(b))) => b.as_slice().to_vec(),
         _ => panic!("no bytes"),
     };
     let text = String::from_utf8(bytes).unwrap();

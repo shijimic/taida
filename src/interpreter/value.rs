@@ -252,6 +252,116 @@ impl std::borrow::Borrow<str> for StrValue {
     }
 }
 
+/// # D29B-004 / Track-ε (2026-04-27): Bytes view value
+///
+/// `BytesValue` represents a (possibly sub-range) view over an `Arc<Vec<u8>>`
+/// byte buffer. The view is defined by `offset` and `len` into `buf`.
+///
+/// # Zero-copy invariants
+///
+/// - `Slice[bytes(b), s, e]` returns a new `BytesValue` with the *same* `buf`
+///   `Arc` (verified by `Arc::ptr_eq`) and adjusted `offset`/`len`.
+/// - The byte slice is `&buf[offset..offset+len]`, returned by `as_slice()`.
+/// - Cloning `Arc<BytesValue>` is O(1) atomic; cloning `BytesValue` itself
+///   bumps the inner `Arc<Vec<u8>>` rcount (one atomic).
+///
+/// # Equality / ordering / hashing
+///
+/// All comparisons use the byte slice (`as_slice()`), so two BytesValues with
+/// different `buf` Arcs but the same byte content compare equal. This matches
+/// the pre-D29 contract of `Value::Bytes` equality on `Vec<u8>` content.
+#[derive(Debug, Clone)]
+pub struct BytesValue {
+    /// The underlying byte buffer. Shared via `Arc::clone` across views.
+    pub buf: Arc<Vec<u8>>,
+    /// Byte offset of the view start within `buf`.
+    pub offset: usize,
+    /// Byte length of the view.
+    pub len: usize,
+}
+
+impl BytesValue {
+    /// An empty Bytes view (offset=0, len=0, fresh empty Arc).
+    pub fn empty() -> Self {
+        BytesValue {
+            buf: Arc::new(Vec::new()),
+            offset: 0,
+            len: 0,
+        }
+    }
+
+    /// Borrow the view as a byte slice. Always returns
+    /// `&buf[offset..offset+len]`.
+    #[inline]
+    pub fn as_slice(&self) -> &[u8] {
+        &self.buf[self.offset..self.offset + self.len]
+    }
+
+    /// Length of the view (NOT the underlying buffer).
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    /// True iff the view length is zero.
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    /// Iterator over the bytes in the view.
+    #[inline]
+    pub fn iter(&self) -> std::slice::Iter<'_, u8> {
+        self.as_slice().iter()
+    }
+
+    /// True iff this view shares its underlying `buf` Arc with `other`.
+    /// Used by D29B-004 zero-copy regression tests to confirm that
+    /// `Slice[bytes]` returns a view rather than a deep copy.
+    #[inline]
+    pub fn shares_buf_with(&self, other: &BytesValue) -> bool {
+        Arc::ptr_eq(&self.buf, &other.buf)
+    }
+}
+
+impl Deref for BytesValue {
+    type Target = [u8];
+    #[inline]
+    fn deref(&self) -> &[u8] {
+        self.as_slice()
+    }
+}
+
+impl PartialEq for BytesValue {
+    #[inline]
+    fn eq(&self, other: &Self) -> bool {
+        self.as_slice() == other.as_slice()
+    }
+}
+
+impl Eq for BytesValue {}
+
+impl PartialOrd for BytesValue {
+    #[inline]
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for BytesValue {
+    #[inline]
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.as_slice().cmp(other.as_slice())
+    }
+}
+
+impl std::hash::Hash for BytesValue {
+    #[inline]
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.as_slice().hash(state);
+    }
+}
+
 /// A runtime value in Taida.
 #[derive(Debug, Clone)]
 pub enum Value {
@@ -292,23 +402,35 @@ pub enum Value {
     Str(Arc<StrValue>),
     /// Bytes value (immutable byte sequence).
     ///
-    /// # C26B-020 柱 2 / Round 5 wO (2026-04-24): interior `Arc<Vec<u8>>`
+    /// # D29B-004 / Track-ε (2026-04-27): interior `Arc<BytesValue>`
     ///
-    /// Migrated from plain `Vec<u8>` to `Arc<Vec<u8>>` so that
-    /// `Value::clone()` on Bytes becomes an `Arc::clone()` (one atomic
-    /// increment) instead of a full byte-by-byte deep-clone. This
-    /// unblocks `BytesCursorTake` zero-copy paths, where multi-MB / GB
-    /// buffers are threaded through every `take(size)` step.
+    /// Migrated from `Arc<Vec<u8>>` to `Arc<BytesValue { buf, offset, len }>`
+    /// so that `Slice[bytes]` can return a **zero-copy view** sharing the
+    /// underlying byte buffer (`Arc::ptr_eq(&result.buf, &source.buf) == true`)
+    /// while still expressing a sub-range. This eliminates the per-request
+    /// body memcpy in the 1-arg handler hot path
+    /// (`body <= Slice[req.raw, body.start, body.start + body.len]`).
     ///
-    /// * **Construction**: prefer [`Value::bytes`] (wraps in `Arc::new`).
-    /// * **Reading from a match binding**: `bytes.iter()` / `bytes.len()`
-    ///   / `bytes.is_empty()` work via deref; `&**bytes` yields `&[u8]`.
-    /// * **Consuming the inner `Vec<u8>`**: use [`Value::bytes_take`] —
-    ///   `Arc::try_unwrap` fast path, else `(*arc).clone()` fallback.
+    /// # C26B-020 柱 2 / Round 5 wO (2026-04-24): interior Arc origin
     ///
-    /// Equality, ordering, display, hashing semantics are unchanged
-    /// because `Arc<T>` transparently forwards read access to `T`.
-    Bytes(Arc<Vec<u8>>),
+    /// The original migration from plain `Vec<u8>` to `Arc<Vec<u8>>` ensured
+    /// that `Value::clone()` on Bytes is one atomic increment instead of a
+    /// full byte-by-byte deep-clone. This Track-ε wrapping preserves that
+    /// property — cloning `Value::Bytes` now bumps the outer `Arc<BytesValue>`
+    /// rcount; the inner `Arc<Vec<u8>>` is shared via the BytesValue field.
+    ///
+    /// * **Construction**: prefer [`Value::bytes`] (full-buffer view) or
+    ///   [`Value::bytes_view`] (sub-range view sharing an existing buf Arc).
+    /// * **Reading from a match binding**: `b.iter()` / `b.len()` /
+    ///   `b.is_empty()` / `b.as_slice()` work as `BytesValue` inherent
+    ///   methods; the slice is `&buf[offset..offset+len]`.
+    /// * **Consuming bytes**: use [`Value::bytes_take`] — Arc try_unwrap
+    ///   fast path on the outer BytesValue, else returns `as_slice().to_vec()`.
+    ///
+    /// Equality, ordering, display semantics are based on the byte slice
+    /// `&buf[offset..offset+len]`, so Bytes from different buf Arcs with the
+    /// same byte content compare equal. Hashing follows the same rule.
+    Bytes(Arc<BytesValue>),
     /// Boolean value
     Bool(bool),
     /// Buchi pack (named fields, ordered).
@@ -549,22 +671,52 @@ impl Value {
 
     /// Default value for Bytes.
     pub fn default_bytes() -> Self {
-        Value::Bytes(Arc::new(Vec::new()))
+        Value::Bytes(Arc::new(BytesValue::empty()))
     }
 
     /// Construct a `Value::Bytes` from an owned `Vec<u8>`, hiding the
     /// `Arc` wrapping. See the doc comment on `Value::Bytes` for the
-    /// rationale (C26B-020 柱 2 interior migration).
+    /// rationale (C26B-020 柱 2 interior migration + D29B-004 Track-ε
+    /// view wrapping).
     pub fn bytes(data: Vec<u8>) -> Self {
-        Value::Bytes(Arc::new(data))
+        let len = data.len();
+        Value::Bytes(Arc::new(BytesValue {
+            buf: Arc::new(data),
+            offset: 0,
+            len,
+        }))
+    }
+
+    /// D29B-004 / Track-ε: Construct a `Value::Bytes` as a zero-copy view
+    /// over an existing buffer Arc. Used by `Slice[bytes]` and other
+    /// sub-range operations to avoid the per-request body memcpy.
+    /// `Arc::ptr_eq(&new.buf, &source.buf) == true` if `source.buf` is
+    /// passed as `buf`.
+    pub fn bytes_view(buf: Arc<Vec<u8>>, offset: usize, len: usize) -> Self {
+        debug_assert!(
+            offset.saturating_add(len) <= buf.len(),
+            "bytes_view range out of bounds: offset={offset}, len={len}, buf.len={}",
+            buf.len()
+        );
+        Value::Bytes(Arc::new(BytesValue { buf, offset, len }))
     }
 
     /// COW helper: take ownership of the inner `Vec<u8>` from an
-    /// `Arc<Vec<u8>>`. If the `Arc` is uniquely owned, avoids allocation;
-    /// otherwise clones the vec. Used at legacy consumer sites that
-    /// previously moved `Vec<u8>` out of `Value::Bytes`. C26B-020 柱 2.
-    pub fn bytes_take(data: Arc<Vec<u8>>) -> Vec<u8> {
-        Arc::try_unwrap(data).unwrap_or_else(|arc| (*arc).clone())
+    /// `Arc<BytesValue>`. If both Arcs are uniquely owned and `offset==0`
+    /// and `len==buf.len()`, avoids allocation; otherwise allocates a new
+    /// `Vec<u8>` containing the slice. C26B-020 柱 2 + D29B-004 Track-ε.
+    pub fn bytes_take(data: Arc<BytesValue>) -> Vec<u8> {
+        match Arc::try_unwrap(data) {
+            Ok(bv) => {
+                let BytesValue { buf, offset, len } = bv;
+                if offset == 0 && len == buf.len() {
+                    Arc::try_unwrap(buf).unwrap_or_else(|arc| (*arc).clone())
+                } else {
+                    buf[offset..offset + len].to_vec()
+                }
+            }
+            Err(arc) => arc.as_slice().to_vec(),
+        }
     }
 
     /// Default value for Bool.

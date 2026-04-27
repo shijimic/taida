@@ -1,7 +1,9 @@
 use std::sync::Arc;
 
 use super::eval::{Interpreter, RuntimeError, Signal};
-use super::value::{AsyncStatus, AsyncValue, StreamStatus, StreamTransform, StreamValue, Value};
+use super::value::{
+    AsyncStatus, AsyncValue, BytesValue, StreamStatus, StreamTransform, StreamValue, Value,
+};
 /// Operation mold evaluation for the Taida interpreter.
 ///
 /// Contains `try_operation_mold` (Str/Num/List molds) and `try_list_mold_op`
@@ -50,9 +52,14 @@ fn make_lax_value(has_value: bool, value: Value, default: Value) -> Value {
 
 /// C26B-020 柱 2: zero-copy BytesCursor constructor.
 ///
-/// Accepts an already-shared `Arc<Vec<u8>>`; cloning the Arc is O(1)
+/// Accepts an already-shared `Arc<BytesValue>`; cloning the Arc is O(1)
 /// atomic refcount bump rather than a full byte-by-byte memcpy.
-fn make_bytes_cursor_arc(bytes: Arc<Vec<u8>>, offset: i64) -> Value {
+///
+/// D29B-004 / Track-ε: `bytes` is now `Arc<BytesValue>` (was `Arc<Vec<u8>>`)
+/// to match the new `Value::Bytes` interior. `BytesValue::len()` returns the
+/// view length (not the underlying buf length), so cursors over a sub-range
+/// view see the view's range only.
+fn make_bytes_cursor_arc(bytes: Arc<BytesValue>, offset: i64) -> Value {
     let clamped = offset.clamp(0, bytes.len() as i64);
     let length = bytes.len() as i64;
     Value::pack(vec![
@@ -70,7 +77,7 @@ fn make_bytes_cursor_step(value: Value, cursor: Value) -> Value {
 fn parse_bytes_cursor(
     value: Value,
     mold_name: &str,
-) -> Result<(Arc<Vec<u8>>, usize), RuntimeError> {
+) -> Result<(Arc<BytesValue>, usize), RuntimeError> {
     let Value::BuchiPack(fields) = value else {
         return Err(RuntimeError {
             message: format!("{}: argument must be BytesCursor, got {}", mold_name, value),
@@ -478,8 +485,21 @@ impl Interpreter {
                         };
                         let (clamped_start, clamped_end) =
                             clamp_slice_bounds(bytes.len(), start, end);
-                        let result = bytes[clamped_start..clamped_end].to_vec();
-                        Ok(Some(Signal::Value(Value::bytes(result))))
+                        // D29B-004 / Track-ε: zero-copy view sharing the
+                        // underlying buf Arc. Result is `Arc::ptr_eq` to
+                        // the source's buf Arc — the per-request body
+                        // memcpy in the 1-arg handler hot path
+                        // (`body <= Slice[req.raw, b.start, b.start+b.len]`)
+                        // is eliminated. Pre-Track-ε path (commented for
+                        // delta evidence): `bytes[clamped_start..clamped_end].to_vec()`
+                        // → `Value::bytes(result)` (1 alloc + memcpy/req).
+                        let new_offset = bytes.offset + clamped_start;
+                        let new_len = clamped_end - clamped_start;
+                        Ok(Some(Signal::Value(Value::bytes_view(
+                            Arc::clone(&bytes.buf),
+                            new_offset,
+                            new_len,
+                        ))))
                     }
                     _ => Ok(None), // Not a supported Slice target, fall through
                 }

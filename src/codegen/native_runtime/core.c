@@ -3472,6 +3472,17 @@ taida_val taida_str_slice(const char* s, taida_val start, taida_val end) {
 
 taida_val taida_slice_mold(taida_val value, taida_val start, taida_val end) {
     if (TAIDA_IS_BYTES(value)) {
+        // D29B-004 / Track-ε note (2026-04-27): the Native ABI uses the
+        // `taida_val[]` Bytes representation (8-fold inline expansion), so
+        // a true zero-copy "view sharing the underlying buffer" requires a
+        // new magic (e.g. TAIDA_BYTES_VIEW_MAGIC carrying a base pointer
+        // + offset + len). Track-β added TAIDA_BYTES_CONTIG_MAGIC for
+        // writev output paths but not for Slice input/output. Adding view
+        // semantics to Native Slice is a Track-η (Phase 6) follow-up that
+        // integrates with `taida_net_raw_as_bytes` leak fix and is gated
+        // on the BytesContiguous → BytesView unification work.
+        // Native output parity with interpreter/JS is preserved (same
+        // bytes returned); only the alloc/memcpy path remains here.
         taida_val *bytes = (taida_val*)value;
         taida_val len = bytes[1];
         taida_val s = start;

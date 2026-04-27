@@ -1040,7 +1040,7 @@ pub(crate) fn extract_response_fields(response: &Value) -> Result<ResponseFields
     // A future `Value::into_bytes()` consuming method could eliminate this clone, but
     // would require changes to the Value type across the codebase.
     let body_bytes: Vec<u8> = match fields.iter().find(|(k, _)| k == "body") {
-        Some((_, Value::Bytes(b))) => (**b).clone(),
+        Some((_, Value::Bytes(b))) => b.as_slice().to_vec(),
         Some((_, Value::Str(s))) => s.as_bytes().to_vec(),
         Some((_, v)) => {
             return Err(format!(
