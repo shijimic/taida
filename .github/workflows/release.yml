@@ -84,7 +84,7 @@ jobs:
       - run: cargo clippy --all-targets -- -D warnings
       - uses: taiki-e/install-action@nextest
       - name: Install wasmtime
-        run: curl https://wasmtime.dev/install.sh -sSf | bash && echo "$HOME/.wasmtime/bin" >> $GITHUB_PATH
+        run: curl https://wasmtime.dev/install.sh -sSf | bash && echo "$HOME/.wasmtime/bin" >> "$GITHUB_PATH"
       - run: cargo nextest run --profile ci
       - run: cargo build --locked --release
       - run: ./tests/run_backend_parity.sh
@@ -96,7 +96,7 @@ jobs:
           cat <<EOF | tee release-gate-summary.md >> "${GITHUB_STEP_SUMMARY}"
           ## Release Gate
 
-          - Decision: `Go`
+          - Decision: \`Go\`
           - Tag: \`${RELEASE_TAG}\`
           - Distribution channel: \`install.sh\` via \`taida.dev\`
           - Release assets: GitHub Release archives + \`SHA256SUMS\`
@@ -230,8 +230,9 @@ jobs:
           set -euo pipefail
           # Sign each packaged binary plus SHA256SUMS. Skips anything
           # that is already a .cosign.bundle or .sig (defensive — in
-          # case the job retries).
-          for f in taida-* SHA256SUMS; do
+          # case the job retries). Glob prefixed with ./ to avoid
+          # filenames being interpreted as options (shellcheck SC2035).
+          for f in ./taida-* SHA256SUMS; do
               [ -f "${f}" ] || continue
               case "${f}" in
                   *.cosign.bundle|*.sig) continue ;;
