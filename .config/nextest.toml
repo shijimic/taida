@@ -25,3 +25,40 @@ status-level = "pass"
 final-status-level = "all"
 # Warn on tests slower than 60s, terminate after 10 minutes
 slow-timeout = { period = "60s", terminate-after = 10 }
+
+# ---------------------------------------------------------------------------
+# D29B-009 / Lock-F: NET integration test serialization
+# ---------------------------------------------------------------------------
+#
+# CI 2C nextest parallelism multiplied port-bind contention across these
+# binaries even after the port-allocator hardening (see
+# `.dev/D29_BLOCKERS.md::D29B-009`). Lock-F (Phase 0 verdict) declared a
+# `net-serial` test-group with `max-threads = 1` that funnels the NET test
+# binaries through a single executor slot, eliminating the residual race
+# between concurrent allocator probes and child-bind windows.
+#
+# Scope: only test binaries that actually bind loopback sockets. parity.rs
+# is intentionally excluded because (a) its private allocator already
+# enforces probe-and-cooldown invariants and (b) serializing the largest
+# integration test would dominate wall-clock without proportional flake
+# reduction.
+#
+# Retry strategy is unchanged: Lock-F explicitly rejected
+# `nextest --retries` as it would mask root-cause regressions instead of
+# preventing them.
+[test-groups]
+net-serial = { max-threads = 1 }
+
+# Track-η (Phase 6, 2026-04-27, Lock-Phase6 land): added `d29b_005_*`
+# (NET binders: js_buffer_identity spawns a Node.js HTTP server on a
+# loopback port; native_use_after_reset spawns a Native HTTP/1 server)
+# and `d29b_012_*` (valgrind-wrapped Native HTTP/1 server). The
+# dhat_alloc_count test is in-process interpreter only — no port bind —
+# so it is intentionally excluded.
+[[profile.default.overrides]]
+filter = "binary(/^c26b_022/) | binary(/^c27b_003/) | binary(/^c27b_014/) | binary(/^c27b_027/) | binary(/^d28b_012/) | binary(/^d29b_009/) | binary(/^d29b_005_js_buffer_identity/) | binary(/^d29b_005_native_use_after_reset/) | binary(/^d29b_012/)"
+test-group = "net-serial"
+
+[[profile.ci.overrides]]
+filter = "binary(/^c26b_022/) | binary(/^c27b_003/) | binary(/^c27b_014/) | binary(/^c27b_027/) | binary(/^d28b_012/) | binary(/^d29b_009/) | binary(/^d29b_005_js_buffer_identity/) | binary(/^d29b_005_native_use_after_reset/) | binary(/^d29b_012/)"
+test-group = "net-serial"

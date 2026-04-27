@@ -34,13 +34,19 @@ import sys
 from pathlib import Path
 
 NET_RPS_RE = re.compile(
-    r"^NET6-(?P<slug>[0-9a-z-]+)\s+\[(?P<desc>[^\]]+)\]\s+"
+    # D29B-010 follow-up: drop the `^` line-start anchor. cargo test
+    # output prefixes the integration-test name to the same line as the
+    # NET6 marker (`test test_net6_xxx_benchmark ... NET6-3b-2 [...]`),
+    # so the previous anchor matched nothing and the parser silently
+    # produced an empty bencher output even when all three benches ran
+    # green. `re.search` still locates the marker anywhere on the line.
+    r"NET6-(?P<slug>[0-9a-z-]+)\s+\[(?P<desc>[^\]]+)\]\s+"
     r"ok=(?P<ok>\d+)/(?P<n>\d+)\s+"
     r"req/s=(?P<rps>[0-9.]+)\s+total=(?P<total>\d+)ms"
 )
 
 NET_BYTES_RE = re.compile(
-    r"^NET6-(?P<slug>[0-9a-z-]+)\s+\[(?P<desc>[^\]]+)\]\s+"
+    r"NET6-(?P<slug>[0-9a-z-]+)\s+\[(?P<desc>[^\]]+)\]\s+"
     r"ok=(?P<ok>\d+)/(?P<n>\d+)\s+"
     r"throughput=(?P<mibps>[0-9.]+)MiB/s\s+"
     r"total_bytes=(?P<bytes>\d+)\s+elapsed=(?P<elapsed>\d+)ms"

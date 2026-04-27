@@ -84,7 +84,7 @@ jobs:
       - run: cargo clippy --all-targets -- -D warnings
       - uses: taiki-e/install-action@nextest
       - name: Install wasmtime
-        run: curl https://wasmtime.dev/install.sh -sSf | bash && echo "$HOME/.wasmtime/bin" >> $GITHUB_PATH
+        run: curl https://wasmtime.dev/install.sh -sSf | bash && echo "$HOME/.wasmtime/bin" >> "$GITHUB_PATH"
       - run: cargo nextest run --profile ci
       - run: cargo build --locked --release
       - run: ./tests/run_backend_parity.sh
@@ -96,7 +96,7 @@ jobs:
           cat <<EOF | tee release-gate-summary.md >> "${GITHUB_STEP_SUMMARY}"
           ## Release Gate
 
-          - Decision: `Go`
+          - Decision: \`Go\`
           - Tag: \`${RELEASE_TAG}\`
           - Distribution channel: \`install.sh\` via \`taida.dev\`
           - Release assets: GitHub Release archives + \`SHA256SUMS\`
@@ -230,8 +230,9 @@ jobs:
           set -euo pipefail
           # Sign each packaged binary plus SHA256SUMS. Skips anything
           # that is already a .cosign.bundle or .sig (defensive — in
-          # case the job retries).
-          for f in taida-* SHA256SUMS; do
+          # case the job retries). Glob prefixed with ./ to avoid
+          # filenames being interpreted as options (shellcheck SC2035).
+          for f in ./taida-* SHA256SUMS; do
               [ -f "${f}" ] || continue
               case "${f}" in
                   *.cosign.bundle|*.sig) continue ;;
@@ -244,7 +245,7 @@ jobs:
               echo "::endgroup::"
           done
           echo "Signed artefacts:"
-          ls -la *.cosign.bundle
+          ls -la ./*.cosign.bundle
       - name: Compute artefact digests (for SLSA subjects)
         id: digest
         working-directory: dist
@@ -331,7 +332,31 @@ jobs:
           "
           GENERATED=$(gh api "repos/${REPO}/releases/generate-notes" \
             -f tag_name="${RELEASE_TAG}" -q '.body')
-          gh release create "${RELEASE_TAG}" dist/* \
-            --repo "${REPO}" \
-            --title "${RELEASE_TAG}" \
-            --notes "${HEADER}${GENERATED}"
+          NOTES="${HEADER}${GENERATED}"
+
+          # D29B-013 / Lock-I: idempotent release dispatcher.
+          #
+          # `gh release create` hard-fails with `release already exists`
+          # when its tag is already published, which broke the `@d.28`
+          # release run (manual `gh release delete` + rerun was required).
+          # Stable-cycle re-runs (asset-only fixes, signature retries,
+          # SHA256SUMS regen) must complete without manual operator
+          # intervention, so we branch on existence:
+          #   * exists  → upload assets with --clobber + edit notes
+          #   * absent  → create as before
+          if gh release view "${RELEASE_TAG}" --repo "${REPO}" >/dev/null 2>&1; then
+            echo "release ${RELEASE_TAG} already exists; updating assets and notes"
+            gh release upload "${RELEASE_TAG}" dist/* \
+              --repo "${REPO}" \
+              --clobber
+            gh release edit "${RELEASE_TAG}" \
+              --repo "${REPO}" \
+              --title "${RELEASE_TAG}" \
+              --notes "${NOTES}"
+          else
+            echo "release ${RELEASE_TAG} does not exist; creating"
+            gh release create "${RELEASE_TAG}" dist/* \
+              --repo "${REPO}" \
+              --title "${RELEASE_TAG}" \
+              --notes "${NOTES}"
+          fi

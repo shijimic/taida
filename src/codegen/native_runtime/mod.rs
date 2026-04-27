@@ -568,7 +568,124 @@ mod tests {
         //   at a zeroed slot.
         // EXPECTED_TOTAL_LEN: 1,032,350 + 2,612 (D28B-025) + 425
         //   (D28B-026) = 1,035,387.
-        const EXPECTED_TOTAL_LEN: usize = 1_035_387;
+        // D29B-003 (Track-β, 2026-04-27): +10,698 bytes total — split as
+        //   core.c +6,407 (TAIDA_BYTES_CONTIG_MAGIC + TAIDA_IS_BYTES_CONTIG /
+        //   TAIDA_IS_ANY_BYTES macros + taida_bytes_contig_new /
+        //   taida_bytes_contig_data / taida_bytes_contig_len primitives +
+        //   taida_net_raw_as_bytes_view borrow helper + recognition in
+        //   taida_has_magic_header / _taida_is_callable_impl /
+        //   taida_runtime_detect_tag / taida_polymorphic_length) and
+        //   net_h1_h2.c +4,291 (3 writev sites with TAIDA_BYTES_CONTIG
+        //   fast-path branches alongside legacy taida_val[] fallback +
+        //   body_is_contig flag plumbing through scatter / encode paths).
+        //   readBody / readBodyAll / readBodyChunk producers remain on the
+        //   legacy taida_val[] form pending a follow-up sub-Lock that
+        //   polymorphizes the remaining Bytes dispatchers (length already
+        //   handles both forms; decode/get/concat/append still need the
+        //   same treatment before producers can flip to contig).
+        //   EXPECTED_TOTAL_LEN: 1,035,387 + 10,698 = 1,046,085.
+        //   Track-β is the 4th (last) TIER 1 merge, so successor tracks
+        //   (TIER 2 ε / TIER 3 ζ η) will rebase on top and accumulate
+        //   their own deltas onto this base.
+        // D29B-004 (Track-ε, 2026-04-27): +803 bytes in core.c
+        //   (taida_slice_mold inline comment block documenting that
+        //   Native Slice[bytes] retains the legacy taida_val[] memcpy
+        //   path — true zero-copy view requires a new
+        //   TAIDA_BYTES_VIEW_MAGIC carrying base+offset+len, deferred to
+        //   Track-η Phase 6 where it can integrate with the
+        //   taida_net_raw_as_bytes leak fix and the BytesContiguous →
+        //   BytesView unification work). The interpreter and JS backends
+        //   are zero-copy in this Phase (Value::bytes_view + Arc::ptr_eq;
+        //   Uint8Array.subarray view); Native output parity is preserved.
+        //   Measured delta: 1,046,085 (Track-β base) + 803 (Track-ε
+        //   comment block) = 1,046,888.
+        // D29B-001 / D29B-011 (Track-ζ, 2026-04-27): +11,572 bytes total —
+        //   split as net_h1_h2.c +5,919 (h2_build_request_pack rewritten
+        //   to allocate a per-request arena that holds [body | method |
+        //   path | query | header name/value pairs ...] as a single
+        //   contiguous buffer, with method/path/query/headers all
+        //   surfaced as `@(start, len)` span packs into req.raw, plus an
+        //   OOM-tolerant fallback path that retains the legacy Str-pack
+        //   form when the staging arena allocation fails) and
+        //   net_h3_quic.c +5,653 (h3_build_request_pack rewritten with
+        //   the symmetric strategy for QPACK headers; same arena layout
+        //   so SpanEquals[req.method, req.raw, "GET"]() returns the same
+        //   Bool under h1/h2/h3). The HPACK / QPACK dynamic tables
+        //   reallocate during decode so the arena copy is the only way
+        //   to give Span* mold a stable backing buffer; the pre-fix
+        //   `req.headers[i].name` was a Str (not a span pack), causing
+        //   `extract_span_pack` to return None and SpanEquals to silently
+        //   fall through to false under h2/h3 — protocol-divergent
+        //   behavior that violated the
+        //   `docs/reference/net_api.md §3.1` contract
+        //   `headers: @[@(name: span, value: span)]`. core.c is
+        //   unchanged on this track (taida_net_make_span and
+        //   taida_bytes_from_raw helpers were already available).
+        //   Track-ζ delta-only EXPECTED_TOTAL_LEN: 1,046,888 + 11,572 = 1,058,460.
+        // D29B-005 / D29B-012 (Track-η Phase 6, 2026-04-27): +3,291 bytes
+        //   in core.c — split as
+        //   (a) taida_net_raw_as_bytes ABI rewrite (Lock-Phase6-A Option D):
+        //       out_owned: unsigned char** → out_owner: taida_val* release
+        //       handle, plus a TAIDA_BYTES_CONTIG fast-path borrow that
+        //       reuses the Track-β contig payload (alloc 0 for CONTIG raw,
+        //       1 alloc + 1 release for legacy taida_val[] raw, leak 0
+        //       across tier 1/2/3 because taida_str_release dispatches
+        //       freelist push / arena no-op / free() automatically). The
+        //       three Span* callers (SpanEquals / SpanStartsWith /
+        //       SpanContains) acquired matching release sites on every
+        //       branch, including resolver-failure early returns, so the
+        //       previous own_buf / own_n leak is closed.
+        //   (b) taida_slice_mold CONTIG view fast path (Lock-Phase6-B
+        //       Option β-2): when input is TAIDA_BYTES_CONTIG, copy only
+        //       the [s, e) slice window into a fresh contig payload via
+        //       taida_bytes_contig_new (slice-bounded memcpy, no new magic
+        //       added — output parity with interpreter / JS preserved).
+        //       Legacy taida_val[] inputs retain the existing
+        //       bytes_new_filled materialize path because the producer
+        //       flip is gated on D29B-015 (β-2 TIER 4).
+        //   (c) Tier 2/3 review fix: Native Span* range checks use
+        //       subtraction (`len <= buf_len - start`) instead of signed
+        //       `start + len` arithmetic, avoiding UB on hostile span
+        //       values before the bounds check runs (+75 bytes).
+        // TIER 3 統合 (ζ + η land 後 merge resolve, 2026-04-27):
+        //   合計 delta = ζ +11,572 (net_h1_h2.c F6 +5,919 + net_h3_quic.c +5,653)
+        //   + η +3,291 (core.c F1 +3,291、Track-η +3,216 + review fix +75) = +14,863
+        //   EXPECTED_TOTAL_LEN canonical post-review: 1,046,888 + 14,863 = 1,061,751
+        // D29B-015 (Track-β-2 TIER 4, 2026-04-27): producer flip + Bytes
+        //   polymorphic dispatcher expansion. Adds:
+        //   * core.c: 11 dispatcher polymorphic branches (taida_u8_at,
+        //     taida_bytes_clone, taida_bytes_to_list, taida_u16be/u16le/
+        //     u32be/u32le_decode_mold, taida_bytes_cursor_take/u8,
+        //     taida_utf8_decode_mold, taida_sha256, taida_bytes_to_display_string,
+        //     taida_bytes_set, taida_bytes_mold, taida_list_concat for
+        //     bytes-bytes case, taida_is_bytes typeof). All gain a
+        //     TAIDA_IS_BYTES_CONTIG short-circuit branch reading the
+        //     CONTIG inline payload via taida_bytes_contig_data, then fall
+        //     through to the legacy taida_val[] path.
+        //   * net_h1_h2.c: producer flip on five sites — taida_net_read_body
+        //     (slice copy → CONTIG), taida_net_read_body_all (aggregate buf
+        //     → CONTIG), taida_net4_make_lax_bytes_value (chunk Lax[Bytes]
+        //     → CONTIG), taida_net_build_request_pack (request `raw` field),
+        //     and the H1 + H2 in-loop request-pack producers. Plus
+        //     polymorphism on consumer sites: parse_request_head input,
+        //     wsUpgrade raw extraction, wsSend body extraction, h2 response
+        //     fields body, taida_net_send_response wire_bytes, ws binary
+        //     frame producer.
+        //   Net result: readBody → writeChunk fully exercises the CONTIG
+        //   writev fast path (iov[1].iov_base = taida_bytes_contig_data),
+        //   eliminating the per-byte materialize loop on the hot path. The
+        //   D29B-012 valgrind alloc-balance test gains the option to tighten
+        //   the slack from <= 16 to < 4 once process-life retained allocs
+        //   are factored out (test comment updated accordingly).
+        //   Track-β-2 delta-only: +14,738 bytes (β-2 のみ pre-merge: 1,061,676 + 14,738 = 1,076,414).
+        // D29B-016 (Track-θ Phase 10 TIER 4, 2026-04-27):
+        //   core.c に TAIDA_STR_ROPE_MAGIC sentinel + 説明コメント追加
+        //   (interpreter side rope path で透過昇格を実装、Native の
+        //   rope-aware dispatcher は将来用に予約、§ 6.2 widening addition).
+        //   Track-θ delta-only: +910 bytes.
+        // TIER 4 統合 (β-2 + θ land 後 merge resolve, 2026-04-27):
+        //   EXPECTED_TOTAL_LEN: 1,061,751 (canonical post-review) + 14,738 (β-2) + 910 (θ) = 1,077,399
+        const EXPECTED_TOTAL_LEN: usize = 1_077_399;
         let asm = *NATIVE_RUNTIME_C;
         assert_eq!(
             asm.len(),
@@ -995,11 +1112,79 @@ mod tests {
         //   chunks[0].base == NULL would leave active_chunk pointing
         //   at a zeroed slot). All inside F1, F2 unchanged.
         //   F1_LEN: 276,686 + 425 = 277,111.
-        const F1_LEN: usize = 277_111;
+        // D29B-003 (Track-β, 2026-04-27): +6,407 bytes in F1 for
+        //   TAIDA_BYTES_CONTIG_MAGIC + TAIDA_IS_BYTES_CONTIG /
+        //   TAIDA_IS_ANY_BYTES macros + taida_bytes_contig_new /
+        //   taida_bytes_contig_data / taida_bytes_contig_len primitives +
+        //   taida_net_raw_as_bytes_view borrow helper +
+        //   recognition in taida_has_magic_header / _taida_is_callable_impl /
+        //   taida_runtime_detect_tag / taida_polymorphic_length. All
+        //   additions land inside F1 (Magic-Numbers / allocator /
+        //   type primitives region, well before the "// ── Error
+        //   ceiling" marker). F2 unchanged.
+        //   F1_LEN: 277,111 + 6,407 = 283,518.
+        // D29B-004 (Track-ε, 2026-04-27): +803 bytes in F1 for the
+        //   taida_slice_mold inline comment block (TAIDA_IS_BYTES branch)
+        //   documenting that Native Slice[bytes] retains the legacy
+        //   taida_val[] memcpy and that true zero-copy view requires a
+        //   future TAIDA_BYTES_VIEW_MAGIC integration with Track-η /
+        //   BytesContiguous unification (deferred to Phase 6). The
+        //   comment lives entirely inside taida_slice_mold which is well
+        //   before the "// ── Error ceiling" marker, so all bytes land in
+        //   F1. F2 unchanged.
+        //   F1_LEN: 283,518 + 803 = 284,321.
+        // D29B-005 / D29B-012 (Track-η Phase 6, 2026-04-27): +3,291 bytes
+        //   in F1 split as:
+        //   (a) taida_slice_mold CONTIG view fast path (Lock-Phase6-B β-2)
+        //       — new TAIDA_IS_BYTES_CONTIG branch above the legacy
+        //       TAIDA_BYTES path inside taida_slice_mold (line ~3473).
+        //   (b) taida_net_raw_as_bytes ABI rewrite (Lock-Phase6-A Option D)
+        //       — out_owned: unsigned char** → out_owner: taida_val*
+        //       release-handle, plus a TAIDA_BYTES_CONTIG fast-path borrow
+        //       branch reusing the Track-β contig payload (line ~6472).
+        //   (c) Three Span* callers (SpanEquals / SpanStartsWith /
+        //       SpanContains, lines ~6533/6547/6561) acquired matching
+        //       taida_str_release sites on every branch including
+        //       resolver-failure early returns.
+        //   (d) Tier 2/3 review fix: subtraction-based bounds checks avoid
+        //       signed `start + len` overflow in Native Span* helpers.
+        //   All edits land before the "// ── Error ceiling" marker so the
+        //   delta accumulates entirely in F1. F2 unchanged.
+        //   F1_LEN canonical post-review: 284,321 + 3,291 (η +3,216 + review +75) = 287,612.
+        // D29B-015 (Track-β-2 TIER 4, 2026-04-27): +8,418 bytes to F1 and
+        //   +1,234 bytes to F2 for the dispatcher polymorphism expansion
+        //   plus producer flip:
+        //   * F1 (Magic-Numbers / allocator / type primitives / mold
+        //     dispatchers, before "// ── Error ceiling"): polymorphic
+        //     CONTIG branches added to taida_u16be/u16le/u32be/u32le_decode_mold
+        //     (decoder molds, ~lines 1885-1950), taida_bytes_clone (~3404),
+        //     taida_bytes_get_lax (~3425), taida_bytes_to_list (~2110),
+        //     taida_bytes_cursor_take/u8 (~2174/2201), taida_utf8_decode_mold
+        //     (~2232), taida_bytes_set / taida_bytes_mold (~2064/2099),
+        //     taida_list_concat bytes-bytes case (~4989), taida_bytes_len
+        //     ANY_BYTES gate (~3416), cursor_unpack ANY_BYTES (~2121),
+        //     bytes_cursor_new ANY_BYTES (~2147).
+        //   * F2 (after "// ── Error ceiling"): polymorphic CONTIG
+        //     branches added to taida_sha256 (~10056), taida_is_bytes
+        //     typeof (~7278), taida_bytes_to_display_string (~7411).
+        //   Track-β-2 delta-only: F1 +8,418、F2 +1,234.
+        // D29B-016 Track-θ Phase 10-D (TIER 4, 2026-04-27): +910 to F1 for the
+        //   TAIDA_STR_ROPE_MAGIC sentinel + design rationale comment block.
+        //   Reserved widening addition (§ 6.2) anticipating a future rope-
+        //   aware taida_str_concat polymorphic dispatch; the interpreter
+        //   side already implements rope promotion via StrRepr::Rope.
+        //   Track-θ delta-only: F1 +910.
+        // TIER 4 統合 (β-2 + θ land 後 merge resolve, 2026-04-27):
+        //   F1_LEN: 287,612 (canonical post-review) + 8,418 (β-2) + 910 (θ) = 296,940.
+        //   F2_LEN: 160,760 + 1,234 (β-2) = 161,994.
+        //   Net delta on core.c TIER 4 land: +10,562 (F1 +9,328 + F2 +1,234).
+        //   Per-track total (β + ε + η + review + β-2 + θ) on F1 = 19,829
+        //     (6,407 + 803 + 3,216 + 75 + 8,418 + 910), on F2 = 1,234.
+        const F1_LEN: usize = 296_940;
         assert_eq!(
             CORE_SECTION.len(),
-            277_111 + 160_760,
-            "core.c total byte length must equal legacy fragment1 + fragment2 (C25B-001 / C25B-028 / C25B-025 / C26B-011 / C26B-020 / C26B-016 / C26B-018 / C26B-011-wS / C26B-024 / C26B-024-wepsilon adjusted; CI-red 2026-04-24 cppcheck clean-up adds 881/409 to F1/F2; @c.27 PR41 CI-red follow-up adds 61 to F1 for the cppcheck-suppress comment on the new taida_release_any helper; D28B-012 wF adds 4,821 to F1 for taida_arena_request_reset; D28B-026 review follow-up adds 425 to F1 for the active_chunk defensive corner)"
+            296_940 + 161_994,
+            "core.c total byte length must equal legacy fragment1 + fragment2 (C25B-001 / C25B-028 / C25B-025 / C26B-011 / C26B-020 / C26B-016 / C26B-018 / C26B-011-wS / C26B-024 / C26B-024-wepsilon adjusted; CI-red 2026-04-24 cppcheck clean-up adds 881/409 to F1/F2; @c.27 PR41 CI-red follow-up adds 61 to F1 for the cppcheck-suppress comment on the new taida_release_any helper; D28B-012 wF adds 4,821 to F1 for taida_arena_request_reset; D28B-026 review follow-up adds 425 to F1 for the active_chunk defensive corner; D29B-003 Track-β adds 6,407 to F1 for TAIDA_BYTES_CONTIG primitives + writev hot-path reflection; D29B-004 Track-ε adds 803 to F1 for taida_slice_mold inline note documenting deferred Native zero-copy view integration; D29B-005/012 Track-η adds 3,291 to F1 for taida_net_raw_as_bytes ABI Option-D rewrite + Span* release sites + taida_slice_mold CONTIG view fast path + subtraction-based Span* bounds checks; D29B-015 Track-β-2 adds 8,418 to F1 and 1,234 to F2 for Bytes dispatcher polymorphism + producer flip; D29B-016 Track-θ adds 910 to F1 for TAIDA_STR_ROPE_MAGIC sentinel + design rationale comment block)"
         );
         const F2_PREFIX: &[u8] = b"// \xE2\x94\x80\xE2\x94\x80 Error ceiling";
         let tail = &CORE_SECTION.as_bytes()[F1_LEN..F1_LEN + F2_PREFIX.len()];
@@ -1079,11 +1264,56 @@ mod tests {
         //   branch (filter loop + filtered header copy + cleanup
         //   free + multi-paragraph commentary). All inside fragment
         //   6, F5 unchanged. F6 grows: 96,830 + 2,612 = 99,442.
-        const F5_LEN: usize = 188_398;
+        // D29B-003 (Track-β, 2026-04-27): +4,291 bytes inside fragment 5
+        //   for the TAIDA_BYTES_CONTIG hot-path branches in three writev
+        //   sites (taida_net_send_response_scatter Bytes body branch +
+        //   taida_net_write_chunk stack/heap payload branches +
+        //   taida_net_encode_response Bytes body memcpy fast path) plus
+        //   the body_is_contig flag plumbing through encode/scatter
+        //   request packs. readBody / readBodyAll / readBodyChunk
+        //   producers remain on the legacy taida_val[] form pending the
+        //   polymorphic-Bytes-dispatcher follow-up sub-Lock. All
+        //   insertions live well before the "// ── Native HTTP/2 server"
+        //   divider so F5 grows and F6 (HTTP/2 server) is unchanged.
+        //   F5_LEN moves: 188,398 + 4,291 = 192,689.
+        // D29B-001 (Track-ζ, 2026-04-27): +5,919 bytes inside fragment 6
+        //   (HTTP/2 server) for the h2_build_request_pack rewrite —
+        //   per-request arena allocation + memcpy of body + method +
+        //   path + query + header name/value pairs into a single
+        //   contiguous buffer, with the resulting span starts/lens
+        //   surfaced as `@(start, len)` packs into req.raw. Includes an
+        //   OOM-tolerant fallback that reverts to the legacy Str-pack
+        //   form when the staging arena allocation fails (so a per-
+        //   request transient OOM degrades SpanEquals to silent-miss
+        //   instead of crashing the server). All bytes land after the
+        //   "// ── Native HTTP/2 server" divider so F5_LEN is unchanged
+        //   and F6 grows: 99,442 + 5,919 = 105,361.
+        // D29B-015 (Track-β-2 TIER 4, 2026-04-27): producer flip + dispatcher
+        //   plumbing inside net_h1_h2.c. F5 (HTTP/1 parser + worker, before
+        //   "// ── Native HTTP/2 server"): +4,371 bytes for
+        //   * taida_net_http_parse_request_head CONTIG short-circuit branch
+        //   * taida_net_read_body CONTIG raw fast path + producer flip
+        //   * taida_net_read_body_all CONTIG aggregate producer flip
+        //   * taida_net4_make_lax_bytes_value CONTIG chunk producer flip
+        //   * taida_net_send_response wire_bytes CONTIG borrow branch
+        //   * taida_net4_make_lax_ws_frame_value ANY_BYTES tag check
+        //   * wsUpgrade raw extraction CONTIG branch
+        //   * wsSend payload CONTIG borrow branch
+        //   * WS binary frame producer flip to CONTIG
+        //   * H1 in-loop request-pack `raw` producer flips (head_consumed
+        //     and head+body variants)
+        //   * taida_net_build_request_pack request `raw` producer flip
+        //   F5_LEN: 192,689 + 4,371 = 197,060.
+        //   F6 (HTTP/2 server, after divider): +715 bytes for
+        //   * h2_extract_response_fields body branch CONTIG fast path
+        //   * H2 build_request_pack arena/body CONTIG producer flip (both
+        //     branches: arena-backed and body-only fall-back).
+        //   F6_LEN: 105,361 + 715 = 106,076.
+        const F5_LEN: usize = 197_060;
         assert_eq!(
             NET_H1_H2_SECTION.len(),
-            188_398 + 99_442,
-            "net_h1_h2.c total byte length must equal legacy fragment5 + fragment6 (C26B-026 / C26B-022-wS / C27B-014 / C27B-026 / D28B-012 wF / D28B-002 wG / D28B-025 review follow-up adjusted)"
+            197_060 + 106_076,
+            "net_h1_h2.c total byte length must equal legacy fragment5 + fragment6 (C26B-026 / C26B-022-wS / C27B-014 / C27B-026 / D28B-012 wF / D28B-002 wG / D28B-025 review follow-up / D29B-003 Track-β contig writev hot-path / D29B-001 Track-ζ h2 arena+span request pack / D29B-015 Track-β-2 producer flip + consumer polymorphism adjusted)"
         );
         const F6_PREFIX: &[u8] = b"// \xE2\x94\x80\xE2\x94\x80 Native HTTP/2 server";
         let tail = &NET_H1_H2_SECTION.as_bytes()[F5_LEN..F5_LEN + F6_PREFIX.len()];

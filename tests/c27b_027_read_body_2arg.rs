@@ -49,24 +49,23 @@
 
 mod common;
 
-use common::{normalize, taida_bin};
+use common::{find_free_loopback_port, normalize, taida_bin};
 use std::fs;
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicU16, Ordering};
 use std::thread;
 use std::time::Duration;
 
-// Local port allocator — share-nothing so we never collide with parity.rs's
-// allocator. Range 17000-17999 is well below ephemeral_port_min (32768) and
-// outside the parity.rs allocator's typical band (10000-16999 + cooldown).
-static PORT_COUNTER: AtomicU16 = AtomicU16::new(17000);
-
-fn next_port() -> u16 {
-    PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
-}
+// D29B-009 / Lock-F: port allocation now delegates to
+// `common::find_free_loopback_port`, which is the shared probe-and-cooldown
+// allocator hoisted from `tests/parity.rs::find_free_loopback_port`. The
+// legacy `AtomicU16::new(17000)` allocator was the dominant source of
+// the `c27b_027_read_body_2arg_{short,long}_body` flake observed across
+// CI runs 24963621539 / 24965019780 / 24935511811 (D28 main); see
+// `.dev/D29_BLOCKERS.md::D29B-009`. Handler logic / assertion text /
+// region scope unchanged (Lock-F constraint).
 
 fn node_available() -> bool {
     Command::new("node")
@@ -262,7 +261,7 @@ fn assert_echo_parity(case_label: &str, body: &[u8]) {
 
     let mut results: Vec<(String, String)> = Vec::with_capacity(backends.len());
     for backend in &backends {
-        let port = next_port();
+        let port = find_free_loopback_port();
         let (resp, stdout) = spawn_2arg_server_and_post_body(backend, port, body);
 
         // Header sanity: 200 OK present.

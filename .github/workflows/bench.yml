@@ -109,11 +109,16 @@ jobs:
           RUN_BENCHMARKS: "1"
         run: |
           set -euo pipefail
-          cargo test --release --test parity \
+          # cargo test accepts only one TESTNAME positional; multiple
+          # filters must go after `--` (passed to libtest). The earlier
+          # form ran fine on older cargo but the latest treats the
+          # extra TESTNAMEs as unexpected arguments. Move all three
+          # filters past `--` so libtest substring-matches each.
+          cargo test --release --test parity -- \
               test_net6_3b_native_h2_32_request_throughput_benchmark \
               test_net6_3b_native_h2_64kib_data_benchmark \
               test_net6_3b_native_h2_32_stream_multiplex_benchmark \
-              -- --nocapture --test-threads=1 \
+              --nocapture --test-threads=1 \
               2>&1 | tee cargo-test-net.log
 
       - name: Parse NET6-3b h2 benchmark lines into bencher format
@@ -237,9 +242,15 @@ jobs:
           git config user.email "taida-bench-bot@users.noreply.github.com"
           git add .github/bench-baselines/perf_baseline.json
           git add scripts/perf/peak_rss_baseline.json
-          git commit -m "chore(bench): D28B-005 / D28B-013 update perf + RSS baselines (auto)
-
-sha: ${{ github.sha }}
-workflow: ${{ github.workflow }}
-run: ${{ github.run_id }}"
+          # D29B-010 / Lock-G: split the multi-line commit message into
+          # repeated `-m` flags so the body never escapes the `run: |`
+          # block indentation. Previously the bare-newline body confused
+          # the YAML parser, producing `Invalid workflow file: Unexpected
+          # value 'sha', 'workflow', 'run'` and silently disabling this
+          # auto-baseline-update job (CI runs 24935511415 / 24967722690).
+          git commit \
+              -m "chore(bench): D28B-005 / D28B-013 update perf + RSS baselines (auto)" \
+              -m "sha: ${{ github.sha }}" \
+              -m "workflow: ${{ github.workflow }}" \
+              -m "run: ${{ github.run_id }}"
           git push origin HEAD:main

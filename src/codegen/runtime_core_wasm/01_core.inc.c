@@ -1272,6 +1272,18 @@ int64_t taida_list_length(int64_t list_ptr);
 #define WASM_SET_MAGIC  0x5441494453455400LL  /* "TAIDSET\0" */
 #define WASM_HM_MAGIC   0x54414944484D5000LL  /* "TAIDHMP\0" */
 #define WASM_PACK_MAGIC 0x54414944504B4B00LL  /* "TAIDPKK\0" (non-empty) */
+/* D29B-016 / Phase 10-E (Track-θ, 2026-04-27): Rope-backed string sentinel.
+   Reserved for a future rope-aware `_wf_str_concat` polymorphic dispatch.
+   The interpreter side (Lock-K verdict V-1) implements transparent rope
+   promotion via an internal `StrRepr::Rope` variant on `StrValue`
+   (DEVIATION matching Track-ε commit `e179238` to avoid 146-site Value::Str
+   match arm churn). The wasm-wasi backend currently relies on the existing
+   bump-allocator + `_wf_str_*` heap-copy path which already meets the
+   Lock-K acceptance envelope at the surface level (4-backend parity is
+   verified by `tests/d29b_016_str_rope_parity.rs`). This sentinel is
+   pinned now so a future widening addition (§ 6.2) can detect rope-backed
+   inputs without an ABI break. */
+#define WASM_STR_ROPE_MAGIC 0x5441494452505400LL  /* "TAIDRPT\0" */
 /* Back-compat aliases so the remaining call sites in the file keep
    compiling until every reference is renamed. Each alias points to the
    widened sentinel so the allocation stamp and the detector check

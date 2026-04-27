@@ -225,6 +225,16 @@ AI がこの関数で行ってはいけないことを説明します。
 ///@   - Logging: Logs pilot creation event
 ```
 
+### @AI-Hint
+
+AI が実装や呼び出し方を選ぶときの補助ヒントを明示します。
+
+```taida
+///@ AI-Hint:
+///@   - Prefer renderFrame for normal TUI redraw loops
+///@   - Pair enter/leave style APIs in cleanup paths
+```
+
 ---
 
 ## 型のドキュメント
@@ -488,3 +498,4 @@ createPilot name: Str =
 | `@AI-Category` | 機能カテゴリ |
 | `@AI-Complexity` | 計算量・複雑さ |
 | `@AI-SideEffects` | 副作用 |
+| `@AI-Hint` | 実装・利用時の補助ヒント |

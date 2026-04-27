@@ -10,19 +10,19 @@
 // keeps to the pure portion of the API to stay friendly to non-TTY
 // environments (CI, redirected stdin).
 
->>> taida-lang/terminal => @(LineEditorNew, LineEditorRender, PromptOptions, PromptMode, Write)
+>>> taida-lang/terminal => @(lineEditorNew, lineEditorRender, PromptOptions, PromptMode, write)
 
 opts <= PromptOptions(
   prompt <= "name> ",
   initial <= "Misato",
   placeholder <= "",
-  mode <= PromptMode.Normal,
+  mode <= PromptMode.normal,
   history <= @[],
   completion <= @()
 )
 
-editor <= LineEditorNew(opts)
-view <= LineEditorRender(editor)
-bytes <= Write[](view.text)
+editor <= lineEditorNew(opts)
+view <= lineEditorRender(editor)
+bytes <= write(view.line)
 stdout("\nline editor frame written: " + bytes.toString() + " bytes")
 stdout("editor cursor=" + editor.cursor.toString() + " text=" + editor.text)

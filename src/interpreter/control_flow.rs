@@ -248,8 +248,16 @@ impl Interpreter {
                 (Value::Int(a), Value::Float(b)) => Ok(Signal::Value(Value::Float(*a as f64 + b))),
                 (Value::Float(a), Value::Int(b)) => Ok(Signal::Value(Value::Float(a + *b as f64))),
                 (Value::Str(a), Value::Str(b)) => {
-                    // String concatenation with + between two strings
-                    Ok(Signal::Value(Value::str(format!("{}{}", a, b))))
+                    // String concatenation with + between two strings.
+                    // D29B-016 / Phase 10-B (Track-θ): dispatch through
+                    // `concat_with` so that combined size >= 1024 bytes
+                    // (or either operand already Rope) promotes to the
+                    // gap-buffer rope path. Below the threshold, the Flat
+                    // fast path is preserved (legacy `format!` semantics
+                    // are equivalent because StrValue Display forwards
+                    // to the inner str).
+                    let combined = a.concat_with(b);
+                    Ok(Signal::Value(Value::Str(std::sync::Arc::new(combined))))
                 }
                 _ => Err(RuntimeError {
                     message: format!("Cannot add {} and {}", left, right),

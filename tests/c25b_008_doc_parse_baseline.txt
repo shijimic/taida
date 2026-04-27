@@ -45,10 +45,11 @@ docs/reference/documentation_comments.md:178
 docs/reference/documentation_comments.md:190
 docs/reference/documentation_comments.md:210
 docs/reference/documentation_comments.md:221
-docs/reference/documentation_comments.md:275
-docs/reference/documentation_comments.md:423
-docs/reference/documentation_comments.md:436
-docs/reference/documentation_comments.md:451
+docs/reference/documentation_comments.md:232
+docs/reference/documentation_comments.md:285
+docs/reference/documentation_comments.md:433
+docs/reference/documentation_comments.md:446
+docs/reference/documentation_comments.md:461
 docs/reference/mold_types.md:33
 docs/reference/naming_conventions.md:273
 docs/reference/net_api.md:369

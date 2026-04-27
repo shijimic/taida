@@ -359,11 +359,73 @@ impl Interpreter {
                     None => (path.as_str(), ""),
                 };
 
-                // Build request pack for handler (h2 requests use 1-arg handler path).
+                // D29B-001 (Track-ζ Lock-H, 2026-04-27): build a per-request
+                // arena that holds [body | method | path | query | header
+                // name/value pairs ...] as a single contiguous Vec<u8>, then
+                // expose every Str-shaped field (method/path/query/headers
+                // name/value) as `@(start, len)` span packs that index into
+                // the same arena. The arena becomes `req.raw`. This makes
+                // h2 match the h1 reference shape (where parse_request_head
+                // returns span packs against the head buffer) and lets
+                // `SpanEquals[req.headers(0).name, req.raw, "host"]()`
+                // succeed under h2 instead of silently returning false.
+                //
+                // Strategy V1-A (sub-Lock Phase-5_..._track-zeta_sub-Lock.md):
+                // single arena, body first (offset 0, body span unchanged),
+                // followed by header/pseudo strings. The HPACK dynamic table
+                // is a moving target, so we cannot reuse its memory; the
+                // arena copy is the only way to give Span* mold a stable
+                // backing buffer.
+                let body_len = body.len();
+                let mut arena_cap = body_len + method.len() + path_part.len() + query_part.len();
+                for (name, value) in &regular_headers {
+                    arena_cap += name.len() + value.len();
+                }
+                if !authority.is_empty() {
+                    arena_cap += 4 /* "host" */ + authority.len();
+                }
+
+                let mut arena: Vec<u8> = Vec::with_capacity(arena_cap);
+                arena.extend_from_slice(&body);
+
+                let method_start = arena.len();
+                let method_len = method.len();
+                arena.extend_from_slice(method.as_bytes());
+
+                let path_start = arena.len();
+                let path_len = path_part.len();
+                arena.extend_from_slice(path_part.as_bytes());
+
+                let query_start = arena.len();
+                let query_len = query_part.len();
+                arena.extend_from_slice(query_part.as_bytes());
+
+                // Pre-allocate the header span tuples so we can build the
+                // header list after the arena is final.
+                let mut header_spans: Vec<(usize, usize, usize, usize)> =
+                    Vec::with_capacity(regular_headers.len() + 1);
+                for (name, value) in &regular_headers {
+                    let n_start = arena.len();
+                    let n_len = name.len();
+                    arena.extend_from_slice(name.as_bytes());
+                    let v_start = arena.len();
+                    let v_len = value.len();
+                    arena.extend_from_slice(value.as_bytes());
+                    header_spans.push((n_start, n_len, v_start, v_len));
+                }
+                if !authority.is_empty() {
+                    let n_start = arena.len();
+                    arena.extend_from_slice(b"host");
+                    let v_start = arena.len();
+                    let v_len = authority.len();
+                    arena.extend_from_slice(authority.as_bytes());
+                    header_spans.push((n_start, 4, v_start, v_len));
+                }
+
                 let mut request_fields: Vec<(String, Value)> = vec![
-                    ("method".into(), Value::str(method)),
-                    ("path".into(), Value::str(path_part.to_string())),
-                    ("query".into(), Value::str(query_part.to_string())),
+                    ("method".into(), make_span(method_start, method_len)),
+                    ("path".into(), make_span(path_start, path_len)),
+                    ("query".into(), make_span(query_start, query_len)),
                     (
                         "version".into(),
                         Value::pack(vec![
@@ -373,29 +435,25 @@ impl Interpreter {
                     ),
                 ];
 
-                // Convert h2 headers to the same format as h1
-                let mut header_values: Vec<Value> = Vec::new();
-                for (name, value) in &regular_headers {
+                let mut header_values: Vec<Value> = Vec::with_capacity(header_spans.len());
+                for (n_start, n_len, v_start, v_len) in &header_spans {
                     header_values.push(Value::pack(vec![
-                        ("name".into(), Value::str(name.clone())),
-                        ("value".into(), Value::str(value.clone())),
-                    ]));
-                }
-                // Add :authority as host header for compatibility
-                if !authority.is_empty() {
-                    header_values.push(Value::pack(vec![
-                        ("name".into(), Value::str("host".into())),
-                        ("value".into(), Value::str(authority.clone())),
+                        ("name".into(), make_span(*n_start, *n_len)),
+                        ("value".into(), make_span(*v_start, *v_len)),
                     ]));
                 }
                 request_fields.push(("headers".into(), Value::list(header_values)));
 
-                // Body
-                let raw_len = body.len();
-                request_fields.push(("body".into(), make_span(0, raw_len)));
+                // Body span still references the leading `body_len` bytes of
+                // the arena (offset 0), preserving the existing contract.
+                request_fields.push(("body".into(), make_span(0, body_len)));
                 request_fields.push(("bodyOffset".into(), Value::Int(0)));
-                request_fields.push(("contentLength".into(), Value::Int(raw_len as i64)));
-                request_fields.push(("raw".into(), Value::bytes(body)));
+                request_fields.push(("contentLength".into(), Value::Int(body_len as i64)));
+                // raw = arena (body + headers concat). Track-ε's Arc<BytesValue>
+                // interior wrapping keeps `req.raw` zero-copy on subsequent
+                // clones (handler dispatch retains via Arc::clone, no Vec
+                // re-allocation).
+                request_fields.push(("raw".into(), Value::bytes(arena)));
                 request_fields.push(("remoteHost".into(), Value::str(peer_addr.ip().to_string())));
                 request_fields.push(("remotePort".into(), Value::Int(peer_addr.port() as i64)));
                 request_fields.push(("keepAlive".into(), Value::Bool(true)));

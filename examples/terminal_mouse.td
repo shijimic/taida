@@ -9,22 +9,22 @@
 // human-readable byte count so the example works without an actual
 // TTY (CI / redirected stdout safe).
 
->>> taida-lang/terminal => @(MouseTrackingEnter, MouseTrackingLeave, ClearScreen, CursorHide, CursorShow, MouseKind, EventKind)
+>>> taida-lang/terminal => @(mouseTrackingEnter, mouseTrackingLeave, clearScreen, cursorHide, cursorShow, MouseKind, EventKind)
 
-enterSeq <= MouseTrackingEnter()
-leaveSeq <= MouseTrackingLeave()
-clearSeq <= ClearScreen()
-hideSeq <= CursorHide()
-showSeq <= CursorShow()
+enter_seq <= mouseTrackingEnter()
+leave_seq <= mouseTrackingLeave()
+clear_seq <= clearScreen()
+hide_seq <= cursorHide()
+show_seq <= cursorShow()
 
-stdout("MouseTrackingEnter bytes=" + enterSeq.length().toString())
-stdout("MouseTrackingLeave bytes=" + leaveSeq.length().toString())
-stdout("ClearScreen bytes=" + clearSeq.length().toString())
-stdout("CursorHide bytes=" + hideSeq.length().toString())
-stdout("CursorShow bytes=" + showSeq.length().toString())
+stdout("mouseTrackingEnter bytes=" + enter_seq.length().toString())
+stdout("mouseTrackingLeave bytes=" + leave_seq.length().toString())
+stdout("clearScreen bytes=" + clear_seq.length().toString())
+stdout("cursorHide bytes=" + hide_seq.length().toString())
+stdout("cursorShow bytes=" + show_seq.length().toString())
 
 // Mouse / event kind constants are pinned by the v1 ABI.
-stdout("MouseKind.LeftDown=" + MouseKind.LeftDown.toString())
-stdout("MouseKind.ScrollUp=" + MouseKind.ScrollUp.toString())
-stdout("EventKind.Mouse=" + EventKind.Mouse.toString())
-stdout("EventKind.Resize=" + EventKind.Resize.toString())
+stdout("MouseKind.down=" + MouseKind.down.toString())
+stdout("MouseKind.scroll_up=" + MouseKind.scroll_up.toString())
+stdout("EventKind.mouse=" + EventKind.mouse.toString())
+stdout("EventKind.resize=" + EventKind.resize.toString())

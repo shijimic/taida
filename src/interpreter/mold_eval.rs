@@ -1,7 +1,9 @@
 use std::sync::Arc;
 
 use super::eval::{Interpreter, RuntimeError, Signal};
-use super::value::{AsyncStatus, AsyncValue, StreamStatus, StreamTransform, StreamValue, Value};
+use super::value::{
+    AsyncStatus, AsyncValue, BytesValue, StreamStatus, StreamTransform, StreamValue, Value,
+};
 /// Operation mold evaluation for the Taida interpreter.
 ///
 /// Contains `try_operation_mold` (Str/Num/List molds) and `try_list_mold_op`
@@ -50,9 +52,14 @@ fn make_lax_value(has_value: bool, value: Value, default: Value) -> Value {
 
 /// C26B-020 柱 2: zero-copy BytesCursor constructor.
 ///
-/// Accepts an already-shared `Arc<Vec<u8>>`; cloning the Arc is O(1)
+/// Accepts an already-shared `Arc<BytesValue>`; cloning the Arc is O(1)
 /// atomic refcount bump rather than a full byte-by-byte memcpy.
-fn make_bytes_cursor_arc(bytes: Arc<Vec<u8>>, offset: i64) -> Value {
+///
+/// D29B-004 / Track-ε: `bytes` is now `Arc<BytesValue>` (was `Arc<Vec<u8>>`)
+/// to match the new `Value::Bytes` interior. `BytesValue::len()` returns the
+/// view length (not the underlying buf length), so cursors over a sub-range
+/// view see the view's range only.
+fn make_bytes_cursor_arc(bytes: Arc<BytesValue>, offset: i64) -> Value {
     let clamped = offset.clamp(0, bytes.len() as i64);
     let length = bytes.len() as i64;
     Value::pack(vec![
@@ -70,7 +77,7 @@ fn make_bytes_cursor_step(value: Value, cursor: Value) -> Value {
 fn parse_bytes_cursor(
     value: Value,
     mold_name: &str,
-) -> Result<(Arc<Vec<u8>>, usize), RuntimeError> {
+) -> Result<(Arc<BytesValue>, usize), RuntimeError> {
     let Value::BuchiPack(fields) = value else {
         return Err(RuntimeError {
             message: format!("{}: argument must be BytesCursor, got {}", mold_name, value),
@@ -478,8 +485,21 @@ impl Interpreter {
                         };
                         let (clamped_start, clamped_end) =
                             clamp_slice_bounds(bytes.len(), start, end);
-                        let result = bytes[clamped_start..clamped_end].to_vec();
-                        Ok(Some(Signal::Value(Value::bytes(result))))
+                        // D29B-004 / Track-ε: zero-copy view sharing the
+                        // underlying buf Arc. Result is `Arc::ptr_eq` to
+                        // the source's buf Arc — the per-request body
+                        // memcpy in the 1-arg handler hot path
+                        // (`body <= Slice[req.raw, b.start, b.start+b.len]`)
+                        // is eliminated. Pre-Track-ε path (commented for
+                        // delta evidence): `bytes[clamped_start..clamped_end].to_vec()`
+                        // → `Value::bytes(result)` (1 alloc + memcpy/req).
+                        let new_offset = bytes.offset + clamped_start;
+                        let new_len = clamped_end - clamped_start;
+                        Ok(Some(Signal::Value(Value::bytes_view(
+                            Arc::clone(&bytes.buf),
+                            new_offset,
+                            new_len,
+                        ))))
                     }
                     _ => Ok(None), // Not a supported Slice target, fall through
                 }
@@ -2882,30 +2902,41 @@ impl Interpreter {
                     Signal::Value(v) => v,
                     other => return Ok(Some(other)),
                 };
-                let needle: Vec<u8> = match self.eval_expr(&type_args[2])? {
-                    Signal::Value(Value::Str(s)) => Value::str_take(s).into_bytes(),
-                    Signal::Value(Value::Bytes(b)) => Value::bytes_take(b),
-                    Signal::Value(v) => {
+                // D29B-006 (Lock-D 周辺, Phase 2 / Track-α): needle is borrowed
+                // as `&[u8]` directly from the inner `Arc<StrValue>` / `Arc<Vec<u8>>`,
+                // avoiding a `Vec<u8>::from(...)` allocation that previously fired
+                // when the needle Arc was shared (literal string constant pool ->
+                // `Arc::try_unwrap` failure -> deep clone). This restores the
+                // zero-allocation guarantee of contract C
+                // (`docs/reference/net_api.md §4.2`).
+                let needle_val = match self.eval_expr(&type_args[2])? {
+                    Signal::Value(v) => v,
+                    other => return Ok(Some(other)),
+                };
+                let needle_bytes: &[u8] = match &needle_val {
+                    Value::Str(s) => s.as_bytes(),
+                    Value::Bytes(b) => b.as_slice(),
+                    other => {
                         return Err(RuntimeError {
                             message: format!(
                                 "SpanEquals: needle must be Str or Bytes, got {}",
-                                v
+                                other
                             ),
                         });
                     }
-                    other => return Ok(Some(other)),
                 };
                 let result = match (extract_span_pack(&span), raw_as_bytes(&raw)) {
                     (Some((start, len)), Some(bytes)) => {
                         let end = start.saturating_add(len);
-                        if end <= bytes.len() && len == needle.len() {
-                            bytes[start..end] == needle[..]
+                        if end <= bytes.len() && len == needle_bytes.len() {
+                            &bytes[start..end] == needle_bytes
                         } else {
                             false
                         }
                     }
                     _ => false,
                 };
+                drop(needle_val);
                 Ok(Some(Signal::Value(Value::Bool(result))))
             }
             "SpanStartsWith" => {
@@ -2923,30 +2954,36 @@ impl Interpreter {
                     Signal::Value(v) => v,
                     other => return Ok(Some(other)),
                 };
-                let prefix: Vec<u8> = match self.eval_expr(&type_args[2])? {
-                    Signal::Value(Value::Str(s)) => Value::str_take(s).into_bytes(),
-                    Signal::Value(Value::Bytes(b)) => Value::bytes_take(b),
-                    Signal::Value(v) => {
+                // D29B-006 (Lock-D 周辺, Phase 2 / Track-α): see SpanEquals above
+                // for rationale. prefix is borrowed `&[u8]` to keep zero allocation.
+                let prefix_val = match self.eval_expr(&type_args[2])? {
+                    Signal::Value(v) => v,
+                    other => return Ok(Some(other)),
+                };
+                let prefix_bytes: &[u8] = match &prefix_val {
+                    Value::Str(s) => s.as_bytes(),
+                    Value::Bytes(b) => b.as_slice(),
+                    other => {
                         return Err(RuntimeError {
                             message: format!(
                                 "SpanStartsWith: prefix must be Str or Bytes, got {}",
-                                v
+                                other
                             ),
                         });
                     }
-                    other => return Ok(Some(other)),
                 };
                 let result = match (extract_span_pack(&span), raw_as_bytes(&raw)) {
                     (Some((start, len)), Some(bytes)) => {
                         let end = start.saturating_add(len);
-                        if end <= bytes.len() && len >= prefix.len() {
-                            bytes[start..start + prefix.len()] == prefix[..]
+                        if end <= bytes.len() && len >= prefix_bytes.len() {
+                            &bytes[start..start + prefix_bytes.len()] == prefix_bytes
                         } else {
                             false
                         }
                     }
                     _ => false,
                 };
+                drop(prefix_val);
                 Ok(Some(Signal::Value(Value::Bool(result))))
             }
             "SpanContains" => {
@@ -2964,27 +3001,32 @@ impl Interpreter {
                     Signal::Value(v) => v,
                     other => return Ok(Some(other)),
                 };
-                let needle: Vec<u8> = match self.eval_expr(&type_args[2])? {
-                    Signal::Value(Value::Str(s)) => Value::str_take(s).into_bytes(),
-                    Signal::Value(Value::Bytes(b)) => Value::bytes_take(b),
-                    Signal::Value(v) => {
+                // D29B-006 (Lock-D 周辺, Phase 2 / Track-α): see SpanEquals above
+                // for rationale. needle is borrowed `&[u8]` to keep zero allocation.
+                let needle_val = match self.eval_expr(&type_args[2])? {
+                    Signal::Value(v) => v,
+                    other => return Ok(Some(other)),
+                };
+                let needle_bytes: &[u8] = match &needle_val {
+                    Value::Str(s) => s.as_bytes(),
+                    Value::Bytes(b) => b.as_slice(),
+                    other => {
                         return Err(RuntimeError {
                             message: format!(
                                 "SpanContains: needle must be Str or Bytes, got {}",
-                                v
+                                other
                             ),
                         });
                     }
-                    other => return Ok(Some(other)),
                 };
                 let result = match (extract_span_pack(&span), raw_as_bytes(&raw)) {
                     (Some((start, len)), Some(bytes)) => {
                         let end = start.saturating_add(len);
-                        if end <= bytes.len() && !needle.is_empty() && len >= needle.len() {
+                        if end <= bytes.len() && !needle_bytes.is_empty() && len >= needle_bytes.len() {
                             bytes[start..end]
-                                .windows(needle.len())
-                                .any(|w| w == needle.as_slice())
-                        } else if needle.is_empty() {
+                                .windows(needle_bytes.len())
+                                .any(|w| w == needle_bytes)
+                        } else if needle_bytes.is_empty() {
                             // Empty needle is always contained (stdlib convention).
                             true
                         } else {
@@ -2993,6 +3035,7 @@ impl Interpreter {
                     }
                     _ => false,
                 };
+                drop(needle_val);
                 Ok(Some(Signal::Value(Value::Bool(result))))
             }
             // ── C26B-016 (@c.26, Option B+): StrOf mold ──
@@ -3055,10 +3098,20 @@ impl Interpreter {
                     Signal::Value(v) => v,
                     other => return Ok(Some(other)),
                 };
-                let _raw = match self.eval_expr(&type_args[1])? {
-                    Signal::Value(v) => v,
-                    other => return Ok(Some(other)),
-                };
+                // D29B-007 (Lock-D D2, Phase 2 / Track-α): the `raw` argument is
+                // intentionally NOT evaluated here. The output of `SpanSlice` is a
+                // sub-span pack `@(start: Int, len: Int)` derived solely from the
+                // input span pack and the integer bounds; the raw bytes value is
+                // never inspected. Previously this site evaluated `raw` and
+                // immediately dropped it (`let _raw = ...`), which silently fired
+                // any side-effects in the expression. Skipping the eval makes
+                // `SpanSlice[span, side_effecting_expr(), 0, 10]()` honour the
+                // documented "type-only check" contract from
+                // `docs/reference/net_api.md §4.4`.
+                //
+                // Trade-off: a runtime type error for non-Bytes/Str `raw` is no
+                // longer surfaced from this site (D2 acceptance trade-off, see
+                // Phase 0 Lock-D verdict).
                 let sub_start = match self.eval_expr(&type_args[2])? {
                     Signal::Value(Value::Int(n)) => n,
                     Signal::Value(v) => {

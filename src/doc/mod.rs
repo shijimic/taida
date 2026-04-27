@@ -33,6 +33,8 @@ pub struct DocTags {
     // AI collaboration tags
     /// `@AI-Context` tag lines.
     pub ai_context: Vec<String>,
+    /// `@AI-Hint` tag lines.
+    pub ai_hint: Vec<String>,
     /// `@AI-Examples` tag lines.
     pub ai_examples: Vec<String>,
     /// `@AI-Constraints` tag lines.
@@ -129,6 +131,7 @@ const MULTI_LINE_TAGS: &[&str] = &[
     "Throws",
     "Example",
     "AI-Context",
+    "AI-Hint",
     "AI-Examples",
     "AI-Constraints",
     "AI-Related",
@@ -238,6 +241,9 @@ fn push_tag_content(tags: &mut DocTags, tag: &str, content: &str) {
         }
         "AI-Context" => {
             tags.ai_context.push(content.to_string());
+        }
+        "AI-Hint" => {
+            tags.ai_hint.push(content.to_string());
         }
         "AI-Examples" => {
             tags.ai_examples.push(content.to_string());
@@ -697,6 +703,15 @@ fn render_ai_tags(out: &mut String, tags: &DocTags) {
         out.push('\n');
     }
 
+    if !tags.ai_hint.is_empty() {
+        out.push_str("**AI-Hint**:\n");
+        for line in &tags.ai_hint {
+            out.push_str(line);
+            out.push('\n');
+        }
+        out.push('\n');
+    }
+
     if !tags.ai_examples.is_empty() {
         out.push_str("**AI-Examples**:\n\n```taida\n");
         for line in &tags.ai_examples {
@@ -832,6 +847,24 @@ mod tests {
         let tags = parse_doc_tags(&comments);
         assert_eq!(tags.ai_context.len(), 2);
         assert!(tags.ai_context[0].contains("authentication"));
+    }
+
+    #[test]
+    fn test_parse_doc_tags_ai_hint() {
+        let comments = vec![
+            "@AI-Context: Call from render loop.".to_string(),
+            "@AI-Hint: Prefer renderFrame over manual cursor movement.".to_string(),
+            "  Keep enter/leave calls paired.".to_string(),
+        ];
+        let tags = parse_doc_tags(&comments);
+        assert_eq!(tags.ai_context, vec!["Call from render loop."]);
+        assert_eq!(
+            tags.ai_hint,
+            vec![
+                "Prefer renderFrame over manual cursor movement.",
+                "Keep enter/leave calls paired.",
+            ]
+        );
     }
 
     #[test]
@@ -1184,6 +1217,7 @@ mod tests {
                     purpose: Some("Process data".to_string()),
                     ai_category: Some("data-processing".to_string()),
                     ai_context: vec!["Use in batch processing pipeline.".to_string()],
+                    ai_hint: vec!["Prefer batch size under 100.".to_string()],
                     ai_constraints: vec!["- Input must not be empty".to_string()],
                     ai_related: vec!["- validate: input validation".to_string()],
                     ai_complexity: vec!["- Time: O(n)".to_string()],
@@ -1203,6 +1237,8 @@ mod tests {
         assert!(md.contains("**AI-Category**: data-processing"));
         assert!(md.contains("**AI-Context**:"));
         assert!(md.contains("Use in batch processing pipeline."));
+        assert!(md.contains("**AI-Hint**:"));
+        assert!(md.contains("Prefer batch size under 100."));
         assert!(md.contains("**AI-Constraints**:"));
         assert!(md.contains("- Input must not be empty"));
         assert!(md.contains("**AI-Related**:"));

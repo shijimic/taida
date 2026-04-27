@@ -5,7 +5,178 @@
   The §1-§9 structure (Phase 0 Lock, D28B-022) is preserved.
   Tag push remains user-driven; this draft is staged for user
   approval before `@d.28` is cut.
+
+  D29 Phase 9 GATE pre-flight (2026-04-27): @d.Y section drafted
+  for user approval before tag push. All 17 D29B blockers FIXED
+  (D29B-001〜017 incl. D29B-014 Phase 0 Lock + D29B-015 follow-up
+  + D29B-016 String mutability + D29B-017 runbook archive path).
+  Tag push (`@d.Y`) remains user-driven.
 -->
+
+## @d.Y — Stable second release (D29 Phase 9 GATE pre-flight, 2026-04-27)
+
+> **Status: PRE-FLIGHT (Phase 9 GATE).** All 17 D29B blockers FIXED on
+> `feat/d29` (TIER 1〜4 + D29B-017 land 完了). Tag (`@d.Y`、build number
+> TBD by user) remains user-driven. CI 2C 3-run median wallclock pin /
+> actionlint CI green / valgrind memory.yml green / NET soak 10 連続 PASS
+> は user PR push 後に CI で確認。
+
+### §1 Scope (fix-only RC cycle, Lock-A)
+
+D29 は D28 stable 後の **第 2 stable track**。fix-only verdict (Lock-A) を
+維持し、surface (新 syntax / 新演算子 / 新 symbol) 追加は無し。`taida-lang/net`
+パッケージの zero-copy 契約と実装の構造的乖離を最終解消し、加えて Taida `String`
+immutability 起因の累積 O(N²) を rope path で根本解消する。
+
+### §2 D29B blockers FIXED (17 件)
+
+- **D29B-001** (h2 HPACK arena+span): h2 path で headers の name/value を
+  per-request arena に concat、req.raw 末尾 append、span offset 化。Span* mold
+  が h1/h2 で同一挙動 (Track-ζ Phase 5、Lock-H、Strategy V1-A single per-request
+  arena)
+- **D29B-002** (wasm-full zero-copy claim 限定化): docs/STABILITY.md L540-545
+  の wasm-full claim を Bytes I/O surface のみに限定 (NET surface は
+  `[E1612]` 維持)。Phase 1 docs review fix
+- **D29B-003** (Native writev 真 zero-copy): `Value::BytesContiguous` variant
+  + writev 3 sites polymorphic 反映 (Track-β TIER 1) + producer flip + Bytes
+  polymorphic dispatcher 拡張 (Track-β-2 TIER 4 D29B-015)。byte-loop 完全排除
+- **D29B-004** (`Slice[bytes]` zero-copy): interior wrapping
+  `Value::Bytes(Arc<BytesValue>)` (Track-ε DEVIATION、47-site non-exhaustive
+  silent bug 回避) + `bytes_view` helper + JS Uint8Array.subarray + Native
+  defer→Track-η 統合
+- **D29B-005** (regression test gap fill): `tests/d29b_005_*.rs` 3 本新規
+  (JS Buffer identity / Native use-after-reset / interpreter dhat alloc count、
+  Lock-Phase6-D DEVIATION で「4-backend cross-backend dhat」を「interpreter
+  dhat + Native valgrind 2-backend」に再定義)
+- **D29B-006** (Span* needle 借用化): `mold_eval.rs:2870-2997` で SpanEquals/
+  StartsWith/Contains の needle を `&[u8]` に書き換え、owned Vec<u8> を作らず
+  zero allocation 達成
+- **D29B-007** (SpanSlice raw eval skip): Lock-D D2 採用、type-only check で
+  value eval を skip し副作用付き式の silent 発火を排除
+- **D29B-008** (parse_request_head index 化 + signature pin): Lock-E E2+E1
+  両方採用。`bytes.as_ptr() as usize - base` pointer arithmetic を
+  `bytes_subslice_offset` helper に置き換え、`fn parse_request_head(bytes:
+  &[u8])` のシグネチャ固定 CI test 追加
+- **D29B-009** (NET 系 CI flaky 恒久対策): port 17xxx 直書きを
+  `TcpListener::bind("127.0.0.1:0")` + `addr.port()` に sweep。nextest
+  `[test-groups.net-serial]` 追加で NET 系直列化、retry 不採用 (Lock-F)
+- **D29B-010** (workflow YAML 構文 fix + actionlint sweep): bench.yml /
+  perf-router.yml の `git commit -m` 多行文字列を multi `-m` 分割に書き換え
+  (Lock-G G1)。actionlint CI hard-fail step を全 workflow に sweep
+- **D29B-011** (h3 QPACK arena+span、D29B-001 と対称): Native h3 + Interpreter
+  h3 path で per-request arena concat + req.raw 末尾 append + span offset
+  化。h1/h2/h3 で SpanEquals が同一 Bool (Track-ζ Phase 5)
+- **D29B-012** (Native Span* leak fix + 借用化): `taida_net_raw_as_bytes`
+  ABI を `out_owner: taida_val*` に書き換え (Lock-Phase6-A Option D)、
+  `taida_str_release` 経由で tier 1/2/3 全 path leak 0、CONTIG raw で
+  alloc 0 (borrow short-circuit)。subtraction-based bounds check で signed
+  overflow UB を排除 (TIER 2/3 review fix +75 bytes)
+- **D29B-013** (release.yml idempotent dispatcher): `gh release view` で
+  existence check、存在時は `gh release upload --clobber` + `gh release edit`、
+  無しは `gh release create` に分岐 (Lock-I I1)。手動操作なしで release 完結
+- **D29B-014** (Phase 0 Design Lock 完遂): Lock-A〜J verdict 確定、PLANNED
+- **D29B-015** (D29B-003 follow-up Bytes producer flip + dispatcher
+  polymorphism + bench evidence): Producer flip 8 site + Dispatcher 15+ site
+  + Consumer polymorphism。bench 268.96 µs/round-trip (~1.9 GB/s) local 16T
+  512KB body (DEVIATION: 1MB は NET_MAX_REQUEST_BUF cap)
+- **D29B-016** (Taida `String` immutability 解消、TMB-027 root cause):
+  Lock-K Option A 採用 (`StrValue::data` 内部 enum `StrRepr { Flat, Rope }`、
+  Track-ε pattern 踏襲 interior wrapping、146 site match arm 更新 risk 回避)。
+  Gap buffer (5.2-b)、threshold 1024 bytes 透過昇格、Rope sticky property、
+  BinOp::Add で自動 Rope 化。N=500/N=2000 で < 1 µs/keystroke (acceptance
+  < 100/< 500 µs に大幅余裕)。terminal `prompt.td` 無変更で LineEditor が
+  rope path に乗る (`@b.X+1` 不要)、TMB-027 close
+- **D29B-017** (`d28b_014_runbook_present` archive path フォールバック):
+  D28 stable land 後 `D28_SOAK_RUNBOOK.md` が `.dev/taida-logs/docs/archive/
+  d28/` に archive 移管された運用に追従。primary path OR archive path
+  exists で OK
+
+### §3 Native ABI 加算 (TIER 1〜4 統合)
+
+- `EXPECTED_TOTAL_LEN`: 1,032,775 (D28 base) → **1,077,399** (+44,624)
+  - Track-β TIER 1 (D29B-003): +10,698 (TAIDA_BYTES_CONTIG primitives)
+  - Track-ε TIER 2 (D29B-004): +803 (taida_slice_mold defer note)
+  - Track-ζ TIER 3 (D29B-001/011): +11,572 (HPACK/QPACK arena concat、F6
+    +5,919 + net_h3_quic.c +5,653)
+  - Track-η TIER 3 (D29B-005/012): +3,216 (taida_net_raw_as_bytes ABI +
+    Span* release sites + slice CONTIG view)
+  - TIER 2/3 review fix (D29B-012 補強): +75 (subtraction-based bounds check)
+  - Track-β-2 TIER 4 (D29B-015): +14,738 (dispatcher polymorphism + producer
+    flip、F1 +8,418 + F2 +1,234 + F5 +4,371 + F6 +715)
+  - Track-θ TIER 4 (D29B-016): +910 (TAIDA_STR_ROPE_MAGIC sentinel)
+- `F1_LEN` (core.c): 270,400 → **296,940**
+- `F5_LEN` (net_h1_h2.c): 184,963 → **197,060** (β-2 +4,371)
+- `F6` (HTTP/2 server): 99,442 → **106,076** (ζ +5,919 + β-2 +715)
+- wasm `EXPECTED_TOTAL_LEN`: 332,185 → **333,863** (Track-θ +839 で
+  WASM_STR_ROPE_MAGIC sentinel)
+
+### §4 Phase 9 GATE pre-flight evidence (Lock-H acceptance)
+
+- ✅ 全 17 D29B FIXED on `feat/d29` (HEAD `fff5dad`)
+- ✅ `cargo test --release --lib`: 2585 passed
+- ✅ `cargo test --release --test parity`: 693 passed (4-backend、interpreter
+  reference vs JS / native / wasm-wasi)
+- ✅ `cargo test --release --test wasm_min --test wasm_wasi --test wasm_full
+  --test wasm_edge`: 112 passed (wasm regression なし)
+- ✅ `cargo test --release --test js_execution --test native_compile`: 162
+  passed
+- ✅ d29b_001/003/004/005/006/007/008/009/010/011/012/015/016 全 regression
+  test PASS (5+ binary、12+ test)
+- ✅ `cargo clippy --release --all-targets -- -D warnings`: clean
+- ✅ `cargo fmt --check`: clean
+- ✅ `bash tests/d29b_013_release_idempotency.sh`: 2/2 cases PASS (release
+  exists / absent 両分岐)
+- ✅ `test_native_runtime_fragment_concat_preserves_bytes`: PASS
+  (EXPECTED_TOTAL_LEN 1,077,399 actual 一致)
+- ⚠️ NET 10 連続 PASS soak: user PR push 後 CI で確認 (Track-δ Lock-F)
+- ⚠️ actionlint green: local 環境 not installed、CI hard-fail step 動作確認は
+  user PR push 時 (D29B-010 Lock-G)
+- ⚠️ valgrind leak 0: `memory.yml::valgrind-smoke` で d29b_012 hard-fail
+  gate 動作確認は user PR push 時 (D29B-012 Lock-Phase6-A)
+- ⚠️ CI 2C 3-run median wallclock baseline: 各 track 行に「TBD」placeholder、
+  user PR push 後 CI 実測値で attach
+- ✅ STABILITY § 5 再 audit: D29B-002 (Phase 1) で wasm-full claim 限定化済、
+  D29B-001/011 (Phase 5) で h2/h3 protocol-divergent behavior 解消済
+- ✅ POST-STABLE-002 (wasm-wasi NET) scope-out 維持 (Lock-J)
+- ✅ Lock-K 完遂 + LineEditor microbench < 100 µs / N=500 4-backend pass
+  (interpreter で実測 < 1 µs/keystroke、N=2000 でも < 1 µs)
+- ✅ terminal submodule 不変 (V-4 透過昇格、`@b.X+1` 不要)
+- ✅ C21〜C27 / D28 archive 不変
+
+### §5 user action 待ち (Phase 9 GATE 完遂条件)
+
+1. `feat/d29` を upstream に push (`git push origin feat/d29`)
+2. CI 2C 3-run median wallclock 取得 (PR 経由)、`.dev/D29_PROGRESS.md` の
+   CI delta 表 TBD 行を実測値で埋める
+3. NET 10 連続 PASS soak 確認 (CI 上)
+4. actionlint CI green 確認
+5. valgrind smoke green 確認
+6. release.yml dry-run smoke 3 連続 PASS 確認
+7. `feat/d29` → `main` (upstream/main) merge (PR review 経由)
+8. `@d.Y` tag push (build 番号は user 確定、agent 不可)
+
+### §6 known DEVIATION 記録
+
+- **Track-ε V-1 DEVIATION** (D29B-004): driver 指示「BytesView outer enum
+  variant 追加」を Track-β 47-site non-exhaustive silent bug 回避を理由に却下、
+  interior wrapping `Value::Bytes(Arc<BytesValue>)` 採用
+- **Track-θ V-1 DEVIATION** (D29B-016): driver 指示「StrRope outer enum
+  variant 追加」を 146-site match arm 更新 risk 回避を理由に却下、
+  interior wrapping `StrValue::data` 内部 enum `StrRepr { Flat, Rope }`
+  採用 (Track-ε pattern 踏襲)
+- **Track-η Lock-Phase6-D DEVIATION** (D29B-005): acceptance 文言
+  「4-backend cross-backend dhat」を「interpreter dhat + Native valgrind
+  2-backend」に再定義 (JS = output parity / wasm-wasi = NET 未対応で
+  Lock-J 整合)
+- **Track-β-2 DEVIATION 2** (D29B-015): bench body サイズを 1MB → 512KB
+  に変更 (`NET_MAX_REQUEST_BUF = 1MB` cap で 1MB body + ヘッダが収まらず
+  socket reset)
+- **Track-β-2 DEVIATION 3** (D29B-015): strace -e writev / LD_PRELOAD
+  直接観測は CI 環境制約 (ptrace permission / sandbox reject) のため
+  間接 evidence (wire correctness round-trip + dispatcher static sentinel
+  + 1KB byte-for-byte echo) で代替、直接計測は post-stable scope
+
+---
 
 ## @d.28 — Stable initial release (2026-04-27)
 

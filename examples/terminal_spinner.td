@@ -4,21 +4,21 @@
 //   taida install taida-lang/terminal
 //   taida examples/terminal_spinner.td
 //
-// Renders 8 spinner frames in succession via SpinnerNext recursion.
-// Each frame overwrites the previous one with ClearLine + Write.
+// Renders 8 spinner frames in succession via spinnerNext recursion.
+// Each frame overwrites the previous one with clearLine + write.
 
->>> taida-lang/terminal => @(SpinnerState, SpinnerNext, SpinnerRender, Write, ClearLine)
+>>> taida-lang/terminal => @(SpinnerState, spinnerNext, spinnerRender, write, clearLine)
 
 renderTick state remaining: Int =
   | remaining < 1 |> 0
   | _ |>
-    bytes <= Write[](ClearLine())
-    rendered <= Write[](SpinnerRender(state))
-    next <= SpinnerNext(state)
+    bytes <= write(clearLine())
+    rendered <= write(spinnerRender(state))
+    next <= spinnerNext(state)
     renderTick(next, remaining - 1)
 => :Int
 
 initial <= SpinnerState
 total <= renderTick(initial, 8)
-final_clear <= Write[](ClearLine())
+final_clear <= write(clearLine())
 stdout("done after " + (total + 8).toString() + " ticks")

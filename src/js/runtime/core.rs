@@ -1759,7 +1759,11 @@ function Slice(val, optsOrStart, maybeEnd) {
     const e = Math.max(0, Math.min(val.length, end));
     const from = Math.min(s, e);
     const to = Math.max(s, e);
-    return val.slice(from, to);
+    // D29B-004 / Track-ε: subarray is a zero-copy view sharing the
+    // underlying ArrayBuffer (vs. .slice() which deep-copies). Matches
+    // the interpreter's Value::bytes_view (Arc<BytesValue> sub-range
+    // view sharing buf Arc).
+    return val.subarray(from, to);
   }
   return '';
 }

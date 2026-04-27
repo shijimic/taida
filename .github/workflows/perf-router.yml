@@ -155,9 +155,11 @@ jobs:
           git config user.name  "taida-bench-bot"
           git config user.email "taida-bench-bot@users.noreply.github.com"
           git add .github/bench-baselines/perf_router.json
-          git commit -m "chore(bench): C26B-024 Step 1 update perf-router baseline (auto)
-
-sha: ${{ github.sha }}
-workflow: ${{ github.workflow }}
-run: ${{ github.run_id }}"
+          # D29B-010 / Lock-G: see bench.yml for the multi-line commit
+          # message rationale. Mirrors the same split.
+          git commit \
+              -m "chore(bench): C26B-024 Step 1 update perf-router baseline (auto)" \
+              -m "sha: ${{ github.sha }}" \
+              -m "workflow: ${{ github.workflow }}" \
+              -m "run: ${{ github.run_id }}"
           git push origin HEAD:main

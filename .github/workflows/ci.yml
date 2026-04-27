@@ -102,7 +102,7 @@ jobs:
           mv "wasmtime-${WASMTIME_VERSION}-x86_64-linux/wasmtime" "$HOME/.wasmtime-bin"
           mkdir -p "$HOME/.wasmtime/bin"
           mv "$HOME/.wasmtime-bin" "$HOME/.wasmtime/bin/wasmtime"
-          echo "$HOME/.wasmtime/bin" >> $GITHUB_PATH
+          echo "$HOME/.wasmtime/bin" >> "$GITHUB_PATH"
       - name: Download nextest archive
         uses: actions/download-artifact@v4
         with:
@@ -212,7 +212,12 @@ jobs:
           # Curated scope — exclude compile_*.td (codegen regression
           # fixtures), addon_terminal.td (baseline parse errors), and
           # the quality/ subtree (compiler quality gate fixtures).
-          for f in $(ls examples/*.td | grep -vE 'examples/(compile_|addon_terminal)'); do
+          # Iterate via glob + case-pattern guard (SC2010 avoids ls|grep).
+          shopt -s nullglob
+          for f in examples/*.td; do
+            case "$f" in
+              examples/compile_*|examples/addon_terminal*) continue ;;
+            esac
             ./target/debug/taida lint --quiet "$f" || {
               echo "Lint failed for $f:"
               ./target/debug/taida lint "$f"
@@ -226,3 +231,26 @@ jobs:
           if [ -d examples/embedding ]; then
             ./target/debug/taida lint --quiet examples/embedding
           fi
+
+  # D29B-010 / Lock-G: workflow YAML hard-fail audit.
+  #
+  # `bench.yml` / `perf-router.yml` reproduced an `Invalid workflow file:
+  # Unexpected value 'sha', 'workflow', 'run'` startup failure across at
+  # least six consecutive `main` runs (24935511415 .. 24967722690 in
+  # 2026-04-25 .. 2026-04-26), silently disabling the D28B-005 / D28B-013
+  # / C26B-024 perf hard-fail gates. Lock-G mandates a `actionlint` step
+  # that fails the CI hard so any future structural regression of any
+  # workflow file is caught at PR review, not in production releases.
+  workflow-lint:
+    name: Workflow Lint (D29B-010)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install actionlint
+        run: |
+          bash <(curl --proto '=https' --tlsv1.2 -sSfL \
+            https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash)
+          echo "$PWD" >> "$GITHUB_PATH"
+      - name: Run actionlint over all workflows
+        run: |
+          actionlint -color .github/workflows/*.yml

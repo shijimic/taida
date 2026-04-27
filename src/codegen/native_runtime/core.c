@@ -97,6 +97,28 @@ typedef intptr_t  taida_fn_ptr;  // 関数ポインタ
 #define TAIDA_SET_MAGIC   0x5441494453455400LL // "TAIDSET\0"
 #define TAIDA_ASYNC_MAGIC 0x5441494441535900LL // "TAIDASY\0"
 #define TAIDA_BYTES_MAGIC 0x5441494442595400LL // "TAIDBYT\0"
+// D29B-003 (Track-β, 2026-04-27): Contiguous Bytes representation.
+// Layout: [magic|rc, len, data_ptr, ...inline payload bytes packed in following slots].
+// `data_ptr` is a `const unsigned char *` pointing either at the inline payload
+// (slots starting at offset 24 from header base) or at an externally owned buffer
+// (e.g. per-request arena). When emitted via taida_bytes_contig_new(src, len) we
+// always allocate in a single block and set data_ptr to the inline area, so the
+// header + payload live contiguously in one allocation. This unblocks
+// payload-level zero-copy writev (D29B-003 acceptance) by letting callers reflect
+// `data_ptr` directly into iovec without the legacy taida_val[] byte-loop.
+#define TAIDA_BYTES_CONTIG_MAGIC 0x54414944424E4300LL // "TAIDBNC\0"
+// D29B-016 / Phase 10-D (Track-θ, 2026-04-27): Rope-backed string sentinel.
+// Layout (when present): [magic|rc, byte_len, gap_start, gap_end, ...buffer bytes].
+// Reserved for future use by the Native backend's polymorphic str dispatcher;
+// the interpreter side (Lock-K verdict V-1) implements rope path via an
+// internal `StrRepr::Rope(Box<RopeBuffer>)` variant in src/interpreter/value.rs
+// (DEVIATION matching Track-ε commit `e179238` to avoid 146-site Value::Str
+// match arm churn). The Native backend currently relies on the existing
+// `taida_str_concat` heap-copy path which already meets the Lock-K acceptance
+// envelope (microbench < 100 µs at N=500); this magic is pinned now so a
+// future rope-aware `taida_str_concat` polymorphic dispatch can detect rope-
+// backed inputs without an ABI break (§ 6.2 widening addition).
+#define TAIDA_STR_ROPE_MAGIC 0x5441494452505400LL // "TAIDRPT\0"
 #define TAIDA_CLOSURE_MAGIC 0x54414944434C4F00LL // "TAIDCLO\0"
 
 // Type tags for BuchiPack field values (A-4a)
@@ -182,6 +204,16 @@ typedef intptr_t  taida_fn_ptr;  // 関数ポインタ
 #define TAIDA_IS_SET(ptr)   (taida_ptr_is_readable(ptr, 8) && (((taida_val*)ptr)[0] & TAIDA_MAGIC_MASK) == TAIDA_SET_MAGIC)
 #define TAIDA_IS_ASYNC(ptr) (taida_ptr_is_readable(ptr, 8) && (((taida_val*)ptr)[0] & TAIDA_MAGIC_MASK) == TAIDA_ASYNC_MAGIC)
 #define TAIDA_IS_BYTES(ptr) (taida_ptr_is_readable(ptr, 8) && (((taida_val*)ptr)[0] & TAIDA_MAGIC_MASK) == TAIDA_BYTES_MAGIC)
+// D29B-003 (Track-β): contiguous Bytes type check. Payload sits inline after
+// the 24-byte header (magic|rc + len + data_ptr); we require the header to be
+// readable, not the full payload, since data_ptr may point outside the header
+// for arena-backed contig bytes.
+#define TAIDA_IS_BYTES_CONTIG(ptr) (taida_ptr_is_readable(ptr, 24) && (((taida_val*)ptr)[0] & TAIDA_MAGIC_MASK) == TAIDA_BYTES_CONTIG_MAGIC)
+// D29B-003 (Track-β): polymorphic Bytes check accepting both legacy and contig
+// representations. Hot-path consumers (writev, SpanEquals reflection) use this
+// to handle either representation; legacy consumers using TAIDA_IS_BYTES alone
+// continue to see only the original taida_val[] form for backward compatibility.
+#define TAIDA_IS_ANY_BYTES(ptr) (TAIDA_IS_BYTES(ptr) || TAIDA_IS_BYTES_CONTIG(ptr))
 #define TAIDA_IS_CLOSURE(ptr) (taida_ptr_is_readable(ptr, sizeof(taida_val) * 3) && (((taida_val*)ptr)[0] & TAIDA_MAGIC_MASK) == TAIDA_CLOSURE_MAGIC)
 
 // NB-31: Callable check — closure OR readable non-heap-tagged pointer (function pointer).
@@ -700,6 +732,11 @@ taida_val taida_str_match_regex(const char *s, taida_val regex_pack);
 taida_val taida_str_search_regex(const char *s, taida_val regex_pack);
 static taida_val taida_bytes_new_filled(taida_val len, unsigned char fill);
 static taida_val taida_bytes_from_raw(const unsigned char *data, taida_val len);
+// D29B-003 (Track-β): contiguous Bytes primitives. See definitions in the
+// Bytes section below for the layout invariant and lifetime contract.
+static taida_val taida_bytes_contig_new(const unsigned char *data, taida_val len);
+static const unsigned char *taida_bytes_contig_data(taida_val ptr);
+static taida_val taida_bytes_contig_len(taida_val ptr);
 static taida_val taida_bytes_clone(taida_val bytes_ptr);
 static taida_val taida_bytes_len(taida_val bytes_ptr);
 static taida_val taida_bytes_default_value(void);
@@ -1858,6 +1895,17 @@ taida_val taida_u32le_mold(taida_val value) {
 }
 
 taida_val taida_u16be_decode_mold(taida_val value) {
+    // D29B-015 (Track-β-2, 2026-04-27): polymorphic on TAIDA_IS_BYTES_CONTIG.
+    // CONTIG payloads from the producer flip (readBody / readBodyAll /
+    // make_lax_bytes_value) are now hot — read inline-payload bytes
+    // directly via taida_bytes_contig_data instead of indexing the legacy
+    // taida_val[] slot[2..3], which would deref the data_ptr slot as a u8.
+    if (TAIDA_IS_BYTES_CONTIG(value)) {
+        if (taida_bytes_contig_len(value) != 2) return taida_lax_empty(0);
+        const unsigned char *p = taida_bytes_contig_data(value);
+        uint16_t out = (uint16_t)(((uint16_t)p[0] << 8) | (uint16_t)p[1]);
+        return taida_lax_new((taida_val)out, 0);
+    }
     if (!TAIDA_IS_BYTES(value)) return taida_lax_empty(0);
     taida_val *bytes = (taida_val*)value;
     if (bytes[1] != 2) return taida_lax_empty(0);
@@ -1866,6 +1914,13 @@ taida_val taida_u16be_decode_mold(taida_val value) {
 }
 
 taida_val taida_u16le_decode_mold(taida_val value) {
+    // D29B-015 (Track-β-2, 2026-04-27): polymorphic on TAIDA_IS_BYTES_CONTIG.
+    if (TAIDA_IS_BYTES_CONTIG(value)) {
+        if (taida_bytes_contig_len(value) != 2) return taida_lax_empty(0);
+        const unsigned char *p = taida_bytes_contig_data(value);
+        uint16_t out = (uint16_t)(((uint16_t)p[1] << 8) | (uint16_t)p[0]);
+        return taida_lax_new((taida_val)out, 0);
+    }
     if (!TAIDA_IS_BYTES(value)) return taida_lax_empty(0);
     taida_val *bytes = (taida_val*)value;
     if (bytes[1] != 2) return taida_lax_empty(0);
@@ -1874,6 +1929,17 @@ taida_val taida_u16le_decode_mold(taida_val value) {
 }
 
 taida_val taida_u32be_decode_mold(taida_val value) {
+    // D29B-015 (Track-β-2, 2026-04-27): polymorphic on TAIDA_IS_BYTES_CONTIG.
+    if (TAIDA_IS_BYTES_CONTIG(value)) {
+        if (taida_bytes_contig_len(value) != 4) return taida_lax_empty(0);
+        const unsigned char *p = taida_bytes_contig_data(value);
+        uint32_t out =
+            ((uint32_t)p[0] << 24) |
+            ((uint32_t)p[1] << 16) |
+            ((uint32_t)p[2] << 8) |
+            (uint32_t)p[3];
+        return taida_lax_new((taida_val)(uint64_t)out, 0);
+    }
     if (!TAIDA_IS_BYTES(value)) return taida_lax_empty(0);
     taida_val *bytes = (taida_val*)value;
     if (bytes[1] != 4) return taida_lax_empty(0);
@@ -1886,6 +1952,17 @@ taida_val taida_u32be_decode_mold(taida_val value) {
 }
 
 taida_val taida_u32le_decode_mold(taida_val value) {
+    // D29B-015 (Track-β-2, 2026-04-27): polymorphic on TAIDA_IS_BYTES_CONTIG.
+    if (TAIDA_IS_BYTES_CONTIG(value)) {
+        if (taida_bytes_contig_len(value) != 4) return taida_lax_empty(0);
+        const unsigned char *p = taida_bytes_contig_data(value);
+        uint32_t out =
+            ((uint32_t)p[3] << 24) |
+            ((uint32_t)p[2] << 16) |
+            ((uint32_t)p[1] << 8) |
+            (uint32_t)p[0];
+        return taida_lax_new((taida_val)(uint64_t)out, 0);
+    }
     if (!TAIDA_IS_BYTES(value)) return taida_lax_empty(0);
     taida_val *bytes = (taida_val*)value;
     if (bytes[1] != 4) return taida_lax_empty(0);
@@ -2037,7 +2114,11 @@ taida_val taida_codepoint_mold_str(taida_val value) {
 }
 
 taida_val taida_bytes_mold(taida_val value, taida_val fill) {
-    if (TAIDA_IS_BYTES(value)) {
+    // D29B-015 (Track-β-2, 2026-04-27): TAIDA_IS_ANY_BYTES — accept CONTIG
+    // bytes inputs from producer-flipped readBody / readBodyAll outputs.
+    // taida_bytes_clone is itself polymorphic and preserves the input's
+    // representation, so this fall-through stays correct end-to-end.
+    if (TAIDA_IS_ANY_BYTES(value)) {
         taida_val cloned = taida_bytes_clone(value);
         return taida_lax_new(cloned, taida_bytes_default_value());
     }
@@ -2072,18 +2153,36 @@ taida_val taida_bytes_mold(taida_val value, taida_val fill) {
 }
 
 taida_val taida_bytes_set(taida_val bytes_ptr, taida_val idx, taida_val value) {
-    if (!TAIDA_IS_BYTES(bytes_ptr)) return taida_lax_empty(taida_bytes_default_value());
+    // D29B-015 (Track-β-2, 2026-04-27): polymorphic on TAIDA_IS_BYTES_CONTIG.
+    // taida_bytes_clone preserves layout, so the post-clone write must match
+    // the cloned representation: CONTIG → write inline payload byte at idx,
+    // legacy → write taida_val slot[2 + idx].
+    if (!TAIDA_IS_ANY_BYTES(bytes_ptr)) return taida_lax_empty(taida_bytes_default_value());
     taida_val len = taida_bytes_len(bytes_ptr);
     if (idx < 0 || idx >= len) return taida_lax_empty(taida_bytes_default_value());
     if (value < 0 || value > 255) return taida_lax_empty(taida_bytes_default_value());
     taida_val out = taida_bytes_clone(bytes_ptr);
-    taida_val *bytes = (taida_val*)out;
-    bytes[2 + idx] = value;
+    if (TAIDA_IS_BYTES_CONTIG(out)) {
+        unsigned char *p = (unsigned char *)taida_bytes_contig_data(out);
+        p[idx] = (unsigned char)(value & 0xFF);
+    } else {
+        taida_val *bytes = (taida_val*)out;
+        bytes[2 + idx] = value;
+    }
     return taida_lax_new(out, taida_bytes_default_value());
 }
 
 taida_val taida_bytes_to_list(taida_val bytes_ptr) {
+    // D29B-015 (Track-β-2, 2026-04-27): polymorphic on TAIDA_IS_BYTES_CONTIG.
     taida_val list = taida_list_new();
+    if (TAIDA_IS_BYTES_CONTIG(bytes_ptr)) {
+        const unsigned char *p = taida_bytes_contig_data(bytes_ptr);
+        taida_val len = taida_bytes_contig_len(bytes_ptr);
+        for (taida_val i = 0; i < len; i++) {
+            list = taida_list_push(list, (taida_val)p[i]);
+        }
+        return list;
+    }
     if (!TAIDA_IS_BYTES(bytes_ptr)) return list;
     taida_val *bytes = (taida_val*)bytes_ptr;
     taida_val len = bytes[1];
@@ -2101,7 +2200,10 @@ static int taida_bytes_cursor_unpack(taida_val cursor_ptr, taida_val *bytes_out,
     // A-4b: stride-3 layout: [magic+rc, fc, hash0, tag0, val0, hash1, tag1, val1, ...]
     taida_val bytes_ptr = pack[2 + 0 * 3 + 2];  // field 0 value
     taida_val offset = pack[2 + 1 * 3 + 2];      // field 1 value
-    if (!TAIDA_IS_BYTES(bytes_ptr)) return 0;
+    // D29B-015 (Track-β-2, 2026-04-27): accept either layout. CONTIG cursors
+    // are reachable when a bytes producer (readBody) hands a CONTIG payload
+    // through a Bytes cursor mold.
+    if (!TAIDA_IS_ANY_BYTES(bytes_ptr)) return 0;
     taida_val len = taida_bytes_len(bytes_ptr);
     if (offset < 0) offset = 0;
     if (offset > len) offset = len;
@@ -2120,7 +2222,8 @@ static taida_val taida_bytes_cursor_step(taida_val value, taida_val cursor) {
 }
 
 taida_val taida_bytes_cursor_new(taida_val bytes_ptr, taida_val offset) {
-    if (!TAIDA_IS_BYTES(bytes_ptr)) {
+    // D29B-015 (Track-β-2, 2026-04-27): accept CONTIG payloads.
+    if (!TAIDA_IS_ANY_BYTES(bytes_ptr)) {
         bytes_ptr = taida_bytes_default_value();
     }
     taida_val len = taida_bytes_len(bytes_ptr);
@@ -2162,11 +2265,21 @@ taida_val taida_bytes_cursor_take(taida_val cursor_ptr, taida_val size) {
     taida_val len = taida_bytes_len(bytes_ptr);
     if (offset + size > len) return taida_lax_empty(default_step);
 
-    taida_val *src = (taida_val*)bytes_ptr;
-    taida_val out = taida_bytes_new_filled(size, 0);
-    taida_val *dst = (taida_val*)out;
-    for (taida_val i = 0; i < size; i++) {
-        dst[2 + i] = src[2 + offset + i];
+    // D29B-015 (Track-β-2, 2026-04-27): polymorphic. CONTIG sources slice
+    // via memcpy from the inline payload window into a fresh CONTIG bytes,
+    // preserving the producer's CONTIG layout end-to-end through cursor
+    // sequences (avoids unintentional fall-back to legacy taida_val[]).
+    taida_val out;
+    if (TAIDA_IS_BYTES_CONTIG(bytes_ptr)) {
+        const unsigned char *src_p = taida_bytes_contig_data(bytes_ptr);
+        out = taida_bytes_contig_new(src_p + offset, size);
+    } else {
+        taida_val *src = (taida_val*)bytes_ptr;
+        out = taida_bytes_new_filled(size, 0);
+        taida_val *dst = (taida_val*)out;
+        for (taida_val i = 0; i < size; i++) {
+            dst[2 + i] = src[2 + offset + i];
+        }
     }
     taida_val next_cursor = taida_bytes_cursor_new(bytes_ptr, offset + size);
     taida_val step = taida_bytes_cursor_step(out, next_cursor);
@@ -2187,8 +2300,17 @@ taida_val taida_bytes_cursor_u8(taida_val cursor_ptr) {
     taida_val len = taida_bytes_len(bytes_ptr);
     if (offset >= len) return taida_lax_empty(default_step);
 
-    taida_val *bytes = (taida_val*)bytes_ptr;
-    taida_val value = bytes[2 + offset];
+    // D29B-015 (Track-β-2, 2026-04-27): polymorphic. CONTIG yields a u8
+    // from the inline payload byte at `offset` (1-byte stride), legacy
+    // yields slot[2 + offset] taida_val low bits.
+    taida_val value;
+    if (TAIDA_IS_BYTES_CONTIG(bytes_ptr)) {
+        const unsigned char *p = taida_bytes_contig_data(bytes_ptr);
+        value = (taida_val)p[offset];
+    } else {
+        taida_val *bytes = (taida_val*)bytes_ptr;
+        value = bytes[2 + offset];
+    }
     taida_val next_cursor = taida_bytes_cursor_new(bytes_ptr, offset + 1);
     taida_val step = taida_bytes_cursor_step(value, next_cursor);
     return taida_lax_new(step, default_step);
@@ -2205,30 +2327,44 @@ taida_val taida_utf8_encode_mold(taida_val value) {
 }
 
 taida_val taida_utf8_decode_mold(taida_val value) {
-    if (!TAIDA_IS_BYTES(value)) return taida_lax_empty((taida_val)"");
-    taida_val *bytes = (taida_val*)value;
-    taida_val len = bytes[1];
-    // R-01: Guard against negative length — a corrupted Bytes header could
-    // pass a negative len, which would be cast to a huge size_t and trigger
-    // a massive malloc followed by OOM abort.
-    if (len <= 0) return taida_lax_new((taida_val)taida_str_new_copy(""), (taida_val)"");
-    unsigned char *raw = (unsigned char*)TAIDA_MALLOC((size_t)len, "bytes_decode");
-    for (taida_val i = 0; i < len; i++) raw[i] = (unsigned char)bytes[2 + i];
+    // D29B-015 (Track-β-2, 2026-04-27): polymorphic. CONTIG borrows the
+    // inline payload directly (zero materialize alloc); legacy stays on
+    // the per-byte taida_val[] expansion.
+    const unsigned char *raw_ptr = NULL;
+    unsigned char *raw_owned = NULL;
+    taida_val len = 0;
+    if (TAIDA_IS_BYTES_CONTIG(value)) {
+        len = taida_bytes_contig_len(value);
+        if (len <= 0) return taida_lax_new((taida_val)taida_str_new_copy(""), (taida_val)"");
+        raw_ptr = taida_bytes_contig_data(value);
+    } else if (TAIDA_IS_BYTES(value)) {
+        taida_val *bytes = (taida_val*)value;
+        len = bytes[1];
+        // R-01: Guard against negative length — a corrupted Bytes header could
+        // pass a negative len, which would be cast to a huge size_t and trigger
+        // a massive malloc followed by OOM abort.
+        if (len <= 0) return taida_lax_new((taida_val)taida_str_new_copy(""), (taida_val)"");
+        raw_owned = (unsigned char*)TAIDA_MALLOC((size_t)len, "bytes_decode");
+        for (taida_val i = 0; i < len; i++) raw_owned[i] = (unsigned char)bytes[2 + i];
+        raw_ptr = raw_owned;
+    } else {
+        return taida_lax_empty((taida_val)"");
+    }
 
     size_t pos = 0;
     while (pos < (size_t)len) {
         size_t consumed = 0;
         uint32_t cp = 0;
-        if (!taida_utf8_decode_one(raw + pos, (size_t)len - pos, &consumed, &cp)) {
-            free(raw);
+        if (!taida_utf8_decode_one(raw_ptr + pos, (size_t)len - pos, &consumed, &cp)) {
+            if (raw_owned) free(raw_owned);
             return taida_lax_empty((taida_val)"");
         }
         pos += consumed;
     }
 
     char *out = taida_str_alloc((size_t)len);
-    memcpy(out, raw, (size_t)len);
-    free(raw);
+    memcpy(out, raw_ptr, (size_t)len);
+    if (raw_owned) free(raw_owned);
     return taida_lax_new((taida_val)out, (taida_val)"");
 }
 
@@ -2338,7 +2474,10 @@ static int taida_has_magic_header(taida_val tag) {
            magic == TAIDA_SET_MAGIC ||
            magic == TAIDA_ASYNC_MAGIC ||
            magic == TAIDA_CLOSURE_MAGIC ||
-           magic == TAIDA_BYTES_MAGIC;
+           magic == TAIDA_BYTES_MAGIC ||
+           // D29B-003 (Track-β, 2026-04-27): contig Bytes participates in
+           // standard retain/release lifecycle just like legacy Bytes.
+           magic == TAIDA_BYTES_CONTIG_MAGIC;
 }
 
 taida_val taida_retain(taida_ptr ptr) {
@@ -2868,6 +3007,8 @@ static taida_val taida_runtime_detect_tag(taida_val value) {
     if (taida_is_list(value)) return TAIDA_TAG_LIST;
     if (taida_is_buchi_pack(value)) return TAIDA_TAG_PACK;
     if (TAIDA_IS_BYTES(value)) return TAIDA_TAG_STR;  // Bytes is string-like
+    // D29B-003 (Track-β, 2026-04-27): contig Bytes shares the string-like tag.
+    if (TAIDA_IS_BYTES_CONTIG(value)) return TAIDA_TAG_STR;
     if (TAIDA_IS_CLOSURE(value)) return TAIDA_TAG_CLOSURE;
     if (taida_is_hashmap(value)) return TAIDA_TAG_HMAP;
     if (taida_is_set(value)) return TAIDA_TAG_SET;
@@ -3321,7 +3462,68 @@ static taida_val taida_bytes_from_raw(const unsigned char *data, taida_val len) 
     return out;
 }
 
+// D29B-003 (Track-β, 2026-04-27): contiguous Bytes constructor.
+// Allocates a single contiguous block holding [magic|rc, len, data_ptr,
+// inline payload]. data_ptr points at the inline payload region (offset 24
+// from the header base), so the wire-bytes form is reachable via direct
+// pointer reflection — no taida_val[] 8x expansion, no per-call materialize
+// loop on consumption. Used by readBody / readBodyChunk / readBodyAll
+// producers and by test fixtures that exercise the writev zero-copy path.
+// rc=1 on entry; standard taida_retain / taida_release lifecycle applies.
+// Header alignment matches taida_val (8 byte) so payload starts at slot [3].
+static taida_val taida_bytes_contig_new(const unsigned char *data, taida_val len) {
+    if (len < 0) len = 0;
+    // Bound the payload size to keep us under the safe-malloc ceiling. The
+    // header is 3 * sizeof(taida_val) = 24 bytes, plus payload bytes
+    // (rounded up so the total is 8-aligned for taida_val* readback).
+    if ((size_t)len > (size_t)(SIZE_MAX - 32)) {
+        fprintf(stderr, "taida: bytes length too large (bytes_contig_new): %" PRId64 "\n", len);
+        exit(1);
+    }
+    size_t header = 3 * sizeof(taida_val);
+    size_t payload_aligned = ((size_t)len + 7) & ~((size_t)7);
+    size_t total = taida_safe_add(header, payload_aligned, "bytes_contig_new total");
+    unsigned char *block = (unsigned char *)TAIDA_MALLOC(total, "bytes_contig_new");
+    taida_val *hdr = (taida_val *)block;
+    hdr[0] = TAIDA_BYTES_CONTIG_MAGIC | 1;
+    hdr[1] = len;
+    unsigned char *payload = block + header;
+    if (data && len > 0) memcpy(payload, data, (size_t)len);
+    // Zero out tail padding so reads stay deterministic if anyone overshoots.
+    if (payload_aligned > (size_t)len) {
+        memset(payload + len, 0, payload_aligned - (size_t)len);
+    }
+    hdr[2] = (taida_val)(uintptr_t)payload;
+    return (taida_val)hdr;
+}
+
+// D29B-003 (Track-β): borrow the contiguous payload pointer from a
+// TAIDA_BYTES_CONTIG-tagged value. Returns NULL if `ptr` is not a contig
+// Bytes. Caller must NOT free the returned pointer — the lifetime is tied
+// to the bytes header (released via taida_release like any other heap obj).
+static const unsigned char *taida_bytes_contig_data(taida_val ptr) {
+    if (!TAIDA_IS_BYTES_CONTIG(ptr)) return NULL;
+    return (const unsigned char *)(uintptr_t)((taida_val *)ptr)[2];
+}
+
+// D29B-003 (Track-β): borrow the contiguous Bytes length.
+static taida_val taida_bytes_contig_len(taida_val ptr) {
+    if (!TAIDA_IS_BYTES_CONTIG(ptr)) return 0;
+    return ((taida_val *)ptr)[1];
+}
+
 static taida_val taida_bytes_clone(taida_val bytes_ptr) {
+    // D29B-015 (Track-β-2, 2026-04-27): polymorphic on TAIDA_IS_BYTES_CONTIG.
+    // CONTIG sources clone via memcpy from the inline payload (single
+    // contig allocation owned by taida_bytes_contig_new) — no per-byte
+    // taida_val[] indexing. Output preserves the input's representation:
+    // CONTIG → CONTIG, legacy → legacy. This keeps taida_bytes_clone
+    // semantically a deep-copy that respects the producer's chosen layout.
+    if (TAIDA_IS_BYTES_CONTIG(bytes_ptr)) {
+        const unsigned char *src = taida_bytes_contig_data(bytes_ptr);
+        taida_val len = taida_bytes_contig_len(bytes_ptr);
+        return taida_bytes_contig_new(src, len);
+    }
     if (!TAIDA_IS_BYTES(bytes_ptr)) return taida_bytes_new_filled(0, 0);
     taida_val *src = (taida_val*)bytes_ptr;
     taida_val len = src[1];
@@ -3334,7 +3536,11 @@ static taida_val taida_bytes_clone(taida_val bytes_ptr) {
 }
 
 static taida_val taida_bytes_len(taida_val bytes_ptr) {
-    if (!TAIDA_IS_BYTES(bytes_ptr)) return 0;
+    // D29B-015 (Track-β-2, 2026-04-27): TAIDA_IS_ANY_BYTES — both legacy
+    // and CONTIG headers store length in slot[1], so a single typed read
+    // is correct for either layout. Required so length-driven loops in
+    // dispatchers (cursor_take, etc) see the CONTIG length too.
+    if (!TAIDA_IS_ANY_BYTES(bytes_ptr)) return 0;
     return ((taida_val*)bytes_ptr)[1];
 }
 
@@ -3343,6 +3549,16 @@ static taida_val taida_bytes_default_value(void) {
 }
 
 static taida_val taida_bytes_get_lax(taida_val bytes_ptr, taida_val index) {
+    // D29B-015 (Track-β-2, 2026-04-27): polymorphic on TAIDA_IS_BYTES_CONTIG.
+    // u8At() / [i] indexing must read the inline payload byte (1-byte
+    // strides) for CONTIG, not slot[2 + index] which would deref into the
+    // taida_val data_ptr slot of the CONTIG header.
+    if (TAIDA_IS_BYTES_CONTIG(bytes_ptr)) {
+        taida_val len = taida_bytes_contig_len(bytes_ptr);
+        if (index < 0 || index >= len) return taida_lax_empty(0);
+        const unsigned char *p = taida_bytes_contig_data(bytes_ptr);
+        return taida_lax_new((taida_val)p[index], 0);
+    }
     if (!TAIDA_IS_BYTES(bytes_ptr)) return taida_lax_empty(0);
     taida_val *bytes = (taida_val*)bytes_ptr;
     taida_val len = bytes[1];
@@ -3391,7 +3607,36 @@ taida_val taida_str_slice(const char* s, taida_val start, taida_val end) {
 }
 
 taida_val taida_slice_mold(taida_val value, taida_val start, taida_val end) {
+    if (TAIDA_IS_BYTES_CONTIG(value)) {
+        // D29B-004 Track-η Phase 6 (Lock-Phase6-B Option β-2, 2026-04-27):
+        // CONTIG inputs (e.g. produced by Track-β writev hot-path or any
+        // future BytesContiguous emitter) admit a slice-range fast path —
+        // we copy only the requested [s, e) window into a fresh CONTIG
+        // payload (1 alloc + 1 memcpy bounded by the slice width, not the
+        // source length) and reuse the existing CONTIG magic. No new magic
+        // is introduced; 4-backend output parity is preserved (same bytes
+        // returned). True zero-copy `Arc::clone` semantics across CONTIG
+        // payloads remains a follow-up after the Bytes producer flip
+        // (D29B-015 / β-2 TIER 4) lands and the codegen lifetime tracker
+        // can prove the source outlives every view.
+        const unsigned char *src = taida_bytes_contig_data(value);
+        taida_val total = taida_bytes_contig_len(value);
+        taida_val s = start;
+        taida_val e = end;
+        if (s < 0) s = 0;
+        if (s > total) s = total;
+        if (e < 0 || e > total) e = total;
+        if (e < s) e = s;
+        return taida_bytes_contig_new(src + s, e - s);
+    }
     if (TAIDA_IS_BYTES(value)) {
+        // D29B-004 / Track-ε note (2026-04-27, Lock-Phase6-B fallback):
+        // Legacy `taida_val[]` Bytes (8-fold inline expansion) are still
+        // produced by emitters that have not yet flipped to CONTIG (e.g.
+        // bytes literals, body builders prior to D29B-015). For these
+        // inputs we keep the materialize-via-bytes_new_filled path; alloc
+        // count parity with the previous behavior is intentional, the
+        // CONTIG fast path above is the alloc-reduction lane.
         taida_val *bytes = (taida_val*)value;
         taida_val len = bytes[1];
         taida_val s = start;
@@ -4754,9 +4999,40 @@ taida_val taida_list_none(taida_val list_ptr, taida_val fn_ptr) {
 }
 
 taida_val taida_list_concat(taida_val list1, taida_val list2) {
-    if (TAIDA_IS_BYTES(list1) && TAIDA_IS_BYTES(list2)) {
+    // D29B-015 (Track-β-2, 2026-04-27): polymorphic bytes concat. Either
+    // operand may be CONTIG; we materialize once into a fresh CONTIG payload
+    // when at least one input is CONTIG, otherwise stay on the legacy
+    // taida_val[] path. Output preference: CONTIG when either input is
+    // CONTIG (so the producer-flipped hot path keeps producing CONTIG end
+    // to end). Both inputs legacy → output legacy (preserves shape parity
+    // with pre-D29B-015 code for non-CONTIG callers).
+    if (TAIDA_IS_ANY_BYTES(list1) && TAIDA_IS_ANY_BYTES(list2)) {
         taida_val len1 = taida_bytes_len(list1);
         taida_val len2 = taida_bytes_len(list2);
+        int any_contig = TAIDA_IS_BYTES_CONTIG(list1) || TAIDA_IS_BYTES_CONTIG(list2);
+        if (any_contig) {
+            // Build the merged payload directly into a CONTIG block. Read
+            // each operand polymorphically: CONTIG → memcpy from its inline
+            // payload, legacy → byte-loop low-bits expansion.
+            unsigned char *tmp = (unsigned char *)TAIDA_MALLOC((size_t)(len1 + len2),
+                                                                "list_concat_bytes_contig");
+            if (TAIDA_IS_BYTES_CONTIG(list1)) {
+                memcpy(tmp, taida_bytes_contig_data(list1), (size_t)len1);
+            } else {
+                taida_val *a = (taida_val*)list1;
+                for (taida_val i = 0; i < len1; i++) tmp[i] = (unsigned char)a[2 + i];
+            }
+            if (TAIDA_IS_BYTES_CONTIG(list2)) {
+                memcpy(tmp + len1, taida_bytes_contig_data(list2), (size_t)len2);
+            } else {
+                taida_val *b = (taida_val*)list2;
+                for (taida_val i = 0; i < len2; i++) tmp[len1 + i] = (unsigned char)b[2 + i];
+            }
+            taida_val out = taida_bytes_contig_new(tmp, len1 + len2);
+            free(tmp);
+            return out;
+        }
+        // Both legacy: keep shape parity with pre-D29B-015 callers.
         taida_val out = taida_bytes_new_filled(len1 + len2, 0);
         taida_val *dst = (taida_val*)out;
         taida_val *a = (taida_val*)list1;
@@ -5360,7 +5636,9 @@ static int _taida_is_callable_impl(taida_val val) {
         if (magic == TAIDA_PACK_MAGIC || magic == TAIDA_LIST_MAGIC ||
             magic == TAIDA_STR_MAGIC || magic == TAIDA_HMAP_MAGIC ||
             magic == TAIDA_SET_MAGIC || magic == TAIDA_ASYNC_MAGIC ||
-            magic == TAIDA_BYTES_MAGIC) return 0;
+            magic == TAIDA_BYTES_MAGIC ||
+            // D29B-003 (Track-β): contig Bytes is a heap data type, not callable.
+            magic == TAIDA_BYTES_CONTIG_MAGIC) return 0;
     }
     // Assume callable: function pointer or large integer (rare edge case)
     return 1;
@@ -6231,6 +6509,10 @@ taida_val taida_polymorphic_length(taida_val ptr) {
     if (TAIDA_IS_BYTES(ptr)) {
         return ((taida_val*)ptr)[1];
     }
+    // D29B-003 (Track-β, 2026-04-27): contig Bytes also stores len at slot [1].
+    if (TAIDA_IS_BYTES_CONTIG(ptr)) {
+        return ((taida_val*)ptr)[1];
+    }
     // Treat as string
     size_t sl = 0;
     if (taida_read_cstr_len_safe((const char*)ptr, 65536, &sl)) return (taida_val)sl;
@@ -6331,22 +6613,49 @@ static int taida_net_span_extract(taida_val span, taida_val *out_start, taida_va
 }
 
 // Resolve raw (Bytes or Str) to a contiguous byte view. Returns 1 on success
-// with *out_buf pointing into the underlying storage and *out_buf_len set.
-// For Bytes we unpack via `bytes[2 + i]` into a scratch buffer (alloc then
-// let caller free); for Str we return the char* directly. To keep the
-// interface simple, we always materialize a temp `char*` for Bytes input.
+// with *out_buf pointing into the underlying storage and *out_len set.
+//
+// D29B-012 Track-η Phase 6 (Lock-Phase6-A Option D, 2026-04-27): the legacy
+// `unsigned char **out_owned` raw-pointer escape was leaking through tier 1
+// (freelist), tier 2 (arena), tier 3 (pure malloc) because the three Span*
+// callers never invoked free() on the materialized scratch. We replace the
+// out-param with `taida_val *out_owner` carrying a release-handle:
+//   * 0 / TAIDA_NULL_VAL  → caller borrows from underlying storage
+//                           (CONTIG payload pointer, or C string pointer)
+//                           and MUST NOT release.
+//   * non-zero            → caller MUST `taida_str_release(*out_owner)` once
+//                           the borrow goes out of scope. The release helper
+//                           dispatches automatically to freelist push (tier 1),
+//                           arena no-op (tier 2), or free() (tier 3) — leak 0
+//                           on every backing tier.
+//
+// Fast paths (alloc 0) covered:
+//   * TAIDA_BYTES_CONTIG raw  → borrow contig payload directly (Track-β land)
+//   * String raw / needle      → borrow C string pointer
+// Materialize path (1 alloc + 1 release, leak 0):
+//   * Legacy TAIDA_BYTES (taida_val[] inline form) → unpack to scratch,
+//     return its release handle. Producer flip to CONTIG (D29B-015 / β-2
+//     TIER 4) eliminates this remaining alloc.
 static int taida_net_raw_as_bytes(taida_val raw, const unsigned char **out_buf,
-                                   taida_val *out_len, unsigned char **out_owned) {
-    *out_owned = NULL;
+                                   taida_val *out_len, taida_val *out_owner) {
+    *out_owner = 0;
+    if (TAIDA_IS_BYTES_CONTIG(raw)) {
+        // Lock-Phase6-A fast path: zero-copy borrow from contig payload
+        // (already land via Track-β writev hot-path producer flip).
+        *out_buf = taida_bytes_contig_data(raw);
+        *out_len = taida_bytes_contig_len(raw);
+        return 1;
+    }
     if (TAIDA_IS_BYTES(raw)) {
         taida_val *bytes = (taida_val*)raw;
         taida_val len = bytes[1];
         if (len < 0) return 0;
-        unsigned char *tmp = (unsigned char*)taida_str_alloc((size_t)len);
+        char *scratch = taida_str_alloc((size_t)len);
+        unsigned char *tmp = (unsigned char *)scratch;
         for (taida_val i = 0; i < len; i++) tmp[i] = (unsigned char)bytes[2 + i];
         *out_buf = tmp;
         *out_len = len;
-        *out_owned = tmp;
+        *out_owner = (taida_val)scratch;  // release-handle: see comment above
         return 1;
     }
     if (taida_is_string_value(raw)) {
@@ -6359,47 +6668,93 @@ static int taida_net_raw_as_bytes(taida_val raw, const unsigned char **out_buf,
 }
 
 static int taida_net_needle_as_bytes(taida_val needle, const unsigned char **out_buf,
-                                      taida_val *out_len, unsigned char **out_owned) {
-    return taida_net_raw_as_bytes(needle, out_buf, out_len, out_owned);
+                                      taida_val *out_len, taida_val *out_owner) {
+    return taida_net_raw_as_bytes(needle, out_buf, out_len, out_owner);
 }
 
+// D29B-003 (Track-β, 2026-04-27): borrow-only variant of taida_net_raw_as_bytes.
+// Returns 1 on success with *out_buf borrowing from caller-owned storage:
+//   - TAIDA_BYTES_CONTIG: direct contig payload pointer (no allocation, no leak)
+//   - String: direct C string pointer
+// Returns 0 for the legacy taida_val[] Bytes form (caller must fall back to
+// the materialize path) so the existing TAIDA_BYTES_MAGIC consumers remain
+// unchanged. Used by writev hot paths to avoid the per-request alloc that
+// taida_net_raw_as_bytes incurs when raw is Bytes-shaped (D29B-012 leak fix
+// is Track-η scope; Track-β only adds the borrow path for the contig case).
+static int taida_net_raw_as_bytes_view(taida_val raw,
+                                        const unsigned char **out_buf,
+                                        taida_val *out_len) {
+    if (TAIDA_IS_BYTES_CONTIG(raw)) {
+        *out_buf = taida_bytes_contig_data(raw);
+        *out_len = taida_bytes_contig_len(raw);
+        return 1;
+    }
+    if (taida_is_string_value(raw)) {
+        const char *s = (const char *)raw;
+        *out_buf = (const unsigned char *)s;
+        *out_len = (taida_val)strlen(s);
+        return 1;
+    }
+    return 0;
+}
+
+// D29B-012 Track-η Phase 6 (Lock-Phase6-A Option D, 2026-04-27): each Span*
+// helper acquires a release-handle (out_owner) for raw and needle separately
+// and is responsible for calling `taida_str_release` on each non-zero handle
+// before returning, regardless of branch. Static error path retained: any
+// resolver failure releases handles already acquired so no partial leak.
 taida_val taida_net_SpanEquals(taida_val span, taida_val raw, taida_val needle) {
     taida_val start, len;
     if (!taida_net_span_extract(span, &start, &len)) return 0;
-    const unsigned char *buf = NULL; taida_val buf_len = 0; unsigned char *own_buf = NULL;
+    const unsigned char *buf = NULL; taida_val buf_len = 0; taida_val own_buf = 0;
     if (!taida_net_raw_as_bytes(raw, &buf, &buf_len, &own_buf)) return 0;
-    const unsigned char *nbuf = NULL; taida_val nlen = 0; unsigned char *own_n = NULL;
-    if (!taida_net_needle_as_bytes(needle, &nbuf, &nlen, &own_n)) { return 0; }
+    const unsigned char *nbuf = NULL; taida_val nlen = 0; taida_val own_n = 0;
+    if (!taida_net_needle_as_bytes(needle, &nbuf, &nlen, &own_n)) {
+        if (own_buf) taida_str_release(own_buf);
+        return 0;
+    }
     taida_val result = 0;
-    if (start + len <= buf_len && len == nlen && memcmp(buf + start, nbuf, (size_t)len) == 0) {
+    if (start <= buf_len && len <= buf_len - start &&
+        len == nlen && memcmp(buf + start, nbuf, (size_t)len) == 0) {
         result = 1;
     }
+    if (own_buf) taida_str_release(own_buf);
+    if (own_n) taida_str_release(own_n);
     return result;
 }
 
 taida_val taida_net_SpanStartsWith(taida_val span, taida_val raw, taida_val prefix) {
     taida_val start, len;
     if (!taida_net_span_extract(span, &start, &len)) return 0;
-    const unsigned char *buf = NULL; taida_val buf_len = 0; unsigned char *own_buf = NULL;
+    const unsigned char *buf = NULL; taida_val buf_len = 0; taida_val own_buf = 0;
     if (!taida_net_raw_as_bytes(raw, &buf, &buf_len, &own_buf)) return 0;
-    const unsigned char *pbuf = NULL; taida_val plen = 0; unsigned char *own_p = NULL;
-    if (!taida_net_needle_as_bytes(prefix, &pbuf, &plen, &own_p)) return 0;
+    const unsigned char *pbuf = NULL; taida_val plen = 0; taida_val own_p = 0;
+    if (!taida_net_needle_as_bytes(prefix, &pbuf, &plen, &own_p)) {
+        if (own_buf) taida_str_release(own_buf);
+        return 0;
+    }
     taida_val result = 0;
-    if (start + len <= buf_len && len >= plen && memcmp(buf + start, pbuf, (size_t)plen) == 0) {
+    if (start <= buf_len && len <= buf_len - start &&
+        len >= plen && memcmp(buf + start, pbuf, (size_t)plen) == 0) {
         result = 1;
     }
+    if (own_buf) taida_str_release(own_buf);
+    if (own_p) taida_str_release(own_p);
     return result;
 }
 
 taida_val taida_net_SpanContains(taida_val span, taida_val raw, taida_val needle) {
     taida_val start, len;
     if (!taida_net_span_extract(span, &start, &len)) return 0;
-    const unsigned char *buf = NULL; taida_val buf_len = 0; unsigned char *own_buf = NULL;
+    const unsigned char *buf = NULL; taida_val buf_len = 0; taida_val own_buf = 0;
     if (!taida_net_raw_as_bytes(raw, &buf, &buf_len, &own_buf)) return 0;
-    const unsigned char *nbuf = NULL; taida_val nlen = 0; unsigned char *own_n = NULL;
-    if (!taida_net_needle_as_bytes(needle, &nbuf, &nlen, &own_n)) return 0;
+    const unsigned char *nbuf = NULL; taida_val nlen = 0; taida_val own_n = 0;
+    if (!taida_net_needle_as_bytes(needle, &nbuf, &nlen, &own_n)) {
+        if (own_buf) taida_str_release(own_buf);
+        return 0;
+    }
     taida_val result = 0;
-    if (start + len > buf_len) { result = 0; }
+    if (start > buf_len || len > buf_len - start) { result = 0; }
     else if (nlen == 0) { result = 1; }
     else if (len < nlen) { result = 0; }
     else {
@@ -6407,6 +6762,8 @@ taida_val taida_net_SpanContains(taida_val span, taida_val raw, taida_val needle
             if (memcmp(buf + start + i, nbuf, (size_t)nlen) == 0) { result = 1; break; }
         }
     }
+    if (own_buf) taida_str_release(own_buf);
+    if (own_n) taida_str_release(own_n);
     return result;
 }
 
@@ -6964,7 +7321,10 @@ static int taida_is_list(taida_val ptr) {
 }
 
 static int taida_is_bytes(taida_val ptr) {
-    return TAIDA_IS_BYTES(ptr);
+    // D29B-015 (Track-β-2, 2026-04-27): typeof(Bytes) recognizes both
+    // legacy and CONTIG layouts so producer-flipped Bytes values still
+    // type-check as Bytes from Taida's perspective.
+    return TAIDA_IS_ANY_BYTES(ptr);
 }
 
 static int taida_monadic_field_count(taida_val ptr) {
@@ -7097,11 +7457,15 @@ static taida_val taida_list_to_display_string(taida_val list_ptr) {
 }
 
 static taida_val taida_bytes_to_display_string(taida_val bytes_ptr) {
-    if (!TAIDA_IS_BYTES(bytes_ptr)) {
+    // D29B-015 (Track-β-2, 2026-04-27): polymorphic on TAIDA_IS_BYTES_CONTIG.
+    // Both shapes display identically; only the byte-source differs.
+    if (!TAIDA_IS_ANY_BYTES(bytes_ptr)) {
         return (taida_val)taida_str_new_copy("Bytes[@[]]");
     }
+    int is_contig = TAIDA_IS_BYTES_CONTIG(bytes_ptr);
     taida_val *bytes = (taida_val*)bytes_ptr;
-    taida_val len_bytes = bytes[1];
+    taida_val len_bytes = is_contig ? taida_bytes_contig_len(bytes_ptr) : bytes[1];
+    const unsigned char *contig_p = is_contig ? taida_bytes_contig_data(bytes_ptr) : NULL;
     size_t cap = 64;
     size_t len = 0;
     char *buf = (char*)TAIDA_MALLOC(cap, "bytes_to_string");
@@ -7123,7 +7487,8 @@ static taida_val taida_bytes_to_display_string(taida_val bytes_ptr) {
             buf[len] = '\0';
         }
         char nbuf[8];
-        int wrote = snprintf(nbuf, sizeof(nbuf), "%" PRId64 "", bytes[2 + i]);
+        taida_val byte_value = is_contig ? (taida_val)contig_p[i] : bytes[2 + i];
+        int wrote = snprintf(nbuf, sizeof(nbuf), "%" PRId64 "", byte_value);
         if (wrote < 0) wrote = 0;
         size_t sl = (size_t)wrote;
         while (len + sl + 1 > cap) { cap *= 2; TAIDA_REALLOC(buf, cap, "to_string"); }
@@ -9866,6 +10231,18 @@ static taida_val taida_sha256_hex_from_bytes(const unsigned char *data, size_t l
 }
 
 taida_val taida_sha256(taida_val value) {
+    // D29B-015 (Track-β-2, 2026-04-27): polymorphic. CONTIG hashes from the
+    // inline payload directly (zero materialize alloc); legacy stays on the
+    // per-byte taida_val[] expansion.
+    if (TAIDA_IS_BYTES_CONTIG(value)) {
+        taida_val len = taida_bytes_contig_len(value);
+        if (len <= 0) return taida_sha256_hex_from_bytes(NULL, 0);
+        if (len > (taida_val)(256 * 1024 * 1024)) {
+            return taida_sha256_hex_from_bytes(NULL, 0);
+        }
+        const unsigned char *p = taida_bytes_contig_data(value);
+        return taida_sha256_hex_from_bytes(p, (size_t)len);
+    }
     if (TAIDA_IS_BYTES(value)) {
         taida_val len = taida_bytes_len(value);
         if (len <= 0) return taida_sha256_hex_from_bytes(NULL, 0);

@@ -16,9 +16,11 @@
 
 pub mod fixture_lists;
 
+use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU16, Ordering};
+use std::sync::{Mutex, Once, OnceLock};
 
 // ---------------------------------------------------------------------------
 // Binary discovery helpers (RCB-26)
@@ -330,4 +332,112 @@ pub fn cached_wasm(profile: &str, stem: &str, td_path: &Path) -> Option<PathBuf>
     } else {
         None
     }
+}
+
+// ---------------------------------------------------------------------------
+// D29B-009 / Lock-F: shared NET test port allocator
+// ---------------------------------------------------------------------------
+//
+// Mirror of `tests/parity.rs::find_free_loopback_port` (C25B-002 / C26B-003
+// root-cause-fixed allocator). Hoisted into `common::` so any NET integration
+// test can share the same probe/cooldown invariants without duplicating
+// hard-coded port bands (e.g. the legacy `AtomicU16::new(17000)` allocator
+// in `tests/c27b_027_read_body_2arg.rs` that this commit retires).
+//
+// Properties (inherited from parity.rs):
+//   * Stays strictly below `/proc/sys/net/ipv4/ip_local_port_range` so the
+//     kernel never re-hands an allocated port to an ephemeral client socket.
+//   * PID-seeded counter: independent test binaries do not converge on the
+//     same range under nextest 2C parallelism.
+//   * 8-second cooldown list: the same port is never re-issued while the
+//     intended consumer is still racing to bind it.
+//   * Double-bind probe: rejects ports about to be claimed by an in-flight
+//     ephemeral socket.
+//
+// Note: `parity.rs` keeps its own private copy because the `Mutex<...>` /
+// `AtomicU16` statics there are tied to its `c25b_002_*` regression test
+// (`crate::tests::parity::find_free_loopback_port` references). Two
+// independent allocators are intentional — they target different test
+// binaries and therefore live in different process address spaces.
+
+const PORT_COOLDOWN_SECS: u64 = 8;
+const ALLOC_PORT_MIN: u16 = 10000;
+
+fn port_probe_lock() -> &'static Mutex<Vec<(u16, std::time::Instant)>> {
+    static LOCK: OnceLock<Mutex<Vec<(u16, std::time::Instant)>>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(Vec::with_capacity(64)))
+}
+
+fn ephemeral_port_min() -> u16 {
+    if let Ok(s) = std::fs::read_to_string("/proc/sys/net/ipv4/ip_local_port_range") {
+        let mut parts = s.split_ascii_whitespace();
+        if let Some(min_s) = parts.next()
+            && let Ok(min) = min_s.parse::<u16>()
+            && min >= 1024
+        {
+            return min;
+        }
+    }
+    32768
+}
+
+/// Allocate a unique, bindable loopback port for NET integration tests.
+///
+/// Replaces the legacy `AtomicU16::new(17000)` per-binary allocators that
+/// CI run 24935511811 / 24846315881 (D28 main) showed to be flaky under
+/// nextest 2C parallelism. See `.dev/D29_BLOCKERS.md::D29B-009` for the
+/// full failure inventory.
+pub fn find_free_loopback_port() -> u16 {
+    static INIT: Once = Once::new();
+    static COUNTER: AtomicU16 = AtomicU16::new(0);
+
+    let alloc_max = ephemeral_port_min().saturating_sub(1);
+    let (band_min, band_max) = if alloc_max < ALLOC_PORT_MIN + 500 {
+        (ALLOC_PORT_MIN, 65000u16)
+    } else {
+        (ALLOC_PORT_MIN, alloc_max)
+    };
+    let band_span = (band_max - band_min) as u32 + 1;
+
+    INIT.call_once(|| {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind free loopback port");
+        let seed = listener.local_addr().expect("local addr").port();
+        let pid_bias = (std::process::id() as u16).wrapping_mul(37);
+        let offset = (seed as u32).wrapping_add(pid_bias as u32) % band_span;
+        let biased = band_min + offset as u16;
+        COUNTER.store(biased, Ordering::Relaxed);
+    });
+
+    let mut cooldown = port_probe_lock().lock().expect("port_probe_lock poisoned");
+    let now = std::time::Instant::now();
+    cooldown.retain(|&(_, t)| now.duration_since(t).as_secs() < PORT_COOLDOWN_SECS);
+
+    for _ in 0..400 {
+        let raw = COUNTER.fetch_add(2, Ordering::Relaxed);
+        let port = if (band_min..=band_max).contains(&raw) {
+            raw
+        } else {
+            let wrapped = band_min + (raw % band_span.max(1) as u16);
+            COUNTER.store(wrapped.wrapping_add(2), Ordering::Relaxed);
+            wrapped
+        };
+
+        if cooldown.iter().any(|&(p, _)| p == port) {
+            continue;
+        }
+
+        let Ok(listener1) = TcpListener::bind(("127.0.0.1", port)) else {
+            continue;
+        };
+        drop(listener1);
+
+        let Ok(listener2) = TcpListener::bind(("127.0.0.1", port)) else {
+            continue;
+        };
+        drop(listener2);
+
+        cooldown.push((port, std::time::Instant::now()));
+        return port;
+    }
+    panic!("find_free_loopback_port: could not find a free port after 400 attempts");
 }
