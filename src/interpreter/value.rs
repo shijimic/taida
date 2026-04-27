@@ -9,6 +9,16 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::parser::{FieldDef, Param, Statement};
 
+use super::runtime::str_rope::GapBuffer;
+
+/// D29B-016 / Phase 10-B (Track-θ): threshold above which `concat_with` and
+/// the `+` operator promote a Flat string to the Rope path.
+///
+/// Lock-K verdict V-3 confirmed 1024 bytes — small enough that LineEditor's
+/// keystroke-by-keystroke growth crosses the threshold within a few dozen
+/// inserts and starts amortising mutation cost over the rope's gap buffer.
+pub const STR_ROPE_PROMOTION_THRESHOLD: usize = 1024;
+
 /// # C26B-018 (A) / Round 8 wU (2026-04-24): char-index cache layer
 ///
 /// A string value with a lazy char-boundary cache. The `data` field holds
@@ -31,46 +41,207 @@ use crate::parser::{FieldDef, Param, Statement};
 /// first write (single `Acquire` load), which matches Taida's
 /// immutable-first execution model and the Cluster 4 abstraction pin
 /// (Arc + try_unwrap COW, Round 3 wG LOCKED).
+/// D29B-016 / Phase 10-B (Track-θ): internal storage variant for `StrValue`.
+///
+/// Lock-K V-1 verdict (Option A) is implemented as **interior wrapping**
+/// (DEVIATION matching Track-ε commit `e179238`) rather than a new
+/// `Value::StrRope` outer enum variant — the latter would have required
+/// updating ~146 `Value::Str(_)` match arms across the codebase, with the
+/// same silent-bug risk Track-ε identified for Bytes (47 sites).
+///
+/// * `Flat(String)` — legacy path, also the default for short strings.
+/// * `Rope(Box<RopeBuffer>)` — gap-buffer storage used after a `concat_with`
+///   crosses `STR_ROPE_PROMOTION_THRESHOLD`. Rope reads (`as_str`,
+///   `as_string`, `cached_char_*`) lazily flatten via the inner `OnceLock`.
+#[derive(Debug)]
+pub enum StrRepr {
+    Flat(String),
+    Rope(Box<RopeBuffer>),
+}
+
+/// D29B-016 / Phase 10-B: rope storage backing a `StrRepr::Rope` variant.
+///
+/// Wraps the raw `GapBuffer` (defined in `super::runtime::str_rope`) with a
+/// `OnceLock<String>` that caches the flat representation on first read.
+/// Subsequent `as_str()` / `cached_char_*` reads return slices into this
+/// cache for `&str` lifetimes that match the `&self` borrow.
+///
+/// The cache is populated lazily and discarded if the buffer is mutated
+/// (mutation APIs reside on `StrValue` and reset both caches).
+#[derive(Debug)]
+pub struct RopeBuffer {
+    buf: GapBuffer,
+    /// Lazily-cached flat `String`. Filled on first `flatten_cached`.
+    flat_cache: OnceLock<String>,
+}
+
+impl RopeBuffer {
+    /// Construct a fresh rope seeded from `initial`.
+    pub fn from_str(initial: &str) -> Self {
+        RopeBuffer {
+            buf: GapBuffer::from_str(initial),
+            flat_cache: OnceLock::new(),
+        }
+    }
+
+    /// Construct a rope by concatenating two segments. Used by the
+    /// `concat_with` promotion path.
+    pub fn from_concat(left: &str, right: &str) -> Self {
+        let mut buf = GapBuffer::from_str_with_gap(left, right.len() + 256);
+        buf.insert_at_byte(left.len(), right);
+        RopeBuffer {
+            buf,
+            flat_cache: OnceLock::new(),
+        }
+    }
+
+    /// Borrow the underlying gap buffer (read-only access).
+    #[inline]
+    pub fn buf(&self) -> &GapBuffer {
+        &self.buf
+    }
+
+    /// Effective byte length.
+    #[inline]
+    pub fn byte_len(&self) -> usize {
+        self.buf.byte_len()
+    }
+
+    /// Flatten on demand and cache for subsequent reads. The returned
+    /// `&str` has the lifetime of `&self`.
+    #[inline]
+    pub fn flatten_cached(&self) -> &str {
+        self.flat_cache.get_or_init(|| self.buf.flatten()).as_str()
+    }
+}
+
+impl Clone for RopeBuffer {
+    fn clone(&self) -> Self {
+        // Cloning a rope flattens it into a fresh Flat-style seed; the
+        // resulting RopeBuffer drops both caches. Outer `Arc<StrValue>`
+        // sharing means this path is only hit when a consumer already
+        // holds a uniquely-owned StrValue and calls Clone explicitly.
+        RopeBuffer::from_str(self.flatten_cached())
+    }
+}
+
 #[derive(Debug)]
 pub struct StrValue {
-    /// The UTF-8 payload.
-    data: String,
+    /// The UTF-8 payload (Flat or Rope; see `StrRepr`).
+    ///
+    /// Phase 10-B (D29B-016) replaced the prior `data: String` field with
+    /// this enum. The change is internal — `as_str()` / `as_string()` /
+    /// `cached_char_*` keep their previous signatures and call sites are
+    /// unaffected.
+    data: StrRepr,
     /// Lazily-populated char-index → byte-offset table.
     ///
     /// When present, `char_offsets[i]` is the byte offset of the `i`-th
-    /// `char` in `data`, and `char_offsets.len()` equals the total char
-    /// count. One extra sentinel entry equal to `data.len()` is appended
-    /// so that `char_offsets[i+1] - char_offsets[i]` gives the byte width
-    /// of the `i`-th char without a separate bound check — but it is NOT
-    /// counted in the char count (see `cached_char_count`).
+    /// `char` in the flattened payload, and `char_offsets.len()` equals
+    /// the total char count plus one sentinel entry (== byte length) so
+    /// that `char_offsets[i+1] - char_offsets[i]` gives the byte width of
+    /// the `i`-th char without a separate bound check.
+    ///
+    /// For `StrRepr::Rope`, the table is computed against the rope's
+    /// `flatten_cached()` output, so accessing this field implicitly
+    /// triggers flatten if not already cached.
     char_offsets: OnceLock<Vec<usize>>,
 }
 
 impl StrValue {
-    /// Construct a new `StrValue` without populating the cache.
+    /// Construct a new `StrValue` without populating the cache. Uses the
+    /// `StrRepr::Flat` variant (legacy path).
     pub fn new(data: String) -> Self {
         StrValue {
-            data,
+            data: StrRepr::Flat(data),
             char_offsets: OnceLock::new(),
         }
     }
 
-    /// Borrow the UTF-8 payload as `&str`.
+    /// D29B-016 / Phase 10-B: construct a `StrValue` whose internal
+    /// representation is a rope. Caller is asserting the rope path is
+    /// beneficial — most call sites should use `concat_with` instead and
+    /// let the threshold heuristic decide.
+    pub fn from_rope(rope: RopeBuffer) -> Self {
+        StrValue {
+            data: StrRepr::Rope(Box::new(rope)),
+            char_offsets: OnceLock::new(),
+        }
+    }
+
+    /// True iff the storage is the rope path. Intended for tests and the
+    /// LineEditor promotion verification (Phase 10-G).
+    #[inline]
+    pub fn is_rope(&self) -> bool {
+        matches!(self.data, StrRepr::Rope(_))
+    }
+
+    /// D29B-016 / Phase 10-B: concatenate with `other` and decide whether
+    /// to keep the result Flat or promote to Rope.
+    ///
+    /// Promotion rules (Lock-K V-3 = 1024 bytes):
+    /// * Either operand is already Rope → result is Rope.
+    /// * Combined byte length >= `STR_ROPE_PROMOTION_THRESHOLD` → Rope.
+    /// * Otherwise → Flat (legacy fast path).
+    pub fn concat_with(&self, other: &StrValue) -> StrValue {
+        let left_is_rope = matches!(self.data, StrRepr::Rope(_));
+        let right_is_rope = matches!(other.data, StrRepr::Rope(_));
+        let combined_len = self.as_str().len() + other.as_str().len();
+        if left_is_rope || right_is_rope || combined_len >= STR_ROPE_PROMOTION_THRESHOLD {
+            StrValue::from_rope(RopeBuffer::from_concat(self.as_str(), other.as_str()))
+        } else {
+            let mut s = String::with_capacity(combined_len);
+            s.push_str(self.as_str());
+            s.push_str(other.as_str());
+            StrValue::new(s)
+        }
+    }
+
+    /// Borrow the UTF-8 payload as `&str`. For `StrRepr::Rope`, this
+    /// triggers a one-time flatten + cache; subsequent calls reuse the
+    /// cached flat representation.
     #[inline]
     pub fn as_str(&self) -> &str {
-        &self.data
+        match &self.data {
+            StrRepr::Flat(s) => s.as_str(),
+            StrRepr::Rope(rope) => rope.flatten_cached(),
+        }
     }
 
-    /// Borrow the underlying `String`.
+    /// Borrow the underlying string as a cached owned `&String`.
+    ///
+    /// For `StrRepr::Flat`, this returns the inner `String` directly. For
+    /// `StrRepr::Rope`, this returns a reference into the OnceLock-cached
+    /// flatten output (so the call site retains its `&String` lifetime
+    /// invariant). The first rope call triggers the flatten.
     #[inline]
     pub fn as_string(&self) -> &String {
-        &self.data
+        match &self.data {
+            StrRepr::Flat(s) => s,
+            StrRepr::Rope(rope) => {
+                // flatten_cached returns &str backed by the cache; we need
+                // the &String form for callers that match the legacy
+                // signature. Reach into the OnceLock to obtain it.
+                rope.flat_cache.get_or_init(|| rope.buf.flatten())
+            }
+        }
     }
 
-    /// Consume this `StrValue` and return the owned `String`.
+    /// Consume this `StrValue` and return the owned `String`. For Rope,
+    /// this either reuses the cached flatten or computes a fresh one.
     #[inline]
     pub fn into_string(self) -> String {
-        self.data
+        match self.data {
+            StrRepr::Flat(s) => s,
+            StrRepr::Rope(rope) => {
+                let RopeBuffer { buf, flat_cache } = *rope;
+                if let Some(cached) = flat_cache.into_inner() {
+                    cached
+                } else {
+                    buf.flatten()
+                }
+            }
+        }
     }
 
     /// Get the char-offset table, computing and caching it on first call.
@@ -78,15 +249,19 @@ impl StrValue {
     /// The returned slice has `char_count + 1` entries: indices `0..N` are
     /// the byte offsets of each char, and the final entry is the total
     /// byte length (a sentinel that simplifies width computation).
+    ///
+    /// For `StrRepr::Rope`, this implicitly triggers a flatten + cache
+    /// (the table is computed against the flat representation).
     #[inline]
     fn offsets(&self) -> &[usize] {
         self.char_offsets.get_or_init(|| {
             // Reserve char_count + 1 entries (sentinel). Byte length is a
             // safe upper bound because each char is at least 1 byte in
             // UTF-8, so char_count ≤ byte_len.
-            let byte_len = self.data.len();
+            let payload = self.as_str();
+            let byte_len = payload.len();
             let mut table = Vec::with_capacity(byte_len + 1);
-            for (byte_idx, _) in self.data.char_indices() {
+            for (byte_idx, _) in payload.char_indices() {
                 table.push(byte_idx);
             }
             table.push(byte_len); // sentinel
@@ -122,7 +297,7 @@ impl StrValue {
         }
         let start = offs[idx];
         let end = offs[idx + 1];
-        Some(self.data[start..end].to_string())
+        Some(self.as_str()[start..end].to_string())
     }
 
     /// O(1) after first call: slice `self` by char indices and return the
@@ -140,7 +315,7 @@ impl StrValue {
         }
         let byte_start = offs[s];
         let byte_end = offs[e];
-        self.data[byte_start..byte_end].to_string()
+        self.as_str()[byte_start..byte_end].to_string()
     }
 
     /// O(1) after first call: convert a byte offset that lies on a char
@@ -155,10 +330,14 @@ impl StrValue {
 }
 
 impl Deref for StrValue {
+    /// Phase 10-B (D29B-016): Deref keeps the legacy `&String` target so
+    /// that all 146 `Value::Str(s)` sites continue to compile unchanged.
+    /// For `StrRepr::Rope`, this triggers a one-time flatten + cache via
+    /// `as_string()`.
     type Target = String;
     #[inline]
     fn deref(&self) -> &String {
-        &self.data
+        self.as_string()
     }
 }
 
@@ -169,14 +348,17 @@ impl Clone for StrValue {
         // uniquely owned and a consumer calls `Arc::try_unwrap` followed
         // by an explicit clone. The common case — `Value::clone` on
         // `Value::Str` — is an `Arc::clone` and does NOT invoke this.
-        StrValue::new(self.data.clone())
+        //
+        // Phase 10-B: a Rope clone flattens to Flat (semantically equal,
+        // simpler invariant for downstream consumers).
+        StrValue::new(self.as_str().to_string())
     }
 }
 
 impl PartialEq for StrValue {
     #[inline]
     fn eq(&self, other: &Self) -> bool {
-        self.data == other.data
+        self.as_str() == other.as_str()
     }
 }
 
@@ -192,21 +374,21 @@ impl PartialOrd for StrValue {
 impl Ord for StrValue {
     #[inline]
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.data.cmp(&other.data)
+        self.as_str().cmp(other.as_str())
     }
 }
 
 impl fmt::Display for StrValue {
     #[inline]
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        fmt::Display::fmt(&self.data, f)
+        fmt::Display::fmt(self.as_str(), f)
     }
 }
 
 impl std::hash::Hash for StrValue {
     #[inline]
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.data.hash(state)
+        self.as_str().hash(state)
     }
 }
 
@@ -234,21 +416,21 @@ impl Default for StrValue {
 impl AsRef<str> for StrValue {
     #[inline]
     fn as_ref(&self) -> &str {
-        &self.data
+        self.as_str()
     }
 }
 
 impl AsRef<std::ffi::OsStr> for StrValue {
     #[inline]
     fn as_ref(&self) -> &std::ffi::OsStr {
-        self.data.as_ref()
+        self.as_str().as_ref()
     }
 }
 
 impl std::borrow::Borrow<str> for StrValue {
     #[inline]
     fn borrow(&self) -> &str {
-        &self.data
+        self.as_str()
     }
 }
 

@@ -647,7 +647,13 @@ mod tests {
         //   合計 delta = ζ +11,572 (net_h1_h2.c F6 +5,919 + net_h3_quic.c +5,653)
         //   + η +3,216 (core.c F1 +3,216) = +14,788
         //   EXPECTED_TOTAL_LEN: 1,046,888 (TIER 2 base) + 14,788 = 1,061,676
-        const EXPECTED_TOTAL_LEN: usize = 1_061_676;
+        // TIER 4 Track-θ (D29B-016, 2026-04-27):
+        //   core.c に TAIDA_STR_ROPE_MAGIC sentinel + 説明コメント追加
+        //   (interpreter side rope path で透過昇格を実装、Native の
+        //   rope-aware dispatcher は将来用に予約、§ 6.2 widening addition).
+        //   delta = +910 (コメント blob 含む define 1 行)
+        //   EXPECTED_TOTAL_LEN: 1,061,676 + 910 = 1,062,586
+        const EXPECTED_TOTAL_LEN: usize = 1_062_586;
         let asm = *NATIVE_RUNTIME_C;
         assert_eq!(
             asm.len(),
@@ -1111,11 +1117,17 @@ mod tests {
         //   All edits land before the "// ── Error ceiling" marker so the
         //   delta accumulates entirely in F1. F2 unchanged.
         //   F1_LEN: 284,321 + 3,216 = 287,537.
-        const F1_LEN: usize = 287_537;
+        // D29B-016 Track-θ Phase 10-D (2026-04-27): +910 to F1 for the
+        // TAIDA_STR_ROPE_MAGIC sentinel + design rationale comment block.
+        // Reserved widening addition (§ 6.2) anticipating a future rope-
+        // aware taida_str_concat polymorphic dispatch; the interpreter
+        // side already implements rope promotion via StrRepr::Rope.
+        //   F1_LEN: 287,537 + 910 = 288,447.
+        const F1_LEN: usize = 288_447;
         assert_eq!(
             CORE_SECTION.len(),
-            287_537 + 160_760,
-            "core.c total byte length must equal legacy fragment1 + fragment2 (C25B-001 / C25B-028 / C25B-025 / C26B-011 / C26B-020 / C26B-016 / C26B-018 / C26B-011-wS / C26B-024 / C26B-024-wepsilon adjusted; CI-red 2026-04-24 cppcheck clean-up adds 881/409 to F1/F2; @c.27 PR41 CI-red follow-up adds 61 to F1 for the cppcheck-suppress comment on the new taida_release_any helper; D28B-012 wF adds 4,821 to F1 for taida_arena_request_reset; D28B-026 review follow-up adds 425 to F1 for the active_chunk defensive corner; D29B-003 Track-β adds 6,407 to F1 for TAIDA_BYTES_CONTIG primitives + writev hot-path reflection; D29B-004 Track-ε adds 803 to F1 for taida_slice_mold inline note documenting deferred Native zero-copy view integration; D29B-005/012 Track-η adds 3,216 to F1 for taida_net_raw_as_bytes ABI Option-D rewrite + Span* release sites + taida_slice_mold CONTIG view fast path)"
+            288_447 + 160_760,
+            "core.c total byte length must equal legacy fragment1 + fragment2 (C25B-001 / C25B-028 / C25B-025 / C26B-011 / C26B-020 / C26B-016 / C26B-018 / C26B-011-wS / C26B-024 / C26B-024-wepsilon adjusted; CI-red 2026-04-24 cppcheck clean-up adds 881/409 to F1/F2; @c.27 PR41 CI-red follow-up adds 61 to F1 for the cppcheck-suppress comment on the new taida_release_any helper; D28B-012 wF adds 4,821 to F1 for taida_arena_request_reset; D28B-026 review follow-up adds 425 to F1 for the active_chunk defensive corner; D29B-003 Track-β adds 6,407 to F1 for TAIDA_BYTES_CONTIG primitives + writev hot-path reflection; D29B-004 Track-ε adds 803 to F1 for taida_slice_mold inline note documenting deferred Native zero-copy view integration; D29B-005/012 Track-η adds 3,216 to F1 for taida_net_raw_as_bytes ABI Option-D rewrite + Span* release sites + taida_slice_mold CONTIG view fast path; D29B-016 Track-θ adds 910 to F1 for TAIDA_STR_ROPE_MAGIC sentinel + design rationale comment block)"
         );
         const F2_PREFIX: &[u8] = b"// \xE2\x94\x80\xE2\x94\x80 Error ceiling";
         let tail = &CORE_SECTION.as_bytes()[F1_LEN..F1_LEN + F2_PREFIX.len()];

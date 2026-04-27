@@ -438,8 +438,16 @@ mod tests {
     /// same libm on Linux / macOS. Closes the Phase 5-I scope for
     /// C25B-025 (math mold family on native + wasm backends).
     #[test]
+    /// D29B-016 / Phase 10-E (Track-θ, 2026-04-27): 333,024 → 333,863 (+839).
+    /// Added the `WASM_STR_ROPE_MAGIC = 0x5441494452505400` sentinel + a
+    /// design rationale comment block in `01_core.inc.c`. Reserved for a
+    /// future widening addition (§ 6.2) that introduces a rope-aware
+    /// `_wf_str_concat` polymorphic dispatch. The interpreter side
+    /// (Lock-K verdict V-1) implements rope promotion transparently via
+    /// `StrRepr::Rope` so 4-backend surface parity is preserved against
+    /// the existing wasm-wasi `_wf_str_*` heap-copy path.
     fn test_runtime_core_wasm_fragment_concat_preserves_bytes() {
-        const EXPECTED_TOTAL_LEN: usize = 333_024;
+        const EXPECTED_TOTAL_LEN: usize = 333_863;
         let asm = *RUNTIME_CORE_WASM;
         assert_eq!(
             asm.len(),

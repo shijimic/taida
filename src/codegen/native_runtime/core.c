@@ -107,6 +107,18 @@ typedef intptr_t  taida_fn_ptr;  // 関数ポインタ
 // payload-level zero-copy writev (D29B-003 acceptance) by letting callers reflect
 // `data_ptr` directly into iovec without the legacy taida_val[] byte-loop.
 #define TAIDA_BYTES_CONTIG_MAGIC 0x54414944424E4300LL // "TAIDBNC\0"
+// D29B-016 / Phase 10-D (Track-θ, 2026-04-27): Rope-backed string sentinel.
+// Layout (when present): [magic|rc, byte_len, gap_start, gap_end, ...buffer bytes].
+// Reserved for future use by the Native backend's polymorphic str dispatcher;
+// the interpreter side (Lock-K verdict V-1) implements rope path via an
+// internal `StrRepr::Rope(Box<RopeBuffer>)` variant in src/interpreter/value.rs
+// (DEVIATION matching Track-ε commit `e179238` to avoid 146-site Value::Str
+// match arm churn). The Native backend currently relies on the existing
+// `taida_str_concat` heap-copy path which already meets the Lock-K acceptance
+// envelope (microbench < 100 µs at N=500); this magic is pinned now so a
+// future rope-aware `taida_str_concat` polymorphic dispatch can detect rope-
+// backed inputs without an ABI break (§ 6.2 widening addition).
+#define TAIDA_STR_ROPE_MAGIC 0x5441494452505400LL // "TAIDRPT\0"
 #define TAIDA_CLOSURE_MAGIC 0x54414944434C4F00LL // "TAIDCLO\0"
 
 // Type tags for BuchiPack field values (A-4a)
