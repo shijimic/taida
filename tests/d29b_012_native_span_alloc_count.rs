@@ -11,23 +11,31 @@
 //!
 //! # Why "net" and not "absolute"
 //!
-//! The producer flip from legacy `taida_val[]` Bytes to `TAIDA_BYTES_CONTIG`
-//! is gated on D29B-015 (β-2 TIER 4). Until that lands, every Span* call
-//! against a Bytes-shaped raw still incurs **1 alloc + 1 release** inside
-//! `taida_net_raw_as_bytes` (the materialize fallback path). The acceptance
-//! recorded here therefore is:
+//! With D29B-015 (Track-β-2 TIER 4) **landed** (2026-04-27), the producer
+//! flip from legacy `taida_val[]` Bytes to `TAIDA_BYTES_CONTIG` is in
+//! place: `taida_net_read_body` / `taida_net_read_body_all` /
+//! `taida_net4_make_lax_bytes_value` and the H1 / H2 request-pack `raw`
+//! producers all emit `taida_bytes_contig_new(...)`. Span* hot paths
+//! against the producer-flipped raw take the borrow short-circuit
+//! (`taida_net_raw_as_bytes` returns `out_owner=0` for CONTIG inputs,
+//! see Track-η Phase 6 land), so the per-request alloc attributable
+//! to Span* is **0**.
 //!
-//! * `total heap usage` shows `N allocs, N frees` for some N (alloc/free
-//!   balance — leak 0 in absolute terms).
-//! * The N delta vs a no-Span baseline is bounded — the per-request linear
-//!   leak (3 GB/s for 1 MB body × 3 Span* calls × 1000 req/s, pre-Track-η)
-//!   is closed.
+//! The absolute `total heap usage` count is still bounded by **process-life
+//! retained allocs** (tokio runtime / OS thread pool arenas, freelist
+//! pre-warming) which intentionally outlive process exit and are NOT
+//! definite-lost. The leak guard sibling test owns the definite-lost
+//! signal. This test owns the alloc/free balance signal:
 //!
-//! Once D29B-015 (Bytes producer flip) lands, the CONTIG fast-path inside
-//! `taida_net_raw_as_bytes` will short-circuit to a borrow with `out_owner=0`
-//! and the per-request alloc count attributable to Span* will drop to 0.
-//! At that point this test should be tightened to assert `delta < 4` rather
-//! than the current alloc/free balance check.
+//! * `total heap usage` shows `N allocs, M frees` with `|N - M| <= 16`
+//!   (slack covers process-life retained allocs).
+//! * The per-request linear leak (3 GB/s for 1 MB body × 3 Span* calls
+//!   × 1000 req/s, pre-Track-η) is closed.
+//!
+//! Tightening the slack to `< 4` requires factoring out the process-life
+//! retained allocs, which is post-stable scope (the runtime arena
+//! reservation count is workload-stable — adding `cargo run` / first-call
+//! warm-up alloc tracking is post-D29).
 //!
 //! # SKIP behavior
 //!

@@ -103,7 +103,21 @@ taida_val taida_net_http_parse_request_head(taida_val input) {
     size_t data_len = 0;
     int free_data = 0;
 
-    if (TAIDA_IS_BYTES(input)) {
+    if (TAIDA_IS_BYTES_CONTIG(input)) {
+        // D29B-015 (Track-β-2, 2026-04-27): CONTIG borrow — payload is
+        // already contiguous, but we still alloc a (data_len + 1) buffer
+        // so the trailing NUL terminator can be written without mutating
+        // the borrowed CONTIG payload (which is shared via Arc-like refcount
+        // semantics on the Bytes header). One memcpy + NUL replaces the
+        // legacy 8x byte-loop expansion.
+        taida_val blen = taida_bytes_contig_len(input);
+        if (blen < 0) blen = 0;
+        data_len = (size_t)blen;
+        data = (unsigned char*)TAIDA_MALLOC(data_len + 1, "net_parse_input");
+        if (data_len > 0) memcpy(data, taida_bytes_contig_data(input), data_len);
+        data[data_len] = 0;
+        free_data = 1;
+    } else if (TAIDA_IS_BYTES(input)) {
         taida_val *bytes = (taida_val*)input;
         taida_val blen = bytes[1];
         if (blen < 0) blen = 0;
@@ -801,8 +815,11 @@ taida_val taida_net_read_body(taida_val req) {
     }
 
     // Extract raw: Bytes
+    // D29B-015 (Track-β-2, 2026-04-27): polymorphic on TAIDA_IS_BYTES_CONTIG
+    // so producer-flipped CONTIG raw values pass the type check. The slice
+    // path below also reads polymorphically.
     taida_val raw = taida_pack_get(req, taida_str_hash((taida_val)"raw"));
-    if (!TAIDA_IS_BYTES(raw)) {
+    if (!TAIDA_IS_ANY_BYTES(raw)) {
         return taida_throw(taida_make_error("TypeError",
             "readBody: request pack missing 'raw: Bytes' field"));
     }
@@ -820,9 +837,11 @@ taida_val taida_net_read_body(taida_val req) {
         return taida_bytes_new_filled(0, 0);
     }
 
-    // raw layout: [magic+rc, length, b0, b1, ...]
-    taida_val *raw_arr = (taida_val*)raw;
-    taida_val raw_len = raw_arr[1];
+    // raw layout depends on representation: CONTIG -> inline payload at
+    // taida_bytes_contig_data; legacy -> [magic+rc, length, b0, b1, ...]
+    int raw_is_contig = TAIDA_IS_BYTES_CONTIG(raw);
+    taida_val raw_len = raw_is_contig ? taida_bytes_contig_len(raw)
+                                       : ((taida_val*)raw)[1];
 
     // Clamp to valid range
     if (body_start < 0) body_start = 0;
@@ -834,12 +853,24 @@ taida_val taida_net_read_body(taida_val req) {
         return taida_bytes_new_filled(0, 0);
     }
 
-    // Copy body bytes into a new Bytes object
-    taida_val out = taida_bytes_new_filled(actual_len, 0);
-    taida_val *out_arr = (taida_val*)out;
-    for (taida_val i = 0; i < actual_len; i++) {
-        out_arr[2 + i] = raw_arr[2 + body_start + i];
+    // D29B-015 (Track-β-2, 2026-04-27): producer flip — emit CONTIG so the
+    // writev hot path (taida_net_send_response_scatter / taida_net_write_chunk)
+    // takes the direct iovec reflection branch. CONTIG raw → memcpy from
+    // inline payload directly into the new CONTIG body. Legacy raw → 8x
+    // taida_val[] expansion into a staging buffer (preserved for back-compat
+    // until all producers flip).
+    if (raw_is_contig) {
+        const unsigned char *raw_data = taida_bytes_contig_data(raw);
+        return taida_bytes_contig_new(raw_data + body_start, actual_len);
     }
+    taida_val *raw_arr = (taida_val*)raw;
+    unsigned char *tmp = (unsigned char *)TAIDA_MALLOC((size_t)actual_len,
+                                                       "net_read_body_contig");
+    for (taida_val i = 0; i < actual_len; i++) {
+        tmp[i] = (unsigned char)raw_arr[2 + body_start + i];
+    }
+    taida_val out = taida_bytes_contig_new(tmp, actual_len);
+    free(tmp);
     return out;
 }
 
@@ -1092,7 +1123,10 @@ static taida_val taida_net_build_request_pack(
     int is_chunked, int keep_alive,
     const char *remote_host, int remote_port
 ) {
-    taida_val raw_bytes = taida_bytes_from_raw(raw_data, (taida_val)raw_len);
+    // D29B-015 (Track-β-2, 2026-04-27): producer flip — request pack `raw`
+    // field is CONTIG so downstream readBody (and any user-side Bytes
+    // dispatcher in core.c) takes the polymorphic CONTIG branch end-to-end.
+    taida_val raw_bytes = taida_bytes_contig_new(raw_data, (taida_val)raw_len);
 
     // Parse to get spans
     taida_val parse_result = taida_net_http_parse_request_head(raw_bytes);
@@ -1196,7 +1230,15 @@ static void taida_net_send_response(int client_fd, taida_val encoded) {
         taida_val enc_inner = taida_pack_get(encoded, taida_str_hash((taida_val)"__value"));
         if (enc_inner != 0 && taida_is_buchi_pack(enc_inner)) {
             taida_val wire_bytes = taida_pack_get(enc_inner, taida_str_hash((taida_val)"bytes"));
-            if (TAIDA_IS_BYTES(wire_bytes)) {
+            // D29B-015 (Track-β-2, 2026-04-27): polymorphic on TAIDA_IS_BYTES_CONTIG.
+            // CONTIG inputs (e.g. user handlers building Bytes via the new
+            // contig constructor) borrow the inline payload directly — no
+            // intermediate stack/heap copy.
+            if (TAIDA_IS_BYTES_CONTIG(wire_bytes)) {
+                taida_val wb_len = taida_bytes_contig_len(wire_bytes);
+                const unsigned char *wb_data = taida_bytes_contig_data(wire_bytes);
+                taida_net_send_all(client_fd, wb_data, (size_t)wb_len);
+            } else if (TAIDA_IS_BYTES(wire_bytes)) {
                 taida_val *wb = (taida_val*)wire_bytes;
                 taida_val wb_len = wb[1];
                 // Use stack buffer for typical responses (< 4KB), heap for larger
@@ -2289,8 +2331,12 @@ static taida_val taida_net4_make_lax_bytes_empty(void) {
 }
 
 // Make Lax[Bytes] with value (parity with Interpreter: hasValue=true).
+// D29B-015 (Track-β-2, 2026-04-27): producer flip — emit CONTIG so chunked
+// readBodyChunk feeds the writeChunk writev hot path with zero materialize
+// in user-space (taida_bytes_contig_data → iov[1].iov_base). Replaces the
+// legacy taida_bytes_from_raw which did taida_val[] 8x expansion.
 static taida_val taida_net4_make_lax_bytes_value(const unsigned char *data, size_t len) {
-    taida_val bytes = taida_bytes_from_raw(data, (taida_val)len);
+    taida_val bytes = taida_bytes_contig_new(data, (taida_val)len);
     return taida_lax_new(bytes, taida_bytes_default_value());
 }
 
@@ -2628,11 +2674,13 @@ taida_val taida_net_read_body_all(taida_val req) {
     }
 
 all_done:;
-    // D29B-003 (Track-β, 2026-04-27): kept on legacy form pending the
-    // polymorphic Bytes dispatcher follow-up (see readBody producer above
-    // for the rationale). The writev hot path supports both legacy and
-    // CONTIG inputs; opt-in CONTIG construction is via taida_bytes_contig_new.
-    taida_val result = taida_bytes_from_raw(all_buf, (taida_val)all_len);
+    // D29B-015 (Track-β-2, 2026-04-27): producer flip — emit CONTIG so the
+    // writev hot path on the response side reflects taida_bytes_contig_data
+    // directly into the iovec base (iov[1] in scatter / write_chunk). The
+    // legacy `taida_bytes_from_raw` 8x taida_val[] expansion is gone for
+    // this producer; downstream Bytes dispatchers in core.c are now
+    // polymorphic on TAIDA_IS_BYTES_CONTIG via the D29B-015 follow-up.
+    taida_val result = taida_bytes_contig_new(all_buf, (taida_val)all_len);
     free(all_buf);
     return result;
 }
@@ -2840,7 +2888,8 @@ static taida_val taida_net4_make_lax_ws_frame_value(const char *type_str, taida_
     taida_pack_set_hash(inner, 1, taida_str_hash((taida_val)"data"));
     taida_pack_set(inner, 1, data_val);
     // Tag the data field appropriately.
-    if (TAIDA_IS_BYTES(data_val)) {
+    // D29B-015 (Track-β-2, 2026-04-27): accept CONTIG bytes too.
+    if (TAIDA_IS_ANY_BYTES(data_val)) {
         taida_pack_set_tag(inner, 1, TAIDA_TAG_PACK); // Bytes is ptr
     } else {
         taida_pack_set_tag(inner, 1, TAIDA_TAG_STR);
@@ -2998,16 +3047,28 @@ taida_val taida_net_ws_upgrade(taida_val req, taida_val writer) {
     }
 
     // Extract raw bytes for header value extraction.
+    // D29B-015 (Track-β-2, 2026-04-27): polymorphic on TAIDA_IS_BYTES_CONTIG
+    // — producer flip emits CONTIG raw, so this consumer must read the inline
+    // payload (memcpy) instead of indexing the legacy taida_val[] slots.
     taida_val raw_val = taida_pack_get(req, taida_str_hash((taida_val)"raw"));
-    if (!TAIDA_IS_BYTES(raw_val)) {
+    if (!TAIDA_IS_ANY_BYTES(raw_val)) {
         return taida_net4_make_lax_ws_empty();
     }
-    taida_val *raw_arr = (taida_val*)raw_val;
-    taida_val raw_len = raw_arr[1];
-    // Materialize raw bytes for C string comparison.
-    unsigned char *raw = (unsigned char*)TAIDA_MALLOC((size_t)raw_len + 1, "net_ws_raw");
-    for (taida_val i = 0; i < raw_len; i++) raw[i] = (unsigned char)raw_arr[2 + i];
-    raw[raw_len] = 0;
+    taida_val raw_len;
+    unsigned char *raw;
+    if (TAIDA_IS_BYTES_CONTIG(raw_val)) {
+        raw_len = taida_bytes_contig_len(raw_val);
+        raw = (unsigned char*)TAIDA_MALLOC((size_t)raw_len + 1, "net_ws_raw");
+        if (raw_len > 0) memcpy(raw, taida_bytes_contig_data(raw_val), (size_t)raw_len);
+        raw[raw_len] = 0;
+    } else {
+        taida_val *raw_arr = (taida_val*)raw_val;
+        raw_len = raw_arr[1];
+        // Materialize raw bytes for C string comparison.
+        raw = (unsigned char*)TAIDA_MALLOC((size_t)raw_len + 1, "net_ws_raw");
+        for (taida_val i = 0; i < raw_len; i++) raw[i] = (unsigned char)raw_arr[2 + i];
+        raw[raw_len] = 0;
+    }
 
     // Validate: must be GET.
     char method[16];
@@ -3163,7 +3224,12 @@ taida_val taida_net_ws_send(taida_val ws, taida_val data) {
     size_t payload_len;
     unsigned char *temp_buf = NULL;
 
-    if (TAIDA_IS_BYTES(data)) {
+    if (TAIDA_IS_BYTES_CONTIG(data)) {
+        // D29B-015 (Track-β-2, 2026-04-27): borrow CONTIG payload directly.
+        opcode = WS_OPCODE_BINARY;
+        payload_len = (size_t)taida_bytes_contig_len(data);
+        payload = taida_bytes_contig_data(data);
+    } else if (TAIDA_IS_BYTES(data)) {
         opcode = WS_OPCODE_BINARY;
         taida_val *bytes = (taida_val*)data;
         taida_val blen = bytes[1];
@@ -3236,7 +3302,8 @@ taida_val taida_net_ws_receive(taida_val ws) {
             }
 
             case WS_FRAME_BINARY: {
-                taida_val bytes = taida_bytes_from_raw(frame.payload, (taida_val)frame.payload_len);
+                // D29B-015 (Track-β-2, 2026-04-27): producer flip — emit CONTIG.
+                taida_val bytes = taida_bytes_contig_new(frame.payload, (taida_val)frame.payload_len);
                 free(frame.payload);
                 return taida_net4_make_lax_ws_frame_value("binary", bytes);
             }
@@ -3784,7 +3851,8 @@ static void *net_worker_thread(void *arg) {
                 body_state.ws_close_code = 0; // v5: no close frame received yet
 
                 // Build request pack (head only, body = empty span).
-                taida_val raw_bytes = taida_bytes_from_raw(buf, (taida_val)head_consumed);
+                // D29B-015 (Track-β-2, 2026-04-27): producer flip — CONTIG raw.
+                taida_val raw_bytes = taida_bytes_contig_new(buf, (taida_val)head_consumed);
                 // 15 fields: raw, method, path, query, version, headers, body, bodyOffset,
                 //            contentLength, remoteHost, remotePort, keepAlive, chunked,
                 //            __body_stream, __body_token
@@ -4091,7 +4159,8 @@ static void *net_worker_thread(void *arg) {
                 }
                 keep_alive = taida_net_determine_keep_alive(buf, raw_len, parsed_headers, http_minor);
 
-                taida_val raw_bytes = taida_bytes_from_raw(buf, (taida_val)raw_len);
+                // D29B-015 (Track-β-2, 2026-04-27): producer flip — CONTIG raw.
+                taida_val raw_bytes = taida_bytes_contig_new(buf, (taida_val)raw_len);
                 taida_val request = taida_pack_new(13);
                 taida_pack_set_hash(request, 0, taida_str_hash((taida_val)"raw"));
                 taida_pack_set(request, 0, raw_bytes);
@@ -5544,6 +5613,16 @@ static void h2_extract_response_fields(taida_val response, H2ResponseFields *out
             size_t blen = strlen(body_str);
             out->body = (unsigned char*)TAIDA_MALLOC(blen + 1, "h2_resp_body");
             if (out->body) { memcpy(out->body, body_str, blen); out->body_len = blen; }
+        } else if (TAIDA_IS_BYTES_CONTIG(body_val)) {
+            // D29B-015 (Track-β-2, 2026-04-27): CONTIG memcpy fast path.
+            int64_t blen = (int64_t)taida_bytes_contig_len(body_val);
+            if (blen > 0) {
+                out->body = (unsigned char*)TAIDA_MALLOC((size_t)blen, "h2_resp_body_bytes");
+                if (out->body) {
+                    memcpy(out->body, taida_bytes_contig_data(body_val), (size_t)blen);
+                    out->body_len = (size_t)blen;
+                }
+            }
         } else if (TAIDA_IS_BYTES(body_val)) {
             // Bytes value: header[0]=magic, header[1]=len, then raw bytes inline
             int64_t blen = (int64_t)taida_bytes_len(body_val);
@@ -5698,15 +5777,17 @@ static taida_val h2_build_request_pack(H2RequestFields *fields,
         cursor += authority_len;
     }
 
-    // 5. raw = Bytes(arena). taida_bytes_from_raw memcpys into a
-    // taida_val[] slot layout (one byte per slot), so we can free the
-    // staging arena immediately after.
+    // 5. raw = Bytes(arena). D29B-015 (Track-β-2, 2026-04-27): producer flip
+    // — emit CONTIG so dispatchers in core.c and the writev hot path on the
+    // h2 response side both take the polymorphic CONTIG branch. The CONTIG
+    // constructor memcpys the staging arena into its inline payload, so the
+    // staging arena can still be freed immediately.
     taida_val raw_bytes;
     if (arena) {
-        raw_bytes = taida_bytes_from_raw(arena, (taida_val)arena_size);
+        raw_bytes = taida_bytes_contig_new(arena, (taida_val)arena_size);
         free(arena);
     } else {
-        raw_bytes = taida_bytes_from_raw(body, (taida_val)body_len);
+        raw_bytes = taida_bytes_contig_new(body, (taida_val)body_len);
     }
 
     // 6. Header list: span packs into the arena (or fall back to Str on OOM)

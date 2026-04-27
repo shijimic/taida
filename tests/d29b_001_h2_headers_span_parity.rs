@@ -169,16 +169,19 @@ fn native_h2_request_pack_uses_arena_with_span_headers() {
         "Native h2 arena layout must place body at offset 0."
     );
 
-    // taida_bytes_from_raw materializes the arena into req.raw, then we
-    // free the staging buffer. taida_bytes_from_raw memcpys into the
-    // taida_val[] slot layout, so the staging arena can be freed
-    // immediately.
+    // D29B-015 (Track-β-2, 2026-04-27): producer flip. Native h2 now
+    // materializes req.raw via taida_bytes_contig_new (CONTIG header +
+    // inline payload, single allocation) so the writev hot path on the
+    // h2 response side reflects the inline payload directly into iov[1]
+    // — no taida_val[] 8x expansion. The staging arena is still freed
+    // immediately because taida_bytes_contig_new memcpys the payload.
     assert!(
-        h2_section.contains("taida_bytes_from_raw(arena, (taida_val)arena_size)")
+        h2_section.contains("taida_bytes_contig_new(arena, (taida_val)arena_size)")
             && h2_section.contains("free(arena);"),
-        "Native h2 must materialize req.raw via taida_bytes_from_raw(arena, \
-         arena_size) and free the staging arena (lifetime ends with the \
-         memcpy into the taida_val[] payload region)."
+        "Native h2 must materialize req.raw via taida_bytes_contig_new(arena, \
+         arena_size) and free the staging arena (D29B-015 producer flip; the \
+         CONTIG constructor copies into a single inline payload behind the \
+         CONTIG header, so the staging arena can be freed immediately)."
     );
 
     // Headers list must use span packs (taida_net_make_span) into the

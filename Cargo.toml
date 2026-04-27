@@ -120,5 +120,12 @@ dhat = "0.3"
 name = "perf_baseline"
 harness = false
 
+# D29B-015 (Track-β-2 TIER 4, 2026-04-27): bench measuring the producer
+# flip impact on 1MB body chunked TE response latency. Pre-flip baseline
+# captured on commit 32be6d8; post-flip target is -50% latency reduction.
+[[bench]]
+name = "d29b_015_chunked_te_writev"
+harness = false
+
 [profile.dev]
 codegen-units = 256  # Explicit: Rust default for dev is 256
