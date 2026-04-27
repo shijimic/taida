@@ -370,7 +370,11 @@ fn d28b_014_runbook_present() {
     // worktree contract installs (see
     // `.dev/D28_WORKTREE_CONTRACT.md`). When this test runs from
     // CI on a fresh clone there is no `.dev/` so the test skips.
-    let runbook = manifest_dir().join(".dev/D28_SOAK_RUNBOOK.md");
+    //
+    // D29 (2026-04-27): D28 stable land 後、runbook は
+    // `.dev/taida-logs/docs/archive/d28/D28_SOAK_RUNBOOK.md` に
+    // archive 移管される。primary path 不在でも archive path
+    // exists なら GREEN とする (D29B-017 修正)。
     if !manifest_dir().join(".dev").exists() {
         eprintln!(
             "skipping: `.dev/` not present in this checkout (this is \
@@ -379,9 +383,13 @@ fn d28b_014_runbook_present() {
         );
         return;
     }
+    let primary = manifest_dir().join(".dev/D28_SOAK_RUNBOOK.md");
+    let archive = manifest_dir().join(".dev/taida-logs/docs/archive/d28/D28_SOAK_RUNBOOK.md");
     assert!(
-        runbook.exists(),
-        "d28b_014: `.dev/D28_SOAK_RUNBOOK.md` is missing — see \
-         `.dev/D28_BLOCKERS.md::D28B-014` for the acceptance"
+        primary.exists() || archive.exists(),
+        "d28b_014: D28_SOAK_RUNBOOK.md not found in either primary \
+         (`.dev/D28_SOAK_RUNBOOK.md`) or D28 archive \
+         (`.dev/taida-logs/docs/archive/d28/D28_SOAK_RUNBOOK.md`) — \
+         see `.dev/D28_BLOCKERS.md::D28B-014` for the acceptance"
     );
 }
