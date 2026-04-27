@@ -63,6 +63,29 @@ fn valgrind_available() -> bool {
         .unwrap_or(false)
 }
 
+#[test]
+fn native_span_helpers_guard_range_without_signed_overflow() {
+    let src = std::fs::read_to_string("src/codegen/native_runtime/core.c")
+        .expect("read src/codegen/native_runtime/core.c");
+
+    assert!(
+        src.contains("start <= buf_len && len <= buf_len - start"),
+        "SpanEquals/SpanStartsWith must validate ranges via subtraction, \
+         not `start + len <= buf_len`, because signed taida_val addition \
+         can overflow before the bounds check runs."
+    );
+    assert!(
+        src.contains("if (start > buf_len || len > buf_len - start) { result = 0; }"),
+        "SpanContains must reject out-of-range spans with subtraction-based \
+         bounds checks before entering the memcmp loop."
+    );
+    assert!(
+        !src.contains("start + len <= buf_len") && !src.contains("start + len > buf_len"),
+        "D29B-012 review fix: Native Span* helpers must not use direct \
+         `start + len` bounds checks."
+    );
+}
+
 fn tempdir(name: &str) -> PathBuf {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

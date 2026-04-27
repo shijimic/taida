@@ -6547,7 +6547,8 @@ taida_val taida_net_SpanEquals(taida_val span, taida_val raw, taida_val needle) 
         return 0;
     }
     taida_val result = 0;
-    if (start + len <= buf_len && len == nlen && memcmp(buf + start, nbuf, (size_t)len) == 0) {
+    if (start <= buf_len && len <= buf_len - start &&
+        len == nlen && memcmp(buf + start, nbuf, (size_t)len) == 0) {
         result = 1;
     }
     if (own_buf) taida_str_release(own_buf);
@@ -6566,7 +6567,8 @@ taida_val taida_net_SpanStartsWith(taida_val span, taida_val raw, taida_val pref
         return 0;
     }
     taida_val result = 0;
-    if (start + len <= buf_len && len >= plen && memcmp(buf + start, pbuf, (size_t)plen) == 0) {
+    if (start <= buf_len && len <= buf_len - start &&
+        len >= plen && memcmp(buf + start, pbuf, (size_t)plen) == 0) {
         result = 1;
     }
     if (own_buf) taida_str_release(own_buf);
@@ -6585,7 +6587,7 @@ taida_val taida_net_SpanContains(taida_val span, taida_val raw, taida_val needle
         return 0;
     }
     taida_val result = 0;
-    if (start + len > buf_len) { result = 0; }
+    if (start > buf_len || len > buf_len - start) { result = 0; }
     else if (nlen == 0) { result = 1; }
     else if (len < nlen) { result = 0; }
     else {

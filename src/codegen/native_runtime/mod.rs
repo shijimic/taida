@@ -622,7 +622,7 @@ mod tests {
         //   unchanged on this track (taida_net_make_span and
         //   taida_bytes_from_raw helpers were already available).
         //   Track-ζ delta-only EXPECTED_TOTAL_LEN: 1,046,888 + 11,572 = 1,058,460.
-        // D29B-005 / D29B-012 (Track-η Phase 6, 2026-04-27): +3,216 bytes
+        // D29B-005 / D29B-012 (Track-η Phase 6, 2026-04-27): +3,291 bytes
         //   in core.c — split as
         //   (a) taida_net_raw_as_bytes ABI rewrite (Lock-Phase6-A Option D):
         //       out_owned: unsigned char** → out_owner: taida_val* release
@@ -643,11 +643,15 @@ mod tests {
         //       Legacy taida_val[] inputs retain the existing
         //       bytes_new_filled materialize path because the producer
         //       flip is gated on D29B-015 (β-2 TIER 4).
+        //   (c) Tier 2/3 review fix: Native Span* range checks use
+        //       subtraction (`len <= buf_len - start`) instead of signed
+        //       `start + len` arithmetic, avoiding UB on hostile span
+        //       values before the bounds check runs (+75 bytes).
         // TIER 3 統合 (ζ + η land 後 merge resolve, 2026-04-27):
         //   合計 delta = ζ +11,572 (net_h1_h2.c F6 +5,919 + net_h3_quic.c +5,653)
-        //   + η +3,216 (core.c F1 +3,216) = +14,788
-        //   EXPECTED_TOTAL_LEN: 1,046,888 (TIER 2 base) + 14,788 = 1,061,676
-        const EXPECTED_TOTAL_LEN: usize = 1_061_676;
+        //   + η +3,291 (core.c F1 +3,291) = +14,863
+        //   EXPECTED_TOTAL_LEN: 1,046,888 (TIER 2 base) + 14,863 = 1,061,751
+        const EXPECTED_TOTAL_LEN: usize = 1_061_751;
         let asm = *NATIVE_RUNTIME_C;
         assert_eq!(
             asm.len(),
@@ -1095,7 +1099,7 @@ mod tests {
         //   before the "// ── Error ceiling" marker, so all bytes land in
         //   F1. F2 unchanged.
         //   F1_LEN: 283,518 + 803 = 284,321.
-        // D29B-005 / D29B-012 (Track-η Phase 6, 2026-04-27): +3,216 bytes
+        // D29B-005 / D29B-012 (Track-η Phase 6, 2026-04-27): +3,291 bytes
         //   in F1 split as:
         //   (a) taida_slice_mold CONTIG view fast path (Lock-Phase6-B β-2)
         //       — new TAIDA_IS_BYTES_CONTIG branch above the legacy
@@ -1108,14 +1112,16 @@ mod tests {
         //       SpanContains, lines ~6533/6547/6561) acquired matching
         //       taida_str_release sites on every branch including
         //       resolver-failure early returns.
+        //   (d) Tier 2/3 review fix: subtraction-based bounds checks avoid
+        //       signed `start + len` overflow in Native Span* helpers.
         //   All edits land before the "// ── Error ceiling" marker so the
         //   delta accumulates entirely in F1. F2 unchanged.
-        //   F1_LEN: 284,321 + 3,216 = 287,537.
-        const F1_LEN: usize = 287_537;
+        //   F1_LEN: 284,321 + 3,291 = 287,612.
+        const F1_LEN: usize = 287_612;
         assert_eq!(
             CORE_SECTION.len(),
-            287_537 + 160_760,
-            "core.c total byte length must equal legacy fragment1 + fragment2 (C25B-001 / C25B-028 / C25B-025 / C26B-011 / C26B-020 / C26B-016 / C26B-018 / C26B-011-wS / C26B-024 / C26B-024-wepsilon adjusted; CI-red 2026-04-24 cppcheck clean-up adds 881/409 to F1/F2; @c.27 PR41 CI-red follow-up adds 61 to F1 for the cppcheck-suppress comment on the new taida_release_any helper; D28B-012 wF adds 4,821 to F1 for taida_arena_request_reset; D28B-026 review follow-up adds 425 to F1 for the active_chunk defensive corner; D29B-003 Track-β adds 6,407 to F1 for TAIDA_BYTES_CONTIG primitives + writev hot-path reflection; D29B-004 Track-ε adds 803 to F1 for taida_slice_mold inline note documenting deferred Native zero-copy view integration; D29B-005/012 Track-η adds 3,216 to F1 for taida_net_raw_as_bytes ABI Option-D rewrite + Span* release sites + taida_slice_mold CONTIG view fast path)"
+            287_612 + 160_760,
+            "core.c total byte length must equal legacy fragment1 + fragment2 (C25B-001 / C25B-028 / C25B-025 / C26B-011 / C26B-020 / C26B-016 / C26B-018 / C26B-011-wS / C26B-024 / C26B-024-wepsilon adjusted; CI-red 2026-04-24 cppcheck clean-up adds 881/409 to F1/F2; @c.27 PR41 CI-red follow-up adds 61 to F1 for the cppcheck-suppress comment on the new taida_release_any helper; D28B-012 wF adds 4,821 to F1 for taida_arena_request_reset; D28B-026 review follow-up adds 425 to F1 for the active_chunk defensive corner; D29B-003 Track-β adds 6,407 to F1 for TAIDA_BYTES_CONTIG primitives + writev hot-path reflection; D29B-004 Track-ε adds 803 to F1 for taida_slice_mold inline note documenting deferred Native zero-copy view integration; D29B-005/012 Track-η adds 3,291 to F1 for taida_net_raw_as_bytes ABI Option-D rewrite + Span* release sites + taida_slice_mold CONTIG view fast path + subtraction-based Span* bounds checks)"
         );
         const F2_PREFIX: &[u8] = b"// \xE2\x94\x80\xE2\x94\x80 Error ceiling";
         let tail = &CORE_SECTION.as_bytes()[F1_LEN..F1_LEN + F2_PREFIX.len()];
