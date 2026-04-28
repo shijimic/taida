@@ -35,5 +35,10 @@ pub mod upgrade;
 /// regulation-violating symbols to comply with the D28B-001 (Phase 0
 /// 2026-04-26 Lock) category-based naming rules.
 pub mod upgrade_d28;
+/// E30B-001 / Lock-E: AST-aware code rewriter for the @d.29 → @e.30 migration
+/// (skeleton, Phase 2 Sub-step 2.3). Implements the `taida upgrade --e30 <path>`
+/// subcommand for migrating legacy `Mold[T] => Foo[T] = @(...)` syntax to the
+/// unified `Name[?type-args] [=> Parent] = @(...)` form. Phase 7 で完成予定。
+pub mod upgrade_e30;
 pub mod util;
 pub mod version;

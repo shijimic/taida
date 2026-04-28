@@ -767,120 +767,123 @@ impl GraphExtractor {
         graph.source_files.push(self.file.clone());
 
         for stmt in &program.statements {
-            match stmt {
-                Statement::TypeDef(td) => {
-                    let span = &td.span;
-                    let id = Graph::make_id(
-                        &self.file,
-                        span.line,
-                        span.column,
-                        &NodeKind::BuchiPackType,
-                    );
-                    graph.add_node(GraphNode {
-                        id,
-                        kind: NodeKind::BuchiPackType,
-                        label: td.name.clone(),
-                        location: Location {
-                            file: self.file.clone(),
-                            line: span.line,
-                            column: span.column,
-                        },
-                        metadata: HashMap::new(),
-                    });
+            // (E30 Sub-step 2.1) ClassLikeDef + kind dispatch (旧 TypeDef/MoldDef/InheritanceDef を統合)
+            if let Statement::ClassLikeDef(cl) = stmt {
+                match &cl.kind {
+                    crate::parser::ClassLikeKind::BuchiPack => {
+                        let td = cl;
+                        let span = &td.span;
+                        let id = Graph::make_id(
+                            &self.file,
+                            span.line,
+                            span.column,
+                            &NodeKind::BuchiPackType,
+                        );
+                        graph.add_node(GraphNode {
+                            id,
+                            kind: NodeKind::BuchiPackType,
+                            label: td.name.clone(),
+                            location: Location {
+                                file: self.file.clone(),
+                                line: span.line,
+                                column: span.column,
+                            },
+                            metadata: HashMap::new(),
+                        });
+                    }
+                    crate::parser::ClassLikeKind::Mold { .. } => {
+                        let md = cl;
+                        let span = &md.span;
+                        let id =
+                            Graph::make_id(&self.file, span.line, span.column, &NodeKind::MoldType);
+                        graph.add_node(GraphNode {
+                            id: id.clone(),
+                            kind: NodeKind::MoldType,
+                            label: md.name.clone(),
+                            location: Location {
+                                file: self.file.clone(),
+                                line: span.line,
+                                column: span.column,
+                            },
+                            metadata: HashMap::new(),
+                        });
+
+                        let mold_base_id = "builtin:Mold".to_string();
+                        graph.add_node(GraphNode {
+                            id: mold_base_id.clone(),
+                            kind: NodeKind::MoldType,
+                            label: "Mold[T]".to_string(),
+                            location: Location {
+                                file: "builtin".to_string(),
+                                line: 0,
+                                column: 0,
+                            },
+                            metadata: HashMap::new(),
+                        });
+                        graph.add_edge(GraphEdge {
+                            source: mold_base_id,
+                            target: id,
+                            kind: EdgeKind::MoldInheritance,
+                            label: "Mold[T] =>".to_string(),
+                            metadata: HashMap::new(),
+                        });
+                    }
+                    crate::parser::ClassLikeKind::Inheritance { parent, .. } => {
+                        let inh = cl;
+                        let span = &inh.span;
+                        let inh_parent = parent;
+                        let inh_child = &inh.name;
+
+                        let (parent_kind, child_kind, edge_kind) = if inh_parent == "Error" {
+                            (
+                                NodeKind::ErrorType,
+                                NodeKind::ErrorType,
+                                EdgeKind::ErrorInheritance,
+                            )
+                        } else {
+                            (
+                                NodeKind::BuchiPackType,
+                                NodeKind::BuchiPackType,
+                                EdgeKind::StructuralSubtype,
+                            )
+                        };
+
+                        let parent_id = format!("type:{}", inh_parent);
+                        graph.add_node(GraphNode {
+                            id: parent_id.clone(),
+                            kind: parent_kind,
+                            label: inh_parent.clone(),
+                            location: Location {
+                                file: self.file.clone(),
+                                line: span.line,
+                                column: span.column,
+                            },
+                            metadata: HashMap::new(),
+                        });
+
+                        let child_id =
+                            Graph::make_id(&self.file, span.line, span.column, &child_kind);
+                        graph.add_node(GraphNode {
+                            id: child_id.clone(),
+                            kind: child_kind,
+                            label: inh_child.clone(),
+                            location: Location {
+                                file: self.file.clone(),
+                                line: span.line,
+                                column: span.column,
+                            },
+                            metadata: HashMap::new(),
+                        });
+
+                        graph.add_edge(GraphEdge {
+                            source: parent_id,
+                            target: child_id,
+                            kind: edge_kind,
+                            label: format!("{} => {}", inh_parent, inh_child),
+                            metadata: HashMap::new(),
+                        });
+                    }
                 }
-
-                Statement::MoldDef(md) => {
-                    let span = &md.span;
-                    let id =
-                        Graph::make_id(&self.file, span.line, span.column, &NodeKind::MoldType);
-                    graph.add_node(GraphNode {
-                        id: id.clone(),
-                        kind: NodeKind::MoldType,
-                        label: md.name.clone(),
-                        location: Location {
-                            file: self.file.clone(),
-                            line: span.line,
-                            column: span.column,
-                        },
-                        metadata: HashMap::new(),
-                    });
-
-                    // MoldInheritance edge from Mold[T] to this type
-                    let mold_base_id = "builtin:Mold".to_string();
-                    graph.add_node(GraphNode {
-                        id: mold_base_id.clone(),
-                        kind: NodeKind::MoldType,
-                        label: "Mold[T]".to_string(),
-                        location: Location {
-                            file: "builtin".to_string(),
-                            line: 0,
-                            column: 0,
-                        },
-                        metadata: HashMap::new(),
-                    });
-                    graph.add_edge(GraphEdge {
-                        source: mold_base_id,
-                        target: id,
-                        kind: EdgeKind::MoldInheritance,
-                        label: "Mold[T] =>".to_string(),
-                        metadata: HashMap::new(),
-                    });
-                }
-
-                Statement::InheritanceDef(inh) => {
-                    let span = &inh.span;
-
-                    // Check if this is Error inheritance
-                    let (parent_kind, child_kind, edge_kind) = if inh.parent == "Error" {
-                        (
-                            NodeKind::ErrorType,
-                            NodeKind::ErrorType,
-                            EdgeKind::ErrorInheritance,
-                        )
-                    } else {
-                        (
-                            NodeKind::BuchiPackType,
-                            NodeKind::BuchiPackType,
-                            EdgeKind::StructuralSubtype,
-                        )
-                    };
-
-                    let parent_id = format!("type:{}", inh.parent);
-                    graph.add_node(GraphNode {
-                        id: parent_id.clone(),
-                        kind: parent_kind,
-                        label: inh.parent.clone(),
-                        location: Location {
-                            file: self.file.clone(),
-                            line: span.line,
-                            column: span.column,
-                        },
-                        metadata: HashMap::new(),
-                    });
-
-                    let child_id = Graph::make_id(&self.file, span.line, span.column, &child_kind);
-                    graph.add_node(GraphNode {
-                        id: child_id.clone(),
-                        kind: child_kind,
-                        label: inh.child.clone(),
-                        location: Location {
-                            file: self.file.clone(),
-                            line: span.line,
-                            column: span.column,
-                        },
-                        metadata: HashMap::new(),
-                    });
-
-                    graph.add_edge(GraphEdge {
-                        source: parent_id,
-                        target: child_id,
-                        kind: edge_kind,
-                        label: format!("{} => {}", inh.parent, inh.child),
-                        metadata: HashMap::new(),
-                    });
-                }
-
-                _ => {}
             }
         }
 

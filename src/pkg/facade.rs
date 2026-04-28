@@ -128,12 +128,19 @@ fn collect_defined_symbols(statements: &[Statement]) -> HashSet<String> {
             Statement::Assignment(a) => {
                 defined.insert(a.target.clone());
             }
-            Statement::TypeDef(t) => {
-                defined.insert(t.name.clone());
-            }
-            Statement::InheritanceDef(i) => {
-                defined.insert(i.child.clone());
-            }
+            // (E30 Sub-step 2.1) ClassLikeDef + kind dispatch (旧 TypeDef/MoldDef/InheritanceDef を統合)
+            // 注: 旧コードでは MoldDef は defined に入れず Native lowering の symbol kind 解決を
+            // Function fallback に落としていた (silent bug、E30B-006 で解消予定)。
+            // 本 Sub-step 2.1 では旧挙動維持: BuchiPack / Inheritance のみ defined に登録。
+            Statement::ClassLikeDef(cl) => match &cl.kind {
+                crate::parser::ClassLikeKind::BuchiPack
+                | crate::parser::ClassLikeKind::Inheritance { .. } => {
+                    defined.insert(cl.name.clone());
+                }
+                crate::parser::ClassLikeKind::Mold { .. } => {
+                    // 旧挙動: MoldDef は defined に入れない (E30B-006 で再検討)
+                }
+            },
             Statement::EnumDef(e) => {
                 defined.insert(e.name.clone());
             }
@@ -194,10 +201,10 @@ pub fn classify_symbol_in_module(
             Statement::FuncDef(f) if f.name == symbol_name => {
                 return Some(SymbolKind::Function);
             }
-            Statement::TypeDef(t) if t.name == symbol_name => {
-                return Some(SymbolKind::TypeDef);
-            }
-            Statement::InheritanceDef(i) if i.child == symbol_name => {
+            // (E30 Sub-step 2.1) ClassLikeDef + kind dispatch (旧挙動維持: BuchiPack / Inheritance のみ TypeDef SymbolKind)
+            Statement::ClassLikeDef(cl)
+                if cl.name == symbol_name && (cl.is_buchi_pack() || cl.is_inheritance()) =>
+            {
                 return Some(SymbolKind::TypeDef);
             }
             Statement::Assignment(a) if a.target == symbol_name => {

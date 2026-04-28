@@ -71,10 +71,11 @@
 | `E1404` | MoldInst の `()` オプションに同一名が重複 | TypeChecker |
 | `E1405` | 必須フィールドが `()` オプション側に渡されている | TypeChecker |
 | `E1406` | MoldInst の `()` に未定義のオプションが渡されている | TypeChecker |
-| `E1407` | Mold / Inheritance header の arity・prefix・重複・親種別が不正 | TypeChecker |
+| `E1407` | 親型適用の arity mismatch (header arity / prefix preservation / 親種別 / type param uniqueness を含む umbrella、E30 Lock-B Sub-B3) | TypeChecker |
 | `E1408` | MoldInst の `[]` 引数が concrete header 型に一致しない | TypeChecker |
 | `E1409` | MoldInst の `[]` 引数が constrained header 型に一致しない | TypeChecker |
-| `E1410` | InheritanceDef の子フィールドが親の型と互換でない再定義 | TypeChecker |
+| `E1410` | declare-only function field requires default function or explicit value (E30 Lock-C / Lock-D、E30 Phase 6 で E30B-004 defaultFn と同期して full 発火 path 実装予定、現状は (予約)) | TypeChecker |
+| `E1411` | InheritanceDef の子フィールドが親の型と互換でない再定義 (旧 `E1410`、E30 Phase 3 で番号移動) | TypeChecker |
 
 ### 定義・意味論エラー (`E15xx`)
 

@@ -1256,9 +1256,12 @@ impl JsCodegen {
                 ));
                 Ok(())
             }
-            Statement::TypeDef(type_def) => self.gen_type_def(type_def),
-            Statement::InheritanceDef(inh_def) => self.gen_inheritance_def(inh_def),
-            Statement::MoldDef(mold_def) => self.gen_mold_def(mold_def),
+            // (E30 Sub-step 2.1) ClassLikeDef + kind dispatch
+            Statement::ClassLikeDef(cl) => match cl.kind {
+                crate::parser::ClassLikeKind::BuchiPack => self.gen_type_def(cl),
+                crate::parser::ClassLikeKind::Mold { .. } => self.gen_mold_def(cl),
+                crate::parser::ClassLikeKind::Inheritance { .. } => self.gen_inheritance_def(cl),
+            },
             Statement::ErrorCeiling(ec) => {
                 // Standalone ErrorCeiling (when not handled by gen_statement_sequence)
                 self.gen_error_ceiling(ec)
@@ -1627,7 +1630,8 @@ impl JsCodegen {
         }
     }
 
-    fn gen_type_def(&mut self, type_def: &TypeDef) -> Result<(), JsError> {
+    fn gen_type_def(&mut self, type_def: &ClassLikeDef) -> Result<(), JsError> {
+        // (E30 Sub-step 2.1) BuchiPack kind の ClassLikeDef のみ呼び出される想定。
         // B3: TypeDef → factory function + methods as prototype
         let non_method_fields: Vec<&FieldDef> =
             type_def.fields.iter().filter(|f| !f.is_method).collect();
@@ -1709,27 +1713,31 @@ impl JsCodegen {
         Ok(())
     }
 
-    fn gen_inheritance_def(&mut self, inh_def: &InheritanceDef) -> Result<(), JsError> {
-        if let Some(parent_mold_fields) = self.mold_field_registry.get(&inh_def.parent).cloned() {
+    fn gen_inheritance_def(&mut self, inh_def: &ClassLikeDef) -> Result<(), JsError> {
+        // (E30 Sub-step 2.1) Inheritance kind の ClassLikeDef のみ呼び出される想定。
+        let inh_parent = inh_def.parent().expect("inheritance kind has parent");
+        let inh_child = &inh_def.name;
+        let parent_args = inh_def.parent_args();
+        if let Some(parent_mold_fields) = self.mold_field_registry.get(inh_parent).cloned() {
             let merged_fields = merge_field_defs(&parent_mold_fields, &inh_def.fields);
             let header_args = inh_def
-                .child_args
+                .name_args
                 .as_ref()
-                .or(inh_def.parent_args.as_ref())
+                .or(parent_args)
                 .map(Vec::as_slice)
                 .unwrap_or(&[]);
             let prev_async_context = self.in_async_context;
             self.in_async_context = false;
-            self.gen_custom_mold_factory(&inh_def.child, header_args, &merged_fields)?;
+            self.gen_custom_mold_factory(inh_child, header_args, &merged_fields)?;
             let all_fields: Vec<String> = merged_fields
                 .iter()
                 .filter(|field| !field.is_method)
                 .map(|field| field.name.clone())
                 .collect();
             self.type_field_registry
-                .insert(inh_def.child.clone(), all_fields);
+                .insert(inh_child.clone(), all_fields);
             self.mold_field_registry
-                .insert(inh_def.child.clone(), merged_fields);
+                .insert(inh_child.clone(), merged_fields);
 
             self.in_async_context = prev_async_context;
             return Ok(());
@@ -1741,26 +1749,22 @@ impl JsCodegen {
 
         let methods: Vec<&FieldDef> = inh_def.fields.iter().filter(|f| f.is_method).collect();
 
-        // Collect parent field names from registry for closure variable extraction
         let parent_field_names: Vec<String> = self
             .type_field_registry
-            .get(&inh_def.parent)
+            .get(inh_parent)
             .cloned()
             .unwrap_or_default();
 
-        // InheritanceDef factory function and methods are sync context
         let prev_async_context = self.in_async_context;
         self.in_async_context = false;
 
         self.write_indent();
-        self.write(&format!("function {}(fields) {{\n", inh_def.child));
+        self.write(&format!("function {}(fields) {{\n", inh_child));
         self.indent += 1;
-        self.writeln(&format!("const parent = {}(fields);", inh_def.parent));
-        // Extract parent fields as local variables so child methods can access them via closure
+        self.writeln(&format!("const parent = {}(fields);", inh_parent));
         for pf in &parent_field_names {
             self.writeln(&format!("const {pf} = parent.{pf};"));
         }
-        // Extract child fields as local variables
         for field in &child_fields {
             self.write_indent();
             self.write(&format!(
@@ -1773,12 +1777,10 @@ impl JsCodegen {
         self.writeln("const obj = {");
         self.indent += 1;
         self.writeln("...parent,");
-        self.writeln(&format!("__type: '{}',", inh_def.child));
+        self.writeln(&format!("__type: '{}',", inh_child));
         for name in &field_names {
             self.writeln(&format!("{name},"));
         }
-        // Child methods override parent methods
-        // QF-14: gen_func_body_to_buf を使って ErrorCeiling (|==) を正しく処理する
         for method_field in &methods {
             if let Some(ref func_def) = method_field.method_def {
                 let params: Vec<String> = func_def.params.iter().map(|p| p.name.clone()).collect();
@@ -1802,32 +1804,29 @@ impl JsCodegen {
         self.indent -= 1;
         self.writeln("}");
 
-        // RCB-101: Register inheritance parent for error type filtering in |==
         self.writeln(&format!(
             "__taida_type_parents['{}'] = '{}';",
-            inh_def.child, inh_def.parent
+            inh_child, inh_parent
         ));
-        // B11-6c: Track inheritance for TypeExtends compile-time resolution
         self.type_parents
-            .insert(inh_def.child.clone(), inh_def.parent.clone());
+            .insert(inh_child.clone(), inh_parent.to_string());
 
-        // Register child type fields (parent fields + child fields) for further inheritance
         let mut all_fields: Vec<String> = parent_field_names;
         all_fields.extend(field_names.iter().map(|s| s.to_string()));
         self.type_field_registry
-            .insert(inh_def.child.clone(), all_fields);
+            .insert(inh_child.clone(), all_fields);
         self.writeln("");
 
-        // Restore async context
         self.in_async_context = prev_async_context;
         Ok(())
     }
 
-    fn gen_mold_def(&mut self, mold_def: &MoldDef) -> Result<(), JsError> {
-        // MoldDef factory function and methods are sync context
+    fn gen_mold_def(&mut self, mold_def: &ClassLikeDef) -> Result<(), JsError> {
+        // (E30 Sub-step 2.1) Mold kind の ClassLikeDef のみ呼び出される想定。
         let prev_async_context = self.in_async_context;
         self.in_async_context = false;
-        let header_args = mold_def.name_args.as_ref().unwrap_or(&mold_def.mold_args);
+        let mold_args = mold_def.mold_args().cloned().unwrap_or_default();
+        let header_args = mold_def.name_args.as_ref().unwrap_or(&mold_args);
         self.gen_custom_mold_factory(&mold_def.name, header_args, &mold_def.fields)?;
         // Register fields for later use by inheritance lookups. This is populated
         // only when `gen_mold_def()` runs, so the registry depends on definition

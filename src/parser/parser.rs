@@ -344,13 +344,16 @@ impl Parser {
                 self.advance(); // consume `=`
 
                 if self.check(&TokenKind::At) {
-                    // Type definition
+                    // Type definition (E30 Phase 2 Sub-step 2.1: BuchiPack kind の ClassLikeDef)
                     let fields = self.parse_buchi_pack_fields()?;
-                    Ok(Statement::TypeDef(TypeDef {
+                    Ok(Statement::ClassLikeDef(ClassLikeDef {
                         name,
                         fields,
                         doc_comments,
                         span: start_span,
+                        kind: ClassLikeKind::BuchiPack,
+                        name_args: None,
+                        type_params: Vec::new(),
                     }))
                 } else if matches!(self.peek_kind(), TokenKind::Newline | TokenKind::Indent(_)) {
                     // No-argument function definition: `name = \n  body\n=> :Type`
@@ -472,9 +475,19 @@ impl Parser {
                 match self.try_parse_inheritance_with_headers(doc_comments.clone()) {
                     Ok(stmt) => Ok(stmt),
                     Err(_) => {
+                        // E30 Phase 2 Sub-step 2.2 (Lock-B Sub-B1):
+                        // zero-or-more arity の type-def 形式 `Name[args?] = @(...)` を試す。
+                        // `Pilot[] = @(...)` は zero-arity sugar、`Box[T] = @(...)` は
+                        // 型引数あり class-like 定義。
                         self.pos = save_pos;
-                        let expr = self.parse_expression()?;
-                        self.finish_expr_as_statement(expr, start_span, doc_comments)
+                        match self.try_parse_class_like_with_type_params(doc_comments.clone()) {
+                            Ok(stmt) => Ok(stmt),
+                            Err(_) => {
+                                self.pos = save_pos;
+                                let expr = self.parse_expression()?;
+                                self.finish_expr_as_statement(expr, start_span, doc_comments)
+                            }
+                        }
                     }
                 }
             }
@@ -503,16 +516,20 @@ impl Parser {
                     let next_name = self.expect_ident()?;
                     if self.check(&TokenKind::Eq) {
                         // Inheritance: `Parent => Child = @(...)`
+                        // (E30 Phase 2 Sub-step 2.1: Inheritance kind の ClassLikeDef)
                         self.advance(); // consume `=`
                         let fields = self.parse_buchi_pack_fields()?;
-                        return Ok(Statement::InheritanceDef(InheritanceDef {
-                            parent: name,
-                            parent_args: None,
-                            child: next_name,
-                            child_args: None,
+                        return Ok(Statement::ClassLikeDef(ClassLikeDef {
+                            name: next_name,
                             fields,
                             doc_comments,
                             span: start_span,
+                            kind: ClassLikeKind::Inheritance {
+                                parent: name,
+                                parent_args: None,
+                            },
+                            name_args: None,
+                            type_params: Vec::new(),
                         }));
                     }
                 }
@@ -707,8 +724,21 @@ impl Parser {
                 TokenKind::RBracket => {
                     depth = depth.saturating_sub(1);
                     if depth == 0 {
+                        // E30 Phase 2 Sub-step 2.2 (Lock-B Sub-B1):
+                        // `Name[args?] = @(...)` (zero-arity sugar / 型引数あり class-like)
+                        // を generic func def と誤認しないため、`]` の次が `Eq` かつ
+                        // その次が `@` (At) のケースは class-like 定義と判定して false 返す。
+                        let after_rbracket = self.tokens.get(i + 1).map(|token| &token.kind);
+                        if matches!(after_rbracket, Some(TokenKind::Eq))
+                            && matches!(
+                                self.tokens.get(i + 2).map(|token| &token.kind),
+                                Some(TokenKind::At)
+                            )
+                        {
+                            return false;
+                        }
                         return matches!(
-                            self.tokens.get(i + 1).map(|token| &token.kind),
+                            after_rbracket,
                             Some(TokenKind::Ident(_)) | Some(TokenKind::Eq)
                         );
                     }
@@ -726,6 +756,7 @@ impl Parser {
         &mut self,
         doc_comments: Vec<String>,
     ) -> Result<Statement, ParseError> {
+        // (E30 Phase 2 Sub-step 2.1: Mold kind の ClassLikeDef を生成)
         let start_span = self.current_span();
         self.expect_ident()?; // consume "Mold"
         self.expect(&TokenKind::LBracket)?;
@@ -744,14 +775,14 @@ impl Parser {
         self.expect(&TokenKind::Eq)?;
         let fields = self.parse_buchi_pack_fields()?;
 
-        Ok(Statement::MoldDef(MoldDef {
+        Ok(Statement::ClassLikeDef(ClassLikeDef {
             name,
-            mold_args,
-            name_args,
-            type_params,
             fields,
             doc_comments,
             span: start_span,
+            kind: ClassLikeKind::Mold { mold_args },
+            name_args,
+            type_params,
         }))
     }
 
@@ -759,6 +790,8 @@ impl Parser {
         &mut self,
         doc_comments: Vec<String>,
     ) -> Result<Statement, ParseError> {
+        // (E30 Phase 2 Sub-step 2.1: Inheritance kind の ClassLikeDef を生成、
+        //  parent_args 付きの generic inheritance)
         let start_span = self.current_span();
         let parent = self.expect_ident()?;
         self.expect(&TokenKind::LBracket)?;
@@ -776,14 +809,63 @@ impl Parser {
         self.expect(&TokenKind::Eq)?;
         let fields = self.parse_buchi_pack_fields()?;
 
-        Ok(Statement::InheritanceDef(InheritanceDef {
-            parent,
-            parent_args: Some(parent_args),
-            child,
-            child_args,
+        Ok(Statement::ClassLikeDef(ClassLikeDef {
+            name: child,
             fields,
             doc_comments,
             span: start_span,
+            kind: ClassLikeKind::Inheritance {
+                parent,
+                parent_args: Some(parent_args),
+            },
+            name_args: child_args,
+            type_params: Vec::new(),
+        }))
+    }
+
+    /// E30 Phase 2 Sub-step 2.2 (Lock-B Sub-B1): zero-or-more arity の class-like 定義。
+    ///
+    /// 形式: `Name[args?] = @(...)`
+    ///
+    /// - `Pilot[] = @(name: Str)` → BuchiPack ClassLikeDef (zero-arity sugar、type_params 空)
+    /// - `Box[T] = @(filling: T)` → BuchiPack ClassLikeDef (type_params=[T])
+    /// - `Pair[T, U] = @(first: T, second: U)` → BuchiPack ClassLikeDef (type_params=[T, U])
+    ///
+    /// 失敗時は呼び出し側が `self.pos` を save_pos に戻して別 path に backtrack する。
+    /// 本 helper 自体は consume 進行を仮定し、形が合わなければ `Err` を返す。
+    fn try_parse_class_like_with_type_params(
+        &mut self,
+        doc_comments: Vec<String>,
+    ) -> Result<Statement, ParseError> {
+        let start_span = self.current_span();
+        let name = self.expect_ident()?;
+        self.expect(&TokenKind::LBracket)?;
+        let header_args = self.parse_mold_header_args()?;
+        self.expect(&TokenKind::Eq)?;
+
+        if !self.check(&TokenKind::At) {
+            return Err(ParseError {
+                message: "expected `@(...)` for class-like definition body".to_string(),
+                span: self.current_span(),
+            });
+        }
+
+        let fields = self.parse_buchi_pack_fields()?;
+        let type_params = Self::collect_mold_type_params(&header_args);
+        let name_args = if header_args.is_empty() {
+            None
+        } else {
+            Some(header_args)
+        };
+
+        Ok(Statement::ClassLikeDef(ClassLikeDef {
+            name,
+            fields,
+            doc_comments,
+            span: start_span,
+            kind: ClassLikeKind::BuchiPack,
+            name_args,
+            type_params,
         }))
     }
 

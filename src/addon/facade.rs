@@ -411,15 +411,22 @@ fn load_facade_file(
                 }
                 local_funcs.insert(fd.name.clone(), fd.clone());
             }
-            Statement::TypeDef(td) => {
+            // (E30 Sub-step 2.1) ClassLikeDef + kind dispatch
+            Statement::ClassLikeDef(cl) => {
                 visiting.remove(&canonical);
+                let kind_label = match &cl.kind {
+                    crate::parser::ClassLikeKind::BuchiPack => "TypeDef",
+                    crate::parser::ClassLikeKind::Mold { .. } => "MoldDef",
+                    crate::parser::ClassLikeKind::Inheritance { .. } => "InheritanceDef",
+                };
                 return Err(FacadeLoadError {
                     message: format!(
-                        "addon facade '{}' declares TypeDef '{}' — TypeDef statements \
+                        "addon facade '{}' declares {} '{}' — class-like definitions \
                          inside addon facades are not yet supported for native codegen \
                          (C25B-030 Phase 1E-γ pending).",
                         facade_path.display(),
-                        td.name
+                        kind_label,
+                        cl.name
                     ),
                 });
             }
@@ -432,18 +439,6 @@ fn load_facade_file(
                          (C25B-030 Phase 1E-γ pending).",
                         facade_path.display(),
                         ed.name
-                    ),
-                });
-            }
-            Statement::MoldDef(md) => {
-                visiting.remove(&canonical);
-                return Err(FacadeLoadError {
-                    message: format!(
-                        "addon facade '{}' declares MoldDef '{}' — MoldDef statements \
-                         inside addon facades are not yet supported for native codegen \
-                         (C25B-030 Phase 1E-γ pending).",
-                        facade_path.display(),
-                        md.name
                     ),
                 });
             }

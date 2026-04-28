@@ -64,34 +64,43 @@ fn find_user_mold_detail(
 ) -> String {
     let fields_str = format_registry_fields_inline(fields);
     for stmt in statements {
-        match stmt {
-            Statement::MoldDef(md) if md.name == name => {
-                let child_args = md.name_args.as_deref().unwrap_or(md.mold_args.as_slice());
-                return format!(
-                    "{} => {} = @({})",
-                    format_named_mold_header("Mold", &md.mold_args),
-                    format_named_mold_header(&md.name, child_args),
-                    fields_str
-                );
+        // (E30 Sub-step 2.1) ClassLikeDef + kind dispatch
+        if let Statement::ClassLikeDef(cl) = stmt {
+            if cl.name != name {
+                continue;
             }
-            Statement::InheritanceDef(inh) if inh.child == name => {
-                let child_args = inh
-                    .child_args
-                    .as_deref()
-                    .or(inh.parent_args.as_deref())
-                    .unwrap_or(&[]);
-                let parent_header = match inh.parent_args.as_deref() {
-                    Some(args) => format_named_mold_header(&inh.parent, args),
-                    None => inh.parent.clone(),
-                };
-                return format!(
-                    "{} => {} = @({})",
-                    parent_header,
-                    format_named_mold_header(&inh.child, child_args),
-                    fields_str
-                );
+            match &cl.kind {
+                crate::parser::ClassLikeKind::Mold { mold_args } => {
+                    let child_args = cl.name_args.as_deref().unwrap_or(mold_args.as_slice());
+                    return format!(
+                        "{} => {} = @({})",
+                        format_named_mold_header("Mold", mold_args),
+                        format_named_mold_header(&cl.name, child_args),
+                        fields_str
+                    );
+                }
+                crate::parser::ClassLikeKind::Inheritance {
+                    parent,
+                    parent_args,
+                } => {
+                    let child_args = cl
+                        .name_args
+                        .as_deref()
+                        .or(parent_args.as_deref())
+                        .unwrap_or(&[]);
+                    let parent_header = match parent_args.as_deref() {
+                        Some(args) => format_named_mold_header(parent, args),
+                        None => parent.clone(),
+                    };
+                    return format!(
+                        "{} => {} = @({})",
+                        parent_header,
+                        format_named_mold_header(&cl.name, child_args),
+                        fields_str
+                    );
+                }
+                crate::parser::ClassLikeKind::BuchiPack => {}
             }
-            _ => {}
         }
     }
     format!("{} = @({})", name, fields_str)
@@ -218,61 +227,67 @@ fn partial_source_completions(statements: &[Statement]) -> Vec<CompletionItem> {
                     ..Default::default()
                 });
             }
-            Statement::TypeDef(td) => {
-                items.push(CompletionItem {
-                    label: td.name.clone(),
-                    kind: Some(CompletionItemKind::STRUCT),
-                    detail: Some(format!("type {}", td.name)),
-                    documentation: format_doc_comments(&td.doc_comments),
-                    ..Default::default()
-                });
-            }
-            Statement::MoldDef(md) => {
-                items.push(CompletionItem {
-                    label: md.name.clone(),
-                    kind: Some(CompletionItemKind::CLASS),
-                    detail: Some(format!("mold {}", md.name)),
-                    documentation: format_doc_comments(&md.doc_comments),
-                    ..Default::default()
-                });
-            }
-            Statement::InheritanceDef(inh) => {
-                let detail = match (&inh.parent_args, &inh.child_args) {
-                    (Some(parent_args), Some(child_args)) => format!(
-                        "{}[{}] => {}[{}]",
-                        inh.parent,
-                        parent_args
-                            .iter()
-                            .map(format_mold_header_arg)
-                            .collect::<Vec<_>>()
-                            .join(", "),
-                        inh.child,
-                        child_args
-                            .iter()
-                            .map(format_mold_header_arg)
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    ),
-                    (Some(parent_args), None) => format!(
-                        "{}[{}] => {}",
-                        inh.parent,
-                        parent_args
-                            .iter()
-                            .map(format_mold_header_arg)
-                            .collect::<Vec<_>>()
-                            .join(", "),
-                        inh.child
-                    ),
-                    _ => format!("{} => {}", inh.parent, inh.child),
-                };
-                items.push(CompletionItem {
-                    label: inh.child.clone(),
-                    kind: Some(CompletionItemKind::STRUCT),
-                    detail: Some(detail),
-                    documentation: format_doc_comments(&inh.doc_comments),
-                    ..Default::default()
-                });
-            }
+            // (E30 Sub-step 2.1) ClassLikeDef + kind dispatch
+            Statement::ClassLikeDef(cl) => match &cl.kind {
+                crate::parser::ClassLikeKind::BuchiPack => {
+                    items.push(CompletionItem {
+                        label: cl.name.clone(),
+                        kind: Some(CompletionItemKind::STRUCT),
+                        detail: Some(format!("type {}", cl.name)),
+                        documentation: format_doc_comments(&cl.doc_comments),
+                        ..Default::default()
+                    });
+                }
+                crate::parser::ClassLikeKind::Mold { .. } => {
+                    items.push(CompletionItem {
+                        label: cl.name.clone(),
+                        kind: Some(CompletionItemKind::CLASS),
+                        detail: Some(format!("mold {}", cl.name)),
+                        documentation: format_doc_comments(&cl.doc_comments),
+                        ..Default::default()
+                    });
+                }
+                crate::parser::ClassLikeKind::Inheritance {
+                    parent,
+                    parent_args,
+                } => {
+                    let detail = match (parent_args, &cl.name_args) {
+                        (Some(parent_args), Some(child_args)) => format!(
+                            "{}[{}] => {}[{}]",
+                            parent,
+                            parent_args
+                                .iter()
+                                .map(format_mold_header_arg)
+                                .collect::<Vec<_>>()
+                                .join(", "),
+                            cl.name,
+                            child_args
+                                .iter()
+                                .map(format_mold_header_arg)
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        ),
+                        (Some(parent_args), None) => format!(
+                            "{}[{}] => {}",
+                            parent,
+                            parent_args
+                                .iter()
+                                .map(format_mold_header_arg)
+                                .collect::<Vec<_>>()
+                                .join(", "),
+                            cl.name
+                        ),
+                        _ => format!("{} => {}", parent, cl.name),
+                    };
+                    items.push(CompletionItem {
+                        label: cl.name.clone(),
+                        kind: Some(CompletionItemKind::STRUCT),
+                        detail: Some(detail),
+                        documentation: format_doc_comments(&cl.doc_comments),
+                        ..Default::default()
+                    });
+                }
+            },
             _ => {}
         }
     }
@@ -986,32 +1001,28 @@ fn format_func_params(fd: &FuncDef) -> String {
 }
 
 /// Find doc_comments for a TypeDef by name.
+/// (E30 Sub-step 2.1) ClassLikeDef + kind dispatch
 fn find_type_doc_comments(statements: &[Statement], name: &str) -> Option<Documentation> {
     for stmt in statements {
-        match stmt {
-            Statement::TypeDef(td) if td.name == name => {
-                return format_doc_comments(&td.doc_comments);
-            }
-            Statement::InheritanceDef(inh) if inh.child == name => {
-                return format_doc_comments(&inh.doc_comments);
-            }
-            _ => {}
+        if let Statement::ClassLikeDef(cl) = stmt
+            && cl.name == name
+            && (cl.is_buchi_pack() || cl.is_inheritance())
+        {
+            return format_doc_comments(&cl.doc_comments);
         }
     }
     None
 }
 
 /// Find doc_comments for a MoldDef by name.
+/// (E30 Sub-step 2.1) ClassLikeDef + kind dispatch
 fn find_mold_doc_comments(statements: &[Statement], name: &str) -> Option<Documentation> {
     for stmt in statements {
-        match stmt {
-            Statement::MoldDef(md) if md.name == name => {
-                return format_doc_comments(&md.doc_comments);
-            }
-            Statement::InheritanceDef(inh) if inh.child == name => {
-                return format_doc_comments(&inh.doc_comments);
-            }
-            _ => {}
+        if let Statement::ClassLikeDef(cl) = stmt
+            && cl.name == name
+            && (cl.is_mold() || cl.is_inheritance())
+        {
+            return format_doc_comments(&cl.doc_comments);
         }
     }
     None

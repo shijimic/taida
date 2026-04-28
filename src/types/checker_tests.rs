@@ -1490,6 +1490,99 @@ Expanded[T, U] => Child[T] = @()"#;
     );
 }
 
+// ── E30 Phase 3 / Lock-B Sub-B1 / Sub-B3 / E30B-008 confirmation tests ──
+
+/// E30 Lock-B Sub-B1: zero-arity sugar `Pilot[] = @(...)` ≡ `Pilot = @(...)`
+/// checker 側の受理確認 (parser Sub-step 2.2 で既に受理、checker でも arity 0 として
+/// 通常の class-like 定義と同等に処理される)。
+#[test]
+fn test_e30_lock_b_sub_b1_zero_arity_sugar_class_like_accepted_by_checker() {
+    let source = r#"Pilot[] = @(name: Str, age: Int)
+rei <= Pilot(name <= "Rei", age <= 14)"#;
+    let (_, errors) = check(source);
+    assert!(
+        errors.is_empty(),
+        "Expected zero-arity sugar `Pilot[] = @(...)` to be accepted by checker, got: {:?}",
+        errors
+    );
+}
+
+/// E30 Lock-B Sub-B1: zero-arity 明示と省略形が等価に扱われること。
+#[test]
+fn test_e30_lock_b_sub_b1_zero_arity_sugar_equivalence() {
+    let with_brackets = r#"Pilot[] = @(name: Str)
+rei <= Pilot(name <= "Rei")"#;
+    let without_brackets = r#"Pilot = @(name: Str)
+rei <= Pilot(name <= "Rei")"#;
+    let (_, errors_a) = check(with_brackets);
+    let (_, errors_b) = check(without_brackets);
+    assert!(
+        errors_a.is_empty(),
+        "Expected `Pilot[] = @(...)` form to be error-free, got: {:?}",
+        errors_a
+    );
+    assert!(
+        errors_b.is_empty(),
+        "Expected `Pilot = @(...)` form to be error-free, got: {:?}",
+        errors_b
+    );
+}
+
+/// E30 Lock-B Sub-B3: 親型 arity に対し子側で **追加** の型引数を持つことは OK
+/// (`CustomType[T, U] => CustomSubType[T, U, V] = @(...)`)。
+#[test]
+fn test_e30_lock_b_sub_b3_child_can_add_type_params_after_parent_prefix() {
+    let source = r#"Mold[T] => Result[T, P <= :T => :Bool] = @(value: T)
+Result[T, P <= :T => :Bool] => CustomResult[T, P <= :T => :Bool, V] = @(meta: V)"#;
+    let (_, errors) = check(source);
+    assert!(
+        errors.is_empty(),
+        "Expected child to be able to add type params (T, P, V) on top of parent (T, P), got: {:?}",
+        errors
+    );
+}
+
+/// E30 Lock-B Sub-B3: 親型 arity 不一致 (`shrink`) は `[E1407]` umbrella で reject。
+/// 既存 `test_generic_inheritance_cannot_shrink_parent_header_arity` と意味的に同じだが、
+/// E30 Phase 3 で umbrella 化された `[E1407]` 新意味の pin として独立追加。
+#[test]
+fn test_e30_lock_b_sub_b3_parent_arity_mismatch_shrink_rejected_via_e1407_umbrella() {
+    let source = r#"Mold[T] => Result[T, P <= :T => :Bool] = @(value: T)
+Result[T, P <= :T => :Bool] => Bad[T] = @()"#;
+    let (_, errors) = check(source);
+    assert!(
+        errors.iter().any(|e| {
+            e.message.contains("[E1407]")
+                && e.message
+                    .contains("cannot shrink header arity below parent")
+        }),
+        "Expected `[E1407]` umbrella (Lock-B Sub-B3 親型適用 arity mismatch) to fire on shrink, got: {:?}",
+        errors
+    );
+}
+
+/// E30 Phase 3 / E30B-008: 旧 `[E1410]` 意味 (InheritanceDef 子フィールド型互換違反)
+/// が `[E1411]` に番号移動されたことを pin。`[E1410]` は新意味 (declare-only function
+/// field requires defaultFn) 用に予約され、本 Phase では発火しない。
+#[test]
+fn test_e30_e30b_008_e1411_inheritance_field_redefinition_relocated_from_e1410() {
+    let source = r#"Parent = @(value: Int)
+Parent => Child = @(value: Str)"#;
+    let (_, errors) = check(source);
+    assert!(
+        errors
+            .iter()
+            .any(|e| { e.message.contains("[E1411]") && e.message.contains("redefines field") }),
+        "Expected `[E1411]` (旧 [E1410] の意味、E30 Phase 3 で番号移動) to fire on incompatible field redefinition, got: {:?}",
+        errors
+    );
+    assert!(
+        !errors.iter().any(|e| e.message.contains("[E1410]")),
+        "Expected `[E1410]` to NOT fire (reserved for new meaning, E30 Phase 6 で full 発火 path 実装予定), got: {:?}",
+        errors
+    );
+}
+
 // ── E1501: Same-scope name collision ──
 
 #[test]

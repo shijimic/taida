@@ -1088,7 +1088,9 @@ impl Lowering {
 
         for stmt in &program.statements {
             match stmt {
-                Statement::TypeDef(type_def) if type_def.name == symbol_name => {
+                Statement::ClassLikeDef(type_def)
+                    if type_def.is_buchi_pack() && type_def.name == symbol_name =>
+                {
                     let non_method_fields: Vec<crate::parser::FieldDef> = type_def
                         .fields
                         .iter()
@@ -1139,12 +1141,14 @@ impl Lowering {
                     }
                     return;
                 }
-                Statement::InheritanceDef(inh_def) if inh_def.child == symbol_name => {
-                    // InheritanceDef の場合、親チェーンを再帰的に辿って全フィールド/メソッドを収集
+                Statement::ClassLikeDef(inh_def)
+                    if inh_def.is_inheritance() && inh_def.name == symbol_name =>
+                {
+                    // (E30 Sub-step 2.1) Inheritance kind の ClassLikeDef
+                    let inh_parent = inh_def.parent().expect("inheritance kind has parent");
                     let (mut all_fields, mut all_field_types, mut all_field_defs, mut all_methods) =
-                        Self::collect_inheritance_chain_fields(&program.statements, &inh_def.parent);
+                        Self::collect_inheritance_chain_fields(&program.statements, inh_parent);
 
-                    // 子のフィールド/メソッドを親にマージ（同名はオーバーライド）
                     for field in inh_def.fields.iter() {
                         if field.is_method {
                             if let Some(ref md) = field.method_def {
@@ -1206,8 +1210,10 @@ impl Lowering {
     ) -> InheritanceChainFields {
         for stmt in statements {
             match stmt {
-                Statement::TypeDef(type_def) if type_def.name == parent_name => {
-                    // チェーンの最上位: TypeDef から直接フィールド/メソッドを収集
+                Statement::ClassLikeDef(type_def)
+                    if type_def.is_buchi_pack() && type_def.name == parent_name =>
+                {
+                    // (E30 Sub-step 2.1) チェーンの最上位: BuchiPack kind の ClassLikeDef
                     let mut fields = Vec::new();
                     let mut field_types = Vec::new();
                     let mut field_defs = Vec::new();
@@ -1225,11 +1231,13 @@ impl Lowering {
                     }
                     return (fields, field_types, field_defs, methods);
                 }
-                Statement::InheritanceDef(inh_def) if inh_def.child == parent_name => {
-                    // 中間ノード: さらに親を再帰的に辿る
+                Statement::ClassLikeDef(inh_def)
+                    if inh_def.is_inheritance() && inh_def.name == parent_name =>
+                {
+                    // (E30 Sub-step 2.1) 中間ノード: Inheritance kind の ClassLikeDef
+                    let inh_parent = inh_def.parent().expect("inheritance kind has parent");
                     let (mut fields, mut field_types, mut field_defs, mut methods) =
-                        Self::collect_inheritance_chain_fields(statements, &inh_def.parent);
-                    // この InheritanceDef のフィールド/メソッドをマージ（同名はオーバーライド）
+                        Self::collect_inheritance_chain_fields(statements, inh_parent);
                     for f in inh_def.fields.iter() {
                         if f.is_method {
                             if let Some(ref md) = f.method_def {
@@ -1317,16 +1325,15 @@ impl Lowering {
                     let hash = simple_hash(&format!("{}:{}", module_key, assign.target)) as i64;
                     init_fn.push(IrInst::GlobalSet(hash, val));
                 }
-                Statement::InheritanceDef(inh_def) => {
+                Statement::ClassLikeDef(inh_def) if inh_def.is_inheritance() => {
+                    // (E30 Sub-step 2.1) Inheritance kind の ClassLikeDef
                     // RCB-101 fix: Register inheritance parent for cross-module
-                    // error type filtering.  Without this, error types defined in
-                    // a library module are not registered in the parent map when
-                    // the module is initialised, so |== catch handlers in the
-                    // importing module cannot walk the inheritance chain.
+                    // error type filtering.
+                    let inh_parent = inh_def.parent().expect("inheritance kind has parent");
                     let child_str_var = init_fn.alloc_var();
-                    init_fn.push(IrInst::ConstStr(child_str_var, inh_def.child.clone()));
+                    init_fn.push(IrInst::ConstStr(child_str_var, inh_def.name.clone()));
                     let parent_str_var = init_fn.alloc_var();
-                    init_fn.push(IrInst::ConstStr(parent_str_var, inh_def.parent.clone()));
+                    init_fn.push(IrInst::ConstStr(parent_str_var, inh_parent.to_string()));
                     let reg_dummy = init_fn.alloc_var();
                     init_fn.push(IrInst::Call(
                         reg_dummy,

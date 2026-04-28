@@ -1454,65 +1454,28 @@ fn check_naming_convention(program: &Program, file: &str) -> Vec<VerifyFinding> 
 
 fn check_stmt_naming(stmt: &Statement, file: &str, findings: &mut Vec<VerifyFinding>) {
     match stmt {
-        // Type definition: name must be PascalCase
-        Statement::TypeDef(td) => {
-            if !is_excluded_name(&td.name) && !is_pascal_case(&td.name) {
+        // (E30 Sub-step 2.1) ClassLikeDef + kind dispatch (旧 TypeDef/MoldDef/InheritanceDef を統合)
+        Statement::ClassLikeDef(cl) => {
+            let label = match &cl.kind {
+                crate::parser::ClassLikeKind::BuchiPack => "Type",
+                crate::parser::ClassLikeKind::Mold { .. } => "Mold",
+                crate::parser::ClassLikeKind::Inheritance { .. } => "Type",
+            };
+            if !is_excluded_name(&cl.name) && !is_pascal_case(&cl.name) {
                 findings.push(VerifyFinding {
                     check: "naming-convention".to_string(),
                     severity: Severity::Warning,
                     message: format!(
-                        "Type name '{}' should be PascalCase (suggestion: '{}')",
-                        td.name,
-                        to_pascal_case(&td.name)
+                        "{} name '{}' should be PascalCase (suggestion: '{}')",
+                        label,
+                        cl.name,
+                        to_pascal_case(&cl.name)
                     ),
                     file: Some(file.to_string()),
-                    line: Some(td.span.line),
+                    line: Some(cl.span.line),
                 });
             }
-            // Check field names in the type
-            for field in &td.fields {
-                check_field_naming(field, file, findings);
-            }
-        }
-
-        // Mold definition: name must be PascalCase
-        Statement::MoldDef(md) => {
-            if !is_excluded_name(&md.name) && !is_pascal_case(&md.name) {
-                findings.push(VerifyFinding {
-                    check: "naming-convention".to_string(),
-                    severity: Severity::Warning,
-                    message: format!(
-                        "Mold name '{}' should be PascalCase (suggestion: '{}')",
-                        md.name,
-                        to_pascal_case(&md.name)
-                    ),
-                    file: Some(file.to_string()),
-                    line: Some(md.span.line),
-                });
-            }
-            // Check field names in the mold (excluding internal fields)
-            for field in &md.fields {
-                check_field_naming(field, file, findings);
-            }
-        }
-
-        // Inheritance definition: child name must be PascalCase
-        Statement::InheritanceDef(id) => {
-            if !is_excluded_name(&id.child) && !is_pascal_case(&id.child) {
-                findings.push(VerifyFinding {
-                    check: "naming-convention".to_string(),
-                    severity: Severity::Warning,
-                    message: format!(
-                        "Type name '{}' should be PascalCase (suggestion: '{}')",
-                        id.child,
-                        to_pascal_case(&id.child)
-                    ),
-                    file: Some(file.to_string()),
-                    line: Some(id.span.line),
-                });
-            }
-            // Check field names
-            for field in &id.fields {
+            for field in &cl.fields {
                 check_field_naming(field, file, findings);
             }
         }

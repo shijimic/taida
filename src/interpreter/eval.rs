@@ -475,32 +475,102 @@ impl Interpreter {
                 Ok(Signal::Value(Value::Unit))
             }
 
-            Statement::TypeDef(td) => {
-                // Register methods defined in the type
-                let mut methods = HashMap::new();
-                for field in &td.fields {
-                    if field.is_method
-                        && let Some(ref func_def) = field.method_def
-                    {
-                        methods.insert(field.name.clone(), func_def.clone());
+            // (E30 Sub-step 2.1) ClassLikeDef + kind dispatch (旧 TypeDef/MoldDef/InheritanceDef を統合)
+            Statement::ClassLikeDef(cl) => match &cl.kind {
+                crate::parser::ClassLikeKind::BuchiPack => {
+                    let td = cl;
+                    // Register methods defined in the type
+                    let mut methods = HashMap::new();
+                    for field in &td.fields {
+                        if field.is_method
+                            && let Some(ref func_def) = field.method_def
+                        {
+                            methods.insert(field.name.clone(), func_def.clone());
+                        }
                     }
+                    if !methods.is_empty() {
+                        self.type_methods.insert(td.name.clone(), methods);
+                    }
+                    self.type_defs.insert(td.name.clone(), td.fields.clone());
+                    let _ = self.env.define(
+                        &td.name,
+                        Value::pack(vec![
+                            ("__type".to_string(), Value::str("TypeDef".to_string())),
+                            ("__name".to_string(), Value::str(td.name.clone())),
+                        ]),
+                    );
+                    Ok(Signal::Value(Value::Unit))
                 }
-                if !methods.is_empty() {
-                    self.type_methods.insert(td.name.clone(), methods);
+                crate::parser::ClassLikeKind::Mold { .. } => {
+                    let md = cl;
+                    // Register methods defined in the mold type
+                    let mut methods = HashMap::new();
+                    for field in &md.fields {
+                        if field.is_method
+                            && let Some(ref func_def) = field.method_def
+                        {
+                            methods.insert(field.name.clone(), func_def.clone());
+                        }
+                    }
+                    if !methods.is_empty() {
+                        self.type_methods.insert(md.name.clone(), methods);
+                    }
+                    self.type_defs.insert(md.name.clone(), md.fields.clone());
+                    self.mold_defs.insert(md.name.clone(), md.fields.clone());
+                    Ok(Signal::Value(Value::Unit))
                 }
-                // Store TypeDef field definitions for JSON schema matching
-                self.type_defs.insert(td.name.clone(), td.fields.clone());
-                // QF-17: TypeDef 名をシンボルとして環境に登録（<<< @(TypeName) で export 可能にする）
-                // マーカー値として __type: "TypeDef" の BuchiPack を使う
-                let _ = self.env.define(
-                    &td.name,
-                    Value::pack(vec![
-                        ("__type".to_string(), Value::str("TypeDef".to_string())),
-                        ("__name".to_string(), Value::str(td.name.clone())),
-                    ]),
-                );
-                Ok(Signal::Value(Value::Unit))
-            }
+                crate::parser::ClassLikeKind::Inheritance { parent, .. } => {
+                    let inh = cl;
+                    let inh_parent = parent;
+                    let inh_child = &inh.name;
+                    let mut methods = self
+                        .type_methods
+                        .get(inh_parent)
+                        .cloned()
+                        .unwrap_or_default();
+                    for field in &inh.fields {
+                        if field.is_method
+                            && let Some(ref func_def) = field.method_def
+                        {
+                            methods.insert(field.name.clone(), func_def.clone());
+                        }
+                    }
+                    if !methods.is_empty() {
+                        self.type_methods.insert(inh_child.clone(), methods);
+                    }
+                    let mut merged_fields = self
+                        .type_defs
+                        .get(inh_parent)
+                        .cloned()
+                        .or_else(|| self.mold_defs.get(inh_parent).cloned())
+                        .unwrap_or_default();
+                    for child_field in &inh.fields {
+                        if let Some(existing) = merged_fields
+                            .iter_mut()
+                            .find(|field| field.name == child_field.name)
+                        {
+                            *existing = child_field.clone();
+                        } else {
+                            merged_fields.push(child_field.clone());
+                        }
+                    }
+                    self.type_defs.insert(inh_child.clone(), merged_fields);
+                    if self.mold_defs.contains_key(inh_parent) {
+                        self.mold_defs
+                            .insert(inh_child.clone(), self.type_defs[inh_child].clone());
+                    }
+                    self.type_parents
+                        .insert(inh_child.clone(), inh_parent.clone());
+                    let _ = self.env.define(
+                        inh_child,
+                        Value::pack(vec![
+                            ("__type".to_string(), Value::str("TypeDef".to_string())),
+                            ("__name".to_string(), Value::str(inh_child.clone())),
+                        ]),
+                    );
+                    Ok(Signal::Value(Value::Unit))
+                }
+            },
 
             Statement::FuncDef(fd) => {
                 let closure = Arc::new(self.env.snapshot());
@@ -534,79 +604,6 @@ impl Interpreter {
                     return Err(RuntimeError { message: e });
                 }
                 Ok(Signal::Value(value))
-            }
-
-            Statement::MoldDef(md) => {
-                // Register methods defined in the mold type
-                let mut methods = HashMap::new();
-                for field in &md.fields {
-                    if field.is_method
-                        && let Some(ref func_def) = field.method_def
-                    {
-                        methods.insert(field.name.clone(), func_def.clone());
-                    }
-                }
-                if !methods.is_empty() {
-                    self.type_methods.insert(md.name.clone(), methods);
-                }
-                // Store MoldDef field definitions for filling/unmold lookup
-                self.type_defs.insert(md.name.clone(), md.fields.clone());
-                self.mold_defs.insert(md.name.clone(), md.fields.clone());
-                Ok(Signal::Value(Value::Unit))
-            }
-
-            Statement::InheritanceDef(inh) => {
-                // Copy parent methods, then override with child methods
-                let mut methods = self
-                    .type_methods
-                    .get(&inh.parent)
-                    .cloned()
-                    .unwrap_or_default();
-                for field in &inh.fields {
-                    if field.is_method
-                        && let Some(ref func_def) = field.method_def
-                    {
-                        methods.insert(field.name.clone(), func_def.clone());
-                    }
-                }
-                if !methods.is_empty() {
-                    self.type_methods.insert(inh.child.clone(), methods);
-                }
-                // Register child type fields for type instantiation defaults:
-                // parent fields + child fields (child override wins by name).
-                let mut merged_fields = self
-                    .type_defs
-                    .get(&inh.parent)
-                    .cloned()
-                    .or_else(|| self.mold_defs.get(&inh.parent).cloned())
-                    .unwrap_or_default();
-                for child_field in &inh.fields {
-                    if let Some(existing) = merged_fields
-                        .iter_mut()
-                        .find(|field| field.name == child_field.name)
-                    {
-                        *existing = child_field.clone();
-                    } else {
-                        merged_fields.push(child_field.clone());
-                    }
-                }
-                self.type_defs.insert(inh.child.clone(), merged_fields);
-                if self.mold_defs.contains_key(&inh.parent) {
-                    self.mold_defs
-                        .insert(inh.child.clone(), self.type_defs[&inh.child].clone());
-                }
-                // RCB-101: Record inheritance parent for error type filtering
-                self.type_parents
-                    .insert(inh.child.clone(), inh.parent.clone());
-                // InheritanceDef 名もシンボルとして環境に登録（<<< @(ChildType) で export 可能にする）
-                let _ = self.env.define(
-                    &inh.child,
-                    Value::pack(vec![
-                        ("__type".to_string(), Value::str("TypeDef".to_string())),
-                        ("__name".to_string(), Value::str(inh.child.clone())),
-                    ]),
-                );
-                Ok(Signal::Value(Value::Unit))
             }
 
             Statement::ErrorCeiling(ec) => self.eval_error_ceiling(ec),

@@ -15,7 +15,9 @@ impl Lowering {
     }
 
     pub(super) fn register_mold_solidify_helpers(&mut self) -> Result<(), LowerError> {
-        let mut mold_defs: Vec<crate::parser::MoldDef> = self.mold_defs.values().cloned().collect();
+        // (E30 Phase 2 Sub-step 2.1) `MoldDef` 廃止に伴い `ClassLikeDef` を保持。
+        let mut mold_defs: Vec<crate::parser::ClassLikeDef> =
+            self.mold_defs.values().cloned().collect();
         mold_defs.sort_by(|a, b| a.name.cmp(&b.name));
 
         // Register helper symbols first, so recursive mold references can resolve.

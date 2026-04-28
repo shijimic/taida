@@ -93,79 +93,212 @@ impl Lowering {
                         self.param_type_check_funcs.insert(func_def.name.clone());
                     }
                 }
-                Statement::TypeDef(type_def) => {
-                    let non_method_field_defs: Vec<crate::parser::FieldDef> = type_def
-                        .fields
-                        .iter()
-                        .filter(|f| !f.is_method)
-                        .cloned()
-                        .collect();
-                    let fields: Vec<String> = type_def
-                        .fields
-                        .iter()
-                        .filter(|f| !f.is_method)
-                        .map(|f| f.name.clone())
-                        .collect();
-                    // Register field names and types for jsonEncode
-                    for field_def in &non_method_field_defs {
-                        self.field_names.insert(field_def.name.clone());
-                        // Map type annotation to type tag
-                        if let Some(ref ty) = field_def.type_annotation {
-                            let tag = match ty {
-                                crate::parser::TypeExpr::Named(n) => match n.as_str() {
-                                    "Int" => 1,
-                                    "Float" => 2,
-                                    "Str" => 3,
-                                    "Bool" => 4,
-                                    // C18-2: Enum-typed field → tag 5 (Enum).
-                                    // Look up variants so the runtime can emit
-                                    // the variant-name Str via
-                                    // `taida_register_field_enum`.
-                                    other => {
-                                        if let Some(variants) = self.enum_defs.get(other) {
-                                            // Record the descriptor so we can emit
-                                            // the register_field_enum call later.
-                                            self.field_enum_descriptors
-                                                .insert(field_def.name.clone(), variants.join(","));
-                                            5
-                                        } else {
-                                            0
+                // (E30 Phase 2 Sub-step 2.1) ClassLikeDef 単一 variant に統合。
+                // 内部で kind discriminator dispatch して旧 3 系統の lowering 経路を維持。
+                Statement::ClassLikeDef(cl) => match &cl.kind {
+                    crate::parser::ClassLikeKind::BuchiPack => {
+                        let type_def = cl;
+                        let non_method_field_defs: Vec<crate::parser::FieldDef> = type_def
+                            .fields
+                            .iter()
+                            .filter(|f| !f.is_method)
+                            .cloned()
+                            .collect();
+                        let fields: Vec<String> = type_def
+                            .fields
+                            .iter()
+                            .filter(|f| !f.is_method)
+                            .map(|f| f.name.clone())
+                            .collect();
+                        // Register field names and types for jsonEncode
+                        for field_def in &non_method_field_defs {
+                            self.field_names.insert(field_def.name.clone());
+                            // Map type annotation to type tag
+                            if let Some(ref ty) = field_def.type_annotation {
+                                let tag = match ty {
+                                    crate::parser::TypeExpr::Named(n) => match n.as_str() {
+                                        "Int" => 1,
+                                        "Float" => 2,
+                                        "Str" => 3,
+                                        "Bool" => 4,
+                                        // C18-2: Enum-typed field → tag 5 (Enum).
+                                        other => {
+                                            if let Some(variants) = self.enum_defs.get(other) {
+                                                self.field_enum_descriptors.insert(
+                                                    field_def.name.clone(),
+                                                    variants.join(","),
+                                                );
+                                                5
+                                            } else {
+                                                0
+                                            }
                                         }
-                                    }
-                                },
-                                _ => 0,
-                            };
-                            self.register_field_type_tag(&field_def.name, tag);
-                        } else if let Some(ref default_expr) = field_def.default_value {
-                            // Infer type from default value expression
-                            if self.expr_is_bool(default_expr) {
+                                    },
+                                    _ => 0,
+                                };
+                                self.register_field_type_tag(&field_def.name, tag);
+                            } else if let Some(ref default_expr) = field_def.default_value
+                                && self.expr_is_bool(default_expr)
+                            {
                                 self.register_field_type_tag(&field_def.name, 4);
-                                // Bool
                             }
                         }
-                    }
-                    self.type_fields.insert(type_def.name.clone(), fields);
-                    // JSON スキーマ解決用: フィールド名+型アノテーション
-                    let field_types: Vec<(String, Option<crate::parser::TypeExpr>)> =
-                        non_method_field_defs
+                        self.type_fields.insert(type_def.name.clone(), fields);
+                        let field_types: Vec<(String, Option<crate::parser::TypeExpr>)> =
+                            non_method_field_defs
+                                .iter()
+                                .map(|f| (f.name.clone(), f.type_annotation.clone()))
+                                .collect();
+                        self.type_field_types
+                            .insert(type_def.name.clone(), field_types);
+                        self.type_field_defs
+                            .insert(type_def.name.clone(), non_method_field_defs);
+                        let methods: Vec<(String, crate::parser::FuncDef)> = type_def
+                            .fields
                             .iter()
-                            .map(|f| (f.name.clone(), f.type_annotation.clone()))
+                            .filter(|f| f.is_method && f.method_def.is_some())
+                            .map(|f| (f.name.clone(), f.method_def.clone().unwrap()))
                             .collect();
-                    self.type_field_types
-                        .insert(type_def.name.clone(), field_types);
-                    self.type_field_defs
-                        .insert(type_def.name.clone(), non_method_field_defs);
-                    // Register method definitions for TypeDef method closure generation
-                    let methods: Vec<(String, crate::parser::FuncDef)> = type_def
-                        .fields
-                        .iter()
-                        .filter(|f| f.is_method && f.method_def.is_some())
-                        .map(|f| (f.name.clone(), f.method_def.clone().unwrap()))
-                        .collect();
-                    if !methods.is_empty() {
-                        self.type_method_defs.insert(type_def.name.clone(), methods);
+                        if !methods.is_empty() {
+                            self.type_method_defs.insert(type_def.name.clone(), methods);
+                        }
                     }
-                }
+                    crate::parser::ClassLikeKind::Mold { .. } => {
+                        let mold_def = cl;
+                        let non_method_field_defs: Vec<crate::parser::FieldDef> = mold_def
+                            .fields
+                            .iter()
+                            .filter(|f| !f.is_method)
+                            .cloned()
+                            .collect();
+                        let fields: Vec<String> = non_method_field_defs
+                            .iter()
+                            .map(|f| f.name.clone())
+                            .collect();
+                        for field_def in &non_method_field_defs {
+                            self.field_names.insert(field_def.name.clone());
+                            if let Some(ref ty) = field_def.type_annotation {
+                                let tag = match ty {
+                                    crate::parser::TypeExpr::Named(n) => match n.as_str() {
+                                        "Int" => 1,
+                                        "Float" => 2,
+                                        "Str" => 3,
+                                        "Bool" => 4,
+                                        _ => 0,
+                                    },
+                                    _ => 0,
+                                };
+                                self.register_field_type_tag(&field_def.name, tag);
+                            } else if let Some(ref default_expr) = field_def.default_value
+                                && self.expr_is_bool(default_expr)
+                            {
+                                self.register_field_type_tag(&field_def.name, 4);
+                            }
+                        }
+                        self.type_fields.insert(mold_def.name.clone(), fields);
+                        let field_types: Vec<(String, Option<crate::parser::TypeExpr>)> =
+                            non_method_field_defs
+                                .iter()
+                                .map(|f| (f.name.clone(), f.type_annotation.clone()))
+                                .collect();
+                        self.type_field_types
+                            .insert(mold_def.name.clone(), field_types);
+                        self.type_field_defs
+                            .insert(mold_def.name.clone(), non_method_field_defs);
+                        self.mold_defs
+                            .insert(mold_def.name.clone(), mold_def.clone());
+                    }
+                    crate::parser::ClassLikeKind::Inheritance {
+                        parent,
+                        parent_args,
+                    } => {
+                        let inh_def = cl;
+                        let inh_child = &inh_def.name;
+                        let inh_parent = parent;
+                        let mut all_fields = self
+                            .type_fields
+                            .get(inh_parent)
+                            .cloned()
+                            .unwrap_or_default();
+                        let mut all_field_types = self
+                            .type_field_types
+                            .get(inh_parent)
+                            .cloned()
+                            .unwrap_or_default();
+                        let mut all_field_defs = self
+                            .type_field_defs
+                            .get(inh_parent)
+                            .cloned()
+                            .unwrap_or_default();
+                        for field in inh_def.fields.iter().filter(|f| !f.is_method) {
+                            all_fields.retain(|name| name != &field.name);
+                            all_fields.push(field.name.clone());
+                            all_field_types.retain(|(name, _)| name != &field.name);
+                            all_field_types
+                                .push((field.name.clone(), field.type_annotation.clone()));
+                            all_field_defs.retain(|f| f.name != field.name);
+                            all_field_defs.push(field.clone());
+                        }
+                        self.type_fields.insert(inh_child.clone(), all_fields);
+                        self.type_field_types
+                            .insert(inh_child.clone(), all_field_types);
+                        self.type_field_defs
+                            .insert(inh_child.clone(), all_field_defs);
+                        // Inherit parent methods, then override/add child methods
+                        let mut all_methods = self
+                            .type_method_defs
+                            .get(inh_parent)
+                            .cloned()
+                            .unwrap_or_default();
+                        for field in inh_def
+                            .fields
+                            .iter()
+                            .filter(|f| f.is_method && f.method_def.is_some())
+                        {
+                            all_methods.retain(|(name, _)| name != &field.name);
+                            all_methods
+                                .push((field.name.clone(), field.method_def.clone().unwrap()));
+                        }
+                        if !all_methods.is_empty() {
+                            self.type_method_defs.insert(inh_child.clone(), all_methods);
+                        }
+                        if let Some(parent_mold) = self.mold_defs.get(inh_parent).cloned() {
+                            let parent_mold_args: Vec<crate::parser::MoldHeaderArg> =
+                                parent_mold.mold_args().cloned().unwrap_or_default();
+                            let parent_name_args = parent_mold.name_args.clone();
+                            let parent_type_params = parent_mold.type_params.clone();
+                            let mut merged_mold_fields = parent_mold.fields.clone();
+                            for child_field in &inh_def.fields {
+                                if let Some(existing) = merged_mold_fields
+                                    .iter_mut()
+                                    .find(|field| field.name == child_field.name)
+                                {
+                                    *existing = child_field.clone();
+                                } else {
+                                    merged_mold_fields.push(child_field.clone());
+                                }
+                            }
+                            self.mold_defs.insert(
+                                inh_child.clone(),
+                                crate::parser::ClassLikeDef {
+                                    name: inh_child.clone(),
+                                    fields: merged_mold_fields,
+                                    doc_comments: inh_def.doc_comments.clone(),
+                                    span: inh_def.span.clone(),
+                                    kind: crate::parser::ClassLikeKind::Mold {
+                                        mold_args: parent_mold_args,
+                                    },
+                                    name_args: inh_def
+                                        .name_args
+                                        .clone()
+                                        .or_else(|| parent_args.clone())
+                                        .or(parent_name_args),
+                                    type_params: parent_type_params,
+                                },
+                            );
+                        }
+                    }
+                },
                 Statement::EnumDef(enum_def) => {
                     self.enum_defs.insert(
                         enum_def.name.clone(),
@@ -175,127 +308,6 @@ impl Lowering {
                             .map(|variant| variant.name.clone())
                             .collect(),
                     );
-                }
-                Statement::MoldDef(mold_def) => {
-                    let non_method_field_defs: Vec<crate::parser::FieldDef> = mold_def
-                        .fields
-                        .iter()
-                        .filter(|f| !f.is_method)
-                        .cloned()
-                        .collect();
-                    let fields: Vec<String> = non_method_field_defs
-                        .iter()
-                        .map(|f| f.name.clone())
-                        .collect();
-                    for field_def in &non_method_field_defs {
-                        self.field_names.insert(field_def.name.clone());
-                        if let Some(ref ty) = field_def.type_annotation {
-                            let tag = match ty {
-                                crate::parser::TypeExpr::Named(n) => match n.as_str() {
-                                    "Int" => 1,
-                                    "Float" => 2,
-                                    "Str" => 3,
-                                    "Bool" => 4,
-                                    _ => 0,
-                                },
-                                _ => 0,
-                            };
-                            self.register_field_type_tag(&field_def.name, tag);
-                        } else if let Some(ref default_expr) = field_def.default_value
-                            && self.expr_is_bool(default_expr)
-                        {
-                            self.register_field_type_tag(&field_def.name, 4);
-                        }
-                    }
-                    self.type_fields.insert(mold_def.name.clone(), fields);
-                    let field_types: Vec<(String, Option<crate::parser::TypeExpr>)> =
-                        non_method_field_defs
-                            .iter()
-                            .map(|f| (f.name.clone(), f.type_annotation.clone()))
-                            .collect();
-                    self.type_field_types
-                        .insert(mold_def.name.clone(), field_types);
-                    self.type_field_defs
-                        .insert(mold_def.name.clone(), non_method_field_defs);
-                    self.mold_defs
-                        .insert(mold_def.name.clone(), mold_def.clone());
-                }
-                Statement::InheritanceDef(inh_def) => {
-                    let mut all_fields = self
-                        .type_fields
-                        .get(&inh_def.parent)
-                        .cloned()
-                        .unwrap_or_default();
-                    let mut all_field_types = self
-                        .type_field_types
-                        .get(&inh_def.parent)
-                        .cloned()
-                        .unwrap_or_default();
-                    let mut all_field_defs = self
-                        .type_field_defs
-                        .get(&inh_def.parent)
-                        .cloned()
-                        .unwrap_or_default();
-                    for field in inh_def.fields.iter().filter(|f| !f.is_method) {
-                        all_fields.retain(|name| name != &field.name);
-                        all_fields.push(field.name.clone());
-                        all_field_types.retain(|(name, _)| name != &field.name);
-                        all_field_types.push((field.name.clone(), field.type_annotation.clone()));
-                        all_field_defs.retain(|f| f.name != field.name);
-                        all_field_defs.push(field.clone());
-                    }
-                    self.type_fields.insert(inh_def.child.clone(), all_fields);
-                    self.type_field_types
-                        .insert(inh_def.child.clone(), all_field_types);
-                    self.type_field_defs
-                        .insert(inh_def.child.clone(), all_field_defs);
-                    // Inherit parent methods, then override/add child methods
-                    let mut all_methods = self
-                        .type_method_defs
-                        .get(&inh_def.parent)
-                        .cloned()
-                        .unwrap_or_default();
-                    for field in inh_def
-                        .fields
-                        .iter()
-                        .filter(|f| f.is_method && f.method_def.is_some())
-                    {
-                        all_methods.retain(|(name, _)| name != &field.name);
-                        all_methods.push((field.name.clone(), field.method_def.clone().unwrap()));
-                    }
-                    if !all_methods.is_empty() {
-                        self.type_method_defs
-                            .insert(inh_def.child.clone(), all_methods);
-                    }
-                    if let Some(parent_mold) = self.mold_defs.get(&inh_def.parent).cloned() {
-                        let mut merged_mold_fields = parent_mold.fields.clone();
-                        for child_field in &inh_def.fields {
-                            if let Some(existing) = merged_mold_fields
-                                .iter_mut()
-                                .find(|field| field.name == child_field.name)
-                            {
-                                *existing = child_field.clone();
-                            } else {
-                                merged_mold_fields.push(child_field.clone());
-                            }
-                        }
-                        self.mold_defs.insert(
-                            inh_def.child.clone(),
-                            crate::parser::MoldDef {
-                                name: inh_def.child.clone(),
-                                mold_args: parent_mold.mold_args.clone(),
-                                name_args: inh_def
-                                    .child_args
-                                    .clone()
-                                    .or_else(|| inh_def.parent_args.clone())
-                                    .or(parent_mold.name_args.clone()),
-                                type_params: parent_mold.type_params.clone(),
-                                fields: merged_mold_fields,
-                                doc_comments: inh_def.doc_comments.clone(),
-                                span: inh_def.span.clone(),
-                            },
-                        );
-                    }
                 }
                 Statement::Export(export_stmt) => {
                     // RCB-212: Re-export path `<<< ./path` is not supported.
@@ -1581,161 +1593,168 @@ impl Lowering {
                 }
                 Ok(())
             }
-            Statement::TypeDef(type_def) => {
-                // Register type fields (already done in 1st pass, but safe to repeat)
-                let non_method_field_defs: Vec<crate::parser::FieldDef> = type_def
-                    .fields
-                    .iter()
-                    .filter(|f| !f.is_method)
-                    .cloned()
-                    .collect();
-                let fields: Vec<String> = non_method_field_defs
-                    .iter()
-                    .map(|f| f.name.clone())
-                    .collect();
-                self.type_fields.insert(type_def.name.clone(), fields);
-                // JSON スキーマ解決用
-                let field_types: Vec<(String, Option<crate::parser::TypeExpr>)> =
-                    non_method_field_defs
+            // (E30 Phase 2 Sub-step 2.1) ClassLikeDef 単一 variant + kind dispatch
+            Statement::ClassLikeDef(cl) => match &cl.kind {
+                crate::parser::ClassLikeKind::BuchiPack => {
+                    let type_def = cl;
+                    let non_method_field_defs: Vec<crate::parser::FieldDef> = type_def
+                        .fields
                         .iter()
-                        .map(|f| (f.name.clone(), f.type_annotation.clone()))
+                        .filter(|f| !f.is_method)
+                        .cloned()
                         .collect();
-                self.type_field_types
-                    .insert(type_def.name.clone(), field_types);
-                self.type_field_defs
-                    .insert(type_def.name.clone(), non_method_field_defs);
-                // Register method definitions (safe to repeat from 1st pass)
-                let methods: Vec<(String, crate::parser::FuncDef)> = type_def
-                    .fields
-                    .iter()
-                    .filter(|f| f.is_method && f.method_def.is_some())
-                    .map(|f| (f.name.clone(), f.method_def.clone().unwrap()))
-                    .collect();
-                if !methods.is_empty() {
-                    self.type_method_defs.insert(type_def.name.clone(), methods);
-                }
-                Ok(())
-            }
-            Statement::MoldDef(mold_def) => {
-                // MoldDef is internally treated like TypeDef
-                let non_method_field_defs: Vec<crate::parser::FieldDef> = mold_def
-                    .fields
-                    .iter()
-                    .filter(|f| !f.is_method)
-                    .cloned()
-                    .collect();
-                let fields: Vec<String> = non_method_field_defs
-                    .iter()
-                    .map(|f| f.name.clone())
-                    .collect();
-                self.type_fields.insert(mold_def.name.clone(), fields);
-                // JSON スキーマ解決用
-                let field_types: Vec<(String, Option<crate::parser::TypeExpr>)> =
-                    non_method_field_defs
+                    let fields: Vec<String> = non_method_field_defs
                         .iter()
-                        .map(|f| (f.name.clone(), f.type_annotation.clone()))
+                        .map(|f| f.name.clone())
                         .collect();
-                self.type_field_types
-                    .insert(mold_def.name.clone(), field_types);
-                self.type_field_defs
-                    .insert(mold_def.name.clone(), non_method_field_defs);
-                self.mold_defs
-                    .insert(mold_def.name.clone(), mold_def.clone());
-                Ok(())
-            }
-            Statement::InheritanceDef(inh_def) => {
-                // Inheritance: parent fields + child fields
-                let mut all_fields = self
-                    .type_fields
-                    .get(&inh_def.parent)
-                    .cloned()
-                    .unwrap_or_default();
-                let mut all_field_types = self
-                    .type_field_types
-                    .get(&inh_def.parent)
-                    .cloned()
-                    .unwrap_or_default();
-                let mut all_field_defs = self
-                    .type_field_defs
-                    .get(&inh_def.parent)
-                    .cloned()
-                    .unwrap_or_default();
-                for field in inh_def.fields.iter().filter(|f| !f.is_method) {
-                    all_fields.retain(|name| name != &field.name);
-                    all_fields.push(field.name.clone());
-                    all_field_types.retain(|(name, _)| name != &field.name);
-                    all_field_types.push((field.name.clone(), field.type_annotation.clone()));
-                    all_field_defs.retain(|f| f.name != field.name);
-                    all_field_defs.push(field.clone());
-                }
-                self.type_fields.insert(inh_def.child.clone(), all_fields);
-                self.type_field_types
-                    .insert(inh_def.child.clone(), all_field_types);
-                self.type_field_defs
-                    .insert(inh_def.child.clone(), all_field_defs);
-                // Inherit parent methods, then override/add child methods
-                let mut all_methods = self
-                    .type_method_defs
-                    .get(&inh_def.parent)
-                    .cloned()
-                    .unwrap_or_default();
-                for field in inh_def
-                    .fields
-                    .iter()
-                    .filter(|f| f.is_method && f.method_def.is_some())
-                {
-                    all_methods.retain(|(name, _)| name != &field.name);
-                    all_methods.push((field.name.clone(), field.method_def.clone().unwrap()));
-                }
-                if !all_methods.is_empty() {
-                    self.type_method_defs
-                        .insert(inh_def.child.clone(), all_methods);
-                }
-                // RCB-101: Register inheritance parent for error type filtering in |==
-                // B11-6d: Track inheritance for TypeExtends compile-time resolution
-                self.type_parents
-                    .insert(inh_def.child.clone(), inh_def.parent.clone());
-                let child_str_var = func.alloc_var();
-                func.push(IrInst::ConstStr(child_str_var, inh_def.child.clone()));
-                let parent_str_var = func.alloc_var();
-                func.push(IrInst::ConstStr(parent_str_var, inh_def.parent.clone()));
-                let reg_dummy = func.alloc_var();
-                func.push(IrInst::Call(
-                    reg_dummy,
-                    "taida_register_type_parent".to_string(),
-                    vec![child_str_var, parent_str_var],
-                ));
-                if let Some(parent_mold) = self.mold_defs.get(&inh_def.parent).cloned() {
-                    let mut merged_mold_fields = parent_mold.fields.clone();
-                    for child_field in &inh_def.fields {
-                        if let Some(existing) = merged_mold_fields
-                            .iter_mut()
-                            .find(|field| field.name == child_field.name)
-                        {
-                            *existing = child_field.clone();
-                        } else {
-                            merged_mold_fields.push(child_field.clone());
-                        }
+                    self.type_fields.insert(type_def.name.clone(), fields);
+                    let field_types: Vec<(String, Option<crate::parser::TypeExpr>)> =
+                        non_method_field_defs
+                            .iter()
+                            .map(|f| (f.name.clone(), f.type_annotation.clone()))
+                            .collect();
+                    self.type_field_types
+                        .insert(type_def.name.clone(), field_types);
+                    self.type_field_defs
+                        .insert(type_def.name.clone(), non_method_field_defs);
+                    let methods: Vec<(String, crate::parser::FuncDef)> = type_def
+                        .fields
+                        .iter()
+                        .filter(|f| f.is_method && f.method_def.is_some())
+                        .map(|f| (f.name.clone(), f.method_def.clone().unwrap()))
+                        .collect();
+                    if !methods.is_empty() {
+                        self.type_method_defs.insert(type_def.name.clone(), methods);
                     }
-                    self.mold_defs.insert(
-                        inh_def.child.clone(),
-                        crate::parser::MoldDef {
-                            name: inh_def.child.clone(),
-                            mold_args: parent_mold.mold_args.clone(),
-                            name_args: inh_def
-                                .child_args
-                                .clone()
-                                .or_else(|| inh_def.parent_args.clone())
-                                .or(parent_mold.name_args.clone()),
-                            type_params: parent_mold.type_params.clone(),
-                            fields: merged_mold_fields,
-                            doc_comments: inh_def.doc_comments.clone(),
-                            span: inh_def.span.clone(),
-                        },
-                    );
+                    Ok(())
                 }
-                Ok(())
-            }
+                crate::parser::ClassLikeKind::Mold { .. } => {
+                    let mold_def = cl;
+                    let non_method_field_defs: Vec<crate::parser::FieldDef> = mold_def
+                        .fields
+                        .iter()
+                        .filter(|f| !f.is_method)
+                        .cloned()
+                        .collect();
+                    let fields: Vec<String> = non_method_field_defs
+                        .iter()
+                        .map(|f| f.name.clone())
+                        .collect();
+                    self.type_fields.insert(mold_def.name.clone(), fields);
+                    let field_types: Vec<(String, Option<crate::parser::TypeExpr>)> =
+                        non_method_field_defs
+                            .iter()
+                            .map(|f| (f.name.clone(), f.type_annotation.clone()))
+                            .collect();
+                    self.type_field_types
+                        .insert(mold_def.name.clone(), field_types);
+                    self.type_field_defs
+                        .insert(mold_def.name.clone(), non_method_field_defs);
+                    self.mold_defs
+                        .insert(mold_def.name.clone(), mold_def.clone());
+                    Ok(())
+                }
+                crate::parser::ClassLikeKind::Inheritance {
+                    parent,
+                    parent_args,
+                } => {
+                    let inh_def = cl;
+                    let inh_child = &inh_def.name;
+                    let inh_parent = parent;
+                    let mut all_fields = self
+                        .type_fields
+                        .get(inh_parent)
+                        .cloned()
+                        .unwrap_or_default();
+                    let mut all_field_types = self
+                        .type_field_types
+                        .get(inh_parent)
+                        .cloned()
+                        .unwrap_or_default();
+                    let mut all_field_defs = self
+                        .type_field_defs
+                        .get(inh_parent)
+                        .cloned()
+                        .unwrap_or_default();
+                    for field in inh_def.fields.iter().filter(|f| !f.is_method) {
+                        all_fields.retain(|name| name != &field.name);
+                        all_fields.push(field.name.clone());
+                        all_field_types.retain(|(name, _)| name != &field.name);
+                        all_field_types.push((field.name.clone(), field.type_annotation.clone()));
+                        all_field_defs.retain(|f| f.name != field.name);
+                        all_field_defs.push(field.clone());
+                    }
+                    self.type_fields.insert(inh_child.clone(), all_fields);
+                    self.type_field_types
+                        .insert(inh_child.clone(), all_field_types);
+                    self.type_field_defs
+                        .insert(inh_child.clone(), all_field_defs);
+                    let mut all_methods = self
+                        .type_method_defs
+                        .get(inh_parent)
+                        .cloned()
+                        .unwrap_or_default();
+                    for field in inh_def
+                        .fields
+                        .iter()
+                        .filter(|f| f.is_method && f.method_def.is_some())
+                    {
+                        all_methods.retain(|(name, _)| name != &field.name);
+                        all_methods.push((field.name.clone(), field.method_def.clone().unwrap()));
+                    }
+                    if !all_methods.is_empty() {
+                        self.type_method_defs.insert(inh_child.clone(), all_methods);
+                    }
+                    self.type_parents
+                        .insert(inh_child.clone(), inh_parent.clone());
+                    let child_str_var = func.alloc_var();
+                    func.push(IrInst::ConstStr(child_str_var, inh_child.clone()));
+                    let parent_str_var = func.alloc_var();
+                    func.push(IrInst::ConstStr(parent_str_var, inh_parent.clone()));
+                    let reg_dummy = func.alloc_var();
+                    func.push(IrInst::Call(
+                        reg_dummy,
+                        "taida_register_type_parent".to_string(),
+                        vec![child_str_var, parent_str_var],
+                    ));
+                    if let Some(parent_mold) = self.mold_defs.get(inh_parent).cloned() {
+                        let parent_mold_args: Vec<crate::parser::MoldHeaderArg> =
+                            parent_mold.mold_args().cloned().unwrap_or_default();
+                        let parent_name_args = parent_mold.name_args.clone();
+                        let parent_type_params = parent_mold.type_params.clone();
+                        let mut merged_mold_fields = parent_mold.fields.clone();
+                        for child_field in &inh_def.fields {
+                            if let Some(existing) = merged_mold_fields
+                                .iter_mut()
+                                .find(|field| field.name == child_field.name)
+                            {
+                                *existing = child_field.clone();
+                            } else {
+                                merged_mold_fields.push(child_field.clone());
+                            }
+                        }
+                        self.mold_defs.insert(
+                            inh_child.clone(),
+                            crate::parser::ClassLikeDef {
+                                name: inh_child.clone(),
+                                fields: merged_mold_fields,
+                                doc_comments: inh_def.doc_comments.clone(),
+                                span: inh_def.span.clone(),
+                                kind: crate::parser::ClassLikeKind::Mold {
+                                    mold_args: parent_mold_args,
+                                },
+                                name_args: inh_def
+                                    .name_args
+                                    .clone()
+                                    .or_else(|| parent_args.clone())
+                                    .or(parent_name_args),
+                                type_params: parent_type_params,
+                            },
+                        );
+                    }
+                    Ok(())
+                }
+            },
             Statement::ErrorCeiling(ec) => {
                 // lower_statement_sequence 経由で呼ばれるべきだが、
                 // 直接呼ばれた場合は後続文なしで処理（フォールバック）

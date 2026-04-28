@@ -36,8 +36,8 @@
 
 use crate::lexer::Span;
 use crate::parser::{
-    BuchiField, Expr, FieldDef, FuncDef, MoldDef, MoldHeaderArg, Param, Program, Statement,
-    TypeDef, TypeExpr, TypeParam,
+    BuchiField, ClassLikeDef, ClassLikeKind, Expr, FieldDef, FuncDef, MoldHeaderArg, Param,
+    Program, Statement, TypeExpr, TypeParam,
 };
 
 /// A single naming-convention violation discovered by [`lint_program`].
@@ -234,7 +234,7 @@ fn lint_statement(stmt: &Statement, diags: &mut Vec<LintDiagnostic>) {
                 }
             }
         }
-        Statement::TypeDef(td) => lint_type_def(td, diags),
+        Statement::ClassLikeDef(cl) => lint_class_like_def(cl, diags),
         Statement::FuncDef(f) => lint_func_def(f, diags, /* is_method */ false),
         Statement::Assignment(a) => {
             // PascalCase assignment targets are almost certainly a
@@ -291,32 +291,8 @@ fn lint_statement(stmt: &Statement, diags: &mut Vec<LintDiagnostic>) {
             // Lint nested expressions inside the value as well.
             lint_expr(&a.value, diags);
         }
-        Statement::MoldDef(m) => lint_mold_def(m, diags),
-        Statement::InheritanceDef(i) => {
-            if !is_pascal_case(&i.parent) {
-                diags.push(LintDiagnostic {
-                    code: "[E1801]",
-                    message: format!(
-                        "継承元の型名は PascalCase で命名してください: '{}'",
-                        i.parent
-                    ),
-                    span: i.span.clone(),
-                });
-            }
-            if !is_pascal_case(&i.child) {
-                diags.push(LintDiagnostic {
-                    code: "[E1801]",
-                    message: format!(
-                        "継承先の型名は PascalCase で命名してください: '{}'",
-                        i.child
-                    ),
-                    span: i.span.clone(),
-                });
-            }
-            for f in &i.fields {
-                lint_field_def(f, diags);
-            }
-        }
+        // (E30 Sub-step 2.1) MoldDef / InheritanceDef は ClassLikeDef::ClassLikeKind 内で
+        // 内部 dispatch される。ここでは何もしない (上の ClassLikeDef arm が処理する)。
         Statement::ErrorCeiling(ec) => {
             for s in &ec.handler_body {
                 lint_statement(s, diags);
@@ -337,51 +313,76 @@ fn lint_statement(stmt: &Statement, diags: &mut Vec<LintDiagnostic>) {
 // TypeDef / MoldDef / FuncDef
 // ─────────────────────────────────────────────────────────────────────
 
-fn lint_type_def(td: &TypeDef, diags: &mut Vec<LintDiagnostic>) {
-    // E1801
-    if !is_pascal_case(&td.name) {
-        diags.push(LintDiagnostic {
-            code: "[E1801]",
-            message: format!(
-                "クラスライク型 / モールド型 / スキーマ / エラー variant は PascalCase で命名してください: '{}'",
-                td.name
-            ),
-            span: td.span.clone(),
-        });
-    }
-    for f in &td.fields {
-        lint_field_def(f, diags);
-    }
-}
-
-fn lint_mold_def(md: &MoldDef, diags: &mut Vec<LintDiagnostic>) {
-    // E1801
-    if !is_pascal_case(&md.name) {
-        diags.push(LintDiagnostic {
-            code: "[E1801]",
-            message: format!("モールド型は PascalCase で命名してください: '{}'", md.name),
-            span: md.span.clone(),
-        });
-    }
-    // E1807: type-variable names must be single upper-letter
-    for tp in &md.type_params {
-        check_type_param(tp, &md.span, diags);
-    }
-    // header args may also embed TypeParams (already covered) or concrete types
-    for arg in &md.mold_args {
-        if let MoldHeaderArg::TypeParam(tp) = arg {
-            check_type_param(tp, &md.span, diags);
-        }
-    }
-    if let Some(name_args) = &md.name_args {
-        for arg in name_args {
-            if let MoldHeaderArg::TypeParam(tp) = arg {
-                check_type_param(tp, &md.span, diags);
+/// (E30 Sub-step 2.1) ClassLikeDef 用の lint。kind discriminator で旧 3 系統の lint を内部 dispatch。
+fn lint_class_like_def(cl: &ClassLikeDef, diags: &mut Vec<LintDiagnostic>) {
+    match &cl.kind {
+        ClassLikeKind::BuchiPack => {
+            // 旧 lint_type_def
+            if !is_pascal_case(&cl.name) {
+                diags.push(LintDiagnostic {
+                    code: "[E1801]",
+                    message: format!(
+                        "クラスライク型 / モールド型 / スキーマ / エラー variant は PascalCase で命名してください: '{}'",
+                        cl.name
+                    ),
+                    span: cl.span.clone(),
+                });
+            }
+            for f in &cl.fields {
+                lint_field_def(f, diags);
             }
         }
-    }
-    for f in &md.fields {
-        lint_field_def(f, diags);
+        ClassLikeKind::Mold { mold_args } => {
+            // 旧 lint_mold_def
+            if !is_pascal_case(&cl.name) {
+                diags.push(LintDiagnostic {
+                    code: "[E1801]",
+                    message: format!("モールド型は PascalCase で命名してください: '{}'", cl.name),
+                    span: cl.span.clone(),
+                });
+            }
+            for tp in &cl.type_params {
+                check_type_param(tp, &cl.span, diags);
+            }
+            for arg in mold_args {
+                if let MoldHeaderArg::TypeParam(tp) = arg {
+                    check_type_param(tp, &cl.span, diags);
+                }
+            }
+            if let Some(name_args) = &cl.name_args {
+                for arg in name_args {
+                    if let MoldHeaderArg::TypeParam(tp) = arg {
+                        check_type_param(tp, &cl.span, diags);
+                    }
+                }
+            }
+            for f in &cl.fields {
+                lint_field_def(f, diags);
+            }
+        }
+        ClassLikeKind::Inheritance { parent, .. } => {
+            // 旧 InheritanceDef branch
+            if !is_pascal_case(parent) {
+                diags.push(LintDiagnostic {
+                    code: "[E1801]",
+                    message: format!("継承元の型名は PascalCase で命名してください: '{}'", parent),
+                    span: cl.span.clone(),
+                });
+            }
+            if !is_pascal_case(&cl.name) {
+                diags.push(LintDiagnostic {
+                    code: "[E1801]",
+                    message: format!(
+                        "継承先の型名は PascalCase で命名してください: '{}'",
+                        cl.name
+                    ),
+                    span: cl.span.clone(),
+                });
+            }
+            for f in &cl.fields {
+                lint_field_def(f, diags);
+            }
+        }
     }
 }
 
@@ -803,22 +804,9 @@ fn scan_for_e1809(stmt: &Statement, source: &str, diags: &mut Vec<LintDiagnostic
                 scan_for_e1809(s, source, diags);
             }
         }
-        Statement::TypeDef(td) => {
-            for fd in &td.fields {
-                if let Some(md) = fd.method_def.as_ref().filter(|_| fd.is_method) {
-                    check_func_e1809(md, source, diags);
-                }
-            }
-        }
-        Statement::MoldDef(m) => {
-            for fd in &m.fields {
-                if let Some(md) = fd.method_def.as_ref().filter(|_| fd.is_method) {
-                    check_func_e1809(md, source, diags);
-                }
-            }
-        }
-        Statement::InheritanceDef(i) => {
-            for fd in &i.fields {
+        // (E30 Sub-step 2.1) ClassLikeDef 単一 variant + kind dispatch (旧 TypeDef/MoldDef/InheritanceDef を統合)
+        Statement::ClassLikeDef(cl) => {
+            for fd in &cl.fields {
                 if let Some(md) = fd.method_def.as_ref().filter(|_| fd.is_method) {
                     check_func_e1809(md, source, diags);
                 }
