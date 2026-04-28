@@ -185,6 +185,16 @@ pub struct Interpreter {
 }
 
 impl Interpreter {
+    /// E30 Phase 6 / E30B-004: synthetic defaultFn sentinel name.
+    ///
+    /// `default_for_type_expr` returns a `Value::Function` whose `name`
+    /// equals this constant when materialising the default for a
+    /// `TypeExpr::Function(_, _)` annotation (declare-only function field's
+    /// auto-generated `defaultFn`). `call_function` intercepts the name
+    /// before entering the trampoline loop and returns the **return
+    /// type's default value** without executing any AST body.
+    pub(crate) const DEFAULT_FN_SENTINEL_NAME: &'static str = "__taida_default_fn";
+
     pub fn new() -> Self {
         // Create a dedicated current-thread tokio runtime for the interpreter.
         // This runtime is used by `]=>` to block_on pending async values
@@ -1257,6 +1267,15 @@ impl Interpreter {
                     }
 
                     // Remaining fields: named values first, then default values.
+                    //
+                    // E30 Phase 6 / E30B-004: declare-only function fields
+                    // (E30B-002) have `default_value.is_none()` but are still
+                    // materialised here so that their synthetic defaultFn
+                    // (Lock-D verdict) is bound on the result pack — without
+                    // this, `m.declareOnlyField(...)` would fail with
+                    // `Unknown method` since the field would be absent. The
+                    // synthetic FuncValue itself is produced by
+                    // `default_for_field_def` → `default_for_type_expr`.
                     for field_def in defs.iter().filter(|f| !f.is_method && f.name != "filling") {
                         if consumed.contains(&field_def.name) {
                             continue;
@@ -1266,7 +1285,8 @@ impl Interpreter {
                             consumed.insert(field_def.name.clone());
                             continue;
                         }
-                        if field_def.default_value.is_some() {
+                        if field_def.default_value.is_some() || field_def.is_declare_only_fn_field()
+                        {
                             let mut visiting = HashSet::new();
                             let default_val =
                                 self.default_for_field_def(field_def, &mut visiting)?;
@@ -1541,9 +1561,56 @@ impl Interpreter {
                         ("__type".to_string(), Value::str("Lax".to_string())),
                     ]));
                 }
+                // E30 Phase 6 / E30B-004 / Lock-D: `Async[T]` defaultFn
+                // resolves immediately with `T`'s default value.
+                if name == "Async" {
+                    let inner = if let Some(inner_ty) = args.first() {
+                        self.default_for_type_expr(inner_ty, visiting)?
+                    } else {
+                        Value::Unit
+                    };
+                    return Ok(Value::Async(crate::interpreter::value::AsyncValue {
+                        status: crate::interpreter::value::AsyncStatus::Fulfilled,
+                        value: Box::new(inner),
+                        error: Box::new(Value::Unit),
+                        task: None,
+                    }));
+                }
                 Ok(Value::Unit)
             }
-            TypeExpr::Function(_, _) => Ok(Value::Unit),
+            // E30 Phase 6 / E30B-004 / Lock-D verdict: synthesise a
+            // `defaultFn` value for declare-only function fields. The
+            // returned `Value::Function` carries a sentinel name and
+            // the original return type; `call_function` short-circuits
+            // calls on it to materialise the return type's default value
+            // without executing any AST body.
+            //
+            // PHILOSOPHY: completes "全型にデフォルト値保証 / null/undefined
+            // 排除" — function-typed fields previously fell back to
+            // `Value::Unit` placeholder which crashes on call. The
+            // synthetic defaultFn returns the proper type-default on call
+            // so that "デフォルト値保証" extends to function types.
+            TypeExpr::Function(params, ret) => {
+                let synth_params: Vec<Param> = params
+                    .iter()
+                    .enumerate()
+                    .map(|(i, ty)| Param {
+                        name: format!("__arg_{}", i),
+                        type_annotation: Some(ty.clone()),
+                        default_value: None,
+                        span: crate::lexer::Span::new(0, 0, 0, 0),
+                    })
+                    .collect();
+                Ok(Value::Function(FuncValue {
+                    name: Self::DEFAULT_FN_SENTINEL_NAME.to_string(),
+                    params: synth_params,
+                    body: Vec::new(),
+                    closure: Arc::new(HashMap::new()),
+                    return_type: Some((**ret).clone()),
+                    module_type_defs: None,
+                    module_enum_defs: None,
+                }))
+            }
         }
     }
 
@@ -1812,6 +1879,21 @@ impl Interpreter {
         }
     }
 
+    /// E30 Phase 6 / E30B-004: Materialise the synthetic defaultFn return.
+    ///
+    /// Called from `call_function` / `call_function_with_values` /
+    /// `call_function_preserving_signals` whenever a `Value::Function` whose
+    /// `name` equals `DEFAULT_FN_SENTINEL_NAME` is invoked. The body is
+    /// intentionally empty; we only ever produce the return type's default.
+    pub(crate) fn invoke_default_fn(&mut self, func: &FuncValue) -> Result<Value, RuntimeError> {
+        let ret_ty = match &func.return_type {
+            Some(t) => t.clone(),
+            None => return Ok(Value::Unit),
+        };
+        let mut visiting = HashSet::new();
+        self.default_for_type_expr(&ret_ty, &mut visiting)
+    }
+
     /// Helper: call a function with pre-evaluated argument values,
     /// preserving all Signal variants (including Throw) for the caller to handle.
     /// Used for __unmold calls where Signal::Throw must be catchable by |==.
@@ -1830,6 +1912,13 @@ impl Interpreter {
                     MAX_CALL_DEPTH
                 ),
             });
+        }
+
+        // E30 Phase 6 / E30B-004: synthetic defaultFn fast path.
+        if func.name == Self::DEFAULT_FN_SENTINEL_NAME {
+            self.call_depth -= 1;
+            let _ = arg_values; // arity is enforced by the type, the body is no-op
+            return self.invoke_default_fn(func).map(Signal::Value);
         }
         // Internal callback paths (list ops, unmold hooks) should not inherit
         // outer-function tail-call context.
@@ -1887,6 +1976,14 @@ impl Interpreter {
                 ),
             });
         }
+
+        // E30 Phase 6 / E30B-004: synthetic defaultFn fast path.
+        if func.name == Self::DEFAULT_FN_SENTINEL_NAME {
+            self.call_depth -= 1;
+            let _ = arg_values;
+            return self.invoke_default_fn(func);
+        }
+
         // Internal callback paths (Map/Filter/etc.) should not inherit
         // outer-function tail-call context.
         let prev_active = self.active_function.take();
@@ -1980,6 +2077,24 @@ impl Interpreter {
                 other => return Ok(other),
             };
             arg_values.push(val);
+        }
+
+        // E30 Phase 6 / E30B-004: synthetic defaultFn fast path.
+        //
+        // A `Value::Function` whose name is `Self::DEFAULT_FN_SENTINEL_NAME`
+        // is the synthetic placeholder generated by `default_for_type_expr`
+        // for declare-only function fields. Its body intentionally carries
+        // no AST (it must never enter the trampoline loop). When called,
+        // it materialises and returns the **return type's default value**
+        // per Lock-D verdict (E30 Phase 0, 2026-04-28):
+        //   - primitive return → primitive default
+        //   - `:Unit` → no-op (Value::Unit)
+        //   - `:Async[T]` → resolved Async carrying T's default
+        //   - registered class-like → default pack with cycle guard
+        //   - opaque alias → not generatable (Phase 5 reject path)
+        if func.name == Self::DEFAULT_FN_SENTINEL_NAME {
+            self.call_depth -= 1;
+            return self.invoke_default_fn(func).map(Signal::Value);
         }
 
         // Save the previous active function name

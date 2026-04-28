@@ -5042,6 +5042,117 @@ impl Default for TypeChecker {
     }
 }
 
+// ────────────────────────────────────────────────────────────────────────
+// E30 Phase 6 / E30B-004: defaultFn 生成可能性判定 API (Lock-D verdict)
+// ────────────────────────────────────────────────────────────────────────
+//
+// `default_fn_generatable` returns whether a synthetic default function
+// (defaultFn) can be generated for the given `TypeExpr`.
+//
+// Lock-D verdict (E30 Phase 0, 2026-04-28):
+//   - primitive types (Int, Num, Float, Str, Bytes, Bool, Unit, JSON, Molten): true
+//   - List[T] / Lax[T] / Async[T]: true iff inner T is generatable
+//   - BuchiPack inline: true iff all fields are generatable
+//   - Named type: true iff registered in TypeRegistry (TypeDef / Mold /
+//     Error / Enum). Recursive cycles are allowed via `visiting` cycle
+//     guard. Unknown alias (opaque type) → false.
+//   - Function type: true iff return type is generatable (recursive)
+//
+// Lock-C verdict (E30 Phase 0, 2026-04-28): Phase 5 will fire `[E1410]`
+// when this API returns false for a declare-only function field's type
+// annotation.
+//
+// `visiting` is the cycle guard used by `default_for_type_expr` (interpreter)
+// and `lower_default_for_type_expr` (codegen) so that the judgement remains
+// consistent with actual default-value materialisation.
+
+/// Returns true iff a defaultFn can be synthesised for the given function /
+/// value type per Lock-D verdict (E30 Phase 0, 2026-04-28).
+///
+/// `visiting` carries the names already in the recursion stack so that
+/// self-referential / mutually-recursive types are treated as generatable
+/// (the existing class-like `default_for_type_expr` cycle guard returns a
+/// minimal `__type` pack at the cycle point — we mirror that semantics).
+pub fn default_fn_generatable(
+    type_expr: &TypeExpr,
+    registry: &TypeRegistry,
+    visiting: &mut HashSet<String>,
+) -> bool {
+    match type_expr {
+        TypeExpr::Named(name) => match name.as_str() {
+            // Built-in primitives — Lock-D "primitive types: true".
+            "Int" | "Num" | "Float" | "Str" | "Bytes" | "Bool" | "Unit" | "JSON" | "Molten" => true,
+            // T (single uppercase) — type parameters that may or may not be
+            // bound at the use site. Treat as generatable (the eventual
+            // binding determines the concrete default; cycle guard handles
+            // the recursive case).
+            _ if name.len() == 1
+                && name
+                    .chars()
+                    .next()
+                    .map(|c| c.is_ascii_uppercase())
+                    .unwrap_or(false) =>
+            {
+                true
+            }
+            _ => {
+                if visiting.contains(name) {
+                    // Cycle: mirror interpreter's `default_for_type_expr`
+                    // which returns a minimal `__type` pack at the cycle
+                    // point. That counts as a valid default.
+                    return true;
+                }
+                // Registered class-like types (TypeDef / Mold / Error /
+                // Enum) all have well-defined defaults.
+                if registry.type_defs.contains_key(name)
+                    || registry.mold_defs.contains_key(name)
+                    || registry.error_types.contains_key(name)
+                    || registry.enum_defs.contains_key(name)
+                {
+                    return true;
+                }
+                // Unknown / opaque alias — defaultFn cannot be generated.
+                false
+            }
+        },
+        TypeExpr::List(inner) => {
+            // List default is empty list; we still recurse so that the
+            // inner type is generatable for downstream introspection.
+            default_fn_generatable(inner, registry, visiting)
+        }
+        TypeExpr::Generic(name, args) => match name.as_str() {
+            "Lax" | "Async" => args
+                .first()
+                .map(|inner| default_fn_generatable(inner, registry, visiting))
+                .unwrap_or(true),
+            _ => {
+                // Other generics (e.g. Result[T, P]) — generatable iff the
+                // base name is registered and all args are generatable.
+                let base_ok = visiting.contains(name)
+                    || registry.type_defs.contains_key(name)
+                    || registry.mold_defs.contains_key(name)
+                    || registry.error_types.contains_key(name);
+                if !base_ok {
+                    return false;
+                }
+                args.iter()
+                    .all(|arg| default_fn_generatable(arg, registry, visiting))
+            }
+        },
+        TypeExpr::BuchiPack(fields) => fields.iter().filter(|f| !f.is_method).all(|f| {
+            f.type_annotation
+                .as_ref()
+                .map(|ty| default_fn_generatable(ty, registry, visiting))
+                .unwrap_or(true) // missing annotation defaults to Unit
+        }),
+        TypeExpr::Function(_, ret) => {
+            // defaultFn is generatable iff the return type's default value
+            // can be constructed. Argument types do not affect generability.
+            default_fn_generatable(ret, registry, visiting)
+        }
+    }
+}
+
 #[cfg(test)]
 #[path = "checker_tests.rs"]
 mod tests;

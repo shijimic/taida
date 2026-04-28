@@ -1068,6 +1068,13 @@ impl JsCodegen {
 
     /// Convert a TypeExpr to a JSON schema string for __taida_registerTypeDef.
     /// Handles Named types, List types, and inline BuchiPack types recursively.
+    ///
+    /// E30 Phase 6 / E30B-004 (Lock-D verdict): `TypeExpr::Function(_, ret)`
+    /// emits a `{ __fn: retSchema }` schema so that `__taida_defaultForSchema`
+    /// can synthesise an arrow-function default whose return value is the
+    /// return-type's default. This mirrors the interpreter's synthetic
+    /// `Value::Function(DEFAULT_FN_SENTINEL_NAME)` placeholder for declare-only
+    /// function fields.
     fn type_expr_to_schema(type_annotation: &Option<crate::parser::TypeExpr>) -> String {
         match type_annotation {
             Some(crate::parser::TypeExpr::Named(n)) => format!("'{}'", n),
@@ -1086,6 +1093,11 @@ impl JsCodegen {
                     }
                 }
                 format!("{{ {} }}", parts.join(", "))
+            }
+            // E30 Phase 6 / E30B-004: synthetic defaultFn schema.
+            Some(crate::parser::TypeExpr::Function(_, ret)) => {
+                let ret_schema = Self::type_expr_to_schema(&Some((**ret).clone()));
+                format!("{{ __fn: {} }}", ret_schema)
             }
             _ => "'Str'".to_string(),
         }

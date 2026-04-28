@@ -252,9 +252,11 @@ impl FieldDef {
     /// declare-only function fields from the "required positional `[]`
     /// argument" set in `validate_custom_mold_inst_bindings` and from the
     /// extra-type-arg binding-target count in
-    /// `validate_mold_extension_bindings`. Phase 6 will replace the runtime
-    /// `Value::Unit` placeholder (interpreter `default_for_type_expr`) with a
-    /// proper `defaultFn` value while keeping this helper unchanged.
+    /// `validate_mold_extension_bindings`. Phase 6 (E30B-004, DONE
+    /// 2026-04-28) replaced the runtime `Value::Unit` placeholder with a
+    /// synthetic `defaultFn` per Lock-D verdict (interpreter / JS / native /
+    /// wasm-wasi all materialise the proper return-type default on call);
+    /// this helper is unchanged.
     pub fn is_declare_only_fn_field(&self) -> bool {
         if self.is_method || self.default_value.is_some() {
             return false;

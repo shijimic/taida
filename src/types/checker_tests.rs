@@ -4604,3 +4604,153 @@ fn test_e30b_002_mold_extension_bindings_ignore_declare_only_fn_field() {
         errors
     );
 }
+
+// ────────────────────────────────────────────────────────────────────────
+// E30 Phase 6 / E30B-004: defaultFn 生成可能性判定 API tests (Lock-D verdict)
+// ────────────────────────────────────────────────────────────────────────
+
+use std::collections::HashSet;
+
+/// Lock-D: primitive return types are always generatable.
+#[test]
+fn test_e30b_004_default_fn_generatable_primitive() {
+    let registry = TypeRegistry::new();
+    for name in &["Int", "Num", "Float", "Str", "Bool", "Bytes", "Unit"] {
+        let ty = TypeExpr::Named((*name).to_string());
+        let mut visiting = HashSet::new();
+        assert!(
+            default_fn_generatable(&ty, &registry, &mut visiting),
+            "primitive {name} should be generatable"
+        );
+    }
+}
+
+/// Lock-D: registered class-like types (TypeDef / Mold / Error) are
+/// generatable.
+#[test]
+fn test_e30b_004_default_fn_generatable_typedef() {
+    let source = "Pilot = @(name: Str)";
+    let (checker, errors) = check(source);
+    assert!(errors.is_empty(), "parse/check errors: {:?}", errors);
+    let ty = TypeExpr::Named("Pilot".to_string());
+    let mut visiting = HashSet::new();
+    assert!(
+        default_fn_generatable(&ty, &checker.registry, &mut visiting),
+        "registered TypeDef should be generatable"
+    );
+}
+
+/// Lock-D: function return type recursion — `Int => :Str` ok because Str
+/// is generatable; `Int => :OpaqueExternal` is not generatable.
+#[test]
+fn test_e30b_004_default_fn_generatable_function_recursive() {
+    let registry = TypeRegistry::new();
+    // Int => :Str
+    let ok = TypeExpr::Function(
+        vec![TypeExpr::Named("Int".to_string())],
+        Box::new(TypeExpr::Named("Str".to_string())),
+    );
+    let mut visiting = HashSet::new();
+    assert!(
+        default_fn_generatable(&ok, &registry, &mut visiting),
+        "Int => :Str should be generatable"
+    );
+
+    // Int => :OpaqueExternal (unknown alias)
+    let bad = TypeExpr::Function(
+        vec![TypeExpr::Named("Int".to_string())],
+        Box::new(TypeExpr::Named("OpaqueExternal".to_string())),
+    );
+    let mut visiting = HashSet::new();
+    assert!(
+        !default_fn_generatable(&bad, &registry, &mut visiting),
+        "Function returning unknown alias should not be generatable"
+    );
+}
+
+/// Lock-D: Async[T] is generatable iff T is generatable.
+#[test]
+fn test_e30b_004_default_fn_generatable_async() {
+    let registry = TypeRegistry::new();
+    let ok = TypeExpr::Generic(
+        "Async".to_string(),
+        vec![TypeExpr::Named("Int".to_string())],
+    );
+    let mut visiting = HashSet::new();
+    assert!(default_fn_generatable(&ok, &registry, &mut visiting));
+
+    let bad = TypeExpr::Generic(
+        "Async".to_string(),
+        vec![TypeExpr::Named("Opaque".to_string())],
+    );
+    let mut visiting = HashSet::new();
+    assert!(!default_fn_generatable(&bad, &registry, &mut visiting));
+}
+
+/// Lock-D: opaque / unknown alias is not generatable.
+#[test]
+fn test_e30b_004_default_fn_generatable_unknown_alias_is_false() {
+    let registry = TypeRegistry::new();
+    let ty = TypeExpr::Named("UnknownAlias".to_string());
+    let mut visiting = HashSet::new();
+    assert!(
+        !default_fn_generatable(&ty, &registry, &mut visiting),
+        "unknown alias must be opaque (not generatable)"
+    );
+}
+
+/// Lock-D: cycle guard — recursive self-referential type is generatable.
+#[test]
+fn test_e30b_004_default_fn_generatable_recursive_cycle_is_true() {
+    // `Node = @(value: Int, next: Node)` — recursive but generatable
+    // (interpreter returns minimal `__type` pack at cycle point).
+    let source = "Node = @(value: Int, next: Node)";
+    let (checker, errors) = check(source);
+    assert!(errors.is_empty(), "parse/check errors: {:?}", errors);
+    let ty = TypeExpr::Named("Node".to_string());
+    let mut visiting = HashSet::new();
+    visiting.insert("Node".to_string()); // simulate recursive entry
+    assert!(
+        default_fn_generatable(&ty, &checker.registry, &mut visiting),
+        "recursive cycle should be considered generatable (matches default_for_type_expr cycle guard)"
+    );
+}
+
+/// Lock-D: BuchiPack inline is generatable iff all fields are generatable.
+#[test]
+fn test_e30b_004_default_fn_generatable_buchi_pack() {
+    let registry = TypeRegistry::new();
+    let ok = TypeExpr::BuchiPack(vec![FieldDef {
+        name: "x".to_string(),
+        type_annotation: Some(TypeExpr::Named("Int".to_string())),
+        default_value: None,
+        is_method: false,
+        method_def: None,
+        doc_comments: Vec::new(),
+        span: Span {
+            start: 0,
+            end: 0,
+            line: 1,
+            column: 1,
+        },
+    }]);
+    let mut visiting = HashSet::new();
+    assert!(default_fn_generatable(&ok, &registry, &mut visiting));
+
+    let bad = TypeExpr::BuchiPack(vec![FieldDef {
+        name: "x".to_string(),
+        type_annotation: Some(TypeExpr::Named("OpaqueAlias".to_string())),
+        default_value: None,
+        is_method: false,
+        method_def: None,
+        doc_comments: Vec::new(),
+        span: Span {
+            start: 0,
+            end: 0,
+            line: 1,
+            column: 1,
+        },
+    }]);
+    let mut visiting = HashSet::new();
+    assert!(!default_fn_generatable(&bad, &registry, &mut visiting));
+}

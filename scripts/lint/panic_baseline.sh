@@ -46,7 +46,7 @@ set -euo pipefail
 # Update only with explicit user verdict (D28B-020 maintenance entry).
 PANIC_BASELINE=(
   "src/codegen/driver.rs:1228"
-  "src/parser/ast.rs:527"
+  "src/parser/ast.rs:529"
 )
 PANIC_BASELINE_COUNT=${#PANIC_BASELINE[@]}
 
