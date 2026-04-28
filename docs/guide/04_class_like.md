@@ -320,7 +320,7 @@ taida way migrate --e30 <PATH>
 | モールド系統 | `Mold[T] => Foo[T] = @(...)` (操作モールド) |
 | エラー系統 | `Error => NotFound = @(...)` (一般化継承) |
 | 親型適用 arity mismatch | `[E1407]` (header arity / prefix preservation / 親種別 / type param uniqueness を含む umbrella) |
-| declare-only field の default 不能 | `[E1410]` (defaultFn 生成不可時、E30 Phase 6 で full 発火 path 実装予定) |
+| declare-only field の default 不能 | `[E1410]` (戻り型が opaque / unknown alias で defaultFn 生成不可、definition-site で発火) |
 
 ---
 

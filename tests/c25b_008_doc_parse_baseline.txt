@@ -32,7 +32,6 @@ docs/guide/13_creating_addons.md:491
 docs/guide/13_creating_addons.md:499
 docs/guide/15_net_package.md:222
 docs/guide/migration_e30.md:84
-docs/guide/migration_e30.md:156
 docs/reference/class_like_types.md:38
 docs/reference/documentation_comments.md:20
 docs/reference/documentation_comments.md:26

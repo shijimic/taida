@@ -74,7 +74,7 @@
 | `E1407` | 親型適用の arity mismatch (header arity / prefix preservation / 親種別 / type param uniqueness を含む umbrella、E30 Lock-B Sub-B3) | TypeChecker |
 | `E1408` | MoldInst の `[]` 引数が concrete header 型に一致しない | TypeChecker |
 | `E1409` | MoldInst の `[]` 引数が constrained header 型に一致しない | TypeChecker |
-| `E1410` | declare-only function field requires default function or explicit value (E30 Lock-C / Lock-D、E30 Phase 6 で E30B-004 defaultFn と同期して full 発火 path 実装予定、現状は (予約)) | TypeChecker |
+| `E1410` | declare-only function field requires default function or explicit value (戻り型が defaultFn 生成不能な opaque / unknown alias の場合に definition-site で発火、E30 Lock-C / Lock-D、E30 Phase 5 land) | TypeChecker |
 | `E1411` | InheritanceDef の子フィールドが親の型と互換でない再定義 (旧 `E1410`、E30 Phase 3 で番号移動) | TypeChecker |
 
 ### 定義・意味論エラー (`E15xx`)
