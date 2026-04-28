@@ -2634,4 +2634,72 @@ p.y.hasValue"#,
             msg
         );
     }
+
+    /// E30B-007 sub-step B-5 / Lock-G Sub-G4 (2026-04-28): inside an
+    /// addon facade load context, a **bare reference** to a manifest
+    /// function (without `RustAddon["..."]` binding) must reject with
+    /// `[E1413]` and a migration hint pointing to the explicit binding
+    /// form. This is the legacy implicit pre-inject removal verdict.
+    #[test]
+    fn test_e30b_007_b5_legacy_bare_reference_rejects_with_e1413() {
+        let mut interp = Interpreter::new();
+        let mut arities = std::collections::BTreeMap::<String, u32>::new();
+        arities.insert("terminalSize".to_string(), 0);
+        interp.loading_addon_facade_ctx = Some(("taida-lang/terminal".to_string(), arities));
+
+        // Bare reference to a manifest function — no explicit binding.
+        // In @e.30 this must reject with [E1413] (no implicit pre-inject).
+        let (program, errors) = crate::parser::parse("size <= terminalSize()\n");
+        assert!(errors.is_empty(), "parse: {:?}", errors);
+        let res = interp.eval_program(&program);
+        let err = res.expect_err("bare reference must reject in @e.30");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("[E1413]"),
+            "expected [E1413] diagnostic for legacy bare reference, got: {}",
+            msg
+        );
+        assert!(
+            msg.contains("RustAddon"),
+            "diagnostic must point to the RustAddon[...] binding form, got: {}",
+            msg
+        );
+        assert!(
+            msg.contains("taida upgrade --e30") || msg.contains("upgrade"),
+            "diagnostic must reference the migration tool, got: {}",
+            msg
+        );
+        assert!(
+            msg.contains("terminalSize"),
+            "diagnostic must name the offending fn, got: {}",
+            msg
+        );
+    }
+
+    /// E30B-007 sub-step B-5: outside an addon facade load context, an
+    /// undefined identifier still surfaces the generic message
+    /// (`Undefined variable: '...'`) — `[E1413]` is **not** spuriously
+    /// emitted for non-facade callers.
+    #[test]
+    fn test_e30b_007_b5_e1413_only_in_facade_context() {
+        let mut interp = Interpreter::new();
+        // No facade context.
+        assert!(interp.loading_addon_facade_ctx.is_none());
+
+        let (program, errors) = crate::parser::parse("y <= unknownFn()\n");
+        assert!(errors.is_empty(), "parse: {:?}", errors);
+        let res = interp.eval_program(&program);
+        let err = res.expect_err("undefined ident must reject");
+        let msg = err.to_string();
+        assert!(
+            !msg.contains("[E1413]"),
+            "[E1413] must not fire outside facade context, got: {}",
+            msg
+        );
+        assert!(
+            msg.contains("Undefined variable"),
+            "expected generic 'Undefined variable' message, got: {}",
+            msg
+        );
+    }
 }

@@ -313,6 +313,41 @@ pub struct Assignment {
     pub span: Span,
 }
 
+impl Assignment {
+    /// E30B-007 Lock-G Sub-G5 (2026-04-28): If this assignment is the
+    /// explicit addon-binding form `target <= RustAddon["fn"](arity <= N)`,
+    /// returns `Some((fn_name, arity))`. Otherwise returns `None`.
+    ///
+    /// This helper drives consumer parity (doc-gen / LSP / graph / pkg
+    /// facade / introspection) so a `RustAddon[...]` binding is surfaced
+    /// as a **public function** instead of a generic value, even though
+    /// the AST representation is `Statement::Assignment(_)`.
+    ///
+    /// Validation here is **structural only** (matches the surface form);
+    /// drift / context errors are emitted by the interpreter
+    /// (`eval_rust_addon_binding`) and the addon facade summary loader
+    /// (`src/addon/facade.rs::load_facade_summary`).
+    pub fn as_rust_addon_binding(&self) -> Option<(String, u32)> {
+        if let Expr::MoldInst(name, type_args, fields, _) = &self.value
+            && name == "RustAddon"
+            && type_args.len() == 1
+            && fields.len() == 1
+            && fields[0].name == "arity"
+        {
+            let fn_name = match &type_args[0] {
+                Expr::StringLit(s, _) => s.clone(),
+                _ => return None,
+            };
+            let arity = match &fields[0].value {
+                Expr::IntLit(n, _) if *n >= 0 => *n as u32,
+                _ => return None,
+            };
+            return Some((fn_name, arity));
+        }
+        None
+    }
+}
+
 /// Mold header argument in `Mold[...]` / `Name[...]`.
 #[derive(Debug, Clone, PartialEq)]
 pub enum MoldHeaderArg {

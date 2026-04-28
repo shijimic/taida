@@ -76,7 +76,8 @@
 | `E1409` | MoldInst の `[]` 引数が constrained header 型に一致しない | TypeChecker |
 | `E1410` | declare-only function field requires default function or explicit value (戻り型が defaultFn 生成不能な opaque / unknown alias の場合に definition-site で発火、E30 Lock-C / Lock-D、E30 Phase 5 land) | TypeChecker |
 | `E1411` | InheritanceDef の子フィールドが親の型と互換でない再定義 (旧 `E1410`、E30 Phase 3 で番号移動) | TypeChecker |
-| `E1412` | `RustAddon["fn"](arity <= N)` explicit binding violation: surface 不正 (string literal でない `fn` / `arity` field 欠落 / 非整数 arity) / facade context 外 / 未宣言 fn / manifest arity drift (E30 Lock-G、E30 Phase 7 sub-track B、Interpreter runtime に発火、checker 側 hard-fail は sub-step B-5 で land 予定) | Interpreter / TypeChecker |
+| `E1412` | `RustAddon["fn"](arity <= N)` explicit binding violation: surface 不正 (string literal でない `fn` / `arity` field 欠落 / 非整数 arity) / facade context 外 / 未宣言 fn / manifest arity drift (E30 Lock-G、E30 Phase 7 sub-track B、Interpreter runtime + addon facade summary loader に発火) | Interpreter / TypeChecker |
+| `E1413` | addon facade で manifest `[functions]` の関数名を **bare 参照** している (legacy 暗黙 pre-inject に依存)。@e.30 Lock-G Sub-G4 で legacy pre-inject が撤廃されたため、`name <= RustAddon["name"](arity <= N)` を facade 先頭に追加する必要がある。`taida upgrade --e30 <pkg>/taida/` で自動 migrate 可能 (E30 Phase 7 sub-track B sub-step B-5 land) | Interpreter |
 
 ### 定義・意味論エラー (`E15xx`)
 

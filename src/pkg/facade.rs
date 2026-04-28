@@ -208,6 +208,18 @@ pub fn classify_symbol_in_module(
             Statement::ClassLikeDef(cl) if cl.name == symbol_name => {
                 return Some(SymbolKind::TypeDef);
             }
+            // (E30B-007 sub-step B-5 / Lock-G Sub-G5、2026-04-28) explicit
+            // `Name <= RustAddon["fn"](arity <= N)` binding を `SymbolKind::
+            // Function` として分類する。AST 上は Assignment だが、user
+            // perspective では public callable (== function) であり、Lock-G
+            // Sub-G5 verdict に沿って doc-gen / LSP / graph / introspection
+            // でも function として表出する。Match の order が重要 — Function
+            // 判定を Value より前に置くこと。
+            Statement::Assignment(a)
+                if a.target == symbol_name && a.as_rust_addon_binding().is_some() =>
+            {
+                return Some(SymbolKind::Function);
+            }
             Statement::Assignment(a) if a.target == symbol_name => {
                 return Some(SymbolKind::Value);
             }

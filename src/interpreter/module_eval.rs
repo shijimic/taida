@@ -786,11 +786,12 @@ impl Interpreter {
     ///    pass on the native interpreter binary).
     /// 2. Loads / caches the addon via `AddonRegistry::ensure_loaded`.
     /// 3. If the package ships a Taida-side facade at
-    ///    `<pkg_dir>/taida/<stem>.td`, executes it as a module with the
-    ///    addon's `[functions]` pre-injected as sentinels. This lets the
-    ///    facade wrap the lowercase Rust functions under uppercase
-    ///    Taida-side names (e.g. `TerminalSize <= terminalSize`) and
-    ///    define pure-Taida companion values (like the `KeyKind` pack).
+    ///    `<pkg_dir>/taida/<stem>.td`, executes it as a module. Inside
+    ///    the facade, each addon-backed function appears as an explicit
+    ///    `Name <= RustAddon["fn"](arity <= N)` binding (E30 Lock-G,
+    ///    sub-step B-5 — legacy implicit pre-inject is removed). The
+    ///    facade can also define pure-Taida companion values (like the
+    ///    `KeyKind` pack).
     /// 4. Validates that every symbol the import statement asked for
     ///    resolves to either
     ///      - a facade export (if a facade was loaded), or
@@ -838,16 +839,19 @@ impl Interpreter {
                 message: e.to_string(),
             })?;
 
-        // RC2B-207: Load the optional Taida-side facade. The facade is a
-        // single `.td` file at `<pkg_dir>/taida/<stem>.td` where `<stem>`
-        // is the final `/`-segment of the canonical package id (e.g.
-        // `terminal` for `taida-lang/terminal`). It runs in a dedicated
-        // child environment with all `[functions]` entries pre-bound as
-        // addon sentinels, so the facade can write
-        // `TerminalSize <= terminalSize` to re-export the Rust function
-        // under a Taida-side name, or define auxiliary pure-Taida values
-        // like the `KeyKind` enum pack. Facade exports drive the user
-        // import's symbol lookup and always take precedence over the raw
+        // RC2B-207 / E30B-007 sub-step B-5: Load the optional Taida-side
+        // facade. The facade is a single `.td` file at
+        // `<pkg_dir>/taida/<stem>.td` where `<stem>` is the final
+        // `/`-segment of the canonical package id (e.g. `terminal` for
+        // `taida-lang/terminal`). It runs in a dedicated child
+        // environment.
+        //
+        // E30 Lock-G Sub-G4 verdict (2026-04-28): each addon-backed
+        // function MUST appear as an explicit `Name <= RustAddon["fn"]
+        // (arity <= N)` binding in the facade. `eval_rust_addon_binding`
+        // resolves these to addon sentinels (the same string the legacy
+        // pre-inject produced). Facade exports drive the user import's
+        // symbol lookup and always take precedence over the raw
         // `[functions]` table.
         let facade_exports = self.load_addon_facade(&pkg_dir, &resolved)?;
 
@@ -903,11 +907,13 @@ impl Interpreter {
     ///
     /// The facade file lives at `<pkg_dir>/taida/<stem>.td` where
     /// `<stem>` is the final `/`-segment of the package id. Inside the
-    /// facade, every manifest `[functions]` entry is pre-bound as an
-    /// addon sentinel (`Value::str(__taida_addon_call::<pkg>::<fn>)`)
-    /// so the facade can assign `TerminalSize <= terminalSize` to
-    /// rename the Rust function under a Taida-side name, or combine
-    /// addon calls with pure-Taida companion values such as the
+    /// facade, each addon-backed function appears as an explicit
+    /// `Name <= RustAddon["fn"](arity <= N)` binding (E30 Lock-G
+    /// sub-step B-5 verdict — legacy implicit pre-inject is removed).
+    /// `eval_rust_addon_binding` resolves these to addon sentinels
+    /// (`Value::str("__taida_addon_call::<pkg>::<fn>")`) — the same
+    /// string the legacy pre-inject path produced. The facade can also
+    /// combine addon calls with pure-Taida companion values such as the
     /// `KeyKind` enum pack.
     ///
     /// The facade is cached in `loaded_modules` under its canonical
@@ -997,18 +1003,22 @@ impl Interpreter {
             resolved.manifest.functions.clone(),
         ));
 
-        // Legacy implicit pre-inject (Lock-G Sub-G4): pre-bind every
-        // manifest `[functions]` entry as an addon sentinel so existing
-        // facades that reference bare lowercase names continue to work
-        // while the ecosystem migrates to explicit `RustAddon[...]`
-        // bindings. Removal of this path is deferred to sub-step B-5
-        // (TM-track coordinated session) per the Phase 7 sub-track B
-        // plan; for now both surfaces co-exist and produce identical
-        // sentinel values, so behaviour is unchanged for legacy facades.
-        for fn_name in resolved.manifest.functions.keys() {
-            let sentinel = format!("__taida_addon_call::{}::{}", resolved.package_id, fn_name);
-            self.env.define_force(fn_name, Value::str(sentinel));
-        }
+        // E30B-007 sub-step B-5 (Lock-G Sub-G4 verdict 2026-04-28):
+        // legacy implicit pre-inject is REMOVED in @e.30. E gen は破壊的
+        // 変更許容のため、deprecation period なしで撤廃する。各 addon
+        // function は facade で **明示的に** `Name <= RustAddon["fn"](arity
+        // <= N)` と binding する必要がある。`taida-lang/terminal` 等の
+        // 公式 addon は v@b.8 → v@b.9 で migration 済 (TMB-029 解消)。
+        //
+        // bare 参照 (例えば `size <= terminalSize()` のように `terminalSize`
+        // を未 binding 状態で呼ぶ) は facade load 時に identifier 未定義
+        // エラーとなり、`eval_program` が `[E1413]` 等価のエラーで reject
+        // する。明示 binding 経路は `eval_rust_addon_binding` (eval.rs) で
+        // sentinel string `__taida_addon_call::<pkg>::<fn>` を生成し、
+        // 旧 pre-inject 経路と structurally identical な値を bind する。
+        //
+        // (loading_addon_facade_ctx は L995-998 で既に set 済で、これが
+        // RustAddon[...] binding 評価の前提 context となる。)
 
         let exec_result = self.eval_program(&program);
 

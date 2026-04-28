@@ -752,6 +752,42 @@ impl GraphExtractor {
                     }
                 }
 
+                // (E30B-007 sub-step B-5 / Lock-G Sub-G5、2026-04-28)
+                // explicit `Name <= RustAddon["fn"](arity <= N)` binding
+                // を module graph に **public function** node として追加。
+                // AST 上は Assignment で表現されるが、addon-backed callable
+                // という contract に従い、graph view では Function node 扱い。
+                // metadata には source = "rust_addon"、addon_fn_name、arity
+                // を記録、consumer (introspection / 可視化 tool) が判別可能。
+                Statement::Assignment(assign) if assign.as_rust_addon_binding().is_some() => {
+                    let span = &assign.span;
+                    let (fn_name, arity) = assign.as_rust_addon_binding().expect("checked");
+                    let fn_id =
+                        Graph::make_id(&self.file, span.line, span.column, &NodeKind::Function);
+                    let mut meta = HashMap::new();
+                    meta.insert("source".to_string(), "rust_addon".to_string());
+                    meta.insert("addon_fn_name".to_string(), fn_name);
+                    meta.insert("arity".to_string(), arity.to_string());
+                    graph.add_node(GraphNode {
+                        id: fn_id.clone(),
+                        kind: NodeKind::Function,
+                        label: assign.target.clone(),
+                        location: Location {
+                            file: self.file.clone(),
+                            line: span.line,
+                            column: span.column,
+                        },
+                        metadata: meta,
+                    });
+                    graph.add_edge(GraphEdge {
+                        source: module_id.clone(),
+                        target: fn_id,
+                        kind: EdgeKind::SymbolRef,
+                        label: format!("defines {}", assign.target),
+                        metadata: HashMap::new(),
+                    });
+                }
+
                 _ => {}
             }
         }

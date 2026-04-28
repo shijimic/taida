@@ -353,6 +353,30 @@ fn extract_ai_graph(program: &Program, file: &str) -> AiGraph {
                 exports.extend(exp.symbols.iter().cloned());
             }
 
+            // (E30B-007 sub-step B-5 / Lock-G Sub-G5、2026-04-28) explicit
+            // `Name <= RustAddon["fn"](arity <= N)` binding を AI graph
+            // 上で **public function** として表出する。AST 上は Assignment
+            // だが、user perspective では関数。`taida graph` JSON 出力で
+            // 23 sentinel が functions[] に並ぶため `taida doc generate`
+            // が表現できなかった TMB-029 が解消する。
+            Statement::Assignment(a) if a.as_rust_addon_binding().is_some() => {
+                let (fn_name, arity) = a.as_rust_addon_binding().unwrap();
+                let placeholder_params: Vec<(String, String)> = (0..arity)
+                    .map(|i| (format!("_arg{}", i), String::new()))
+                    .collect();
+                functions.push(AiFunction {
+                    name: a.target.clone(),
+                    params: placeholder_params,
+                    returns: String::new(),
+                    body_summary: format!("RustAddon[\"{}\"](arity <= {})", fn_name, arity),
+                    calls: Vec::new(),
+                    throws: false,
+                    has_error_ceiling: false,
+                    is_recursive: false,
+                    line: a.span.line,
+                });
+            }
+
             // Top-level statements go to main_flow
             Statement::Assignment(_)
             | Statement::Expr(_)

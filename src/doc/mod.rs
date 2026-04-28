@@ -370,6 +370,17 @@ pub fn extract_docs(program: &Program, module_name: &str) -> ModuleDoc {
             {
                 doc.functions.push(extract_func_doc(fd));
             }
+            // (E30B-007 sub-step B-5 / Lock-G Sub-G5、2026-04-28) explicit
+            // `Name <= RustAddon["fn"](arity <= N)` binding を **public
+            // function** として doc-gen 出力する。AST 上は Assignment だが、
+            // public binding contract であり、call site から見ると関数。
+            // doc comment の有無に関わらず必ず FuncDoc に出すことで、
+            // `taida doc generate` の addon facade 出力に 23 sentinel が
+            // 全件表示される (TMB-029 解消)。Match の order が重要 — RustAddon
+            // 判定を doc-comments-only の AssignmentDoc 分岐より前に置くこと。
+            Statement::Assignment(a) if a.as_rust_addon_binding().is_some() => {
+                doc.functions.push(extract_rust_addon_func_doc(a));
+            }
             Statement::Assignment(a) if !a.doc_comments.is_empty() => {
                 doc.assignments.push(extract_assignment_doc(a));
             }
@@ -387,6 +398,29 @@ fn extract_assignment_doc(a: &Assignment) -> AssignmentDoc {
     AssignmentDoc {
         name: a.target.clone(),
         tags: parse_doc_tags(&a.doc_comments),
+    }
+}
+
+/// E30B-007 sub-step B-5 / Lock-G Sub-G5: render an explicit
+/// `Name <= RustAddon["fn"](arity <= N)` binding as a `FuncDoc` so
+/// downstream doc-gen / LSP / introspection consumers surface it as a
+/// public function. Params / return type are not declared in the
+/// surface form (they live in the `///@` doc comment block above the
+/// binding) — we mark return_type as `None` and produce N positional
+/// placeholder params so the doc tool can render
+/// `<name>(_, _, ...)` even before the user adds richer signatures.
+fn extract_rust_addon_func_doc(a: &Assignment) -> FuncDoc {
+    let (_fn_name, arity) = a
+        .as_rust_addon_binding()
+        .expect("caller already verified RustAddon binding");
+    let placeholder_params: Vec<(String, Option<String>)> =
+        (0..arity).map(|i| (format!("_arg{}", i), None)).collect();
+    FuncDoc {
+        name: a.target.clone(),
+        type_params: Vec::new(),
+        tags: parse_doc_tags(&a.doc_comments),
+        params: placeholder_params,
+        return_type: None,
     }
 }
 

@@ -209,6 +209,20 @@ fn partial_source_completions(statements: &[Statement]) -> Vec<CompletionItem> {
 
     for stmt in statements {
         match stmt {
+            // (E30B-007 sub-step B-5 / Lock-G Sub-G5、2026-04-28) explicit
+            // `Name <= RustAddon["fn"](arity <= N)` binding を `FUNCTION`
+            // として補完候補に出す。AST 上は Assignment だが、public
+            // callable surface であり、user perspective では関数。
+            Statement::Assignment(assign) if assign.as_rust_addon_binding().is_some() => {
+                let (fn_name, arity) = assign.as_rust_addon_binding().unwrap();
+                items.push(CompletionItem {
+                    label: assign.target.clone(),
+                    kind: Some(CompletionItemKind::FUNCTION),
+                    detail: Some(format!("RustAddon[\"{}\"](arity <= {})", fn_name, arity)),
+                    documentation: format_doc_comments(&assign.doc_comments),
+                    ..Default::default()
+                });
+            }
             Statement::Assignment(assign) => {
                 items.push(CompletionItem {
                     label: assign.target.clone(),

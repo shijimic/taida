@@ -43,16 +43,21 @@
 //!   `tests/e30b_001_unified_class_like.rs`); migration must be a behaviour-
 //!   preserving textual transform on already-equivalent surface.
 //!
-//! ## 残作業 (Phase 7 sub-track B、次セッション送り)
+//! ## Phase 7 sub-track B sub-step B-5 (2026-04-28、Lock-G Sub-G4 verdict) で land した要素
 //!
-//! - 23 sentinel 関数の `RustAddon[...]` migration (E30B-007 連携)
-//! - addon facade explicit binding 用の AST/parser/checker 拡張、`taida check`
-//!   の drift check、新診断コード番号確定 (`[E14xx]`)、4-backend lowering
-//!
-//! `RustAddon[...]` migration path は本 tool に Phase 7 sub-track B 着手時に
-//! 追加予定。本 sub-track A 完了時点では legacy `Mold` prefix 撤廃のみが scope。
+//! - **Addon facade migration**: `<pkg>/native/addon.toml::[functions]` の各 entry に
+//!   対し、対応する Taida-side facade (`<pkg>/taida/<stem>.td`) で
+//!   `name <= RustAddon["name"](arity <= N)` 明示 binding が存在するか確認する。
+//!   存在しない関数があれば、facade の `<<<` export 直前 (or 末尾) に missing
+//!   binding を一括 append して書き戻す。`taida-lang/terminal` の 23 sentinel が
+//!   主要対象 (TMB-029 解消)。
+//! - **CLI surface拡張**: `taida upgrade --e30 <pkg-or-facade-path>` が package root
+//!   または facade `.td` を直接指定された場合に addon facade 検出を行う。
+//! - **Idempotent**: 既に明示 binding がある関数は touch しない、二度目の実行は no-op。
 
-use crate::parser::{ClassLikeDef, ClassLikeKind, MoldHeaderArg, Statement, TypeExpr, parse};
+use crate::parser::{
+    BuchiField, ClassLikeDef, ClassLikeKind, Expr, MoldHeaderArg, Statement, TypeExpr, parse,
+};
 
 /// Configuration for the `taida upgrade --e30` migration run.
 #[derive(Debug, Clone)]
@@ -501,6 +506,216 @@ pub fn run(config: UpgradeE30Config) -> Result<UpgradeE30Report, UpgradeE30Error
     Ok(report)
 }
 
+// ── Phase 7 sub-track B sub-step B-5: addon facade migration ──────────
+//
+// `taida-lang/terminal` etc. addon facade の **bare reference** から
+// **明示 `RustAddon[...]` binding** への自動展開。Lock-G Sub-G4 verdict
+// で legacy 暗黙 pre-inject が撤廃されたため、各 manifest [functions]
+// entry には対応する `name <= RustAddon["name"](arity <= N)` が必要。
+// 既存 facade に欠けている binding を検出して append する。
+
+/// One missing `RustAddon[...]` binding proposal for an addon facade.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AddonBindingProposal {
+    /// camelCase function name as listed in `addon.toml::[functions]`.
+    pub fn_name: String,
+    /// Manifest-declared arity (matches the `arity <= N` field).
+    pub arity: u32,
+}
+
+/// Returns the set of facade-bound RustAddon function names already present
+/// as `Name <= RustAddon["name"](arity <= N)` assignments in `program`.
+fn collect_existing_rust_addon_bindings(
+    program: &crate::parser::Program,
+) -> std::collections::HashSet<String> {
+    let mut out = std::collections::HashSet::new();
+    for stmt in &program.statements {
+        if let Statement::Assignment(assign) = stmt
+            && let Some((fn_name, _)) = extract_rust_addon_binding(&assign.value)
+            && assign.target == fn_name
+        {
+            out.insert(fn_name);
+        }
+    }
+    out
+}
+
+/// Match `Expr::MoldInst("RustAddon", [StringLit(fn)], [arity <= IntLit(n)])`
+/// and extract `(fn_name, arity)` if the surface is well-formed.
+fn extract_rust_addon_binding(expr: &Expr) -> Option<(String, u32)> {
+    match expr {
+        Expr::MoldInst(name, type_args, fields, _) if name == "RustAddon" => {
+            let fn_name = match type_args.first() {
+                Some(Expr::StringLit(s, _)) if type_args.len() == 1 => s.clone(),
+                _ => return None,
+            };
+            if fields.len() != 1 {
+                return None;
+            }
+            let f: &BuchiField = &fields[0];
+            if f.name != "arity" {
+                return None;
+            }
+            match &f.value {
+                Expr::IntLit(n, _) if *n >= 0 => Some((fn_name, *n as u32)),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Read manifest `[functions]` from `<pkg_dir>/native/addon.toml`. Minimal
+/// TOML extraction (we only need `[functions] name = N` entries) so we
+/// don't have to depend on a TOML crate at this layer.
+fn read_manifest_functions(
+    pkg_dir: &std::path::Path,
+) -> std::io::Result<std::collections::BTreeMap<String, u32>> {
+    let manifest_path = pkg_dir.join("native").join("addon.toml");
+    let raw = std::fs::read_to_string(&manifest_path)?;
+    let mut out = std::collections::BTreeMap::new();
+    let mut in_functions = false;
+    for line in raw.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if line.starts_with('[') && line.ends_with(']') {
+            in_functions = line == "[functions]";
+            continue;
+        }
+        if in_functions && let Some((k, v)) = line.split_once('=') {
+            let k = k.trim().trim_matches('"').to_string();
+            let v_str = v.trim();
+            // strip trailing comment `# ...`
+            let v_clean = v_str.split('#').next().unwrap_or(v_str).trim();
+            if let Ok(n) = v_clean.parse::<u32>() {
+                out.insert(k, n);
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Compute the list of missing RustAddon bindings for a facade source given
+/// the surrounding addon's manifest function table. Determinism: result is
+/// sorted by manifest declaration order (BTreeMap iteration order).
+pub fn collect_facade_addon_proposals(
+    facade_source: &str,
+    manifest_functions: &std::collections::BTreeMap<String, u32>,
+) -> Vec<AddonBindingProposal> {
+    let (program, errors) = parse(facade_source);
+    if !errors.is_empty() {
+        return Vec::new();
+    }
+    let existing = collect_existing_rust_addon_bindings(&program);
+    let mut out = Vec::new();
+    for (fn_name, arity) in manifest_functions {
+        if !existing.contains(fn_name) {
+            out.push(AddonBindingProposal {
+                fn_name: fn_name.clone(),
+                arity: *arity,
+            });
+        }
+    }
+    out
+}
+
+/// Render a missing-binding block (one binding per line, aligned to the
+/// longest fn_name for readability) to be inserted in the facade source.
+fn render_addon_binding_block(proposals: &[AddonBindingProposal]) -> String {
+    if proposals.is_empty() {
+        return String::new();
+    }
+    let max_len = proposals.iter().map(|p| p.fn_name.len()).max().unwrap_or(0);
+    let mut out = String::new();
+    out.push_str("// ── E30B-007 Sub-G4: explicit RustAddon[...] bindings (auto-migrated) ──\n");
+    out.push_str("// `taida upgrade --e30` で legacy 暗黙 pre-inject から明示 binding に\n");
+    out.push_str("// 自動展開された箇所。arity は `native/addon.toml` と同期する必要がある。\n\n");
+    for p in proposals {
+        out.push_str(&format!(
+            "{:width$} <= RustAddon[\"{}\"](arity <= {})\n",
+            p.fn_name,
+            p.fn_name,
+            p.arity,
+            width = max_len
+        ));
+    }
+    out
+}
+
+/// Locate the byte offset of the `<<< @(...)` export statement in the source.
+/// Returns `None` if no export is found, in which case the caller should
+/// append at the end of the file.
+fn find_export_byte_offset(source: &str) -> Option<usize> {
+    // Search for `<<<` token at start of line (skipping leading whitespace).
+    // We scan line by line so a `<<<` inside a string literal or comment is
+    // not falsely matched.
+    let mut byte = 0usize;
+    for line in source.split_inclusive('\n') {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("<<<") {
+            return Some(byte);
+        }
+        byte += line.len();
+    }
+    None
+}
+
+/// Rewrite a facade source by inserting any missing RustAddon[...] bindings
+/// just before the `<<<` export (or appended to EOF if absent).
+/// Returns `(new_source, num_inserted_bindings)`.
+pub fn upgrade_facade_source(
+    facade_source: &str,
+    manifest_functions: &std::collections::BTreeMap<String, u32>,
+) -> (String, usize) {
+    let proposals = collect_facade_addon_proposals(facade_source, manifest_functions);
+    if proposals.is_empty() {
+        return (facade_source.to_string(), 0);
+    }
+    let block = render_addon_binding_block(&proposals);
+    let n = proposals.len();
+    if let Some(offset) = find_export_byte_offset(facade_source) {
+        let mut out = String::with_capacity(facade_source.len() + block.len() + 1);
+        out.push_str(&facade_source[..offset]);
+        out.push_str(&block);
+        out.push('\n');
+        out.push_str(&facade_source[offset..]);
+        (out, n)
+    } else {
+        // No export — append to EOF (with separating newline if needed).
+        let mut out = facade_source.to_string();
+        if !out.ends_with('\n') {
+            out.push('\n');
+        }
+        out.push('\n');
+        out.push_str(&block);
+        (out, n)
+    }
+}
+
+/// CLI helper: `taida upgrade --e30 <pkg-dir>` で package root を指定された
+/// 場合に、`<pkg-dir>/taida/<stem>.td` facade を addon migration する。
+/// `<stem>` は package id の `/` 後ろ segment (canonical name から復元する
+/// のは tool 上層の責務、ここでは stem を引数で受け取る)。
+///
+/// Returns `Ok((rewrites_applied, facade_path))` or any I/O error.
+pub fn upgrade_facade_file(
+    pkg_dir: &std::path::Path,
+    stem: &str,
+    check_only: bool,
+    dry_run: bool,
+) -> std::io::Result<(usize, std::path::PathBuf)> {
+    let manifest_functions = read_manifest_functions(pkg_dir)?;
+    let facade_path = pkg_dir.join("taida").join(format!("{}.td", stem));
+    let source = std::fs::read_to_string(&facade_path)?;
+    let (new_source, n) = upgrade_facade_source(&source, &manifest_functions);
+    if n > 0 && !check_only && !dry_run {
+        std::fs::write(&facade_path, &new_source)?;
+    }
+    Ok((n, facade_path))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -729,5 +944,142 @@ mod tests {
         let (out, n) = upgrade_source(src);
         assert_eq!(out, src);
         assert_eq!(n, 0);
+    }
+
+    // ── Phase 7 sub-track B sub-step B-5: addon facade migration tests ──
+
+    fn manifest_2() -> std::collections::BTreeMap<String, u32> {
+        let mut m = std::collections::BTreeMap::new();
+        m.insert("terminalSize".to_string(), 0);
+        m.insert("readKey".to_string(), 0);
+        m
+    }
+
+    #[test]
+    fn collect_addon_proposals_detects_all_missing_when_facade_empty() {
+        let src = "<<< @(terminalSize, readKey)\n";
+        let proposals = collect_facade_addon_proposals(src, &manifest_2());
+        assert_eq!(proposals.len(), 2, "got: {:?}", proposals);
+        // BTreeMap iteration order = alphabetical → readKey, terminalSize
+        assert_eq!(proposals[0].fn_name, "readKey");
+        assert_eq!(proposals[0].arity, 0);
+        assert_eq!(proposals[1].fn_name, "terminalSize");
+        assert_eq!(proposals[1].arity, 0);
+    }
+
+    #[test]
+    fn collect_addon_proposals_skips_already_bound_fns() {
+        // facade already has explicit binding for terminalSize → only readKey is proposed
+        let src = concat!(
+            "terminalSize <= RustAddon[\"terminalSize\"](arity <= 0)\n",
+            "<<< @(terminalSize, readKey)\n",
+        );
+        let proposals = collect_facade_addon_proposals(src, &manifest_2());
+        assert_eq!(proposals.len(), 1, "got: {:?}", proposals);
+        assert_eq!(proposals[0].fn_name, "readKey");
+    }
+
+    #[test]
+    fn collect_addon_proposals_no_op_when_all_bound() {
+        let src = concat!(
+            "terminalSize <= RustAddon[\"terminalSize\"](arity <= 0)\n",
+            "readKey <= RustAddon[\"readKey\"](arity <= 0)\n",
+            "<<< @(terminalSize, readKey)\n",
+        );
+        let proposals = collect_facade_addon_proposals(src, &manifest_2());
+        assert!(proposals.is_empty(), "got: {:?}", proposals);
+    }
+
+    #[test]
+    fn upgrade_facade_inserts_missing_bindings_before_export() {
+        let src = concat!(
+            "// header\n", //
+            "<<< @(terminalSize, readKey)\n",
+        );
+        let (out, n) = upgrade_facade_source(src, &manifest_2());
+        assert_eq!(n, 2);
+        // Both bindings must appear before `<<<` (alignment may insert
+        // padding so we match against the RHS substring only).
+        let export_pos = out.find("<<<").expect("export must remain");
+        let read_pos = out
+            .find("RustAddon[\"readKey\"](arity <= 0)")
+            .expect("readKey binding must be added");
+        let term_pos = out
+            .find("RustAddon[\"terminalSize\"](arity <= 0)")
+            .expect("terminalSize binding must be added");
+        assert!(read_pos < export_pos);
+        assert!(term_pos < export_pos);
+        // The original `// header` and `<<<` line are preserved
+        assert!(out.contains("// header\n"));
+        assert!(out.contains("<<< @(terminalSize, readKey)\n"));
+    }
+
+    #[test]
+    fn upgrade_facade_is_idempotent() {
+        let src = concat!(
+            "// header\n", //
+            "<<< @(terminalSize, readKey)\n",
+        );
+        let (once, n1) = upgrade_facade_source(src, &manifest_2());
+        assert_eq!(n1, 2);
+        let (twice, n2) = upgrade_facade_source(&once, &manifest_2());
+        assert_eq!(n2, 0, "second pass must be a no-op");
+        assert_eq!(once, twice);
+    }
+
+    #[test]
+    fn upgrade_facade_preserves_existing_explicit_bindings() {
+        let src = concat!(
+            "terminalSize <= RustAddon[\"terminalSize\"](arity <= 0)\n",
+            "<<< @(terminalSize, readKey)\n",
+        );
+        let (out, n) = upgrade_facade_source(src, &manifest_2());
+        assert_eq!(n, 1, "only readKey should be inserted");
+        // Original terminalSize binding must remain at original position
+        assert!(out.contains("terminalSize <= RustAddon[\"terminalSize\"](arity <= 0)\n"));
+        // readKey was inserted just before `<<<` (alignment-tolerant match)
+        let read_pos = out.find("RustAddon[\"readKey\"](arity <= 0)").unwrap();
+        let export_pos = out.find("<<<").unwrap();
+        assert!(read_pos < export_pos);
+    }
+
+    #[test]
+    fn extract_rust_addon_binding_recognises_well_formed_form() {
+        let src = "f <= RustAddon[\"f\"](arity <= 3)\n";
+        let (program, errors) = parse(src);
+        assert!(errors.is_empty(), "{:?}", errors);
+        let stmt = program.statements.first().unwrap();
+        match stmt {
+            Statement::Assignment(a) => {
+                let r = extract_rust_addon_binding(&a.value);
+                assert_eq!(r, Some(("f".to_string(), 3)));
+            }
+            other => panic!("expected Assignment, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn extract_rust_addon_binding_rejects_wrong_field_name() {
+        // Field `arities` (not `arity`) should not be recognised as a RustAddon binding
+        let src = "f <= RustAddon[\"f\"](arities <= 3)\n";
+        let (program, errors) = parse(src);
+        assert!(errors.is_empty(), "{:?}", errors);
+        let stmt = program.statements.first().unwrap();
+        match stmt {
+            Statement::Assignment(a) => {
+                let r = extract_rust_addon_binding(&a.value);
+                assert!(r.is_none(), "wrong field name should be rejected: {:?}", r);
+            }
+            other => panic!("expected Assignment, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn upgrade_facade_appends_when_no_export_present() {
+        let src = "// just doc comments and nothing else\n";
+        let (out, n) = upgrade_facade_source(src, &manifest_2());
+        assert_eq!(n, 2);
+        assert!(out.contains("RustAddon[\"readKey\"](arity <= 0)"));
+        assert!(out.contains("RustAddon[\"terminalSize\"](arity <= 0)"));
     }
 }

@@ -933,6 +933,30 @@ impl Interpreter {
                 if let Some(val) = self.env.get(name) {
                     Ok(Signal::Value(val.clone()))
                 } else {
+                    // E30B-007 sub-step B-5 / Lock-G Sub-G4: when an
+                    // undefined identifier matches the surrounding addon
+                    // manifest's `[functions]` table, emit `[E1413]` with
+                    // a migration hint instead of the generic message.
+                    // Legacy facades that referenced bare lowercase addon
+                    // function names (relying on the implicit pre-inject)
+                    // hit this branch in @e.30 because the pre-inject is
+                    // removed. The fix is an explicit `RustAddon[...]`
+                    // binding at the top of the facade.
+                    if let Some((pkg_id, manifest_arities)) = &self.loading_addon_facade_ctx
+                        && let Some(arity) = manifest_arities.get(name)
+                    {
+                        return Err(RuntimeError {
+                            message: format!(
+                                "[E1413] addon facade for '{}': bare reference to addon \
+                                 manifest function '{}' is no longer pre-injected in @e.30 \
+                                 (Lock-G Sub-G4: legacy implicit pre-inject removed). Add \
+                                 an explicit binding to the top of the facade: `{} <= \
+                                 RustAddon[\"{}\"](arity <= {})`. Run `taida upgrade --e30 \
+                                 <pkg>/taida/` to migrate automatically.",
+                                pkg_id, name, name, name, arity
+                            ),
+                        });
+                    }
                     // No null/undefined — but undefined variable is a runtime error
                     Err(RuntimeError {
                         message: format!("Undefined variable: '{}'", name),
