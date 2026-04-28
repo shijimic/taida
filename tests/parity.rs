@@ -38574,6 +38574,37 @@ stdout(p.name.length().toString())
     assert_backend_parity_for_source(src, "e30b_004_default_fn_typedef");
 }
 
+#[test]
+fn e30b_004_default_fn_enum_return_three_backend_parity() {
+    if !cc_available() {
+        eprintln!("SKIP: cc unavailable");
+        return;
+    }
+    let src = r#"
+Enum => Status = :Ok :Fail
+Probe = @(label: Str, pick: Unit => :Status)
+p <= Probe(label <= "status")
+s <= p.pick()
+stdout(s.toString())
+"#;
+    assert_backend_parity_for_source(src, "e30b_004_default_fn_enum");
+}
+
+#[test]
+fn e30b_004_default_fn_self_recursive_typedef_three_backend_parity() {
+    if !cc_available() {
+        eprintln!("SKIP: cc unavailable");
+        return;
+    }
+    let src = r#"
+Node = @(name: Str, next: Unit => :Node)
+n <= Node(name <= "root")
+child <= n.next()
+stdout(child.name.length().toString())
+"#;
+    assert_backend_parity_for_source(src, "e30b_004_default_fn_self_recursive");
+}
+
 // ===========================================================================
 // E30 Phase 8 — 4-backend parity 集約 evidence
 // ---------------------------------------------------------------------------
@@ -38667,4 +38698,49 @@ stdout(p.label)
 stdout(b.toString())
 "#;
     assert_backend_parity_for_source(src, "e30b_phase8_aggregate_combined");
+}
+
+#[test]
+fn e30b_006_imported_mold_kind_registers_type_metadata_three_backend_parity() {
+    if !cc_available() {
+        eprintln!("SKIP: cc unavailable");
+        return;
+    }
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock")
+        .as_nanos();
+    let dir = std::env::temp_dir().join(format!(
+        "taida_e30b006_imported_mold_{}_{}",
+        std::process::id(),
+        nanos
+    ));
+    fs::create_dir_all(&dir).expect("create temp dir");
+    fs::write(
+        dir.join("box.td"),
+        r#"
+Mold[T] => Box[T] = @(value: T, label: Str)
+<<< @(Box)
+"#,
+    )
+    .expect("write box.td");
+    fs::write(
+        dir.join("main.td"),
+        r#"
+>>> ./box.td => @(Box)
+b <= Box[7, 7, "seven"]()
+stdout(b.value.toString())
+stdout(b.label)
+"#,
+    )
+    .expect("write main.td");
+    let main = dir.join("main.td");
+    let interp = run_interpreter(&main).expect("interpreter should succeed");
+    let native = run_native(&main).expect("native should succeed");
+    assert_eq!(interp, native);
+    if node_available() {
+        let js = run_js_project(&main, "e30b006_imported_mold").expect("js should succeed");
+        assert_eq!(interp, js);
+    }
+    let _ = fs::remove_dir_all(&dir);
 }

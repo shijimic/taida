@@ -362,12 +362,12 @@ fn extract_ai_graph(program: &Program, file: &str) -> AiGraph {
             Statement::Assignment(a) if a.as_rust_addon_binding().is_some() => {
                 let (fn_name, arity) = a.as_rust_addon_binding().unwrap();
                 let placeholder_params: Vec<(String, String)> = (0..arity)
-                    .map(|i| (format!("_arg{}", i), String::new()))
+                    .map(|i| (format!("_arg{}", i), "Unknown".to_string()))
                     .collect();
                 functions.push(AiFunction {
                     name: a.target.clone(),
                     params: placeholder_params,
-                    returns: String::new(),
+                    returns: "Unknown".to_string(),
                     body_summary: format!("RustAddon[\"{}\"](arity <= {})", fn_name, arity),
                     calls: Vec::new(),
                     throws: false,

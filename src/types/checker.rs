@@ -2200,6 +2200,13 @@ impl TypeChecker {
                 && let Some(type_annotation) = &field.type_annotation
             {
                 let mut visiting = std::collections::HashSet::new();
+                // The current definition is not registered until after
+                // field validation completes. Seed the cycle guard with the
+                // definition name so self-referential defaultFn returns such
+                // as `Foo = @(next: Unit => :Foo)` mirror the runtime
+                // default materializer's cycle handling instead of looking
+                // like an opaque type.
+                visiting.insert(def_name.to_string());
                 if !default_fn_generatable(type_annotation, &self.registry, &mut visiting) {
                     self.errors.push(TypeError {
                         message: Self::binding_diag(
@@ -5160,19 +5167,12 @@ pub fn default_fn_generatable(
                 .first()
                 .map(|inner| default_fn_generatable(inner, registry, visiting))
                 .unwrap_or(true),
-            _ => {
-                // Other generics (e.g. Result[T, P]) — generatable iff the
-                // base name is registered and all args are generatable.
-                let base_ok = visiting.contains(name)
-                    || registry.type_defs.contains_key(name)
-                    || registry.mold_defs.contains_key(name)
-                    || registry.error_types.contains_key(name);
-                if !base_ok {
-                    return false;
-                }
-                args.iter()
-                    .all(|arg| default_fn_generatable(arg, registry, visiting))
-            }
+            // Other generic bases are intentionally not accepted here yet:
+            // interpreter / JS / native default materializers only share
+            // concrete support for Lax and Async. Accepting arbitrary
+            // registered generics would let the checker approve a defaultFn
+            // whose return value diverges across backends.
+            _ => false,
         },
         TypeExpr::BuchiPack(fields) => fields.iter().filter(|f| !f.is_method).all(|f| {
             f.type_annotation

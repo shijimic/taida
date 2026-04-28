@@ -1348,11 +1348,11 @@ are `.dev/FUTURE_BLOCKERS.md` (post-stable items deliberately
 deferred) and a future `.dev/E*_BLOCKERS.md` (will be created when
 gen-E planning starts).
 
-### 6.8. gen-E rationale and `@e.30` breaking-change manifest (Phase 8 pre-flight)
+### 6.8. gen-E rationale and `@e.30` breaking-change manifest (Phase 9 pre-flight)
 
-> **Status**: pre-flight skeleton (E30 Phase 8 完了時点、2026-04-28).
-> Phase 9 GATE で完成。本節は §6.1 の gen bump policy 整合のため
-> Phase 8 で staged。
+> **Status**: Phase 9 pre-flight (E30B-001〜011 stable prerequisite FIXED、
+> 2026-04-28). Phase 9 GATE で final CI evidence と user tag 承認を反映して
+> 完成。本節は §6.1 の gen bump policy 整合のため staged。
 
 gen-E は **言語仕様 (`.td`) の破壊的変更** を land する gen 系列。`@e.30`
 (gen-E 最初の stable) は D series 最終 stable (`@d.29`) の後続として、

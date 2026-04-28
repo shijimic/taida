@@ -12,16 +12,14 @@
 
 use std::process::Command;
 
-fn taida_bin() -> String {
-    env!("CARGO_BIN_EXE_taida").to_string()
-}
+mod common;
 
 fn run_taida_source(label: &str, source: &str) -> String {
     let dir = std::env::temp_dir().join("taida-e30b_004-tests");
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join(format!("{}.td", label));
     std::fs::write(&path, source).unwrap();
-    let output = Command::new(taida_bin())
+    let output = Command::new(common::taida_bin())
         .arg(&path)
         .output()
         .expect("failed to execute taida");
@@ -86,6 +84,32 @@ p <= g.build("Rei")
 stdout(p.name.length().toString())
 "#;
     assert_eq!(run_taida_source("default_fn_typedef", src).trim(), "0");
+}
+
+#[test]
+fn e30b_004_default_fn_self_recursive_typedef_return() {
+    let src = r#"
+Node = @(name: Str, next: Unit => :Node)
+n <= Node(name <= "root")
+child <= n.next()
+stdout(child.name.length().toString())
+"#;
+    assert_eq!(
+        run_taida_source("default_fn_self_recursive_typedef", src).trim(),
+        "0"
+    );
+}
+
+#[test]
+fn e30b_004_default_fn_enum_return() {
+    let src = r#"
+Enum => Status = :Ok :Fail
+Probe = @(label: Str, pick: Unit => :Status)
+p <= Probe(label <= "status")
+s <= p.pick()
+stdout(s.toString())
+"#;
+    assert_eq!(run_taida_source("default_fn_enum", src).trim(), "0");
 }
 
 #[test]

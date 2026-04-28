@@ -57,6 +57,8 @@ pub(crate) struct LoadedModule {
     pub(crate) exports: HashMap<String, Value>,
     /// QF-17: TypeDef field definitions exported from this module
     pub(crate) type_defs: HashMap<String, Vec<FieldDef>>,
+    /// Mold field definitions exported from this module.
+    pub(crate) mold_defs: HashMap<String, Vec<FieldDef>>,
     /// Enum definitions exported from this module
     pub(crate) enum_defs: HashMap<String, Vec<String>>,
     /// QF-17: TypeDef methods exported from this module
@@ -138,7 +140,7 @@ pub struct Interpreter {
     /// Enum definitions: enum_name -> variants in ordinal order
     pub(crate) enum_defs: HashMap<String, Vec<String>>,
     /// MoldDef field definitions: mold_name -> Vec<FieldDef> (for filling/unmold lookup)
-    mold_defs: HashMap<String, Vec<FieldDef>>,
+    pub(crate) mold_defs: HashMap<String, Vec<FieldDef>>,
     /// Symbols declared via `<<<` during module execution.
     /// Empty means no `<<<` was encountered (all symbols exported for backward compat).
     pub(crate) module_exported_symbols: Vec<String>,
@@ -545,6 +547,13 @@ impl Interpreter {
                     }
                     self.type_defs.insert(md.name.clone(), md.fields.clone());
                     self.mold_defs.insert(md.name.clone(), md.fields.clone());
+                    let _ = self.env.define(
+                        &md.name,
+                        Value::pack(vec![
+                            ("__type".to_string(), Value::str("TypeDef".to_string())),
+                            ("__name".to_string(), Value::str(md.name.clone())),
+                        ]),
+                    );
                     Ok(Signal::Value(Value::Unit))
                 }
                 crate::parser::ClassLikeKind::Inheritance { parent, .. } => {
@@ -1592,6 +1601,8 @@ impl Interpreter {
                         visiting.remove(name);
                         fields.push(("__type".to_string(), Value::str(name.clone())));
                         Ok(Value::pack(fields))
+                    } else if self.enum_defs.contains_key(name) {
+                        Ok(Value::EnumVal(name.clone(), 0))
                     } else {
                         Ok(Value::Unit)
                     }

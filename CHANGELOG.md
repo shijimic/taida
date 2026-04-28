@@ -14,23 +14,19 @@
 
   E30 Phase 8 完了時 draft (2026-04-28): @e.30 section skeleton を
   Phase 9 GATE 直前 user 承認用に staged。E gen 破壊的変更 track の
-  最初のリリース。E30B-001/002/003/004/005/007/008/009/010 FIXED、
-  E30B-011 Native MakeClosure return-tag propagation FIXED (Phase 8)、
-  E30B-006 / E30B-007 sub-step B-5 は Phase 9 GATE で stable 宣言条件
-  か post-stable 送りかを user 判断。
+  最初のリリース。E30B-001〜011 は stable prerequisite として FIXED。
+  Phase 9 GATE は user-driven tag 承認 / final CI evidence / 本節完成を残す。
 -->
 
 ## @e.30 — gen-E breaking change first release (E30 Phase 8 pre-flight, 2026-04-28)
 
 > **Status: PRE-FLIGHT (Phase 8 集約 evidence DONE → Phase 9 GATE).**
-> Phase 8 終了時点で E30B-001/002/003/004/005/007/008/009/010/011
-> FIXED (10 件)。E30B-006 (graph / pkg facade / LSP / introspection
-> consumer parity)、E30B-007 sub-step B-5 (legacy implicit pre-inject
-> 撤廃 + checker hard-fail diagnostic + 23 sentinel migration TM track
-> 協調) は Phase 9 GATE で **stable 宣言の prerequisite** か **post-stable
-> 送り** かを user 判断する 2 件残。Tag (`@e.30`、build number は user
-> 判断) は user-driven。本セクションは Phase 8 完了時点の skeleton で、
-> Phase 9 GATE で完成させる。
+> E30B-001〜011 は stable prerequisite として FIXED。E30B-006 (graph /
+> pkg facade / LSP / introspection consumer parity) と E30B-007 sub-step
+> B-5 (legacy implicit pre-inject 撤廃 + `[E1413]` hard-fail + terminal
+> sentinel migration + consumer parity) も Phase 7.5 / B-5 で land 済。
+> Tag (`@e.30`、build number は user 判断) は user-driven。本セクションは
+> Phase 9 GATE で final CI evidence を反映して完成させる。
 
 ### §1 Scope (gen-E breaking change track first release)
 

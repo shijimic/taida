@@ -373,6 +373,7 @@ impl Interpreter {
             let prev_exported_symbols = std::mem::take(&mut self.module_exported_symbols);
             // QF-17: TypeDef 登録情報を退避（モジュール実行中の TypeDef はモジュールのスコープ）
             let prev_type_defs = self.type_defs.clone();
+            let prev_mold_defs = self.mold_defs.clone();
             let prev_type_methods = self.type_methods.clone();
 
             // Set up for module execution
@@ -436,6 +437,7 @@ impl Interpreter {
             let exported_symbols = std::mem::take(&mut self.module_exported_symbols);
             // QF-17: モジュール内で定義された TypeDef 情報を取得
             let module_type_defs = self.type_defs.clone();
+            let module_mold_defs = self.mold_defs.clone();
             let module_type_methods = self.type_methods.clone();
             // C20B-015 / ROOT-18: Snapshot enum_defs from the defining module so
             // exported functions can resolve their own JSON schemas even when the
@@ -448,6 +450,7 @@ impl Interpreter {
             self.loading_modules.remove(&module_path);
             self.module_exported_symbols = prev_exported_symbols;
             self.type_defs = prev_type_defs;
+            self.mold_defs = prev_mold_defs;
             self.type_methods = prev_type_methods;
 
             // Check for module execution errors
@@ -560,6 +563,13 @@ impl Interpreter {
                 .into_iter()
                 .filter(|(k, _)| module_exports.contains_key(k))
                 .collect();
+            let exported_mold_defs: std::collections::HashMap<
+                String,
+                Vec<crate::parser::FieldDef>,
+            > = module_mold_defs
+                .into_iter()
+                .filter(|(k, _)| module_exports.contains_key(k))
+                .collect();
             let exported_enum_defs: std::collections::HashMap<String, Vec<String>> = self
                 .enum_defs
                 .iter()
@@ -580,6 +590,7 @@ impl Interpreter {
                 LoadedModule {
                     exports: module_exports.clone(),
                     type_defs: exported_type_defs,
+                    mold_defs: exported_mold_defs,
                     enum_defs: exported_enum_defs,
                     type_methods: exported_type_methods,
                 },
@@ -598,6 +609,11 @@ impl Interpreter {
             .loaded_modules
             .get(&module_path)
             .map(|m| m.enum_defs.clone())
+            .unwrap_or_default();
+        let cached_mold_defs = self
+            .loaded_modules
+            .get(&module_path)
+            .map(|m| m.mold_defs.clone())
             .unwrap_or_default();
         let cached_type_methods = self
             .loaded_modules
@@ -657,6 +673,10 @@ impl Interpreter {
                 if let Some(td_fields) = cached_type_defs.get(name) {
                     self.type_defs
                         .insert(local_name.to_string(), td_fields.clone());
+                }
+                if let Some(mold_fields) = cached_mold_defs.get(name) {
+                    self.mold_defs
+                        .insert(local_name.to_string(), mold_fields.clone());
                 }
                 if let Some(enum_variants) = cached_enum_defs.get(name) {
                     self.enum_defs
@@ -988,6 +1008,7 @@ impl Interpreter {
         let prev_env = self.env.clone();
         let prev_exported_symbols = std::mem::take(&mut self.module_exported_symbols);
         let prev_type_defs = self.type_defs.clone();
+        let prev_mold_defs = self.mold_defs.clone();
         let prev_type_methods = self.type_methods.clone();
         // E30B-007 / Lock-G: stash the previous facade context (if any) so
         // nested facade loads (currently disallowed but defensively handled)
@@ -1025,6 +1046,7 @@ impl Interpreter {
         let module_env = self.env.clone();
         let exported_symbols = std::mem::take(&mut self.module_exported_symbols);
         let module_type_defs = self.type_defs.clone();
+        let module_mold_defs = self.mold_defs.clone();
         let module_type_methods = self.type_methods.clone();
 
         self.env = prev_env;
@@ -1032,6 +1054,7 @@ impl Interpreter {
         self.loading_modules.remove(&canonical);
         self.module_exported_symbols = prev_exported_symbols;
         self.type_defs = prev_type_defs;
+        self.mold_defs = prev_mold_defs;
         self.type_methods = prev_type_methods;
         self.loading_addon_facade_ctx = prev_addon_facade_ctx;
 
@@ -1095,6 +1118,11 @@ impl Interpreter {
                 .into_iter()
                 .filter(|(k, _)| exports.contains_key(k))
                 .collect();
+        let exported_mold_defs: std::collections::HashMap<String, Vec<crate::parser::FieldDef>> =
+            module_mold_defs
+                .into_iter()
+                .filter(|(k, _)| exports.contains_key(k))
+                .collect();
         let exported_enum_defs: std::collections::HashMap<String, Vec<String>> = self
             .enum_defs
             .iter()
@@ -1114,6 +1142,7 @@ impl Interpreter {
             LoadedModule {
                 exports: exports.clone(),
                 type_defs: exported_type_defs,
+                mold_defs: exported_mold_defs,
                 enum_defs: exported_enum_defs,
                 type_methods: exported_type_methods,
             },

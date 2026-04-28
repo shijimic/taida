@@ -144,12 +144,23 @@ fn find_hover_in_statement(
                     return Some(info);
                 }
                 // Check if cursor is near the target name
-                let var_type = checker.lookup_var(&assign.target);
-                if let Some(ty) = var_type
-                    && assign.span.column <= col
+                if assign.span.column <= col
                     && col <= assign.span.column + assign.target.chars().count()
                 {
-                    return Some(format!("```taida\n{}: {}\n```", assign.target, ty));
+                    if let Some((fn_name, arity)) = assign.as_rust_addon_binding() {
+                        let params = (0..arity)
+                            .map(|i| format!("_arg{}: Unknown", i))
+                            .collect::<Vec<_>>()
+                            .join(" ");
+                        let spacer = if params.is_empty() { "" } else { " " };
+                        return Some(format!(
+                            "```taida\n{}{}{} => :Unknown\n```\nRustAddon[\"{}\"](arity <= {})",
+                            assign.target, spacer, params, fn_name, arity
+                        ));
+                    }
+                    if let Some(ty) = checker.lookup_var(&assign.target) {
+                        return Some(format!("```taida\n{}: {}\n```", assign.target, ty));
+                    }
                 }
             }
             None
@@ -511,6 +522,21 @@ mod tests {
         let info = result.unwrap();
         assert!(info.contains("x"), "Should contain variable name");
         assert!(info.contains("Int"), "Should contain type Int");
+    }
+
+    #[test]
+    fn test_hover_rust_addon_binding_as_function() {
+        let source = "isTerminal <= RustAddon[\"isTerminal\"](arity <= 1)";
+        let result = get_hover_info(
+            source,
+            Position {
+                line: 0,
+                character: 0,
+            },
+        );
+        let info = result.expect("Should get hover info for RustAddon binding");
+        assert!(info.contains("isTerminal _arg0: Unknown => :Unknown"));
+        assert!(info.contains("RustAddon[\"isTerminal\"](arity <= 1)"));
     }
 
     #[test]

@@ -1109,10 +1109,10 @@ Options:
   --d28 PATH       D28B-007 code-migration mode: rewrite .td files to comply
                    with the D28B-001 naming rules. Run `taida upgrade --d28
                    --help` for details.
-  --e30 PATH       E30B-001 / Lock-E code-migration mode (skeleton, Phase 2
-                   Sub-step 2.3): scan for legacy `Mold[T] => Foo[T] = @(...)`
-                   syntax and propose the unified `Name[?type-args] [=> Parent]
-                   = @(...)` form. Run `taida upgrade --e30 --help` for details.
+  --e30 PATH       E30B-001 / E30B-007 code-migration mode: rewrite legacy
+                   `Mold[T] => Foo[T] = @(...)` syntax and add missing
+                   explicit RustAddon facade bindings. Run `taida upgrade
+                   --e30 --help` for details.
   --dry-run        (--d28/--e30 only) Print rewrites without modifying files.
 
 Notes:
@@ -1152,7 +1152,7 @@ fn run_upgrade(args: &[String]) {
         return;
     }
 
-    // ── E30B-001 / Lock-E: `taida upgrade --e30 <path>` (skeleton, Phase 2 Sub-step 2.3) ──
+    // ── E30B-001 / E30B-007: `taida upgrade --e30 <path>` ──
     // Detects the --e30 flag and delegates to `taida::upgrade_e30::run`.
     // Migrates legacy `Mold[T] => Foo[T] = @(...)` syntax to the unified
     // `Name[?type-args] [=> Parent] = @(...)` form. Phase 7 で完成予定。
@@ -1352,17 +1352,16 @@ Examples:
     );
 }
 
-/// E30B-001 / Lock-E: `taida upgrade --e30 <path>` — AST-aware migration scan
-/// (skeleton, Phase 2 Sub-step 2.3).
+/// E30B-001 / Lock-E: `taida upgrade --e30 <path>` — AST-aware migration.
 ///
 /// Scans `.td` source files for legacy `Mold[T] => Foo[T] = @(...)` syntax and
-/// proposes migration to the unified `Name[?type-args] [=> Parent] = @(...)`
-/// form. Phase 2 Sub-step 2.3 では skeleton (proposal scan のみ); Phase 7 で
-/// in-place rewrite + 完全な fields reconstruction を land 予定。
+/// migrates to the unified `Name[?type-args] [=> Parent] = @(...)` form.
+/// For addon package roots / facade files, also inserts missing explicit
+/// `RustAddon["fn"](arity <= N)` bindings required by E30B-007.
 ///
 /// Lock-E verdict (2026-04-28) 整合:
 ///   - 統合先: E31 `taida way migrate --e30` ハブ (E31B-004 subcommand 統合候補)
-///   - 本 skeleton は D28 前例 `taida upgrade --d28` パターンを継承
+///   - D28 前例 `taida upgrade --d28` パターンを継承
 ///   - deprecation policy: E gen は **deprecation なし、即破壊的変更**
 ///
 /// Flags:
@@ -1440,10 +1439,8 @@ fn run_upgrade_e30(args: &[String]) {
                 );
             } else {
                 println!(
-                    "[skeleton] Scanned {} file(s); {} legacy class-like definition(s) detected. \
-                     In-place rewrite is implemented in E30 Phase 7 (this is the Sub-step 2.3 \
-                     skeleton).",
-                    report.files_scanned, report.legacy_count
+                    "Scanned {} file(s); migrated {} legacy class-like definition(s) and {} RustAddon binding(s).",
+                    report.files_scanned, report.legacy_count, report.addon_binding_count
                 );
             }
         }
@@ -1469,13 +1466,13 @@ Usage:
   taida upgrade --e30 [--check] [--dry-run] <PATH>
 
 Description:
-  Scans .td source files for legacy class-like syntax that needs migration to
-  the unified E30 form `Name[?type-args] [=> Parent] = @(...)`. Operates on
-  parsed AST so detection is robust against whitespace/comment variations.
+  Migrates .td source files from legacy class-like syntax to the unified E30
+  form `Name[?type-args] [=> Parent] = @(...)`. Operates on parsed AST so
+  detection is robust against whitespace/comment variations.
 
-  E30 Phase 2 Sub-step 2.3 では skeleton 実装: 旧 `Mold[T] => Foo[T] = @(...)`
-  形式の検出 + dry-run 表示のみ。in-place ファイル書き換えは E30 Phase 7 で
-  実装予定。
+  When <PATH> is an addon package root or `<pkg>/taida/<stem>.td` facade,
+  also inserts missing explicit `RustAddon[\"fn\"](arity <= N)` bindings from
+  `native/addon.toml`.
 
   Lock-E verdict (2026-04-28) per .dev/E30_DESIGN.md:
     - 統合先: E31 `taida way migrate --e30` ハブ (E31B-004 統合候補)

@@ -1089,7 +1089,8 @@ impl Lowering {
         for stmt in &program.statements {
             match stmt {
                 Statement::ClassLikeDef(type_def)
-                    if type_def.is_buchi_pack() && type_def.name == symbol_name =>
+                    if (type_def.is_buchi_pack() || type_def.is_mold())
+                        && type_def.name == symbol_name =>
                 {
                     let non_method_fields: Vec<crate::parser::FieldDef> = type_def
                         .fields
@@ -1120,6 +1121,12 @@ impl Lowering {
                     if !methods.is_empty() {
                         self.type_method_defs
                             .insert(register_name.to_string(), methods);
+                    }
+                    if type_def.is_mold() {
+                        let mut imported_mold = type_def.clone();
+                        imported_mold.name = register_name.to_string();
+                        self.mold_defs
+                            .insert(register_name.to_string(), imported_mold);
                     }
 
                     // フィールドの型タグも登録

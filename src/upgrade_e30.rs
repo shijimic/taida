@@ -90,6 +90,8 @@ pub struct UpgradeE30Report {
     pub files_scanned: usize,
     /// Total legacy ClassLikeDef nodes detected across all files.
     pub legacy_count: usize,
+    /// Total missing explicit RustAddon bindings detected across addon facades.
+    pub addon_binding_count: usize,
     pub proposals: Vec<MigrationProposal>,
 }
 
@@ -107,11 +109,9 @@ impl std::fmt::Display for UpgradeE30Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             UpgradeE30Error::Io(e) => write!(f, "I/O error: {}", e),
-            UpgradeE30Error::CheckFailed { legacy_count } => write!(
-                f,
-                "{} legacy E30 class-like definition(s) need migration",
-                legacy_count
-            ),
+            UpgradeE30Error::CheckFailed { legacy_count } => {
+                write!(f, "{} E30 migration issue(s) need migration", legacy_count)
+            }
         }
     }
 }
@@ -430,6 +430,7 @@ pub fn run(config: UpgradeE30Config) -> Result<UpgradeE30Report, UpgradeE30Error
     let mut report = UpgradeE30Report {
         files_scanned: 0,
         legacy_count: 0,
+        addon_binding_count: 0,
         proposals: Vec::new(),
     };
 
@@ -497,9 +498,50 @@ pub fn run(config: UpgradeE30Config) -> Result<UpgradeE30Report, UpgradeE30Error
         report.proposals.extend(proposals);
     }
 
-    if config.check_only && report.legacy_count > 0 {
+    if let Some((pkg_dir, stem)) = addon_facade_target(&config.path)? {
+        let manifest_functions = read_manifest_functions(&pkg_dir)?;
+        let facade_path = pkg_dir.join("taida").join(format!("{}.td", stem));
+        let source = std::fs::read_to_string(&facade_path)?;
+        let addon_proposals = collect_facade_addon_proposals(&source, &manifest_functions);
+        report.addon_binding_count += addon_proposals.len();
+
+        for p in &addon_proposals {
+            if config.check_only {
+                println!(
+                    "[check] {} missing RustAddon binding: `{}` -> `{} <= RustAddon[\"{}\"](arity <= {})`",
+                    facade_path.display(),
+                    p.fn_name,
+                    p.fn_name,
+                    p.fn_name,
+                    p.arity
+                );
+            } else if config.dry_run {
+                println!(
+                    "[dry-run] {} add RustAddon binding: `{} <= RustAddon[\"{}\"](arity <= {})`",
+                    facade_path.display(),
+                    p.fn_name,
+                    p.fn_name,
+                    p.arity
+                );
+            }
+        }
+
+        if !addon_proposals.is_empty() && !config.check_only && !config.dry_run {
+            let (n, path) = upgrade_facade_file(&pkg_dir, &stem, false, false)?;
+            if n > 0 {
+                println!(
+                    "[upgraded] {} ({} RustAddon binding(s) added)",
+                    path.display(),
+                    n
+                );
+            }
+        }
+    }
+
+    let issue_count = report.legacy_count + report.addon_binding_count;
+    if config.check_only && issue_count > 0 {
         return Err(UpgradeE30Error::CheckFailed {
-            legacy_count: report.legacy_count,
+            legacy_count: issue_count,
         });
     }
 
@@ -595,6 +637,60 @@ fn read_manifest_functions(
         }
     }
     Ok(out)
+}
+
+fn read_manifest_package_id(pkg_dir: &std::path::Path) -> std::io::Result<Option<String>> {
+    let manifest_path = pkg_dir.join("native").join("addon.toml");
+    let raw = std::fs::read_to_string(&manifest_path)?;
+    for line in raw.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if let Some((key, value)) = line.split_once('=')
+            && key.trim() == "package"
+        {
+            let package_id = value
+                .split('#')
+                .next()
+                .unwrap_or(value)
+                .trim()
+                .trim_matches('"')
+                .to_string();
+            if !package_id.is_empty() {
+                return Ok(Some(package_id));
+            }
+        }
+    }
+    Ok(None)
+}
+
+fn addon_facade_target(
+    path: &std::path::Path,
+) -> std::io::Result<Option<(std::path::PathBuf, String)>> {
+    if path.is_dir() && path.join("native").join("addon.toml").exists() {
+        let stem = read_manifest_package_id(path)?
+            .and_then(|id| id.rsplit('/').next().map(|s| s.to_string()))
+            .or_else(|| {
+                path.file_name()
+                    .and_then(|s| s.to_str())
+                    .map(|s| s.to_string())
+            });
+        return Ok(stem.map(|s| (path.to_path_buf(), s)));
+    }
+
+    if path.is_file()
+        && path.extension().and_then(|s| s.to_str()) == Some("td")
+        && let Some(taida_dir) = path.parent()
+        && taida_dir.file_name().and_then(|s| s.to_str()) == Some("taida")
+        && let Some(pkg_dir) = taida_dir.parent()
+        && pkg_dir.join("native").join("addon.toml").exists()
+        && let Some(stem) = path.file_stem().and_then(|s| s.to_str())
+    {
+        return Ok(Some((pkg_dir.to_path_buf(), stem.to_string())));
+    }
+
+    Ok(None)
 }
 
 /// Compute the list of missing RustAddon bindings for a facade source given
@@ -1081,5 +1177,81 @@ mod tests {
         assert_eq!(n, 2);
         assert!(out.contains("RustAddon[\"readKey\"](arity <= 0)"));
         assert!(out.contains("RustAddon[\"terminalSize\"](arity <= 0)"));
+    }
+
+    #[test]
+    fn run_e30_migrates_addon_package_root_facade_bindings() {
+        let tmp = std::env::temp_dir().join(format!(
+            "e30_upgrade_addon_pkg_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(tmp.join("native")).unwrap();
+        std::fs::create_dir_all(tmp.join("taida")).unwrap();
+        std::fs::write(
+            tmp.join("native").join("addon.toml"),
+            r#"abi = 1
+entry = "taida_addon_get_v1"
+package = "taida-lang/demo"
+library = "taida_lang_demo"
+
+[functions]
+foo = 0
+"#,
+        )
+        .unwrap();
+        std::fs::write(tmp.join("taida").join("demo.td"), "<<< @(foo)\n").unwrap();
+
+        let report = run(UpgradeE30Config {
+            path: tmp.clone(),
+            check_only: false,
+            dry_run: false,
+        })
+        .expect("upgrade should succeed");
+        assert_eq!(report.addon_binding_count, 1);
+        let migrated = std::fs::read_to_string(tmp.join("taida").join("demo.td")).unwrap();
+        assert!(migrated.contains("foo <= RustAddon[\"foo\"](arity <= 0)"));
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn run_e30_check_fails_for_missing_addon_facade_bindings() {
+        let tmp = std::env::temp_dir().join(format!(
+            "e30_upgrade_addon_check_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(tmp.join("native")).unwrap();
+        std::fs::create_dir_all(tmp.join("taida")).unwrap();
+        std::fs::write(
+            tmp.join("native").join("addon.toml"),
+            r#"package = "taida-lang/demo"
+
+[functions]
+foo = 0
+"#,
+        )
+        .unwrap();
+        std::fs::write(tmp.join("taida").join("demo.td"), "<<< @(foo)\n").unwrap();
+
+        let err = run(UpgradeE30Config {
+            path: tmp.clone(),
+            check_only: true,
+            dry_run: false,
+        })
+        .expect_err("check should fail");
+        match err {
+            UpgradeE30Error::CheckFailed { legacy_count } => assert_eq!(legacy_count, 1),
+            other => panic!("expected CheckFailed, got {:?}", other),
+        }
+        let unchanged = std::fs::read_to_string(tmp.join("taida").join("demo.td")).unwrap();
+        assert!(!unchanged.contains("RustAddon"));
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }

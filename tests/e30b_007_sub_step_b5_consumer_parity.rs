@@ -170,6 +170,16 @@ fn graph_ai_format_lists_rust_addon_bindings_as_public_functions() {
         "body_summary must reference RustAddon[...] for isTerminal; output: {}",
         json
     );
+    assert!(
+        json.contains("\"returns\": \"Unknown\""),
+        "RustAddon function entries must not expose an empty returns field; output: {}",
+        json
+    );
+    assert!(
+        json.contains("{\"name\": \"_arg0\", \"type\": \"Unknown\"}"),
+        "arity placeholders must carry an Unknown type marker; output: {}",
+        json
+    );
 }
 
 #[test]
