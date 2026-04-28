@@ -113,7 +113,8 @@ pub fn validate_facade(
 /// Collect all symbols that are "available" in a module's top-level scope.
 ///
 /// This includes:
-/// - Local definitions: FuncDef, Assignment, TypeDef, InheritanceDef, EnumDef
+/// - Local definitions: FuncDef, Assignment, ClassLikeDef (BuchiPack / Mold /
+///   Inheritance — E30 Phase 7.5 / E30B-006 で 3 kind を統一登録)、EnumDef
 /// - Imported symbols: `>>> ./other.td => @(sym)` makes `sym` available
 ///
 /// B11B-022: Import-sourced symbols are included so that re-exports are not
@@ -128,19 +129,17 @@ fn collect_defined_symbols(statements: &[Statement]) -> HashSet<String> {
             Statement::Assignment(a) => {
                 defined.insert(a.target.clone());
             }
-            // (E30 Sub-step 2.1) ClassLikeDef + kind dispatch (旧 TypeDef/MoldDef/InheritanceDef を統合)
-            // 注: 旧コードでは MoldDef は defined に入れず Native lowering の symbol kind 解決を
-            // Function fallback に落としていた (silent bug、E30B-006 で解消予定)。
-            // 本 Sub-step 2.1 では旧挙動維持: BuchiPack / Inheritance のみ defined に登録。
-            Statement::ClassLikeDef(cl) => match &cl.kind {
-                crate::parser::ClassLikeKind::BuchiPack
-                | crate::parser::ClassLikeKind::Inheritance { .. } => {
-                    defined.insert(cl.name.clone());
-                }
-                crate::parser::ClassLikeKind::Mold { .. } => {
-                    // 旧挙動: MoldDef は defined に入れない (E30B-006 で再検討)
-                }
-            },
+            // (E30 Phase 7.5 / E30B-006, Lock-F 軸 1) ClassLikeDef は kind に
+            // 関わらず単一概念 (class-like) として defined symbol に登録する。
+            // 旧挙動 (Sub-step 2.1) では Mold kind を defined に入れず、Native
+            // lowering の symbol kind 解決を Function fallback に落としていた
+            // — これは silent bug で、Mold kind class-like を facade 経由で
+            // export したときに `SymbolKind::Function` 誤分類されていた。
+            // E30B-006 で BuchiPack / Mold / Inheritance を統一登録する。
+            Statement::ClassLikeDef(cl) => {
+                let _ = &cl.kind;
+                defined.insert(cl.name.clone());
+            }
             Statement::EnumDef(e) => {
                 defined.insert(e.name.clone());
             }
@@ -201,10 +200,12 @@ pub fn classify_symbol_in_module(
             Statement::FuncDef(f) if f.name == symbol_name => {
                 return Some(SymbolKind::Function);
             }
-            // (E30 Sub-step 2.1) ClassLikeDef + kind dispatch (旧挙動維持: BuchiPack / Inheritance のみ TypeDef SymbolKind)
-            Statement::ClassLikeDef(cl)
-                if cl.name == symbol_name && (cl.is_buchi_pack() || cl.is_inheritance()) =>
-            {
+            // (E30 Phase 7.5 / E30B-006, Lock-F 軸 1) ClassLikeDef は kind に
+            // 関わらず `SymbolKind::TypeDef` として分類する。旧挙動 (Sub-step
+            // 2.1) では Mold kind を分類対象外にしていたため Native lowering
+            // の symbol kind 解決が Function fallback に落ちていた (silent
+            // bug)。E30B-006 で 3 kind を class-like 単一概念に統合した。
+            Statement::ClassLikeDef(cl) if cl.name == symbol_name => {
                 return Some(SymbolKind::TypeDef);
             }
             Statement::Assignment(a) if a.target == symbol_name => {

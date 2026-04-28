@@ -2,7 +2,7 @@
 ///
 /// Provides context-aware completion items:
 /// - Variables and functions defined in the current document
-/// - User-defined types (TypeDef, MoldDef, InheritanceDef)
+/// - User-defined types (ClassLikeDef — BuchiPack / Mold / Inheritance kinds、E30 Phase 7.5 / E30B-006)
 /// - Built-in mold types (30+ operation molds)
 /// - Prelude functions (stdout, stderr, stdin, jsonEncode, jsonPretty, etc.)
 /// - Operators (10 Taida operators)

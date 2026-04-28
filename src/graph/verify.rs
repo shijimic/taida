@@ -1178,29 +1178,38 @@ pub fn structural_summary(program: &Program, file: &str) -> String {
         .filter(|n| n.kind == NodeKind::Function)
         .count();
 
-    // Count types
+    // (E30 Phase 7.5 / E30B-006, Lock-F 軸 2) type-hierarchy node を
+    // `NodeKind::ClassLikeType` 単一 kind に統合。旧分類 (BuchiPack / Mold /
+    // Inheritance) は `metadata["class_like_kind"]` で復元する。
+    // Inheritance kind 内の Error 親判定は `metadata["inheritance_parent"]`
+    // を使う。structural_summary JSON contract (mold_types / error_types
+    // フィールド) は維持する。
     let types = type_graph
         .nodes
         .iter()
-        .filter(|n| {
-            matches!(
-                n.kind,
-                NodeKind::BuchiPackType | NodeKind::MoldType | NodeKind::ErrorType
-            )
-        })
+        .filter(|n| n.kind == NodeKind::ClassLikeType)
         .count();
 
     let mold_types: Vec<String> = type_graph
         .nodes
         .iter()
-        .filter(|n| n.kind == NodeKind::MoldType && n.label != "Mold[T]")
+        .filter(|n| {
+            n.kind == NodeKind::ClassLikeType
+                && n.metadata.get("class_like_kind").map(|s| s.as_str()) == Some("Mold")
+                && n.label != "Mold[T]"
+        })
         .map(|n| n.label.clone())
         .collect();
 
     let error_types: Vec<String> = type_graph
         .nodes
         .iter()
-        .filter(|n| n.kind == NodeKind::ErrorType && n.label != "Error")
+        .filter(|n| {
+            n.kind == NodeKind::ClassLikeType
+                && n.metadata.get("class_like_kind").map(|s| s.as_str()) == Some("Inheritance")
+                && n.metadata.get("inheritance_parent").map(|s| s.as_str()) == Some("Error")
+                && n.label != "Error"
+        })
         .map(|n| n.label.clone())
         .collect();
 
