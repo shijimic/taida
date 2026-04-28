@@ -451,7 +451,7 @@ stdout(msg)                  // "HTTP Error 404"
 引数は受け取りません。`n.toString(16)` のように base / precision を渡そう
 とすると、`taida check` が `[E1508] Method 'toString' takes 0 argument(s)`
 で拒否します。基数指定が必要な場合は `ToRadix[n, base]()` モールド
-（`docs/reference/mold_types.md` 参照）を使います。`ToRadix` は
+（`docs/reference/class_like_types.md` 参照）を使います。`ToRadix` は
 `Lax[Str]` を返すので、通常は `getOrDefault` で unwrap します:
 
 ```taida

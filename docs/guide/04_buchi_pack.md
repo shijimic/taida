@@ -2,6 +2,8 @@
 
 > **PHILOSOPHY.md -- II.** だいじなものはふくろにしまっておきましょう
 
+> **本章は E30 (gen-E 破壊的変更) で再構成されました。** 型定義 (`Pilot = @(...)`) と継承 (`Pilot => NervStaff = @(...)`) は **クラスライク型の単一概念** に統合され、[クラスライク型定義](04_class_like.md) で説明されます。本章では値リテラル `@(...)` / `@[...]` を中心に扱います。旧構文からの移行は [migration_e30.md](migration_e30.md) を参照してください。
+
 ---
 
 ## ぶちパックとは
@@ -12,9 +14,11 @@
 pilot <= @(name <= "Asuka", age <= 14, active <= true)
 ```
 
+ぶちパックはあくまで **値リテラル** の構文です。型を定義する場合は [クラスライク型定義](04_class_like.md) を参照してください。
+
 ---
 
-## 基本構文
+## 値リテラル `@(...)`
 
 ### 値の作成
 
@@ -22,28 +26,13 @@ pilot <= @(name <= "Asuka", age <= 14, active <= true)
 pack <= @(name <= "Asuka", age <= 14, active <= true)
 ```
 
-### クラスライク/型定義
-
-型を定義するときは `=` を使います:
-
-```taida
-Pilot = @(
-  name: Str
-  age: Int
-  active: Bool
-)
-
-// インスタンス化
-rei <= Pilot(name <= "Rei", age <= 14, active <= true)
-```
-
 ### フィールドアクセス
 
 ```taida
 pilot <= @(name <= "Shinji", age <= 14, call_sign <= "Ikari")
 
-pilotName <= pilot.name      // "Shinji"
-pilotAge <= pilot.age        // 14
+pilotName <= pilot.name        // "Shinji"
+pilotAge <= pilot.age          // 14
 pilot_call <= pilot.call_sign  // "Ikari"
 ```
 
@@ -56,12 +45,7 @@ pilot <= @(name <= "Rei")
 sync_rate <= pilot.sync_rate  // コンパイルエラー: フィールド 'sync_rate' は存在しません
 ```
 
-型で定義されたフィールドはデフォルト値を持ちます:
-
-```taida
-Pilot = @(name: Str, call_sign: Str, age: Int)
-rei <= Pilot(name <= "Rei")  // call_sign = "", age = 0
-```
+ただし、クラスライク型として宣言されたフィールドはデフォルト値を持つため、宣言されたフィールドを省略してインスタンス化することは可能です。詳細は [クラスライク型定義 / デフォルト値](04_class_like.md#デフォルト値) を参照してください。
 
 ---
 
@@ -100,73 +84,19 @@ processData items =
 
 ---
 
-## 型の継承（InheritanceDef）
+## 型定義との関係
 
-`=>` 演算子で型の継承を表現します:
+ぶちパックの **値リテラル** (`@(name <= "Asuka")`) と、それを受け取る **型定義** (`Pilot = @(name: Str)`) は別の概念です。E30 では型定義は [クラスライク型定義](04_class_like.md) の単一構文に統一されているため、本章では深入りしません。
 
-```taida
-Pilot = @(
-  name: Str
-  age: Int
-)
+簡単に対応関係を示します:
 
-// Pilot を継承します
-Pilot => NervStaff = @(
-  department: Str
-  rank: Int
-)
-
-staff <= NervStaff(
-  name <= "Ritsuko",
-  age <= 30,
-  department <= "Science",
-  rank <= 2
-)
-
-// 親フィールドにもアクセスできます
-staff.name        // "Ritsuko"
-staff.department  // "Science"
-```
-
-### メソッド内でのフィールドアクセス
-
-メソッド内では、親フィールドも子フィールドも区別なく直接アクセスできます。`self` や `super` は不要です:
-
-```taida
-Pilot = @(
-  name: Str
-  age: Int
-)
-
-Pilot => NervOfficer = @(
-  rank: Int
-  intro =
-    `I'm ${name}, rank ${Str[rank]() ]=> _}, age ${Str[age]() ]=> _}.`
-  => :Str
-)
-
-ritsuko <= NervOfficer(name <= "Ritsuko", age <= 30, rank <= 2)
-greeting <= ritsuko.intro()  // "I'm Ritsuko, rank 2, age 30."
-```
-
----
-
-## 構造的部分型付け
-
-Taida は構造的部分型付けを採用しています。必要なフィールドがあれば互換と見なされ、余分なフィールドは許容されます。
-
-```taida
-// HasName 型は name フィールドだけを要求します
-HasName = @(name: Str)
-
-greet person: HasName =
-  stdout("Hello, " + person.name)
-=> :Void
-
-// Pilot は name フィールドを持つので、HasName として渡せます
-pilot <= @(name <= "Asuka", age <= 14, department <= "Unit-02")
-greet(pilot)  // "Hello, Asuka"
-```
+| 用途 | 構文 | 章 |
+|------|------|-----|
+| 値リテラル (構造化データを作る) | `@(name <= "Asuka")` | 本章 |
+| クラスライク型定義 | `Pilot = @(name: Str)` | [04_class_like.md](04_class_like.md) |
+| インスタンス化 | `Pilot(name <= "Asuka")` | [04_class_like.md](04_class_like.md) |
+| 継承 | `Pilot => NervStaff = @(...)` | [04_class_like.md](04_class_like.md) |
+| 構造的部分型 | `HasName = @(name: Str)` 経由 | [04_class_like.md](04_class_like.md) |
 
 ---
 
@@ -186,34 +116,7 @@ pilot <= @(
 email <= pilot.contact.email  // "rei@nerv.jp"
 ```
 
-### 型定義でのネスト
-
-```taida
-Pilot = @(
-  name: Str
-  age: Int
-  base: @(
-    city: Str
-    zip: Str
-    org: @(
-      code: Str
-      name: Str
-    )
-  )
-)
-
-pilot <= Pilot(
-  name <= "Shinji"
-  age <= 14
-  base <= @(
-    city <= "Tokyo-3"
-    zip <= "999-0003"
-    org <= @(code <= "NERV", name <= "NERV HQ")
-  )
-)
-
-orgCode <= pilot.base.org.code  // "NERV"
-```
+クラスライク型でも同様にネストできます。詳細は [クラスライク型定義 / ネスト構造](04_class_like.md#ネスト構造) を参照してください。
 
 ---
 
@@ -261,7 +164,7 @@ pilot_data <= @(
 pilot_data.sync_rate ]=> rate_value  // 78
 ```
 
-モールディング型の詳細は [モールディング型](05_molding.md) を参照してください。
+モールディング型の詳細は [操作モールド](05_molding.md) を参照してください。
 
 ---
 
@@ -299,13 +202,14 @@ JSON[raw, Pilot]() ]=> pilot
 
 ## まとめ
 
-| 概念 | 構文 |
-|------|------|
-| 値の作成 | `@(field <= value, ...)` |
-| 型定義（TypeDef） | `TypeName = @(field: Type, ...)` |
-| インスタンス化 | `TypeName(field <= value, ...)` |
-| フィールドアクセス | `pack.fieldName` |
-| 型の継承（InheritanceDef） | `Parent => Child = @(...)` |
-| ネスト | `@(inner <= @(field <= value))` |
-| リストリテラル | `@[elem1, elem2, ...]` |
-| JSON 変換 | `JSON[raw, TypeName]() ]=> val` |
+| 概念 | 構文 | 章 |
+|------|------|-----|
+| 値の作成 | `@(field <= value, ...)` | 本章 |
+| フィールドアクセス | `pack.fieldName` | 本章 |
+| ネスト | `@(inner <= @(field <= value))` | 本章 |
+| リストリテラル | `@[elem1, elem2, ...]` | 本章 |
+| JSON 変換 | `JSON[raw, TypeName]() ]=> val` | [03_json.md](03_json.md) |
+| クラスライク型定義 | `Name[?type-args] [=> Parent] = @(...)` | [04_class_like.md](04_class_like.md) |
+| 操作モールド | `Upper[str]()` 等 | [05_molding.md](05_molding.md) |
+
+旧 D 世代までの「型の継承（InheritanceDef）」記述は [クラスライク型定義 / 継承](04_class_like.md#継承) に統合されました。

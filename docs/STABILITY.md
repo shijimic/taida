@@ -19,7 +19,7 @@ Related references:
   (C26 successor, opened 2026-04-25).
 - `.dev/D28_BLOCKERS.md` — breaking changes deferred to the gen-D phase.
 - `docs/reference/addon_manifest.md` — addon manifest schema.
-- `docs/reference/operators.md`, `docs/reference/mold_types.md`,
+- `docs/reference/operators.md`, `docs/reference/class_like_types.md`,
   `docs/reference/standard_library.md`, `docs/reference/standard_methods.md`
   — the surface whose compatibility is pinned by this document.
 
@@ -156,7 +156,7 @@ Specifically covered:
 
 - All ten operators (see §2.1).
 - The `Lax[T]` / `Result[T, E]` / `Gorillax[T]` mold family
-  (`docs/reference/mold_types.md`).
+  (`docs/reference/class_like_types.md`).
 - `Str[...]()` constructor (C22 / C23).
 - Collection primitives (`List`, `HashMap`, `Set`, `Stream`) and
   their method surface.

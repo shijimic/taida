@@ -1,11 +1,16 @@
-# モールディング型リファレンス
+# クラスライク型リファレンス (操作モールド中心)
 
 ## 概要
 
-モールディング型の定義方法と、全モールディング型のリファレンスです。
-概念的な説明は `../guide/05_molding.md` を参照してください。
+Taida のユーザー定義型 (旧 TypeDef / Mold 継承 / Error 継承) は、E30 (gen-E 破壊的変更) で **クラスライク型** の単一構文に統合されました。本リファレンスは class-like 型の中でも特に **操作モールド** (Mold[T] を継承して定義される操作型) の構文・標準モールド一覧・型シグネチャを扱います。
+
+- class-like 単一構文 (`Name[?type-args] [=> Parent] = @(...)`) の概念ガイドは [`../guide/04_class_like.md`](../guide/04_class_like.md) を参照してください
+- 操作モールド (Mold) の概念ガイドは [`../guide/05_molding.md`](../guide/05_molding.md) を参照してください
+- 旧 3 系統 (TypeDef / Mold 継承 / Error 継承) からの移行は [`../guide/migration_e30.md`](../guide/migration_e30.md) を参照してください
 
 > **PHILOSOPHY.md — III.** カタめたいなら、鋳型を作りましょう
+
+> **E30 rename note** — このファイルは旧 `mold_types.md` から rename されました (2026-04-28)。class-like 統一概念のもとで「操作モールド」を扱うリファレンスとして再配置されています。本ファイルが扱う内容 (Mold 基底クラスの header 規則 / `solidify` / `unmold` / 標準モールド全種 / 型シグネチャ一覧) は変わりません。`[E1407]` / `[E1410]` 等の診断コードの意味改訂は Phase 2/3 (parser / checker) で実装と同期 land されるため、`docs/reference/diagnostic_codes.md` 側の記述更新もそのタイミングで行われます (本リファレンスは class-like 統一概念に先行整合)。
 
 ---
 
@@ -28,7 +33,7 @@ MoldInst(String, Vec<Expr>, Vec<BuchiField>, Span)
 
 ## Mold基底クラス
 
-すべてのモールディング型は `Mold[...]` を継承して定義します。
+操作モールドは class-like 単一構文 (`Name[?type-args] [=> Parent] = @(...)`) を `Mold[...]` を親型として用いる特殊化です。すべてのモールディング型は `Mold[...]` を継承して定義します (E30 統一構文では `=> Mold[T]` の形になり、ぶちパック型定義 / Error 型と同じ surface 構文を共有します)。
 
 ```taida
 // 基本形式
@@ -781,7 +786,7 @@ JSON[raw, User]() ]=> user
 | スキーマ | 挙動 |
 |----------|------|
 | プリミティブ (`Int` / `Float` / `Str` / `Bool`) | 型一致なら値、不一致はデフォルト値 |
-| TypeDef（ぶちパック） | フィールド単位で再帰照合 |
+| クラスライク型（ぶちパック） | フィールド単位で再帰照合 |
 | `@[Schema]` | 配列を各要素ごとに再帰照合 |
 | **Enum（C16）** | variant 名の Str と照合し ordinal（`Int`）を返す |
 
@@ -1084,3 +1089,35 @@ Filter[list, isEven]() ]=> result
 | `JSSet[obj, key, value]()` | obj: Molten, key: Str, value: Any | - | Molten |
 | `JSBind[obj, method]()` | obj: Molten, method: Str | - | Molten |
 | `JSSpread[target, source]()` | target: Molten, source: Any | - | Molten |
+
+---
+
+## E30 過渡期 note (旧 `mold_types.md` からの参照者向け)
+
+このファイル `docs/reference/class_like_types.md` は、E30 (gen-E 破壊的変更) 着手時 (2026-04-28) に **旧 `docs/reference/mold_types.md` から rename** されました。git 履歴は `git log --follow docs/reference/class_like_types.md` で追跡できます。
+
+### 何が変わったか (本ファイル)
+
+- ファイル名: `mold_types.md` → `class_like_types.md`
+- タイトル / 概要 (冒頭) を class-like 統一概念向けに再 frame
+- Mold 基底クラスの位置づけを「class-like 単一構文を `Mold[...]` 親型で特殊化したもの」として明示
+- JSON モールドの schema 表で `TypeDef（ぶちパック）` → `クラスライク型（ぶちパック）` に語彙置換
+
+### 何が変わっていないか
+
+- 標準モールド全種 (文字列 / 数値 / リスト / 演算 / 条件 / 型比較 / 型変換 / Lax / JSON / Result / Gorillax / JS 補助) の API・引数・戻り値・semantics
+- `solidify` / `unmold` の正式仕様
+- `[]` / `()` 束縛規則
+- header 記法と `[E1401]` / `[E1407]` / `[E1408]` の発火条件 (※意味再定義は Phase 2/3 で実装と同期 land、`docs/reference/diagnostic_codes.md` も同期更新)
+- 4 バックエンド (Interpreter / JS / Native / WASM-wasi) parity 保証
+
+### 旧パスへの参照を見つけた場合
+
+- 本リポジトリ内の非歴史的 docs (README.md / docs/STABILITY.md / docs/{guide,reference}/ 配下) は Sub-step 1.3 で一斉置換済み
+- `CHANGELOG.md` の **歴史的 release note** (`@b.X` / `@c.X` / `@d.X` 当時の記述) は原文保持 — 当時の事実として `mold_types.md` パスを残しています
+- 外部参照 (ブログ / IDE plugin 設定 / addon README 等) で旧パスが残っている場合は、本ファイル `class_like_types.md` を参照するように更新してください
+
+### 関連 blocker
+
+- E30B-005 (Phase 1 主軸): Docs 全面再構成 (3 系統 → class-like 単一概念) — 本 rename はその Sub-step 1.3
+- E30B-008 (Phase 2/3 同期 land): `[E1407]` / `[E1410]` 意味再定義は parser / checker 実装と同期して land

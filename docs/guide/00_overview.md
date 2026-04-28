@@ -251,23 +251,25 @@ ritchan <= NervStaff(name <= "Ritsuko")  // call_sign = "", age = 0
 | 01 | [型システム](01_types.md) | プリミティブ型、Enum型、コレクション型、モールディング型、デフォルト値 |
 | 02 | [型のガチガチさ](02_strict_typing.md) | 暗黙変換禁止、Lax による安全な操作、JSON エアロック |
 | 03 | [JSON 溶鉄](03_json.md) | JSON の不透明プリミティブ化、スキーマ必須の型変換 |
-| 04 | [ぶちパック](04_buchi_pack.md) | ぶちパック構文 |
+| 04 | [ぶちパック](04_buchi_pack.md) | ぶちパック構文（リテラル中心、E30 Phase 1.2 で縮約予定） |
+| 04+ | [クラスライク型定義](04_class_like.md) | E30 統一構文 (`Name[?type-args] [=> Parent] = @(...)`)、3 系統統合 |
 | 05 | [モールディング](05_molding.md) | モールディング型（操作モールド全種） |
 | 06 | [リスト操作](06_lists.md) | リスト操作（モールド + 状態チェックメソッド） |
 | 07 | [制御フロー](07_control_flow.md) | 条件分岐、パターンマッチ |
 | 08 | [エラー処理](08_error_handling.md) | Lax + throw/\|== + ゴリラ天井 |
-| 09 | [関数](09_functions.md) | 関数定義、パイプライン、末尾再帰 |
+| 09 | [関数](09_functions.md) | 関数定義、パイプライン、末尾再帰、defaultFn (E30 Phase 6 で追記) |
 | 10 | [モジュール](10_modules.md) | モジュールシステム（プリリュード、インポート/エクスポート） |
 | 11 | [非同期処理](11_async.md) | Async[T]、]=> await |
 | 12 | [イントロスペクション](12_introspection.md) | 構造的イントロスペクション |
 | 13 | [アドオン作成](13_creating_addons.md) | Rust アドオンの作成とプレビルド配布 |
+| - | [E30 移行ガイド](migration_e30.md) | D29 → `@e.30` 移行手順 + breaking points 一覧 |
 
 ### リファレンス
 
 | ドキュメント | 内容 |
 |------------|------|
 | [演算子リファレンス](../reference/operators.md) | 10種の演算子 + 算術・比較・論理 |
-| [モールディング型リファレンス](../reference/mold_types.md) | 全モールドの型シグネチャ |
+| [クラスライク型リファレンス](../reference/class_like_types.md) | クラスライク型 / 全モールドの型シグネチャ (E30 統一) |
 | [命名規則](../reference/naming_conventions.md) | 識別子の命名規則 |
 | [CLI リファレンス](../reference/cli.md) | 実装準拠のコマンド一覧とオプション |
 | [グラフモデル](../reference/graph_model.md) | 5つのグラフビュー |

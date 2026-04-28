@@ -1,4 +1,4 @@
-// D-2b: docs/reference/mold_types.md code examples
+// D-2b: docs/reference/class_like_types.md code examples (formerly mold_types.md, renamed in E30 Phase 1 Sub-step 1.3)
 
 // String molds
 stdout(Upper["hello"]())
