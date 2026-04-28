@@ -2509,4 +2509,197 @@ p.y.hasValue"#,
         let result = eval_ok("Div[1,0]().__default");
         assert_eq!(result, Value::Int(0), "Div by zero default should be 0");
     }
+
+    // ── E30B-007 / Lock-G: explicit RustAddon[...] binding ──
+
+    /// Lock-G: outside of a facade load context, evaluating a
+    /// `RustAddon["fn"](arity <= 0)` expression must reject with
+    /// `[E1412]` because user-side code is not allowed to construct
+    /// addon sentinels directly.
+    #[test]
+    fn test_e30b_007_rust_addon_outside_facade_context_rejects() {
+        let mut interp = Interpreter::new();
+        let (program, errors) = crate::parser::parse(r#"x <= RustAddon["foo"](arity <= 0)"#);
+        assert!(errors.is_empty(), "parse: {:?}", errors);
+        let res = interp.eval_program(&program);
+        let err = res.expect_err("must reject without facade context");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("[E1412]"),
+            "expected [E1412] diagnostic, got: {}",
+            msg
+        );
+        assert!(
+            msg.contains("inside an addon facade") || msg.contains("facade"),
+            "diagnostic must mention facade requirement, got: {}",
+            msg
+        );
+    }
+
+    /// Lock-G: inside a facade load context with a matching manifest
+    /// arity, `RustAddon["fn"](arity <= 0)` evaluates to the addon
+    /// sentinel string identical to what `define_force` pre-injection
+    /// produces today.
+    #[test]
+    fn test_e30b_007_rust_addon_inside_facade_resolves_to_sentinel() {
+        let mut interp = Interpreter::new();
+        // Simulate facade load context.
+        let mut arities = std::collections::BTreeMap::<String, u32>::new();
+        arities.insert("terminalSize".to_string(), 0);
+        interp.loading_addon_facade_ctx = Some(("taida-lang/terminal".to_string(), arities));
+
+        let (program, errors) =
+            crate::parser::parse(r#"terminalSize <= RustAddon["terminalSize"](arity <= 0)"#);
+        assert!(errors.is_empty(), "parse: {:?}", errors);
+        interp.eval_program(&program).expect("eval succeeds");
+
+        let v = interp
+            .env
+            .get("terminalSize")
+            .expect("binding exists after facade-context eval");
+        let s = match v {
+            Value::Str(arc) => arc.to_string(),
+            other => panic!("expected Str sentinel, got {:?}", other),
+        };
+        assert_eq!(
+            s, "__taida_addon_call::taida-lang/terminal::terminalSize",
+            "Lock-G: explicit binding must produce the same sentinel as \
+             the legacy pre-inject path"
+        );
+    }
+
+    /// Lock-G drift check: declared `arity` in the binding must
+    /// match the manifest `[functions]` arity. Mismatch → [E1412].
+    #[test]
+    fn test_e30b_007_rust_addon_arity_drift_rejects() {
+        let mut interp = Interpreter::new();
+        let mut arities = std::collections::BTreeMap::<String, u32>::new();
+        arities.insert("terminalSize".to_string(), 0); // manifest says arity=0
+        interp.loading_addon_facade_ctx = Some(("taida-lang/terminal".to_string(), arities));
+
+        // Facade declares arity=2 → drift.
+        let (program, errors) =
+            crate::parser::parse(r#"terminalSize <= RustAddon["terminalSize"](arity <= 2)"#);
+        assert!(errors.is_empty(), "parse: {:?}", errors);
+        let res = interp.eval_program(&program);
+        let err = res.expect_err("arity drift must reject");
+        let msg = err.to_string();
+        assert!(msg.contains("[E1412]"), "expected [E1412], got: {}", msg);
+        assert!(
+            msg.contains("drift") || msg.contains("arity"),
+            "diagnostic must mention arity drift, got: {}",
+            msg
+        );
+    }
+
+    /// Lock-G: function name must exist in the addon manifest.
+    #[test]
+    fn test_e30b_007_rust_addon_unknown_fn_rejects() {
+        let mut interp = Interpreter::new();
+        let arities = std::collections::BTreeMap::<String, u32>::new();
+        interp.loading_addon_facade_ctx = Some(("taida-lang/test".to_string(), arities));
+
+        let (program, errors) =
+            crate::parser::parse(r#"f <= RustAddon["doesNotExist"](arity <= 0)"#);
+        assert!(errors.is_empty(), "parse: {:?}", errors);
+        let res = interp.eval_program(&program);
+        let err = res.expect_err("unknown fn must reject");
+        let msg = err.to_string();
+        assert!(msg.contains("[E1412]"), "expected [E1412], got: {}", msg);
+        assert!(
+            msg.contains("not declared") || msg.contains("manifest"),
+            "diagnostic must mention manifest absence, got: {}",
+            msg
+        );
+    }
+
+    /// Lock-G surface: function name MUST be a string literal.
+    /// IntLit (or any non-string) → [E1412].
+    #[test]
+    fn test_e30b_007_rust_addon_non_string_fn_arg_rejects() {
+        let mut interp = Interpreter::new();
+        let mut arities = std::collections::BTreeMap::<String, u32>::new();
+        arities.insert("foo".to_string(), 0);
+        interp.loading_addon_facade_ctx = Some(("taida-lang/test".to_string(), arities));
+
+        let (program, errors) = crate::parser::parse(r#"f <= RustAddon[1](arity <= 0)"#);
+        assert!(errors.is_empty(), "parse: {:?}", errors);
+        let res = interp.eval_program(&program);
+        let err = res.expect_err("non-string fn arg must reject");
+        let msg = err.to_string();
+        assert!(msg.contains("[E1412]"), "expected [E1412], got: {}", msg);
+        assert!(
+            msg.contains("string literal"),
+            "diagnostic must mention string literal requirement, got: {}",
+            msg
+        );
+    }
+
+    /// E30B-007 sub-step B-5 / Lock-G Sub-G4 (2026-04-28): inside an
+    /// addon facade load context, a **bare reference** to a manifest
+    /// function (without `RustAddon["..."]` binding) must reject with
+    /// `[E1413]` and a migration hint pointing to the explicit binding
+    /// form. This is the legacy implicit pre-inject removal verdict.
+    #[test]
+    fn test_e30b_007_b5_legacy_bare_reference_rejects_with_e1413() {
+        let mut interp = Interpreter::new();
+        let mut arities = std::collections::BTreeMap::<String, u32>::new();
+        arities.insert("terminalSize".to_string(), 0);
+        interp.loading_addon_facade_ctx = Some(("taida-lang/terminal".to_string(), arities));
+
+        // Bare reference to a manifest function — no explicit binding.
+        // In @e.30 this must reject with [E1413] (no implicit pre-inject).
+        let (program, errors) = crate::parser::parse("size <= terminalSize()\n");
+        assert!(errors.is_empty(), "parse: {:?}", errors);
+        let res = interp.eval_program(&program);
+        let err = res.expect_err("bare reference must reject in @e.30");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("[E1413]"),
+            "expected [E1413] diagnostic for legacy bare reference, got: {}",
+            msg
+        );
+        assert!(
+            msg.contains("RustAddon"),
+            "diagnostic must point to the RustAddon[...] binding form, got: {}",
+            msg
+        );
+        assert!(
+            msg.contains("taida upgrade --e30") || msg.contains("upgrade"),
+            "diagnostic must reference the migration tool, got: {}",
+            msg
+        );
+        assert!(
+            msg.contains("terminalSize"),
+            "diagnostic must name the offending fn, got: {}",
+            msg
+        );
+    }
+
+    /// E30B-007 sub-step B-5: outside an addon facade load context, an
+    /// undefined identifier still surfaces the generic message
+    /// (`Undefined variable: '...'`) — `[E1413]` is **not** spuriously
+    /// emitted for non-facade callers.
+    #[test]
+    fn test_e30b_007_b5_e1413_only_in_facade_context() {
+        let mut interp = Interpreter::new();
+        // No facade context.
+        assert!(interp.loading_addon_facade_ctx.is_none());
+
+        let (program, errors) = crate::parser::parse("y <= unknownFn()\n");
+        assert!(errors.is_empty(), "parse: {:?}", errors);
+        let res = interp.eval_program(&program);
+        let err = res.expect_err("undefined ident must reject");
+        let msg = err.to_string();
+        assert!(
+            !msg.contains("[E1413]"),
+            "[E1413] must not fire outside facade context, got: {}",
+            msg
+        );
+        assert!(
+            msg.contains("Undefined variable"),
+            "expected generic 'Undefined variable' message, got: {}",
+            msg
+        );
+    }
 }

@@ -56,8 +56,7 @@
 //! references — those require global rename which is out of scope.
 
 use crate::parser::{
-    BuchiField, CondArm, Expr, FieldDef, FuncDef, MoldDef, Param, Program, Statement, TypeDef,
-    TypeExpr,
+    BuchiField, ClassLikeDef, CondArm, Expr, FieldDef, FuncDef, Param, Program, Statement, TypeExpr,
 };
 
 /// Returns true if `name` is a single-character ASCII upper letter
@@ -292,19 +291,22 @@ impl UpgradeVisitor {
             Statement::Expr(e) => self.visit_expr(e),
             Statement::Assignment(a) => self.visit_expr(&a.value),
             Statement::FuncDef(f) => self.visit_func_def(f),
-            Statement::TypeDef(td) => self.visit_type_def(td),
-            Statement::MoldDef(md) => self.visit_mold_def(md),
-            Statement::InheritanceDef(id) => {
-                for f in &id.fields {
-                    self.maybe_rewrite_field_def(f);
-                    if let Some(default) = &f.default_value {
-                        self.visit_expr(default);
-                    }
-                    if let Some(method) = &f.method_def {
-                        self.visit_func_def(method);
+            // (E30 Sub-step 2.1) ClassLikeDef + kind dispatch
+            Statement::ClassLikeDef(cl) => match &cl.kind {
+                crate::parser::ClassLikeKind::BuchiPack => self.visit_class_like_def(cl),
+                crate::parser::ClassLikeKind::Mold { .. } => self.visit_class_like_def(cl),
+                crate::parser::ClassLikeKind::Inheritance { .. } => {
+                    for f in &cl.fields {
+                        self.maybe_rewrite_field_def(f);
+                        if let Some(default) = &f.default_value {
+                            self.visit_expr(default);
+                        }
+                        if let Some(method) = &f.method_def {
+                            self.visit_func_def(method);
+                        }
                     }
                 }
-            }
+            },
             Statement::ErrorCeiling(ec) => {
                 for s in &ec.handler_body {
                     self.visit_statement(s);
@@ -318,20 +320,10 @@ impl UpgradeVisitor {
         }
     }
 
-    fn visit_type_def(&mut self, td: &TypeDef) {
-        for f in &td.fields {
-            self.maybe_rewrite_field_def(f);
-            if let Some(default) = &f.default_value {
-                self.visit_expr(default);
-            }
-            if let Some(method) = &f.method_def {
-                self.visit_func_def(method);
-            }
-        }
-    }
-
-    fn visit_mold_def(&mut self, md: &MoldDef) {
-        for f in &md.fields {
+    /// (E30 Sub-step 2.1) BuchiPack / Mold kind の ClassLikeDef を visit。
+    /// 旧 visit_type_def / visit_mold_def を統合。
+    fn visit_class_like_def(&mut self, cl: &ClassLikeDef) {
+        for f in &cl.fields {
             self.maybe_rewrite_field_def(f);
             if let Some(default) = &f.default_value {
                 self.visit_expr(default);
@@ -584,32 +576,9 @@ impl<'a> FieldAccessRewriter<'a> {
                     self.visit_statement(s);
                 }
             }
-            Statement::TypeDef(td) => {
-                for f in &td.fields {
-                    if let Some(default) = &f.default_value {
-                        self.visit_expr(default);
-                    }
-                    if let Some(method) = &f.method_def {
-                        for s in &method.body {
-                            self.visit_statement(s);
-                        }
-                    }
-                }
-            }
-            Statement::MoldDef(md) => {
-                for f in &md.fields {
-                    if let Some(default) = &f.default_value {
-                        self.visit_expr(default);
-                    }
-                    if let Some(method) = &f.method_def {
-                        for s in &method.body {
-                            self.visit_statement(s);
-                        }
-                    }
-                }
-            }
-            Statement::InheritanceDef(id) => {
-                for f in &id.fields {
+            // (E30 Sub-step 2.1) ClassLikeDef + kind dispatch (旧 TypeDef/MoldDef/InheritanceDef を統合)
+            Statement::ClassLikeDef(cl) => {
+                for f in &cl.fields {
                     if let Some(default) = &f.default_value {
                         self.visit_expr(default);
                     }

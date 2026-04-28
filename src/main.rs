@@ -1098,17 +1098,22 @@ fn print_upgrade_help() {
 Usage:
   taida upgrade [--check] [--gen GEN] [--label LABEL] [--version VERSION]
   taida upgrade --d28 [--check] [--dry-run] <PATH>
+  taida upgrade --e30 [--check] [--dry-run] <PATH>
 
 Options:
   --check          Check for updates without installing (binary mode)
-                   or report non-compliant files without rewriting (--d28 mode)
+                   or report non-compliant files without rewriting (--d28/--e30 mode)
   --gen GEN        Filter by generation (e.g. b)
   --label LABEL    Filter by label (e.g. rc2)
   --version VER    Upgrade to an exact version (e.g. @b.10.rc2)
   --d28 PATH       D28B-007 code-migration mode: rewrite .td files to comply
                    with the D28B-001 naming rules. Run `taida upgrade --d28
                    --help` for details.
-  --dry-run        (--d28 only) Print rewrites without modifying files.
+  --e30 PATH       E30B-001 / E30B-007 code-migration mode: rewrite legacy
+                   `Mold[T] => Foo[T] = @(...)` syntax and add missing
+                   explicit RustAddon facade bindings. Run `taida upgrade
+                   --e30 --help` for details.
+  --dry-run        (--d28/--e30 only) Print rewrites without modifying files.
 
 Notes:
   --gen and --label can be combined.
@@ -1123,7 +1128,9 @@ Examples:
   taida upgrade --gen b
   taida upgrade --version @b.10.rc2
   taida upgrade --d28 examples/03_buchi_pack.td
-  taida upgrade --d28 --check src/"
+  taida upgrade --d28 --check src/
+  taida upgrade --e30 examples/05_molding.td
+  taida upgrade --e30 --check src/"
     );
 }
 
@@ -1142,6 +1149,16 @@ fn run_upgrade(args: &[String]) {
     // mode (which is the default behaviour without --d28).
     if args.iter().any(|a| a == "--d28") {
         run_upgrade_d28(args);
+        return;
+    }
+
+    // ── E30B-001 / E30B-007: `taida upgrade --e30 <path>` ──
+    // Detects the --e30 flag and delegates to `taida::upgrade_e30::run`.
+    // Migrates legacy `Mold[T] => Foo[T] = @(...)` syntax to the unified
+    // `Name[?type-args] [=> Parent] = @(...)` form. Phase 7 で完成予定。
+    // 統合先: E31 `taida way migrate --e30` ハブ (E31B-004 subcommand 統合候補)。
+    if args.iter().any(|a| a == "--e30") {
+        run_upgrade_e30(args);
         return;
     }
 
@@ -1331,6 +1348,148 @@ Examples:
   taida upgrade --d28 examples/03_buchi_pack.td
   taida upgrade --d28 --check src/
   taida upgrade --d28 --dry-run my_project/
+"
+    );
+}
+
+/// E30B-001 / Lock-E: `taida upgrade --e30 <path>` — AST-aware migration.
+///
+/// Scans `.td` source files for legacy `Mold[T] => Foo[T] = @(...)` syntax and
+/// migrates to the unified `Name[?type-args] [=> Parent] = @(...)` form.
+/// For addon package roots / facade files, also inserts missing explicit
+/// `RustAddon["fn"](arity <= N)` bindings required by E30B-007.
+///
+/// Lock-E verdict (2026-04-28) 整合:
+///   - 統合先: E31 `taida way migrate --e30` ハブ (E31B-004 subcommand 統合候補)
+///   - D28 前例 `taida upgrade --d28` パターンを継承
+///   - deprecation policy: E gen は **deprecation なし、即破壊的変更**
+///
+/// Flags:
+///   --e30          Activate E30 code-migration mode (required)
+///   --check        Report legacy syntax that would migrate, exit 1 if any
+///   --dry-run      Print proposed migrations but do not modify files
+///   <PATH>         File or directory to process (recurses into directories)
+#[cfg(feature = "community")]
+fn run_upgrade_e30(args: &[String]) {
+    use std::path::PathBuf;
+    use taida::upgrade_e30::{UpgradeE30Config, UpgradeE30Error, run};
+
+    let mut path: Option<PathBuf> = None;
+    let mut check_only = false;
+    let mut dry_run = false;
+
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--e30" => {} // already detected
+            "--help" | "-h" => {
+                print_upgrade_e30_help();
+                return;
+            }
+            "--check" => {
+                check_only = true;
+            }
+            "--dry-run" => {
+                dry_run = true;
+            }
+            other if other.starts_with("--") => {
+                eprintln!("Error: unknown option '{}' for upgrade --e30", other);
+                eprintln!("Run `taida upgrade --e30 --help` for usage.");
+                std::process::exit(1);
+            }
+            other => {
+                if path.is_some() {
+                    eprintln!("Error: only one path argument is allowed");
+                    std::process::exit(1);
+                }
+                path = Some(PathBuf::from(other));
+            }
+        }
+        i += 1;
+    }
+
+    let Some(path) = path else {
+        eprintln!("Error: --e30 requires a path argument");
+        eprintln!("Run `taida upgrade --e30 --help` for usage.");
+        std::process::exit(1);
+    };
+
+    if !path.exists() {
+        eprintln!("Error: path does not exist: {}", path.display());
+        std::process::exit(1);
+    }
+
+    let config = UpgradeE30Config {
+        path,
+        check_only,
+        dry_run,
+    };
+
+    match run(config) {
+        Ok(report) => {
+            if report.legacy_count == 0 {
+                println!(
+                    "All {} file(s) scanned compliant with E30 unified class-like syntax.",
+                    report.files_scanned
+                );
+            } else if dry_run {
+                println!(
+                    "[dry-run] {} legacy class-like definition(s) across {} file(s) would migrate.",
+                    report.legacy_count, report.files_scanned
+                );
+            } else {
+                println!(
+                    "Scanned {} file(s); migrated {} legacy class-like definition(s) and {} RustAddon binding(s).",
+                    report.files_scanned, report.legacy_count, report.addon_binding_count
+                );
+            }
+        }
+        Err(UpgradeE30Error::CheckFailed { legacy_count }) => {
+            eprintln!(
+                "{} legacy class-like definition(s) need migration to E30 unified syntax.",
+                legacy_count
+            );
+            std::process::exit(1);
+        }
+        Err(e) => {
+            eprintln!("Error: {}", e);
+            std::process::exit(1);
+        }
+    }
+}
+
+#[cfg(feature = "community")]
+fn print_upgrade_e30_help() {
+    println!(
+        "\
+Usage:
+  taida upgrade --e30 [--check] [--dry-run] <PATH>
+
+Description:
+  Migrates .td source files from legacy class-like syntax to the unified E30
+  form `Name[?type-args] [=> Parent] = @(...)`. Operates on parsed AST so
+  detection is robust against whitespace/comment variations.
+
+  When <PATH> is an addon package root or `<pkg>/taida/<stem>.td` facade,
+  also inserts missing explicit `RustAddon[\"fn\"](arity <= N)` bindings from
+  `native/addon.toml`.
+
+  Lock-E verdict (2026-04-28) per .dev/E30_DESIGN.md:
+    - 統合先: E31 `taida way migrate --e30` ハブ (E31B-004 統合候補)
+    - 本 subcommand は D28 前例 `taida upgrade --d28` を踏襲
+    - deprecation policy: E gen は deprecation なし、即破壊的変更
+
+Flags:
+  --e30          Activate E30 code-migration mode (required for this mode).
+  --check        Report legacy syntax that would migrate; exit non-zero if any
+                 legacy form is detected. No files are modified.
+  --dry-run      Print proposed migrations but do not modify files.
+  -h, --help     Show this help.
+
+Examples:
+  taida upgrade --e30 examples/05_molding.td
+  taida upgrade --e30 --check src/
+  taida upgrade --e30 --dry-run my_project/
 "
     );
 }
@@ -3456,23 +3615,14 @@ fn scan_stmt_for_todo(stmt: &Statement, file: &str, out: &mut TodoScanResult) {
     match stmt {
         Statement::Expr(expr) => scan_expr_for_todo(expr, file, out),
         Statement::EnumDef(_) => {}
-        Statement::TypeDef(td) => {
-            for field in &td.fields {
+        // (E30 Sub-step 2.1) ClassLikeDef + kind dispatch (旧 TypeDef/MoldDef/InheritanceDef を統合)
+        Statement::ClassLikeDef(cl) => {
+            for field in &cl.fields {
                 scan_field_defaults(field, file, out);
             }
         }
         Statement::FuncDef(fd) => scan_func_for_todo(fd, file, out),
         Statement::Assignment(assign) => scan_expr_for_todo(&assign.value, file, out),
-        Statement::MoldDef(md) => {
-            for field in &md.fields {
-                scan_field_defaults(field, file, out);
-            }
-        }
-        Statement::InheritanceDef(idf) => {
-            for field in &idf.fields {
-                scan_field_defaults(field, file, out);
-            }
-        }
         Statement::ErrorCeiling(ec) => {
             for stmt in &ec.handler_body {
                 scan_stmt_for_todo(stmt, file, out);

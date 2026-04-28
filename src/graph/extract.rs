@@ -752,6 +752,42 @@ impl GraphExtractor {
                     }
                 }
 
+                // (E30B-007 sub-step B-5 / Lock-G Sub-G5、2026-04-28)
+                // explicit `Name <= RustAddon["fn"](arity <= N)` binding
+                // を module graph に **public function** node として追加。
+                // AST 上は Assignment で表現されるが、addon-backed callable
+                // という contract に従い、graph view では Function node 扱い。
+                // metadata には source = "rust_addon"、addon_fn_name、arity
+                // を記録、consumer (introspection / 可視化 tool) が判別可能。
+                Statement::Assignment(assign) if assign.as_rust_addon_binding().is_some() => {
+                    let span = &assign.span;
+                    let (fn_name, arity) = assign.as_rust_addon_binding().expect("checked");
+                    let fn_id =
+                        Graph::make_id(&self.file, span.line, span.column, &NodeKind::Function);
+                    let mut meta = HashMap::new();
+                    meta.insert("source".to_string(), "rust_addon".to_string());
+                    meta.insert("addon_fn_name".to_string(), fn_name);
+                    meta.insert("arity".to_string(), arity.to_string());
+                    graph.add_node(GraphNode {
+                        id: fn_id.clone(),
+                        kind: NodeKind::Function,
+                        label: assign.target.clone(),
+                        location: Location {
+                            file: self.file.clone(),
+                            line: span.line,
+                            column: span.column,
+                        },
+                        metadata: meta,
+                    });
+                    graph.add_edge(GraphEdge {
+                        source: module_id.clone(),
+                        target: fn_id,
+                        kind: EdgeKind::SymbolRef,
+                        label: format!("defines {}", assign.target),
+                        metadata: HashMap::new(),
+                    });
+                }
+
                 _ => {}
             }
         }
@@ -767,120 +803,107 @@ impl GraphExtractor {
         graph.source_files.push(self.file.clone());
 
         for stmt in &program.statements {
-            match stmt {
-                Statement::TypeDef(td) => {
-                    let span = &td.span;
-                    let id = Graph::make_id(
-                        &self.file,
-                        span.line,
-                        span.column,
-                        &NodeKind::BuchiPackType,
-                    );
-                    graph.add_node(GraphNode {
-                        id,
-                        kind: NodeKind::BuchiPackType,
-                        label: td.name.clone(),
-                        location: Location {
-                            file: self.file.clone(),
-                            line: span.line,
-                            column: span.column,
-                        },
-                        metadata: HashMap::new(),
-                    });
+            // (E30 Phase 7.5 / E30B-006, Lock-F 軸 2) ClassLikeDef → 単一
+            // `NodeKind::ClassLikeType` + 単一 `EdgeKind::ClassLikeInheritance`
+            // (旧 BuchiPackType / MoldType / ErrorType / MoldInheritance /
+            // ErrorInheritance を統合)。surface 上の旧 3 系統 (BuchiPack / Mold /
+            // Inheritance) は metadata で記録し、structural_summary 等の
+            // consumer はそれを参照して旧分類を復元する。
+            if let Statement::ClassLikeDef(cl) = stmt {
+                let span = &cl.span;
+                let kind_label = match &cl.kind {
+                    crate::parser::ClassLikeKind::BuchiPack => "BuchiPack",
+                    crate::parser::ClassLikeKind::Mold { .. } => "Mold",
+                    crate::parser::ClassLikeKind::Inheritance { .. } => "Inheritance",
+                };
+                let id =
+                    Graph::make_id(&self.file, span.line, span.column, &NodeKind::ClassLikeType);
+                let mut metadata = HashMap::new();
+                metadata.insert("class_like_kind".to_string(), kind_label.to_string());
+                if let crate::parser::ClassLikeKind::Inheritance { parent, .. } = &cl.kind {
+                    metadata.insert("inheritance_parent".to_string(), parent.clone());
                 }
+                graph.add_node(GraphNode {
+                    id: id.clone(),
+                    kind: NodeKind::ClassLikeType,
+                    label: cl.name.clone(),
+                    location: Location {
+                        file: self.file.clone(),
+                        line: span.line,
+                        column: span.column,
+                    },
+                    metadata,
+                });
 
-                Statement::MoldDef(md) => {
-                    let span = &md.span;
-                    let id =
-                        Graph::make_id(&self.file, span.line, span.column, &NodeKind::MoldType);
-                    graph.add_node(GraphNode {
-                        id: id.clone(),
-                        kind: NodeKind::MoldType,
-                        label: md.name.clone(),
-                        location: Location {
-                            file: self.file.clone(),
-                            line: span.line,
-                            column: span.column,
-                        },
-                        metadata: HashMap::new(),
-                    });
+                match &cl.kind {
+                    crate::parser::ClassLikeKind::BuchiPack => {
+                        // 単独定義 — inheritance edge なし
+                    }
+                    crate::parser::ClassLikeKind::Mold { .. } => {
+                        // Mold[T] base node + 単一 ClassLikeInheritance edge
+                        let mold_base_id = "builtin:Mold".to_string();
+                        let mut base_metadata = HashMap::new();
+                        base_metadata.insert("class_like_kind".to_string(), "Mold".to_string());
+                        graph.add_node(GraphNode {
+                            id: mold_base_id.clone(),
+                            kind: NodeKind::ClassLikeType,
+                            label: "Mold[T]".to_string(),
+                            location: Location {
+                                file: "builtin".to_string(),
+                                line: 0,
+                                column: 0,
+                            },
+                            metadata: base_metadata,
+                        });
+                        graph.add_edge(GraphEdge {
+                            source: mold_base_id,
+                            target: id,
+                            kind: EdgeKind::ClassLikeInheritance,
+                            label: "Mold[T] =>".to_string(),
+                            metadata: HashMap::new(),
+                        });
+                    }
+                    crate::parser::ClassLikeKind::Inheritance { parent, .. } => {
+                        // 親型 ClassLikeType node + inheritance edge
+                        // Lock-F 軸 2: Mold/Error/その他親 の区別は edge level では
+                        // 持たず、Error 親のときのみ ClassLikeInheritance edge、
+                        // それ以外 (TypeDef inheritance) は StructuralSubtype edge
+                        // を維持する (StructuralSubtype は class-like 統合とは
+                        // 直交する別概念のため Lock-F 範囲外)。
+                        let parent_id = format!("type:{}", parent);
+                        let mut parent_metadata = HashMap::new();
+                        parent_metadata
+                            .insert("class_like_kind".to_string(), "Inheritance".to_string());
+                        if parent == "Error" {
+                            parent_metadata
+                                .insert("inheritance_parent".to_string(), "Error".to_string());
+                        }
+                        graph.add_node(GraphNode {
+                            id: parent_id.clone(),
+                            kind: NodeKind::ClassLikeType,
+                            label: parent.clone(),
+                            location: Location {
+                                file: self.file.clone(),
+                                line: span.line,
+                                column: span.column,
+                            },
+                            metadata: parent_metadata,
+                        });
 
-                    // MoldInheritance edge from Mold[T] to this type
-                    let mold_base_id = "builtin:Mold".to_string();
-                    graph.add_node(GraphNode {
-                        id: mold_base_id.clone(),
-                        kind: NodeKind::MoldType,
-                        label: "Mold[T]".to_string(),
-                        location: Location {
-                            file: "builtin".to_string(),
-                            line: 0,
-                            column: 0,
-                        },
-                        metadata: HashMap::new(),
-                    });
-                    graph.add_edge(GraphEdge {
-                        source: mold_base_id,
-                        target: id,
-                        kind: EdgeKind::MoldInheritance,
-                        label: "Mold[T] =>".to_string(),
-                        metadata: HashMap::new(),
-                    });
+                        let edge_kind = if parent == "Error" {
+                            EdgeKind::ClassLikeInheritance
+                        } else {
+                            EdgeKind::StructuralSubtype
+                        };
+                        graph.add_edge(GraphEdge {
+                            source: parent_id,
+                            target: id,
+                            kind: edge_kind,
+                            label: format!("{} => {}", parent, cl.name),
+                            metadata: HashMap::new(),
+                        });
+                    }
                 }
-
-                Statement::InheritanceDef(inh) => {
-                    let span = &inh.span;
-
-                    // Check if this is Error inheritance
-                    let (parent_kind, child_kind, edge_kind) = if inh.parent == "Error" {
-                        (
-                            NodeKind::ErrorType,
-                            NodeKind::ErrorType,
-                            EdgeKind::ErrorInheritance,
-                        )
-                    } else {
-                        (
-                            NodeKind::BuchiPackType,
-                            NodeKind::BuchiPackType,
-                            EdgeKind::StructuralSubtype,
-                        )
-                    };
-
-                    let parent_id = format!("type:{}", inh.parent);
-                    graph.add_node(GraphNode {
-                        id: parent_id.clone(),
-                        kind: parent_kind,
-                        label: inh.parent.clone(),
-                        location: Location {
-                            file: self.file.clone(),
-                            line: span.line,
-                            column: span.column,
-                        },
-                        metadata: HashMap::new(),
-                    });
-
-                    let child_id = Graph::make_id(&self.file, span.line, span.column, &child_kind);
-                    graph.add_node(GraphNode {
-                        id: child_id.clone(),
-                        kind: child_kind,
-                        label: inh.child.clone(),
-                        location: Location {
-                            file: self.file.clone(),
-                            line: span.line,
-                            column: span.column,
-                        },
-                        metadata: HashMap::new(),
-                    });
-
-                    graph.add_edge(GraphEdge {
-                        source: parent_id,
-                        target: child_id,
-                        kind: edge_kind,
-                        label: format!("{} => {}", inh.parent, inh.child),
-                        metadata: HashMap::new(),
-                    });
-                }
-
-                _ => {}
             }
         }
 
@@ -1735,18 +1758,21 @@ mod tests {
 
     #[test]
     fn test_type_hierarchy_typedef() {
+        // (E30 Phase 7.5 / E30B-006) NodeKind::BuchiPackType → ClassLikeType に統合。
+        // 旧分類は metadata["class_like_kind"] で復元可能。
         let source = "Person = @(name: Str, age: Int)";
         let graph = parse_and_extract(source, GraphView::TypeHierarchy);
-        assert!(
-            graph
-                .nodes
-                .iter()
-                .any(|n| n.label == "Person" && n.kind == NodeKind::BuchiPackType)
-        );
+        assert!(graph.nodes.iter().any(|n| {
+            n.label == "Person"
+                && n.kind == NodeKind::ClassLikeType
+                && n.metadata.get("class_like_kind").map(|s| s.as_str()) == Some("BuchiPack")
+        }));
     }
 
     #[test]
     fn test_type_hierarchy_error_inheritance() {
+        // (E30 Phase 7.5 / E30B-006) EdgeKind::ErrorInheritance → ClassLikeInheritance に統合。
+        // 旧分類は metadata["inheritance_parent"] で復元可能。
         let source = "Error => ValidationError = @(field: Str)";
         let graph = parse_and_extract(source, GraphView::TypeHierarchy);
         assert!(graph.nodes.iter().any(|n| n.label == "Error"));
@@ -1755,7 +1781,7 @@ mod tests {
             graph
                 .edges
                 .iter()
-                .any(|e| e.kind == EdgeKind::ErrorInheritance)
+                .any(|e| e.kind == EdgeKind::ClassLikeInheritance)
         );
     }
 

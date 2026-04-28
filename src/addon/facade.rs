@@ -283,6 +283,93 @@ fn load_facade_file(
                         });
                     }
                 }
+                // E30B-007 / Lock-G: explicit addon-binding form
+                // `RustAddon["fn"](arity <= N)`. Treat as an alias in
+                // the codegen summary so native / JS / wasm lower this
+                // to the same addon dispatch path as the legacy
+                // `Name <= lowercaseFn` form. Surface validation
+                // (string literal fn name, arity field, drift check)
+                // is performed here so codegen consumers do not need
+                // to repeat it.
+                Expr::MoldInst(name, type_args, fields, _) if name == "RustAddon" => {
+                    let fn_name = match type_args.first() {
+                        Some(Expr::StringLit(s, _)) if type_args.len() == 1 => s.clone(),
+                        _ => {
+                            visiting.remove(&canonical);
+                            return Err(FacadeLoadError {
+                                message: format!(
+                                    "[E1412] addon facade '{}': RustAddon[\"fn\"] requires \
+                                     a single string literal between the brackets (target='{}')",
+                                    facade_path.display(),
+                                    assign.target
+                                ),
+                            });
+                        }
+                    };
+                    if fields.len() != 1 || fields[0].name != "arity" {
+                        visiting.remove(&canonical);
+                        return Err(FacadeLoadError {
+                            message: format!(
+                                "[E1412] addon facade '{}': RustAddon[\"{}\"](arity <= N) \
+                                 requires exactly one `arity` field (target='{}')",
+                                facade_path.display(),
+                                fn_name,
+                                assign.target
+                            ),
+                        });
+                    }
+                    let arity_decl: u32 = match &fields[0].value {
+                        Expr::IntLit(n, _) if *n >= 0 => *n as u32,
+                        other => {
+                            visiting.remove(&canonical);
+                            return Err(FacadeLoadError {
+                                message: format!(
+                                    "[E1412] addon facade '{}': RustAddon[\"{}\"](arity <= N) \
+                                     requires a non-negative integer literal; got {:?} \
+                                     (target='{}')",
+                                    facade_path.display(),
+                                    fn_name,
+                                    other,
+                                    assign.target
+                                ),
+                            });
+                        }
+                    };
+                    let manifest_arity =
+                        manifest.functions.get(&fn_name).copied().ok_or_else(|| {
+                            FacadeLoadError {
+                                message: format!(
+                                    "[E1412] addon facade '{}': RustAddon[\"{}\"] is not \
+                                     declared in [functions] of '{}' (target='{}')",
+                                    facade_path.display(),
+                                    fn_name,
+                                    import_path,
+                                    assign.target
+                                ),
+                            }
+                        })?;
+                    if arity_decl != manifest_arity {
+                        visiting.remove(&canonical);
+                        return Err(FacadeLoadError {
+                            message: format!(
+                                "[E1412] addon facade '{}': RustAddon[\"{}\"](arity <= {}) \
+                                 drifts from manifest arity {} for package '{}' (target='{}')",
+                                facade_path.display(),
+                                fn_name,
+                                arity_decl,
+                                manifest_arity,
+                                import_path,
+                                assign.target
+                            ),
+                        });
+                    }
+                    // Treat the explicit binding identically to a
+                    // legacy alias `Name <= fn_name` so codegen layers
+                    // (native cdylib lowering / JS / wasm) hit the
+                    // existing addon-call path without per-backend
+                    // changes.
+                    local_aliases.insert(assign.target.clone(), fn_name);
+                }
                 // Phase 1E-β: accepted pure-Taida RHS shapes. See
                 // `src/codegen/lower/imports.rs` comment block for
                 // the rationale behind the specific whitelist.
@@ -411,15 +498,22 @@ fn load_facade_file(
                 }
                 local_funcs.insert(fd.name.clone(), fd.clone());
             }
-            Statement::TypeDef(td) => {
+            // (E30 Sub-step 2.1) ClassLikeDef + kind dispatch
+            Statement::ClassLikeDef(cl) => {
                 visiting.remove(&canonical);
+                let kind_label = match &cl.kind {
+                    crate::parser::ClassLikeKind::BuchiPack => "TypeDef",
+                    crate::parser::ClassLikeKind::Mold { .. } => "MoldDef",
+                    crate::parser::ClassLikeKind::Inheritance { .. } => "InheritanceDef",
+                };
                 return Err(FacadeLoadError {
                     message: format!(
-                        "addon facade '{}' declares TypeDef '{}' — TypeDef statements \
+                        "addon facade '{}' declares {} '{}' — class-like definitions \
                          inside addon facades are not yet supported for native codegen \
                          (C25B-030 Phase 1E-γ pending).",
                         facade_path.display(),
-                        td.name
+                        kind_label,
+                        cl.name
                     ),
                 });
             }
@@ -432,18 +526,6 @@ fn load_facade_file(
                          (C25B-030 Phase 1E-γ pending).",
                         facade_path.display(),
                         ed.name
-                    ),
-                });
-            }
-            Statement::MoldDef(md) => {
-                visiting.remove(&canonical);
-                return Err(FacadeLoadError {
-                    message: format!(
-                        "addon facade '{}' declares MoldDef '{}' — MoldDef statements \
-                         inside addon facades are not yet supported for native codegen \
-                         (C25B-030 Phase 1E-γ pending).",
-                        facade_path.display(),
-                        md.name
                     ),
                 });
             }
@@ -1005,6 +1087,118 @@ Wrap word = `${word}${_suffix}` => :Str
             "_suffix must be promoted via the template reachability walk"
         );
         assert!(got.facade_funcs.contains_key("Wrap"));
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    // ── E30B-007 / Lock-G: explicit RustAddon[...] binding ──
+
+    /// Lock-G: `Name <= RustAddon["fn"](arity <= N)` is recognised by
+    /// the codegen-side facade summary as an alias entry, identical
+    /// in shape to today's `Name <= fn` legacy alias path. This
+    /// guarantees native / JS / wasm lowering needs no per-backend
+    /// changes for the explicit binding form.
+    #[test]
+    fn load_facade_summary_recognises_rust_addon_explicit_binding_as_alias() {
+        let tmp = std::env::temp_dir().join(format!(
+            "e30b_007_explicit_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let facade = r#"
+TerminalSize <= RustAddon["terminalSize"](arity <= 0)
+
+<<< @(TerminalSize)
+"#;
+        mk_pkg(&tmp, "tst/explicit", facade, &[]);
+        let manifest = test_manifest("tst/explicit", &[("terminalSize", 0)]);
+        let pkg_dir = facade_pkg_dir(&tmp, "tst/explicit");
+        let got = load_facade_summary(&pkg_dir, &manifest, "tst/explicit")
+            .expect("loader should not error")
+            .expect("facade should exist");
+
+        assert_eq!(
+            got.aliases.get("TerminalSize").map(|s| s.as_str()),
+            Some("terminalSize"),
+            "Lock-G: explicit binding must surface as alias, got {:?}",
+            got.aliases
+        );
+        assert!(
+            !got.pack_bindings.contains_key("TerminalSize"),
+            "Lock-G: explicit binding must NOT fall through to pack_bindings"
+        );
+        assert!(got.exports.contains("TerminalSize"));
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// Lock-G drift: arity mismatch between facade and manifest is
+    /// rejected with [E1412].
+    #[test]
+    fn load_facade_summary_rejects_rust_addon_arity_drift() {
+        let tmp = std::env::temp_dir().join(format!(
+            "e30b_007_drift_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let facade = r#"
+TerminalSize <= RustAddon["terminalSize"](arity <= 5)
+
+<<< @(TerminalSize)
+"#;
+        mk_pkg(&tmp, "tst/drift", facade, &[]);
+        let manifest = test_manifest("tst/drift", &[("terminalSize", 0)]);
+        let pkg_dir = facade_pkg_dir(&tmp, "tst/drift");
+        let err = load_facade_summary(&pkg_dir, &manifest, "tst/drift")
+            .expect_err("arity drift must reject");
+        assert!(
+            err.message.contains("[E1412]"),
+            "expected [E1412] in: {}",
+            err.message
+        );
+        assert!(
+            err.message.contains("drift"),
+            "expected drift mention in: {}",
+            err.message
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// Lock-G: function not in manifest [functions] is rejected.
+    #[test]
+    fn load_facade_summary_rejects_rust_addon_unknown_fn() {
+        let tmp = std::env::temp_dir().join(format!(
+            "e30b_007_unknown_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let facade = r#"
+Foo <= RustAddon["doesNotExist"](arity <= 0)
+
+<<< @(Foo)
+"#;
+        mk_pkg(&tmp, "tst/unknown", facade, &[]);
+        let manifest = test_manifest("tst/unknown", &[("terminalSize", 0)]);
+        let pkg_dir = facade_pkg_dir(&tmp, "tst/unknown");
+        let err = load_facade_summary(&pkg_dir, &manifest, "tst/unknown")
+            .expect_err("unknown fn must reject");
+        assert!(
+            err.message.contains("[E1412]"),
+            "expected [E1412] in: {}",
+            err.message
+        );
+        assert!(
+            err.message.contains("not declared") || err.message.contains("[functions]"),
+            "expected manifest absence mention in: {}",
+            err.message
+        );
         let _ = std::fs::remove_dir_all(&tmp);
     }
 }

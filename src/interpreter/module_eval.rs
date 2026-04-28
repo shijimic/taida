@@ -373,6 +373,7 @@ impl Interpreter {
             let prev_exported_symbols = std::mem::take(&mut self.module_exported_symbols);
             // QF-17: TypeDef 登録情報を退避（モジュール実行中の TypeDef はモジュールのスコープ）
             let prev_type_defs = self.type_defs.clone();
+            let prev_mold_defs = self.mold_defs.clone();
             let prev_type_methods = self.type_methods.clone();
 
             // Set up for module execution
@@ -436,6 +437,7 @@ impl Interpreter {
             let exported_symbols = std::mem::take(&mut self.module_exported_symbols);
             // QF-17: モジュール内で定義された TypeDef 情報を取得
             let module_type_defs = self.type_defs.clone();
+            let module_mold_defs = self.mold_defs.clone();
             let module_type_methods = self.type_methods.clone();
             // C20B-015 / ROOT-18: Snapshot enum_defs from the defining module so
             // exported functions can resolve their own JSON schemas even when the
@@ -448,6 +450,7 @@ impl Interpreter {
             self.loading_modules.remove(&module_path);
             self.module_exported_symbols = prev_exported_symbols;
             self.type_defs = prev_type_defs;
+            self.mold_defs = prev_mold_defs;
             self.type_methods = prev_type_methods;
 
             // Check for module execution errors
@@ -560,6 +563,13 @@ impl Interpreter {
                 .into_iter()
                 .filter(|(k, _)| module_exports.contains_key(k))
                 .collect();
+            let exported_mold_defs: std::collections::HashMap<
+                String,
+                Vec<crate::parser::FieldDef>,
+            > = module_mold_defs
+                .into_iter()
+                .filter(|(k, _)| module_exports.contains_key(k))
+                .collect();
             let exported_enum_defs: std::collections::HashMap<String, Vec<String>> = self
                 .enum_defs
                 .iter()
@@ -580,6 +590,7 @@ impl Interpreter {
                 LoadedModule {
                     exports: module_exports.clone(),
                     type_defs: exported_type_defs,
+                    mold_defs: exported_mold_defs,
                     enum_defs: exported_enum_defs,
                     type_methods: exported_type_methods,
                 },
@@ -598,6 +609,11 @@ impl Interpreter {
             .loaded_modules
             .get(&module_path)
             .map(|m| m.enum_defs.clone())
+            .unwrap_or_default();
+        let cached_mold_defs = self
+            .loaded_modules
+            .get(&module_path)
+            .map(|m| m.mold_defs.clone())
             .unwrap_or_default();
         let cached_type_methods = self
             .loaded_modules
@@ -657,6 +673,10 @@ impl Interpreter {
                 if let Some(td_fields) = cached_type_defs.get(name) {
                     self.type_defs
                         .insert(local_name.to_string(), td_fields.clone());
+                }
+                if let Some(mold_fields) = cached_mold_defs.get(name) {
+                    self.mold_defs
+                        .insert(local_name.to_string(), mold_fields.clone());
                 }
                 if let Some(enum_variants) = cached_enum_defs.get(name) {
                     self.enum_defs
@@ -786,11 +806,12 @@ impl Interpreter {
     ///    pass on the native interpreter binary).
     /// 2. Loads / caches the addon via `AddonRegistry::ensure_loaded`.
     /// 3. If the package ships a Taida-side facade at
-    ///    `<pkg_dir>/taida/<stem>.td`, executes it as a module with the
-    ///    addon's `[functions]` pre-injected as sentinels. This lets the
-    ///    facade wrap the lowercase Rust functions under uppercase
-    ///    Taida-side names (e.g. `TerminalSize <= terminalSize`) and
-    ///    define pure-Taida companion values (like the `KeyKind` pack).
+    ///    `<pkg_dir>/taida/<stem>.td`, executes it as a module. Inside
+    ///    the facade, each addon-backed function appears as an explicit
+    ///    `Name <= RustAddon["fn"](arity <= N)` binding (E30 Lock-G,
+    ///    sub-step B-5 — legacy implicit pre-inject is removed). The
+    ///    facade can also define pure-Taida companion values (like the
+    ///    `KeyKind` pack).
     /// 4. Validates that every symbol the import statement asked for
     ///    resolves to either
     ///      - a facade export (if a facade was loaded), or
@@ -838,16 +859,19 @@ impl Interpreter {
                 message: e.to_string(),
             })?;
 
-        // RC2B-207: Load the optional Taida-side facade. The facade is a
-        // single `.td` file at `<pkg_dir>/taida/<stem>.td` where `<stem>`
-        // is the final `/`-segment of the canonical package id (e.g.
-        // `terminal` for `taida-lang/terminal`). It runs in a dedicated
-        // child environment with all `[functions]` entries pre-bound as
-        // addon sentinels, so the facade can write
-        // `TerminalSize <= terminalSize` to re-export the Rust function
-        // under a Taida-side name, or define auxiliary pure-Taida values
-        // like the `KeyKind` enum pack. Facade exports drive the user
-        // import's symbol lookup and always take precedence over the raw
+        // RC2B-207 / E30B-007 sub-step B-5: Load the optional Taida-side
+        // facade. The facade is a single `.td` file at
+        // `<pkg_dir>/taida/<stem>.td` where `<stem>` is the final
+        // `/`-segment of the canonical package id (e.g. `terminal` for
+        // `taida-lang/terminal`). It runs in a dedicated child
+        // environment.
+        //
+        // E30 Lock-G Sub-G4 verdict (2026-04-28): each addon-backed
+        // function MUST appear as an explicit `Name <= RustAddon["fn"]
+        // (arity <= N)` binding in the facade. `eval_rust_addon_binding`
+        // resolves these to addon sentinels (the same string the legacy
+        // pre-inject produced). Facade exports drive the user import's
+        // symbol lookup and always take precedence over the raw
         // `[functions]` table.
         let facade_exports = self.load_addon_facade(&pkg_dir, &resolved)?;
 
@@ -903,11 +927,13 @@ impl Interpreter {
     ///
     /// The facade file lives at `<pkg_dir>/taida/<stem>.td` where
     /// `<stem>` is the final `/`-segment of the package id. Inside the
-    /// facade, every manifest `[functions]` entry is pre-bound as an
-    /// addon sentinel (`Value::str(__taida_addon_call::<pkg>::<fn>)`)
-    /// so the facade can assign `TerminalSize <= terminalSize` to
-    /// rename the Rust function under a Taida-side name, or combine
-    /// addon calls with pure-Taida companion values such as the
+    /// facade, each addon-backed function appears as an explicit
+    /// `Name <= RustAddon["fn"](arity <= N)` binding (E30 Lock-G
+    /// sub-step B-5 verdict — legacy implicit pre-inject is removed).
+    /// `eval_rust_addon_binding` resolves these to addon sentinels
+    /// (`Value::str("__taida_addon_call::<pkg>::<fn>")`) — the same
+    /// string the legacy pre-inject path produced. The facade can also
+    /// combine addon calls with pure-Taida companion values such as the
     /// `KeyKind` enum pack.
     ///
     /// The facade is cached in `loaded_modules` under its canonical
@@ -982,26 +1008,45 @@ impl Interpreter {
         let prev_env = self.env.clone();
         let prev_exported_symbols = std::mem::take(&mut self.module_exported_symbols);
         let prev_type_defs = self.type_defs.clone();
+        let prev_mold_defs = self.mold_defs.clone();
         let prev_type_methods = self.type_methods.clone();
+        // E30B-007 / Lock-G: stash the previous facade context (if any) so
+        // nested facade loads (currently disallowed but defensively handled)
+        // restore correctly. The new context exposes the package id + arity
+        // map to `RustAddon["fn"](arity <= N)` evaluation inside the facade.
+        let prev_addon_facade_ctx = self.loading_addon_facade_ctx.take();
 
         self.current_file = Some(canonical.clone());
         self.loading_modules.insert(canonical.clone());
         self.env = Environment::new();
+        self.loading_addon_facade_ctx = Some((
+            resolved.package_id.clone(),
+            resolved.manifest.functions.clone(),
+        ));
 
-        // Pre-inject every manifest `[functions]` entry as an addon
-        // sentinel. The facade can bind these to uppercase Taida names
-        // (`TerminalSize <= terminalSize`) or reference them to combine
-        // addon calls with pure-Taida values (`KeyKind`, wrapper funcs).
-        for fn_name in resolved.manifest.functions.keys() {
-            let sentinel = format!("__taida_addon_call::{}::{}", resolved.package_id, fn_name);
-            self.env.define_force(fn_name, Value::str(sentinel));
-        }
+        // E30B-007 sub-step B-5 (Lock-G Sub-G4 verdict 2026-04-28):
+        // legacy implicit pre-inject is REMOVED in @e.30. E gen は破壊的
+        // 変更許容のため、deprecation period なしで撤廃する。各 addon
+        // function は facade で **明示的に** `Name <= RustAddon["fn"](arity
+        // <= N)` と binding する必要がある。`taida-lang/terminal` 等の
+        // 公式 addon は v@b.8 → v@b.9 で migration 済 (TMB-029 解消)。
+        //
+        // bare 参照 (例えば `size <= terminalSize()` のように `terminalSize`
+        // を未 binding 状態で呼ぶ) は facade load 時に identifier 未定義
+        // エラーとなり、`eval_program` が `[E1413]` 等価のエラーで reject
+        // する。明示 binding 経路は `eval_rust_addon_binding` (eval.rs) で
+        // sentinel string `__taida_addon_call::<pkg>::<fn>` を生成し、
+        // 旧 pre-inject 経路と structurally identical な値を bind する。
+        //
+        // (loading_addon_facade_ctx は L995-998 で既に set 済で、これが
+        // RustAddon[...] binding 評価の前提 context となる。)
 
         let exec_result = self.eval_program(&program);
 
         let module_env = self.env.clone();
         let exported_symbols = std::mem::take(&mut self.module_exported_symbols);
         let module_type_defs = self.type_defs.clone();
+        let module_mold_defs = self.mold_defs.clone();
         let module_type_methods = self.type_methods.clone();
 
         self.env = prev_env;
@@ -1009,7 +1054,9 @@ impl Interpreter {
         self.loading_modules.remove(&canonical);
         self.module_exported_symbols = prev_exported_symbols;
         self.type_defs = prev_type_defs;
+        self.mold_defs = prev_mold_defs;
         self.type_methods = prev_type_methods;
+        self.loading_addon_facade_ctx = prev_addon_facade_ctx;
 
         if let Err(e) = exec_result {
             return Err(RuntimeError {
@@ -1071,6 +1118,11 @@ impl Interpreter {
                 .into_iter()
                 .filter(|(k, _)| exports.contains_key(k))
                 .collect();
+        let exported_mold_defs: std::collections::HashMap<String, Vec<crate::parser::FieldDef>> =
+            module_mold_defs
+                .into_iter()
+                .filter(|(k, _)| exports.contains_key(k))
+                .collect();
         let exported_enum_defs: std::collections::HashMap<String, Vec<String>> = self
             .enum_defs
             .iter()
@@ -1090,6 +1142,7 @@ impl Interpreter {
             LoadedModule {
                 exports: exports.clone(),
                 type_defs: exported_type_defs,
+                mold_defs: exported_mold_defs,
                 enum_defs: exported_enum_defs,
                 type_methods: exported_type_methods,
             },

@@ -130,7 +130,7 @@ pipeline and migration notes for pre-C14 addons.
 |----------|---------|
 | [CLI](docs/reference/cli.md) | Command reference |
 | [Operators](docs/reference/operators.md) | All 10 operators + arithmetic/comparison/logic |
-| [Mold Types](docs/reference/mold_types.md) | Mold type signatures |
+| [Class-like Types](docs/reference/class_like_types.md) | Class-like type definitions / Mold type signatures (E30 unified) |
 | [Naming](docs/reference/naming_conventions.md) | Identifier and version naming |
 | [Graph Model](docs/reference/graph_model.md) | 5 graph views |
 | [Doc Comments](docs/reference/documentation_comments.md) | AI collaboration tags |

@@ -548,4 +548,4 @@ Sum[aSubtotals]() ]=> aRevenue
 
 メソッドは「聞くだけ」、モールドは「作り変える」。ゴリラリテラルは終了。この使い分けが Taida のリスト操作の基本です。
 
-詳しいモールドの仕様は [モールディング型リファレンス](../reference/mold_types.md) を、メソッドの仕様は [標準メソッドリファレンス](../reference/standard_methods.md) を参照してください。
+詳しいモールドの仕様は [クラスライク型リファレンス (操作モールド中心)](../reference/class_like_types.md) を、メソッドの仕様は [標準メソッドリファレンス](../reference/standard_methods.md) を参照してください。

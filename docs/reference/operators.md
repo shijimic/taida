@@ -323,7 +323,7 @@ result ]=> user
 | _                    |> stdout("status missing or invalid")
 ```
 
-詳細は `docs/guide/03_json.md` の「Enum 型フィールドの検査」節および `docs/reference/mold_types.md` の「JSON モールディング型」節を参照してください。
+詳細は `docs/guide/03_json.md` の「Enum 型フィールドの検査」節および `docs/reference/class_like_types.md` の「JSON モールディング型」節を参照してください。
 
 ### `|` `|>` 条件分岐
 

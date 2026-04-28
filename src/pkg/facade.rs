@@ -113,7 +113,8 @@ pub fn validate_facade(
 /// Collect all symbols that are "available" in a module's top-level scope.
 ///
 /// This includes:
-/// - Local definitions: FuncDef, Assignment, TypeDef, InheritanceDef, EnumDef
+/// - Local definitions: FuncDef, Assignment, ClassLikeDef (BuchiPack / Mold /
+///   Inheritance — E30 Phase 7.5 / E30B-006 で 3 kind を統一登録)、EnumDef
 /// - Imported symbols: `>>> ./other.td => @(sym)` makes `sym` available
 ///
 /// B11B-022: Import-sourced symbols are included so that re-exports are not
@@ -128,11 +129,16 @@ fn collect_defined_symbols(statements: &[Statement]) -> HashSet<String> {
             Statement::Assignment(a) => {
                 defined.insert(a.target.clone());
             }
-            Statement::TypeDef(t) => {
-                defined.insert(t.name.clone());
-            }
-            Statement::InheritanceDef(i) => {
-                defined.insert(i.child.clone());
+            // (E30 Phase 7.5 / E30B-006, Lock-F 軸 1) ClassLikeDef は kind に
+            // 関わらず単一概念 (class-like) として defined symbol に登録する。
+            // 旧挙動 (Sub-step 2.1) では Mold kind を defined に入れず、Native
+            // lowering の symbol kind 解決を Function fallback に落としていた
+            // — これは silent bug で、Mold kind class-like を facade 経由で
+            // export したときに `SymbolKind::Function` 誤分類されていた。
+            // E30B-006 で BuchiPack / Mold / Inheritance を統一登録する。
+            Statement::ClassLikeDef(cl) => {
+                let _ = &cl.kind;
+                defined.insert(cl.name.clone());
             }
             Statement::EnumDef(e) => {
                 defined.insert(e.name.clone());
@@ -194,11 +200,25 @@ pub fn classify_symbol_in_module(
             Statement::FuncDef(f) if f.name == symbol_name => {
                 return Some(SymbolKind::Function);
             }
-            Statement::TypeDef(t) if t.name == symbol_name => {
+            // (E30 Phase 7.5 / E30B-006, Lock-F 軸 1) ClassLikeDef は kind に
+            // 関わらず `SymbolKind::TypeDef` として分類する。旧挙動 (Sub-step
+            // 2.1) では Mold kind を分類対象外にしていたため Native lowering
+            // の symbol kind 解決が Function fallback に落ちていた (silent
+            // bug)。E30B-006 で 3 kind を class-like 単一概念に統合した。
+            Statement::ClassLikeDef(cl) if cl.name == symbol_name => {
                 return Some(SymbolKind::TypeDef);
             }
-            Statement::InheritanceDef(i) if i.child == symbol_name => {
-                return Some(SymbolKind::TypeDef);
+            // (E30B-007 sub-step B-5 / Lock-G Sub-G5、2026-04-28) explicit
+            // `Name <= RustAddon["fn"](arity <= N)` binding を `SymbolKind::
+            // Function` として分類する。AST 上は Assignment だが、user
+            // perspective では public callable (== function) であり、Lock-G
+            // Sub-G5 verdict に沿って doc-gen / LSP / graph / introspection
+            // でも function として表出する。Match の order が重要 — Function
+            // 判定を Value より前に置くこと。
+            Statement::Assignment(a)
+                if a.target == symbol_name && a.as_rust_addon_binding().is_some() =>
+            {
+                return Some(SymbolKind::Function);
             }
             Statement::Assignment(a) if a.target == symbol_name => {
                 return Some(SymbolKind::Value);

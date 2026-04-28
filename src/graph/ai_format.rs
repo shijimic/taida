@@ -258,53 +258,54 @@ fn extract_ai_graph(program: &Program, file: &str) -> AiGraph {
                     line: ed.span.line,
                 });
             }
-            Statement::TypeDef(td) => {
-                types.push(AiType {
-                    name: td.name.clone(),
-                    kind: "buchi_pack",
-                    parent: None,
-                    fields: td
-                        .fields
-                        .iter()
-                        .map(|f| (f.name.clone(), type_expr_to_str(&f.type_annotation)))
-                        .collect(),
-                    line: td.span.line,
-                });
-            }
-
-            Statement::MoldDef(md) => {
-                types.push(AiType {
-                    name: md.name.clone(),
-                    kind: "mold",
-                    parent: None,
-                    fields: md
-                        .fields
-                        .iter()
-                        .filter(|f| !f.is_method)
-                        .map(|f| (f.name.clone(), type_expr_to_str(&f.type_annotation)))
-                        .collect(),
-                    line: md.span.line,
-                });
-            }
-
-            Statement::InheritanceDef(inh) => {
-                let kind = if inh.parent == "Error" {
-                    "error"
-                } else {
-                    "inheritance"
-                };
-                types.push(AiType {
-                    name: inh.child.clone(),
-                    kind,
-                    parent: Some(inh.parent.clone()),
-                    fields: inh
-                        .fields
-                        .iter()
-                        .map(|f| (f.name.clone(), type_expr_to_str(&f.type_annotation)))
-                        .collect(),
-                    line: inh.span.line,
-                });
-            }
+            // (E30 Sub-step 2.1) ClassLikeDef + kind dispatch (旧 TypeDef/MoldDef/InheritanceDef を統合)
+            Statement::ClassLikeDef(cl) => match &cl.kind {
+                crate::parser::ClassLikeKind::BuchiPack => {
+                    types.push(AiType {
+                        name: cl.name.clone(),
+                        kind: "buchi_pack",
+                        parent: None,
+                        fields: cl
+                            .fields
+                            .iter()
+                            .map(|f| (f.name.clone(), type_expr_to_str(&f.type_annotation)))
+                            .collect(),
+                        line: cl.span.line,
+                    });
+                }
+                crate::parser::ClassLikeKind::Mold { .. } => {
+                    types.push(AiType {
+                        name: cl.name.clone(),
+                        kind: "mold",
+                        parent: None,
+                        fields: cl
+                            .fields
+                            .iter()
+                            .filter(|f| !f.is_method)
+                            .map(|f| (f.name.clone(), type_expr_to_str(&f.type_annotation)))
+                            .collect(),
+                        line: cl.span.line,
+                    });
+                }
+                crate::parser::ClassLikeKind::Inheritance { parent, .. } => {
+                    let kind = if parent == "Error" {
+                        "error"
+                    } else {
+                        "inheritance"
+                    };
+                    types.push(AiType {
+                        name: cl.name.clone(),
+                        kind,
+                        parent: Some(parent.clone()),
+                        fields: cl
+                            .fields
+                            .iter()
+                            .map(|f| (f.name.clone(), type_expr_to_str(&f.type_annotation)))
+                            .collect(),
+                        line: cl.span.line,
+                    });
+                }
+            },
 
             Statement::FuncDef(fd) => {
                 let mut calls = Vec::new();
@@ -350,6 +351,30 @@ fn extract_ai_graph(program: &Program, file: &str) -> AiGraph {
 
             Statement::Export(exp) => {
                 exports.extend(exp.symbols.iter().cloned());
+            }
+
+            // (E30B-007 sub-step B-5 / Lock-G Sub-G5、2026-04-28) explicit
+            // `Name <= RustAddon["fn"](arity <= N)` binding を AI graph
+            // 上で **public function** として表出する。AST 上は Assignment
+            // だが、user perspective では関数。`taida graph` JSON 出力で
+            // 23 sentinel が functions[] に並ぶため `taida doc generate`
+            // が表現できなかった TMB-029 が解消する。
+            Statement::Assignment(a) if a.as_rust_addon_binding().is_some() => {
+                let (fn_name, arity) = a.as_rust_addon_binding().unwrap();
+                let placeholder_params: Vec<(String, String)> = (0..arity)
+                    .map(|i| (format!("_arg{}", i), "Unknown".to_string()))
+                    .collect();
+                functions.push(AiFunction {
+                    name: a.target.clone(),
+                    params: placeholder_params,
+                    returns: "Unknown".to_string(),
+                    body_summary: format!("RustAddon[\"{}\"](arity <= {})", fn_name, arity),
+                    calls: Vec::new(),
+                    throws: false,
+                    has_error_ceiling: false,
+                    is_recursive: false,
+                    line: a.span.line,
+                });
             }
 
             // Top-level statements go to main_flow
@@ -557,9 +582,14 @@ fn summarize_stmt(stmt: &Statement) -> String {
         }
         Statement::EnumDef(ed) => format!("enum {}", ed.name),
         Statement::FuncDef(fd) => format!("fn {}", fd.name),
-        Statement::TypeDef(td) => format!("type {}", td.name),
-        Statement::MoldDef(md) => format!("mold {}", md.name),
-        Statement::InheritanceDef(inh) => format!("{} => {}", inh.parent, inh.child),
+        // (E30 Sub-step 2.1) ClassLikeDef + kind dispatch
+        Statement::ClassLikeDef(cl) => match &cl.kind {
+            crate::parser::ClassLikeKind::BuchiPack => format!("type {}", cl.name),
+            crate::parser::ClassLikeKind::Mold { .. } => format!("mold {}", cl.name),
+            crate::parser::ClassLikeKind::Inheritance { parent, .. } => {
+                format!("{} => {}", parent, cl.name)
+            }
+        },
         Statement::Import(imp) => {
             let syms: Vec<&str> = imp.symbols.iter().map(|s| s.name.as_str()).collect();
             format!(">>> {} => @({})", imp.path, syms.join(", "))

@@ -751,6 +751,18 @@ function __taida_defaultForSchema(schema) {
     }
   }
   if (schema && schema.__list) return Object.freeze([]);
+  // E30 Phase 6 / E30B-004 (Lock-D verdict): synthetic defaultFn for
+  // declare-only function fields. The schema `{ __fn: retSchema }` produces
+  // an arrow function that, when called, returns the return-type's default
+  // value. Matches the interpreter's `DEFAULT_FN_SENTINEL_NAME` synthetic
+  // FuncValue. The function ignores its arguments — arity is enforced at
+  // the type level, not at runtime.
+  if (schema && schema.__fn !== undefined) {
+    const retSchema = schema.__fn;
+    return function __taida_default_fn() {
+      return __taida_defaultForSchema(retSchema);
+    };
+  }
   // Inline BuchiPack schema: { field1: schema1, field2: schema2 }
   if (schema && typeof schema === 'object' && !Array.isArray(schema)) {
     const result = {};

@@ -2,6 +2,8 @@
 
 > **PHILOSOPHY.md -- I.** 深く考えずに適当にぶちこんでけ
 
+> **本章は E30 (gen-E 破壊的変更) で再構成されました。** Error 系のクラスライク型定義 (`Error => MyError = @(...)`) は **クラスライク型定義の単一構文** に統合され、[クラスライク型定義 / エラー系統](04_class_like.md#エラー系統) で説明されます。本章では throw / `|==` / ゴリラ天井 / Result / Gorillax といった **エラー処理の挙動** を中心に扱います。旧構文からの移行は [migration_e30.md](migration_e30.md) を参照してください。
+
 Taida には try-catch がありません。エラー処理は2つの仕組みで成り立っています。
 
 1. **Lax による安全な操作** -- よくある失敗（ゼロ除算、範囲外アクセスなど）はプログラムを止めず、デフォルト値にフォールバックします
@@ -113,7 +115,7 @@ Div[100, count]()
   ]=> taxAmount
 ```
 
-Lax の詳細は [リスト操作](06_lists.md) および [モールディング型リファレンス](../reference/mold_types.md) を参照してください。
+Lax の詳細は [リスト操作](06_lists.md) および [クラスライク型リファレンス (操作モールド中心)](../reference/class_like_types.md) を参照してください。
 
 ---
 
@@ -128,7 +130,7 @@ Error = @(
   message: Str
 )
 
-// カスタムエラーの定義
+// カスタムエラーの定義 (E30 統一構文 = クラスライク継承)
 Error => ValidationError = @(
   field: Str
   code: Int
@@ -139,6 +141,8 @@ Error => ApiError = @(
   endpoint: Str
 )
 ```
+
+> Error 系統は E30 で **クラスライク型定義の単一構文** に統合されました。旧 D 世代までは Error 継承は専用構文として扱われていましたが、E30 以降は「親型 Error から継承した class-like 型」として通常の継承と同じ規則で読みます。declare-only 関数フィールドも許可されます (例: `Error => NotFound = @(msg: Str, recovery: Unit => :Unit)`)。詳細は [クラスライク型定義 / エラー系統](04_class_like.md#エラー系統) を参照してください。
 
 ### throw は Error 継承型のみ
 
@@ -302,6 +306,7 @@ Div[10, 0]() ]=> result  // 0 (プログラムは止まりません)
 Result は「成功条件を述語で定義する」モールド型です。`]=>` でアンモールディングすると述語 P が評価され、真なら値 T を返し、偽なら throw が発動します。
 
 ```taida
+// クラスライク型としての定義 (詳細は 04_class_like.md)
 Mold[T] => Result[T, P <= :T => :Bool] = @(throw: Error)
 // P: :T => :Bool（成功条件を定義する述語）
 ```
@@ -540,3 +545,5 @@ validateAndProcess input =
 | 外部パッケージの Molten 操作 | `Cage` → `Gorillax`（失敗は致命的） |
 | 外部操作の失敗をキャッチしたい | `.relax()` → `RelaxedGorillax` + `\|==` |
 | エラーを握り潰さず確実に止めたい | ゴリラ天井（何もしなければ自動） |
+
+旧 D 世代までの「Error 継承」記述 (専用構文として扱った部分) は [クラスライク型定義 / エラー系統](04_class_like.md#エラー系統) に統合されました。

@@ -57,6 +57,8 @@ pub(crate) struct LoadedModule {
     pub(crate) exports: HashMap<String, Value>,
     /// QF-17: TypeDef field definitions exported from this module
     pub(crate) type_defs: HashMap<String, Vec<FieldDef>>,
+    /// Mold field definitions exported from this module.
+    pub(crate) mold_defs: HashMap<String, Vec<FieldDef>>,
     /// Enum definitions exported from this module
     pub(crate) enum_defs: HashMap<String, Vec<String>>,
     /// QF-17: TypeDef methods exported from this module
@@ -138,7 +140,7 @@ pub struct Interpreter {
     /// Enum definitions: enum_name -> variants in ordinal order
     pub(crate) enum_defs: HashMap<String, Vec<String>>,
     /// MoldDef field definitions: mold_name -> Vec<FieldDef> (for filling/unmold lookup)
-    mold_defs: HashMap<String, Vec<FieldDef>>,
+    pub(crate) mold_defs: HashMap<String, Vec<FieldDef>>,
     /// Symbols declared via `<<<` during module execution.
     /// Empty means no `<<<` was encountered (all symbols exported for backward compat).
     pub(crate) module_exported_symbols: Vec<String>,
@@ -182,9 +184,36 @@ pub struct Interpreter {
     /// Safety: The interpreter is single-threaded (!Send). The raw pointers point to
     /// stack-local variables in dispatch_request that outlive the handler call.
     pub(crate) active_streaming_writer: Option<super::net_eval::ActiveStreamingWriter>,
+    /// E30B-007 / Lock-G: Context for the addon facade currently being loaded.
+    ///
+    /// When `load_addon_facade` is evaluating a `<pkg>/taida/<stem>.td` file,
+    /// this field holds `Some((package_id, function_arities))` so that the
+    /// `RustAddon["fn"](arity <= N)` expression form can:
+    ///
+    /// 1. Resolve to the canonical addon sentinel
+    ///    `Value::str("__taida_addon_call::<package_id>::<fn>")` (matching
+    ///    today's `define_force` pre-injection contract).
+    /// 2. Validate the declared `arity` field against the manifest
+    ///    `[functions]` table and reject drift with `[E1412]`.
+    ///
+    /// Outside facade execution this is `None` and a `RustAddon[...]`
+    /// expression falls through to the generic `MoldInst` path (the
+    /// checker will surface a `[E1412]` "context" diagnostic in a later
+    /// sub-step; the interpreter contract here is purely runtime).
+    pub(crate) loading_addon_facade_ctx: Option<(String, std::collections::BTreeMap<String, u32>)>,
 }
 
 impl Interpreter {
+    /// E30 Phase 6 / E30B-004: synthetic defaultFn sentinel name.
+    ///
+    /// `default_for_type_expr` returns a `Value::Function` whose `name`
+    /// equals this constant when materialising the default for a
+    /// `TypeExpr::Function(_, _)` annotation (declare-only function field's
+    /// auto-generated `defaultFn`). `call_function` intercepts the name
+    /// before entering the trampoline loop and returns the **return
+    /// type's default value** without executing any AST body.
+    pub(crate) const DEFAULT_FN_SENTINEL_NAME: &'static str = "__taida_default_fn";
+
     pub fn new() -> Self {
         // Create a dedicated current-thread tokio runtime for the interpreter.
         // This runtime is used by `]=>` to block_on pending async values
@@ -225,6 +254,7 @@ impl Interpreter {
             type_parents: HashMap::new(),
             call_depth: 0,
             active_streaming_writer: None,
+            loading_addon_facade_ctx: None,
         }
     }
 
@@ -475,32 +505,109 @@ impl Interpreter {
                 Ok(Signal::Value(Value::Unit))
             }
 
-            Statement::TypeDef(td) => {
-                // Register methods defined in the type
-                let mut methods = HashMap::new();
-                for field in &td.fields {
-                    if field.is_method
-                        && let Some(ref func_def) = field.method_def
-                    {
-                        methods.insert(field.name.clone(), func_def.clone());
+            // (E30 Sub-step 2.1) ClassLikeDef + kind dispatch (旧 TypeDef/MoldDef/InheritanceDef を統合)
+            Statement::ClassLikeDef(cl) => match &cl.kind {
+                crate::parser::ClassLikeKind::BuchiPack => {
+                    let td = cl;
+                    // Register methods defined in the type
+                    let mut methods = HashMap::new();
+                    for field in &td.fields {
+                        if field.is_method
+                            && let Some(ref func_def) = field.method_def
+                        {
+                            methods.insert(field.name.clone(), func_def.clone());
+                        }
                     }
+                    if !methods.is_empty() {
+                        self.type_methods.insert(td.name.clone(), methods);
+                    }
+                    self.type_defs.insert(td.name.clone(), td.fields.clone());
+                    let _ = self.env.define(
+                        &td.name,
+                        Value::pack(vec![
+                            ("__type".to_string(), Value::str("TypeDef".to_string())),
+                            ("__name".to_string(), Value::str(td.name.clone())),
+                        ]),
+                    );
+                    Ok(Signal::Value(Value::Unit))
                 }
-                if !methods.is_empty() {
-                    self.type_methods.insert(td.name.clone(), methods);
+                crate::parser::ClassLikeKind::Mold { .. } => {
+                    let md = cl;
+                    // Register methods defined in the mold type
+                    let mut methods = HashMap::new();
+                    for field in &md.fields {
+                        if field.is_method
+                            && let Some(ref func_def) = field.method_def
+                        {
+                            methods.insert(field.name.clone(), func_def.clone());
+                        }
+                    }
+                    if !methods.is_empty() {
+                        self.type_methods.insert(md.name.clone(), methods);
+                    }
+                    self.type_defs.insert(md.name.clone(), md.fields.clone());
+                    self.mold_defs.insert(md.name.clone(), md.fields.clone());
+                    let _ = self.env.define(
+                        &md.name,
+                        Value::pack(vec![
+                            ("__type".to_string(), Value::str("TypeDef".to_string())),
+                            ("__name".to_string(), Value::str(md.name.clone())),
+                        ]),
+                    );
+                    Ok(Signal::Value(Value::Unit))
                 }
-                // Store TypeDef field definitions for JSON schema matching
-                self.type_defs.insert(td.name.clone(), td.fields.clone());
-                // QF-17: TypeDef 名をシンボルとして環境に登録（<<< @(TypeName) で export 可能にする）
-                // マーカー値として __type: "TypeDef" の BuchiPack を使う
-                let _ = self.env.define(
-                    &td.name,
-                    Value::pack(vec![
-                        ("__type".to_string(), Value::str("TypeDef".to_string())),
-                        ("__name".to_string(), Value::str(td.name.clone())),
-                    ]),
-                );
-                Ok(Signal::Value(Value::Unit))
-            }
+                crate::parser::ClassLikeKind::Inheritance { parent, .. } => {
+                    let inh = cl;
+                    let inh_parent = parent;
+                    let inh_child = &inh.name;
+                    let mut methods = self
+                        .type_methods
+                        .get(inh_parent)
+                        .cloned()
+                        .unwrap_or_default();
+                    for field in &inh.fields {
+                        if field.is_method
+                            && let Some(ref func_def) = field.method_def
+                        {
+                            methods.insert(field.name.clone(), func_def.clone());
+                        }
+                    }
+                    if !methods.is_empty() {
+                        self.type_methods.insert(inh_child.clone(), methods);
+                    }
+                    let mut merged_fields = self
+                        .type_defs
+                        .get(inh_parent)
+                        .cloned()
+                        .or_else(|| self.mold_defs.get(inh_parent).cloned())
+                        .unwrap_or_default();
+                    for child_field in &inh.fields {
+                        if let Some(existing) = merged_fields
+                            .iter_mut()
+                            .find(|field| field.name == child_field.name)
+                        {
+                            *existing = child_field.clone();
+                        } else {
+                            merged_fields.push(child_field.clone());
+                        }
+                    }
+                    self.type_defs.insert(inh_child.clone(), merged_fields);
+                    if self.mold_defs.contains_key(inh_parent) {
+                        self.mold_defs
+                            .insert(inh_child.clone(), self.type_defs[inh_child].clone());
+                    }
+                    self.type_parents
+                        .insert(inh_child.clone(), inh_parent.clone());
+                    let _ = self.env.define(
+                        inh_child,
+                        Value::pack(vec![
+                            ("__type".to_string(), Value::str("TypeDef".to_string())),
+                            ("__name".to_string(), Value::str(inh_child.clone())),
+                        ]),
+                    );
+                    Ok(Signal::Value(Value::Unit))
+                }
+            },
 
             Statement::FuncDef(fd) => {
                 let closure = Arc::new(self.env.snapshot());
@@ -534,79 +641,6 @@ impl Interpreter {
                     return Err(RuntimeError { message: e });
                 }
                 Ok(Signal::Value(value))
-            }
-
-            Statement::MoldDef(md) => {
-                // Register methods defined in the mold type
-                let mut methods = HashMap::new();
-                for field in &md.fields {
-                    if field.is_method
-                        && let Some(ref func_def) = field.method_def
-                    {
-                        methods.insert(field.name.clone(), func_def.clone());
-                    }
-                }
-                if !methods.is_empty() {
-                    self.type_methods.insert(md.name.clone(), methods);
-                }
-                // Store MoldDef field definitions for filling/unmold lookup
-                self.type_defs.insert(md.name.clone(), md.fields.clone());
-                self.mold_defs.insert(md.name.clone(), md.fields.clone());
-                Ok(Signal::Value(Value::Unit))
-            }
-
-            Statement::InheritanceDef(inh) => {
-                // Copy parent methods, then override with child methods
-                let mut methods = self
-                    .type_methods
-                    .get(&inh.parent)
-                    .cloned()
-                    .unwrap_or_default();
-                for field in &inh.fields {
-                    if field.is_method
-                        && let Some(ref func_def) = field.method_def
-                    {
-                        methods.insert(field.name.clone(), func_def.clone());
-                    }
-                }
-                if !methods.is_empty() {
-                    self.type_methods.insert(inh.child.clone(), methods);
-                }
-                // Register child type fields for type instantiation defaults:
-                // parent fields + child fields (child override wins by name).
-                let mut merged_fields = self
-                    .type_defs
-                    .get(&inh.parent)
-                    .cloned()
-                    .or_else(|| self.mold_defs.get(&inh.parent).cloned())
-                    .unwrap_or_default();
-                for child_field in &inh.fields {
-                    if let Some(existing) = merged_fields
-                        .iter_mut()
-                        .find(|field| field.name == child_field.name)
-                    {
-                        *existing = child_field.clone();
-                    } else {
-                        merged_fields.push(child_field.clone());
-                    }
-                }
-                self.type_defs.insert(inh.child.clone(), merged_fields);
-                if self.mold_defs.contains_key(&inh.parent) {
-                    self.mold_defs
-                        .insert(inh.child.clone(), self.type_defs[&inh.child].clone());
-                }
-                // RCB-101: Record inheritance parent for error type filtering
-                self.type_parents
-                    .insert(inh.child.clone(), inh.parent.clone());
-                // InheritanceDef 名もシンボルとして環境に登録（<<< @(ChildType) で export 可能にする）
-                let _ = self.env.define(
-                    &inh.child,
-                    Value::pack(vec![
-                        ("__type".to_string(), Value::str("TypeDef".to_string())),
-                        ("__name".to_string(), Value::str(inh.child.clone())),
-                    ]),
-                );
-                Ok(Signal::Value(Value::Unit))
             }
 
             Statement::ErrorCeiling(ec) => self.eval_error_ceiling(ec),
@@ -908,6 +942,30 @@ impl Interpreter {
                 if let Some(val) = self.env.get(name) {
                     Ok(Signal::Value(val.clone()))
                 } else {
+                    // E30B-007 sub-step B-5 / Lock-G Sub-G4: when an
+                    // undefined identifier matches the surrounding addon
+                    // manifest's `[functions]` table, emit `[E1413]` with
+                    // a migration hint instead of the generic message.
+                    // Legacy facades that referenced bare lowercase addon
+                    // function names (relying on the implicit pre-inject)
+                    // hit this branch in @e.30 because the pre-inject is
+                    // removed. The fix is an explicit `RustAddon[...]`
+                    // binding at the top of the facade.
+                    if let Some((pkg_id, manifest_arities)) = &self.loading_addon_facade_ctx
+                        && let Some(arity) = manifest_arities.get(name)
+                    {
+                        return Err(RuntimeError {
+                            message: format!(
+                                "[E1413] addon facade for '{}': bare reference to addon \
+                                 manifest function '{}' is no longer pre-injected in @e.30 \
+                                 (Lock-G Sub-G4: legacy implicit pre-inject removed). Add \
+                                 an explicit binding to the top of the facade: `{} <= \
+                                 RustAddon[\"{}\"](arity <= {})`. Run `taida upgrade --e30 \
+                                 <pkg>/taida/` to migrate automatically.",
+                                pkg_id, name, name, name, arity
+                            ),
+                        });
+                    }
                     // No null/undefined — but undefined variable is a runtime error
                     Err(RuntimeError {
                         message: format!("Undefined variable: '{}'", name),
@@ -1127,7 +1185,24 @@ impl Interpreter {
                 Ok(Signal::Value(current))
             }
 
-            Expr::MoldInst(name, type_args, fields, _) => {
+            Expr::MoldInst(name, type_args, fields, span) => {
+                // E30B-007 / Lock-G: explicit addon-binding form
+                // `RustAddon["fn"](arity <= N)`. Inside an addon facade
+                // load context (`loading_addon_facade_ctx`) this expression
+                // resolves to the addon sentinel string; the `arity <= N`
+                // metadata is validated against the manifest `[functions]`
+                // table and any drift is rejected as `[E1412]`.
+                //
+                // Outside facade context the form is a structural error
+                // (binding only makes sense in a facade). The interpreter
+                // surfaces a `[E1412]` runtime error here as a defensive
+                // diagnostic; the checker surfacing of this code at compile
+                // time lands in sub-step B-5 once the terminal addon
+                // submodule has been migrated by the TM track.
+                if name == "RustAddon" {
+                    return self.eval_rust_addon_binding(type_args, fields, span);
+                }
+
                 // Check for new operation mold types (str, num, list with fields support)
                 if let Some(result) = self.try_operation_mold(name, type_args, fields)? {
                     return Ok(result);
@@ -1260,6 +1335,15 @@ impl Interpreter {
                     }
 
                     // Remaining fields: named values first, then default values.
+                    //
+                    // E30 Phase 6 / E30B-004: declare-only function fields
+                    // (E30B-002) have `default_value.is_none()` but are still
+                    // materialised here so that their synthetic defaultFn
+                    // (Lock-D verdict) is bound on the result pack — without
+                    // this, `m.declareOnlyField(...)` would fail with
+                    // `Unknown method` since the field would be absent. The
+                    // synthetic FuncValue itself is produced by
+                    // `default_for_field_def` → `default_for_type_expr`.
                     for field_def in defs.iter().filter(|f| !f.is_method && f.name != "filling") {
                         if consumed.contains(&field_def.name) {
                             continue;
@@ -1269,7 +1353,8 @@ impl Interpreter {
                             consumed.insert(field_def.name.clone());
                             continue;
                         }
-                        if field_def.default_value.is_some() {
+                        if field_def.default_value.is_some() || field_def.is_declare_only_fn_field()
+                        {
                             let mut visiting = HashSet::new();
                             let default_val =
                                 self.default_for_field_def(field_def, &mut visiting)?;
@@ -1516,6 +1601,8 @@ impl Interpreter {
                         visiting.remove(name);
                         fields.push(("__type".to_string(), Value::str(name.clone())));
                         Ok(Value::pack(fields))
+                    } else if self.enum_defs.contains_key(name) {
+                        Ok(Value::EnumVal(name.clone(), 0))
                     } else {
                         Ok(Value::Unit)
                     }
@@ -1544,9 +1631,56 @@ impl Interpreter {
                         ("__type".to_string(), Value::str("Lax".to_string())),
                     ]));
                 }
+                // E30 Phase 6 / E30B-004 / Lock-D: `Async[T]` defaultFn
+                // resolves immediately with `T`'s default value.
+                if name == "Async" {
+                    let inner = if let Some(inner_ty) = args.first() {
+                        self.default_for_type_expr(inner_ty, visiting)?
+                    } else {
+                        Value::Unit
+                    };
+                    return Ok(Value::Async(crate::interpreter::value::AsyncValue {
+                        status: crate::interpreter::value::AsyncStatus::Fulfilled,
+                        value: Box::new(inner),
+                        error: Box::new(Value::Unit),
+                        task: None,
+                    }));
+                }
                 Ok(Value::Unit)
             }
-            TypeExpr::Function(_, _) => Ok(Value::Unit),
+            // E30 Phase 6 / E30B-004 / Lock-D verdict: synthesise a
+            // `defaultFn` value for declare-only function fields. The
+            // returned `Value::Function` carries a sentinel name and
+            // the original return type; `call_function` short-circuits
+            // calls on it to materialise the return type's default value
+            // without executing any AST body.
+            //
+            // PHILOSOPHY: completes "全型にデフォルト値保証 / null/undefined
+            // 排除" — function-typed fields previously fell back to
+            // `Value::Unit` placeholder which crashes on call. The
+            // synthetic defaultFn returns the proper type-default on call
+            // so that "デフォルト値保証" extends to function types.
+            TypeExpr::Function(params, ret) => {
+                let synth_params: Vec<Param> = params
+                    .iter()
+                    .enumerate()
+                    .map(|(i, ty)| Param {
+                        name: format!("__arg_{}", i),
+                        type_annotation: Some(ty.clone()),
+                        default_value: None,
+                        span: crate::lexer::Span::new(0, 0, 0, 0),
+                    })
+                    .collect();
+                Ok(Value::Function(FuncValue {
+                    name: Self::DEFAULT_FN_SENTINEL_NAME.to_string(),
+                    params: synth_params,
+                    body: Vec::new(),
+                    closure: Arc::new(HashMap::new()),
+                    return_type: Some((**ret).clone()),
+                    module_type_defs: None,
+                    module_enum_defs: None,
+                }))
+            }
         }
     }
 
@@ -1815,6 +1949,21 @@ impl Interpreter {
         }
     }
 
+    /// E30 Phase 6 / E30B-004: Materialise the synthetic defaultFn return.
+    ///
+    /// Called from `call_function` / `call_function_with_values` /
+    /// `call_function_preserving_signals` whenever a `Value::Function` whose
+    /// `name` equals `DEFAULT_FN_SENTINEL_NAME` is invoked. The body is
+    /// intentionally empty; we only ever produce the return type's default.
+    pub(crate) fn invoke_default_fn(&mut self, func: &FuncValue) -> Result<Value, RuntimeError> {
+        let ret_ty = match &func.return_type {
+            Some(t) => t.clone(),
+            None => return Ok(Value::Unit),
+        };
+        let mut visiting = HashSet::new();
+        self.default_for_type_expr(&ret_ty, &mut visiting)
+    }
+
     /// Helper: call a function with pre-evaluated argument values,
     /// preserving all Signal variants (including Throw) for the caller to handle.
     /// Used for __unmold calls where Signal::Throw must be catchable by |==.
@@ -1833,6 +1982,13 @@ impl Interpreter {
                     MAX_CALL_DEPTH
                 ),
             });
+        }
+
+        // E30 Phase 6 / E30B-004: synthetic defaultFn fast path.
+        if func.name == Self::DEFAULT_FN_SENTINEL_NAME {
+            self.call_depth -= 1;
+            let _ = arg_values; // arity is enforced by the type, the body is no-op
+            return self.invoke_default_fn(func).map(Signal::Value);
         }
         // Internal callback paths (list ops, unmold hooks) should not inherit
         // outer-function tail-call context.
@@ -1890,6 +2046,14 @@ impl Interpreter {
                 ),
             });
         }
+
+        // E30 Phase 6 / E30B-004: synthetic defaultFn fast path.
+        if func.name == Self::DEFAULT_FN_SENTINEL_NAME {
+            self.call_depth -= 1;
+            let _ = arg_values;
+            return self.invoke_default_fn(func);
+        }
+
         // Internal callback paths (Map/Filter/etc.) should not inherit
         // outer-function tail-call context.
         let prev_active = self.active_function.take();
@@ -1983,6 +2147,24 @@ impl Interpreter {
                 other => return Ok(other),
             };
             arg_values.push(val);
+        }
+
+        // E30 Phase 6 / E30B-004: synthetic defaultFn fast path.
+        //
+        // A `Value::Function` whose name is `Self::DEFAULT_FN_SENTINEL_NAME`
+        // is the synthetic placeholder generated by `default_for_type_expr`
+        // for declare-only function fields. Its body intentionally carries
+        // no AST (it must never enter the trampoline loop). When called,
+        // it materialises and returns the **return type's default value**
+        // per Lock-D verdict (E30 Phase 0, 2026-04-28):
+        //   - primitive return → primitive default
+        //   - `:Unit` → no-op (Value::Unit)
+        //   - `:Async[T]` → resolved Async carrying T's default
+        //   - registered class-like → default pack with cycle guard
+        //   - opaque alias → not generatable (Phase 5 reject path)
+        if func.name == Self::DEFAULT_FN_SENTINEL_NAME {
+            self.call_depth -= 1;
+            return self.invoke_default_fn(func).map(Signal::Value);
         }
 
         // Save the previous active function name
@@ -2210,6 +2392,132 @@ impl Interpreter {
         }
 
         Ok(result)
+    }
+
+    /// E30B-007 / Lock-G: evaluate the explicit addon-binding form
+    /// `RustAddon["fn"](arity <= N)`.
+    ///
+    /// Contract:
+    /// - `type_args` must contain exactly one entry, a `StringLit` with
+    ///   the addon function name. Anything else → `[E1412]`.
+    /// - `fields` must contain exactly one entry, name `arity`, with an
+    ///   `IntLit` value. Anything else → `[E1412]`.
+    /// - Must execute inside an addon facade load context
+    ///   (`loading_addon_facade_ctx == Some(_)`). Otherwise → `[E1412]`.
+    /// - The function name must exist in the surrounding addon's
+    ///   manifest `[functions]` table and the declared arity must match
+    ///   the manifest arity. Otherwise → `[E1412]` drift error.
+    /// - On success, returns `Value::str("__taida_addon_call::<pkg>::<fn>")`
+    ///   so the binding is structurally identical to today's pre-injected
+    ///   addon sentinel (the addon dispatch path in `MoldInst` /
+    ///   `try_addon_func` uses the sentinel string verbatim).
+    fn eval_rust_addon_binding(
+        &mut self,
+        type_args: &[crate::parser::Expr],
+        fields: &[crate::parser::BuchiField],
+        _span: &crate::lexer::Span,
+    ) -> Result<Signal, RuntimeError> {
+        use crate::parser::Expr;
+
+        // Surface form: exactly one type-arg = string literal.
+        if type_args.len() != 1 {
+            return Err(RuntimeError {
+                message: format!(
+                    "[E1412] RustAddon[\"fn\"] expects exactly one string \
+                     literal inside the brackets (got {})",
+                    type_args.len()
+                ),
+            });
+        }
+        let fn_name = match &type_args[0] {
+            Expr::StringLit(s, _) => s.clone(),
+            other => {
+                return Err(RuntimeError {
+                    message: format!(
+                        "[E1412] RustAddon[\"fn\"] requires a string literal; \
+                         got {:?}",
+                        other
+                    ),
+                });
+            }
+        };
+
+        // Surface form: exactly one field `arity <= IntLit`.
+        if fields.len() != 1 {
+            return Err(RuntimeError {
+                message: format!(
+                    "[E1412] RustAddon[\"{}\"](arity <= N) expects exactly \
+                     one `arity` field (got {})",
+                    fn_name,
+                    fields.len()
+                ),
+            });
+        }
+        if fields[0].name != "arity" {
+            return Err(RuntimeError {
+                message: format!(
+                    "[E1412] RustAddon[\"{}\"] expects field name `arity`, got `{}`",
+                    fn_name, fields[0].name
+                ),
+            });
+        }
+        let arity_decl: u32 = match &fields[0].value {
+            Expr::IntLit(n, _) if *n >= 0 => *n as u32,
+            other => {
+                return Err(RuntimeError {
+                    message: format!(
+                        "[E1412] RustAddon[\"{}\"](arity <= N) requires a \
+                         non-negative integer literal; got {:?}",
+                        fn_name, other
+                    ),
+                });
+            }
+        };
+
+        // Must execute inside an addon facade load context.
+        let (pkg_id, manifest_arities) = match &self.loading_addon_facade_ctx {
+            Some(ctx) => ctx.clone(),
+            None => {
+                return Err(RuntimeError {
+                    message: format!(
+                        "[E1412] RustAddon[\"{}\"] binding may only appear \
+                         inside an addon facade (`<pkg>/taida/<stem>.td`). \
+                         This is the explicit-binding form locked by E30 \
+                         Lock-G; user-side code cannot construct addon \
+                         sentinels directly.",
+                        fn_name
+                    ),
+                });
+            }
+        };
+
+        // Function must exist + arity must match manifest entry.
+        let manifest_arity = match manifest_arities.get(&fn_name) {
+            Some(a) => *a,
+            None => {
+                return Err(RuntimeError {
+                    message: format!(
+                        "[E1412] RustAddon[\"{}\"]: function not declared in \
+                         addon manifest `[functions]` for package '{}'.",
+                        fn_name, pkg_id
+                    ),
+                });
+            }
+        };
+        if arity_decl != manifest_arity {
+            return Err(RuntimeError {
+                message: format!(
+                    "[E1412] RustAddon[\"{}\"](arity <= {}) drifts from \
+                     addon manifest declared arity {} for package '{}'. \
+                     Update the facade binding or the manifest entry.",
+                    fn_name, arity_decl, manifest_arity, pkg_id
+                ),
+            });
+        }
+
+        // Success: same sentinel string the legacy pre-inject path produces.
+        let sentinel = format!("__taida_addon_call::{}::{}", pkg_id, fn_name);
+        Ok(Signal::Value(Value::str(sentinel)))
     }
 }
 

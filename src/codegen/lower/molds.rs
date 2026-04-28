@@ -15,7 +15,9 @@ impl Lowering {
     }
 
     pub(super) fn register_mold_solidify_helpers(&mut self) -> Result<(), LowerError> {
-        let mut mold_defs: Vec<crate::parser::MoldDef> = self.mold_defs.values().cloned().collect();
+        // (E30 Phase 2 Sub-step 2.1) `MoldDef` 廃止に伴い `ClassLikeDef` を保持。
+        let mut mold_defs: Vec<crate::parser::ClassLikeDef> =
+            self.mold_defs.values().cloned().collect();
         mold_defs.sort_by(|a, b| a.name.cmp(&b.name));
 
         // Register helper symbols first, so recursive mold references can resolve.
@@ -583,11 +585,89 @@ impl Lowering {
                 func.push(IrInst::PackSetTag(pack_var, 3, 3)); // TAIDA_TAG_STR
                 Ok(pack_var)
             }
-            TypeExpr::Generic(_, _) | TypeExpr::Function(_, _) => {
+            TypeExpr::Generic(_, _) => {
                 let zero = func.alloc_var();
                 func.push(IrInst::ConstInt(zero, 0));
                 Ok(zero)
             }
+            // E30 Phase 6 / E30B-004 (Lock-D verdict): synthetic defaultFn
+            // for declare-only function fields. Emit a lambda function that,
+            // when called, returns the **return type's default value**.
+            //
+            // The lambda takes `params.len()` ignored arguments (matching the
+            // declared type arity) and immediately returns the lowered default
+            // value of `ret`. `MakeClosure` produces a closure value carrying
+            // no captures, so calling the field at runtime materialises the
+            // expected type-default — matching the interpreter's
+            // `DEFAULT_FN_SENTINEL_NAME` synthetic FuncValue and the JS
+            // backend's `__taida_defaultForSchema({ __fn: ... })` arrow
+            // function.
+            //
+            // PHILOSOPHY: completes "全型にデフォルト値保証 / null/undefined
+            // 排除" — function-typed fields no longer fall back to the
+            // crashing `ConstInt(0)` placeholder; they yield a callable
+            // closure whose result is the proper type-default.
+            TypeExpr::Function(params, ret) => {
+                self.lower_default_fn_synthetic(func, params, ret, visiting)
+            }
         }
+    }
+
+    /// E30 Phase 6 / E30B-004: Emit a synthetic defaultFn lambda whose body
+    /// returns the lowered default value of `ret`. Returns the IR var of the
+    /// resulting closure (boxed value).
+    fn lower_default_fn_synthetic(
+        &mut self,
+        _outer: &mut IrFunction,
+        params: &[TypeExpr],
+        ret: &TypeExpr,
+        visiting: &mut std::collections::HashSet<String>,
+    ) -> Result<IrVar, LowerError> {
+        let lambda_id = self.lambda_counter;
+        self.lambda_counter += 1;
+        let lambda_name = format!("_taida_default_fn_{}", lambda_id);
+
+        // Synthetic params: __env (closure env, unused) + one slot per
+        // declared type-arg (also unused inside the body).
+        let mut ir_params: Vec<String> = vec!["__env".to_string()];
+        for i in 0..params.len() {
+            ir_params.push(format!("__df_arg_{}", i));
+        }
+
+        let mut lambda_fn = IrFunction::new_with_params(lambda_name.clone(), ir_params);
+
+        // Body: materialise the return-type default and return it.
+        let result = self.lower_default_for_type_expr(&mut lambda_fn, ret, visiting)?;
+
+        // E30 Phase 8 / E30B-011: propagate the return-type tag so callers
+        // (`CallIndirect` + `taida_get_return_tag`) can render the value
+        // correctly. Without this, `:Bool` defaults (i64 0) lose their tag
+        // at the closure boundary and `.toString()` produces `"0"` instead
+        // of `"false"`. The C runtime helper `taida_set_return_tag`
+        // (`native_runtime/core.c:921`) updates a thread-local tag slot
+        // that the caller reads via `taida_get_return_tag` immediately
+        // after `CallIndirect`.
+        let tag = crate::codegen::tag_prop::type_expr_to_tag(ret);
+        if tag >= 0 {
+            let tag_var = lambda_fn.alloc_var();
+            lambda_fn.push(IrInst::ConstInt(tag_var, tag));
+            let dummy = lambda_fn.alloc_var();
+            lambda_fn.push(IrInst::Call(
+                dummy,
+                "taida_set_return_tag".to_string(),
+                vec![tag_var],
+            ));
+        }
+
+        lambda_fn.push(IrInst::Return(result));
+
+        self.user_funcs.insert(lambda_name.clone());
+        self.lambda_funcs.push(lambda_fn);
+
+        // Emit MakeClosure in the outer function. Captures: empty (synthetic
+        // defaultFn does not close over any caller-scope variable).
+        let closure_var = _outer.alloc_var();
+        _outer.push(IrInst::MakeClosure(closure_var, lambda_name, Vec::new()));
+        Ok(closure_var)
     }
 }

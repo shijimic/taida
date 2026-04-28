@@ -42,36 +42,45 @@ fn find_user_mold_hover_info(
     }
     let fields = checker.registry.get_type_fields(name).unwrap_or_default();
     for stmt in statements {
-        match stmt {
-            Statement::MoldDef(md) if md.name == name => {
-                let child_args = md.name_args.as_deref().unwrap_or(md.mold_args.as_slice());
-                let signature = format!(
-                    "{} => {}",
-                    format_named_mold_header("Mold", &md.mold_args),
-                    format_named_mold_header(&md.name, child_args)
-                );
-                let doc = format_doc_comments(&md.doc_comments);
-                return Some(format_mold_hover_block(&signature, &fields, &doc));
+        // (E30 Sub-step 2.1) ClassLikeDef + kind dispatch
+        if let Statement::ClassLikeDef(cl) = stmt {
+            if cl.name != name {
+                continue;
             }
-            Statement::InheritanceDef(inh) if inh.child == name => {
-                let parent_header = match inh.parent_args.as_deref() {
-                    Some(args) => format_named_mold_header(&inh.parent, args),
-                    None => inh.parent.clone(),
-                };
-                let child_args = inh
-                    .child_args
-                    .as_deref()
-                    .or(inh.parent_args.as_deref())
-                    .unwrap_or(&[]);
-                let signature = format!(
-                    "{} => {}",
-                    parent_header,
-                    format_named_mold_header(&inh.child, child_args)
-                );
-                let doc = format_doc_comments(&inh.doc_comments);
-                return Some(format_mold_hover_block(&signature, &fields, &doc));
+            match &cl.kind {
+                crate::parser::ClassLikeKind::Mold { mold_args } => {
+                    let child_args = cl.name_args.as_deref().unwrap_or(mold_args.as_slice());
+                    let signature = format!(
+                        "{} => {}",
+                        format_named_mold_header("Mold", mold_args),
+                        format_named_mold_header(&cl.name, child_args)
+                    );
+                    let doc = format_doc_comments(&cl.doc_comments);
+                    return Some(format_mold_hover_block(&signature, &fields, &doc));
+                }
+                crate::parser::ClassLikeKind::Inheritance {
+                    parent,
+                    parent_args,
+                } => {
+                    let parent_header = match parent_args.as_deref() {
+                        Some(args) => format_named_mold_header(parent, args),
+                        None => parent.clone(),
+                    };
+                    let child_args = cl
+                        .name_args
+                        .as_deref()
+                        .or(parent_args.as_deref())
+                        .unwrap_or(&[]);
+                    let signature = format!(
+                        "{} => {}",
+                        parent_header,
+                        format_named_mold_header(&cl.name, child_args)
+                    );
+                    let doc = format_doc_comments(&cl.doc_comments);
+                    return Some(format_mold_hover_block(&signature, &fields, &doc));
+                }
+                crate::parser::ClassLikeKind::BuchiPack => {}
             }
-            _ => {}
         }
     }
     None
@@ -135,12 +144,23 @@ fn find_hover_in_statement(
                     return Some(info);
                 }
                 // Check if cursor is near the target name
-                let var_type = checker.lookup_var(&assign.target);
-                if let Some(ty) = var_type
-                    && assign.span.column <= col
+                if assign.span.column <= col
                     && col <= assign.span.column + assign.target.chars().count()
                 {
-                    return Some(format!("```taida\n{}: {}\n```", assign.target, ty));
+                    if let Some((fn_name, arity)) = assign.as_rust_addon_binding() {
+                        let params = (0..arity)
+                            .map(|i| format!("_arg{}: Unknown", i))
+                            .collect::<Vec<_>>()
+                            .join(" ");
+                        let spacer = if params.is_empty() { "" } else { " " };
+                        return Some(format!(
+                            "```taida\n{}{}{} => :Unknown\n```\nRustAddon[\"{}\"](arity <= {})",
+                            assign.target, spacer, params, fn_name, arity
+                        ));
+                    }
+                    if let Some(ty) = checker.lookup_var(&assign.target) {
+                        return Some(format!("```taida\n{}: {}\n```", assign.target, ty));
+                    }
                 }
             }
             None
@@ -185,140 +205,142 @@ fn find_hover_in_statement(
             }
             None
         }
-        Statement::TypeDef(td) => {
-            // Check if cursor is on the type name
-            if td.span.line == line
-                && td.span.column <= col
-                && col <= td.span.column + td.name.chars().count()
-            {
-                let fields: Vec<String> = td
-                    .fields
-                    .iter()
-                    .filter(|f| !f.is_method)
-                    .map(|f| {
-                        if let Some(ty) = &f.type_annotation {
-                            format!("  {}: {}", f.name, format_type_expr(ty))
-                        } else {
-                            format!("  {}", f.name)
-                        }
-                    })
-                    .collect();
-                let doc = format_doc_comments(&td.doc_comments);
-                return Some(format!(
-                    "```taida\n{} = @(\n{}\n)\n```{}",
-                    td.name,
-                    fields.join(",\n"),
-                    doc
-                ));
+        // (E30 Sub-step 2.1) ClassLikeDef + kind dispatch (旧 TypeDef/MoldDef/InheritanceDef を統合)
+        Statement::ClassLikeDef(cl) => match &cl.kind {
+            crate::parser::ClassLikeKind::BuchiPack => {
+                let td = cl;
+                if td.span.line == line
+                    && td.span.column <= col
+                    && col <= td.span.column + td.name.chars().count()
+                {
+                    let fields: Vec<String> = td
+                        .fields
+                        .iter()
+                        .filter(|f| !f.is_method)
+                        .map(|f| {
+                            if let Some(ty) = &f.type_annotation {
+                                format!("  {}: {}", f.name, format_type_expr(ty))
+                            } else {
+                                format!("  {}", f.name)
+                            }
+                        })
+                        .collect();
+                    let doc = format_doc_comments(&td.doc_comments);
+                    return Some(format!(
+                        "```taida\n{} = @(\n{}\n)\n```{}",
+                        td.name,
+                        fields.join(",\n"),
+                        doc
+                    ));
+                }
+                None
             }
-            None
-        }
-        Statement::MoldDef(md) => {
-            // Check if cursor is on the mold name
-            if md.span.line == line
-                && md.span.column <= col
-                && col <= md.span.column + md.name.chars().count()
-            {
-                let parent_args: Vec<String> =
-                    md.mold_args.iter().map(format_mold_header_arg).collect();
-                let child_args: Vec<String> = md
-                    .name_args
-                    .as_ref()
-                    .unwrap_or(&md.mold_args)
-                    .iter()
-                    .map(format_mold_header_arg)
-                    .collect();
-                let fields: Vec<String> = md
-                    .fields
-                    .iter()
-                    .filter(|f| !f.is_method)
-                    .map(|f| {
-                        if let Some(ty) = &f.type_annotation {
-                            format!("  {}: {}", f.name, format_type_expr(ty))
-                        } else {
-                            format!("  {}", f.name)
-                        }
-                    })
-                    .collect();
-                let doc = format_doc_comments(&md.doc_comments);
-                return Some(format!(
-                    "```taida\nMold[{}] => {}[{}] = @(\n{}\n)\n```{}",
-                    parent_args.join(", "),
-                    md.name,
-                    child_args.join(", "),
-                    fields.join(",\n"),
-                    doc
-                ));
+            crate::parser::ClassLikeKind::Mold { mold_args } => {
+                let md = cl;
+                if md.span.line == line
+                    && md.span.column <= col
+                    && col <= md.span.column + md.name.chars().count()
+                {
+                    let parent_args: Vec<String> =
+                        mold_args.iter().map(format_mold_header_arg).collect();
+                    let child_args: Vec<String> = md
+                        .name_args
+                        .as_ref()
+                        .unwrap_or(mold_args)
+                        .iter()
+                        .map(format_mold_header_arg)
+                        .collect();
+                    let fields: Vec<String> = md
+                        .fields
+                        .iter()
+                        .filter(|f| !f.is_method)
+                        .map(|f| {
+                            if let Some(ty) = &f.type_annotation {
+                                format!("  {}: {}", f.name, format_type_expr(ty))
+                            } else {
+                                format!("  {}", f.name)
+                            }
+                        })
+                        .collect();
+                    let doc = format_doc_comments(&md.doc_comments);
+                    return Some(format!(
+                        "```taida\nMold[{}] => {}[{}] = @(\n{}\n)\n```{}",
+                        parent_args.join(", "),
+                        md.name,
+                        child_args.join(", "),
+                        fields.join(",\n"),
+                        doc
+                    ));
+                }
+                None
             }
-            None
-        }
-        Statement::InheritanceDef(inh) => {
-            // Check if cursor is on the child type name
-            if inh.span.line == line {
-                // Check child name position (appears after "Parent => ")
-                let parent_header = inh
-                    .parent_args
-                    .as_ref()
-                    .map(|args| {
-                        format!(
-                            "{}[{}]",
-                            inh.parent,
-                            args.iter()
-                                .map(format_mold_header_arg)
-                                .collect::<Vec<_>>()
-                                .join(", ")
-                        )
-                    })
-                    .unwrap_or_else(|| inh.parent.clone());
-                let child_header = inh
-                    .child_args
-                    .as_ref()
-                    .map(|args| {
-                        format!(
-                            "{}[{}]",
-                            inh.child,
-                            args.iter()
-                                .map(format_mold_header_arg)
-                                .collect::<Vec<_>>()
-                                .join(", ")
-                        )
-                    })
-                    .unwrap_or_else(|| inh.child.clone());
-                let fields: Vec<String> = inh
-                    .fields
-                    .iter()
-                    .filter(|f| !f.is_method)
-                    .map(|f| {
-                        if let Some(ty) = &f.type_annotation {
-                            format!("  {}: {}", f.name, format_type_expr(ty))
-                        } else {
-                            format!("  {}", f.name)
-                        }
-                    })
-                    .collect();
-                let parent_fields = checker
-                    .registry
-                    .get_type_fields(&inh.parent)
-                    .unwrap_or_default();
-                let parent_fields_str: Vec<String> = parent_fields
-                    .iter()
-                    .map(|(n, t)| format!("  {}: {} (inherited)", n, t))
-                    .collect();
+            crate::parser::ClassLikeKind::Inheritance {
+                parent,
+                parent_args,
+            } => {
+                let inh = cl;
+                if inh.span.line == line {
+                    let parent_header = parent_args
+                        .as_ref()
+                        .map(|args| {
+                            format!(
+                                "{}[{}]",
+                                parent,
+                                args.iter()
+                                    .map(format_mold_header_arg)
+                                    .collect::<Vec<_>>()
+                                    .join(", ")
+                            )
+                        })
+                        .unwrap_or_else(|| parent.clone());
+                    let child_header = inh
+                        .name_args
+                        .as_ref()
+                        .map(|args| {
+                            format!(
+                                "{}[{}]",
+                                inh.name,
+                                args.iter()
+                                    .map(format_mold_header_arg)
+                                    .collect::<Vec<_>>()
+                                    .join(", ")
+                            )
+                        })
+                        .unwrap_or_else(|| inh.name.clone());
+                    let fields: Vec<String> = inh
+                        .fields
+                        .iter()
+                        .filter(|f| !f.is_method)
+                        .map(|f| {
+                            if let Some(ty) = &f.type_annotation {
+                                format!("  {}: {}", f.name, format_type_expr(ty))
+                            } else {
+                                format!("  {}", f.name)
+                            }
+                        })
+                        .collect();
+                    let parent_fields =
+                        checker.registry.get_type_fields(parent).unwrap_or_default();
+                    let parent_fields_str: Vec<String> = parent_fields
+                        .iter()
+                        .map(|(n, t)| format!("  {}: {} (inherited)", n, t))
+                        .collect();
 
-                let mut all_fields = parent_fields_str;
-                all_fields.extend(fields);
+                    let mut all_fields = parent_fields_str;
+                    all_fields.extend(fields);
 
-                let doc = format_doc_comments(&inh.doc_comments);
-                return Some(format!(
-                    "```taida\n{} => {} = @(\n{}\n)\n```{}",
-                    parent_header,
-                    child_header,
-                    all_fields.join(",\n"),
-                    doc
-                ));
+                    let doc = format_doc_comments(&inh.doc_comments);
+                    return Some(format!(
+                        "```taida\n{} => {} = @(\n{}\n)\n```{}",
+                        parent_header,
+                        child_header,
+                        all_fields.join(",\n"),
+                        doc
+                    ));
+                }
+                None
             }
-            None
-        }
+        },
         Statement::Expr(expr) => find_hover_in_expr(expr, line, col, checker, all_stmts),
         Statement::ErrorCeiling(ec) => {
             for body_stmt in &ec.handler_body {
@@ -500,6 +522,21 @@ mod tests {
         let info = result.unwrap();
         assert!(info.contains("x"), "Should contain variable name");
         assert!(info.contains("Int"), "Should contain type Int");
+    }
+
+    #[test]
+    fn test_hover_rust_addon_binding_as_function() {
+        let source = "isTerminal <= RustAddon[\"isTerminal\"](arity <= 1)";
+        let result = get_hover_info(
+            source,
+            Position {
+                line: 0,
+                character: 0,
+            },
+        );
+        let info = result.expect("Should get hover info for RustAddon binding");
+        assert!(info.contains("isTerminal _arg0: Unknown => :Unknown"));
+        assert!(info.contains("RustAddon[\"isTerminal\"](arity <= 1)"));
     }
 
     #[test]

@@ -3,8 +3,8 @@
 //! Extracts doc comments (`///@`) from AST nodes and generates Markdown documentation.
 
 use crate::parser::{
-    Assignment, ExportStmt, FieldDef, FuncDef, InheritanceDef, MoldDef, MoldHeaderArg, Program,
-    Statement, TypeDef, TypeExpr, TypeParam,
+    Assignment, ClassLikeDef, ClassLikeKind, ExportStmt, FieldDef, FuncDef, MoldHeaderArg, Program,
+    Statement, TypeExpr, TypeParam,
 };
 
 // ── Data structures ─────────────────────────────────────────────────
@@ -341,9 +341,28 @@ pub fn extract_docs(program: &Program, module_name: &str) -> ModuleDoc {
 
     for stmt in &program.statements {
         match stmt {
-            Statement::TypeDef(td) if !td.doc_comments.is_empty() || !td.fields.is_empty() => {
-                doc.types.push(extract_type_doc(td));
-            }
+            // (E30 Sub-step 2.1) ClassLikeDef 単一 variant + kind dispatch。
+            Statement::ClassLikeDef(cl) => match &cl.kind {
+                ClassLikeKind::BuchiPack
+                    if !cl.doc_comments.is_empty() || !cl.fields.is_empty() =>
+                {
+                    doc.types.push(extract_type_doc(cl));
+                }
+                ClassLikeKind::Mold { mold_args }
+                    if !cl.doc_comments.is_empty()
+                        || !cl.fields.is_empty()
+                        || !mold_args.is_empty()
+                        || cl.name_args.as_ref().is_some_and(|args| !args.is_empty()) =>
+                {
+                    doc.molds.push(extract_mold_doc(cl));
+                }
+                ClassLikeKind::Inheritance { .. }
+                    if !cl.doc_comments.is_empty() || !cl.fields.is_empty() =>
+                {
+                    doc.inheritances.push(extract_inherit_doc(cl));
+                }
+                _ => {}
+            },
             Statement::FuncDef(fd)
                 if !fd.doc_comments.is_empty()
                     || !fd.params.is_empty()
@@ -351,18 +370,16 @@ pub fn extract_docs(program: &Program, module_name: &str) -> ModuleDoc {
             {
                 doc.functions.push(extract_func_doc(fd));
             }
-            Statement::MoldDef(md)
-                if !md.doc_comments.is_empty()
-                    || !md.fields.is_empty()
-                    || !md.mold_args.is_empty()
-                    || md.name_args.as_ref().is_some_and(|args| !args.is_empty()) =>
-            {
-                doc.molds.push(extract_mold_doc(md));
-            }
-            Statement::InheritanceDef(id)
-                if !id.doc_comments.is_empty() || !id.fields.is_empty() =>
-            {
-                doc.inheritances.push(extract_inherit_doc(id));
+            // (E30B-007 sub-step B-5 / Lock-G Sub-G5、2026-04-28) explicit
+            // `Name <= RustAddon["fn"](arity <= N)` binding を **public
+            // function** として doc-gen 出力する。AST 上は Assignment だが、
+            // public binding contract であり、call site から見ると関数。
+            // doc comment の有無に関わらず必ず FuncDoc に出すことで、
+            // `taida doc generate` の addon facade 出力に 23 sentinel が
+            // 全件表示される (TMB-029 解消)。Match の order が重要 — RustAddon
+            // 判定を doc-comments-only の AssignmentDoc 分岐より前に置くこと。
+            Statement::Assignment(a) if a.as_rust_addon_binding().is_some() => {
+                doc.functions.push(extract_rust_addon_func_doc(a));
             }
             Statement::Assignment(a) if !a.doc_comments.is_empty() => {
                 doc.assignments.push(extract_assignment_doc(a));
@@ -384,7 +401,31 @@ fn extract_assignment_doc(a: &Assignment) -> AssignmentDoc {
     }
 }
 
-fn extract_type_doc(td: &TypeDef) -> TypeDoc {
+/// E30B-007 sub-step B-5 / Lock-G Sub-G5: render an explicit
+/// `Name <= RustAddon["fn"](arity <= N)` binding as a `FuncDoc` so
+/// downstream doc-gen / LSP / introspection consumers surface it as a
+/// public function. Params / return type are not declared in the
+/// surface form (they live in the `///@` doc comment block above the
+/// binding) — we mark return_type as `None` and produce N positional
+/// placeholder params so the doc tool can render
+/// `<name>(_, _, ...)` even before the user adds richer signatures.
+fn extract_rust_addon_func_doc(a: &Assignment) -> FuncDoc {
+    let (_fn_name, arity) = a
+        .as_rust_addon_binding()
+        .expect("caller already verified RustAddon binding");
+    let placeholder_params: Vec<(String, Option<String>)> =
+        (0..arity).map(|i| (format!("_arg{}", i), None)).collect();
+    FuncDoc {
+        name: a.target.clone(),
+        type_params: Vec::new(),
+        tags: parse_doc_tags(&a.doc_comments),
+        params: placeholder_params,
+        return_type: None,
+    }
+}
+
+fn extract_type_doc(td: &ClassLikeDef) -> TypeDoc {
+    // (E30 Sub-step 2.1) BuchiPack kind の ClassLikeDef を旧 TypeDoc 形式に抽出。
     TypeDoc {
         name: td.name.clone(),
         tags: parse_doc_tags(&td.doc_comments),
@@ -413,13 +454,15 @@ fn extract_func_doc(fd: &FuncDef) -> FuncDoc {
     }
 }
 
-fn extract_mold_doc(md: &MoldDef) -> MoldDoc {
+fn extract_mold_doc(md: &ClassLikeDef) -> MoldDoc {
+    // (E30 Sub-step 2.1) Mold kind の ClassLikeDef を旧 MoldDoc 形式に抽出。
+    let mold_args = md.mold_args().cloned().unwrap_or_default();
     MoldDoc {
         name: md.name.clone(),
         header_args: md
             .name_args
             .as_ref()
-            .unwrap_or(&md.mold_args)
+            .unwrap_or(&mold_args)
             .iter()
             .map(format_mold_header_arg)
             .collect(),
@@ -428,26 +471,30 @@ fn extract_mold_doc(md: &MoldDef) -> MoldDoc {
     }
 }
 
-fn extract_inherit_doc(id: &InheritanceDef) -> InheritDoc {
-    let parent_header_args: Vec<String> = id
-        .parent_args
-        .as_ref()
+fn extract_inherit_doc(id: &ClassLikeDef) -> InheritDoc {
+    // (E30 Sub-step 2.1) Inheritance kind の ClassLikeDef を旧 InheritDoc 形式に抽出。
+    let parent = id
+        .parent()
+        .expect("inheritance kind has parent")
+        .to_string();
+    let parent_args = id.parent_args();
+    let parent_header_args: Vec<String> = parent_args
         .into_iter()
         .flatten()
         .map(format_mold_header_arg)
         .collect();
     let child_header_args: Vec<String> = id
-        .child_args
+        .name_args
         .as_ref()
-        .or(id.parent_args.as_ref())
+        .or(parent_args)
         .into_iter()
         .flatten()
         .map(format_mold_header_arg)
         .collect();
     InheritDoc {
-        parent: id.parent.clone(),
+        parent,
         parent_header_args,
-        child: id.child.clone(),
+        child: id.name.clone(),
         child_header_args,
         tags: parse_doc_tags(&id.doc_comments),
         fields: id.fields.iter().map(extract_field_doc).collect(),
@@ -994,7 +1041,7 @@ mod tests {
 
         let program = Program {
             statements: vec![
-                Statement::TypeDef(TypeDef {
+                Statement::ClassLikeDef(ClassLikeDef {
                     name: "User".to_string(),
                     fields: vec![FieldDef {
                         name: "name".to_string(),
@@ -1007,6 +1054,9 @@ mod tests {
                     }],
                     doc_comments: vec!["@Purpose: Represents a user".to_string()],
                     span: span.clone(),
+                    kind: ClassLikeKind::BuchiPack,
+                    name_args: None,
+                    type_params: Vec::new(),
                 }),
                 Statement::FuncDef(FuncDef {
                     name: "greet".to_string(),
@@ -1260,19 +1310,8 @@ mod tests {
         };
 
         let program = Program {
-            statements: vec![Statement::MoldDef(MoldDef {
+            statements: vec![Statement::ClassLikeDef(ClassLikeDef {
                 name: "Container".to_string(),
-                mold_args: vec![crate::parser::MoldHeaderArg::TypeParam(
-                    crate::parser::TypeParam {
-                        name: "T".to_string(),
-                        constraint: None,
-                    },
-                )],
-                name_args: None,
-                type_params: vec![crate::parser::TypeParam {
-                    name: "T".to_string(),
-                    constraint: None,
-                }],
                 fields: vec![FieldDef {
                     name: "value".to_string(),
                     type_annotation: None,
@@ -1284,6 +1323,19 @@ mod tests {
                 }],
                 doc_comments: vec!["@Purpose: A generic container".to_string()],
                 span: span.clone(),
+                kind: ClassLikeKind::Mold {
+                    mold_args: vec![crate::parser::MoldHeaderArg::TypeParam(
+                        crate::parser::TypeParam {
+                            name: "T".to_string(),
+                            constraint: None,
+                        },
+                    )],
+                },
+                name_args: None,
+                type_params: vec![crate::parser::TypeParam {
+                    name: "T".to_string(),
+                    constraint: None,
+                }],
             })],
         };
 
@@ -1326,20 +1378,8 @@ mod tests {
                     doc_comments: vec![],
                     span: span.clone(),
                 }),
-                Statement::MoldDef(MoldDef {
+                Statement::ClassLikeDef(ClassLikeDef {
                     name: "IntBox".to_string(),
-                    mold_args: vec![
-                        crate::parser::MoldHeaderArg::Concrete(TypeExpr::Named("Int".to_string())),
-                        crate::parser::MoldHeaderArg::TypeParam(crate::parser::TypeParam {
-                            name: "T".to_string(),
-                            constraint: Some(TypeExpr::Named("Int".to_string())),
-                        }),
-                    ],
-                    name_args: None,
-                    type_params: vec![crate::parser::TypeParam {
-                        name: "T".to_string(),
-                        constraint: Some(TypeExpr::Named("Int".to_string())),
-                    }],
                     fields: vec![FieldDef {
                         name: "count".to_string(),
                         type_annotation: Some(TypeExpr::Named("Int".to_string())),
@@ -1351,6 +1391,22 @@ mod tests {
                     }],
                     doc_comments: vec!["@Purpose: int wrapper".to_string()],
                     span,
+                    kind: ClassLikeKind::Mold {
+                        mold_args: vec![
+                            crate::parser::MoldHeaderArg::Concrete(TypeExpr::Named(
+                                "Int".to_string(),
+                            )),
+                            crate::parser::MoldHeaderArg::TypeParam(crate::parser::TypeParam {
+                                name: "T".to_string(),
+                                constraint: Some(TypeExpr::Named("Int".to_string())),
+                            }),
+                        ],
+                    },
+                    name_args: None,
+                    type_params: vec![crate::parser::TypeParam {
+                        name: "T".to_string(),
+                        constraint: Some(TypeExpr::Named("Int".to_string())),
+                    }],
                 }),
             ],
         };
@@ -1387,16 +1443,18 @@ mod tests {
                     doc_comments: vec![],
                     span: span.clone(),
                 }),
-                Statement::MoldDef(MoldDef {
+                Statement::ClassLikeDef(ClassLikeDef {
                     name: "Box".to_string(),
-                    mold_args: vec![crate::parser::MoldHeaderArg::Concrete(TypeExpr::Named(
-                        "Int".to_string(),
-                    ))],
-                    name_args: None,
-                    type_params: vec![],
                     fields: vec![],
                     doc_comments: vec![],
                     span,
+                    kind: ClassLikeKind::Mold {
+                        mold_args: vec![crate::parser::MoldHeaderArg::Concrete(TypeExpr::Named(
+                            "Int".to_string(),
+                        ))],
+                    },
+                    name_args: None,
+                    type_params: vec![],
                 }),
             ],
         };
@@ -1421,16 +1479,29 @@ mod tests {
         };
 
         let program = Program {
-            statements: vec![Statement::InheritanceDef(InheritanceDef {
-                parent: "Base".to_string(),
-                parent_args: Some(vec![crate::parser::MoldHeaderArg::TypeParam(
-                    crate::parser::TypeParam {
-                        name: "T".to_string(),
-                        constraint: None,
-                    },
-                )]),
-                child: "Derived".to_string(),
-                child_args: Some(vec![
+            statements: vec![Statement::ClassLikeDef(ClassLikeDef {
+                name: "Derived".to_string(),
+                fields: vec![FieldDef {
+                    name: "extra".to_string(),
+                    type_annotation: Some(TypeExpr::Named("Int".to_string())),
+                    default_value: None,
+                    is_method: false,
+                    method_def: None,
+                    doc_comments: vec!["Extra field".to_string()],
+                    span: span.clone(),
+                }],
+                doc_comments: vec!["Purpose: Derived extends Base".to_string()],
+                span: span.clone(),
+                kind: ClassLikeKind::Inheritance {
+                    parent: "Base".to_string(),
+                    parent_args: Some(vec![crate::parser::MoldHeaderArg::TypeParam(
+                        crate::parser::TypeParam {
+                            name: "T".to_string(),
+                            constraint: None,
+                        },
+                    )]),
+                },
+                name_args: Some(vec![
                     crate::parser::MoldHeaderArg::TypeParam(crate::parser::TypeParam {
                         name: "T".to_string(),
                         constraint: None,
@@ -1443,17 +1514,7 @@ mod tests {
                         )),
                     }),
                 ]),
-                fields: vec![FieldDef {
-                    name: "extra".to_string(),
-                    type_annotation: Some(TypeExpr::Named("Int".to_string())),
-                    default_value: None,
-                    is_method: false,
-                    method_def: None,
-                    doc_comments: vec!["Extra field".to_string()],
-                    span: span.clone(),
-                }],
-                doc_comments: vec!["Purpose: Derived extends Base".to_string()],
-                span: span.clone(),
+                type_params: vec![],
             })],
         };
 

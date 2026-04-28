@@ -377,11 +377,10 @@ impl TypeChecker {
             )
     }
 
-    fn effective_mold_header_args(md: &MoldDef) -> Vec<MoldHeaderArg> {
-        md.name_args
-            .as_ref()
-            .cloned()
-            .unwrap_or_else(|| md.mold_args.clone())
+    fn effective_mold_header_args(md: &ClassLikeDef) -> Vec<MoldHeaderArg> {
+        // (E30 Sub-step 2.1) Mold kind の ClassLikeDef のみ呼び出される想定。
+        let mold_args = md.mold_args().cloned().unwrap_or_default();
+        md.name_args.as_ref().cloned().unwrap_or(mold_args)
     }
 
     fn merge_field_defs(parent: &[FieldDef], child: &[FieldDef]) -> Vec<FieldDef> {
@@ -411,15 +410,21 @@ impl TypeChecker {
         }
     }
 
-    fn validate_mold_root_header(&mut self, md: &MoldDef, header_args: &[MoldHeaderArg]) {
-        if md.mold_args.len() != 1 {
+    fn validate_mold_root_header(&mut self, md: &ClassLikeDef, header_args: &[MoldHeaderArg]) {
+        // (E30 Sub-step 2.1) Mold kind の ClassLikeDef のみ呼び出される想定。
+        // (E30 Phase 3 / Lock-B Sub-B3) `[E1407]` umbrella = 親型適用の arity mismatch
+        // (header arity / prefix preservation / 親種別 / type param uniqueness 含む).
+        // 本箇所は「Mold root が built-in `Mold` 親に対する適用 arity を維持しているか」
+        // を確認するため、umbrella の root 部の発火点。
+        let mold_args: Vec<MoldHeaderArg> = md.mold_args().cloned().unwrap_or_default();
+        if mold_args.len() != 1 {
             self.errors.push(TypeError {
                 message: Self::binding_diag(
                     "E1407",
                     format!(
                         "MoldDef '{}' must keep the built-in parent `Mold` header at arity 1, got {}",
                         md.name,
-                        md.mold_args.len()
+                        mold_args.len()
                     ),
                     "Write `Mold[T] => Child[T, U, ...] = @(...)`; extend header slots on the child side, not on `Mold` itself.",
                 ),
@@ -431,7 +436,7 @@ impl TypeChecker {
             "MoldDef",
             &md.name,
             "Mold",
-            &md.mold_args,
+            &mold_args,
             header_args,
             &md.span,
         );
@@ -447,6 +452,11 @@ impl TypeChecker {
         child_args: &[MoldHeaderArg],
         span: &Span,
     ) {
+        // (E30 Phase 3 / Lock-B Sub-B3) `[E1407]` umbrella = 親型適用の arity mismatch.
+        // 子側 header が親 header arity 以上 + 親 header を prefix として preserve していることを確認。
+        // Lock-B Sub-B3 verdict: 子側で型引数を追加するのは OK (`Result[T,P] => CustomResult[T,P,V]`)、
+        // しかし shrink (`Result[T,P] => CustomResult[T]`) や prefix 改変 (`Result[T,P] => CustomResult[U,P]`)
+        // は arity / header 構造 mismatch として reject。
         if child_args.len() < parent_args.len() {
             self.errors.push(TypeError {
                 message: Self::binding_diag(
@@ -498,6 +508,8 @@ impl TypeChecker {
         header_args: &[MoldHeaderArg],
         span: &Span,
     ) {
+        // (E30 Phase 3 / Lock-B Sub-B3) `[E1407]` umbrella の周辺発火点 — header 構造一貫性の一部。
+        // 同一 header に同名 type-param を二重登場させると arity / 解決の一貫性が崩れるため reject。
         let mut seen = HashSet::<String>::new();
         let mut duplicates = Vec::<String>::new();
         for arg in header_args {
@@ -534,6 +546,16 @@ impl TypeChecker {
         fields: &[FieldDef],
         inherited_field_names: &HashSet<String>,
     ) {
+        // (E30 Phase 4 / E30B-002) declare-only function fields are NOT
+        // counted as positional binding targets for additional child-side
+        // header type-args. They are interface members whose values are
+        // supplied at instantiation time or, after Phase 6 (E30B-004), by an
+        // automatically-generated `defaultFn`. Counting them here would
+        // (a) silently consume a child-side type-arg slot that the user
+        // intended to bind to a regular new field, and (b) suppress the
+        // `[E1401]` "unbound type parameter" diagnostic that surfaces this
+        // mistake. See `FieldDef::is_declare_only_fn_field` and the Phase 4
+        // plan in `.dev/E30_SESSION_PLANS/Phase-4_*.md`.
         let positional_field_count = fields
             .iter()
             .filter(|f| {
@@ -541,6 +563,7 @@ impl TypeChecker {
                     && f.default_value.is_none()
                     && f.name != "filling"
                     && !inherited_field_names.contains(&f.name)
+                    && !f.is_declare_only_fn_field()
             })
             .count();
 
@@ -602,30 +625,37 @@ impl TypeChecker {
             .collect()
     }
 
-    fn inheritance_uses_headers(inh: &InheritanceDef) -> bool {
-        inh.parent_args.is_some() || inh.child_args.is_some()
+    fn inheritance_uses_headers(inh: &ClassLikeDef) -> bool {
+        // (E30 Sub-step 2.1) Inheritance kind の ClassLikeDef のみ呼び出される想定。
+        inh.parent_args().is_some() || inh.name_args.is_some()
     }
 
-    fn inheritance_child_arity(&self, inh: &InheritanceDef, parent_arity: usize) -> usize {
-        inh.child_args
+    fn inheritance_child_arity(&self, inh: &ClassLikeDef, parent_arity: usize) -> usize {
+        // (E30 Sub-step 2.1) Inheritance kind の ClassLikeDef のみ呼び出される想定。
+        inh.name_args
             .as_ref()
             .map(Vec::len)
-            .or_else(|| inh.parent_args.as_ref().map(Vec::len))
+            .or_else(|| inh.parent_args().map(Vec::len))
             .unwrap_or(parent_arity)
     }
 
     fn validate_inheritance_header_arities(
         &mut self,
-        inh: &InheritanceDef,
+        inh: &ClassLikeDef,
         parent_header: Option<&[MoldHeaderArg]>,
     ) {
+        // (E30 Sub-step 2.1) Inheritance kind の ClassLikeDef のみ呼び出される想定。
+        // (E30 Phase 3 / Lock-B Sub-B3) `[E1407]` umbrella の Inheritance variant 発火点。
+        // 親型適用の arity 一致 / mold-like parent 要件 / 子側 arity ≥ 親 を確認する。
+        let inh_parent = inh.parent().expect("inheritance kind has parent");
+        let inh_child = &inh.name;
         if Self::inheritance_uses_headers(inh) && parent_header.is_none() {
             self.errors.push(TypeError {
                 message: Self::binding_diag(
                     "E1407",
                     format!(
                         "InheritanceDef '{}' can only declare `Parent[...] => Child[...]` headers when parent '{}' is a mold-like type",
-                        inh.child, inh.parent
+                        inh_child, inh_parent
                     ),
                     "Use header syntax only when inheriting from `Mold[...]` or another mold-derived child header.",
                 ),
@@ -636,12 +666,12 @@ impl TypeChecker {
 
         let parent_arity = parent_header.map(|args| args.len()).unwrap_or_else(|| {
             self.declared_header_arities
-                .get(&inh.parent)
+                .get(inh_parent)
                 .copied()
                 .unwrap_or(0)
         });
 
-        if let Some(parent_args) = &inh.parent_args
+        if let Some(parent_args) = inh.parent_args()
             && parent_args.len() != parent_arity
         {
             self.errors.push(TypeError {
@@ -649,8 +679,8 @@ impl TypeChecker {
                     "E1407",
                     format!(
                         "InheritanceDef '{}' must spell the parent header for '{}' with {} slot(s), got {}",
-                        inh.child,
-                        inh.parent,
+                        inh_child,
+                        inh_parent,
                         parent_arity,
                         parent_args.len()
                     ),
@@ -667,7 +697,7 @@ impl TypeChecker {
                     "E1407",
                     format!(
                         "InheritanceDef '{}' cannot shrink header arity below parent '{}' (child: {}, parent: {})",
-                        inh.child, inh.parent, child_arity, parent_arity
+                        inh_child, inh_parent, child_arity, parent_arity
                     ),
                     "Keep inherited header slots intact and append any new slots on the child side.",
                 ),
@@ -676,48 +706,58 @@ impl TypeChecker {
         }
 
         if let Some(parent_header) = parent_header {
-            let parent_args = inh.parent_args.as_deref().unwrap_or(parent_header);
+            let parent_args_ref: Vec<MoldHeaderArg> = inh
+                .parent_args()
+                .cloned()
+                .unwrap_or_else(|| parent_header.to_vec());
             self.validate_child_header_prefix(
                 "InheritanceDef",
-                &inh.child,
-                &inh.parent,
+                inh_child,
+                inh_parent,
                 parent_header,
-                parent_args,
+                &parent_args_ref,
                 &inh.span,
             );
-            let child_args = inh.child_args.as_deref().unwrap_or(parent_args);
+            let child_args_ref: Vec<MoldHeaderArg> = inh
+                .name_args
+                .as_ref()
+                .cloned()
+                .unwrap_or_else(|| parent_args_ref.clone());
             self.validate_child_header_prefix(
                 "InheritanceDef",
-                &inh.child,
-                &inh.parent,
+                inh_child,
+                inh_parent,
                 parent_header,
-                child_args,
+                &child_args_ref,
                 &inh.span,
             );
         }
     }
 
     fn predeclare_header_metadata(&mut self, statements: &[Statement]) {
+        // (E30 Sub-step 2.1) ClassLikeDef + kind discriminator dispatch
         self.mold_header_specs.clear();
         self.declared_header_arities.clear();
 
         for stmt in statements {
-            match stmt {
-                Statement::TypeDef(td) => {
-                    self.declared_header_arities.insert(td.name.clone(), 0);
+            if let Statement::ClassLikeDef(cl) = stmt {
+                match &cl.kind {
+                    ClassLikeKind::BuchiPack => {
+                        self.declared_header_arities.insert(cl.name.clone(), 0);
+                    }
+                    ClassLikeKind::Mold { .. } => {
+                        let header_args = Self::effective_mold_header_args(cl);
+                        self.mold_header_specs.insert(
+                            cl.name.clone(),
+                            MoldHeaderSpec {
+                                header_args: header_args.clone(),
+                            },
+                        );
+                        self.declared_header_arities
+                            .insert(cl.name.clone(), header_args.len());
+                    }
+                    ClassLikeKind::Inheritance { .. } => {}
                 }
-                Statement::MoldDef(md) => {
-                    let header_args = Self::effective_mold_header_args(md);
-                    self.mold_header_specs.insert(
-                        md.name.clone(),
-                        MoldHeaderSpec {
-                            header_args: header_args.clone(),
-                        },
-                    );
-                    self.declared_header_arities
-                        .insert(md.name.clone(), header_args.len());
-                }
-                _ => {}
             }
         }
 
@@ -725,33 +765,38 @@ impl TypeChecker {
         while changed {
             changed = false;
             for stmt in statements {
-                let Statement::InheritanceDef(inh) = stmt else {
+                let Statement::ClassLikeDef(inh) = stmt else {
                     continue;
                 };
+                if !inh.is_inheritance() {
+                    continue;
+                }
+                let inh_parent = inh.parent().expect("inheritance kind has parent");
+                let inh_child = &inh.name;
 
                 let parent_header = self
                     .mold_header_specs
-                    .get(&inh.parent)
+                    .get(inh_parent)
                     .map(|spec| spec.header_args.clone());
                 let parent_arity = parent_header
                     .as_ref()
                     .map(Vec::len)
-                    .or_else(|| self.declared_header_arities.get(&inh.parent).copied());
+                    .or_else(|| self.declared_header_arities.get(inh_parent).copied());
 
                 if let Some(parent_header) = parent_header {
                     let child_header = inh
-                        .child_args
+                        .name_args
                         .clone()
-                        .or_else(|| inh.parent_args.clone())
+                        .or_else(|| inh.parent_args().cloned())
                         .unwrap_or_else(|| parent_header.clone());
                     if self
                         .mold_header_specs
-                        .get(&inh.child)
+                        .get(inh_child)
                         .map(|spec| spec.header_args.as_slice())
                         != Some(child_header.as_slice())
                     {
                         self.mold_header_specs.insert(
-                            inh.child.clone(),
+                            inh_child.clone(),
                             MoldHeaderSpec {
                                 header_args: child_header.clone(),
                             },
@@ -760,17 +805,17 @@ impl TypeChecker {
                     }
 
                     let child_arity = child_header.len();
-                    if self.declared_header_arities.get(&inh.child) != Some(&child_arity) {
+                    if self.declared_header_arities.get(inh_child) != Some(&child_arity) {
                         self.declared_header_arities
-                            .insert(inh.child.clone(), child_arity);
+                            .insert(inh_child.clone(), child_arity);
                         changed = true;
                     }
                 } else if !Self::inheritance_uses_headers(inh)
                     && let Some(parent_arity) = parent_arity
-                    && self.declared_header_arities.get(&inh.child) != Some(&parent_arity)
+                    && self.declared_header_arities.get(inh_child) != Some(&parent_arity)
                 {
                     self.declared_header_arities
-                        .insert(inh.child.clone(), parent_arity);
+                        .insert(inh_child.clone(), parent_arity);
                     changed = true;
                 }
             }
@@ -1608,17 +1653,13 @@ impl TypeChecker {
                 Statement::EnumDef(ed) => {
                     self.declared_concrete_type_names.insert(ed.name.clone());
                 }
-                Statement::TypeDef(td) => {
-                    self.declared_concrete_type_names.insert(td.name.clone());
+                // (E30 Sub-step 2.1) ClassLikeDef 単一 variant + kind dispatch (旧 TypeDef/MoldDef/InheritanceDef を統合)
+                Statement::ClassLikeDef(cl) => {
+                    // BuchiPack / Mold / Inheritance いずれも子型名を登録
+                    self.declared_concrete_type_names.insert(cl.name.clone());
                 }
-                Statement::MoldDef(md) => {
-                    self.declared_concrete_type_names.insert(md.name.clone());
-                }
-                Statement::InheritanceDef(inh) => {
-                    self.declared_concrete_type_names.insert(inh.child.clone());
-                }
-                // N-64: Intentional catch-all — the first pass only collects TypeDef,
-                // MoldDef, and InheritanceDef names for forward-reference resolution.
+                // N-64: Intentional catch-all — the first pass only collects ClassLikeDef
+                // and EnumDef names for forward-reference resolution.
                 // All other statement kinds (Assignment, FuncDef, Expr, etc.) are
                 // processed in the second pass by check_statement().
                 _ => {}
@@ -1629,8 +1670,13 @@ impl TypeChecker {
         self.predeclare_header_metadata(&program.statements);
 
         // First pass: register base type definitions and function signatures before inheritances.
+        // (E30 Sub-step 2.1) ClassLikeDef + kind discriminator
         for stmt in &program.statements {
-            if !matches!(stmt, Statement::InheritanceDef(_)) {
+            let is_inheritance = matches!(
+                stmt,
+                Statement::ClassLikeDef(cl) if cl.is_inheritance()
+            );
+            if !is_inheritance {
                 self.register_types(stmt);
             }
         }
@@ -1639,17 +1685,26 @@ impl TypeChecker {
         let mut pending_inheritances: Vec<&Statement> = program
             .statements
             .iter()
-            .filter(|stmt| matches!(stmt, Statement::InheritanceDef(_)))
+            .filter(|stmt| {
+                matches!(
+                    stmt,
+                    Statement::ClassLikeDef(cl) if cl.is_inheritance()
+                )
+            })
             .collect();
         while !pending_inheritances.is_empty() {
             let mut next_round = Vec::new();
             let mut made_progress = false;
             for stmt in pending_inheritances {
-                let Statement::InheritanceDef(inh) = stmt else {
+                let Statement::ClassLikeDef(inh) = stmt else {
                     continue;
                 };
-                let parent_is_mold_like = self.mold_header_specs.contains_key(&inh.parent);
-                if !parent_is_mold_like || self.mold_field_defs.contains_key(&inh.parent) {
+                if !inh.is_inheritance() {
+                    continue;
+                }
+                let inh_parent = inh.parent().expect("inheritance kind has parent");
+                let parent_is_mold_like = self.mold_header_specs.contains_key(inh_parent);
+                if !parent_is_mold_like || self.mold_field_defs.contains_key(inh_parent) {
                     self.register_types(stmt);
                     made_progress = true;
                 } else {
@@ -1790,186 +1845,29 @@ impl TypeChecker {
                 );
                 self.declared_header_arities.insert(ed.name.clone(), 0);
             }
-            Statement::TypeDef(td) => {
-                // E1501: Check for TypeDef name collision with existing types, functions, or molds
-                let has_collision = self.registry.type_defs.contains_key(&td.name)
-                    || self.registry.enum_defs.contains_key(&td.name)
-                    || self.func_types.contains_key(&td.name)
-                    || self.registry.mold_defs.contains_key(&td.name);
-                if has_collision {
-                    self.errors.push(TypeError {
-                        message: format!(
-                            "[E1501] Name '{}' is already defined in this scope. \
-                             Redefinition in the same scope is not allowed. \
-                             Hint: Use a different name, or define it in an inner scope (shadowing is allowed).",
-                            td.name
-                        ),
-                        span: td.span.clone(),
-                    });
-                }
-                self.validate_class_like_fields("TypeDef", &td.name, &td.fields);
-                let fields: Vec<(String, Type)> = td
-                    .fields
-                    .iter()
-                    .filter(|f| !f.is_method)
-                    .map(|f| {
-                        let ty = f
-                            .type_annotation
-                            .as_ref()
-                            .map(|t| self.registry.resolve_type(t))
-                            .unwrap_or(Type::Unknown);
-                        (f.name.clone(), ty)
-                    })
-                    .collect();
-                self.registry.register_type(&td.name, fields);
-                self.declared_header_arities.insert(td.name.clone(), 0);
-            }
-            Statement::MoldDef(md) => {
-                self.validate_class_like_fields("MoldDef", &md.name, &md.fields);
-                let header_args = Self::effective_mold_header_args(md);
-                self.validate_mold_root_header(md, &header_args);
-                self.validate_mold_extension_bindings(
-                    MoldBindingDef {
-                        kind: "MoldDef",
-                        name: &md.name,
-                        span: &md.span,
-                    },
-                    1,
-                    &header_args,
-                    &md.fields,
-                    &HashSet::new(),
-                );
-                let type_params = Self::collect_mold_type_param_names(&header_args);
-                let fields: Vec<(String, Type)> = md
-                    .fields
-                    .iter()
-                    .filter(|f| !f.is_method)
-                    .map(|f| {
-                        let ty = f
-                            .type_annotation
-                            .as_ref()
-                            .map(|t| self.registry.resolve_type(t))
-                            .unwrap_or(Type::Unknown);
-                        (f.name.clone(), ty)
-                    })
-                    .collect();
-                self.registry
-                    .register_mold(&md.name, type_params, fields.clone());
-                self.registry.register_type(&md.name, fields);
-                self.mold_header_specs
-                    .insert(md.name.clone(), MoldHeaderSpec { header_args });
-                self.mold_field_defs
-                    .insert(md.name.clone(), md.fields.clone());
-                self.declared_header_arities
-                    .insert(md.name.clone(), Self::effective_mold_header_args(md).len());
-            }
-            Statement::InheritanceDef(inh) => {
-                self.validate_class_like_fields("InheritanceDef", &inh.child, &inh.fields);
-                let parent_header = self
-                    .mold_header_specs
-                    .get(&inh.parent)
-                    .map(|spec| spec.header_args.clone());
-                self.validate_inheritance_header_arities(inh, parent_header.as_deref());
-                let extra_fields: Vec<(String, Type)> = inh
-                    .fields
-                    .iter()
-                    .filter(|f| !f.is_method)
-                    .map(|f| {
-                        let ty = f
-                            .type_annotation
-                            .as_ref()
-                            .map(|t| self.registry.resolve_type(t))
-                            .unwrap_or(Type::Unknown);
-                        (f.name.clone(), ty)
-                    })
-                    .collect();
-                // RCB-216: Check for incompatible field redefinition.
-                // If a child redefines a parent field, the type must be compatible
-                // (same type or subtype). Redefining `legs: Int` as `legs: Str` violates LSP.
-                if let Some(parent_fields) = self.registry.get_type_fields(&inh.parent) {
-                    for (child_name, child_ty) in &extra_fields {
-                        if let Some((_, parent_ty)) =
-                            parent_fields.iter().find(|(n, _)| n == child_name)
-                        {
-                            // Both types must be known and compatible
-                            if !matches!(parent_ty, Type::Unknown)
-                                && !matches!(child_ty, Type::Unknown)
-                                && parent_ty != child_ty
-                                && !self.registry.is_subtype_of(child_ty, parent_ty)
-                            {
-                                self.errors.push(TypeError {
-                                    message: Self::binding_diag(
-                                        "E1410",
-                                        format!(
-                                            "InheritanceDef '{}' redefines field '{}' with incompatible type '{}' (parent '{}' declares it as '{}')",
-                                            inh.child, child_name, child_ty, inh.parent, parent_ty
-                                        ),
-                                        "A child type's field must be compatible with the parent's field type. \
-                                         Use the same type or a subtype.",
-                                    ),
-                                    span: inh.span.clone(),
-                                });
-                            }
-                        }
+            // (E30 Sub-step 2.1) ClassLikeDef + kind dispatch (旧 TypeDef/MoldDef/InheritanceDef)
+            Statement::ClassLikeDef(cl) => match &cl.kind {
+                ClassLikeKind::BuchiPack => {
+                    let td = cl;
+                    // E1501: Check for TypeDef name collision with existing types, functions, or molds
+                    let has_collision = self.registry.type_defs.contains_key(&td.name)
+                        || self.registry.enum_defs.contains_key(&td.name)
+                        || self.func_types.contains_key(&td.name)
+                        || self.registry.mold_defs.contains_key(&td.name);
+                    if has_collision {
+                        self.errors.push(TypeError {
+                            message: format!(
+                                "[E1501] Name '{}' is already defined in this scope. \
+                                 Redefinition in the same scope is not allowed. \
+                                 Hint: Use a different name, or define it in an inner scope (shadowing is allowed).",
+                                td.name
+                            ),
+                            span: td.span.clone(),
+                        });
                     }
-                }
-
-                // RCB-51: Detect cyclic inheritance and emit an error
-                // instead of silently accepting it (which causes
-                // is_subtype_of to loop forever).
-                let registered = if self.registry.is_error_type(&inh.parent) {
-                    self.registry
-                        .register_error_type(&inh.parent, &inh.child, extra_fields)
-                } else {
-                    self.registry
-                        .register_inheritance(&inh.parent, &inh.child, extra_fields)
-                };
-                if !registered {
-                    self.errors.push(TypeError {
-                        message: format!(
-                            "[E1610] Cyclic inheritance detected: '{}' => '{}' would create a cycle in the inheritance chain. \
-                             Hint: Remove one of the inheritance relationships to break the cycle.",
-                            inh.parent, inh.child
-                        ),
-                        span: inh.span.clone(),
-                    });
-                }
-
-                if let Some(ref parent_header) = parent_header {
-                    let child_header = inh
-                        .child_args
-                        .clone()
-                        .or_else(|| inh.parent_args.clone())
-                        .unwrap_or_else(|| parent_header.clone());
-                    self.validate_unique_mold_type_param_names(
-                        "InheritanceDef",
-                        &inh.child,
-                        &child_header,
-                        &inh.span,
-                    );
-                    let parent_field_defs = self
-                        .mold_field_defs
-                        .get(&inh.parent)
-                        .cloned()
-                        .unwrap_or_default();
-                    let inherited_field_names: HashSet<String> = parent_field_defs
-                        .iter()
-                        .map(|field| field.name.clone())
-                        .collect();
-                    self.validate_mold_extension_bindings(
-                        MoldBindingDef {
-                            kind: "InheritanceDef",
-                            name: &inh.child,
-                            span: &inh.span,
-                        },
-                        parent_header.len(),
-                        &child_header,
-                        &inh.fields,
-                        &inherited_field_names,
-                    );
-
-                    let merged_field_defs = Self::merge_field_defs(&parent_field_defs, &inh.fields);
-                    let merged_fields: Vec<(String, Type)> = merged_field_defs
+                    self.validate_class_like_fields("TypeDef", &td.name, &td.fields);
+                    let fields: Vec<(String, Type)> = td
+                        .fields
                         .iter()
                         .filter(|f| !f.is_method)
                         .map(|f| {
@@ -1981,35 +1879,201 @@ impl TypeChecker {
                             (f.name.clone(), ty)
                         })
                         .collect();
-                    self.registry.register_mold(
-                        &inh.child,
-                        Self::collect_mold_type_param_names(&child_header),
-                        merged_fields.clone(),
+                    self.registry.register_type(&td.name, fields);
+                    self.declared_header_arities.insert(td.name.clone(), 0);
+                }
+                ClassLikeKind::Mold { .. } => {
+                    let md = cl;
+                    self.validate_class_like_fields("MoldDef", &md.name, &md.fields);
+                    let header_args = Self::effective_mold_header_args(md);
+                    self.validate_mold_root_header(md, &header_args);
+                    self.validate_mold_extension_bindings(
+                        MoldBindingDef {
+                            kind: "MoldDef",
+                            name: &md.name,
+                            span: &md.span,
+                        },
+                        1,
+                        &header_args,
+                        &md.fields,
+                        &HashSet::new(),
                     );
-                    self.registry.register_type(&inh.child, merged_fields);
+                    let type_params = Self::collect_mold_type_param_names(&header_args);
+                    let fields: Vec<(String, Type)> = md
+                        .fields
+                        .iter()
+                        .filter(|f| !f.is_method)
+                        .map(|f| {
+                            let ty = f
+                                .type_annotation
+                                .as_ref()
+                                .map(|t| self.registry.resolve_type(t))
+                                .unwrap_or(Type::Unknown);
+                            (f.name.clone(), ty)
+                        })
+                        .collect();
+                    self.registry
+                        .register_mold(&md.name, type_params, fields.clone());
+                    self.registry.register_type(&md.name, fields);
                     self.mold_header_specs.insert(
-                        inh.child.clone(),
+                        md.name.clone(),
                         MoldHeaderSpec {
-                            header_args: child_header.clone(),
+                            header_args: header_args.clone(),
                         },
                     );
                     self.mold_field_defs
-                        .insert(inh.child.clone(), merged_field_defs);
+                        .insert(md.name.clone(), md.fields.clone());
+                    self.declared_header_arities
+                        .insert(md.name.clone(), header_args.len());
                 }
+                ClassLikeKind::Inheritance { .. } => {
+                    let inh = cl;
+                    let inh_parent = inh.parent().expect("inheritance kind has parent");
+                    let inh_child = &inh.name;
+                    self.validate_class_like_fields("InheritanceDef", inh_child, &inh.fields);
+                    let parent_header = self
+                        .mold_header_specs
+                        .get(inh_parent)
+                        .map(|spec| spec.header_args.clone());
+                    self.validate_inheritance_header_arities(inh, parent_header.as_deref());
+                    let extra_fields: Vec<(String, Type)> = inh
+                        .fields
+                        .iter()
+                        .filter(|f| !f.is_method)
+                        .map(|f| {
+                            let ty = f
+                                .type_annotation
+                                .as_ref()
+                                .map(|t| self.registry.resolve_type(t))
+                                .unwrap_or(Type::Unknown);
+                            (f.name.clone(), ty)
+                        })
+                        .collect();
+                    if let Some(parent_fields) = self.registry.get_type_fields(inh_parent) {
+                        for (child_name, child_ty) in &extra_fields {
+                            if let Some((_, parent_ty)) =
+                                parent_fields.iter().find(|(n, _)| n == child_name)
+                                && !matches!(parent_ty, Type::Unknown)
+                                && !matches!(child_ty, Type::Unknown)
+                                && parent_ty != child_ty
+                                && !self.registry.is_subtype_of(child_ty, parent_ty)
+                            {
+                                // (E30 Phase 3 / E30B-008) 旧 `[E1410]` 意味
+                                // (InheritanceDef 子フィールド型互換) を `[E1411]` に移動。
+                                // `[E1410]` は新意味 (declare-only function field requires
+                                // default function or explicit value) 用に予約 (Phase 6 で
+                                // E30B-004 defaultFn と同期して full 発火 path 実装予定)。
+                                self.errors.push(TypeError {
+                                    message: Self::binding_diag(
+                                        "E1411",
+                                        format!(
+                                            "InheritanceDef '{}' redefines field '{}' with incompatible type '{}' (parent '{}' declares it as '{}')",
+                                            inh_child, child_name, child_ty, inh_parent, parent_ty
+                                        ),
+                                        "A child type's field must be compatible with the parent's field type. \
+                                         Use the same type or a subtype.",
+                                    ),
+                                    span: inh.span.clone(),
+                                });
+                            }
+                        }
+                    }
 
-                let parent_arity = parent_header
-                    .as_ref()
-                    .map(Vec::len)
-                    .or_else(|| self.declared_header_arities.get(&inh.parent).copied())
-                    .unwrap_or(0);
-                let child_arity = if parent_header.is_some() {
-                    self.inheritance_child_arity(inh, parent_arity)
-                } else {
-                    parent_arity
-                };
-                self.declared_header_arities
-                    .insert(inh.child.clone(), child_arity);
-            }
+                    let registered = if self.registry.is_error_type(inh_parent) {
+                        self.registry
+                            .register_error_type(inh_parent, inh_child, extra_fields)
+                    } else {
+                        self.registry
+                            .register_inheritance(inh_parent, inh_child, extra_fields)
+                    };
+                    if !registered {
+                        self.errors.push(TypeError {
+                            message: format!(
+                                "[E1610] Cyclic inheritance detected: '{}' => '{}' would create a cycle in the inheritance chain. \
+                                 Hint: Remove one of the inheritance relationships to break the cycle.",
+                                inh_parent, inh_child
+                            ),
+                            span: inh.span.clone(),
+                        });
+                    }
+
+                    if let Some(ref parent_header) = parent_header {
+                        let child_header = inh
+                            .name_args
+                            .clone()
+                            .or_else(|| inh.parent_args().cloned())
+                            .unwrap_or_else(|| parent_header.clone());
+                        self.validate_unique_mold_type_param_names(
+                            "InheritanceDef",
+                            inh_child,
+                            &child_header,
+                            &inh.span,
+                        );
+                        let parent_field_defs = self
+                            .mold_field_defs
+                            .get(inh_parent)
+                            .cloned()
+                            .unwrap_or_default();
+                        let inherited_field_names: HashSet<String> = parent_field_defs
+                            .iter()
+                            .map(|field| field.name.clone())
+                            .collect();
+                        self.validate_mold_extension_bindings(
+                            MoldBindingDef {
+                                kind: "InheritanceDef",
+                                name: inh_child,
+                                span: &inh.span,
+                            },
+                            parent_header.len(),
+                            &child_header,
+                            &inh.fields,
+                            &inherited_field_names,
+                        );
+
+                        let merged_field_defs =
+                            Self::merge_field_defs(&parent_field_defs, &inh.fields);
+                        let merged_fields: Vec<(String, Type)> = merged_field_defs
+                            .iter()
+                            .filter(|f| !f.is_method)
+                            .map(|f| {
+                                let ty = f
+                                    .type_annotation
+                                    .as_ref()
+                                    .map(|t| self.registry.resolve_type(t))
+                                    .unwrap_or(Type::Unknown);
+                                (f.name.clone(), ty)
+                            })
+                            .collect();
+                        self.registry.register_mold(
+                            inh_child,
+                            Self::collect_mold_type_param_names(&child_header),
+                            merged_fields.clone(),
+                        );
+                        self.registry.register_type(inh_child, merged_fields);
+                        self.mold_header_specs.insert(
+                            inh_child.clone(),
+                            MoldHeaderSpec {
+                                header_args: child_header.clone(),
+                            },
+                        );
+                        self.mold_field_defs
+                            .insert(inh_child.clone(), merged_field_defs);
+                    }
+
+                    let parent_arity = parent_header
+                        .as_ref()
+                        .map(Vec::len)
+                        .or_else(|| self.declared_header_arities.get(inh_parent).copied())
+                        .unwrap_or(0);
+                    let child_arity = if parent_header.is_some() {
+                        self.inheritance_child_arity(inh, parent_arity)
+                    } else {
+                        parent_arity
+                    };
+                    self.declared_header_arities
+                        .insert(inh_child.clone(), child_arity);
+                }
+            },
             Statement::FuncDef(fd) => {
                 let duplicate_func_name = !self.seen_func_defs.insert(fd.name.clone());
                 let generic_is_inferable = if fd.type_params.is_empty() {
@@ -2114,6 +2178,48 @@ impl TypeChecker {
                     ),
                     span: field.span.clone(),
                 });
+            }
+
+            // (E30 Phase 5 / E30B-003) `[E1410]` reject path —
+            // declare-only function fields whose return type cannot be
+            // auto-generated by `defaultFn` (Lock-D verdict, Phase 6 land)
+            // must be supplied with an explicit default at definition time.
+            // The check is definition-site (not instantiation-site): once
+            // the field passes here, `defaultFn` (Phase 6) materialises a
+            // proper return-type default at instantiation, so no further
+            // runtime mismatch can occur.
+            //
+            // Lock-C verdict (E30 Phase 0, 2026-04-28):
+            //   - opaque / unknown alias return → reject with [E1410]
+            //   - primitive / class-like / cycle / Async / List etc. → accept
+            //
+            // Phase 4 (E30B-002) acceptance regression guard: the four
+            // existing e30b_002_*_passes fixtures all have generatable
+            // return types (Str / T / Unit / T) and continue to pass.
+            if field.is_declare_only_fn_field()
+                && let Some(type_annotation) = &field.type_annotation
+            {
+                let mut visiting = std::collections::HashSet::new();
+                // The current definition is not registered until after
+                // field validation completes. Seed the cycle guard with the
+                // definition name so self-referential defaultFn returns such
+                // as `Foo = @(next: Unit => :Foo)` mirror the runtime
+                // default materializer's cycle handling instead of looking
+                // like an opaque type.
+                visiting.insert(def_name.to_string());
+                if !default_fn_generatable(type_annotation, &self.registry, &mut visiting) {
+                    self.errors.push(TypeError {
+                        message: Self::binding_diag(
+                            "E1410",
+                            format!(
+                                "{} '{}' declare-only function field '{}' requires default function or explicit value: return type cannot be auto-generated by defaultFn (opaque or unknown type)",
+                                kind, def_name, field.name
+                            ),
+                            "Either provide an explicit default (`field <= someFn`), or change the return type to one with a generatable default (primitive / registered class-like / List / Lax / Async)."
+                        ),
+                        span: field.span.clone(),
+                    });
+                }
             }
         }
     }
@@ -2236,14 +2342,28 @@ impl TypeChecker {
             None => return,
         };
 
+        // (E30 Phase 4 / E30B-002) declare-only function fields are excluded
+        // from the required-positional `[]` set: they are interface members
+        // (`fn: A => :B` form, no body, no default) whose values are filled in
+        // at instantiation time via `()` (override) or, after Phase 6, by an
+        // automatically-generated `defaultFn`. They are also classified as
+        // "optional" so that explicit `(transform <= ...)` overrides in `()`
+        // are accepted (no `[E1406]` "undefined option"). Phase 6 (E30B-004)
+        // will keep this classification while adding the auto-generated
+        // defaultFn that replaces the current `Value::Unit` placeholder.
         let required_fields: Vec<String> = mold_fields
             .iter()
-            .filter(|f| !f.is_method && f.default_value.is_none() && f.name != "filling")
+            .filter(|f| {
+                !f.is_method
+                    && f.default_value.is_none()
+                    && f.name != "filling"
+                    && !f.is_declare_only_fn_field()
+            })
             .map(|f| f.name.clone())
             .collect();
         let optional_fields: Vec<String> = mold_fields
             .iter()
-            .filter(|f| !f.is_method && f.default_value.is_some())
+            .filter(|f| !f.is_method && (f.default_value.is_some() || f.is_declare_only_fn_field()))
             .map(|f| f.name.clone())
             .collect();
 
@@ -4961,6 +5081,110 @@ mod checker_methods;
 impl Default for TypeChecker {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+// ────────────────────────────────────────────────────────────────────────
+// E30 Phase 6 / E30B-004: defaultFn 生成可能性判定 API (Lock-D verdict)
+// ────────────────────────────────────────────────────────────────────────
+//
+// `default_fn_generatable` returns whether a synthetic default function
+// (defaultFn) can be generated for the given `TypeExpr`.
+//
+// Lock-D verdict (E30 Phase 0, 2026-04-28):
+//   - primitive types (Int, Num, Float, Str, Bytes, Bool, Unit, JSON, Molten): true
+//   - List[T] / Lax[T] / Async[T]: true iff inner T is generatable
+//   - BuchiPack inline: true iff all fields are generatable
+//   - Named type: true iff registered in TypeRegistry (TypeDef / Mold /
+//     Error / Enum). Recursive cycles are allowed via `visiting` cycle
+//     guard. Unknown alias (opaque type) → false.
+//   - Function type: true iff return type is generatable (recursive)
+//
+// Lock-C verdict (E30 Phase 0, 2026-04-28): Phase 5 will fire `[E1410]`
+// when this API returns false for a declare-only function field's type
+// annotation.
+//
+// `visiting` is the cycle guard used by `default_for_type_expr` (interpreter)
+// and `lower_default_for_type_expr` (codegen) so that the judgement remains
+// consistent with actual default-value materialisation.
+
+/// Returns true iff a defaultFn can be synthesised for the given function /
+/// value type per Lock-D verdict (E30 Phase 0, 2026-04-28).
+///
+/// `visiting` carries the names already in the recursion stack so that
+/// self-referential / mutually-recursive types are treated as generatable
+/// (the existing class-like `default_for_type_expr` cycle guard returns a
+/// minimal `__type` pack at the cycle point — we mirror that semantics).
+pub fn default_fn_generatable(
+    type_expr: &TypeExpr,
+    registry: &TypeRegistry,
+    visiting: &mut HashSet<String>,
+) -> bool {
+    match type_expr {
+        TypeExpr::Named(name) => match name.as_str() {
+            // Built-in primitives — Lock-D "primitive types: true".
+            "Int" | "Num" | "Float" | "Str" | "Bytes" | "Bool" | "Unit" | "JSON" | "Molten" => true,
+            // T (single uppercase) — type parameters that may or may not be
+            // bound at the use site. Treat as generatable (the eventual
+            // binding determines the concrete default; cycle guard handles
+            // the recursive case).
+            _ if name.len() == 1
+                && name
+                    .chars()
+                    .next()
+                    .map(|c| c.is_ascii_uppercase())
+                    .unwrap_or(false) =>
+            {
+                true
+            }
+            _ => {
+                if visiting.contains(name) {
+                    // Cycle: mirror interpreter's `default_for_type_expr`
+                    // which returns a minimal `__type` pack at the cycle
+                    // point. That counts as a valid default.
+                    return true;
+                }
+                // Registered class-like types (TypeDef / Mold / Error /
+                // Enum) all have well-defined defaults.
+                if registry.type_defs.contains_key(name)
+                    || registry.mold_defs.contains_key(name)
+                    || registry.error_types.contains_key(name)
+                    || registry.enum_defs.contains_key(name)
+                {
+                    return true;
+                }
+                // Unknown / opaque alias — defaultFn cannot be generated.
+                false
+            }
+        },
+        TypeExpr::List(inner) => {
+            // List default is empty list; we still recurse so that the
+            // inner type is generatable for downstream introspection.
+            default_fn_generatable(inner, registry, visiting)
+        }
+        TypeExpr::Generic(name, args) => match name.as_str() {
+            "Lax" | "Async" => args
+                .first()
+                .map(|inner| default_fn_generatable(inner, registry, visiting))
+                .unwrap_or(true),
+            // Other generic bases are intentionally not accepted here yet:
+            // interpreter / JS / native default materializers only share
+            // concrete support for Lax and Async. Accepting arbitrary
+            // registered generics would let the checker approve a defaultFn
+            // whose return value diverges across backends.
+            _ => false,
+        },
+        TypeExpr::BuchiPack(fields) => fields.iter().filter(|f| !f.is_method).all(|f| {
+            f.type_annotation
+                .as_ref()
+                .map(|ty| default_fn_generatable(ty, registry, visiting))
+                .unwrap_or(true) // missing annotation defaults to Unit
+        }),
+        TypeExpr::Function(_, ret) => {
+            // defaultFn is generatable iff the return type's default value
+            // can be constructed. Argument types do not affect generability.
+            default_fn_generatable(ret, registry, visiting)
+        }
     }
 }
 

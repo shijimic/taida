@@ -91,8 +91,10 @@ pub struct Lowering {
     /// `pickColor n = ... => :HiveState` を検出して、呼び出しサイトで
     /// `@(state <= pickColor(n))` の field を Enum-tagged として登録する。
     enum_returning_funcs: std::collections::HashMap<String, String>,
-    /// Mold 定義レジストリ（custom mold lowering 用）
-    pub(crate) mold_defs: std::collections::HashMap<String, crate::parser::MoldDef>,
+    /// Mold 定義レジストリ（custom mold lowering 用）。
+    /// (E30 Phase 2 Sub-step 2.1) `MoldDef` 廃止に伴い `ClassLikeDef` を保持し、
+    /// 登録時は `ClassLikeKind::Mold` のみを許容する。
+    pub(crate) mold_defs: std::collections::HashMap<String, crate::parser::ClassLikeDef>,
     /// Enum definitions: enum_name -> variants in ordinal order
     pub(crate) enum_defs: std::collections::HashMap<String, Vec<String>>,
     /// B11-6d: Inheritance parent map (child_name -> parent_name) for TypeExtends resolution.

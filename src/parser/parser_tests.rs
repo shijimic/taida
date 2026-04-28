@@ -39,14 +39,135 @@ fn test_parse_string_assignment() {
 
 #[test]
 fn test_parse_type_def() {
+    // (E30 Sub-step 2.1) ClassLikeDef + ClassLikeKind::BuchiPack
     match first_stmt("Person = @(name: Str, age: Int)") {
-        Statement::TypeDef(td) => {
+        Statement::ClassLikeDef(td) if td.is_buchi_pack() => {
             assert_eq!(td.name, "Person");
             assert_eq!(td.fields.len(), 2);
             assert_eq!(td.fields[0].name, "name");
             assert_eq!(td.fields[1].name, "age");
         }
         other => panic!("Expected TypeDef, got {:?}", other),
+    }
+}
+
+// E30 Phase 2 Sub-step 2.2 (Lock-B Sub-B1): zero-arity sugar
+#[test]
+fn test_parse_class_like_zero_arity_sugar() {
+    // `Pilot[] = @(...)` は `Pilot = @(...)` と等価な BuchiPack ClassLikeDef
+    match first_stmt("Pilot[] = @(name: Str, age: Int)") {
+        Statement::ClassLikeDef(cl) if cl.is_buchi_pack() => {
+            assert_eq!(cl.name, "Pilot");
+            assert_eq!(cl.fields.len(), 2);
+            assert!(
+                cl.type_params.is_empty(),
+                "zero-arity sugar should have empty type_params, got {:?}",
+                cl.type_params
+            );
+            // header_args は empty なので name_args は None に正規化される
+            assert!(
+                cl.name_args.is_none(),
+                "zero-arity sugar should normalise name_args to None"
+            );
+        }
+        other => panic!(
+            "Expected zero-arity BuchiPack ClassLikeDef, got {:?}",
+            other
+        ),
+    }
+}
+
+// E30 Phase 2 Sub-step 2.2 (Lock-B Sub-B1): 型引数あり class-like 定義
+#[test]
+fn test_parse_class_like_with_type_params() {
+    // `Box[T] = @(filling: T, label: Str)` は BuchiPack ClassLikeDef + type_params=[T]
+    match first_stmt("Box[T] = @(filling: T, label: Str)") {
+        Statement::ClassLikeDef(cl) if cl.is_buchi_pack() => {
+            assert_eq!(cl.name, "Box");
+            assert_eq!(cl.fields.len(), 2);
+            assert_eq!(
+                cl.type_params.len(),
+                1,
+                "expected 1 type_param, got {:?}",
+                cl.type_params
+            );
+            assert_eq!(cl.type_params[0].name, "T");
+        }
+        other => panic!(
+            "Expected BuchiPack ClassLikeDef with type_params, got {:?}",
+            other
+        ),
+    }
+}
+
+// E30 Phase 2 Sub-step 2.2 (Lock-B Sub-B1): 複数型引数あり class-like 定義
+#[test]
+fn test_parse_class_like_with_multi_type_params() {
+    match first_stmt("Pair[T, U] = @(first: T, second: U)") {
+        Statement::ClassLikeDef(cl) if cl.is_buchi_pack() => {
+            assert_eq!(cl.name, "Pair");
+            assert_eq!(cl.type_params.len(), 2);
+            assert_eq!(cl.type_params[0].name, "T");
+            assert_eq!(cl.type_params[1].name, "U");
+        }
+        other => panic!(
+            "Expected multi-type-param BuchiPack ClassLikeDef, got {:?}",
+            other
+        ),
+    }
+}
+
+// E30 Phase 2 Sub-step 2.2 (Lock-B Sub-B2): `Error =>` prefix の特別扱い撤廃確認
+//
+// 現状の parser は `Name => Child = @(...)` を一般 inheritance として受理しており、
+// Error も特別扱いせずに通常の Inheritance kind ClassLikeDef に着地する。
+// 本 test は Sub-B2 verdict (Error は単なる base 型) の parse 段階での pin。
+#[test]
+fn test_parse_error_prefix_is_general_inheritance() {
+    match first_stmt("Error => NotFound = @(msg: Str)") {
+        Statement::ClassLikeDef(cl) if cl.is_inheritance() => {
+            assert_eq!(cl.name, "NotFound");
+            assert_eq!(
+                cl.parent(),
+                Some("Error"),
+                "Error should appear as a regular parent type, not as a special prefix"
+            );
+            assert_eq!(cl.fields.len(), 1);
+            assert_eq!(cl.fields[0].name, "msg");
+        }
+        other => panic!(
+            "Expected Inheritance ClassLikeDef with parent=Error, got {:?}",
+            other
+        ),
+    }
+}
+
+// E30 Phase 2 Sub-step 2.2 (Lock-B Sub-B3): 子側型引数追加許容 (parser 受理のみ pin)
+//
+// 現状の parser は parent_args / child_args の arity 一致を検証しない。
+// arity 一致検証は Phase 3 (checker) で `[E1407]` 再定義として実装される
+// (E30B-008 と同期 land)。本 test は parser 受理パスの pin のみ。
+#[test]
+fn test_parse_child_with_extra_type_params() {
+    match first_stmt("Result[T, P] => CustomResult[T, P, V] = @(meta: V)") {
+        Statement::ClassLikeDef(cl) if cl.is_inheritance() => {
+            assert_eq!(cl.name, "CustomResult");
+            assert_eq!(cl.parent(), Some("Result"));
+            // parent_args は 2、child の name_args は 3
+            let parent_args = cl
+                .parent_args()
+                .expect("inheritance should have parent_args");
+            assert_eq!(parent_args.len(), 2);
+            let child_args = cl
+                .name_args
+                .as_ref()
+                .expect("child should carry its own name_args");
+            assert_eq!(child_args.len(), 3);
+        }
+        other => panic!(
+            "Expected Inheritance ClassLikeDef with parent_args=2 / child_args=3, got {:?}",
+            other
+        ),
     }
 }
 
@@ -216,12 +337,13 @@ fn test_parse_export() {
 
 #[test]
 fn test_parse_inheritance() {
+    // (E30 Sub-step 2.1) ClassLikeDef + ClassLikeKind::Inheritance
     match first_stmt("Person => Employee = @(department: Str)") {
-        Statement::InheritanceDef(inh) => {
-            assert_eq!(inh.parent, "Person");
-            assert!(inh.parent_args.is_none());
-            assert_eq!(inh.child, "Employee");
-            assert!(inh.child_args.is_none());
+        Statement::ClassLikeDef(inh) if inh.is_inheritance() => {
+            assert_eq!(inh.parent(), Some("Person"));
+            assert!(inh.parent_args().is_none());
+            assert_eq!(inh.name, "Employee"); // 旧 inh.child
+            assert!(inh.name_args.is_none());
             assert_eq!(inh.fields.len(), 1);
             assert_eq!(inh.fields[0].name, "department");
         }
@@ -231,17 +353,18 @@ fn test_parse_inheritance() {
 
 #[test]
 fn test_parse_generic_inheritance_headers() {
+    // (E30 Sub-step 2.1) ClassLikeDef + ClassLikeKind::Inheritance
     match first_stmt("Parent[T] => Child[T, U <= :T] = @(value: T)") {
-        Statement::InheritanceDef(inh) => {
-            assert_eq!(inh.parent, "Parent");
-            assert_eq!(inh.child, "Child");
+        Statement::ClassLikeDef(inh) if inh.is_inheritance() => {
+            assert_eq!(inh.parent(), Some("Parent"));
+            assert_eq!(inh.name, "Child");
             assert!(matches!(
-                inh.parent_args.as_ref().and_then(|args| args.first()),
+                inh.parent_args().and_then(|args| args.first()),
                 Some(MoldHeaderArg::TypeParam(TypeParam { name, constraint: None })) if name == "T"
             ));
-            assert_eq!(inh.child_args.as_ref().map(Vec::len), Some(2));
+            assert_eq!(inh.name_args.as_ref().map(Vec::len), Some(2));
             assert!(matches!(
-                inh.child_args.as_ref().and_then(|args| args.get(1)),
+                inh.name_args.as_ref().and_then(|args| args.get(1)),
                 Some(MoldHeaderArg::TypeParam(TypeParam { name, constraint: Some(TypeExpr::Named(bound)) }))
                     if name == "U" && bound == "T"
             ));
@@ -254,11 +377,13 @@ fn test_parse_generic_inheritance_headers() {
 
 #[test]
 fn test_parse_mold_def() {
+    // (E30 Sub-step 2.1) ClassLikeDef + ClassLikeKind::Mold
     match first_stmt("Mold[T] => Optional[T] = @(hasValue: Bool)") {
-        Statement::MoldDef(md) => {
+        Statement::ClassLikeDef(md) if md.is_mold() => {
             assert_eq!(md.name, "Optional");
-            assert_eq!(md.mold_args.len(), 1);
-            assert_eq!(md.name_args.as_ref(), Some(&md.mold_args));
+            let mold_args = md.mold_args().unwrap();
+            assert_eq!(mold_args.len(), 1);
+            assert_eq!(md.name_args.as_ref(), Some(mold_args));
             assert_eq!(md.type_params.len(), 1);
             assert_eq!(md.type_params[0].name, "T");
             assert_eq!(md.fields.len(), 1);
@@ -270,11 +395,13 @@ fn test_parse_mold_def() {
 
 #[test]
 fn test_parse_mold_def_with_concrete_and_constrained_header_args() {
+    // (E30 Sub-step 2.1) ClassLikeDef + ClassLikeKind::Mold
     match first_stmt("Mold[:Int, T <= :Int] => IntBox[:Int, T <= :Int] = @(count: Int)") {
-        Statement::MoldDef(md) => {
+        Statement::ClassLikeDef(md) if md.is_mold() => {
             assert_eq!(md.name, "IntBox");
-            assert_eq!(md.mold_args.len(), 2);
-            assert_eq!(md.name_args.as_ref(), Some(&md.mold_args));
+            let mold_args = md.mold_args().unwrap();
+            assert_eq!(mold_args.len(), 2);
+            assert_eq!(md.name_args.as_ref(), Some(mold_args));
             assert_eq!(md.type_params.len(), 1);
             assert_eq!(md.type_params[0].name, "T");
             assert_eq!(
@@ -282,11 +409,11 @@ fn test_parse_mold_def_with_concrete_and_constrained_header_args() {
                 Some(TypeExpr::Named("Int".to_string()))
             );
             assert!(matches!(
-                &md.mold_args[0],
+                &mold_args[0],
                 MoldHeaderArg::Concrete(TypeExpr::Named(name)) if name == "Int"
             ));
             assert!(matches!(
-                &md.mold_args[1],
+                &mold_args[1],
                 MoldHeaderArg::TypeParam(TypeParam { name, constraint: Some(TypeExpr::Named(bound)) })
                     if name == "T" && bound == "Int"
             ));
@@ -297,14 +424,16 @@ fn test_parse_mold_def_with_concrete_and_constrained_header_args() {
 
 #[test]
 fn test_parse_mold_def_with_implicit_name_header() {
+    // (E30 Sub-step 2.1) ClassLikeDef + ClassLikeKind::Mold
     match first_stmt("Mold[:Int] => IntBox = @()") {
-        Statement::MoldDef(md) => {
+        Statement::ClassLikeDef(md) if md.is_mold() => {
             assert_eq!(md.name, "IntBox");
-            assert_eq!(md.mold_args.len(), 1);
+            let mold_args = md.mold_args().unwrap();
+            assert_eq!(mold_args.len(), 1);
             assert!(md.name_args.is_none());
             assert!(md.type_params.is_empty());
             assert!(matches!(
-                &md.mold_args[0],
+                &mold_args[0],
                 MoldHeaderArg::Concrete(TypeExpr::Named(name)) if name == "Int"
             ));
         }
@@ -814,7 +943,7 @@ fn test_parse_method_no_args() {
     let source = "Greeter = @(\n  name: Str\n  greet =\n    name\n  => :Str\n)";
     let program = parse_ok(source);
     match &program.statements[0] {
-        Statement::TypeDef(td) => {
+        Statement::ClassLikeDef(td) if td.is_buchi_pack() => {
             assert_eq!(td.name, "Greeter");
             assert_eq!(td.fields.len(), 2);
             assert_eq!(td.fields[0].name, "name");
@@ -835,7 +964,7 @@ fn test_parse_method_with_args() {
     let source = "Calc = @(\n  base: Int\n  add x: Int =\n    base + x\n  => :Int\n)";
     let program = parse_ok(source);
     match &program.statements[0] {
-        Statement::TypeDef(td) => {
+        Statement::ClassLikeDef(td) if td.is_buchi_pack() => {
             assert_eq!(td.fields.len(), 2);
             let method = &td.fields[1];
             assert!(method.is_method);
@@ -853,7 +982,7 @@ fn test_parse_method_mixed_fields() {
     let source = "Thing = @(\n  a: Int\n  b: Str\n  compute =\n    a\n  => :Int\n  label =\n    b\n  => :Str\n)";
     let program = parse_ok(source);
     match &program.statements[0] {
-        Statement::TypeDef(td) => {
+        Statement::ClassLikeDef(td) if td.is_buchi_pack() => {
             assert_eq!(td.fields.len(), 4);
             assert!(!td.fields[0].is_method); // a
             assert!(!td.fields[1].is_method); // b
@@ -1470,7 +1599,7 @@ fn test_doc_comment_on_type_def() {
     let source = "///@ Purpose: represents a pilot\nPilot = @(\n  name: Str\n  age: Int\n)";
     let program = parse_ok(source);
     match &program.statements[0] {
-        Statement::TypeDef(td) => {
+        Statement::ClassLikeDef(td) if td.is_buchi_pack() => {
             assert_eq!(td.name, "Pilot");
             assert_eq!(td.doc_comments, vec!["Purpose: represents a pilot"]);
             assert_eq!(td.fields.len(), 2);
@@ -1485,7 +1614,7 @@ fn test_doc_comment_on_type_def_fields() {
         "Pilot = @(\n  ///@ The pilot's name\n  name: Str\n  ///@ The pilot's age\n  age: Int\n)";
     let program = parse_ok(source);
     match &program.statements[0] {
-        Statement::TypeDef(td) => {
+        Statement::ClassLikeDef(td) if td.is_buchi_pack() => {
             assert_eq!(td.name, "Pilot");
             assert_eq!(td.fields.len(), 2);
             assert_eq!(td.fields[0].name, "name");
@@ -1503,7 +1632,7 @@ fn test_doc_comment_on_mold_def() {
         "///@ Purpose: wraps async result\nMold[T] => ApiResult[T] = @(\n  success: Bool\n)";
     let program = parse_ok(source);
     match &program.statements[0] {
-        Statement::MoldDef(md) => {
+        Statement::ClassLikeDef(md) if md.is_mold() => {
             assert_eq!(md.name, "ApiResult");
             assert_eq!(md.doc_comments, vec!["Purpose: wraps async result"]);
         }
@@ -1516,9 +1645,9 @@ fn test_doc_comment_on_inheritance_def() {
     let source = "///@ Purpose: employee inherits from person\nPerson => Employee = @(\n  department: Str\n)";
     let program = parse_ok(source);
     match &program.statements[0] {
-        Statement::InheritanceDef(inh) => {
-            assert_eq!(inh.parent, "Person");
-            assert_eq!(inh.child, "Employee");
+        Statement::ClassLikeDef(inh) if inh.is_inheritance() => {
+            assert_eq!(inh.parent(), Some("Person"));
+            assert_eq!(inh.name, "Employee");
             assert_eq!(
                 inh.doc_comments,
                 vec!["Purpose: employee inherits from person"]
@@ -1563,7 +1692,7 @@ fn test_doc_comment_empty_line() {
     let source = "///@\n///@ Purpose: test\nPilot = @(name: Str)";
     let program = parse_ok(source);
     match &program.statements[0] {
-        Statement::TypeDef(td) => {
+        Statement::ClassLikeDef(td) if td.is_buchi_pack() => {
             assert_eq!(td.name, "Pilot");
             assert_eq!(td.doc_comments.len(), 2);
             assert_eq!(td.doc_comments[0], ""); // empty doc comment line
@@ -1742,7 +1871,7 @@ fn test_docs_sample_buchi_pack_parses() {
         "TypeDef should produce 1 statement"
     );
     match &program.statements[0] {
-        Statement::TypeDef(td) => {
+        Statement::ClassLikeDef(td) if td.is_buchi_pack() => {
             assert_eq!(td.name, "Pilot");
             assert_eq!(td.fields.len(), 3, "Pilot should have 3 fields");
         }
@@ -1830,7 +1959,10 @@ parsed <= JSON[raw, User]()"#;
         2,
         "Should produce 2 statements (TypeDef + Assignment)"
     );
-    assert!(matches!(&program.statements[0], Statement::TypeDef(_)));
+    assert!(matches!(
+        &program.statements[0],
+        Statement::ClassLikeDef(cl) if cl.is_buchi_pack()
+    ));
     assert!(matches!(&program.statements[1], Statement::Assignment(a) if a.target == "parsed"));
 }
 
@@ -2423,5 +2555,111 @@ bad x =\n  \
         errors.iter().any(|e| e.message.contains("E1616")),
         "C13-1: bare call at non-tail must stay rejected, got: {:?}",
         errors
+    );
+}
+
+// ---------------------------------------------------------------------------
+// E30B-007 / Lock-G: RustAddon[...] explicit binding probes (Phase 7 sub-track B)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_e30b_007_rust_addon_binding_parses_as_mold_inst() {
+    // Lock-G verdict: `RustAddon["fn"](arity <= N)` is the explicit
+    // binding syntax for addon-backed functions on a `.td` facade.
+    // Because `RustAddon` starts with uppercase and `[...](...)`
+    // matches the existing mold-instantiation surface, the parser
+    // already accepts this form as `Expr::MoldInst("RustAddon",
+    // [StringLit], [arity field], span)` without any AST changes.
+    //
+    // This probe pins that contract so the checker / interpreter /
+    // codegen layers can rely on the shape when implementing
+    // explicit binding semantics.
+    use crate::parser::ast::{Expr, Statement};
+    let source = "terminalSize <= RustAddon[\"terminalSize\"](arity <= 0)\n";
+    let (program, errors) = parse(source);
+    assert!(
+        errors.is_empty(),
+        "expected no parse errors, got: {:?}",
+        errors
+    );
+    assert_eq!(
+        program.statements.len(),
+        1,
+        "expected single Assignment statement"
+    );
+    let assign = match &program.statements[0] {
+        Statement::Assignment(a) => a,
+        other => panic!("expected Assignment, got {:?}", other),
+    };
+    assert_eq!(assign.target, "terminalSize");
+    let (name, type_args, fields) = match &assign.value {
+        Expr::MoldInst(n, ta, f, _) => (n.as_str(), ta, f),
+        other => panic!("expected MoldInst, got {:?}", other),
+    };
+    assert_eq!(name, "RustAddon");
+    assert_eq!(type_args.len(), 1, "expected single type-arg slot");
+    let fn_lit = match &type_args[0] {
+        Expr::StringLit(s, _) => s.as_str(),
+        other => panic!("expected StringLit, got {:?}", other),
+    };
+    assert_eq!(fn_lit, "terminalSize");
+    assert_eq!(fields.len(), 1, "expected single arity field");
+    assert_eq!(fields[0].name, "arity");
+    let arity_int = match &fields[0].value {
+        Expr::IntLit(n, _) => *n,
+        other => panic!("expected IntLit, got {:?}", other),
+    };
+    assert_eq!(arity_int, 0);
+}
+
+#[test]
+fn test_e30b_007_rust_addon_binding_with_nonzero_arity() {
+    // Lock-G drift check requires arity metadata. Confirm parsing
+    // for non-zero arity values.
+    use crate::parser::ast::{Expr, Statement};
+    let source = "readKey <= RustAddon[\"readKey\"](arity <= 2)\n";
+    let (program, errors) = parse(source);
+    assert!(errors.is_empty(), "errors: {:?}", errors);
+    let assign = match &program.statements[0] {
+        Statement::Assignment(a) => a,
+        other => panic!("expected Assignment, got {:?}", other),
+    };
+    let (_n, _ta, fields) = match &assign.value {
+        Expr::MoldInst(n, ta, f, _) => (n, ta, f),
+        other => panic!("expected MoldInst, got {:?}", other),
+    };
+    assert_eq!(fields.len(), 1);
+    let arity_int = match &fields[0].value {
+        Expr::IntLit(n, _) => *n,
+        other => panic!("expected IntLit, got {:?}", other),
+    };
+    assert_eq!(arity_int, 2);
+}
+
+#[test]
+fn test_e30b_007_rust_addon_binding_rejects_missing_quotes() {
+    // Lock-G fixes the syntax: the function name MUST be a string
+    // literal so doc-gen / drift check can extract it without
+    // resolving identifiers. A bare ident inside the brackets
+    // would parse as a different MoldInst surface (TypeIs/etc.
+    // type-arg path) and fail at checker level when we add the
+    // E1412 path. For the parser probe here we just confirm the
+    // string-literal form is the one we lock on.
+    use crate::parser::ast::Expr;
+    let source = "f <= RustAddon[\"f\"](arity <= 0)\n";
+    let (program, errors) = parse(source);
+    assert!(errors.is_empty(), "errors: {:?}", errors);
+    let assign = match &program.statements[0] {
+        crate::parser::ast::Statement::Assignment(a) => a,
+        other => panic!("expected Assignment, got {:?}", other),
+    };
+    let type_args = match &assign.value {
+        Expr::MoldInst(_, ta, _, _) => ta,
+        other => panic!("expected MoldInst, got {:?}", other),
+    };
+    assert!(
+        matches!(&type_args[0], Expr::StringLit(_, _)),
+        "Lock-G requires string literal for fn name, got {:?}",
+        type_args[0]
     );
 }

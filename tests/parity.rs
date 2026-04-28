@@ -38398,3 +38398,349 @@ fn test_d29b_011_h3_arena_implementation_symmetry_with_h2() {
 // Lock-Phase6 verdicts (sub-Lock A..E) are recorded in
 // `.dev/D29_SESSION_PLANS/Phase-6_2026-04-27-0937_track-eta_sub-Lock.md` and
 // the FIXED status flip is recorded in `.dev/D29_BLOCKERS.md`.
+
+// ===========================================================================
+// E30B-002 / E30 Phase 4: declare-only function field parity across backends.
+//
+// Lock-B verdict (2026-04-28): declare-only function fields (e.g.
+// `transform: T => :T`) are permitted in all class-like variants (TypeDef
+// / Mold / Inheritance / Error). Phase 4 (E30B-002) excludes them from the
+// required-positional `[]` set and from the extra-type-arg binding-target
+// count. Phase 6 (E30B-004) will replace the `Value::Unit` runtime
+// placeholder with an automatically-generated `defaultFn`; these tests
+// deliberately do not call any declare-only fn field so they remain
+// parity-safe both before and after Phase 6.
+//
+// 4-backend coverage:
+//   - Interpreter (reference): `assert_backend_parity_for_source`
+//   - Native: `assert_backend_parity_for_source`
+//   - JS: `assert_backend_parity_for_source` (skips when node missing)
+//   - wasm-wasi: covered by the existing wasm regression guard
+//     (`cargo test --test wasm_min` / `wasm_wasi`); Phase 4 introduces no
+//     new wasm-specific surface (checker-only change), so the existing
+//     baseline is the parity pin.
+// ===========================================================================
+
+#[test]
+fn e30b_002_typedef_declare_only_fn_field_three_backend_parity() {
+    if !cc_available() {
+        eprintln!("SKIP: cc unavailable");
+        return;
+    }
+    let src = r#"
+Pilot = @(name: Str, greet: Str => :Str)
+p <= Pilot(name <= "Rei")
+stdout(p.name)
+"#;
+    assert_backend_parity_for_source(src, "e30b_002_typedef_declare_only");
+}
+
+#[test]
+fn e30b_002_mold_declare_only_fn_field_three_backend_parity() {
+    if !cc_available() {
+        eprintln!("SKIP: cc unavailable");
+        return;
+    }
+    let src = r#"
+Mold[T] => Foo[T] = @(
+  name: Str,
+  transform: T => :T
+)
+f <= Foo[1, "x"]()
+stdout(f.name)
+"#;
+    assert_backend_parity_for_source(src, "e30b_002_mold_declare_only");
+}
+
+#[test]
+fn e30b_002_error_declare_only_fn_field_three_backend_parity() {
+    if !cc_available() {
+        eprintln!("SKIP: cc unavailable");
+        return;
+    }
+    let src = r#"
+Error => NotFound = @(
+  msg: Str,
+  recovery: Unit => :Unit
+)
+err <= NotFound(msg <= "missing")
+stdout(err.msg)
+"#;
+    assert_backend_parity_for_source(src, "e30b_002_error_declare_only");
+}
+
+#[test]
+fn e30b_002_inheritance_declare_only_fn_field_three_backend_parity() {
+    if !cc_available() {
+        eprintln!("SKIP: cc unavailable");
+        return;
+    }
+    let src = r#"
+Mold[T] => Container[T] = @(item: T)
+
+Container[T] => Greeter[T] = @(
+  greet: T => :T
+)
+g <= Greeter[7, 42]()
+stdout(g.item.toString())
+"#;
+    assert_backend_parity_for_source(src, "e30b_002_inheritance_declare_only");
+}
+
+// ===========================================================================
+// E30B-004 / E30 Phase 6 (Sub-step 6.6): defaultFn 4-backend parity
+//
+// Lock-D verdict (E30 Phase 0, 2026-04-28): a synthetic `defaultFn` is
+// generated for every `TypeExpr::Function(_, _)` annotation reachable from
+// `default_for_type_expr` (interpreter) / `lower_default_for_type_expr`
+// (codegen) / `__taida_defaultForSchema` (JS). Calling the field at runtime
+// must yield the **return type's default value** in all four backends:
+//   - Interpreter (reference): `DEFAULT_FN_SENTINEL_NAME` synthetic FuncValue
+//   - JS: `__taida_defaultForSchema({ __fn: retSchema })` arrow function
+//   - Native: `_taida_default_fn_<id>` synthetic IR lambda + `MakeClosure`
+//   - wasm-wasi: shares the native codegen path; existing wasm regression
+//     guards (`cargo test --test wasm_min` / `wasm_wasi`) pin the baseline
+// ===========================================================================
+
+#[test]
+fn e30b_004_default_fn_int_return_three_backend_parity() {
+    if !cc_available() {
+        eprintln!("SKIP: cc unavailable");
+        return;
+    }
+    let src = r#"
+Counter = @(value: Int, getNext: Int => :Int)
+c <= Counter(value <= 10)
+n <= c.getNext(0)
+stdout(n.toString())
+"#;
+    assert_backend_parity_for_source(src, "e30b_004_default_fn_int");
+}
+
+#[test]
+fn e30b_004_default_fn_str_return_three_backend_parity() {
+    if !cc_available() {
+        eprintln!("SKIP: cc unavailable");
+        return;
+    }
+    let src = r#"
+Pilot = @(name: Str, greet: Str => :Str)
+p <= Pilot(name <= "Rei")
+result <= p.greet("hello")
+stdout(result.length().toString())
+"#;
+    assert_backend_parity_for_source(src, "e30b_004_default_fn_str");
+}
+
+// E30B-004 Bool-return defaultFn parity (Phase 8 / E30B-011 FIXED):
+// the synthetic `MakeClosure`-returned value now carries the proper
+// `:Bool` tag through `taida_set_return_tag` emitted at the end of the
+// synthetic lambda body (`lower_default_fn_synthetic`). All three
+// backends (Interpreter / JS / Native) render `false` for the Bool
+// default. wasm-wasi shares the native codegen path, so the regression
+// guard applies there too.
+#[test]
+fn e30b_004_default_fn_bool_return_three_backend_parity() {
+    if !cc_available() {
+        eprintln!("SKIP: cc unavailable");
+        return;
+    }
+    let src = r#"
+Predicate = @(label: Str, check: Int => :Bool)
+p <= Predicate(label <= "any")
+b <= p.check(0)
+stdout(b.toString())
+"#;
+    assert_backend_parity_for_source(src, "e30b_004_default_fn_bool");
+}
+
+#[test]
+fn e30b_004_default_fn_typedef_return_three_backend_parity() {
+    if !cc_available() {
+        eprintln!("SKIP: cc unavailable");
+        return;
+    }
+    // Function-typed declare-only field whose return type is a class-like.
+    // Calling the synthetic defaultFn must materialise the class-like's
+    // default pack (empty string for `name`); `.name.length()` must be 0
+    // across all backends.
+    let src = r#"
+Pilot = @(name: Str)
+Greeter = @(label: Str, build: Str => :Pilot)
+g <= Greeter(label <= "make")
+p <= g.build("Rei")
+stdout(p.name.length().toString())
+"#;
+    assert_backend_parity_for_source(src, "e30b_004_default_fn_typedef");
+}
+
+#[test]
+fn e30b_004_default_fn_enum_return_three_backend_parity() {
+    if !cc_available() {
+        eprintln!("SKIP: cc unavailable");
+        return;
+    }
+    let src = r#"
+Enum => Status = :Ok :Fail
+Probe = @(label: Str, pick: Unit => :Status)
+p <= Probe(label <= "status")
+s <= p.pick()
+stdout(s.toString())
+"#;
+    assert_backend_parity_for_source(src, "e30b_004_default_fn_enum");
+}
+
+#[test]
+fn e30b_004_default_fn_self_recursive_typedef_three_backend_parity() {
+    if !cc_available() {
+        eprintln!("SKIP: cc unavailable");
+        return;
+    }
+    let src = r#"
+Node = @(name: Str, next: Unit => :Node)
+n <= Node(name <= "root")
+child <= n.next()
+stdout(child.name.length().toString())
+"#;
+    assert_backend_parity_for_source(src, "e30b_004_default_fn_self_recursive");
+}
+
+// ===========================================================================
+// E30 Phase 8 — 4-backend parity 集約 evidence
+// ---------------------------------------------------------------------------
+// Aggregated parity tests pinning the full E30 unified-class-like surface:
+// E30B-001 (unified syntax: zero-arity sugar / `Mold[T] =>` 撤廃 / 子側型引数追加)
+// + E30B-002 (declare-only fn field 全系統許可)
+// + E30B-003 (`[E1410]` definition-site reject is checker-only, no parity test)
+// + E30B-004 (defaultFn 自動生成、Bool included after E30B-011 fix).
+// E30B-007 explicit binding は addon facade build を必要とするため
+// `tests/e30b_007_addon_explicit_binding.rs` 側で native build pin、
+// 4-backend parity は本 Phase 8 では interpreter / JS / native の
+// stdout 出力 surface に絞る。wasm-wasi は native codegen を共有するため
+// 既存 `cargo test --test wasm_min` / `wasm_wasi` regression guard で baseline 維持。
+// ===========================================================================
+
+#[test]
+fn e30b_phase8_aggregate_unified_zero_arity_three_backend_parity() {
+    if !cc_available() {
+        eprintln!("SKIP: cc unavailable");
+        return;
+    }
+    // E30B-001 Lock-B Sub-B1: zero-arity sugar (`Pilot = @(...)` ≡ `Pilot[] = @(...)`).
+    let src = r#"
+Pilot[] = @(name: Str, age: Int)
+p <= Pilot(name <= "Rei", age <= 14)
+stdout(p.name)
+stdout(p.age.toString())
+"#;
+    assert_backend_parity_for_source(src, "e30b_phase8_aggregate_zero_arity");
+}
+
+#[test]
+fn e30b_phase8_aggregate_unified_class_like_inheritance_three_backend_parity() {
+    if !cc_available() {
+        eprintln!("SKIP: cc unavailable");
+        return;
+    }
+    // E30B-001: legacy class-like inheritance (TypeDef → child via `=>`).
+    // 既存 surface 受理 regression guard (Phase 4 / Phase 6 land の 4-backend
+    // parity を pin する集約)。zero-arity sugar 親 → 子 継承の checker 受理
+    // は Lock-B/Lock-F verdict 範囲ではあるが現実装は legacy `Parent => Child`
+    // (子に prefix-arity なし) のみ受理 — そちらを使って 4-backend parity を
+    // pin する。
+    let src = r#"
+Pilot = @(name: Str)
+Pilot => NervStaff = @(rank: Int)
+ns <= NervStaff(name <= "Rei", rank <= 3)
+stdout(ns.name)
+stdout(ns.rank.toString())
+"#;
+    assert_backend_parity_for_source(src, "e30b_phase8_aggregate_class_like_inh");
+}
+
+#[test]
+fn e30b_phase8_aggregate_declare_only_plus_default_fn_three_backend_parity() {
+    if !cc_available() {
+        eprintln!("SKIP: cc unavailable");
+        return;
+    }
+    // E30B-002 (declare-only fn field 全系統許可) + E30B-004 (defaultFn 自動生成).
+    // class-like variant に declare-only fn field が存在し、未指定の場合に
+    // defaultFn が呼ばれて戻り型 default (Str = "") を返す。`.length()` で
+    // 4-backend pin。Mold / Error variant は既存の e30b_002_*_three_backend_parity
+    // で受理 pin、本 aggregate はそれに重ねて defaultFn 呼び出し parity を確認。
+    let src = r#"
+Pilot = @(name: Str, greet: Str => :Str)
+p <= Pilot(name <= "Rei")
+result <= p.greet("hi")
+stdout(result.length().toString())
+"#;
+    assert_backend_parity_for_source(src, "e30b_phase8_aggregate_declare_only_default");
+}
+
+#[test]
+fn e30b_phase8_aggregate_combined_unified_plus_default_fn_three_backend_parity() {
+    if !cc_available() {
+        eprintln!("SKIP: cc unavailable");
+        return;
+    }
+    // E30B-001 + E30B-002 + E30B-004 集約: zero-arity sugar + declare-only fn
+    // field (Bool 戻り) + defaultFn 自動生成 + E30B-011 修正の Bool tag 伝播。
+    // 4-backend で `false` を render できることを pin する (E30B-011 fix の
+    // 集約 evidence)。Float は JS の `(0.0).toString() === "0"` semantics で
+    // 恒久的 mismatch のため Phase 8 集約からは除外、Int / Str / Bool /
+    // TypeDef return の 4 ケースで E30B-004 全 parity を担保。
+    let src = r#"
+Predicate[] = @(label: Str, check: Int => :Bool)
+p <= Predicate(label <= "any")
+b <= p.check(0)
+stdout(p.label)
+stdout(b.toString())
+"#;
+    assert_backend_parity_for_source(src, "e30b_phase8_aggregate_combined");
+}
+
+#[test]
+fn e30b_006_imported_mold_kind_registers_type_metadata_three_backend_parity() {
+    if !cc_available() {
+        eprintln!("SKIP: cc unavailable");
+        return;
+    }
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock")
+        .as_nanos();
+    let dir = std::env::temp_dir().join(format!(
+        "taida_e30b006_imported_mold_{}_{}",
+        std::process::id(),
+        nanos
+    ));
+    fs::create_dir_all(&dir).expect("create temp dir");
+    fs::write(
+        dir.join("box.td"),
+        r#"
+Mold[T] => Box[T] = @(value: T, label: Str)
+<<< @(Box)
+"#,
+    )
+    .expect("write box.td");
+    fs::write(
+        dir.join("main.td"),
+        r#"
+>>> ./box.td => @(Box)
+b <= Box[7, 7, "seven"]()
+stdout(b.value.toString())
+stdout(b.label)
+"#,
+    )
+    .expect("write main.td");
+    let main = dir.join("main.td");
+    let interp = run_interpreter(&main).expect("interpreter should succeed");
+    let native = run_native(&main).expect("native should succeed");
+    assert_eq!(interp, native);
+    if node_available() {
+        let js = run_js_project(&main, "e30b006_imported_mold").expect("js should succeed");
+        assert_eq!(interp, js);
+    }
+    let _ = fs::remove_dir_all(&dir);
+}

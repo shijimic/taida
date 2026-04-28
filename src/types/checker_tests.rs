@@ -1490,6 +1490,99 @@ Expanded[T, U] => Child[T] = @()"#;
     );
 }
 
+// ── E30 Phase 3 / Lock-B Sub-B1 / Sub-B3 / E30B-008 confirmation tests ──
+
+/// E30 Lock-B Sub-B1: zero-arity sugar `Pilot[] = @(...)` ≡ `Pilot = @(...)`
+/// checker 側の受理確認 (parser Sub-step 2.2 で既に受理、checker でも arity 0 として
+/// 通常の class-like 定義と同等に処理される)。
+#[test]
+fn test_e30_lock_b_sub_b1_zero_arity_sugar_class_like_accepted_by_checker() {
+    let source = r#"Pilot[] = @(name: Str, age: Int)
+rei <= Pilot(name <= "Rei", age <= 14)"#;
+    let (_, errors) = check(source);
+    assert!(
+        errors.is_empty(),
+        "Expected zero-arity sugar `Pilot[] = @(...)` to be accepted by checker, got: {:?}",
+        errors
+    );
+}
+
+/// E30 Lock-B Sub-B1: zero-arity 明示と省略形が等価に扱われること。
+#[test]
+fn test_e30_lock_b_sub_b1_zero_arity_sugar_equivalence() {
+    let with_brackets = r#"Pilot[] = @(name: Str)
+rei <= Pilot(name <= "Rei")"#;
+    let without_brackets = r#"Pilot = @(name: Str)
+rei <= Pilot(name <= "Rei")"#;
+    let (_, errors_a) = check(with_brackets);
+    let (_, errors_b) = check(without_brackets);
+    assert!(
+        errors_a.is_empty(),
+        "Expected `Pilot[] = @(...)` form to be error-free, got: {:?}",
+        errors_a
+    );
+    assert!(
+        errors_b.is_empty(),
+        "Expected `Pilot = @(...)` form to be error-free, got: {:?}",
+        errors_b
+    );
+}
+
+/// E30 Lock-B Sub-B3: 親型 arity に対し子側で **追加** の型引数を持つことは OK
+/// (`CustomType[T, U] => CustomSubType[T, U, V] = @(...)`)。
+#[test]
+fn test_e30_lock_b_sub_b3_child_can_add_type_params_after_parent_prefix() {
+    let source = r#"Mold[T] => Result[T, P <= :T => :Bool] = @(value: T)
+Result[T, P <= :T => :Bool] => CustomResult[T, P <= :T => :Bool, V] = @(meta: V)"#;
+    let (_, errors) = check(source);
+    assert!(
+        errors.is_empty(),
+        "Expected child to be able to add type params (T, P, V) on top of parent (T, P), got: {:?}",
+        errors
+    );
+}
+
+/// E30 Lock-B Sub-B3: 親型 arity 不一致 (`shrink`) は `[E1407]` umbrella で reject。
+/// 既存 `test_generic_inheritance_cannot_shrink_parent_header_arity` と意味的に同じだが、
+/// E30 Phase 3 で umbrella 化された `[E1407]` 新意味の pin として独立追加。
+#[test]
+fn test_e30_lock_b_sub_b3_parent_arity_mismatch_shrink_rejected_via_e1407_umbrella() {
+    let source = r#"Mold[T] => Result[T, P <= :T => :Bool] = @(value: T)
+Result[T, P <= :T => :Bool] => Bad[T] = @()"#;
+    let (_, errors) = check(source);
+    assert!(
+        errors.iter().any(|e| {
+            e.message.contains("[E1407]")
+                && e.message
+                    .contains("cannot shrink header arity below parent")
+        }),
+        "Expected `[E1407]` umbrella (Lock-B Sub-B3 親型適用 arity mismatch) to fire on shrink, got: {:?}",
+        errors
+    );
+}
+
+/// E30 Phase 3 / E30B-008: 旧 `[E1410]` 意味 (InheritanceDef 子フィールド型互換違反)
+/// が `[E1411]` に番号移動されたことを pin。`[E1410]` は新意味 (declare-only function
+/// field requires defaultFn) 用に予約され、本 Phase では発火しない。
+#[test]
+fn test_e30_e30b_008_e1411_inheritance_field_redefinition_relocated_from_e1410() {
+    let source = r#"Parent = @(value: Int)
+Parent => Child = @(value: Str)"#;
+    let (_, errors) = check(source);
+    assert!(
+        errors
+            .iter()
+            .any(|e| { e.message.contains("[E1411]") && e.message.contains("redefines field") }),
+        "Expected `[E1411]` (旧 [E1410] の意味、E30 Phase 3 で番号移動) to fire on incompatible field redefinition, got: {:?}",
+        errors
+    );
+    assert!(
+        !errors.iter().any(|e| e.message.contains("[E1410]")),
+        "Expected `[E1410]` to NOT fire (reserved for new meaning, E30 Phase 6 で full 発火 path 実装予定), got: {:?}",
+        errors
+    );
+}
+
 // ── E1501: Same-scope name collision ──
 
 #[test]
@@ -4382,4 +4475,282 @@ fn test_c19b_002_error_inheriting_named_type_type_access_ok() {
         "err.__type on an Error-inheriting Named type must not trigger E1602, got: {:?}",
         errors
     );
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// E30 Phase 4 / E30B-002: declare-only function field acceptance for
+// Mold and Inheritance (Error) variants.
+//
+// Lock-B verdict (2026-04-28): declare-only function fields (e.g.
+// `transform: T => :T`) are permitted in all class-like variants, not
+// just the BuchiPack (TypeDef) kind. They are excluded from the
+// required-positional `[]` set and from the extra-type-arg binding
+// target count, mirroring the existing TypeDef behaviour. Phase 6
+// (E30B-004) will replace the runtime `Value::Unit` placeholder with
+// an automatically-generated `defaultFn` while keeping these checker
+// invariants intact.
+// ─────────────────────────────────────────────────────────────────────
+
+/// Mold variant accepts a declare-only function field at definition.
+#[test]
+fn test_e30b_002_mold_with_declare_only_fn_field_check_passes() {
+    let source = r#"Mold[T] => Foo[T] = @(
+  name: Str,
+  transform: T => :T
+)"#;
+    let (_, errors) = check(source);
+    assert!(
+        errors.is_empty(),
+        "Mold definition with declare-only fn field must check clean, got: {:?}",
+        errors
+    );
+}
+
+/// Mold instantiation must NOT count the declare-only function field
+/// as a required positional `[]` argument. Before Phase 4 the user
+/// would see `[E1402] requires 3 positional [] argument(s)` because
+/// `transform` was treated as required. After Phase 4 only the regular
+/// fields (`filling` + `name`) are required positional.
+#[test]
+fn test_e30b_002_mold_with_declare_only_fn_field_instantiate_no_e1402() {
+    let source = r#"Mold[T] => Foo[T] = @(
+  name: Str,
+  transform: T => :T
+)
+f <= Foo[1, "x"]()"#;
+    let (_, errors) = check(source);
+    assert!(
+        errors.is_empty(),
+        "Mold instantiation with declare-only fn field omitted must produce no errors, got: {:?}",
+        errors
+    );
+}
+
+/// Mold instantiation may also override the declare-only function
+/// field via a named `()` option (treated as optional). The override
+/// must NOT trigger `[E1406] undefined option`.
+#[test]
+fn test_e30b_002_mold_declare_only_fn_field_override_via_named_option_ok() {
+    let source = r#"Mold[T] => Foo[T] = @(
+  name: Str,
+  transform: T => :T
+)
+f <= Foo[1, "x"](transform <= _ x = x)"#;
+    let (_, errors) = check(source);
+    assert!(
+        errors.is_empty(),
+        "Mold instantiation with explicit override of declare-only fn field must produce no errors, got: {:?}",
+        errors
+    );
+}
+
+/// Error-inheritance variant accepts a declare-only function field
+/// (recovery hook). Instantiation only requires the regular fields.
+#[test]
+fn test_e30b_002_error_with_declare_only_fn_field_instantiate_ok() {
+    let source = r#"Error => NotFound = @(
+  msg: Str,
+  recovery: Unit => :Unit
+)
+err <= NotFound(msg <= "missing")"#;
+    let (_, errors) = check(source);
+    assert!(
+        errors.is_empty(),
+        "Error variant with declare-only fn field instantiation must produce no errors, got: {:?}",
+        errors
+    );
+}
+
+/// Mold-derived inheritance variant accepts a declare-only function
+/// field on the child header. Only the regular parent fields remain
+/// required for `[]` positional binding (the declare-only fn field
+/// `greet` is excluded from the required-positional count). Here we
+/// pass `filling` (`7`) and the inherited `item` (`42`) — without
+/// Phase 4 the user would also need to supply a third `[]` arg for
+/// `greet`, which is wrong for an interface declaration.
+#[test]
+fn test_e30b_002_inheritance_with_declare_only_fn_field_instantiate_ok() {
+    let source = r#"Mold[T] => Container[T] = @(item: T)
+
+Container[T] => Greeter[T] = @(
+  greet: T => :T
+)
+g <= Greeter[7, 42]()"#;
+    let (_, errors) = check(source);
+    assert!(
+        errors.is_empty(),
+        "Inheritance variant with declare-only fn field must accept instantiation with only filling+inherited fields, got: {:?}",
+        errors
+    );
+}
+
+/// Regression guard: a Mold definition with **only** a declare-only
+/// function field still surfaces unbound type-parameter errors when
+/// the type-arg count exceeds the parent + non-fn-field count. Phase 4
+/// must not silently consume the extra type-arg with the declare-only
+/// fn field (see `validate_mold_extension_bindings`).
+#[test]
+fn test_e30b_002_mold_extension_bindings_ignore_declare_only_fn_field() {
+    let source = r#"Mold[T] => Broken[T, U] = @(
+  greet: T => :T
+)"#;
+    let (_, errors) = check(source);
+    assert!(
+        errors
+            .iter()
+            .any(|e| e.message.contains("[E1401]")
+                && e.message.contains("unbound type parameter(s): U")),
+        "Phase 4 must keep [E1401] firing when extra type-arg has no non-fn-field binding target, got: {:?}",
+        errors
+    );
+}
+
+// ────────────────────────────────────────────────────────────────────────
+// E30 Phase 6 / E30B-004: defaultFn 生成可能性判定 API tests (Lock-D verdict)
+// ────────────────────────────────────────────────────────────────────────
+
+use std::collections::HashSet;
+
+/// Lock-D: primitive return types are always generatable.
+#[test]
+fn test_e30b_004_default_fn_generatable_primitive() {
+    let registry = TypeRegistry::new();
+    for name in &["Int", "Num", "Float", "Str", "Bool", "Bytes", "Unit"] {
+        let ty = TypeExpr::Named((*name).to_string());
+        let mut visiting = HashSet::new();
+        assert!(
+            default_fn_generatable(&ty, &registry, &mut visiting),
+            "primitive {name} should be generatable"
+        );
+    }
+}
+
+/// Lock-D: registered class-like types (TypeDef / Mold / Error) are
+/// generatable.
+#[test]
+fn test_e30b_004_default_fn_generatable_typedef() {
+    let source = "Pilot = @(name: Str)";
+    let (checker, errors) = check(source);
+    assert!(errors.is_empty(), "parse/check errors: {:?}", errors);
+    let ty = TypeExpr::Named("Pilot".to_string());
+    let mut visiting = HashSet::new();
+    assert!(
+        default_fn_generatable(&ty, &checker.registry, &mut visiting),
+        "registered TypeDef should be generatable"
+    );
+}
+
+/// Lock-D: function return type recursion — `Int => :Str` ok because Str
+/// is generatable; `Int => :OpaqueExternal` is not generatable.
+#[test]
+fn test_e30b_004_default_fn_generatable_function_recursive() {
+    let registry = TypeRegistry::new();
+    // Int => :Str
+    let ok = TypeExpr::Function(
+        vec![TypeExpr::Named("Int".to_string())],
+        Box::new(TypeExpr::Named("Str".to_string())),
+    );
+    let mut visiting = HashSet::new();
+    assert!(
+        default_fn_generatable(&ok, &registry, &mut visiting),
+        "Int => :Str should be generatable"
+    );
+
+    // Int => :OpaqueExternal (unknown alias)
+    let bad = TypeExpr::Function(
+        vec![TypeExpr::Named("Int".to_string())],
+        Box::new(TypeExpr::Named("OpaqueExternal".to_string())),
+    );
+    let mut visiting = HashSet::new();
+    assert!(
+        !default_fn_generatable(&bad, &registry, &mut visiting),
+        "Function returning unknown alias should not be generatable"
+    );
+}
+
+/// Lock-D: Async[T] is generatable iff T is generatable.
+#[test]
+fn test_e30b_004_default_fn_generatable_async() {
+    let registry = TypeRegistry::new();
+    let ok = TypeExpr::Generic(
+        "Async".to_string(),
+        vec![TypeExpr::Named("Int".to_string())],
+    );
+    let mut visiting = HashSet::new();
+    assert!(default_fn_generatable(&ok, &registry, &mut visiting));
+
+    let bad = TypeExpr::Generic(
+        "Async".to_string(),
+        vec![TypeExpr::Named("Opaque".to_string())],
+    );
+    let mut visiting = HashSet::new();
+    assert!(!default_fn_generatable(&bad, &registry, &mut visiting));
+}
+
+/// Lock-D: opaque / unknown alias is not generatable.
+#[test]
+fn test_e30b_004_default_fn_generatable_unknown_alias_is_false() {
+    let registry = TypeRegistry::new();
+    let ty = TypeExpr::Named("UnknownAlias".to_string());
+    let mut visiting = HashSet::new();
+    assert!(
+        !default_fn_generatable(&ty, &registry, &mut visiting),
+        "unknown alias must be opaque (not generatable)"
+    );
+}
+
+/// Lock-D: cycle guard — recursive self-referential type is generatable.
+#[test]
+fn test_e30b_004_default_fn_generatable_recursive_cycle_is_true() {
+    // `Node = @(value: Int, next: Node)` — recursive but generatable
+    // (interpreter returns minimal `__type` pack at cycle point).
+    let source = "Node = @(value: Int, next: Node)";
+    let (checker, errors) = check(source);
+    assert!(errors.is_empty(), "parse/check errors: {:?}", errors);
+    let ty = TypeExpr::Named("Node".to_string());
+    let mut visiting = HashSet::new();
+    visiting.insert("Node".to_string()); // simulate recursive entry
+    assert!(
+        default_fn_generatable(&ty, &checker.registry, &mut visiting),
+        "recursive cycle should be considered generatable (matches default_for_type_expr cycle guard)"
+    );
+}
+
+/// Lock-D: BuchiPack inline is generatable iff all fields are generatable.
+#[test]
+fn test_e30b_004_default_fn_generatable_buchi_pack() {
+    let registry = TypeRegistry::new();
+    let ok = TypeExpr::BuchiPack(vec![FieldDef {
+        name: "x".to_string(),
+        type_annotation: Some(TypeExpr::Named("Int".to_string())),
+        default_value: None,
+        is_method: false,
+        method_def: None,
+        doc_comments: Vec::new(),
+        span: Span {
+            start: 0,
+            end: 0,
+            line: 1,
+            column: 1,
+        },
+    }]);
+    let mut visiting = HashSet::new();
+    assert!(default_fn_generatable(&ok, &registry, &mut visiting));
+
+    let bad = TypeExpr::BuchiPack(vec![FieldDef {
+        name: "x".to_string(),
+        type_annotation: Some(TypeExpr::Named("OpaqueAlias".to_string())),
+        default_value: None,
+        is_method: false,
+        method_def: None,
+        doc_comments: Vec::new(),
+        span: Span {
+            start: 0,
+            end: 0,
+            line: 1,
+            column: 1,
+        },
+    }]);
+    let mut visiting = HashSet::new();
+    assert!(!default_fn_generatable(&bad, &registry, &mut visiting));
 }

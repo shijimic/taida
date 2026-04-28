@@ -6,7 +6,7 @@ Taida は**プリリュード**と**ビルトイン型**で構成されていま
 
 > **PHILOSOPHY.md — I.** 深く考えずに適当にぶちこんでけ
 
-操作系の処理はモールドとして提供されます。詳細は `reference/mold_types.md` を参照してください。
+操作系の処理はモールドとして提供されます。詳細は `reference/class_like_types.md` を参照してください。
 メソッドは状態チェックとモナディック操作に限定されています。詳細は `reference/standard_methods.md` を参照してください。
 
 ---

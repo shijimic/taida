@@ -17,18 +17,18 @@
       "rationale": "wε Round 10 local 16T measured Native/JS = 2.0 (acceptance bar). CI 2C has less parallelism, more malloc contention on a shared glibc arena, and node startup variance; 1.5× headroom keeps the gate informative without false positives. If 5+ CI samples land consistently below 2.5, tighten to 2.5."
     },
     "sys_real_ratio_max": {
-      "value": 0.40,
+      "value": 0.4,
       "local_reference": 0.09,
       "headroom_multiplier": 4.4,
       "rationale": "wε Round 10 local 16T measured sys/real = 0.09. CI kernels have higher syscall overhead + runner-level tracing, and shorter absolute wall times make sys/real noisier. The published C26B-024 Step 4 acceptance bar is 0.30 (30%); 0.40 gives 1.33× headroom above that so the gate catches regressions approaching 50% (the prior wT Round 8 waypoint) while tolerating CI noise."
     }
   },
   "state": {
-    "sample_count": 0,
-    "median_native_js_ratio": 0.0,
-    "median_native_sys_ratio": 0.0,
-    "last_run_sha": null,
-    "last_run_at": null,
+    "sample_count": 1,
+    "median_native_js_ratio": 2.589744,
+    "median_native_sys_ratio": 0.059406,
+    "last_run_sha": "a8e7930e73a570c4b6a078847c79a8a858870a67",
+    "last_run_at": "2026-04-27T15:37:35Z",
     "strict": null,
     "notes": [
       "Populated by the perf-router.yml workflow on successful runs.",

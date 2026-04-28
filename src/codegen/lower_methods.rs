@@ -520,6 +520,24 @@ impl Lowering {
         let runtime_fn = format!("taida_pack_call_field{}", args.len());
         let result = func.alloc_var();
         func.push(IrInst::Call(result, runtime_fn, call_args));
+
+        // E30 Phase 8 / E30B-011: capture the return tag set by the
+        // invoked callback (closure or function pointer) so that
+        // downstream tag-aware operations (`stdout(_with_tag)`,
+        // `.toString()` polymorphic dispatch) can render the value
+        // correctly. Without this, a `Bool`-returning declare-only
+        // function field's defaultFn closure would set the thread-local
+        // tag inside the synthetic lambda but the caller would never
+        // read it, so `b.toString()` would observe a raw i64 (0) and
+        // print "0" instead of "false".
+        let return_tag = func.alloc_var();
+        func.push(IrInst::Call(
+            return_tag,
+            "taida_get_return_tag".to_string(),
+            vec![],
+        ));
+        self.record_call_return_tag(result, return_tag);
+
         Ok(result)
     }
 }

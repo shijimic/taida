@@ -76,9 +76,13 @@ pub enum NodeKind {
 
     // Type hierarchy graph
     PrimitiveType,
-    BuchiPackType,
-    MoldType,
-    ErrorType,
+    /// (E30 Phase 7.5 / E30B-006, Lock-F 軸 2) Class-like 単一 NodeKind。
+    /// 旧 `BuchiPackType` / `MoldType` / `ErrorType` を統合した。surface 上の
+    /// 旧 3 系統 (TypeDef / Mold 継承 / Error 継承) は kind discriminator を
+    /// `metadata["class_like_kind"]` (`"BuchiPack" | "Mold" | "Inheritance"`)
+    /// で表現し、必要に応じて `metadata["inheritance_parent"]` で親型名
+    /// (`"Error"` 等) を記録する。
+    ClassLikeType,
 
     // Error boundary graph
     ErrorCeiling,
@@ -106,9 +110,7 @@ impl std::fmt::Display for NodeKind {
             NodeKind::ExternalPackage => write!(f, "ExternalPackage"),
             NodeKind::Symbol => write!(f, "Symbol"),
             NodeKind::PrimitiveType => write!(f, "PrimitiveType"),
-            NodeKind::BuchiPackType => write!(f, "BuchiPackType"),
-            NodeKind::MoldType => write!(f, "MoldType"),
-            NodeKind::ErrorType => write!(f, "ErrorType"),
+            NodeKind::ClassLikeType => write!(f, "ClassLikeType"),
             NodeKind::ErrorCeiling => write!(f, "ErrorCeiling"),
             NodeKind::ThrowSite => write!(f, "ThrowSite"),
             NodeKind::Function => write!(f, "Function"),
@@ -141,8 +143,13 @@ pub enum EdgeKind {
     SymbolRef,
 
     // Type hierarchy
-    MoldInheritance,
-    ErrorInheritance,
+    /// (E30 Phase 7.5 / E30B-006, Lock-F 軸 2) Class-like 単一 inheritance edge。
+    /// 旧 `MoldInheritance` / `ErrorInheritance` を統合した。Mold base / Error
+    /// base / 任意親型からの継承をすべてこの edge kind で表現する。`metadata`
+    /// で旧分類が必要な consumer 向けに kind hint を付与する余地を残す。
+    /// `StructuralSubtype` は別概念 (TypeDef inheritance の暗黙 subtype edge)
+    /// として既存維持。
+    ClassLikeInheritance,
     StructuralSubtype,
 
     // Error boundary
@@ -170,8 +177,7 @@ impl std::fmt::Display for EdgeKind {
             EdgeKind::Imports => write!(f, "Imports"),
             EdgeKind::Exports => write!(f, "Exports"),
             EdgeKind::SymbolRef => write!(f, "SymbolRef"),
-            EdgeKind::MoldInheritance => write!(f, "MoldInheritance"),
-            EdgeKind::ErrorInheritance => write!(f, "ErrorInheritance"),
+            EdgeKind::ClassLikeInheritance => write!(f, "ClassLikeInheritance"),
             EdgeKind::StructuralSubtype => write!(f, "StructuralSubtype"),
             EdgeKind::Catches => write!(f, "Catches"),
             EdgeKind::ThrowsTo => write!(f, "ThrowsTo"),

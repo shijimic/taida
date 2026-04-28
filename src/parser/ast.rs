@@ -33,16 +33,14 @@ pub enum Statement {
     Expr(Expr),
     /// Enum definition: `Enum => Name = :A :B`
     EnumDef(EnumDef),
-    /// Type definition: `Name = @(...)`
-    TypeDef(TypeDef),
+    /// Class-like definition (E30 Phase 2 Sub-step 2.1, Lock-F 軸 1):
+    /// 旧 `TypeDef` / `MoldDef` / `InheritanceDef` を統合。`ClassLikeKind`
+    /// discriminator で 3 系統 (BuchiPack / Mold / Inheritance) を内部分類する。
+    ClassLikeDef(ClassLikeDef),
     /// Function definition: `name params = body => :ReturnType`
     FuncDef(FuncDef),
     /// Variable assignment: `name <= expr` or `expr => name`
     Assignment(Assignment),
-    /// Mold type definition: `Mold[T] => Name[T] = @(...)`
-    MoldDef(MoldDef),
-    /// Inheritance definition: `Parent => Child = @(...)`
-    InheritanceDef(InheritanceDef),
     /// Error ceiling: `|== error: Type = body => :ReturnType`
     ErrorCeiling(ErrorCeiling),
     /// Import: `>>> path => @(symbols)`
@@ -108,14 +106,119 @@ pub struct EnumVariantDef {
     pub span: Span,
 }
 
-/// Type definition: `Name = @(field: Type, ...)`
+/// Class-like definition (E30 Phase 2 Sub-step 2.1, Lock-F 軸 1):
+/// 旧 `TypeDef` / `MoldDef` / `InheritanceDef` を `Statement::ClassLikeDef`
+/// 単一 variant に統合。3 系統の残存差は `ClassLikeKind` discriminator で
+/// 内部分類する。
 #[derive(Debug, Clone, PartialEq)]
-pub struct TypeDef {
+pub struct ClassLikeDef {
+    /// 子型名 (旧 `TypeDef::name` / `MoldDef::name` / `InheritanceDef::child` を統合)。
     pub name: String,
+    /// Buchi-pack body フィールド群。
     pub fields: Vec<FieldDef>,
-    /// Documentation comments (`///@`) attached to this type definition.
+    /// Documentation comments (`///@`) attached to this class-like definition.
     pub doc_comments: Vec<String>,
     pub span: Span,
+    /// kind discriminator (BuchiPack / Mold / Inheritance)。
+    pub kind: ClassLikeKind,
+    /// 子側 `Name[...]` ヘッダ引数 (Mold / Inheritance 系で子が独自の type params を持つ場合)。
+    /// 旧 `MoldDef::name_args` / `InheritanceDef::child_args` を統合。
+    pub name_args: Option<Vec<MoldHeaderArg>>,
+    /// declared type variables (旧 `MoldDef::type_params` を継承)。Mold kind でのみ非空。
+    pub type_params: Vec<TypeParam>,
+}
+
+/// `ClassLikeDef` の kind discriminator。surface 上は migration / docs history 以外には
+/// 出さず、内部 dispatch 用のみで使う (Lock-F 軸 1: 旧語彙退避)。
+#[derive(Debug, Clone, PartialEq)]
+pub enum ClassLikeKind {
+    /// 旧 `TypeDef` 系: `Pilot = @(...)` (zero-arity sugar `Pilot[] = @(...)` は
+    /// Sub-step 2.2 で受理予定、本 Sub-step では旧構文のみ)。
+    BuchiPack,
+    /// 旧 `MoldDef` 系: `Mold[T] => Name[T] = @(...)`。
+    /// `mold_args` は親側 `Mold[...]` 内の引数。
+    Mold { mold_args: Vec<MoldHeaderArg> },
+    /// 旧 `InheritanceDef` 系: `Parent => Child = @(...)` または
+    /// `Parent[T] => Child[T] = @(...)`。
+    /// `parent` は親型名 (`"Error"` / `"User"` 等)。
+    /// `parent_args` は親型適用の引数 (旧 `InheritanceDef::parent_args`)。
+    Inheritance {
+        parent: String,
+        parent_args: Option<Vec<MoldHeaderArg>>,
+    },
+}
+
+impl ClassLikeDef {
+    /// Inheritance kind なら親型名を返す。それ以外は `None`。
+    pub fn parent(&self) -> Option<&str> {
+        match &self.kind {
+            ClassLikeKind::Inheritance { parent, .. } => Some(parent.as_str()),
+            _ => None,
+        }
+    }
+
+    /// Inheritance kind なら親型適用の引数を返す。それ以外は `None`。
+    pub fn parent_args(&self) -> Option<&Vec<MoldHeaderArg>> {
+        match &self.kind {
+            ClassLikeKind::Inheritance { parent_args, .. } => parent_args.as_ref(),
+            _ => None,
+        }
+    }
+
+    /// Mold kind なら `Mold[...]` 側の引数を返す。それ以外は `None`。
+    pub fn mold_args(&self) -> Option<&Vec<MoldHeaderArg>> {
+        match &self.kind {
+            ClassLikeKind::Mold { mold_args } => Some(mold_args),
+            _ => None,
+        }
+    }
+
+    /// Inheritance kind かどうか (旧 `Statement::InheritanceDef` 判定の置換用)。
+    pub fn is_inheritance(&self) -> bool {
+        matches!(self.kind, ClassLikeKind::Inheritance { .. })
+    }
+
+    /// Mold kind かどうか (旧 `Statement::MoldDef` 判定の置換用)。
+    pub fn is_mold(&self) -> bool {
+        matches!(self.kind, ClassLikeKind::Mold { .. })
+    }
+
+    /// BuchiPack kind かどうか (旧 `Statement::TypeDef` 判定の置換用)。
+    pub fn is_buchi_pack(&self) -> bool {
+        matches!(self.kind, ClassLikeKind::BuchiPack)
+    }
+
+    /// E30 migration tool 専用: 本 ClassLikeDef が migrate 対象の旧構文か判定する。
+    ///
+    /// E30 Phase 0 Lock-B verdict に従い、以下を旧構文として扱う:
+    /// - `Mold[T] => Foo[T] = @(...)` 形式 (`ClassLikeKind::Mold`) — 新構文では
+    ///   `Mold[T] =>` prefix 撤廃で `Foo[T] = @(...)` (zero-or-more arity の
+    ///   type-def 形式) として書き換え可能 (Sub-step 2.2 で受理済)。
+    ///
+    /// 以下は旧構文ではない:
+    /// - `Pilot = @(...)` (Lock-B Sub-B1 で `Pilot[] = @(...)` と等価、
+    ///   migration は推奨 ≠ 必須)
+    /// - `Error => NotFound = @(...)` (Lock-B Sub-B2 で「prefix 撤廃」 = 必須でなくなる、
+    ///   撤廃 ≠ 禁止。Error 継承構文は新仕様でも保持される)
+    ///
+    /// 用途: `taida upgrade --e30` migration tool の旧構文検出 hook。
+    pub fn is_legacy_e30_syntax(&self) -> bool {
+        matches!(self.kind, ClassLikeKind::Mold { .. })
+    }
+
+    /// E30 migration tool 用 表示ラベル。
+    ///
+    /// `is_legacy_e30_syntax()` が true のときに、旧構文の category 名を
+    /// 返す (dry-run 出力 / diagnostic 用)。
+    ///
+    /// - `Some("mold")` — 旧 `Mold[T] => Foo[T] = @(...)` 形式
+    /// - `None` — 新構文 (migration 対象外)
+    pub fn legacy_e30_kind(&self) -> Option<&'static str> {
+        match &self.kind {
+            ClassLikeKind::Mold { .. } => Some("mold"),
+            _ => None,
+        }
+    }
 }
 
 /// A field in a type or buchi pack definition.
@@ -130,6 +233,36 @@ pub struct FieldDef {
     /// Documentation comments (`///@`) attached to this field.
     pub doc_comments: Vec<String>,
     pub span: Span,
+}
+
+impl FieldDef {
+    /// E30 Phase 4 / E30B-002: declare-only function field detection.
+    ///
+    /// A declare-only function field is a field declared with a function type
+    /// annotation (e.g. `greet: Str => :Str`) but **without** a method body
+    /// (`is_method == false`) and **without** an explicit default value
+    /// (`default_value.is_none()`). Such a field is effectively an interface
+    /// member: the type is fixed by the declaration, but the value is supplied
+    /// either at instantiation time (via `(name <= ...)`) or, after Phase 6
+    /// (E30B-004), by an automatically-generated `defaultFn`.
+    ///
+    /// Phase 4 (E30B-002) extends declare-only function field acceptance from
+    /// the class-like (TypeDef / `BuchiPack` kind) variant to the Mold and
+    /// Inheritance (Error) variants. The checker uses this helper to exclude
+    /// declare-only function fields from the "required positional `[]`
+    /// argument" set in `validate_custom_mold_inst_bindings` and from the
+    /// extra-type-arg binding-target count in
+    /// `validate_mold_extension_bindings`. Phase 6 (E30B-004, DONE
+    /// 2026-04-28) replaced the runtime `Value::Unit` placeholder with a
+    /// synthetic `defaultFn` per Lock-D verdict (interpreter / JS / native /
+    /// wasm-wasi all materialise the proper return-type default on call);
+    /// this helper is unchanged.
+    pub fn is_declare_only_fn_field(&self) -> bool {
+        if self.is_method || self.default_value.is_some() {
+            return false;
+        }
+        matches!(self.type_annotation, Some(TypeExpr::Function(_, _)))
+    }
 }
 
 /// Type expression.
@@ -180,6 +313,41 @@ pub struct Assignment {
     pub span: Span,
 }
 
+impl Assignment {
+    /// E30B-007 Lock-G Sub-G5 (2026-04-28): If this assignment is the
+    /// explicit addon-binding form `target <= RustAddon["fn"](arity <= N)`,
+    /// returns `Some((fn_name, arity))`. Otherwise returns `None`.
+    ///
+    /// This helper drives consumer parity (doc-gen / LSP / graph / pkg
+    /// facade / introspection) so a `RustAddon[...]` binding is surfaced
+    /// as a **public function** instead of a generic value, even though
+    /// the AST representation is `Statement::Assignment(_)`.
+    ///
+    /// Validation here is **structural only** (matches the surface form);
+    /// drift / context errors are emitted by the interpreter
+    /// (`eval_rust_addon_binding`) and the addon facade summary loader
+    /// (`src/addon/facade.rs::load_facade_summary`).
+    pub fn as_rust_addon_binding(&self) -> Option<(String, u32)> {
+        if let Expr::MoldInst(name, type_args, fields, _) = &self.value
+            && name == "RustAddon"
+            && type_args.len() == 1
+            && fields.len() == 1
+            && fields[0].name == "arity"
+        {
+            let fn_name = match &type_args[0] {
+                Expr::StringLit(s, _) => s.clone(),
+                _ => return None,
+            };
+            let arity = match &fields[0].value {
+                Expr::IntLit(n, _) if *n >= 0 => *n as u32,
+                _ => return None,
+            };
+            return Some((fn_name, arity));
+        }
+        None
+    }
+}
+
 /// Mold header argument in `Mold[...]` / `Name[...]`.
 #[derive(Debug, Clone, PartialEq)]
 pub enum MoldHeaderArg {
@@ -189,42 +357,14 @@ pub enum MoldHeaderArg {
     Concrete(TypeExpr),
 }
 
-/// Mold type definition: `Mold[...] => Name[...] = @(...)`
-#[derive(Debug, Clone, PartialEq)]
-pub struct MoldDef {
-    pub name: String,
-    /// Header arguments declared on the `Mold[...]` side.
-    pub mold_args: Vec<MoldHeaderArg>,
-    /// Header arguments declared on the `Name[...]` side, if explicitly present.
-    pub name_args: Option<Vec<MoldHeaderArg>>,
-    /// Declared type variables extracted from `mold_args`.
-    pub type_params: Vec<TypeParam>,
-    pub fields: Vec<FieldDef>,
-    /// Documentation comments (`///@`) attached to this mold definition.
-    pub doc_comments: Vec<String>,
-    pub span: Span,
-}
+// (E30 Phase 2 Sub-step 2.1) 旧 `MoldDef` / `InheritanceDef` struct は廃止。
+// 統合先は `ClassLikeDef` (上に定義) + `ClassLikeKind::Mold|Inheritance` discriminator。
 
 /// Type parameter, optionally with constraint.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TypeParam {
     pub name: String,
     pub constraint: Option<TypeExpr>,
-}
-
-/// Inheritance definition: `Parent => Child = @(...)`
-#[derive(Debug, Clone, PartialEq)]
-pub struct InheritanceDef {
-    pub parent: String,
-    /// Header arguments declared on the `Parent[...]` side, if present.
-    pub parent_args: Option<Vec<MoldHeaderArg>>,
-    pub child: String,
-    /// Header arguments declared on the `Child[...]` side, if present.
-    pub child_args: Option<Vec<MoldHeaderArg>>,
-    pub fields: Vec<FieldDef>,
-    /// Documentation comments (`///@`) attached to this inheritance definition.
-    pub doc_comments: Vec<String>,
-    pub span: Span,
 }
 
 /// Error ceiling block.

@@ -59,8 +59,8 @@ impl Lowering {
                 )
             }
             Expr::UnaryOp(UnaryOp::Not, _, _) => true,
-            Expr::MethodCall(_, method, _, _) => {
-                matches!(
+            Expr::MethodCall(obj, method, _, _) => {
+                if matches!(
                     method.as_str(),
                     "hasValue"
                         | "isEmpty"
@@ -83,7 +83,33 @@ impl Lowering {
                         | "isPositive"
                         | "isNegative"
                         | "isZero"
-                )
+                ) {
+                    return true;
+                }
+                // E30 Phase 8 / E30B-011: pack field call whose declared
+                // return type is :Bool (e.g. `Predicate = @(check: Int => :Bool)`
+                // and `b <= p.check(0)`). The default value of `check` is the
+                // synthetic defaultFn returning `false`; without recognising
+                // the Bool return here, `b.toString()` would fall into
+                // `taida_polymorphic_to_string` which only sees a raw i64
+                // and renders "0". By detecting the Bool return type from
+                // the receiver's class-like annotation, we route to
+                // `taida_str_from_bool` and produce the parity-correct
+                // "false".
+                if let Some(type_name) = self.infer_type_name(obj)
+                    && let Some(field_types) = self.type_field_types.get(&type_name)
+                {
+                    for (name, ty) in field_types {
+                        if name == method
+                            && let Some(crate::parser::TypeExpr::Function(_, ret)) = ty
+                            && let crate::parser::TypeExpr::Named(n) = ret.as_ref()
+                            && n == "Bool"
+                        {
+                            return true;
+                        }
+                    }
+                }
+                false
             }
             Expr::FuncCall(callee, _, _) => {
                 // Detect bool-returning user-defined functions

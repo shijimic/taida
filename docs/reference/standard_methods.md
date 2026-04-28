@@ -5,7 +5,7 @@
 プリミティブ型およびリスト型で使用できる標準メソッドのリファレンスです。
 
 メソッドは**状態チェック**（内部状態を問い合わせる）と**表示用**（toString）に限定されています。
-操作系の処理はモールドとして提供されます。詳細は `reference/mold_types.md` を参照してください。
+操作系の処理はモールドとして提供されます。詳細は `reference/class_like_types.md` を参照してください。
 
 ## 設計原則
 
@@ -36,7 +36,7 @@ true.toString()           // "true"
   渡そうとすると、チェッカーが `[E1508] Method 'toString' takes 0 argument(s)`
   で拒否します（哲学 I: 暗黙の型変換なし）。
 - 基数指定で整数を文字列化したい場合は `ToRadix[n, base]()` モールド
-  （`reference/mold_types.md §ToRadix`）を使います。戻り値は `Lax[Str]`
+  （`reference/class_like_types.md §ToRadix`）を使います。戻り値は `Lax[Str]`
   なので `.getOrDefault("")` で unwrap します。
 - 数値を Lax にラップして扱いたい場合は `Str[value]()` モールドを使います。
   `.toString()` は直接 `Str` を返すため、`+` 演算子で文字列連結する場合に

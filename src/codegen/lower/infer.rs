@@ -26,6 +26,27 @@ impl Lowering {
                     false
                 }
             }
+            // E30 Phase 8 / E30B-011 follow-up: pack field call whose
+            // declared return type is :Float. Mirrors the Bool path in
+            // `expr_is_bool`; without this, defaultFn-driven Float fields
+            // (e.g. `Calc = @(halve: Int => :Float)`) would be rendered
+            // through `taida_polymorphic_to_string` and observe a raw i64.
+            Expr::MethodCall(obj, method, _, _) => {
+                if let Some(type_name) = self.infer_type_name(obj)
+                    && let Some(field_types) = self.type_field_types.get(&type_name)
+                {
+                    for (name, ty) in field_types {
+                        if name == method
+                            && let Some(crate::parser::TypeExpr::Function(_, ret)) = ty
+                            && let crate::parser::TypeExpr::Named(n) = ret.as_ref()
+                            && n == "Float"
+                        {
+                            return true;
+                        }
+                    }
+                }
+                false
+            }
             Expr::BinaryOp(lhs, _, rhs, _) => {
                 // 一方が float なら結果も float
                 self.expr_returns_float(lhs) || self.expr_returns_float(rhs)
