@@ -1348,6 +1348,35 @@ are `.dev/FUTURE_BLOCKERS.md` (post-stable items deliberately
 deferred) and a future `.dev/E*_BLOCKERS.md` (will be created when
 gen-E planning starts).
 
+### 6.8. gen-E rationale and `@e.30` breaking-change manifest (Phase 8 pre-flight)
+
+> **Status**: pre-flight skeleton (E30 Phase 8 完了時点、2026-04-28).
+> Phase 9 GATE で完成。本節は §6.1 の gen bump policy 整合のため
+> Phase 8 で staged。
+
+gen-E は **言語仕様 (`.td`) の破壊的変更** を land する gen 系列。`@e.30`
+(gen-E 最初の stable) は D series 最終 stable (`@d.29`) の後続として、
+型システム surface の構造的統一 + interface 機能 + defaultFn + addon facade
+explicit binding を主軸に scope in する。
+
+Per-item acceptance evidence は `.dev/E30_BLOCKERS.md::E30B-001〜011` を
+single source of truth とする。本節 (`@e.30`) は gen-E の surface-side
+manifest。
+
+主要 breaking change:
+
+- **§1.1 bullet 1 (型システム surface 統一)**: TypeDef / Mold 継承 / Error
+  継承の 3 系統を `Name[?type-args] [=> Parent] = @(...)` 単一構文に統合
+  (E30B-001、Lock-B/F)。
+- **§1.1 bullet 5 (診断コード再定義)**: `[E1407]` umbrella / `[E1410]` 新意味 /
+  `[E1411]` 番号移動 / `[E1412]` 新規 (E30B-008、Lock-B Sub-B3 / Lock-C)。
+- **§1.1 bullet 6 (addon facade 明示 binding)**: `RustAddon["fn"](arity <= N)`
+  形式の facade binding (E30B-007 sub-step B-2、Lock-G)。
+
+Migration tool: `taida upgrade --e30 <PATH>` (旧 `Mold[T] =>` / `Error =>` prefix
+撤廃の AST-driven char-offset rewrite、idempotent)。詳細は `CHANGELOG.md` の
+`@e.30` section §6 参照。
+
 ---
 
 ## 7. Scope note

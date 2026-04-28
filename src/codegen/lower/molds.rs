@@ -638,6 +638,27 @@ impl Lowering {
 
         // Body: materialise the return-type default and return it.
         let result = self.lower_default_for_type_expr(&mut lambda_fn, ret, visiting)?;
+
+        // E30 Phase 8 / E30B-011: propagate the return-type tag so callers
+        // (`CallIndirect` + `taida_get_return_tag`) can render the value
+        // correctly. Without this, `:Bool` defaults (i64 0) lose their tag
+        // at the closure boundary and `.toString()` produces `"0"` instead
+        // of `"false"`. The C runtime helper `taida_set_return_tag`
+        // (`native_runtime/core.c:921`) updates a thread-local tag slot
+        // that the caller reads via `taida_get_return_tag` immediately
+        // after `CallIndirect`.
+        let tag = crate::codegen::tag_prop::type_expr_to_tag(ret);
+        if tag >= 0 {
+            let tag_var = lambda_fn.alloc_var();
+            lambda_fn.push(IrInst::ConstInt(tag_var, tag));
+            let dummy = lambda_fn.alloc_var();
+            lambda_fn.push(IrInst::Call(
+                dummy,
+                "taida_set_return_tag".to_string(),
+                vec![tag_var],
+            ));
+        }
+
         lambda_fn.push(IrInst::Return(result));
 
         self.user_funcs.insert(lambda_name.clone());

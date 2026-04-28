@@ -6,6 +6,7 @@
 // original signatures, bodies, and privacy; only the enclosing file changes.
 
 use super::{Lowering, simple_hash};
+use crate::codegen::ir::IrVar;
 
 impl Lowering {
     pub fn new() -> Self {
@@ -240,5 +241,15 @@ impl Lowering {
 
     pub(super) fn fallback_module_key(path: &str) -> String {
         format!("m{:016x}", simple_hash(path))
+    }
+
+    /// E30 Phase 8 / E30B-011: Register the IR var holding the return-tag
+    /// captured immediately after a callback / closure invocation, so
+    /// downstream tag-aware ops (`taida_to_string_dispatch` /
+    /// `stdout_with_tag`) can render the value with the correct type
+    /// projection. Exposed at `pub(crate)` because `lower_pack_field_call`
+    /// lives in the sibling module `crate::codegen::lower_methods`.
+    pub(crate) fn record_call_return_tag(&mut self, result: IrVar, return_tag: IrVar) {
+        self.return_tag_vars.insert(result, return_tag);
     }
 }

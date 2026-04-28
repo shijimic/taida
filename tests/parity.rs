@@ -38532,17 +38532,14 @@ stdout(result.length().toString())
     assert_backend_parity_for_source(src, "e30b_004_default_fn_str");
 }
 
-// E30B-004 Bool-return defaultFn parity: Native renders `0` while
-// Interpreter / JS render `false`. The synthetic `MakeClosure`-returned
-// value loses Bool tagging at the `CallIndirect` boundary in native
-// codegen — `c.check(0)` materialises a Bool default but `.toString()`
-// observes only the raw i64 (0). This is a Native-side tag-propagation
-// gap, not a defaultFn semantic gap. Tracked as **E30B-011** and
-// deferred to Phase 7+ tag-propagation follow-up; the synthetic
-// `MakeClosure` mechanism itself is correct (Int / Str / TypeDef
-// return types pass parity).
+// E30B-004 Bool-return defaultFn parity (Phase 8 / E30B-011 FIXED):
+// the synthetic `MakeClosure`-returned value now carries the proper
+// `:Bool` tag through `taida_set_return_tag` emitted at the end of the
+// synthetic lambda body (`lower_default_fn_synthetic`). All three
+// backends (Interpreter / JS / Native) render `false` for the Bool
+// default. wasm-wasi shares the native codegen path, so the regression
+// guard applies there too.
 #[test]
-#[ignore = "E30B-011: Native MakeClosure return-tag propagation for Bool toString — Phase 7+ follow-up"]
 fn e30b_004_default_fn_bool_return_three_backend_parity() {
     if !cc_available() {
         eprintln!("SKIP: cc unavailable");
@@ -38575,4 +38572,99 @@ p <= g.build("Rei")
 stdout(p.name.length().toString())
 "#;
     assert_backend_parity_for_source(src, "e30b_004_default_fn_typedef");
+}
+
+// ===========================================================================
+// E30 Phase 8 — 4-backend parity 集約 evidence
+// ---------------------------------------------------------------------------
+// Aggregated parity tests pinning the full E30 unified-class-like surface:
+// E30B-001 (unified syntax: zero-arity sugar / `Mold[T] =>` 撤廃 / 子側型引数追加)
+// + E30B-002 (declare-only fn field 全系統許可)
+// + E30B-003 (`[E1410]` definition-site reject is checker-only, no parity test)
+// + E30B-004 (defaultFn 自動生成、Bool included after E30B-011 fix).
+// E30B-007 explicit binding は addon facade build を必要とするため
+// `tests/e30b_007_addon_explicit_binding.rs` 側で native build pin、
+// 4-backend parity は本 Phase 8 では interpreter / JS / native の
+// stdout 出力 surface に絞る。wasm-wasi は native codegen を共有するため
+// 既存 `cargo test --test wasm_min` / `wasm_wasi` regression guard で baseline 維持。
+// ===========================================================================
+
+#[test]
+fn e30b_phase8_aggregate_unified_zero_arity_three_backend_parity() {
+    if !cc_available() {
+        eprintln!("SKIP: cc unavailable");
+        return;
+    }
+    // E30B-001 Lock-B Sub-B1: zero-arity sugar (`Pilot = @(...)` ≡ `Pilot[] = @(...)`).
+    let src = r#"
+Pilot[] = @(name: Str, age: Int)
+p <= Pilot(name <= "Rei", age <= 14)
+stdout(p.name)
+stdout(p.age.toString())
+"#;
+    assert_backend_parity_for_source(src, "e30b_phase8_aggregate_zero_arity");
+}
+
+#[test]
+fn e30b_phase8_aggregate_unified_class_like_inheritance_three_backend_parity() {
+    if !cc_available() {
+        eprintln!("SKIP: cc unavailable");
+        return;
+    }
+    // E30B-001: legacy class-like inheritance (TypeDef → child via `=>`).
+    // 既存 surface 受理 regression guard (Phase 4 / Phase 6 land の 4-backend
+    // parity を pin する集約)。zero-arity sugar 親 → 子 継承の checker 受理
+    // は Lock-B/Lock-F verdict 範囲ではあるが現実装は legacy `Parent => Child`
+    // (子に prefix-arity なし) のみ受理 — そちらを使って 4-backend parity を
+    // pin する。
+    let src = r#"
+Pilot = @(name: Str)
+Pilot => NervStaff = @(rank: Int)
+ns <= NervStaff(name <= "Rei", rank <= 3)
+stdout(ns.name)
+stdout(ns.rank.toString())
+"#;
+    assert_backend_parity_for_source(src, "e30b_phase8_aggregate_class_like_inh");
+}
+
+#[test]
+fn e30b_phase8_aggregate_declare_only_plus_default_fn_three_backend_parity() {
+    if !cc_available() {
+        eprintln!("SKIP: cc unavailable");
+        return;
+    }
+    // E30B-002 (declare-only fn field 全系統許可) + E30B-004 (defaultFn 自動生成).
+    // class-like variant に declare-only fn field が存在し、未指定の場合に
+    // defaultFn が呼ばれて戻り型 default (Str = "") を返す。`.length()` で
+    // 4-backend pin。Mold / Error variant は既存の e30b_002_*_three_backend_parity
+    // で受理 pin、本 aggregate はそれに重ねて defaultFn 呼び出し parity を確認。
+    let src = r#"
+Pilot = @(name: Str, greet: Str => :Str)
+p <= Pilot(name <= "Rei")
+result <= p.greet("hi")
+stdout(result.length().toString())
+"#;
+    assert_backend_parity_for_source(src, "e30b_phase8_aggregate_declare_only_default");
+}
+
+#[test]
+fn e30b_phase8_aggregate_combined_unified_plus_default_fn_three_backend_parity() {
+    if !cc_available() {
+        eprintln!("SKIP: cc unavailable");
+        return;
+    }
+    // E30B-001 + E30B-002 + E30B-004 集約: zero-arity sugar + declare-only fn
+    // field (Bool 戻り) + defaultFn 自動生成 + E30B-011 修正の Bool tag 伝播。
+    // 4-backend で `false` を render できることを pin する (E30B-011 fix の
+    // 集約 evidence)。Float は JS の `(0.0).toString() === "0"` semantics で
+    // 恒久的 mismatch のため Phase 8 集約からは除外、Int / Str / Bool /
+    // TypeDef return の 4 ケースで E30B-004 全 parity を担保。
+    let src = r#"
+Predicate[] = @(label: Str, check: Int => :Bool)
+p <= Predicate(label <= "any")
+b <= p.check(0)
+stdout(p.label)
+stdout(b.toString())
+"#;
+    assert_backend_parity_for_source(src, "e30b_phase8_aggregate_combined");
 }

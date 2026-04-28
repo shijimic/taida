@@ -11,7 +11,124 @@
   (D29B-001〜017 incl. D29B-014 Phase 0 Lock + D29B-015 follow-up
   + D29B-016 String mutability + D29B-017 runbook archive path).
   Tag push (`@d.Y`) remains user-driven.
+
+  E30 Phase 8 完了時 draft (2026-04-28): @e.30 section skeleton を
+  Phase 9 GATE 直前 user 承認用に staged。E gen 破壊的変更 track の
+  最初のリリース。E30B-001/002/003/004/005/007/008/009/010 FIXED、
+  E30B-011 Native MakeClosure return-tag propagation FIXED (Phase 8)、
+  E30B-006 / E30B-007 sub-step B-5 は Phase 9 GATE で stable 宣言条件
+  か post-stable 送りかを user 判断。
 -->
+
+## @e.30 — gen-E breaking change first release (E30 Phase 8 pre-flight, 2026-04-28)
+
+> **Status: PRE-FLIGHT (Phase 8 集約 evidence DONE → Phase 9 GATE).**
+> Phase 8 終了時点で E30B-001/002/003/004/005/007/008/009/010/011
+> FIXED (10 件)。E30B-006 (graph / pkg facade / LSP / introspection
+> consumer parity)、E30B-007 sub-step B-5 (legacy implicit pre-inject
+> 撤廃 + checker hard-fail diagnostic + 23 sentinel migration TM track
+> 協調) は Phase 9 GATE で **stable 宣言の prerequisite** か **post-stable
+> 送り** かを user 判断する 2 件残。Tag (`@e.30`、build number は user
+> 判断) は user-driven。本セクションは Phase 8 完了時点の skeleton で、
+> Phase 9 GATE で完成させる。
+
+### §1 Scope (gen-E breaking change track first release)
+
+E30 は **gen-E 破壊的変更 track** の最初の major scope。`@d.29` (D series 最終
+stable) の後続として、**型システム surface の構造的統一 + interface 機能 +
+defaultFn + addon facade explicit binding** を land する。E gen 全体は破壊的
+変更を許容する track 群であり、E30 はその先頭で言語仕様 (`.td` ファイル) の
+breaking change を扱う。
+
+### §2 BREAKING CHANGES
+
+- **型システム surface 完全統一** (E30B-001、Lock-B/F): TypeDef / Mold 継承
+  / Error 継承の 3 系統を `Name[?type-args] [=> Parent] = @(...)` 単一構文に
+  統合。AST `Statement::ClassLikeDef` 単一 variant、graph `NodeKind::ClassLikeType`
+  単一 kind。zero-arity sugar (`Pilot = @(...)` ≡ `Pilot[] = @(...)`) 許容、
+  `Mold[T] =>` / `Error =>` prefix 撤廃 (legacy `Mold[T] => Foo[T] = @(...)`
+  / `Error => NotFound = @(...)` は migration tool で書き換え)。
+- **declare-only 関数フィールド全系統許可** (E30B-002): Mold / Error 継承でも
+  declare-only fn field (`fn: Str => :Str` 形式) を許容。
+- **`[E14xx]` 診断コード再定義** (E30B-008、Lock-B Sub-B3 / Lock-C):
+  - `[E1407]`: 「親型適用の arity mismatch (umbrella)」(旧定義 = Mold/Inheritance
+    header 不正は既存 7 site で umbrella 統合)
+  - `[E1410]`: 「declare-only function field requires default function or explicit
+    value」(新意味、Phase 5 land、defaultFn 生成不能型のみ発火)
+  - `[E1411]`: 「InheritanceDef child field redefines parent field with non-compatible
+    type」(旧 [E1410] 意味の番号移動)
+  - `[E1412]`: 「RustAddon binding arity drift / unknown fn / non-facade context」
+    (新規、Phase 7 sub-track B sub-step B-2 land)
+- **`taida upgrade --e30 <PATH>`** (E30B-001 migration tool): 旧 `Mold[T] => Foo[T] = @(...)`
+  prefix を新 `Foo[T] = @(...)` 形に AST-driven char-offset rewrite。--check /
+  --dry-run / default の 3 mode、idempotent。
+- **addon facade explicit binding** (E30B-007 sub-step B-2): `RustAddon["fn"](arity <= N)`
+  形式の facade binding を parser / interpreter / native / wasm-full で land。
+  `arity <= N` drift check + `[E1412]` 発火。**legacy implicit pre-inject の撤廃
+  (sub-step B-5) は TM track 協調セッション送り** (terminal `@b.X+1` migration 後)。
+
+### §3 Added (non-breaking complements)
+
+- **defaultFn 自動生成** (E30B-004、Lock-D): 全関数型に対し戻り型 default value を
+  返す合成 lambda を 4-backend で自動生成 (Interpreter `DEFAULT_FN_SENTINEL_NAME`
+  / JS `__taida_defaultForSchema({ __fn })` arrow / Native `_taida_default_fn_<id>`
+  synthetic IR lambda + `MakeClosure`)。declare-only 関数フィールドの runtime
+  default が空 pack `@()` から defaultFn に置換、PHILOSOPHY.md「全型にデフォルト値
+  保証 / null/undefined 排除」を完全充足。
+- **Native MakeClosure return-tag propagation** (E30B-011、Phase 8 fix):
+  defaultFn synthetic lambda が `taida_set_return_tag` で戻り型 tag を伝播、
+  `taida_pack_call_field<N>` の caller が `taida_get_return_tag` を読み取って
+  `return_tag_vars` に登録。Bool 戻り型 declare-only fn field の `.toString()` が
+  Native でも `"false"` を render (Interpreter / JS と同一)。
+
+### §4 Docs
+
+- 新章 `docs/guide/04_class_like.md` で 3 系統を class-like 単一概念として統一説明
+- migration guide `docs/guide/migration_e30.md` 新規追加
+- `docs/reference/mold_types.md` → `docs/reference/class_like_types.md` rename
+  (`git mv` で履歴保持)
+- 既存 `04_buchi_pack.md` / `05_molding.md` / `08_error_handling.md` を新章へ link 化
+- `docs/reference/diagnostic_codes.md` `[E1407]` umbrella / `[E1410]` 新意味 /
+  `[E1411]` 番号移動 / `[E1412]` 新規 entry
+
+### §5 Tests / Parity Evidence (Phase 8 集約)
+
+- `tests/parity.rs` E30B 3-backend parity tests (Interpreter / JS / Native):
+  E30B-002 受理 4 本、E30B-004 defaultFn 4 本 (Int / Str / Bool / TypeDef
+  すべて GREEN、Bool は Phase 8 / E30B-011 fix)、Phase 8 集約 4 本
+  (zero-arity / class-like inheritance / declare-only + defaultFn /
+  unified + Bool defaultFn 集約)
+- 4-backend (interpreter / JS / native / wasm-wasi) 全 GREEN、wasm-edge /
+  wasm-full は既存 regression guard 維持
+- panic_baseline drift: line shift only、count baseline=2 / observed=2 維持
+- `cargo test --release --tests` 全 PASS
+
+### §6 Migration
+
+旧構文を含む既存 `.td` 資産は `taida upgrade --e30 <PATH>` で migrate:
+
+```sh
+taida upgrade --e30 path/to/file.td --check    # check mode (no rewrite)
+taida upgrade --e30 path/to/file.td --dry-run  # preview rewrite
+taida upgrade --e30 path/to/file.td            # in-place rewrite
+```
+
+addon facade を持つ package (taida-lang/terminal 等) は **TM track 協調セッション**
+で legacy implicit pre-inject 撤廃 + 23 sentinel `RustAddon[...]` 化を実施
+(Phase 9 GATE で stable 宣言条件か post-stable かを user 判断)。
+
+### §7 Stable Gate Acceptance (Phase 9 GATE で user 確認予定)
+
+- E30B-001/002/003/004/005/007/008/009/010/011 FIXED 確認
+- E30B-006 / E30B-007 sub-step B-5 の prerequisite/post-stable 判定
+- 4-backend parity 集約 evidence GREEN (Phase 8 land 済)
+- Docs hygiene 4-grep 0 hit (例外 list 継承)
+- STABILITY § 6 整合 (gen-E gen increment policy)
+- panic_baseline drift line-shift only
+- `cargo test --release --tests` 全 PASS、`cargo clippy -D warnings` clean、
+  `cargo fmt --check` clean
+
+---
 
 ## @d.Y — Stable second release (D29 Phase 9 GATE pre-flight, 2026-04-27)
 
