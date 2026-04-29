@@ -1,4 +1,4 @@
-//! CLI tests for `taida todo`, `taida inspect`, `taida doc`, and feature gate commands.
+//! CLI tests for `taida way todo`, removed `inspect`, `taida doc`, and feature gate commands.
 //!
 //! Groups smaller command tests that do not warrant their own file.
 //!
@@ -10,7 +10,7 @@ use common::{taida_bin, unique_temp_dir, write_file};
 use std::fs;
 use std::process::Command;
 
-// ── taida todo ──
+// ── taida way todo ──
 
 #[test]
 fn test_taida_todo_json_reports_ids_and_stats() {
@@ -23,16 +23,17 @@ c <= TODO[Stub["shape TBD"]](id <= "TASK-2", task <= "third")
     write_file(&dir.join("main.td"), src);
 
     let output = Command::new(taida_bin())
+        .arg("way")
         .arg("todo")
         .arg("--format")
         .arg("json")
         .arg(&dir)
         .output()
-        .expect("failed to run taida todo");
+        .expect("failed to run taida way todo");
 
     assert!(
         output.status.success(),
-        "taida todo should succeed: stderr={}",
+        "taida way todo should succeed: stderr={}",
         String::from_utf8_lossy(&output.stderr)
     );
 
@@ -62,7 +63,7 @@ c <= TODO[Stub["shape TBD"]](id <= "TASK-2", task <= "third")
 #[test]
 fn test_rc5d_todo_invalid_format_errors() {
     let output = Command::new(taida_bin())
-        .args(["todo", "--format", "csv", "."])
+        .args(["way", "todo", "--format", "csv", "."])
         .output()
         .expect("todo with invalid format");
     assert!(!output.status.success());
@@ -77,7 +78,7 @@ fn test_rc5d_todo_invalid_format_errors() {
 #[test]
 fn test_rc5_todo_format_missing_value_errors() {
     let output = Command::new(taida_bin())
-        .args(["todo", "--format"])
+        .args(["way", "todo", "--format"])
         .output()
         .expect("todo --format with no value");
     assert!(!output.status.success());
@@ -89,65 +90,19 @@ fn test_rc5_todo_format_missing_value_errors() {
     );
 }
 
-// ── taida inspect ──
+// ── taida inspect removed in E31 ──
 
 #[test]
-fn test_rc5c_inspect_invalid_format_errors() {
+fn test_e31_inspect_removed_with_e1700() {
     let output = Command::new(taida_bin())
         .args(["inspect", "--format", "yaml", "examples/01_hello.td"])
         .output()
-        .expect("inspect with invalid format");
-    assert!(!output.status.success());
+        .expect("inspect removed command");
+    assert_eq!(output.status.code(), Some(2));
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("Unknown format 'yaml'"),
-        "should mention unknown format, got: {}",
-        stderr
-    );
-}
-
-#[test]
-fn test_rc5c_inspect_valid_formats_accepted() {
-    for fmt in &["text", "json", "sarif"] {
-        let output = Command::new(taida_bin())
-            .args(["inspect", "--format", fmt, "examples/01_hello.td"])
-            .output()
-            .unwrap_or_else(|_| panic!("inspect --format {} should run", fmt));
-        assert!(
-            output.status.success(),
-            "inspect --format {} should succeed, stderr: {}",
-            fmt,
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
-}
-
-#[test]
-fn test_rc5c_inspect_missing_path_errors() {
-    let output = Command::new(taida_bin())
-        .arg("inspect")
-        .output()
-        .expect("inspect with no path");
-    assert!(!output.status.success());
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("Missing <PATH>"),
-        "should mention missing PATH, got: {}",
-        stderr
-    );
-}
-
-#[test]
-fn test_rc5_inspect_format_missing_value_errors() {
-    let output = Command::new(taida_bin())
-        .args(["inspect", "--format"])
-        .output()
-        .expect("inspect --format with no value");
-    assert!(!output.status.success());
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("Missing value for --format"),
-        "should mention missing value, got: {}",
+        stderr.contains("[E1700]") && stderr.contains("taida graph summary"),
+        "should mention E1700 graph summary migration, got: {}",
         stderr
     );
 }

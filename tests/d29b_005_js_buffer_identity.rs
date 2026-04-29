@@ -99,16 +99,16 @@ fn tempdir(name: &str) -> PathBuf {
     dir
 }
 
-/// Build the .td fixture into a JS module via `taida build --target js`.
+/// Build the .td fixture into a JS module via `taida build js`.
 /// The Taida source emits `writeChunk(writer, payload)` for a Bytes payload.
 fn build_js(td_path: &std::path::Path, out_js: &std::path::Path) -> bool {
     let out = Command::new(taida_bin())
-        .args(["build", "--target", "js"])
+        .args(["build", "js"])
         .arg(td_path)
         .arg("-o")
         .arg(out_js)
         .output()
-        .expect("spawn taida build --target js");
+        .expect("spawn taida build js");
     if !out.status.success() {
         eprintln!("js build failed:\n{}", String::from_utf8_lossy(&out.stderr));
         return false;
@@ -129,7 +129,7 @@ fn write_wrapper(emitted_js: &std::path::Path, wrapper_js: &std::path::Path) {
 // D29B-005 Track-η Phase 6 (Lock-Phase6-E E-2): test-only socket.write monkey
 // patch. Captures every payload object identity so the test can verify that
 // writeChunk(writer, bytes) reaches sock.write as a Uint8Array (no copy).
-// `taida build --target js` emits an ES module (.mjs) that already imports
+// `taida build js` emits an ES module (.mjs) that already imports
 // `net` at the top, so we must use the dynamic import form here rather than
 // require(). The patched function intercepts every Socket.prototype.write.
 import * as __d29b005_net from 'net';
@@ -283,7 +283,7 @@ stdout(r.requests)
     std::fs::write(&td, src).expect("write server.td");
     let emitted = dir.join("server.mjs");
     if !build_js(&td, &emitted) {
-        panic!("taida build --target js failed");
+        panic!("taida build js failed");
     }
     let wrapper = dir.join("wrapper.mjs");
     write_wrapper(&emitted, &wrapper);

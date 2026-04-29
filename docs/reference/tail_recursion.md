@@ -305,7 +305,7 @@ error [E1614]: Mutual recursion in non-tail position: emptyDomNode -> emptyNodes
 
 #### 検出ロジック
 
-1. `taida check` / `taida build` / `taida verify` は、プログラムから**コールグラフ**（`GraphView::Call`）を抽出する。
+1. `taida way check` / `taida build` / `taida way verify` は、プログラムから**コールグラフ**（`GraphView::Call`）を抽出する。
 2. DFS による `query::find_cycles` で関数間の循環を列挙する。
 3. サイクルに含まれる 2 関数以上のノードごとに、**呼び出し元の AST を走査し末尾位置判定を行う**（`src/graph/tail_pos.rs::collect_call_sites`）。末尾位置の規則は上記「末尾位置とは」と同一。
 4. サイクル上のいずれかのエッジに**非末尾**呼び出しが存在すれば `[E1614]` を発行してコンパイルを停止する。

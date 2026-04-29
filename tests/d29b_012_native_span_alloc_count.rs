@@ -117,12 +117,12 @@ fn fixture_path() -> PathBuf {
 
 fn build_native(src: &Path, bin: &Path) -> bool {
     let out = Command::new(taida_bin())
-        .args(["build", "--target", "native"])
+        .args(["build", "native"])
         .arg(src)
         .arg("-o")
         .arg(bin)
         .output()
-        .expect("spawn taida build --target native");
+        .expect("spawn taida build native");
     if !out.status.success() {
         eprintln!(
             "native build failed:\n{}",
@@ -204,7 +204,7 @@ fn d29b_012_valgrind_alloc_free_balanced() {
     let dir = tempdir("balance");
     let bin = dir.join("server.bin");
     if !build_native(&fx, &bin) {
-        panic!("taida build --target native failed for {}", fx.display());
+        panic!("taida build native failed for {}", fx.display());
     }
 
     let log_path = dir.join("valgrind.log");

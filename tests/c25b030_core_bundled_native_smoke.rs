@@ -1,4 +1,4 @@
-//! C25B-030 Phase 1D: regression guard for `taida build --target native`
+//! C25B-030 Phase 1D: regression guard for `taida build native`
 //! acceptance of core-bundled packages.
 //!
 //! Background: C25B-030 redefined addon backend policy so `Interpreter`
@@ -51,7 +51,7 @@ fn unique_temp_dir(label: &str) -> PathBuf {
     dir
 }
 
-/// Compile `source` with `taida build --target native` and return
+/// Compile `source` with `taida build native` and return
 /// whether the compile step itself succeeded. The produced binary is
 /// discarded — we only verify the native backend accepts the program.
 fn native_build_succeeds(source: &str, label: &str) -> bool {
@@ -62,13 +62,12 @@ fn native_build_succeeds(source: &str, label: &str) -> bool {
 
     let output = Command::new(taida_bin())
         .arg("build")
-        .arg("--target")
         .arg("native")
         .arg(&td_path)
         .arg("-o")
         .arg(&bin_path)
         .output()
-        .expect("spawn taida build --target native");
+        .expect("spawn taida build native");
 
     let ok = output.status.success();
     if !ok {

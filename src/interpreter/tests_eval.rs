@@ -2638,8 +2638,8 @@ p.y.hasValue"#,
     /// E30B-007 sub-step B-5 / Lock-G Sub-G4 (2026-04-28): inside an
     /// addon facade load context, a **bare reference** to a manifest
     /// function (without `RustAddon["..."]` binding) must reject with
-    /// `[E1413]` and a migration hint pointing to the explicit binding
-    /// form. This is the legacy implicit pre-inject removal verdict.
+    /// `[E1413]` and a hint pointing to the explicit binding form. This
+    /// is the legacy implicit pre-inject removal verdict.
     #[test]
     fn test_e30b_007_b5_legacy_bare_reference_rejects_with_e1413() {
         let mut interp = Interpreter::new();
@@ -2665,8 +2665,8 @@ p.y.hasValue"#,
             msg
         );
         assert!(
-            msg.contains("taida upgrade --e30") || msg.contains("upgrade"),
-            "diagnostic must reference the migration tool, got: {}",
+            msg.contains("update the facade manually"),
+            "diagnostic must avoid removed migration tooling, got: {}",
             msg
         );
         assert!(

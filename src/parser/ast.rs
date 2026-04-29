@@ -188,7 +188,7 @@ impl ClassLikeDef {
         matches!(self.kind, ClassLikeKind::BuchiPack)
     }
 
-    /// E30 migration tool 専用: 本 ClassLikeDef が migrate 対象の旧構文か判定する。
+    /// E30 legacy-form detector: 本 ClassLikeDef が旧構文か判定する。
     ///
     /// E30 Phase 0 Lock-B verdict に従い、以下を旧構文として扱う:
     /// - `Mold[T] => Foo[T] = @(...)` 形式 (`ClassLikeKind::Mold`) — 新構文では
@@ -201,12 +201,12 @@ impl ClassLikeDef {
     /// - `Error => NotFound = @(...)` (Lock-B Sub-B2 で「prefix 撤廃」 = 必須でなくなる、
     ///   撤廃 ≠ 禁止。Error 継承構文は新仕様でも保持される)
     ///
-    /// 用途: `taida upgrade --e30` migration tool の旧構文検出 hook。
+    /// 用途: 旧構文診断 / compatibility audit hook。
     pub fn is_legacy_e30_syntax(&self) -> bool {
         matches!(self.kind, ClassLikeKind::Mold { .. })
     }
 
-    /// E30 migration tool 用 表示ラベル。
+    /// E30 legacy-form 表示ラベル。
     ///
     /// `is_legacy_e30_syntax()` が true のときに、旧構文の category 名を
     /// 返す (dry-run 出力 / diagnostic 用)。

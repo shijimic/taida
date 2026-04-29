@@ -2,7 +2,7 @@
 
 //! C17-5: shared mock HTTP server for installer integration tests.
 //!
-//! Serves two endpoints that `taida install` talks to:
+//! Serves two endpoints that `taida ingot install` talks to:
 //!
 //! - `GET /<org>/<name>/archive/refs/tags/<version>.tar.gz`
 //!   -> returns the currently-registered tarball bytes.

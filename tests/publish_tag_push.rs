@@ -1,12 +1,12 @@
-//! C14-1: `taida publish` tag-push-only integration tests.
+//! C14-1: `taida ingot publish` tag-push-only integration tests.
 //!
-//! These tests pin the new CLI contract that `taida publish` is a
+//! These tests pin the new CLI contract that `taida ingot publish` is a
 //! tag-only command:
 //!
 //! - `--dry-run` prints a deterministic plan and makes no git changes.
 //! - Real publish creates exactly one tag on `origin` and pushes it —
 //!   no commit on `main`, no `gh release create`.
-//! - `taida publish` exits immediately after the tag push (does not
+//! - `taida ingot publish` exits immediately after the tag push (does not
 //!   wait for CI).
 //!
 //! The tests use a bare local repo accessed via `insteadOf` so
@@ -118,10 +118,10 @@ fn dry_run_prints_plan_and_makes_no_git_changes() {
 
     let output = Command::new(taida_bin())
         .env("TAIDA_PUBLISH_SKIP_GH_AUTH", "1")
-        .args(["publish", "--dry-run"])
+        .args(["ingot", "publish", "--dry-run"])
         .current_dir(&project)
         .output()
-        .expect("taida publish --dry-run");
+        .expect("taida ingot publish --dry-run");
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
@@ -169,10 +169,10 @@ fn real_publish_pushes_tag_and_exits() {
 
     let output = Command::new(taida_bin())
         .env("TAIDA_PUBLISH_SKIP_GH_AUTH", "1")
-        .args(["publish"])
+        .args(["ingot", "publish"])
         .current_dir(&project)
         .output()
-        .expect("taida publish");
+        .expect("taida ingot publish");
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
@@ -218,7 +218,7 @@ fn real_publish_pushes_tag_and_exits() {
 
 #[test]
 fn real_publish_does_not_push_main() {
-    // Regression gate: the old `taida publish` used `git push origin
+    // Regression gate: the old `taida ingot publish` used `git push origin
     // HEAD --follow-tags` which would be blocked by protected `main`.
     // The new flow only pushes `refs/tags/<tag>`, so HEAD on the bare
     // remote must be whatever main was before publish, unchanged.
@@ -230,10 +230,10 @@ fn real_publish_does_not_push_main() {
 
     let output = Command::new(taida_bin())
         .env("TAIDA_PUBLISH_SKIP_GH_AUTH", "1")
-        .args(["publish"])
+        .args(["ingot", "publish"])
         .current_dir(&project)
         .output()
-        .expect("taida publish");
+        .expect("taida ingot publish");
     assert!(
         output.status.success(),
         "publish failed:\nstdout: {}\nstderr: {}",
@@ -260,7 +260,7 @@ fn removed_cli_flags_are_rejected_with_migration_hint() {
     // --target rust-addon
     let out = Command::new(taida_bin())
         .env("TAIDA_PUBLISH_SKIP_GH_AUTH", "1")
-        .args(["publish", "--target", "rust-addon"])
+        .args(["ingot", "publish", "--target", "rust-addon"])
         .current_dir(&project)
         .output()
         .expect("run");
@@ -275,7 +275,7 @@ fn removed_cli_flags_are_rejected_with_migration_hint() {
     // --dry-run=plan
     let out = Command::new(taida_bin())
         .env("TAIDA_PUBLISH_SKIP_GH_AUTH", "1")
-        .args(["publish", "--dry-run=plan"])
+        .args(["ingot", "publish", "--dry-run=plan"])
         .current_dir(&project)
         .output()
         .expect("run");
@@ -290,7 +290,7 @@ fn removed_cli_flags_are_rejected_with_migration_hint() {
     // --dry-run=build
     let out = Command::new(taida_bin())
         .env("TAIDA_PUBLISH_SKIP_GH_AUTH", "1")
-        .args(["publish", "--dry-run=build"])
+        .args(["ingot", "publish", "--dry-run=build"])
         .current_dir(&project)
         .output()
         .expect("run");
@@ -309,7 +309,7 @@ fn dirty_worktree_is_rejected() {
 
     let output = Command::new(taida_bin())
         .env("TAIDA_PUBLISH_SKIP_GH_AUTH", "1")
-        .args(["publish", "--dry-run"])
+        .args(["ingot", "publish", "--dry-run"])
         .current_dir(&project)
         .output()
         .expect("run");
@@ -336,7 +336,7 @@ fn second_publish_uses_api_diff_for_next_version() {
     // Round 1: initial publish.
     let out = Command::new(taida_bin())
         .env("TAIDA_PUBLISH_SKIP_GH_AUTH", "1")
-        .args(["publish"])
+        .args(["ingot", "publish"])
         .current_dir(&project)
         .output()
         .expect("publish 1");
@@ -361,7 +361,7 @@ fn second_publish_uses_api_diff_for_next_version() {
 
     let out = Command::new(taida_bin())
         .env("TAIDA_PUBLISH_SKIP_GH_AUTH", "1")
-        .args(["publish", "--dry-run"])
+        .args(["ingot", "publish", "--dry-run"])
         .current_dir(&project)
         .output()
         .expect("publish 2 dry-run");
@@ -386,7 +386,7 @@ fn breaking_change_bumps_generation() {
     // Round 1.
     let out = Command::new(taida_bin())
         .env("TAIDA_PUBLISH_SKIP_GH_AUTH", "1")
-        .args(["publish"])
+        .args(["ingot", "publish"])
         .current_dir(&project)
         .output()
         .expect("publish 1");
@@ -410,7 +410,7 @@ fn breaking_change_bumps_generation() {
 
     let out = Command::new(taida_bin())
         .env("TAIDA_PUBLISH_SKIP_GH_AUTH", "1")
-        .args(["publish", "--dry-run"])
+        .args(["ingot", "publish", "--dry-run"])
         .current_dir(&project)
         .output()
         .expect("publish 2 dry-run");

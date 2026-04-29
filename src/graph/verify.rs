@@ -5,6 +5,7 @@ use super::extract::GraphExtractor;
 use super::model::*;
 use super::query;
 use super::tail_pos;
+use crate::diagnostics::split_diag_code_and_hint;
 use crate::module_graph;
 use crate::parser::*;
 use serde_json::json;
@@ -72,11 +73,6 @@ impl VerifyReport {
         }
     }
 
-    pub fn passed(&self) -> usize {
-        // Checks that had no findings
-        0 // Calculated externally
-    }
-
     pub fn errors(&self) -> usize {
         self.findings
             .iter()
@@ -121,7 +117,7 @@ impl VerifyReport {
 
         out.push_str(&format!(
             "\nResults: {} passed, {} warnings, {} errors\n",
-            checks_run.len() - findings_by_check.len(),
+            passed_count(checks_run, &findings_by_check),
             self.warnings(),
             self.errors()
         ));
@@ -379,35 +375,14 @@ impl VerifyReport {
     }
 }
 
-fn split_diag_code_and_hint(message: &str) -> (Option<String>, Option<String>) {
-    let code = if let Some(rest) = message.strip_prefix('[') {
-        if rest.len() >= 6 {
-            let code_candidate = &rest[..5];
-            let close = rest.as_bytes()[5];
-            if close == b']'
-                && code_candidate.len() == 5
-                && code_candidate.as_bytes()[0].is_ascii_uppercase()
-                && code_candidate.as_bytes()[1..]
-                    .iter()
-                    .all(|c| c.is_ascii_digit())
-            {
-                Some(code_candidate.to_string())
-            } else {
-                None
-            }
-        } else {
-            None
-        }
-    } else {
-        None
-    };
-
-    let suggestion = message
-        .split_once("Hint:")
-        .map(|(_, hint)| hint.trim().to_string())
-        .filter(|hint| !hint.is_empty());
-
-    (code, suggestion)
+fn passed_count(
+    checks_run: &[&str],
+    findings_by_check: &std::collections::HashMap<String, Vec<&VerifyFinding>>,
+) -> usize {
+    checks_run
+        .iter()
+        .filter(|check| !findings_by_check.keys().any(|key| key == *check))
+        .count()
 }
 
 /// Available verification checks.
@@ -420,7 +395,6 @@ pub const ALL_CHECKS: &[&str] = &[
     "unchecked-division",
     "direction-constraint",
     "unchecked-lax",
-    "naming-convention",
 ];
 
 /// Run a specific verification check.
@@ -763,7 +737,7 @@ fn scan_stmt_for_direction(stmt: &Statement, file: &str, findings: &mut Vec<Veri
                 findings.push(VerifyFinding {
                     check: "direction-constraint".to_string(),
                     severity: Severity::Error,
-                    message: "E0301: Single-direction constraint violation \u{2014} => and <= must not be mixed in the same statement".to_string(),
+                    message: "[E0301] 単一方向制約違反 — 一つの文内で => と <= を混在させることはできません".to_string(),
                     file: Some(file.to_string()),
                     line: Some(assign.span.line),
                 });
@@ -778,7 +752,7 @@ fn scan_stmt_for_direction(stmt: &Statement, file: &str, findings: &mut Vec<Veri
                 findings.push(VerifyFinding {
                     check: "direction-constraint".to_string(),
                     severity: Severity::Error,
-                    message: "E0301: Single-direction constraint violation \u{2014} => and <= must not be mixed in the same statement".to_string(),
+                    message: "[E0301] 単一方向制約違反 — 一つの文内で => と <= を混在させることはできません".to_string(),
                     file: Some(file.to_string()),
                     line: Some(expr.span().line),
                 });
@@ -797,7 +771,7 @@ fn scan_stmt_for_direction(stmt: &Statement, file: &str, findings: &mut Vec<Veri
                 findings.push(VerifyFinding {
                     check: "direction-constraint".to_string(),
                     severity: Severity::Error,
-                    message: "E0302: Single-direction constraint violation \u{2014} ]=> and <=[ must not be mixed in the same statement".to_string(),
+                    message: "[E0302] 単一方向制約違反 — 一つの文内で ]=> と <=[ を混在させることはできません".to_string(),
                     file: Some(file.to_string()),
                     line: Some(uf.span.line),
                 });
@@ -815,7 +789,7 @@ fn scan_stmt_for_direction(stmt: &Statement, file: &str, findings: &mut Vec<Veri
                 findings.push(VerifyFinding {
                     check: "direction-constraint".to_string(),
                     severity: Severity::Error,
-                    message: "E0302: Single-direction constraint violation \u{2014} ]=> and <=[ must not be mixed in the same statement".to_string(),
+                    message: "[E0302] 単一方向制約違反 — 一つの文内で ]=> と <=[ を混在させることはできません".to_string(),
                     file: Some(file.to_string()),
                     line: Some(ub.span.line),
                 });
@@ -1915,6 +1889,23 @@ mod tests {
     }
 
     #[test]
+    fn test_format_jsonl_extracts_legacy_colon_code() {
+        let mut report = VerifyReport::new();
+        report.add(VerifyFinding {
+            check: "direction-constraint".to_string(),
+            severity: Severity::Error,
+            message: "E0301: 単一方向制約違反".to_string(),
+            file: None,
+            line: None,
+        });
+
+        let jsonl = report.format_jsonl(&["direction-constraint"]);
+        let first: serde_json::Value = serde_json::from_str(jsonl.lines().next().unwrap_or("{}"))
+            .expect("jsonl first line should be valid json");
+        assert_eq!(first["code"], "E0301");
+    }
+
+    #[test]
     fn test_dead_code_truly_unused() {
         // A truly unused function should be dead code
         let program = parse_source("unused x =\n  x + 1\nresult <= 42");
@@ -2411,10 +2402,10 @@ outer input =
     }
 
     #[test]
-    fn test_naming_in_all_checks() {
+    fn test_naming_not_in_all_checks() {
         assert!(
-            ALL_CHECKS.contains(&"naming-convention"),
-            "naming-convention should be in ALL_CHECKS"
+            !ALL_CHECKS.contains(&"naming-convention"),
+            "naming-convention belongs to `taida way lint`, not `taida way verify`"
         );
     }
 

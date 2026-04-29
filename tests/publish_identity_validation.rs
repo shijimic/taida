@@ -1,6 +1,6 @@
 //! C14-1 identity validation tests.
 //!
-//! `taida publish` requires the manifest to declare a qualified
+//! `taida ingot publish` requires the manifest to declare a qualified
 //! `owner/name` identity via `<<<@version owner/name`. Bare names (that
 //! fall back to the directory name) must be rejected.
 
@@ -82,7 +82,7 @@ fn bare_identity_is_rejected() {
     let project = setup_with_manifest(&root, "demo-pkg", "<<<@a.1\n");
 
     let output = Command::new(taida_bin())
-        .args(["publish", "--dry-run"])
+        .args(["ingot", "publish", "--dry-run"])
         .current_dir(&project)
         .output()
         .expect("run");
@@ -107,7 +107,7 @@ fn qualified_identity_is_accepted() {
     let project = setup_with_manifest(&root, "demo-pkg", "<<<@a.1 alice/demo-pkg\n");
 
     let output = Command::new(taida_bin())
-        .args(["publish", "--dry-run"])
+        .args(["ingot", "publish", "--dry-run"])
         .current_dir(&project)
         .output()
         .expect("run");
@@ -157,7 +157,7 @@ fn identity_mismatch_with_remote_is_rejected() {
     run_git(&["push", "-u", "origin", "main"], &project);
 
     let out = Command::new(taida_bin())
-        .args(["publish", "--dry-run"])
+        .args(["ingot", "publish", "--dry-run"])
         .current_dir(&project)
         .output()
         .expect("run");
@@ -201,7 +201,7 @@ fn non_github_remote_is_rejected() {
     run_git(&["push", "-u", "origin", "main"], &project);
 
     let out = Command::new(taida_bin())
-        .args(["publish", "--dry-run"])
+        .args(["ingot", "publish", "--dry-run"])
         .current_dir(&project)
         .output()
         .expect("run");

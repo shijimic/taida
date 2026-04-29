@@ -56,8 +56,8 @@
   いるわけではない。`naming_conventions.md` 末尾の Versioning 節 / `operators.md` の `>>>` / `<<<` モジュール演算子節が該当。
 - **CLI フラグの構文例** (`docs/reference/cli.md` `--version <VERSION>` / `<<<@a.1` 形式):
   `--version @b.10.rc2`, `<<<@a.1 owner/name`, `@gen.num` 等は flag / 識別子構文を
-  示すサンプル。実在 release への参照ではない。`taida publish` / `taida cache`
-  / `taida install` の章が該当。
+  示すサンプル。実在 release への参照ではない。`taida ingot publish` / `taida ingot cache`
+  / `taida ingot install` の章が該当。
 - **package version 構文サンプル** (`docs/reference/standard_library.md`
   の crypto 例 / `docs/guide/10_modules.md` の packages.tdm 章 /
   `docs/guide/13_creating_addons.md` の `packages.tdm` migration ステップ):

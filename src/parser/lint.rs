@@ -183,7 +183,7 @@ fn classify_field_value(value: &Expr) -> Option<bool> {
         | Expr::BinaryOp(..)
         | Expr::UnaryOp(..) => Some(false),
         // Field access usually yields data; treat as non-function for
-        // the lint heuristic (keeps us aligned with upgrade_d28).
+        // the lint heuristic.
         Expr::FieldAccess(..) => Some(false),
         // Everything else is conservatively ambiguous.
         _ => None,

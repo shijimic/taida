@@ -1926,6 +1926,22 @@ fn test_arity_check_normal_call_too_many_args() {
 }
 
 #[test]
+fn test_call_argument_limit_rejects_tag_frame_overflow() {
+    let args = std::iter::repeat_n("1", 257).collect::<Vec<_>>().join(", ");
+    let source = format!("result <= dynamic({})", args);
+    let (_, errors) = check(&source);
+    assert!(
+        errors.iter().any(|e| {
+            e.message.contains("[E1301]")
+                && e.message.contains("at most 256 argument")
+                && e.message.contains("tag propagation is capped")
+        }),
+        "Expected E1301 for tag frame overflow, got: {:?}",
+        errors
+    );
+}
+
+#[test]
 fn test_arity_check_partial_with_holes() {
     // C-4b: Partial application with holes should not trigger arity errors
     // `add(, )` — 2 holes for 2-param function, valid partial application

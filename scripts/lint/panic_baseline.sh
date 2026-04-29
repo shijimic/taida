@@ -14,8 +14,8 @@
 # Baseline rationale (2026-04-26 audit, Round 1 wB):
 #   The contract initially assumed production `panic!` count was 0. Direct grep
 #   over `src/graph/` and `src/addon/` confirmed 0 there, but a full-tree audit
-#   discovered 2 invariant-violation `BUG:` panics in unrelated modules:
-#     - src/codegen/driver.rs (IR-cache invariant in incremental fuse path)
+#   discovered 2 invariant-violation `BUG:` panics in unrelated modules.
+#   E31 removed the src/codegen/driver.rs panic, leaving only:
 #     - src/parser/ast.rs     (`body_expr()` precondition on AST arm)
 #   These are intentional internal-invariant panics (precondition violations
 #   that signal a compiler bug, not user-input failures), allowed by D28B-020's
@@ -45,7 +45,6 @@ set -euo pipefail
 # Each entry is `path:line` relative to the repo root, sorted ascending.
 # Update only with explicit user verdict (D28B-020 maintenance entry).
 PANIC_BASELINE=(
-  "src/codegen/driver.rs:1228"
   "src/parser/ast.rs:564"
 )
 PANIC_BASELINE_COUNT=${#PANIC_BASELINE[@]}

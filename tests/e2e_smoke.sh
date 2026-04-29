@@ -99,14 +99,14 @@ echo ""
 # =========================================================================
 echo "=== Section 2: Type-Check Examples ==="
 
-# Use `taida check` (parse + typecheck only, no execution) so that server /
+# Use `taida way check` (parse + typecheck only, no execution) so that server /
 # interactive / network-bound examples like `httpServe(...)` /
 # `wsReceive(...)` / raw-mode terminal fixtures cannot hang the smoke job
 # waiting for I/O. The previous form `$TAIDA "$td_file"` actually executed
 # the file — that conflated typecheck with run and required a per-fixture
 # skip list (kept symmetric with WASI_SKIP_STEMS / FULL_SKIP_STEMS) that
 # rotted every time a new server / interactive example landed (most
-# recently the D28B-017/018 set). `taida check` finishes in O(ms) for
+# recently the D28B-017/018 set). `taida way check` finishes in O(ms) for
 # every example regardless of what runtime I/O it would trigger.
 #
 # Known-broken legacy fixtures (kept matching the same exclusion list used
@@ -127,10 +127,10 @@ for td_file in "$PROJECT_DIR"/examples/*.td; do
     continue
   fi
 
-  if $TAIDA check "$td_file" >/dev/null 2>&1; then
+  if $TAIDA way check "$td_file" >/dev/null 2>&1; then
     typecheck_pass=$((typecheck_pass + 1))
   else
-    fail "typecheck: $basename (taida check failed)"
+    fail "typecheck: $basename (taida way check failed)"
     typecheck_fail=$((typecheck_fail + 1))
   fi
 done
@@ -160,7 +160,7 @@ echo ""
 # =========================================================================
 echo "=== Section 4: Verify Command ==="
 
-verify_output=$($TAIDA verify "$PROJECT_DIR/examples/01_hello.td" 2>/dev/null)
+verify_output=$($TAIDA way verify "$PROJECT_DIR/examples/01_hello.td" 2>/dev/null)
 if echo "$verify_output" | grep -q "passed"; then
   pass "verify command runs successfully"
 else
@@ -168,7 +168,7 @@ else
 fi
 
 # Test specific check
-verify_check=$($TAIDA verify --check error-coverage "$PROJECT_DIR/examples/08_error_handling.td" 2>/dev/null)
+verify_check=$($TAIDA way verify --check error-coverage "$PROJECT_DIR/examples/08_error_handling.td" 2>/dev/null)
 if echo "$verify_check" | grep -q "PASS"; then
   pass "verify --check error-coverage"
 else
@@ -207,20 +207,20 @@ else
 fi
 rm -f "$graph_tmp"
 
-# Test verify --format sarif
-sarif_output=$($TAIDA verify --format sarif "$PROJECT_DIR/examples/04_functions.td" 2>/dev/null)
+# Test way verify --format sarif
+sarif_output=$($TAIDA way verify --format sarif "$PROJECT_DIR/examples/04_functions.td" 2>/dev/null)
 if echo "$sarif_output" | grep -q '"version": "2.1.0"'; then
-  pass "verify --format sarif"
+  pass "way verify --format sarif"
 else
-  fail "verify --format sarif" "$sarif_output"
+  fail "way verify --format sarif" "$sarif_output"
 fi
 
-# Test inspect command
-inspect_output=$($TAIDA inspect "$PROJECT_DIR/examples/04_functions.td" 2>/dev/null)
-if echo "$inspect_output" | grep -q "Structural Summary" && echo "$inspect_output" | grep -q "Verification"; then
-  pass "inspect command"
+# Test graph summary command
+summary_output=$($TAIDA graph summary "$PROJECT_DIR/examples/04_functions.td" 2>/dev/null)
+if echo "$summary_output" | grep -q '"version": "1.0"' && ! echo "$summary_output" | grep -q '"verification"'; then
+  pass "graph summary command"
 else
-  fail "inspect command" "$inspect_output"
+  fail "graph summary command" "$summary_output"
 fi
 
 echo ""
@@ -287,7 +287,7 @@ if command -v node >/dev/null 2>&1; then
     basename=$(basename "$td_file" .td)
 
     # Build JS (single-file mode)
-    if ! $TAIDA build --target js "$td_file" -o "$TMPDIR_JS/${basename}.js" >/dev/null 2>&1; then
+    if ! $TAIDA build js "$td_file" -o "$TMPDIR_JS/${basename}.js" >/dev/null 2>&1; then
       fail "js-build: $basename (build failed)"
       js_fail=$((js_fail + 1))
       continue
@@ -295,7 +295,7 @@ if command -v node >/dev/null 2>&1; then
 
     # For module example, also build the module
     if [ "$basename" = "09_modules" ]; then
-      $TAIDA build --target js "$PROJECT_DIR/examples/module_utils.td" -o "$TMPDIR_JS/module_utils.mjs" >/dev/null 2>&1 || true
+      $TAIDA build js "$PROJECT_DIR/examples/module_utils.td" -o "$TMPDIR_JS/module_utils.mjs" >/dev/null 2>&1 || true
     fi
 
     # Execute with node
@@ -359,7 +359,7 @@ if command -v node >/dev/null 2>&1; then
     fi
 
     # Build JS (single-file mode)
-    if ! $TAIDA build --target js "$td_file" -o "$TMPDIR_JS/${extra_td}.js" >/dev/null 2>&1; then
+    if ! $TAIDA build js "$td_file" -o "$TMPDIR_JS/${extra_td}.js" >/dev/null 2>&1; then
       fail "js-build: $extra_td (build failed)"
       js_fail=$((js_fail + 1))
       continue
@@ -454,7 +454,7 @@ if command -v node >/dev/null 2>&1; then
   sem_run_js() {
     local src="$1"
     local jsf="$TMPDIR_SEM/sem_test_${RANDOM}_$$.js"
-    if ! echo "$src" | $TAIDA build --target js /dev/stdin -o "$jsf" >/dev/null 2>&1; then
+    if ! echo "$src" | $TAIDA build js /dev/stdin -o "$jsf" >/dev/null 2>&1; then
       echo "BUILD_ERROR"
       return
     fi
@@ -784,7 +784,7 @@ if command -v node >/dev/null 2>&1; then
     local tmpf="$TMPDIR_LAX/js_$RANDOM.td"
     local jsf="$TMPDIR_LAX/js_$RANDOM.js"
     echo "$1" > "$tmpf"
-    if ! $TAIDA build --target js "$tmpf" -o "$jsf" >/dev/null 2>&1; then
+    if ! $TAIDA build js "$tmpf" -o "$jsf" >/dev/null 2>&1; then
       echo "BUILD_ERROR"
       return
     fi

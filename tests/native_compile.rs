@@ -18,7 +18,6 @@ fn compile_and_run(td_path: &Path) -> Option<String> {
     // Compile (no global lock needed -- FL-7 ensures unique .o paths)
     let compile_output = Command::new(taida_bin())
         .arg("build")
-        .arg("--target")
         .arg("native")
         .arg(td_path)
         .arg("-o")
@@ -248,13 +247,12 @@ fn test_native_stream_example_is_explicitly_rejected() {
 
     let output = Command::new(taida_bin())
         .arg("build")
-        .arg("--target")
         .arg("native")
         .arg(&td_path)
         .arg("-o")
         .arg(&binary_path)
         .output()
-        .expect("build --target native compile_stream");
+        .expect("build native compile_stream");
 
     let _ = fs::remove_file(&binary_path);
 
@@ -919,7 +917,6 @@ stdout(result)
     let binary_path = dir.join("main_native");
     let compile_output = Command::new(taida_bin())
         .arg("build")
-        .arg("--target")
         .arg("native")
         .arg(&main_path)
         .arg("-o")

@@ -18,7 +18,7 @@ use std::process::Command;
 /// Compile a .td file with wasm-full and return the error message (or None on success).
 fn compile_wasm_full(td_path: &Path, wasm_path: &Path) -> Option<String> {
     let output = Command::new(taida_bin())
-        .args(["build", "--target", "wasm-full"])
+        .args(["build", "wasm-full"])
         .arg(td_path)
         .arg("-o")
         .arg(wasm_path)
@@ -687,7 +687,7 @@ fn run_native(td_path: &Path) -> Option<String> {
         td_path.file_stem()?.to_string_lossy()
     ));
     let build = Command::new(taida_bin())
-        .args(["build", "--target", "native"])
+        .args(["build", "native"])
         .arg(td_path)
         .arg("-o")
         .arg(&native_path)
@@ -795,7 +795,7 @@ fn run_wasm_full_parity_fixture(stem: &str) {
     // wasm-full compile + run, caching the .wasm for superset reuse.
     let wasm_path = std::env::temp_dir().join(format!("taida_wf5_parity_{}.wasm", stem));
     let compile_output = Command::new(taida_bin())
-        .args(["build", "--target", "wasm-full"])
+        .args(["build", "wasm-full"])
         .arg(&td_path)
         .arg("-o")
         .arg(&wasm_path)
@@ -949,7 +949,7 @@ fn wasm_full_superset_of_wasm_wasi() {
         } else {
             let wasi_path = std::env::temp_dir().join(format!("taida_wf5b_wasi_{}.wasm", stem));
             let ok = Command::new(taida_bin())
-                .args(["build", "--target", "wasm-wasi"])
+                .args(["build", "wasm-wasi"])
                 .arg(td_path)
                 .arg("-o")
                 .arg(&wasi_path)
@@ -968,7 +968,7 @@ fn wasm_full_superset_of_wasm_wasi() {
         } else {
             let full_path = std::env::temp_dir().join(format!("taida_wf5b_full_{}.wasm", stem));
             let ok = Command::new(taida_bin())
-                .args(["build", "--target", "wasm-full"])
+                .args(["build", "wasm-full"])
                 .arg(td_path)
                 .arg("-o")
                 .arg(&full_path)
@@ -1006,7 +1006,7 @@ fn wasm_full_does_not_break_wasm_min() {
     let wasm_path = std::env::temp_dir().join("taida_wasm_full_nonreg_min.wasm");
 
     let compile = Command::new(taida_bin())
-        .args(["build", "--target", "wasm-min"])
+        .args(["build", "wasm-min"])
         .arg(&td_path)
         .arg("-o")
         .arg(&wasm_path)
@@ -1028,7 +1028,7 @@ fn wasm_full_does_not_break_wasm_wasi() {
     let wasm_path = std::env::temp_dir().join("taida_wasm_full_nonreg_wasi.wasm");
 
     let compile = Command::new(taida_bin())
-        .args(["build", "--target", "wasm-wasi"])
+        .args(["build", "wasm-wasi"])
         .arg(&td_path)
         .arg("-o")
         .arg(&wasm_path)
@@ -1056,7 +1056,6 @@ fn assert_full_regex_rejected(stem: &str, source: &str, candidates: &[&str]) {
 
     let output = Command::new(taida_bin())
         .arg("build")
-        .arg("--target")
         .arg("wasm-full")
         .arg(&td_path)
         .arg("-o")

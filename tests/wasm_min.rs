@@ -1,6 +1,6 @@
 /// Integration tests for wasm-min backend.
 ///
-/// Compiles .td files to .wasm via `taida build --target wasm-min`,
+/// Compiles .td files to .wasm via `taida build wasm-min`,
 /// runs them with wasmtime, and verifies output matches the interpreter.
 ///
 /// WC-7d: Size gate CI tests — hard gates on .wasm file sizes.
@@ -62,7 +62,6 @@ fn compile_and_run_wasm(td_path: &Path, wasmtime: &Path) -> Option<String> {
     // Compile
     let compile_output = Command::new(taida_bin())
         .arg("build")
-        .arg("--target")
         .arg("wasm-min")
         .arg(td_path)
         .arg("-o")
@@ -114,7 +113,6 @@ fn compile_and_run_wasm_src(source: &str, wasmtime: &Path, label: &str) -> Optio
 
     let compile_output = Command::new(taida_bin())
         .arg("build")
-        .arg("--target")
         .arg("wasm-min")
         .arg(&td_path)
         .arg("-o")
@@ -199,7 +197,7 @@ fn wasm_min_pi_approx() {
 /// Helper: compile a .td to .wasm and return the file size in bytes.
 fn compile_wasm_and_get_size(td_path: &Path, wasm_path: &Path) -> u64 {
     let output = Command::new(taida_bin())
-        .args(["build", "--target", "wasm-min"])
+        .args(["build", "wasm-min"])
         .arg(td_path)
         .arg("-o")
         .arg(wasm_path)
@@ -340,7 +338,7 @@ fn wasm_min_pack_accepted() {
     let wasm_path = std::env::temp_dir().join("taida_wasm_pack_accepted.wasm");
 
     let output = Command::new(taida_bin())
-        .args(["build", "--target", "wasm-min"])
+        .args(["build", "wasm-min"])
         .arg(&td_path)
         .arg("-o")
         .arg(&wasm_path)
@@ -367,7 +365,7 @@ fn wasm_min_closure_accepted() {
     let wasm_path = std::env::temp_dir().join("taida_wasm_closure_accepted.wasm");
 
     let output = Command::new(taida_bin())
-        .args(["build", "--target", "wasm-min"])
+        .args(["build", "wasm-min"])
         .arg(&td_path)
         .arg("-o")
         .arg(&wasm_path)
@@ -419,7 +417,7 @@ fn wasm_min_release_gate_positive() {
 
     // Compiling with --release should succeed (no TODO/Stub in source)
     let output = Command::new(taida_bin())
-        .args(["build", "--target", "wasm-min", "--release"])
+        .args(["build", "wasm-min", "--release"])
         .arg(&td_path)
         .arg("-o")
         .arg(&wasm_path)
@@ -506,7 +504,7 @@ fn wasm_min_float_accepted() {
     let wasm_path = std::env::temp_dir().join("taida_wasm_float_accepted.wasm");
 
     let output = Command::new(taida_bin())
-        .args(["build", "--target", "wasm-min"])
+        .args(["build", "wasm-min"])
         .arg(&td_path)
         .arg("-o")
         .arg(&wasm_path)
@@ -531,7 +529,7 @@ fn wasm_min_release_gate_negative() {
 
     // Compiling with --release should fail (TODO mold present)
     let output = Command::new(taida_bin())
-        .args(["build", "--target", "wasm-min", "--release"])
+        .args(["build", "wasm-min", "--release"])
         .arg(&td_path)
         .arg("-o")
         .arg(&wasm_path)
@@ -969,7 +967,6 @@ fn compile_and_run_wasm_project(td_path: &Path, wasmtime: &Path, label: &str) ->
 
     let compile_output = Command::new(taida_bin())
         .arg("build")
-        .arg("--target")
         .arg("wasm-min")
         .arg(td_path)
         .arg("-o")
@@ -1412,7 +1409,6 @@ stdout(serverResult.ok)
 
     let output = Command::new(taida_bin())
         .arg("build")
-        .arg("--target")
         .arg("wasm-min")
         .arg(&td_path)
         .arg("-o")
@@ -1451,7 +1447,6 @@ stdout(result.__value.consumed)
 
     let output = Command::new(taida_bin())
         .arg("build")
-        .arg("--target")
         .arg("wasm-min")
         .arg(&td_path)
         .arg("-o")
@@ -1488,7 +1483,6 @@ stdout(result.__value.kind)
 
     let output = Command::new(taida_bin())
         .arg("build")
-        .arg("--target")
         .arg("wasm-min")
         .arg(&td_path)
         .arg("-o")
@@ -1528,7 +1522,6 @@ fn try_build_wasm(source: &str, stem: &str, target: &str) -> (bool, String) {
 
     let output = Command::new(taida_bin())
         .arg("build")
-        .arg("--target")
         .arg(target)
         .arg(&td_path)
         .arg("-o")

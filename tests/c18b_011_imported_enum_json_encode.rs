@@ -120,7 +120,6 @@ fn c18b_011_js_relative_imported_enum_jsonencode() {
 
     let build = Command::new(taida_bin())
         .arg("build")
-        .arg("--target")
         .arg("js")
         .arg(&main)
         .arg("-o")
@@ -162,7 +161,6 @@ fn c18b_011_native_relative_imported_enum_jsonencode() {
 
     let build = Command::new(taida_bin())
         .arg("build")
-        .arg("--target")
         .arg("native")
         .arg(&main)
         .arg("-o")
@@ -279,7 +277,6 @@ fn c18b_011_js_package_imported_enum_jsonencode() {
 
     let build = Command::new(taida_bin())
         .arg("build")
-        .arg("--target")
         .arg("js")
         .arg(&main)
         .arg("-o")
@@ -320,7 +317,6 @@ fn c18b_011_native_package_imported_enum_jsonencode() {
 
     let build = Command::new(taida_bin())
         .arg("build")
-        .arg("--target")
         .arg("native")
         .arg(&main)
         .arg("-o")

@@ -101,7 +101,6 @@ fn c18b_003_shared_field_name_js_matches_interpreter() {
     let js_out_path = unique_temp("c18b_003_shared", "mjs");
     let build_out = Command::new(taida_bin())
         .arg("build")
-        .arg("--target")
         .arg("js")
         .arg(td_path())
         .arg("-o")
@@ -142,7 +141,6 @@ fn c18b_003_shared_field_name_native_matches_interpreter() {
     let bin_path = unique_temp("c18b_003_shared", "bin");
     let build_out = Command::new(taida_bin())
         .arg("build")
-        .arg("--target")
         .arg("native")
         .arg(td_path())
         .arg("-o")

@@ -205,7 +205,6 @@ fn build_and_run_native(project: &Path, main_td: &str) -> (bool, String, String)
     std::fs::write(project.join("main.td"), main_td).expect("write main.td");
     let build = Command::new(taida_bin())
         .arg("build")
-        .arg("--target")
         .arg("native")
         .arg(project.join("main.td"))
         .arg("-o")
@@ -235,7 +234,6 @@ fn build_native_only(project: &Path, main_td: &str) -> (bool, String, String) {
     std::fs::write(project.join("main.td"), main_td).expect("write main.td");
     let build = Command::new(taida_bin())
         .arg("build")
-        .arg("--target")
         .arg("native")
         .arg(project.join("main.td"))
         .arg("-o")

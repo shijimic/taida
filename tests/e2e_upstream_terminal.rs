@@ -19,7 +19,7 @@
 //!
 //! 3. Run through the interpreter (`taida main.td < /dev/null`).
 //!
-//! 4. Build native (`taida build --target native main.td -o main.bin`).
+//! 4. Build native (`taida build native main.td -o main.bin`).
 //!
 //! 5. Run native (`./main.bin < /dev/null`).
 //!
@@ -199,7 +199,7 @@ fn unique_temp_dir(prefix: &str) -> PathBuf {
 }
 
 /// Set up a self-contained project directory with the hand-installed
-/// fixture that mirrors what `taida install` would produce.
+/// fixture that mirrors what `taida ingot install` would produce.
 fn write_fixture(project: &Path, fix: &Fixture) {
     // Copy main.td and packages.tdm from e2e-demo-upstream
     std::fs::copy(fix.demo_dir.join("main.td"), project.join("main.td"))
@@ -284,7 +284,6 @@ fn test_e2e_upstream_terminal_interpreter_native_parity() {
     let bin_path = project.join("main.bin");
     let build_output = Command::new(&fix.taida)
         .arg("build")
-        .arg("--target")
         .arg("native")
         .arg(project.join("main.td"))
         .arg("-o")

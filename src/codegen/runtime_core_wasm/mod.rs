@@ -447,7 +447,7 @@ mod tests {
     /// `StrRepr::Rope` so 4-backend surface parity is preserved against
     /// the existing wasm-wasi `_wf_str_*` heap-copy path.
     fn test_runtime_core_wasm_fragment_concat_preserves_bytes() {
-        const EXPECTED_TOTAL_LEN: usize = 333_863;
+        const EXPECTED_TOTAL_LEN: usize = 333_867;
         let asm = *RUNTIME_CORE_WASM;
         assert_eq!(
             asm.len(),

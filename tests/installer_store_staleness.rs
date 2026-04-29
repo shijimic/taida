@@ -1,14 +1,14 @@
 #![allow(clippy::doc_overindented_list_items)]
 
-//! C17-5: end-to-end test that `taida install` detects a retag / delete+recreate
+//! C17-5: end-to-end test that `taida ingot install` detects a retag / delete+recreate
 //! on the remote and auto-refreshes the cached store entry.
 //!
 //! Scenario:
 //!   1. Mock server serves tarball v1 + tag SHA = "aaaa".
-//!   2. `taida install` populates `~/.taida/store/alice/demo/a.1/` with
+//!   2. `taida ingot install` populates `~/.taida/store/alice/demo/a.1/` with
 //!      `_meta.toml` recording commit_sha=aaaa.
 //!   3. Mock server swaps its tarball to v2 + tag SHA = "bbbb" (retag).
-//!   4. `taida install` runs again -> store entry is re-extracted; the
+//!   4. `taida ingot install` runs again -> store entry is re-extracted; the
 //!      new sidecar records commit_sha=bbbb; exit code 0; the new
 //!      tarball content is now visible in the store.
 
@@ -83,6 +83,7 @@ fn c17_5_install_autorefreshes_when_tag_retags() {
 
     // First install.
     let output1 = Command::new(taida_bin())
+        .arg("ingot")
         .arg("install")
         .arg("--no-remote-check") // fallback; we'll toggle below to see both paths
         .current_dir(&project)
@@ -92,7 +93,7 @@ fn c17_5_install_autorefreshes_when_tag_retags() {
         // Ensure `gh` auth or network is never touched by other code paths.
         .env("GH_TOKEN", "unused")
         .output()
-        .expect("run taida install");
+        .expect("run taida ingot install");
     assert!(
         output1.status.success(),
         "first install failed: stdout={} stderr={}",
@@ -123,6 +124,7 @@ fn c17_5_install_autorefreshes_when_tag_retags() {
     // Second install WITHOUT --no-remote-check -> decision table should
     // detect the SHA change and auto-refresh.
     let output2 = Command::new(taida_bin())
+        .arg("ingot")
         .arg("install")
         .current_dir(&project)
         .env("HOME", &fake_home)
@@ -130,7 +132,7 @@ fn c17_5_install_autorefreshes_when_tag_retags() {
         .env("TAIDA_GITHUB_API_URL", server.api_url())
         .env("GH_TOKEN", "unused")
         .output()
-        .expect("run taida install (2nd)");
+        .expect("run taida ingot install (2nd)");
     assert!(
         output2.status.success(),
         "second install failed: stdout={} stderr={}",

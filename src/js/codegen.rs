@@ -2597,7 +2597,7 @@ impl JsCodegen {
             )
             .ok_or_else(|| JsError {
                 message: format!(
-                    "Could not resolve package import '{}@{}'. Run `taida deps` and ensure the package is installed in .taida/deps/ before building JS.",
+                    "Could not resolve package import '{}@{}'. Run `taida ingot deps` and ensure the package is installed in .taida/deps/ before building JS.",
                     import_path, ver
                 ),
             })?
@@ -2605,7 +2605,7 @@ impl JsCodegen {
             crate::pkg::resolver::resolve_package_module(project_root, import_path)
                 .ok_or_else(|| JsError {
                     message: format!(
-                        "Could not resolve package import '{}'. Run `taida deps` and ensure the package is installed in .taida/deps/ before building JS.",
+                        "Could not resolve package import '{}'. Run `taida ingot deps` and ensure the package is installed in .taida/deps/ before building JS.",
                         import_path
                     ),
                 })?

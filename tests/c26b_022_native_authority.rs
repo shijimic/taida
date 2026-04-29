@@ -7,7 +7,7 @@
 //! Host-header value with `400 Bad Request` at the parser boundary (see
 //! `tests/parity.rs::test_net6_c26b022_*` — landed in wE Round 3 and
 //! extended for authority in wJ Round 4). This file pins the **Native**
-//! (`taida build --target native` + run the binary) side of the same
+//! (`taida build native` + run the binary) side of the same
 //! 3-backend parity contract by asserting that a Native-compiled HTTP/1
 //! server also returns `HTTP/1.1 400 Bad Request` for:
 //!
@@ -108,12 +108,12 @@ stdout(r.ok)
 /// Build the fixture as a native binary and return the path.
 fn build_native(src: &Path, bin: &Path) -> bool {
     let out = Command::new(taida_bin())
-        .args(["build", "--target", "native"])
+        .args(["build", "native"])
         .arg(src)
         .arg("-o")
         .arg(bin)
         .output()
-        .expect("spawn taida build --target native");
+        .expect("spawn taida build native");
     if !out.status.success() {
         eprintln!(
             "native build failed:\n{}",

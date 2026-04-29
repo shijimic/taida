@@ -14,7 +14,8 @@ use super::super::eval::{Interpreter, RuntimeError, Signal};
 use super::super::value::Value;
 use super::helpers::{build_streaming_head, get_field_str, write_all_retry, write_vectored_all};
 use super::types::{
-    BodyEncoding, ChunkedDecoderState, ConnStream, RequestBodyState, StreamingWriter, WriterState,
+    ActiveStreamingWriter, BodyEncoding, ChunkedDecoderState, ConnStream, RequestBodyState,
+    StreamingWriter, WriterState,
 };
 use crate::parser::Expr;
 
@@ -70,6 +71,20 @@ impl Interpreter {
         }
     }
 
+    fn active_streaming_writer_for(
+        &self,
+        api_name: &str,
+    ) -> Result<&ActiveStreamingWriter, RuntimeError> {
+        self.active_streaming_writer
+            .as_ref()
+            .ok_or_else(|| RuntimeError {
+                message: format!(
+                    "{}: active streaming writer disappeared during handler execution",
+                    api_name
+                ),
+            })
+    }
+
     /// `startResponse(writer, status <= 200, headers <= @[])`
     ///
     /// Updates pending status/headers on the StreamingWriter.
@@ -89,7 +104,7 @@ impl Interpreter {
         // Validate writer token.
         self.validate_writer_token(args, "startResponse")?;
 
-        let active = self.active_streaming_writer.as_ref().unwrap();
+        let active = self.active_streaming_writer_for("startResponse")?;
 
         // Safety: pointers are valid during handler execution (see ActiveStreamingWriter doc).
         let writer = unsafe { &mut *active.writer };
@@ -172,7 +187,7 @@ impl Interpreter {
 
         // Update pending state.
         // Re-borrow writer since self was borrowed by eval_expr above.
-        let active = self.active_streaming_writer.as_ref().unwrap();
+        let active = self.active_streaming_writer_for("startResponse")?;
         let writer = unsafe { &mut *active.writer };
         writer.pending_status = status;
         writer.pending_headers = headers;
@@ -202,7 +217,7 @@ impl Interpreter {
         // Validate writer token.
         self.validate_writer_token(args, "writeChunk")?;
 
-        let active = self.active_streaming_writer.as_ref().unwrap();
+        let active = self.active_streaming_writer_for("writeChunk")?;
 
         let writer = unsafe { &mut *active.writer };
 
@@ -250,7 +265,7 @@ impl Interpreter {
         }
 
         // Re-borrow after eval_expr.
-        let active = self.active_streaming_writer.as_ref().unwrap();
+        let active = self.active_streaming_writer_for("writeChunk")?;
         let writer = unsafe { &mut *active.writer };
         let stream = unsafe { &mut *active.stream };
 
@@ -305,7 +320,7 @@ impl Interpreter {
         // Validate writer token.
         self.validate_writer_token(args, "endResponse")?;
 
-        let active = self.active_streaming_writer.as_ref().unwrap();
+        let active = self.active_streaming_writer_for("endResponse")?;
 
         let writer = unsafe { &mut *active.writer };
         let stream = unsafe { &mut *active.stream };
@@ -405,7 +420,7 @@ impl Interpreter {
         };
 
         // Re-borrow after eval_expr calls.
-        let active = self.active_streaming_writer.as_ref().unwrap();
+        let active = self.active_streaming_writer_for("sseEvent")?;
         let writer = unsafe { &mut *active.writer };
         let stream = unsafe { &mut *active.stream };
 

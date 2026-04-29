@@ -83,7 +83,7 @@ fn c27b_025_3backend_stdout_content_parity() {
 
     let bin_path: PathBuf = dir.join("main");
     let build = Command::new(taida_bin())
-        .args(["build", "--target", "native"])
+        .args(["build", "native"])
         .arg(&td_path)
         .arg("-o")
         .arg(&bin_path)
@@ -115,7 +115,7 @@ fn c27b_025_3backend_stdout_content_parity() {
     {
         let js_path = dir.join("main.mjs");
         let jbuild = Command::new(taida_bin())
-            .args(["build", "--target", "js"])
+            .args(["build", "js"])
             .arg(&td_path)
             .arg("-o")
             .arg(&js_path)

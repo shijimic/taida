@@ -109,7 +109,7 @@ fn c26b_021_native_stdout_is_line_buffered_on_pipe() {
     let bin_path = dir.join("out.bin");
 
     let build = Command::new(taida_bin())
-        .args(["build", "--target", "native"])
+        .args(["build", "native"])
         .arg(&src)
         .arg("-o")
         .arg(&bin_path)
@@ -186,7 +186,7 @@ fn c26b_021_3backend_stdout_content_parity() {
     if node_available() {
         let js_path = dir.join("out.mjs");
         let build = Command::new(taida_bin())
-            .args(["build", "--target", "js"])
+            .args(["build", "js"])
             .arg(&src)
             .arg("-o")
             .arg(&js_path)
@@ -206,7 +206,7 @@ fn c26b_021_3backend_stdout_content_parity() {
     if cc_available() {
         let bin_path = dir.join("out.bin");
         let build = Command::new(taida_bin())
-            .args(["build", "--target", "native"])
+            .args(["build", "native"])
             .arg(&src)
             .arg("-o")
             .arg(&bin_path)

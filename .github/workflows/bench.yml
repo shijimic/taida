@@ -174,7 +174,7 @@ jobs:
 
       - name: Upload bench results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: perf-baseline-${{ github.sha }}
           path: |
@@ -208,7 +208,7 @@ jobs:
         with:
           python-version: "3.11"
       - name: Download bench results
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           name: perf-baseline-${{ github.sha }}
           path: bench-artifacts

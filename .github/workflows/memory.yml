@@ -82,7 +82,7 @@ jobs:
 
       - name: upload valgrind logs
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: valgrind-smoke-${{ github.sha }}
           path: target/mem-smoke/
@@ -135,7 +135,7 @@ jobs:
 
       - name: upload heaptrack data
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: heaptrack-weekly-${{ github.sha }}
           path: target/heaptrack/

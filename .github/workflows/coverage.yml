@@ -42,7 +42,7 @@ jobs:
     # D28B-013 hard-fail: continue-on-error removed.
     timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           submodules: false
 
@@ -61,9 +61,9 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: ensure node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
-          node-version: "20"
+          node-version: "22"
 
       - name: generate lcov (lib only)
         run: |
@@ -155,7 +155,7 @@ jobs:
           PY
 
       - name: upload lcov
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: coverage-lcov-${{ github.sha }}
           path: lcov.info
@@ -163,7 +163,7 @@ jobs:
           retention-days: 30
 
       - name: upload html report
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: coverage-html-${{ github.sha }}
           path: target/llvm-cov/html

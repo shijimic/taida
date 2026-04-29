@@ -53,6 +53,7 @@ use std::collections::{HashMap, HashSet};
 /// introspection (see `examples/quality/rc6a_error_inheritance.td`);
 /// only write-side assignments in pack literals are rejected.
 const RESERVED_INTERNAL_FIELD_PREFIX: &str = "__";
+const MAX_CALL_ARGUMENTS: usize = 256;
 
 #[derive(Debug, Clone)]
 struct MoldHeaderSpec {
@@ -2900,12 +2901,14 @@ defaulted fields must be provided via `()`",
                 }
             }
             Expr::FuncCall(callee, args, _) => {
+                self.check_call_argument_limit("function call", args.len(), expr.span().clone());
                 self.check_mold_errors_in_expr(callee);
                 for arg in args {
                     self.check_mold_errors_in_expr(arg);
                 }
             }
             Expr::MethodCall(obj, _, args, _) => {
+                self.check_call_argument_limit("method call", args.len(), expr.span().clone());
                 self.check_mold_errors_in_expr(obj);
                 for arg in args {
                     self.check_mold_errors_in_expr(arg);
@@ -2990,6 +2993,19 @@ defaulted fields must be provided via `()`",
             // Leaf expressions — no recursion needed
             _ => {}
         }
+    }
+
+    fn check_call_argument_limit(&mut self, kind: &str, arg_count: usize, span: Span) {
+        if arg_count <= MAX_CALL_ARGUMENTS {
+            return;
+        }
+        self.errors.push(TypeError {
+            message: format!(
+                "[E1301] {} takes at most {} argument(s), got {}. Hint: Split the call or reduce arity; native/WASM tag propagation is capped at {} arguments.",
+                kind, MAX_CALL_ARGUMENTS, arg_count, MAX_CALL_ARGUMENTS
+            ),
+            span,
+        });
     }
 
     // C12-2c: Walk an expression subtree and emit E1508 for any

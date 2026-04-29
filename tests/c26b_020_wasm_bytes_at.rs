@@ -22,7 +22,7 @@ use std::process::Command;
 /// on success, or the emitted stderr string on compile failure.
 fn compile_wasm(td: &Path, target: &str, out: &Path) -> Result<(), String> {
     let output = Command::new(taida_bin())
-        .args(["build", "--target", target])
+        .args(["build", target])
         .arg(td)
         .arg("-o")
         .arg(out)
@@ -238,7 +238,7 @@ fn run_native(td: &Path) -> Option<String> {
         td.file_stem().and_then(|s| s.to_str()).unwrap_or("x")
     ));
     let status = Command::new(taida_bin())
-        .args(["build", "--target", "native"])
+        .args(["build", "native"])
         .arg(td)
         .arg("-o")
         .arg(&exe)
@@ -271,7 +271,7 @@ fn run_js(td: &Path) -> Option<String> {
         td.file_stem().and_then(|s| s.to_str()).unwrap_or("x")
     ));
     let status = Command::new(taida_bin())
-        .args(["build", "--target", "js"])
+        .args(["build", "js"])
         .arg(td)
         .arg("-o")
         .arg(&js)

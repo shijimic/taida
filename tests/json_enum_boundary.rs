@@ -103,7 +103,6 @@ fn c16_enum_boundary_js_matches_interpreter() {
     let js_out_path = unique_temp("c16_json_enum_boundary", "js");
     let build_out = Command::new(taida_bin())
         .arg("build")
-        .arg("--target")
         .arg("js")
         .arg(td_path())
         .arg("-o")
@@ -144,7 +143,6 @@ fn c16_enum_boundary_native_matches_interpreter() {
     let bin_path = unique_temp("c16_json_enum_boundary", "bin");
     let build_out = Command::new(taida_bin())
         .arg("build")
-        .arg("--target")
         .arg("native")
         .arg(td_path())
         .arg("-o")

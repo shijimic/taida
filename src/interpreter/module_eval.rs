@@ -78,7 +78,7 @@ impl Interpreter {
             } else {
                 return Err(RuntimeError {
                     message: format!(
-                        "Package '{}' not found. Run 'taida deps' to install dependencies.",
+                        "Package '{}' not found. Run 'taida ingot deps' to install dependencies.",
                         import_path
                     ),
                 });
@@ -298,7 +298,7 @@ impl Interpreter {
             } else {
                 return Err(RuntimeError {
                     message: format!(
-                        "Package '{}@{}' not found. Run 'taida deps' to install dependencies.",
+                        "Package '{}@{}' not found. Run 'taida ingot deps' to install dependencies.",
                         pkg_id, version
                     ),
                 });

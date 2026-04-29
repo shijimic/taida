@@ -74,7 +74,7 @@ fn taida_bin() -> PathBuf {
 
 /// C26B-025: rewrite `packages.tdm` self-identity to match the
 /// version about to be published, then amend the initial commit so
-/// the working tree stays clean for `taida publish`.
+/// the working tree stays clean for `taida ingot publish`.
 fn bump_manifest_to(project: &Path, pkg: &str, version: &str) {
     fs::write(
         project.join("packages.tdm"),
@@ -99,7 +99,7 @@ fn force_version_overrides_auto_bump() {
     // to `a.5`.
     let out = Command::new(taida_bin())
         .env("TAIDA_PUBLISH_SKIP_GH_AUTH", "1")
-        .args(["publish", "--dry-run", "--force-version", "a.5"])
+        .args(["ingot", "publish", "--dry-run", "--force-version", "a.5"])
         .current_dir(&project)
         .output()
         .expect("run");
@@ -132,6 +132,7 @@ fn force_version_combined_with_label() {
     let out = Command::new(taida_bin())
         .env("TAIDA_PUBLISH_SKIP_GH_AUTH", "1")
         .args([
+            "ingot",
             "publish",
             "--dry-run",
             "--force-version",
@@ -162,7 +163,7 @@ fn force_version_rejects_non_taida_version() {
 
     let out = Command::new(taida_bin())
         .env("TAIDA_PUBLISH_SKIP_GH_AUTH", "1")
-        .args(["publish", "--dry-run", "--force-version", "1.0.0"])
+        .args(["ingot", "publish", "--dry-run", "--force-version", "1.0.0"])
         .current_dir(&project)
         .output()
         .expect("run");
@@ -186,7 +187,7 @@ fn force_version_actually_pushes_the_forced_tag() {
 
     let out = Command::new(taida_bin())
         .env("TAIDA_PUBLISH_SKIP_GH_AUTH", "1")
-        .args(["publish", "--force-version", "a.7"])
+        .args(["ingot", "publish", "--force-version", "a.7"])
         .current_dir(&project)
         .output()
         .expect("run");
@@ -221,7 +222,7 @@ fn c26b_025_publish_rejects_stale_manifest_self_identity() {
     // mismatched base version (not a label addendum).
     let out = Command::new(taida_bin())
         .env("TAIDA_PUBLISH_SKIP_GH_AUTH", "1")
-        .args(["publish", "--dry-run", "--force-version", "a.7"])
+        .args(["ingot", "publish", "--dry-run", "--force-version", "a.7"])
         .current_dir(&project)
         .output()
         .expect("run");
@@ -255,6 +256,7 @@ fn c26b_025_publish_accepts_label_addendum() {
     let out = Command::new(taida_bin())
         .env("TAIDA_PUBLISH_SKIP_GH_AUTH", "1")
         .args([
+            "ingot",
             "publish",
             "--dry-run",
             "--force-version",
@@ -282,7 +284,7 @@ fn missing_force_version_value_errors() {
 
     let out = Command::new(taida_bin())
         .env("TAIDA_PUBLISH_SKIP_GH_AUTH", "1")
-        .args(["publish", "--force-version"])
+        .args(["ingot", "publish", "--force-version"])
         .current_dir(&project)
         .output()
         .expect("run");

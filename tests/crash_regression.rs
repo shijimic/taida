@@ -75,7 +75,6 @@ fn run_js(td_path: &Path) -> Result<String, String> {
 
     let transpile_output = Command::new(taida_bin())
         .arg("build")
-        .arg("--target")
         .arg("js")
         .arg(td_path)
         .arg("-o")
@@ -120,7 +119,6 @@ fn run_native(td_path: &Path) -> Result<String, String> {
 
     let compile_output = Command::new(taida_bin())
         .arg("build")
-        .arg("--target")
         .arg("native")
         .arg(td_path)
         .arg("-o")

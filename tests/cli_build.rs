@@ -1,4 +1,4 @@
-//! CLI `taida build` and `taida transpile` tests.
+//! CLI `taida build` tests.
 //!
 //! Covers: release gate, diag-format jsonl, package import resolution,
 //! directory entry, stale output cleanup, checker integration.
@@ -27,18 +27,17 @@ stdout(typeof(v))
 
     let output = Command::new(taida_bin())
         .arg("build")
-        .arg("--target")
         .arg("native")
         .arg("--release")
         .arg(&input)
         .arg("-o")
         .arg(&bin)
         .output()
-        .expect("failed to run taida build --target native --release");
+        .expect("failed to run taida build native --release");
 
     assert!(
         !output.status.success(),
-        "build --target native --release should fail when TODO/Stub exists"
+        "build native --release should fail when TODO/Stub exists"
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
@@ -66,18 +65,17 @@ stdout(x.toString())
 
     let output = Command::new(taida_bin())
         .arg("build")
-        .arg("--target")
         .arg("js")
         .arg("--release")
         .arg("--outdir")
         .arg(&out_dir)
         .arg(&src_dir)
         .output()
-        .expect("failed to run taida build --target js --release");
+        .expect("failed to run taida build js --release");
 
     assert!(
         !output.status.success(),
-        "build --target js --release should fail when TODO/Stub exists"
+        "build js --release should fail when TODO/Stub exists"
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
@@ -114,18 +112,17 @@ v <= TODO[Int](id <= "REL-DEP", task <= "must be removed")
 
     let output = Command::new(taida_bin())
         .arg("build")
-        .arg("--target")
         .arg("native")
         .arg("--release")
         .arg(&main_td)
         .arg("-o")
         .arg(&bin)
         .output()
-        .expect("failed to run taida build --target native --release");
+        .expect("failed to run taida build native --release");
 
     assert!(
         !output.status.success(),
-        "build --target native --release should fail when imported module has TODO/Stub"
+        "build native --release should fail when imported module has TODO/Stub"
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
@@ -154,13 +151,12 @@ stdout("hello native dir")
 
     let output = Command::new(taida_bin())
         .arg("build")
-        .arg("--target")
         .arg("native")
         .arg(&project)
         .arg("-o")
         .arg(&bin)
         .output()
-        .expect("failed to run taida build --target native <DIR>");
+        .expect("failed to run taida build native <DIR>");
 
     assert!(
         output.status.success(),
@@ -193,7 +189,6 @@ stdout("custom entry")
 
     let output = Command::new(taida_bin())
         .arg("build")
-        .arg("--target")
         .arg("native")
         .arg(&project)
         .arg("--entry")
@@ -201,7 +196,7 @@ stdout("custom entry")
         .arg("-o")
         .arg(&bin)
         .output()
-        .expect("failed to run taida build --target native <DIR> --entry");
+        .expect("failed to run taida build native <DIR> --entry");
 
     assert!(
         output.status.success(),
@@ -213,31 +208,77 @@ stdout("custom entry")
     let _ = fs::remove_dir_all(&dir);
 }
 
-// ── Transpile ──
+// ── JS positional target ──
 
 #[test]
-fn test_transpile_alias_produces_js_output() {
-    let dir = unique_temp_dir("taida_transpile_e2e");
+fn test_build_js_positional_target_produces_js_output() {
+    let dir = unique_temp_dir("taida_build_js_e2e");
     let src = dir.join("main.td");
     let js_out = dir.join("main.mjs");
-    write_file(&src, "stdout(\"transpile works\")\n");
+    write_file(&src, "stdout(\"build js works\")\n");
 
     let output = Command::new(taida_bin())
-        .arg("transpile")
+        .arg("build")
+        .arg("js")
         .arg(&src)
         .arg("-o")
         .arg(&js_out)
         .output()
-        .expect("failed to run taida transpile");
+        .expect("failed to run taida build js");
 
     assert!(
         output.status.success(),
-        "transpile should succeed: stderr={}",
+        "build js should succeed: stderr={}",
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(js_out.exists(), "JS output should exist");
 
     let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn test_build_target_flag_removed() {
+    let dir = unique_temp_dir("taida_build_target_flag_removed");
+    let src = dir.join("main.td");
+    write_file(&src, "stdout(\"old flag\")\n");
+
+    let output = Command::new(taida_bin())
+        .arg("build")
+        .arg("--target")
+        .arg("js")
+        .arg(&src)
+        .output()
+        .expect("failed to run removed build target flag");
+
+    assert_eq!(output.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("[E1700]")
+            && stderr.contains("Flag '--target <target>' was removed")
+            && stderr.contains("taida build <target> <PATH>"),
+        "removed --target flag should point to positional target syntax, got: {}",
+        stderr
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn test_build_target_equals_flag_removed() {
+    let output = Command::new(taida_bin())
+        .args(["build", "--target=js", "examples/01_hello.td"])
+        .output()
+        .expect("taida build --target=js should run");
+
+    assert_eq!(output.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("[E1700]")
+            && stderr.contains("Flag '--target <target>' was removed")
+            && stderr.contains("taida build <target> <PATH>"),
+        "unexpected stderr: {}",
+        stderr
+    );
 }
 
 // ── Diag format ──
@@ -250,7 +291,6 @@ fn test_build_js_diag_format_jsonl_outputs_parse_error_record() {
 
     let output = Command::new(taida_bin())
         .arg("build")
-        .arg("--target")
         .arg("js")
         .arg("--diag-format")
         .arg("jsonl")
@@ -291,7 +331,6 @@ fn test_build_diag_format_jsonl_emits_checker_error() {
 
     let output = Command::new(taida_bin())
         .arg("build")
-        .arg("--target")
         .arg("js")
         .arg("--diag-format")
         .arg("jsonl")
@@ -331,33 +370,28 @@ fn test_build_stops_on_checker_error() {
     let js_out = dir.join("out.mjs");
     write_file(&src, "x <= 1\nx <= 2\n");
 
-    // build --target js
+    // build js
     let build_js = Command::new(taida_bin())
         .arg("build")
-        .arg("--target")
         .arg("js")
         .arg(&src)
         .arg("-o")
         .arg(&js_out)
         .output()
-        .expect("build --target js");
+        .expect("build js");
 
-    // build --target native
+    // build native
     let build_native = Command::new(taida_bin())
         .arg("build")
-        .arg("--target")
         .arg("native")
         .arg(&src)
         .arg("-o")
         .arg(&bin)
         .output()
-        .expect("build --target native");
+        .expect("build native");
 
     // Both should fail with the same checker error
-    for (name, out) in &[
-        ("build --target js", &build_js),
-        ("build --target native", &build_native),
-    ] {
+    for (name, out) in &[("build js", &build_js), ("build native", &build_native)] {
         assert!(
             !out.status.success(),
             "{} should fail on checker error",
@@ -395,22 +429,21 @@ fn test_build_js_fails_on_unresolved_package_import() {
     let build_js = Command::new(taida_bin())
         .current_dir(&dir)
         .arg("build")
-        .arg("--target")
         .arg("js")
         .arg(&src)
         .arg("-o")
         .arg(&build_js_out)
         .output()
-        .expect("build --target js");
+        .expect("build js");
 
     assert!(
         !build_js.status.success(),
-        "build --target js should fail on unresolved package import"
+        "build js should fail on unresolved package import"
     );
     let stderr = String::from_utf8_lossy(&build_js.stderr);
     assert!(
         stderr.contains("Could not resolve package import 'alice/missing'"),
-        "build --target js should surface the unresolved package import, got: {}",
+        "build js should surface the unresolved package import, got: {}",
         stderr
     );
 
@@ -455,13 +488,12 @@ fn test_build_js_resolves_package_import_from_source_root_with_custom_output() {
     let build_out = Command::new(taida_bin())
         .current_dir(&caller)
         .arg("build")
-        .arg("--target")
         .arg("js")
         .arg(project.join("main.td"))
         .arg("-o")
         .arg(&js_out)
         .output()
-        .expect("build --target js with custom output");
+        .expect("build js with custom output");
 
     assert!(
         build_out.status.success(),
@@ -515,13 +547,12 @@ fn test_build_js_failure_does_not_leave_stale_local_module_outputs() {
     let build_out = Command::new(taida_bin())
         .current_dir(&project)
         .arg("build")
-        .arg("--target")
         .arg("js")
         .arg(project.join("main.td"))
         .arg("-o")
         .arg(dist.join("app.mjs"))
         .output()
-        .expect("build --target js with unresolved package import");
+        .expect("build js with unresolved package import");
 
     assert!(
         !build_out.status.success(),
@@ -592,13 +623,12 @@ fn test_build_js_failure_does_not_leave_stale_dependency_outputs() {
     let build_out = Command::new(taida_bin())
         .current_dir(&project)
         .arg("build")
-        .arg("--target")
         .arg("js")
         .arg(project.join("main.td"))
         .arg("-o")
         .arg(project.join("dist").join("app.mjs"))
         .output()
-        .expect("build --target js with bad dep graph");
+        .expect("build js with bad dep graph");
 
     assert!(
         !build_out.status.success(),
@@ -637,17 +667,17 @@ fn test_same_scope_duplicate_check_vs_build_consistency() {
     let src = dir.join("main.td");
     write_file(&src, "x <= 1\nx <= 2\nstdout(x.toString())\n");
 
-    // taida check
+    // taida way check
     let check_out = Command::new(taida_bin())
+        .arg("way")
         .arg("check")
         .arg(&src)
         .output()
         .expect("check");
 
-    // taida build --target js
+    // taida build js
     let build_out = Command::new(taida_bin())
         .arg("build")
-        .arg("--target")
         .arg("js")
         .arg(&src)
         .output()
@@ -708,9 +738,10 @@ fn test_b11_9d_facade_hidden_symbol_rejected_all_backends() {
 
     let expect_msg = "not part of the public API declared in packages.tdm";
 
-    // 1. taida check
+    // 1. taida way check
     let check_out = Command::new(taida_bin())
         .current_dir(&app)
+        .arg("way")
         .arg("check")
         .arg("main.td")
         .output()
@@ -722,20 +753,19 @@ fn test_b11_9d_facade_hidden_symbol_rejected_all_backends() {
     );
     assert!(
         !check_out.status.success(),
-        "taida check should reject hidden symbol, got: {}",
+        "taida way check should reject hidden symbol, got: {}",
         check_combined
     );
     assert!(
         check_combined.contains(expect_msg),
-        "taida check error should mention facade, got: {}",
+        "taida way check error should mention facade, got: {}",
         check_combined
     );
 
-    // 2. taida build --target js
+    // 2. taida build js
     let js_out = Command::new(taida_bin())
         .current_dir(&app)
         .arg("build")
-        .arg("--target")
         .arg("js")
         .arg("main.td")
         .output()
@@ -756,11 +786,10 @@ fn test_b11_9d_facade_hidden_symbol_rejected_all_backends() {
         js_combined
     );
 
-    // 3. taida build --target native
+    // 3. taida build native
     let native_out = Command::new(taida_bin())
         .current_dir(&app)
         .arg("build")
-        .arg("--target")
         .arg("native")
         .arg("main.td")
         .output()
@@ -832,9 +861,10 @@ fn test_b11_021_facade_missing_symbol_rejected_all_backends() {
 
     let expect_msg = "declared in packages.tdm but not found in the entry module";
 
-    // 1. taida check
+    // 1. taida way check
     let check_out = Command::new(taida_bin())
         .current_dir(&app)
+        .arg("way")
         .arg("check")
         .arg("main.td")
         .output()
@@ -846,20 +876,19 @@ fn test_b11_021_facade_missing_symbol_rejected_all_backends() {
     );
     assert!(
         !check_out.status.success(),
-        "taida check should reject ghost symbol, got: {}",
+        "taida way check should reject ghost symbol, got: {}",
         check_combined
     );
     assert!(
         check_combined.contains(expect_msg),
-        "taida check error should mention missing in entry module, got: {}",
+        "taida way check error should mention missing in entry module, got: {}",
         check_combined
     );
 
-    // 2. taida build --target js
+    // 2. taida build js
     let js_out = Command::new(taida_bin())
         .current_dir(&app)
         .arg("build")
-        .arg("--target")
         .arg("js")
         .arg("main.td")
         .output()
@@ -880,11 +909,10 @@ fn test_b11_021_facade_missing_symbol_rejected_all_backends() {
         js_combined
     );
 
-    // 3. taida build --target native
+    // 3. taida build native
     let native_out = Command::new(taida_bin())
         .current_dir(&app)
         .arg("build")
-        .arg("--target")
         .arg("native")
         .arg("main.td")
         .output()
@@ -955,16 +983,17 @@ fn test_b11_9d_facade_public_symbol_accepted() {
         ">>> acme/lib => @(public)\nstdout(public)\n",
     );
 
-    // taida check should pass
+    // taida way check should pass
     let check_out = Command::new(taida_bin())
         .current_dir(&app)
+        .arg("way")
         .arg("check")
         .arg("main.td")
         .output()
         .expect("check");
     assert!(
         check_out.status.success(),
-        "taida check should accept public symbol, got: {}{}",
+        "taida way check should accept public symbol, got: {}{}",
         String::from_utf8_lossy(&check_out.stdout),
         String::from_utf8_lossy(&check_out.stderr)
     );
@@ -1019,25 +1048,25 @@ fn test_b11_022_facade_reexport_accepted_all_backends() {
         ">>> acme/lib => @(reExported)\nstdout(reExported)\n",
     );
 
-    // 1. taida check should pass
+    // 1. taida way check should pass
     let check_out = Command::new(taida_bin())
         .current_dir(&app)
+        .arg("way")
         .arg("check")
         .arg("main.td")
         .output()
         .expect("check");
     assert!(
         check_out.status.success(),
-        "taida check should accept re-exported symbol, got: {}{}",
+        "taida way check should accept re-exported symbol, got: {}{}",
         String::from_utf8_lossy(&check_out.stdout),
         String::from_utf8_lossy(&check_out.stderr)
     );
 
-    // 2. taida build --target js should pass
+    // 2. taida build js should pass
     let js_out = Command::new(taida_bin())
         .current_dir(&app)
         .arg("build")
-        .arg("--target")
         .arg("js")
         .arg("main.td")
         .arg("-o")
@@ -1051,11 +1080,10 @@ fn test_b11_022_facade_reexport_accepted_all_backends() {
         String::from_utf8_lossy(&js_out.stderr)
     );
 
-    // 3. taida build --target native should pass
+    // 3. taida build native should pass
     let native_out = Command::new(taida_bin())
         .current_dir(&app)
         .arg("build")
-        .arg("--target")
         .arg("native")
         .arg("main.td")
         .arg("-o")
@@ -1112,16 +1140,17 @@ fn test_b11_025_identity_only_facade_allows_entry_exports() {
         ">>> acme/lib => @(public)\nstdout(public)\n",
     );
 
-    // 1. taida check should pass
+    // 1. taida way check should pass
     let check_out = Command::new(taida_bin())
         .current_dir(&app)
+        .arg("way")
         .arg("check")
         .arg("main.td")
         .output()
         .expect("check");
     assert!(
         check_out.status.success(),
-        "taida check should accept symbol from identity-only facade package, got: {}{}",
+        "taida way check should accept symbol from identity-only facade package, got: {}{}",
         String::from_utf8_lossy(&check_out.stdout),
         String::from_utf8_lossy(&check_out.stderr)
     );
@@ -1203,16 +1232,17 @@ fn test_b11_025_submodule_import_bypasses_facade() {
     );
     assert!(stdout.contains("99"), "Should print 99, got: {}", stdout);
 
-    // taida check should also pass
+    // taida way check should also pass
     let check_out = Command::new(taida_bin())
         .current_dir(&app)
+        .arg("way")
         .arg("check")
         .arg("main.td")
         .output()
         .expect("check");
     assert!(
         check_out.status.success(),
-        "taida check should accept submodule import, got: {}{}",
+        "taida way check should accept submodule import, got: {}{}",
         String::from_utf8_lossy(&check_out.stdout),
         String::from_utf8_lossy(&check_out.stderr)
     );

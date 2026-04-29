@@ -60,7 +60,7 @@ fn tmp_artifact(td_path: &Path, suffix: &str) -> PathBuf {
 fn build_native(td_path: &Path) -> Option<PathBuf> {
     let bin_path = tmp_artifact(td_path, "bin");
     let build = Command::new(taida_bin())
-        .args(["build", "--target", "native"])
+        .args(["build", "native"])
         .arg(td_path)
         .arg("-o")
         .arg(&bin_path)

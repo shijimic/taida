@@ -15,7 +15,7 @@ use super::super::value::Value;
 use super::helpers::{
     extract_body_token, get_field_int, get_field_value, write_all_retry, write_vectored_all,
 };
-use super::types::{ConnStream, NEXT_WS_TOKEN, WriterState, WsFrame};
+use super::types::{ActiveStreamingWriter, ConnStream, NEXT_WS_TOKEN, WriterState, WsFrame};
 use crate::parser::Expr;
 
 impl Interpreter {
@@ -48,6 +48,17 @@ impl Interpreter {
 
     /// RFC 6455 magic GUID for Sec-WebSocket-Accept calculation.
     const WS_GUID: &'static str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
+
+    fn active_ws_writer_for(&self, api_name: &str) -> Result<&ActiveStreamingWriter, RuntimeError> {
+        self.active_streaming_writer
+            .as_ref()
+            .ok_or_else(|| RuntimeError {
+                message: format!(
+                    "{}: active streaming writer disappeared during handler execution",
+                    api_name
+                ),
+            })
+    }
 
     /// Compute Sec-WebSocket-Accept from Sec-WebSocket-Key (NET4-2b).
     /// SHA-1(key + GUID) → Base64.
@@ -172,7 +183,7 @@ impl Interpreter {
         // Validate writer token (2nd arg).
         self.validate_writer_token(&args[1..], "wsUpgrade")?;
 
-        let active = self.active_streaming_writer.as_ref().unwrap();
+        let active = self.active_ws_writer_for("wsUpgrade")?;
         let writer = unsafe { &mut *active.writer };
 
         // State check: wsUpgrade is only valid in Idle state (before any head commit).
@@ -332,7 +343,7 @@ impl Interpreter {
         );
 
         // Write the 101 response to wire.
-        let active = self.active_streaming_writer.as_ref().unwrap();
+        let active = self.active_ws_writer_for("wsUpgrade")?;
         let stream = unsafe { &mut *active.stream };
         write_all_retry(stream, response.as_bytes())?;
 
@@ -407,7 +418,7 @@ impl Interpreter {
             }
         };
 
-        let active = self.active_streaming_writer.as_ref().unwrap();
+        let active = self.active_ws_writer_for("wsSend")?;
         let writer = unsafe { &*active.writer };
 
         // Must be in WebSocket state.
@@ -509,7 +520,7 @@ impl Interpreter {
         // Validate ws token.
         self.validate_ws_token(args, "wsReceive")?;
 
-        let active = self.active_streaming_writer.as_ref().unwrap();
+        let active = self.active_ws_writer_for("wsReceive")?;
         let writer = unsafe { &*active.writer };
 
         if writer.state != WriterState::WebSocket {
@@ -874,7 +885,7 @@ impl Interpreter {
         };
 
         // Now take borrows after eval_expr is done.
-        let active = self.active_streaming_writer.as_ref().unwrap();
+        let active = self.active_ws_writer_for("wsClose")?;
         let writer = unsafe { &*active.writer };
 
         if writer.state != WriterState::WebSocket {
@@ -922,7 +933,7 @@ impl Interpreter {
         // Validate ws token.
         self.validate_ws_token(args, "wsCloseCode")?;
 
-        let active = self.active_streaming_writer.as_ref().unwrap();
+        let active = self.active_ws_writer_for("wsCloseCode")?;
         let writer = unsafe { &*active.writer };
 
         if writer.state != WriterState::WebSocket {

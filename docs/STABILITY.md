@@ -1,23 +1,16 @@
 # Taida Lang Stability Policy
 
-> Target: **`@c.27`** (gen-C stable — third candidate)
-> Status: **provisional** — the label-less `@c.25` and `@c.26` tags
-> were both **skipped** (see §1.3 / §5.6 below); the gen-C stable tag
-> is now being pursued through the C27 fix-only RC cycle.
-> Intermediate tags are `@c.27.rcM`. The policy contract in this
-> document is pinned for the whole gen-C generation (`@c.25.*`,
-> `@c.26.*`, and `@c.27.*`) so downstream tooling, packagers, and
-> addon authors have a fixed target before stable is declared.
+> Target: **`@e.X`** (gen-E CLI surface stable candidate)
+> Status: **E31 draft** — updated for the E31 top-level CLI hierarchy.
+> The final stable tag number is chosen at release gate time; `@e.X`
+> is used until then.
 
 Related references:
 
 - `PHILOSOPHY.md` — the four philosophies the language is bound to.
-- `.dev/C26_BLOCKERS.md` — open quality blockers and their severity
-  (C26 track; `.dev/C25_BLOCKERS.md` is archived).
-- `.dev/C26_PROGRESS.md` — phase map for the C26 fix-only RC cycle.
-- `.dev/C27_PROGRESS.md` — phase map for the C27 fix-only RC cycle
-  (C26 successor, opened 2026-04-25).
-- `.dev/D28_BLOCKERS.md` — breaking changes deferred to the gen-D phase.
+- `.dev/E31_BLOCKERS.md` — E31 CLI surface blockers and stable gate
+  status.
+- `.dev/E31_PROGRESS.md` — E31 phase map.
 - `docs/reference/addon_manifest.md` — addon manifest schema.
 - `docs/reference/operators.md`, `docs/reference/class_like_types.md`,
   `docs/reference/standard_library.md`, `docs/reference/standard_methods.md`
@@ -76,8 +69,11 @@ are treated as breaking:
 4. Tightening a type signature in the surface (widening is additive).
 5. Removing or renaming a diagnostic code `E1xxx` used in tooling.
 6. Incompatible changes to the addon manifest schema (§4).
-7. Incompatible changes to the CLI flag grammar for `taida build`,
-   `taida run`, `taida init`, `taida publish`, `taida upgrade`.
+7. Incompatible changes to the CLI command hierarchy or flag grammar
+   documented in `docs/reference/cli.md`, including `taida build`,
+   `taida way`, `taida graph`, `taida doc`, `taida ingot`,
+   `taida init`, `taida lsp`, `taida auth`, `taida community`,
+   and `taida upgrade`.
 
 Additions that keep every previously-legal program working unchanged
 do **not** constitute a breaking change. They land at a `<num>` bump.
@@ -179,11 +175,19 @@ renumbering, or retiring codes is a breaking change.
 
 ### 2.4. CLI surface
 
-`taida build`, `taida run`, `taida init`, `taida publish`,
-`taida upgrade`, `taida check`, `taida fmt` accept the flag grammar
-documented in `docs/reference/cli.md`. Adding flags is additive.
-Changing the meaning of an existing flag, tightening its argument
-grammar, or retiring a flag is a breaking change.
+The public CLI surface is:
+
+- `taida` / `taida <FILE>`
+- `taida build [target] <PATH>`
+- `taida way <PATH>` and `taida way check|lint|verify|todo`
+- `taida graph` and `taida graph summary`
+- `taida doc`, `taida ingot`, `taida init`, `taida lsp`,
+  `taida auth`, `taida community`, `taida upgrade`
+
+The exact flag grammar is documented in `docs/reference/cli.md`.
+Adding flags is additive. Changing the meaning of an existing flag,
+tightening its argument grammar, retiring a flag, or moving a command
+between top-level and hub scope is a breaking change.
 
 ### 2.5. File layout contracts
 
@@ -213,6 +217,11 @@ depend on them do so at their own risk; they may change at any
   stable, the text is not).
 - The wallclock performance of any particular workload. Performance
   is tracked via the perf-gate harness (C25B-004) but not contractual.
+- Host resource exhaustion, including out-of-memory termination. The
+  native runtime may print a fatal allocation message and exit with
+  status 1, while interpreter / JS / WASM surfaces remain
+  host-runtime-dependent. Backend parity tests do not assert OOM
+  message or recovery behaviour.
 - Addon ABI major version: §4.4 permits ABI minor additions at a
   `<num>` bump, but major ABI revisions require a `<gen>` bump.
 - Any file under `.dev/`. This directory is explicitly development
@@ -248,7 +257,7 @@ Across the whole gen-C generation (`@c.25.*` and `@c.26.*`):
   no addon dispatcher in the stable contract at @d.X.
 
 The error message `"(supported: interpreter, native, wasm-full).
-Run 'taida build --target native' or use the interpreter; for wasm
+Run 'taida build native' or use the interpreter; for wasm
 targets, only 'wasm-full' supports addons."` is part of the stable
 surface — tooling is permitted to match on the substring
 `"supported: interpreter, native"` to detect the current policy.
@@ -291,7 +300,7 @@ host callbacks). The gen-C generation (`@c.25.*` / `@c.26.*` /
 
 ### 4.5. Publishing workflow
 
-The `taida publish` / `taida init --target rust-addon` workflow
+The `taida ingot publish` / `taida init --target rust-addon` workflow
 (C25B-007 / RC2.6) is part of the stable surface. The release
 workflow template (`crates/addon-rs/templates/release.yml.template`),
 tag-push semantics, and `--dry-run` / `--force-version` flag behaviour
@@ -300,7 +309,7 @@ are pinned by `tests/init_release_workflow_symmetry.rs` and the
 
 Core-bundled addons (`taida-lang/os`, `taida-lang/net`,
 `taida-lang/crypto`, `taida-lang/pool`, `taida-lang/js`) do **not**
-pass through `taida publish`; they are bundled through the
+pass through `taida ingot publish`; they are bundled through the
 `CoreBundledProvider` path. The only externally-publishable official
 addon at `@c.25.rc7` is `taida-lang/terminal`.
 
@@ -676,7 +685,7 @@ FIXED on `feat/c26` (Round 1 + Round 2 + Round 3 + Round 4 + Round 5 + Round 6 +
   with a pinned warning baseline.
 - **C26B-007** sub-phase 7.4 — **SEC-011** Sigstore cosign keyless
   signing + SLSA provenance attestation wired into the
-  `taida publish` workflow (Round 2 / wB).
+  `taida ingot publish` workflow (Round 2 / wB).
 - **C26B-009** — parser state-machine transition graph
   (`.dev/C26_PARSER_FSM.md`) + arm-body throw propagation.
 - **C26B-011** — Float parity (NaN / ±Inf / denormal) + Div /
@@ -709,7 +718,7 @@ FIXED on `feat/c26` (Round 1 + Round 2 + Round 3 + Round 4 + Round 5 + Round 6 +
 - **C26B-017** — Interpreter partial-application closure-capture
   bug fixed (Round 3 / wH); `makeAdder(10)(7) == 17` 3-backend.
 - **C26B-019** — multi-line `TypeDef(field <= v, ...)`
-  constructor parse + `taida check` vs `taida build` parser
+  constructor parse + `taida way check` vs `taida build` parser
   divergence eliminated (widening, §6.2).
 - **C26B-020** pillar 1 — `readBytesAt(path, offset, len)`
   3-backend API (see §5.5 addendum).
@@ -897,7 +906,7 @@ FIXED on `feat/c26` (Round 1 + Round 2 + Round 3 + Round 4 + Round 5 + Round 6 +
   / wH. The runtime diagnostic (warn on direct `req.body` slice
   in 2-arg handlers) is part of the code-path completion tracked
   separately.
-- **C26B-025** — `taida publish` rejects stale `packages.tdm`
+- **C26B-025** — `taida ingot publish` rejects stale `packages.tdm`
   self-identity before tag push.
 - **C26B-026** — Native h2 HPACK custom-header preservation fix
   (Round 2 / wC). See §5.1.
@@ -974,7 +983,7 @@ Round 9 merge narrative (all on `feat/c26`; merge commits
   **SEC-011 invariants are pinned into the symmetry test**:
   `sign` depends on `build-release`, `provenance` depends on
   `sign`, the verify-on-install step is present, and the
-  keyless-signing OIDC audience matches the `taida publish`
+  keyless-signing OIDC audience matches the `taida ingot publish`
   workflow. Future release-workflow edits that break any of
   those invariants hard-fail the test rather than silently
   drifting. Closes the second of the two OPEN blockers from
@@ -1230,8 +1239,9 @@ manifest pinned for the entire gen-D generation.
   spelled `callSign`, `syncRate`, `updatedBy`) are renamed to the
   rule-conformant casing (`call_sign`, `sync_rate`, `updated_by`).
   Programs that referenced the old names by literal field access
-  must be updated. Mechanical rewriting is provided by
-  `taida upgrade --d28` (see §6.6).
+  must be updated. Mechanical rewriting was provided during the D28
+  RC work, but E31 no longer ships AST migration commands; current
+  migrations are documented as manual guide steps.
 - **Mold-form / function-form coexistence** (D28B-015):
   `Map[xs](_)` / `map(xs, _)`, `StrOf[span, raw]()` / `strOf(span, raw)`
   remain simultaneously valid; the lock confirmed that PascalCase
@@ -1277,22 +1287,12 @@ manifest pinned for the entire gen-D generation.
   that adds a new admissible target string (e.g. `"wasm"`) without
   changing the default is additive and lands at a `<num>` bump.
 
-#### 6.5.4. Migration tooling: `taida upgrade --d28` is the
-single-direction rewriter
+#### 6.5.4. Historical migration tooling
 
-- **Tool** (D28B-007, `src/upgrade_d28.rs`,
-  `taida upgrade --d28 [--check] [--dry-run] <PATH>`): three-pass
-  AST visitor that (1) collects rule-violating buchi-pack and
-  schema-field rewrites, (2) propagates renamed field reads, and
-  (3) tokenises template-string interpolations (parser does not
-  re-parse template strings, so the third pass is textual but
-  rename-set-aware).
-- **Idempotency**: applying the tool twice to the same source
-  produces identical output (pinned by unit test in
-  `src/upgrade_d28.rs::tests::idempotent_*`).
-- **Single direction**: there is no inverse tool. Users are
-  expected to commit a clean tree before invoking
-  `taida upgrade --d28`.
+D28 carried an AST rewrite prototype for naming-rule cleanup during
+its RC work. That tool is not part of the E31 public CLI. The current
+stable surface keeps `taida upgrade` for self-upgrade only; source
+syntax migrations are handled by guide-driven manual edits.
 
 #### 6.5.5. Auxiliary rules
 
@@ -1313,29 +1313,10 @@ single-direction rewriter
 
 ### 6.6. Migration tooling
 
-`taida upgrade --d28` is the canonical migration tool for
-moving gen-C source to gen-D. It is intentionally
-single-direction:
-
-1. The user commits a clean tree.
-2. `taida upgrade --d28 <PATH>` rewrites `.td` and `.tdm` files
-   in place; `--dry-run` prints the diff without writing;
-   `--check` exits non-zero if any rewrites would be applied
-   (suitable for CI gates that want to assert
-   "this tree has been upgraded").
-3. The rewriter handles the mechanical buchi-pack and schema-field
-   case conversions (see §6.5.1). Symbols outside its three-pass
-   scope (for instance free identifiers used in dynamic addon
-   `Lookup[...]` calls) require manual review; the tool emits a
-   `taida upgrade --d28: residual references` warning when it
-   detects such identifiers.
-4. The tool itself is part of the gen-D surface and is pinned by
-   `tests/d28b_007_upgrade_d28.rs`. Output stability is required
-   by the `idempotent_*` tests; a future regression that breaks
-   idempotency is itself a breaking change against §6.5.4.
-
-A migration guide (in addition to this section) is published at
-`CHANGELOG.md` §3 (gen-D entry) per §6.1 step 4.
+E31 does not provide AST migration tooling. `taida upgrade` is reserved
+for upgrading the Taida binary itself. Source migrations such as the
+E30 class-like syntax cleanup are manual and documented in
+`docs/guide/migration_e30.md`.
 
 ### 6.7. Stable-after surface lock
 
@@ -1373,9 +1354,23 @@ manifest。
 - **§1.1 bullet 6 (addon facade 明示 binding)**: `RustAddon["fn"](arity <= N)`
   形式の facade binding (E30B-007 sub-step B-2、Lock-G)。
 
-Migration tool: `taida upgrade --e30 <PATH>` (旧 `Mold[T] =>` / `Error =>` prefix
-撤廃の AST-driven char-offset rewrite、idempotent)。詳細は `CHANGELOG.md` の
-`@e.30` section §6 参照。
+### 6.9. E31 CLI hierarchy manifest
+
+E31 is the gen-E CLI surface cleanup. It consolidates the previous
+top-level command spread into semantic hubs:
+
+- Quality commands move under `taida way`.
+- Package commands move under `taida ingot`.
+- `taida transpile` is removed in favour of `taida build js`.
+- `taida inspect` is removed in favour of `taida graph summary`.
+- `taida upgrade` is self-upgrade only; AST migration flags are rejected.
+
+Removed commands return `[E1700]` with a replacement hint. There is no
+deprecation alias period for E31.
+
+Migration note: E31 does not ship an AST migration command. E30 source
+updates are documented as manual guide steps in
+`docs/guide/migration_e30.md`.
 
 ---
 

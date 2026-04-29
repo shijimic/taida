@@ -61,7 +61,7 @@ fn native_build(source: &str, label: &str) -> (bool, String) {
     fs::write(&td, source).expect("write main.td");
     let bin = dir.join("out");
     let out = Command::new(taida_bin())
-        .args(["build", "--target", "native"])
+        .args(["build", "native"])
         .arg(&td)
         .arg("-o")
         .arg(&bin)

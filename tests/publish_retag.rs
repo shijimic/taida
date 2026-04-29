@@ -102,7 +102,7 @@ fn collision_without_retag_is_rejected() {
     // (otherwise auto-bump would pick a.2 since a.1 is the prev tag).
     let out = Command::new(taida_bin())
         .env("TAIDA_PUBLISH_SKIP_GH_AUTH", "1")
-        .args(["publish", "--dry-run", "--force-version", "a.1"])
+        .args(["ingot", "publish", "--dry-run", "--force-version", "a.1"])
         .current_dir(&project)
         .output()
         .expect("run");
@@ -151,7 +151,7 @@ fn retag_replaces_existing_tag() {
     // (otherwise auto-bump would pick a.2 since HEAD differs from the tagged tree).
     let out = Command::new(taida_bin())
         .env("TAIDA_PUBLISH_SKIP_GH_AUTH", "1")
-        .args(["publish", "--retag", "--force-version", "a.1"])
+        .args(["ingot", "publish", "--retag", "--force-version", "a.1"])
         .current_dir(&project)
         .output()
         .expect("run");
@@ -182,7 +182,14 @@ fn retag_dry_run_reports_retag_flag() {
 
     let out = Command::new(taida_bin())
         .env("TAIDA_PUBLISH_SKIP_GH_AUTH", "1")
-        .args(["publish", "--dry-run", "--retag", "--force-version", "a.1"])
+        .args([
+            "ingot",
+            "publish",
+            "--dry-run",
+            "--retag",
+            "--force-version",
+            "a.1",
+        ])
         .current_dir(&project)
         .output()
         .expect("run");

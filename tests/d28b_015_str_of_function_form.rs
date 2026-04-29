@@ -91,7 +91,7 @@ fn run_native(td: &Path, label: &str) -> Option<String> {
     let exe: PathBuf =
         std::env::temp_dir().join(format!("d28b015_native_{}_{}", std::process::id(), label));
     let build = Command::new(taida_bin())
-        .args(["build", "--target", "native"])
+        .args(["build", "native"])
         .arg(td)
         .arg("-o")
         .arg(&exe)
@@ -120,7 +120,7 @@ fn run_js(td: &Path, label: &str) -> Option<String> {
     }
     let js = std::env::temp_dir().join(format!("d28b015_js_{}_{}.mjs", std::process::id(), label));
     let build = Command::new(taida_bin())
-        .args(["build", "--target", "js"])
+        .args(["build", "js"])
         .arg(td)
         .arg("-o")
         .arg(&js)
@@ -144,7 +144,7 @@ fn run_js(td: &Path, label: &str) -> Option<String> {
 
 fn compile_wasm(td: &Path, target: &str, out: &Path) -> Result<(), String> {
     let output = Command::new(taida_bin())
-        .args(["build", "--target", target])
+        .args(["build", target])
         .arg(td)
         .arg("-o")
         .arg(out)

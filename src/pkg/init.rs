@@ -387,7 +387,7 @@ const RELEASE_YML_TEMPLATE: &str =
 ///
 /// # Rationale (C14-3)
 ///
-/// Under the C14 publish workflow, the `taida publish` CLI only pushes
+/// Under the C14 publish workflow, the `taida ingot publish` CLI only pushes
 /// the tag. All build / SHA-256 / `addon.lock.toml` / release creation
 /// responsibilities live in this workflow and are performed by
 /// `github-actions[bot]`, mirroring the Taida core release contract.
@@ -433,13 +433,13 @@ GitHub Release with `addon.lock.toml` attached.
 
 ```bash
 # Preview the next version without touching git
-taida publish --dry-run
+taida ingot publish --dry-run
 
 # Push the tag; CI takes over from there
-taida publish
+taida ingot publish
 ```
 
-The release is created by `github-actions[bot]`. The `taida publish`
+The release is created by `github-actions[bot]`. The `taida ingot publish`
 CLI does NOT build cdylibs, write `addon.lock.toml`, or call
 `gh release create` — those responsibilities live in CI.
 

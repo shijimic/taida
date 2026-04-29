@@ -1,6 +1,6 @@
 #![allow(clippy::doc_overindented_list_items)]
 
-//! C17-5: `taida install --force-refresh` re-extracts the store entry even
+//! C17-5: `taida ingot install --force-refresh` re-extracts the store entry even
 //! when sidecar SHA matches the remote (fast-path would otherwise skip).
 //!
 //! Also verifies:
@@ -68,7 +68,7 @@ fn run_install(
     extra: &[&str],
 ) -> std::process::Output {
     let mut cmd = Command::new(taida_bin());
-    cmd.arg("install");
+    cmd.arg("ingot").arg("install");
     for a in extra {
         cmd.arg(a);
     }
@@ -77,7 +77,7 @@ fn run_install(
         .env("TAIDA_GITHUB_BASE_URL", base)
         .env("TAIDA_GITHUB_API_URL", api)
         .env("GH_TOKEN", "unused");
-    cmd.output().expect("run taida install")
+    cmd.output().expect("run taida ingot install")
 }
 
 #[test]
@@ -202,13 +202,14 @@ fn c17_5_force_refresh_conflicts_with_no_remote_check() {
     // No server needed -- we want the CLI arg parser to reject before
     // it even looks at the network.
     let out = Command::new(taida_bin())
+        .arg("ingot")
         .arg("install")
         .arg("--force-refresh")
         .arg("--no-remote-check")
         .current_dir(&project)
         .env("HOME", &home)
         .output()
-        .expect("run taida install");
+        .expect("run taida ingot install");
     assert!(
         !out.status.success(),
         "mutual-exclusion must exit non-zero, stdout={} stderr={}",

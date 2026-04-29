@@ -785,7 +785,7 @@ int64_t taida_generic_unmold(int64_t val) {
             (int64_t)(intptr_t)"Gorillax error");
         return taida_throw(err);
     }
-    /* BE-WASM-1: TODO unmold — return unm channel, fallback to sol/__default/__value.
+    /* BE-WASM-1: TODO mold unmold — return unm channel, fallback to sol/__default/__value.
        Matches native_runtime.c taida_generic_unmold TODO branch. */
     if (taida_pack_has_hash(val, WASM_HASH___TYPE)) {
         int64_t type_ptr = taida_pack_get(val, WASM_HASH___TYPE);
@@ -3827,4 +3827,3 @@ int64_t taida_polymorphic_map(int64_t obj, int64_t fn_ptr) {
     /* Default: list.map */
     return taida_list_map(obj, fn_ptr);
 }
-

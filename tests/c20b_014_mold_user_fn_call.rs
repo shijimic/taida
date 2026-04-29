@@ -5,7 +5,7 @@
 //!
 //!   * **Interpreter** silently wrapped the call in a mold envelope:
 //!     `cursorMoveTo[1, 1]()` returned `@(__value <= 1, __type <=
-//!     "cursorMoveTo")` instead of invoking the function. `taida check`
+//!     "cursorMoveTo")` instead of invoking the function. `taida way check`
 //!     passed because the checker fell through to `Type::Unknown`.
 //!   * **Native lowering** emitted a `LowerError: unsupported mold type:
 //!     <fn-name>` at build time (different failure mode from Interpreter
@@ -181,7 +181,6 @@ fn c20b_014_mold_user_fn_js_matches_interpreter() {
     let mjs = unique_temp("c20b014_js", "mjs");
     let build = Command::new(taida_bin())
         .arg("build")
-        .arg("--target")
         .arg("js")
         .arg(fixture_path())
         .arg("-o")
@@ -225,7 +224,6 @@ fn c20b_014_mold_user_fn_native_matches_interpreter() {
     let bin = unique_temp("c20b014_native", "bin");
     let build = Command::new(taida_bin())
         .arg("build")
-        .arg("--target")
         .arg("native")
         .arg(fixture_path())
         .arg("-o")
@@ -264,12 +262,13 @@ fn c20b_014_mold_user_fn_native_matches_interpreter() {
 fn c20b_014_checker_rejects_named_fields_on_user_fn_mold_call() {
     // User function `greet` takes 1 arg. `greet["x"](extra <= "y")` is
     // invalid — user fns have no named-field ABI. This must surface as
-    // `[E1511]` at `taida check` time.
+    // `[E1511]` at `taida way check` time.
     let src =
         "greet name = \"hi \" + name => :Str\nmsg <= greet[\"x\"](extra <= \"y\")\nstdout(msg)\n";
     let src_path = unique_temp("c20b014_fields_src", "td");
     fs::write(&src_path, src).expect("write src");
     let out = Command::new(taida_bin())
+        .arg("way")
         .arg("check")
         .arg(&src_path)
         .output()
@@ -302,6 +301,7 @@ fn c20b_014_checker_accepts_user_fn_mold_syntax() {
     let src_path = unique_temp("c20b014_accept_src", "td");
     fs::write(&src_path, src).expect("write src");
     let out = Command::new(taida_bin())
+        .arg("way")
         .arg("check")
         .arg(&src_path)
         .output()
@@ -324,7 +324,7 @@ fn c20b_014_checker_accepts_user_fn_mold_syntax() {
 // fields and returned the raw function return type. Arity mismatches
 // (E1301), type mismatches (E1506) and partial-application errors
 // (E1505) that `Fn(args)` catches were silently skipped for
-// `Fn[args]()`, producing runtime crashes on code that `taida check`
+// `Fn[args]()`, producing runtime crashes on code that `taida way check`
 // accepted.
 //
 // Fix: delegate to the normal `Expr::FuncCall` path via a synthesised
@@ -335,6 +335,7 @@ fn run_check(src: &str, prefix: &str) -> (std::process::Output, String) {
     let src_path = unique_temp(prefix, "td");
     fs::write(&src_path, src).expect("write src");
     let out = Command::new(taida_bin())
+        .arg("way")
         .arg("check")
         .arg(&src_path)
         .output()
@@ -357,7 +358,7 @@ fn c20b_016_type_mismatch_mold_syntax_emits_e1506() {
     let (out, combined) = run_check(src, "c20b016_type");
     assert!(
         !out.status.success(),
-        "[C20B-016] `add[1, \"x\"]()` was accepted by taida check — regression. combined:\n{}",
+        "[C20B-016] `add[1, \"x\"]()` was accepted by taida way check — regression. combined:\n{}",
         combined
     );
     assert!(
@@ -413,6 +414,7 @@ fn c20b_016_valid_mold_syntax_call_passes_check_and_runs() {
     fs::write(&src_path, src).expect("write src");
     // Check phase
     let check = Command::new(taida_bin())
+        .arg("way")
         .arg("check")
         .arg(&src_path)
         .output()

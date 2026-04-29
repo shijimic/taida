@@ -107,7 +107,6 @@ fn assert_js_matches(stem: &str) {
     let mjs_path = unique_temp(&format!("c19_{}", stem), "mjs");
     let build_out = Command::new(taida_bin())
         .arg("build")
-        .arg("--target")
         .arg("js")
         .arg(td_path(stem))
         .arg("-o")
@@ -152,7 +151,6 @@ fn assert_native_matches(stem: &str) {
     let bin_path = unique_temp(&format!("c19_{}", stem), "bin");
     let build_out = Command::new(taida_bin())
         .arg("build")
-        .arg("--target")
         .arg("native")
         .arg(td_path(stem))
         .arg("-o")

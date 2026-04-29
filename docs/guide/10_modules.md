@@ -317,7 +317,7 @@ $ taida ./main.td
 
 | 用途 | エントリーポイント | packages.tdm の役割 |
 |------|-------------------|-------------------|
-| アプリ（`taida run`） | `main.td` | 依存宣言のみ |
+| アプリ（`taida <file>`） | `main.td` | 依存宣言のみ |
 | ライブラリ（`>>> author/pkg@a.1`） | packages.tdm が指す実コード | 依存 + 公開 API 宣言 |
 
 ---

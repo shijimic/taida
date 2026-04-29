@@ -11,7 +11,7 @@
 //! - docs gen (`taida::doc::extract_docs`) が 4 系統 (BuchiPack /
 //!   Mold / Inheritance / Error 継承) を旧 docs 構造 (`types` /
 //!   `molds` / `inheritances`) に正しく振り分ける
-//! - run_all_checks (LSP / `taida verify` 経路) が class-like 統合後も
+//! - run_all_checks (LSP / `taida way verify` 経路) が class-like 統合後も
 //!   type-consistency / cycle 検査を成立させる (NodeKind 統合で false
 //!   positive / false negative なし)
 //!
@@ -80,7 +80,7 @@ fn test_e30b_006_doc_gen_typedef_inheritance_into_inheritances() {
     assert_eq!(doc.inheritances[0].parent, "Pilot");
 }
 
-/// (E30B-006) `taida verify` の structural-summary は class-like 統合後も
+/// (E30B-006) `taida way verify` の structural-summary は class-like 統合後も
 /// type-consistency check を成立させる (NodeKind 統合で graph cycle 検出が
 /// 壊れていないこと)。
 #[test]

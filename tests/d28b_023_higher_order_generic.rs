@@ -78,17 +78,18 @@ fn write_temp_td(prefix: &str, src: &str) -> PathBuf {
 fn d28b_023_checker_accepts_function_constrained_type_param_call() {
     let src_path = write_temp_td("d28b023_check_ok", FIXTURE_INT);
     let out = Command::new(taida_bin())
+        .arg("way")
         .arg("check")
         .arg(&src_path)
         .output()
-        .expect("failed to spawn taida check");
+        .expect("failed to spawn taida way check");
     let _ = fs::remove_file(&src_path);
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
     let combined = format!("{}{}", stdout, stderr);
     assert!(
         out.status.success(),
-        "D28B-023: `taida check` should accept `F <= :T => :T` higher-order generic.\n\
+        "D28B-023: `taida way check` should accept `F <= :T => :T` higher-order generic.\n\
          stdout=\n{}\nstderr=\n{}",
         stdout,
         stderr
@@ -107,10 +108,11 @@ fn d28b_023_checker_still_rejects_unconstrained_call_with_hint() {
     let bad = "badCall[T] x: T fn: T = fn(x) => :T\n";
     let src_path = write_temp_td("d28b023_check_neg", bad);
     let out = Command::new(taida_bin())
+        .arg("way")
         .arg("check")
         .arg(&src_path)
         .output()
-        .expect("failed to spawn taida check");
+        .expect("failed to spawn taida way check");
     let _ = fs::remove_file(&src_path);
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
@@ -166,7 +168,6 @@ fn d28b_023_js_matches_interpreter() {
     let mjs = unique_temp("d28b023_js", "mjs");
     let build = Command::new(taida_bin())
         .arg("build")
-        .arg("--target")
         .arg("js")
         .arg(&src_path)
         .arg("-o")
@@ -205,7 +206,6 @@ fn d28b_023_native_matches_interpreter() {
     let bin = unique_temp("d28b023_native", "bin");
     let build = Command::new(taida_bin())
         .arg("build")
-        .arg("--target")
         .arg("native")
         .arg(&src_path)
         .arg("-o")

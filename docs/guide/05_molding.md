@@ -381,7 +381,7 @@ stdout(If[x > 0, "positive", "negative"]())
 
 特徴:
 
-- **Short-circuit**: 非選択 branch は評価しません。`If[true, "ok", throw "error"]()` でエラーは発生しません
+- **短絡評価**: 選択されなかった枝は評価しません。`If[true, "ok", throw "error"]()` でエラーは発生しません
 - **パイプライン対応**: `_` で前段の値を参照できます（`_ > 3` のようにネストした `_` も可能）
 - **ネスト可能**: `If[cond, If[cond2, a, b](), c]()` のように入れ子にできます
 - **`| |>` との使い分け**: `If` は 2 分岐向き、`| |>` は複数分岐向き
@@ -644,16 +644,16 @@ Gorillax[42]() => g         // g: Gorillax[Int], hasValue = true
 g ]=> value                  // 42（成功: 値が取り出せます）
 ```
 
-### Cage[T, F] -- Molten 専用の操作檻
+### Cage[T, F] -- JS Molten 専用の操作檻
 
-Cage は Molten（溶鉄）に対して操作を実行し、結果を Gorillax で包むモールドです。Cage 内でのみ溶鉄への操作が許可されます。
+Cage は JS / npm 連携の `Molten => JS` 分岐に対して操作を実行し、結果を Gorillax で包むモールドです。Cage 内でのみ JS 溶鉄への操作が許可されます。
 
-**Cage は Molten 専用です。** 第一引数は Molten 型の値のみ受け付けます。Taida の型安全な値を Cage に渡すことはできません。
+**Cage は `Molten => JS` 専用です。** 第一引数は JS 分岐の Molten 値だけを受け付けます。Taida の型安全な値、JSON 分岐、`TemperedMolten[T]` は Cage に渡せません。
 
 ```taida
 Cage[molten, function]() => gorillax  // gorillax: Gorillax[U]
-// molten: Molten（溶鉄のみ）
-// function: :Molten => :U（溶鉄に対する操作）
+// molten: Molten => JS
+// function: :Molten => :U（JS 溶鉄に対する操作）
 ```
 
 ### 使用例
@@ -678,15 +678,15 @@ rilax ]=> total              // total = 15
 
 ### JSON と Molten の関係
 
-JSON は概念的に Molten の一種です。どちらも外部由来の不透明な値であり、型安全な世界に持ち込むには鋳型を通す必要があります。
+JSON は `Molten => JSON` の分岐です。JS / npm 連携の値は `Molten => JS` の分岐です。どちらも外部由来の不透明な値ですが、鋳造経路は分かれます。
 
-ただし JSON には専用のモールド `JSON[raw, Schema]()` があり、通常はこちらを使います。JSON を Cage に渡すことも可能ですが、Cage では JavaScript のメソッド呼び出しが行われるため、JSON の処理には適していません。
+JSON には専用のモールド `JSON[raw, Schema]()` があります。JSON を Cage に渡すことはできません。
 
 | 状況 | 使うべきもの |
 |------|------------|
 | JSON 文字列を型付き値に変換 | `JSON[raw, Schema]()` |
 | npm パッケージの Molten を操作 | `Cage[molten, fn]()` |
-| JSON を Cage に渡す | 可能だが非推奨（`JSON[raw, Schema]()` を使うこと） |
+| JSON を Cage に渡す | 不可（`JSON[raw, Schema]()` を使うこと） |
 
 ### .relax() -- RelaxedGorillax[T]
 
@@ -735,7 +735,7 @@ npm パッケージから得られる Molten 値に対して、JavaScript 固有
 
 **重要: これらのモールドは JS トランスパイラでのみ動作します。** インタプリタおよび Native バックエンドでは「JS バックエンド専用です」コンパイルエラーになります。ポータブルなコード（複数バックエンドで動作させるコード）では使わないでください。
 
-**3バックエンド・パリティの対象外です。** JSNew, JSSet, JSBind, JSSpread は JS interop 層であり、JS トランスパイラ固有の機能です。インタプリタや Native バックエンドに同等の実装は提供されません。
+**3バックエンド・パリティの対象外です。** JSNew, JSSet, JSBind, JSSpread は JS 連携層に属し、JS トランスパイラ固有の機能です。インタプリタや Native バックエンドに同等の実装は提供されません。
 
 ### JSNew[constructor, args] -- コンストラクタ呼び出し
 

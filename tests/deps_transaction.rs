@@ -43,15 +43,16 @@ deps <= @(
     fs::write(&lock_path, "LOCK_SENTINEL\n").expect("write lock sentinel");
 
     let output = Command::new(common::taida_bin())
+        .arg("ingot")
         .arg("deps")
         .current_dir(&project_dir)
         .output()
-        .expect("run taida deps");
+        .expect("run taida ingot deps");
 
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         !output.status.success(),
-        "taida deps should fail on unresolved dependency\nstderr:\n{}",
+        "taida ingot deps should fail on unresolved dependency\nstderr:\n{}",
         stderr
     );
     assert!(

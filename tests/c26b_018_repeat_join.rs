@@ -91,7 +91,7 @@ fn run_js(src: &Path, dir: &Path) -> Option<String> {
     }
     let js = dir.join("out.mjs");
     let build = Command::new(taida_bin())
-        .args(["build", "--target", "js"])
+        .args(["build", "js"])
         .arg(src)
         .arg("-o")
         .arg(&js)
@@ -118,7 +118,7 @@ fn run_native(src: &Path, dir: &Path) -> Option<String> {
     }
     let bin = dir.join("out.bin");
     let build = Command::new(taida_bin())
-        .args(["build", "--target", "native"])
+        .args(["build", "native"])
         .arg(src)
         .arg("-o")
         .arg(&bin)

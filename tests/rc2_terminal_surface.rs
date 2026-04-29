@@ -17,7 +17,7 @@
 //! the raw function table.
 //!
 //! RC2B-208 (Must Fix): the review raised that
-//! `taida build --target native` rejects addon-backed packages, yet
+//! `taida build native` rejects addon-backed packages, yet
 //! the README and example told users to run exactly that. The RC2
 //! design calls the interpreter binary the "Native backend", so the
 //! README / example / design are now aligned to the interpreter run
@@ -387,11 +387,11 @@ stdout(`cols=${size.cols} rows=${size.rows}`)
     let _ = std::fs::remove_dir_all(&project);
 }
 
-// ── RC2B-208 lock: Cranelift --target native is still rejected ─
+// ── RC2B-208 lock: Cranelift native target is still rejected ─
 
 /// RC2.5 Phase 1: the Cranelift AOT native backend **accepts**
 /// addon-backed package imports. Previously (RC2B-208, RC2 scope) the
-/// lowering layer rejected `taida build --target native` for any
+/// lowering layer rejected `taida build native` for any
 /// package with `native/addon.toml`; that reject has been removed now
 /// that `taida_addon_call` exists in the native runtime.
 ///
@@ -422,7 +422,6 @@ stdout("rc2_5: terminal import accepted by cranelift native backend")
 
     let output = Command::new(taida_bin())
         .arg("build")
-        .arg("--target")
         .arg("native")
         .arg(project.join("main.td"))
         .arg("-o")
@@ -436,7 +435,7 @@ stdout("rc2_5: terminal import accepted by cranelift native backend")
 
     assert!(
         output.status.success(),
-        "RC2.5 contract: Cranelift --target native must now accept \
+        "RC2.5 contract: Cranelift native target must now accept \
          addon-backed package imports. stdout={}, stderr={}",
         stdout,
         stderr

@@ -49,7 +49,6 @@ fn js(source: &str) -> Option<String> {
 
     let transpile = Command::new(taida_bin())
         .arg("build")
-        .arg("--target")
         .arg("js")
         .arg(&tmp_td)
         .arg("-o")

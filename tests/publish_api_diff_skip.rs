@@ -1,6 +1,6 @@
 //! C14B-011: API diff skip contract tests.
 //!
-//! `taida publish --force-version` and `taida publish --retag` fully
+//! `taida ingot publish --force-version` and `taida ingot publish --retag` fully
 //! determine the target tag name without consulting the public API
 //! diff. Running the diff in those cases would (a) do work whose
 //! result is thrown away and (b) surface parse errors from pre-C13
@@ -127,7 +127,7 @@ fn force_version_skips_api_diff_on_parse_error() {
 
     let out = Command::new(taida_bin())
         .env("TAIDA_PUBLISH_SKIP_GH_AUTH", "1")
-        .args(["publish", "--dry-run", "--force-version", "b.1"])
+        .args(["ingot", "publish", "--dry-run", "--force-version", "b.1"])
         .current_dir(&project)
         .output()
         .expect("run");
@@ -172,7 +172,14 @@ fn retag_skips_api_diff_on_parse_error() {
     // the tag already exists but the tag's tree cannot be snapshotted.
     let out = Command::new(taida_bin())
         .env("TAIDA_PUBLISH_SKIP_GH_AUTH", "1")
-        .args(["publish", "--dry-run", "--retag", "--force-version", "a.1"])
+        .args([
+            "ingot",
+            "publish",
+            "--dry-run",
+            "--retag",
+            "--force-version",
+            "a.1",
+        ])
         .current_dir(&project)
         .output()
         .expect("run");
@@ -226,7 +233,14 @@ fn retag_alone_also_skips_api_diff() {
 
     let out = Command::new(taida_bin())
         .env("TAIDA_PUBLISH_SKIP_GH_AUTH", "1")
-        .args(["publish", "--dry-run", "--retag", "--force-version", "a.2"])
+        .args([
+            "ingot",
+            "publish",
+            "--dry-run",
+            "--retag",
+            "--force-version",
+            "a.2",
+        ])
         .current_dir(&project)
         .output()
         .expect("run");

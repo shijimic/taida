@@ -402,7 +402,7 @@ failed.getOrThrow()      // throw が発動します
 
 ## Gorillax -- 覚悟のエラーモデル
 
-外部パッケージ（npm 等）の Molten（溶鉄）操作は安全が保証されません。Cage モールドで Molten への操作を実行し、結果を Gorillax で受け取ります。Cage は Molten 専用です。
+外部パッケージ（npm 等）の `Molten => JS` 操作は安全が保証されません。Cage モールドで JS 分岐の Molten への操作を実行し、結果を Gorillax で受け取ります。Cage は `Molten => JS` 専用です。
 
 ### 基本: Cage → Gorillax → unmold
 

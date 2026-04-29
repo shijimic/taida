@@ -17,7 +17,7 @@
 | `E14xx` | モールド束縛エラー | TypeChecker | 必須引数不足、重複オプション、未定義フィールド |
 | `E15xx` | 定義・意味論エラー | TypeChecker | 重複定義、禁止構文の明示拒否 |
 | `E16xx` | 型推論・演算意味論エラー | TypeChecker | 戻り型不一致、列挙型不整合、演算子型不整合 |
-| `E17xx` | モジュール境界エラー | TypeChecker | `packages.tdm` 公開 API 不整合 |
+| `E17xx` | CLI / モジュール境界エラー | CLI / TypeChecker | 削除済み CLI surface、`packages.tdm` 公開 API 不整合 |
 | `E18xx` | 命名規則違反 (D28B-008 lint) | Parser / Lint | カテゴリ別命名規則 (D28B-001 Lock) 違反 |
 | `E20xx` | アドオンマニフェストエラー | Addon manifest parser | `targets` 互換契約違反、未知ターゲット |
 
@@ -35,7 +35,7 @@
 
 **フェーズ**: Parser (`src/parser/parser_expr.rs::parse_cond_branch`)
 
-**契機**: silent-bug 禁圧。`name <= | cond |> A | _ |> B` を複数行に分けて書くと、parser が続きの top-level 文を greedy に arm body として吸収する穴があった (`taida check` は通り、module load で symbol が消える)。**`CondBranchContext::LetRhs`** を `<=` 束縛の rhs で設定し、continuation arm が別行に現れたら `[E0303]` を発射します。
+**契機**: silent-bug 禁圧。`name <= | cond |> A | _ |> B` を複数行に分けて書くと、parser が続きの top-level 文を greedy に arm body として吸収する穴があった (`taida way check` は通り、module load で symbol が消える)。**`CondBranchContext::LetRhs`** を `<=` 束縛の rhs で設定し、continuation arm が別行に現れたら `[E0303]` を発射します。
 
 **代替手段**:
 
@@ -77,7 +77,7 @@
 | `E1410` | declare-only function field requires default function or explicit value (戻り型が defaultFn 生成不能な opaque / unknown alias の場合に definition-site で発火、E30 Lock-C / Lock-D、E30 Phase 5 land) | TypeChecker |
 | `E1411` | InheritanceDef の子フィールドが親の型と互換でない再定義 (旧 `E1410`、E30 Phase 3 で番号移動) | TypeChecker |
 | `E1412` | `RustAddon["fn"](arity <= N)` explicit binding violation: surface 不正 (string literal でない `fn` / `arity` field 欠落 / 非整数 arity) / facade context 外 / 未宣言 fn / manifest arity drift (E30 Lock-G、E30 Phase 7 sub-track B、Interpreter runtime + addon facade summary loader に発火) | Interpreter / TypeChecker |
-| `E1413` | addon facade で manifest `[functions]` の関数名を **bare 参照** している (legacy 暗黙 pre-inject に依存)。@e.30 Lock-G Sub-G4 で legacy pre-inject が撤廃されたため、`name <= RustAddon["name"](arity <= N)` を facade 先頭に追加する必要がある。`taida upgrade --e30 <pkg>/taida/` で自動 migrate 可能 (E30 Phase 7 sub-track B sub-step B-5 land) | Interpreter |
+| `E1413` | addon facade で manifest `[functions]` の関数名を **bare 参照** している (legacy 暗黙 pre-inject に依存)。@e.30 Lock-G Sub-G4 で legacy pre-inject が撤廃されたため、`name <= RustAddon["name"](arity <= N)` を facade 先頭に追加する必要がある。`@e.X` 以降は移行コマンドを提供しないため、該当 facade は手動で修正する必要がある | Interpreter |
 
 ### 定義・意味論エラー (`E15xx`)
 
@@ -118,15 +118,30 @@
 | `E1617` | Regex invariant 違反 (wasm profile での `Regex` 参照、`__`-prefix field の衝突など) | TypeChecker / emit_wasm_c |
 | `E1618` | モジュール境界越しの enum variant 並び順不一致 | TypeChecker |
 
-### モジュール境界エラー (`E17xx`)
+### CLI / モジュール境界エラー (`E17xx`)
 
 | コード | メッセージ | フェーズ |
 |--------|-----------|---------|
+| `E1700` | E31 で削除された top-level command / CLI flag が呼ばれた。新しい command path / positional syntax を使うこと | CLI |
 | `E1701` | `packages.tdm` で宣言された公開 API とエントリモジュールの実シンボル群が不整合 (未公開 symbol import / 宣言済み symbol 欠如 / module 内シンボル未発見) | TypeChecker |
+
+`E1700` の標準表示:
+
+```text
+[E1700] Command '<old>' was removed in @e.X. Use '<replacement>' instead.
+        See `taida --help` for the new command set.
+```
+
+削除済み flag の表示例:
+
+```text
+[E1700] Flag '--target <target>' was removed in @e.X. Use 'taida build <target> <PATH>' instead.
+        For example: `taida build js src`.
+```
 
 ### 命名規則違反 — D28B-008 lint (`E18xx`)
 
-D28B-001 (Phase 0 2026-04-26 Lock) のカテゴリ別命名規則を CI で pin する lint 診断。`taida lint <PATH>` で実行する。
+D28B-001 (Phase 0 2026-04-26 Lock) のカテゴリ別命名規則を CI で pin する lint 診断。`taida way lint <PATH>` で実行する。
 
 | コード | Lock 別名 | メッセージ | フェーズ |
 |--------|----------|-----------|---------|
@@ -162,7 +177,7 @@ D28B-001 (Phase 0 2026-04-26 Lock) のカテゴリ別命名規則を CI で pin 
 
 診断コードは発生フェーズに基づいて3つの層に分かれる。
 
-#### 1. 前段ゲート（`taida check` で検出、backend に到達しない）
+#### 1. 前段ゲート（`taida way check` / `taida way` で検出、backend に到達しない）
 
 | 帯域 | フェーズ | 責務 |
 |------|---------|------|
@@ -175,8 +190,8 @@ D28B-001 (Phase 0 2026-04-26 Lock) のカテゴリ別命名規則を CI で pin 
 | `E14xx` | TypeChecker | モールド束縛意味論。フィールド重複、引数不足 |
 | `E15xx` | TypeChecker | 定義・意味論。重複定義、禁止構文の明示拒否 |
 | `E16xx` | TypeChecker / Parser | 型推論・演算意味論。戻り型、比較、論理、cond-branch、循環継承 |
-| `E17xx` | TypeChecker | モジュール境界 (`packages.tdm`) 公開 API 不整合 |
-| `E18xx` | Parser / Lint | 命名規則違反 (D28B-008 lint、`taida lint` 実行時のみ発射) |
+| `E17xx` | CLI / TypeChecker | 削除済み CLI surface / モジュール境界 (`packages.tdm`) 公開 API 不整合 |
+| `E18xx` | Parser / Lint | 命名規則違反 (D28B-008 lint、`taida way lint` 実行時のみ発射) |
 
 #### 2. Backend 層（コード生成時に検出）
 
@@ -202,7 +217,7 @@ D28B-001 (Phase 0 2026-04-26 Lock) のカテゴリ別命名規則を CI で pin 
 - **前段ゲート内の重複なし**: `E01xx`-`E05xx` は入力処理の順序に沿った連番。`E13xx`-`E15xx` は TypeChecker 内の意味分類。両者は帯域が重複しない
 - **`E03xx` の Parser / Verify 共有**: `E0301`/`E0302` は Parser と Verify の両方で検出される。これは同一の制約違反を2箇所で検出するための意図的な共有であり、帯域重複ではない
 - **`E10xx`-`E12xx` は予約**: 将来の TypeChecker 拡張用に確保。現在は未使用
-- **`E18xx` は lint 帯域**: D28B-008 で確保。`taida lint` 実行時のみ発射し、`taida check` / `taida build` の前段ゲートには含めない (lint と check は別レイヤー、CI では別 job)
+- **`E18xx` は lint 帯域**: D28B-008 で確保。`taida way lint` 実行時のみ発射し、`taida way check` / `taida build` の前段ゲートには含めない (lint と check は別レイヤー、CI では別 job)
 - **`E16xx` の Parser / TypeChecker 共有**: `E1616` は Parser が cond-branch の arm body を検査する時点で発射される。`E1617` は TypeChecker と `emit_wasm_c` の 2 箇所で発射される (同じ不変条件の検査を異なる段で別側面から行う意図的共有)。`E1609` / `E1615` は将来拡張用に予約された欠番
 - **`E05xx` / `E06xx` / `E07xx` / `E08xx` / `E09xx` はカテゴリ予約**: 現時点で具体的な `E####` コードは未割当。モジュール解決 / ランタイム / codegen / パッケージ / グラフ各段のエラーは将来この帯域から採番する
 
@@ -212,10 +227,10 @@ D28B-001 (Phase 0 2026-04-26 Lock) のカテゴリ別命名規則を CI で pin 
 
 | 形式 | 使用箇所 | 例 |
 |------|---------|-----|
-| `E0301:` (コロン区切り) | Parser / Verify | `E0301: 単一方向制約違反 — ...` |
+| `E0301:` (コロン区切り) | Parser legacy | `E0301: 単一方向制約違反 — ...` |
 | `[E1301]` (ブラケット囲み) | TypeChecker | `[E1301] Function '...' takes at most ...` |
 
-**正規形式**: `[E####]`（ブラケット囲み）を正規とする。`E03xx` のコロン形式は後方互換のため維持するが、新規コードは必ずブラケット形式を使用すること。`split_diag_code_and_hint` 関数は両形式を解析できる。
+**正規形式**: `[E####]`（ブラケット囲み）を正規とする。`E03xx` のコロン形式は後方互換のため解析可能なまま維持するが、新規コードは必ずブラケット形式を使用すること。構造化診断の code 抽出は `src/diagnostics.rs::split_diag_code_and_hint` を source of truth とし、CLI / verify の JSONL 出力は両形式を同じ `code` として扱う。
 
 ## 命名規約
 
@@ -240,6 +255,6 @@ D28B-001 (Phase 0 2026-04-26 Lock) のカテゴリ別命名規則を CI で pin 
 
 ### AI 連携
 
-- `taida check --json` / `--diag-format jsonl` の出力に `E####` コードが含まれる
+- `taida way check --format json` / `taida way verify --format jsonl` / `taida build --diag-format jsonl` の出力に `E####` コードが含まれる
 - AI ツールはコードを安定識別子として利用できる（文面に依存しない）
 - 新規コード追加時はこのドキュメントを更新する

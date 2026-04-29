@@ -8,11 +8,12 @@ TTY 検出、ターミナルサイズ取得、キー / マウス入力、raw mod
 バッファ + 差分レンダラ、行エディタ、UX ウィジェットなど、61 個のシンボルを
 公開します。
 
-**位置付け**: addon (Rust `cdylib` + Taida facade)。core bundled の
-`taida-lang/os` / `taida-lang/net` と異なり、`taida install` でユーザの
-プロジェクトに導入します。Backend は **Native (Rust addon ABI v1) のみ**
-対応 — interpreter は addon ABI 経由で cdylib に dispatch、JS / WASM は
-直接サポート対象外 (graceful degrade)。
+**位置付け**: addon (Rust `cdylib` + Taida facade)。コア同梱の
+`taida-lang/os` / `taida-lang/net` と異なり、`packages.tdm` に依存を宣言した上で
+`taida ingot install` でユーザーのプロジェクトに導入します。バックエンドは
+**Native（Rust addon ABI v1）のみ**対応で、インタプリタは addon ABI 経由で
+cdylib にディスパッチします。JS / WASM は直接サポートしていません
+（graceful degrade で扱われます）。
 
 ---
 
@@ -20,8 +21,16 @@ TTY 検出、ターミナルサイズ取得、キー / マウス入力、raw mod
 
 ### インストール
 
+`packages.tdm` に依存を宣言します:
+
+```taida
+>>> taida-lang/terminal@a.1
+```
+
+その後、宣言済み依存をまとめて install します:
+
 ```bash
-taida install taida-lang/terminal
+taida ingot install
 ```
 
 `taida.lock` に SHA-256 が pin され、cdylib は `.taida/deps/<pkg>/native/`
@@ -306,7 +315,7 @@ addon の cdylib build と publish 手順は [`docs/guide/13_creating_addons.md`
 を参照してください。`taida-lang/terminal` 自身もこの publish パイプライン
 で release されています。
 
-詳細な API シグネチャは addon 側の README + `taida doc generate` 出力
-(`docs/api.md` 相当) を参照してください — `docs/reference/` 配下に terminal
-個別の API ファイルは置きません (bundled package docs governance、
-addon 側で自己完結する原則)。
+詳細な API シグネチャは addon 側の README と `taida doc generate` の出力
+（`docs/api.md` 相当）を参照してください。`docs/reference/` 配下には terminal
+個別の API ファイルを置きません（同梱パッケージの docs governance に従い、
+addon 側で自己完結させる原則です）。

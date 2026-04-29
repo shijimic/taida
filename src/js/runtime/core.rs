@@ -1171,7 +1171,7 @@ function __taida_display_string(v) {
       const items = Array.isArray(v.__items) ? v.__items : [];
       return 'Stream[completed: ' + items.length + ' items]';
     }
-    // C23B-003 reopen — TODO: interpreter `BuchiPack` with fields
+    // C23B-003 reopen — TODO mold: interpreter `BuchiPack` with fields
     // `id / task / sol / unm / __value / __default / __type`
     // (`src/interpreter/mold_eval.rs:1793-1801`).
     if (v.__type === 'TODO') {
@@ -2373,7 +2373,7 @@ function __taida_unmold(v) {
       }
       return v.__value;
     }
-    // TODO unmold: return unm channel (fallback __default, then __value).
+    // TODO mold unmold: return unm channel (fallback __default, then __value).
     if (v.__type === 'TODO') {
       if (Object.prototype.hasOwnProperty.call(v, 'unm')) return v.unm;
       if (Object.prototype.hasOwnProperty.call(v, '__default')) return v.__default;

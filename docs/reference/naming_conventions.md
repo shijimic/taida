@@ -1,6 +1,6 @@
 # 命名規則
 
-Taida Lang はカテゴリ別命名規則を採用します。本書はその正式仕様です。`taida lint` (D28B-008、診断コード `E18xx`) が CI で違反を pin します。
+Taida Lang はカテゴリ別命名規則を採用します。本書はその正式仕様です。`taida way lint` (D28B-008、診断コード `E18xx`) が CI で違反を pin します。
 
 ## 7 カテゴリ命名規則
 
@@ -238,7 +238,7 @@ error.throw()
 
 ## CI lint との関係
 
-`taida lint <PATH>` は本書の規則を E18xx 診断コードで pin します。CI では `lint` job で `taida lint` を hard-fail (非 0 終了で job fail) として実行します。
+`taida way lint <PATH>` は本書の規則を E18xx 診断コードで pin します。CI では `lint` job で `taida way lint` を hard-fail (非 0 終了で job fail) として実行します。
 
 | コード | 違反 |
 |--------|------|

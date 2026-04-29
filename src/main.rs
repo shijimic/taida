@@ -32,6 +32,7 @@ use taida::auth;
 use taida::codegen;
 #[cfg(feature = "community")]
 use taida::community;
+use taida::diagnostics::split_diag_code_and_hint;
 use taida::doc;
 use taida::graph::ai_format;
 use taida::graph::verify;
@@ -59,20 +60,11 @@ Usage:
 
 Commands:
   build       Build Native, JS, or WASM output
-  transpile   Alias for `build --target js`
-  todo        Scan TODO/Stub molds
-  check       Run parse/type/verify front gate
-  lint        D28B-008 naming-convention lint (E1801..E1809)
+  way         Quality hub: check, lint, verify, todo
   graph       AI-oriented structural JSON for codebase comprehension
-  verify      Run structural verification checks
-  inspect     Print summary + verification
-  init        Initialize a Taida project
-  deps        Resolve/install dependencies strictly
-  install     Install dependencies and write lockfile
-  update      Update dependencies and lockfile
-  publish     Prepare and publish a package
-  cache       Manage WASM runtime cache
   doc         Generate docs from doc comments
+  ingot       Package/dependency hub: deps, install, update, publish, cache
+  init        Initialize a Taida project
   lsp         Run the language server over stdio
   auth        Manage authentication state
   community   Access community features
@@ -93,18 +85,83 @@ fn print_graph_help() {
         "\
 Usage:
   taida graph [-o OUTPUT] [--recursive] <PATH>
+  taida graph summary [--format text|json|sarif] <PATH>
 
 Options:
   --recursive, -r   Follow imports recursively and produce unified multi-module JSON
   --output, -o      Output path (bare filename writes into .taida/graph/)
+  --format, -f      Summary output format: text | json | sarif
 
 Output:
   AI-oriented unified JSON — types, functions, flow, imports, exports
 
 Examples:
   taida graph examples/04_functions.td
+  taida graph summary --format json examples/04_functions.td
   taida graph --recursive examples/complex/inventory/main.td
   taida graph -o snapshot.json examples/04_functions.td"
+    );
+}
+
+fn print_graph_summary_help() {
+    println!(
+        "\
+Usage:
+  taida graph summary [--format text|json|sarif] <PATH>
+
+Options:
+  --format, -f    text | json | sarif
+
+Examples:
+  taida graph summary main.td
+  taida graph summary --format sarif main.td"
+    );
+}
+
+fn print_way_help() {
+    println!(
+        "\
+Usage:
+  taida way <PATH>
+  taida way check <PATH>
+  taida way lint <PATH>
+  taida way verify <PATH>
+  taida way todo [PATH]
+
+Commands:
+  check    Parse + type front gate
+  lint     Naming-convention lint
+  verify   Structural verification checks
+  todo     Scan TODO/Stub molds
+
+Notes:
+  `taida way <PATH>` is the full quality gate. It runs check, lint, and verify.
+  `--no-check` is not accepted under `taida way`."
+    );
+}
+
+fn print_ingot_help() {
+    println!(
+        "\
+Usage:
+  taida ingot [--help]
+  taida ingot deps
+  taida ingot install [--force-refresh | --no-remote-check] [--allow-local-addon-build]
+  taida ingot update [--allow-local-addon-build]
+  taida ingot publish [--label LABEL] [--force-version VERSION] [--retag] [--dry-run]
+  taida ingot cache [clean] [--addons|--store|--store-pkg <org>/<name>|--all] [--yes]
+
+Commands:
+  deps      Resolve/install dependencies strictly
+  install   Install dependencies and write lockfile
+  update    Update dependencies and lockfile
+  publish   Push a package tag; CI creates release assets
+  cache     Manage WASM/runtime/addon caches
+
+Notes:
+  `taida ingot` without a subcommand prints this help and exits successfully.
+  Dependencies are declared in packages.tdm with `>>> author/pkg@a.1`.
+  `taida ingot <author/package>` is not a supported form."
     );
 }
 
@@ -112,14 +169,16 @@ fn print_check_help() {
     println!(
         "\
 Usage:
-  taida check [--json] <PATH>
+  taida way check [--format text|json|jsonl|sarif] [--strict] [--quiet] <PATH>
 
 Options:
-  --json          Print `taida.check.v1` JSON diagnostics
+  --format, -f    text | json | jsonl | sarif
+  --strict        Treat WARNING diagnostics as failure
+  --quiet, -q     Suppress diagnostic output
 
 Examples:
-  taida check src
-  taida check --json main.td"
+  taida way check src
+  taida way check --format json main.td"
     );
 }
 
@@ -127,10 +186,9 @@ fn print_build_help() {
     println!(
         "\
 Usage:
-  taida build [--target native|js|wasm-min|wasm-wasi|wasm-edge|wasm-full] [--release] [--no-cache] [--diag-format text|jsonl] [-o OUTPUT] [--entry ENTRY] <PATH>
+  taida build [native|js|wasm-min|wasm-wasi|wasm-edge|wasm-full] [--release] [--no-cache] [--diag-format text|jsonl] [-o OUTPUT] [--entry ENTRY] <PATH>
 
 Options:
-  --target        Build target (default: native)
   --output, -o    Output file or directory
   --outdir        Alias of `--output`
   --entry         Native dir entry override (default: main.td)
@@ -140,10 +198,11 @@ Options:
 
 Examples:
   taida build app.td
-  taida build --target js src
+  taida build js src
   taida build --release app.td
 
 Notes:
+  Target defaults to native when omitted.
   `--no-check` is a global option and applies here."
     );
 }
@@ -152,14 +211,16 @@ fn print_todo_help() {
     println!(
         "\
 Usage:
-  taida todo [--format text|json] [PATH]
+  taida way todo [--format text|json|jsonl|sarif] [--strict] [--quiet] [PATH]
 
 Options:
-  --format, -f    text | json
+  --format, -f    text | json | jsonl | sarif
+  --strict        Accepted for `way` flag consistency
+  --quiet, -q     Suppress diagnostic output
 
 Examples:
-  taida todo
-  taida todo --format json src"
+  taida way todo
+  taida way todo --format json src"
     );
 }
 
@@ -167,30 +228,17 @@ fn print_verify_help() {
     println!(
         "\
 Usage:
-  taida verify [--check CHECK] [--format FORMAT] <PATH>
+  taida way verify [--check CHECK] [--format text|json|jsonl|sarif] [--strict] [--quiet] <PATH>
 
 Options:
   --check, -c     Run a specific check (repeatable)
   --format, -f    text | json | jsonl | sarif
+  --strict        Treat WARNING findings as failure
+  --quiet, -q     Suppress diagnostic output
 
 Examples:
-  taida verify src
-  taida verify --check error-coverage --format jsonl main.td"
-    );
-}
-
-fn print_inspect_help() {
-    println!(
-        "\
-Usage:
-  taida inspect [--format text|json|sarif] <PATH>
-
-Options:
-  --format, -f    text | json | sarif
-
-Examples:
-  taida inspect main.td
-  taida inspect --format sarif main.td"
+  taida way verify src
+  taida way verify --check error-coverage --format jsonl main.td"
     );
 }
 
@@ -214,13 +262,13 @@ fn print_deps_help() {
     println!(
         "\
 Usage:
-  taida deps
+  taida ingot deps
 
 Behavior:
   Resolve dependencies strictly and stop before install/lockfile update on any error.
 
 Example:
-  taida deps"
+  taida ingot deps"
     );
 }
 
@@ -228,7 +276,7 @@ fn print_install_help() {
     println!(
         "\
 Usage:
-  taida install [--force-refresh | --no-remote-check] [--allow-local-addon-build]
+  taida ingot install [--force-refresh | --no-remote-check] [--allow-local-addon-build]
 
 Behavior:
   Install resolved dependencies and generate/update `.taida/taida.lock`.
@@ -237,13 +285,13 @@ Behavior:
   downloads the prebuild binary for the current host target, verifies its
   SHA-256 against the manifest, and places it in
   `.taida/deps/<pkg>/native/lib<name>.<ext>`. Downloads are cached under
-  `~/.taida/addon-cache/`; use `taida cache clean --addons` to prune.
+  `~/.taida/addon-cache/`; use `taida ingot cache clean --addons` to prune.
 
   Large addon downloads (>= 256 KiB) show a progress indicator on stderr
   (RC15B-002).
 
   C17: before reusing a cached `~/.taida/store/<pkg>/<version>/` entry,
-  `taida install` compares the resolved commit SHA of `<version>` on the
+  `taida ingot install` compares the resolved commit SHA of `<version>` on the
   remote with the `commit_sha` recorded in the store `_meta.toml` sidecar.
   When they differ (tag was retagged / recreated), the store entry is
   re-extracted automatically. Offline or unverifiable states emit a
@@ -263,10 +311,10 @@ Options:
                                Integrity mismatches are never overridden by fallback.
 
 Example:
-  taida install
-  taida install --force-refresh
-  taida install --no-remote-check
-  taida install --allow-local-addon-build"
+  taida ingot install
+  taida ingot install --force-refresh
+  taida ingot install --no-remote-check
+  taida ingot install --allow-local-addon-build"
     );
 }
 
@@ -274,7 +322,7 @@ fn print_update_help() {
     println!(
         "\
 Usage:
-  taida update [--allow-local-addon-build]
+  taida ingot update [--allow-local-addon-build]
 
 Behavior:
   Resolve dependencies with remote-preferred generation lookup, then reinstall and update lockfile.
@@ -285,8 +333,8 @@ Options:
                                Integrity mismatches are never overridden by fallback.
 
 Example:
-  taida update
-  taida update --allow-local-addon-build"
+  taida ingot update
+  taida ingot update --allow-local-addon-build"
     );
 }
 
@@ -295,10 +343,10 @@ fn print_publish_help() {
     println!(
         "\
 Usage:
-  taida publish [--label LABEL] [--force-version VERSION] [--retag] [--dry-run]
+  taida ingot publish [--label LABEL] [--force-version VERSION] [--retag] [--dry-run]
 
 C14 tag-only publish:
-  `taida publish` only creates and pushes a git tag. It does not build
+  `taida ingot publish` only creates and pushes a git tag. It does not build
   cdylibs, does not compute SHA-256 digests, does not push to `main`,
   and does not call `gh release create`. The addon's CI
   (`.github/workflows/release.yml`) is the exclusive owner of release
@@ -321,11 +369,11 @@ Auto version bump:
   - Public API addition or internal only -> number bump     (a.3 -> a.4)
 
 Examples:
-  taida publish --dry-run
-  taida publish
-  taida publish --label rc
-  taida publish --force-version a.5
-  taida publish --force-version a.5.rc --retag"
+  taida ingot publish --dry-run
+  taida ingot publish
+  taida ingot publish --label rc
+  taida ingot publish --force-version a.5
+  taida ingot publish --force-version a.5.rc --retag"
     );
 }
 
@@ -360,6 +408,242 @@ fn is_help_flag(raw: &str) -> bool {
     matches!(raw, "--help" | "-h")
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum WayFormat {
+    Text,
+    Json,
+    Jsonl,
+    Sarif,
+}
+
+impl WayFormat {
+    fn parse(raw: &str) -> Option<Self> {
+        match raw {
+            "text" => Some(Self::Text),
+            "json" => Some(Self::Json),
+            "jsonl" => Some(Self::Jsonl),
+            "sarif" => Some(Self::Sarif),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct WayOptions {
+    format: WayFormat,
+    strict: bool,
+    quiet: bool,
+}
+
+impl Default for WayOptions {
+    fn default() -> Self {
+        Self {
+            format: WayFormat::Text,
+            strict: false,
+            quiet: false,
+        }
+    }
+}
+
+fn reject_no_check_under_way() -> ! {
+    eprintln!(
+        "--no-check is not allowed under 'taida way'. The way hub exists to run quality checks."
+    );
+    std::process::exit(2);
+}
+
+fn way_should_fail(errors: usize, warnings: usize, strict: bool) -> bool {
+    errors > 0 || (strict && warnings > 0)
+}
+
+fn parse_way_format_or_exit(raw: &str, command: &str) -> WayFormat {
+    match WayFormat::parse(raw) {
+        Some(format) => format,
+        None => {
+            eprintln!(
+                "Unknown format '{}'. Expected: text | json | jsonl | sarif",
+                raw
+            );
+            if command.is_empty() {
+                eprintln!("Run `taida way --help` for usage.");
+            } else {
+                eprintln!("Run `taida way {} --help` for usage.", command);
+            }
+            std::process::exit(2);
+        }
+    }
+}
+
+fn push_way_options_args(out: &mut Vec<String>, options: WayOptions) {
+    if options.strict {
+        out.push("--strict".to_string());
+    }
+    if options.quiet {
+        out.push("--quiet".to_string());
+    }
+    match options.format {
+        WayFormat::Text => {}
+        WayFormat::Json => {
+            out.push("--format".to_string());
+            out.push("json".to_string());
+        }
+        WayFormat::Jsonl => {
+            out.push("--format".to_string());
+            out.push("jsonl".to_string());
+        }
+        WayFormat::Sarif => {
+            out.push("--format".to_string());
+            out.push("sarif".to_string());
+        }
+    }
+}
+
+fn removed_command_replacement(command: &str) -> Option<&'static str> {
+    match command {
+        "check" => Some("taida way check"),
+        "verify" => Some("taida way verify"),
+        "lint" => Some("taida way lint"),
+        "todo" => Some("taida way todo"),
+        "inspect" => Some("taida graph summary"),
+        "transpile" => Some("taida build js"),
+        "compile" => Some("taida build native"),
+        "deps" => Some("taida ingot deps"),
+        "install" => Some("taida ingot install"),
+        "update" => Some("taida ingot update"),
+        "publish" => Some("taida ingot publish"),
+        "cache" => Some("taida ingot cache"),
+        "c" => Some("taida community"),
+        _ => None,
+    }
+}
+
+fn reject_removed_command(command: &str) -> ! {
+    let replacement = removed_command_replacement(command).unwrap_or("taida --help");
+    eprintln!(
+        "[E1700] Command '{}' was removed in @e.X. Use '{}' instead.",
+        command, replacement
+    );
+    eprintln!("        See `taida --help` for the new command set.");
+    std::process::exit(2);
+}
+
+fn reject_removed_migration_command(invocation: &str) -> ! {
+    eprintln!(
+        "[E1700] Migration command '{}' is not available in @e.X. E31 does not provide AST migration tooling.",
+        invocation
+    );
+    eprintln!(
+        "        Update source files manually; run `taida upgrade --help` for self-upgrade usage."
+    );
+    std::process::exit(2);
+}
+
+fn run_way(args: &[String], no_check: bool) {
+    if no_check {
+        reject_no_check_under_way();
+    }
+
+    if args.is_empty() || is_help_flag(args[0].as_str()) {
+        print_way_help();
+        return;
+    }
+
+    match args[0].as_str() {
+        "check" => run_check_cmd(&args[1..]),
+        "lint" => run_lint_cmd(&args[1..]),
+        "verify" => run_verify(&args[1..]),
+        "todo" => run_todo(&args[1..]),
+        "migrate" => reject_removed_migration_command("taida way migrate"),
+        _ => run_way_full(args),
+    }
+}
+
+fn run_way_full(args: &[String]) {
+    let mut options = WayOptions::default();
+    let mut path: Option<String> = None;
+
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--format" | "-f" => {
+                i += 1;
+                if i >= args.len() {
+                    eprintln!("Missing value for --format.");
+                    eprintln!("Run `taida way --help` for usage.");
+                    std::process::exit(2);
+                }
+                options.format = parse_way_format_or_exit(args[i].as_str(), "");
+            }
+            "--strict" => options.strict = true,
+            "--quiet" | "-q" => options.quiet = true,
+            raw if raw.starts_with('-') => {
+                eprintln!("Unknown option for `taida way`: {}", raw);
+                eprintln!("Run `taida way --help` for usage.");
+                std::process::exit(2);
+            }
+            _ => {
+                if path.is_some() {
+                    eprintln!("Only one <PATH> is accepted for taida way.");
+                    std::process::exit(2);
+                }
+                path = Some(args[i].clone());
+            }
+        }
+        i += 1;
+    }
+
+    let path = match path {
+        Some(path) => path,
+        None => {
+            eprintln!("Missing <PATH> argument.");
+            eprintln!("Run `taida way --help` for usage.");
+            std::process::exit(2);
+        }
+    };
+
+    let mut sub_args = Vec::new();
+    push_way_options_args(&mut sub_args, options);
+    sub_args.push(path.clone());
+    run_check_cmd(&sub_args);
+
+    let mut sub_args = Vec::new();
+    push_way_options_args(&mut sub_args, options);
+    sub_args.push(path.clone());
+    run_lint_cmd(&sub_args);
+
+    let mut sub_args = Vec::new();
+    push_way_options_args(&mut sub_args, options);
+    sub_args.push(path);
+    run_verify(&sub_args);
+}
+
+fn run_ingot(args: &[String]) {
+    if args.is_empty() || is_help_flag(args[0].as_str()) {
+        print_ingot_help();
+        return;
+    }
+
+    match args[0].as_str() {
+        "deps" => run_deps(&args[1..]),
+        "install" => run_install(&args[1..]),
+        "update" => run_update(&args[1..]),
+        #[cfg(feature = "community")]
+        "publish" => run_publish(&args[1..]),
+        #[cfg(not(feature = "community"))]
+        "publish" => {
+            eprintln!("The 'taida ingot publish' command requires the 'community' feature.");
+            eprintln!("Rebuild with: cargo build --features community");
+            std::process::exit(1);
+        }
+        "cache" => run_cache(&args[1..]),
+        other => {
+            eprintln!("Unknown subcommand for `taida ingot`: {}", other);
+            eprintln!("Run `taida ingot --help` for usage.");
+            std::process::exit(2);
+        }
+    }
+}
+
 fn main() {
     // C25B-018: install the panic hook + fatal-signal cleanup handlers
     // **before** we otherwise perturb signal dispositions below. This
@@ -370,7 +654,7 @@ fn main() {
     taida::panic_cleanup::install_panic_cleanup_hook();
     taida::panic_cleanup::install_signal_cleanup_handlers();
 
-    // C22-4 / C22B-004: restore `taida run ... | head` as a first-class UNIX
+    // C22-4 / C22B-004: restore `taida <file> ... | head` as a first-class UNIX
     // pipeline. Rust binaries default to SIGPIPE-driven exit(141) the moment
     // a downstream consumer closes early; we disable that disposition here so
     // that subsequent `write(2)` calls fail with EPIPE instead — which the
@@ -408,34 +692,13 @@ fn main() {
                 eprintln!("Rebuild with: cargo build --features lsp");
                 std::process::exit(1);
             }
-            "check" => run_check_cmd(&filtered_args[2..]),
-            "lint" => run_lint_cmd(&filtered_args[2..]),
-            "compile" => {
-                eprintln!(
-                    "Error: `taida compile` has been removed. Use `taida build --target native` instead."
-                );
-                std::process::exit(1);
-            }
-            "transpile" => run_transpile(&filtered_args[2..], no_check),
+            old if removed_command_replacement(old).is_some() => reject_removed_command(old),
+            "way" => run_way(&filtered_args[2..], no_check),
             "build" => run_build(&filtered_args[2..], no_check),
             "graph" => run_graph(&filtered_args[2..]),
-            "verify" => run_verify(&filtered_args[2..]),
-            "inspect" => run_inspect(&filtered_args[2..]),
             "init" => run_init(&filtered_args[2..]),
-            "deps" => run_deps(&filtered_args[2..]),
-            "install" => run_install(&filtered_args[2..]),
-            "update" => run_update(&filtered_args[2..]),
-            #[cfg(feature = "community")]
-            "publish" => run_publish(&filtered_args[2..]),
-            #[cfg(not(feature = "community"))]
-            "publish" => {
-                eprintln!("The 'publish' command requires the 'community' feature.");
-                eprintln!("Rebuild with: cargo build --features community");
-                std::process::exit(1);
-            }
+            "ingot" => run_ingot(&filtered_args[2..]),
             "doc" => run_doc(&filtered_args[2..]),
-            "cache" => run_cache(&filtered_args[2..]),
-            "todo" => run_todo(&filtered_args[2..]),
             #[cfg(feature = "community")]
             "auth" => auth::run_auth(&filtered_args[2..]),
             #[cfg(not(feature = "community"))]
@@ -445,9 +708,9 @@ fn main() {
                 std::process::exit(1);
             }
             #[cfg(feature = "community")]
-            "community" | "c" => community::run_community(&filtered_args[2..]),
+            "community" => community::run_community(&filtered_args[2..]),
             #[cfg(not(feature = "community"))]
-            "community" | "c" => {
+            "community" => {
                 eprintln!("The 'community' command requires the 'community' feature.");
                 eprintln!("Rebuild with: cargo build --features community");
                 std::process::exit(1);
@@ -540,7 +803,7 @@ fn run_source(source: &str, filename: &str, no_check: bool) {
                 }
             }
             // If the last value is not Unit and nothing was ever printed
-            // via `stdout(...)`, print the value so that `taida run expr.td`
+            // via `stdout(...)`, print the value so that `taida expr.td`
             // continues to show the result of a pure-expression script.
             let no_emissions = if interpreter.stream_stdout {
                 interpreter.stdout_emissions == 0
@@ -566,7 +829,7 @@ fn run_source(source: &str, filename: &str, no_check: bool) {
 }
 
 fn run_check_cmd(args: &[String]) {
-    let mut json_mode = false;
+    let mut options = WayOptions::default();
     let mut path: Option<String> = None;
 
     let mut i = 0;
@@ -576,16 +839,30 @@ fn run_check_cmd(args: &[String]) {
                 print_check_help();
                 return;
             }
-            "--json" => json_mode = true,
+            "--format" | "-f" => {
+                i += 1;
+                if i >= args.len() {
+                    eprintln!("Missing value for --format.");
+                    eprintln!("Run `taida way check --help` for usage.");
+                    std::process::exit(1);
+                }
+                options.format = parse_way_format_or_exit(args[i].as_str(), "check");
+            }
+            "--strict" => options.strict = true,
+            "--quiet" | "-q" => options.quiet = true,
+            "--json" => {
+                eprintln!("`--json` was removed. Use `taida way check --format json`.");
+                std::process::exit(2);
+            }
             raw if raw.starts_with('-') => {
                 eprintln!("Unknown option for check: {}", raw);
-                eprintln!("Run `taida check --help` for usage.");
-                std::process::exit(1);
+                eprintln!("Run `taida way check --help` for usage.");
+                std::process::exit(2);
             }
             _ => {
                 if path.is_some() {
-                    eprintln!("Only one <PATH> is accepted for taida check.");
-                    std::process::exit(1);
+                    eprintln!("Only one <PATH> is accepted for taida way check.");
+                    std::process::exit(2);
                 }
                 path = Some(args[i].clone());
             }
@@ -597,8 +874,8 @@ fn run_check_cmd(args: &[String]) {
         Some(p) => p,
         None => {
             eprintln!("Missing <PATH> argument.");
-            eprintln!("Run `taida check --help` for usage.");
-            std::process::exit(1);
+            eprintln!("Run `taida way check --help` for usage.");
+            std::process::exit(2);
         }
     };
 
@@ -670,24 +947,6 @@ fn run_check_cmd(args: &[String]) {
                 suggestion,
             });
         }
-
-        let findings = verify::run_check("error-coverage", &program, &file_str);
-        for finding in findings {
-            diagnostics.push(CheckDiagnostic {
-                stage: "verify",
-                severity: match finding.severity {
-                    verify::Severity::Error => "ERROR",
-                    verify::Severity::Warning => "WARNING",
-                    verify::Severity::Info => "INFO",
-                },
-                code: None,
-                message: finding.message,
-                file: finding.file,
-                line: finding.line,
-                column: None,
-                suggestion: None,
-            });
-        }
     }
 
     let errors = diagnostics.iter().filter(|d| d.severity == "ERROR").count();
@@ -697,72 +956,187 @@ fn run_check_cmd(args: &[String]) {
         .count();
     let infos = diagnostics.iter().filter(|d| d.severity == "INFO").count();
 
-    if json_mode {
-        let output = json!({
-            "schema": "taida.check.v1",
-            "diagnostics": diagnostics
-                .iter()
-                .map(|d| {
-                    json!({
-                        "stage": d.stage,
-                        "severity": d.severity,
-                        "code": d.code,
-                        "message": d.message,
-                        "location": {
-                            "file": d.file,
-                            "line": d.line,
-                            "column": d.column,
-                        },
-                        "suggestion": d.suggestion,
-                    })
-                })
-                .collect::<Vec<serde_json::Value>>(),
-            "summary": {
-                "total": diagnostics.len(),
-                "errors": errors,
-                "warnings": warnings,
-                "info": infos,
-                "files": td_files.len(),
-            }
-        });
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&output).unwrap_or_else(|_| "{}".to_string())
-        );
-    } else {
-        for d in &diagnostics {
-            match (&d.file, d.line, d.column) {
-                (Some(file), Some(line), Some(column)) => {
-                    eprintln!(
-                        "[{}][{}] {} ({}:{}:{})",
-                        d.severity, d.stage, d.message, file, line, column
-                    );
-                }
-                (Some(file), Some(line), None) => {
-                    eprintln!(
-                        "[{}][{}] {} ({}:{})",
-                        d.severity, d.stage, d.message, file, line
-                    );
-                }
-                (Some(file), None, _) => {
-                    eprintln!("[{}][{}] {} ({})", d.severity, d.stage, d.message, file);
-                }
-                _ => eprintln!("[{}][{}] {}", d.severity, d.stage, d.message),
-            }
-        }
-        eprintln!(
-            "check summary: total={}, errors={}, warnings={}, info={}, files={}",
-            diagnostics.len(),
+    if !options.quiet {
+        emit_check_diagnostics(
+            &diagnostics,
+            td_files.len(),
+            options,
             errors,
             warnings,
             infos,
-            td_files.len()
         );
     }
 
-    if errors > 0 {
+    if way_should_fail(errors, warnings, options.strict) {
         std::process::exit(1);
     }
+}
+
+fn emit_check_diagnostics(
+    diagnostics: &[CheckDiagnostic],
+    files: usize,
+    options: WayOptions,
+    errors: usize,
+    warnings: usize,
+    infos: usize,
+) {
+    match options.format {
+        WayFormat::Text => {
+            for d in diagnostics {
+                match (&d.file, d.line, d.column) {
+                    (Some(file), Some(line), Some(column)) => {
+                        eprintln!(
+                            "[{}][{}] {} ({}:{}:{})",
+                            d.severity, d.stage, d.message, file, line, column
+                        );
+                    }
+                    (Some(file), Some(line), None) => {
+                        eprintln!(
+                            "[{}][{}] {} ({}:{})",
+                            d.severity, d.stage, d.message, file, line
+                        );
+                    }
+                    (Some(file), None, _) => {
+                        eprintln!("[{}][{}] {} ({})", d.severity, d.stage, d.message, file);
+                    }
+                    _ => eprintln!("[{}][{}] {}", d.severity, d.stage, d.message),
+                }
+            }
+            eprintln!(
+                "check summary: total={}, errors={}, warnings={}, info={}, files={}",
+                diagnostics.len(),
+                errors,
+                warnings,
+                infos,
+                files
+            );
+        }
+        WayFormat::Json => {
+            let output = check_diagnostics_json(diagnostics, files, errors, warnings, infos);
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&output).unwrap_or_else(|_| "{}".to_string())
+            );
+        }
+        WayFormat::Jsonl => {
+            for d in diagnostics {
+                let rec = json!({
+                    "schema": "taida.diagnostic.v1",
+                    "stream": "check",
+                    "kind": "finding",
+                    "code": d.code,
+                    "message": d.message,
+                    "location": {
+                        "file": d.file,
+                        "line": d.line,
+                        "column": d.column,
+                    },
+                    "suggestion": d.suggestion,
+                    "stage": d.stage,
+                    "severity": d.severity,
+                });
+                println!("{}", rec);
+            }
+            println!(
+                "{}",
+                json!({
+                    "schema": "taida.diagnostic.v1",
+                    "stream": "check",
+                    "kind": "summary",
+                    "code": null,
+                    "message": "check summary",
+                    "location": null,
+                    "suggestion": null,
+                    "summary": {
+                        "total": diagnostics.len(),
+                        "errors": errors,
+                        "warnings": warnings,
+                        "info": infos,
+                        "files": files,
+                    }
+                })
+            );
+        }
+        WayFormat::Sarif => {
+            let results: Vec<serde_json::Value> = diagnostics
+                .iter()
+                .map(|d| {
+                    let level = match d.severity {
+                        "ERROR" => "error",
+                        "WARNING" => "warning",
+                        _ => "note",
+                    };
+                    json!({
+                        "ruleId": d.code.as_deref().unwrap_or(d.stage),
+                        "level": level,
+                        "message": { "text": d.message },
+                        "locations": [{
+                            "physicalLocation": {
+                                "artifactLocation": { "uri": d.file },
+                                "region": {
+                                    "startLine": d.line,
+                                    "startColumn": d.column,
+                                }
+                            }
+                        }]
+                    })
+                })
+                .collect();
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&json!({
+                    "version": "2.1.0",
+                    "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
+                    "runs": [{
+                        "tool": {
+                            "driver": {
+                                "name": "taida way check",
+                                "rules": []
+                            }
+                        },
+                        "results": results
+                    }]
+                }))
+                .unwrap_or_else(|_| "{}".to_string())
+            );
+        }
+    }
+}
+
+fn check_diagnostics_json(
+    diagnostics: &[CheckDiagnostic],
+    files: usize,
+    errors: usize,
+    warnings: usize,
+    infos: usize,
+) -> serde_json::Value {
+    json!({
+        "schema": "taida.check.v1",
+        "diagnostics": diagnostics
+            .iter()
+            .map(|d| {
+                json!({
+                    "stage": d.stage,
+                    "severity": d.severity,
+                    "code": d.code,
+                    "message": d.message,
+                    "location": {
+                        "file": d.file,
+                        "line": d.line,
+                        "column": d.column,
+                    },
+                    "suggestion": d.suggestion,
+                })
+            })
+            .collect::<Vec<serde_json::Value>>(),
+        "summary": {
+            "total": diagnostics.len(),
+            "errors": errors,
+            "warnings": warnings,
+            "info": infos,
+            "files": files,
+        }
+    })
 }
 
 // ── Lint subcommand (D28B-008) ──────────────────────────
@@ -771,7 +1145,7 @@ fn print_lint_help() {
     println!(
         "\
 Usage:
-  taida lint [--quiet] <PATH>
+  taida way lint [--format text|json|jsonl|sarif] [--strict] [--quiet] <PATH>
 
 Description:
   Run the D28B-008 naming-convention lint pass over <PATH>. <PATH> may be
@@ -785,19 +1159,21 @@ Exit codes:
   2   Argument / IO / parse / type error (lint cannot run cleanly).
 
 Options:
+  --format, -f    text | json | jsonl | sarif
+  --strict        Treat lint diagnostics as failure (same as default)
   --quiet         Suppress diagnostic output, exit code only.
   --help, -h      Show this help.
 
 Examples:
-  taida lint examples
-  taida lint --quiet src/main.td"
+  taida way lint examples
+  taida way lint --quiet src/main.td"
     );
 }
 
 fn run_lint_cmd(args: &[String]) {
     use taida::parser::lint::lint_program_with_source;
 
-    let mut quiet = false;
+    let mut options = WayOptions::default();
     let mut path: Option<String> = None;
 
     let mut i = 0;
@@ -807,15 +1183,25 @@ fn run_lint_cmd(args: &[String]) {
                 print_lint_help();
                 return;
             }
-            "--quiet" | "-q" => quiet = true,
+            "--format" | "-f" => {
+                i += 1;
+                if i >= args.len() {
+                    eprintln!("Missing value for --format.");
+                    eprintln!("Run `taida way lint --help` for usage.");
+                    std::process::exit(1);
+                }
+                options.format = parse_way_format_or_exit(args[i].as_str(), "lint");
+            }
+            "--strict" => options.strict = true,
+            "--quiet" | "-q" => options.quiet = true,
             raw if raw.starts_with('-') => {
                 eprintln!("Unknown option for lint: {}", raw);
-                eprintln!("Run `taida lint --help` for usage.");
+                eprintln!("Run `taida way lint --help` for usage.");
                 std::process::exit(2);
             }
             _ => {
                 if path.is_some() {
-                    eprintln!("Only one <PATH> is accepted for taida lint.");
+                    eprintln!("Only one <PATH> is accepted for taida way lint.");
                     std::process::exit(2);
                 }
                 path = Some(args[i].clone());
@@ -828,7 +1214,7 @@ fn run_lint_cmd(args: &[String]) {
         Some(p) => p,
         None => {
             eprintln!("Missing <PATH> argument.");
-            eprintln!("Run `taida lint --help` for usage.");
+            eprintln!("Run `taida way lint --help` for usage.");
             std::process::exit(2);
         }
     };
@@ -847,6 +1233,7 @@ fn run_lint_cmd(args: &[String]) {
 
     let mut total_diags: usize = 0;
     let mut had_parse_error: bool = false;
+    let mut report = verify::VerifyReport::new();
 
     for td_file in &td_files {
         let file_str = td_file.to_string_lossy().to_string();
@@ -863,7 +1250,7 @@ fn run_lint_cmd(args: &[String]) {
             // Lint cannot run cleanly when parse errors are present.
             // Skip this file and report.
             had_parse_error = true;
-            if !quiet {
+            if !options.quiet {
                 eprintln!(
                     "{}: parse errors prevent lint ({} error(s))",
                     file_str,
@@ -874,7 +1261,16 @@ fn run_lint_cmd(args: &[String]) {
         }
         let diags = lint_program_with_source(&program, &source);
         total_diags += diags.len();
-        if !quiet {
+        for d in &diags {
+            report.add(verify::VerifyFinding {
+                check: "naming-convention".to_string(),
+                severity: verify::Severity::Error,
+                message: format!("{} {}", d.code, d.message),
+                file: Some(file_str.clone()),
+                line: Some(d.span.line),
+            });
+        }
+        if !options.quiet && options.format == WayFormat::Text {
             for d in &diags {
                 println!("{}", d.render(&file_str));
             }
@@ -884,6 +1280,14 @@ fn run_lint_cmd(args: &[String]) {
     if had_parse_error {
         // Argument-level failure (lint could not clean-run somewhere)
         std::process::exit(2);
+    }
+    if !options.quiet {
+        match options.format {
+            WayFormat::Text => {}
+            WayFormat::Json => println!("{}", report.format_json()),
+            WayFormat::Jsonl => print!("{}", report.format_jsonl(&["naming-convention"])),
+            WayFormat::Sarif => print!("{}", report.format_sarif(&["naming-convention"])),
+        }
     }
     if total_diags > 0 {
         std::process::exit(1);
@@ -967,37 +1371,6 @@ fn severity_to_kind(severity: &str) -> &'static str {
     }
 }
 
-fn split_diag_code_and_hint(message: &str) -> (Option<String>, Option<String>) {
-    let code = if let Some(rest) = message.strip_prefix('[') {
-        if rest.len() >= 6 {
-            let code_candidate = &rest[..5];
-            let close = rest.as_bytes()[5];
-            if close == b']'
-                && code_candidate.len() == 5
-                && code_candidate.as_bytes()[0].is_ascii_uppercase()
-                && code_candidate.as_bytes()[1..]
-                    .iter()
-                    .all(|c| c.is_ascii_digit())
-            {
-                Some(code_candidate.to_string())
-            } else {
-                None
-            }
-        } else {
-            None
-        }
-    } else {
-        None
-    };
-
-    let suggestion = message
-        .split_once("Hint:")
-        .map(|(_, hint)| hint.trim().to_string())
-        .filter(|hint| !hint.is_empty());
-
-    (code, suggestion)
-}
-
 #[allow(clippy::too_many_arguments)]
 fn emit_compile_diag_jsonl(
     stats: &mut CompileDiagStats,
@@ -1067,29 +1440,6 @@ struct CheckDiagnostic {
     suggestion: Option<String>,
 }
 
-fn print_transpile_help() {
-    println!(
-        "\
-Usage:
-  taida transpile [--release] [--diag-format text|jsonl] [-o OUTPUT] <PATH>
-
-Alias for `taida build --target js`.
-
-Example:
-  taida transpile src -o dist"
-    );
-}
-
-fn run_transpile(args: &[String], no_check: bool) {
-    if args.len() == 1 && is_help_flag(args[0].as_str()) {
-        print_transpile_help();
-        return;
-    }
-    let mut forwarded = vec!["--target".to_string(), "js".to_string()];
-    forwarded.extend(args.iter().cloned());
-    run_build(&forwarded, no_check);
-}
-
 // ── Upgrade subcommand ──────────────────────────────────────
 
 fn print_upgrade_help() {
@@ -1097,28 +1447,19 @@ fn print_upgrade_help() {
         "\
 Usage:
   taida upgrade [--check] [--gen GEN] [--label LABEL] [--version VERSION]
-  taida upgrade --d28 [--check] [--dry-run] <PATH>
-  taida upgrade --e30 [--check] [--dry-run] <PATH>
 
 Options:
-  --check          Check for updates without installing (binary mode)
-                   or report non-compliant files without rewriting (--d28/--e30 mode)
+  --check          Check for updates without installing
   --gen GEN        Filter by generation (e.g. b)
   --label LABEL    Filter by label (e.g. rc2)
   --version VER    Upgrade to an exact version (e.g. @b.10.rc2)
-  --d28 PATH       D28B-007 code-migration mode: rewrite .td files to comply
-                   with the D28B-001 naming rules. Run `taida upgrade --d28
-                   --help` for details.
-  --e30 PATH       E30B-001 / E30B-007 code-migration mode: rewrite legacy
-                   `Mold[T] => Foo[T] = @(...)` syntax and add missing
-                   explicit RustAddon facade bindings. Run `taida upgrade
-                   --e30 --help` for details.
-  --dry-run        (--d28/--e30 only) Print rewrites without modifying files.
 
 Notes:
   --gen and --label can be combined.
   --version is mutually exclusive with --gen/--label.
   By default, upgrades to the latest stable version.
+  AST rewrite flags (`--d28`, `--d29`, `--e30`) were removed in @e.X.
+  No migration command is provided.
   Windows: only --check is supported (self-replace is not yet implemented).
 
 Examples:
@@ -1126,11 +1467,7 @@ Examples:
   taida upgrade --check
   taida upgrade --label rc2
   taida upgrade --gen b
-  taida upgrade --version @b.10.rc2
-  taida upgrade --d28 examples/03_buchi_pack.td
-  taida upgrade --d28 --check src/
-  taida upgrade --e30 examples/05_molding.td
-  taida upgrade --e30 --check src/"
+  taida upgrade --version @b.10.rc2"
     );
 }
 
@@ -1143,23 +1480,14 @@ fn run_upgrade(args: &[String]) {
         return;
     }
 
-    // ── D28B-007: `taida upgrade --d28 <path>` (code migration mode) ──
-    // Detects the --d28 flag and delegates to `taida::upgrade_d28::run`.
-    // This is a separate code-rewrite mode from the binary self-upgrade
-    // mode (which is the default behaviour without --d28).
     if args.iter().any(|a| a == "--d28") {
-        run_upgrade_d28(args);
-        return;
+        reject_removed_migration_command("taida upgrade --d28");
     }
-
-    // ── E30B-001 / E30B-007: `taida upgrade --e30 <path>` ──
-    // Detects the --e30 flag and delegates to `taida::upgrade_e30::run`.
-    // Migrates legacy `Mold[T] => Foo[T] = @(...)` syntax to the unified
-    // `Name[?type-args] [=> Parent] = @(...)` form. Phase 7 で完成予定。
-    // 統合先: E31 `taida way migrate --e30` ハブ (E31B-004 subcommand 統合候補)。
+    if args.iter().any(|a| a == "--d29") {
+        reject_removed_migration_command("taida upgrade --d29");
+    }
     if args.iter().any(|a| a == "--e30") {
-        run_upgrade_e30(args);
-        return;
+        reject_removed_migration_command("taida upgrade --e30");
     }
 
     let mut check_only = false;
@@ -1231,277 +1559,13 @@ fn run_upgrade(args: &[String]) {
     }
 }
 
-/// D28B-007: `taida upgrade --d28 <path>` — AST-aware code rewriter.
-///
-/// Rewrites `.td` source files to comply with the D28B-001 Phase 0 Lock
-/// (2026-04-26) category-based naming rules. Operates on parsed AST
-/// (not on text patterns) so the rewrite respects category × value-type
-/// (e.g. `@(callSign <= "Eva-02")` → `@(call_sign <= "Eva-02")` because
-/// the value is a non-function string, but `@(handler <= myFn)` is left
-/// unchanged because the value is a function).
-///
-/// Flags:
-///   --d28          Activate D28 code-migration mode (required)
-///   --check        Report rewrites that would happen, exit 1 if any
-///   --dry-run      Print rewrites but do not modify files
-///   <PATH>         File or directory to process (recurses into directories)
-#[cfg(feature = "community")]
-fn run_upgrade_d28(args: &[String]) {
-    use std::path::PathBuf;
-    use taida::upgrade_d28::{UpgradeD28Config, run};
-
-    let mut path: Option<PathBuf> = None;
-    let mut check_only = false;
-    let mut dry_run = false;
-
-    let mut i = 0;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--d28" => {} // already detected
-            "--help" | "-h" => {
-                print_upgrade_d28_help();
-                return;
-            }
-            "--check" => {
-                check_only = true;
-            }
-            "--dry-run" => {
-                dry_run = true;
-            }
-            other if other.starts_with("--") => {
-                eprintln!("Error: unknown option '{}' for upgrade --d28", other);
-                eprintln!("Run `taida upgrade --d28 --help` for usage.");
-                std::process::exit(1);
-            }
-            other => {
-                if path.is_some() {
-                    eprintln!("Error: only one path argument is allowed");
-                    std::process::exit(1);
-                }
-                path = Some(PathBuf::from(other));
-            }
-        }
-        i += 1;
-    }
-
-    let Some(path) = path else {
-        eprintln!("Error: --d28 requires a path argument");
-        eprintln!("Run `taida upgrade --d28 --help` for usage.");
-        std::process::exit(1);
-    };
-
-    if !path.exists() {
-        eprintln!("Error: path does not exist: {}", path.display());
-        std::process::exit(1);
-    }
-
-    let config = UpgradeD28Config {
-        path,
-        check_only,
-        dry_run,
-    };
-
-    match run(config) {
-        Ok((total_rewrites, files_changed)) => {
-            if total_rewrites == 0 {
-                println!("All files compliant with D28B-001 naming rules.");
-            } else if dry_run {
-                println!(
-                    "[dry-run] {} rewrite(s) across {} file(s) would be applied.",
-                    total_rewrites, files_changed
-                );
-            } else {
-                println!(
-                    "Applied {} rewrite(s) across {} file(s).",
-                    total_rewrites, files_changed
-                );
-            }
-        }
-        Err(msg) => {
-            eprintln!("{}", msg);
-            std::process::exit(1);
-        }
-    }
-}
-
-#[cfg(feature = "community")]
-fn print_upgrade_d28_help() {
-    println!(
-        "\
-Usage:
-  taida upgrade --d28 [--check] [--dry-run] <PATH>
-
-Description:
-  Rewrites .td source files to comply with the D28B-001 (Phase 0 2026-04-26
-  Lock) category-based naming rules. Operates on parsed AST so the rewrite
-  respects category x value-type. Idempotent: running the tool twice on the
-  same source produces identical output.
-
-Flags:
-  --d28          Activate D28 code-migration mode (required for this mode).
-  --check        Report rewrites that would happen and exit non-zero if any
-                 file is non-compliant. No files are modified.
-  --dry-run      Print rewrites but do not modify files.
-  -h, --help     Show this help.
-
-Examples:
-  taida upgrade --d28 examples/03_buchi_pack.td
-  taida upgrade --d28 --check src/
-  taida upgrade --d28 --dry-run my_project/
-"
-    );
-}
-
-/// E30B-001 / Lock-E: `taida upgrade --e30 <path>` — AST-aware migration.
-///
-/// Scans `.td` source files for legacy `Mold[T] => Foo[T] = @(...)` syntax and
-/// migrates to the unified `Name[?type-args] [=> Parent] = @(...)` form.
-/// For addon package roots / facade files, also inserts missing explicit
-/// `RustAddon["fn"](arity <= N)` bindings required by E30B-007.
-///
-/// Lock-E verdict (2026-04-28) 整合:
-///   - 統合先: E31 `taida way migrate --e30` ハブ (E31B-004 subcommand 統合候補)
-///   - D28 前例 `taida upgrade --d28` パターンを継承
-///   - deprecation policy: E gen は **deprecation なし、即破壊的変更**
-///
-/// Flags:
-///   --e30          Activate E30 code-migration mode (required)
-///   --check        Report legacy syntax that would migrate, exit 1 if any
-///   --dry-run      Print proposed migrations but do not modify files
-///   <PATH>         File or directory to process (recurses into directories)
-#[cfg(feature = "community")]
-fn run_upgrade_e30(args: &[String]) {
-    use std::path::PathBuf;
-    use taida::upgrade_e30::{UpgradeE30Config, UpgradeE30Error, run};
-
-    let mut path: Option<PathBuf> = None;
-    let mut check_only = false;
-    let mut dry_run = false;
-
-    let mut i = 0;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--e30" => {} // already detected
-            "--help" | "-h" => {
-                print_upgrade_e30_help();
-                return;
-            }
-            "--check" => {
-                check_only = true;
-            }
-            "--dry-run" => {
-                dry_run = true;
-            }
-            other if other.starts_with("--") => {
-                eprintln!("Error: unknown option '{}' for upgrade --e30", other);
-                eprintln!("Run `taida upgrade --e30 --help` for usage.");
-                std::process::exit(1);
-            }
-            other => {
-                if path.is_some() {
-                    eprintln!("Error: only one path argument is allowed");
-                    std::process::exit(1);
-                }
-                path = Some(PathBuf::from(other));
-            }
-        }
-        i += 1;
-    }
-
-    let Some(path) = path else {
-        eprintln!("Error: --e30 requires a path argument");
-        eprintln!("Run `taida upgrade --e30 --help` for usage.");
-        std::process::exit(1);
-    };
-
-    if !path.exists() {
-        eprintln!("Error: path does not exist: {}", path.display());
-        std::process::exit(1);
-    }
-
-    let config = UpgradeE30Config {
-        path,
-        check_only,
-        dry_run,
-    };
-
-    match run(config) {
-        Ok(report) => {
-            if report.legacy_count == 0 {
-                println!(
-                    "All {} file(s) scanned compliant with E30 unified class-like syntax.",
-                    report.files_scanned
-                );
-            } else if dry_run {
-                println!(
-                    "[dry-run] {} legacy class-like definition(s) across {} file(s) would migrate.",
-                    report.legacy_count, report.files_scanned
-                );
-            } else {
-                println!(
-                    "Scanned {} file(s); migrated {} legacy class-like definition(s) and {} RustAddon binding(s).",
-                    report.files_scanned, report.legacy_count, report.addon_binding_count
-                );
-            }
-        }
-        Err(UpgradeE30Error::CheckFailed { legacy_count }) => {
-            eprintln!(
-                "{} legacy class-like definition(s) need migration to E30 unified syntax.",
-                legacy_count
-            );
-            std::process::exit(1);
-        }
-        Err(e) => {
-            eprintln!("Error: {}", e);
-            std::process::exit(1);
-        }
-    }
-}
-
-#[cfg(feature = "community")]
-fn print_upgrade_e30_help() {
-    println!(
-        "\
-Usage:
-  taida upgrade --e30 [--check] [--dry-run] <PATH>
-
-Description:
-  Migrates .td source files from legacy class-like syntax to the unified E30
-  form `Name[?type-args] [=> Parent] = @(...)`. Operates on parsed AST so
-  detection is robust against whitespace/comment variations.
-
-  When <PATH> is an addon package root or `<pkg>/taida/<stem>.td` facade,
-  also inserts missing explicit `RustAddon[\"fn\"](arity <= N)` bindings from
-  `native/addon.toml`.
-
-  Lock-E verdict (2026-04-28) per .dev/E30_DESIGN.md:
-    - 統合先: E31 `taida way migrate --e30` ハブ (E31B-004 統合候補)
-    - 本 subcommand は D28 前例 `taida upgrade --d28` を踏襲
-    - deprecation policy: E gen は deprecation なし、即破壊的変更
-
-Flags:
-  --e30          Activate E30 code-migration mode (required for this mode).
-  --check        Report legacy syntax that would migrate; exit non-zero if any
-                 legacy form is detected. No files are modified.
-  --dry-run      Print proposed migrations but do not modify files.
-  -h, --help     Show this help.
-
-Examples:
-  taida upgrade --e30 examples/05_molding.td
-  taida upgrade --e30 --check src/
-  taida upgrade --e30 --dry-run my_project/
-"
-    );
-}
-
 fn print_build_usage_and_exit() -> ! {
     eprintln!(
         "\
 Usage:
-  taida build [--target native|js|wasm-min|wasm-wasi|wasm-edge|wasm-full] [--release] [--no-cache] [--diag-format text|jsonl] [-o OUTPUT] [--entry ENTRY] <PATH>
+  taida build [native|js|wasm-min|wasm-wasi|wasm-edge|wasm-full] [--release] [--no-cache] [--diag-format text|jsonl] [-o OUTPUT] [--entry ENTRY] <PATH>
 
 Options:
-  --target        Build target (default: native)
   --output, -o    Output file or directory
   --outdir        Alias of `--output`
   --entry         Native dir entry override (default: main.td)
@@ -1512,8 +1576,17 @@ Options:
     std::process::exit(1);
 }
 
+fn reject_removed_build_target_flag() -> ! {
+    eprintln!(
+        "[E1700] Flag '--target <target>' was removed in @e.X. Use 'taida build <target> <PATH>' instead."
+    );
+    eprintln!("        For example: `taida build js src`.");
+    std::process::exit(2);
+}
+
 fn run_build(args: &[String], no_check: bool) {
     let mut target = BuildTarget::Native;
+    let mut target_seen = false;
     let mut diag_format = DiagFormat::Text;
     let mut input_path: Option<String> = None;
     let mut output_path: Option<String> = None;
@@ -1529,20 +1602,10 @@ fn run_build(args: &[String], no_check: bool) {
                 return;
             }
             "--target" => {
-                i += 1;
-                if i >= args.len() {
-                    print_build_usage_and_exit();
-                }
-                target = match BuildTarget::parse(args[i].as_str()) {
-                    Some(v) => v,
-                    None => {
-                        eprintln!(
-                            "Unknown build target '{}'. Expected: native | js | wasm-min | wasm-wasi | wasm-edge | wasm-full",
-                            args[i]
-                        );
-                        std::process::exit(1);
-                    }
-                };
+                reject_removed_build_target_flag();
+            }
+            raw if raw.starts_with("--target=") => {
+                reject_removed_build_target_flag();
             }
             "--entry" => {
                 i += 1;
@@ -1581,12 +1644,21 @@ fn run_build(args: &[String], no_check: bool) {
                 eprintln!("Unknown option for build: {}", raw);
                 print_build_usage_and_exit();
             }
-            _ => {
+            raw => {
+                if !target_seen
+                    && input_path.is_none()
+                    && let Some(parsed) = BuildTarget::parse(raw)
+                {
+                    target = parsed;
+                    target_seen = true;
+                    i += 1;
+                    continue;
+                }
                 if input_path.is_some() {
                     eprintln!("Only one <PATH> is accepted for taida build.");
                     print_build_usage_and_exit();
                 }
-                input_path = Some(args[i].clone());
+                input_path = Some(raw.to_string());
             }
         }
         i += 1;
@@ -1624,14 +1696,14 @@ fn run_build(args: &[String], no_check: bool) {
                         "ERROR",
                         "compile",
                         None,
-                        "`--entry` is only valid with `--target native`.",
+                        "`--entry` is only valid with `taida build native`.",
                         None,
                         None,
                         None,
                         None,
                     );
                 } else {
-                    eprintln!("`--entry` is only valid with `--target native`.");
+                    eprintln!("`--entry` is only valid with `taida build native`.");
                 }
                 std::process::exit(1);
             }
@@ -2044,7 +2116,7 @@ fn run_build_js_file(
                 diag_format,
                 "compile",
                 Some(input_path),
-                "`taida build --target js --release /dev/stdin` is not supported.",
+                "`taida build js --release /dev/stdin` is not supported.",
             );
         }
 
@@ -3863,7 +3935,7 @@ fn report_release_gate_violations(
 }
 
 fn run_todo(args: &[String]) {
-    let mut format_type = "text".to_string();
+    let mut options = WayOptions::default();
     let mut path: Option<String> = None;
 
     let mut i = 0;
@@ -3877,27 +3949,21 @@ fn run_todo(args: &[String]) {
                 i += 1;
                 if i >= args.len() {
                     eprintln!("Missing value for --format.");
-                    eprintln!("Run `taida todo --help` for usage.");
+                    eprintln!("Run `taida way todo --help` for usage.");
                     std::process::exit(1);
                 }
-                match args[i].as_str() {
-                    "text" | "json" => {
-                        format_type = args[i].clone();
-                    }
-                    other => {
-                        eprintln!("Unknown format '{}'. Expected: text | json", other);
-                        std::process::exit(1);
-                    }
-                }
+                options.format = parse_way_format_or_exit(args[i].as_str(), "todo");
             }
+            "--strict" => options.strict = true,
+            "--quiet" | "-q" => options.quiet = true,
             raw if raw.starts_with('-') => {
                 eprintln!("Unknown option for todo: {}", raw);
-                eprintln!("Run `taida todo --help` for usage.");
+                eprintln!("Run `taida way todo --help` for usage.");
                 std::process::exit(1);
             }
             _ => {
                 if path.is_some() {
-                    eprintln!("Only one [PATH] is accepted for taida todo.");
+                    eprintln!("Only one [PATH] is accepted for taida way todo.");
                     std::process::exit(1);
                 }
                 path = Some(args[i].clone());
@@ -3954,39 +4020,128 @@ fn run_todo(args: &[String]) {
         *by_file.entry(todo.file.clone()).or_insert(0) += 1;
     }
 
-    if format_type == "json" {
-        let todos_json: Vec<serde_json::Value> = merged
-            .todos
-            .iter()
-            .map(|t| {
-                json!({
-                    "id": t.id,
-                    "task": t.task,
-                    "file": t.file,
-                    "line": t.line,
-                    "column": t.column,
-                })
-            })
-            .collect();
-        let by_id_json: Vec<serde_json::Value> = by_id
-            .into_iter()
-            .map(|(id, count)| json!({ "id": id, "count": count }))
-            .collect();
-        let by_file_json: Vec<serde_json::Value> = by_file
-            .into_iter()
-            .map(|(file, count)| json!({ "file": file, "count": count }))
-            .collect();
-        let output = json!({
-            "total": merged.todos.len(),
-            "todos": todos_json,
-            "byId": by_id_json,
-            "byFile": by_file_json,
-        });
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&output).unwrap_or_else(|_| "{}".to_string())
-        );
+    if options.quiet {
         return;
+    }
+
+    let todos_json: Vec<serde_json::Value> = merged
+        .todos
+        .iter()
+        .map(|t| {
+            json!({
+                "id": t.id,
+                "task": t.task,
+                "file": t.file,
+                "line": t.line,
+                "column": t.column,
+            })
+        })
+        .collect();
+    let by_id_json: Vec<serde_json::Value> = by_id
+        .iter()
+        .map(|(id, count)| json!({ "id": id, "count": count }))
+        .collect();
+    let by_file_json: Vec<serde_json::Value> = by_file
+        .iter()
+        .map(|(file, count)| json!({ "file": file, "count": count }))
+        .collect();
+    let output = json!({
+        "total": merged.todos.len(),
+        "todos": todos_json,
+        "byId": by_id_json,
+        "byFile": by_file_json,
+    });
+
+    match options.format {
+        WayFormat::Json => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&output).unwrap_or_else(|_| "{}".to_string())
+            );
+            return;
+        }
+        WayFormat::Jsonl => {
+            for todo in &merged.todos {
+                println!(
+                    "{}",
+                    json!({
+                        "schema": "taida.diagnostic.v1",
+                        "stream": "todo",
+                        "kind": "finding",
+                        "code": null,
+                        "message": todo.task,
+                        "location": {
+                            "file": todo.file,
+                            "line": todo.line,
+                            "column": todo.column,
+                        },
+                        "suggestion": null,
+                        "severity": "INFO",
+                        "id": todo.id,
+                    })
+                );
+            }
+            println!(
+                "{}",
+                json!({
+                    "schema": "taida.diagnostic.v1",
+                    "stream": "todo",
+                    "kind": "summary",
+                    "code": null,
+                    "message": "todo summary",
+                    "location": null,
+                    "suggestion": null,
+                    "summary": {
+                        "total": merged.todos.len(),
+                        "errors": 0,
+                        "warnings": 0,
+                        "info": merged.todos.len(),
+                    }
+                })
+            );
+            return;
+        }
+        WayFormat::Sarif => {
+            let results: Vec<serde_json::Value> = merged
+                .todos
+                .iter()
+                .map(|todo| {
+                    json!({
+                        "ruleId": "todo",
+                        "level": "note",
+                        "message": { "text": todo.task },
+                        "locations": [{
+                            "physicalLocation": {
+                                "artifactLocation": { "uri": todo.file },
+                                "region": {
+                                    "startLine": todo.line,
+                                    "startColumn": todo.column,
+                                }
+                            }
+                        }]
+                    })
+                })
+                .collect();
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&json!({
+                    "version": "2.1.0",
+                    "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
+                    "runs": [{
+                        "tool": {
+                            "driver": {
+                                "name": "taida way todo",
+                                "rules": []
+                            }
+                        },
+                        "results": results
+                    }]
+                }))
+                .unwrap_or_else(|_| "{}".to_string())
+            );
+            return;
+        }
+        WayFormat::Text => {}
     }
 
     if merged.todos.is_empty() {
@@ -4021,6 +4176,11 @@ fn run_todo(args: &[String]) {
 // ── Graph subcommand ────────────────────────────────────
 
 fn run_graph(args: &[String]) {
+    if args.first().is_some_and(|arg| arg == "summary") {
+        run_graph_summary(&args[1..]);
+        return;
+    }
+
     let mut path: Option<String> = None;
     let mut output_path: Option<String> = None;
     let mut recursive = false;
@@ -4126,11 +4286,112 @@ fn run_graph(args: &[String]) {
     }
 }
 
+fn run_graph_summary(args: &[String]) {
+    let mut format_type = "text".to_string();
+    let mut path: Option<String> = None;
+
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--help" | "-h" => {
+                print_graph_summary_help();
+                return;
+            }
+            "--format" | "-f" => {
+                i += 1;
+                if i >= args.len() {
+                    eprintln!("Missing value for --format.");
+                    eprintln!("Run `taida graph summary --help` for usage.");
+                    std::process::exit(1);
+                }
+                match args[i].as_str() {
+                    "text" | "json" | "sarif" => {
+                        format_type = args[i].clone();
+                    }
+                    other => {
+                        eprintln!("Unknown format '{}'. Expected: text | json | sarif", other);
+                        std::process::exit(1);
+                    }
+                }
+            }
+            raw if raw.starts_with('-') => {
+                eprintln!("Unknown option for graph summary: {}", raw);
+                eprintln!("Run `taida graph summary --help` for usage.");
+                std::process::exit(1);
+            }
+            _ => {
+                if path.is_some() {
+                    eprintln!("Only one <PATH> is accepted for taida graph summary.");
+                    std::process::exit(1);
+                }
+                path = Some(args[i].clone());
+            }
+        }
+        i += 1;
+    }
+
+    let file_path = match path {
+        Some(p) => p,
+        None => {
+            eprintln!("Missing <PATH> argument.");
+            eprintln!("Run `taida graph summary --help` for usage.");
+            std::process::exit(1);
+        }
+    };
+
+    let source = match fs::read_to_string(&file_path) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("Error reading file '{}': {}", file_path, e);
+            std::process::exit(1);
+        }
+    };
+
+    let (program, parse_errors) = parse(&source);
+    if !parse_errors.is_empty() {
+        for err in &parse_errors {
+            eprintln!("{}", err);
+        }
+        std::process::exit(1);
+    }
+
+    let summary = verify::structural_summary(&program, &file_path);
+    match format_type.as_str() {
+        "sarif" => print!("{}", format_graph_summary_sarif(&summary)),
+        _ => println!("{}", summary),
+    }
+}
+
+fn format_graph_summary_sarif(summary_json: &str) -> String {
+    let summary =
+        serde_json::from_str::<serde_json::Value>(summary_json).unwrap_or_else(|_| json!({}));
+    serde_json::to_string_pretty(&json!({
+        "$schema": "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/main/sarif-2.1/schema/sarif-schema-2.1.0.json",
+        "version": "2.1.0",
+        "runs": [
+            {
+                "tool": {
+                    "driver": {
+                        "name": "taida-graph-summary",
+                        "version": taida_version(),
+                        "rules": []
+                    }
+                },
+                "results": [],
+                "properties": {
+                    "summary": summary
+                }
+            }
+        ]
+    }))
+    .expect("graph summary SARIF serialization should not fail")
+}
+
 // ── Verify subcommand ───────────────────────────────────
 
 fn run_verify(args: &[String]) {
     let mut checks: Vec<String> = Vec::new();
-    let mut format_type = "text".to_string();
+    let mut options = WayOptions::default();
     let mut path: Option<String> = None;
 
     let mut i = 0;
@@ -4144,7 +4405,7 @@ fn run_verify(args: &[String]) {
                 i += 1;
                 if i >= args.len() {
                     eprintln!("Missing value for --check.");
-                    eprintln!("Run `taida verify --help` for usage.");
+                    eprintln!("Run `taida way verify --help` for usage.");
                     std::process::exit(1);
                 }
                 if !verify::ALL_CHECKS.contains(&args[i].as_str()) {
@@ -4161,30 +4422,21 @@ fn run_verify(args: &[String]) {
                 i += 1;
                 if i >= args.len() {
                     eprintln!("Missing value for --format.");
-                    eprintln!("Run `taida verify --help` for usage.");
+                    eprintln!("Run `taida way verify --help` for usage.");
                     std::process::exit(1);
                 }
-                match args[i].as_str() {
-                    "text" | "json" | "jsonl" | "sarif" => {
-                        format_type = args[i].clone();
-                    }
-                    other => {
-                        eprintln!(
-                            "Unknown format '{}'. Expected: text | json | jsonl | sarif",
-                            other
-                        );
-                        std::process::exit(1);
-                    }
-                }
+                options.format = parse_way_format_or_exit(args[i].as_str(), "verify");
             }
+            "--strict" => options.strict = true,
+            "--quiet" | "-q" => options.quiet = true,
             raw if raw.starts_with('-') => {
                 eprintln!("Unknown option for verify: {}", raw);
-                eprintln!("Run `taida verify --help` for usage.");
+                eprintln!("Run `taida way verify --help` for usage.");
                 std::process::exit(1);
             }
             _ => {
                 if path.is_some() {
-                    eprintln!("Only one <PATH> is accepted for taida verify.");
+                    eprintln!("Only one <PATH> is accepted for taida way verify.");
                     std::process::exit(1);
                 }
                 path = Some(args[i].clone());
@@ -4197,7 +4449,7 @@ fn run_verify(args: &[String]) {
         Some(p) => p,
         None => {
             eprintln!("Missing <PATH> argument.");
-            eprintln!("Run `taida verify --help` for usage.");
+            eprintln!("Run `taida way verify --help` for usage.");
             std::process::exit(1);
         }
     };
@@ -4256,125 +4508,18 @@ fn run_verify(args: &[String]) {
     } else {
         checks.iter().map(|s| s.as_str()).collect()
     };
-    let output = match format_type.as_str() {
-        "json" => report.format_json(),
-        "jsonl" => report.format_jsonl(&checks_ref),
-        "sarif" => report.format_sarif(&checks_ref),
-        _ => report.format_text(&checks_ref),
-    };
-    print!("{}", output);
+    if !options.quiet {
+        let output = match options.format {
+            WayFormat::Json => report.format_json(),
+            WayFormat::Jsonl => report.format_jsonl(&checks_ref),
+            WayFormat::Sarif => report.format_sarif(&checks_ref),
+            WayFormat::Text => report.format_text(&checks_ref),
+        };
+        print!("{}", output);
+    }
 
-    if format_type == "jsonl" && report.errors() > 0 {
+    if way_should_fail(report.errors(), report.warnings(), options.strict) {
         std::process::exit(1);
-    }
-}
-
-// ── Inspect subcommand ──────────────────────────────────
-
-fn run_inspect(args: &[String]) {
-    let mut format_type = "text".to_string();
-    let mut path: Option<String> = None;
-
-    let mut i = 0;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--help" | "-h" => {
-                print_inspect_help();
-                return;
-            }
-            "--format" | "-f" => {
-                i += 1;
-                if i >= args.len() {
-                    eprintln!("Missing value for --format.");
-                    eprintln!("Run `taida inspect --help` for usage.");
-                    std::process::exit(1);
-                }
-                match args[i].as_str() {
-                    "text" | "json" | "sarif" => {
-                        format_type = args[i].clone();
-                    }
-                    other => {
-                        eprintln!("Unknown format '{}'. Expected: text | json | sarif", other);
-                        std::process::exit(1);
-                    }
-                }
-            }
-            raw if raw.starts_with('-') => {
-                eprintln!("Unknown option for inspect: {}", raw);
-                eprintln!("Run `taida inspect --help` for usage.");
-                std::process::exit(1);
-            }
-            _ => {
-                if path.is_some() {
-                    eprintln!("Only one <PATH> is accepted for taida inspect.");
-                    std::process::exit(1);
-                }
-                path = Some(args[i].clone());
-            }
-        }
-        i += 1;
-    }
-
-    let file_path = match path {
-        Some(p) => p,
-        None => {
-            eprintln!("Missing <PATH> argument.");
-            eprintln!("Run `taida inspect --help` for usage.");
-            std::process::exit(1);
-        }
-    };
-
-    let source = match fs::read_to_string(&file_path) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("Error reading file '{}': {}", file_path, e);
-            std::process::exit(1);
-        }
-    };
-
-    let (program, parse_errors) = parse(&source);
-    if !parse_errors.is_empty() {
-        for err in &parse_errors {
-            eprintln!("{}", err);
-        }
-        std::process::exit(1);
-    }
-
-    match format_type.as_str() {
-        "json" => {
-            // JSON: structural summary + verify results
-            let summary = verify::structural_summary(&program, &file_path);
-            let report = verify::run_all_checks(&program, &file_path);
-            let checks_ref: Vec<&str> = verify::ALL_CHECKS.to_vec();
-            let sarif = report.format_sarif(&checks_ref);
-            println!("{{");
-            println!("  \"summary\": {},", summary);
-            println!("  \"verification\": {}", sarif);
-            println!("}}");
-        }
-        "sarif" => {
-            // SARIF only
-            let report = verify::run_all_checks(&program, &file_path);
-            let checks_ref: Vec<&str> = verify::ALL_CHECKS.to_vec();
-            print!("{}", report.format_sarif(&checks_ref));
-        }
-        _ => {
-            // Text: summary + verify
-            println!("=== Taida Inspect: {} ===\n", file_path);
-
-            println!("--- Structural Summary ---");
-            let summary = verify::structural_summary(&program, &file_path);
-            println!("{}\n", summary);
-
-            println!("--- Structure ---");
-            let ai_json = ai_format::format_ai_json(&program, &file_path);
-            println!("{}\n", ai_json);
-
-            println!("--- Verification ---");
-            let report = verify::run_all_checks(&program, &file_path);
-            let checks_ref: Vec<&str> = verify::ALL_CHECKS.to_vec();
-            print!("{}", report.format_text(&checks_ref));
-        }
     }
 }
 
@@ -4492,7 +4637,7 @@ fn run_deps(args: &[String]) {
         }
         _ => {
             eprintln!("Unexpected arguments.");
-            eprintln!("Run `taida deps --help` for usage.");
+            eprintln!("Run `taida ingot deps --help` for usage.");
             std::process::exit(1);
         }
     }
@@ -4532,7 +4677,7 @@ fn run_deps(args: &[String]) {
         eprintln!("  ERROR: {}", err);
     }
 
-    // Strict mode for `taida deps`: never install or write lockfile on resolve errors.
+    // Strict mode for `taida ingot deps`: never install or write lockfile on resolve errors.
     if !result.errors.is_empty() {
         eprintln!("Dependency resolution failed. Skipping install and lockfile update.");
         std::process::exit(1);
@@ -4590,7 +4735,7 @@ fn run_install(args: &[String]) {
     }
     if !filtered.is_empty() {
         eprintln!("Unexpected arguments.");
-        eprintln!("Run `taida install --help` for usage.");
+        eprintln!("Run `taida ingot install --help` for usage.");
         std::process::exit(1);
     }
     // C17-2: mutual exclusion is a hard error so users cannot silently
@@ -4601,7 +4746,7 @@ fn run_install(args: &[String]) {
     };
     if let Err(msg) = refresh_flags.validate() {
         eprintln!("Error: {}", msg);
-        eprintln!("Run `taida install --help` for usage.");
+        eprintln!("Run `taida ingot install --help` for usage.");
         std::process::exit(1);
     }
 
@@ -4739,7 +4884,7 @@ fn run_update(args: &[String]) {
             return;
         } else {
             eprintln!("Unexpected arguments.");
-            eprintln!("Run `taida update --help` for usage.");
+            eprintln!("Run `taida ingot update --help` for usage.");
             std::process::exit(1);
         }
     }
@@ -4807,7 +4952,7 @@ fn run_update(args: &[String]) {
         }
 
         // RC2.7B-011: install addon prebuilds after deps are recreated.
-        // Without this, `taida update` destroys addon binaries because
+        // Without this, `taida ingot update` destroys addon binaries because
         // `install_deps` recreates `.taida/deps` from scratch.
         let lock_path = project_dir.join(".taida").join("taida.lock");
         let existing_lock = pkg::lockfile::Lockfile::read(&lock_path).unwrap_or(None);
@@ -4848,7 +4993,7 @@ fn run_update(args: &[String]) {
 // ── Publish subcommand ─────────────────────────────────
 
 #[cfg(feature = "community")]
-/// C14-1: `taida publish` is now a tag-push-only command.
+/// C14-1: `taida ingot publish` is now a tag-push-only command.
 ///
 /// Flow:
 ///
@@ -4864,7 +5009,7 @@ fn run_update(args: &[String]) {
 ///   7. `--dry-run` prints the plan and exits.
 ///   8. Otherwise, `git tag <next> && git push origin <tag>`. Done.
 ///
-/// `taida publish` does not build cdylibs, compute SHA-256, mutate
+/// `taida ingot publish` does not build cdylibs, compute SHA-256, mutate
 /// `packages.tdm`, push to `main`, or call `gh release create`. All
 /// release artefact work is delegated to the addon
 /// `release.yml` running as `github-actions[bot]`.
@@ -4886,7 +5031,7 @@ fn run_publish(args: &[String]) {
                 i += 1;
                 if i >= args.len() {
                     eprintln!("Missing value for --label.");
-                    eprintln!("Run `taida publish --help` for usage.");
+                    eprintln!("Run `taida ingot publish --help` for usage.");
                     std::process::exit(1);
                 }
                 label = Some(args[i].clone());
@@ -4895,7 +5040,7 @@ fn run_publish(args: &[String]) {
                 i += 1;
                 if i >= args.len() {
                     eprintln!("Missing value for --force-version.");
-                    eprintln!("Run `taida publish --help` for usage.");
+                    eprintln!("Run `taida ingot publish --help` for usage.");
                     std::process::exit(1);
                 }
                 force_version = Some(args[i].clone());
@@ -4906,25 +5051,25 @@ fn run_publish(args: &[String]) {
                 eprintln!(
                     "`--dry-run=<mode>` was removed in @c.14.rc1. Use plain `--dry-run` instead."
                 );
-                eprintln!("Run `taida publish --help` for the new flow.");
+                eprintln!("Run `taida ingot publish --help` for the new flow.");
                 std::process::exit(1);
             }
             "--target" => {
                 eprintln!(
-                    "`--target` was removed in @c.14.rc1. `taida publish` now only pushes a git tag; \
+                    "`--target` was removed in @c.14.rc1. `taida ingot publish` now only pushes a git tag; \
                      addon builds happen in CI via `.github/workflows/release.yml`."
                 );
-                eprintln!("Run `taida publish --help` for the new flow.");
+                eprintln!("Run `taida ingot publish --help` for the new flow.");
                 std::process::exit(1);
             }
             raw if raw.starts_with('-') => {
                 eprintln!("Unknown option for publish: {}", raw);
-                eprintln!("Run `taida publish --help` for usage.");
+                eprintln!("Run `taida ingot publish --help` for usage.");
                 std::process::exit(1);
             }
             other => {
                 eprintln!("Unexpected argument for publish: {}", other);
-                eprintln!("Run `taida publish --help` for usage.");
+                eprintln!("Run `taida ingot publish --help` for usage.");
                 std::process::exit(1);
             }
         }
@@ -4999,7 +5144,7 @@ fn run_publish(args: &[String]) {
 
 fn run_cache(args: &[String]) {
     if args.is_empty() || args.iter().any(|a| is_help_flag(a.as_str())) {
-        println!("Usage: taida cache <command> [options]");
+        println!("Usage: taida ingot cache <command> [options]");
         println!();
         println!("Commands:");
         println!("  clean                       Remove cached WASM runtime .o files (default)");
@@ -5055,7 +5200,7 @@ fn run_cache(args: &[String]) {
                     }
                     other => {
                         eprintln!(
-                            "Unknown flag '{}' for 'taida cache clean'. \
+                            "Unknown flag '{}' for 'taida ingot cache clean'. \
                              Use --addons, --store, --store-pkg <org>/<name>, --all, or no flag.",
                             other
                         );
@@ -5090,7 +5235,7 @@ fn run_cache(args: &[String]) {
         }
         other => {
             eprintln!(
-                "Unknown cache command '{}'. Use 'taida cache clean'.",
+                "Unknown cache command '{}'. Use 'taida ingot cache clean'.",
                 other
             );
             std::process::exit(1);
@@ -5238,7 +5383,7 @@ fn run_cache_clean_store(assume_yes: bool) {
         if !is_tty {
             eprintln!(
                 "Refusing to prune store in a non-TTY context without --yes. \
-                 Re-run with `taida cache clean --store --yes`."
+                 Re-run with `taida ingot cache clean --store --yes`."
             );
             std::process::exit(1);
         }

@@ -4,7 +4,7 @@
 //! gate. The release side (`.github/workflows/release.yml` — the
 //! `sign` and `provenance` jobs) produces `.cosign.bundle` files
 //! alongside every official artefact; this module is the hook that
-//! consumes them inside `taida install` so the signature matters.
+//! consumes them inside `taida ingot install` so the signature matters.
 //!
 //! # Policy matrix
 //!

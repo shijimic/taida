@@ -99,7 +99,6 @@ fn c16_json_enum_js_matches_interpreter() {
     let js_out_path = unique_temp("c16_json_enum", "js");
     let build_out = Command::new(taida_bin())
         .arg("build")
-        .arg("--target")
         .arg("js")
         .arg(td_path())
         .arg("-o")
@@ -140,7 +139,6 @@ fn c16_json_enum_native_matches_interpreter() {
     let bin_path = unique_temp("c16_json_enum", "bin");
     let build_out = Command::new(taida_bin())
         .arg("build")
-        .arg("--target")
         .arg("native")
         .arg(td_path())
         .arg("-o")

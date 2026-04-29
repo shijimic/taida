@@ -18,10 +18,10 @@
 #   - terminal addon.toml: ../terminal/native/addon.toml
 #
 # The script sets up a manual fixture under $PROJECT/.taida/deps/
-# because `taida install` cannot yet fetch from a GitHub Release
-# (no release has been published). Once `taida publish --target
-# rust-addon` + `taida install` are wired end-to-end, this manual
-# fixture setup can be replaced by a single `taida install`.
+# because `taida ingot install` cannot yet fetch from a GitHub Release
+# (no release has been published). Once `taida ingot publish`
+# + `taida ingot install` are wired end-to-end, this manual
+# fixture setup can be replaced by a single `taida ingot install`.
 # ─────────────────────────────────────────────────────────────────
 set -euo pipefail
 
@@ -129,7 +129,7 @@ echo ""
 echo "=== Native build ==="
 NATIVE_BIN="${PROJECT}/main.bin"
 rm -f "$NATIVE_BIN"
-if ! "$TAIDA" build --target native "${PROJECT}/main.td" -o "$NATIVE_BIN" 2>&1; then
+if ! "$TAIDA" build native "${PROJECT}/main.td" -o "$NATIVE_BIN" 2>&1; then
     echo "FAIL: native build failed." >&2
     exit 1
 fi

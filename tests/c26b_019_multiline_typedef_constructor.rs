@@ -36,14 +36,14 @@
 //! # Checker / build parser parity
 //!
 //! `src/parser/parser.rs::parse` is the single public entry point invoked
-//! by `taida check` (`SemanticAnalyzer` → `parse`) and `taida <file>` /
+//! by `taida way check` (`SemanticAnalyzer` → `parse`) and `taida <file>` /
 //! `taida build` (`Interpreter` → `parse`). Both paths share the same
 //! parser struct and recovery behaviour — there is no separate "checker
 //! parser". Any divergence between `check` result and build result on the
 //! same input is therefore a symptom of something other than duplicated
 //! parser implementations (e.g. lexer input normalisation,
 //! token-stream trimming at a higher layer). The regression tests below
-//! pin the 2-way invariant: `taida check` and `taida run` must report the
+//! pin the 2-way invariant: `taida way check` and `taida run` must report the
 //! same parse-error count on the same input.
 //!
 //! # Scope
@@ -83,6 +83,7 @@ fn run_interp(path: &Path) -> (String, i32) {
 
 fn run_check(path: &Path) -> (String, String, i32) {
     let output = Command::new(taida_bin())
+        .arg("way")
         .arg("check")
         .arg(path)
         .output()
@@ -219,7 +220,7 @@ fn c26b_019_multiline_function_call_parses() {
     assert_eq!(stdout.trim(), "6");
 }
 
-/// Checker / build parser parity: `taida check` and `taida <file>` must
+/// Checker / build parser parity: `taida way check` and `taida <file>` must
 /// agree on parse success/failure for the same input. C26B-019 secondary
 /// observation flagged "check passes, build fails" as a diagnostics-trust
 /// issue; the repository has a single `parse` entry point, and this test
@@ -233,7 +234,7 @@ fn c26b_019_check_and_run_parser_parity_on_multiline() {
     let _ = fs::remove_dir_all(path.parent().unwrap());
     assert_eq!(
         check_code, 0,
-        "taida check must pass on the fixture (got exit {}, stdout: {})",
+        "taida way check must pass on the fixture (got exit {}, stdout: {})",
         check_code, check_stdout
     );
     assert_eq!(
@@ -258,7 +259,7 @@ fn c26b_019_multiline_3backend_parity() {
     if node_available() {
         let js_path = dir.join("out.mjs");
         let build = Command::new(taida_bin())
-            .args(["build", "--target", "js"])
+            .args(["build", "js"])
             .arg(&path)
             .arg("-o")
             .arg(&js_path)
@@ -282,7 +283,7 @@ fn c26b_019_multiline_3backend_parity() {
     if cc_available() {
         let bin_path = dir.join("out.bin");
         let build = Command::new(taida_bin())
-            .args(["build", "--target", "native"])
+            .args(["build", "native"])
             .arg(&path)
             .arg("-o")
             .arg(&bin_path)

@@ -93,6 +93,7 @@ fn c17b_003_row1_sidecarless_online_refreshes_pessimistically() {
     fs::write(project.join("main.td"), "stdout(\"consumer\")\n").unwrap();
 
     let out = Command::new(taida_bin())
+        .arg("ingot")
         .arg("install")
         .current_dir(&project)
         .env("HOME", &home)
@@ -100,7 +101,7 @@ fn c17b_003_row1_sidecarless_online_refreshes_pessimistically() {
         .env("TAIDA_GITHUB_API_URL", server.api_url())
         .env("GH_TOKEN", "unused")
         .output()
-        .expect("run taida install");
+        .expect("run taida ingot install");
     let stderr = String::from_utf8_lossy(&out.stderr);
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
@@ -155,7 +156,7 @@ fn c17b_003_row1_sidecarless_online_refreshes_pessimistically() {
 
 /// C17B-001 e2e: force-refresh + offline must not lose the user's install.
 ///
-/// Set up a working install with a sidecar. Run `taida install
+/// Set up a working install with a sidecar. Run `taida ingot install
 /// --force-refresh` while the remote and archive URLs point at closed
 /// ports. The fetch must fail, but the backup-swap rollback must restore
 /// the previous working install (main.td + sidecar intact).
@@ -189,6 +190,7 @@ fn c17b_001_force_refresh_offline_rolls_back_to_previous_install() {
     fs::write(project.join("main.td"), "stdout(\"c\")\n").unwrap();
 
     let warmup = Command::new(taida_bin())
+        .arg("ingot")
         .arg("install")
         .current_dir(&project)
         .env("HOME", &home)
@@ -196,7 +198,7 @@ fn c17b_001_force_refresh_offline_rolls_back_to_previous_install() {
         .env("TAIDA_GITHUB_API_URL", server.api_url())
         .env("GH_TOKEN", "unused")
         .output()
-        .expect("run taida install");
+        .expect("run taida ingot install");
     assert!(
         warmup.status.success(),
         "warmup install must succeed, stderr={}",
@@ -217,6 +219,7 @@ fn c17b_001_force_refresh_offline_rolls_back_to_previous_install() {
     // Step 2: run force-refresh with every network endpoint closed.
     // The fetch MUST fail, and the rollback MUST restore everything.
     let out = Command::new(taida_bin())
+        .arg("ingot")
         .arg("install")
         .arg("--force-refresh")
         .current_dir(&project)
@@ -225,8 +228,8 @@ fn c17b_001_force_refresh_offline_rolls_back_to_previous_install() {
         .env("TAIDA_GITHUB_API_URL", "http://127.0.0.1:1")
         .env("GH_TOKEN", "unused")
         .output()
-        .expect("run taida install");
-    // `taida install` returns non-zero when any dep fails to resolve,
+        .expect("run taida ingot install");
+    // `taida ingot install` returns non-zero when any dep fails to resolve,
     // but the critical behaviour is the state of the store.
     let stderr = String::from_utf8_lossy(&out.stderr);
 
@@ -319,6 +322,7 @@ fn c17b_015_corrupt_sidecar_re_extracts() {
     fs::write(project.join("main.td"), "stdout(\"c\")\n").unwrap();
 
     let out = Command::new(taida_bin())
+        .arg("ingot")
         .arg("install")
         .current_dir(&project)
         .env("HOME", &home)
@@ -326,7 +330,7 @@ fn c17b_015_corrupt_sidecar_re_extracts() {
         .env("TAIDA_GITHUB_API_URL", server.api_url())
         .env("GH_TOKEN", "unused")
         .output()
-        .expect("run taida install");
+        .expect("run taida ingot install");
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
         out.status.success(),

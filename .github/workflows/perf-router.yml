@@ -74,7 +74,7 @@ jobs:
           python-version: "3.11"
 
       - name: Build taida CLI (release)
-        # The gate uses `--target native` which shells out to `cc`. We
+        # The gate uses `taida build native`, which shells out to `cc`. We
         # build `taida` in release mode so the build phase of the
         # measurement itself is not pathologically slow.
         run: cargo build --release --bin taida
@@ -108,7 +108,7 @@ jobs:
 
       - name: Upload perf-router log
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: perf-router-${{ github.sha }}
           path: |
@@ -134,7 +134,7 @@ jobs:
         with:
           python-version: "3.11"
       - name: Download perf-router log
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           name: perf-router-${{ github.sha }}
           path: perf-artifacts

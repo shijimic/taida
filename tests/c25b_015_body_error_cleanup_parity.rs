@@ -109,7 +109,6 @@ fn run_js(fixture: &Path, tag: &str) -> Option<String> {
     let mjs = outdir.join(format!("{}.mjs", tag));
     let build = Command::new(taida_bin())
         .arg("build")
-        .arg("--target")
         .arg("js")
         .arg("-o")
         .arg(&mjs)
@@ -143,7 +142,6 @@ fn run_native(fixture: &Path, tag: &str) -> Option<String> {
     let bin = outdir.join(format!("{}_bin", tag));
     let build = Command::new(taida_bin())
         .arg("build")
-        .arg("--target")
         .arg("native")
         .arg("-o")
         .arg(&bin)

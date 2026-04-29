@@ -91,7 +91,7 @@ fn run_js(td_path: &Path) -> Option<String> {
     let js_path =
         std::env::temp_dir().join(format!("c26b011_sz_{}_{}.mjs", std::process::id(), stem));
     let build = Command::new(taida_bin())
-        .args(["build", "--target", "js"])
+        .args(["build", "js"])
         .arg(td_path)
         .arg("-o")
         .arg(&js_path)
@@ -127,7 +127,7 @@ fn run_native(td_path: &Path) -> Option<String> {
     let bin_path =
         std::env::temp_dir().join(format!("c26b011_sz_{}_{}.bin", std::process::id(), stem));
     let build = Command::new(taida_bin())
-        .args(["build", "--target", "native"])
+        .args(["build", "native"])
         .arg(td_path)
         .arg("-o")
         .arg(&bin_path)

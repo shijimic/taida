@@ -12,15 +12,11 @@
 //!      consumed by `taida graph` and downstream introspection).
 //!   4. `parser::Assignment::as_rust_addon_binding` parses the surface
 //!      form (string-literal fn name + `arity <= IntLit` field).
-//!   5. The migration tool (`upgrade_facade_source`) is idempotent:
-//!      running it twice on a facade that's already fully migrated
-//!      produces no further changes.
 
 use taida::doc::extract_docs;
 use taida::graph::ai_format::format_ai_json;
 use taida::parser::{Statement, parse};
 use taida::pkg::facade::{SymbolKind, classify_symbol_in_module};
-use taida::upgrade_e30::{collect_facade_addon_proposals, upgrade_facade_source};
 
 const FACADE_SOURCE: &str = concat!(
     "// Test facade with explicit RustAddon bindings.\n",
@@ -31,14 +27,6 @@ const FACADE_SOURCE: &str = concat!(
     "\n",
     "<<< @(terminalSize, readKey, isTerminal)\n",
 );
-
-fn manifest_3() -> std::collections::BTreeMap<String, u32> {
-    let mut m = std::collections::BTreeMap::new();
-    m.insert("terminalSize".to_string(), 0);
-    m.insert("readKey".to_string(), 0);
-    m.insert("isTerminal".to_string(), 1);
-    m
-}
 
 #[test]
 fn ast_helper_recognises_rust_addon_binding() {
@@ -183,33 +171,8 @@ fn graph_ai_format_lists_rust_addon_bindings_as_public_functions() {
 }
 
 #[test]
-fn migration_tool_idempotent_on_fully_migrated_facade() {
-    let proposals = collect_facade_addon_proposals(FACADE_SOURCE, &manifest_3());
-    assert!(
-        proposals.is_empty(),
-        "fully migrated facade must produce 0 proposals, got: {:?}",
-        proposals
-    );
-    let (out, n) = upgrade_facade_source(FACADE_SOURCE, &manifest_3());
-    assert_eq!(n, 0, "fully migrated facade is a no-op");
-    assert_eq!(out, FACADE_SOURCE, "source must be unchanged");
-}
-
-#[test]
-fn migration_tool_inserts_missing_bindings_for_unmigrated_facade() {
-    let unmigrated_source = "// just an export\n<<< @(terminalSize, readKey, isTerminal)\n";
-    let proposals = collect_facade_addon_proposals(unmigrated_source, &manifest_3());
-    assert_eq!(proposals.len(), 3);
-    let (out, n) = upgrade_facade_source(unmigrated_source, &manifest_3());
-    assert_eq!(n, 3);
-    assert!(out.contains("RustAddon[\"terminalSize\"](arity <= 0)"));
-    assert!(out.contains("RustAddon[\"readKey\"](arity <= 0)"));
-    assert!(out.contains("RustAddon[\"isTerminal\"](arity <= 1)"));
-}
-
-#[test]
 fn e1413_diagnostic_documented() {
-    // diagnostic_codes.md must list E1413 with a migration hint.
+    // diagnostic_codes.md must list E1413 with a manual-fix hint.
     let ref_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("docs")
         .join("reference")

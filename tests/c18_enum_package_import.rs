@@ -154,7 +154,6 @@ fn c18b_004_js_package_enum_import() {
 
     let build = Command::new(taida_bin())
         .arg("build")
-        .arg("--target")
         .arg("js")
         .arg(&main)
         .arg("-o")
@@ -195,7 +194,6 @@ fn c18b_004_native_package_enum_import() {
 
     let build = Command::new(taida_bin())
         .arg("build")
-        .arg("--target")
         .arg("native")
         .arg(&main)
         .arg("-o")

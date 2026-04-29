@@ -88,7 +88,7 @@ stdout / stderr を pipe で捕捉し、文字列として返します。
 |-----|-----------|------|
 | `EnvVar[name]()` | `Str -> Lax[Str]` | 未設定時は `Lax` の default |
 | `allEnv()` | `() -> HashMap[Str, Str]` | snapshot |
-| `argv()` | `() -> @[Str]` | ユーザー引数（`taida run script.td -- a b` の `a b` 部分） |
+| `argv()` | `() -> @[Str]` | ユーザー引数（`taida script.td -- a b` の `a b` 部分） |
 
 ---
 
@@ -126,7 +126,7 @@ stdout("こんにちは、" + line.getOrDefault("旅人"))
 - buchi-pack 形式: `headers <= @(content_type <= "application/json")` — フィールド識別子がそのまま wire header 名になります（`-` や `.` は識別子に使えないので `x-api-key` 等は書けません）。
 - 名前-値ペアリスト形式: `headers <= @[@(name <= "x-api-key", value <= "secret"), @(name <= "anthropic-version", value <= "2023-06-01")]` — `List[@(name: Str, value: Str)]`。任意 UTF-8 header 名が使えます。
 
-`-` を含む header 名 (`x-api-key` 等) を扱う場合はペアリスト形式を使用してください。`HttpRequest["GET"]()` のように type arg が 2 未満の呼び出しは Interpreter / JS / Native すべてで拒否されます（JS backend は `taida build --target js` 時点で arity error）。
+`-` を含む header 名 (`x-api-key` 等) を扱う場合はペアリスト形式を使用してください。`HttpRequest["GET"]()` のように type arg が 2 未満の呼び出しは Interpreter / JS / Native すべてで拒否されます（JS backend は `taida build js` 時点で arity error）。
 
 ---
 

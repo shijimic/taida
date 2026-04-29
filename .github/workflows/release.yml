@@ -16,6 +16,22 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  # E31B-009 / FUTURE_BLOCKERS::POST-STABLE-003.
+  #
+  # SLSA's reusable generator (slsa-github-generator/.../generator_generic_slsa3.yml@v2.1.0)
+  # still carries internal `runs.using: node20` actions (`detect-workflow-js`,
+  # `setup-generic`). Taida repo cannot patch upstream; closure depends on
+  # SLSA Issue #4490 ("migrate internal actions from node20 to node24
+  # ahead of June 2026 deprecation") which is OPEN as of 2026-04-29.
+  #
+  # The 2026-04-29 user verdict DEFERRED E31B-009 to FUTURE_BLOCKERS::POST-STABLE-003,
+  # so this guard is now an explicit policy gate rather than an E31 stable
+  # requirement. Flip to `closed` only when:
+  #   1. SLSA upstream Issue #4490 is closed and we have bumped the pin to
+  #      a node24-clean release, OR
+  #   2. The release policy is explicitly changed to accept the warning
+  #      (record the decision in `.dev/FUTURE_BLOCKERS.md::POST-STABLE-003`).
+  E31B009_SLSA_NODE20_BLOCKER: open
 
 jobs:
   prepare:
@@ -78,6 +94,16 @@ jobs:
       - uses: actions/setup-node@v5
         with:
           node-version: "22"
+      - name: E31 stable blocker guard (FUTURE_BLOCKERS::POST-STABLE-003)
+        run: |
+          set -euo pipefail
+          if [[ "${E31B009_SLSA_NODE20_BLOCKER}" == "open" ]]; then
+            echo "::error::E31B-009 (DEFERRED to POST-STABLE-003) is still open."
+            echo "::error::SLSA provenance reusable workflow has upstream node20 actions; SLSA Issue #4490 is OPEN."
+            echo "::error::Do not publish @e.X until SLSA Node 24 support is verified or the release policy is explicitly flipped."
+            echo "::error::See .dev/FUTURE_BLOCKERS.md::POST-STABLE-003 for the unblock procedure."
+            exit 1
+          fi
       - name: Secret scan
         run: ./scripts/release/secret-scan.sh
       - run: cargo fmt --all -- --check
@@ -193,7 +219,7 @@ jobs:
   # stored anywhere; verification relies on the Rekor transparency log.
   #
   # The resulting `.cosign.bundle` files are uploaded alongside the
-  # binaries so `install.sh` and `taida install` can call
+  # binaries so `install.sh` and `taida ingot install` can call
   # `scripts/release/verify-signatures.sh` before trusting a download.
   sign:
     name: Sign Release Artefacts (Sigstore)
@@ -279,7 +305,7 @@ jobs:
       actions: read
       id-token: write
       contents: write
-    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml@v2.0.0
+    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml@v2.1.0
     with:
       base64-subjects: ${{ needs.sign.outputs.artefact_digests }}
       upload-assets: true

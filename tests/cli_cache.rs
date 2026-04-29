@@ -1,4 +1,4 @@
-//! CLI `taida cache` and WASM build cache tests.
+//! CLI `taida ingot cache` and WASM build cache tests.
 //!
 //! Covers: RC-8a WASM runtime cache hit, RC-8d cache clean command.
 //!
@@ -28,7 +28,7 @@ fn test_rc8a_wasm_cache_hit_on_second_build() {
 
     // First build -- compiles runtime (cache miss)
     let out1 = Command::new(taida_bin())
-        .args(["build", "--target", "wasm-min", "-o"])
+        .args(["build", "wasm-min", "-o"])
         .arg(&wasm_out)
         .arg(&td)
         .output()
@@ -47,7 +47,7 @@ fn test_rc8a_wasm_cache_hit_on_second_build() {
 
     // Second build -- should hit cache (faster, same result)
     let out2 = Command::new(taida_bin())
-        .args(["build", "--target", "wasm-min", "-o"])
+        .args(["build", "wasm-min", "-o"])
         .arg(&wasm_out)
         .arg(&td)
         .output()
@@ -66,7 +66,7 @@ fn test_rc8a_wasm_cache_hit_on_second_build() {
 }
 
 // -----------------------------------------------------------------------
-// T-2: `taida cache clean` (RC-8d)
+// T-2: `taida ingot cache clean` (RC-8d)
 // -----------------------------------------------------------------------
 
 #[test]
@@ -85,7 +85,7 @@ fn test_rc8d_cache_clean_removes_files() {
     let _ = fs::write(&fake_tmp, b"fake");
 
     let output = Command::new(taida_bin())
-        .args(["cache", "clean"])
+        .args(["ingot", "cache", "clean"])
         .current_dir(&tmp)
         .output()
         .expect("cache clean");
@@ -111,7 +111,7 @@ fn test_rc8d_cache_clean_removes_files() {
     let _ = fs::remove_dir_all(&tmp);
 }
 
-/// Regression: `taida cache clean` in a project with `.taida/` + `packages.tdm`
+/// Regression: `taida ingot cache clean` in a project with `.taida/` + `packages.tdm`
 /// must find the project-local cache (`.taida/cache/wasm-rt/`), not the fallback.
 #[test]
 fn test_cache_clean_finds_project_local_cache() {
@@ -129,7 +129,7 @@ fn test_cache_clean_finds_project_local_cache() {
     assert!(fake_o.exists(), "setup: fake .o should exist");
 
     let output = Command::new(taida_bin())
-        .args(["cache", "clean"])
+        .args(["ingot", "cache", "clean"])
         .current_dir(&tmp)
         .output()
         .expect("cache clean in project dir");
@@ -150,7 +150,7 @@ fn test_cache_clean_finds_project_local_cache() {
 #[test]
 fn test_rc8d_cache_unknown_subcommand() {
     let output = Command::new(taida_bin())
-        .args(["cache", "bogus"])
+        .args(["ingot", "cache", "bogus"])
         .output()
         .expect("cache bogus");
     assert!(!output.status.success());
@@ -165,7 +165,7 @@ fn test_rc8d_cache_unknown_subcommand() {
 #[test]
 fn test_rc8d_cache_help() {
     let output = Command::new(taida_bin())
-        .args(["cache", "--help"])
+        .args(["ingot", "cache", "--help"])
         .output()
         .expect("cache --help");
     assert!(output.status.success());
@@ -178,7 +178,7 @@ fn test_rc8d_cache_help() {
 }
 
 // -----------------------------------------------------------------------
-// C17B-004: CLI integration tests for `taida cache clean --store` etc.
+// C17B-004: CLI integration tests for `taida ingot cache clean --store` etc.
 // -----------------------------------------------------------------------
 //
 // These tests exercise the CLI wiring of the C17 store-prune path (the
@@ -236,7 +236,7 @@ fn c17b_004_cache_clean_store_non_tty_without_yes_rejects() {
     populate_store(&home, &[("alice", "http", "a.1")]);
 
     let out = Command::new(taida_bin())
-        .args(["cache", "clean", "--store"])
+        .args(["ingot", "cache", "clean", "--store"])
         .env("HOME", &home)
         // stdin is closed / not a tty because we don't inherit it
         .stdin(std::process::Stdio::null())
@@ -273,7 +273,7 @@ fn c17b_004_cache_clean_store_with_yes_removes_all_packages() {
     assert!(store_entry_exists(&home, "bob", "rpc", "c.1"));
 
     let out = Command::new(taida_bin())
-        .args(["cache", "clean", "--store", "--yes"])
+        .args(["ingot", "cache", "clean", "--store", "--yes"])
         .env("HOME", &home)
         .output()
         .expect("cache clean --store --yes");
@@ -318,7 +318,7 @@ fn c17b_004_cache_clean_store_pkg_targets_single_package() {
     );
 
     let out = Command::new(taida_bin())
-        .args(["cache", "clean", "--store-pkg", "alice/http"])
+        .args(["ingot", "cache", "clean", "--store-pkg", "alice/http"])
         .env("HOME", &home)
         .output()
         .expect("cache clean --store-pkg alice/http");
@@ -352,7 +352,14 @@ fn c17b_004_cache_clean_store_pkg_conflicts_with_store() {
     populate_store(&home, &[("alice", "http", "a.1")]);
 
     let out = Command::new(taida_bin())
-        .args(["cache", "clean", "--store", "--store-pkg", "alice/http"])
+        .args([
+            "ingot",
+            "cache",
+            "clean",
+            "--store",
+            "--store-pkg",
+            "alice/http",
+        ])
         .env("HOME", &home)
         .output()
         .expect("cache clean conflict");
@@ -378,7 +385,7 @@ fn c17b_004_cache_clean_store_pkg_conflicts_with_store() {
 fn c17b_004_cache_clean_store_pkg_rejects_three_segments() {
     // C17B-004 test #5: `--store-pkg foo/bar/baz` -> "Invalid --store-pkg value"
     let out = Command::new(taida_bin())
-        .args(["cache", "clean", "--store-pkg", "foo/bar/baz"])
+        .args(["ingot", "cache", "clean", "--store-pkg", "foo/bar/baz"])
         .output()
         .expect("cache clean --store-pkg three segments");
     assert!(
@@ -397,7 +404,7 @@ fn c17b_004_cache_clean_store_pkg_rejects_three_segments() {
 fn c17b_004_cache_clean_store_pkg_rejects_trailing_slash() {
     // C17B-004 test #6: `--store-pkg foo/` (empty name) -> rejected.
     let out = Command::new(taida_bin())
-        .args(["cache", "clean", "--store-pkg", "foo/"])
+        .args(["ingot", "cache", "clean", "--store-pkg", "foo/"])
         .output()
         .expect("cache clean --store-pkg trailing slash");
     assert!(
@@ -416,7 +423,7 @@ fn c17b_004_cache_clean_store_pkg_rejects_trailing_slash() {
 fn c17b_004_cache_clean_store_pkg_rejects_leading_slash() {
     // Additional C17B-004 coverage: `--store-pkg /foo` (empty org).
     let out = Command::new(taida_bin())
-        .args(["cache", "clean", "--store-pkg", "/foo"])
+        .args(["ingot", "cache", "clean", "--store-pkg", "/foo"])
         .output()
         .expect("cache clean --store-pkg leading slash");
     assert!(
@@ -459,7 +466,7 @@ fn c17b_004_cache_clean_all_with_yes_prunes_store_too() {
     fs::write(&wasm_o, b"fake").unwrap();
 
     let out = Command::new(taida_bin())
-        .args(["cache", "clean", "--all", "--yes"])
+        .args(["ingot", "cache", "clean", "--all", "--yes"])
         .env("HOME", &home)
         .current_dir(&tmp)
         .output()

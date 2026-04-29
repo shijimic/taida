@@ -1,10 +1,10 @@
 docs/guide/00_overview.md:41
-docs/guide/01_types.md:509
-docs/guide/01_types.md:574
+docs/guide/01_types.md:517
+docs/guide/01_types.md:582
 docs/guide/02_strict_typing.md:19
 docs/guide/02_strict_typing.md:257
-docs/guide/03_json.md:51
-docs/guide/03_json.md:354
+docs/guide/03_json.md:52
+docs/guide/03_json.md:355
 docs/guide/04_buchi_pack.md:127
 docs/guide/04_class_like.md:99
 docs/guide/05_molding.md:34
@@ -26,8 +26,8 @@ docs/guide/09_functions.md:296
 docs/guide/10_modules.md:180
 docs/guide/10_modules.md:186
 docs/guide/11_async.md:81
-docs/guide/12_introspection.md:224
-docs/guide/12_introspection.md:235
+docs/guide/12_introspection.md:202
+docs/guide/12_introspection.md:213
 docs/guide/13_creating_addons.md:491
 docs/guide/13_creating_addons.md:499
 docs/guide/15_net_package.md:222

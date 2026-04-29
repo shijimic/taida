@@ -444,13 +444,16 @@ impl Interpreter {
                 //   1. Run H3 protocol layer self-tests (QPACK round-trip, request validation)
                 //   2. Gate on QUIC transport availability
                 //   3. Return appropriate error/success
-                return self.serve_h3(
-                    tls_cert_path.clone().unwrap(),
-                    tls_key_path.clone().unwrap(),
-                    handler,
-                    max_requests,
-                    port,
-                );
+                let (Some(cert_path), Some(key_path)) =
+                    (tls_cert_path.clone(), tls_key_path.clone())
+                else {
+                    let result = make_result_failure_msg(
+                        "ProtocolError",
+                        "httpServe: HTTP/3 (protocol: \"h3\") requires TLS (cert + key).",
+                    );
+                    return Ok(Some(Signal::Value(make_fulfilled_async(result))));
+                };
+                return self.serve_h3(cert_path, key_path, handler, max_requests, port);
             }
             Some(other) => {
                 let result = make_result_failure_msg(
@@ -531,9 +534,16 @@ impl Interpreter {
 
         // ── NET6-2a: HTTP/2 serve loop (Interpreter reference implementation) ──
         if is_h2 {
+            let Some(tls_config) = tls_config else {
+                let result = make_result_failure_msg(
+                    "ProtocolError",
+                    "httpServe: HTTP/2 (protocol: \"h2\") requires TLS (cert + key).",
+                );
+                return Ok(Some(Signal::Value(make_fulfilled_async(result))));
+            };
             return self.serve_h2(
                 listener,
-                tls_config.expect("h2 requires TLS"),
+                tls_config,
                 handler,
                 max_requests,
                 max_connections,

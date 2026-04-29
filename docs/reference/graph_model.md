@@ -254,21 +254,11 @@ node_id    := IDENTIFIER
 | `fan_in(a)` | ノードID | `Int` | `a` に入るエッジ数 |
 | `fan_out(a)` | ノードID | `Int` | `a` から出るエッジ数 |
 
-### クエリの使用例
+### クエリの扱い
 
-```bash
-# データフローグラフに対するクエリ
-taida graph query --type dataflow --query "path_exists(input, result)" ./src/main.td
-
-# モジュール依存グラフの循環検出
-taida graph query --type module --query "find_cycles()" ./src
-
-# エラーカバレッジの検証
-taida graph query --type error --query "uncovered_throws()" ./src
-
-# 特定関数の呼び出し元を列挙
-taida graph query --type call --query "dependents(processData)" ./src
-```
+上記の query vocabulary は内部モデルと検証器が使う概念です。E31 の公開 CLI
+には graph query subcommand はありません。安全性検査は `taida way verify`、
+機械処理用の構造抽出は `taida graph` の JSON を使います。
 
 ---
 
@@ -277,7 +267,7 @@ taida graph query --type call --query "dependents(processData)" ./src
 ### JSON
 
 ```bash
-taida graph --type dataflow --format json ./src/main.td
+taida graph ./src/main.td
 ```
 
 ```json
@@ -316,40 +306,8 @@ taida graph --type dataflow --format json ./src/main.td
 }
 ```
 
-### Mermaid
-
-```bash
-taida graph --type dataflow --format mermaid ./src/main.td
-```
-
-```mermaid
-graph LR
-    input["input: 'hello world'"]
-    trim["trim(_)"]
-    toUpperCase["toUpperCase(_)"]
-    result["result"]
-
-    input -->|"=>"| trim
-    trim -->|"=>"| toUpperCase
-    toUpperCase -->|"=>"| result
-```
-
-### Graphviz (DOT)
-
-```bash
-taida graph --type module --format dot ./src
-```
-
-```dot
-digraph module_dependency {
-    rankdir=LR;
-    node [shape=box];
-
-    "main.td" -> "utils.td" [label="imports: helper, format"];
-    "main.td" -> "types.td" [label="imports: Pilot, Config"];
-    "main.td" -> "express"  [label="imports: App", style=dashed];
-}
-```
+Mermaid / DOT は E31 CLI の公開出力形式ではありません。必要な場合は
+`taida graph` の JSON を外部ツールで変換してください。
 
 ---
 
@@ -463,36 +421,35 @@ ErrorCeilingInfo = @(
 ## CLIリファレンス
 
 CLI 全体の仕様は [CLI リファレンス](./cli.md) を参照してください。  
-このページでは `graph` / `verify` に関係する最小情報のみ記載します。
+このページでは `graph` / `way verify` に関係する最小情報のみ記載します。
 
 ### `taida graph`
 
 ```
-taida graph [--type TYPE] [--format FORMAT] <PATH>
-taida graph summary [--type TYPE] [--format FORMAT] <PATH>
-taida graph query --type TYPE --query EXPR <PATH>
+taida graph [-o OUTPUT] [--recursive] <PATH>
+taida graph summary [--format text|json|sarif] <PATH>
 ```
 
 | オプション | 短縮 | 説明 |
 |---|---|---|
-| `--type <TYPE>` | `-t` | `dataflow` / `module` / `type-hierarchy` / `error` / `call` |
-| `--format <FORMAT>` | `-f` | `text` / `json` / `mermaid` / `dot` |
-| `--query <EXPR>` | - | `query` サブコマンド用 |
+| `--recursive` | `-r` | import を再帰的にたどる |
+| `--output <OUTPUT>` | `-o` | graph JSON の出力先 |
+| `--format <text|json|sarif>` | `-f` | `graph summary` 用 |
 
 注:
 - 現状 `<PATH>` は単一ファイル入力です。
 - `summary` は構造サマリを出力します。
 
-### `taida verify`
+### `taida way verify`
 
 ```
-taida verify [--check CHECK] [--format FORMAT] <PATH>
+taida way verify [--check CHECK] [--format FORMAT] <PATH>
 ```
 
 | オプション | 短縮 | 説明 |
 |---|---|---|
 | `--check <CHECK>` | `-c` | 実行チェック（複数指定可） |
-| `--format <FORMAT>` | `-f` | `text` / `json` / `sarif` |
+| `--format <FORMAT>` | `-f` | `text` / `json` / `jsonl` / `sarif` |
 
 ### 検証チェック一覧
 
@@ -505,4 +462,4 @@ taida verify [--check CHECK] [--format FORMAT] <PATH>
 | `unchecked-division` | warning | 除算安全性チェック枠（現行構文では通常 finding なし） |
 | `direction-constraint` | error | 単一方向制約の検証 |
 | `unchecked-lax` | warning | Lax 未検査利用検出 |
-| `naming-convention` | warning | 命名規約違反検出 |
+`naming-convention` は `taida way lint` の責務です。

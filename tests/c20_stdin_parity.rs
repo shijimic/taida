@@ -149,7 +149,6 @@ fn assert_js_matches(stem: &str) {
     let mjs_path = unique_temp(&format!("c20_{}", stem), "mjs");
     let build_out = Command::new(taida_bin())
         .arg("build")
-        .arg("--target")
         .arg("js")
         .arg(td_path(stem))
         .arg("-o")
@@ -194,7 +193,6 @@ fn assert_native_matches(stem: &str) {
     let bin_path = unique_temp(&format!("c20_{}", stem), "bin");
     let build_out = Command::new(taida_bin())
         .arg("build")
-        .arg("--target")
         .arg("native")
         .arg(td_path(stem))
         .arg("-o")
@@ -305,14 +303,15 @@ fn c20_stdin_no_prompt_form_passes_check() {
     let src = unique_temp("c20_stdin_no_prompt", "td");
     fs::write(&src, script).expect("write temp td");
     let out = Command::new(taida_bin())
+        .arg("way")
         .arg("check")
         .arg(&src)
         .output()
-        .expect("taida check");
+        .expect("taida way check");
     let _ = fs::remove_file(&src);
     assert!(
         out.status.success(),
-        "`taida check` should accept `stdin()` no-prompt form after C20-3 ROOT-13 fix. stderr={}",
+        "`taida way check` should accept `stdin()` no-prompt form after C20-3 ROOT-13 fix. stderr={}",
         String::from_utf8_lossy(&out.stderr)
     );
 }
@@ -336,7 +335,6 @@ fn c20_stdin_js_non_string_prompt_does_not_crash() {
     let mjs = unique_temp("c20_stdin_js_int_prompt", "mjs");
     let build = Command::new(taida_bin())
         .arg("build")
-        .arg("--target")
         .arg("js")
         .arg(&src)
         .arg("-o")

@@ -21,16 +21,17 @@ fn test_install_without_deps_writes_lockfile_under_dot_taida() {
     fs::write(project_dir.join("main.td"), "stdout(\"ok\")\n").expect("write main.td");
 
     let output = Command::new(common::taida_bin())
+        .arg("ingot")
         .arg("install")
         .current_dir(&project_dir)
         .output()
-        .expect("run taida install");
+        .expect("run taida ingot install");
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         output.status.success(),
-        "taida install should succeed\nstdout:\n{}\nstderr:\n{}",
+        "taida ingot install should succeed\nstdout:\n{}\nstderr:\n{}",
         stdout,
         stderr
     );

@@ -214,7 +214,7 @@ impl Lowering {
         let cdylib_path = crate::addon::registry::resolve_cdylib_path(pkg_dir, &manifest.library)
             .ok_or_else(|| LowerError {
                 message: format!(
-                    "addon-backed package '{}' cdylib not found: looked for lib{}.{{so,dylib,dll}} under '{}' (did you run 'taida install'?)",
+                    "addon-backed package '{}' cdylib not found: looked for lib{}.{{so,dylib,dll}} under '{}' (did you run 'taida ingot install'?)",
                     import_path,
                     manifest.library,
                     pkg_dir.display()
@@ -730,7 +730,12 @@ impl Lowering {
             .addon_func_refs
             .get(name)
             .cloned()
-            .expect("emit_addon_call invoked for non-addon name");
+            .ok_or_else(|| LowerError {
+                message: format!(
+                    "internal lowering error: addon call '{}' has no registered addon binding",
+                    name
+                ),
+            })?;
         if args.len() != addon_ref.arity as usize {
             return Err(LowerError {
                 message: format!(
@@ -1108,8 +1113,8 @@ impl Lowering {
                     let methods: Vec<(String, crate::parser::FuncDef)> = type_def
                         .fields
                         .iter()
-                        .filter(|f| f.is_method && f.method_def.is_some())
-                        .map(|f| (f.name.clone(), f.method_def.clone().unwrap()))
+                        .filter(|f| f.is_method)
+                        .filter_map(|f| f.method_def.clone().map(|method| (f.name.clone(), method)))
                         .collect();
 
                     // alias 名で登録（alias なしの場合は orig_name と同一）

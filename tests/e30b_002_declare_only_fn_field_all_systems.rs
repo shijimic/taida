@@ -44,23 +44,24 @@ fn ensure_release_binary() {
     assert!(status.success(), "cargo build --release --bin taida failed");
 }
 
-/// Run `taida check` on a temporary file written from `source` and assert
+/// Run `taida way check` on a temporary file written from `source` and assert
 /// it succeeds with no errors.
 fn assert_check_clean(source: &str, label: &str) {
     ensure_release_binary();
     let tmp = std::env::temp_dir().join(format!("e30b_002_{}.td", label));
     std::fs::write(&tmp, source).expect("write tmp");
     let output = Command::new(taida_bin())
+        .arg("way")
         .arg("check")
         .arg(&tmp)
         .output()
-        .expect("taida check spawn");
+        .expect("taida way check spawn");
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     let combined = format!("{}{}", stdout, stderr);
     assert!(
         output.status.success(),
-        "taida check failed for {}\nstdout: {}\nstderr: {}",
+        "taida way check failed for {}\nstdout: {}\nstderr: {}",
         label,
         stdout,
         stderr
@@ -149,10 +150,11 @@ fn e30b_002_mold_extension_unbound_type_param_still_rejected() {
     let tmp = std::env::temp_dir().join("e30b_002_mold_unbound_type_param.td");
     std::fs::write(&tmp, source).expect("write tmp");
     let output = Command::new(taida_bin())
+        .arg("way")
         .arg("check")
         .arg(&tmp)
         .output()
-        .expect("taida check spawn");
+        .expect("taida way check spawn");
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     let combined = format!("{}{}", stdout, stderr);

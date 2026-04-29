@@ -108,30 +108,30 @@ processAll
 
 ## verify（構造的自己検証）
 
-`taida verify` コマンドで、コードの構造的な健全性を検証できます。  
+`taida way verify` コマンドで、コードの構造的な健全性を検証できます。
 最新のCLIオプションは [CLI リファレンス](../reference/cli.md) を参照してください。
 
 ### CLI コマンド
 
 ```bash
 # 全検証を実行します
-taida verify ./src
+taida way verify ./src
 
 # 特定の検証のみ
-taida verify --check direction-constraint ./src
-taida verify --check error-coverage ./src
-taida verify --check no-circular-deps ./src
-taida verify --check dead-code ./src
+taida way verify --check direction-constraint ./src
+taida way verify --check error-coverage ./src
+taida way verify --check no-circular-deps ./src
+taida way verify --check dead-code ./src
 
 # JSON / SARIF 出力
-taida verify --format json ./src
-taida verify --format sarif ./src
+taida way verify --format json ./src
+taida way verify --format sarif ./src
 ```
 
 ### 出力例
 
 ```
-$ taida verify ./src
+$ taida way verify ./src
 [PASS] direction-constraint: 全ファイルが単一方向制約を満たしています
 [PASS] error-coverage: 全ての throw サイトがエラー天井でカバーされています
 [WARN] dead-code: 2つの未使用関数が検出されました
@@ -146,54 +146,32 @@ $ taida verify ./src
 ### グラフの抽出・可視化
 
 ```bash
-# データフローグラフ
-taida graph --type dataflow ./src/main.td
+# AI 向け統合グラフ JSON
+taida graph ./src/main.td
 
-# モジュール依存グラフ
-taida graph --type module ./src/main.td
-
-# 型階層グラフ
-taida graph --type type-hierarchy ./src/main.td
-
-# エラー境界グラフ
-taida graph --type error ./src/main.td
-
-# コールグラフ
-taida graph --type call ./src/main.td
-
-# 出力形式の指定
-taida graph --type dataflow --format mermaid ./src/main.td
-taida graph --type module --format dot ./src/main.td
-taida graph --type call --format json ./src/main.td
+# import をたどる統合グラフ JSON
+taida graph --recursive ./src/main.td
 
 # 構造サマリの生成
 taida graph summary ./src/main.td
+taida graph summary --format json ./src/main.td
 ```
 
 ### 構造クエリ
 
-グラフに対して構造的なクエリを発行できます。
+E31 の公開 CLI には graph query subcommand はありません。構造的な安全性検査は
+`taida way verify` が担い、機械処理が必要な場合は `taida graph` の JSON を
+外部ツールで読む方針です。
 
 ```bash
-# パス存在性
-taida graph query --type dataflow --query "path_exists(input, result)" ./src/main.td
-# => true: input -> Trim -> Upper -> result
-
 # 循環検出
-taida graph query --type module --query "find_cycles()" ./src/main.td
-# => No cycles found.
-
-# 到達可能性
-taida graph query --type dataflow --query "reachable(input)" ./src/main.td
-# => [Trim, Upper, result]
+taida way verify --check no-circular-deps ./src/main.td
 
 # エラーカバレッジ
-taida graph query --type error --query "uncovered_throws()" ./src/main.td
-# => All throw sites are covered.
+taida way verify --check error-coverage ./src/main.td
 
 # デッドコード検出
-taida graph query --type call --query "unreachable_functions()" ./src/main.td
-# => [unusedHelper, deprecatedFunc]
+taida way verify --check dead-code ./src/main.td
 ```
 
 ---
@@ -214,7 +192,7 @@ createStaff name: Str rank: Str =
 => :Staff
 ```
 
-`@AI-Related` タグは現状 `taida verify` の個別チェック対象ではありません。  
+`@AI-Related` タグは現状 `taida way verify` の個別チェック対象ではありません。
 `taida doc generate` で抽出されるドキュメント情報として活用します。
 
 ### `@AI-SideEffects`
@@ -305,8 +283,8 @@ debug(user, "load_user")      // "[load_user] BuchiPack: @(name: ..., age: ...)"
 
 | 実行モード | `stdout(...)` | `debug(...)` | 備考 |
 |---|---|---|---|
-| CLI (`taida <file>` / `taida run <file>`) | 呼び出し毎に即 flush | 呼び出し毎に即 flush | 長時間実行のスクリプトで進捗・トレースをリアルタイム観測できる |
-| REPL (`taida repl`) | eval 完了後に一括出力 | eval 完了後に一括出力 | return-value 字下げ表示との視覚分離のためバッファモードを維持 |
+| CLI (`taida <file>`) | 呼び出し毎に即 flush | 呼び出し毎に即 flush | 長時間実行のスクリプトで進捗・トレースをリアルタイム観測できる |
+| Interactive (`taida` 引数なし) | eval 完了後に一括出力 | eval 完了後に一括出力 | return-value 字下げ表示との視覚分離のためバッファモードを維持 |
 | Rust 側 in-process test | eval 完了後に `interpreter.output` から取得 | 同左 | `Interpreter::new()` 経由のテスト互換性を維持 |
 
 `debug` の stream mode 出力先は **stdout** です（stderr ではありません）。これは JS バックエンド（`console.log`）・Native バックエンド（`printf`）との 3 バックエンドパリティを保証するための設計判断で、`test_native_compile_parity` 系の captured-stdout diff を破らない形に揃えています。

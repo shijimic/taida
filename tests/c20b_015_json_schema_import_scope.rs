@@ -120,7 +120,6 @@ fn c20b_015_json_schema_scope_js_matches_interpreter() {
     let mjs = outdir.join("caller.mjs");
     let build = Command::new(taida_bin())
         .arg("build")
-        .arg("--target")
         .arg("js")
         .arg("-o")
         .arg(&mjs)
@@ -165,7 +164,6 @@ fn c20b_015_json_schema_scope_native_matches_interpreter() {
     let bin = outdir.join("caller_native");
     let build = Command::new(taida_bin())
         .arg("build")
-        .arg("--target")
         .arg("native")
         .arg("-o")
         .arg(&bin)

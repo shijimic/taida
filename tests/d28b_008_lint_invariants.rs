@@ -6,7 +6,7 @@
 //!   3. Surfaces user-friendly Japanese diagnostic messages
 //!   4. Maintains the curated user-facing examples lint-clean (CI ratchet)
 //!
-//! The lint command (`taida lint <PATH>`) is the user-facing surface;
+//! The lint command (`taida way lint <PATH>`) is the user-facing surface;
 //! this suite exercises it both directly via the library API and via the
 //! CLI binary to ensure the same diagnostics surface in both paths.
 
@@ -260,10 +260,11 @@ fn d28b_008_curated_user_facing_examples_lint_clean() {
             continue;
         }
         let out = taida_cli()
+            .arg("way")
             .arg("lint")
             .arg(&path)
             .output()
-            .expect("taida lint failed to spawn");
+            .expect("taida way lint failed to spawn");
         if !out.status.success() {
             let stdout = String::from_utf8_lossy(&out.stdout);
             violations.push(format!("{}\n{}", path.display(), stdout));
@@ -306,10 +307,10 @@ fn d28b_008_ci_lint_job_is_hard_fail() {
         !lint_block.contains("continue-on-error: true"),
         "lint job must not opt out via continue-on-error"
     );
-    // Must invoke `taida lint`
+    // Must invoke `taida way lint`
     assert!(
-        lint_block.contains("taida lint"),
-        "lint job must invoke taida lint"
+        lint_block.contains("taida way lint"),
+        "lint job must invoke taida way lint"
     );
 }
 

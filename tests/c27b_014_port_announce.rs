@@ -230,7 +230,6 @@ fn build_native() -> Option<PathBuf> {
     let out_path = dir.join("serve_native");
     let status = Command::new(taida_bin())
         .arg("build")
-        .arg("--target")
         .arg("native")
         .arg(fixture_path())
         .arg("-o")
@@ -288,7 +287,6 @@ fn build_js() -> Option<PathBuf> {
     let out_path = dir.join("serve.mjs");
     let status = Command::new(taida_bin())
         .arg("build")
-        .arg("--target")
         .arg("js")
         .arg(fixture_path())
         .arg("-o")

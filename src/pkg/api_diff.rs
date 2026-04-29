@@ -86,7 +86,7 @@ pub fn snapshot_head(root: &Path) -> Result<PublicApiSnapshot, String> {
     if !taida_dir.exists() {
         // Source-only packages without a `taida/` directory have no
         // public API from this detector's point of view. The detector
-        // still returns Ok so `taida publish` does not fail hard on
+        // still returns Ok so `taida ingot publish` does not fail hard on
         // packages that are just manifests + main.td.
         return Ok(PublicApiSnapshot::default());
     }

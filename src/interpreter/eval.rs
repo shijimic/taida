@@ -102,7 +102,7 @@ pub struct Interpreter {
     ///
     /// `false` (default): buffered mode — `stdout` / `debug` push to `self.output`.
     /// `true`: stream mode — `stdout` writes to real stdout with immediate flush,
-    /// `debug` writes to real stderr. CLI `taida run <file>` uses stream mode;
+    /// `debug` writes to real stderr. CLI `taida <file>` uses stream mode;
     /// REPL / test / JS codegen embedding uses buffered mode.
     ///
     /// The stream/buffered split is **internal to the Rust API** and has no
@@ -264,7 +264,7 @@ impl Interpreter {
     /// with immediate flush (line-by-line), and `debug(...)` writes directly to
     /// `io::stderr()`. The `output` Vec is **not** populated.
     ///
-    /// This is the mode used by the CLI `taida run <file>` / `taida <file>`
+    /// This is the mode used by the CLI `taida <file>`
     /// execution path (`main.rs::run_file_cmd`), restoring POSIX-standard
     /// immediate-flush behavior so that TUI / progress / spinner / printf-debug
     /// all work as expected.
@@ -945,7 +945,7 @@ impl Interpreter {
                     // E30B-007 sub-step B-5 / Lock-G Sub-G4: when an
                     // undefined identifier matches the surrounding addon
                     // manifest's `[functions]` table, emit `[E1413]` with
-                    // a migration hint instead of the generic message.
+                    // an explicit-binding hint instead of the generic message.
                     // Legacy facades that referenced bare lowercase addon
                     // function names (relying on the implicit pre-inject)
                     // hit this branch in @e.30 because the pre-inject is
@@ -957,11 +957,11 @@ impl Interpreter {
                         return Err(RuntimeError {
                             message: format!(
                                 "[E1413] addon facade for '{}': bare reference to addon \
-                                 manifest function '{}' is no longer pre-injected in @e.30 \
+                                manifest function '{}' is no longer pre-injected in @e.30 \
                                  (Lock-G Sub-G4: legacy implicit pre-inject removed). Add \
                                  an explicit binding to the top of the facade: `{} <= \
-                                 RustAddon[\"{}\"](arity <= {})`. Run `taida upgrade --e30 \
-                                 <pkg>/taida/` to migrate automatically.",
+                                 RustAddon[\"{}\"](arity <= {})`. E31 does not provide an \
+                                 AST migration command; update the facade manually.",
                                 pkg_id, name, name, name, arity
                             ),
                         });

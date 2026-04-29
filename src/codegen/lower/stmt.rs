@@ -156,8 +156,13 @@ impl Lowering {
                         let methods: Vec<(String, crate::parser::FuncDef)> = type_def
                             .fields
                             .iter()
-                            .filter(|f| f.is_method && f.method_def.is_some())
-                            .map(|f| (f.name.clone(), f.method_def.clone().unwrap()))
+                            .filter_map(|f| {
+                                if f.is_method {
+                                    f.method_def.clone().map(|method| (f.name.clone(), method))
+                                } else {
+                                    None
+                                }
+                            })
                             .collect();
                         if !methods.is_empty() {
                             self.type_method_defs.insert(type_def.name.clone(), methods);
@@ -250,14 +255,11 @@ impl Lowering {
                             .get(inh_parent)
                             .cloned()
                             .unwrap_or_default();
-                        for field in inh_def
-                            .fields
-                            .iter()
-                            .filter(|f| f.is_method && f.method_def.is_some())
-                        {
-                            all_methods.retain(|(name, _)| name != &field.name);
-                            all_methods
-                                .push((field.name.clone(), field.method_def.clone().unwrap()));
+                        for field in inh_def.fields.iter().filter(|f| f.is_method) {
+                            if let Some(method) = field.method_def.clone() {
+                                all_methods.retain(|(name, _)| name != &field.name);
+                                all_methods.push((field.name.clone(), method));
+                            }
                         }
                         if !all_methods.is_empty() {
                             self.type_method_defs.insert(inh_child.clone(), all_methods);
@@ -1620,8 +1622,8 @@ impl Lowering {
                     let methods: Vec<(String, crate::parser::FuncDef)> = type_def
                         .fields
                         .iter()
-                        .filter(|f| f.is_method && f.method_def.is_some())
-                        .map(|f| (f.name.clone(), f.method_def.clone().unwrap()))
+                        .filter(|f| f.is_method)
+                        .filter_map(|f| f.method_def.clone().map(|method| (f.name.clone(), method)))
                         .collect();
                     if !methods.is_empty() {
                         self.type_method_defs.insert(type_def.name.clone(), methods);
@@ -1694,13 +1696,11 @@ impl Lowering {
                         .get(inh_parent)
                         .cloned()
                         .unwrap_or_default();
-                    for field in inh_def
-                        .fields
-                        .iter()
-                        .filter(|f| f.is_method && f.method_def.is_some())
-                    {
-                        all_methods.retain(|(name, _)| name != &field.name);
-                        all_methods.push((field.name.clone(), field.method_def.clone().unwrap()));
+                    for field in inh_def.fields.iter().filter(|f| f.is_method) {
+                        if let Some(method) = field.method_def.clone() {
+                            all_methods.retain(|(name, _)| name != &field.name);
+                            all_methods.push((field.name.clone(), method));
+                        }
                     }
                     if !all_methods.is_empty() {
                         self.type_method_defs.insert(inh_child.clone(), all_methods);

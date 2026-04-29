@@ -178,7 +178,7 @@ fn c27b_022_case1_root_inside_sibling_js() {
     let src = root.join("examples/foo.td");
     let out_js = root.join("out.mjs");
     let build = Command::new(taida_bin())
-        .args(["build", "--target", "js"])
+        .args(["build", "js"])
         .arg(&src)
         .arg("-o")
         .arg(&out_js)
@@ -208,7 +208,7 @@ fn c27b_022_case1_root_inside_sibling_native() {
     let src = root.join("examples/foo.td");
     let bin = root.join("out.bin");
     let build = Command::new(taida_bin())
-        .args(["build", "--target", "native"])
+        .args(["build", "native"])
         .arg(&src)
         .arg("-o")
         .arg(&bin)
@@ -273,7 +273,7 @@ fn c27b_022_case2_root_inside_nested_js() {
     let src = root.join("examples/sub/foo.td");
     let out_js = root.join("out.mjs");
     let build = Command::new(taida_bin())
-        .args(["build", "--target", "js"])
+        .args(["build", "js"])
         .arg(&src)
         .arg("-o")
         .arg(&out_js)
@@ -303,7 +303,7 @@ fn c27b_022_case2_root_inside_nested_native() {
     let src = root.join("examples/sub/foo.td");
     let bin = root.join("out.bin");
     let build = Command::new(taida_bin())
-        .args(["build", "--target", "native"])
+        .args(["build", "native"])
         .arg(&src)
         .arg("-o")
         .arg(&bin)
@@ -375,7 +375,7 @@ fn c27b_022_case3_root_inside_direct_child_js() {
     let src = root.join("examples/foo.td");
     let out_js = root.join("out.mjs");
     let build = Command::new(taida_bin())
-        .args(["build", "--target", "js"])
+        .args(["build", "js"])
         .arg(&src)
         .arg("-o")
         .arg(&out_js)
@@ -408,7 +408,7 @@ fn c27b_022_case3_root_inside_direct_child_native() {
     let src = root.join("examples/foo.td");
     let bin = root.join("out.bin");
     let build = Command::new(taida_bin())
-        .args(["build", "--target", "native"])
+        .args(["build", "native"])
         .arg(&src)
         .arg("-o")
         .arg(&bin)
@@ -577,7 +577,7 @@ fn c27b_022_case4_root_outside_absolute_js() {
     let outside_td = outside_dir.join("leak.td");
     let out_js = root.join("out.mjs");
     let build = Command::new(taida_bin())
-        .args(["build", "--target", "js"])
+        .args(["build", "js"])
         .arg(&main)
         .arg("-o")
         .arg(&out_js)
@@ -608,7 +608,7 @@ fn c27b_022_case4_root_outside_absolute_native() {
     let outside_td = outside_dir.join("leak.td");
     let bin = root.join("out.bin");
     let build = Command::new(taida_bin())
-        .args(["build", "--target", "native"])
+        .args(["build", "native"])
         .arg(&main)
         .arg("-o")
         .arg(&bin)
@@ -711,7 +711,7 @@ fn c27b_022_case5_root_outside_relative_js() {
     let (outer, main, _leak) = case5_layout();
     let out_js = outer.join("project/out.mjs");
     let build = Command::new(taida_bin())
-        .args(["build", "--target", "js"])
+        .args(["build", "js"])
         .arg(&main)
         .arg("-o")
         .arg(&out_js)
@@ -740,7 +740,7 @@ fn c27b_022_case5_root_outside_relative_native() {
     let (outer, main, _leak) = case5_layout();
     let bin = outer.join("project/out.bin");
     let build = Command::new(taida_bin())
-        .args(["build", "--target", "native"])
+        .args(["build", "native"])
         .arg(&main)
         .arg("-o")
         .arg(&bin)

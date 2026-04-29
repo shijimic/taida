@@ -5,7 +5,7 @@
 /// 2. CoreBundledProvider — core packages bundled with Taida (`taida-lang/*`)
 /// 3. StoreProvider — external registry (stub, Phase 3+)
 ///
-/// `taida deps` and `taida install` read `packages.tdm`, resolve all dependencies
+/// `taida ingot deps` and `taida ingot install` read `packages.tdm`, resolve all dependencies
 /// through the provider chain, and create `.taida/deps/` symlinks.
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -70,7 +70,7 @@ pub fn resolve_deps(manifest: &Manifest) -> ResolveResult {
 /// Resolve all dependencies using the provider chain, but pin generation-only
 /// versions to their locked exact versions from an existing lockfile.
 ///
-/// Used by `taida install` to ensure reproducible installs: if a lockfile
+/// Used by `taida ingot install` to ensure reproducible installs: if a lockfile
 /// records `alice/demo@a.2`, a manifest dependency of `alice/demo@a` will
 /// resolve to `a.2` instead of the latest version in generation `a`.
 pub fn resolve_deps_locked(manifest: &Manifest, lockfile: &Lockfile) -> ResolveResult {
@@ -100,7 +100,7 @@ pub fn resolve_deps_with_flags(manifest: &Manifest, flags: StoreRefreshFlags) ->
 
 /// Resolve all dependencies, bypassing local cache for generation resolution.
 ///
-/// Used by `taida update` to re-resolve generation-only versions (e.g. "a")
+/// Used by `taida ingot update` to re-resolve generation-only versions (e.g. "a")
 /// to the latest exact version (e.g. "a.47") by querying GitHub API directly.
 pub fn resolve_deps_update(manifest: &Manifest) -> ResolveResult {
     resolve_deps_inner(manifest, true, None, StoreRefreshFlags::default())
@@ -372,17 +372,78 @@ fn resolve_deps_inner(
 /// These are installed to `.taida/deps/org/pkg@version/` directories, enabling
 /// multiple versions of the same package to coexist (pnpm-style).
 pub fn install_deps(manifest: &Manifest, result: &ResolveResult) -> Result<(), String> {
+    let taida_dir = manifest.root_dir.join(".taida");
     let deps_dir = manifest.root_dir.join(".taida").join("deps");
+    std::fs::create_dir_all(&taida_dir).map_err(|e| format!("Cannot create .taida/: {}", e))?;
 
-    // Create deps directory
-    std::fs::create_dir_all(&deps_dir).map_err(|e| format!("Cannot create .taida/deps/: {}", e))?;
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let tmp_deps_dir = taida_dir.join(format!(".deps.tmp-{}-{}", std::process::id(), nonce));
 
-    // Clean existing deps dir completely (supports nested org/name structure)
-    if deps_dir.exists() {
-        let _ = std::fs::remove_dir_all(&deps_dir);
+    let _ = std::fs::remove_dir_all(&tmp_deps_dir);
+    std::fs::create_dir_all(&tmp_deps_dir)
+        .map_err(|e| format!("Cannot create staging deps dir: {}", e))?;
+
+    if let Err(e) = install_deps_into(result, &tmp_deps_dir) {
+        let _ = std::fs::remove_dir_all(&tmp_deps_dir);
+        return Err(e);
     }
-    std::fs::create_dir_all(&deps_dir).map_err(|e| format!("Cannot create .taida/deps/: {}", e))?;
 
+    if deps_dir.exists() {
+        replace_existing_deps_dir(&tmp_deps_dir, &deps_dir).map_err(|e| {
+            let _ = std::fs::remove_dir_all(&tmp_deps_dir);
+            format!("Cannot replace .taida/deps atomically: {}", e)
+        })?;
+        // After an atomic exchange, tmp_deps_dir contains the previous deps.
+        let _ = std::fs::remove_dir_all(&tmp_deps_dir);
+    } else if let Err(e) = std::fs::rename(&tmp_deps_dir, &deps_dir) {
+        let _ = std::fs::remove_dir_all(&tmp_deps_dir);
+        return Err(format!("Cannot install .taida/deps: {}", e));
+    }
+
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn replace_existing_deps_dir(tmp_deps_dir: &Path, deps_dir: &Path) -> std::io::Result<()> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+
+    const RENAME_EXCHANGE: libc::c_uint = 2;
+
+    let tmp = CString::new(tmp_deps_dir.as_os_str().as_bytes())
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
+    let deps = CString::new(deps_dir.as_os_str().as_bytes())
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
+
+    let rc = unsafe {
+        libc::syscall(
+            libc::SYS_renameat2,
+            libc::AT_FDCWD,
+            tmp.as_ptr(),
+            libc::AT_FDCWD,
+            deps.as_ptr(),
+            RENAME_EXCHANGE,
+        )
+    };
+    if rc == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn replace_existing_deps_dir(_tmp_deps_dir: &Path, _deps_dir: &Path) -> std::io::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "atomic directory exchange is only implemented on Linux",
+    ))
+}
+
+fn install_deps_into(result: &ResolveResult, deps_dir: &Path) -> Result<(), String> {
     // Install each resolved package using its provider's install method
     let providers: Vec<Box<dyn PackageProvider>> = vec![
         Box::new(WorkspaceProvider),
@@ -399,7 +460,7 @@ pub fn install_deps(manifest: &Manifest, result: &ResolveResult) -> Result<(), S
                 PackageSource::Store { .. } => provider.name() == "store",
             };
             if can_install {
-                if let Err(e) = provider.install(pkg, &deps_dir) {
+                if let Err(e) = provider.install(pkg, deps_dir) {
                     eprintln!("  Warning: {}", e);
                     return false;
                 }
@@ -541,7 +602,7 @@ pub fn install_addon_prebuilds(
                         "{}\n\
                          action:\n\
                          \x20 - ask the addon author to upload a prebuild for {}\n\
-                         \x20 - or retry with `taida install --allow-local-addon-build`",
+                         \x20 - or retry with `taida ingot install --allow-local-addon-build`",
                         msg,
                         host.as_triple()
                     ));
@@ -804,7 +865,7 @@ fn try_fetch_prebuild(
             {
                 // RC1.5-3b-5: mismatch -> reject (integrity)
                 return Err(PrebuildFailure::IntegrityMismatch(format!(
-                    "lockfile addon SHA-256 mismatch for package '{}' (expected {}, got {}). Re-run `taida install --force-refresh`.",
+                    "lockfile addon SHA-256 mismatch for package '{}' (expected {}, got {}). Re-run `taida ingot install --force-refresh`.",
                     pkg.name, expected_sha256, locked_addon.sha256
                 )));
             }
@@ -1283,6 +1344,14 @@ mod tests {
     const REAL_SHA: &str =
         "sha256:d9c093fe0123456789abcdef0123456789abcdef0123456789abcdef01234567";
 
+    fn unique_test_dir(prefix: &str) -> PathBuf {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        std::env::temp_dir().join(format!("{}_{}_{}", prefix, std::process::id(), nonce))
+    }
+
     #[test]
     fn choose_sha_source_prefers_addon_toml_when_real_sha_present() {
         // Happy path: addon.toml has a real, CI-computed digest for
@@ -1440,6 +1509,108 @@ mod tests {
         assert!(
             link.join("lib.td").exists(),
             "lib.td should be accessible through symlink"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_install_deps_preserves_existing_deps_on_staging_failure() {
+        let dir = unique_test_dir("taida_test_pkg_install_txn");
+        let dep_a = dir.join("dep_a");
+        let dep_b = dir.join("dep_b");
+        let existing_dir = dir.join(".taida").join("deps").join("existing");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dep_a).unwrap();
+        fs::create_dir_all(&dep_b).unwrap();
+        fs::create_dir_all(&existing_dir).unwrap();
+        fs::write(existing_dir.join("keep.td"), "// keep").unwrap();
+
+        let manifest = Manifest {
+            name: "test".to_string(),
+            version: "0.1.0".to_string(),
+            description: String::new(),
+            entry: "main.td".to_string(),
+            deps: BTreeMap::new(),
+            root_dir: dir.clone(),
+            exports: Vec::new(),
+        };
+        let result = ResolveResult {
+            resolved: BTreeMap::new(),
+            packages: vec![
+                ResolvedPackage {
+                    name: "dup".to_string(),
+                    version: "0.1.0".to_string(),
+                    source: PackageSource::Path(dep_a.display().to_string()),
+                    path: dep_a,
+                    integrity: String::new(),
+                },
+                ResolvedPackage {
+                    name: "dup".to_string(),
+                    version: "0.1.0".to_string(),
+                    source: PackageSource::Path(dep_b.display().to_string()),
+                    path: dep_b,
+                    integrity: String::new(),
+                },
+            ],
+            errors: Vec::new(),
+        };
+
+        let err = install_deps(&manifest, &result).expect_err("duplicate install should fail");
+        assert!(
+            err.contains("Cannot create symlink for 'dup'"),
+            "unexpected error: {}",
+            err
+        );
+        assert!(
+            existing_dir.join("keep.td").exists(),
+            "existing deps must survive staging failure"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_install_deps_replaces_existing_deps_with_atomic_exchange() {
+        let dir = unique_test_dir("taida_test_pkg_install_exchange");
+        let dep_dir = dir.join("dep_new");
+        let old_dir = dir.join(".taida").join("deps").join("old");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dep_dir).unwrap();
+        fs::write(dep_dir.join("lib.td"), "// new lib").unwrap();
+        fs::create_dir_all(&old_dir).unwrap();
+        fs::write(old_dir.join("old.td"), "// old").unwrap();
+
+        let manifest = Manifest {
+            name: "test".to_string(),
+            version: "0.1.0".to_string(),
+            description: String::new(),
+            entry: "main.td".to_string(),
+            deps: BTreeMap::new(),
+            root_dir: dir.clone(),
+            exports: Vec::new(),
+        };
+        let result = ResolveResult {
+            resolved: BTreeMap::new(),
+            packages: vec![ResolvedPackage {
+                name: "newlib".to_string(),
+                version: "0.1.0".to_string(),
+                source: PackageSource::Path(dep_dir.display().to_string()),
+                path: dep_dir,
+                integrity: String::new(),
+            }],
+            errors: Vec::new(),
+        };
+
+        install_deps(&manifest, &result).unwrap();
+
+        let deps = dir.join(".taida").join("deps");
+        assert!(deps.join("newlib").join("lib.td").exists());
+        assert!(
+            !deps.join("old").exists(),
+            "old deps should be removed after the exchange"
         );
 
         let _ = fs::remove_dir_all(&dir);

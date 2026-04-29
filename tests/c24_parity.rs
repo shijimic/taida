@@ -71,7 +71,7 @@ fn tmp_artifact(td_path: &Path, suffix: &str) -> PathBuf {
 fn run_js(td_path: &Path) -> Option<String> {
     let js_path = tmp_artifact(td_path, "mjs");
     let build = Command::new(taida_bin())
-        .args(["build", "--target", "js"])
+        .args(["build", "js"])
         .arg(td_path)
         .arg("-o")
         .arg(&js_path)
@@ -102,7 +102,7 @@ fn run_js(td_path: &Path) -> Option<String> {
 fn run_native(td_path: &Path) -> Option<String> {
     let bin_path = tmp_artifact(td_path, "bin");
     let build = Command::new(taida_bin())
-        .args(["build", "--target", "native"])
+        .args(["build", "native"])
         .arg(td_path)
         .arg("-o")
         .arg(&bin_path)
@@ -134,7 +134,7 @@ fn run_wasm_wasi(td_path: &Path) -> Option<String> {
     let wasmtime = wasmtime_bin()?;
     let wasm_path = tmp_artifact(td_path, "wasm");
     let build = Command::new(taida_bin())
-        .args(["build", "--target", "wasm-wasi"])
+        .args(["build", "wasm-wasi"])
         .arg(td_path)
         .arg("-o")
         .arg(&wasm_path)

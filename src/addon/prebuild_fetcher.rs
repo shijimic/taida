@@ -131,7 +131,7 @@ fn noop_progress(_: u64, _: Option<u64>) {}
 
 /// Returns the addon cache root (`~/.taida/addon-cache`).
 ///
-/// Exposed to the crate so that CLI commands like `taida cache clean`
+/// Exposed to the crate so that CLI commands like `taida ingot cache clean`
 /// (RC15B-001) can locate the directory without duplicating the path
 /// logic.
 pub(crate) fn cache_root() -> Result<PathBuf, FetchError> {
@@ -160,7 +160,7 @@ pub struct AddonCacheCleanSummary {
 
 /// Remove every cached addon binary under `~/.taida/addon-cache`.
 ///
-/// This is the `taida cache clean --addons` implementation for
+/// This is the `taida ingot cache clean --addons` implementation for
 /// RC15B-001. Unlike the WASM runtime cache cleaner, addon binaries are
 /// keyed by `<org>/<name>/<version>/<target>/` so the directory tree is
 /// walked recursively. The walk is conservative: it only removes files
@@ -674,7 +674,7 @@ pub fn fetch_release_lockfile(package_name: &str, version: &str) -> Result<Strin
             "addon.lock.toml not found for '{}@{}' (HTTP {})\n\
              \x20 url: {}\n\
              \x20 hint: the addon author may not have published a prebuild yet.\n\
-             \x20       Run `taida publish --target rust-addon` in the addon repository.",
+             \x20       Run `taida ingot publish` in the addon repository.",
             package_name,
             version,
             response.status(),

@@ -168,7 +168,7 @@ jobs:
           printf '"%s" = "sha256:%s"\n' "${{ matrix.triple }}" "$sha" > "${{ matrix.triple }}.toml.fragment"
 
       - name: Upload artefact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: prebuild-${{ matrix.triple }}
           path: |
@@ -185,7 +185,7 @@ jobs:
     # condition automatically flips on.
     if: startsWith(github.ref, 'refs/tags/v')
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v7
         with:
           path: prebuild-artifacts
 

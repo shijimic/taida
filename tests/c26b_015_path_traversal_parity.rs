@@ -104,7 +104,7 @@ fn c26b_015_native_accepts_in_project_parent_import() {
     let src = dir.join("examples/foo.td");
     let bin = dir.join("out.bin");
     let build = Command::new(taida_bin())
-        .args(["build", "--target", "native"])
+        .args(["build", "native"])
         .arg(&src)
         .arg("-o")
         .arg(&bin)
@@ -157,7 +157,7 @@ fn c26b_015_js_accepts_in_project_parent_import() {
     let src = dir.join("examples/foo.td");
     let js = dir.join("out.mjs");
     let build = Command::new(taida_bin())
-        .args(["build", "--target", "js"])
+        .args(["build", "js"])
         .arg(&src)
         .arg("-o")
         .arg(&js)
@@ -187,7 +187,7 @@ fn c26b_015_native_rejects_true_escape() {
     let (root, src) = escape_layout("native_escape");
     let bin = root.join("out.bin");
     let build = Command::new(taida_bin())
-        .args(["build", "--target", "native"])
+        .args(["build", "native"])
         .arg(&src)
         .arg("-o")
         .arg(&bin)

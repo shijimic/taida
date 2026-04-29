@@ -64,7 +64,7 @@ fn run_install_with_env(
     extra: &[&str],
 ) -> std::process::Output {
     let mut cmd = Command::new(taida_bin());
-    cmd.arg("install");
+    cmd.arg("ingot").arg("install");
     for a in extra {
         cmd.arg(a);
     }
@@ -73,7 +73,7 @@ fn run_install_with_env(
         .env("TAIDA_GITHUB_BASE_URL", base)
         .env("TAIDA_GITHUB_API_URL", api)
         .env("GH_TOKEN", "unused");
-    cmd.output().expect("run taida install")
+    cmd.output().expect("run taida ingot install")
 }
 
 #[test]

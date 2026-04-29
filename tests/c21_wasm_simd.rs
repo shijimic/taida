@@ -60,7 +60,7 @@ fn build_and_print(target: &str) -> Option<(String, PathBuf)> {
     let wasm_path = std::env::temp_dir().join(format!("{}.wasm", stem));
 
     let build = Command::new(taida_bin())
-        .args(["build", "--target", target])
+        .args(["build", target])
         .arg(matmul_td())
         .arg("-o")
         .arg(&wasm_path)
@@ -165,7 +165,7 @@ fn wasm_min_stays_simd_free() {
         simd, 0,
         "wasm-min must stay SIMD-free for minimal-runtime compatibility: \
          found {} SIMD-flavored instructions, which would silently force \
-         simd128 feature requirement on consumers that chose --target wasm-min",
+         simd128 feature requirement on consumers that chose wasm-min",
         simd
     );
 }
@@ -185,7 +185,7 @@ fn wasm_wasi_matmul_small_runs_correctly() {
     let wasm_path = std::env::temp_dir().join(format!("{}.wasm", stem));
 
     let build = Command::new(taida_bin())
-        .args(["build", "--target", "wasm-wasi"])
+        .args(["build", "wasm-wasi"])
         .arg(matmul_td())
         .arg("-o")
         .arg(&wasm_path)

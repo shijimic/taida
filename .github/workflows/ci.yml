@@ -79,7 +79,7 @@ jobs:
       - name: Build nextest archive
         run: cargo nextest archive --all-targets --archive-file taida-nextest.tar.zst
       - name: Upload nextest archive
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: nextest-archive
           path: taida-nextest.tar.zst
@@ -104,7 +104,7 @@ jobs:
           mv "$HOME/.wasmtime-bin" "$HOME/.wasmtime/bin/wasmtime"
           echo "$HOME/.wasmtime/bin" >> "$GITHUB_PATH"
       - name: Download nextest archive
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           name: nextest-archive
       # `cargo nextest run --archive-file` skips compilation entirely and
@@ -171,7 +171,7 @@ jobs:
   # D28B-008 Round 3 wK — naming-convention lint hard-fail.
   #
   # Pins the D28B-001 (Phase 0 2026-04-26 Lock) category-based naming
-  # rules at the parser/AST level via `taida lint`. Diagnostic codes
+  # rules at the parser/AST level via `taida way lint`. Diagnostic codes
   # E1801..E1809 are emitted on violations; this job fails (`continue-on-error`
   # is intentionally NOT set) if any user-facing example regresses.
   #
@@ -218,18 +218,18 @@ jobs:
             case "$f" in
               examples/compile_*|examples/addon_terminal*) continue ;;
             esac
-            ./target/debug/taida lint --quiet "$f" || {
+            ./target/debug/taida way lint --quiet "$f" || {
               echo "Lint failed for $f:"
-              ./target/debug/taida lint "$f"
+              ./target/debug/taida way lint "$f"
               exit 1
             }
           done
       - name: Lint complex examples
-        run: ./target/debug/taida lint --quiet examples/complex
+        run: ./target/debug/taida way lint --quiet examples/complex
       - name: Lint embedding examples (if any present)
         run: |
           if [ -d examples/embedding ]; then
-            ./target/debug/taida lint --quiet examples/embedding
+            ./target/debug/taida way lint --quiet examples/embedding
           fi
 
   # D29B-010 / Lock-G: workflow YAML hard-fail audit.

@@ -157,7 +157,7 @@ jobs:
 
       - name: upload proxy log
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: soak-smoke-proxy-log-${{ github.sha }}
           path: target/soak-smoke/proxy.log

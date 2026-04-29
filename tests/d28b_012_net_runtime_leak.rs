@@ -73,7 +73,7 @@ fn build_native(td: &Path) -> Option<PathBuf> {
     let seq = SEQ.fetch_add(1, Ordering::SeqCst);
     let bin = std::env::temp_dir().join(format!("d28b_012_{}_{}.bin", std::process::id(), seq));
     let out = Command::new(taida_bin())
-        .args(["build", "--target", "native"])
+        .args(["build", "native"])
         .arg(td)
         .arg("-o")
         .arg(&bin)

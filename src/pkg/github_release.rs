@@ -1,7 +1,7 @@
 //! GitHub Release REST API driver (RC2.7 Phase 2).
 //!
 //! Provides release ensure + asset ensure semantics so that
-//! `taida publish --target rust-addon` can create GitHub Releases
+//! `taida ingot publish` can create GitHub Releases
 //! and upload assets without depending on the `gh` CLI.
 //!
 //! ## Design

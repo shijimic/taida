@@ -20,32 +20,33 @@ fn test_compile_command_removed() {
         "compile should fail with non-zero exit code"
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(2));
     assert!(
-        stderr.contains("`taida compile` has been removed"),
-        "expected removal error, got: {}",
+        stderr.contains("[E1700]") && stderr.contains("Command 'compile' was removed"),
+        "expected E1700 removal error, got: {}",
         stderr
     );
     assert!(
-        stderr.contains("taida build --target native"),
-        "expected migration hint, got: {}",
+        stderr.contains("taida build native"),
+        "expected replacement hint, got: {}",
         stderr
     );
 }
 
 #[test]
-fn test_transpile_command_help() {
+fn test_transpile_command_removed_with_e1700() {
     let output = Command::new(taida_bin())
         .arg("transpile")
         .arg("--help")
         .output()
         .expect("failed to run taida transpile --help");
 
-    assert!(output.status.success(), "transpile --help should succeed");
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(output.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stdout.contains("taida transpile"),
-        "expected usage text, got: {}",
-        stdout
+        stderr.contains("[E1700]") && stderr.contains("taida build js"),
+        "expected E1700 replacement hint, got: {}",
+        stderr
     );
 }
 
@@ -66,9 +67,14 @@ fn test_top_level_help_prints_usage_and_commands() {
     assert!(
         stdout.contains("Usage:\n  taida [--no-check] <FILE>")
             && stdout.contains("Commands:")
+            && stdout.contains("way")
             && stdout.contains("graph")
+            && stdout.contains("ingot")
             && stdout.contains("upgrade")
-            && stdout.contains("Global options:"),
+            && stdout.contains("Global options:")
+            && !stdout.contains("\n  transpile")
+            && !stdout.contains("\n  inspect")
+            && !stdout.contains("\n  check"),
         "unexpected help output: {}",
         stdout
     );
@@ -78,37 +84,31 @@ fn test_top_level_help_prints_usage_and_commands() {
 fn test_subcommand_help_prints_usage_and_exits_zero() {
     let workdir = common::unique_temp_dir("taida_subcommand_help");
     let cases = [
-        (&["check", "--help"][..], "taida check [--json] <PATH>"),
+        (&["way", "--help"][..], "taida way check <PATH>"),
         (
-            &["build", "--help"][..],
-            "taida build [--target native|js|wasm-min|wasm-wasi|wasm-edge|wasm-full]",
+            &["way", "check", "--help"][..],
+            "taida way check [--format text|json|jsonl|sarif]",
         ),
         (
-            &["todo", "--help"][..],
-            "taida todo [--format text|json] [PATH]",
+            &["way", "verify", "--help"][..],
+            "taida way verify [--check CHECK]",
+        ),
+        (&["ingot", "--help"][..], "taida ingot install"),
+        (
+            &["build", "--help"][..],
+            "taida build [native|js|wasm-min|wasm-wasi|wasm-edge|wasm-full]",
         ),
         (
             &["graph", "--help"][..],
             "taida graph [-o OUTPUT] [--recursive] <PATH>",
         ),
         (
-            &["verify", "--help"][..],
-            "taida verify [--check CHECK] [--format FORMAT] <PATH>",
-        ),
-        (
-            &["inspect", "--help"][..],
-            "taida inspect [--format text|json|sarif] <PATH>",
+            &["graph", "summary", "--help"][..],
+            "taida graph summary [--format text|json|sarif] <PATH>",
         ),
         (
             &["init", "--help"][..],
             "taida init [--target rust-addon] [DIR]",
-        ),
-        (&["deps", "--help"][..], "taida deps"),
-        (&["install", "--help"][..], "taida install"),
-        (&["update", "--help"][..], "taida update"),
-        (
-            &["publish", "--help"][..],
-            "taida publish [--label LABEL] [--force-version VERSION] [--retag] [--dry-run]",
         ),
         (
             &["doc", "--help"][..],

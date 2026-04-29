@@ -1,9 +1,9 @@
 #![allow(clippy::doc_overindented_list_items)]
 
-//! C17B-009: concurrent `taida install` processes must not corrupt the
+//! C17B-009: concurrent `taida ingot install` processes must not corrupt the
 //! store.
 //!
-//! Contract: two `taida install` processes racing on the same
+//! Contract: two `taida ingot install` processes racing on the same
 //! `<org>/<name>/<version>/` may block on each other (flock LOCK_EX) but
 //! must both eventually exit 0 with a well-formed sidecar and marker in
 //! place. No `.tmp-*` or `.refresh-staging-*` scratch may remain.
@@ -75,6 +75,7 @@ fn c17b_009_two_concurrent_installs_serialize_safely() {
     let spawn_install = |project: PathBuf, home: PathBuf, base: String, api: String| {
         thread::spawn(move || {
             Command::new(taida_bin())
+                .arg("ingot")
                 .arg("install")
                 .current_dir(&project)
                 .env("HOME", &home)
@@ -82,7 +83,7 @@ fn c17b_009_two_concurrent_installs_serialize_safely() {
                 .env("TAIDA_GITHUB_API_URL", &api)
                 .env("GH_TOKEN", "unused")
                 .output()
-                .expect("run taida install")
+                .expect("run taida ingot install")
         })
     };
 

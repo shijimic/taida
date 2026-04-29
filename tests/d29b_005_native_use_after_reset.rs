@@ -105,12 +105,12 @@ stdout(r.requests)
 
 fn build_native(src: &Path, bin: &Path) -> bool {
     let out = Command::new(taida_bin())
-        .args(["build", "--target", "native"])
+        .args(["build", "native"])
         .arg(src)
         .arg("-o")
         .arg(bin)
         .output()
-        .expect("spawn taida build --target native");
+        .expect("spawn taida build native");
     if !out.status.success() {
         eprintln!(
             "native build failed:\n{}",
@@ -165,7 +165,7 @@ fn native_req_raw_lives_across_arena_reset() {
     let src = write_server(&dir, port);
     let bin = dir.join("server.bin");
     if !build_native(&src, &bin) {
-        panic!("taida build --target native failed");
+        panic!("taida build native failed");
     }
 
     let mut child = spawn_server(&bin, port);

@@ -10,8 +10,8 @@
 //!     `[E1410]` 発火しない (defaultFn が自動充足、Phase 6 land 済)
 //!
 //! 4-backend parity 観点: Phase 5 は **checker-only 変更** (definition-site
-//! reject)。`taida check` の標準 error 出力は backend 非依存で、4-backend
-//! いずれも同一の `[E1410]` を発火する。本 test は `taida check` の output
+//! reject)。`taida way check` の標準 error 出力は backend 非依存で、4-backend
+//! いずれも同一の `[E1410]` を発火する。本 test は `taida way check` の output
 //! を assert することで 4-backend 共通の compile-time 挙動を pin する。
 //!
 //! Phase 4 (E30B-002) 受理 fixture の regression guard:
@@ -42,17 +42,18 @@ fn ensure_release_binary() {
     assert!(status.success(), "cargo build --release --bin taida failed");
 }
 
-/// Run `taida check` on a temporary file written from `source` and return
+/// Run `taida way check` on a temporary file written from `source` and return
 /// (combined stdout+stderr, status_success).
 fn run_check(source: &str, label: &str) -> (String, bool) {
     ensure_release_binary();
     let tmp = std::env::temp_dir().join(format!("e30b_003_{}.td", label));
     std::fs::write(&tmp, source).expect("write tmp");
     let output = Command::new(taida_bin())
+        .arg("way")
         .arg("check")
         .arg(&tmp)
         .output()
-        .expect("taida check spawn");
+        .expect("taida way check spawn");
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     let combined = format!("{}{}", stdout, stderr);
@@ -146,7 +147,7 @@ stdout(p.name)
     let (combined, ok) = run_check(source, "generatable");
     assert!(
         ok,
-        "taida check should succeed for generatable declare-only fn field, got: {}",
+        "taida way check should succeed for generatable declare-only fn field, got: {}",
         combined
     );
     assert!(
@@ -190,7 +191,7 @@ stdout(p.compute())
     let (combined, ok) = run_check(source, "method_with_body");
     assert!(
         ok,
-        "taida check should succeed for method with body, got: {}",
+        "taida way check should succeed for method with body, got: {}",
         combined
     );
     assert!(

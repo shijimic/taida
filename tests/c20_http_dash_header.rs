@@ -125,7 +125,6 @@ fn run_js(source: &str, label: &str) -> String {
     let mjs = unique_temp(&format!("c20_http_{}", label), "mjs");
     let build = Command::new(taida_bin())
         .arg("build")
-        .arg("--target")
         .arg("js")
         .arg(&src)
         .arg("-o")
@@ -155,7 +154,6 @@ fn run_native(source: &str, label: &str) -> String {
     let bin = unique_temp(&format!("c20_http_{}", label), "bin");
     let build = Command::new(taida_bin())
         .arg("build")
-        .arg("--target")
         .arg("native")
         .arg(&src)
         .arg("-o")
@@ -359,7 +357,6 @@ fn c20_http_request_missing_url_js_build_fails() {
     let mjs = unique_temp("c20_http_root16", "mjs");
     let build = Command::new(taida_bin())
         .arg("build")
-        .arg("--target")
         .arg("js")
         .arg(&src)
         .arg("-o")

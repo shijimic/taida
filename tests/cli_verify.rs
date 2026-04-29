@@ -1,4 +1,4 @@
-//! CLI `taida verify` tests.
+//! CLI `taida way verify` tests.
 //!
 //! Covers: jsonl output format, format/check validation, missing path errors.
 //!
@@ -24,12 +24,13 @@ risky x =
     );
 
     let output = Command::new(taida_bin())
+        .arg("way")
         .arg("verify")
         .arg("--format")
         .arg("jsonl")
         .arg(&src)
         .output()
-        .expect("failed to run taida verify --format jsonl");
+        .expect("failed to run taida way verify --format jsonl");
 
     assert!(
         !output.status.success(),
@@ -69,7 +70,7 @@ risky x =
 #[test]
 fn test_rc5b_verify_invalid_format_errors() {
     let output = Command::new(taida_bin())
-        .args(["verify", "--format", "xml", "examples/01_hello.td"])
+        .args(["way", "verify", "--format", "xml", "examples/01_hello.td"])
         .output()
         .expect("verify with invalid format");
     assert!(!output.status.success());
@@ -84,7 +85,13 @@ fn test_rc5b_verify_invalid_format_errors() {
 #[test]
 fn test_rc5b_verify_invalid_check_errors() {
     let output = Command::new(taida_bin())
-        .args(["verify", "--check", "nonexistent", "examples/01_hello.td"])
+        .args([
+            "way",
+            "verify",
+            "--check",
+            "nonexistent",
+            "examples/01_hello.td",
+        ])
         .output()
         .expect("verify with invalid check");
     assert!(!output.status.success());
@@ -104,6 +111,7 @@ fn test_rc5b_verify_invalid_check_errors() {
 #[test]
 fn test_rc5b_verify_missing_path_errors() {
     let output = Command::new(taida_bin())
+        .arg("way")
         .arg("verify")
         .output()
         .expect("verify with no path");
@@ -120,12 +128,12 @@ fn test_rc5b_verify_missing_path_errors() {
 fn test_rc5b_verify_valid_format_accepted() {
     for fmt in &["text", "json", "jsonl", "sarif"] {
         let output = Command::new(taida_bin())
-            .args(["verify", "--format", fmt, "examples/01_hello.td"])
+            .args(["way", "verify", "--format", fmt, "examples/01_hello.td"])
             .output()
-            .unwrap_or_else(|_| panic!("verify --format {} should run", fmt));
+            .unwrap_or_else(|_| panic!("way verify --format {} should run", fmt));
         assert!(
             output.status.success(),
-            "verify --format {} should succeed, stderr: {}",
+            "way verify --format {} should succeed, stderr: {}",
             fmt,
             String::from_utf8_lossy(&output.stderr)
         );
@@ -136,6 +144,7 @@ fn test_rc5b_verify_valid_format_accepted() {
 fn test_rc5b_verify_valid_check_accepted() {
     let output = Command::new(taida_bin())
         .args([
+            "way",
             "verify",
             "--check",
             "error-coverage",
@@ -145,7 +154,7 @@ fn test_rc5b_verify_valid_check_accepted() {
         .expect("verify with valid check");
     assert!(
         output.status.success(),
-        "verify --check error-coverage should succeed, stderr: {}",
+        "way verify --check error-coverage should succeed, stderr: {}",
         String::from_utf8_lossy(&output.stderr)
     );
 }
@@ -153,9 +162,9 @@ fn test_rc5b_verify_valid_check_accepted() {
 #[test]
 fn test_rc5_verify_format_missing_value_errors() {
     let output = Command::new(taida_bin())
-        .args(["verify", "--format"])
+        .args(["way", "verify", "--format"])
         .output()
-        .expect("verify --format with no value");
+        .expect("way verify --format with no value");
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
@@ -168,9 +177,9 @@ fn test_rc5_verify_format_missing_value_errors() {
 #[test]
 fn test_rc5_verify_check_missing_value_errors() {
     let output = Command::new(taida_bin())
-        .args(["verify", "--check"])
+        .args(["way", "verify", "--check"])
         .output()
-        .expect("verify --check with no value");
+        .expect("way verify --check with no value");
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(

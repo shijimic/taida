@@ -142,7 +142,7 @@ impl fmt::Display for AddonBackendError {
         // working targets without an obsolete reference to D26.
         write!(
             f,
-            "addon-backed package '{}' is not supported on backend '{}' (supported: interpreter, native, wasm-full). Run 'taida build --target native' or use the interpreter; for wasm targets, only 'wasm-full' supports addons.",
+            "addon-backed package '{}' is not supported on backend '{}' (supported: interpreter, native, wasm-full). Run 'taida build native' or use the interpreter; for wasm targets, only 'wasm-full' supports addons.",
             self.package,
             self.backend.label()
         )
@@ -222,7 +222,7 @@ mod tests {
         let err = AddonBackendError::new(AddonBackend::Js, "taida-lang/terminal");
         assert_eq!(
             err.to_string(),
-            "addon-backed package 'taida-lang/terminal' is not supported on backend 'js' (supported: interpreter, native, wasm-full). Run 'taida build --target native' or use the interpreter; for wasm targets, only 'wasm-full' supports addons."
+            "addon-backed package 'taida-lang/terminal' is not supported on backend 'js' (supported: interpreter, native, wasm-full). Run 'taida build native' or use the interpreter; for wasm targets, only 'wasm-full' supports addons."
         );
     }
 

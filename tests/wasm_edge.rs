@@ -19,7 +19,7 @@ use std::process::Command;
 /// Compile a .td file with wasm-edge and return the wasm path (or None on failure).
 fn compile_wasm_edge(td_path: &Path, wasm_path: &Path) -> Option<String> {
     let output = Command::new(taida_bin())
-        .args(["build", "--target", "wasm-edge"])
+        .args(["build", "wasm-edge"])
         .arg(td_path)
         .arg("-o")
         .arg(wasm_path)
@@ -249,7 +249,7 @@ fn wasm_edge_does_not_break_wasm_min() {
     let wasm_path = std::env::temp_dir().join("taida_wasm_edge_nonreg_min.wasm");
 
     let compile = Command::new(taida_bin())
-        .args(["build", "--target", "wasm-min"])
+        .args(["build", "wasm-min"])
         .arg(&td_path)
         .arg("-o")
         .arg(&wasm_path)
@@ -271,7 +271,7 @@ fn wasm_edge_does_not_break_wasm_wasi() {
     let wasm_path = std::env::temp_dir().join("taida_wasm_edge_nonreg_wasi.wasm");
 
     let compile = Command::new(taida_bin())
-        .args(["build", "--target", "wasm-wasi"])
+        .args(["build", "wasm-wasi"])
         .arg(&td_path)
         .arg("-o")
         .arg(&wasm_path)
@@ -302,7 +302,7 @@ fn wasm_edge_generates_js_glue() {
     let _ = std::fs::remove_file(&glue_path);
 
     let output = Command::new(taida_bin())
-        .args(["build", "--target", "wasm-edge"])
+        .args(["build", "wasm-edge"])
         .arg(&td_path)
         .arg("-o")
         .arg(&wasm_path)
@@ -431,7 +431,7 @@ fn wasm_edge_env_generates_js_glue() {
     let _ = std::fs::remove_file(&glue_path);
 
     let output = Command::new(taida_bin())
-        .args(["build", "--target", "wasm-edge"])
+        .args(["build", "wasm-edge"])
         .arg(&td_path)
         .arg("-o")
         .arg(&wasm_path)
@@ -460,7 +460,7 @@ fn wasm_edge_size_check() {
     let wasm_path = std::env::temp_dir().join("taida_wasm_edge_size_hello.wasm");
 
     let compile = Command::new(taida_bin())
-        .args(["build", "--target", "wasm-edge"])
+        .args(["build", "wasm-edge"])
         .arg(&td_path)
         .arg("-o")
         .arg(&wasm_path)
@@ -504,7 +504,7 @@ fn wasm_edge_hello_no_polymorphic_regression() {
     let wasm_path = std::env::temp_dir().join("taida_wasm_edge_c12_7_no_poly_regression.wasm");
 
     let compile = Command::new(taida_bin())
-        .args(["build", "--target", "wasm-edge"])
+        .args(["build", "wasm-edge"])
         .arg(&td_path)
         .arg("-o")
         .arg(&wasm_path)
@@ -547,7 +547,6 @@ fn assert_edge_regex_rejected(stem: &str, source: &str, candidates: &[&str]) {
 
     let output = Command::new(taida_bin())
         .arg("build")
-        .arg("--target")
         .arg("wasm-edge")
         .arg(&td_path)
         .arg("-o")

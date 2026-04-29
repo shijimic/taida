@@ -7,7 +7,7 @@ pub mod init;
 pub mod lockfile;
 /// Package management for Taida Lang.
 ///
-/// Provides `taida init`, `taida deps`, `taida install`, and `taida publish` commands.
+/// Provides `taida init`, `taida ingot deps`, `taida ingot install`, and `taida ingot publish` commands.
 /// Package definition uses `packages.tdm` in Taida's own syntax.
 ///
 /// ## Architecture (Common Package Resolver)

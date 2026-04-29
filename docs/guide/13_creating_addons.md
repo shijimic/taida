@@ -1,16 +1,16 @@
-# Creating Addons
+# Creating Addons Inside Ingots
 
 > **PHILOSOPHY.md — IV.** キモい言語だ。だが、書くのも読むのもAI。眺めるのが人間の仕事。
 
-Addons extend Taida Lang with Rust-backed functions that the main
-binary loads at runtime. An addon is a Rust `cdylib` plus a
-`native/addon.toml` manifest that pins the ABI, the package name, the
-function table, and (optionally) prebuild distribution metadata so
-users can `taida install` without needing a Rust toolchain.
+An **ingot** is the package unit. An **addon** is the native loader layer
+inside an ingot: a Rust `cdylib` plus `native/addon.toml` that pins the ABI,
+package name, function table, and optional prebuild distribution metadata.
+The manifest stays named `addon.toml`; E31 only rehomes the CLI surface under
+`taida ingot`.
 
 This guide is aimed at addon *authors*. See `docs/reference/addon_manifest.md`
 for the manifest reference and forward-compat policy, and
-`docs/reference/cli.md` for the `taida publish` CLI contract.
+`docs/reference/cli.md` for the `taida ingot publish` CLI contract.
 
 ### Backend policy (what runs your addon)
 
@@ -62,12 +62,12 @@ so the rejection is informational):
 - `<<< <path>` re-exports.
 
 If your facade depends on any of these, compile errors at
-`taida build --target native` will indicate which construct was
+`taida build native` will indicate which construct was
 rejected. Interim workaround: expose a facade FuncDef that wraps
 the missing construct with a pure-Taida surface the loader does
 understand.
 
-The publish and release workflow is **tag-push-only**: `taida publish`
+The publish and release workflow is **tag-push-only**: `taida ingot publish`
 just pushes a git tag and exits, and the addon repository's own CI
 (`.github/workflows/release.yml`, scaffolded by `taida init --target
 rust-addon`) builds and publishes the release as
@@ -102,7 +102,7 @@ What you get:
 
 - **`packages.tdm`** with a `<<<@a` placeholder identity. Before
   your first publish, replace it with the qualified form
-  `<<<@a owner/my-addon @(MyExport, ...)` — `taida publish`
+  `<<<@a owner/my-addon @(MyExport, ...)` — `taida ingot publish`
   will reject a bare identity.
 - **`Cargo.toml`** with `crate-type = ["rlib", "cdylib"]` and
   `taida-addon = "2.0"` (the ABI v1 author crate).
@@ -128,11 +128,11 @@ Next steps:
 3. `cargo build --release` to verify the cdylib compiles.
 4. (Optional) point `native/addon.toml`'s `prebuild.url` at a
    relative `file://target/release/lib<name>.so` to test
-   `taida install` locally against your own build output —
+   `taida ingot install` locally against your own build output —
    see §6.
 5. When you are ready to cut the first release, push the
-   repository to GitHub and run `taida publish --dry-run`
-   to preview the version bump. `taida publish` (without
+   repository to GitHub and run `taida ingot publish --dry-run`
+   to preview the version bump. `taida ingot publish` (without
    `--dry-run`) creates and pushes the tag; CI does the
    rest (§3, §4).
 
@@ -184,7 +184,7 @@ library = "my_addon"
 greet = 1
 ```
 
-To ship a prebuild that `taida install` can fetch, add a
+To ship a prebuild that `taida ingot install` can fetch, add a
 `[library.prebuild]` section:
 
 ```toml
@@ -203,7 +203,7 @@ url = "https://github.com/my-org/my-addon/releases/download/v{version}/lib{name}
 
 | Variable    | Expands to |
 |-------------|------------|
-| `{version}` | The exact version resolved by `taida install` |
+| `{version}` | The exact version resolved by `taida ingot install` |
 | `{target}`  | The host target triple (e.g. `x86_64-unknown-linux-gnu`) |
 | `{ext}`     | Platform cdylib extension (`so`, `dylib`, `dll`) |
 | `{name}`    | The `[library] name` value |
@@ -234,7 +234,7 @@ which lists the targets your manifest does declare.
 ### SHA-256 integrity
 
 The `targets` values are always lowercase `sha256:` + 64 hex chars.
-Uppercase hex is rejected for canonical form. `taida install`
+Uppercase hex is rejected for canonical form. `taida ingot install`
 streams the downloaded bytes through SHA-256 and aborts with a
 structured error on mismatch — there is no silent fallback.
 
@@ -307,7 +307,7 @@ The 5-platform matrix is:
 
 The `publish` job authenticates with `GH_TOKEN: ${{ github.token }}`,
 so the **release author is always `github-actions[bot]`** — never the
-person who ran `taida publish`. This is a non-negotiable contract
+person who ran `taida ingot publish`. This is a non-negotiable contract
 of the addon release pipeline.
 
 ### Release assets
@@ -316,7 +316,7 @@ A successful `publish` job attaches 8 assets to the GitHub Release:
 
 - 5 × `lib<LIBRARY_STEM>-<triple>.<so|dylib|dll>` (the matrix cdylibs)
 - `addon.lock.toml` — CI-generated lockfile listing the SHA-256 of
-  each of the 5 cdylibs. `taida install` reads this as the
+  each of the 5 cdylibs. `taida ingot install` reads this as the
   authoritative source of truth.
 - `prebuild-targets.toml.txt` — a TOML fragment that could be pasted
   into `[library.prebuild.targets]` if needed, but the lockfile is
@@ -334,7 +334,7 @@ structure can be used as a ground-truth example.
 
 ---
 
-## 4. Publishing a new version with `taida publish`
+## 4. Publishing a new version with `taida ingot publish`
 
 From the addon crate root, with `packages.tdm`'s identity set to
 `<<<@<version> <owner>/<name>`, a tagged release is a two-step
@@ -342,7 +342,7 @@ process:
 
 ```bash
 # 1. Preview: what version would this publish?
-$ taida publish --dry-run
+$ taida ingot publish --dry-run
 Publish plan for my-org/my-addon:
   Last release tag: a.3
   API diff: added 2
@@ -352,20 +352,20 @@ Publish plan for my-org/my-addon:
   Dry-run: no git changes performed.
 
 # 2. Execute: push the tag, then exit immediately.
-$ taida publish
+$ taida ingot publish
 Created tag 'a.4' and pushed to origin.
 CI will build and publish the release.
 ```
 
-`taida publish` does **not** wait for CI. Open the GitHub Actions tab
+`taida ingot publish` does **not** wait for CI. Open the GitHub Actions tab
 to watch the 4 jobs complete (typically ~90 seconds for the baseline
 5-platform matrix).
 
 ### Automatic version bump
 
-`taida publish` compares the export symbol set of `taida/*.td`
+`taida ingot publish` compares the export symbol set of `taida/*.td`
 between the previous release tag and HEAD. See
-`docs/reference/cli.md#taida-publish` for the full bump table; the
+`docs/reference/cli.md#ingot-publish` for the full bump table; the
 one-line summary is:
 
 - Symbol removed / renamed → generation bump (`a.3` → `b.1`)
@@ -388,10 +388,10 @@ be re-tagged without tripping the Taida parser on the old tag's
 
 ---
 
-## 5. How `taida install` fetches prebuilds
+## 5. How `taida ingot install` fetches prebuilds
 
 When a package has a `native/addon.toml` with a `[library.prebuild]`
-section, `taida install`:
+section, `taida ingot install`:
 
 1. Detects the host target (`HostTarget::detect_host_target`).
 2. Looks the host triple up in `[library.prebuild.targets]`.
@@ -420,8 +420,8 @@ section, `taida install`:
 
 Downloads larger than ~256 KiB show a byte-count progress indicator
 on stderr. Users can force a re-download with
-`taida install --force-refresh`, or prune the cache entirely with
-`taida cache clean --addons`.
+`taida ingot install --force-refresh`, or prune the cache entirely with
+`taida ingot cache clean --addons`.
 
 ---
 
@@ -457,7 +457,7 @@ exercised in `tests/addon_terminal_install_e2e.rs`.
 
 - [ ] `packages.tdm` declares a qualified identity
       (`<<<@<version> <owner>/<name>`) — a bare `<<<@<version>`
-      with no `<owner>/<name>` is rejected by `taida publish`
+      with no `<owner>/<name>` is rejected by `taida ingot publish`
 - [ ] `.github/workflows/release.yml` is the standard template
       (4 jobs, 5-platform matrix, `github-actions[bot]` release
       author). Older addons that still use a `prebuild.yml`
@@ -467,7 +467,7 @@ exercised in `tests/addon_terminal_install_e2e.rs`.
       (or you've passed `--retag` intentionally)
 - [ ] `cargo build --release` succeeds locally (the CI matrix will
       catch cross-target issues, but local x86_64 failures fail fast)
-- [ ] `taida install` completes end-to-end against a local
+- [ ] `taida ingot install` completes end-to-end against a local
       `file://` URL during development
 - [ ] The `[functions]` table lists every symbol your `cdylib`
       exports through `declare_addon!`
@@ -502,7 +502,7 @@ to the qualified-identity form:
 <<<@a.1 <owner>/<name> @(...)
 ```
 
-`taida publish` will refuse to run against a bare `<<<@<version>`
+`taida ingot publish` will refuse to run against a bare `<<<@<version>`
 (no identity) because the resolver has no way to derive a fetch URL
 without qualifying `owner/name`.
 
@@ -544,7 +544,7 @@ are supported by the resolver — option (b) is cleaner but requires
 that every release ships `addon.lock.toml`. Option (a) is defensive
 in case a future release omits the lockfile.
 
-`taida install` auto-detects placeholder SHA values and falls back
+`taida ingot install` auto-detects placeholder SHA values and falls back
 to the release asset `addon.lock.toml`
 (`is_placeholder_sha()` + `choose_sha_source()` in the Taida
 source tree). See `docs/reference/addon_manifest.md` for the full
@@ -552,13 +552,14 @@ decision matrix.
 
 ### Step 4 — Drop obsolete CLI options from your scripts
 
-Any `Makefile`, shell alias, or CI script that calls
-`taida publish` must stop passing the now-removed options:
+Any `Makefile`, shell alias, or CI script that calls the old publish
+surface must move to `taida ingot publish` and stop passing the
+now-removed options:
 
 | Older form                       | Current replacement                           |
 |----------------------------------|-----------------------------------------------|
-| `taida publish --target rust-addon` | `taida publish` (target is implicit)       |
-| `taida publish --dry-run=plan`   | `taida publish --dry-run`                     |
+| `taida publish --target rust-addon` | `taida ingot publish` (target is implicit)       |
+| `taida publish --dry-run=plan`   | `taida ingot publish --dry-run`                     |
 | `taida publish --dry-run=build`  | Removed — local build happens in CI only      |
 | `TAIDA_PUBLISH_SKIP_RELEASE=1`   | Removed — the CLI never creates releases now  |
 
@@ -569,7 +570,7 @@ If your addon's existing `a.1` tag was pushed by an older CLI
 you can re-run the current pipeline against the same tag:
 
 ```bash
-taida publish --force-version a.1 --retag
+taida ingot publish --force-version a.1 --retag
 ```
 
 This force-replaces the tag on origin, fires the new `release.yml`,

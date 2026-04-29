@@ -1,6 +1,6 @@
 /// Integration tests for wasm-wasi backend.
 ///
-/// Compiles .td files to .wasm via `taida build --target wasm-wasi`,
+/// Compiles .td files to .wasm via `taida build wasm-wasi`,
 /// runs them with wasmtime, and verifies output matches Native/interpreter.
 ///
 /// WW-2: Tests for env, file I/O, and stderr non-regression.
@@ -26,7 +26,6 @@ fn compile_and_run_wasm_wasi(
 
     let compile_output = Command::new(taida_bin())
         .arg("build")
-        .arg("--target")
         .arg("wasm-wasi")
         .arg(td_path)
         .arg("-o")
@@ -123,7 +122,7 @@ fn wasm_wasi_env() {
     // Compile wasm-wasi
     let wasm_path = std::env::temp_dir().join("taida_wasm_wasi_test_env.wasm");
     let compile = Command::new(taida_bin())
-        .args(["build", "--target", "wasm-wasi"])
+        .args(["build", "wasm-wasi"])
         .arg(&td_path)
         .arg("-o")
         .arg(&wasm_path)
@@ -198,7 +197,7 @@ fn wasm_wasi_file_io() {
     // Compile wasm-wasi
     let wasm_path = std::env::temp_dir().join("taida_wasm_wasi_test_file_io.wasm");
     let compile = Command::new(taida_bin())
-        .args(["build", "--target", "wasm-wasi"])
+        .args(["build", "wasm-wasi"])
         .arg(&td_path)
         .arg("-o")
         .arg(&wasm_path)
@@ -260,7 +259,7 @@ fn wasm_wasi_exists() {
     // Compile wasm-wasi
     let wasm_path = std::env::temp_dir().join("taida_wasm_wasi_test_exists.wasm");
     let compile = Command::new(taida_bin())
-        .args(["build", "--target", "wasm-wasi"])
+        .args(["build", "wasm-wasi"])
         .arg(&td_path)
         .arg("-o")
         .arg(&wasm_path)
@@ -385,7 +384,7 @@ fn wasm_wasi_does_not_break_wasm_min() {
     // Just verify wasm-min compilation still works
     let wasm_path = std::env::temp_dir().join("taida_wasm_wasi_nonreg_hello.wasm");
     let compile = Command::new(taida_bin())
-        .args(["build", "--target", "wasm-min"])
+        .args(["build", "wasm-min"])
         .arg(&td_path)
         .arg("-o")
         .arg(&wasm_path)
@@ -412,7 +411,6 @@ fn run_native(td_path: &Path) -> Option<String> {
 
     let compile_output = Command::new(taida_bin())
         .arg("build")
-        .arg("--target")
         .arg("native")
         .arg(td_path)
         .arg("-o")
@@ -441,7 +439,7 @@ fn run_native(td_path: &Path) -> Option<String> {
 /// Compile a .td file to a given target and return the .wasm file size in bytes.
 fn compile_wasm_and_get_size(td_path: &Path, target: &str, wasm_path: &Path) -> Option<u64> {
     let output = Command::new(taida_bin())
-        .args(["build", "--target", target])
+        .args(["build", target])
         .arg(td_path)
         .arg("-o")
         .arg(wasm_path)
@@ -497,7 +495,7 @@ fn run_wasm_cached_or_compile(
     // Cache miss or stale: compile, cache, and run
     let wasm_path = std::env::temp_dir().join(format!("taida_rc8b_{}_{}.wasm", profile, stem));
     let compile_output = Command::new(taida_bin())
-        .args(["build", "--target", profile])
+        .args(["build", profile])
         .arg(td_path)
         .arg("-o")
         .arg(&wasm_path)
@@ -614,7 +612,7 @@ fn run_wasm_wasi_parity_fixture(stem: &str) {
     // Try wasm-wasi compile + run. Cache the .wasm so superset tests can reuse it.
     let parity_wasm_path = std::env::temp_dir().join(format!("taida_ww3_parity_{}.wasm", stem));
     let compile_output = Command::new(taida_bin())
-        .args(["build", "--target", "wasm-wasi"])
+        .args(["build", "wasm-wasi"])
         .arg(&td_path)
         .arg("-o")
         .arg(&parity_wasm_path)
@@ -925,7 +923,6 @@ fn assert_wasi_regex_rejected(stem: &str, source: &str, candidates: &[&str]) {
 
     let output = Command::new(taida_bin())
         .arg("build")
-        .arg("--target")
         .arg("wasm-wasi")
         .arg(&td_path)
         .arg("-o")
@@ -1097,7 +1094,7 @@ fn wasm_wasi_arena_release_is_bounded() {
     let wasm_path = std::env::temp_dir().join("taida_c25b026_arena_release.wasm");
 
     let compile = Command::new(taida_bin())
-        .args(["build", "--target", "wasm-wasi"])
+        .args(["build", "wasm-wasi"])
         .arg(&td_path)
         .arg("-o")
         .arg(&wasm_path)
@@ -1170,7 +1167,7 @@ fn wasm_wasi_memory_config_env_vars_propagate() {
     let wasm_path = std::env::temp_dir().join("taida_c25b026_mem_config.wasm");
 
     let compile = Command::new(taida_bin())
-        .args(["build", "--target", "wasm-wasi"])
+        .args(["build", "wasm-wasi"])
         .arg(&td_path)
         .arg("-o")
         .arg(&wasm_path)
@@ -1247,7 +1244,7 @@ fn wasm_wasi_arena_helpers_are_exported() {
     let wasm_path = std::env::temp_dir().join("taida_c25b026_arena_exports.wasm");
 
     let compile = Command::new(taida_bin())
-        .args(["build", "--target", "wasm-wasi"])
+        .args(["build", "wasm-wasi"])
         .arg(&td_path)
         .arg("-o")
         .arg(&wasm_path)

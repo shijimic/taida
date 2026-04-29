@@ -12,7 +12,7 @@ It limits itself to 10 operators, has no `null` or `undefined`, and does not all
 - Parametric typing through molding types `Mold[T]`
 - Enum types with ordinal values
 - Three backends: Interpreter, JS, and Native (+ WASM profiles)
-- Structural tooling through `check`, `graph`, `verify`, and `inspect`
+- Structural tooling through `taida way`, `taida graph`, and `taida doc`
 - Rust addon system for extending the language with native code
 
 ## Hello World
@@ -49,8 +49,8 @@ stdout(Status:Active() == Status:Active())   // true
 |---------|---------|--------|
 | Interpreter | `taida file.td` | Direct execution |
 | Native | `taida build file.td` | Binary executable (default) |
-| JS | `taida build --target js file.td` | `.mjs` file |
-| WASM | `taida build --target wasm-wasi file.td` | `.wasm` file |
+| JS | `taida build js file.td` | `.mjs` file |
+| WASM | `taida build wasm-wasi file.td` | `.wasm` file |
 
 All backends produce identical output for the same source code (3-way parity).
 
@@ -91,12 +91,13 @@ Taida supports Rust-backed native addons via `cdylib` crates:
 
 ```bash
 taida init --target rust-addon my-addon   # Scaffold (incl. release.yml)
-taida publish --dry-run                   # Preview next version
-taida publish                             # Tag push — CI builds & releases
-taida install                             # Download prebuilds
+taida ingot publish --dry-run             # Preview next version
+taida ingot publish                       # Tag push; CI builds & releases
+taida ingot install                       # Download prebuilds
 ```
 
-Under @c.14.rc3 `taida publish` is tag-push-only. The addon's own
+The E31 `taida ingot publish` surface keeps the tag-push-only publish
+model from @c.14.rc3. The addon's own
 CI (`.github/workflows/release.yml`, scaffolded by `taida init`)
 builds the 5-platform cdylib matrix and creates the GitHub Release
 as `github-actions[bot]`. See
@@ -145,7 +146,7 @@ pipeline and migration notes for pre-C14 addons.
 
 The canonical public release identifier is the Taida version, not the Rust package semver.
 
-- Current release: `@c.15.rc3`
-- `Cargo.toml` version `2.1.2`: semver metadata for Rust tooling
+- Current release track: `@e.X` (E31 stable candidate; final build number is assigned at release gate)
+- `Cargo.toml` version `3.1.0`: semver metadata for Rust tooling
 
-In release notes and public communication, `@c.15.rc3` is the primary version. `2.1.2` is supplementary.
+In release notes and public communication, Taida's `@gen.num[.label]` version is primary. Cargo's semver is supplementary.

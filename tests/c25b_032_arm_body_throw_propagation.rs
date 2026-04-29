@@ -208,7 +208,7 @@ fn c25b_032_default_arm_throw_3backend_parity() {
     if node_ok {
         let js_path = dir.join("out.mjs");
         let build = Command::new(taida_bin())
-            .args(["build", "--target", "js"])
+            .args(["build", "js"])
             .arg(&path)
             .arg("-o")
             .arg(&js_path)
@@ -232,7 +232,7 @@ fn c25b_032_default_arm_throw_3backend_parity() {
     if cc_ok {
         let bin_path = dir.join("out.bin");
         let build = Command::new(taida_bin())
-            .args(["build", "--target", "native"])
+            .args(["build", "native"])
             .arg(&path)
             .arg("-o")
             .arg(&bin_path)

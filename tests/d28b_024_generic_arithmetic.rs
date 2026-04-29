@@ -97,17 +97,18 @@ fn write_temp_td(prefix: &str, src: &str) -> PathBuf {
 fn d28b_024_checker_accepts_num_bounded_arithmetic() {
     let src_path = write_temp_td("d28b024_check_num", FIXTURE_NUM_INT);
     let out = Command::new(taida_bin())
+        .arg("way")
         .arg("check")
         .arg(&src_path)
         .output()
-        .expect("failed to spawn taida check");
+        .expect("failed to spawn taida way check");
     let _ = fs::remove_file(&src_path);
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
     let combined = format!("{}{}", stdout, stderr);
     assert!(
         out.status.success(),
-        "D28B-024: `taida check` should accept `T <= :Num` generic arithmetic.\n\
+        "D28B-024: `taida way check` should accept `T <= :Num` generic arithmetic.\n\
          stdout=\n{}\nstderr=\n{}",
         stdout,
         stderr
@@ -123,14 +124,15 @@ fn d28b_024_checker_accepts_num_bounded_arithmetic() {
 fn d28b_024_checker_accepts_int_bounded_arithmetic() {
     let src_path = write_temp_td("d28b024_check_int", FIXTURE_INT_BOUND);
     let out = Command::new(taida_bin())
+        .arg("way")
         .arg("check")
         .arg(&src_path)
         .output()
-        .expect("failed to spawn taida check");
+        .expect("failed to spawn taida way check");
     let _ = fs::remove_file(&src_path);
     assert!(
         out.status.success(),
-        "D28B-024: `taida check` should accept `T <= :Int` generic arithmetic.\n\
+        "D28B-024: `taida way check` should accept `T <= :Int` generic arithmetic.\n\
          stdout=\n{}\nstderr=\n{}",
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
@@ -144,10 +146,11 @@ fn d28b_024_checker_rejects_unconstrained_arithmetic() {
     let bad = "addBad[T] x: T y: T = x + y => :T\n";
     let src_path = write_temp_td("d28b024_check_neg", bad);
     let out = Command::new(taida_bin())
+        .arg("way")
         .arg("check")
         .arg(&src_path)
         .output()
-        .expect("failed to spawn taida check");
+        .expect("failed to spawn taida way check");
     let _ = fs::remove_file(&src_path);
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
@@ -171,10 +174,11 @@ fn d28b_024_checker_preserves_e1509_on_constraint_violation() {
     let bad = "add[T <= :Num] x: T y: T = x + y => :T\ndebug(add(\"hi\", \"there\"))\n";
     let src_path = write_temp_td("d28b024_check_e1509", bad);
     let out = Command::new(taida_bin())
+        .arg("way")
         .arg("check")
         .arg(&src_path)
         .output()
-        .expect("failed to spawn taida check");
+        .expect("failed to spawn taida way check");
     let _ = fs::remove_file(&src_path);
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
@@ -245,7 +249,6 @@ fn d28b_024_js_matches_interpreter_num_bounded() {
     let mjs = unique_temp("d28b024_js_num", "mjs");
     let build = Command::new(taida_bin())
         .arg("build")
-        .arg("--target")
         .arg("js")
         .arg(&src_path)
         .arg("-o")
@@ -282,7 +285,6 @@ fn d28b_024_js_matches_interpreter_int_bounded() {
     let mjs = unique_temp("d28b024_js_int", "mjs");
     let build = Command::new(taida_bin())
         .arg("build")
-        .arg("--target")
         .arg("js")
         .arg(&src_path)
         .arg("-o")
@@ -324,7 +326,6 @@ fn d28b_024_native_matches_interpreter_num_bounded() {
     let bin = unique_temp("d28b024_native_num", "bin");
     let build = Command::new(taida_bin())
         .arg("build")
-        .arg("--target")
         .arg("native")
         .arg(&src_path)
         .arg("-o")
@@ -361,7 +362,6 @@ fn d28b_024_native_matches_interpreter_int_bounded() {
     let bin = unique_temp("d28b024_native_int", "bin");
     let build = Command::new(taida_bin())
         .arg("build")
-        .arg("--target")
         .arg("native")
         .arg(&src_path)
         .arg("-o")

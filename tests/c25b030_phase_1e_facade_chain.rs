@@ -117,7 +117,6 @@ fn build_native(project: &Path, main_td: &str) -> (bool, String, String) {
     std::fs::write(project.join("main.td"), main_td).expect("write main.td");
     let output = Command::new(taida_bin())
         .arg("build")
-        .arg("--target")
         .arg("native")
         .arg(project.join("main.td"))
         .arg("-o")
@@ -860,8 +859,7 @@ stdout(`cha=${KeyKind.Char}`)
 // These tests guard two regressions that Phase 1E-β-3 fixed when
 // the real `taida-lang/terminal` facade (7 files, dozens of
 // private FuncDef helpers, several public packs used inside
-// reachable FuncDef bodies) was pointed at `taida build --target
-// native`:
+// reachable FuncDef bodies) was pointed at `taida build native`:
 //
 //   1. `Lowering::return_tag_vars` is keyed on `IrVar`, but IrVars
 //      are per-function. `lower_func_def` previously did not

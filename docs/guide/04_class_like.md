@@ -289,21 +289,23 @@ D29 までは 3 系統が独立した surface 構文を持っていました。
 
 **surface はほぼ変わりません**。変わるのは「3 系統が別々のもの」という概念の取り扱いです。E30 以降は、すべて **class-like 単一概念** として読みます。
 
-旧コードからの自動移行は [migration_e30.md](migration_e30.md) を参照してください。
+旧コードからの移行手順は [migration_e30.md](migration_e30.md) を参照してください。
 
 ---
 
-## migration tool
+## 移行について
 
-旧構文を新統一構文に書き換える migration tool が提供されます。
+`@e.X` 以降の CLI には移行用ハブはありません。`@e.30` への移行は
+[migration_e30.md](migration_e30.md) のチェックリストに従って手動で行います。
 
 ```bash
-taida way migrate --e30 <PATH>
+taida way check <PATH>
+# Run your project-specific tests after the Taida gate passes.
 ```
 
-詳細は [migration_e30.md](migration_e30.md) および E31 の `taida way migrate --<ver>` ハブ仕様を参照してください。
+古い RC 計画やメモにある「移行コマンド」案は `@e.X` の確定 CLI には含まれません。
 
-> E gen は **deprecation なし、即破壊的変更** で確定しています (E30 Lock-E)。旧構文の使用は E30 から `[E14xx]` 系の reject になります。
+> gen-E は **予告期間なし、即破壊的変更** で確定しています（E30 Lock-E）。旧構文を使うと `@e.30` から `[E14xx]` 系の診断で拒否されます。
 
 ---
 

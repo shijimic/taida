@@ -177,7 +177,6 @@ fn assert_js_matches(stem: &str) {
     let mjs_path = unique_temp(&format!("c20_{}", stem), "mjs");
     let build_out = Command::new(taida_bin())
         .arg("build")
-        .arg("--target")
         .arg("js")
         .arg(td_path(stem))
         .arg("-o")
@@ -224,7 +223,6 @@ fn assert_native_matches(stem: &str) {
     let bin_path = unique_temp(&format!("c20_{}", stem), "bin");
     let build_out = Command::new(taida_bin())
         .arg("build")
-        .arg("--target")
         .arg("native")
         .arg(td_path(stem))
         .arg("-o")
@@ -321,14 +319,15 @@ fn c20_stdin_line_checker_accepts_no_prompt_form() {
     let src = unique_temp("c20_stdinline_noprompt", "td");
     fs::write(&src, script).expect("write temp td");
     let out = Command::new(taida_bin())
+        .arg("way")
         .arg("check")
         .arg(&src)
         .output()
-        .expect("taida check");
+        .expect("taida way check");
     let _ = fs::remove_file(&src);
     assert!(
         out.status.success(),
-        "`taida check` must accept `stdinLine()` (no prompt). stderr={}",
+        "`taida way check` must accept `stdinLine()` (no prompt). stderr={}",
         String::from_utf8_lossy(&out.stderr)
     );
 }
@@ -339,14 +338,15 @@ fn c20_stdin_line_checker_accepts_str_prompt_form() {
     let src = unique_temp("c20_stdinline_strprompt", "td");
     fs::write(&src, script).expect("write temp td");
     let out = Command::new(taida_bin())
+        .arg("way")
         .arg("check")
         .arg(&src)
         .output()
-        .expect("taida check");
+        .expect("taida way check");
     let _ = fs::remove_file(&src);
     assert!(
         out.status.success(),
-        "`taida check` must accept `stdinLine(\"…\")` with Str prompt. stderr={}",
+        "`taida way check` must accept `stdinLine(\"…\")` with Str prompt. stderr={}",
         String::from_utf8_lossy(&out.stderr)
     );
 }
@@ -357,10 +357,11 @@ fn c20_stdin_line_checker_rejects_too_many_args() {
     let src = unique_temp("c20_stdinline_arity", "td");
     fs::write(&src, script).expect("write temp td");
     let out = Command::new(taida_bin())
+        .arg("way")
         .arg("check")
         .arg(&src)
         .output()
-        .expect("taida check");
+        .expect("taida way check");
     let _ = fs::remove_file(&src);
     // arity = 0..=1, so 2 args must surface [E1507].
     let stderr = String::from_utf8_lossy(&out.stderr);
@@ -368,7 +369,7 @@ fn c20_stdin_line_checker_rejects_too_many_args() {
     let combined = format!("{}{}", stderr, stdout);
     assert!(
         combined.contains("E1507") || combined.contains("stdinLine") || !out.status.success(),
-        "`taida check` must reject 2-arg stdinLine as an arity violation. combined={}",
+        "`taida way check` must reject 2-arg stdinLine as an arity violation. combined={}",
         combined
     );
 }

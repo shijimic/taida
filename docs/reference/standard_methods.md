@@ -381,15 +381,15 @@ lodash.toString()     // エラー: Molten has no methods
 lodash.length()       // エラー: Molten has no methods
 ```
 
-Molten 値を操作するには Cage を使います。JS バックエンドでは JSNew, JSSet, JSBind, JSSpread モールドも利用可能です。
+JS / npm 連携の Molten 値（`Molten => JS`）を操作するには Cage を使います。JS バックエンドでは JSNew, JSSet, JSBind, JSSpread モールドも利用できます。
 
-JSON は Molten の特殊ケースです。JSON もメソッドを持ちません（詳細は下記の JSON セクションを参照）。
+JSON は `Molten => JSON` の分岐です。JSON もメソッドを持ちません（詳細は下記の JSON セクションを参照）。
 
 ---
 
 ## JSON -- 溶鉄（メソッドなし）
 
-`JSON` 型はメソッドを一切持ちません。JSON は Molten の特殊ケースであり、外部由来の不透明値です。
+`JSON` 型はメソッドを一切持ちません。JSON は `Molten => JSON` の分岐であり、外部由来の不透明値です。`Molten[Str]` のような型引数つきの Molten でもなく、Cage で扱う JS 分岐でもありません。
 
 ```taida
 // これらは全てエラーになります

@@ -15,15 +15,16 @@
 //!
 //! Round 1 wB 実装中に `src/graph/` + `src/addon/` 以外も含めた full audit を実施。
 //! production region (filename が `*_tests.rs` / `tests.rs` でない、かつ
-//! `#[cfg(test)]` line より前) に残る panic! は次の 2 箇所のみ:
+//! `#[cfg(test)]` line より前) に残る panic! は当初 2 箇所だったが、E31 で
+//! `src/codegen/driver.rs` の IR cache invariant panic は除去済み。現在残る
+//! panic! は次の 1 箇所のみ:
 //!
-//! - `src/codegen/driver.rs` — IR cache invariant 違反時の `BUG: ...` panic
 //! - `src/parser/ast.rs` — `body_expr()` の precondition 違反 panic
 //!   (`debug_assert_eq!` で contract を明示後の defensive panic)
 //!
-//! どちらも user-input 由来ではなく、compiler 内部の invariant 違反を signal する
+//! これは user-input 由来ではなく、compiler 内部の invariant 違反を signal する
 //! defensive panic で、D28B-020 の「invariant 違反の internal panic は限定的に許容
-//! され得る」判断に整合する。これら 2 箇所を baseline として pin し、新規 panic!
+//! され得る」判断に整合する。この 1 箇所を baseline として pin し、新規 panic!
 //! 追加 / 既存 panic! の silent な行ずれ・除去を CI で検出する。
 //!
 //! ## このテストの役割

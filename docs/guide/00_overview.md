@@ -121,7 +121,7 @@ stdout(message)  // "Hello, World!"
 | `debug(value)` | stdout | 即 flush（CLI） / eval 後一括（REPL・in-process テスト） | あり |
 | `stdin(prompt?)` | stdin | プロンプトは即 flush | — |
 
-REPL と Rust 側の in-process テスト API (`Interpreter::new()`) は後方互換のため**バッファモード**のまま残してあります。`taida <file>` / `taida run <file>` だけが内部で `Interpreter::new_streaming()` を使い、即 flush に切り替わります。Taida の surface API には変更はなく、既存のコードはそのまま動きます。
+REPL と Rust 側の in-process テスト API (`Interpreter::new()`) は後方互換のため**バッファモード**のまま残してあります。CLI 実行 (`taida <file>`) だけが内部で `Interpreter::new_streaming()` を使い、即 flush に切り替わります。Taida の surface API には変更はなく、既存のコードはそのまま動きます。
 
 改行を付けずに生のバイト列を端末に書きたい場合（ANSI エスケープ連続送信、TUI 描画など）は `stdout()` ではなく `taida-lang/terminal` パッケージの raw write API を使ってください。`stdout()` は行指向 I/O のままにしておき、TUI 用途は責務を分けるのが方針です。
 

@@ -13,6 +13,7 @@ pub mod codegen;
 pub mod community;
 /// SHA-256 digest (hand-written, no external crate).
 pub mod crypto;
+pub mod diagnostics;
 pub mod doc;
 pub mod graph;
 pub mod interpreter;
@@ -30,15 +31,5 @@ pub mod pkg;
 pub mod types;
 #[cfg(feature = "community")]
 pub mod upgrade;
-/// D28B-007: AST-aware code rewriter for the @c.X → @d.X migration.
-/// Implements the `taida upgrade --d28 <path>` subcommand which rewrites
-/// regulation-violating symbols to comply with the D28B-001 (Phase 0
-/// 2026-04-26 Lock) category-based naming rules.
-pub mod upgrade_d28;
-/// E30B-001 / Lock-E: AST-aware code rewriter for the @d.29 → @e.30 migration
-/// (skeleton, Phase 2 Sub-step 2.3). Implements the `taida upgrade --e30 <path>`
-/// subcommand for migrating legacy `Mold[T] => Foo[T] = @(...)` syntax to the
-/// unified `Name[?type-args] [=> Parent] = @(...)` form. Phase 7 で完成予定。
-pub mod upgrade_e30;
 pub mod util;
 pub mod version;

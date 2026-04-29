@@ -212,7 +212,7 @@ impl CoreBundledProvider {
 
     /// C26B-014: materialize a core-bundled package on-demand even when
     /// `packages.tdm` does not declare it. `resolve()` requires a full
-    /// `Manifest` because it participates in the `taida deps` pipeline;
+    /// `Manifest` because it participates in the `taida ingot deps` pipeline;
     /// at runtime we only need the bundled directory path so that
     /// `resolve_module_path` can hand it to the import evaluator.
     ///
@@ -513,7 +513,7 @@ impl PackageProvider for CoreBundledProvider {
 /// `.dev/C17_IMPL_SPEC.md` Phase 2.
 pub struct StoreProvider {
     store: GlobalStore,
-    /// When true, bypass local cache for generation resolution (used by `taida update`).
+    /// When true, bypass local cache for generation resolution (used by `taida ingot update`).
     force_remote: bool,
     /// C17-2 / C17-4: when true, invalidate any cached entry and re-extract
     /// unconditionally. Skips the decision table.
@@ -542,7 +542,7 @@ impl StoreProvider {
     }
 
     /// Create a StoreProvider that bypasses local cache for generation resolution.
-    /// Used by `taida update` to always query GitHub for the latest version.
+    /// Used by `taida ingot update` to always query GitHub for the latest version.
     pub fn new_force_remote() -> Self {
         StoreProvider {
             store: GlobalStore::new(),
@@ -804,7 +804,7 @@ impl PackageProvider for StoreProvider {
                 };
 
                 // C17B-009: take a per-package advisory lock so two
-                // concurrent `taida install` processes do not clobber each
+                // concurrent `taida ingot install` processes do not clobber each
                 // other's extract. The lock is held for the duration of the
                 // decision table + fetch + commit.
                 let _lock_guard = match self.store.acquire_install_lock(org, name, &exact_version) {
@@ -840,7 +840,7 @@ impl PackageProvider for StoreProvider {
                         // Uncached: do not do an extra remote round-trip here.
                         // `fetch_and_cache_with_meta` will record the SHA we
                         // pass in, but for the first install we leave it
-                        // `None` -- the next `taida install` will detect the
+                        // `None` -- the next `taida ingot install` will detect the
                         // missing SHA and do a pessimistic refresh that fills
                         // it in. This keeps the first-install UX unchanged.
                         (None, None)

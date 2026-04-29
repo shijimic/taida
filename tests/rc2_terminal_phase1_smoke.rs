@@ -13,14 +13,14 @@
 //!   - return a deterministic "package not found" diagnostic when the
 //!     addon is **not installed** under `.taida/deps/`
 //!   - be rejected at compile time on every non-Native backend
-//!     (`--target js` / `--target wasm-min` / `--target native`)
+//!     (`taida build js` / `taida build wasm-min` / `taida build native`)
 //!     with the deterministic policy message
 //!     (`.dev/RC2_DESIGN.md` Section D, RC2B-204).
 //!
 //! Constraint (`RC2_IMPL_SPEC.md` G3 + RC2 ロールバック注記):
 //!
 //! - `taida-lang/terminal` is **NOT** a core-bundled package. It is an
-//!   addon-backed external package consumed via `taida install`. These
+//!   addon-backed external package consumed via `taida ingot install`. These
 //!   tests must therefore exercise the `.taida/deps/` resolution path,
 //!   not the `CoreBundledProvider` path.
 //! - We deliberately do **not** copy a real cdylib into the test
@@ -190,7 +190,8 @@ fn terminal_addon_manifest_matches_external_repo_when_present() {
 /// `>>> taida-lang/terminal` on a project with **no** `.taida/deps/`
 /// entry must produce a deterministic failure (not a silent success
 /// and not a CoreBundledProvider hit). This is the user-facing failure
-/// mode they encounter before they run `taida install taida-lang/terminal`.
+/// mode they encounter before they declare it in packages.tdm and run
+/// `taida ingot install`.
 ///
 /// Critically: this test must succeed even though
 /// `taida-lang/terminal` is **not** registered in
@@ -280,7 +281,6 @@ stdout("unreachable")
 
     let output = Command::new(taida_bin())
         .arg("build")
-        .arg("--target")
         .arg("js")
         .arg(project.join("main.td"))
         .arg("-o")
@@ -359,7 +359,6 @@ stdout("rc2_5: terminal import accepted on cranelift native")
 
     let output = Command::new(taida_bin())
         .arg("build")
-        .arg("--target")
         .arg("native")
         .arg(project.join("main.td"))
         .arg("-o")
@@ -391,7 +390,7 @@ stdout("rc2_5: terminal import accepted on cranelift native")
     let _ = std::fs::remove_dir_all(&project);
 }
 
-/// `--target wasm-min` shares the lowering pass with the Cranelift
+/// `taida build wasm-min` shares the lowering pass with the Cranelift
 /// native compile path, so the same addon-detection branch fires. The
 /// resulting compile-time error is the same shape as the Cranelift
 /// case (today the lowering layer cannot distinguish between the two
@@ -412,7 +411,6 @@ stdout("unreachable")
 
     let output = Command::new(taida_bin())
         .arg("build")
-        .arg("--target")
         .arg("wasm-min")
         .arg(project.join("main.td"))
         .arg("-o")

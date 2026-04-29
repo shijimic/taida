@@ -164,9 +164,8 @@ fn test_init_rust_addon_packages_tdm_taida_version() {
 
 // ── Test 4: native/addon.toml is parseable by addon manifest parser ──
 //
-// We invoke `taida inspect` on the facade to trigger the parser
-// chain, but that is overkill. Instead we directly read the file and
-// use a simple heuristic (the file must contain the required keys).
+// Directly read the file and use a simple heuristic: the generated manifest
+// must contain the required keys.
 
 #[test]
 fn test_init_rust_addon_addon_toml_structure() {

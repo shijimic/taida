@@ -133,7 +133,7 @@ fn c27b_026_native_build_emits_no_format_truncation_warnings_for_pseudo_headers(
 
     let bin_path = dir.join("main");
     let build = Command::new(taida_bin())
-        .args(["build", "--target", "native"])
+        .args(["build", "native"])
         .arg(&td_path)
         .arg("-o")
         .arg(&bin_path)

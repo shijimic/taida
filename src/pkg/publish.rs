@@ -1,4 +1,4 @@
-//! C14-1: `taida publish` tag-push-only implementation.
+//! C14-1: `taida ingot publish` tag-push-only implementation.
 //!
 //! This module used to orchestrate `cargo build`, SHA-256 computation,
 //! `addon.lock.toml` generation, `packages.tdm` rewriting, `git commit`,
@@ -18,11 +18,11 @@
 //!
 //! Non-negotiable contracts carried over from `.dev/C14_DESIGN.md`:
 //!
-//! - `taida publish` MUST NOT push anything to `main` (no `git push
+//! - `taida ingot publish` MUST NOT push anything to `main` (no `git push
 //!   origin HEAD`). Only `git push origin <tag>` is allowed.
-//! - `taida publish` MUST NOT call `gh release create`. The addon
+//! - `taida ingot publish` MUST NOT call `gh release create`. The addon
 //!   `release.yml` creates the release as `github-actions[bot]`.
-//! - `taida publish` MUST exit immediately after the tag push. It does
+//! - `taida ingot publish` MUST exit immediately after the tag push. It does
 //!   not wait for CI.
 //! - The manifest identity MUST be qualified (`<<<@version owner/name`);
 //!   bare names are rejected.
@@ -64,7 +64,7 @@ impl DiffSkipReason {
     }
 }
 
-/// Human-facing description of what a `taida publish` invocation is
+/// Human-facing description of what a `taida ingot publish` invocation is
 /// about to do (or, under `--dry-run`, would do).
 ///
 /// The fields are the single source of truth for the plan printout
@@ -112,12 +112,12 @@ pub enum VersionSource {
 ///
 /// A bare name (or a manifest that falls back to its directory name
 /// because `<<<@version owner/name` was missing) is rejected: the
-/// `taida install` resolver only speaks `org/name`.
+/// `taida ingot install` resolver only speaks `org/name`.
 pub fn validate_manifest_identity(manifest: &Manifest) -> Result<String, String> {
     if !manifest.name.contains('/') {
         return Err(format!(
             "Package identity '{}' is not qualified. packages.tdm must declare \
-             `<<<@version owner/name` so `taida install` can resolve it via GitHub.",
+             `<<<@version owner/name` so `taida ingot install` can resolve it via GitHub.",
             manifest.name
         ));
     }
@@ -285,7 +285,7 @@ pub fn read_git_tags(project_dir: &Path) -> Result<Vec<String>, String> {
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(format!(
-            "taida publish requires a git repository. git tag failed: {}",
+            "taida ingot publish requires a git repository. git tag failed: {}",
             stderr.trim()
         ));
     }
@@ -383,7 +383,7 @@ pub fn require_identity_matches_remote(
     let (owner, name) = parse_github_repo(remote).ok_or_else(|| {
         format!(
             "git remote 'origin' is '{}', which is not a GitHub URL. \
-             `taida install` fetches from GitHub, so the remote must point there.",
+             `taida ingot install` fetches from GitHub, so the remote must point there.",
             remote
         )
     })?;
@@ -429,7 +429,7 @@ pub fn check_gh_auth() -> Result<(), String> {
             let stderr = String::from_utf8_lossy(&o.stderr);
             Err(format!(
                 "`gh auth status` reports no active GitHub session:\n{}\n\n\
-                 Run `gh auth login`, then retry `taida publish`.",
+                 Run `gh auth login`, then retry `taida ingot publish`.",
                 stderr.trim()
             ))
         }
@@ -450,7 +450,7 @@ pub fn check_gh_auth() -> Result<(), String> {
 /// the long-lived declaration; the CLI label is a per-run addendum.
 ///
 /// Rationale: when the operator bumps `packages.tdm` to `<<<@a.7`
-/// and then runs `taida publish --label rc3`, the tag should be
+/// and then runs `taida ingot publish --label rc3`, the tag should be
 /// `@a.7.rc3`. Requiring the operator to rewrite the manifest with
 /// every RC label churn would be a regression. We accept the form
 /// `tag = "<manifest>.<label>"` as a match so the manifest carries
@@ -543,22 +543,22 @@ pub fn plan_publish(
     // C26B-025: self-identity vs tag consistency check.
     //
     // `packages.tdm` declares the package self-identity as
-    // `<<<@<version> owner/name`. Historically `taida publish` has been
+    // `<<<@<version> owner/name`. Historically `taida ingot publish` has been
     // tag-push-only, meaning it never rewrote the manifest. When an
     // owner forgot to bump `<<<@ver` before publishing, the tag landed
     // with the old self-identity string in the pushed tree — visible
-    // to `taida install` consumers and to IDE / runtime introspection.
+    // to `taida ingot install` consumers and to IDE / runtime introspection.
     //
     // The contract now refuses to push a tag whose `next_version`
     // disagrees with the manifest's declared self-identity. The
     // operator must bump `packages.tdm` first (and commit the bump),
-    // then re-run `taida publish`. This applies to `--retag` as well:
+    // then re-run `taida ingot publish`. This applies to `--retag` as well:
     // retagging an old self-identity would re-publish the bug.
     if !manifest_version_matches(&manifest.version, &next_version) {
         return Err(format!(
             "packages.tdm self-identity '<<<@{}' does not match the tag to be pushed ('{}'). \
              Bump the `<<<@{}` line in packages.tdm to `<<<@{}` and commit before re-running \
-             `taida publish`.",
+             `taida ingot publish`.",
             manifest.version, next_version, manifest.version, next_version
         ));
     }
@@ -1122,7 +1122,7 @@ Publish plan for alice/demo:
         let err_msg = format!(
             "packages.tdm self-identity '<<<@{}' does not match the tag to be pushed ('{}'). \
              Bump the `<<<@{}` line in packages.tdm to `<<<@{}` and commit before re-running \
-             `taida publish`.",
+             `taida ingot publish`.",
             "a.6", "a.7", "a.6", "a.7"
         );
         assert!(err_msg.contains("<<<@a.6"));

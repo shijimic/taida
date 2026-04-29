@@ -69,7 +69,7 @@ PHILOSOPHY I（「null/undefined の完全排除」）に沿った設計です
 | `stdin(prompt?)` | stdin（入力） | prompt は即 flush | prompt は即 flush | — | `Str`（EOF で `""`） |
 | `stdinLine(prompt?)` | stdin（入力） | prompt は即 flush | prompt は即 flush | — | `Async[Lax[Str]]` |
 
-CLI モード（`taida <file>` / `taida run <file>`）とは別に、REPL および Rust 側の in-process テスト API（`Interpreter::new()`）では後方互換のため `stdout` / `debug` を内部バッファに積み、評価完了後にまとめて出力する**バッファモード**を維持しています。Taida の surface API は両モードで完全に同じで、既存コードは無改修で動きます。
+CLI モード（`taida <file>`）とは別に、REPL および Rust 側の in-process テスト API（`Interpreter::new()`）では後方互換のため `stdout` / `debug` を内部バッファに積み、評価完了後にまとめて出力する**バッファモード**を維持しています。Taida の surface API は両モードで完全に同じで、既存コードは無改修で動きます。
 
 `debug` の stream mode 出力先は **stdout** です（stderr ではありません）。JS バックエンド（`console.log`）・Native バックエンド（`printf`）と一致させることで 3 バックエンドパリティを保証しています。
 
@@ -317,4 +317,3 @@ bridge.has("Shinji")  // false
 // 差集合で「パイロットでないスタッフ」を取得
 staff <= all.diff(pilots)
 ```
-
