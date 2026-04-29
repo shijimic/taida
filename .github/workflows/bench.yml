@@ -196,7 +196,7 @@ jobs:
     name: Update baseline (main only)
     runs-on: ubuntu-latest
     needs: bench
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && github.repository == 'taida-lang/taida'
     permissions:
       contents: write
     steps:
