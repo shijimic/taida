@@ -1493,6 +1493,12 @@ impl TypeChecker {
         self.define_var_with_span(name, ty, None);
     }
 
+    fn define_var_silent(&mut self, name: &str, ty: Type) {
+        if let Some(scope) = self.scope_stack.last_mut() {
+            scope.insert(name.to_string(), ty);
+        }
+    }
+
     /// Define a variable with a span for duplicate detection.
     fn define_var_with_span(&mut self, name: &str, ty: Type, span: Option<&Span>) {
         if let Some(scope) = self.scope_stack.last_mut() {
@@ -1734,6 +1740,15 @@ impl TypeChecker {
         for stmt in &program.statements {
             self.check_mold_errors_in_stmt(stmt);
         }
+
+        // Fourth pass: check comparison diagnostics that must fire even in
+        // expression contexts whose container type is known without recursing
+        // into every child (builtin args, method args, templates, etc.).
+        self.push_scope();
+        for stmt in &program.statements {
+            self.check_comparison_errors_in_stmt(stmt);
+        }
+        self.pop_scope();
 
         // C12-3 / FB-8: promote non-tail mutual recursion to a
         // compile-time error so programs that would overflow the stack at
@@ -3126,6 +3141,339 @@ defaulted fields must be provided via `()`",
         }
     }
 
+    // ── E32B-019: comparison diagnostics in skipped expression contexts ──
+    //
+    // Some containers know their own type without fully inferring children
+    // (for example builtin function args, method args with `Unknown`
+    // parameters, lambdas passed as values, and TemplateLit raw strings).
+    // This walker is intentionally narrower than full inference: it only
+    // validates comparison BinaryOps and suppresses incidental diagnostics
+    // emitted while computing operand types.
+
+    fn check_comparison_errors_in_stmt(&mut self, stmt: &Statement) {
+        match stmt {
+            Statement::Assignment(a) => {
+                self.check_comparison_errors_in_expr(&a.value);
+                let inferred = self.infer_expr_type_without_recording_errors(&a.value);
+                let registered = a
+                    .type_annotation
+                    .as_ref()
+                    .map(|ty| self.registry.resolve_type(ty))
+                    .unwrap_or(inferred);
+                self.define_var_silent(&a.target, registered);
+            }
+            Statement::Expr(expr) => self.check_comparison_errors_in_expr(expr),
+            Statement::FuncDef(fd) => {
+                let ret_ty = fd
+                    .return_type
+                    .as_ref()
+                    .map(|ty| self.registry.resolve_type(ty))
+                    .unwrap_or(Type::Unknown);
+                let param_types: Vec<Type> = fd
+                    .params
+                    .iter()
+                    .map(|p| {
+                        p.type_annotation
+                            .as_ref()
+                            .map(|ty| self.registry.resolve_type(ty))
+                            .unwrap_or(Type::Unknown)
+                    })
+                    .collect();
+                self.define_var_silent(&fd.name, Type::Function(param_types, Box::new(ret_ty)));
+                self.check_comparison_errors_in_func_def(fd);
+            }
+            Statement::ErrorCeiling(ec) => {
+                self.push_scope();
+                let err_ty = self.registry.resolve_type(&ec.error_type);
+                self.define_var_silent(&ec.error_param, err_ty);
+                for stmt in &ec.handler_body {
+                    self.check_comparison_errors_in_stmt(stmt);
+                }
+                self.pop_scope();
+            }
+            Statement::ClassLikeDef(def) => {
+                for field in &def.fields {
+                    if let Some(default_value) = &field.default_value {
+                        self.check_comparison_errors_in_expr(default_value);
+                    }
+                    if let Some(method_def) = &field.method_def {
+                        self.check_comparison_errors_in_func_def(method_def);
+                    }
+                }
+            }
+            Statement::UnmoldForward(uf) => {
+                self.check_comparison_errors_in_expr(&uf.source);
+                let source_ty = self.infer_expr_type_without_recording_errors(&uf.source);
+                let target_ty = self.unmold_type(&source_ty);
+                self.define_var_silent(&uf.target, target_ty);
+            }
+            Statement::UnmoldBackward(ub) => {
+                self.check_comparison_errors_in_expr(&ub.source);
+                let source_ty = self.infer_expr_type_without_recording_errors(&ub.source);
+                let target_ty = self.unmold_type(&source_ty);
+                self.define_var_silent(&ub.target, target_ty);
+            }
+            Statement::EnumDef(_) | Statement::Import(_) | Statement::Export(_) => {}
+        }
+    }
+
+    fn check_comparison_errors_in_func_def(&mut self, fd: &FuncDef) {
+        let param_types: Vec<Type> = fd
+            .params
+            .iter()
+            .map(|p| {
+                p.type_annotation
+                    .as_ref()
+                    .map(|ty| self.registry.resolve_type(ty))
+                    .unwrap_or(Type::Unknown)
+            })
+            .collect();
+
+        self.push_scope();
+        self.current_func_type_params.push(fd.type_params.clone());
+        for (i, param) in fd.params.iter().enumerate() {
+            if let Some(default_value) = &param.default_value {
+                self.check_comparison_errors_in_expr(default_value);
+            }
+            self.define_var_silent(
+                &param.name,
+                param_types.get(i).cloned().unwrap_or(Type::Unknown),
+            );
+        }
+        for stmt in &fd.body {
+            self.check_comparison_errors_in_stmt(stmt);
+        }
+        self.current_func_type_params.pop();
+        self.pop_scope();
+    }
+
+    fn check_comparison_errors_in_expr(&mut self, expr: &Expr) {
+        match expr {
+            Expr::BinaryOp(left, op, right, span) => {
+                self.check_comparison_errors_in_expr(left);
+                self.check_comparison_errors_in_expr(right);
+                if Self::is_comparison_op(op) {
+                    let left_ty = self.infer_expr_type_without_recording_errors(left);
+                    let right_ty = self.infer_expr_type_without_recording_errors(right);
+                    self.emit_comparison_mismatch_if_needed(&left_ty, op, &right_ty, span);
+                }
+            }
+            Expr::UnaryOp(_, inner, _) | Expr::Unmold(inner, _) | Expr::Throw(inner, _) => {
+                self.check_comparison_errors_in_expr(inner);
+            }
+            Expr::FuncCall(callee, args, _) => {
+                self.check_comparison_errors_in_expr(callee);
+                for arg in args {
+                    self.check_comparison_errors_in_expr(arg);
+                }
+            }
+            Expr::MethodCall(obj, _, args, _) => {
+                self.check_comparison_errors_in_expr(obj);
+                for arg in args {
+                    self.check_comparison_errors_in_expr(arg);
+                }
+            }
+            Expr::FieldAccess(obj, _, _) => self.check_comparison_errors_in_expr(obj),
+            Expr::BuchiPack(fields, _) | Expr::TypeInst(_, fields, _) => {
+                for field in fields {
+                    self.check_comparison_errors_in_expr(&field.value);
+                }
+            }
+            Expr::ListLit(items, _) | Expr::Pipeline(items, _) => {
+                for item in items {
+                    self.check_comparison_errors_in_expr(item);
+                }
+            }
+            Expr::MoldInst(_, type_args, fields, _) => {
+                for arg in type_args {
+                    self.check_comparison_errors_in_expr(arg);
+                }
+                for field in fields {
+                    self.check_comparison_errors_in_expr(&field.value);
+                }
+            }
+            Expr::CondBranch(arms, _) => {
+                for arm in arms {
+                    if let Some(condition) = &arm.condition {
+                        self.check_comparison_errors_in_expr(condition);
+                    }
+                    self.push_scope();
+                    for stmt in &arm.body {
+                        self.check_comparison_errors_in_stmt(stmt);
+                    }
+                    self.pop_scope();
+                }
+            }
+            Expr::Lambda(params, body, _) => {
+                self.push_scope();
+                for param in params {
+                    if let Some(default_value) = &param.default_value {
+                        self.check_comparison_errors_in_expr(default_value);
+                    }
+                    let ty = param
+                        .type_annotation
+                        .as_ref()
+                        .map(|ty| self.registry.resolve_type(ty))
+                        .unwrap_or(Type::Unknown);
+                    self.define_var_silent(&param.name, ty);
+                }
+                self.check_comparison_errors_in_expr(body);
+                self.pop_scope();
+            }
+            Expr::TemplateLit(template, span) => {
+                self.check_comparison_errors_in_template(template, span)
+            }
+            Expr::IntLit(_, _)
+            | Expr::FloatLit(_, _)
+            | Expr::StringLit(_, _)
+            | Expr::BoolLit(_, _)
+            | Expr::Gorilla(_)
+            | Expr::Ident(_, _)
+            | Expr::Placeholder(_)
+            | Expr::Hole(_)
+            | Expr::EnumVariant(_, _, _)
+            | Expr::TypeLiteral(_, _, _) => {}
+        }
+    }
+
+    fn check_comparison_errors_in_template(&mut self, template: &str, span: &Span) {
+        let chars: Vec<char> = template.chars().collect();
+        let mut i = 0;
+        while i < chars.len() {
+            if chars[i] == '$' && i + 1 < chars.len() && chars[i + 1] == '{' {
+                i += 2;
+                let start = i;
+                let mut depth = 1;
+                while i < chars.len() && depth > 0 {
+                    if chars[i] == '{' {
+                        depth += 1;
+                    }
+                    if chars[i] == '}' {
+                        depth -= 1;
+                    }
+                    if depth > 0 {
+                        i += 1;
+                    }
+                }
+                let expr_str: String = chars[start..i].iter().collect();
+                let trimmed = expr_str.trim();
+                let (program, parse_errors) = crate::parser::parse(trimmed);
+                if parse_errors.is_empty()
+                    && let Some(Statement::Expr(parsed_expr)) = program.statements.first()
+                {
+                    let error_count = self.errors.len();
+                    self.check_comparison_errors_in_expr(parsed_expr);
+                    for err in &mut self.errors[error_count..] {
+                        if err.message.contains("[E1605]") {
+                            err.span = span.clone();
+                        }
+                    }
+                }
+                if i < chars.len() {
+                    i += 1;
+                }
+            } else {
+                i += 1;
+            }
+        }
+    }
+
+    fn infer_expr_type_without_recording_errors(&mut self, expr: &Expr) -> Type {
+        let error_count = self.errors.len();
+        let ty = self.infer_expr_type(expr);
+        self.errors.truncate(error_count);
+        ty
+    }
+
+    fn is_comparison_op(op: &BinOp) -> bool {
+        matches!(
+            op,
+            BinOp::Eq | BinOp::NotEq | BinOp::Lt | BinOp::Gt | BinOp::GtEq
+        )
+    }
+
+    fn emit_comparison_mismatch_if_needed(
+        &mut self,
+        left_type: &Type,
+        op: &BinOp,
+        right_type: &Type,
+        span: &Span,
+    ) {
+        let left_is_numeric_var =
+            matches!(left_type, Type::Named(n) if self.type_param_is_numeric(n));
+        let right_is_numeric_var =
+            matches!(right_type, Type::Named(n) if self.type_param_is_numeric(n));
+        let left_is_numeric_ext = left_type.is_numeric() || left_is_numeric_var;
+        let right_is_numeric_ext = right_type.is_numeric() || right_is_numeric_var;
+
+        match op {
+            BinOp::Eq | BinOp::NotEq => {
+                if left_type != &Type::Unknown
+                    && right_type != &Type::Unknown
+                    && !Self::contains_unknown(left_type)
+                    && !Self::contains_unknown(right_type)
+                    && left_type != right_type
+                    && !(left_type.is_numeric() && right_type.is_numeric())
+                    && !(left_is_numeric_ext && right_is_numeric_ext)
+                    && !self.registry.is_subtype_of(left_type, right_type)
+                    && !self.registry.is_subtype_of(right_type, left_type)
+                {
+                    self.push_e1605_once(
+                        span,
+                        format!(
+                            "[E1605] Cannot compare {} with {} using {:?}. \
+                             Hint: Both operands should be of compatible types.",
+                            left_type, right_type, op
+                        ),
+                    );
+                }
+            }
+            BinOp::Lt | BinOp::Gt | BinOp::GtEq => {
+                if left_type != &Type::Unknown
+                    && right_type != &Type::Unknown
+                    && !Self::contains_unknown(left_type)
+                    && !Self::contains_unknown(right_type)
+                {
+                    let both_numeric = left_type.is_numeric() && right_type.is_numeric();
+                    let both_str =
+                        matches!(left_type, Type::Str) && matches!(right_type, Type::Str);
+                    let same_enum = match (left_type, right_type) {
+                        (Type::Named(a), Type::Named(b)) => a == b && self.registry.is_enum_type(a),
+                        _ => false,
+                    };
+                    let both_numeric_ext = left_is_numeric_ext && right_is_numeric_ext;
+                    let valid = both_numeric || both_numeric_ext || both_str || same_enum;
+                    if !valid {
+                        self.push_e1605_once(
+                            span,
+                            format!(
+                                "[E1605] Cannot compare {} with {} using {:?}. \
+                                 Hint: Ordering comparison requires numeric, string, or same-Enum operands. \
+                                 For Enum↔Int comparisons use `Ordinal[<enum>]()` to obtain the Int first.",
+                                left_type, right_type, op
+                            ),
+                        );
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn push_e1605_once(&mut self, span: &Span, message: String) {
+        if self
+            .errors
+            .iter()
+            .any(|err| err.span == *span && err.message.contains("[E1605]"))
+        {
+            return;
+        }
+        self.errors.push(TypeError {
+            message,
+            span: span.clone(),
+        });
+    }
+
     /// Type-check a statement (second pass).
     fn check_statement(&mut self, stmt: &Statement) {
         match stmt {
@@ -3660,29 +4008,7 @@ defaulted fields must be provided via `()`",
                     }
                     BinOp::Eq | BinOp::NotEq => {
                         // FL-4: Equality operators allow any types but warn on incompatible comparisons
-                        if left_type != Type::Unknown
-                            && right_type != Type::Unknown
-                            && !Self::contains_unknown(&left_type)
-                            && !Self::contains_unknown(&right_type)
-                            && left_type != right_type
-                            && !(left_type.is_numeric() && right_type.is_numeric())
-                            // D28B-024: equality between generic numeric
-                            // type variables (or such a variable and a
-                            // concrete numeric primitive) is allowed.
-                            && !(left_is_numeric_ext && right_is_numeric_ext)
-                            // Allow structurally compatible types (e.g. BuchiPack subtypes)
-                            && !self.registry.is_subtype_of(&left_type, &right_type)
-                            && !self.registry.is_subtype_of(&right_type, &left_type)
-                        {
-                            self.errors.push(TypeError {
-                                message: format!(
-                                    "[E1605] Cannot compare {} with {} using {:?}. \
-                                     Hint: Both operands should be of compatible types.",
-                                    left_type, right_type, op
-                                ),
-                                span: span.clone(),
-                            });
-                        }
+                        self.emit_comparison_mismatch_if_needed(&left_type, op, &right_type, span);
                         Type::Bool
                     }
                     BinOp::Lt | BinOp::Gt | BinOp::GtEq => {
@@ -3695,37 +4021,7 @@ defaulted fields must be provided via `()`",
                         // the Int explicitly (added in C18-3). The declared
                         // order of an Enum is therefore semantic; see
                         // `docs/guide/01_types.md` for the author contract.
-                        if left_type != Type::Unknown
-                            && right_type != Type::Unknown
-                            && !Self::contains_unknown(&left_type)
-                            && !Self::contains_unknown(&right_type)
-                        {
-                            let both_numeric = left_type.is_numeric() && right_type.is_numeric();
-                            let both_str =
-                                matches!(left_type, Type::Str) && matches!(right_type, Type::Str);
-                            let same_enum = match (&left_type, &right_type) {
-                                (Type::Named(a), Type::Named(b)) => {
-                                    a == b && self.registry.is_enum_type(a)
-                                }
-                                _ => false,
-                            };
-                            // D28B-024: ordering between generic numeric
-                            // type variables (or such a variable and a
-                            // concrete numeric primitive) is allowed.
-                            let both_numeric_ext = left_is_numeric_ext && right_is_numeric_ext;
-                            let valid = both_numeric || both_numeric_ext || both_str || same_enum;
-                            if !valid {
-                                self.errors.push(TypeError {
-                                    message: format!(
-                                        "[E1605] Cannot compare {} with {} using {:?}. \
-                                         Hint: Ordering comparison requires numeric, string, or same-Enum operands. \
-                                         For Enum↔Int comparisons use `Ordinal[<enum>]()` to obtain the Int first.",
-                                        left_type, right_type, op
-                                    ),
-                                    span: span.clone(),
-                                });
-                            }
-                        }
+                        self.emit_comparison_mismatch_if_needed(&left_type, op, &right_type, span);
                         Type::Bool
                     }
                     BinOp::And | BinOp::Or => {
