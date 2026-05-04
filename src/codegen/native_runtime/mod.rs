@@ -685,7 +685,12 @@ mod tests {
         //   Track-θ delta-only: +910 bytes.
         // TIER 4 統合 (β-2 + θ land 後 merge resolve, 2026-04-27):
         //   EXPECTED_TOTAL_LEN: 1,061,751 (canonical post-review) + 14,738 (β-2) + 910 (θ) = 1,077,399
-        const EXPECTED_TOTAL_LEN: usize = 1_077_399;
+        // E32B-027 (2026-05-05): Native streaming response headers now
+        //   reject CR/LF in name/value on the same path as the existing
+        //   reserved-header guard. The helper expansion lands in
+        //   net_h1_h2.c: +665 bytes.
+        //   EXPECTED_TOTAL_LEN: 1,077,399 + 665 = 1,078,064.
+        const EXPECTED_TOTAL_LEN: usize = 1_078_064;
         let asm = *NATIVE_RUNTIME_C;
         assert_eq!(
             asm.len(),
@@ -1309,10 +1314,14 @@ mod tests {
         //   * H2 build_request_pack arena/body CONTIG producer flip (both
         //     branches: arena-backed and body-only fall-back).
         //   F6_LEN: 105,361 + 715 = 106,076.
-        const F5_LEN: usize = 197_060;
+        // E32B-027 (2026-05-05): streaming header CR/LF guard lands before
+        //   the HTTP/2 divider. F5 grows by 666 bytes; the merged source
+        //   drops one trailing blank byte after F6, so F6 length is 106,075.
+        //   F5_LEN: 197,060 + 666 = 197,726.
+        const F5_LEN: usize = 197_726;
         assert_eq!(
             NET_H1_H2_SECTION.len(),
-            197_060 + 106_076,
+            197_726 + 106_075,
             "net_h1_h2.c total byte length must equal legacy fragment5 + fragment6 (C26B-026 / C26B-022-wS / C27B-014 / C27B-026 / D28B-012 wF / D28B-002 wG / D28B-025 review follow-up / D29B-003 Track-β contig writev hot-path / D29B-001 Track-ζ h2 arena+span request pack / D29B-015 Track-β-2 producer flip + consumer polymorphism adjusted)"
         );
         const F6_PREFIX: &[u8] = b"// \xE2\x94\x80\xE2\x94\x80 Native HTTP/2 server";
