@@ -1602,42 +1602,65 @@ overflow:
     return -2;
 }
 
-// Validate reserved headers (Content-Length, Transfer-Encoding) in streaming path.
+static int taida_net3_contains_crlf(const char *s, size_t len) {
+    for (size_t i = 0; i < len; i++) {
+        if (s[i] == '\r' || s[i] == '\n') return 1;
+    }
+    return 0;
+}
+
+static int taida_net3_header_name_eq_ci(const char *name, size_t name_len, const char *expected) {
+    size_t expected_len = strlen(expected);
+    if (name_len != expected_len) return 0;
+    for (size_t i = 0; i < name_len; i++) {
+        char c = name[i];
+        if (c >= 'A' && c <= 'Z') c += 32;
+        if (c != expected[i]) return 0;
+    }
+    return 1;
+}
+
+// Validate user headers in the streaming path.
 // Returns 0 if valid, prints error to stderr and returns -1 if invalid.
-static int taida_net3_validate_reserved_headers(taida_val headers, const char *api_name) {
+static int taida_net3_validate_streaming_headers(taida_val headers, const char *api_name) {
     if (!TAIDA_IS_LIST(headers)) return 0;
     taida_val *list = (taida_val*)headers;
     taida_val len = list[2];
+    taida_val name_hash = taida_str_hash((taida_val)"name");
+    taida_val value_hash = taida_str_hash((taida_val)"value");
     for (taida_val i = 0; i < len; i++) {
         taida_val item = list[4 + i];
         if (!taida_is_buchi_pack(item)) continue;
-        taida_val name_val = taida_pack_get(item, taida_str_hash((taida_val)"name"));
+        taida_val name_val = taida_pack_get(item, name_hash);
         if (name_val == 0) continue;
         const char *name_str = (const char*)name_val;
         size_t name_len = 0;
-        if (!taida_read_cstr_len_safe(name_str, 256, &name_len)) continue;
-        // Case-insensitive comparison
-        if (name_len == 14) {
-            // "content-length" (14 chars)
-            char lower[15];
-            for (size_t j = 0; j < name_len; j++) lower[j] = (char)((name_str[j] >= 'A' && name_str[j] <= 'Z') ? name_str[j] + 32 : name_str[j]);
-            lower[name_len] = '\0';
-            if (strcmp(lower, "content-length") == 0) {
-                fprintf(stderr, "%s: 'Content-Length' is not allowed in streaming response headers. "
-                        "The runtime manages Content-Length/Transfer-Encoding for streaming responses.\n", api_name);
+        if (!taida_read_cstr_len_safe(name_str, 8192, &name_len)) continue;
+        if (taida_net3_contains_crlf(name_str, name_len)) {
+            fprintf(stderr, "%s: headers[%d].name contains CR/LF\n", api_name, (int)i);
+            return -1;
+        }
+
+        taida_val value_val = taida_pack_get(item, value_hash);
+        if (value_val != 0) {
+            const char *value_str = (const char*)value_val;
+            size_t value_len = 0;
+            if (taida_read_cstr_len_safe(value_str, 65536, &value_len) &&
+                taida_net3_contains_crlf(value_str, value_len)) {
+                fprintf(stderr, "%s: headers[%d].value contains CR/LF\n", api_name, (int)i);
                 return -1;
             }
         }
-        if (name_len == 17) {
-            // "transfer-encoding" (17 chars)
-            char lower[18];
-            for (size_t j = 0; j < name_len; j++) lower[j] = (char)((name_str[j] >= 'A' && name_str[j] <= 'Z') ? name_str[j] + 32 : name_str[j]);
-            lower[name_len] = '\0';
-            if (strcmp(lower, "transfer-encoding") == 0) {
-                fprintf(stderr, "%s: 'Transfer-Encoding' is not allowed in streaming response headers. "
-                        "The runtime manages Transfer-Encoding for streaming responses.\n", api_name);
-                return -1;
-            }
+
+        if (taida_net3_header_name_eq_ci(name_str, name_len, "content-length")) {
+            fprintf(stderr, "%s: 'Content-Length' is not allowed in streaming response headers. "
+                    "The runtime manages Content-Length/Transfer-Encoding for streaming responses.\n", api_name);
+            return -1;
+        }
+        if (taida_net3_header_name_eq_ci(name_str, name_len, "transfer-encoding")) {
+            fprintf(stderr, "%s: 'Transfer-Encoding' is not allowed in streaming response headers. "
+                    "The runtime manages Transfer-Encoding for streaming responses.\n", api_name);
+            return -1;
         }
     }
     return 0;
@@ -1688,8 +1711,8 @@ taida_val taida_net_start_response(taida_val writer, taida_val status, taida_val
         fprintf(stderr, "startResponse: status must be 100-599, got %lld\n", (long long)status);
         exit(1);
     }
-    // Validate reserved headers
-    if (taida_net3_validate_reserved_headers(headers, "startResponse") < 0) {
+    // Validate streaming response headers
+    if (taida_net3_validate_streaming_headers(headers, "startResponse") < 0) {
         exit(1);
     }
     w->pending_status = (int)status;
@@ -6657,4 +6680,3 @@ static H2ServeResult taida_net_h2_serve(int port, taida_val handler, int handler
     H2ServeResult ok_result = {request_count};
     return ok_result;
 }
-

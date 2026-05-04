@@ -4620,6 +4620,32 @@ fn test_reserved_header_content_length_rejected() {
 }
 
 #[test]
+fn test_streaming_header_crlf_name_rejected() {
+    let headers = vec![("X-Ok\r\nX-Injected".to_string(), "value".to_string())];
+    let result = StreamingWriter::validate_reserved_headers(&headers);
+    assert!(result.is_err());
+    let msg = result.unwrap_err();
+    assert!(
+        msg.contains("headers[0].name contains CR/LF"),
+        "error should mention CR/LF in header name: {}",
+        msg
+    );
+}
+
+#[test]
+fn test_streaming_header_crlf_value_rejected() {
+    let headers = vec![("X-Ok".to_string(), "value\r\nX-Injected: yes".to_string())];
+    let result = StreamingWriter::validate_reserved_headers(&headers);
+    assert!(result.is_err());
+    let msg = result.unwrap_err();
+    assert!(
+        msg.contains("headers[0].value contains CR/LF"),
+        "error should mention CR/LF in header value: {}",
+        msg
+    );
+}
+
+#[test]
 fn test_reserved_header_transfer_encoding_rejected() {
     let headers = vec![("Transfer-Encoding".to_string(), "chunked".to_string())];
     let result = StreamingWriter::validate_reserved_headers(&headers);
