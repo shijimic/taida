@@ -119,7 +119,8 @@ impl Interpreter {
     }
 
     /// Find project root by walking up from the current file.
-    /// Looks for `packages.tdm`, `taida.toml`, `.taida` (project-local), or `.git`.
+    /// `.taida/` is state/config storage, not a project-root marker; otherwise
+    /// `~/.taida` can make `$HOME` look like the active project root.
     pub(crate) fn find_project_root(&self) -> PathBuf {
         let start = if let Some(current) = &self.current_file {
             // Falls back to "." if current_file has no parent (e.g., bare filename)
@@ -131,7 +132,6 @@ impl Interpreter {
         loop {
             if dir.join("packages.tdm").exists()
                 || dir.join("taida.toml").exists()
-                || dir.join(".taida").exists()
                 || dir.join(".git").exists()
             {
                 return dir;

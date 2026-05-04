@@ -4883,7 +4883,7 @@ fn stmts_contain_async_unmold(stmts: &[Statement]) -> bool {
 
 /// Compute relative path from `base` directory to `target` file.
 /// C27B-022: Walk up from `start_dir` looking for project-root markers
-/// (`packages.tdm`, `taida.toml`, `.taida`, `.git`). Mirrors the marker
+/// (`packages.tdm`, `taida.toml`, `.git`). Mirrors the marker
 /// set used by `interpreter::module_eval::find_project_root` and
 /// `codegen::driver::find_project_root` so the JS path-traversal guard
 /// agrees with Native / Interpreter on what counts as the project
@@ -4893,7 +4893,6 @@ fn js_find_project_root(start_dir: &std::path::Path) -> std::path::PathBuf {
     loop {
         if dir.join("packages.tdm").exists()
             || dir.join("taida.toml").exists()
-            || dir.join(".taida").exists()
             || dir.join(".git").exists()
         {
             return dir;

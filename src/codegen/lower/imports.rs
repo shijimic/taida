@@ -915,14 +915,13 @@ impl Lowering {
         Some(resolved)
     }
 
-    /// RCB-103: Find project root by walking up from the given directory.
+    /// RCB-103 / E32B-017: Find project root by walking up from the given directory.
     /// Mirrors Interpreter::find_project_root().
     pub(super) fn find_project_root(start_dir: &std::path::Path) -> std::path::PathBuf {
         let mut dir = start_dir.to_path_buf();
         loop {
             if dir.join("packages.tdm").exists()
                 || dir.join("taida.toml").exists()
-                || dir.join(".taida").exists()
                 || dir.join(".git").exists()
             {
                 return dir;
