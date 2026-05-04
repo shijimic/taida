@@ -113,7 +113,7 @@ fn node_available() -> bool {
 /// Allocate a clean temp directory. We use `taida.toml` as the
 /// project-root marker so that all 3 backends agree the directory
 /// is the project boundary (Native / Interpreter / JS all walk up
-/// looking for `packages.tdm`, `taida.toml`, `.taida`, or `.git`).
+/// looking for `packages.tdm`, `taida.toml`, or `.git`).
 fn temp_root(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!(
         "taida_c27b022_{}_{}_{}",

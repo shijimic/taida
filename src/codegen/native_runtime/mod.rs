@@ -693,7 +693,14 @@ mod tests {
         //   now rejects shape mismatches and 8192/65536 byte overflows before
         //   staging headers. net_h1_h2.c adds +1,114 bytes.
         //   EXPECTED_TOTAL_LEN: 1,077,399 + 665 + 1,114 = 1,079,178.
-        const EXPECTED_TOTAL_LEN: usize = 1_079_178;
+        // E32B-028 (2026-05-05): Native readBodyChunk/readBodyAll chunk-size
+        //   parsing now rejects >15 hex digits before strtoul, matching the
+        //   eager parser and JS/Interpreter policy. net_h1_h2.c adds +408 bytes.
+        //   EXPECTED_TOTAL_LEN: 1,079,178 + 408 = 1,079,586.
+        // E32B-029 (2026-05-05): WebSocket validation adds control-frame caps
+        //   and helperizes strict UTF-8 validation, shrinking net_h1_h2.c by
+        //   382 bytes. EXPECTED_TOTAL_LEN: 1,079,586 - 382 = 1,079,204.
+        const EXPECTED_TOTAL_LEN: usize = 1_079_204;
         let asm = *NATIVE_RUNTIME_C;
         assert_eq!(
             asm.len(),
@@ -1324,10 +1331,16 @@ mod tests {
         // E32B-027 follow-up (2026-05-05): streaming header shape/Str and
         //   8192/65536 byte limit guards also land before the HTTP/2 divider.
         //   F5 grows by +1,114 bytes. F5_LEN: 197,726 + 1,114 = 198,840.
-        const F5_LEN: usize = 198_840;
+        // E32B-028 (2026-05-05): readBodyChunk/readBodyAll oversized chunk-size
+        //   guards land before the HTTP/2 divider. F5 grows by +408 bytes.
+        //   F5_LEN: 198,840 + 408 = 199,248.
+        // E32B-029 (2026-05-05): WebSocket control-frame caps and shared
+        //   strict UTF-8 validation land before the HTTP/2 divider. F5 shrinks
+        //   by 382 bytes. F5_LEN: 199,248 - 382 = 198,866.
+        const F5_LEN: usize = 198_866;
         assert_eq!(
             NET_H1_H2_SECTION.len(),
-            198_840 + 106_075,
+            198_866 + 106_075,
             "net_h1_h2.c total byte length must equal legacy fragment5 + fragment6 (C26B-026 / C26B-022-wS / C27B-014 / C27B-026 / D28B-012 wF / D28B-002 wG / D28B-025 review follow-up / D29B-003 Track-β contig writev hot-path / D29B-001 Track-ζ h2 arena+span request pack / D29B-015 Track-β-2 producer flip + consumer polymorphism adjusted)"
         );
         const F6_PREFIX: &[u8] = b"// \xE2\x94\x80\xE2\x94\x80 Native HTTP/2 server";

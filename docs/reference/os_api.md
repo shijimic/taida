@@ -180,10 +180,16 @@ Interactive 版:
 
 ## 7. パス境界ポリシー（import / module loader）
 
-`>>> ./X.td` や `>>> ./sub/Y.td` といった相対 import は
-**プロジェクトルート（`.tdproj` のあるディレクトリ）** を境界とします。
-3 backend (Interpreter / JS / Native) で同一の境界判定とエラー
-メッセージを返します。
+`>>> ./X.td`、`>>> ../Y.td`、`>>> /absolute/Y.td` といった
+filesystem import は **プロジェクトルート** を境界とします。marker は
+`packages.tdm`、`taida.toml`、`.git/` のいずれかです。`.taida/` は
+依存・ビルド出力・ユーザーキャッシュなどの状態置き場であり、
+project root marker ではありません。`~/.taida/` だけで `$HOME` 全体を
+project root として扱うことはありません。
+
+marker が見つからない standalone source では、その source のある
+ディレクトリだけを fallback 境界として扱います。Interpreter / JS /
+Native / wasm build paths は同一の境界判定とエラーメッセージを返します。
 
 | パターン | 例 | 結果 |
 |---------|-----|------|
@@ -208,7 +214,8 @@ Import path '<exact import token>' resolves outside the project root. Path trave
 - Interpreter: `src/interpreter/module_eval.rs`
 - JS codegen: `src/js/codegen.rs`
 - Native codegen: `src/codegen/driver.rs`
-- 3 backend parity guard は `tests/` 配下の path traversal parity fixtures（5 cases × 3 backends）
+- parity guard は `tests/` 配下の path traversal fixtures と
+  `tests/e32b_017_project_root.rs`
 
 > **Note**: pkg-store URL component validation
 > (`src/pkg/store.rs::validate_path_component`) は本セクションの import path

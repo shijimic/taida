@@ -9,6 +9,23 @@ Taida Langには2種類のスコープがあります。
 | モジュールスコープ | ファイルのトップレベルで定義されたシンボル |
 | 関数スコープ | 関数内で定義されたシンボル |
 
+### プロジェクトルートと import 境界
+
+`>>> ./module.td`、`>>> ../module.td`、`>>> /absolute/module.td` の
+ような filesystem import は、実行中ソースから親方向に探索した
+プロジェクトルートを境界にします。プロジェクトルート marker は
+`packages.tdm`、`taida.toml`、`.git/` のいずれかです。
+
+`.taida/` は依存・ビルド出力・ユーザーキャッシュなどの状態置き場であり、
+プロジェクトルート marker ではありません。特に `~/.taida/` はグローバル
+ユーザー状態なので、`$HOME` 全体を Taida project として広げる理由には
+なりません。
+
+marker が見つからない standalone source では、その source のある
+ディレクトリだけを fallback 境界として扱います。絶対 path import や
+`..` import がその境界の外へ出る場合、Interpreter / JS / Native /
+wasm build paths は同じ SEC-003 診断で reject します。
+
 ---
 
 ## モジュールスコープ

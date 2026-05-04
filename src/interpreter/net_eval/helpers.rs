@@ -518,6 +518,44 @@ pub(crate) fn trim_ascii(bytes: &[u8]) -> &[u8] {
     &bytes[start..end]
 }
 
+/// E32B-028: cap HTTP chunk-size to the same 15 hex digits used by JS/Native.
+pub(crate) const MAX_CHUNK_SIZE_HEX_DIGITS: usize = 15;
+
+/// Parse a trimmed HTTP chunk-size hex field with explicit overflow guards.
+pub(crate) fn parse_chunk_size_hex_bytes(hex_part: &[u8]) -> Result<usize, String> {
+    let hex = trim_ascii(hex_part);
+    if hex.is_empty() {
+        return Err("empty chunk-size".into());
+    }
+    if hex.len() > MAX_CHUNK_SIZE_HEX_DIGITS {
+        return Err(format!(
+            "invalid chunk-size '{}'",
+            String::from_utf8_lossy(hex)
+        ));
+    }
+
+    let mut result: usize = 0;
+    for &b in hex {
+        let digit = match b {
+            b'0'..=b'9' => (b - b'0') as usize,
+            b'a'..=b'f' => (b - b'a' + 10) as usize,
+            b'A'..=b'F' => (b - b'A' + 10) as usize,
+            _ => {
+                return Err(format!(
+                    "invalid chunk-size '{}'",
+                    String::from_utf8_lossy(hex)
+                ));
+            }
+        };
+        result = result
+            .checked_mul(16)
+            .and_then(|v| v.checked_add(digit))
+            .ok_or_else(|| format!("invalid chunk-size '{}'", String::from_utf8_lossy(hex)))?;
+    }
+
+    Ok(result)
+}
+
 // ── Chunked Transfer Encoding: in-place compaction (NET2-2b/2f/2g) ──
 
 /// Result of chunked in-place compaction on a buffer.
@@ -567,25 +605,21 @@ pub(crate) fn chunked_in_place_compact(
             Some(semi) => &size_line[..semi],
             None => size_line,
         };
-        let hex_str = std::str::from_utf8(trim_ascii(hex_part))
-            .map_err(|_| "Malformed chunked body: invalid chunk-size encoding".to_string())?;
-
-        if hex_str.is_empty() {
-            return Err("Malformed chunked body: empty chunk-size".into());
-        }
-
-        let chunk_size = usize::from_str_radix(hex_str, 16)
-            .map_err(|_| format!("Malformed chunked body: invalid chunk-size '{}'", hex_str))?;
+        let chunk_size = parse_chunk_size_hex_bytes(hex_part)
+            .map_err(|err| format!("Malformed chunked body: {}", err))?;
 
         // Advance read_pos past "chunk-size\r\n"
-        read_pos += size_line_end + 2; // +2 for CRLF
+        read_pos = read_pos
+            .checked_add(size_line_end)
+            .and_then(|v| v.checked_add(2))
+            .ok_or_else(|| "Malformed chunked body: chunk position overflow".to_string())?;
 
         // NET2-2f: 0-length terminator chunk
         if chunk_size == 0 {
             // Skip optional trailer headers until final CRLF
             // Trailer format: (header-field CRLF)* CRLF
             loop {
-                if body_offset + read_pos + 2 > buf.len() {
+                if read_pos.checked_add(2).is_none_or(|end| end > data_len) {
                     return Err("Malformed chunked body: missing final CRLF after 0 chunk".into());
                 }
                 // Check if the next two bytes are CRLF (end of trailers)
@@ -596,7 +630,14 @@ pub(crate) fn chunked_in_place_compact(
                 }
                 // Skip trailer line
                 match find_crlf(&buf[body_offset + read_pos..]) {
-                    Some(pos) => read_pos += pos + 2,
+                    Some(pos) => {
+                        read_pos = read_pos
+                            .checked_add(pos)
+                            .and_then(|v| v.checked_add(2))
+                            .ok_or_else(|| {
+                                "Malformed chunked body: trailer position overflow".to_string()
+                            })?
+                    }
                     None => {
                         return Err("Malformed chunked body: incomplete trailer".into());
                     }
@@ -610,7 +651,13 @@ pub(crate) fn chunked_in_place_compact(
         }
 
         // Validate: enough data for chunk-data + CRLF
-        if read_pos + chunk_size + 2 > data_len {
+        let chunk_end = read_pos
+            .checked_add(chunk_size)
+            .ok_or_else(|| "Malformed chunked body: chunk position overflow".to_string())?;
+        let chunk_with_crlf_end = chunk_end
+            .checked_add(2)
+            .ok_or_else(|| "Malformed chunked body: chunk position overflow".to_string())?;
+        if chunk_with_crlf_end > data_len {
             return Err("Malformed chunked body: truncated chunk data".into());
         }
 
@@ -618,12 +665,14 @@ pub(crate) fn chunked_in_place_compact(
         // Use copy_within (memmove) because regions may overlap.
         if write_pos != read_pos {
             buf.copy_within(
-                body_offset + read_pos..body_offset + read_pos + chunk_size,
+                body_offset + read_pos..body_offset + chunk_end,
                 body_offset + write_pos,
             );
         }
-        write_pos += chunk_size;
-        read_pos += chunk_size;
+        write_pos = write_pos
+            .checked_add(chunk_size)
+            .ok_or_else(|| "Malformed chunked body: compacted body overflow".to_string())?;
+        read_pos = chunk_end;
 
         // Validate trailing CRLF after chunk data
         if buf[body_offset + read_pos] != b'\r' || buf[body_offset + read_pos + 1] != b'\n' {
@@ -688,25 +737,20 @@ pub(crate) fn chunked_body_complete(
             Some(semi) => &size_line[..semi],
             None => size_line,
         };
-        let hex_str = std::str::from_utf8(trim_ascii(hex_part))
-            .map_err(|_| ChunkedBodyError::Malformed("invalid chunk-size encoding".to_string()))?;
-
-        if hex_str.is_empty() {
-            return Err(ChunkedBodyError::Malformed("empty chunk-size".into()));
-        }
-
-        let chunk_size = usize::from_str_radix(hex_str, 16).map_err(|_| {
-            ChunkedBodyError::Malformed(format!("invalid chunk-size '{}'", hex_str))
-        })?;
+        let chunk_size =
+            parse_chunk_size_hex_bytes(hex_part).map_err(ChunkedBodyError::Malformed)?;
 
         // Advance past "chunk-size\r\n"
-        read_pos += size_line_end + 2;
+        read_pos = read_pos
+            .checked_add(size_line_end)
+            .and_then(|v| v.checked_add(2))
+            .ok_or_else(|| ChunkedBodyError::Malformed("chunk position overflow".into()))?;
 
         // Terminator chunk
         if chunk_size == 0 {
             // Skip optional trailer headers until final CRLF
             loop {
-                if read_pos + 2 > data_len {
+                if read_pos.checked_add(2).is_none_or(|end| end > data_len) {
                     return Err(ChunkedBodyError::Incomplete(
                         "missing final CRLF after 0 chunk".into(),
                     ));
@@ -717,7 +761,14 @@ pub(crate) fn chunked_body_complete(
                     return Ok(read_pos);
                 }
                 match find_crlf(&buf[body_offset + read_pos..]) {
-                    Some(pos) => read_pos += pos + 2,
+                    Some(pos) => {
+                        read_pos = read_pos
+                            .checked_add(pos)
+                            .and_then(|v| v.checked_add(2))
+                            .ok_or_else(|| {
+                                ChunkedBodyError::Malformed("trailer position overflow".into())
+                            })?
+                    }
                     None => {
                         return Err(ChunkedBodyError::Incomplete("incomplete trailer".into()));
                     }
@@ -726,12 +777,18 @@ pub(crate) fn chunked_body_complete(
         }
 
         // Check we have chunk-data + CRLF
-        if read_pos + chunk_size + 2 > data_len {
+        let chunk_end = read_pos
+            .checked_add(chunk_size)
+            .ok_or_else(|| ChunkedBodyError::Malformed("chunk position overflow".into()))?;
+        let chunk_with_crlf_end = chunk_end
+            .checked_add(2)
+            .ok_or_else(|| ChunkedBodyError::Malformed("chunk position overflow".into()))?;
+        if chunk_with_crlf_end > data_len {
             return Err(ChunkedBodyError::Incomplete("chunk data incomplete".into()));
         }
 
         // Skip chunk-data + CRLF
-        read_pos += chunk_size;
+        read_pos = chunk_end;
 
         // Validate CRLF after data
         if buf[body_offset + read_pos] != b'\r' || buf[body_offset + read_pos + 1] != b'\n' {

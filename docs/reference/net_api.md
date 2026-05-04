@@ -280,9 +280,18 @@ wsReceive(ws: WsToken) -> Lax[@(type: Str, data: Str | Bytes)]
 |--------|------------|------|
 | `"text"` | `Str` | UTF-8 text frame |
 | `"binary"` | `Bytes` | binary frame |
-| `"close"` | `Bytes` | close frame ペイロード (close code を含む。`wsCloseCode` で抽出) |
-| `"ping"` | `Bytes` | ping frame ペイロード (応答は wsSend で pong を送る運用、現状自動応答は無し) |
-| `"pong"` | `Bytes` | pong frame ペイロード |
+
+`ping` は同じ payload の `pong` で自動応答し、次の data / close frame まで読み進めます。`pong` は unsolicited pong として無視されます。`close` frame を受けた場合は close reply を送って `Lax.failure` を返し、受信 close code は `wsCloseCode(ws)` で取得します。
+
+### 7.3.1 WebSocket frame validation
+
+`wsReceive` は RFC 6455 の frame validation を Interpreter / JS / Native で同一 policy に揃えます。
+
+- client-to-server frame は masked 必須。RSV bit 非 0、fragmented frame (`FIN=0`)、unexpected continuation、unknown opcode は protocol error として close `1002`。
+- payload length は最大 16 MiB。超過時は close `1002`。
+- control frame (`close` / `ping` / `pong`) の payload は最大 125 bytes。126 bytes 以上の close / ping / pong は close `1002`。
+- close frame は payload 0 bytes、または 2 bytes 以上の valid close code + UTF-8 reason のみ受理します。1 byte payload、不正 close code、不正 UTF-8 reason は close `1002`。
+- text frame payload は strict UTF-8 必須。不正 UTF-8 は user handler に lossy `Str` として渡さず、close `1007`。
 
 ### 7.4 `wsClose(ws, ?code)`
 
@@ -393,6 +402,13 @@ handler req writer =
   ...
 => :Unit
 ```
+
+`Transfer-Encoding: chunked` の chunk-size は strict hex で、chunk-extension
+より前の hex 部分は最大 15 桁です。16 桁以上、空、非 hex、または加算時に
+overflow する chunk-size は malformed body として扱われます。1-arg eager
+body path では handler を呼ばずに `400 Bad Request`、2-arg streaming
+`readBodyChunk` / `readBodyAll` path では protocol error になります。この
+上限と failure policy は Interpreter / JS / Native で揃えます。
 
 ### 11.4 Why 2-arg `req.body` span is intentionally empty
 

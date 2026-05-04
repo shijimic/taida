@@ -3285,6 +3285,43 @@ fn test_chunked_compact_empty_chunk_size() {
     assert!(result.unwrap_err().contains("empty chunk-size"));
 }
 
+#[test]
+fn test_e32b028_chunked_compact_rejects_oversized_chunk_size() {
+    let head = b"GET / HTTP/1.1\r\n\r\n";
+    let chunked_body = b"FFFFFFFFFFFFFFFF\r\nx\r\n0\r\n\r\n";
+    let mut buf = Vec::new();
+    buf.extend_from_slice(head);
+    buf.extend_from_slice(chunked_body);
+    let body_offset = head.len();
+
+    let result = chunked_in_place_compact(&mut buf, body_offset);
+    assert!(result.is_err());
+    assert!(result.unwrap_err().contains("invalid chunk-size"));
+}
+
+#[test]
+fn test_e32b028_chunked_body_complete_rejects_oversized_chunk_size() {
+    let head = b"GET / HTTP/1.1\r\n\r\n";
+    let chunked_body = b"FFFFFFFFFFFFFFFF\r\nx\r\n0\r\n\r\n";
+    let mut buf = Vec::new();
+    buf.extend_from_slice(head);
+    buf.extend_from_slice(chunked_body);
+    let body_offset = head.len();
+
+    let result = chunked_body_complete(&buf, body_offset);
+    assert!(
+        matches!(result, Err(ChunkedBodyError::Malformed(msg)) if msg.contains("invalid chunk-size"))
+    );
+}
+
+#[test]
+fn test_e32b028_chunk_size_parser_accepts_15_hex_digits() {
+    assert_eq!(
+        parse_chunk_size_hex_bytes(b"FFFFFFFFFFFFFFF").unwrap(),
+        0x0FFF_FFFF_FFFF_FFFFusize
+    );
+}
+
 // ── parse_request_head: Transfer-Encoding detection (NET2-2a) ──
 
 #[test]

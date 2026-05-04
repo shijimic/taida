@@ -45,9 +45,18 @@ impl Interpreter {
 
     /// Maximum WebSocket payload size: 16 MiB.
     const WS_MAX_PAYLOAD: u64 = 16 * 1024 * 1024;
+    /// RFC 6455 control frames (close/ping/pong) are capped at 125 bytes.
+    const WS_CONTROL_MAX_PAYLOAD: u64 = 125;
 
     /// RFC 6455 magic GUID for Sec-WebSocket-Accept calculation.
     const WS_GUID: &'static str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
+
+    fn is_ws_control_opcode(opcode: u8) -> bool {
+        matches!(
+            opcode,
+            Self::WS_OPCODE_CLOSE | Self::WS_OPCODE_PING | Self::WS_OPCODE_PONG
+        )
+    }
 
     fn active_ws_writer_for(&self, api_name: &str) -> Result<&ActiveStreamingWriter, RuntimeError> {
         self.active_streaming_writer
@@ -544,8 +553,24 @@ impl Interpreter {
                 WsFrame::Data { opcode, payload } => {
                     let (type_str, data_val) = if opcode == Self::WS_OPCODE_TEXT {
                         // Text frames carry UTF-8: return Str so wsSend(ws, data) echoes as text.
-                        let text = String::from_utf8(payload)
-                            .unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned());
+                        let text = match String::from_utf8(payload) {
+                            Ok(text) => text,
+                            Err(_) => {
+                                // RFC 6455: invalid text payload data closes with 1007.
+                                let close_payload = [0x03, 0xEF]; // 1007 invalid payload data
+                                let _ = Self::write_ws_frame(
+                                    stream,
+                                    Self::WS_OPCODE_CLOSE,
+                                    &close_payload,
+                                );
+                                if let Some(ref mut active) = self.active_streaming_writer {
+                                    active.ws_closed = true;
+                                }
+                                return Err(RuntimeError {
+                                    message: "wsReceive: invalid UTF-8 in text frame".into(),
+                                });
+                            }
+                        };
                         ("text", Value::str(text))
                     } else {
                         ("binary", Value::bytes(payload))
@@ -773,6 +798,14 @@ impl Interpreter {
                 "payload too large ({} bytes, max {} bytes)",
                 payload_len,
                 Self::WS_MAX_PAYLOAD
+            )));
+        }
+
+        if Self::is_ws_control_opcode(opcode) && payload_len > Self::WS_CONTROL_MAX_PAYLOAD {
+            return Ok(WsFrame::ProtocolError(format!(
+                "control frame payload too large ({} bytes, max {} bytes)",
+                payload_len,
+                Self::WS_CONTROL_MAX_PAYLOAD
             )));
         }
 

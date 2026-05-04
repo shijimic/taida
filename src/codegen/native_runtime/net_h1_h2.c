@@ -2299,6 +2299,41 @@ static char *taida_net4_compute_ws_accept(const char *key) {
 #define WS_OPCODE_PING   0x9
 #define WS_OPCODE_PONG   0xA
 #define WS_MAX_PAYLOAD   (16ULL * 1024 * 1024)  // 16 MiB
+#define WS_CONTROL_MAX_PAYLOAD 125ULL
+
+static int taida_net4_is_ws_control_opcode(uint8_t opcode) {
+    return opcode == WS_OPCODE_CLOSE || opcode == WS_OPCODE_PING || opcode == WS_OPCODE_PONG;
+}
+
+static int taida_net4_is_valid_utf8(const unsigned char *bytes, size_t len) {
+    size_t i = 0;
+    while (i < len) {
+        unsigned char c = bytes[i];
+        if (c < 0x80) {
+            i++;
+        } else if ((c & 0xE0) == 0xC0) {
+            if (i + 1 >= len || (bytes[i+1] & 0xC0) != 0x80) return 0;
+            uint32_t cp = ((uint32_t)(c & 0x1F) << 6) | (uint32_t)(bytes[i+1] & 0x3F);
+            if (cp < 0x80) return 0;
+            i += 2;
+        } else if ((c & 0xF0) == 0xE0) {
+            if (i + 2 >= len || (bytes[i+1] & 0xC0) != 0x80 || (bytes[i+2] & 0xC0) != 0x80) return 0;
+            uint32_t cp = ((uint32_t)(c & 0x0F) << 12) | ((uint32_t)(bytes[i+1] & 0x3F) << 6) | (uint32_t)(bytes[i+2] & 0x3F);
+            if (cp < 0x800) return 0;
+            if (cp >= 0xD800 && cp <= 0xDFFF) return 0;
+            i += 3;
+        } else if ((c & 0xF8) == 0xF0) {
+            if (i + 3 >= len || (bytes[i+1] & 0xC0) != 0x80 || (bytes[i+2] & 0xC0) != 0x80 || (bytes[i+3] & 0xC0) != 0x80) return 0;
+            uint32_t cp = ((uint32_t)(c & 0x07) << 18) | ((uint32_t)(bytes[i+1] & 0x3F) << 12) | ((uint32_t)(bytes[i+2] & 0x3F) << 6) | (uint32_t)(bytes[i+3] & 0x3F);
+            if (cp < 0x10000) return 0;
+            if (cp > 0x10FFFF) return 0;
+            i += 4;
+        } else {
+            return 0;
+        }
+    }
+    return 1;
+}
 
 // ── v4 Body streaming helpers ────────────────────────────────
 
@@ -2469,6 +2504,10 @@ taida_val taida_net_read_body_chunk(taida_val req) {
                             hex_buf[hex_len++] = line_buf[i];
                     }
                     hex_buf[hex_len] = '\0';
+                    if (hex_len > 15) {
+                        fprintf(stderr, "readBodyChunk: invalid chunk-size '%s' in chunked body\n", hex_buf);
+                        exit(1);
+                    }
                     // NB4-18: Strict hex-only parse. Reject partial parse like '1g'.
                     for (size_t vi = 0; vi < hex_len; vi++) {
                         char c = hex_buf[vi];
@@ -2627,6 +2666,10 @@ taida_val taida_net_read_body_all(taida_val req) {
                             hex_buf[hex_len++] = line_buf[i];
                     }
                     hex_buf[hex_len] = '\0';
+                    if (hex_len > 15) {
+                        fprintf(stderr, "readBodyAll: invalid chunk-size '%s' in chunked body\n", hex_buf);
+                        exit(1);
+                    }
                     // NB4-18: Strict hex-only parse. Reject partial parse like '1g'.
                     for (size_t vi = 0; vi < hex_len; vi++) {
                         char c = hex_buf[vi];
@@ -2831,6 +2874,10 @@ static WsFrameResult taida_net4_read_ws_frame(int fd) {
 
     // Oversized payload check.
     if (payload_len > WS_MAX_PAYLOAD) { result.type = WS_FRAME_ERROR; return result; }
+    if (taida_net4_is_ws_control_opcode(opcode) && payload_len > WS_CONTROL_MAX_PAYLOAD) {
+        result.type = WS_FRAME_ERROR;
+        return result;
+    }
 
     // Read masking key if masked.
     uint8_t mask_key[4] = {0};
@@ -3339,6 +3386,14 @@ taida_val taida_net_ws_receive(taida_val ws) {
         switch (frame.type) {
             case WS_FRAME_TEXT: {
                 // Text frame: return data as Str (parity with Interpreter).
+                if (frame.payload_len > 0 && !taida_net4_is_valid_utf8(frame.payload, frame.payload_len)) {
+                    unsigned char close_1007[2] = { 0x03, 0xEF };
+                    taida_net4_write_ws_frame(fd, WS_OPCODE_CLOSE, close_1007, 2);
+                    if (bs) bs->ws_closed = 1;
+                    free(frame.payload);
+                    fprintf(stderr, "wsReceive: invalid UTF-8 in text frame\n");
+                    exit(1);
+                }
                 char *text = NULL;
                 if (frame.payload_len > 0) {
                     text = (char*)TAIDA_MALLOC(frame.payload_len + 1, "net_ws_text");
@@ -3413,43 +3468,10 @@ taida_val taida_net_ws_receive(taida_val ws) {
                         exit(1);
                     }
                     // Validate reason UTF-8 if present.
-                    // Strict UTF-8 validation: reject overlong sequences, surrogate
-                    // halves (U+D800..U+DFFF), and code points > U+10FFFF to match
-                    // Interpreter (std::str::from_utf8) and JS (decode+re-encode).
                     if (frame.payload_len > 2) {
                         size_t rlen = frame.payload_len - 2;
                         unsigned char *reason = frame.payload + 2;
-                        size_t i = 0;
-                        int utf8_ok = 1;
-                        while (i < rlen && utf8_ok) {
-                            unsigned char c = reason[i];
-                            if (c < 0x80) {
-                                i++;
-                            } else if ((c & 0xE0) == 0xC0) {
-                                // 2-byte: must have 1 continuation, code point >= 0x80
-                                if (i + 1 >= rlen || (reason[i+1] & 0xC0) != 0x80) { utf8_ok = 0; break; }
-                                uint32_t cp = ((uint32_t)(c & 0x1F) << 6) | (uint32_t)(reason[i+1] & 0x3F);
-                                if (cp < 0x80) { utf8_ok = 0; break; } // overlong
-                                i += 2;
-                            } else if ((c & 0xF0) == 0xE0) {
-                                // 3-byte: must have 2 continuations, cp >= 0x800, not surrogate
-                                if (i + 2 >= rlen || (reason[i+1] & 0xC0) != 0x80 || (reason[i+2] & 0xC0) != 0x80) { utf8_ok = 0; break; }
-                                uint32_t cp = ((uint32_t)(c & 0x0F) << 12) | ((uint32_t)(reason[i+1] & 0x3F) << 6) | (uint32_t)(reason[i+2] & 0x3F);
-                                if (cp < 0x800) { utf8_ok = 0; break; } // overlong
-                                if (cp >= 0xD800 && cp <= 0xDFFF) { utf8_ok = 0; break; } // surrogate
-                                i += 3;
-                            } else if ((c & 0xF8) == 0xF0) {
-                                // 4-byte: must have 3 continuations, cp >= 0x10000, cp <= 0x10FFFF
-                                if (i + 3 >= rlen || (reason[i+1] & 0xC0) != 0x80 || (reason[i+2] & 0xC0) != 0x80 || (reason[i+3] & 0xC0) != 0x80) { utf8_ok = 0; break; }
-                                uint32_t cp = ((uint32_t)(c & 0x07) << 18) | ((uint32_t)(reason[i+1] & 0x3F) << 12) | ((uint32_t)(reason[i+2] & 0x3F) << 6) | (uint32_t)(reason[i+3] & 0x3F);
-                                if (cp < 0x10000) { utf8_ok = 0; break; } // overlong
-                                if (cp > 0x10FFFF) { utf8_ok = 0; break; } // out of range
-                                i += 4;
-                            } else {
-                                utf8_ok = 0; break; // invalid lead byte
-                            }
-                        }
-                        if (!utf8_ok) {
+                        if (!taida_net4_is_valid_utf8(reason, rlen)) {
                             unsigned char close_1002[2] = { 0x03, 0xEA };
                             taida_net4_write_ws_frame(fd, WS_OPCODE_CLOSE, close_1002, 2);
                             if (bs) bs->ws_closed = 1;

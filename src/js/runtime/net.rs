@@ -2458,6 +2458,9 @@ function __taida_net_readBodyChunkChunkedSync(writer) {
         if (!/^[0-9a-fA-F]+$/.test(hexStr)) {
           throw new __NativeError('readBodyChunk: invalid chunk-size \'' + hexStr + '\' in chunked body');
         }
+        if (hexStr.length > 15) {
+          throw new __NativeError('readBodyChunk: invalid chunk-size \'' + hexStr + '\' in chunked body');
+        }
         const chunkSize = parseInt(hexStr, 16);
         if (isNaN(chunkSize)) {
           throw new __NativeError('readBodyChunk: invalid chunk-size \'' + hexStr + '\' in chunked body');
@@ -2620,6 +2623,9 @@ function __taida_net_readBodyAllImpl(writer) {
           if (!/^[0-9a-fA-F]+$/.test(hexStr)) {
             throw new __NativeError('readBodyAll: invalid chunk-size \'' + hexStr + '\' in chunked body');
           }
+          if (hexStr.length > 15) {
+            throw new __NativeError('readBodyAll: invalid chunk-size \'' + hexStr + '\' in chunked body');
+          }
           const chunkSize = parseInt(hexStr, 16);
           if (isNaN(chunkSize)) {
             throw new __NativeError('readBodyAll: invalid chunk-size \'' + hexStr + '\' in chunked body');
@@ -2697,6 +2703,17 @@ function __taida_net_readBodyAllImpl(writer) {
 // RFC 6455 magic GUID.
 const __WS_GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11';
 const __WS_MAX_PAYLOAD = 16 * 1024 * 1024; // 16 MiB
+const __WS_CONTROL_MAX_PAYLOAD = 125;
+
+function __taida_net_isWsControlOpcode(opcode) {
+  return opcode === 0x8 || opcode === 0x9 || opcode === 0xA;
+}
+
+function __taida_net_isStrictUtf8(buf) {
+  const decoded = buf.toString('utf8');
+  const reencoded = Buffer.from(decoded, 'utf8');
+  return reencoded.length === buf.length && reencoded.equals(buf);
+}
 
 // Compute Sec-WebSocket-Accept from Sec-WebSocket-Key (NET4-3b).
 function __taida_net_computeWsAccept(key) {
@@ -2709,7 +2726,8 @@ function __taida_net_computeWsAccept(key) {
 
 // Write a WebSocket frame to the socket (NET4-3c).
 // Server-to-client: FIN=1, MASK=0.
-// Uses cork/uncork to coalesce header + payload (no Buffer.concat).
+// Uses synchronous fd writes for plaintext; close frames are written atomically
+// so error paths do not tear header and status code apart.
 function __taida_net_writeWsFrame(sock, opcode, payload) {
   const payloadLen = payload ? payload.length : 0;
   // Build frame header on stack (max 10 bytes).
@@ -2748,8 +2766,12 @@ function __taida_net_writeWsFrame(sock, opcode, payload) {
   } else {
     const fd = sock._handle ? sock._handle.fd : -1;
     if (fd >= 0 && __taida_fs) {
-      __taida_net_fdWriteAll(fd, header);
-      if (payloadLen > 0) __taida_net_fdWriteAll(fd, payload);
+      if (opcode === 0x8 && payloadLen > 0) {
+        __taida_net_fdWriteAll(fd, Buffer.concat([header, payload]));
+      } else {
+        __taida_net_fdWriteAll(fd, header);
+        if (payloadLen > 0) __taida_net_fdWriteAll(fd, payload);
+      }
     } else {
       // Fallback: vectored write via cork/uncork.
       sock.cork();
@@ -2914,6 +2936,10 @@ function __taida_net_readWsFrame(sock) {
   // Oversized payload check.
   if (payloadLen > __WS_MAX_PAYLOAD) {
     return { error: 'payload too large (' + payloadLen + ' bytes, max ' + __WS_MAX_PAYLOAD + ' bytes)' };
+  }
+
+  if (__taida_net_isWsControlOpcode(opcode) && payloadLen > __WS_CONTROL_MAX_PAYLOAD) {
+    return { error: 'control frame payload too large (' + payloadLen + ' bytes, max ' + __WS_CONTROL_MAX_PAYLOAD + ' bytes)' };
   }
 
   // Read masking key.
@@ -3312,10 +3338,7 @@ function __taida_net_wsReceive(ws) {
         if (cp.length > 2) {
           try {
             const reason = cp.slice(2);
-            // Check for invalid UTF-8 sequences by round-tripping.
-            const decoded = reason.toString('utf8');
-            const reencoded = Buffer.from(decoded, 'utf8');
-            if (reencoded.length !== reason.length || !reencoded.equals(reason)) {
+            if (!__taida_net_isStrictUtf8(reason)) {
               __taida_net_writeWsFrame(sock, 0x8, Buffer.from([0x03, 0xEA])); // 1002
               writer._wsClosed = true;
               throw new __NativeError('wsReceive: protocol error: invalid UTF-8 in close reason');
@@ -3350,6 +3373,11 @@ function __taida_net_wsReceive(ws) {
     let dataVal;
     if (frame.opcode === 0x1) {
       // Text: return the payload as Str in data field for parity with interpreter.
+      if (!__taida_net_isStrictUtf8(frame.payload)) {
+        __taida_net_writeWsFrame(sock, 0x8, Buffer.from([0x03, 0xEF])); // 1007
+        writer._wsClosed = true;
+        throw new __NativeError('wsReceive: invalid UTF-8 in text frame');
+      }
       dataVal = frame.payload.toString('utf8');
     } else {
       dataVal = new Uint8Array(frame.payload.buffer, frame.payload.byteOffset, frame.payload.byteLength);

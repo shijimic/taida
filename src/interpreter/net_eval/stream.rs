@@ -12,7 +12,9 @@
 
 use super::super::eval::{Interpreter, RuntimeError, Signal};
 use super::super::value::Value;
-use super::helpers::{build_streaming_head, write_all_retry, write_vectored_all};
+use super::helpers::{
+    build_streaming_head, parse_chunk_size_hex_bytes, write_all_retry, write_vectored_all,
+};
 use super::types::{
     ActiveStreamingWriter, BodyEncoding, ChunkedDecoderState, ConnStream, RequestBodyState,
     StreamingWriter, WriterState,
@@ -912,18 +914,7 @@ impl Interpreter {
         if hex_part.is_empty() {
             return None;
         }
-        // Parse hex digits directly from bytes.
-        let mut result: usize = 0;
-        for &b in hex_part {
-            let digit = match b {
-                b'0'..=b'9' => (b - b'0') as usize,
-                b'a'..=b'f' => (b - b'a' + 10) as usize,
-                b'A'..=b'F' => (b - b'A' + 10) as usize,
-                _ => return None,
-            };
-            result = result.checked_mul(16)?.checked_add(digit)?;
-        }
-        Some(result)
+        parse_chunk_size_hex_bytes(hex_part).ok()
     }
 
     /// Read up to `count` bytes from leftover buffer then stream.
