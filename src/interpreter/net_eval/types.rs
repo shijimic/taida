@@ -76,10 +76,19 @@ impl StreamingWriter {
         matches!(status, 100..=199 | 204 | 205 | 304)
     }
 
-    /// Validate that user-supplied headers do not contain reserved headers
-    /// for the streaming path (Content-Length, Transfer-Encoding).
+    /// Validate that user-supplied headers are safe for the streaming path.
     pub(crate) fn validate_reserved_headers(headers: &[(String, String)]) -> Result<(), String> {
-        for (name, _) in headers {
+        for (i, (name, value)) in headers.iter().enumerate() {
+            if name.contains('\r') || name.contains('\n') {
+                return Err(format!("startResponse: headers[{}].name contains CR/LF", i));
+            }
+            if value.contains('\r') || value.contains('\n') {
+                return Err(format!(
+                    "startResponse: headers[{}].value contains CR/LF",
+                    i
+                ));
+            }
+
             let lower = name.to_ascii_lowercase();
             if lower == "content-length" {
                 return Err(

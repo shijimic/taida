@@ -1878,16 +1878,26 @@ function __taida_net_buildStreamingHead(status, headers) {
   return head;
 }
 
-// Validate that headers don't contain reserved names for streaming path.
-function __taida_net_validateReservedHeaders(headers) {
+// Validate user headers for the streaming path.
+function __taida_net_validateStreamingHeaders(headers) {
   for (let i = 0; i < headers.length; i++) {
-    const name = (headers[i].name || '').toLowerCase();
-    if (name === 'content-length') {
+    const h = headers[i];
+    const name = h.name || '';
+    const value = h.value || '';
+    if (typeof name === 'string' && (name.includes('\r') || name.includes('\n'))) {
+      throw new __NativeError('startResponse: headers[' + i + '].name contains CR/LF');
+    }
+    if (typeof value === 'string' && (value.includes('\r') || value.includes('\n'))) {
+      throw new __NativeError('startResponse: headers[' + i + '].value contains CR/LF');
+    }
+
+    const lower = name.toLowerCase();
+    if (lower === 'content-length') {
       throw new __NativeError(
         "startResponse: 'Content-Length' is not allowed in streaming response headers. " +
         'The runtime manages Content-Length/Transfer-Encoding for streaming responses.');
     }
-    if (name === 'transfer-encoding') {
+    if (lower === 'transfer-encoding') {
       throw new __NativeError(
         "startResponse: 'Transfer-Encoding' is not allowed in streaming response headers. " +
         'The runtime manages Transfer-Encoding for streaming responses.');
@@ -1934,8 +1944,8 @@ function __taida_net_startResponse(writer, status, headers) {
   // Default headers = []
   const h = Array.isArray(headers) ? headers : [];
 
-  // Validate reserved headers
-  __taida_net_validateReservedHeaders(h);
+  // Validate streaming response headers
+  __taida_net_validateStreamingHeaders(h);
 
   writer._pendingStatus = s;
   writer._pendingHeaders = h;
