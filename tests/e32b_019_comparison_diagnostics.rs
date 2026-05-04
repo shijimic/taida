@@ -48,7 +48,13 @@ n <= 1
 stdout(_ x = n == "a")
 "#,
         ),
-        ("template interpolation", r#"msg <= `bad ${1 == "a"}`"#),
+        (
+            "template interpolation",
+            r#"
+Enum => Status = :Ok :Retry
+msg <= `bad ${Status:Retry() > 0}`
+"#,
+        ),
         (
             "conditional arm",
             r#"

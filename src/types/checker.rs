@@ -3253,9 +3253,7 @@ defaulted fields must be provided via `()`",
                 self.check_comparison_errors_in_expr(left);
                 self.check_comparison_errors_in_expr(right);
                 if Self::is_comparison_op(op) {
-                    let left_ty = self.infer_expr_type_without_recording_errors(left);
-                    let right_ty = self.infer_expr_type_without_recording_errors(right);
-                    self.emit_comparison_mismatch_if_needed(&left_ty, op, &right_ty, span);
+                    self.infer_expr_type_must_emit_e1605(left, op, right, span);
                 }
             }
             Expr::UnaryOp(_, inner, _) | Expr::Unmold(inner, _) | Expr::Throw(inner, _) => {
@@ -3357,12 +3355,9 @@ defaulted fields must be provided via `()`",
                 }
                 let expr_str: String = chars[start..i].iter().collect();
                 let trimmed = expr_str.trim();
-                let (program, parse_errors) = crate::parser::parse(trimmed);
-                if parse_errors.is_empty()
-                    && let Some(Statement::Expr(parsed_expr)) = program.statements.first()
-                {
+                if let Some(parsed_expr) = Self::parse_template_interpolation_expr(trimmed) {
                     let error_count = self.errors.len();
-                    self.check_comparison_errors_in_expr(parsed_expr);
+                    self.check_comparison_errors_in_expr(&parsed_expr);
                     for err in &mut self.errors[error_count..] {
                         if err.message.contains("[E1605]") {
                             err.span = span.clone();
@@ -3378,11 +3373,37 @@ defaulted fields must be provided via `()`",
         }
     }
 
+    fn parse_template_interpolation_expr(source: &str) -> Option<Expr> {
+        fn parse_expr(source: &str) -> Option<Expr> {
+            let (program, parse_errors) = crate::parser::parse(source);
+            if parse_errors.is_empty()
+                && let Some(Statement::Expr(parsed_expr)) = program.statements.first()
+            {
+                return Some(parsed_expr.clone());
+            }
+            None
+        }
+
+        parse_expr(source).or_else(|| parse_expr(&format!("({source})")))
+    }
+
     fn infer_expr_type_without_recording_errors(&mut self, expr: &Expr) -> Type {
         let error_count = self.errors.len();
         let ty = self.infer_expr_type(expr);
         self.errors.truncate(error_count);
         ty
+    }
+
+    fn infer_expr_type_must_emit_e1605(
+        &mut self,
+        left: &Expr,
+        op: &BinOp,
+        right: &Expr,
+        span: &Span,
+    ) {
+        let left_ty = self.infer_expr_type_without_recording_errors(left);
+        let right_ty = self.infer_expr_type_without_recording_errors(right);
+        self.emit_comparison_mismatch_if_needed(&left_ty, op, &right_ty, span);
     }
 
     fn is_comparison_op(op: &BinOp) -> bool {

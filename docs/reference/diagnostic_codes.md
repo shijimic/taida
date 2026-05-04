@@ -118,6 +118,12 @@
 | `E1617` | Regex invariant 違反 (wasm profile での `Regex` 参照、`__`-prefix field の衝突など) | TypeChecker / emit_wasm_c |
 | `E1618` | モジュール境界越しの enum variant 並び順不一致 | TypeChecker |
 
+#### `E1605` — 比較オペランド型の不整合
+
+`E1605` は比較演算子そのものに対する前段ゲートであり、式ツリーの途中に埋まっていても発火します。対象には `stdout(...)` の引数、ユーザー関数 / メソッド呼び出しの引数、template interpolation (`${...}`)、BuchiPack / TypeInst のフィールド値、lambda body、cond arm body が含まれます。
+
+この診断が出る program は Interpreter / JS / Native / WASM の各 backend に lowering されません。Enum や class-like value を順序比較したい場合は、先に明示的な数値化 API (例: `Ordinal[<enum>]()` など) を使って比較対象の型を揃えてください。
+
 ### CLI / モジュール境界エラー (`E17xx`)
 
 | コード | メッセージ | フェーズ |

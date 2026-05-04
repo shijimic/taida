@@ -414,6 +414,97 @@ fn run_js_build_error(td_path: &Path, label: &str) -> Option<String> {
     Some(normalize(&String::from_utf8_lossy(&output.stderr)))
 }
 
+fn run_wasm_min_build_error(td_path: &Path, label: &str) -> Option<String> {
+    let wasm_path = unique_temp_path("taida_parity_wasm_min_err", label, "wasm");
+    let output = Command::new(taida_bin())
+        .arg("build")
+        .arg("wasm-min")
+        .arg(td_path)
+        .arg("-o")
+        .arg(&wasm_path)
+        .output()
+        .ok()?;
+    let _ = fs::remove_file(&wasm_path);
+    if output.status.success() {
+        return None;
+    }
+    Some(normalize(&String::from_utf8_lossy(&output.stderr)))
+}
+
+fn assert_e32b019_e1605_rejected_4backend(label: &str, source: &str) {
+    let td_path = unique_temp_path("taida_e32b019_e1605", label, "td");
+    fs::write(&td_path, source).expect("write E32B-019 source");
+
+    let backends: [(&str, Option<String>); 4] = [
+        ("interpreter", run_interpreter_error(&td_path)),
+        ("js", run_js_build_error(&td_path, label)),
+        ("native", run_native_build_error(&td_path, label)),
+        ("wasm-min", run_wasm_min_build_error(&td_path, label)),
+    ];
+
+    let _ = fs::remove_file(&td_path);
+
+    for (backend, err) in backends {
+        let err = err.unwrap_or_else(|| {
+            panic!(
+                "E32B-019 {}: {} unexpectedly accepted source",
+                label, backend
+            )
+        });
+        assert!(
+            err.contains("[E1605]"),
+            "E32B-019 {}: {} error should mention [E1605], got: {}",
+            label,
+            backend,
+            err
+        );
+    }
+}
+
+#[test]
+fn test_e32b_019_e1605_nested_contexts_4backend_negative() {
+    let cases = [
+        (
+            "stdout_arg",
+            r#"
+Enum => Status = :Ok :Retry
+stdout((Status:Retry() > 0).toString())
+"#,
+        ),
+        (
+            "func_arg",
+            r#"
+Enum => Status = :Ok :Retry
+echoBool value = value => :Bool
+stdout(echoBool(Status:Retry() > 0).toString())
+"#,
+        ),
+        (
+            "template_interp",
+            r#"
+Enum => Status = :Ok :Retry
+msg <= `bad ${Status:Retry() > 0}`
+stdout(msg)
+"#,
+        ),
+        (
+            "cond_arm",
+            r#"
+Enum => Status = :Ok :Retry
+result <= (
+  | true |> Status:Retry() > 0
+  | _ |> false
+)
+stdout(result.toString())
+"#,
+        ),
+    ];
+
+    for (label, source) in cases {
+        assert_e32b019_e1605_rejected_4backend(label, source);
+    }
+}
+
 fn spawn_http_echo_server() -> (u16, mpsc::Receiver<String>, thread::JoinHandle<()>) {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind http loopback");
     listener.set_nonblocking(false).expect("set blocking");
