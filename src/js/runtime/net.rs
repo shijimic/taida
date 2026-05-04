@@ -1882,12 +1882,27 @@ function __taida_net_buildStreamingHead(status, headers) {
 function __taida_net_validateStreamingHeaders(headers) {
   for (let i = 0; i < headers.length; i++) {
     const h = headers[i];
-    const name = h.name || '';
-    const value = h.value || '';
-    if (typeof name === 'string' && (name.includes('\r') || name.includes('\n'))) {
+    if (!h || typeof h !== 'object' || Array.isArray(h)) {
+      throw new __NativeError('startResponse: headers[' + i + '] must be @(name, value)');
+    }
+    const name = h.name;
+    const value = h.value;
+    if (typeof name !== 'string') {
+      throw new __NativeError('startResponse: headers[' + i + '].name must be Str');
+    }
+    if (typeof value !== 'string') {
+      throw new __NativeError('startResponse: headers[' + i + '].value must be Str');
+    }
+    if (Buffer.byteLength(name, 'utf-8') > 8192) {
+      throw new __NativeError('startResponse: headers[' + i + '].name exceeds 8192 bytes');
+    }
+    if (Buffer.byteLength(value, 'utf-8') > 65536) {
+      throw new __NativeError('startResponse: headers[' + i + '].value exceeds 65536 bytes');
+    }
+    if (name.includes('\r') || name.includes('\n')) {
       throw new __NativeError('startResponse: headers[' + i + '].name contains CR/LF');
     }
-    if (typeof value === 'string' && (value.includes('\r') || value.includes('\n'))) {
+    if (value.includes('\r') || value.includes('\n')) {
       throw new __NativeError('startResponse: headers[' + i + '].value contains CR/LF');
     }
 
@@ -1942,7 +1957,14 @@ function __taida_net_startResponse(writer, status, headers) {
   }
 
   // Default headers = []
-  const h = Array.isArray(headers) ? headers : [];
+  let h;
+  if (arguments.length < 3 || typeof headers === 'undefined') {
+    h = [];
+  } else if (Array.isArray(headers)) {
+    h = headers;
+  } else {
+    throw new __NativeError('startResponse: headers must be a List, got ' + String(headers));
+  }
 
   // Validate streaming response headers
   __taida_net_validateStreamingHeaders(h);

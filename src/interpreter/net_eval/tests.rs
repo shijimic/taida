@@ -4646,6 +4646,38 @@ fn test_streaming_header_crlf_value_rejected() {
 }
 
 #[test]
+fn test_streaming_header_name_too_long_rejected() {
+    let headers = vec![(
+        "x".repeat(STREAMING_HEADER_NAME_MAX_BYTES + 1),
+        "value".to_string(),
+    )];
+    let result = StreamingWriter::validate_reserved_headers(&headers);
+    assert!(result.is_err());
+    let msg = result.unwrap_err();
+    assert!(
+        msg.contains("headers[0].name exceeds 8192 bytes"),
+        "error should mention header name byte limit: {}",
+        msg
+    );
+}
+
+#[test]
+fn test_streaming_header_value_too_long_rejected() {
+    let headers = vec![(
+        "X-Ok".to_string(),
+        "x".repeat(STREAMING_HEADER_VALUE_MAX_BYTES + 1),
+    )];
+    let result = StreamingWriter::validate_reserved_headers(&headers);
+    assert!(result.is_err());
+    let msg = result.unwrap_err();
+    assert!(
+        msg.contains("headers[0].value exceeds 65536 bytes"),
+        "error should mention header value byte limit: {}",
+        msg
+    );
+}
+
+#[test]
 fn test_reserved_header_transfer_encoding_rejected() {
     let headers = vec![("Transfer-Encoding".to_string(), "chunked".to_string())];
     let result = StreamingWriter::validate_reserved_headers(&headers);

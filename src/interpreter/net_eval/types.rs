@@ -13,6 +13,9 @@ use crate::net_surface::NET_RUNTIME_BUILTIN_NAMES;
 /// (status_code, headers, body_bytes)
 pub(super) type ResponseFields = (i64, Vec<(String, String)>, Vec<u8>);
 
+pub(crate) const STREAMING_HEADER_NAME_MAX_BYTES: usize = 8192;
+pub(crate) const STREAMING_HEADER_VALUE_MAX_BYTES: usize = 65536;
+
 /// All symbols exported by the net package.
 /// HTTP v1 (3) + HTTP v2 (1) + HTTP v3 (4) + HTTP v4 (6) + v5 (1) = 15 symbols.
 pub(crate) const NET_SYMBOLS: &[&str] = &NET_RUNTIME_BUILTIN_NAMES;
@@ -79,6 +82,18 @@ impl StreamingWriter {
     /// Validate that user-supplied headers are safe for the streaming path.
     pub(crate) fn validate_reserved_headers(headers: &[(String, String)]) -> Result<(), String> {
         for (i, (name, value)) in headers.iter().enumerate() {
+            if name.len() > STREAMING_HEADER_NAME_MAX_BYTES {
+                return Err(format!(
+                    "startResponse: headers[{}].name exceeds {} bytes",
+                    i, STREAMING_HEADER_NAME_MAX_BYTES
+                ));
+            }
+            if value.len() > STREAMING_HEADER_VALUE_MAX_BYTES {
+                return Err(format!(
+                    "startResponse: headers[{}].value exceeds {} bytes",
+                    i, STREAMING_HEADER_VALUE_MAX_BYTES
+                ));
+            }
             if name.contains('\r') || name.contains('\n') {
                 return Err(format!("startResponse: headers[{}].name contains CR/LF", i));
             }

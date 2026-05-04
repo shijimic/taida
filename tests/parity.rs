@@ -13758,6 +13758,205 @@ stdout(r.requests)
     );
 }
 
+fn e32b_027_start_response_rejection_source(port: u16, headers_expr: &str) -> String {
+    format!(
+        r#">>> taida-lang/net => @(httpServe, startResponse, writeChunk, endResponse)
+
+handler req writer =
+  startResponse(writer, 200, {headers_expr})
+  writeChunk(writer, "should-not-reach")
+  endResponse(writer)
+
+asyncResult <= httpServe({port}, handler, 1)
+asyncResult ]=> result
+result ]=> r
+stdout(r.requests)
+"#,
+        port = port,
+        headers_expr = headers_expr
+    )
+}
+
+fn e32b_027_assert_native_start_response_rejects(
+    source: &str,
+    label: &str,
+    port: u16,
+    expected: &str,
+) {
+    let dir = setup_net_project(source, &format!("e32b027_{}_{}", label, port));
+    let td_path = dir.join("main.td");
+    let bin_path = unique_temp_path("taida_e32b027_native", label, "bin");
+
+    let compile = Command::new(taida_bin())
+        .arg("build")
+        .arg("native")
+        .arg(&td_path)
+        .arg("-o")
+        .arg(&bin_path)
+        .output()
+        .expect("compile native");
+    if !compile.status.success() {
+        let stderr = String::from_utf8_lossy(&compile.stderr);
+        cleanup_net_project(&dir);
+        let _ = fs::remove_file(&bin_path);
+        panic!("E32B-027 native {}: compile failed: {}", label, stderr);
+    }
+
+    let mut child = Command::new(&bin_path)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn native binary");
+
+    let mut triggered = false;
+    for _ in 0..80 {
+        thread::sleep(Duration::from_millis(100));
+        let stream = match TcpStream::connect(format!("127.0.0.1:{}", port)) {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+        stream.set_write_timeout(Some(Duration::from_secs(5))).ok();
+        let mut stream = stream;
+        let request = b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+        let _ = std::io::Write::write_all(&mut stream, request);
+        triggered = true;
+        break;
+    }
+
+    let _ = fs::remove_file(&bin_path);
+
+    if !triggered {
+        let _ = child.kill();
+        cleanup_net_project(&dir);
+        panic!(
+            "E32B-027 native {}: server did not accept connection on port {}",
+            label, port
+        );
+    }
+
+    let output = child.wait_with_output().expect("wait for native process");
+    cleanup_net_project(&dir);
+
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    assert!(
+        !output.status.success(),
+        "E32B-027 native {}: process should exit with non-zero status, got: {:?}",
+        label,
+        output.status,
+    );
+    assert!(
+        stderr.contains(expected),
+        "E32B-027 native {}: stderr should mention {:?}, got: {:?}",
+        label,
+        expected,
+        stderr,
+    );
+}
+
+/// E32B-027: unsafe streaming headers are rejected on Interpreter and JS.
+#[test]
+fn test_e32b_027_streaming_header_negative_interp_js() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+
+    let cases = [
+        (
+            "crlf_name",
+            r#"@[@(name <= "Bad\r\nName", value <= "ok")]"#,
+            "CR/LF",
+        ),
+        (
+            "name_too_long",
+            r#"@[@(name <= Repeat["x", 8193](), value <= "ok")]"#,
+            "exceeds 8192",
+        ),
+        (
+            "value_too_long",
+            r#"@[@(name <= "X-Ok", value <= Repeat["x", 65537]())]"#,
+            "exceeds 65536",
+        ),
+        ("headers_not_list", "42", "headers must be a List"),
+        ("item_not_pack", r#"@["bad"]"#, "must be @(name, value)"),
+        (
+            "name_not_str",
+            r#"@[@(name <= 1, value <= "ok")]"#,
+            "name must be Str",
+        ),
+        (
+            "value_not_str",
+            r#"@[@(name <= "X-Ok", value <= 1)]"#,
+            "value must be Str",
+        ),
+    ];
+
+    for (label, headers_expr, expected) in cases {
+        for backend in &["interp", "js"] {
+            let port = find_free_loopback_port();
+            let source = e32b_027_start_response_rejection_source(port, headers_expr);
+            let request = b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+            let (resp, _stdout) = spawn_and_request_v3(&source, backend, port, request);
+
+            assert!(
+                resp.contains("500") || resp.contains(expected),
+                "E32B-027 {} {}: startResponse should reject {:?}, got: {:?}",
+                backend,
+                label,
+                expected,
+                resp
+            );
+            assert!(
+                !resp.contains("should-not-reach"),
+                "E32B-027 {} {}: writeChunk after rejection should not execute, got: {:?}",
+                backend,
+                label,
+                resp
+            );
+        }
+    }
+}
+
+/// E32B-027: unsafe streaming headers are rejected on Native.
+#[test]
+fn test_e32b_027_streaming_header_negative_native() {
+    let cases = [
+        (
+            "crlf_name",
+            r#"@[@(name <= "Bad\r\nName", value <= "ok")]"#,
+            "CR/LF",
+        ),
+        (
+            "name_too_long",
+            r#"@[@(name <= Repeat["x", 8193](), value <= "ok")]"#,
+            "exceeds 8192",
+        ),
+        (
+            "value_too_long",
+            r#"@[@(name <= "X-Ok", value <= Repeat["x", 65537]())]"#,
+            "exceeds 65536",
+        ),
+        ("headers_not_list", "42", "headers must be a List"),
+        ("item_not_pack", r#"@["bad"]"#, "must be @(name, value)"),
+        (
+            "name_not_str",
+            r#"@[@(name <= 1, value <= "ok")]"#,
+            "name must be Str",
+        ),
+        (
+            "value_not_str",
+            r#"@[@(name <= "X-Ok", value <= 1)]"#,
+            "value must be Str",
+        ),
+    ];
+
+    for (label, headers_expr, expected) in cases {
+        let port = find_free_loopback_port();
+        let source = e32b_027_start_response_rejection_source(port, headers_expr);
+        e32b_027_assert_native_start_response_rejects(&source, label, port, expected);
+    }
+}
+
 /// NET3-6e: double endResponse is idempotent (no error, no crash).
 #[test]
 fn test_net3_6e_double_end_response_idempotent() {

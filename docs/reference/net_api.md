@@ -364,6 +364,8 @@ handler req writer =
 => :Unit
 ```
 
+`startResponse` の `headers` は `@[@(name <= Str, value <= Str)]` だけを受理します。`headers` が List ではない、要素が `@(name, value)` pack ではない、`name` / `value` が Str ではない場合はエラーです。streaming response では runtime が framing を管理するため、`Content-Length` と `Transfer-Encoding` は指定できません。header name は 8192 bytes 以下、header value は 65536 bytes 以下で、どちらも CR/LF を含められません。この validation は Interpreter / JS / Native で同じ契約です。
+
 ### 11.2 Anti-pattern — direct `req.body` span slice (silent breakage)
 
 ```taida

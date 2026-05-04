@@ -1623,33 +1623,61 @@ static int taida_net3_header_name_eq_ci(const char *name, size_t name_len, const
 // Validate user headers in the streaming path.
 // Returns 0 if valid, prints error to stderr and returns -1 if invalid.
 static int taida_net3_validate_streaming_headers(taida_val headers, const char *api_name) {
-    if (!TAIDA_IS_LIST(headers)) return 0;
+    if (headers == 0) return 0;
+    if (!TAIDA_IS_LIST(headers)) {
+        fprintf(stderr, "%s: headers must be a List\n", api_name);
+        return -1;
+    }
     taida_val *list = (taida_val*)headers;
     taida_val len = list[2];
     taida_val name_hash = taida_str_hash((taida_val)"name");
     taida_val value_hash = taida_str_hash((taida_val)"value");
     for (taida_val i = 0; i < len; i++) {
         taida_val item = list[4 + i];
-        if (!taida_is_buchi_pack(item)) continue;
+        if (!taida_is_buchi_pack(item)) {
+            fprintf(stderr, "%s: headers[%d] must be @(name, value)\n", api_name, (int)i);
+            return -1;
+        }
         taida_val name_val = taida_pack_get(item, name_hash);
-        if (name_val == 0) continue;
+        taida_val name_tag = taida_pack_get_field_tag(item, name_hash);
+        if (name_tag != TAIDA_TAG_STR) {
+            fprintf(stderr, "%s: headers[%d].name must be Str\n", api_name, (int)i);
+            return -1;
+        }
         const char *name_str = (const char*)name_val;
         size_t name_len = 0;
-        if (!taida_read_cstr_len_safe(name_str, 8192, &name_len)) continue;
+        if (!taida_str_byte_len(name_str, &name_len)) {
+            fprintf(stderr, "%s: headers[%d].name must be Str\n", api_name, (int)i);
+            return -1;
+        }
+        if (name_len > 8192) {
+            fprintf(stderr, "%s: headers[%d].name exceeds 8192 bytes\n", api_name, (int)i);
+            return -1;
+        }
         if (taida_net3_contains_crlf(name_str, name_len)) {
             fprintf(stderr, "%s: headers[%d].name contains CR/LF\n", api_name, (int)i);
             return -1;
         }
 
         taida_val value_val = taida_pack_get(item, value_hash);
-        if (value_val != 0) {
-            const char *value_str = (const char*)value_val;
-            size_t value_len = 0;
-            if (taida_read_cstr_len_safe(value_str, 65536, &value_len) &&
-                taida_net3_contains_crlf(value_str, value_len)) {
-                fprintf(stderr, "%s: headers[%d].value contains CR/LF\n", api_name, (int)i);
-                return -1;
-            }
+        taida_val value_tag = taida_pack_get_field_tag(item, value_hash);
+        if (value_tag != TAIDA_TAG_STR) {
+            fprintf(stderr, "%s: headers[%d].value must be Str\n", api_name, (int)i);
+            return -1;
+        }
+        const char *value_str = (const char*)value_val;
+        size_t value_len = 0;
+        if (!taida_str_byte_len(value_str, &value_len)) {
+            fprintf(stderr, "%s: headers[%d].value must be Str\n", api_name, (int)i);
+            return -1;
+        }
+        if (value_len > 65536) {
+            fprintf(stderr, "%s: headers[%d].value exceeds 65536 bytes\n", api_name, (int)i);
+            return -1;
+        }
+        if (taida_net3_contains_crlf(value_str, value_len)) {
+            fprintf(stderr, "%s: headers[%d].value contains CR/LF\n", api_name, (int)i);
+            return -1;
         }
 
         if (taida_net3_header_name_eq_ci(name_str, name_len, "content-length")) {

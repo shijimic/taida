@@ -274,14 +274,6 @@ pub(crate) fn get_field_int(fields: &[(String, Value)], key: &str) -> Option<i64
     }
 }
 
-/// Get a Str field from a BuchiPack field list.
-pub(crate) fn get_field_str(fields: &[(String, Value)], key: &str) -> Option<String> {
-    match fields.iter().find(|(k, _)| k == key) {
-        Some((_, Value::Str(s))) => Some(s.as_string().clone()),
-        _ => None,
-    }
-}
-
 /// Get a reference to any field value from a BuchiPack field list.
 pub(crate) fn get_field_value<'a>(fields: &'a [(String, Value)], key: &str) -> Option<&'a Value> {
     fields.iter().find(|(k, _)| k == key).map(|(_, v)| v)

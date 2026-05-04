@@ -12,7 +12,7 @@
 
 use super::super::eval::{Interpreter, RuntimeError, Signal};
 use super::super::value::Value;
-use super::helpers::{build_streaming_head, get_field_str, write_all_retry, write_vectored_all};
+use super::helpers::{build_streaming_head, write_all_retry, write_vectored_all};
 use super::types::{
     ActiveStreamingWriter, BodyEncoding, ChunkedDecoderState, ConnStream, RequestBodyState,
     StreamingWriter, WriterState,
@@ -163,18 +163,7 @@ impl Interpreter {
         // Arg 2: headers (List of @(name, value), default @[])
         let headers: Vec<(String, String)> = if let Some(arg) = args.get(2) {
             match self.eval_expr(arg)? {
-                Signal::Value(Value::List(items)) => {
-                    let mut out = Vec::new();
-                    for item in items.iter() {
-                        if let Value::BuchiPack(fields) = item {
-                            let name = get_field_str(fields, "name").unwrap_or_default();
-                            let value = get_field_str(fields, "value").unwrap_or_default();
-                            out.push((name, value));
-                        }
-                    }
-                    out
-                }
-                Signal::Value(_) => Vec::new(),
+                Signal::Value(headers_value) => extract_start_response_headers(&headers_value)?,
                 other => return Ok(Some(other)),
             }
         } else {
@@ -1128,4 +1117,45 @@ impl Interpreter {
 
         Ok(Some(Signal::Value(Value::bytes(all_bytes))))
     }
+}
+
+fn extract_start_response_headers(value: &Value) -> Result<Vec<(String, String)>, RuntimeError> {
+    let items = match value {
+        Value::List(items) => items,
+        other => {
+            return Err(RuntimeError {
+                message: format!("startResponse: headers must be a List, got {}", other),
+            });
+        }
+    };
+
+    let mut out = Vec::new();
+    for (i, item) in items.iter().enumerate() {
+        let fields = match item {
+            Value::BuchiPack(fields) => fields,
+            _ => {
+                return Err(RuntimeError {
+                    message: format!("startResponse: headers[{}] must be @(name, value)", i),
+                });
+            }
+        };
+        let name = match fields.iter().find(|(k, _)| k == "name") {
+            Some((_, Value::Str(s))) => s.as_string().clone(),
+            _ => {
+                return Err(RuntimeError {
+                    message: format!("startResponse: headers[{}].name must be Str", i),
+                });
+            }
+        };
+        let value = match fields.iter().find(|(k, _)| k == "value") {
+            Some((_, Value::Str(s))) => s.as_string().clone(),
+            _ => {
+                return Err(RuntimeError {
+                    message: format!("startResponse: headers[{}].value must be Str", i),
+                });
+            }
+        };
+        out.push((name, value));
+    }
+    Ok(out)
 }
