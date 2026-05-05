@@ -1163,10 +1163,12 @@ pub fn write_lockfile(manifest: &Manifest, result: &ResolveResult) -> Result<(),
     let lockfile = Lockfile::from_resolved(&result.packages);
 
     // Check if lockfile is already up to date
-    if let Ok(Some(existing)) = Lockfile::read(&lock_path)
-        && existing.is_up_to_date(&result.packages)
-    {
-        return Ok(()); // Already up to date, skip write
+    match Lockfile::read(&lock_path) {
+        Ok(Some(existing)) if existing.is_up_to_date(&result.packages) => {
+            return Ok(()); // Already up to date, skip write
+        }
+        Ok(_) => {}
+        Err(e) => return Err(e),
     }
 
     lockfile.write(&lock_path)
@@ -1186,6 +1188,13 @@ pub fn write_lockfile_with_addons(
             .map_err(|e| format!("Cannot create .taida/ directory: {}", e))?;
     }
     let mut lockfile = Lockfile::from_resolved(&result.packages);
+
+    // Never silently overwrite legacy or malformed lockfiles. v1/fnv1a must go
+    // through `taida ingot migrate-lockfile` so the user sees the trust-boundary
+    // change explicitly.
+    if let Err(e) = Lockfile::read(&lock_path) {
+        return Err(e);
+    }
 
     // Attach addon info
     for (pkg_name, addon) in addons {
@@ -2073,12 +2082,14 @@ deps <= @(
 
         // Lockfile records os@a.1 (exact version)
         let lockfile = Lockfile {
-            version: 1,
+            version: 2,
             packages: vec![LockedPackage {
                 name: "os".to_string(),
                 version: "a.1".to_string(),
                 source: "bundled".to_string(),
-                integrity: "fnv1a:0000000000000002".to_string(),
+                integrity:
+                    "sha256:0000000000000000000000000000000000000000000000000000000000000002"
+                        .to_string(),
                 addon: None,
             }],
         };
@@ -2576,7 +2587,9 @@ deps <= @(
                     name: "http".to_string(),
                 },
                 path: PathBuf::from("/tmp/test/a1"),
-                integrity: "fnv1a:0000000000000001".to_string(),
+                integrity:
+                    "sha256:0000000000000000000000000000000000000000000000000000000000000001"
+                        .to_string(),
             },
             ResolvedPackage {
                 name: "alice/http@b.12".to_string(),
@@ -2586,7 +2599,9 @@ deps <= @(
                     name: "http".to_string(),
                 },
                 path: PathBuf::from("/tmp/test/b12"),
-                integrity: "fnv1a:0000000000000002".to_string(),
+                integrity:
+                    "sha256:0000000000000000000000000000000000000000000000000000000000000002"
+                        .to_string(),
             },
         ];
 
@@ -2656,14 +2671,18 @@ deps <= @(
                     version: "a.1".to_string(),
                     source: PackageSource::Path("./pkg_v1".to_string()),
                     path: pkg_dir_v1.canonicalize().unwrap_or(pkg_dir_v1),
-                    integrity: "fnv1a:0000000000000001".to_string(),
+                    integrity:
+                        "sha256:0000000000000000000000000000000000000000000000000000000000000001"
+                            .to_string(),
                 },
                 ResolvedPackage {
                     name: "mylib@b.1".to_string(),
                     version: "b.1".to_string(),
                     source: PackageSource::Path("./pkg_v2".to_string()),
                     path: pkg_dir_v2.canonicalize().unwrap_or(pkg_dir_v2),
-                    integrity: "fnv1a:0000000000000002".to_string(),
+                    integrity:
+                        "sha256:0000000000000000000000000000000000000000000000000000000000000002"
+                            .to_string(),
                 },
             ],
             errors: Vec::new(),

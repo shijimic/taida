@@ -147,7 +147,8 @@ fn print_ingot_help() {
 Usage:
   taida ingot [--help]
   taida ingot deps
-  taida ingot install [--force-refresh | --no-remote-check] [--allow-local-addon-build]
+  taida ingot install [--force-refresh | --no-remote-check] [--allow-local-addon-build] [--frozen]
+  taida ingot migrate-lockfile
   taida ingot update [--allow-local-addon-build]
   taida ingot publish [--label LABEL] [--force-version VERSION] [--retag] [--dry-run]
   taida ingot cache [clean] [--addons|--store|--store-pkg <org>/<name>|--all] [--yes]
@@ -155,6 +156,8 @@ Usage:
 Commands:
   deps      Resolve/install dependencies strictly
   install   Install dependencies and write lockfile
+  migrate-lockfile
+            Rewrite legacy taida.lock v1/fnv1a entries to v2/SHA-256
   update    Update dependencies and lockfile
   publish   Push a package tag; CI creates release assets
   cache     Manage WASM/runtime/addon caches
@@ -285,7 +288,7 @@ fn print_install_help() {
     println!(
         "\
 Usage:
-  taida ingot install [--force-refresh | --no-remote-check] [--allow-local-addon-build]
+  taida ingot install [--force-refresh | --no-remote-check] [--allow-local-addon-build] [--frozen]
 
 Behavior:
   Install resolved dependencies and generate/update `.taida/taida.lock`.
@@ -306,6 +309,11 @@ Behavior:
   re-extracted automatically. Offline or unverifiable states emit a
   warning to stderr but never silently skip.
 
+  E32: `.taida/taida.lock` uses schema v2 and SHA-256 integrity. Legacy v1
+  lockfiles and `fnv1a:` integrity are rejected. Run
+  `taida ingot migrate-lockfile` once after installing dependencies to rewrite
+  an old lockfile from the installed `.taida/deps` tree.
+
 Options:
   --force-refresh              Invalidate the cached store entry for every
                                registry dependency and re-extract it. Also
@@ -318,12 +326,16 @@ Options:
   --allow-local-addon-build    When a prebuild is missing or unavailable, fall back
                                to building the addon from source using `cargo build`.
                                Integrity mismatches are never overridden by fallback.
+  --frozen                     Require `.taida/taida.lock` to already match the
+                               resolved `(name, version, integrity)` triples.
+                               No lockfile writes are allowed.
 
 Example:
   taida ingot install
   taida ingot install --force-refresh
   taida ingot install --no-remote-check
-  taida ingot install --allow-local-addon-build"
+  taida ingot install --allow-local-addon-build
+  taida ingot install --frozen"
     );
 }
 
@@ -635,6 +647,7 @@ fn run_ingot(args: &[String]) {
     match args[0].as_str() {
         "deps" => run_deps(&args[1..]),
         "install" => run_install(&args[1..]),
+        "migrate-lockfile" => run_migrate_lockfile(&args[1..]),
         "update" => run_update(&args[1..]),
         #[cfg(feature = "community")]
         "publish" => run_publish(&args[1..]),
@@ -5086,6 +5099,7 @@ fn run_install(args: &[String]) {
     let mut force_refresh = false;
     let mut no_remote_check = false;
     let mut allow_local_addon_build = false;
+    let mut frozen = false;
     let mut filtered: Vec<&str> = Vec::new();
     for arg in args {
         if arg == "--force-refresh" {
@@ -5094,6 +5108,8 @@ fn run_install(args: &[String]) {
             no_remote_check = true;
         } else if arg == "--allow-local-addon-build" {
             allow_local_addon_build = true;
+        } else if arg == "--frozen" {
+            frozen = true;
         } else if is_help_flag(arg.as_str()) {
             print_install_help();
             return;
@@ -5140,10 +5156,34 @@ fn run_install(args: &[String]) {
 
     if manifest.deps.is_empty() {
         println!("No dependencies defined in packages.tdm");
+        let lock_path = project_dir.join(".taida").join("taida.lock");
+        if frozen {
+            match pkg::lockfile::Lockfile::read(&lock_path) {
+                Ok(Some(lockfile)) if lockfile.is_up_to_date(&[]) => {
+                    println!("taida.lock is frozen and up to date");
+                    return;
+                }
+                Ok(Some(_)) => {
+                    eprintln!(
+                        "[E32K2_LOCKFILE_DRIFT] --frozen requires .taida/taida.lock to match packages.tdm"
+                    );
+                    std::process::exit(1);
+                }
+                Ok(None) => {
+                    eprintln!(
+                        "[E32K2_LOCKFILE_DRIFT] --frozen requires existing .taida/taida.lock"
+                    );
+                    std::process::exit(1);
+                }
+                Err(e) => {
+                    eprintln!("{}", e);
+                    std::process::exit(1);
+                }
+            }
+        }
         println!("Generated taida.lock (empty)");
         // Write empty lockfile
         let lockfile = pkg::lockfile::Lockfile::from_resolved(&[]);
-        let lock_path = project_dir.join(".taida").join("taida.lock");
         if let Some(parent) = lock_path.parent() {
             // N-56: directory creation error is caught by the subsequent
             // lockfile.write() call, which will report a clear error.
@@ -5159,7 +5199,17 @@ fn run_install(args: &[String]) {
 
     // Read existing lockfile to pin generation-only versions for reproducibility
     let lock_path = project_dir.join(".taida").join("taida.lock");
-    let existing_lockfile = pkg::lockfile::Lockfile::read(&lock_path).unwrap_or_default();
+    let existing_lockfile = match pkg::lockfile::Lockfile::read(&lock_path) {
+        Ok(lockfile) => lockfile,
+        Err(e) => {
+            eprintln!("{}", e);
+            std::process::exit(1);
+        }
+    };
+    if frozen && existing_lockfile.is_none() {
+        eprintln!("[E32K2_LOCKFILE_DRIFT] --frozen requires existing .taida/taida.lock");
+        std::process::exit(1);
+    }
 
     // Resolve all dependencies using the provider chain,
     // pinning generation-only versions to locked exact versions when available.
@@ -5173,6 +5223,30 @@ fn run_install(args: &[String]) {
     // Report errors
     for err in &result.errors {
         eprintln!("  ERROR: {}", err);
+    }
+
+    if result.errors.is_empty() {
+        if let Some(lockfile) = &existing_lockfile {
+            if let Err(e) = lockfile.validate_resolved_bindings(&result.packages) {
+                eprintln!("{}", e);
+                std::process::exit(1);
+            }
+        }
+        if frozen
+            && !existing_lockfile
+                .as_ref()
+                .map(|lf| lf.is_up_to_date(&result.packages))
+                .unwrap_or(false)
+        {
+            eprintln!(
+                "[E32K2_LOCKFILE_DRIFT] --frozen requires .taida/taida.lock to match packages.tdm"
+            );
+            std::process::exit(1);
+        }
+    }
+    if frozen && !result.errors.is_empty() {
+        eprintln!("\nSome dependencies could not be resolved. See errors above.");
+        std::process::exit(1);
     }
 
     // Install resolved dependencies
@@ -5226,16 +5300,65 @@ fn run_install(args: &[String]) {
         }
     }
 
-    // Generate lockfile (always, even if some deps failed)
-    // RC1.5: include addon info if addon prebuilds were installed
-    match pkg::resolver::write_lockfile_with_addons(&manifest, &result, &addon_map) {
-        Ok(()) => println!("Generated taida.lock"),
-        Err(e) => eprintln!("Warning: could not write lockfile: {}", e),
+    if frozen {
+        println!("taida.lock is frozen and up to date");
+    } else {
+        // Generate lockfile (always, even if some deps failed)
+        // RC1.5: include addon info if addon prebuilds were installed
+        match pkg::resolver::write_lockfile_with_addons(&manifest, &result, &addon_map) {
+            Ok(()) => println!("Generated taida.lock"),
+            Err(e) => eprintln!("Warning: could not write lockfile: {}", e),
+        }
     }
 
     if !result.errors.is_empty() {
         eprintln!("\nSome dependencies could not be resolved. See errors above.");
         std::process::exit(1);
+    }
+}
+
+fn run_migrate_lockfile(args: &[String]) {
+    for arg in args {
+        if is_help_flag(arg.as_str()) {
+            println!(
+                "\
+Usage:
+  taida ingot migrate-lockfile
+
+Behavior:
+  Rewrite `.taida/taida.lock` from schema v1 / `fnv1a:` integrity to
+  schema v2 / `sha256:` integrity using the installed `.taida/deps` tree.
+  Missing installed dependencies fail with `[E32K2_LOCKFILE_MIGRATE_FAIL]`."
+            );
+            return;
+        }
+    }
+    if !args.is_empty() {
+        eprintln!("Unexpected arguments.");
+        eprintln!("Run `taida ingot migrate-lockfile --help` for usage.");
+        std::process::exit(1);
+    }
+
+    let project_dir = find_packages_tdm().unwrap_or_else(|| {
+        eprintln!("No packages.tdm found in current directory or parent directories.");
+        eprintln!("Run 'taida init' to create a new project.");
+        std::process::exit(1);
+    });
+    let lock_path = project_dir.join(".taida").join("taida.lock");
+    let deps_dir = project_dir.join(".taida").join("deps");
+
+    match pkg::lockfile::Lockfile::migrate_v2_from_installed(&lock_path, &deps_dir) {
+        Ok(lockfile) => {
+            println!(
+                "Migrated taida.lock to schema v{} ({} package(s))",
+                lockfile.version,
+                lockfile.packages.len()
+            );
+        }
+        Err(e) => {
+            eprintln!("{}", e);
+            std::process::exit(1);
+        }
     }
 }
 

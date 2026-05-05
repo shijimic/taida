@@ -242,6 +242,25 @@ verification policy is stable for `@e.X`:
   verified `SHA256SUMS` entry. Self-replacement runs after those
   checks pass.
 
+### 2.9. Package lockfile integrity
+
+`.taida/taida.lock` schema v2 is the stable package binding format
+for `@e.X`. Every package entry records a `(name, version,
+integrity)` triple, and `integrity` must use `sha256:`. Legacy
+schema v1 lockfiles and `fnv1a:` integrity values are rejected by
+normal `taida ingot install` with `[E32K2_LOCKFILE_V1_REJECTED]`.
+
+`taida ingot install --frozen` never writes the lockfile. It succeeds
+only when the existing lockfile exactly matches the resolver output.
+Any drift in package name, version, source, or SHA-256 integrity is a
+hard failure with `[E32K2_LOCKFILE_INTEGRITY_MISMATCH]` or
+`[E32K2_LOCKFILE_DRIFT]`.
+
+Use `taida ingot migrate-lockfile` to rewrite an installed v1 tree to
+schema v2. Migration recomputes SHA-256 from `.taida/deps`; missing
+dependencies or unsupported filesystem entries fail with
+`[E32K2_LOCKFILE_MIGRATE_FAIL]`.
+
 ---
 
 ## 3. Non-Stable Surface — what may change

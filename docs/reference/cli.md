@@ -221,7 +221,8 @@ taida init [--target rust-addon] [DIR]
 
 ```bash
 taida ingot [--help]
-taida ingot install [--force-refresh | --no-remote-check] [--allow-local-addon-build]
+taida ingot install [--force-refresh | --no-remote-check] [--allow-local-addon-build] [--frozen]
+taida ingot migrate-lockfile
 taida ingot deps
 taida ingot update [--allow-local-addon-build]
 taida ingot publish [--label LABEL] [--force-version VERSION] [--retag] [--dry-run]
@@ -247,11 +248,17 @@ taida ingot cache [clean] [--addons|--store|--store-pkg <org>/<name>|--all] [--y
 | `--force-refresh` | `~/.taida/store/` の該当パッケージを破棄して再展開 |
 | `--no-remote-check` | リモート確認をスキップ |
 | `--allow-local-addon-build` | prebuild 不在時にローカルの `cargo build` へフォールバック |
+| `--frozen` | `.taida/taida.lock` の `(name, version, integrity)` triple と解決結果が一致しない場合に失敗 |
 
 挙動:
 - 解決できた依存をインストールし、`.taida/taida.lock` を生成または更新します。
+- 通常の `install` でも既存 lockfile と解決結果の triple mismatch は `[E32K2_LOCKFILE_INTEGRITY_MISMATCH]` で拒否します。依存更新は `taida ingot update`、旧 lockfile 変換は `taida ingot migrate-lockfile` を使います。
 - アドオン依存は `native/addon.toml` の `[library.prebuild]` に従い、SHA-256 検証付きで prebuild を取得します。
 - アドオンキャッシュは `~/.taida/addon-cache/` に置かれます。
+
+### `ingot migrate-lockfile`
+
+`.taida/taida.lock` schema v1 / `fnv1a:` integrity を、installed `.taida/deps` tree から再計算した schema v2 / `sha256:` integrity に書き換えます。通常の `install` は v1 / `fnv1a:` を `[E32K2_LOCKFILE_V1_REJECTED]` で拒否します。migration 中に installed dependency が見つからない場合は `[E32K2_LOCKFILE_MIGRATE_FAIL]` で停止します。
 
 ストア sidecar と stale 検知:
 

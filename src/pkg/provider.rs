@@ -94,14 +94,19 @@ impl PackageProvider for WorkspaceProvider {
         match abs_path.canonicalize() {
             Ok(canonical) => {
                 if canonical.is_dir() {
-                    let integrity = compute_dir_hash(&canonical);
-                    ProviderResult::Resolved(ResolvedPackage {
-                        name: name.to_string(),
-                        version: "0.0.0-local".to_string(),
-                        source: PackageSource::Path(path.clone()),
-                        path: canonical,
-                        integrity,
-                    })
+                    match compute_dir_hash(&canonical) {
+                        Ok(integrity) => ProviderResult::Resolved(ResolvedPackage {
+                            name: name.to_string(),
+                            version: "0.0.0-local".to_string(),
+                            source: PackageSource::Path(path.clone()),
+                            path: canonical,
+                            integrity,
+                        }),
+                        Err(e) => ProviderResult::Error(format!(
+                            "Dependency '{}': integrity calculation failed: {}",
+                            name, e
+                        )),
+                    }
                 } else {
                     ProviderResult::Error(format!(
                         "Dependency '{}': path '{}' is not a directory",
@@ -465,16 +470,19 @@ impl PackageProvider for CoreBundledProvider {
         }
 
         match self.ensure_bundled_dir(manifest, pkg_name) {
-            Ok(bundled_dir) => {
-                let integrity = compute_dir_hash(&bundled_dir);
-                ProviderResult::Resolved(ResolvedPackage {
+            Ok(bundled_dir) => match compute_dir_hash(&bundled_dir) {
+                Ok(integrity) => ProviderResult::Resolved(ResolvedPackage {
                     name: dep_name.to_string(),
                     version: bundled_version.clone(),
                     source: PackageSource::CoreBundled,
                     path: bundled_dir,
                     integrity,
-                })
-            }
+                }),
+                Err(e) => ProviderResult::Error(format!(
+                    "Dependency '{}': integrity calculation failed: {}",
+                    dep_name, e
+                )),
+            },
             Err(e) => ProviderResult::Error(e),
         }
     }
@@ -902,17 +910,22 @@ impl PackageProvider for StoreProvider {
                                 e
                             );
                         }
-                        let integrity = compute_dir_hash(&path);
-                        ProviderResult::Resolved(ResolvedPackage {
-                            name: dep_name.to_string(),
-                            version: exact_version,
-                            source: PackageSource::Store {
-                                org: org.clone(),
-                                name: name.clone(),
-                            },
-                            path,
-                            integrity,
-                        })
+                        match compute_dir_hash(&path) {
+                            Ok(integrity) => ProviderResult::Resolved(ResolvedPackage {
+                                name: dep_name.to_string(),
+                                version: exact_version,
+                                source: PackageSource::Store {
+                                    org: org.clone(),
+                                    name: name.clone(),
+                                },
+                                path,
+                                integrity,
+                            }),
+                            Err(e) => ProviderResult::Error(format!(
+                                "Dependency '{}': integrity calculation failed: {}",
+                                dep_name, e
+                            )),
+                        }
                     }
                     Err(e) => {
                         // C17B-001: fetch failed. Roll back the stash so
@@ -976,49 +989,62 @@ impl PackageProvider for StoreProvider {
 
 // ── Utilities ──────────────────────────────────────────────
 
-/// Compute a content-based hash of a directory for integrity checking.
+/// Compute a content-based SHA-256 hash of a directory for lockfile integrity.
 ///
-/// Uses a deterministic traversal (sorted file names) and hashes file paths
-/// and file contents using FNV-1a. This ensures that any change to file
-/// content is detected, not just changes to file size or structure.
-pub fn compute_dir_hash(dir: &Path) -> String {
-    let mut hasher_state: u64 = 0xcbf29ce484222325; // FNV-1a offset basis
+/// The tree hash is deterministic: each regular file contributes
+/// `sha256(<relative-path> || 0x00 || <bytes>)` in sorted path order, and the
+/// final digest hashes the concatenated per-file digests. Symlinks and other
+/// special entries fail closed because lockfile integrity must describe exactly
+/// what will be imported.
+pub fn compute_dir_hash(dir: &Path) -> Result<String, String> {
+    let entries = collect_files_sorted(dir).map_err(|e| {
+        format!(
+            "[E32K2_INTEGRITY_UNSUPPORTED_ENTRY] cannot traverse '{}': {}",
+            dir.display(),
+            e
+        )
+    })?;
+    let mut digest_stream = Vec::new();
 
-    if let Ok(entries) = collect_files_sorted(dir) {
-        for entry in &entries {
-            // Hash the relative path
-            if let Ok(rel) = entry.strip_prefix(dir) {
-                for byte in rel.to_string_lossy().as_bytes() {
-                    hasher_state ^= *byte as u64;
-                    hasher_state = hasher_state.wrapping_mul(0x100000001b3); // FNV prime
-                }
-            }
-            // Hash the file contents
-            if let Ok(content) = std::fs::read(entry) {
-                for byte in &content {
-                    hasher_state ^= *byte as u64;
-                    hasher_state = hasher_state.wrapping_mul(0x100000001b3);
-                }
-            }
-        }
+    for entry in &entries {
+        let rel = entry
+            .strip_prefix(dir)
+            .map_err(|e| format!("cannot relativize '{}': {}", entry.display(), e))?;
+        let rel_text = rel.to_string_lossy().replace('\\', "/");
+        let content = std::fs::read(entry)
+            .map_err(|e| format!("cannot read '{}' for integrity: {}", entry.display(), e))?;
+        let mut entry_input = Vec::with_capacity(rel_text.len() + 1 + content.len());
+        entry_input.extend_from_slice(rel_text.as_bytes());
+        entry_input.push(0);
+        entry_input.extend_from_slice(&content);
+        let entry_digest = crate::crypto::sha256_hex_bytes(&entry_input);
+        digest_stream.extend_from_slice(entry_digest.as_bytes());
     }
 
-    format!("fnv1a:{:016x}", hasher_state)
+    Ok(format!(
+        "sha256:{}",
+        crate::crypto::sha256_hex_bytes(&digest_stream)
+    ))
 }
 
 /// Collect all files in a directory tree, sorted by relative path.
-fn collect_files_sorted(dir: &Path) -> Result<Vec<PathBuf>, std::io::Error> {
+fn collect_files_sorted(dir: &Path) -> Result<Vec<PathBuf>, String> {
     let mut files = Vec::new();
     collect_files_recursive(dir, &mut files)?;
     files.sort();
     Ok(files)
 }
 
-fn collect_files_recursive(dir: &Path, files: &mut Vec<PathBuf>) -> Result<(), std::io::Error> {
+fn collect_files_recursive(dir: &Path, files: &mut Vec<PathBuf>) -> Result<(), String> {
     if dir.is_dir() {
-        for entry in std::fs::read_dir(dir)? {
-            let entry = entry?;
+        for entry in std::fs::read_dir(dir)
+            .map_err(|e| format!("cannot read directory '{}': {}", dir.display(), e))?
+        {
+            let entry = entry.map_err(|e| format!("cannot read directory entry: {}", e))?;
             let path = entry.path();
+            let meta = std::fs::symlink_metadata(&path)
+                .map_err(|e| format!("cannot stat '{}': {}", path.display(), e))?;
+            let file_type = meta.file_type();
             // C17B-002 + HOLD M2 fix (2026-04-17): skip taida-managed metadata
             // **files** that would otherwise make the directory hash churn
             // between installs even though the package content is unchanged.
@@ -1040,7 +1066,7 @@ fn collect_files_recursive(dir: &Path, files: &mut Vec<PathBuf>) -> Result<(), s
             // ran before the is_file/is_dir split, which would have skipped
             // entire subtrees whose directory name collided with these
             // sentinel filenames.
-            if path.is_file() {
+            if file_type.is_file() {
                 if let Some(fname) = path.file_name().and_then(|n| n.to_str())
                     && (fname == crate::pkg::store::STORE_META_FILENAME
                         || fname == ".taida_installed"
@@ -1049,22 +1075,13 @@ fn collect_files_recursive(dir: &Path, files: &mut Vec<PathBuf>) -> Result<(), s
                     continue;
                 }
                 files.push(path);
-            } else if path.is_dir() {
+            } else if file_type.is_dir() {
                 collect_files_recursive(&path, files)?;
             } else {
-                // C18B-009 fix (carry from C17B-022): anything that is
-                // neither a regular file nor a directory — broken
-                // symlink, socket, FIFO, device node, etc. — used to
-                // be silently dropped from the integrity-hash walk.
-                // That silently diverged the hash from the actual
-                // on-disk state and prevented downstream cache
-                // invalidation. Emit a `warning:` line to stderr so
-                // the drop is visible; the hash still excludes the
-                // entry because there is no stable content to read.
-                eprintln!(
-                    "warning: skipping non-regular entry during integrity walk: {}",
+                return Err(format!(
+                    "[E32K2_INTEGRITY_UNSUPPORTED_ENTRY] unsupported non-regular entry '{}'",
                     path.display()
-                );
+                ));
             }
         }
     }
@@ -1075,10 +1092,8 @@ fn collect_files_recursive(dir: &Path, files: &mut Vec<PathBuf>) -> Result<(), s
 mod tests {
     use super::*;
 
-    // C18B-009 regression: `collect_files_recursive` must still
-    // enumerate real files when broken symlinks are present in the
-    // traversal root. The symlink target is deliberately missing so
-    // the entry's `is_file()` is false, forcing the non-file branch.
+    // E32B-015: lockfile integrity must fail closed on symlinks and other
+    // non-regular entries rather than silently dropping them.
     //
     // Platform note: `std::os::unix::fs::symlink` is only available
     // on Unix. On non-Unix targets this test is compiled out; the
@@ -1086,7 +1101,7 @@ mod tests {
     // fully covered on those targets.
     #[cfg(unix)]
     #[test]
-    fn test_collect_files_recursive_skips_broken_symlink_but_reports() {
+    fn test_collect_files_recursive_rejects_broken_symlink() {
         use std::os::unix::fs::symlink;
 
         let dir = PathBuf::from("/tmp/taida_test_c18b_009_broken_symlink");
@@ -1094,41 +1109,18 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         // Real regular file that MUST be enumerated.
         std::fs::write(dir.join("real.txt"), b"hello").unwrap();
-        // Broken symlink pointing at a non-existent target. Before
-        // the C18B-009 fix this entry was silently skipped; after the
-        // fix it is still skipped (there is no content to hash) but
-        // the skip emits a warning. We don't assert on stderr here
-        // because `eprintln!` is swallowed by cargo's default test
-        // harness — the behavioural pin is "real files still get
-        // enumerated, traversal doesn't error out".
+        // Broken symlink pointing at a non-existent target. E32B-015 makes
+        // this a hard error because lockfile integrity must be cryptographic
+        // and complete, not a best-effort walk.
         symlink(dir.join("__does_not_exist__"), dir.join("dangling.lnk")).unwrap();
 
         let mut files = Vec::new();
         let result = collect_files_recursive(&dir, &mut files);
         assert!(
-            result.is_ok(),
-            "broken-symlink traversal must not return Err"
-        );
-        // The regular file must be present. The broken symlink must
-        // not poison the Vec with a bogus path that read_to_string
-        // would later fail on.
-        let names: Vec<String> = files
-            .iter()
-            .filter_map(|p| {
-                p.file_name()
-                    .and_then(|n| n.to_str())
-                    .map(|s| s.to_string())
-            })
-            .collect();
-        assert!(
-            names.contains(&"real.txt".to_string()),
-            "real file must be enumerated; got: {:?}",
-            names
-        );
-        assert!(
-            !names.contains(&"dangling.lnk".to_string()),
-            "broken symlink must not be enumerated (no stable content); got: {:?}",
-            names
+            result
+                .unwrap_err()
+                .contains("[E32K2_INTEGRITY_UNSUPPORTED_ENTRY]"),
+            "broken symlink must hard-fail the integrity walk"
         );
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -1776,10 +1768,11 @@ mod tests {
         std::fs::write(dir.join("a.txt"), "hello").unwrap();
         std::fs::write(dir.join("b.txt"), "world").unwrap();
 
-        let hash1 = compute_dir_hash(&dir);
-        let hash2 = compute_dir_hash(&dir);
+        let hash1 = compute_dir_hash(&dir).unwrap();
+        let hash2 = compute_dir_hash(&dir).unwrap();
         assert_eq!(hash1, hash2, "Hash should be deterministic");
-        assert!(hash1.starts_with("fnv1a:"));
+        assert!(hash1.starts_with("sha256:"));
+        assert_eq!("sha256:".len() + 64, hash1.len());
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1791,17 +1784,17 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("a.txt"), "hello").unwrap();
 
-        let hash1 = compute_dir_hash(&dir);
+        let hash1 = compute_dir_hash(&dir).unwrap();
 
         // Add a file -> hash should change
         std::fs::write(dir.join("b.txt"), "world").unwrap();
-        let hash2 = compute_dir_hash(&dir);
+        let hash2 = compute_dir_hash(&dir).unwrap();
 
         assert_ne!(hash1, hash2, "Hash should change when files are added");
 
         // Modify file content (same size) -> hash should change
         std::fs::write(dir.join("a.txt"), "hullo").unwrap();
-        let hash3 = compute_dir_hash(&dir);
+        let hash3 = compute_dir_hash(&dir).unwrap();
         assert_ne!(hash2, hash3, "Hash should change when file content changes");
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -1819,7 +1812,7 @@ mod tests {
         std::fs::write(dir.join("main.td"), "stdout(\"hello\")\n").unwrap();
         std::fs::write(dir.join("packages.tdm"), "<<<@a.1 x/y\n").unwrap();
 
-        let baseline = compute_dir_hash(&dir);
+        let baseline = compute_dir_hash(&dir).unwrap();
 
         // Add `_meta.toml` with a timestamp -- must not change hash.
         std::fs::write(
@@ -1827,7 +1820,7 @@ mod tests {
             "schema_version = 1\nfetched_at = \"2026-01-01T00:00:00Z\"\n",
         )
         .unwrap();
-        let with_meta = compute_dir_hash(&dir);
+        let with_meta = compute_dir_hash(&dir).unwrap();
         assert_eq!(
             baseline, with_meta,
             "_meta.toml must NOT affect integrity hash (C17B-002)"
@@ -1839,7 +1832,7 @@ mod tests {
             "schema_version = 1\nfetched_at = \"2026-12-31T23:59:59Z\"\n",
         )
         .unwrap();
-        let with_meta2 = compute_dir_hash(&dir);
+        let with_meta2 = compute_dir_hash(&dir).unwrap();
         assert_eq!(
             baseline, with_meta2,
             "mutating _meta.toml must NOT change integrity (C17B-002)"
@@ -1847,7 +1840,7 @@ mod tests {
 
         // Add `.taida_installed` marker -> still same.
         std::fs::write(dir.join(".taida_installed"), "").unwrap();
-        let with_marker = compute_dir_hash(&dir);
+        let with_marker = compute_dir_hash(&dir).unwrap();
         assert_eq!(
             baseline, with_marker,
             ".taida_installed marker must NOT affect integrity (C17B-002)"
@@ -1855,7 +1848,7 @@ mod tests {
 
         // Add a `.foo.tmp` scratch file -> still same.
         std::fs::write(dir.join("._meta.toml.tmp"), "stale").unwrap();
-        let with_tmp = compute_dir_hash(&dir);
+        let with_tmp = compute_dir_hash(&dir).unwrap();
         assert_eq!(
             baseline, with_tmp,
             ".foo.tmp scratch must NOT affect integrity (C17B-002)"
@@ -1863,7 +1856,7 @@ mod tests {
 
         // Sanity: a *real* content change still flips the hash.
         std::fs::write(dir.join("main.td"), "stdout(\"changed\")\n").unwrap();
-        let changed = compute_dir_hash(&dir);
+        let changed = compute_dir_hash(&dir).unwrap();
         assert_ne!(
             baseline, changed,
             "actual content change must flip hash even with metadata filters"
@@ -1892,12 +1885,12 @@ mod tests {
         std::fs::create_dir_all(&quirky).unwrap();
         std::fs::write(quirky.join("inner.td"), "x = 1\n").unwrap();
 
-        let h1 = compute_dir_hash(&dir);
+        let h1 = compute_dir_hash(&dir).unwrap();
 
         // Mutating a file inside the `_meta.toml/` directory MUST flip
         // the hash, proving the subtree was traversed.
         std::fs::write(quirky.join("inner.td"), "x = 2\n").unwrap();
-        let h2 = compute_dir_hash(&dir);
+        let h2 = compute_dir_hash(&dir).unwrap();
         assert_ne!(
             h1, h2,
             "content inside a dir named _meta.toml must still affect hash (HOLD M2)"
@@ -1905,7 +1898,7 @@ mod tests {
 
         // Adding a sibling inside the quirky dir also flips.
         std::fs::write(quirky.join("extra.td"), "y = 3\n").unwrap();
-        let h3 = compute_dir_hash(&dir);
+        let h3 = compute_dir_hash(&dir).unwrap();
         assert_ne!(
             h2, h3,
             "new file inside dir named _meta.toml must flip hash (HOLD M2)"
