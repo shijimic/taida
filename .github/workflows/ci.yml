@@ -144,6 +144,32 @@ jobs:
       - name: Run E2E smoke tests
         run: TAIDA_BIN=./target/release/taida ./tests/e2e_smoke.sh
 
+  e32-loopback-smoke:
+    name: E32 Loopback Smoke
+    runs-on: ubuntu-latest
+    needs: check
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: cargo-base
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - run: cargo build --bin taida
+      - name: Run E32 loopback smoke
+        run: |
+          mkdir -p "${RUNNER_TEMP}/e32-loopback-smoke"
+          TAIDA_BIN=./target/debug/taida \
+          E32_LOOPBACK_ARTIFACT_DIR="${RUNNER_TEMP}/e32-loopback-smoke" \
+          ./tests/run_e32_loopback_smoke.sh
+      - name: Upload E32 loopback traces
+        if: failure()
+        uses: actions/upload-artifact@v6
+        with:
+          name: e32-loopback-smoke-${{ github.sha }}
+          path: ${{ runner.temp }}/e32-loopback-smoke
+          if-no-files-found: ignore
+
   clippy:
     name: Clippy
     runs-on: ubuntu-latest

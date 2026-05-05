@@ -170,7 +170,7 @@
 
 ### ビルドドライバ系エラー (`E19xx` 予約)
 
-複数バックエンド混合ビルド (`docs/reference/build_descriptors.md`) で発射する診断帯です。現時点では帯域のみ予約し、各コードのメッセージ文面は実装と同時に確定します。
+複数バックエンド混合ビルド (`docs/reference/build_descriptors.md`) で発射する診断帯です。
 
 | 区切り | 用途 | 発射段 |
 |--------|------|--------|
@@ -183,6 +183,29 @@
 | `E1960` | 内部 `__` フィールドへのユーザ向けドットアクセス禁止 | TypeChecker / Runtime |
 
 ビルドドライバ由来の診断はこの `E19xx` 帯から採番します。jsonl レコードへの `build` ブロック付与ルールと、テキスト出力での `unit=...` / `target=...` / `edge=... dependency=...` 行の扱いは `docs/reference/build_descriptors.md` の 9 節を参照してください。
+
+| コード | 概要 |
+|--------|------|
+| `E1900` | ディスクリプタビルドと単一ターゲットビルドの曖昧な CLI 組み合わせ |
+| `E1901` | `--unit` / `--plan` / `--all-units` の複数指定 |
+| `E1902` | ディスクリプタ入力・フィールド形状・export 不在 |
+| `E1903` | 指定 `BuildUnit` 不在 |
+| `E1904` | 指定 `BuildPlan` 不在 |
+| `E1910` | `AssetBundle.root` / 参照 asset の検証失敗 |
+| `E1911` | `AssetBundle.files` glob の検証失敗 |
+| `E1912` | AssetBundle ソース正規化・コピー失敗 |
+| `E1913` | AssetBundle が symlink / 非通常ファイルを含む |
+| `E1914` | AssetBundle 出力パスの検証失敗または重複 |
+| `E1915` | `RouteAsset.path` の形式不正または重複 |
+| `E1922` | stale staging cleanup 失敗 |
+| `E1923` | staging / child build / artifact-map 作成失敗 |
+| `E1924` | atomic replace / rollback 失敗 |
+| `E1940` | 成果物依存サイクル |
+| `E1941` | descriptor import / target closure 検証失敗 |
+| `E1942` | 子 `BuildUnit` のターゲットビルド失敗 |
+| `E1950` | `BuildHook` 参照または cwd 検証失敗 |
+| `E1951` | `BuildHook` が付与されているが `--run-hooks` が無い |
+| `E1952` | `BuildHook` 実行またはログ書き込み失敗 |
 
 ### 帯域を再利用する予約コード
 
