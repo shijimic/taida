@@ -29,8 +29,8 @@ docs/guide/12_introspection.md:202
 docs/guide/12_introspection.md:213
 docs/guide/13_creating_addons.md:491
 docs/guide/13_creating_addons.md:499
-docs/guide/15_net_package.md:222
-docs/reference/class_like_types.md:38
+docs/guide/15_net_package.md:229
+docs/reference/class_like_types.md:78
 docs/reference/documentation_comments.md:20
 docs/reference/documentation_comments.md:26
 docs/reference/documentation_comments.md:37

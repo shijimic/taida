@@ -57,8 +57,9 @@ handler req =
 
 asyncResult <= httpServe(8080, handler, 1)
 asyncResult ]=> result
-stdout(result.__value.ok.toString())
-stdout(result.__value.requests.toString())
+result ]=> summary
+stdout(summary.ok.toString())
+stdout(summary.requests.toString())
 ```
 
 - **`port`** — bind するローカル port。`0` を渡すと OS 割り当て。
@@ -100,7 +101,8 @@ handler req writer =
 
 asyncResult <= httpServe(8083, handler, 1)
 asyncResult ]=> result
-stdout(result.__value.ok.toString())
+result ]=> summary
+stdout(summary.ok.toString())
 ```
 
 詳細は [`docs/reference/net_api.md` §8](../reference/net_api.md) の
@@ -125,7 +127,8 @@ handler req writer =
 
 asyncResult <= httpServe(8084, handler, 1)
 asyncResult ]=> result
-stdout(result.__value.ok.toString())
+result ]=> summary
+stdout(summary.ok.toString())
 ```
 
 - `startResponse(writer, status, headers)` — status line + header block を
@@ -150,15 +153,18 @@ WebSocket は HTTP の Upgrade で wire レベルプロトコルを切り替え�
 
 handler req writer =
   upgrade <= wsUpgrade(req, writer)
-  ws <= upgrade.__value.ws
+  upgrade ]=> accepted
+  ws <= accepted.ws
   msg <= wsReceive(ws)
-  wsSend(ws, msg.__value.data)
+  msg ]=> received
+  wsSend(ws, received.data)
   wsClose(ws)
 => :Unit
 
 asyncResult <= httpServe(8082, handler, 1)
 asyncResult ]=> result
-stdout(result.__value.ok.toString())
+result ]=> summary
+stdout(summary.ok.toString())
 ```
 
 | API | 用途 | 制約 |
@@ -193,7 +199,8 @@ handler req writer =
 
 asyncResult <= httpServe(8081, handler, 1)
 asyncResult ]=> result
-stdout(result.__value.ok.toString())
+result ]=> summary
+stdout(summary.ok.toString())
 ```
 
 `sseEvent(writer, eventName, data)` は `event:`, `data:`, `\n\n` の SSE wire
@@ -233,10 +240,11 @@ resp <= HttpRequest["GET", url](
   body <= ""
 )
 resp ]=> result
+response <= result.getOrDefault(@(status <= 0, headers <= @[], body <= ""))
 report <= (
   | result.hasValue |>
-      "status=" + result.__value.status.toString() +
-      " body_len=" + result.__value.body.length().toString()
+      "status=" + response.status.toString() +
+      " body_len=" + response.body.length().toString()
   | _ |> "request failed: " + result.__error.message
 )
 stdout(report)

@@ -168,7 +168,7 @@ u3.status.hasValue         // false
 
 この挙動は PHILOSOPHY の「**暗黙の型変換なし**」を境界で再現するものです。JSON に書かれた任意の Str が Enum 値として黙って通ることはなく、利用側は `hasValue` / `| .hasValue |> ... | _ |> ...` / `getOrDefault(Variant)` のいずれかで境界を明示的に処理する必要があります（`|==` は `throw` されたエラーをキャッチする演算子で、Lax には使えません — 詳細は `docs/reference/operators.md`）。
 
-> **補足**: Enum のデフォルトは「最初のバリアントの ordinal」（`01_types.md` 参照）です。Lax[Enum] の `__value` / `__default` はどちらも `Int(0)` に固定され、バリアント定義順が「既定値は何か」を直接示します。
+> **補足**: Enum のデフォルトは「最初のバリアントの ordinal」（`01_types.md` 参照）です。`Lax[Enum]` は `getOrDefault(Variant)` または `]=>` で取り出します。内部フィールドへ直接アクセスする必要はありません。
 
 ---
 
@@ -412,7 +412,9 @@ Pilot = @(name: Str, age: Int)
 
 processPilotData raw: Str =
   result <= JSON[raw, Pilot]()
-  | result.hasValue |> stdout("Pilot: " + result.__value.name)
+  | result.hasValue |>
+      result ]=> pilot
+      stdout("Pilot: " + pilot.name)
   | _ |> stderr("Failed to parse pilot data")
 => :Void
 ```

@@ -180,7 +180,7 @@
 | `E1930〜E1939` | 多成果物診断スキーマの予約・移行用 | Build driver / Diagnostics |
 | `E1940〜E1949` | 成果物グラフの循環 / ターゲット依存閉包違反 | Build driver / TypeChecker |
 | `E1950〜E1959` | `BuildHook` の検証 / 実行失敗 | Build driver |
-| `E1960` (予約) | 内部 `__` フィールドへのユーザ向けドットアクセス禁止 | TypeChecker / Runtime |
+| `E1960` | 内部 `__` フィールドへのユーザ向けドットアクセス禁止 | TypeChecker / Runtime |
 
 ビルドドライバ由来の診断はこの `E19xx` 帯から採番します。jsonl レコードへの `build` ブロック付与ルールと、テキスト出力での `unit=...` / `target=...` / `edge=... dependency=...` 行の扱いは `docs/reference/build_descriptors.md` の 9 節を参照してください。
 

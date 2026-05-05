@@ -49,9 +49,9 @@ use std::collections::{HashMap, HashSet};
 /// and IR ops — never through the AST `Expr::BuchiPack` /
 /// `Expr::TypeInst` paths this check guards.
 ///
-/// NOTE: field **reads** (`value.__type`) remain allowed for
-/// introspection (see `examples/quality/rc6a_error_inheritance.td`);
-/// only write-side assignments in pack literals are rejected.
+/// E32B-018: field **reads** (`value.__type`, `lax.__value`, etc.) are
+/// rejected too. Compiler-generated packs may still carry these internal
+/// fields, but user-facing access must go through unmolding / public methods.
 const RESERVED_INTERNAL_FIELD_PREFIX: &str = "__";
 const MAX_CALL_ARGUMENTS: usize = 256;
 
@@ -4769,6 +4769,18 @@ defaulted fields must be provided via `()`",
 
             Expr::FieldAccess(obj, field, span) => {
                 let obj_type = self.infer_expr_type(obj);
+                if field.starts_with(RESERVED_INTERNAL_FIELD_PREFIX) {
+                    self.errors.push(TypeError {
+                        message: format!(
+                            "[E1960] Field '{}' is compiler-internal and cannot be accessed from Taida code. \
+                             Hint: use `]=>` / `<=[` to unmold values, `getOrDefault(default)` for Lax, \
+                             or an official introspection API instead.",
+                            field
+                        ),
+                        span: span.clone(),
+                    });
+                    return Type::Unknown;
+                }
                 match &obj_type {
                     Type::BuchiPack(fields) => {
                         if let Some((_, ty)) = fields.iter().find(|(name, _)| name == field) {
@@ -4789,15 +4801,6 @@ defaulted fields must be provided via `()`",
                         if let Some(fields) = self.registry.get_type_fields(type_name) {
                             if let Some((_, ty)) = fields.iter().find(|(name, _)| name == field) {
                                 ty.clone()
-                            } else if field.starts_with("__") {
-                                // C19B-002: skip compiler-internal `__*` fields
-                                // (`__type`, `__value`, `__error`, `__default`,
-                                // etc.). Error-derived packs surface these at
-                                // runtime even when they aren't in the user's
-                                // explicit field list, and flagging them here
-                                // would regress existing patterns like
-                                // `err.__type` on Error-inheriting named types.
-                                Type::Unknown
                             } else {
                                 // FL-2: Report undefined field access on Named types
                                 self.errors.push(TypeError {
@@ -4814,25 +4817,15 @@ defaulted fields must be provided via `()`",
                             Type::Unknown
                         }
                     }
-                    // C19B-002: Gorillax / RelaxedGorillax `__value` / `__error`
-                    // dot-access. When the Gorillax is parameterized — e.g.
-                    // `runInteractive` → `Gorillax[@(code: Int)]` — accessing
-                    // `.__value` must yield the inner BuchiPack so that a
-                    // further `.stdout` / `.bogus` access is rejected by the
-                    // BuchiPack branch above.
-                    //
-                    // `hasValue` is always Bool. `__error` is deliberately
-                    // returned as Unknown because the error inner shape
-                    // (IoError / ProcessError) is heterogeneous and not pinned
-                    // by this checker; falling back to Unknown keeps existing
-                    // `r.__error.code` / `.kind` callers compiling.
+                    // E32B-018: internal `__*` envelope slots are rejected
+                    // above before type-specific dispatch. Public `hasValue`
+                    // remains available.
                     Type::Generic(name, args)
                         if name == "Gorillax" || name == "RelaxedGorillax" =>
                     {
                         match field.as_str() {
-                            "__value" => args.first().cloned().unwrap_or(Type::Unknown),
                             "hasValue" => Type::Bool,
-                            "__error" | "throw" | "__type" => Type::Unknown,
+                            "throw" => Type::Unknown,
                             _ => {
                                 // Only surface an error for fields that are
                                 // clearly not Gorillax envelope slots. Unknown

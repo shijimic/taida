@@ -3234,6 +3234,14 @@ impl JsCodegen {
                 Ok(())
             }
             Expr::FieldAccess(obj, field, _) => {
+                if field.starts_with("__") {
+                    return Err(JsError {
+                        message: format!(
+                            "[E1960] Field '{}' is compiler-internal and cannot be accessed from Taida code. Hint: use unmolding or public methods instead.",
+                            field
+                        ),
+                    });
+                }
                 self.gen_expr(obj)?;
                 // F-59 fix: Lax/Gorillax hasValue is a callable function in JS runtime.
                 // When accessed as a property (field access), emit as function call

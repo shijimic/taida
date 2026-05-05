@@ -60,7 +60,7 @@ stdout / stderr を pipe で捕捉し、文字列として返します。
 | `execShellInteractive(command)` | `Str -> Gorillax[@(code: Int)]` |
 
 - stdout / stderr は **捕捉しない**。子プロセスが親の端末を直接占有する
-- `__value` の inner shape は **`@(code: Int)` のみ**。`.stdout` / `.stderr` へのアクセスは checker で E1602 として reject される
+- unmold 後の inner shape は **`@(code: Int)` のみ**。`.stdout` / `.stderr` へのアクセスは checker で E1602 として reject される。`.__value` などの内部フィールド直接アクセスは E1960 で reject される
 - 3 バックエンドの実装:
   - Interpreter: `std::process::Command::status()`
   - JS: `child_process.spawnSync(prog, args, { stdio: 'inherit' })`

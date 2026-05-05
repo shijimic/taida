@@ -1792,6 +1792,15 @@ impl Lowering {
         obj: &Expr,
         field: &str,
     ) -> Result<IrVar, LowerError> {
+        if field.starts_with("__") {
+            return Err(LowerError {
+                message: format!(
+                    "[E1960] Field '{}' is compiler-internal and cannot be accessed from Taida code. Hint: use unmolding or public methods instead.",
+                    field
+                ),
+            });
+        }
+
         let obj_var = self.lower_expr(func, obj)?;
 
         // フィールドのインデックスをランタイムで解決

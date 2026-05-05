@@ -343,10 +343,39 @@ impl Interpreter {
             Signal::Throw(err) => {
                 // Gorilla ceiling: unhandled error terminates program
                 Err(RuntimeError {
-                    message: format!("Unhandled error: {}", err),
+                    message: format!("Unhandled error: {}", Self::format_unhandled_error(&err)),
                 })
             }
             Signal::Gorilla => Ok(Value::Gorilla),
+        }
+    }
+
+    fn format_unhandled_error(err: &Value) -> String {
+        fn str_field<'a>(fields: &'a [(String, Value)], name: &str) -> Option<&'a str> {
+            fields.iter().find_map(|(field, value)| {
+                if field == name
+                    && let Value::Str(s) = value
+                {
+                    return Some(s.as_str());
+                }
+                None
+            })
+        }
+
+        match err {
+            Value::Error(e) => format!("Error[{}]: {}", e.error_type, e.message),
+            Value::BuchiPack(fields) => {
+                let error_type = str_field(fields, "type")
+                    .or_else(|| str_field(fields, "__type"))
+                    .unwrap_or("Error");
+                let message = str_field(fields, "message").unwrap_or("");
+                if message.is_empty() {
+                    format!("Error[{}]", error_type)
+                } else {
+                    format!("Error[{}]: {}", error_type, message)
+                }
+            }
+            other => other.to_display_string(),
         }
     }
 
@@ -1073,6 +1102,14 @@ impl Interpreter {
                     Signal::Value(v) => v,
                     other => return Ok(other),
                 };
+                if field.starts_with("__") {
+                    return Err(RuntimeError {
+                        message: format!(
+                            "[E1960] Field '{}' is compiler-internal and cannot be accessed from Taida code. Hint: use unmolding or public methods instead.",
+                            field
+                        ),
+                    });
+                }
                 match &obj_val {
                     Value::BuchiPack(fields) => {
                         if let Some((_, val)) = fields.iter().find(|(n, _)| n == field) {
