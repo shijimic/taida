@@ -35,6 +35,16 @@ taida --no-check <FILE>
 - `--version` / `-V`: バージョンを表示します。
 - `--no-check`: `taida`, `taida <FILE>`, `taida build` でのみ意味を持ちます。`taida way` 配下では拒否されます。
 
+### プロジェクトルート解決
+
+`taida` / `taida build` / `taida way` / `taida ingot` などサブコマンドは、引数で渡された `<PATH>` から親方向に **プロジェクトルートマーカー** を探索して解決します。受理されるマーカーは次の 3 種だけです:
+
+- `packages.tdm` (パッケージマニフェスト)
+- `taida.toml` (将来予約)
+- `.git/` (git リポジトリルート)
+
+**E32 移行ノート**: `@e.32` で **`.taida` ディレクトリをプロジェクトルートマーカーから外しました**。E31 までは `~/.taida` を持つホームディレクトリ直下で `taida ./script.td` を実行すると `$HOME` がルートと誤判定されることがありましたが、E32 以降は `packages.tdm` / `taida.toml` / `.git` が無いディレクトリは「プロジェクトルートではない」と扱われ、CLI はファイル単独実行モードとしてフォールバックします。`.taida/` は依然としてビルドキャッシュ (`build/`, `deps/`, `taida.lock`) の格納先ですが、ルート判定の trigger にはなりません。`packages.tdm` を持たない単発スクリプト実行で従来挙動が必要な場合は、明示的に空の `packages.tdm` を置いてください (詳細は `docs/guide/10_modules.md` の「packages.tdm」セクションを参照)。
+
 ---
 
 ## 公開トップレベルコマンド

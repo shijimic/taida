@@ -228,7 +228,12 @@ fn make_public_client() -> Result<reqwest::blocking::Client, String> {
             headers
         })
         .build()
-        .map_err(|e| format!("failed to build HTTP client: {}", e))
+        .map_err(|e| {
+            format!(
+                "[E32K1_UPGRADE_DOWNLOAD_FAILED] failed to build HTTP client: {}",
+                e
+            )
+        })
 }
 
 /// Fetch all release tag names from the GitHub repository.
@@ -245,24 +250,32 @@ pub fn fetch_release_tags(owner: &str, repo: &str) -> Result<Vec<String>, String
             "{}/repos/{}/{}/releases?per_page=100&page={}",
             base, owner, repo, page
         );
-        let resp = client
-            .get(&url)
-            .send()
-            .map_err(|e| format!("failed to fetch releases: {}", e))?;
+        let resp = client.get(&url).send().map_err(|e| {
+            format!(
+                "[E32K1_UPGRADE_DOWNLOAD_FAILED] failed to fetch releases: {}",
+                e
+            )
+        })?;
 
         if !resp.status().is_success() {
             let status = resp.status();
             let body = resp.text().unwrap_or_default();
-            return Err(format!("GitHub API error (HTTP {}): {}", status, body));
+            return Err(format!(
+                "[E32K1_UPGRADE_DOWNLOAD_FAILED] GitHub API error (HTTP {}): {}",
+                status, body
+            ));
         }
 
-        let json: serde_json::Value = resp
-            .json()
-            .map_err(|e| format!("failed to parse releases JSON: {}", e))?;
+        let json: serde_json::Value = resp.json().map_err(|e| {
+            format!(
+                "[E32K1_UPGRADE_DOWNLOAD_FAILED] failed to parse releases JSON: {}",
+                e
+            )
+        })?;
 
-        let arr = json
-            .as_array()
-            .ok_or_else(|| "releases response is not an array".to_string())?;
+        let arr = json.as_array().ok_or_else(|| {
+            "[E32K1_UPGRADE_DOWNLOAD_FAILED] releases response is not an array".to_string()
+        })?;
 
         if arr.is_empty() {
             break;
@@ -295,23 +308,28 @@ pub fn find_asset_url(
     let base = api_url();
     let url = format!("{}/repos/{}/{}/releases/tags/{}", base, owner, repo, tag);
 
-    let resp = client
-        .get(&url)
-        .send()
-        .map_err(|e| format!("failed to fetch release {}: {}", tag, e))?;
+    let resp = client.get(&url).send().map_err(|e| {
+        format!(
+            "[E32K1_UPGRADE_DOWNLOAD_FAILED] failed to fetch release {}: {}",
+            tag, e
+        )
+    })?;
 
     if !resp.status().is_success() {
         let status = resp.status();
         let body = resp.text().unwrap_or_default();
         return Err(format!(
-            "failed to get release {} (HTTP {}): {}",
+            "[E32K1_UPGRADE_DOWNLOAD_FAILED] failed to get release {} (HTTP {}): {}",
             tag, status, body
         ));
     }
 
-    let json: serde_json::Value = resp
-        .json()
-        .map_err(|e| format!("failed to parse release JSON: {}", e))?;
+    let json: serde_json::Value = resp.json().map_err(|e| {
+        format!(
+            "[E32K1_UPGRADE_DOWNLOAD_FAILED] failed to parse release JSON: {}",
+            e
+        )
+    })?;
 
     let assets = json["assets"]
         .as_array()
@@ -334,27 +352,41 @@ pub fn find_asset_url(
 /// Download bytes from URL.
 pub fn download_bytes(url: &str) -> Result<Vec<u8>, String> {
     if let Some(path) = url.strip_prefix("file://") {
-        return std::fs::read(path).map_err(|e| format!("download failed: {}", e));
+        return std::fs::read(path)
+            .map_err(|e| format!("[E32K1_UPGRADE_DOWNLOAD_FAILED] download failed: {}", e));
     }
 
     let client = reqwest::blocking::Client::builder()
         .user_agent("taida-upgrade")
         .build()
-        .map_err(|e| format!("failed to build HTTP client: {}", e))?;
+        .map_err(|e| {
+            format!(
+                "[E32K1_UPGRADE_DOWNLOAD_FAILED] failed to build HTTP client: {}",
+                e
+            )
+        })?;
 
     let resp = client
         .get(url)
         .send()
-        .map_err(|e| format!("download failed: {}", e))?;
+        .map_err(|e| format!("[E32K1_UPGRADE_DOWNLOAD_FAILED] download failed: {}", e))?;
 
     if !resp.status().is_success() {
         let status = resp.status();
-        return Err(format!("download failed (HTTP {})", status));
+        return Err(format!(
+            "[E32K1_UPGRADE_DOWNLOAD_FAILED] download failed (HTTP {})",
+            status
+        ));
     }
 
     let bytes = resp
         .bytes()
-        .map_err(|e| format!("failed to read download body: {}", e))?
+        .map_err(|e| {
+            format!(
+                "[E32K1_UPGRADE_DOWNLOAD_FAILED] failed to read download body: {}",
+                e
+            )
+        })?
         .to_vec();
 
     Ok(bytes)
@@ -479,7 +511,12 @@ impl TempDownloadedFile {
     fn new(label: &str, bytes: &[u8]) -> Result<Self, String> {
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map_err(|e| format!("system clock error while staging upgrade artifact: {}", e))?
+            .map_err(|e| {
+                format!(
+                    "[E32K1_UPGRADE_STAGE_FAILED] system clock error while staging upgrade artifact: {}",
+                    e
+                )
+            })?
             .as_nanos();
         let path = std::env::temp_dir().join(format!(
             "taida_upgrade_{}_{}_{}",
@@ -487,8 +524,12 @@ impl TempDownloadedFile {
             nanos,
             label
         ));
-        std::fs::write(&path, bytes)
-            .map_err(|e| format!("failed to stage {} for verification: {}", label, e))?;
+        std::fs::write(&path, bytes).map_err(|e| {
+            format!(
+                "[E32K1_UPGRADE_STAGE_FAILED] failed to stage {} for verification: {}",
+                label, e
+            )
+        })?;
         Ok(Self { path })
     }
 }
@@ -541,7 +582,12 @@ pub fn download_verified_sha256sums(sha256sums_url: &str) -> Result<String, Stri
         ));
     }
 
-    String::from_utf8(bytes).map_err(|e| format!("invalid SHA256SUMS encoding: {}", e))
+    String::from_utf8(bytes).map_err(|e| {
+        format!(
+            "[E32K1_UPGRADE_SHA256SUMS_INVALID_ENCODING] invalid SHA256SUMS encoding: {}",
+            e
+        )
+    })
 }
 
 /// Replace the current executable with the new binary.

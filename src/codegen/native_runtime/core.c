@@ -6565,9 +6565,13 @@ taida_val taida_polymorphic_last_index_of(taida_val obj, taida_val needle) {
 // hasValue=false case to honour PHILOSOPHY I (no magic sentinels).
 static taida_val taida_make_int_lax_found(taida_val idx) {
     taida_ptr lax = (taida_ptr)taida_lax_new(idx, 0);
-    // Match `taida_lax_to_string` expectations — the value/default tags
-    // were already initialised by `taida_lax_new`/`taida_lax_empty` to
-    // TAIDA_TAG_INT for the int path.
+    // Match `taida_lax_to_string` expectations: `taida_lax_new` /
+    // `taida_lax_empty` only stamp tags on slot 0 (hasValue, BOOL) and
+    // slot 3 (__type, STR). Slots 1 (__value) and 2 (__default) rely on
+    // `taida_pack_new` which explicitly writes `TAIDA_TAG_INT (= 0)`
+    // into every freshly allocated tag slot (arena / freelist /
+    // TAIDA_MALLOC paths all set `cached[2 + i*3 + 1] = 0`), which is
+    // exactly what we want for the int-returning indexOf path.
     return (taida_val)lax;
 }
 

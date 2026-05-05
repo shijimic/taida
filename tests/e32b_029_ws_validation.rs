@@ -145,9 +145,11 @@ fn ws_source(port: u16) -> String {
 
 handler req writer =
   upgrade <= wsUpgrade(req, writer)
-  ws <= upgrade.__value.ws
+  upgrade ]=> accepted
+  ws <= accepted.ws
   msg <= wsReceive(ws)
-  wsSend(ws, msg.__value.data)
+  msg ]=> received
+  wsSend(ws, received.data)
   wsClose(ws)
 => :Unit
 

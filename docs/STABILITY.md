@@ -531,6 +531,29 @@ clone only when the buffer is shared. Acceptance includes
 opt-in environment variable) 1 GB × 64 chunks under 2 s, with
 pointer-equality invariants asserted in the test suite.
 
+### 5.6. Lax / Result function-arg type integrity (post-stable scope)
+
+For the `@e.32` stable line, the argument-type integrity contract for
+`Lax[T]` / `Result[T, E]` methods is split as follows:
+
+- **`getOrDefault(default)`** — pinned. The `default` argument must
+  match the success inner type (`T` for `Lax[T]`, `T` for
+  `Result[T, E]`). Mismatches are rejected at compile time with
+  `[E1508]`. This silent-breakage path was hardened during the gen-E
+  audit and is part of the stable surface.
+- **`map(fn)` / `flatMap(fn)` / `mapError(fn)`** — **not** pinned at
+  `@e.X`. The function argument (`fn`) is currently typed as
+  `Type::Unknown` and bypasses the function-arg integrity check, so
+  passing a lambda whose argument type does not match `T` (or `E` for
+  `mapError`) compiles. A future generation may tighten this contract
+  by adding a `Type::Function` subtype relation to the type checker
+  and emitting `[E1508]` on argument-type mismatch. Source programs
+  written against `@e.X` should not assume the lambda argument type
+  is checked.
+
+The deferred half of this contract will be re-evaluated at the next
+`<gen>` bump.
+
 ## 6. Process
 
 ### 6.1. How breaking changes are introduced

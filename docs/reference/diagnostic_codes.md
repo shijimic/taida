@@ -21,6 +21,9 @@
 | `E18xx` | 命名規則違反 (`taida way lint`) | Parser / Lint | カテゴリ別命名規則違反 |
 | `E19xx` | ビルドドライバ系エラー | CLI / TypeChecker / Build driver | ディスクリプタビルドの文法、`AssetBundle` の安全性、`.taida/build` のトランザクショナル更新、依存閉包と成果物グラフの違反、内部フィールドへのアクセス禁止 |
 | `E20xx` | アドオンマニフェストエラー | Addon manifest parser | `targets` 互換契約違反、未知ターゲット |
+| `E32K1_*` | 自己アップグレード供給網エラー | `taida upgrade` | SHA-256 検証 / cosign 署名検証 / artifact 取得失敗 |
+| `E32K2_*` | ロックファイル整合性エラー | `taida ingot` / `pkg::lockfile` | `taida.lock` schema バージョン / integrity 不一致 / migration 失敗 |
+| `E32K3_*` | ソースパッケージ整合性エラー | `pkg::store` / `pkg::manifest` / `pkg::provider` | ソース pin / cosign 検証 / sha256 sidecar / 公式 namespace 制約 |
 
 ## 現在の割り当て
 
@@ -225,6 +228,52 @@
 |--------|-----------|---------|
 | `E2001` | `targets` 配列のエントリが許可リスト（現在は `{"native"}`）に含まれない | Addon manifest parser |
 | `E2002` | `targets = []` — 空配列は許容しない（key を省略するとデフォルト `["native"]` が適用される） | Addon manifest parser |
+
+### 自己アップグレード供給網エラー (`E32K1_*`)
+
+`taida upgrade` が GitHub Releases から SHA256SUMS および artifact を取得し、cosign で
+verify する経路で発射する診断。`@e.32` beta で `--required` 既定。
+
+| コード | 発生条件 | 推奨対応 |
+|--------|----------|---------|
+| `E32K1_UPGRADE_DOWNLOAD_FAILED` | release artifact / SHA256SUMS / cosign bundle の取得 (HTTP / `file://`) が失敗、または HTTP non-2xx | ネットワーク状態を確認し再実行。proxy / firewall がある場合は `https://api.github.com` および `https://github.com/taida-lang/taida/releases/...` への到達性を確認 |
+| `E32K1_UPGRADE_STAGE_FAILED` | 取得済み bytes を `/tmp/taida_upgrade_<pid>_<nanos>_*` に書き出す段階で失敗 | `/tmp` の disk 空き容量 / 権限を確認。`TMPDIR` を任意のディレクトリへ変更可 |
+| `E32K1_UPGRADE_NO_SHA256SUMS` | release に SHA256SUMS が公開されていない、もしくは対象 archive 行が欠落 | release tag を再確認し、リリースワークフローが SHA256SUMS を上げ直すまで待機 |
+| `E32K1_UPGRADE_SHA256_MISMATCH` | 取得 archive の SHA-256 が SHA256SUMS の expected と一致しない | 取得を再試行。`--force-refresh` 等で cache を無効化、それでも mismatch が続く場合は供給網侵害を疑い、手元 binary に切り戻して `taida-lang/taida` security advisory を確認 |
+| `E32K1_UPGRADE_SHA256SUMS_INVALID_ENCODING` | cosign 検証通過後の SHA256SUMS が UTF-8 として decode できない | 上記 `_SHA256_MISMATCH` と同様に供給網侵害を疑う。release を再公開する判断は upstream 側 |
+| `E32K1_COSIGN_MISSING` | `taida upgrade` 実行環境の `PATH` 上に `cosign` が存在しない | `cosign` (sigstore) を install して `PATH` に通す。`@e.32` beta では `taida upgrade` の cosign verify は **必須** |
+| `E32K1_UPGRADE_SHA256SUMS_COSIGN_MISSING` | `SHA256SUMS.bundle` が release から取得できない | release ワークフローが bundle を上げ直すまで待機 |
+| `E32K1_UPGRADE_SHA256SUMS_COSIGN_REJECTED` | cosign が SHA256SUMS の署名を拒否 (identity / certificate-identity-regexp 不一致など) | 公式 release tag であることを確認。手動再取得後も再現する場合は供給網侵害として upstream に報告 |
+| `E32K1_UPGRADE_SHA256SUMS_COSIGN_ERROR` | cosign の起動 / 内部エラーで verify が完了しない | `cosign version` を確認し、最新版に更新。`/tmp` の権限不足や AppArmor / SELinux 等の sandbox 制約が原因のことがある |
+
+### ロックファイル整合性エラー (`E32K2_*`)
+
+`taida.lock` (schema v2 = `sha256:` + 64 hex 必須) の load / migrate / drift 検査が発射する診断。
+
+| コード | 発生条件 | 推奨対応 |
+|--------|----------|---------|
+| `E32K2_LOCKFILE_V1_REJECTED` | schema v1 (`fnv1a` 等の legacy integrity) の `taida.lock` を load しようとした | `taida ingot migrate-lockfile` で schema v2 に移行。lockfile を直接書き換えない |
+| `E32K2_LOCKFILE_UNSUPPORTED_VERSION` | `taida.lock` schema が現在の taida binary がサポートする `LOCKFILE_SCHEMA_VERSION` より新しい | taida binary を `taida upgrade` で更新するか、互換 lockfile を生成し直す |
+| `E32K2_LOCKFILE_INTEGRITY_MISMATCH` | `validate_resolved_bindings` が `--frozen` 非依存で発射する 4 経路: (1) `taida.lock` の `integrity` が `sha256:` 以外の prefix (legacy / unknown algorithm)、(2) resolved package が `taida.lock` から欠落、(3) `(version, source, integrity)` triple が resolver 結果と一致しない、(4) `taida.lock` の package 件数と resolver 件数が不一致 | `taida ingot update` で再解決 (`--frozen` を外す)、または上流の package version pin を見直す。`sha256:` 以外の prefix は `taida ingot migrate-lockfile` 経由で v2 に正規化 |
+| `E32K2_LOCKFILE_DRIFT` | `--frozen` 指定で `.taida/taida.lock` が欠落、または `is_up_to_date` 検査で `packages.tdm` と drift | `taida ingot update` で lockfile を再生成して commit。CI で `--frozen` を保つ場合は事前に開発者側で lock を更新 |
+| `E32K2_LOCKFILE_MIGRATE_FAIL` | `taida ingot migrate-lockfile` で installed dependency が見つからない、SHA-256 計算に失敗 | `.taida/deps/...` の中身を確認、`taida ingot install` で取得し直す |
+| `E32K2_INTEGRITY_UNSUPPORTED_ENTRY` | tarball / extracted dir に non-regular file (symlink / device / fifo 等) が含まれ SHA-256 stream walker が traverse できない | 当該パッケージの公式 archive を確認。手元 fork の場合は構造をフラットなファイル構成へ修正 |
+
+### ソースパッケージ整合性エラー (`E32K3_*`)
+
+ソースパッケージ (`taida-lang/*` の `[packages."x"]`) が cosign + SHA-256 で
+verify されることを保証する診断。`@e.32` beta では
+`taida-lang/*` 以外のソース pin は受理しない。
+
+| コード | 発生条件 | 推奨対応 |
+|--------|----------|---------|
+| `E32K3_GITHUB_BASE_URL_CONFINED` | source package install 時に `TAIDA_GITHUB_BASE_URL` が `https://github.com` 以外を指している | `@e.32` beta で source archive は `https://github.com` 固定。テスト環境で override する場合は `cargo test` 内の専用 helper を使う |
+| `E32K3_NON_OFFICIAL_SOURCE_REJECTED` | `[packages."x"]` table に `taida-lang/*` 以外の owner の source pin を書いた | `@e.32` beta では公式 namespace のみ。3rd party は addon (cdylib) として配布する設計 |
+| `E32K3_SOURCE_INTEGRITY_MISSING` | `[packages."x"]` table に `integrity` が無い、または `sha256:<64 lowercase hex>` 以外の prefix | `packages.tdm` に `integrity = "sha256:<64 hex>"` を追加。値は upstream release の sidecar から取得 |
+| `E32K3_SOURCE_INTEGRITY_MISMATCH` | キャッシュ済み source archive / cached store の SHA-256 が `packages.tdm` の expected と一致しない | `taida ingot install --force-refresh` で再取得。再現する場合は供給網侵害を疑う |
+| `E32K3_SOURCE_INTEGRITY_UNVERIFIED` | キャッシュ済み source archive に SHA-256 sidecar が無い、または読めない | `taida ingot install --force-refresh` で sidecar を再生成 |
+| `E32K3_SOURCE_COSIGN_REQUIRED` | source archive の cosign 検証が `Required` policy 下で skip / warn / 失敗 | `cosign` を install し、release が公式 cosign-signed であることを確認。`TAIDA_VERIFY_SIGNATURES` を緩めない |
+| `E32K3_VERIFY_SIGNATURES_RELAXED` | source package install 時に `TAIDA_VERIFY_SIGNATURES` が `required` 以外 (もしくは未設定の cosign 不在) | install を再実行し、`required` を強制する。`@e.32` beta で source archive は `Required` 必須 |
 
 ## 帯域ルール
 

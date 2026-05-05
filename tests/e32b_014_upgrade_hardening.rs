@@ -62,3 +62,13 @@ fn e32b_014_upgrade_code_no_longer_reads_api_override_env() {
         "self-upgrade path must not read TAIDA_GITHUB_API_URL"
     );
 }
+
+#[test]
+fn e32b_062_download_bytes_err_carries_code_prefix() {
+    let err = taida::upgrade::download_bytes("file:///nonexistent/path/that/should/not/exist")
+        .expect_err("missing file must fail");
+    assert!(
+        err.contains("[E32K1_UPGRADE_DOWNLOAD_FAILED]"),
+        "download_bytes error must carry [E32K1_UPGRADE_DOWNLOAD_FAILED]: {err}"
+    );
+}

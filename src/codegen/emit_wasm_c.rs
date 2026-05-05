@@ -137,17 +137,20 @@ fn validate_net_http_api_for_wasm(
 /// polymorphic dispatchers. PHILOSOPHY I forbids silent-undefined paths, so
 /// we reject the Regex surface at compile time instead.
 ///
-/// Detected by the presence of any of the three Regex-specific runtime
+/// Detected by the presence of any of the four Regex-specific runtime
 /// helpers in the collected `needed_funcs` set:
 ///
 /// - `taida_regex_new` — emitted for `Regex(pattern, flags?)`
 /// - `taida_str_match_regex` — emitted for `str.match(re)`
 /// - `taida_str_search_regex` — emitted for `str.search(re)`
+/// - `taida_str_search_regex_lax` — emitted for `str.searchLax(re)`
 ///
 /// `str.replace(Regex(...), ...)` / `str.replaceAll(Regex(...), ...)` go
 /// through the `_poly` dispatchers which are safe for plain-Str callers; the
 /// `Regex(...)` construction on the arg side already emits `taida_regex_new`,
-/// so those cases are caught transitively.
+/// so those cases are caught transitively. `searchLax` is listed explicitly
+/// (defense-in-depth, E32B-070) so a future overload taking a non-`Regex`
+/// argument cannot silently bypass the diagnostic.
 fn validate_regex_api_for_wasm(
     needed_funcs: &HashSet<String>,
     profile: WasmProfile,
@@ -156,6 +159,7 @@ fn validate_regex_api_for_wasm(
         ("taida_regex_new", "Regex"),
         ("taida_str_match_regex", "Str.match"),
         ("taida_str_search_regex", "Str.search"),
+        ("taida_str_search_regex_lax", "Str.searchLax"),
     ];
 
     for &(runtime_name, api_name) in REGEX_FUNCS {
@@ -838,8 +842,9 @@ fn runtime_func_prototype(name: &str, profile: WasmProfile) -> Result<String, Wa
         }
         // E32B-022 (Lock-N): Lax[Int]-returning sibling. wasm has only a
         // stub regex implementation, so the function exists for surface
-        // parity but always returns a hasValue=false Lax (rejected at
-        // compile time when actually used through `validate_regex_api_for_wasm`).
+        // parity. `validate_regex_api_for_wasm` rejects this helper directly
+        // (E32B-070 hardening) — the diagnostic no longer relies on the
+        // transitive `taida_regex_new` chain.
         "taida_str_search_regex_lax" => {
             "int64_t taida_str_search_regex_lax(int64_t s, int64_t regex);".to_string()
         }

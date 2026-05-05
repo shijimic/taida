@@ -45,6 +45,12 @@ fn try_build_fingerprint_set(items: &[Value]) -> Option<HashSet<u64>> {
 /// methods that replaced the legacy `-1` sentinel. `Some(i)` becomes a
 /// hasValue=true pack; `None` becomes the hasValue=false default with
 /// `__value` = `__default` = `0` (Int's PHILOSOPHY-I default).
+///
+/// Internal representation only — the `__value` / `__default` / `__type`
+/// fields must never be observed via `.__value` etc. from user code.
+/// Direct `__` field reads are rejected with `[E1960]` per E32B-018,
+/// and end users must unmold via `]=>` / `getOrDefault` / `isSuccess`
+/// / `hasValue` instead.
 pub(crate) fn make_int_lax(idx: Option<i64>) -> Value {
     match idx {
         Some(i) => Value::pack(vec![

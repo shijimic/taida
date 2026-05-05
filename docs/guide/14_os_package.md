@@ -162,7 +162,7 @@ r ]=> proc
 stdout("editor exit: " + proc.code.toString())
 ```
 
-`runInteractive` の戻り値には `stdout` / `stderr` フィールドが **存在しません**。checker が `Gorillax[@(code: Int)]` として pin しているため、unmold 後の `proc.stdout` を書くと compile error になります（型の誤用を実行前に弾く）。`r.__value` のような内部フィールドアクセスは E32B-018 以降 `[E1960]` で拒否されます。
+`runInteractive` の戻り値には `stdout` / `stderr` フィールドが **存在しません**。checker が `Gorillax[@(code: Int)]` として pin しているため、unmold 後の `proc.stdout` を書くと compile error になります（型の誤用を実行前に弾く）。`r.__value` のような内部フィールドアクセスは `[E1960]` で拒否されます。
 
 ```taida fragment
 r <= runInteractive("nvim", @["/tmp/draft.md"])
