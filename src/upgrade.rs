@@ -7,7 +7,8 @@
 //! - Resolves the best matching version based on CLI filters.
 //! - Downloads the platform-appropriate **archive** asset
 //!   (`taida-<tag>-<target>.tar.gz` on Unix, `.zip` on Windows).
-//! - Verifies SHA-256 integrity against the shared `SHA256SUMS` file.
+//! - Verifies the shared `SHA256SUMS` file with Sigstore cosign.
+//! - Verifies SHA-256 integrity against the release-signed `SHA256SUMS` file.
 //! - Extracts the `taida` binary from the archive.
 //! - Replaces the current executable via rename.
 //!
@@ -30,6 +31,9 @@
 //! ```
 
 use crate::addon::host_target::{self, HostTarget};
+use crate::addon::signature_verify::{
+    VerifyError, VerifyOutcome, VerifyPolicy, bundle_path_for, verify_artifact_with_identity,
+};
 use crate::crypto;
 
 /// A parsed Taida version tag.
@@ -194,9 +198,21 @@ pub fn resolve_version(
     }
 }
 
-/// GitHub API base URL. Respects `TAIDA_GITHUB_API_URL` for testing.
-fn api_url() -> String {
-    std::env::var("TAIDA_GITHUB_API_URL").unwrap_or_else(|_| "https://api.github.com".to_string())
+const GITHUB_API_URL: &str = "https://api.github.com";
+
+/// Certificate identity accepted for the self-upgrade trust root.
+///
+/// Unlike source-package verification, self-upgrade is only allowed to trust
+/// the canonical `taida-lang/taida` release workflow for a tagged release.
+pub const UPGRADE_COSIGN_IDENTITY_REGEXP: &str =
+    r"^https://github.com/taida-lang/taida/\.github/workflows/.+@refs/tags/.+$";
+
+/// GitHub API base URL for `taida upgrade`.
+///
+/// Production code never reads `TAIDA_GITHUB_API_URL`: the self-replacing
+/// upgrade path must not be redirected by ambient environment variables.
+pub fn api_url() -> &'static str {
+    GITHUB_API_URL
 }
 
 /// Build a blocking reqwest client without authentication.
@@ -315,8 +331,12 @@ pub fn find_asset_url(
     ))
 }
 
-/// Download a binary from URL and verify its SHA-256 hash.
-pub fn download_and_verify(url: &str, expected_sha256: Option<&str>) -> Result<Vec<u8>, String> {
+/// Download bytes from URL.
+pub fn download_bytes(url: &str) -> Result<Vec<u8>, String> {
+    if let Some(path) = url.strip_prefix("file://") {
+        return std::fs::read(path).map_err(|e| format!("download failed: {}", e));
+    }
+
     let client = reqwest::blocking::Client::builder()
         .user_agent("taida-upgrade")
         .build()
@@ -337,16 +357,31 @@ pub fn download_and_verify(url: &str, expected_sha256: Option<&str>) -> Result<V
         .map_err(|e| format!("failed to read download body: {}", e))?
         .to_vec();
 
-    if let Some(expected) = expected_sha256 {
-        let actual = crypto::sha256_hex_bytes(&bytes);
-        if actual != expected {
-            return Err(format!(
-                "SHA-256 mismatch: expected {}, got {}",
-                expected, actual
-            ));
-        }
+    Ok(bytes)
+}
+
+/// Verify already-downloaded bytes against a mandatory SHA-256 hex digest.
+pub fn verify_sha256_bytes(bytes: &[u8], expected_sha256: &str) -> Result<(), String> {
+    let expected = expected_sha256.trim();
+    if expected.is_empty() {
+        return Err("[E32K1_UPGRADE_NO_SHA256SUMS] release SHA256SUMS entry is empty".to_string());
     }
 
+    let actual = crypto::sha256_hex_bytes(bytes);
+    if actual != expected {
+        return Err(format!(
+            "[E32K1_UPGRADE_SHA256_MISMATCH] SHA-256 mismatch: expected {}, got {}",
+            expected, actual
+        ));
+    }
+
+    Ok(())
+}
+
+/// Download a release artifact and verify its mandatory SHA-256 hash.
+pub fn download_and_verify(url: &str, expected_sha256: &str) -> Result<Vec<u8>, String> {
+    let bytes = download_bytes(url)?;
+    verify_sha256_bytes(&bytes, expected_sha256)?;
     Ok(bytes)
 }
 
@@ -421,6 +456,92 @@ pub fn lookup_sha256(sha256sums: &str, target_filename: &str) -> Option<String> 
         }
     }
     None
+}
+
+/// Look up the mandatory SHA-256 entry for a release archive.
+pub fn expected_sha256_for_archive(
+    sha256sums: &str,
+    target_filename: &str,
+) -> Result<String, String> {
+    lookup_sha256(sha256sums, target_filename).ok_or_else(|| {
+        format!(
+            "[E32K1_UPGRADE_NO_SHA256SUMS] release SHA256SUMS does not list {}",
+            target_filename
+        )
+    })
+}
+
+struct TempDownloadedFile {
+    path: std::path::PathBuf,
+}
+
+impl TempDownloadedFile {
+    fn new(label: &str, bytes: &[u8]) -> Result<Self, String> {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|e| format!("system clock error while staging upgrade artifact: {}", e))?
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "taida_upgrade_{}_{}_{}",
+            std::process::id(),
+            nanos,
+            label
+        ));
+        std::fs::write(&path, bytes)
+            .map_err(|e| format!("failed to stage {} for verification: {}", label, e))?;
+        Ok(Self { path })
+    }
+}
+
+impl Drop for TempDownloadedFile {
+    fn drop(&mut self) {
+        let bundle = bundle_path_for(&self.path);
+        let _ = std::fs::remove_file(&bundle);
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+fn upgrade_cosign_error(err: VerifyError) -> String {
+    match err {
+        VerifyError::CosignUnavailable => {
+            "[E32K1_COSIGN_MISSING] taida upgrade requires cosign on PATH to verify SHA256SUMS"
+                .to_string()
+        }
+        VerifyError::BundleMissing(detail) => format!(
+            "[E32K1_UPGRADE_SHA256SUMS_COSIGN_MISSING] SHA256SUMS cosign bundle is required: {}",
+            detail
+        ),
+        VerifyError::SignatureRejected { stderr } => format!(
+            "[E32K1_UPGRADE_SHA256SUMS_COSIGN_REJECTED] cosign rejected SHA256SUMS: {}",
+            stderr.trim()
+        ),
+        VerifyError::InvocationError(detail) => format!(
+            "[E32K1_UPGRADE_SHA256SUMS_COSIGN_ERROR] SHA256SUMS cosign verification failed: {}",
+            detail
+        ),
+    }
+}
+
+/// Download `SHA256SUMS`, verify its cosign bundle, then return the text.
+pub fn download_verified_sha256sums(sha256sums_url: &str) -> Result<String, String> {
+    let bytes = download_bytes(sha256sums_url)?;
+    let staged = TempDownloadedFile::new("SHA256SUMS", &bytes)?;
+    let outcome = verify_artifact_with_identity(
+        &staged.path,
+        sha256sums_url,
+        VerifyPolicy::Required,
+        UPGRADE_COSIGN_IDENTITY_REGEXP,
+    )
+    .map_err(upgrade_cosign_error)?;
+
+    if !matches!(outcome, VerifyOutcome::Verified) {
+        return Err(format!(
+            "[E32K1_UPGRADE_SHA256SUMS_COSIGN_ERROR] SHA256SUMS verification did not complete: {:?}",
+            outcome
+        ));
+    }
+
+    String::from_utf8(bytes).map_err(|e| format!("invalid SHA256SUMS encoding: {}", e))
 }
 
 /// Replace the current executable with the new binary.
@@ -530,39 +651,19 @@ pub fn run(config: UpgradeConfig) -> Result<(), String> {
                 let download_url =
                     find_asset_url(TAIDA_OWNER, TAIDA_REPO, &version.tag, &archive_name)?;
 
-                // Fetch SHA256SUMS and look up our archive's hash
-                let expected_sha = match find_asset_url(
-                    TAIDA_OWNER,
-                    TAIDA_REPO,
-                    &version.tag,
-                    "SHA256SUMS",
-                ) {
-                    Ok(sha_url) => {
-                        let sha_bytes = download_and_verify(&sha_url, None)?;
-                        let sha_text = String::from_utf8(sha_bytes)
-                            .map_err(|e| format!("invalid SHA256SUMS encoding: {}", e))?;
-                        match lookup_sha256(&sha_text, &archive_name) {
-                            Some(hash) => Some(hash),
-                            None => {
-                                eprintln!(
-                                    "Warning: {} not found in SHA256SUMS. Skipping verification.",
-                                    archive_name
-                                );
-                                None
-                            }
-                        }
-                    }
-                    Err(_) => {
-                        eprintln!(
-                            "Warning: SHA256SUMS not found for {}. Skipping verification.",
-                            version.tag
-                        );
-                        None
-                    }
-                };
+                // Fetch release-signed SHA256SUMS and look up our archive's hash.
+                let sha_url = find_asset_url(TAIDA_OWNER, TAIDA_REPO, &version.tag, "SHA256SUMS")
+                    .map_err(|e| {
+                    format!(
+                        "[E32K1_UPGRADE_NO_SHA256SUMS] release {} must publish SHA256SUMS: {}",
+                        version.tag, e
+                    )
+                })?;
+                let sha_text = download_verified_sha256sums(&sha_url)?;
+                let expected_sha = expected_sha256_for_archive(&sha_text, &archive_name)?;
 
-                // Download archive with optional integrity check
-                let archive_bytes = download_and_verify(&download_url, expected_sha.as_deref())?;
+                // Download archive with mandatory integrity check.
+                let archive_bytes = download_and_verify(&download_url, &expected_sha)?;
 
                 // Extract binary from archive
                 let archive_base = archive_name
@@ -597,6 +698,96 @@ pub fn run(config: UpgradeConfig) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use std::sync::Mutex;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn with_env_guard<F: FnOnce()>(f: F) {
+        let _guard = match ENV_LOCK.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        let prev_path = std::env::var("PATH").ok();
+        let prev_api = std::env::var("TAIDA_GITHUB_API_URL").ok();
+        f();
+        unsafe {
+            match prev_path {
+                Some(path) => std::env::set_var("PATH", path),
+                None => std::env::remove_var("PATH"),
+            }
+            match prev_api {
+                Some(url) => std::env::set_var("TAIDA_GITHUB_API_URL", url),
+                None => std::env::remove_var("TAIDA_GITHUB_API_URL"),
+            }
+        }
+    }
+
+    struct TestDir(PathBuf);
+
+    impl TestDir {
+        fn new(label: &str) -> Self {
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let path = std::env::temp_dir().join(format!(
+                "e32b014_upgrade_{}_{}_{}",
+                std::process::id(),
+                nanos,
+                label
+            ));
+            fs::create_dir_all(&path).unwrap();
+            Self(path)
+        }
+
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TestDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn install_fake_cosign(dir: &Path, log: &Path) {
+        let bin = dir.join("fake-bin");
+        fs::create_dir_all(&bin).unwrap();
+        let cosign = bin.join("cosign");
+        fs::write(
+            &cosign,
+            format!(
+                r#"#!/usr/bin/env bash
+set -euo pipefail
+if [ "${{1:-}}" = "version" ]; then
+  exit 0
+fi
+if [ "${{1:-}}" = "verify-blob" ]; then
+  printf '%s\n' "$*" >> '{}'
+  exit 0
+fi
+echo "unexpected fake cosign invocation: $*" >&2
+exit 2
+"#,
+                log.display()
+            ),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = fs::metadata(&cosign).unwrap().permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(&cosign, perms).unwrap();
+        }
+        let old_path = std::env::var("PATH").unwrap_or_default();
+        unsafe {
+            std::env::set_var("PATH", format!("{}:{old_path}", bin.display()));
+        }
+    }
 
     // ── Canonical release source (security) ──
 
@@ -617,6 +808,66 @@ mod tests {
             "upgrade source must be the canonical org, not a personal fork"
         );
         assert_eq!(TAIDA_REPO, "taida");
+    }
+
+    #[test]
+    fn e32b014_api_url_ignores_env_override() {
+        with_env_guard(|| {
+            unsafe {
+                std::env::set_var("TAIDA_GITHUB_API_URL", "http://127.0.0.1:9998");
+            }
+            assert_eq!(api_url(), "https://api.github.com");
+        });
+    }
+
+    #[test]
+    fn e32b014_missing_sha256sums_entry_is_hard_fail() {
+        let err = expected_sha256_for_archive("abc123  other.tar.gz\n", "taida-@e.1-x.tar.gz")
+            .expect_err("missing archive line must fail closed");
+        assert!(
+            err.contains("[E32K1_UPGRADE_NO_SHA256SUMS]") && err.contains("taida-@e.1-x.tar.gz"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn e32b014_sha256sums_requires_cosign_bundle() {
+        let td = TestDir::new("missing_bundle");
+        let sums = td.path().join("SHA256SUMS");
+        fs::write(&sums, "abc123  taida-@e.1-x.tar.gz\n").unwrap();
+
+        let err = download_verified_sha256sums(&format!("file://{}", sums.display()))
+            .expect_err("SHA256SUMS without a cosign bundle must fail");
+        assert!(
+            err.contains("[E32K1_UPGRADE_SHA256SUMS_COSIGN_MISSING]"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn e32b014_sha256sums_cosign_uses_taida_release_identity() {
+        with_env_guard(|| {
+            let td = TestDir::new("identity");
+            let sums = td.path().join("SHA256SUMS");
+            let bundle = td.path().join("SHA256SUMS.cosign.bundle");
+            let log = td.path().join("cosign.log");
+            fs::write(&sums, "abc123  taida-@e.1-x.tar.gz\n").unwrap();
+            fs::write(&bundle, "fake bundle").unwrap();
+            install_fake_cosign(td.path(), &log);
+
+            let text = download_verified_sha256sums(&format!("file://{}", sums.display()))
+                .expect("fake cosign should verify SHA256SUMS");
+            assert!(text.contains("taida-@e.1-x.tar.gz"));
+
+            let log_text = fs::read_to_string(log).unwrap();
+            assert!(
+                log_text.contains("--certificate-identity-regexp")
+                    && log_text.contains(UPGRADE_COSIGN_IDENTITY_REGEXP)
+                    && log_text.contains("--certificate-oidc-issuer")
+                    && log_text.contains("https://token.actions.githubusercontent.com"),
+                "cosign invocation must pin taida-lang/taida workflow identity, got: {log_text}"
+            );
+        });
     }
 
     // ── TaidaVersion::parse ──
@@ -921,5 +1172,7 @@ def456  taida-@b.11-aarch64-apple-darwin.tar.gz\n";
         let actual_sha = crypto::sha256_hex_bytes(data);
         let wrong_sha = "0000000000000000000000000000000000000000000000000000000000000000";
         assert_ne!(actual_sha, wrong_sha);
+        let err = verify_sha256_bytes(data, wrong_sha).unwrap_err();
+        assert!(err.contains("[E32K1_UPGRADE_SHA256_MISMATCH]"));
     }
 }

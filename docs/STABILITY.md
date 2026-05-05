@@ -223,6 +223,25 @@ node as `metadata.parent_lineage` (`"none"` / `"mold"` / `"error"` /
 longer supported. The schema version exposed in the JSON output is
 bumped accordingly.
 
+### 2.8. Self-upgrade supply-chain gate
+
+`taida upgrade` is a self-replacing executable path, so its release
+verification policy is stable for `@e.X`:
+
+- Release metadata is fetched only from `https://api.github.com` for
+  `taida-lang/taida`; `TAIDA_GITHUB_API_URL` is not read by the
+  production upgrade path.
+- The release must publish `SHA256SUMS`, and that file must contain
+  the selected archive name. Missing data is a hard failure with
+  `[E32K1_UPGRADE_NO_SHA256SUMS]`; there is no unsigned escape hatch.
+- `SHA256SUMS` is verified through cosign keyless verification before
+  its hashes are trusted. The accepted certificate identity is pinned
+  to the tagged `taida-lang/taida` GitHub Actions release workflow,
+  with OIDC issuer `https://token.actions.githubusercontent.com`.
+- The archive bytes are accepted only if their SHA-256 matches the
+  verified `SHA256SUMS` entry. Self-replacement runs after those
+  checks pass.
+
 ---
 
 ## 3. Non-Stable Surface — what may change

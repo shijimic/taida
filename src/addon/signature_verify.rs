@@ -274,10 +274,12 @@ fn fetch_bundle_https(_src_url: &str, _dest: &Path) -> Result<bool, VerifyError>
 
 // ── cosign invocation ───────────────────────────────────────────
 
-/// Identity regex the release workflow signs under. Mirrors
-/// `scripts/release/verify-signatures.sh::COSIGN_IDENTITY_REGEXP`
-/// default.
-const COSIGN_IDENTITY_REGEXP: &str = "^https://github.com/taida-lang/";
+/// Default identity regex accepted by addon/source-package verification.
+///
+/// First-party packages may live in any `taida-lang/*` repository, so this
+/// default intentionally remains broader than the self-upgrade path. Callers
+/// with a narrower trust root should use [`verify_artifact_with_identity`].
+pub const DEFAULT_COSIGN_IDENTITY_REGEXP: &str = "^https://github.com/taida-lang/";
 /// OIDC issuer used by GitHub Actions workflows — pinned literal.
 const COSIGN_OIDC_ISSUER: &str = "https://token.actions.githubusercontent.com";
 
@@ -287,6 +289,19 @@ const COSIGN_OIDC_ISSUER: &str = "https://token.actions.githubusercontent.com";
 /// Production flow never honours a test bypass environment variable:
 /// it always resolves and executes `cosign` from `PATH`.
 pub fn run_cosign_verify(artifact: &Path, bundle_path: &Path) -> Result<(), VerifyError> {
+    run_cosign_verify_with_identity(artifact, bundle_path, DEFAULT_COSIGN_IDENTITY_REGEXP)
+}
+
+/// Run `cosign verify-blob` with an explicit certificate identity regex.
+///
+/// This is used by `taida upgrade`, whose self-replacement trust root is the
+/// single canonical `taida-lang/taida` release workflow, while addon/source
+/// package verification keeps the broader first-party default above.
+pub fn run_cosign_verify_with_identity(
+    artifact: &Path,
+    bundle_path: &Path,
+    identity_regexp: &str,
+) -> Result<(), VerifyError> {
     // Detect cosign availability explicitly so the `Required`-policy
     // error path can surface `CosignUnavailable` distinctly from
     // `SignatureRejected`.
@@ -301,7 +316,7 @@ pub fn run_cosign_verify(artifact: &Path, bundle_path: &Path) -> Result<(), Veri
         .arg("--bundle")
         .arg(bundle_path)
         .arg("--certificate-identity-regexp")
-        .arg(COSIGN_IDENTITY_REGEXP)
+        .arg(identity_regexp)
         .arg("--certificate-oidc-issuer")
         .arg(COSIGN_OIDC_ISSUER)
         .arg(artifact)
@@ -329,6 +344,21 @@ pub fn verify_artifact(
     artifact: &Path,
     artifact_url: &str,
     policy: VerifyPolicy,
+) -> Result<VerifyOutcome, VerifyError> {
+    verify_artifact_with_identity(
+        artifact,
+        artifact_url,
+        policy,
+        DEFAULT_COSIGN_IDENTITY_REGEXP,
+    )
+}
+
+/// End-to-end verification with an explicit certificate identity regex.
+pub fn verify_artifact_with_identity(
+    artifact: &Path,
+    artifact_url: &str,
+    policy: VerifyPolicy,
+    identity_regexp: &str,
 ) -> Result<VerifyOutcome, VerifyError> {
     if matches!(policy, VerifyPolicy::Disabled) {
         return Ok(VerifyOutcome::Skipped);
@@ -360,7 +390,7 @@ pub fn verify_artifact(
         }
     }
 
-    match run_cosign_verify(artifact, &bundle_path) {
+    match run_cosign_verify_with_identity(artifact, &bundle_path, identity_regexp) {
         Ok(()) => Ok(VerifyOutcome::Verified),
         Err(VerifyError::CosignUnavailable) => match policy {
             VerifyPolicy::Required => Err(VerifyError::CosignUnavailable),

@@ -378,3 +378,9 @@ Taida 本体のセルフアップデート専用コマンドです。旧 AST 書
 | `--version <VERSION>` | 特定のバージョンに固定 |
 
 `--gen` と `--label` は併用できます。`--version` は `--gen` / `--label` とは排他です。
+
+`taida upgrade` は自己置換を行うため、release provenance は hard-fail 契約です。Release asset に
+`SHA256SUMS` が存在しない場合、または対象 archive の行が存在しない場合は `[E32K1_UPGRADE_NO_SHA256SUMS]`
+で停止します。`SHA256SUMS` は cosign keyless verification で `taida-lang/taida` の release workflow
+identity に pin され、検証後に archive bytes の SHA-256 と照合されます。`TAIDA_GITHUB_API_URL` は
+production upgrade path では読まれず、release metadata の取得先は `https://api.github.com` 固定です。

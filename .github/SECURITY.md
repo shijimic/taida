@@ -98,9 +98,11 @@ The contract for this path is:
   occurs. There is no opt-out flag for this check.
 - `SHA256SUMS` itself is verified with Sigstore cosign keyless
   verification. The certificate identity is pinned to a workflow path
-  under `taida-lang/taida` (the regular expression is a constant in
-  the upgrader, not derived from any environment variable). The OIDC
-  issuer is pinned to `https://token.actions.githubusercontent.com`.
+  under `taida-lang/taida`:
+  `^https://github.com/taida-lang/taida/\.github/workflows/.+@refs/tags/.+$`.
+  The regular expression is a constant in the upgrader, not derived
+  from any environment variable. The OIDC issuer is pinned to
+  `https://token.actions.githubusercontent.com`.
 - After cosign verification succeeds, the upgrader recomputes the
   SHA-256 of the downloaded binary and compares it against the line
   in `SHA256SUMS`. Only if both checks pass does the binary
@@ -110,11 +112,11 @@ The contract for this path is:
   only in test builds.
 
 The `install.sh` script applies the same identity pin: the cosign
-`--certificate-identity-regexp` value is hard-coded to
-`taida-lang/taida` and is **not** derived from `TAIDA_REPO`. If a
-fork or test repository needs to substitute the source URL, that
-substitution is intentionally out of scope of the cosign identity
-check.
+`--certificate-identity-regexp` value is hard-coded to the
+`taida-lang/taida` workflow regex and is **not** derived from
+`TAIDA_REPO`. If a fork or test repository needs to substitute the
+source URL, that substitution is intentionally out of scope of the
+cosign identity check.
 
 ## Source package pinning
 
