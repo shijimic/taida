@@ -2343,6 +2343,52 @@ fn resolve_descriptor_imports(entry_path: &Path, program: &Program) -> HashMap<S
     symbols
 }
 
+/// E32B-036: BuildUnit / BuildPlan / AssetBundle / BuildHook の `name` は
+/// staging path / artifact-map key / hook log directory に直接使われるため、
+/// `..` / `/` / `\\` / leading `.` / NUL / 空文字を含む値は project root の
+/// 外への arbitrary file write に発展する。`name` を単一 path segment に
+/// 限定し、E32B-009 (`E1910..E1919`) と同 family の `[E1916]` で hard-fail
+/// する。
+fn validate_descriptor_name(name: &str, kind: &str) -> Result<(), DescriptorBuildError> {
+    if name.is_empty() {
+        return Err(DescriptorBuildError::new(
+            "E1916",
+            format!("{} name must not be empty.", kind),
+        ));
+    }
+    if name == "." || name == ".." {
+        return Err(DescriptorBuildError::new(
+            "E1916",
+            format!("{} name '{}' is not a valid path segment.", kind, name),
+        ));
+    }
+    if name.starts_with('.') {
+        return Err(DescriptorBuildError::new(
+            "E1916",
+            format!(
+                "{} name '{}' must not start with '.' (hidden segments are rejected).",
+                kind, name
+            ),
+        ));
+    }
+    if name.contains('/') || name.contains('\\') {
+        return Err(DescriptorBuildError::new(
+            "E1916",
+            format!(
+                "{} name '{}' must be a single path segment (no '/' or '\\\\').",
+                kind, name
+            ),
+        ));
+    }
+    if name.contains('\0') {
+        return Err(DescriptorBuildError::new(
+            "E1916",
+            format!("{} name must not contain a NUL byte.", kind),
+        ));
+    }
+    Ok(())
+}
+
 fn parse_route_asset(expr: &Expr) -> Result<RouteAssetDescriptor, DescriptorBuildError> {
     let fields = match expr {
         Expr::TypeInst(type_name, fields, _) if type_name == "RouteAsset" => fields,
@@ -2394,6 +2440,7 @@ fn parse_build_unit(
     import_symbols: &HashMap<String, PathBuf>,
 ) -> Result<BuildUnitDescriptor, DescriptorBuildError> {
     let name = descriptor_name_from_fields(fields, symbol);
+    validate_descriptor_name(&name, "BuildUnit")?;
     let target_raw = required_string_field(fields, "target", "BuildUnit")?;
     let target = BuildTarget::parse(&target_raw).ok_or_else(|| {
         DescriptorBuildError::new(
@@ -2422,9 +2469,11 @@ fn parse_build_plan(
     symbol: &str,
     fields: &[BuchiField],
 ) -> Result<BuildPlanDescriptor, DescriptorBuildError> {
+    let name = descriptor_name_from_fields(fields, symbol);
+    validate_descriptor_name(&name, "BuildPlan")?;
     Ok(BuildPlanDescriptor {
         symbol: symbol.to_string(),
-        name: descriptor_name_from_fields(fields, symbol),
+        name,
         unit_symbols: ident_list_field(fields, "units")?,
         asset_symbols: ident_list_field(fields, "assets")?,
         before_hooks: ident_list_field(fields, "before")?,
@@ -2435,9 +2484,11 @@ fn parse_asset_bundle(
     symbol: &str,
     fields: &[BuchiField],
 ) -> Result<AssetBundleDescriptor, DescriptorBuildError> {
+    let name = descriptor_name_from_fields(fields, symbol);
+    validate_descriptor_name(&name, "AssetBundle")?;
     Ok(AssetBundleDescriptor {
         symbol: symbol.to_string(),
-        name: descriptor_name_from_fields(fields, symbol),
+        name,
         root: required_string_field(fields, "root", "AssetBundle")?,
         files: string_list_field(fields, "files")?,
         output: optional_string_field(fields, "output", "AssetBundle")?,
@@ -2449,9 +2500,11 @@ fn parse_build_hook(
     symbol: &str,
     fields: &[BuchiField],
 ) -> Result<BuildHookDescriptor, DescriptorBuildError> {
+    let name = descriptor_name_from_fields(fields, symbol);
+    validate_descriptor_name(&name, "BuildHook")?;
     Ok(BuildHookDescriptor {
         symbol: symbol.to_string(),
-        name: descriptor_name_from_fields(fields, symbol),
+        name,
         command: required_string_field(fields, "command", "BuildHook")?,
         cwd: required_string_field(fields, "cwd", "BuildHook")?,
         env: env_list_field(fields, "env")?,

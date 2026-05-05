@@ -106,6 +106,52 @@ stdout(err.__type)
     let _ = fs::remove_dir_all(&dir);
 }
 
+/// E32B-054: `lower_stdout_with_tag` previously bypassed
+/// `lower_field_access`'s E1960 guard for FieldAccess arguments with a
+/// compile-time-unknown tag, so `taida --no-check build native` would happily
+/// emit `taida_pack_get(obj, "__value")` and produce a binary that prints
+/// the internal field. The guard now lives in both paths; this test pins
+/// the `--no-check` Native behavior.
+#[test]
+fn e32b_054_no_check_native_rejects_internal_field_via_stdout() {
+    let dir = unique_temp_dir("e32b_054_no_check_native");
+    let src = write_lax_false_fixture(&dir);
+    let out_path = dir.join("out-native");
+
+    let output = Command::new(taida_bin())
+        .args(["--no-check", "build", "native"])
+        .arg(&src)
+        .arg("-o")
+        .arg(&out_path)
+        .output()
+        .expect("run taida --no-check build native");
+    assert_e1960(&output, "--no-check native");
+    assert!(
+        !out_path.exists(),
+        "build must not produce a Native binary when E1960 fires (bypass would have produced one)"
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn e32b_054_no_check_js_rejects_internal_field_via_stdout() {
+    let dir = unique_temp_dir("e32b_054_no_check_js");
+    let src = write_lax_false_fixture(&dir);
+    let out_path = dir.join("out.mjs");
+
+    let output = Command::new(taida_bin())
+        .args(["--no-check", "build", "js"])
+        .arg(&src)
+        .arg("-o")
+        .arg(&out_path)
+        .output()
+        .expect("run taida --no-check build js");
+    assert_e1960(&output, "--no-check js");
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn e32b_018_unhandled_throw_output_hides_internal_fields() {
     let dir = unique_temp_dir("e32b_018_throw");

@@ -688,6 +688,19 @@ impl Lowering {
                 Expr::FieldAccess(obj, field, _) => (obj, field),
                 _ => unreachable!("is_field_access_unknown gated by matches!"),
             };
+            // E32B-054: lower_stdout_with_tag bypassed `lower_field_access`'s
+            // E1960 guard, so a `--no-check` build would happily emit
+            // `taida_pack_get(obj, "__value")` and print the internal field.
+            // Reject `__*` here so the four-backend defense-in-depth stays
+            // symmetric (checker / interp / lower / JS).
+            if field.starts_with("__") {
+                return Err(LowerError {
+                    message: format!(
+                        "[E1960] Field '{}' is compiler-internal and cannot be accessed from Taida code. Hint: use unmolding or public methods instead.",
+                        field
+                    ),
+                });
+            }
             let obj_var = self.lower_expr(func, obj)?;
             let field_hash = simple_hash(field);
             let hash_var = func.alloc_var();

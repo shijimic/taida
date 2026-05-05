@@ -339,6 +339,17 @@ pub fn find_asset_url(
         if asset["name"].as_str() == Some(asset_name)
             && let Some(url) = asset["browser_download_url"].as_str()
         {
+            // E32B-042: Defense-in-depth — reject non-https
+            // browser_download_url responses (e.g. tampered API metadata
+            // injecting `file://`) before the URL ever reaches
+            // `download_bytes`. The GitHub API contract uses https
+            // exclusively; anything else is a supply-chain signal.
+            if !url.starts_with("https://") {
+                return Err(format!(
+                    "[E32K1_UPGRADE_NON_HTTPS_URL] release asset '{}' has non-https URL: {}",
+                    asset_name, url
+                ));
+            }
             return Ok(url.to_string());
         }
     }
@@ -350,12 +361,37 @@ pub fn find_asset_url(
 }
 
 /// Download bytes from URL.
+///
+/// E32B-042: production callers MUST receive only `https://` URLs. The
+/// `browser_download_url` field of the GitHub Releases API is the sole
+/// production input; if the metadata is tampered with to inject a
+/// `file://` URL, defense-in-depth must reject the URL **before** the
+/// download path is touched. Test fixtures that need to load fixture
+/// bytes from disk go through `download_bytes_for_test` instead.
 pub fn download_bytes(url: &str) -> Result<Vec<u8>, String> {
+    if !url.starts_with("https://") {
+        return Err(format!(
+            "[E32K1_UPGRADE_NON_HTTPS_URL] non-https URL rejected by self-upgrade: {}",
+            url
+        ));
+    }
+    download_bytes_https(url)
+}
+
+/// Test-only entry point that allows `file://` and `https://` URLs.
+///
+/// Production code MUST NOT call this. The boundary lives in `download_bytes`,
+/// which rejects every non-https URL before any I/O.
+#[doc(hidden)]
+pub fn download_bytes_for_test(url: &str) -> Result<Vec<u8>, String> {
     if let Some(path) = url.strip_prefix("file://") {
         return std::fs::read(path)
             .map_err(|e| format!("[E32K1_UPGRADE_DOWNLOAD_FAILED] download failed: {}", e));
     }
+    download_bytes_https(url)
+}
 
+fn download_bytes_https(url: &str) -> Result<Vec<u8>, String> {
     let client = reqwest::blocking::Client::builder()
         .user_agent("taida-upgrade")
         .build()
@@ -507,8 +543,48 @@ struct TempDownloadedFile {
     path: std::path::PathBuf,
 }
 
+/// E32B-037: stage upgrade artifacts under `~/.taida/cache/upgrade/` with
+/// mode 0700 instead of `std::env::temp_dir()`.
+///
+/// `/tmp/taida_upgrade_<pid>_<nanos>_*` is predictable enough that a local
+/// attacker can pre-place a symlink at the target path; the previous
+/// implementation called `std::fs::write` (which follows symlinks) and
+/// would then clobber arbitrary files when `taida upgrade` ran as root.
+/// A user-private cache directory + `O_NOFOLLOW | O_EXCL` open closes that
+/// hole.
+fn upgrade_cache_dir() -> Result<std::path::PathBuf, String> {
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .map_err(|_| {
+            "[E32K1_UPGRADE_STAGE_FAILED] HOME / USERPROFILE is not set; cannot resolve upgrade cache dir"
+                .to_string()
+        })?;
+    if home.is_empty() {
+        return Err("[E32K1_UPGRADE_STAGE_FAILED] HOME / USERPROFILE is empty".to_string());
+    }
+    let dir = std::path::PathBuf::from(home)
+        .join(".taida")
+        .join("cache")
+        .join("upgrade");
+    std::fs::create_dir_all(&dir).map_err(|e| {
+        format!(
+            "[E32K1_UPGRADE_STAGE_FAILED] failed to create upgrade cache dir {}: {}",
+            dir.display(),
+            e
+        )
+    })?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let perms = std::fs::Permissions::from_mode(0o700);
+        let _ = std::fs::set_permissions(&dir, perms);
+    }
+    Ok(dir)
+}
+
 impl TempDownloadedFile {
     fn new(label: &str, bytes: &[u8]) -> Result<Self, String> {
+        let dir = upgrade_cache_dir()?;
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_err(|e| {
@@ -518,18 +594,34 @@ impl TempDownloadedFile {
                 )
             })?
             .as_nanos();
-        let path = std::env::temp_dir().join(format!(
+        let path = dir.join(format!(
             "taida_upgrade_{}_{}_{}",
             std::process::id(),
             nanos,
             label
         ));
-        std::fs::write(&path, bytes).map_err(|e| {
+        let mut opts = std::fs::OpenOptions::new();
+        opts.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.custom_flags(libc::O_NOFOLLOW).mode(0o600);
+        }
+        let mut file = opts.open(&path).map_err(|e| {
             format!(
                 "[E32K1_UPGRADE_STAGE_FAILED] failed to stage {} for verification: {}",
                 label, e
             )
         })?;
+        use std::io::Write;
+        if let Err(e) = file.write_all(bytes) {
+            drop(file);
+            let _ = std::fs::remove_file(&path);
+            return Err(format!(
+                "[E32K1_UPGRADE_STAGE_FAILED] failed to write {} for verification: {}",
+                label, e
+            ));
+        }
         Ok(Self { path })
     }
 }
@@ -565,7 +657,14 @@ fn upgrade_cosign_error(err: VerifyError) -> String {
 
 /// Download `SHA256SUMS`, verify its cosign bundle, then return the text.
 pub fn download_verified_sha256sums(sha256sums_url: &str) -> Result<String, String> {
+    // E32B-042: production rejects every non-https scheme; in-process unit
+    // tests stage `file://` fixtures via `download_bytes_for_test`. The
+    // boundary is tight — only this call site swaps; the public
+    // `download_bytes` remains https-only.
+    #[cfg(not(test))]
     let bytes = download_bytes(sha256sums_url)?;
+    #[cfg(test)]
+    let bytes = download_bytes_for_test(sha256sums_url)?;
     let staged = TempDownloadedFile::new("SHA256SUMS", &bytes)?;
     let outcome = verify_artifact_with_identity(
         &staged.path,

@@ -627,3 +627,185 @@ serverX <= BuildUnit(
     );
     assert!(stdout.contains("\"exit_code\":7"), "stdout={stdout}");
 }
+
+// =============================================================================
+// E32B-036: descriptor `name` path traversal rejection ([E1916])
+// =============================================================================
+//
+// `BuildUnit` / `BuildPlan` / `AssetBundle` / `BuildHook` の `name` は staging
+// path / artifact-map key / hook log directory に直接使われる。攻撃者が
+// `name <= "../../../../tmp/pwn"` のような traversal を埋め込むと、commit
+// 時に project root の外へ書き出される。`parse_build_*` 直後の
+// `validate_descriptor_name` で `[E1916]` を hard-fail させ、4 種類すべての
+// descriptor で同じ policy を pin する。
+
+fn assert_e1916(output: &std::process::Output, label: &str) {
+    assert!(
+        !output.status.success(),
+        "{label} should reject descriptor name traversal"
+    );
+    let stdout = stdout_text(output);
+    let stderr = stderr_text(output);
+    assert!(
+        stdout.contains("\"code\":\"E1916\"") || stderr.contains("[E1916]"),
+        "{label} should report E1916, stdout={stdout} stderr={stderr}"
+    );
+}
+
+#[test]
+fn e32b_036_build_unit_name_path_traversal_rejected() {
+    let dir = project("e32b_036_unit_traversal");
+    write_file(&dir.join("server.td"), "stdout(\"server\")\n");
+    write_file(
+        &dir.join("main.td"),
+        r#"
+>>> ./server.td => @(serverMain)
+serverX <= BuildUnit(
+  name <= "../../../../tmp/pwn",
+  target <= "js",
+  entry <= serverMain
+)
+<<< serverX
+"#,
+    );
+
+    let output = run_taida_build(&dir, &["main.td", "--all-units", "--diag-format", "jsonl"]);
+    assert_e1916(&output, "BuildUnit.name traversal");
+
+    // Defense-in-depth: confirm no project-external file was created.
+    let escaped = std::path::Path::new("/tmp/pwn");
+    assert!(
+        !escaped.is_dir() || !escaped.join("server.mjs").exists(),
+        "build must not have created a project-external artifact directory"
+    );
+}
+
+#[test]
+fn e32b_036_asset_bundle_name_path_traversal_rejected() {
+    let dir = project("e32b_036_asset_traversal");
+    fs::create_dir_all(dir.join("public")).unwrap();
+    write_file(&dir.join("public/index.html"), "ok");
+    write_file(&dir.join("server.td"), "stdout(\"server\")\n");
+    write_file(
+        &dir.join("main.td"),
+        r#"
+>>> ./server.td => @(serverMain)
+frontendAssets <= AssetBundle(
+  name <= "../../../../tmp/pwn-assets",
+  root <= "public",
+  files <= @["**/*"]
+)
+serverX <= BuildUnit(
+  name <= "server-x",
+  target <= "js",
+  entry <= serverMain,
+  assets <= @[RouteAsset(path <= "/", asset <= frontendAssets)]
+)
+<<< serverX
+"#,
+    );
+
+    let output = run_taida_build(
+        &dir,
+        &["main.td", "--unit", "server-x", "--diag-format", "jsonl"],
+    );
+    assert_e1916(&output, "AssetBundle.name traversal");
+}
+
+#[test]
+fn e32b_036_build_hook_name_path_traversal_rejected() {
+    let dir = project("e32b_036_hook_traversal");
+    write_file(&dir.join("server.td"), "stdout(\"server\")\n");
+    write_file(
+        &dir.join("main.td"),
+        r#"
+>>> ./server.td => @(serverMain)
+escapeHook <= BuildHook(
+  name <= "../../../../tmp/pwn-hook",
+  command <= "echo ok",
+  cwd <= "."
+)
+serverX <= BuildUnit(
+  name <= "server-x",
+  target <= "js",
+  entry <= serverMain,
+  before <= @[escapeHook]
+)
+<<< serverX
+"#,
+    );
+
+    let output = run_taida_build(
+        &dir,
+        &["main.td", "--unit", "server-x", "--diag-format", "jsonl"],
+    );
+    assert_e1916(&output, "BuildHook.name traversal");
+}
+
+#[test]
+fn e32b_036_build_plan_name_path_traversal_rejected() {
+    let dir = project("e32b_036_plan_traversal");
+    write_file(&dir.join("server.td"), "stdout(\"server\")\n");
+    write_file(
+        &dir.join("main.td"),
+        r#"
+>>> ./server.td => @(serverMain)
+serverX <= BuildUnit(
+  name <= "server-x",
+  target <= "js",
+  entry <= serverMain
+)
+plan <= BuildPlan(
+  name <= "../../../../tmp/pwn-plan",
+  units <= @[serverX]
+)
+<<< plan
+<<< serverX
+"#,
+    );
+
+    let output = run_taida_build(&dir, &["main.td", "--all-units", "--diag-format", "jsonl"]);
+    assert_e1916(&output, "BuildPlan.name traversal");
+}
+
+#[test]
+fn e32b_036_build_unit_name_leading_dot_rejected() {
+    let dir = project("e32b_036_unit_hidden");
+    write_file(&dir.join("server.td"), "stdout(\"server\")\n");
+    write_file(
+        &dir.join("main.td"),
+        r#"
+>>> ./server.td => @(serverMain)
+serverX <= BuildUnit(
+  name <= ".hidden",
+  target <= "js",
+  entry <= serverMain
+)
+<<< serverX
+"#,
+    );
+
+    let output = run_taida_build(&dir, &["main.td", "--all-units", "--diag-format", "jsonl"]);
+    assert_e1916(&output, "BuildUnit.name leading-dot");
+}
+
+#[test]
+fn e32b_036_build_unit_name_empty_rejected() {
+    let dir = project("e32b_036_unit_empty");
+    write_file(&dir.join("server.td"), "stdout(\"server\")\n");
+    write_file(
+        &dir.join("main.td"),
+        r#"
+>>> ./server.td => @(serverMain)
+serverX <= BuildUnit(
+  name <= "",
+  target <= "js",
+  entry <= serverMain
+)
+<<< serverX
+"#,
+    );
+
+    let output = run_taida_build(&dir, &["main.td", "--all-units", "--diag-format", "jsonl"]);
+    assert_e1916(&output, "BuildUnit.name empty");
+}
