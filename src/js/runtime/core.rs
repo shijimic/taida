@@ -1744,6 +1744,24 @@ function __taida_str_search(s, rx) {
   const prefix = s.slice(0, m.index);
   return Array.from(prefix).length;
 }
+// E32B-022 (Lock-N): `searchLax` returns Lax[Int] — hasValue=true with
+// the char index on a hit, hasValue=false (default 0) on no-match.
+// PHILOSOPHY I rejects the `-1` magic value pattern of `search`.
+function __taida_str_search_lax(s, rx) {
+  if (typeof s !== 'string') return Lax(null, 0);
+  if (!__taida_is_regex(rx)) {
+    const err = new Error(
+      'str.searchLax(...) requires a Regex argument. Use Regex("pattern") to construct one.'
+    );
+    err.__taida_error_type = 'TypeError';
+    throw err;
+  }
+  const re = __taida_compile_regex(rx, false);
+  const m = s.match(re);
+  if (!m) return Lax(null, 0);
+  const prefix = s.slice(0, m.index);
+  return Lax(Array.from(prefix).length);
+}
 function Slice(val, optsOrStart, maybeEnd) {
   // C25B-031: support both forms —
   //   named:      Slice[val]({start, end})         → optsOrStart is an object
@@ -1957,6 +1975,15 @@ function FindIndex(list, fn) {
     if (fn(list[i]) === true) return i;
   }
   return -1;
+}
+// E32B-022 (Lock-N): Lax[Int]-returning replacement for the legacy
+// `-1`-sentinel `FindIndex`. Predicate semantics are identical; only
+// the return shape (Lax[Int] vs raw `-1` Int) differs.
+function FindIndexLax(list, fn) {
+  for (let i = 0; i < (list || []).length; i++) {
+    if (fn(list[i]) === true) return Lax(i);
+  }
+  return Lax(null, 0);
 }
 function Count(list, fn) {
   let c = 0;
@@ -2483,6 +2510,27 @@ if (!Array.prototype.__taida_patched) {
       return -1;
     }, enumerable: false, configurable: true
   });
+  // E32B-022 (Lock-N): Lax[Int]-returning siblings of indexOf /
+  // lastIndexOf. PHILOSOPHY I forbids `-1` magic-value sentinels;
+  // callers should use `]=>` / `<=[` / `getOrDefault(...)` off the
+  // returned Lax. Both paths use structural equality just like the
+  // `-1`-sentinel siblings above.
+  Object.defineProperty(Array.prototype, 'indexOfLax', {
+    value: function(v) {
+      for (let i = 0; i < this.length; i++) {
+        if (__taida_equals(this[i], v)) return Lax(i);
+      }
+      return Lax(null, 0);
+    }, enumerable: false, configurable: true
+  });
+  Object.defineProperty(Array.prototype, 'lastIndexOfLax', {
+    value: function(v) {
+      for (let i = this.length - 1; i >= 0; i--) {
+        if (__taida_equals(this[i], v)) return Lax(i);
+      }
+      return Lax(null, 0);
+    }, enumerable: false, configurable: true
+  });
   // any(fn) — true if any element satisfies the predicate
   Object.defineProperty(Array.prototype, 'any', {
     value: function(fn) {
@@ -2637,6 +2685,29 @@ if (!String.prototype.__taida_str_patched) {
   });
   // indexOf — already native, structural for string is identity
   // lastIndexOf — already native
+  // E32B-022 (Lock-N): String.indexOfLax / .lastIndexOfLax return
+  // Lax[Int] (PHILOSOPHY I — no `-1` magic). The returned index is
+  // char-based to match the interpreter / native runtime; JS's native
+  // .indexOf returns a code-unit offset (UTF-16) so we convert via
+  // Array.from(prefix).length, matching __taida_str_search.
+  Object.defineProperty(String.prototype, 'indexOfLax', {
+    value: function(sub) {
+      const target = String(sub);
+      const codeUnitIdx = this.indexOf(target);
+      if (codeUnitIdx < 0) return Lax(null, 0);
+      const prefix = this.slice(0, codeUnitIdx);
+      return Lax(Array.from(prefix).length);
+    }, enumerable: false, configurable: true
+  });
+  Object.defineProperty(String.prototype, 'lastIndexOfLax', {
+    value: function(sub) {
+      const target = String(sub);
+      const codeUnitIdx = this.lastIndexOf(target);
+      if (codeUnitIdx < 0) return Lax(null, 0);
+      const prefix = this.slice(0, codeUnitIdx);
+      return Lax(Array.from(prefix).length);
+    }, enumerable: false, configurable: true
+  });
   // get(index) — return Lax for string character access
   Object.defineProperty(String.prototype, 'get', {
     value: function(idx) {

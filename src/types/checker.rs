@@ -5102,6 +5102,9 @@ defaulted fields must be provided via `()`",
                     "Sum" => Type::Num,
                     "Find" => Type::Generic("Lax".to_string(), vec![Type::Unknown]),
                     "FindIndex" | "Count" => Type::Int,
+                    // E32B-022 (Lock-N): Lax[Int]-returning replacement for
+                    // the legacy `-1`-sentinel `FindIndex`.
+                    "FindIndexLax" => Type::Generic("Lax".to_string(), vec![Type::Int]),
                     // Gorillax[value]() returns Gorillax[T]
                     "Gorillax" => {
                         let inner = type_args

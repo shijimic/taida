@@ -2119,6 +2119,51 @@ impl Interpreter {
                 }
                 Ok(Some(Signal::Value(Value::Int(-1))))
             }
+            // E32B-022 (Lock-N): Lax[Int]-returning replacement for the
+            // legacy `-1`-sentinel `FindIndex`. Predicate signature and
+            // semantics are identical, only the return shape differs.
+            "FindIndexLax" => {
+                if type_args.len() < 2 {
+                    return Err(RuntimeError {
+                        message: "FindIndexLax requires 2 arguments: FindIndexLax[list, fn]()"
+                            .into(),
+                    });
+                }
+                let list = match self.eval_expr(&type_args[0])? {
+                    Signal::Value(Value::List(items)) => items,
+                    Signal::Value(v) => {
+                        return Err(RuntimeError {
+                            message: format!(
+                                "FindIndexLax: first argument must be a list, got {}",
+                                v
+                            ),
+                        });
+                    }
+                    other => return Ok(Some(other)),
+                };
+                let func = match self.eval_expr(&type_args[1])? {
+                    Signal::Value(Value::Function(f)) => f,
+                    Signal::Value(v) => {
+                        return Err(RuntimeError {
+                            message: format!(
+                                "FindIndexLax: second argument must be a function, got {}",
+                                v
+                            ),
+                        });
+                    }
+                    other => return Ok(Some(other)),
+                };
+                let mut found: Option<i64> = None;
+                for (i, item) in list.iter().enumerate() {
+                    let result =
+                        self.call_function_with_values(&func, std::slice::from_ref(item))?;
+                    if result.is_truthy() {
+                        found = Some(i as i64);
+                        break;
+                    }
+                }
+                Ok(Some(Signal::Value(super::methods::make_int_lax(found))))
+            }
             "Count" => {
                 if type_args.len() < 2 {
                     return Err(RuntimeError {

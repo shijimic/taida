@@ -167,6 +167,8 @@ impl Lowering {
             // we err on the side of a well-defined empty result).
             "match" => "taida_str_match_regex",
             "search" => "taida_str_search_regex",
+            // E32B-022 (Lock-N): Lax[Int]-returning sibling of `search`.
+            "searchLax" => "taida_str_search_regex_lax",
             "slice" => "taida_str_slice",
             "charAt" => "taida_str_char_at",
             "repeat" => "taida_str_repeat",
@@ -180,6 +182,9 @@ impl Lowering {
             "indexOf" => "taida_polymorphic_index_of",
             // Polymorphic: Str.lastIndexOf(substr) vs List.lastIndexOf(val)
             "lastIndexOf" => "taida_polymorphic_last_index_of",
+            // E32B-022 (Lock-N): Lax[Int]-returning siblings (no `-1` sentinel).
+            "indexOfLax" => "taida_polymorphic_index_of_lax",
+            "lastIndexOfLax" => "taida_polymorphic_last_index_of_lax",
             // List methods
             "first" => "taida_list_first",
             "last" => "taida_list_last",

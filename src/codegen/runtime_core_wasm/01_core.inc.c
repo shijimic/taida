@@ -3805,6 +3805,32 @@ int64_t taida_polymorphic_last_index_of(int64_t obj, int64_t needle) {
     return -1;
 }
 
+/* E32B-022 (Lock-N): Lax[Int]-returning siblings of the legacy `-1`
+ * sentinel `*indexOf*` helpers.  Same probe semantics as the raw
+ * helpers above; the `-1` sentinel is rewritten to a hasValue=false
+ * Lax with default 0 (PHILOSOPHY I — no magic-value sentinels).  */
+extern int64_t taida_list_find_index(int64_t list_ptr, int64_t fn_ptr);
+static int64_t _taida_int_lax_found_wasm(int64_t idx) { return taida_lax_new(idx, 0); }
+static int64_t _taida_int_lax_missing_wasm(void) { return taida_lax_empty(0); }
+
+int64_t taida_polymorphic_index_of_lax(int64_t obj, int64_t needle) {
+    int64_t raw = taida_polymorphic_index_of(obj, needle);
+    if (raw < 0) return _taida_int_lax_missing_wasm();
+    return _taida_int_lax_found_wasm(raw);
+}
+
+int64_t taida_polymorphic_last_index_of_lax(int64_t obj, int64_t needle) {
+    int64_t raw = taida_polymorphic_last_index_of(obj, needle);
+    if (raw < 0) return _taida_int_lax_missing_wasm();
+    return _taida_int_lax_found_wasm(raw);
+}
+
+int64_t taida_list_find_index_lax(int64_t list_ptr, int64_t fn_ptr) {
+    int64_t raw = taida_list_find_index(list_ptr, fn_ptr);
+    if (raw < 0) return _taida_int_lax_missing_wasm();
+    return _taida_int_lax_found_wasm(raw);
+}
+
 /* Polymorphic .map(fn) */
 int64_t taida_polymorphic_map(int64_t obj, int64_t fn_ptr) {
     if (obj == 0) return obj;

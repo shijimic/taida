@@ -1530,6 +1530,25 @@ impl Lowering {
                 ));
                 Ok(result)
             }
+            // E32B-022 (Lock-N): Lax[Int]-returning replacement for the
+            // legacy `-1`-sentinel `FindIndex`.
+            "FindIndexLax" => {
+                if type_args.len() < 2 {
+                    return Err(LowerError {
+                        message: "FindIndexLax requires 2 arguments: FindIndexLax[list, fn]()"
+                            .into(),
+                    });
+                }
+                let list = self.lower_expr(func, &type_args[0])?;
+                let fn_var = self.lower_expr(func, &type_args[1])?;
+                let result = func.alloc_var();
+                func.push(IrInst::Call(
+                    result,
+                    "taida_list_find_index_lax".to_string(),
+                    vec![list, fn_var],
+                ));
+                Ok(result)
+            }
             "Count" => {
                 if type_args.len() < 2 {
                     return Err(LowerError {

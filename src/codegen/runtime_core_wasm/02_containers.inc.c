@@ -1436,6 +1436,13 @@ int64_t taida_str_search_regex(int64_t s_raw, int64_t regex_raw) {
     (void)s_raw; (void)regex_raw;
     return -1;
 }
+/* E32B-022 (Lock-N): wasm Regex stub — same no-op semantics as
+ * `taida_str_search_regex`, surfaced as a hasValue=false Lax[Int] so the
+ * caller path matches Interpreter / Native / JS shape. */
+int64_t taida_str_search_regex_lax(int64_t s_raw, int64_t regex_raw) {
+    (void)s_raw; (void)regex_raw;
+    return taida_lax_empty(0);
+}
 int64_t taida_regex_new(int64_t pattern_raw, int64_t flags_raw) {
     /* Build a minimal Regex "pack" that callers can inspect only if
      * they go back through the Regex-aware code paths (which don't

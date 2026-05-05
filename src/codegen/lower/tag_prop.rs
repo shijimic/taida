@@ -59,7 +59,7 @@ impl Lowering {
                 )
             }
             Expr::UnaryOp(UnaryOp::Not, _, _) => true,
-            Expr::MethodCall(obj, method, _, _) => {
+            Expr::MethodCall(obj, method, args, _) => {
                 if matches!(
                     method.as_str(),
                     "hasValue"
@@ -84,6 +84,17 @@ impl Lowering {
                         | "isNegative"
                         | "isZero"
                 ) {
+                    return true;
+                }
+                // E32B-030: `Lax[T] / Result[T,_] / Async[T] .getOrDefault(default)`
+                // returns the inner T. Since E32B-021's type-checker `[E1508]` now
+                // requires `default` to match T at compile time, the static type
+                // of the default arg is a sound proxy for the result type. Without
+                // this rule, `Lax[Bool].getOrDefault(false).toString()` falls
+                // through to `taida_polymorphic_to_string`, which only sees a
+                // raw i64 and renders Bool values as `0`/`1` on Native — breaking
+                // 3-backend parity that Interpreter / JS already satisfy.
+                if method == "getOrDefault" && args.len() == 1 && self.expr_is_bool(&args[0]) {
                     return true;
                 }
                 // E30 Phase 8 / E30B-011: pack field call whose declared
@@ -296,6 +307,12 @@ impl Lowering {
                 match method.as_str() {
                     "toString" | "toUpperCase" | "toLowerCase" => 3,
                     "length" | "indexOf" | "lastIndexOf" => 0, // known Int-returning methods
+                    // E32B-022 (Lock-N): Lax[Int]-returning siblings.
+                    // Tag 4 = Pack (Lax) so `stdout(x.indexOfLax(...))` is
+                    // dispatched through the Pack stdout path that
+                    // renders the BuchiPack contents instead of decoding
+                    // the pointer as a raw Int.
+                    "indexOfLax" | "lastIndexOfLax" | "searchLax" => 4,
                     "map" | "filter" | "flatMap" | "sort" | "unique" | "flatten" | "reverse"
                     | "concat" | "append" | "prepend" | "zip" | "enumerate" => 5,
                     _ => -1, // TAIDA_TAG_UNKNOWN

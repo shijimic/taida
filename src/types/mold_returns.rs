@@ -89,6 +89,9 @@ pub fn lookup_mold_return_kind(name: &str) -> Option<MoldReturnKind> {
         // "Lax")`.
         "Int" => Pack,
         "Length" | "Count" | "IndexOf" | "LastIndexOf" | "FindIndex" => Int,
+        // E32B-022 (Lock-N): `FindIndexLax` mirrors `FindIndex` but
+        // returns Lax[Int] (Pack) instead of `-1` on no match.
+        "FindIndexLax" => Pack,
         "Floor" | "Ceil" | "Round" | "Truncate" => Int,
         "BitAnd" | "BitOr" | "BitXor" | "BitNot" => Int,
         // C18-3: `Ordinal[Enum:Variant()]()` — explicit Enum → Int.

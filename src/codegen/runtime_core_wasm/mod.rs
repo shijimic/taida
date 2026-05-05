@@ -446,8 +446,14 @@ mod tests {
     /// (Lock-K verdict V-1) implements rope promotion transparently via
     /// `StrRepr::Rope` so 4-backend surface parity is preserved against
     /// the existing wasm-wasi `_wf_str_*` heap-copy path.
+    /// E32B-022 (Lock-N, 2026-05-05): 333,867 → 335,420 (+1,553).
+    /// Added `_taida_int_lax_*` helpers + four Lax[Int]-returning siblings
+    /// (`taida_polymorphic_index_of_lax`, `taida_polymorphic_last_index_of_lax`,
+    /// `taida_list_find_index_lax` in 01_core.inc.c, `taida_str_search_regex_lax`
+    /// stub in 02_containers.inc.c). PHILOSOPHY I — drop the `-1` magic
+    /// sentinel from caller-visible APIs.
     fn test_runtime_core_wasm_fragment_concat_preserves_bytes() {
-        const EXPECTED_TOTAL_LEN: usize = 333_867;
+        const EXPECTED_TOTAL_LEN: usize = 335_420;
         let asm = *RUNTIME_CORE_WASM;
         assert_eq!(
             asm.len(),

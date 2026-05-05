@@ -230,9 +230,10 @@ stdout(m.start)      // 4  (char index, not byte index)
 
 **シグネチャ**: `pattern: Regex => :RegexMatch`
 
-一致なしの場合 `hasValue <= false`, `full <= ""`, `groups <= @[]`,
-`start <= -1` のぶちパックを返します（null / undefined は返さない —
-哲学 I）。
+一致なしの場合 `hasValue <= false`, `full <= ""`, `groups <= @[]` の
+ぶちパックを返します（null / undefined は返さない — 哲学 I）。
+`hasValue` を確認する前に `start` を読まないでください。位置だけ必要な
+場合は `searchLax` の `Lax[Int]` を直接使う方が安全です。
 
 #### searchLax (推奨)
 

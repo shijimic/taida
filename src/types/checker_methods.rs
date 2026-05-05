@@ -15,6 +15,9 @@ impl TypeChecker {
                 "length" | "toString" => Some((0, 0, vec![])),
                 "contains" | "startsWith" | "endsWith" => Some((1, 1, vec![Type::Str])),
                 "indexOf" | "lastIndexOf" => Some((1, 1, vec![Type::Str])),
+                // E32B-022 (Lock-N): Lax[Int] additive replacements for
+                // the legacy `-1` sentinel methods.
+                "indexOfLax" | "lastIndexOfLax" => Some((1, 1, vec![Type::Str])),
                 "get" => Some((1, 1, vec![Type::Int])),
                 // B11-4e: replace / replaceAll / split — fixed-string overload.
                 // C12-6c: first argument may also be a :Regex BuchiPack
@@ -32,6 +35,9 @@ impl TypeChecker {
                 // Interpreter/JS threw at runtime, Native silently returned
                 // an empty match — see C12B-031).
                 "match" | "search" => Some((1, 1, vec![Type::Named("Regex".to_string())])),
+                // E32B-022 (Lock-N): `searchLax` mirrors `search` but
+                // returns Lax[Int] instead of `-1` on no-match.
+                "searchLax" => Some((1, 1, vec![Type::Named("Regex".to_string())])),
                 _ => None,
             },
             Type::Int | Type::Float | Type::Num => match method {
@@ -58,6 +64,8 @@ impl TypeChecker {
                 "get" => Some((1, 1, vec![Type::Int])),
                 "contains" => Some((1, 1, vec![Type::Unknown])), // element type varies
                 "indexOf" | "lastIndexOf" => Some((1, 1, vec![Type::Unknown])),
+                // E32B-022 (Lock-N): Lax[Int] additive replacements.
+                "indexOfLax" | "lastIndexOfLax" => Some((1, 1, vec![Type::Unknown])),
                 "any" | "all" | "none" => Some((1, 1, vec![Type::Unknown])), // predicate
                 "take" | "drop" => Some((1, 1, vec![Type::Int])),
                 "unique" | "reverse" | "sort" | "flatten" => Some((0, 0, vec![])),
@@ -91,22 +99,39 @@ impl TypeChecker {
                 "toString" => Some((0, 0, vec![])),
                 _ => None,
             },
-            Type::Generic(name, _) if name == "Lax" => match method {
-                "hasValue" | "isEmpty" => Some((0, 0, vec![])),
-                "getOrDefault" => Some((1, 1, vec![Type::Unknown])),
-                "map" | "flatMap" => Some((1, 1, vec![Type::Unknown])), // function arg
-                "unmold" => Some((0, 0, vec![])),
-                "toString" => Some((0, 0, vec![])),
-                _ => None,
-            },
-            Type::Generic(name, _) if name == "Result" => match method {
-                "isSuccess" | "isError" => Some((0, 0, vec![])),
-                "map" | "flatMap" | "mapError" => Some((1, 1, vec![Type::Unknown])),
-                "getOrDefault" => Some((1, 1, vec![Type::Unknown])),
-                "getOrThrow" => Some((0, 0, vec![])),
-                "toString" => Some((0, 0, vec![])),
-                _ => None,
-            },
+            Type::Generic(name, inner_args) if name == "Lax" => {
+                // E32B-021 (Lock-M): the `default` arg of `getOrDefault`
+                // must match the Lax inner type T. Previously
+                // `Type::Unknown` silently accepted `Lax[Str].getOrDefault(99)`
+                // and broke at runtime. PHILOSOPHY I — no silent type drift.
+                // `getOrThrow` is Result-only on the runtime side; Lax does
+                // not currently surface it, so we leave the existing arity-only
+                // signature for Result below.
+                let inner = inner_args.first().cloned().unwrap_or(Type::Unknown);
+                match method {
+                    "hasValue" | "isEmpty" => Some((0, 0, vec![])),
+                    "getOrDefault" => Some((1, 1, vec![inner])),
+                    // function arg — receiver shape, not strict
+                    "map" | "flatMap" => Some((1, 1, vec![Type::Unknown])),
+                    "unmold" => Some((0, 0, vec![])),
+                    "toString" => Some((0, 0, vec![])),
+                    _ => None,
+                }
+            }
+            Type::Generic(name, inner_args) if name == "Result" => {
+                // E32B-021 (Lock-M): match Lax/Result behaviour — both
+                // accumulators (success type at index 0) get strict
+                // `default` arg type checking.
+                let success_ty = inner_args.first().cloned().unwrap_or(Type::Unknown);
+                match method {
+                    "isSuccess" | "isError" => Some((0, 0, vec![])),
+                    "map" | "flatMap" | "mapError" => Some((1, 1, vec![Type::Unknown])),
+                    "getOrDefault" => Some((1, 1, vec![success_ty])),
+                    "getOrThrow" => Some((0, 0, vec![])),
+                    "toString" => Some((0, 0, vec![])),
+                    _ => None,
+                }
+            }
             _ => {
                 // N-66: For unknown/unresolved receiver types (Type::Unknown, Type::Any,
                 // Type::Generic for non-Lax/Result/Async, user-defined Named types without
@@ -200,6 +225,11 @@ impl TypeChecker {
                 "length" => Type::Int,
                 "contains" | "startsWith" | "endsWith" => Type::Bool,
                 "indexOf" | "lastIndexOf" => Type::Int,
+                // E32B-022 (Lock-N): Lax[Int] return for additive `*Lax`
+                // replacements of the legacy `-1` sentinel methods.
+                "indexOfLax" | "lastIndexOfLax" => {
+                    Type::Generic("Lax".to_string(), vec![Type::Int])
+                }
                 "get" => Type::Generic("Lax".to_string(), vec![Type::Str]),
                 "toString" => Type::Str,
                 // B11-4e: replace / replaceAll / split (fixed-string + C12-6 Regex overload)
@@ -211,6 +241,7 @@ impl TypeChecker {
                 // through the BuchiPack path at runtime.
                 "match" => Type::Named("RegexMatch".to_string()),
                 "search" => Type::Int,
+                "searchLax" => Type::Generic("Lax".to_string(), vec![Type::Int]),
                 _ => Type::Unknown,
             },
             Type::Int | Type::Float | Type::Num => match method {
@@ -241,6 +272,11 @@ impl TypeChecker {
                 "get" => Type::Generic("Lax".to_string(), vec![*inner.clone()]),
                 "contains" => Type::Bool,
                 "indexOf" | "lastIndexOf" => Type::Int,
+                // E32B-022 (Lock-N): Lax[Int] return for additive `*Lax`
+                // replacements of the legacy `-1` sentinel methods.
+                "indexOfLax" | "lastIndexOfLax" => {
+                    Type::Generic("Lax".to_string(), vec![Type::Int])
+                }
                 "any" | "all" | "none" => Type::Bool,
                 "toString" => Type::Str,
                 _ => Type::Unknown,

@@ -723,6 +723,13 @@ taida_val taida_typeof(taida_val val, taida_val tag);
 taida_val taida_polymorphic_contains(taida_val obj, taida_val needle);
 taida_val taida_polymorphic_index_of(taida_val obj, taida_val needle);
 taida_val taida_polymorphic_last_index_of(taida_val obj, taida_val needle);
+// E32B-022 (Lock-N): Lax[Int]-returning siblings for the legacy `-1`
+// sentinel `*indexOf*` / `search` / `FindIndex` helpers. PHILOSOPHY I
+// forbids magic-value sentinels.
+taida_val taida_polymorphic_index_of_lax(taida_val obj, taida_val needle);
+taida_val taida_polymorphic_last_index_of_lax(taida_val obj, taida_val needle);
+taida_val taida_str_search_regex_lax(const char *s, taida_val regex_pack);
+taida_val taida_list_find_index_lax(taida_val list_ptr, taida_val fn_ptr);
 // C12-6c: Regex polymorphic dispatchers + constructor.
 taida_val taida_regex_new(const char *pattern_s, const char *flags_s);
 taida_val taida_str_split_poly(const char *s, taida_val sep);
@@ -6551,6 +6558,58 @@ taida_val taida_polymorphic_last_index_of(taida_val obj, taida_val needle) {
         return taida_list_last_index_of(obj, needle);
     }
     return taida_str_last_index_of((const char*)obj, (const char*)needle);
+}
+
+// E32B-022 (Lock-N): Lax[Int]-returning siblings of the legacy
+// `*indexOf*` helpers. The Lax pack uses Int default 0 for the
+// hasValue=false case to honour PHILOSOPHY I (no magic sentinels).
+static taida_val taida_make_int_lax_found(taida_val idx) {
+    taida_ptr lax = (taida_ptr)taida_lax_new(idx, 0);
+    // Match `taida_lax_to_string` expectations — the value/default tags
+    // were already initialised by `taida_lax_new`/`taida_lax_empty` to
+    // TAIDA_TAG_INT for the int path.
+    return (taida_val)lax;
+}
+
+static taida_val taida_make_int_lax_missing(void) {
+    taida_ptr lax = (taida_ptr)taida_lax_empty(0);
+    return (taida_val)lax;
+}
+
+taida_val taida_polymorphic_index_of_lax(taida_val obj, taida_val needle) {
+    if (obj == 0 || obj < 4096) return taida_make_int_lax_missing();
+    if (taida_ptr_is_readable(obj, 8) && taida_has_magic_header(((taida_val*)obj)[0])) {
+        taida_val raw = taida_list_index_of(obj, needle);
+        if (raw < 0) return taida_make_int_lax_missing();
+        return taida_make_int_lax_found(raw);
+    }
+    taida_val raw = taida_str_index_of((const char*)obj, (const char*)needle);
+    if (raw < 0) return taida_make_int_lax_missing();
+    return taida_make_int_lax_found(raw);
+}
+
+taida_val taida_polymorphic_last_index_of_lax(taida_val obj, taida_val needle) {
+    if (obj == 0 || obj < 4096) return taida_make_int_lax_missing();
+    if (taida_ptr_is_readable(obj, 8) && taida_has_magic_header(((taida_val*)obj)[0])) {
+        taida_val raw = taida_list_last_index_of(obj, needle);
+        if (raw < 0) return taida_make_int_lax_missing();
+        return taida_make_int_lax_found(raw);
+    }
+    taida_val raw = taida_str_last_index_of((const char*)obj, (const char*)needle);
+    if (raw < 0) return taida_make_int_lax_missing();
+    return taida_make_int_lax_found(raw);
+}
+
+taida_val taida_str_search_regex_lax(const char *s, taida_val regex_pack) {
+    taida_val raw = taida_str_search_regex(s, regex_pack);
+    if (raw < 0) return taida_make_int_lax_missing();
+    return taida_make_int_lax_found(raw);
+}
+
+taida_val taida_list_find_index_lax(taida_val list_ptr, taida_val fn_ptr) {
+    taida_val raw = taida_list_find_index(list_ptr, fn_ptr);
+    if (raw < 0) return taida_make_int_lax_missing();
+    return taida_make_int_lax_found(raw);
 }
 
 // ── Polymorphic collection methods ───────────────────────

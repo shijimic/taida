@@ -138,6 +138,7 @@ const PRELUDE_RESERVED_IDENTS: &[&str] = &[
     "Filter",
     "Find",
     "FindIndex",
+    "FindIndexLax",
     "Flatten",
     "Float_mold",
     "Float_mold_f",
@@ -3190,6 +3191,7 @@ impl JsCodegen {
                     || method == "split"
                     || method == "match"
                     || method == "search"
+                    || method == "searchLax"
                 {
                     let helper = match method.as_str() {
                         "replace" => "__taida_str_replace",
@@ -3197,6 +3199,10 @@ impl JsCodegen {
                         "split" => "__taida_str_split",
                         "match" => "__taida_str_match",
                         "search" => "__taida_str_search",
+                        // E32B-022 (Lock-N): `searchLax` is a Lax[Int]
+                        // sibling of `search`; the runtime helper handles
+                        // the Regex argument dispatch.
+                        "searchLax" => "__taida_str_search_lax",
                         _ => unreachable!(),
                     };
                     self.write(&format!("{}(", helper));

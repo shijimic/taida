@@ -504,6 +504,11 @@ fn runtime_abi(name: &str) -> Result<RuntimeAbi, String> {
             params: &[Ptr, Ptr],
             returns: &[Val],
         },
+        // E32B-022 (Lock-N): Lax[Int]-returning sibling — Pack pointer.
+        "taida_str_search_regex_lax" => RuntimeAbi {
+            params: &[Ptr, Ptr],
+            returns: &[Ptr],
+        },
         "taida_regex_new" => RuntimeAbi {
             params: &[Ptr, Ptr],
             returns: &[Ptr],
@@ -718,6 +723,11 @@ fn runtime_abi(name: &str) -> Result<RuntimeAbi, String> {
             returns: &[Ptr],
         },
         "taida_list_find_index" => RuntimeAbi {
+            params: &[Ptr, FnPtr],
+            returns: &[Ptr],
+        },
+        // E32B-022 (Lock-N): Lax[Int]-returning sibling.
+        "taida_list_find_index_lax" => RuntimeAbi {
             params: &[Ptr, FnPtr],
             returns: &[Ptr],
         },
@@ -1026,6 +1036,15 @@ fn runtime_abi(name: &str) -> Result<RuntimeAbi, String> {
         "taida_polymorphic_last_index_of" => RuntimeAbi {
             params: &[Val, Val],
             returns: &[Val],
+        },
+        // E32B-022 (Lock-N): Lax[Int]-returning siblings (Pack pointer).
+        "taida_polymorphic_index_of_lax" => RuntimeAbi {
+            params: &[Val, Val],
+            returns: &[Ptr],
+        },
+        "taida_polymorphic_last_index_of_lax" => RuntimeAbi {
+            params: &[Val, Val],
+            returns: &[Ptr],
         },
         "taida_polymorphic_get_or_default" => RuntimeAbi {
             params: &[Val, Val],

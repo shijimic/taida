@@ -41,6 +41,27 @@ fn try_build_fingerprint_set(items: &[Value]) -> Option<HashSet<u64>> {
     Some(set)
 }
 
+/// E32B-022 (Lock-N): build a `Lax[Int]` BuchiPack for the new `*Lax`
+/// methods that replaced the legacy `-1` sentinel. `Some(i)` becomes a
+/// hasValue=true pack; `None` becomes the hasValue=false default with
+/// `__value` = `__default` = `0` (Int's PHILOSOPHY-I default).
+pub(crate) fn make_int_lax(idx: Option<i64>) -> Value {
+    match idx {
+        Some(i) => Value::pack(vec![
+            ("hasValue".into(), Value::Bool(true)),
+            ("__value".into(), Value::Int(i)),
+            ("__default".into(), Value::Int(0)),
+            ("__type".into(), Value::str("Lax".into())),
+        ]),
+        None => Value::pack(vec![
+            ("hasValue".into(), Value::Bool(false)),
+            ("__value".into(), Value::Int(0)),
+            ("__default".into(), Value::Int(0)),
+            ("__type".into(), Value::str("Lax".into())),
+        ]),
+    }
+}
+
 impl Interpreter {
     /// Evaluate auto-mold method calls on values.
     pub(crate) fn eval_method_call(
@@ -1234,6 +1255,33 @@ impl Interpreter {
                     .unwrap_or(-1);
                 Ok(Signal::Value(Value::Int(idx)))
             }
+            // E32B-022 (Lock-N): Lax[Int]-returning replacements for the
+            // legacy `-1` sentinel methods. PHILOSOPHY I forbids magic
+            // values; callers should use `]=>` / `<=[` / `getOrDefault(...)`
+            // off the returned Lax. Old methods stay around as
+            // `@deprecated since="e.X"` (gen-F removal candidate).
+            "indexOfLax" => {
+                let substr = args
+                    .first()
+                    .map(|v| v.to_display_string())
+                    .unwrap_or_default();
+                let idx = s
+                    .as_str()
+                    .find(&substr)
+                    .and_then(|byte_pos| s.cached_byte_to_char_index(byte_pos));
+                Ok(Signal::Value(make_int_lax(idx.map(|i| i as i64))))
+            }
+            "lastIndexOfLax" => {
+                let substr = args
+                    .first()
+                    .map(|v| v.to_display_string())
+                    .unwrap_or_default();
+                let idx = s
+                    .as_str()
+                    .rfind(&substr)
+                    .and_then(|byte_pos| s.cached_byte_to_char_index(byte_pos));
+                Ok(Signal::Value(make_int_lax(idx.map(|i| i as i64))))
+            }
             // Safe access (returns Lax)
             "get" => {
                 let idx = match args.first() {
@@ -1382,9 +1430,24 @@ impl Interpreter {
                     Err(msg) => Err(RuntimeError { message: msg }),
                 }
             }
+            // E32B-022 (Lock-N): `searchLax` returns Lax[Int] so callers
+            // never see a `-1` sentinel.
+            "searchLax" => {
+                let (pat, flags) = args
+                    .first()
+                    .and_then(super::regex_eval::as_regex)
+                    .ok_or_else(|| RuntimeError {
+                        message: "str.searchLax(...) requires a Regex argument. Use Regex(\"pattern\") to construct one.".to_string(),
+                    })?;
+                match super::regex_eval::match_first(s.as_str(), &pat, &flags) {
+                    Ok(Some(m)) => Ok(Signal::Value(make_int_lax(Some(m.start)))),
+                    Ok(None) => Ok(Signal::Value(make_int_lax(None))),
+                    Err(msg) => Err(RuntimeError { message: msg }),
+                }
+            }
             _ => Err(RuntimeError {
                 message: format!(
-                    "Unknown string method: '{}'. Available: length, contains, startsWith, endsWith, indexOf, lastIndexOf, get, replace, replaceAll, split, match, search, toString",
+                    "Unknown string method: '{}'. Available: length, contains, startsWith, endsWith, indexOf, indexOfLax, lastIndexOf, lastIndexOfLax, get, replace, replaceAll, split, match, search, searchLax, toString",
                     method
                 ),
             }),
@@ -1530,6 +1593,18 @@ impl Interpreter {
                     idx.map(|i| i as i64).unwrap_or(-1),
                 )))
             }
+            // E32B-022 (Lock-N): Lax[Int]-returning replacements for the
+            // legacy `-1` sentinel methods.
+            "indexOfLax" => {
+                let target = args.first().cloned().unwrap_or(Value::Unit);
+                let idx = items.iter().position(|v| v == &target);
+                Ok(Signal::Value(make_int_lax(idx.map(|i| i as i64))))
+            }
+            "lastIndexOfLax" => {
+                let target = args.first().cloned().unwrap_or(Value::Unit);
+                let idx = items.iter().rposition(|v| v == &target);
+                Ok(Signal::Value(make_int_lax(idx.map(|i| i as i64))))
+            }
             "max" => {
                 if items.is_empty() {
                     Ok(Signal::Value(Value::pack(vec![
@@ -1637,7 +1712,7 @@ impl Interpreter {
             ))),
             _ => Err(RuntimeError {
                 message: format!(
-                    "Unknown list method: '{}'. Operations moved to molds: Reverse[], Concat[], Append[], Prepend[], Join[], Sum[], Sort[], Unique[], Flatten[], Find[], FindIndex[], Count[]",
+                    "Unknown list method: '{}'. Operations moved to molds: Reverse[], Concat[], Append[], Prepend[], Join[], Sum[], Sort[], Unique[], Flatten[], Find[], FindIndex[], FindIndexLax[], Count[]",
                     method
                 ),
             }),

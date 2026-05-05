@@ -836,6 +836,13 @@ fn runtime_func_prototype(name: &str, profile: WasmProfile) -> Result<String, Wa
         "taida_str_search_regex" => {
             "int64_t taida_str_search_regex(int64_t s, int64_t regex);".to_string()
         }
+        // E32B-022 (Lock-N): Lax[Int]-returning sibling. wasm has only a
+        // stub regex implementation, so the function exists for surface
+        // parity but always returns a hasValue=false Lax (rejected at
+        // compile time when actually used through `validate_regex_api_for_wasm`).
+        "taida_str_search_regex_lax" => {
+            "int64_t taida_str_search_regex_lax(int64_t s, int64_t regex);".to_string()
+        }
         "taida_regex_new" => {
             "int64_t taida_regex_new(int64_t pattern, int64_t flags);".to_string()
         }
@@ -913,7 +920,7 @@ fn runtime_func_prototype(name: &str, profile: WasmProfile) -> Result<String, Wa
         "taida_list_fold" | "taida_list_foldr" => {
             format!("int64_t {}(int64_t list, int64_t init, int64_t fn_ptr);", name)
         }
-        "taida_list_find" | "taida_list_find_index" => {
+        "taida_list_find" | "taida_list_find_index" | "taida_list_find_index_lax" => {
             format!("int64_t {}(int64_t list, int64_t fn_ptr);", name)
         }
         "taida_list_take_while" | "taida_list_drop_while"
@@ -1056,7 +1063,8 @@ fn runtime_func_prototype(name: &str, profile: WasmProfile) -> Result<String, Wa
         "taida_read_cstr_len_safe" => "int64_t taida_read_cstr_len_safe(int64_t ptr, int64_t max);".to_string(),
         // WC-6e: Polymorphic extensions (all profiles — implemented in runtime_core_wasm.c)
         "taida_polymorphic_contains" | "taida_polymorphic_get_or_default"
-        | "taida_polymorphic_index_of" | "taida_polymorphic_last_index_of" => {
+        | "taida_polymorphic_index_of" | "taida_polymorphic_last_index_of"
+        | "taida_polymorphic_index_of_lax" | "taida_polymorphic_last_index_of_lax" => {
             format!("int64_t {}(int64_t ptr, int64_t item);", name)
         }
         "taida_polymorphic_has_value" => "int64_t taida_polymorphic_has_value(int64_t ptr);".to_string(),

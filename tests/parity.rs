@@ -5630,6 +5630,59 @@ stdout(catch_fn(1))
 }
 
 #[test]
+fn rc6e_custom_error_typed_ceiling_filter() {
+    let source = r#"
+Error => BaseErr = @()
+BaseErr => ChildErr = @()
+
+throwChild msg =
+  ChildErr(type <= "ChildErr", message <= msg).throw()
+  ""
+=> :Str
+
+throwBase msg =
+  BaseErr(type <= "BaseErr", message <= msg).throw()
+  ""
+=> :Str
+
+catch_parent x =
+  |== e: BaseErr =
+    "parent:" + e.type + ":" + e.message
+  => :Str
+  throwChild("child")
+=> :Str
+
+catch_exact x =
+  |== e: ChildErr =
+    "child:" + e.type + ":" + e.message
+  => :Str
+  throwChild("exact")
+=> :Str
+
+catch_mismatch x =
+  |== e: ChildErr =
+    "bad:" + e.type
+  => :Str
+  |== e: Error =
+    "outer:" + e.type + ":" + e.message
+  => :Str
+  throwBase("base")
+=> :Str
+
+stdout(catch_parent(0))
+stdout(catch_exact(0))
+stdout(catch_mismatch(0))
+"#;
+    assert_backend_parity_for_source(source, "rc6e_custom_error_typed_ceiling_filter");
+    let out = run_interpreter_src(source, "rc6e_custom_error_typed_ceiling_filter_expected")
+        .expect("interpreter failed for rc6e expected output");
+    assert_eq!(
+        out.trim(),
+        "parent:ChildErr:child\nchild:ChildErr:exact\nouter:BaseErr:base"
+    );
+}
+
+#[test]
 fn rc6f_custom_inheritance_basic() {
     let source = r#"
 Vehicle = @(name: Str, speed: Int)
@@ -38872,4 +38925,226 @@ stdout(b.label)
         assert_eq!(interp, js);
     }
     let _ = fs::remove_dir_all(&dir);
+}
+
+// ── E32B-022 (Lock-N): Lax[Int]-returning index methods ────────
+//
+// Pin the 3-backend parity (Interpreter / Native / JS) of the additive
+// `*Lax` siblings that replace the legacy `-1` sentinel methods. The
+// `-1` siblings stay around as deprecated and are NOT removed in E32 —
+// pinning their continued existence is left to the existing `indexOf`
+// tests above. Each new pin asserts:
+//   - hasValue=true path returns Lax(<idx>) for found elements
+//   - hasValue=false path returns Lax(default: 0) for missing — the
+//     `__default` is `0` (Int's default) and never the legacy `-1`
+//   - the toString() and getOrDefault() shapes match across backends
+#[test]
+fn e32b_022_string_index_of_lax_4backend_parity() {
+    let source = r#"
+"hello".indexOfLax("ll") ]=> i
+stdout("found:" + i.toString())
+"hello".indexOfLax("xyz") ]=> j
+stdout("missing:" + j.toString())
+stdout("missing_hv:" + "hello".indexOfLax("xyz").hasValue.toString())
+stdout("missing_def:" + "hello".indexOfLax("xyz").getOrDefault(7).toString())
+"#;
+    assert_backend_parity_for_source(source, "e32b_022_string_index_of_lax");
+}
+
+#[test]
+fn e32b_022_string_last_index_of_lax_4backend_parity() {
+    let source = r#"
+"hello world hello".lastIndexOfLax("hello") ]=> i
+stdout("found:" + i.toString())
+"hello".lastIndexOfLax("xyz") ]=> j
+stdout("missing:" + j.toString())
+stdout("missing_hv:" + "hello".lastIndexOfLax("xyz").hasValue.toString())
+"#;
+    assert_backend_parity_for_source(source, "e32b_022_string_last_index_of_lax");
+}
+
+#[test]
+fn e32b_022_list_index_of_lax_4backend_parity() {
+    let source = r#"
+@[10, 20, 30].indexOfLax(20) ]=> i
+stdout("found:" + i.toString())
+@[10, 20, 30].indexOfLax(99) ]=> j
+stdout("missing:" + j.toString())
+stdout("missing_hv:" + @[10, 20, 30].indexOfLax(99).hasValue.toString())
+stdout("missing_def:" + @[10, 20, 30].indexOfLax(99).getOrDefault(42).toString())
+"#;
+    assert_backend_parity_for_source(source, "e32b_022_list_index_of_lax");
+}
+
+#[test]
+fn e32b_022_list_last_index_of_lax_4backend_parity() {
+    let source = r#"
+@[10, 20, 30, 20].lastIndexOfLax(20) ]=> i
+stdout("found:" + i.toString())
+@[10, 20, 30].lastIndexOfLax(99) ]=> j
+stdout("missing:" + j.toString())
+stdout("missing_hv:" + @[10, 20, 30].lastIndexOfLax(99).hasValue.toString())
+"#;
+    assert_backend_parity_for_source(source, "e32b_022_list_last_index_of_lax");
+}
+
+#[test]
+fn e32b_022_find_index_lax_4backend_parity() {
+    let source = r#"
+isEven n =
+  Mod[n, 2]() ]=> rem
+  rem == 0
+=> :Bool
+
+allOdd n =
+  false
+=> :Bool
+
+FindIndexLax[@[1, 2, 3, 4], isEven]() ]=> i
+stdout("found:" + i.toString())
+FindIndexLax[@[1, 2, 3, 4], allOdd]() ]=> j
+stdout("missing:" + j.toString())
+stdout("missing_hv:" + FindIndexLax[@[1, 2, 3, 4], allOdd]().hasValue.toString())
+stdout("found_def:" + FindIndexLax[@[1, 2, 3, 4], isEven]().getOrDefault(99).toString())
+stdout("missing_def:" + FindIndexLax[@[1, 2, 3, 4], allOdd]().getOrDefault(99).toString())
+"#;
+    assert_backend_parity_for_source(source, "e32b_022_find_index_lax");
+}
+
+#[test]
+fn e32b_022_legacy_sentinels_still_return_minus_one() {
+    // The deprecation strategy keeps the legacy `-1` sentinel methods
+    // around through gen-E so existing programs do not break. Pin that
+    // they still emit `-1` on no-match across the 3 backends.
+    let source = r#"
+stdout("str:" + "hello".indexOf("xyz").toString())
+stdout("str_last:" + "hello".lastIndexOf("xyz").toString())
+stdout("list:" + @[1, 2, 3].indexOf(99).toString())
+stdout("list_last:" + @[1, 2, 3].lastIndexOf(99).toString())
+"#;
+    assert_backend_parity_for_source(source, "e32b_022_legacy_sentinels_minus_one");
+}
+
+#[test]
+fn e32b_022_search_lax_3backend_parity() {
+    // searchLax is the regex-based sibling of `search`. Like `search`,
+    // wasm has only a stub regex implementation — pinning the parity to
+    // Interpreter / Native / JS via `assert_backend_parity_for_source`
+    // covers the surface contract.
+    let source = r#"
+"hello world".searchLax(Regex("w[a-z]+")) ]=> idx
+stdout("found:" + idx.toString())
+"hello world".searchLax(Regex("zz+")) ]=> idx2
+stdout("missing:" + idx2.toString())
+stdout("missing_hv:" + "hello world".searchLax(Regex("zz+")).hasValue.toString())
+stdout("found_hv:" + "hello world".searchLax(Regex("w[a-z]+")).hasValue.toString())
+"#;
+    assert_backend_parity_for_source(source, "e32b_022_search_lax");
+}
+
+// ── E32B-021 (Lock-M): Lax/Result.getOrDefault arg-type integrity ────
+//
+// PHILOSOPHY I — silent type drift via `Lax[Str].getOrDefault(99)` was
+// the original PoC. The type-checker now strictly checks the `default`
+// arg type against the receiver's inner T (Type::Generic("Lax", [T])).
+// Pin both the positive-path 3-backend parity and the negative-path
+// `[E1508]` rejection across all 3 backends.
+#[test]
+fn e32b_021_lax_get_or_default_typed_positive_3backend_parity() {
+    // Bool default is covered by `e32b_030_lax_bool_get_or_default_3backend_parity`
+    // (E32B-030, 2026-05-05). The lower-side `expr_is_bool` rule for
+    // `getOrDefault(<bool default>)` now keeps Native parity with
+    // Interpreter / JS by routing `.toString()` through
+    // `taida_str_from_bool` instead of `taida_polymorphic_to_string`.
+    let source = r#"
+empty: @[Str] <= @[]
+val <= empty.first().getOrDefault("missing")
+stdout("str_default:" + val)
+
+nums: @[Int] <= @[]
+n <= nums.first().getOrDefault(42)
+stdout("int_default:" + n.toString())
+
+filled: @[Str] <= @["only"]
+keep <= filled.first().getOrDefault("ignored")
+stdout("filled_str:" + keep)
+"#;
+    assert_backend_parity_for_source(source, "e32b_021_lax_get_or_default_typed_positive");
+}
+
+#[test]
+fn e32b_021_lax_get_or_default_type_mismatch_rejected_3backend() {
+    // `Lax[Str].getOrDefault(99)` previously type-checked silently and
+    // broke at runtime ("Cannot add ..." errors). After E32B-021 the
+    // arg type must equal T; mismatched types are rejected at compile
+    // time via [E1508] across all 3 backends.
+    let source = r#"
+empty: @[Str] <= @[]
+val <= empty.first().getOrDefault(99)
+stdout(val)
+"#;
+    assert_backends_reject_source(source, "e32b_021_lax_get_or_default_type_mismatch");
+}
+
+#[test]
+fn e32b_021_result_get_or_default_typed_positive_3backend_parity() {
+    let source = r#"
+n <= 7
+res <= Result[n, _ x = x > 0]()
+val <= res.getOrDefault(42)
+stdout("ok_default:" + val.toString())
+
+bad <= -3
+err <= Result[bad, _ x = x > 0]()
+val2 <= err.getOrDefault(42)
+stdout("err_default:" + val2.toString())
+"#;
+    assert_backend_parity_for_source(source, "e32b_021_result_get_or_default_typed_positive");
+}
+
+#[test]
+fn e32b_021_result_get_or_default_type_mismatch_rejected_3backend() {
+    let source = r#"
+n <= 7
+res <= Result[n, _ x = x > 0]()
+val <= res.getOrDefault("oops")
+stdout(val)
+"#;
+    assert_backends_reject_source(source, "e32b_021_result_get_or_default_type_mismatch");
+}
+
+// ── E32B-030: Native Lax[Bool].getOrDefault parity gap ───────────────
+//
+// E32B-021 deliberately omitted the Bool positive path because Native
+// rendered the underlying tag (`0`/`1`) instead of `false`/`true` when a
+// `Lax[Bool].__value` was returned via `getOrDefault`. The lower-side
+// fix (E32B-030, 2026-05-05) extends `expr_is_bool` so that
+// `getOrDefault(<bool default>)` is recognised as a Bool-returning
+// MethodCall — relying on E32B-021's `[E1508]` arg-type integrity to
+// ensure the default's type matches the receiver's inner T. This routes
+// `b.toString()` through `taida_str_from_bool` and restores parity with
+// Interpreter / JS.
+#[test]
+fn e32b_030_lax_bool_get_or_default_3backend_parity() {
+    let source = r#"
+empty: @[Bool] <= @[]
+b <= empty.first().getOrDefault(false)
+stdout("bool:" + b.toString())
+
+filled: @[Bool] <= @[true]
+b2 <= filled.first().getOrDefault(false)
+stdout("filled:" + b2.toString())
+
+mixed: @[Bool] <= @[false, true]
+b3 <= mixed.last().getOrDefault(false)
+stdout("last:" + b3.toString())
+
+direct <= true
+b4 <= empty.first().getOrDefault(direct)
+stdout("var_default:" + b4.toString())
+"#;
+    assert_backend_parity_for_source(source, "e32b_030_lax_bool_get_or_default");
+    let out = run_interpreter_src(source, "e32b_030_lax_bool_expected")
+        .expect("interpreter output should exist");
+    assert_eq!(out, "bool:false\nfilled:true\nlast:true\nvar_default:true");
 }

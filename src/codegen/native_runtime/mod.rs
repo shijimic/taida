@@ -700,7 +700,11 @@ mod tests {
         // E32B-029 (2026-05-05): WebSocket validation adds control-frame caps
         //   and helperizes strict UTF-8 validation, shrinking net_h1_h2.c by
         //   382 bytes. EXPECTED_TOTAL_LEN: 1,079,586 - 382 = 1,079,204.
-        const EXPECTED_TOTAL_LEN: usize = 1_079_204;
+        // E32B-022 (Lock-N) (2026-05-05): Lax[Int]-returning siblings of
+        //   the legacy `-1`-sentinel index/find helpers add four polymorphic
+        //   wrappers + two pack constructors to core.c: +2,783 bytes.
+        //   EXPECTED_TOTAL_LEN: 1,079,204 + 2,783 = 1,081,987.
+        const EXPECTED_TOTAL_LEN: usize = 1_081_987;
         let asm = *NATIVE_RUNTIME_C;
         assert_eq!(
             asm.len(),
@@ -1195,11 +1199,16 @@ mod tests {
         //   Net delta on core.c TIER 4 land: +10,562 (F1 +9,328 + F2 +1,234).
         //   Per-track total (β + ε + η + review + β-2 + θ) on F1 = 19,829
         //     (6,407 + 803 + 3,216 + 75 + 8,418 + 910), on F2 = 1,234.
-        const F1_LEN: usize = 296_940;
+        // E32B-022 (Lock-N) (2026-05-05): Lax[Int]-returning siblings of the
+        //   legacy `-1`-sentinel `*indexOf*` / `search` / `FindIndex`
+        //   helpers add four polymorphic wrappers + two pack constructors
+        //   inside the polymorphic helpers block (F1). Track delta: F1 +2,783.
+        //   F1_LEN: 296,940 + 2,783 = 299,723.
+        const F1_LEN: usize = 299_723;
         assert_eq!(
             CORE_SECTION.len(),
-            296_940 + 161_994,
-            "core.c total byte length must equal legacy fragment1 + fragment2 (C25B-001 / C25B-028 / C25B-025 / C26B-011 / C26B-020 / C26B-016 / C26B-018 / C26B-011-wS / C26B-024 / C26B-024-wepsilon adjusted; CI-red 2026-04-24 cppcheck clean-up adds 881/409 to F1/F2; @c.27 PR41 CI-red follow-up adds 61 to F1 for the cppcheck-suppress comment on the new taida_release_any helper; D28B-012 wF adds 4,821 to F1 for taida_arena_request_reset; D28B-026 review follow-up adds 425 to F1 for the active_chunk defensive corner; D29B-003 Track-β adds 6,407 to F1 for TAIDA_BYTES_CONTIG primitives + writev hot-path reflection; D29B-004 Track-ε adds 803 to F1 for taida_slice_mold inline note documenting deferred Native zero-copy view integration; D29B-005/012 Track-η adds 3,291 to F1 for taida_net_raw_as_bytes ABI Option-D rewrite + Span* release sites + taida_slice_mold CONTIG view fast path + subtraction-based Span* bounds checks; D29B-015 Track-β-2 adds 8,418 to F1 and 1,234 to F2 for Bytes dispatcher polymorphism + producer flip; D29B-016 Track-θ adds 910 to F1 for TAIDA_STR_ROPE_MAGIC sentinel + design rationale comment block)"
+            299_723 + 161_994,
+            "core.c total byte length must equal legacy fragment1 + fragment2 (C25B-001 / C25B-028 / C25B-025 / C26B-011 / C26B-020 / C26B-016 / C26B-018 / C26B-011-wS / C26B-024 / C26B-024-wepsilon adjusted; CI-red 2026-04-24 cppcheck clean-up adds 881/409 to F1/F2; @c.27 PR41 CI-red follow-up adds 61 to F1 for the cppcheck-suppress comment on the new taida_release_any helper; D28B-012 wF adds 4,821 to F1 for taida_arena_request_reset; D28B-026 review follow-up adds 425 to F1 for the active_chunk defensive corner; D29B-003 Track-β adds 6,407 to F1 for TAIDA_BYTES_CONTIG primitives + writev hot-path reflection; D29B-004 Track-ε adds 803 to F1 for taida_slice_mold inline note documenting deferred Native zero-copy view integration; D29B-005/012 Track-η adds 3,291 to F1 for taida_net_raw_as_bytes ABI Option-D rewrite + Span* release sites + taida_slice_mold CONTIG view fast path + subtraction-based Span* bounds checks; D29B-015 Track-β-2 adds 8,418 to F1 and 1,234 to F2 for Bytes dispatcher polymorphism + producer flip; D29B-016 Track-θ adds 910 to F1 for TAIDA_STR_ROPE_MAGIC sentinel + design rationale comment block; E32B-022 Lock-N adds 2,783 to F1 for the Lax[Int]-returning *indexOf*/search/FindIndex sibling helpers)"
         );
         const F2_PREFIX: &[u8] = b"// \xE2\x94\x80\xE2\x94\x80 Error ceiling";
         let tail = &CORE_SECTION.as_bytes()[F1_LEN..F1_LEN + F2_PREFIX.len()];
