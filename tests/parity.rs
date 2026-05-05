@@ -1027,7 +1027,22 @@ fn interpreter_skip_list() -> Vec<&'static str> {
 fn native_expected_reject_list() -> Vec<&'static str> {
     vec![
         "compile_stream", // Stream[T] is outside the native backend capability set
+        // E32B-023 (Lock-N): Native and wasm-* lower mutual cycles to
+        // plain calls and SIGSEGV at depth, so the checker now rejects
+        // **any** mutual recursion with `[E0700]`. Interpreter / JS
+        // continue to compile and run these via the trampoline.
+        "compile_mutual_recursion",
+        "compile_c12_3_mutual_tail",
     ]
+}
+
+/// E32B-023: per-fixture expected reject substring. Falls back to the
+/// historical Stream capability message for fixtures not listed here.
+fn native_reject_expected_substring(stem: &str) -> &'static str {
+    match stem {
+        "compile_mutual_recursion" | "compile_c12_3_mutual_tail" => "[E0700]",
+        _ => "unsupported mold type: Stream",
+    }
 }
 
 // =========================================================================
@@ -1192,10 +1207,12 @@ fn run_three_way_parity_fixture(stem: &str) {
             if !native_expected_rejects.contains(&stem) {
                 panic!("{}: native compile/run failed\n  {}", stem, err);
             }
+            let expected = native_reject_expected_substring(&stem);
             assert!(
-                err.contains("unsupported mold type: Stream"),
-                "{}: expected Stream capability reject, got: {}",
+                err.contains(expected),
+                "{}: expected reject substring `{}`, got: {}",
                 stem,
+                expected,
                 err,
             );
             if has_node {
@@ -33440,9 +33457,12 @@ stdout((n.toString() == Str[n]().getOrDefault("")).toString())
 // continues to compile and run correctly on all three backends.
 // ────────────────────────────────────────────────────────────────
 
-/// C12-3d: tail-only mutual recursion passes the new check and produces
-/// identical output on all three backends. This is the positive case —
-/// isEven / isOdd with calls in tail position.
+/// C12-3d (updated for E32B-023): tail-only mutual recursion now passes
+/// **only on Interpreter / JS**, where the runtime trampoline handles
+/// arbitrary depth. The Native and wasm-* backends reject the same
+/// program with `[E0700]` because they lower mutual cycles to plain
+/// call instructions (see `test_e32b_023_native_mutual_recursion_rejected`
+/// below for the negative parity).
 #[test]
 fn test_c12_3_tail_mutual_recursion_parity() {
     let source = r#"isEven n =
@@ -33457,10 +33477,17 @@ stdout(isEven(0))
 stdout(isEven(4))
 stdout(isOdd(7))
 "#;
-    assert_backend_parity_for_source(source, "c12_3_tail_mutual_recursion");
-    let out = run_interpreter_src(source, "c12_3_tail_mutual_recursion_expected")
-        .expect("interpreter output should exist");
-    assert_eq!(out, "1\n1\n1");
+    let interp = run_interpreter_src(source, "c12_3_tail_mutual_recursion")
+        .expect("interpreter must accept tail-only mutual recursion");
+    assert_eq!(interp, "1\n1\n1");
+    if node_available() {
+        let js = run_js_src(source, "c12_3_tail_mutual_recursion")
+            .expect("js must accept tail-only mutual recursion");
+        assert_eq!(
+            interp, js,
+            "interpreter/js mismatch for tail mutual recursion"
+        );
+    }
 }
 
 /// C12-3d: non-tail mutual recursion must be rejected by all three
@@ -39189,4 +39216,74 @@ stdout("r_zero:" + r4.toString())
         out,
         "q_neg_a:-3\nr_neg_a:-1\nq_neg_b:-3\nr_neg_b:1\nq_neg_both:3\nr_neg_both:-1\nq_zero:0\nr_zero:0"
     );
+}
+
+// ── E32B-023 (Lock-N): Native + wasm mutual-recursion reject ─────────
+//
+// Phase 0 verdict: option (c). Backends that lower mutual cycles to
+// plain call instructions (Native + wasm-*) used to silently segfault
+// on deep mutual recursion (PoC: `compile_mutual_recursion.td`'s
+// `isEven(2_000_000)` SIGSEGVed under Native). The fix promotes that
+// silent crash to a compile-time `[E0700]` so 3-backend parity stays
+// honest: Interpreter / JS still accept the trampoline-friendly tail
+// mutual recursion (`test_c12_3_tail_mutual_recursion_parity`), and
+// the native lowering targets reject the same program before they can
+// reach the segfault path.
+#[test]
+fn test_e32b_023_native_mutual_recursion_rejected() {
+    let source = r#"isEven n =
+  | n == 0 |> 1
+  | _ |> isOdd(n - 1)
+
+isOdd n =
+  | n == 0 |> 0
+  | _ |> isEven(n - 1)
+
+stdout(isEven(50000))
+"#;
+
+    // Interpreter / JS continue to accept tail-only mutual recursion.
+    let interp = run_interpreter_src(source, "e32b_023_native_mutual_recursion_rejected")
+        .expect("interpreter must accept tail-only mutual recursion at 50k depth");
+    assert_eq!(interp, "1");
+    if node_available() {
+        let js = run_js_src(source, "e32b_023_native_mutual_recursion_rejected")
+            .expect("js must accept tail-only mutual recursion at 50k depth");
+        assert_eq!(
+            interp, js,
+            "interpreter/js mismatch for E32B-023 deep mutual recursion"
+        );
+    }
+
+    // Native must reject with `[E0700]` before it can lower the
+    // program. The error is surfaced via the build subcommand because
+    // the type-checker runs once we know the compile target.
+    let tmp = unique_temp_path("taida_parity_e32b_023", "native", "td");
+    fs::write(&tmp, source).expect("failed to write E32B-023 source");
+    let native_err = run_native_build_error(&tmp, "e32b_023_native_mutual_recursion_rejected")
+        .expect("native build must fail for E32B-023 mutual recursion");
+    assert!(
+        native_err.contains("[E0700]"),
+        "native rejection must cite [E0700], got: {}",
+        native_err
+    );
+    assert!(
+        native_err.contains("Mutual recursion"),
+        "native rejection must explain mutual recursion, got: {}",
+        native_err
+    );
+
+    // wasm-min covers the wasm lowering pipeline (the same checker runs
+    // for every wasm-* profile via `set_compile_target`, so wasm-min is
+    // sufficient as the canonical wasm reject pin without paying the
+    // wasm-full link cost).
+    let wasm_err = run_wasm_min_build_error(&tmp, "e32b_023_wasm_mutual_recursion_rejected")
+        .expect("wasm-min build must fail for E32B-023 mutual recursion");
+    assert!(
+        wasm_err.contains("[E0700]"),
+        "wasm-min rejection must cite [E0700], got: {}",
+        wasm_err
+    );
+
+    let _ = fs::remove_file(&tmp);
 }

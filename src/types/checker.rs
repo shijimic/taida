@@ -189,6 +189,21 @@ impl CompileTarget {
         )
     }
 
+    /// E32B-023 (Lock-N): Native and wasm targets that lower through the
+    /// C / wasm-C runtime use regular call instructions for mutual
+    /// recursion (no trampoline). Deep mutual cycles therefore overflow
+    /// the OS stack at runtime instead of falling back to bounded
+    /// iteration. The checker uses this predicate to gate the
+    /// `[E0700]` mutual-recursion reject so Interpreter / JS programs
+    /// continue to compile while Native and wasm-* programs hard-fail
+    /// before they reach the segfault path.
+    pub(crate) fn is_native_lowering(self) -> bool {
+        matches!(
+            self,
+            Self::Native | Self::WasmMin | Self::WasmWasi | Self::WasmEdge | Self::WasmFull
+        )
+    }
+
     fn label(self) -> &'static str {
         match self {
             Self::Neutral => "neutral",
@@ -1779,14 +1794,26 @@ impl TypeChecker {
 
         // The file path is informational for the verify layer; type errors
         // carry their own spans so we pass a neutral marker here.
-        let findings = crate::graph::verify::run_check(
-            "mutual-recursion",
-            program,
-            self.source_file
-                .as_deref()
-                .and_then(|p| p.to_str())
-                .unwrap_or("<program>"),
-        );
+        let file = self
+            .source_file
+            .as_deref()
+            .and_then(|p| p.to_str())
+            .unwrap_or("<program>");
+
+        // Always run the cross-backend non-tail mutual recursion check.
+        // E32B-023 (Lock-N): when the active compile target lowers through
+        // the C / wasm-C runtime (Native or wasm-*), additionally reject
+        // *any* mutual cycle (tail or non-tail) with `[E0700]` because
+        // those backends lack the trampoline that Interpreter / JS use.
+        let mut findings = crate::graph::verify::run_check("mutual-recursion", program, file);
+        if self.compile_target.is_native_lowering() {
+            findings.extend(crate::graph::verify::run_check(
+                "mutual-recursion-native",
+                program,
+                file,
+            ));
+        }
+
         for f in findings {
             if !matches!(f.severity, crate::graph::verify::Severity::Error) {
                 continue;

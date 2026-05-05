@@ -392,6 +392,7 @@ pub const ALL_CHECKS: &[&str] = &[
     "dead-code",
     "type-consistency",
     "mutual-recursion",
+    "mutual-recursion-native",
     "unchecked-division",
     "direction-constraint",
     "unchecked-lax",
@@ -405,6 +406,7 @@ pub fn run_check(check: &str, program: &Program, file: &str) -> Vec<VerifyFindin
         "dead-code" => check_dead_code(program, file),
         "type-consistency" => check_type_consistency(program, file),
         "mutual-recursion" => check_mutual_recursion(program, file),
+        "mutual-recursion-native" => check_mutual_recursion_native(program, file),
         "unchecked-division" => check_unchecked_division(program, file),
         "direction-constraint" => check_direction_constraint(program, file),
         "unchecked-lax" => check_unchecked_lax(program, file),
@@ -688,6 +690,111 @@ fn check_mutual_recursion(program: &Program, file: &str) -> Vec<VerifyFinding> {
                 line: Some(line),
             });
         }
+    }
+
+    findings
+}
+
+// ── Check: mutual-recursion-native ────────────────────
+
+/// E32B-023 (Lock-N): for backends that lower through the C / wasm-C
+/// runtime (`Native`, `wasm-min`, `wasm-wasi`, `wasm-edge`, `wasm-full`),
+/// mutual recursion lowers to ordinary call instructions without a
+/// trampoline. Even tail-only mutual cycles overflow the OS stack at
+/// runtime once the depth grows (PoC: `isEven(2_000_000)` SIGSEGVs the
+/// `compile_mutual_recursion.td` example on Native). Rather than emit a
+/// silent runtime crash that breaks 3-backend parity, the gen-E stable
+/// surface rejects **any** mutual cycle at compile time with `[E0700]`
+/// for those targets.
+///
+/// Self-recursion (single-node cycle) is not affected — it is handled
+/// by the existing TCO path (`E1614` already covers non-tail self
+/// recursion at the language level). This check only flags cycles
+/// between two or more **distinct** user-defined functions.
+///
+/// Interpreter / JS continue to accept tail-only mutual recursion via
+/// the runtime trampoline; this check runs only when
+/// `CompileTarget::is_native_lowering()` holds (gated by the
+/// `TypeChecker::check_mutual_recursion_errors` caller).
+///
+/// A trampoline-based Native implementation is post-stable scope and
+/// tracked under `.dev/FUTURE_BLOCKERS.md` (gen-F additive option (a)).
+fn check_mutual_recursion_native(program: &Program, file: &str) -> Vec<VerifyFinding> {
+    let mut func_defs: std::collections::HashMap<String, &FuncDef> =
+        std::collections::HashMap::new();
+    for stmt in &program.statements {
+        if let Statement::FuncDef(fd) = stmt {
+            func_defs.insert(fd.name.clone(), fd);
+        }
+    }
+    if func_defs.is_empty() {
+        return Vec::new();
+    }
+
+    let mut extractor = GraphExtractor::new(file);
+    let graph = extractor.extract(program, GraphView::Call);
+    let cycles = match query::find_cycles(&graph) {
+        query::QueryResult::Cycles(c) => c,
+        _ => return Vec::new(),
+    };
+    if cycles.is_empty() {
+        return Vec::new();
+    }
+
+    let mut findings = Vec::new();
+    let mut seen_cycles: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    for cycle in &cycles {
+        let user_cycle: Vec<&String> = cycle
+            .iter()
+            .filter(|lbl| func_defs.contains_key(lbl.as_str()))
+            .collect();
+        if user_cycle.len() < 2 {
+            continue;
+        }
+        let distinct: std::collections::HashSet<&str> =
+            user_cycle.iter().map(|s| s.as_str()).collect();
+        if distinct.len() < 2 {
+            continue;
+        }
+
+        let mut sorted: Vec<String> = distinct.iter().map(|s| s.to_string()).collect();
+        sorted.sort();
+        let key = sorted.join("|");
+        if !seen_cycles.insert(key) {
+            continue;
+        }
+
+        let mut path_display: Vec<String> = user_cycle.iter().map(|s| (*s).clone()).collect();
+        if let Some(first) = path_display.first().cloned() {
+            path_display.push(first);
+        }
+
+        // Anchor the diagnostic at the first function in the cycle so
+        // it points at user code rather than the verify entry line.
+        let first_fn_name = user_cycle[0];
+        let line = func_defs
+            .get(first_fn_name.as_str())
+            .map(|fd| fd.span.line)
+            .unwrap_or(1);
+
+        let msg = format!(
+            "[E0700] Mutual recursion is rejected on Native and wasm targets: {}. \
+             These backends lower mutual cycles to plain call instructions and will \
+             overflow the OS stack at runtime. \
+             Hint: collapse the cycle into a single recursive function and use a \
+             tag / accumulator to switch behaviour, or run the program through the \
+             Interpreter / JS backend (which use a trampoline). See docs/reference/tail_recursion.md.",
+            path_display.join(" -> ")
+        );
+
+        findings.push(VerifyFinding {
+            check: "mutual-recursion-native".to_string(),
+            severity: Severity::Error,
+            message: msg,
+            file: Some(file.to_string()),
+            line: Some(line),
+        });
     }
 
     findings
