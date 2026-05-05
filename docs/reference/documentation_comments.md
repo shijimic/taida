@@ -419,7 +419,7 @@ Map[pilots, _ u = stdout(u.name)]()
 
 ### 1. 公開APIには必ずドキュメントを付ける
 
-```taida
+```taida fragment
 // 良い例
 ///@ Purpose: パイロットを作成する
 ///@ Params:

@@ -93,7 +93,7 @@ empty.isEmpty()                // true
 
 ### first / last
 
-```taida
+```taida fragment
 @[10, 20, 30].first() ]=> val   // 10
 @[10, 20, 30].last() ]=> val    // 30
 
@@ -107,7 +107,7 @@ empty.last() ]=> val             // 0
 
 インデックスを指定して要素にアクセスします。
 
-```taida
+```taida fragment
 items <= @[10, 20, 30]
 items.get(0) ]=> val    // 10
 items.get(1) ]=> val    // 20
@@ -118,7 +118,7 @@ items.get(100) ]=> val  // 0 (範囲外: デフォルト値)
 
 最大値・最小値を返します。
 
-```taida
+```taida fragment
 @[3, 1, 4, 1, 5].max() ]=> val   // 5
 @[3, 1, 4, 1, 5].min() ]=> val   // 1
 
@@ -329,7 +329,7 @@ Reverse[@[1, 2, 3]]() ]=> reversed  // @[3, 2, 1]
 
 重複を除去します。
 
-```taida
+```taida fragment
 Unique[@[1, 2, 2, 3, 3, 1]]() ]=> uniq  // @[1, 2, 3]
 
 // キー関数で重複判定

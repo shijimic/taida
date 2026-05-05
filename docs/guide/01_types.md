@@ -114,7 +114,7 @@ bytes.get(0) ]=> b0            // 112
 
 全てのエラーの基底型です。
 
-```taida
+```taida fragment
 Error = @(
   type: Str
   message: Str
@@ -189,7 +189,7 @@ empty: @[Int] <= @[]
 
 操作はモールドで行います:
 
-```taida
+```taida fragment
 // モールドで操作します
 Sort[@[3, 1, 2]]()                       // @[1, 2, 3]
 Filter[@[1, 2, 3, 4], _ x = x > 2]()    // @[3, 4]
@@ -249,7 +249,7 @@ Mold[T] => Lax[T] = @(hasValue: Bool)   // 安全モールド
 
 述語 P（`:T => :Bool`）で成功/失敗を判定する操作モールドです。`]=>` で述語を評価し、真なら値 T、偽なら throw が発動します。
 
-```taida
+```taida fragment
 Error => NotFound = @(message: Str)
 
 // _ = true / _ = false は常に真/偽を返す無名関数
@@ -269,7 +269,7 @@ Result[age, _ x = x >= 18](throw <= err) ]=> validAge
 
 「操作が失敗しても必ず値を返す」ことを保証するモールド型です。失敗時は型 T のデフォルト値にフォールバックします。
 
-```taida
+```taida fragment
 // 除算: ゼロ除算でも必ず値を返します
 Div[10, 3]() ]=> result   // 3
 Div[10, 0]() ]=> result   // 0 (Int のデフォルト値)
@@ -300,7 +300,7 @@ lax2.hasValue              // true (正常に割れた)
 
 「操作が失敗したらゴリラがプログラムを止める」モールド型です。Lax のようなデフォルト値へのフォールバックはありません。外部パッケージ（npm 等）の Molten 値への操作で使います。
 
-```taida
+```taida fragment
 // Cage で Molten（溶鉄）に操作を実行 → Gorillax で包まれます
 Cage[lodash, _ lo = lo.sum(items)] => rilax  // rilax: Gorillax[Int]
 rilax ]=> total              // 成功 → 値, 失敗 → ゴリラ（プログラム終了）
@@ -360,7 +360,7 @@ pilot.sync_rate  // 78
 | ネスト | 再帰的にスキーマ照合 |
 | リスト | 各要素にスキーマを適用 |
 
-```taida
+```taida fragment
 // フィールド欠損 → デフォルト値
 raw <= '{"name": "Rei"}'
 JSON[raw, Pilot]() ]=> pilot
@@ -412,7 +412,7 @@ rei <= Pilot(name <= "Rei")  // call_sign = "", age = 0
 
 Taida では暗黙の型変換は一切行われません。型変換はモールドで明示的に行います。全ての型変換モールドは Lax を返します。
 
-```taida
+```taida fragment
 // Str → Int
 Int["123"]() ]=> num         // 123
 Int["abc"]() ]=> num         // 0 (変換失敗: デフォルト値)
@@ -488,7 +488,7 @@ ToRadix[26, 2]().getOrDefault("") ]=> bin     // "11010"
 
 型推論があるので、ほとんどの場合は型アノテーションを書く必要がありません。書きたいときだけ書けば十分です。
 
-```taida
+```taida fragment
 // 型推論に任せます（ほとんどの場合はこれで十分です）
 x <= 42
 name <= "Asuka"

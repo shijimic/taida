@@ -123,7 +123,7 @@ id[T] x: T =
 
 引数には必ず型を指定します。
 
-```taida
+```taida fragment
 greet name: Str =
   "Hello, " + name + "!"
 => :Str
@@ -255,7 +255,7 @@ Fold[numbers, 0, _ acc x = acc + x]() ]=> total  // 15
 
 `=>` でデータを左から右へ流します。`_` が前のステップの結果を受け取ります。
 
-```taida
+```taida fragment
 // データが左から右へ流れます
 "  hello world  " => Trim[_]() => Upper[_]() => result
 // result: "HELLO WORLD"
@@ -279,7 +279,7 @@ result <= Upper["hello"]()
 
 操作がモールドなので、パイプラインとの組み合わせが自然です。
 
-```taida
+```taida fragment
 // 文字列処理パイプライン
 "  Asuka Langley  " => Trim[_]() => Upper[_]() => Split[_, " "]() => result
 // result: @["ASUKA", "LANGLEY"]
@@ -310,7 +310,7 @@ data => Filter[_, _ x = x > 0]() <= result  // コンパイルエラー
 
 関数呼び出しの引数位置を空にすると、その位置が「穴」になり、部分適用された関数が返ります。
 
-```taida
+```taida fragment
 // 第2引数を空にします（穴）
 add5 <= add(5, )
 result <= add5(3)  // 8
@@ -391,7 +391,7 @@ retryLoop maxRetries: Int attempt: Int =
 
 再帰呼び出しの後に演算がある場合は末尾位置ではありません。
 
-```taida
+```taida fragment
 // OK: 末尾位置（最適化されます）
 | _ |> factorial(n - 1, acc * n)
 

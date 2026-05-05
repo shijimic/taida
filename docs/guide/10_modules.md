@@ -106,7 +106,7 @@ result <= sub(10, 3)  // 7
 
 npm からインポートされた値は **Molten** 型です。Molten は外部由来の不透明値であり、直接操作はできません。型安全な値を取り出すには Cage 経由で操作します。
 
-```taida
+```taida fragment
 >>> npm:express => @(express)  // express: Molten
 
 // Cage 内で Molten の関数を呼び出します（直接呼び出しは不可）
@@ -295,7 +295,7 @@ $ taida ./main.td
 
 **packages.tdm は実行されません。** `>>>` / `<<<` と、source package の SHA-256 pin を持つ `[packages."owner/name"]` テーブルのみが許可され、式・代入・関数定義は書けません。
 
-```taida
+```taida fragment
 // packages.tdm の例
 >>> taida-lang/os@a.1
 >>> ./main.td

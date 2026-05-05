@@ -282,7 +282,7 @@ stdout(report)
 
 TLS および h2 / h3 を使う `httpServe` は `opts` 引数で TLS 設定を渡せます:
 
-```taida
+```taida fragment
 opts <= @(
   cert <= certPem,
   key <= keyPem,

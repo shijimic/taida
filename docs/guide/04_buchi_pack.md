@@ -40,7 +40,7 @@ pilot_call <= pilot.call_sign  // "Ikari"
 
 存在しないフィールドにアクセスするとコンパイルエラーになります:
 
-```taida
+```taida fragment
 pilot <= @(name <= "Rei")
 sync_rate <= pilot.sync_rate  // コンパイルエラー: フィールド 'sync_rate' は存在しません
 ```
@@ -139,7 +139,7 @@ pi <= mathUtils.PI             // 3.14159
 
 ## 関数への名前付き引数
 
-```taida
+```taida fragment
 connect host: Str port: Int timeout: Int =
   // 接続処理
 => :Connection

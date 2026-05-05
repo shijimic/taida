@@ -197,7 +197,7 @@ clone せず view として保持する zero-copy primitive です。span を
   `callSign(req).path` のような関数呼び出し式チェーンで `StrOf[...]()`
   の括弧の二重を避けたいときに使う):
 
-```taida
+```taida fragment
 // mold form と function form は同じ結果を返す
 str_a <= strOf(req.path, req.bytes)
 str_b <= StrOf[req.path, req.bytes]()
@@ -242,7 +242,7 @@ validateAge age: Int =
 | `Gorillax[value]()` | 値を Gorillax で包む | `Gorillax[42]()` |
 | `Cage[molten, fn]()` | Molten 専用。fn(molten) を実行し Gorillax で包む | `Cage[lodash, _ lo = lo.sum(items)]()` |
 
-```taida
+```taida fragment
 // Cage で溶鉄に操作 → Gorillax で受け取る
 Cage[externalLib, _ lib = lib.process(data)] => result
 result ]=> value         // 成功 → 値, 失敗 → ゴリラ
@@ -284,7 +284,7 @@ pilots <= hashMap()
 | `.isEmpty()` | `Bool` | 空かどうか |
 | `.toString()` | `Str` | 文字列表現 |
 
-```taida
+```taida fragment
 // get は Lax を返します
 pilots.get("Misato").hasValue  // true
 pilots.get("Gendo").hasValue   // false

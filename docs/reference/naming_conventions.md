@@ -124,7 +124,7 @@ isValidEmail email: Str =
 
 ### 変数 — 値の種別で使い分け
 
-```taida
+```taida fragment
 // 非関数値 (snake_case)
 pilot_name <= "Misato"
 total_count <= 42
@@ -138,7 +138,7 @@ validateEmail <= isValidEmail
 
 ### ぶちパックフィールド — 値の種別で使い分け
 
-```taida
+```taida fragment
 // 非関数値フィールドは snake_case
 pilot <= @(
   first_name <= "Misato",
@@ -203,7 +203,7 @@ PilotService = @(
 
 import / export ではモジュール path は **kebab-case** (GitHub URL 準拠):
 
-```taida
+```taida fragment
 >>> taida-lang/os => @(readBytes, writeBytes)
 >>> taida-lang/net => @(httpServe, httpRequest)
 >>> alice-lang/utils => @(parse)
@@ -230,7 +230,7 @@ _internal <= "internal"   // _ prefix は lint 対象外 (慣習として開放)
 
 Taida Lang には予約語がありません。`unmold`、`throw` なども関数として扱われます。
 
-```taida
+```taida fragment
 // これらは予約語ではなく、関数 / メソッドとして動作
 opt.unmold()
 error.throw()
@@ -258,7 +258,7 @@ error.throw()
 
 ### 意味のある名前を使う
 
-```taida
+```taida fragment
 // Good
 pilot_count <= pilots.length
 active_pilots <= Filter[pilots, _ p = p.is_active]()

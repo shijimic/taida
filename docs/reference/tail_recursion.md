@@ -75,7 +75,7 @@ classify x: Int =
 
 ### 4. エラーシーリング内の最後
 
-```taida
+```taida fragment
 process x: Int =
   |== error: Error =
     defaultValue  // ← 末尾位置（エラー分岐）
@@ -306,7 +306,7 @@ Native 向けのトランポリン実装は将来世代の候補です。
 
 非末尾位置での相互再帰は、実行時に必ずスタックオーバーフロー（`Maximum call depth (256) exceeded`）を起こすため、コンパイル時に拒否されます。
 
-```taida
+```taida fragment
 // NG: wrap(emptyNodes(n)) の emptyNodes 呼び出しは非末尾位置
 emptyDomNode n =
   wrap(emptyNodes(n))
@@ -370,7 +370,7 @@ processItemsTail items: @[Item] acc: @[Result] =
 
 より複雑なケースでは、継続渡しスタイルを使って末尾再帰に変換できます。
 
-```taida
+```taida fragment
 // 継続渡しスタイルでの階乗（形式 A: コロン分離）
 factorialCPS n: Int cont: Int => :Int =
   | n < 1 |> cont(1)

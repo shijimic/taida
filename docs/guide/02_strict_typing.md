@@ -45,7 +45,7 @@ ToFixed[num, 2]() ]=> formatted // "42.00"
 
 Taida に `/` 演算子と `%` 演算子はありません。除算と剰余は `Div[x, y]()` と `Mod[x, y]()` モールドで行います。ゼロ除算は Lax を返し、プログラムを停止させません。
 
-```taida
+```taida fragment
 Div[10, 3]() ]=> result  // 3
 Div[10, 0]() ]=> result  // 0 (ゼロ除算: Lax のデフォルト値)
 ```
@@ -74,7 +74,7 @@ lax2.hasValue  // true (正常に割れた)
 
 剰余も同様です:
 
-```taida
+```taida fragment
 Mod[10, 3]() ]=> result   // 1
 Mod[10, 0]() ]=> result   // 0 (ゼロ除算: デフォルト値)
 Mod[10, 0]().hasValue      // false
@@ -86,7 +86,7 @@ Mod[10, 0]().hasValue      // false
 
 リストの要素アクセスは `.get()` メソッドで行います。範囲外の場合は Lax を返し、プログラムを停止させません。
 
-```taida
+```taida fragment
 items <= @[10, 20, 30]
 items.get(1) ]=> val    // 20
 items.get(100) ]=> val  // 0 (範囲外: Lax のデフォルト値)
@@ -104,7 +104,7 @@ items.get(100) ]=> val  // 0 (範囲外: Lax のデフォルト値)
 
 `first()`、`last()`、`max()`、`min()` も同様に Lax を返します:
 
-```taida
+```taida fragment
 @[1, 2, 3].first() ]=> val  // 1
 empty: @[Int] <= @[]
 empty.first() ]=> val        // 0 (空リスト: Lax のデフォルト値)
@@ -156,7 +156,7 @@ pilot.sync_rate  // 78
 
 ### スキーマなしはエラーです
 
-```taida
+```taida fragment
 // NG: スキーマなし
 JSON[raw]()               // コンパイルエラー: JSON requires a schema type argument
 
@@ -222,7 +222,7 @@ Taida の型のガチガチさは2つの意味を持っています。
 
 ### 1. 全てが明示的であること
 
-```taida
+```taida fragment
 // 暗黙変換はありません
 "Count: " + 42                 // コンパイルエラー
 "Count: " + 42.toString()      // OK: 明示的な変換

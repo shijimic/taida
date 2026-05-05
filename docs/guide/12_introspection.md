@@ -274,7 +274,7 @@ scores => Filter[_, _ x = x > 80]() => debug => Map[_, _ x = x * 2]() => result
 
 `debug(value)` は渡された値をそのまま返すため、パイプラインを切断せずに観測地点を挟めます。単独で値を print したいときや、ラベル付きで `[label] Type: repr` 形式を出したいときは以下を使います。
 
-```taida
+```taida fragment
 debug("ping")                 // "ping" を出力
 debug(user, "load_user")      // "[load_user] BuchiPack: @(name: ..., age: ...)" を出力
 ```

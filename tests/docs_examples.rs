@@ -2,7 +2,7 @@
 //
 // `tests/c25b_008_doc_examples_parse.rs` already pins the **parse**
 // status of every ` ```taida ` block in `docs/guide` and
-// `docs/reference` against a baseline manifest (70 known fragments).
+// `docs/reference` against a baseline manifest (68 known fragments).
 // The lock asks for an additional, stricter guard: docs *links* and
 // *file-path* references must never dangle, so that AI-generated
 // content cannot silently introduce typos like `mold_types.md`
@@ -24,11 +24,19 @@
 //   rather than wiki-links, so they are skipped to avoid false
 //   positives.
 //
-// Failure mode: emits every broken link with `path:line: -> target`
-// so the offender can be fixed in one pass.
+// Failure modes:
+// - broken links emit every `path:line: -> target` offender.
+// - standalone ` ```taida ` blocks are copied to a temp tree and checked
+//   by `taida way check`; intentional fragments use ` ```taida fragment `.
 
+mod common;
+
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
+
+const DOC_PARSE_BASELINE_PATH: &str = "tests/c25b_008_doc_parse_baseline.txt";
 
 fn collect_md_files(dir: &Path, out: &mut Vec<PathBuf>) {
     let read = match fs::read_dir(dir) {
@@ -53,6 +61,93 @@ fn collect_md_files(dir: &Path, out: &mut Vec<PathBuf>) {
             out.push(path);
         }
     }
+}
+
+fn collect_doc_example_files(manifest: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    for dir in ["docs/guide", "docs/reference"] {
+        let mut paths: Vec<PathBuf> = fs::read_dir(manifest.join(dir))
+            .unwrap_or_else(|e| panic!("read_dir({}) failed: {}", dir, e))
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("md"))
+            .collect();
+        paths.sort();
+        out.extend(paths);
+    }
+    out
+}
+
+fn extract_taida_blocks(md: &str) -> Vec<(usize, String, String)> {
+    let mut blocks = Vec::new();
+    let mut in_block = false;
+    let mut info = String::new();
+    let mut body = String::new();
+    let mut start = 0usize;
+    for (i, line) in md.lines().enumerate() {
+        let trimmed_start = line.trim_start();
+        if !in_block {
+            if let Some(rest) = trimmed_start.strip_prefix("```") {
+                let word = rest.split_whitespace().next().unwrap_or("");
+                if word == "taida" {
+                    in_block = true;
+                    info = rest.to_string();
+                    body.clear();
+                    start = i + 1;
+                }
+            }
+        } else if trimmed_start.starts_with("```") {
+            blocks.push((start, info.clone(), body.clone()));
+            in_block = false;
+        } else {
+            body.push_str(line);
+            body.push('\n');
+        }
+    }
+    blocks
+}
+
+fn has_skip_marker(body: &str) -> bool {
+    for line in body.lines() {
+        let t = line.trim();
+        if t.is_empty() {
+            continue;
+        }
+        return t.contains("@doctest: skip");
+    }
+    false
+}
+
+fn has_way_check_skip_info(info: &str) -> bool {
+    info.split_whitespace()
+        .any(|word| matches!(word, "fragment" | "no-check" | "reject"))
+}
+
+fn load_doc_parse_baseline(manifest: &Path) -> BTreeSet<String> {
+    let path = manifest.join(DOC_PARSE_BASELINE_PATH);
+    let raw = fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("baseline manifest not found at {}: {}", path.display(), e));
+    raw.lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .map(str::to_string)
+        .collect()
+}
+
+fn doc_block_file_name(relative_doc: &Path, line: usize) -> String {
+    let mut stem = relative_doc
+        .to_string_lossy()
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() {
+                ch.to_ascii_lowercase()
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    stem.push_str(&format!("_line_{}.td", line));
+    stem
 }
 
 fn extract_links(body: &str) -> Vec<(usize, String)> {
@@ -290,4 +385,71 @@ fn docs_examples_smoke_self_check() {
         "expected ≥10 docs/*.md files (found {})",
         md_files.len()
     );
+}
+
+#[test]
+fn doc_parse_pass_blocks_way_check_cleanly() {
+    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let parse_baseline = load_doc_parse_baseline(manifest);
+    let tmp = common::unique_temp_dir("e32b_024_docs_way_check");
+
+    let mut written = 0usize;
+    let mut skipped_parse_fail = 0usize;
+    let mut skipped_marked = 0usize;
+    for path in collect_doc_example_files(manifest) {
+        let content = fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("cannot read {}: {}", path.display(), e));
+        let relative = path.strip_prefix(manifest).unwrap_or(&path);
+        for (line, info, body) in extract_taida_blocks(&content) {
+            if has_way_check_skip_info(&info) || has_skip_marker(&body) {
+                skipped_marked += 1;
+                continue;
+            }
+            let key = format!("{}:{}", relative.display(), line);
+            if parse_baseline.contains(&key) {
+                skipped_parse_fail += 1;
+                continue;
+            }
+            let (_program, parse_errors) = taida::parser::parse(&body);
+            assert!(
+                parse_errors.is_empty(),
+                "{} is not in the parse baseline but no longer parses: {:?}",
+                key,
+                parse_errors
+            );
+            let out_path = tmp.join(doc_block_file_name(relative, line));
+            common::write_file(&out_path, &body);
+            written += 1;
+        }
+    }
+
+    assert!(
+        written > 0,
+        "expected at least one parse-pass docs example for way-check smoke"
+    );
+
+    let output = Command::new(common::taida_bin())
+        .arg("way")
+        .arg("check")
+        .arg("--format")
+        .arg("jsonl")
+        .arg(&tmp)
+        .output()
+        .expect("taida way check docs examples");
+    assert!(
+        output.status.success(),
+        "docs parse-pass blocks failed `taida way check` ({} checked, {} parse-fail baseline, {} marked fragment/no-check/reject)\nstdout:\n{}\nstderr:\n{}",
+        written,
+        skipped_parse_fail,
+        skipped_marked,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    eprintln!(
+        "[E32B-024] docs way-check smoke OK — {} parse-pass blocks checked ({} parse-fail baseline, {} marked fragment/no-check/reject).",
+        written, skipped_parse_fail, skipped_marked
+    );
+
+    let _ = fs::remove_dir_all(&tmp);
 }

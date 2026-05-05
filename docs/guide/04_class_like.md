@@ -50,7 +50,7 @@ rei.name   // "Rei"
 
 型を抽象化したい場合は、型引数を `[T]` のように与えます。
 
-```taida
+```taida fragment
 Box[T] = @(
   filling: T
   label: Str
@@ -116,7 +116,7 @@ Result[T, P] => CustomResult[T, P, V] = @(
 
 親型 arity が一致していれば、子側で型引数を追加できます。
 
-```taida
+```taida fragment
 // 親: 2 引数
 CustomType[T, U] = @(a: T, b: U)
 
@@ -178,7 +178,7 @@ hello.greet("anyone")   // "" (defaultFn で自動充足)
 
 `Mold[T]` を親に取った class-like 型は、特に **モールド (mold) または操作モールド** と呼ばれ、値を流し込む鋳型として使われます。
 
-```taida
+```taida fragment
 Mold[T] => Result[T, P <= :T => :Bool] = @(
   throw: Error
 )
@@ -223,7 +223,7 @@ findUser id: Int =
 
 Taida は構造的部分型付け (structural subtyping) を採用しています。class-like 型でも、必要なフィールドを持っていれば互換と見なされます。
 
-```taida
+```taida fragment
 HasName = @(name: Str)
 
 greet person: HasName =

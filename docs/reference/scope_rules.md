@@ -136,7 +136,7 @@ processValue value: Int =
 
 分岐の戻り値として受け取ります。
 
-```taida
+```taida fragment
 processValue value: Int =
   // 分岐全体の結果を result に代入
   result <= (
@@ -179,7 +179,7 @@ processData data: Data =
 
 同一スコープ内での同名変数の再定義（シャドウイング）は禁止されています。
 
-```taida
+```taida fragment
 // NG: 同一スコープでの再定義
 x <= 10
 x <= 20  // コンパイルエラー: 'x' は既に定義されています
@@ -213,7 +213,7 @@ result <= x  // 10
 
 Taida Langではすべての変数はイミュータブルです。一度定義した変数に再代入することはできません。
 
-```taida
+```taida fragment
 // NG: 再代入
 counter <= 0
 counter <= counter + 1  // コンパイルエラー
