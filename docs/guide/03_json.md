@@ -360,12 +360,16 @@ fetchPilot id: Int =
     Pilot(name <= "", age <= 0)
   => :Pilot
 
-  response <= httpGet("https://api.nerv.jp/pilots/" + Str[id]() ]=> _)
+  Str[id]() ]=> idStr
+  url <= "https://api.nerv.jp/pilots/" + idStr
+  response <= httpGet(url)
   response ]=> res
   JSON[res.body, Pilot]() ]=> pilot
   pilot
 => :Pilot
 ```
+
+`Str[id]()` の結果は `]=>` で先に取り出し、`url` 文字列を組み立ててから `httpGet` に渡します。引数式の中に `]=>` を直接書くと括弧の閉じ位置が曖昧になるため、束縛を分けて書きます。
 
 ### 設定ファイルの読み込み
 

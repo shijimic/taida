@@ -93,27 +93,37 @@ true.toString()           // "true"
 
 **シグネチャ**: `suffix: Str => :Bool`
 
-#### indexOf
+#### indexOfLax (推奨)
 
-部分文字列の位置を返します。見つからない場合は -1。
-
-```taida
-"hello world".indexOf("world")  // 6
-"hello".indexOf("xyz")  // -1
-```
-
-**シグネチャ**: `substr: Str => :Int`
-
-#### lastIndexOf
-
-部分文字列の最後の出現位置を返します。見つからない場合は -1。
+部分文字列の位置を `Lax[Int]` で返します。見つからない場合は `hasValue = false`、デフォルト値は `0` です。
 
 ```taida
-"hello hello".lastIndexOf("hello")  // 6
-"hello".lastIndexOf("xyz")  // -1
+"hello world".indexOfLax("world") ]=> i  // 6
+"hello".indexOfLax("xyz").hasValue       // false
 ```
 
-**シグネチャ**: `substr: Str => :Int`
+**シグネチャ**: `substr: Str => :Lax[Int]`
+
+#### lastIndexOfLax (推奨)
+
+部分文字列の最後の出現位置を `Lax[Int]` で返します。見つからない場合は `hasValue = false`、デフォルト値は `0` です。
+
+```taida
+"hello hello".lastIndexOfLax("hello") ]=> i   // 6
+"hello".lastIndexOfLax("xyz").hasValue        // false
+```
+
+**シグネチャ**: `substr: Str => :Lax[Int]`
+
+#### indexOf / lastIndexOf (非推奨)
+
+旧来の `indexOf` / `lastIndexOf` は、見つからない場合に `-1` を返す形です。`-1` は `Int` の通常の値と区別できないため、`Lax` で表現する `*Lax` 版に移行してください。
+
+```taida
+"hello".indexOf("xyz")      // -1   (非推奨。位置として誤解されるリスクがある)
+```
+
+**シグネチャ**: `substr: Str => :Int` (非推奨。doc-comment では `///@ Deprecated: indexOfLax を使用してください` を付与します。将来の世代で削除されます)
 
 ### 安全アクセス
 
@@ -152,7 +162,7 @@ true.toString()           // "true"
 "hello world".replace("world", "taida")  // "hello taida"
 "aaa".replace("a", "b")  // "baa" (最初の一致のみ)
 
-// C12 Phase 6 (FB-5): Regex overload
+// 正規表現オーバーロード
 "hello".replace(Regex("[aeiou]"), "*")  // "h*llo"
 ```
 
@@ -173,7 +183,7 @@ true.toString()           // "true"
 "hello world hello".replaceAll("hello", "hi")  // "hi world hi"
 "aaa".replaceAll("a", "b")  // "bbb"
 
-// C12 Phase 6 (FB-5): Regex overload
+// 正規表現オーバーロード
 "hello".replaceAll(Regex("[aeiou]"), "*")  // "h*ll*"
 "a1b2c3".replaceAll(Regex("\\d"), "#")     // "a#b#c#"
 ```
@@ -194,7 +204,7 @@ true.toString()           // "true"
 "hello".split(",")  // @["hello"] (一致なし → 単一要素)
 "abc".split("")     // @["a", "b", "c"] (文字ごとに分割)
 
-// C12 Phase 6 (FB-5): Regex overload
+// 正規表現オーバーロード
 "one,two;three.four".split(Regex("[,;.]"))  // @["one", "two", "three", "four"]
 ```
 
@@ -224,24 +234,32 @@ stdout(m.start)      // 4  (char index, not byte index)
 `start <= -1` のぶちパックを返します（null / undefined は返さない —
 哲学 I）。
 
-#### search
+#### searchLax (推奨)
 
-正規表現で最初の一致が見つかった位置（char index）を返します。一致が
-ない場合は `-1` を返します。
+正規表現で最初の一致が見つかった位置を文字インデックスとして `Lax[Int]` で返します。一致がない場合は `hasValue = false`、デフォルト値は `0` です。
 
 ```taida
-stdout("abc123".search(Regex("\\d+")))  // 3
-stdout("nothing".search(Regex("\\d+"))) // -1
+"abc123".searchLax(Regex("\\d+")) ]=> i      // 3
+"nothing".searchLax(Regex("\\d+")).hasValue  // false
 ```
 
-**シグネチャ**: `pattern: Regex => :Int`
+**シグネチャ**: `pattern: Regex => :Lax[Int]`
 
-文字列内での固定文字列検索には `.indexOf(...)` を使用してください。
-`search` は必ず `Regex` 引数を要求します。
+固定文字列の検索には `.indexOfLax(...)` を使用してください。`searchLax` は必ず `Regex` 引数を要求します。
+
+#### search (非推奨)
+
+旧来の `search` は、一致がないときに `-1` を返す形です。`-1` を「見つからなかった」のしるしに使うと、有効な位置と区別できないため、`searchLax` に移行してください。
+
+```taida
+"nothing".search(Regex("\\d+"))  // -1  (非推奨)
+```
+
+**シグネチャ**: `pattern: Regex => :Int` (非推奨。doc-comment で `///@ Deprecated: searchLax を使用してください` を付与します)
 
 #### Regex コンストラクタ
 
-`Regex(pattern, flags?)` で正規表現オブジェクトを作成します（C12 Phase 6）。
+`Regex(pattern, flags?)` で正規表現オブジェクトを作成します（後継世代で導入）。
 
 ```taida
 r <= Regex("[aeiou]")          // flags なし
@@ -542,26 +560,37 @@ NaN (非数) かどうかを返します。
 
 **シグネチャ**: `item: T => :Bool`
 
-#### indexOf
+#### indexOfLax (推奨)
 
-要素の位置を返します。見つからない場合は -1。
-
-```taida
-@[10, 20, 30].indexOf(20)  // 1
-@[10, 20, 30].indexOf(50)  // -1
-```
-
-**シグネチャ**: `item: T => :Int`
-
-#### lastIndexOf
-
-要素の最後の出現位置を返します。見つからない場合は -1。
+要素の位置を `Lax[Int]` で返します。見つからない場合は `hasValue = false`、デフォルト値は `0` です。
 
 ```taida
-@[1, 2, 1, 2].lastIndexOf(1)  // 2
+@[10, 20, 30].indexOfLax(20) ]=> i        // 1
+@[10, 20, 30].indexOfLax(50).hasValue     // false
 ```
 
-**シグネチャ**: `item: T => :Int`
+**シグネチャ**: `item: T => :Lax[Int]`
+
+#### lastIndexOfLax (推奨)
+
+要素の最後の出現位置を `Lax[Int]` で返します。見つからない場合は `hasValue = false`、デフォルト値は `0` です。
+
+```taida
+@[1, 2, 1, 2].lastIndexOfLax(1) ]=> i     // 2
+@[1, 2, 1, 2].lastIndexOfLax(9).hasValue  // false
+```
+
+**シグネチャ**: `item: T => :Lax[Int]`
+
+#### indexOf / lastIndexOf (非推奨)
+
+旧来の `indexOf` / `lastIndexOf` は、見つからない場合に `-1` を返す形です。`-1` をしるしに使うと、リスト末尾相対のインデックスとして誤って解釈されうるため、`*Lax` 版に移行してください。
+
+```taida
+@[10, 20, 30].indexOf(50)   // -1  (非推奨)
+```
+
+**シグネチャ**: `item: T => :Int` (非推奨。doc-comment で `///@ Deprecated: indexOfLax を使用してください` を付与します)
 
 ### 安全アクセス（Lax 返し）
 
@@ -671,7 +700,8 @@ NaN (非数) かどうかを返します。
 | 重複除去 | `Unique[list]()` | `Unique[@[1,2,2,3]]()` → `@[1,2,3]` |
 | フラット化 | `Flatten[list]()` | `Flatten[@[@[1],@[2]]]()` → `@[1,2]` |
 | 条件検索 | `Find[list, fn]()` | `Find[@[1,2,3], _ x = x > 1]()` → `Lax(2)` |
-| 位置検索 | `FindIndex[list, fn]()` | `FindIndex[@[1,2,3], _ x = x > 1]()` → `1` |
+| 位置検索 (推奨) | `FindIndexLax[list, fn]()` | `FindIndexLax[@[1,2,3], _ x = x > 1]()` → `Lax(1)` |
+| 位置検索 (非推奨) | `FindIndex[list, fn]()` | 一致なしのとき `-1` を返す。`FindIndexLax` への移行を推奨 |
 | 条件カウント | `Count[list, fn]()` | `Count[@[1,2,3], _ x = x > 1]()` → `2` |
 | 先頭n個 | `Take[list, n]()` | `Take[@[1,2,3], 2]()` → `@[1,2]` |
 | スキップ | `Drop[list, n]()` | `Drop[@[1,2,3], 1]()` → `@[2,3]` |

@@ -18,7 +18,8 @@
 | `E15xx` | 定義・意味論エラー | TypeChecker | 重複定義、禁止構文の明示拒否 |
 | `E16xx` | 型推論・演算意味論エラー | TypeChecker | 戻り型不一致、列挙型不整合、演算子型不整合 |
 | `E17xx` | CLI / モジュール境界エラー | CLI / TypeChecker | 削除済み CLI surface、`packages.tdm` 公開 API 不整合 |
-| `E18xx` | 命名規則違反 (D28B-008 lint) | Parser / Lint | カテゴリ別命名規則 (D28B-001 Lock) 違反 |
+| `E18xx` | 命名規則違反 (`taida way lint`) | Parser / Lint | カテゴリ別命名規則違反 |
+| `E19xx` | ビルドドライバ系エラー | CLI / TypeChecker / Build driver | ディスクリプタビルドの文法、`AssetBundle` の安全性、`.taida/build` のトランザクショナル更新、依存閉包と成果物グラフの違反、内部フィールドへのアクセス禁止 |
 | `E20xx` | アドオンマニフェストエラー | Addon manifest parser | `targets` 互換契約違反、未知ターゲット |
 
 ## 現在の割り当て
@@ -71,13 +72,13 @@
 | `E1404` | MoldInst の `()` オプションに同一名が重複 | TypeChecker |
 | `E1405` | 必須フィールドが `()` オプション側に渡されている | TypeChecker |
 | `E1406` | MoldInst の `()` に未定義のオプションが渡されている | TypeChecker |
-| `E1407` | 親型適用の arity mismatch (header arity / prefix preservation / 親種別 / type param uniqueness を含む umbrella、E30 Lock-B Sub-B3) | TypeChecker |
+| `E1407` | 親型適用の arity mismatch (header arity / prefix preservation / 親種別 / type param uniqueness を含む umbrella) | TypeChecker |
 | `E1408` | MoldInst の `[]` 引数が concrete header 型に一致しない | TypeChecker |
 | `E1409` | MoldInst の `[]` 引数が constrained header 型に一致しない | TypeChecker |
-| `E1410` | declare-only function field requires default function or explicit value (戻り型が defaultFn 生成不能な opaque / unknown alias の場合に definition-site で発火、E30 Lock-C / Lock-D、E30 Phase 5 land) | TypeChecker |
-| `E1411` | InheritanceDef の子フィールドが親の型と互換でない再定義 (旧 `E1410`、E30 Phase 3 で番号移動) | TypeChecker |
-| `E1412` | `RustAddon["fn"](arity <= N)` explicit binding violation: surface 不正 (string literal でない `fn` / `arity` field 欠落 / 非整数 arity) / facade context 外 / 未宣言 fn / manifest arity drift (E30 Lock-G、E30 Phase 7 sub-track B、Interpreter runtime + addon facade summary loader に発火) | Interpreter / TypeChecker |
-| `E1413` | addon facade で manifest `[functions]` の関数名を **bare 参照** している (legacy 暗黙 pre-inject に依存)。@e.30 Lock-G Sub-G4 で legacy pre-inject が撤廃されたため、`name <= RustAddon["name"](arity <= N)` を facade 先頭に追加する必要がある。`@e.X` 以降は移行コマンドを提供しないため、該当 facade は手動で修正する必要がある | Interpreter |
+| `E1410` | declare-only な関数フィールドに既定関数または明示値が必要 (戻り型が defaultFn 生成不能な opaque / unknown alias の場合に定義位置で発火) | TypeChecker |
+| `E1411` | 継承定義の子フィールドが親の型と互換でない再定義 | TypeChecker |
+| `E1412` | `RustAddon["fn"](arity <= N)` の explicit binding 違反: 表記不正 (`fn` が文字列リテラルでない / `arity` field 欠落 / 非整数 arity) / facade コンテキスト外 / 未宣言の関数 / マニフェストとの arity 不一致 | Interpreter / TypeChecker |
+| `E1413` | addon facade でマニフェスト `[functions]` の関数名を **bare 参照** している。`name <= RustAddon["name"](arity <= N)` を facade 先頭に明示する必要がある。`@e.X` 以降は移行コマンドを提供しないため、該当 facade は手動で修正する必要がある | Interpreter |
 
 ### 定義・意味論エラー (`E15xx`)
 
@@ -145,27 +146,52 @@
         For example: `taida build js src`.
 ```
 
-### 命名規則違反 — D28B-008 lint (`E18xx`)
+### 命名規則違反 — `taida way lint` (`E18xx`)
 
-D28B-001 (Phase 0 2026-04-26 Lock) のカテゴリ別命名規則を CI で pin する lint 診断。`taida way lint <PATH>` で実行する。
+カテゴリ別命名規則を CI で確認する lint 診断帯です。`taida way lint <PATH>` で実行します。
 
-| コード | Lock 別名 | メッセージ | フェーズ |
-|--------|----------|-----------|---------|
-| `E1801` | E1XXa | クラスライク型 / モールド型 / スキーマ / エラー variant は PascalCase で命名してください | Parser / Lint |
-| `E1802` | E1XXb | 関数は camelCase で命名してください | Parser / Lint |
-| `E1803` | E1XXc | 関数値を束縛する変数は camelCase で命名してください | Parser / Lint |
-| `E1804` | E1XXd | 非関数値を束縛する変数は snake_case で命名してください | Parser / Lint |
-| `E1805` | E1XXe | (予約) 定数は SCREAMING_SNAKE_CASE で命名してください — Taida は構文上「定数」を変数と区別しないため、AST 単独パスでは検出不可。usage tracking 後段に hook を予約 | Parser / Lint |
-| `E1806` | E1XXf | エラー variant / Enum variant は PascalCase で命名してください | Parser / Lint |
-| `E1807` | E1XXg | 型変数は単一大文字 (`T`, `U`, `V`, `E`, `K`, `P`, `R` 等) で命名してください (4 つ以上の `T1`/`T2`/`T3` indexed 形は許容) | Parser / Lint |
-| `E1808` | E1XXh | ぶちパックフィールドの値型と命名規則が不整合 (関数値 → camelCase / 非関数値 → snake_case) | Parser / Lint |
-| `E1809` | E1XXi | 戻り値型注釈には `:Type` の `:` マーカーを付けてください (例: `=> :Int`)。parser は lenient に受理しますが、`:` マーカーは「これが型ですよ」を明示する concrete type literal marker のため、戻り値型 / 制約 / 型引数 slot / `TypeIs` / mold 具象型 slot 等の **型 literal が必要な文脈** では必須 | Parser / Lint |
+| コード | メッセージ | フェーズ |
+|--------|-----------|---------|
+| `E1801` | クラスライク型 / モールド型 / スキーマ / エラー variant は PascalCase で命名してください | Parser / Lint |
+| `E1802` | 関数は camelCase で命名してください | Parser / Lint |
+| `E1803` | 関数値を束縛する変数は camelCase で命名してください | Parser / Lint |
+| `E1804` | 非関数値を束縛する変数は snake_case で命名してください | Parser / Lint |
+| `E1805` | (予約) 定数は SCREAMING_SNAKE_CASE で命名してください。Taida は構文上「定数」を変数と区別しないため、AST 単独走査では検出できません。利用情報を扱う後段への接続を予約しています | Parser / Lint |
+| `E1806` | エラー variant / 列挙 variant は PascalCase で命名してください | Parser / Lint |
+| `E1807` | 型変数は単一大文字 (`T`, `U`, `V`, `E`, `K`, `P`, `R` など) で命名してください (4 つ以上の場合に `T1` / `T2` / `T3` といった添字形は許容します) | Parser / Lint |
+| `E1808` | ぶちパックフィールドの値型と命名規則が不整合 (関数値は camelCase、非関数値は snake_case) | Parser / Lint |
+| `E1809` | 戻り値型注釈には `:Type` の `:` マーカーを付けてください (例: `=> :Int`)。parser は寛容に受理しますが、戻り値型・制約・型引数のスロット・`TypeIs`・モールドの具象型スロットなど、型リテラルが必要な文脈では必須です | Parser / Lint |
 
-#### 適用範囲 / 適用対象外 (D28B-008 Acceptance より)
+#### 適用範囲 / 適用対象外
 
-- 適用対象外: `_` prefix (`_internal` 等)、boolean プレフィックス (`is`/`has`/`can`/`did`/`needs`)、引数 / フィールド型注釈の形式 A (`arg: Type`) と 形式 B (`arg :Type`) の選択
-- E1805 は AST 単独パスで定数を検出できないため reserved (将来拡張)
-- E1809 は parser が lenient に `=> Type` を受理する場合の lint 検出。CI hard-fail の対象
+- 適用対象外: `_` プレフィックス (`_internal` など)、boolean プレフィックス (`is` / `has` / `can` / `did` / `needs`)、引数・フィールド型注釈の形式 A (`arg: Type`) と形式 B (`arg :Type`) の選択
+- `E1805` は AST 単独走査で定数を検出できないため予約 (将来拡張)
+- `E1809` は parser が寛容に `=> Type` を受理した場合に lint で検出します。CI ではエラー扱いです
+
+### ビルドドライバ系エラー (`E19xx` 予約)
+
+複数バックエンド混合ビルド (`docs/reference/build_descriptors.md`) で発射する診断帯です。現時点では帯域のみ予約し、各コードのメッセージ文面は実装と同時に確定します。
+
+| 区切り | 用途 | 発射段 |
+|--------|------|--------|
+| `E1900〜E1909` | ディスクリプタビルドの CLI 文法と曖昧さ排除 | CLI |
+| `E1910〜E1919` | `AssetBundle` のパス / グロブ / シンボリックリンク安全性 | Build driver |
+| `E1920〜E1929` | `.taida/build` のトランザクショナル更新 / ステージング掃除 / アトミック置換非対応 | Build driver |
+| `E1930〜E1939` | 多成果物診断スキーマの予約・移行用 | Build driver / Diagnostics |
+| `E1940〜E1949` | 成果物グラフの循環 / ターゲット依存閉包違反 | Build driver / TypeChecker |
+| `E1950〜E1959` | `BuildHook` の検証 / 実行失敗 | Build driver |
+| `E1960` (予約) | 内部 `__` フィールドへのユーザ向けドットアクセス禁止 | TypeChecker / Runtime |
+
+ビルドドライバ由来の診断はこの `E19xx` 帯から採番します。jsonl レコードへの `build` ブロック付与ルールと、テキスト出力での `unit=...` / `target=...` / `edge=... dependency=...` 行の扱いは `docs/reference/build_descriptors.md` の 9 節を参照してください。
+
+### 帯域を再利用する予約コード
+
+新帯域を切らず、既存帯域を再利用して採番する予約コードです。
+
+| コード (予約) | 内容 | 既存帯域 |
+|--------------|------|---------|
+| `E0700` | Native と native lowering 系 WASM で相互再帰を検出した場合の拒否 | `E07xx` コード生成エラー |
+| `E1508` | `Lax[T].getOrDefault` / `getOrThrow` / `map` / `flatMap` の引数型不整合 | `E15xx` 定義・意味論エラー |
 
 ### アドオンマニフェストエラー (`E20xx`)
 
@@ -197,7 +223,8 @@ D28B-001 (Phase 0 2026-04-26 Lock) のカテゴリ別命名規則を CI で pin 
 | `E15xx` | TypeChecker | 定義・意味論。重複定義、禁止構文の明示拒否 |
 | `E16xx` | TypeChecker / Parser | 型推論・演算意味論。戻り型、比較、論理、cond-branch、循環継承 |
 | `E17xx` | CLI / TypeChecker | 削除済み CLI surface / モジュール境界 (`packages.tdm`) 公開 API 不整合 |
-| `E18xx` | Parser / Lint | 命名規則違反 (D28B-008 lint、`taida way lint` 実行時のみ発射) |
+| `E18xx` | Parser / Lint | 命名規則違反 (`taida way lint` 実行時のみ発射) |
+| `E19xx` | CLI / TypeChecker / Build driver | ビルドドライバ系 (ディスクリプタビルド文法、`AssetBundle` 安全性、トランザクショナル更新、依存閉包違反、内部フィールドアクセス禁止) |
 
 #### 2. Backend 層（コード生成時に検出）
 
@@ -223,7 +250,7 @@ D28B-001 (Phase 0 2026-04-26 Lock) のカテゴリ別命名規則を CI で pin 
 - **前段ゲート内の重複なし**: `E01xx`-`E05xx` は入力処理の順序に沿った連番。`E13xx`-`E15xx` は TypeChecker 内の意味分類。両者は帯域が重複しない
 - **`E03xx` の Parser / Verify 共有**: `E0301`/`E0302` は Parser と Verify の両方で検出される。これは同一の制約違反を2箇所で検出するための意図的な共有であり、帯域重複ではない
 - **`E10xx`-`E12xx` は予約**: 将来の TypeChecker 拡張用に確保。現在は未使用
-- **`E18xx` は lint 帯域**: D28B-008 で確保。`taida way lint` 実行時のみ発射し、`taida way check` / `taida build` の前段ゲートには含めない (lint と check は別レイヤー、CI では別 job)
+- **`E18xx` は lint 帯域**: `taida way lint` 実行時のみ発射し、`taida way check` / `taida build` の前段ゲートには含めない (lint と check は別レイヤー、CI では別 job)
 - **`E16xx` の Parser / TypeChecker 共有**: `E1616` は Parser が cond-branch の arm body を検査する時点で発射される。`E1617` は TypeChecker と `emit_wasm_c` の 2 箇所で発射される (同じ不変条件の検査を異なる段で別側面から行う意図的共有)。`E1609` / `E1615` は将来拡張用に予約された欠番
 - **`E05xx` / `E06xx` / `E07xx` / `E08xx` / `E09xx` はカテゴリ予約**: 現時点で具体的な `E####` コードは未割当。モジュール解決 / ランタイム / codegen / パッケージ / グラフ各段のエラーは将来この帯域から採番する
 

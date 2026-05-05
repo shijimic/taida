@@ -30,13 +30,13 @@
 
 | 禁止要素 | 理由 | 行き先 |
 |---------|------|--------|
-| Blocker ID (`C26B-001`, `D28B-003`, `RC15B-005`, `QF-42`, `ROOT-5` 等、generic `[A-Z][0-9]+B-[0-9]+`) | 進行中・終了済の追跡情報。surface 仕様ではない | `CHANGELOG.md` / `.dev/*_BLOCKERS.md` |
-| RC タグ別 land narrative (`@c.26.rc1 で land`, `@d.28 で削除`, `Round 3 / wH で着地` 等、generic `@[a-z]\.[0-9]+`) | 時系列のスナップショット。次の RC で陳腐化する | `CHANGELOG.md` |
-| `[FIXED]` / `OPEN` / `PARTIAL` / `tentative` などの status マーカー | 進行状況。RC ごとに変わる | `.dev/*_BLOCKERS.md` |
-| 廃止タグの履歴 (`@c.14.rc1 で廃止`, `@b.11.rc3 で廃止`, `@d.28 で削除予定` 等) | 廃止 *時期* は CHANGELOG 領域 | `CHANGELOG.md` |
-| 固定の日付 / timestamp (`2026-04-24`, `更新日: 2026-04-10` 等) | 静的に古くなる | placeholder (`<ISO-8601 timestamp>`) |
-| 固定 semver 値 (`taida_version: "0.1.0"`) | Taida 採番ルール (`@gen.num.label`) と矛盾 | placeholder |
-| `Round N` / `wA`〜`wZ` (worktree 名) | 開発スプリント名。surface に登場すべきでない | `CHANGELOG.md` |
+| Blocker ID (`<TRACK>B-<NUM>` 形式の内部追跡ラベル全般) | 進行中・終了済の追跡情報であり、表面仕様ではない | `CHANGELOG.md` (公開する場合) または内部追跡 |
+| RC タグ別の着地ナラティブ (`@<gen>.<num>.rc<n>` 単位の時系列記述) | 次の RC で陳腐化する | `CHANGELOG.md` |
+| `[FIXED]` / `OPEN` / `PARTIAL` / `tentative` などの状態マーカー | 進行状況。RC ごとに変わる | 内部追跡 |
+| 廃止タグの履歴 (どの RC で廃止 / 削除予定かといった記述) | 廃止 *時期* は CHANGELOG 領域 | `CHANGELOG.md` |
+| 固定の日付 / タイムスタンプ (`更新日: ...` 等) | 静的に古くなる | プレースホルダ (`<ISO-8601 timestamp>`) |
+| 固定の Semantic Versioning 値 (`taida_version: "0.1.0"` 等) | Taida 採番ルール (`@<gen>.<num>.<label?>`) と矛盾 | プレースホルダ |
+| `Round N` / `wA`〜`wZ` などの開発時スプリント名 | 表面に登場すべきでない | `CHANGELOG.md` |
 
 廃止された surface を文書化したい場合は、リファレンス末尾に
 `## Deprecated` 節を設け、**「現在非サポート」** とだけ書きます。
@@ -69,11 +69,12 @@
   error message 自体に literal として焼かれている文字列は surface の
   一部。リファレンスは「この literal が固定されている」事実を pin する
   責務を負う。
-- **本 README 自身**: 禁止パターンを列挙する責務上、`C26B-001`,
-  `D28B-003`, `@c.14.rc1`, `@d.28`, `Round 3`, `[FIXED]` 等のサンプル
-  文字列が **本 README ファイル内にのみ** 現れます。レビュー時の
-  grep は `--exclude=README.md` を付けるか、本ファイル内 hits は
-  手動で「禁止パターンの教材としての使用」と判定して除外してください。
+- **本 README 自身**: 禁止パターンを列挙する責務上、`<TRACK>B-<NUM>`
+  形式の例示や `@<gen>.<num>.rc<n>` のような形式記述、`Round N`,
+  `[FIXED]` 等の例示文字列が **本 README ファイル内にのみ** 現れます。
+  レビュー時の grep は `--exclude=README.md` を付けるか、本ファイル
+  内のヒットは「禁止パターンを教材として使用している箇所」として
+  手動で除外してください。
 
 例外を新規追加する場合は、本 README の本節に行を追加して理由を明示
 してください。**justified exception 一覧化されない例外は許容されません**。
@@ -99,15 +100,13 @@ why を深掘りしたい場合は `docs/guide/` に置きます。
 タグ narrative の混入が無いことを確認してください:
 
 ```bash
-# Primary sweep: 0 件であること (README.md 自身は教材として除外)
-# 採番世代 (C25 / C26 / C27 / D28 / 後続 D29+ / 後続 C28+) すべてに追従できる
-# よう、blocker ID 部分は `[A-Z][0-9]+B-[0-9]+` (大文字 1+ + 数字 + `B-` + 数字)、
-# タグ narrative 部分は `@[a-z]\.[0-9]+` (`@c.26` / `@d.28` / `@e.x` 等) で
-# generalize 済。
+# 一次走査: 0 件であること (README.md 自身は教材として除外)
+# 内部追跡ラベルは `[A-Z][0-9]+B-[0-9]+` 形式、タグナラティブは
+# `@[a-z]\.[0-9]+` 形式で一般化したパターンで検出します。
 grep -nE "Round [0-9]+|[A-Z][0-9]+B-[0-9]+|@[a-z]\.[0-9]+|FIXED" docs/reference/ --exclude=README.md
 
-# Secondary sweep: 0 件 / または justified exception のみであること
-grep -nE "RC15B|RC2\.[0-9]|RC1\.5|C19B|C20B|C12B|C18-1|C21-3|QF-[0-9]|B11B|2026-" docs/reference/ --exclude=README.md
+# 二次走査: 0 件であること、または明示的に許容された例外のみであること
+grep -nE "RC[0-9]+B|RC[0-9]+\.[0-9]+|QF-[0-9]+|2026-" docs/reference/ --exclude=README.md
 ```
 
 両 sweep が 0 件 (または本 README に列挙された justified exception のみ)

@@ -56,9 +56,8 @@ A capability / permission model (along the lines of Deno's
 the D26 breaking-change phase** and will be introduced alongside a
 namespaced redesign of the `taida-lang/os` surface.
 
-The full triage of the 2026-03-19 audit round is tracked in
-`.dev/taida-logs/docs/archive/SECURITY_AUDIT.md` and summarised in
-the C25 blocker `C25B-006`. Each finding carries one of:
+Each finding from the audit round carries one of the following
+states:
 
 - **MITIGATED** — fix has landed.
 - **ACCEPTED** — by design; surface-level contract published here.
@@ -86,3 +85,49 @@ database lookup) and `cargo-deny` (licences / duplicates / yanked
 crates / sources allow-list) on every push and weekly on a schedule.
 Findings are surfaced as GitHub Actions warnings during `@c.25.rc7`;
 promotion to hard-fail is the gate for `@c.26.rc*`.
+
+## Upgrade path verification
+
+`taida upgrade` performs the self-replacing binary update path and
+must verify provenance before overwriting the running executable.
+The contract for this path is:
+
+- The release asset list **must** include `SHA256SUMS`. If the asset
+  is missing, or the line for the downloaded binary cannot be located
+  inside it, the upgrade is aborted before any file replacement
+  occurs. There is no opt-out flag for this check.
+- `SHA256SUMS` itself is verified with Sigstore cosign keyless
+  verification. The certificate identity is pinned to a workflow path
+  under `taida-lang/taida` (the regular expression is a constant in
+  the upgrader, not derived from any environment variable). The OIDC
+  issuer is pinned to `https://token.actions.githubusercontent.com`.
+- After cosign verification succeeds, the upgrader recomputes the
+  SHA-256 of the downloaded binary and compares it against the line
+  in `SHA256SUMS`. Only if both checks pass does the binary
+  replacement proceed.
+- Production builds ignore `TAIDA_GITHUB_API_URL`. The host is fixed
+  to `https://api.github.com`. The environment variable is honoured
+  only in test builds.
+
+The `install.sh` script applies the same identity pin: the cosign
+`--certificate-identity-regexp` value is hard-coded to
+`taida-lang/taida` and is **not** derived from `TAIDA_REPO`. If a
+fork or test repository needs to substitute the source URL, that
+substitution is intentionally out of scope of the cosign identity
+check.
+
+## Source package pinning
+
+Source-package downloads consumed via `packages.tdm` are pinned by
+SHA-256 in the manifest. The package store recomputes the SHA-256
+from the downloaded bytes and rejects any mismatch before the cache
+is written. Cosign verification is required for any source package
+whose origin matches the official release URL pattern; non-official
+source URLs are rejected during the supported window.
+
+Production builds ignore `TAIDA_GITHUB_BASE_URL`; the host is fixed
+to `https://github.com`. `TAIDA_VERIFY_SIGNATURES` defaults to
+`required`, and any value other than `required` causes a production
+binary to refuse to start. Test builds may relax these constraints
+through a build feature, but the released binary distributed via
+`install.sh` does not enable that feature.

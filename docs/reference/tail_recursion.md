@@ -214,21 +214,25 @@ fibTail n: Int a: Int b: Int =
 
 ### 二分探索
 
+見つからない場合は `Lax[Int]` の `hasValue = false` で表現します。`-1` を「見つからなかった」のしるしに使うパターンは採用しません (有効な位置と区別できないため)。
+
 ```taida
 binarySearch list: @[Int] target: Int =
   searchTail list target 0 (list.length() - 1)
-=> :Int
+=> :Lax[Int]
 
 searchTail list: @[Int] target: Int low: Int high: Int =
-  | low > high |> 0 - 1
+  | low > high |> Lax[Int]()                           // 見つからなかった (hasValue = false)
   | _ |>
     Div[low + high, 2]() ]=> mid
     list.get(mid) ]=> value
-    | value == target |> mid
+    | value == target |> Lax[Int](mid)                 // 見つかった
     | value < target |> searchTail(list, target, mid + 1, high)
     | _ |> searchTail(list, target, low, mid - 1)
-=> :Int
+=> :Lax[Int]
 ```
+
+呼び出し側は `]=>` で取り出すか、`hasValue` を確認してから `getOrDefault` で既定値を渡します。
 
 ### 文字列の繰り返し
 
@@ -275,13 +279,28 @@ stdout(isEven(100000))
 
 ### バックエンド対応状況
 
-| バックエンド | 直接再帰 TCO | 相互再帰 TCO |
-|-------------|:-----------:|:-----------:|
-| Interpreter | OK | OK |
-| JS          | OK | OK |
-| Native      | OK | 通常呼び出し |
+| バックエンド | 直接再帰の末尾呼び出し最適化 | 相互再帰 |
+|-------------|:---------------------------:|:--------:|
+| Interpreter | OK | OK (末尾呼び出し最適化) |
+| JS          | OK | OK (末尾呼び出し最適化) |
+| Native      | OK | `[E0700]` で拒否 |
+| WASM (Native と同系統の lowering を行うプロファイル) | OK | `[E0700]` で拒否 |
 
-Native バックエンドでは、相互再帰は通常の関数呼び出しとして実行されます。深い相互再帰ではスタックオーバーフローの可能性があるため、Interpreter または JS バックエンドの使用を推奨します。
+Native と Native と同系統の lowering を行う WASM プロファイルでは、相互再帰を `[E0700]` で拒否します。バックエンド間で動作が暗黙のうちに乖離するのを避け、診断で明示する方針です。
+
+判定理由:
+
+- Native バックエンドにトランポリン変換や継続渡し変換を入れる負担を、現在の安定スコープから外す
+- Interpreter と JS で末尾呼び出し最適化を捨てる方向は既存コード (`examples/*.td` を含む) を破壊する
+- Native 側のみ拒否することで、ユーザは「Interpreter または JS 向けに書く」「相互再帰を直接再帰やアキュムレータパターンに書き換える」のいずれかを明示的に選べる
+
+Native 向けのトランポリン実装は将来世代の候補です。
+
+#### `[E0700]` が出たときの対応
+
+1. 相互再帰を直接再帰に書き換える (アキュムレータ引数渡しや 1 関数への統合)
+2. 上記が難しい場合、対象成果物を Interpreter または JS バックエンドに移す (`taida build js <PATH>`)
+3. 通常のループに置き換える (`@[1..n].reduce(_)` など)
 
 ### 非末尾の相互再帰はコンパイルエラー
 

@@ -6,8 +6,8 @@ Taida は**プリリュード**と**ビルトイン型**で構成されていま
 
 > **PHILOSOPHY.md — I.** 深く考えずに適当にぶちこんでけ
 
-操作系の処理はモールドとして提供されます。詳細は `reference/class_like_types.md` を参照してください。
-メソッドは状態チェックとモナディック操作に限定されています。詳細は `reference/standard_methods.md` を参照してください。
+操作系の処理はモールドとして提供されます。詳細は [`docs/reference/class_like_types.md`](./class_like_types.md) を参照してください。
+メソッドは状態チェックとモナディック操作に限定されています。詳細は [`docs/reference/standard_methods.md`](./standard_methods.md) を参照してください。
 
 ---
 
@@ -173,11 +173,11 @@ clone せず view として保持する zero-copy primitive です。span を
 
 - **mold form** `StrOf[span, raw]() -> Str` (3-backend parity 保証、
   詳細は [`docs/reference/net_api.md §4.1`](./net_api.md))
-- **function form** `strOf(span, raw) -> Str` (D28B-015 で追加、
-  4-backend parity: interpreter / JS / native / wasm-full の中で
-  3-backend 完全 GREEN、wasm-full は compile-only pin。
-  mold form と意味論的に等価で、`callSign(req).path` 等の関数呼び出し
-  式チェーンで「`StrOf[...]()` の括弧二重」を避けたいときに使う):
+- **function form** `strOf(span, raw) -> Str` (gen-D 追加。
+  4 バックエンドのうち interpreter / JS / native は 3 バックエンドの
+  完全パリティ、wasm-full はコンパイルのみ確認。mold 形と意味的に等価で、
+  `callSign(req).path` のような関数呼び出し式チェーンで `StrOf[...]()`
+  の括弧の二重を避けたいときに使う):
 
 ```taida
 // mold form と function form は同じ結果を返す

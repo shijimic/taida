@@ -3,7 +3,7 @@
 > **PHILOSOPHY.md -- II.** だいじなものはふくろにしまっておきましょう
 > **PHILOSOPHY.md -- III.** カタめたいなら、鋳型を作りましょう
 
-> **E30 (gen-E 破壊的変更) で導入された統一構文。** 旧 3 系統 (TypeDef / Mold 継承 / Error 継承) は本章の単一構文に統合されました。旧構文からの移行は [migration_e30.md](migration_e30.md) を参照してください。
+> 旧来の 3 系統 (TypeDef / Mold 継承 / Error 継承) は、本章の単一構文に統合されています。
 
 ---
 
@@ -135,13 +135,15 @@ Pilot = @(
   name: Str
   age: Int
   intro =
-    `I'm ${name}, age ${Str[age]() ]=> _}.`
+    `I'm ${name}, age ${age.toString()}.`
   => :Str
 )
 
 ritsuko <= Pilot(name <= "Ritsuko", age <= 30)
 greeting <= ritsuko.intro()  // "I'm Ritsuko, age 30."
 ```
+
+テンプレートリテラルの `${ ... }` には式のみを書きます。`]=>` や `<=[` のような取り出し系は書けません。Int から Str への変換が必要な場合は `.toString()` を使い、Lax から取り出す必要がある場合は事前に `]=>` で束縛してからテンプレートに埋め込んでください。
 
 メソッド内では、親フィールドも子フィールドも区別なく直接アクセスできます。`self` や `super` のような特別な識別子は不要です。
 
@@ -156,7 +158,7 @@ Greeter = @(
 )
 ```
 
-declare-only 関数フィールドは、E30 で **すべての系統 (旧 TypeDef / Mold 継承 / Error 継承) で許可** されます (E30B-002)。
+declare-only な関数フィールドは、E30 ですべての系統 (旧 TypeDef / Mold 継承 / Error 継承) で許可されます。
 
 declare-only 関数フィールドの default 値は、E30 で導入される **defaultFn 自動生成** によって充足されます。defaultFn は引数を受け取り、戻り型のデフォルト値を返す関数です。
 
@@ -201,7 +203,7 @@ ok ]=> value   // 42
 ```taida
 Error => NotFound = @(
   msg: Str
-  recovery: Unit => :Unit  // declare-only 関数フィールド OK (E30B-002)
+  recovery: Unit => :Unit  // declare-only な関数フィールドは許可
 )
 
 // throw / |== は通常通り
@@ -287,25 +289,7 @@ D29 までは 3 系統が独立した surface 構文を持っていました。
 | Mold 継承 | `Mold[T] => Foo[T] = @(...)` | `Mold[T] => Foo[T] = @(...)` (一般化された継承として保持) |
 | Error 継承 | `Error => NotFound = @(...)` | `Error => NotFound = @(...)` (一般化された継承として保持) |
 
-**surface はほぼ変わりません**。変わるのは「3 系統が別々のもの」という概念の取り扱いです。E30 以降は、すべて **class-like 単一概念** として読みます。
-
-旧コードからの移行手順は [migration_e30.md](migration_e30.md) を参照してください。
-
----
-
-## 移行について
-
-`@e.X` 以降の CLI には移行用ハブはありません。`@e.30` への移行は
-[migration_e30.md](migration_e30.md) のチェックリストに従って手動で行います。
-
-```bash
-taida way check <PATH>
-# Run your project-specific tests after the Taida gate passes.
-```
-
-古い RC 計画やメモにある「移行コマンド」案は `@e.X` の確定 CLI には含まれません。
-
-> gen-E は **予告期間なし、即破壊的変更** で確定しています（E30 Lock-E）。旧構文を使うと `@e.30` から `[E14xx]` 系の診断で拒否されます。
+**表面はほぼ変わりません**。変わるのは「3 系統が別々のもの」という概念の取り扱いです。すべて **クラスライクの単一概念** として読みます。
 
 ---
 
@@ -331,7 +315,6 @@ taida way check <PATH>
 - [リテラル `@(...)` / `@[...]`](04_buchi_pack.md) — 値リテラル中心
 - [操作モールド (Mold)](05_molding.md) — `solidify` / `unmold` フック
 - [エラー処理](08_error_handling.md) — Lax / throw / `\|==` / Gorillax
-- [関数](09_functions.md) — defaultFn 仕様 (Phase 6 で追記)
-- [migration_e30](migration_e30.md) — 旧構文 → 新統一構文 移行ガイド
+- [関数](09_functions.md) — defaultFn 仕様
 - [診断コード](../reference/diagnostic_codes.md) — `[E1407]` / `[E1410]` 等
 - [命名規則](../reference/naming_conventions.md) — 型名 / 型引数の命名

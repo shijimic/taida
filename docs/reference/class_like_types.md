@@ -6,7 +6,7 @@ Taida のユーザー定義型 (旧 TypeDef / Mold 継承 / Error 継承) は、
 
 - class-like 単一構文 (`Name[?type-args] [=> Parent] = @(...)`) の概念ガイドは [`../guide/04_class_like.md`](../guide/04_class_like.md) を参照してください
 - 操作モールド (Mold) の概念ガイドは [`../guide/05_molding.md`](../guide/05_molding.md) を参照してください
-- 旧 3 系統 (TypeDef / Mold 継承 / Error 継承) からの移行は [`../guide/migration_e30.md`](../guide/migration_e30.md) を参照してください
+- 旧来の 3 系統 (TypeDef / Mold 継承 / Error 継承) は、本リファレンスのクラスライク統一構文に統合されています
 
 > **PHILOSOPHY.md — III.** カタめたいなら、鋳型を作りましょう
 
@@ -1123,7 +1123,7 @@ Filter[list, isEven]() ]=> result
 - `CHANGELOG.md` の **歴史的 release note** (`@b.X` / `@c.X` / `@d.X` 当時の記述) は原文保持 — 当時の事実として `mold_types.md` パスを残しています
 - 外部参照 (ブログ / IDE plugin 設定 / addon README 等) で旧パスが残っている場合は、本ファイル `class_like_types.md` を参照するように更新してください
 
-### 関連 blocker
+### 関連する変更点
 
-- E30B-005 (Phase 1 主軸): Docs 全面再構成 (3 系統 → class-like 単一概念) — 本 rename はその Sub-step 1.3
-- E30B-008 (Phase 2/3 同期 land): `[E1407]` / `[E1410]` 意味再定義は parser / checker 実装と同期して land
+- gen-E でドキュメントを 3 系統 (TypeDef / Mold 継承 / Error 継承) からクラスライク統一概念へ再構成しました。本ファイルへのリネームはその一部です。
+- `[E1407]` と `[E1410]` の意味の再定義は、parser と型検査器の実装と同期して反映されています。

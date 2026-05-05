@@ -141,31 +141,35 @@ Graph = @(
 
 ## 型階層グラフ
 
+クラスライク型の宣言は単一の構文に統一されています (`docs/reference/class_like_types.md`)。`TypeDef` / `Mold` / `Error` を別個のノード種別として持っていた以前の表現は廃止し、`ClassLikeType` 単一に揃えます。基底種別の情報は metadata `parent_lineage` に保持します。
+
 ### ノード種別
 
 | `kind` | 説明 | 抽出元 |
 |--------|------|--------|
 | `PrimitiveType` | プリミティブ型 | `Int`, `Str`, `Bool`, `Float` |
-| `BuchiPackType` | ぶちパック型 | `TypeName = @(...)` |
-| `MoldType` | モールディング型 | `Mold[T] => TypeName[T] = @(...)` |
-| `ErrorType` | エラー型 | `Error => ErrorName = @(...)` |
+| `ClassLikeType` | クラスライク型 (旧 `BuchiPackType` / `MoldType` / `ErrorType` の統合) | `TypeName = @(...)`、`Mold[T] => TypeName[T] = @(...)`、`Error => ErrorName = @(...)` |
+
+ノードの metadata には次の情報を含めます。
+
+- `parent_lineage`: `"none"` / `"mold"` / `"error"` / `"named"` のいずれか。基底種別を保持します
+- `mold_params`: `Mold[T]` 系で型引数を取る場合のみ、引数名の配列
 
 ### エッジ種別
 
 | `kind` | 説明 | 抽出元 |
 |--------|------|--------|
-| `MoldInheritance` | Mold基底クラスからの継承 | `Mold[T] => ...` |
-| `ErrorInheritance` | Error基底型からの継承 | `Error => ...` |
-| `StructuralSubtype` | 構造的サブタイプ | `ParentType => ChildType = @(...)` |
+| `Inheritance` | 親型からの継承 (旧 `MoldInheritance` / `ErrorInheritance` の統合) | `Mold[T] => ...`、`Error => ...`、`Parent => Child = @(...)` |
+| `StructuralSubtype` | 構造的サブタイプ関係 | 構造ベースの暗黙の関係 |
 
 ### 抽出規則
 
-| 構文パターン | 生成されるノード | 生成されるエッジ |
-|-------------|----------------|----------------|
-| `Name = @(...)` | `Name`: BuchiPackType | なし |
-| `Mold[T] => Name[T] = @(...)` | `Name`: MoldType | `Mold[T] -> Name`: MoldInheritance |
-| `Error => Name = @(...)` | `Name`: ErrorType | `Error -> Name`: ErrorInheritance |
-| `Parent => Child = @(...)` | `Child`: BuchiPackType | `Parent -> Child`: StructuralSubtype |
+| 構文パターン | 生成されるノード (`metadata.parent_lineage`) | 生成されるエッジ |
+|-------------|---------------------------------------------|----------------|
+| `Name = @(...)` | `Name`: `ClassLikeType` (`parent_lineage = "none"`) | なし |
+| `Mold[T] => Name[T] = @(...)` | `Name`: `ClassLikeType` (`parent_lineage = "mold"`) | `Mold[T] -> Name`: `Inheritance` |
+| `Error => Name = @(...)` | `Name`: `ClassLikeType` (`parent_lineage = "error"`) | `Error -> Name`: `Inheritance` |
+| `Parent => Child = @(...)` | `Child`: `ClassLikeType` (`parent_lineage = "named"`、親名は metadata 内に保持) | `Parent -> Child`: `Inheritance` |
 
 ---
 

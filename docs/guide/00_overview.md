@@ -257,12 +257,11 @@ ritchan <= NervStaff(name <= "Ritsuko")  // call_sign = "", age = 0
 | 06 | [リスト操作](06_lists.md) | リスト操作（モールド + 状態チェックメソッド） |
 | 07 | [制御フロー](07_control_flow.md) | 条件分岐、パターンマッチ |
 | 08 | [エラー処理](08_error_handling.md) | Lax + throw/\|== + ゴリラ天井 |
-| 09 | [関数](09_functions.md) | 関数定義、パイプライン、末尾再帰、defaultFn (E30 Phase 6 で追記) |
+| 09 | [関数](09_functions.md) | 関数定義、パイプライン、末尾再帰、defaultFn |
 | 10 | [モジュール](10_modules.md) | モジュールシステム（プリリュード、インポート/エクスポート） |
 | 11 | [非同期処理](11_async.md) | Async[T]、]=> await |
 | 12 | [イントロスペクション](12_introspection.md) | 構造的イントロスペクション |
 | 13 | [アドオン作成](13_creating_addons.md) | Rust アドオンの作成とプレビルド配布 |
-| - | [E30 移行ガイド](migration_e30.md) | D29 → `@e.30` 移行手順 + breaking points 一覧 |
 
 ### リファレンス
 

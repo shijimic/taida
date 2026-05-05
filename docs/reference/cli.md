@@ -75,6 +75,10 @@ taida --no-check <FILE>
 
 ## `taida build`
 
+`taida build` には **単一ターゲットビルド** と **ディスクリプタビルド** の 2 つのモードがあります。第一位置引数を unit 名や plan 名として再利用しないことで、両モードの曖昧さを排除します。
+
+### 単一ターゲットビルド (既存互換)
+
 ```bash
 taida build [native|js|wasm-min|wasm-wasi|wasm-edge|wasm-full] [--release] [--diag-format text|jsonl] [-o OUTPUT] [--entry ENTRY] <PATH>
 ```
@@ -94,6 +98,36 @@ taida build [native|js|wasm-min|wasm-wasi|wasm-edge|wasm-full] [--release] [--di
 - 旧 `--target <target>` / `--target=<target>` フラグは `@e.X` で削除され、`[E1700]` + exit 2 になります。
 - 既定では parse + type check を実行します。`--no-check` で型検査をスキップできます。
 - `--diag-format jsonl` を指定するとコンパイル診断を `taida.diagnostic.v1` JSONL 形式で出力します。
+
+### ディスクリプタビルド
+
+```bash
+taida build <PATH> --unit <NAME>
+taida build <PATH> --plan <NAME>
+taida build <PATH> --all-units
+```
+
+| 形 | 意味 |
+|----|------|
+| `--unit <NAME>` | `<PATH>` 内で export された `BuildUnit` のうち `name == <NAME>` のものだけをビルド |
+| `--plan <NAME>` | `<PATH>` 内で export された `BuildPlan` のうち `name == <NAME>` をビルド |
+| `--all-units` | `<PATH>` 内で export された全 `BuildUnit` をビルド (単独 export と `BuildPlan` 経由のどちらも対象) |
+
+ディスクリプタビルドは、`taida-lang/build` パッケージのディスクリプタ (`BuildUnit` / `BuildPlan` / `AssetBundle` / `RouteAsset` / `BuildHook`) をランタイム値としてではなく **ビルドディスクリプタ** として扱います。詳細は `docs/reference/build_descriptors.md` を参照してください。
+
+#### 禁止される組み合わせ (`E1900〜E1909`)
+
+| 組み合わせ | 結果 |
+|------------|------|
+| 位置引数の `<target>` と `--unit` / `--plan` / `--all-units` の併用 | `[E1900]` で拒否 |
+| `--unit` と `--plan` の併用 | `[E1901]` で拒否 |
+| `--unit` と `--all-units` の併用 | `[E1901]` で拒否 |
+| `--plan` と `--all-units` の併用 | `[E1901]` で拒否 |
+| `--unit` / `--plan` / `--all-units` を指定したが `<PATH>` に export 済みディスクリプタが無い | `[E1902]` でビルドを中断 |
+| `--unit <NAME>` を指定したが該当する `BuildUnit` が無い | `[E1903]` でビルドを中断 (候補名一覧を表示) |
+| `--plan <NAME>` を指定したが該当する `BuildPlan` が無い | `[E1904]` でビルドを中断 |
+
+`<PATH>` の解釈は単一ターゲットビルドと共通です。第一位置引数はビルドルートのソースパス (ファイル / ディレクトリ / プロジェクトルート) であり、unit 名や plan 名として解釈しません。
 
 WASM SIMD (`simd128`) 有効化ポリシー:
 

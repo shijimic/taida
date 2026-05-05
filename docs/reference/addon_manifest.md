@@ -28,7 +28,7 @@ currently routes an addon-backed import through its dispatcher:
 |----------------|-------------------|-------|
 | Interpreter    | **Yes**           | Dispatches through `dlopen` when the interpreter binary is built with `feature = "native"` (the default build). The addon facade runs as a dynamic Taida module in a dedicated environment. |
 | Native (AOT)   | **Yes**           | Lowered at build time. The facade is statically analysed by `src/addon/facade.rs` into an `AddonFacadeSummary`; facade FuncDefs become IR functions, pack / scalar / list / template bindings are replayed into the module init path, and cdylib calls go through `taida_addon_call`. |
-| WasmFull       | **Yes** (D28B-010, @d.X) | Reuses the registry / facade path used by Native and Interpreter. Manifest authors opt in by adding `"wasm-full"` to the top-level `targets` array. cdylib loading at @d.X reuses the host's native loader (a wasm-side dispatcher inside the wasm sandbox is post-stable scope). |
+| WasmFull       | **Yes** (since `@d.X`) | Reuses the registry / facade path used by Native and Interpreter. Manifest authors opt in by adding `"wasm-full"` to the top-level `targets` array. cdylib loading at `@d.X` reuses the host's native loader; a wasm-side dispatcher inside the wasm sandbox is a post-stable improvement. |
 | JS transpiler  | **No**            | No JS-side dispatcher exists. Imports produce a deterministic error message pointing at `Run 'taida build native' or use the interpreter`. |
 | WasmMin / WasmWasi / WasmEdge | **No** | No addon dispatcher in the @d.X stable contract. These backends remain rejected even when the manifest declares `targets = ["wasm-full"]`; they are *separate* wasm profiles, not aliases. |
 
@@ -81,11 +81,10 @@ source level but **always populated** in the parsed manifest:
   `["native"]`. The omitted form and an explicit
   `targets = ["native"]` produce a **bit-identical**
   `AddonManifest` — same struct values, same diagnostic strings.
-- **Allowed entries**: drawn from a closed allowlist. The @d.X
-  allowlist is `{"native", "wasm-full"}` (D28B-010 added
-  `"wasm-full"` as a §6.2 widening); any other entry (including
-  `"wasm"`, `"wasm-min"`, `"wasm-wasi"`, `"wasm-edge"`, `"Native"`,
-  `"unknown"`) is rejected at parse time.
+- **Allowed entries**: drawn from a closed allowlist. The `@d.X`
+  allowlist is `{"native", "wasm-full"}`. Any other entry
+  (including `"wasm"`, `"wasm-min"`, `"wasm-wasi"`, `"wasm-edge"`,
+  `"Native"`, or `"unknown"`) is rejected at parse time.
 - **Empty array**: `targets = []` is rejected. Authors who want
   the default must omit the key entirely; an empty array would
   otherwise let an addon opt out of the contract by writing a

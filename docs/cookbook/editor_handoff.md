@@ -131,9 +131,9 @@ after  <= Read[path]().getOrDefault("")
 
 ---
 
-## 5. エディタ起動前の対話プロンプト（C20-2 以降）
+## 5. エディタ起動前の対話プロンプト
 
-`runInteractive` / `execShellInteractive` に渡す前の「どのファイルを編集しますか？」「コミットメッセージのドラフトを書きますか？」のようなプロンプトは、`stdinLine` を使って UTF-8-aware に受け取ると日本語 / 中国語 / 絵文字入力が編集中に壊れません。従来の `stdin` は kernel cooked mode のため Backspace が 1 バイト単位で働き、multibyte 文字が途中まで残る不具合 (ROOT-7) がありました。
+`runInteractive` / `execShellInteractive` に渡す前の「どのファイルを編集しますか？」「コミットメッセージのドラフトを書きますか？」のようなプロンプトは、`stdinLine` を使って UTF-8 を意識した形で受け取ると、日本語・中国語・絵文字の入力が編集中に壊れません。旧来の `stdin` はカーネルの cooked モードで動くため、Backspace が 1 バイト単位で働き、マルチバイト文字が途中まで残ることがありました。
 
 ```taida
 >>> taida-lang/os => @(runInteractive, writeFile, Read, EnvVar)

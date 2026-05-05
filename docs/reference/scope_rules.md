@@ -21,10 +21,11 @@ Taida Langには2種類のスコープがあります。
 ユーザー状態なので、`$HOME` 全体を Taida project として広げる理由には
 なりません。
 
-marker が見つからない standalone source では、その source のある
-ディレクトリだけを fallback 境界として扱います。絶対 path import や
-`..` import がその境界の外へ出る場合、Interpreter / JS / Native /
-wasm build paths は同じ SEC-003 診断で reject します。
+マーカーが見つからない単独ソースでは、そのソースのあるディレクトリ
+だけを fallback の境界として扱います。絶対パスの import や `..`
+を含む import がその境界の外へ出る場合、Interpreter / JS / Native /
+WASM ビルドのいずれも、共通のパストラバーサル拒否診断で reject
+します。
 
 ---
 
