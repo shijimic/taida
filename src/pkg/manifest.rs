@@ -10,6 +10,13 @@
 /// <<<@1.0.0 @(capitalize, truncate)
 /// ```
 ///
+/// **Pinned source package format** (E32B-016):
+/// ```toml
+/// [packages."taida-lang/web"]
+/// version = "a.1"
+/// integrity = "sha256:<64 lowercase hex chars>"
+/// ```
+///
 /// **Legacy format** (declarative assignments only):
 /// ```taida
 /// name <= "my-project"
@@ -54,6 +61,9 @@ pub enum Dependency {
         org: String,
         name: String,
         version: String,
+        /// E32B-016: optional source tarball SHA-256 pin.
+        /// Canonical shape: `sha256:` + 64 lowercase hex chars.
+        integrity: Option<String>,
     },
 }
 
@@ -74,11 +84,14 @@ impl Manifest {
     /// Parse manifest from source string.
     ///
     /// Detects format automatically:
+    /// - `[packages."org/name"]` tables are extracted before Taida parsing and
+    ///   carry pinned source package integrity.
     /// - If the AST contains versioned imports (`>>> pkg@ver`) or versioned exports
     ///   (`<<<@ver`), use new format extraction.
     /// - Otherwise, fall back to legacy format (assignments only, reject side-effects).
     pub fn parse(source: &str, root_dir: &Path) -> Result<Self, String> {
-        let (program, parse_errors) = crate::parser::parse(source);
+        let (table_deps, source_without_tables) = extract_package_tables(source)?;
+        let (program, parse_errors) = crate::parser::parse(&source_without_tables);
         if !parse_errors.is_empty() {
             let msgs: Vec<String> = parse_errors.iter().map(|e| e.to_string()).collect();
             return Err(format!("packages.tdm parse errors:\n{}", msgs.join("\n")));
@@ -96,9 +109,9 @@ impl Manifest {
         });
 
         if has_new_format {
-            Self::extract_from_ast(&program, root_dir)
+            Self::extract_from_ast(&program, root_dir, table_deps)
         } else {
-            Self::parse_legacy(&program, root_dir)
+            Self::parse_legacy(&program, root_dir, table_deps)
         }
     }
 
@@ -107,8 +120,11 @@ impl Manifest {
     /// Enforces packages.tdm constraints:
     /// - P-2: Only `>>>` and `<<<` statements allowed (no expressions, assignments, function defs)
     /// - P-4: Only one `<<<` line allowed
-    fn extract_from_ast(program: &crate::parser::Program, root_dir: &Path) -> Result<Self, String> {
-        let mut deps = BTreeMap::new();
+    fn extract_from_ast(
+        program: &crate::parser::Program,
+        root_dir: &Path,
+        mut deps: BTreeMap<String, Dependency>,
+    ) -> Result<Self, String> {
         let mut version = "0.1.0".to_string();
         let mut entry = "main.td".to_string();
         let mut export_count = 0;
@@ -132,12 +148,19 @@ impl Manifest {
                             }
                         };
                         let canonical_id = format!("{}/{}", org, name);
+                        if deps.contains_key(&canonical_id) {
+                            return Err(format!(
+                                "packages.tdm: package '{}' is declared both as a [packages.\"...\"] table and a >>> import; use the table form so the source SHA-256 pin is not ambiguous.",
+                                canonical_id
+                            ));
+                        }
                         deps.insert(
                             canonical_id,
                             Dependency::Registry {
                                 org,
                                 name,
                                 version: ver,
+                                integrity: None,
                             },
                         );
                     }
@@ -243,7 +266,11 @@ impl Manifest {
     }
 
     /// Parse legacy format manifest (assignments only).
-    fn parse_legacy(program: &crate::parser::Program, root_dir: &Path) -> Result<Self, String> {
+    fn parse_legacy(
+        program: &crate::parser::Program,
+        root_dir: &Path,
+        mut deps: BTreeMap<String, Dependency>,
+    ) -> Result<Self, String> {
         // Validate: only Assignment statements are allowed (reject side-effect statements)
         for stmt in &program.statements {
             match stmt {
@@ -310,7 +337,6 @@ impl Manifest {
         };
 
         // Extract dependencies from the `deps` field
-        let mut deps = BTreeMap::new();
         if let Some(AstValue::BuchiPack(dep_entries)) = fields.get("deps") {
             for (dep_name, dep_val) in dep_entries {
                 if let AstValue::BuchiPack(dep_fields) = dep_val
@@ -457,6 +483,169 @@ fn parse_org_name(path: &str) -> Option<(String, String)> {
     } else {
         Some((String::new(), path.to_string()))
     }
+}
+
+fn is_valid_source_integrity(value: &str) -> bool {
+    let Some(hex) = value.strip_prefix("sha256:") else {
+        return false;
+    };
+    hex.len() == 64
+        && hex
+            .chars()
+            .all(|c| c.is_ascii_digit() || matches!(c, 'a'..='f'))
+}
+
+fn parse_quoted_string(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    let inner = trimmed.strip_prefix('"')?.strip_suffix('"')?;
+    if inner.contains('\\') {
+        return None;
+    }
+    Some(inner.to_string())
+}
+
+fn extract_package_table_name(line: &str) -> Option<String> {
+    let trimmed = line.trim();
+    let inner = trimmed.strip_prefix("[packages.\"")?.strip_suffix("\"]")?;
+    if inner.is_empty() || inner.starts_with('/') || inner.ends_with('/') {
+        return None;
+    }
+    Some(inner.to_string())
+}
+
+fn flush_package_table(
+    deps: &mut BTreeMap<String, Dependency>,
+    table_name: Option<String>,
+    version: Option<String>,
+    integrity: Option<String>,
+) -> Result<(), String> {
+    let Some(package_id) = table_name else {
+        return Ok(());
+    };
+    let (org, name) = parse_org_name(&package_id).ok_or_else(|| {
+        format!(
+            "packages.tdm: package table '{}' must use an org/name package id.",
+            package_id
+        )
+    })?;
+    if org.is_empty() {
+        return Err(format!(
+            "packages.tdm: package table '{}' must include an org.",
+            package_id
+        ));
+    }
+    let version = version.ok_or_else(|| {
+        format!(
+            "packages.tdm: package table '{}' is missing `version`.",
+            package_id
+        )
+    })?;
+    let integrity = integrity.ok_or_else(|| {
+        format!(
+            "[E32K3_SOURCE_INTEGRITY_MISSING] packages.tdm: package table '{}' is missing mandatory `integrity`.",
+            package_id
+        )
+    })?;
+    if !is_valid_source_integrity(&integrity) {
+        return Err(format!(
+            "packages.tdm: package table '{}' has invalid `integrity`; expected sha256: + 64 lowercase hex characters.",
+            package_id
+        ));
+    }
+
+    deps.insert(
+        package_id,
+        Dependency::Registry {
+            org,
+            name,
+            version,
+            integrity: Some(integrity),
+        },
+    );
+    Ok(())
+}
+
+fn extract_package_tables(source: &str) -> Result<(BTreeMap<String, Dependency>, String), String> {
+    let mut deps = BTreeMap::new();
+    let mut stripped = String::with_capacity(source.len());
+    let mut active_package: Option<String> = None;
+    let mut active_version: Option<String> = None;
+    let mut active_integrity: Option<String> = None;
+
+    for line in source.lines() {
+        let trimmed = line.trim();
+        if let Some(package_id) = extract_package_table_name(trimmed) {
+            flush_package_table(
+                &mut deps,
+                active_package.take(),
+                active_version.take(),
+                active_integrity.take(),
+            )?;
+            active_package = Some(package_id);
+            stripped.push('\n');
+            continue;
+        }
+
+        if active_package.is_some() {
+            if trimmed.is_empty() || trimmed.starts_with('#') || trimmed.starts_with("//") {
+                stripped.push('\n');
+                continue;
+            }
+            if trimmed.starts_with(">>>") || trimmed.starts_with("<<<") {
+                flush_package_table(
+                    &mut deps,
+                    active_package.take(),
+                    active_version.take(),
+                    active_integrity.take(),
+                )?;
+                stripped.push_str(line);
+                stripped.push('\n');
+                continue;
+            }
+            if trimmed.starts_with('[') {
+                return Err(format!(
+                    "packages.tdm: unsupported table header '{}'. Only [packages.\"org/name\"] is supported.",
+                    trimmed
+                ));
+            }
+            let Some((key, value_raw)) = trimmed.split_once('=') else {
+                return Err(format!(
+                    "packages.tdm: invalid package table line '{}'. Expected key = \"value\".",
+                    trimmed
+                ));
+            };
+            let key = key.trim();
+            let value = parse_quoted_string(value_raw).ok_or_else(|| {
+                format!(
+                    "packages.tdm: package table key '{}' must be a plain quoted string.",
+                    key
+                )
+            })?;
+            match key {
+                "version" => active_version = Some(value),
+                "integrity" => active_integrity = Some(value),
+                _ => {
+                    return Err(format!(
+                        "packages.tdm: unknown package table key '{}'. Expected version or integrity.",
+                        key
+                    ));
+                }
+            }
+            stripped.push('\n');
+        } else {
+            stripped.push_str(line);
+            stripped.push('\n');
+        }
+    }
+
+    flush_package_table(
+        &mut deps,
+        active_package.take(),
+        active_version.take(),
+        active_integrity.take(),
+    )?;
+
+    Ok((deps, stripped))
 }
 
 /// Internal AST value representation for manifest extraction.
@@ -613,6 +802,7 @@ writeFile("/tmp/evil.txt", "gotcha")
                 org: "taida-lang".to_string(),
                 name: "os".to_string(),
                 version: "1.0.0".to_string(),
+                integrity: None,
             }
         );
         assert_eq!(
@@ -621,6 +811,7 @@ writeFile("/tmp/evil.txt", "gotcha")
                 org: "taida-community".to_string(),
                 name: "http".to_string(),
                 version: "2.1.0".to_string(),
+                integrity: None,
             }
         );
     }
@@ -698,6 +889,7 @@ description <= "A legacy app"
                 org: "alice".to_string(),
                 name: "webframework".to_string(),
                 version: "b.12".to_string(),
+                integrity: None,
             }
         );
         assert_eq!(
@@ -706,7 +898,66 @@ description <= "A legacy app"
                 org: "bob".to_string(),
                 name: "jsonutil".to_string(),
                 version: "a".to_string(),
+                integrity: None,
             }
+        );
+    }
+
+    #[test]
+    fn test_extract_pinned_package_table() {
+        let source = r#"
+[packages."alice/demo"]
+version = "a.1"
+integrity = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+<<<@a.1 test/app
+"#;
+        let manifest = Manifest::parse(source, Path::new("/tmp")).unwrap();
+        assert_eq!(manifest.deps.len(), 1);
+        assert_eq!(
+            manifest.deps.get("alice/demo").unwrap(),
+            &Dependency::Registry {
+                org: "alice".to_string(),
+                name: "demo".to_string(),
+                version: "a.1".to_string(),
+                integrity: Some(
+                    "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                        .to_string()
+                ),
+            }
+        );
+    }
+
+    #[test]
+    fn test_package_table_requires_integrity() {
+        let source = r#"
+[packages."alice/demo"]
+version = "a.1"
+"#;
+        let err = Manifest::parse(source, Path::new("/tmp")).expect_err("integrity is required");
+        assert!(
+            err.contains("E32K3_SOURCE_INTEGRITY_MISSING"),
+            "unexpected error: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_package_table_and_import_duplicate_is_rejected() {
+        let source = r#"
+[packages."taida-lang/demo"]
+version = "a.1"
+integrity = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+>>> taida-lang/demo@a.1
+<<<@a.1 test/app
+"#;
+        let err = Manifest::parse(source, Path::new("/tmp"))
+            .expect_err("duplicate table/import must be rejected");
+        assert!(
+            err.contains("declared both"),
+            "unexpected duplicate declaration error: {}",
+            err
         );
     }
 

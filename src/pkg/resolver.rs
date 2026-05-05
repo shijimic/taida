@@ -122,7 +122,9 @@ fn dep_decl_identity(dep: &Dependency, declared_from_root: &Path) -> String {
             let canonical = joined.canonicalize().unwrap_or(joined);
             format!("path:{}", canonical.display())
         }
-        Dependency::Registry { org, name, version } => {
+        Dependency::Registry {
+            org, name, version, ..
+        } => {
             format!("registry:{}/{}@{}", org, name, version)
         }
     }
@@ -265,6 +267,7 @@ fn resolve_deps_inner(
                 org,
                 name: dep_name,
                 version,
+                integrity,
             } if !version.contains('.') && locked_versions.contains_key(&name) => {
                 let locked_ver = &locked_versions[&name];
                 // Only pin if the locked version belongs to the same generation
@@ -273,6 +276,7 @@ fn resolve_deps_inner(
                         org: org.clone(),
                         name: dep_name.clone(),
                         version: locked_ver.clone(),
+                        integrity: integrity.clone(),
                     }
                 } else {
                     dep
@@ -1707,6 +1711,7 @@ mod tests {
                         org: "taida-lang".to_string(),
                         name: "os".to_string(),
                         version: "a.1".to_string(),
+                        integrity: None,
                     },
                 );
                 deps
@@ -1747,6 +1752,7 @@ mod tests {
                         org: "nonexistent-org-xyz".to_string(),
                         name: "http".to_string(),
                         version: "a.1".to_string(),
+                        integrity: None,
                     },
                 );
                 deps
@@ -1794,6 +1800,7 @@ mod tests {
                         org: "taida-lang".to_string(),
                         name: "os".to_string(),
                         version: "a.1".to_string(),
+                        integrity: None,
                     },
                 );
                 deps
@@ -2001,6 +2008,7 @@ deps <= @(
                         org: "taida-lang".to_string(),
                         name: "os".to_string(),
                         version: "a.1".to_string(),
+                        integrity: None,
                     },
                 );
                 deps
@@ -2054,6 +2062,7 @@ deps <= @(
                         org: "taida-lang".to_string(),
                         name: "os".to_string(),
                         version: "a".to_string(),
+                        integrity: None,
                     },
                 );
                 deps

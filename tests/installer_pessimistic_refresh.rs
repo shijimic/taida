@@ -57,12 +57,12 @@ fn c17b_003_row1_sidecarless_online_refreshes_pessimistically() {
     let store_pkg = home
         .join(".taida")
         .join("store")
-        .join("alice")
+        .join("taida-lang")
         .join("row1")
         .join("a.1");
     fs::create_dir_all(&store_pkg).unwrap();
     fs::write(store_pkg.join(".taida_installed"), "").unwrap();
-    fs::write(store_pkg.join("packages.tdm"), "<<<@a.1 alice/row1\n").unwrap();
+    fs::write(store_pkg.join("packages.tdm"), "<<<@a.1 taida-lang/row1\n").unwrap();
     fs::write(store_pkg.join("main.td"), "stdout(\"LEGACY_PRE_C17\")\n").unwrap();
     // Deliberately: NO _meta.toml
     assert!(
@@ -73,11 +73,12 @@ fn c17b_003_row1_sidecarless_online_refreshes_pessimistically() {
     // Remote tarball has a fresh content that differs from the legacy
     // facade. The refresh must replace the local content with this.
     let tarball = make_tarball(&[
-        ("packages.tdm", b"<<<@a.1 alice/row1\n" as &[u8]),
+        ("packages.tdm", b"<<<@a.1 taida-lang/row1\n" as &[u8]),
         ("main.td", b"stdout(\"FRESH_FROM_REMOTE\")\n"),
     ]);
+    let integrity = format!("sha256:{}", taida::crypto::sha256_hex_bytes(&tarball));
     let state = Arc::new(Mutex::new(TagState {
-        org: "alice".into(),
+        org: "taida-lang".into(),
         name: "row1".into(),
         version: "a.1".into(),
         commit_sha: "abcdef1234567890abcdef1234567890abcdef12".into(),
@@ -87,7 +88,14 @@ fn c17b_003_row1_sidecarless_online_refreshes_pessimistically() {
 
     fs::write(
         project.join("packages.tdm"),
-        ">>> alice/row1@a.1\n<<<@a.1 test/consumer\n",
+        format!(
+            r#"[packages."taida-lang/row1"]
+version = "a.1"
+integrity = "{integrity}"
+
+<<<@a.1 test/consumer
+"#
+        ),
     )
     .unwrap();
     fs::write(project.join("main.td"), "stdout(\"consumer\")\n").unwrap();
@@ -98,6 +106,7 @@ fn c17b_003_row1_sidecarless_online_refreshes_pessimistically() {
         .current_dir(&project)
         .env("HOME", &home)
         .env("TAIDA_GITHUB_BASE_URL", server.base_url())
+        .env("TAIDA_E32_ALLOW_MOCK_GITHUB_BASE_URL", "1")
         .env("TAIDA_GITHUB_API_URL", server.api_url())
         .env("GH_TOKEN", "unused")
         .output()
@@ -171,11 +180,12 @@ fn c17b_001_force_refresh_offline_rolls_back_to_previous_install() {
     // Step 1: warm up with a real online install so a sidecar+content
     // are in place.
     let tarball = make_tarball(&[
-        ("packages.tdm", b"<<<@a.1 alice/warm2\n" as &[u8]),
+        ("packages.tdm", b"<<<@a.1 taida-lang/warm2\n" as &[u8]),
         ("main.td", b"stdout(\"PRECIOUS_WORKING_CONTENT\")\n"),
     ]);
+    let integrity = format!("sha256:{}", taida::crypto::sha256_hex_bytes(&tarball));
     let state = Arc::new(Mutex::new(TagState {
-        org: "alice".into(),
+        org: "taida-lang".into(),
         name: "warm2".into(),
         version: "a.1".into(),
         commit_sha: "5555555555555555555555555555555555555555".into(),
@@ -184,7 +194,14 @@ fn c17b_001_force_refresh_offline_rolls_back_to_previous_install() {
     let server = MockServer::start(state.clone());
     fs::write(
         project.join("packages.tdm"),
-        ">>> alice/warm2@a.1\n<<<@a.1 test/consumer\n",
+        format!(
+            r#"[packages."taida-lang/warm2"]
+version = "a.1"
+integrity = "{integrity}"
+
+<<<@a.1 test/consumer
+"#
+        ),
     )
     .unwrap();
     fs::write(project.join("main.td"), "stdout(\"c\")\n").unwrap();
@@ -195,6 +212,7 @@ fn c17b_001_force_refresh_offline_rolls_back_to_previous_install() {
         .current_dir(&project)
         .env("HOME", &home)
         .env("TAIDA_GITHUB_BASE_URL", server.base_url())
+        .env("TAIDA_E32_ALLOW_MOCK_GITHUB_BASE_URL", "1")
         .env("TAIDA_GITHUB_API_URL", server.api_url())
         .env("GH_TOKEN", "unused")
         .output()
@@ -209,7 +227,7 @@ fn c17b_001_force_refresh_offline_rolls_back_to_previous_install() {
     let store_pkg = home
         .join(".taida")
         .join("store")
-        .join("alice")
+        .join("taida-lang")
         .join("warm2")
         .join("a.1");
     let precious =
@@ -225,6 +243,7 @@ fn c17b_001_force_refresh_offline_rolls_back_to_previous_install() {
         .current_dir(&project)
         .env("HOME", &home)
         .env("TAIDA_GITHUB_BASE_URL", "http://127.0.0.1:1")
+        .env("TAIDA_E32_ALLOW_MOCK_GITHUB_BASE_URL", "1")
         .env("TAIDA_GITHUB_API_URL", "http://127.0.0.1:1")
         .env("GH_TOKEN", "unused")
         .output()
@@ -258,7 +277,7 @@ fn c17b_001_force_refresh_offline_rolls_back_to_previous_install() {
     let parent = home
         .join(".taida")
         .join("store")
-        .join("alice")
+        .join("taida-lang")
         .join("warm2");
     for entry in fs::read_dir(&parent).unwrap().filter_map(|e| e.ok()) {
         let name = entry.file_name().to_string_lossy().to_string();
@@ -287,12 +306,16 @@ fn c17b_015_corrupt_sidecar_re_extracts() {
     let store_pkg = home
         .join(".taida")
         .join("store")
-        .join("alice")
+        .join("taida-lang")
         .join("corrupt")
         .join("a.1");
     fs::create_dir_all(&store_pkg).unwrap();
     fs::write(store_pkg.join(".taida_installed"), "").unwrap();
-    fs::write(store_pkg.join("packages.tdm"), "<<<@a.1 alice/corrupt\n").unwrap();
+    fs::write(
+        store_pkg.join("packages.tdm"),
+        "<<<@a.1 taida-lang/corrupt\n",
+    )
+    .unwrap();
     fs::write(store_pkg.join("main.td"), "stdout(\"STALE\")\n").unwrap();
     // schema_version=99 triggers StoreError::UnknownMetaSchema on read.
     fs::write(
@@ -302,11 +325,12 @@ fn c17b_015_corrupt_sidecar_re_extracts() {
     .unwrap();
 
     let tarball = make_tarball(&[
-        ("packages.tdm", b"<<<@a.1 alice/corrupt\n" as &[u8]),
+        ("packages.tdm", b"<<<@a.1 taida-lang/corrupt\n" as &[u8]),
         ("main.td", b"stdout(\"FRESH_AFTER_RE_EXTRACT\")\n"),
     ]);
+    let integrity = format!("sha256:{}", taida::crypto::sha256_hex_bytes(&tarball));
     let state = Arc::new(Mutex::new(TagState {
-        org: "alice".into(),
+        org: "taida-lang".into(),
         name: "corrupt".into(),
         version: "a.1".into(),
         commit_sha: "6666666666666666666666666666666666666666".into(),
@@ -316,7 +340,14 @@ fn c17b_015_corrupt_sidecar_re_extracts() {
 
     fs::write(
         project.join("packages.tdm"),
-        ">>> alice/corrupt@a.1\n<<<@a.1 test/consumer\n",
+        format!(
+            r#"[packages."taida-lang/corrupt"]
+version = "a.1"
+integrity = "{integrity}"
+
+<<<@a.1 test/consumer
+"#
+        ),
     )
     .unwrap();
     fs::write(project.join("main.td"), "stdout(\"c\")\n").unwrap();
@@ -327,6 +358,7 @@ fn c17b_015_corrupt_sidecar_re_extracts() {
         .current_dir(&project)
         .env("HOME", &home)
         .env("TAIDA_GITHUB_BASE_URL", server.base_url())
+        .env("TAIDA_E32_ALLOW_MOCK_GITHUB_BASE_URL", "1")
         .env("TAIDA_GITHUB_API_URL", server.api_url())
         .env("GH_TOKEN", "unused")
         .output()

@@ -293,15 +293,25 @@ $ taida ./main.td
 
 `packages.tdm` はパッケージの静的マニフェストです。依存宣言とパッケージの公開 API を1ファイルに集約します。
 
-**packages.tdm は実行されません。** `>>>` と `<<<` のみが許可され、式・代入・関数定義は書けません。
+**packages.tdm は実行されません。** `>>>` / `<<<` と、source package の SHA-256 pin を持つ `[packages."owner/name"]` テーブルのみが許可され、式・代入・関数定義は書けません。
 
 ```taida
 // packages.tdm の例
 >>> taida-lang/os@a.1
->>> ./main.td => @(hello, greet)
+>>> ./main.td
 
-<<<@a.3 @(hello, greet)
+<<<@a.3 owner/pkg @(hello, greet)
 ```
+
+source tarball から取得する依存は `[packages."taida-lang/name"]` テーブルで宣言し、SHA-256 pin を必ず併記します。Phase 0 では source package の owner は `taida-lang` のみです。`integrity` は `sha256:` + 64 文字の小文字 hex です。download した tarball の SHA-256 が一致しない場合、install は `[E32K3_SOURCE_INTEGRITY_MISMATCH]` で中断します。
+
+```toml
+[packages."taida-lang/web"]
+version = "a.1"
+integrity = "sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+```
+
+source tarball は `https://github.com/taida-lang/...` からのみ取得され、`TAIDA_GITHUB_BASE_URL` による本番 override は受理されません。署名検証は required 固定で、`TAIDA_VERIFY_SIGNATURES=best-effort` や `off` による緩和は source package では `[E32K3_VERIFY_SIGNATURES_RELAXED]` になります。
 
 ### packages.tdm と通常の .td の違い
 
@@ -310,6 +320,7 @@ $ taida ./main.td
 | 実行 | されない（静的解釈のみ） | される |
 | `>>>` のバージョン指定 | 可能（`@a.1` 等） | 不可 |
 | `<<<` のバージョン指定 | 可能（`@a.3` 等、publish が管理） | 不可 |
+| `[packages."owner/name"]` | source tarball の SHA-256 pin | 不可 |
 | `<<<` の行数 | 1行のみ | 複数行可 |
 | 式・代入・関数定義 | 禁止 | 可 |
 

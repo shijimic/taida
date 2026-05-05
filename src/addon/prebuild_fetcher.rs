@@ -649,7 +649,7 @@ pub fn fetch_release_lockfile(package_name: &str, version: &str) -> Result<Strin
         .split_once('/')
         .ok_or_else(|| format!("Cannot parse package name '{}' as org/name", package_name))?;
 
-    let base_url = crate::pkg::store::github_base_url();
+    let base_url = crate::pkg::store::github_base_url()?;
     let url = format!(
         "{}/{}/{}/releases/download/{}/addon.lock.toml",
         base_url.trim_end_matches('/'),

@@ -443,7 +443,9 @@ impl PackageProvider for CoreBundledProvider {
 
     fn resolve(&self, dep_name: &str, dep: &Dependency, manifest: &Manifest) -> ProviderResult {
         let (org, pkg_name, version) = match dep {
-            Dependency::Registry { org, name, version } => (org, name, version),
+            Dependency::Registry {
+                org, name, version, ..
+            } => (org, name, version),
             _ => return ProviderResult::NotApplicable,
         };
 
@@ -780,7 +782,28 @@ impl PackageProvider for StoreProvider {
 
     fn resolve(&self, dep_name: &str, dep: &Dependency, _manifest: &Manifest) -> ProviderResult {
         match dep {
-            Dependency::Registry { org, name, version } => {
+            Dependency::Registry {
+                org,
+                name,
+                version,
+                integrity,
+            } => {
+                if org != "taida-lang" {
+                    return ProviderResult::Error(format!(
+                        "[E32K3_NON_OFFICIAL_SOURCE_REJECTED] source package {}/{}@{} is not accepted in E32 Phase 0; source packages are limited to taida-lang/*",
+                        org, name, version
+                    ));
+                }
+                let source_integrity = match integrity.as_deref() {
+                    Some(value) => value,
+                    None => {
+                        return ProviderResult::Error(format!(
+                            "[E32K3_SOURCE_INTEGRITY_MISSING] source package {}/{}@{} requires packages.tdm integrity = \"sha256:<64 lowercase hex>\"",
+                            org, name, version
+                        ));
+                    }
+                };
+
                 // Determine if this is a gen-only or exact version
                 let exact_version = if version.contains('.') {
                     if self.force_remote {
@@ -828,7 +851,17 @@ impl PackageProvider for StoreProvider {
                     if self.store.is_cached(org, name, &exact_version) {
                         match self.apply_stale_decision(org, name, &exact_version) {
                             Err(msg) => return ProviderResult::Error(msg),
-                            Ok(StaleOutcome::Skip) => (None, None),
+                            Ok(StaleOutcome::Skip) => {
+                                if let Err(msg) = self.store.verify_cached_tarball_integrity(
+                                    org,
+                                    name,
+                                    &exact_version,
+                                    source_integrity,
+                                ) {
+                                    return ProviderResult::Error(msg);
+                                }
+                                (None, None)
+                            }
                             Ok(StaleOutcome::Refresh { sha }) => {
                                 match self.store.stage_invalidation(org, name, &exact_version) {
                                     Ok(stash) => (sha, stash),
@@ -851,6 +884,7 @@ impl PackageProvider for StoreProvider {
                     name,
                     &exact_version,
                     remote_sha_for_sidecar.as_deref(),
+                    Some(source_integrity),
                 );
 
                 match fetch_result {
@@ -1144,6 +1178,7 @@ mod tests {
             org: "taida-lang".to_string(),
             name: "os".to_string(),
             version: "a.1".to_string(),
+            integrity: None,
         };
         let provider = WorkspaceProvider;
         assert!(!provider.can_resolve(&dep));
@@ -1169,6 +1204,7 @@ mod tests {
             org: "taida-lang".to_string(),
             name: "os".to_string(),
             version: "a.1".to_string(),
+            integrity: None,
         };
         let provider = CoreBundledProvider::with_bundled_root(dir.join("bundled"));
 
@@ -1255,6 +1291,7 @@ mod tests {
             org: "taida-lang".to_string(),
             name: "os".to_string(),
             version: "b.1".to_string(),
+            integrity: None,
         };
         let provider = CoreBundledProvider::with_bundled_root(dir.join("bundled"));
 
@@ -1275,9 +1312,65 @@ mod tests {
             org: "taida-community".to_string(),
             name: "http".to_string(),
             version: "a.3".to_string(),
+            integrity: None,
         };
         let provider = StoreProvider::new();
         assert!(provider.can_resolve(&dep));
+    }
+
+    #[test]
+    fn test_store_provider_rejects_missing_source_pin() {
+        let provider = StoreProvider::new();
+        let manifest = Manifest {
+            name: "test".to_string(),
+            version: "0.1.0".to_string(),
+            description: String::new(),
+            entry: "main.td".to_string(),
+            deps: BTreeMap::new(),
+            root_dir: PathBuf::from("/tmp"),
+            exports: Vec::new(),
+        };
+        let dep = Dependency::Registry {
+            org: "taida-lang".to_string(),
+            name: "http".to_string(),
+            version: "a.1".to_string(),
+            integrity: None,
+        };
+        match provider.resolve("http", &dep, &manifest) {
+            ProviderResult::Error(msg) => {
+                assert!(msg.contains("E32K3_SOURCE_INTEGRITY_MISSING"), "{msg}")
+            }
+            _ => panic!("missing source pin must reject"),
+        }
+    }
+
+    #[test]
+    fn test_store_provider_rejects_non_official_source_owner() {
+        let provider = StoreProvider::new();
+        let manifest = Manifest {
+            name: "test".to_string(),
+            version: "0.1.0".to_string(),
+            description: String::new(),
+            entry: "main.td".to_string(),
+            deps: BTreeMap::new(),
+            root_dir: PathBuf::from("/tmp"),
+            exports: Vec::new(),
+        };
+        let dep = Dependency::Registry {
+            org: "alice".to_string(),
+            name: "http".to_string(),
+            version: "a.1".to_string(),
+            integrity: Some(
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                    .to_string(),
+            ),
+        };
+        match provider.resolve("http", &dep, &manifest) {
+            ProviderResult::Error(msg) => {
+                assert!(msg.contains("E32K3_NON_OFFICIAL_SOURCE_REJECTED"), "{msg}")
+            }
+            _ => panic!("third-party source owner must reject"),
+        }
     }
 
     // ==========================================================================
@@ -1383,7 +1476,7 @@ mod tests {
         let _guard = crate::util::env_test_lock().lock().unwrap();
         let dir = PathBuf::from("/tmp/taida_test_force_refresh_rollback");
         let _ = std::fs::remove_dir_all(&dir);
-        let pkg_dir = dir.join("alice").join("http").join("b.12");
+        let pkg_dir = dir.join("taida-lang").join("http").join("b.12");
         std::fs::create_dir_all(&pkg_dir).unwrap();
         std::fs::write(pkg_dir.join("main.td"), "// original content").unwrap();
         std::fs::write(pkg_dir.join(".taida_installed"), "").unwrap();
@@ -1393,7 +1486,7 @@ mod tests {
             tarball_sha256: "abc".to_string(),
             tarball_etag: None,
             fetched_at: "2026-04-16T00:00:00Z".to_string(),
-            source: "github:alice/http".to_string(),
+            source: "github:taida-lang/http".to_string(),
             version: "b.12".to_string(),
         };
         super::super::store::write_meta_atomic(
@@ -1407,9 +1500,11 @@ mod tests {
 
         let prev_api = std::env::var("TAIDA_GITHUB_API_URL").ok();
         let prev_base = std::env::var("TAIDA_GITHUB_BASE_URL").ok();
+        let prev_allow = std::env::var("TAIDA_E32_ALLOW_MOCK_GITHUB_BASE_URL").ok();
         unsafe {
             std::env::set_var("TAIDA_GITHUB_API_URL", "http://127.0.0.1:1");
             std::env::set_var("TAIDA_GITHUB_BASE_URL", "http://127.0.0.1:1");
+            std::env::set_var("TAIDA_E32_ALLOW_MOCK_GITHUB_BASE_URL", "1");
         }
 
         let manifest = Manifest {
@@ -1422,9 +1517,13 @@ mod tests {
             exports: Vec::new(),
         };
         let dep = Dependency::Registry {
-            org: "alice".to_string(),
+            org: "taida-lang".to_string(),
             name: "http".to_string(),
             version: "b.12".to_string(),
+            integrity: Some(
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                    .to_string(),
+            ),
         };
         let result = provider.resolve("http", &dep, &manifest);
         unsafe {
@@ -1435,6 +1534,10 @@ mod tests {
             match prev_base {
                 Some(v) => std::env::set_var("TAIDA_GITHUB_BASE_URL", v),
                 None => std::env::remove_var("TAIDA_GITHUB_BASE_URL"),
+            }
+            match prev_allow {
+                Some(v) => std::env::set_var("TAIDA_E32_ALLOW_MOCK_GITHUB_BASE_URL", v),
+                None => std::env::remove_var("TAIDA_E32_ALLOW_MOCK_GITHUB_BASE_URL"),
             }
         }
 
@@ -1472,7 +1575,7 @@ mod tests {
         );
 
         // The staging dir must also be cleaned up.
-        let parent = dir.join("alice").join("http");
+        let parent = dir.join("taida-lang").join("http");
         let staging_count = std::fs::read_dir(&parent)
             .unwrap()
             .filter_map(|e| e.ok())
@@ -1490,13 +1593,28 @@ mod tests {
     fn test_store_provider_resolves_cached_package() {
         let dir = PathBuf::from("/tmp/taida_test_store_provider");
         let _ = std::fs::remove_dir_all(&dir);
-        let pkg_dir = dir.join("alice").join("http").join("b.12");
+        let pkg_dir = dir.join("taida-lang").join("http").join("b.12");
         std::fs::create_dir_all(&pkg_dir).unwrap();
         std::fs::write(pkg_dir.join("main.td"), "// http lib").unwrap();
         std::fs::write(pkg_dir.join(".taida_installed"), "").unwrap();
+        let sidecar = super::super::store::StoreMeta {
+            schema_version: super::super::store::STORE_META_SCHEMA_VERSION,
+            commit_sha: "oldsha".to_string(),
+            tarball_sha256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                .to_string(),
+            tarball_etag: None,
+            fetched_at: "2026-04-16T00:00:00Z".to_string(),
+            source: "github:taida-lang/http".to_string(),
+            version: "b.12".to_string(),
+        };
+        super::super::store::write_meta_atomic(
+            &super::super::store::meta_path_for(&pkg_dir),
+            &sidecar,
+        )
+        .unwrap();
 
         let store = super::super::store::GlobalStore::with_root(dir.clone());
-        let provider = StoreProvider::with_store(store);
+        let provider = StoreProvider::with_store(store).with_refresh_flags(false, true);
 
         let manifest = Manifest {
             name: "test".to_string(),
@@ -1509,9 +1627,13 @@ mod tests {
         };
 
         let dep = Dependency::Registry {
-            org: "alice".to_string(),
+            org: "taida-lang".to_string(),
             name: "http".to_string(),
             version: "b.12".to_string(),
+            integrity: Some(
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                    .to_string(),
+            ),
         };
 
         match provider.resolve("http", &dep, &manifest) {
@@ -1562,6 +1684,7 @@ mod tests {
             org: "taida-lang".to_string(),
             name: "js".to_string(),
             version: "a.1".to_string(),
+            integrity: None,
         };
         let provider = CoreBundledProvider::with_bundled_root(dir.join("bundled"));
 
@@ -1615,6 +1738,7 @@ mod tests {
                 org: "taida-lang".to_string(),
                 name: pkg.to_string(),
                 version: "a.1".to_string(),
+                integrity: None,
             };
 
             assert!(

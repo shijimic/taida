@@ -35,10 +35,17 @@ fn taida_bin() -> PathBuf {
     common::taida_bin()
 }
 
-fn write_consumer(project: &std::path::Path) {
+fn write_consumer(project: &std::path::Path, pkg: &str, integrity: &str) {
     fs::write(
         project.join("packages.tdm"),
-        ">>> alice/force@a.1\n<<<@a.1 test/consumer\n",
+        format!(
+            r#"[packages."taida-lang/{pkg}"]
+version = "a.1"
+integrity = "{integrity}"
+
+<<<@a.1 test/consumer
+"#
+        ),
     )
     .unwrap();
     fs::write(project.join("main.td"), "stdout(\"consumer\")\n").unwrap();
@@ -75,6 +82,7 @@ fn run_install(
     cmd.current_dir(project)
         .env("HOME", home)
         .env("TAIDA_GITHUB_BASE_URL", base)
+        .env("TAIDA_E32_ALLOW_MOCK_GITHUB_BASE_URL", "1")
         .env("TAIDA_GITHUB_API_URL", api)
         .env("GH_TOKEN", "unused");
     cmd.output().expect("run taida ingot install")
@@ -89,13 +97,14 @@ fn c17_5_force_refresh_rewrites_store_entry_even_when_fresh() {
     fs::create_dir_all(&project).unwrap();
 
     let tarball = make_tarball(&[
-        ("packages.tdm", b"<<<@a.1 alice/force\n" as &[u8]),
+        ("packages.tdm", b"<<<@a.1 taida-lang/force\n" as &[u8]),
         ("main.td", b"stdout(\"same\")\n"),
         ("marker.td", b"// gen=1\n"),
     ]);
+    let integrity = format!("sha256:{}", taida::crypto::sha256_hex_bytes(&tarball));
 
     let state = Arc::new(Mutex::new(TagState {
-        org: "alice".into(),
+        org: "taida-lang".into(),
         name: "force".into(),
         version: "a.1".into(),
         commit_sha: "1111111111111111111111111111111111111111".into(),
@@ -103,7 +112,7 @@ fn c17_5_force_refresh_rewrites_store_entry_even_when_fresh() {
     }));
     let server = MockServer::start(state.clone());
 
-    write_consumer(&project);
+    write_consumer(&project, "force", &integrity);
 
     // Install 1 (cold): sidecar is written with commit_sha="" because
     // Phase 2 does not do a remote lookup on the first install path.
@@ -117,7 +126,7 @@ fn c17_5_force_refresh_rewrites_store_entry_even_when_fresh() {
     let store_dir = home
         .join(".taida")
         .join("store")
-        .join("alice")
+        .join("taida-lang")
         .join("force")
         .join("a.1");
 
@@ -197,7 +206,11 @@ fn c17_5_force_refresh_conflicts_with_no_remote_check() {
     let project = work.join("project");
     fs::create_dir_all(&home).unwrap();
     fs::create_dir_all(&project).unwrap();
-    write_consumer(&project);
+    write_consumer(
+        &project,
+        "force",
+        "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    );
 
     // No server needed -- we want the CLI arg parser to reject before
     // it even looks at the network.
@@ -239,11 +252,12 @@ fn c17_5_force_refresh_handles_sidecar_less_install() {
     fs::create_dir_all(&project).unwrap();
 
     let tarball = make_tarball(&[
-        ("packages.tdm", b"<<<@a.1 alice/legacy\n" as &[u8]),
+        ("packages.tdm", b"<<<@a.1 taida-lang/legacy\n" as &[u8]),
         ("main.td", b"stdout(\"legacy\")\n"),
     ]);
+    let integrity = format!("sha256:{}", taida::crypto::sha256_hex_bytes(&tarball));
     let state = Arc::new(Mutex::new(TagState {
-        org: "alice".into(),
+        org: "taida-lang".into(),
         name: "legacy".into(),
         version: "a.1".into(),
         commit_sha: "2222222222222222222222222222222222222222".into(),
@@ -255,18 +269,29 @@ fn c17_5_force_refresh_handles_sidecar_less_install() {
     let store_pkg = home
         .join(".taida")
         .join("store")
-        .join("alice")
+        .join("taida-lang")
         .join("legacy")
         .join("a.1");
     fs::create_dir_all(&store_pkg).unwrap();
     fs::write(store_pkg.join(".taida_installed"), "").unwrap();
-    fs::write(store_pkg.join("packages.tdm"), "<<<@a.1 alice/legacy\n").unwrap();
+    fs::write(
+        store_pkg.join("packages.tdm"),
+        "<<<@a.1 taida-lang/legacy\n",
+    )
+    .unwrap();
     fs::write(store_pkg.join("main.td"), "stdout(\"old\")\n").unwrap();
     // Deliberately no `_meta.toml`.
 
     fs::write(
         project.join("packages.tdm"),
-        ">>> alice/legacy@a.1\n<<<@a.1 test/consumer\n",
+        format!(
+            r#"[packages."taida-lang/legacy"]
+version = "a.1"
+integrity = "{integrity}"
+
+<<<@a.1 test/consumer
+"#
+        ),
     )
     .unwrap();
     fs::write(project.join("main.td"), "stdout(\"consumer\")\n").unwrap();

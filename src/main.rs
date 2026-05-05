@@ -20,6 +20,7 @@
 // pattern 3 at the boundary.
 
 use serde_json::json;
+use std::collections::{HashMap, HashSet};
 use std::env;
 use std::fs;
 use std::io::{self, Write};
@@ -187,6 +188,9 @@ fn print_build_help() {
         "\
 Usage:
   taida build [native|js|wasm-min|wasm-wasi|wasm-edge|wasm-full] [--release] [--no-cache] [--diag-format text|jsonl] [-o OUTPUT] [--entry ENTRY] <PATH>
+  taida build <PATH> --unit NAME [--release] [--diag-format text|jsonl]
+  taida build <PATH> --plan NAME [--release] [--diag-format text|jsonl]
+  taida build <PATH> --all-units [--release] [--diag-format text|jsonl]
 
 Options:
   --output, -o    Output file or directory
@@ -195,14 +199,19 @@ Options:
   --release, -r   Fail if TODO/Stub remains in source
   --no-cache      Disable WASM runtime .o cache
   --diag-format   text | jsonl
+  --unit          Descriptor build: build one exported BuildUnit by name
+  --plan          Descriptor build: build one exported BuildPlan by name
+  --all-units     Descriptor build: build all exported BuildUnit values
 
 Examples:
   taida build app.td
   taida build js src
   taida build --release app.td
+  taida build app.td --unit server-x
 
 Notes:
   Target defaults to native when omitted.
+  Descriptor mode does not accept a positional target.
   `--no-check` is a global option and applies here."
     );
 }
@@ -1355,6 +1364,37 @@ impl DiagFormat {
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum DescriptorBuildSelector {
+    Unit(String),
+    Plan(String),
+    AllUnits,
+}
+
+#[derive(Default)]
+struct DescriptorBuildFlags {
+    unit: Option<String>,
+    plan: Option<String>,
+    all_units: bool,
+}
+
+impl DescriptorBuildFlags {
+    fn selector_count(&self) -> usize {
+        usize::from(self.unit.is_some())
+            + usize::from(self.plan.is_some())
+            + usize::from(self.all_units)
+    }
+
+    fn selector(&self) -> Option<DescriptorBuildSelector> {
+        match (self.unit.as_ref(), self.plan.as_ref(), self.all_units) {
+            (Some(unit), None, false) => Some(DescriptorBuildSelector::Unit(unit.clone())),
+            (None, Some(plan), false) => Some(DescriptorBuildSelector::Plan(plan.clone())),
+            (None, None, true) => Some(DescriptorBuildSelector::AllUnits),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Default)]
 struct CompileDiagStats {
     errors: usize,
@@ -1564,6 +1604,9 @@ fn print_build_usage_and_exit() -> ! {
         "\
 Usage:
   taida build [native|js|wasm-min|wasm-wasi|wasm-edge|wasm-full] [--release] [--no-cache] [--diag-format text|jsonl] [-o OUTPUT] [--entry ENTRY] <PATH>
+  taida build <PATH> --unit NAME [--release] [--diag-format text|jsonl]
+  taida build <PATH> --plan NAME [--release] [--diag-format text|jsonl]
+  taida build <PATH> --all-units [--release] [--diag-format text|jsonl]
 
 Options:
   --output, -o    Output file or directory
@@ -1571,7 +1614,10 @@ Options:
   --entry         Native dir entry override (default: main.td)
   --release, -r   Fail if TODO/Stub remains in source
   --no-cache      Disable WASM runtime .o cache
-  --diag-format   text | jsonl"
+  --diag-format   text | jsonl
+  --unit          Descriptor build: build one exported BuildUnit by name
+  --plan          Descriptor build: build one exported BuildPlan by name
+  --all-units     Descriptor build: build all exported BuildUnit values"
     );
     std::process::exit(1);
 }
@@ -1584,6 +1630,273 @@ fn reject_removed_build_target_flag() -> ! {
     std::process::exit(2);
 }
 
+fn emit_build_cli_diagnostic_and_exit(
+    compile_stats: &mut CompileDiagStats,
+    diag_format: DiagFormat,
+    code: &'static str,
+    message: &str,
+    suggestion: Option<&str>,
+    exit_code: i32,
+) -> ! {
+    if diag_format == DiagFormat::Jsonl {
+        emit_compile_diag_jsonl(
+            compile_stats,
+            "ERROR",
+            "cli",
+            Some(code.to_string()),
+            message,
+            None,
+            None,
+            None,
+            suggestion.map(str::to_string),
+        );
+    } else {
+        eprintln!("[{}] {}", code, message);
+        if let Some(suggestion) = suggestion {
+            eprintln!("        {}", suggestion);
+        }
+    }
+    std::process::exit(exit_code);
+}
+
+#[derive(Default)]
+struct BuildDescriptorExports {
+    units: Vec<String>,
+    plans: Vec<String>,
+}
+
+fn build_descriptor_entry_path(input_path: &Path) -> Result<PathBuf, String> {
+    if input_path.is_dir() {
+        let candidate = input_path.join("main.td");
+        if !candidate.exists() || !candidate.is_file() {
+            return Err(format!(
+                "Build descriptor input not found: {}",
+                candidate.display()
+            ));
+        }
+        return Ok(candidate);
+    }
+
+    if !input_path.exists() || !input_path.is_file() {
+        return Err(format!("Build input not found: {}", input_path.display()));
+    }
+
+    Ok(input_path.to_path_buf())
+}
+
+fn descriptor_name_from_fields(fields: &[BuchiField], fallback: &str) -> String {
+    fields
+        .iter()
+        .find_map(|field| match (&field.name, &field.value) {
+            (name, Expr::StringLit(value, _)) if name == "name" => Some(value.clone()),
+            _ => None,
+        })
+        .unwrap_or_else(|| fallback.to_string())
+}
+
+fn collect_build_descriptor_exports(program: &Program) -> BuildDescriptorExports {
+    let mut descriptors: HashMap<String, (&'static str, String)> = HashMap::new();
+    let mut exported_symbols: HashSet<String> = HashSet::new();
+
+    for stmt in &program.statements {
+        match stmt {
+            Statement::Assignment(assignment) => {
+                let kind_and_name = match &assignment.value {
+                    Expr::TypeInst(type_name, fields, _) if type_name == "BuildUnit" => Some((
+                        "unit",
+                        descriptor_name_from_fields(fields, assignment.target.as_str()),
+                    )),
+                    Expr::TypeInst(type_name, fields, _) if type_name == "BuildPlan" => Some((
+                        "plan",
+                        descriptor_name_from_fields(fields, assignment.target.as_str()),
+                    )),
+                    _ => None,
+                };
+                if let Some((kind, name)) = kind_and_name {
+                    descriptors.insert(assignment.target.clone(), (kind, name));
+                }
+            }
+            Statement::Export(export) => {
+                for symbol in &export.symbols {
+                    exported_symbols.insert(symbol.clone());
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let mut exports = BuildDescriptorExports::default();
+    for symbol in exported_symbols {
+        if let Some((kind, name)) = descriptors.get(&symbol) {
+            match *kind {
+                "unit" => exports.units.push(name.clone()),
+                "plan" => exports.plans.push(name.clone()),
+                _ => {}
+            }
+        }
+    }
+    exports.units.sort();
+    exports.units.dedup();
+    exports.plans.sort();
+    exports.plans.dedup();
+    exports
+}
+
+fn format_descriptor_candidates(candidates: &[String]) -> String {
+    if candidates.is_empty() {
+        "<none>".to_string()
+    } else {
+        candidates.join(", ")
+    }
+}
+
+fn run_build_descriptor_mode(
+    input_path: &Path,
+    selector: DescriptorBuildSelector,
+    diag_format: DiagFormat,
+    compile_stats: &mut CompileDiagStats,
+) -> ! {
+    let entry_path = match build_descriptor_entry_path(input_path) {
+        Ok(path) => path,
+        Err(message) => {
+            emit_build_cli_diagnostic_and_exit(
+                compile_stats,
+                diag_format,
+                "E1902",
+                &message,
+                Some("Pass a .td file or a directory containing main.td."),
+                1,
+            );
+        }
+    };
+
+    let source = match fs::read_to_string(&entry_path) {
+        Ok(source) => source,
+        Err(e) => {
+            let message = format!("Error reading file '{}': {}", entry_path.display(), e);
+            emit_build_cli_diagnostic_and_exit(
+                compile_stats,
+                diag_format,
+                "E1902",
+                &message,
+                None,
+                1,
+            );
+        }
+    };
+
+    let (program, parse_errors) = parse(&source);
+    if !parse_errors.is_empty() {
+        for err in &parse_errors {
+            if diag_format == DiagFormat::Jsonl {
+                let (code, suggestion) = split_diag_code_and_hint(&err.message);
+                emit_compile_diag_jsonl(
+                    compile_stats,
+                    "ERROR",
+                    "parse",
+                    code,
+                    &err.message,
+                    Some(&entry_path.to_string_lossy()),
+                    Some(err.span.line),
+                    Some(err.span.column),
+                    suggestion,
+                );
+            } else {
+                eprintln!("{}", err);
+            }
+        }
+        std::process::exit(1);
+    }
+
+    let exports = collect_build_descriptor_exports(&program);
+    if exports.units.is_empty() && exports.plans.is_empty() {
+        let message = format!(
+            "Descriptor build mode requested for '{}', but it exports no BuildUnit or BuildPlan descriptors.",
+            entry_path.display()
+        );
+        emit_build_cli_diagnostic_and_exit(
+            compile_stats,
+            diag_format,
+            "E1902",
+            &message,
+            Some(
+                "Export a BuildUnit/BuildPlan symbol, or run single-target build without --unit/--plan/--all-units.",
+            ),
+            1,
+        );
+    }
+
+    match selector {
+        DescriptorBuildSelector::Unit(name) => {
+            if !exports.units.iter().any(|candidate| candidate == &name) {
+                let message = format!(
+                    "No exported BuildUnit named '{}'. Candidates: {}.",
+                    name,
+                    format_descriptor_candidates(&exports.units)
+                );
+                emit_build_cli_diagnostic_and_exit(
+                    compile_stats,
+                    diag_format,
+                    "E1903",
+                    &message,
+                    None,
+                    1,
+                );
+            }
+        }
+        DescriptorBuildSelector::Plan(name) => {
+            if !exports.plans.iter().any(|candidate| candidate == &name) {
+                let message = format!(
+                    "No exported BuildPlan named '{}'. Candidates: {}.",
+                    name,
+                    format_descriptor_candidates(&exports.plans)
+                );
+                emit_build_cli_diagnostic_and_exit(
+                    compile_stats,
+                    diag_format,
+                    "E1904",
+                    &message,
+                    None,
+                    1,
+                );
+            }
+        }
+        DescriptorBuildSelector::AllUnits => {
+            if exports.units.is_empty() {
+                emit_build_cli_diagnostic_and_exit(
+                    compile_stats,
+                    diag_format,
+                    "E1903",
+                    "Descriptor build mode requested --all-units, but no BuildUnit descriptors are exported.",
+                    None,
+                    1,
+                );
+            }
+        }
+    }
+
+    let message = "Descriptor build mode reached the build-driver handoff, but descriptor execution is not implemented yet.";
+    if diag_format == DiagFormat::Jsonl {
+        emit_compile_diag_jsonl(
+            compile_stats,
+            "ERROR",
+            "build",
+            None,
+            message,
+            Some(&entry_path.to_string_lossy()),
+            None,
+            None,
+            Some("E32 currently pins CLI ambiguity diagnostics before the artifact graph driver lands.".to_string()),
+        );
+    } else {
+        eprintln!("{}", message);
+        eprintln!(
+            "        E32 currently pins CLI ambiguity diagnostics before the artifact graph driver lands."
+        );
+    }
+    std::process::exit(1);
+}
+
 fn run_build(args: &[String], no_check: bool) {
     let mut target = BuildTarget::Native;
     let mut target_seen = false;
@@ -1593,6 +1906,7 @@ fn run_build(args: &[String], no_check: bool) {
     let mut entry_path: Option<String> = None;
     let mut release_mode = false;
     let mut no_cache = false;
+    let mut descriptor_flags = DescriptorBuildFlags::default();
 
     let mut i = 0;
     while i < args.len() {
@@ -1626,6 +1940,23 @@ fn run_build(args: &[String], no_check: bool) {
                         std::process::exit(1);
                     }
                 };
+            }
+            "--unit" => {
+                i += 1;
+                if i >= args.len() {
+                    print_build_usage_and_exit();
+                }
+                descriptor_flags.unit = Some(args[i].clone());
+            }
+            "--plan" => {
+                i += 1;
+                if i >= args.len() {
+                    print_build_usage_and_exit();
+                }
+                descriptor_flags.plan = Some(args[i].clone());
+            }
+            "--all-units" => {
+                descriptor_flags.all_units = true;
             }
             "--outdir" | "--output" | "-o" => {
                 i += 1;
@@ -1670,6 +2001,43 @@ fn run_build(args: &[String], no_check: bool) {
     };
     let input_path = Path::new(&input);
     let mut compile_stats = CompileDiagStats::default();
+
+    let selector_count = descriptor_flags.selector_count();
+    if selector_count > 1 {
+        emit_build_cli_diagnostic_and_exit(
+            &mut compile_stats,
+            diag_format,
+            "E1901",
+            "`--unit`, `--plan`, and `--all-units` are mutually exclusive.",
+            Some("Use exactly one descriptor build selector."),
+            2,
+        );
+    }
+    if selector_count == 1 && target_seen {
+        emit_build_cli_diagnostic_and_exit(
+            &mut compile_stats,
+            diag_format,
+            "E1900",
+            "Descriptor build mode does not accept a positional build target.",
+            Some(
+                "Use `taida build <PATH> --unit NAME` or single-target `taida build <target> <PATH>`.",
+            ),
+            2,
+        );
+    }
+    if selector_count == 1 && entry_path.is_some() {
+        emit_build_cli_diagnostic_and_exit(
+            &mut compile_stats,
+            diag_format,
+            "E1900",
+            "`--entry` is only valid in single-target native build mode.",
+            Some("Descriptor BuildUnit.entry is a symbol, not a CLI file override."),
+            2,
+        );
+    }
+    if let Some(selector) = descriptor_flags.selector() {
+        run_build_descriptor_mode(input_path, selector, diag_format, &mut compile_stats);
+    }
 
     // S-2: Initialize WASM runtime cache once for all wasm targets.
     // N-2: Emit warning if cache initialization fails instead of silently ignoring.

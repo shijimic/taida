@@ -28,15 +28,90 @@
 use std::path::{Path, PathBuf};
 
 /// Base URL for GitHub archive downloads.
-/// Override with `TAIDA_GITHUB_BASE_URL` for testing (e.g. local mock server).
-pub(crate) fn github_base_url() -> String {
-    std::env::var("TAIDA_GITHUB_BASE_URL").unwrap_or_else(|_| "https://github.com".to_string())
+///
+/// Production installs are pinned to github.com. Debug/test builds may opt
+/// into a loopback mock with `TAIDA_E32_ALLOW_MOCK_GITHUB_BASE_URL=1`; release
+/// builds reject the override even when that variable is present.
+pub(crate) fn github_base_url() -> Result<String, String> {
+    match std::env::var("TAIDA_GITHUB_BASE_URL") {
+        Ok(raw) if raw.trim().is_empty() => Ok("https://github.com".to_string()),
+        Ok(raw) => {
+            if local_mock_github_base_url_allowed() && is_loopback_http_url(raw.trim()) {
+                Ok(raw)
+            } else {
+                Err(format!(
+                    "[E32K3_GITHUB_BASE_URL_CONFINED] TAIDA_GITHUB_BASE_URL is not accepted for source package installs; production source archives are pinned to https://github.com (got '{}')",
+                    raw
+                ))
+            }
+        }
+        Err(_) => Ok("https://github.com".to_string()),
+    }
 }
 
 /// Base URL for GitHub API calls.
 /// Override with `TAIDA_GITHUB_API_URL` for testing.
 fn github_api_url() -> String {
     std::env::var("TAIDA_GITHUB_API_URL").unwrap_or_else(|_| "https://api.github.com".to_string())
+}
+
+fn local_mock_github_base_url_allowed() -> bool {
+    cfg!(debug_assertions)
+        && std::env::var("TAIDA_E32_ALLOW_MOCK_GITHUB_BASE_URL")
+            .map(|v| v == "1")
+            .unwrap_or(false)
+}
+
+fn is_loopback_http_url(url: &str) -> bool {
+    url.starts_with("http://127.0.0.1:")
+        || url.starts_with("http://localhost:")
+        || url.starts_with("http://[::1]:")
+}
+
+fn source_signature_verification_skipped_for_mock_base(base_url: &str) -> bool {
+    local_mock_github_base_url_allowed() && is_loopback_http_url(base_url.trim())
+}
+
+fn enforce_source_signature_required_env() -> Result<(), String> {
+    let Ok(raw) = std::env::var("TAIDA_VERIFY_SIGNATURES") else {
+        return Ok(());
+    };
+    let value = raw.trim();
+    if value.is_empty() || matches!(value, "required" | "REQUIRED" | "enforce" | "ENFORCE") {
+        return Ok(());
+    }
+    Err(format!(
+        "[E32K3_VERIFY_SIGNATURES_RELAXED] source package installs require TAIDA_VERIFY_SIGNATURES=required or unset; got '{}'",
+        raw
+    ))
+}
+
+fn verify_source_tarball_signature(
+    archive_path: &Path,
+    artifact_url: &str,
+    org: &str,
+    name: &str,
+    version: &str,
+) -> Result<(), String> {
+    if org != "taida-lang" {
+        return Ok(());
+    }
+    use crate::addon::signature_verify::{VerifyOutcome, VerifyPolicy, verify_artifact};
+    match verify_artifact(archive_path, artifact_url, VerifyPolicy::Required) {
+        Ok(VerifyOutcome::Verified) => Ok(()),
+        Ok(VerifyOutcome::Warned(reason)) => Err(format!(
+            "[E32K3_SOURCE_COSIGN_REQUIRED] source package {}/{}@{} requires cosign verification; warning is not accepted: {}",
+            org, name, version, reason
+        )),
+        Ok(VerifyOutcome::Skipped) => Err(format!(
+            "[E32K3_SOURCE_COSIGN_REQUIRED] source package {}/{}@{} requires cosign verification; verification was skipped",
+            org, name, version
+        )),
+        Err(e) => Err(format!(
+            "[E32K3_SOURCE_COSIGN_REQUIRED] source package {}/{}@{} requires cosign verification: {}",
+            org, name, version, e
+        )),
+    }
 }
 
 /// Global package store at `~/.taida/store/`.
@@ -105,7 +180,7 @@ impl GlobalStore {
     /// `.taida_installed` marker, and writes a C17 `_meta.toml` provenance
     /// sidecar with the tarball SHA-256.
     pub fn fetch_and_cache(&self, org: &str, name: &str, version: &str) -> Result<PathBuf, String> {
-        self.fetch_and_cache_with_meta(org, name, version, None)
+        self.fetch_and_cache_with_meta(org, name, version, None, None)
     }
 
     /// C17-2: Remove a cached package directory so the next
@@ -304,6 +379,39 @@ impl GlobalStore {
         read_meta(&meta_path_for(&pkg_dir))
     }
 
+    /// E32B-016: before reusing a cached source package, prove that the
+    /// sidecar's tarball SHA still matches the source pin declared in
+    /// `packages.tdm`. Missing or unreadable sidecars cannot satisfy the pin.
+    pub fn verify_cached_tarball_integrity(
+        &self,
+        org: &str,
+        name: &str,
+        version: &str,
+        expected_integrity: &str,
+    ) -> Result<(), String> {
+        match self.read_package_meta(org, name, version) {
+            Ok(Some(meta)) => {
+                let actual = format!("sha256:{}", meta.tarball_sha256);
+                if actual == expected_integrity {
+                    Ok(())
+                } else {
+                    Err(format!(
+                        "[E32K3_SOURCE_INTEGRITY_MISMATCH] cached source package {}/{}@{} SHA-256 mismatch: expected {}, got {}",
+                        org, name, version, expected_integrity, actual
+                    ))
+                }
+            }
+            Ok(None) => Err(format!(
+                "[E32K3_SOURCE_INTEGRITY_UNVERIFIED] cached source package {}/{}@{} has no tarball SHA-256 sidecar; run `taida ingot install --force-refresh` to re-fetch and verify the source pin",
+                org, name, version
+            )),
+            Err(e) => Err(format!(
+                "[E32K3_SOURCE_INTEGRITY_UNVERIFIED] cached source package {}/{}@{} sidecar cannot be read: {}; run `taida ingot install --force-refresh` to re-fetch and verify the source pin",
+                org, name, version, e
+            )),
+        }
+    }
+
     /// Fetch a package from GitHub and cache it, optionally recording a
     /// resolver-supplied commit SHA in the `_meta.toml` sidecar.
     ///
@@ -318,11 +426,25 @@ impl GlobalStore {
         name: &str,
         version: &str,
         commit_sha: Option<&str>,
+        expected_integrity: Option<&str>,
     ) -> Result<PathBuf, String> {
         // RCB-307: Reject path traversal in components
         Self::validate_path_component(org, "org")?;
         Self::validate_path_component(name, "package name")?;
         Self::validate_path_component(version, "version")?;
+        if org != "taida-lang" {
+            return Err(format!(
+                "[E32K3_NON_OFFICIAL_SOURCE_REJECTED] source package {}/{}@{} is not accepted in E32 Phase 0; source packages are limited to taida-lang/*",
+                org, name, version
+            ));
+        }
+        let expected_integrity = expected_integrity.ok_or_else(|| {
+            format!(
+                "[E32K3_SOURCE_INTEGRITY_MISSING] source package {}/{}@{} requires packages.tdm integrity = \"sha256:<64 lowercase hex>\"",
+                org, name, version
+            )
+        })?;
+        enforce_source_signature_required_env()?;
 
         let pkg_dir = self.package_path(org, name, version);
 
@@ -340,10 +462,12 @@ impl GlobalStore {
             )
         })?;
 
-        // Download tarball from GitHub (or mock server via TAIDA_GITHUB_BASE_URL)
+        // Download tarball from GitHub. Debug integration tests may opt into
+        // a loopback mock; production builds reject TAIDA_GITHUB_BASE_URL.
+        let base_url = github_base_url()?;
         let url = format!(
             "{}/{}/{}/archive/refs/tags/{}.tar.gz",
-            github_base_url().trim_end_matches('/'),
+            base_url.trim_end_matches('/'),
             org,
             name,
             version
@@ -389,6 +513,23 @@ impl GlobalStore {
                 org, name, version, e
             )
         })?;
+        let actual = format!("sha256:{}", tarball_sha256);
+        if actual != expected_integrity {
+            let _ = std::fs::remove_dir_all(&tmp_dir);
+            let _ = std::fs::remove_dir_all(&pkg_dir);
+            return Err(format!(
+                "[E32K3_SOURCE_INTEGRITY_MISMATCH] source package {}/{}@{} SHA-256 mismatch: expected {}, got {}",
+                org, name, version, expected_integrity, actual
+            ));
+        }
+
+        if !source_signature_verification_skipped_for_mock_base(&base_url)
+            && let Err(e) = verify_source_tarball_signature(&archive_path, &url, org, name, version)
+        {
+            let _ = std::fs::remove_dir_all(&tmp_dir);
+            let _ = std::fs::remove_dir_all(&pkg_dir);
+            return Err(e);
+        }
 
         // Extract tarball (--strip-components=1 removes the top-level directory)
         let tar_status = std::process::Command::new("tar")
@@ -451,7 +592,7 @@ impl GlobalStore {
     ///
     /// 1. Scans the local cache for matching versions
     /// 2. If not found locally, queries GitHub API for tags
-    /// 3. Fetches and caches the resolved version
+    /// 3. Returns the resolved version; the caller fetches with its source pin
     pub fn resolve_generation(
         &self,
         org: &str,
@@ -491,7 +632,7 @@ impl GlobalStore {
         self.resolve_generation_from_remote(org, name, generation)
     }
 
-    /// Internal: query GitHub API for the latest version in a generation, fetch and cache it.
+    /// Internal: query GitHub API for the latest version in a generation.
     fn resolve_generation_from_remote(
         &self,
         org: &str,
@@ -552,11 +693,7 @@ impl GlobalStore {
         }
 
         match best {
-            Some((_, exact)) => {
-                // Fetch and cache the resolved version
-                self.fetch_and_cache(org, name, &exact)?;
-                Ok(exact)
-            }
+            Some((_, exact)) => Ok(exact),
             None => Err(format!(
                 "No version found for {}/{}@{} (generation '{}')",
                 org, name, generation, generation
@@ -2212,6 +2349,116 @@ mod tests {
         let store = GlobalStore::with_root(dir.clone());
         assert!(store.is_cached("alice", "http", "b.12"));
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_e32_github_base_url_rejects_env_without_mock_gate() {
+        let _guard = crate::util::env_test_lock().lock().unwrap();
+        let prev_base = std::env::var("TAIDA_GITHUB_BASE_URL").ok();
+        let prev_allow = std::env::var("TAIDA_E32_ALLOW_MOCK_GITHUB_BASE_URL").ok();
+        unsafe {
+            std::env::set_var("TAIDA_GITHUB_BASE_URL", "http://127.0.0.1:9999");
+            std::env::remove_var("TAIDA_E32_ALLOW_MOCK_GITHUB_BASE_URL");
+        }
+        let err = github_base_url().expect_err("non-default base URL must be confined");
+        assert!(err.contains("E32K3_GITHUB_BASE_URL_CONFINED"), "{err}");
+        unsafe {
+            match prev_base {
+                Some(v) => std::env::set_var("TAIDA_GITHUB_BASE_URL", v),
+                None => std::env::remove_var("TAIDA_GITHUB_BASE_URL"),
+            }
+            match prev_allow {
+                Some(v) => std::env::set_var("TAIDA_E32_ALLOW_MOCK_GITHUB_BASE_URL", v),
+                None => std::env::remove_var("TAIDA_E32_ALLOW_MOCK_GITHUB_BASE_URL"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_e32_github_base_url_allows_loopback_mock_under_gate() {
+        let _guard = crate::util::env_test_lock().lock().unwrap();
+        let prev_base = std::env::var("TAIDA_GITHUB_BASE_URL").ok();
+        let prev_allow = std::env::var("TAIDA_E32_ALLOW_MOCK_GITHUB_BASE_URL").ok();
+        unsafe {
+            std::env::set_var("TAIDA_GITHUB_BASE_URL", "http://127.0.0.1:9999");
+            std::env::set_var("TAIDA_E32_ALLOW_MOCK_GITHUB_BASE_URL", "1");
+        }
+        assert_eq!(
+            github_base_url().unwrap(),
+            "http://127.0.0.1:9999".to_string()
+        );
+        unsafe {
+            match prev_base {
+                Some(v) => std::env::set_var("TAIDA_GITHUB_BASE_URL", v),
+                None => std::env::remove_var("TAIDA_GITHUB_BASE_URL"),
+            }
+            match prev_allow {
+                Some(v) => std::env::set_var("TAIDA_E32_ALLOW_MOCK_GITHUB_BASE_URL", v),
+                None => std::env::remove_var("TAIDA_E32_ALLOW_MOCK_GITHUB_BASE_URL"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_e32_verify_signatures_relaxed_rejected_for_source() {
+        let _guard = crate::util::env_test_lock().lock().unwrap();
+        let prev = std::env::var("TAIDA_VERIFY_SIGNATURES").ok();
+        unsafe {
+            std::env::set_var("TAIDA_VERIFY_SIGNATURES", "best-effort");
+        }
+        let err = enforce_source_signature_required_env()
+            .expect_err("source installs must reject relaxed signature policy");
+        assert!(err.contains("E32K3_VERIFY_SIGNATURES_RELAXED"), "{err}");
+        unsafe {
+            match prev {
+                Some(v) => std::env::set_var("TAIDA_VERIFY_SIGNATURES", v),
+                None => std::env::remove_var("TAIDA_VERIFY_SIGNATURES"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_e32_fetch_rejects_non_official_owner_before_network() {
+        let store = GlobalStore::with_root(unique_tmp_dir("e32_non_official_store"));
+        let err = store
+            .fetch_and_cache_with_meta(
+                "alice",
+                "demo",
+                "a.1",
+                None,
+                Some("sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+            )
+            .expect_err("third-party owner must reject before network");
+        assert!(err.contains("E32K3_NON_OFFICIAL_SOURCE_REJECTED"), "{err}");
+    }
+
+    #[test]
+    fn test_e32_fetch_rejects_missing_pin_before_network() {
+        let store = GlobalStore::with_root(unique_tmp_dir("e32_missing_pin_store"));
+        let err = store
+            .fetch_and_cache_with_meta("taida-lang", "demo", "a.1", None, None)
+            .expect_err("missing source pin must reject before network");
+        assert!(err.contains("E32K3_SOURCE_INTEGRITY_MISSING"), "{err}");
+    }
+
+    #[test]
+    fn test_e32_source_cosign_required_hard_fails_without_bundle() {
+        let dir = std::env::temp_dir().join(format!(
+            "taida_e32_cosign_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let archive = dir.join("archive.tar.gz");
+        std::fs::write(&archive, b"archive").unwrap();
+        let url = format!("file://{}", archive.display());
+        let err = verify_source_tarball_signature(&archive, &url, "taida-lang", "demo", "a.1")
+            .expect_err("source tarballs require a cosign bundle under required policy");
+        assert!(err.contains("E32K3_SOURCE_COSIGN_REQUIRED"), "{err}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

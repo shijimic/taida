@@ -47,10 +47,17 @@ fn taida_bin() -> PathBuf {
 /// that is vanishingly rare on CI Linux.
 const CLOSED_URL: &str = "http://127.0.0.1:1";
 
-fn write_consumer(project: &std::path::Path, pkg: &str) {
+fn write_consumer(project: &std::path::Path, pkg: &str, integrity: &str) {
     fs::write(
         project.join("packages.tdm"),
-        format!(">>> alice/{}@a.1\n<<<@a.1 test/consumer\n", pkg),
+        format!(
+            r#"[packages."taida-lang/{pkg}"]
+version = "a.1"
+integrity = "{integrity}"
+
+<<<@a.1 test/consumer
+"#
+        ),
     )
     .unwrap();
     fs::write(project.join("main.td"), "stdout(\"c\")\n").unwrap();
@@ -71,6 +78,7 @@ fn run_install_with_env(
     cmd.current_dir(project)
         .env("HOME", home)
         .env("TAIDA_GITHUB_BASE_URL", base)
+        .env("TAIDA_E32_ALLOW_MOCK_GITHUB_BASE_URL", "1")
         .env("TAIDA_GITHUB_API_URL", api)
         .env("GH_TOKEN", "unused");
     cmd.output().expect("run taida ingot install")
@@ -87,18 +95,19 @@ fn c17_5_offline_with_sidecar_prints_offline_warning() {
     // Step 1: do a successful install against the mock so the store
     // ends up with a sidecar.
     let tarball = make_tarball(&[
-        ("packages.tdm", b"<<<@a.1 alice/warm\n" as &[u8]),
+        ("packages.tdm", b"<<<@a.1 taida-lang/warm\n" as &[u8]),
         ("main.td", b"stdout(\"warm\")\n"),
     ]);
+    let integrity = format!("sha256:{}", taida::crypto::sha256_hex_bytes(&tarball));
     let state = Arc::new(Mutex::new(TagState {
-        org: "alice".into(),
+        org: "taida-lang".into(),
         name: "warm".into(),
         version: "a.1".into(),
         commit_sha: "3333333333333333333333333333333333333333".into(),
         tarball,
     }));
     let server = MockServer::start(state.clone());
-    write_consumer(&project, "warm");
+    write_consumer(&project, "warm", &integrity);
     // Two warm-up installs so the sidecar records the real SHA (row 2b
     // upgrade from empty commit_sha, then fast-path).
     let _ = run_install_with_env(&project, &home, &server.base_url(), &server.api_url(), &[]);
@@ -148,26 +157,30 @@ fn c17_5_offline_without_sidecar_prints_strong_warning() {
     let store_pkg = home
         .join(".taida")
         .join("store")
-        .join("alice")
+        .join("taida-lang")
         .join("bare")
         .join("a.1");
     fs::create_dir_all(&store_pkg).unwrap();
     fs::write(store_pkg.join(".taida_installed"), "").unwrap();
-    fs::write(store_pkg.join("packages.tdm"), "<<<@a.1 alice/bare\n").unwrap();
+    fs::write(store_pkg.join("packages.tdm"), "<<<@a.1 taida-lang/bare\n").unwrap();
     fs::write(store_pkg.join("main.td"), "stdout(\"old\")\n").unwrap();
 
-    write_consumer(&project, "bare");
+    write_consumer(
+        &project,
+        "bare",
+        "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    );
 
     let out = run_install_with_env(&project, &home, CLOSED_URL, CLOSED_URL, &[]);
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        out.status.success(),
-        "offline install without sidecar must still exit 0, stderr=\n{}",
+        !out.status.success(),
+        "offline install without source sidecar must fail, stderr=\n{}",
         stderr
     );
     assert!(
-        stderr.contains("unknown provenance"),
-        "stderr must include strong warning, got:\n{}",
+        stderr.contains("E32K3_SOURCE_INTEGRITY_UNVERIFIED"),
+        "stderr must include source integrity warning, got:\n{}",
         stderr
     );
     assert!(
@@ -197,18 +210,19 @@ fn c17_5_no_remote_check_skips_lookup_silently() {
     // place. Then verify that --no-remote-check skips the API hit even
     // when the API endpoint would have worked.
     let tarball = make_tarball(&[
-        ("packages.tdm", b"<<<@a.1 alice/noremote\n" as &[u8]),
+        ("packages.tdm", b"<<<@a.1 taida-lang/noremote\n" as &[u8]),
         ("main.td", b"stdout(\"nr\")\n"),
     ]);
+    let integrity = format!("sha256:{}", taida::crypto::sha256_hex_bytes(&tarball));
     let state = Arc::new(Mutex::new(TagState {
-        org: "alice".into(),
+        org: "taida-lang".into(),
         name: "noremote".into(),
         version: "a.1".into(),
         commit_sha: "4444444444444444444444444444444444444444".into(),
         tarball,
     }));
     let server = MockServer::start(state.clone());
-    write_consumer(&project, "noremote");
+    write_consumer(&project, "noremote", &integrity);
     let _ = run_install_with_env(&project, &home, &server.base_url(), &server.api_url(), &[]);
     let _ = run_install_with_env(&project, &home, &server.base_url(), &server.api_url(), &[]);
     drop(server);

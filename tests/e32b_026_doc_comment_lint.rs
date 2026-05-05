@@ -21,8 +21,12 @@
 // New documentation must keep both rules satisfied; the test fails loud
 // rather than relying on reviewer vigilance.
 
+mod common;
+
+use common::{taida_bin, unique_temp_dir, write_file};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 fn collect_md_files(dir: &Path, out: &mut Vec<PathBuf>) {
     let read = match fs::read_dir(dir) {
@@ -241,4 +245,74 @@ fn e32b_026_doc_comment_template_no_null_check_phrasing() {
         "doc-comment legacy null-phrasing violations:\n{}",
         hits.join("\n")
     );
+}
+
+#[test]
+fn e32b_026_doc_generate_output_has_no_semver_or_null_surface() {
+    let dir = unique_temp_dir("e32b_026_doc_generate");
+    let src = dir.join("api.td");
+    let out = dir.join("api.md");
+    write_file(
+        &src,
+        r#"
+///@ Purpose: Generated documentation surface smoke.
+///@ Since: e.32
+///@ AI-Constraints:
+///@   - Lax.hasValue を確認する
+///@   - Result predicate を使う
+answer <= 42
+"#,
+    );
+
+    let output = Command::new(taida_bin())
+        .args(["doc", "generate", "-o"])
+        .arg(&out)
+        .arg(&src)
+        .output()
+        .expect("run taida doc generate");
+    assert!(
+        output.status.success(),
+        "taida doc generate should succeed; stdout={}; stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let markdown = fs::read_to_string(&out).expect("read generated markdown");
+    assert!(
+        markdown.contains("### answer"),
+        "generated docs should include documented binding, got:\n{}",
+        markdown
+    );
+    assert!(
+        markdown.contains("**Since**: e.32"),
+        "generated docs should preserve Taida versioning, got:\n{}",
+        markdown
+    );
+
+    let mut since_lines = Vec::new();
+    for line in markdown.lines() {
+        if let Some(value) = line.strip_prefix("**Since**:") {
+            let value = value.trim();
+            since_lines.push(value.to_string());
+            assert!(
+                taida_version_value_matches(value),
+                "generated @Since value `{}` must use Taida versioning in:\n{}",
+                value,
+                markdown
+            );
+        }
+    }
+    assert!(
+        !since_lines.is_empty(),
+        "generated docs should include at least one Since line"
+    );
+
+    let lower = markdown.to_ascii_lowercase();
+    assert!(
+        !lower.contains("null") && !lower.contains("undefined"),
+        "generated docs must not reintroduce null/undefined surface wording:\n{}",
+        markdown
+    );
+
+    let _ = fs::remove_dir_all(&dir);
 }
