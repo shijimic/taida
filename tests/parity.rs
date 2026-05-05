@@ -39287,3 +39287,96 @@ stdout(isEven(50000))
 
     let _ = fs::remove_file(&tmp);
 }
+
+// ── E32B-020 (Lock-M): closed-constructor validation ─────────────────
+//
+// Phase 0 verdict: anonymous `@(...)` keeps its open shape; named
+// `Name(field <= value, ...)` is closed. Typo'd field names, duplicate
+// field assignments, and mismatched value types previously fell through
+// the type checker silently — `Pilot(typo_age <= 14)` would simply drop
+// `typo_age` and leave the declared `age` at its default (0). Lock-M
+// promotes those silent breakages to compile errors so AI typos surface
+// before runtime.
+#[test]
+fn test_e32b_020_constructor_rejects_undefined_field() {
+    let source = r#"
+Pilot = @(name: Str, age: Int)
+p <= Pilot(name <= "Rei", typo_age <= 14)
+stdout(p.name)
+"#;
+    assert_backends_reject_source(source, "e32b_020_undefined_field");
+}
+
+#[test]
+fn test_e32b_020_constructor_rejects_duplicate_field() {
+    let source = r#"
+Pilot = @(name: Str, age: Int)
+p <= Pilot(name <= "Rei", name <= "Asuka", age <= 14)
+stdout(p.name)
+"#;
+    assert_backends_reject_source(source, "e32b_020_duplicate_field");
+}
+
+#[test]
+fn test_e32b_020_constructor_rejects_type_mismatch() {
+    let source = r#"
+Pilot = @(name: Str, age: Int)
+p <= Pilot(name <= "Rei", age <= "fourteen")
+stdout(p.age.toString())
+"#;
+    assert_backends_reject_source(source, "e32b_020_type_mismatch");
+}
+
+#[test]
+fn test_e32b_020_constructor_rejects_method_field_passing() {
+    let source = r#"
+Pilot = @(
+  name: Str
+  intro =
+    "I'm " + name
+  => :Str
+)
+g <= Pilot(name <= "Rei", intro <= "fake")
+stdout(g.intro())
+"#;
+    assert_backends_reject_source(source, "e32b_020_method_field");
+}
+
+#[test]
+fn test_e32b_020_error_constructor_rejects_typo() {
+    let source = r#"
+Error => MyError = @(field: Str, message: Str)
+err <= MyError(feild <= "email", message <= "oops")
+stdout(err.field)
+"#;
+    assert_backends_reject_source(source, "e32b_020_error_typo");
+}
+
+#[test]
+fn test_e32b_020_constructor_positive_3backend_parity() {
+    // Anonymous `@(...)` keeps open shape. Named TypeInst with
+    // declared fields and Error inheritance round-trip the contract:
+    // omitted fields fall back to their declared default, and the
+    // legacy `type <= "Same"` literal on Error subclasses is accepted
+    // for backward compatibility.
+    let source = r#"
+anon <= @(x <= 1, y <= "extra", z <= true)
+stdout("anon_x:" + anon.x.toString())
+
+Pilot = @(name: Str, age: Int)
+p <= Pilot(name <= "Rei", age <= 14)
+stdout("p_name:" + p.name)
+stdout("p_age:" + p.age.toString())
+
+q <= Pilot(name <= "Asuka")
+stdout("q_age:" + q.age.toString())
+
+Error => MyError = @(field: Str, message: Str)
+ok <= MyError(type <= "MyError", field <= "name", message <= "oops")
+stdout("err_msg:" + ok.message)
+"#;
+    assert_backend_parity_for_source(source, "e32b_020_constructor_positive");
+    let out = run_interpreter_src(source, "e32b_020_constructor_positive_expected")
+        .expect("interpreter output should exist");
+    assert_eq!(out, "anon_x:1\np_name:Rei\np_age:14\nq_age:0\nerr_msg:oops");
+}

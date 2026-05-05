@@ -1924,6 +1924,16 @@ impl TypeChecker {
                         .collect();
                     self.registry.register_type(&td.name, fields);
                     self.declared_header_arities.insert(td.name.clone(), 0);
+                    // E32B-020 (Lock-M): record the FieldDef list so the
+                    // closed-constructor validator can distinguish data
+                    // fields, method fields, and declare-only function
+                    // fields when checking `Name(field <= value, ...)`
+                    // call sites. Without this entry, BuchiPack-style
+                    // TypeDefs fall through validation and silently
+                    // accept undefined fields / type mismatches at
+                    // runtime.
+                    self.mold_field_defs
+                        .insert(td.name.clone(), td.fields.clone());
                 }
                 ClassLikeKind::Mold { .. } => {
                     let md = cl;
@@ -2099,6 +2109,25 @@ impl TypeChecker {
                                 header_args: child_header.clone(),
                             },
                         );
+                        self.mold_field_defs
+                            .insert(inh_child.clone(), merged_field_defs);
+                    } else {
+                        // E32B-020 (Lock-M): non-mold inheritance (the
+                        // common Error path: `Error => MyError = @(...)`)
+                        // also needs a `mold_field_defs` entry so the
+                        // closed-constructor validator can see the
+                        // merged parent + child field list. Without
+                        // this, `MyError(feild <= "...")` typos would
+                        // fall through unchecked because the parent has
+                        // no header args and we'd otherwise skip the
+                        // mold-style registration above.
+                        let parent_field_defs = self
+                            .mold_field_defs
+                            .get(inh_parent)
+                            .cloned()
+                            .unwrap_or_default();
+                        let merged_field_defs =
+                            Self::merge_field_defs(&parent_field_defs, &inh.fields);
                         self.mold_field_defs
                             .insert(inh_child.clone(), merged_field_defs);
                     }
@@ -5321,8 +5350,190 @@ defaulted fields must be provided via `()`",
                 }
             }
 
-            Expr::TypeInst(name, _, _) => Type::Named(name.clone()),
+            Expr::TypeInst(name, fields, span) => {
+                self.validate_type_inst_constructor(name, fields, span);
+                Type::Named(name.clone())
+            }
             Expr::Throw(_, _) => Type::Unknown,
+        }
+    }
+
+    /// E32B-020 (Lock-M): closed-constructor validation for class-like
+    /// `Name(field <= value, ...)` instantiations.
+    ///
+    /// Anonymous packs (`@(...)`) keep their open / structural shape and
+    /// are intentionally left untouched by this validator. Named
+    /// constructors backed by a `mold_field_defs[name]` declaration are
+    /// promoted to closed form here:
+    ///
+    /// 1. Duplicate field names → `[E1404]` (single appearance per call).
+    /// 2. Undeclared field names → `[E1406]` (the typo path that
+    ///    previously fell back to a default value at runtime — e.g.
+    ///    `Pilot(typo_age <= 14)` silently dropping the typo and giving
+    ///    `age = 0`).
+    /// 3. Method fields (`is_method = true`) cannot be passed as
+    ///    constructor arguments — methods are part of the type's
+    ///    behaviour, not its data — `[E1407]`.
+    /// 4. Declared field value type must be compatible with the field's
+    ///    declared type → `[E1506]` (existing arg-type code).
+    /// 5. Error-derived types' `type` field is auto-set to the concrete
+    ///    type name. Passing `type <= "Same"` is allowed (idempotent
+    ///    legacy aid); any other literal / non-literal value is rejected
+    ///    via `[E1408]` so `type` cannot be spoofed.
+    /// 6. Omitted fields are NOT rejected — the value is filled by the
+    ///    declared default / by the `defaultFn` synthesised in E30B-004
+    ///    for declare-only function fields. This honours the "every type
+    ///    has a default" PHILOSOPHY without forcing every constructor
+    ///    call site to enumerate every field.
+    fn validate_type_inst_constructor(&mut self, name: &str, fields: &[BuchiField], _span: &Span) {
+        let Some(field_defs) = self.mold_field_defs.get(name).cloned() else {
+            // Name is not a registered class-like / mold-like type
+            // declaration (e.g. an Enum variant call, a stale name, a
+            // user-defined function call, etc.). Defer to other paths
+            // for those — this validator is scoped strictly to the
+            // closed-constructor surface for known types.
+            return;
+        };
+
+        let is_error_type = self.registry.is_error_type(name);
+        // Build lookup tables once. Method names are pulled from
+        // `mold_field_defs` (which carries `is_method`), data names
+        // additionally include inherited fields from
+        // `registry.type_defs` (which contains parent-merged fields,
+        // including built-in Error parent fields like `type` /
+        // `message`). Without this fallback, `MyError(message <= ...)`
+        // would be rejected as undefined because the AST-level
+        // `mold_field_defs` only carries the *declared* extras.
+        let inherited_field_types: std::collections::HashMap<String, Type> = self
+            .registry
+            .get_type_fields(name)
+            .unwrap_or_default()
+            .into_iter()
+            .collect();
+        let declared_data: std::collections::HashMap<&str, &FieldDef> = field_defs
+            .iter()
+            .filter(|f| !f.is_method)
+            .map(|f| (f.name.as_str(), f))
+            .collect();
+        let declared_methods: std::collections::HashSet<&str> = field_defs
+            .iter()
+            .filter(|f| f.is_method)
+            .map(|f| f.name.as_str())
+            .collect();
+
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for field in fields {
+            // (a) duplicate detection
+            if !seen.insert(field.name.clone()) {
+                self.errors.push(TypeError {
+                    message: format!(
+                        "[E1404] Constructor '{}' has duplicate field '{}'. \
+                         Hint: pass each field at most once in a `Name(...)` constructor call.",
+                        name, field.name
+                    ),
+                    span: field.span.clone(),
+                });
+                continue;
+            }
+
+            // `__`-prefix is already handled by `check_mold_errors_in_expr`
+            // (`[E1617]`); skip here so we don't double-report.
+            if field.name.starts_with(RESERVED_INTERNAL_FIELD_PREFIX) {
+                continue;
+            }
+
+            // (b) method field cannot be passed
+            if declared_methods.contains(field.name.as_str()) {
+                self.errors.push(TypeError {
+                    message: format!(
+                        "[E1407] Constructor '{}' cannot accept method field '{}' as a value. \
+                         Hint: methods are part of the type's behaviour and are defined in the \
+                         type declaration, not assigned per-instance.",
+                        name, field.name
+                    ),
+                    span: field.span.clone(),
+                });
+                continue;
+            }
+
+            // (c) undeclared field
+            let declared_opt = declared_data.get(field.name.as_str()).copied();
+            let inherited_ty = inherited_field_types.get(field.name.as_str()).cloned();
+            if declared_opt.is_none() && inherited_ty.is_none() {
+                // Error-derived types: `type` is the auto-set inheritance
+                // tag. It is not declared in `field_defs` (added by the
+                // base Error type's structural merge), but accepting a
+                // literal `type <= "<same name>"` is convenient for
+                // round-trip code. Anything else is rejected.
+                if is_error_type && field.name == "type" {
+                    if let Expr::StringLit(value, _) = &field.value
+                        && value == name
+                    {
+                        // idempotent legacy literal — allowed
+                    } else {
+                        self.errors.push(TypeError {
+                            message: format!(
+                                "[E1408] Error constructor '{}' auto-sets the `type` field; \
+                                 only the literal `type <= \"{}\"` is accepted as a redundant pass-through. \
+                                 Hint: drop the `type` argument or pass the matching string literal.",
+                                name, name
+                            ),
+                            span: field.span.clone(),
+                        });
+                    }
+                    continue;
+                }
+
+                self.errors.push(TypeError {
+                    message: format!(
+                        "[E1406] Constructor '{}' has no field named '{}'. \
+                         Hint: check the type declaration; only declared data fields can be passed \
+                         as `Name(field <= value, ...)`.",
+                        name, field.name
+                    ),
+                    span: field.span.clone(),
+                });
+                continue;
+            }
+
+            // (d) value type compatibility against declared / inherited type
+            let expected_ty = if let Some(declared) = declared_opt {
+                declared
+                    .type_annotation
+                    .as_ref()
+                    .map(|ta| self.registry.resolve_type(ta))
+                    .unwrap_or(Type::Unknown)
+            } else {
+                inherited_ty.unwrap_or(Type::Unknown)
+            };
+            if matches!(expected_ty, Type::Unknown) {
+                continue;
+            }
+            // Wrap so the rest of the function flow stays uniform.
+            let expected_ty = Some(expected_ty);
+            let Some(expected_ty) = expected_ty else {
+                continue;
+            };
+            if matches!(expected_ty, Type::Unknown) {
+                continue;
+            }
+            let actual_ty = self.infer_expr_type(&field.value);
+            if matches!(actual_ty, Type::Unknown) {
+                continue;
+            }
+            if Self::contains_unknown(&actual_ty) || Self::contains_unknown(&expected_ty) {
+                continue;
+            }
+            if !self.registry.is_subtype_of(&actual_ty, &expected_ty) {
+                self.errors.push(TypeError {
+                    message: format!(
+                        "[E1506] Constructor '{}' field '{}' has type {}, expected {}. \
+                         Hint: pass a value of the declared field type, or use an explicit conversion mold.",
+                        name, field.name, actual_ty, expected_ty
+                    ),
+                    span: field.span.clone(),
+                });
+            }
         }
     }
 

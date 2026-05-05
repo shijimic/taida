@@ -31,6 +31,46 @@ MoldInst(String, Vec<Expr>, Vec<BuchiField>, Span)
 
 ---
 
+## class-like 統一構文の構築検査ポリシー (E32B-020 / Lock-M)
+
+`Name(field <= value, ...)` のクラスライク型コンストラクタ呼び出しは、E32 から **closed-constructor** として検査されます。匿名 `@(...)` リテラルは引き続き open / 構造的な値として扱い、本ポリシーの対象外です。
+
+| ケース | 受理 / 拒否 | 診断 |
+|---|---|---|
+| 宣言済みフィールドのみで呼び出し | 受理 | — |
+| 宣言済みフィールドの省略 | 受理 (型のデフォルト値で充足) | — |
+| declare-only 関数フィールドの省略 | 受理 (E30B-004 の defaultFn が充足) | — |
+| 宣言外フィールドを渡す | 拒否 | `[E1406]` |
+| 同一フィールドを複数回渡す | 拒否 | `[E1404]` |
+| 宣言済みフィールドに型不一致な値を渡す | 拒否 | `[E1506]` |
+| メソッドフィールドに値を渡す | 拒否 | `[E1407]` |
+| Error 派生で `type` に同名 literal を渡す | 受理 (idempotent legacy aid) | — |
+| Error 派生で `type` に別 literal / 非 literal を渡す | 拒否 | `[E1408]` |
+| 匿名 `@(...)` への余分フィールド | 受理 (open shape を維持) | — |
+
+```taida
+Pilot = @(name: Str, age: Int)
+
+Pilot(name <= "Rei", age <= 14)            // OK
+Pilot(name <= "Asuka")                     // OK (age はデフォルト 0)
+Pilot(name <= "Rei", typo_age <= 14)       // [E1406]
+Pilot(name <= "Rei", name <= "Asuka")      // [E1404]
+Pilot(name <= "Rei", age <= "fourteen")    // [E1506]
+
+@(x <= 1, y <= "extra", z <= true)         // OK (匿名 pack は open)
+
+Error => MyError = @(field: Str, message: Str)
+MyError(type <= "MyError", field <= "x", message <= "y")  // OK
+MyError(type <= "AppError", message <= "y")               // [E1408]
+MyError(feild <= "typo", message <= "y")                  // [E1406]
+```
+
+> **PHILOSOPHY.md — I.** 深く考えずに適当にぶちこんでけ
+>
+> 構造的サブタイピングは代入 / 引数渡し / 戻り値の互換規則として維持されます。コンストラクタの closed-form 検査は型の identity を立てる際の AI typo 防止と silent breakage 抑止に集中し、structural compat 規則とは独立に動作します。
+
+---
+
 ## Mold基底クラス
 
 操作モールドは class-like 単一構文 (`Name[?type-args] [=> Parent] = @(...)`) を `Mold[...]` を親型として用いる特殊化です。すべてのモールディング型は `Mold[...]` を継承して定義します (E30 統一構文では `=> Mold[T]` の形になり、ぶちパック型定義 / Error 型と同じ surface 構文を共有します)。
