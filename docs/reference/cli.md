@@ -404,3 +404,15 @@ Taida 本体のセルフアップデート専用コマンドです。旧 AST 書
 で停止します。`SHA256SUMS` は cosign keyless verification で `taida-lang/taida` の release workflow
 identity に pin され、検証後に archive bytes の SHA-256 と照合されます。`TAIDA_GITHUB_API_URL` は
 production upgrade path では読まれず、release metadata の取得先は `https://api.github.com` 固定です。
+
+production upgrade path はダウンロード URL について `https://` 以外の scheme を `[E32K1_UPGRADE_NON_HTTPS_URL]`
+で hard-fail します。release metadata 改竄経由で `file://` などの URL が渡される攻撃を防ぐ defense-in-depth
+ガードであり、テスト経路だけが `download_bytes_for_test` ヘルパーを通じて `file://` を受け付けます。
+
+ダウンロードした archive / `SHA256SUMS` / cosign bundle のステージング先は `~/.taida/cache/upgrade/`
+(ディレクトリ mode `0700`) に固定されます。各ファイルは `O_NOFOLLOW | O_EXCL` で原子作成され、
+`/tmp` 配下の予測可能パスは使いません。
+
+`install.sh` の `TAIDA_VERIFY_SIGNATURES` 既定値は `required` です。`taida upgrade` の cosign 必須
+契約と `install.sh` の trust model はここで一致し、明示的に `TAIDA_VERIFY_SIGNATURES=best-effort` /
+`off` を指定したオペレーターだけが緩いモードに落ちます。

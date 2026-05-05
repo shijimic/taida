@@ -178,7 +178,7 @@
 | 区切り | 用途 | 発射段 |
 |--------|------|--------|
 | `E1900〜E1909` | ディスクリプタビルドの CLI 文法と曖昧さ排除 | CLI |
-| `E1910〜E1919` | `AssetBundle` のパス / グロブ / シンボリックリンク安全性 | Build driver |
+| `E1910〜E1919` | `AssetBundle` のパス / グロブ / シンボリックリンク / ディスクリプタ名安全性 | Build driver |
 | `E1920〜E1929` | `.taida/build` のトランザクショナル更新 / ステージング掃除 / アトミック置換非対応 | Build driver |
 | `E1930〜E1939` | 多成果物診断スキーマの予約・移行用 | Build driver / Diagnostics |
 | `E1940〜E1949` | 成果物グラフの循環 / ターゲット依存閉包違反 | Build driver / TypeChecker |
@@ -200,6 +200,7 @@
 | `E1913` | AssetBundle が symlink / 非通常ファイルを含む |
 | `E1914` | AssetBundle 出力パスの検証失敗または重複 |
 | `E1915` | `RouteAsset.path` の形式不正または重複 |
+| `E1916` | `BuildUnit` / `BuildPlan` / `AssetBundle` / `BuildHook` の `name` が単一パスセグメント制約を満たさない (空 / `..` / `/` / `\\` / 先頭ドット / NUL) |
 | `E1922` | stale staging cleanup 失敗 |
 | `E1923` | staging / child build / artifact-map 作成失敗 |
 | `E1924` | atomic replace / rollback 失敗 |

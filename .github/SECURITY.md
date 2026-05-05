@@ -118,6 +118,21 @@ The `install.sh` script applies the same identity pin: the cosign
 source URL, that substitution is intentionally out of scope of the
 cosign identity check.
 
+The default value of `TAIDA_VERIFY_SIGNATURES` in `install.sh` is
+`required`. Operators have to opt out explicitly (e.g.
+`TAIDA_VERIFY_SIGNATURES=best-effort ./install.sh`) to fall back to
+the warn-only path. A new install on an offline host without cosign
+therefore fails fast, matching the hard-required policy enforced by
+`taida upgrade`.
+
+Self-upgrade staging files are written to `~/.taida/cache/upgrade/`
+(directory mode `0700`). Each artefact (the candidate binary, the
+SHA256SUMS blob, and the cosign bundle) is opened with `O_NOFOLLOW |
+O_EXCL` and mode `0600`, so a pre-placed symlink at the staging path
+makes the upgrader fail closed instead of clobbering the symlink
+target. The legacy `/tmp/taida_upgrade_<pid>_<nanos>_*` path is no
+longer used.
+
 ## Source package pinning
 
 Source-package downloads consumed via `packages.tdm` are pinned by
