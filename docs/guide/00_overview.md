@@ -280,11 +280,3 @@ ritchan <= NervStaff(name <= "Ritsuko")  // call_sign = "", age = 0
 | [標準ライブラリ](../reference/standard_library.md) | プリリュードとビルトイン型 |
 | [標準メソッド](../reference/standard_methods.md) | 状態チェック・モナディックメソッド |
 
-### 設計ドキュメント
-
-| ドキュメント | 内容 |
-|------------|------|
-| [メソッド→モールド リファクタリング](../design/method_to_mold_refactoring.md) | 操作モールド設計 |
-| [JSON 溶鉄化](../design/json_molten_iron.md) | JSON の不透明プリミティブ化設計 |
-| [CLI ドキュメント運用設計](../design/cli_documentation.md) | CLI 文書の同期ルールと更新規約 |
-| [Graph/Human 収益化設計](../design/graph_human_monetization.md) | 無料 `taida` と有料 `taida-human` の責務分離 |

@@ -75,6 +75,24 @@ CLI モード（`taida <file>`）とは別に、REPL および Rust 側の in-pr
 
 パイプ合成時の挙動: `taida script.td | head -N` のように下流 reader が先に stdout を閉じると、後続の `stdout()` 呼び出しは `EPIPE` を黙って吸収して 0 バイトを返すだけで、プロセスは exit 0 で終了します（`ripgrep` / `bat` と同じ一般的な CLI 規約）。
 
+#### `nowMs()` の 4-backend 契約
+
+`nowMs()` は **Unix epoch（1970-01-01T00:00:00Z）からの経過ミリ秒数**を `Int` で返します。4 バックエンド (Interpreter / JS / Native / wasm) いずれも同じ wall-clock 契約に従います。
+
+| Backend | 内部実装 | 解像度 | 同期源 |
+|---|---|---|---|
+| Interpreter | Rust `SystemTime::now()` | OS 依存 (Linux: ナノ秒) | OS wall clock |
+| JS | `Date.now()` | ミリ秒 | Host wall clock |
+| Native | `clock_gettime(CLOCK_REALTIME)` | OS 依存 (Linux: ナノ秒) | OS wall clock |
+| wasm-* | host が提供する WASI clock (`clock_time_get(realtime)`) | host 依存 | Host wall clock |
+
+契約の本質:
+
+- **wall-clock であり、単調時計ではない**。NTP 補正やユーザによる時刻変更でジャンプ・巻き戻りが発生する。
+- **同一プロセス内で `nowMs() <= a; nowMs() <= b` としても `b >= a` は保証されない**（極めて稀ではあるが、wall-clock 巻き戻り時に `b < a` が起きうる）。
+- 厳密な経過時間測定（タイムアウト・レート制御・パフォーマンス計測）には差分を取り、許容誤差を併用する。
+- 単調保証が必要な path 用の `monoMs()` は post-stable additive 候補として予約 (`docs/STABILITY.md` 参照)。E32 stable では `nowMs()` のみ。
+
 ### JSON シリアライズ
 
 | 関数 | 説明 | 例 |

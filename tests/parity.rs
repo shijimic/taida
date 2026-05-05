@@ -39148,3 +39148,45 @@ stdout("var_default:" + b4.toString())
         .expect("interpreter output should exist");
     assert_eq!(out, "bool:false\nfilled:true\nlast:true\nvar_default:true");
 }
+
+// ── E32B-025 (Lock-N): Div / Mod negative-number truncation contract ─
+//
+// `docs/reference/operators.md` and `docs/guide/05_molding.md` lock the
+// 4-backend contract that `Div` / `Mod` truncate toward zero (the C99 /
+// Rust integer convention), not Python-floor. Without an explicit pin
+// the contract drifts silently — AI-generated implementations often
+// default to Python-style floor for `%`, which would flip the sign of
+// `Mod[-7, 2]()` from `-1` to `1`. Pin all three sign combinations
+// across Interpreter / JS / Native to guarantee `q = trunc(a/b)` and
+// `r = a - q*b` everywhere.
+#[test]
+fn e32b_025_div_mod_negative_truncation_3backend_parity() {
+    let source = r#"
+Div[-7, 2]() ]=> q1
+stdout("q_neg_a:" + q1.toString())
+Mod[-7, 2]() ]=> r1
+stdout("r_neg_a:" + r1.toString())
+
+Div[7, -2]() ]=> q2
+stdout("q_neg_b:" + q2.toString())
+Mod[7, -2]() ]=> r2
+stdout("r_neg_b:" + r2.toString())
+
+Div[-7, -2]() ]=> q3
+stdout("q_neg_both:" + q3.toString())
+Mod[-7, -2]() ]=> r3
+stdout("r_neg_both:" + r3.toString())
+
+Div[0, -3]() ]=> q4
+stdout("q_zero:" + q4.toString())
+Mod[0, -3]() ]=> r4
+stdout("r_zero:" + r4.toString())
+"#;
+    assert_backend_parity_for_source(source, "e32b_025_div_mod_negative_truncation");
+    let out = run_interpreter_src(source, "e32b_025_div_mod_negative_expected")
+        .expect("interpreter output should exist");
+    assert_eq!(
+        out,
+        "q_neg_a:-3\nr_neg_a:-1\nq_neg_b:-3\nr_neg_b:1\nq_neg_both:3\nr_neg_both:-1\nq_zero:0\nr_zero:0"
+    );
+}
