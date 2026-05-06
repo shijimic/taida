@@ -1,4 +1,9 @@
 //! E32B-028: oversized HTTP chunk-size is a protocol error, not a panic.
+//!
+//! E32B-080 follow-up (concurrent isolation): a malformed connection A
+//! (oversized chunk-size) must not break sibling connection B's keep-alive
+//! processing. Both connections drive the same server (request limit = 2),
+//! A gets HTTP 400 + close, B gets HTTP 200 + body echo.
 
 mod common;
 
@@ -7,6 +12,9 @@ use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 fn node_available() -> bool {
@@ -186,6 +194,64 @@ stdout(r.requests)
     )
 }
 
+fn eager_source_two_request(port: u16) -> String {
+    format!(
+        r#">>> taida-lang/net => @(httpServe, readBody)
+
+handler req =
+  body <= readBody(req)
+  @(status <= 200, headers <= @[], body <= body)
+=> :@(status: Int, headers: @[@(name: Str, value: Str)], body: Bytes)
+
+asyncResult <= httpServe({port}, handler, 2)
+asyncResult ]=> result
+result ]=> r
+stdout(r.ok)
+stdout(r.requests)
+"#
+    )
+}
+
+/// Open a TCP connection, write `request`, drain the response. Used by the
+/// concurrent isolation worker threads.
+///
+/// Polls connect() while `server_up` is false so the worker waits for the
+/// spawned backend to bind its listener; once the listener is up, the actual
+/// I/O is one round-trip and the read drains until the server half-closes
+/// (Connection: close on both the 400 reject path and the 200 echo path).
+fn one_shot_request(port: u16, request: &[u8], server_up: &AtomicBool) -> Option<Vec<u8>> {
+    let connect_deadline = std::time::Instant::now() + Duration::from_secs(6);
+    let mut stream = loop {
+        if let Ok(stream) = TcpStream::connect(("127.0.0.1", port)) {
+            server_up.store(true, Ordering::Release);
+            break stream;
+        }
+        if std::time::Instant::now() >= connect_deadline {
+            return None;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    };
+    stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
+    stream.set_write_timeout(Some(Duration::from_secs(5))).ok();
+    if stream.write_all(request).is_err() {
+        return None;
+    }
+    let mut response = Vec::new();
+    let mut buf = [0u8; 4096];
+    loop {
+        match stream.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => response.extend_from_slice(&buf[..n]),
+            Err(_) => break,
+        }
+    }
+    if response.is_empty() {
+        None
+    } else {
+        Some(response)
+    }
+}
+
 #[test]
 fn e32b_028_oversized_chunk_size_eager_400_three_backend() {
     let mut backends = vec!["interp"];
@@ -231,6 +297,115 @@ fn e32b_028_oversized_chunk_size_eager_400_three_backend() {
             "{} backend must not pass oversized chunk body to the handler, got: {}",
             backend,
             response
+        );
+    }
+}
+
+/// E32B-080 (concurrent isolation): two HTTP/1.1 connections drive the same
+/// server. Connection A sends an oversized chunk-size and must be rejected
+/// with HTTP 400 + close. Connection B sends a well-formed chunked body
+/// `hello` and must observe HTTP 200 + the echoed body. The point of the
+/// test is that A's malformed input must not impact B's processing — the
+/// server's accept loop has to recover from A and continue serving B.
+#[test]
+fn e32b_080_chunked_concurrent_isolation_three_backend() {
+    let mut backends = vec!["interp"];
+    if node_available() {
+        backends.push("js");
+    } else {
+        eprintln!("node unavailable; skipping JS member");
+    }
+    if cc_available() {
+        backends.push("native");
+    } else {
+        eprintln!("cc unavailable; skipping native member");
+    }
+
+    for backend in backends {
+        let port = free_loopback_port();
+        let dir = setup_net_project(
+            &eager_source_two_request(port),
+            &format!("conc_{}", backend),
+        );
+        let (mut child, artifact) = spawn_backend(&dir, backend, &format!("conc_{}", backend));
+
+        let server_up = Arc::new(AtomicBool::new(false));
+        let server_up_a = server_up.clone();
+        let server_up_b = server_up.clone();
+
+        let handle_a = thread::spawn(move || {
+            // Oversized chunk-size in hex (FF * 16 chars > SIZE_MAX on 64-bit
+            // and well past it on 32-bit). The runtime must reject before
+            // delivering any chunk bytes to the handler.
+            let req = b"POST /a HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\nFFFFFFFFFFFFFFFF\r\nx\r\n0\r\n\r\n";
+            one_shot_request(port, req, &server_up_a)
+        });
+        // Stagger B so A's first connect+write lands on the listener before
+        // B opens its socket. The server is single-accept-loop, so the
+        // staggering simply pins the (A, B) ordering — once A's connection
+        // is closed, B is accepted and processed.
+        let handle_b = thread::spawn(move || {
+            // Wait until A has at least connected, then send a normal POST
+            // with a 5-byte `hello` body via chunked transfer.
+            let deadline = std::time::Instant::now() + Duration::from_secs(6);
+            while !server_up_b.load(Ordering::Acquire) {
+                if std::time::Instant::now() >= deadline {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            // Tiny extra delay so A's bytes are processed first.
+            std::thread::sleep(Duration::from_millis(100));
+            let req = b"POST /b HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n5\r\nhello\r\n0\r\n\r\n";
+            // For B we don't need to set server_up (already set), pass a
+            // local atomic.
+            let local_up = AtomicBool::new(true);
+            one_shot_request(port, req, &local_up)
+        });
+
+        let response_a = handle_a.join().expect("worker A panicked");
+        let response_b = handle_b.join().expect("worker B panicked");
+
+        let _ = child.kill();
+        let _ = child.wait();
+        if let Some(path) = artifact {
+            let _ = fs::remove_file(path);
+        }
+        let _ = fs::remove_dir_all(&dir);
+
+        let response_a =
+            response_a.unwrap_or_else(|| panic!("{}: connection A got no response", backend));
+        let response_b =
+            response_b.unwrap_or_else(|| panic!("{}: connection B got no response", backend));
+        let response_a = String::from_utf8_lossy(&response_a);
+        let response_b = String::from_utf8_lossy(&response_b);
+
+        assert!(
+            response_a.contains("400 Bad Request"),
+            "{}: A must observe HTTP 400 (oversized chunk-size), got: {}",
+            backend,
+            response_a
+        );
+        assert!(
+            !response_a.contains("200 OK") && !response_a.contains("\r\nx"),
+            "{}: A must not leak the chunk body to the wire, got: {}",
+            backend,
+            response_a
+        );
+
+        // B's echoed body is "hello"; the runtime auto-appends Content-Length
+        // for the eager path so the response ends with `...\r\n\r\nhello`.
+        assert!(
+            response_b.contains("200 OK"),
+            "{}: B must observe HTTP 200 (sibling connection unaffected by A), got: {}",
+            backend,
+            response_b
+        );
+        assert!(
+            response_b.ends_with("hello"),
+            "{}: B's echoed body must reach the wire, got: {}",
+            backend,
+            response_b
         );
     }
 }

@@ -1,4 +1,10 @@
 //! E32B-029: WebSocket control-frame and text UTF-8 validation parity.
+//!
+//! E32B-080 follow-up (concurrent isolation): a malformed WS connection A
+//! (invalid UTF-8 text frame) must not affect sibling WS connection B.
+//! Both connections share a server with request limit = 2; A must observe
+//! close-code 1007 and B must observe its frame echoed back + a normal
+//! close (1000).
 
 mod common;
 
@@ -7,6 +13,9 @@ use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 fn node_available() -> bool {
@@ -154,6 +163,28 @@ handler req writer =
 => :Unit
 
 asyncResult <= httpServe({port}, handler, 1)
+asyncResult ]=> result
+result ]=> r
+stdout(r.requests)
+"#
+    )
+}
+
+fn ws_source_two_request(port: u16) -> String {
+    format!(
+        r#">>> taida-lang/net => @(httpServe, wsUpgrade, wsSend, wsReceive, wsClose)
+
+handler req writer =
+  upgrade <= wsUpgrade(req, writer)
+  upgrade ]=> accepted
+  ws <= accepted.ws
+  msg <= wsReceive(ws)
+  msg ]=> received
+  wsSend(ws, received.data)
+  wsClose(ws)
+=> :Unit
+
+asyncResult <= httpServe({port}, handler, 2)
 asyncResult ]=> result
 result ]=> r
 stdout(r.requests)
@@ -336,5 +367,173 @@ fn e32b_029_websocket_validation_three_backend() {
         run_reject_case(backend, "pong_126", 0xA, &pong_126, 1002);
         run_reject_case(backend, "close_126", 0x8, &close_126, 1002);
         run_reject_case(backend, "invalid_text_utf8", 0x1, &[0xFF], 1007);
+    }
+}
+
+/// Locate the first text-frame (opcode 0x1) payload in a stream of unmasked
+/// server-to-client frames. Returns `None` if no text frame is found.
+///
+/// Server-to-client frames are unmasked (RFC 6455 §5.1). Each frame begins
+/// with the FIN+opcode byte and a payload-length byte (no mask key on this
+/// direction). The helper walks frames sequentially until it lands on a
+/// text frame and returns that frame's payload.
+fn find_text_payload(bytes: &[u8]) -> Option<Vec<u8>> {
+    let mut pos = 0;
+    while pos + 2 <= bytes.len() {
+        let opcode = bytes[pos] & 0x0F;
+        let len7 = bytes[pos + 1] & 0x7F;
+        let mut header_len = 2usize;
+        let payload_len = if len7 < 126 {
+            len7 as usize
+        } else if len7 == 126 {
+            if pos + 4 > bytes.len() {
+                return None;
+            }
+            header_len = 4;
+            ((bytes[pos + 2] as usize) << 8) | bytes[pos + 3] as usize
+        } else {
+            if pos + 10 > bytes.len() {
+                return None;
+            }
+            header_len = 10;
+            let mut len = 0usize;
+            for byte in &bytes[pos + 2..pos + 10] {
+                len = (len << 8) | (*byte as usize);
+            }
+            len
+        };
+        let payload_start = pos + header_len;
+        let payload_end = payload_start.saturating_add(payload_len);
+        if payload_end > bytes.len() {
+            return None;
+        }
+        if opcode == 0x1 {
+            return Some(bytes[payload_start..payload_end].to_vec());
+        }
+        pos = payload_end;
+    }
+    None
+}
+
+/// E32B-080 (WS concurrent isolation): connection A sends a malformed
+/// UTF-8 text frame and must observe close-code 1007. Sibling connection
+/// B sends a valid text frame `hello` and must observe its frame echoed
+/// back followed by a normal close (1000). Both run against the same
+/// backend process (request limit = 2) so the test demonstrates that A's
+/// malformed input did not impact B's echo path.
+#[test]
+fn e32b_080_ws_concurrent_isolation_three_backend() {
+    let mut backends = vec!["interp"];
+    if node_available() {
+        backends.push("js");
+    } else {
+        eprintln!("node unavailable; skipping JS member");
+    }
+    if cc_available() {
+        backends.push("native");
+    } else {
+        eprintln!("cc unavailable; skipping native member");
+    }
+
+    for backend in backends {
+        let port = free_loopback_port();
+        let dir = setup_net_project(&ws_source_two_request(port), &format!("conc_{}", backend));
+        let (mut child, artifact) = spawn_backend(&dir, backend, &format!("conc_{}", backend));
+
+        let server_up = Arc::new(AtomicBool::new(false));
+        let server_up_a = server_up.clone();
+        let server_up_b = server_up.clone();
+
+        // Connection A: malformed UTF-8 text frame → expect close 1007.
+        let handle_a = thread::spawn(move || -> Option<Vec<u8>> {
+            // Wait for the listener to bind. connect_ws polls internally,
+            // so we just call it directly.
+            let mut stream = match connect_ws(port) {
+                Some(s) => s,
+                None => return None,
+            };
+            server_up_a.store(true, Ordering::Release);
+            stream
+                .write_all(&masked_frame(0x1, &[0xFF]))
+                .expect("write malformed text frame");
+            Some(read_ws_bytes(&mut stream))
+        });
+
+        // Connection B: valid text frame → expect echo + close 1000.
+        let handle_b = thread::spawn(move || -> Option<Vec<u8>> {
+            // Wait for A to have at least connected so the (A, B) ordering
+            // is pinned: A runs through its abort path, then the accept
+            // loop picks up B.
+            let deadline = std::time::Instant::now() + Duration::from_secs(8);
+            while !server_up_b.load(Ordering::Acquire) {
+                if std::time::Instant::now() >= deadline {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            // Grace window for A to drive its frame through the server
+            // before B opens its socket. Without this, A and B may race
+            // for the first accept slot and the assertion shape (A=1007,
+            // B=echo+1000) becomes ambiguous.
+            std::thread::sleep(Duration::from_millis(200));
+            let mut stream = match connect_ws(port) {
+                Some(s) => s,
+                None => return None,
+            };
+            stream
+                .write_all(&masked_frame(0x1, b"hello"))
+                .expect("write valid text frame");
+            Some(read_ws_bytes(&mut stream))
+        });
+
+        let response_a = handle_a.join().expect("worker A panicked");
+        let response_b = handle_b.join().expect("worker B panicked");
+
+        let _ = child.kill();
+        let _ = child.wait();
+        if let Some(path) = artifact {
+            let _ = fs::remove_file(path);
+        }
+        let _ = fs::remove_dir_all(&dir);
+
+        let response_a = response_a
+            .unwrap_or_else(|| panic!("{}: connection A could not complete WS upgrade", backend));
+        let response_b = response_b
+            .unwrap_or_else(|| panic!("{}: connection B could not complete WS upgrade", backend));
+
+        let close_a = find_close_code(&response_a).unwrap_or_else(|| {
+            panic!(
+                "{}: connection A must observe a close frame, got: {:?}",
+                backend, response_a
+            )
+        });
+        assert_eq!(
+            close_a, 1007,
+            "{}: A must close with 1007 (invalid UTF-8 text frame), got close-code {} (raw {:?})",
+            backend, close_a, response_a
+        );
+
+        let echo = find_text_payload(&response_b).unwrap_or_else(|| {
+            panic!(
+                "{}: B must observe an echoed text frame, got: {:?}",
+                backend, response_b
+            )
+        });
+        assert_eq!(
+            echo, b"hello",
+            "{}: B's echoed payload must be exactly `hello`, got {:?}",
+            backend, echo
+        );
+        let close_b = find_close_code(&response_b).unwrap_or_else(|| {
+            panic!(
+                "{}: B must also observe a close frame, got: {:?}",
+                backend, response_b
+            )
+        });
+        assert_eq!(
+            close_b, 1000,
+            "{}: B must close with 1000 (normal closure), got close-code {} (raw {:?})",
+            backend, close_b, response_b
+        );
     }
 }
