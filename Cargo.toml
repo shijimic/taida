@@ -15,6 +15,15 @@ license = "MIT"
 [features]
 default = ["native", "lsp", "community"]
 
+# Test-only helpers that must NOT be linked into release binaries.
+# Symbols guarded by `#[cfg(any(test, feature = "test-utils"))]` only
+# exist when this feature is enabled. Default builds (including
+# `cargo build --release`) do not enable it, so the helpers compile
+# out entirely. Integration tests that need the helpers should opt
+# in via `cargo test --features test-utils`; library `#[cfg(test)]`
+# code already sees them under `cargo test`.
+test-utils = []
+
 # Native compiler backend (Cranelift + C runtime)
 # libloading is part of `native` because the addon-rs loader (RC1 Phase 2)
 # only runs on the Native backend; other backends fall through to a

@@ -380,8 +380,12 @@ pub fn download_bytes(url: &str) -> Result<Vec<u8>, String> {
 
 /// Test-only entry point that allows `file://` and `https://` URLs.
 ///
-/// Production code MUST NOT call this. The boundary lives in `download_bytes`,
-/// which rejects every non-https URL before any I/O.
+/// Production code MUST NOT call this. The symbol is linked only when
+/// `cfg(test)` (library unit tests) or `feature = "test-utils"`
+/// (integration tests opting in) holds — release binaries never see
+/// the helper at all, so a downstream depending on the `taida` crate
+/// cannot reach it.
+#[cfg(any(test, feature = "test-utils"))]
 #[doc(hidden)]
 pub fn download_bytes_for_test(url: &str) -> Result<Vec<u8>, String> {
     if let Some(path) = url.strip_prefix("file://") {
@@ -575,9 +579,68 @@ fn upgrade_cache_dir() -> Result<std::path::PathBuf, String> {
     })?;
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        let perms = std::fs::Permissions::from_mode(0o700);
-        let _ = std::fs::set_permissions(&dir, perms);
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        // The `create_dir_all` above is a no-op when the directory already
+        // exists, so an attacker who pre-created `~/.taida/cache/upgrade`
+        // with looser modes or as a symlink could bypass our hardening.
+        // Validate the existing entry: regular dir, not a symlink, owned
+        // by the effective UID, and group/world bits cleared.
+        let meta = std::fs::symlink_metadata(&dir).map_err(|e| {
+            format!(
+                "[E32K1_UPGRADE_STAGE_FAILED] failed to inspect upgrade cache dir {}: {}",
+                dir.display(),
+                e
+            )
+        })?;
+        if meta.file_type().is_symlink() {
+            return Err(format!(
+                "[E32K1_UPGRADE_STAGE_FAILED] upgrade cache dir {} is a symlink; refuse to use it",
+                dir.display()
+            ));
+        }
+        if !meta.is_dir() {
+            return Err(format!(
+                "[E32K1_UPGRADE_STAGE_FAILED] upgrade cache dir {} is not a directory",
+                dir.display()
+            ));
+        }
+        // Safe: getuid is async-signal-safe and never fails on Linux.
+        let euid = unsafe { libc::geteuid() };
+        if meta.uid() != euid {
+            return Err(format!(
+                "[E32K1_UPGRADE_STAGE_FAILED] upgrade cache dir {} is owned by uid {} but the current effective uid is {}; refuse to use it",
+                dir.display(),
+                meta.uid(),
+                euid
+            ));
+        }
+        let mode_bits = meta.mode() & 0o777;
+        if mode_bits & 0o077 != 0 {
+            // Try once to tighten the mode in place; if that fails, hard
+            // fail so we never stage downloads under a permissive dir.
+            let perms = std::fs::Permissions::from_mode(0o700);
+            std::fs::set_permissions(&dir, perms).map_err(|e| {
+                format!(
+                    "[E32K1_UPGRADE_STAGE_FAILED] upgrade cache dir {} has world/group bits {:o} and chmod 0700 failed: {}",
+                    dir.display(),
+                    mode_bits,
+                    e
+                )
+            })?;
+        } else {
+            // Already 0700 (or stricter). Keep the chmod call so a future
+            // umask change cannot drift the mode silently, but propagate
+            // any error rather than silencing it the way the previous
+            // `let _ =` pattern did.
+            let perms = std::fs::Permissions::from_mode(0o700);
+            std::fs::set_permissions(&dir, perms).map_err(|e| {
+                format!(
+                    "[E32K1_UPGRADE_STAGE_FAILED] failed to set 0700 on upgrade cache dir {}: {}",
+                    dir.display(),
+                    e
+                )
+            })?;
+        }
     }
     Ok(dir)
 }
@@ -632,6 +695,42 @@ impl Drop for TempDownloadedFile {
         let _ = std::fs::remove_file(&bundle);
         let _ = std::fs::remove_file(&self.path);
     }
+}
+
+/// Atomically create `path` and write `bytes` into it with the same
+/// `O_NOFOLLOW | O_EXCL` + mode 0600 hardening as `TempDownloadedFile`.
+/// Used by callers outside of `upgrade.rs` (notably the addon signature
+/// verifier's bundle staging) so every staging file in the upgrade
+/// pipeline is opened the same way — a pre-placed symlink at any
+/// staging path makes the call fail closed instead of clobbering its
+/// target. Removes a partial file if the write fails midway.
+#[doc(hidden)]
+pub fn write_staged_file_at(path: &std::path::Path, bytes: &[u8]) -> Result<(), String> {
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.custom_flags(libc::O_NOFOLLOW).mode(0o600);
+    }
+    let mut file = opts.open(path).map_err(|e| {
+        format!(
+            "[E32K1_UPGRADE_STAGE_FAILED] failed to create staging file {}: {}",
+            path.display(),
+            e
+        )
+    })?;
+    use std::io::Write;
+    if let Err(e) = file.write_all(bytes) {
+        drop(file);
+        let _ = std::fs::remove_file(path);
+        return Err(format!(
+            "[E32K1_UPGRADE_STAGE_FAILED] failed to write staging file {}: {}",
+            path.display(),
+            e
+        ));
+    }
+    Ok(())
 }
 
 fn upgrade_cosign_error(err: VerifyError) -> String {
@@ -846,6 +945,20 @@ mod tests {
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::sync::Mutex;
+
+    #[test]
+    fn download_bytes_for_test_err_carries_code_prefix() {
+        // Library-internal pin for the file-not-found error contract.
+        // Mirrors the integration test gated behind `feature = "test-utils"`
+        // so default `cargo test` keeps the contract checked even when
+        // the helper is invisible to integration tests.
+        let err = download_bytes_for_test("file:///nonexistent/path/that/should/not/exist")
+            .expect_err("missing file must fail");
+        assert!(
+            err.contains("[E32K1_UPGRADE_DOWNLOAD_FAILED]"),
+            "download_bytes_for_test error must carry [E32K1_UPGRADE_DOWNLOAD_FAILED]: {err}"
+        );
+    }
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 

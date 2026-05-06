@@ -212,7 +212,7 @@ pub fn fetch_bundle(src_url: &str, dest: &Path) -> Result<bool, VerifyError> {
     if let Some(path) = src_url.strip_prefix("file://") {
         match std::fs::read(path) {
             Ok(data) => {
-                std::fs::write(dest, data).map_err(|e| {
+                crate::upgrade::write_staged_file_at(dest, &data).map_err(|e| {
                     VerifyError::InvocationError(format!("cannot write bundle to {dest:?}: {e}"))
                 })?;
                 Ok(true)
@@ -256,7 +256,7 @@ fn fetch_bundle_https(src_url: &str, dest: &Path) -> Result<bool, VerifyError> {
     let bytes = resp
         .bytes()
         .map_err(|e| VerifyError::InvocationError(format!("bundle body read failed: {e}")))?;
-    std::fs::write(dest, &bytes).map_err(|e| {
+    crate::upgrade::write_staged_file_at(dest, &bytes).map_err(|e| {
         VerifyError::InvocationError(format!("cannot write bundle to {dest:?}: {e}"))
     })?;
     Ok(true)
