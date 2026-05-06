@@ -664,16 +664,38 @@ taida_val taida_net_http_encode_response(taida_val response) {
             const char *hname_s = (const char*)hname;
             const char *hvalue_s = (const char*)hvalue;
             size_t hn_len = 0, hv_len = 0;
-            if (!taida_read_cstr_len_safe(hname_s, 8192, &hn_len)) {
+            // E32B-082: read the byte length from the heap-style header so an
+            // embedded NUL byte (e.g. `name = "X\x00Y"`) is counted, instead
+            // of silently truncated by the `taida_read_cstr_len_safe` NUL
+            // scan. Without this the RFC 7230 token grammar check would only
+            // see "X" and let the malformed name onto the wire / through the
+            // header reservation table.
+            if (!taida_str_byte_len(hname_s, &hn_len)) {
                 free(buf);
                 char err_msg[128];
                 snprintf(err_msg, sizeof(err_msg), "httpEncodeResponse: headers[%d].name must be Str", (int)i);
                 return taida_net_result_fail("EncodeError", err_msg);
             }
-            if (!taida_read_cstr_len_safe(hvalue_s, 65536, &hv_len)) {
+            if (hn_len > 8192) {
+                free(buf);
+                char err_msg[160];
+                snprintf(err_msg, sizeof(err_msg),
+                    "httpEncodeResponse: headers[%d].name exceeds 8192 bytes",
+                    (int)i);
+                return taida_net_result_fail("EncodeError", err_msg);
+            }
+            if (!taida_str_byte_len(hvalue_s, &hv_len)) {
                 free(buf);
                 char err_msg[128];
                 snprintf(err_msg, sizeof(err_msg), "httpEncodeResponse: headers[%d].value must be Str", (int)i);
+                return taida_net_result_fail("EncodeError", err_msg);
+            }
+            if (hv_len > 65536) {
+                free(buf);
+                char err_msg[160];
+                snprintf(err_msg, sizeof(err_msg),
+                    "httpEncodeResponse: headers[%d].value exceeds 65536 bytes",
+                    (int)i);
                 return taida_net_result_fail("EncodeError", err_msg);
             }
 
@@ -1405,8 +1427,12 @@ static int taida_net_send_response_scatter(int client_fd, taida_val response) {
         const char *hname_s = (const char*)hname;
         const char *hvalue_s = (const char*)hvalue;
         size_t hn_len = 0, hv_len = 0;
-        if (!taida_read_cstr_len_safe(hname_s, 8192, &hn_len)) { if (head != head_stack) free(head); return -1; }
-        if (!taida_read_cstr_len_safe(hvalue_s, 65536, &hv_len)) { if (head != head_stack) free(head); return -1; }
+        // E32B-082: heap-header byte length so embedded NUL bytes are caught
+        // by the RFC 7230 grammar check below instead of silently truncated.
+        if (!taida_str_byte_len(hname_s, &hn_len)) { if (head != head_stack) free(head); return -1; }
+        if (hn_len > 8192) { if (head != head_stack) free(head); return -1; }
+        if (!taida_str_byte_len(hvalue_s, &hv_len)) { if (head != head_stack) free(head); return -1; }
+        if (hv_len > 65536) { if (head != head_stack) free(head); return -1; }
 
         // RFC 7230 token + field-value grammar (parity with the eager
         // encoder + streaming validator). Without this scatter path the

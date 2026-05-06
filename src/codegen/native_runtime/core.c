@@ -93,6 +93,15 @@ typedef intptr_t  taida_fn_ptr;  // 関数ポインタ
 #define TAIDA_LIST_MAGIC  0x544149444C535400LL // "TAIDLST\0"
 #define TAIDA_PACK_MAGIC  0x5441494450414B00LL // "TAIDPAK\0"
 #define TAIDA_STR_MAGIC   0x5441494453545200LL // "TAIDSTR\0"
+// E32B-082: Static-string magic used by the cranelift codegen for string
+// literals living in `.rodata`. Layout matches the runtime-allocated header
+// (`[magic, byte_len, bytes..., \0]` with sizeof(taida_val)*2 bytes of
+// header) so `taida_str_byte_len` can short-circuit on either magic, but
+// retain/release (which write `hdr[0]` / `hdr[1]` and may free the block)
+// only match `TAIDA_STR_MAGIC` so the static path is naturally a no-op.
+// One-bit difference from `TAIDA_STR_MAGIC` (0x52 → 0x53 in the magic
+// region) keeps the family ASCII-readable as "TAIDSTS\0".
+#define TAIDA_STR_STATIC_MAGIC 0x5441494453545300LL // "TAIDSTS\0"
 #define TAIDA_HMAP_MAGIC  0x54414944484D4100LL // "TAIDHMA\0"
 #define TAIDA_SET_MAGIC   0x5441494453455400LL // "TAIDSET\0"
 #define TAIDA_ASYNC_MAGIC 0x5441494441535900LL // "TAIDASY\0"
@@ -708,6 +717,7 @@ static const char *taida_os_error_kind(int err_code, const char *err_msg);
 static taida_val taida_make_io_error(int err_code, const char *err_msg);
 static int taida_ptr_is_readable(taida_val ptr, size_t bytes);
 static int taida_read_cstr_len_safe(const char *s, size_t max_len, size_t *out_len);
+static int taida_str_byte_len(const char *s, size_t *out_len);
 static taida_val taida_value_to_display_string(taida_val val);
 static taida_val taida_value_to_debug_string(taida_val val);
 static taida_val taida_throw_to_display_string(taida_val throw_val);
@@ -3578,7 +3588,13 @@ static taida_val taida_bytes_get_lax(taida_val bytes_ptr, taida_val index) {
 taida_val taida_str_concat(const char* a, const char* b) {
     if (!a) a = "";
     if (!b) b = "";
-    size_t la = strlen(a), lb = strlen(b);
+    // E32B-082: prefer the heap-header byte length so embedded NUL bytes
+    // in either side of the concat are preserved (parity with interp/JS
+    // where `("X" + "X\x00Y").length() == 4`). Falls back to strlen for
+    // raw C strings that have no header (FFI / inline asm callsites).
+    size_t la = 0, lb = 0;
+    if (!taida_str_byte_len(a, &la)) la = strlen(a);
+    if (!taida_str_byte_len(b, &lb)) lb = strlen(b);
     // M-10: Overflow guard on la + lb before passing to taida_str_alloc.
     size_t total_len = taida_safe_add(la, lb, "str_concat length");
     char *buf = taida_str_alloc(total_len);
@@ -3589,6 +3605,16 @@ taida_val taida_str_concat(const char* a, const char* b) {
 
 taida_val taida_str_length(const char* s) {
     if (!s) return 0;
+    // E32B-082: prefer the heap-header byte length so embedded NUL bytes are
+    // counted (parity with interp/JS where `"X\x00Y".length() == 3`). Static
+    // strings emitted by the cranelift codegen now carry the same hidden
+    // header, so this short-circuits before strlen() truncates at the first
+    // NUL. The fall-through to strlen is preserved for raw C strings handed
+    // in from FFI / inline assembly callsites, where there is no header.
+    size_t out_len = 0;
+    if (taida_str_byte_len(s, &out_len)) {
+        return (taida_val)out_len;
+    }
     return (taida_val)strlen(s);
 }
 
@@ -5699,16 +5725,19 @@ static int taida_str_byte_len(const char *s, size_t *out_len) {
     if (!s) return 0;
     uintptr_t ptr = (uintptr_t)s;
     if (ptr < 4096) return 0;
-    // Check if this is a heap string with hidden header
+    // Check if this is a heap string (TAIDA_STR_MAGIC) or a cranelift-emitted
+    // static-string literal (TAIDA_STR_STATIC_MAGIC, E32B-082) with a
+    // hidden length header at ptr-16.
     taida_val *hdr = ((taida_val*)s) - 2;
     if (taida_ptr_is_readable((taida_val)hdr, sizeof(taida_val) * 2)) {
         taida_val tag = hdr[0];
-        if ((tag & TAIDA_MAGIC_MASK) == TAIDA_STR_MAGIC) {
+        taida_val masked = tag & TAIDA_MAGIC_MASK;
+        if (masked == TAIDA_STR_MAGIC || masked == TAIDA_STR_STATIC_MAGIC) {
             if (out_len) *out_len = (size_t)hdr[1];
             return 1;
         }
     }
-    // Static string — fall back to NUL scan
+    // No header — fall back to NUL scan (raw C strings handed in via FFI).
     return taida_read_cstr_len_safe(s, 16 * 1024 * 1024, out_len);
 }
 
@@ -6520,8 +6549,12 @@ taida_val taida_polymorphic_length(taida_val ptr) {
     if (TAIDA_IS_BYTES_CONTIG(ptr)) {
         return ((taida_val*)ptr)[1];
     }
-    // Treat as string
+    // Treat as string. E32B-082: prefer the heap-header byte length so
+    // embedded NUL bytes are counted (e.g. `"X\x00Y".length() == 3`),
+    // matching interpreter / JS parity. Falls back to the NUL-bounded scan
+    // for raw C-string callers (FFI / inline asm) that have no header.
     size_t sl = 0;
+    if (taida_str_byte_len((const char*)ptr, &sl)) return (taida_val)sl;
     if (taida_read_cstr_len_safe((const char*)ptr, 65536, &sl)) return (taida_val)sl;
     return 0;
 }

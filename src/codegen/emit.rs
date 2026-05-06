@@ -2284,8 +2284,15 @@ impl Emitter {
         }
 
         // 文字列定数をデータセクションに書き込み
+        //
+        // E32B-082: 8-byte alignment is required because
+        // `taida_ptr_is_readable` rejects pointers with `ptr & 0x7 != 0`. The
+        // user-visible string pointer is `data_start + 16`, so as long as the
+        // data section base is 8-byte aligned, the post-header pointer also
+        // satisfies the alignment guard.
         for (data_id, bytes) in &self.string_constants {
             let mut data_desc = cranelift_module::DataDescription::new();
+            data_desc.set_align(8);
             data_desc.define(bytes.clone().into_boxed_slice());
             self.module
                 .define_data(*data_id, &data_desc)
@@ -2316,7 +2323,36 @@ impl Emitter {
         for inst in insts {
             match inst {
                 IrInst::ConstStr(dst, string) => {
-                    let mut bytes = string.as_bytes().to_vec();
+                    // E32B-082: Embed a hidden heap-style header (matching
+                    // `taida_str_alloc` layout) so the runtime's
+                    // `taida_str_byte_len` short-circuit returns the
+                    // NUL-aware byte length for static string literals.
+                    //
+                    // Layout (16-byte header + bytes + trailing NUL):
+                    //
+                    //   [magic]    (8 bytes) hdr[0] — TAIDA_STR_STATIC_MAGIC
+                    //   [byte_len] (8 bytes) hdr[1]
+                    //   [bytes...]           len bytes
+                    //   [\0]                 1 byte (so legacy NUL-scan
+                    //                        callers still see a terminator
+                    //                        when the string has no embedded
+                    //                        NUL).
+                    //
+                    // Critical: the magic intentionally differs from
+                    // `TAIDA_STR_MAGIC` (the runtime-allocated heap-string
+                    // tag). Retain/release inspect `hdr[0] & TAIDA_MAGIC_MASK`
+                    // and only match `TAIDA_STR_MAGIC`, so static literals
+                    // pass through as a no-op (no rc decrement, no free()
+                    // on read-only memory). `taida_str_byte_len` accepts
+                    // either magic, so length lookups still work.
+                    const TAIDA_STR_STATIC_MAGIC: u64 = 0x5441_4944_5354_5300;
+                    let header_size_bytes = (self.abi.value_ty().bytes() * 2) as usize;
+                    let byte_len = string.len() as u64;
+
+                    let mut bytes = Vec::with_capacity(header_size_bytes + string.len() + 1);
+                    bytes.extend_from_slice(&TAIDA_STR_STATIC_MAGIC.to_ne_bytes());
+                    bytes.extend_from_slice(&byte_len.to_ne_bytes());
+                    bytes.extend_from_slice(string.as_bytes());
                     bytes.push(0);
 
                     let data_id = self
@@ -2525,8 +2561,17 @@ impl Emitter {
                 // W-0 note: ConstStr の結果は意味的にはヒープ参照（Ptr）だが、
                 // 案 A（統一値表現）により boxed value_ty として保持する。
                 // Wasm32 では runtime 境界呼び出し時に value_ty → ptr_ty の truncate が入る。
+                //
+                // E32B-082: the data section now begins with a 16-byte hidden
+                // heap header (`[magic|rc, byte_len]`) so the runtime's
+                // `taida_str_byte_len` short-circuit returns the NUL-aware
+                // length. The user-visible string pointer must therefore be
+                // `data_start + sizeof(taida_val) * 2`, matching the offset
+                // produced by `taida_str_alloc`.
                 let global = ectx.str_globals[dst];
-                let ptr = builder.ins().global_value(ectx.value_ty, global);
+                let raw_ptr = builder.ins().global_value(ectx.value_ty, global);
+                let header_size = (ectx.value_ty.bytes() * 2) as i64;
+                let ptr = builder.ins().iadd_imm(raw_ptr, header_size);
                 ectx.val_map.insert(*dst, ptr);
             }
             IrInst::ConstBool(dst, value) => {

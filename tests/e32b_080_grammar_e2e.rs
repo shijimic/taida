@@ -285,48 +285,7 @@ fn e32b_080_grammar_seven_cases_three_backend() {
                 continue;
             };
 
-            // E32B-082 parity gap: the Native backend emits Taida string
-            // literals into a cranelift-managed `.rodata` section as
-            // `[bytes..., 0]` with NO heap-style length header. A literal
-            // like `"X\x00Y"` therefore round-trips through `const char*`
-            // C-string accessors as the truncated `"X"`, and the validator
-            // sees a 1-byte name that satisfies token grammar. That bypass
-            // never reaches the wire (the bytes after NUL are dropped at
-            // emit time, not smuggled), so the security-critical invariant
-            // — no NUL byte appears in the wire response — still holds.
-            //
-            // The strict 3-backend parity (interp/JS/Native all reject) is
-            // tracked separately as E32B-082; here we assert each backend's
-            // observed shape and pin the no-leak invariant.
-            let nul_in_static_str_truncates = backend == "native" && *path == "/case2";
-            if nul_in_static_str_truncates {
-                let lossy = String::from_utf8_lossy(&bytes);
-                let prefix: String = lossy.chars().take(120).collect();
-                if !bytes.starts_with(b"HTTP/1.1 200") {
-                    failures.push(format!(
-                        "{} [{}]: native NUL-in-static-string parity gap (E32B-082) expected HTTP/1.1 200 with truncated name, got: {}",
-                        path, label, prefix
-                    ));
-                    continue;
-                }
-                if bytes.contains(&0u8) {
-                    failures.push(format!(
-                        "{} [{}]: NUL byte must not appear on wire (E32B-082), got: {:?}",
-                        path, label, lossy
-                    ));
-                    continue;
-                }
-                if memmem(&bytes, b"X\x00Y") || memmem(&bytes, b"\x00Y") {
-                    failures.push(format!(
-                        "{} [{}]: bytes after the NUL must not leak (E32B-082), got: {:?}",
-                        path, label, lossy
-                    ));
-                    continue;
-                }
-                continue;
-            }
-
-            // Default: status line must be 500 — the runtime validator
+            // Status line must be 500 — the runtime validator
             // rejected the handler-supplied bad header.
             let starts_500 = bytes.starts_with(b"HTTP/1.1 500");
             if !starts_500 {
