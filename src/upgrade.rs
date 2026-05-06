@@ -943,7 +943,6 @@ mod tests {
     use super::*;
     use std::fs;
     use std::path::{Path, PathBuf};
-    use std::sync::Mutex;
 
     #[test]
     fn download_bytes_for_test_err_carries_code_prefix() {
@@ -1042,15 +1041,20 @@ mod tests {
         );
     }
 
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
-
     fn with_env_guard<F: FnOnce()>(f: F) {
-        let _guard = match ENV_LOCK.lock() {
+        // Serialise against every other env-touching test in this crate.
+        // The local Mutex used to live here; sharing the crate-wide
+        // `env_test_lock` (also held by auth/token.rs, pkg/provider.rs,
+        // addon/prebuild_fetcher.rs) prevents `cargo test`'s thread
+        // pool from racing HOME / PATH / TAIDA_* across modules.
+        let _guard = match crate::util::env_test_lock().lock() {
             Ok(g) => g,
             Err(p) => p.into_inner(),
         };
         let prev_path = std::env::var("PATH").ok();
         let prev_api = std::env::var("TAIDA_GITHUB_API_URL").ok();
+        let prev_home = std::env::var("HOME").ok();
+        let prev_user_profile = std::env::var("USERPROFILE").ok();
         f();
         unsafe {
             match prev_path {
@@ -1060,6 +1064,14 @@ mod tests {
             match prev_api {
                 Some(url) => std::env::set_var("TAIDA_GITHUB_API_URL", url),
                 None => std::env::remove_var("TAIDA_GITHUB_API_URL"),
+            }
+            match prev_home {
+                Some(h) => std::env::set_var("HOME", h),
+                None => std::env::remove_var("HOME"),
+            }
+            match prev_user_profile {
+                Some(u) => std::env::set_var("USERPROFILE", u),
+                None => std::env::remove_var("USERPROFILE"),
             }
         }
     }
