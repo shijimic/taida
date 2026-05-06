@@ -413,9 +413,7 @@ pub fn verify_artifact_with_identity(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Mutex, MutexGuard};
-
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
+    use std::sync::MutexGuard;
 
     #[test]
     fn official_url_detection() {
@@ -502,7 +500,11 @@ mod tests {
 
     impl EnvGuard {
         fn set(key: &'static str, value: &str) -> Self {
-            let lock = match ENV_LOCK.lock() {
+            // Use the crate-wide env_test_lock so this serialises
+            // against pkg::store::tests, upgrade::tests, auth::token::tests,
+            // pkg::github_release::tests, etc. — every other suite that
+            // touches process env vars during cargo test.
+            let lock = match crate::util::env_test_lock().lock() {
                 Ok(g) => g,
                 Err(p) => p.into_inner(),
             };
@@ -520,7 +522,7 @@ mod tests {
         }
 
         fn unset(key: &'static str) -> Self {
-            let lock = match ENV_LOCK.lock() {
+            let lock = match crate::util::env_test_lock().lock() {
                 Ok(g) => g,
                 Err(p) => p.into_inner(),
             };
