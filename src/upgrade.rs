@@ -699,13 +699,12 @@ impl Drop for TempDownloadedFile {
 
 /// Atomically create `path` and write `bytes` into it with the same
 /// `O_NOFOLLOW | O_EXCL` + mode 0600 hardening as `TempDownloadedFile`.
-/// Used by callers outside of `upgrade.rs` (notably the addon signature
-/// verifier's bundle staging) so every staging file in the upgrade
-/// pipeline is opened the same way — a pre-placed symlink at any
-/// staging path makes the call fail closed instead of clobbering its
-/// target. Removes a partial file if the write fails midway.
-#[doc(hidden)]
-pub fn write_staged_file_at(path: &std::path::Path, bytes: &[u8]) -> Result<(), String> {
+/// Crate-internal: only the addon signature verifier's bundle staging
+/// path consumes this — every staging file in the upgrade pipeline is
+/// opened the same way, so a pre-placed symlink at any staging path
+/// makes the call fail closed instead of clobbering its target.
+/// Removes a partial file if the write fails midway.
+pub(crate) fn write_staged_file_at(path: &std::path::Path, bytes: &[u8]) -> Result<(), String> {
     let mut opts = std::fs::OpenOptions::new();
     opts.write(true).create_new(true);
     #[cfg(unix)]
@@ -957,6 +956,89 @@ mod tests {
         assert!(
             err.contains("[E32K1_UPGRADE_DOWNLOAD_FAILED]"),
             "download_bytes_for_test error must carry [E32K1_UPGRADE_DOWNLOAD_FAILED]: {err}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_staged_file_at_rejects_pre_placed_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir =
+            std::env::temp_dir().join(format!("write_staged_dir_{}_{}", std::process::id(), nanos));
+        fs::create_dir_all(&dir).unwrap();
+
+        let outside = std::env::temp_dir().join(format!(
+            "write_staged_victim_{}_{}",
+            std::process::id(),
+            nanos
+        ));
+        fs::write(&outside, b"victim_original").unwrap();
+
+        let target = dir.join("bundle.cosign.bundle");
+        symlink(&outside, &target).unwrap();
+
+        let err = write_staged_file_at(&target, b"attacker_payload")
+            .expect_err("write_staged_file_at must reject pre-placed symlinks");
+        assert!(
+            err.contains("[E32K1_UPGRADE_STAGE_FAILED]"),
+            "error must be tagged: {err}"
+        );
+
+        let after = fs::read_to_string(&outside).expect("victim must still exist");
+        assert_eq!(
+            after, "victim_original",
+            "victim file must not be overwritten through symlinked staging"
+        );
+
+        let _ = fs::remove_file(&target);
+        let _ = fs::remove_file(&outside);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn temp_downloaded_file_tightens_loose_cache_dir_mode() {
+        use std::os::unix::fs::PermissionsExt;
+
+        // Pre-create the cache dir under a redirected HOME with 0o755 so
+        // that upgrade_cache_dir() must reseat it to 0o700 before any
+        // staging file is opened. Drives the real chmod path through
+        // TempDownloadedFile::new instead of source-pinning the helper.
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let tmp_home = std::env::temp_dir().join(format!(
+            "cache_dir_mode_home_{}_{}",
+            std::process::id(),
+            nanos
+        ));
+        fs::create_dir_all(&tmp_home).unwrap();
+        let cache_dir = tmp_home.join(".taida").join("cache").join("upgrade");
+        fs::create_dir_all(&cache_dir).unwrap();
+        fs::set_permissions(&cache_dir, fs::Permissions::from_mode(0o755)).unwrap();
+
+        with_env_guard(|| {
+            unsafe {
+                std::env::set_var("HOME", &tmp_home);
+            }
+            let staged = TempDownloadedFile::new("probe", b"payload")
+                .expect("staging under tightened cache dir must succeed");
+            // Drop staged so the file is removed by Drop impl.
+            drop(staged);
+        });
+
+        let mode = fs::metadata(&cache_dir).unwrap().permissions().mode() & 0o777;
+        let _ = fs::remove_dir_all(&tmp_home);
+
+        assert_eq!(
+            mode, 0o700,
+            "upgrade_cache_dir must tighten a 0755 cache dir to 0700"
         );
     }
 

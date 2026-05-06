@@ -138,11 +138,23 @@ Before staging, the upgrader validates the cache directory itself:
 the entry must be a real directory (not a symlink), owned by the
 current effective UID, and the group/world mode bits must be clear.
 A directory pre-created with looser bits is tightened to `0700` and
-the `chmod` error path is propagated rather than silenced. When the
-`taida upgrade` invoker is `root` via `sudo`, the operator should not
-override `HOME` to a writable shared location — the cache directory
-discovery follows `HOME` / `USERPROFILE` and assumes the directory
-sits under that user's account.
+the `chmod` error path is propagated rather than silenced.
+
+**Trust model on the `HOME` ancestor chain.** The validation above
+only inspects the leaf `~/.taida/cache/upgrade` directory by name.
+The intermediate components (`~`, `~/.taida`, `~/.taida/cache`) are
+assumed to be under the same user's control — the upgrader does not
+walk them with `dirfd` + `O_DIRECTORY | O_NOFOLLOW`, so an attacker
+who can replace, say, `~/.taida` with a symlink between the leaf
+check and the next staging open could redirect future staging files.
+This is acceptable when `taida upgrade` runs as a normal user (the
+attacker would need write access to `~`, at which point any
+guarantee is moot), but operators running upgrade under `sudo` must
+not override `HOME` to a writable shared location: the cache
+directory discovery follows `HOME` / `USERPROFILE` and trusts that
+ancestor chain. A future hardening pass (tracked separately) will
+move the validator to `openat`/`fchmod` over a `dirfd` so the
+ancestor chain stops being part of the trust boundary.
 
 Test-only helpers in the upgrade module (e.g. a `file://`-friendly
 download path used by fixtures) are linked only when the `test-utils`

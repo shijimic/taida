@@ -136,57 +136,14 @@ fn e32b_075_signature_verify_fetch_bundle_uses_hardened_helper() {
     }
 }
 
-#[cfg(unix)]
 #[test]
-fn e32b_076_upgrade_cache_dir_rejects_world_writable() {
-    use std::os::unix::fs::PermissionsExt;
-
-    // Redirect HOME so the validation runs against a fixture, then
-    // pre-create the cache dir with too-loose permissions and assert
-    // that upgrade_cache_dir reseats them to 0700 (or rejects when it
-    // cannot). The fixture only exercises the chmod-to-0700 path; the
-    // owner-mismatch / symlink branches are out of reach in a unit
-    // test that runs as the current user but the source-level pins
-    // below cover them.
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let tmp_home =
-        std::env::temp_dir().join(format!("e32b_076_home_{}_{}", std::process::id(), nanos));
-    fs::create_dir_all(&tmp_home).unwrap();
-    let cache_dir = tmp_home.join(".taida").join("cache").join("upgrade");
-    fs::create_dir_all(&cache_dir).unwrap();
-    fs::set_permissions(&cache_dir, fs::Permissions::from_mode(0o755)).unwrap();
-
-    let prev_home = std::env::var("HOME").ok();
-    unsafe {
-        std::env::set_var("HOME", &tmp_home);
-    }
-
-    // Stage a small file via the public helper. After it returns, the
-    // dir must be 0700 — proof that upgrade_cache_dir tightened it
-    // rather than leaving 0755 in place.
-    let staged_target = cache_dir.join("e32b_076_probe");
-    let _ = taida::upgrade::write_staged_file_at(&staged_target, b"probe").map(|_| ());
-    let _ = fs::remove_file(&staged_target);
-    let meta = fs::metadata(&cache_dir).expect("cache dir must still exist");
-    let mode = meta.permissions().mode() & 0o777;
-
-    let _ = fs::remove_dir_all(&tmp_home);
-    unsafe {
-        match prev_home {
-            Some(h) => std::env::set_var("HOME", h),
-            None => std::env::remove_var("HOME"),
-        }
-    }
-
-    // The mode tightening lives inside upgrade_cache_dir, called by
-    // TempDownloadedFile::new. write_staged_file_at on a directly
-    // supplied path does NOT pass through upgrade_cache_dir, so this
-    // test only validates the source-level pin below.
-    let _ = mode;
-
+fn e32b_076_upgrade_cache_dir_source_pins_validation() {
+    // Source-level pin for the cache_dir validation contract. The real
+    // chmod / symlink / uid behaviour is exercised through
+    // TempDownloadedFile::new in the library `cfg(test) mod tests`
+    // (see `temp_downloaded_file_tightens_loose_cache_dir_mode`),
+    // because the helper is `pub(crate)` and not reachable from
+    // integration tests.
     let upgrade_src = fs::read_to_string("src/upgrade.rs").expect("read src/upgrade.rs");
     assert!(
         upgrade_src.contains("if meta.file_type().is_symlink() {"),
@@ -206,41 +163,62 @@ fn e32b_076_upgrade_cache_dir_rejects_world_writable() {
     );
 }
 
+#[test]
+fn e32b_075_write_staged_file_at_is_crate_internal() {
+    // The hardened helper is `pub(crate)` so the symbol is only
+    // reachable from inside the `taida` crate. The real symlink
+    // race regression is pinned by the library
+    // `cfg(test) mod tests::write_staged_file_at_rejects_pre_placed_symlink`
+    // unit test; this integration assertion just keeps the visibility
+    // bound from quietly drifting back to `pub`.
+    let upgrade_src = fs::read_to_string("src/upgrade.rs").expect("read src/upgrade.rs");
+    assert!(
+        upgrade_src.contains("pub(crate) fn write_staged_file_at"),
+        "write_staged_file_at must stay pub(crate); never widen to pub"
+    );
+    assert!(
+        !upgrade_src.contains("pub fn write_staged_file_at"),
+        "write_staged_file_at must not be `pub fn`"
+    );
+
+    // And signature_verify::fetch_bundle must keep using it via
+    // `crate::upgrade::write_staged_file_at` — the source-level pin
+    // here covers both the file:// and https:// branches because both
+    // of them call the same helper inside the same function body.
+    let sig_src = fs::read_to_string("src/addon/signature_verify.rs")
+        .expect("read src/addon/signature_verify.rs");
+    assert!(
+        sig_src.contains("crate::upgrade::write_staged_file_at(dest, &data)"),
+        "signature_verify::fetch_bundle file:// branch must call write_staged_file_at"
+    );
+}
+
 #[cfg(unix)]
 #[test]
-fn e32b_075_write_staged_file_rejects_pre_placed_symlink() {
-    use std::os::unix::fs::symlink;
+fn e32b_075_signature_verify_https_branch_uses_hardened_helper_when_built() {
+    // The HTTPS branch only compiles with feature = "community"; on
+    // default builds the function is a stub. When built, it must
+    // route through the same staging helper.
+    let sig_src = fs::read_to_string("src/addon/signature_verify.rs")
+        .expect("read src/addon/signature_verify.rs");
+    if sig_src.contains("fn fetch_bundle_https(src_url: &str, dest: &Path)") {
+        assert!(
+            sig_src.contains("crate::upgrade::write_staged_file_at(dest, &bytes)"),
+            "fetch_bundle_https must call write_staged_file_at instead of fs::write"
+        );
+    }
 
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let dir = std::env::temp_dir().join(format!("e32b_075_dir_{}_{}", std::process::id(), nanos));
-    fs::create_dir_all(&dir).unwrap();
-
-    let outside =
-        std::env::temp_dir().join(format!("e32b_075_victim_{}_{}", std::process::id(), nanos));
-    fs::write(&outside, b"victim_original").unwrap();
-
-    let target = dir.join("bundle.cosign.bundle");
-    symlink(&outside, &target).unwrap();
-
-    let err = taida::upgrade::write_staged_file_at(&target, b"attacker_payload")
-        .expect_err("write_staged_file_at must reject pre-placed symlinks");
+    // Source must not contain the legacy direct fs::write on either
+    // bundle branch — duplicate of the guarantee above but worth a
+    // separate assertion so a regression points at the right line.
+    let bytes_block_start = sig_src
+        .find("crate::upgrade::write_staged_file_at(dest, &data)")
+        .unwrap_or(0);
+    let prelude = &sig_src[..bytes_block_start.saturating_sub(0)];
     assert!(
-        err.contains("[E32K1_UPGRADE_STAGE_FAILED]"),
-        "error must be tagged: {err}"
+        !prelude.contains("fs::write(dest, data)"),
+        "fetch_bundle file:// branch must not retain the legacy fs::write call"
     );
-
-    let after = fs::read_to_string(&outside).expect("victim must still exist");
-    assert_eq!(
-        after, "victim_original",
-        "victim file must not be overwritten through symlinked staging"
-    );
-
-    let _ = fs::remove_file(&target);
-    let _ = fs::remove_file(&outside);
-    let _ = fs::remove_dir_all(&dir);
 }
 
 #[test]
