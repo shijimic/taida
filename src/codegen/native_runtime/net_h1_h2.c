@@ -515,6 +515,11 @@ taida_val taida_net_http_parse_request_head(taida_val input) {
     return taida_net_result_ok(parsed);
 }
 
+// Forward declarations for header byte-grammar helpers; the definitions
+// live alongside the streaming validator below.
+static int taida_net3_is_rfc7230_token_byte(unsigned char b);
+static int taida_net3_is_rfc7230_field_value_byte(unsigned char b);
+
 // ── httpEncodeResponse(response) ────────────────────────────────
 // Encode response @(status, headers, body) into HTTP/1.1 wire bytes.
 // Returns Result[@(bytes: Bytes), _]
@@ -671,20 +676,42 @@ taida_val taida_net_http_encode_response(taida_val response) {
                 return taida_net_result_fail("EncodeError", err_msg);
             }
 
-            // NB-13: Check for CRLF injection with index + name/value distinction (parity with Interpreter/JS)
+            // RFC 7230 token + field-value grammar (parity with streaming
+            // validator). Catches NUL, control bytes, ':' in name, space/tab
+            // in name, underscore (CL.CL bypass), and CRLF in one pass.
+            if (hn_len == 0) {
+                free(buf);
+                char err_msg[128];
+                snprintf(err_msg, sizeof(err_msg), "httpEncodeResponse: headers[%d].name is empty", (int)i);
+                return taida_net_result_fail("EncodeError", err_msg);
+            }
             for (size_t k = 0; k < hn_len; k++) {
-                if (hname_s[k] == '\r' || hname_s[k] == '\n') {
+                unsigned char b = (unsigned char)hname_s[k];
+                if (!taida_net3_is_rfc7230_token_byte(b)) {
                     free(buf);
-                    char err_msg[128];
-                    snprintf(err_msg, sizeof(err_msg), "httpEncodeResponse: headers[%d].name contains CR/LF", (int)i);
+                    char err_msg[160];
+                    snprintf(err_msg, sizeof(err_msg),
+                        "httpEncodeResponse: headers[%d].name contains a byte outside RFC 7230 token grammar (0x%02X)",
+                        (int)i, (unsigned)b);
+                    return taida_net_result_fail("EncodeError", err_msg);
+                }
+                if (b == '_') {
+                    free(buf);
+                    char err_msg[160];
+                    snprintf(err_msg, sizeof(err_msg),
+                        "httpEncodeResponse: headers[%d].name contains '_' which reverse proxies normalise inconsistently",
+                        (int)i);
                     return taida_net_result_fail("EncodeError", err_msg);
                 }
             }
             for (size_t k = 0; k < hv_len; k++) {
-                if (hvalue_s[k] == '\r' || hvalue_s[k] == '\n') {
+                unsigned char b = (unsigned char)hvalue_s[k];
+                if (!taida_net3_is_rfc7230_field_value_byte(b)) {
                     free(buf);
-                    char err_msg[128];
-                    snprintf(err_msg, sizeof(err_msg), "httpEncodeResponse: headers[%d].value contains CR/LF", (int)i);
+                    char err_msg[160];
+                    snprintf(err_msg, sizeof(err_msg),
+                        "httpEncodeResponse: headers[%d].value contains a byte outside RFC 7230 field-value grammar (0x%02X)",
+                        (int)i, (unsigned)b);
                     return taida_net_result_fail("EncodeError", err_msg);
                 }
             }
@@ -1012,10 +1039,13 @@ static int64_t taida_net_chunked_body_complete(
         if (hs >= he) return -2; // empty chunk-size = malformed
 
         // Parse hex
-        // NB2-5: Reject chunk-size with more than 15 hex digits (max safe: 0xFFFFFFFFFFFFFFF)
-        // to prevent size_t overflow that silently wraps to 0 and accepts malformed input.
+        // 15 hex digit cap rejects 64-bit overflow on LP64 hosts. The
+        // arithmetic accumulator below uses uint64_t with explicit overflow
+        // detection so 32-bit (LP32 / ILP32) `size_t` cannot silently wrap
+        // and turn an oversized chunk-size into the terminator chunk —
+        // request smuggling vector documented for LP32 builds.
         if (he - hs > 15) return -2; // oversized chunk-size = malformed
-        size_t chunk_size = 0;
+        uint64_t chunk_size_u64 = 0;
         for (size_t i = hs; i < he; i++) {
             unsigned char c = buf[body_offset + rp + i];
             int digit = -1;
@@ -1023,8 +1053,14 @@ static int64_t taida_net_chunked_body_complete(
             else if (c >= 'a' && c <= 'f') digit = 10 + c - 'a';
             else if (c >= 'A' && c <= 'F') digit = 10 + c - 'A';
             if (digit < 0) return -2; // invalid hex
-            chunk_size = chunk_size * 16 + (size_t)digit;
+            uint64_t mul = 0;
+            uint64_t add = 0;
+            if (__builtin_mul_overflow(chunk_size_u64, (uint64_t)16, &mul)) return -2;
+            if (__builtin_add_overflow(mul, (uint64_t)digit, &add)) return -2;
+            chunk_size_u64 = add;
         }
+        if (chunk_size_u64 > (uint64_t)SIZE_MAX) return -2;
+        size_t chunk_size = (size_t)chunk_size_u64;
 
         rp += (size_t)crlf + 2; // skip "chunk-size\r\n"
 
@@ -1072,9 +1108,10 @@ static int taida_net_chunked_in_place_compact(
         while (he > hs && (buf[body_offset + rp + he - 1] == ' ' || buf[body_offset + rp + he - 1] == '\t')) he--;
         if (hs >= he) return -1;
 
-        // NB2-5: Reject oversized chunk-size to prevent overflow (parity with body_complete)
+        // 15 hex digit cap + uint64_t overflow check (parity with body_complete).
+        // LP32 size_t would silently wrap above 8 hex digits without this guard.
         if (he - hs > 15) return -1;
-        size_t chunk_size = 0;
+        uint64_t chunk_size_u64 = 0;
         for (size_t i = hs; i < he; i++) {
             unsigned char c = buf[body_offset + rp + i];
             int digit = -1;
@@ -1082,8 +1119,14 @@ static int taida_net_chunked_in_place_compact(
             else if (c >= 'a' && c <= 'f') digit = 10 + c - 'a';
             else if (c >= 'A' && c <= 'F') digit = 10 + c - 'A';
             if (digit < 0) return -1;
-            chunk_size = chunk_size * 16 + (size_t)digit;
+            uint64_t mul = 0;
+            uint64_t add = 0;
+            if (__builtin_mul_overflow(chunk_size_u64, (uint64_t)16, &mul)) return -1;
+            if (__builtin_add_overflow(mul, (uint64_t)digit, &add)) return -1;
+            chunk_size_u64 = add;
         }
+        if (chunk_size_u64 > (uint64_t)SIZE_MAX) return -1;
+        size_t chunk_size = (size_t)chunk_size_u64;
 
         rp += (size_t)crlf + 2; // skip "size\r\n"
 
@@ -1523,6 +1566,11 @@ typedef struct {
     uint64_t ws_token;
     // v5: Received close code from peer's close frame (0 = not received).
     int64_t ws_close_code;
+    // Set by taida_net4_abort_connection() when the handler hits an
+    // unrecoverable protocol error. The accept loop reads this after the
+    // handler returns and closes the socket without re-entering keep-alive.
+    // This replaces process-wide exit(1) on bad input from a single client.
+    int aborted;
 } Net4BodyState;
 
 // Global monotonic counter for unique request tokens (NB4-7 parity).
@@ -1543,6 +1591,29 @@ static __thread Net3WriterState *tl_net3_writer = NULL;
 static __thread int tl_net3_client_fd = -1;
 // v4: per-request body streaming state for 2-arg handlers.
 static __thread Net4BodyState *tl_net4_body = NULL;
+
+// Mark the active connection as aborted by an unrecoverable protocol error.
+// The accept loop uses the `aborted` flag on Net4BodyState to close the
+// socket immediately and accept the next client, instead of process-wide
+// `exit(1)` which would tear down every concurrent connection on this
+// httpServe pool. Lax-typed read APIs return their empty sentinels after
+// the abort flag is set, so the handler unwinds naturally without further
+// I/O on the dead socket.
+static void taida_net4_abort_connection(const char *reason) {
+    int fd = tl_net3_client_fd;
+    if (fd >= 0) {
+        shutdown(fd, SHUT_RDWR);
+    }
+    Net4BodyState *bs = tl_net4_body;
+    if (bs) {
+        bs->aborted = 1;
+        bs->fully_read = 1;
+        bs->ws_closed = 1;
+    }
+    if (reason) {
+        fprintf(stderr, "[net]: connection aborted — %s\n", reason);
+    }
+}
 
 // Forward declaration: writer token validation (defined after create_writer_token).
 static void taida_net3_validate_writer(taida_val writer, const char *api_name);
@@ -1609,6 +1680,25 @@ static int taida_net3_contains_crlf(const char *s, size_t len) {
     return 0;
 }
 
+// RFC 7230 §3.2.6 token grammar. Mirrors interpreter / JS validators so
+// the same set of byte-level rejections fires across all three backends.
+static int taida_net3_is_rfc7230_token_byte(unsigned char b) {
+    if ((b >= '0' && b <= '9') || (b >= 'A' && b <= 'Z') || (b >= 'a' && b <= 'z')) return 1;
+    switch (b) {
+        case '!': case '#': case '$': case '%': case '&': case '\'':
+        case '*': case '+': case '-': case '.': case '^': case '_':
+        case '`': case '|': case '~':
+            return 1;
+        default:
+            return 0;
+    }
+}
+
+// RFC 7230 §3.2 field-value byte = HTAB / SP / VCHAR / obs-text.
+static int taida_net3_is_rfc7230_field_value_byte(unsigned char b) {
+    return b == '\t' || (b >= 0x20 && b <= 0x7E) || (b >= 0x80 && b <= 0xFF);
+}
+
 static int taida_net3_header_name_eq_ci(const char *name, size_t name_len, const char *expected) {
     size_t expected_len = strlen(expected);
     if (name_len != expected_len) return 0;
@@ -1654,9 +1744,24 @@ static int taida_net3_validate_streaming_headers(taida_val headers, const char *
             fprintf(stderr, "%s: headers[%d].name exceeds 8192 bytes\n", api_name, (int)i);
             return -1;
         }
-        if (taida_net3_contains_crlf(name_str, name_len)) {
-            fprintf(stderr, "%s: headers[%d].name contains CR/LF\n", api_name, (int)i);
+        if (name_len == 0) {
+            fprintf(stderr, "%s: headers[%d].name is empty\n", api_name, (int)i);
             return -1;
+        }
+        for (size_t j = 0; j < name_len; j++) {
+            unsigned char b = (unsigned char)name_str[j];
+            if (!taida_net3_is_rfc7230_token_byte(b)) {
+                fprintf(stderr, "%s: headers[%d].name contains a byte outside RFC 7230 token grammar (0x%02X)\n",
+                        api_name, (int)i, (unsigned)b);
+                return -1;
+            }
+        }
+        for (size_t j = 0; j < name_len; j++) {
+            if (name_str[j] == '_') {
+                fprintf(stderr, "%s: headers[%d].name contains '_' which reverse proxies normalise inconsistently\n",
+                        api_name, (int)i);
+                return -1;
+            }
         }
 
         taida_val value_val = taida_pack_get(item, value_hash);
@@ -1675,9 +1780,13 @@ static int taida_net3_validate_streaming_headers(taida_val headers, const char *
             fprintf(stderr, "%s: headers[%d].value exceeds 65536 bytes\n", api_name, (int)i);
             return -1;
         }
-        if (taida_net3_contains_crlf(value_str, value_len)) {
-            fprintf(stderr, "%s: headers[%d].value contains CR/LF\n", api_name, (int)i);
-            return -1;
+        for (size_t j = 0; j < value_len; j++) {
+            unsigned char b = (unsigned char)value_str[j];
+            if (!taida_net3_is_rfc7230_field_value_byte(b)) {
+                fprintf(stderr, "%s: headers[%d].value contains a byte outside RFC 7230 field-value grammar (0x%02X)\n",
+                        api_name, (int)i, (unsigned)b);
+                return -1;
+            }
         }
 
         if (taida_net3_header_name_eq_ci(name_str, name_len, "content-length")) {
@@ -1688,6 +1797,12 @@ static int taida_net3_validate_streaming_headers(taida_val headers, const char *
         if (taida_net3_header_name_eq_ci(name_str, name_len, "transfer-encoding")) {
             fprintf(stderr, "%s: 'Transfer-Encoding' is not allowed in streaming response headers. "
                     "The runtime manages Transfer-Encoding for streaming responses.\n", api_name);
+            return -1;
+        }
+        if (taida_net3_header_name_eq_ci(name_str, name_len, "set-cookie")) {
+            fprintf(stderr, "%s: 'Set-Cookie' is reserved by the runtime; "
+                    "handler-supplied Set-Cookie headers would let attacker-influenced names "
+                    "(forwarded via untrusted input) inject cookies.\n", api_name);
             return -1;
         }
     }
@@ -2505,31 +2620,42 @@ taida_val taida_net_read_body_chunk(taida_val req) {
                     }
                     hex_buf[hex_len] = '\0';
                     if (hex_len > 15) {
-                        fprintf(stderr, "readBodyChunk: invalid chunk-size '%s' in chunked body\n", hex_buf);
-                        exit(1);
+                        taida_net4_abort_connection("readBodyChunk: chunk-size exceeds 15 hex digits");
+                        return taida_net4_make_lax_bytes_empty();
                     }
-                    // NB4-18: Strict hex-only parse. Reject partial parse like '1g'.
+                    // Strict hex-only parse. Reject partial parse like '1g'.
                     for (size_t vi = 0; vi < hex_len; vi++) {
                         char c = hex_buf[vi];
                         if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'))) {
-                            fprintf(stderr, "readBodyChunk: invalid chunk-size '%s' in chunked body\n", hex_buf);
-                            exit(1);
+                            taida_net4_abort_connection("readBodyChunk: invalid hex digit in chunk-size");
+                            return taida_net4_make_lax_bytes_empty();
                         }
                     }
                     if (hex_len == 0) continue; // skip empty, retry
-                    unsigned long chunk_size = strtoul(hex_buf, NULL, 16);
+                    // strtoull + ERANGE check + size_t bound rejects 32-bit
+                    // overflow that strtoul (LP32 unsigned long = 32-bit)
+                    // would silently wrap to ULONG_MAX without errno.
+                    errno = 0;
+                    char *parse_end = NULL;
+                    unsigned long long chunk_size_ull = strtoull(hex_buf, &parse_end, 16);
+                    if (errno == ERANGE
+                        || parse_end != hex_buf + hex_len
+                        || chunk_size_ull > (unsigned long long)SIZE_MAX) {
+                        taida_net4_abort_connection("readBodyChunk: chunk-size overflow");
+                        return taida_net4_make_lax_bytes_empty();
+                    }
+                    size_t chunk_size = (size_t)chunk_size_ull;
                     if (chunk_size == 0) {
                         bs->chunked_state = NET4_CHUNKED_DONE;
                         bs->fully_read = 1;
                         if (taida_net4_drain_chunked_trailers(bs, fd) < 0) {
-                            bs->fully_read = 0;
-                            fprintf(stderr, "readBodyChunk: chunked body protocol error\n");
-                            exit(1);
+                            taida_net4_abort_connection("readBodyChunk: chunked body protocol error in trailers");
+                            return taida_net4_make_lax_bytes_empty();
                         }
                         return taida_net4_make_lax_bytes_empty();
                     }
                     bs->chunked_state = NET4_CHUNKED_READ_DATA;
-                    bs->chunked_remaining = (size_t)chunk_size;
+                    bs->chunked_remaining = chunk_size;
                     break;
                 }
 
@@ -2542,11 +2668,10 @@ taida_val taida_net_read_body_chunk(taida_val req) {
                     if (to_read > NET4_READ_BUF) to_read = NET4_READ_BUF;
                     unsigned char tmp[NET4_READ_BUF];
                     size_t got = taida_net4_read_body_bytes(bs, fd, tmp, to_read);
-                    // NB4-18: short read (EOF) in chunked data is a protocol error.
+                    // Short read (EOF) in chunked data is a protocol error.
                     if (got == 0) {
-                        fprintf(stderr, "readBodyChunk: truncated chunked body — expected %zu more chunk-data bytes but got EOF\n",
-                                bs->chunked_remaining);
-                        exit(1);
+                        taida_net4_abort_connection("readBodyChunk: truncated chunked body");
+                        return taida_net4_make_lax_bytes_empty();
                     }
                     bs->chunked_remaining -= got;
                     bs->bytes_consumed += (int64_t)got;
@@ -2554,21 +2679,20 @@ taida_val taida_net_read_body_chunk(taida_val req) {
                 }
 
                 case NET4_CHUNKED_WAIT_TRAILER: {
-                    // NB4-18: Read CRLF after chunk data and validate.
+                    // Read CRLF after chunk data and validate.
                     {
                         size_t tl_len = taida_net4_read_line(bs, fd, line_buf, sizeof(line_buf));
                         if (tl_len == 0) {
-                            fprintf(stderr, "readBodyChunk: missing CRLF after chunk data (unexpected EOF)\n");
-                            exit(1);
+                            taida_net4_abort_connection("readBodyChunk: missing CRLF after chunk data");
+                            return taida_net4_make_lax_bytes_empty();
                         }
                         // Trim and check empty.
                         size_t ts = 0, te = tl_len;
                         while (ts < te && (line_buf[ts]==' '||line_buf[ts]=='\t'||line_buf[ts]=='\r'||line_buf[ts]=='\n')) ts++;
                         while (te > ts && (line_buf[te-1]==' '||line_buf[te-1]=='\t'||line_buf[te-1]=='\r'||line_buf[te-1]=='\n')) te--;
                         if (ts != te) {
-                            line_buf[tl_len < sizeof(line_buf)-1 ? tl_len : sizeof(line_buf)-1] = '\0';
-                            fprintf(stderr, "readBodyChunk: malformed chunk trailer — expected CRLF after chunk data, got \"%s\"\n", line_buf);
-                            exit(1);
+                            taida_net4_abort_connection("readBodyChunk: malformed chunk trailer");
+                            return taida_net4_make_lax_bytes_empty();
                         }
                     }
                     bs->chunked_state = NET4_CHUNKED_WAIT_SIZE;
@@ -2589,11 +2713,9 @@ taida_val taida_net_read_body_chunk(taida_val req) {
         unsigned char tmp[8192];
         size_t got = taida_net4_read_body_bytes(bs, fd, tmp, to_read);
         if (got == 0) {
-            // NB4-18: EOF before Content-Length exhausted is a protocol error.
-            fprintf(stderr, "readBodyChunk: truncated body — expected %" PRId64
-                    " bytes (Content-Length) but got EOF after %" PRId64 " bytes\n",
-                    bs->content_length, bs->bytes_consumed);
-            exit(1);
+            // EOF before Content-Length exhausted is a protocol error.
+            taida_net4_abort_connection("readBodyChunk: truncated Content-Length body");
+            return taida_net4_make_lax_bytes_empty();
         }
         bs->bytes_consumed += (int64_t)got;
         if (bs->bytes_consumed >= bs->content_length) {
@@ -2622,14 +2744,14 @@ taida_val taida_net_read_body_all(taida_val req) {
     // NB4-7: Verify request token.
     uint64_t tok = taida_net4_extract_body_token(req);
     if (tok != bs->request_token) {
-        fprintf(stderr, "readBodyAll: request pack does not match the current active request.\n");
-        exit(1);
+        taida_net4_abort_connection("readBodyAll: request pack token mismatch");
+        return taida_bytes_new_filled(0, 0);
     }
 
     Net3WriterState *w = tl_net3_writer;
     if (w && w->state == NET3_STATE_WEBSOCKET) {
-        fprintf(stderr, "readBodyAll: cannot read HTTP body after WebSocket upgrade.\n");
-        exit(1);
+        taida_net4_abort_connection("readBodyAll: cannot read HTTP body after WebSocket upgrade");
+        return taida_bytes_new_filled(0, 0);
     }
 
     int fd = tl_net3_client_fd;
@@ -2667,31 +2789,46 @@ taida_val taida_net_read_body_all(taida_val req) {
                     }
                     hex_buf[hex_len] = '\0';
                     if (hex_len > 15) {
-                        fprintf(stderr, "readBodyAll: invalid chunk-size '%s' in chunked body\n", hex_buf);
-                        exit(1);
+                        free(all_buf);
+                        taida_net4_abort_connection("readBodyAll: chunk-size exceeds 15 hex digits");
+                        return taida_bytes_new_filled(0, 0);
                     }
-                    // NB4-18: Strict hex-only parse. Reject partial parse like '1g'.
+                    // Strict hex-only parse. Reject partial parse like '1g'.
                     for (size_t vi = 0; vi < hex_len; vi++) {
                         char c = hex_buf[vi];
                         if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'))) {
-                            fprintf(stderr, "readBodyChunk: invalid chunk-size '%s' in chunked body\n", hex_buf);
-                            exit(1);
+                            free(all_buf);
+                            taida_net4_abort_connection("readBodyAll: invalid hex digit in chunk-size");
+                            return taida_bytes_new_filled(0, 0);
                         }
                     }
                     if (hex_len == 0) continue; // skip empty, retry
-                    unsigned long chunk_size = strtoul(hex_buf, NULL, 16);
+                    // strtoull + ERANGE rejects 32-bit overflow that
+                    // strtoul (LP32 unsigned long = 32-bit) would silently
+                    // wrap to ULONG_MAX without errno being checked.
+                    errno = 0;
+                    char *parse_end = NULL;
+                    unsigned long long chunk_size_ull = strtoull(hex_buf, &parse_end, 16);
+                    if (errno == ERANGE
+                        || parse_end != hex_buf + hex_len
+                        || chunk_size_ull > (unsigned long long)SIZE_MAX) {
+                        free(all_buf);
+                        taida_net4_abort_connection("readBodyAll: chunk-size overflow");
+                        return taida_bytes_new_filled(0, 0);
+                    }
+                    size_t chunk_size = (size_t)chunk_size_ull;
                     if (chunk_size == 0) {
                         bs->chunked_state = NET4_CHUNKED_DONE;
                         bs->fully_read = 1;
                         if (taida_net4_drain_chunked_trailers(bs, fd) < 0) {
-                            bs->fully_read = 0;
-                            fprintf(stderr, "readBodyAll: chunked body protocol error\n");
-                            exit(1);
+                            free(all_buf);
+                            taida_net4_abort_connection("readBodyAll: chunked body protocol error in trailers");
+                            return taida_bytes_new_filled(0, 0);
                         }
                         goto all_done;
                     }
                     bs->chunked_state = NET4_CHUNKED_READ_DATA;
-                    bs->chunked_remaining = (size_t)chunk_size;
+                    bs->chunked_remaining = chunk_size;
                     break;
                 }
 
@@ -2706,12 +2843,11 @@ taida_val taida_net_read_body_all(taida_val req) {
                         TAIDA_REALLOC(all_buf, all_cap, "net_readBodyAll_grow");
                     }
                     size_t got = taida_net4_read_body_bytes(bs, fd, all_buf + all_len, bs->chunked_remaining);
-                    // NB4-18: short read (EOF) in chunked data is a protocol error.
+                    // Short read (EOF) in chunked data is a protocol error.
                     if (got == 0) {
-                        fprintf(stderr, "readBodyAll: truncated chunked body — expected %zu more chunk-data bytes but got EOF\n",
-                                bs->chunked_remaining);
                         free(all_buf);
-                        exit(1);
+                        taida_net4_abort_connection("readBodyAll: truncated chunked body");
+                        return taida_bytes_new_filled(0, 0);
                     }
                     all_len += got;
                     size_t new_rem = bs->chunked_remaining - got;
@@ -2720,22 +2856,21 @@ taida_val taida_net_read_body_all(taida_val req) {
                 }
 
                 case NET4_CHUNKED_WAIT_TRAILER: {
-                    // NB4-18: Read CRLF after chunk data and validate.
+                    // Read CRLF after chunk data and validate.
                     {
                         size_t tl_len2 = taida_net4_read_line(bs, fd, line_buf, sizeof(line_buf));
                         if (tl_len2 == 0) {
-                            fprintf(stderr, "readBodyAll: missing CRLF after chunk data (unexpected EOF)\n");
                             free(all_buf);
-                            exit(1);
+                            taida_net4_abort_connection("readBodyAll: missing CRLF after chunk data");
+                            return taida_bytes_new_filled(0, 0);
                         }
                         size_t ts2 = 0, te2 = tl_len2;
                         while (ts2 < te2 && (line_buf[ts2]==' '||line_buf[ts2]=='\t'||line_buf[ts2]=='\r'||line_buf[ts2]=='\n')) ts2++;
                         while (te2 > ts2 && (line_buf[te2-1]==' '||line_buf[te2-1]=='\t'||line_buf[te2-1]=='\r'||line_buf[te2-1]=='\n')) te2--;
                         if (ts2 != te2) {
-                            line_buf[tl_len2 < sizeof(line_buf)-1 ? tl_len2 : sizeof(line_buf)-1] = '\0';
-                            fprintf(stderr, "readBodyAll: malformed chunk trailer — expected CRLF after chunk data, got \"%s\"\n", line_buf);
                             free(all_buf);
-                            exit(1);
+                            taida_net4_abort_connection("readBodyAll: malformed chunk trailer");
+                            return taida_bytes_new_filled(0, 0);
                         }
                     }
                     bs->chunked_state = NET4_CHUNKED_WAIT_SIZE;
@@ -2753,13 +2888,11 @@ taida_val taida_net_read_body_all(taida_val req) {
                 TAIDA_REALLOC(all_buf, all_cap, "net_readBodyAll_cl");
             }
             size_t got = taida_net4_read_body_bytes(bs, fd, all_buf, to_read);
-            // NB4-18: EOF before Content-Length exhausted is a protocol error.
+            // EOF before Content-Length exhausted is a protocol error.
             if (got == 0 && to_read > 0) {
-                fprintf(stderr, "readBodyAll: truncated body — expected %" PRId64
-                        " bytes (Content-Length) but got EOF after %" PRId64 " bytes\n",
-                        bs->content_length, bs->bytes_consumed);
                 free(all_buf);
-                exit(1);
+                taida_net4_abort_connection("readBodyAll: truncated Content-Length body");
+                return taida_bytes_new_filled(0, 0);
             }
             all_len = got;
             bs->bytes_consumed += (int64_t)got;
@@ -3389,10 +3522,9 @@ taida_val taida_net_ws_receive(taida_val ws) {
                 if (frame.payload_len > 0 && !taida_net4_is_valid_utf8(frame.payload, frame.payload_len)) {
                     unsigned char close_1007[2] = { 0x03, 0xEF };
                     taida_net4_write_ws_frame(fd, WS_OPCODE_CLOSE, close_1007, 2);
-                    if (bs) bs->ws_closed = 1;
                     free(frame.payload);
-                    fprintf(stderr, "wsReceive: invalid UTF-8 in text frame\n");
-                    exit(1);
+                    taida_net4_abort_connection("wsReceive: invalid UTF-8 in text frame");
+                    return taida_net4_make_lax_ws_frame_empty();
                 }
                 char *text = NULL;
                 if (frame.payload_len > 0) {
@@ -3446,10 +3578,9 @@ taida_val taida_net_ws_receive(taida_val ws) {
                     // 1-byte close payload is malformed.
                     unsigned char close_1002[2] = { 0x03, 0xEA };
                     taida_net4_write_ws_frame(fd, WS_OPCODE_CLOSE, close_1002, 2);
-                    if (bs) bs->ws_closed = 1;
                     if (frame.payload) free(frame.payload);
-                    fprintf(stderr, "wsReceive: protocol error: malformed close frame (1-byte payload)\n");
-                    exit(1);
+                    taida_net4_abort_connection("wsReceive: malformed close frame (1-byte payload)");
+                    return taida_net4_make_lax_ws_frame_empty();
                 } else {
                     // 2+ bytes: first 2 bytes are the close code (big-endian).
                     uint16_t code = ((uint16_t)frame.payload[0] << 8) | (uint16_t)frame.payload[1];
@@ -3462,10 +3593,9 @@ taida_val taida_net_ws_receive(taida_val ws) {
                     if (!valid_code) {
                         unsigned char close_1002[2] = { 0x03, 0xEA };
                         taida_net4_write_ws_frame(fd, WS_OPCODE_CLOSE, close_1002, 2);
-                        if (bs) bs->ws_closed = 1;
                         free(frame.payload);
-                        fprintf(stderr, "wsReceive: protocol error: invalid close code %u\n", (unsigned)code);
-                        exit(1);
+                        taida_net4_abort_connection("wsReceive: invalid close code");
+                        return taida_net4_make_lax_ws_frame_empty();
                     }
                     // Validate reason UTF-8 if present.
                     if (frame.payload_len > 2) {
@@ -3474,10 +3604,9 @@ taida_val taida_net_ws_receive(taida_val ws) {
                         if (!taida_net4_is_valid_utf8(reason, rlen)) {
                             unsigned char close_1002[2] = { 0x03, 0xEA };
                             taida_net4_write_ws_frame(fd, WS_OPCODE_CLOSE, close_1002, 2);
-                            if (bs) bs->ws_closed = 1;
                             free(frame.payload);
-                            fprintf(stderr, "wsReceive: protocol error: invalid UTF-8 in close reason\n");
-                            exit(1);
+                            taida_net4_abort_connection("wsReceive: invalid UTF-8 in close reason");
+                            return taida_net4_make_lax_ws_frame_empty();
                         }
                     }
                     // Valid close: echo the code in the reply.
@@ -3500,9 +3629,8 @@ taida_val taida_net_ws_receive(taida_val ws) {
                 // Send close frame with protocol error (1002).
                 unsigned char close_payload[2] = { 0x03, 0xEA }; // 1002
                 taida_net4_write_ws_frame(fd, WS_OPCODE_CLOSE, close_payload, 2);
-                if (bs) bs->ws_closed = 1;
-                fprintf(stderr, "wsReceive: protocol error\n");
-                exit(1);
+                taida_net4_abort_connection("wsReceive: WS frame protocol error");
+                return taida_net4_make_lax_ws_frame_empty();
             }
         }
     }
@@ -3922,6 +4050,7 @@ static void *net_worker_thread(void *arg) {
                 body_state.ws_closed = 0;
                 body_state.ws_token = 0;
                 body_state.ws_close_code = 0; // v5: no close frame received yet
+                body_state.aborted = 0;
 
                 // Build request pack (head only, body = empty span).
                 // D29B-015 (Track-β-2, 2026-04-27): producer flip — CONTIG raw.
@@ -4033,6 +4162,21 @@ static void *net_worker_thread(void *arg) {
                 tl_net3_writer = NULL;
                 tl_net3_client_fd = -1;
                 tl_net4_body = NULL;
+
+                // The handler hit an unrecoverable protocol error and
+                // taida_net4_abort_connection() shut the socket down. Drop
+                // request/writer references, skip keep-alive bookkeeping,
+                // and let the listener accept the next client. Other
+                // concurrent connections in this httpServe pool keep
+                // running.
+                if (body_state.aborted) {
+                    taida_release(request);
+                    taida_release(writer_token);
+                    taida_release(response);
+                    if (leftover) free(leftover);
+                    total_read = 0;
+                    break;
+                }
 
                 // ── v4: WebSocket auto-close on handler return ──
                 if (writer_state.state == NET3_STATE_WEBSOCKET) {

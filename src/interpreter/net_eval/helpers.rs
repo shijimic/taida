@@ -1052,7 +1052,7 @@ pub(crate) fn extract_response_fields(response: &Value) -> Result<ResponseFields
                 ));
             }
         };
-        // NB-7: Enforce header name/value length limits (parity with Native)
+        // Enforce header name/value length limits (parity with Native).
         if name.len() > 8192 {
             return Err(format!(
                 "httpEncodeResponse: headers[{}].name exceeds 8192 bytes",
@@ -1065,18 +1065,33 @@ pub(crate) fn extract_response_fields(response: &Value) -> Result<ResponseFields
                 i
             ));
         }
-        // Reject CRLF in header name/value to prevent response splitting
-        if name.contains('\r') || name.contains('\n') {
+        // Share grammar with the streaming validator so the eager path
+        // rejects the same RFC 7230 violations (NUL, control bytes, space
+        // and tab in name, ':' in name, underscore CL.CL bypass).
+        if name.is_empty() {
+            return Err(format!("httpEncodeResponse: headers[{}].name is empty", i));
+        }
+        for &b in name.as_bytes() {
+            if !crate::interpreter::net_eval::types::is_rfc7230_token_byte(b) {
+                return Err(format!(
+                    "httpEncodeResponse: headers[{}].name contains a byte outside RFC 7230 token grammar (0x{:02X})",
+                    i, b
+                ));
+            }
+        }
+        if name.as_bytes().contains(&b'_') {
             return Err(format!(
-                "httpEncodeResponse: headers[{}].name contains CR/LF",
+                "httpEncodeResponse: headers[{}].name contains '_' which reverse proxies normalise inconsistently",
                 i
             ));
         }
-        if value.contains('\r') || value.contains('\n') {
-            return Err(format!(
-                "httpEncodeResponse: headers[{}].value contains CR/LF",
-                i
-            ));
+        for &b in value.as_bytes() {
+            if !crate::interpreter::net_eval::types::is_rfc7230_field_value_byte(b) {
+                return Err(format!(
+                    "httpEncodeResponse: headers[{}].value contains a byte outside RFC 7230 field-value grammar (0x{:02X})",
+                    i, b
+                ));
+            }
         }
         headers.push((name, value));
     }

@@ -622,7 +622,12 @@ fn test_encode_crlf_in_header_name() {
     ]);
     let result = encode_response(&response);
     assert!(is_result_failure(&result));
-    assert!(get_failure_message(&result).contains("CR/LF"));
+    let msg = get_failure_message(&result);
+    assert!(
+        msg.contains("RFC 7230 token grammar"),
+        "expected RFC 7230 token grammar rejection for CR/LF in name, got: {}",
+        msg
+    );
 }
 
 #[test]
@@ -640,7 +645,12 @@ fn test_encode_crlf_in_header_value() {
     ]);
     let result = encode_response(&response);
     assert!(is_result_failure(&result));
-    assert!(get_failure_message(&result).contains("CR/LF"));
+    let msg = get_failure_message(&result);
+    assert!(
+        msg.contains("RFC 7230 field-value grammar"),
+        "expected RFC 7230 field-value grammar rejection for CR/LF in value, got: {}",
+        msg
+    );
 }
 
 #[test]
@@ -4663,8 +4673,8 @@ fn test_streaming_header_crlf_name_rejected() {
     assert!(result.is_err());
     let msg = result.unwrap_err();
     assert!(
-        msg.contains("headers[0].name contains CR/LF"),
-        "error should mention CR/LF in header name: {}",
+        msg.contains("headers[0].name") && msg.contains("RFC 7230 token grammar"),
+        "error should mention RFC 7230 token grammar violation in header name: {}",
         msg
     );
 }
@@ -4676,8 +4686,8 @@ fn test_streaming_header_crlf_value_rejected() {
     assert!(result.is_err());
     let msg = result.unwrap_err();
     assert!(
-        msg.contains("headers[0].value contains CR/LF"),
-        "error should mention CR/LF in header value: {}",
+        msg.contains("headers[0].value") && msg.contains("RFC 7230 field-value grammar"),
+        "error should mention RFC 7230 field-value grammar violation in header value: {}",
         msg
     );
 }
@@ -4752,6 +4762,92 @@ fn test_non_reserved_headers_allowed() {
 fn test_empty_headers_allowed() {
     let headers: Vec<(String, String)> = vec![];
     assert!(StreamingWriter::validate_reserved_headers(&headers).is_ok());
+}
+
+#[test]
+fn rfc7230_header_name_with_colon_rejected() {
+    let headers = vec![("X:Y".to_string(), "v".to_string())];
+    let err = StreamingWriter::validate_reserved_headers(&headers).unwrap_err();
+    assert!(err.contains("RFC 7230 token grammar"), "{}", err);
+}
+
+#[test]
+fn rfc7230_header_name_with_nul_rejected() {
+    let headers = vec![("X-Test\x00".to_string(), "v".to_string())];
+    let err = StreamingWriter::validate_reserved_headers(&headers).unwrap_err();
+    assert!(err.contains("RFC 7230 token grammar"), "{}", err);
+}
+
+#[test]
+fn rfc7230_header_value_with_nul_rejected() {
+    let headers = vec![("X-Test".to_string(), "v\x00ok".to_string())];
+    let err = StreamingWriter::validate_reserved_headers(&headers).unwrap_err();
+    assert!(err.contains("RFC 7230 field-value grammar"), "{}", err);
+}
+
+#[test]
+fn rfc7230_header_name_with_space_rejected() {
+    let headers = vec![("X Test".to_string(), "v".to_string())];
+    let err = StreamingWriter::validate_reserved_headers(&headers).unwrap_err();
+    assert!(err.contains("RFC 7230 token grammar"), "{}", err);
+}
+
+#[test]
+fn rfc7230_header_name_with_tab_rejected() {
+    let headers = vec![("X\tTest".to_string(), "v".to_string())];
+    let err = StreamingWriter::validate_reserved_headers(&headers).unwrap_err();
+    assert!(err.contains("RFC 7230 token grammar"), "{}", err);
+}
+
+#[test]
+fn rfc7230_header_value_with_control_byte_rejected() {
+    let headers = vec![("X-Test".to_string(), "v\x01\x02".to_string())];
+    let err = StreamingWriter::validate_reserved_headers(&headers).unwrap_err();
+    assert!(err.contains("RFC 7230 field-value grammar"), "{}", err);
+}
+
+#[test]
+fn rfc7230_header_value_with_del_rejected() {
+    let headers = vec![("X-Test".to_string(), "v\x7F".to_string())];
+    let err = StreamingWriter::validate_reserved_headers(&headers).unwrap_err();
+    assert!(err.contains("RFC 7230 field-value grammar"), "{}", err);
+}
+
+#[test]
+fn rfc7230_header_underscore_in_name_rejected() {
+    let headers = vec![("Content_Length".to_string(), "10".to_string())];
+    let err = StreamingWriter::validate_reserved_headers(&headers).unwrap_err();
+    assert!(
+        err.contains("'_'") && err.contains("reverse proxies"),
+        "{}",
+        err
+    );
+}
+
+#[test]
+fn rfc7230_header_set_cookie_reserved() {
+    let headers = vec![("Set-Cookie".to_string(), "session=evil".to_string())];
+    let err = StreamingWriter::validate_reserved_headers(&headers).unwrap_err();
+    assert!(err.contains("Set-Cookie"), "{}", err);
+}
+
+#[test]
+fn rfc7230_header_obs_text_value_allowed() {
+    let headers = vec![("X-Test".to_string(), "v\u{0080}\u{00FF}".to_string())];
+    assert!(StreamingWriter::validate_reserved_headers(&headers).is_ok());
+}
+
+#[test]
+fn rfc7230_header_value_with_tab_allowed() {
+    let headers = vec![("X-Test".to_string(), "v\tt".to_string())];
+    assert!(StreamingWriter::validate_reserved_headers(&headers).is_ok());
+}
+
+#[test]
+fn rfc7230_header_empty_name_rejected() {
+    let headers = vec![(String::new(), "value".to_string())];
+    let err = StreamingWriter::validate_reserved_headers(&headers).unwrap_err();
+    assert!(err.contains("name is empty"), "{}", err);
 }
 
 // NET3-1f: Bodyless status validation

@@ -393,19 +393,42 @@ function __taida_net_httpEncodeResponse(response) {
     if (typeof value !== 'string') {
       return __taida_net_result_fail('EncodeError', 'httpEncodeResponse: headers[' + i + '].value must be Str');
     }
-    // NB-7: Enforce header name/value length limits in UTF-8 bytes (parity with Interpreter/Native)
+    // Length limits (parity with Interpreter/Native).
     if (Buffer.byteLength(name, 'utf-8') > 8192) {
       return __taida_net_result_fail('EncodeError', 'httpEncodeResponse: headers[' + i + '].name exceeds 8192 bytes');
     }
     if (Buffer.byteLength(value, 'utf-8') > 65536) {
       return __taida_net_result_fail('EncodeError', 'httpEncodeResponse: headers[' + i + '].value exceeds 65536 bytes');
     }
-    // Reject CRLF in header name/value
-    if (name.includes('\r') || name.includes('\n')) {
-      return __taida_net_result_fail('EncodeError', 'httpEncodeResponse: headers[' + i + '].name contains CR/LF');
+    // RFC 7230 token + field-value grammar (parity with the streaming validator).
+    if (name.length === 0) {
+      return __taida_net_result_fail('EncodeError', 'httpEncodeResponse: headers[' + i + '].name is empty');
     }
-    if (value.includes('\r') || value.includes('\n')) {
-      return __taida_net_result_fail('EncodeError', 'httpEncodeResponse: headers[' + i + '].value contains CR/LF');
+    {
+      const nameBuf = Buffer.from(name, 'utf-8');
+      for (let k = 0; k < nameBuf.length; k++) {
+        const b = nameBuf[k];
+        if (!__taida_net_isRfc7230TokenByte(b)) {
+          return __taida_net_result_fail('EncodeError',
+            'httpEncodeResponse: headers[' + i + '].name contains a byte outside RFC 7230 token grammar (0x' +
+            b.toString(16).toUpperCase().padStart(2, '0') + ')');
+        }
+      }
+      if (nameBuf.includes(0x5F)) {
+        return __taida_net_result_fail('EncodeError',
+          "httpEncodeResponse: headers[" + i + "].name contains '_' which reverse proxies normalise inconsistently");
+      }
+    }
+    {
+      const valueBuf = Buffer.from(value, 'utf-8');
+      for (let k = 0; k < valueBuf.length; k++) {
+        const b = valueBuf[k];
+        if (!__taida_net_isRfc7230FieldValueByte(b)) {
+          return __taida_net_result_fail('EncodeError',
+            'httpEncodeResponse: headers[' + i + '].value contains a byte outside RFC 7230 field-value grammar (0x' +
+            b.toString(16).toUpperCase().padStart(2, '0') + ')');
+        }
+      }
     }
     headerPairs.push([name, value]);
   }
@@ -1878,6 +1901,23 @@ function __taida_net_buildStreamingHead(status, headers) {
   return head;
 }
 
+// RFC 7230 §3.2.6 token grammar — used by both streaming + eager validators.
+function __taida_net_isRfc7230TokenByte(b) {
+  return (
+    (b >= 0x30 && b <= 0x39) || // 0-9
+    (b >= 0x41 && b <= 0x5A) || // A-Z
+    (b >= 0x61 && b <= 0x7A) || // a-z
+    b === 0x21 || b === 0x23 || b === 0x24 || b === 0x25 || b === 0x26 ||
+    b === 0x27 || b === 0x2A || b === 0x2B || b === 0x2D || b === 0x2E ||
+    b === 0x5E || b === 0x5F || b === 0x60 || b === 0x7C || b === 0x7E
+  );
+}
+
+// RFC 7230 §3.2 field-value byte = HTAB / SP / VCHAR / obs-text.
+function __taida_net_isRfc7230FieldValueByte(b) {
+  return b === 0x09 || (b >= 0x20 && b <= 0x7E) || (b >= 0x80 && b <= 0xFF);
+}
+
 // Validate user headers for the streaming path.
 function __taida_net_validateStreamingHeaders(headers) {
   for (let i = 0; i < headers.length; i++) {
@@ -1899,11 +1939,30 @@ function __taida_net_validateStreamingHeaders(headers) {
     if (Buffer.byteLength(value, 'utf-8') > 65536) {
       throw new __NativeError('startResponse: headers[' + i + '].value exceeds 65536 bytes');
     }
-    if (name.includes('\r') || name.includes('\n')) {
-      throw new __NativeError('startResponse: headers[' + i + '].name contains CR/LF');
+    if (name.length === 0) {
+      throw new __NativeError('startResponse: headers[' + i + '].name is empty');
     }
-    if (value.includes('\r') || value.includes('\n')) {
-      throw new __NativeError('startResponse: headers[' + i + '].value contains CR/LF');
+    const nameBuf = Buffer.from(name, 'utf-8');
+    for (let k = 0; k < nameBuf.length; k++) {
+      const b = nameBuf[k];
+      if (!__taida_net_isRfc7230TokenByte(b)) {
+        throw new __NativeError(
+          'startResponse: headers[' + i + '].name contains a byte outside RFC 7230 token grammar (0x' +
+          b.toString(16).toUpperCase().padStart(2, '0') + ')');
+      }
+    }
+    if (nameBuf.includes(0x5F /* '_' */)) {
+      throw new __NativeError(
+        "startResponse: headers[" + i + "].name contains '_' which reverse proxies normalise inconsistently");
+    }
+    const valueBuf = Buffer.from(value, 'utf-8');
+    for (let k = 0; k < valueBuf.length; k++) {
+      const b = valueBuf[k];
+      if (!__taida_net_isRfc7230FieldValueByte(b)) {
+        throw new __NativeError(
+          'startResponse: headers[' + i + '].value contains a byte outside RFC 7230 field-value grammar (0x' +
+          b.toString(16).toUpperCase().padStart(2, '0') + ')');
+      }
     }
 
     const lower = name.toLowerCase();
@@ -1916,6 +1975,12 @@ function __taida_net_validateStreamingHeaders(headers) {
       throw new __NativeError(
         "startResponse: 'Transfer-Encoding' is not allowed in streaming response headers. " +
         'The runtime manages Transfer-Encoding for streaming responses.');
+    }
+    if (lower === 'set-cookie') {
+      throw new __NativeError(
+        "startResponse: 'Set-Cookie' is reserved by the runtime; " +
+        'handler-supplied Set-Cookie headers would let attacker-influenced names ' +
+        '(forwarded via untrusted input) inject cookies.');
     }
   }
 }
