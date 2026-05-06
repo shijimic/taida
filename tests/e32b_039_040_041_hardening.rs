@@ -182,13 +182,41 @@ fn e32b_079_native_runtime_has_no_remaining_handler_exit() {
     // net_h1_h2.c routes attacker-reachable failures through
     // taida_net4_abort_connection. The only `exit(1)` tokens that are
     // allowed to remain in the source are the explanatory references
-    // inside doc-comments (`This replaces process-wide exit(1) ...`) —
-    // not actual call sites. Count code-side calls by looking for the
-    // bare `exit(1);` statement (the trailing semicolon distinguishes
-    // it from in-text references).
-    let code_exit_count = NATIVE_NET.matches("exit(1);").count();
+    // inside doc-comments. Strip C `//` line comments first so a
+    // future "exit(1)" rewritten as `exit (1);` (whitespace-injected)
+    // cannot slip through, and so doc-comment mentions don't trip the
+    // assertion.
+    let mut code = String::with_capacity(NATIVE_NET.len());
+    for line in NATIVE_NET.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("//") {
+            continue;
+        }
+        code.push_str(line);
+        code.push('\n');
+    }
+    let mut chars = code.chars().peekable();
+    let mut tokens: Vec<char> = Vec::new();
+    while let Some(c) = chars.next() {
+        // Strip /* ... */ block comments too.
+        if c == '/' && matches!(chars.peek(), Some(&'*')) {
+            chars.next(); // consume '*'
+            let mut prev = ' ';
+            while let Some(cc) = chars.next() {
+                if prev == '*' && cc == '/' {
+                    break;
+                }
+                prev = cc;
+            }
+            continue;
+        }
+        tokens.push(c);
+    }
+    let stripped: String = tokens.into_iter().collect();
+    let collapsed = stripped.replace([' ', '\t', '\n', '\r'], "");
+    let exit_count = collapsed.matches("exit(1);").count();
     assert_eq!(
-        code_exit_count, 0,
+        exit_count, 0,
         "net_h1_h2.c must not call exit(1) on any handler-context path; \
          every attacker-reachable failure must funnel through \
          taida_net4_abort_connection"
@@ -222,6 +250,134 @@ fn e32b_079_validate_writer_returns_int_not_void() {
     assert!(
         NATIVE_NET.contains("if (taida_net3_validate_writer(writer, \"wsUpgrade\") < 0)"),
         "wsUpgrade must early-return on validate_writer failure"
+    );
+}
+
+#[test]
+fn e32b_079_handler_apis_have_post_abort_noop_guard() {
+    // After abort_connection runs, the handler keeps executing on Lax
+    // sentinels until it returns naturally. Each handler-callable API
+    // must short-circuit at its head when bs->aborted is set, so a
+    // post-abort writeChunk / wsSend / sseEvent / readBodyChunk does
+    // not retrigger I/O on the dead socket.
+    let apis = [
+        (
+            "taida_net_start_response",
+            "if (tl_net4_body && tl_net4_body->aborted) return 0;",
+        ),
+        (
+            "taida_net_write_chunk",
+            "if (tl_net4_body && tl_net4_body->aborted) return 0;",
+        ),
+        (
+            "taida_net_end_response",
+            "if (tl_net4_body && tl_net4_body->aborted) return 0;",
+        ),
+        (
+            "taida_net_sse_event",
+            "if (tl_net4_body && tl_net4_body->aborted) return 0;",
+        ),
+        (
+            "taida_net_read_body_chunk",
+            "return taida_net4_make_lax_bytes_empty();",
+        ),
+        (
+            "taida_net_read_body_all",
+            "return taida_bytes_new_filled(0, 0);",
+        ),
+        (
+            "taida_net_ws_upgrade",
+            "return taida_net4_make_lax_ws_empty();",
+        ),
+        (
+            "taida_net_ws_send",
+            "if (tl_net4_body && tl_net4_body->aborted) return 0;",
+        ),
+        (
+            "taida_net_ws_receive",
+            "return taida_net4_make_lax_ws_frame_empty();",
+        ),
+        (
+            "taida_net_ws_close",
+            "if (tl_net4_body && tl_net4_body->aborted) return 0;",
+        ),
+        (
+            "taida_net_ws_close_code",
+            "if (tl_net4_body && tl_net4_body->aborted) return 0;",
+        ),
+    ];
+    for (api, sentinel) in apis {
+        // Find the function *body* (signature line ending with `) {`),
+        // not the forward declaration (signature line ending with `);`).
+        // Walk every line, track when we cross a line that starts with
+        // `taida_val <api>(` AND ends with `) {`.
+        let signature_prefix = format!("taida_val {}(", api);
+        let mut head_offset = None;
+        let mut byte_pos = 0usize;
+        for line in NATIVE_NET.lines() {
+            if line.starts_with(&signature_prefix) && line.trim_end().ends_with(") {") {
+                head_offset = Some(byte_pos + line.len() + 1); // +1 for '\n'
+                break;
+            }
+            byte_pos += line.len() + 1; // +1 for '\n'
+        }
+        let head_offset = head_offset.unwrap_or_else(|| {
+            panic!(
+                "API {} body (signature line ending with `) {{`) must be defined",
+                api
+            )
+        });
+        let head_window_end = std::cmp::min(head_offset + 600, NATIVE_NET.len());
+        let head_window = &NATIVE_NET[head_offset..head_window_end];
+        assert!(
+            head_window.contains("tl_net4_body && tl_net4_body->aborted"),
+            "{} must guard its body with a tl_net4_body->aborted check at the head",
+            api
+        );
+        assert!(
+            head_window.contains(sentinel),
+            "{} must return its post-abort sentinel `{}`",
+            api,
+            sentinel
+        );
+    }
+}
+
+#[test]
+fn e32b_079_end_response_and_ws_upgrade_check_send_all_return() {
+    // Codex follow-up: the chunked terminator in endResponse and the
+    // 101 Switching Protocols response in wsUpgrade used to discard
+    // the taida_net_send_all return value, leaving a peer-disconnect
+    // path silently fail. Both now check the return and abort the
+    // connection on a write failure.
+    assert!(
+        NATIVE_NET.contains("if (taida_net_send_all(fd, \"0\\r\\n\\r\\n\", 5) != 0) {"),
+        "endResponse must check taida_net_send_all for the chunked terminator"
+    );
+    assert!(
+        NATIVE_NET.contains(
+            "taida_net4_abort_connection(\"endResponse: failed to send chunked terminator\")"
+        ),
+        "endResponse must abort on a chunked-terminator write failure"
+    );
+    assert!(
+        NATIVE_NET.contains("if (taida_net_send_all(fd, response, (size_t)rlen) != 0) {"),
+        "wsUpgrade must check taida_net_send_all for the 101 response"
+    );
+    assert!(
+        NATIVE_NET.contains(
+            "taida_net4_abort_connection(\"wsUpgrade: failed to send 101 Switching Protocols response\")"
+        ),
+        "wsUpgrade must abort on a 101-response write failure"
+    );
+    assert!(
+        NATIVE_NET.contains("int pong_rc = taida_net4_write_ws_frame(fd, WS_OPCODE_PONG,"),
+        "wsReceive auto-pong path must capture the write return value"
+    );
+    assert!(
+        NATIVE_NET
+            .contains("taida_net4_abort_connection(\"wsReceive: failed to send auto-pong frame\")"),
+        "wsReceive must abort on auto-pong write failure"
     );
 }
 

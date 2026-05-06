@@ -1858,6 +1858,7 @@ static void taida_net3_extract_headers(Net3WriterState *w, taida_val headers) {
 // NET3-5b: startResponse(writer, status, headers)
 // Updates pending status/headers on the writer state. Does NOT commit to wire.
 taida_val taida_net_start_response(taida_val writer, taida_val status, taida_val headers) {
+    if (tl_net4_body && tl_net4_body->aborted) return 0; // Unit
     if (taida_net3_validate_writer(writer, "startResponse") < 0) return 0;
     Net3WriterState *w = tl_net3_writer;
     if (!w) {
@@ -1898,6 +1899,7 @@ taida_val taida_net_start_response(taida_val writer, taida_val status, taida_val
 // Bytes: extract from taida_val array to stack/stack-heap buffer, then writev.
 // Str: use C string directly.
 taida_val taida_net_write_chunk(taida_val writer, taida_val data) {
+    if (tl_net4_body && tl_net4_body->aborted) return 0; // Unit
     if (taida_net3_validate_writer(writer, "writeChunk") < 0) return 0;
     Net3WriterState *w = tl_net3_writer;
     int fd = tl_net3_client_fd;
@@ -2009,6 +2011,7 @@ taida_val taida_net_write_chunk(taida_val writer, taida_val data) {
 // Terminates the chunked response by sending 0\r\n\r\n.
 // Idempotent: second call is a no-op.
 taida_val taida_net_end_response(taida_val writer) {
+    if (tl_net4_body && tl_net4_body->aborted) return 0; // Unit
     if (taida_net3_validate_writer(writer, "endResponse") < 0) return 0;
     Net3WriterState *w = tl_net3_writer;
     int fd = tl_net3_client_fd;
@@ -2027,9 +2030,13 @@ taida_val taida_net_end_response(taida_val writer) {
         }
     }
 
-    // Send chunked terminator — but only for non-bodyless status
+    // Send chunked terminator — but only for non-bodyless status. Peer
+    // disconnect (RST / EPIPE) is attacker-reachable here too.
     if (!taida_net3_is_bodyless_status(w->pending_status)) {
-        taida_net_send_all(fd, "0\r\n\r\n", 5);
+        if (taida_net_send_all(fd, "0\r\n\r\n", 5) != 0) {
+            taida_net4_abort_connection("endResponse: failed to send chunked terminator");
+            return 0; // Unit
+        }
     }
     w->state = NET3_STATE_ENDED;
     return 0; // Unit
@@ -2040,6 +2047,7 @@ taida_val taida_net_end_response(taida_val writer) {
 // Auto-sets Content-Type and Cache-Control headers if not already set.
 // Splits multiline data into data: lines.
 taida_val taida_net_sse_event(taida_val writer, taida_val event, taida_val data) {
+    if (tl_net4_body && tl_net4_body->aborted) return 0; // Unit
     if (taida_net3_validate_writer(writer, "sseEvent") < 0) return 0;
     Net3WriterState *w = tl_net3_writer;
     int fd = tl_net3_client_fd;
@@ -2584,6 +2592,9 @@ static uint64_t taida_net4_extract_body_token(taida_val req) {
 
 // ── readBodyChunk(req) → Lax[Bytes] ─────────────────────────
 taida_val taida_net_read_body_chunk(taida_val req) {
+    if (tl_net4_body && tl_net4_body->aborted) {
+        return taida_net4_make_lax_bytes_empty();
+    }
     if (!taida_net4_is_body_stream_request(req)) {
         taida_net4_abort_connection("readBodyChunk: can only be called in a 2-argument httpServe handler");
         return taida_net4_make_lax_bytes_empty();
@@ -2749,6 +2760,9 @@ taida_val taida_net_read_body_chunk(taida_val req) {
 // ── readBodyAll(req) → Bytes ─────────────────────────────────
 // The only aggregate path permitted by v4 contract.
 taida_val taida_net_read_body_all(taida_val req) {
+    if (tl_net4_body && tl_net4_body->aborted) {
+        return taida_bytes_new_filled(0, 0);
+    }
     if (!taida_net4_is_body_stream_request(req)) {
         taida_net4_abort_connection("readBodyAll: can only be called in a 2-argument httpServe handler");
         return taida_bytes_new_filled(0, 0);
@@ -3253,6 +3267,9 @@ static int taida_net4_header_contains_token(const char *value, const char *token
 
 // ── wsUpgrade(req, writer) → Lax[@(ws: WsConn)] (NET4-4b) ──
 taida_val taida_net_ws_upgrade(taida_val req, taida_val writer) {
+    if (tl_net4_body && tl_net4_body->aborted) {
+        return taida_net4_make_lax_ws_empty();
+    }
     // Must be inside 2-arg handler.
     Net3WriterState *w = tl_net3_writer;
     if (!w) {
@@ -3417,7 +3434,13 @@ taida_val taida_net_ws_upgrade(taida_val req, taida_val writer) {
     if (rlen < 0 || (size_t)rlen >= sizeof(response)) {
         return taida_net4_make_lax_ws_empty();
     }
-    taida_net_send_all(fd, response, (size_t)rlen);
+    // Peer disconnect (RST / EPIPE) on the 101 response is
+    // attacker-reachable, so the upgrade must abort the connection
+    // rather than silently transitioning into a half-broken WS state.
+    if (taida_net_send_all(fd, response, (size_t)rlen) != 0) {
+        taida_net4_abort_connection("wsUpgrade: failed to send 101 Switching Protocols response");
+        return taida_net4_make_lax_ws_empty();
+    }
 
     // Transition to WebSocket state.
     w->state = NET3_STATE_WEBSOCKET;
@@ -3444,6 +3467,7 @@ taida_val taida_net_ws_upgrade(taida_val req, taida_val writer) {
 
 // ── wsSend(ws, data) → Unit (NET4-4d) ───────────────────────
 taida_val taida_net_ws_send(taida_val ws, taida_val data) {
+    if (tl_net4_body && tl_net4_body->aborted) return 0; // Unit
     Net3WriterState *w = tl_net3_writer;
     if (!w) {
         taida_net4_abort_connection("wsSend: can only be called inside a 2-argument httpServe handler");
@@ -3515,6 +3539,9 @@ taida_val taida_net_ws_send(taida_val ws, taida_val data) {
 
 // ── wsReceive(ws) → Lax[@(type, data)] (NET4-4d) ────────────
 taida_val taida_net_ws_receive(taida_val ws) {
+    if (tl_net4_body && tl_net4_body->aborted) {
+        return taida_net4_make_lax_ws_frame_empty();
+    }
     Net3WriterState *w = tl_net3_writer;
     if (!w) {
         taida_net4_abort_connection("wsReceive: can only be called inside a 2-argument httpServe handler");
@@ -3573,11 +3600,17 @@ taida_val taida_net_ws_receive(taida_val ws) {
             }
 
             case WS_FRAME_PING: {
-                // Auto pong: send pong with same payload.
-                taida_net4_write_ws_frame(fd, WS_OPCODE_PONG,
+                // Auto pong: send pong with same payload. Peer disconnect
+                // on the pong write must abort this connection rather
+                // than letting the loop spin on a broken socket.
+                int pong_rc = taida_net4_write_ws_frame(fd, WS_OPCODE_PONG,
                     frame.payload ? frame.payload : (unsigned char*)"",
                     frame.payload_len);
                 if (frame.payload) free(frame.payload);
+                if (pong_rc != 0) {
+                    taida_net4_abort_connection("wsReceive: failed to send auto-pong frame");
+                    return taida_net4_make_lax_ws_frame_empty();
+                }
                 continue; // Next frame.
             }
 
@@ -3667,6 +3700,7 @@ taida_val taida_net_ws_receive(taida_val ws) {
 // 2nd arg (code): 0 = default 1000 (Normal Closure), otherwise explicit close code.
 // Valid codes: 1000-4999 excluding reserved 1004, 1005, 1006, 1015.
 taida_val taida_net_ws_close(taida_val ws, taida_val code_val) {
+    if (tl_net4_body && tl_net4_body->aborted) return 0; // Unit
     Net3WriterState *w = tl_net3_writer;
     if (!w) {
         taida_net4_abort_connection("wsClose: can only be called inside a 2-argument httpServe handler");
@@ -3730,6 +3764,7 @@ taida_val taida_net_ws_close(taida_val ws, taida_val code_val) {
 // Returns the close code received from the peer's close frame.
 // 0 = no close frame received yet, 1005 = no status code, 1000-4999 = peer code.
 taida_val taida_net_ws_close_code(taida_val ws) {
+    if (tl_net4_body && tl_net4_body->aborted) return 0; // Int
     Net3WriterState *w = tl_net3_writer;
     if (!w) {
         taida_net4_abort_connection("wsCloseCode: can only be called inside a 2-argument httpServe handler");
