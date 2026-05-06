@@ -513,7 +513,12 @@ mod tests {
     #[test]
     fn test_ensure_release_bad_api_url() {
         // Point at an unreachable API endpoint to test transport failure.
-        // Safety: single-threaded test, restored immediately.
+        // Acquire the crate-wide env_test_lock so this does not race
+        // upgrade::tests / auth::token::tests / pkg::provider::tests on
+        // shared environment variables.
+        let _guard = crate::util::env_test_lock()
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         let prev = std::env::var("TAIDA_GITHUB_API_URL").ok();
         unsafe { std::env::set_var("TAIDA_GITHUB_API_URL", "http://127.0.0.1:1") };
 
@@ -554,8 +559,11 @@ mod tests {
     #[test]
     fn test_ensure_release_with_assets_transport_failure() {
         // RC2.7-3a: test idempotent retry semantics by hitting
-        // an unreachable endpoint. The ensure call should fail
-        // gracefully with a descriptive error.
+        // an unreachable endpoint. Acquire the crate-wide env lock
+        // before mutating TAIDA_GITHUB_API_URL.
+        let _guard = crate::util::env_test_lock()
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         let prev = std::env::var("TAIDA_GITHUB_API_URL").ok();
         unsafe { std::env::set_var("TAIDA_GITHUB_API_URL", "http://127.0.0.1:1") };
 
