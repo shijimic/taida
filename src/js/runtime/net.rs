@@ -430,6 +430,19 @@ function __taida_net_httpEncodeResponse(response) {
         }
       }
     }
+    {
+      const lower = name.toLowerCase();
+      if (lower === 'transfer-encoding') {
+        return __taida_net_result_fail('EncodeError',
+          "httpEncodeResponse: headers[" + i + "].name 'Transfer-Encoding' is runtime-managed");
+      }
+      if (lower === 'set-cookie') {
+        return __taida_net_result_fail('EncodeError',
+          "httpEncodeResponse: headers[" + i + "].name 'Set-Cookie' is reserved by the runtime");
+      }
+      // Content-Length: legacy behaviour — handler-supplied value flows
+      // through and the encoder coalesces with its own auto-append.
+    }
     headerPairs.push([name, value]);
   }
 
@@ -510,15 +523,32 @@ function __taida_net_encodeResponseScatter(response) {
     if (!h || typeof h !== 'object') return null;
     const name = h.name, value = h.value;
     if (typeof name !== 'string' || typeof value !== 'string') return null;
-    // NB-7: Enforce header name/value length limits (parity with public encoder)
     if (Buffer.byteLength(name, 'utf-8') > 8192) return null;
     if (Buffer.byteLength(value, 'utf-8') > 65536) return null;
-    // Reject CRLF in header name/value to prevent response splitting
-    if (name.includes('\r') || name.includes('\n')) return null;
-    if (value.includes('\r') || value.includes('\n')) return null;
-    if (noBody && name.toLowerCase() === 'content-length') continue;
+    if (name.length === 0) return null;
+    // RFC 7230 token + field-value grammar (parity with public encoder
+    // and streaming validator). Without this the scatter path forwarded
+    // ':' / NUL / SP / HTAB / control / DEL / underscore / Set-Cookie
+    // straight onto the wire.
+    {
+      const nameBuf = Buffer.from(name, 'utf-8');
+      for (let k = 0; k < nameBuf.length; k++) {
+        if (!__taida_net_isRfc7230TokenByte(nameBuf[k])) return null;
+      }
+      if (nameBuf.includes(0x5F)) return null; // underscore in name
+      const valueBuf = Buffer.from(value, 'utf-8');
+      for (let k = 0; k < valueBuf.length; k++) {
+        if (!__taida_net_isRfc7230FieldValueByte(valueBuf[k])) return null;
+      }
+    }
+    const lower = name.toLowerCase();
+    if (lower === 'transfer-encoding') return null;
+    if (lower === 'set-cookie') return null;
+    if (lower === 'content-length') {
+      if (noBody) continue;
+      hasContentLength = true;
+    }
     head += name + ': ' + value + '\r\n';
-    if (name.toLowerCase() === 'content-length') hasContentLength = true;
   }
   if (!noBody && !hasContentLength) {
     head += 'Content-Length: ' + bodyBytes.length + '\r\n';

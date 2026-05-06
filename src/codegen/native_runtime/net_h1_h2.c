@@ -519,6 +519,7 @@ taida_val taida_net_http_parse_request_head(taida_val input) {
 // live alongside the streaming validator below.
 static int taida_net3_is_rfc7230_token_byte(unsigned char b);
 static int taida_net3_is_rfc7230_field_value_byte(unsigned char b);
+static int taida_net3_header_name_eq_ci(const char *name, size_t name_len, const char *expected);
 
 // ── httpEncodeResponse(response) ────────────────────────────────
 // Encode response @(status, headers, body) into HTTP/1.1 wire bytes.
@@ -716,28 +717,26 @@ taida_val taida_net_http_encode_response(taida_val response) {
                 }
             }
 
-            // Skip Content-Length for no-body statuses
-            if (no_body && hn_len == 14) {
-                const char *cl_expected = "content-length";
-                int is_cl = 1;
-                for (size_t k = 0; k < 14; k++) {
-                    char c = hname_s[k];
-                    if (c >= 'A' && c <= 'Z') c += 32;
-                    if (c != cl_expected[k]) { is_cl = 0; break; }
-                }
-                if (is_cl) continue;
+            // Reserve Transfer-Encoding / Set-Cookie at the grammar
+            // layer. Content-Length is allowed here so the eager path
+            // preserves the handler-supplied value (the encoder coalesces
+            // it with its own auto-append). The streaming validator is
+            // stricter because chunked is always emitted there.
+            if (taida_net3_header_name_eq_ci(hname_s, hn_len, "transfer-encoding")) {
+                free(buf);
+                char err_msg[160];
+                snprintf(err_msg, sizeof(err_msg),
+                    "httpEncodeResponse: headers[%d].name 'Transfer-Encoding' is runtime-managed",
+                    (int)i);
+                return taida_net_result_fail("EncodeError", err_msg);
             }
-
-            // Check if user provided Content-Length
-            if (hn_len == 14) {
-                const char *cl_expected = "content-length";
-                int is_cl = 1;
-                for (size_t k = 0; k < 14; k++) {
-                    char c = hname_s[k];
-                    if (c >= 'A' && c <= 'Z') c += 32;
-                    if (c != cl_expected[k]) { is_cl = 0; break; }
-                }
-                if (is_cl) has_content_length = 1;
+            if (taida_net3_header_name_eq_ci(hname_s, hn_len, "set-cookie")) {
+                free(buf);
+                char err_msg[200];
+                snprintf(err_msg, sizeof(err_msg),
+                    "httpEncodeResponse: headers[%d].name 'Set-Cookie' is reserved by the runtime",
+                    (int)i);
+                return taida_net_result_fail("EncodeError", err_msg);
             }
 
             // Grow buffer if needed
@@ -1078,9 +1077,16 @@ static int64_t taida_net_chunked_body_complete(
             }
         }
 
-        // Check data + CRLF
-        if (rp + chunk_size + 2 > data_len) return -1; // incomplete
-        rp += chunk_size;
+        // Check data + CRLF. The naive `rp + chunk_size + 2 > data_len`
+        // would wrap on LP32 once chunk_size approaches SIZE_MAX (which
+        // the upstream uint64_t guard still allows up to SIZE_MAX). Use
+        // the difference form so the comparison is monotonic, then fold
+        // the +2 trailing CRLF into a separate check on data_len - rp
+        // - chunk_size to avoid any silent wrap.
+        if (chunk_size > data_len - rp) return -1; // incomplete (body fragment)
+        size_t after_data = rp + chunk_size;
+        if (data_len - after_data < 2) return -1; // incomplete (trailing CRLF)
+        rp = after_data;
         if (buf[body_offset + rp] != '\r' || buf[body_offset + rp + 1] != '\n') return -2; // malformed
         rp += 2;
     }
@@ -1392,27 +1398,38 @@ static int taida_net_send_response_scatter(int client_fd, taida_val response) {
         if (!taida_read_cstr_len_safe(hname_s, 8192, &hn_len)) { if (head != head_stack) free(head); return -1; }
         if (!taida_read_cstr_len_safe(hvalue_s, 65536, &hv_len)) { if (head != head_stack) free(head); return -1; }
 
-        // NB-13: Reject CRLF in header name/value (parity with public encoder)
+        // RFC 7230 token + field-value grammar (parity with the eager
+        // encoder + streaming validator). Without this scatter path the
+        // rest of httpServe forwards attacker-influenced names like ':',
+        // NUL, SP/HTAB, control bytes, DEL, underscore (CL.CL bypass)
+        // straight onto the wire.
+        if (hn_len == 0) { if (head != head_stack) free(head); return -1; }
         for (size_t k = 0; k < hn_len; k++) {
-            if (hname_s[k] == '\r' || hname_s[k] == '\n') { if (head != head_stack) free(head); return -1; }
+            unsigned char b = (unsigned char)hname_s[k];
+            if (!taida_net3_is_rfc7230_token_byte(b)) { if (head != head_stack) free(head); return -1; }
+        }
+        for (size_t k = 0; k < hn_len; k++) {
+            if (hname_s[k] == '_') { if (head != head_stack) free(head); return -1; }
         }
         for (size_t k = 0; k < hv_len; k++) {
-            if (hvalue_s[k] == '\r' || hvalue_s[k] == '\n') { if (head != head_stack) free(head); return -1; }
+            unsigned char b = (unsigned char)hvalue_s[k];
+            if (!taida_net3_is_rfc7230_field_value_byte(b)) { if (head != head_stack) free(head); return -1; }
         }
 
-        // Check content-length
-        if (hn_len == 14) {
-            const char *cl_expected = "content-length";
-            int is_cl = 1;
-            for (size_t k = 0; k < 14; k++) {
-                char c = hname_s[k];
-                if (c >= 'A' && c <= 'Z') c += 32;
-                if (c != cl_expected[k]) { is_cl = 0; break; }
-            }
-            if (is_cl) {
-                if (no_body) continue;
-                has_content_length = 1;
-            }
+        // Reserve Content-Length / Transfer-Encoding / Set-Cookie at the
+        // grammar layer (parity with eager / streaming).
+        if (taida_net3_header_name_eq_ci(hname_s, hn_len, "content-length")) {
+            if (no_body) continue;
+            has_content_length = 1;
+            // Fall through to emit; the caller has already validated the body length.
+        }
+        if (taida_net3_header_name_eq_ci(hname_s, hn_len, "transfer-encoding")) {
+            if (head != head_stack) free(head);
+            return -1;
+        }
+        if (taida_net3_header_name_eq_ci(hname_s, hn_len, "set-cookie")) {
+            if (head != head_stack) free(head);
+            return -1;
         }
 
         size_t needed = head_len + hn_len + hv_len + 4;
@@ -1944,9 +1961,9 @@ taida_val taida_net_write_chunk(taida_val writer, taida_val data) {
     // Commit head if not yet committed
     if (w->state == NET3_STATE_IDLE || w->state == NET3_STATE_HEAD_PREPARED) {
         if (taida_net3_commit_head(fd, w) != 0) {
-            fprintf(stderr, "writeChunk: failed to commit response head\n");
             if (heap_payload) free(heap_payload);
-            exit(1);
+            taida_net4_abort_connection("writeChunk: failed to commit response head");
+            return 0; // Unit
         }
         w->state = NET3_STATE_STREAMING;
     }
@@ -1964,11 +1981,12 @@ taida_val taida_net_write_chunk(taida_val writer, taida_val data) {
     iov[2].iov_base = (void*)"\r\n";
     iov[2].iov_len = 2;
 
-    // NB3-5: Check writev_all return value for write errors (e.g. peer RST).
+    // Peer disconnect (RST / EPIPE) is attacker-reachable and must not
+    // tear down sibling connections.
     if (taida_net_writev_all(fd, iov, 3) != 0) {
         if (heap_payload) free(heap_payload);
-        fprintf(stderr, "writeChunk: failed to send chunk data\n");
-        exit(1);
+        taida_net4_abort_connection("writeChunk: failed to send chunk data");
+        return 0; // Unit
     }
 
     if (heap_payload) free(heap_payload);
@@ -1992,8 +2010,8 @@ taida_val taida_net_end_response(taida_val writer) {
     // Commit head if not yet committed
     if (w->state == NET3_STATE_IDLE || w->state == NET3_STATE_HEAD_PREPARED) {
         if (taida_net3_commit_head(fd, w) != 0) {
-            fprintf(stderr, "endResponse: failed to commit response head\n");
-            exit(1);
+            taida_net4_abort_connection("endResponse: failed to commit response head");
+            return 0; // Unit
         }
     }
 
@@ -2121,8 +2139,8 @@ taida_val taida_net_sse_event(taida_val writer, taida_val event, taida_val data)
     // Commit head if not yet committed
     if (w->state == NET3_STATE_IDLE || w->state == NET3_STATE_HEAD_PREPARED) {
         if (taida_net3_commit_head(fd, w) != 0) {
-            fprintf(stderr, "sseEvent: failed to commit response head\n");
-            exit(1);
+            taida_net4_abort_connection("sseEvent: failed to commit response head");
+            return 0; // Unit
         }
         w->state = NET3_STATE_STREAMING;
     }
@@ -2223,11 +2241,11 @@ taida_val taida_net_sse_event(taida_val writer, taida_val event, taida_val data)
     iov[iov_count].iov_len = 2;
     iov_count++;
 
-    // NB3-5: Check writev_all return value for write errors (e.g. peer RST).
+    // Peer disconnect (RST / EPIPE) is attacker-reachable.
     if (taida_net_writev_all(fd, iov, iov_count) != 0) {
         if (iov != stack_iov) free(iov);
-        fprintf(stderr, "sseEvent: failed to send SSE chunk data\n");
-        exit(1);
+        taida_net4_abort_connection("sseEvent: failed to send SSE chunk data");
+        return 0; // Unit
     }
 
     if (iov != stack_iov) free(iov);

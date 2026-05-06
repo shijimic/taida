@@ -211,6 +211,126 @@ fn e32b_041_eager_path_shares_grammar_with_streaming() {
 }
 
 #[test]
+fn e32b_039_native_chunked_data_length_check_does_not_wrap() {
+    // The naive `rp + chunk_size + 2 > data_len` wraps on LP32 once
+    // `chunk_size` approaches SIZE_MAX, even after the upstream uint64_t
+    // guard. Native must use the difference form so the comparison stays
+    // monotonic.
+    assert!(
+        NATIVE_NET.contains("if (chunk_size > data_len - rp) return -1;"),
+        "native chunked parser must use difference-form length check"
+    );
+    assert!(
+        NATIVE_NET.contains("if (data_len - after_data < 2) return -1;"),
+        "native chunked parser must check trailing CRLF without wrapping"
+    );
+}
+
+#[test]
+fn e32b_040_streaming_writers_use_abort_connection() {
+    // Peer disconnect (RST / EPIPE) is attacker-reachable. The streaming
+    // commit / send paths must funnel write failures through
+    // taida_net4_abort_connection rather than exit(1).
+    assert!(
+        NATIVE_NET.contains(
+            "taida_net4_abort_connection(\"writeChunk: failed to commit response head\")"
+        ) && NATIVE_NET
+            .contains("taida_net4_abort_connection(\"writeChunk: failed to send chunk data\")"),
+        "writeChunk wire-error paths must call taida_net4_abort_connection"
+    );
+    assert!(
+        NATIVE_NET.contains(
+            "taida_net4_abort_connection(\"endResponse: failed to commit response head\")"
+        ),
+        "endResponse wire-error path must call taida_net4_abort_connection"
+    );
+    assert!(
+        NATIVE_NET
+            .contains("taida_net4_abort_connection(\"sseEvent: failed to commit response head\")")
+            && NATIVE_NET.contains(
+                "taida_net4_abort_connection(\"sseEvent: failed to send SSE chunk data\")"
+            ),
+        "sseEvent wire-error paths must call taida_net4_abort_connection"
+    );
+}
+
+#[test]
+fn e32b_041_eager_path_rejects_set_cookie() {
+    // Set-Cookie reservation must be enforced in the eager path
+    // (httpEncodeResponse) across all three backends — not just the
+    // streaming validator.
+    assert!(
+        INTERP_HELPERS.contains("'Set-Cookie' is reserved by the runtime"),
+        "interpreter eager path must reject Set-Cookie in httpEncodeResponse"
+    );
+    assert!(
+        NATIVE_NET.contains("'Set-Cookie' is reserved by the runtime"),
+        "native eager path must reject Set-Cookie in httpEncodeResponse"
+    );
+    assert!(
+        JS_NET.contains("'Set-Cookie' is reserved by the runtime"),
+        "JS eager path must reject Set-Cookie in httpEncodeResponse"
+    );
+}
+
+#[test]
+fn e32b_041_scatter_path_uses_grammar_helpers() {
+    // The httpServe handler-return scatter path (which does not flow
+    // through httpEncodeResponse) must enforce the same RFC 7230 grammar
+    // and reservations. Otherwise an attacker-influenced header from the
+    // handler bypasses the validator on the production wire.
+    let scatter = NATIVE_NET
+        .split("static int taida_net_send_response_scatter")
+        .nth(1)
+        .expect("scatter function must exist");
+    let scatter_end = scatter
+        .find("\n}\n")
+        .expect("scatter function must terminate");
+    let scatter_body = &scatter[..scatter_end];
+    assert!(
+        scatter_body.contains("taida_net3_is_rfc7230_token_byte"),
+        "native scatter path must call the RFC 7230 token grammar helper"
+    );
+    assert!(
+        scatter_body.contains("taida_net3_is_rfc7230_field_value_byte"),
+        "native scatter path must call the RFC 7230 field-value grammar helper"
+    );
+    assert!(
+        scatter_body.contains("\"set-cookie\""),
+        "native scatter path must reserve set-cookie"
+    );
+    assert!(
+        scatter_body.contains("\"transfer-encoding\""),
+        "native scatter path must reserve transfer-encoding"
+    );
+
+    // JS scatter shares helpers with the eager validator.
+    let js_scatter = JS_NET
+        .split("function __taida_net_encodeResponseScatter")
+        .nth(1)
+        .expect("JS scatter must exist");
+    let js_scatter_end = js_scatter.find("\n}\n").expect("JS scatter must terminate");
+    let js_scatter_body = &js_scatter[..js_scatter_end];
+    assert!(
+        js_scatter_body.contains("__taida_net_isRfc7230TokenByte"),
+        "JS scatter path must call the RFC 7230 token helper"
+    );
+    assert!(
+        js_scatter_body.contains("__taida_net_isRfc7230FieldValueByte"),
+        "JS scatter path must call the RFC 7230 field-value helper"
+    );
+    assert!(
+        js_scatter_body.contains("'set-cookie'") || js_scatter_body.contains("\"set-cookie\""),
+        "JS scatter path must reserve set-cookie"
+    );
+    assert!(
+        js_scatter_body.contains("'transfer-encoding'")
+            || js_scatter_body.contains("\"transfer-encoding\""),
+        "JS scatter path must reserve transfer-encoding"
+    );
+}
+
+#[test]
 fn e32b_041_seven_bypass_cases_pinned() {
     // Each of the seven cases the reviewer demonstrated must show up
     // in the validator messages so a unit test can assert against them.

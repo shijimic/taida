@@ -1250,8 +1250,12 @@ fn test_encode_multiple_headers_order_preserved() {
 }
 
 #[test]
-fn test_encode_duplicate_header_names_preserved() {
-    // Multiple headers with the same name should all appear (e.g. Set-Cookie).
+fn test_encode_duplicate_set_cookie_rejected() {
+    // Set-Cookie is now runtime-reserved. Multiple Set-Cookie headers
+    // (or a single one) must be rejected at httpEncodeResponse — the
+    // attacker bypass is that name="Set-Cookie" with attacker-controlled
+    // value forwards arbitrary cookies, which the future cookie API will
+    // own instead.
     let response = Value::pack(vec![
         ("status".into(), Value::Int(200)),
         (
@@ -1270,16 +1274,36 @@ fn test_encode_duplicate_header_names_preserved() {
         ("body".into(), Value::str(String::new())),
     ]);
     let result = encode_response(&response);
-    assert!(!is_result_failure(&result));
-    let inner = extract_result_inner(&result);
-    let bytes = match inner.iter().find(|(k, _)| k == "bytes") {
-        Some((_, Value::Bytes(b))) => b.as_slice().to_vec(),
-        _ => panic!("no bytes"),
-    };
-    let text = String::from_utf8(bytes).unwrap();
-    assert!(text.contains("Set-Cookie: a=1\r\n"));
-    assert!(text.contains("Set-Cookie: b=2\r\n"));
-    assert_eq!(text.matches("Set-Cookie").count(), 2);
+    assert!(is_result_failure(&result));
+    let msg = get_failure_message(&result);
+    assert!(
+        msg.contains("'Set-Cookie' is reserved by the runtime"),
+        "{}",
+        msg
+    );
+}
+
+#[test]
+fn test_encode_transfer_encoding_rejected() {
+    let response = Value::pack(vec![
+        ("status".into(), Value::Int(200)),
+        (
+            "headers".into(),
+            Value::list(vec![Value::pack(vec![
+                ("name".into(), Value::str("Transfer-Encoding".into())),
+                ("value".into(), Value::str("chunked".into())),
+            ])]),
+        ),
+        ("body".into(), Value::str(String::new())),
+    ]);
+    let result = encode_response(&response);
+    assert!(is_result_failure(&result));
+    let msg = get_failure_message(&result);
+    assert!(
+        msg.contains("'Transfer-Encoding' is runtime-managed"),
+        "{}",
+        msg
+    );
 }
 
 // ── httpServe integration tests ──

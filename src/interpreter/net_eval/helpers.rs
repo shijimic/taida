@@ -1093,6 +1093,25 @@ pub(crate) fn extract_response_fields(response: &Value) -> Result<ResponseFields
                 ));
             }
         }
+        let lower = name.to_ascii_lowercase();
+        if lower == "transfer-encoding" {
+            return Err(format!(
+                "httpEncodeResponse: headers[{}].name 'Transfer-Encoding' is runtime-managed",
+                i
+            ));
+        }
+        if lower == "set-cookie" {
+            return Err(format!(
+                "httpEncodeResponse: headers[{}].name 'Set-Cookie' is reserved by the runtime; handler-supplied Set-Cookie headers would let attacker-influenced names (forwarded via untrusted input) inject cookies. Use a future cookie API.",
+                i
+            ));
+        }
+        // NB: Content-Length is intentionally not rejected on the eager
+        // path. The encoder coalesces handler-supplied Content-Length
+        // with the runtime-computed one (no double-emit) and strips it
+        // for bodyless statuses, preserving legacy behaviour. The
+        // streaming validator is stricter because the runtime always
+        // emits chunked there.
         headers.push((name, value));
     }
 
