@@ -738,6 +738,16 @@ taida_val taida_net_http_encode_response(taida_val response) {
                     (int)i);
                 return taida_net_result_fail("EncodeError", err_msg);
             }
+            // Content-Length: drop it for bodyless statuses (parity with
+            // Interpreter / JS) and otherwise mark `has_content_length`
+            // so the auto-append below does not double-emit. Without
+            // this signal Native would emit the user's Content-Length
+            // on the wire AND append its own — re-introducing the
+            // CL.CL smuggling vector the rest of this batch closes.
+            if (taida_net3_header_name_eq_ci(hname_s, hn_len, "content-length")) {
+                if (no_body) continue;
+                has_content_length = 1;
+            }
 
             // Grow buffer if needed
             size_t needed = buf_len + hn_len + hv_len + 4;

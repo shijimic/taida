@@ -274,6 +274,42 @@ fn e32b_041_eager_path_rejects_set_cookie() {
 }
 
 #[test]
+fn e32b_041_native_eager_no_double_content_length() {
+    // The Native eager httpEncodeResponse must coalesce a handler-supplied
+    // Content-Length with its own auto-append, otherwise the response
+    // emits two Content-Length lines and re-introduces CL.CL smuggling.
+    // The control flow we depend on is: detect "content-length", drop it
+    // for bodyless statuses (`continue`), and otherwise set
+    // `has_content_length = 1` so the auto-append below is suppressed.
+    // Skip the forward declaration (line ~7) and grab the function body
+    // proper, which starts at the `{` after the parameter list.
+    let eager = NATIVE_NET
+        .split("taida_val taida_net_http_encode_response(taida_val response) {")
+        .nth(1)
+        .expect("Native httpEncodeResponse function body must exist");
+    let eager_end = eager
+        .find("// ── net_send_all")
+        .or_else(|| eager.find("// ── readBody"))
+        .or_else(|| eager.find("static int taida_net_send_response_scatter"))
+        .expect("Native httpEncodeResponse must terminate before the next section");
+    let eager_body = &eager[..eager_end];
+
+    assert!(
+        eager_body.contains(r#"taida_net3_header_name_eq_ci(hname_s, hn_len, "content-length")"#),
+        "native eager path must detect content-length in handler headers"
+    );
+    assert!(
+        eager_body.contains("has_content_length = 1"),
+        "native eager path must mark has_content_length so auto-append is suppressed"
+    );
+    // Bodyless statuses (204 / 304 / 1xx) must drop the user CL.
+    assert!(
+        eager_body.contains("if (no_body) continue;"),
+        "native eager path must skip user content-length for no-body statuses"
+    );
+}
+
+#[test]
 fn e32b_041_scatter_path_uses_grammar_helpers() {
     // The httpServe handler-return scatter path (which does not flow
     // through httpEncodeResponse) must enforce the same RFC 7230 grammar
