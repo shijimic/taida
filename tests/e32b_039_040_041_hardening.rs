@@ -174,6 +174,78 @@ fn e32b_040_chunked_body_does_not_exit_on_attacker_input() {
     );
 }
 
+// ── E32B-079 (E32B-040 follow-up) ───────────────────────────────
+
+#[test]
+fn e32b_079_native_runtime_has_no_remaining_handler_exit() {
+    // After the supply-chain follow-up, every handler-callable API in
+    // net_h1_h2.c routes attacker-reachable failures through
+    // taida_net4_abort_connection. The only `exit(1)` tokens that are
+    // allowed to remain in the source are the explanatory references
+    // inside doc-comments (`This replaces process-wide exit(1) ...`) —
+    // not actual call sites. Count code-side calls by looking for the
+    // bare `exit(1);` statement (the trailing semicolon distinguishes
+    // it from in-text references).
+    let code_exit_count = NATIVE_NET.matches("exit(1);").count();
+    assert_eq!(
+        code_exit_count, 0,
+        "net_h1_h2.c must not call exit(1) on any handler-context path; \
+         every attacker-reachable failure must funnel through \
+         taida_net4_abort_connection"
+    );
+}
+
+#[test]
+fn e32b_079_validate_writer_returns_int_not_void() {
+    assert!(
+        NATIVE_NET.contains(
+            "static int taida_net3_validate_writer(taida_val writer, const char *api_name)"
+        ),
+        "validate_writer must return int so callers can check 0/-1 instead of relying on exit(1)"
+    );
+    assert!(
+        NATIVE_NET.contains("if (taida_net3_validate_writer(writer, \"startResponse\") < 0)"),
+        "startResponse must early-return on validate_writer failure"
+    );
+    assert!(
+        NATIVE_NET.contains("if (taida_net3_validate_writer(writer, \"writeChunk\") < 0)"),
+        "writeChunk must early-return on validate_writer failure"
+    );
+    assert!(
+        NATIVE_NET.contains("if (taida_net3_validate_writer(writer, \"endResponse\") < 0)"),
+        "endResponse must early-return on validate_writer failure"
+    );
+    assert!(
+        NATIVE_NET.contains("if (taida_net3_validate_writer(writer, \"sseEvent\") < 0)"),
+        "sseEvent must early-return on validate_writer failure"
+    );
+    assert!(
+        NATIVE_NET.contains("if (taida_net3_validate_writer(writer, \"wsUpgrade\") < 0)"),
+        "wsUpgrade must early-return on validate_writer failure"
+    );
+}
+
+#[test]
+fn e32b_079_ws_send_checks_write_frame_return() {
+    // wsSend used to drop the taida_net4_write_ws_frame return value,
+    // letting peer disconnect (RST / EPIPE) silently fail. The fix
+    // checks `!= 0` and aborts the connection so the listener pool
+    // keeps serving siblings.
+    let ws_send = slice_between(
+        NATIVE_NET,
+        "// ── wsSend(ws, data) → Unit (NET4-4d) ───────────────────────",
+        "// ── wsReceive(ws) → Lax[@(type, data)] (NET4-4d) ────────────",
+    );
+    assert!(
+        ws_send.contains("taida_net4_write_ws_frame(fd, opcode, payload, payload_len) != 0"),
+        "wsSend must check the WS frame write return value and abort on failure"
+    );
+    assert!(
+        ws_send.contains("taida_net4_abort_connection(\"wsSend: failed to send WebSocket frame\")"),
+        "wsSend must call abort_connection on a write failure"
+    );
+}
+
 // ── E32B-041 ────────────────────────────────────────────────────
 
 #[test]

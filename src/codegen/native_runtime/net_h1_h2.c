@@ -1643,7 +1643,8 @@ static void taida_net4_abort_connection(const char *reason) {
 }
 
 // Forward declaration: writer token validation (defined after create_writer_token).
-static void taida_net3_validate_writer(taida_val writer, const char *api_name);
+// Returns 0 on success, -1 after aborting the connection.
+static int taida_net3_validate_writer(taida_val writer, const char *api_name);
 
 // NET3-5c: writev()-based send helper. Sends all iov buffers, handling
 // partial writes and EINTR. Returns 0 on success, -1 on error.
@@ -1857,33 +1858,34 @@ static void taida_net3_extract_headers(Net3WriterState *w, taida_val headers) {
 // NET3-5b: startResponse(writer, status, headers)
 // Updates pending status/headers on the writer state. Does NOT commit to wire.
 taida_val taida_net_start_response(taida_val writer, taida_val status, taida_val headers) {
-    taida_net3_validate_writer(writer, "startResponse");
+    if (taida_net3_validate_writer(writer, "startResponse") < 0) return 0;
     Net3WriterState *w = tl_net3_writer;
     if (!w) {
-        fprintf(stderr, "startResponse: can only be called inside a 2-argument httpServe handler\n");
-        exit(1);
+        taida_net4_abort_connection("startResponse: can only be called inside a 2-argument httpServe handler");
+        return 0;
     }
     // State check
     switch (w->state) {
         case NET3_STATE_IDLE: break;
         case NET3_STATE_HEAD_PREPARED:
-            fprintf(stderr, "startResponse: already called. Cannot call startResponse twice.\n");
-            exit(1);
+            taida_net4_abort_connection("startResponse: already called. Cannot call startResponse twice.");
+            return 0;
         case NET3_STATE_STREAMING:
-            fprintf(stderr, "startResponse: head already committed (chunks are being written). Cannot change status/headers after writeChunk.\n");
-            exit(1);
+            taida_net4_abort_connection("startResponse: head already committed (chunks are being written). Cannot change status/headers after writeChunk.");
+            return 0;
         case NET3_STATE_ENDED:
-            fprintf(stderr, "startResponse: response already ended.\n");
-            exit(1);
+            taida_net4_abort_connection("startResponse: response already ended.");
+            return 0;
     }
     // Validate status range
     if (status < 100 || status > 599) {
-        fprintf(stderr, "startResponse: status must be 100-599, got %lld\n", (long long)status);
-        exit(1);
+        taida_net4_abort_connection("startResponse: status out of 100-599 range");
+        return 0;
     }
     // Validate streaming response headers
     if (taida_net3_validate_streaming_headers(headers, "startResponse") < 0) {
-        exit(1);
+        taida_net4_abort_connection("startResponse: streaming header validation rejected");
+        return 0;
     }
     w->pending_status = (int)status;
     taida_net3_extract_headers(w, headers);
@@ -1896,16 +1898,16 @@ taida_val taida_net_start_response(taida_val writer, taida_val status, taida_val
 // Bytes: extract from taida_val array to stack/stack-heap buffer, then writev.
 // Str: use C string directly.
 taida_val taida_net_write_chunk(taida_val writer, taida_val data) {
-    taida_net3_validate_writer(writer, "writeChunk");
+    if (taida_net3_validate_writer(writer, "writeChunk") < 0) return 0;
     Net3WriterState *w = tl_net3_writer;
     int fd = tl_net3_client_fd;
     if (!w) {
-        fprintf(stderr, "writeChunk: can only be called inside a 2-argument httpServe handler\n");
-        exit(1);
+        taida_net4_abort_connection("writeChunk: can only be called inside a 2-argument httpServe handler");
+        return 0;
     }
     if (w->state == NET3_STATE_ENDED) {
-        fprintf(stderr, "writeChunk: response already ended.\n");
-        exit(1);
+        taida_net4_abort_connection("writeChunk: response already ended.");
+        return 0;
     }
 
     // Extract payload pointer and length
@@ -1952,9 +1954,9 @@ taida_val taida_net_write_chunk(taida_val writer, taida_val data) {
         const char *str = (const char*)data;
         size_t slen = 0;
         if (!taida_read_cstr_len_safe(str, 16 * 1024 * 1024, &slen)) {
-            fprintf(stderr, "writeChunk: data must be Bytes or Str\n");
             if (heap_payload) free(heap_payload);
-            exit(1);
+            taida_net4_abort_connection("writeChunk: data must be Bytes or Str");
+            return 0;
         }
         payload = (const unsigned char*)str;
         payload_len = slen;
@@ -1963,9 +1965,9 @@ taida_val taida_net_write_chunk(taida_val writer, taida_val data) {
 
     // Bodyless status check
     if (taida_net3_is_bodyless_status(w->pending_status)) {
-        fprintf(stderr, "writeChunk: status %d does not allow a message body\n", w->pending_status);
         if (heap_payload) free(heap_payload);
-        exit(1);
+        taida_net4_abort_connection("writeChunk: status does not allow a message body");
+        return 0;
     }
 
     // Commit head if not yet committed
@@ -2007,12 +2009,12 @@ taida_val taida_net_write_chunk(taida_val writer, taida_val data) {
 // Terminates the chunked response by sending 0\r\n\r\n.
 // Idempotent: second call is a no-op.
 taida_val taida_net_end_response(taida_val writer) {
-    taida_net3_validate_writer(writer, "endResponse");
+    if (taida_net3_validate_writer(writer, "endResponse") < 0) return 0;
     Net3WriterState *w = tl_net3_writer;
     int fd = tl_net3_client_fd;
     if (!w) {
-        fprintf(stderr, "endResponse: can only be called inside a 2-argument httpServe handler\n");
-        exit(1);
+        taida_net4_abort_connection("endResponse: can only be called inside a 2-argument httpServe handler");
+        return 0;
     }
     // Idempotent: no-op if already ended
     if (w->state == NET3_STATE_ENDED) return 0;
@@ -2038,36 +2040,34 @@ taida_val taida_net_end_response(taida_val writer) {
 // Auto-sets Content-Type and Cache-Control headers if not already set.
 // Splits multiline data into data: lines.
 taida_val taida_net_sse_event(taida_val writer, taida_val event, taida_val data) {
-    taida_net3_validate_writer(writer, "sseEvent");
+    if (taida_net3_validate_writer(writer, "sseEvent") < 0) return 0;
     Net3WriterState *w = tl_net3_writer;
     int fd = tl_net3_client_fd;
     if (!w) {
-        fprintf(stderr, "sseEvent: can only be called inside a 2-argument httpServe handler\n");
-        exit(1);
+        taida_net4_abort_connection("sseEvent: can only be called inside a 2-argument httpServe handler");
+        return 0;
     }
-    // Validate event and data are strings.
-    // NB3-8: Use taida_str_byte_len which reads heap string length from header
-    // metadata instead of scanning for NUL. This is correct for non-ASCII
-    // (multi-byte UTF-8) strings and avoids parity issues with Interpreter/JS.
+    // Validate event and data are strings (UTF-8 byte length read from
+    // the heap header so non-ASCII works).
     const char *event_str = (const char*)event;
     const char *data_str = (const char*)data;
     size_t event_len = 0, data_len = 0;
     if (!taida_str_byte_len(event_str, &event_len)) {
-        fprintf(stderr, "sseEvent: event must be Str\n");
-        exit(1);
+        taida_net4_abort_connection("sseEvent: event must be Str");
+        return 0;
     }
     if (!taida_str_byte_len(data_str, &data_len)) {
-        fprintf(stderr, "sseEvent: data must be Str\n");
-        exit(1);
+        taida_net4_abort_connection("sseEvent: data must be Str");
+        return 0;
     }
 
     if (w->state == NET3_STATE_ENDED) {
-        fprintf(stderr, "sseEvent: response already ended.\n");
-        exit(1);
+        taida_net4_abort_connection("sseEvent: response already ended.");
+        return 0;
     }
     if (taida_net3_is_bodyless_status(w->pending_status)) {
-        fprintf(stderr, "sseEvent: status %d does not allow a message body\n", w->pending_status);
-        exit(1);
+        taida_net4_abort_connection("sseEvent: status does not allow a message body");
+        return 0;
     }
 
     // SSE auto-headers (once per writer)
@@ -2112,11 +2112,8 @@ taida_val taida_net_sse_event(taida_val writer, taida_val event, taida_val data)
                 }
             }
             if (!has_ct || !has_cc) {
-                fprintf(stderr, "sseEvent: head already committed without SSE headers. "
-                        "Call sseEvent before writeChunk, or use startResponse "
-                        "with explicit Content-Type: text/event-stream and "
-                        "Cache-Control: no-cache headers before writeChunk.\n");
-                exit(1);
+                taida_net4_abort_connection("sseEvent: head already committed without SSE headers. Call sseEvent before writeChunk, or use startResponse with explicit text/event-stream + no-cache headers.");
+                return 0;
             }
             w->sse_mode = 1;
         } else {
@@ -2588,30 +2585,26 @@ static uint64_t taida_net4_extract_body_token(taida_val req) {
 // ── readBodyChunk(req) → Lax[Bytes] ─────────────────────────
 taida_val taida_net_read_body_chunk(taida_val req) {
     if (!taida_net4_is_body_stream_request(req)) {
-        fprintf(stderr, "readBodyChunk: can only be called in a 2-argument httpServe handler. "
-                "In a 1-argument handler, the request body is already fully read. "
-                "Use readBody(req) instead.\n");
-        exit(1);
+        taida_net4_abort_connection("readBodyChunk: can only be called in a 2-argument httpServe handler");
+        return taida_net4_make_lax_bytes_empty();
     }
 
     Net4BodyState *bs = tl_net4_body;
     if (!bs) {
-        fprintf(stderr, "readBodyChunk: no active body streaming state\n");
-        exit(1);
+        taida_net4_abort_connection("readBodyChunk: no active body streaming state");
+        return taida_net4_make_lax_bytes_empty();
     }
 
-    // NB4-7: Verify request token.
     uint64_t tok = taida_net4_extract_body_token(req);
     if (tok != bs->request_token) {
-        fprintf(stderr, "readBodyChunk: request pack does not match the current active request. "
-                "The request may be stale or fabricated.\n");
-        exit(1);
+        taida_net4_abort_connection("readBodyChunk: request pack does not match the current active request");
+        return taida_net4_make_lax_bytes_empty();
     }
 
     Net3WriterState *w = tl_net3_writer;
     if (w && w->state == NET3_STATE_WEBSOCKET) {
-        fprintf(stderr, "readBodyChunk: cannot read HTTP body after WebSocket upgrade.\n");
-        exit(1);
+        taida_net4_abort_connection("readBodyChunk: cannot read HTTP body after WebSocket upgrade");
+        return taida_net4_make_lax_bytes_empty();
     }
 
     int fd = tl_net3_client_fd;
@@ -2757,16 +2750,14 @@ taida_val taida_net_read_body_chunk(taida_val req) {
 // The only aggregate path permitted by v4 contract.
 taida_val taida_net_read_body_all(taida_val req) {
     if (!taida_net4_is_body_stream_request(req)) {
-        fprintf(stderr, "readBodyAll: can only be called in a 2-argument httpServe handler. "
-                "In a 1-argument handler, the request body is already fully read. "
-                "Use readBody(req) instead.\n");
-        exit(1);
+        taida_net4_abort_connection("readBodyAll: can only be called in a 2-argument httpServe handler");
+        return taida_bytes_new_filled(0, 0);
     }
 
     Net4BodyState *bs = tl_net4_body;
     if (!bs) {
-        fprintf(stderr, "readBodyAll: no active body streaming state\n");
-        exit(1);
+        taida_net4_abort_connection("readBodyAll: no active body streaming state");
+        return taida_bytes_new_filled(0, 0);
     }
 
     // NB4-7: Verify request token.
@@ -3265,12 +3256,14 @@ taida_val taida_net_ws_upgrade(taida_val req, taida_val writer) {
     // Must be inside 2-arg handler.
     Net3WriterState *w = tl_net3_writer;
     if (!w) {
-        fprintf(stderr, "wsUpgrade: can only be called inside a 2-argument httpServe handler\n");
-        exit(1);
+        taida_net4_abort_connection("wsUpgrade: can only be called inside a 2-argument httpServe handler");
+        return taida_net4_make_lax_ws_empty();
     }
 
     // Validate writer token.
-    taida_net3_validate_writer(writer, "wsUpgrade");
+    if (taida_net3_validate_writer(writer, "wsUpgrade") < 0) {
+        return taida_net4_make_lax_ws_empty();
+    }
 
     // NB4-10: Verify request token matches the active body state.
     {
@@ -3278,9 +3271,8 @@ taida_val taida_net_ws_upgrade(taida_val req, taida_val writer) {
         if (bs_check) {
             uint64_t tok = taida_net4_extract_body_token(req);
             if (tok != bs_check->request_token) {
-                fprintf(stderr, "wsUpgrade: request pack does not match the current active request. "
-                        "The request may be stale or fabricated.\n");
-                exit(1);
+                taida_net4_abort_connection("wsUpgrade: request pack does not match the current active request");
+                return taida_net4_make_lax_ws_empty();
             }
         }
     }
@@ -3290,15 +3282,14 @@ taida_val taida_net_ws_upgrade(taida_val req, taida_val writer) {
         case NET3_STATE_IDLE: break;
         case NET3_STATE_HEAD_PREPARED:
         case NET3_STATE_STREAMING:
-            fprintf(stderr, "wsUpgrade: cannot upgrade after HTTP response has started. "
-                    "wsUpgrade must be called before startResponse/writeChunk.\n");
-            exit(1);
+            taida_net4_abort_connection("wsUpgrade: cannot upgrade after HTTP response has started");
+            return taida_net4_make_lax_ws_empty();
         case NET3_STATE_ENDED:
-            fprintf(stderr, "wsUpgrade: cannot upgrade after HTTP response has ended.\n");
-            exit(1);
+            taida_net4_abort_connection("wsUpgrade: cannot upgrade after HTTP response has ended");
+            return taida_net4_make_lax_ws_empty();
         case NET3_STATE_WEBSOCKET:
-            fprintf(stderr, "wsUpgrade: WebSocket upgrade already completed.\n");
-            exit(1);
+            taida_net4_abort_connection("wsUpgrade: WebSocket upgrade already completed");
+            return taida_net4_make_lax_ws_empty();
     }
 
     if (!taida_is_buchi_pack(req)) {
@@ -3455,24 +3446,24 @@ taida_val taida_net_ws_upgrade(taida_val req, taida_val writer) {
 taida_val taida_net_ws_send(taida_val ws, taida_val data) {
     Net3WriterState *w = tl_net3_writer;
     if (!w) {
-        fprintf(stderr, "wsSend: can only be called inside a 2-argument httpServe handler\n");
-        exit(1);
+        taida_net4_abort_connection("wsSend: can only be called inside a 2-argument httpServe handler");
+        return 0;
     }
 
     if (!taida_net4_validate_ws_token(ws)) {
-        fprintf(stderr, "wsSend: first argument must be the WebSocket connection from wsUpgrade\n");
-        exit(1);
+        taida_net4_abort_connection("wsSend: first argument must be the WebSocket connection from wsUpgrade");
+        return 0;
     }
 
     if (w->state != NET3_STATE_WEBSOCKET) {
-        fprintf(stderr, "wsSend: not in WebSocket state. Call wsUpgrade first.\n");
-        exit(1);
+        taida_net4_abort_connection("wsSend: not in WebSocket state. Call wsUpgrade first.");
+        return 0;
     }
 
     Net4BodyState *bs = tl_net4_body;
     if (bs && bs->ws_closed) {
-        fprintf(stderr, "wsSend: WebSocket connection is already closed.\n");
-        exit(1);
+        taida_net4_abort_connection("wsSend: WebSocket connection is already closed");
+        return 0;
     }
 
     int fd = tl_net3_client_fd;
@@ -3502,14 +3493,21 @@ taida_val taida_net_ws_send(taida_val ws, taida_val data) {
         const char *s = (const char*)data;
         size_t slen = 0;
         if (!taida_read_cstr_len_safe(s, 64 * 1024 * 1024, &slen)) {
-            fprintf(stderr, "wsSend: data must be Str (text frame) or Bytes (binary frame)\n");
-            exit(1);
+            taida_net4_abort_connection("wsSend: data must be Str (text frame) or Bytes (binary frame)");
+            return 0;
         }
         payload = (const unsigned char*)s;
         payload_len = slen;
     }
 
-    taida_net4_write_ws_frame(fd, opcode, payload, payload_len);
+    // Peer disconnect (RST / EPIPE) is attacker-reachable, so a write
+    // failure must close only this connection rather than tearing down
+    // the listener pool.
+    if (taida_net4_write_ws_frame(fd, opcode, payload, payload_len) != 0) {
+        if (temp_buf) free(temp_buf);
+        taida_net4_abort_connection("wsSend: failed to send WebSocket frame");
+        return 0;
+    }
     if (temp_buf) free(temp_buf);
 
     return 0; // Unit
@@ -3519,18 +3517,18 @@ taida_val taida_net_ws_send(taida_val ws, taida_val data) {
 taida_val taida_net_ws_receive(taida_val ws) {
     Net3WriterState *w = tl_net3_writer;
     if (!w) {
-        fprintf(stderr, "wsReceive: can only be called inside a 2-argument httpServe handler\n");
-        exit(1);
+        taida_net4_abort_connection("wsReceive: can only be called inside a 2-argument httpServe handler");
+        return taida_net4_make_lax_ws_frame_empty();
     }
 
     if (!taida_net4_validate_ws_token(ws)) {
-        fprintf(stderr, "wsReceive: first argument must be the WebSocket connection from wsUpgrade\n");
-        exit(1);
+        taida_net4_abort_connection("wsReceive: first argument must be the WebSocket connection from wsUpgrade");
+        return taida_net4_make_lax_ws_frame_empty();
     }
 
     if (w->state != NET3_STATE_WEBSOCKET) {
-        fprintf(stderr, "wsReceive: not in WebSocket state. Call wsUpgrade first.\n");
-        exit(1);
+        taida_net4_abort_connection("wsReceive: not in WebSocket state. Call wsUpgrade first.");
+        return taida_net4_make_lax_ws_frame_empty();
     }
 
     Net4BodyState *bs = tl_net4_body;
@@ -3671,18 +3669,18 @@ taida_val taida_net_ws_receive(taida_val ws) {
 taida_val taida_net_ws_close(taida_val ws, taida_val code_val) {
     Net3WriterState *w = tl_net3_writer;
     if (!w) {
-        fprintf(stderr, "wsClose: can only be called inside a 2-argument httpServe handler\n");
-        exit(1);
+        taida_net4_abort_connection("wsClose: can only be called inside a 2-argument httpServe handler");
+        return 0;
     }
 
     if (!taida_net4_validate_ws_token(ws)) {
-        fprintf(stderr, "wsClose: first argument must be the WebSocket connection from wsUpgrade\n");
-        exit(1);
+        taida_net4_abort_connection("wsClose: first argument must be the WebSocket connection from wsUpgrade");
+        return 0;
     }
 
     if (w->state != NET3_STATE_WEBSOCKET) {
-        fprintf(stderr, "wsClose: not in WebSocket state. Call wsUpgrade first.\n");
-        exit(1);
+        taida_net4_abort_connection("wsClose: not in WebSocket state. Call wsUpgrade first.");
+        return 0;
     }
 
     Net4BodyState *bs = tl_net4_body;
@@ -3702,22 +3700,26 @@ taida_val taida_net_ws_close(taida_val ws, taida_val code_val) {
     } else {
         // Validate close code range.
         if (close_code_i64 < 1000 || close_code_i64 > 4999) {
-            fprintf(stderr, "wsClose: close code must be 1000-4999, got %lld\n", (long long)close_code_i64);
-            exit(1);
+            taida_net4_abort_connection("wsClose: close code must be 1000-4999");
+            return 0;
         }
         // Reserved codes that must not be sent.
         if (close_code_i64 == 1004 || close_code_i64 == 1005 || close_code_i64 == 1006 || close_code_i64 == 1015) {
-            fprintf(stderr, "wsClose: close code %lld is reserved and cannot be sent\n", (long long)close_code_i64);
-            exit(1);
+            taida_net4_abort_connection("wsClose: close code is reserved and cannot be sent");
+            return 0;
         }
         close_code = (uint16_t)close_code_i64;
     }
 
     int fd = tl_net3_client_fd;
 
-    // Send close frame with the specified close code.
+    // Send close frame with the specified close code. Peer disconnect
+    // (RST / EPIPE) is attacker-reachable here too.
     unsigned char close_payload[2] = { (unsigned char)(close_code >> 8), (unsigned char)(close_code & 0xFF) };
-    taida_net4_write_ws_frame(fd, WS_OPCODE_CLOSE, close_payload, 2);
+    if (taida_net4_write_ws_frame(fd, WS_OPCODE_CLOSE, close_payload, 2) != 0) {
+        taida_net4_abort_connection("wsClose: failed to send Close frame");
+        return 0;
+    }
 
     if (bs) bs->ws_closed = 1;
 
@@ -3730,18 +3732,18 @@ taida_val taida_net_ws_close(taida_val ws, taida_val code_val) {
 taida_val taida_net_ws_close_code(taida_val ws) {
     Net3WriterState *w = tl_net3_writer;
     if (!w) {
-        fprintf(stderr, "wsCloseCode: can only be called inside a 2-argument httpServe handler\n");
-        exit(1);
+        taida_net4_abort_connection("wsCloseCode: can only be called inside a 2-argument httpServe handler");
+        return 0;
     }
 
     if (!taida_net4_validate_ws_token(ws)) {
-        fprintf(stderr, "wsCloseCode: first argument must be the WebSocket connection from wsUpgrade\n");
-        exit(1);
+        taida_net4_abort_connection("wsCloseCode: first argument must be the WebSocket connection from wsUpgrade");
+        return 0;
     }
 
     if (w->state != NET3_STATE_WEBSOCKET) {
-        fprintf(stderr, "wsCloseCode: not in WebSocket state. Call wsUpgrade first.\n");
-        exit(1);
+        taida_net4_abort_connection("wsCloseCode: not in WebSocket state. Call wsUpgrade first.");
+        return 0;
     }
 
     Net4BodyState *bs = tl_net4_body;
@@ -3751,23 +3753,32 @@ taida_val taida_net_ws_close_code(taida_val ws) {
 
 // Validate that the writer argument is a genuine BuchiPack token with
 // __writer_id === "__v3_streaming_writer" (parity with Interpreter/JS).
-static void taida_net3_validate_writer(taida_val writer, const char *api_name) {
+// Returns 0 on success, -1 after aborting the current connection so the
+// caller can return its own empty sentinel without process-wide exit(1).
+static int taida_net3_validate_writer(taida_val writer, const char *api_name) {
     if (!taida_is_buchi_pack(writer)) {
-        fprintf(stderr, "%s: first argument must be the writer provided by httpServe\n", api_name);
-        exit(1);
+        char msg[160];
+        snprintf(msg, sizeof(msg), "%s: first argument must be the writer provided by httpServe", api_name);
+        taida_net4_abort_connection(msg);
+        return -1;
     }
     taida_val id_val = taida_pack_get(writer, taida_str_hash((taida_val)"__writer_id"));
     if (id_val == 0) {
-        fprintf(stderr, "%s: first argument must be the writer provided by httpServe\n", api_name);
-        exit(1);
+        char msg[160];
+        snprintf(msg, sizeof(msg), "%s: first argument must be the writer provided by httpServe", api_name);
+        taida_net4_abort_connection(msg);
+        return -1;
     }
     const char *id_str = (const char*)id_val;
     size_t id_len = 0;
     if (!taida_read_cstr_len_safe(id_str, 64, &id_len) ||
         id_len != 21 || memcmp(id_str, "__v3_streaming_writer", 21) != 0) {
-        fprintf(stderr, "%s: first argument must be the writer provided by httpServe\n", api_name);
-        exit(1);
+        char msg[160];
+        snprintf(msg, sizeof(msg), "%s: first argument must be the writer provided by httpServe", api_name);
+        taida_net4_abort_connection(msg);
+        return -1;
     }
+    return 0;
 }
 
 // Create a writer BuchiPack token for 2-arg handler.
