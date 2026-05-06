@@ -126,12 +126,30 @@ therefore fails fast, matching the hard-required policy enforced by
 `taida upgrade`.
 
 Self-upgrade staging files are written to `~/.taida/cache/upgrade/`
-(directory mode `0700`). Each artefact (the candidate binary, the
-SHA256SUMS blob, and the cosign bundle) is opened with `O_NOFOLLOW |
-O_EXCL` and mode `0600`, so a pre-placed symlink at the staging path
-makes the upgrader fail closed instead of clobbering the symlink
-target. The legacy `/tmp/taida_upgrade_<pid>_<nanos>_*` path is no
+(directory mode `0700`). Each artefact — the candidate binary, the
+`SHA256SUMS` blob, and **every** cosign bundle (including the bundle
+staged by the addon signature verifier) — goes through a single
+`O_NOFOLLOW | O_EXCL` + mode `0600` helper. A pre-placed symlink at
+any staging path makes the upgrader fail closed instead of clobbering
+its target. The legacy `/tmp/taida_upgrade_<pid>_<nanos>_*` path is no
 longer used.
+
+Before staging, the upgrader validates the cache directory itself:
+the entry must be a real directory (not a symlink), owned by the
+current effective UID, and the group/world mode bits must be clear.
+A directory pre-created with looser bits is tightened to `0700` and
+the `chmod` error path is propagated rather than silenced. When the
+`taida upgrade` invoker is `root` via `sudo`, the operator should not
+override `HOME` to a writable shared location — the cache directory
+discovery follows `HOME` / `USERPROFILE` and assumes the directory
+sits under that user's account.
+
+Test-only helpers in the upgrade module (e.g. a `file://`-friendly
+download path used by fixtures) are linked only when the `test-utils`
+Cargo feature is enabled. Default release builds (`cargo build
+--release`) do not enable the feature, so the helper symbols are
+absent from production binaries and downstream crates depending on
+`taida` cannot reach them.
 
 ## httpServe connection isolation
 
