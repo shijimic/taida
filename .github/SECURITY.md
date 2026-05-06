@@ -133,6 +133,37 @@ makes the upgrader fail closed instead of clobbering the symlink
 target. The legacy `/tmp/taida_upgrade_<pid>_<nanos>_*` path is no
 longer used.
 
+## httpServe connection isolation
+
+A malformed request from a single client must never tear down the
+listener thread or the other concurrent connections. The Native
+runtime calls `taida_net4_abort_connection()` — which `shutdown(fd,
+SHUT_RDWR)`s the offending socket and sets a per-request abort flag —
+on every wire-data validation failure (chunked-size overflow, invalid
+chunked trailer, truncated body, WebSocket UTF-8 violation, malformed
+WebSocket close frame, invalid close code, generic frame protocol
+error). The accept loop checks the flag after the handler returns and
+closes that connection without re-entering keep-alive; sibling
+connections continue to be served. Process-wide `exit(1)` is reserved
+for handler programmer errors (token mismatch, calling a streaming
+API after WebSocket upgrade, etc.) which are not attacker-reachable.
+
+`Transfer-Encoding: chunked` size accumulation uses
+`__builtin_mul_overflow` / `__builtin_add_overflow` on `uint64_t` and
+bounds the result to `SIZE_MAX`. The streaming readBodyChunk path
+uses `strtoull` with `errno == ERANGE` checks instead of `strtoul`,
+so 32-bit (LP32 / ILP32) builds cannot wrap an over-large
+`chunk-size` to a smaller value and admit a request-smuggling vector.
+
+Response header validators in all three backends share a single
+RFC 7230 / 9110 grammar check. `name` is restricted to the token set
+(rejects NUL, `:`, SP, HTAB, CR, LF, control bytes, and underscore
+to avoid CL.CL smuggling against reverse proxies that vary on
+`underscores_in_headers`); `value` is restricted to HTAB / SP / VCHAR
+/ obs-text. `Content-Length`, `Transfer-Encoding`, and `Set-Cookie`
+are runtime-reserved. `httpEncodeResponse` (eager path) calls into
+the same helpers, so the eager and streaming paths cannot diverge.
+
 ## Source package pinning
 
 Source-package downloads consumed via `packages.tdm` are pinned by

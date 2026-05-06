@@ -202,6 +202,31 @@ response を wire bytes に encode します。
 
 > **Implementation note**: Interpreter h1 path は `HTTP_WIRE_MAX_METHOD_LEN = 16` / `HTTP_WIRE_MAX_PATH_LEN = 2048` を `src/interpreter/net_eval/h1.rs` に導入し、`parse_request_head` 後・`dispatch_request` 前で enforcement します。Native / h2 / h3 への enforcement の現況は `CHANGELOG.md` を参照してください。
 
+### 5.4 Chunked transfer-encoding overflow guard
+
+`Transfer-Encoding: chunked` の `chunk-size` は次の二段ガードを通った値だけが採用されます。両者を同時に通らないリクエストは `400 Bad Request` ＋ connection close で reject されます。
+
+1. **桁数 cap**: 16 進 16 桁以上 (= 65 bit 以上) の `chunk-size` は parse せずに reject します。`FFFFFFFFFFFFFFF` (15 桁、約 `0xFFFFFFFFFFFFFFF`) が上限です。
+2. **算術 overflow guard**: 15 桁以下の入力でも、累算は `uint64_t` 上で `__builtin_mul_overflow` / `__builtin_add_overflow` (Native) または `checked_mul` / `checked_add` (Interpreter) で行い、`SIZE_MAX` を超えた値は reject します。`size_t` が 32-bit のプラットフォームで 8 桁目以降が silent wrap-around して terminator chunk として誤認される CL.TE / TE.TE smuggling 経路を塞ぐためです。
+
+streaming path (`readBodyChunk` / `readBodyAll`) では `strtoull` で parse したうえで `errno == ERANGE` と `chunk_size_ull > SIZE_MAX` を両方検査します。`strtoul` は LP32 では 32-bit `unsigned long` に bound されるため使用しません。
+
+malformed な `chunk-size` を受信した場合は process 全体を terminate せず、`shutdown(fd, SHUT_RDWR)` で当該 connection のみを閉じ、httpServe の accept loop は他 client を受け付け続けます。
+
+### 5.5 Header name / value grammar
+
+`startResponse` の headers list と `httpEncodeResponse` の headers list は、3 バックエンドすべてで以下の RFC 7230 / 9110 grammar を強制します。
+
+**name byte grammar**: RFC 7230 §3.2.6 token (= 1\*tchar)。具体的には `0-9 / A-Z / a-z` および `! # $ % & ' * + - . ^ _ \` | ~`。それ以外のバイト (NUL、コロン `:`、SP、HTAB、CR、LF、その他 0x00..0x1F / 0x7F の制御文字、obs-text バイト 0x80..0xFF) はすべて reject。
+
+**value byte grammar**: RFC 7230 §3.2 field-value byte (HTAB / SP / VCHAR / obs-text)。`0x09 / 0x20..0x7E / 0x80..0xFF` のみ許容。NUL、CR、LF、それ以外の 0x00..0x1F / 0x7F の制御文字はすべて reject。
+
+**name の追加禁止**:
+- `_` を含む name は reject。reverse proxy が `underscores_in_headers` 設定で正規化を変えるため、attacker が `Content_Length: 10` を 1 個追加するだけで CL.CL request smuggling が成立する経路を遮断します。
+- `Content-Length` / `Transfer-Encoding` / `Set-Cookie` は runtime-managed reserved set。handler から指定すると reject。`Set-Cookie` は今後 cookie 専用 API に切り出される予定。
+
+これらの validator は eager path (`httpEncodeResponse`) と streaming path (`startResponse`) で同じ helper を共有するため、片方だけ通る抜け穴は生じません。
+
 ---
 
 ## 6. Client
