@@ -2159,6 +2159,64 @@ fn cleanup_stale_descriptor_staging(build_root: &Path) -> Result<(), DescriptorB
         if !file_type.is_dir() {
             continue;
         }
+        // E32B-050 (Codex review HOLD A+B): owner UID check runs BEFORE we
+        // read or parse `transaction.json`. A co-tenant with write access
+        // to our build root could otherwise plant a malformed / unreadable
+        // `transaction.json` (or `chmod 000` it), making `read_to_string`
+        // / `from_str` raise `[E1922]` from inside this loop. That would
+        // wedge the entire cleanup pass and keep the foreign staging
+        // directory alive — the opposite of what UID hardening was meant
+        // to deliver. Foreign-owned directories are removed *without*
+        // touching their JSON contents.
+        //
+        // TOCTOU note: there is a non-zero gap between `fs::metadata(&path)`
+        // here and `fs::remove_dir_all(&path)` below. A racing attacker
+        // with same-tree write access could in principle swap the
+        // directory in between. We accept the residual risk because:
+        //   1. Anyone able to race here already needs write access to
+        //      `.taida/build/` — they could just delete the staging
+        //      directly anyway.
+        //   2. `remove_dir_all` failure on an unexpected layout surfaces
+        //      as `[E1922]` rather than being silently swallowed, so
+        //      breakage is observable in the cleanup log.
+        // A fully race-free implementation would require `openat` +
+        // `unlinkat(AT_REMOVEDIR)` and is tracked alongside the upgrade
+        // hardening track (see E32B-081 for the equivalent dirfd plan).
+        let owner_mismatch = {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::MetadataExt;
+                match (current_uid, fs::metadata(&path).map(|m| m.uid()).ok()) {
+                    (Some(my_uid), Some(staging_uid)) => my_uid != staging_uid,
+                    _ => false,
+                }
+            }
+            #[cfg(not(unix))]
+            {
+                let _ = current_uid;
+                false
+            }
+        };
+        if owner_mismatch {
+            append_descriptor_cleanup_log(
+                build_root,
+                &format!(
+                    "remove staging={} reason=owner-uid-mismatch pid=-",
+                    file_name
+                ),
+            )?;
+            fs::remove_dir_all(&path).map_err(|e| {
+                DescriptorBuildError::new(
+                    "E1922",
+                    format!(
+                        "Cannot remove foreign-owned descriptor staging directory '{}': {}",
+                        path.display(),
+                        e
+                    ),
+                )
+            })?;
+            continue;
+        }
         let tx_path = path.join("transaction.json");
         if !tx_path.is_file() {
             continue;
@@ -2202,37 +2260,16 @@ fn cleanup_stale_descriptor_staging(build_root: &Path) -> Result<(), DescriptorB
             .and_then(|pid| descriptor_pid_alive(pid))
             .map(|alive| !alive)
             .unwrap_or(false);
-        // E32B-050: staging directory owner UID mismatch. On Unix we read
-        // the directory's owner via `MetadataExt::uid()` and compare with
-        // the current EUID. A mismatch means the staging belongs to a
-        // different user and we cannot trust its `transaction.json`, so
-        // the staging is forced out independent of the alive probe.
-        let owner_mismatch = {
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::MetadataExt;
-                match (current_uid, fs::metadata(&path).map(|m| m.uid()).ok()) {
-                    (Some(my_uid), Some(staging_uid)) => my_uid != staging_uid,
-                    _ => false,
-                }
-            }
-            #[cfg(not(unix))]
-            {
-                let _ = current_uid;
-                false
-            }
-        };
-        if !expired && !dead_pid && !owner_mismatch {
+        if !expired && !dead_pid {
             continue;
         }
-        let reason = match (expired, dead_pid, clock_skew, owner_mismatch) {
-            (_, _, _, true) => "owner-uid-mismatch",
-            (true, true, true, false) => "clock-skew-and-dead-pid",
-            (true, true, false, false) => "expired-and-dead-pid",
-            (true, false, true, false) => "clock-skew",
-            (true, false, false, false) => "expired",
-            (false, true, _, false) => "dead-pid",
-            (false, false, _, false) => unreachable!("filtered above"),
+        let reason = match (expired, dead_pid, clock_skew) {
+            (true, true, true) => "clock-skew-and-dead-pid",
+            (true, true, false) => "expired-and-dead-pid",
+            (true, false, true) => "clock-skew",
+            (true, false, false) => "expired",
+            (false, true, _) => "dead-pid",
+            (false, false, _) => unreachable!("filtered above"),
         };
         append_descriptor_cleanup_log(
             build_root,

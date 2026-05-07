@@ -1318,12 +1318,21 @@ frontendA <= BuildUnit(
     );
 }
 
-// E32B-050: a tampered `transaction.json` can claim a live PID (e.g. PID 1)
-// and `touch` the file to keep `mtime` fresh, defeating both the alive probe
-// and the legacy 24 h TTL. The cleanup TTL is now capped at 6 h on hosts
-// that support the alive probe so a spoofed PID can keep stale staging on
-// disk for at most that window even when the staging directory is owned by
-// the current user (so `owner-uid-mismatch` would not trigger).
+// E32B-050: a tampered `transaction.json` can claim a live PID and `touch`
+// the file to keep `mtime` fresh, defeating both the alive probe and the
+// legacy 24 h TTL. The cleanup TTL is now capped at 6 h on hosts that
+// support the alive probe so a spoofed PID can keep stale staging on disk
+// for at most that window even when the staging directory is owned by the
+// current user (so `owner-uid-mismatch` would not trigger).
+//
+// Per Codex review HOLD C: this fixture spoofs the **test runner's own
+// PID** instead of PID 1. `descriptor_pid_alive` short-circuits when the
+// queried pid equals the caller's `std::process::id()` and always returns
+// `Some(true)`. That keeps the spoof robust on container hosts where
+// `/proc/1` may not be observable from a child process, and it lets us
+// pin the *bare* `expired` reason — `expired-and-dead-pid` would mean the
+// alive probe failed and we would not actually be exercising the
+// pid-spoofed-but-alive path.
 #[cfg(unix)]
 #[test]
 fn e32b_050_pid_spoof_with_aged_mtime_forces_staging_cleanup_within_six_hours() {
@@ -1333,14 +1342,15 @@ fn e32b_050_pid_spoof_with_aged_mtime_forces_staging_cleanup_within_six_hours() 
     let dir = project("e32b_050_pid_spoof_six_hour_cap");
     let stale = dir.join(".taida/build/.tmp-spoofed");
     fs::create_dir_all(&stale).unwrap();
-    // PID 1 is `init` on every supported Unix host and is virtually
-    // guaranteed to be alive, so `descriptor_pid_alive(1)` returns true.
-    // Without the 6 h cap, the legacy 24 h TTL would let the staging
-    // survive every cleanup scan as long as a co-tenant kept touching the
-    // file. We assert that even with `pid_alive=true` the staging is
-    // removed once mtime ages past 6 h.
+    // The test runner is alive for the duration of the spawned `taida
+    // build`, so the child's `descriptor_pid_alive(spoof_pid)` short-
+    // circuits to `Some(true)` regardless of host probe support.
+    let spoof_pid = std::process::id();
     let tx_path = stale.join("transaction.json");
-    write_file(&tx_path, r#"{"transaction_id":"spoofed","pid":1}"#);
+    write_file(
+        &tx_path,
+        &format!(r#"{{"transaction_id":"spoofed","pid":{}}}"#, spoof_pid),
+    );
 
     let aged = SystemTime::now() - Duration::from_secs(7 * 60 * 60);
     let times = std::fs::FileTimes::new()
@@ -1376,13 +1386,28 @@ serverX <= BuildUnit(
     );
     let cleanup_log = fs::read_to_string(dir.join(".taida/build/.cleanup.log")).unwrap();
     assert!(cleanup_log.contains(".tmp-spoofed"), "log={cleanup_log}");
-    assert!(
-        cleanup_log.contains("expired"),
-        "cleanup log must record `expired` reason for aged spoofed staging; log={cleanup_log}"
+    // Bare `expired` reason proves the alive probe returned true and TTL
+    // alone forced the cleanup. Substring `expired` would also match
+    // `expired-and-dead-pid` / `expired-and-clock-skew`, which would mean
+    // the spoof did not actually exercise the live-PID path.
+    let expected_line = format!(
+        "remove staging=.tmp-spoofed reason=expired pid={}",
+        spoof_pid
     );
     assert!(
-        cleanup_log.contains("pid=1"),
-        "cleanup log must surface the spoofed PID for audit; log={cleanup_log}"
+        cleanup_log.contains(&expected_line),
+        "cleanup log must record bare `expired` reason with the spoofed pid \
+         (proving alive-probe returned true); expected={expected_line}, log={cleanup_log}"
+    );
+    assert!(
+        !cleanup_log.contains("dead-pid"),
+        "cleanup log must NOT record dead-pid: this fixture pins the \
+         live-PID + TTL path, not pid_alive=false; log={cleanup_log}"
+    );
+    assert!(
+        !cleanup_log.contains("owner-uid-mismatch"),
+        "staging is owned by the test runner, so owner-uid-mismatch must \
+         not be the dominant reason; log={cleanup_log}"
     );
 }
 
