@@ -978,3 +978,61 @@ serverX <= BuildUnit(
     );
     assert_e1902_duplicate_name(&output, "BuildHook", "duplicate-hook");
 }
+
+// =============================================================================
+// `validate_target_closure` parse error は silent skip ではなく `[E1941]` で hard-fail
+// =============================================================================
+//
+// build descriptor driver は target × closure の互換違反 (`taida-lang/net` を
+// wasm-min closure に含める等) を `[E1941]` で reject する責務を負う。closure
+// module に parse error が混じると、validation を silent skip して進ませると
+// 「対象 API が closure に入っているか」を確認できなくなる。`collect_local_modules`
+// 段階で parse error 全般を `[E1941]` 化済だが、`validate_target_closure` の
+// 内側の再 parse でも `continue` で握り潰さず TOCTOU race window 含めて hard-fail
+// するよう defence-in-depth を入れる。
+#[test]
+fn e32b_055_closure_module_parse_error_rejected() {
+    let dir = project("e32b_055_closure_parse_error");
+    write_file(
+        &dir.join("net_helper.td"),
+        ">>> taida-lang/net@a.1 => @(httpServe)\nlet bad = (\n",
+    );
+    write_file(
+        &dir.join("frontend.td"),
+        ">>> ./net_helper.td => @(httpServe)\nstdout(\"frontend\")\n",
+    );
+    write_file(
+        &dir.join("main.td"),
+        r#"
+>>> ./frontend.td => @(frontendMain)
+frontendA <= BuildUnit(
+  name <= "frontend-a",
+  target <= "wasm-min",
+  entry <= frontendMain
+)
+<<< frontendA
+"#,
+    );
+
+    let output = run_taida_build(
+        &dir,
+        &["main.td", "--unit", "frontend-a", "--diag-format", "jsonl"],
+    );
+    assert!(
+        !output.status.success(),
+        "closure module with parse errors must hard-fail; stdout={} stderr={}",
+        stdout_text(&output),
+        stderr_text(&output)
+    );
+    let stdout = stdout_text(&output);
+    let stderr = stderr_text(&output);
+    assert!(
+        stdout.contains("\"code\":\"E1941\"") || stderr.contains("[E1941]"),
+        "parse-error closure must report E1941; stdout={stdout} stderr={stderr}"
+    );
+    let combined = format!("{stdout}{stderr}").to_ascii_lowercase();
+    assert!(
+        combined.contains("net_helper.td") && combined.contains("parse error"),
+        "diagnostic must mention the offending module and parse error context; combined={combined}"
+    );
+}

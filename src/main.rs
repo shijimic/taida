@@ -2913,7 +2913,30 @@ fn validate_target_closure(unit: &BuildUnitDescriptor) -> Result<(), DescriptorB
         })?;
         let (program, parse_errors) = parse(&source);
         if !parse_errors.is_empty() {
-            continue;
+            let summary = parse_errors
+                .first()
+                .map(|e| format!("{e}"))
+                .unwrap_or_else(|| String::from("parse error"));
+            return Err(DescriptorBuildError::new(
+                "E1941",
+                format!(
+                    "BuildUnit '{}' closure module '{}' has parse errors and cannot be validated against target '{}': {}",
+                    unit.name,
+                    module.display(),
+                    unit.target.as_str(),
+                    summary
+                ),
+            )
+            .context(BuildDiagContext {
+                unit: Some(unit.name.clone()),
+                target: Some(unit.target.as_str().to_string()),
+                edge_kind: Some("NormalImport"),
+                dependency_path: vec![
+                    entry_path.display().to_string(),
+                    module.display().to_string(),
+                ],
+                ..BuildDiagContext::default()
+            }));
         }
         for stmt in &program.statements {
             if let Statement::Import(import) = stmt {

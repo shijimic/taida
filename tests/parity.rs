@@ -505,6 +505,46 @@ stdout(result.toString())
     }
 }
 
+// E32B-064: pin three additional E1605 contexts (list literal, named arg of
+// constructor, parenthesised let-rhs) on all four backends. The Rust-side
+// fixture in `tests/e32b_019_comparison_diagnostics.rs` exercises the checker
+// in process; this parity counterpart guarantees that JS / Native / wasm-min
+// lower the same source to the same `[E1605]` reject.
+#[test]
+fn test_e32b_064_e1605_extra_contexts_4backend_negative() {
+    let cases = [
+        (
+            "list_literal",
+            r#"
+Enum => Status = :Ok :Retry
+xs <= @[Status:Retry() > 0]
+stdout(xs.length().toString())
+"#,
+        ),
+        (
+            "named_arg_of_constructor",
+            r#"
+Enum => Status = :Ok :Retry
+Box = @(value: Bool)
+b <= Box(value <= Status:Retry() > 0)
+stdout(b.value.toString())
+"#,
+        ),
+        (
+            "let_rhs_extra_paren",
+            r#"
+Enum => Status = :Ok :Retry
+res <= ((Status:Retry() > 0)).toString()
+stdout(res)
+"#,
+        ),
+    ];
+
+    for (label, source) in cases {
+        assert_e32b019_e1605_rejected_4backend(label, source);
+    }
+}
+
 fn spawn_http_echo_server() -> (u16, mpsc::Receiver<String>, thread::JoinHandle<()>) {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind http loopback");
     listener.set_nonblocking(false).expect("set blocking");
@@ -39283,6 +39323,61 @@ stdout(isEven(50000))
         wasm_err.contains("[E0700]"),
         "wasm-min rejection must cite [E0700], got: {}",
         wasm_err
+    );
+
+    let _ = fs::remove_file(&tmp);
+}
+
+// E32B-046: pin the `[E0700]` diagnostic anchor to the user-facing function
+// definition. Earlier code emitted "line 1, column 1" when the cycle entry
+// was further down the file; the Native checker now anchors the finding at
+// the first cycle-participant's `FuncDef::span`. Use a 3-function cycle whose
+// first function intentionally sits past the file start so a regression that
+// resets the anchor to (1, 1) is caught.
+#[test]
+fn test_e32b_046_native_mutual_recursion_anchor_points_at_user_func() {
+    let source = r#"
+// leading comment so the user functions never start at line 1.
+// keep this preamble multi-line so a regression that anchors to
+// the beginning of the file is visible.
+
+a n =
+  | n == 0 |> 1
+  | _ |> b(n - 1)
+
+b n =
+  | n == 0 |> 1
+  | _ |> c(n - 1)
+
+c n =
+  | n == 0 |> 1
+  | _ |> a(n - 1)
+
+stdout(a(10))
+"#;
+
+    let tmp = unique_temp_path("taida_parity_e32b_046", "anchor", "td");
+    fs::write(&tmp, source).expect("failed to write E32B-046 source");
+    let native_err = run_native_build_error(&tmp, "e32b_046_native_anchor")
+        .expect("native build must fail for the 3-function cycle");
+    assert!(
+        native_err.contains("[E0700]"),
+        "diagnostic must carry [E0700], got: {native_err}"
+    );
+    assert!(
+        native_err.contains("line 6"),
+        "diagnostic must anchor at the user-defined function `a` on line 6, got: {native_err}"
+    );
+    assert!(
+        !native_err.contains("line 1, column 1"),
+        "diagnostic must not collapse to (1,1) when the cycle entry sits past line 1: {native_err}"
+    );
+
+    let wasm_err = run_wasm_min_build_error(&tmp, "e32b_046_wasm_anchor")
+        .expect("wasm-min build must fail for the same cycle");
+    assert!(
+        wasm_err.contains("[E0700]") && wasm_err.contains("line 6"),
+        "wasm-min anchor must match native anchor at line 6, got: {wasm_err}"
     );
 
     let _ = fs::remove_file(&tmp);

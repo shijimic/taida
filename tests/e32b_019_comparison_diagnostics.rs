@@ -71,6 +71,43 @@ stdout((
     }
 }
 
+// E32B-064: extend the E1605 net so containers that previously slipped past the
+// fourth-pass walk (list literals, named args of constructors, parenthesised
+// let-rhs) are also diagnosed. Implementation already covers them via the
+// recursive `infer_expr_type_without_recording_errors` walk; without these
+// fixtures a future refactor could regress the coverage silently.
+#[test]
+fn e32b_064_reports_nested_comparison_mismatches_extra_contexts() {
+    let cases = [
+        (
+            "list literal",
+            r#"
+Enum => Status = :Ok :Retry
+xs <= @[Status:Retry() > 0]
+"#,
+        ),
+        (
+            "named arg of constructor",
+            r#"
+Enum => Status = :Ok :Retry
+Box = @(value: Bool)
+b <= Box(value <= Status:Retry() > 0)
+"#,
+        ),
+        (
+            "let-rhs with extra paren",
+            r#"
+Enum => Status = :Ok :Retry
+res <= ((Status:Retry() > 0)).toString()
+"#,
+        ),
+    ];
+
+    for (case, source) in cases {
+        assert_has_e1605(case, source);
+    }
+}
+
 #[test]
 fn e32b_019_accepts_nested_compatible_comparisons() {
     let errors = check(
