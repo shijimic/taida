@@ -115,6 +115,9 @@ taida build [native|js|wasm-min|wasm-wasi|wasm-edge|wasm-full] [--release] [--di
 taida build <PATH> --unit <NAME> [--run-hooks]
 taida build <PATH> --plan <NAME> [--run-hooks]
 taida build <PATH> --all-units [--run-hooks]
+taida --no-check build <PATH> --unit <NAME>
+taida --no-check build <PATH> --plan <NAME>
+taida --no-check build <PATH> --all-units
 ```
 
 | 形 | 意味 |
@@ -125,6 +128,8 @@ taida build <PATH> --all-units [--run-hooks]
 | `--run-hooks` | ディスクリプタに接続された `BuildHook.before` を実行 |
 
 ディスクリプタビルドは、`taida-lang/build` パッケージのディスクリプタ (`BuildUnit` / `BuildPlan` / `AssetBundle` / `RouteAsset` / `BuildHook`) をランタイム値としてではなく **ビルドディスクリプタ** として扱います。ビルド成功時は `.taida/build/` にターゲット別成果物、静的アセット、hook ログ、`artifact-map.json` をトランザクション単位でコミットします。詳細は `docs/reference/build_descriptors.md` を参照してください。
+
+`--no-check` はディスクリプタファイルの parse とディスクリプタ抽出には影響しません。`--unit` / `--plan` / `--all-units` のいずれでも、選択された `BuildUnit` と依存 `BuildUnit` の子ビルドへ伝播し、単一ターゲットビルドと同じように各エントリソースの型検査をスキップします。
 
 #### 禁止される組み合わせ (`E1900〜E1909`)
 

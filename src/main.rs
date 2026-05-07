@@ -3751,6 +3751,7 @@ fn run_child_build(
     unit: &BuildUnitDescriptor,
     tx: &DescriptorTransaction,
     release_mode: bool,
+    no_check: bool,
 ) -> Result<PathBuf, DescriptorBuildError> {
     let entry_path = require_build_unit_entry_path(unit)?;
     let output_path = build_unit_output_path(tx, unit)?;
@@ -3773,6 +3774,9 @@ fn run_child_build(
         )
     })?;
     let mut cmd = Command::new(exe);
+    if no_check {
+        cmd.arg("--no-check");
+    }
     cmd.arg("build")
         .arg(unit.target.as_str())
         .arg(entry_path)
@@ -4052,6 +4056,7 @@ fn run_descriptor_build_driver(
     selector: DescriptorBuildSelector,
     run_hooks: bool,
     release_mode: bool,
+    no_check: bool,
 ) -> Result<DescriptorBuildRecords, DescriptorBuildError> {
     let project_root = descriptor_project_root(entry_path);
     let model = build_descriptor_model(entry_path, program)?;
@@ -4141,7 +4146,7 @@ fn run_descriptor_build_driver(
                     }
                 }
             }
-            let output = run_child_build(unit, &tx, release_mode)?;
+            let output = run_child_build(unit, &tx, release_mode, no_check)?;
             let rel = output
                 .strip_prefix(&tx.staging_root)
                 .map(Path::to_path_buf)
@@ -4182,6 +4187,7 @@ fn run_build_descriptor_mode(
     selector: DescriptorBuildSelector,
     run_hooks: bool,
     release_mode: bool,
+    no_check: bool,
     diag_format: DiagFormat,
     compile_stats: &mut CompileDiagStats,
 ) -> ! {
@@ -4237,7 +4243,14 @@ fn run_build_descriptor_mode(
         std::process::exit(1);
     }
 
-    match run_descriptor_build_driver(&entry_path, &program, selector, run_hooks, release_mode) {
+    match run_descriptor_build_driver(
+        &entry_path,
+        &program,
+        selector,
+        run_hooks,
+        release_mode,
+        no_check,
+    ) {
         Ok(records) => {
             if diag_format == DiagFormat::Text {
                 println!(
@@ -4410,6 +4423,7 @@ fn run_build(args: &[String], no_check: bool) {
             selector,
             run_hooks,
             release_mode,
+            no_check,
             diag_format,
             &mut compile_stats,
         );

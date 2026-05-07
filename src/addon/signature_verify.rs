@@ -128,7 +128,9 @@ pub enum VerifyOutcome {
     Skipped,
     /// Policy was [`VerifyPolicy::BestEffort`] and no bundle was
     /// found (or `cosign` was missing). A warning was emitted to
-    /// the caller; the install should proceed.
+    /// the caller; the install should proceed. First-party source
+    /// tarball verification uses [`VerifyPolicy::Required`], so that
+    /// path fails closed instead of returning this outcome.
     Warned(String),
     /// `cosign verify-blob` (or the test stub) returned success.
     Verified,

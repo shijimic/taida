@@ -154,6 +154,73 @@ serverX <= BuildUnit(
 }
 
 #[test]
+fn descriptor_no_check_propagates_to_child_build() {
+    let dir = project("descriptor_no_check_child_build");
+    write_file(&dir.join("unchecked.td"), "bad <= 1 + \"x\"\nstdout(bad)\n");
+    write_file(
+        &dir.join("main.td"),
+        r#"
+>>> ./unchecked.td => @(uncheckedMain)
+
+uncheckedUnit <= BuildUnit(
+  name <= "unchecked-unit",
+  target <= "js",
+  entry <= uncheckedMain
+)
+
+<<< uncheckedUnit
+"#,
+    );
+
+    let checked = run_taida_build(&dir, &["main.td", "--unit", "unchecked-unit"]);
+    assert!(
+        !checked.status.success(),
+        "descriptor build without --no-check must reject child type errors"
+    );
+    let checked_combined = format!("{}{}", stdout_text(&checked), stderr_text(&checked));
+    assert!(
+        checked_combined.contains("Cannot apply Add to Int and Str"),
+        "checked build should surface the child type error, got:\n{checked_combined}"
+    );
+
+    let unchecked = Command::new(taida_bin())
+        .current_dir(&dir)
+        .args(["--no-check", "build", "main.td", "--unit", "unchecked-unit"])
+        .output()
+        .expect("taida --no-check build descriptor");
+    assert!(
+        unchecked.status.success(),
+        "descriptor build should propagate --no-check to the child build\nstdout={}\nstderr={}",
+        stdout_text(&unchecked),
+        stderr_text(&unchecked)
+    );
+    assert!(
+        dir.join(".taida/build/js/unchecked-unit/unchecked.mjs")
+            .exists(),
+        "child JS artifact should be committed when --no-check is propagated"
+    );
+
+    let unchecked_release = Command::new(taida_bin())
+        .current_dir(&dir)
+        .args([
+            "--no-check",
+            "build",
+            "main.td",
+            "--unit",
+            "unchecked-unit",
+            "--release",
+        ])
+        .output()
+        .expect("taida --no-check build descriptor --release");
+    assert!(
+        unchecked_release.status.success(),
+        "--release should not drop descriptor child --no-check propagation\nstdout={}\nstderr={}",
+        stdout_text(&unchecked_release),
+        stderr_text(&unchecked_release)
+    );
+}
+
+#[test]
 fn e32_descriptor_asset_glob_escape_rejects_with_build_context() {
     let dir = project("e32_descriptor_asset_escape");
     fs::create_dir_all(dir.join("public")).unwrap();
