@@ -2099,19 +2099,43 @@ fn cleanup_stale_descriptor_staging(build_root: &Path) -> Result<(), DescriptorB
     // build, so the TTL is the only signal that distinguishes an active
     // owner from a crashed one. A heartbeat / mtime refresh is tracked as
     // a separate hardening item.
-    let probe_supported =
-        descriptor_pid_alive(std::process::id() as u64).is_some();
+    //
+    // E32B-050: when probe is supported (Linux / POSIX), the cap is 6 h
+    // instead of 24 h. `transaction.json` is plain JSON, so an attacker who
+    // can write to a staging directory could pin its `pid` field to any live
+    // process (e.g. PID 1) and `touch` the file to keep `mtime` fresh. That
+    // would make the staging dir immortal under a 24 h TTL. Capping at 6 h
+    // bounds the window during which a spoofed PID can sit on disk, even
+    // when the staging directory is owned by the current user (so
+    // `owner_mismatch` would not catch it).
+    let probe_supported = descriptor_pid_alive(std::process::id() as u64).is_some();
     let ttl = if probe_supported {
-        std::time::Duration::from_secs(24 * 60 * 60)
+        std::time::Duration::from_secs(6 * 60 * 60)
     } else {
         std::time::Duration::from_secs(4 * 60 * 60)
     };
     if !probe_supported {
-        let _ = append_descriptor_cleanup_log(
-            build_root,
-            "scan pid_alive_check=unsupported ttl=4h",
-        );
+        let _ =
+            append_descriptor_cleanup_log(build_root, "scan pid_alive_check=unsupported ttl=4h");
     }
+    // E32B-050: capture the current effective UID once per scan so we can
+    // refuse to trust `transaction.json` written by a different owner. On
+    // shared multi-user projects another user can otherwise spoof a live
+    // PID into our staging directory and survive both the alive probe and
+    // mtime TTL by re-touching the file. Treating "owner UID mismatch" as
+    // expired forces those staging directories out on the next scan.
+    let current_uid: Option<u32> = {
+        #[cfg(unix)]
+        {
+            // Safety: `geteuid` is async-signal-safe and returns the
+            // calling process's effective UID.
+            Some(unsafe { libc::geteuid() } as u32)
+        }
+        #[cfg(not(unix))]
+        {
+            None
+        }
+    };
     let now = std::time::SystemTime::now();
     for entry in entries {
         let entry = entry.map_err(|e| {
@@ -2178,16 +2202,37 @@ fn cleanup_stale_descriptor_staging(build_root: &Path) -> Result<(), DescriptorB
             .and_then(|pid| descriptor_pid_alive(pid))
             .map(|alive| !alive)
             .unwrap_or(false);
-        if !expired && !dead_pid {
+        // E32B-050: staging directory owner UID mismatch. On Unix we read
+        // the directory's owner via `MetadataExt::uid()` and compare with
+        // the current EUID. A mismatch means the staging belongs to a
+        // different user and we cannot trust its `transaction.json`, so
+        // the staging is forced out independent of the alive probe.
+        let owner_mismatch = {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::MetadataExt;
+                match (current_uid, fs::metadata(&path).map(|m| m.uid()).ok()) {
+                    (Some(my_uid), Some(staging_uid)) => my_uid != staging_uid,
+                    _ => false,
+                }
+            }
+            #[cfg(not(unix))]
+            {
+                let _ = current_uid;
+                false
+            }
+        };
+        if !expired && !dead_pid && !owner_mismatch {
             continue;
         }
-        let reason = match (expired, dead_pid, clock_skew) {
-            (true, true, true) => "clock-skew-and-dead-pid",
-            (true, true, false) => "expired-and-dead-pid",
-            (true, false, true) => "clock-skew",
-            (true, false, false) => "expired",
-            (false, true, _) => "dead-pid",
-            (false, false, _) => unreachable!("filtered above"),
+        let reason = match (expired, dead_pid, clock_skew, owner_mismatch) {
+            (_, _, _, true) => "owner-uid-mismatch",
+            (true, true, true, false) => "clock-skew-and-dead-pid",
+            (true, true, false, false) => "expired-and-dead-pid",
+            (true, false, true, false) => "clock-skew",
+            (true, false, false, false) => "expired",
+            (false, true, _, false) => "dead-pid",
+            (false, false, _, false) => unreachable!("filtered above"),
         };
         append_descriptor_cleanup_log(
             build_root,
@@ -7507,22 +7552,30 @@ fn run_install(args: &[String]) {
     }
 
     if result.errors.is_empty() {
-        if let Some(lockfile) = &existing_lockfile {
-            if let Err(e) = lockfile.validate_resolved_bindings(&result.packages) {
-                eprintln!("{}", e);
-                std::process::exit(1);
+        // Triple equality (version / source / integrity) is only required
+        // under --frozen. Non-frozen install is documented as "generate /
+        // update the lockfile", so legitimate drift (version bump in
+        // packages.tdm, newly added dep) must rewrite the lockfile rather
+        // than fail. Schema malformation (E32B-044/063 malformed sha256)
+        // is independently caught by `Lockfile::read` -> `parse` ->
+        // `validate_schema`, so it remains rejected regardless of frozen.
+        if frozen {
+            if let Some(lockfile) = &existing_lockfile {
+                if let Err(e) = lockfile.validate_resolved_bindings(&result.packages) {
+                    eprintln!("{}", e);
+                    std::process::exit(1);
+                }
             }
-        }
-        if frozen
-            && !existing_lockfile
+            if !existing_lockfile
                 .as_ref()
                 .map(|lf| lf.is_up_to_date(&result.packages))
                 .unwrap_or(false)
-        {
-            eprintln!(
-                "[E32K2_LOCKFILE_DRIFT] --frozen requires .taida/taida.lock to match packages.tdm"
-            );
-            std::process::exit(1);
+            {
+                eprintln!(
+                    "[E32K2_LOCKFILE_DRIFT] --frozen requires .taida/taida.lock to match packages.tdm"
+                );
+                std::process::exit(1);
+            }
         }
     }
     if frozen && !result.errors.is_empty() {

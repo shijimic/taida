@@ -818,9 +818,11 @@ impl Interpreter {
             }
             // Trailer line bytes count toward the total cap (excluding CRLF).
             let trim_len = trimmed.len();
-            total_bytes = total_bytes.checked_add(trim_len).ok_or_else(|| RuntimeError {
-                message: "chunked body error: trailer byte total overflow".into(),
-            })?;
+            total_bytes = total_bytes
+                .checked_add(trim_len)
+                .ok_or_else(|| RuntimeError {
+                    message: "chunked body error: trailer byte total overflow".into(),
+                })?;
             if total_bytes > MAX_TRAILER_BYTES {
                 return Err(RuntimeError {
                     message: "chunked body error: trailer block exceeds byte cap".into(),

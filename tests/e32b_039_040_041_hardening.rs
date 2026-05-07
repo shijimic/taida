@@ -811,8 +811,8 @@ fn e32b_085_ws_receive_checks_every_write_frame_return() {
     // Every captured wrc / pong_rc must feed an abort-on-failure path
     // (either a ternary in the abort message or an explicit
     // `if (wrc != 0) abort`).
-    let abort_paths = ws_receive.matches("wrc != 0").count()
-        + ws_receive.matches("pong_rc != 0").count();
+    let abort_paths =
+        ws_receive.matches("wrc != 0").count() + ws_receive.matches("pong_rc != 0").count();
     assert!(
         abort_paths >= captured_calls,
         "every wsReceive write must reach an abort_connection branch on failure; abort_paths={} captured_calls={}",

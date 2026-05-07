@@ -3385,7 +3385,10 @@ fn test_e32b051_chunk_size_line_exceeds_byte_cap_eager_compact() {
     let body_offset = head.len();
 
     let result = chunked_in_place_compact(&mut buf, body_offset);
-    assert!(result.is_err(), "compact must reject oversized chunk-size line");
+    assert!(
+        result.is_err(),
+        "compact must reject oversized chunk-size line"
+    );
 }
 
 #[test]

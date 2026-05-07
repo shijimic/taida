@@ -150,6 +150,61 @@ integrity = "fnv1a:0000000000000001"
     let _ = fs::remove_dir_all(&project);
 }
 
+/// E32B-083: non-frozen `taida ingot install` must accept legitimate drift
+/// (path dep contents changed -> integrity differs) and rewrite the lockfile,
+/// instead of failing with `[E32K2_LOCKFILE_INTEGRITY_MISMATCH]` from
+/// `validate_resolved_bindings`. Triple equality is reserved for `--frozen`.
+#[test]
+fn e32b_083_non_frozen_install_accepts_drift_and_rewrites_lockfile() {
+    let (project, dep) = setup_path_dep_project("e32b_083_drift_rewrite");
+    let first = run(&project, &["ingot", "install"]);
+    assert!(
+        first.status.success(),
+        "first install should succeed: {}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+
+    let lock_path = project.join(".taida/taida.lock");
+    let lock_before = fs::read_to_string(&lock_path).expect("read lock before drift");
+    let integrity_before = lock_before
+        .lines()
+        .find(|line| line.trim_start().starts_with("integrity = \"sha256:"))
+        .expect("first install must write sha256 integrity")
+        .to_string();
+
+    write_file(
+        &dep.join("main.td"),
+        r#"Value <= "drift-after"
+<<< @(Value)
+"#,
+    );
+
+    let second = run(&project, &["ingot", "install"]);
+    assert!(
+        second.status.success(),
+        "non-frozen install must succeed under drift, got stderr: {}",
+        String::from_utf8_lossy(&second.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&second.stderr);
+    assert!(
+        !stderr.contains("[E32K2_LOCKFILE_INTEGRITY_MISMATCH]"),
+        "non-frozen install must not reject legitimate drift, stderr={stderr}"
+    );
+
+    let lock_after = fs::read_to_string(&lock_path).expect("read lock after drift");
+    let integrity_after = lock_after
+        .lines()
+        .find(|line| line.trim_start().starts_with("integrity = \"sha256:"))
+        .expect("rewrite must keep sha256 integrity")
+        .to_string();
+    assert_ne!(
+        integrity_before, integrity_after,
+        "non-frozen install must rewrite drifted integrity; before={integrity_before} after={integrity_after}"
+    );
+
+    let _ = fs::remove_dir_all(&project);
+}
+
 /// A lockfile whose integrity claims `sha256:` but is not a canonical
 /// 64-lowercase-hex payload must be rejected by `Lockfile::read`, not
 /// silently invalidated by `is_up_to_date` and rewritten by the resolver.

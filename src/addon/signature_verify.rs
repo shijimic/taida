@@ -134,6 +134,16 @@ pub enum VerifyOutcome {
     Verified,
 }
 
+impl std::fmt::Display for VerifyOutcome {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Skipped => write!(f, "skipped (verification policy disabled)"),
+            Self::Warned(detail) => write!(f, "warned: {detail}"),
+            Self::Verified => write!(f, "verified"),
+        }
+    }
+}
+
 /// Reason a verification failed when the policy demanded success.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VerifyError {

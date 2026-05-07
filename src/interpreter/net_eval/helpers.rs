@@ -580,9 +580,7 @@ pub(crate) fn parse_chunk_size_hex_bytes(hex_part: &[u8]) -> Result<usize, Strin
         result = result
             .checked_mul(16)
             .and_then(|v| v.checked_add(digit))
-            .ok_or_else(|| {
-                format!("invalid chunk-size '{}'", String::from_utf8_lossy(hex_part))
-            })?;
+            .ok_or_else(|| format!("invalid chunk-size '{}'", String::from_utf8_lossy(hex_part)))?;
     }
 
     Ok(result)
@@ -839,17 +837,13 @@ pub(crate) fn chunked_body_complete(
                     return Ok(read_pos);
                 }
                 if trailer_count >= MAX_TRAILER_COUNT {
-                    return Err(ChunkedBodyError::Malformed(
-                        "too many trailer lines".into(),
-                    ));
+                    return Err(ChunkedBodyError::Malformed("too many trailer lines".into()));
                 }
                 match find_crlf_capped(&buf[body_offset + read_pos..], MAX_CHUNK_LINE_BYTES) {
                     Some(pos) => {
-                        trailer_bytes = trailer_bytes
-                            .checked_add(pos)
-                            .ok_or_else(|| {
-                                ChunkedBodyError::Malformed("trailer byte total overflow".into())
-                            })?;
+                        trailer_bytes = trailer_bytes.checked_add(pos).ok_or_else(|| {
+                            ChunkedBodyError::Malformed("trailer byte total overflow".into())
+                        })?;
                         if trailer_bytes > MAX_TRAILER_BYTES {
                             return Err(ChunkedBodyError::Malformed(
                                 "trailer block exceeds byte cap".into(),

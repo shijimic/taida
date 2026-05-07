@@ -589,8 +589,7 @@ fn e32b_051_chunk_extension_flood_rejected_three_backend() {
     for backend in backends {
         let port = common::find_free_loopback_port();
         let dir = setup_net_project(&eager_source(port), &format!("extflood_{}", backend));
-        let (mut child, artifact) =
-            spawn_backend(&dir, backend, &format!("extflood_{}", backend));
+        let (mut child, artifact) = spawn_backend(&dir, backend, &format!("extflood_{}", backend));
 
         let mut request = Vec::with_capacity(padding.len() + 256);
         request.extend_from_slice(
@@ -716,11 +715,8 @@ fn e32b_051_streaming_chunk_extension_flood_rejected_three_backend() {
             &streaming_source(port),
             &format!("extflood_stream_{}", backend),
         );
-        let (mut child, artifact) = spawn_backend(
-            &dir,
-            backend,
-            &format!("extflood_stream_{}", backend),
-        );
+        let (mut child, artifact) =
+            spawn_backend(&dir, backend, &format!("extflood_stream_{}", backend));
 
         let mut request = Vec::with_capacity(padding.len() + 256);
         request.extend_from_slice(

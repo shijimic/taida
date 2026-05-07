@@ -2488,9 +2488,11 @@ p.y.hasValue"#,
         // hasValue=false. The implicit default (`__default`) is 0; the
         // user-observable replacement for that pin is `]=>` unmolding,
         // which falls back to the same default when hasValue=false.
-        let result = eval_ok(r#"res <= Int["abc"]()
+        let result = eval_ok(
+            r#"res <= Int["abc"]()
 res ]=> v
-v"#);
+v"#,
+        );
         assert_eq!(
             result,
             Value::Int(0),
@@ -2502,9 +2504,11 @@ v"#);
     fn test_bt18_float_conversion_failure_default() {
         // E32B-035 migration: same pattern as the Int variant — `]=>` on a
         // Lax[Float] with hasValue=false yields the implicit default 0.0.
-        let result = eval_ok(r#"res <= Float["abc"]()
+        let result = eval_ok(
+            r#"res <= Float["abc"]()
 res ]=> v
-v"#);
+v"#,
+        );
         assert_eq!(
             result,
             Value::Float(0.0),
@@ -2533,9 +2537,11 @@ v"#);
         // E32B-035 migration: same `]=>` fallback pattern as the
         // Int / Float conversion tests. Div[1,0]() is hasValue=false and
         // unmolds to the implicit default 0.
-        let result = eval_ok(r#"res <= Div[1,0]()
+        let result = eval_ok(
+            r#"res <= Div[1,0]()
 res ]=> v
-v"#);
+v"#,
+        );
         assert_eq!(result, Value::Int(0), "Div by zero default should be 0");
     }
 

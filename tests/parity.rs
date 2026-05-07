@@ -40054,6 +40054,46 @@ stdout("list_last:" + @[1, 2, 3].lastIndexOf(99).toString())
     assert_backend_parity_for_source(source, "e32b_022_legacy_sentinels_minus_one");
 }
 
+// E32B-071: `*Lax` long-form (`@(hasValue <= ..., __value <= ..., __default <=
+// ..., __type <= "Lax")`) raw-pack output must be identical across backends
+// regardless of whether the value is consumed via direct method call
+// (`stdout(xs.indexOfLax(...))`) or routed through a let binding
+// (`let_value <= xs.indexOfLax(...); stdout(let_value)`). The previous
+// E32B-022 batch only pinned the direct path, leaving the let-binding path
+// vulnerable to a tag-propagation regression where a Pack tag would silently
+// reshape the long-form for `let_value`.
+#[test]
+fn e32b_071_lax_long_form_let_binding_4backend_parity() {
+    let source = r#"
+xs <= @[10, 20, 30]
+stdout(xs.indexOfLax(20))
+let_value <= xs.indexOfLax(20)
+stdout(let_value)
+stdout(xs.indexOfLax(99))
+let_miss <= xs.indexOfLax(99)
+stdout(let_miss)
+"#;
+    assert_backend_parity_for_source(source, "e32b_071_lax_long_form_let_binding");
+}
+
+#[test]
+fn e32b_071_lax_long_form_string_let_binding_4backend_parity() {
+    // Method receivers other than list bindings (here: a Str literal that is
+    // routed through a `let` binding before it reaches stdout) must round-trip
+    // through the same long-form pack so the field shape stays stable across
+    // backends regardless of binding shape.
+    let source = r#"
+greet <= "hello"
+stdout(greet.indexOfLax("ll"))
+direct_value <= greet.indexOfLax("ll")
+stdout(direct_value)
+stdout(greet.indexOfLax("zzz"))
+miss_value <= greet.indexOfLax("zzz")
+stdout(miss_value)
+"#;
+    assert_backend_parity_for_source(source, "e32b_071_lax_long_form_string_let_binding");
+}
+
 #[test]
 fn e32b_022_search_lax_3backend_parity() {
     // searchLax is the regex-based sibling of `search`. Like `search`,

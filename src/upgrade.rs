@@ -774,7 +774,7 @@ pub fn download_verified_sha256sums(sha256sums_url: &str) -> Result<String, Stri
 
     if !matches!(outcome, VerifyOutcome::Verified) {
         return Err(format!(
-            "[E32K1_UPGRADE_SHA256SUMS_COSIGN_ERROR] SHA256SUMS verification did not complete: {:?}",
+            "[E32K1_UPGRADE_SHA256SUMS_COSIGN_ERROR] SHA256SUMS verification did not complete: {}",
             outcome
         ));
     }

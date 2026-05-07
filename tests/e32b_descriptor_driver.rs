@@ -454,10 +454,7 @@ fn e32_descriptor_keeps_recent_live_pid_staging() {
     let live_pid = std::process::id();
     write_file(
         &live.join("transaction.json"),
-        &format!(
-            r#"{{"transaction_id":"live","pid":{}}}"#,
-            live_pid
-        ),
+        &format!(r#"{{"transaction_id":"live","pid":{}}}"#, live_pid),
     );
     write_file(&dir.join("server.td"), "stdout(\"server\")\n");
     write_file(
@@ -1321,6 +1318,74 @@ frontendA <= BuildUnit(
     );
 }
 
+// E32B-050: a tampered `transaction.json` can claim a live PID (e.g. PID 1)
+// and `touch` the file to keep `mtime` fresh, defeating both the alive probe
+// and the legacy 24 h TTL. The cleanup TTL is now capped at 6 h on hosts
+// that support the alive probe so a spoofed PID can keep stale staging on
+// disk for at most that window even when the staging directory is owned by
+// the current user (so `owner-uid-mismatch` would not trigger).
+#[cfg(unix)]
+#[test]
+fn e32b_050_pid_spoof_with_aged_mtime_forces_staging_cleanup_within_six_hours() {
+    use std::fs::OpenOptions;
+    use std::time::{Duration, SystemTime};
+
+    let dir = project("e32b_050_pid_spoof_six_hour_cap");
+    let stale = dir.join(".taida/build/.tmp-spoofed");
+    fs::create_dir_all(&stale).unwrap();
+    // PID 1 is `init` on every supported Unix host and is virtually
+    // guaranteed to be alive, so `descriptor_pid_alive(1)` returns true.
+    // Without the 6 h cap, the legacy 24 h TTL would let the staging
+    // survive every cleanup scan as long as a co-tenant kept touching the
+    // file. We assert that even with `pid_alive=true` the staging is
+    // removed once mtime ages past 6 h.
+    let tx_path = stale.join("transaction.json");
+    write_file(&tx_path, r#"{"transaction_id":"spoofed","pid":1}"#);
+
+    let aged = SystemTime::now() - Duration::from_secs(7 * 60 * 60);
+    let times = std::fs::FileTimes::new()
+        .set_modified(aged)
+        .set_accessed(aged);
+    let handle = OpenOptions::new().write(true).open(&tx_path).unwrap();
+    handle.set_times(times).unwrap();
+
+    write_file(&dir.join("server.td"), "stdout(\"server\")\n");
+    write_file(
+        &dir.join("main.td"),
+        r#"
+>>> ./server.td => @(serverMain)
+serverX <= BuildUnit(
+  name <= "server-x",
+  target <= "js",
+  entry <= serverMain
+)
+<<< serverX
+"#,
+    );
+
+    let output = run_taida_build(&dir, &["main.td", "--unit", "server-x"]);
+    assert!(
+        output.status.success(),
+        "stdout={}\nstderr={}",
+        stdout_text(&output),
+        stderr_text(&output)
+    );
+    assert!(
+        !stale.exists(),
+        "PID-spoofed staging directory must be removed once mtime ages past 6 h"
+    );
+    let cleanup_log = fs::read_to_string(dir.join(".taida/build/.cleanup.log")).unwrap();
+    assert!(cleanup_log.contains(".tmp-spoofed"), "log={cleanup_log}");
+    assert!(
+        cleanup_log.contains("expired"),
+        "cleanup log must record `expired` reason for aged spoofed staging; log={cleanup_log}"
+    );
+    assert!(
+        cleanup_log.contains("pid=1"),
+        "cleanup log must surface the spoofed PID for audit; log={cleanup_log}"
+    );
+}
+
 // E32B-074 item 11: a forward clock skew (transaction.json mtime in the future)
 // previously made `now.duration_since(mtime)` return Err, which fell through to
 // `unwrap_or(false)` and kept the staging dir alive past the TTL. The cleanup
@@ -1444,7 +1509,8 @@ serverX <= BuildUnit(
         "parent envar must not leak into hook subprocess"
     );
 
-    let declared = fs::read_to_string(dir.join(".taida/build/assets/frontend/declared.txt")).unwrap();
+    let declared =
+        fs::read_to_string(dir.join(".taida/build/assets/frontend/declared.txt")).unwrap();
     assert_eq!(
         declared, "ok",
         "BuildHook.env declared values must reach the hook"
