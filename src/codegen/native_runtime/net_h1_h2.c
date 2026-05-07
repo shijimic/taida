@@ -1075,10 +1075,9 @@ static int64_t taida_net_chunked_body_complete(
         for (size_t i = 0; i < hex_end; i++) {
             if (buf[body_offset + rp + i] == ';') { hex_end = i; break; }
         }
-        // Trim whitespace
+        // E32B-053: RFC 7230 §4.1 forbids OWS in chunk-size; reject any
+        // SP/HT (and any non-hex byte) inline rather than silently trimming.
         size_t hs = 0, he = hex_end;
-        while (hs < he && (buf[body_offset + rp + hs] == ' ' || buf[body_offset + rp + hs] == '\t')) hs++;
-        while (he > hs && (buf[body_offset + rp + he - 1] == ' ' || buf[body_offset + rp + he - 1] == '\t')) he--;
         if (hs >= he) return -2; // empty chunk-size = malformed
 
         // Parse hex
@@ -1086,7 +1085,10 @@ static int64_t taida_net_chunked_body_complete(
         // arithmetic accumulator below uses uint64_t with explicit overflow
         // detection so 32-bit (LP32 / ILP32) `size_t` cannot silently wrap
         // and turn an oversized chunk-size into the terminator chunk —
-        // request smuggling vector documented for LP32 builds.
+        // request smuggling vector documented for LP32 builds. Leading-zero
+        // policy: the cap is enforced on literal hex digit count regardless
+        // of magnitude, so `0000000000000FF` (15 digits) is accepted but
+        // `00000000000000FF` (16 digits) is rejected.
         if (he - hs > 15) return -2; // oversized chunk-size = malformed
         uint64_t chunk_size_u64 = 0;
         for (size_t i = hs; i < he; i++) {
@@ -1095,7 +1097,7 @@ static int64_t taida_net_chunked_body_complete(
             if (c >= '0' && c <= '9') digit = c - '0';
             else if (c >= 'a' && c <= 'f') digit = 10 + c - 'a';
             else if (c >= 'A' && c <= 'F') digit = 10 + c - 'A';
-            if (digit < 0) return -2; // invalid hex
+            if (digit < 0) return -2; // invalid hex (non-hex or OWS)
             uint64_t mul = 0;
             uint64_t add = 0;
             if (__builtin_mul_overflow(chunk_size_u64, (uint64_t)16, &mul)) return -2;
@@ -1153,13 +1155,14 @@ static int taida_net_chunked_in_place_compact(
         for (size_t i = 0; i < hex_end; i++) {
             if (buf[body_offset + rp + i] == ';') { hex_end = i; break; }
         }
+        // E32B-053: no whitespace trim; OWS in chunk-size is malformed.
         size_t hs = 0, he = hex_end;
-        while (hs < he && (buf[body_offset + rp + hs] == ' ' || buf[body_offset + rp + hs] == '\t')) hs++;
-        while (he > hs && (buf[body_offset + rp + he - 1] == ' ' || buf[body_offset + rp + he - 1] == '\t')) he--;
         if (hs >= he) return -1;
 
         // 15 hex digit cap + uint64_t overflow check (parity with body_complete).
         // LP32 size_t would silently wrap above 8 hex digits without this guard.
+        // Leading-zero policy: 15-digit cap is enforced on the literal byte
+        // count, matching Interpreter / JS behavior.
         if (he - hs > 15) return -1;
         uint64_t chunk_size_u64 = 0;
         for (size_t i = hs; i < he; i++) {
@@ -1168,7 +1171,7 @@ static int taida_net_chunked_in_place_compact(
             if (c >= '0' && c <= '9') digit = c - '0';
             else if (c >= 'a' && c <= 'f') digit = 10 + c - 'a';
             else if (c >= 'A' && c <= 'F') digit = 10 + c - 'A';
-            if (digit < 0) return -1;
+            if (digit < 0) return -1; // non-hex or OWS
             uint64_t mul = 0;
             uint64_t add = 0;
             if (__builtin_mul_overflow(chunk_size_u64, (uint64_t)16, &mul)) return -1;
@@ -2682,24 +2685,26 @@ taida_val taida_net_read_body_chunk(taida_val req) {
 
                 case NET4_CHUNKED_WAIT_SIZE: {
                     size_t llen = taida_net4_read_line(bs, fd, line_buf, sizeof(line_buf));
-                    // Trim.
+                    // E32B-053: only strip the trailing CRLF; OWS within
+                    // chunk-size itself is rejected as malformed (parity with
+                    // Interpreter/JS, RFC 7230 §4.1).
                     size_t s = 0, e = llen;
-                    while (s < e && (line_buf[s]==' '||line_buf[s]=='\t'||line_buf[s]=='\r'||line_buf[s]=='\n')) s++;
-                    while (e > s && (line_buf[e-1]==' '||line_buf[e-1]=='\t'||line_buf[e-1]=='\r'||line_buf[e-1]=='\n')) e--;
-                    if (s == e) continue; // Empty line, try again.
+                    if (e > s && line_buf[e - 1] == '\n') e--;
+                    if (e > s && line_buf[e - 1] == '\r') e--;
+                    if (s == e) continue; // Empty line (CRLF only), try again.
                     // Parse hex chunk-size (strip chunk-extension after ';').
                     char hex_buf[64];
                     size_t hex_len = 0;
                     for (size_t i = s; i < e && line_buf[i] != ';' && hex_len < 63; i++) {
-                        if (line_buf[i] != ' ' && line_buf[i] != '\t')
-                            hex_buf[hex_len++] = line_buf[i];
+                        hex_buf[hex_len++] = line_buf[i];
                     }
                     hex_buf[hex_len] = '\0';
                     if (hex_len > 15) {
                         taida_net4_abort_connection("readBodyChunk: chunk-size exceeds 15 hex digits");
                         return taida_net4_make_lax_bytes_empty();
                     }
-                    // Strict hex-only parse. Reject partial parse like '1g'.
+                    // Strict hex-only parse. OWS (SP/HT) and partial parse
+                    // (`1g`, ` 1`) are both rejected here.
                     for (size_t vi = 0; vi < hex_len; vi++) {
                         char c = hex_buf[vi];
                         if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'))) {
@@ -2707,7 +2712,13 @@ taida_val taida_net_read_body_chunk(taida_val req) {
                             return taida_net4_make_lax_bytes_empty();
                         }
                     }
-                    if (hex_len == 0) continue; // skip empty, retry
+                    if (hex_len == 0) {
+                        // E32B-053: empty chunk-size (e.g. ";ext\r\n") is
+                        // malformed; reject explicitly instead of silently
+                        // re-reading. Parity with eager paths.
+                        taida_net4_abort_connection("readBodyChunk: empty chunk-size");
+                        return taida_net4_make_lax_bytes_empty();
+                    }
                     // strtoull + ERANGE check + size_t bound rejects 32-bit
                     // overflow that strtoul (LP32 unsigned long = 32-bit)
                     // would silently wrap to ULONG_MAX without errno.
@@ -2854,15 +2865,17 @@ taida_val taida_net_read_body_all(taida_val req) {
 
                 case NET4_CHUNKED_WAIT_SIZE: {
                     size_t llen = taida_net4_read_line(bs, fd, line_buf, sizeof(line_buf));
+                    // E32B-053: only strip the trailing CRLF terminator;
+                    // OWS within chunk-size itself is rejected as malformed
+                    // (parity with readBodyChunk + Interpreter / JS).
                     size_t s = 0, e = llen;
-                    while (s < e && (line_buf[s]==' '||line_buf[s]=='\t'||line_buf[s]=='\r'||line_buf[s]=='\n')) s++;
-                    while (e > s && (line_buf[e-1]==' '||line_buf[e-1]=='\t'||line_buf[e-1]=='\r'||line_buf[e-1]=='\n')) e--;
-                    if (s == e) continue;
+                    if (e > s && line_buf[e - 1] == '\n') e--;
+                    if (e > s && line_buf[e - 1] == '\r') e--;
+                    if (s == e) continue; // CRLF-only line — try again
                     char hex_buf[64];
                     size_t hex_len = 0;
                     for (size_t i = s; i < e && line_buf[i] != ';' && hex_len < 63; i++) {
-                        if (line_buf[i] != ' ' && line_buf[i] != '\t')
-                            hex_buf[hex_len++] = line_buf[i];
+                        hex_buf[hex_len++] = line_buf[i];
                     }
                     hex_buf[hex_len] = '\0';
                     if (hex_len > 15) {
@@ -2870,7 +2883,8 @@ taida_val taida_net_read_body_all(taida_val req) {
                         taida_net4_abort_connection("readBodyAll: chunk-size exceeds 15 hex digits");
                         return taida_bytes_new_filled(0, 0);
                     }
-                    // Strict hex-only parse. Reject partial parse like '1g'.
+                    // Strict hex-only parse. OWS (SP/HT) and partial parse
+                    // (`1g`, ` 1`) are both rejected here.
                     for (size_t vi = 0; vi < hex_len; vi++) {
                         char c = hex_buf[vi];
                         if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'))) {
@@ -2879,7 +2893,11 @@ taida_val taida_net_read_body_all(taida_val req) {
                             return taida_bytes_new_filled(0, 0);
                         }
                     }
-                    if (hex_len == 0) continue; // skip empty, retry
+                    if (hex_len == 0) {
+                        free(all_buf);
+                        taida_net4_abort_connection("readBodyAll: empty chunk-size");
+                        return taida_bytes_new_filled(0, 0);
+                    }
                     // strtoull + ERANGE rejects 32-bit overflow that
                     // strtoul (LP32 unsigned long = 32-bit) would silently
                     // wrap to ULONG_MAX without errno being checked.

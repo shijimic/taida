@@ -204,12 +204,15 @@ response を wire bytes に encode します。
 
 ### 5.4 Chunked transfer-encoding overflow guard
 
-`Transfer-Encoding: chunked` の `chunk-size` は次の二段ガードを通った値だけが採用されます。両者を同時に通らないリクエストは `400 Bad Request` ＋ connection close で reject されます。
+`Transfer-Encoding: chunked` の `chunk-size` は次のガードを通った値だけが採用されます。いずれかに違反するリクエストは `400 Bad Request` ＋ connection close で reject されます。
 
-1. **桁数 cap**: 16 進 16 桁以上 (= 65 bit 以上) の `chunk-size` は parse せずに reject します。`FFFFFFFFFFFFFFF` (15 桁、約 `0xFFFFFFFFFFFFFFF`) が上限です。
-2. **算術 overflow guard**: 15 桁以下の入力でも、累算は `uint64_t` 上で `__builtin_mul_overflow` / `__builtin_add_overflow` (Native) または `checked_mul` / `checked_add` (Interpreter) で行い、`SIZE_MAX` を超えた値は reject します。`size_t` が 32-bit のプラットフォームで 8 桁目以降が silent wrap-around して terminator chunk として誤認される CL.TE / TE.TE smuggling 経路を塞ぐためです。
+1. **桁数 cap (leading-zero policy 含む)**: 16 進 16 桁以上 (= 65 bit 以上) の `chunk-size` は parse せずに reject します。`FFFFFFFFFFFFFFF` (15 桁、約 `0xFFFFFFFFFFFFFFF`) が上限です。**leading-zero でも 15 桁 cap は literal byte 数で評価**するため、`0000000000000001` (16 桁) は magnitude が 1 でも reject されます。Interpreter / Native / JS で同一 cap を共有します。
+2. **OWS reject**: `chunk-size` 内・前後の SP / HTAB / CR / LF をすべて reject します (RFC 7230 §4.1)。reverse proxy が OWS を寛容に解釈する一方で本実装が reject することで request smuggling 経路を遮断します。3 バックエンドで同一 grammar です。
+3. **算術 overflow guard**: 15 桁以下の入力でも、累算は `uint64_t` 上で `__builtin_mul_overflow` / `__builtin_add_overflow` (Native) または `checked_mul` / `checked_add` (Interpreter) で行い、`SIZE_MAX` を超えた値は reject します。`size_t` が 32-bit のプラットフォームで 8 桁目以降が silent wrap-around して terminator chunk として誤認される CL.TE / TE.TE smuggling 経路を塞ぐためです。
 
-streaming path (`readBodyChunk` / `readBodyAll`) では `strtoull` で parse したうえで `errno == ERANGE` と `chunk_size_ull > SIZE_MAX` を両方検査します。`strtoul` は LP32 では 32-bit `unsigned long` に bound されるため使用しません。
+streaming path (`readBodyChunk` / `readBodyAll`) は eager path と同じ OWS reject / 15 桁 leading-zero cap / 算術 overflow guard を共有します。Native は `strtoull` + `errno == ERANGE` + `chunk_size_ull > SIZE_MAX` の三段、Interpreter は `parse_chunk_size_hex_bytes` の `checked_mul` / `checked_add`、JS は `parseInt` 後の `Number.isSafeInteger` で同等の overflow guard を行います (`strtoul` は LP32 では 32-bit `unsigned long` に bound されるため使用しません)。空 chunk-size (`;ext\r\n` のような行) は streaming / eager 双方で reject します。
+
+`;` 以降の chunk-extension は通常 ignore しますが、本実装は **`chunk-size` 自体に空白を含めることを許しません**。RFC 7230 errata 4667 の `BWS ";"` 寛容条項より strict に振っているのは、reverse proxy が OWS を緩く扱う一方で本実装が strict に reject することで request smuggling 経路を遮断するための security hardening です。
 
 malformed な `chunk-size` を受信した場合は process 全体を terminate せず、`shutdown(fd, SHUT_RDWR)` で当該 connection のみを閉じ、httpServe の accept loop は他 client を受け付け続けます。
 

@@ -204,6 +204,31 @@ stdout(r.requests)
     )
 }
 
+// E32B-053 follow-up: 2-arg streaming handler driving readBodyAll, which
+// exercises the line-by-line streaming chunked decoder (Native
+// NET4_CHUNKED_WAIT_SIZE in readBodyAll, JS __taida_net_readBodyAllImpl,
+// Interpreter chunked_state transition in stream.rs). Distinct from the
+// eager `chunked_in_place_compact` path that the existing 1-arg fixtures
+// drive.
+fn streaming_source(port: u16) -> String {
+    format!(
+        r#">>> taida-lang/net => @(httpServe, readBodyAll, startResponse, writeChunk, endResponse)
+
+handler req writer =
+  body <= readBodyAll(req)
+  startResponse(writer, 200, @[@(name <= "Content-Type", value <= "application/octet-stream")])
+  writeChunk(writer, body)
+  endResponse(writer)
+
+asyncResult <= httpServe({port}, handler, 1)
+asyncResult ]=> result
+result ]=> r
+stdout(r.ok)
+stdout(r.requests)
+"#
+    )
+}
+
 #[test]
 fn e32b_028_oversized_chunk_size_eager_400_three_backend() {
     let mut backends = vec!["interp"];
@@ -346,6 +371,164 @@ fn e32b_080_chunked_concurrent_isolation_three_backend() {
             "{}: B's echoed body must reach the wire, got: {}",
             backend,
             response_b
+        );
+    }
+}
+
+/// E32B-053: chunk-size with leading OWS (space before the hex digits) must
+/// be rejected as malformed by all three backends — RFC 7230 §4.1 forbids
+/// OWS within `chunk-size`. Reverse-proxy interpretation drift around OWS
+/// is the canonical request-smuggling vector this test pins.
+#[test]
+fn e32b_053_chunk_size_leading_ows_rejected_three_backend() {
+    let mut backends = vec!["interp"];
+    if node_available() {
+        backends.push("js");
+    } else {
+        eprintln!("node unavailable; skipping JS member");
+    }
+    if cc_available() {
+        backends.push("native");
+    } else {
+        eprintln!("cc unavailable; skipping native member");
+    }
+
+    for backend in backends {
+        let port = common::find_free_loopback_port();
+        let dir = setup_net_project(&eager_source(port), &format!("ows_{}", backend));
+        let (mut child, artifact) = spawn_backend(&dir, backend, &format!("ows_{}", backend));
+
+        // Leading SP before the hex chunk-size.
+        let response = send_request(
+            port,
+            b"POST /data HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n 5\r\nhello\r\n0\r\n\r\n",
+        );
+
+        let _ = child.kill();
+        let _ = child.wait();
+        if let Some(path) = artifact {
+            let _ = fs::remove_file(path);
+        }
+        let _ = fs::remove_dir_all(&dir);
+
+        let response =
+            response.unwrap_or_else(|| panic!("{} backend did not return a response", backend));
+        let response = String::from_utf8_lossy(&response);
+        assert!(
+            response.contains("400 Bad Request"),
+            "{} backend must reject leading-OWS chunk-size with HTTP 400, got: {}",
+            backend,
+            response
+        );
+        assert!(
+            !response.contains("200 OK") && !response.ends_with("hello"),
+            "{} backend must not deliver the body to the handler when chunk-size has OWS, got: {}",
+            backend,
+            response
+        );
+    }
+}
+
+/// E32B-053: chunk-size with 16 hex digits (one more than the 15-digit cap)
+/// even when its magnitude fits in a `usize` must be rejected — leading
+/// zeros count toward the cap. This pins the leading-zero policy across
+/// the three backends.
+#[test]
+fn e32b_053_chunk_size_leading_zero_overflows_cap_three_backend() {
+    let mut backends = vec!["interp"];
+    if node_available() {
+        backends.push("js");
+    } else {
+        eprintln!("node unavailable; skipping JS member");
+    }
+    if cc_available() {
+        backends.push("native");
+    } else {
+        eprintln!("cc unavailable; skipping native member");
+    }
+
+    for backend in backends {
+        let port = common::find_free_loopback_port();
+        let dir = setup_net_project(&eager_source(port), &format!("lzcap_{}", backend));
+        let (mut child, artifact) = spawn_backend(&dir, backend, &format!("lzcap_{}", backend));
+
+        // 15 zeros + `1` = 16 hex digits → over the 15-digit cap.
+        let response = send_request(
+            port,
+            b"POST /data HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n0000000000000001\r\nx\r\n0\r\n\r\n",
+        );
+
+        let _ = child.kill();
+        let _ = child.wait();
+        if let Some(path) = artifact {
+            let _ = fs::remove_file(path);
+        }
+        let _ = fs::remove_dir_all(&dir);
+
+        let response =
+            response.unwrap_or_else(|| panic!("{} backend did not return a response", backend));
+        let response = String::from_utf8_lossy(&response);
+        assert!(
+            response.contains("400 Bad Request"),
+            "{} backend must reject 16-digit chunk-size (leading zeros counted) with HTTP 400, got: {}",
+            backend,
+            response
+        );
+    }
+}
+
+/// E32B-053 follow-up: leading-OWS chunk-size must be rejected on the
+/// streaming path (`readBodyAll`) too. The Codex review uncovered that
+/// the 2026-05-07 fix only touched the eager helpers, so JS
+/// `__taida_net_readBodyAllImpl` / `__taida_net_readBodyChunkChunkedSync`
+/// and Native `readBodyAll` continued to silently strip OWS. This test
+/// pins the streaming path closure.
+#[test]
+fn e32b_053_streaming_chunk_size_leading_ows_rejected_three_backend() {
+    let mut backends = vec!["interp"];
+    if node_available() {
+        backends.push("js");
+    } else {
+        eprintln!("node unavailable; skipping JS member");
+    }
+    if cc_available() {
+        backends.push("native");
+    } else {
+        eprintln!("cc unavailable; skipping native member");
+    }
+
+    for backend in backends {
+        let port = common::find_free_loopback_port();
+        let dir = setup_net_project(&streaming_source(port), &format!("ows_stream_{}", backend));
+        let (mut child, artifact) =
+            spawn_backend(&dir, backend, &format!("ows_stream_{}", backend));
+
+        // Leading SP before the hex chunk-size on a 2-arg / streaming handler.
+        let response = send_request(
+            port,
+            b"POST /data HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n 5\r\nhello\r\n0\r\n\r\n",
+        );
+
+        let _ = child.kill();
+        let _ = child.wait();
+        if let Some(path) = artifact {
+            let _ = fs::remove_file(path);
+        }
+        let _ = fs::remove_dir_all(&dir);
+
+        // The streaming path may either return HTTP 400 or close the
+        // connection without a response (Native readBodyAll currently
+        // calls `taida_net4_abort_connection` which `shutdown(SHUT_RDWR)`
+        // the socket without writing anything). Either way the body must
+        // not be echoed back.
+        let response = response
+            .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+            .unwrap_or_default();
+        assert!(
+            !response.contains("200 OK") && !response.ends_with("hello"),
+            "{} streaming backend must not deliver the OWS-prefixed body to the handler, got: {:?}",
+            backend,
+            response
         );
     }
 }

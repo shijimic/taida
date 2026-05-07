@@ -5452,31 +5452,36 @@ defaulted fields must be provided via `()`",
             // (c) undeclared field
             let declared_opt = declared_data.get(field.name.as_str()).copied();
             let inherited_ty = inherited_field_types.get(field.name.as_str()).cloned();
-            if declared_opt.is_none() && inherited_ty.is_none() {
-                // Error-derived types: `type` is the auto-set inheritance
-                // tag. It is not declared in `field_defs` (added by the
-                // base Error type's structural merge), but accepting a
-                // literal `type <= "<same name>"` is convenient for
-                // round-trip code. Anything else is rejected.
-                if is_error_type && field.name == "type" {
-                    if let Expr::StringLit(value, _) = &field.value
-                        && value == name
-                    {
-                        // idempotent legacy literal — allowed
-                    } else {
-                        self.errors.push(TypeError {
-                            message: format!(
-                                "[E1408] Error constructor '{}' auto-sets the `type` field; \
-                                 only the literal `type <= \"{}\"` is accepted as a redundant pass-through. \
-                                 Hint: drop the `type` argument or pass the matching string literal.",
-                                name, name
-                            ),
-                            span: field.span.clone(),
-                        });
-                    }
-                    continue;
-                }
 
+            // Error-derived types: `type` is the auto-set inheritance tag.
+            // The base `Error` parent merges `type: Str` into the field map,
+            // so `inherited_field_types` always contains it for Error
+            // subclasses. Without this hoisted check the validator below
+            // would happily accept `MyError(type <= someVar)` (variable
+            // bypass) or `MyError(type <= "Other")` because the field is
+            // not "undeclared". Per E32B-058 the validator must always
+            // require a string literal whose value matches the type name.
+            if is_error_type && field.name == "type" {
+                if let Expr::StringLit(value, _) = &field.value
+                    && value == name
+                {
+                    // idempotent legacy literal — allowed
+                } else {
+                    self.errors.push(TypeError {
+                        message: format!(
+                            "[E1408] Error constructor '{}' auto-sets the `type` field. \
+                             The `type` argument must be a string literal whose value exactly matches the type name (\"{}\"); \
+                             variables, expressions, and any other string value are rejected. \
+                             Hint: drop the `type` argument or pass the matching string literal `type <= \"{}\"`.",
+                            name, name, name
+                        ),
+                        span: field.span.clone(),
+                    });
+                }
+                continue;
+            }
+
+            if declared_opt.is_none() && inherited_ty.is_none() {
                 self.errors.push(TypeError {
                     message: format!(
                         "[E1406] Constructor '{}' has no field named '{}'. \
@@ -5498,14 +5503,6 @@ defaulted fields must be provided via `()`",
                     .unwrap_or(Type::Unknown)
             } else {
                 inherited_ty.unwrap_or(Type::Unknown)
-            };
-            if matches!(expected_ty, Type::Unknown) {
-                continue;
-            }
-            // Wrap so the rest of the function flow stays uniform.
-            let expected_ty = Some(expected_ty);
-            let Some(expected_ty) = expected_ty else {
-                continue;
             };
             if matches!(expected_ty, Type::Unknown) {
                 continue;

@@ -521,21 +521,29 @@ pub(crate) fn trim_ascii(bytes: &[u8]) -> &[u8] {
 /// Cap HTTP chunk-size to the same 15 hex digits used by JS/Native.
 pub(crate) const MAX_CHUNK_SIZE_HEX_DIGITS: usize = 15;
 
-/// Parse a trimmed HTTP chunk-size hex field with explicit overflow guards.
+/// Parse the HTTP chunk-size hex field with explicit overflow guards.
+///
+/// RFC 7230 §4.1 forbids OWS within `chunk-size`. Any leading or trailing
+/// whitespace (including SP/HT/CR/LF) is rejected to keep parity across the
+/// three backends (Interpreter / Native / JS) and to avoid request-smuggling
+/// vectors that come from reverse-proxy interpretation drift.
+///
+/// Leading-zero policy: the 15 hex digit cap is enforced on the literal hex
+/// digit count, independent of magnitude. `0000000000000FF` (15 digits) is
+/// accepted; `00000000000000FF` (16 digits) is rejected as malformed.
 pub(crate) fn parse_chunk_size_hex_bytes(hex_part: &[u8]) -> Result<usize, String> {
-    let hex = trim_ascii(hex_part);
-    if hex.is_empty() {
+    if hex_part.is_empty() {
         return Err("empty chunk-size".into());
     }
-    if hex.len() > MAX_CHUNK_SIZE_HEX_DIGITS {
+    if hex_part.len() > MAX_CHUNK_SIZE_HEX_DIGITS {
         return Err(format!(
             "invalid chunk-size '{}'",
-            String::from_utf8_lossy(hex)
+            String::from_utf8_lossy(hex_part)
         ));
     }
 
     let mut result: usize = 0;
-    for &b in hex {
+    for &b in hex_part {
         let digit = match b {
             b'0'..=b'9' => (b - b'0') as usize,
             b'a'..=b'f' => (b - b'a' + 10) as usize,
@@ -543,14 +551,16 @@ pub(crate) fn parse_chunk_size_hex_bytes(hex_part: &[u8]) -> Result<usize, Strin
             _ => {
                 return Err(format!(
                     "invalid chunk-size '{}'",
-                    String::from_utf8_lossy(hex)
+                    String::from_utf8_lossy(hex_part)
                 ));
             }
         };
         result = result
             .checked_mul(16)
             .and_then(|v| v.checked_add(digit))
-            .ok_or_else(|| format!("invalid chunk-size '{}'", String::from_utf8_lossy(hex)))?;
+            .ok_or_else(|| {
+                format!("invalid chunk-size '{}'", String::from_utf8_lossy(hex_part))
+            })?;
     }
 
     Ok(result)

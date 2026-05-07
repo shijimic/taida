@@ -902,14 +902,24 @@ impl Interpreter {
     }
 
     /// NB6-7: Parse hex chunk size directly from byte slice.
-    /// Strips any chunk-extension after ';' and trims whitespace.
+    ///
+    /// Strips the trailing CRLF terminator and the chunk-extension after `;`.
+    /// E32B-053: per RFC 7230 §4.1, no OWS is allowed within `chunk-size`, so
+    /// the hex slice is forwarded to `parse_chunk_size_hex_bytes` without any
+    /// internal trim — any whitespace yields a malformed-chunk diagnostic.
     #[inline]
     pub(super) fn parse_chunk_size_bytes(line: &[u8]) -> Option<usize> {
-        let trimmed = Self::trim_bytes(line);
-        // Strip chunk-extension after ';'
-        let hex_part = match trimmed.iter().position(|&b| b == b';') {
-            Some(pos) => Self::trim_bytes(&trimmed[..pos]),
-            None => trimmed,
+        let mut end = line.len();
+        if end > 0 && line[end - 1] == b'\n' {
+            end -= 1;
+        }
+        if end > 0 && line[end - 1] == b'\r' {
+            end -= 1;
+        }
+        let stripped = &line[..end];
+        let hex_part = match stripped.iter().position(|&b| b == b';') {
+            Some(pos) => &stripped[..pos],
+            None => stripped,
         };
         if hex_part.is_empty() {
             return None;

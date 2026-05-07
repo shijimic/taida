@@ -583,16 +583,17 @@ function __taida_net_chunkedInPlaceCompact(buf, bodyOffset) {
     for (let i = readPos; i < crlfPos; i++) {
       if (buf[bodyOffset + i] === 0x3B) { hexEnd = i; break; } // ';'
     }
-    // Trim ASCII whitespace from hex part
+    // E32B-053: per RFC 7230 §4.1 chunk-size MUST NOT contain OWS.
+    // No SP/HT trim — strict hex validation below rejects any whitespace.
     let hexStart = readPos;
-    while (hexStart < hexEnd && (buf[bodyOffset + hexStart] === 0x20 || buf[bodyOffset + hexStart] === 0x09)) hexStart++;
-    while (hexEnd > hexStart && (buf[bodyOffset + hexEnd - 1] === 0x20 || buf[bodyOffset + hexEnd - 1] === 0x09)) hexEnd--;
 
     if (hexStart >= hexEnd) return null; // empty chunk-size
 
     const hexStr = buf.toString('latin1', bodyOffset + hexStart, bodyOffset + hexEnd);
     if (!/^[0-9a-fA-F]+$/.test(hexStr)) return null; // strict hex validation
-    // NB2-4: Reject oversized chunk-size (parity with body_complete)
+    // NB2-4: Reject oversized chunk-size (parity with body_complete).
+    // Leading-zero policy: 15-digit cap is enforced on the literal hex
+    // length so leading zeros count toward the cap.
     if (hexStr.length > 15) return null; // malformed: oversized chunk-size
     const chunkSize = parseInt(hexStr, 16);
     if (isNaN(chunkSize) || chunkSize < 0 || !Number.isSafeInteger(chunkSize)) return null; // invalid hex
@@ -654,15 +655,16 @@ function __taida_net_chunkedBodyComplete(buf, bodyOffset) {
     for (let i = readPos; i < crlfPos; i++) {
       if (buf[bodyOffset + i] === 0x3B) { hexEnd = i; break; }
     }
+    // E32B-053: no OWS trim; whitespace inside chunk-size is rejected by
+    // the strict hex regex below, matching Interpreter / Native parity.
     let hexStart = readPos;
-    while (hexStart < hexEnd && (buf[bodyOffset + hexStart] === 0x20 || buf[bodyOffset + hexStart] === 0x09)) hexStart++;
-    while (hexEnd > hexStart && (buf[bodyOffset + hexEnd - 1] === 0x20 || buf[bodyOffset + hexEnd - 1] === 0x09)) hexEnd--;
     if (hexStart >= hexEnd) return -2; // malformed: empty chunk-size
 
     const hexStr = buf.toString('latin1', bodyOffset + hexStart, bodyOffset + hexEnd);
-    if (!/^[0-9a-fA-F]+$/.test(hexStr)) return -2; // strict hex validation
+    if (!/^[0-9a-fA-F]+$/.test(hexStr)) return -2; // strict hex validation (rejects OWS)
     // NB2-4: Reject oversized chunk-size that would exceed safe integer range.
-    // Prevents JS parseInt wrapping to Infinity / imprecise float for huge hex values.
+    // Leading-zero policy: 15-digit cap is enforced on literal hex length;
+    // leading zeros count toward the cap so `00...01` (16 digits) is rejected.
     if (hexStr.length > 15) return -2; // malformed: oversized chunk-size
     const chunkSize = parseInt(hexStr, 16);
     if (isNaN(chunkSize) || chunkSize < 0 || !Number.isSafeInteger(chunkSize)) return -2; // malformed
@@ -2546,13 +2548,21 @@ function __taida_net_readBodyChunkChunkedSync(writer) {
 
       case 'waitSize': {
         const line = __taida_net_readLineFromBody(writer);
-        const trimmed = line.trim();
-        if (trimmed === '') continue;
-        const hexStr = trimmed.split(';')[0].trim();
-        // NB4-18: Strict hex-only parse. Reject partial parse like '1g'.
+        // E32B-053: strip only the trailing CRLF terminator, then reject any
+        // OWS within chunk-size via the strict hex regex below. RFC 7230 §4.1.
+        let stripped = line;
+        if (stripped.endsWith('\n')) stripped = stripped.slice(0, -1);
+        if (stripped.endsWith('\r')) stripped = stripped.slice(0, -1);
+        if (stripped === '') continue; // CRLF-only — try again
+        const semi = stripped.indexOf(';');
+        const hexStr = semi >= 0 ? stripped.slice(0, semi) : stripped;
+        // Strict hex-only parse. Rejects OWS (SP/HT/CR/LF) and partial parse
+        // like '1g' uniformly.
         if (!/^[0-9a-fA-F]+$/.test(hexStr)) {
           throw new __NativeError('readBodyChunk: invalid chunk-size \'' + hexStr + '\' in chunked body');
         }
+        // Leading-zero policy: 15-digit cap on literal length, parity with
+        // Interpreter / Native eager and streaming paths.
         if (hexStr.length > 15) {
           throw new __NativeError('readBodyChunk: invalid chunk-size \'' + hexStr + '\' in chunked body');
         }
@@ -2711,10 +2721,15 @@ function __taida_net_readBodyAllImpl(writer) {
           break;
         case 'waitSize': {
           const line = __taida_net_readLineFromBody(writer);
-          const trimmed = line.trim();
-          if (trimmed === '') continue;
-          const hexStr = trimmed.split(';')[0].trim();
-          // NB4-18: Strict hex-only parse (parity with readBodyChunk).
+          // E32B-053: only strip the trailing CRLF terminator, then reject
+          // OWS within chunk-size via the strict hex regex below.
+          let stripped = line;
+          if (stripped.endsWith('\n')) stripped = stripped.slice(0, -1);
+          if (stripped.endsWith('\r')) stripped = stripped.slice(0, -1);
+          if (stripped === '') continue;
+          const semi = stripped.indexOf(';');
+          const hexStr = semi >= 0 ? stripped.slice(0, semi) : stripped;
+          // Strict hex-only parse (parity with readBodyChunk + eager paths).
           if (!/^[0-9a-fA-F]+$/.test(hexStr)) {
             throw new __NativeError('readBodyAll: invalid chunk-size \'' + hexStr + '\' in chunked body');
           }

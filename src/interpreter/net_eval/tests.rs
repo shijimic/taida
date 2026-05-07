@@ -3356,6 +3356,72 @@ fn test_e32b028_chunk_size_parser_accepts_15_hex_digits() {
     );
 }
 
+#[test]
+fn test_e32b053_chunk_size_parser_accepts_leading_zeros_within_cap() {
+    // Leading-zero policy: 15-digit cap is enforced on literal byte length,
+    // independent of magnitude. 14 leading zeros + one hex digit = 15 chars
+    // and decodes to magnitude 1.
+    assert_eq!(
+        parse_chunk_size_hex_bytes(b"000000000000001").unwrap(),
+        1usize
+    );
+}
+
+#[test]
+fn test_e32b053_chunk_size_parser_rejects_leading_zero_overflowing_cap() {
+    // 16 hex digits even though magnitude is 1 → exceeds 15-digit cap.
+    let err = parse_chunk_size_hex_bytes(b"0000000000000001").unwrap_err();
+    assert!(err.contains("invalid chunk-size"));
+}
+
+#[test]
+fn test_e32b053_chunk_size_parser_rejects_leading_space() {
+    let err = parse_chunk_size_hex_bytes(b" 1A").unwrap_err();
+    assert!(err.contains("invalid chunk-size"));
+}
+
+#[test]
+fn test_e32b053_chunk_size_parser_rejects_trailing_space() {
+    let err = parse_chunk_size_hex_bytes(b"1A ").unwrap_err();
+    assert!(err.contains("invalid chunk-size"));
+}
+
+#[test]
+fn test_e32b053_chunk_size_parser_rejects_internal_whitespace() {
+    let err = parse_chunk_size_hex_bytes(b"1\tA").unwrap_err();
+    assert!(err.contains("invalid chunk-size"));
+}
+
+#[test]
+fn test_e32b053_chunked_compact_rejects_ows_around_chunk_size() {
+    // SP before chunk-size hex must be rejected per RFC 7230 §4.1.
+    let head = b"GET / HTTP/1.1\r\n\r\n";
+    let chunked_body = b" a\r\n0123456789\r\n0\r\n\r\n";
+    let mut buf = Vec::new();
+    buf.extend_from_slice(head);
+    buf.extend_from_slice(chunked_body);
+    let body_offset = head.len();
+
+    let result = chunked_in_place_compact(&mut buf, body_offset);
+    assert!(result.is_err());
+    assert!(result.unwrap_err().contains("invalid chunk-size"));
+}
+
+#[test]
+fn test_e32b053_chunked_body_complete_rejects_ows_around_chunk_size() {
+    let head = b"GET / HTTP/1.1\r\n\r\n";
+    let chunked_body = b"a \r\n0123456789\r\n0\r\n\r\n";
+    let mut buf = Vec::new();
+    buf.extend_from_slice(head);
+    buf.extend_from_slice(chunked_body);
+    let body_offset = head.len();
+
+    let result = chunked_body_complete(&buf, body_offset);
+    assert!(
+        matches!(result, Err(ChunkedBodyError::Malformed(msg)) if msg.contains("invalid chunk-size"))
+    );
+}
+
 // ── parse_request_head: Transfer-Encoding detection (NET2-2a) ──
 
 #[test]

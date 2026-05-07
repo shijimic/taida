@@ -39458,6 +39458,32 @@ stdout(err.field)
 }
 
 #[test]
+fn test_e32b_020_variable_type_field_rejected() {
+    // E32B-058: `[E1408]` Error `type` reject must apply to non-literal RHS as
+    // well — a variable that happens to hold the matching string is still
+    // rejected because the validator only accepts a string literal.
+    let source = r#"
+Error => MyError = @(field: Str, message: Str)
+name <= "MyError"
+err <= MyError(type <= name, field <= "f", message <= "oops")
+stdout(err.message)
+"#;
+    assert_backends_reject_source(source, "e32b_020_variable_type_field_rejected");
+}
+
+#[test]
+fn test_e32b_020_expr_type_field_rejected() {
+    // E32B-058: a string-concatenation expression that produces the matching
+    // type name is rejected for the same reason — only a literal is accepted.
+    let source = r#"
+Error => MyError = @(field: Str, message: Str)
+err <= MyError(type <= "My" + "Error", field <= "f", message <= "oops")
+stdout(err.message)
+"#;
+    assert_backends_reject_source(source, "e32b_020_expr_type_field_rejected");
+}
+
+#[test]
 fn test_e32b_020_constructor_positive_3backend_parity() {
     // Anonymous `@(...)` keeps open shape. Named TypeInst with
     // declared fields and Error inheritance round-trip the contract:
