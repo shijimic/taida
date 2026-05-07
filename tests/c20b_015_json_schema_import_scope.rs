@@ -58,6 +58,27 @@ fn read_expected() -> String {
     fs::read_to_string(expected_path()).expect("expected file must exist")
 }
 
+fn migrated_schema_mod_src() -> String {
+    fs::read_to_string(fixture_dir().join("schema_mod.td"))
+        .expect("read schema_mod.td")
+        .replace(
+            "  | parsed.hasValue |> parsed.__value.name + \"/\" + parsed.__value.age.toString()",
+            "  | parsed.hasValue |>\n    parsed ]=> parsedValue\n    parsedValue.name + \"/\" + parsedValue.age.toString()",
+        )
+}
+
+fn write_primary_fixture_temp(prefix: &str) -> (PathBuf, PathBuf) {
+    let tmp = unique_temp(prefix, "dir");
+    fs::create_dir_all(&tmp).expect("mkdir fixture temp");
+    fs::write(tmp.join("schema_mod.td"), migrated_schema_mod_src()).expect("write schema_mod.td");
+    fs::write(
+        tmp.join("caller.td"),
+        fs::read_to_string(caller_path()).expect("read caller.td"),
+    )
+    .expect("write caller.td");
+    (tmp.join("caller.td"), tmp)
+}
+
 fn unique_temp(prefix: &str, ext: &str) -> PathBuf {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -88,10 +109,12 @@ fn outputs_equal(a: &str, b: &str) -> bool {
 
 #[test]
 fn c20b_015_json_schema_scope_interpreter() {
+    let (caller, tmp) = write_primary_fixture_temp("c20b015_interp_primary");
     let out = Command::new(taida_bin())
-        .arg(caller_path())
+        .arg(caller)
         .output()
         .expect("failed to spawn interpreter");
+    let _ = fs::remove_dir_all(&tmp);
     assert!(
         out.status.success(),
         "interpreter non-zero: stderr={}",
@@ -115,6 +138,7 @@ fn c20b_015_json_schema_scope_js_matches_interpreter() {
         eprintln!("SKIP: node not available");
         return;
     }
+    let (caller, tmp) = write_primary_fixture_temp("c20b015_js_primary");
     let outdir = unique_temp("c20b015_js", "dir");
     fs::create_dir_all(&outdir).expect("mkdir outdir");
     let mjs = outdir.join("caller.mjs");
@@ -123,7 +147,7 @@ fn c20b_015_json_schema_scope_js_matches_interpreter() {
         .arg("js")
         .arg("-o")
         .arg(&mjs)
-        .arg(caller_path())
+        .arg(caller)
         .output()
         .expect("failed to spawn js build");
     assert!(
@@ -136,6 +160,7 @@ fn c20b_015_json_schema_scope_js_matches_interpreter() {
         .output()
         .expect("failed to spawn node");
     let _ = fs::remove_dir_all(&outdir);
+    let _ = fs::remove_dir_all(&tmp);
     assert!(
         run.status.success(),
         "node exit failed: {}",
@@ -159,6 +184,7 @@ fn c20b_015_json_schema_scope_native_matches_interpreter() {
         eprintln!("SKIP: cc not available");
         return;
     }
+    let (caller, tmp) = write_primary_fixture_temp("c20b015_native_primary");
     let outdir = unique_temp("c20b015_native", "dir");
     fs::create_dir_all(&outdir).expect("mkdir outdir");
     let bin = outdir.join("caller_native");
@@ -167,7 +193,7 @@ fn c20b_015_json_schema_scope_native_matches_interpreter() {
         .arg("native")
         .arg("-o")
         .arg(&bin)
-        .arg(caller_path())
+        .arg(caller)
         .output()
         .expect("failed to spawn native build");
     assert!(
@@ -179,6 +205,7 @@ fn c20b_015_json_schema_scope_native_matches_interpreter() {
         .output()
         .expect("failed to spawn native binary");
     let _ = fs::remove_dir_all(&outdir);
+    let _ = fs::remove_dir_all(&tmp);
     assert!(
         run.status.success(),
         "native binary exit failed: status={:?}, stderr={}",
@@ -207,9 +234,7 @@ fn c20b_015_json_schema_scope_native_matches_interpreter() {
 fn c20b_015_interpreter_also_works_when_caller_imports_typedef() {
     let tmp = unique_temp("c20b015_both", "dir");
     fs::create_dir_all(&tmp).expect("mkdir");
-    let schema_src =
-        fs::read_to_string(fixture_dir().join("schema_mod.td")).expect("read schema_mod.td");
-    fs::write(tmp.join("schema_mod.td"), schema_src).expect("write schema_mod.td");
+    fs::write(tmp.join("schema_mod.td"), migrated_schema_mod_src()).expect("write schema_mod.td");
     let caller_both = "\
 >>> ./schema_mod.td => @(loadUser, UserSchema)
 stdout(loadUser())
@@ -249,15 +274,14 @@ stdout(\"\\n\")
 fn c20b_015_interpreter_overlay_does_not_leak_to_caller_scope() {
     let tmp = unique_temp("c20b015_leak", "dir");
     fs::create_dir_all(&tmp).expect("mkdir");
-    let schema_src =
-        fs::read_to_string(fixture_dir().join("schema_mod.td")).expect("read schema_mod.td");
-    fs::write(tmp.join("schema_mod.td"), schema_src).expect("write schema_mod.td");
+    fs::write(tmp.join("schema_mod.td"), migrated_schema_mod_src()).expect("write schema_mod.td");
     let leaky_caller = "\
 >>> ./schema_mod.td => @(loadUser)
 stdout(loadUser())
 stdout(\"\\n\")
 raw <= \"{\\\"name\\\":\\\"bob\\\",\\\"age\\\":9}\"
-stdout(JSON[raw, UserSchema]().__value.name)
+JSON[raw, UserSchema]() ]=> jsResult
+stdout(jsResult.name)
 ";
     fs::write(tmp.join("caller.td"), leaky_caller).expect("write caller");
     let out = Command::new(taida_bin())
@@ -305,7 +329,9 @@ Schema = @(name: Str)
 
 load raw: Str =
   parsed <= JSON[raw, Schema]()
-  | parsed.hasValue |> parsed.__value.name
+  | parsed.hasValue |>
+    parsed ]=> parsedValue
+    parsedValue.name
   | _ |> \"no\"
 => :Str
 
@@ -323,7 +349,8 @@ wrap raw: Str = load(raw) => :Str
 
 stdout(wrap(\"{\\\"name\\\":\\\"ok\\\"}\"))
 stdout(\"\\n\")
-stdout(JSON[\"{\\\"name\\\":\\\"leak\\\"}\", Schema]().__value.name)
+JSON[\"{\\\"name\\\":\\\"leak\\\"}\", Schema]() ]=> jsResult
+stdout(jsResult.name)
 stdout(\"\\n\")
 ";
     fs::write(tmp.join("caller.td"), caller).expect("write caller");
@@ -367,7 +394,8 @@ fn c20b_015_interpreter_truly_unknown_schema_still_errors() {
     fs::create_dir_all(&tmp).expect("mkdir");
     let src = "\
 raw <= \"{\\\"x\\\":1}\"
-stdout(JSON[raw, ThisDoesNotExist]().__value.x.toString())
+JSON[raw, ThisDoesNotExist]() ]=> jsResult
+stdout(jsResult.x.toString())
 ";
     fs::write(tmp.join("prog.td"), src).expect("write prog");
     let out = Command::new(taida_bin())
@@ -457,7 +485,9 @@ Schema = @(name: Str)
 
 load raw: Str =
   parsed <= JSON[raw, UnknownTypeThatDoesNotExist]()
-  | parsed.hasValue |> parsed.__value.name
+  | parsed.hasValue |>
+    parsed ]=> parsedValue
+    parsedValue.name
   | _ |> \"no\"
 => :Str
 
@@ -514,7 +544,8 @@ stdout(wrap(\"{\\\"name\\\":\\\"ignored\\\"}\"))
     // the bug report.
     let prog2_src = "\
 probeJson <= \"{\\\"name\\\":\\\"leak\\\"}\"
-stdout(JSON[probeJson, Schema]().__value.name)
+JSON[probeJson, Schema]() ]=> probe
+stdout(probe.name)
 ";
     let (prog2, errs2) = parse(prog2_src);
     assert!(errs2.is_empty(), "program 2 must parse: {:?}", errs2);
@@ -562,7 +593,9 @@ Schema = @(name: Str)
 
 load raw: Str =
   parsed <= JSON[raw, UnknownTypeThatDoesNotExist]()
-  | parsed.hasValue |> parsed.__value.name
+  | parsed.hasValue |>
+    parsed ]=> parsedValue
+    parsedValue.name
   | _ |> \"no\"
 => :Str
 
@@ -604,7 +637,8 @@ stdout(wrap(\"{\\\"name\\\":\\\"x\\\"}\"))
     // from the independent scope-leak signal.
     let probe_src = "\
 probeJson <= \"{\\\"name\\\":\\\"leak\\\"}\"
-stdout(JSON[probeJson, Schema]().__value.name)
+JSON[probeJson, Schema]() ]=> probe
+stdout(probe.name)
 ";
     let (probe, probe_errs) = parse(probe_src);
     assert!(probe_errs.is_empty(), "probe must parse: {:?}", probe_errs);
@@ -652,7 +686,9 @@ Schema = @(name: Str)
 
 load payload: Str =
   parsed <= JSON[payload, UnknownTypeThatDoesNotExist]()
-  | parsed.hasValue |> parsed.__value.name
+  | parsed.hasValue |>
+    parsed ]=> parsedValue
+    parsedValue.name
   | _ |> \"no\"
 => :Str
 

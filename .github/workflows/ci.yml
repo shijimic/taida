@@ -159,7 +159,7 @@ jobs:
       - name: Run E32 loopback smoke
         run: |
           mkdir -p "${RUNNER_TEMP}/e32-loopback-smoke"
-          TAIDA_BIN=./target/debug/taida \
+          TAIDA_BIN="$PWD/target/debug/taida" \
           E32_LOOPBACK_ARTIFACT_DIR="${RUNNER_TEMP}/e32-loopback-smoke" \
           ./tests/run_e32_loopback_smoke.sh
       - name: Upload E32 loopback traces

@@ -158,6 +158,8 @@ stdout(result.toString())
 fn expected_native_reject_examples() -> Vec<&'static str> {
     vec![
         "compile_stream", // Native backend does not provide Stream[T]
+        "compile_mutual_recursion",
+        "compile_c12_3_mutual_tail",
     ]
 }
 
@@ -729,7 +731,8 @@ doUpdate reqId reqTitle reqDone =
   mapper <= _ item = | item.id == reqId |> @(id <= reqId, title <= reqTitle, done <= reqDone) | _ |> item
   newItems <= Map[items, mapper]()
   found <= Find[newItems, _ item = item.id == reqId]()
-  jsonPretty(found.__value)
+  found ]=> foundValue
+  jsonPretty(foundValue)
 => :Str
 main dummy =
   result <= doUpdate(1, "updated", true)

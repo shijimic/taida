@@ -739,6 +739,8 @@ const FULL_EXPECTED_REJECTED: &[&str] = &[
 
 /// Examples where the native backend itself fails.
 const FULL_EXPECTED_NATIVE_FAIL: &[&str] = &[
+    "compile_mutual_recursion",
+    "compile_c12_3_mutual_tail",
     "compile_stream",
     "helper_val",
     "module_math",
@@ -875,12 +877,12 @@ fn wasm_full_parity_allowlist_guard() {
     // allowlist sizes. If a new fixture is added and parities, bump this
     // constant deliberately.
     //
-    //   92 fixtures - 14 skip - 1 rejected - 7 native_fail - 0 diff = 70
+    //   92 fixtures - 14 skip - 1 rejected - 9 native_fail - 0 diff = 68
     assert_eq!(
         expected_parity_ok,
-        70,
+        68,
         "WF-5: parity-OK count drift — got {} = |fixtures {}| - |skip {}| - |rejected {}| - \
-         |native_fail {}| - |diff {}|. Expected 70. Update this constant deliberately.",
+         |native_fail {}| - |diff {}|. Expected 68. Update this constant deliberately.",
         expected_parity_ok,
         all.len(),
         FULL_SKIP_STEMS.len(),

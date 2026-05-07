@@ -5793,8 +5793,9 @@ static int taida_str_byte_len(const char *s, size_t *out_len) {
 }
 
 static int taida_hashmap_key_valid(taida_val key_ptr) {
-    // All values are valid keys in Taida.
-    // Null (0) is traditionally not a key, but we can allow it as Int(0).
+    // Values are valid keys in Taida.
+    // Null (0) is not a key, but can be allowed as Int(0).
+    (void)key_ptr;
     return 1;
 }
 
