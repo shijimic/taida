@@ -717,7 +717,12 @@ mod tests {
         //   readBodyChunk / readBodyAll callers translate the new error
         //   return into abort_connection. net_h1_h2.c delta: +2,714 bytes.
         //   EXPECTED_TOTAL_LEN: 1,106,899 + 2,714 = 1,109,613.
-        const EXPECTED_TOTAL_LEN: usize = 1_109_613;
+        // E33B-003 Cat B (2026-05-07): JS / Native parity for runtime-built
+        //   `Error.kind` field-lift. core.c gains the
+        //   `taida_make_error_with_kind` helper (+1,541 bytes); net_h1_h2.c's
+        //   `taida_net_result_fail` switches to it (+210 bytes).
+        //   EXPECTED_TOTAL_LEN: 1,109,613 + 1,751 = 1,111,364.
+        const EXPECTED_TOTAL_LEN: usize = 1_111_364;
         let asm = *NATIVE_RUNTIME_C;
         assert_eq!(
             asm.len(),
@@ -1226,11 +1231,18 @@ mod tests {
         //   F2 starts at exactly that offset and ends at CORE_SECTION.len()
         //   (= 465,220).
         //   F1_LEN: 299,723 + 3,503 = 303,226.
-        const F1_LEN: usize = 303_226;
+        // E33B-003 Cat B (2026-05-07): added `taida_make_error_with_kind`
+        //   helper inside the polymorphic-helpers block (F1) to surface
+        //   the `kind` field at the top level of Native Error packs. This
+        //   is the JS-runtime parity counterpart of the
+        //   `__TaidaError`-constructor field-lift change. F1 grew by
+        //   +1,541 bytes (`grep -bo` 303,226 → 304,767). F2 unchanged.
+        //   F1_LEN: 303,226 + 1,541 = 304,767.
+        const F1_LEN: usize = 304_767;
         assert_eq!(
             CORE_SECTION.len(),
-            303_226 + 161_994,
-            "core.c total byte length must equal legacy fragment1 + fragment2 (C25B-001 / C25B-028 / C25B-025 / C26B-011 / C26B-020 / C26B-016 / C26B-018 / C26B-011-wS / C26B-024 / C26B-024-wepsilon adjusted; CI-red 2026-04-24 cppcheck clean-up adds 881/409 to F1/F2; @c.27 PR41 CI-red follow-up adds 61 to F1 for the cppcheck-suppress comment on the new taida_release_any helper; D28B-012 wF adds 4,821 to F1 for taida_arena_request_reset; D28B-026 review follow-up adds 425 to F1 for the active_chunk defensive corner; D29B-003 Track-β adds 6,407 to F1 for TAIDA_BYTES_CONTIG primitives + writev hot-path reflection; D29B-004 Track-ε adds 803 to F1 for taida_slice_mold inline note documenting deferred Native zero-copy view integration; D29B-005/012 Track-η adds 3,291 to F1 for taida_net_raw_as_bytes ABI Option-D rewrite + Span* release sites + taida_slice_mold CONTIG view fast path + subtraction-based Span* bounds checks; D29B-015 Track-β-2 adds 8,418 to F1 and 1,234 to F2 for Bytes dispatcher polymorphism + producer flip; D29B-016 Track-θ adds 910 to F1 for TAIDA_STR_ROPE_MAGIC sentinel + design rationale comment block; E32B-022 Lock-N adds 2,783 to F1 for the Lax[Int]-returning *indexOf*/search/FindIndex sibling helpers)"
+            304_767 + 161_994,
+            "core.c total byte length must equal legacy fragment1 + fragment2 (C25B-001 / C25B-028 / C25B-025 / C26B-011 / C26B-020 / C26B-016 / C26B-018 / C26B-011-wS / C26B-024 / C26B-024-wepsilon adjusted; CI-red 2026-04-24 cppcheck clean-up adds 881/409 to F1/F2; @c.27 PR41 CI-red follow-up adds 61 to F1 for the cppcheck-suppress comment on the new taida_release_any helper; D28B-012 wF adds 4,821 to F1 for taida_arena_request_reset; D28B-026 review follow-up adds 425 to F1 for the active_chunk defensive corner; D29B-003 Track-β adds 6,407 to F1 for TAIDA_BYTES_CONTIG primitives + writev hot-path reflection; D29B-004 Track-ε adds 803 to F1 for taida_slice_mold inline note documenting deferred Native zero-copy view integration; D29B-005/012 Track-η adds 3,291 to F1 for taida_net_raw_as_bytes ABI Option-D rewrite + Span* release sites + taida_slice_mold CONTIG view fast path + subtraction-based Span* bounds checks; D29B-015 Track-β-2 adds 8,418 to F1 and 1,234 to F2 for Bytes dispatcher polymorphism + producer flip; D29B-016 Track-θ adds 910 to F1 for TAIDA_STR_ROPE_MAGIC sentinel + design rationale comment block; E32B-022 Lock-N adds 2,783 to F1 for the Lax[Int]-returning *indexOf*/search/FindIndex sibling helpers; E33B-003 Cat B adds 1,541 to F1 for `taida_make_error_with_kind` parity helper)"
         );
         const F2_PREFIX: &[u8] = b"// \xE2\x94\x80\xE2\x94\x80 Error ceiling";
         let tail = &CORE_SECTION.as_bytes()[F1_LEN..F1_LEN + F2_PREFIX.len()];
@@ -1378,11 +1390,18 @@ mod tests {
         //   offset of `// ── Native HTTP/2 server` (verified via `grep -bo`,
         //   which yields 222,989).
         //   F5_LEN: 198,866 + 24,123 = 222,989. F6_LEN unchanged at 106,075.
-        const F5_LEN: usize = 222_989;
+        // E33B-003 Cat B (2026-05-07): net_h1_h2.c's
+        //   `taida_net_result_fail` switched from `taida_make_error` to the
+        //   new `taida_make_error_with_kind` helper to expose the `kind`
+        //   field at top level on the throw side. The change is +210
+        //   bytes (additional comment + extended call). All edits sit
+        //   before the HTTP/2 divider; F6 unchanged.
+        //   F5_LEN: 222,989 + 210 = 223,199.
+        const F5_LEN: usize = 223_199;
         assert_eq!(
             NET_H1_H2_SECTION.len(),
-            222_989 + 106_075,
-            "net_h1_h2.c total byte length must equal legacy fragment5 + fragment6 (C26B-026 / C26B-022-wS / C27B-014 / C27B-026 / D28B-012 wF / D28B-002 wG / D28B-025 review follow-up / D29B-003 Track-β contig writev hot-path / D29B-001 Track-ζ h2 arena+span request pack / D29B-015 Track-β-2 producer flip + consumer polymorphism adjusted)"
+            223_199 + 106_075,
+            "net_h1_h2.c total byte length must equal legacy fragment5 + fragment6 (C26B-026 / C26B-022-wS / C27B-014 / C27B-026 / D28B-012 wF / D28B-002 wG / D28B-025 review follow-up / D29B-003 Track-β contig writev hot-path / D29B-001 Track-ζ h2 arena+span request pack / D29B-015 Track-β-2 producer flip + consumer polymorphism adjusted; E33B-003 Cat B adds 210 to F5 for taida_net_result_fail switching to taida_make_error_with_kind)"
         );
         const F6_PREFIX: &[u8] = b"// \xE2\x94\x80\xE2\x94\x80 Native HTTP/2 server";
         let tail = &NET_H1_H2_SECTION.as_bytes()[F5_LEN..F5_LEN + F6_PREFIX.len()];

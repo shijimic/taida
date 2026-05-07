@@ -124,7 +124,10 @@ function __taida_net_result_ok(inner) {
 // Helper: create net Result failure with kind/message
 function __taida_net_result_fail(kind, message) {
   const inner = Object.freeze({ ok: false, code: -1, message: message, kind: kind });
-  const errVal = { __type: 'HttpError', type: 'HttpError', message: message, fields: { kind: kind } };
+  // E33B-003 Cat B: surface `kind` at top-level so user code reading
+  // `err.kind` (after `|==` catch) matches Interpreter / Native parity.
+  // Keep `fields.kind` populated for legacy `err.fields.kind` callers.
+  const errVal = { __type: 'HttpError', type: 'HttpError', message: message, kind: kind, fields: { kind: kind } };
   return __taida_result_create(inner, errVal, null);
 }
 

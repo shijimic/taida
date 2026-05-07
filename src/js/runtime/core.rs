@@ -316,6 +316,19 @@ class __TaidaError extends globalThis.Error {
     super(message);
     this.type = type;
     this.fields = fields || {};
+    // E33B-003 Cat B: lift `fields` to top-level so user code's
+    // `err.kind` / `err.code` etc. matches Interpreter / Native parity
+    // (where Error fields surface as direct properties via
+    // `get_error_field`). Preserve the legacy `err.fields.X` callers by
+    // keeping `this.fields` populated as before.
+    if (fields) {
+      for (const k of Object.keys(fields)) {
+        // Do not clobber the canonical `type` / `message` / `name` /
+        // `stack` properties already set by the JS Error superclass.
+        if (k === 'type' || k === 'message' || k === 'name' || k === 'stack') continue;
+        this[k] = fields[k];
+      }
+    }
   }
 }
 
@@ -838,7 +851,10 @@ function __taida_result_create(value, throwVal, predicate) {
     getOrThrow() {
       if (!_checkError()) return _value;
       if (_throw && typeof _throw === 'object') {
-        throw new __TaidaError(_throw.type || 'ResultError', _throw.message || String(_throw), {});
+        // E33B-003 Cat B: forward throw object as fields so the
+        // __TaidaError constructor lifts top-level keys (e.g. `kind`)
+        // for `err.kind` parity with Interpreter / Native.
+        throw new __TaidaError(_throw.type || 'ResultError', _throw.message || String(_throw), _throw);
       }
       if (_throw) {
         throw new __TaidaError('ResultError', String(_throw), {});
@@ -854,7 +870,8 @@ function __taida_result_create(value, throwVal, predicate) {
     unmold() {
       if (_checkError()) {
         if (_throw && typeof _throw === 'object') {
-          throw new __TaidaError(_throw.type || 'ResultError', _throw.message || String(_throw), {});
+          // E33B-003 Cat B: forward throw object as fields (see getOrThrow).
+          throw new __TaidaError(_throw.type || 'ResultError', _throw.message || String(_throw), _throw);
         }
         if (_throw) throw _throw;
         // Predicate failed but no explicit throw — generate default error

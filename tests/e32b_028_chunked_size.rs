@@ -229,6 +229,34 @@ stdout(r.requests)
     )
 }
 
+// E32B-068: distinct from `streaming_source` (which uses readBodyAll), this
+// 2-arg handler drives the streaming `readBodyChunk` API directly. The
+// chunk-size guard must reject malformed framing on this path even when the
+// handler only requests a single chunk before responding — otherwise an
+// attacker could bypass the eager guarantees by attaching a chunk-by-chunk
+// streaming handler. The handler unmolds the `Lax[Bytes]` via `]=>` so we
+// stay clear of the compiler-internal `__value` accessor (rejected by
+// E1960) while still exercising the readBodyChunk codepath end-to-end.
+fn streaming_chunk_source(port: u16) -> String {
+    format!(
+        r#">>> taida-lang/net => @(httpServe, readBodyChunk, startResponse, writeChunk, endResponse)
+
+handler req writer =
+  chunk <= readBodyChunk(req)
+  chunk ]=> bytes
+  startResponse(writer, 200, @[@(name <= "Content-Type", value <= "application/octet-stream")])
+  writeChunk(writer, bytes)
+  endResponse(writer)
+
+asyncResult <= httpServe({port}, handler, 1)
+asyncResult ]=> result
+result ]=> r
+stdout(r.ok)
+stdout(r.requests)
+"#
+    )
+}
+
 #[test]
 fn e32b_028_oversized_chunk_size_eager_400_three_backend() {
     let mut backends = vec!["interp"];
@@ -841,6 +869,84 @@ fn e32b_052_trailer_bytes_flood_rejected_three_backend() {
         assert!(
             !response.contains("200 OK"),
             "{} backend must reject a 16 KiB trailer-bytes flood, got prefix: {:?}",
+            backend,
+            &response[..response.len().min(200)]
+        );
+    }
+}
+
+/// E32B-068: oversized chunk-size on the readBodyChunk streaming path.
+/// The eager-path test (`e32b_028_oversized_chunk_size_eager_400_three_backend`)
+/// pins the 1-arg handler reject. This sibling pins the 2-arg streaming
+/// `readBodyChunk` reject so the per-chunk path cannot bypass the cap by
+/// reading chunks individually instead of via `readBodyAll`. All three
+/// backends must refuse to deliver the chunk body to the handler, which
+/// means the handler-side echo (`chunk.__value`) must never reach the wire.
+#[test]
+fn e32b_068_streaming_readbodychunk_oversized_chunk_size_three_backend() {
+    let mut backends = vec!["interp"];
+    if node_available() {
+        backends.push("js");
+    } else {
+        eprintln!("node unavailable; skipping JS member");
+    }
+    if cc_available() {
+        backends.push("native");
+    } else {
+        eprintln!("cc unavailable; skipping native member");
+    }
+
+    for backend in backends {
+        let port = common::find_free_loopback_port();
+        let dir = setup_net_project(
+            &streaming_chunk_source(port),
+            &format!("rbc_oversize_{}", backend),
+        );
+        let (mut child, artifact) =
+            spawn_backend(&dir, backend, &format!("rbc_oversize_{}", backend));
+
+        // Same oversized chunk-size as the eager test: 16 hex digits worth of
+        // F's overflows SIZE_MAX on 64-bit systems. The runtime must reject
+        // before the handler can observe the `x` byte chunk-data.
+        let response = send_request(
+            port,
+            b"POST /data HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\nFFFFFFFFFFFFFFFF\r\nx\r\n0\r\n\r\n",
+        );
+
+        let _ = child.kill();
+        let _ = child.wait();
+        if let Some(path) = artifact {
+            let _ = fs::remove_file(path);
+        }
+        let _ = fs::remove_dir_all(&dir);
+
+        // The streaming path may either return HTTP 400 or close the
+        // connection without a response (Native's readBodyChunk calls
+        // `taida_net4_abort_connection` which `shutdown(SHUT_RDWR)`s the
+        // socket without writing anything). What must hold: the handler
+        // never observes the chunk-data, so the response must NOT contain
+        // the echoed `x` body, and must not be a 200 OK.
+        let response = response
+            .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+            .unwrap_or_default();
+        assert!(
+            !response.contains("200 OK"),
+            "{} streaming readBodyChunk backend must not 200 an oversized chunk-size, got: {:?}",
+            backend,
+            &response[..response.len().min(200)]
+        );
+        // The handler-side echo (`writeChunk(writer, bytes)` after
+        // unmolding the Lax) would emit the byte `x` either as a
+        // chunked-encoding frame `\r\n1\r\nx\r\n` or as a raw trailing
+        // `\r\nx`. Reject all three echo shapes to ensure no chunk-data
+        // leaked through the cap. The Codex review for this batch
+        // flagged that the chunked-encoding shape was not previously
+        // covered by the assert.
+        assert!(
+            !response.ends_with("\r\nx")
+                && !response.contains("\r\n\r\nx")
+                && !response.contains("\r\n1\r\nx\r\n"),
+            "{} streaming readBodyChunk backend must not deliver chunk-data after oversized chunk-size, got prefix: {:?}",
             backend,
             &response[..response.len().min(200)]
         );

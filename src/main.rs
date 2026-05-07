@@ -2875,7 +2875,6 @@ fn collect_unit_dependencies(model: &BuildDescriptorModel, unit_symbol: &str) ->
     let mut deps = Vec::new();
     for route in &unit.route_assets {
         if let Some(dep) = route.unit_symbol.as_ref()
-            && model.units_by_symbol.contains_key(dep)
             && !deps.contains(dep)
         {
             deps.push(dep.clone());

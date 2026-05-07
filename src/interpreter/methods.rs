@@ -1452,7 +1452,9 @@ impl Interpreter {
             }
             _ => Err(RuntimeError {
                 message: format!(
-                    "Unknown string method: '{}'. Available: length, contains, startsWith, endsWith, indexOf, indexOfLax, lastIndexOf, lastIndexOfLax, get, replace, replaceAll, split, match, search, searchLax, toString",
+                    "Unknown string method: '{}'. Available: length, contains, startsWith, endsWith, indexOf, indexOfLax, lastIndexOf, lastIndexOfLax, get, replace, replaceAll, split, match, search, searchLax, toString. \
+                     Note: `indexOf` / `lastIndexOf` / `search` return the sentinel `-1` when the substring or pattern is not found — this is retained for migration but is discouraged because Taida values total functions over magic-number returns. \
+                     Prefer the `*Lax` variants (`indexOfLax` / `lastIndexOfLax` / `searchLax`) which return `Lax[Int]` so callers can `]=>` unmold the index or fall through with an explicit default instead of guarding against `-1`.",
                     method
                 ),
             }),

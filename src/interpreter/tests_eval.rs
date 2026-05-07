@@ -1566,14 +1566,26 @@ PlusOne[41]()"#;
     }
 
     #[test]
-    fn test_custom_mold_solidify_can_reference_self() {
+    fn test_custom_mold_solidify_self_type_rejected_post_e32b_018() {
+        // E32B-018: `self.__type` inside a mold's `solidify` body used to
+        // return the mold name as a Str. Reading any compiler-internal
+        // `__*` field is now a hard `[E1960]` runtime error — the
+        // user-visible mold-name surface lives on the public API instead.
+        // This test pins that we *correctly reject* the access from inside
+        // a mold body, which is the symmetric guarantee of the user-side
+        // rejection elsewhere.
         let source = r#"Mold[T] => SelfType[T] = @(
   solidify =
     self.__type
   => :Str
 )
 SelfType[1]()"#;
-        assert_eq!(eval_ok(source), Value::str("SelfType".to_string()));
+        let err = eval(source).expect_err("self.__type must be rejected");
+        assert!(
+            err.contains("[E1960]") && err.contains("__type"),
+            "expected E1960 reject for self.__type inside solidify, got: {}",
+            err
+        );
     }
 
     #[test]
@@ -2472,8 +2484,13 @@ p.y.hasValue"#,
 
     #[test]
     fn test_bt18_int_conversion_failure_default() {
-        // Int["invalid"]() should return Lax with __default = 0
-        let result = eval_ok(r#"Int["abc"]().__default"#);
+        // E32B-035 migration: `Int["abc"]()` returns a Lax[Int] with
+        // hasValue=false. The implicit default (`__default`) is 0; the
+        // user-observable replacement for that pin is `]=>` unmolding,
+        // which falls back to the same default when hasValue=false.
+        let result = eval_ok(r#"res <= Int["abc"]()
+res ]=> v
+v"#);
         assert_eq!(
             result,
             Value::Int(0),
@@ -2483,8 +2500,11 @@ p.y.hasValue"#,
 
     #[test]
     fn test_bt18_float_conversion_failure_default() {
-        // Float["invalid"]() should return Lax with __default = 0.0
-        let result = eval_ok(r#"Float["abc"]().__default"#);
+        // E32B-035 migration: same pattern as the Int variant — `]=>` on a
+        // Lax[Float] with hasValue=false yields the implicit default 0.0.
+        let result = eval_ok(r#"res <= Float["abc"]()
+res ]=> v
+v"#);
         assert_eq!(
             result,
             Value::Float(0.0),
@@ -2494,19 +2514,28 @@ p.y.hasValue"#,
 
     #[test]
     fn test_bt18_lax_type_field() {
-        // Type conversion molds return Lax, __type field should be "Lax"
-        let result = eval_ok(r#"Bool[0]().__type"#);
+        // E32B-035 migration: the old form read `__type` (now rejected by
+        // [E1960]) to verify that conversion molds wrap their result in a
+        // Lax envelope. The user-observable proxy is `.hasValue` — only
+        // Lax-shaped values expose it. Reading `.hasValue` on the
+        // (success) `Bool[0]()` pins the same invariant: the value is a
+        // Lax envelope wrapping the converted Bool.
+        let result = eval_ok(r#"Bool[0]().hasValue"#);
         assert_eq!(
             result,
-            Value::str("Lax".to_string()),
-            "Lax __type should be 'Lax' (the mold type, not the inner type)"
+            Value::Bool(true),
+            "Bool[0]() must be wrapped in Lax (hasValue accessor present and true on success)"
         );
     }
 
     #[test]
     fn test_bt18_div_zero_default() {
-        // Div[1,0]() should return Lax with __default = 0
-        let result = eval_ok("Div[1,0]().__default");
+        // E32B-035 migration: same `]=>` fallback pattern as the
+        // Int / Float conversion tests. Div[1,0]() is hasValue=false and
+        // unmolds to the implicit default 0.
+        let result = eval_ok(r#"res <= Div[1,0]()
+res ]=> v
+v"#);
         assert_eq!(result, Value::Int(0), "Div by zero default should be 0");
     }
 

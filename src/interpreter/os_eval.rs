@@ -2966,6 +2966,23 @@ mod tests {
         interp.output.clone()
     }
 
+    /// E32B-035 migration helper — returns the last evaluated Value alongside
+    /// captured stdout. Useful when a test must pin runtime layout that lives
+    /// only inside compiler-internal `__value` / `__error` fields, since
+    /// `[E1960]` rejects user-side access to those fields. We bypass the
+    /// rejection at the Rust level (the runtime reject is only on the
+    /// `Expr::FieldAccess` path) by inspecting the returned `Value` directly.
+    fn run_code_returning_value(code: &str) -> (Value, Vec<String>) {
+        let (program, errors) = crate::parser::parse(code);
+        assert!(errors.is_empty(), "Parse errors: {:?}", errors);
+        let mut interp = Interpreter::new();
+        let value = match interp.eval_program(&program) {
+            Ok(v) => v,
+            Err(e) => unreachable!("Unexpected runtime error: {}", e),
+        };
+        (value, interp.output.clone())
+    }
+
     fn run_code_result(code: &str) -> Result<Vec<String>, String> {
         let (program, errors) = crate::parser::parse(code);
         if !errors.is_empty() {
@@ -2991,7 +3008,8 @@ mod tests {
         let code = format!(
             r#"result <= Read["{}"]()
 stdout(result.hasValue)
-stdout(result.__value)"#,
+result ]=> v
+stdout(v)"#,
             path
         );
         let output = run_code(&code);
@@ -3051,8 +3069,9 @@ stdout(result.hasValue)"#;
         let code = format!(
             r#"result <= Stat["{}"]()
 stdout(result.hasValue)
-stdout(result.__value.size)
-stdout(result.__value.isDir)"#,
+result ]=> info
+stdout(info.size)
+stdout(info.isDir)"#,
             path
         );
         let output = run_code(&code);
@@ -3072,7 +3091,8 @@ stdout(result.__value.isDir)"#,
         let path = dir.to_string_lossy().to_string();
         let code = format!(
             r#"result <= Stat["{}"]()
-stdout(result.__value.isDir)"#,
+result ]=> info
+stdout(info.isDir)"#,
             path
         );
         let output = run_code(&code);
@@ -3107,7 +3127,8 @@ stdout(result.hasValue)"#;
         let code = format!(
             r#"r <= Exists["{}"]()
 stdout(r.isSuccess())
-stdout(r.__value)"#,
+r ]=> exists
+stdout(exists)"#,
             path
         );
         let output = run_code(&code);
@@ -3120,9 +3141,10 @@ stdout(r.__value)"#,
     fn test_exists_false() {
         let code = r#"r <= Exists["/tmp/taida_nonexistent_xyz"]()
 stdout(r.isSuccess())
-stdout(r.__value)"#;
+r ]=> exists
+stdout(exists)"#;
         let output = run_code(code);
-        // The probe succeeded (isSuccess=true) and found no such path (__value=false).
+        // The probe succeeded (isSuccess=true) and found no such path (exists=false).
         assert_eq!(output, vec!["true", "false"]);
     }
 
@@ -3165,7 +3187,8 @@ stdout(result.hasValue)"#;
         let code = format!(
             r#"result <= writeFile("{}", "Hello!")
 stdout(result.isSuccess())
-stdout(result.__value)"#,
+result ]=> bytesWritten
+stdout(bytesWritten)"#,
             path
         );
         let output = run_code(&code);
@@ -3192,7 +3215,8 @@ writeRes <= writeBytes("{}", payload)
 stdout(writeRes.isSuccess())
 readRes <= readBytes("{}")
 stdout(readRes.hasValue)
-decoded <= Utf8Decode[readRes.__value]()
+readRes ]=> rawBytes
+decoded <= Utf8Decode[rawBytes]()
 decoded ]=> txt
 stdout(txt)"#,
             path, path
@@ -3219,7 +3243,8 @@ stdout(txt)"#,
         let code = format!(
             r#"result <= appendFile("{}", "Line2\n")
 stdout(result.isSuccess())
-stdout(result.__value)"#,
+result ]=> bytesAppended
+stdout(bytesAppended)"#,
             path
         );
         let output = run_code(&code);
@@ -3246,7 +3271,8 @@ stdout(result.__value)"#,
         let code = format!(
             r#"result <= remove("{}")
 stdout(result.isSuccess())
-stdout(result.__value)"#,
+result ]=> removedCount
+stdout(removedCount)"#,
             path
         );
         let output = run_code(&code);
@@ -3269,7 +3295,8 @@ stdout(result.__value)"#,
         let code = format!(
             r#"result <= remove("{}")
 stdout(result.isSuccess())
-stdout(result.__value)"#,
+result ]=> removedCount
+stdout(removedCount)"#,
             path
         );
         let output = run_code(&code);
@@ -3291,7 +3318,8 @@ stdout(result.__value)"#,
         let code = format!(
             r#"result <= createDir("{}")
 stdout(result.isSuccess())
-stdout(result.__value)"#,
+result ]=> createdCount
+stdout(createdCount)"#,
             path
         );
         let output = run_code(&code);
@@ -3315,7 +3343,8 @@ stdout(result.__value)"#,
         let to = dir.join("new.txt").to_string_lossy().to_string();
         let code = format!(
             r#"result <= rename("{}", "{}")
-stdout(result.__value.ok)"#,
+result ]=> info
+stdout(info.ok)"#,
             from, to
         );
         let output = run_code(&code);
@@ -3331,7 +3360,8 @@ stdout(result.__value.ok)"#,
     #[test]
     fn test_run_success() {
         let code = r#"result <= run("echo", @["hello"])
-stdout(result.__value.stdout)"#;
+result ]=> proc
+stdout(proc.stdout)"#;
         let output = run_code(code);
         assert_eq!(output[0].trim(), "hello");
     }
@@ -3350,7 +3380,8 @@ stdout(result.hasValue)"#;
     #[test]
     fn test_execshell_success() {
         let code = r#"result <= execShell("echo world")
-stdout(result.__value.stdout)"#;
+result ]=> proc
+stdout(proc.stdout)"#;
         let output = run_code(code);
         assert_eq!(output[0].trim(), "world");
     }
@@ -3420,7 +3451,8 @@ stdout(typeof(args))"#,
         let path = dir.join("ts.txt").to_string_lossy().to_string();
         let code = format!(
             r#"result <= Stat["{}"]()
-stdout(result.__value.modified)"#,
+result ]=> info
+stdout(info.modified)"#,
             path
         );
         let output = run_code(&code);
@@ -3451,12 +3483,15 @@ stdout(result.__value.modified)"#,
         std::fs::write(dir.join("test.txt"), "Async Hello").unwrap();
 
         let path = dir.join("test.txt").to_string_lossy().to_string();
-        // ReadAsync returns Async[Lax[Str]], ]=> unwraps the Async to get Lax[Str]
+        // ReadAsync returns Async[Lax[Str]], ]=> unwraps the Async to get
+        // Lax[Str]; the second `]=>` then unwraps the Lax to the Str default
+        // (or the read content when hasValue=true).
         let code = format!(
             r#"result <= ReadAsync["{}"]()
 result ]=> lax
 stdout(lax.hasValue)
-stdout(lax.__value)"#,
+lax ]=> contents
+stdout(contents)"#,
             path
         );
         let output = run_code(&code);
@@ -3722,29 +3757,56 @@ stdout(lax.hasValue)"#;
     fn test_c19_run_interactive_exit_0() {
         let code = r#"r <= runInteractive("/bin/sh", @["-c", "exit 0"])
 stdout(r.hasValue)
-stdout(r.__value.code)"#;
+r ]=> proc
+stdout(proc.code)"#;
         let out = run_code(code);
         assert_eq!(out, vec!["true", "0"]);
     }
 
     #[test]
     fn test_c19_run_interactive_exit_7() {
+        // E32B-035 migration: the failure-side carries the exit code on the
+        // compiler-internal `__error.code` field, which user-side code is no
+        // longer allowed to read (`[E1960]`). The `__error` for a non-zero
+        // exit is a `Value::Error(ProcessError)` with `code` in its
+        // `fields` map (not a `Value::BuchiPack`), so we go through
+        // `get_error_field` to read it at the Rust level.
         let code = r#"r <= runInteractive("/bin/sh", @["-c", "exit 7"])
 stdout(r.hasValue)
-stdout(r.__error.code)"#;
-        let out = run_code(code);
-        assert_eq!(out, vec!["false", "7"]);
+r"#;
+        let (value, out) = run_code_returning_value(code);
+        assert_eq!(out, vec!["false"]);
+        assert!(!lax_has_value(&value), "exit 7 must yield Gorillax failure");
+        let error = pack_field(&value, "__error");
+        let code_field = error
+            .get_error_field("code")
+            .unwrap_or_else(|| panic!("ProcessError must carry code field, got: {:?}", error));
+        assert_eq!(code_field, Value::Int(7), "exit code must be 7");
     }
 
     #[test]
     fn test_c19_run_interactive_missing_program_returns_io_error() {
+        // E32B-035 migration: same shape as `exit_7`, but the failure carries
+        // an `IoError` (`Value::Error` variant) instead of a process exit
+        // BuchiPack. We still cannot reach `__error.kind` from user code, so
+        // we read the `Value::Error` field map directly at the Rust level.
         let code = r#"r <= runInteractive("/nonexistent/taida_c19_xyz", @[])
 stdout(r.hasValue)
-stdout(r.__error.kind)"#;
-        let out = run_code(code);
-        assert_eq!(out[0], "false");
+r"#;
+        let (value, out) = run_code_returning_value(code);
+        assert_eq!(out, vec!["false"]);
+        assert!(!lax_has_value(&value));
+        let error = pack_field(&value, "__error");
+        let kind_field = match error.get_error_field("kind") {
+            Some(v) => v,
+            None => panic!(
+                "Missing program must classify __error.kind, got: {:?}",
+                error
+            ),
+        };
         assert_eq!(
-            out[1], "not_found",
+            kind_field,
+            Value::str("not_found".into()),
             "Missing program must be classified as not_found IoError"
         );
     }
@@ -3753,18 +3815,27 @@ stdout(r.__error.kind)"#;
     fn test_c19_exec_shell_interactive_exit_0() {
         let code = r#"r <= execShellInteractive("exit 0")
 stdout(r.hasValue)
-stdout(r.__value.code)"#;
+r ]=> proc
+stdout(proc.code)"#;
         let out = run_code(code);
         assert_eq!(out, vec!["true", "0"]);
     }
 
     #[test]
     fn test_c19_exec_shell_interactive_exit_3() {
+        // E32B-035 migration: same Rust-level inspection pattern as
+        // `runInteractive_exit_7`.
         let code = r#"r <= execShellInteractive("exit 3")
 stdout(r.hasValue)
-stdout(r.__error.code)"#;
-        let out = run_code(code);
-        assert_eq!(out, vec!["false", "3"]);
+r"#;
+        let (value, out) = run_code_returning_value(code);
+        assert_eq!(out, vec!["false"]);
+        assert!(!lax_has_value(&value));
+        let error = pack_field(&value, "__error");
+        let code_field = error
+            .get_error_field("code")
+            .unwrap_or_else(|| panic!("ProcessError must carry code field, got: {:?}", error));
+        assert_eq!(code_field, Value::Int(3), "exit code must be 3");
     }
 
     /// The code-only helper must produce a BuchiPack with `code` and nothing
@@ -3794,8 +3865,13 @@ stdout(r.__error.code)"#;
     /// will immediately scream.
     #[test]
     fn test_c19_run_interactive_stdout_field_is_absent_at_runtime() {
+        // E32B-035 migration: unmold via `]=>` (instead of compiler-internal
+        // `__value`) so the test still pins the inner-shape contract — the
+        // "stdout field is absent" assertion only fires when reaching the
+        // inner BuchiPack via the public unmold path.
         let code = r#"r <= runInteractive("/bin/sh", @["-c", "exit 0"])
-stdout(r.__value.stdout)"#;
+r ]=> proc
+stdout(proc.stdout)"#;
         let result = run_code_result(code);
         assert!(
             result.is_err(),
@@ -3807,7 +3883,8 @@ stdout(r.__value.stdout)"#;
     #[test]
     fn test_c19_run_interactive_stderr_field_is_absent_at_runtime() {
         let code = r#"r <= runInteractive("/bin/sh", @["-c", "exit 0"])
-stdout(r.__value.stderr)"#;
+r ]=> proc
+stdout(proc.stderr)"#;
         let result = run_code_result(code);
         assert!(
             result.is_err(),
@@ -3819,7 +3896,8 @@ stdout(r.__value.stderr)"#;
     #[test]
     fn test_c19_exec_shell_interactive_stdout_field_is_absent_at_runtime() {
         let code = r#"r <= execShellInteractive("exit 0")
-stdout(r.__value.stdout)"#;
+r ]=> proc
+stdout(proc.stdout)"#;
         let result = run_code_result(code);
         assert!(
             result.is_err(),
@@ -3834,8 +3912,9 @@ stdout(r.__value.stdout)"#;
     #[test]
     fn test_c19_run_captured_stdout_field_still_present() {
         let code = r#"r <= run("/bin/sh", @["-c", "exit 0"])
-stdout(r.__value.stdout)
-stdout(r.__value.code)"#;
+r ]=> proc
+stdout(proc.stdout)
+stdout(proc.code)"#;
         let out = run_code(code);
         // stdout is "" and code is 0.
         assert_eq!(out.len(), 2);
@@ -3909,9 +3988,14 @@ stdout(r.__value.code)"#;
 
     #[test]
     fn test_bt11_read_nonexistent_returns_lax_false() {
+        // E32B-035 migration: `]=>` on a Lax with hasValue=false unmolds to
+        // the implicit default (empty string for Lax[Str]), giving us the
+        // same assertion as the old `result.__default` path without
+        // touching compiler-internal fields.
         let code = r#"result <= Read["/tmp/taida_bt11_nonexistent_xyz.txt"]()
 stdout(result.hasValue)
-stdout(result.__default)"#;
+result ]=> contents
+stdout(contents)"#;
         let output = run_code(code);
         assert_eq!(
             output[0], "false",
@@ -3945,12 +4029,13 @@ stdout(result.hasValue)"#;
     fn test_bt11_exists_nonexistent() {
         let code = r#"r <= Exists["/tmp/taida_bt11_nonexistent_xyz"]()
 stdout(r.isSuccess())
-stdout(r.__value)"#;
+r ]=> exists
+stdout(exists)"#;
         let output = run_code(code);
         assert_eq!(
             output,
             vec!["true", "false"],
-            "Exists nonexistent should return Result[Bool](isSuccess=true, __value=false)"
+            "Exists nonexistent should return Result[Bool] with isSuccess=true and inner Bool=false"
         );
     }
 
@@ -3982,7 +4067,8 @@ stdout(r.__value)"#;
         let code = format!(
             r#"result <= Read["{}"]()
 stdout(result.hasValue)
-stdout(result.__value)"#,
+result ]=> contents
+stdout(contents)"#,
             path
         );
         let output = run_code(&code);
@@ -4002,7 +4088,8 @@ stdout(result.__value)"#,
             r#"writeFile("{path}", "")
 result <= Read["{path}"]()
 stdout(result.hasValue)
-stdout(result.__value)"#,
+result ]=> contents
+stdout(contents)"#,
             path = path
         );
         let output = run_code(&code);
@@ -4023,7 +4110,8 @@ stdout(result.__value)"#,
         let code = format!(
             r#"result <= Read["{}"]()
 stdout(result.hasValue)
-stdout(result.__value)"#,
+result ]=> contents
+stdout(contents)"#,
             path
         );
         let output = run_code(&code);
@@ -4043,7 +4131,8 @@ stdout(result.__value)"#,
         let code = format!(
             r#"result <= Read["{}"]()
 stdout(result.hasValue)
-stdout(result.__value)"#,
+result ]=> contents
+stdout(contents)"#,
             path
         );
         let output = run_code(&code);

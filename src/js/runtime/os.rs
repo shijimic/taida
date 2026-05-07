@@ -76,7 +76,9 @@ function __taida_os_result_fail(err) {
 // Helper: create os Result failure with explicit kind/message (non-OS errors)
 function __taida_os_result_fail_with_kind(kind, message) {
   const inner = Object.freeze({ ok: false, code: -1, message: message, kind: kind });
-  const errVal = { __type: 'IoError', type: 'IoError', message: message, fields: { code: -1, kind: kind } };
+  // E33B-003 Cat B: lift `code` and `kind` to top-level for `err.X` parity
+  // with Interpreter / Native. Keep `fields.X` for legacy callers.
+  const errVal = { __type: 'IoError', type: 'IoError', message: message, code: -1, kind: kind, fields: { code: -1, kind: kind } };
   return __taida_result_create(inner, errVal, null);
 }
 

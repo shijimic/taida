@@ -1106,6 +1106,38 @@ static taida_val taida_make_error(const char *error_type, const char *error_msg)
     return pack;
 }
 
+// E33B-003 Cat B: Native counterpart to JS `__TaidaError` field lift.
+// Builds an Error pack that mirrors `taida_make_error` shape but adds a
+// public `kind` field at the end so user code's `err.kind` parity matches
+// the Interpreter (which surfaces Error.fields[0] as a direct field via
+// `Value::get_error_field`) and the JS runtime (after the matching lift).
+static taida_val taida_make_error_with_kind(const char *error_type, const char *error_msg, const char *error_kind) {
+    taida_register_builtin_error_field_names();
+
+    taida_val pack = taida_pack_new(4);
+    // type
+    taida_pack_set_hash(pack, 0, (taida_val)HASH_TYPE);
+    char *type_str = taida_str_new_copy(error_type);
+    taida_pack_set(pack, 0, (taida_val)type_str);
+    taida_pack_set_tag(pack, 0, TAIDA_TAG_STR);
+    // message
+    taida_pack_set_hash(pack, 1, (taida_val)HASH_MESSAGE);
+    char *msg_str = taida_str_new_copy(error_msg);
+    taida_pack_set(pack, 1, (taida_val)msg_str);
+    taida_pack_set_tag(pack, 1, TAIDA_TAG_STR);
+    // __type (RCB-101)
+    taida_pack_set_hash(pack, 2, (taida_val)0x84d2d84b631f799bULL);
+    char *type_str2 = taida_str_new_copy(error_type);
+    taida_pack_set(pack, 2, (taida_val)type_str2);
+    taida_pack_set_tag(pack, 2, TAIDA_TAG_STR);
+    // kind (E33B-003 Cat B parity field)
+    taida_pack_set_hash(pack, 3, taida_str_hash((taida_val)"kind"));
+    char *kind_str = taida_str_new_copy(error_kind);
+    taida_pack_set(pack, 3, (taida_val)kind_str);
+    taida_pack_set_tag(pack, 3, TAIDA_TAG_STR);
+    return pack;
+}
+
 static int taida_os_msg_contains(const char *msg, const char *needle) {
     return msg && needle && strstr(msg, needle) != NULL;
 }

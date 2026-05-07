@@ -108,6 +108,43 @@ res <= ((Status:Retry() > 0)).toString()
     }
 }
 
+// E32B-045: Template interpolations that parse-error on a trailing fragment
+// (e.g. `|> bar` is not legal as a binary expression) still produce a partial
+// AST whose comparison prefix must be diagnosed. Previously the checker
+// dropped the partial AST whenever `parse_errors` was non-empty, swallowing
+// the embedded `[E1605]`. Multiple interpolations and trailing operator drops
+// all need to keep firing so that the user sees the real type mismatch.
+#[test]
+fn e32b_045_template_interpolation_partial_parse_still_emits_e1605() {
+    let cases = [
+        (
+            "trailing pipe drop",
+            r#"
+foo <= 1
+msg <= `bad ${foo == "x" |> bar}`
+"#,
+        ),
+        (
+            "trailing pipe with stdout sink",
+            r#"
+n <= 1
+msg <= `head ${n == "a" |> stdout}`
+"#,
+        ),
+        (
+            "multiple interpolations second has trailing pipe drop",
+            r#"
+foo <= 1
+msg <= `head ${foo == 2} tail ${foo == "x" |> bar}`
+"#,
+        ),
+    ];
+
+    for (case, source) in cases {
+        assert_has_e1605(case, source);
+    }
+}
+
 #[test]
 fn e32b_019_accepts_nested_compatible_comparisons() {
     let errors = check(

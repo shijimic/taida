@@ -582,6 +582,63 @@ bUnit <= BuildUnit(
 }
 
 #[test]
+fn e32b_032_route_asset_unknown_unit_symbol_rejected() {
+    // E32B-032: RouteAsset(unit <= <typo>) must hard-fail with [E1903] instead of
+    // silently dropping the unknown symbol from the dependency graph.
+    let dir = project("e32b_032_route_asset_unknown_unit");
+    write_file(&dir.join("server.td"), "stdout(\"server\")\n");
+    write_file(&dir.join("frontend.td"), "stdout(\"frontend\")\n");
+    write_file(
+        &dir.join("main.td"),
+        r#"
+>>> ./server.td => @(serverMain)
+>>> ./frontend.td => @(frontendMain)
+
+frontendA <= BuildUnit(
+  name <= "frontend-a",
+  target <= "wasm-min",
+  entry <= frontendMain
+)
+
+serverX <= BuildUnit(
+  name <= "server-x",
+  target <= "native",
+  entry <= serverMain,
+  assets <= @[
+    RouteAsset(path <= "/app.wasm", unit <= frontnedA)
+  ]
+)
+
+<<< serverX
+"#,
+    );
+
+    let output = run_taida_build(
+        &dir,
+        &["main.td", "--unit", "server-x", "--diag-format", "jsonl"],
+    );
+    assert!(
+        !output.status.success(),
+        "build with unknown RouteAsset.unit symbol must fail\nstdout={}\nstderr={}",
+        stdout_text(&output),
+        stderr_text(&output)
+    );
+    let stdout = stdout_text(&output);
+    assert!(stdout.contains("\"code\":\"E1903\""), "stdout={stdout}");
+    assert!(
+        stdout.contains("\"edge_kind\":\"ArtifactDependency\""),
+        "stdout={stdout}"
+    );
+    assert!(stdout.contains("server-x"), "stdout={stdout}");
+    assert!(stdout.contains("frontnedA"), "stdout={stdout}");
+    assert!(
+        !dir.join(".taida/build/wasm-min/frontend-a/frontend.wasm")
+            .exists(),
+        "no artifact should be built when RouteAsset.unit is unknown"
+    );
+}
+
+#[test]
 fn e32_descriptor_build_hook_requires_opt_in_and_then_runs() {
     let dir = project("e32_descriptor_hook");
     write_file(&dir.join("server.td"), "stdout(\"server\")\n");

@@ -88,9 +88,10 @@ allDone <= list5.all(isDone)
 
 // Find[] -- locate first pending item
 pending_todo <= Find[list5, isNotDone]()
+pending_todo ]=> next_todo
 stdout("")
 | pending_todo.hasValue |>
-  stdout("Next pending: " + pending_todo.__value.title)
+  stdout("Next pending: " + next_todo.title)
 | _ |>
   stdout("No pending tasks!")
 

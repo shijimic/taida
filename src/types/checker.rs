@@ -3429,12 +3429,24 @@ defaulted fields must be provided via `()`",
         }
     }
 
+    // E32B-045: When the interpolation source has trailing syntax errors
+    // (e.g. `foo == "x" |> bar` — `|>` is not valid in expression context),
+    // the parser still produces a partial AST for the prefix that *did*
+    // parse cleanly (`foo == "x"`). Earlier code dropped the partial AST
+    // whenever `parse_errors` was non-empty, which silently hid `[E1605]`
+    // detection on any comparison sitting inside such an interpolation.
+    // We now accept the partial AST and let `check_comparison_errors_in_expr`
+    // walk it as a best-effort diagnosis: comparison prefixes that *did*
+    // parse get diagnosed, and downstream `Type::Unknown` guards keep
+    // false positives away on the missing pieces. This is a diagnostic
+    // policy rather than a soundness proof — the goal is to refuse to
+    // miss `[E1605]` just because a tail of the interpolation failed to
+    // tokenize, not to claim soundness in the presence of arbitrary
+    // partial trees.
     fn parse_template_interpolation_expr(source: &str) -> Option<Expr> {
         fn parse_expr(source: &str) -> Option<Expr> {
-            let (program, parse_errors) = crate::parser::parse(source);
-            if parse_errors.is_empty()
-                && let Some(Statement::Expr(parsed_expr)) = program.statements.first()
-            {
+            let (program, _parse_errors) = crate::parser::parse(source);
+            if let Some(Statement::Expr(parsed_expr)) = program.statements.first() {
                 return Some(parsed_expr.clone());
             }
             None

@@ -301,6 +301,19 @@ fn find_close_code(bytes: &[u8]) -> Option<u16> {
 }
 
 fn run_reject_case(backend: &str, label: &str, opcode: u8, payload: &[u8], expected_code: u16) {
+    run_reject_frame_case(
+        backend,
+        label,
+        &masked_frame(opcode, payload),
+        expected_code,
+    );
+}
+
+/// Lower-level entry point used by E32B-068 to drive raw frames that the
+/// `masked_frame` helper cannot express (RSV1=1, MASK=0, unknown opcode).
+/// Identical lifecycle to `run_reject_case` — connect, send the frame,
+/// observe the close frame, assert the RFC 6455 close code.
+fn run_reject_frame_case(backend: &str, label: &str, frame: &[u8], expected_code: u16) {
     let port = common::find_free_loopback_port();
     let dir = setup_net_project(&ws_source(port), &format!("{}_{}", backend, label));
     let (mut child, artifact) = spawn_backend(&dir, backend, &format!("{}_{}", backend, label));
@@ -310,9 +323,7 @@ fn run_reject_case(backend: &str, label: &str, opcode: u8, payload: &[u8], expec
         let _ = child.wait();
         panic!("{} {}: WebSocket upgrade did not complete", backend, label);
     });
-    stream
-        .write_all(&masked_frame(opcode, payload))
-        .expect("write websocket frame");
+    stream.write_all(frame).expect("write websocket frame");
     let response = read_ws_bytes(&mut stream);
 
     let _ = child.kill();
@@ -333,6 +344,44 @@ fn run_reject_case(backend: &str, label: &str, opcode: u8, payload: &[u8], expec
         "{} {}: close code mismatch, raw bytes {:?}",
         backend, label, response
     );
+}
+
+/// Build a client→server frame with the RSV1 reserved bit set. RFC 6455
+/// §5.2 reserves RSV1/2/3 for extensions and requires endpoints to fail
+/// the connection (1002 protocol error) when an unnegotiated reserved bit
+/// is observed. The frame is otherwise a well-formed masked text frame
+/// so that the close cause is the reserved bit, not a downstream parse
+/// error.
+fn rsv1_text_frame(payload: &[u8]) -> Vec<u8> {
+    let mask_key = [0x37, 0xfa, 0x21, 0x3d];
+    let mut frame = Vec::new();
+    // FIN(0x80) | RSV1(0x40) | opcode(0x1=text)
+    frame.push(0x80 | 0x40 | 0x1);
+    // Masked payload (MASK=0x80) — short length only (≤125).
+    frame.push(0x80 | payload.len() as u8);
+    frame.extend_from_slice(&mask_key);
+    for (i, byte) in payload.iter().enumerate() {
+        frame.push(*byte ^ mask_key[i % 4]);
+    }
+    frame
+}
+
+/// Build an UNMASKED client→server text frame. RFC 6455 §5.1 requires every
+/// client-originated frame to be masked; servers MUST close with 1002 when
+/// they receive an unmasked frame from a client.
+fn unmasked_text_frame(payload: &[u8]) -> Vec<u8> {
+    let mut frame = Vec::new();
+    frame.push(0x80 | 0x1); // FIN | text
+    frame.push(payload.len() as u8); // MASK bit cleared
+    frame.extend_from_slice(payload);
+    frame
+}
+
+/// Build a masked frame with an unassigned non-control opcode (0x3-0x7
+/// reserved by RFC 6455 §5.2). Receiving an unknown opcode MUST fail the
+/// connection with 1002 (protocol error).
+fn unknown_opcode_frame(opcode: u8, payload: &[u8]) -> Vec<u8> {
+    masked_frame(opcode, payload)
 }
 
 #[test]
@@ -359,6 +408,41 @@ fn e32b_029_websocket_validation_three_backend() {
         run_reject_case(backend, "pong_126", 0xA, &pong_126, 1002);
         run_reject_case(backend, "close_126", 0x8, &close_126, 1002);
         run_reject_case(backend, "invalid_text_utf8", 0x1, &[0xFF], 1007);
+    }
+}
+
+/// E32B-068 (RFC 6455 §5.1 / §5.2 protocol-violation closure):
+///
+/// The existing `e32b_029_websocket_validation_three_backend` covers control
+/// payload >125 and invalid-UTF-8 text. Three additional protocol violations
+/// must close with 1002 on every backend so that future runtime changes
+/// cannot silently accept frames that the spec marks as connection-fatal:
+///   - RSV1 = 1 with no negotiated extension (RFC 6455 §5.2)
+///   - MASK = 0 on a client→server frame (RFC 6455 §5.1)
+///   - unassigned non-control opcode 0x3 (RFC 6455 §5.2)
+#[test]
+fn e32b_068_websocket_protocol_violation_three_backend() {
+    let mut backends = vec!["interp"];
+    if node_available() {
+        backends.push("js");
+    } else {
+        eprintln!("node unavailable; skipping JS member");
+    }
+    if cc_available() {
+        backends.push("native");
+    } else {
+        eprintln!("cc unavailable; skipping native member");
+    }
+
+    for backend in backends {
+        run_reject_frame_case(backend, "rsv1_set", &rsv1_text_frame(b"hi"), 1002);
+        run_reject_frame_case(backend, "unmasked", &unmasked_text_frame(b"hi"), 1002);
+        run_reject_frame_case(
+            backend,
+            "unknown_opcode_3",
+            &unknown_opcode_frame(0x3, b"hi"),
+            1002,
+        );
     }
 }
 

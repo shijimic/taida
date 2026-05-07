@@ -43,7 +43,10 @@ static taida_val taida_net_result_fail(const char *kind, const char *message) {
     taida_pack_set(inner, 3, (taida_val)taida_str_new_copy(kind));
     taida_pack_set_tag(inner, 3, TAIDA_TAG_STR);
 
-    taida_val error = taida_make_error("HttpError", message);
+    // E33B-003 Cat B: build the throw-side Error with `kind` exposed at
+    // the top level so user code's `err.kind` parity matches Interpreter
+    // and JS runtime after the matching lift.
+    taida_val error = taida_make_error_with_kind("HttpError", message, kind);
     return taida_result_create(inner, error, 0);
 }
 
