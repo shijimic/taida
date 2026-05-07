@@ -1,6 +1,6 @@
 //! E32B-029: WebSocket control-frame and text UTF-8 validation parity.
 //!
-//! E32B-080 follow-up (concurrent isolation): a malformed WS connection A
+//! Process-survival regression: a malformed WS connection A
 //! (invalid UTF-8 text frame) must not affect sibling WS connection B.
 //! Both connections share a server with request limit = 2; A must observe
 //! close-code 1007 and B must observe its frame echoed back + a normal
@@ -491,20 +491,19 @@ fn find_text_payload(bytes: &[u8]) -> Option<Vec<u8>> {
     None
 }
 
-/// E32B-080 (WS concurrent isolation): connection A sends a malformed
+/// Process-survival regression: connection A sends a malformed
 /// UTF-8 text frame and must observe close-code 1007. Sibling connection
 /// B sends a valid text frame `hello` afterwards and must observe its
 /// frame echoed back followed by a normal close (1000). Both run
 /// against the same backend process (request limit = 2) so the test
 /// demonstrates that A's malformed input did not impact B's echo path.
 ///
-/// E32B-080 follow-up (Codex HOLD): the workers are sequential rather
-/// than racing on a shared atomic + sleep barrier — A finishes its
-/// upgrade + frame round-trip first, then B opens a fresh WS handshake.
-/// Removing the sleep-as-synchronization eliminates the flake window
-/// observed under nextest 2C parallelism.
+/// The workers are intentionally sequential: A finishes its upgrade +
+/// frame round-trip first, then B opens a fresh WS handshake. This test
+/// pins process-wide survival after malformed input; it does not claim
+/// overlap between sibling connections.
 #[test]
-fn e32b_080_ws_concurrent_isolation_three_backend() {
+fn ws_process_survival_three_backend() {
     let mut backends = vec!["interp"];
     if node_available() {
         backends.push("js");

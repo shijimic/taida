@@ -1,6 +1,6 @@
 //! E32B-028: oversized HTTP chunk-size is a protocol error, not a panic.
 //!
-//! E32B-080 follow-up (concurrent isolation): a malformed connection A
+//! Process-survival regression: a malformed connection A
 //! (oversized chunk-size) must not break sibling connection B's keep-alive
 //! processing. Both connections drive the same server (request limit = 2),
 //! A gets HTTP 400 + close, B gets HTTP 200 + body echo.
@@ -306,22 +306,19 @@ fn e32b_028_oversized_chunk_size_eager_400_three_backend() {
     }
 }
 
-/// E32B-080 (concurrent isolation): two HTTP/1.1 connections drive the
+/// Process-survival regression: two HTTP/1.1 connections drive the
 /// same server (request limit = 2). A sends an oversized chunk-size and
 /// must be rejected with HTTP 400 + close; B sends a well-formed
 /// chunked body `hello` afterwards and must observe HTTP 200 + the
 /// echoed body. The property under test is that A's malformed input
 /// does not break the server's ability to serve B.
 ///
-/// E32B-080 follow-up (Codex HOLD): the workers are sequential rather
-/// than racing on a shared atomic + sleep barrier — A finishes its
-/// full request/response round-trip first, then B opens a fresh
-/// connection. The server processes connections single-threadedly, so
-/// the sequential shape is observationally indistinguishable from the
-/// previous racing layout while removing every sleep-as-synchronization
-/// hazard under nextest 2C parallelism.
+/// The workers are intentionally sequential: A finishes its full
+/// request/response round-trip first, then B opens a fresh connection.
+/// This test pins process-wide survival after malformed input; it does
+/// not claim overlap between sibling connections.
 #[test]
-fn e32b_080_chunked_concurrent_isolation_three_backend() {
+fn chunked_process_survival_three_backend() {
     let mut backends = vec!["interp"];
     if node_available() {
         backends.push("js");

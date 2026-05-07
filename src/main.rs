@@ -41,7 +41,7 @@ use taida::graph::verify;
 use taida::interpreter::Interpreter;
 use taida::js;
 use taida::module_graph;
-use taida::parser::{BuchiField, Expr, FieldDef, FuncDef, Program, Statement, parse};
+use taida::parser::{BuchiField, Expr, FieldDef, FuncDef, ImportStmt, Program, Statement, parse};
 use taida::pkg;
 use taida::types::{CompileTarget, TypeChecker};
 use taida::version::taida_version;
@@ -3139,8 +3139,7 @@ pub(crate) fn validate_target_closure_modules(
     entry_path: &Path,
     modules: &[PathBuf],
 ) -> Result<(), DescriptorBuildError> {
-    let restricted = matches!(unit.target, BuildTarget::WasmMin | BuildTarget::WasmEdge);
-    if !restricted {
+    if matches!(unit.target, BuildTarget::Js | BuildTarget::Native) {
         return Ok(());
     }
     for module in modules {
@@ -3179,11 +3178,7 @@ pub(crate) fn validate_target_closure_modules(
         }
         for stmt in &program.statements {
             if let Statement::Import(import) = stmt {
-                let api = import.path.split('@').next().unwrap_or(&import.path);
-                if matches!(
-                    api,
-                    "taida-lang/os" | "taida-lang/net" | "taida-lang/terminal"
-                ) {
+                if let Some(api) = target_incompatible_import(unit.target, import) {
                     return Err(DescriptorBuildError::new(
                         "E1941",
                         format!(
@@ -3200,7 +3195,7 @@ pub(crate) fn validate_target_closure_modules(
                         dependency_path: vec![
                             entry_path.display().to_string(),
                             module.display().to_string(),
-                            api.to_string(),
+                            api,
                         ],
                         ..BuildDiagContext::default()
                     }));
@@ -3209,6 +3204,50 @@ pub(crate) fn validate_target_closure_modules(
         }
     }
     Ok(())
+}
+
+fn target_incompatible_import(target: BuildTarget, import: &ImportStmt) -> Option<String> {
+    let api = import.path.split('@').next().unwrap_or(&import.path);
+    match target {
+        BuildTarget::Js | BuildTarget::Native => None,
+        BuildTarget::WasmMin => match api {
+            "taida-lang/os" | "taida-lang/net" | "taida-lang/terminal" => Some(api.to_string()),
+            _ => None,
+        },
+        BuildTarget::WasmEdge => match api {
+            "taida-lang/net" | "taida-lang/terminal" => Some(api.to_string()),
+            "taida-lang/os" => first_symbol_not_in(import, &["EnvVar", "allEnv"])
+                .map(|symbol| format!("{api}::{symbol}")),
+            _ => None,
+        },
+        BuildTarget::WasmWasi | BuildTarget::WasmFull => match api {
+            "taida-lang/net" | "taida-lang/terminal" => Some(api.to_string()),
+            "taida-lang/os" => first_symbol_not_in(
+                import,
+                &[
+                    "EnvVar",
+                    "allEnv",
+                    "Read",
+                    "Exists",
+                    "writeFile",
+                    "readBytesAt",
+                ],
+            )
+            .map(|symbol| format!("{api}::{symbol}")),
+            _ => None,
+        },
+    }
+}
+
+fn first_symbol_not_in(import: &ImportStmt, allowed: &[&str]) -> Option<String> {
+    if import.symbols.is_empty() {
+        return Some("*".to_string());
+    }
+    import
+        .symbols
+        .iter()
+        .find(|symbol| !allowed.contains(&symbol.name.as_str()))
+        .map(|symbol| symbol.name.clone())
 }
 
 fn path_has_parent_component(path: &str) -> bool {
@@ -3659,7 +3698,7 @@ fn run_descriptor_hook(
             format!("Cannot execute BuildHook '{}': {}", hook.name, e),
         )
     })?;
-    let log_dir = tx.staging_root.join("hooks").join(&hook.name);
+    let log_dir = tx.build_root.join("hooks").join(&hook.name);
     fs::create_dir_all(&log_dir).map_err(|e| {
         DescriptorBuildError::new(
             "E1952",
@@ -3670,7 +3709,26 @@ fn run_descriptor_hook(
             ),
         )
     })?;
-    let log_path = log_dir.join(format!("{}.log", tx.id));
+    let ordinal = records
+        .hooks
+        .iter()
+        .filter(|existing| existing.as_str() == hook.name.as_str())
+        .count()
+        + 1;
+    let log_name = if ordinal == 1 {
+        format!("{}.log", tx.id)
+    } else {
+        format!("{}-{}.log", tx.id, ordinal)
+    };
+    let log_path = log_dir.join(log_name);
+    let tmp_log_path = log_dir.join(format!(
+        ".{}.tmp-{}",
+        log_path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("hook"),
+        std::process::id()
+    ));
     let fingerprint = descriptor_hook_fingerprint(hook);
     let log = format!(
         "hook={}\ncwd={}\ncommand={}\nenv={}\nfingerprint={}\nstatus={}\nstdout:\n{}\nstderr:\n{}\n",
@@ -3687,10 +3745,50 @@ fn run_descriptor_hook(
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    fs::write(&log_path, log).map_err(|e| {
+    let mut log_file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&tmp_log_path)
+        .map_err(|e| {
+            DescriptorBuildError::new(
+                "E1952",
+                format!(
+                    "Cannot create BuildHook log temp file '{}': {}",
+                    tmp_log_path.display(),
+                    e
+                ),
+            )
+        })?;
+    use std::io::Write as _;
+    if let Err(e) = log_file.write_all(log.as_bytes()) {
+        let _ = fs::remove_file(&tmp_log_path);
+        return Err(DescriptorBuildError::new(
+            "E1952",
+            format!(
+                "Cannot write BuildHook log temp file '{}': {}",
+                tmp_log_path.display(),
+                e
+            ),
+        ));
+    }
+    drop(log_file);
+    if log_path.exists() {
+        let _ = fs::remove_file(&tmp_log_path);
+        return Err(DescriptorBuildError::new(
+            "E1952",
+            format!("BuildHook log '{}' already exists.", log_path.display()),
+        ));
+    }
+    fs::rename(&tmp_log_path, &log_path).map_err(|e| {
+        let _ = fs::remove_file(&tmp_log_path);
         DescriptorBuildError::new(
             "E1952",
-            format!("Cannot write BuildHook log '{}': {}", log_path.display(), e),
+            format!(
+                "Cannot commit BuildHook log '{}' from temp file '{}': {}",
+                log_path.display(),
+                tmp_log_path.display(),
+                e
+            ),
         )
     })?;
     records.hooks.push(hook.name.clone());
@@ -3925,12 +4023,6 @@ fn collect_descriptor_replacements(
     }
     for asset in &records.assets {
         let rel = asset.output_rel.clone();
-        if seen.insert(rel.clone()) {
-            replacements.push((tx.staging_root.join(&rel), tx.build_root.join(&rel)));
-        }
-    }
-    for hook in &records.hooks {
-        let rel = PathBuf::from("hooks").join(hook);
         if seen.insert(rel.clone()) {
             replacements.push((tx.staging_root.join(&rel), tx.build_root.join(&rel)));
         }
@@ -8719,5 +8811,60 @@ mod tests {
             .expect("non-wasm targets must skip the closure re-parse pass");
 
         fs::remove_dir_all(&dir).ok();
+    }
+
+    fn parse_single_import(source: &str) -> ImportStmt {
+        let (program, errors) = parse(source);
+        assert!(errors.is_empty(), "fixture parse errors: {errors:?}");
+        program
+            .statements
+            .into_iter()
+            .find_map(|stmt| match stmt {
+                Statement::Import(import) => Some(import),
+                _ => None,
+            })
+            .expect("fixture must contain an import")
+    }
+
+    #[test]
+    fn wasm_descriptor_closure_matrix_rejects_incompatible_core_imports() {
+        let net = parse_single_import(">>> taida-lang/net@a.1 => @(httpServe)\n");
+        let terminal = parse_single_import(">>> taida-lang/terminal@a.1 => @(readKey)\n");
+        let os_env = parse_single_import(">>> taida-lang/os@a.1 => @(EnvVar, allEnv)\n");
+        let os_file = parse_single_import(">>> taida-lang/os@a.1 => @(Read)\n");
+        let os_process = parse_single_import(">>> taida-lang/os@a.1 => @(run)\n");
+
+        assert_eq!(
+            target_incompatible_import(BuildTarget::WasmMin, &os_env).as_deref(),
+            Some("taida-lang/os")
+        );
+        assert_eq!(
+            target_incompatible_import(BuildTarget::WasmWasi, &net).as_deref(),
+            Some("taida-lang/net")
+        );
+        assert_eq!(
+            target_incompatible_import(BuildTarget::WasmFull, &net).as_deref(),
+            Some("taida-lang/net")
+        );
+        assert_eq!(
+            target_incompatible_import(BuildTarget::WasmEdge, &terminal).as_deref(),
+            Some("taida-lang/terminal")
+        );
+        assert!(
+            target_incompatible_import(BuildTarget::WasmEdge, &os_env).is_none(),
+            "wasm-edge supports environment-only OS imports"
+        );
+        assert_eq!(
+            target_incompatible_import(BuildTarget::WasmEdge, &os_file).as_deref(),
+            Some("taida-lang/os::Read")
+        );
+        assert!(
+            target_incompatible_import(BuildTarget::WasmWasi, &os_file).is_none(),
+            "wasm-wasi supports the WASI file subset"
+        );
+        assert_eq!(
+            target_incompatible_import(BuildTarget::WasmFull, &os_process).as_deref(),
+            Some("taida-lang/os::run")
+        );
     }
 }

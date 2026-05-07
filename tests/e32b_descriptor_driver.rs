@@ -763,6 +763,96 @@ serverX <= BuildUnit(
 }
 
 #[test]
+fn e32_descriptor_hook_logs_accumulate_across_duplicate_and_prior_runs() {
+    let dir = project("e32_descriptor_hook_log_accumulation");
+    fs::create_dir_all(dir.join("public")).unwrap();
+    write_file(&dir.join("public/index.html"), "ok\n");
+    write_file(&dir.join("server.td"), "stdout(\"server\")\n");
+    write_file(
+        &dir.join("main.td"),
+        r#"
+>>> ./server.td => @(serverMain)
+
+auditHook <= BuildHook(
+  name <= "audit-hook",
+  command <= "printf hook-run",
+  cwd <= "."
+)
+
+frontendAssets <= AssetBundle(
+  name <= "frontend-assets",
+  root <= "public",
+  files <= @["**/*"],
+  before <= @[auditHook]
+)
+
+serverX <= BuildUnit(
+  name <= "server-x",
+  target <= "js",
+  entry <= serverMain,
+  assets <= @[RouteAsset(path <= "/", asset <= frontendAssets)],
+  before <= @[auditHook]
+)
+
+plan <= BuildPlan(
+  name <= "release-plan",
+  units <= @[serverX]
+)
+
+<<< plan
+<<< serverX
+"#,
+    );
+
+    let first = run_taida_build(&dir, &["main.td", "--plan", "release-plan", "--run-hooks"]);
+    assert!(
+        first.status.success(),
+        "first hook build failed\nstdout={}\nstderr={}",
+        stdout_text(&first),
+        stderr_text(&first)
+    );
+    let hook_dir = dir.join(".taida/build/hooks/audit-hook");
+    let mut first_logs = fs::read_dir(&hook_dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+    first_logs.sort();
+    assert_eq!(
+        first_logs.len(),
+        2,
+        "duplicate hook references in one transaction must create two logs: {first_logs:?}"
+    );
+    assert!(
+        first_logs.iter().any(|name| name.ends_with("-2.log")),
+        "duplicate hook log should carry a per-transaction ordinal: {first_logs:?}"
+    );
+
+    let second = run_taida_build(&dir, &["main.td", "--plan", "release-plan", "--run-hooks"]);
+    assert!(
+        second.status.success(),
+        "second hook build failed\nstdout={}\nstderr={}",
+        stdout_text(&second),
+        stderr_text(&second)
+    );
+    let mut second_logs = fs::read_dir(&hook_dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+    second_logs.sort();
+    assert_eq!(
+        second_logs.len(),
+        4,
+        "new commits must preserve prior hook logs: {second_logs:?}"
+    );
+    for name in first_logs {
+        assert!(
+            second_logs.contains(&name),
+            "prior hook log {name} disappeared after second commit: {second_logs:?}"
+        );
+    }
+}
+
+#[test]
 fn e32_descriptor_build_hook_failure_reports_context() {
     let dir = project("e32_descriptor_hook_failure");
     write_file(&dir.join("server.td"), "stdout(\"server\")\n");
@@ -1383,6 +1473,51 @@ frontendA <= BuildUnit(
         combined.contains("net_helper.td") && combined.contains("parse error"),
         "diagnostic must mention the offending module and parse error context; combined={combined}"
     );
+}
+
+#[test]
+fn e32b_067_all_wasm_targets_reject_net_in_descriptor_closure() {
+    for target in ["wasm-min", "wasm-wasi", "wasm-edge", "wasm-full"] {
+        let dir = project(&format!("e32b_067_{}", target.replace('-', "_")));
+        write_file(
+            &dir.join("frontend.td"),
+            ">>> taida-lang/net@a.1 => @(httpServe)\nstdout(\"frontend\")\n",
+        );
+        write_file(
+            &dir.join("main.td"),
+            &format!(
+                r#"
+>>> ./frontend.td => @(frontendMain)
+frontendA <= BuildUnit(
+  name <= "frontend-a",
+  target <= "{target}",
+  entry <= frontendMain
+)
+<<< frontendA
+"#
+            ),
+        );
+
+        let output = run_taida_build(
+            &dir,
+            &["main.td", "--unit", "frontend-a", "--diag-format", "jsonl"],
+        );
+        assert!(
+            !output.status.success(),
+            "{target} closure with taida-lang/net must hard-fail; stdout={} stderr={}",
+            stdout_text(&output),
+            stderr_text(&output)
+        );
+        let combined = format!("{}{}", stdout_text(&output), stderr_text(&output));
+        assert!(
+            combined.contains("\"code\":\"E1941\"") || combined.contains("[E1941]"),
+            "{target} must report E1941; combined={combined}"
+        );
+        assert!(
+            combined.contains("taida-lang/net"),
+            "{target} diagnostic must mention the incompatible API; combined={combined}"
+        );
+    }
 }
 
 // E32B-050: a tampered `transaction.json` can claim a live PID and `touch`
