@@ -522,6 +522,12 @@ fn flush_package_table(
     let Some(package_id) = table_name else {
         return Ok(());
     };
+    if deps.contains_key(&package_id) {
+        return Err(format!(
+            "[E32K3_PACKAGES_TDM_DUPLICATE_TABLE] packages.tdm: package '{}' is declared more than once; remove the duplicate [packages.\"{}\"] block so the source pin is unambiguous.",
+            package_id, package_id
+        ));
+    }
     let (org, name) = parse_org_name(&package_id).ok_or_else(|| {
         format!(
             "packages.tdm: package table '{}' must use an org/name package id.",
@@ -957,6 +963,57 @@ integrity = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
         assert!(
             err.contains("declared both"),
             "unexpected duplicate declaration error: {}",
+            err
+        );
+    }
+
+    /// Two `[packages."x"]` tables with the same package id must hard-fail
+    /// with `[E32K3_PACKAGES_TDM_DUPLICATE_TABLE]` so that a hidden pin
+    /// override (the second block silently winning) is impossible.
+    #[test]
+    fn test_package_table_duplicate_is_rejected() {
+        let source = r#"
+[packages."taida-lang/foo"]
+version = "a.1"
+integrity = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+[packages."taida-lang/foo"]
+version = "a.1"
+integrity = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+
+<<<@a.1 test/app
+"#;
+        let err = Manifest::parse(source, Path::new("/tmp"))
+            .expect_err("duplicate package table must be rejected");
+        assert!(
+            err.contains("E32K3_PACKAGES_TDM_DUPLICATE_TABLE") && err.contains("taida-lang/foo"),
+            "expected duplicate-table diagnostic, got: {}",
+            err
+        );
+    }
+
+    /// A duplicate `[packages."x"]` after a `>>>` import of the same package
+    /// must also reject — the import branch is detected first
+    /// (`declared both ... table and a >>> import`), but a third occurrence
+    /// after parsing a second table must still trip the table-duplicate path.
+    #[test]
+    fn test_package_table_duplicate_after_partial_parse() {
+        let source = r#"
+[packages."taida-lang/foo"]
+version = "a.1"
+integrity = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+[packages."taida-lang/foo"]
+version = "a.2"
+integrity = "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+
+<<<@a.1 test/app
+"#;
+        let err = Manifest::parse(source, Path::new("/tmp"))
+            .expect_err("duplicate package table with diverging pin must reject");
+        assert!(
+            err.contains("E32K3_PACKAGES_TDM_DUPLICATE_TABLE"),
+            "expected duplicate-table diagnostic, got: {}",
             err
         );
     }

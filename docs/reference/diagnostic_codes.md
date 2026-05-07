@@ -275,6 +275,7 @@ verify されることを保証する診断。`@e.32` beta では
 | `E32K3_SOURCE_INTEGRITY_UNVERIFIED` | キャッシュ済み source archive に SHA-256 sidecar が無い、または読めない | `taida ingot install --force-refresh` で sidecar を再生成 |
 | `E32K3_SOURCE_COSIGN_REQUIRED` | source archive の cosign 検証が `Required` policy 下で skip / warn / 失敗 | `cosign` を install し、release が公式 cosign-signed であることを確認。`TAIDA_VERIFY_SIGNATURES` を緩めない |
 | `E32K3_VERIFY_SIGNATURES_RELAXED` | source package install 時に `TAIDA_VERIFY_SIGNATURES` が `required` 以外 (もしくは未設定の cosign 不在) | install を再実行し、`required` を強制する。`@e.32` beta で source archive は `Required` 必須 |
+| `E32K3_PACKAGES_TDM_DUPLICATE_TABLE` | 同一 `[packages."<id>"]` ブロックが `packages.tdm` に複数存在する。後続テーブルで pin が silent に上書きされてレビューで気付けない状態 | 重複ブロックを 1 つにまとめ、source pin が一意になる形に書き直す |
 
 ## 帯域ルール
 

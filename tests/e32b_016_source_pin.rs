@@ -319,6 +319,61 @@ fn e32b_016_base_url_override_rejected_without_mock_gate() {
     let _ = fs::remove_dir_all(&work);
 }
 
+/// A `packages.tdm` containing two `[packages."<id>"]` tables for the same
+/// package id must be rejected by the manifest parser before any network or
+/// staging step runs. A silent overwrite would let a hidden second pin
+/// override the first one undetected during code review.
+#[test]
+fn e32b_043_duplicate_package_table_rejected() {
+    let work = unique_temp_dir("e32b_043_duplicate_table");
+    let home = work.join("home");
+    let project = work.join("project");
+    fs::create_dir_all(&home).expect("create home");
+    fs::create_dir_all(&project).expect("create project");
+    fs::write(
+        project.join("packages.tdm"),
+        r#"[packages."taida-lang/demo"]
+version = "a.1"
+integrity = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+[packages."taida-lang/demo"]
+version = "a.1"
+integrity = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+
+<<<@a.1 test/consumer
+"#,
+    )
+    .expect("write manifest");
+    fs::write(project.join("main.td"), "stdout(\"consumer\")\n").expect("write main");
+
+    let output = Command::new(taida_bin())
+        .args(["ingot", "install", "--no-remote-check"])
+        .current_dir(&project)
+        .env("HOME", &home)
+        .env("GH_TOKEN", "unused")
+        .output()
+        .expect("run install");
+
+    assert!(
+        !output.status.success(),
+        "duplicate package table must fail"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("E32K3_PACKAGES_TDM_DUPLICATE_TABLE") && stderr.contains("taida-lang/demo"),
+        "expected duplicate-table diagnostic, got: {}",
+        stderr
+    );
+    assert!(
+        !home
+            .join(".taida/store/taida-lang/demo/a.1/.taida_installed")
+            .exists(),
+        "manifest with duplicate table must not produce a store entry"
+    );
+
+    let _ = fs::remove_dir_all(&work);
+}
+
 #[test]
 fn e32b_016_relaxed_signature_policy_rejected() {
     let work = unique_temp_dir("e32b_016_relaxed_sig");

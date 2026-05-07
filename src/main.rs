@@ -1880,6 +1880,12 @@ struct BuildDescriptorModel {
     assets_by_symbol: HashMap<String, AssetBundleDescriptor>,
     asset_symbol_by_name: HashMap<String, String>,
     hooks_by_symbol: HashMap<String, BuildHookDescriptor>,
+    /// Tracks BuildHook `name` -> `symbol` so duplicate hook names are
+    /// caught alongside BuildUnit / BuildPlan / AssetBundle. Without this
+    /// map two `BuildHook(name <= "deploy", ...)` definitions silently
+    /// coexist in `hooks_by_symbol`, leaving any future name-based CLI or
+    /// docs lookup ambiguous.
+    hook_symbol_by_name: HashMap<String, String>,
     exported_symbols: HashSet<String>,
 }
 
@@ -2522,27 +2528,62 @@ fn build_descriptor_model(
             Statement::Assignment(assignment) => match &assignment.value {
                 Expr::TypeInst(type_name, fields, _) if type_name == "BuildUnit" => {
                     let unit = parse_build_unit(&assignment.target, fields, &import_symbols)?;
-                    model
+                    if let Some(prev_symbol) = model
                         .unit_symbol_by_name
-                        .insert(unit.name.clone(), unit.symbol.clone());
+                        .insert(unit.name.clone(), unit.symbol.clone())
+                    {
+                        return Err(duplicate_descriptor_name(
+                            "BuildUnit",
+                            &unit.name,
+                            &prev_symbol,
+                            &unit.symbol,
+                        ));
+                    }
                     model.units_by_symbol.insert(unit.symbol.clone(), unit);
                 }
                 Expr::TypeInst(type_name, fields, _) if type_name == "BuildPlan" => {
                     let plan = parse_build_plan(&assignment.target, fields)?;
-                    model
+                    if let Some(prev_symbol) = model
                         .plan_symbol_by_name
-                        .insert(plan.name.clone(), plan.symbol.clone());
+                        .insert(plan.name.clone(), plan.symbol.clone())
+                    {
+                        return Err(duplicate_descriptor_name(
+                            "BuildPlan",
+                            &plan.name,
+                            &prev_symbol,
+                            &plan.symbol,
+                        ));
+                    }
                     model.plans_by_symbol.insert(plan.symbol.clone(), plan);
                 }
                 Expr::TypeInst(type_name, fields, _) if type_name == "AssetBundle" => {
                     let asset = parse_asset_bundle(&assignment.target, fields)?;
-                    model
+                    if let Some(prev_symbol) = model
                         .asset_symbol_by_name
-                        .insert(asset.name.clone(), asset.symbol.clone());
+                        .insert(asset.name.clone(), asset.symbol.clone())
+                    {
+                        return Err(duplicate_descriptor_name(
+                            "AssetBundle",
+                            &asset.name,
+                            &prev_symbol,
+                            &asset.symbol,
+                        ));
+                    }
                     model.assets_by_symbol.insert(asset.symbol.clone(), asset);
                 }
                 Expr::TypeInst(type_name, fields, _) if type_name == "BuildHook" => {
                     let hook = parse_build_hook(&assignment.target, fields)?;
+                    if let Some(prev_symbol) = model
+                        .hook_symbol_by_name
+                        .insert(hook.name.clone(), hook.symbol.clone())
+                    {
+                        return Err(duplicate_descriptor_name(
+                            "BuildHook",
+                            &hook.name,
+                            &prev_symbol,
+                            &hook.symbol,
+                        ));
+                    }
                     model.hooks_by_symbol.insert(hook.symbol.clone(), hook);
                 }
                 _ => {}
@@ -2556,6 +2597,24 @@ fn build_descriptor_model(
         }
     }
     Ok(model)
+}
+
+/// Descriptor `name` collisions across two different symbols are a silent
+/// foot-gun — `taida build --unit X` would resolve to whichever was inserted
+/// last. Reject the second occurrence with `[E1902]` so users see the
+/// conflict instead of guessing which definition won.
+fn duplicate_descriptor_name(
+    descriptor: &str,
+    name: &str,
+    first_symbol: &str,
+    second_symbol: &str,
+) -> DescriptorBuildError {
+    DescriptorBuildError::new(
+        "E1902",
+        format!(
+            "{descriptor} name '{name}' is declared more than once (symbols '{first_symbol}' and '{second_symbol}'); each {descriptor} name must be unique within a descriptor file."
+        ),
+    )
 }
 
 fn descriptor_exported_unit_names(model: &BuildDescriptorModel) -> Vec<String> {

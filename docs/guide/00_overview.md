@@ -279,4 +279,3 @@ ritchan <= NervStaff(name <= "Ritsuko")  // call_sign = "", age = 0
 | [診断コード](../reference/diagnostic_codes.md) | コンパイラ診断コード一覧 |
 | [標準ライブラリ](../reference/standard_library.md) | プリリュードとビルトイン型 |
 | [標準メソッド](../reference/standard_methods.md) | 状態チェック・モナディックメソッド |
-
