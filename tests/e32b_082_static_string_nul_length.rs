@@ -163,6 +163,93 @@ stdout(s.length().toString())
 }
 
 #[test]
+fn e32b_084_byte_at_past_nul_three_backend() {
+    // E32B-084: `taida_str_byte_at` / `_lax` were still scanning with
+    // `strlen()`, so a static literal like "X\x00Y" reported byte length
+    // 1 on the Native backend and any access at idx >= 1 returned the
+    // OOB sentinel. The fix routes both helpers through
+    // `taida_str_byte_len`, mirroring the E32B-082 treatment of
+    // `byte_slice` / `byte_length`. This test pins parity at idx 2
+    // (the `Y` byte after the embedded NUL); idx 1 (the NUL byte) is
+    // also asserted so a future regression that conflates "value 0" and
+    // "no value" surfaces here.
+    let source = r#"s <= "X\x00Y"
+b0Lax <= ByteAt[s, 0]()
+b0Lax ]=> b0
+stdout(b0.toString())
+b1Lax <= ByteAt[s, 1]()
+b1Lax ]=> b1
+stdout(b1.toString())
+b2Lax <= ByteAt[s, 2]()
+b2Lax ]=> b2
+stdout(b2.toString())
+oobLax <= ByteAt[s, 3]()
+oobLax ]=> oob
+stdout(oob.toString())
+"#;
+
+    let results = run_program_three_backends(source);
+    let interp = results
+        .iter()
+        .find(|(b, _)| b == "interp")
+        .map(|(_, o)| o.clone())
+        .unwrap_or_default();
+    assert_eq!(
+        interp, "88\n0\n89\n0",
+        "interpreter must observe X(88) NUL(0) Y(89) and OOB(0) for \"X\\x00Y\""
+    );
+    for (backend, out) in &results {
+        if out.is_empty() {
+            continue;
+        }
+        assert_eq!(
+            out, &interp,
+            "{} backend disagrees with interpreter on byteAt past NUL: {} vs {}",
+            backend, out, interp
+        );
+    }
+}
+
+#[test]
+fn e32b_084_byte_at_lax_tag_three_backend() {
+    // The acceptance for the embedded-NUL byteAt fix also pins the Lax
+    // tag: an in-bounds NUL byte must report `hasValue=true` (the value
+    // happens to be 0 but is real), while an out-of-bounds index must
+    // report `hasValue=false`. The previous strlen()-truncated path
+    // confused the two on Native because every index >= 1 fell into the
+    // empty-Lax branch. This test reads the tag directly via
+    // `.hasValue()` instead of `]=>` so a tag mistake cannot hide
+    // behind a default value that happens to coincide with the byte.
+    let source = r#"s <= "X\x00Y"
+b1Lax <= ByteAt[s, 1]()
+stdout("has1:" + b1Lax.hasValue().toString())
+oobLax <= ByteAt[s, 9]()
+stdout("hasOob:" + oobLax.hasValue().toString())
+"#;
+
+    let results = run_program_three_backends(source);
+    let interp = results
+        .iter()
+        .find(|(b, _)| b == "interp")
+        .map(|(_, o)| o.clone())
+        .unwrap_or_default();
+    assert_eq!(
+        interp, "has1:true\nhasOob:false",
+        "interpreter must observe hasValue=true for the NUL byte and hasValue=false for the OOB index"
+    );
+    for (backend, out) in &results {
+        if out.is_empty() {
+            continue;
+        }
+        assert_eq!(
+            out, &interp,
+            "{} backend disagrees with interpreter on byteAt Lax tag: {} vs {}",
+            backend, out, interp
+        );
+    }
+}
+
+#[test]
 fn e32b_082_nul_in_static_string_length_via_concat_three_backend() {
     // `"hello" + "X\x00Y" + "world"` is 5 + 3 + 5 = 13 bytes. The
     // concatenation result is a runtime-allocated heap string, so this

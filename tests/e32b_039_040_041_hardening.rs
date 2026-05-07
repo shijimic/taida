@@ -703,3 +703,120 @@ fn e32b_041_seven_bypass_cases_pinned() {
         );
     }
 }
+
+// ── E32B-085 ────────────────────────────────────────────────────
+
+#[test]
+fn e32b_085_native_runtime_checks_every_ws_frame_write_return() {
+    // Whole-file invariant: every `taida_net4_write_ws_frame(...)` call
+    // outside the function definition itself must capture its return
+    // value. The forms in use are
+    //   - `if (taida_net4_write_ws_frame(...) != 0) { ... }`  (wsSend / wsClose)
+    //   - `int wrc = taida_net4_write_ws_frame(...);`         (close replies)
+    //   - `wrc = taida_net4_write_ws_frame(...);`             (re-use of wrc)
+    //   - `int pong_rc = taida_net4_write_ws_frame(...);`     (auto-pong)
+    // Any new call site that drops the return becomes a peer-disconnect
+    // hole that is invisible to the abort-connection path.
+    let mut total_calls = 0usize;
+    let mut unchecked_lines: Vec<String> = Vec::new();
+    for line in NATIVE_NET.lines() {
+        if !line.contains("taida_net4_write_ws_frame(") {
+            continue;
+        }
+        // Skip the function definition.
+        if line.contains("static int taida_net4_write_ws_frame(") {
+            continue;
+        }
+        total_calls += 1;
+        let captured = line.contains("if (taida_net4_write_ws_frame(")
+            || line.contains("wrc = taida_net4_write_ws_frame(")
+            || line.contains("pong_rc = taida_net4_write_ws_frame(");
+        if !captured {
+            unchecked_lines.push(line.trim().to_string());
+        }
+    }
+    assert!(
+        total_calls >= 10,
+        "net_h1_h2.c must still emit at least 10 WS frame writes (wsSend, wsReceive 8 sites, wsClose, handler-return auto-close); got {}",
+        total_calls
+    );
+    assert!(
+        unchecked_lines.is_empty(),
+        "every taida_net4_write_ws_frame call site must capture its return value; unchecked: {:?}",
+        unchecked_lines
+    );
+}
+
+#[test]
+fn e32b_085_ws_receive_checks_every_write_frame_return() {
+    // E32B-079 hardened wsSend / wsClose / endResponse / wsUpgrade so the
+    // peer-disconnect-during-reply path no longer escapes diagnosis. The
+    // wsReceive frame-handling switch was missed in that sweep: invalid
+    // UTF-8 text replies, malformed-close replies, invalid-close-code
+    // replies, invalid-reason replies, valid-close echoes, the empty
+    // close reply, and the WS_FRAME_ERROR fallback all dropped the
+    // taida_net4_write_ws_frame return, leaving "we couldn't actually
+    // send the close frame" indistinguishable from "we did."
+    //
+    // This test pins that every `taida_net4_write_ws_frame(...)` inside
+    // the wsReceive function captures the return value (either as
+    // `int wrc = ...`, `wrc = ...`, or the pre-existing `int pong_rc`),
+    // matching the E32B-079 wsSend pattern.
+    let ws_receive = slice_between(
+        NATIVE_NET,
+        "// ── wsReceive(ws) → Lax[@(type, data)] (NET4-4d) ────────────",
+        "// ── wsClose(ws, code) → Unit (NET4-4d, v5 revision) ────────────────",
+    );
+
+    let total_calls = ws_receive.matches("taida_net4_write_ws_frame(").count();
+    // Every call site must be preceded by either `wrc =` or `pong_rc =`
+    // (with optional `int` declaration earlier on the same token). We
+    // count by lines so substring overlap between `int wrc =` and
+    // `wrc =` does not double-count.
+    let mut captured_calls = 0usize;
+    let mut unchecked_lines: Vec<&str> = Vec::new();
+    for line in ws_receive.lines() {
+        if !line.contains("taida_net4_write_ws_frame(") {
+            continue;
+        }
+        // Skip the function definition itself.
+        if line.contains("static int taida_net4_write_ws_frame(") {
+            continue;
+        }
+        let captured = line.contains("wrc = taida_net4_write_ws_frame(")
+            || line.contains("pong_rc = taida_net4_write_ws_frame(");
+        if captured {
+            captured_calls += 1;
+        } else {
+            unchecked_lines.push(line.trim());
+        }
+    }
+
+    assert!(
+        total_calls >= 7,
+        "wsReceive must still emit at least 7 close/auto-pong write sites; got {}",
+        total_calls
+    );
+    assert!(
+        unchecked_lines.is_empty(),
+        "every taida_net4_write_ws_frame inside wsReceive must capture its return value (wrc / pong_rc); unchecked sites: {:?}",
+        unchecked_lines
+    );
+    assert!(
+        captured_calls >= 7,
+        "wsReceive must capture at least 7 write returns; got {}",
+        captured_calls
+    );
+
+    // Every captured wrc / pong_rc must feed an abort-on-failure path
+    // (either a ternary in the abort message or an explicit
+    // `if (wrc != 0) abort`).
+    let abort_paths = ws_receive.matches("wrc != 0").count()
+        + ws_receive.matches("pong_rc != 0").count();
+    assert!(
+        abort_paths >= captured_calls,
+        "every wsReceive write must reach an abort_connection branch on failure; abort_paths={} captured_calls={}",
+        abort_paths,
+        captured_calls
+    );
+}

@@ -3618,9 +3618,15 @@ taida_val taida_net_ws_receive(taida_val ws) {
                 // Text frame: return data as Str (parity with Interpreter).
                 if (frame.payload_len > 0 && !taida_net4_is_valid_utf8(frame.payload, frame.payload_len)) {
                     unsigned char close_1007[2] = { 0x03, 0xEF };
-                    taida_net4_write_ws_frame(fd, WS_OPCODE_CLOSE, close_1007, 2);
+                    // Capture the write rc so a peer disconnect during the
+                    // close reply does not silently demote the "we
+                    // rejected your text frame" diagnostic into a zombie
+                    // connection.
+                    int wrc = taida_net4_write_ws_frame(fd, WS_OPCODE_CLOSE, close_1007, 2);
                     free(frame.payload);
-                    taida_net4_abort_connection("wsReceive: invalid UTF-8 in text frame");
+                    taida_net4_abort_connection(wrc != 0
+                        ? "wsReceive: failed to send close-1007 reply (peer disconnect)"
+                        : "wsReceive: invalid UTF-8 in text frame");
                     return taida_net4_make_lax_ws_frame_empty();
                 }
                 char *text = NULL;
@@ -3668,21 +3674,34 @@ taida_val taida_net_ws_receive(taida_val ws) {
                 // v5 close code extraction (NET5-0d).
                 if (frame.payload_len == 0) {
                     // No status code: reply with empty close payload.
+                    int wrc = 0;
                     if (bs && !bs->ws_closed) {
-                        taida_net4_write_ws_frame(fd, WS_OPCODE_CLOSE, (unsigned char*)"", 0);
+                        wrc = taida_net4_write_ws_frame(fd, WS_OPCODE_CLOSE, (unsigned char*)"", 0);
                     }
                     if (bs) {
                         bs->ws_closed = 1;
                         bs->ws_close_code = 1005; // No Status Rcvd
                     }
                     if (frame.payload) free(frame.payload);
+                    // Peer disconnect during the empty close reply must
+                    // abort the connection statelessly; otherwise the
+                    // socket leaks until the kernel reaps it.
+                    if (wrc != 0) {
+                        taida_net4_abort_connection("wsReceive: failed to send empty close reply (peer disconnect)");
+                    }
                     return taida_net4_make_lax_ws_frame_empty();
                 } else if (frame.payload_len == 1) {
                     // 1-byte close payload is malformed.
                     unsigned char close_1002[2] = { 0x03, 0xEA };
-                    taida_net4_write_ws_frame(fd, WS_OPCODE_CLOSE, close_1002, 2);
+                    int wrc = taida_net4_write_ws_frame(fd, WS_OPCODE_CLOSE, close_1002, 2);
                     if (frame.payload) free(frame.payload);
-                    taida_net4_abort_connection("wsReceive: malformed close frame (1-byte payload)");
+                    // Same write-failure handling as the invalid-UTF-8
+                    // text branch above: peer disconnect during the
+                    // close reply must surface as a write-failure abort
+                    // rather than the original protocol-level reason.
+                    taida_net4_abort_connection(wrc != 0
+                        ? "wsReceive: failed to send close-1002 reply (peer disconnect)"
+                        : "wsReceive: malformed close frame (1-byte payload)");
                     return taida_net4_make_lax_ws_frame_empty();
                 } else {
                     // 2+ bytes: first 2 bytes are the close code (big-endian).
@@ -3695,9 +3714,15 @@ taida_val taida_net_ws_receive(taida_val ws) {
                                      (code >= 3000 && code <= 4999);
                     if (!valid_code) {
                         unsigned char close_1002[2] = { 0x03, 0xEA };
-                        taida_net4_write_ws_frame(fd, WS_OPCODE_CLOSE, close_1002, 2);
+                        int wrc = taida_net4_write_ws_frame(fd, WS_OPCODE_CLOSE, close_1002, 2);
                         free(frame.payload);
-                        taida_net4_abort_connection("wsReceive: invalid close code");
+                        // Write rc takes precedence over the protocol
+                        // diagnostic so an unreachable peer is reported
+                        // as such rather than masquerading as an
+                        // invalid-close-code rejection.
+                        taida_net4_abort_connection(wrc != 0
+                            ? "wsReceive: failed to send close-1002 reply (peer disconnect)"
+                            : "wsReceive: invalid close code");
                         return taida_net4_make_lax_ws_frame_empty();
                     }
                     // Validate reason UTF-8 if present.
@@ -3706,22 +3731,33 @@ taida_val taida_net_ws_receive(taida_val ws) {
                         unsigned char *reason = frame.payload + 2;
                         if (!taida_net4_is_valid_utf8(reason, rlen)) {
                             unsigned char close_1002[2] = { 0x03, 0xEA };
-                            taida_net4_write_ws_frame(fd, WS_OPCODE_CLOSE, close_1002, 2);
+                            int wrc = taida_net4_write_ws_frame(fd, WS_OPCODE_CLOSE, close_1002, 2);
                             free(frame.payload);
-                            taida_net4_abort_connection("wsReceive: invalid UTF-8 in close reason");
+                            // Same precedence rule as the invalid-close-
+                            // code branch above.
+                            taida_net4_abort_connection(wrc != 0
+                                ? "wsReceive: failed to send close-1002 reply (peer disconnect)"
+                                : "wsReceive: invalid UTF-8 in close reason");
                             return taida_net4_make_lax_ws_frame_empty();
                         }
                     }
                     // Valid close: echo the code in the reply.
                     unsigned char reply[2] = { (unsigned char)(code >> 8), (unsigned char)(code & 0xFF) };
+                    int wrc = 0;
                     if (bs && !bs->ws_closed) {
-                        taida_net4_write_ws_frame(fd, WS_OPCODE_CLOSE, reply, 2);
+                        wrc = taida_net4_write_ws_frame(fd, WS_OPCODE_CLOSE, reply, 2);
                     }
                     if (bs) {
                         bs->ws_closed = 1;
                         bs->ws_close_code = (int64_t)code;
                     }
                     free(frame.payload);
+                    // Peer disconnect during the close-echo reply must
+                    // abort the connection statelessly so the socket
+                    // does not zombie on a half-closed peer.
+                    if (wrc != 0) {
+                        taida_net4_abort_connection("wsReceive: failed to send close echo reply (peer disconnect)");
+                    }
                     return taida_net4_make_lax_ws_frame_empty();
                 }
             }
@@ -3731,8 +3767,12 @@ taida_val taida_net_ws_receive(taida_val ws) {
                 if (frame.payload) free(frame.payload);
                 // Send close frame with protocol error (1002).
                 unsigned char close_payload[2] = { 0x03, 0xEA }; // 1002
-                taida_net4_write_ws_frame(fd, WS_OPCODE_CLOSE, close_payload, 2);
-                taida_net4_abort_connection("wsReceive: WS frame protocol error");
+                int wrc = taida_net4_write_ws_frame(fd, WS_OPCODE_CLOSE, close_payload, 2);
+                // Same precedence rule as the per-case close-1002
+                // branches above.
+                taida_net4_abort_connection(wrc != 0
+                    ? "wsReceive: failed to send close-1002 reply (peer disconnect)"
+                    : "wsReceive: WS frame protocol error");
                 return taida_net4_make_lax_ws_frame_empty();
             }
         }
@@ -4300,7 +4340,16 @@ static void *net_worker_thread(void *arg) {
                 if (writer_state.state == NET3_STATE_WEBSOCKET) {
                     if (!body_state.ws_closed) {
                         unsigned char close_payload[2] = { 0x03, 0xE8 }; // 1000
-                        taida_net4_write_ws_frame(client_fd, WS_OPCODE_CLOSE, close_payload, 2);
+                        // Peer disconnect during the auto-close 1000 reply
+                        // must abort statelessly so the connection cleanup
+                        // below tears down a known-bad socket rather than
+                        // a half-closed one. Capture the rc to keep this
+                        // path symmetric with the rest of the WS write
+                        // surface (wsSend / wsClose / wsReceive).
+                        int wrc = taida_net4_write_ws_frame(client_fd, WS_OPCODE_CLOSE, close_payload, 2);
+                        if (wrc != 0) {
+                            taida_net4_abort_connection("handler return: failed to send auto-close 1000 reply (peer disconnect)");
+                        }
                     }
                     taida_release(request);
                     taida_release(writer_token);

@@ -3974,13 +3974,20 @@ taida_val taida_str_repeat(const char* s, taida_val n) {
 // are unchanged.
 taida_val taida_str_byte_at(const char* s, taida_val idx) {
     if (!s) return -1;
-    taida_val len = (taida_val)strlen(s);
+    // Prefer the heap-header byte length so embedded NUL bytes are
+    // addressable (parity with interp/JS). Falls back to strlen for raw
+    // C-string callers without a header.
+    size_t byte_len = 0;
+    if (!taida_str_byte_len(s, &byte_len)) byte_len = strlen(s);
+    taida_val len = (taida_val)byte_len;
     if (idx < 0 || idx >= len) return -1;
     return (taida_val)(unsigned char)s[idx];
 }
 taida_ptr taida_str_byte_at_lax(const char* s, taida_val idx, taida_val default_value) {
     if (!s) return taida_lax_empty(default_value);
-    taida_val len = (taida_val)strlen(s);
+    size_t byte_len = 0;
+    if (!taida_str_byte_len(s, &byte_len)) byte_len = strlen(s);
+    taida_val len = (taida_val)byte_len;
     if (idx < 0 || idx >= len) {
         return taida_lax_empty(default_value);
     }
