@@ -29,6 +29,23 @@ fn assert_has_e1605(case: &str, source: &str) {
     );
 }
 
+fn assert_e1605_contains(case: &str, source: &str, parts: &[&str]) {
+    let errors = check(source);
+    let e1605 = errors
+        .iter()
+        .find(|err| err.message.contains("[E1605]"))
+        .unwrap_or_else(|| panic!("{}: expected [E1605], got {:?}", case, errors));
+    for part in parts {
+        assert!(
+            e1605.message.contains(part),
+            "{}: expected [E1605] message to contain {:?}, got {}",
+            case,
+            part,
+            e1605.message
+        );
+    }
+}
+
 #[test]
 fn e32b_019_reports_nested_comparison_mismatches() {
     let cases = [
@@ -158,4 +175,28 @@ stdout(@(ok <= n == 2, label <= `ok ${n < 3}`))
         .filter(|err| err.message.contains("[E1605]"))
         .collect();
     assert!(e1605.is_empty(), "unexpected E1605 errors: {:?}", e1605);
+}
+
+#[test]
+fn e32b_060_comparison_uses_main_pass_binding_types() {
+    assert_e1605_contains(
+        "generic binding types",
+        r#"
+left <= Lax[1]()
+right <= Lax["x"]()
+stdout(left == right)
+"#,
+        &["Lax[Int]", "Lax[Str]"],
+    );
+}
+
+#[test]
+fn e32b_059_deep_nested_builtin_arg_does_not_need_fourth_pass_rewalk() {
+    let mut source = String::new();
+    source.push_str("seed <= 0\n");
+    for i in 0..1200 {
+        source.push_str(&format!("v{} <= seed + {}\n", i, i));
+    }
+    source.push_str("stdout(v1199 == \"bad\")\n");
+    assert_e1605_contains("deep builtin arg", &source, &["Int", "Str"]);
 }

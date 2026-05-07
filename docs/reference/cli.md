@@ -415,14 +415,18 @@ production upgrade path はダウンロード URL について `https://` 以外
 ガードであり、テスト経路だけが `download_bytes_for_test` ヘルパーを通じて `file://` を受け付けます。
 
 ダウンロードした archive / `SHA256SUMS` / cosign bundle のステージング先は `~/.taida/cache/upgrade/`
-(ディレクトリ mode `0700`) に固定されます。各ファイルは `O_NOFOLLOW | O_EXCL` で原子作成され、
-`/tmp` 配下の予測可能パスは使いません。アップグレードを開始する直前に cache ディレクトリ自体も
+(ディレクトリ mode `0700`) に固定されます。Unix では `HOME` から `~/.taida/cache/upgrade/`
+までを `O_NOFOLLOW` 付きの dirfd traversal で開き、管理下の各ディレクトリを開いた fd に対して
+owner / mode 検査します。各ファイルも cache dirfd から `O_NOFOLLOW | O_EXCL` で原子作成され、
+`/tmp` 配下の予測可能パスは使いません。アップグレードを開始する直前に cache ディレクトリ経路も
 検査され、symlink・他 UID 所有・group / world bits 立ちのいずれかに該当する場合は
 `[E32K1_UPGRADE_STAGE_FAILED]` で hard-fail します。
 
 `sudo` で `taida upgrade` を実行する場合、`HOME` を共有書き込み可能ディレクトリに上書きしないでください。
-cache ディレクトリは `HOME` (Windows では `USERPROFILE`) を起点に解決されるため、別ユーザー書き込み可能な
-`HOME` を指定すると staging 周辺の権限前提が崩れます。
+cache ディレクトリは `HOME` (Windows では `USERPROFILE`) を起点に解決されます。Unix では
+`HOME` 自体も現在の実効 UID 所有の symlink でないディレクトリであることを確認します。
+検証ツールは staged file のパスを再度開くため、同じ UID で `HOME` 配下を書き換えられるプロセスは
+信頼境界内として扱います。共有書き込み可能な `HOME` は指定しないでください。
 
 `install.sh` の `TAIDA_VERIFY_SIGNATURES` 既定値は `required` です。`taida upgrade` の cosign 必須
 契約と `install.sh` の trust model はここで一致し、明示的に `TAIDA_VERIFY_SIGNATURES=best-effort` /

@@ -542,8 +542,15 @@ pub fn expected_sha256_for_archive(
     })
 }
 
+#[derive(Debug)]
 struct TempDownloadedFile {
     path: std::path::PathBuf,
+}
+
+struct UpgradeCacheDir {
+    path: std::path::PathBuf,
+    #[cfg(unix)]
+    dir: std::fs::File,
 }
 
 /// Stage upgrade artifacts under `~/.taida/cache/upgrade/` with
@@ -555,7 +562,7 @@ struct TempDownloadedFile {
 /// would then clobber arbitrary files when `taida upgrade` ran as root.
 /// A user-private cache directory + `O_NOFOLLOW | O_EXCL` open closes that
 /// hole.
-fn upgrade_cache_dir() -> Result<std::path::PathBuf, String> {
+fn upgrade_cache_dir() -> Result<UpgradeCacheDir, String> {
     let home = std::env::var("HOME")
         .or_else(|_| std::env::var("USERPROFILE"))
         .map_err(|_| {
@@ -565,83 +572,217 @@ fn upgrade_cache_dir() -> Result<std::path::PathBuf, String> {
     if home.is_empty() {
         return Err("[E32K1_UPGRADE_STAGE_FAILED] HOME / USERPROFILE is empty".to_string());
     }
-    let dir = std::path::PathBuf::from(home)
-        .join(".taida")
-        .join("cache")
-        .join("upgrade");
-    std::fs::create_dir_all(&dir).map_err(|e| {
-        format!(
-            "[E32K1_UPGRADE_STAGE_FAILED] failed to create upgrade cache dir {}: {}",
-            dir.display(),
-            e
-        )
-    })?;
+
     #[cfg(unix)]
     {
-        use std::os::unix::fs::{MetadataExt, PermissionsExt};
-        // The `create_dir_all` above is a no-op when the directory already
-        // exists, so an attacker who pre-created `~/.taida/cache/upgrade`
-        // with looser modes or as a symlink could bypass our hardening.
-        // Validate the existing entry: regular dir, not a symlink, owned
-        // by the effective UID, and group/world bits cleared.
-        let meta = std::fs::symlink_metadata(&dir).map_err(|e| {
+        upgrade_cache_dir_unix(std::path::PathBuf::from(home))
+    }
+
+    #[cfg(not(unix))]
+    {
+        let dir = std::path::PathBuf::from(home)
+            .join(".taida")
+            .join("cache")
+            .join("upgrade");
+        std::fs::create_dir_all(&dir).map_err(|e| {
             format!(
-                "[E32K1_UPGRADE_STAGE_FAILED] failed to inspect upgrade cache dir {}: {}",
+                "[E32K1_UPGRADE_STAGE_FAILED] failed to create upgrade cache dir {}: {}",
                 dir.display(),
                 e
             )
         })?;
-        if meta.file_type().is_symlink() {
+        Ok(UpgradeCacheDir { path: dir })
+    }
+}
+
+#[cfg(unix)]
+fn upgrade_cache_dir_unix(home: std::path::PathBuf) -> Result<UpgradeCacheDir, String> {
+    use std::ffi::CString;
+    use std::os::fd::{AsRawFd, FromRawFd};
+    use std::os::unix::ffi::OsStrExt;
+
+    fn cstring_path(path: &std::path::Path) -> Result<CString, String> {
+        CString::new(path.as_os_str().as_bytes()).map_err(|_| {
+            format!(
+                "[E32K1_UPGRADE_STAGE_FAILED] path {} contains an interior NUL byte",
+                path.display()
+            )
+        })
+    }
+
+    fn cstring_component(component: &str) -> Result<CString, String> {
+        CString::new(component.as_bytes()).map_err(|_| {
+            format!(
+                "[E32K1_UPGRADE_STAGE_FAILED] path component {} contains an interior NUL byte",
+                component
+            )
+        })
+    }
+
+    fn open_home_dir(path: &std::path::Path) -> Result<std::fs::File, String> {
+        let c_path = cstring_path(path)?;
+        let flags = libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC;
+        // SAFETY: `c_path` is a valid NUL-terminated path. `open` returns a
+        // fresh fd on success, which is immediately owned by `File`.
+        let fd = unsafe { libc::open(c_path.as_ptr(), flags) };
+        if fd < 0 {
             return Err(format!(
-                "[E32K1_UPGRADE_STAGE_FAILED] upgrade cache dir {} is a symlink; refuse to use it",
-                dir.display()
+                "[E32K1_UPGRADE_STAGE_FAILED] failed to open HOME {} without following symlinks: {}",
+                path.display(),
+                std::io::Error::last_os_error()
             ));
         }
-        if !meta.is_dir() {
+        // SAFETY: `fd` was returned by `open` and is uniquely owned here.
+        let file = unsafe { std::fs::File::from_raw_fd(fd) };
+        validate_open_dir(&file, path, false)?;
+        Ok(file)
+    }
+
+    fn validate_open_dir(
+        dir: &std::fs::File,
+        display_path: &std::path::Path,
+        tighten_mode: bool,
+    ) -> Result<(), String> {
+        let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
+        // SAFETY: `stat` points to valid writable memory and `dir` is open.
+        let rc = unsafe { libc::fstat(dir.as_raw_fd(), stat.as_mut_ptr()) };
+        if rc != 0 {
             return Err(format!(
-                "[E32K1_UPGRADE_STAGE_FAILED] upgrade cache dir {} is not a directory",
-                dir.display()
+                "[E32K1_UPGRADE_STAGE_FAILED] failed to inspect directory {}: {}",
+                display_path.display(),
+                std::io::Error::last_os_error()
             ));
         }
-        // Safe: getuid is async-signal-safe and never fails on Linux.
+        // SAFETY: `fstat` succeeded and initialized `stat`.
+        let stat = unsafe { stat.assume_init() };
+        if (stat.st_mode & libc::S_IFMT) != libc::S_IFDIR {
+            return Err(format!(
+                "[E32K1_UPGRADE_STAGE_FAILED] upgrade cache path {} is not a directory",
+                display_path.display()
+            ));
+        }
+        // SAFETY: geteuid never fails on Unix.
         let euid = unsafe { libc::geteuid() };
-        if meta.uid() != euid {
+        if stat.st_uid != euid {
             return Err(format!(
-                "[E32K1_UPGRADE_STAGE_FAILED] upgrade cache dir {} is owned by uid {} but the current effective uid is {}; refuse to use it",
-                dir.display(),
-                meta.uid(),
+                "[E32K1_UPGRADE_STAGE_FAILED] upgrade cache path {} is owned by uid {} but the current effective uid is {}; refuse to use it",
+                display_path.display(),
+                stat.st_uid,
                 euid
             ));
         }
-        let mode_bits = meta.mode() & 0o777;
-        if mode_bits & 0o077 != 0 {
-            // Try once to tighten the mode in place; if that fails, hard
-            // fail so we never stage downloads under a permissive dir.
-            let perms = std::fs::Permissions::from_mode(0o700);
-            std::fs::set_permissions(&dir, perms).map_err(|e| {
-                format!(
-                    "[E32K1_UPGRADE_STAGE_FAILED] upgrade cache dir {} has world/group bits {:o} and chmod 0700 failed: {}",
-                    dir.display(),
+        if tighten_mode {
+            let mode_bits = stat.st_mode & 0o777;
+            // SAFETY: `dir` is an owned directory fd; fchmod changes only
+            // this already-open directory, not a path that can be swapped.
+            let rc = unsafe { libc::fchmod(dir.as_raw_fd(), 0o700) };
+            if rc != 0 {
+                return Err(format!(
+                    "[E32K1_UPGRADE_STAGE_FAILED] upgrade cache path {} has mode {:o} and fchmod 0700 failed: {}",
+                    display_path.display(),
                     mode_bits,
-                    e
-                )
-            })?;
-        } else {
-            // Already 0700 (or stricter). Keep the chmod call so a future
-            // umask change cannot drift the mode silently, but propagate
-            // any error rather than silencing it the way the previous
-            // `let _ =` pattern did.
-            let perms = std::fs::Permissions::from_mode(0o700);
-            std::fs::set_permissions(&dir, perms).map_err(|e| {
-                format!(
-                    "[E32K1_UPGRADE_STAGE_FAILED] failed to set 0700 on upgrade cache dir {}: {}",
-                    dir.display(),
-                    e
-                )
-            })?;
+                    std::io::Error::last_os_error()
+                ));
+            }
         }
+        // HOME itself is not chmod'ed or rejected for group/world mode bits:
+        // for compatibility we require only an owned, non-symlink directory
+        // as the trust root, then force 0700 on the managed cache children.
+        Ok(())
     }
-    Ok(dir)
+
+    fn open_or_create_child_dir(
+        parent: &std::fs::File,
+        parent_path: &std::path::Path,
+        component: &str,
+    ) -> Result<std::fs::File, String> {
+        let c_component = cstring_component(component)?;
+        let child_path = parent_path.join(component);
+        let flags = libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC;
+        // SAFETY: `parent` is an open directory fd and `c_component` is a
+        // valid single path component. `O_NOFOLLOW` rejects symlink leaves.
+        let mut fd = unsafe { libc::openat(parent.as_raw_fd(), c_component.as_ptr(), flags) };
+        if fd < 0 {
+            let err = std::io::Error::last_os_error();
+            if err.raw_os_error() != Some(libc::ENOENT) {
+                return Err(format!(
+                    "[E32K1_UPGRADE_STAGE_FAILED] failed to open upgrade cache path {} without following symlinks: {}",
+                    child_path.display(),
+                    err
+                ));
+            }
+            // SAFETY: mkdirat receives a valid parent dirfd and component.
+            let rc = unsafe { libc::mkdirat(parent.as_raw_fd(), c_component.as_ptr(), 0o700) };
+            if rc != 0 {
+                let mkdir_err = std::io::Error::last_os_error();
+                if mkdir_err.raw_os_error() != Some(libc::EEXIST) {
+                    return Err(format!(
+                        "[E32K1_UPGRADE_STAGE_FAILED] failed to create upgrade cache path {}: {}",
+                        child_path.display(),
+                        mkdir_err
+                    ));
+                }
+            }
+            // SAFETY: same arguments as above; retry after successful mkdir
+            // or an EEXIST race.
+            fd = unsafe { libc::openat(parent.as_raw_fd(), c_component.as_ptr(), flags) };
+            if fd < 0 {
+                return Err(format!(
+                    "[E32K1_UPGRADE_STAGE_FAILED] failed to reopen upgrade cache path {} without following symlinks: {}",
+                    child_path.display(),
+                    std::io::Error::last_os_error()
+                ));
+            }
+        }
+        // SAFETY: `fd` is a fresh fd returned by openat.
+        let file = unsafe { std::fs::File::from_raw_fd(fd) };
+        validate_open_dir(&file, &child_path, true)?;
+        Ok(file)
+    }
+
+    let home_dir = open_home_dir(&home)?;
+    let taida_dir = open_or_create_child_dir(&home_dir, &home, ".taida")?;
+    let taida_path = home.join(".taida");
+    let cache_dir = open_or_create_child_dir(&taida_dir, &taida_path, "cache")?;
+    let cache_path = taida_path.join("cache");
+    let upgrade_dir = open_or_create_child_dir(&cache_dir, &cache_path, "upgrade")?;
+    let upgrade_path = cache_path.join("upgrade");
+
+    Ok(UpgradeCacheDir {
+        path: upgrade_path,
+        dir: upgrade_dir,
+    })
+}
+
+#[cfg(unix)]
+fn create_upgrade_staging_file(
+    dir: &std::fs::File,
+    filename: &str,
+    label: &str,
+) -> Result<std::fs::File, String> {
+    use std::ffi::CString;
+    use std::os::fd::{AsRawFd, FromRawFd};
+
+    let c_filename = CString::new(filename.as_bytes()).map_err(|_| {
+        format!(
+            "[E32K1_UPGRADE_STAGE_FAILED] staging filename for {} contains an interior NUL byte",
+            label
+        )
+    })?;
+    let flags = libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC;
+    // SAFETY: `dir` is the already-validated cache dirfd and `c_filename`
+    // is a single generated filename. O_EXCL + O_NOFOLLOW fail closed on
+    // pre-placed files or symlinks.
+    let fd = unsafe { libc::openat(dir.as_raw_fd(), c_filename.as_ptr(), flags, 0o600) };
+    if fd < 0 {
+        return Err(format!(
+            "[E32K1_UPGRADE_STAGE_FAILED] failed to stage {} for verification: {}",
+            label,
+            std::io::Error::last_os_error()
+        ));
+    }
+    // SAFETY: `fd` is a fresh fd returned by openat.
+    Ok(unsafe { std::fs::File::from_raw_fd(fd) })
 }
 
 impl TempDownloadedFile {
@@ -656,25 +797,21 @@ impl TempDownloadedFile {
                 )
             })?
             .as_nanos();
-        let path = dir.join(format!(
-            "taida_upgrade_{}_{}_{}",
-            std::process::id(),
-            nanos,
-            label
-        ));
-        let mut opts = std::fs::OpenOptions::new();
-        opts.write(true).create_new(true);
+        let filename = format!("taida_upgrade_{}_{}_{}", std::process::id(), nanos, label);
+        let path = dir.path.join(&filename);
         #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            opts.custom_flags(libc::O_NOFOLLOW).mode(0o600);
-        }
-        let mut file = opts.open(&path).map_err(|e| {
-            format!(
-                "[E32K1_UPGRADE_STAGE_FAILED] failed to stage {} for verification: {}",
-                label, e
-            )
-        })?;
+        let mut file = create_upgrade_staging_file(&dir.dir, &filename, label)?;
+        #[cfg(not(unix))]
+        let mut file = {
+            let mut opts = std::fs::OpenOptions::new();
+            opts.write(true).create_new(true);
+            opts.open(&path).map_err(|e| {
+                format!(
+                    "[E32K1_UPGRADE_STAGE_FAILED] failed to stage {} for verification: {}",
+                    label, e
+                )
+            })?
+        };
         use std::io::Write;
         if let Err(e) = file.write_all(bytes) {
             drop(file);
@@ -1040,7 +1177,52 @@ mod tests {
         );
     }
 
-    fn with_env_guard<F: FnOnce()>(f: F) {
+    #[cfg(unix)]
+    #[test]
+    fn temp_downloaded_file_rejects_symlinked_cache_parent() {
+        use std::os::unix::fs::symlink;
+
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let tmp_home = std::env::temp_dir().join(format!(
+            "cache_dir_parent_home_{}_{}",
+            std::process::id(),
+            nanos
+        ));
+        let outside = std::env::temp_dir().join(format!(
+            "cache_dir_parent_outside_{}_{}",
+            std::process::id(),
+            nanos
+        ));
+        fs::create_dir_all(&tmp_home).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        symlink(&outside, tmp_home.join(".taida")).unwrap();
+
+        let err = with_env_guard(|| {
+            unsafe {
+                std::env::set_var("HOME", &tmp_home);
+            }
+            TempDownloadedFile::new("probe", b"payload")
+                .expect_err("symlinked .taida parent must be rejected")
+        });
+
+        assert!(
+            err.contains("[E32K1_UPGRADE_STAGE_FAILED]"),
+            "error must be tagged: {err}"
+        );
+        assert!(
+            !outside.join("cache").join("upgrade").exists(),
+            "dirfd traversal must not follow a symlinked cache parent"
+        );
+
+        let _ = fs::remove_file(tmp_home.join(".taida"));
+        let _ = fs::remove_dir_all(&tmp_home);
+        let _ = fs::remove_dir_all(&outside);
+    }
+
+    fn with_env_guard<R, F: FnOnce() -> R>(f: F) -> R {
         // Serialise against every other env-touching test in this crate.
         // The local Mutex used to live here; sharing the crate-wide
         // `env_test_lock` (also held by auth/token.rs, pkg/provider.rs,
@@ -1054,7 +1236,7 @@ mod tests {
         let prev_api = std::env::var("TAIDA_GITHUB_API_URL").ok();
         let prev_home = std::env::var("HOME").ok();
         let prev_user_profile = std::env::var("USERPROFILE").ok();
-        f();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
         unsafe {
             match prev_path {
                 Some(path) => std::env::set_var("PATH", path),
@@ -1072,6 +1254,10 @@ mod tests {
                 Some(u) => std::env::set_var("USERPROFILE", u),
                 None => std::env::remove_var("USERPROFILE"),
             }
+        }
+        match result {
+            Ok(value) => value,
+            Err(payload) => std::panic::resume_unwind(payload),
         }
     }
 

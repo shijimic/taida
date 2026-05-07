@@ -150,16 +150,23 @@ fn e32b_076_upgrade_cache_dir_source_pins_validation() {
     // integration tests.
     let upgrade_src = fs::read_to_string("src/upgrade.rs").expect("read src/upgrade.rs");
     assert!(
-        upgrade_src.contains("if meta.file_type().is_symlink() {"),
-        "upgrade_cache_dir must reject symlinked cache dirs"
+        upgrade_src.contains("libc::openat")
+            && upgrade_src.contains("libc::O_DIRECTORY | libc::O_NOFOLLOW"),
+        "upgrade_cache_dir must traverse cache dirs with openat + O_NOFOLLOW"
     );
     assert!(
-        upgrade_src.contains("meta.uid() != euid"),
-        "upgrade_cache_dir must reject cache dirs owned by another uid"
+        upgrade_src.contains("stat.st_uid != euid"),
+        "upgrade_cache_dir must reject cache dirs owned by another uid via fstat"
     );
     assert!(
-        upgrade_src.contains("mode_bits & 0o077 != 0"),
-        "upgrade_cache_dir must reject cache dirs with group/world bits set"
+        upgrade_src.contains("libc::fchmod(dir.as_raw_fd(), 0o700)"),
+        "upgrade_cache_dir must tighten managed cache dirs through their open dirfd"
+    );
+    assert!(
+        upgrade_src.contains("create_upgrade_staging_file")
+            && upgrade_src
+                .contains("libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW"),
+        "TempDownloadedFile::new must create staging files with openat on the cache dirfd"
     );
     assert!(
         !upgrade_src.contains("let _ = std::fs::set_permissions(&dir, perms);"),

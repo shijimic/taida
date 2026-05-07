@@ -150,6 +150,10 @@ pub struct TypeChecker {
     /// Whether we are currently inside a pipeline expression.
     /// Used to allow `_` (Placeholder) in pipeline context while rejecting it elsewhere.
     in_pipeline: bool,
+    /// True while the comparison-diagnostic walker is speculatively inferring
+    /// a subtree. Main inference paths use this to avoid recursively
+    /// re-starting the same E1605-only walk from nested containers.
+    in_comparison_error_walk: bool,
     /// Source file path — used for resolving import paths to validate export symbols.
     source_file: Option<std::path::PathBuf>,
     /// Compile target for backend-aware diagnostics.
@@ -235,6 +239,7 @@ impl TypeChecker {
             mold_header_specs: HashMap::new(),
             declared_header_arities: HashMap::new(),
             in_pipeline: false,
+            in_comparison_error_walk: false,
             source_file: None,
             compile_target: CompileTarget::Neutral,
             net_http_serve_symbols: HashSet::new(),
@@ -1756,15 +1761,6 @@ impl TypeChecker {
             self.check_mold_errors_in_stmt(stmt);
         }
 
-        // Fourth pass: check comparison diagnostics that must fire even in
-        // expression contexts whose container type is known without recursing
-        // into every child (builtin args, method args, templates, etc.).
-        self.push_scope();
-        for stmt in &program.statements {
-            self.check_comparison_errors_in_stmt(stmt);
-        }
-        self.pop_scope();
-
         // C12-3 / FB-8: promote non-tail mutual recursion to a
         // compile-time error so programs that would overflow the stack at
         // runtime (`Maximum call depth exceeded`) are rejected up front.
@@ -3197,120 +3193,30 @@ defaulted fields must be provided via `()`",
         }
     }
 
-    // ── E32B-019: comparison diagnostics in skipped expression contexts ──
+    // ── Comparison diagnostics in skipped expression contexts ──
     //
     // Some containers know their own type without fully inferring children
     // (for example builtin function args, method args with `Unknown`
     // parameters, lambdas passed as values, and TemplateLit raw strings).
-    // This walker is intentionally narrower than full inference: it only
-    // validates comparison BinaryOps and suppresses incidental diagnostics
-    // emitted while computing operand types.
-
-    fn check_comparison_errors_in_stmt(&mut self, stmt: &Statement) {
-        match stmt {
-            Statement::Assignment(a) => {
-                self.check_comparison_errors_in_expr(&a.value);
-                let inferred = self.infer_expr_type_without_recording_errors(&a.value);
-                let registered = a
-                    .type_annotation
-                    .as_ref()
-                    .map(|ty| self.registry.resolve_type(ty))
-                    .unwrap_or(inferred);
-                self.define_var_silent(&a.target, registered);
-            }
-            Statement::Expr(expr) => self.check_comparison_errors_in_expr(expr),
-            Statement::FuncDef(fd) => {
-                let ret_ty = fd
-                    .return_type
-                    .as_ref()
-                    .map(|ty| self.registry.resolve_type(ty))
-                    .unwrap_or(Type::Unknown);
-                let param_types: Vec<Type> = fd
-                    .params
-                    .iter()
-                    .map(|p| {
-                        p.type_annotation
-                            .as_ref()
-                            .map(|ty| self.registry.resolve_type(ty))
-                            .unwrap_or(Type::Unknown)
-                    })
-                    .collect();
-                self.define_var_silent(&fd.name, Type::Function(param_types, Box::new(ret_ty)));
-                self.check_comparison_errors_in_func_def(fd);
-            }
-            Statement::ErrorCeiling(ec) => {
-                self.push_scope();
-                let err_ty = self.registry.resolve_type(&ec.error_type);
-                self.define_var_silent(&ec.error_param, err_ty);
-                for stmt in &ec.handler_body {
-                    self.check_comparison_errors_in_stmt(stmt);
-                }
-                self.pop_scope();
-            }
-            Statement::ClassLikeDef(def) => {
-                for field in &def.fields {
-                    if let Some(default_value) = &field.default_value {
-                        self.check_comparison_errors_in_expr(default_value);
-                    }
-                    if let Some(method_def) = &field.method_def {
-                        self.check_comparison_errors_in_func_def(method_def);
-                    }
-                }
-            }
-            Statement::UnmoldForward(uf) => {
-                self.check_comparison_errors_in_expr(&uf.source);
-                let source_ty = self.infer_expr_type_without_recording_errors(&uf.source);
-                let target_ty = self.unmold_type(&source_ty);
-                self.define_var_silent(&uf.target, target_ty);
-            }
-            Statement::UnmoldBackward(ub) => {
-                self.check_comparison_errors_in_expr(&ub.source);
-                let source_ty = self.infer_expr_type_without_recording_errors(&ub.source);
-                let target_ty = self.unmold_type(&source_ty);
-                self.define_var_silent(&ub.target, target_ty);
-            }
-            Statement::EnumDef(_) | Statement::Import(_) | Statement::Export(_) => {}
+    // The old implementation ran a whole-program fourth pass with its own
+    // scope reconstruction.  That both re-inferred nested expressions and
+    // could drift from the main pass.  This walker is started from main
+    // inference paths that may skip child expressions or treat their argument
+    // signature as Unknown, and records only `[E1605]` diagnostics from those
+    // speculative walks.
+    fn run_comparison_error_walk(&mut self, expr: &Expr) {
+        if self.in_comparison_error_walk {
+            return;
         }
-    }
-
-    fn check_comparison_errors_in_func_def(&mut self, fd: &FuncDef) {
-        let param_types: Vec<Type> = fd
-            .params
-            .iter()
-            .map(|p| {
-                p.type_annotation
-                    .as_ref()
-                    .map(|ty| self.registry.resolve_type(ty))
-                    .unwrap_or(Type::Unknown)
-            })
-            .collect();
-
-        self.push_scope();
-        self.current_func_type_params.push(fd.type_params.clone());
-        for (i, param) in fd.params.iter().enumerate() {
-            if let Some(default_value) = &param.default_value {
-                self.check_comparison_errors_in_expr(default_value);
-            }
-            self.define_var_silent(
-                &param.name,
-                param_types.get(i).cloned().unwrap_or(Type::Unknown),
-            );
-        }
-        for stmt in &fd.body {
-            self.check_comparison_errors_in_stmt(stmt);
-        }
-        self.current_func_type_params.pop();
-        self.pop_scope();
+        self.in_comparison_error_walk = true;
+        self.check_comparison_errors_in_expr(expr);
+        self.in_comparison_error_walk = false;
     }
 
     fn check_comparison_errors_in_expr(&mut self, expr: &Expr) {
         match expr {
-            Expr::BinaryOp(left, op, right, span) => {
-                self.check_comparison_errors_in_expr(left);
-                self.check_comparison_errors_in_expr(right);
-                if Self::is_comparison_op(op) {
-                    self.infer_expr_type_must_emit_e1605(left, op, right, span);
-                }
+            Expr::BinaryOp(_, _, _, _) => {
+                let _ = self.infer_expr_type_recording_only_e1605(expr);
             }
             Expr::UnaryOp(_, inner, _) | Expr::Unmold(inner, _) | Expr::Throw(inner, _) => {
                 self.check_comparison_errors_in_expr(inner);
@@ -3346,17 +3252,8 @@ defaulted fields must be provided via `()`",
                     self.check_comparison_errors_in_expr(&field.value);
                 }
             }
-            Expr::CondBranch(arms, _) => {
-                for arm in arms {
-                    if let Some(condition) = &arm.condition {
-                        self.check_comparison_errors_in_expr(condition);
-                    }
-                    self.push_scope();
-                    for stmt in &arm.body {
-                        self.check_comparison_errors_in_stmt(stmt);
-                    }
-                    self.pop_scope();
-                }
+            Expr::CondBranch(_, _) => {
+                let _ = self.infer_expr_type_recording_only_e1605(expr);
             }
             Expr::Lambda(params, body, _) => {
                 self.push_scope();
@@ -3455,30 +3352,56 @@ defaulted fields must be provided via `()`",
         parse_expr(source).or_else(|| parse_expr(&format!("({source})")))
     }
 
-    fn infer_expr_type_without_recording_errors(&mut self, expr: &Expr) -> Type {
+    fn infer_expr_type_recording_only_e1605(&mut self, expr: &Expr) -> Type {
         let error_count = self.errors.len();
         let ty = self.infer_expr_type(expr);
-        self.errors.truncate(error_count);
+        let mut retained = Vec::new();
+        for err in self.errors.drain(error_count..) {
+            if err.message.contains("[E1605]") {
+                retained.push(err);
+            }
+        }
+        self.errors.extend(retained);
         ty
     }
 
-    fn infer_expr_type_must_emit_e1605(
-        &mut self,
-        left: &Expr,
-        op: &BinOp,
-        right: &Expr,
-        span: &Span,
-    ) {
-        let left_ty = self.infer_expr_type_without_recording_errors(left);
-        let right_ty = self.infer_expr_type_without_recording_errors(right);
-        self.emit_comparison_mismatch_if_needed(&left_ty, op, &right_ty, span);
-    }
+    fn func_call_args_need_comparison_walk(&self, func: &Expr, args: &[Expr]) -> bool {
+        fn args_with_unknown_expected_need_walk(args: &[Expr], params: &[Type]) -> bool {
+            args.iter().enumerate().any(|(i, arg)| {
+                if matches!(arg, Expr::Hole(_) | Expr::Placeholder(_)) {
+                    return false;
+                }
+                params
+                    .get(i)
+                    .is_none_or(|expected| matches!(expected, Type::Unknown))
+            })
+        }
 
-    fn is_comparison_op(op: &BinOp) -> bool {
-        matches!(
-            op,
-            BinOp::Eq | BinOp::NotEq | BinOp::Lt | BinOp::Gt | BinOp::GtEq
-        )
+        let Expr::Ident(name, _) = func else {
+            return true;
+        };
+
+        if self.generic_func_defs.contains_key(name) {
+            // Generic function dispatch infers every provided argument while
+            // binding type parameters, so an additional E1605 walk would only
+            // duplicate that work.
+            return false;
+        }
+        if let Some(param_types) = self.func_param_types.get(name) {
+            return args_with_unknown_expected_need_walk(args, param_types);
+        }
+        if self.func_types.contains_key(name) {
+            return true;
+        }
+        if let Some(Type::Function(params, _)) = self.lookup_var(name) {
+            return args_with_unknown_expected_need_walk(args, &params);
+        }
+        if let Some(Type::Named(var_name)) = self.lookup_var(name)
+            && let Some(Type::Function(params, _)) = self.type_param_function_constraint(&var_name)
+        {
+            return args_with_unknown_expected_need_walk(args, &params);
+        }
+        true
     }
 
     fn emit_comparison_mismatch_if_needed(
@@ -3911,7 +3834,10 @@ defaulted fields must be provided via `()`",
             Expr::IntLit(_, _) => Type::Int,
             Expr::FloatLit(_, _) => Type::Float,
             Expr::StringLit(_, _) => Type::Str,
-            Expr::TemplateLit(_, _) => Type::Str,
+            Expr::TemplateLit(template, span) => {
+                self.check_comparison_errors_in_template(template, span);
+                Type::Str
+            }
             Expr::BoolLit(_, _) => Type::Bool,
             Expr::Gorilla(_) => Type::Unit,
             Expr::Placeholder(_) => Type::Unknown,
@@ -4197,6 +4123,16 @@ defaulted fields must be provided via `()`",
                                      Hint: Remove the `_` and leave the argument position empty.".to_string(),
                                 span: ph_span.clone(),
                             });
+                        }
+                    }
+                }
+                if !self.in_comparison_error_walk
+                    && self.func_call_args_need_comparison_walk(func, args)
+                {
+                    self.run_comparison_error_walk(func);
+                    for arg in args {
+                        if !matches!(arg, Expr::Hole(_) | Expr::Placeholder(_)) {
+                            self.run_comparison_error_walk(arg);
                         }
                     }
                 }
@@ -4774,6 +4710,13 @@ defaulted fields must be provided via `()`",
 
             Expr::MethodCall(obj, method, args, span) => {
                 let obj_type = self.infer_expr_type(obj);
+                if !self.in_comparison_error_walk {
+                    for arg in args {
+                        if !matches!(arg, Expr::Hole(_) | Expr::Placeholder(_)) {
+                            self.run_comparison_error_walk(arg);
+                        }
+                    }
+                }
                 // E1508: Method call argument count and type checking
                 self.check_method_args(&obj_type, method, args, span);
                 self.infer_method_return_type(&obj_type, method)
@@ -4895,6 +4838,14 @@ defaulted fields must be provided via `()`",
             }
 
             Expr::MoldInst(name, type_args, fields, mold_span) => {
+                if !self.in_comparison_error_walk {
+                    for arg in type_args {
+                        self.run_comparison_error_walk(arg);
+                    }
+                    for field in fields {
+                        self.run_comparison_error_walk(&field.value);
+                    }
+                }
                 // C-5e: Reject Mold[_]() direct binding outside pipeline.
                 // In pipeline (`data => Trim[_]()`), `_` refers to the pipe value — allowed.
                 if !self.in_pipeline {
