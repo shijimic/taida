@@ -52,8 +52,8 @@ docs/reference/documentation_comments.md:440
 docs/reference/documentation_comments.md:453
 docs/reference/documentation_comments.md:468
 docs/reference/naming_conventions.md:273
-docs/reference/net_api.md:380
-docs/reference/net_api.md:395
+docs/reference/net_api.md:424
+docs/reference/net_api.md:439
 docs/reference/operators.md:267
 docs/reference/operators.md:410
 docs/reference/operators.md:579
