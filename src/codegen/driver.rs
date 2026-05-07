@@ -2188,6 +2188,28 @@ mod tests {
         );
     }
 
+    struct TestDir {
+        path: PathBuf,
+    }
+
+    impl TestDir {
+        fn new(name: &str) -> Self {
+            Self {
+                path: unique_test_dir(name),
+            }
+        }
+
+        fn path(&self) -> &Path {
+            &self.path
+        }
+    }
+
+    impl Drop for TestDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
+    }
+
     fn unique_test_dir(name: &str) -> PathBuf {
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -2201,15 +2223,14 @@ mod tests {
         ))
     }
 
-    /// E32B-017: supported project markers still anchor the native driver root.
     #[test]
     fn test_find_project_root_accepts_supported_markers() {
         for marker in ["packages.tdm", "taida.toml", ".git"] {
-            let root = unique_test_dir(marker.trim_start_matches('.'));
-            let nested = root.join("src").join("deep");
+            let root = TestDir::new(marker.trim_start_matches('.'));
+            let nested = root.path().join("src").join("deep");
             std::fs::create_dir_all(&nested).expect("create nested project dir");
 
-            let marker_path = root.join(marker);
+            let marker_path = root.path().join(marker);
             if marker == ".git" {
                 std::fs::create_dir_all(&marker_path).expect("create .git marker");
             } else {
@@ -2218,21 +2239,18 @@ mod tests {
 
             assert_eq!(
                 find_project_root(&nested),
-                root,
+                root.path(),
                 "{} should be treated as a project-root marker",
                 marker
             );
-
-            let _ = std::fs::remove_dir_all(root);
         }
     }
 
-    /// E32B-017: `~/.taida` is user state, not a project-root marker.
     #[test]
     fn test_find_project_root_ignores_home_taida() {
-        let home = unique_test_dir("home-taida");
-        let nested = home.join("workspace").join("demo").join("src");
-        std::fs::create_dir_all(home.join(".taida")).expect("create home .taida");
+        let home = TestDir::new("home-taida");
+        let nested = home.path().join("workspace").join("demo").join("src");
+        std::fs::create_dir_all(home.path().join(".taida")).expect("create home .taida");
         std::fs::create_dir_all(&nested).expect("create nested source dir");
 
         assert_eq!(
@@ -2242,11 +2260,9 @@ mod tests {
         );
         assert_ne!(
             find_project_root(&nested),
-            home,
+            home.path(),
             "a HOME-like directory with only .taida must not become the project root"
         );
-
-        let _ = std::fs::remove_dir_all(home);
     }
 
     /// FL-27: find_wasm_ld error message should be platform-appropriate

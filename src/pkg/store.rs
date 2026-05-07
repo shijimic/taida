@@ -63,9 +63,12 @@ fn local_mock_github_base_url_allowed() -> bool {
 }
 
 fn is_loopback_http_url(url: &str) -> bool {
+    let url = url.to_ascii_lowercase();
     url.starts_with("http://127.0.0.1:")
         || url.starts_with("http://localhost:")
         || url.starts_with("http://[::1]:")
+        || url.starts_with("http://[::ffff:127.0.0.1]:")
+        || url.starts_with("http://[::ffff:7f00:1]:")
 }
 
 fn source_signature_verification_skipped_for_mock_base(base_url: &str) -> bool {
@@ -2388,6 +2391,58 @@ mod tests {
             github_base_url().unwrap(),
             "http://127.0.0.1:9999".to_string()
         );
+        unsafe {
+            match prev_base {
+                Some(v) => std::env::set_var("TAIDA_GITHUB_BASE_URL", v),
+                None => std::env::remove_var("TAIDA_GITHUB_BASE_URL"),
+            }
+            match prev_allow {
+                Some(v) => std::env::set_var("TAIDA_E32_ALLOW_MOCK_GITHUB_BASE_URL", v),
+                None => std::env::remove_var("TAIDA_E32_ALLOW_MOCK_GITHUB_BASE_URL"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_github_base_url_allows_ipv4_mapped_loopback_mock_under_gate() {
+        let _guard = crate::util::env_test_lock().lock().unwrap();
+        let prev_base = std::env::var("TAIDA_GITHUB_BASE_URL").ok();
+        let prev_allow = std::env::var("TAIDA_E32_ALLOW_MOCK_GITHUB_BASE_URL").ok();
+        unsafe {
+            std::env::set_var("TAIDA_GITHUB_BASE_URL", "http://[::ffff:127.0.0.1]:9999");
+            std::env::set_var("TAIDA_E32_ALLOW_MOCK_GITHUB_BASE_URL", "1");
+        }
+        assert_eq!(
+            github_base_url().unwrap(),
+            "http://[::ffff:127.0.0.1]:9999".to_string()
+        );
+        unsafe {
+            match prev_base {
+                Some(v) => std::env::set_var("TAIDA_GITHUB_BASE_URL", v),
+                None => std::env::remove_var("TAIDA_GITHUB_BASE_URL"),
+            }
+            match prev_allow {
+                Some(v) => std::env::set_var("TAIDA_E32_ALLOW_MOCK_GITHUB_BASE_URL", v),
+                None => std::env::remove_var("TAIDA_E32_ALLOW_MOCK_GITHUB_BASE_URL"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_github_base_url_allows_ipv4_mapped_loopback_case_and_hex_under_gate() {
+        let _guard = crate::util::env_test_lock().lock().unwrap();
+        let prev_base = std::env::var("TAIDA_GITHUB_BASE_URL").ok();
+        let prev_allow = std::env::var("TAIDA_E32_ALLOW_MOCK_GITHUB_BASE_URL").ok();
+        for base in [
+            "http://[::FFFF:127.0.0.1]:9999",
+            "http://[::ffff:7f00:1]:9999",
+        ] {
+            unsafe {
+                std::env::set_var("TAIDA_GITHUB_BASE_URL", base);
+                std::env::set_var("TAIDA_E32_ALLOW_MOCK_GITHUB_BASE_URL", "1");
+            }
+            assert_eq!(github_base_url().unwrap(), base.to_string());
+        }
         unsafe {
             match prev_base {
                 Some(v) => std::env::set_var("TAIDA_GITHUB_BASE_URL", v),

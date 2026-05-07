@@ -4,9 +4,13 @@
 //! install.sh signature default, and download_bytes scheme guard.
 
 use std::fs;
+use std::sync::Mutex;
+
+static ENV_LOCK: Mutex<()> = Mutex::new(());
 
 #[test]
 fn e32b_014_upgrade_api_url_is_pinned() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     unsafe {
         std::env::set_var("TAIDA_GITHUB_API_URL", "http://127.0.0.1:9998");
     }
@@ -259,6 +263,8 @@ fn e32b_038_install_sh_default_is_required() {
 fn e32b_037_temp_downloaded_file_rejects_symlink_at_target_path() {
     use std::io::Write;
     use std::os::unix::fs::symlink;
+
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
 
     // Force the upgrade cache dir into a test-private location so the
     // symlink fixture does not collide with the real `~/.taida/cache/upgrade`.

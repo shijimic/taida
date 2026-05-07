@@ -220,6 +220,29 @@ These checks run **before** any filesystem access or network I/O.
 
 ---
 
+## Source package integrity and line endings
+
+`taida ingot install --frozen` verifies local source-package trees with a
+content hash over sorted relative paths and raw file bytes:
+
+```text
+sha256(<relative-path> || 0x00 || <bytes>)
+```
+
+The hash does **not** normalize line endings. A file checked out with CRLF
+bytes and the same file checked out with LF bytes are different package
+contents and produce different lockfile integrity values. Package authors who
+need cross-platform frozen installs should pin text normalization in
+`.gitattributes`, for example:
+
+```gitattributes
+*.td text eol=lf
+*.tdm text eol=lf
+native/addon.toml text eol=lf
+```
+
+---
+
 ## Unknown-key forward-compatibility policy
 
 The manifest parser is **strict**: any section header or top-level

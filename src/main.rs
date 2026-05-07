@@ -1926,6 +1926,124 @@ struct DescriptorTransaction {
     build_root: PathBuf,
     staging_root: PathBuf,
     replaced_root: PathBuf,
+    _lock: DescriptorBuildLock,
+}
+
+struct DescriptorBuildLock {
+    path: PathBuf,
+    file: Option<fs::File>,
+}
+
+impl DescriptorBuildLock {
+    fn acquire(build_root: &Path) -> Result<Self, DescriptorBuildError> {
+        let path = build_root.join(".lock");
+        let pid = std::process::id() as u64;
+        let body = || {
+            serde_json::to_string_pretty(&json!({
+                "pid": pid,
+                "created_at": std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .expect("system clock must be after 1970-01-01 (UNIX epoch)")
+                    .as_secs(),
+            }))
+            .unwrap_or_else(|_| format!("{{\"pid\":{}}}", pid))
+        };
+
+        for _attempt in 0..3 {
+            match fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)
+            {
+                Ok(mut file) => {
+                    if let Err(e) = file.write_all(body().as_bytes()) {
+                        drop(file);
+                        let _ = fs::remove_file(&path);
+                        return Err(DescriptorBuildError::new(
+                            "E1923",
+                            format!(
+                                "Cannot write descriptor build lock '{}': {}",
+                                path.display(),
+                                e
+                            ),
+                        ));
+                    }
+                    return Ok(Self {
+                        path,
+                        file: Some(file),
+                    });
+                }
+                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
+                    let lock_pid = descriptor_lock_pid(&path);
+                    match lock_pid.and_then(descriptor_pid_alive) {
+                        Some(false) => {
+                            let _ = append_descriptor_cleanup_log(
+                                build_root,
+                                &format!(
+                                    "remove build-lock={} reason=dead-pid pid={}",
+                                    path.file_name()
+                                        .and_then(|name| name.to_str())
+                                        .unwrap_or(".lock"),
+                                    lock_pid
+                                        .map(|pid| pid.to_string())
+                                        .unwrap_or_else(|| "-".to_string())
+                                ),
+                            );
+                            fs::remove_file(&path).map_err(|remove_err| {
+                                DescriptorBuildError::new(
+                                    "E1923",
+                                    format!(
+                                        "Cannot remove stale descriptor build lock '{}' (pid={}): {}",
+                                        path.display(),
+                                        lock_pid
+                                            .map(|pid| pid.to_string())
+                                            .unwrap_or_else(|| "-".to_string()),
+                                        remove_err
+                                    ),
+                                )
+                            })?;
+                            continue;
+                        }
+                        Some(true) | None => {}
+                    }
+                    let owner = lock_pid
+                        .map(|pid| pid.to_string())
+                        .unwrap_or_else(|| "unknown".to_string());
+                    return Err(DescriptorBuildError::new(
+                        "E1923",
+                        format!(
+                            "Descriptor build root '{}' is locked by pid {}. Wait for the running descriptor build to finish, or remove '{}' if that process is gone.",
+                            build_root.display(),
+                            owner,
+                            path.display()
+                        ),
+                    ));
+                }
+                Err(e) => {
+                    return Err(DescriptorBuildError::new(
+                        "E1923",
+                        format!(
+                            "Cannot create descriptor build lock '{}': {}",
+                            path.display(),
+                            e
+                        ),
+                    ));
+                }
+            }
+        }
+
+        Err(DescriptorBuildError::new(
+            "E1923",
+            format!("Cannot acquire descriptor build lock '{}'.", path.display()),
+        ))
+    }
+}
+
+impl Drop for DescriptorBuildLock {
+    fn drop(&mut self) {
+        let _ = self.file.take();
+        let _ = fs::remove_file(&self.path);
+    }
 }
 
 impl DescriptorTransaction {
@@ -1945,6 +2063,7 @@ impl DescriptorTransaction {
             )
         })?;
         cleanup_stale_descriptor_staging(&build_root)?;
+        let lock = DescriptorBuildLock::acquire(&build_root)?;
         fs::create_dir(&staging_root).map_err(|e| {
             DescriptorBuildError::new(
                 "E1923",
@@ -1992,12 +2111,21 @@ impl DescriptorTransaction {
             build_root,
             staging_root,
             replaced_root,
+            _lock: lock,
         })
     }
 
     fn cleanup(&self) {
         let _ = fs::remove_dir_all(&self.staging_root);
     }
+}
+
+fn descriptor_lock_pid(path: &Path) -> Option<u64> {
+    let text = fs::read_to_string(path).ok()?;
+    serde_json::from_str::<serde_json::Value>(&text)
+        .ok()?
+        .get("pid")
+        .and_then(serde_json::Value::as_u64)
 }
 
 fn append_descriptor_cleanup_log(
@@ -2100,14 +2228,11 @@ fn cleanup_stale_descriptor_staging(build_root: &Path) -> Result<(), DescriptorB
     // owner from a crashed one. A heartbeat / mtime refresh is tracked as
     // a separate hardening item.
     //
-    // E32B-050: when probe is supported (Linux / POSIX), the cap is 6 h
-    // instead of 24 h. `transaction.json` is plain JSON, so an attacker who
-    // can write to a staging directory could pin its `pid` field to any live
-    // process (e.g. PID 1) and `touch` the file to keep `mtime` fresh. That
-    // would make the staging dir immortal under a 24 h TTL. Capping at 6 h
-    // bounds the window during which a spoofed PID can sit on disk, even
-    // when the staging directory is owned by the current user (so
-    // `owner_mismatch` would not catch it).
+    // When the process probe is supported (Linux / POSIX), use a 6 h cap
+    // instead of 24 h. `transaction.json` is plain JSON, so anyone who can
+    // write to a staging directory could pin its `pid` field to any live
+    // process and `touch` the file to keep `mtime` fresh. Capping at 6 h
+    // bounds the window during which a spoofed PID can sit on disk.
     let probe_supported = descriptor_pid_alive(std::process::id() as u64).is_some();
     let ttl = if probe_supported {
         std::time::Duration::from_secs(6 * 60 * 60)
@@ -2118,12 +2243,10 @@ fn cleanup_stale_descriptor_staging(build_root: &Path) -> Result<(), DescriptorB
         let _ =
             append_descriptor_cleanup_log(build_root, "scan pid_alive_check=unsupported ttl=4h");
     }
-    // E32B-050: capture the current effective UID once per scan so we can
-    // refuse to trust `transaction.json` written by a different owner. On
-    // shared multi-user projects another user can otherwise spoof a live
-    // PID into our staging directory and survive both the alive probe and
-    // mtime TTL by re-touching the file. Treating "owner UID mismatch" as
-    // expired forces those staging directories out on the next scan.
+    // Capture the current effective UID once per scan so we can refuse to
+    // trust `transaction.json` written by a different owner. On shared
+    // multi-user projects another user can otherwise spoof a live PID into
+    // our staging directory and survive both the alive probe and mtime TTL.
     let current_uid: Option<u32> = {
         #[cfg(unix)]
         {
@@ -2159,15 +2282,10 @@ fn cleanup_stale_descriptor_staging(build_root: &Path) -> Result<(), DescriptorB
         if !file_type.is_dir() {
             continue;
         }
-        // E32B-050 (Codex review HOLD A+B): owner UID check runs BEFORE we
-        // read or parse `transaction.json`. A co-tenant with write access
-        // to our build root could otherwise plant a malformed / unreadable
-        // `transaction.json` (or `chmod 000` it), making `read_to_string`
-        // / `from_str` raise `[E1922]` from inside this loop. That would
-        // wedge the entire cleanup pass and keep the foreign staging
-        // directory alive — the opposite of what UID hardening was meant
-        // to deliver. Foreign-owned directories are removed *without*
-        // touching their JSON contents.
+        // The owner UID check runs before reading `transaction.json`.
+        // A co-tenant with write access to the build root could otherwise
+        // plant malformed or unreadable JSON and wedge the cleanup pass.
+        // Foreign-owned directories are removed without trusting their JSON.
         //
         // TOCTOU note: there is a non-zero gap between `fs::metadata(&path)`
         // here and `fs::remove_dir_all(&path)` below. A racing attacker
@@ -2180,8 +2298,8 @@ fn cleanup_stale_descriptor_staging(build_root: &Path) -> Result<(), DescriptorB
         //      as `[E1922]` rather than being silently swallowed, so
         //      breakage is observable in the cleanup log.
         // A fully race-free implementation would require `openat` +
-        // `unlinkat(AT_REMOVEDIR)` and is tracked alongside the upgrade
-        // hardening track (see E32B-081 for the equivalent dirfd plan).
+        // `unlinkat(AT_REMOVEDIR)`, matching the dirfd-based hardening shape
+        // used for other cache and staging paths.
         let owner_mismatch = {
             #[cfg(unix)]
             {
@@ -2303,23 +2421,27 @@ fn descriptor_transaction_id() -> String {
     format!("{}-{}", std::process::id(), nanos)
 }
 
-fn descriptor_project_root(entry_path: &Path) -> PathBuf {
+fn descriptor_project_root(entry_path: &Path) -> Result<PathBuf, DescriptorBuildError> {
     let mut dir = entry_path
         .parent()
         .unwrap_or_else(|| Path::new("."))
         .to_path_buf();
+    let start = dir.clone();
     loop {
         if dir.join("packages.tdm").exists()
             || dir.join("taida.toml").exists()
             || dir.join(".git").exists()
         {
-            return dir;
+            return Ok(dir);
         }
         if !dir.pop() {
-            return entry_path
-                .parent()
-                .unwrap_or_else(|| Path::new("."))
-                .to_path_buf();
+            return Err(DescriptorBuildError::new(
+                "E1902",
+                format!(
+                    "Descriptor build requires a project root marker (packages.tdm, taida.toml, or .git) above '{}'.",
+                    start.display()
+                ),
+            ));
         }
     }
 }
@@ -2518,11 +2640,10 @@ fn resolve_descriptor_imports(entry_path: &Path, program: &Program) -> HashMap<S
     symbols
 }
 
-/// BuildUnit / BuildPlan / AssetBundle / BuildHook の `name` は
-/// staging path / artifact-map key / hook log directory に直接使われるため、
-/// `..` / `/` / `\\` / leading `.` / NUL / 空文字を含む値は project root の
-/// 外への arbitrary file write に発展する。`name` を単一 path segment に
-/// 限定し、`[E1910..E1919]` family の `[E1916]` で hard-fail する。
+/// Descriptor names are used directly as staging path segments, artifact-map
+/// keys, and hook-log directories. Keep them to one portable path segment:
+/// reject traversal, hidden segments, NUL, common Unicode slash/dot lookalikes,
+/// and Windows device names before any filesystem write is planned.
 fn validate_descriptor_name(name: &str, kind: &str) -> Result<(), DescriptorBuildError> {
     if name.is_empty() {
         return Err(DescriptorBuildError::new(
@@ -2550,6 +2671,58 @@ fn validate_descriptor_name(name: &str, kind: &str) -> Result<(), DescriptorBuil
             "E1916",
             format!(
                 "{} name '{}' must be a single path segment (no '/' or '\\\\').",
+                kind, name
+            ),
+        ));
+    }
+    const CONFUSABLE_PATH_CHARS: &[char] = &[
+        '\u{2215}', // ∕ DIVISION SLASH
+        '\u{2044}', // ⁄ FRACTION SLASH
+        '\u{29F8}', // ⧸ BIG SOLIDUS
+        '\u{FF0F}', // ／ FULLWIDTH SOLIDUS
+        '\u{2024}', // ․ ONE DOT LEADER
+        '\u{FF0E}', // ． FULLWIDTH FULL STOP
+    ];
+    if name.chars().any(|ch| CONFUSABLE_PATH_CHARS.contains(&ch)) {
+        return Err(DescriptorBuildError::new(
+            "E1916",
+            format!(
+                "{} name '{}' must not contain look-alike path separator characters.",
+                kind, name
+            ),
+        ));
+    }
+    let windows_base = name.split('.').next().unwrap_or(name).to_ascii_uppercase();
+    let reserved = matches!(
+        windows_base.as_str(),
+        "CON"
+            | "PRN"
+            | "AUX"
+            | "NUL"
+            | "COM1"
+            | "COM2"
+            | "COM3"
+            | "COM4"
+            | "COM5"
+            | "COM6"
+            | "COM7"
+            | "COM8"
+            | "COM9"
+            | "LPT1"
+            | "LPT2"
+            | "LPT3"
+            | "LPT4"
+            | "LPT5"
+            | "LPT6"
+            | "LPT7"
+            | "LPT8"
+            | "LPT9"
+    );
+    if reserved {
+        return Err(DescriptorBuildError::new(
+            "E1916",
+            format!(
+                "{} name '{}' is reserved on Windows and cannot be used as an artifact path segment.",
                 kind, name
             ),
         ));
@@ -4150,7 +4323,7 @@ fn run_descriptor_build_driver(
     release_mode: bool,
     no_check: bool,
 ) -> Result<DescriptorBuildRecords, DescriptorBuildError> {
-    let project_root = descriptor_project_root(entry_path);
+    let project_root = descriptor_project_root(entry_path)?;
     let model = build_descriptor_model(entry_path, program)?;
     let (root_units, plan_assets) = descriptor_selected_units(&model, &selector)?;
     let build_order = descriptor_build_order(&model, &root_units)?;
@@ -7699,8 +7872,8 @@ fn run_install(args: &[String]) {
         // under --frozen. Non-frozen install is documented as "generate /
         // update the lockfile", so legitimate drift (version bump in
         // packages.tdm, newly added dep) must rewrite the lockfile rather
-        // than fail. Schema malformation (E32B-044/063 malformed sha256)
-        // is independently caught by `Lockfile::read` -> `parse` ->
+        // than fail. Schema malformation is independently caught by
+        // `Lockfile::read` -> `parse` ->
         // `validate_schema`, so it remains rejected regardless of frozen.
         if frozen {
             if let Some(lockfile) = &existing_lockfile {
@@ -7842,7 +8015,7 @@ Behavior:
 // ── Update subcommand ──────────────────────────────────
 
 fn run_update(args: &[String]) {
-    // RC2.7-4a / RC2.7B-005: parse --allow-local-addon-build flag
+    // Parse --allow-local-addon-build for local addon development.
     let mut allow_local_addon_build = false;
     for arg in args {
         if arg == "--allow-local-addon-build" {
@@ -7919,7 +8092,7 @@ fn run_update(args: &[String]) {
             }
         }
 
-        // RC2.7B-011: install addon prebuilds after deps are recreated.
+        // Install addon prebuilds after deps are recreated.
         // Without this, `taida ingot update` destroys addon binaries because
         // `install_deps` recreates `.taida/deps` from scratch.
         let lock_path = project_dir.join(".taida").join("taida.lock");
@@ -7945,7 +8118,7 @@ fn run_update(args: &[String]) {
         }
     }
 
-    // RC2.7B-012: use write_lockfile_with_addons to preserve addon stanzas.
+    // Preserve addon stanzas when writing the lockfile.
     // The old write_lockfile call would discard all [[package.addon]] entries.
     match pkg::resolver::write_lockfile_with_addons(&manifest, &result, &addon_map) {
         Ok(()) => println!("Updated taida.lock"),

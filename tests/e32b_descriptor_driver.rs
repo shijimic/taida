@@ -27,6 +27,14 @@ fn stdout_text(output: &std::process::Output) -> String {
     String::from_utf8_lossy(&output.stdout).into_owned()
 }
 
+fn has_project_marker_ancestor(path: &Path) -> bool {
+    path.ancestors().any(|dir| {
+        dir.join("packages.tdm").exists()
+            || dir.join("taida.toml").exists()
+            || dir.join(".git").exists()
+    })
+}
+
 fn write_basic_entries(dir: &Path) {
     write_file(
         &dir.join("shared.td"),
@@ -217,6 +225,43 @@ uncheckedUnit <= BuildUnit(
         "--release should not drop descriptor child --no-check propagation\nstdout={}\nstderr={}",
         stdout_text(&unchecked_release),
         stderr_text(&unchecked_release)
+    );
+}
+
+#[test]
+fn e32b_074_descriptor_build_without_project_marker_rejects() {
+    let dir = unique_temp_dir("e32b_074_descriptor_no_project_marker");
+    if has_project_marker_ancestor(&dir) {
+        eprintln!(
+            "SKIP: temp dir '{}' is under a Taida project marker ancestor",
+            dir.display()
+        );
+        return;
+    }
+    write_file(&dir.join("server.td"), "stdout(\"server\")\n");
+    write_file(
+        &dir.join("main.td"),
+        r#"
+>>> ./server.td => @(serverMain)
+serverX <= BuildUnit(
+  name <= "server-x",
+  target <= "js",
+  entry <= serverMain
+)
+<<< serverX
+"#,
+    );
+
+    let output = run_taida_build(
+        &dir,
+        &["main.td", "--unit", "server-x", "--diag-format", "jsonl"],
+    );
+    assert!(!output.status.success());
+    let stdout = stdout_text(&output);
+    assert!(stdout.contains("\"code\":\"E1902\""), "stdout={stdout}");
+    assert!(
+        stdout.contains("project root marker"),
+        "diagnostic should explain missing marker: {stdout}"
     );
 }
 
@@ -852,6 +897,130 @@ plan <= BuildPlan(
     }
 }
 
+#[cfg(unix)]
+#[test]
+fn e32b_047_parallel_descriptor_build_reports_lock_conflict_e1923() {
+    let dir = project("e32b_047_parallel_descriptor_lock");
+    write_file(&dir.join("server.td"), "stdout(\"server\")\n");
+    write_file(
+        &dir.join("main.td"),
+        r#"
+>>> ./server.td => @(serverMain)
+
+slowHook <= BuildHook(
+  name <= "slow-hook",
+  command <= "sleep 2",
+  cwd <= "."
+)
+
+serverX <= BuildUnit(
+  name <= "server-x",
+  target <= "js",
+  entry <= serverMain,
+  before <= @[slowHook]
+)
+
+<<< serverX
+"#,
+    );
+
+    let mut first = Command::new(taida_bin())
+        .current_dir(&dir)
+        .args(["build", "main.td", "--unit", "server-x", "--run-hooks"])
+        .spawn()
+        .expect("spawn first descriptor build");
+
+    let lock_path = dir.join(".taida/build/.lock");
+    let first_pid = first.id().to_string();
+    for _ in 0..100 {
+        if fs::read_to_string(&lock_path)
+            .map(|text| text.contains(&first_pid))
+            .unwrap_or(false)
+        {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert!(
+        fs::read_to_string(&lock_path)
+            .map(|text| text.contains(&first_pid))
+            .unwrap_or(false),
+        "first build should acquire descriptor lock and write its pid"
+    );
+
+    let second = run_taida_build(&dir, &["main.td", "--unit", "server-x"]);
+    assert!(
+        !second.status.success(),
+        "second descriptor build must fail while first holds lock"
+    );
+    let combined = format!("{}{}", stdout_text(&second), stderr_text(&second));
+    assert!(
+        combined.contains("[E1923]") || combined.contains("\"code\":\"E1923\""),
+        "lock conflict must report E1923, not commit-time E1924: {combined}"
+    );
+    assert!(
+        !combined.contains("[E1924]") && !combined.contains("\"code\":\"E1924\""),
+        "lock conflict must not be misreported as E1924: {combined}"
+    );
+    assert!(
+        combined.contains(&first_pid),
+        "diagnostic should include the pid holding the lock; combined={combined}"
+    );
+
+    let first_status = first.wait().expect("wait for first descriptor build");
+    assert!(
+        first_status.success(),
+        "first descriptor build should finish"
+    );
+    assert!(
+        !lock_path.exists(),
+        "descriptor lock should be removed after the owning build exits"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn e32b_047_dead_pid_descriptor_lock_is_reclaimed() {
+    let dir = project("e32b_047_dead_lock_reclaimed");
+    let build_root = dir.join(".taida/build");
+    fs::create_dir_all(&build_root).unwrap();
+    write_file(
+        &build_root.join(".lock"),
+        r#"{"pid":999999999,"created_at":1}"#,
+    );
+    write_file(&dir.join("server.td"), "stdout(\"server\")\n");
+    write_file(
+        &dir.join("main.td"),
+        r#"
+>>> ./server.td => @(serverMain)
+serverX <= BuildUnit(
+  name <= "server-x",
+  target <= "js",
+  entry <= serverMain
+)
+<<< serverX
+"#,
+    );
+
+    let output = run_taida_build(&dir, &["main.td", "--unit", "server-x"]);
+    assert!(
+        output.status.success(),
+        "dead-pid lock should be reclaimed\nstdout={}\nstderr={}",
+        stdout_text(&output),
+        stderr_text(&output)
+    );
+    assert!(
+        !build_root.join(".lock").exists(),
+        "newly acquired descriptor lock should be removed after commit"
+    );
+    let cleanup_log = fs::read_to_string(build_root.join(".cleanup.log")).unwrap();
+    assert!(
+        cleanup_log.contains("build-lock=.lock"),
+        "log={cleanup_log}"
+    );
+    assert!(cleanup_log.contains("dead-pid"), "log={cleanup_log}");
+}
+
 #[test]
 fn e32_descriptor_build_hook_failure_reports_context() {
     let dir = project("e32_descriptor_hook_failure");
@@ -1076,6 +1245,103 @@ serverX <= BuildUnit(
 
     let output = run_taida_build(&dir, &["main.td", "--all-units", "--diag-format", "jsonl"]);
     assert_e1916(&output, "BuildUnit.name empty");
+}
+
+#[test]
+fn e32b_078_descriptor_name_unicode_separator_rejected() {
+    let dir = project("e32b_078_unicode_separator");
+    write_file(&dir.join("server.td"), "stdout(\"server\")\n");
+    write_file(
+        &dir.join("main.td"),
+        ">>> ./server.td => @(serverMain)\n\
+serverX <= BuildUnit(\n\
+  name <= \"frontend\u{2215}admin\",\n\
+  target <= \"js\",\n\
+  entry <= serverMain\n\
+)\n\
+<<< serverX\n",
+    );
+
+    let output = run_taida_build(&dir, &["main.td", "--all-units", "--diag-format", "jsonl"]);
+    assert_e1916(&output, "BuildUnit.name U+2215");
+    let combined = format!("{}{}", stdout_text(&output), stderr_text(&output));
+    assert!(
+        combined.contains("look-alike path separator"),
+        "diagnostic should explain unicode separator rejection: {combined}"
+    );
+}
+
+#[test]
+fn e32b_078_descriptor_name_one_dot_leader_rejected() {
+    let dir = project("e32b_078_one_dot_leader");
+    write_file(&dir.join("server.td"), "stdout(\"server\")\n");
+    write_file(
+        &dir.join("main.td"),
+        ">>> ./server.td => @(serverMain)\n\
+serverX <= BuildUnit(\n\
+  name <= \"frontend\u{2024}cache\",\n\
+  target <= \"js\",\n\
+  entry <= serverMain\n\
+)\n\
+<<< serverX\n",
+    );
+
+    let output = run_taida_build(&dir, &["main.td", "--all-units", "--diag-format", "jsonl"]);
+    assert_e1916(&output, "BuildUnit.name U+2024");
+}
+
+#[test]
+fn e32b_078_descriptor_name_additional_unicode_confusables_rejected() {
+    for (label, ch) in [
+        ("fraction_slash", '\u{2044}'),
+        ("big_solidus", '\u{29F8}'),
+        ("fullwidth_solidus", '\u{FF0F}'),
+        ("fullwidth_full_stop", '\u{FF0E}'),
+    ] {
+        let dir = project(&format!("e32b_078_{label}"));
+        write_file(&dir.join("server.td"), "stdout(\"server\")\n");
+        write_file(
+            &dir.join("main.td"),
+            &format!(
+                ">>> ./server.td => @(serverMain)\n\
+serverX <= BuildUnit(\n\
+  name <= \"frontend{ch}cache\",\n\
+  target <= \"js\",\n\
+  entry <= serverMain\n\
+)\n\
+<<< serverX\n"
+            ),
+        );
+
+        let output = run_taida_build(&dir, &["main.td", "--all-units", "--diag-format", "jsonl"]);
+        assert_e1916(&output, label);
+    }
+}
+
+#[test]
+fn e32b_078_descriptor_name_windows_reserved_rejected() {
+    let dir = project("e32b_078_windows_reserved");
+    write_file(&dir.join("server.td"), "stdout(\"server\")\n");
+    write_file(
+        &dir.join("main.td"),
+        r#"
+>>> ./server.td => @(serverMain)
+serverX <= BuildUnit(
+  name <= "CON.txt",
+  target <= "js",
+  entry <= serverMain
+)
+<<< serverX
+"#,
+    );
+
+    let output = run_taida_build(&dir, &["main.td", "--all-units", "--diag-format", "jsonl"]);
+    assert_e1916(&output, "BuildUnit.name Windows reserved");
+    let combined = format!("{}{}", stdout_text(&output), stderr_text(&output));
+    assert!(
+        combined.contains("reserved on Windows"),
+        "diagnostic should explain Windows reserved-name rejection: {combined}"
+    );
 }
 
 // =============================================================================

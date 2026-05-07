@@ -339,11 +339,10 @@ pub fn find_asset_url(
         if asset["name"].as_str() == Some(asset_name)
             && let Some(url) = asset["browser_download_url"].as_str()
         {
-            // E32B-042: Defense-in-depth — reject non-https
-            // browser_download_url responses (e.g. tampered API metadata
-            // injecting `file://`) before the URL ever reaches
-            // `download_bytes`. The GitHub API contract uses https
-            // exclusively; anything else is a supply-chain signal.
+            // Defense-in-depth: reject non-https release asset metadata
+            // before the URL ever reaches `download_bytes`. The GitHub API
+            // contract uses https exclusively; anything else is a supply-chain
+            // signal.
             if !url.starts_with("https://") {
                 return Err(format!(
                     "[E32K1_UPGRADE_NON_HTTPS_URL] release asset '{}' has non-https URL: {}",
@@ -755,10 +754,10 @@ fn upgrade_cosign_error(err: VerifyError) -> String {
 
 /// Download `SHA256SUMS`, verify its cosign bundle, then return the text.
 pub fn download_verified_sha256sums(sha256sums_url: &str) -> Result<String, String> {
-    // E32B-042: production rejects every non-https scheme; in-process unit
-    // tests stage `file://` fixtures via `download_bytes_for_test`. The
-    // boundary is tight — only this call site swaps; the public
-    // `download_bytes` remains https-only.
+    // Production rejects every non-https scheme; in-process unit tests stage
+    // `file://` fixtures via `download_bytes_for_test`. The boundary is
+    // tight: only this call site swaps; the public `download_bytes` remains
+    // https-only.
     #[cfg(not(test))]
     let bytes = download_bytes(sha256sums_url)?;
     #[cfg(test)]
