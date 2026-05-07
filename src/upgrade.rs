@@ -362,7 +362,7 @@ pub fn find_asset_url(
 
 /// Download bytes from URL.
 ///
-/// E32B-042: production callers MUST receive only `https://` URLs. The
+/// Production callers MUST receive only `https://` URLs. The
 /// `browser_download_url` field of the GitHub Releases API is the sole
 /// production input; if the metadata is tampered with to inject a
 /// `file://` URL, defense-in-depth must reject the URL **before** the
@@ -547,7 +547,7 @@ struct TempDownloadedFile {
     path: std::path::PathBuf,
 }
 
-/// E32B-037: stage upgrade artifacts under `~/.taida/cache/upgrade/` with
+/// Stage upgrade artifacts under `~/.taida/cache/upgrade/` with
 /// mode 0700 instead of `std::env::temp_dir()`.
 ///
 /// `/tmp/taida_upgrade_<pid>_<nanos>_*` is predictable enough that a local

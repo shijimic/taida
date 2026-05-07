@@ -10,7 +10,7 @@
 /// <<<@1.0.0 @(capitalize, truncate)
 /// ```
 ///
-/// **Pinned source package format** (E32B-016):
+/// **Pinned source package format**:
 /// ```toml
 /// [packages."taida-lang/web"]
 /// version = "a.1"
@@ -61,7 +61,7 @@ pub enum Dependency {
         org: String,
         name: String,
         version: String,
-        /// E32B-016: optional source tarball SHA-256 pin.
+        /// Optional source tarball SHA-256 pin.
         /// Canonical shape: `sha256:` + 64 lowercase hex chars.
         integrity: Option<String>,
     },

@@ -518,7 +518,7 @@ pub(crate) fn trim_ascii(bytes: &[u8]) -> &[u8] {
     &bytes[start..end]
 }
 
-/// E32B-028: cap HTTP chunk-size to the same 15 hex digits used by JS/Native.
+/// Cap HTTP chunk-size to the same 15 hex digits used by JS/Native.
 pub(crate) const MAX_CHUNK_SIZE_HEX_DIGITS: usize = 15;
 
 /// Parse a trimmed HTTP chunk-size hex field with explicit overflow guards.

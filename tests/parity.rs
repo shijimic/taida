@@ -39336,6 +39336,9 @@ stdout(isEven(50000))
 // resets the anchor to (1, 1) is caught.
 #[test]
 fn test_e32b_046_native_mutual_recursion_anchor_points_at_user_func() {
+    // Compute the expected line dynamically from the fixture so tweaking
+    // the preamble (e.g. adding another comment) does not silently break
+    // the regression check.
     let source = r#"
 // leading comment so the user functions never start at line 1.
 // keep this preamble multi-line so a regression that anchors to
@@ -39356,6 +39359,13 @@ c n =
 stdout(a(10))
 "#;
 
+    let entry_line = source
+        .lines()
+        .position(|l| l.starts_with("a n ="))
+        .map(|idx| idx + 1)
+        .expect("fixture must contain `a n =` somewhere; otherwise the anchor regression makes no sense");
+    let expected_anchor = format!("line {entry_line}");
+
     let tmp = unique_temp_path("taida_parity_e32b_046", "anchor", "td");
     fs::write(&tmp, source).expect("failed to write E32B-046 source");
     let native_err = run_native_build_error(&tmp, "e32b_046_native_anchor")
@@ -39365,8 +39375,8 @@ stdout(a(10))
         "diagnostic must carry [E0700], got: {native_err}"
     );
     assert!(
-        native_err.contains("line 6"),
-        "diagnostic must anchor at the user-defined function `a` on line 6, got: {native_err}"
+        native_err.contains(&expected_anchor),
+        "diagnostic must anchor at the user-defined function `a` on {expected_anchor}, got: {native_err}"
     );
     assert!(
         !native_err.contains("line 1, column 1"),
@@ -39376,8 +39386,8 @@ stdout(a(10))
     let wasm_err = run_wasm_min_build_error(&tmp, "e32b_046_wasm_anchor")
         .expect("wasm-min build must fail for the same cycle");
     assert!(
-        wasm_err.contains("[E0700]") && wasm_err.contains("line 6"),
-        "wasm-min anchor must match native anchor at line 6, got: {wasm_err}"
+        wasm_err.contains("[E0700]") && wasm_err.contains(&expected_anchor),
+        "wasm-min anchor must match native anchor at {expected_anchor}, got: {wasm_err}"
     );
 
     let _ = fs::remove_file(&tmp);

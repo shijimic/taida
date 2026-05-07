@@ -149,7 +149,7 @@ fn validate_net_http_api_for_wasm(
 /// through the `_poly` dispatchers which are safe for plain-Str callers; the
 /// `Regex(...)` construction on the arg side already emits `taida_regex_new`,
 /// so those cases are caught transitively. `searchLax` is listed explicitly
-/// (defense-in-depth, E32B-070) so a future overload taking a non-`Regex`
+/// (defense-in-depth) so a future overload taking a non-`Regex`
 /// argument cannot silently bypass the diagnostic.
 fn validate_regex_api_for_wasm(
     needed_funcs: &HashSet<String>,

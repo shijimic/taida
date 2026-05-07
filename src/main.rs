@@ -2349,12 +2349,11 @@ fn resolve_descriptor_imports(entry_path: &Path, program: &Program) -> HashMap<S
     symbols
 }
 
-/// E32B-036: BuildUnit / BuildPlan / AssetBundle / BuildHook の `name` は
+/// BuildUnit / BuildPlan / AssetBundle / BuildHook の `name` は
 /// staging path / artifact-map key / hook log directory に直接使われるため、
 /// `..` / `/` / `\\` / leading `.` / NUL / 空文字を含む値は project root の
 /// 外への arbitrary file write に発展する。`name` を単一 path segment に
-/// 限定し、E32B-009 (`E1910..E1919`) と同 family の `[E1916]` で hard-fail
-/// する。
+/// 限定し、`[E1910..E1919]` family の `[E1916]` で hard-fail する。
 fn validate_descriptor_name(name: &str, kind: &str) -> Result<(), DescriptorBuildError> {
     if name.is_empty() {
         return Err(DescriptorBuildError::new(
@@ -2528,6 +2527,14 @@ fn build_descriptor_model(
             Statement::Assignment(assignment) => match &assignment.value {
                 Expr::TypeInst(type_name, fields, _) if type_name == "BuildUnit" => {
                     let unit = parse_build_unit(&assignment.target, fields, &import_symbols)?;
+                    if let Some(prev) = model.units_by_symbol.get(&unit.symbol) {
+                        return Err(duplicate_descriptor_symbol(
+                            "BuildUnit",
+                            &unit.symbol,
+                            &prev.name,
+                            &unit.name,
+                        ));
+                    }
                     if let Some(prev_symbol) = model
                         .unit_symbol_by_name
                         .insert(unit.name.clone(), unit.symbol.clone())
@@ -2543,6 +2550,14 @@ fn build_descriptor_model(
                 }
                 Expr::TypeInst(type_name, fields, _) if type_name == "BuildPlan" => {
                     let plan = parse_build_plan(&assignment.target, fields)?;
+                    if let Some(prev) = model.plans_by_symbol.get(&plan.symbol) {
+                        return Err(duplicate_descriptor_symbol(
+                            "BuildPlan",
+                            &plan.symbol,
+                            &prev.name,
+                            &plan.name,
+                        ));
+                    }
                     if let Some(prev_symbol) = model
                         .plan_symbol_by_name
                         .insert(plan.name.clone(), plan.symbol.clone())
@@ -2558,6 +2573,14 @@ fn build_descriptor_model(
                 }
                 Expr::TypeInst(type_name, fields, _) if type_name == "AssetBundle" => {
                     let asset = parse_asset_bundle(&assignment.target, fields)?;
+                    if let Some(prev) = model.assets_by_symbol.get(&asset.symbol) {
+                        return Err(duplicate_descriptor_symbol(
+                            "AssetBundle",
+                            &asset.symbol,
+                            &prev.name,
+                            &asset.name,
+                        ));
+                    }
                     if let Some(prev_symbol) = model
                         .asset_symbol_by_name
                         .insert(asset.name.clone(), asset.symbol.clone())
@@ -2573,6 +2596,14 @@ fn build_descriptor_model(
                 }
                 Expr::TypeInst(type_name, fields, _) if type_name == "BuildHook" => {
                     let hook = parse_build_hook(&assignment.target, fields)?;
+                    if let Some(prev) = model.hooks_by_symbol.get(&hook.symbol) {
+                        return Err(duplicate_descriptor_symbol(
+                            "BuildHook",
+                            &hook.symbol,
+                            &prev.name,
+                            &hook.name,
+                        ));
+                    }
                     if let Some(prev_symbol) = model
                         .hook_symbol_by_name
                         .insert(hook.name.clone(), hook.symbol.clone())
@@ -2613,6 +2644,26 @@ fn duplicate_descriptor_name(
         "E1902",
         format!(
             "{descriptor} name '{name}' is declared more than once (symbols '{first_symbol}' and '{second_symbol}'); each {descriptor} name must be unique within a descriptor file."
+        ),
+    )
+}
+
+/// Descriptor `symbol` collisions are equally dangerous: rebinding the same
+/// Taida-side identifier to two different descriptor instances silently
+/// overwrites `*_by_symbol` while leaving the previous `*_symbol_by_name`
+/// entry as a stale alias, so `taida build --unit <prev_name>` resolves to
+/// the second descriptor. Reject the second binding with `[E1902]` before
+/// the overwrite happens.
+fn duplicate_descriptor_symbol(
+    descriptor: &str,
+    symbol: &str,
+    first_name: &str,
+    second_name: &str,
+) -> DescriptorBuildError {
+    DescriptorBuildError::new(
+        "E1902",
+        format!(
+            "{descriptor} symbol '{symbol}' is bound more than once (names '{first_name}' and '{second_name}'); each {descriptor} symbol must be defined exactly once within a descriptor file."
         ),
     )
 }
@@ -2900,12 +2951,26 @@ fn validate_target_closure(unit: &BuildUnitDescriptor) -> Result<(), DescriptorB
         })
     })?;
 
+    validate_target_closure_modules(unit, entry_path, &modules)
+}
+
+/// Validate that no module in `modules` imports a target-incompatible API.
+/// The inner re-parse defends against the TOCTOU race between
+/// `module_graph::collect_local_modules` (which already vets parse errors)
+/// and the file being rewritten before this re-read. Splitting it out as a
+/// `pub(crate)` helper lets a test inject a parse-broken module path
+/// without racing the upstream collector.
+pub(crate) fn validate_target_closure_modules(
+    unit: &BuildUnitDescriptor,
+    entry_path: &Path,
+    modules: &[PathBuf],
+) -> Result<(), DescriptorBuildError> {
     let restricted = matches!(unit.target, BuildTarget::WasmMin | BuildTarget::WasmEdge);
     if !restricted {
         return Ok(());
     }
     for module in modules {
-        let source = fs::read_to_string(&module).map_err(|e| {
+        let source = fs::read_to_string(module).map_err(|e| {
             DescriptorBuildError::new(
                 "E1941",
                 format!("Cannot read closure module '{}': {}", module.display(), e),
@@ -8369,5 +8434,77 @@ mod tests {
         // a non-empty string (exact value depends on build environment).
         let version = taida_version();
         assert!(!version.is_empty(), "taida_version() should not be empty");
+    }
+
+    /// `validate_target_closure_modules` rejects any closure module that
+    /// has parse errors with `[E1941]` so a TOCTOU race window between
+    /// `module_graph::collect_local_modules` and the inner re-read cannot
+    /// silently downgrade a target-incompatibility diagnostic. Exercised
+    /// directly here because the upstream `collect_local_modules` step in
+    /// `validate_target_closure` would otherwise reject the same fixture
+    /// before the inner loop runs, leaving the inner hard-fail untested
+    /// in end-to-end flows.
+    #[test]
+    fn validate_target_closure_modules_rejects_parse_error_inner() {
+        let dir = temp_test_dir("validate-closure-inner-parse");
+        let entry = dir.join("entry.td");
+        fs::write(&entry, "stdout(\"entry\")\n").expect("write entry");
+        let bad = dir.join("bad.td");
+        fs::write(&bad, "let bad = (\n").expect("write bad module");
+
+        let unit = BuildUnitDescriptor {
+            symbol: "frontendA".to_string(),
+            name: "frontend-a".to_string(),
+            target: BuildTarget::WasmMin,
+            entry_symbol: "entryMain".to_string(),
+            entry_path: Some(entry.clone()),
+            route_assets: Vec::new(),
+            before_hooks: Vec::new(),
+        };
+
+        let err = validate_target_closure_modules(&unit, &entry, &[bad.clone()]).expect_err(
+            "TOCTOU defence must reject any closure module that fails to parse on re-read",
+        );
+        assert_eq!(err.code, "E1941");
+        assert!(
+            err.message.contains("frontend-a") && err.message.contains("bad.td"),
+            "diagnostic must mention the unit and offending module: {}",
+            err.message
+        );
+        assert!(
+            err.message.to_ascii_lowercase().contains("parse error"),
+            "diagnostic must surface the parse error context: {}",
+            err.message
+        );
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Sibling guarantee: when the closure target is not restricted (e.g.
+    /// `js`), the inner re-parse path must short-circuit so that benign
+    /// build pipelines that lower through unrestricted targets do not pay
+    /// the wasm-only TOCTOU cost.
+    #[test]
+    fn validate_target_closure_modules_skips_inner_parse_for_unrestricted_target() {
+        let dir = temp_test_dir("validate-closure-inner-skip");
+        let entry = dir.join("entry.td");
+        fs::write(&entry, "stdout(\"entry\")\n").expect("write entry");
+        let bad = dir.join("bad.td");
+        fs::write(&bad, "let bad = (\n").expect("write bad module");
+
+        let unit = BuildUnitDescriptor {
+            symbol: "serverA".to_string(),
+            name: "server-a".to_string(),
+            target: BuildTarget::Js,
+            entry_symbol: "entryMain".to_string(),
+            entry_path: Some(entry.clone()),
+            route_assets: Vec::new(),
+            before_hooks: Vec::new(),
+        };
+
+        validate_target_closure_modules(&unit, &entry, &[bad])
+            .expect("non-wasm targets must skip the closure re-parse pass");
+
+        fs::remove_dir_all(&dir).ok();
     }
 }

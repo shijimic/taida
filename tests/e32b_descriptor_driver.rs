@@ -847,6 +847,32 @@ fn assert_e1902_duplicate_name(
     );
 }
 
+fn assert_e1902_duplicate_symbol(
+    output: &std::process::Output,
+    descriptor: &str,
+    duplicate_symbol: &str,
+) {
+    assert!(
+        !output.status.success(),
+        "{descriptor} duplicate symbol '{duplicate_symbol}' must hard-fail"
+    );
+    let stdout = stdout_text(output);
+    let stderr = stderr_text(output);
+    assert!(
+        stdout.contains("\"code\":\"E1902\"") || stderr.contains("[E1902]"),
+        "{descriptor} duplicate symbol '{duplicate_symbol}' must report E1902; stdout={stdout} stderr={stderr}"
+    );
+    let combined = format!("{stdout}{stderr}");
+    assert!(
+        combined.contains(duplicate_symbol),
+        "{descriptor} duplicate-symbol diagnostic must mention '{duplicate_symbol}'; combined={combined}"
+    );
+    assert!(
+        combined.contains("bound more than once"),
+        "{descriptor} duplicate-symbol diagnostic must explain the conflict; combined={combined}"
+    );
+}
+
 #[test]
 fn e32b_056_build_unit_duplicate_name_rejected() {
     let dir = project("e32b_056_unit_dup");
@@ -977,6 +1003,150 @@ serverX <= BuildUnit(
         &["main.td", "--unit", "server-x", "--diag-format", "jsonl"],
     );
     assert_e1902_duplicate_name(&output, "BuildHook", "duplicate-hook");
+}
+
+// =============================================================================
+// 同 symbol への二重定義 reject ([E1902])
+// =============================================================================
+//
+// `unitName <= BuildUnit(name <= "x", ...)` を同じ `unitName` で 2 度定義すると
+// `units_by_symbol[symbol]` が **silent overwrite** され、`unit_symbol_by_name`
+// に旧 name の stale alias が残る (例: `unit_symbol_by_name["x"] -> unitName`
+// が残ったまま `units_by_symbol[unitName]` は name="y" に書き換わる)。`taida
+// build --unit x` は stale alias 経由で後勝ち unit (name="y") を build する
+// silent foot-gun になる。E32B-056 の name-collision reject と対称的に、
+// symbol-collision も `[E1902]` で hard-fail させる。
+#[test]
+fn e32b_087_build_unit_duplicate_symbol_rejected() {
+    let dir = project("e32b_087_unit_sym_dup");
+    write_file(&dir.join("server.td"), "stdout(\"server\")\n");
+    write_file(&dir.join("frontend.td"), "stdout(\"frontend\")\n");
+    write_file(
+        &dir.join("main.td"),
+        r#"
+>>> ./server.td => @(serverMain)
+>>> ./frontend.td => @(frontendMain)
+aUnit <= BuildUnit(
+  name <= "x",
+  target <= "js",
+  entry <= serverMain
+)
+aUnit <= BuildUnit(
+  name <= "y",
+  target <= "js",
+  entry <= frontendMain
+)
+<<< aUnit
+"#,
+    );
+
+    let output = run_taida_build(&dir, &["main.td", "--unit", "x", "--diag-format", "jsonl"]);
+    assert_e1902_duplicate_symbol(&output, "BuildUnit", "aUnit");
+}
+
+#[test]
+fn e32b_087_build_plan_duplicate_symbol_rejected() {
+    let dir = project("e32b_087_plan_sym_dup");
+    write_file(&dir.join("server.td"), "stdout(\"server\")\n");
+    write_file(
+        &dir.join("main.td"),
+        r#"
+>>> ./server.td => @(serverMain)
+serverX <= BuildUnit(
+  name <= "server-x",
+  target <= "js",
+  entry <= serverMain
+)
+aPlan <= BuildPlan(
+  name <= "plan-a",
+  units <= @[serverX]
+)
+aPlan <= BuildPlan(
+  name <= "plan-b",
+  units <= @[serverX]
+)
+<<< serverX
+<<< aPlan
+"#,
+    );
+
+    let output = run_taida_build(
+        &dir,
+        &["main.td", "--plan", "plan-a", "--diag-format", "jsonl"],
+    );
+    assert_e1902_duplicate_symbol(&output, "BuildPlan", "aPlan");
+}
+
+#[test]
+fn e32b_087_asset_bundle_duplicate_symbol_rejected() {
+    let dir = project("e32b_087_asset_sym_dup");
+    fs::create_dir_all(dir.join("public")).unwrap();
+    write_file(&dir.join("public/index.html"), "ok");
+    write_file(&dir.join("server.td"), "stdout(\"server\")\n");
+    write_file(
+        &dir.join("main.td"),
+        r#"
+>>> ./server.td => @(serverMain)
+aAssets <= AssetBundle(
+  name <= "assets-a",
+  root <= "public",
+  files <= @["**/*"]
+)
+aAssets <= AssetBundle(
+  name <= "assets-b",
+  root <= "public",
+  files <= @["**/*"]
+)
+serverX <= BuildUnit(
+  name <= "server-x",
+  target <= "js",
+  entry <= serverMain,
+  assets <= @[RouteAsset(path <= "/", asset <= aAssets)]
+)
+<<< serverX
+"#,
+    );
+
+    let output = run_taida_build(
+        &dir,
+        &["main.td", "--unit", "server-x", "--diag-format", "jsonl"],
+    );
+    assert_e1902_duplicate_symbol(&output, "AssetBundle", "aAssets");
+}
+
+#[test]
+fn e32b_087_build_hook_duplicate_symbol_rejected() {
+    let dir = project("e32b_087_hook_sym_dup");
+    write_file(&dir.join("server.td"), "stdout(\"server\")\n");
+    write_file(
+        &dir.join("main.td"),
+        r#"
+>>> ./server.td => @(serverMain)
+aHook <= BuildHook(
+  name <= "hook-a",
+  command <= "echo a",
+  cwd <= "."
+)
+aHook <= BuildHook(
+  name <= "hook-b",
+  command <= "echo b",
+  cwd <= "."
+)
+serverX <= BuildUnit(
+  name <= "server-x",
+  target <= "js",
+  entry <= serverMain,
+  before <= @[aHook]
+)
+<<< serverX
+"#,
+    );
+
+    let output = run_taida_build(
+        &dir,
+        &["main.td", "--unit", "server-x", "--diag-format", "jsonl"],
+    );
+    assert_e1902_duplicate_symbol(&output, "BuildHook", "aHook");
 }
 
 // =============================================================================

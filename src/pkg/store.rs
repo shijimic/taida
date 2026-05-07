@@ -379,9 +379,9 @@ impl GlobalStore {
         read_meta(&meta_path_for(&pkg_dir))
     }
 
-    /// E32B-016: before reusing a cached source package, prove that the
-    /// sidecar's tarball SHA still matches the source pin declared in
-    /// `packages.tdm`. Missing or unreadable sidecars cannot satisfy the pin.
+    /// Before reusing a cached source package, prove that the sidecar's
+    /// tarball SHA still matches the source pin declared in `packages.tdm`.
+    /// Missing or unreadable sidecars cannot satisfy the pin.
     pub fn verify_cached_tarball_integrity(
         &self,
         org: &str,

@@ -849,9 +849,9 @@ fn traversal_rejection_path(path: &Path) -> Option<String> {
     Some(stripped.to_string())
 }
 
-/// RCB-103 / E32B-017: Find project root by walking up from the given directory.
-/// `.taida/` is state/config storage, not a project-root marker; otherwise
-/// `~/.taida` can make `$HOME` look like the active project root.
+/// Find project root by walking up from the given directory. `.taida/` is
+/// state/config storage, not a project-root marker; otherwise `~/.taida`
+/// can make `$HOME` look like the active project root.
 fn find_project_root(start_dir: &Path) -> PathBuf {
     let mut dir = start_dir.to_path_buf();
     loop {

@@ -49,9 +49,9 @@ use std::collections::{HashMap, HashSet};
 /// and IR ops — never through the AST `Expr::BuchiPack` /
 /// `Expr::TypeInst` paths this check guards.
 ///
-/// E32B-018: field **reads** (`value.__type`, `lax.__value`, etc.) are
-/// rejected too. Compiler-generated packs may still carry these internal
-/// fields, but user-facing access must go through unmolding / public methods.
+/// Field **reads** (`value.__type`, `lax.__value`, etc.) are rejected too.
+/// Compiler-generated packs may still carry these internal fields, but
+/// user-facing access must go through unmolding / public methods.
 const RESERVED_INTERNAL_FIELD_PREFIX: &str = "__";
 const MAX_CALL_ARGUMENTS: usize = 256;
 
@@ -189,7 +189,7 @@ impl CompileTarget {
         )
     }
 
-    /// E32B-023 (Lock-N): Native and wasm targets that lower through the
+    /// Native and wasm targets that lower through the
     /// C / wasm-C runtime use regular call instructions for mutual
     /// recursion (no trampoline). Deep mutual cycles therefore overflow
     /// the OS stack at runtime instead of falling back to bounded
@@ -1485,7 +1485,7 @@ impl TypeChecker {
         }
     }
 
-    /// E32B-017: Find project root by walking up from the given directory.
+    /// Find project root by walking up from the given directory.
     /// `.taida/` is state/config storage, not a project-root marker; otherwise
     /// `~/.taida` can make `$HOME` look like the active project root.
     fn find_project_root(start_dir: &std::path::Path) -> std::path::PathBuf {
@@ -5351,7 +5351,7 @@ defaulted fields must be provided via `()`",
         }
     }
 
-    /// E32B-020 (Lock-M): closed-constructor validation for class-like
+    /// Closed-constructor validation for class-like
     /// `Name(field <= value, ...)` instantiations.
     ///
     /// Anonymous packs (`@(...)`) keep their open / structural shape and

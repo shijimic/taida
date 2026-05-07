@@ -252,7 +252,7 @@ impl Lockfile {
             if pkg.integrity.starts_with("sha256:") {
                 if !is_valid_lockfile_integrity(&pkg.integrity) {
                     return Err(format!(
-                        "[E32K2_LOCKFILE_INTEGRITY_MISMATCH] package '{}' has malformed integrity '{}'; expected sha256: + 64 lowercase hex characters",
+                        "[E32K2_LOCKFILE_INTEGRITY_MISMATCH] package '{}' has malformed integrity '{}'; expected sha256: + 64 lowercase hex characters. To recover, run `taida ingot migrate-lockfile`, or delete `.taida/taida.lock` and rerun `taida ingot install` to regenerate it.",
                         pkg.name, pkg.integrity
                     ));
                 }
@@ -260,7 +260,7 @@ impl Lockfile {
             }
             if !allow_legacy {
                 return Err(format!(
-                    "[E32K2_LOCKFILE_INTEGRITY_MISMATCH] package '{}' has unsupported integrity '{}'",
+                    "[E32K2_LOCKFILE_INTEGRITY_MISMATCH] package '{}' has unsupported integrity '{}'. To recover, run `taida ingot migrate-lockfile`, or delete `.taida/taida.lock` and rerun `taida ingot install` to regenerate it.",
                     pkg.name, pkg.integrity
                 ));
             }

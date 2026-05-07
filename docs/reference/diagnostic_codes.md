@@ -191,7 +191,7 @@
 |--------|------|
 | `E1900` | ディスクリプタビルドと単一ターゲットビルドの曖昧な CLI 組み合わせ |
 | `E1901` | `--unit` / `--plan` / `--all-units` の複数指定 |
-| `E1902` | ディスクリプタ入力・フィールド形状・export 不在 |
+| `E1902` | ディスクリプタ入力・フィールド形状・export 不在、または `BuildUnit` / `BuildPlan` / `AssetBundle` / `BuildHook` の `name` / シンボル重複 |
 | `E1903` | 指定 `BuildUnit` 不在 |
 | `E1904` | 指定 `BuildPlan` 不在 |
 | `E1910` | `AssetBundle.root` / 参照 asset の検証失敗 |

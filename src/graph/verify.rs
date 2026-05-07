@@ -697,7 +697,7 @@ fn check_mutual_recursion(program: &Program, file: &str) -> Vec<VerifyFinding> {
 
 // ── Check: mutual-recursion-native ────────────────────
 
-/// E32B-023 (Lock-N): for backends that lower through the C / wasm-C
+/// For backends that lower through the C / wasm-C
 /// runtime (`Native`, `wasm-min`, `wasm-wasi`, `wasm-edge`, `wasm-full`),
 /// mutual recursion lowers to ordinary call instructions without a
 /// trampoline. Even tail-only mutual cycles overflow the OS stack at
