@@ -10,12 +10,9 @@ mod common;
 
 use std::fs;
 use std::io::{Read, Write};
-use std::net::{TcpListener, TcpStream};
+use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 fn node_available() -> bool {
@@ -47,11 +44,6 @@ fn unique_path(prefix: &str, label: &str, ext: &str) -> PathBuf {
         nanos,
         ext
     ))
-}
-
-fn free_loopback_port() -> u16 {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("bind free port");
-    listener.local_addr().expect("local addr").port()
 }
 
 fn setup_net_project(source: &str, label: &str) -> PathBuf {
@@ -309,7 +301,7 @@ fn find_close_code(bytes: &[u8]) -> Option<u16> {
 }
 
 fn run_reject_case(backend: &str, label: &str, opcode: u8, payload: &[u8], expected_code: u16) {
-    let port = free_loopback_port();
+    let port = common::find_free_loopback_port();
     let dir = setup_net_project(&ws_source(port), &format!("{}_{}", backend, label));
     let (mut child, artifact) = spawn_backend(&dir, backend, &format!("{}_{}", backend, label));
 
@@ -417,10 +409,16 @@ fn find_text_payload(bytes: &[u8]) -> Option<Vec<u8>> {
 
 /// E32B-080 (WS concurrent isolation): connection A sends a malformed
 /// UTF-8 text frame and must observe close-code 1007. Sibling connection
-/// B sends a valid text frame `hello` and must observe its frame echoed
-/// back followed by a normal close (1000). Both run against the same
-/// backend process (request limit = 2) so the test demonstrates that A's
-/// malformed input did not impact B's echo path.
+/// B sends a valid text frame `hello` afterwards and must observe its
+/// frame echoed back followed by a normal close (1000). Both run
+/// against the same backend process (request limit = 2) so the test
+/// demonstrates that A's malformed input did not impact B's echo path.
+///
+/// E32B-080 follow-up (Codex HOLD): the workers are sequential rather
+/// than racing on a shared atomic + sleep barrier — A finishes its
+/// upgrade + frame round-trip first, then B opens a fresh WS handshake.
+/// Removing the sleep-as-synchronization eliminates the flake window
+/// observed under nextest 2C parallelism.
 #[test]
 fn e32b_080_ws_concurrent_isolation_three_backend() {
     let mut backends = vec!["interp"];
@@ -436,58 +434,31 @@ fn e32b_080_ws_concurrent_isolation_three_backend() {
     }
 
     for backend in backends {
-        let port = free_loopback_port();
+        let port = common::find_free_loopback_port();
         let dir = setup_net_project(&ws_source_two_request(port), &format!("conc_{}", backend));
         let (mut child, artifact) = spawn_backend(&dir, backend, &format!("conc_{}", backend));
 
-        let server_up = Arc::new(AtomicBool::new(false));
-        let server_up_a = server_up.clone();
-        let server_up_b = server_up.clone();
-
         // Connection A: malformed UTF-8 text frame → expect close 1007.
-        let handle_a = thread::spawn(move || -> Option<Vec<u8>> {
-            // Wait for the listener to bind. connect_ws polls internally,
-            // so we just call it directly.
-            let mut stream = match connect_ws(port) {
-                Some(s) => s,
-                None => return None,
-            };
-            server_up_a.store(true, Ordering::Release);
+        // `connect_ws` already polls the listener so we wait for the
+        // backend to bind without an external barrier.
+        let response_a = (|| -> Option<Vec<u8>> {
+            let mut stream = connect_ws(port)?;
             stream
                 .write_all(&masked_frame(0x1, &[0xFF]))
                 .expect("write malformed text frame");
             Some(read_ws_bytes(&mut stream))
-        });
+        })();
 
         // Connection B: valid text frame → expect echo + close 1000.
-        let handle_b = thread::spawn(move || -> Option<Vec<u8>> {
-            // Wait for A to have at least connected so the (A, B) ordering
-            // is pinned: A runs through its abort path, then the accept
-            // loop picks up B.
-            let deadline = std::time::Instant::now() + Duration::from_secs(8);
-            while !server_up_b.load(Ordering::Acquire) {
-                if std::time::Instant::now() >= deadline {
-                    break;
-                }
-                std::thread::sleep(Duration::from_millis(20));
-            }
-            // Grace window for A to drive its frame through the server
-            // before B opens its socket. Without this, A and B may race
-            // for the first accept slot and the assertion shape (A=1007,
-            // B=echo+1000) becomes ambiguous.
-            std::thread::sleep(Duration::from_millis(200));
-            let mut stream = match connect_ws(port) {
-                Some(s) => s,
-                None => return None,
-            };
+        // Runs after A has fully closed, so the server's accept loop
+        // is guaranteed to have moved past A's slot.
+        let response_b = (|| -> Option<Vec<u8>> {
+            let mut stream = connect_ws(port)?;
             stream
                 .write_all(&masked_frame(0x1, b"hello"))
                 .expect("write valid text frame");
             Some(read_ws_bytes(&mut stream))
-        });
-
-        let response_a = handle_a.join().expect("worker A panicked");
-        let response_b = handle_b.join().expect("worker B panicked");
+        })();
 
         let _ = child.kill();
         let _ = child.wait();

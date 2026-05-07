@@ -28,7 +28,7 @@ mod common;
 
 use std::fs;
 use std::io::{Read, Write};
-use std::net::{TcpListener, TcpStream};
+use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -62,11 +62,6 @@ fn unique_path(prefix: &str, label: &str, ext: &str) -> PathBuf {
         nanos,
         ext
     ))
-}
-
-fn free_loopback_port() -> u16 {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("bind free port");
-    listener.local_addr().expect("local addr").port()
 }
 
 fn setup_net_project(source: &str, label: &str) -> PathBuf {
@@ -264,7 +259,7 @@ fn e32b_080_grammar_seven_cases_three_backend() {
     ];
 
     for backend in backends {
-        let port = free_loopback_port();
+        let port = common::find_free_loopback_port();
         let dir = setup_net_project(&handler_source(port), backend);
         let (mut child, artifact) = spawn_backend(&dir, backend, backend);
 

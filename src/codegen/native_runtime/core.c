@@ -3989,7 +3989,12 @@ taida_ptr taida_str_byte_at_lax(const char* s, taida_val idx, taida_val default_
 }
 taida_val taida_str_byte_slice(const char* s, taida_val start, taida_val end) {
     if (!s) { char *r = taida_str_alloc(0); return (taida_val)r; }
-    taida_val len = (taida_val)strlen(s);
+    // E32B-082 follow-up (Codex REJECT): heap-header byte length so a
+    // slice that crosses an embedded NUL keeps all bytes (parity with
+    // interp/JS). Falls back to strlen for raw C-string callers.
+    size_t byte_len = 0;
+    if (!taida_str_byte_len(s, &byte_len)) byte_len = strlen(s);
+    taida_val len = (taida_val)byte_len;
     if (start < 0) start = 0;
     if (start > len) start = len;
     if (end < 0) end = 0;
@@ -4002,6 +4007,13 @@ taida_val taida_str_byte_slice(const char* s, taida_val start, taida_val end) {
 }
 taida_val taida_str_byte_length(const char* s) {
     if (!s) return 0;
+    // E32B-082 follow-up (Codex REJECT): prefer the heap-header byte length
+    // so embedded NUL bytes are counted (parity with interp/JS). Falls back
+    // to strlen for raw C-string callers without a header.
+    size_t out_len = 0;
+    if (taida_str_byte_len(s, &out_len)) {
+        return (taida_val)out_len;
+    }
     return (taida_val)strlen(s);
 }
 // ── C26B-018 (C) StringRepeatJoin ───────────────────────────────

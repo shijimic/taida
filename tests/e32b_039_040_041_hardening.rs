@@ -594,6 +594,84 @@ fn e32b_041_scatter_path_uses_grammar_helpers() {
     );
 }
 
+// ── E32B-082 (static-string NUL preservation) ─────────────────────────
+
+#[test]
+fn e32b_082_native_runtime_uses_heap_header_byte_length_for_body() {
+    // E32B-082 follow-up (Codex REJECT): the eager `httpEncodeResponse`
+    // and the `httpServe` scatter path used to size Str bodies via
+    // `taida_read_cstr_len_safe` (a NUL scan), so an embedded-NUL body
+    // would silently truncate before reaching the wire. The fix routes
+    // both paths through `taida_str_byte_len`, which prefers the
+    // heap-style header length and falls back to NUL scan only for
+    // raw C-string callers (FFI). This test pins the source-level
+    // invariant so a future revert is caught by the regression suite.
+
+    // Eager path callsite (within the `body` Str branch).
+    assert!(
+        NATIVE_NET.contains("if (taida_str_byte_len((const char*)body_ptr, &slen)) {")
+            && NATIVE_NET.contains("\"httpEncodeResponse: body exceeds 10485760 bytes (got %zu)\""),
+        "eager httpEncodeResponse Str-body sizer must use taida_str_byte_len + post-bound check"
+    );
+
+    // Scatter path callsite (httpServe).
+    let scatter_body = NATIVE_NET
+        .split("static int taida_net_send_response_scatter")
+        .nth(1)
+        .expect("scatter function must exist");
+    let scatter_body_end = scatter_body
+        .find("\n}\n")
+        .expect("scatter function must terminate");
+    let scatter_body = &scatter_body[..scatter_body_end];
+    assert!(
+        scatter_body.contains("if (taida_str_byte_len((const char*)body_ptr, &slen)) {"),
+        "scatter Str-body sizer must use taida_str_byte_len"
+    );
+    let raw_cstr_in_scatter_body = scatter_body
+        .matches("taida_read_cstr_len_safe((const char*)body_ptr")
+        .count();
+    assert_eq!(
+        raw_cstr_in_scatter_body, 0,
+        "scatter Str-body sizer must not call taida_read_cstr_len_safe (it truncates at NUL)"
+    );
+}
+
+#[test]
+fn e32b_082_native_runtime_str_byte_length_uses_heap_header() {
+    // `taida_str_byte_length` (the public C entrypoint exported via
+    // header) and `taida_str_byte_slice` (used by the polymorphic
+    // slice mold) must reach for the heap-header byte length first
+    // so embedded-NUL static strings are not truncated.
+    let core: &str = include_str!("../src/codegen/native_runtime/core.c");
+    let length_body = core
+        .split("taida_val taida_str_byte_length(const char* s) {")
+        .nth(1)
+        .expect("taida_str_byte_length body must exist");
+    let length_body_end = length_body
+        .find("\n}")
+        .expect("taida_str_byte_length must terminate");
+    let length_body = &length_body[..length_body_end];
+    assert!(
+        length_body.contains("taida_str_byte_len(s, &out_len)"),
+        "taida_str_byte_length must prefer the heap-header byte length"
+    );
+
+    let slice_body = core
+        .split("taida_val taida_str_byte_slice(const char* s, taida_val start, taida_val end) {")
+        .nth(1)
+        .expect("taida_str_byte_slice body must exist");
+    let slice_body_end = slice_body
+        .find("\n}")
+        .expect("taida_str_byte_slice must terminate");
+    let slice_body = &slice_body[..slice_body_end];
+    assert!(
+        slice_body.contains("taida_str_byte_len(s, &byte_len)"),
+        "taida_str_byte_slice must prefer the heap-header byte length"
+    );
+}
+
+// ── E32B-041 ────────────────────────────────────────────────────
+
 #[test]
 fn e32b_041_seven_bypass_cases_pinned() {
     // Each of the seven cases the reviewer demonstrated must show up

@@ -609,8 +609,20 @@ taida_val taida_net_http_encode_response(taida_val response) {
         body_len = (size_t)blen;
         body_is_bytes = 1;
     } else {
+        // E32B-082 follow-up (Codex REJECT): use the heap-style byte
+        // length so an embedded NUL in a Str body survives onto the
+        // wire instead of being silently truncated by the NUL scan.
+        // Cap the size after the lookup so static-string literals
+        // that legitimately carry the full 10 MiB payload still
+        // round-trip identically to before.
         size_t slen = 0;
-        if (taida_read_cstr_len_safe((const char*)body_ptr, 10485760, &slen)) {
+        if (taida_str_byte_len((const char*)body_ptr, &slen)) {
+            if (slen > 10485760) {
+                char err_msg[128];
+                snprintf(err_msg, sizeof(err_msg),
+                    "httpEncodeResponse: body exceeds 10485760 bytes (got %zu)", slen);
+                return taida_net_result_fail("EncodeError", err_msg);
+            }
             body_data = (unsigned char*)body_ptr;
             body_len = slen;
         } else {
@@ -1391,8 +1403,14 @@ static int taida_net_send_response_scatter(int client_fd, taida_val response) {
         body_len = (size_t)blen;
         body_is_bytes = 1;
     } else {
+        // E32B-082 follow-up (Codex REJECT): heap-style byte length so
+        // an embedded NUL in a Str body survives the writev iov_len
+        // (which would otherwise silently truncate at the first NUL).
         size_t slen = 0;
-        if (taida_read_cstr_len_safe((const char*)body_ptr, 10485760, &slen)) {
+        if (taida_str_byte_len((const char*)body_ptr, &slen)) {
+            if (slen > 10485760) {
+                return -1;
+            }
             body_data = (const unsigned char*)body_ptr;
             body_len = slen;
         } else {
