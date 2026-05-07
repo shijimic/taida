@@ -1192,9 +1192,7 @@ pub fn write_lockfile_with_addons(
     // Never silently overwrite legacy or malformed lockfiles. v1/fnv1a must go
     // through `taida ingot migrate-lockfile` so the user sees the trust-boundary
     // change explicitly.
-    if let Err(e) = Lockfile::read(&lock_path) {
-        return Err(e);
-    }
+    Lockfile::read(&lock_path)?;
 
     // Attach addon info
     for (pkg_name, addon) in addons {

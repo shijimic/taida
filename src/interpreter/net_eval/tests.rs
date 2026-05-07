@@ -3376,7 +3376,7 @@ fn test_e32b051_chunk_size_line_exceeds_byte_cap_eager_compact() {
     // `1;` followed by 1 MiB + 1 of `a=b;` padding so the chunk-size line
     // strictly exceeds the cap.
     let mut chunked_body: Vec<u8> = b"1;".to_vec();
-    chunked_body.extend(std::iter::repeat(b'a').take(1_048_576));
+    chunked_body.extend(std::iter::repeat_n(b'a', 1_048_576));
     chunked_body.extend_from_slice(b"\r\nx\r\n0\r\n\r\n");
 
     let mut buf = Vec::new();
@@ -3395,7 +3395,7 @@ fn test_e32b051_chunk_size_line_exceeds_byte_cap_eager_compact() {
 fn test_e32b051_chunk_size_line_exceeds_byte_cap_body_complete() {
     let head = b"GET / HTTP/1.1\r\n\r\n";
     let mut chunked_body: Vec<u8> = b"1;".to_vec();
-    chunked_body.extend(std::iter::repeat(b'a').take(1_048_576));
+    chunked_body.extend(std::iter::repeat_n(b'a', 1_048_576));
     chunked_body.extend_from_slice(b"\r\nx\r\n0\r\n\r\n");
 
     let mut buf = Vec::new();
@@ -3470,7 +3470,7 @@ fn test_e32b052_trailer_count_flood_body_complete() {
 fn test_e32b052_trailer_bytes_flood_body_complete() {
     let head = b"GET / HTTP/1.1\r\n\r\n";
     let mut chunked_body: Vec<u8> = b"5\r\nhello\r\n0\r\n".to_vec();
-    let padding: String = std::iter::repeat('a').take(500).collect();
+    let padding: String = "a".repeat(500);
     for i in 0..32 {
         let line = format!("X-T-{}: {}\r\n", i, padding);
         chunked_body.extend_from_slice(line.as_bytes());

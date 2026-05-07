@@ -202,7 +202,7 @@ fn e32b_079_native_runtime_has_no_remaining_handler_exit() {
         if c == '/' && matches!(chars.peek(), Some(&'*')) {
             chars.next(); // consume '*'
             let mut prev = ' ';
-            while let Some(cc) = chars.next() {
+            for cc in chars.by_ref() {
                 if prev == '*' && cc == '/' {
                     break;
                 }

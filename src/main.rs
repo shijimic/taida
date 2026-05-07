@@ -1728,7 +1728,7 @@ struct DescriptorBuildError {
     code: &'static str,
     message: String,
     suggestion: Option<String>,
-    context: BuildDiagContext,
+    context: Box<BuildDiagContext>,
     exit_code: i32,
 }
 
@@ -1738,7 +1738,7 @@ impl DescriptorBuildError {
             code,
             message: message.into(),
             suggestion: None,
-            context: BuildDiagContext::default(),
+            context: Box::default(),
             exit_code: 1,
         }
     }
@@ -1749,7 +1749,7 @@ impl DescriptorBuildError {
     }
 
     fn context(mut self, context: BuildDiagContext) -> Self {
-        self.context = context;
+        self.context = Box::new(context);
         self
     }
 }
@@ -1975,36 +1975,33 @@ impl DescriptorBuildLock {
                 }
                 Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
                     let lock_pid = descriptor_lock_pid(&path);
-                    match lock_pid.and_then(descriptor_pid_alive) {
-                        Some(false) => {
-                            let _ = append_descriptor_cleanup_log(
-                                build_root,
-                                &format!(
-                                    "remove build-lock={} reason=dead-pid pid={}",
-                                    path.file_name()
-                                        .and_then(|name| name.to_str())
-                                        .unwrap_or(".lock"),
+                    if let Some(false) = lock_pid.and_then(descriptor_pid_alive) {
+                        let _ = append_descriptor_cleanup_log(
+                            build_root,
+                            &format!(
+                                "remove build-lock={} reason=dead-pid pid={}",
+                                path.file_name()
+                                    .and_then(|name| name.to_str())
+                                    .unwrap_or(".lock"),
+                                lock_pid
+                                    .map(|pid| pid.to_string())
+                                    .unwrap_or_else(|| "-".to_string())
+                            ),
+                        );
+                        fs::remove_file(&path).map_err(|remove_err| {
+                            DescriptorBuildError::new(
+                                "E1923",
+                                format!(
+                                    "Cannot remove stale descriptor build lock '{}' (pid={}): {}",
+                                    path.display(),
                                     lock_pid
                                         .map(|pid| pid.to_string())
-                                        .unwrap_or_else(|| "-".to_string())
+                                        .unwrap_or_else(|| "-".to_string()),
+                                    remove_err
                                 ),
-                            );
-                            fs::remove_file(&path).map_err(|remove_err| {
-                                DescriptorBuildError::new(
-                                    "E1923",
-                                    format!(
-                                        "Cannot remove stale descriptor build lock '{}' (pid={}): {}",
-                                        path.display(),
-                                        lock_pid
-                                            .map(|pid| pid.to_string())
-                                            .unwrap_or_else(|| "-".to_string()),
-                                        remove_err
-                                    ),
-                                )
-                            })?;
-                            continue;
-                        }
-                        Some(true) | None => {}
+                            )
+                        })?;
+                        continue;
                     }
                     let owner = lock_pid
                         .map(|pid| pid.to_string())
@@ -2171,7 +2168,7 @@ fn descriptor_pid_alive(pid: u64) -> Option<bool> {
 
     #[cfg(target_os = "linux")]
     {
-        return Some(Path::new("/proc").join(pid.to_string()).exists());
+        Some(Path::new("/proc").join(pid.to_string()).exists())
     }
 
     // POSIX (macOS / *BSD): `kill(pid, 0)` performs a permission check
@@ -2375,7 +2372,7 @@ fn cleanup_stale_descriptor_staging(build_root: &Path) -> Result<(), DescriptorB
         // `descriptor_pid_alive` returns `None` when the host has no probe;
         // treat that as "unknown, not dead" so cleanup waits on TTL alone.
         let dead_pid = pid
-            .and_then(|pid| descriptor_pid_alive(pid))
+            .and_then(descriptor_pid_alive)
             .map(|alive| !alive)
             .unwrap_or(false);
         if !expired && !dead_pid {
@@ -3350,29 +3347,29 @@ pub(crate) fn validate_target_closure_modules(
             }));
         }
         for stmt in &program.statements {
-            if let Statement::Import(import) = stmt {
-                if let Some(api) = target_incompatible_import(unit.target, import) {
-                    return Err(DescriptorBuildError::new(
-                        "E1941",
-                        format!(
-                            "BuildUnit '{}' target '{}' cannot include target-incompatible API '{}'.",
-                            unit.name,
-                            unit.target.as_str(),
-                            api
-                        ),
-                    )
-                    .context(BuildDiagContext {
-                        unit: Some(unit.name.clone()),
-                        target: Some(unit.target.as_str().to_string()),
-                        edge_kind: Some("NormalImport"),
-                        dependency_path: vec![
-                            entry_path.display().to_string(),
-                            module.display().to_string(),
-                            api,
-                        ],
-                        ..BuildDiagContext::default()
-                    }));
-                }
+            if let Statement::Import(import) = stmt
+                && let Some(api) = target_incompatible_import(unit.target, import)
+            {
+                return Err(DescriptorBuildError::new(
+                    "E1941",
+                    format!(
+                        "BuildUnit '{}' target '{}' cannot include target-incompatible API '{}'.",
+                        unit.name,
+                        unit.target.as_str(),
+                        api
+                    ),
+                )
+                .context(BuildDiagContext {
+                    unit: Some(unit.name.clone()),
+                    target: Some(unit.target.as_str().to_string()),
+                    edge_kind: Some("NormalImport"),
+                    dependency_path: vec![
+                        entry_path.display().to_string(),
+                        module.display().to_string(),
+                        api,
+                    ],
+                    ..BuildDiagContext::default()
+                }));
             }
         }
     }
@@ -7876,11 +7873,11 @@ fn run_install(args: &[String]) {
         // `Lockfile::read` -> `parse` ->
         // `validate_schema`, so it remains rejected regardless of frozen.
         if frozen {
-            if let Some(lockfile) = &existing_lockfile {
-                if let Err(e) = lockfile.validate_resolved_bindings(&result.packages) {
-                    eprintln!("{}", e);
-                    std::process::exit(1);
-                }
+            if let Some(lockfile) = &existing_lockfile
+                && let Err(e) = lockfile.validate_resolved_bindings(&result.packages)
+            {
+                eprintln!("{}", e);
+                std::process::exit(1);
             }
             if !existing_lockfile
                 .as_ref()
@@ -8940,9 +8937,10 @@ mod tests {
             before_hooks: Vec::new(),
         };
 
-        let err = validate_target_closure_modules(&unit, &entry, &[bad.clone()]).expect_err(
-            "TOCTOU defence must reject any closure module that fails to parse on re-read",
-        );
+        let err = validate_target_closure_modules(&unit, &entry, std::slice::from_ref(&bad))
+            .expect_err(
+                "TOCTOU defence must reject any closure module that fails to parse on re-read",
+            );
         assert_eq!(err.code, "E1941");
         assert!(
             err.message.contains("frontend-a") && err.message.contains("bad.td"),

@@ -5,7 +5,8 @@
 
 r1 <= execShellInteractive("exit 0")
 stdout("r1.hasValue=" + r1.hasValue.toString())
-stdout("r1.code=" + r1.__value.code.toString())
+r1 ]=> r1V
+stdout("r1.code=" + r1V.code.toString())
 
 r2 <= execShellInteractive("exit 3")
 stdout("r2.hasValue=" + r2.hasValue.toString())

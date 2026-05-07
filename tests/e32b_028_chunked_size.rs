@@ -829,7 +829,7 @@ fn e32b_052_trailer_bytes_flood_rejected_three_backend() {
 
     // Each trailer line is ~512 bytes (`X-T-NN: <500 chars>`); 32 lines
     // exceeds the 8 KiB shared cap while staying under the 64-count cap.
-    let padding: String = std::iter::repeat('a').take(500).collect();
+    let padding: String = std::iter::repeat_n('a', 500).collect();
     let mut trailers = String::new();
     for i in 0..32 {
         trailers.push_str(&format!("X-T-{}: {}\r\n", i, padding));

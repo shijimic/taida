@@ -138,9 +138,9 @@ fn e32b_026_at_since_values_use_taida_versioning() {
 
             // Extract the value after `@Since:`.
             let after = line
-                .splitn(2, "@Since:")
-                .nth(1)
-                .or_else(|| line.splitn(2, "@ Since:").nth(1))
+                .split_once("@Since:")
+                .map(|x| x.1)
+                .or_else(|| line.split_once("@ Since:").map(|x| x.1))
                 .unwrap_or("")
                 .trim();
             // Strip optional surrounding back-ticks / commas / spaces.

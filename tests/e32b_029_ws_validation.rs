@@ -401,7 +401,7 @@ fn e32b_029_websocket_validation_three_backend() {
     let ping_126 = vec![b'p'; 126];
     let pong_126 = vec![b'q'; 126];
     let mut close_126 = vec![0x03, 0xE8];
-    close_126.extend(std::iter::repeat(b'c').take(124));
+    close_126.extend(std::iter::repeat_n(b'c', 124));
 
     for backend in backends {
         run_reject_case(backend, "ping_126", 0x9, &ping_126, 1002);

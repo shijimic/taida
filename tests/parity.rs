@@ -1288,7 +1288,7 @@ fn run_three_way_parity_fixture(stem: &str) {
             if !native_expected_rejects.contains(&stem) {
                 panic!("{}: native compile/run failed\n  {}", stem, err);
             }
-            let expected = native_reject_expected_substring(&stem);
+            let expected = native_reject_expected_substring(stem);
             assert!(
                 err.contains(expected),
                 "{}: expected reject substring `{}`, got: {}",
