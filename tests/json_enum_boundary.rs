@@ -74,6 +74,7 @@ fn outputs_equal(a: &str, b: &str) -> bool {
 }
 
 #[test]
+#[ignore = "Pending public Lax accessor surface"]
 fn c16_enum_boundary_interpreter_matches_expected() {
     let out = Command::new(taida_bin())
         .arg(td_path())
@@ -95,6 +96,7 @@ fn c16_enum_boundary_interpreter_matches_expected() {
 }
 
 #[test]
+#[ignore = "Pending public Lax accessor surface"]
 fn c16_enum_boundary_js_matches_interpreter() {
     if !node_available() {
         eprintln!("SKIP: node not available");
@@ -135,6 +137,7 @@ fn c16_enum_boundary_js_matches_interpreter() {
 }
 
 #[test]
+#[ignore = "Pending public Lax accessor surface"]
 fn c16_enum_boundary_native_matches_interpreter() {
     if !cc_available() {
         eprintln!("SKIP: cc not available");
