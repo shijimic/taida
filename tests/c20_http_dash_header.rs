@@ -218,8 +218,9 @@ fn run_list_of_record_backend(backend: &str) {
   body <= "ping",
 )
 resp ]=> out
-stdout(out.__value.status.toString())
-stdout(out.__value.body)
+out ]=> outV
+stdout(outV.status.toString())
+stdout(outV.body)
 "#
     );
 
@@ -286,7 +287,8 @@ fn run_legacy_buchi_pack_backend(backend: &str) {
   body <= "ping",
 )
 resp ]=> out
-stdout(out.__value.status.toString())
+out ]=> outV
+stdout(outV.status.toString())
 "#
     );
 

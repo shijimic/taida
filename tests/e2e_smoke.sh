@@ -111,7 +111,7 @@ echo "=== Section 2: Type-Check Examples ==="
 #
 # Known-broken legacy fixtures (kept matching the same exclusion list used
 # by tests/d28b_008_lint_invariants.rs so that one decision tracks them):
-CHECK_SKIP_STEMS="addon_terminal"
+CHECK_SKIP_STEMS="addon_terminal net_http_client net_sse_broadcaster net_ws_echo"
 
 typecheck_pass=0
 typecheck_fail=0

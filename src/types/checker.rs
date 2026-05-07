@@ -3404,6 +3404,11 @@ defaulted fields must be provided via `()`",
         true
     }
 
+    // The two complex `if` guards under each `BinOp` arm cover several
+    // distinct fall-through cases; collapsing them into match-arm guards
+    // pushes long boolean expressions next to the pattern and hurts
+    // readability without changing semantics.
+    #[allow(clippy::collapsible_match)]
     fn emit_comparison_mismatch_if_needed(
         &mut self,
         left_type: &Type,
