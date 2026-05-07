@@ -557,6 +557,14 @@ function __taida_net_encodeResponseScatter(response) {
   return { head: Buffer.from(head, 'latin1'), body: bodyBytes };
 }
 
+// E32B-051 / E32B-052: per-line and trailer-block caps shared with
+// Interpreter (helpers.rs::MAX_CHUNK_LINE_BYTES / MAX_TRAILER_COUNT /
+// MAX_TRAILER_BYTES) and Native (net_h1_h2.c TAIDA_NET_MAX_*). Documented in
+// docs/reference/net_api.md §5.4.
+const __TAIDA_NET_MAX_CHUNK_LINE_BYTES = 1048576;
+const __TAIDA_NET_MAX_TRAILER_COUNT = 64;
+const __TAIDA_NET_MAX_TRAILER_BYTES = 8192;
+
 // NET2-4b: Chunked Transfer Encoding in-place compaction (JS)
 // Mirrors Interpreter's chunked_in_place_compact algorithm.
 // buf is a Buffer; bodyOffset is where chunk framing starts.
@@ -566,8 +574,18 @@ function __taida_net_chunkedInPlaceCompact(buf, bodyOffset) {
   let readPos = 0;
   let writePos = 0;
 
+  // Cap per-line CRLF scan at __TAIDA_NET_MAX_CHUNK_LINE_BYTES bytes (parity
+  // with Native `taida_net_find_crlf(_, cap)` and Interpreter
+  // `find_crlf_capped(_, cap)`). Both Rust and C scan exactly `cap` total
+  // bytes (i+1 < cap), so the JS scan must use `start + cap - 1` as the
+  // exclusive upper bound to match. Off-by-one between backends would let
+  // attackers tune chunk-line length to exploit the most-permissive backend.
   function findCRLF(start) {
-    for (let i = start; i < dataLen - 1; i++) {
+    const end = Math.min(
+      dataLen - 1,
+      start + __TAIDA_NET_MAX_CHUNK_LINE_BYTES - 1
+    );
+    for (let i = start; i < end; i++) {
       if (buf[bodyOffset + i] === 13 && buf[bodyOffset + i + 1] === 10) return i;
     }
     return -1;
@@ -603,16 +621,24 @@ function __taida_net_chunkedInPlaceCompact(buf, bodyOffset) {
 
     // Terminator chunk (size == 0)
     if (chunkSize === 0) {
-      // Skip optional trailer headers until final CRLF
+      // Skip optional trailer headers until final CRLF, bounded by line
+      // count + total bytes (E32B-052) and per-line length (E32B-051).
+      let trailerCount = 0;
+      let trailerBytes = 0;
       for (;;) {
         if (readPos + 2 > dataLen) return null; // malformed: missing final CRLF
         if (buf[bodyOffset + readPos] === 13 && buf[bodyOffset + readPos + 1] === 10) {
           readPos += 2;
           return { bodyLen: writePos, wireConsumed: readPos };
         }
+        if (trailerCount >= __TAIDA_NET_MAX_TRAILER_COUNT) return null; // too many trailers
         // Skip trailer line
         const trlf = findCRLF(readPos);
         if (trlf < 0) return null; // malformed: incomplete trailer
+        const lineLen = trlf - readPos;
+        trailerBytes += lineLen;
+        if (trailerBytes > __TAIDA_NET_MAX_TRAILER_BYTES) return null; // trailer block too large
+        trailerCount++;
         readPos = trlf + 2;
       }
     }
@@ -643,12 +669,23 @@ function __taida_net_chunkedBodyComplete(buf, bodyOffset) {
   for (;;) {
     if (readPos >= dataLen) return -1; // need more data
 
-    // Find CRLF after chunk-size
+    // Find CRLF after chunk-size, capped at MAX_CHUNK_LINE_BYTES so a chunk
+    // -ext flood is treated as malformed rather than "incomplete" (E32B-051).
+    // Off-by-one parity with Rust/C: we scan `cap` bytes total, i.e. up to
+    // absolute index `readPos + cap - 1` inclusive, hence `i < readPos + cap - 1`.
     let crlfPos = -1;
-    for (let i = readPos; i < dataLen - 1; i++) {
+    const scanWindow = Math.min(
+      dataLen - 1,
+      readPos + __TAIDA_NET_MAX_CHUNK_LINE_BYTES - 1
+    );
+    for (let i = readPos; i < scanWindow; i++) {
       if (buf[bodyOffset + i] === 13 && buf[bodyOffset + i + 1] === 10) { crlfPos = i; break; }
     }
-    if (crlfPos < 0) return -1; // need more data
+    if (crlfPos < 0) {
+      const remaining = dataLen - readPos;
+      if (remaining >= __TAIDA_NET_MAX_CHUNK_LINE_BYTES) return -2; // malformed
+      return -1; // need more data
+    }
 
     // Parse chunk-size hex
     let hexEnd = crlfPos;
@@ -672,17 +709,33 @@ function __taida_net_chunkedBodyComplete(buf, bodyOffset) {
     readPos = crlfPos + 2;
 
     if (chunkSize === 0) {
-      // Skip trailers
+      // Skip trailers, bounded by line count + total bytes (E32B-052) and
+      // per-line length (E32B-051). Hitting a cap is treated as malformed.
+      let trailerCount = 0;
+      let trailerBytes = 0;
       for (;;) {
         if (readPos + 2 > dataLen) return -1;
         if (buf[bodyOffset + readPos] === 13 && buf[bodyOffset + readPos + 1] === 10) {
           return readPos + 2; // complete
         }
+        if (trailerCount >= __TAIDA_NET_MAX_TRAILER_COUNT) return -2;
         let trlf = -1;
-        for (let i = readPos; i < dataLen - 1; i++) {
+        const tWindow = Math.min(
+          dataLen - 1,
+          readPos + __TAIDA_NET_MAX_CHUNK_LINE_BYTES - 1
+        );
+        for (let i = readPos; i < tWindow; i++) {
           if (buf[bodyOffset + i] === 13 && buf[bodyOffset + i + 1] === 10) { trlf = i; break; }
         }
-        if (trlf < 0) return -1;
+        if (trlf < 0) {
+          const tRemaining = dataLen - readPos;
+          if (tRemaining >= __TAIDA_NET_MAX_CHUNK_LINE_BYTES) return -2;
+          return -1;
+        }
+        const lineLen = trlf - readPos;
+        trailerBytes += lineLen;
+        if (trailerBytes > __TAIDA_NET_MAX_TRAILER_BYTES) return -2;
+        trailerCount++;
         readPos = trlf + 2;
       }
     }
@@ -2450,14 +2503,22 @@ function __taida_net_readBodyBytes(writer, count) {
   return Buffer.concat(parts);
 }
 
-// Read a line (up to LF) from leftover buffer, then socket.
-// Returns string (synchronous).
+// Read a line (up to LF) from leftover buffer, then socket. Bounded by
+// __TAIDA_NET_MAX_CHUNK_LINE_BYTES so a streaming chunk-ext flood is treated
+// as malformed framing (parity with eager body_complete cap).
+// Returns string (synchronous). Throws __NativeError when the cap is hit
+// before LF (smuggling vector).
 function __taida_net_readLineFromBody(writer) {
   const bs = writer._bodyState;
   const lineParts = [];
 
   // First drain from leftover.
   while (bs.leftoverPos < bs.leftover.length) {
+    if (lineParts.length >= __TAIDA_NET_MAX_CHUNK_LINE_BYTES) {
+      throw new __NativeError(
+        'chunked body error: chunk-size line exceeds byte cap'
+      );
+    }
     const b = bs.leftover[bs.leftoverPos];
     bs.leftoverPos++;
     lineParts.push(b);
@@ -2468,6 +2529,11 @@ function __taida_net_readLineFromBody(writer) {
 
   // Then read from socket byte-by-byte until LF.
   while (true) {
+    if (lineParts.length >= __TAIDA_NET_MAX_CHUNK_LINE_BYTES) {
+      throw new __NativeError(
+        'chunked body error: chunk-size line exceeds byte cap'
+      );
+    }
     const b = __taida_net_readOneByte(writer);
     if (b < 0) break; // EOF
     lineParts.push(b);
@@ -2477,16 +2543,29 @@ function __taida_net_readLineFromBody(writer) {
   return Buffer.from(lineParts).toString();
 }
 
-// Drain chunked trailers after terminal chunk (NB4-8 parity).
+// Drain chunked trailers after terminal chunk. Bounded by line count and
+// total trailer-byte length to keep parity with the eager-path cap policy
+// in docs/reference/net_api.md §5.4. Both caps trigger __NativeError so the
+// caller (readBodyChunk / readBodyAll) aborts the connection rather than
+// continuing on keep-alive.
 function __taida_net_drainChunkedTrailers(writer) {
-  for (let i = 0; i < 64; i++) {
+  let totalBytes = 0;
+  for (let i = 0; i < __TAIDA_NET_MAX_TRAILER_COUNT; i++) {
     const line = __taida_net_readLineFromBody(writer);
     // NB4-18: EOF (0 raw bytes) != valid empty line ("\r\n").
     if (line.length === 0) {
       throw new __NativeError('chunked body error: missing final CRLF after terminal chunk');
     }
-    if (line.trim() === '') return;
+    const trimmed = line.trim();
+    if (trimmed === '') return;
+    totalBytes += trimmed.length;
+    if (totalBytes > __TAIDA_NET_MAX_TRAILER_BYTES) {
+      throw new __NativeError('chunked body error: trailer block exceeds byte cap');
+    }
   }
+  // Smuggling guard: more than the count cap of trailer lines without
+  // observing the final empty line.
+  throw new __NativeError('chunked body error: too many trailer lines');
 }
 
 // NET4-3a: readBodyChunk(req) -> Lax[Bytes]

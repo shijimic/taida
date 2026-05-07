@@ -397,7 +397,11 @@ serverX <= BuildUnit(
     );
 }
 
-#[cfg(target_os = "linux")]
+/// E32B-049: dead-pid staging cleanup must work on every Unix host. Linux
+/// uses `/proc/<pid>`; macOS / *BSD fall back to `kill(pid, 0)` + ESRCH.
+/// Both paths are exercised by picking an obviously unallocated pid and
+/// confirming the staging dir is removed before commit.
+#[cfg(unix)]
 #[test]
 fn e32_descriptor_cleans_dead_pid_staging_before_commit() {
     let dir = project("e32_descriptor_stale_cleanup");
@@ -435,6 +439,59 @@ serverX <= BuildUnit(
     let cleanup_log = fs::read_to_string(dir.join(".taida/build/.cleanup.log")).unwrap();
     assert!(cleanup_log.contains(".tmp-stale"), "log={cleanup_log}");
     assert!(cleanup_log.contains("dead-pid"), "log={cleanup_log}");
+}
+
+/// E32B-049: a live foreign pid (the test process itself) must NOT be
+/// classified as dead just because the descriptor staging belongs to
+/// another transaction. This pins the same `kill(pid, 0)` ESRCH-vs-OK
+/// distinction the macOS / *BSD path relies on.
+#[cfg(unix)]
+#[test]
+fn e32_descriptor_keeps_recent_live_pid_staging() {
+    let dir = project("e32_descriptor_live_pid_kept");
+    let live = dir.join(".taida/build/.tmp-live");
+    fs::create_dir_all(&live).unwrap();
+    let live_pid = std::process::id();
+    write_file(
+        &live.join("transaction.json"),
+        &format!(
+            r#"{{"transaction_id":"live","pid":{}}}"#,
+            live_pid
+        ),
+    );
+    write_file(&dir.join("server.td"), "stdout(\"server\")\n");
+    write_file(
+        &dir.join("main.td"),
+        r#"
+>>> ./server.td => @(serverMain)
+serverX <= BuildUnit(
+  name <= "server-x",
+  target <= "js",
+  entry <= serverMain
+)
+<<< serverX
+"#,
+    );
+
+    let output = run_taida_build(&dir, &["main.td", "--unit", "server-x"]);
+    assert!(
+        output.status.success(),
+        "stdout={}\nstderr={}",
+        stdout_text(&output),
+        stderr_text(&output)
+    );
+    assert!(
+        live.exists(),
+        "staging dir owned by a live pid must survive cleanup scan"
+    );
+    let cleanup_log = dir.join(".taida/build/.cleanup.log");
+    if cleanup_log.exists() {
+        let log_text = fs::read_to_string(&cleanup_log).unwrap();
+        assert!(
+            !log_text.contains(".tmp-live"),
+            "live-pid staging must not appear in cleanup log: {log_text}"
+        );
+    }
 }
 
 #[test]
@@ -1204,5 +1261,177 @@ frontendA <= BuildUnit(
     assert!(
         combined.contains("net_helper.td") && combined.contains("parse error"),
         "diagnostic must mention the offending module and parse error context; combined={combined}"
+    );
+}
+
+// E32B-074 item 11: a forward clock skew (transaction.json mtime in the future)
+// previously made `now.duration_since(mtime)` return Err, which fell through to
+// `unwrap_or(false)` and kept the staging dir alive past the TTL. The cleanup
+// scanner now treats forward skew as expired so a wandering host clock cannot
+// keep crashed staging dirs immortal.
+#[cfg(unix)]
+#[test]
+fn e32b_074_item11_clock_skew_forces_staging_cleanup() {
+    use std::fs::OpenOptions;
+    use std::time::{Duration, SystemTime};
+
+    let dir = project("e32b_074_clock_skew_cleanup");
+    let stale = dir.join(".taida/build/.tmp-skewed");
+    fs::create_dir_all(&stale).unwrap();
+    let live_pid = std::process::id();
+    let tx_path = stale.join("transaction.json");
+    write_file(
+        &tx_path,
+        &format!(r#"{{"transaction_id":"skewed","pid":{}}}"#, live_pid),
+    );
+
+    let future = SystemTime::now() + Duration::from_secs(60 * 60 * 24 * 365 * 2);
+    let times = std::fs::FileTimes::new()
+        .set_modified(future)
+        .set_accessed(future);
+    let handle = OpenOptions::new().write(true).open(&tx_path).unwrap();
+    handle.set_times(times).unwrap();
+
+    write_file(&dir.join("server.td"), "stdout(\"server\")\n");
+    write_file(
+        &dir.join("main.td"),
+        r#"
+>>> ./server.td => @(serverMain)
+serverX <= BuildUnit(
+  name <= "server-x",
+  target <= "js",
+  entry <= serverMain
+)
+<<< serverX
+"#,
+    );
+
+    let output = run_taida_build(&dir, &["main.td", "--unit", "server-x"]);
+    assert!(
+        output.status.success(),
+        "stdout={}\nstderr={}",
+        stdout_text(&output),
+        stderr_text(&output)
+    );
+    assert!(
+        !stale.exists(),
+        "forward-skewed staging directory should be removed even with a live pid"
+    );
+    let cleanup_log = fs::read_to_string(dir.join(".taida/build/.cleanup.log")).unwrap();
+    assert!(cleanup_log.contains(".tmp-skewed"), "log={cleanup_log}");
+    assert!(cleanup_log.contains("clock-skew"), "log={cleanup_log}");
+}
+
+// E32B-057: BuildHook subprocesses inherited the parent process environment
+// wholesale, breaking hermeticity (`docs/reference/build_descriptors.md` 7.3).
+// Now hooks start from a cleared environment plus an explicit allow-list and
+// any vars declared on the BuildHook itself.
+//
+// `cfg(unix)` because the hook command relies on POSIX `${VAR:-default}` shell
+// expansion, which `cmd /C` on Windows does not parse. Windows hook env
+// hermeticity is tracked separately (see `docs/reference/build_descriptors.md`
+// 7.3 caveat).
+#[cfg(unix)]
+#[test]
+fn e32b_057_build_hook_env_hermeticity() {
+    let dir = project("e32b_057_hook_env_hermeticity");
+    fs::create_dir_all(dir.join("generated")).unwrap();
+    write_file(&dir.join("server.td"), "stdout(\"server\")\n");
+    write_file(
+        &dir.join("main.td"),
+        r#"
+>>> ./server.td => @(serverMain)
+
+probeHook <= BuildHook(
+  name <= "probe-hook",
+  command <= "printf '%s' \"${E32B_057_PARENT_LEAK:-clean}\" > generated/leak.txt && printf '%s' \"${TAIDA_HOOK_DECLARED:-missing}\" > generated/declared.txt",
+  cwd <= ".",
+  env <= @[@(name <= "TAIDA_HOOK_DECLARED", value <= "ok")]
+)
+
+frontendAssets <= AssetBundle(
+  name <= "frontend-assets",
+  root <= "generated",
+  files <= @["**/*"],
+  output <= "assets/frontend",
+  before <= @[probeHook]
+)
+
+serverX <= BuildUnit(
+  name <= "server-x",
+  target <= "js",
+  entry <= serverMain,
+  assets <= @[RouteAsset(path <= "/", asset <= frontendAssets)]
+)
+
+<<< serverX
+"#,
+    );
+
+    let mut cmd = Command::new(taida_bin());
+    cmd.current_dir(&dir)
+        .arg("build")
+        .args(["main.td", "--unit", "server-x", "--run-hooks"])
+        .env("E32B_057_PARENT_LEAK", "leaked-from-parent");
+    let output = cmd.output().expect("taida build with parent envar");
+    assert!(
+        output.status.success(),
+        "stdout={}\nstderr={}",
+        stdout_text(&output),
+        stderr_text(&output)
+    );
+
+    let leak = fs::read_to_string(dir.join(".taida/build/assets/frontend/leak.txt")).unwrap();
+    assert_eq!(
+        leak, "clean",
+        "parent envar must not leak into hook subprocess"
+    );
+
+    let declared = fs::read_to_string(dir.join(".taida/build/assets/frontend/declared.txt")).unwrap();
+    assert_eq!(
+        declared, "ok",
+        "BuildHook.env declared values must reach the hook"
+    );
+}
+
+// E32B-033: documented `BuildUnit.output` was silently dropped by the parser,
+// letting docs / artifact-map / actual output drift. The retracted-field policy
+// now hard-fails with E1902 so authors notice the unsupported override.
+#[test]
+fn e32b_033_build_unit_output_field_rejected() {
+    let dir = project("e32b_033_unit_output_rejected");
+    write_file(&dir.join("server.td"), "stdout(\"server\")\n");
+    write_file(
+        &dir.join("main.td"),
+        r#"
+>>> ./server.td => @(serverMain)
+serverX <= BuildUnit(
+  name <= "server-x",
+  target <= "js",
+  entry <= serverMain,
+  output <= "custom-name.mjs"
+)
+<<< serverX
+"#,
+    );
+
+    let output = run_taida_build(
+        &dir,
+        &["main.td", "--unit", "server-x", "--diag-format", "jsonl"],
+    );
+    assert!(
+        !output.status.success(),
+        "BuildUnit.output should be rejected by descriptor parser"
+    );
+    let stdout = stdout_text(&output);
+    let stderr = stderr_text(&output);
+    assert!(
+        stdout.contains("\"code\":\"E1902\"") || stderr.contains("[E1902]"),
+        "BuildUnit.output should report E1902, stdout={stdout} stderr={stderr}"
+    );
+    let combined = format!("{stdout}{stderr}");
+    assert!(
+        combined.contains("BuildUnit.output"),
+        "diagnostic must name BuildUnit.output explicitly; combined={combined}"
     );
 }

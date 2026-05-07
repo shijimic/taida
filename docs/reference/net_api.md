@@ -216,6 +216,22 @@ streaming path (`readBodyChunk` / `readBodyAll`) は eager path と同じ OWS re
 
 malformed な `chunk-size` を受信した場合は process 全体を terminate せず、`shutdown(fd, SHUT_RDWR)` で当該 connection のみを閉じ、httpServe の accept loop は他 client を受け付け続けます。
 
+#### Chunk-line / trailer DoS guard
+
+`chunked` framing には桁数 / OWS / overflow guard に加えて、長さ・個数のハード cap を 3 バックエンド共通で導入しています。chunk-extension flooding や trailer flooding で 1 リクエストあたりのメモリ / CPU を攻撃者が swing させる経路を塞ぎます。
+
+| Guard | 値 | 適用範囲 |
+|------|-----|---------|
+| `MAX_CHUNK_LINE_BYTES` | 1 MiB | `chunk-size` 行 (chunk-size + chunk-ext) と各 trailer 行の最大長 |
+| `MAX_TRAILER_COUNT` | 64 行 | 終端 chunk (`0\r\n`) 後に許容する trailer header 行数 |
+| `MAX_TRAILER_BYTES` | 8 KiB | 全 trailer 行の合計バイト数 (終端 CRLF を除く) |
+
+Interpreter `helpers.rs::MAX_CHUNK_LINE_BYTES` / `MAX_TRAILER_COUNT` / `MAX_TRAILER_BYTES`、Native `net_h1_h2.c::TAIDA_NET_MAX_*`、JS `net.rs::__TAIDA_NET_MAX_*` で同じ値を共有します。いずれの cap を超えた framing も `chunk-size` overflow と同じく `400 Bad Request` ＋ connection close で reject されます。eager path (1-arg handler の `readBody`) と streaming path (2-arg handler の `readBodyChunk` / `readBodyAll`) の双方で同じ三段の cap が掛かります。
+
+streaming path 側の cap 適用は、Interpreter `Self::read_line_from_body` / `Self::drain_chunked_trailers`、Native `taida_net4_read_line` (戻り値 `ssize_t`、cap 超過は `-1`) / `taida_net4_drain_chunked_trailers`、JS `__taida_net_readLineFromBody` / `__taida_net_drainChunkedTrailers` で実装されています。chunk-size 行 / chunk-data trailer 行が `MAX_CHUNK_LINE_BYTES` を超えた場合、または trailer drain で `MAX_TRAILER_COUNT` 行を超えるか累計 `MAX_TRAILER_BYTES` を超えた場合は、いずれもエラーとして報告され、上位 API は `taida_net4_abort_connection` 等で connection を close します。これにより eager / streaming のいずれを使っても `Trailer:` flooding / chunk-ext flooding に対する 3-backend parity が維持されます。
+
+`Trailer:` request header に列挙されていない trailer 名の reject (RFC 9110 §6.5 SHOULD) は本リリース時点では対象外で、`MAX_TRAILER_COUNT` / `MAX_TRAILER_BYTES` の二段で attack surface を実用上閉じています。allowlist 化は将来のセキュリティ強化で再評価します。
+
 ### 5.5 Header name / value grammar
 
 `startResponse` の headers list と `httpEncodeResponse` の headers list は、3 バックエンドすべてで以下の RFC 7230 / 9110 grammar を強制します。

@@ -3367,6 +3367,126 @@ fn test_e32b053_chunk_size_parser_accepts_leading_zeros_within_cap() {
     );
 }
 
+// E32B-051: chunk-ext flooding past the 1 MiB per-line cap must be rejected
+// as malformed (not "incomplete"). The previous implementation walked the
+// full buffer to look for CRLF and would silently DoS the eager decoder.
+#[test]
+fn test_e32b051_chunk_size_line_exceeds_byte_cap_eager_compact() {
+    let head = b"GET / HTTP/1.1\r\n\r\n";
+    // `1;` followed by 1 MiB + 1 of `a=b;` padding so the chunk-size line
+    // strictly exceeds the cap.
+    let mut chunked_body: Vec<u8> = b"1;".to_vec();
+    chunked_body.extend(std::iter::repeat(b'a').take(1_048_576));
+    chunked_body.extend_from_slice(b"\r\nx\r\n0\r\n\r\n");
+
+    let mut buf = Vec::new();
+    buf.extend_from_slice(head);
+    buf.extend_from_slice(&chunked_body);
+    let body_offset = head.len();
+
+    let result = chunked_in_place_compact(&mut buf, body_offset);
+    assert!(result.is_err(), "compact must reject oversized chunk-size line");
+}
+
+#[test]
+fn test_e32b051_chunk_size_line_exceeds_byte_cap_body_complete() {
+    let head = b"GET / HTTP/1.1\r\n\r\n";
+    let mut chunked_body: Vec<u8> = b"1;".to_vec();
+    chunked_body.extend(std::iter::repeat(b'a').take(1_048_576));
+    chunked_body.extend_from_slice(b"\r\nx\r\n0\r\n\r\n");
+
+    let mut buf = Vec::new();
+    buf.extend_from_slice(head);
+    buf.extend_from_slice(&chunked_body);
+    let body_offset = head.len();
+
+    let result = chunked_body_complete(&buf, body_offset);
+    assert!(
+        matches!(&result, Err(ChunkedBodyError::Malformed(msg)) if msg.contains("chunk-size line exceeds byte cap")),
+        "body_complete must classify oversized chunk-size line as malformed, got {:?}",
+        result
+    );
+}
+
+// E32B-052: trailer count flood past the 64-line cap must be rejected as
+// malformed by both the eager compact decoder and the readiness checker.
+#[test]
+fn test_e32b052_trailer_count_flood_eager_compact() {
+    let head = b"GET / HTTP/1.1\r\n\r\n";
+    let mut chunked_body: Vec<u8> = b"5\r\nhello\r\n0\r\n".to_vec();
+    for i in 0..200 {
+        let line = format!("X-T-{}: 1\r\n", i);
+        chunked_body.extend_from_slice(line.as_bytes());
+    }
+    chunked_body.extend_from_slice(b"\r\n");
+
+    let mut buf = Vec::new();
+    buf.extend_from_slice(head);
+    buf.extend_from_slice(&chunked_body);
+    let body_offset = head.len();
+
+    let result = chunked_in_place_compact(&mut buf, body_offset);
+    assert!(
+        result.is_err()
+            && result
+                .as_ref()
+                .err()
+                .unwrap()
+                .contains("too many trailer lines"),
+        "compact must reject 200-trailer flood with 'too many trailer lines', got {:?}",
+        result
+    );
+}
+
+#[test]
+fn test_e32b052_trailer_count_flood_body_complete() {
+    let head = b"GET / HTTP/1.1\r\n\r\n";
+    let mut chunked_body: Vec<u8> = b"5\r\nhello\r\n0\r\n".to_vec();
+    for i in 0..200 {
+        let line = format!("X-T-{}: 1\r\n", i);
+        chunked_body.extend_from_slice(line.as_bytes());
+    }
+    chunked_body.extend_from_slice(b"\r\n");
+
+    let mut buf = Vec::new();
+    buf.extend_from_slice(head);
+    buf.extend_from_slice(&chunked_body);
+    let body_offset = head.len();
+
+    let result = chunked_body_complete(&buf, body_offset);
+    assert!(
+        matches!(&result, Err(ChunkedBodyError::Malformed(msg)) if msg.contains("too many trailer lines")),
+        "body_complete must classify a 200-trailer flood as malformed, got {:?}",
+        result
+    );
+}
+
+// E32B-052: trailer byte total flood past the 8 KiB cap must be rejected as
+// malformed even when the line count is well under the 64-line cap.
+#[test]
+fn test_e32b052_trailer_bytes_flood_body_complete() {
+    let head = b"GET / HTTP/1.1\r\n\r\n";
+    let mut chunked_body: Vec<u8> = b"5\r\nhello\r\n0\r\n".to_vec();
+    let padding: String = std::iter::repeat('a').take(500).collect();
+    for i in 0..32 {
+        let line = format!("X-T-{}: {}\r\n", i, padding);
+        chunked_body.extend_from_slice(line.as_bytes());
+    }
+    chunked_body.extend_from_slice(b"\r\n");
+
+    let mut buf = Vec::new();
+    buf.extend_from_slice(head);
+    buf.extend_from_slice(&chunked_body);
+    let body_offset = head.len();
+
+    let result = chunked_body_complete(&buf, body_offset);
+    assert!(
+        matches!(&result, Err(ChunkedBodyError::Malformed(msg)) if msg.contains("trailer block exceeds byte cap")),
+        "body_complete must reject 16 KiB of trailer bytes as malformed, got {:?}",
+        result
+    );
+}
+
 #[test]
 fn test_e32b053_chunk_size_parser_rejects_leading_zero_overflowing_cap() {
     // 16 hex digits even though magnitude is 1 → exceeds 15-digit cap.

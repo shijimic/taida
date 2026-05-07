@@ -1047,6 +1047,14 @@ typedef struct {
     size_t wire_consumed;  // total bytes consumed from body_offset
 } ChunkedCompactResult;
 
+// E32B-051 / E32B-052: Per-line and trailer-block caps shared with
+// Interpreter (helpers.rs::MAX_CHUNK_LINE_BYTES / MAX_TRAILER_COUNT /
+// MAX_TRAILER_BYTES) and JS (net.rs constants below). Documented in
+// docs/reference/net_api.md §5.4.
+#define TAIDA_NET_MAX_CHUNK_LINE_BYTES 1048576UL
+#define TAIDA_NET_MAX_TRAILER_COUNT    64UL
+#define TAIDA_NET_MAX_TRAILER_BYTES    8192UL
+
 // Find the first CRLF in buf[0..len). Returns offset of '\r', or -1 if not found.
 static int64_t taida_net_find_crlf(const unsigned char *data, size_t len) {
     if (len < 2) return -1;
@@ -1067,8 +1075,19 @@ static int64_t taida_net_chunked_body_complete(
     for (;;) {
         if (rp >= data_len) return -1; // incomplete
 
-        int64_t crlf = taida_net_find_crlf(buf + body_offset + rp, data_len - rp);
-        if (crlf < 0) return -1; // incomplete
+        // E32B-051: cap chunk-size line scan at 1 MiB so a chunk-ext flood
+        // cannot force unbounded CRLF scans even before the body is fully
+        // buffered. If the cap is hit AND the buffered window is already at
+        // least the cap, treat it as malformed (no legitimate chunk-line is
+        // 1 MiB long).
+        size_t scan_window = data_len - rp;
+        size_t scan_cap = scan_window < TAIDA_NET_MAX_CHUNK_LINE_BYTES
+            ? scan_window : TAIDA_NET_MAX_CHUNK_LINE_BYTES;
+        int64_t crlf = taida_net_find_crlf(buf + body_offset + rp, scan_cap);
+        if (crlf < 0) {
+            if (scan_window >= TAIDA_NET_MAX_CHUNK_LINE_BYTES) return -2; // malformed
+            return -1; // incomplete
+        }
 
         // Parse hex chunk-size, ignoring chunk-ext after ';'
         size_t hex_end = (size_t)crlf;
@@ -1110,15 +1129,29 @@ static int64_t taida_net_chunked_body_complete(
         rp += (size_t)crlf + 2; // skip "chunk-size\r\n"
 
         if (chunk_size == 0) {
-            // Terminator chunk: skip trailers
+            // Terminator chunk: skip trailers, bounded by line count + total
+            // bytes (E32B-052) and per-line length (E32B-051).
+            size_t trailer_count = 0;
+            size_t trailer_bytes = 0;
             for (;;) {
                 if (rp + 2 > data_len) return -1; // incomplete
                 if (buf[body_offset + rp] == '\r' && buf[body_offset + rp + 1] == '\n') {
                     rp += 2;
                     return (int64_t)rp;
                 }
-                int64_t tc = taida_net_find_crlf(buf + body_offset + rp, data_len - rp);
-                if (tc < 0) return -1; // incomplete
+                if (trailer_count >= TAIDA_NET_MAX_TRAILER_COUNT) return -2; // malformed
+                size_t t_window = data_len - rp;
+                size_t t_cap = t_window < TAIDA_NET_MAX_CHUNK_LINE_BYTES
+                    ? t_window : TAIDA_NET_MAX_CHUNK_LINE_BYTES;
+                int64_t tc = taida_net_find_crlf(buf + body_offset + rp, t_cap);
+                if (tc < 0) {
+                    if (t_window >= TAIDA_NET_MAX_CHUNK_LINE_BYTES) return -2; // malformed
+                    return -1; // incomplete
+                }
+                if (trailer_bytes + (size_t)tc < trailer_bytes) return -2; // overflow
+                trailer_bytes += (size_t)tc;
+                if (trailer_bytes > TAIDA_NET_MAX_TRAILER_BYTES) return -2; // malformed
+                trailer_count++;
                 rp += (size_t)tc + 2;
             }
         }
@@ -1147,7 +1180,10 @@ static int taida_net_chunked_in_place_compact(
     size_t wp = 0; // write position relative to body_offset
 
     for (;;) {
-        int64_t crlf = taida_net_find_crlf(buf + body_offset + rp, 1048576);
+        // E32B-051: chunk-size line cap parity with body_complete (1 MiB).
+        int64_t crlf = taida_net_find_crlf(
+            buf + body_offset + rp, TAIDA_NET_MAX_CHUNK_LINE_BYTES
+        );
         if (crlf < 0) return -1;
 
         // Parse hex chunk-size, ignoring chunk-ext
@@ -1184,14 +1220,24 @@ static int taida_net_chunked_in_place_compact(
         rp += (size_t)crlf + 2; // skip "size\r\n"
 
         if (chunk_size == 0) {
-            // Skip trailers until final CRLF
+            // Skip trailers until final CRLF, bounded by count + total bytes
+            // (E32B-052) and per-line length (E32B-051).
+            size_t trailer_count = 0;
+            size_t trailer_bytes = 0;
             for (;;) {
                 if (buf[body_offset + rp] == '\r' && buf[body_offset + rp + 1] == '\n') {
                     rp += 2;
                     break;
                 }
-                int64_t tc = taida_net_find_crlf(buf + body_offset + rp, 1048576);
+                if (trailer_count >= TAIDA_NET_MAX_TRAILER_COUNT) return -1;
+                int64_t tc = taida_net_find_crlf(
+                    buf + body_offset + rp, TAIDA_NET_MAX_CHUNK_LINE_BYTES
+                );
                 if (tc < 0) return -1;
+                if (trailer_bytes + (size_t)tc < trailer_bytes) return -1; // overflow
+                trailer_bytes += (size_t)tc;
+                if (trailer_bytes > TAIDA_NET_MAX_TRAILER_BYTES) return -1;
+                trailer_count++;
                 rp += (size_t)tc + 2;
             }
             out->body_len = wp;
@@ -2561,15 +2607,22 @@ static size_t taida_net4_read_body_bytes(Net4BodyState *bs, int fd, unsigned cha
 
 // Read a line (up to LF) from leftover then fd.
 // Returns line in `out` (null-terminated). Max `cap` bytes including NUL.
-// Returns length excluding NUL.
+// Return value:
+//   > 0 — number of bytes written (excluding NUL); LF is the last byte.
+//   = 0 — EOF / no bytes read.
+//   < 0 — line exceeds `cap - 1` bytes without observing LF. Callers must
+//         treat this as malformed framing (chunk-ext flood / smuggling
+//         vector) and abort the connection. Parity with the eager-path
+//         MAX_CHUNK_LINE_BYTES contract documented in
+//         docs/reference/net_api.md §5.4.
 // NET5-4a: Routes through TLS when tl_ssl is active.
-static size_t taida_net4_read_line(Net4BodyState *bs, int fd, char *out, size_t cap) {
+static ssize_t taida_net4_read_line(Net4BodyState *bs, int fd, char *out, size_t cap) {
     size_t pos = 0;
     // From leftover.
     while (pos < cap - 1 && bs->leftover_pos < bs->leftover_len) {
         unsigned char b = bs->leftover[bs->leftover_pos++];
         out[pos++] = (char)b;
-        if (b == '\n') { out[pos] = '\0'; return pos; }
+        if (b == '\n') { out[pos] = '\0'; return (ssize_t)pos; }
     }
     // From socket byte-by-byte (TLS-aware).
     while (pos < cap - 1) {
@@ -2580,30 +2633,50 @@ static size_t taida_net4_read_line(Net4BodyState *bs, int fd, char *out, size_t 
             break;
         }
         out[pos++] = (char)b;
-        if (b == '\n') break;
+        if (b == '\n') {
+            out[pos] = '\0';
+            return (ssize_t)pos;
+        }
+    }
+    if (pos >= cap - 1) {
+        // Buffer ran out before LF: malformed framing (or attacker padding).
+        out[pos] = '\0';
+        return -1;
     }
     out[pos] = '\0';
-    return pos;
+    return (ssize_t)pos;
 }
 
-// Drain chunked trailers after terminal chunk (NB4-8 parity).
-// Returns 0 on success, -1 on protocol error (missing final CRLF).
+// Drain chunked trailers after terminal chunk.
+// Returns 0 on success, -1 on protocol error (missing final CRLF, line cap
+// exceeded, count cap exceeded, or trailer-byte cap exceeded). Callers
+// translate the negative return into abort_connection. Bounds match the
+// 3-backend contract in docs/reference/net_api.md §5.4.
 static int taida_net4_drain_chunked_trailers(Net4BodyState *bs, int fd) {
     char line[4096];
-    for (int i = 0; i < 64; i++) {
-        size_t len = taida_net4_read_line(bs, fd, line, sizeof(line));
+    size_t total_bytes = 0;
+    for (size_t i = 0; i < TAIDA_NET_MAX_TRAILER_COUNT; i++) {
+        ssize_t len = taida_net4_read_line(bs, fd, line, sizeof(line));
+        if (len < 0) {
+            // Per-line cap exceeded — malformed framing (smuggling vector).
+            return -1;
+        }
         // NB4-18: EOF (0 raw bytes) != valid empty line ("\r\n").
         if (len == 0) {
-            fprintf(stderr, "chunked body error: missing final CRLF after terminal chunk\n");
             return -1;
         }
         // Trim whitespace and check empty.
-        size_t start = 0, end = len;
+        size_t start = 0, end = (size_t)len;
         while (start < end && (line[start] == ' ' || line[start] == '\t' || line[start] == '\r' || line[start] == '\n')) start++;
         while (end > start && (line[end-1] == ' ' || line[end-1] == '\t' || line[end-1] == '\r' || line[end-1] == '\n')) end--;
         if (start == end) return 0; // Empty line = trailers done.
+        size_t trim_len = end - start;
+        if (total_bytes + trim_len < total_bytes) return -1; // overflow
+        total_bytes += trim_len;
+        if (total_bytes > TAIDA_NET_MAX_TRAILER_BYTES) return -1;
     }
-    return 0;
+    // More than 64 trailers without an empty line — malformed.
+    return -1;
 }
 
 // Make Lax[Bytes] empty (parity with Interpreter: hasValue=false).
@@ -2684,7 +2757,14 @@ taida_val taida_net_read_body_chunk(taida_val req) {
                     return taida_net4_make_lax_bytes_empty();
 
                 case NET4_CHUNKED_WAIT_SIZE: {
-                    size_t llen = taida_net4_read_line(bs, fd, line_buf, sizeof(line_buf));
+                    ssize_t llen_signed = taida_net4_read_line(bs, fd, line_buf, sizeof(line_buf));
+                    if (llen_signed < 0) {
+                        // Streaming chunk-size line exceeded MAX_CHUNK_LINE
+                        // _BYTES (parity with eager body_complete cap).
+                        taida_net4_abort_connection("readBodyChunk: chunk-size line exceeds byte cap");
+                        return taida_net4_make_lax_bytes_empty();
+                    }
+                    size_t llen = (size_t)llen_signed;
                     // E32B-053: only strip the trailing CRLF; OWS within
                     // chunk-size itself is rejected as malformed (parity with
                     // Interpreter/JS, RFC 7230 §4.1).
@@ -2768,7 +2848,12 @@ taida_val taida_net_read_body_chunk(taida_val req) {
                 case NET4_CHUNKED_WAIT_TRAILER: {
                     // Read CRLF after chunk data and validate.
                     {
-                        size_t tl_len = taida_net4_read_line(bs, fd, line_buf, sizeof(line_buf));
+                        ssize_t tl_len_signed = taida_net4_read_line(bs, fd, line_buf, sizeof(line_buf));
+                        if (tl_len_signed < 0) {
+                            taida_net4_abort_connection("readBodyChunk: chunk-data trailer line exceeds byte cap");
+                            return taida_net4_make_lax_bytes_empty();
+                        }
+                        size_t tl_len = (size_t)tl_len_signed;
                         if (tl_len == 0) {
                             taida_net4_abort_connection("readBodyChunk: missing CRLF after chunk data");
                             return taida_net4_make_lax_bytes_empty();
@@ -2864,7 +2949,13 @@ taida_val taida_net_read_body_all(taida_val req) {
                     goto all_done;
 
                 case NET4_CHUNKED_WAIT_SIZE: {
-                    size_t llen = taida_net4_read_line(bs, fd, line_buf, sizeof(line_buf));
+                    ssize_t llen_signed = taida_net4_read_line(bs, fd, line_buf, sizeof(line_buf));
+                    if (llen_signed < 0) {
+                        free(all_buf);
+                        taida_net4_abort_connection("readBodyAll: chunk-size line exceeds byte cap");
+                        return taida_bytes_new_filled(0, 0);
+                    }
+                    size_t llen = (size_t)llen_signed;
                     // E32B-053: only strip the trailing CRLF terminator;
                     // OWS within chunk-size itself is rejected as malformed
                     // (parity with readBodyChunk + Interpreter / JS).
@@ -2953,7 +3044,13 @@ taida_val taida_net_read_body_all(taida_val req) {
                 case NET4_CHUNKED_WAIT_TRAILER: {
                     // Read CRLF after chunk data and validate.
                     {
-                        size_t tl_len2 = taida_net4_read_line(bs, fd, line_buf, sizeof(line_buf));
+                        ssize_t tl_len2_signed = taida_net4_read_line(bs, fd, line_buf, sizeof(line_buf));
+                        if (tl_len2_signed < 0) {
+                            free(all_buf);
+                            taida_net4_abort_connection("readBodyAll: chunk-data trailer line exceeds byte cap");
+                            return taida_bytes_new_filled(0, 0);
+                        }
+                        size_t tl_len2 = (size_t)tl_len2_signed;
                         if (tl_len2 == 0) {
                             free(all_buf);
                             taida_net4_abort_connection("readBodyAll: missing CRLF after chunk data");

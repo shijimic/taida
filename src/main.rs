@@ -2031,18 +2031,49 @@ fn append_descriptor_cleanup_log(
     })
 }
 
-fn descriptor_pid_alive(pid: u64) -> bool {
+/// Returns `Some(true)` if `pid` names a live process, `Some(false)` if it
+/// is known to be dead, and `None` if the platform has no supported probe.
+/// Callers fall back to TTL-only cleanup (and a `pid_alive_check=unsupported`
+/// log entry) when this returns `None`, so a missing probe never deletes a
+/// staging dir whose owner is still active.
+fn descriptor_pid_alive(pid: u64) -> Option<bool> {
     if pid == std::process::id() as u64 {
-        return true;
+        return Some(true);
     }
+
     #[cfg(target_os = "linux")]
     {
-        Path::new("/proc").join(pid.to_string()).exists()
+        return Some(Path::new("/proc").join(pid.to_string()).exists());
     }
-    #[cfg(not(target_os = "linux"))]
+
+    // POSIX (macOS / *BSD): `kill(pid, 0)` performs a permission check
+    // without delivering a signal. rc == 0 means the target exists and is
+    // owned by us, EPERM means it exists but is owned by another user
+    // (still alive), ESRCH means no such pid. Other errnos are treated as
+    // "not alive" rather than "alive" to fail closed for cleanup.
+    #[cfg(all(unix, not(target_os = "linux")))]
+    {
+        let raw = match i32::try_from(pid) {
+            Ok(v) => v,
+            Err(_) => return Some(false),
+        };
+        let rc = unsafe { libc::kill(raw, 0) };
+        if rc == 0 {
+            return Some(true);
+        }
+        let err = std::io::Error::last_os_error();
+        if matches!(err.raw_os_error(), Some(libc::EPERM)) {
+            return Some(true);
+        }
+        return Some(false);
+    }
+
+    // Windows / other targets: no in-tree probe yet — caller should fall
+    // back to a shorter TTL and a `pid_alive_check=unsupported` log line.
+    #[cfg(not(unix))]
     {
         let _ = pid;
-        true
+        None
     }
 }
 
@@ -2057,7 +2088,30 @@ fn cleanup_stale_descriptor_staging(build_root: &Path) -> Result<(), DescriptorB
             ),
         )
     })?;
-    let ttl = std::time::Duration::from_secs(24 * 60 * 60);
+    // Probe support is platform-fixed: when the host has no working
+    // `descriptor_pid_alive` probe (e.g. Windows today), the 24 h TTL would
+    // let crashed-process staging dirs accumulate disk forever. Fall back
+    // to a 4 h TTL and stamp the cleanup log with the unsupported reason
+    // so operators have a paper trail. 4 h is chosen as the smallest TTL
+    // that still leaves long-running CI / release builds (typically under
+    // 1 h end-to-end) a comfortable margin without heartbeat support — the
+    // current scheme has no `transaction.json` mtime refresh during a
+    // build, so the TTL is the only signal that distinguishes an active
+    // owner from a crashed one. A heartbeat / mtime refresh is tracked as
+    // a separate hardening item.
+    let probe_supported =
+        descriptor_pid_alive(std::process::id() as u64).is_some();
+    let ttl = if probe_supported {
+        std::time::Duration::from_secs(24 * 60 * 60)
+    } else {
+        std::time::Duration::from_secs(4 * 60 * 60)
+    };
+    if !probe_supported {
+        let _ = append_descriptor_cleanup_log(
+            build_root,
+            "scan pid_alive_check=unsupported ttl=4h",
+        );
+    }
     let now = std::time::SystemTime::now();
     for entry in entries {
         let entry = entry.map_err(|e| {
@@ -2107,20 +2161,33 @@ fn cleanup_stale_descriptor_staging(build_root: &Path) -> Result<(), DescriptorB
         })?;
         let pid = tx.get("pid").and_then(serde_json::Value::as_u64);
         let modified = fs::metadata(&tx_path).and_then(|meta| meta.modified()).ok();
-        let expired = modified
-            .and_then(|mtime| now.duration_since(mtime).ok())
-            .map(|age| age > ttl)
+        // A forward clock skew (mtime > now) made `duration_since` return Err,
+        // which fell through to `unwrap_or(false)` and kept the staging alive
+        // even past the TTL. Treat any forward skew as expired so a host
+        // with a wandering clock cannot make staging dirs immortal.
+        let (expired, clock_skew) = match modified {
+            Some(mtime) => match now.duration_since(mtime) {
+                Ok(age) => (age > ttl, false),
+                Err(_) => (true, true),
+            },
+            None => (false, false),
+        };
+        // `descriptor_pid_alive` returns `None` when the host has no probe;
+        // treat that as "unknown, not dead" so cleanup waits on TTL alone.
+        let dead_pid = pid
+            .and_then(|pid| descriptor_pid_alive(pid))
+            .map(|alive| !alive)
             .unwrap_or(false);
-        let dead_pid = pid.map(|pid| !descriptor_pid_alive(pid)).unwrap_or(false);
         if !expired && !dead_pid {
             continue;
         }
-        let reason = if expired && dead_pid {
-            "expired-and-dead-pid"
-        } else if expired {
-            "expired"
-        } else {
-            "dead-pid"
+        let reason = match (expired, dead_pid, clock_skew) {
+            (true, true, true) => "clock-skew-and-dead-pid",
+            (true, true, false) => "expired-and-dead-pid",
+            (true, false, true) => "clock-skew",
+            (true, false, false) => "expired",
+            (false, true, _) => "dead-pid",
+            (false, false, _) => unreachable!("filtered above"),
         };
         append_descriptor_cleanup_log(
             build_root,
@@ -2242,6 +2309,26 @@ fn required_ident_field(
             format!("{} requires a '{}' field.", descriptor, field_name),
         )),
     }
+}
+
+/// Reject a field that is documented historically but no longer supported.
+/// Silent-ignore would let docs / artifact-map / actual output drift.
+fn reject_retired_field(
+    fields: &[BuchiField],
+    field_name: &str,
+    descriptor: &str,
+    rationale: &str,
+) -> Result<(), DescriptorBuildError> {
+    if field(fields, field_name).is_some() {
+        return Err(DescriptorBuildError::new(
+            "E1902",
+            format!(
+                "{}.{} is not supported in descriptor build mode. {}",
+                descriptor, field_name, rationale
+            ),
+        ));
+    }
+    Ok(())
 }
 
 fn list_expr<'a>(
@@ -2455,6 +2542,12 @@ fn parse_build_unit(
     })?;
     let entry_symbol = required_ident_field(fields, "entry", "BuildUnit")?;
     let entry_path = import_symbols.get(&entry_symbol).cloned();
+    reject_retired_field(
+        fields,
+        "output",
+        "BuildUnit",
+        "Output paths are derived from `<target>/<unit-name>/<entry-stem>` and must not be overridden.",
+    )?;
     let mut route_assets = Vec::new();
     for item in list_expr(fields, "assets")? {
         route_assets.push(parse_route_asset(item)?);
@@ -3418,6 +3511,13 @@ fn descriptor_hook_fingerprint(hook: &BuildHookDescriptor) -> String {
     format!("sha256:{}", taida::crypto::sha256_hex_bytes(&input))
 }
 
+/// Environment variables forwarded into hook subprocesses after `env_clear()`.
+/// Hooks need `PATH` to resolve the command itself, and `HOME` / `LANG` /
+/// `LC_ALL` because tooling such as `npm` and `git` refuse to run without them.
+/// Anything else must be declared in `BuildHook.env` so descriptor builds stay
+/// reproducible across machines.
+const HOOK_FORWARDED_ENV_VARS: &[&str] = &["PATH", "HOME", "LANG", "LC_ALL"];
+
 fn run_descriptor_hook(
     hook: &BuildHookDescriptor,
     project_root: &Path,
@@ -3459,6 +3559,16 @@ fn run_descriptor_hook(
     }
     let mut command = descriptor_shell_command(&hook.command);
     command.current_dir(&cwd_canon);
+    // Strip the parent environment so descriptor builds stay reproducible:
+    // anything the hook needs must come from the descriptor's own `env`
+    // declaration. `PATH`, `HOME`, `LANG`, `LC_ALL` are forwarded because
+    // shells / locale-aware tools refuse to start without them.
+    command.env_clear();
+    for forwarded in HOOK_FORWARDED_ENV_VARS {
+        if let Some(value) = std::env::var_os(forwarded) {
+            command.env(forwarded, value);
+        }
+    }
     for (name, value) in &hook.env {
         command.env(name, value);
     }

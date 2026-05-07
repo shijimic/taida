@@ -363,17 +363,31 @@ impl Interpreter {
         }
 
         match err {
-            Value::Error(e) => format!("Error[{}]: {}", e.error_type, e.message),
+            Value::Error(e) => {
+                let error_type = if e.error_type.is_empty() {
+                    "AnonymousError"
+                } else {
+                    e.error_type.as_str()
+                };
+                let message = if e.message.is_empty() {
+                    "Unknown"
+                } else {
+                    e.message.as_str()
+                };
+                format!("Error[{}]: {}", error_type, message)
+            }
             Value::BuchiPack(fields) => {
+                // `str_field` returns `Some("")` for an empty string literal;
+                // filter those so empty `type <= ""` / `message <= ""` get
+                // the same AnonymousError / Unknown treatment as missing fields.
                 let error_type = str_field(fields, "type")
                     .or_else(|| str_field(fields, "__type"))
-                    .unwrap_or("Error");
-                let message = str_field(fields, "message").unwrap_or("");
-                if message.is_empty() {
-                    format!("Error[{}]", error_type)
-                } else {
-                    format!("Error[{}]: {}", error_type, message)
-                }
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or("AnonymousError");
+                let message = str_field(fields, "message")
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or("Unknown");
+                format!("Error[{}]: {}", error_type, message)
             }
             other => other.to_display_string(),
         }

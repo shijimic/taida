@@ -789,13 +789,20 @@ impl Interpreter {
     /// until we see an empty line (just CRLF), which marks the end of
     /// the chunked message. This prevents leftover trailer bytes from
     /// corrupting the next request on a keep-alive connection.
+    ///
+    /// Bounded by `MAX_TRAILER_COUNT` lines and `MAX_TRAILER_BYTES` total
+    /// byte length so a trailer flood is treated as malformed framing and
+    /// surfaces an error to the caller (which then aborts the connection
+    /// rather than continuing on keep-alive). Parity with the eager
+    /// `chunked_body_complete` policy and the 3-backend cap contract
+    /// documented in `docs/reference/net_api.md` §5.4.
     pub(super) fn drain_chunked_trailers(
         body: &mut RequestBodyState,
         stream: &mut ConnStream,
     ) -> Result<(), RuntimeError> {
-        // Read lines until we get an empty line (just whitespace/CRLF).
-        // Safety limit: at most 64 trailer lines to prevent infinite loops.
-        for _ in 0..64 {
+        use super::helpers::{MAX_TRAILER_BYTES, MAX_TRAILER_COUNT};
+        let mut total_bytes: usize = 0;
+        for _ in 0..MAX_TRAILER_COUNT {
             let line = Self::read_line_from_body(body, stream)?;
             // NB4-18: EOF (0 raw bytes) != valid empty line ("\r\n").
             if line.is_empty() {
@@ -809,13 +816,30 @@ impl Interpreter {
                 // Final empty line found; trailers fully consumed.
                 return Ok(());
             }
-            // Non-empty line: a trailer header. Continue reading.
+            // Trailer line bytes count toward the total cap (excluding CRLF).
+            let trim_len = trimmed.len();
+            total_bytes = total_bytes.checked_add(trim_len).ok_or_else(|| RuntimeError {
+                message: "chunked body error: trailer byte total overflow".into(),
+            })?;
+            if total_bytes > MAX_TRAILER_BYTES {
+                return Err(RuntimeError {
+                    message: "chunked body error: trailer block exceeds byte cap".into(),
+                });
+            }
         }
-        // Too many trailer lines; treat as consumed (close will handle cleanup).
-        Ok(())
+        // More than MAX_TRAILER_COUNT trailers: smuggling guard. Reject
+        // (matches eager-path Malformed semantics) instead of pretending
+        // the framing finished cleanly.
+        Err(RuntimeError {
+            message: "chunked body error: too many trailer lines".into(),
+        })
     }
 
-    /// Read a line (up to CRLF) from leftover buffer then stream.
+    /// Read a line (up to CRLF) from leftover buffer then stream, bounded by
+    /// `MAX_CHUNK_LINE_BYTES` so a chunk-ext flood at the streaming path
+    /// cannot DoS the decoder. Returns `Err` when the per-line cap is hit
+    /// before a CRLF is observed; callers translate that into a connection
+    /// abort (parity with the eager `chunked_body_complete` policy).
     ///
     /// NB5-21: After leftover is exhausted, reads in 64-byte chunks from the
     /// stream instead of byte-by-byte. Excess bytes beyond the LF are pushed
@@ -832,10 +856,16 @@ impl Interpreter {
         body: &mut RequestBodyState,
         stream: &mut ConnStream,
     ) -> Result<Vec<u8>, RuntimeError> {
+        use super::helpers::MAX_CHUNK_LINE_BYTES;
         let mut line = Vec::new();
 
         // First consume from leftover.
         while body.has_leftover() {
+            if line.len() >= MAX_CHUNK_LINE_BYTES {
+                return Err(RuntimeError {
+                    message: "chunked body error: chunk-size line exceeds byte cap".into(),
+                });
+            }
             let b = body.leftover[body.leftover_pos];
             body.leftover_pos += 1;
             line.push(b);
@@ -852,6 +882,12 @@ impl Interpreter {
                 Ok(n) => {
                     // Scan the chunk for LF.
                     if let Some(lf_pos) = chunk_buf[..n].iter().position(|&b| b == b'\n') {
+                        if line.len() + lf_pos + 1 > MAX_CHUNK_LINE_BYTES {
+                            return Err(RuntimeError {
+                                message: "chunked body error: chunk-size line exceeds byte cap"
+                                    .into(),
+                            });
+                        }
                         // Include everything up to and including the LF.
                         line.extend_from_slice(&chunk_buf[..=lf_pos]);
                         // NB6-8: Push excess bytes back into leftover using in-place
@@ -866,7 +902,14 @@ impl Interpreter {
                         }
                         break;
                     } else {
-                        // No LF in this chunk — append all and continue reading.
+                        // No LF in this chunk — append all and continue reading,
+                        // unless we would cross the cap.
+                        if line.len() + n > MAX_CHUNK_LINE_BYTES {
+                            return Err(RuntimeError {
+                                message: "chunked body error: chunk-size line exceeds byte cap"
+                                    .into(),
+                            });
+                        }
                         line.extend_from_slice(&chunk_buf[..n]);
                     }
                 }

@@ -532,3 +532,317 @@ fn e32b_053_streaming_chunk_size_leading_ows_rejected_three_backend() {
         );
     }
 }
+
+/// E32B-051: chunk-ext flood. A single chunk-size line (`1;` followed by a
+/// 2 MiB padding) must be rejected as malformed by the eager path on all
+/// three backends. Without the per-line cap shared between Interpreter / JS /
+/// Native this test would force unbounded CRLF scans on the smaller backends.
+#[test]
+fn e32b_051_chunk_extension_flood_rejected_three_backend() {
+    let mut backends = vec!["interp"];
+    if node_available() {
+        backends.push("js");
+    } else {
+        eprintln!("node unavailable; skipping JS member");
+    }
+    if cc_available() {
+        backends.push("native");
+    } else {
+        eprintln!("cc unavailable; skipping native member");
+    }
+
+    // 2 MiB of `a=b;` padding inside the chunk-ext, well past the shared
+    // 1 MiB per-line cap.
+    let mut padding = String::with_capacity(2 * 1024 * 1024);
+    while padding.len() < 2 * 1024 * 1024 {
+        padding.push_str("a=b;");
+    }
+
+    for backend in backends {
+        let port = common::find_free_loopback_port();
+        let dir = setup_net_project(&eager_source(port), &format!("extflood_{}", backend));
+        let (mut child, artifact) =
+            spawn_backend(&dir, backend, &format!("extflood_{}", backend));
+
+        let mut request = Vec::with_capacity(padding.len() + 256);
+        request.extend_from_slice(
+            b"POST /data HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n1;",
+        );
+        request.extend_from_slice(padding.as_bytes());
+        request.extend_from_slice(b"\r\nx\r\n0\r\n\r\n");
+
+        let response = send_request(port, &request);
+
+        let _ = child.kill();
+        let _ = child.wait();
+        if let Some(path) = artifact {
+            let _ = fs::remove_file(path);
+        }
+        let _ = fs::remove_dir_all(&dir);
+
+        // Either an explicit HTTP 400 or a connection close with no body
+        // delivered. The handler must never observe the chunk payload.
+        let response = response
+            .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+            .unwrap_or_default();
+        assert!(
+            !response.contains("200 OK"),
+            "{} backend must not 200 a 2 MiB chunk-ext flood, got: {:?}",
+            backend,
+            &response[..response.len().min(200)]
+        );
+        assert!(
+            !response.ends_with("\r\nx") && !response.contains("\r\n\r\nx"),
+            "{} backend must not echo the chunk-data after a chunk-ext flood, got prefix: {:?}",
+            backend,
+            &response[..response.len().min(200)]
+        );
+    }
+}
+
+/// E32B-052: trailer-count flood. After the terminator chunk a body that
+/// emits 200 trailer lines (each `X-N: 1`) must be rejected on all three
+/// backends — well past the shared 64-line cap.
+#[test]
+fn e32b_052_trailer_count_flood_rejected_three_backend() {
+    let mut backends = vec!["interp"];
+    if node_available() {
+        backends.push("js");
+    } else {
+        eprintln!("node unavailable; skipping JS member");
+    }
+    if cc_available() {
+        backends.push("native");
+    } else {
+        eprintln!("cc unavailable; skipping native member");
+    }
+
+    // 200 trailer lines, each tiny (~10 bytes), so the count cap fires
+    // before the byte cap.
+    let mut trailers = String::new();
+    for i in 0..200 {
+        trailers.push_str(&format!("X-T-{}: 1\r\n", i));
+    }
+    trailers.push_str("\r\n");
+
+    for backend in backends {
+        let port = common::find_free_loopback_port();
+        let dir = setup_net_project(&eager_source(port), &format!("trcnt_{}", backend));
+        let (mut child, artifact) = spawn_backend(&dir, backend, &format!("trcnt_{}", backend));
+
+        let mut request = Vec::with_capacity(trailers.len() + 256);
+        request.extend_from_slice(
+            b"POST /data HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n5\r\nhello\r\n0\r\n",
+        );
+        request.extend_from_slice(trailers.as_bytes());
+
+        let response = send_request(port, &request);
+
+        let _ = child.kill();
+        let _ = child.wait();
+        if let Some(path) = artifact {
+            let _ = fs::remove_file(path);
+        }
+        let _ = fs::remove_dir_all(&dir);
+
+        let response = response
+            .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+            .unwrap_or_default();
+        assert!(
+            !response.contains("200 OK"),
+            "{} backend must reject a 200-trailer flood, got prefix: {:?}",
+            backend,
+            &response[..response.len().min(200)]
+        );
+    }
+}
+
+/// E32B-051 (streaming-path closure): a 2 MiB chunk-extension flood directed
+/// at a 2-arg streaming handler (`readBodyAll`) must be rejected by every
+/// backend. This guards the per-line cap at the streaming path, which is a
+/// distinct line reader from the eager `chunked_body_complete` decoder. A
+/// missing cap on the streaming path lets attackers bypass the eager
+/// guarantees just by attaching a streaming handler.
+#[test]
+fn e32b_051_streaming_chunk_extension_flood_rejected_three_backend() {
+    let mut backends = vec!["interp"];
+    if node_available() {
+        backends.push("js");
+    } else {
+        eprintln!("node unavailable; skipping JS member");
+    }
+    if cc_available() {
+        backends.push("native");
+    } else {
+        eprintln!("cc unavailable; skipping native member");
+    }
+
+    let mut padding = String::with_capacity(2 * 1024 * 1024);
+    while padding.len() < 2 * 1024 * 1024 {
+        padding.push_str("a=b;");
+    }
+
+    for backend in backends {
+        let port = common::find_free_loopback_port();
+        let dir = setup_net_project(
+            &streaming_source(port),
+            &format!("extflood_stream_{}", backend),
+        );
+        let (mut child, artifact) = spawn_backend(
+            &dir,
+            backend,
+            &format!("extflood_stream_{}", backend),
+        );
+
+        let mut request = Vec::with_capacity(padding.len() + 256);
+        request.extend_from_slice(
+            b"POST /data HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n1;",
+        );
+        request.extend_from_slice(padding.as_bytes());
+        request.extend_from_slice(b"\r\nx\r\n0\r\n\r\n");
+
+        let response = send_request(port, &request);
+
+        let _ = child.kill();
+        let _ = child.wait();
+        if let Some(path) = artifact {
+            let _ = fs::remove_file(path);
+        }
+        let _ = fs::remove_dir_all(&dir);
+
+        let response = response
+            .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+            .unwrap_or_default();
+        assert!(
+            !response.contains("200 OK"),
+            "{} streaming backend must not 200 a 2 MiB chunk-ext flood, got: {:?}",
+            backend,
+            &response[..response.len().min(200)]
+        );
+        // The streaming decoder must not let the chunk-ext padding leak into
+        // the response body (which is what readBodyAll would echo back).
+        assert!(
+            !response.contains("a=b;"),
+            "{} streaming backend must not echo chunk-ext padding, got prefix: {:?}",
+            backend,
+            &response[..response.len().min(200)]
+        );
+    }
+}
+
+/// E32B-052 (streaming-path closure): a 200-line trailer flood must be
+/// rejected on the streaming path (`readBodyAll`) as malformed framing —
+/// not silently consumed as success — on all three backends.
+#[test]
+fn e32b_052_streaming_trailer_count_flood_rejected_three_backend() {
+    let mut backends = vec!["interp"];
+    if node_available() {
+        backends.push("js");
+    } else {
+        eprintln!("node unavailable; skipping JS member");
+    }
+    if cc_available() {
+        backends.push("native");
+    } else {
+        eprintln!("cc unavailable; skipping native member");
+    }
+
+    let mut trailers = String::new();
+    for i in 0..200 {
+        trailers.push_str(&format!("X-T-{}: 1\r\n", i));
+    }
+    trailers.push_str("\r\n");
+
+    for backend in backends {
+        let port = common::find_free_loopback_port();
+        let dir = setup_net_project(
+            &streaming_source(port),
+            &format!("trcnt_stream_{}", backend),
+        );
+        let (mut child, artifact) =
+            spawn_backend(&dir, backend, &format!("trcnt_stream_{}", backend));
+
+        let mut request = Vec::with_capacity(trailers.len() + 256);
+        request.extend_from_slice(
+            b"POST /data HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n5\r\nhello\r\n0\r\n",
+        );
+        request.extend_from_slice(trailers.as_bytes());
+
+        let response = send_request(port, &request);
+
+        let _ = child.kill();
+        let _ = child.wait();
+        if let Some(path) = artifact {
+            let _ = fs::remove_file(path);
+        }
+        let _ = fs::remove_dir_all(&dir);
+
+        let response = response
+            .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+            .unwrap_or_default();
+        assert!(
+            !response.ends_with("hello"),
+            "{} streaming backend must not echo body after 200-trailer flood, got: {:?}",
+            backend,
+            &response[..response.len().min(200)]
+        );
+    }
+}
+
+/// E32B-052: trailer-bytes flood. 32 trailer lines (well under the 64-count
+/// cap), each carrying a 512-byte name+value pair, sum to ~16 KiB — twice
+/// the 8 KiB total-bytes cap. All three backends must reject the message.
+#[test]
+fn e32b_052_trailer_bytes_flood_rejected_three_backend() {
+    let mut backends = vec!["interp"];
+    if node_available() {
+        backends.push("js");
+    } else {
+        eprintln!("node unavailable; skipping JS member");
+    }
+    if cc_available() {
+        backends.push("native");
+    } else {
+        eprintln!("cc unavailable; skipping native member");
+    }
+
+    // Each trailer line is ~512 bytes (`X-T-NN: <500 chars>`); 32 lines
+    // exceeds the 8 KiB shared cap while staying under the 64-count cap.
+    let padding: String = std::iter::repeat('a').take(500).collect();
+    let mut trailers = String::new();
+    for i in 0..32 {
+        trailers.push_str(&format!("X-T-{}: {}\r\n", i, padding));
+    }
+    trailers.push_str("\r\n");
+
+    for backend in backends {
+        let port = common::find_free_loopback_port();
+        let dir = setup_net_project(&eager_source(port), &format!("trbyt_{}", backend));
+        let (mut child, artifact) = spawn_backend(&dir, backend, &format!("trbyt_{}", backend));
+
+        let mut request = Vec::with_capacity(trailers.len() + 256);
+        request.extend_from_slice(
+            b"POST /data HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n5\r\nhello\r\n0\r\n",
+        );
+        request.extend_from_slice(trailers.as_bytes());
+
+        let response = send_request(port, &request);
+
+        let _ = child.kill();
+        let _ = child.wait();
+        if let Some(path) = artifact {
+            let _ = fs::remove_file(path);
+        }
+        let _ = fs::remove_dir_all(&dir);
+
+        let response = response
+            .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+            .unwrap_or_default();
+        assert!(
+            !response.contains("200 OK"),
+            "{} backend must reject a 16 KiB trailer-bytes flood, got prefix: {:?}",
+            backend,
+            &response[..response.len().min(200)]
+        );
+    }
+}

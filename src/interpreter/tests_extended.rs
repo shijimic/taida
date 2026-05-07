@@ -553,6 +553,24 @@ TestError(type <= "TestError", message <= "Boom").throw()
         assert!(result.unwrap_err().contains("Unhandled error"));
     }
 
+    // E32B-074 item 9 (Codex review HIGH 1): an empty `message` field on the
+    // thrown BuchiPack used to render as `Error[TestError]: ` with a trailing
+    // colon-space, because `Some("")` short-circuited `unwrap_or("Unknown")`.
+    #[test]
+    fn test_eval_gorilla_ceiling_empty_message_renders_unknown() {
+        let source = r#"
+Error => TestError = @()
+TestError(type <= "TestError", message <= "").throw()
+"#;
+        let result = eval(source);
+        let err = result.unwrap_err();
+        assert!(err.contains("Unhandled error"), "err={err}");
+        assert!(
+            err.contains("Error[TestError]: Unknown"),
+            "empty message must render as Unknown placeholder; err={err}"
+        );
+    }
+
     #[test]
     fn test_eval_error_ceiling_conditional_handler() {
         let source = r#"

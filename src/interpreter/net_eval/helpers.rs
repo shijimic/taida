@@ -521,6 +521,28 @@ pub(crate) fn trim_ascii(bytes: &[u8]) -> &[u8] {
 /// Cap HTTP chunk-size to the same 15 hex digits used by JS/Native.
 pub(crate) const MAX_CHUNK_SIZE_HEX_DIGITS: usize = 15;
 
+/// Maximum number of bytes scanned for a single chunk-size line (chunk-size +
+/// optional chunk-ext) before treating the framing as malformed. Matches the
+/// 1 MiB cap used by the Native runtime so an attacker that pads chunk-ext
+/// with megabytes of padding cannot force unbounded CRLF scans across the
+/// three backends. RFC 7230 §4.1.1 leaves the chunk-ext length unbounded; the
+/// cap is a Taida-wide implementation contract documented in
+/// `docs/reference/net_api.md` §5.4.
+pub(crate) const MAX_CHUNK_LINE_BYTES: usize = 1_048_576;
+
+/// Maximum number of trailer header lines (after the terminator chunk) the
+/// eager chunked decoder will accept before rejecting the message as
+/// malformed. Matches the cap already used by the streaming readBodyChunk /
+/// readBodyAll paths (3-backend) so smuggling attempts cannot exploit a
+/// difference in eager vs streaming policy.
+pub(crate) const MAX_TRAILER_COUNT: usize = 64;
+
+/// Maximum total byte length of all trailer header lines (excluding the final
+/// CRLF that terminates the trailer block). 8 KiB matches typical reverse
+/// proxy limits and bounds memory work proportional to wire bytes already
+/// observed. Documented in `docs/reference/net_api.md` §5.4.
+pub(crate) const MAX_TRAILER_BYTES: usize = 8 * 1024;
+
 /// Parse the HTTP chunk-size hex field with explicit overflow guards.
 ///
 /// RFC 7230 §4.1 forbids OWS within `chunk-size`. Any leading or trailing
@@ -601,13 +623,17 @@ pub(crate) fn chunked_in_place_compact(
     let mut write_pos: usize = 0;
 
     loop {
-        // Find the end of the chunk-size line (CRLF)
-        let size_line_end = match find_crlf(&buf[body_offset + read_pos..]) {
-            Some(pos) => pos,
-            None => {
-                return Err("Malformed chunked body: missing CRLF after chunk-size".into());
-            }
-        };
+        // Find the end of the chunk-size line (CRLF). Cap the scan at
+        // MAX_CHUNK_LINE_BYTES so a chunk-ext flood (`;a=b;a=b;...`) cannot
+        // force an unbounded buffer walk; matches Native / JS parity
+        // (E32B-051).
+        let size_line_end =
+            match find_crlf_capped(&buf[body_offset + read_pos..], MAX_CHUNK_LINE_BYTES) {
+                Some(pos) => pos,
+                None => {
+                    return Err("Malformed chunked body: missing CRLF after chunk-size".into());
+                }
+            };
 
         // Parse chunk-size (hex), ignoring chunk-ext after semicolon
         let size_line = &buf[body_offset + read_pos..body_offset + read_pos + size_line_end];
@@ -628,6 +654,12 @@ pub(crate) fn chunked_in_place_compact(
         if chunk_size == 0 {
             // Skip optional trailer headers until final CRLF
             // Trailer format: (header-field CRLF)* CRLF
+            // E32B-052: bound by both line count (MAX_TRAILER_COUNT) and total
+            // bytes (MAX_TRAILER_BYTES) so a trailer flood cannot DoS the
+            // decoder. The total counts every trailer line excluding the
+            // terminating CRLF.
+            let mut trailer_count: usize = 0;
+            let mut trailer_bytes: usize = 0;
             loop {
                 if read_pos.checked_add(2).is_none_or(|end| end > data_len) {
                     return Err("Malformed chunked body: missing final CRLF after 0 chunk".into());
@@ -638,9 +670,21 @@ pub(crate) fn chunked_in_place_compact(
                     read_pos += 2;
                     break;
                 }
+                if trailer_count >= MAX_TRAILER_COUNT {
+                    return Err("Malformed chunked body: too many trailer lines".into());
+                }
                 // Skip trailer line
-                match find_crlf(&buf[body_offset + read_pos..]) {
+                match find_crlf_capped(&buf[body_offset + read_pos..], MAX_CHUNK_LINE_BYTES) {
                     Some(pos) => {
+                        trailer_bytes = trailer_bytes.checked_add(pos).ok_or_else(|| {
+                            "Malformed chunked body: trailer byte total overflow".to_string()
+                        })?;
+                        if trailer_bytes > MAX_TRAILER_BYTES {
+                            return Err(
+                                "Malformed chunked body: trailer block exceeds byte cap".into()
+                            );
+                        }
+                        trailer_count += 1;
                         read_pos = read_pos
                             .checked_add(pos)
                             .and_then(|v| v.checked_add(2))
@@ -692,13 +736,18 @@ pub(crate) fn chunked_in_place_compact(
     }
 }
 
-/// Find the position of the first CRLF in a byte slice.
-/// Returns the offset of '\r' (so the CRLF is at `pos` and `pos+1`).
-pub(crate) fn find_crlf(data: &[u8]) -> Option<usize> {
-    if data.len() < 2 {
+/// Like `find_crlf` (legacy helper removed in E32B-051), but only scans the
+/// first `cap` bytes of `data`.
+/// Returns `None` if no CRLF is found within `cap` bytes (regardless of
+/// whether more data exists past the cap). Used to bound chunk-size and
+/// trailer line lengths so a chunk-ext flood cannot turn a single CRLF scan
+/// into an unbounded buffer walk. Matches the 3-backend cap policy.
+pub(crate) fn find_crlf_capped(data: &[u8], cap: usize) -> Option<usize> {
+    let scan_end = data.len().min(cap);
+    if scan_end < 2 {
         return None;
     }
-    (0..data.len() - 1).find(|&i| data[i] == b'\r' && data[i + 1] == b'\n')
+    (0..scan_end - 1).find(|&i| data[i] == b'\r' && data[i + 1] == b'\n')
 }
 
 /// Check if the buffer contains a complete chunked body (read-only scan).
@@ -731,15 +780,28 @@ pub(crate) fn chunked_body_complete(
             ));
         }
 
-        // Find the end of the chunk-size line (CRLF)
-        let size_line_end = match find_crlf(&buf[body_offset + read_pos..]) {
-            Some(pos) => pos,
-            None => {
-                return Err(ChunkedBodyError::Incomplete(
-                    "missing CRLF after chunk-size".into(),
-                ));
-            }
-        };
+        // Find the end of the chunk-size line (CRLF). Cap the scan at
+        // MAX_CHUNK_LINE_BYTES so chunk-ext flooding cannot trigger an
+        // unbounded buffer walk before the body is even fully buffered
+        // (E32B-051). When the cap is hit but more bytes have already been
+        // received, that's malformed framing — not "incomplete" — because no
+        // reverse proxy in normal operation emits a single chunk-line longer
+        // than 1 MiB.
+        let scan_window = data_len.saturating_sub(read_pos).min(MAX_CHUNK_LINE_BYTES);
+        let size_line_end =
+            match find_crlf_capped(&buf[body_offset + read_pos..], MAX_CHUNK_LINE_BYTES) {
+                Some(pos) => pos,
+                None => {
+                    if scan_window >= MAX_CHUNK_LINE_BYTES {
+                        return Err(ChunkedBodyError::Malformed(
+                            "chunk-size line exceeds byte cap".into(),
+                        ));
+                    }
+                    return Err(ChunkedBodyError::Incomplete(
+                        "missing CRLF after chunk-size".into(),
+                    ));
+                }
+            };
 
         // Parse chunk-size (hex), ignoring chunk-ext after semicolon
         let size_line = &buf[body_offset + read_pos..body_offset + read_pos + size_line_end];
@@ -758,7 +820,13 @@ pub(crate) fn chunked_body_complete(
 
         // Terminator chunk
         if chunk_size == 0 {
-            // Skip optional trailer headers until final CRLF
+            // Skip optional trailer headers until final CRLF.
+            // E32B-052: bound by line count + total bytes to prevent trailer
+            // flood DoS. Hitting either cap is treated as malformed (parity
+            // with chunk-size oversize) so the connection is closed rather
+            // than continuing to read unbounded headers.
+            let mut trailer_count: usize = 0;
+            let mut trailer_bytes: usize = 0;
             loop {
                 if read_pos.checked_add(2).is_none_or(|end| end > data_len) {
                     return Err(ChunkedBodyError::Incomplete(
@@ -770,8 +838,24 @@ pub(crate) fn chunked_body_complete(
                     read_pos += 2;
                     return Ok(read_pos);
                 }
-                match find_crlf(&buf[body_offset + read_pos..]) {
+                if trailer_count >= MAX_TRAILER_COUNT {
+                    return Err(ChunkedBodyError::Malformed(
+                        "too many trailer lines".into(),
+                    ));
+                }
+                match find_crlf_capped(&buf[body_offset + read_pos..], MAX_CHUNK_LINE_BYTES) {
                     Some(pos) => {
+                        trailer_bytes = trailer_bytes
+                            .checked_add(pos)
+                            .ok_or_else(|| {
+                                ChunkedBodyError::Malformed("trailer byte total overflow".into())
+                            })?;
+                        if trailer_bytes > MAX_TRAILER_BYTES {
+                            return Err(ChunkedBodyError::Malformed(
+                                "trailer block exceeds byte cap".into(),
+                            ));
+                        }
+                        trailer_count += 1;
                         read_pos = read_pos
                             .checked_add(pos)
                             .and_then(|v| v.checked_add(2))
