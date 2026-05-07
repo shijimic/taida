@@ -18,9 +18,10 @@ final-status-level = "fail"
 slow-timeout = { period = "60s" }
 
 [profile.ci]
-# CI profile: no retries, fail-fast enabled
+# CI profile: no retries. Run the suite to completion so a single CI run
+# enumerates every failure, instead of cancelling on the first one.
 retries = 0
-fail-fast = true
+fail-fast = false
 status-level = "pass"
 final-status-level = "all"
 # Warn on tests slower than 60s, terminate after 10 minutes
