@@ -26,8 +26,9 @@ resp <= HttpRequest["GET", url](
   body <= ""
 )
 resp ]=> result
+response <= result.getOrDefault(@(status <= 0, headers <= @[], body <= ""))
 report <= (
-  | result.hasValue |> "status=" + result.__value.status.toString() + " body_len=" + result.__value.body.length().toString()
-  | _              |> "request failed: " + result.__error.message
+  | result.hasValue |> "status=" + response.status.toString() + " body_len=" + response.body.length().toString()
+  | _              |> "request failed"
 )
 stdout(report)

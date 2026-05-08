@@ -117,9 +117,11 @@ jsonPretty(pilot)
 
 | 関数 | 説明 | 例 |
 |------|------|-----|
-| `typeof(x)` | 型名を文字列で返す | `typeof(42)` → `"Int"` |
+| `typeof(x)` | declared static type 名を文字列で返す（compile-time helper） | `typeof(42)` → `"Int"` |
 | `range(start, end)` | 整数リスト生成 | `range(0, 5)` → `@[0, 1, 2, 3, 4]` |
 | `debug(x)` | デバッグ出力して値をそのまま返す | `5 => debug => result` |
+
+> 値の type identity（class-like 系統の継承位置 = `__type` 相当）を取り出したい場合は、関数ではなくモールド `TypeName[value]() -> Str` を使います。`docs/reference/class_like_types.md` の「演算・型変換モールド」を参照してください。
 
 ```taida
 // debug はパイプラインの途中に挿入できます
@@ -240,15 +242,19 @@ validateAge age: Int =
 | 構文 | 説明 | 例 |
 |------|------|-----|
 | `Gorillax[value]()` | 値を Gorillax で包む | `Gorillax[42]()` |
-| `Cage[molten, fn]()` | Molten 専用。fn(molten) を実行し Gorillax で包む | `Cage[lodash, _ lo = lo.sum(items)]()` |
+| `Cage[subject, runner]()` | Molten branch capability boundary。runner `CageRilla[Branch, Out]` を実行し `Gorillax[Out]` を返す | `Cage[lodash, JSCall[@["sum"], @[items], Int]()]()` |
 
 ```taida fragment
-// Cage で溶鉄に操作 → Gorillax で受け取る
-Cage[externalLib, _ lib = lib.process(data)] => result
+// Cage で Molten branch capability を実行 → Gorillax で受け取る
+Cage[externalLib, JSCall[@["process"], @[data], Molten]()]() => result
 result ]=> value         // 成功 → 値, 失敗 → ゴリラ
 
 // .relax() で |== キャッチ可能に変換
 result.relax() => relaxed  // relaxed: RelaxedGorillax[T]
+
+// 失敗詳細は errorInfo() で取得
+result.errorInfo() ]=> err  // err: ErrorInfo
+err.message              // 人間向けメッセージ
 ```
 
 ### コレクション

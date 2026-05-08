@@ -245,7 +245,7 @@ report <= (
   | result.hasValue |>
       "status=" + response.status.toString() +
       " body_len=" + response.body.length().toString()
-  | _ |> "request failed: " + result.__error.message
+  | _ |> "request failed"
 )
 stdout(report)
 ```

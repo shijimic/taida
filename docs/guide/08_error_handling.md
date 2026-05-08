@@ -402,15 +402,15 @@ failed.getOrThrow()      // throw が発動します
 
 ## Gorillax -- 覚悟のエラーモデル
 
-外部パッケージ（npm 等）の `Molten => JS` 操作は安全が保証されません。Cage モールドで JS 分岐の Molten への操作を実行し、結果を Gorillax で受け取ります。Cage は `Molten => JS` 専用です。
+外部パッケージ（npm 等）の Molten branch operation は安全が保証されません。`Cage[subject, runner]()` で Molten branch capability を実行し、結果を Gorillax で受け取ります。`Cage` の対応 branch は現状 `JS` / `Build` / `File` です。
 
 ### 基本: Cage → Gorillax → unmold
 
 ```taida fragment
->>> npm:lodash => @(lodash)  // lodash: Molten
+>>> npm:lodash => @(lodash)  // lodash: Molten (branch=JS)
 
 items: @[Int] <= @[1, 2, 3]
-Cage[lodash, _ lo = lo.sum(items)] => rilax  // rilax: Gorillax[Int]
+Cage[lodash, JSCall[@["sum"], @[items], Int]()]() => rilax  // rilax: Gorillax[Int]
 rilax ]=> total  // 成功 → total = 6, 失敗 → ゴリラ（プログラム終了）
 ```
 
@@ -428,6 +428,32 @@ rilax.relax() => relaxed  // relaxed: RelaxedGorillax[Int]
 => :Int
 
 relaxed ]=> total  // 失敗時: RelaxedGorillaEscaped が throw → |== でキャッチ
+```
+
+### errorInfo() による失敗詳細の取得
+
+失敗した `Gorillax[T]` / `RelaxedGorillax[T]` / catchした `RelaxedGorillaEscaped` から error 情報を読みたい場合は、公式 accessor `errorInfo() -> Lax[ErrorInfo]` を使います。`__error` 直接アクセスは `[E1960]` で reject されます。
+
+```taida fragment
+result = Cage[lodash, JSCall[@["divide"], @[10, 0], Int]()]()
+
+result.errorInfo() ]=> err   // err: ErrorInfo
+err.type                      // "JsError" 等
+err.message                   // 人間向けメッセージ
+err.kind                      // 細分カテゴリ（"timeout" / "not_found" 等）
+err.code                      // numeric code（OS error / HTTP status / 0=未指定）
+```
+
+`ErrorInfo` シェイプは `@(type: Str, message: Str, kind: Str, code: Int)`。`Gorillax` が成功時は `errorInfo()` の返す `Lax` の `hasValue = false`、失敗時のみ `Lax(true)` で `ErrorInfo` を取り出せます。`docs/reference/class_like_types.md` の「errorInfo() による失敗情報取得」「ErrorInfo」節を参照。
+
+```taida fragment
+// |== でキャッチした RelaxedGorillaEscaped からも errorInfo() で詳細を読める
+|== error: RelaxedGorillaEscaped =
+  | _ |>
+      error.errorInfo() ]=> err
+      stderr("operation failed: " + err.message)
+      0
+=> :Int
 ```
 
 ### エラーモデルの全体像
@@ -530,7 +556,8 @@ validateAndProcess input =
 | **Result** | `Result[T, P]` | 述語 P で成功/失敗を判定する操作モールド型です |
 | **ゴリラ** | `><` | 即時終了リテラルです。条件分岐と組み合わせて使います |
 | **Gorillax** | `Gorillax[T]` | 覚悟のモールド型。unmold 失敗でゴリラ（プログラム終了） |
-| **Cage** | `Cage[Molten, F]` | Molten 専用の操作檻。F(Molten) を実行し Gorillax[U] を返します |
+| **Cage** | `Cage[subject, runner]` | Molten branch capability boundary。runner `CageRilla[Branch, Out]` を実行し Gorillax[Out] を返します |
+| **errorInfo()** | `g.errorInfo()` | Gorillax / RelaxedGorillax / RelaxedGorillaEscaped から失敗詳細を `Lax[ErrorInfo]` として取り出します |
 | **RelaxedGorillax** | `.relax()` | Gorillax を throw 可能に変換。`\|==` でキャッチ可能になります |
 
 ### 使い分けの指針

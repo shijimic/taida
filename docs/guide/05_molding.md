@@ -644,49 +644,95 @@ Gorillax[42]() => g         // g: Gorillax[Int], hasValue = true
 g ]=> value                  // 42（成功: 値が取り出せます）
 ```
 
-### Cage[T, F] -- JS Molten 専用の操作檻
+### Cage[subject, runner] -- Molten branch capability boundary
 
-Cage は JS / npm 連携の `Molten => JS` 分岐に対して操作を実行し、結果を Gorillax で包むモールドです。Cage 内でのみ JS 溶鉄への操作が許可されます。
-
-**Cage は `Molten => JS` 専用です。** 第一引数は JS 分岐の Molten 値だけを受け付けます。Taida の型安全な値、JSON 分岐、`TemperedMolten[T]` は Cage に渡せません。
+Cage は外部由来の Molten 値を扱うための boundary（境界）です。`Cage[subject, runner]()` は subject の Molten branch と runner の `CageRilla[Branch, Out]` 子系統 descriptor の `Branch` を型レベルで照合し、一致したときだけ branch operation を実行して結果を `Gorillax[Out]` で返します。
 
 ```taida fragment
-Cage[molten, function]() => gorillax  // gorillax: Gorillax[U]
-// molten: Molten => JS
-// function: :Molten => :U（JS 溶鉄に対する操作）
+Cage[subject, runner]() => gorillax  // gorillax: Gorillax[Out]
+// subject : 特定 branch を持つ Molten 値
+// runner  : CageRilla[Branch, Out] 子系統の descriptor
+//           例: JSRilla[Out] / FileRilla[Out]
 ```
+
+`branch(subject) = B` かつ `runner <: CageRilla[B, Out]` のとき checker が許可します。subject branch と runner branch の不一致 (`Cage[jsMolten, FileRilla[Out]()]()` 等) は compile error として弾かれ、`Gorillax(false)` には包まれません。runtime metadata で初めて mismatch が判明する場合は runtime error として報告されます。`Gorillax(false)` は branch 一致後に branch operation 自体が失敗したケースだけを表します。
+
+**Cage branch**: 現状 `JS` / `Build` / `File` の 3 種を扱います。JSON のような structured data の schema cast は `Cage` 経路ではなく、専用 facade `JSON[raw, Schema]() -> Lax[T]` を使います（節「JSON と Cage の境界」を参照）。
+
+### CageRilla[Branch, Out] -- Cage に渡す capability descriptor
+
+`CageRilla[Branch, Out]` は Cage に渡す runner の親 type です。第 1 引数 `Branch` が runner の branch、第 2 引数 `Out` が成功時 `Gorillax[Out]` の値型を表します。
+
+公開 surface の子系統:
+
+| 子系統 | branch | 用途 |
+|--------|--------|------|
+| `JSRilla[Out]` | JS | npm / JS interop |
+| `FileRilla[Out]` | File | file descriptor / handle / cursor / stream |
+
+`CageRilla[Branch, Out]` 自体は通常 user-facing surface に書きません。`Cage[subject, JSRilla[Int]()]()` のように具象子系統名を直接書きます。`JSRilla[JS, Out]` のように branch 名を 2 引数目に書く形は不採用です。
+
+### JSRilla[Out] 系統 -- JS branch capability constructor
+
+JS branch 用の capability は `JSRilla[Out]` 子系統 constructor で記述します。任意の JS 式を埋め込むのではなく、property / method / constructor / value set / bind / spread を path / args / Out で指定する descriptor です。
+
+```taida fragment
+JSGet[path, Out]()          // -> JSRilla[Out]      property / value 取得
+JSCall[path, args, Out]()   // -> JSRilla[Out]      関数 / メソッド呼び出し
+JSNew[path, args, Out]()    // -> JSRilla[Out]      new によるインスタンス生成
+JSSet[path, value]()        // -> JSRilla[Molten]   プロパティ設定
+JSBind[path]()              // -> JSRilla[Molten]   this バインド
+JSSpread[source]()          // -> JSRilla[Molten]   スプレッド展開
+```
+
+各引数の意味:
+
+- `path` は `@[Str]`。subject 自身を直接呼ぶ場合は `@[]`、ネスト property は `@["a", "b"]`。
+- `args` は Taida 値の list (`@[...]`)。JS 側へ渡す前に bridge conversion されます。
+- `Out` は Taida 側へ持ち込む結果型。JS object / handle を保持する場合は `Out = Molten`。
+- `JSSet` / `JSBind` / `JSSpread` は JS 側の Molten handle を返すため、結果型は `Molten` 固定です。
+
+bridge conversion は Taida 値を JS 値へ正規化します。`Lax` は値があれば `__value`、空なら `__default` を渡し、`Result` は `__value` を渡します。`Gorillax` / `RelaxedGorillax` は成功時だけ `__value` を渡し、失敗時は JS の `undefined` になります。
 
 ### 使用例
 
 ```taida fragment
->>> npm:lodash => @(lodash)  // lodash: Molten（溶鉄状態、直接使用不可）
+>>> npm:lodash => @(lodash)
+>>> npm:express => @(express)
 
 items: @[Int] <= @[1, 2, 3, 4, 5]
 
-// Cage 内でのみ Molten への操作が許可されます
-Cage[lodash, _ lo = lo.sum(items)] => rilax  // rilax: Gorillax[Int]
+// 関数呼び出し: lodash.sum(items)
+Cage[lodash, JSCall[@["sum"], @[items], Int]()]() => total
+total ]=> value          // value: Int = 15
 
-// 成功時: 値が取り出せます
-rilax ]=> total              // total = 15
+// new 呼び出し: new express.Router()
+Cage[express, JSNew[@["Router"], @[], Molten]()]() => router
+router ]=> r             // r: Molten
+
+// プロパティ設定: app.port = 3000
+Cage[app, JSSet[@["port"], 3000]()]() => app2
+app2 ]=> a               // a: Molten
 
 // 失敗時: ゴリラがプログラムを停止させます
-// rilax ]=> total           // ><（ゴリラ出現）
+// total ]=> value       // ><（ゴリラ出現、branch operation が失敗した場合）
 
-// Taida の値は Cage に渡せません
-// Cage[42, _ x = x + 1]()  // コンパイルエラー: Cage requires Molten type
+// Taida 値は Molten ではないため Cage に渡せません
+// Cage[42, JSCall[@[], @[], Int]()]()  // コンパイルエラー: subject must carry Molten branch
 ```
 
-### JSON と Molten の関係
+旧 `Cage[molten, _ m = ...]()` の lambda direct form は canonical から外れます。Cage の第 2 引数は `JSRilla` / `FileRilla` 等の descriptor のみを受け取り、生の Taida function / lambda は受け取りません。npm 由来の Molten value の `branch` metadata は import 時点で `JS` に解決されるため、`JSRilla[...]()` を渡せば branch contract が静的に成立します。
 
-JSON は `Molten => JSON` の分岐です。JS / npm 連携の値は `Molten => JS` の分岐です。どちらも外部由来の不透明な値ですが、鋳造経路は分かれます。
+### JSON と Cage の境界
 
-JSON には専用のモールド `JSON[raw, Schema]()` があります。JSON を Cage に渡すことはできません。
+JSON のような structured data の schema cast は **`Cage` 経路を通りません**。JSON 専用 facade `JSON[raw, Schema]()` が `Lax[T]` failure channel を維持し、parse 失敗 / schema mismatch を `Lax(false)` として返します。Cage の `Gorillax` 経路と Lax 経路は責務を分けています。
 
-| 状況 | 使うべきもの |
-|------|------------|
-| JSON 文字列を型付き値に変換 | `JSON[raw, Schema]()` |
-| npm パッケージの Molten を操作 | `Cage[molten, fn]()` |
-| JSON を Cage に渡す | 不可（`JSON[raw, Schema]()` を使うこと） |
+| 状況 | 使うべきもの | failure channel |
+|------|------------|-----------------|
+| JSON 文字列を型付き値に変換 | `JSON[raw, Schema]() -> Lax[T]` | `Lax(false)` |
+| npm パッケージの Molten を操作 | `Cage[subject, JSRilla[...]()]()` | `Gorillax[Out]` |
+| File handle / cursor / stream | `Cage[handle, FileRilla[...]()]()` | `Gorillax[Out]` |
+| JSON facade を Cage に渡す | 不可（boundary contract 違反） | — |
 
 ### .relax() -- RelaxedGorillax[T]
 
@@ -729,108 +775,150 @@ relaxed ]=> value            // 失敗時: throw（|== で捕捉）
 
 ---
 
-## JS 補助モールド（JS バックエンド専用）
+## JSRilla[Out] 系統の各 constructor（JS バックエンド専用）
 
-npm パッケージから得られる Molten 値に対して、JavaScript 固有の操作を行うモールドです。これらは全て **Molten を受け取り Molten を返します**（溶鉄から溶鉄）。最終的に Taida の型世界に持ち込むには Cage を経由します。
+`JSRilla[Out]` 系統は JS branch を扱う Cage runner descriptor 群です。各 constructor は path / args / Out で特定の JS 操作を表現し、実行は `Cage[subject, JSRilla[...]()]()` を介します。`Cage` 外で `Molten -> Molten` 操作として直接書く form は canonical から外れます。
 
-**重要: これらのモールドは JS トランスパイラでのみ動作します。** インタプリタおよび Native バックエンドでは「JS バックエンド専用です」コンパイルエラーになります。ポータブルなコード（複数バックエンドで動作させるコード）では使わないでください。
+**重要: `JSRilla` 子系統は JS バックエンド専用です。** インタプリタおよび Native バックエンドでは「JS バックエンド専用です」コンパイルエラーになります。ポータブルなコード（複数バックエンドで動作させるコード）では使わないでください。
 
-**3バックエンド・パリティの対象外です。** JSNew, JSSet, JSBind, JSSpread は JS 連携層に属し、JS トランスパイラ固有の機能です。インタプリタや Native バックエンドに同等の実装は提供されません。
+**3 バックエンド・パリティの対象外です。** `JSGet` / `JSCall` / `JSNew` / `JSSet` / `JSBind` / `JSSpread` は JS 連携層に属し、JS トランスパイラ固有の機能です。インタプリタや Native バックエンドに同等の実装は提供されません。
 
-### JSNew[constructor, args] -- コンストラクタ呼び出し
+### JSGet[path, Out] -- property / value 取得
 
-JavaScript の `new` キーワードに相当する操作です。Molten のコンストラクタを呼び出し、新しい Molten インスタンスを返します。
+JS object のプロパティ / 値を取得します。`obj.a.b` のようなネスト読み出しは `path = @["a", "b"]` で記述します。
 
-```taida
+```taida fragment
+>>> npm:os => @(os)
+
+// os.platform を Str として読む
+Cage[os, JSGet[@["platform"], Str]()]() ]=> name
+```
+
+| `[]` 必須 | 説明 |
+|----------|------|
+| `path` | `@[Str]`。subject 自身は `@[]`、ネスト property は `@["a", "b"]` |
+| `Out` | 取得値の Taida 側型（Molten 保持なら `Molten`） |
+
+**結果**: `JSRilla[Out]`。`Cage[subject, JSGet[...]()]()` で `Gorillax[Out]`。
+
+### JSCall[path, args, Out] -- 関数 / メソッド呼び出し
+
+JS の関数 / メソッドを呼び出します。`subject(args...)` は `path = @[]`、`subject.a.b(args...)` は `path = @["a", "b"]`。
+
+```taida fragment
+>>> npm:lodash => @(lodash)
+
+items: @[Int] <= @[1, 2, 3, 4, 5]
+Cage[lodash, JSCall[@["sum"], @[items], Int]()]() ]=> total
+// total: Int = 15
+```
+
+| `[]` 必須 | 説明 |
+|----------|------|
+| `path` | `@[Str]`。subject 自身を呼ぶなら `@[]`、メソッドは `@["method"]` |
+| `args` | Taida 値の list (`@[...]`)。JS 側へは bridge conversion で渡す |
+| `Out` | 呼び出し結果の Taida 側型 |
+
+**結果**: `JSRilla[Out]`。`Cage[subject, JSCall[...]()]()` で `Gorillax[Out]`。
+
+### JSNew[path, args, Out] -- コンストラクタ呼び出し
+
+JS の `new` に相当する操作です。`new subject(args...)` は `path = @[]`、`new subject.Router(args...)` は `path = @["Router"]`。
+
+```taida fragment
 >>> npm:express => @(express)
 
 // new express.Router() に相当
-JSNew[express.Router, @()]() => router  // router: Molten
+Cage[express, JSNew[@["Router"], @[], Molten]()]() ]=> router
+// router: Molten（生成されたインスタンス handle）
 ```
 
 | `[]` 必須 | 説明 |
 |----------|------|
-| `constructor` | Molten のコンストラクタ関数 |
-| `args` | コンストラクタ引数（ぶちパック） |
+| `path` | `@[Str]`。subject 自身を呼ぶなら `@[]`、ネスト constructor は `@["Router"]` |
+| `args` | コンストラクタ引数の list (`@[...]`) |
+| `Out` | 生成インスタンスの Taida 側型（多くは `Molten`） |
 
-**戻り値**: `Molten`
+**結果**: `JSRilla[Out]`。`Cage[subject, JSNew[...]()]()` で `Gorillax[Out]`。
 
-### JSSet[obj, key, value] -- プロパティ設定
+### JSSet[path, value] -- プロパティ設定
 
-Molten オブジェクトのプロパティに値を設定します。JavaScript の `obj[key] = value` に相当する破壊的操作です。**同一の Molten 参照を返します**（JavaScript の破壊的代入のセマンティクスがそのまま適用されます）。
+JS object のプロパティに値を設定します。JavaScript の `obj.path = value` に相当する破壊的操作で、**同一 Molten handle を返します**。
 
-```taida
->>> npm:express => @(express)
-
-// Cage 内で Molten の関数を呼び出し、JS 補助モールドで操作します
-Cage[express, _ e = e()]() ]=> app    // app: Molten（express() の結果）
-JSSet[app, "port", 3000]() => app2    // app2: Molten（app と同一参照）
+```taida fragment
+// app.port = 3000 に相当
+Cage[app, JSSet[@["port"], 3000]()]() ]=> app2
+// app2: Molten（app と同一参照）
 ```
 
 | `[]` 必須 | 説明 |
 |----------|------|
-| `obj` | 対象の Molten オブジェクト |
-| `key` | プロパティ名（Str） |
-| `value` | 設定する値（Any） |
+| `path` | 非空の `@[Str]`。`@["port"]` で `subject.port`、`@["a", "b"]` で `subject.a.b` |
+| `value` | 設定する値（Taida 側型、bridge conversion で JS へ渡る） |
 
-**戻り値**: `Molten`（同一参照。JavaScript の破壊的代入に相当）
+**結果**: `JSRilla[Molten]` 固定。`Cage[subject, JSSet[...]()]()` で `Gorillax[Molten]`。
 
-### JSBind[obj, method] -- this バインド
+### JSBind[path] -- this バインド
 
-Molten オブジェクトのメソッドに `this` をバインドします。JavaScript の `obj.method.bind(obj)` に相当します。
+JS object のメソッドに `this` をバインドします。JavaScript の `subject.path.bind(subject)` に相当します。
 
-```taida
->>> npm:someLib => @(lib)
-
-handler <= JSBind[lib, "handleRequest"]() // handler: Molten
+```taida fragment
+// server.handleRequest を server に bind
+Cage[server, JSBind[@["handleRequest"]]()]() ]=> handler
+// handler: Molten（bound function handle）
 ```
 
 | `[]` 必須 | 説明 |
 |----------|------|
-| `obj` | 対象の Molten オブジェクト |
-| `method` | メソッド名（Str） |
+| `path` | `@[Str]`。bind 対象メソッド path |
 
-**戻り値**: `Molten`
+**結果**: `JSRilla[Molten]` 固定。`Cage[subject, JSBind[...]()]()` で `Gorillax[Molten]`。
 
-### JSSpread[target, source] -- スプレッド展開
+### JSSpread[source] -- スプレッド展開
 
-Molten オブジェクトにスプレッド展開でプロパティをマージします。JavaScript の `{...target, ...source}` に相当します。
+JS object に source の properties をスプレッド展開でマージします。JavaScript の `{...subject, ...source}` に相当します。
 
-```taida
->>> npm:config => @(defaults)
-
+```taida fragment
 overrides <= @(port <= 8080, debug <= true)
-merged <= JSSpread[defaults, overrides]()  // merged: Molten
+Cage[defaults, JSSpread[overrides]()]() ]=> merged
+// merged: Molten
 ```
 
 | `[]` 必須 | 説明 |
 |----------|------|
-| `target` | マージ先の Molten オブジェクト |
-| `source` | マージ元の値（Any） |
+| `source` | マージ元の値（Taida 側型、bridge conversion で JS へ渡る） |
 
-**戻り値**: `Molten`
+**結果**: `JSRilla[Molten]` 固定。`Cage[subject, JSSpread[...]()]()` で `Gorillax[Molten]`。
 
 ### 型の流れ: npm から値の取り出しまで
 
-npm パッケージを使う際の典型的な型の流れは以下の通りです:
+npm パッケージを使う際の典型的な型の流れは次の通りです:
 
 ```
-npm import (Molten) → JSNew 等 (Molten→Molten) → Cage (Molten→Gorillax) → ]=> (値)
+npm import (Molten / branch=JS)
+  -> JSRilla descriptor (JSGet / JSCall / JSNew / JSSet / JSBind / JSSpread)
+  -> Cage (subject branch ↔ runner branch を照合)
+  -> Gorillax[Out]
+  -> ]=> 値
 ```
 
 ```taida fragment
->>> npm:express => @(express)           // express: Molten
+>>> npm:express => @(express)            // express: Molten (branch=JS)
 
-// Cage 内で Molten の関数を呼び出します
-Cage[express, _ e = e()]() ]=> app       // app: Molten（express() の結果）
-JSNew[express.Router, @()]() => router   // router: Molten（new 呼び出し）
+// express() を呼び出してアプリ handle を得る
+Cage[express, JSCall[@[], @[], Molten]()]() ]=> app
+// app: Molten
 
-// Cage で Molten の操作を実行し、Gorillax で受け取ります
-Cage[app, _ a = a.get("/")]() => result  // result: Gorillax[Molten]
-result ]=> handler                       // handler: Molten（またはゴリラ）
+// new express.Router() でルータを生成
+Cage[express, JSNew[@["Router"], @[], Molten]()]() ]=> router
+// router: Molten
+
+// app.get("/") を呼び出して handler を得る
+Cage[app, JSCall[@["get"], @["/"], Molten]()]() ]=> handler
+// handler: Molten
 ```
 
-Molten への直接的な関数呼び出しは Cage 内でのみ許可されます。JS 補助モールド（JSNew, JSSet, JSBind, JSSpread）は Taida のモールド構文なので Cage 外でも使用可能ですが、Molten のメソッド呼び出しや関数呼び出しは必ず Cage を経由してください。
+`JSRilla` 子系統 descriptor は必ず `Cage[subject, JSRilla[...]()]()` の runner として渡します。Cage 外で descriptor を直接束縛すると Cage runner として実行されないため意味を持ちません。
 
 ---
 
@@ -981,11 +1069,15 @@ Mold[T] => Container[T] = @(
 | Result[T, P] | 述語付き操作モールド（P: :T => :Bool で成功/失敗を判定） |
 | Gorillax[T] | 覚悟のモールド型。unmold 失敗時はゴリラ（プログラム終了） |
 | RelaxedGorillax[T] | `.relax()` で生成。unmold 失敗時は RelaxedGorillaEscaped を throw |
-| Cage[T, F] | Molten 専用の操作檻。`F(Molten)` を実行し Gorillax[U] を返す |
-| JSNew[constructor, args] | JS の `new` 呼び出し。Molten→Molten（JS バックエンド専用） |
-| JSSet[obj, key, value] | JS プロパティ設定。Molten→Molten（JS バックエンド専用） |
-| JSBind[obj, method] | JS の `this` バインド。Molten→Molten（JS バックエンド専用） |
-| JSSpread[target, source] | JS スプレッド展開。Molten→Molten（JS バックエンド専用） |
+| `Cage[subject, runner]` | Molten branch capability boundary。`runner <: CageRilla[Branch, Out]` が subject branch と一致したときだけ `Gorillax[Out]` を返す |
+| `CageRilla[Branch, Out]` | Cage runner の親 type。子系統は `JSRilla` / `FileRilla` |
+| `TypeName[value]` | value の type identity（class-like の継承位置 / enum variant 名 / プリミティブ型名）を `Str` で返す |
+| `JSGet[path, Out]` | JS property / value 取得。`JSRilla[Out]`（JS バックエンド専用） |
+| `JSCall[path, args, Out]` | JS 関数 / メソッド呼び出し。`JSRilla[Out]`（JS バックエンド専用） |
+| `JSNew[path, args, Out]` | JS new によるインスタンス生成。`JSRilla[Out]`（JS バックエンド専用） |
+| `JSSet[path, value]` | JS プロパティ設定。`JSRilla[Molten]` 固定（JS バックエンド専用） |
+| `JSBind[path]` | JS this バインド。`JSRilla[Molten]` 固定（JS バックエンド専用） |
+| `JSSpread[source]` | JS スプレッド展開。`JSRilla[Molten]` 固定（JS バックエンド専用） |
 | パイプライン | `=>` / `<=` の中で `_` が前ステップの値を受け取る |
 
 旧 D 世代までの「Mold 基底クラス」「Mold 継承定義」記述は [クラスライク型定義 / モールド系統](04_class_like.md#モールド系統-操作モールド) に統合されました。

@@ -301,8 +301,8 @@ lax2.hasValue              // true (正常に割れた)
 「操作が失敗したらゴリラがプログラムを止める」モールド型です。Lax のようなデフォルト値へのフォールバックはありません。外部パッケージ（npm 等）の Molten 値への操作で使います。
 
 ```taida fragment
-// Cage で Molten（溶鉄）に操作を実行 → Gorillax で包まれます
-Cage[lodash, _ lo = lo.sum(items)] => rilax  // rilax: Gorillax[Int]
+// Cage で Molten（溶鉄）に branch operation を実行 → Gorillax で包まれます
+Cage[lodash, JSCall[@["sum"], @[items], Int]()]() => rilax  // rilax: Gorillax[Int]
 rilax ]=> total              // 成功 → 値, 失敗 → ゴリラ（プログラム終了）
 
 // .relax() で RelaxedGorillax に変換（|== でキャッチ可能に）

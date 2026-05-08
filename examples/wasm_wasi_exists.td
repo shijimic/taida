@@ -1,14 +1,16 @@
 // wasm-wasi acceptance: Exists[path]()
 // Run: wasmtime run --dir=. output.wasm
 //
-// C12B-021: Exists returns Result[Bool]. We assert the shape via
-// `.isSuccess()` which is true on every backend when the probe
-// itself succeeded (both existing and missing paths qualify — only
-// permission-denied / IO errors flip it to false). The inner Bool
-// is not compared textually here because wasm does not propagate
-// the Bool tag through `.__value` field access (known existing
-// codegen gap; see C12B-019 family); tests that need the Bool bit
-// use `.isSuccess()` + separate `writeFile` / path state checks.
+// `Exists[path]()` returns a Result-shaped wrapper over Bool. Here we
+// assert the wrapper shape via the public `.isSuccess()` accessor: it is
+// true on every backend whenever the probe itself completed (both
+// existing and missing paths qualify — only permission-denied / I/O
+// errors flip it to false). We deliberately do not compare the inner
+// Bool textually in this acceptance, because direct internal-field
+// access (`.__value`, etc.) is rejected by `[E1960]` and therefore is
+// not part of the public surface tested here. Acceptances that need to
+// observe the inner Bool use `.isSuccess()` together with separate
+// `writeFile` / path state checks instead.
 
 writeFile("_wasi_exists_test.txt", "test")
 a <= Exists["_wasi_exists_test.txt"]()
