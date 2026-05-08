@@ -98,6 +98,16 @@
 | `E1509` | generic function の型変数が declared constraint を満たさない | TypeChecker |
 | `E1510` | inference-only generic function の型変数が parameter annotation / call から束縛・推論できない、または concrete type 名と衝突する | TypeChecker |
 | `E1511` | ユーザー定義関数を mold 構文 `Fn[args]()` で呼ぶ際に named fields `()` を渡せない — `Fn[a, b]()` か `Fn(a, b)` のみ | TypeChecker |
+| `E1512` | Cage / CageRilla: branch mismatch (compile-time) — `Cage[subject, runner]()` で subject の Molten branch と runner `CageRilla[Branch, Out]` の `Branch` 型引数が不一致 | TypeChecker |
+| `E1513` | (予約) Cage / CageRilla: branch mismatch (runtime) — runtime metadata で subject branch と runner branch の不一致を検出 | Runtime |
+| `E1514` | Cage / CageRilla: legacy `Cage[molten, lambda]()` direct lambda form は canonical から外す。`Cage[subject, JSRilla[...]()]()` 等の `CageRilla` descriptor 経由に書き換える | TypeChecker |
+| `E1515` | Cage / CageRilla: `JSGet` / `JSCall` / `JSNew` / `JSSet` / `JSBind` / `JSSpread` を Cage 外で JS runner 操作として直接書く form は canonical から外す。runner descriptor として `Cage[subject, JSCall[path, args, Out]()]()` 等の中へ移行する | TypeChecker |
+| `E1516` | Cage / CageRilla: forbidden child arity — `JSRilla[JS, Out]` / `BuildRilla[Build, Out]` / `FileRilla[File, Out]` のように branch 名を 2 引数目に書く形は不採用。子系統は `JSRilla[Out]` / `BuildRilla[Out]` / `FileRilla[Out]` の `[Out]` 1 引数のみ | TypeChecker |
+| `E1517` | Cage / CageRilla: validation pass 終了時点で subject branch または runner branch が未解決 (`Cage[target, runner]()` の boundary contract を静的に証明できない) | TypeChecker |
+| `E1518` | Cage / CageRilla: Hammer 系 schema cast facade (`JSON[raw, Schema]()` 等) を `Cage` の subject または runner に渡す boundary contract 違反。Hammer family は `Lax[T]` failure channel を維持し、`Cage` / `Gorillax` 経路には流さない | TypeChecker |
+| `E1519` | (予約) Cage / CageRilla 診断範囲の拡張用 | — |
+
+`E1512`〜`E1519` は **Cage / CageRilla 診断範囲**。`Cage[subject, runner]()` の type rule および `CageRilla[Branch, Out]` 子系統 (`JSRilla` / `JSONRilla` / `BuildRilla` / `FileRilla`) の boundary contract を扱う。`E1513` と `E1519` は将来の runtime validation または追加診断用に予約している。
 
 ### 型推論・演算意味論エラー (`E16xx`)
 

@@ -49,6 +49,9 @@ slow-timeout = { period = "60s", terminate-after = 10 }
 # preventing them.
 [test-groups]
 net-serial = { max-threads = 1 }
+external-backend = { max-threads = 2 }
+wasm-runtime = { max-threads = 2 }
+long-running-ignored = { max-threads = 1 }
 
 # Track-η (Phase 6, 2026-04-27, Lock-Phase6 land): added `d29b_005_*`
 # (NET binders: js_buffer_identity spawns a Node.js HTTP server on a
@@ -63,3 +66,36 @@ test-group = "net-serial"
 [[profile.ci.overrides]]
 filter = "binary(/^c26b_022/) | binary(/^c27b_003/) | binary(/^c27b_014/) | binary(/^c27b_027/) | binary(/^d28b_012/) | binary(/^d29b_009/) | binary(/^d29b_005_js_buffer_identity/) | binary(/^d29b_005_native_use_after_reset/) | binary(/^d29b_012/)"
 test-group = "net-serial"
+
+# E33 stable gate inventory: environment-dependent binaries are grouped so
+# CI/manual runs can identify JS/native/WASM prerequisite coverage explicitly.
+[[profile.default.overrides]]
+filter = "binary(/^js_execution/) | binary(/^cli_build/) | binary(/^c20_stdinline_parity/) | binary(/^d28b_023_higher_order_generic/) | binary(/^d28b_024_generic_arithmetic/)"
+test-group = "external-backend"
+
+[[profile.ci.overrides]]
+filter = "binary(/^js_execution/) | binary(/^cli_build/) | binary(/^c20_stdinline_parity/) | binary(/^d28b_023_higher_order_generic/) | binary(/^d28b_024_generic_arithmetic/)"
+test-group = "external-backend"
+
+[[profile.default.overrides]]
+filter = "binary(/^wasm_min/) | binary(/^wasm_wasi/) | binary(/^wasm_full/) | binary(/^wasm_edge/) | binary(/^c21_wasm_simd/) | binary(/^c27b_021_wasm_arith_parity/)"
+test-group = "wasm-runtime"
+
+[[profile.ci.overrides]]
+filter = "binary(/^wasm_min/) | binary(/^wasm_wasi/) | binary(/^wasm_full/) | binary(/^wasm_edge/) | binary(/^c21_wasm_simd/) | binary(/^c27b_021_wasm_arith_parity/)"
+test-group = "wasm-runtime"
+
+[[profile.default.overrides]]
+filter = "binary(/^c26b_024_router_bench_parity/)"
+test-group = "long-running-ignored"
+
+[[profile.ci.overrides]]
+filter = "binary(/^c26b_024_router_bench_parity/)"
+test-group = "long-running-ignored"
+
+# Inventory for opt-in ignored tests. The binaries remain explicitly ignored at
+# test level; workflow_dispatch lists this inventory without executing known
+# failing/post-stable ignored tests.
+# c27b_003_portbind_race is covered by net-serial because it binds loopback.
+# c27b_003_portbind_race
+# c26b_024_router_bench_parity

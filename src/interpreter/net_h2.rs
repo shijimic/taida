@@ -1677,6 +1677,8 @@ pub(crate) fn process_frame(
                     "HEADERS frame on stream 0".into(),
                 ));
             }
+            // `is_multiple_of` would be less readable here because this is an
+            // HTTP/2 stream-id parity rule, not a general arithmetic helper.
             #[allow(clippy::manual_is_multiple_of)]
             if stream_id % 2 == 0 {
                 return Err(H2Error::Connection(

@@ -1209,10 +1209,6 @@ fn runtime_abi(name: &str) -> Result<RuntimeAbi, String> {
             params: &[Ptr, Ptr, Ptr, Ptr],
             returns: &[Ptr],
         },
-        "taida_cage_apply" => RuntimeAbi {
-            params: &[Val, FnPtr],
-            returns: &[Ptr],
-        },
         "taida_gorillax_unmold" => RuntimeAbi {
             params: &[Ptr],
             returns: &[Val],
@@ -1231,6 +1227,10 @@ fn runtime_abi(name: &str) -> Result<RuntimeAbi, String> {
         },
         "taida_relaxed_gorillax_to_string" => RuntimeAbi {
             params: &[Ptr],
+            returns: &[Ptr],
+        },
+        "taida_error_info" => RuntimeAbi {
+            params: &[Val],
             returns: &[Ptr],
         },
 
@@ -1528,6 +1528,10 @@ fn runtime_abi(name: &str) -> Result<RuntimeAbi, String> {
         },
         // typeof prelude
         "taida_typeof" => RuntimeAbi {
+            params: &[Val, Val],
+            returns: &[Ptr],
+        },
+        "taida_type_name" => RuntimeAbi {
             params: &[Val, Val],
             returns: &[Ptr],
         },

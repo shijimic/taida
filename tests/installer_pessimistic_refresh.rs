@@ -46,13 +46,13 @@ fn taida_bin() -> PathBuf {
 /// - the old pre-C17 content is replaced by the remote's current content
 /// - install exits 0
 #[test]
-#[ignore = "Pre-empted by project-root marker tightening; needs rooted fixture"]
 fn c17b_003_row1_sidecarless_online_refreshes_pessimistically() {
     let work = unique_temp_dir("c17_row1_pessimistic");
     let home = work.join("home");
     let project = work.join("project");
     fs::create_dir_all(&home).unwrap();
     fs::create_dir_all(&project).unwrap();
+    common::mark_project_root(&project);
 
     // Pre-populate a pre-C17 extraction: legacy facade only, no sidecar.
     let store_pkg = home
@@ -171,13 +171,13 @@ integrity = "{integrity}"
 /// ports. The fetch must fail, but the backup-swap rollback must restore
 /// the previous working install (main.td + sidecar intact).
 #[test]
-#[ignore = "Pre-empted by project-root marker tightening; needs rooted fixture"]
 fn c17b_001_force_refresh_offline_rolls_back_to_previous_install() {
     let work = unique_temp_dir("c17b_001_rollback");
     let home = work.join("home");
     let project = work.join("project");
     fs::create_dir_all(&home).unwrap();
     fs::create_dir_all(&project).unwrap();
+    common::mark_project_root(&project);
 
     // Step 1: warm up with a real online install so a sidecar+content
     // are in place.
@@ -297,13 +297,13 @@ integrity = "{integrity}"
 /// "unreadable; re-extracting" path and the sidecar is rewritten with a
 /// fresh schema-1 entry recording the current remote SHA.
 #[test]
-#[ignore = "Pre-empted by project-root marker tightening; needs rooted fixture"]
 fn c17b_015_corrupt_sidecar_re_extracts() {
     let work = unique_temp_dir("c17b_015_corrupt");
     let home = work.join("home");
     let project = work.join("project");
     fs::create_dir_all(&home).unwrap();
     fs::create_dir_all(&project).unwrap();
+    common::mark_project_root(&project);
 
     // Pre-populate a "corrupt" sidecar that the v1 parser will reject.
     let store_pkg = home

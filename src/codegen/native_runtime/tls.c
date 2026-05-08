@@ -44,7 +44,7 @@ static struct {
         const unsigned char *server, unsigned int server_len,
         const unsigned char *client, unsigned int client_len);
     void (*SSL_get0_alpn_selected)(const OSSL_SSL *ssl, const unsigned char **data, unsigned int *len);
-} taida_ossl = { 0, NULL, NULL };
+} taida_ossl = {0};
 
 // OpenSSL constants (stable ABI, unlikely to change).
 #define TAIDA_SSL_FILETYPE_PEM 1
@@ -1798,4 +1798,3 @@ taida_val taida_pool_health(taida_val pool_or_pack) {
     taida_pool_state *st = taida_pool_states[pool_id];
     return taida_pool_health_pack(st->open, (taida_val)st->idle_len, (taida_val)st->in_use_len, 0);
 }
-

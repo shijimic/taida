@@ -1425,6 +1425,8 @@ fn severity_to_kind(severity: &str) -> &'static str {
     }
 }
 
+// JSONL diagnostics mirror the public record fields directly; bundling them
+// into a transient struct would obscure the emitter contract at call sites.
 #[allow(clippy::too_many_arguments)]
 fn emit_compile_diag_jsonl(
     stats: &mut CompileDiagStats,
@@ -4922,6 +4924,8 @@ fn is_stdin_path(path: &Path) -> bool {
     raw == "/dev/stdin" || raw == "-" || raw.ends_with("/fd/0")
 }
 
+// The JS source transpile entry point keeps CLI flags and diagnostic sinks
+// explicit so the file and stdin callers do not need adapter structs.
 #[allow(clippy::too_many_arguments)]
 fn transpile_js_source_to_output(
     source: &str,
@@ -5041,6 +5045,8 @@ fn transpile_js_source_to_output(
     }
 }
 
+// Module transpilation shares the same explicit CLI/output contract as source
+// transpilation; a wrapper struct would not be reused outside this boundary.
 #[allow(clippy::too_many_arguments)]
 fn transpile_js_module_to_output(
     td_file: &Path,

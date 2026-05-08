@@ -47,7 +47,7 @@ jobs:
           submodules: false
 
       - name: install rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.93.1
         with:
           components: llvm-tools-preview
 

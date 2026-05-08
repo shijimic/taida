@@ -89,13 +89,13 @@ fn run_install(
 }
 
 #[test]
-#[ignore = "Pre-empted by project-root marker tightening; needs rooted fixture"]
 fn c17_5_force_refresh_rewrites_store_entry_even_when_fresh() {
     let work = unique_temp_dir("c17_force_fresh");
     let home = work.join("home");
     let project = work.join("project");
     fs::create_dir_all(&home).unwrap();
     fs::create_dir_all(&project).unwrap();
+    common::mark_project_root(&project);
 
     let tarball = make_tarball(&[
         ("packages.tdm", b"<<<@a.1 taida-lang/force\n" as &[u8]),
@@ -207,6 +207,7 @@ fn c17_5_force_refresh_conflicts_with_no_remote_check() {
     let project = work.join("project");
     fs::create_dir_all(&home).unwrap();
     fs::create_dir_all(&project).unwrap();
+    common::mark_project_root(&project);
     write_consumer(
         &project,
         "force",
@@ -241,7 +242,6 @@ fn c17_5_force_refresh_conflicts_with_no_remote_check() {
 }
 
 #[test]
-#[ignore = "Pre-empted by project-root marker tightening; needs rooted fixture"]
 fn c17_5_force_refresh_handles_sidecar_less_install() {
     // Simulate a pre-C17 install: `.taida_installed` is present but no
     // `_meta.toml`. Without --force-refresh this would print the "unknown
@@ -252,6 +252,7 @@ fn c17_5_force_refresh_handles_sidecar_less_install() {
     let project = work.join("project");
     fs::create_dir_all(&home).unwrap();
     fs::create_dir_all(&project).unwrap();
+    common::mark_project_root(&project);
 
     let tarball = make_tarball(&[
         ("packages.tdm", b"<<<@a.1 taida-lang/legacy\n" as &[u8]),

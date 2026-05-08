@@ -2584,21 +2584,19 @@ impl Lowering {
                 Ok(result)
             }
             "Cage" => {
-                // Cage[molten, fn]() -> taida_cage_apply(molten, fn)
+                // Cage[subject, runner](): JS-only CageRilla descriptors are
+                // rejected while lowering the runner expression. Direct native
+                // function/lambda runners are not part of the Cage contract.
                 if type_args.len() < 2 {
                     return Err(LowerError {
-                        message: "Cage requires 2 type arguments: Cage[value, function]".into(),
+                        message: "Cage requires 2 type arguments: Cage[subject, runner]".into(),
                     });
                 }
-                let cage_value = self.lower_expr(func, &type_args[0])?;
-                let cage_fn = self.lower_expr(func, &type_args[1])?;
-                let result = func.alloc_var();
-                func.push(IrInst::Call(
-                    result,
-                    "taida_cage_apply".to_string(),
-                    vec![cage_value, cage_fn],
-                ));
-                Ok(result)
+                let _subject = self.lower_expr(func, &type_args[0])?;
+                let _runner = self.lower_expr(func, &type_args[1])?;
+                Err(LowerError {
+                    message: "Cage runner must be a CageRilla descriptor; direct native functions and lambdas are not supported".into(),
+                })
             }
             // C18-3: Ordinal[<enum_value>]() — explicit Enum → Int.
             // On Native, Enum values are already stored as int32 ordinals
@@ -2898,10 +2896,44 @@ impl Lowering {
                 Ok(result)
             }
 
+            "TypeName" => {
+                if type_args.len() != 1 {
+                    return Err(LowerError {
+                        message: format!(
+                            "TypeName requires 1 argument: TypeName[value](), got {}",
+                            type_args.len()
+                        ),
+                    });
+                }
+                let arg = &type_args[0];
+                if let Expr::EnumVariant(_, variant_name, _) = arg {
+                    let result = func.alloc_var();
+                    func.push(IrInst::ConstStr(result, variant_name.clone()));
+                    return Ok(result);
+                }
+                let arg_var = self.lower_expr(func, arg)?;
+                let tag = self.expr_type_tag(arg);
+                let tag_var = func.alloc_var();
+                func.push(IrInst::ConstInt(tag_var, tag));
+                let result = func.alloc_var();
+                func.push(IrInst::Call(
+                    result,
+                    "taida_type_name".to_string(),
+                    vec![arg_var, tag_var],
+                ));
+                Ok(result)
+            }
+
             // JS-only molds -- error in native backend
-            "JSNew" | "JSSet" | "JSBind" | "JSSpread" => Err(LowerError {
+            "JSGet" | "JSCall" | "JSNew" | "JSSet" | "JSBind" | "JSSpread" => Err(LowerError {
                 message: format!(
                     "{} is only available in the JS transpiler backend.",
+                    type_name
+                ),
+            }),
+            "JSRilla" | "FileRilla" | "BuildRilla" | "CageRilla" => Err(LowerError {
+                message: format!(
+                    "{} is an abstract CageRilla descriptor. Use JSGet/JSCall/JSNew/JSSet/JSBind/JSSpread.",
                     type_name
                 ),
             }),

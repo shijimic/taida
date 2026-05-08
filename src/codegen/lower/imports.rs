@@ -918,19 +918,7 @@ impl Lowering {
     /// Find project root by walking up from the given directory.
     /// Mirrors Interpreter::find_project_root().
     pub(super) fn find_project_root(start_dir: &std::path::Path) -> std::path::PathBuf {
-        let mut dir = start_dir.to_path_buf();
-        loop {
-            if dir.join("packages.tdm").exists()
-                || dir.join("taida.toml").exists()
-                || dir.join(".git").exists()
-            {
-                return dir;
-            }
-            if !dir.pop() {
-                break;
-            }
-        }
-        start_dir.to_path_buf()
+        crate::project_root::find_project_root(start_dir)
     }
 
     pub(super) fn import_module_key(&self, module_path: &str, version: Option<&str>) -> String {

@@ -27,5 +27,6 @@ handler req writer =
 
 asyncResult <= httpServe(8081, handler, 1)
 asyncResult ]=> result
-stdout(result.__value.ok.toString())
-stdout(result.__value.requests.toString())
+result ]=> served
+stdout(served.ok.toString())
+stdout(served.requests.toString())

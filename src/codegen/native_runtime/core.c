@@ -626,7 +626,6 @@ taida_ptr taida_gorillax_new(taida_val value);
 taida_ptr taida_molten_new(void);
 taida_ptr taida_stub_new(taida_ptr message);
 taida_ptr taida_todo_new(taida_ptr id, taida_ptr task, taida_ptr sol, taida_ptr unm);
-taida_ptr taida_cage_apply(taida_val cage_value, taida_fn_ptr fn_ptr);
 taida_ptr taida_gorillax_err(taida_ptr error);
 taida_val taida_gorillax_unmold(taida_ptr ptr);
 taida_ptr taida_gorillax_relax(taida_ptr ptr);
@@ -1271,6 +1270,7 @@ static taida_val taida_make_io_error(int err_code, const char *err_msg) {
 static const char __lax_type_str[] = "Lax";
 static const char __gorillax_type_str[] = "Gorillax";
 static const char __relaxed_gorillax_type_str[] = "RelaxedGorillax";
+static const char __error_info_type_str[] = "ErrorInfo";
 static const char __molten_type_str[] = "Molten";
 static const char __todo_type_str[] = "TODO";
 static const char __bytes_cursor_type_str[] = "BytesCursor";
@@ -3127,6 +3127,116 @@ taida_val taida_pack_has_hash(taida_ptr pack_ptr, taida_val field_hash) {
 taida_val taida_pack_get_idx(taida_ptr pack_ptr, taida_val index) {
     taida_val *pack = (taida_val*)pack_ptr;
     return pack[2 + index * 3 + 2];
+}
+
+static int taida_is_gorillax_like_pack(taida_val ptr) {
+    if (!TAIDA_IS_PACK(ptr)) return 0;
+    taida_val *pack = (taida_val*)ptr;
+    if (pack[1] < 4) return 0;
+    return pack[2] == (taida_val)HASH_HAS_VALUE
+        && pack[2 + 2 * 3] == (taida_val)HASH___ERROR;
+}
+
+static int taida_is_error_info_source_pack(taida_val ptr) {
+    return TAIDA_IS_PACK(ptr)
+        && taida_pack_has_hash(ptr, (taida_val)HASH___TYPE)
+        && taida_pack_has_hash(ptr, (taida_val)HASH_TYPE)
+        && taida_pack_has_hash(ptr, (taida_val)HASH_MESSAGE);
+}
+
+static taida_val taida_error_info_default(void) {
+    taida_register_builtin_error_field_names();
+    taida_register_lax_field_names();
+    taida_val kind_hash = taida_str_hash((taida_val)"kind");
+    taida_val code_hash = taida_str_hash((taida_val)"code");
+    taida_val pack = taida_pack_new(5);
+    taida_pack_set_hash(pack, 0, (taida_val)HASH_TYPE);
+    taida_pack_set(pack, 0, (taida_val)taida_str_new_copy(""));
+    taida_pack_set_tag(pack, 0, TAIDA_TAG_STR);
+    taida_pack_set_hash(pack, 1, (taida_val)HASH_MESSAGE);
+    taida_pack_set(pack, 1, (taida_val)taida_str_new_copy(""));
+    taida_pack_set_tag(pack, 1, TAIDA_TAG_STR);
+    taida_pack_set_hash(pack, 2, kind_hash);
+    taida_pack_set(pack, 2, (taida_val)taida_str_new_copy(""));
+    taida_pack_set_tag(pack, 2, TAIDA_TAG_STR);
+    taida_pack_set_hash(pack, 3, code_hash);
+    taida_pack_set(pack, 3, 0);
+    taida_pack_set_tag(pack, 3, TAIDA_TAG_INT);
+    taida_pack_set_hash(pack, 4, (taida_val)HASH___TYPE);
+    taida_pack_set(pack, 4, (taida_val)__error_info_type_str);
+    taida_pack_set_tag(pack, 4, TAIDA_TAG_STR);
+    return pack;
+}
+
+static int taida_safe_cstr(taida_val ptr, size_t max_len) {
+    size_t len = 0;
+    return ptr && taida_read_cstr_len_safe((const char*)ptr, max_len, &len);
+}
+
+static taida_val taida_error_info_pack_from_error(taida_val error) {
+    taida_register_builtin_error_field_names();
+    taida_register_lax_field_names();
+    const char *type_src = "Error";
+    const char *message_src = "";
+    const char *kind_src = NULL;
+    taida_val code = 0;
+    taida_val kind_hash = taida_str_hash((taida_val)"kind");
+    taida_val code_hash = taida_str_hash((taida_val)"code");
+
+    if (TAIDA_IS_PACK(error)) {
+        taida_val type_val = 0;
+        if (taida_pack_has_hash(error, (taida_val)HASH_TYPE)) {
+            type_val = taida_pack_get(error, (taida_val)HASH_TYPE);
+        } else if (taida_pack_has_hash(error, (taida_val)HASH___TYPE)) {
+            type_val = taida_pack_get(error, (taida_val)HASH___TYPE);
+        }
+        if (taida_safe_cstr(type_val, 1024)) type_src = (const char*)type_val;
+        if (taida_pack_has_hash(error, (taida_val)HASH_MESSAGE)) {
+            taida_val msg_val = taida_pack_get(error, (taida_val)HASH_MESSAGE);
+            if (taida_safe_cstr(msg_val, 4096)) message_src = (const char*)msg_val;
+        }
+        if (taida_pack_has_hash(error, kind_hash)) {
+            taida_val kind_val = taida_pack_get(error, kind_hash);
+            if (taida_safe_cstr(kind_val, 1024)) kind_src = (const char*)kind_val;
+        }
+        if (taida_pack_has_hash(error, code_hash)) {
+            code = taida_pack_get(error, code_hash);
+        }
+    } else if (error != 0) {
+        message_src = "non-pack error";
+        kind_src = "Error";
+    }
+    if (!kind_src) kind_src = type_src;
+
+    taida_val pack = taida_pack_new(5);
+    taida_pack_set_hash(pack, 0, (taida_val)HASH_TYPE);
+    taida_pack_set(pack, 0, (taida_val)taida_str_new_copy(type_src));
+    taida_pack_set_tag(pack, 0, TAIDA_TAG_STR);
+    taida_pack_set_hash(pack, 1, (taida_val)HASH_MESSAGE);
+    taida_pack_set(pack, 1, (taida_val)taida_str_new_copy(message_src));
+    taida_pack_set_tag(pack, 1, TAIDA_TAG_STR);
+    taida_pack_set_hash(pack, 2, kind_hash);
+    taida_pack_set(pack, 2, (taida_val)taida_str_new_copy(kind_src));
+    taida_pack_set_tag(pack, 2, TAIDA_TAG_STR);
+    taida_pack_set_hash(pack, 3, code_hash);
+    taida_pack_set(pack, 3, code);
+    taida_pack_set_tag(pack, 3, TAIDA_TAG_INT);
+    taida_pack_set_hash(pack, 4, (taida_val)HASH___TYPE);
+    taida_pack_set(pack, 4, (taida_val)__error_info_type_str);
+    taida_pack_set_tag(pack, 4, TAIDA_TAG_STR);
+    return pack;
+}
+
+taida_val taida_error_info(taida_val source) {
+    taida_val def = taida_error_info_default();
+    if (taida_is_gorillax_like_pack(source)) {
+        if (taida_pack_get_idx(source, 0)) return taida_lax_empty(def);
+        taida_val error = taida_pack_get_idx(source, 2);
+        return taida_lax_new(taida_error_info_pack_from_error(error), def);
+    }
+    if (source == 0) return taida_lax_empty(def);
+    if (!taida_is_error_info_source_pack(source)) return taida_lax_empty(def);
+    return taida_lax_new(taida_error_info_pack_from_error(source), def);
 }
 
 taida_ptr taida_pack_set_hash(taida_ptr pack_ptr, taida_val index, taida_val hash) {
@@ -7135,27 +7245,6 @@ taida_val taida_error_type_check_or_rethrow(taida_val error_val, taida_val handl
     return 0; // unreachable
 }
 
-taida_val taida_cage_apply(taida_val cage_value, taida_val fn_ptr) {
-    if (fn_ptr == 0) {
-        taida_val error = taida_make_error("CageError", "Cage second argument must be a function");
-        return taida_gorillax_err(error);
-    }
-
-    taida_val depth = taida_error_ceiling_push();
-    if (setjmp(__taida_error_jmp[(int)depth]) == 0) {
-        taida_val result = taida_invoke_callback1(fn_ptr, cage_value);
-        taida_error_ceiling_pop();
-        return taida_gorillax_new(result);
-    }
-
-    taida_val error = taida_error_get_value(depth);
-    taida_error_ceiling_pop();
-    if (error == 0) {
-        error = taida_make_error("CageError", "Cage function failed");
-    }
-    return taida_gorillax_err(error);
-}
-
 // ── Result[T, P] (v0.8.0 redesign — predicate support) ───
 // Optional abolished in v0.8.0 — use Lax[T] instead.
 // Result: operation mold — BuchiPack @(__value: T, __predicate: P, throw: Error, __type: "Result")
@@ -8256,6 +8345,21 @@ taida_val taida_typeof(taida_val val, taida_val tag) {
     }
 }
 
+taida_val taida_type_name(taida_val val, taida_val tag) {
+    if (val != 0 && val >= 4096 && taida_is_buchi_pack(val)) {
+        if (taida_pack_has_hash(val, (taida_val)HASH___TYPE)) {
+            taida_val type_val = taida_pack_get(val, (taida_val)HASH___TYPE);
+            if (taida_safe_cstr(type_val, 1024)) {
+                return (taida_val)taida_str_new_copy((const char*)type_val);
+            }
+        }
+        // Plain packs intentionally have no class-like identity. If a future
+        // pack metadata field becomes public identity, add it before this return.
+        return (taida_val)taida_str_new_copy("");
+    }
+    return taida_typeof(val, tag);
+}
+
 // Polymorphic .map(fn) — works on List, Result, Lax, Async
 taida_val taida_polymorphic_map(taida_val obj, taida_val fn_ptr) {
     if (obj == 0 || obj < 4096) return obj;
@@ -8800,7 +8904,6 @@ typedef struct json_obj {
 // Forward declarations
 static json_val json_parse_value(const char **p);
 static void json_skip_ws(const char **p);
-static json_val json_default_for_desc(const char *desc);
 static taida_val json_apply_schema(json_val *jval, const char **desc);
 
 // FNV-1a hash (matches Rust side)

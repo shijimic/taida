@@ -9,25 +9,15 @@
 #
 # Usage:
 #   ./tests/verify_doc_examples.sh
-#   TAIDA_BIN=./target/debug/taida ./tests/verify_doc_examples.sh
+#   TAIDA_BIN="$PWD/target/debug/taida" ./tests/verify_doc_examples.sh
 
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd -P)"
+PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd -P)"
 QUALITY_DIR="$PROJECT_DIR/examples/quality"
-
-# Determine the taida binary
-if [ -n "${TAIDA_BIN:-}" ]; then
-  TAIDA="$TAIDA_BIN"
-elif [ -f "$PROJECT_DIR/target/release/taida" ]; then
-  TAIDA="$PROJECT_DIR/target/release/taida"
-elif [ -f "$PROJECT_DIR/target/debug/taida" ]; then
-  TAIDA="$PROJECT_DIR/target/debug/taida"
-else
-  echo "Error: No taida binary found. Run 'cargo build --release' first."
-  exit 1
-fi
+source "$SCRIPT_DIR/scripts/lib_taida_bin.sh"
+TAIDA="$(resolve_taida_bin)" || exit 1
 
 PASS=0
 FAIL=0

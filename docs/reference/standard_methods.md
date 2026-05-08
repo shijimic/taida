@@ -835,7 +835,7 @@ Div[10, 0]().toString()  // "Lax(default: 0)"
 
 ## Gorillax — 覚悟のモールドメソッド
 
-`Gorillax[T]` 型に対して使用できるメソッドです。Gorillax は `Cage[value, fn]()` や `Gorillax[value]()` で生成されます。
+`Gorillax[T]` 型に対して使用できるメソッドです。Gorillax は `Cage[subject, runner]()` (runner は `JSRilla[Out]` / `FileRilla[Out]` 等の `CageRilla[Branch, Out]` 子系統 descriptor) や `Gorillax[value]()` で生成されます。
 
 ### フィールド
 
@@ -860,6 +860,24 @@ Gorillax[42]().isEmpty()  // false
 ```
 
 **シグネチャ**: `=> :Bool`
+
+### 失敗情報取得
+
+#### errorInfo
+
+Gorillax が失敗 (`hasValue = false`) のときの error 情報を `Lax[ErrorInfo]` として取り出します。`__error` フィールドへの直接アクセス (`.__error.message` 等) は `[E1960]` で reject されるため、失敗詳細を読む公式 accessor として本メソッドを使います。`hasValue = true` (成功) のときは戻り値の `Lax` の `hasValue = false` (実体無し) を返します。
+
+```taida fragment
+result = Cage[lodash, JSCall[@["sum"], @[items], Int]()]()
+result.errorInfo() ]=> err
+err.message     // 人間向けメッセージ
+err.kind        // "timeout" / "not_found" 等
+err.code        // numeric code
+```
+
+`ErrorInfo` シェイプ: `@(type: Str, message: Str, kind: Str, code: Int)`。詳細は `docs/reference/class_like_types.md::ErrorInfo` を参照。
+
+**シグネチャ**: `=> :Lax[ErrorInfo]`
 
 ### 変換
 
@@ -906,6 +924,23 @@ Gorillax[42]().toString()  // "Gorillax(42)"
 値を持たないかどうかを返します。
 
 **シグネチャ**: `=> :Bool`
+
+### 失敗情報取得
+
+#### errorInfo
+
+`Gorillax.errorInfo()` と同様、失敗時の `Lax[ErrorInfo]` を返します。`|==` で catch した `RelaxedGorillaEscaped` インスタンスからも `errorInfo()` を呼べます。
+
+```taida fragment
+|== error: RelaxedGorillaEscaped =
+  | _ |>
+      error.errorInfo() ]=> err
+      stderr("operation failed: " + err.message)
+      0
+=> :Int
+```
+
+**シグネチャ**: `=> :Lax[ErrorInfo]`
 
 ### 文字列変換
 

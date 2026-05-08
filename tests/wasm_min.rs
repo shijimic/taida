@@ -4,8 +4,8 @@
 /// runs them with wasmtime, and verifies output matches the interpreter.
 ///
 /// WC-7d: Size gate CI tests — hard gates on .wasm file sizes.
-/// Prelude-complete baselines (WC-1~WC-6): hello = 321 bytes, pi_approx = 6,736 bytes.
-/// Gate: hello <= 512 bytes, pi <= 8,192 bytes.
+/// E33 core baselines: hello = 340 bytes, pi_approx = 8,348 bytes.
+/// Gate: hello <= 512 bytes, pi <= 9,216 bytes.
 ///
 /// RC-8b: Parity tests save compiled .wasm files to `target/wasm-test-cache/wasm-min/`
 /// so superset tests in wasm_wasi.rs can reuse them without recompiling.
@@ -182,16 +182,19 @@ fn wasm_min_pi_approx() {
 // ---------------------------------------------------------------------------
 // WC-7d: Size Gate CI — hard gates on .wasm file sizes
 //
-// Baselines (prelude-complete core, WC-1 through WC-6):
-//   hello = 321 bytes, pi_approx = 6,736 bytes
+// Baselines (E33 core after TypeName / errorInfo / CageRilla support):
+//   hello = 340 bytes, pi_approx = 8,348 bytes
 //
 // wasm-ld --gc-sections prunes unused functions, so hello (which uses only
 // stdout + int-to-string) stays tiny even though core now contains all
 // prelude functions. pi_approx pulls in more of core (float formatting,
-// string concat, etc.) but is still well under 10KB.
+// string concat, etc.) and therefore observes the shared runtime core growth
+// from the E33 introspection / failure-channel support, but is still well
+// under 10KB. If runtime compilation becomes more section-granular, this
+// baseline should be lowered rather than treated as permanent headroom.
 //
-// Gate values include ~60% headroom (hello) / ~22% headroom (pi) above
-// current baselines to allow minor growth without breaking CI.
+// Gate values include headroom above current baselines to allow minor growth
+// without breaking CI.
 // ---------------------------------------------------------------------------
 
 /// Helper: compile a .td to .wasm and return the file size in bytes.
@@ -228,34 +231,31 @@ fn wasm_min_size_gate() {
         &std::env::temp_dir().join("taida_wasm_size_pi.wasm"),
     );
 
-    // WC-7d baselines (prelude-complete core): hello = 321 bytes, pi = 6,736 bytes
+    // E33 baselines: hello = 340 bytes, pi = 8,348 bytes
     eprintln!(
-        "wasm-min hello size: {} bytes (WC-7d baseline: 321)",
+        "wasm-min hello size: {} bytes (E33 baseline: 340)",
         hello_size
     );
-    eprintln!(
-        "wasm-min pi size: {} bytes (WC-7d baseline: 6,736)",
-        pi_size
-    );
+    eprintln!("wasm-min pi size: {} bytes (E33 baseline: 8,348)", pi_size);
 
-    // Hard gate: hello must be <= 512 bytes (~60% headroom above 321 baseline)
+    // Hard gate: hello must be <= 512 bytes.
     assert!(
         hello_size > 0 && hello_size <= 512,
         "HARD GATE FAIL: hello.wasm should be <= 512 bytes (WC-7d gate), got {} bytes",
         hello_size
     );
 
-    // Hard gate: pi_approx must be <= 8,192 bytes (~22% headroom above 6,736 baseline)
+    // Hard gate: pi_approx must be <= 9,216 bytes.
     assert!(
-        pi_size > 0 && pi_size <= 8192,
-        "HARD GATE FAIL: pi.wasm should be <= 8,192 bytes (WC-7d gate), got {} bytes. \
-         Prelude-complete core baseline is 6,736 bytes.",
+        pi_size > 0 && pi_size <= 9216,
+        "HARD GATE FAIL: pi.wasm should be <= 9,216 bytes (WC-7d gate), got {} bytes. \
+         E33 core baseline is 8,348 bytes.",
         pi_size
     );
 
     // Report exact values for tracking
     eprintln!(
-        "Size gate passed: hello={} (gate: 512), pi={} (gate: 8,192)",
+        "Size gate passed: hello={} (gate: 512), pi={} (gate: 9,216)",
         hello_size, pi_size
     );
 }
@@ -1287,7 +1287,6 @@ stdout(fromC("world"))
 // ── RC-6: Type Inheritance Soundness (WASM) ─────────────────────────
 
 #[test]
-#[ignore = "Pending public error introspection surface"]
 fn rc6_wasm_error_inheritance() {
     let Some(wasmtime) = require_wasmtime() else {
         return;
@@ -1296,7 +1295,7 @@ fn rc6_wasm_error_inheritance() {
 Error => AppError = @(code: Int)
 err <= AppError(type <= "AppError", message <= "test", code <= 42)
 Str[err.code]() ]=> code_str
-stdout(err.__type + " " + code_str)
+stdout(TypeName[err]() + " " + code_str)
 "#;
     let interp =
         run_interpreter_src(source, "rc6_wasm_err").expect("RC-6: interpreter should succeed");
@@ -1306,7 +1305,6 @@ stdout(err.__type + " " + code_str)
 }
 
 #[test]
-#[ignore = "Pending public error introspection surface"]
 fn rc6_wasm_error_multilevel() {
     let Some(wasmtime) = require_wasmtime() else {
         return;
@@ -1314,9 +1312,9 @@ fn rc6_wasm_error_multilevel() {
     let source = r#"
 Error => AppError = @(app_code: Int)
 AppError => ValidationError = @(field_name: Str)
-ve <= ValidationError(type <= "VE", message <= "bad", app_code <= 400, field_name <= "email")
+ve <= ValidationError(type <= "ValidationError", message <= "bad", app_code <= 400, field_name <= "email")
 Str[ve.app_code]() ]=> ac
-stdout(ve.__type + " " + ac + " " + ve.field_name)
+stdout(TypeName[ve]() + " " + ac + " " + ve.field_name)
 "#;
     let interp = run_interpreter_src(source, "rc6_wasm_multi_err")
         .expect("RC-6: interpreter should succeed");
@@ -1326,7 +1324,6 @@ stdout(ve.__type + " " + ac + " " + ve.field_name)
 }
 
 #[test]
-#[ignore = "Pending public error introspection surface"]
 fn rc6_wasm_throw_catch() {
     let Some(wasmtime) = require_wasmtime() else {
         return;
@@ -1351,7 +1348,6 @@ stdout(catch_fn(1))
 }
 
 #[test]
-#[ignore = "Pending public error introspection surface"]
 fn rc6_wasm_custom_inheritance() {
     let Some(wasmtime) = require_wasmtime() else {
         return;
@@ -1362,7 +1358,7 @@ Vehicle => Car = @(doors: Int)
 car <= Car(name <= "Sedan", speed <= 120, doors <= 4)
 Str[car.speed]() ]=> sp
 Str[car.doors]() ]=> dr
-stdout(car.__type + " " + car.name + " " + sp + " " + dr)
+stdout(TypeName[car]() + " " + car.name + " " + sp + " " + dr)
 "#;
     let interp =
         run_interpreter_src(source, "rc6_wasm_custom").expect("RC-6: interpreter should succeed");
@@ -1372,7 +1368,6 @@ stdout(car.__type + " " + car.name + " " + sp + " " + dr)
 }
 
 #[test]
-#[ignore = "Pending public error introspection surface"]
 fn rc6_wasm_custom_multilevel() {
     let Some(wasmtime) = require_wasmtime() else {
         return;
@@ -1385,13 +1380,29 @@ rect <= Rectangle(color <= "blue", sides <= 4, width <= 10, height <= 5)
 Str[rect.sides]() ]=> s
 Str[rect.width]() ]=> w
 Str[rect.height]() ]=> h
-stdout(rect.__type + " " + rect.color + " " + s + " " + w + " " + h)
+stdout(TypeName[rect]() + " " + rect.color + " " + s + " " + w + " " + h)
 "#;
     let interp = run_interpreter_src(source, "rc6_wasm_multilevel")
         .expect("RC-6: interpreter should succeed");
     let wasm = compile_and_run_wasm_src(source, &wasmtime, "rc6_wasm_multilevel")
         .expect("RC-6: wasm-min should succeed");
     assert_eq!(interp, wasm, "RC-6/WASM: custom multilevel mismatch");
+}
+
+#[test]
+fn rc6_wasm_typename_plain_buchi_pack_empty() {
+    let Some(wasmtime) = require_wasmtime() else {
+        return;
+    };
+    let source = r#"
+stdout("[" + TypeName[@(a <= 1)]() + "]")
+"#;
+    let interp = run_interpreter_src(source, "rc6_wasm_typename_plain_pack")
+        .expect("RC-6: interpreter should succeed");
+    let wasm = compile_and_run_wasm_src(source, &wasmtime, "rc6_wasm_typename_plain_pack")
+        .expect("RC-6: wasm-min should succeed");
+    assert_eq!(interp, wasm, "RC-6/WASM: TypeName plain BuchiPack mismatch");
+    assert_eq!(wasm, "[]");
 }
 
 // ── NB-30: Net HTTP API compile error integration tests ──────────────
@@ -1439,13 +1450,13 @@ stdout(serverResult.ok)
 
 /// NB-30: httpParseRequestHead in wasm-min must produce compile error.
 #[test]
-#[ignore = "Pending public accessor surface"]
 fn test_nb30_wasm_min_net_http_parse_compile_error() {
     let source = r#">>> taida-lang/net => @(httpParseRequestHead)
 bytesLax <= Bytes["GET / HTTP/1.1\r\nHost: localhost\r\n\r\n"]()
 bytesLax ]=> bytes
 result <= httpParseRequestHead(bytes)
-stdout(result.__value.consumed)
+result ]=> parsed
+stdout(parsed.consumed.toString())
 "#;
     let td_path = std::env::temp_dir().join("taida_nb30_parse.td");
     let wasm_path = std::env::temp_dir().join("taida_nb30_parse.wasm");
@@ -1470,19 +1481,19 @@ stdout(result.__value.consumed)
         stderr
     );
     assert!(
-        stderr.contains("httpParseRequestHead") || stderr.contains("net"),
-        "NB-30: compile error should mention httpParseRequestHead or net.\nstderr: {}",
+        stderr.contains("httpParseRequestHead"),
+        "NB-30: compile error should mention httpParseRequestHead.\nstderr: {}",
         stderr
     );
 }
 
 /// NB-30: httpEncodeResponse in wasm-min must produce compile error.
 #[test]
-#[ignore = "Pending public accessor surface"]
 fn test_nb30_wasm_min_net_http_encode_compile_error() {
     let source = r#">>> taida-lang/net => @(httpEncodeResponse)
 result <= httpEncodeResponse(@(status <= 200, headers <= @[], body <= "Hello"))
-stdout(result.__value.kind)
+result ]=> encoded
+stdout(encoded.kind)
 "#;
     let td_path = std::env::temp_dir().join("taida_nb30_encode.td");
     let wasm_path = std::env::temp_dir().join("taida_nb30_encode.wasm");
@@ -1507,8 +1518,8 @@ stdout(result.__value.kind)
         stderr
     );
     assert!(
-        stderr.contains("httpEncodeResponse") || stderr.contains("net"),
-        "NB-30: compile error should mention httpEncodeResponse or net.\nstderr: {}",
+        stderr.contains("httpEncodeResponse"),
+        "NB-30: compile error should mention httpEncodeResponse.\nstderr: {}",
         stderr
     );
 }

@@ -67,7 +67,134 @@ pub(crate) fn make_int_lax(idx: Option<i64>) -> Value {
     }
 }
 
+fn string_field(fields: &[(String, Value)], name: &str) -> Option<String> {
+    fields.iter().find_map(|(field, value)| {
+        if field == name
+            && let Value::Str(s) = value
+        {
+            Some(s.as_string().clone())
+        } else {
+            None
+        }
+    })
+}
+
+fn int_field(fields: &[(String, Value)], name: &str) -> Option<i64> {
+    fields.iter().find_map(|(field, value)| {
+        if field == name
+            && let Value::Int(n) = value
+        {
+            Some(*n)
+        } else {
+            None
+        }
+    })
+}
+
 impl Interpreter {
+    pub(crate) fn default_error_info_value() -> Value {
+        Value::pack(vec![
+            ("type".into(), Value::str(String::new())),
+            ("message".into(), Value::str(String::new())),
+            ("kind".into(), Value::str(String::new())),
+            ("code".into(), Value::Int(0)),
+            ("__type".into(), Value::str("ErrorInfo".into())),
+        ])
+    }
+
+    pub(crate) fn error_info_value(error: &Value) -> Value {
+        let (error_type, message, kind, code) = match error {
+            Value::Error(err) => {
+                let kind = string_field(&err.fields, "kind").unwrap_or_else(|| {
+                    if err.error_type.is_empty() {
+                        "Error".to_string()
+                    } else {
+                        err.error_type.clone()
+                    }
+                });
+                let code = int_field(&err.fields, "code").unwrap_or(0);
+                (
+                    if err.error_type.is_empty() {
+                        "Error".to_string()
+                    } else {
+                        err.error_type.clone()
+                    },
+                    err.message.clone(),
+                    kind,
+                    code,
+                )
+            }
+            Value::BuchiPack(fields) => {
+                let error_type = string_field(fields, "type")
+                    .or_else(|| string_field(fields, "__type"))
+                    .unwrap_or_else(|| "Error".to_string());
+                let message = string_field(fields, "message").unwrap_or_default();
+                let kind = string_field(fields, "kind").unwrap_or_else(|| error_type.clone());
+                let code = int_field(fields, "code").unwrap_or(0);
+                (error_type, message, kind, code)
+            }
+            other => (
+                Self::type_name_of(other).to_string(),
+                other.to_display_string(),
+                Self::type_name_of(other).to_string(),
+                0,
+            ),
+        };
+
+        Value::pack(vec![
+            ("type".into(), Value::str(error_type)),
+            ("message".into(), Value::str(message)),
+            ("kind".into(), Value::str(kind)),
+            ("code".into(), Value::Int(code)),
+            ("__type".into(), Value::str("ErrorInfo".into())),
+        ])
+    }
+
+    pub(crate) fn error_info_lax(error: Option<&Value>) -> Value {
+        let default = Self::default_error_info_value();
+        match error {
+            Some(value) => Value::pack(vec![
+                ("hasValue".into(), Value::Bool(true)),
+                ("__value".into(), Self::error_info_value(value)),
+                ("__default".into(), default),
+                ("__type".into(), Value::str("Lax".into())),
+            ]),
+            None => Value::pack(vec![
+                ("hasValue".into(), Value::Bool(false)),
+                ("__value".into(), default.clone()),
+                ("__default".into(), default),
+                ("__type".into(), Value::str("Lax".into())),
+            ]),
+        }
+    }
+
+    pub(crate) fn relaxed_gorilla_error(error: &Value) -> Value {
+        let info = Self::error_info_value(error);
+        let (kind, code, cause_message) = if let Value::BuchiPack(fields) = &info {
+            (
+                string_field(fields, "kind").unwrap_or_else(|| "RelaxedGorillaEscaped".into()),
+                int_field(fields, "code").unwrap_or(0),
+                string_field(fields, "message").unwrap_or_default(),
+            )
+        } else {
+            ("RelaxedGorillaEscaped".into(), 0, String::new())
+        };
+        let message = if cause_message.is_empty() {
+            "Relaxed gorilla escaped".to_string()
+        } else {
+            format!("Relaxed gorilla escaped: {}", cause_message)
+        };
+        Value::Error(super::value::ErrorValue {
+            error_type: "RelaxedGorillaEscaped".into(),
+            message,
+            fields: vec![
+                ("kind".into(), Value::str(kind)),
+                ("code".into(), Value::Int(code)),
+                ("cause".into(), error.clone()),
+            ],
+        })
+    }
+
     /// Evaluate auto-mold method calls on values.
     pub(crate) fn eval_method_call(
         &mut self,
@@ -178,6 +305,8 @@ impl Interpreter {
             Value::Error(_) => {
                 if method == "throw" {
                     Ok(Signal::Throw(obj.clone()))
+                } else if method == "errorInfo" {
+                    Ok(Signal::Value(Self::error_info_lax(Some(obj))))
                 } else {
                     Err(RuntimeError {
                         message: format!(
@@ -488,6 +617,13 @@ impl Interpreter {
         match method {
             "hasValue" => Ok(Signal::Value(Value::Bool(has_value))),
             "isEmpty" => Ok(Signal::Value(Value::Bool(!has_value))),
+            "errorInfo" => {
+                if has_value {
+                    Ok(Signal::Value(Self::error_info_lax(None)))
+                } else {
+                    Ok(Signal::Value(Self::error_info_lax(Some(&error_value))))
+                }
+            }
             "relax" => {
                 // Convert to RelaxedGorillax — throwable instead of gorilla
                 Ok(Signal::Value(Value::pack(vec![
@@ -531,10 +667,22 @@ impl Interpreter {
             .find(|(n, _)| n == "__value")
             .map(|(_, v)| v.clone())
             .unwrap_or(Value::Unit);
+        let error_value = fields
+            .iter()
+            .find(|(n, _)| n == "__error")
+            .map(|(_, v)| v.clone())
+            .unwrap_or(Value::Unit);
 
         match method {
             "hasValue" => Ok(Signal::Value(Value::Bool(has_value))),
             "isEmpty" => Ok(Signal::Value(Value::Bool(!has_value))),
+            "errorInfo" => {
+                if has_value {
+                    Ok(Signal::Value(Self::error_info_lax(None)))
+                } else {
+                    Ok(Signal::Value(Self::error_info_lax(Some(&error_value))))
+                }
+            }
             "toString" => {
                 if has_value {
                     Ok(Signal::Value(Value::str(format!(

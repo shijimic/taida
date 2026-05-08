@@ -892,6 +892,16 @@ fn wasm_full_parity_allowlist_guard() {
     );
 }
 
+#[test]
+fn wasm_full_mutual_recursion_native_fail_allowlist_pins_examples() {
+    for stem in ["compile_mutual_recursion", "compile_c12_3_mutual_tail"] {
+        assert!(
+            FULL_EXPECTED_NATIVE_FAIL.contains(&stem),
+            "wasm-full parity policy must keep `{stem}` in the native-fail allowlist"
+        );
+    }
+}
+
 // Per-fixture tests emitted by build.rs; see tests/wasm_wasi.rs for design.
 macro_rules! c24_fixture_runner {
     ($stem:expr) => {

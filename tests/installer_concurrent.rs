@@ -36,7 +36,6 @@ fn taida_bin() -> PathBuf {
 }
 
 #[test]
-#[ignore = "Pre-empted by project-root marker tightening; needs rooted fixture"]
 fn c17b_009_two_concurrent_installs_serialize_safely() {
     let work = unique_temp_dir("c17b_009_concurrent");
     let home = work.join("home");
@@ -48,6 +47,8 @@ fn c17b_009_two_concurrent_installs_serialize_safely() {
     let project_b = work.join("project_b");
     fs::create_dir_all(&project_a).unwrap();
     fs::create_dir_all(&project_b).unwrap();
+    common::mark_project_root(&project_a);
+    common::mark_project_root(&project_b);
 
     let tarball = make_tarball(&[
         ("packages.tdm", b"<<<@a.1 taida-lang/race\n" as &[u8]),

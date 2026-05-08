@@ -12,7 +12,7 @@
 #
 # Prerequisites (the script checks each and exits with a message
 # if any is missing):
-#   - taida binary built: target/debug/taida (or set TAIDA_BIN)
+#   - taida binary built under target/{debug,release}/taida (or set TAIDA_BIN)
 #   - terminal cdylib built: ../terminal/target/{debug,release}/libtaida_lang_terminal.so
 #   - terminal facade: ../terminal/taida/terminal.td
 #   - terminal addon.toml: ../terminal/native/addon.toml
@@ -25,24 +25,12 @@
 # ─────────────────────────────────────────────────────────────────
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd -P)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd -P)"
 
 # ── Resolve taida binary ────────────────────────────────────────
-TAIDA="${TAIDA_BIN:-}"
-if [ -z "$TAIDA" ]; then
-    for profile in debug release; do
-        candidate="${REPO_ROOT}/target/${profile}/taida"
-        if [ -x "$candidate" ]; then
-            TAIDA="$candidate"
-            break
-        fi
-    done
-fi
-if [ -z "$TAIDA" ] || [ ! -x "$TAIDA" ]; then
-    echo "SKIP: taida binary not found. Build with 'cargo build' or set TAIDA_BIN." >&2
-    exit 1
-fi
+source "$SCRIPT_DIR/scripts/lib_taida_bin.sh"
+TAIDA="$(resolve_taida_bin)" || exit 1
 echo "taida binary: ${TAIDA}"
 
 # ── Resolve project directory ───────────────────────────────────

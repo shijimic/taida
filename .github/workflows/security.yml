@@ -15,14 +15,13 @@ name: Security
 # C26B-007 Sub-phase 7.3 (2026-04-24): added `c-static-analysis` job.
 # Assembles the native_runtime C fragments in the same order used by
 # the runtime (`native_runtime/mod.rs::NATIVE_RUNTIME_C`) and runs
-# gcc -Wall -Wextra -Wformat-security + cppcheck on the TU. Uses a
-# delta-based gate against the baseline recorded in
-# `.dev/C26_C_STATIC_ANALYSIS.md` so a new warning introduced by any
-# change to the C fragments fails the job.
+# gcc -Wall -Wextra -Wformat-security -Werror + cppcheck on the TU.
+# The gcc step is a zero-warning gate: warning-producing C fragments fail
+# before runtime code can merge.
 #
-# Scope isolation (Phase 6 driver): this workflow lives in its own
-# file. The existing `.github/workflows/ci.yml` is not touched — CI
-# wallclock is the Phase 2 driver's domain.
+# Scope isolation: native C static analysis remains in this workflow.
+# Archive/direct binary path checks live in `.github/workflows/ci.yml`
+# because they exercise nextest archive production and consumption.
 
 on:
   push:
@@ -54,7 +53,7 @@ jobs:
     # cargo-audit surfaces blocks the pipeline.
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.93.1
       - name: Cache cargo-audit binary
         uses: actions/cache@v5
         with:
@@ -82,7 +81,7 @@ jobs:
     # cargo-audit above). `continue-on-error` removed.
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.93.1
       - name: Cache cargo-deny binary
         uses: actions/cache@v5
         with:
@@ -108,8 +107,8 @@ jobs:
     # C26B-007 Sub-phase 7.3: assemble the native_runtime C fragments
     # in the same concatenation order as
     # `native_runtime/mod.rs::NATIVE_RUNTIME_C` and run gcc + cppcheck
-    # on the assembled TU. Hard-fails on a delta against the baseline
-    # in `.dev/C26_C_STATIC_ANALYSIS.md`.
+    # on the assembled TU. Hard-fails on any gcc warning and on cppcheck
+    # security findings.
     steps:
       - uses: actions/checkout@v5
       - name: Install analyzers
@@ -128,22 +127,20 @@ jobs:
               src/codegen/native_runtime/net_h3_quic.c \
               > /tmp/c-analysis/native_runtime_assembled.c
           echo "Assembled TU: $(wc -l < /tmp/c-analysis/native_runtime_assembled.c) lines"
-      - name: gcc -Wall -Wextra (delta gate)
-        # Baseline recorded in .dev/C26_C_STATIC_ANALYSIS.md: 78 warnings.
-        # A new warning (any category) fails the job.
+      - name: gcc -Wall -Wextra -Wformat-security -Werror
+        # Native runtime fragments must stay warning-clean. This prevents
+        # warning-count baselines from hiding newly reachable C issues.
         run: |
           set -euo pipefail
-          gcc -fsyntax-only -Wall -Wextra -Wformat-security \
+          if ! gcc -fsyntax-only -Wall -Wextra -Wformat-security -Werror \
               /tmp/c-analysis/native_runtime_assembled.c \
-              2> /tmp/c-analysis/gcc.log || true
-          count=$(grep -cE "warning:" /tmp/c-analysis/gcc.log || true)
-          echo "gcc warning count: ${count} (baseline: 78)"
-          if [ "${count}" -gt 78 ]; then
-              echo "::error::gcc warnings increased: ${count} > 78 baseline."
-              echo "See .dev/C26_C_STATIC_ANALYSIS.md for the allowlist/fix-queue policy."
-              grep -E "warning:" /tmp/c-analysis/gcc.log | head -80
+              2> /tmp/c-analysis/gcc.log; then
+              echo "::group::gcc diagnostics"
+              cat /tmp/c-analysis/gcc.log
+              echo "::endgroup::"
               exit 1
           fi
+          echo "gcc warning count: 0"
       - name: cppcheck (security categories)
         # Security gate scope: `warning` (null-deref, uninit-var, memory
         # leak, etc.), `performance`, and `portability` — the categories
@@ -168,8 +165,7 @@ jobs:
         #     no security-critical check that only `style` surfaces.
         #
         # If `style` is re-enabled in the future it must come with a
-        # triage pass of the defence-in-depth sites and an updated
-        # baseline in `.dev/C26_C_STATIC_ANALYSIS.md`.
+        # triage pass of the defence-in-depth sites.
         run: |
           set -euo pipefail
           # `--inline-suppr` enables the handful of `// cppcheck-suppress`

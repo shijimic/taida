@@ -85,13 +85,13 @@ fn run_install_with_env(
 }
 
 #[test]
-#[ignore = "Pre-empted by project-root marker tightening; needs rooted fixture"]
 fn c17_5_offline_with_sidecar_prints_offline_warning() {
     let work = unique_temp_dir("c17_offline_with_sidecar");
     let home = work.join("home");
     let project = work.join("project");
     fs::create_dir_all(&home).unwrap();
     fs::create_dir_all(&project).unwrap();
+    common::mark_project_root(&project);
 
     // Step 1: do a successful install against the mock so the store
     // ends up with a sidecar.
@@ -153,6 +153,7 @@ fn c17_5_offline_without_sidecar_prints_strong_warning() {
     let project = work.join("project");
     fs::create_dir_all(&home).unwrap();
     fs::create_dir_all(&project).unwrap();
+    common::mark_project_root(&project);
 
     // Simulate a pre-C17 install (no sidecar).
     let store_pkg = home
@@ -200,13 +201,13 @@ fn c17_5_offline_without_sidecar_prints_strong_warning() {
 }
 
 #[test]
-#[ignore = "Pre-empted by project-root marker tightening; needs rooted fixture"]
 fn c17_5_no_remote_check_skips_lookup_silently() {
     let work = unique_temp_dir("c17_no_remote");
     let home = work.join("home");
     let project = work.join("project");
     fs::create_dir_all(&home).unwrap();
     fs::create_dir_all(&project).unwrap();
+    common::mark_project_root(&project);
 
     // Start with a warm install so a sidecar with a real SHA is in
     // place. Then verify that --no-remote-check skips the API hit even

@@ -63,6 +63,38 @@ impl Interpreter {
         }
     }
 
+    /// Get the value-time public type identity used by `TypeName[value]()`.
+    pub(crate) fn value_type_name(&self, val: &Value) -> String {
+        match val {
+            Value::BuchiPack(fields) => fields
+                .iter()
+                .find_map(|(name, v)| {
+                    if name == "__type"
+                        && let Value::Str(s) = v
+                    {
+                        Some(s.as_string().clone())
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or_default(),
+            Value::Error(err) => {
+                if err.error_type.is_empty() {
+                    "Error".to_string()
+                } else {
+                    err.error_type.clone()
+                }
+            }
+            Value::EnumVal(enum_name, ordinal) => self
+                .enum_defs
+                .get(enum_name)
+                .and_then(|variants| variants.get(*ordinal as usize))
+                .cloned()
+                .unwrap_or_else(|| enum_name.clone()),
+            other => Self::type_name_of(other).to_string(),
+        }
+    }
+
     /// Try to handle a built-in function call (prelude functions).
     pub(crate) fn try_builtin_func(
         &mut self,

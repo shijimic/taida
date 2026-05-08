@@ -5,7 +5,7 @@
 Error => AppError = @(code: Int)
 err1 <= AppError(type <= "AppError", message <= "test error", code <= 42)
 Str[err1.code]() ]=> code_str
-stdout("T1: " + err1.__type + " code=" + code_str)
+stdout("T1: " + TypeName[err1]() + " code=" + code_str)
 
 // --- Test 2: Field composition (parent message/type + child fields) ---
 Error => DetailedError = @(detail: Str, severity: Int)
@@ -55,7 +55,7 @@ stdout("T6: " + catch_with_fields(1))
 Error => BaseError = @(base_info: Str)
 BaseError => SubError = @(sub_detail: Str)
 sub_err <= SubError(type <= "SubError", message <= "sub failed", base_info <= "base", sub_detail <= "detail")
-stdout("T7: " + sub_err.__type + " base_info=" + sub_err.base_info + " sub_detail=" + sub_err.sub_detail)
+stdout("T7: " + TypeName[sub_err]() + " base_info=" + sub_err.base_info + " sub_detail=" + sub_err.sub_detail)
 
 // --- Test 8: Multi-level throw and catch ---
 Error => Level1Error = @(l1: Str)

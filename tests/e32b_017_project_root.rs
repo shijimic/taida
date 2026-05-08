@@ -32,6 +32,9 @@ fn write_poc_layout() -> (PathBuf, PathBuf, PathBuf) {
     fs::create_dir_all(home.join(".taida")).expect("create home .taida");
     fs::create_dir_all(&project).expect("create project");
     fs::create_dir_all(&attacker).expect("create attacker dir");
+    // Keep the intended boundary stable even when the temp parent has
+    // ambient markers such as `/tmp/.git`.
+    fs::write(project.join("taida.toml"), "").expect("write project marker");
 
     let secret = attacker.join("secret.td");
     fs::write(

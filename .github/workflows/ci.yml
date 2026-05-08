@@ -24,7 +24,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.93.1
       # C25B-003 Phase 2B: migrate from hand-rolled actions/cache to
       # Swatinem/rust-cache@v2. Advantages:
       #  - save-on-success semantics avoid polluting the cache with broken
@@ -70,14 +70,56 @@ jobs:
     needs: check
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.93.1
       - uses: taiki-e/install-action@nextest
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: cargo-base
           save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Build taida CLI for archive
+        env:
+          RUSTFLAGS: "-D warnings --cfg taida_allow_mock_github_base_url"
+        run: cargo build --bin taida
       - name: Build nextest archive
+        env:
+          RUSTFLAGS: "-D warnings --cfg taida_allow_mock_github_base_url"
         run: cargo nextest archive --all-targets --archive-file taida-nextest.tar.zst
+      - name: Archived taida mock-base gate
+        run: |
+          probe_dir="${RUNNER_TEMP}/archive-mock-base-gate"
+          rm -rf "${probe_dir}"
+          mkdir -p "${probe_dir}/extract" "${probe_dir}/home" "${probe_dir}/project"
+          tar --zstd -xf taida-nextest.tar.zst -C "${probe_dir}/extract" target/debug/taida
+          chmod +x "${probe_dir}/extract/target/debug/taida"
+          touch "${probe_dir}/project/taida.toml"
+          cat > "${probe_dir}/project/packages.tdm" <<'EOF'
+          [packages."taida-lang/mock"]
+          version = "a.1"
+          integrity = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+          <<<@a.1 test/probe
+          EOF
+          printf 'stdout("probe")\n' > "${probe_dir}/project/main.td"
+          set +e
+          HOME="${probe_dir}/home" \
+            TAIDA_GITHUB_BASE_URL="http://127.0.0.1:1" \
+            TAIDA_E32_ALLOW_MOCK_GITHUB_BASE_URL="1" \
+            TAIDA_GITHUB_API_URL="http://127.0.0.1:1" \
+            GH_TOKEN="unused" \
+            "${probe_dir}/extract/target/debug/taida" ingot install --no-remote-check \
+              >"${probe_dir}/stdout" 2>"${probe_dir}/stderr"
+          status=$?
+          set -e
+          if grep -q "E32K3_GITHUB_BASE_URL_CONFINED" "${probe_dir}/stderr"; then
+            cat "${probe_dir}/stderr"
+            exit 1
+          fi
+          if [ "${status}" -eq 0 ]; then
+            echo "closed loopback source install unexpectedly succeeded"
+            exit 1
+          fi
+      - name: Direct taida binary path gate
+        run: cargo test --test archive_path_gate -- --nocapture
       - name: Upload nextest archive
         uses: actions/upload-artifact@v6
         with:
@@ -92,7 +134,7 @@ jobs:
     needs: build-archive
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.93.1
       - uses: taiki-e/install-action@nextest
       - name: Install wasmtime
         run: |
@@ -111,7 +153,15 @@ jobs:
       # loads test binaries directly from the archive. `--workspace-remap .`
       # tells nextest the repository root at test-run time (fixture paths in
       # `tests/**/*.rs` resolve relative to workspace root at runtime).
-      - run: cargo nextest run --archive-file taida-nextest.tar.zst --workspace-remap . --profile ci
+      - run: |
+          mkdir -p "${RUNNER_TEMP}/nextest-archive"
+          TAIDA_BIN="${RUNNER_TEMP}/nextest-archive/target/debug/taida" \
+            cargo nextest run \
+              --archive-file taida-nextest.tar.zst \
+              --extract-to "${RUNNER_TEMP}/nextest-archive" \
+              --extract-overwrite \
+              --workspace-remap . \
+              --profile ci
 
   parity:
     name: Backend Parity
@@ -119,7 +169,7 @@ jobs:
     needs: check
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.93.1
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: cargo-base
@@ -135,14 +185,14 @@ jobs:
     needs: check
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.93.1
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: cargo-base
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: cargo build --release
       - name: Run E2E smoke tests
-        run: TAIDA_BIN=./target/release/taida ./tests/e2e_smoke.sh
+        run: TAIDA_BIN="$PWD/target/release/taida" ./tests/e2e_smoke.sh
 
   e32-loopback-smoke:
     name: E32 Loopback Smoke
@@ -150,7 +200,7 @@ jobs:
     needs: check
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.93.1
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: cargo-base
@@ -175,7 +225,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.93.1
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
@@ -189,7 +239,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.93.1
         with:
           components: rustfmt
       - run: cargo fmt --all -- --check
@@ -225,7 +275,7 @@ jobs:
     needs: check
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.93.1
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: cargo-base
@@ -257,6 +307,21 @@ jobs:
           if [ -d examples/embedding ]; then
             ./target/debug/taida way lint --quiet examples/embedding
           fi
+
+  ignored-inventory:
+    name: Ignored / optional test inventory
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch'
+    needs: check
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@1.93.1
+      - uses: taiki-e/install-action@nextest
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: cargo-base
+      - name: List ignored tests inventory
+        run: cargo nextest list --profile ci --run-ignored only
 
   # D29B-010 / Lock-G: workflow YAML hard-fail audit.
   #

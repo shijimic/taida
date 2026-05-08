@@ -13,7 +13,7 @@ Str[sq.width]() ]=> sq_w
 Str[sq.height]() ]=> sq_h
 Str[sq.is_square]() ]=> sq_is
 Str[sq.area]() ]=> sq_a
-stdout("T1: " + sq.__type + " color=" + sq.color + " sides=" + sq_sides + " w=" + sq_w + " h=" + sq_h + " sq=" + sq_is + " area=" + sq_a)
+stdout("T1: " + TypeName[sq]() + " color=" + sq.color + " sides=" + sq_sides + " w=" + sq_w + " h=" + sq_h + " sq=" + sq_is + " area=" + sq_a)
 
 // Function expecting Shape (grandparent) receives Square
 describe_shape s: Shape = s.color + " shape" => :Str
@@ -31,10 +31,10 @@ rect <= Rectangle(color <= "blue", sides <= 4, width <= 10, height <= 5)
 Str[rect.area]() ]=> r_area
 Str[rect.width]() ]=> r_w
 Str[rect.height]() ]=> r_h
-stdout("T4: " + rect.__type + " area=" + r_area + " w=" + r_w + " h=" + r_h)
+stdout("T4: " + TypeName[rect]() + " area=" + r_area + " w=" + r_w + " h=" + r_h)
 
 // Polygon with minimal fields
 tri <= Polygon(color <= "green", sides <= 3)
 Str[tri.sides]() ]=> t_sides
 Str[tri.area]() ]=> t_area
-stdout("T5: " + tri.__type + " sides=" + t_sides + " area=" + t_area)
+stdout("T5: " + TypeName[tri]() + " sides=" + t_sides + " area=" + t_area)

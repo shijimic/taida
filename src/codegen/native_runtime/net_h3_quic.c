@@ -438,7 +438,7 @@ static int h3_qpack_decode_string(const unsigned char *data, size_t data_len,
 
     if (is_huffman) {
         // Reuse H2 Huffman decode
-        int dec_len = h2_huffman_decode(str_data, (size_t)str_len, out, out_cap - 1);
+        int dec_len = h2_huffman_decode(str_data, (size_t)str_len, (unsigned char*)out, out_cap - 1);
         if (dec_len < 0) return -1;
         out[dec_len] = '\0';
     } else {
@@ -585,7 +585,8 @@ static int h3_qpack_decode_block_with_dt(const unsigned char *data, size_t data_
             if (consumed + (size_t)name_len > data_len) return -1;
             if (name_huffman) {
                 int dec = h2_huffman_decode(data + consumed, (size_t)name_len,
-                                           headers[hdr_count].name, sizeof(headers[hdr_count].name) - 1);
+                                           (unsigned char*)headers[hdr_count].name,
+                                           sizeof(headers[hdr_count].name) - 1);
                 if (dec < 0) return -1;
                 headers[hdr_count].name[dec] = '\0';
             } else {
@@ -1473,7 +1474,7 @@ static struct {
     int             (*quiche_conn_stream_priority)(quiche_conn *conn, uint64_t stream_id,
                                                     uint8_t urgency, int incremental);
 
-} taida_quiche = { 0, NULL };
+} taida_quiche = {0};
 
 // Forward declaration.
 static void taida_quiche_unload(void);
@@ -2850,8 +2851,6 @@ static H3ServeResult serve_h3_loop(int port, taida_val handler, int handler_arit
     unsigned char send_buf[QUICHE_MAX_DATAGRAM_SIZE]; // bounded: matches recv_buf
     struct sockaddr_in peer_addr;
     socklen_t peer_len;
-    struct sockaddr_in send_addr;
-    socklen_t send_addr_len;
     H3ServeResult serve_result = {0};
 
     for (;;) {

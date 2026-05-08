@@ -209,6 +209,7 @@ int64_t taida_typeis_named(int64_t val, int64_t expected_type_str) {
 /* WASM_HASH_TYPE and WASM_HASH_MESSAGE are defined in the "Error field hashes" section */
 #define WASM_HASH_FIELD     0x2c5d047ff4e6ffc7LL  /* FNV-1a("field") */
 #define WASM_HASH_CODE      0x0bb51791194b4414LL  /* FNV-1a("code") */
+#define WASM_HASH_KIND      0xef9c96d721673243LL  /* FNV-1a("kind") */
 
 static void _wasm_register_builtin_error_field_names(void) {
     static int registered = 0;
@@ -219,10 +220,7 @@ static void _wasm_register_builtin_error_field_names(void) {
     taida_register_field_name(WASM_HASH_MESSAGE, (int64_t)(intptr_t)"message");
     taida_register_field_name(WASM_HASH_FIELD, (int64_t)(intptr_t)"field");
     taida_register_field_name(WASM_HASH_CODE, (int64_t)(intptr_t)"code");
-    taida_register_field_name(
-        taida_str_hash((int64_t)(intptr_t)"kind"),
-        (int64_t)(intptr_t)"kind"
-    );
+    taida_register_field_name(WASM_HASH_KIND, (int64_t)(intptr_t)"kind");
 }
 
 int64_t taida_make_error(int64_t type_ptr, int64_t msg_ptr) {
@@ -317,6 +315,87 @@ int64_t taida_lax_unmold(int64_t lax_ptr) {
 
 int64_t taida_lax_is_empty(int64_t lax_ptr) {
     return taida_pack_get_idx(lax_ptr, 0) ? 0 : 1;
+}
+
+static int64_t _wasm_error_info_pack(int64_t type_name, int64_t message, int64_t kind, int64_t code) {
+    _wasm_register_builtin_error_field_names();
+    _wasm_register_lax_field_names();
+    int64_t pack = taida_pack_new(5);
+    taida_pack_set_hash(pack, 0, WASM_HASH_TYPE);
+    taida_pack_set(pack, 0, type_name);
+    taida_pack_set_tag(pack, 0, WASM_TAG_STR);
+    taida_pack_set_hash(pack, 1, WASM_HASH_MESSAGE);
+    taida_pack_set(pack, 1, message);
+    taida_pack_set_tag(pack, 1, WASM_TAG_STR);
+    taida_pack_set_hash(pack, 2, WASM_HASH_KIND);
+    taida_pack_set(pack, 2, kind);
+    taida_pack_set_tag(pack, 2, WASM_TAG_STR);
+    taida_pack_set_hash(pack, 3, WASM_HASH_CODE);
+    taida_pack_set(pack, 3, code);
+    taida_pack_set_tag(pack, 3, WASM_TAG_INT);
+    taida_pack_set_hash(pack, 4, WASM_HASH___TYPE);
+    taida_pack_set(pack, 4, (int64_t)(intptr_t)"ErrorInfo");
+    taida_pack_set_tag(pack, 4, WASM_TAG_STR);
+    return pack;
+}
+
+static int64_t _wasm_error_info_default(void) {
+    return _wasm_error_info_pack(
+        (int64_t)(intptr_t)"",
+        (int64_t)(intptr_t)"",
+        (int64_t)(intptr_t)"",
+        0
+    );
+}
+
+static int _wasm_is_gorillax_like_pack(int64_t ptr) {
+    if (!_looks_like_pack(ptr)) return 0;
+    int64_t *pack = (int64_t *)(intptr_t)ptr;
+    if (pack[0] < 4) return 0;
+    return pack[1] == WASM_HASH_HAS_VALUE && pack[1 + 2 * 3] == WASM_HASH___ERROR;
+}
+
+static int _wasm_is_error_info_source_pack(int64_t ptr) {
+    return _looks_like_pack(ptr)
+        && taida_pack_has_hash(ptr, WASM_HASH___TYPE)
+        && taida_pack_has_hash(ptr, WASM_HASH_TYPE)
+        && taida_pack_has_hash(ptr, WASM_HASH_MESSAGE);
+}
+
+static int64_t _wasm_error_info_from_error(int64_t error) {
+    int64_t type_name = (int64_t)(intptr_t)"Error";
+    int64_t message = (int64_t)(intptr_t)"";
+    int64_t kind = 0;
+    int64_t code = 0;
+    if (_looks_like_pack(error)) {
+        if (taida_pack_has_hash(error, WASM_HASH_TYPE)) {
+            type_name = taida_pack_get(error, WASM_HASH_TYPE);
+        } else if (taida_pack_has_hash(error, WASM_HASH___TYPE)) {
+            type_name = taida_pack_get(error, WASM_HASH___TYPE);
+        }
+        if (taida_pack_has_hash(error, WASM_HASH_MESSAGE)) {
+            message = taida_pack_get(error, WASM_HASH_MESSAGE);
+        }
+        if (taida_pack_has_hash(error, WASM_HASH_KIND)) {
+            kind = taida_pack_get(error, WASM_HASH_KIND);
+        }
+        if (taida_pack_has_hash(error, WASM_HASH_CODE)) {
+            code = taida_pack_get(error, WASM_HASH_CODE);
+        }
+    }
+    if (kind == 0) kind = type_name;
+    return _wasm_error_info_pack(type_name, message, kind, code);
+}
+
+int64_t taida_error_info(int64_t source) {
+    int64_t def = _wasm_error_info_default();
+    if (_wasm_is_gorillax_like_pack(source)) {
+        if (taida_pack_get_idx(source, 0)) return taida_lax_empty(def);
+        return taida_lax_new(_wasm_error_info_from_error(taida_pack_get_idx(source, 2)), def);
+    }
+    if (source == 0) return taida_lax_empty(def);
+    if (!_wasm_is_error_info_source_pack(source)) return taida_lax_empty(def);
+    return taida_lax_new(_wasm_error_info_from_error(source), def);
 }
 
 /* ── W-5: generic_unmold — now Lax-aware ── */
@@ -847,31 +926,6 @@ int64_t taida_error_type_check_or_rethrow(int64_t error_val, int64_t handler_typ
     /* Re-throw: sets __wasm_error_thrown flag */
     taida_throw(error_val);
     return 0; /* caller should check __wasm_error_thrown */
-}
-
-int64_t taida_cage_apply(int64_t cage_value, int64_t fn_ptr) {
-    if (fn_ptr == 0) {
-        int64_t error = taida_make_error(
-            (int64_t)(intptr_t)"CageError",
-            (int64_t)(intptr_t)"Cage second argument must be a function");
-        return taida_gorillax_err(error);
-    }
-
-    int64_t depth = taida_error_ceiling_push();
-    __wasm_error_thrown = 0;
-    int64_t result = _wasm_invoke_callback1(fn_ptr, cage_value);
-    if (__wasm_error_thrown) {
-        int64_t error = taida_error_get_value(depth);
-        taida_error_ceiling_pop();
-        if (error == 0) {
-            error = taida_make_error(
-                (int64_t)(intptr_t)"CageError",
-                (int64_t)(intptr_t)"Cage function failed");
-        }
-        return taida_gorillax_err(error);
-    }
-    taida_error_ceiling_pop();
-    return taida_gorillax_new(result);
 }
 
 /* ── W-5: Molten/Stub/Todo stubs ── */
@@ -1782,4 +1836,3 @@ int64_t taida_codepoint_mold_str(int64_t value) {
 int64_t taida_digit_to_char(int64_t digit) {
     return (digit < 10) ? ('0' + digit) : ('a' + (digit - 10));
 }
-

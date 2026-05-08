@@ -24,7 +24,8 @@ r       <= runInteractive(editor, @[path])
 
 // 3) exit code を検査（失敗は早期終了、成功は通過）
 | !r.hasValue |>
-  bytes <= stderr("editor failed: " + r.__error.message)
+  r.errorInfo() ]=> err
+  bytes <= stderr("editor failed: " + err.message)
   ><
 r ]=> proc
 | proc.code != 0 |>
@@ -107,7 +108,8 @@ stdout(AltScreenEnter())
 
 ```taida
 | !r.hasValue |>
-  bytes <= stderr("editor failed: " + r.__error.message)
+  r.errorInfo() ]=> err
+  bytes <= stderr("editor failed: " + err.message)
   ><
 
 r ]=> proc

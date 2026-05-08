@@ -24,6 +24,7 @@ pub mod lsp;
 pub mod module_graph;
 pub mod net_surface;
 pub mod parser;
+pub(crate) mod project_root;
 // C25B-018: best-effort terminal-state restoration on panic / fatal
 // signal. See module docs for scope / non-negotiables.
 pub mod panic_cleanup;

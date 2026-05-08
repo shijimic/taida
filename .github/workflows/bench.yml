@@ -72,7 +72,7 @@ jobs:
     timeout-minutes: 50
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.93.1
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: cargo-base

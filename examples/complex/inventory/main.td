@@ -54,7 +54,8 @@ stdout("")
 // Find item by name
 found <= findByName(items, "Widget B")
 | found.hasValue |>
-  stdout("Found: " + found.__value.name + " ($" + found.__value.price.toString() + ", qty: " + found.__value.qty.toString() + ")")
+  found ]=> item
+  stdout("Found: " + item.name + " ($" + item.price.toString() + ", qty: " + item.qty.toString() + ")")
 | _ |>
   stdout("Item not found")
 
@@ -62,9 +63,12 @@ stdout("")
 
 // Validate stock — throw/catch handled inside validateStock
 stdout("--- Stock Validation ---")
-stdout(validateStock(items.get(0).__value))
-stdout(validateStock(items.get(1).__value))
-stdout(validateStock(items.get(2).__value))
+items.get(0) ]=> item0
+items.get(1) ]=> item1
+items.get(2) ]=> item2
+stdout(validateStock(item0))
+stdout(validateStock(item1))
+stdout(validateStock(item2))
 
 stdout("")
 stdout("=== Done ===")

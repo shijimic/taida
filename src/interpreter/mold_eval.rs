@@ -2434,14 +2434,22 @@ impl Interpreter {
                 ]))))
             }
 
-            // Cage[molten, function](): protected call -> Gorillax.
+            // Cage[subject, runner](): Molten branch capability boundary.
+            //
+            // The legacy `Cage[molten, fn]()` function/lambda form is no
+            // longer canonical. Interpreter has no executable CageRilla
+            // branch today; JSRilla descriptors are handled by the JS backend.
             "Cage" => {
                 if type_args.len() < 2 {
                     return Err(RuntimeError {
-                        message: "Cage requires 2 type arguments: Cage[value, function]".into(),
+                        message: "Cage requires 2 type arguments: Cage[subject, runner]".into(),
                     });
                 }
                 let cage_value = match self.eval_expr(&type_args[0])? {
+                    Signal::Value(v) => v,
+                    other => return Ok(Some(other)),
+                };
+                let _runner = match self.eval_expr(&type_args[1])? {
                     Signal::Value(v) => v,
                     other => return Ok(Some(other)),
                 };
@@ -2454,49 +2462,9 @@ impl Interpreter {
                         ),
                     });
                 }
-                let cage_fn = match self.eval_expr(&type_args[1])? {
-                    Signal::Value(v) => v,
-                    other => return Ok(Some(other)),
-                };
-                let func = match cage_fn {
-                    Value::Function(f) => f,
-                    _ => {
-                        return Err(RuntimeError {
-                            message: "Cage second argument must be a function".into(),
-                        });
-                    }
-                };
-                match self.call_function_preserving_signals(&func, &[cage_value]) {
-                    Ok(Signal::Value(result)) => Ok(Some(Signal::Value(Value::pack(vec![
-                        ("hasValue".into(), Value::Bool(true)),
-                        ("__value".into(), result),
-                        ("__error".into(), Value::Unit),
-                        ("__type".into(), Value::str("Gorillax".into())),
-                    ])))),
-                    Ok(Signal::Throw(err)) => Ok(Some(Signal::Value(Value::pack(vec![
-                        ("hasValue".into(), Value::Bool(false)),
-                        ("__value".into(), Value::Unit),
-                        ("__error".into(), err),
-                        ("__type".into(), Value::str("Gorillax".into())),
-                    ])))),
-                    Ok(Signal::Gorilla) => Ok(Some(Signal::Gorilla)),
-                    Ok(Signal::TailCall(_)) => Err(RuntimeError {
-                        message: "Cage function must not use tail recursion".into(),
-                    }),
-                    Err(e) => Ok(Some(Signal::Value(Value::pack(vec![
-                        ("hasValue".into(), Value::Bool(false)),
-                        ("__value".into(), Value::Unit),
-                        (
-                            "__error".into(),
-                            Value::Error(super::value::ErrorValue {
-                                error_type: "CageError".into(),
-                                message: e.message.clone(),
-                                fields: Vec::new(),
-                            }),
-                        ),
-                        ("__type".into(), Value::str("Gorillax".into())),
-                    ])))),
-                }
+                Err(RuntimeError {
+                    message: "Cage runner must be a CageRilla descriptor; direct functions and lambdas are not supported".into(),
+                })
             }
 
             // Div[x, y](): safe division returning Lax.
@@ -4210,9 +4178,31 @@ impl Interpreter {
                 Ok(Some(Signal::Value(Value::Bool(result))))
             }
 
+            "TypeName" => {
+                if type_args.len() != 1 {
+                    return Err(RuntimeError {
+                        message: format!(
+                            "TypeName requires 1 argument: TypeName[value](), got {}",
+                            type_args.len()
+                        ),
+                    });
+                }
+                let val = match self.eval_expr(&type_args[0])? {
+                    Signal::Value(v) => v,
+                    other => return Ok(Some(other)),
+                };
+                Ok(Some(Signal::Value(Value::str(self.value_type_name(&val)))))
+            }
+
             // ── JS-backend-only mold types ──────────────────────
             // These molds operate on Molten values and are only available
             // in the JS transpiler backend.
+            "JSGet" => Err(RuntimeError {
+                message: "JSGet is only available in the JS transpiler backend".to_string(),
+            }),
+            "JSCall" => Err(RuntimeError {
+                message: "JSCall is only available in the JS transpiler backend".to_string(),
+            }),
             "JSNew" => Err(RuntimeError {
                 message: "JSNew is only available in the JS transpiler backend".to_string(),
             }),

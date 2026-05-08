@@ -270,16 +270,30 @@ fn measure_peak_rss_script_is_executable() {
     let _ = metadata;
 }
 
-// The original assertions checked for internal blocker IDs verbatim in
-// docs/STABILITY.md. The repository policy now forbids writing internal IDs
-// into public documentation, so the only acceptable invariant is "the
-// throughput and memory subsections still exist." Pinning the wording goes
-// beyond that and is left to a follow-up that does not require the IDs.
 #[test]
-#[ignore = "Public docs no longer carry internal IDs; restate the invariant before re-enabling"]
 fn stability_md_marks_throughput_and_memory_fixed_at_d28() {
     let path = repo_root().join("docs/STABILITY.md");
     let content = read_to_string(&path);
-    assert!(content.contains("Throughput"));
-    assert!(content.contains("Memory"));
+    let performance = content
+        .split("### 5.5. Performance")
+        .nth(1)
+        .expect("docs/STABILITY.md must contain the performance policy section");
+    assert!(
+        performance.contains("Throughput regression")
+            && performance.contains("`bench.yml`")
+            && performance.contains("+10% slow-down vs the 30-sample EWMA baseline"),
+        "stability policy must pin the throughput regression gate without relying on internal IDs"
+    );
+    assert!(
+        performance.contains("Peak RSS regression")
+            && performance.contains("`bench.yml`")
+            && performance.contains("+10% RSS growth vs the 30-sample EWMA baseline"),
+        "stability policy must pin the peak-RSS regression gate without relying on internal IDs"
+    );
+    assert!(
+        performance.contains("Valgrind definitely-lost")
+            && performance.contains("`memory.yml`")
+            && performance.contains("any `definitely lost` byte"),
+        "stability policy must pin the memory hard-fail gate without relying on internal IDs"
+    );
 }

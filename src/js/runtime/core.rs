@@ -330,11 +330,62 @@ class __TaidaError extends globalThis.Error {
       }
     }
   }
+
+  errorInfo() {
+    return __taida_error_info_lax(this);
+  }
 }
 
 // Standalone throw function (no Object.prototype pollution)
 function __taida_throw(obj) {
   throw obj instanceof globalThis.Error ? obj : new __TaidaError(obj.type || 'Error', obj.message || '', obj);
+}
+
+function __taida_error_info_default() {
+  return Object.freeze({
+    __type: 'ErrorInfo',
+    type: '',
+    message: '',
+    kind: '',
+    code: 0,
+  });
+}
+
+function __taida_error_info(error) {
+  let type = 'Error';
+  let message = '';
+  let kind = '';
+  let code = 0;
+
+  if (error instanceof __TaidaError || error instanceof globalThis.Error) {
+    type = error.type || error.name || 'Error';
+    message = error.message || '';
+    kind = error.kind || type;
+    code = Number.isInteger(error.code) ? error.code : 0;
+  } else if (error && typeof error === 'object') {
+    type = error.type || error.__type || 'Error';
+    message = error.message || '';
+    kind = error.kind || type;
+    code = Number.isInteger(error.code) ? error.code : 0;
+  } else if (error !== null && error !== undefined) {
+    type = __taida_typeof(error);
+    message = String(error);
+    kind = type;
+  }
+
+  return Object.freeze({
+    __type: 'ErrorInfo',
+    type: String(type),
+    message: String(message),
+    kind: String(kind || type),
+    code,
+  });
+}
+
+function __taida_error_info_lax(error) {
+  const def = __taida_error_info_default();
+  if (error === null || error === undefined) return Lax(null, def);
+  return Lax(__taida_error_info(error), def);
 }
 
 // RCB-101: Inheritance parent map for error type filtering in |==
@@ -1015,6 +1066,7 @@ function Gorillax(value, error) {
     __error: _error,
     hasValue: __taida_hasValue(_hasValue),
     isEmpty() { return !_hasValue; },
+    errorInfo() { return _hasValue ? __taida_error_info_lax(null) : __taida_error_info_lax(_error); },
     relax() {
       return Object.freeze({
         __type: 'RelaxedGorillax',
@@ -1022,6 +1074,7 @@ function Gorillax(value, error) {
         __error: _error,
         hasValue: __taida_hasValue(_hasValue),
         isEmpty() { return !_hasValue; },
+        errorInfo() { return _hasValue ? __taida_error_info_lax(null) : __taida_error_info_lax(_error); },
         toString() {
           return _hasValue ? 'RelaxedGorillax(' + String(value) + ')' : 'RelaxedGorillax(escaped)';
         },
@@ -1033,10 +1086,27 @@ function Gorillax(value, error) {
   });
 }
 
-// Cage: execute function in protected context, return Gorillax
-function Cage_mold(cageValue, cageFn) {
+function __taida_cagerilla_runner(fn) {
+  Object.defineProperty(fn, '__taida_cagerilla_runner', {
+    value: true,
+    writable: false,
+    configurable: false,
+    enumerable: false,
+  });
+  return fn;
+}
+
+// Cage: execute a CageRilla descriptor runner in protected context.
+function Cage_mold(cageValue, cageRunner) {
+  if (typeof cageRunner !== 'function' || cageRunner.__taida_cagerilla_runner !== true) {
+    throw new __TaidaError(
+      'TypeError',
+      'Cage runner must be a CageRilla descriptor; direct functions and lambdas are not supported',
+      {}
+    );
+  }
   try {
-    const result = cageFn(cageValue);
+    const result = cageRunner(cageValue);
     return Gorillax(result, null);
   } catch (e) {
     return Gorillax(null, e);
@@ -2439,7 +2509,12 @@ function __taida_unmold(v) {
     if (v.__type === 'RelaxedGorillax') {
       const hv = typeof v.hasValue === 'function' ? v.hasValue() : v.hasValue;
       if (hv) return v.__value;
-      throw new __TaidaError('RelaxedGorillaEscaped', 'Relaxed gorilla escaped', {});
+      const info = __taida_error_info(v.__error);
+      throw new __TaidaError(
+        'RelaxedGorillaEscaped',
+        info.message ? 'Relaxed gorilla escaped: ' + info.message : 'Relaxed gorilla escaped',
+        { kind: info.kind || 'RelaxedGorillaEscaped', code: info.code || 0, cause: v.__error }
+      );
     }
   }
   return v;
@@ -3034,11 +3109,174 @@ function __taida_typeof(x) {
   return 'Unknown';
 }
 
+function __taida_typename(x) {
+  if (__taida_isEnumVal(x)) {
+    const variants = __taida_enumDefs[x.__taida_enum_name];
+    const ordinal = x.__taida_enum_ordinal;
+    if (variants && ordinal >= 0 && ordinal < variants.length) return variants[ordinal];
+    return x.__taida_enum_name;
+  }
+  if (x && typeof x === 'object' && typeof x.__type === 'string') return x.__type;
+  if (x instanceof __TaidaError || x instanceof globalThis.Error) return x.type || x.name || 'Error';
+  if (Array.isArray(x) || __taida_isBytes(x) || x instanceof __TaidaJSON || x instanceof __TaidaAsync) return __taida_typeof(x);
+  if (x && typeof x === 'object') return '';
+  return __taida_typeof(x);
+}
+
 // ── JS interop helpers (Molten operations) ──
 function __taida_js_spread(target, source) {
   if (Array.isArray(target)) {
     return [...target, ...(Array.isArray(source) ? source : [source])];
   }
   return {...target, ...source};
+}
+
+function __taida_js_path_array(path) {
+  if (path === null || path === undefined) return [];
+  if (Array.isArray(path)) return Array.from(path);
+  return [path];
+}
+
+function __taida_js_args_array(args) {
+  if (args === null || args === undefined) return [];
+  if (Array.isArray(args)) return Array.from(args);
+  return [args];
+}
+
+function __taida_to_js_value(value) {
+  if (value === null || value === undefined) return value;
+  if (__taida_isEnumVal(value)) return Number(value);
+  if (__taida_isBytes(value)) return value;
+  if (Array.isArray(value)) return value.map(__taida_to_js_value);
+  if (value instanceof __TaidaJSON) return value.__value;
+  if (value && typeof value === 'object') {
+    if (value.__type === 'Lax') {
+      const hv = typeof value.hasValue === 'function' ? value.hasValue() : value.hasValue;
+      return __taida_to_js_value(hv ? value.__value : value.__default);
+    }
+    if (value.__type === 'Result') {
+      return __taida_to_js_value(value.__value);
+    }
+    if (value.__type === 'Gorillax' || value.__type === 'RelaxedGorillax') {
+      const hv = typeof value.hasValue === 'function' ? value.hasValue() : value.hasValue;
+      return hv ? __taida_to_js_value(value.__value) : undefined;
+    }
+    const out = {};
+    for (const [key, item] of Object.entries(value)) {
+      if (key.startsWith('__') || typeof item === 'function') continue;
+      out[key] = __taida_to_js_value(item);
+    }
+    return out;
+  }
+  return value;
+}
+
+function __taida_from_js_value(value) {
+  return value;
+}
+
+function __taida_js_key(part) {
+  if (typeof part === 'string' || typeof part === 'number' || typeof part === 'symbol') {
+    return part;
+  }
+  return String(part);
+}
+
+function __taida_js_get_path(subject, path) {
+  let current = subject;
+  for (const part of __taida_js_path_array(path)) {
+    if (current === null || current === undefined) {
+      throw new __TaidaError('JSError', 'JS path cannot traverse nullish value', {});
+    }
+    current = current[__taida_js_key(part)];
+  }
+  return current;
+}
+
+function __taida_js_parent_and_key(subject, path, op) {
+  const parts = __taida_js_path_array(path);
+  if (parts.length === 0) {
+    throw new __TaidaError('JSError', `${op} requires a non-empty path`, {});
+  }
+  const key = __taida_js_key(parts[parts.length - 1]);
+  const parentPath = parts.slice(0, -1);
+  const parent = __taida_js_get_path(subject, parentPath);
+  if (parent === null || parent === undefined) {
+    throw new __TaidaError('JSError', `${op} target parent is nullish`, {});
+  }
+  return [parent, key];
+}
+
+function __taida_js_get_runner(path) {
+  const runnerPath = __taida_js_path_array(path);
+  return __taida_cagerilla_runner(function(subject) {
+    return __taida_js_get_path(subject, runnerPath);
+  });
+}
+
+function __taida_js_call_runner(path, args) {
+  const runnerPath = __taida_js_path_array(path);
+  const runnerArgs = __taida_js_args_array(args).map(__taida_to_js_value);
+  return __taida_cagerilla_runner(function(subject) {
+    if (runnerPath.length === 0) {
+      if (typeof subject !== 'function') {
+        throw new __TaidaError('JSError', 'JSCall target is not callable', {});
+      }
+      return __taida_from_js_value(subject(...runnerArgs));
+    }
+    const [receiver, key] = __taida_js_parent_and_key(subject, runnerPath, 'JSCall');
+    const fn = receiver[key];
+    if (typeof fn !== 'function') {
+      throw new __TaidaError('JSError', 'JSCall target is not callable', {});
+    }
+    return __taida_from_js_value(fn.apply(receiver, runnerArgs));
+  });
+}
+
+function __taida_js_new_runner(path, args) {
+  const runnerPath = __taida_js_path_array(path);
+  const runnerArgs = __taida_js_args_array(args).map(__taida_to_js_value);
+  return __taida_cagerilla_runner(function(subject) {
+    const ctor = __taida_js_get_path(subject, runnerPath);
+    if (typeof ctor !== 'function') {
+      throw new __TaidaError('JSError', 'JSNew target is not constructible', {});
+    }
+    return __taida_from_js_value(new ctor(...runnerArgs));
+  });
+}
+
+function __taida_js_set_runner(path, value) {
+  const runnerPath = __taida_js_path_array(path);
+  const runnerValue = __taida_to_js_value(value);
+  return __taida_cagerilla_runner(function(subject) {
+    const [receiver, key] = __taida_js_parent_and_key(subject, runnerPath, 'JSSet');
+    receiver[key] = runnerValue;
+    return subject;
+  });
+}
+
+function __taida_js_bind_runner(path) {
+  const runnerPath = __taida_js_path_array(path);
+  return __taida_cagerilla_runner(function(subject) {
+    if (runnerPath.length === 0) {
+      if (typeof subject !== 'function') {
+        throw new __TaidaError('JSError', 'JSBind target is not callable', {});
+      }
+      return subject.bind(null);
+    }
+    const [receiver, key] = __taida_js_parent_and_key(subject, runnerPath, 'JSBind');
+    const fn = receiver[key];
+    if (typeof fn !== 'function') {
+      throw new __TaidaError('JSError', 'JSBind target is not callable', {});
+    }
+    return fn.bind(receiver);
+  });
+}
+
+function __taida_js_spread_runner(source) {
+  const runnerSource = __taida_to_js_value(source);
+  return __taida_cagerilla_runner(function(subject) {
+    return __taida_from_js_value(__taida_js_spread(subject, runnerSource));
+  });
 }
 "#;

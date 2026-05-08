@@ -2,7 +2,7 @@
 
 mod common;
 
-use common::{taida_bin, unique_temp_dir, write_file};
+use common::{taida_bin, unique_project_temp_dir, unique_temp_dir, write_file};
 use std::fs;
 use std::process::Command;
 
@@ -127,15 +127,9 @@ fn e32b_008_descriptor_selectors_are_mutually_exclusive_e1901() {
     let _ = fs::remove_dir_all(&dir);
 }
 
-// Project-root marker tightening fires `[E1902]` before the descriptor
-// export check is reached when the temp directory has no parent project
-// root. The descriptor-export probe needs to be reframed against a fixture
-// rooted under a real `packages.tdm` / `taida.toml` marker before the pin
-// can be reactivated.
 #[test]
-#[ignore = "Project root marker check pre-empts the descriptor export probe in /tmp; needs a rooted fixture"]
 fn e32b_008_descriptor_mode_without_exported_descriptors_rejects_e1902() {
-    let dir = unique_temp_dir("e32b_008_e1902");
+    let dir = unique_project_temp_dir("e32b_008_e1902");
     let src = dir.join("main.td");
     write_file(&src, "stdout(\"plain\")\n");
 
@@ -158,9 +152,8 @@ fn e32b_008_descriptor_mode_without_exported_descriptors_rejects_e1902() {
 }
 
 #[test]
-#[ignore = "Project root marker check pre-empts the descriptor probe in /tmp; needs a rooted fixture"]
 fn e32b_008_unknown_unit_reports_e1903_with_candidates() {
-    let dir = unique_temp_dir("e32b_008_e1903");
+    let dir = unique_project_temp_dir("e32b_008_e1903");
     let src = dir.join("main.td");
     write_file(
         &src,
@@ -195,9 +188,8 @@ server <= BuildUnit(
 }
 
 #[test]
-#[ignore = "Project root marker check pre-empts the descriptor probe in /tmp; needs a rooted fixture"]
 fn e32b_008_unknown_plan_reports_e1904_with_candidates() {
-    let dir = unique_temp_dir("e32b_008_e1904");
+    let dir = unique_project_temp_dir("e32b_008_e1904");
     let src = dir.join("main.td");
     write_file(
         &src,

@@ -1820,7 +1820,7 @@ static int taida_net3_is_rfc7230_token_byte(unsigned char b) {
 
 // RFC 7230 §3.2 field-value byte = HTAB / SP / VCHAR / obs-text.
 static int taida_net3_is_rfc7230_field_value_byte(unsigned char b) {
-    return b == '\t' || (b >= 0x20 && b <= 0x7E) || (b >= 0x80 && b <= 0xFF);
+    return b == '\t' || (b >= 0x20 && b <= 0x7E) || b >= 0x80;
 }
 
 static int taida_net3_header_name_eq_ci(const char *name, size_t name_len, const char *expected) {
@@ -2018,14 +2018,12 @@ taida_val taida_net_write_chunk(taida_val writer, taida_val data) {
     // contig buffer directly — zero allocation, true payload-level zero-copy.
     unsigned char stack_payload[4096];
     unsigned char *heap_payload = NULL;
-    int is_bytes = 0;
 
     if (TAIDA_IS_BYTES_CONTIG(data)) {
         // D29B-003 (Track-β, 2026-04-27): contig fast path. Direct pointer
         // reflection into payload — no taida_val[] byte-loop, no temporary
         // stack/heap buffer alloc. iov[1].iov_base will land on the inline
         // contiguous payload owned by the Bytes header.
-        is_bytes = 1;
         payload = taida_bytes_contig_data(data);
         taida_val blen = taida_bytes_contig_len(data);
         payload_len = (size_t)blen;
@@ -2034,7 +2032,6 @@ taida_val taida_net_write_chunk(taida_val writer, taida_val data) {
         // Legacy taida_val[] Bytes form: materialize once via byte-loop. New
         // producers (readBody/readBodyAll) emit TAIDA_BYTES_CONTIG so this
         // branch is cold in the D29 hot path.
-        is_bytes = 1;
         taida_val *bytes = (taida_val*)data;
         taida_val blen = bytes[1];
         payload_len = (size_t)blen;
@@ -2470,23 +2467,16 @@ static char *taida_base64_encode(const uint8_t *data, size_t len) {
 
 // NB4-11: Base64 decode for Sec-WebSocket-Key validation.
 // Returns decoded length, or -1 on invalid input. Writes to `out` (must have enough space).
+static int8_t taida_base64_decode_value(unsigned char c) {
+    if (c >= 'A' && c <= 'Z') return (int8_t)(c - 'A');
+    if (c >= 'a' && c <= 'z') return (int8_t)(26 + c - 'a');
+    if (c >= '0' && c <= '9') return (int8_t)(52 + c - '0');
+    if (c == '+') return 62;
+    if (c == '/') return 63;
+    return -1;
+}
+
 static int taida_base64_decode(const char *input, size_t input_len, uint8_t *out, size_t out_cap) {
-    static const int8_t decode_table[256] = {
-        [0 ... 255] = -1,
-        ['A'] = 0, ['B'] = 1, ['C'] = 2, ['D'] = 3, ['E'] = 4, ['F'] = 5,
-        ['G'] = 6, ['H'] = 7, ['I'] = 8, ['J'] = 9, ['K'] = 10, ['L'] = 11,
-        ['M'] = 12, ['N'] = 13, ['O'] = 14, ['P'] = 15, ['Q'] = 16, ['R'] = 17,
-        ['S'] = 18, ['T'] = 19, ['U'] = 20, ['V'] = 21, ['W'] = 22, ['X'] = 23,
-        ['Y'] = 24, ['Z'] = 25,
-        ['a'] = 26, ['b'] = 27, ['c'] = 28, ['d'] = 29, ['e'] = 30, ['f'] = 31,
-        ['g'] = 32, ['h'] = 33, ['i'] = 34, ['j'] = 35, ['k'] = 36, ['l'] = 37,
-        ['m'] = 38, ['n'] = 39, ['o'] = 40, ['p'] = 41, ['q'] = 42, ['r'] = 43,
-        ['s'] = 44, ['t'] = 45, ['u'] = 46, ['v'] = 47, ['w'] = 48, ['x'] = 49,
-        ['y'] = 50, ['z'] = 51,
-        ['0'] = 52, ['1'] = 53, ['2'] = 54, ['3'] = 55, ['4'] = 56, ['5'] = 57,
-        ['6'] = 58, ['7'] = 59, ['8'] = 60, ['9'] = 61,
-        ['+'] = 62, ['/'] = 63
-    };
     if (input_len % 4 != 0) return -1;
     size_t decoded_len = input_len / 4 * 3;
     if (input_len > 0 && input[input_len - 1] == '=') decoded_len--;
@@ -2495,17 +2485,17 @@ static int taida_base64_decode(const char *input, size_t input_len, uint8_t *out
 
     size_t j = 0;
     for (size_t i = 0; i < input_len; i += 4) {
-        int8_t a = decode_table[(unsigned char)input[i]];
-        int8_t b = (i + 1 < input_len) ? decode_table[(unsigned char)input[i + 1]] : -1;
+        int8_t a = taida_base64_decode_value((unsigned char)input[i]);
+        int8_t b = (i + 1 < input_len) ? taida_base64_decode_value((unsigned char)input[i + 1]) : -1;
         if (a < 0 || b < 0) return -1;
         uint32_t triple = ((uint32_t)a << 18) | ((uint32_t)b << 12);
         if (i + 2 < input_len && input[i + 2] != '=') {
-            int8_t c = decode_table[(unsigned char)input[i + 2]];
+            int8_t c = taida_base64_decode_value((unsigned char)input[i + 2]);
             if (c < 0) return -1;
             triple |= ((uint32_t)c << 6);
         }
         if (i + 3 < input_len && input[i + 3] != '=') {
-            int8_t d = decode_table[(unsigned char)input[i + 3]];
+            int8_t d = taida_base64_decode_value((unsigned char)input[i + 3]);
             if (d < 0) return -1;
             triple |= (uint32_t)d;
         }
@@ -5130,7 +5120,7 @@ static int h2_hpack_encode_int(unsigned char *buf, size_t buf_cap,
 
 // Minimal bit-by-bit Huffman decoder.
 // The full table is in net_h2.rs; we duplicate the same data here.
-typedef struct { uint8_t sym; uint32_t code; uint8_t bits; } H2HuffEntry;
+typedef struct { uint16_t sym; uint32_t code; uint8_t bits; } H2HuffEntry;
 static const H2HuffEntry H2_HUFFMAN_TABLE[] = {
     { 48, 0x00,  5},{ 49, 0x01,  5},{ 50, 0x02,  5},{ 97, 0x03,  5},
     { 99, 0x04,  5},{101, 0x05,  5},{105, 0x06,  5},{111, 0x07,  5},
@@ -5205,7 +5195,7 @@ static const H2HuffEntry H2_HUFFMAN_TABLE[] = {
 // Entries with code length <= 8 are decoded in O(1). Longer codes fall back
 // to a reduced linear scan (only entries with bits > 8).
 typedef struct {
-    uint8_t sym;
+    uint16_t sym;
     uint8_t bits;  // 0 means no match at this prefix (need longer codes)
 } H2HuffLookup;
 
@@ -5266,7 +5256,7 @@ static int h2_huffman_decode(const unsigned char *src, size_t src_len,
                     /* NB7-75: RFC 7541 Section 5.2 — EOS symbol (256) forbidden */
                     if (entry->sym == 256) return -1;
                     if (out >= (int)dst_cap) return -1;
-                    dst[out++] = entry->sym;
+                    dst[out++] = (unsigned char)entry->sym;
                     bits_left -= entry->bits;
                     bits &= bits_left ? (((uint64_t)1 << bits_left) - 1) : 0;
                     continue;
@@ -5284,7 +5274,7 @@ static int h2_huffman_decode(const unsigned char *src, size_t src_len,
                     /* NB7-75: RFC 7541 Section 5.2 — EOS symbol (256) forbidden */
                     if (H2_HUFFMAN_TABLE[t].sym == 256) return -1;
                     if (out >= (int)dst_cap) return -1;
-                    dst[out++] = H2_HUFFMAN_TABLE[t].sym;
+                    dst[out++] = (unsigned char)H2_HUFFMAN_TABLE[t].sym;
                     bits_left -= code_len;
                     bits &= ((uint64_t)1 << bits_left) - 1;
                     found = 1;
@@ -5838,7 +5828,8 @@ static int h2_send_response_headers(int fd, H2HpackDynTable *enc_dyn,
     uint8_t flags = 0;
     if (end_stream) flags |= H2_FLAG_END_STREAM;
     if (h2_write_frame(fd, H2_FRAME_HEADERS, flags, stream_id, hdr_buf, max_sz) < 0) {
-        if (hdr_buf != hdr_stack) free(hdr_buf); return -1;
+        if (hdr_buf != hdr_stack) free(hdr_buf);
+        return -1;
     }
     uint32_t offset = max_sz;
     while (offset < (uint32_t)enc_len) {
@@ -5848,7 +5839,8 @@ static int h2_send_response_headers(int fd, H2HpackDynTable *enc_dyn,
         uint8_t cont_flags = is_last ? H2_FLAG_END_HEADERS : 0;
         if (h2_write_frame(fd, H2_FRAME_CONTINUATION, cont_flags, stream_id,
                            hdr_buf + offset, chunk) < 0) {
-            if (hdr_buf != hdr_stack) free(hdr_buf); return -1;
+            if (hdr_buf != hdr_stack) free(hdr_buf);
+            return -1;
         }
         offset += chunk;
     }

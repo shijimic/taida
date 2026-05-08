@@ -9,7 +9,7 @@ ValidationError => FieldValidationError = @(expected_type: Str)
 // Instantiate the deepest child
 fve <= FieldValidationError(type <= "FieldValidationError", message <= "invalid type", app_code <= 500, field_name <= "age", expected_type <= "Int")
 Str[fve.app_code]() ]=> ac
-stdout("T1: " + fve.__type + " ac=" + ac + " fn=" + fve.field_name + " et=" + fve.expected_type)
+stdout("T1: " + TypeName[fve]() + " ac=" + ac + " fn=" + fve.field_name + " et=" + fve.expected_type)
 
 // Throw deepest child, catch at root Error level
 catch_deep x =

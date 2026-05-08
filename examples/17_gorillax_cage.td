@@ -1,12 +1,13 @@
 // === Taida Lang: Gorillax ===
 //
 // Gorillax[T] is a protected container that wraps values.
-// Cage[molten, fn]() executes a function on Molten data in a protected context.
+// Cage[subject, runner]() executes a CageRilla[Branch, Out] capability
+// (e.g. JSRilla / FileRilla) on Molten data and returns Gorillax[Out].
 //
-// NOTE: Cage requires Molten type as first argument (Molten-only).
-// Since Molten values cannot be generated in the interpreter
-// (npm imports are JS-backend only), Cage tests are in unit tests only.
-// This example demonstrates Gorillax without Cage.
+// NOTE: Cage requires a subject with a resolved Molten branch and a runner
+// of the matching CageRilla subfamily. Since Molten values cannot be
+// generated in the interpreter (npm imports are JS-backend only), Cage tests
+// are in unit tests only. This example demonstrates Gorillax without Cage.
 
 // Direct Gorillax creation (success case)
 Gorillax[42]() => g

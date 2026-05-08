@@ -128,20 +128,7 @@ impl Interpreter {
         } else {
             PathBuf::from(".")
         };
-        let mut dir = start.clone();
-        loop {
-            if dir.join("packages.tdm").exists()
-                || dir.join("taida.toml").exists()
-                || dir.join(".git").exists()
-            {
-                return dir;
-            }
-            if !dir.pop() {
-                break;
-            }
-        }
-        // Fallback to the current file's directory
-        start
+        crate::project_root::find_project_root(&start)
     }
 
     /// Evaluate an import statement: `>>> path => @(symbols)`

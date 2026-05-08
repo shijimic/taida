@@ -7,8 +7,9 @@
 
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd -P)"
+source "$SCRIPT_DIR/scripts/lib_taida_bin.sh"
+TAIDA="$(resolve_taida_bin)" || exit 1
 WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/taida-e32-loopback.XXXXXX")"
 ARTIFACT_DIR="${E32_LOOPBACK_ARTIFACT_DIR:-}"
 SERVER_LOG="$WORK_DIR/server.log"
@@ -32,17 +33,6 @@ cleanup() {
   exit "$status"
 }
 trap cleanup EXIT
-
-if [ -n "${TAIDA_BIN:-}" ]; then
-  TAIDA="$TAIDA_BIN"
-elif [ -x "$PROJECT_DIR/target/debug/taida" ]; then
-  TAIDA="$PROJECT_DIR/target/debug/taida"
-elif [ -x "$PROJECT_DIR/target/release/taida" ]; then
-  TAIDA="$PROJECT_DIR/target/release/taida"
-else
-  echo "TAIDA_BIN is not set and no built taida binary exists" >&2
-  exit 1
-fi
 
 cat >"$WORK_DIR/packages.tdm" <<'PKG'
 PKG

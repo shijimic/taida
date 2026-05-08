@@ -240,6 +240,26 @@ fn env_workspace_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
 
+fn walk_files_with_extension(root: &std::path::Path, ext: &str) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(&dir)
+            .unwrap_or_else(|e| panic!("read_dir({}): {e}", dir.display()))
+            .flatten()
+        {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path.extension().and_then(|s| s.to_str()) == Some(ext) {
+                out.push(path);
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
 #[test]
 #[ignore = "requires built taida binary; runs in CI lint job explicitly"]
 fn d28b_008_curated_user_facing_examples_lint_clean() {
@@ -330,6 +350,99 @@ fn d28b_008_diagnostic_codes_doc_registers_e18xx() {
             code
         );
     }
+}
+
+#[test]
+fn d28b_008_diagnostic_codes_doc_registers_cage_rilla_subrange() {
+    let workspace = env_workspace_root();
+    let doc = std::fs::read_to_string(workspace.join("docs/reference/diagnostic_codes.md"))
+        .expect("diagnostic_codes.md must exist");
+    for code in [
+        "E1512", "E1513", "E1514", "E1515", "E1516", "E1517", "E1518", "E1519",
+    ] {
+        assert!(
+            doc.contains(&format!("`{}`", code)),
+            "diagnostic_codes.md must register Cage / CageRilla diagnostic {}",
+            code
+        );
+    }
+    assert!(
+        doc.contains("Cage / CageRilla 診断範囲"),
+        "diagnostic_codes.md must describe the Cage / CageRilla diagnostic subrange"
+    );
+    assert!(
+        doc.contains("`E1513` | (予約)") && doc.contains("`E1519` | (予約)"),
+        "Cage / CageRilla reserved slots must stay explicitly marked"
+    );
+}
+
+#[test]
+fn d28b_008_diagnostic_codes_range_rows_mark_reserved_boundaries() {
+    let workspace = env_workspace_root();
+    let doc = std::fs::read_to_string(workspace.join("docs/reference/diagnostic_codes.md"))
+        .expect("diagnostic_codes.md must exist");
+    let mut issues = Vec::new();
+    for (idx, line) in doc.lines().enumerate() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("| `E")
+            && line.contains('〜')
+            && line.contains('`')
+            && !line.contains("(予約)")
+        {
+            issues.push(format!("{}: {}", idx + 1, line));
+        }
+    }
+    assert!(
+        issues.is_empty(),
+        "diagnostic_codes.md range rows must mark reserved boundaries:\n{}",
+        issues.join("\n")
+    );
+}
+
+#[test]
+fn d28b_008_clippy_allows_have_nearby_justification() {
+    const CLIPPY_ALLOW_NEEDLE: &str = concat!("#[allow(", "clippy::");
+    let workspace = env_workspace_root();
+    let mut issues = Vec::new();
+    for root in ["src", "tests"] {
+        for path in walk_files_with_extension(&workspace.join(root), "rs") {
+            let content = std::fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("{} must be readable: {e}", path.display()));
+            let lines: Vec<&str> = content.lines().collect();
+            for (idx, line) in lines.iter().enumerate() {
+                let trimmed = line.trim_start();
+                let is_clippy_allow = line.contains(CLIPPY_ALLOW_NEEDLE)
+                    || (trimmed.starts_with("#[allow(") && {
+                        let attr_end = (idx + 8).min(lines.len());
+                        lines[idx..attr_end].join("\n").contains("clippy::")
+                    });
+                if !is_clippy_allow {
+                    continue;
+                }
+                let start = idx.saturating_sub(5);
+                let context = lines[start..idx].join("\n");
+                let has_comment = context.lines().any(|l| {
+                    let trimmed = l.trim_start();
+                    trimmed.starts_with("//")
+                        || trimmed.starts_with("///")
+                        || trimmed.starts_with("//!")
+                });
+                if !has_comment {
+                    issues.push(format!(
+                        "{}:{} missing nearby justification comment for `{}`",
+                        path.strip_prefix(&workspace).unwrap_or(&path).display(),
+                        idx + 1,
+                        line.trim()
+                    ));
+                }
+            }
+        }
+    }
+    assert!(
+        issues.is_empty(),
+        "new clippy allow attributes must carry a nearby justification comment:\n{}",
+        issues.join("\n")
+    );
 }
 
 #[test]

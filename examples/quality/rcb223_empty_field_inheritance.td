@@ -5,18 +5,18 @@
 Animal = @(species: Str, legs: Int)
 Animal => Dog = @()
 dog <= Dog(species <= "Canine", legs <= 4)
-stdout("T1: " + dog.__type + " " + dog.species + " " + dog.legs.toString())
+stdout("T1: " + TypeName[dog]() + " " + dog.species + " " + dog.legs.toString())
 
 // --- Test 2: Empty field child with only parent defaults ---
 Animal => Cat = @()
 cat <= Cat(species <= "Feline", legs <= 4)
-stdout("T2: " + cat.__type + " " + cat.species + " " + cat.legs.toString())
+stdout("T2: " + TypeName[cat]() + " " + cat.species + " " + cat.legs.toString())
 
 // --- Test 3: Multi-level empty inheritance ---
 Animal => Pet = @()
 Pet => HousePet = @()
 hp <= HousePet(species <= "Hamster", legs <= 4)
-stdout("T3: " + hp.__type + " " + hp.species + " " + hp.legs.toString())
+stdout("T3: " + TypeName[hp]() + " " + hp.species + " " + hp.legs.toString())
 
 // --- Test 4: Empty child as function parameter expecting parent type ---
 describe a: Animal = a.species + ":" + a.legs.toString() => :Str
@@ -26,8 +26,8 @@ stdout("T4: " + describe(dog2))
 // --- Test 5: Error type with empty field inheritance ---
 Error => AppError = @()
 Error => DbError = @()
-stdout("T5: AppError=" + AppError(type <= "AppError", message <= "fail").__type)
-stdout("T5: DbError=" + DbError(type <= "DbError", message <= "db fail").__type)
+stdout("T5: AppError=" + TypeName[AppError(type <= "AppError", message <= "fail")]())
+stdout("T5: DbError=" + TypeName[DbError(type <= "DbError", message <= "db fail")]())
 
 // --- Test 6: Child with methods but no extra fields ---
 Shape = @(sides: Int)

@@ -133,6 +133,7 @@ pub fn lookup_mold_return_kind(name: &str) -> Option<MoldReturnKind> {
         // treating the Lax pointer as a `char*` and printing pack header
         // bytes (symptom: `KAPDIAT`).
         "Str" => Pack,
+        "TypeName" => Str,
         "Upper" | "Lower" | "Trim" => Str,
         "Replace" | "ReplaceAll" => Str,
         "Repeat" => Str,
@@ -223,6 +224,7 @@ mod tests {
             // C26B-018 (B)(C): byte-level slice + single-alloc repeat/join.
             "ByteSlice",
             "StringRepeatJoin",
+            "TypeName",
         ] {
             assert_eq!(mold_return_tag(name), Some(3), "{name} should be Str (3)");
         }

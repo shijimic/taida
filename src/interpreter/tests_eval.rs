@@ -64,6 +64,33 @@ mod tests {
     }
 
     #[test]
+    fn test_typename_mold_reports_value_identity() {
+        let source = r#"Enum => Status = :Ok :Fail
+AppError = @(message: Str)
+stdout(TypeName[42]())
+stdout(TypeName[AppError(message <= "x")]())
+stdout("[" + TypeName[@(a <= 1)]() + "]")
+TypeName[Status:Fail()]()"#;
+        let (program, parse_errors) = crate::parser::parse(source);
+        assert!(parse_errors.is_empty(), "Parse errors: {:?}", parse_errors);
+        let mut interpreter = Interpreter::new();
+        let result = interpreter.eval_program(&program).unwrap();
+        assert_eq!(interpreter.output, vec!["Int", "AppError", "[]"]);
+        assert_eq!(result, Value::str("Fail".to_string()));
+    }
+
+    #[test]
+    fn test_plain_typedef_error_info_is_not_runtime_method() {
+        let result = eval(
+            r#"Cat = @(name: Str)
+Cat(name <= "Tama").errorInfo()"#,
+        );
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.contains("Unknown method 'errorInfo'"), "Got: {}", err);
+    }
+
+    #[test]
     fn test_eval_div_mold() {
         // Div[10, 3]() returns Lax with hasValue=true, value=3
         let result = eval_ok("result <= Div[10, 3]()");
@@ -1668,6 +1695,30 @@ check(1)"#;
     // ── Molten type tests ──────────────────────────────
 
     #[test]
+    fn test_jsget_js_backend_only_error() {
+        let result = eval("x <= JSGet[@[\"x\"], Int]()");
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("JSGet is only available in the JS transpiler backend"),
+            "Got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_jscall_js_backend_only_error() {
+        let result = eval("x <= JSCall[@[], @[], Int]()");
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("JSCall is only available in the JS transpiler backend"),
+            "Got: {}",
+            err
+        );
+    }
+
+    #[test]
     fn test_jsnew_js_backend_only_error() {
         let result = eval("x <= JSNew[\"Date\"]()");
         assert!(result.is_err());
@@ -1837,49 +1888,65 @@ out.toString()
     }
 
     #[test]
-    fn test_cage_accepts_molten_value() {
-        // Directly test Cage with Value::Molten by pre-setting a variable
+    fn test_cage_rejects_legacy_direct_function_runner() {
         let source = "identity x = x => :Molten\nCage[m, identity]() => c\nc.hasValue()";
         let (program, parse_errors) = crate::parser::parse(source);
         assert!(parse_errors.is_empty(), "Parse errors: {:?}", parse_errors);
         let mut interpreter = Interpreter::new();
-        // Pre-define 'm' as a Molten value
         interpreter.env.define_force("m", Value::Molten);
         let result = interpreter.eval_program(&program);
         assert!(
-            result.is_ok(),
-            "Cage should accept Molten value, got: {:?}",
-            result.err()
+            result.is_err(),
+            "Cage should reject legacy direct function runner"
+        );
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("Cage runner must be a CageRilla descriptor"),
+            "Got: {}",
+            err
         );
     }
 
     #[test]
-    fn test_cage_molten_success_has_value() {
-        // Cage with Molten value should produce a Gorillax with hasValue=true
-        let source = "identity x = x => :Molten\nCage[m, identity]() => c\nc.hasValue()";
+    fn test_gorillax_success_error_info_is_empty() {
+        let source = "g <= Gorillax[1]()\ng.errorInfo().hasValue()";
         let (program, parse_errors) = crate::parser::parse(source);
         assert!(parse_errors.is_empty());
         let mut interpreter = Interpreter::new();
-        interpreter.env.define_force("m", Value::Molten);
         let result = interpreter.eval_program(&program).unwrap();
-        assert_eq!(result, Value::Bool(true));
+        assert_eq!(result, Value::Bool(false));
     }
 
     #[test]
-    fn test_cage_molten_error_in_function() {
-        // Cage catches errors from the function and returns Gorillax with hasValue=false
+    fn test_gorillax_error_info_exposes_failure_details() {
         let source = r#"Error => TestError = @(message: Str)
-failing x =
-  TestError(message <= "cage fail").throw()
-=> :Molten
-Cage[m, failing]() => c
-c.hasValue()"#;
+err <= TestError(message <= "cage fail")
+c <= @(hasValue <= false, __value <= @(), __error <= err, __type <= "Gorillax")
+c.errorInfo() ]=> info
+info.message"#;
         let (program, parse_errors) = crate::parser::parse(source);
         assert!(parse_errors.is_empty(), "Parse errors: {:?}", parse_errors);
         let mut interpreter = Interpreter::new();
-        interpreter.env.define_force("m", Value::Molten);
         let result = interpreter.eval_program(&program).unwrap();
-        assert_eq!(result, Value::Bool(false));
+        assert_eq!(result, Value::str("cage fail".to_string()));
+    }
+
+    #[test]
+    fn test_relaxed_gorillax_error_info_from_caught_error() {
+        let source = r#"Error => TestError = @(message: Str)
+err <= TestError(message <= "cage fail")
+c <= @(hasValue <= false, __value <= @(), __error <= err, __type <= "Gorillax")
+|== error: Error =
+  error.errorInfo() ]=> info
+  info.type
+=> :Str
+c.relax() ]=> value
+"unreachable""#;
+        let (program, parse_errors) = crate::parser::parse(source);
+        assert!(parse_errors.is_empty(), "Parse errors: {:?}", parse_errors);
+        let mut interpreter = Interpreter::new();
+        let result = interpreter.eval_program(&program).unwrap();
+        assert_eq!(result, Value::str("RelaxedGorillaEscaped".to_string()));
     }
 
     // ── Molten negative tests ──────────────────────────
@@ -1918,8 +1985,8 @@ c.hasValue()"#;
     }
 
     #[test]
-    fn test_cage_second_arg_not_function() {
-        // Cage second argument must be a function, not a literal
+    fn test_cage_second_arg_not_descriptor() {
+        // Cage second argument must be a CageRilla descriptor, not a literal.
         let source = "Cage[m, 42]() => c";
         let (program, parse_errors) = crate::parser::parse(source);
         assert!(parse_errors.is_empty(), "Parse errors: {:?}", parse_errors);
@@ -1928,11 +1995,11 @@ c.hasValue()"#;
         let result = interpreter.eval_program(&program);
         assert!(
             result.is_err(),
-            "Cage should reject non-function second argument"
+            "Cage should reject non-descriptor second argument"
         );
         let err = result.unwrap_err().to_string();
         assert!(
-            err.contains("Cage second argument must be a function"),
+            err.contains("Cage runner must be a CageRilla descriptor"),
             "Got: {}",
             err
         );

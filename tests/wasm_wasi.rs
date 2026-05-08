@@ -719,6 +719,16 @@ fn wasm_wasi_parity_allowlist_guard() {
     );
 }
 
+#[test]
+fn wasm_wasi_mutual_recursion_native_fail_allowlist_pins_examples() {
+    for stem in ["compile_mutual_recursion", "compile_c12_3_mutual_tail"] {
+        assert!(
+            WASI_EXPECTED_NATIVE_FAIL.contains(&stem),
+            "wasm-wasi parity policy must keep `{stem}` in the native-fail allowlist"
+        );
+    }
+}
+
 // Per-fixture tests: build.rs emits one `#[test] fn fixture_all_td_<stem>() { ... }`
 // per fixture stem in `ALL_TD_FIXTURES`. The macro forwards to our runner.
 macro_rules! c24_fixture_runner {

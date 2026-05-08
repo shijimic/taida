@@ -758,6 +758,7 @@ fn runtime_func_prototype(name: &str, profile: WasmProfile) -> Result<String, Wa
         "taida_relaxed_gorillax_err" => {
             "int64_t taida_relaxed_gorillax_err(int64_t error);".to_string()
         }
+        "taida_error_info" => "int64_t taida_error_info(int64_t source);".to_string(),
         "taida_result_create" => {
             "int64_t taida_result_create(int64_t value, int64_t throw_val, int64_t predicate);"
                 .to_string()
@@ -766,9 +767,6 @@ fn runtime_func_prototype(name: &str, profile: WasmProfile) -> Result<String, Wa
         "taida_result_is_error" => "int64_t taida_result_is_error(int64_t result);".to_string(),
         "taida_result_map_error" => {
             "int64_t taida_result_map_error(int64_t result, int64_t fn_ptr);".to_string()
-        }
-        "taida_cage_apply" => {
-            "int64_t taida_cage_apply(int64_t cage_value, int64_t fn_ptr);".to_string()
         }
         // W-5: Error/Molten/Stub helpers
         "taida_molten_new" => "int64_t taida_molten_new(void);".to_string(),
@@ -969,6 +967,7 @@ fn runtime_func_prototype(name: &str, profile: WasmProfile) -> Result<String, Wa
         }
         // typeof (all profiles — implemented in runtime_core_wasm.c)
         "taida_typeof" => "int64_t taida_typeof(int64_t val, int64_t tag);".to_string(),
+        "taida_type_name" => "int64_t taida_type_name(int64_t val, int64_t tag);".to_string(),
         // WC-4: JSON functions (all profiles — implemented in runtime_core_wasm.c)
         "taida_json_parse" | "taida_json_stringify" | "taida_json_encode"
         | "taida_json_pretty" | "taida_json_unmold" => {

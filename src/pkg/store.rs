@@ -29,9 +29,10 @@ use std::path::{Path, PathBuf};
 
 /// Base URL for GitHub archive downloads.
 ///
-/// Production installs are pinned to github.com. Debug/test builds may opt
-/// into a loopback mock with `TAIDA_E32_ALLOW_MOCK_GITHUB_BASE_URL=1`; release
-/// builds reject the override even when that variable is present.
+/// Production installs are pinned to github.com. Debug and test-archive builds
+/// may opt into a loopback mock with
+/// `TAIDA_E32_ALLOW_MOCK_GITHUB_BASE_URL=1`; release builds reject the
+/// override even when that variable is present.
 pub(crate) fn github_base_url() -> Result<String, String> {
     match std::env::var("TAIDA_GITHUB_BASE_URL") {
         Ok(raw) if raw.trim().is_empty() => Ok("https://github.com".to_string()),
@@ -56,7 +57,7 @@ fn github_api_url() -> String {
 }
 
 fn local_mock_github_base_url_allowed() -> bool {
-    cfg!(debug_assertions)
+    (cfg!(debug_assertions) || cfg!(taida_allow_mock_github_base_url))
         && std::env::var("TAIDA_E32_ALLOW_MOCK_GITHUB_BASE_URL")
             .map(|v| v == "1")
             .unwrap_or(false)

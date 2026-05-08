@@ -22,12 +22,24 @@ Taida の NET surface は **zero-copy span** を基本単位とします:
 ### 2.1 `httpServe`
 
 ```
-httpServe(port: Int, handler: Fn, ?opts: BuchiPack) -> Gorillax[@(closed: Bool)]
+httpServe(
+  port: Int,
+  handler: Fn,
+  ?maxRequests: Int,
+  ?timeoutMs: Int,
+  ?maxConnections: Int,
+  ?tls: BuchiPack
+) -> Async[Gorillax[@(ok: Bool, requests: Int)]]
 ```
 
-- `port` — bind port。`0` を渡すと OS 割り当て (port は `opts` で返さない、観測には `getsockname` 相当の mold を別途使う想定)。
+- `port` — bind port。`0` を渡すと OS 割り当て (割り当て後の port 観測には `getsockname` 相当の mold を別途使う想定)。
 - `handler` — 下記 2.2 / 2.3 のいずれかの arity を持つ関数値。
-- `opts` (optional) — TLS 設定 `@(cert: Str, key: Str, protocol: Str)` 等。`protocol <= "h2"` を指定すると HTTP/2 over TLS。
+- `maxRequests` (optional) — N 回処理して終了する上限。`0` または省略で無制限。
+- `timeoutMs` (optional) — accept / read 系の待ち時間上限。
+- `maxConnections` (optional) — 同時接続上限。
+- `tls` (optional) — TLS 設定 `@(cert: Str, key: Str, protocol: Str)` 等。`protocol <= "h2"` を指定すると HTTP/2 over TLS。
+
+戻り値の `Async` を `]=>` で待つと `Gorillax[@(ok: Bool, requests: Int)]` が得られ、さらに `]=>` で summary pack を取り出します。`ok` は bind / accept loop が正常に閉じたか、`requests` は実際に処理した request 数です。
 
 ### 2.2 1-arg handler (response-return form)
 

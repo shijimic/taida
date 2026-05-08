@@ -315,18 +315,7 @@ impl Interpreter {
                             .find(|(k, _)| k == "__error")
                             .map(|(_, v)| v.clone())
                             .unwrap_or(Value::Unit);
-                        let throw_error = if let Value::Error(_) = &error {
-                            error
-                        } else {
-                            Value::Error(super::value::ErrorValue {
-                                error_type: "RelaxedGorillaEscaped".into(),
-                                message: format!(
-                                    "Relaxed gorilla escaped: {}",
-                                    error.to_display_string()
-                                ),
-                                fields: Vec::new(),
-                            })
-                        };
+                        let throw_error = Self::relaxed_gorilla_error(&error);
                         return Ok(Signal::Throw(throw_error));
                     }
                 }

@@ -853,19 +853,7 @@ fn traversal_rejection_path(path: &Path) -> Option<String> {
 /// state/config storage, not a project-root marker; otherwise `~/.taida`
 /// can make `$HOME` look like the active project root.
 fn find_project_root(start_dir: &Path) -> PathBuf {
-    let mut dir = start_dir.to_path_buf();
-    loop {
-        if dir.join("packages.tdm").exists()
-            || dir.join("taida.toml").exists()
-            || dir.join(".git").exists()
-        {
-            return dir;
-        }
-        if !dir.pop() {
-            break;
-        }
-    }
-    start_dir.to_path_buf()
+    crate::project_root::find_project_root(start_dir)
 }
 
 /// 複数 .o ファイルをリンクしてバイナリを生成
@@ -1119,6 +1107,8 @@ fn wasm_clang_base_args(include_dir: &Path, profile: emit_wasm_c::WasmProfile) -
     args
 }
 
+// The clang invocation contract is clearer as explicit parameters than as a
+// short-lived options struct that would only be unpacked at this call site.
 #[allow(clippy::too_many_arguments)]
 fn run_wasm_clang_object(
     clang: &str,
@@ -2232,7 +2222,9 @@ mod tests {
 
             let marker_path = root.path().join(marker);
             if marker == ".git" {
-                std::fs::create_dir_all(&marker_path).expect("create .git marker");
+                std::fs::create_dir_all(marker_path.join("objects")).expect("create .git objects");
+                std::fs::write(marker_path.join("HEAD"), "ref: refs/heads/main\n")
+                    .expect("write .git HEAD");
             } else {
                 std::fs::write(&marker_path, "").expect("write project marker");
             }

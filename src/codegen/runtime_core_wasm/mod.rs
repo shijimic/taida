@@ -437,7 +437,6 @@ mod tests {
     /// bit-for-bit with the interpreter because both delegate to the
     /// same libm on Linux / macOS. Closes the Phase 5-I scope for
     /// C25B-025 (math mold family on native + wasm backends).
-    #[test]
     /// D29B-016 / Phase 10-E (Track-θ, 2026-04-27): 333,024 → 333,863 (+839).
     /// Added the `WASM_STR_ROPE_MAGIC = 0x5441494452505400` sentinel + a
     /// design rationale comment block in `01_core.inc.c`. Reserved for a
@@ -452,8 +451,14 @@ mod tests {
     /// `taida_list_find_index_lax` in 01_core.inc.c, `taida_str_search_regex_lax`
     /// stub in 02_containers.inc.c). PHILOSOPHY I — drop the `-1` magic
     /// sentinel from caller-visible APIs.
+    /// 2026-05-08: final blocker review leaves the concatenated WASM runtime
+    /// at 338,303 bytes. The final shape keeps the `errorInfo()` helpers,
+    /// requires `__type` metadata for errorInfo source packs, returns `""`
+    /// for plain buchi-packs in `TypeName`, and drops the legacy direct
+    /// function Cage runtime entry.
+    #[test]
     fn test_runtime_core_wasm_fragment_concat_preserves_bytes() {
-        const EXPECTED_TOTAL_LEN: usize = 335_420;
+        const EXPECTED_TOTAL_LEN: usize = 338_303;
         let asm = *RUNTIME_CORE_WASM;
         assert_eq!(
             asm.len(),

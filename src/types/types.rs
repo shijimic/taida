@@ -205,6 +205,28 @@ impl TypeRegistry {
                 ("message".to_string(), Type::Str),
             ],
         );
+        registry.type_defs.insert(
+            "ErrorInfo".to_string(),
+            vec![
+                ("type".to_string(), Type::Str),
+                ("message".to_string(), Type::Str),
+                ("kind".to_string(), Type::Str),
+                ("code".to_string(), Type::Int),
+            ],
+        );
+        registry.type_defs.insert(
+            "RelaxedGorillaEscaped".to_string(),
+            vec![
+                ("type".to_string(), Type::Str),
+                ("message".to_string(), Type::Str),
+            ],
+        );
+        registry
+            .inheritance
+            .insert("RelaxedGorillaEscaped".to_string(), "Error".to_string());
+        registry
+            .error_types
+            .insert("RelaxedGorillaEscaped".to_string(), Vec::new());
         registry
     }
 

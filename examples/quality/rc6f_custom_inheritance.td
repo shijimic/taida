@@ -7,7 +7,7 @@ Vehicle => Car = @(doors: Int)
 car <= Car(name <= "Sedan", speed <= 120, doors <= 4)
 Str[car.speed]() ]=> speed_str1
 Str[car.doors]() ]=> doors_str1
-stdout("T1: " + car.__type + " name=" + car.name + " speed=" + speed_str1 + " doors=" + doors_str1)
+stdout("T1: " + TypeName[car]() + " name=" + car.name + " speed=" + speed_str1 + " doors=" + doors_str1)
 
 // --- Test 2: Default values in inherited type ---
 Vehicle => Bike = @(hasPedals: Bool)
@@ -23,7 +23,7 @@ sc <= SportsCar(name <= "Ferrari", speed <= 300, doors <= 2, turbo <= true)
 Str[sc.speed]() ]=> sc_speed
 Str[sc.doors]() ]=> sc_doors
 Str[sc.turbo]() ]=> sc_turbo
-stdout("T3: " + sc.__type + " name=" + sc.name + " speed=" + sc_speed + " doors=" + sc_doors + " turbo=" + sc_turbo)
+stdout("T3: " + TypeName[sc]() + " name=" + sc.name + " speed=" + sc_speed + " doors=" + sc_doors + " turbo=" + sc_turbo)
 
 // --- Test 4: Child type as function parameter expecting parent type ---
 describe_vehicle v: Vehicle = v.name + " at speed " + Str[v.speed]().unmold() => :Str
@@ -44,4 +44,4 @@ Animal => Cat = @(indoor: Bool)
 dog <= Dog(species <= "Canine", legs <= 4, breed <= "Shiba")
 cat <= Cat(species <= "Feline", legs <= 4, indoor <= true)
 Str[cat.indoor]() ]=> cat_indoor
-stdout("T6: " + dog.__type + "=" + dog.breed + " " + cat.__type + "=" + cat_indoor)
+stdout("T6: " + TypeName[dog]() + "=" + dog.breed + " " + TypeName[cat]() + "=" + cat_indoor)

@@ -330,10 +330,11 @@ impl CoreBundledProvider {
     /// Generate the js package stub source.
     fn js_package_source() -> &'static str {
         r#"// taida-lang/js — JS interop package (core bundled)
-// JSNew[T](...) — instantiate a JS class: JSNew[Hono]() → new Hono()
-// This mold is JS-backend only. Interpreter/Native will error.
+// JSRilla[Out] subfamily of CageRilla[Branch, Out] for Cage[subject, JSRilla[...]()]() boundaries.
+// canonical: Cage[subject, JSNew[@["Hono"], @[], Molten]()]() ]=> app
+// All descriptors are JS-backend only. Interpreter/Native will error.
 
-<<< @(JSNew)
+<<< @(JSGet, JSCall, JSNew, JSSet, JSBind, JSSpread)
 "#
     }
 
@@ -1688,9 +1689,15 @@ mod tests {
                 assert_eq!(pkg.source, PackageSource::CoreBundled);
                 assert!(pkg.path.exists());
                 assert!(pkg.path.join("main.td").exists());
-                // Verify the source contains JSNew export
+                // Verify the source contains JS descriptor exports.
                 let source = std::fs::read_to_string(pkg.path.join("main.td")).unwrap();
-                assert!(source.contains("JSNew"), "js package should export JSNew");
+                for symbol in ["JSGet", "JSCall", "JSNew", "JSSet", "JSBind", "JSSpread"] {
+                    assert!(
+                        source.contains(symbol),
+                        "js package should export {}",
+                        symbol
+                    );
+                }
             }
             other => panic!(
                 "Expected Resolved, got: {:?}",

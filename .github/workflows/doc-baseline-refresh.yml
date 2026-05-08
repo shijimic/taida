@@ -1,0 +1,18 @@
+name: Doc Baseline Refresh
+
+on:
+  workflow_dispatch: {}
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@1.93.1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: cargo-base
+      - name: Run doc parse baseline probe
+        run: cargo test --test c25b_008_doc_examples_probe -- --ignored --nocapture
+      - name: Run committed baseline guard
+        run: cargo test --test c25b_008_doc_examples_parse -- --nocapture

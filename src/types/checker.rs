@@ -55,6 +55,45 @@ use std::collections::{HashMap, HashSet};
 const RESERVED_INTERNAL_FIELD_PREFIX: &str = "__";
 const MAX_CALL_ARGUMENTS: usize = 256;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum CageBranch {
+    Js,
+    Build,
+    File,
+}
+
+impl CageBranch {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Js => "JS",
+            Self::Build => "Build",
+            Self::File => "File",
+        }
+    }
+
+    fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "JS" => Some(Self::Js),
+            "Build" => Some(Self::Build),
+            "File" => Some(Self::File),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct CageRunnerType {
+    branch: CageBranch,
+    output: Type,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BranchInfo {
+    None,
+    Molten(CageBranch),
+    GorillaxValue(CageBranch),
+}
+
 #[derive(Debug, Clone)]
 struct MoldHeaderSpec {
     header_args: Vec<MoldHeaderArg>,
@@ -162,6 +201,10 @@ pub struct TypeChecker {
     net_http_serve_symbols: HashSet<String>,
     /// Local enum names that resolve to taida-lang/net's `HttpProtocol`.
     net_http_protocol_type_names: HashSet<String>,
+    /// Scope-aligned metadata for branch-carrying values. `Type::Molten`
+    /// remains the public type; this side table records the branch only
+    /// when the checker can prove it.
+    branch_scope_stack: Vec<HashMap<String, BranchInfo>>,
     /// D28B-023 / D28B-024: stack of type parameter declarations for the
     /// enclosing generic functions. Pushed on `Statement::FuncDef` body
     /// entry, popped on exit. Used to resolve constrained type variables
@@ -244,6 +287,7 @@ impl TypeChecker {
             compile_target: CompileTarget::Neutral,
             net_http_serve_symbols: HashSet::new(),
             net_http_protocol_type_names: HashSet::new(),
+            branch_scope_stack: vec![HashMap::new()],
             current_func_type_params: Vec::new(),
         };
         // C19B-002 (import-less): the C19 interactive variants are core-bundled
@@ -1063,14 +1107,326 @@ impl TypeChecker {
         matches!(ty, Type::Named(name) if self.registry.mold_defs.contains_key(name))
     }
 
+    fn type_arg_expr_to_type(&self, expr: &Expr) -> Type {
+        match expr {
+            Expr::Ident(name, _) => self.type_name_to_type(name),
+            Expr::TypeLiteral(name, None, _) => self.type_name_to_type(name),
+            Expr::TypeLiteral(enum_name, Some(variant_name), _) => {
+                Type::Named(format!("{}:{}", enum_name, variant_name))
+            }
+            Expr::ListLit(items, _) if items.len() == 1 => {
+                Type::List(Box::new(self.type_arg_expr_to_type(&items[0])))
+            }
+            _ => Type::Unknown,
+        }
+    }
+
+    fn type_name_to_type(&self, name: &str) -> Type {
+        match name {
+            "Int" => Type::Int,
+            "Float" => Type::Float,
+            "Num" | "Number" => Type::Num,
+            "Str" | "String" => Type::Str,
+            "Bytes" => Type::Bytes,
+            "Bool" | "Boolean" => Type::Bool,
+            "Unit" => Type::Unit,
+            "JSON" => Type::Json,
+            "Molten" => Type::Molten,
+            other if self.registry.is_error_type(other) => Type::Error(other.to_string()),
+            other => Type::Named(other.to_string()),
+        }
+    }
+
+    fn branch_from_type_arg(&self, expr: &Expr) -> Option<CageBranch> {
+        match expr {
+            Expr::Ident(name, _) | Expr::TypeLiteral(name, None, _) => CageBranch::from_name(name),
+            _ => None,
+        }
+    }
+
+    fn is_js_rilla_constructor(name: &str) -> bool {
+        matches!(
+            name,
+            "JSGet" | "JSCall" | "JSNew" | "JSSet" | "JSBind" | "JSSpread"
+        )
+    }
+
+    fn js_rilla_constructor_signature(name: &str) -> Option<(usize, &'static str)> {
+        match name {
+            "JSGet" => Some((2, "JSGet[path, Out]()")),
+            "JSCall" => Some((3, "JSCall[path, args, Out]()")),
+            "JSNew" => Some((3, "JSNew[path, args, Out]()")),
+            "JSSet" => Some((2, "JSSet[path, value]()")),
+            "JSBind" => Some((1, "JSBind[path]()")),
+            "JSSpread" => Some((1, "JSSpread[source]()")),
+            _ => None,
+        }
+    }
+
+    fn is_cage_rilla_child(name: &str) -> bool {
+        matches!(name, "JSRilla" | "FileRilla" | "BuildRilla")
+    }
+
+    fn is_hammer_cage_boundary_expr(expr: &Expr) -> bool {
+        matches!(expr, Expr::MoldInst(name, _, _, _) if name == "JSON" || name == "JSONRilla")
+    }
+
+    fn cage_runner_type(&self, expr: &Expr) -> Option<CageRunnerType> {
+        let Expr::MoldInst(name, type_args, _, _) = expr else {
+            return None;
+        };
+        match name.as_str() {
+            "JSGet" if type_args.len() == 2 => type_args.get(1).map(|out| CageRunnerType {
+                branch: CageBranch::Js,
+                output: self.type_arg_expr_to_type(out),
+            }),
+            "JSCall" | "JSNew" if type_args.len() == 3 => {
+                type_args.get(2).map(|out| CageRunnerType {
+                    branch: CageBranch::Js,
+                    output: self.type_arg_expr_to_type(out),
+                })
+            }
+            "JSSet" if type_args.len() == 2 => Some(CageRunnerType {
+                branch: CageBranch::Js,
+                output: Type::Molten,
+            }),
+            "JSBind" | "JSSpread" if type_args.len() == 1 => Some(CageRunnerType {
+                branch: CageBranch::Js,
+                output: Type::Molten,
+            }),
+            "JSRilla" => type_args.first().map(|out| CageRunnerType {
+                branch: CageBranch::Js,
+                output: self.type_arg_expr_to_type(out),
+            }),
+            "FileRilla" => type_args.first().map(|out| CageRunnerType {
+                branch: CageBranch::File,
+                output: self.type_arg_expr_to_type(out),
+            }),
+            "BuildRilla" => type_args.first().map(|out| CageRunnerType {
+                branch: CageBranch::Build,
+                output: self.type_arg_expr_to_type(out),
+            }),
+            "CageRilla" => {
+                let branch = type_args
+                    .first()
+                    .and_then(|arg| self.branch_from_type_arg(arg))?;
+                let output = type_args
+                    .get(1)
+                    .map(|out| self.type_arg_expr_to_type(out))
+                    .unwrap_or(Type::Unknown);
+                Some(CageRunnerType { branch, output })
+            }
+            _ => None,
+        }
+    }
+
+    fn molten_branch_for_expr(&self, expr: &Expr) -> Option<CageBranch> {
+        match expr {
+            Expr::Ident(name, _) => self.lookup_molten_branch(name),
+            Expr::Unmold(inner, _) => self.gorillax_value_branch_for_expr(inner),
+            _ => None,
+        }
+    }
+
+    fn gorillax_value_branch_for_expr(&self, expr: &Expr) -> Option<CageBranch> {
+        match expr {
+            Expr::Ident(name, _) => self.lookup_gorillax_value_branch(name),
+            Expr::MoldInst(name, type_args, _, _) if name == "Cage" => type_args
+                .get(1)
+                .and_then(|runner| self.cage_runner_type(runner))
+                .and_then(|runner| {
+                    if runner.output == Type::Molten {
+                        Some(runner.branch)
+                    } else {
+                        None
+                    }
+                }),
+            _ => None,
+        }
+    }
+
+    fn branch_info_for_assignment_expr(&self, expr: &Expr, inferred: &Type) -> BranchInfo {
+        match inferred {
+            Type::Molten => self
+                .molten_branch_for_expr(expr)
+                .map(BranchInfo::Molten)
+                .unwrap_or(BranchInfo::None),
+            Type::Generic(name, args)
+                if name == "Gorillax" && args.first().is_some_and(|arg| *arg == Type::Molten) =>
+            {
+                self.gorillax_value_branch_for_expr(expr)
+                    .map(BranchInfo::GorillaxValue)
+                    .unwrap_or(BranchInfo::None)
+            }
+            _ => BranchInfo::None,
+        }
+    }
+
+    fn push_cage_error(&mut self, code: &str, span: &Span, message: String) {
+        if self
+            .errors
+            .iter()
+            .any(|err| err.span == *span && err.message.contains(code))
+        {
+            return;
+        }
+        self.errors.push(TypeError {
+            message,
+            span: span.clone(),
+        });
+    }
+
+    fn validate_cage_runner_expr(&mut self, runner: &Expr, span: &Span) -> Option<CageRunnerType> {
+        match runner {
+            Expr::Lambda(_, _, lambda_span) => {
+                self.push_cage_error(
+                    "[E1514]",
+                    lambda_span,
+                    "[E1514] Cage runner must be a CageRilla descriptor, not a direct lambda. \
+                     Hint: use a branch descriptor such as `JSCall[path, args, Out]()`."
+                        .to_string(),
+                );
+                None
+            }
+            Expr::MoldInst(name, type_args, _, runner_span) => {
+                if let Some((expected, signature)) = Self::js_rilla_constructor_signature(name)
+                    && type_args.len() != expected
+                {
+                    self.push_cage_error(
+                        "[E1517]",
+                        runner_span,
+                        format!(
+                            "[E1517] {} requires {} `[]` type argument(s): `{}`. \
+                             Hint: pass the descriptor directly as `Cage[subject, {}]()`.",
+                            name, expected, signature, signature
+                        ),
+                    );
+                    return None;
+                }
+                if Self::is_cage_rilla_child(name) && type_args.len() != 1 {
+                    self.push_cage_error(
+                        "[E1516]",
+                        runner_span,
+                        format!(
+                            "[E1516] {} takes exactly one `[]` output type argument. \
+                             Hint: write `{}[Out]()`; the branch is implied by the child family.",
+                            name, name
+                        ),
+                    );
+                    return None;
+                }
+                if name == "JSON" || name == "JSONRilla" {
+                    self.push_cage_error(
+                        "[E1518]",
+                        runner_span,
+                        "[E1518] JSON/Hammer schema casting is not a Cage runner. \
+                         Hint: use `JSON[raw, Schema]()` directly and handle its `Lax[T]` result."
+                            .to_string(),
+                    );
+                    return None;
+                }
+                let info = self.cage_runner_type(runner);
+                if info.is_none() {
+                    self.push_cage_error(
+                        "[E1517]",
+                        runner_span,
+                        format!(
+                            "[E1517] Cage runner branch is unresolved for `{}`. \
+                             Hint: pass a CageRilla child descriptor such as `JSCall[path, args, Out]()`.",
+                            name
+                        ),
+                    );
+                }
+                info
+            }
+            Expr::Ident(name, ident_span) => {
+                let ty = self.infer_expr_type(runner);
+                if matches!(ty, Type::Function(_, _)) {
+                    self.push_cage_error(
+                        "[E1514]",
+                        ident_span,
+                        format!(
+                            "[E1514] Cage runner '{}' is a direct function. \
+                             Hint: use a CageRilla descriptor such as `JSCall[path, args, Out]()`.",
+                            name
+                        ),
+                    );
+                } else {
+                    self.push_cage_error(
+                        "[E1517]",
+                        ident_span,
+                        format!(
+                            "[E1517] Cage runner '{}' does not carry a statically known branch. \
+                             Hint: pass a CageRilla child descriptor directly.",
+                            name
+                        ),
+                    );
+                }
+                None
+            }
+            _ => {
+                let ty = self.infer_expr_type(runner);
+                if matches!(ty, Type::Function(_, _)) {
+                    self.push_cage_error(
+                        "[E1514]",
+                        span,
+                        "[E1514] Cage runner must be a CageRilla descriptor, not a direct function. \
+                         Hint: use a branch descriptor such as `JSCall[path, args, Out]()`."
+                            .to_string(),
+                    );
+                } else {
+                    self.push_cage_error(
+                        "[E1517]",
+                        span,
+                        "[E1517] Cage runner branch is unresolved. \
+                         Hint: pass a CageRilla child descriptor such as `JSCall[path, args, Out]()`."
+                            .to_string(),
+                    );
+                }
+                None
+            }
+        }
+    }
+
     /// Push a new scope (e.g., entering a function body).
     fn push_scope(&mut self) {
         self.scope_stack.push(HashMap::new());
+        self.branch_scope_stack.push(HashMap::new());
     }
 
     /// Pop a scope (e.g., leaving a function body).
     fn pop_scope(&mut self) {
         self.scope_stack.pop();
+        self.branch_scope_stack.pop();
+    }
+
+    fn define_branch_info(&mut self, name: &str, info: BranchInfo) {
+        if let Some(scope) = self.branch_scope_stack.last_mut() {
+            scope.insert(name.to_string(), info);
+        }
+    }
+
+    fn lookup_branch_info(&self, name: &str) -> BranchInfo {
+        for scope in self.branch_scope_stack.iter().rev() {
+            if let Some(info) = scope.get(name) {
+                return *info;
+            }
+        }
+        BranchInfo::None
+    }
+
+    fn lookup_molten_branch(&self, name: &str) -> Option<CageBranch> {
+        match self.lookup_branch_info(name) {
+            BranchInfo::Molten(branch) => Some(branch),
+            BranchInfo::None | BranchInfo::GorillaxValue(_) => None,
+        }
+    }
+
+    fn lookup_gorillax_value_branch(&self, name: &str) -> Option<CageBranch> {
+        match self.lookup_branch_info(name) {
+            BranchInfo::GorillaxValue(branch) => Some(branch),
+            BranchInfo::None | BranchInfo::Molten(_) => None,
+        }
     }
 
     fn validate_http_serve_protocol_capability(&mut self, callee_name: &str, args: &[Expr]) {
@@ -1494,19 +1850,7 @@ impl TypeChecker {
     /// `.taida/` is state/config storage, not a project-root marker; otherwise
     /// `~/.taida` can make `$HOME` look like the active project root.
     fn find_project_root(start_dir: &std::path::Path) -> std::path::PathBuf {
-        let mut dir = start_dir.to_path_buf();
-        loop {
-            if dir.join("packages.tdm").exists()
-                || dir.join("taida.toml").exists()
-                || dir.join(".git").exists()
-            {
-                return dir;
-            }
-            if !dir.pop() {
-                break;
-            }
-        }
-        start_dir.to_path_buf()
+        crate::project_root::find_project_root(start_dir)
     }
 
     fn define_var(&mut self, name: &str, ty: Type) {
@@ -1517,6 +1861,7 @@ impl TypeChecker {
         if let Some(scope) = self.scope_stack.last_mut() {
             scope.insert(name.to_string(), ty);
         }
+        self.define_branch_info(name, BranchInfo::None);
     }
 
     /// Define a variable with a span for duplicate detection.
@@ -1538,6 +1883,7 @@ impl TypeChecker {
             }
             scope.insert(name.to_string(), ty);
         }
+        self.define_branch_info(name, BranchInfo::None);
     }
 
     /// C13-1 / C13B-007: True if `name` in an intermediate pipeline
@@ -2943,9 +3289,35 @@ defaulted fields must be provided via `()`",
     }
 
     fn check_mold_errors_in_expr(&mut self, expr: &Expr) {
+        self.check_mold_errors_in_expr_ctx(expr, false);
+    }
+
+    fn check_mold_errors_in_expr_ctx(&mut self, expr: &Expr, in_cage_runner: bool) {
         match expr {
             // B11B-016: TypeExtends does not accept enum variant literals
             Expr::MoldInst(name, type_args, fields, _) => {
+                if Self::is_js_rilla_constructor(name) && !in_cage_runner {
+                    self.push_cage_error(
+                        "[E1515]",
+                        expr.span(),
+                        format!(
+                            "[E1515] `{}` is a Cage runner descriptor and cannot be executed directly. \
+                             Hint: pass it as the second argument of `Cage[subject, {}[...]()]()`.",
+                            name, name
+                        ),
+                    );
+                }
+                if Self::is_cage_rilla_child(name) && type_args.len() != 1 {
+                    self.push_cage_error(
+                        "[E1516]",
+                        expr.span(),
+                        format!(
+                            "[E1516] {} takes exactly one `[]` output type argument. \
+                             Hint: write `{}[Out]()`; the branch is implied by the child family.",
+                            name, name
+                        ),
+                    );
+                }
                 if name == "TypeExtends" {
                     for arg in type_args {
                         if let Expr::TypeLiteral(enum_name, Some(variant_name), lit_span) = arg {
@@ -2960,36 +3332,37 @@ defaulted fields must be provided via `()`",
                         }
                     }
                 }
-                for arg in type_args {
-                    self.check_mold_errors_in_expr(arg);
+                for (idx, arg) in type_args.iter().enumerate() {
+                    let child_in_cage_runner = name == "Cage" && idx == 1;
+                    self.check_mold_errors_in_expr_ctx(arg, child_in_cage_runner);
                 }
                 for f in fields {
-                    self.check_mold_errors_in_expr(&f.value);
+                    self.check_mold_errors_in_expr_ctx(&f.value, false);
                 }
             }
             Expr::FuncCall(callee, args, _) => {
                 self.check_call_argument_limit("function call", args.len(), expr.span().clone());
-                self.check_mold_errors_in_expr(callee);
+                self.check_mold_errors_in_expr_ctx(callee, false);
                 for arg in args {
-                    self.check_mold_errors_in_expr(arg);
+                    self.check_mold_errors_in_expr_ctx(arg, false);
                 }
             }
             Expr::MethodCall(obj, _, args, _) => {
                 self.check_call_argument_limit("method call", args.len(), expr.span().clone());
-                self.check_mold_errors_in_expr(obj);
+                self.check_mold_errors_in_expr_ctx(obj, false);
                 for arg in args {
-                    self.check_mold_errors_in_expr(arg);
+                    self.check_mold_errors_in_expr_ctx(arg, false);
                 }
             }
             Expr::Pipeline(exprs, _) => {
                 for e in exprs {
-                    self.check_mold_errors_in_expr(e);
+                    self.check_mold_errors_in_expr_ctx(e, false);
                 }
             }
             Expr::CondBranch(arms, _) => {
                 for arm in arms {
                     if let Some(cond) = &arm.condition {
-                        self.check_mold_errors_in_expr(cond);
+                        self.check_mold_errors_in_expr_ctx(cond, false);
                     }
                     for s in &arm.body {
                         self.check_mold_errors_in_stmt(s);
@@ -3041,22 +3414,22 @@ defaulted fields must be provided via `()`",
                 }
                 let _ = span;
                 for f in fields {
-                    self.check_mold_errors_in_expr(&f.value);
+                    self.check_mold_errors_in_expr_ctx(&f.value, false);
                 }
             }
             Expr::ListLit(items, _) => {
                 for item in items {
-                    self.check_mold_errors_in_expr(item);
+                    self.check_mold_errors_in_expr_ctx(item, false);
                 }
             }
-            Expr::UnaryOp(_, inner, _) => self.check_mold_errors_in_expr(inner),
+            Expr::UnaryOp(_, inner, _) => self.check_mold_errors_in_expr_ctx(inner, false),
             Expr::BinaryOp(l, _, r, _) => {
-                self.check_mold_errors_in_expr(l);
-                self.check_mold_errors_in_expr(r);
+                self.check_mold_errors_in_expr_ctx(l, false);
+                self.check_mold_errors_in_expr_ctx(r, false);
             }
-            Expr::Throw(inner, _) => self.check_mold_errors_in_expr(inner),
-            Expr::FieldAccess(obj, _, _) => self.check_mold_errors_in_expr(obj),
-            Expr::Lambda(_, body, _) => self.check_mold_errors_in_expr(body),
+            Expr::Throw(inner, _) => self.check_mold_errors_in_expr_ctx(inner, false),
+            Expr::FieldAccess(obj, _, _) => self.check_mold_errors_in_expr_ctx(obj, false),
+            Expr::Lambda(_, body, _) => self.check_mold_errors_in_expr_ctx(body, false),
             // Leaf expressions — no recursion needed
             _ => {}
         }
@@ -3514,6 +3887,10 @@ defaulted fields must be provided via `()`",
                     }
                     // Register with the annotated type
                     self.define_var_with_span(&assign.target, expected, Some(&assign.span));
+                    self.define_branch_info(
+                        &assign.target,
+                        self.branch_info_for_assignment_expr(&assign.value, &inferred),
+                    );
                 } else {
                     // @[] without type annotation is ambiguous — element type is unknown
                     if matches!(&inferred, Type::List(inner) if matches!(inner.as_ref(), Type::Unknown))
@@ -3528,7 +3905,10 @@ defaulted fields must be provided via `()`",
                             });
                     }
                     // Register with the inferred type
+                    let branch_info =
+                        self.branch_info_for_assignment_expr(&assign.value, &inferred);
                     self.define_var_with_span(&assign.target, inferred, Some(&assign.span));
+                    self.define_branch_info(&assign.target, branch_info);
                 }
             }
             Statement::FuncDef(fd) => {
@@ -3785,20 +4165,35 @@ defaulted fields must be provided via `()`",
                     if os_import {
                         self.register_os_import_symbol(&sym.name, name);
                     }
-                    self.define_var(name, Type::Unknown);
+                    if imp.path.starts_with("npm:") {
+                        self.define_var(name, Type::Molten);
+                        self.define_branch_info(name, BranchInfo::Molten(CageBranch::Js));
+                    } else {
+                        self.define_var(name, Type::Unknown);
+                    }
                 }
             }
             Statement::UnmoldForward(uf) => {
                 // `expr ]=> target` -- target gets the unmolded (inner) value
                 let source_ty = self.infer_expr_type(&uf.source);
                 let target_ty = self.unmold_type(&source_ty);
-                self.define_var_with_span(&uf.target, target_ty, Some(&uf.span));
+                self.define_var_with_span(&uf.target, target_ty.clone(), Some(&uf.span));
+                if target_ty == Type::Molten
+                    && let Some(branch) = self.gorillax_value_branch_for_expr(&uf.source)
+                {
+                    self.define_branch_info(&uf.target, BranchInfo::Molten(branch));
+                }
             }
             Statement::UnmoldBackward(ub) => {
                 // `target <=[ expr`
                 let source_ty = self.infer_expr_type(&ub.source);
                 let target_ty = self.unmold_type(&source_ty);
-                self.define_var_with_span(&ub.target, target_ty, Some(&ub.span));
+                self.define_var_with_span(&ub.target, target_ty.clone(), Some(&ub.span));
+                if target_ty == Type::Molten
+                    && let Some(branch) = self.gorillax_value_branch_for_expr(&ub.source)
+                {
+                    self.define_branch_info(&ub.target, BranchInfo::Molten(branch));
+                }
             }
             Statement::Export(export) => {
                 // RCB-102: `<<< @()` (empty export) is almost certainly a mistake.
@@ -5070,6 +5465,31 @@ defaulted fields must be provided via `()`",
                     // check_mold_errors_in_expr(), not here, to ensure it
                     // fires regardless of expression context.
                     "TypeExtends" => Type::Bool,
+                    "TypeName" => {
+                        if type_args.len() != 1 {
+                            self.errors.push(TypeError {
+                                message: format!(
+                                    "[E1507] TypeName requires exactly 1 argument: TypeName[value](), got {}.",
+                                    type_args.len()
+                                ),
+                                span: mold_span.clone(),
+                            });
+                        }
+                        Type::Str
+                    }
+                    "JSGet" | "JSCall" | "JSNew" | "JSSet" | "JSBind" | "JSSpread" | "JSRilla"
+                    | "FileRilla" | "BuildRilla" | "CageRilla" => self
+                        .cage_runner_type(expr)
+                        .map(|runner| {
+                            Type::Generic(
+                                "CageRilla".to_string(),
+                                vec![
+                                    Type::Named(runner.branch.label().to_string()),
+                                    runner.output,
+                                ],
+                            )
+                        })
+                        .unwrap_or(Type::Unknown),
                     "Upper" | "Lower" | "Trim" | "Replace" | "Repeat" | "Pad" => Type::Str,
                     // C26B-018 (B)(C): byte-level primitive + single-alloc repeat/join
                     "ByteSlice" | "StringRepeatJoin" => Type::Str,
@@ -5140,46 +5560,80 @@ defaulted fields must be provided via `()`",
                         }
                         Type::Molten
                     }
-                    // Cage[molten, F] where F: :Molten => :U → Gorillax[U]
-                    // Cage requires Molten type as first argument
+                    // Cage[subject, runner] where runner <: CageRilla[Branch, Out].
                     "Cage" => {
-                        if let Some(first_arg) = type_args.first() {
-                            let first_type = self.infer_expr_type(first_arg);
-                            if first_type != Type::Molten && first_type != Type::Unknown {
-                                self.errors.push(TypeError {
-                                    message: format!(
-                                        "Cage requires Molten type as first argument, got {}",
-                                        first_type
-                                    ),
-                                    span: mold_span.clone(),
-                                });
-                            }
-                        }
-                        // Extract the return type U from the second argument (function F):
-                        // - If F is a lambda `_ x = expr`, infer body type directly → Gorillax[U]
-                        // - If F is a function reference, infer its type → Function(params, ret) → extract ret
-                        // - Otherwise, fall back to Unknown (safe)
-                        let inner = if type_args.len() >= 2 {
-                            let second_arg = &type_args[1];
-                            match second_arg {
-                                Expr::Lambda(_params, body, _span) => {
-                                    // Lambda: infer the body expression type directly
-                                    self.infer_expr_type(body)
-                                }
-                                _ => {
-                                    // Function reference or other expression:
-                                    // infer its type, then extract return type if it's a Function type
-                                    let fn_type = self.infer_expr_type(second_arg);
-                                    match fn_type {
-                                        Type::Function(_, ret) => *ret,
-                                        _ => Type::Unknown,
-                                    }
-                                }
-                            }
-                        } else {
-                            Type::Unknown
+                        let Some(subject) = type_args.first() else {
+                            self.push_cage_error(
+                                "[E1517]",
+                                mold_span,
+                                "[E1517] Cage requires a subject and runner: `Cage[subject, runner]()`."
+                                    .to_string(),
+                            );
+                            return Type::Generic("Gorillax".to_string(), vec![Type::Unknown]);
                         };
-                        Type::Generic("Gorillax".to_string(), vec![inner])
+                        let subject_type = self.infer_expr_type(subject);
+                        if Self::is_hammer_cage_boundary_expr(subject) {
+                            self.push_cage_error(
+                                "[E1518]",
+                                subject.span(),
+                                "[E1518] JSON/Hammer schema casts must not be used as Cage subjects. \
+                                 Hint: keep `JSON[raw, Schema]()` on its `Lax[T]` path."
+                                    .to_string(),
+                            );
+                        } else if subject_type != Type::Molten && subject_type != Type::Unknown {
+                            self.push_cage_error(
+                                "[E1517]",
+                                subject.span(),
+                                format!(
+                                    "[E1517] Cage subject must carry a resolved Molten branch, got {}. \
+                                     Hint: pass an external Molten value such as an `npm:` import.",
+                                    subject_type
+                                ),
+                            );
+                        }
+
+                        let subject_branch = self.molten_branch_for_expr(subject);
+                        if subject_type == Type::Molten && subject_branch.is_none() {
+                            self.push_cage_error(
+                                "[E1517]",
+                                subject.span(),
+                                "[E1517] Cage subject branch is unresolved. \
+                                 Hint: use a Molten value whose source fixes the branch, such as an `npm:` import for JS."
+                                    .to_string(),
+                            );
+                        }
+
+                        let Some(runner_expr) = type_args.get(1) else {
+                            self.push_cage_error(
+                                "[E1517]",
+                                mold_span,
+                                "[E1517] Cage requires a runner descriptor: `Cage[subject, runner]()`."
+                                    .to_string(),
+                            );
+                            return Type::Generic("Gorillax".to_string(), vec![Type::Unknown]);
+                        };
+                        let runner = self.validate_cage_runner_expr(runner_expr, mold_span);
+                        match (subject_branch, runner) {
+                            (Some(subject_branch), Some(runner)) => {
+                                if subject_branch != runner.branch {
+                                    self.push_cage_error(
+                                        "[E1512]",
+                                        runner_expr.span(),
+                                        format!(
+                                            "[E1512] Cage branch mismatch: subject is {}, runner is {}. \
+                                             Hint: choose a runner descriptor from the matching CageRilla family.",
+                                            subject_branch.label(),
+                                            runner.branch.label()
+                                        ),
+                                    );
+                                }
+                                Type::Generic("Gorillax".to_string(), vec![runner.output])
+                            }
+                            (_, Some(runner)) => {
+                                Type::Generic("Gorillax".to_string(), vec![runner.output])
+                            }
+                            _ => Type::Generic("Gorillax".to_string(), vec![Type::Unknown]),
+                        }
                     }
                     _ => {
                         // Look up in mold definitions

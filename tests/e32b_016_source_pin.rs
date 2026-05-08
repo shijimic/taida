@@ -23,13 +23,13 @@ integrity = "{integrity}"
 }
 
 #[test]
-#[ignore = "Pre-empted by project-root marker tightening; needs rooted fixture"]
 fn e32b_016_source_pin_mismatch_rejects_first_install() {
     let work = unique_temp_dir("e32b_016_mismatch");
     let home = work.join("home");
     let project = work.join("project");
     fs::create_dir_all(&home).expect("create home");
     fs::create_dir_all(&project).expect("create project");
+    common::mark_project_root(&project);
 
     let tarball = make_tarball(&[
         ("packages.tdm", b"<<<@a.1 taida-lang/demo\n" as &[u8]),
@@ -85,13 +85,13 @@ fn e32b_016_source_pin_mismatch_rejects_first_install() {
 }
 
 #[test]
-#[ignore = "Pre-empted by project-root marker tightening; needs rooted fixture"]
 fn e32b_016_source_pin_match_allows_first_install() {
     let work = unique_temp_dir("e32b_016_match");
     let home = work.join("home");
     let project = work.join("project");
     fs::create_dir_all(&home).expect("create home");
     fs::create_dir_all(&project).expect("create project");
+    common::mark_project_root(&project);
 
     let tarball = make_tarball(&[
         ("packages.tdm", b"<<<@a.1 taida-lang/demo\n" as &[u8]),
@@ -141,13 +141,13 @@ fn e32b_016_source_pin_match_allows_first_install() {
 }
 
 #[test]
-#[ignore = "Pre-empted by project-root marker tightening; needs rooted fixture"]
 fn e32b_016_cached_source_pin_mismatch_rejects_reuse() {
     let work = unique_temp_dir("e32b_016_cached_mismatch");
     let home = work.join("home");
     let project = work.join("project");
     fs::create_dir_all(&home).expect("create home");
     fs::create_dir_all(&project).expect("create project");
+    common::mark_project_root(&project);
 
     let tarball = make_tarball(&[
         ("packages.tdm", b"<<<@a.1 taida-lang/demo\n" as &[u8]),

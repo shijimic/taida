@@ -871,8 +871,13 @@ fn builtin_mold_completions() -> Vec<CompletionItem> {
         ),
         (
             "Cage",
-            "Cage[molten, fn]() -- execute fn(molten) in protected context",
-            "Cage[Molten, F]: Execute F(Molten) with error protection. Returns Gorillax. First arg must be Molten.",
+            "Cage[subject, runner]() -- run a branch-specific CageRilla capability on a Molten subject",
+            "Cage[subject, runner]: subject branch must match runner CageRilla[Branch, Out]. JS runners are built with JSGet/JSCall/JSNew/JSSet/JSBind/JSSpread. Returns Gorillax[Out].",
+        ),
+        (
+            "CageRilla",
+            "CageRilla[Branch, Out] -- parent type of Cage runner descriptors",
+            "CageRilla[Branch, Out]: abstract parent descriptor. Write concrete JS runner constructors such as JSGet/JSCall instead of calling CageRilla directly.",
         ),
         // JSON mold
         (
@@ -880,26 +885,36 @@ fn builtin_mold_completions() -> Vec<CompletionItem> {
             "JSON[raw, Schema]() => :Lax[T]",
             "Parse JSON with schema. Returns Lax containing typed value matching Schema.",
         ),
-        // JS interop molds (JS backend only)
+        // JSRilla[Out] subfamily (JS backend only)
+        (
+            "JSGet",
+            "JSGet[path, Out]() -- JSRilla[Out] for property/value get",
+            "JS backend only. Build a JSRilla[Out] descriptor that reads subject.path. Used as runner of Cage[subject, JSGet[...]()]() -> Gorillax[Out].",
+        ),
+        (
+            "JSCall",
+            "JSCall[path, args, Out]() -- JSRilla[Out] for function/method call",
+            "JS backend only. Build a JSRilla[Out] descriptor that calls subject.path(args...). Used as runner of Cage[subject, JSCall[...]()]() -> Gorillax[Out].",
+        ),
         (
             "JSNew",
-            "JSNew[constructor, args]() -- JS new operator",
-            "JS backend only. Create new JS object.",
+            "JSNew[path, args, Out]() -- JSRilla[Out] for `new` instantiation",
+            "JS backend only. Build a JSRilla[Out] descriptor that runs `new subject.path(args...)`. Used as runner of Cage[subject, JSNew[...]()]() -> Gorillax[Out].",
         ),
         (
             "JSSet",
-            "JSSet[obj, field, value]() -- JS property set",
-            "JS backend only. Set JS object property.",
+            "JSSet[path, value]() -- JSRilla[Molten] for property set",
+            "JS backend only. Build a JSRilla[Molten] descriptor that sets subject.path = value. Used as runner of Cage[subject, JSSet[...]()]() -> Gorillax[Molten].",
         ),
         (
             "JSBind",
-            "JSBind[fn, thisArg]() -- JS Function.bind",
-            "JS backend only. Bind `this` context.",
+            "JSBind[path]() -- JSRilla[Molten] for `this` binding",
+            "JS backend only. Build a JSRilla[Molten] descriptor that returns subject.path.bind(subject). Used as runner of Cage[subject, JSBind[...]()]() -> Gorillax[Molten].",
         ),
         (
             "JSSpread",
-            "JSSpread[obj]() -- JS spread operator",
-            "JS backend only. Spread object properties.",
+            "JSSpread[source]() -- JSRilla[Molten] for spread merge",
+            "JS backend only. Build a JSRilla[Molten] descriptor that merges source into subject. Used as runner of Cage[subject, JSSpread[...]()]() -> Gorillax[Molten].",
         ),
     ];
 

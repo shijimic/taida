@@ -1,12 +1,12 @@
-//! C25B-008 probe — measure parse-success rate of ```taida blocks in docs/.
+//! C25B-008 helper — refresh the parse baseline for ```taida blocks in docs/.
 //!
-//! This is an *exploratory* test (marked `#[ignore]`) used once during Phase 8
-//! to size the doctest effort and to capture the initial parse baseline.
-//! The real guard test is `c25b_008_doc_examples_parse.rs` which consumes the
-//! baseline.
+//! This ignored test is an explicit maintenance helper, not exploratory
+//! coverage. The real guard test is `c25b_008_doc_examples_parse.rs`, which
+//! consumes the committed baseline; this helper prints the current failure
+//! locations when a documentation edit intentionally changes parse status.
 //!
 //! Run manually with:
-//!     cargo test --release --test c25b_008_doc_examples_probe -- --ignored --nocapture
+//!     cargo test --test c25b_008_doc_examples_probe -- --ignored --nocapture
 
 use std::fs;
 use std::path::PathBuf;
@@ -41,7 +41,7 @@ fn extract_taida_blocks(md: &str) -> Vec<(usize, String, String)> {
 }
 
 #[test]
-#[ignore]
+#[ignore = "maintenance helper: run via doc-baseline-refresh workflow or manually with --ignored"]
 fn probe_doc_taida_blocks_parse_rate() {
     let mut total = 0usize;
     let mut pass = 0usize;

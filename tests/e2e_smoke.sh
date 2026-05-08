@@ -4,26 +4,22 @@
 # Also tests CLI commands (verify, graph, type-check).
 #
 # Usage:
-#   ./tests/e2e_smoke.sh              # uses cargo run
-#   TAIDA_BIN=./target/release/taida ./tests/e2e_smoke.sh  # uses prebuilt binary
+#   ./tests/e2e_smoke.sh
+#   TAIDA_BIN="$PWD/target/release/taida" ./tests/e2e_smoke.sh
 
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd -P)"
+PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd -P)"
 EXPECTED_DIR="$SCRIPT_DIR/expected"
-
-# Determine the taida binary
-if [ -n "${TAIDA_BIN:-}" ]; then
-  TAIDA="$TAIDA_BIN"
-elif [ -f "$PROJECT_DIR/target/release/taida" ]; then
-  TAIDA="$PROJECT_DIR/target/release/taida"
-elif [ -f "$PROJECT_DIR/target/debug/taida" ]; then
-  TAIDA="$PROJECT_DIR/target/debug/taida"
-else
-  # Fall back to cargo run
-  TAIDA="cargo run --quiet --"
+if [ -z "${TAIDA_BIN:-}" ] \
+  && [ ! -x "$PROJECT_DIR/target/release/taida" ] \
+  && [ ! -x "$PROJECT_DIR/target/debug/taida" ]; then
+  echo "[e2e-smoke] building taida binary"
+  cargo build --bin taida
 fi
+source "$SCRIPT_DIR/scripts/lib_taida_bin.sh"
+TAIDA="$(resolve_taida_bin)" || exit 1
 
 PASS=0
 FAIL=0

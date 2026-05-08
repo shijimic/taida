@@ -4757,3 +4757,142 @@ fn test_e30b_004_default_fn_generatable_buchi_pack() {
     let mut visiting = HashSet::new();
     assert!(!default_fn_generatable(&bad, &registry, &mut visiting));
 }
+
+#[test]
+fn test_cage_accepts_matching_js_rilla_runner() {
+    let source = r#"
+>>> npm:lodash => @(lodash)
+items <= @[1, 2, 3]
+result <= Cage[lodash, JSCall[@["sum"], @[items], Int]()]()
+result ]=> total
+stdout(total.toString())
+"#;
+    let (_checker, errors) = check(source);
+    assert!(
+        errors.iter().all(|e| !e.message.contains("[E1512]")
+            && !e.message.contains("[E1514]")
+            && !e.message.contains("[E1515]")
+            && !e.message.contains("[E1516]")
+            && !e.message.contains("[E1517]")
+            && !e.message.contains("[E1518]")),
+        "matching JS Cage runner should not emit Cage diagnostics, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn test_typename_and_error_info_type_check() {
+    let source = r#"
+Thing = @(name: Str)
+typeName <= TypeName[Thing(name <= "box")]()
+>>> npm:lodash => @(lodash)
+result <= Cage[lodash, JSCall[@["sum"], @[@[1, 2]], Int]()]()
+result.errorInfo() ]=> info
+stdout(typeName + ":" + info.message)
+"#;
+    let (_checker, errors) = check(source);
+    assert!(
+        errors.is_empty(),
+        "TypeName and Gorillax.errorInfo should type-check, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn test_cage_rejects_direct_function_runner() {
+    let source = r#"
+>>> npm:lib => @(lib)
+identity x = x => :Molten
+result <= Cage[lib, identity]()
+"#;
+    let (_checker, errors) = check(source);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1514]")),
+        "direct function runner must emit [E1514], got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn test_js_rilla_descriptor_rejects_direct_execution() {
+    let source = r#"result <= JSNew[@[], @[], Molten]()"#;
+    let (_checker, errors) = check(source);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1515]")),
+        "direct JS descriptor execution must emit [E1515], got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn test_cage_rejects_forbidden_child_arity() {
+    let source = r#"
+>>> npm:lib => @(lib)
+result <= Cage[lib, JSRilla[JS, Int]()]()
+"#;
+    let (_checker, errors) = check(source);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1516]")),
+        "JSRilla[JS, Int] must emit [E1516], got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn test_cage_rejects_js_descriptor_wrong_arity() {
+    let source = r#"
+>>> npm:lib => @(lib)
+result <= Cage[lib, JSSet[@["x"], 1, 2]()]()
+"#;
+    let (_checker, errors) = check(source);
+    assert!(
+        errors
+            .iter()
+            .any(|e| e.message.contains("[E1517]") && e.message.contains("JSSet requires 2")),
+        "JSSet with extra runner arguments must emit arity-specific [E1517], got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn test_cage_rejects_branch_mismatch() {
+    let source = r#"
+>>> npm:lib => @(lib)
+result <= Cage[lib, FileRilla[Int]()]()
+"#;
+    let (_checker, errors) = check(source);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1512]")),
+        "JS subject with File runner must emit [E1512], got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn test_cage_rejects_unresolved_subject_branch() {
+    let source = r#"
+m: Molten <= Molten[]()
+result <= Cage[m, JSCall[@[], @[], Int]()]()
+"#;
+    let (_checker, errors) = check(source);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1517]")),
+        "Molten without branch metadata must emit [E1517], got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn test_cage_rejects_json_hammer_boundary() {
+    let source = r#"
+Data = @(value: Int)
+raw <= "{\"value\":1}"
+result <= Cage[JSON[raw, Data](), JSCall[@[], @[], Int]()]()
+"#;
+    let (_checker, errors) = check(source);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1518]")),
+        "JSON/Hammer value in Cage boundary must emit [E1518], got: {:?}",
+        errors
+    );
+}

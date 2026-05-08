@@ -24,8 +24,8 @@
 | 演算モールド | `Div[x, y]()`, `Mod[x, y]()` |
 | JSON モールド | `JSON[raw, Schema]()` |
 | 非同期モールド | `Async[T]`, `All`, `Race`, `Timeout` |
-| モールディング型 | `Result[T, P]`, `Lax[T]`, `Gorillax[T]`, `Cage[Molten, F]` |
-| JS 補助モールド | `JSNew`, `JSSet`, `JSBind`, `JSSpread`（JS バックエンド専用） |
+| モールディング型 | `Result[T, P]`, `Lax[T]`, `Gorillax[T]`, `Cage[subject, runner]` |
+| `JSRilla[Out]` 系統 | `JSGet`, `JSCall`, `JSNew`, `JSSet`, `JSBind`, `JSSpread`（JS バックエンド専用） |
 
 詳細は [モールディング型](05_molding.md) を参照してください。
 
@@ -104,29 +104,33 @@ result <= sub(10, 3)  // 7
 
 `>>> npm:package => @(symbols)` で npm パッケージをインポートします。JS バックエンドでのみ動作します。
 
-npm からインポートされた値は **Molten** 型です。Molten は外部由来の不透明値であり、直接操作はできません。型安全な値を取り出すには Cage 経由で操作します。
+npm からインポートされた値は **Molten** 型（branch=JS）です。Molten は外部由来の不透明値であり、直接操作はできません。型安全な値を取り出すには `Cage[subject, JSRilla[...]()]()` 経由で操作します。
 
 ```taida fragment
->>> npm:express => @(express)  // express: Molten
+>>> npm:express => @(express)  // express: Molten (branch=JS)
 
-// Cage 内で Molten の関数を呼び出します（直接呼び出しは不可）
-Cage[express, _ e = e()]() ]=> app       // app: Molten（express() の結果）
+// express() を呼び出してアプリ handle を得る
+Cage[express, JSCall[@[], @[], Molten]()]() ]=> app       // app: Molten
 
-// JS 補助モールドは Cage 外でも使えます（Taida のモールド構文）
-JSNew[express.Router, @()]() => router   // router: Molten
+// new express.Router() でルータを生成
+Cage[express, JSNew[@["Router"], @[], Molten]()]() ]=> router  // router: Molten
 
-// Cage で Molten から Taida の型世界に値を持ち込みます
-Cage[app, _ a = a.listen(3000)]() => result  // result: Gorillax
-result ]=> server                            // server: 値（またはゴリラ）
+// app.listen(3000) を Int として受け取る
+Cage[app, JSCall[@["listen"], @[3000], Int]()]() => result    // result: Gorillax[Int]
+result ]=> server                                              // server: Int（またはゴリラ）
 ```
 
 **型の流れ:**
 
 ```
-npm import (Molten) → JSNew 等 (Molten→Molten) → Cage (Molten→Gorillax) → ]=> (値)
+npm import (Molten / branch=JS)
+  -> JSRilla descriptor (JSGet / JSCall / JSNew / JSSet / JSBind / JSSpread)
+  -> Cage (subject branch ↔ runner branch を照合)
+  -> Gorillax[Out]
+  -> ]=> 値
 ```
 
-インタプリタおよび Native バックエンドで `npm:` インポートを使用するとコンパイルエラーになります。JS 補助モールド（JSNew, JSSet, JSBind, JSSpread）も同様です。
+インタプリタおよび Native バックエンドで `npm:` インポートを使用するとコンパイルエラーになります。`JSRilla` 子系統 (`JSGet` / `JSCall` / `JSNew` / `JSSet` / `JSBind` / `JSSpread`) も同様です。
 
 ### 外部パッケージ
 

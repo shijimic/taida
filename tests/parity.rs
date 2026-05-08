@@ -2661,26 +2661,16 @@ stdout(badShell.hasValue().toString())
 }
 
 #[test]
-fn test_cage_molten_three_way_parity() {
+fn test_legacy_cage_direct_function_rejected_three_way() {
     let source = r#"
 m <= Molten[]()
 
 toInt x = 7 => :Int
 
-boom x =
-  Result[0](throw <= "boom") ]=> y
-  0
-=> :Int
-
 ok <= Cage[m, toInt]()
 stdout(ok.hasValue().toString())
-ok ]=> value
-stdout(value.toString())
-
-bad <= Cage[m, boom]()
-stdout(bad.hasValue().toString())
 "#;
-    assert_backend_parity_for_source(source, "cage_molten");
+    assert_backends_reject_source(source, "legacy_cage_direct_function_rejected");
 }
 
 #[test]
@@ -3541,14 +3531,54 @@ stdout(bv.toString())
 
 c <= TODO[Stub["User data TBD"]]()
 c ]=> cv
-g <= Cage[cv, _ m = 1]()
-g ]=> gv
-stdout(gv.toString())
+stdout(TypeName[cv]())
 "#;
     assert_backend_parity_for_source(source, "todo_stub_three_way");
     let out = run_interpreter_src(source, "todo_stub_three_way_expected")
         .expect("interpreter output should exist");
-    assert_eq!(out, "9\n0\n1");
+    assert_eq!(out, "9\n0\nMolten");
+}
+
+#[test]
+fn test_legacy_cage_direct_lambda_rejected_three_way() {
+    let source = r#"
+m <= Molten[]()
+g <= Cage[m, _ value = 1]()
+stdout(g.hasValue().toString())
+"#;
+    assert_backends_reject_source(source, "legacy_cage_direct_lambda_rejected");
+}
+
+#[test]
+fn test_error_info_rejects_plain_error_shape_three_way() {
+    let source = r#"
+fake <= @(type <= "FakeError", message <= "x", kind <= "X")
+fake.errorInfo() ]=> info
+stdout(info.kind)
+"#;
+    assert_backends_reject_source(source, "error_info_rejects_plain_error_shape");
+}
+
+#[test]
+fn test_error_info_rejects_named_error_shape_three_way() {
+    let source = r#"
+FakeError = @(type: Str, message: Str, kind: Str)
+fake <= FakeError(type <= "FakeError", message <= "x", kind <= "X")
+fake.errorInfo() ]=> info
+stdout(info.kind)
+"#;
+    assert_backends_reject_source(source, "error_info_rejects_named_error_shape");
+}
+
+#[test]
+fn test_type_name_plain_buchi_pack_empty_three_way_parity() {
+    let source = r#"
+stdout("[" + TypeName[@(a <= 1)]() + "]")
+"#;
+    assert_backend_parity_for_source(source, "type_name_plain_buchi_pack_empty");
+    let out = run_interpreter_src(source, "type_name_plain_buchi_pack_empty_expected")
+        .expect("interpreter output should exist");
+    assert_eq!(out, "[]");
 }
 
 #[test]
@@ -4904,8 +4934,8 @@ fn test_qf26_js_dir_build_includes_sibling_modules() {
     let dir = unique_temp_path("taida_qf26", "sibling", "dir");
     let src_dir = dir.join("src");
     fs::create_dir_all(&src_dir).expect("create src dir");
-    // Mark project root so find_project_root doesn't fall back to src/
-    fs::create_dir_all(dir.join(".git")).expect("create .git marker");
+    // Mark project root so find_project_root doesn't fall back to src/.
+    fs::write(dir.join("taida.toml"), "").expect("write project marker");
 
     fs::write(
         src_dir.join("main.td"),
@@ -4983,8 +5013,8 @@ fn test_qf27_js_dir_build_relative_paths_with_sibling() {
     fs::create_dir_all(&nested_dir).expect("create nested dir");
     let lib_dir = dir.join("lib");
     fs::create_dir_all(&lib_dir).expect("create lib dir");
-    // Mark project root so find_project_root doesn't fall back to src/nested/
-    fs::create_dir_all(dir.join(".git")).expect("create .git marker");
+    // Mark project root so find_project_root doesn't fall back to src/nested/.
+    fs::write(dir.join("taida.toml"), "").expect("write project marker");
 
     fs::write(
         nested_dir.join("main.td"),

@@ -132,6 +132,17 @@ impl TypeChecker {
                     _ => None,
                 }
             }
+            Type::Generic(name, _) if name == "Gorillax" || name == "RelaxedGorillax" => {
+                match method {
+                    "hasValue" | "isEmpty" | "errorInfo" | "toString" => Some((0, 0, vec![])),
+                    "relax" if name == "Gorillax" => Some((0, 0, vec![])),
+                    _ => None,
+                }
+            }
+            Type::Error(_) => match method {
+                "errorInfo" | "throw" | "toString" => Some((0, 0, vec![])),
+                _ => None,
+            },
             _ => {
                 // N-66: For unknown/unresolved receiver types (Type::Unknown, Type::Any,
                 // Type::Generic for non-Lax/Result/Async, user-defined Named types without
@@ -142,8 +153,28 @@ impl TypeChecker {
             }
         };
 
+        // errorInfo intentionally uses an explicit allow-list. Accepting any
+        // `(type, message)` shaped pack would reintroduce duck typing here.
+        if method == "errorInfo"
+            && !matches!(
+                obj_type,
+                Type::Generic(name, _) if name == "Gorillax" || name == "RelaxedGorillax"
+            )
+            && !matches!(obj_type, Type::Error(_))
+            && !matches!(obj_type, Type::Unknown | Type::Any)
+        {
+            self.errors.push(TypeError {
+                message: format!(
+                    "[E1509] Unknown method 'errorInfo' on type {}. \
+                     Hint: errorInfo() is only available on Gorillax, RelaxedGorillax, and Error values.",
+                    obj_type
+                ),
+                span: span.clone(),
+            });
+        }
+
         // FL-22: Emit error for unknown methods on known concrete types
-        if method_sig.is_none() && method != "toString" {
+        if method_sig.is_none() && method != "toString" && method != "errorInfo" {
             let is_known_type = matches!(
                 obj_type,
                 Type::Str
@@ -154,7 +185,8 @@ impl TypeChecker {
                     | Type::Bytes
                     | Type::List(_)
             ) || matches!(obj_type, Type::Named(n) if n == "HashMap" || n == "Set")
-                || matches!(obj_type, Type::Generic(n, _) if n == "Lax" || n == "Result");
+                || matches!(obj_type, Type::Generic(n, _) if n == "Lax" || n == "Result" || n == "Gorillax" || n == "RelaxedGorillax")
+                || matches!(obj_type, Type::Error(_));
             if is_known_type {
                 self.errors.push(TypeError {
                     message: format!(
@@ -326,6 +358,34 @@ impl TypeChecker {
                 "map" | "flatMap" | "mapError" => obj_type.clone(),
                 "getOrDefault" => args.first().cloned().unwrap_or(Type::Unknown),
                 "getOrThrow" => args.first().cloned().unwrap_or(Type::Unknown),
+                "toString" => Type::Str,
+                _ => Type::Unknown,
+            },
+            Type::Generic(name, args) if name == "Gorillax" => match method {
+                "hasValue" | "isEmpty" => Type::Bool,
+                "relax" => Type::Generic("RelaxedGorillax".to_string(), args.clone()),
+                "errorInfo" => Type::Generic(
+                    "Lax".to_string(),
+                    vec![Type::Named("ErrorInfo".to_string())],
+                ),
+                "toString" => Type::Str,
+                _ => Type::Unknown,
+            },
+            Type::Generic(name, _) if name == "RelaxedGorillax" => match method {
+                "hasValue" | "isEmpty" => Type::Bool,
+                "errorInfo" => Type::Generic(
+                    "Lax".to_string(),
+                    vec![Type::Named("ErrorInfo".to_string())],
+                ),
+                "toString" => Type::Str,
+                _ => Type::Unknown,
+            },
+            Type::Error(_) => match method {
+                "errorInfo" => Type::Generic(
+                    "Lax".to_string(),
+                    vec![Type::Named("ErrorInfo".to_string())],
+                ),
+                "throw" => Type::Unknown,
                 "toString" => Type::Str,
                 _ => Type::Unknown,
             },

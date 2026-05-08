@@ -80,6 +80,7 @@ impl Lowering {
             "hasValue" => "taida_polymorphic_has_value",
             "getOrDefault" => "taida_polymorphic_get_or_default",
             "getOrThrow" => "taida_monadic_get_or_throw",
+            "errorInfo" => "taida_error_info",
             // Gorillax.relax() → RelaxedGorillax
             "relax" => "taida_gorillax_relax",
             // Result methods

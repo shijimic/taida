@@ -27,6 +27,19 @@ int64_t taida_typeof(int64_t val, int64_t tag) {
     }
 }
 
+int64_t taida_type_name(int64_t val, int64_t tag) {
+    if (val != 0 && val >= WASM_MIN_HEAP_ADDR && _looks_like_pack(val)) {
+        if (taida_pack_has_hash(val, WASM_HASH___TYPE)) {
+            int64_t type_name = taida_pack_get(val, WASM_HASH___TYPE);
+            if (type_name != 0) return type_name;
+        }
+        /* Plain packs intentionally have no class-like identity. If a future
+           pack metadata field becomes public identity, add it before this return. */
+        return (int64_t)(intptr_t)"";
+    }
+    return taida_typeof(val, tag);
+}
+
 /* =========================================================================
  * WC-2a: Float mold functions (prelude — all profiles)
  * ========================================================================= */
@@ -1294,4 +1307,3 @@ int64_t taida_list_count(int64_t list_ptr, int64_t fn_ptr) {
 /* ── List elem retain/release (no-ops in WASM) ── */
 void taida_list_elem_retain(int64_t list) { (void)list; }
 void taida_list_elem_release(int64_t list) { (void)list; }
-
