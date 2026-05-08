@@ -222,41 +222,19 @@ fn c19_exec_shell_interactive_native_matches_interpreter() {
 
 // ── runInteractive ENOENT (IoError contract) parity ──
 //
-// These three tests pin the failure-path parity uncovered by the
-// code-review HOLD:
-// - Native used to surface `execvp` failure as ProcessError(127)
-//   instead of a proper IoError (fixed via CLOEXEC errno pipe in
-//   `taida_os_run_interactive`).
-// - Native Gorillax stored `__error` under the wrong field hash
-//   (HASH___DEFAULT), making `.__error.<field>` unreachable
-//   (fixed by introducing HASH___ERROR and threading it through
-//   `taida_gorillax_{new,err,relax}`).
-// - JS normalized Node's signed `err.errno` so `.__error.code`
-//   agrees with the interpreter / native positive-errno contract.
-//
-// If any of these regress, this test will turn red.
-
-// Internal-field reject removes the legacy `r.__error.<field>` access path
-// that this fixture probes. A public Gorillax error-field accessor has not
-// yet been defined: the Gorillax `]=>` unmold collapses through ゴリラ天井
-// (process abort) so `|==` cannot catch it, and `.relax()` only exposes a
-// `RelaxedGorillaEscaped` wrapper that hides the original error's
-// `type` / `kind` / `code` from user code. These three entry points stay
-// ignored until the public accessor lands.
+// Pins the failure-path contract through the public `errorInfo()` accessor:
+// missing executable is IoError/not_found/code=2 on all three backends.
 #[test]
-#[ignore = "Gorillax error-field accessor not yet public; tracked separately"]
 fn c19_run_interactive_enoent_interpreter_matches_expected() {
     assert_interpreter("os_interactive_enoent");
 }
 
 #[test]
-#[ignore = "Gorillax error-field accessor not yet public; tracked separately"]
 fn c19_run_interactive_enoent_js_matches_interpreter() {
     assert_js_matches("os_interactive_enoent");
 }
 
 #[test]
-#[ignore = "Gorillax error-field accessor not yet public; tracked separately"]
 fn c19_run_interactive_enoent_native_matches_interpreter() {
     assert_native_matches("os_interactive_enoent");
 }
