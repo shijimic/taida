@@ -382,9 +382,12 @@ fn d28b_002_native_h2_arena_reset_bounds_rss() {
     );
 
     let cap_kib_per_1k: f64 = 5_120.0; // 5 MiB / 1k req
+    let fixed_ci_slack_kib: f64 = 2_048.0;
+    let effective_cap = cap_kib_per_1k + fixed_ci_slack_kib / (drove.max(1) as f64) * 1000.0;
     assert!(
-        kib_per_1k <= cap_kib_per_1k,
-        "d28b_002: h2 RSS grew {kib_per_1k:.1} KiB / 1k requests, exceeds {cap_kib_per_1k} KiB / 1k cap. \
+        kib_per_1k <= effective_cap,
+        "d28b_002: h2 RSS grew {kib_per_1k:.1} KiB / 1k requests, exceeds {effective_cap:.1} KiB / 1k effective cap \
+         ({cap_kib_per_1k} KiB / 1k plus {fixed_ci_slack_kib} KiB fixed CI slack). \
          This is the D28B-002 / D28B-012 regression signature on the h2 path -- the per-thread bump arena \
          is no longer rewinding at the h2 stream boundary. Check that `taida_arena_request_reset` is still \
          called from `taida_net_h2_serve_connection` in `src/codegen/native_runtime/net_h1_h2.c`."

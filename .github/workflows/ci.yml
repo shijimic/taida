@@ -76,10 +76,48 @@ jobs:
         with:
           shared-key: cargo-base
           save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Build taida CLI for archive
+        env:
+          RUSTFLAGS: "-D warnings --cfg taida_allow_mock_github_base_url"
+        run: cargo build --bin taida
       - name: Build nextest archive
         env:
           RUSTFLAGS: "-D warnings --cfg taida_allow_mock_github_base_url"
         run: cargo nextest archive --all-targets --archive-file taida-nextest.tar.zst
+      - name: Archived taida mock-base gate
+        run: |
+          probe_dir="${RUNNER_TEMP}/archive-mock-base-gate"
+          rm -rf "${probe_dir}"
+          mkdir -p "${probe_dir}/extract" "${probe_dir}/home" "${probe_dir}/project"
+          tar --zstd -xf taida-nextest.tar.zst -C "${probe_dir}/extract" target/debug/taida
+          chmod +x "${probe_dir}/extract/target/debug/taida"
+          touch "${probe_dir}/project/taida.toml"
+          cat > "${probe_dir}/project/packages.tdm" <<'EOF'
+          [packages."taida-lang/mock"]
+          version = "a.1"
+          integrity = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+          <<<@a.1 test/probe
+          EOF
+          printf 'stdout("probe")\n' > "${probe_dir}/project/main.td"
+          set +e
+          HOME="${probe_dir}/home" \
+            TAIDA_GITHUB_BASE_URL="http://127.0.0.1:1" \
+            TAIDA_E32_ALLOW_MOCK_GITHUB_BASE_URL="1" \
+            TAIDA_GITHUB_API_URL="http://127.0.0.1:1" \
+            GH_TOKEN="unused" \
+            "${probe_dir}/extract/target/debug/taida" ingot install --no-remote-check \
+              >"${probe_dir}/stdout" 2>"${probe_dir}/stderr"
+          status=$?
+          set -e
+          if grep -q "E32K3_GITHUB_BASE_URL_CONFINED" "${probe_dir}/stderr"; then
+            cat "${probe_dir}/stderr"
+            exit 1
+          fi
+          if [ "${status}" -eq 0 ]; then
+            echo "closed loopback source install unexpectedly succeeded"
+            exit 1
+          fi
       - name: Direct taida binary path gate
         run: cargo test --test archive_path_gate -- --nocapture
       - name: Upload nextest archive
@@ -115,7 +153,15 @@ jobs:
       # loads test binaries directly from the archive. `--workspace-remap .`
       # tells nextest the repository root at test-run time (fixture paths in
       # `tests/**/*.rs` resolve relative to workspace root at runtime).
-      - run: cargo nextest run --archive-file taida-nextest.tar.zst --workspace-remap . --profile ci
+      - run: |
+          mkdir -p "${RUNNER_TEMP}/nextest-archive"
+          TAIDA_BIN="${RUNNER_TEMP}/nextest-archive/target/debug/taida" \
+            cargo nextest run \
+              --archive-file taida-nextest.tar.zst \
+              --extract-to "${RUNNER_TEMP}/nextest-archive" \
+              --extract-overwrite \
+              --workspace-remap . \
+              --profile ci
 
   parity:
     name: Backend Parity
