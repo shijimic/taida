@@ -4934,8 +4934,8 @@ fn test_qf26_js_dir_build_includes_sibling_modules() {
     let dir = unique_temp_path("taida_qf26", "sibling", "dir");
     let src_dir = dir.join("src");
     fs::create_dir_all(&src_dir).expect("create src dir");
-    // Mark project root so find_project_root doesn't fall back to src/
-    fs::create_dir_all(dir.join(".git")).expect("create .git marker");
+    // Mark project root so find_project_root doesn't fall back to src/.
+    fs::write(dir.join("taida.toml"), "").expect("write project marker");
 
     fs::write(
         src_dir.join("main.td"),
@@ -5013,8 +5013,8 @@ fn test_qf27_js_dir_build_relative_paths_with_sibling() {
     fs::create_dir_all(&nested_dir).expect("create nested dir");
     let lib_dir = dir.join("lib");
     fs::create_dir_all(&lib_dir).expect("create lib dir");
-    // Mark project root so find_project_root doesn't fall back to src/nested/
-    fs::create_dir_all(dir.join(".git")).expect("create .git marker");
+    // Mark project root so find_project_root doesn't fall back to src/nested/.
+    fs::write(dir.join("taida.toml"), "").expect("write project marker");
 
     fs::write(
         nested_dir.join("main.td"),
