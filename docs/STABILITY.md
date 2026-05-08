@@ -531,28 +531,27 @@ clone only when the buffer is shared. Acceptance includes
 opt-in environment variable) 1 GB × 64 chunks under 2 s, with
 pointer-equality invariants asserted in the test suite.
 
-### 5.6. Lax / Result function-arg type integrity (post-stable scope)
+### 5.6. Lax / Result function-arg type integrity
 
-For the `@e.32` stable line, the argument-type integrity contract for
-`Lax[T]` / `Result[T, E]` methods is split as follows:
+`Lax[T]` / `Result[T, E]` / `Async[T]` method signatures are
+fully pinned for the stable release line:
 
-- **`getOrDefault(default)`** — pinned. The `default` argument must
-  match the success inner type (`T` for `Lax[T]`, `T` for
-  `Result[T, E]`). Mismatches are rejected at compile time with
-  `[E1508]`. This silent-breakage path was hardened during the gen-E
-  audit and is part of the stable surface.
-- **`map(fn)` / `flatMap(fn)` / `mapError(fn)`** — **not** pinned at
-  `@e.X`. The function argument (`fn`) is currently typed as
-  `Type::Unknown` and bypasses the function-arg integrity check, so
-  passing a lambda whose argument type does not match `T` (or `E` for
-  `mapError`) compiles. A future generation may tighten this contract
-  by adding a `Type::Function` subtype relation to the type checker
-  and emitting `[E1508]` on argument-type mismatch. Source programs
-  written against `@e.X` should not assume the lambda argument type
-  is checked.
+- `getOrDefault(default)` requires `default` to match the success
+  inner type (`T`). Mismatches are rejected at compile time via
+  `[E1508]`.
+- `map(fn)` / `flatMap(fn)` / `mapError(fn)` carry full function
+  signatures: argument type and return type are both pinned.
+  Passing a lambda whose argument type disagrees with `T` (or
+  `E` for `mapError`) is rejected by `[E1508]`. The check is
+  driven by the `Type::Function` subtype relation built into
+  the type checker.
+- `Result[T, P].flatMap(fn: T -> Result[U, P])` requires the
+  returned Result to share the same error type `P` as the
+  receiver; cross-error mixing is rejected and must be made
+  explicit through `mapError`.
 
-The deferred half of this contract will be re-evaluated at the next
-`<gen>` bump.
+See `docs/reference/standard_methods.md` for the canonical
+signatures.
 
 ## 6. Process
 
