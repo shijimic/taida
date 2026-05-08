@@ -1,25 +1,22 @@
 // Codegen lower-side `expr_is_bool` parity gaps.
 //
-// `expr_is_bool` (`src/codegen/lower/tag_prop.rs`) decides whether
-// `MethodCall(...).toString()` lowers to `taida_str_from_bool` (Bool
-// surface) or to `taida_polymorphic_to_string` (raw value). The
-// helper is syntax-driven and does NOT consult the type checker, so
-// it has both directions of error:
+// E34 Phase 2 (Lock-B=C, 2026-05-09): both gaps closed by routing
+// `expr_is_bool` through the type-checker's Typed HIR side table.
+// When the table holds a typed decision for the expression, that
+// decision wins outright — both directions:
 //
-//   - FALSE POSITIVE: a hard-coded allow-list of method names
-//     (`has`, `isEmpty`, `contains`, …) returns `true` for any
-//     receiver, even when the receiver is a user-defined pack whose
-//     field of the same name returns a non-Bool. Native then renders
-//     the Int as "true"/"false" while Interp and JS render the Int.
+//   - FALSE POSITIVE: a user-defined pack whose field shadows a
+//     built-in Bool method name now reports the field's actual
+//     return type. The legacy allow-list still runs as a fallback
+//     for expressions the type-checker never observed (e.g.
+//     synthesised defaultFn results), but a non-Bool typed entry
+//     short-circuits the allow-list before it matches.
+//   - FALSE NEGATIVE: a cross-module `:Bool` function lands in the
+//     typed table even though it never reached the local
+//     bool_returning_funcs pre-pass.
 //
-//   - FALSE NEGATIVE: a cross-module Bool function that never landed
-//     in `bool_returning_funcs` during the local pre-pass falls
-//     through to the polymorphic stringifier. Native renders "1"/"0"
-//     while Interp and JS render "true"/"false".
-//
-// Both fixtures below are held ignored until the receiver-side type
-// projection lands. They are tracked in the local FUTURE_BLOCKERS
-// index. When the gap closes, drop the `#[ignore]` attributes.
+// Both fixtures below are part of the active E34 Phase 2 acceptance
+// regression suite (no longer #[ignore]'d).
 
 mod common;
 
@@ -136,7 +133,6 @@ fn run_three_backends(main_path: &std::path::Path, dir: &std::path::Path) -> [(S
 }
 
 #[test]
-#[ignore = "post-stable: cross-module Bool fn detection (false negative); receiver-T projection required"]
 fn expr_is_bool_cross_module_bool_get_or_default_three_backend_parity() {
     // FALSE NEGATIVE — a Bool fn imported from another module is not
     // in the local `bool_returning_funcs` registry, so `expr_is_bool`
@@ -179,7 +175,6 @@ fn expr_is_bool_cross_module_bool_get_or_default_three_backend_parity() {
 }
 
 #[test]
-#[ignore = "post-stable: pack field shadowing built-in Bool method names (false positive); receiver-T gating required"]
 fn expr_is_bool_pack_field_shadows_bool_method_three_backend_parity() {
     // FALSE POSITIVE — a user-defined pack with a field named like a
     // built-in Bool method (`has`, `isEmpty`, `contains`, …) hits the
