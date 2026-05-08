@@ -993,13 +993,16 @@ function Lax(value, typedDefault, floatHint, error) {
   const _floatHint = floatHint === true;
   // E34 Phase 3 (Lock-D=B'): optional ErrorInfo carrier. Producers like
   // JSON failure / net / file / process pass an `error` describing the
-  // failure cause; `errorInfo()` surfaces it as Lax[ErrorInfo].
+  // failure cause; `errorInfo()` surfaces it as Lax[ErrorInfo]. The
+  // `__error` field is **not** materialised on the pack object when no
+  // error is recorded — this preserves backwards-compatible JSON
+  // serialisation (jsonEncode / __default / __value parity tests must
+  // not see a null __error key on success).
   const _error = error === undefined ? null : error;
   const pack = {
     __type: 'Lax',
     __value: _val,
     __default: _default,
-    __error: _error,
     hasValue: __taida_hasValue(_hasValue),
     isEmpty() { return !_hasValue; },
     errorInfo() { return _hasValue ? __taida_error_info_lax(null) : __taida_error_info_lax(_error); },
@@ -1018,6 +1021,7 @@ function Lax(value, typedDefault, floatHint, error) {
     },
   };
   if (_floatHint) pack.__floatHint = true;
+  if (_error !== null) pack.__error = _error;
   return Object.freeze(pack);
 }
 
