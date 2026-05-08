@@ -77,6 +77,8 @@ jobs:
           shared-key: cargo-base
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Build nextest archive
+        env:
+          RUSTFLAGS: "-D warnings --cfg taida_allow_mock_github_base_url"
         run: cargo nextest archive --all-targets --archive-file taida-nextest.tar.zst
       - name: Direct taida binary path gate
         run: cargo test --test archive_path_gate -- --nocapture

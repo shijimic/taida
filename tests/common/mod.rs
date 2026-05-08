@@ -16,11 +16,13 @@
 
 pub mod fixture_lists;
 
+use std::fs;
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::{Mutex, Once, OnceLock};
+use std::time::SystemTime;
 
 // ---------------------------------------------------------------------------
 // Binary discovery helpers (RCB-26)
@@ -38,10 +40,10 @@ use std::sync::{Mutex, Once, OnceLock};
 /// Search order:
 ///
 /// 1. `TAIDA_BIN` runtime env override (used by ad-hoc local runs)
-/// 2. Canonical `<manifest>/target/<current-test-profile>/taida`, then the
-///    other profile. The profile matching the test binary is tried first so
-///    debug `cargo test` cannot accidentally run a stale release CLI. This is
-///    still chosen ahead of `CARGO_BIN_EXE_taida` because cargo can cache
+/// 2. Canonical `<manifest>/target/debug/taida`, then release. Debug is tried
+///    first so normal `cargo test` and nextest archive runs cannot accidentally
+///    run a stale release CLI. This is still chosen ahead of
+///    `CARGO_BIN_EXE_taida` because cargo can cache
 ///    multiple bin fingerprints under `target/<profile>/deps/taida-XXXX`
 ///    and silently point `CARGO_BIN_EXE_taida` at a stale one when test
 ///    builds race with bin builds (observed on `feat/c27` Round 1 fix
@@ -49,14 +51,14 @@ use std::sync::{Mutex, Once, OnceLock};
 ///    the canonical path, but a subsequent `cargo test --release` ran
 ///    against a previously-cached bin via `CARGO_BIN_EXE_taida` and
 ///    re-linked `target/release/taida` to the older fingerprint).
-/// 3. `CARGO_BIN_EXE_taida` runtime env (last-resort fallback)
-/// 4. Relative candidates from the current working directory, current test
+/// 3. Relative candidates from the current working directory, current test
 ///    binary location, and the compile-time manifest dir:
 ///    - `<root>/taida`
 ///    - `<root>/debug/taida`
 ///    - `<root>/release/taida`
 ///    - `<root>/target/debug/taida`
 ///    - `<root>/target/release/taida`
+/// 4. `CARGO_BIN_EXE_taida` runtime env (last-resort fallback)
 pub fn taida_bin() -> PathBuf {
     #[cfg(windows)]
     const BIN_NAME: &str = "taida.exe";
@@ -72,21 +74,11 @@ pub fn taida_bin() -> PathBuf {
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let debug = manifest.join("target").join("debug").join(BIN_NAME);
     let release = manifest.join("target").join("release").join(BIN_NAME);
-    let canonical_order = if cfg!(debug_assertions) {
-        [debug, release]
-    } else {
-        [release, debug]
-    };
+    let canonical_order = [debug, release];
     for canonical in canonical_order {
         if canonical.exists() {
             return canonical;
         }
-    }
-
-    if let Some(path) = std::env::var_os("CARGO_BIN_EXE_taida").map(PathBuf::from)
-        && path.exists()
-    {
-        return path;
     }
 
     let mut roots = Vec::new();
@@ -100,6 +92,7 @@ pub fn taida_bin() -> PathBuf {
             roots.push(ancestor.to_path_buf());
         }
     }
+    push_nextest_archive_roots(&mut roots);
     roots.push(manifest.clone());
 
     let mut candidates = Vec::new();
@@ -121,6 +114,12 @@ pub fn taida_bin() -> PathBuf {
         return path.clone();
     }
 
+    if let Some(path) = std::env::var_os("CARGO_BIN_EXE_taida").map(PathBuf::from)
+        && path.exists()
+    {
+        return path;
+    }
+
     panic!(
         "could not locate taida binary; searched:\n{}",
         candidates
@@ -129,6 +128,43 @@ pub fn taida_bin() -> PathBuf {
             .collect::<Vec<_>>()
             .join("\n")
     );
+}
+
+fn push_nextest_archive_roots(roots: &mut Vec<PathBuf>) {
+    push_nextest_archive_roots_in(roots, std::env::temp_dir());
+
+    #[cfg(unix)]
+    {
+        let tmp = PathBuf::from("/tmp");
+        if tmp != std::env::temp_dir() {
+            push_nextest_archive_roots_in(roots, tmp);
+        }
+    }
+}
+
+fn push_nextest_archive_roots_in(roots: &mut Vec<PathBuf>, dir: PathBuf) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    let mut archives = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if !name.starts_with("nextest-archive-") || !path.is_dir() {
+            continue;
+        }
+        let modified = entry
+            .metadata()
+            .and_then(|metadata| metadata.modified())
+            .unwrap_or(SystemTime::UNIX_EPOCH);
+        archives.push((path, modified));
+    }
+    archives.sort_by(|a, b| b.1.cmp(&a.1));
+    for (path, _) in archives {
+        roots.push(path);
+    }
 }
 
 /// Find the `wasmtime` binary for running compiled `.wasm` files.
