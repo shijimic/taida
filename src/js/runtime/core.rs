@@ -857,11 +857,22 @@ function __taida_result_create(value, throwVal, predicate) {
     mapError(fn) {
       if (!_checkError()) return this;
       // Pass the throw payload `P` directly to the mapper so the runtime
-      // matches `mapError(fn: P -> Q) -> Result[T, Q]`.
+      // matches `mapError(fn: P -> Q) -> Result[T, Q]`. Direct-store
+      // applies to Error-derived BuchiPacks (those carrying `__type`);
+      // anything else is wrapped in a generic ResultError carrier whose
+      // message is materialised via `__taida_format` so anonymous packs
+      // and primitives round-trip the same string Interpreter/Native
+      // produce instead of `[object Object]`.
       const mapped = fn(_throw);
-      const newThrow = (mapped && typeof mapped === 'object' && mapped.__type)
-        ? mapped
-        : { __type: 'ResultError', message: String(mapped), type: 'ResultError' };
+      let newThrow;
+      if (mapped && typeof mapped === 'object' && mapped.__type) {
+        newThrow = mapped;
+      } else {
+        const msg = (mapped && typeof mapped === 'object')
+          ? __taida_format(mapped)
+          : String(mapped);
+        newThrow = { __type: 'ResultError', message: msg, type: 'ResultError' };
+      }
       return __taida_result_create(null, newThrow, null);
     },
     getOrThrow() {
@@ -880,7 +891,26 @@ function __taida_result_create(value, throwVal, predicate) {
     },
     toString() {
       if (!_checkError()) return 'Result(' + String(_value) + ')';
-      const errDisplay = _throw && _throw.message ? _throw.message : (_throw ? String(_throw) : 'predicate failed');
+      let errDisplay;
+      if (_throw && typeof _throw === 'object') {
+        // The JS Error factory always materialises `message: ''` for
+        // Error-derived packs, so an empty string is indistinguishable
+        // from a missing message. Treat `message === ''` as "no
+        // message" and fall back to the declared `__type` name; the
+        // four backends agree on this even though Interpreter / Native
+        // can technically tell the two states apart.
+        if (typeof _throw.message === 'string' && _throw.message.length > 0) {
+          errDisplay = _throw.message;
+        } else if (_throw.__type) {
+          errDisplay = _throw.__type;
+        } else {
+          errDisplay = String(_throw);
+        }
+      } else if (_throw) {
+        errDisplay = String(_throw);
+      } else {
+        errDisplay = 'predicate failed';
+      }
       return 'Result(throw <= ' + errDisplay + ')';
     },
     unmold() {

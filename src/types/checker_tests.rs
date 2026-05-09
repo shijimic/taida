@@ -5120,3 +5120,22 @@ fn e34b_008_lambda_body_diagnostic_emitted_once() {
         errors
     );
 }
+
+// E34B-015 negative coverage: an explicit `fn(s: Str) -> Str` cannot be
+// passed to `Result[T, P].mapError` when P is not Str. The full-pin
+// signature must reject the mismatch via [E1508].
+
+#[test]
+fn e34b_015_map_error_rejects_str_input_when_payload_is_pack() {
+    let src = "Error => Fail = @(message: Str)\n\
+               renderStr s: Str = \"prefix: \" + s => :Str\n\
+               r <= Result[0](throw <= Fail(message <= \"boom\"))\n\
+               mapped <= r.mapError(renderStr)\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1508]")),
+        "Expected [E1508] for mapError(fn: Str -> Str) when payload is Fail, got: {:?}",
+        errors
+    );
+}
+

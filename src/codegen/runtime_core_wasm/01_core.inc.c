@@ -2170,7 +2170,10 @@ static int64_t _wasm_lax_to_string(int64_t lax_ptr) {
    matching native's taida_throw_to_display_string. */
 static int64_t _wasm_throw_to_display_string(int64_t throw_val) {
     if (throw_val == 0) return (int64_t)(intptr_t)"error";
-    /* If it's a BuchiPack, look for "message" field */
+    /* If it's a BuchiPack, look for "message" field. Empty messages
+       are skipped so the JS Error factory's mandatory `message: ''`
+       default does not diverge from the Interpreter / Native fallback
+       to the `__type` name. */
     if (_looks_like_pack(throw_val)) {
         int64_t *p = (int64_t *)(intptr_t)throw_val;
         int64_t fc = p[0];
@@ -2181,7 +2184,17 @@ static int64_t _wasm_throw_to_display_string(int64_t throw_val) {
                 break;
             }
         }
-        /* Fallback: render full pack structure */
+        /* Error-derived pack with no message field — surface the
+           declared `__type` name so the four-backend toString output
+           stays aligned with the Interpreter / Native fallback. */
+        for (int64_t i = 0; i < fc; i++) {
+            if (p[1 + i * 3] == WASM_HASH___TYPE) {
+                int64_t ty = p[1 + i * 3 + 2];
+                if (ty && _looks_like_string(ty)) return ty;
+                break;
+            }
+        }
+        /* Anonymous pack — render structure verbatim. */
         return _wasm_value_to_display_string(throw_val);
     }
     /* String or other value */

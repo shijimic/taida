@@ -460,9 +460,23 @@ mod tests {
     /// the throw payload directly to the mapper and forks on
     /// Error-shaped vs message-shaped returns; assembled runtime grows
     /// to 338,670 bytes.
+    /// 2026-05-09 mapError Q-shape parity: the fork now also accepts
+    /// user-defined `Error => Foo` BuchiPacks via WASM_HASH___TYPE +
+    /// WASM_HASH_MESSAGE; assembled runtime grows to 338,933 bytes.
+    /// 2026-05-09 mapError Phase 2: predicate reduced to
+    /// WASM_HASH___TYPE only, fallback now wraps the polymorphic
+    /// to-string output, and `_wasm_throw_to_display_string` falls
+    /// back to `__type` for message-less Error packs; assembled
+    /// runtime grows to 339,439 bytes.
+    /// 2026-05-09 mapError Phase 3: tag-aware wrap branch + empty
+    /// message support in `_wasm_throw_to_display_string`; assembled
+    /// runtime grows to 340,506 bytes.
+    /// 2026-05-09 mapError Phase 3.1: revert the empty-message
+    /// allowance to match the four-backend "empty == missing" decision;
+    /// assembled runtime is 340,167 bytes.
     #[test]
     fn test_runtime_core_wasm_fragment_concat_preserves_bytes() {
-        const EXPECTED_TOTAL_LEN: usize = 338_670;
+        const EXPECTED_TOTAL_LEN: usize = 340_167;
         let asm = *RUNTIME_CORE_WASM;
         assert_eq!(
             asm.len(),

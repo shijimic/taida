@@ -708,17 +708,36 @@ int64_t taida_result_map_error(int64_t result, int64_t fn_ptr) {
        matches the type-checker contract
        `mapError(fn: P -> Q) -> Result[T, Q]`. */
     int64_t mapped = taida_invoke_callback1(fn_ptr, throw_val);
-    /* If the mapper returned an Error-shaped pack, store it directly so
-       user code can recover field-level metadata via getOrThrow. */
+    /* Snapshot the callback return tag immediately. */
+    int64_t mapped_tag = taida_get_return_tag();
+    /* Direct-store applies to Error-derived BuchiPacks — those that
+       carry WASM_HASH___TYPE = "__type", which the user-defined
+       `Error => Foo = @(...)` form always emits. The predicate is
+       deliberately the same shape as the Native and Interpreter
+       paths so all four backends agree. */
     if (taida_is_buchi_pack(mapped)
-        && taida_pack_has_hash(mapped, WASM_HASH_TYPE)
-        && taida_pack_has_hash(mapped, WASM_HASH_MESSAGE)) {
+        && taida_pack_has_hash(mapped, WASM_HASH___TYPE)) {
         return taida_result_create(0, mapped, 0);
     }
-    /* Otherwise wrap the mapped value's display string in a generic
-       ResultError so `Result[T, Q]` still throws something coherent. */
+    /* Anything else (anonymous pack, primitive) is wrapped in a generic
+       ResultError. Untagged scalars must be rendered via the tag the
+       callback advertised; otherwise primitives surface as their raw
+       64-bit representation (Bool=1, Float=IEEE-754 bit pattern) and
+       diverge from the Interpreter / JS output. */
+    int64_t display;
+    if (mapped_tag == WASM_TAG_BOOL) {
+        display = taida_str_from_bool(mapped);
+    } else if (mapped_tag == WASM_TAG_FLOAT) {
+        display = taida_float_to_str(mapped);
+    } else if (mapped_tag == WASM_TAG_INT) {
+        display = taida_int_to_str(mapped);
+    } else if (mapped_tag == WASM_TAG_STR) {
+        display = mapped;
+    } else {
+        display = taida_polymorphic_to_string(mapped);
+    }
     int64_t new_error = taida_make_error(
-        (int64_t)(intptr_t)"ResultError", mapped);
+        (int64_t)(intptr_t)"ResultError", display);
     return taida_result_create(0, new_error, 0);
 }
 

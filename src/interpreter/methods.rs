@@ -347,13 +347,23 @@ impl Interpreter {
                 }
             }
             Value::BuchiPack(fields) => {
-                // TypeInst error: look for message field, then type field
+                // TypeInst error: look for message field, then type field.
+                // An empty `message` is treated as "no message" so the
+                // four backends agree on the `__type` fallback (the JS
+                // Error factory always emits `message: ''` defaults
+                // which would otherwise diverge from Interpreter /
+                // Native).
                 fields
                     .iter()
                     .find(|(n, _)| n == "message")
                     .and_then(|(_, v)| {
                         if let Value::Str(s) = v {
-                            Some(s.as_string().clone())
+                            let s = s.as_string();
+                            if s.is_empty() {
+                                None
+                            } else {
+                                Some(s.clone())
+                            }
                         } else {
                             None
                         }
@@ -557,15 +567,27 @@ impl Interpreter {
                 };
                 // Pass the throw payload `P` directly to the mapper so the
                 // runtime contract matches the type-checker pin
-                // `mapError(fn: P -> Q) -> Result[T, Q]`.
+                // `mapError(fn: P -> Q) -> Result[T, Q]`. Direct-store
+                // applies to Error-derived results: `Value::Error` and
+                // BuchiPacks tagged with a `__type` field (the marker
+                // user-defined `Error => Foo = @(...)` instances all
+                // carry). Anything else — anonymous packs, primitives —
+                // falls back to a generic `ResultError` wrapper so the
+                // throw still has a coherent display string.
                 let result = self.call_function_with_values(&func, &[throw_val.clone()])?;
-                let new_throw = match result {
-                    Value::Error(_) => result,
-                    other => Value::Error(super::value::ErrorValue {
+                let is_error_derived_pack = matches!(
+                    &result,
+                    Value::BuchiPack(fs)
+                        if fs.iter().any(|(n, _)| n == "__type")
+                );
+                let new_throw = if matches!(result, Value::Error(_)) || is_error_derived_pack {
+                    result
+                } else {
+                    Value::Error(super::value::ErrorValue {
                         error_type: "ResultError".into(),
-                        message: other.to_display_string(),
+                        message: result.to_display_string(),
                         fields: Vec::new(),
-                    }),
+                    })
                 };
                 Ok(Signal::Value(Value::pack(vec![
                     ("__value".into(), Value::Unit),
