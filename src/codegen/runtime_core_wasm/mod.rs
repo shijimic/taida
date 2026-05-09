@@ -456,9 +456,13 @@ mod tests {
     /// requires `__type` metadata for errorInfo source packs, returns `""`
     /// for plain buchi-packs in `TypeName`, and drops the legacy direct
     /// function Cage runtime entry.
+    /// 2026-05-09 mapError follow-up: `taida_result_map_error` now passes
+    /// the throw payload directly to the mapper and forks on
+    /// Error-shaped vs message-shaped returns; assembled runtime grows
+    /// to 338,670 bytes.
     #[test]
     fn test_runtime_core_wasm_fragment_concat_preserves_bytes() {
-        const EXPECTED_TOTAL_LEN: usize = 338_303;
+        const EXPECTED_TOTAL_LEN: usize = 338_670;
         let asm = *RUNTIME_CORE_WASM;
         assert_eq!(
             asm.len(),

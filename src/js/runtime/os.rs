@@ -1348,6 +1348,7 @@ function __taida_lax_from_bytes_cursor_step(step, hasValue) {
     __default: def,
     hasValue: __taida_hasValue(!!hasValue),
     isEmpty() { return !hasValue; },
+    errorInfo() { return __taida_error_info_lax(null); },
     getOrDefault(d) { return hasValue ? val : d; },
     map(fn) { return hasValue ? Lax(fn(val)) : this; },
     flatMap(fn) {

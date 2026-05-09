@@ -971,7 +971,7 @@ gorillax.relax().toString()  // "RelaxedGorillax(42)"
 | `getOrThrow()` | `=> :T` | 値取得（失敗時エラーを throw） |
 | `map(fn)` | `:T => :U => :Result[U, _]` | モナディック変換 |
 | `flatMap(fn)` | `:T => :Result[U, _] => :Result[U, _]` | モナディック連鎖 |
-| `mapError(fn)` | `:Error => :Error => :Result[T, P]` | throw フィールドのエラーを変換 |
+| `mapError(fn)` | `:P => :Q => :Result[T, Q]` | throw フィールドの payload P を mapper に渡し Q を新 throw として保存 |
 | `toString()` | `=> :Str` | 文字列表現 |
 | `unmold()` | `=> :T` | アンモールディング |
 

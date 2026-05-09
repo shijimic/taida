@@ -241,13 +241,11 @@ pub struct Lowering {
     /// Defaults to `Native` so existing Cranelift callers do not need to
     /// change.
     addon_backend: crate::addon::AddonBackend,
-    /// E34 Phase 2 (Lock-B=C): Typed HIR side table delivered by the
-    /// type-checker. When populated (driver/main path), `expr_is_bool`
-    /// and other type-tag inferences consult this first; when empty
-    /// (legacy / dependency-module path), the codegen falls back to
-    /// the existing name-/syntax-driven heuristics. Phase 2.5 ends
-    /// with this table being the only source of truth for Bool
-    /// detection.
+    /// Typed HIR side table delivered by the type-checker. When
+    /// populated (driver/main path), `expr_is_bool` and other type-tag
+    /// inferences consult this first; when empty (legacy /
+    /// dependency-module path), the codegen falls back to the existing
+    /// name-/syntax-driven heuristics.
     pub(crate) typed_expr_table: crate::types::TypedExprTable,
 }
 

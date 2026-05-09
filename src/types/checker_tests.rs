@@ -5063,3 +5063,60 @@ fn e34b_002_result_map_preserves_error_type() {
         args[1]
     );
 }
+
+// E34B-005: errorInfo() is a Lax/Gorillax/Error-only accessor at this stage
+// because no backend implements Result[T,P].errorInfo() / Async[T].errorInfo()
+// at runtime. Admitting them at the type-checker level produced runtime panics
+// across 2/3 backends, so the carrier is intentionally narrowed back to the
+// shapes that have a real implementation.
+
+#[test]
+fn e34b_005_result_error_info_rejected_at_type_check() {
+    let src = "Error => Fail = @(message: Str)\n\
+               failure <= Result[0](throw <= Fail(message <= \"boom\"))\n\
+               info <= failure.errorInfo()\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1509]")
+            && e.message.contains("errorInfo")),
+        "Expected [E1509] for Result.errorInfo(), got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn e34b_005_async_error_info_rejected_at_type_check() {
+    let src = "task <= Async[42]()\n\
+               info <= task.errorInfo()\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1509]")
+            && e.message.contains("errorInfo")),
+        "Expected [E1509] for Async.errorInfo(), got: {:?}",
+        errors
+    );
+}
+
+// E34B-008: lambda body inference must run at most once per call site.
+// `check_method_args` records the hinted lambda type into the typed
+// table; `infer_method_return_type_with_args` should reuse that record
+// instead of re-running `infer_lambda_with_hint`, which would push the
+// same diagnostic twice and cost O(2^depth) on nested chains.
+
+#[test]
+fn e34b_008_lambda_body_diagnostic_emitted_once() {
+    let src = "obj <= Lax[42]()\n\
+               result <= obj.map(_ x = x.fooBar())\n";
+    let (_, errors) = check(src);
+    let unknown_method_errors: Vec<_> = errors
+        .iter()
+        .filter(|e| e.message.contains("[E1509]") && e.message.contains("fooBar"))
+        .collect();
+    assert_eq!(
+        unknown_method_errors.len(),
+        1,
+        "Expected exactly one [E1509] for fooBar on Int, got {}: {:?}",
+        unknown_method_errors.len(),
+        errors
+    );
+}

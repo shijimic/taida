@@ -1,13 +1,7 @@
-//! E34 Phase 1.5 acceptance: Typed HIR smoke test.
-//!
-//! Verifies that `TypeChecker::typed_expr_table` is populated correctly
-//! after `check_program` for representative fixtures. Phase 2 codegen
-//! lower will consume this table to replace the old `expr_is_bool`
-//! allow-list / `bool_vars` / `bool_returning_funcs` / `infer_type_name`
-//! machinery.
-//!
-//! Lock-G P1一体型 acceptance 文 (`.dev/E34_DESIGN.md`):
-//! > Typed HIR の expr type table が tests/typed_hir_smoke.rs 等で確認可能
+//! Typed HIR smoke test: verifies that `TypeChecker::typed_expr_table`
+//! is populated correctly after `check_program` for representative
+//! fixtures. Codegen lowering consumes this table to drive Bool
+//! detection from the type-checker's verdict instead of syntax.
 
 use taida::parser::parse;
 use taida::types::{Type, TypeChecker, TypedExprTable};

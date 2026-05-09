@@ -185,12 +185,12 @@ impl Lowering {
         }
     }
 
-    /// E34 Phase 2 (Lock-B=C): receive the type-checker's Typed HIR side
-    /// table so codegen can consume `Type::Bool` decisions instead of
-    /// the legacy name-driven heuristics. The driver populates this
-    /// after running `TypeChecker::check_program` on the fully parsed
-    /// program. Dependency-module compilations may call `lower_program`
-    /// without setting it; in that case the legacy fallbacks kick in.
+    /// Receive the type-checker's Typed HIR side table so codegen can
+    /// consume `Type::Bool` decisions instead of the legacy name-driven
+    /// heuristics. The driver populates this after running
+    /// `TypeChecker::check_program` on the fully parsed program.
+    /// Dependency-module compilations may call `lower_program` without
+    /// setting it; in that case the legacy fallbacks kick in.
     pub fn set_typed_expr_table(&mut self, table: crate::types::TypedExprTable) {
         self.typed_expr_table = table;
     }

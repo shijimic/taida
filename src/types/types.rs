@@ -131,10 +131,11 @@ impl Type {
     /// Check structural subtype compatibility: `self` is a subtype of `expected`.
     /// Width subtyping: a buchi pack with extra fields is a subtype of one with fewer.
     ///
-    /// E34 Phase 1.1 (Lock-C foundation): `Type::Function` の subtype 関係を新規導入。
-    /// 関数型の subtype は contravariant (param) + covariant (return)。
-    /// `Type::Unknown` は推論途中の placeholder として propagation 用に許可するが、
-    /// type-checker 完了後の method signature / Typed HIR には残さない (Lock-C 文)。
+    /// `Type::Function` follows the standard rule — parameters are
+    /// contravariant, the return type is covariant. `Type::Unknown` is
+    /// admitted as a propagation placeholder while inference is in
+    /// progress; the type-checker is expected to resolve it before any
+    /// method signature is recorded.
     pub fn is_subtype_of(&self, expected: &Type) -> bool {
         if self == expected {
             return true;
@@ -202,13 +203,10 @@ impl Type {
         }
     }
 
-    /// E34 Phase 1.1: Returns true if any nested `Type::Unknown` is present.
-    /// Used by Phase 1 acceptance checks (`tests/typed_hir_smoke.rs`) to verify
-    /// that the TypedExprTable contains no residual `Type::Unknown` after
-    /// `check_program` completes for a fully-typed fixture.
-    ///
-    /// Lock-C 文: `Type::Unknown` は推論途中の変数のみ許可、
-    /// type-checker 完了後の signature には残さない。
+    /// Returns true if any nested `Type::Unknown` is present. Used by
+    /// `tests/typed_hir_smoke.rs` to verify that `TypedExprTable`
+    /// contains no residual `Type::Unknown` after `check_program`
+    /// completes for a fully-typed fixture.
     pub fn contains_concrete_unknown(&self) -> bool {
         match self {
             Type::Unknown => true,

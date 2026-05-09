@@ -1,15 +1,11 @@
 //! JS runtime: core helpers, types, arithmetic, I/O, regex, stream.
 //!
-//! Split out from monolithic `src/js/runtime.rs` as part of C12-9
-//! (FB-21 mechanical file split). This chunk covers helpers / Lax /
-//! Result / BuchiPack / throw / async / Regex / stream / stdout /
-//! stderr / stdin / trampoline / format / toString, plus the
-//! HashMap / Set / equals / typeof / spread helpers. Original
-//! source line range: 4..2003.
+//! This chunk covers helpers / Lax / Result / BuchiPack / throw /
+//! async / Regex / stream / stdout / stderr / stdin / trampoline /
+//! format / toString, plus the HashMap / Set / equals / typeof /
+//! spread helpers.
 //!
-//! See `src/js/runtime/mod.rs::RUNTIME_JS` for the assembled constant
-//! and the file-split boundary table at
-//! `.dev/taida-logs/docs/design/file_boundaries.md`.
+//! See `src/js/runtime/mod.rs::RUNTIME_JS` for the assembled constant.
 
 pub(super) const CORE_JS: &str = r#"
 // taida-runtime.js — Taida Lang JavaScript Runtime
@@ -139,49 +135,13 @@ function Float_mold_f(value) {
   else if (typeof value === 'string') {
     const f = parseFloat(value);
     if (isNaN(f)) {
-      return Object.freeze({
-        __type: 'Lax',
-        __floatHint: true,
-        __value: 0.0,
-        __default: 0.0,
-        hasValue: __taida_hasValue(false),
-        isEmpty() { return true; },
-        getOrDefault(def) { return def; },
-        map(fn) { return this; },
-        flatMap(fn) { return this; },
-        unmold() { return 0.0; },
-        toString() { return 'Lax(default: 0.0)'; },
-      });
+      return Lax(null, 0.0, true);
     }
     num = f;
   } else {
-    return Object.freeze({
-      __type: 'Lax',
-      __floatHint: true,
-      __value: 0.0,
-      __default: 0.0,
-      hasValue: __taida_hasValue(false),
-      isEmpty() { return true; },
-      getOrDefault(def) { return def; },
-      map(fn) { return this; },
-      flatMap(fn) { return this; },
-      unmold() { return 0.0; },
-      toString() { return 'Lax(default: 0.0)'; },
-    });
+    return Lax(null, 0.0, true);
   }
-  return Object.freeze({
-    __type: 'Lax',
-    __floatHint: true,
-    __value: num,
-    __default: 0.0,
-    hasValue: __taida_hasValue(true),
-    isEmpty() { return false; },
-    getOrDefault(def) { return num; },
-    map(fn) { const r = fn(num); return (r && r.__type === 'Lax') ? r : Lax(r); },
-    flatMap(fn) { const r = fn(num); return (r && r.__type === 'Lax') ? r : Lax(r); },
-    unmold() { return num; },
-    toString() { return 'Lax(' + __taida_float_render(num) + ')'; },
-  });
+  return Lax(num, 0.0, true);
 }
 
 function __taida_ensureNotNull(value, defaultValue) {
@@ -288,6 +248,7 @@ function __taida_lax_from_bytes(bytes, hasValue) {
     __default: new Uint8Array(0),
     hasValue: __taida_hasValue(!!hasValue),
     isEmpty() { return !hasValue; },
+    errorInfo() { return __taida_error_info_lax(null); },
     getOrDefault(def) { return hasValue ? val : def; },
     map(fn) { return hasValue ? Lax(fn(val)) : this; },
     flatMap(fn) {
@@ -694,7 +655,7 @@ function JSON_mold(rawValue, schema) {
     try { jsonData = JSON.parse(rawValue); }
     catch (e) {
       const defaultVal = __taida_defaultForSchema(schema);
-      return Object.freeze({ __type: 'Lax', hasValue: __taida_hasValue(false), __value: defaultVal, __default: defaultVal, __error: 'JSON parse error: ' + e.message });
+      return Lax(null, defaultVal, undefined, 'JSON parse error: ' + e.message);
     }
   } else {
     jsonData = __taidaValueToJson(rawValue);
@@ -703,7 +664,7 @@ function JSON_mold(rawValue, schema) {
   // Cast through schema
   const typedValue = __taida_castJson(jsonData, schema);
   const defaultVal = __taida_defaultForSchema(schema);
-  return Object.freeze({ __type: 'Lax', hasValue: __taida_hasValue(true), __value: typedValue, __default: defaultVal });
+  return Lax(typedValue, defaultVal);
 }
 
 // C16: Decide whether a field default for a missing/null Enum field should be
@@ -895,9 +856,13 @@ function __taida_result_create(value, throwVal, predicate) {
     },
     mapError(fn) {
       if (!_checkError()) return this;
-      const errMsg = _throw && _throw.message ? _throw.message : String(_throw);
-      const newMsg = fn(errMsg);
-      return __taida_result_create(null, { __type: 'ResultError', message: String(newMsg), type: 'ResultError' }, null);
+      // Pass the throw payload `P` directly to the mapper so the runtime
+      // matches `mapError(fn: P -> Q) -> Result[T, Q]`.
+      const mapped = fn(_throw);
+      const newThrow = (mapped && typeof mapped === 'object' && mapped.__type)
+        ? mapped
+        : { __type: 'ResultError', message: String(mapped), type: 'ResultError' };
+      return __taida_result_create(null, newThrow, null);
     },
     getOrThrow() {
       if (!_checkError()) return _value;
@@ -2665,36 +2630,13 @@ if (!Array.prototype.__taida_patched) {
     value: function(idx, customDefault) {
       if (idx >= 0 && idx < this.length) {
         const val = this[idx];
-        const lax = Lax(val);
         if (customDefault !== undefined) {
-          return Object.freeze({
-            __type: 'Lax',
-            __value: val,
-            __default: customDefault,
-            hasValue: __taida_hasValue(true),
-            isEmpty() { return false; },
-            getOrDefault(def) { return val; },
-            map(fn) { return Lax(fn(val)); },
-            flatMap(fn) { const r = fn(val); return r && r.__type === 'Lax' ? r : Lax(r); },
-            unmold() { return val; },
-            toString() { return 'Lax(' + String(val) + ')'; },
-          });
+          return Lax(val, customDefault);
         }
-        return lax;
+        return Lax(val);
       }
       const def = customDefault !== undefined ? customDefault : (this.length > 0 ? __taida_lax_default(this[0]) : 0);
-      return Object.freeze({
-        __type: 'Lax',
-        __value: def,
-        __default: def,
-        hasValue: __taida_hasValue(false),
-        isEmpty() { return true; },
-        getOrDefault(d) { return d; },
-        map(fn) { return this; },
-        flatMap(fn) { return this; },
-        unmold() { return def; },
-        toString() { return 'Lax(default: ' + String(def) + ')'; },
-      });
+      return Lax(null, def);
     }, enumerable: false
   });
   // isEmpty() — check if list is empty
@@ -2752,12 +2694,7 @@ if (typeof Uint8Array !== 'undefined' && !Uint8Array.prototype.__taida_bytes_pat
   Object.defineProperty(Uint8Array.prototype, 'get', {
     value: function(idx) {
       if (__taida_isIntNumber(idx) && idx >= 0 && idx < this.length) return Lax(Number(this[idx]));
-      return Object.freeze({
-        __type: 'Lax', __value: 0, __default: 0, hasValue: __taida_hasValue(false),
-        isEmpty() { return true; }, getOrDefault(d) { return d; },
-        map(fn) { return this; }, flatMap(fn) { return this; },
-        unmold() { return 0; }, toString() { return 'Lax(default: 0)'; },
-      });
+      return Lax(null, 0);
     }, enumerable: false
   });
   Object.defineProperty(Uint8Array.prototype, 'toString', {
@@ -2814,12 +2751,7 @@ if (!String.prototype.__taida_str_patched) {
   Object.defineProperty(String.prototype, 'get', {
     value: function(idx) {
       if (idx >= 0 && idx < this.length) return Lax(this[idx]);
-      return Object.freeze({
-        __type: 'Lax', __value: '', __default: '', hasValue: __taida_hasValue(false),
-        isEmpty() { return true; }, getOrDefault(d) { return d; },
-        map(fn) { return this; }, flatMap(fn) { return this; },
-        unmold() { return ''; }, toString() { return 'Lax(default: "")'; },
-      });
+      return Lax(null, '');
     }, enumerable: false
   });
 }

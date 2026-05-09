@@ -2189,9 +2189,12 @@ Result[0](throw <= Fail(message <= "fail")).map(double).isError()
 
     #[test]
     fn test_result_map_error() {
+        // mapError now invokes the mapper with the throw payload (P)
+        // itself, so the lambda destructures the Fail BuchiPack rather
+        // than receiving a pre-rendered Str.
         let source = r#"
 Error => Fail = @(message: Str)
-addPrefix msg = "Error: " + msg => :Str
+addPrefix e: Fail = "Error: " + e.message => :Str
 Result[0](throw <= Fail(message <= "fail")).mapError(addPrefix).toString()
 "#;
         assert_eq!(

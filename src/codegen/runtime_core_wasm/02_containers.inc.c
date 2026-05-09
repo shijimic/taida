@@ -704,13 +704,21 @@ int64_t taida_result_map_error(int64_t result, int64_t fn_ptr) {
         return result; /* Success: return as-is */
     }
     int64_t throw_val = taida_pack_get_idx(result, 2); /* throw field */
-    /* Extract the error message string to pass to the mapping function
-       (matching native: passes display string, not the Error BuchiPack) */
-    int64_t err_display = _wasm_throw_to_display_string(throw_val);
-    int64_t mapped_str = taida_invoke_callback1(fn_ptr, err_display);
-    /* Wrap the mapped result back into an Error BuchiPack */
+    /* Pass the throw payload `P` directly to the mapper so the runtime
+       matches the type-checker contract
+       `mapError(fn: P -> Q) -> Result[T, Q]`. */
+    int64_t mapped = taida_invoke_callback1(fn_ptr, throw_val);
+    /* If the mapper returned an Error-shaped pack, store it directly so
+       user code can recover field-level metadata via getOrThrow. */
+    if (taida_is_buchi_pack(mapped)
+        && taida_pack_has_hash(mapped, WASM_HASH_TYPE)
+        && taida_pack_has_hash(mapped, WASM_HASH_MESSAGE)) {
+        return taida_result_create(0, mapped, 0);
+    }
+    /* Otherwise wrap the mapped value's display string in a generic
+       ResultError so `Result[T, Q]` still throws something coherent. */
     int64_t new_error = taida_make_error(
-        (int64_t)(intptr_t)"ResultError", mapped_str);
+        (int64_t)(intptr_t)"ResultError", mapped);
     return taida_result_create(0, new_error, 0);
 }
 

@@ -21,8 +21,8 @@ stdout("Result[21]().map(double) = " + Result[21]().map(double).getOrDefault(0).
 Error => Fail = @(message: Str)
 stdout("Result[0](throw).map(double).isError() = " + Result[0](throw <= Fail(message <= "fail")).map(double).isError().toString())
 
-// メソッド: mapError
-addPrefix msg = "Error: " + msg => :Str
+// メソッド: mapError — mapper には throw payload (Fail) がそのまま渡される
+addPrefix e: Fail = "Error: " + e.message => :Str
 stdout("failure.mapError(addPrefix) = " + Result[0](throw <= Fail(message <= "fail")).mapError(addPrefix).toString())
 
 // メソッド: flatMap

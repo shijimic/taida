@@ -1,33 +1,23 @@
-//! Typed HIR / Typed AST infrastructure (E34 Phase 1.2, Lock-B=C foundation).
+//! Typed HIR side table.
 //!
-//! Phase 1 では、untyped AST を再構築せずに **side table** として expr → Type の
-//! mapping を保持する最小実装を提供する。codegen lower (Phase 2) はこの side table
-//! を consume し、`expr_is_bool` 等の判定で `typed_expr_table[expr_id].type == Bool`
-//! の query だけを行う。`bool_vars` / `bool_returning_funcs` / allow-list / `infer_type_name`
-//! 等の codegen 内型推論機構は Phase 2 で完全削除される。
+//! The type-checker records the inferred `Type` of every observed
+//! `Expr` here. Codegen lowering consumes the table by id so the
+//! "is this expression a Bool?" decision becomes a typed lookup,
+//! removing the historical method-name allow-list and reducing the
+//! number of places that have to re-derive type information from
+//! syntax.
 //!
-//! ## Lock-B=C 文 (`.dev/E34_DESIGN.md::Phase 0 Locked Decisions::Lock-B`)
+//! ## Design notes
 //!
-//! > `expr_is_bool` を codegen の allow-list / method-name 推測から完全に追放する。
-//! > type-checker / generic solver が確定した型を Typed HIR / Typed AST の expression
-//! > type table に書き込み、codegen は `typed_expr_table[expr_id].type == Bool`
-//! > だけを真とする。
-//!
-//! ## Phase 1 設計上の trade-off
-//!
-//! - **`ExprId` は span-based hash**: parser を改修しない。`(start, end, discriminant_tag)`
-//!   の 3-tuple をキーにする。同一 program 内で span は unique なので衝突は起こらない。
-//! - **side table 方式 (= AST mirror ではない)**: Lock-B=C 文の理想形は AST mirror
-//!   (Typed AST) だが、Phase 1 では HashMap で機能等価。Phase 3+ で必要なら拡張。
-//! - **`record(&Expr, Type)` は idempotent**: 同じ Expr に対して再呼び出しすると
-//!   後勝ちで上書き。Phase 1.4 の Lambda bidirectional 推論で hint 付き path が
-//!   override する場面を許容する。
-//!
-//! ## Phase 1 acceptance
-//!
-//! - `tests/typed_hir_smoke.rs` で table の埋まり方を検証
-//! - `has_residual_unknown` で Lock-C 文「type-checker 完了後の Typed HIR には
-//!   `Type::Unknown` 残らない」(対象 fixture) を assert
+//! - **`ExprId` is a span-based hash** so the parser does not have to
+//!   carry a node id field. The id is `(start, end, discriminant_tag)`.
+//!   Within a single program every observed span is unique.
+//! - **Side table, not an AST mirror**. The table lives next to the
+//!   untyped AST and is keyed by id; consumers query it explicitly.
+//! - **`record(&Expr, Type)` is idempotent**: a second record for the
+//!   same expression overwrites the first, which lets bidirectional
+//!   lambda inference replace an earlier `Type::Unknown` placeholder
+//!   with a hint-resolved function type.
 
 use std::collections::HashMap;
 
@@ -37,9 +27,9 @@ use super::types::Type;
 
 /// Stable identifier of an `Expr` in the AST.
 ///
-/// Phase 1: parser を改修せず、span + discriminant tag の 3-tuple をキーにする。
-/// 同一 program 内で span は unique なので、(start, end, discriminant_tag) で
-/// expression を一意に識別できる。
+/// `(start, end, discriminant_tag)` triple keyed off the span. Within a
+/// single program a `(span, variant)` pair uniquely identifies an
+/// expression without changing the parser to carry a dedicated node id.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ExprId {
     start: usize,
@@ -59,11 +49,8 @@ impl ExprId {
     }
 }
 
-/// Phase 1: minimal Typed HIR. AST → Type の side table。
-///
-/// codegen lower (Phase 2) はこの table を consume し、`is_bool` / `lookup`
-/// で typed query を行う。Phase 1 では誰も読まないが、acceptance test で
-/// table の record 状態を verify する。
+/// AST → Type side table populated by the type-checker and consumed by
+/// codegen lowering for typed queries (`is_bool`, `lookup`).
 #[derive(Debug, Clone, Default)]
 pub struct TypedExprTable {
     types: HashMap<ExprId, Type>,
@@ -74,9 +61,10 @@ impl TypedExprTable {
         Self::default()
     }
 
-    /// Record the inferred type of `expr`. Idempotent: same expr → same type.
-    /// Phase 1.4 の Lambda bidirectional 推論で hint-付き path が override
-    /// するケースを許容する (後勝ち)。
+    /// Record the inferred type of `expr`. Idempotent: a second record
+    /// for the same expression overwrites the first (last write wins),
+    /// which lets bidirectional lambda inference upgrade an earlier
+    /// placeholder with the hint-resolved function type.
     pub fn record(&mut self, expr: &Expr, ty: Type) {
         let id = ExprId::from_expr(expr);
         self.types.insert(id, ty);
@@ -88,8 +76,8 @@ impl TypedExprTable {
         self.types.get(&id)
     }
 
-    /// Phase 2 codegen 用 convenience: typed bool query。
-    /// `expr_is_bool` を `table.is_bool(&expr)` に置換するための API。
+    /// Convenience for codegen: returns `true` iff the recorded type
+    /// for `expr` is exactly `Type::Bool`.
     pub fn is_bool(&self, expr: &Expr) -> bool {
         matches!(self.lookup(expr), Some(Type::Bool))
     }
@@ -104,17 +92,16 @@ impl TypedExprTable {
         self.types.is_empty()
     }
 
-    /// Phase 1 acceptance helper: returns true if any recorded type contains a
-    /// `Type::Unknown` (residual after type-checker completes).
-    ///
-    /// Lock-C 文: 「`Type::Unknown` は推論途中の変数のみ許可、type-checker
-    /// 完了後の signature には残さない」。
-    /// `tests/typed_hir_smoke.rs` で fixture ごとに assert する。
+    /// Returns `true` if any recorded type still contains a residual
+    /// `Type::Unknown`. The full-pin contract for `Lax` / `Result` /
+    /// `Async` method signatures requires the table to be free of
+    /// residuals after the type-checker completes; this helper drives
+    /// that fixture-level assertion.
     pub fn has_residual_unknown(&self) -> bool {
         self.types.values().any(|t| t.contains_concrete_unknown())
     }
 
-    /// Iterate over all recorded `(ExprId, Type)` pairs. Phase 2 codegen 用。
+    /// Iterate over all recorded `(ExprId, Type)` pairs.
     pub fn iter(&self) -> impl Iterator<Item = (&ExprId, &Type)> {
         self.types.iter()
     }

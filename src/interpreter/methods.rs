@@ -555,14 +555,18 @@ impl Interpreter {
                         });
                     }
                 };
-                // Pass the error's display string to the mapping function
-                let error_display = Self::throw_val_to_display_str(&throw_val);
-                let result = self.call_function_with_values(&func, &[Value::str(error_display)])?;
-                let new_throw = Value::Error(super::value::ErrorValue {
-                    error_type: "ResultError".into(),
-                    message: result.to_display_string(),
-                    fields: Vec::new(),
-                });
+                // Pass the throw payload `P` directly to the mapper so the
+                // runtime contract matches the type-checker pin
+                // `mapError(fn: P -> Q) -> Result[T, Q]`.
+                let result = self.call_function_with_values(&func, &[throw_val.clone()])?;
+                let new_throw = match result {
+                    Value::Error(_) => result,
+                    other => Value::Error(super::value::ErrorValue {
+                        error_type: "ResultError".into(),
+                        message: other.to_display_string(),
+                        fields: Vec::new(),
+                    }),
+                };
                 Ok(Signal::Value(Value::pack(vec![
                     ("__value".into(), Value::Unit),
                     ("__predicate".into(), Value::Unit),

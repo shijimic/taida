@@ -210,9 +210,9 @@ pub struct TypeChecker {
     /// entry, popped on exit. Used to resolve constrained type variables
     /// inside the body (e.g. arithmetic on `T <= :Num`, calling `F <= :T => :T`).
     current_func_type_params: Vec<Vec<TypeParam>>,
-    /// E34 Phase 1.3 (Lock-B=C foundation): Typed HIR / expression type table.
-    /// `infer_expr_type` の末尾で record される。Phase 2 で codegen lower が
-    /// `typed_expr_table[expr_id].type == Bool` query で consume する。
+    /// Typed HIR / expression type table. `infer_expr_type` records
+    /// every observed `Expr` here so codegen lowering can answer
+    /// "is this expression Bool?" by looking up the recorded type.
     pub typed_expr_table: super::typed_hir::TypedExprTable,
 }
 
@@ -4235,9 +4235,9 @@ defaulted fields must be provided via `()`",
 
     /// Infer the type of an expression.
     ///
-    /// E34 Phase 1.3 (Lock-B=C foundation): wraps `infer_expr_type_inner` and
-    /// records the inferred type into `typed_expr_table` for downstream
-    /// consumption (Phase 2 codegen lower will query this table).
+    /// Wraps `infer_expr_type_inner` and records the inferred type into
+    /// `typed_expr_table` so downstream consumers (codegen lowering)
+    /// can query the result without re-running inference.
     pub fn infer_expr_type(&mut self, expr: &Expr) -> Type {
         let ty = self.infer_expr_type_inner(expr);
         self.typed_expr_table.record(expr, ty.clone());

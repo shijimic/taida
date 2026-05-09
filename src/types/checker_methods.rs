@@ -220,9 +220,10 @@ impl TypeChecker {
 
         // errorInfo intentionally uses an explicit allow-list. Accepting any
         // `(type, message)` shaped pack would reintroduce duck typing here.
-        // E34 Phase 3 (Lock-D=B'): Lax / Result / Async are admitted as part
-        // of the canonical ErrorInfo carrier unification — every error-bag
-        // type now answers `errorInfo() -> Lax[ErrorInfo]`.
+        // The canonical ErrorInfo carrier currently lives on Lax + Gorillax /
+        // RelaxedGorillax + Error. Result / Async runtime answers do not yet
+        // exist on any backend, so admitting them here would let type-correct
+        // programs panic across 2/3 backends at runtime.
         if method == "errorInfo"
             && !matches!(
                 obj_type,
@@ -230,8 +231,6 @@ impl TypeChecker {
                     if name == "Gorillax"
                         || name == "RelaxedGorillax"
                         || name == "Lax"
-                        || name == "Result"
-                        || name == "Async"
             )
             && !matches!(obj_type, Type::Error(_))
             && !matches!(obj_type, Type::Unknown | Type::Any)
@@ -239,7 +238,7 @@ impl TypeChecker {
             self.errors.push(TypeError {
                 message: format!(
                     "[E1509] Unknown method 'errorInfo' on type {}. \
-                     Hint: errorInfo() is available on Lax, Result, Async, Gorillax, RelaxedGorillax, and Error values.",
+                     Hint: errorInfo() is available on Lax, Gorillax, RelaxedGorillax, and Error values.",
                     obj_type
                 ),
                 span: span.clone(),
@@ -345,17 +344,18 @@ impl TypeChecker {
         }
     }
 
-    /// E34 Phase 1.4 (Lock-C=B): Bidirectional Lambda inference.
+    /// Bidirectional Lambda inference.
     ///
-    /// Infer a Lambda's type using the expected `Type::Function(expected_params, _)`
-    /// to fill in missing param annotations. If the lambda has explicit type
-    /// annotations on params, those win (they may legitimately reject via
-    /// subtype check downstream). If a param has no annotation, the expected
+    /// Infer a Lambda's type using the expected
+    /// `Type::Function(expected_params, _)` to fill in missing param
+    /// annotations. If the lambda has explicit type annotations on
+    /// params, those win (they may legitimately reject via subtype
+    /// check downstream). If a param has no annotation, the expected
     /// param type at the same index is used as a hint.
     ///
-    /// This is the **only** place where bidirectional hint flows into Lambda
-    /// inference in Phase 1. The general lambda inference path remains
-    /// unchanged (no annotation -> Type::Unknown).
+    /// This is the only place where a bidirectional hint flows into
+    /// Lambda inference. The general lambda inference path remains
+    /// unchanged (no annotation -> `Type::Unknown`).
     fn infer_lambda_with_hint(&mut self, expr: &Expr, expected: &Type) -> Type {
         let (Expr::Lambda(params, body, _), Type::Function(expected_params, _)) =
             (expr, expected)
@@ -393,13 +393,13 @@ impl TypeChecker {
         fn_ty
     }
 
-    /// E34 Phase 1.4 (Lock-C=B full pin): Infer the return type of a method
-    /// call **using the actual lambda/fn arguments** to pin generic parameters
-    /// (U / Q in `Lax[T].map(fn: T -> U) -> Lax[U]` etc.).
+    /// Infer the return type of a method call **using the actual
+    /// lambda/fn arguments** to pin generic parameters (U / Q in
+    /// `Lax[T].map(fn: T -> U) -> Lax[U]` etc.).
     ///
-    /// Falls back to `infer_method_return_type` for methods that don't need
-    /// arg-aware inference. The MethodCall arm in `infer_expr_type_inner`
-    /// calls this variant.
+    /// Falls back to `infer_method_return_type` for methods that don't
+    /// need arg-aware inference. The MethodCall arm in
+    /// `infer_expr_type_inner` calls this variant.
     pub(super) fn infer_method_return_type_with_args(
         &mut self,
         obj_type: &Type,
@@ -412,19 +412,28 @@ impl TypeChecker {
             let success_ty = inner_args.first().cloned().unwrap_or(Type::Unknown);
             let error_ty = inner_args.get(1).cloned().unwrap_or(Type::Unknown);
 
-            // Helper: extract the lambda's actual return type (U) from args[0].
-            // If args[0] is a Lambda, use bidirectional hint from the expected
-            // function param type (T) so the lambda body sees T for untyped params.
+            // Helper: extract the lambda's actual return type (U) from
+            // args[0]. The MethodCall arm calls `check_method_args`
+            // immediately before this helper, and that path already
+            // records the bidirectional-hinted lambda type into the
+            // typed table. Reusing that record avoids re-inferring the
+            // lambda body — which would double-evaluate side-effecting
+            // checker work like duplicate `[E1508]` emission and grow
+            // cost quadratically through nested chains.
             let lambda_ret = |this: &mut Self, expected_param: &Type| -> Type {
-                if let Some(arg) = args.first() {
-                    let expected_fn = Type::Function(
-                        vec![expected_param.clone()],
-                        Box::new(Type::Unknown),
-                    );
-                    let inferred = this.infer_lambda_with_hint(arg, &expected_fn);
-                    if let Type::Function(_, ret) = inferred {
-                        return *ret;
-                    }
+                let Some(arg) = args.first() else {
+                    return Type::Unknown;
+                };
+                if let Some(Type::Function(_, ret)) = this.typed_expr_table.lookup(arg) {
+                    return (**ret).clone();
+                }
+                let expected_fn = Type::Function(
+                    vec![expected_param.clone()],
+                    Box::new(Type::Unknown),
+                );
+                let inferred = this.infer_lambda_with_hint(arg, &expected_fn);
+                if let Type::Function(_, ret) = inferred {
+                    return *ret;
                 }
                 Type::Unknown
             };
@@ -600,11 +609,6 @@ impl TypeChecker {
                 "map" | "flatMap" | "mapError" => obj_type.clone(),
                 "getOrDefault" => args.first().cloned().unwrap_or(Type::Unknown),
                 "getOrThrow" => args.first().cloned().unwrap_or(Type::Unknown),
-                // E34 Phase 3 (Lock-D=B'): canonical Lax[ErrorInfo].
-                "errorInfo" => Type::Generic(
-                    "Lax".to_string(),
-                    vec![Type::Named("ErrorInfo".to_string())],
-                ),
                 "toString" => Type::Str,
                 _ => Type::Unknown,
             },
@@ -641,11 +645,6 @@ impl TypeChecker {
                 "isPending" | "isFulfilled" | "isRejected" => Type::Bool,
                 "map" => obj_type.clone(),
                 "getOrDefault" => args.first().cloned().unwrap_or(Type::Unknown),
-                // E34 Phase 3 (Lock-D=B'): canonical Lax[ErrorInfo].
-                "errorInfo" => Type::Generic(
-                    "Lax".to_string(),
-                    vec![Type::Named("ErrorInfo".to_string())],
-                ),
                 "toString" => Type::Str,
                 _ => Type::Unknown,
             },
@@ -661,16 +660,14 @@ impl TypeChecker {
                 if let Some(fields) = self.registry.get_type_fields(type_name) {
                     // Check if method name matches a field (could be a method field)
                     if let Some((_, ty)) = fields.iter().find(|(n, _)| n == method) {
-                        // E34 Phase 2 (Lock-B=C) fix: when the matched
-                        // field is a function type (e.g.
-                        // `Predicate = @(check: Int => :Bool)`), the
-                        // method-call result is the function's declared
-                        // return type, not the function type itself.
-                        // The legacy codegen relied on the declared
-                        // return via expr_is_bool's pack-field arm; the
-                        // typed-table path needs the same answer or it
-                        // records `Type::Function(...)` and Bool
-                        // detection collapses to false.
+                        // When the matched field is a function type
+                        // (e.g. `Predicate = @(check: Int => :Bool)`),
+                        // the method-call result is the function's
+                        // declared return type, not the function type
+                        // itself. Without unwrapping here the typed
+                        // table records `Type::Function(...)` and Bool
+                        // detection collapses to false for callers like
+                        // `predicate.check(x)`.
                         if let Type::Function(_, ret) = ty {
                             return (**ret).clone();
                         }

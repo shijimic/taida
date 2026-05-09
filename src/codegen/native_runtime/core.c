@@ -7383,28 +7383,32 @@ taida_val taida_result_flat_map(taida_val result, taida_val fn_ptr) {
     return new_result;
 }
 
-// Result.mapError(fn) — if error, apply fn to throw value
+// Result.mapError(fn) — if error, apply fn to throw payload directly so
+// the runtime matches the type-checker contract
+// `mapError(fn: P -> Q) -> Result[T, Q]`.
 taida_val taida_result_map_error(taida_val result, taida_val fn_ptr) {
     if (!taida_result_is_error_check(result)) {
         return result;  // Success: return as-is
     }
     taida_val throw_val = taida_pack_get_idx(result, 2);  // throw (shifted from idx 1 to idx 2)
-    // Extract the error message string to pass to the mapping function
-    // (matching interpreter: passes display string, not the Error BuchiPack)
-    taida_val err_display = taida_throw_to_display_string(throw_val);
-    taida_val mapped_str = taida_invoke_callback1(fn_ptr, err_display);
-    // Wrap the mapped result back into an Error BuchiPack
-    const char *new_msg = (const char*)mapped_str;
+    taida_val mapped = taida_invoke_callback1(fn_ptr, throw_val);
+    // If the mapper returned an Error-shaped pack, store it directly so
+    // user code can recover field-level metadata via getOrThrow / errorInfo.
+    if (taida_is_buchi_pack(mapped)
+        && taida_pack_has_hash(mapped, (taida_val)HASH_TYPE)
+        && taida_pack_has_hash(mapped, (taida_val)HASH_MESSAGE)) {
+        return taida_result_create(0, mapped, 0);
+    }
+    // Otherwise wrap the mapped value's display string in a generic
+    // ResultError so `Result[T, Q]` still throws something coherent.
+    const char *new_msg = (const char*)mapped;
     size_t sl = 0;
     if (taida_read_cstr_len_safe(new_msg, 65536, &sl)) {
         taida_val new_error = taida_make_error("ResultError", new_msg);
-        taida_str_release(mapped_str);
-        taida_str_release(err_display);
+        taida_str_release(mapped);
         return taida_result_create(0, new_error, 0);
     }
-    // Fallback: use mapped value as-is
-    taida_str_release(err_display);
-    return taida_result_create(0, mapped_str, 0);
+    return taida_result_create(0, mapped, 0);
 }
 
 // Result.getOrThrow() — if success return __value, otherwise throw

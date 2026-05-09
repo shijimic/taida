@@ -43,34 +43,41 @@ impl Lowering {
 
     /// 式が bool 値を返すかどうかを判定
     ///
-    /// E34 Phase 2 (Lock-B=C): the type-checker's Typed HIR side table
-    /// is the source of truth. When `typed_expr_table.is_bool(expr)`
-    /// returns `true` the answer is final. The legacy syntax-driven
-    /// fallback below only runs when the table has no entry for this
-    /// expression, which happens in two paths:
+    /// The type-checker's Typed HIR side table is the source of truth.
+    /// When `typed_expr_table.is_bool(expr)` returns `true` the answer
+    /// is final. The legacy syntax-driven fallback below only runs when
+    /// the table has no entry for this expression, which happens in two
+    /// paths:
     ///
-    ///   1. Lowering of synthesised expressions (e.g. defaultFn
+    ///   1. Lowering of synthesised expressions (e.g. `defaultFn`
     ///      inserted by mold/pack lowering) that the type-checker
     ///      never observed.
     ///   2. Tests / dependency-module compilations that bypass
     ///      `set_typed_expr_table`, leaving the table empty.
     ///
-    /// Both fall-through cases are honoured for now to keep the
-    /// migration green; Phase 2.3〜2.5 narrow the fallback to nil and
-    /// delete the legacy bool_vars / bool_returning_funcs / allow-list
-    /// machinery entirely.
+    /// Both fall-through cases are honoured today so the migration
+    /// stays incremental; the long-term direction is to narrow the
+    /// fallback as more synthesised expressions are routed through the
+    /// typed table.
     pub(crate) fn expr_is_bool(&self, expr: &Expr) -> bool {
-        // E34 Phase 2 (Lock-B=C): the type-checker's Typed HIR side
-        // table is authoritative when it has a concrete decision.
-        //   - Type::Bool: definitive yes (closes the cross-module
-        //     false-negative gap).
-        //   - any other concrete type: definitive no (closes the
-        //     pack-field-shadowing false-positive gap).
-        //   - Type::Unknown: the checker had no insight (e.g. molds
-        //     like SpanEquals / Exists that have no checker arm yet,
-        //     or expressions through generics that didn't fully
-        //     resolve). Fall through to the legacy heuristics so
-        //     existing parity tests stay green.
+        // The type-checker's Typed HIR side table is authoritative
+        // when it has a concrete decision:
+        //   - Type::Bool: definitive yes (closes the
+        //     pack-field-shadowing false-positive gap, since the
+        //     checker already disambiguates the receiver type).
+        //   - any other concrete type: definitive no.
+        //   - Type::Unknown: the checker had no insight. Common
+        //     sources are molds without a checker arm yet
+        //     (SpanEquals / Exists), generics that didn't fully
+        //     resolve, and imported function calls (the type-checker
+        //     currently registers cross-module function values as
+        //     `Type::Unknown` and does not surface their declared
+        //     return type — that gap predates this routing layer).
+        //     The fallback below relies on `bool_returning_funcs`,
+        //     which is populated only for *local* Bool functions, so
+        //     cross-module Bool callers still bypass detection here
+        //     and need a follow-up registration pass to close the
+        //     loop.
         if let Some(ty) = self.typed_expr_table.lookup(expr) {
             match ty {
                 crate::types::Type::Bool => return true,
@@ -94,13 +101,13 @@ impl Lowering {
                 )
             }
             Expr::UnaryOp(UnaryOp::Not, _, _) => true,
-            // E34 Phase 2 (Lock-B=C): the type-checker decides Bool method
-            // calls when a typed entry exists (top-of-function short-circuit).
-            // The legacy heuristics below survive as a fallback for
+            // The type-checker decides Bool method calls when a typed
+            // entry exists (top-of-function short-circuit above). The
+            // legacy heuristics below survive as a fallback for
             // synthesised expressions the checker never observed (e.g.
-            // mold lowering inserts a `someExpr.toString()` call where the
-            // receiver was constructed in lowering itself, leaving no
-            // ExprId for the table to key on). The allow-list still
+            // mold lowering inserts a `someExpr.toString()` call where
+            // the receiver was constructed in lowering itself, leaving
+            // no ExprId for the table to key on). The allow-list still
             // matches, but only when the typed table has nothing to say.
             Expr::MethodCall(obj, method, args, _) => {
                 if matches!(
@@ -148,11 +155,11 @@ impl Lowering {
                 false
             }
             Expr::FuncCall(callee, _, _) => {
-                // E34 Phase 2: typed table wins above; this fallback only
-                // helps synthesised FuncCalls that the type-checker never
-                // saw. Local-only Bool fn detection survives so mold and
-                // facade-emitted call sites that bypass the AST still get
-                // the right tag.
+                // The typed table wins above; this fallback only helps
+                // synthesised FuncCalls that the type-checker never
+                // saw. Local-only Bool fn detection survives so mold
+                // and facade-emitted call sites that bypass the AST
+                // still get the right tag.
                 if let Expr::Ident(name, _) = callee.as_ref() {
                     self.bool_returning_funcs.contains(name.as_str())
                 } else {
