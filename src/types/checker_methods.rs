@@ -252,6 +252,26 @@ impl TypeChecker {
                     }
                     _ => None,
                 }),
+            // E34B-013 / E34B-014 follow-up (Codex review #10): a
+            // function-valued field on a declared `Named` (TypeDef /
+            // MoldDef) struct must obey the same boundary discipline as
+            // a `BuchiPack` literal. Walk the type's registered fields
+            // and surface the signature of any `Type::Function` field
+            // that matches the called name.
+            Type::Named(type_name) => self
+                .registry
+                .get_type_fields(type_name)
+                .and_then(|fields| {
+                    fields
+                        .iter()
+                        .find(|(name, _)| name == method)
+                        .and_then(|(_, ty)| match ty {
+                            Type::Function(params, _) => {
+                                Some((params.len(), params.len(), params.clone()))
+                            }
+                            _ => None,
+                        })
+                }),
             _ => {
                 // N-66: For unknown/unresolved receiver types (Type::Unknown, Type::Any,
                 // Type::Generic for non-Lax/Result/Async, user-defined Named types without

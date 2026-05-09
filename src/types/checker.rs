@@ -1902,6 +1902,133 @@ impl TypeChecker {
     ///   - the name is registered as a user-defined (possibly generic)
     ///     function / type / mold, or
     ///   - it is a known builtin identifier.
+    /// E34B-013 / E34B-014 follow-up (Codex review #10): pipeline
+    /// `Mold[_]()` / `Map[_, fn]()` etc. — the placeholder in the
+    /// type-args list receives the upstream value at runtime.
+    /// Surface the expected element type from a small allow-list
+    /// (the HOF molds `Map` / `Filter` / `Fold` and the generic
+    /// `Mold[_]()` form for any user-declared mold) and reject when
+    /// the upstream type cannot satisfy the strict subtype rule.
+    fn check_pipeline_mold_inst_placeholder(
+        &mut self,
+        name: &str,
+        type_args: &[Expr],
+        pipe_value_ty: &Type,
+        span: &Span,
+    ) {
+        let ph_idx = type_args
+            .iter()
+            .position(|a| matches!(a, Expr::Placeholder(_) | Expr::Hole(_)));
+        // Build the expected slot type from the mold.
+        // - `Map[_, fn]()` / `Filter[_, fn]()` / `Fold[_, init, fn]()`:
+        //   the `_` slot holds a `List[T]` whose element type is the
+        //   first parameter type of the function value supplied in the
+        //   second/third position.
+        let expected_ty: Option<Type> = match (name, ph_idx) {
+            ("Map", Some(0)) | ("Filter", Some(0)) => {
+                type_args.get(1).and_then(|fn_arg| {
+                    match self.infer_expr_type(fn_arg) {
+                        Type::Function(params, _) => params
+                            .first()
+                            .cloned()
+                            .map(|p| Type::List(Box::new(p))),
+                        _ => None,
+                    }
+                })
+            }
+            ("Fold", Some(0)) => type_args.get(2).and_then(|fn_arg| {
+                match self.infer_expr_type(fn_arg) {
+                    Type::Function(params, _) => params
+                        .first()
+                        .cloned()
+                        .map(|p| Type::List(Box::new(p))),
+                    _ => None,
+                }
+            }),
+            // Function-as-mold misuse (`fn[_]()` / `fn[]()` where
+            // `fn` is a user function rather than a registered mold):
+            // surface the function's first param as the expected slot
+            // type so PHILOSOPHY I "no implicit type conversion at
+            // function boundaries" is honoured even on this fringe
+            // syntax. Without this, `1 => acceptFloat[_]() => debug`
+            // would silently widen Int → Float at runtime.
+            _ if !self.registry.mold_defs.contains_key(name) => {
+                self.func_param_types
+                    .get(name)
+                    .and_then(|params| params.first().cloned())
+            }
+            // Generic `Mold[_]()` for a registered mold: the mold
+            // registry tracks the type-parameter names but not a
+            // concrete expected type at the placeholder slot, so we
+            // skip the strict check here. Per-mold pinning lives in
+            // the dedicated arms above (Map / Filter / Fold) and can
+            // be extended as new HOF surfaces emerge.
+            _ => None,
+        };
+        let Some(expected_ty) = expected_ty else {
+            return;
+        };
+        if matches!(expected_ty, Type::Unknown) {
+            return;
+        }
+        if matches!(pipe_value_ty, Type::Unknown) {
+            return;
+        }
+        if !self
+            .registry
+            .is_function_arg_subtype_of(pipe_value_ty, &expected_ty)
+        {
+            self.errors.push(TypeError {
+                message: format!(
+                    "[E1506] Pipeline value of type {} cannot fill the `_` slot of \
+                     `{}[..]()` expecting {}. Hint: Pass a value of the correct type, \
+                     or use an explicit conversion.",
+                    pipe_value_ty, name, expected_ty
+                ),
+                span: span.clone(),
+            });
+        }
+    }
+
+    /// E34B-013 / E34B-014 follow-up (Codex review #10): pipeline
+    /// auto-call boundary check. When a step is a bare `Ident` (or
+    /// any callable form without an explicit placeholder slot), the
+    /// previous value is fed to the function's first parameter at
+    /// runtime; the type-checker mirrors that discipline here.
+    fn check_pipeline_ident_auto_call_arg(
+        &mut self,
+        name: &str,
+        pipe_value_ty: &Type,
+        span: &Span,
+    ) {
+        let Some(expected_params) = self.func_param_types.get(name).cloned() else {
+            return;
+        };
+        let Some(expected_ty) = expected_params.first() else {
+            return;
+        };
+        if matches!(expected_ty, Type::Unknown) {
+            return;
+        }
+        if matches!(pipe_value_ty, Type::Unknown) {
+            return;
+        }
+        if !self
+            .registry
+            .is_function_arg_subtype_of(pipe_value_ty, expected_ty)
+        {
+            self.errors.push(TypeError {
+                message: format!(
+                    "[E1506] Pipeline value of type {} cannot be auto-applied to '{}' \
+                     expecting {}. Hint: Pass a value of the correct type, or use an \
+                     explicit conversion.",
+                    pipe_value_ty, name, expected_ty
+                ),
+                span: span.clone(),
+            });
+        }
+    }
+
     /// E34B-013 / E34B-014 follow-up (Codex review #9): check the
     /// `_` placeholder slot in a pipeline-call step against the
     /// callee's declared parameter type. The placeholder receives the
@@ -5399,6 +5526,45 @@ defaulted fields must be provided via `()`",
                         // placeholder.
                         if let Expr::FuncCall(func, args, span) = pipe_expr {
                             self.check_pipeline_placeholder_arg(func, args, &result_type, span);
+                            // E34B-013 / E34B-014 follow-up (Codex
+                            // review #10): a FuncCall with no
+                            // placeholder and no explicit arg is the
+                            // empty-paren auto-call form
+                            // `1 => f() => debug`. Treat the same as a
+                            // bare ident step.
+                            if args.is_empty()
+                                && let Expr::Ident(name, _) = func.as_ref()
+                                && self.is_pipeline_callable_ident(name)
+                            {
+                                self.check_pipeline_ident_auto_call_arg(
+                                    name,
+                                    &result_type,
+                                    span,
+                                );
+                            }
+                        }
+                        // E34B-013 / E34B-014 follow-up (Codex review #10):
+                        // pipeline auto-call (no-placeholder) boundary
+                        // check. `1 => acceptFloat` is auto-applied as
+                        // `acceptFloat(1)` at runtime; the type-checker
+                        // must apply the same boundary discipline here.
+                        if let Expr::Ident(name, span) = pipe_expr
+                            && self.is_pipeline_callable_ident(name)
+                        {
+                            self.check_pipeline_ident_auto_call_arg(name, &result_type, span);
+                        }
+                        // E34B-013 / E34B-014 follow-up (Codex review #10):
+                        // pipeline `Mold[_]()` / `Mold[_, args]()` —
+                        // the `_` slot in type-args receives the
+                        // upstream value at runtime; the same boundary
+                        // discipline applies here.
+                        if let Expr::MoldInst(name, type_args, _, span) = pipe_expr {
+                            self.check_pipeline_mold_inst_placeholder(
+                                name,
+                                type_args,
+                                &result_type,
+                                span,
+                            );
                         }
                     }
                     if i > 0
@@ -5413,6 +5579,20 @@ defaulted fields must be provided via `()`",
                         continue;
                     }
                     result_type = self.infer_expr_type(pipe_expr);
+                    // E34B-013 / E34B-014 follow-up (Codex review #10):
+                    // a callable `Ident` step is auto-applied to the
+                    // previous value, so the next step's input is the
+                    // function's return type, not the function value.
+                    // This unwraps `Type::Function(_, ret)` -> `ret`
+                    // when the step is the bare ident form (FuncCall
+                    // already returns `ret` directly).
+                    if i > 0
+                        && let Expr::Ident(name, _) = pipe_expr
+                        && self.is_pipeline_callable_ident(name)
+                        && let Type::Function(_, ret) = &result_type
+                    {
+                        result_type = (**ret).clone();
+                    }
                 }
                 self.pop_scope();
                 self.in_pipeline = old_in_pipeline;

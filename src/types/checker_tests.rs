@@ -5614,3 +5614,143 @@ fn e34b_013_list_map_accepts_int_param_for_int_list() {
     );
 }
 
+// E34B-013 / E34B-014 follow-up (Codex review #10): close the
+// remaining boundary leaks Codex surfaced after `f11409d`.
+//   Regression: nested pipeline `1 => nestedFn => acceptInt(_)` was
+//     incorrectly rejected because the placeholder check compared the
+//     bare `Type::Function` value of `nestedFn` to the expected slot
+//     type. Auto-call must unwrap to the function's return type.
+//   8'  / 8'' / 8''': pipeline auto-call without an explicit
+//     placeholder (`1 => f`, `1 => f()`, `1 => f[]()`) was unchecked.
+//   6': Named pack with a function-typed field
+//     (`Holder = @(fn: Float => :Float)`) bypassed the BuchiPack arm.
+//   HOF mold: `@[Int] => Map[_, fnFloat]() => debug` slipped because
+//     the MoldInst arm did not consult the function value's first
+//     parameter type when computing the expected `_` slot type.
+
+#[test]
+fn e34b_013_pipeline_nested_callable_does_not_false_positive() {
+    // Regression guard: pipeline of two `Int -> Int` callables must
+    // accept. The first ident step is auto-applied so the second
+    // step's `_` slot receives `Int`, not `(Int) => Int`.
+    let src = "nestedFn x: Int = x * 2 => :Int\n\
+               acceptInt y: Int = y + 1 => :Int\n\
+               1 => nestedFn => acceptInt(_) => result\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.is_empty(),
+        "Nested `Int -> Int` pipeline should be accepted; errors: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn e34b_013_pipeline_auto_call_rejects_int_for_float_ident() {
+    // Hole 8': `1 => acceptFloat => debug` is auto-applied as
+    // `acceptFloat(1)`; the boundary check must run on the bare ident.
+    let src = "acceptFloat x: Float = x + 1.0 => :Float\n\
+               1 => acceptFloat => debug\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1506]")
+            && e.message.contains("auto-applied")
+            && e.message.contains("acceptFloat")),
+        "Expected [E1506] for `1 => acceptFloat`, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn e34b_013_pipeline_auto_call_rejects_int_for_float_empty_paren() {
+    // Hole 8'': `1 => acceptFloat() => debug` is the empty-paren
+    // form of the auto-call; same boundary check.
+    let src = "acceptFloat x: Float = x + 1.0 => :Float\n\
+               1 => acceptFloat() => debug\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1506]")
+            && e.message.contains("auto-applied")
+            && e.message.contains("acceptFloat")),
+        "Expected [E1506] for `1 => acceptFloat()`, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn e34b_013_pipeline_mold_form_rejects_int_for_float_fn_as_mold() {
+    // Hole 8''' / 10: `1 => acceptFloat[]()` and
+    // `1 => acceptFloat[_]()` are mold-call shapes used on a regular
+    // function; the boundary check still applies to the function's
+    // first parameter type.
+    let src_empty = "acceptFloat x: Float = x + 1.0 => :Float\n\
+                     1 => acceptFloat[]() => debug\n";
+    let (_, errors) = check(src_empty);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1506]")
+            && e.message.contains("acceptFloat")),
+        "Expected [E1506] for `1 => acceptFloat[]()`, got: {:?}",
+        errors
+    );
+
+    let src_ph = "acceptFloat x: Float = x + 1.0 => :Float\n\
+                  1 => acceptFloat[_]() => debug\n";
+    let (_, errors) = check(src_ph);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1506]")
+            && e.message.contains("acceptFloat")),
+        "Expected [E1506] for `1 => acceptFloat[_]()`, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn e34b_014_named_pack_function_field_call_rejects_int_for_float() {
+    // Hole 6': declared Named struct with a function-typed field. The
+    // method-call-on-Named path now consults `registry.get_type_fields`
+    // for a Function field and runs the boundary check.
+    let src = "Holder = @(fn: Float => :Float)\n\
+               fnFloat x: Float = x + 1.0 => :Float\n\
+               holder <= Holder(fn <= fnFloat)\n\
+               result <= holder.fn(1)\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1508]")
+            && e.message.contains("Method 'fn'")
+            && e.message.contains("Int")
+            && e.message.contains("Float")),
+        "Expected [E1508] for Named pack `holder.fn(1)`, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn e34b_013_pipeline_hof_mold_rejects_float_param_for_int_list() {
+    // HOF mold: `@[1, 2, 3] => Map[_, fnFloat]()` was previously
+    // accepted because the MoldInst arm did not surface the expected
+    // `_` slot type. The slot now resolves to `@[Float]` from the
+    // function value, and `@[Int]` cannot satisfy it.
+    let src = "fnFloat x: Float = x + 1.0 => :Float\n\
+               @[1, 2, 3] => Map[_, fnFloat]() => debug\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1506]")
+            && e.message.contains("Map")
+            && e.message.contains("Float")),
+        "Expected [E1506] for `@[Int] => Map[_, fnFloat]()`, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn e34b_013_pipeline_hof_mold_accepts_int_for_int_list() {
+    // Positive: matching `Int -> Int` HOF mold call accepted.
+    let src = "double x: Int = x * 2 => :Int\n\
+               @[1, 2, 3] => Map[_, double]() => debug\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.is_empty(),
+        "`@[Int] => Map[_, double]()` should be accepted; errors: {:?}",
+        errors
+    );
+}
+
