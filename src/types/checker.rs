@@ -2017,6 +2017,27 @@ impl TypeChecker {
             "Find" | "FindIndex" | "FindIndexLax" | "Count" => {
                 Some(("[xs, fn]", 2, Some(2)))
             }
+            // E34B-022 (Codex review #18 follow-up): close the
+            // 16-mold gap Codex re-discovered after the previous
+            // round. All entries mirror `src/interpreter/mold_eval.rs`
+            // exactly.
+            "Split" => Some(("[str, delim]", 2, Some(2))),
+            "Chars" => Some(("[str]", 1, Some(1))),
+            // `Slice[str|bytes]` accepts the 1-arg form
+            // (`Slice[str](start <= ...)`) as well as the 3-arg
+            // shorthand `Slice[str, start, end]`.
+            "Slice" => Some(("[str|bytes, start?, end?]", 1, Some(3))),
+            "CharAt" | "ByteAt" => Some(("[str, idx]", 2, Some(2))),
+            "ByteSlice" => Some(("[str, start, end]", 3, Some(3))),
+            "StringRepeatJoin" => Some(("[str, n, sep]", 3, Some(3))),
+            "ToFixed" => Some(("[num, digits]", 2, Some(2))),
+            "Abs" => Some(("[num]", 1, Some(1))),
+            "Sum" => Some(("[list]", 1, Some(1))),
+            "Clamp" => Some(("[num, min, max]", 3, Some(3))),
+            "BitAnd" => Some(("[a, b]", 2, Some(2))),
+            "BytesCursor" => Some(("[bytes]", 1, Some(1))),
+            "BytesCursorTake" => Some(("[cursor, size]", 2, Some(2))),
+            "Concat" | "Join" => Some(("[list, other]", 2, Some(2))),
             _ => None,
         };
         let Some((slots, min, max)) = arity_spec else {

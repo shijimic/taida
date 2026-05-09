@@ -6734,3 +6734,182 @@ fn e34b_021_pad_rejects_partial_args() {
         errors
     );
 }
+
+// E34B-022 (Codex review #18 follow-up): 16 additional built-in
+// molds whose arity was missing from the central allow-list.
+// `taida way check` previously let these slip through, only to
+// fail at runtime.
+
+#[test]
+fn e34b_022_slice_rejects_empty() {
+    let src = "v <= Slice[]()\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1505]")
+            && e.message.contains("Slice[")),
+        "Expected [E1505] for `Slice[]()`, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn e34b_022_split_rejects_partial() {
+    let src = "v <= Split[\"a\"]()\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1505]")
+            && e.message.contains("Split[str, delim]()")),
+        "Expected [E1505] for `Split[\"a\"]()`, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn e34b_022_chars_rejects_empty() {
+    let src = "v <= Chars[]()\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1505]")
+            && e.message.contains("Chars[str]()")),
+        "Expected [E1505] for `Chars[]()`, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn e34b_022_charat_rejects_partial() {
+    let src = "v <= CharAt[\"abc\"]()\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1505]")
+            && e.message.contains("CharAt[str, idx]()")),
+        "Expected [E1505] for `CharAt[\"abc\"]()`, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn e34b_022_concat_rejects_empty() {
+    let src = "v <= Concat[]()\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1505]")
+            && e.message.contains("Concat[list, other]()")),
+        "Expected [E1505] for `Concat[]()`, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn e34b_022_join_rejects_partial() {
+    let src = "v <= Join[@[1, 2]]()\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1505]")
+            && e.message.contains("Join[list, other]()")),
+        "Expected [E1505] for `Join[@[1, 2]]()`, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn e34b_022_sum_rejects_empty() {
+    let src = "v <= Sum[]()\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1505]")
+            && e.message.contains("Sum[list]()")),
+        "Expected [E1505] for `Sum[]()`, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn e34b_022_abs_rejects_empty() {
+    let src = "v <= Abs[]()\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1505]")
+            && e.message.contains("Abs[num]()")),
+        "Expected [E1505] for `Abs[]()`, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn e34b_022_clamp_rejects_partial() {
+    let src = "v <= Clamp[1]()\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1505]")
+            && e.message.contains("Clamp[num, min, max]()")),
+        "Expected [E1505] for `Clamp[1]()`, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn e34b_022_tofixed_rejects_partial() {
+    let src = "v <= ToFixed[1]()\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1505]")
+            && e.message.contains("ToFixed[num, digits]()")),
+        "Expected [E1505] for `ToFixed[1]()`, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn e34b_022_bitand_rejects_partial() {
+    let src = "v <= BitAnd[1]()\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1505]")
+            && e.message.contains("BitAnd[a, b]()")),
+        "Expected [E1505] for `BitAnd[1]()`, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn e34b_022_bytes_cursor_rejects_empty() {
+    let src = "v <= BytesCursor[]()\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1505]")
+            && e.message.contains("BytesCursor[bytes]()")),
+        "Expected [E1505] for `BytesCursor[]()`, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn e34b_022_bytes_cursor_take_rejects_partial() {
+    let src = "v <= BytesCursorTake[42]()\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1505]")
+            && e.message.contains("BytesCursorTake[cursor, size]()")),
+        "Expected [E1505] for `BytesCursorTake[42]()`, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn e34b_022_correct_signatures_accepted() {
+    // Spot-check that the new entries do not over-fire on
+    // legitimate shapes.
+    let src = "a <= Slice[\"abc\"]()\n\
+               b <= Split[\"a-b\", \"-\"]()\n\
+               c <= Chars[\"x\"]()\n\
+               d <= Sum[@[1, 2, 3]]()\n\
+               e <= Abs[-1]()\n\
+               f <= Clamp[5, 0, 10]()\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.is_empty(),
+        "Correctly-shaped string / numeric mold calls must be accepted; errors: {:?}",
+        errors
+    );
+}
