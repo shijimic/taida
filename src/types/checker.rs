@@ -2053,7 +2053,13 @@ impl TypeChecker {
             // `mold_eval.rs` that the central allow-list was missing.
             // Numeric scalar molds (1-arg).
             "Floor" | "Ceil" | "Round" | "Truncate" => Some(("[num]", 1, Some(1))),
-            "ByteLength" | "BytesToList" => Some(("[bytes]", 1, Some(1))),
+            // E34B-024 (Codex review #20): split the byte-shape
+            // helpers — `ByteLength` accepts `Str` per
+            // `mold_eval.rs:697`, while `BytesToList` reads
+            // `Bytes`. Putting them under the same label was a
+            // diagnostic-string error introduced in E34B-023.
+            "ByteLength" => Some(("[str]", 1, Some(1))),
+            "BytesToList" => Some(("[bytes]", 1, Some(1))),
             // Math 1-arg unary helpers (every entry from
             // `eval_unary_math` and the dedicated Asin/Acos/Atan
             // arms).
@@ -6433,6 +6439,24 @@ defaulted fields must be provided via `()`",
                     // `r.flatMap(...)` can enforce Result[U, P] preservation
                     // (方針 A: error type 保存 strict).
                     "Result" => {
+                        // E34B-024 (Codex review #20): pin the upper
+                        // arity. `Result[value, predicate?]()` is the
+                        // public shape (`docs/reference/standard_methods.md`,
+                        // `examples/compile_optional_result.td:95`),
+                        // and the runtime reads `type_args[0]` /
+                        // `type_args[1]` only. Anything past index 1
+                        // was silently dropped at the front gate.
+                        if type_args.len() > 2 {
+                            self.errors.push(TypeError {
+                                message: format!(
+                                    "[E1505] `Result[value, predicate?]()` accepts at most \
+                                     2 type arguments, got {}. Hint: extra information \
+                                     belongs in the `(throw <= ErrorVal)` field block.",
+                                    type_args.len()
+                                ),
+                                span: mold_span.clone(),
+                            });
+                        }
                         let success_ty = type_args
                             .first()
                             .map(|a| self.infer_expr_type(a))
@@ -6446,6 +6470,21 @@ defaulted fields must be provided via `()`",
                     }
                     // Lax[value]() returns Lax[T]
                     "Lax" => {
+                        // E34B-024 (Codex review #20): same silent-drop
+                        // gap as `Result` — any `type_args[1..]` were
+                        // ignored, masking simple typos like
+                        // `Lax[1, 2, 3]()`.
+                        if type_args.len() > 1 {
+                            self.errors.push(TypeError {
+                                message: format!(
+                                    "[E1505] `Lax[value]()` accepts at most 1 type \
+                                     argument, got {}. Hint: wrap a single value, e.g. \
+                                     `Lax[42]()`.",
+                                    type_args.len()
+                                ),
+                                span: mold_span.clone(),
+                            });
+                        }
                         let inner = type_args
                             .first()
                             .map(|a| self.infer_expr_type(a))

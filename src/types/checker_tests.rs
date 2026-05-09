@@ -7076,11 +7076,14 @@ fn e34b_023_to_radix_rejects_one_arg() {
 
 #[test]
 fn e34b_023_byte_length_rejects_empty() {
+    // E34B-024 (Codex review #20 follow-up): the diagnostic label
+    // moved from `[bytes]` to `[str]` to match the runtime, which
+    // requires a `Value::Str` (`mold_eval.rs:697`).
     let src = "v <= ByteLength[]()\n";
     let (_, errors) = check(src);
     assert!(
         errors.iter().any(|e| e.message.contains("[E1505]")
-            && e.message.contains("ByteLength[bytes]()")),
+            && e.message.contains("ByteLength[str]()")),
         "Expected [E1505] for `ByteLength[]()`, got: {:?}",
         errors
     );
@@ -7154,6 +7157,62 @@ fn e34b_023_span_slice_rejects_partial() {
         errors.iter().any(|e| e.message.contains("[E1505]")
             && e.message.contains("SpanSlice[span, raw, start, end]()")),
         "Expected [E1505] for `SpanSlice[1, 2, 3]()`, got: {:?}",
+        errors
+    );
+}
+
+// E34B-024 (Codex review #20 follow-up): two regressions in
+// E34B-023 (`ByteLength` diagnostic label) and one pre-existing
+// silent-drop leak (`Lax` / `Result` accepted any number of
+// type-args and quietly dropped the tail).
+
+#[test]
+fn e34b_024_byte_length_label_says_str_not_bytes() {
+    let src = "v <= ByteLength[]()\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1505]")
+            && e.message.contains("ByteLength[str]()")),
+        "Expected [E1505] for `ByteLength[]()` with `[str]` label, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn e34b_024_lax_rejects_excess_type_args() {
+    let src = "v <= Lax[1, 2, 3]()\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1505]")
+            && e.message.contains("Lax[value]()")
+            && e.message.contains("got 3")),
+        "Expected [E1505] for `Lax[1, 2, 3]()`, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn e34b_024_result_rejects_excess_type_args() {
+    let src = "v <= Result[1, 2, 3]()\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1505]")
+            && e.message.contains("Result[value, predicate?]()")
+            && e.message.contains("got 3")),
+        "Expected [E1505] for `Result[1, 2, 3]()`, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn e34b_024_lax_and_result_accept_canonical_shapes() {
+    // Positive: the documented one-arg shapes still work.
+    let src = "a <= Lax[42]()\n\
+               b <= Result[\"ok\"]()\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.is_empty(),
+        "`Lax[42]()` / `Result[\"ok\"]()` must remain accepted; errors: {:?}",
         errors
     );
 }
