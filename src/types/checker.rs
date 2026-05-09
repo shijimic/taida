@@ -1956,6 +1956,66 @@ impl TypeChecker {
     ///   - the name is registered as a user-defined (possibly generic)
     ///     function / type / mold, or
     ///   - it is a known builtin identifier.
+    /// E34B-019 (Codex review #15 follow-up): boundary check for
+    /// built-in molds that accept a callback option such as
+    /// `Sort[xs](by <= keyFn)` or `Unique[xs](by <= keyFn)`. The
+    /// callback's first parameter must accept the list element type.
+    /// Without this pin, a `Sort[@[Int]](by <= keyFloat)` would
+    /// silently widen Int -> Float at runtime and lose 4-backend
+    /// parity.
+    fn check_built_in_mold_callback_option(
+        &mut self,
+        name: &str,
+        type_args: &[Expr],
+        fields: &[BuchiField],
+        span: &Span,
+    ) {
+        // Allow-list of built-in molds that accept a `by` callback
+        // option whose param0 must accept the list element type.
+        let by_callback_molds = ["Sort", "Unique"];
+        if !by_callback_molds.contains(&name) {
+            return;
+        }
+        let Some(by_field) = fields.iter().find(|f| f.name == "by") else {
+            return;
+        };
+        let Some(xs_arg) = type_args.first() else {
+            return;
+        };
+        let xs_ty = self.infer_expr_type(xs_arg);
+        let Type::List(elem_ty) = &xs_ty else {
+            return;
+        };
+        if matches!(elem_ty.as_ref(), Type::Unknown) {
+            return;
+        }
+        let by_ty = self.infer_expr_type(&by_field.value);
+        let Type::Function(by_params, _) = &by_ty else {
+            return;
+        };
+        let Some(fn_param0) = by_params.first() else {
+            return;
+        };
+        if matches!(fn_param0, Type::Unknown) {
+            return;
+        }
+        if !self
+            .registry
+            .is_function_arg_subtype_of(elem_ty, fn_param0)
+        {
+            self.errors.push(TypeError {
+                message: format!(
+                    "[E1506] `{}[xs](by <= ..)`: callback parameter type {} cannot \
+                     accept the list element type {}. Hint: align the callback's \
+                     first parameter with the list element type, or use an explicit \
+                     conversion mold.",
+                    name, fn_param0, elem_ty
+                ),
+                span: span.clone(),
+            });
+        }
+    }
+
     /// E34B-013 / E34B-014 follow-up (Codex review #11): direct HOF
     /// mold boundary check. `Map[xs, fn]()` and friends called
     /// outside a pipeline still form a function boundary between the
@@ -6029,6 +6089,12 @@ defaulted fields must be provided via `()`",
                 // `check_pipeline_mold_inst_placeholder`; this branch
                 // covers the direct shape.
                 self.check_direct_hof_mold_boundary(name, type_args, mold_span);
+                // E34B-019 (Codex review #15 follow-up): Sort / Unique
+                // accept a `by` callback option whose first parameter
+                // must match the list element type. Pin the boundary
+                // here so `Sort[@[Int]](by <= keyFloat)` cannot widen
+                // Int -> Float silently.
+                self.check_built_in_mold_callback_option(name, type_args, fields, mold_span);
                 match name.as_str() {
                     // JSON[raw, Schema]() returns Lax (wrapping the schema type).
                     // E34B-014 follow-up (Codex review #11): when the
@@ -6056,6 +6122,125 @@ defaulted fields must be provided via `()`",
                     ),
                     // Cancel[async]() returns Async[T] (or Async[Unknown] fallback)
                     "Cancel" => {
+                        if type_args.len() != 1 {
+                            self.errors.push(TypeError {
+                                message: format!(
+                                    "[E1505] `Cancel[async]()` requires exactly 1 type argument, got {}. \
+                                     Hint: pass a single Async value, e.g. `Cancel[asyncTask]()`.",
+                                    type_args.len()
+                                ),
+                                span: mold_span.clone(),
+                            });
+                        }
+                        let inner = type_args
+                            .first()
+                            .map(|a| self.infer_expr_type(a))
+                            .map(|t| match t {
+                                Type::Generic(name, args) if name == "Async" => {
+                                    args.first().cloned().unwrap_or(Type::Unknown)
+                                }
+                                other => other,
+                            })
+                            .unwrap_or(Type::Unknown);
+                        Type::Generic("Async".to_string(), vec![inner])
+                    }
+                    // E34B-018 (Codex review #15 follow-up): All / Race /
+                    // Timeout had no checker-side arity validation, so
+                    // `All[xs, extra]()` and `Timeout[async]()` (missing
+                    // ms) silently passed type checking and only failed
+                    // at runtime. Pin the signatures here to align with
+                    // `src/interpreter/mold_eval.rs` (4-backend parity).
+                    //
+                    // Runtime contracts:
+                    //   All[asyncList]() -> Async[List[T]]    (1 arg)
+                    //   Race[asyncList]() -> Async[T]         (1 arg)
+                    //   Timeout[async, ms]() -> Async[T]      (2 args)
+                    "All" => {
+                        if type_args.len() != 1 {
+                            self.errors.push(TypeError {
+                                message: format!(
+                                    "[E1505] `All[asyncList]()` requires exactly 1 type \
+                                     argument, got {}. Hint: pass a single list of Async \
+                                     values, e.g. `All[@[a1, a2]]()`.",
+                                    type_args.len()
+                                ),
+                                span: mold_span.clone(),
+                            });
+                        }
+                        let inner = type_args
+                            .first()
+                            .map(|a| self.infer_expr_type(a))
+                            .map(|t| match t {
+                                Type::List(elem) => match *elem {
+                                    Type::Generic(ref name, ref args) if name == "Async" => {
+                                        Type::List(Box::new(
+                                            args.first().cloned().unwrap_or(Type::Unknown),
+                                        ))
+                                    }
+                                    other => Type::List(Box::new(other)),
+                                },
+                                _ => Type::List(Box::new(Type::Unknown)),
+                            })
+                            .unwrap_or(Type::List(Box::new(Type::Unknown)));
+                        Type::Generic("Async".to_string(), vec![inner])
+                    }
+                    "Race" => {
+                        if type_args.len() != 1 {
+                            self.errors.push(TypeError {
+                                message: format!(
+                                    "[E1505] `Race[asyncList]()` requires exactly 1 type \
+                                     argument, got {}. Hint: pass a single list of Async \
+                                     values, e.g. `Race[@[a1, a2]]()`.",
+                                    type_args.len()
+                                ),
+                                span: mold_span.clone(),
+                            });
+                        }
+                        let inner = type_args
+                            .first()
+                            .map(|a| self.infer_expr_type(a))
+                            .map(|t| match t {
+                                Type::List(elem) => match *elem {
+                                    Type::Generic(ref name, ref args) if name == "Async" => {
+                                        args.first().cloned().unwrap_or(Type::Unknown)
+                                    }
+                                    other => other,
+                                },
+                                _ => Type::Unknown,
+                            })
+                            .unwrap_or(Type::Unknown);
+                        Type::Generic("Async".to_string(), vec![inner])
+                    }
+                    "Timeout" => {
+                        if type_args.len() != 2 {
+                            self.errors.push(TypeError {
+                                message: format!(
+                                    "[E1505] `Timeout[async, ms]()` requires exactly 2 type \
+                                     arguments, got {}. Hint: pass an Async value and a \
+                                     numeric timeout (ms), e.g. `Timeout[asyncTask, 5000]()`.",
+                                    type_args.len()
+                                ),
+                                span: mold_span.clone(),
+                            });
+                        }
+                        // Validate the second argument's type: must be a
+                        // numeric literal / value (Int or Float).
+                        if let Some(ms_arg) = type_args.get(1) {
+                            let ms_ty = self.infer_expr_type(ms_arg);
+                            if !matches!(ms_ty, Type::Unknown)
+                                && !ms_ty.is_numeric()
+                            {
+                                self.errors.push(TypeError {
+                                    message: format!(
+                                        "[E1506] `Timeout[async, ms]()`: second argument has \
+                                         type {}, expected a numeric (Int / Float / Num) \
+                                         timeout in milliseconds.",
+                                        ms_ty
+                                    ),
+                                    span: mold_span.clone(),
+                                });
+                            }
+                        }
                         let inner = type_args
                             .first()
                             .map(|a| self.infer_expr_type(a))

@@ -6395,3 +6395,150 @@ fn e34b_013_custom_mold_function_option_concrete_return_accepted() {
         errors
     );
 }
+
+// E34B-018 (Codex review #15 follow-up): Async-family checker arity
+// validation. All / Race / Timeout previously bypassed the checker
+// arity test, so `All[xs, "extra"]()` and `Timeout[a]()` (missing ms)
+// only failed at runtime. The checker now mirrors the runtime
+// signature.
+
+#[test]
+fn e34b_018_all_rejects_extra_type_argument() {
+    let src = "a1 <= Async[1]()\n\
+               a2 <= Async[2]()\n\
+               asyncs <= @[a1, a2]\n\
+               All[asyncs, \"extra\"]() ]=> bad\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1505]")
+            && e.message.contains("All[asyncList]()")
+            && e.message.contains("got 2")),
+        "Expected [E1505] for `All[asyncs, \"extra\"]()`, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn e34b_018_race_rejects_extra_type_argument() {
+    let src = "a1 <= Async[1]()\n\
+               a2 <= Async[2]()\n\
+               asyncs <= @[a1, a2]\n\
+               Race[asyncs, \"extra\"]() ]=> bad\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1505]")
+            && e.message.contains("Race[asyncList]()")
+            && e.message.contains("got 2")),
+        "Expected [E1505] for `Race[asyncs, \"extra\"]()`, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn e34b_018_timeout_rejects_missing_ms() {
+    let src = "a <= Async[1]()\n\
+               Timeout[a]() ]=> bad\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1505]")
+            && e.message.contains("Timeout[async, ms]()")
+            && e.message.contains("got 1")),
+        "Expected [E1505] for `Timeout[a]()` missing ms, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn e34b_018_timeout_rejects_non_numeric_ms() {
+    let src = "a <= Async[1]()\n\
+               Timeout[a, \"5s\"]() ]=> bad\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1506]")
+            && e.message.contains("Timeout")
+            && e.message.contains("Str")),
+        "Expected [E1506] for `Timeout[a, \"5s\"]()`, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn e34b_018_cancel_rejects_extra_type_argument() {
+    let src = "a <= Async[1]()\n\
+               Cancel[a, \"extra\"]() ]=> bad\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1505]")
+            && e.message.contains("Cancel[async]()")
+            && e.message.contains("got 2")),
+        "Expected [E1505] for `Cancel[a, \"extra\"]()`, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn e34b_018_async_family_correct_signatures_accepted() {
+    let src = "a1 <= Async[1]()\n\
+               a2 <= Async[2]()\n\
+               asyncs <= @[a1, a2]\n\
+               All[asyncs]() ]=> all_v\n\
+               Race[asyncs]() ]=> race_v\n\
+               Timeout[a1, 5000]() ]=> to_v\n\
+               Cancel[a1]() ]=> cancel_v\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.is_empty(),
+        "Correctly-shaped Async-family calls must be accepted; errors: {:?}",
+        errors
+    );
+}
+
+// E34B-019 (Codex review #15 follow-up): built-in molds with a
+// `by` callback option (`Sort[xs](by <= keyFn)`,
+// `Unique[xs](by <= keyFn)`) must reject when the callback's first
+// parameter cannot accept the list element type.
+
+#[test]
+fn e34b_019_sort_rejects_int_list_with_float_key_callback() {
+    let src = "keyFloat x: Float = x => :Float\n\
+               xs <= @[1, 2, 3]\n\
+               sorted <= Sort[xs](by <= keyFloat)\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1506]")
+            && e.message.contains("Sort[xs](by <= ..)")
+            && e.message.contains("Float")
+            && e.message.contains("Int")),
+        "Expected [E1506] for `Sort[@[Int]](by <= keyFloat)`, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn e34b_019_sort_accepts_int_list_with_int_key_callback() {
+    let src = "keyInt x: Int = -x => :Int\n\
+               xs <= @[1, 2, 3]\n\
+               sorted <= Sort[xs](by <= keyInt)\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.is_empty(),
+        "`Sort[@[Int]](by <= keyInt)` must be accepted; errors: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn e34b_019_unique_rejects_int_list_with_float_key_callback() {
+    let src = "keyFloat x: Float = x => :Float\n\
+               xs <= @[1, 2, 1, 3]\n\
+               u <= Unique[xs](by <= keyFloat)\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1506]")
+            && e.message.contains("Unique[xs](by <= ..)")
+            && e.message.contains("Float")
+            && e.message.contains("Int")),
+        "Expected [E1506] for `Unique[@[Int]](by <= keyFloat)`, got: {:?}",
+        errors
+    );
+}
