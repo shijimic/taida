@@ -4896,3 +4896,389 @@ result <= Cage[JSON[raw, Data](), JSCall[@[], @[], Int]()]()
         errors
     );
 }
+
+// E34 Phase 1.3 (Lock-B=C foundation): TypedExprTable delivery tests.
+// Verify that infer_expr_type records into the table for every expression.
+
+#[test]
+fn typed_expr_table_records_simple_int_literal() {
+    let (checker, errors) = check("x <= 42\n");
+    assert!(errors.is_empty(), "errors: {:?}", errors);
+    assert!(
+        !checker.typed_expr_table.is_empty(),
+        "TypedExprTable should not be empty after check_program"
+    );
+}
+
+#[test]
+fn typed_expr_table_records_lax_inner_type() {
+    let (checker, errors) = check("obj <= Lax[42]()\n");
+    assert!(errors.is_empty(), "errors: {:?}", errors);
+    // The Lax[42]() expression should have been typed as Lax[Int].
+    let has_lax_int = checker.typed_expr_table.iter().any(|(_, ty)| {
+        matches!(ty, Type::Generic(n, args)
+            if n == "Lax" && args.len() == 1 && args[0] == Type::Int)
+    });
+    assert!(
+        has_lax_int,
+        "Expected Lax[Int] in typed_expr_table, got: {:?}",
+        checker.typed_expr_table.iter().collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn typed_expr_table_records_method_call_chain() {
+    let src = "obj <= Lax[42]()\n\
+               result <= obj.hasValue()\n";
+    let (checker, errors) = check(src);
+    assert!(errors.is_empty(), "errors: {:?}", errors);
+    // hasValue() returns Bool; the MethodCall expression should have Bool typed.
+    let has_bool = checker
+        .typed_expr_table
+        .iter()
+        .any(|(_, ty)| ty == &Type::Bool);
+    assert!(has_bool, "Expected Bool in typed_expr_table");
+}
+
+// E34 Phase 1.4 (Lock-C=B full pin): Lax/Result/Async function-arg integrity tests.
+// Acceptance for E34B-002.
+//
+// Note: taida lambdas (`_ x = expr`) cannot carry type annotations at the
+// syntax level. Negative tests use **named functions with explicit `:Type`
+// parameter annotations** to assert that mismatched function signatures
+// are rejected at type-check time. Positive tests use bare lambdas to
+// verify bidirectional inference picks up the receiver's T.
+
+#[test]
+fn e34b_002_lax_map_arg_type_mismatch_rejected_via_named_fn() {
+    // Named fn with Str param, applied to Lax[Int].map -> [E1508].
+    let src = "fn1 x: Str = x.length() => :Int\n\
+               obj <= Lax[42]()\n\
+               result <= obj.map(fn1)\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1508]")),
+        "expected [E1508] for Lax[Int].map((Str)->_), got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn e34b_002_lax_map_chain_propagates_inner_type() {
+    // Lax[Int].map(Int->Str).map(Str->Int) — full pin chain should accept.
+    let src = "intToStr x: Int = x.toString() => :Str\n\
+               strLen s: Str = s.length() => :Int\n\
+               obj <= Lax[42]()\n\
+               result <= obj.map(intToStr).map(strLen)\n";
+    let (_, errors) = check(src);
+    assert!(errors.is_empty(), "Errors: {:?}", errors);
+}
+
+#[test]
+fn e34b_002_lax_map_chain_type_break_rejected() {
+    // Lax[Int].map(Int->Str).map(Int->Int) — second map gets Lax[Str], rejects fn taking Int.
+    let src = "intToStr x: Int = x.toString() => :Str\n\
+               doubleInt x: Int = x * 2 => :Int\n\
+               obj <= Lax[42]()\n\
+               bad <= obj.map(intToStr).map(doubleInt)\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1508]")),
+        "Expected [E1508] for chain type break, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn e34b_002_lax_flatmap_must_return_lax() {
+    // flatMap signature requires fn: T -> Lax[U]; non-Lax return is rejected.
+    let src = "doubleInt x: Int = x * 2 => :Int\n\
+               obj <= Lax[42]()\n\
+               bad <= obj.flatMap(doubleInt)\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1508]")),
+        "expected [E1508] for Lax.flatMap returning non-Lax, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn e34b_002_async_map_arg_type_mismatch_rejected() {
+    let src = "fnStr s: Str = s.length() => :Int\n\
+               a <= Async[42]()\n\
+               result <= a.map(fnStr)\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1508]")),
+        "expected [E1508] for Async[Int].map((Str)->_), got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn e34b_002_lambda_without_annotation_uses_bidirectional_hint() {
+    // Phase 1.4 bidirectional inference: bare lambda picks up T from receiver.
+    let src = "obj <= Lax[42]()\n\
+               result <= obj.map(_ x = x + 1)\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.is_empty(),
+        "Should accept bare lambda via bidirectional hint, errors: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn e34b_002_lambda_chain_with_bidirectional_hint() {
+    // Bare lambda chain: Lax[Int] -> Lax[Int] -> Lax[Int]
+    // First map's lambda body returns Int, second map sees Lax[Int] and hints x:Int again.
+    let src = "obj <= Lax[42]()\n\
+               result <= obj.map(_ x = x + 1).map(_ y = y * 2)\n";
+    let (_, errors) = check(src);
+    assert!(errors.is_empty(), "Errors: {:?}", errors);
+}
+
+#[test]
+fn e34b_002_result_map_preserves_error_type() {
+    // Result[T, P].map(T -> U) should yield Result[U, P] (error type preservation).
+    let src = "Error => Fail = @(message: Str)\n\
+               intToStr x: Int = x.toString() => :Str\n\
+               r <= Result[42](throw <= Fail(message <= \"e\"))\n\
+               result <= r.map(intToStr)\n";
+    let (checker, errors) = check(src);
+    assert!(errors.is_empty(), "Errors: {:?}", errors);
+    let result_ty = checker.lookup_var("result").unwrap();
+    let Type::Generic(name, args) = &result_ty else {
+        panic!("Expected Generic Result, got {:?}", result_ty);
+    };
+    assert_eq!(name, "Result");
+    assert_eq!(args.len(), 2);
+    assert_eq!(args[0], Type::Str, "U should be Str");
+    assert!(
+        matches!(&args[1], Type::Named(n) if n == "Fail"),
+        "P should be Fail, got {:?}",
+        args[1]
+    );
+}
+
+// E34B-005: errorInfo() is a Lax/Gorillax/Error-only accessor at this stage
+// because no backend implements Result[T,P].errorInfo() / Async[T].errorInfo()
+// at runtime. Admitting them at the type-checker level produced runtime panics
+// across 2/3 backends, so the carrier is intentionally narrowed back to the
+// shapes that have a real implementation.
+
+#[test]
+fn e34b_005_result_error_info_rejected_at_type_check() {
+    let src = "Error => Fail = @(message: Str)\n\
+               failure <= Result[0](throw <= Fail(message <= \"boom\"))\n\
+               info <= failure.errorInfo()\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors
+            .iter()
+            .any(|e| e.message.contains("[E1509]") && e.message.contains("errorInfo")),
+        "Expected [E1509] for Result.errorInfo(), got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn e34b_005_async_error_info_rejected_at_type_check() {
+    let src = "task <= Async[42]()\n\
+               info <= task.errorInfo()\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors
+            .iter()
+            .any(|e| e.message.contains("[E1509]") && e.message.contains("errorInfo")),
+        "Expected [E1509] for Async.errorInfo(), got: {:?}",
+        errors
+    );
+}
+
+// E34B-008: lambda body inference must run at most once per call site.
+// `check_method_args` records the hinted lambda type into the typed
+// table; `infer_method_return_type_with_args` should reuse that record
+// instead of re-running `infer_lambda_with_hint`, which would push the
+// same diagnostic twice and cost O(2^depth) on nested chains.
+
+#[test]
+fn e34b_008_lambda_body_diagnostic_emitted_once() {
+    let src = "obj <= Lax[42]()\n\
+               result <= obj.map(_ x = x.fooBar())\n";
+    let (_, errors) = check(src);
+    let unknown_method_errors: Vec<_> = errors
+        .iter()
+        .filter(|e| e.message.contains("[E1509]") && e.message.contains("fooBar"))
+        .collect();
+    assert_eq!(
+        unknown_method_errors.len(),
+        1,
+        "Expected exactly one [E1509] for fooBar on Int, got {}: {:?}",
+        unknown_method_errors.len(),
+        errors
+    );
+}
+
+// E34B-015 negative coverage: an explicit `fn(s: Str) -> Str` cannot be
+// passed to `Result[T, P].mapError` when P is not Str. The full-pin
+// signature must reject the mismatch via [E1508].
+
+#[test]
+fn e34b_015_map_error_rejects_str_input_when_payload_is_pack() {
+    let src = "Error => Fail = @(message: Str)\n\
+               renderStr s: Str = \"prefix: \" + s => :Str\n\
+               r <= Result[0](throw <= Fail(message <= \"boom\"))\n\
+               mapped <= r.mapError(renderStr)\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1508]")),
+        "Expected [E1508] for mapError(fn: Str -> Str) when payload is Fail, got: {:?}",
+        errors
+    );
+}
+
+// E34B-018 (Codex review #15 follow-up): Async-family dedicated arms.
+// All / Race / Timeout had no checker-side arity validation, while
+// Cancel had a dedicated arm but no arity check, so shapes like
+// `All[xs, "extra"]()` and `Timeout[a]()` (missing ms) silently passed
+// type checking and only failed at runtime. The checker now mirrors
+// the runtime signature in the dedicated MoldInst arms — this is a
+// type-checker delivery responsibility, not an allow-list.
+
+#[test]
+fn e34b_018_all_rejects_extra_type_argument() {
+    let src = "a1 <= Async[1]()\n\
+               a2 <= Async[2]()\n\
+               asyncs <= @[a1, a2]\n\
+               All[asyncs, \"extra\"]() ]=> bad\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1505]")
+            && e.message.contains("All[asyncList]()")
+            && e.message.contains("got 2")),
+        "Expected [E1505] for `All[asyncs, \"extra\"]()`, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn e34b_018_race_rejects_extra_type_argument() {
+    let src = "a1 <= Async[1]()\n\
+               a2 <= Async[2]()\n\
+               asyncs <= @[a1, a2]\n\
+               Race[asyncs, \"extra\"]() ]=> bad\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1505]")
+            && e.message.contains("Race[asyncList]()")
+            && e.message.contains("got 2")),
+        "Expected [E1505] for `Race[asyncs, \"extra\"]()`, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn e34b_018_timeout_rejects_missing_ms() {
+    let src = "a <= Async[1]()\n\
+               Timeout[a]() ]=> bad\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1505]")
+            && e.message.contains("Timeout[async, ms]()")
+            && e.message.contains("got 1")),
+        "Expected [E1505] for `Timeout[a]()` missing ms, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn e34b_018_timeout_rejects_non_numeric_ms() {
+    let src = "a <= Async[1]()\n\
+               Timeout[a, \"5s\"]() ]=> bad\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1506]")
+            && e.message.contains("Timeout")
+            && e.message.contains("Str")),
+        "Expected [E1506] for `Timeout[a, \"5s\"]()`, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn e34b_018_cancel_rejects_extra_type_argument() {
+    let src = "a <= Async[1]()\n\
+               Cancel[a, \"extra\"]() ]=> bad\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1505]")
+            && e.message.contains("Cancel[async]()")
+            && e.message.contains("got 2")),
+        "Expected [E1505] for `Cancel[a, \"extra\"]()`, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn e34b_018_async_family_correct_signatures_accepted() {
+    let src = "a1 <= Async[1]()\n\
+               a2 <= Async[2]()\n\
+               asyncs <= @[a1, a2]\n\
+               All[asyncs]() ]=> all_v\n\
+               Race[asyncs]() ]=> race_v\n\
+               Timeout[a1, 5000]() ]=> to_v\n\
+               Cancel[a1]() ]=> cancel_v\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.is_empty(),
+        "Correctly-shaped Async-family calls must be accepted; errors: {:?}",
+        errors
+    );
+}
+
+// Lax / Result silent-drop pin in the dedicated MoldInst arms. The
+// runtime reads `type_args[0]` (Lax) / `type_args[0..2]` (Result) only,
+// so shapes like `Lax[1, 2, 3]()` were silently accepted at the front
+// gate. The arity cap lives inside each dedicated arm — it is part of
+// the return-type pin contract for the wrapper, not a separate
+// allow-list.
+
+#[test]
+fn e34b_018_lax_rejects_excess_type_args() {
+    let src = "v <= Lax[1, 2, 3]()\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1505]")
+            && e.message.contains("Lax[value]()")
+            && e.message.contains("got 3")),
+        "Expected [E1505] for `Lax[1, 2, 3]()`, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn e34b_018_result_rejects_excess_type_args() {
+    let src = "v <= Result[1, 2, 3]()\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1505]")
+            && e.message.contains("Result[value, predicate?]()")
+            && e.message.contains("got 3")),
+        "Expected [E1505] for `Result[1, 2, 3]()`, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn e34b_018_lax_and_result_accept_canonical_shapes() {
+    let src = "a <= Lax[42]()\n\
+               b <= Result[\"ok\"]()\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.is_empty(),
+        "`Lax[42]()` / `Result[\"ok\"]()` must remain accepted; errors: {:?}",
+        errors
+    );
+}

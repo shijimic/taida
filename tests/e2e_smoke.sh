@@ -486,10 +486,15 @@ stdout(opt.hasValue().toString())
     fail "semantic: Lax.hasValue field access" "interp='$interp_out' js='$js_out'"
   fi
 
-  # 9-3: Non-Bool predicate treated as false (strict === true)
+  # 9-3: Bool predicate parity. Earlier revisions exercised non-Bool
+  # predicates (relying on the runtime to coerce the result via `=== true`),
+  # but the type-checker now rejects mismatched predicate signatures with
+  # [E1508], so the smoke test pins parity on a well-typed Bool predicate
+  # instead. This still covers the strict semantic — only `Bool` is
+  # accepted as a predicate result; everything else is a hard error.
   sem_src_pred='
 items <= @[1, 2, 3]
-result <= items.any(_ x = x)
+result <= items.any(_ x = x > 0)
 stdout(result.toString())
 '
   interp_out=$(sem_run_interp "$sem_src_pred")

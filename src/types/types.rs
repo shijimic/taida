@@ -130,7 +130,28 @@ impl Type {
 
     /// Check structural subtype compatibility: `self` is a subtype of `expected`.
     /// Width subtyping: a buchi pack with extra fields is a subtype of one with fewer.
+    ///
+    /// `Type::Function` follows the standard rule — parameters are
+    /// contravariant, the return type is covariant. `Type::Unknown` is
+    /// admitted as a propagation placeholder while inference is in
+    /// progress; the type-checker is expected to resolve it before any
+    /// method signature is recorded.
     pub fn is_subtype_of(&self, expected: &Type) -> bool {
+        self.is_subtype_of_inner(expected, false)
+    }
+
+    /// Like `is_subtype_of`, but the `Int → Float` widening rule is
+    /// disabled across the entire type tree. Used by the function-param
+    /// contravariance check so that an `Int`-accepting function value
+    /// cannot be passed where a `Float`-accepting parameter is expected.
+    /// PHILOSOPHY I forbids implicit type conversion at function
+    /// boundaries; the residual widening rule is kept only for direct
+    /// numeric assignment / arithmetic contexts.
+    pub fn is_function_arg_subtype_of(&self, expected: &Type) -> bool {
+        self.is_subtype_of_inner(expected, true)
+    }
+
+    pub(crate) fn is_subtype_of_inner(&self, expected: &Type, strict_int_float: bool) -> bool {
         if self == expected {
             return true;
         }
@@ -142,24 +163,40 @@ impl Type {
 
             // Int is a subtype of Num, Float is a subtype of Num
             (Type::Int, Type::Num) | (Type::Float, Type::Num) => true,
-            (Type::Int, Type::Float) => true, // Int widened to Float
+            (Type::Int, Type::Float) if !strict_int_float => true, // Int widened to Float
+            (Type::Int, Type::Float) => false,
 
             // Structural subtyping for buchi packs
             (Type::BuchiPack(self_fields), Type::BuchiPack(expected_fields)) => {
-                // All fields in expected must exist in self with compatible types
                 expected_fields.iter().all(|(exp_name, exp_type)| {
                     self_fields.iter().any(|(self_name, self_type)| {
-                        self_name == exp_name && self_type.is_subtype_of(exp_type)
+                        self_name == exp_name
+                            && self_type.is_subtype_of_inner(exp_type, strict_int_float)
                     })
                 })
             }
 
             // List covariance
-            (Type::List(a), Type::List(b)) => a.is_subtype_of(b),
+            (Type::List(a), Type::List(b)) => a.is_subtype_of_inner(b, strict_int_float),
+
+            // Function subtype: param contravariant, return covariant.
+            // (P1, ..., Pn) -> R   <:   (Q1, ..., Qn) -> S
+            //   iff   Qi <: Pi  (contravariant) for all i
+            //   and   R <: S   (covariant)
+            //   and   arity matches
+            (Type::Function(self_params, self_ret), Type::Function(exp_params, exp_ret)) => {
+                self_params.len() == exp_params.len()
+                    && self_params
+                        .iter()
+                        .zip(exp_params.iter())
+                        .all(|(self_p, exp_p)| exp_p.is_subtype_of_inner(self_p, strict_int_float))
+                    && self_ret.is_subtype_of_inner(exp_ret, strict_int_float)
+            }
 
             // Error subtyping: specific error is subtype of Error
             (Type::Error(_), Type::Error(name)) if name == "Error" => true,
             (Type::Error(_), Type::Named(name)) if name == "Error" => true,
+            (Type::Error(a), Type::Named(b)) | (Type::Named(a), Type::Error(b)) if a == b => true,
 
             // Named type could match by name
             (Type::Named(a), Type::Named(b)) => a == b,
@@ -171,9 +208,27 @@ impl Type {
                     && a_args
                         .iter()
                         .zip(b_args.iter())
-                        .all(|(a, b)| a.is_subtype_of(b))
+                        .all(|(a, b)| a.is_subtype_of_inner(b, strict_int_float))
             }
 
+            _ => false,
+        }
+    }
+
+    /// Returns true if any nested `Type::Unknown` is present. Used by
+    /// `tests/typed_hir_smoke.rs` to verify that `TypedExprTable`
+    /// contains no residual `Type::Unknown` after `check_program`
+    /// completes for a fully-typed fixture.
+    pub fn contains_concrete_unknown(&self) -> bool {
+        match self {
+            Type::Unknown => true,
+            Type::List(inner) => inner.contains_concrete_unknown(),
+            Type::Function(params, ret) => {
+                params.iter().any(|p| p.contains_concrete_unknown())
+                    || ret.contains_concrete_unknown()
+            }
+            Type::Generic(_, args) => args.iter().any(|a| a.contains_concrete_unknown()),
+            Type::BuchiPack(fields) => fields.iter().any(|(_, t)| t.contains_concrete_unknown()),
             _ => false,
         }
     }
@@ -348,62 +403,74 @@ impl TypeRegistry {
     /// Check structural subtype compatibility with registry context.
     /// Resolves Named types to their fields for structural comparison.
     pub fn is_subtype_of(&self, actual: &Type, expected: &Type) -> bool {
+        self.is_subtype_of_inner(actual, expected, false)
+    }
+
+    /// Like `is_subtype_of`, but disallows the `Int → Float` widening
+    /// rule across the whole type tree, including registry-resolved
+    /// Named / BuchiPack structural paths. Used at every function /
+    /// method boundary so that PHILOSOPHY I "no implicit type
+    /// conversion" is honoured uniformly. Pre-existing widening on
+    /// non-boundary subtype contexts (numeric arithmetic, direct
+    /// assignment) is unaffected.
+    pub fn is_function_arg_subtype_of(&self, actual: &Type, expected: &Type) -> bool {
+        self.is_subtype_of_inner(actual, expected, true)
+    }
+
+    fn is_subtype_of_inner(&self, actual: &Type, expected: &Type, strict_int_float: bool) -> bool {
         if actual == expected {
             return true;
         }
         // Delegate to the basic check first
-        if actual.is_subtype_of(expected) {
+        if actual.is_subtype_of_inner(expected, strict_int_float) {
             return true;
         }
         match (actual, expected) {
             // Named vs Named: check inheritance chain, then structural fields
             (Type::Named(a), Type::Named(b)) => {
-                // Check inheritance chain: a inherits from b?
-                // RCB-51: Use a visited set to prevent infinite loops on
-                // cyclic inheritance chains that slipped past validation.
                 let mut current = a.clone();
                 let mut visited = HashSet::new();
-                visited.insert(a.clone()); // include start node
+                visited.insert(a.clone());
                 while let Some(parent) = self.inheritance.get(&current) {
                     if parent == b {
                         return true;
                     }
                     if !visited.insert(parent.clone()) {
-                        break; // Cycle detected -- stop walking
+                        break;
                     }
                     current = parent.clone();
                 }
-                // Structural check: a's fields are a superset of b's fields
                 if let (Some(a_fields), Some(b_fields)) =
                     (self.get_type_fields(a), self.get_type_fields(b))
                 {
                     b_fields.iter().all(|(exp_name, exp_type)| {
                         a_fields.iter().any(|(self_name, self_type)| {
-                            self_name == exp_name && self_type.is_subtype_of(exp_type)
+                            self_name == exp_name
+                                && self_type.is_subtype_of_inner(exp_type, strict_int_float)
                         })
                     })
                 } else {
                     false
                 }
             }
-            // Named vs BuchiPack: resolve Named and check structurally
             (Type::Named(name), Type::BuchiPack(expected_fields)) => {
                 if let Some(actual_fields) = self.get_type_fields(name) {
                     expected_fields.iter().all(|(exp_name, exp_type)| {
                         actual_fields.iter().any(|(self_name, self_type)| {
-                            self_name == exp_name && self_type.is_subtype_of(exp_type)
+                            self_name == exp_name
+                                && self_type.is_subtype_of_inner(exp_type, strict_int_float)
                         })
                     })
                 } else {
                     false
                 }
             }
-            // BuchiPack vs Named: resolve Named and check structurally
             (Type::BuchiPack(actual_fields), Type::Named(name)) => {
                 if let Some(expected_fields) = self.get_type_fields(name) {
                     expected_fields.iter().all(|(exp_name, exp_type)| {
                         actual_fields.iter().any(|(self_name, self_type)| {
-                            self_name == exp_name && self_type.is_subtype_of(exp_type)
+                            self_name == exp_name
+                                && self_type.is_subtype_of_inner(exp_type, strict_int_float)
                         })
                     })
                 } else {
@@ -509,6 +576,78 @@ mod tests {
         assert!(Type::Float.is_subtype_of(&Type::Num));
         assert!(Type::Int.is_subtype_of(&Type::Float));
         assert!(!Type::Str.is_subtype_of(&Type::Num));
+    }
+
+    // E34 Phase 1.1 (Lock-C foundation): Type::Function subtype tests.
+
+    #[test]
+    fn test_function_subtype_basic() {
+        let f1 = Type::Function(vec![Type::Int], Box::new(Type::Int));
+        let f2 = Type::Function(vec![Type::Int], Box::new(Type::Int));
+        assert!(f1.is_subtype_of(&f2));
+
+        let f3 = Type::Function(vec![Type::Int], Box::new(Type::Str));
+        assert!(!f3.is_subtype_of(&f1));
+    }
+
+    #[test]
+    fn test_function_subtype_covariant_return() {
+        // (Int) -> Int is a subtype of (Int) -> Num (Int <: Num covariantly)
+        let f_int = Type::Function(vec![Type::Int], Box::new(Type::Int));
+        let f_num = Type::Function(vec![Type::Int], Box::new(Type::Num));
+        assert!(f_int.is_subtype_of(&f_num));
+        // (Int) -> Num is NOT a subtype of (Int) -> Int (Num is wider than Int)
+        assert!(!f_num.is_subtype_of(&f_int));
+    }
+
+    #[test]
+    fn test_function_subtype_contravariant_param() {
+        // (Num) -> Int is a subtype of (Int) -> Int
+        // because Num is wider than Int (any Int can be passed to a Num-accepting fn)
+        let f_num = Type::Function(vec![Type::Num], Box::new(Type::Int));
+        let f_int = Type::Function(vec![Type::Int], Box::new(Type::Int));
+        assert!(f_num.is_subtype_of(&f_int));
+        // The reverse is NOT true: (Int) -> Int cannot accept a Num
+        assert!(!f_int.is_subtype_of(&f_num));
+    }
+
+    #[test]
+    fn test_function_subtype_arity_mismatch() {
+        let f1 = Type::Function(vec![Type::Int, Type::Int], Box::new(Type::Int));
+        let f2 = Type::Function(vec![Type::Int], Box::new(Type::Int));
+        assert!(!f1.is_subtype_of(&f2));
+        assert!(!f2.is_subtype_of(&f1));
+    }
+
+    #[test]
+    fn test_function_subtype_unknown_propagation() {
+        // Unknown is treated as a wildcard in either position (in-flight inference)
+        let f_unknown_param = Type::Function(vec![Type::Unknown], Box::new(Type::Int));
+        let f_int_param = Type::Function(vec![Type::Int], Box::new(Type::Int));
+        assert!(f_unknown_param.is_subtype_of(&f_int_param));
+        assert!(f_int_param.is_subtype_of(&f_unknown_param));
+
+        let f_unknown_ret = Type::Function(vec![Type::Int], Box::new(Type::Unknown));
+        let f_int_ret = Type::Function(vec![Type::Int], Box::new(Type::Int));
+        assert!(f_unknown_ret.is_subtype_of(&f_int_ret));
+        assert!(f_int_ret.is_subtype_of(&f_unknown_ret));
+    }
+
+    #[test]
+    fn test_contains_concrete_unknown() {
+        assert!(!Type::Int.contains_concrete_unknown());
+        assert!(!Type::Bool.contains_concrete_unknown());
+        assert!(Type::Unknown.contains_concrete_unknown());
+        assert!(Type::List(Box::new(Type::Unknown)).contains_concrete_unknown());
+        assert!(
+            Type::Function(vec![Type::Unknown], Box::new(Type::Int)).contains_concrete_unknown()
+        );
+        assert!(
+            Type::Function(vec![Type::Int], Box::new(Type::Unknown)).contains_concrete_unknown()
+        );
+        assert!(!Type::Function(vec![Type::Int], Box::new(Type::Int)).contains_concrete_unknown());
+        assert!(Type::Generic("Lax".to_string(), vec![Type::Unknown]).contains_concrete_unknown());
+        assert!(!Type::Generic("Lax".to_string(), vec![Type::Int]).contains_concrete_unknown());
     }
 
     #[test]

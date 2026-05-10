@@ -57,24 +57,69 @@ impl TypeChecker {
                 "toString" => Some((0, 0, vec![])),
                 _ => None,
             },
-            Type::List(_) => match method {
+            Type::List(inner) => match method {
                 "length" => Some((0, 0, vec![])),
                 "isEmpty" => Some((0, 0, vec![])),
                 "first" | "last" | "max" | "min" => Some((0, 0, vec![])),
                 "get" => Some((1, 1, vec![Type::Int])),
-                "contains" => Some((1, 1, vec![Type::Unknown])), // element type varies
-                "indexOf" | "lastIndexOf" => Some((1, 1, vec![Type::Unknown])),
+                "contains" => Some((1, 1, vec![inner.as_ref().clone()])),
+                "indexOf" | "lastIndexOf" => Some((1, 1, vec![inner.as_ref().clone()])),
                 // E32B-022 (Lock-N): Lax[Int] additive replacements.
-                "indexOfLax" | "lastIndexOfLax" => Some((1, 1, vec![Type::Unknown])),
-                "any" | "all" | "none" => Some((1, 1, vec![Type::Unknown])), // predicate
+                "indexOfLax" | "lastIndexOfLax" => Some((1, 1, vec![inner.as_ref().clone()])),
+                // E34B-013 / E34B-014 follow-up (Codex review #9): full
+                // pin the predicate / mapper signatures so that the
+                // List HOF surface is symmetric with `Lax[T]` /
+                // `Result[T, P]` / `Async[T]`. The expected param type
+                // is the element type T; any widening at the boundary
+                // is rejected the same way as Lax/Result/Async.
+                "any" | "all" | "none" => Some((
+                    1,
+                    1,
+                    vec![Type::Function(
+                        vec![inner.as_ref().clone()],
+                        Box::new(Type::Bool),
+                    )],
+                )),
                 "take" | "drop" => Some((1, 1, vec![Type::Int])),
                 "unique" | "reverse" | "sort" | "flatten" => Some((0, 0, vec![])),
-                "map" | "flatMap" | "filter" => Some((1, 1, vec![Type::Unknown])),
-                "reduce" | "fold" => Some((2, 2, vec![Type::Unknown, Type::Unknown])),
+                "map" | "filter" => Some((
+                    1,
+                    1,
+                    vec![Type::Function(
+                        vec![inner.as_ref().clone()],
+                        Box::new(Type::Unknown),
+                    )],
+                )),
+                "flatMap" => Some((
+                    1,
+                    1,
+                    vec![Type::Function(
+                        vec![inner.as_ref().clone()],
+                        Box::new(Type::List(Box::new(Type::Unknown))),
+                    )],
+                )),
+                // E34B-013 follow-up (Codex review #12):
+                // `xs.fold(init, fn)` -- the function value's second
+                // parameter must accept the list element type, which
+                // we *can* ground here.  The accumulator (first param)
+                // still depends on `init` at the call site and stays
+                // `Unknown` for now; closing it cleanly requires
+                // arg-aware bidirectional inference (carry-over).
+                "reduce" | "fold" => Some((
+                    2,
+                    2,
+                    vec![
+                        Type::Unknown,
+                        Type::Function(
+                            vec![Type::Unknown, inner.as_ref().clone()],
+                            Box::new(Type::Unknown),
+                        ),
+                    ],
+                )),
                 "join" => Some((1, 1, vec![Type::Str])),
                 "slice" => Some((2, 2, vec![Type::Int, Type::Int])),
-                "push" | "append" => Some((1, 1, vec![Type::Unknown])),
-                "concat" => Some((1, 1, vec![Type::Unknown])),
+                "push" | "append" => Some((1, 1, vec![inner.as_ref().clone()])),
+                "concat" => Some((1, 1, vec![Type::List(Box::new(inner.as_ref().clone()))])),
                 "zip" => Some((1, 1, vec![Type::Unknown])),
                 "toString" => Some((0, 0, vec![])),
                 _ => None,
@@ -107,12 +152,32 @@ impl TypeChecker {
                 // `getOrThrow` is Result-only on the runtime side; Lax does
                 // not currently surface it, so we leave the existing arity-only
                 // signature for Result below.
+                //
+                // E34 Phase 1.4 (Lock-C=B full pin): map/flatMap signatures
+                // are pinned to `Function([T], U)` / `Function([T], Lax[U])`
+                // so that argument-type / return-type mismatch is caught at
+                // type-check time via [E1508].
                 let inner = inner_args.first().cloned().unwrap_or(Type::Unknown);
                 match method {
                     "hasValue" | "isEmpty" => Some((0, 0, vec![])),
-                    "getOrDefault" => Some((1, 1, vec![inner])),
-                    // function arg — receiver shape, not strict
-                    "map" | "flatMap" => Some((1, 1, vec![Type::Unknown])),
+                    "getOrDefault" => Some((1, 1, vec![inner.clone()])),
+                    // Lock-C=B: fn: T -> U
+                    "map" => Some((
+                        1,
+                        1,
+                        vec![Type::Function(vec![inner.clone()], Box::new(Type::Unknown))],
+                    )),
+                    // Lock-C=B: fn: T -> Lax[U]
+                    "flatMap" => Some((
+                        1,
+                        1,
+                        vec![Type::Function(
+                            vec![inner.clone()],
+                            Box::new(Type::Generic("Lax".to_string(), vec![Type::Unknown])),
+                        )],
+                    )),
+                    // Phase 1: errorInfo signature 追加 (Phase 3 で runtime 実装)
+                    "errorInfo" => Some((0, 0, vec![])),
                     "unmold" => Some((0, 0, vec![])),
                     "toString" => Some((0, 0, vec![])),
                     _ => None,
@@ -122,12 +187,60 @@ impl TypeChecker {
                 // E32B-021 (Lock-M): match Lax/Result behaviour — both
                 // accumulators (success type at index 0) get strict
                 // `default` arg type checking.
+                //
+                // E34 Phase 1.4 (Lock-C=B full pin):
+                //   map(fn: T -> U) -> Result[U, P]              (error type P を保存)
+                //   flatMap(fn: T -> Result[U, P]) -> Result[U, P]  (方針 A: error type 保存 strict)
+                //   mapError(fn: P -> Q) -> Result[T, Q]
                 let success_ty = inner_args.first().cloned().unwrap_or(Type::Unknown);
+                let error_ty = inner_args.get(1).cloned().unwrap_or(Type::Unknown);
                 match method {
                     "isSuccess" | "isError" => Some((0, 0, vec![])),
-                    "map" | "flatMap" | "mapError" => Some((1, 1, vec![Type::Unknown])),
+                    "map" => Some((
+                        1,
+                        1,
+                        vec![Type::Function(
+                            vec![success_ty.clone()],
+                            Box::new(Type::Unknown),
+                        )],
+                    )),
+                    // 方針 A: return Result の error type が receiver と一致必須
+                    "flatMap" => Some((
+                        1,
+                        1,
+                        vec![Type::Function(
+                            vec![success_ty.clone()],
+                            Box::new(Type::Generic(
+                                "Result".to_string(),
+                                vec![Type::Unknown, error_ty.clone()],
+                            )),
+                        )],
+                    )),
+                    "mapError" => Some((
+                        1,
+                        1,
+                        vec![Type::Function(
+                            vec![error_ty.clone()],
+                            Box::new(Type::Unknown),
+                        )],
+                    )),
                     "getOrDefault" => Some((1, 1, vec![success_ty])),
                     "getOrThrow" => Some((0, 0, vec![])),
+                    "toString" => Some((0, 0, vec![])),
+                    _ => None,
+                }
+            }
+            // E34 Phase 1.4 (Lock-C=B full pin): Async[T].map(fn: T -> U) -> Async[U]
+            Type::Generic(name, inner_args) if name == "Async" => {
+                let inner = inner_args.first().cloned().unwrap_or(Type::Unknown);
+                match method {
+                    "isPending" | "isFulfilled" | "isRejected" => Some((0, 0, vec![])),
+                    "map" => Some((
+                        1,
+                        1,
+                        vec![Type::Function(vec![inner.clone()], Box::new(Type::Unknown))],
+                    )),
+                    "getOrDefault" => Some((1, 1, vec![inner])),
                     "toString" => Some((0, 0, vec![])),
                     _ => None,
                 }
@@ -143,6 +256,60 @@ impl TypeChecker {
                 "errorInfo" | "throw" | "toString" => Some((0, 0, vec![])),
                 _ => None,
             },
+            // E34B-013 / E34B-014 follow-up (Codex review #9): a
+            // function-valued pack field invoked via `pack.fn(arg)` is
+            // syntactically a MethodCall, but the receiver is a
+            // BuchiPack and the "method" is really a stored function
+            // value. Surface its declared signature so that the regular
+            // boundary subtype check applies — otherwise the legacy
+            // unknown-method path silently swallowed every arg type.
+            Type::BuchiPack(fields) => {
+                fields
+                    .iter()
+                    .find(|(name, _)| name == method)
+                    .and_then(|(_, ty)| match ty {
+                        Type::Function(params, _) => {
+                            // `Unit => :T` is a zero-argument signature
+                            // marker (the only declare-only fn field shape
+                            // gen-E permits). Treat the single Unit param
+                            // as an empty signature so callers can write
+                            // `pack.fn()` without the arity check
+                            // wrongly demanding one argument.
+                            let effective = if params.len() == 1 && params[0] == Type::Unit {
+                                vec![]
+                            } else {
+                                params.clone()
+                            };
+                            Some((effective.len(), effective.len(), effective))
+                        }
+                        _ => None,
+                    })
+            }
+            // E34B-013 / E34B-014 follow-up (Codex review #10): a
+            // function-valued field on a declared `Named` (TypeDef /
+            // MoldDef) struct must obey the same boundary discipline as
+            // a `BuchiPack` literal. Walk the type's registered fields
+            // and surface the signature of any `Type::Function` field
+            // that matches the called name.
+            Type::Named(type_name) => self.registry.get_type_fields(type_name).and_then(|fields| {
+                fields
+                    .iter()
+                    .find(|(name, _)| name == method)
+                    .and_then(|(_, ty)| match ty {
+                        Type::Function(params, _) => {
+                            // See `Type::BuchiPack` arm: `Unit => :T` is the
+                            // gen-E declare-only fn field marker for a
+                            // zero-argument signature.
+                            let effective = if params.len() == 1 && params[0] == Type::Unit {
+                                vec![]
+                            } else {
+                                params.clone()
+                            };
+                            Some((effective.len(), effective.len(), effective))
+                        }
+                        _ => None,
+                    })
+            }),
             _ => {
                 // N-66: For unknown/unresolved receiver types (Type::Unknown, Type::Any,
                 // Type::Generic for non-Lax/Result/Async, user-defined Named types without
@@ -155,10 +322,17 @@ impl TypeChecker {
 
         // errorInfo intentionally uses an explicit allow-list. Accepting any
         // `(type, message)` shaped pack would reintroduce duck typing here.
+        // The canonical ErrorInfo carrier currently lives on Lax + Gorillax /
+        // RelaxedGorillax + Error. Result / Async runtime answers do not yet
+        // exist on any backend, so admitting them here would let type-correct
+        // programs panic across 2/3 backends at runtime.
         if method == "errorInfo"
             && !matches!(
                 obj_type,
-                Type::Generic(name, _) if name == "Gorillax" || name == "RelaxedGorillax"
+                Type::Generic(name, _)
+                    if name == "Gorillax"
+                        || name == "RelaxedGorillax"
+                        || name == "Lax"
             )
             && !matches!(obj_type, Type::Error(_))
             && !matches!(obj_type, Type::Unknown | Type::Any)
@@ -166,7 +340,7 @@ impl TypeChecker {
             self.errors.push(TypeError {
                 message: format!(
                     "[E1509] Unknown method 'errorInfo' on type {}. \
-                     Hint: errorInfo() is only available on Gorillax, RelaxedGorillax, and Error values.",
+                     Hint: errorInfo() is available on Lax, Gorillax, RelaxedGorillax, and Error values.",
                     obj_type
                 ),
                 span: span.clone(),
@@ -225,19 +399,151 @@ impl TypeChecker {
                     if *expected_ty == Type::Unknown {
                         continue;
                     }
-                    let actual_ty = self.infer_expr_type(arg);
+                    // E34 Phase 1.4 (Lock-C=B): Lambda bidirectional inference.
+                    // When the expected param type is Function([T], _), hint the
+                    // lambda's untyped params with T. This lets users write
+                    // `obj.map(_ x = x + 1)` without an explicit type annotation
+                    // and still benefit from full pin checking.
+                    let actual_ty = if matches!(expected_ty, Type::Function(_, _))
+                        && matches!(arg, Expr::Lambda(_, _, _))
+                    {
+                        self.infer_lambda_with_hint(arg, expected_ty)
+                    } else {
+                        self.infer_expr_type(arg)
+                    };
                     if actual_ty == Type::Unknown {
                         continue;
                     }
-                    if !self.registry.is_subtype_of(&actual_ty, expected_ty) {
+                    // E34B-014: If the HOF argument is a function value
+                    // whose return is `Type::Unknown` (e.g. a named
+                    // function with no return annotation, or a forward
+                    // reference whose body inference has not yet run),
+                    // reject when the expected wrapper demands a more
+                    // specific return type. The legacy wildcard rule
+                    // (`Type::Unknown <: anything`) is intended for
+                    // in-flight inference variables, not for function
+                    // values that escaped the type-checker without an
+                    // annotated return.
+                    if let (Type::Function(_, act_ret), Type::Function(_, exp_ret)) =
+                        (&actual_ty, expected_ty)
+                        && matches!(act_ret.as_ref(), Type::Unknown)
+                        && !matches!(exp_ret.as_ref(), Type::Unknown)
+                    {
+                        let arg_label = match arg {
+                            Expr::Ident(name, _) => format!("'{}'", name),
+                            _ => format!("{}", i + 1),
+                        };
+                        self.errors.push(TypeError {
+                            message: format!(
+                                "[E1508] Method '{}' argument {} is a function value with no \
+                                 inferable return type. \
+                                 Hint: Add an explicit return type annotation (e.g. `=> :{}`) \
+                                 to the function definition.",
+                                method, arg_label, exp_ret
+                            ),
+                            span: span.clone(),
+                        });
+                        continue;
+                    }
+                    // E34B-014 follow-up (Codex review #8 / #11): if
+                    // the HOF argument is a named function reference
+                    // whose params include `Type::Unknown` and the
+                    // expected slot demands a concrete param type,
+                    // reject so that the legacy wildcard rule cannot
+                    // silently slip through. Lambdas are exempt — they
+                    // are bidirectionally inferred from `expected_ty`.
+                    //
+                    // Codex review #11 carve-out: a *fully* unannotated
+                    // named function (`f x = x * 2` with no param /
+                    // return annotation at all) is treated as gradual
+                    // typing — author opted out of explicit typing and
+                    // body inference fills in the gaps later. PHILOSOPHY
+                    // I "no implicit type conversion" only fires once
+                    // the author has *committed* to a partial
+                    // annotation (e.g. `f x = x * 2 => :Int` pins the
+                    // return; `f x: Int = ...` pins the param). This
+                    // restores the prelude examples (`double x = x * 2`
+                    // used through `xs.map(double)`) without
+                    // re-introducing the unbounded wildcard slip.
+                    if matches!(arg, Expr::Ident(_, _))
+                        && let (Type::Function(act_params, act_ret), Type::Function(exp_params, _)) =
+                            (&actual_ty, expected_ty)
+                    {
+                        // E34B-014 follow-up (Codex review #11):
+                        // strict reject only fires when at least one
+                        // param has an explicit annotation. The two
+                        // gradual-typing shapes
+                        //   (a) fully unannotated:  `f x = ...`
+                        //   (b) return-annotated, params unannotated:
+                        //       `f x = x * 2 => :Int`
+                        // are admitted; PHILOSOPHY V "強力な型推論"
+                        // covers param inference from the body when
+                        // the author has not written annotations.
+                        // Mixed shapes (one param annotated, another
+                        // not) still trip the strict rule.
+                        let all_params_unannotated =
+                            act_params.iter().all(|t| matches!(t, Type::Unknown));
+                        if !all_params_unannotated {
+                            let mismatch =
+                                act_params.iter().zip(exp_params.iter()).position(|(a, e)| {
+                                    matches!(a, Type::Unknown) && !matches!(e, Type::Unknown)
+                                });
+                            if let Some(pos) = mismatch {
+                                let arg_label = match arg {
+                                    Expr::Ident(name, _) => format!("'{}'", name),
+                                    _ => format!("{}", i + 1),
+                                };
+                                self.errors.push(TypeError {
+                                    message: format!(
+                                        "[E1508] Method '{}' argument {} ({}) has an unannotated \
+                                         parameter at position {}. \
+                                         Hint: Add an explicit type annotation (e.g. `param: {}`) \
+                                         to the function definition.",
+                                        method,
+                                        i + 1,
+                                        arg_label,
+                                        pos + 1,
+                                        exp_params[pos]
+                                    ),
+                                    span: span.clone(),
+                                });
+                                continue;
+                            }
+                        }
+                        let _ = act_ret;
+                    }
+                    // E34B-013 (Lock-H=A): apply the strict
+                    // function-arg subtype rule at every method-call
+                    // boundary, including registry-resolved Named /
+                    // BuchiPack structural paths. This forbids the
+                    // `Int → Float` implicit widening uniformly across
+                    // function/method-arg slots while preserving the
+                    // wider widening rule for non-boundary contexts
+                    // (numeric arithmetic / direct assignment).
+                    let pass = self
+                        .registry
+                        .is_function_arg_subtype_of(&actual_ty, expected_ty);
+                    if !pass {
+                        let hint = match expected_ty {
+                            Type::Function(exp_params, _) => format!(
+                                "Hint: Pass a function whose parameter types match {}.",
+                                exp_params
+                                    .iter()
+                                    .map(|p| p.to_string())
+                                    .collect::<Vec<_>>()
+                                    .join(", ")
+                            ),
+                            _ => "Hint: Pass a value of the correct type.".to_string(),
+                        };
                         self.errors.push(TypeError {
                             message: format!(
                                 "[E1508] Method '{}' argument {} has type {}, expected {}. \
-                                 Hint: Pass a value of the correct type.",
+                                 {}",
                                 method,
                                 i + 1,
                                 actual_ty,
-                                expected_ty
+                                expected_ty,
+                                hint
                             ),
                             span: span.clone(),
                         });
@@ -245,6 +551,149 @@ impl TypeChecker {
                 }
             }
         }
+    }
+
+    /// Bidirectional Lambda inference.
+    ///
+    /// Infer a Lambda's type using the expected
+    /// `Type::Function(expected_params, _)` to fill in missing param
+    /// annotations. If the lambda has explicit type annotations on
+    /// params, those win (they may legitimately reject via subtype
+    /// check downstream). If a param has no annotation, the expected
+    /// param type at the same index is used as a hint.
+    ///
+    /// This is the only place where a bidirectional hint flows into
+    /// Lambda inference. The general lambda inference path remains
+    /// unchanged (no annotation -> `Type::Unknown`).
+    fn infer_lambda_with_hint(&mut self, expr: &Expr, expected: &Type) -> Type {
+        let (Expr::Lambda(params, body, _), Type::Function(expected_params, _)) = (expr, expected)
+        else {
+            return self.infer_expr_type(expr);
+        };
+        // Compute resolved param types: explicit annotation wins, else hint.
+        let param_types: Vec<Type> = params
+            .iter()
+            .enumerate()
+            .map(|(i, p)| {
+                if let Some(annotation) = &p.type_annotation {
+                    self.registry.resolve_type(annotation)
+                } else {
+                    expected_params.get(i).cloned().unwrap_or(Type::Unknown)
+                }
+            })
+            .collect();
+        // Push a temporary scope for the lambda body with hinted param types.
+        self.push_scope();
+        for (i, p) in params.iter().enumerate() {
+            self.define_var(
+                &p.name,
+                param_types.get(i).cloned().unwrap_or(Type::Unknown),
+            );
+        }
+        let ret_type = self.infer_expr_type(body);
+        self.pop_scope();
+        let fn_ty = Type::Function(param_types, Box::new(ret_type));
+        // Last-write wins: idempotent record overrides any earlier path.
+        self.typed_expr_table.record(expr, fn_ty.clone());
+        fn_ty
+    }
+
+    /// Infer the return type of a method call **using the actual
+    /// lambda/fn arguments** to pin generic parameters (U / Q in
+    /// `Lax[T].map(fn: T -> U) -> Lax[U]` etc.).
+    ///
+    /// Falls back to `infer_method_return_type` for methods that don't
+    /// need arg-aware inference. The MethodCall arm in
+    /// `infer_expr_type_inner` calls this variant.
+    pub(super) fn infer_method_return_type_with_args(
+        &mut self,
+        obj_type: &Type,
+        method: &str,
+        args: &[Expr],
+    ) -> Type {
+        // Only Lax/Result/Async map/flatMap/mapError need arg-aware inference.
+        // Other methods use the existing arg-less variant.
+        if let Type::Generic(name, inner_args) = obj_type {
+            let success_ty = inner_args.first().cloned().unwrap_or(Type::Unknown);
+            let error_ty = inner_args.get(1).cloned().unwrap_or(Type::Unknown);
+
+            // Helper: extract the lambda's actual return type (U) from
+            // args[0]. The MethodCall arm calls `check_method_args`
+            // immediately before this helper, and that path already
+            // records the bidirectional-hinted lambda type into the
+            // typed table. Reusing that record avoids re-inferring the
+            // lambda body — which would double-evaluate side-effecting
+            // checker work like duplicate `[E1508]` emission and grow
+            // cost quadratically through nested chains.
+            let lambda_ret = |this: &mut Self, expected_param: &Type| -> Type {
+                let Some(arg) = args.first() else {
+                    return Type::Unknown;
+                };
+                if let Some(Type::Function(_, ret)) = this.typed_expr_table.lookup(arg) {
+                    return (**ret).clone();
+                }
+                let expected_fn =
+                    Type::Function(vec![expected_param.clone()], Box::new(Type::Unknown));
+                let inferred = this.infer_lambda_with_hint(arg, &expected_fn);
+                if let Type::Function(_, ret) = inferred {
+                    return *ret;
+                }
+                Type::Unknown
+            };
+
+            match (name.as_str(), method) {
+                ("Lax", "map") => {
+                    let u = lambda_ret(self, &success_ty);
+                    return Type::Generic("Lax".to_string(), vec![u]);
+                }
+                ("Lax", "flatMap") => {
+                    // Lambda returns Lax[U]; extract U for the chain return.
+                    let ret = lambda_ret(self, &success_ty);
+                    if let Type::Generic(rn, ra) = &ret
+                        && rn == "Lax"
+                    {
+                        return Type::Generic(
+                            "Lax".to_string(),
+                            vec![ra.first().cloned().unwrap_or(Type::Unknown)],
+                        );
+                    }
+                    return Type::Generic("Lax".to_string(), vec![Type::Unknown]);
+                }
+                ("Async", "map") => {
+                    let u = lambda_ret(self, &success_ty);
+                    return Type::Generic("Async".to_string(), vec![u]);
+                }
+                ("Result", "map") => {
+                    let u = lambda_ret(self, &success_ty);
+                    return Type::Generic("Result".to_string(), vec![u, error_ty]);
+                }
+                ("Result", "flatMap") => {
+                    // Lambda returns Result[U, P]; extract U; preserve receiver's P (方針 A).
+                    let ret = lambda_ret(self, &success_ty);
+                    if let Type::Generic(rn, ra) = &ret
+                        && rn == "Result"
+                    {
+                        return Type::Generic(
+                            "Result".to_string(),
+                            vec![ra.first().cloned().unwrap_or(Type::Unknown), error_ty],
+                        );
+                    }
+                    return Type::Generic("Result".to_string(), vec![Type::Unknown, error_ty]);
+                }
+                ("Result", "mapError") => {
+                    let q = lambda_ret(self, &error_ty);
+                    return Type::Generic("Result".to_string(), vec![success_ty, q]);
+                }
+                _ => {}
+            }
+        }
+        // Delegate every non-Lax/Result/Async receiver back to the
+        // arg-less variant. The Named-pack arm there unwraps a
+        // function-typed field's declared return (`Function(_, R) -> R`)
+        // for callers like `obj.someField(7)`, so reusing it here keeps
+        // a single source of truth and avoids duplicating that arm on
+        // both code paths.
+        self.infer_method_return_type(obj_type, method)
     }
 
     /// Infer the return type of a method call based on the receiver type and method name.
@@ -348,6 +797,10 @@ impl TypeChecker {
                 "hasValue" | "isEmpty" => Type::Bool,
                 "getOrDefault" => args.first().cloned().unwrap_or(Type::Unknown),
                 "map" | "flatMap" => obj_type.clone(),
+                "errorInfo" => Type::Generic(
+                    "Lax".to_string(),
+                    vec![Type::Named("ErrorInfo".to_string())],
+                ),
                 "unmold" => args.first().cloned().unwrap_or(Type::Unknown),
                 "toString" => Type::Str,
                 _ => Type::Unknown,
@@ -409,6 +862,17 @@ impl TypeChecker {
                 if let Some(fields) = self.registry.get_type_fields(type_name) {
                     // Check if method name matches a field (could be a method field)
                     if let Some((_, ty)) = fields.iter().find(|(n, _)| n == method) {
+                        // When the matched field is a function type
+                        // (e.g. `Predicate = @(check: Int => :Bool)`),
+                        // the method-call result is the function's
+                        // declared return type, not the function type
+                        // itself. Without unwrapping here the typed
+                        // table records `Type::Function(...)` and Bool
+                        // detection collapses to false for callers like
+                        // `predicate.check(x)`.
+                        if let Type::Function(_, ret) = ty {
+                            return (**ret).clone();
+                        }
                         ty.clone()
                     } else {
                         // toString is available on all types

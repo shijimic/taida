@@ -818,6 +818,43 @@ Div[10, 2]().flatMap(_ x = Div[x, 3]()) ]=> result  // 1
 
 **シグネチャ**: `fn: :T => :Lax[U] => :Lax[U]`
 
+#### `map` / `flatMap` の引数型ピンの効力範囲
+
+`map` / `flatMap` は受け取る関数のシグネチャ全体（引数型と戻り値型）を型チェッカーが固定し、`fn` の引数型が `T` と食い違えば `[E1508]` で reject されます。ただしこのピンは **受け側の `T` が具体型として確定しているとき** にのみ機能します。受け側の `T` が確定しないまま (例: 型注釈なしのクロスモジュール import 経由で値が流入した場合) call site に到達したときは、未解決側がサブタイプ規則のワイルドカードとして振る舞い、本来 reject すべき関数も silent pass します。
+
+```taida
+// other_module.td が `make` を export し、Lax を返すが戻り値注釈がない場合、
+// 呼び出し側で `make()` の inner T が未解決のまま map に流れ込みます。
+>>> ./other_module.td => @(make)
+
+result <= make().map(_ x = x.fooBar())  // [E1509] が出ない、silent pass
+```
+
+確定させる側の対処は以下のいずれか:
+
+- 受け側に **引数の型注釈付き local 関数** を定義し、import 経由で受けた値をそこに通してから `map` に渡す (例: `unwrap v: Lax[Int] = v => :Lax[Int]` を経由すると inner が `Int` に pin される)。import された symbol 自体は call site でも `Type::Unknown` のまま登録されるため、import 元に戻り値注釈を付け足しても importer 側の pin は復活しません
+- import を経由せず、`Lax[42]()` のような **値ベースのコンストラクタ** で受け側に具体型 Lax を直接組み立てる (`Lax[Int]()` のような型名引数形式は `Int` が型名ではなく未定義変数として扱われ `[E1502] Undefined variable 'Int'` で reject されます)
+- 中間に `getOrDefault(...)` を挟んで Lax の inner を取り出してから処理する
+
+同じ caveat は `Result` / `Async` の `map` / `flatMap` / `mapError` にも当てはまります。
+
+### 失敗情報取得
+
+#### errorInfo
+
+Lax が失敗 (`hasValue = false`) のときの error 情報を `Lax[ErrorInfo]` として取り出します。`Div[10, 0]()` / `@[1, 2, 3].get(99)` / `Float["not_a_number"]()` などの失敗系コンストラクタや JSON cast 失敗、`Bytes["..."]()` 派生の Lax からも同一の API で error 詳細を読み出せます。`hasValue = true` (成功) のときは戻り値の `Lax` も `hasValue = false` (中身無し) になります。`errorInfo()` を持つ allow-list は `Lax` / `Gorillax` / `RelaxedGorillax` / `Error` で、それ以外の型へ呼ぶと `[E1509]` で reject されます (`Result` / `Async` には現状提供されていません)。
+
+```taida fragment
+result <= Float["not_a_number"]()
+result.errorInfo() ]=> err
+err.hasValue()      // true (失敗、error info あり)
+err.getOrDefault(@(type <= "", message <= "", kind <= "", code <= 0)).message
+```
+
+`ErrorInfo` シェイプ: `@(type: Str, message: Str, kind: Str, code: Int)`。詳細は `docs/reference/class_like_types.md::ErrorInfo` を参照。
+
+**シグネチャ**: `=> :Lax[ErrorInfo]`
+
 ### 文字列変換
 
 #### toString
@@ -958,7 +995,7 @@ gorillax.relax().toString()  // "RelaxedGorillax(42)"
 
 ## Result — モナディック型メソッド
 
-`Result[T, P]` は `Mold[T] => Result[T, P <= :T => :Bool] = @(throw: Error)` として定義されます。述語 P が真を返す場合は成功、偽を返す場合は失敗（throw 発動）を表します。
+`Result[T, P]` は `Mold[T] => Result[T, P <= :T => :Bool] = @(throw: Error)` として定義されます。第 1 型引数 `T` は成功時の値の型、第 2 型引数 `P` は内部の判定述語 (`:T => :Bool`) を経由して **throw 時の payload 型** として観測されます。`getOrThrow` / `mapError` の両 surface で `P` は throw 時に実際に保持される値の型として現れます。
 
 ### Result
 
@@ -971,9 +1008,11 @@ gorillax.relax().toString()  // "RelaxedGorillax(42)"
 | `getOrThrow()` | `=> :T` | 値取得（失敗時エラーを throw） |
 | `map(fn)` | `:T => :U => :Result[U, _]` | モナディック変換 |
 | `flatMap(fn)` | `:T => :Result[U, _] => :Result[U, _]` | モナディック連鎖 |
-| `mapError(fn)` | `:Error => :Error => :Result[T, P]` | throw フィールドのエラーを変換 |
+| `mapError(fn)` | `:P => :Q => :Result[T, Q]` | throw フィールドの payload P を mapper に渡し Q を新 throw として保存 |
 | `toString()` | `=> :Str` | 文字列表現 |
 | `unmold()` | `=> :T` | アンモールディング |
+
+`map` / `flatMap` / `mapError` の引数型ピンは **受け側の `T` / `P` が具体型として確定しているとき** にのみ機能します。クロスモジュール import 等で `T` / `P` が未解決のまま call site に到達した場合、未解決側がサブタイプ規則のワイルドカードとして振る舞い、型不一致の関数も silent pass します。詳細とサンプルは [Lax の `map` / `flatMap` の引数型ピンの効力範囲](#map--flatmap-の引数型ピンの効力範囲) を参照してください。
 
 ---
 
@@ -988,3 +1027,5 @@ gorillax.relax().toString()  // "RelaxedGorillax(42)"
 | `map(fn)` | `:T => :U => :Async[U]` | モナディック変換 |
 | `toString()` | `=> :Str` | 文字列表現 |
 | `unmold()` | `=> :T` | アンモールディング |
+
+`map` の引数型ピンは **受け側の `T` が具体型として確定しているとき** にのみ機能します。クロスモジュール import 等で `T` が未解決のまま call site に到達した場合、未解決側がサブタイプ規則のワイルドカードとして振る舞い、型不一致の関数も silent pass します。詳細とサンプルは [Lax の `map` / `flatMap` の引数型ピンの効力範囲](#map--flatmap-の引数型ピンの効力範囲) を参照してください。

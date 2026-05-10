@@ -1,22 +1,17 @@
-// Codegen lower-side `expr_is_bool` parity gaps.
+// E34 Phase 3 (Lock-D=B') acceptance: Lax[T].errorInfo() returns
+// Lax[ErrorInfo] consistently across the Interpreter / JS / Native
+// backends. The parity invariant covers two states the canonical
+// shape must agree on:
 //
-// E34 Phase 2 (Lock-B=C, 2026-05-09): both gaps closed by routing
-// `expr_is_bool` through the type-checker's Typed HIR side table.
-// When the table holds a typed decision for the expression, that
-// decision wins outright — both directions:
+//   1. Successful Lax → empty Lax[ErrorInfo] (hasValue=false).
+//   2. Failed Lax with no metadata → empty Lax[ErrorInfo] too.
 //
-//   - FALSE POSITIVE: a user-defined pack whose field shadows a
-//     built-in Bool method name now reports the field's actual
-//     return type. The legacy allow-list still runs as a fallback
-//     for expressions the type-checker never observed (e.g.
-//     synthesised defaultFn results), but a non-Bool typed entry
-//     short-circuits the allow-list before it matches.
-//   - FALSE NEGATIVE: a cross-module `:Bool` function lands in the
-//     typed table even though it never reached the local
-//     bool_returning_funcs pre-pass.
-//
-// Both fixtures below are part of the active E34 Phase 2 acceptance
-// regression suite (no longer #[ignore]'d).
+// State (3) "Failed Lax with metadata → present Lax[ErrorInfo]"
+// arrives once the Phase 5 producers (net / file / process / JSON
+// failure paths) start populating `__error`. The fixture below
+// avoids constructing one because there is no public Taida surface
+// for synthesising a metadata-bearing failed Lax yet — that is
+// exactly the work Phase 3 unlocks.
 
 mod common;
 
@@ -50,7 +45,7 @@ fn fixture_dir(tag: &str) -> PathBuf {
         .expect("clock")
         .as_nanos();
     let dir = std::env::temp_dir().join(format!(
-        "expr_is_bool_completeness_{}_{}_{}",
+        "lax_error_info_{}_{}_{}",
         tag,
         std::process::id(),
         nanos
@@ -133,23 +128,14 @@ fn run_three_backends(main_path: &std::path::Path, dir: &std::path::Path) -> [(S
 }
 
 #[test]
-fn expr_is_bool_cross_module_bool_get_or_default_three_backend_parity() {
-    // FALSE NEGATIVE — a Bool fn imported from another module is not
-    // in the local `bool_returning_funcs` registry, so `expr_is_bool`
-    // returns false and `getOrDefault(importedFn(x)).toString()` falls
-    // through to the polymorphic stringifier on Native (renders "1"
-    // instead of "true").
-    let dir = fixture_dir("cross_module");
-    let lib = dir.join("lib.td");
+fn lax_error_info_success_returns_empty_lax_three_backends() {
+    let dir = fixture_dir("success");
     let main = dir.join("main.td");
-
-    fs::write(&lib, "giveTrue x = x > 0 => :Bool\n\n<<< @(giveTrue)\n").expect("write lib");
     fs::write(
         &main,
-        ">>> ./lib.td => @(giveTrue)\n\nempty: @[Bool] <= @[]\nb <= empty.first().getOrDefault(giveTrue(5))\nstdout(\"bool:\" + b.toString())\n",
+        "obj <= Lax[42]()\ninfo <= obj.errorInfo()\nstdout(info.hasValue().toString())\n",
     )
     .expect("write main");
-
     let results = run_three_backends(&main, &dir);
     let interp = results
         .iter()
@@ -157,8 +143,8 @@ fn expr_is_bool_cross_module_bool_get_or_default_three_backend_parity() {
         .map(|(_, o)| o.clone())
         .unwrap_or_default();
     assert_eq!(
-        interp, "bool:true",
-        "interp must render the Bool surface form"
+        interp, "false",
+        "interp: errorInfo() on a successful Lax must be empty"
     );
     for (backend, out) in &results {
         if out.is_empty() {
@@ -166,53 +152,9 @@ fn expr_is_bool_cross_module_bool_get_or_default_three_backend_parity() {
         }
         assert_eq!(
             out, &interp,
-            "{} backend disagrees with interp (false-negative gap: cross-module Bool fn not in local registry)",
+            "{} backend disagrees with interp on Lax[T].errorInfo() for successful receiver",
             backend
         );
     }
-
-    let _ = fs::remove_dir_all(&dir);
-}
-
-#[test]
-fn expr_is_bool_pack_field_shadows_bool_method_three_backend_parity() {
-    // FALSE POSITIVE — a user-defined pack with a field named like a
-    // built-in Bool method (`has`, `isEmpty`, `contains`, …) hits the
-    // allow-list before any receiver-type check, so Native lowers
-    // `box.has(x).toString()` through `taida_str_from_bool` regardless
-    // of the field's actual return type. Interp and JS render the Int
-    // value, Native renders "true"/"false".
-    let dir = fixture_dir("pack_shadow");
-    let main = dir.join("main.td");
-
-    fs::write(
-        &main,
-        "Box = @(label: Str, has: Int => :Int)\nb <= Box(label <= \"demo\")\nresult <= b.has(7)\nstdout(result.toString())\n",
-    )
-    .expect("write main");
-
-    let results = run_three_backends(&main, &dir);
-    let interp = results
-        .iter()
-        .find(|(b, _)| b == "interp")
-        .map(|(_, o)| o.clone())
-        .unwrap_or_default();
-    // The defaultFn for an unbound `Int => :Int` field returns 0; all
-    // three backends should agree on the Int representation.
-    assert_eq!(
-        interp, "0",
-        "interp must render the underlying Int (defaultFn returns 0)"
-    );
-    for (backend, out) in &results {
-        if out.is_empty() {
-            continue;
-        }
-        assert_eq!(
-            out, &interp,
-            "{} backend disagrees with interp (false-positive gap: allow-list matched on method name without checking receiver type)",
-            backend
-        );
-    }
-
     let _ = fs::remove_dir_all(&dir);
 }

@@ -241,6 +241,12 @@ pub struct Lowering {
     /// Defaults to `Native` so existing Cranelift callers do not need to
     /// change.
     addon_backend: crate::addon::AddonBackend,
+    /// Typed HIR side table delivered by the type-checker. When
+    /// populated (driver/main path), `expr_is_bool` and other type-tag
+    /// inferences consult this first; when empty (legacy /
+    /// dependency-module path), the codegen falls back to the existing
+    /// name-/syntax-driven heuristics.
+    pub(crate) typed_expr_table: crate::types::TypedExprTable,
 }
 
 /// RC2.5: metadata for a single addon function import.

@@ -531,6 +531,15 @@ fn compile_to_object(input_path: &Path) -> Result<(PathBuf, ModuleImports), Comp
         lowering.set_source_dir(parent.to_path_buf());
     }
     lowering.set_module_key(Lowering::module_key_for_path(input_path));
+    // E34 Phase 2 (Lock-B=C): run the type-checker before lowering and
+    // hand the resulting Typed HIR side table over so `expr_is_bool`
+    // and friends can consume `Type::Bool` decisions instead of the
+    // legacy name-driven heuristics. Errors here are intentionally
+    // ignored — the main / build path already surfaced them via
+    // `run_type_checks_and_warnings` before reaching codegen.
+    let mut checker = crate::types::TypeChecker::new();
+    checker.check_program(&program);
+    lowering.set_typed_expr_table(checker.typed_expr_table.clone());
     let mut ir_module = lowering.lower_program(&program).map_err(|e| CompileError {
         message: format!("{}", e),
     })?;
@@ -1280,6 +1289,13 @@ fn inline_wasm_module_imports_with_backend(
         }
         dep_lowering.set_module_key(Lowering::module_key_for_path(&dep_path));
         dep_lowering.set_addon_backend(addon_backend);
+        // E34 Phase 2 (Lock-B=C): same Typed HIR delivery as the main
+        // module path. Dependency modules go through the same checker
+        // pipeline so cross-module Bool detection benefits from the
+        // typed table rather than the local name-driven pre-pass.
+        let mut dep_checker = crate::types::TypeChecker::new();
+        dep_checker.check_program(&dep_program);
+        dep_lowering.set_typed_expr_table(dep_checker.typed_expr_table.clone());
         let dep_ir = dep_lowering
             .lower_program(&dep_program)
             .map_err(|e| CompileError {
@@ -1454,6 +1470,13 @@ fn wasm_frontend(
         emit_wasm_c::WasmProfile::Full => crate::addon::AddonBackend::WasmFull,
     };
     lowering.set_addon_backend(addon_backend);
+    // E34 Phase 2 (Lock-B=C): Typed HIR delivery for the WASM frontend.
+    // Mirrors `compile_to_object` so all native + WASM profiles share
+    // the same Bool decision source. Errors here are intentionally
+    // ignored — the build path already surfaced them.
+    let mut checker = crate::types::TypeChecker::new();
+    checker.check_program(&program);
+    lowering.set_typed_expr_table(checker.typed_expr_table.clone());
     let mut ir_module = lowering.lower_program(&program).map_err(|e| CompileError {
         message: format!("{}", e),
     })?;

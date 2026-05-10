@@ -592,13 +592,17 @@ stdout(m.get("kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk
 }
 
 #[test]
-fn test_native_async_all_mixed_sync_async_matches_interpreter() {
+fn test_native_async_all_mixed_sync_async_rejected_consistently() {
+    // Heterogeneous lists (Int interleaved with Async[Int]) are rejected by
+    // the type-checker via [E0401] (list element type mismatch). Pin that
+    // both backends agree by surfacing the same rejection rather than one
+    // implicitly promoting Int into Async[Int].
     let source = r#"
 a <= All[@[1, Async[2](), 3, Async[4]()]]()
 a ]=> r
 stdout(r)
 "#;
-    assert_native_matches_interpreter(source, "async_all_mixed_sync_async");
+    assert_native_and_interpreter_reject_source(source, "async_all_mixed_sync_async");
 }
 
 #[test]

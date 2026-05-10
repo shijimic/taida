@@ -720,6 +720,11 @@ static int taida_str_byte_len(const char *s, size_t *out_len);
 static taida_val taida_value_to_display_string(taida_val val);
 static taida_val taida_value_to_debug_string(taida_val val);
 static taida_val taida_throw_to_display_string(taida_val throw_val);
+// E34B-017: `taida_result_map_error` materialises the mapped value's
+// display string via the polymorphic helper before wrapping it in a
+// `ResultError`. The helper is defined far below, so forward declare
+// it here to satisfy ISO C linkage.
+taida_val taida_polymorphic_to_string(taida_val obj);
 // C26B-011 (Phase 11): forward-declare `taida_float_to_str` so
 // `taida_debug_float` (defined early in the file) can route through
 // the same Rust-f64::Display formatter used everywhere else.
@@ -5456,6 +5461,39 @@ taida_val taida_list_sort_desc(taida_val list_ptr) {
     return new_list;
 }
 
+/* Unique by key extraction function: fn_ptr maps each element to a key,
+   then dedup by that key. Matches interpreter's Unique[list](by <= fn).
+   E34B-020 (Codex review #16 follow-up): close the 4-backend parity gap
+   where Native / WASM previously dropped the `by` callback and fell back
+   to value-identity dedup. */
+taida_val taida_list_unique_by(taida_val list_ptr, taida_val fn_ptr) {
+    taida_val *list = (taida_val*)list_ptr;
+    taida_val len = list[2];
+    taida_val elem_tag = list[3];
+    taida_val new_list = taida_list_new();
+    taida_val *nl_init = (taida_val*)new_list;
+    nl_init[3] = elem_tag;
+    if (len == 0) return new_list;
+    size_t keys_size = taida_safe_mul((size_t)len, sizeof(taida_val), "list_unique_by keys");
+    taida_val *seen_keys = (taida_val*)TAIDA_MALLOC(keys_size, "list_unique_by seen_keys");
+    taida_val seen_count = 0;
+    for (taida_val i = 0; i < len; i++) {
+        taida_val item = list[4 + i];
+        taida_val key = taida_invoke_callback1(fn_ptr, item);
+        taida_val found = 0;
+        for (taida_val j = 0; j < seen_count; j++) {
+            if (seen_keys[j] == key) { found = 1; break; }
+        }
+        if (!found) {
+            seen_keys[seen_count++] = key;
+            taida_list_elem_retain(item, elem_tag);
+            new_list = taida_list_push(new_list, item);
+        }
+    }
+    free(seen_keys);
+    return new_list;
+}
+
 /* Sort by key extraction function: fn_ptr maps each element to a sort key,
    then sort ascending by key. Matches interpreter's Sort[list](by <= fn). */
 taida_val taida_list_sort_by(taida_val list_ptr, taida_val fn_ptr) {
@@ -7383,28 +7421,54 @@ taida_val taida_result_flat_map(taida_val result, taida_val fn_ptr) {
     return new_result;
 }
 
-// Result.mapError(fn) — if error, apply fn to throw value
+// Result.mapError(fn) — if error, apply fn to throw payload directly so
+// the runtime matches the type-checker contract
+// `mapError(fn: P -> Q) -> Result[T, Q]`.
 taida_val taida_result_map_error(taida_val result, taida_val fn_ptr) {
     if (!taida_result_is_error_check(result)) {
         return result;  // Success: return as-is
     }
     taida_val throw_val = taida_pack_get_idx(result, 2);  // throw (shifted from idx 1 to idx 2)
-    // Extract the error message string to pass to the mapping function
-    // (matching interpreter: passes display string, not the Error BuchiPack)
-    taida_val err_display = taida_throw_to_display_string(throw_val);
-    taida_val mapped_str = taida_invoke_callback1(fn_ptr, err_display);
-    // Wrap the mapped result back into an Error BuchiPack
-    const char *new_msg = (const char*)mapped_str;
+    taida_val mapped = taida_invoke_callback1(fn_ptr, throw_val);
+    // Snapshot the callback return tag immediately — the helpers
+    // below clear and reuse it.
+    taida_val mapped_tag = taida_get_return_tag();
+    // Direct-store applies to Error-derived BuchiPacks — those that
+    // carry HASH___TYPE = "__type", which the user-defined
+    // `Error => Foo = @(...)` form always emits. This keeps the
+    // direct-store predicate aligned across all four backends and
+    // avoids accidentally claiming anonymous packs as Error-shaped.
+    if (taida_is_buchi_pack(mapped)
+        && taida_pack_has_hash(mapped, (taida_val)HASH___TYPE)) {
+        return taida_result_create(0, mapped, 0);
+    }
+    // Anything else (anonymous pack, primitive) is wrapped in a generic
+    // ResultError. Untagged scalars must be rendered via the tag the
+    // callback advertised; otherwise primitives surface as their raw
+    // 64-bit representation (Bool=1, Float=IEEE-754 bit pattern) and
+    // diverge from the Interpreter / JS output.
+    taida_val display;
+    if (mapped_tag == TAIDA_TAG_BOOL) {
+        display = (taida_val)taida_str_from_bool(mapped);
+    } else if (mapped_tag == TAIDA_TAG_FLOAT) {
+        double f;
+        memcpy(&f, &mapped, sizeof(double));
+        display = taida_float_to_str(f);
+    } else if (mapped_tag == TAIDA_TAG_INT) {
+        display = taida_int_to_str(mapped);
+    } else if (mapped_tag == TAIDA_TAG_STR) {
+        display = (taida_val)taida_str_new_copy((const char *)mapped);
+    } else {
+        display = taida_polymorphic_to_string(mapped);
+    }
+    const char *new_msg = (const char*)display;
     size_t sl = 0;
     if (taida_read_cstr_len_safe(new_msg, 65536, &sl)) {
         taida_val new_error = taida_make_error("ResultError", new_msg);
-        taida_str_release(mapped_str);
-        taida_str_release(err_display);
+        taida_str_release(display);
         return taida_result_create(0, new_error, 0);
     }
-    // Fallback: use mapped value as-is
-    taida_str_release(err_display);
-    return taida_result_create(0, mapped_str, 0);
+    return taida_result_create(0, display, 0);
 }
 
 // Result.getOrThrow() — if success return __value, otherwise throw
@@ -7427,18 +7491,34 @@ taida_val taida_result_get_or_throw(taida_val result) {
 // (matching interpreter: shows just the message string, not the full pack structure).
 static taida_val taida_throw_to_display_string(taida_val throw_val) {
     if (throw_val == 0) return (taida_val)taida_str_new_copy("error");
-    // If it's a BuchiPack (Error TypeDef), extract the "message" field
+    // If it's a BuchiPack (Error TypeDef), extract the "message" field.
+    // An empty message is treated as "no message" so the JS Error
+    // factory's mandatory `message: ''` default does not diverge from
+    // the Interpreter / Native rendering.
     if (taida_is_buchi_pack(throw_val)) {
         if (taida_pack_has_hash(throw_val, (taida_val)HASH_MESSAGE)) {
             taida_val msg = taida_pack_get(throw_val, (taida_val)HASH_MESSAGE);
             if (msg != 0) {
                 size_t sl = 0;
-                if (taida_read_cstr_len_safe((const char*)msg, 65536, &sl)) {
+                if (taida_read_cstr_len_safe((const char*)msg, 65536, &sl) && sl > 0) {
                     return (taida_val)taida_str_new_copy((const char*)msg);
                 }
             }
         }
-        // Fallback: render full pack structure for non-message packs
+        // Error-derived pack with no message field — surface the
+        // declared `__type` name so the four-backend toString output
+        // stays aligned (Interpreter's `throw_val_to_display_str`
+        // performs the same fallback).
+        if (taida_pack_has_hash(throw_val, (taida_val)HASH___TYPE)) {
+            taida_val ty = taida_pack_get(throw_val, (taida_val)HASH___TYPE);
+            if (ty != 0) {
+                size_t sl = 0;
+                if (taida_read_cstr_len_safe((const char*)ty, 65536, &sl)) {
+                    return (taida_val)taida_str_new_copy((const char*)ty);
+                }
+            }
+        }
+        // Anonymous pack — render the structure verbatim.
         return taida_value_to_display_string(throw_val);
     }
     // String error message

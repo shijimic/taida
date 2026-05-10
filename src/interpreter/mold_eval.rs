@@ -1878,10 +1878,21 @@ impl Interpreter {
                     }
                     other => return Ok(Some(other)),
                 };
+                // E34B-021 (Codex review #17 follow-up): align with
+                // Native / WASM lowering by honouring `desc` as an
+                // alias for `reverse`. Previously this branch read
+                // `reverse` only, which silently dropped the `desc`
+                // option and broke 4-backend parity for
+                // `Sort[xs](by <= ..., desc <= true)`.
                 let reverse = self
                     .eval_mold_option(fields, "reverse")?
                     .map(|v| v.is_truthy())
                     .unwrap_or(false);
+                let desc = self
+                    .eval_mold_option(fields, "desc")?
+                    .map(|v| v.is_truthy())
+                    .unwrap_or(false);
+                let reverse = reverse || desc;
                 let by_fn = self.eval_mold_option(fields, "by")?;
 
                 let mut sorted: Vec<Value> = if let Some(Value::Function(func)) = by_fn {

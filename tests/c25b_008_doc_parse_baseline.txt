@@ -60,7 +60,7 @@ docs/reference/operators.md:267
 docs/reference/operators.md:410
 docs/reference/operators.md:579
 docs/reference/standard_library.md:273
-docs/reference/standard_methods.md:934
+docs/reference/standard_methods.md:971
 docs/reference/tail_recursion.md:149
 docs/reference/tail_recursion.md:167
 docs/reference/tail_recursion.md:184

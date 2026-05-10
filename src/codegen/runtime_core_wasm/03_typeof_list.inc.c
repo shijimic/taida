@@ -921,6 +921,35 @@ int64_t taida_list_sort_desc(int64_t list_ptr) {
     return new_list;
 }
 
+/* Unique by key extraction function: fn_ptr maps each element to a key,
+   then dedup by that key. Matches interpreter's Unique[list](by <= fn).
+   E34B-020 (Codex review #16 follow-up): close the 4-backend parity gap
+   where Native / WASM previously dropped the `by` callback. */
+int64_t taida_list_unique_by(int64_t list_ptr, int64_t fn_ptr) {
+    int64_t *list = (int64_t *)(intptr_t)list_ptr;
+    int64_t len = list[1];
+    int64_t elem_tag = list[2];
+    int64_t new_list = taida_list_new();
+    int64_t *nl_init = (int64_t *)(intptr_t)new_list;
+    nl_init[2] = elem_tag;
+    if (len == 0) return new_list;
+    int64_t *seen_keys = (int64_t *)wasm_alloc((unsigned int)(len * 8));
+    int64_t seen_count = 0;
+    for (int64_t i = 0; i < len; i++) {
+        int64_t item = list[WASM_LIST_ELEMS + i];
+        int64_t key = taida_invoke_callback1(fn_ptr, item);
+        int64_t found = 0;
+        for (int64_t j = 0; j < seen_count; j++) {
+            if (seen_keys[j] == key) { found = 1; break; }
+        }
+        if (!found) {
+            seen_keys[seen_count++] = key;
+            new_list = taida_list_push(new_list, item);
+        }
+    }
+    return new_list;
+}
+
 /* Sort by key extraction function: fn_ptr maps each element to a sort key,
    then sort ascending by key. Matches interpreter's Sort[list](by <= fn). */
 int64_t taida_list_sort_by(int64_t list_ptr, int64_t fn_ptr) {

@@ -210,6 +210,10 @@ pub struct TypeChecker {
     /// entry, popped on exit. Used to resolve constrained type variables
     /// inside the body (e.g. arithmetic on `T <= :Num`, calling `F <= :T => :T`).
     current_func_type_params: Vec<Vec<TypeParam>>,
+    /// Typed HIR / expression type table. `infer_expr_type` records
+    /// every observed `Expr` here so codegen lowering can answer
+    /// "is this expression Bool?" by looking up the recorded type.
+    pub typed_expr_table: super::typed_hir::TypedExprTable,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -289,6 +293,7 @@ impl TypeChecker {
             net_http_protocol_type_names: HashSet::new(),
             branch_scope_stack: vec![HashMap::new()],
             current_func_type_params: Vec::new(),
+            typed_expr_table: super::typed_hir::TypedExprTable::new(),
         };
         // C19B-002 (import-less): the C19 interactive variants are core-bundled
         // in `src/codegen/lower/core.rs` (import-less parity with interpreter/
@@ -4229,7 +4234,21 @@ defaulted fields must be provided via `()`",
     }
 
     /// Infer the type of an expression.
+    ///
+    /// Wraps `infer_expr_type_inner` and records the inferred type into
+    /// `typed_expr_table` so downstream consumers (codegen lowering)
+    /// can query the result without re-running inference.
     pub fn infer_expr_type(&mut self, expr: &Expr) -> Type {
+        let ty = self.infer_expr_type_inner(expr);
+        self.typed_expr_table.record(expr, ty.clone());
+        ty
+    }
+
+    /// Inner implementation of `infer_expr_type`. Does NOT record into
+    /// the typed expression table — recording happens in the public wrapper.
+    /// Recursive calls go through the public wrapper so every subexpression
+    /// is recorded as well.
+    fn infer_expr_type_inner(&mut self, expr: &Expr) -> Type {
         match expr {
             Expr::IntLit(_, _) => Type::Int,
             Expr::FloatLit(_, _) => Type::Float,
@@ -5119,7 +5138,10 @@ defaulted fields must be provided via `()`",
                 }
                 // E1508: Method call argument count and type checking
                 self.check_method_args(&obj_type, method, args, span);
-                self.infer_method_return_type(&obj_type, method)
+                // E34 Phase 1.4 (Lock-C=B full pin): use arg-aware return type
+                // inference so chains like `obj.map(fn1).map(fn2)` propagate
+                // type info through the Typed HIR.
+                self.infer_method_return_type_with_args(&obj_type, method, args)
             }
 
             Expr::FieldAccess(obj, field, span) => {
@@ -5281,6 +5303,16 @@ defaulted fields must be provided via `()`",
                     ),
                     // Cancel[async]() returns Async[T] (or Async[Unknown] fallback)
                     "Cancel" => {
+                        if type_args.len() != 1 {
+                            self.errors.push(TypeError {
+                                message: format!(
+                                    "[E1505] `Cancel[async]()` requires exactly 1 type argument, got {}. \
+                                     Hint: pass a single Async value, e.g. `Cancel[asyncTask]()`.",
+                                    type_args.len()
+                                ),
+                                span: mold_span.clone(),
+                            });
+                        }
                         let inner = type_args
                             .first()
                             .map(|a| self.infer_expr_type(a))
@@ -5293,19 +5325,159 @@ defaulted fields must be provided via `()`",
                             .unwrap_or(Type::Unknown);
                         Type::Generic("Async".to_string(), vec![inner])
                     }
-                    // Result[value, predicate] returns Result type
-                    "Result" => Type::Generic(
-                        "Result".to_string(),
-                        vec![
-                            type_args
-                                .first()
-                                .map(|a| self.infer_expr_type(a))
-                                .unwrap_or(Type::Unknown),
-                            Type::Unknown, // predicate type
-                        ],
-                    ),
+                    // E34B-018 (Codex review #15 follow-up): All / Race /
+                    // Timeout had no checker-side arity validation and no
+                    // dedicated return-type pin, so `All[xs, extra]()` and
+                    // `Timeout[async]()` (missing ms) silently passed type
+                    // checking. Pin the signatures here to align with
+                    // `src/interpreter/mold_eval.rs` (4-backend parity).
+                    //
+                    // Runtime contracts:
+                    //   All[asyncList]() -> Async[List[T]]    (1 arg)
+                    //   Race[asyncList]() -> Async[T]         (1 arg)
+                    //   Timeout[async, ms]() -> Async[T]      (2 args)
+                    "All" => {
+                        if type_args.len() != 1 {
+                            self.errors.push(TypeError {
+                                message: format!(
+                                    "[E1505] `All[asyncList]()` requires exactly 1 type \
+                                     argument, got {}. Hint: pass a single list of Async \
+                                     values, e.g. `All[@[a1, a2]]()`.",
+                                    type_args.len()
+                                ),
+                                span: mold_span.clone(),
+                            });
+                        }
+                        let inner = type_args
+                            .first()
+                            .map(|a| self.infer_expr_type(a))
+                            .map(|t| match t {
+                                Type::List(elem) => match *elem {
+                                    Type::Generic(ref name, ref args) if name == "Async" => {
+                                        Type::List(Box::new(
+                                            args.first().cloned().unwrap_or(Type::Unknown),
+                                        ))
+                                    }
+                                    other => Type::List(Box::new(other)),
+                                },
+                                _ => Type::List(Box::new(Type::Unknown)),
+                            })
+                            .unwrap_or(Type::List(Box::new(Type::Unknown)));
+                        Type::Generic("Async".to_string(), vec![inner])
+                    }
+                    "Race" => {
+                        if type_args.len() != 1 {
+                            self.errors.push(TypeError {
+                                message: format!(
+                                    "[E1505] `Race[asyncList]()` requires exactly 1 type \
+                                     argument, got {}. Hint: pass a single list of Async \
+                                     values, e.g. `Race[@[a1, a2]]()`.",
+                                    type_args.len()
+                                ),
+                                span: mold_span.clone(),
+                            });
+                        }
+                        let inner = type_args
+                            .first()
+                            .map(|a| self.infer_expr_type(a))
+                            .map(|t| match t {
+                                Type::List(elem) => match *elem {
+                                    Type::Generic(ref name, ref args) if name == "Async" => {
+                                        args.first().cloned().unwrap_or(Type::Unknown)
+                                    }
+                                    other => other,
+                                },
+                                _ => Type::Unknown,
+                            })
+                            .unwrap_or(Type::Unknown);
+                        Type::Generic("Async".to_string(), vec![inner])
+                    }
+                    "Timeout" => {
+                        if type_args.len() != 2 {
+                            self.errors.push(TypeError {
+                                message: format!(
+                                    "[E1505] `Timeout[async, ms]()` requires exactly 2 type \
+                                     arguments, got {}. Hint: pass an Async value and a \
+                                     numeric timeout (ms), e.g. `Timeout[asyncTask, 5000]()`.",
+                                    type_args.len()
+                                ),
+                                span: mold_span.clone(),
+                            });
+                        }
+                        if let Some(ms_arg) = type_args.get(1) {
+                            let ms_ty = self.infer_expr_type(ms_arg);
+                            if !matches!(ms_ty, Type::Unknown) && !ms_ty.is_numeric() {
+                                self.errors.push(TypeError {
+                                    message: format!(
+                                        "[E1506] `Timeout[async, ms]()`: second argument has \
+                                         type {}, expected a numeric (Int / Float / Num) \
+                                         timeout in milliseconds.",
+                                        ms_ty
+                                    ),
+                                    span: mold_span.clone(),
+                                });
+                            }
+                        }
+                        let inner = type_args
+                            .first()
+                            .map(|a| self.infer_expr_type(a))
+                            .map(|t| match t {
+                                Type::Generic(name, args) if name == "Async" => {
+                                    args.first().cloned().unwrap_or(Type::Unknown)
+                                }
+                                other => other,
+                            })
+                            .unwrap_or(Type::Unknown);
+                        Type::Generic("Async".to_string(), vec![inner])
+                    }
+                    // Result[value]() / Result[value](throw <= ErrorVal) returns Result[T, P].
+                    // E34 Phase 1.4 (Lock-C=B): pin error type P from the
+                    // `throw <= ...` field when present so chains like
+                    // `r.flatMap(...)` can enforce Result[U, P] preservation
+                    // (方針 A: error type 保存 strict).
+                    "Result" => {
+                        // Pin upper arity. `Result[value, predicate?]()` is the
+                        // public shape; the runtime reads `type_args[0]` /
+                        // `type_args[1]` only. Anything past index 1 was
+                        // silently dropped at the front gate.
+                        if type_args.len() > 2 {
+                            self.errors.push(TypeError {
+                                message: format!(
+                                    "[E1505] `Result[value, predicate?]()` accepts at most \
+                                     2 type arguments, got {}. Hint: extra information \
+                                     belongs in the `(throw <= ErrorVal)` field block.",
+                                    type_args.len()
+                                ),
+                                span: mold_span.clone(),
+                            });
+                        }
+                        let success_ty = type_args
+                            .first()
+                            .map(|a| self.infer_expr_type(a))
+                            .unwrap_or(Type::Unknown);
+                        let error_ty = fields
+                            .iter()
+                            .find(|f| f.name == "throw")
+                            .map(|f| self.infer_expr_type(&f.value))
+                            .unwrap_or(Type::Unknown);
+                        Type::Generic("Result".to_string(), vec![success_ty, error_ty])
+                    }
                     // Lax[value]() returns Lax[T]
                     "Lax" => {
+                        // Same silent-drop gap as `Result` — any
+                        // `type_args[1..]` were ignored, masking simple
+                        // typos like `Lax[1, 2, 3]()`.
+                        if type_args.len() > 1 {
+                            self.errors.push(TypeError {
+                                message: format!(
+                                    "[E1505] `Lax[value]()` accepts at most 1 type \
+                                     argument, got {}. Hint: wrap a single value, e.g. \
+                                     `Lax[42]()`.",
+                                    type_args.len()
+                                ),
+                                span: mold_span.clone(),
+                            });
+                        }
                         let inner = type_args
                             .first()
                             .map(|a| self.infer_expr_type(a))

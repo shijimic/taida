@@ -1475,12 +1475,27 @@ impl Lowering {
                     });
                 }
                 let list = self.lower_expr(func, &type_args[0])?;
+                // E34B-020 (Codex review #16 follow-up): consume the
+                // optional `by` callback to match the interpreter and
+                // restore 4-backend parity. Without this fork, the
+                // Native / WASM lowering silently fell back to value-
+                // identity dedup whenever the user supplied a key
+                // extractor.
+                let by_fn = self.lower_mold_field_expr(func, fields, "by")?;
                 let result = func.alloc_var();
-                func.push(IrInst::Call(
-                    result,
-                    "taida_list_unique".to_string(),
-                    vec![list],
-                ));
+                if let Some(by_var) = by_fn {
+                    func.push(IrInst::Call(
+                        result,
+                        "taida_list_unique_by".to_string(),
+                        vec![list, by_var],
+                    ));
+                } else {
+                    func.push(IrInst::Call(
+                        result,
+                        "taida_list_unique".to_string(),
+                        vec![list],
+                    ));
+                }
                 Ok(result)
             }
             "Flatten" => {

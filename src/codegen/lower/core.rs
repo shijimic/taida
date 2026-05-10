@@ -181,7 +181,18 @@ impl Lowering {
             addon_facade_funcs: Vec::new(),
             addon_facade_mangled: std::collections::HashSet::new(),
             addon_backend: crate::addon::AddonBackend::Native,
+            typed_expr_table: crate::types::TypedExprTable::new(),
         }
+    }
+
+    /// Receive the type-checker's Typed HIR side table so codegen can
+    /// consume `Type::Bool` decisions instead of the legacy name-driven
+    /// heuristics. The driver populates this after running
+    /// `TypeChecker::check_program` on the fully parsed program.
+    /// Dependency-module compilations may call `lower_program` without
+    /// setting it; in that case the legacy fallbacks kick in.
+    pub fn set_typed_expr_table(&mut self, table: crate::types::TypedExprTable) {
+        self.typed_expr_table = table;
     }
 
     /// RC2.5: set the addon backend for this lowering run. Called by the

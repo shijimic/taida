@@ -94,8 +94,8 @@
 | `E1505` | 部分適用のスロット数が arity と不一致 | TypeChecker |
 | `E1506` | 関数引数の型が宣言されたパラメータ型と不一致 | TypeChecker |
 | `E1507` | ビルトイン関数の引数個数が arity 範囲外 | TypeChecker |
-| `E1508` | メソッド呼び出しの引数個数または型が不一致 | TypeChecker |
-| `E1509` | generic function の型変数が declared constraint を満たさない | TypeChecker |
+| `E1508` | メソッド呼び出しの引数個数または型が不一致 (`Lax[T]` / `Result[T, P]` / `Async[T]` の `map` / `flatMap` / `mapError` の関数引数型ピン違反を含む) | TypeChecker |
+| `E1509` | メソッドが型に存在しない、または generic function の型変数が declared constraint を満たさない (`errorInfo()` を `Lax` / `Gorillax` / `RelaxedGorillax` / `Error` 以外の型に呼んだ場合を含む) | TypeChecker |
 | `E1510` | inference-only generic function の型変数が parameter annotation / call から束縛・推論できない、または concrete type 名と衝突する | TypeChecker |
 | `E1511` | ユーザー定義関数を mold 構文 `Fn[args]()` で呼ぶ際に named fields `()` を渡せない — `Fn[a, b]()` か `Fn(a, b)` のみ | TypeChecker |
 | `E1512` | Cage / CageRilla: branch mismatch (compile-time) — `Cage[subject, runner]()` で subject の Molten branch と runner `CageRilla[Branch, Out]` の `Branch` 型引数が不一致 | TypeChecker |
@@ -228,7 +228,7 @@
 | コード (予約) | 内容 | 既存帯域 |
 |--------------|------|---------|
 | `E0700` | Native と native lowering 系 WASM で相互再帰を検出した場合の拒否 | `E07xx` コード生成エラー |
-| `E1508` | `Lax[T].getOrDefault` / `getOrThrow` / `map` / `flatMap` の引数型不整合 | `E15xx` 定義・意味論エラー |
+| `E1508` | `Lax[T].getOrDefault` / `map` / `flatMap`、`Result[T, P].getOrDefault` / `map` / `flatMap` / `mapError`、`Async[T].getOrDefault` / `map` の引数型不整合 (関数引数型ピン違反を含む。`getOrThrow` は arity 0 のため対象外) | `E15xx` 定義・意味論エラー |
 
 ### アドオンマニフェストエラー (`E20xx`)
 

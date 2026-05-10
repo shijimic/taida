@@ -689,6 +689,14 @@ fn runtime_abi(name: &str) -> Result<RuntimeAbi, String> {
             params: &[Ptr],
             returns: &[Ptr],
         },
+        // E34B-020 (Codex review #16): `Unique[xs](by <= keyFn)` lowers
+        // here, mirroring `taida_list_sort_by`. Closes the 4-backend
+        // parity gap where Native / WASM previously dropped the `by`
+        // callback.
+        "taida_list_unique_by" => RuntimeAbi {
+            params: &[Ptr, FnPtr],
+            returns: &[Ptr],
+        },
         "taida_list_flatten" => RuntimeAbi {
             params: &[Ptr],
             returns: &[Ptr],

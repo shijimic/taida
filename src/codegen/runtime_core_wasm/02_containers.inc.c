@@ -704,13 +704,40 @@ int64_t taida_result_map_error(int64_t result, int64_t fn_ptr) {
         return result; /* Success: return as-is */
     }
     int64_t throw_val = taida_pack_get_idx(result, 2); /* throw field */
-    /* Extract the error message string to pass to the mapping function
-       (matching native: passes display string, not the Error BuchiPack) */
-    int64_t err_display = _wasm_throw_to_display_string(throw_val);
-    int64_t mapped_str = taida_invoke_callback1(fn_ptr, err_display);
-    /* Wrap the mapped result back into an Error BuchiPack */
+    /* Pass the throw payload `P` directly to the mapper so the runtime
+       matches the type-checker contract
+       `mapError(fn: P -> Q) -> Result[T, Q]`. */
+    int64_t mapped = taida_invoke_callback1(fn_ptr, throw_val);
+    /* Snapshot the callback return tag immediately. */
+    int64_t mapped_tag = taida_get_return_tag();
+    /* Direct-store applies to Error-derived BuchiPacks — those that
+       carry WASM_HASH___TYPE = "__type", which the user-defined
+       `Error => Foo = @(...)` form always emits. The predicate is
+       deliberately the same shape as the Native and Interpreter
+       paths so all four backends agree. */
+    if (taida_is_buchi_pack(mapped)
+        && taida_pack_has_hash(mapped, WASM_HASH___TYPE)) {
+        return taida_result_create(0, mapped, 0);
+    }
+    /* Anything else (anonymous pack, primitive) is wrapped in a generic
+       ResultError. Untagged scalars must be rendered via the tag the
+       callback advertised; otherwise primitives surface as their raw
+       64-bit representation (Bool=1, Float=IEEE-754 bit pattern) and
+       diverge from the Interpreter / JS output. */
+    int64_t display;
+    if (mapped_tag == WASM_TAG_BOOL) {
+        display = taida_str_from_bool(mapped);
+    } else if (mapped_tag == WASM_TAG_FLOAT) {
+        display = taida_float_to_str(mapped);
+    } else if (mapped_tag == WASM_TAG_INT) {
+        display = taida_int_to_str(mapped);
+    } else if (mapped_tag == WASM_TAG_STR) {
+        display = mapped;
+    } else {
+        display = taida_polymorphic_to_string(mapped);
+    }
     int64_t new_error = taida_make_error(
-        (int64_t)(intptr_t)"ResultError", mapped_str);
+        (int64_t)(intptr_t)"ResultError", display);
     return taida_result_create(0, new_error, 0);
 }
 

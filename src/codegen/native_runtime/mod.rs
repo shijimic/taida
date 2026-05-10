@@ -729,7 +729,35 @@ mod tests {
         //   returns `""`, raw errorInfo() source packs must carry `__type`
         //   metadata, and the legacy direct-function Cage runtime entry is
         //   removed. Final concatenated native runtime: 1,115,415 bytes.
-        const EXPECTED_TOTAL_LEN: usize = 1_115_415;
+        // 2026-05-09 mapError follow-up: `taida_result_map_error` now
+        //   passes the throw payload directly to the mapper instead of a
+        //   pre-rendered display string, plus a payload-shaped vs
+        //   message-shaped fork. Final size: 1,115,618 bytes.
+        // 2026-05-09 mapError Q-shape parity: the fork now also accepts
+        //   user-defined `Error => Foo = @(message: ...)` packs (which
+        //   carry HASH___TYPE rather than HASH_TYPE) so all four
+        //   backends agree on `Result(throw <= <message>)`. Final
+        //   size: 1,115,877 bytes.
+        // 2026-05-09 mapError Phase 2: direct-store fork is reduced to
+        //   `is_buchi_pack && HASH___TYPE`, the fallback now routes
+        //   through `taida_polymorphic_to_string` (instead of casting
+        //   the pack pointer to `const char*`), and
+        //   `taida_throw_to_display_string` falls back to the `__type`
+        //   name for message-less Error packs. Final size: 1,116,948
+        //   bytes.
+        // 2026-05-09 mapError Phase 3: the wrap path now consumes the
+        //   callback return tag so primitive `Q` (Bool / Float /
+        //   Int / Str) renders the same as Interpreter / JS instead
+        //   of leaking raw 64-bit representations. Final size:
+        //   1,117,575 bytes.
+        // 2026-05-09 mapError Phase 3.1: `taida_throw_to_display_string`
+        //   now skips empty `message` fields and falls through to the
+        //   `__type` name, matching the JS Error factory's mandatory
+        //   `message: ''` default. Final size: 1,117,767 bytes.
+        // 2026-05-09 E34B-020 (Codex review #16): +1397 bytes for the
+        //   new `taida_list_unique_by` runtime that closes the
+        //   4-backend `Unique[xs](by <= ..)` parity gap.
+        const EXPECTED_TOTAL_LEN: usize = 1_119_164;
         let asm = *NATIVE_RUNTIME_C;
         assert_eq!(
             asm.len(),
@@ -1251,10 +1279,36 @@ mod tests {
         //   stricter errorInfo source metadata, and legacy direct Cage
         //   runtime removal leave the marker at byte 309,544 and the tail
         //   section at 161,883 bytes.
-        const F1_LEN: usize = 309_544;
+        // 2026-05-09 mapError follow-up: `taida_result_map_error` now
+        //   forwards the throw payload directly to the mapper and forks
+        //   on Error-shaped vs message-shaped returns. The function
+        //   lives in the post-Error-ceiling tail section, so F1 is
+        //   unchanged at 309,544 and F2 grows by 203 bytes (161,883 →
+        //   162,086).
+        // 2026-05-09 mapError Q-shape parity: the fork now also admits
+        //   user-defined `Error => Foo` BuchiPacks (HASH___TYPE +
+        //   HASH_MESSAGE) for direct storage; F2 grows by another 259
+        //   bytes (162,086 → 162,345).
+        // 2026-05-09 mapError Phase 2: forward-decl `taida_polymorphic_to_string`
+        //   nudges F1 by +300 bytes (309,544 → 309,844). The reduced
+        //   direct-store predicate, polymorphic to-string fallback,
+        //   and `__type` fallback in `taida_throw_to_display_string`
+        //   land in F2, which grows by +771 bytes (162,345 → 163,116).
+        // 2026-05-09 mapError Phase 3: tag-aware wrap branch in
+        //   `taida_result_map_error` lives entirely in F2 (post-Error
+        //   ceiling), which grows by +627 bytes (163,116 → 163,743).
+        //   F1 is unchanged at 309,844.
+        // 2026-05-09 mapError Phase 3.1: empty-message guard in
+        //   `taida_throw_to_display_string` adds +192 bytes to F2
+        //   (163,743 → 163,935). F1 still unchanged.
+        // 2026-05-09 E34B-020 (Codex review #16): `taida_list_unique_by`
+        //   added before `taida_list_sort_by` (above the Error
+        //   ceiling), so F1 grows by +1,397 bytes
+        //   (309,844 → 311,241). F2 is unchanged.
+        const F1_LEN: usize = 311_241;
         assert_eq!(
             CORE_SECTION.len(),
-            309_544 + 161_883,
+            311_241 + 163_935,
             "core.c total byte length must equal legacy fragment1 + fragment2 (C25B-001 / C25B-028 / C25B-025 / C26B-011 / C26B-020 / C26B-016 / C26B-018 / C26B-011-wS / C26B-024 / C26B-024-wepsilon adjusted; CI-red 2026-04-24 cppcheck clean-up adds 881/409 to F1/F2; @c.27 PR41 CI-red follow-up adds 61 to F1 for the cppcheck-suppress comment on the new taida_release_any helper; D28B-012 wF adds 4,821 to F1 for taida_arena_request_reset; D28B-026 review follow-up adds 425 to F1 for the active_chunk defensive corner; D29B-003 Track-β adds 6,407 to F1 for TAIDA_BYTES_CONTIG primitives + writev hot-path reflection; D29B-004 Track-ε adds 803 to F1 for taida_slice_mold inline note documenting deferred Native zero-copy view integration; D29B-005/012 Track-η adds 3,291 to F1 for taida_net_raw_as_bytes ABI Option-D rewrite + Span* release sites + taida_slice_mold CONTIG view fast path + subtraction-based Span* bounds checks; D29B-015 Track-β-2 adds 8,418 to F1 and 1,234 to F2 for Bytes dispatcher polymorphism + producer flip; D29B-016 Track-θ adds 910 to F1 for TAIDA_STR_ROPE_MAGIC sentinel + design rationale comment block; E32B-022 Lock-N adds 2,783 to F1 for the Lax[Int]-returning *indexOf*/search/FindIndex sibling helpers; E33B-003 Cat B adds 1,541 to F1 for `taida_make_error_with_kind` parity helper)"
         );
         const F2_PREFIX: &[u8] = b"// \xE2\x94\x80\xE2\x94\x80 Error ceiling";

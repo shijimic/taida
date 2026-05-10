@@ -2731,21 +2731,11 @@ function __taida_net_readBodyChunkCLSync(writer) {
 
 // Lax[Bytes] constructors for readBodyChunk.
 function __taida_net_makeLaxBytesEmpty() {
-  return Object.freeze({
-    hasValue: __taida_hasValue(false),
-    __value: new Uint8Array(0),
-    __default: new Uint8Array(0),
-    __type: 'Lax',
-  });
+  return Lax(null, new Uint8Array(0));
 }
 
 function __taida_net_makeLaxBytesValue(bytes) {
-  return Object.freeze({
-    hasValue: __taida_hasValue(true),
-    __value: bytes,
-    __default: new Uint8Array(0),
-    __type: 'Lax',
-  });
+  return Lax(bytes, new Uint8Array(0));
 }
 
 // NET4-3a: readBodyAll(req) → Bytes
@@ -3373,39 +3363,19 @@ function __taida_net_wsUpgrade(req, writer) {
 
 // Lax constructors for WebSocket.
 function __taida_net_makeLaxWsEmpty() {
-  return Object.freeze({
-    hasValue: __taida_hasValue(false),
-    __value: Object.freeze({}),
-    __default: Object.freeze({}),
-    __type: 'Lax',
-  });
+  return Lax(null, Object.freeze({}));
 }
 
 function __taida_net_makeLaxWsValue(ws) {
-  return Object.freeze({
-    hasValue: __taida_hasValue(true),
-    __value: Object.freeze({ ws: ws }),
-    __default: Object.freeze({}),
-    __type: 'Lax',
-  });
+  return Lax(Object.freeze({ ws: ws }), Object.freeze({}));
 }
 
 function __taida_net_makeLaxWsFrameValue(typeStr, data) {
-  return Object.freeze({
-    hasValue: __taida_hasValue(true),
-    __value: Object.freeze({ type: typeStr, data: data }),
-    __default: Object.freeze({}),
-    __type: 'Lax',
-  });
+  return Lax(Object.freeze({ type: typeStr, data: data }), Object.freeze({}));
 }
 
 function __taida_net_makeLaxWsFrameEmpty() {
-  return Object.freeze({
-    hasValue: __taida_hasValue(false),
-    __value: Object.freeze({}),
-    __default: Object.freeze({}),
-    __type: 'Lax',
-  });
+  return Lax(null, Object.freeze({}));
 }
 
 // NB4-10: Validate ws token — checks both sentinel AND connection-scoped token.

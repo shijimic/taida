@@ -29,7 +29,7 @@ none_mapped <= Div[0, 0]().map(double)
 debug(none_mapped.getOrDefault(0))
 
 // Test 7: Lax.flatMap(fn)
-wrapDouble x = Lax[x * 2]() => :Int
+wrapDouble x: Int = Lax[x * 2]() => :Lax[Int]
 flat_mapped <= Lax[10]().flatMap(wrapDouble)
 debug(flat_mapped.getOrDefault(0))
 
@@ -61,7 +61,7 @@ err_mapped <= Result[0](throw <= TestError(message <= "fail")).map(double)
 debug(err_mapped.isError())
 
 // Test 14: Result.flatMap(fn)
-wrapResult x = Result[x * 3]() => :Int
+wrapResult x: Int = Result[x * 3]() => :Result[Int, TestError]
 flat_ok <= Result[7]().flatMap(wrapResult)
 debug(flat_ok.getOrDefault(0))
 
@@ -84,7 +84,7 @@ lax_em ]=> le_result
 debug(le_result)
 
 // Test 18: Lax.flatMap(fn)
-wrapLax x = Lax[x * 5]() => :Int
+wrapLax x: Int = Lax[x * 5]() => :Lax[Int]
 lax_fm <= Div[10, 2]().flatMap(wrapLax)
 lax_fm ]=> lfm_result
 debug(lfm_result)

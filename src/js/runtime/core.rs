@@ -1,15 +1,11 @@
 //! JS runtime: core helpers, types, arithmetic, I/O, regex, stream.
 //!
-//! Split out from monolithic `src/js/runtime.rs` as part of C12-9
-//! (FB-21 mechanical file split). This chunk covers helpers / Lax /
-//! Result / BuchiPack / throw / async / Regex / stream / stdout /
-//! stderr / stdin / trampoline / format / toString, plus the
-//! HashMap / Set / equals / typeof / spread helpers. Original
-//! source line range: 4..2003.
+//! This chunk covers helpers / Lax / Result / BuchiPack / throw /
+//! async / Regex / stream / stdout / stderr / stdin / trampoline /
+//! format / toString, plus the HashMap / Set / equals / typeof /
+//! spread helpers.
 //!
-//! See `src/js/runtime/mod.rs::RUNTIME_JS` for the assembled constant
-//! and the file-split boundary table at
-//! `.dev/taida-logs/docs/design/file_boundaries.md`.
+//! See `src/js/runtime/mod.rs::RUNTIME_JS` for the assembled constant.
 
 pub(super) const CORE_JS: &str = r#"
 // taida-runtime.js — Taida Lang JavaScript Runtime
@@ -139,49 +135,13 @@ function Float_mold_f(value) {
   else if (typeof value === 'string') {
     const f = parseFloat(value);
     if (isNaN(f)) {
-      return Object.freeze({
-        __type: 'Lax',
-        __floatHint: true,
-        __value: 0.0,
-        __default: 0.0,
-        hasValue: __taida_hasValue(false),
-        isEmpty() { return true; },
-        getOrDefault(def) { return def; },
-        map(fn) { return this; },
-        flatMap(fn) { return this; },
-        unmold() { return 0.0; },
-        toString() { return 'Lax(default: 0.0)'; },
-      });
+      return Lax(null, 0.0, true);
     }
     num = f;
   } else {
-    return Object.freeze({
-      __type: 'Lax',
-      __floatHint: true,
-      __value: 0.0,
-      __default: 0.0,
-      hasValue: __taida_hasValue(false),
-      isEmpty() { return true; },
-      getOrDefault(def) { return def; },
-      map(fn) { return this; },
-      flatMap(fn) { return this; },
-      unmold() { return 0.0; },
-      toString() { return 'Lax(default: 0.0)'; },
-    });
+    return Lax(null, 0.0, true);
   }
-  return Object.freeze({
-    __type: 'Lax',
-    __floatHint: true,
-    __value: num,
-    __default: 0.0,
-    hasValue: __taida_hasValue(true),
-    isEmpty() { return false; },
-    getOrDefault(def) { return num; },
-    map(fn) { const r = fn(num); return (r && r.__type === 'Lax') ? r : Lax(r); },
-    flatMap(fn) { const r = fn(num); return (r && r.__type === 'Lax') ? r : Lax(r); },
-    unmold() { return num; },
-    toString() { return 'Lax(' + __taida_float_render(num) + ')'; },
-  });
+  return Lax(num, 0.0, true);
 }
 
 function __taida_ensureNotNull(value, defaultValue) {
@@ -288,6 +248,7 @@ function __taida_lax_from_bytes(bytes, hasValue) {
     __default: new Uint8Array(0),
     hasValue: __taida_hasValue(!!hasValue),
     isEmpty() { return !hasValue; },
+    errorInfo() { return __taida_error_info_lax(null); },
     getOrDefault(def) { return hasValue ? val : def; },
     map(fn) { return hasValue ? Lax(fn(val)) : this; },
     flatMap(fn) {
@@ -694,7 +655,7 @@ function JSON_mold(rawValue, schema) {
     try { jsonData = JSON.parse(rawValue); }
     catch (e) {
       const defaultVal = __taida_defaultForSchema(schema);
-      return Object.freeze({ __type: 'Lax', hasValue: __taida_hasValue(false), __value: defaultVal, __default: defaultVal, __error: 'JSON parse error: ' + e.message });
+      return Lax(null, defaultVal, undefined, 'JSON parse error: ' + e.message);
     }
   } else {
     jsonData = __taidaValueToJson(rawValue);
@@ -703,7 +664,7 @@ function JSON_mold(rawValue, schema) {
   // Cast through schema
   const typedValue = __taida_castJson(jsonData, schema);
   const defaultVal = __taida_defaultForSchema(schema);
-  return Object.freeze({ __type: 'Lax', hasValue: __taida_hasValue(true), __value: typedValue, __default: defaultVal });
+  return Lax(typedValue, defaultVal);
 }
 
 // C16: Decide whether a field default for a missing/null Enum field should be
@@ -895,9 +856,24 @@ function __taida_result_create(value, throwVal, predicate) {
     },
     mapError(fn) {
       if (!_checkError()) return this;
-      const errMsg = _throw && _throw.message ? _throw.message : String(_throw);
-      const newMsg = fn(errMsg);
-      return __taida_result_create(null, { __type: 'ResultError', message: String(newMsg), type: 'ResultError' }, null);
+      // Pass the throw payload `P` directly to the mapper so the runtime
+      // matches `mapError(fn: P -> Q) -> Result[T, Q]`. Direct-store
+      // applies to Error-derived BuchiPacks (those carrying `__type`);
+      // anything else is wrapped in a generic ResultError carrier whose
+      // message is materialised via `__taida_format` so anonymous packs
+      // and primitives round-trip the same string Interpreter/Native
+      // produce instead of `[object Object]`.
+      const mapped = fn(_throw);
+      let newThrow;
+      if (mapped && typeof mapped === 'object' && mapped.__type) {
+        newThrow = mapped;
+      } else {
+        const msg = (mapped && typeof mapped === 'object')
+          ? __taida_format(mapped)
+          : String(mapped);
+        newThrow = { __type: 'ResultError', message: msg, type: 'ResultError' };
+      }
+      return __taida_result_create(null, newThrow, null);
     },
     getOrThrow() {
       if (!_checkError()) return _value;
@@ -915,7 +891,26 @@ function __taida_result_create(value, throwVal, predicate) {
     },
     toString() {
       if (!_checkError()) return 'Result(' + String(_value) + ')';
-      const errDisplay = _throw && _throw.message ? _throw.message : (_throw ? String(_throw) : 'predicate failed');
+      let errDisplay;
+      if (_throw && typeof _throw === 'object') {
+        // The JS Error factory always materialises `message: ''` for
+        // Error-derived packs, so an empty string is indistinguishable
+        // from a missing message. Treat `message === ''` as "no
+        // message" and fall back to the declared `__type` name; the
+        // four backends agree on this even though Interpreter / Native
+        // can technically tell the two states apart.
+        if (typeof _throw.message === 'string' && _throw.message.length > 0) {
+          errDisplay = _throw.message;
+        } else if (_throw.__type) {
+          errDisplay = _throw.__type;
+        } else {
+          errDisplay = String(_throw);
+        }
+      } else if (_throw) {
+        errDisplay = String(_throw);
+      } else {
+        errDisplay = 'predicate failed';
+      }
       return 'Result(throw <= ' + errDisplay + ')';
     },
     unmold() {
@@ -980,7 +975,7 @@ function __taida_hasValue(val) {
   return fn;
 }
 
-function Lax(value, typedDefault, floatHint) {
+function Lax(value, typedDefault, floatHint, error) {
   const _hasValue = value !== null && value !== undefined;
   const _default = _hasValue ? __taida_lax_default(value) : (typedDefault !== undefined ? typedDefault : 0);
   const _val = _hasValue ? value : _default;
@@ -991,12 +986,21 @@ function Lax(value, typedDefault, floatHint) {
   // Without this the default `String(0.0)` collapses to `"0"` and the
   // interpreter's `Lax(default: 0.0)` drifts.
   const _floatHint = floatHint === true;
+  // E34 Phase 3 (Lock-D=B'): optional ErrorInfo carrier. Producers like
+  // JSON failure / net / file / process pass an `error` describing the
+  // failure cause; `errorInfo()` surfaces it as Lax[ErrorInfo]. The
+  // `__error` field is **not** materialised on the pack object when no
+  // error is recorded — this preserves backwards-compatible JSON
+  // serialisation (jsonEncode / __default / __value parity tests must
+  // not see a null __error key on success).
+  const _error = error === undefined ? null : error;
   const pack = {
     __type: 'Lax',
     __value: _val,
     __default: _default,
     hasValue: __taida_hasValue(_hasValue),
     isEmpty() { return !_hasValue; },
+    errorInfo() { return _hasValue ? __taida_error_info_lax(null) : __taida_error_info_lax(_error); },
     getOrDefault(def) { return _hasValue ? _val : def; },
     map(fn) { return _hasValue ? Lax(fn(_val), undefined, _floatHint) : this; },
     flatMap(fn) {
@@ -1012,6 +1016,7 @@ function Lax(value, typedDefault, floatHint) {
     },
   };
   if (_floatHint) pack.__floatHint = true;
+  if (_error !== null) pack.__error = _error;
   return Object.freeze(pack);
 }
 
@@ -2024,7 +2029,11 @@ function Sort(list, opts) {
   } else {
     copy.sort((a, b) => a < b ? -1 : a > b ? 1 : 0);
   }
-  if (opts && opts.reverse) copy.reverse();
+  // E34B-021: `desc` is treated as an alias for `reverse` so that
+  // every backend honours `Sort[xs](by <= ..., desc <= true)` the
+  // same way (Native / WASM already OR these two options together
+  // in `lower_molds.rs`).
+  if (opts && (opts.reverse || opts.desc)) copy.reverse();
   return Object.freeze(copy);
 }
 function Unique(list, opts) {
@@ -2655,36 +2664,13 @@ if (!Array.prototype.__taida_patched) {
     value: function(idx, customDefault) {
       if (idx >= 0 && idx < this.length) {
         const val = this[idx];
-        const lax = Lax(val);
         if (customDefault !== undefined) {
-          return Object.freeze({
-            __type: 'Lax',
-            __value: val,
-            __default: customDefault,
-            hasValue: __taida_hasValue(true),
-            isEmpty() { return false; },
-            getOrDefault(def) { return val; },
-            map(fn) { return Lax(fn(val)); },
-            flatMap(fn) { const r = fn(val); return r && r.__type === 'Lax' ? r : Lax(r); },
-            unmold() { return val; },
-            toString() { return 'Lax(' + String(val) + ')'; },
-          });
+          return Lax(val, customDefault);
         }
-        return lax;
+        return Lax(val);
       }
       const def = customDefault !== undefined ? customDefault : (this.length > 0 ? __taida_lax_default(this[0]) : 0);
-      return Object.freeze({
-        __type: 'Lax',
-        __value: def,
-        __default: def,
-        hasValue: __taida_hasValue(false),
-        isEmpty() { return true; },
-        getOrDefault(d) { return d; },
-        map(fn) { return this; },
-        flatMap(fn) { return this; },
-        unmold() { return def; },
-        toString() { return 'Lax(default: ' + String(def) + ')'; },
-      });
+      return Lax(null, def);
     }, enumerable: false
   });
   // isEmpty() — check if list is empty
@@ -2742,12 +2728,7 @@ if (typeof Uint8Array !== 'undefined' && !Uint8Array.prototype.__taida_bytes_pat
   Object.defineProperty(Uint8Array.prototype, 'get', {
     value: function(idx) {
       if (__taida_isIntNumber(idx) && idx >= 0 && idx < this.length) return Lax(Number(this[idx]));
-      return Object.freeze({
-        __type: 'Lax', __value: 0, __default: 0, hasValue: __taida_hasValue(false),
-        isEmpty() { return true; }, getOrDefault(d) { return d; },
-        map(fn) { return this; }, flatMap(fn) { return this; },
-        unmold() { return 0; }, toString() { return 'Lax(default: 0)'; },
-      });
+      return Lax(null, 0);
     }, enumerable: false
   });
   Object.defineProperty(Uint8Array.prototype, 'toString', {
@@ -2804,12 +2785,7 @@ if (!String.prototype.__taida_str_patched) {
   Object.defineProperty(String.prototype, 'get', {
     value: function(idx) {
       if (idx >= 0 && idx < this.length) return Lax(this[idx]);
-      return Object.freeze({
-        __type: 'Lax', __value: '', __default: '', hasValue: __taida_hasValue(false),
-        isEmpty() { return true; }, getOrDefault(d) { return d; },
-        map(fn) { return this; }, flatMap(fn) { return this; },
-        unmold() { return ''; }, toString() { return 'Lax(default: "")'; },
-      });
+      return Lax(null, '');
     }, enumerable: false
   });
 }
