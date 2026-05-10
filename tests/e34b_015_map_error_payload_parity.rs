@@ -165,11 +165,7 @@ fn assert_four_backends_agree(results: &[(String, String); 4]) {
         if out.is_empty() {
             continue;
         }
-        assert_eq!(
-            out, &interp,
-            "{} backend disagrees with interp",
-            backend
-        );
+        assert_eq!(out, &interp, "{} backend disagrees with interp", backend);
     }
 }
 

@@ -132,11 +132,9 @@ fn assert_three_backends_agree(results: &[(String, Option<String>); 3]) {
     for (backend, out) in results {
         match out {
             None => continue,
-            Some(actual) => assert_eq!(
-                actual, &interp,
-                "{} backend disagrees with interp",
-                backend
-            ),
+            Some(actual) => {
+                assert_eq!(actual, &interp, "{} backend disagrees with interp", backend)
+            }
         }
     }
 }

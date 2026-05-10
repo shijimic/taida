@@ -219,7 +219,10 @@ impl TypeChecker {
                     "mapError" => Some((
                         1,
                         1,
-                        vec![Type::Function(vec![error_ty.clone()], Box::new(Type::Unknown))],
+                        vec![Type::Function(
+                            vec![error_ty.clone()],
+                            Box::new(Type::Unknown),
+                        )],
                     )),
                     "getOrDefault" => Some((1, 1, vec![success_ty])),
                     "getOrThrow" => Some((0, 0, vec![])),
@@ -260,35 +263,34 @@ impl TypeChecker {
             // value. Surface its declared signature so that the regular
             // boundary subtype check applies — otherwise the legacy
             // unknown-method path silently swallowed every arg type.
-            Type::BuchiPack(fields) => fields
-                .iter()
-                .find(|(name, _)| name == method)
-                .and_then(|(_, ty)| match ty {
-                    Type::Function(params, _) => {
-                        Some((params.len(), params.len(), params.clone()))
-                    }
-                    _ => None,
-                }),
+            Type::BuchiPack(fields) => {
+                fields
+                    .iter()
+                    .find(|(name, _)| name == method)
+                    .and_then(|(_, ty)| match ty {
+                        Type::Function(params, _) => {
+                            Some((params.len(), params.len(), params.clone()))
+                        }
+                        _ => None,
+                    })
+            }
             // E34B-013 / E34B-014 follow-up (Codex review #10): a
             // function-valued field on a declared `Named` (TypeDef /
             // MoldDef) struct must obey the same boundary discipline as
             // a `BuchiPack` literal. Walk the type's registered fields
             // and surface the signature of any `Type::Function` field
             // that matches the called name.
-            Type::Named(type_name) => self
-                .registry
-                .get_type_fields(type_name)
-                .and_then(|fields| {
-                    fields
-                        .iter()
-                        .find(|(name, _)| name == method)
-                        .and_then(|(_, ty)| match ty {
-                            Type::Function(params, _) => {
-                                Some((params.len(), params.len(), params.clone()))
-                            }
-                            _ => None,
-                        })
-                }),
+            Type::Named(type_name) => self.registry.get_type_fields(type_name).and_then(|fields| {
+                fields
+                    .iter()
+                    .find(|(name, _)| name == method)
+                    .and_then(|(_, ty)| match ty {
+                        Type::Function(params, _) => {
+                            Some((params.len(), params.len(), params.clone()))
+                        }
+                        _ => None,
+                    })
+            }),
             _ => {
                 // N-66: For unknown/unresolved receiver types (Type::Unknown, Type::Any,
                 // Type::Generic for non-Lax/Result/Async, user-defined Named types without
@@ -445,10 +447,8 @@ impl TypeChecker {
                     // used through `xs.map(double)`) without
                     // re-introducing the unbounded wildcard slip.
                     if matches!(arg, Expr::Ident(_, _))
-                        && let (
-                            Type::Function(act_params, act_ret),
-                            Type::Function(exp_params, _),
-                        ) = (&actual_ty, expected_ty)
+                        && let (Type::Function(act_params, act_ret), Type::Function(exp_params, _)) =
+                            (&actual_ty, expected_ty)
                     {
                         // E34B-014 follow-up (Codex review #11):
                         // strict reject only fires when at least one
@@ -462,14 +462,11 @@ impl TypeChecker {
                         // the author has not written annotations.
                         // Mixed shapes (one param annotated, another
                         // not) still trip the strict rule.
-                        let all_params_unannotated = act_params
-                            .iter()
-                            .all(|t| matches!(t, Type::Unknown));
+                        let all_params_unannotated =
+                            act_params.iter().all(|t| matches!(t, Type::Unknown));
                         if !all_params_unannotated {
-                            let mismatch = act_params
-                                .iter()
-                                .zip(exp_params.iter())
-                                .position(|(a, e)| {
+                            let mismatch =
+                                act_params.iter().zip(exp_params.iter()).position(|(a, e)| {
                                     matches!(a, Type::Unknown) && !matches!(e, Type::Unknown)
                                 });
                             if let Some(pos) = mismatch {
@@ -504,7 +501,9 @@ impl TypeChecker {
                     // function/method-arg slots while preserving the
                     // wider widening rule for non-boundary contexts
                     // (numeric arithmetic / direct assignment).
-                    let pass = self.registry.is_function_arg_subtype_of(&actual_ty, expected_ty);
+                    let pass = self
+                        .registry
+                        .is_function_arg_subtype_of(&actual_ty, expected_ty);
                     if !pass {
                         let hint = match expected_ty {
                             Type::Function(exp_params, _) => format!(
@@ -548,8 +547,7 @@ impl TypeChecker {
     /// Lambda inference. The general lambda inference path remains
     /// unchanged (no annotation -> `Type::Unknown`).
     fn infer_lambda_with_hint(&mut self, expr: &Expr, expected: &Type) -> Type {
-        let (Expr::Lambda(params, body, _), Type::Function(expected_params, _)) =
-            (expr, expected)
+        let (Expr::Lambda(params, body, _), Type::Function(expected_params, _)) = (expr, expected)
         else {
             return self.infer_expr_type(expr);
         };
@@ -561,10 +559,7 @@ impl TypeChecker {
                 if let Some(annotation) = &p.type_annotation {
                     self.registry.resolve_type(annotation)
                 } else {
-                    expected_params
-                        .get(i)
-                        .cloned()
-                        .unwrap_or(Type::Unknown)
+                    expected_params.get(i).cloned().unwrap_or(Type::Unknown)
                 }
             })
             .collect();
@@ -618,10 +613,8 @@ impl TypeChecker {
                 if let Some(Type::Function(_, ret)) = this.typed_expr_table.lookup(arg) {
                     return (**ret).clone();
                 }
-                let expected_fn = Type::Function(
-                    vec![expected_param.clone()],
-                    Box::new(Type::Unknown),
-                );
+                let expected_fn =
+                    Type::Function(vec![expected_param.clone()], Box::new(Type::Unknown));
                 let inferred = this.infer_lambda_with_hint(arg, &expected_fn);
                 if let Type::Function(_, ret) = inferred {
                     return *ret;
@@ -663,16 +656,10 @@ impl TypeChecker {
                     {
                         return Type::Generic(
                             "Result".to_string(),
-                            vec![
-                                ra.first().cloned().unwrap_or(Type::Unknown),
-                                error_ty,
-                            ],
+                            vec![ra.first().cloned().unwrap_or(Type::Unknown), error_ty],
                         );
                     }
-                    return Type::Generic(
-                        "Result".to_string(),
-                        vec![Type::Unknown, error_ty],
-                    );
+                    return Type::Generic("Result".to_string(), vec![Type::Unknown, error_ty]);
                 }
                 ("Result", "mapError") => {
                     let q = lambda_ret(self, &error_ty);

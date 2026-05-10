@@ -638,22 +638,16 @@ mod tests {
         assert!(!Type::Int.contains_concrete_unknown());
         assert!(!Type::Bool.contains_concrete_unknown());
         assert!(Type::Unknown.contains_concrete_unknown());
-        assert!(
-            Type::List(Box::new(Type::Unknown)).contains_concrete_unknown()
-        );
+        assert!(Type::List(Box::new(Type::Unknown)).contains_concrete_unknown());
         assert!(
             Type::Function(vec![Type::Unknown], Box::new(Type::Int)).contains_concrete_unknown()
         );
         assert!(
             Type::Function(vec![Type::Int], Box::new(Type::Unknown)).contains_concrete_unknown()
         );
-        assert!(!Type::Function(vec![Type::Int], Box::new(Type::Int))
-            .contains_concrete_unknown());
-        assert!(
-            Type::Generic("Lax".to_string(), vec![Type::Unknown]).contains_concrete_unknown()
-        );
-        assert!(!Type::Generic("Lax".to_string(), vec![Type::Int])
-            .contains_concrete_unknown());
+        assert!(!Type::Function(vec![Type::Int], Box::new(Type::Int)).contains_concrete_unknown());
+        assert!(Type::Generic("Lax".to_string(), vec![Type::Unknown]).contains_concrete_unknown());
+        assert!(!Type::Generic("Lax".to_string(), vec![Type::Int]).contains_concrete_unknown());
     }
 
     #[test]

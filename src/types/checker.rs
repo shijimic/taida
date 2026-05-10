@@ -5406,9 +5406,7 @@ defaulted fields must be provided via `()`",
                         }
                         if let Some(ms_arg) = type_args.get(1) {
                             let ms_ty = self.infer_expr_type(ms_arg);
-                            if !matches!(ms_ty, Type::Unknown)
-                                && !ms_ty.is_numeric()
-                            {
+                            if !matches!(ms_ty, Type::Unknown) && !ms_ty.is_numeric() {
                                 self.errors.push(TypeError {
                                     message: format!(
                                         "[E1506] `Timeout[async, ms]()`: second argument has \

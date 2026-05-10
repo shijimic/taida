@@ -2,8 +2,8 @@
 
 mod checker;
 pub mod mold_returns;
-mod types;
 pub mod typed_hir;
+mod types;
 
 pub use checker::*;
 pub use typed_hir::{ExprId, TypedExprTable};

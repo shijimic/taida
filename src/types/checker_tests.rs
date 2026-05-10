@@ -4897,7 +4897,6 @@ result <= Cage[JSON[raw, Data](), JSCall[@[], @[], Int]()]()
     );
 }
 
-
 // E34 Phase 1.3 (Lock-B=C foundation): TypedExprTable delivery tests.
 // Verify that infer_expr_type records into the table for every expression.
 
@@ -4916,11 +4915,10 @@ fn typed_expr_table_records_lax_inner_type() {
     let (checker, errors) = check("obj <= Lax[42]()\n");
     assert!(errors.is_empty(), "errors: {:?}", errors);
     // The Lax[42]() expression should have been typed as Lax[Int].
-    let has_lax_int = checker
-        .typed_expr_table
-        .iter()
-        .any(|(_, ty)| matches!(ty, Type::Generic(n, args)
-            if n == "Lax" && args.len() == 1 && args[0] == Type::Int));
+    let has_lax_int = checker.typed_expr_table.iter().any(|(_, ty)| {
+        matches!(ty, Type::Generic(n, args)
+            if n == "Lax" && args.len() == 1 && args[0] == Type::Int)
+    });
     assert!(
         has_lax_int,
         "Expected Lax[Int] in typed_expr_table, got: {:?}",
@@ -5077,8 +5075,9 @@ fn e34b_005_result_error_info_rejected_at_type_check() {
                info <= failure.errorInfo()\n";
     let (_, errors) = check(src);
     assert!(
-        errors.iter().any(|e| e.message.contains("[E1509]")
-            && e.message.contains("errorInfo")),
+        errors
+            .iter()
+            .any(|e| e.message.contains("[E1509]") && e.message.contains("errorInfo")),
         "Expected [E1509] for Result.errorInfo(), got: {:?}",
         errors
     );
@@ -5090,8 +5089,9 @@ fn e34b_005_async_error_info_rejected_at_type_check() {
                info <= task.errorInfo()\n";
     let (_, errors) = check(src);
     assert!(
-        errors.iter().any(|e| e.message.contains("[E1509]")
-            && e.message.contains("errorInfo")),
+        errors
+            .iter()
+            .any(|e| e.message.contains("[E1509]") && e.message.contains("errorInfo")),
         "Expected [E1509] for Async.errorInfo(), got: {:?}",
         errors
     );
@@ -5282,4 +5282,3 @@ fn e34b_018_lax_and_result_accept_canonical_shapes() {
         errors
     );
 }
-

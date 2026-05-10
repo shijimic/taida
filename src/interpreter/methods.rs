@@ -359,11 +359,7 @@ impl Interpreter {
                     .and_then(|(_, v)| {
                         if let Value::Str(s) = v {
                             let s = s.as_string();
-                            if s.is_empty() {
-                                None
-                            } else {
-                                Some(s.clone())
-                            }
+                            if s.is_empty() { None } else { Some(s.clone()) }
                         } else {
                             None
                         }
@@ -574,7 +570,7 @@ impl Interpreter {
                 // carry). Anything else — anonymous packs, primitives —
                 // falls back to a generic `ResultError` wrapper so the
                 // throw still has a coherent display string.
-                let result = self.call_function_with_values(&func, &[throw_val.clone()])?;
+                let result = self.call_function_with_values(&func, std::slice::from_ref(&throw_val))?;
                 let is_error_derived_pack = matches!(
                     &result,
                     Value::BuchiPack(fs)

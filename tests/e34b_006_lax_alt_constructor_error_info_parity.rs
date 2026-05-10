@@ -132,11 +132,7 @@ fn assert_three_backends_agree(results: &[(String, String); 3]) {
         if out.is_empty() {
             continue;
         }
-        assert_eq!(
-            out, &interp,
-            "{} backend disagrees with interp",
-            backend
-        );
+        assert_eq!(out, &interp, "{} backend disagrees with interp", backend);
     }
 }
 

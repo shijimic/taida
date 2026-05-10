@@ -22,10 +22,10 @@ fn typed_table_for(src: &str) -> TypedExprTable {
 #[test]
 fn smoke_records_lax_inner_int() {
     let table = typed_table_for("obj <= Lax[42]()\n");
-    let has_lax_int = table
-        .iter()
-        .any(|(_, ty)| matches!(ty, Type::Generic(n, args)
-            if n == "Lax" && args.len() == 1 && args[0] == Type::Int));
+    let has_lax_int = table.iter().any(|(_, ty)| {
+        matches!(ty, Type::Generic(n, args)
+            if n == "Lax" && args.len() == 1 && args[0] == Type::Int)
+    });
     assert!(has_lax_int, "Expected Lax[Int] in TypedExprTable");
 }
 
