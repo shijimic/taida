@@ -269,7 +269,18 @@ impl TypeChecker {
                     .find(|(name, _)| name == method)
                     .and_then(|(_, ty)| match ty {
                         Type::Function(params, _) => {
-                            Some((params.len(), params.len(), params.clone()))
+                            // `Unit => :T` is a zero-argument signature
+                            // marker (the only declare-only fn field shape
+                            // gen-E permits). Treat the single Unit param
+                            // as an empty signature so callers can write
+                            // `pack.fn()` without the arity check
+                            // wrongly demanding one argument.
+                            let effective = if params.len() == 1 && params[0] == Type::Unit {
+                                vec![]
+                            } else {
+                                params.clone()
+                            };
+                            Some((effective.len(), effective.len(), effective))
                         }
                         _ => None,
                     })
@@ -286,7 +297,15 @@ impl TypeChecker {
                     .find(|(name, _)| name == method)
                     .and_then(|(_, ty)| match ty {
                         Type::Function(params, _) => {
-                            Some((params.len(), params.len(), params.clone()))
+                            // See `Type::BuchiPack` arm: `Unit => :T` is the
+                            // gen-E declare-only fn field marker for a
+                            // zero-argument signature.
+                            let effective = if params.len() == 1 && params[0] == Type::Unit {
+                                vec![]
+                            } else {
+                                params.clone()
+                            };
+                            Some((effective.len(), effective.len(), effective))
                         }
                         _ => None,
                     })

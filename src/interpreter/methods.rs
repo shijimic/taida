@@ -570,7 +570,8 @@ impl Interpreter {
                 // carry). Anything else — anonymous packs, primitives —
                 // falls back to a generic `ResultError` wrapper so the
                 // throw still has a coherent display string.
-                let result = self.call_function_with_values(&func, std::slice::from_ref(&throw_val))?;
+                let result =
+                    self.call_function_with_values(&func, std::slice::from_ref(&throw_val))?;
                 let is_error_derived_pack = matches!(
                     &result,
                     Value::BuchiPack(fs)

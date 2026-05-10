@@ -171,7 +171,8 @@ raceResult <= Race[asyncOps]()
 raceResult ]=> winner  // 最初の要素が返されます
 
 // Timeout: タイムアウト付きで結果を待ちます
-timeoutResult <= Timeout[someAsync, 5000]()
+firstAsync <= asyncOps.first().getOrDefault(Async[0]())
+timeoutResult <= Timeout[firstAsync, 5000]()
 timeoutResult ]=> data  // タイムアウト前に完了すれば値を返します
 
 // nowMs/sleep: 最小時間プリミティブ
