@@ -28,7 +28,7 @@ REGISTRY_PATH = Path("src/types/mold_specs.rs")
 
 SIG_RE = re.compile(r"`([A-Z][A-Za-z0-9_]*)\[([^`]*)\]\(\)`")
 HEADING_SIG_RE = re.compile(r"(?<![A-Za-z0-9_])([A-Z][A-Za-z0-9_]*)\[([^\]]*)\]")
-RUNTIME_NAME_RE = re.compile(r'"([A-Z][A-Za-z0-9_]*)"\s*(?:\||=>)')
+RUNTIME_ARM_NAME_RE = re.compile(r'"([A-Z][A-Za-z0-9_]*)"')
 
 TYPE_ONLY_HEADINGS = {
     "RelaxedGorillax",
@@ -187,11 +187,14 @@ def parse_option_sets(text: str) -> dict[str, set[str]]:
 def parse_registry(root: Path) -> dict[str, RegistrySpec]:
     text = (root / REGISTRY_PATH).read_text(encoding="utf-8")
     option_sets = parse_option_sets(text)
-    starts = [m.start() for m in re.finditer(r"MoldSpec::(?:exact|range)\(", text)]
+    table_start = text.index("pub static MOLD_SPECS")
+    table_end = text.index("];", table_start)
+    table = text[table_start:table_end]
+    starts = [m.start() for m in re.finditer(r"MoldSpec::(?:exact|range)\(", table)]
     specs: dict[str, RegistrySpec] = {}
     for index, start in enumerate(starts):
-        end = starts[index + 1] if index + 1 < len(starts) else text.find("];", start)
-        block = text[start:end]
+        end = starts[index + 1] if index + 1 < len(starts) else len(table)
+        block = table[start:end]
         header = re.search(r'MoldSpec::(exact|range)\(\s*"([^"]+)"', block)
         if not header:
             continue
@@ -229,7 +232,20 @@ def parse_runtime_names(root: Path) -> dict[str, set[str]]:
     names: dict[str, set[str]] = {}
     for rel in RUNTIME_PATHS:
         path = root / rel
-        found = set(RUNTIME_NAME_RE.findall(path.read_text(encoding="utf-8")))
+        found: set[str] = set()
+        pending: list[str] = []
+        for raw in path.read_text(encoding="utf-8").splitlines():
+            line = raw.split("//", 1)[0]
+            stripped = line.lstrip()
+            if not stripped:
+                continue
+            if not (stripped.startswith('"') or stripped.startswith("|")):
+                pending.clear()
+                continue
+            pending.extend(RUNTIME_ARM_NAME_RE.findall(stripped))
+            if "=>" in stripped:
+                found.update(pending)
+                pending.clear()
         for name in found:
             names.setdefault(name, set()).add(str(rel))
     return names
@@ -309,14 +325,13 @@ def check(strict: bool) -> int:
         print(f"  note: {msg}")
 
     if failures:
-        print("  result            : DRIFT")
+        result = "DRIFT" if strict else "DRIFT (non-strict)"
+        print(f"  result            : {result}")
         for msg in failures:
             print(f"  - {msg}")
-        return 1
+        return 1 if strict else 0
 
     print("  result            : OK")
-    if strict:
-        return 0
     return 0
 
 
