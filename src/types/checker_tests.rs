@@ -4273,6 +4273,97 @@ fn test_c18_1_function_returning_imported_enum_is_usable() {
     );
 }
 
+#[test]
+fn imported_bool_function_signature_records_bool_call_type() {
+    let dir = C18TempDir::new("boolfn");
+    dir.write(
+        "bool_mod.td",
+        "giveTrue x = x > 0 => :Bool\n<<< @(giveTrue)\n",
+    );
+    let consumer = dir.write(
+        "bool_use.td",
+        ">>> ./bool_mod.td => @(giveTrue)\n\
+         direct <= giveTrue(5)\n\
+         f <= giveTrue\n\
+         via_value <= f(10)\n",
+    );
+    let (checker, errors) = check_file(&consumer);
+    assert!(errors.is_empty(), "errors: {:?}", errors);
+    let bool_entries = checker
+        .typed_expr_table
+        .iter()
+        .filter(|(_, ty)| *ty == &Type::Bool)
+        .count();
+    assert!(
+        bool_entries >= 2,
+        "imported direct and function-value calls should both be Bool, got: {:?}",
+        checker.typed_expr_table.iter().collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn imported_function_signature_checks_param_types() {
+    let dir = C18TempDir::new("fnparams");
+    dir.write(
+        "fn_mod.td",
+        "isPositive x: Int = x > 0 => :Bool\n<<< @(isPositive)\n",
+    );
+    let consumer = dir.write(
+        "fn_use.td",
+        ">>> ./fn_mod.td => @(isPositive)\n\
+         bad <= isPositive(\"x\")\n",
+    );
+    let (_checker, errors) = check_file(&consumer);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1506]")),
+        "imported function parameter type should be enforced, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn imported_generic_function_signature_rewrites_aliased_return_type() {
+    let dir = C18TempDir::new("generic_alias");
+    dir.write(
+        "box_mod.td",
+        "Mold[T] => Box[T] = @(value: T)\n\
+         wrap[T] x: T = Box[x]() => :Box[T]\n\
+         <<< @(Box, wrap)\n",
+    );
+    let consumer = dir.write(
+        "box_use.td",
+        ">>> ./box_mod.td => @(Box: CrateBox, wrap)\n\
+         value: CrateBox[Int] <= wrap(1)\n",
+    );
+    let (_checker, errors) = check_file(&consumer);
+    assert!(
+        errors.is_empty(),
+        "generic imported function should return the aliased type, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn local_unannotated_bool_function_records_bool_call_type() {
+    let (checker, errors) = check(
+        "isPositive x =\n  x > 0\n\
+direct <= isPositive(5)\n\
+f <= isPositive\n\
+viaValue <= f(10)\n",
+    );
+    assert!(errors.is_empty(), "errors: {:?}", errors);
+    let bool_entries = checker
+        .typed_expr_table
+        .iter()
+        .filter(|(_, ty)| *ty == &Type::Bool)
+        .count();
+    assert!(
+        bool_entries >= 3,
+        "unannotated bool function body should type direct and function-value calls as Bool, got: {:?}",
+        checker.typed_expr_table.iter().collect::<Vec<_>>()
+    );
+}
+
 // ── C19B-002: runInteractive / execShellInteractive Gorillax[@(code)] pin ──
 
 /// E32B-018: `runInteractive` must be unwrapped through unmolding;
@@ -4484,7 +4575,7 @@ fn test_c19b_002_error_inheriting_named_type_type_access_rejected() {
 // E30 Phase 4 / E30B-002: declare-only function field acceptance for
 // Mold and Inheritance (Error) variants.
 //
-// Lock-B verdict (2026-04-28): declare-only function fields (e.g.
+// Decision (2026-04-28): declare-only function fields (e.g.
 // `transform: T => :T`) are permitted in all class-like variants, not
 // just the BuchiPack (TypeDef) kind. They are excluded from the
 // required-positional `[]` set and from the extra-type-arg binding

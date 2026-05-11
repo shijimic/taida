@@ -94,8 +94,8 @@ fn smoke_simple_program_no_residual_unknown() {
 
 #[test]
 fn smoke_records_bool_method_call() {
-    // For Phase 2 prep: hasValue() / isEmpty() recorded as Bool so codegen
-    // can drop the allow-list and use `typed_expr_table.is_bool(expr)`.
+    // hasValue() / isEmpty() are recorded as Bool so codegen uses the
+    // type-checker's verdict instead of method-name syntax.
     let src = "b1 <= Lax[42]().hasValue()\n\
                b2 <= Lax[42]().isEmpty()\n";
     let table = typed_table_for(src);

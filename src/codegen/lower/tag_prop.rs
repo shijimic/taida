@@ -15,8 +15,7 @@
 // 2026-04-15): named `TAG_*` constants plus the free function
 // `type_expr_to_tag`. This file complements it by holding the
 // `impl Lowering` methods that *do* consult `Lowering` state
-// (HashSets of Bool-returning functions, the `param_tag_vars` map,
-// per-`Expr` inference, etc). The two modules together form the
+// (`param_tag_vars`, per-`Expr` inference, etc). The two modules together form the
 // complete tag-propagation surface.
 //
 // # Mechanical move policy
@@ -41,53 +40,18 @@ impl Lowering {
     /// Taida.
     pub(super) const TAG_FRAME_SIZE: usize = 256;
 
-    /// 式が bool 値を返すかどうかを判定
+    /// Return whether an expression is known to produce Bool.
     ///
-    /// The type-checker's Typed HIR side table is the source of truth.
-    /// When `typed_expr_table.is_bool(expr)` returns `true` the answer
-    /// is final. The legacy syntax-driven fallback below only runs when
-    /// the table has no entry for this expression, which happens in two
-    /// paths:
-    ///
-    ///   1. Lowering of synthesised expressions (e.g. `defaultFn`
-    ///      inserted by mold/pack lowering) that the type-checker
-    ///      never observed.
-    ///   2. Tests / dependency-module compilations that bypass
-    ///      `set_typed_expr_table`, leaving the table empty.
-    ///
-    /// Both fall-through cases are honoured today so the migration
-    /// stays incremental; the long-term direction is to narrow the
-    /// fallback as more synthesised expressions are routed through the
-    /// typed table.
+    /// The type-checker's Typed HIR side table is the source of truth for
+    /// expression-level Bool decisions. Syntax-only fallback is limited to
+    /// primitive Bool forms that do not depend on a name registry.
     pub(crate) fn expr_is_bool(&self, expr: &Expr) -> bool {
-        // The type-checker's Typed HIR side table is authoritative
-        // when it has a concrete decision:
-        //   - Type::Bool: definitive yes (closes the
-        //     pack-field-shadowing false-positive gap, since the
-        //     checker already disambiguates the receiver type).
-        //   - any other concrete type: definitive no.
-        //   - Type::Unknown: the checker had no insight. Common
-        //     sources are molds without a checker arm yet
-        //     (SpanEquals / Exists), generics that didn't fully
-        //     resolve, and imported function calls (the type-checker
-        //     currently registers cross-module function values as
-        //     `Type::Unknown` and does not surface their declared
-        //     return type — that gap predates this routing layer).
-        //     The fallback below relies on `bool_returning_funcs`,
-        //     which is populated only for *local* Bool functions, so
-        //     cross-module Bool callers still bypass detection here
-        //     and need a follow-up registration pass to close the
-        //     loop.
         if let Some(ty) = self.typed_expr_table.lookup(expr) {
-            match ty {
-                crate::types::Type::Bool => return true,
-                crate::types::Type::Unknown => {}
-                _ => return false,
-            }
+            return matches!(ty, crate::types::Type::Bool);
         }
+
         match expr {
             Expr::BoolLit(_, _) => true,
-            Expr::Ident(name, _) => self.bool_vars.contains(name),
             Expr::BinaryOp(_, op, _, _) => {
                 matches!(
                     op,
@@ -101,100 +65,6 @@ impl Lowering {
                 )
             }
             Expr::UnaryOp(UnaryOp::Not, _, _) => true,
-            // The type-checker decides Bool method calls when a typed
-            // entry exists (top-of-function short-circuit above). The
-            // legacy heuristics below survive as a fallback for
-            // synthesised expressions the checker never observed (e.g.
-            // mold lowering inserts a `someExpr.toString()` call where
-            // the receiver was constructed in lowering itself, leaving
-            // no ExprId for the table to key on). The allow-list still
-            // matches, but only when the typed table has nothing to say.
-            Expr::MethodCall(obj, method, args, _) => {
-                if matches!(
-                    method.as_str(),
-                    "hasValue"
-                        | "isEmpty"
-                        | "contains"
-                        | "has"
-                        | "startsWith"
-                        | "endsWith"
-                        | "any"
-                        | "all"
-                        | "none"
-                        | "isOk"
-                        | "isError"
-                        | "isSuccess"
-                        | "isFulfilled"
-                        | "isPending"
-                        | "isRejected"
-                        | "isNaN"
-                        | "isInfinite"
-                        | "isFinite"
-                        | "isPositive"
-                        | "isNegative"
-                        | "isZero"
-                ) {
-                    return true;
-                }
-                if method == "getOrDefault" && args.len() == 1 && self.expr_is_bool(&args[0]) {
-                    return true;
-                }
-                if let Some(type_name) = self.infer_type_name(obj)
-                    && let Some(field_types) = self.type_field_types.get(&type_name)
-                {
-                    for (name, ty) in field_types {
-                        if name == method
-                            && let Some(crate::parser::TypeExpr::Function(_, ret)) = ty
-                            && let crate::parser::TypeExpr::Named(n) = ret.as_ref()
-                            && n == "Bool"
-                        {
-                            return true;
-                        }
-                    }
-                }
-                false
-            }
-            Expr::FuncCall(callee, _, _) => {
-                // The typed table wins above; this fallback only helps
-                // synthesised FuncCalls that the type-checker never
-                // saw. Local-only Bool fn detection survives so mold
-                // and facade-emitted call sites that bypass the AST
-                // still get the right tag.
-                if let Expr::Ident(name, _) = callee.as_ref() {
-                    self.bool_returning_funcs.contains(name.as_str())
-                } else {
-                    false
-                }
-            }
-            // WFX-3: Exists[path]() returns Bool
-            Expr::MoldInst(name, _, _, _) if name == "Exists" => true,
-            // B11-6d: TypeIs/TypeExtends return Bool
-            Expr::MoldInst(name, _, _, _) if name == "TypeIs" || name == "TypeExtends" => true,
-            // C26B-016 (@c.26, Option B+): span-aware Bool molds
-            Expr::MoldInst(name, _, _, _)
-                if name == "SpanEquals" || name == "SpanStartsWith" || name == "SpanContains" =>
-            {
-                true
-            }
-            Expr::FieldAccess(obj, field, _) => {
-                // QF-34: hasValue フィールドは Lax/Result の Bool フィールド
-                if field == "hasValue" {
-                    return true;
-                }
-                // QF-10: フィールドの型を、アクセス元の TypeDef 定義から判定する。
-                // グローバルな field_type_tags は同名フィールドが異なる型で使われると衝突するため、
-                // TypeDef の型注釈を直接参照する。
-                if let Some(type_name) = self.infer_type_name(obj)
-                    && let Some(field_types) = self.type_field_types.get(&type_name)
-                {
-                    return field_types.iter().any(|(name, ty)| {
-                        name == field
-                            && matches!(ty, Some(crate::parser::TypeExpr::Named(n)) if n == "Bool")
-                    });
-                }
-                // TypeDef 不明の場合はグローバル field_type_tags にフォールバック
-                self.field_type_tags.get(field).copied() == Some(4)
-            }
             _ => false,
         }
     }
@@ -312,11 +182,10 @@ impl Lowering {
                 }
             }
             Expr::FuncCall(callee, _, _) => {
+                if self.expr_is_bool(expr) {
+                    return 2;
+                }
                 if let Expr::Ident(name, _) = callee.as_ref() {
-                    // Known Int-returning: length, indexOf, etc. already match MethodCall above
-                    if self.bool_returning_funcs.contains(name.as_str()) {
-                        return 2;
-                    }
                     if self.float_returning_funcs.contains(name.as_str()) {
                         return 1;
                     }

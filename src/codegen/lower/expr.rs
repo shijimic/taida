@@ -1284,15 +1284,15 @@ impl Lowering {
                 }
             }
             Expr::FuncCall(callee, _, _) => {
+                if self.expr_is_bool(expr) {
+                    return "taida_debug_bool".to_string();
+                }
                 if let Expr::Ident(name, _) = callee.as_ref() {
                     if self.string_returning_funcs.contains(name.as_str()) {
                         return "taida_debug_str".to_string();
                     }
                     if self.float_returning_funcs.contains(name.as_str()) {
                         return "taida_debug_float".to_string();
-                    }
-                    if self.bool_returning_funcs.contains(name.as_str()) {
-                        return "taida_debug_bool".to_string();
                     }
                 }
                 "taida_debug_int".to_string()

@@ -445,9 +445,6 @@ impl Lowering {
                         Self::addon_known_return_tag(&manifest.package, target_fn)
                     {
                         match return_tag {
-                            "Bool" => {
-                                self.bool_returning_funcs.insert(alias.clone());
-                            }
                             "Str" => {
                                 self.string_returning_funcs.insert(alias.clone());
                             }
@@ -506,11 +503,9 @@ impl Lowering {
                     let mangled = format!("_taida_fn_facade_{:016x}_{}", pkg_hash, orig_name);
                     self.user_funcs.insert(alias.clone());
                     self.imported_func_links.insert(alias.clone(), mangled);
-                    // Re-register signature metadata under the
-                    // alias name so the type-inference paths
-                    // (string_returning_funcs, pack_returning_funcs,
-                    // bool_returning_funcs, func_param_defs) all
-                    // agree with the aliased call site.
+                    // Re-register signature metadata under the alias
+                    // name so type-inference paths agree with the
+                    // aliased call site.
                     self.register_facade_func_signature(&alias, fn_def);
                     continue;
                 }
@@ -570,9 +565,6 @@ impl Lowering {
             // backend-parity gap surfaced by RC2.5-4b.
             if let Some(return_tag) = Self::addon_known_return_tag(&manifest.package, &orig_name) {
                 match return_tag {
-                    "Bool" => {
-                        self.bool_returning_funcs.insert(alias.clone());
-                    }
                     "Str" => {
                         self.string_returning_funcs.insert(alias.clone());
                     }
@@ -669,9 +661,6 @@ impl Lowering {
             match rt {
                 crate::parser::TypeExpr::Named(n) if n == "Str" => {
                     self.string_returning_funcs.insert(local_name.to_string());
-                }
-                crate::parser::TypeExpr::Named(n) if n == "Bool" => {
-                    self.bool_returning_funcs.insert(local_name.to_string());
                 }
                 crate::parser::TypeExpr::Named(n) if n == "Float" => {
                     self.float_returning_funcs.insert(local_name.to_string());

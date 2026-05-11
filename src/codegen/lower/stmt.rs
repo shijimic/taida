@@ -28,9 +28,6 @@ impl Lowering {
                             crate::parser::TypeExpr::Named(n) if n == "Str" => {
                                 self.string_returning_funcs.insert(func_def.name.clone());
                             }
-                            crate::parser::TypeExpr::Named(n) if n == "Bool" => {
-                                self.bool_returning_funcs.insert(func_def.name.clone());
-                            }
                             crate::parser::TypeExpr::Named(n) if n == "Float" => {
                                 self.float_returning_funcs.insert(func_def.name.clone());
                             }
@@ -59,29 +56,6 @@ impl Lowering {
                     // retain-on-store: Detect functions that return List
                     if Self::func_body_returns_list(&func_def.body) {
                         self.list_returning_funcs.insert(func_def.name.clone());
-                    }
-                    // C12-11 (FB-1): body-based inference for Bool-returning
-                    // functions so that `b <= is_int(42); stdout(b)` preserves
-                    // the Bool tag through let-binding and displays
-                    // "true"/"false" on Native. Only triggers when:
-                    //   - no explicit return type annotation contradicts (if
-                    //     `return_type` is declared to a non-Bool type we
-                    //     respect the annotation and do NOT override it)
-                    //   - the body's last statement is an expression
-                    //     recognised by `expr_is_bool` (BoolLit, Bool-returning
-                    //     MoldInst like `TypeIs`/`TypeExtends`/`Exists`,
-                    //     Bool-returning method call, comparison/logical op,
-                    //     `!expr`).
-                    let annotated_non_bool = matches!(
-                        &func_def.return_type,
-                        Some(crate::parser::TypeExpr::Named(n))
-                            if n != "Bool"
-                    );
-                    if !annotated_non_bool
-                        && let Some(Statement::Expr(last)) = func_def.body.last()
-                        && self.expr_is_bool(last)
-                    {
-                        self.bool_returning_funcs.insert(func_def.name.clone());
                     }
                     // C12B-022: Detect TypeIs[param, :PrimitiveType]() usage on
                     // function parameters. Such callers need full arg tag

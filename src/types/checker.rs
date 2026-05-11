@@ -1709,15 +1709,15 @@ impl TypeChecker {
         }
     }
 
-    /// C18-1: Register Enum (and future TypeDef) types that cross the module
-    /// boundary so that `Color:Red()` in the importer does not trigger
-    /// `[E1608] Unknown enum type 'Color'.`.
+    /// Register exported types and function signatures that cross a module
+    /// boundary so the importer can type-check calls without falling back to
+    /// `Type::Unknown`.
     ///
     /// Behaviour:
     /// 1. Resolve the import path (relative, package, or submodule) using the same
     ///    logic as `validate_import_symbols`.
-    /// 2. Parse the target module and collect every `EnumDef` whose name is being
-    ///    imported by the current statement.
+    /// 2. Parse the target module and collect every `EnumDef` / `FuncDef`
+    ///    whose name is being imported by the current statement.
     /// 3. If the importer has **not** already defined an enum with the same local
     ///    name, register it into `self.registry`. The wire-order is the import
     ///    origin (source of truth).
@@ -1815,6 +1815,20 @@ impl TypeChecker {
             return;
         }
 
+        let mut type_aliases: std::collections::HashMap<&str, &str> =
+            std::collections::HashMap::new();
+        for stmt in &program.statements {
+            match stmt {
+                S::EnumDef(ed) if requested.contains_key(ed.name.as_str()) => {
+                    type_aliases.insert(ed.name.as_str(), requested[ed.name.as_str()]);
+                }
+                S::ClassLikeDef(cl) if requested.contains_key(cl.name.as_str()) => {
+                    type_aliases.insert(cl.name.as_str(), requested[cl.name.as_str()]);
+                }
+                _ => {}
+            }
+        }
+
         for stmt in &program.statements {
             if let S::EnumDef(ed) = stmt
                 && let Some(&local_name) = requested.get(ed.name.as_str())
@@ -1847,8 +1861,194 @@ impl TypeChecker {
                     self.declared_header_arities
                         .insert(local_name.to_string(), 0);
                 }
+            } else if let S::FuncDef(fd) = stmt
+                && let Some(&local_name) = requested.get(fd.name.as_str())
+            {
+                self.register_imported_function_signature(fd, local_name, &type_aliases);
             }
         }
+    }
+
+    fn register_imported_function_signature(
+        &mut self,
+        fd: &crate::parser::FuncDef,
+        local_name: &str,
+        type_aliases: &std::collections::HashMap<&str, &str>,
+    ) {
+        let ret_ty = fd
+            .return_type
+            .as_ref()
+            .map(|ty| self.resolve_imported_type_expr(ty, type_aliases))
+            .unwrap_or(Type::Unknown);
+        let param_types: Vec<Type> = fd
+            .params
+            .iter()
+            .map(|param| {
+                param
+                    .type_annotation
+                    .as_ref()
+                    .map(|ty| self.resolve_imported_type_expr(ty, type_aliases))
+                    .unwrap_or(Type::Unknown)
+            })
+            .collect();
+
+        self.func_types.insert(local_name.to_string(), ret_ty);
+        self.func_param_counts
+            .insert(local_name.to_string(), fd.params.len());
+        self.func_param_types
+            .insert(local_name.to_string(), param_types);
+
+        if !fd.type_params.is_empty() {
+            let aliased = Self::alias_imported_func_def(fd, local_name, type_aliases);
+            self.generic_func_defs
+                .insert(local_name.to_string(), aliased);
+        }
+    }
+
+    fn alias_imported_func_def(
+        fd: &crate::parser::FuncDef,
+        local_name: &str,
+        type_aliases: &std::collections::HashMap<&str, &str>,
+    ) -> crate::parser::FuncDef {
+        let mut aliased = fd.clone();
+        aliased.name = local_name.to_string();
+        for type_param in &mut aliased.type_params {
+            if let Some(constraint) = &type_param.constraint {
+                type_param.constraint =
+                    Some(Self::alias_imported_type_expr(constraint, type_aliases));
+            }
+        }
+        for param in &mut aliased.params {
+            if let Some(type_annotation) = &param.type_annotation {
+                param.type_annotation = Some(Self::alias_imported_type_expr(
+                    type_annotation,
+                    type_aliases,
+                ));
+            }
+        }
+        if let Some(return_type) = &aliased.return_type {
+            aliased.return_type = Some(Self::alias_imported_type_expr(return_type, type_aliases));
+        }
+        aliased
+    }
+
+    fn alias_imported_type_expr(
+        ty: &crate::parser::TypeExpr,
+        type_aliases: &std::collections::HashMap<&str, &str>,
+    ) -> crate::parser::TypeExpr {
+        use crate::parser::TypeExpr;
+
+        match ty {
+            TypeExpr::Named(name) => TypeExpr::Named(
+                type_aliases
+                    .get(name.as_str())
+                    .copied()
+                    .unwrap_or(name.as_str())
+                    .to_string(),
+            ),
+            TypeExpr::BuchiPack(fields) => TypeExpr::BuchiPack(
+                fields
+                    .iter()
+                    .map(|field| {
+                        let mut field = field.clone();
+                        if let Some(type_annotation) = &field.type_annotation {
+                            field.type_annotation = Some(Self::alias_imported_type_expr(
+                                type_annotation,
+                                type_aliases,
+                            ));
+                        }
+                        field
+                    })
+                    .collect(),
+            ),
+            TypeExpr::List(inner) => TypeExpr::List(Box::new(Self::alias_imported_type_expr(
+                inner,
+                type_aliases,
+            ))),
+            TypeExpr::Generic(name, args) => TypeExpr::Generic(
+                type_aliases
+                    .get(name.as_str())
+                    .copied()
+                    .unwrap_or(name.as_str())
+                    .to_string(),
+                args.iter()
+                    .map(|arg| Self::alias_imported_type_expr(arg, type_aliases))
+                    .collect(),
+            ),
+            TypeExpr::Function(params, ret) => TypeExpr::Function(
+                params
+                    .iter()
+                    .map(|param| Self::alias_imported_type_expr(param, type_aliases))
+                    .collect(),
+                Box::new(Self::alias_imported_type_expr(ret, type_aliases)),
+            ),
+        }
+    }
+
+    fn resolve_imported_type_expr(
+        &self,
+        ty: &crate::parser::TypeExpr,
+        type_aliases: &std::collections::HashMap<&str, &str>,
+    ) -> Type {
+        use crate::parser::TypeExpr;
+
+        match ty {
+            TypeExpr::Named(name) => {
+                let local_name = type_aliases
+                    .get(name.as_str())
+                    .copied()
+                    .unwrap_or(name.as_str());
+                self.registry
+                    .resolve_type(&TypeExpr::Named(local_name.to_string()))
+            }
+            TypeExpr::BuchiPack(fields) => Type::BuchiPack(
+                fields
+                    .iter()
+                    .map(|field| {
+                        let field_ty = field
+                            .type_annotation
+                            .as_ref()
+                            .map(|field_ty| self.resolve_imported_type_expr(field_ty, type_aliases))
+                            .unwrap_or(Type::Unknown);
+                        (field.name.clone(), field_ty)
+                    })
+                    .collect(),
+            ),
+            TypeExpr::List(inner) => Type::List(Box::new(
+                self.resolve_imported_type_expr(inner, type_aliases),
+            )),
+            TypeExpr::Generic(name, args) => Type::Generic(
+                type_aliases
+                    .get(name.as_str())
+                    .copied()
+                    .unwrap_or(name.as_str())
+                    .to_string(),
+                args.iter()
+                    .map(|arg| self.resolve_imported_type_expr(arg, type_aliases))
+                    .collect(),
+            ),
+            TypeExpr::Function(params, ret) => Type::Function(
+                params
+                    .iter()
+                    .map(|param| self.resolve_imported_type_expr(param, type_aliases))
+                    .collect(),
+                Box::new(self.resolve_imported_type_expr(ret, type_aliases)),
+            ),
+        }
+    }
+
+    fn imported_function_value_type(&self, name: &str) -> Option<Type> {
+        let ret = self.func_types.get(name)?;
+        let params = self.func_param_types.get(name).cloned().unwrap_or_else(|| {
+            vec![
+                Type::Unknown;
+                self.func_param_counts
+                    .get(name)
+                    .copied()
+                    .unwrap_or_default()
+            ]
+        });
+        Some(Type::Function(params, Box::new(ret.clone())))
     }
 
     /// Find project root by walking up from the given directory.
@@ -3978,6 +4178,7 @@ defaulted fields must be provided via `()`",
                 //     (C13-1 tail binding `name <= expr` / `expr => name`)
                 //   - `Statement::UnmoldForward(u)` / `UnmoldBackward(u)` →
                 //     the unmolded value (C13-1 tail unmold)
+                let mut inferred_body_ret = None;
                 if has_return_check {
                     let last_stmt = &fd.body[body_len - 1];
                     let body_ty_opt = match last_stmt {
@@ -4040,11 +4241,44 @@ defaulted fields must be provided via `()`",
                             });
                         }
                     }
+                } else if body_len > 0 && !self.invalid_func_defs.contains(&fd.name) {
+                    let last_stmt = &fd.body[body_len - 1];
+                    let body_ty = match last_stmt {
+                        Statement::Expr(last_expr) => self
+                            .typed_expr_table
+                            .lookup(last_expr)
+                            .cloned()
+                            .unwrap_or(Type::Unknown),
+                        Statement::Assignment(a) => {
+                            self.lookup_var(&a.target).unwrap_or(Type::Unknown)
+                        }
+                        Statement::UnmoldForward(u) => {
+                            self.lookup_var(&u.target).unwrap_or(Type::Unknown)
+                        }
+                        Statement::UnmoldBackward(u) => {
+                            self.lookup_var(&u.target).unwrap_or(Type::Unknown)
+                        }
+                        _ => Type::Unknown,
+                    };
+                    if fd.type_params.is_empty()
+                        && body_ty != Type::Unknown
+                        && !Self::contains_unknown(&body_ty)
+                    {
+                        inferred_body_ret = Some(body_ty);
+                    }
                 }
 
                 // D28B-023 / D28B-024: balance the type-param stack push above.
                 self.current_func_type_params.pop();
                 self.pop_scope();
+
+                if let Some(body_ret) = inferred_body_ret {
+                    self.func_types.insert(fd.name.clone(), body_ret.clone());
+                    self.define_var_silent(
+                        &fd.name,
+                        Type::Function(param_types.clone(), Box::new(body_ret)),
+                    );
+                }
             }
             Statement::Expr(expr) => {
                 self.infer_expr_type(expr);
@@ -4160,8 +4394,6 @@ defaulted fields must be provided via `()`",
                 // compile time. Unpinned os symbols still fall through to
                 // `Type::Unknown` below.
                 let os_import = imp.path == "taida-lang/os";
-                // Register imported symbols as Unknown
-                // (We don't have cross-module type info yet)
                 for sym in &imp.symbols {
                     let name = sym.alias.as_ref().unwrap_or(&sym.name);
                     if imp.path == "taida-lang/net" {
@@ -4174,7 +4406,10 @@ defaulted fields must be provided via `()`",
                         self.define_var(name, Type::Molten);
                         self.define_branch_info(name, BranchInfo::Molten(CageBranch::Js));
                     } else {
-                        self.define_var(name, Type::Unknown);
+                        let value_ty = self
+                            .imported_function_value_type(name)
+                            .unwrap_or(Type::Unknown);
+                        self.define_var(name, value_ty);
                     }
                 }
             }
@@ -5016,6 +5251,19 @@ defaulted fields must be provided via `()`",
                             if !matches!(arg, Expr::Hole(_) | Expr::Placeholder(_)) {
                                 self.check_tostring_arity_in_expr(arg);
                                 self.check_pinned_field_access_in_expr(arg);
+                            }
+                        }
+                    }
+                    if matches!(name.as_str(), "stdout" | "stderr") {
+                        for arg in args.iter() {
+                            if matches!(
+                                arg,
+                                Expr::FuncCall(_, _, _)
+                                    | Expr::MethodCall(_, _, _, _)
+                                    | Expr::MoldInst(_, _, _, _)
+                                    | Expr::FieldAccess(_, _, _)
+                            ) {
+                                let _ = self.infer_expr_type(arg);
                             }
                         }
                     }

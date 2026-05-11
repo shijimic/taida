@@ -34876,11 +34876,9 @@ stdout(is_int_like(42))
 }
 
 /// C12-11: body-based Bool inference. `is_int_like` has no explicit
-/// `-> Bool` annotation, but its body's last expression is a
-/// `TypeIs[...]()` MoldInst which `expr_is_bool()` recognises. After
-/// C12-11 the function is added to `bool_returning_funcs` so that
-/// `b1 <= is_int_like(42)` tags `b1` as Bool, and `stdout(b1)` routes
-/// through the tagged path.
+/// return annotation, but its body's last expression is a
+/// `TypeIs[...]()` mold, so the typed table records a Bool tail value
+/// and `stdout(b1)` routes through the tagged path.
 #[test]
 fn test_c12_11_bool_let_binding_from_user_func_parity() {
     let source = r#"is_int_like v =
@@ -39639,14 +39637,13 @@ fn test_d29b_011_h3_arena_implementation_symmetry_with_h2() {
 //   * tests/d29b_012_native_span_zero_alloc_no_leak.rs -- valgrind leak guard
 //   * tests/d29b_012_native_span_alloc_count.rs       -- valgrind alloc balance
 //
-// Lock-Phase6 verdicts (sub-Lock A..E) are recorded in
-// `.dev/D29_SESSION_PLANS/Phase-6_2026-04-27-0937_track-eta_sub-Lock.md` and
-// the FIXED status flip is recorded in `.dev/D29_BLOCKERS.md`.
+// Historical implementation notes for these regressions live in local
+// development records.
 
 // ===========================================================================
 // E30B-002 / E30 Phase 4: declare-only function field parity across backends.
 //
-// Lock-B verdict (2026-04-28): declare-only function fields (e.g.
+// Decision (2026-04-28): declare-only function fields (e.g.
 // `transform: T => :T`) are permitted in all class-like variants (TypeDef
 // / Mold / Inheritance / Error). Phase 4 (E30B-002) excludes them from the
 // required-positional `[]` set and from the extra-type-arg binding-target
@@ -39818,16 +39815,9 @@ stdout(p.name.length().toString())
     assert_backend_parity_for_source(src, "e30b_004_default_fn_typedef");
 }
 
-// E34 cycle introduced a regression in declare-only fn field arity:
-// the new boundary discipline (E34B-013/014 follow-up — pack-field
-// call signatures surface the declared `Type::Function`) treats the
-// E30 zero-argument marker `Unit => :T` as a one-Unit-parameter
-// signature. Tracked as a carry-over to the next cycle (registry-
-// pattern reshape, see E35_BLOCKERS::E35B-007 family); ignore until
-// the registry layer normalises `Unit` back to an empty parameter
-// list.
+// Declare-only function fields use `Unit => :T` as the zero-argument
+// marker; the checker must surface that as an empty parameter list.
 #[test]
-#[ignore = "E34 declare-only fn `Unit => :T` regression — see E34_BLOCKERS::E34B-026"]
 fn e30b_004_default_fn_enum_return_three_backend_parity() {
     if !cc_available() {
         eprintln!("SKIP: cc unavailable");
@@ -39844,7 +39834,6 @@ stdout(s.toString())
 }
 
 #[test]
-#[ignore = "E34 declare-only fn `Unit => :T` regression — see E34_BLOCKERS::E34B-026"]
 fn e30b_004_default_fn_self_recursive_typedef_three_backend_parity() {
     if !cc_available() {
         eprintln!("SKIP: cc unavailable");

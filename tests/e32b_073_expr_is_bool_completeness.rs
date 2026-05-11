@@ -7,13 +7,10 @@
 //
 //   - FALSE POSITIVE: a user-defined pack whose field shadows a
 //     built-in Bool method name now reports the field's actual
-//     return type. The legacy allow-list still runs as a fallback
-//     for expressions the type-checker never observed (e.g.
-//     synthesised defaultFn results), but a non-Bool typed entry
-//     short-circuits the allow-list before it matches.
+//     return type. The type-checker's non-Bool entry wins before
+//     method-name syntax can misclassify the call.
 //   - FALSE NEGATIVE: a cross-module `:Bool` function lands in the
-//     typed table even though it never reached the local
-//     bool_returning_funcs pre-pass.
+//     typed table even though it is defined in another module.
 //
 // Both fixtures below are part of the active E34 Phase 2 acceptance
 // regression suite (no longer #[ignore]'d).
@@ -134,11 +131,9 @@ fn run_three_backends(main_path: &std::path::Path, dir: &std::path::Path) -> [(S
 
 #[test]
 fn expr_is_bool_cross_module_bool_get_or_default_three_backend_parity() {
-    // FALSE NEGATIVE — a Bool fn imported from another module is not
-    // in the local `bool_returning_funcs` registry, so `expr_is_bool`
-    // returns false and `getOrDefault(importedFn(x)).toString()` falls
-    // through to the polymorphic stringifier on Native (renders "1"
-    // instead of "true").
+    // FALSE NEGATIVE — a Bool fn imported from another module must be
+    // typed from the import signature, otherwise `getOrDefault(...)`
+    // falls through to the polymorphic stringifier on Native.
     let dir = fixture_dir("cross_module");
     let lib = dir.join("lib.td");
     let main = dir.join("main.td");
@@ -177,11 +172,9 @@ fn expr_is_bool_cross_module_bool_get_or_default_three_backend_parity() {
 #[test]
 fn expr_is_bool_pack_field_shadows_bool_method_three_backend_parity() {
     // FALSE POSITIVE — a user-defined pack with a field named like a
-    // built-in Bool method (`has`, `isEmpty`, `contains`, …) hits the
-    // allow-list before any receiver-type check, so Native lowers
-    // `box.has(x).toString()` through `taida_str_from_bool` regardless
-    // of the field's actual return type. Interp and JS render the Int
-    // value, Native renders "true"/"false".
+    // built-in Bool method (`has`, `isEmpty`, `contains`, ...) must not
+    // be classified from the method name alone. Interp, JS, and Native
+    // should all render the Int value.
     let dir = fixture_dir("pack_shadow");
     let main = dir.join("main.td");
 
@@ -209,7 +202,7 @@ fn expr_is_bool_pack_field_shadows_bool_method_three_backend_parity() {
         }
         assert_eq!(
             out, &interp,
-            "{} backend disagrees with interp (false-positive gap: allow-list matched on method name without checking receiver type)",
+            "{} backend disagrees with interp (false-positive gap: method name classified without checking receiver type)",
             backend
         );
     }

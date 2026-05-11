@@ -503,6 +503,7 @@ impl TypeRegistry {
                 "Str" | "String" => Type::Str,
                 "Bytes" => Type::Bytes,
                 "Bool" | "Boolean" => Type::Bool,
+                "Unit" => Type::Unit,
                 "JSON" => Type::Json,
                 "Molten" => Type::Molten,
                 other => {
@@ -568,6 +569,15 @@ mod tests {
                 ty
             );
         }
+    }
+
+    #[test]
+    fn test_resolve_unit_type_expr() {
+        let registry = TypeRegistry::new();
+        assert_eq!(
+            registry.resolve_type(&crate::parser::TypeExpr::Named("Unit".to_string())),
+            Type::Unit
+        );
     }
 
     #[test]

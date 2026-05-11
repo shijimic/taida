@@ -145,7 +145,6 @@ impl Lowering {
             type_parents: std::collections::HashMap::new(),
             mold_solidify_funcs: std::collections::HashMap::new(),
             string_returning_funcs: std::collections::HashSet::new(),
-            bool_returning_funcs: std::collections::HashSet::new(),
             param_type_check_funcs: std::collections::HashSet::new(),
             float_returning_funcs: std::collections::HashSet::new(),
             int_returning_funcs: std::collections::HashSet::new(),

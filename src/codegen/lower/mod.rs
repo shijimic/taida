@@ -103,8 +103,6 @@ pub struct Lowering {
     pub(crate) mold_solidify_funcs: std::collections::HashMap<String, String>,
     /// 戻り値が Str のユーザー定義関数名セット
     string_returning_funcs: std::collections::HashSet<String>,
-    /// 戻り値が Bool のユーザー定義関数名セット
-    bool_returning_funcs: std::collections::HashSet<String>,
     /// C12B-022: 関数本体で `TypeIs[param, :T]()` を呼び出す関数。
     /// 呼び出し側で param tag を full propagation する必要がある
     /// (INT=0 も明示的に `taida_set_call_arg_tag` する)
