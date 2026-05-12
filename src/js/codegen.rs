@@ -71,10 +71,6 @@ pub struct JsCodegen {
     float_origin_vars: Vec<std::collections::HashSet<String>>,
     /// C21B-seed-04 re-fix: symmetric scope stack for `Int`-origin locals.
     int_origin_vars: Vec<std::collections::HashSet<String>>,
-    /// Scope stack of local bindings statically known to hold `Str`.
-    /// Used to keep JS `+` rejection aligned with the interpreter's
-    /// no-implicit-conversion rule.
-    string_origin_vars: Vec<std::collections::HashSet<String>>,
     /// C21B-seed-04 re-fix: scope stack of local bindings known to hold
     /// `@[Float]` (homogeneous list of Float). Used to propagate
     /// `a.get(i) ]=> av` / `av <=[ a.get(i)` into `float_origin_vars`.
@@ -245,8 +241,6 @@ enum AssignOrigin {
     Float,
     /// RHS evaluates to an `Int` (same treatment, symmetric).
     Int,
-    /// RHS evaluates to a `Str`.
-    Str,
     /// RHS is a homogeneous `@[Float]` list / binding is annotated `@[Float]`.
     FloatList,
     /// Could not classify statically.
@@ -303,7 +297,6 @@ impl JsCodegen {
             // gen_func_def pushes/pops nested scopes for function bodies.
             float_origin_vars: vec![std::collections::HashSet::new()],
             int_origin_vars: vec![std::collections::HashSet::new()],
-            string_origin_vars: vec![std::collections::HashSet::new()],
             float_list_vars: vec![std::collections::HashSet::new()],
         }
     }
@@ -317,8 +310,6 @@ impl JsCodegen {
         self.float_origin_vars
             .push(std::collections::HashSet::new());
         self.int_origin_vars.push(std::collections::HashSet::new());
-        self.string_origin_vars
-            .push(std::collections::HashSet::new());
         self.float_list_vars.push(std::collections::HashSet::new());
     }
 
@@ -330,9 +321,6 @@ impl JsCodegen {
         }
         if self.int_origin_vars.len() > 1 {
             self.int_origin_vars.pop();
-        }
-        if self.string_origin_vars.len() > 1 {
-            self.string_origin_vars.pop();
         }
         if self.float_list_vars.len() > 1 {
             self.float_list_vars.pop();
@@ -347,9 +335,6 @@ impl JsCodegen {
         if let Some(top) = self.int_origin_vars.last_mut() {
             top.remove(name);
         }
-        if let Some(top) = self.string_origin_vars.last_mut() {
-            top.remove(name);
-        }
     }
 
     fn register_int_origin(&mut self, name: &str) {
@@ -357,21 +342,6 @@ impl JsCodegen {
             top.insert(name.to_string());
         }
         if let Some(top) = self.float_origin_vars.last_mut() {
-            top.remove(name);
-        }
-        if let Some(top) = self.string_origin_vars.last_mut() {
-            top.remove(name);
-        }
-    }
-
-    fn register_string_origin(&mut self, name: &str) {
-        if let Some(top) = self.string_origin_vars.last_mut() {
-            top.insert(name.to_string());
-        }
-        if let Some(top) = self.float_origin_vars.last_mut() {
-            top.remove(name);
-        }
-        if let Some(top) = self.int_origin_vars.last_mut() {
             top.remove(name);
         }
     }
@@ -390,9 +360,6 @@ impl JsCodegen {
             top.remove(name);
         }
         if let Some(top) = self.int_origin_vars.last_mut() {
-            top.remove(name);
-        }
-        if let Some(top) = self.string_origin_vars.last_mut() {
             top.remove(name);
         }
         if let Some(top) = self.float_list_vars.last_mut() {
@@ -420,15 +387,6 @@ impl JsCodegen {
         false
     }
 
-    fn lookup_string_origin(&self, name: &str) -> bool {
-        for frame in self.string_origin_vars.iter().rev() {
-            if frame.contains(name) {
-                return true;
-            }
-        }
-        false
-    }
-
     fn lookup_float_list(&self, name: &str) -> bool {
         for frame in self.float_list_vars.iter().rev() {
             if frame.contains(name) {
@@ -449,7 +407,6 @@ impl JsCodegen {
             match ty {
                 TypeExpr::Named(n) if n == "Float" => return AssignOrigin::Float,
                 TypeExpr::Named(n) if n == "Int" => return AssignOrigin::Int,
-                TypeExpr::Named(n) if n == "Str" => return AssignOrigin::Str,
                 TypeExpr::List(inner) => {
                     if let TypeExpr::Named(n) = inner.as_ref()
                         && n == "Float"
@@ -464,8 +421,6 @@ impl JsCodegen {
             AssignOrigin::Float
         } else if self.is_int_origin_expr(value) {
             AssignOrigin::Int
-        } else if self.is_string_origin_expr(value) {
-            AssignOrigin::Str
         } else if let Expr::ListLit(items, _) = value {
             // Homogeneous FloatLit list → @[Float]-like.
             if !items.is_empty() && items.iter().all(|e| matches!(e, Expr::FloatLit(..))) {
@@ -593,28 +548,6 @@ impl JsCodegen {
         match expr {
             Expr::IntLit(..) => true,
             Expr::Ident(name, _) => self.lookup_int_origin(name),
-            _ => false,
-        }
-    }
-
-    fn is_string_origin_expr(&self, expr: &Expr) -> bool {
-        match expr {
-            Expr::StringLit(..) | Expr::TemplateLit(..) => true,
-            Expr::Ident(name, _) => self.lookup_string_origin(name),
-            Expr::MethodCall(_, method, args, _) => {
-                args.is_empty() && matches!(method.as_str(), "toString" | "toStr")
-            }
-            Expr::BinaryOp(lhs, BinOp::Add, rhs, _) => {
-                self.is_string_origin_expr(lhs) && self.is_string_origin_expr(rhs)
-            }
-            Expr::BinaryOp(_, BinOp::Concat, _, _) => true,
-            Expr::FuncCall(callee, _, _) => {
-                matches!(callee.as_ref(), Expr::Ident(name, _) if matches!(name.as_str(), "stdin" | "jsonEncode" | "jsonPretty"))
-            }
-            Expr::MoldInst(name, _, _, _) => {
-                crate::types::mold_specs::mold_return_tag(name)
-                    == Some(crate::codegen::tag_prop::TAG_STR)
-            }
             _ => false,
         }
     }
@@ -1300,7 +1233,6 @@ impl JsCodegen {
                 match self.classify_assignment_rhs(&assign.type_annotation, &assign.value) {
                     AssignOrigin::Float => self.register_float_origin(&assign.target),
                     AssignOrigin::Int => self.register_int_origin(&assign.target),
-                    AssignOrigin::Str => self.register_string_origin(&assign.target),
                     AssignOrigin::FloatList => self.register_float_list(&assign.target),
                     AssignOrigin::Unknown => self.demote_origin(&assign.target),
                 }
@@ -1456,7 +1388,6 @@ impl JsCodegen {
             match &p.type_annotation {
                 Some(TypeExpr::Named(n)) if n == "Float" => self.register_float_origin(&p.name),
                 Some(TypeExpr::Named(n)) if n == "Int" => self.register_int_origin(&p.name),
-                Some(TypeExpr::Named(n)) if n == "Str" => self.register_string_origin(&p.name),
                 Some(TypeExpr::List(inner)) => {
                     if let TypeExpr::Named(n) = inner.as_ref()
                         && n == "Float"
