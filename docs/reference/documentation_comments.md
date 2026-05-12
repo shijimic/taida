@@ -97,7 +97,7 @@ getPilot id: Int includeDeleted: Bool =
 
 ### @Since
 
-導入バージョンを示します。値は Taida のバージョン表記 `<世代>.<番号>.<ラベル?>` (`a.3` / `c.27` / `e.30` / `e.32.alpha` など) を使います。`1.2.0` のような Semantic Versioning 風の値は使用しません (`docs/STABILITY.md` のリリース成果物に Semantic Versioning 風の値を入れないという方針に整合します)。
+導入バージョンを示します。値は Taida のバージョン表記 `<世代>.<番号>.<ラベル?>` (`a.3` / `c.27` / `e.30` / `e.32.alpha` など) を使います。`1.2.0` のような Semantic Versioning 風の値は使用しません（リリースプロセスの方針については [`docs/reference/release_process.md`](release_process.md) を参照）。
 
 ```taida
 ///@ Since: e.32

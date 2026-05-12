@@ -43,10 +43,11 @@ use the interpreter; for wasm targets, only 'wasm-full' supports addons.
 ```
 
 Tooling that matches on the policy should prefer the
-`"supported: interpreter, native"` prefix; the prefix is preserved
-verbatim across the gen-C → gen-D transition (the trailing list grew
-to include `wasm-full` as a §6.2 widening). The surface text is
-covered by `docs/STABILITY.md` §4.2.
+`"supported: interpreter, native"` prefix; that prefix is part of the
+stable surface and tooling may rely on it verbatim. The trailing list
+inside the parentheses (currently appending `wasm-full`) is additive,
+so consumers that match on the literal prefix continue to work as the
+backend allowlist widens.
 
 See `docs/guide/13_creating_addons.md` for the author-facing view of
 which facade constructs the native backend's static analyser
@@ -66,6 +67,19 @@ library = "my_addon"                     # string — cdylib filename stem (no l
 `abi`, `entry`, `package`, and `library` are all required. Any
 mismatch with the frozen ABI v1 constants is a parse error, not a
 load-time warning.
+
+## ABI 互換性
+
+アドオン ABI のバージョン (`TaidaHostV1`、エクスポートシンボル、
+呼び出し規約) は世代内で固定です。互換のある追加 — vtable 末尾への
+新しいコールバックの追加、新しい省略可能なエクスポートシンボル — は
+ビルド番号の繰り上げで land できます。既存スロットの並び替え・改名、
+あるいはシグネチャの変更は公開仕様を壊す変更として扱い、世代繰り上げが
+必要です。
+
+ABI のメジャー版自体は安定仕様の保証対象には含めません — メジャー
+改訂が必要な場合は世代をまたぎます。互換性判断の枠組み全体は
+`docs/reference/release_process.md` を参照してください。
 
 ## `targets` (optional, top-level)
 
@@ -97,8 +111,8 @@ source level but **always populated** in the parsed manifest:
 
 ### Compatibility contract
 
-The contract is the addon-side counterpart of the stable promise
-in `docs/STABILITY.md` §6 (breaking-change policy):
+The contract is the addon-side counterpart of the breaking-change
+policy in `docs/reference/release_process.md`:
 
 1. **The default value is part of the surface.** Today every
    manifest that omits `targets` resolves to `["native"]`. This

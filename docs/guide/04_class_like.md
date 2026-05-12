@@ -170,7 +170,7 @@ hello.greet("anyone")   // "" (defaultFn で自動充足)
 
 戻り型が defaultFn を生成できない型 (opaque / abstract external type) の場合、`[E1410]` で reject されます。
 
-> defaultFn の詳細仕様は [関数](09_functions.md) の「defaultFn」節を参照してください (E30 Phase 6 で実装と同期して追加されます)。
+> defaultFn の詳細仕様は [関数](09_functions.md) の「defaultFn」節を参照してください。
 
 ---
 

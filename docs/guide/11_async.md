@@ -189,6 +189,26 @@ stdout((end - start).toString())
 
 ---
 
+## クロージャの値キャプチャ
+
+非同期ラムダ（`Async[T]` を返すクロージャ）が外部スコープの値を参照する場合、値はラムダ生成時点でその場の値として取り込まれます。ラムダ本体は `]=>` の中断ポイントをまたいでもキャプチャ済みの値を使い続けます。生成後に別の値を作っても、ラムダの中の値は影響を受けません。
+
+```taida
+counter <= 0
+build value: Int =
+  => :Async[Int]
+  Async[value + 1]()
+=> :Async[Int]
+
+job <= build(counter)   // value = 0 がキャプチャされる
+counter_after <= 99     // 生成後の別値は job に影響しない
+job ]=> result          // result == 1
+```
+
+この「値キャプチャ」挙動と `Async[T]` の構文・型形状は、安定リリースの仕様として固定されています。参照キャプチャや遅延束縛のような別の意味論を導入する場合は、世代をまたぐ変更として扱います。
+
+---
+
 ## Blocking Addon Caveat
 
 `terminal.ReadEvent[]()` のように OS の blocking I/O を内部で使う addon は、Taida 側の `Async[T]` から呼ぶ場合でも、同じ入力ストリームにつき dedicated blocking thread から呼び出してください。`taida-lang/terminal` は `PENDING_BYTES` を thread-local framing context として保持するため、複数 OS thread から同じ stdin を並行に読む設計では thread ごとに独立した未消費 byte queue になります。

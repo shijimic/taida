@@ -80,8 +80,8 @@ use taida_addon::{TAIDA_ADDON_ABI_VERSION, TAIDA_ADDON_ENTRY_SYMBOL};
 /// import resolver before manifest parsing is even attempted.
 /// Additions to this list must be made in lock-step with
 /// `AddonBackend::supports_addons` in `src/addon/backend_policy.rs`,
-/// the policy table at `docs/STABILITY.md § 5.2`, and the receivable
-/// values listed in `docs/reference/addon_manifest.md`.
+/// the WASM profile table at `docs/reference/wasm_profiles.md`, and
+/// the receivable values listed in `docs/reference/addon_manifest.md`.
 pub const SUPPORTED_ADDON_TARGETS: &[&str] = &["native", "wasm-full"];
 
 /// D28B-021: default value injected when `targets` is omitted.

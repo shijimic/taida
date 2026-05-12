@@ -309,7 +309,7 @@ Terminal 等) で動作します。
 | Interpreter (with `feature = "native"`) | ○ | Default build。addon ABI 経由で cdylib に dispatch |
 | Native (AOT) | ○ | `src/addon/facade.rs` で facade を静的解析、IR に lower |
 | JS | × | addon dispatcher が無いため `>>> taida-lang/terminal` 自体が deterministic error。stdout 系の代替は `taida-lang/os` |
-| WASM (`wasm-min` / `wasm-wasi` / `wasm-edge` / `wasm-full`) | × | addon dispatcher 未提供。`docs/STABILITY.md` §1.2 参照 |
+| WASM (`wasm-min` / `wasm-wasi` / `wasm-edge` / `wasm-full`) | × | terminal は addon 経由のため、現状どの WASM プロファイルにも提供しません。各プロファイルとアドオンの対応関係は [`docs/reference/wasm_profiles.md`](../reference/wasm_profiles.md) と [`docs/reference/addon_manifest.md`](../reference/addon_manifest.md) を参照 |
 
 addon の cdylib build と publish 手順は [`docs/guide/13_creating_addons.md`](13_creating_addons.md)
 を参照してください。`taida-lang/terminal` 自身もこの publish パイプライン

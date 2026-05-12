@@ -784,6 +784,8 @@ Div[10, 0]().getOrDefault(99)  // 99
 
 **シグネチャ**: `default: T => :T`
 
+`default` の型は受け側の成功内部型 `T` と一致しなければなりません。例えば `Lax[Int]` に対して `getOrDefault("99")` を渡すと、型チェッカーが `[E1508]` で拒否します。判定は型チェッカーが持つ `Type::Function` のサブタイプ規則を経由しており、受け側の `T` が具体型として確定しているときにのみ機能します（同様の caveat は [`map` / `flatMap` の引数型ピンの効力範囲](#map--flatmap-の引数型ピンの効力範囲) と同じ）。`Result[T, P]` の `getOrDefault`、`Async[T]` の `getOrDefault` も同じ pin を共有します。
+
 #### unmold
 
 値を取り出します。`hasValue = false` の場合は型 T のデフォルト値を返します。
@@ -1013,6 +1015,8 @@ gorillax.relax().toString()  // "RelaxedGorillax(42)"
 | `unmold()` | `=> :T` | アンモールディング |
 
 `map` / `flatMap` / `mapError` の引数型ピンは **受け側の `T` / `P` が具体型として確定しているとき** にのみ機能します。クロスモジュール import 等で `T` / `P` が未解決のまま call site に到達した場合、未解決側がサブタイプ規則のワイルドカードとして振る舞い、型不一致の関数も silent pass します。詳細とサンプルは [Lax の `map` / `flatMap` の引数型ピンの効力範囲](#map--flatmap-の引数型ピンの効力範囲) を参照してください。
+
+`Result[T, P].flatMap(fn: T => Result[U, P])` は、受け取る関数が返す `Result` の述語型 `P` が受け側と一致することを要求します。異なる述語型の `Result` を `flatMap` で混ぜようとすると拒否されます。述語型を切り替えたいときは `mapError` を経由して明示的に変換してください。
 
 ---
 

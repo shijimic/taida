@@ -21,7 +21,7 @@ The supported backend matrix for addons is:
 | Interpreter    | **Supported** | Addon facade runs as a dynamic module; cdylib functions dispatch via `dlopen` when the interpreter binary is built with `feature = "native"` (the default). |
 | Native (AOT)   | **Supported** | Addon facade is statically analysed into an `AddonFacadeSummary` by `src/addon/facade.rs` and lowered through `src/codegen/lower/imports.rs`. FuncDefs become IR functions; pack / scalar / list / template bindings are replayed into the module init path. |
 | JS transpiler  | **Rejected**  | There is no JS-side addon dispatcher today. The import produces a deterministic error. |
-| WASM (min / wasi) | **Rejected** | The wasm dispatcher is not currently exposed. Future widening will reuse the `src/addon/facade.rs` static analyser so authors will not have to re-write facades. See `docs/STABILITY.md` §1.2. |
+| WASM (`wasm-min` / `wasm-wasi` / `wasm-edge`) | **Rejected** | These profiles do not currently expose an addon dispatcher. Any future widening will reuse the same `src/addon/facade.rs` static analyser so authors will not need to re-write facades. The currently supported profile for addon dispatch is `wasm-full`; see `docs/reference/wasm_profiles.md`. |
 
 Authors targeting interpreter + native do not need to write two
 facade files. The same `taida/<stem>.td` must work on both — the

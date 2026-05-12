@@ -63,7 +63,7 @@ handler req: BuchiPack writer: BuchiPack = ... => :Unit
 > - `readBodyChunk(req)` — 2-arg 専用。chunk 単位で `Lax[Bytes]` を返す。残り chunk が無い場合 `Lax` の `hasValue = false`。
 > - `readBodyAll(req)` — 2-arg 専用。body を最後まで読んで `Bytes` を返す。
 >
-> 1-arg handler での `Slice[req.raw, req.body.start, req.body.start + req.body.len]` パスを 2-arg にそのまま持ち込むと **silent に空 Bytes が返る**ため注意。Phase 4 (1-arg) → Phase 5 (2-arg + streaming) の移行で最頻発するハマりどころです。詳細は §3.2 / §8 を参照。
+> 1-arg handler での `Slice[req.raw, req.body.start, req.body.start + req.body.len]` パスを 2-arg にそのまま持ち込むと **silent に空 Bytes が返る**ため注意。1-arg 形式から 2-arg + streaming 形式へ移行する際に最頻発するハマりどころです。詳細は §3.2 / §8 を参照。
 
 ---
 
@@ -405,7 +405,7 @@ Enum => HttpProtocol = :H1 :H2 :H3
 
 ## 10. Backend scope
 
-`taida-lang/net` の API surface は **3-backend (Interpreter / JS / Native)** で parity を保証します。WASM バックエンド (`wasm-min` / `wasm-wasi` / `wasm-edge` / `wasm-full`) は `httpServe` / `httpRequest` を提供しません — 該当 capability を呼び出した場合 `[E1612]` を返します。WASM 向け NET dispatcher の現状方針は `docs/STABILITY.md` §1.2 / §4.2 / §5.2 を参照してください。
+`taida-lang/net` の API surface は **3-backend (Interpreter / JS / Native)** で parity を保証します。WASM バックエンド (`wasm-min` / `wasm-wasi` / `wasm-edge` / `wasm-full`) は `httpServe` / `httpRequest` を提供しません — 該当 capability を呼び出した場合 `[E1612]` を返します。各 WASM プロファイルとアドオン dispatcher の対応関係は [`docs/reference/wasm_profiles.md`](wasm_profiles.md) と [`docs/reference/addon_manifest.md`](addon_manifest.md) を参照してください。
 
 例外として `readBytesAt` (bytes I/O) の `wasm-wasi` / `wasm-full` lowering のみ widening addition として land 済です。
 
@@ -488,7 +488,8 @@ body path では handler を呼ばずに `400 Bad Request`、2-arg streaming
 
 ## 12. References
 
-- `docs/STABILITY.md` §2.2 / §5.1 — surface 保証範囲と NET stable viewpoint
-- `CHANGELOG.md` — タグ別の land 履歴と blocker 単位の進捗
-- `src/interpreter/net_eval/h1.rs` / `h2.rs` — interpreter reference 実装
+- [`docs/reference/release_process.md`](release_process.md) — 公開仕様の保証範囲と互換性判断
+- [`docs/reference/standard_methods.md`](standard_methods.md) — `Lax` / `Result` / `Async` のメソッド契約
+- `CHANGELOG.md` — タグ別の land 履歴
+- `src/interpreter/net_eval/h1.rs` / `h2.rs` — インタプリタ参照実装
 - `tests/parity.rs::test_net6_*` — 3-backend parity fixtures

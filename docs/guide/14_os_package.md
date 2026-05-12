@@ -51,14 +51,16 @@ chunk <= readBytesAt("/data/big.bin", 0, 4096)
 
 ### 書き込み・変更（関数）
 
-| API | 戻り値 | 用途 |
-|-----|--------|------|
-| `writeFile(path, content)` | `Result[Unit, IoError]` | 上書き / 新規作成 |
-| `writeBytes(path, content)` | `Result[Unit, IoError]` | バイナリ書き込み |
-| `appendFile(path, content)` | `Result[Unit, IoError]` | 追記 |
-| `remove(path)` | `Result[Unit, IoError]` | 削除（ファイル / ディレクトリ） |
-| `createDir(path)` | `Result[Unit, IoError]` | `mkdir -p` 相当 |
-| `rename(from, to)` | `Result[Unit, IoError]` | 移動 / 改名（アトミック） |
+| API | 戻り値 | Throws | 用途 |
+|-----|--------|--------|------|
+| `writeFile(path, content)` | `Result[Unit, _]` | `IoError` | 上書き / 新規作成 |
+| `writeBytes(path, content)` | `Result[Unit, _]` | `IoError` | バイナリ書き込み |
+| `appendFile(path, content)` | `Result[Unit, _]` | `IoError` | 追記 |
+| `remove(path)` | `Result[Unit, _]` | `IoError` | 削除（ファイル / ディレクトリ） |
+| `createDir(path)` | `Result[Unit, _]` | `IoError` | `mkdir -p` 相当 |
+| `rename(from, to)` | `Result[Unit, _]` | `IoError` | 移動 / 改名（アトミック） |
+
+> 戻り値表記 `Result[T, _]` は canonical 定義 `Mold[T] => Result[T, P <= :T => :Bool]` の述語省略形です。第 2 型引数は推論プレースホルダで、I/O 操作では述語を使わず `throw` channel のみを利用します（詳細は [`docs/reference/os_api.md`](../reference/os_api.md) 冒頭、エラーハンドリングは [`docs/guide/08_error_handling.md`](08_error_handling.md) 参照）。
 
 ---
 

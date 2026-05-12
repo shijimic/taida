@@ -30,7 +30,7 @@ docs/guide/12_introspection.md:202
 docs/guide/12_introspection.md:213
 docs/guide/13_creating_addons.md:491
 docs/guide/13_creating_addons.md:499
-docs/guide/15_net_package.md:229
+docs/guide/15_net_package.md:230
 docs/reference/class_like_types.md:78
 docs/reference/class_like_types.md:713
 docs/reference/documentation_comments.md:20
@@ -60,7 +60,7 @@ docs/reference/operators.md:267
 docs/reference/operators.md:410
 docs/reference/operators.md:579
 docs/reference/standard_library.md:273
-docs/reference/standard_methods.md:971
+docs/reference/standard_methods.md:973
 docs/reference/tail_recursion.md:149
 docs/reference/tail_recursion.md:167
 docs/reference/tail_recursion.md:184

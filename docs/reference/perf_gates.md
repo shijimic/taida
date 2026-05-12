@@ -1,63 +1,67 @@
 # パフォーマンスゲートリファレンス
 
-このリファレンスは、Taida の公開リリース品質に含まれる
-パフォーマンス / リソースゲートを定義します。契約対象は、ゲートの構造、
-失敗条件、しきい値、検証 fixture の範囲です。どのマシンでも同じ
-benchmark 数値が出ることを保証する文書ではありません。
+このリファレンスは、Taida の公開リリース品質を支える
+パフォーマンス／リソースゲートを定義します。契約対象は
+ゲートの構造・失敗条件・閾値・検証フィクスチャの範囲です。
+本書は、どのマシンで測っても同じベンチマーク値が出ることを
+保証する文書ではありません。
 
 ---
 
 ## ゲート一覧
 
-| ゲート | workflow | 実行契機 | 失敗条件 |
-|--------|----------|----------|----------|
-| throughput regression | `bench.yml` | pull request、main push、scheduled run | 最小 sample 数を満たした後、保存済み EWMA 基準値より 10% を超えて遅くなった場合 |
-| peak RSS regression | `bench.yml` | pull request、main push、scheduled run | 最小 sample 数を満たした後、保存済み EWMA 基準値より peak RSS が 10% を超えて増えた場合 |
-| Valgrind definitely-lost memory | `memory.yml` | pull request、push | `definitely lost` byte が 1 byte でもある場合 |
-| interpreter coverage threshold | `coverage.yml` | scheduled run、manual dispatch | `src/interpreter/` の line coverage が 80% 未満、または branch coverage が 70% 未満の場合 |
+| ゲート | ワークフロー | 起動契機 | 失敗条件 |
+|--------|--------------|----------|----------|
+| スループット回帰 | `bench.yml` | プルリクエスト・main への push・定期実行 | 最小サンプル数を満たした後、保存済み EWMA 基準値より 10% を超えて遅くなった場合 |
+| ピーク RSS 回帰 | `bench.yml` | プルリクエスト・main への push・定期実行 | 最小サンプル数を満たした後、保存済み EWMA 基準値よりピーク RSS が 10% を超えて増えた場合 |
+| Valgrind definitely-lost メモリ | `memory.yml` | プルリクエスト・push | `definitely lost` バイトが 1 でも検出された場合 |
+| インタプリタカバレッジ閾値 | `coverage.yml` | 定期実行・手動起動 | `src/interpreter/` の行カバレッジが 80% 未満、または分岐カバレッジが 70% 未満の場合 |
 
-coverage gate は pull request の高速経路には含めません。計測用 build が通常の
-release build より大幅に遅いためです。ただし、この gate が走る場合は
-上記しきい値を満たさないと失敗します。
+カバレッジゲートはプルリクエストの高速経路には含めません。計測用
+ビルドが通常のリリースビルドより大幅に遅いためです。ただし、本
+ゲートが走行する場合は上記閾値を満たさないと失敗します。
 
 ---
 
 ## 基準値の扱い
 
-throughput と peak RSS は同じ回帰判定モデルを使います。
+スループットとピーク RSS は同じ回帰判定モデルを使います。
 
-- 基準値は 30 samples 以上を持つまで警告扱いです。30 samples に達すると
-  失敗条件として扱います。
-- EWMA 更新は最大 10 samples の alpha window を使います。
-- 許容幅は実行時間と peak RSS のどちらも 10% です。
-- throughput の基準値ファイルと peak RSS の基準値ファイルは、互換の schema を
-  持たなければなりません。
+- 基準値は累積サンプル数が 30 に達するまでは警告扱いです。30 に
+  達した時点から失敗条件として扱います。
+- EWMA の更新には、最大幅 10 サンプルのアルファウィンドウを使います。
+- 許容幅は実行時間・ピーク RSS のどちらも 10% です。
+- スループット基準値ファイルとピーク RSS 基準値ファイルは、
+  互換のスキーマを保つことが要求されます。
 
-この基準値仕様は、workflow の編集で gate が黙って弱くならないように固定されています。
-
----
-
-## fixture の範囲
-
-repository 内の perf-smoke fixture が、ゲート対象の benchmark 範囲を定義します。
-fixture の削除、隠れた workflow fallback、失敗すべき gate への
-`continue-on-error: true` 追加は、公開リリース品質の変更として扱います。
-
-backend ごとの観測専用 measurement が存在してもかまいません。ただし、
-coverage threshold の基準 backend は interpreter です。
+これらの基準値仕様は、ワークフロー変更によってゲートが暗黙に弱まる
+ことを防ぐために固定されています。
 
 ---
 
-## Bytes I/O の invariant
+## フィクスチャの範囲
 
-Bytes I/O の性能は、zero-copy path を保つことに依存します。
+リポジトリに同梱される perf-smoke フィクスチャが、ゲートの計測対象
+ベンチマークの範囲を定義します。フィクスチャの削除、暗黙のワークフロー
+フォールバック、失敗すべきゲートへの `continue-on-error: true` の追加は、
+いずれも公開リリース品質の変更として扱います。
 
-- `readBytesAt(path, offset, len)` は、その API を公開するすべての backend で
-  byte buffer の読み取りを提供します。
-- WASI lowering は WASI host interface の file open と read sequence を使います。
-- `Bytes` cursor slicing は、chunk ごとに buffer 全体を copy せず、共有 buffer の
-  挙動を保ちます。
-- 大容量 fixture は opt-in でもかまいません。ただし invariant test は、
-  buffer 共有の挙動を引き続き検証します。
+バックエンドごとに観測専用の計測を追加すること自体は許容します。
+ただし、カバレッジ閾値の基準バックエンドはインタプリタです。
 
-これらの invariant は workflow gate だけでなく test でも検証します。
+---
+
+## Bytes I/O の不変条件
+
+Bytes I/O の性能は、ゼロコピー経路を保つことに依存します。
+
+- `readBytesAt(path, offset, len)` は、当該 API を公開するすべての
+  バックエンドでバイトバッファの読み取りを提供します。
+- WASI 向けの低水準化は WASI ホストインターフェイスのファイルオープン
+  およびリード列を利用します。
+- `Bytes` カーソルの slice は、チャンクごとにバッファ全体を複製せず、
+  共有バッファの挙動を保ちます。
+- 大容量フィクスチャは opt-in でも構いません。ただし不変条件テストは
+  バッファ共有の挙動を引き続き検証します。
+
+これらの不変条件はワークフローゲートだけでなくテストでも検証します。

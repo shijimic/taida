@@ -4,8 +4,9 @@
 //   - `@Since:` values must match `[a-z]\.\d+(\.[a-z0-9]+)?` (Taida
 //     versioning `<gen>.<num>.<label?>`). Semver-shaped strings like
 //     `1.2.0` are rejected because they would trigger the
-//     `feedback_taida_versioning` immediate-reject rule (`docs/STABILITY.md`
-//     §3 also forbids semver-shaped numbers in release artefacts).
+//     `feedback_taida_versioning` immediate-reject rule. The release
+//     process reference (`docs/reference/release_process.md`) likewise
+//     forbids semver-shaped numbers in release artefacts.
 //   - PHILOSOPHY I forbids `null` / `undefined` in the surface; the
 //     doc-comment AI-Constraints template must use `Lax.hasValue` /
 //     `Result` predicate phrasing instead of "null チェック".

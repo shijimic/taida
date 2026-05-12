@@ -24421,18 +24421,19 @@ stdout(r.requests)
 // Live cert-rotation and ALPN matrix coverage is runtime-dependent
 // (needs cert fixtures + real TLS negotiation); those cases stay in
 // the C26B-005 soak runbook per the 2026-04-24 Phase 0 Design Lock.
-// The 3-backend parity pin here is the contract that `docs/STABILITY.md
-// § 5.1` TLS-construction bullet promises.
+// The 3-backend parity pin here is the contract that the NET
+// reference (`docs/reference/net_api.md`) promises for TLS
+// construction errors.
 
 /// C26B-002-1: TLS config with missing cert path — 3-backend
 /// construction-time error parity.
 ///
 /// Every backend must surface an error that mentions "cert" or "tls"
 /// (case-insensitive substrings). We do not pin the exact string (per
-/// `STABILITY § 2.3` diagnostic messages are not contractual) but we
-/// pin the classification: construction of a TLS server with a
-/// non-existent cert path is an error on every backend, never a
-/// silent fallback.
+/// `docs/reference/release_process.md` 非保証範囲 — diagnostic message
+/// wording is not contractual) but we pin the classification:
+/// construction of a TLS server with a non-existent cert path is an
+/// error on every backend, never a silent fallback.
 #[test]
 fn test_net6_1c_c26b002_1_tls_missing_cert_3backend_parity() {
     if !node_available() {

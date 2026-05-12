@@ -10,7 +10,7 @@ Taida のユーザー定義型 (旧 TypeDef / Mold 継承 / Error 継承) は、
 
 > **PHILOSOPHY.md — III.** カタめたいなら、鋳型を作りましょう
 
-> **E30 rename note** — このファイルは旧 `mold_types.md` から rename されました (2026-04-28)。class-like 統一概念のもとで「操作モールド」を扱うリファレンスとして再配置されています。本ファイルが扱う内容 (Mold 基底クラスの header 規則 / `solidify` / `unmold` / 標準モールド全種 / 型シグネチャ一覧) は変わりません。`[E1407]` / `[E1410]` 等の診断コードの意味改訂は Phase 2/3 (parser / checker) で実装と同期 land されるため、`docs/reference/diagnostic_codes.md` 側の記述更新もそのタイミングで行われます (本リファレンスは class-like 統一概念に先行整合)。
+> **位置付け** — このファイルは旧 `mold_types.md` の後継です。class-like 統一概念のもとで「操作モールド」を扱うリファレンスとして配置しています。Mold 基底クラスのヘッダ規則 / `solidify` / `unmold` / 標準モールド全種 / 型シグネチャ一覧を扱います。`[E1407]` / `[E1410]` などの診断コードの意味は `docs/reference/diagnostic_codes.md` と同期して定義されます。
 
 ---
 
@@ -1273,12 +1273,12 @@ Filter[list, isEven]() ]=> result
 - 標準モールド全種 (文字列 / 数値 / リスト / 演算 / 条件 / 型比較 / 型変換 / Lax / JSON / Result / Gorillax / JS 補助) の API・引数・戻り値・semantics
 - `solidify` / `unmold` の正式仕様
 - `[]` / `()` 束縛規則
-- header 記法と `[E1401]` / `[E1407]` / `[E1408]` の発火条件 (※意味再定義は Phase 2/3 で実装と同期 land、`docs/reference/diagnostic_codes.md` も同期更新)
+- ヘッダ記法と `[E1401]` / `[E1407]` / `[E1408]` の発火条件（診断コードの意味は `docs/reference/diagnostic_codes.md` と同期して定義されます）
 - 4 バックエンド (Interpreter / JS / Native / WASM-wasi) parity 保証
 
 ### 旧パスへの参照を見つけた場合
 
-- 本リポジトリ内の非歴史的 docs (README.md / docs/STABILITY.md / docs/{guide,reference}/ 配下) は Sub-step 1.3 で一斉置換済み
+- 本リポジトリ内の非歴史的 docs (README.md / docs/{guide,reference}/ 配下) は一斉置換済み
 - `CHANGELOG.md` の **歴史的 release note** (`@b.X` / `@c.X` / `@d.X` 当時の記述) は原文保持 — 当時の事実として `mold_types.md` パスを残しています
 - 外部参照 (ブログ / IDE plugin 設定 / addon README 等) で旧パスが残っている場合は、本ファイル `class_like_types.md` を参照するように更新してください
 

@@ -271,29 +271,25 @@ fn measure_peak_rss_script_is_executable() {
 }
 
 #[test]
-fn stability_md_marks_throughput_and_memory_fixed_at_d28() {
-    let path = repo_root().join("docs/STABILITY.md");
+fn perf_gates_reference_pins_throughput_and_memory_invariants() {
+    let path = repo_root().join("docs/reference/perf_gates.md");
     let content = read_to_string(&path);
-    let performance = content
-        .split("### 5.5. Performance")
-        .nth(1)
-        .expect("docs/STABILITY.md must contain the performance policy section");
     assert!(
-        performance.contains("Throughput regression")
-            && performance.contains("`bench.yml`")
-            && performance.contains("+10% slow-down vs the 30-sample EWMA baseline"),
-        "stability policy must pin the throughput regression gate without relying on internal IDs"
+        content.contains("スループット回帰")
+            && content.contains("`bench.yml`")
+            && content.contains("EWMA 基準値より 10% を超えて遅くなった"),
+        "perf gate reference must pin the throughput regression gate without relying on internal IDs"
     );
     assert!(
-        performance.contains("Peak RSS regression")
-            && performance.contains("`bench.yml`")
-            && performance.contains("+10% RSS growth vs the 30-sample EWMA baseline"),
-        "stability policy must pin the peak-RSS regression gate without relying on internal IDs"
+        content.contains("ピーク RSS 回帰")
+            && content.contains("`bench.yml`")
+            && content.contains("ピーク RSS が 10% を超えて増えた"),
+        "perf gate reference must pin the peak-RSS regression gate without relying on internal IDs"
     );
     assert!(
-        performance.contains("Valgrind definitely-lost")
-            && performance.contains("`memory.yml`")
-            && performance.contains("any `definitely lost` byte"),
-        "stability policy must pin the memory hard-fail gate without relying on internal IDs"
+        content.contains("Valgrind definitely-lost")
+            && content.contains("`memory.yml`")
+            && content.contains("`definitely lost` バイトが 1 でも検出された"),
+        "perf gate reference must pin the memory hard-fail gate without relying on internal IDs"
     );
 }

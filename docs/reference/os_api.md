@@ -4,6 +4,12 @@
 
 ガイドは [`docs/guide/14_os_package.md`](../guide/14_os_package.md) を参照。
 
+## 戻り値型表記について
+
+本ドキュメントで使用する `Result[T, _]` は canonical 定義 `Mold[T] => Result[T, P <= :T => :Bool] = @(throw: Error)` の **述語省略形** です。第 2 型引数 `_` は述語型のプレースホルダで、I/O 操作系では述語を使わず `throw` channel のみを利用します。
+
+各 API シグネチャの **Throws** 列は `]=>` で unmold した際に発生しうる throw 型を示します（捕捉は `|== error: <Type>` で行う、`docs/guide/08_error_handling.md` 参照）。`Result` は失敗時に throw して捕捉系へジャンプし、`Gorillax` は失敗を値として保持する点で異なります。
+
 ---
 
 ## 1. ファイル I/O
@@ -17,18 +23,18 @@
 | `readBytesAt(path, offset, len)` | `(Str, Int, Int) -> Lax[Bytes]` | チャンク読み込み。`offset` は 0-indexed、1 回呼び出しの `len` 上限は 64MB。EOF 越えは可読部分のみ返す。`offset` / `len` 不正は `Lax` の default |
 | `ListDir[path]()` | `Str -> Lax[@[Str]]` | ファイル名のみ（パス無し） |
 | `Stat[path]()` | `Str -> Lax[@(size: Int, modified: Int, isDir: Bool)]` | `modified` は epoch ミリ秒 |
-| `Exists[path]()` | `Str -> Result[Bool]` | symlink は follow する。I/O 失敗は `throw`、通常の存在有無は inner Bool |
+| `Exists[path]()` | `Str -> Result[Bool, _]` | symlink は follow する。通常の存在有無は inner Bool。**Throws**: `IoError` (I/O 失敗時) |
 
 ### 出力（関数）
 
-| API | Signature | 備考 |
-|-----|-----------|------|
-| `writeFile(path, content)` | `(Str, Str) -> Result[Unit, IoError]` | 上書き。ディレクトリは自動作成しない |
-| `writeBytes(path, content)` | `(Str, Bytes) -> Result[Unit, IoError]` | 上書き |
-| `appendFile(path, content)` | `(Str, Str) -> Result[Unit, IoError]` | 追記。無ければ新規作成 |
-| `remove(path)` | `Str -> Result[Unit, IoError]` | ファイル / 空ディレクトリ |
-| `createDir(path)` | `Str -> Result[Unit, IoError]` | `mkdir -p` 相当 |
-| `rename(from, to)` | `(Str, Str) -> Result[Unit, IoError]` | アトミック（同一 filesystem 内） |
+| API | Signature | Throws | 備考 |
+|-----|-----------|--------|------|
+| `writeFile(path, content)` | `(Str, Str) -> Result[Unit, _]` | `IoError` | 上書き。ディレクトリは自動作成しない |
+| `writeBytes(path, content)` | `(Str, Bytes) -> Result[Unit, _]` | `IoError` | 上書き |
+| `appendFile(path, content)` | `(Str, Str) -> Result[Unit, _]` | `IoError` | 追記。無ければ新規作成 |
+| `remove(path)` | `Str -> Result[Unit, _]` | `IoError` | ファイル / 空ディレクトリ |
+| `createDir(path)` | `Str -> Result[Unit, _]` | `IoError` | `mkdir -p` 相当 |
+| `rename(from, to)` | `(Str, Str) -> Result[Unit, _]` | `IoError` | アトミック（同一 filesystem 内） |
 
 ---
 
@@ -132,23 +138,23 @@ stdout("こんにちは、" + line.getOrDefault("旅人"))
 
 ## 5. 非同期ソケット（関数）
 
-| API | Signature | 備考 |
-|-----|-----------|------|
-| `tcpConnect(host, port[, timeoutMs])` | `(Str, Int[, Int]) -> Async[Result[TcpSocket, IoError]]` | TCP client 接続 |
-| `tcpListen(port[, timeoutMs])` | `(Int[, Int]) -> Async[Result[TcpListener, IoError]]` | TCP server bind + listen |
-| `tcpAccept(listener[, timeoutMs])` | `(TcpListener[, Int]) -> Async[Result[TcpSocket, IoError]]` | accept 1 connection |
-| `socketSend(socket, data[, timeoutMs])` | `(TcpSocket, Str[, Int]) -> Async[Result[Int, IoError]]` | partial send 可、戻り値は送信 byte 数 |
-| `socketSendAll(socket, data[, timeoutMs])` | `(TcpSocket, Str[, Int]) -> Async[Result[Unit, IoError]]` | 全 byte 送信完了まで block |
-| `socketRecv(socket[, timeoutMs])` | `(TcpSocket[, Int]) -> Async[Result[Str, IoError]]` | best-effort 受信 |
-| `socketSendBytes(socket, data[, timeoutMs])` | `(TcpSocket, Bytes[, Int]) -> Async[Result[Int, IoError]]` | binary 送信 |
-| `socketRecvBytes(socket[, timeoutMs])` | `(TcpSocket[, Int]) -> Async[Result[Bytes, IoError]]` | binary 受信 |
-| `socketRecvExact(socket, size[, timeoutMs])` | `(TcpSocket, Int[, Int]) -> Async[Result[Bytes, IoError]]` | `size` byte 揃うまで待機 |
-| `udpBind(host, port[, timeoutMs])` | `(Str, Int[, Int]) -> Async[Result[UdpSocket, IoError]]` | UDP socket bind |
-| `udpSendTo(socket, host, port, data[, timeoutMs])` | `(UdpSocket, Str, Int, Str[, Int]) -> Async[Result[Int, IoError]]` | UDP datagram 送信 |
-| `udpRecvFrom(socket[, timeoutMs])` | `(UdpSocket[, Int]) -> Async[Result[@(data: Str, host: Str, port: Int), IoError]]` | UDP datagram 受信 |
-| `socketClose(socket)` | `TcpSocket -> Result[Unit, IoError]` | TCP socket（`tcpConnect` / `tcpAccept` の戻り値）を閉じる |
-| `listenerClose(listener)` | `TcpListener -> Result[Unit, IoError]` | TCP listener（`tcpListen` の戻り値）を閉じる。`tcpAccept` で受理済 socket は別途 `socketClose` 必須 |
-| `udpClose(socket)` | `UdpSocket -> Result[Unit, IoError]` | UDP socket（`udpBind` の戻り値）を閉じる。socket type が異なるため `socketClose` と呼び分け必須（型不整合は `[E1602]` で reject） |
+| API | Signature | Throws | 備考 |
+|-----|-----------|--------|------|
+| `tcpConnect(host, port[, timeoutMs])` | `(Str, Int[, Int]) -> Async[Result[TcpSocket, _]]` | `IoError` | TCP client 接続 |
+| `tcpListen(port[, timeoutMs])` | `(Int[, Int]) -> Async[Result[TcpListener, _]]` | `IoError` | TCP server bind + listen |
+| `tcpAccept(listener[, timeoutMs])` | `(TcpListener[, Int]) -> Async[Result[TcpSocket, _]]` | `IoError` | accept 1 connection |
+| `socketSend(socket, data[, timeoutMs])` | `(TcpSocket, Str[, Int]) -> Async[Result[Int, _]]` | `IoError` | partial send 可、戻り値は送信 byte 数 |
+| `socketSendAll(socket, data[, timeoutMs])` | `(TcpSocket, Str[, Int]) -> Async[Result[Unit, _]]` | `IoError` | 全 byte 送信完了まで block |
+| `socketRecv(socket[, timeoutMs])` | `(TcpSocket[, Int]) -> Async[Result[Str, _]]` | `IoError` | best-effort 受信 |
+| `socketSendBytes(socket, data[, timeoutMs])` | `(TcpSocket, Bytes[, Int]) -> Async[Result[Int, _]]` | `IoError` | binary 送信 |
+| `socketRecvBytes(socket[, timeoutMs])` | `(TcpSocket[, Int]) -> Async[Result[Bytes, _]]` | `IoError` | binary 受信 |
+| `socketRecvExact(socket, size[, timeoutMs])` | `(TcpSocket, Int[, Int]) -> Async[Result[Bytes, _]]` | `IoError` | `size` byte 揃うまで待機 |
+| `udpBind(host, port[, timeoutMs])` | `(Str, Int[, Int]) -> Async[Result[UdpSocket, _]]` | `IoError` | UDP socket bind |
+| `udpSendTo(socket, host, port, data[, timeoutMs])` | `(UdpSocket, Str, Int, Str[, Int]) -> Async[Result[Int, _]]` | `IoError` | UDP datagram 送信 |
+| `udpRecvFrom(socket[, timeoutMs])` | `(UdpSocket[, Int]) -> Async[Result[@(data: Str, host: Str, port: Int), _]]` | `IoError` | UDP datagram 受信 |
+| `socketClose(socket)` | `TcpSocket -> Result[Unit, _]` | `IoError` | TCP socket（`tcpConnect` / `tcpAccept` の戻り値）を閉じる |
+| `listenerClose(listener)` | `TcpListener -> Result[Unit, _]` | `IoError` | TCP listener（`tcpListen` の戻り値）を閉じる。`tcpAccept` で受理済 socket は別途 `socketClose` 必須 |
+| `udpClose(socket)` | `UdpSocket -> Result[Unit, _]` | `IoError` | UDP socket（`udpBind` の戻り値）を閉じる。socket type が異なるため `socketClose` と呼び分け必須（型不整合は `[E1602]` で reject） |
 
 ---
 

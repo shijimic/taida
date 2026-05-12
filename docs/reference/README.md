@@ -12,24 +12,24 @@
 
 | ファイル | 役割 |
 |----------|------|
-| `addon_manifest.md` | `native/addon.toml` の schema と addon backend policy |
-| `build_descriptors.md` | 複数ターゲットを組み合わせる build descriptor と artifact graph |
-| `class_like_types.md` | mold / class-like type family |
-| `cli.md` | `taida` CLI command と flag の公開仕様 |
-| `diagnostic_codes.md` | 公開 diagnostic code の一覧 |
-| `documentation_comments.md` | documentation comment の構文 |
-| `graph_model.md` | structural introspection graph model |
-| `naming_conventions.md` | 公開 naming rule |
+| `addon_manifest.md` | `native/addon.toml` のスキーマとアドオンバックエンドの方針 |
+| `build_descriptors.md` | 複数ターゲットを組み合わせるビルド記述子と成果物グラフ |
+| `class_like_types.md` | モールド / クラスライク型ファミリー |
+| `cli.md` | `taida` CLI のコマンドとフラグの公開仕様 |
+| `diagnostic_codes.md` | 公開診断コードの一覧 |
+| `documentation_comments.md` | ドキュメントコメントの構文 |
+| `graph_model.md` | 構造的内省 (introspection) グラフモデル |
+| `naming_conventions.md` | 公開命名規則 |
 | `net_api.md` | `taida-lang/net` API の公開仕様 |
-| `operators.md` | 10 個の operator と grammar 上の役割 |
+| `operators.md` | 10 種の演算子と文法上の役割 |
 | `os_api.md` | `taida-lang/os` API の公開仕様 |
-| `perf_gates.md` | release の performance / resource gate |
-| `release_process.md` | generation / build counter と互換性判断 |
-| `scope_rules.md` | lexical scope と module scope の規則 |
-| `standard_library.md` | prelude と bundled library の公開仕様 |
-| `standard_methods.md` | standard method signature と contract |
-| `tail_recursion.md` | tail-call と recursion の保証 |
-| `wasm_profiles.md` | WASM target profile と対応範囲 |
+| `perf_gates.md` | リリース品質に関わるパフォーマンス／リソースゲート |
+| `release_process.md` | 世代番号・ビルド番号と互換性判断のプロセス |
+| `scope_rules.md` | 字句スコープとモジュールスコープの規則 |
+| `standard_library.md` | プレリュードと標準同梱ライブラリの公開仕様 |
+| `standard_methods.md` | 標準メソッドのシグネチャと契約 |
+| `tail_recursion.md` | 末尾呼び出しと再帰の保証 |
+| `wasm_profiles.md` | WASM ターゲットプロファイルと対応範囲 |
 
 ---
 

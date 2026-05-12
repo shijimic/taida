@@ -12,8 +12,8 @@
 //! 3. unknown target は parse 時に early reject、`[E2001]` / `[E2002]`
 //!    の文言を含む `AddonManifestError` で返す。
 //! 4. stable 後の default 変更は次 gen でしか許容しない (本契約は
-//!    `docs/STABILITY.md § 6` + `docs/reference/addon_manifest.md` で
-//!    明文化、本テストは default 値の現状を pin することで
+//!    `docs/reference/release_process.md` + `docs/reference/addon_manifest.md`
+//!    で明文化、本テストは default 値の現状を pin することで
 //!    accidental drift を CI で捕捉する)。
 
 use taida::addon::manifest::{

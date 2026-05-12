@@ -307,7 +307,7 @@ $ taida ./main.td
 <<<@a.3 owner/pkg @(hello, greet)
 ```
 
-source tarball から取得する依存は `[packages."taida-lang/name"]` テーブルで宣言し、SHA-256 pin を必ず併記します。Phase 0 では source package の owner は `taida-lang` のみです。`integrity` は `sha256:` + 64 文字の小文字 hex です。download した tarball の SHA-256 が一致しない場合、install は `[E32K3_SOURCE_INTEGRITY_MISMATCH]` で中断します。
+source tarball から取得する依存は `[packages."taida-lang/name"]` テーブルで宣言し、SHA-256 pin を必ず併記します。現時点で source package の owner として受理されるのは `taida-lang` のみです。`integrity` は `sha256:` + 64 文字の小文字 hex です。download した tarball の SHA-256 が一致しない場合、install は `[E32K3_SOURCE_INTEGRITY_MISMATCH]` で中断します。
 
 ```toml
 [packages."taida-lang/web"]

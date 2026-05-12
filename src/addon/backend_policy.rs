@@ -9,9 +9,10 @@
 //! `Native` and `Interpreter` as a first-class addon backend. wasm-full
 //! is the only wasm profile in the stable contract that exposes the
 //! addon dispatcher; wasm-min / wasm-wasi / wasm-edge remain unsupported
-//! at @d.X. The widening is a `docs/STABILITY.md § 6.2` addition (the
-//! set of accepted backends grows; no existing addon is reinterpreted),
-//! so it does not require a generation bump. Manifest authors who want
+//! at @d.X. The widening is an additive change under
+//! `docs/reference/release_process.md` (the set of accepted backends
+//! grows; no existing addon is reinterpreted), so it does not require
+//! a generation bump. Manifest authors who want
 //! to declare wasm-full compatibility add `"wasm-full"` to the top-level
 //! `targets` array; addons that omit `targets` continue to default to
 //! `["native"]` (D28B-021 contract preserved). The `Js` backend remains
@@ -44,7 +45,8 @@ use std::fmt;
 /// `WasmWasi`, and `WasmEdge` remain unsupported. Adding a new backend
 /// to the supported set is a deliberate, RC-level decision -- the
 /// policy table below must be updated in lockstep with the manifest
-/// `SUPPORTED_ADDON_TARGETS` allowlist and `docs/STABILITY.md § 5.2`.
+/// `SUPPORTED_ADDON_TARGETS` allowlist and the WASM profile
+/// reference (`docs/reference/wasm_profiles.md`).
 ///
 /// The enum is `#[non_exhaustive]` so future RCs can extend it without
 /// breaking pattern matches in package-resolution code that has already
