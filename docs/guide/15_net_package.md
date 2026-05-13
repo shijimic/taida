@@ -88,7 +88,7 @@ value: Str)]`) として渡すのを推奨します。`-` を含むヘッダ名 
 | API | 1-arg | 2-arg | 用途 |
 |-----|------|------|------|
 | `readBody(req)` | OK | OK | body を `Bytes` で 1 度に取得 |
-| `readBodyChunk(req)` | (使えない) | OK | chunk ごとに `Lax[Bytes]` を返す。`hasValue=false` で終端 |
+| `readBodyChunk(req)` | (使えない) | OK | chunk ごとに `Lax[Bytes]` を返す。`has_value=false` で終端 |
 | `readBodyAll(req)` | (使えない) | OK | 残りすべてを 1 つの `Bytes` で取得 |
 
 ```taida
@@ -244,7 +244,7 @@ resp ]=> result
 response <= result.getOrDefault(@(status <= 0, headers <= @[], body <= ""))
 failure <= result.errorInfo().getOrDefault(@(type <= "IoError", message <= "request failed", kind <= "other", code <= 0))
 report <= (
-  | result.hasValue |>
+  | result.has_value |>
       "status=" + response.status.toString() +
       " body_len=" + response.body.length().toString()
   | _ |> failure.message

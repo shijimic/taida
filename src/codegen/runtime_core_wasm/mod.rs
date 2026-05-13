@@ -109,7 +109,7 @@ mod tests {
     /// carried the stamping). Fixes `stdout(Float[x]())` on wasm-wasi
     /// rendering a pack pointer as subnormal f64 bits and
     /// `stdout(Int[x]())` emitting the short `Lax(3)` toString form
-    /// instead of the interpreter's full `@(hasValue <= …, …)` shape.
+    /// instead of the interpreter's full `@(has_value <= …, …)` shape.
     ///
     /// C23-2 / C23-4 (2026-04-22): +3,674 bytes across two fragments.
     /// `02_containers.inc.c` adds `taida_str_mold_any` (generic `Str[x]()`
@@ -388,13 +388,13 @@ mod tests {
     /// C24-A (2026-04-23): 295,319 → 299,284 (+3,965). Unified WASM
     /// Gorillax's first-field hash from `WASM_HASH_IS_OK` (0x6550…) to
     /// `WASM_HASH_HAS_VALUE` (0x9e9c…) so `Str[Gorillax[v]()]()` matches
-    /// the interpreter / JS / native `@(hasValue <= …, __value <= …,
+    /// the interpreter / JS / native `@(has_value <= …, __value <= …,
     /// __error <= @(), __type <= "Gorillax")` shape byte-for-byte. The
     /// five Gorillax / RelaxedGorillax allocators in `02_containers.inc.c`
     /// (`taida_gorillax_new`, `taida_gorillax_err`, `taida_gorillax_relax`,
     /// `taida_relaxed_gorillax_new`, `taida_relaxed_gorillax_err`) now
     /// (a) set `hash0 = WASM_HASH_HAS_VALUE`, (b) idempotently register
-    /// the `hasValue` / `__value` / `__error` / `__type` field names via
+    /// the `has_value` / `__value` / `__error` / `__type` field names via
     /// the new `_wasm_register_gorillax_field_names` helper so
     /// `_wasm_pack_to_string_full` resolves all four fields (previously
     /// `__error` was unregistered and silently skipped), (c) stamp
@@ -491,9 +491,11 @@ mod tests {
     /// 2026-05-13 E38 Phase 3 canonicalizes RelaxedGorillax throw
     /// carriers to the 5-field ErrorInfo-compatible shape; assembled
     /// runtime is 346,202 bytes.
+    /// 2026-05-14 Lax public data field rename (`hasValue` -> `has_value`)
+    /// updates generated C literals; assembled runtime is 346,223 bytes.
     #[test]
     fn test_runtime_core_wasm_fragment_concat_preserves_bytes() {
-        const EXPECTED_TOTAL_LEN: usize = 346_202;
+        const EXPECTED_TOTAL_LEN: usize = 346_223;
         let asm = *RUNTIME_CORE_WASM;
         assert_eq!(
             asm.len(),

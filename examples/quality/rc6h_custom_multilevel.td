@@ -16,15 +16,15 @@ Str[sq.area]() ]=> sq_a
 stdout("T1: " + TypeName[sq]() + " color=" + sq.color + " sides=" + sq_sides + " w=" + sq_w + " h=" + sq_h + " sq=" + sq_is + " area=" + sq_a)
 
 // Function expecting Shape (grandparent) receives Square
-describe_shape s: Shape = s.color + " shape" => :Str
-stdout("T2: " + describe_shape(sq))
+describeShape s: Shape = s.color + " shape" => :Str
+stdout("T2: " + describeShape(sq))
 
 // Function expecting Polygon (parent) receives Square
-count_sides p: Polygon =
+countSides p: Polygon =
   Str[p.sides]() ]=> s
   s + " sides"
 => :Str
-stdout("T3: " + count_sides(sq))
+stdout("T3: " + countSides(sq))
 
 // Rectangle with defaults
 rect <= Rectangle(color <= "blue", sides <= 4, width <= 10, height <= 5)

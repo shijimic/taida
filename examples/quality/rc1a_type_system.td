@@ -41,7 +41,7 @@ Int["-5"]() ]=> neg
 stdout(neg.toString())
 Int[""]() ]=> emptyInt
 stdout(emptyInt.toString())
-stdout(Int[""]().hasValue.toString())
+stdout(Int[""]().has_value.toString())
 
 // 3b: Float conversion edge cases
 Float["0.0"]() ]=> zeroF
@@ -81,7 +81,7 @@ empty.last() ]=> el
 stdout(el.toString())
 empty.max() ]=> em
 stdout(em.toString())
-stdout(empty.first().hasValue.toString())
+stdout(empty.first().has_value.toString())
 
 // 4b: List methods
 nums <= @[3, 1, 4, 1, 5, 9, 2, 6]
@@ -98,7 +98,7 @@ nums.get(7) ]=> last
 stdout(last.toString())
 nums.get(100) ]=> oob
 stdout(oob.toString())
-stdout(nums.get(100).hasValue.toString())
+stdout(nums.get(100).has_value.toString())
 
 // 4d: Max/Min
 nums.max() ]=> mx
@@ -139,8 +139,8 @@ stdout(reversed)
 // === 6. Numeric molds ===
 ToFixed[3.14159, 2]() => fixed
 stdout(fixed)
-Abs[-5]() => absVal
-stdout(absVal.toString())
+Abs[-5]() => abs_val
+stdout(abs_val.toString())
 Floor[3.7]() => floored
 stdout(floored.toString())
 Ceil[3.2]() => ceiled
@@ -181,9 +181,9 @@ Fold[@[1, 2, 3, 4, 5], 0, _ acc x = acc + x]() ]=> folded
 stdout(folded.toString())
 Find[@[1, 2, 3, 4, 5], _ x = x > 3]() ]=> found
 stdout(found.toString())
-stdout(Find[@[1, 2, 3], _ x = x > 10]().hasValue.toString())
-FindIndex[@[10, 20, 30, 40], _ x = x > 25]() => foundIdx
-stdout(foundIdx.toString())
+stdout(Find[@[1, 2, 3], _ x = x > 10]().has_value.toString())
+FindIndex[@[10, 20, 30, 40], _ x = x > 25]() => found_idx
+stdout(found_idx.toString())
 Count[@[1, 2, 3, 4, 5], _ x = x > 2]() => counted
 stdout(counted.toString())
 Take[@[1, 2, 3, 4, 5], 3]() ]=> taken
@@ -226,8 +226,8 @@ testResultFail =
   |== error: Error =
     -1
   => :Int
-  errRes <= Result[0, _ = false](throw <= Error(type <= "Error", message <= "fail"))
-  errRes ]=> errVal
+  err_res <= Result[0, _ = false](throw <= Error(type <= "Error", message <= "fail"))
+  err_res ]=> errVal
   errVal
 => :Int
 stdout(testResultFail().toString())

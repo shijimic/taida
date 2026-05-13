@@ -92,7 +92,7 @@ Cat(name <= "Tama").errorInfo()"#,
 
     #[test]
     fn test_eval_div_mold() {
-        // Div[10, 3]() returns Lax with hasValue=true, value=3
+        // Div[10, 3]() returns Lax with has_value=true, value=3
         let result = eval_ok("result <= Div[10, 3]()");
         assert!(
             matches!(&result, Value::BuchiPack(_)),
@@ -102,7 +102,7 @@ Cat(name <= "Tama").errorInfo()"#,
         if let Value::BuchiPack(fields) = &result {
             let has_value = fields
                 .iter()
-                .find(|(k, _)| k == "hasValue")
+                .find(|(k, _)| k == "has_value")
                 .unwrap()
                 .1
                 .clone();
@@ -119,7 +119,7 @@ Cat(name <= "Tama").errorInfo()"#,
 
     #[test]
     fn test_eval_div_mold_zero() {
-        // Div[10, 0]() returns Lax with hasValue=false
+        // Div[10, 0]() returns Lax with has_value=false
         let result = eval_ok("result <= Div[10, 0]()");
         assert!(
             matches!(&result, Value::BuchiPack(_)),
@@ -129,7 +129,7 @@ Cat(name <= "Tama").errorInfo()"#,
         if let Value::BuchiPack(fields) = &result {
             let has_value = fields
                 .iter()
-                .find(|(k, _)| k == "hasValue")
+                .find(|(k, _)| k == "has_value")
                 .unwrap()
                 .1
                 .clone();
@@ -139,7 +139,7 @@ Cat(name <= "Tama").errorInfo()"#,
 
     #[test]
     fn test_eval_mod_mold() {
-        // Mod[10, 3]() returns Lax with hasValue=true, value=1
+        // Mod[10, 3]() returns Lax with has_value=true, value=1
         let result = eval_ok("result <= Mod[10, 3]()");
         assert!(
             matches!(&result, Value::BuchiPack(_)),
@@ -149,7 +149,7 @@ Cat(name <= "Tama").errorInfo()"#,
         if let Value::BuchiPack(fields) = &result {
             let has_value = fields
                 .iter()
-                .find(|(k, _)| k == "hasValue")
+                .find(|(k, _)| k == "has_value")
                 .unwrap()
                 .1
                 .clone();
@@ -166,7 +166,7 @@ Cat(name <= "Tama").errorInfo()"#,
 
     #[test]
     fn test_eval_mod_mold_zero() {
-        // Mod[10, 0]() returns Lax with hasValue=false
+        // Mod[10, 0]() returns Lax with has_value=false
         let result = eval_ok("result <= Mod[10, 0]()");
         assert!(
             matches!(&result, Value::BuchiPack(_)),
@@ -176,7 +176,7 @@ Cat(name <= "Tama").errorInfo()"#,
         if let Value::BuchiPack(fields) = &result {
             let has_value = fields
                 .iter()
-                .find(|(k, _)| k == "hasValue")
+                .find(|(k, _)| k == "has_value")
                 .unwrap()
                 .1
                 .clone();
@@ -188,7 +188,7 @@ Cat(name <= "Tama").errorInfo()"#,
 
     #[test]
     fn test_str_mold_from_int() {
-        // Str[42]() → Lax(hasValue=true, __value="42")
+        // Str[42]() → Lax(has_value=true, __value="42")
         let result = eval_ok("result <= Str[42]()");
         assert!(
             matches!(&result, Value::BuchiPack(_)),
@@ -198,7 +198,7 @@ Cat(name <= "Tama").errorInfo()"#,
         if let Value::BuchiPack(fields) = &result {
             let has_value = fields
                 .iter()
-                .find(|(k, _)| k == "hasValue")
+                .find(|(k, _)| k == "has_value")
                 .unwrap()
                 .1
                 .clone();
@@ -220,7 +220,7 @@ Cat(name <= "Tama").errorInfo()"#,
             Value::BuchiPack(fields) => {
                 let has_value = fields
                     .iter()
-                    .find(|(k, _)| k == "hasValue")
+                    .find(|(k, _)| k == "has_value")
                     .unwrap()
                     .1
                     .clone();
@@ -239,13 +239,13 @@ Cat(name <= "Tama").errorInfo()"#,
 
     #[test]
     fn test_int_mold_from_str_success() {
-        // Int["123"]() → Lax(hasValue=true, __value=123)
+        // Int["123"]() → Lax(has_value=true, __value=123)
         let result = eval_ok("result <= Int[\"123\"]()");
         match &result {
             Value::BuchiPack(fields) => {
                 let has_value = fields
                     .iter()
-                    .find(|(k, _)| k == "hasValue")
+                    .find(|(k, _)| k == "has_value")
                     .unwrap()
                     .1
                     .clone();
@@ -264,13 +264,13 @@ Cat(name <= "Tama").errorInfo()"#,
 
     #[test]
     fn test_int_mold_from_str_fail() {
-        // Int["abc"]() → Lax(hasValue=false, __value=0)
+        // Int["abc"]() → Lax(has_value=false, __value=0)
         let result = eval_ok("result <= Int[\"abc\"]()");
         match &result {
             Value::BuchiPack(fields) => {
                 let has_value = fields
                     .iter()
-                    .find(|(k, _)| k == "hasValue")
+                    .find(|(k, _)| k == "has_value")
                     .unwrap()
                     .1
                     .clone();
@@ -289,13 +289,13 @@ Cat(name <= "Tama").errorInfo()"#,
 
     #[test]
     fn test_int_mold_from_float() {
-        // Int[3.14]() → Lax(hasValue=true, __value=3)
+        // Int[3.14]() → Lax(has_value=true, __value=3)
         let result = eval_ok("result <= Int[3.14]()");
         match &result {
             Value::BuchiPack(fields) => {
                 let has_value = fields
                     .iter()
-                    .find(|(k, _)| k == "hasValue")
+                    .find(|(k, _)| k == "has_value")
                     .unwrap()
                     .1
                     .clone();
@@ -314,13 +314,13 @@ Cat(name <= "Tama").errorInfo()"#,
 
     #[test]
     fn test_float_mold_from_str_success() {
-        // Float["3.14"]() → Lax(hasValue=true, __value=3.14)
+        // Float["3.14"]() → Lax(has_value=true, __value=3.14)
         let result = eval_ok("result <= Float[\"3.14\"]()");
         match &result {
             Value::BuchiPack(fields) => {
                 let has_value = fields
                     .iter()
-                    .find(|(k, _)| k == "hasValue")
+                    .find(|(k, _)| k == "has_value")
                     .unwrap()
                     .1
                     .clone();
@@ -339,13 +339,13 @@ Cat(name <= "Tama").errorInfo()"#,
 
     #[test]
     fn test_float_mold_from_str_fail() {
-        // Float["abc"]() → Lax(hasValue=false, __value=0.0)
+        // Float["abc"]() → Lax(has_value=false, __value=0.0)
         let result = eval_ok("result <= Float[\"abc\"]()");
         match &result {
             Value::BuchiPack(fields) => {
                 let has_value = fields
                     .iter()
-                    .find(|(k, _)| k == "hasValue")
+                    .find(|(k, _)| k == "has_value")
                     .unwrap()
                     .1
                     .clone();
@@ -364,13 +364,13 @@ Cat(name <= "Tama").errorInfo()"#,
 
     #[test]
     fn test_bool_mold_from_str_true() {
-        // Bool["true"]() → Lax(hasValue=true, __value=true)
+        // Bool["true"]() → Lax(has_value=true, __value=true)
         let result = eval_ok("result <= Bool[\"true\"]()");
         match &result {
             Value::BuchiPack(fields) => {
                 let has_value = fields
                     .iter()
-                    .find(|(k, _)| k == "hasValue")
+                    .find(|(k, _)| k == "has_value")
                     .unwrap()
                     .1
                     .clone();
@@ -389,13 +389,13 @@ Cat(name <= "Tama").errorInfo()"#,
 
     #[test]
     fn test_bool_mold_from_str_fail() {
-        // Bool["hello"]() → Lax(hasValue=false, __value=false)
+        // Bool["hello"]() → Lax(has_value=false, __value=false)
         let result = eval_ok("result <= Bool[\"hello\"]()");
         match &result {
             Value::BuchiPack(fields) => {
                 let has_value = fields
                     .iter()
-                    .find(|(k, _)| k == "hasValue")
+                    .find(|(k, _)| k == "has_value")
                     .unwrap()
                     .1
                     .clone();
@@ -414,13 +414,13 @@ Cat(name <= "Tama").errorInfo()"#,
 
     #[test]
     fn test_int_mold_from_bool() {
-        // Int[true]() → Lax(hasValue=true, __value=1)
+        // Int[true]() → Lax(has_value=true, __value=1)
         let result = eval_ok("result <= Int[true]()");
         match &result {
             Value::BuchiPack(fields) => {
                 let has_value = fields
                     .iter()
-                    .find(|(k, _)| k == "hasValue")
+                    .find(|(k, _)| k == "has_value")
                     .unwrap()
                     .1
                     .clone();
@@ -439,13 +439,13 @@ Cat(name <= "Tama").errorInfo()"#,
 
     #[test]
     fn test_bool_mold_from_int() {
-        // Bool[0]() → Lax(hasValue=true, __value=false)
+        // Bool[0]() → Lax(has_value=true, __value=false)
         let result = eval_ok("result <= Bool[0]()");
         match &result {
             Value::BuchiPack(fields) => {
                 let has_value = fields
                     .iter()
-                    .find(|(k, _)| k == "hasValue")
+                    .find(|(k, _)| k == "has_value")
                     .unwrap()
                     .1
                     .clone();
@@ -606,11 +606,11 @@ Cat(name <= "Tama").errorInfo()"#,
 
     #[test]
     fn test_eval_list_get_oob_returns_lax() {
-        // .get(i) OOB returns Lax with hasValue=false (no IndexError)
+        // .get(i) OOB returns Lax with has_value=false (no IndexError)
         let source = r#"
 numbers <= @[1, 2, 3]
 result <= numbers.get(10)
-result.hasValue
+result.has_value
 "#;
         assert_eq!(eval_ok(source), Value::Bool(false));
     }
@@ -728,14 +728,14 @@ result <= numbers.get(10).unmold()
 
     #[test]
     fn test_list_find() {
-        let source = "isEven x =\n  Mod[x, 2]() ]=> r\n  r == 0\n=> :Bool\nresult <= Find[@[1, 3, 4, 7], isEven]()\nresult.hasValue";
+        let source = "isEven x =\n  Mod[x, 2]() ]=> r\n  r == 0\n=> :Bool\nresult <= Find[@[1, 3, 4, 7], isEven]()\nresult.has_value";
         assert_eq!(eval_ok(source), Value::Bool(true));
     }
 
     #[test]
     fn test_list_find_not_found() {
         let source =
-            "isNeg x =\n  x < 0\n=> :Bool\nresult <= Find[@[1, 2, 3], isNeg]()\nresult.hasValue";
+            "isNeg x =\n  x < 0\n=> :Bool\nresult <= Find[@[1, 2, 3], isNeg]()\nresult.has_value";
         assert_eq!(eval_ok(source), Value::Bool(false));
     }
 
@@ -1012,7 +1012,7 @@ result <= numbers.get(10).unmold()
         match ok {
             Value::BuchiPack(fields) => {
                 assert_eq!(
-                    fields.iter().find(|(k, _)| k == "hasValue").unwrap().1,
+                    fields.iter().find(|(k, _)| k == "has_value").unwrap().1,
                     Value::Bool(true)
                 );
                 assert_eq!(
@@ -1027,7 +1027,7 @@ result <= numbers.get(10).unmold()
         match bad {
             Value::BuchiPack(fields) => {
                 assert_eq!(
-                    fields.iter().find(|(k, _)| k == "hasValue").unwrap().1,
+                    fields.iter().find(|(k, _)| k == "has_value").unwrap().1,
                     Value::Bool(false)
                 );
             }
@@ -1041,7 +1041,7 @@ result <= numbers.get(10).unmold()
         match radix {
             Value::BuchiPack(fields) => {
                 assert_eq!(
-                    fields.iter().find(|(k, _)| k == "hasValue").unwrap().1,
+                    fields.iter().find(|(k, _)| k == "has_value").unwrap().1,
                     Value::Bool(true)
                 );
                 assert_eq!(
@@ -1056,7 +1056,7 @@ result <= numbers.get(10).unmold()
         match int_base {
             Value::BuchiPack(fields) => {
                 assert_eq!(
-                    fields.iter().find(|(k, _)| k == "hasValue").unwrap().1,
+                    fields.iter().find(|(k, _)| k == "has_value").unwrap().1,
                     Value::Bool(true)
                 );
                 assert_eq!(
@@ -1074,7 +1074,7 @@ result <= numbers.get(10).unmold()
         match u8_ok {
             Value::BuchiPack(fields) => {
                 assert_eq!(
-                    fields.iter().find(|(k, _)| k == "hasValue").unwrap().1,
+                    fields.iter().find(|(k, _)| k == "has_value").unwrap().1,
                     Value::Bool(true)
                 );
                 assert_eq!(
@@ -1089,7 +1089,7 @@ result <= numbers.get(10).unmold()
         match bytes_ok {
             Value::BuchiPack(fields) => {
                 assert_eq!(
-                    fields.iter().find(|(k, _)| k == "hasValue").unwrap().1,
+                    fields.iter().find(|(k, _)| k == "has_value").unwrap().1,
                     Value::Bool(true)
                 );
                 assert_eq!(
@@ -1130,7 +1130,7 @@ Utf8Decode[bb]()",
         match dec_ok {
             Value::BuchiPack(fields) => {
                 assert_eq!(
-                    fields.iter().find(|(k, _)| k == "hasValue").unwrap().1,
+                    fields.iter().find(|(k, _)| k == "has_value").unwrap().1,
                     Value::Bool(true)
                 );
                 assert_eq!(
@@ -1256,7 +1256,7 @@ Utf8Decode[bb]()",
     #[test]
     fn test_mold_find_lax() {
         // Find now returns Lax (not Optional)
-        let source = "isEven x =\n  Mod[x, 2]() ]=> r\n  r == 0\n=> :Bool\nresult <= Find[@[1, 3, 4, 7], isEven]()\nresult.hasValue";
+        let source = "isEven x =\n  Mod[x, 2]() ]=> r\n  r == 0\n=> :Bool\nresult <= Find[@[1, 3, 4, 7], isEven]()\nresult.has_value";
         assert_eq!(eval_ok(source), Value::Bool(true));
     }
 
@@ -1921,7 +1921,7 @@ out.toString()
     fn test_gorillax_error_info_exposes_failure_details() {
         let source = r#"Error => TestError = @(message: Str)
 err <= TestError(message <= "cage fail")
-c <= @(hasValue <= false, __value <= @(), __error <= err, __type <= "Gorillax")
+c <= @(has_value <= false, __value <= @(), __error <= err, __type <= "Gorillax")
 c.errorInfo() ]=> info
 info.message"#;
         let (program, parse_errors) = crate::parser::parse(source);
@@ -1935,7 +1935,7 @@ info.message"#;
     fn test_relaxed_gorillax_error_info_from_caught_error() {
         let source = r#"Error => TestError = @(message: Str)
 err <= TestError(message <= "cage fail")
-c <= @(hasValue <= false, __value <= @(), __error <= err, __type <= "Gorillax")
+c <= @(has_value <= false, __value <= @(), __error <= err, __type <= "Gorillax")
 |== error: Error =
   error.errorInfo() ]=> info
   info.type
@@ -2102,7 +2102,7 @@ c.relax() ]=> value
         if let Value::BuchiPack(fields) = result {
             fields
                 .iter()
-                .any(|(k, v)| k == "hasValue" && *v == Value::Bool(true))
+                .any(|(k, v)| k == "has_value" && *v == Value::Bool(true))
         } else {
             unreachable!()
         }
@@ -2134,7 +2134,7 @@ c.relax() ]=> value
 
     #[test]
     fn test_bt4_int_mold_overflow_string() {
-        // Int["999999999999999999999999"]() should return Lax with hasValue=false
+        // Int["999999999999999999999999"]() should return Lax with has_value=false
         let result = eval_ok(r#"Int["999999999999999999999999"]()"#);
         assert!(
             !lax_has_value(&result),
@@ -2246,10 +2246,10 @@ x.size()"#,
 
     #[test]
     fn test_bt5_char_at_empty_string_index_zero() {
-        // Expected: return Lax with hasValue=false (out of bounds)
+        // Expected: return Lax with has_value=false (out of bounds)
         let result = eval_ok(
             r#"x <= CharAt["",0]()
-x.hasValue"#,
+x.has_value"#,
         );
         assert_eq!(
             result,
@@ -2273,22 +2273,22 @@ x.hasValue"#,
 
     #[test]
     fn test_bt6_lax_success_has_value() {
-        // Div[10,2]() should return Lax with hasValue=true
+        // Div[10,2]() should return Lax with has_value=true
         let result = eval_ok("Div[10,2]()");
         assert!(
             lax_has_value(&result),
-            "Div[10,2]() should have hasValue=true"
+            "Div[10,2]() should have has_value=true"
         );
         assert_eq!(lax_field(&result, "__value"), Some(&Value::Int(5)));
     }
 
     #[test]
     fn test_bt6_lax_failure_has_no_value() {
-        // Div[1,0]() should return Lax with hasValue=false
+        // Div[1,0]() should return Lax with has_value=false
         let result = eval_ok("Div[1,0]()");
         assert!(
             !lax_has_value(&result),
-            "Div[1,0]() should have hasValue=false"
+            "Div[1,0]() should have has_value=false"
         );
     }
 
@@ -2304,25 +2304,25 @@ y.length()"#,
 
     #[test]
     fn test_bt6_lax_in_buchi_pack() {
-        // Lax values as BuchiPack fields should preserve hasValue
+        // Lax values as BuchiPack fields should preserve has_value
         let result = eval_ok(
             r#"p <= @(x <= Div[1,0](), y <= Div[10,2]())
-p.x.hasValue"#,
+p.x.has_value"#,
         );
         assert_eq!(
             result,
             Value::Bool(false),
-            "Failed Lax in pack should have hasValue=false"
+            "Failed Lax in pack should have has_value=false"
         );
 
         let result2 = eval_ok(
             r#"p <= @(x <= Div[1,0](), y <= Div[10,2]())
-p.y.hasValue"#,
+p.y.has_value"#,
         );
         assert_eq!(
             result2,
             Value::Bool(true),
-            "Success Lax in pack should have hasValue=true"
+            "Success Lax in pack should have has_value=true"
         );
     }
 
@@ -2552,9 +2552,9 @@ p.y.hasValue"#,
     #[test]
     fn test_bt18_int_conversion_failure_default() {
         // E32B-035 migration: `Int["abc"]()` returns a Lax[Int] with
-        // hasValue=false. The implicit default (`__default`) is 0; the
+        // has_value=false. The implicit default (`__default`) is 0; the
         // user-observable replacement for that pin is `]=>` unmolding,
-        // which falls back to the same default when hasValue=false.
+        // which falls back to the same default when has_value=false.
         let result = eval_ok(
             r#"res <= Int["abc"]()
 res ]=> v
@@ -2570,7 +2570,7 @@ v"#,
     #[test]
     fn test_bt18_float_conversion_failure_default() {
         // E32B-035 migration: same pattern as the Int variant — `]=>` on a
-        // Lax[Float] with hasValue=false yields the implicit default 0.0.
+        // Lax[Float] with has_value=false yields the implicit default 0.0.
         let result = eval_ok(
             r#"res <= Float["abc"]()
 res ]=> v
@@ -2587,11 +2587,11 @@ v"#,
     fn test_bt18_lax_type_field() {
         // E32B-035 migration: the old form read `__type` (now rejected by
         // [E1960]) to verify that conversion molds wrap their result in a
-        // Lax envelope. The user-observable proxy is `.hasValue` — only
-        // Lax-shaped values expose it. Reading `.hasValue` on the
+        // Lax envelope. The user-observable proxy is `.has_value` — only
+        // Lax-shaped values expose it. Reading `.has_value` on the
         // (success) `Bool[0]()` pins the same invariant: the value is a
         // Lax envelope wrapping the converted Bool.
-        let result = eval_ok(r#"Bool[0]().hasValue"#);
+        let result = eval_ok(r#"Bool[0]().has_value"#);
         assert_eq!(
             result,
             Value::Bool(true),
@@ -2602,7 +2602,7 @@ v"#,
     #[test]
     fn test_bt18_div_zero_default() {
         // E32B-035 migration: same `]=>` fallback pattern as the
-        // Int / Float conversion tests. Div[1,0]() is hasValue=false and
+        // Int / Float conversion tests. Div[1,0]() is has_value=false and
         // unmolds to the implicit default 0.
         let result = eval_ok(
             r#"res <= Div[1,0]()

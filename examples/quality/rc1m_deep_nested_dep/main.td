@@ -3,6 +3,6 @@
 // Each module has internal functions that should be namespaced correctly.
 // Expected output: A(B(C(D(hello))))
 
->>> ./mod_a.td => @(wrap_a)
+>>> ./mod_a.td => @(wrapA)
 
-stdout(wrap_a("hello"))
+stdout(wrapA("hello"))

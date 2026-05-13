@@ -33,7 +33,7 @@ stdout(pretty)
 
 // List schema
 PilotEntry = @(name: Str, sync_rate: Int)
-list_raw <= '[{"name": "Asuka", "syncRate": 78}, {"name": "Rei", "syncRate": 65}]'
+list_raw <= '[{"name": "Asuka", "sync_rate": 78}, {"name": "Rei", "sync_rate": 65}]'
 JSON[list_raw, @[PilotEntry]]() ]=> pilots
 stdout("Number of pilots: " + pilots.length().toString())
 
@@ -47,11 +47,11 @@ stdout("City: " + person.address.city)
 // Lax result check
 Data = @(x: Int)
 result <= JSON['{"x": 42}', Data]()
-stdout("Has value: " + result.hasValue.toString())
+stdout("Has value: " + result.has_value.toString())
 
-// Parse error returns Lax with hasValue=false
+// Parse error returns Lax with has_value=false
 bad_result <= JSON["not valid json", Data]()
-stdout("Bad parse has value: " + bad_result.hasValue.toString())
+stdout("Bad parse has value: " + bad_result.has_value.toString())
 
 // Multiple schemas on same data
 UserInfo = @(name: Str, age: Int)

@@ -563,7 +563,7 @@ impl Interpreter {
     //   Reads the next chunk of request body from the socket.
     //   - Chunked TE: decodes one chunk at a time
     //   - Content-Length: reads in 8KB increments
-    //   - Body end: returns Lax empty (hasValue = false)
+    //   - Body end: returns Lax empty (has_value = false)
     //
     // readBodyAll(req) → Bytes
     //   Reads all remaining body bytes. This is the only aggregate-permitted path.
@@ -571,17 +571,17 @@ impl Interpreter {
     /// Build a Lax[Bytes] with a value.
     pub(super) fn make_lax_bytes_value(data: Vec<u8>) -> Value {
         Value::pack(vec![
-            ("hasValue".into(), Value::Bool(true)),
+            ("has_value".into(), Value::Bool(true)),
             ("__value".into(), Value::bytes(data)),
             ("__default".into(), Value::bytes(vec![])),
             ("__type".into(), Value::str("Lax".into())),
         ])
     }
 
-    /// Build a Lax[Bytes] empty (hasValue = false).
+    /// Build a Lax[Bytes] empty (has_value = false).
     pub(super) fn make_lax_bytes_empty() -> Value {
         Value::pack(vec![
-            ("hasValue".into(), Value::Bool(false)),
+            ("has_value".into(), Value::Bool(false)),
             ("__value".into(), Value::bytes(vec![])),
             ("__default".into(), Value::bytes(vec![])),
             ("__type".into(), Value::str("Lax".into())),

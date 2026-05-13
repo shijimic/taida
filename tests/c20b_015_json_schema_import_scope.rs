@@ -62,8 +62,8 @@ fn migrated_schema_mod_src() -> String {
     fs::read_to_string(fixture_dir().join("schema_mod.td"))
         .expect("read schema_mod.td")
         .replace(
-            "  | parsed.hasValue |> parsed.__value.name + \"/\" + parsed.__value.age.toString()",
-            "  | parsed.hasValue |>\n    parsed ]=> parsedValue\n    parsedValue.name + \"/\" + parsedValue.age.toString()",
+            "  | parsed.has_value |> parsed.__value.name + \"/\" + parsed.__value.age.toString()",
+            "  | parsed.has_value |>\n    parsed ]=> parsedValue\n    parsedValue.name + \"/\" + parsedValue.age.toString()",
         )
 }
 
@@ -329,7 +329,7 @@ Schema = @(name: Str)
 
 load raw: Str =
   parsed <= JSON[raw, Schema]()
-  | parsed.hasValue |>
+  | parsed.has_value |>
     parsed ]=> parsedValue
     parsedValue.name
   | _ |> \"no\"
@@ -485,7 +485,7 @@ Schema = @(name: Str)
 
 load raw: Str =
   parsed <= JSON[raw, UnknownTypeThatDoesNotExist]()
-  | parsed.hasValue |>
+  | parsed.has_value |>
     parsed ]=> parsedValue
     parsedValue.name
   | _ |> \"no\"
@@ -593,7 +593,7 @@ Schema = @(name: Str)
 
 load raw: Str =
   parsed <= JSON[raw, UnknownTypeThatDoesNotExist]()
-  | parsed.hasValue |>
+  | parsed.has_value |>
     parsed ]=> parsedValue
     parsedValue.name
   | _ |> \"no\"
@@ -686,7 +686,7 @@ Schema = @(name: Str)
 
 load payload: Str =
   parsed <= JSON[payload, UnknownTypeThatDoesNotExist]()
-  | parsed.hasValue |>
+  | parsed.has_value |>
     parsed ]=> parsedValue
     parsedValue.name
   | _ |> \"no\"

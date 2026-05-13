@@ -1952,7 +1952,10 @@ result
         let val = eval_ok("Lax(42)");
         if let Value::BuchiPack(fields) = &val {
             assert_eq!(
-                fields.iter().find(|(n, _)| n == "hasValue").map(|(_, v)| v),
+                fields
+                    .iter()
+                    .find(|(n, _)| n == "has_value")
+                    .map(|(_, v)| v),
                 Some(&Value::Bool(true))
             );
             assert_eq!(
@@ -1981,7 +1984,10 @@ result
         let val = eval_ok("Lax[42]()");
         if let Value::BuchiPack(fields) = &val {
             assert_eq!(
-                fields.iter().find(|(n, _)| n == "hasValue").map(|(_, v)| v),
+                fields
+                    .iter()
+                    .find(|(n, _)| n == "has_value")
+                    .map(|(_, v)| v),
                 Some(&Value::Bool(true))
             );
             assert_eq!(
@@ -3073,7 +3079,7 @@ s
 User = @(name: Str)
 raw <= '{"name":"Alice"}'
 result <= JSON[raw, User]()
-result.hasValue
+result.has_value
 "#;
         assert_eq!(eval_ok(source), Value::Bool(true));
     }
@@ -3084,7 +3090,7 @@ result.hasValue
 User = @(name: Str)
 raw <= 'not valid json'
 result <= JSON[raw, User]()
-result.hasValue
+result.has_value
 "#;
         assert_eq!(eval_ok(source), Value::Bool(false));
     }
@@ -3149,7 +3155,7 @@ result
 User = @(name: Str, age: Int)
 raw <= '{}'
 result <= JSON[raw, User]()
-result.hasValue
+result.has_value
 "#;
         assert_eq!(eval_ok(source), Value::Bool(true));
     }
@@ -3180,12 +3186,12 @@ nums.length()
 
     #[test]
     fn test_bt12_json_malformed_input() {
-        // JSON[malformed, Schema]() — invalid JSON should return Lax with hasValue=false
+        // JSON[malformed, Schema]() — invalid JSON should return Lax with has_value=false
         let source = r#"
 User = @(name: Str)
 raw <= '{invalid json}'
 result <= JSON[raw, User]()
-result.hasValue
+result.has_value
 "#;
         assert_eq!(eval_ok(source), Value::Bool(false));
     }
@@ -3219,26 +3225,26 @@ user.age
 
     #[test]
     fn test_oob_str_list_get_returns_lax() {
-        // .get(99) returns Lax with hasValue=false (no IndexError)
-        let source = r#"result <= @["a", "b"].get(99).hasValue"#;
+        // .get(99) returns Lax with has_value=false (no IndexError)
+        let source = r#"result <= @["a", "b"].get(99).has_value"#;
         assert_eq!(eval_ok(source), Value::Bool(false));
     }
 
     #[test]
     fn test_oob_float_list_get_returns_lax() {
-        let source = r#"result <= @[1.5, 2.5].get(99).hasValue"#;
+        let source = r#"result <= @[1.5, 2.5].get(99).has_value"#;
         assert_eq!(eval_ok(source), Value::Bool(false));
     }
 
     #[test]
     fn test_oob_bool_list_get_returns_lax() {
-        let source = r#"result <= @[true, false].get(99).hasValue"#;
+        let source = r#"result <= @[true, false].get(99).has_value"#;
         assert_eq!(eval_ok(source), Value::Bool(false));
     }
 
     #[test]
     fn test_oob_int_list_get_returns_lax() {
-        let source = r#"result <= @[1, 2, 3].get(99).hasValue"#;
+        let source = r#"result <= @[1, 2, 3].get(99).has_value"#;
         assert_eq!(eval_ok(source), Value::Bool(false));
     }
 
@@ -3254,11 +3260,11 @@ result <= items.first().unmold()
 
     #[test]
     fn test_list_first_empty_returns_lax() {
-        // first() on empty list returns Lax with hasValue=false (no IndexError)
+        // first() on empty list returns Lax with has_value=false (no IndexError)
         let source = r#"
 items <= @[]
 result <= items.first()
-result.hasValue
+result.has_value
 "#;
         assert_eq!(eval_ok(source), Value::Bool(false));
     }
@@ -3274,7 +3280,7 @@ result <= items.last().unmold()
 
     #[test]
     fn test_list_get_oob_returns_lax_false() {
-        // get() on OOB returns Lax with hasValue=false
+        // get() on OOB returns Lax with has_value=false
         let source = r#"
 items <= @["a", "b", "c"]
 result <= items.get(99)
@@ -3282,7 +3288,7 @@ result <= items.get(99)
         let val = eval_ok(source);
         match val {
             Value::BuchiPack(fields) => {
-                let has_value = fields.iter().find(|(k, _)| k == "hasValue");
+                let has_value = fields.iter().find(|(k, _)| k == "has_value");
                 assert_eq!(has_value.map(|(_, v)| v), Some(&Value::Bool(false)));
                 let typ = fields.iter().find(|(k, _)| k == "__type");
                 assert_eq!(typ.map(|(_, v)| v), Some(&Value::str("Lax".to_string())));
@@ -3293,7 +3299,7 @@ result <= items.get(99)
 
     #[test]
     fn test_list_get_valid_returns_lax_true() {
-        // get() on valid index returns Lax with hasValue=true
+        // get() on valid index returns Lax with has_value=true
         let source = r#"
 items <= @["a", "b", "c"]
 result <= items.get(1)
@@ -3301,7 +3307,7 @@ result <= items.get(1)
         let val = eval_ok(source);
         match val {
             Value::BuchiPack(fields) => {
-                let has_value = fields.iter().find(|(k, _)| k == "hasValue");
+                let has_value = fields.iter().find(|(k, _)| k == "has_value");
                 assert_eq!(has_value.map(|(_, v)| v), Some(&Value::Bool(true)));
                 let inner = fields.iter().find(|(k, _)| k == "__value");
                 assert_eq!(inner.map(|(_, v)| v), Some(&Value::str("b".to_string())));
@@ -3328,7 +3334,7 @@ result <= items.max().unmold()
     fn test_div_mold_int() {
         let source = r#"
 r <= Div[10, 3]()
-result <= r.hasValue
+result <= r.has_value
 "#;
         assert_eq!(eval_ok(source), Value::Bool(true));
     }
@@ -3337,7 +3343,7 @@ result <= r.hasValue
     fn test_div_mold_zero_division() {
         let source = r#"
 r <= Div[10, 0]()
-result <= r.hasValue
+result <= r.has_value
 "#;
         assert_eq!(eval_ok(source), Value::Bool(false));
     }
@@ -3376,7 +3382,7 @@ result
     fn test_mod_mold_zero() {
         let source = r#"
 r <= Mod[17, 0]()
-result <= r.hasValue
+result <= r.has_value
 "#;
         assert_eq!(eval_ok(source), Value::Bool(false));
     }

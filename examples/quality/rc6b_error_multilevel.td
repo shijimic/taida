@@ -12,24 +12,24 @@ Str[fve.app_code]() ]=> ac
 stdout("T1: " + TypeName[fve]() + " ac=" + ac + " fn=" + fve.field_name + " et=" + fve.expected_type)
 
 // Throw deepest child, catch at root Error level
-catch_deep x =
+catchDeep x =
   |== error: Error =
     "caught(" + error.type + "): " + error.message + " field=" + error.field_name
   => :Str
   FieldValidationError(type <= "FieldValidationError", message <= "bad field", app_code <= 400, field_name <= "email", expected_type <= "Str").throw()
   "unreachable"
 => :Str
-stdout("T2: " + catch_deep(1))
+stdout("T2: " + catchDeep(1))
 
 // Throw middle child, catch at root
-catch_middle x =
+catchMiddle x =
   |== error: Error =
     "caught(" + error.type + "): " + error.message
   => :Str
   ValidationError(type <= "ValidationError", message <= "validation failed", app_code <= 422, field_name <= "name").throw()
   "unreachable"
 => :Str
-stdout("T3: " + catch_middle(1))
+stdout("T3: " + catchMiddle(1))
 
 // Verify field access at each level
 AppError => NetworkError = @(url: Str, status: Int)

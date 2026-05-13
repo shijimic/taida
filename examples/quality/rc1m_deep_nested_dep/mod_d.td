@@ -3,6 +3,6 @@
 
 _internal_d x = "D(" + x + ")" => :Str
 
-wrap_d x = _internal_d(x) => :Str
+wrapD x = _internal_d(x) => :Str
 
-<<< @(wrap_d)
+<<< @(wrapD)

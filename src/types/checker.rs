@@ -32,7 +32,7 @@ use std::collections::{HashMap, HashSet};
 /// `__default`, `__error`, `__tag`, `__items`, `__transforms`,
 /// `__status` as *internal* tags to carry nominal-type identity and
 /// invariants (e.g., `Regex` packs carry a validated `pattern` /
-/// `flags` pair, `Lax` packs carry `hasValue` + default, `Async` packs
+/// `flags` pair, `Lax` packs carry `has_value` + default, `Async` packs
 /// carry a state tag). Allowing user code to set these fields lets
 /// callers fabricate fake nominal packs that bypass the official
 /// constructors' validation. The earlier narrower fix (literal
@@ -6220,7 +6220,7 @@ defaulted fields must be provided via `()`",
                         }
                     }
                     Type::Named(type_name) => {
-                        if self.registry.enum_defs.contains_key(type_name) && field == "hasValue" {
+                        if self.registry.enum_defs.contains_key(type_name) && field == "has_value" {
                             return Type::Bool;
                         }
                         // Look up field in registered type definition
@@ -6244,17 +6244,39 @@ defaulted fields must be provided via `()`",
                         }
                     }
                     Type::Generic(name, _) if name == "Lax" => match field.as_str() {
-                        "hasValue" | "isEmpty" => Type::Bool,
+                        "has_value" | "isEmpty" => Type::Bool,
+                        "hasValue" => {
+                            self.errors.push(TypeError {
+                                message: format!(
+                                    "[E1602] Field '{}' does not exist on type '{}'. \
+                                     Hint: use `has_value` for field access or `hasValue()` for the state-check method.",
+                                    field, name
+                                ),
+                                span: span.clone(),
+                            });
+                            Type::Unknown
+                        }
                         _ => Type::Unknown,
                     },
                     // E32B-018: internal `__*` envelope slots are rejected
-                    // above before type-specific dispatch. Public `hasValue`
+                    // above before type-specific dispatch. Public `has_value`
                     // remains available.
                     Type::Generic(name, args)
                         if name == "Gorillax" || name == "RelaxedGorillax" =>
                     {
                         match field.as_str() {
-                            "hasValue" => Type::Bool,
+                            "has_value" => Type::Bool,
+                            "hasValue" => {
+                                self.errors.push(TypeError {
+                                    message: format!(
+                                        "[E1602] Field '{}' does not exist on type '{}'. \
+                                         Hint: use `has_value` for field access or `hasValue()` for the state-check method.",
+                                        field, name
+                                    ),
+                                    span: span.clone(),
+                                });
+                                Type::Unknown
+                            }
                             "throw" => Type::Unknown,
                             _ => {
                                 // Only surface an error for fields that are

@@ -3322,14 +3322,7 @@ impl JsCodegen {
                     });
                 }
                 self.gen_expr(obj)?;
-                // F-59 fix: Lax/Gorillax hasValue is a callable function in JS runtime.
-                // When accessed as a property (field access), emit as function call
-                // so that it returns the boolean value instead of a function reference.
-                if field == "hasValue" {
-                    self.write(".hasValue()");
-                } else {
-                    self.write(&format!(".{}", field));
-                }
+                self.write(&format!(".{}", field));
                 Ok(())
             }
             // IndexAccess removed in v0.5.0 — use .get(i) instead

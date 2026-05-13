@@ -996,7 +996,7 @@ fn scan_expr_for_direction(expr: &Expr, flags: &mut DirectionFlags) {
 
 // ── Check: unchecked-lax ─────────────────────────────
 
-/// Detect Lax[T] values used without ]=> unmold or .hasValue check.
+/// Detect Lax[T] values used without ]=> unmold or .has_value check.
 ///
 /// Lax-returning expressions:
 /// - `Lax[...]()` mold instantiation
@@ -1006,7 +1006,7 @@ fn scan_expr_for_direction(expr: &Expr, flags: &mut DirectionFlags) {
 ///
 /// Safe usage patterns (excluded from warnings):
 /// - `]=>` / `<=[` unmold (UnmoldForward/UnmoldBackward statements, Unmold expr)
-/// - `.hasValue` field access
+/// - `.has_value` field access
 /// - `.map()`, `.flatMap()` method calls (monadic operations)
 /// - Passing to another function (callee is responsible)
 /// - Returning from a function (caller is responsible)
@@ -1038,11 +1038,11 @@ fn is_lax_producing_expr(expr: &Expr) -> bool {
     }
 }
 
-/// Check if an expression safely handles a Lax variable (via .hasValue, .map, .flatMap, ]=>).
+/// Check if an expression safely handles a Lax variable (via .has_value, .map, .flatMap, ]=>).
 fn is_safe_lax_usage(expr: &Expr, var_name: &str) -> bool {
     match expr {
-        // .hasValue field access on the variable
-        Expr::FieldAccess(obj, field, _) if field == "hasValue" => {
+        // .has_value field access on the variable
+        Expr::FieldAccess(obj, field, _) if field == "has_value" => {
             expr_references_var(obj, var_name)
         }
         // .map(), .flatMap() method calls on the variable
@@ -1072,7 +1072,7 @@ fn expr_uses_lax_unsafely(expr: &Expr, var_name: &str) -> bool {
 
         // Safe patterns — not unsafe
         Expr::FieldAccess(obj, field, _)
-            if field == "hasValue" && expr_references_var(obj, var_name) =>
+            if field == "has_value" && expr_references_var(obj, var_name) =>
         {
             false
         }
@@ -1101,7 +1101,7 @@ fn expr_uses_lax_unsafely(expr: &Expr, var_name: &str) -> bool {
                 || _args.iter().any(|a| expr_uses_lax_unsafely(a, var_name))
         }
         Expr::FieldAccess(obj, _, _) => {
-            // Accessing a field on a Lax variable (other than hasValue) is unsafe
+            // Accessing a field on a Lax variable (other than has_value) is unsafe
             expr_references_var(obj, var_name)
         }
         Expr::Pipeline(stages, _) => stages.iter().any(|s| expr_uses_lax_unsafely(s, var_name)),
@@ -1232,7 +1232,7 @@ fn check_expr_for_unsafe_lax_use(
                 check: "unchecked-lax".to_string(),
                 severity: Severity::Warning,
                 message: format!(
-                    "Lax value '{}' used without ]=> unmold or .hasValue check",
+                    "Lax value '{}' used without ]=> unmold or .has_value check",
                     var
                 ),
                 file: Some(file.to_string()),
@@ -2180,7 +2180,7 @@ outer input =
 
     #[test]
     fn test_unchecked_lax_direct_use_warns() {
-        // Lax value used directly without ]=> or .hasValue — should warn
+        // Lax value used directly without ]=> or .has_value — should warn
         let program = parse_source("result <= Lax[42]()\nstdout(result)");
         let findings = check_unchecked_lax(&program, "test.td");
         assert_eq!(findings.len(), 1, "Should warn about unchecked Lax usage");
@@ -2214,12 +2214,12 @@ outer input =
 
     #[test]
     fn test_unchecked_lax_has_value_safe() {
-        // Lax value checked with .hasValue — should NOT warn
-        let program = parse_source("result <= Lax[42]()\nresult.hasValue");
+        // Lax value checked with .has_value — should NOT warn
+        let program = parse_source("result <= Lax[42]()\nresult.has_value");
         let findings = check_unchecked_lax(&program, "test.td");
         assert!(
             findings.is_empty(),
-            ".hasValue check should be safe. Findings: {:?}",
+            ".has_value check should be safe. Findings: {:?}",
             findings.iter().map(|f| &f.message).collect::<Vec<_>>()
         );
     }

@@ -14,10 +14,10 @@
 >>> taida-lang/net => @(httpServe)
 
 handler req =
-  isGet     <= SpanEquals[req.method, req.raw, "GET"]()
-  startsApi <= SpanStartsWith[req.path, req.raw, "/api"]()
-  hasFoo    <= SpanContains[req.path, req.raw, "foo"]()
-  marker    <= "g=" + isGet.toString() + ";s=" + startsApi.toString() + ";c=" + hasFoo.toString()
+  is_get     <= SpanEquals[req.method, req.raw, "GET"]()
+  starts_api <= SpanStartsWith[req.path, req.raw, "/api"]()
+  has_foo    <= SpanContains[req.path, req.raw, "foo"]()
+  marker    <= "g=" + is_get.toString() + ";s=" + starts_api.toString() + ";c=" + has_foo.toString()
   @(status <= 200, headers <= @[], body <= marker)
 => :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
 

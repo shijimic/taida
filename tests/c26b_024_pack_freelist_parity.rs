@@ -205,7 +205,7 @@ stdout(idxN.toString())
 }
 
 /// Out-of-bounds `list.get` returns an empty Lax — freelist reuse must
-/// not leak a previous hasValue=true into the reinitialised slot.
+/// not leak a previous has_value=true into the reinitialised slot.
 #[test]
 fn c26b_024_lax_oob_empty_parity() {
     let source = r#"

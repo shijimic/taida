@@ -9,8 +9,8 @@ Div[10, 0]() ]=> div_zero
 stdout(div_zero.toString())
 Mod[10, 0]() ]=> mod_zero
 stdout(mod_zero.toString())
-stdout(Div[10, 3]().hasValue.toString())
-stdout(Div[10, 0]().hasValue.toString())
+stdout(Div[10, 3]().has_value.toString())
+stdout(Div[10, 0]().has_value.toString())
 
 // List safe access
 items <= @[10, 20, 30]
@@ -31,12 +31,12 @@ Int["123"]() ]=> conv1
 stdout(conv1.toString())
 Int["abc"]() ]=> conv2
 stdout(conv2.toString())
-stdout(Int["abc"]().hasValue.toString())
+stdout(Int["abc"]().has_value.toString())
 
 // hasValue branching
-userInput <= "42"
-Int[userInput]() => parsed
-| parsed.hasValue |>
+user_input <= "42"
+Int[user_input]() => parsed
+| parsed.has_value |>
   stdout("Parsed: " + parsed.unmold().toString())
 | _ |>
   stdout("Invalid input")

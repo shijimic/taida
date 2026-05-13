@@ -517,7 +517,7 @@ impl Interpreter {
                 };
                 let default_value = Self::default_for_value(&val);
                 Ok(Some(Signal::Value(Value::pack(vec![
-                    ("hasValue".into(), Value::Bool(true)),
+                    ("has_value".into(), Value::Bool(true)),
                     ("__value".into(), val),
                     ("__default".into(), default_value),
                     ("__type".into(), Value::str("Lax".into())),

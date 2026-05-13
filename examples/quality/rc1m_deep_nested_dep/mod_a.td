@@ -1,7 +1,7 @@
 // RC-1m: Deep nested dependency — module A (imports B)
 
->>> ./mod_b.td => @(wrap_b)
+>>> ./mod_b.td => @(wrapB)
 
-wrap_a x = "A(" + wrap_b(x) + ")" => :Str
+wrapA x = "A(" + wrapB(x) + ")" => :Str
 
-<<< @(wrap_a)
+<<< @(wrapA)

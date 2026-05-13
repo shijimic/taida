@@ -135,6 +135,16 @@ pub fn taida_bin() -> PathBuf {
     );
 }
 
+/// Whether the `taida` binary selected for this test profile accepts
+/// loopback GitHub archive mocks.
+///
+/// Release binaries intentionally reject `TAIDA_GITHUB_BASE_URL` overrides,
+/// even with the mock gate set, so integration tests that require a mock
+/// archive server should skip that specific path under release nextest.
+pub fn taida_mock_github_base_url_supported() -> bool {
+    cfg!(debug_assertions) || cfg!(taida_allow_mock_github_base_url)
+}
+
 fn push_nextest_archive_roots(roots: &mut Vec<PathBuf>) {
     push_nextest_archive_roots_in(roots, std::env::temp_dir());
 

@@ -51,12 +51,12 @@ Div[10, 3]() ]=> quotient
 stdout(quotient.toString())
 Div[10, 0]() ]=> quotient_zero
 stdout(quotient_zero.toString())
-stdout(Div[10, 0]().hasValue.toString())
+stdout(Div[10, 0]().has_value.toString())
 Mod[10, 3]() ]=> remainder
 stdout(remainder.toString())
 Mod[10, 0]() ]=> remainder_zero
 stdout(remainder_zero.toString())
-stdout(Mod[10, 0]().hasValue.toString())
+stdout(Mod[10, 0]().has_value.toString())
 
 // Type conversion molds
 Int["123"]() ]=> conv_num
@@ -74,7 +74,7 @@ stdout(conv_false.toString())
 
 // Lax methods
 lax <= Div[10, 3]()
-stdout(lax.hasValue.toString())
+stdout(lax.has_value.toString())
 stdout(lax.isEmpty().toString())
 stdout(lax.getOrDefault(99).toString())
 lax.map(_ x = x * 2) ]=> doubled
@@ -82,7 +82,7 @@ stdout(doubled.toString())
 stdout(lax.toString())
 
 empty_lax <= Div[10, 0]()
-stdout(empty_lax.hasValue.toString())
+stdout(empty_lax.has_value.toString())
 stdout(empty_lax.isEmpty().toString())
 stdout(empty_lax.getOrDefault(99).toString())
 empty_lax.map(_ x = x * 2) ]=> doubled2

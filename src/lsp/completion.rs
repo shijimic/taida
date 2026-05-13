@@ -698,7 +698,7 @@ fn builtin_mold_completions() -> Vec<CompletionItem> {
         (
             "CharAt",
             "CharAt[str, index]() => :Lax[Str]",
-            "Get character at index. Returns Lax (out-of-range = hasValue=false, default \"\").",
+            "Get character at index. Returns Lax (out-of-range = has_value=false, default \"\").",
         ),
         (
             "Repeat",
@@ -852,7 +852,7 @@ fn builtin_mold_completions() -> Vec<CompletionItem> {
         (
             "Lax",
             "Lax[value]() -- safe value with default guarantee",
-            "Lax[T]: BuchiPack-based mold. hasValue / __value / __default / __type fields. Unmold with `]=>`.",
+            "Lax[T]: BuchiPack-based mold. has_value / __value / __default / __type fields. Unmold with `]=>`.",
         ),
         (
             "Result",

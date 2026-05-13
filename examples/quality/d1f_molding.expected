@@ -5,7 +5,7 @@ hello
 hell0 world
 hell0 w0rld
 el
-@(hasValue <= true, __value <= "h", __default <= "", __type <= "Lax")
+@(has_value <= true, __value <= "h", __default <= "", __type <= "Lax")
 hahaha
 olleh
 00042

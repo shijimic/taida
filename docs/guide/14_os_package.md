@@ -32,7 +32,7 @@ hostsExists <= Exists["/etc/hosts"]()
 | hostsExists.getOrDefault(false) == false |> ><
 
 content <= Read["/etc/hosts"]()
-| content.hasValue |> stdout(content.getOrDefault(""))
+| content.has_value |> stdout(content.getOrDefault(""))
 | _                |> stderr("read failed")
 ```
 
@@ -43,7 +43,7 @@ content <= Read["/etc/hosts"]()
 
 // 先頭 4KB だけを読む
 chunk <= readBytesAt("/data/big.bin", 0, 4096)
-| chunk.hasValue |> stdout(chunk.getOrDefault(Bytes[@[]]).toString())
+| chunk.has_value |> stdout(chunk.getOrDefault(Bytes[@[]]).toString())
 | _              |> stderr("readBytesAt failed")
 ```
 
@@ -139,7 +139,7 @@ stdout("こんにちは、" + line.getOrDefault("旅人"))
 >>> taida-lang/os => @(run)
 
 r <= run("git", @["rev-parse", "HEAD"])
-| !r.hasValue |>
+| !r.has_value |>
   r.errorInfo() ]=> err
   bytes <= stderr(err.message)
   ><
@@ -158,7 +158,7 @@ stdout("HEAD = " + sha)
 
 // エディタを起動してユーザー編集を待つ
 r <= runInteractive("nvim", @["/tmp/draft.md"])
-| !r.hasValue |>
+| !r.has_value |>
   r.errorInfo() ]=> err
   bytes <= stderr("editor failed: " + err.message)
   ><
@@ -224,13 +224,13 @@ stdout(body.getOrDefault(""))
 
 ## 5. エラーハンドリング
 
-全プロセス起動 API は `Gorillax` を返すので、`hasValue` / `errorInfo()` の二択で扱います。`IoError`（起動失敗）と `ProcessError`（exit code 非ゼロ）は `errorInfo()` の `ErrorInfo.kind` で区別できます。
+全プロセス起動 API は `Gorillax` を返すので、`has_value` / `errorInfo()` の二択で扱います。`IoError`（起動失敗）と `ProcessError`（exit code 非ゼロ）は `errorInfo()` の `ErrorInfo.kind` で区別できます。
 
 ```taida fragment
 >>> taida-lang/os => @(run)
 
 r <= run("missing-program", @[])
-| r.hasValue |> stdout("ok")
+| r.has_value |> stdout("ok")
 | _ |>
     r.errorInfo() ]=> err
     | err.kind == "not_found" |> stderr("program not found")

@@ -60,7 +60,7 @@ handler req: BuchiPack writer: BuchiPack = ... => :Unit
 > **Important — 2-arg handler body handling**: 2-arg form で handler 内から `req.body` を直接参照すると span の `len` が 0 になります (streaming 前提で body は eagerly 読まれない仕様)。**body を読む場合は必ず `readBody(req)` / `readBodyChunk(req)` / `readBodyAll(req)` のいずれかを使用**してください:
 >
 > - `readBody(req)` — 1-arg / 2-arg 両対応。2-arg では `readBodyAll` と同等 (stream を全読)。
-> - `readBodyChunk(req)` — 2-arg 専用。chunk 単位で `Lax[Bytes]` を返す。残り chunk が無い場合 `Lax` の `hasValue = false`。
+> - `readBodyChunk(req)` — 2-arg 専用。chunk 単位で `Lax[Bytes]` を返す。残り chunk が無い場合 `Lax` の `has_value = false`。
 > - `readBodyAll(req)` — 2-arg 専用。body を最後まで読んで `Bytes` を返す。
 >
 > 1-arg handler での `Slice[req.raw, req.body.start, req.body.start + req.body.len]` パスを 2-arg にそのまま持ち込むと **silent に空 Bytes が返る**ため注意。1-arg 形式から 2-arg + streaming 形式へ移行する際に最頻発するハマりどころです。詳細は §3.2 / §8 を参照。
@@ -454,10 +454,10 @@ handler req writer =
 
 ```taida
 handler req writer =
-  // chunk ごとに Lax[Bytes] を返す。hasValue=false で終端
+  // chunk ごとに Lax[Bytes] を返す。has_value=false で終端
   chunk1 <= readBodyChunk(req)
   chunk1 |
-    @(hasValue <= true) <= processChunk(chunk1.value)
+    @(has_value <= true) <= processChunk(chunk1.value)
     _ <= stdout("EOF")
   ...
 => :Unit

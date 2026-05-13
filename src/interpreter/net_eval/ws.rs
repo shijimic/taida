@@ -380,7 +380,7 @@ impl Interpreter {
     pub(super) fn make_lax_ws_value(ws: Value) -> Value {
         let inner = Value::pack(vec![("ws".into(), ws)]);
         Value::pack(vec![
-            ("hasValue".into(), Value::Bool(true)),
+            ("has_value".into(), Value::Bool(true)),
             ("__value".into(), inner),
             ("__default".into(), Value::pack(vec![])),
             ("__type".into(), Value::str("Lax".into())),
@@ -390,7 +390,7 @@ impl Interpreter {
     /// Build Lax empty for failed wsUpgrade.
     pub(super) fn make_lax_ws_empty() -> Value {
         Value::pack(vec![
-            ("hasValue".into(), Value::Bool(false)),
+            ("has_value".into(), Value::Bool(false)),
             ("__value".into(), Value::pack(vec![])),
             ("__default".into(), Value::pack(vec![])),
             ("__type".into(), Value::str("Lax".into())),
@@ -681,7 +681,7 @@ impl Interpreter {
     /// Build Lax[@(type, data)] with value.
     pub(super) fn make_lax_ws_frame_value(inner: Value) -> Value {
         Value::pack(vec![
-            ("hasValue".into(), Value::Bool(true)),
+            ("has_value".into(), Value::Bool(true)),
             ("__value".into(), inner),
             ("__default".into(), Value::pack(vec![])),
             ("__type".into(), Value::str("Lax".into())),
@@ -691,7 +691,7 @@ impl Interpreter {
     /// Build Lax empty for close / end of stream.
     pub(super) fn make_lax_ws_frame_empty() -> Value {
         Value::pack(vec![
-            ("hasValue".into(), Value::Bool(false)),
+            ("has_value".into(), Value::Bool(false)),
             ("__value".into(), Value::pack(vec![])),
             ("__default".into(), Value::pack(vec![])),
             ("__type".into(), Value::str("Lax".into())),

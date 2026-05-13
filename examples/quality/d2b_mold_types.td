@@ -73,9 +73,9 @@ stdout(bool_r.toString())
 
 // Lax
 lax_ok <= Div[10, 2]()
-stdout(lax_ok.hasValue.toString())
+stdout(lax_ok.has_value.toString())
 lax_ok ]=> lax_val
 stdout(lax_val.toString())
 lax_fail <= Div[10, 0]()
-stdout(lax_fail.hasValue.toString())
+stdout(lax_fail.has_value.toString())
 stdout(lax_fail.getOrDefault(42).toString())

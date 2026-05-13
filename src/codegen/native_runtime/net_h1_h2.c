@@ -2672,12 +2672,12 @@ static int taida_net4_drain_chunked_trailers(Net4BodyState *bs, int fd) {
     return -1;
 }
 
-// Make Lax[Bytes] empty (parity with Interpreter: hasValue=false).
+// Make Lax[Bytes] empty (parity with Interpreter: has_value=false).
 static taida_val taida_net4_make_lax_bytes_empty(void) {
     return taida_lax_empty(taida_bytes_default_value());
 }
 
-// Make Lax[Bytes] with value (parity with Interpreter: hasValue=true).
+// Make Lax[Bytes] with value (parity with Interpreter: has_value=true).
 // D29B-015 (Track-β-2, 2026-04-27): producer flip — emit CONTIG so chunked
 // readBodyChunk feeds the writeChunk writev hot path with zero materialize
 // in user-space (taida_bytes_contig_data → iov[1].iov_base). Replaces the
@@ -6057,7 +6057,7 @@ static void h2_extract_response_fields(taida_val response, H2ResponseFields *out
 
     // headers: @[@(name: Str, value: Str)]
     // C26B-026 fix: `taida_list_get` wraps each entry in a Lax pack
-    // (hasValue/__value/__default/__type). The h1 encode path reads raw
+    // (has_value/__value/__default/__type). The h1 encode path reads raw
     // `hlist[4+i]` to skip the Lax wrapper; mirror that here. Previously we
     // called `taida_list_get(...)` and then `taida_pack_get(entry, "name")`
     // which returned 0 because the Lax pack has no "name" field, causing

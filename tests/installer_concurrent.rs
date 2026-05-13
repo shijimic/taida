@@ -37,6 +37,10 @@ fn taida_bin() -> PathBuf {
 
 #[test]
 fn c17b_009_two_concurrent_installs_serialize_safely() {
+    if !common::taida_mock_github_base_url_supported() {
+        return;
+    }
+
     let work = unique_temp_dir("c17b_009_concurrent");
     let home = work.join("home");
     fs::create_dir_all(&home).unwrap();

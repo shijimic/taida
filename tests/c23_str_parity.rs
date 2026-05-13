@@ -33,7 +33,7 @@
 //! backend limitations that fall outside the C23 track:
 //!   * `str_from_gorillax` — fully 4-backend since C24-A (2026-04-23).
 //!     The WASM Gorillax first-field was unified from `isOk` to
-//!     `hasValue` so every backend now emits the same full-form pack.
+//!     `has_value` so every backend now emits the same full-form pack.
 //!     `WASM_SKIP_FIXTURES` is now empty.
 //!   * `str_from_stream` — fully 4-backend since C25B-001 (2026-04-23).
 //!     Native + wasm now emit a minimal Stream pack via `taida_stream_new`
@@ -356,7 +356,7 @@ const STREAM_ONLY_FIXTURES: &[&str] = &[];
 /// divergence (not a C23 regression, not solvable inside the C23 track).
 ///
 /// C24-A (2026-04-23): `str_from_gorillax` was removed from this list.
-/// The WASM Gorillax first-field was unified from `isOk` to `hasValue`
+/// The WASM Gorillax first-field was unified from `isOk` to `has_value`
 /// in `src/codegen/runtime_core_wasm/02_containers.inc.c` (five
 /// allocators) and `_wasm_is_gorillax` / `_wasm_is_lax` were taught to
 /// disambiguate the shared `hash0 = HASH_HAS_VALUE` via the `__type`

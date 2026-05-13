@@ -441,15 +441,9 @@ impl Lowering {
                     // manifest function whose return type we consult via
                     // `addon_known_return_tag`. See the non-facade path
                     // below for the rationale.
-                    if let Some(return_tag) =
-                        Self::addon_known_return_tag(&manifest.package, target_fn)
+                    if let Some("Str") = Self::addon_known_return_tag(&manifest.package, target_fn)
                     {
-                        match return_tag {
-                            "Str" => {
-                                self.string_returning_funcs.insert(alias.clone());
-                            }
-                            _ => {}
-                        }
+                        self.string_returning_funcs.insert(alias.clone());
                     }
                     continue;
                 }

@@ -2,9 +2,9 @@
 //! render with the same field set on interpreter / JS / native / wasm-
 //! wasi. Pre-fix (reproducible on upstream/main 2026-04-23):
 //!
-//!   interpreter:  {"__error":{},"__value":42,"hasValue":true}
-//!   native:       {"hasValue":true}
-//!   wasm-wasi:    {"hasValue":1}
+//!   interpreter:  {"__error":{},"__value":42,"has_value":true}
+//!   native:       {"has_value":true}
+//!   wasm-wasi:    {"has_value":1}
 //!   js:           {"__error":null,"__value":42}
 //!
 //! Fix covers:

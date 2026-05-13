@@ -155,7 +155,7 @@ fn json_parse_failure_carries_error_info_across_backends() {
     let results = run_four_backends(&main, &dir);
     assert_four_backends_agree(
         &results,
-        "false\ntrue\nJsonError\nparse\n0\nJSON parse error: invalid input\n@(hasValue <= false, __value <= 0, __default <= 0, __type <= \"Lax\")\nLax(default: 0)\n{\"__default\":0,\"__value\":0,\"hasValue\":false}\n99\n0\ntrue\ntrue",
+        "false\ntrue\nJsonError\nparse\n0\nJSON parse error: invalid input\n@(has_value <= false, __value <= 0, __default <= 0, __type <= \"Lax\")\nLax(default: 0)\n{\"__default\":0,\"__value\":0,\"has_value\":false}\n99\n0\ntrue\ntrue",
     );
     let _ = fs::remove_dir_all(&dir);
 }

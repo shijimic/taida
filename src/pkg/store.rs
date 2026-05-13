@@ -15,16 +15,13 @@
 ///
 /// ## C17 sidecar (`_meta.toml`)
 ///
-/// C17 introduces a provenance sidecar written alongside `.taida_installed`.
+/// The package store writes a provenance sidecar alongside `.taida_installed`.
 /// The sidecar records the tarball SHA-256, the resolved commit SHA (filled
-/// by the resolver in C17-2 / Phase 2), an RFC-3339 `fetched_at` timestamp,
-/// and the source identifier (e.g. `github:taida-lang/terminal`).
+/// by the resolver), an RFC-3339 `fetched_at` timestamp, and the source
+/// identifier (e.g. `github:taida-lang/terminal`).
 ///
 /// The sidecar exists so `taida ingot install` can detect stale store entries when
-/// a tag is republished (retag / delete+recreate). See `.dev/C17_DESIGN.md`.
-///
-/// C17-1 only writes the sidecar. The stale-detection decision table is
-/// implemented in C17-2 (Phase 2) and consumed by `taida ingot install` there.
+/// a tag is republished (retag / delete+recreate).
 use std::path::{Path, PathBuf};
 
 /// Base URL for GitHub archive downloads.
@@ -939,13 +936,11 @@ pub struct StoreMeta {
     pub commit_sha: String,
     /// SHA-256 (hex) of the tarball before extraction.
     ///
-    /// C17B-008 (tracked in `.dev/C17_BLOCKERS.md`): C17 writes this field
-    /// but does not yet verify it on fast-path reuse. The natural
-    /// verification point is a rehash of the cached extraction (or of the
-    /// re-downloaded tarball), which is deferred to C18+ together with
-    /// content-addressable store work. Having the field recorded now means
-    /// the future verifier has something to compare against for every
-    /// install performed under C17.
+    /// Current installs write this field but do not yet verify it on
+    /// fast-path reuse. The natural verification point is a rehash of
+    /// the cached extraction or the re-downloaded tarball. Having the
+    /// field recorded now means a future verifier has something to
+    /// compare against for every install performed by this code.
     pub tarball_sha256: String,
     /// HTTP ETag returned by the archive host, if exposed. Optional; the
     /// field is omitted from the on-disk TOML when `None`.
@@ -1586,7 +1581,8 @@ impl GlobalStore {
 //     absent when offline)
 //
 // the installer must decide: skip, refresh, or refresh-with-warning. The
-// table is pinned in `.dev/C17_IMPL_SPEC.md` Phase 2.
+// table is kept explicit here so the cache freshness behavior remains
+// auditable in code.
 //
 // `--force-refresh` bypasses this table (handled at the call site).
 // `--no-remote-check` skips the remote lookup, so `classify_stale` is
@@ -1629,8 +1625,7 @@ pub enum RefreshReason {
 ///   - `remote_sha`: the commit SHA resolved via `resolve_version_to_sha`,
 ///     or `None` if the remote lookup was skipped / failed.
 ///
-/// The table is the authoritative contract of C17-2. See
-/// `.dev/C17_IMPL_SPEC.md` Phase 2 for the frozen mapping.
+/// The table is the authoritative contract for cache freshness decisions.
 pub fn classify_stale(sidecar: Option<&StoreMeta>, remote_sha: Option<&str>) -> StaleDecision {
     match (sidecar, remote_sha) {
         // Row 1: no sidecar, remote known -> pessimistic refresh.
@@ -2030,8 +2025,6 @@ fn github_curl_download_to_file(url: &str, dest: &Path) -> Result<bool, String> 
 /// Returns `None` if none are available; callers degrade gracefully to
 /// unauthenticated requests.
 ///
-/// Pinned in `.dev/C17_IMPL_SPEC.md` so the precedence is auditable.
-///
 /// C18B-007 (carry from C17B-020): reject tokens containing `"` / `\`
 /// / `\n` / `\r` since the curl config stdin we pipe into looks like
 ///   `header = "Authorization: Bearer <token>"`
@@ -2388,10 +2381,15 @@ mod tests {
             std::env::set_var("TAIDA_GITHUB_BASE_URL", "http://127.0.0.1:9999");
             std::env::set_var("TAIDA_E32_ALLOW_MOCK_GITHUB_BASE_URL", "1");
         }
-        assert_eq!(
-            github_base_url().unwrap(),
-            "http://127.0.0.1:9999".to_string()
-        );
+        if local_mock_github_base_url_allowed() {
+            assert_eq!(
+                github_base_url().unwrap(),
+                "http://127.0.0.1:9999".to_string()
+            );
+        } else {
+            let err = github_base_url().expect_err("release builds must reject mock base URLs");
+            assert!(err.contains("E32K3_GITHUB_BASE_URL_CONFINED"), "{err}");
+        }
         unsafe {
             match prev_base {
                 Some(v) => std::env::set_var("TAIDA_GITHUB_BASE_URL", v),
@@ -2413,10 +2411,15 @@ mod tests {
             std::env::set_var("TAIDA_GITHUB_BASE_URL", "http://[::ffff:127.0.0.1]:9999");
             std::env::set_var("TAIDA_E32_ALLOW_MOCK_GITHUB_BASE_URL", "1");
         }
-        assert_eq!(
-            github_base_url().unwrap(),
-            "http://[::ffff:127.0.0.1]:9999".to_string()
-        );
+        if local_mock_github_base_url_allowed() {
+            assert_eq!(
+                github_base_url().unwrap(),
+                "http://[::ffff:127.0.0.1]:9999".to_string()
+            );
+        } else {
+            let err = github_base_url().expect_err("release builds must reject mock base URLs");
+            assert!(err.contains("E32K3_GITHUB_BASE_URL_CONFINED"), "{err}");
+        }
         unsafe {
             match prev_base {
                 Some(v) => std::env::set_var("TAIDA_GITHUB_BASE_URL", v),
@@ -2442,7 +2445,12 @@ mod tests {
                 std::env::set_var("TAIDA_GITHUB_BASE_URL", base);
                 std::env::set_var("TAIDA_E32_ALLOW_MOCK_GITHUB_BASE_URL", "1");
             }
-            assert_eq!(github_base_url().unwrap(), base.to_string());
+            if local_mock_github_base_url_allowed() {
+                assert_eq!(github_base_url().unwrap(), base.to_string());
+            } else {
+                let err = github_base_url().expect_err("release builds must reject mock base URLs");
+                assert!(err.contains("E32K3_GITHUB_BASE_URL_CONFINED"), "{err}");
+            }
         }
         unsafe {
             match prev_base {

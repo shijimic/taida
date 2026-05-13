@@ -7,8 +7,8 @@
 
 >>> taida-lang/net => @(readBody)
 
-rawLax <= Bytes["GET / HTTP/1.1\r\nHost: localhost\r\n\r\n"]()
-rawLax ]=> raw
+raw_lax <= Bytes["GET / HTTP/1.1\r\nHost: localhost\r\n\r\n"]()
+raw_lax ]=> raw
 req <= @(raw <= raw, body <= @(start <= 35, len <= 0))
 body <= readBody(req)
 stdout(body.length())

@@ -238,7 +238,7 @@ mod tests {
     /// the Lax pointer as an f64 bit pattern via the FLOAT fast path (→
     /// `3.958e-315`) and `stdout(Int[x]())` printed the short
     /// `.toString()` form `Lax(3)` instead of the interpreter's full
-    /// `@(hasValue <= true, __value <= 3, __default <= 0, __type <=
+    /// `@(has_value <= true, __value <= 3, __default <= 0, __type <=
     /// "Lax")`. F1 moves from 214,240 to 216,753; F2 moves from 134,257
     /// to 138,039. New total: 935,805.
     ///
@@ -303,9 +303,9 @@ mod tests {
         // C25B-028 (2026-04-23, commit 48d26da): +5,544 bytes in core.c
         // from the `jsonEncode(Gorillax/Lax/Result)` 4-backend parity fix.
         // Monadic-pack detection + `__error` / `__value` / `__default` /
-        // `__predicate` / `throw` / `hasValue` emission paths were added
+        // `__predicate` / `throw` / `has_value` emission paths were added
         // to `json_serialize_pack_fields` so native now matches the
-        // interpreter's `{"__error":{},"__value":42,"hasValue":true}`
+        // interpreter's `{"__error":{},"__value":42,"has_value":true}`
         // output instead of dropping fields / emitting booleans as 1/0.
         // Split across F1 and F2 — see the F1_LEN body below for the
         // per-region accounting.
@@ -786,7 +786,9 @@ mod tests {
         // 2026-05-13 E38 self-review: avoid constructing an unused Stat
         //   default pack on Native failure paths; assembled runtime is
         //   1,128,618 bytes.
-        const EXPECTED_TOTAL_LEN: usize = 1_128_618;
+        // 2026-05-14 Lax public data field rename (`hasValue` -> `has_value`)
+        //   updates generated C literals; assembled runtime is 1,128,652 bytes.
+        const EXPECTED_TOTAL_LEN: usize = 1_128_652;
         let asm = *NATIVE_RUNTIME_C;
         assert_eq!(
             asm.len(),
@@ -961,7 +963,7 @@ mod tests {
         // `taida_io_stdout_with_tag` / `taida_io_stderr_with_tag`
         // routing any runtime-detected pack through
         // `taida_stdout_display_string` so interpreter-parity
-        // `@(hasValue <= …, __value <= …, __default <= …, __type <=
+        // `@(has_value <= …, __value <= …, __default <= …, __type <=
         // "Lax")` output is preserved for Lax returns from
         // `Int[]/Float[]/Bool[]/Str[]`. F1 moves from 214,240 to
         // 216,753; F2 moves from 134,257 to 138,039.
@@ -1056,7 +1058,7 @@ mod tests {
         //   `taida_value_to_debug_string_full(field_val)` which
         //   dereferenced a small int (e.g. `1`) as `(char*)1` and
         //   segfaulted in `taida_read_cstr_len_safe`. The guard uses
-        //   `!render_bool && !render_unit_pack` so Lax's `hasValue`
+        //   `!render_bool && !render_unit_pack` so Lax's `has_value`
         //   (INT tag + legacy ftype-4 registry hint) continues to
         //   render as `true` / `false`, and Gorillax's `__error`
         //   (PACK tag + field_val == 0) continues to render as `@()`.
@@ -1079,7 +1081,7 @@ mod tests {
         // C25B-028 (commit 48d26da): core.c grew by +5,544 bytes from
         // the jsonEncode(Gorillax/Lax/Result) 4-backend parity fix
         // (monadic-pack detection + `__error`/`__value`/`__default`/
-        // `__predicate`/`throw`/`hasValue` emission in
+        // `__predicate`/`throw`/`has_value` emission in
         // `json_serialize_pack_fields`).
         //
         // C25B-001 Phase 3 (commit 4e17e89): core.c grew by +3,200 bytes
@@ -1343,10 +1345,12 @@ mod tests {
         // 2026-05-13 E38 late producer wiring and self-review follow-ups add
         //   another 1,300 bytes before the Error ceiling marker. F2 remains
         //   165,216 bytes.
-        const F1_LEN: usize = 314_134;
+        // 2026-05-14 Lax public data field rename moves the Error ceiling
+        //   marker to byte offset 314,154. F2 grows to 165,227 bytes.
+        const F1_LEN: usize = 314_154;
         assert_eq!(
             CORE_SECTION.len(),
-            314_134 + 165_216,
+            314_154 + 165_227,
             "core.c total byte length must equal legacy fragment1 + fragment2 (C25B-001 / C25B-028 / C25B-025 / C26B-011 / C26B-020 / C26B-016 / C26B-018 / C26B-011-wS / C26B-024 / C26B-024-wepsilon adjusted; CI-red 2026-04-24 cppcheck clean-up adds 881/409 to F1/F2; @c.27 PR41 CI-red follow-up adds 61 to F1 for the cppcheck-suppress comment on the new taida_release_any helper; D28B-012 wF adds 4,821 to F1 for taida_arena_request_reset; D28B-026 review follow-up adds 425 to F1 for the active_chunk defensive corner; D29B-003 Track-β adds 6,407 to F1 for TAIDA_BYTES_CONTIG primitives + writev hot-path reflection; D29B-004 Track-ε adds 803 to F1 for taida_slice_mold inline note documenting deferred Native zero-copy view integration; D29B-005/012 Track-η adds 3,291 to F1 for taida_net_raw_as_bytes ABI Option-D rewrite + Span* release sites + taida_slice_mold CONTIG view fast path + subtraction-based Span* bounds checks; D29B-015 Track-β-2 adds 8,418 to F1 and 1,234 to F2 for Bytes dispatcher polymorphism + producer flip; D29B-016 Track-θ adds 910 to F1 for TAIDA_STR_ROPE_MAGIC sentinel + design rationale comment block; E32B-022 Lock-N adds 2,783 to F1 for the Lax[Int]-returning *indexOf*/search/FindIndex sibling helpers; E33B-003 Cat B adds 1,541 to F1 for `taida_make_error_with_kind` parity helper)"
         );
         const F2_PREFIX: &[u8] = b"// \xE2\x94\x80\xE2\x94\x80 Error ceiling";
@@ -1504,10 +1508,12 @@ mod tests {
         // E33 gate recalibration (2026-05-08): prior net runtime changes plus
         //   C warning cleanup leave the `// ── Native HTTP/2 server` marker at
         //   byte 222,543. The H2 tail is 106,127 bytes.
-        const F5_LEN: usize = 222_543;
+        // 2026-05-14 Lax public data field rename moves the marker to
+        //   byte 222,545. The H2 tail is 106,128 bytes.
+        const F5_LEN: usize = 222_545;
         assert_eq!(
             NET_H1_H2_SECTION.len(),
-            222_543 + 106_127,
+            222_545 + 106_128,
             "net_h1_h2.c total byte length must equal legacy fragment5 + fragment6 (C26B-026 / C26B-022-wS / C27B-014 / C27B-026 / D28B-012 wF / D28B-002 wG / D28B-025 review follow-up / D29B-003 Track-β contig writev hot-path / D29B-001 Track-ζ h2 arena+span request pack / D29B-015 Track-β-2 producer flip + consumer polymorphism adjusted; E33B-003 Cat B adds 210 to F5 for taida_net_result_fail switching to taida_make_error_with_kind)"
         );
         const F6_PREFIX: &[u8] = b"// \xE2\x94\x80\xE2\x94\x80 Native HTTP/2 server";

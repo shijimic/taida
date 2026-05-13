@@ -47,6 +47,10 @@ fn taida_bin() -> PathBuf {
 /// - install exits 0
 #[test]
 fn c17b_003_row1_sidecarless_online_refreshes_pessimistically() {
+    if !common::taida_mock_github_base_url_supported() {
+        return;
+    }
+
     let work = unique_temp_dir("c17_row1_pessimistic");
     let home = work.join("home");
     let project = work.join("project");
@@ -172,6 +176,10 @@ integrity = "{integrity}"
 /// the previous working install (main.td + sidecar intact).
 #[test]
 fn c17b_001_force_refresh_offline_rolls_back_to_previous_install() {
+    if !common::taida_mock_github_base_url_supported() {
+        return;
+    }
+
     let work = unique_temp_dir("c17b_001_rollback");
     let home = work.join("home");
     let project = work.join("project");
@@ -298,6 +306,10 @@ integrity = "{integrity}"
 /// fresh schema-1 entry recording the current remote SHA.
 #[test]
 fn c17b_015_corrupt_sidecar_re_extracts() {
+    if !common::taida_mock_github_base_url_supported() {
+        return;
+    }
+
     let work = unique_temp_dir("c17b_015_corrupt");
     let home = work.join("home");
     let project = work.join("project");

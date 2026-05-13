@@ -128,19 +128,19 @@ empty.max() ]=> val                // 0
 empty.min() ]=> val                // 0
 ```
 
-### hasValue で成功/失敗を判別する
+### has_value で成功/失敗を判別する
 
-Lax の `hasValue` フィールドを使うと、値が実際に存在するかどうかを判別できます。
+Lax の `has_value` フィールドを使うと、値が実際に存在するかどうかを判別できます。
 
 ```taida
 scores <= @[85, 92, 78]
 
-scores.get(0).hasValue    // true
-scores.get(100).hasValue  // false
+scores.get(0).has_value    // true
+scores.get(100).has_value  // false
 
 empty: @[Int] <= @[]
-empty.first().hasValue         // false
-@[1, 2].first().hasValue       // true
+empty.first().has_value         // false
+@[1, 2].first().has_value       // true
 ```
 
 ### getOrDefault でカスタムデフォルト値を指定する
@@ -375,7 +375,7 @@ Sum[empty]() ]=> zero               // 0
 Find[@[1, 2, 3, 4, 5], _ x = x > 3]() ]=> found
 // found: 4
 
-Find[@[1, 2, 3], _ x = x > 10]().hasValue  // false
+Find[@[1, 2, 3], _ x = x > 10]().has_value  // false
 ```
 
 #### FindIndex[list, fn]()

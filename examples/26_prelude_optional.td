@@ -3,9 +3,9 @@
 // Lax[T] provides the same safety with default value guarantees.
 
 name <= Lax["Alice"]()
-empty <= Div[0, 0]()  // hasValue = false
+empty <= Div[0, 0]()  // has_value = false
 
-// hasValue / isEmpty
+// hasValue / is_empty
 stdout("name.hasValue() = " + name.hasValue().toString())
 stdout("empty.isEmpty() = " + empty.isEmpty().toString())
 

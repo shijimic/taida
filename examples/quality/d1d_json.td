@@ -17,8 +17,8 @@ stdout(pilot2.address.city)
 stdout(pilot2.address.zip)
 
 // List schema
-PilotSync = @(name: Str, syncRate: Int)
-raw3 <= '[{"name": "Asuka", "syncRate": 95}, {"name": "Shinji", "syncRate": 41}]'
+PilotSync = @(name: Str, sync_rate: Int)
+raw3 <= '[{"name": "Asuka", "sync_rate": 95}, {"name": "Shinji", "sync_rate": 41}]'
 JSON[raw3, @[PilotSync]]() ]=> pilots
 stdout(pilots.length().toString())
 pilots.get(0) ]=> p0
@@ -65,18 +65,18 @@ stdout(pilot8.address.city)
 stdout(pilot8.address.zip)
 
 // Rule 6: List per-element matching
-Pilot7 = @(name: Str, syncRate: Int)
-raw9 <= '[{"name": "Rei", "syncRate": 95}, {"name": "Shinji"}]'
+Pilot7 = @(name: Str, sync_rate: Int)
+raw9 <= '[{"name": "Rei", "sync_rate": 95}, {"name": "Shinji"}]'
 JSON[raw9, @[Pilot7]]() ]=> pilots2
 pilots2.get(0) ]=> p2_0
 stdout(p2_0.name)
-stdout(p2_0.syncRate.toString())
+stdout(p2_0.sync_rate.toString())
 pilots2.get(1) ]=> p2_1
 stdout(p2_1.name)
-stdout(p2_1.syncRate.toString())
+stdout(p2_1.sync_rate.toString())
 
 // Parse failure -> hasValue false
-JSON["invalid json", Pilot]().hasValue => has_val
+JSON["invalid json", Pilot]().has_value => has_val
 stdout(has_val.toString())
 
 // jsonEncode output

@@ -1,1 +1,1 @@
-@(hasValue <= true, __value <= "@(a <= 1)", __default <= "", __type <= "Lax")
+@(has_value <= true, __value <= "@(a <= 1)", __default <= "", __type <= "Lax")

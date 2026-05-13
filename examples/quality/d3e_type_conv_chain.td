@@ -48,7 +48,7 @@ stdout(ni.toString())
 Bool[ni]() ]=> nb
 stdout(nb.toString())
 
-// 無効な変換（Lax の hasValue = false）
+// 無効な変換（Lax の has_value = false）
 bad <= Int["abc"]()
 stdout(bad.hasValue().toString())
 bad ]=> badval

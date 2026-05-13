@@ -47,7 +47,7 @@ hello
 hello
 @["a", "b", "c"]
 hello taida
-@(hasValue <= true, __value <= "h", __default <= "", __type <= "Lax")
+@(has_value <= true, __value <= "h", __default <= "", __type <= "Lax")
 hahaha
 olleh
 3.14

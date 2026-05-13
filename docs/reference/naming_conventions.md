@@ -14,10 +14,10 @@ Taida Lang はカテゴリ別命名規則を採用します。本書はその正
 | ぶちパックフィールド (非関数値) | snake_case | `@(user_name <= "...", port_count <= 8080)` | 値が関数以外 |
 | 変数 (関数値の束縛) | camelCase | `processRequest <= ...` | |
 | 変数 (非関数値) | snake_case | `user_name`, `port_count` | |
-| 定数 | SCREAMING_SNAKE_CASE | `MAX_BUFFER_SIZE`, `DEFAULT_TIMEOUT` | |
+| 定数 | SCREAMING_SNAKE_CASE | `MAX_BUFFER_SIZE`, `DEFAULT_TIMEOUT` | 非関数値の束縛として扱われ、`E1804` の判定でも許容されます |
 | エラー variant | PascalCase | `NotFound`, `Timeout`, `RelaxedGorillaEscaped` | エラー型は型扱い |
 
-> **重要**: モールド形 (PascalCase の `Map`, `Filter` 等) と関数形 (camelCase の `zip`, `enumerate` 等) は **両方 valid で共存します**。種別が異なる (モールド型 vs 関数) ため、規則上は両者が正しく並立します。
+> **重要**: モールド形 (PascalCase の `Map`, `Filter` 等) と関数形 (camelCase の `zip`, `enumerate` 等) は **両方 valid で共存します**。種別が異なる (モールド型 vs 関数) ため、規則上は両者が正しく並立します。`fnName[args]()` のような関数形の bracket call は parser 内部では mold-call 形の式として保持されますが、命名 lint では関数形として扱い、`E1801` を発火しません。
 
 ## 型変数規則
 
@@ -80,7 +80,7 @@ Mold[T] => Pair[T, U] = @(second: U)
 以下は CI lint の対象外です:
 
 - テスト関数命名 (関数規則 camelCase を踏襲する以上の規則は設けない)
-- `_` prefix (public/protected/private 概念が無いため特別扱いしない、慣習として残す)
+- `_` prefix (public/protected/private 概念が無いため特別扱いしない、慣習として残す)。先頭が `_` の識別子は、関数 / 変数 / ぶちパックフィールドの全カテゴリで命名 lint 対象外です。
 - boolean プレフィックス (`is`, `has`, `can`, `did`, `needs` 等を多様性として許容、規約化しない)
 
 ## 例
@@ -169,8 +169,9 @@ PI <= 3.14159
 
 API_BASE_URL <= "https://api.example.com"
 DEFAULT_LOCALE <= "ja-JP"
+MAX_VALUE <= loadMaxValue()
 
-<<< @(MAX_RETRY_COUNT, DEFAULT_TIMEOUT, API_BASE_URL)
+<<< @(MAX_RETRY_COUNT, DEFAULT_TIMEOUT, API_BASE_URL, MAX_VALUE)
 ```
 
 ### エラー variant / Enum variant (PascalCase)

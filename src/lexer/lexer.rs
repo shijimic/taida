@@ -1461,9 +1461,9 @@ mod tests {
 
     #[test]
     fn test_mold_definition() {
-        // Mold[T] => Optional[T] = @(hasValue: Bool)
+        // Mold[T] => Optional[T] = @(has_value: Bool)
         assert_eq!(
-            tok_kinds("Mold[T] => Optional[T] = @(hasValue: Bool)"),
+            tok_kinds("Mold[T] => Optional[T] = @(has_value: Bool)"),
             vec![
                 Ident("Mold".into()),
                 LBracket,
@@ -1477,7 +1477,7 @@ mod tests {
                 Eq,
                 At,
                 LParen,
-                Ident("hasValue".into()),
+                Ident("has_value".into()),
                 Colon,
                 Ident("Bool".into()),
                 RParen

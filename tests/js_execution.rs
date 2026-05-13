@@ -461,7 +461,7 @@ d <= Div[10, 3]()
 d ]=> val
 stdout(val.toString())
 d2 <= Div[10, 0]()
-stdout(d2.hasValue.toString())
+stdout(d2.has_value.toString())
 d2 ]=> val2
 stdout(val2.toString())
 "#,

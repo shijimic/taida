@@ -1,23 +1,23 @@
-//! D28B-008 — naming-convention lint pass.
+//! Naming-convention lint pass.
 //!
-//! Implements 9 diagnostic codes (E1801..E1809) that pin the D28B-001
-//! (Phase 0 2026-04-26 Lock) category-based naming rules at the
-//! parser/AST level. The lint runs after parsing succeeds and walks the
-//! `Program` AST to surface symbol-level violations.
+//! Implements the E18xx diagnostic family that pins category-based
+//! naming rules at the parser/AST level. The lint runs after parsing
+//! succeeds and walks the `Program` AST to surface symbol-level
+//! violations.
 //!
 //! ## Diagnostic code mapping
 //!
-//! | Code    | Lock alias | Category                                                               |
-//! |---------|------------|------------------------------------------------------------------------|
-//! | E1801   | E1XXa      | クラスライク型 / モールド型 / スキーマ / エラー variant が PascalCase でない |
-//! | E1802   | E1XXb      | 関数が camelCase でない                                                |
-//! | E1803   | E1XXc      | 変数 (関数値の束縛) が camelCase でない                                |
-//! | E1804   | E1XXd      | 変数 (非関数値) が snake_case でない                                   |
-//! | E1805   | E1XXe      | 定数が SCREAMING_SNAKE_CASE でない (将来拡張、現状 reserved)           |
-//! | E1806   | E1XXf      | エラー variant (Enum:Variant) が PascalCase でない                     |
-//! | E1807   | E1XXg      | 型変数が単一大文字でない (T1/T2 series 例外)                           |
-//! | E1808   | E1XXh      | ぶちパックフィールドの値型と命名規則が不整合                           |
-//! | E1809   | E1XXi      | 戻り値型注釈の `:` マーカー欠落                                        |
+//! | Code    | Category                                                               |
+//! |---------|------------------------------------------------------------------------|
+//! | E1801   | クラスライク型 / モールド型 / スキーマ / エラー variant が PascalCase でない |
+//! | E1802   | 関数が camelCase でない                                                |
+//! | E1803   | 変数 (関数値の束縛) が camelCase でない                                |
+//! | E1804   | 変数 (非関数値) が snake_case でない                                   |
+//! | E1805   | 定数が SCREAMING_SNAKE_CASE でない (将来拡張、現状 reserved)           |
+//! | E1806   | エラー variant (Enum:Variant) が PascalCase でない                     |
+//! | E1807   | 型変数が単一大文字でない (T1/T2 series 例外)                           |
+//! | E1808   | ぶちパックフィールドの値型と命名規則が不整合                           |
+//! | E1809   | 戻り値型注釈の `:` マーカー欠落                                        |
 //!
 //! ## Severity / out-of-scope (per D28B-008 Acceptance)
 //!
@@ -127,6 +127,49 @@ fn is_snake_case(name: &str) -> bool {
     }
     name.chars()
         .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+}
+
+/// SCREAMING_SNAKE_CASE: constant binding style.
+fn is_screaming_snake_case(name: &str) -> bool {
+    if name.is_empty() {
+        return false;
+    }
+    let mut has_upper = false;
+    for c in name.chars() {
+        if c.is_ascii_uppercase() {
+            has_upper = true;
+            continue;
+        }
+        if !(c.is_ascii_digit() || c == '_') {
+            return false;
+        }
+    }
+    has_upper
+}
+
+/// `_`-prefixed identifiers are convention-only and outside naming lint.
+fn is_lint_exempt_name(name: &str) -> bool {
+    name.starts_with('_')
+}
+
+fn is_function_binding_name(name: &str) -> bool {
+    is_lint_exempt_name(name) || is_camel_case(name)
+}
+
+fn is_non_function_binding_name(name: &str) -> bool {
+    is_lint_exempt_name(name) || is_snake_case(name) || is_screaming_snake_case(name)
+}
+
+fn is_ambiguous_binding_name(name: &str) -> bool {
+    is_function_binding_name(name) || is_non_function_binding_name(name)
+}
+
+fn is_function_field_name(name: &str) -> bool {
+    is_lint_exempt_name(name) || is_camel_case(name)
+}
+
+fn is_non_function_field_name(name: &str) -> bool {
+    is_lint_exempt_name(name) || is_snake_case(name)
 }
 
 /// Single-letter ASCII upper (`T`, `U`, `V`, `E`, `K`, `P`, `R`, ...).
@@ -250,7 +293,7 @@ fn lint_statement(stmt: &Statement, diags: &mut Vec<LintDiagnostic>) {
             match bind_kind {
                 Some(true) => {
                     // Function-value variable: must be camelCase (E1803)
-                    if !is_camel_case(&a.target) {
+                    if !is_function_binding_name(&a.target) {
                         diags.push(LintDiagnostic {
                             code: "[E1803]",
                             message: format!(
@@ -262,8 +305,8 @@ fn lint_statement(stmt: &Statement, diags: &mut Vec<LintDiagnostic>) {
                     }
                 }
                 Some(false) => {
-                    // Non-function-value variable: must be snake_case (E1804)
-                    if !is_snake_case(&a.target) {
+                    // Non-function-value variable: snake_case or SCREAMING_SNAKE_CASE (constant).
+                    if !is_non_function_binding_name(&a.target) {
                         diags.push(LintDiagnostic {
                             code: "[E1804]",
                             message: format!(
@@ -275,8 +318,8 @@ fn lint_statement(stmt: &Statement, diags: &mut Vec<LintDiagnostic>) {
                     }
                 }
                 None => {
-                    // Ambiguous: accept either camelCase or snake_case
-                    if !(is_camel_case(&a.target) || is_snake_case(&a.target)) {
+                    // Ambiguous: accept function, non-function, or constant binding names.
+                    if !is_ambiguous_binding_name(&a.target) {
                         diags.push(LintDiagnostic {
                             code: "[E1804]",
                             message: format!(
@@ -407,7 +450,7 @@ fn check_type_param(tp: &TypeParam, anchor: &Span, diags: &mut Vec<LintDiagnosti
 fn lint_func_def(f: &FuncDef, diags: &mut Vec<LintDiagnostic>, is_method: bool) {
     // E1802: function name must be camelCase (top-level only; methods
     // inherit field-name classification rules — handled elsewhere).
-    if !is_method && !is_camel_case(&f.name) {
+    if !is_method && !is_function_binding_name(&f.name) {
         diags.push(LintDiagnostic {
             code: "[E1802]",
             message: format!("関数は camelCase で命名してください: '{}'", f.name),
@@ -451,7 +494,7 @@ fn lint_field_def(field: &FieldDef, diags: &mut Vec<LintDiagnostic>) {
         if let Some(md) = &field.method_def {
             lint_func_def(md, diags, /* is_method */ true);
         }
-        if !is_camel_case(&field.name) {
+        if !is_function_field_name(&field.name) {
             // Method-in-pack: function value → camelCase (E1808)
             diags.push(LintDiagnostic {
                 code: "[E1808]",
@@ -469,7 +512,7 @@ fn lint_field_def(field: &FieldDef, diags: &mut Vec<LintDiagnostic>) {
         match classify_field_type(ty) {
             Some(true) => {
                 // Function-type field → camelCase (E1808)
-                if !is_camel_case(&field.name) {
+                if !is_function_field_name(&field.name) {
                     diags.push(LintDiagnostic {
                         code: "[E1808]",
                         message: format!(
@@ -482,7 +525,7 @@ fn lint_field_def(field: &FieldDef, diags: &mut Vec<LintDiagnostic>) {
             }
             Some(false) => {
                 // Non-function-type field → snake_case (E1808)
-                if !is_snake_case(&field.name) {
+                if !is_non_function_field_name(&field.name) {
                     diags.push(LintDiagnostic {
                         code: "[E1808]",
                         message: format!(
@@ -494,7 +537,8 @@ fn lint_field_def(field: &FieldDef, diags: &mut Vec<LintDiagnostic>) {
                 }
             }
             None => {
-                if !(is_camel_case(&field.name) || is_snake_case(&field.name)) {
+                if !(is_function_field_name(&field.name) || is_non_function_field_name(&field.name))
+                {
                     diags.push(LintDiagnostic {
                         code: "[E1808]",
                         message: format!(
@@ -511,7 +555,7 @@ fn lint_field_def(field: &FieldDef, diags: &mut Vec<LintDiagnostic>) {
         // Type omitted but default present: classify by value
         match classify_field_value(default) {
             Some(true) => {
-                if !is_camel_case(&field.name) {
+                if !is_function_field_name(&field.name) {
                     diags.push(LintDiagnostic {
                         code: "[E1808]",
                         message: format!(
@@ -523,7 +567,7 @@ fn lint_field_def(field: &FieldDef, diags: &mut Vec<LintDiagnostic>) {
                 }
             }
             Some(false) => {
-                if !is_snake_case(&field.name) {
+                if !is_non_function_field_name(&field.name) {
                     diags.push(LintDiagnostic {
                         code: "[E1808]",
                         message: format!(
@@ -535,7 +579,8 @@ fn lint_field_def(field: &FieldDef, diags: &mut Vec<LintDiagnostic>) {
                 }
             }
             None => {
-                if !(is_camel_case(&field.name) || is_snake_case(&field.name)) {
+                if !(is_function_field_name(&field.name) || is_non_function_field_name(&field.name))
+                {
                     diags.push(LintDiagnostic {
                         code: "[E1808]",
                         message: format!(
@@ -550,7 +595,7 @@ fn lint_field_def(field: &FieldDef, diags: &mut Vec<LintDiagnostic>) {
         lint_expr(default, diags);
     } else {
         // Plain field with neither type nor default: accept either case
-        if !(is_camel_case(&field.name) || is_snake_case(&field.name)) {
+        if !(is_function_field_name(&field.name) || is_non_function_field_name(&field.name)) {
             diags.push(LintDiagnostic {
                 code: "[E1808]",
                 message: format!(
@@ -570,7 +615,7 @@ fn lint_field_def(field: &FieldDef, diags: &mut Vec<LintDiagnostic>) {
 fn lint_buchi_field_literal(field: &BuchiField, diags: &mut Vec<LintDiagnostic>) {
     match classify_field_value(&field.value) {
         Some(true) => {
-            if !is_camel_case(&field.name) {
+            if !is_function_field_name(&field.name) {
                 diags.push(LintDiagnostic {
                     code: "[E1808]",
                     message: format!(
@@ -582,7 +627,7 @@ fn lint_buchi_field_literal(field: &BuchiField, diags: &mut Vec<LintDiagnostic>)
             }
         }
         Some(false) => {
-            if !is_snake_case(&field.name) {
+            if !is_non_function_field_name(&field.name) {
                 diags.push(LintDiagnostic {
                     code: "[E1808]",
                     message: format!(
@@ -594,7 +639,7 @@ fn lint_buchi_field_literal(field: &BuchiField, diags: &mut Vec<LintDiagnostic>)
             }
         }
         None => {
-            if !(is_camel_case(&field.name) || is_snake_case(&field.name)) {
+            if !(is_function_field_name(&field.name) || is_non_function_field_name(&field.name)) {
                 diags.push(LintDiagnostic {
                     code: "[E1808]",
                     message: format!(
@@ -636,10 +681,13 @@ fn lint_expr(e: &Expr, diags: &mut Vec<LintDiagnostic>) {
             }
         }
         Expr::MoldInst(name, args, fields, span) => {
-            if !is_pascal_case(name) {
+            if !(is_pascal_case(name) || is_camel_case(name)) {
                 diags.push(LintDiagnostic {
                     code: "[E1801]",
-                    message: format!("モールド名は PascalCase で命名してください: '{}'", name),
+                    message: format!(
+                        "モールド名は PascalCase、関数形式は camelCase で命名してください: '{}'",
+                        name
+                    ),
                     span: span.clone(),
                 });
             }
@@ -1063,6 +1111,16 @@ mod tests {
     }
 
     #[test]
+    fn e1804_constant_screaming_snake_compliant_int() {
+        let diags = lint_str("MAX_RETRY_COUNT <= 3\nDEFAULT_TIMEOUT <= 5000\n");
+        assert!(
+            !codes(&diags).contains(&"[E1804]"),
+            "SCREAMING_SNAKE_CASE constants should not trigger E1804: {:?}",
+            diags
+        );
+    }
+
+    #[test]
     fn e1808_buchi_field_value_typed_snake() {
         // Non-function value (string) → must be snake_case
         let diags = lint_str("data <= @(callSign <= \"Eva-02\")\n");
@@ -1156,8 +1214,28 @@ mod tests {
     }
 
     #[test]
+    fn underscore_prefix_function_not_flagged() {
+        let diags = lint_str("_private_helper x: Int = x => :Int\n");
+        assert!(
+            !codes(&diags).contains(&"[E1802]"),
+            "_-prefix function should not trigger E1802: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn underscore_prefix_field_not_flagged() {
+        let diags = lint_str("data <= @(_1 <= _ x = x, _raw <= 42)\n");
+        assert!(
+            !codes(&diags).contains(&"[E1808]"),
+            "_-prefix field should not trigger E1808: {:?}",
+            diags
+        );
+    }
+
+    #[test]
     fn snake_underscore_prefix_not_flagged() {
-        // `_` prefix is in the non-flagged list per Lock.
+        // `_` prefix is in the non-flagged list.
         let diags = lint_str("_internal <= 42\n");
         assert!(
             !codes(&diags).contains(&"[E1804]"),

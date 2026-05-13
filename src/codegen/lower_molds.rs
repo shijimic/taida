@@ -521,7 +521,7 @@ impl Lowering {
                 let default_val = func.alloc_var();
                 func.push(IrInst::ConstInt(default_val, 0));
                 // Sentinel: taida_str_byte_at returns -1 for OOB; we
-                // encode "hasValue" at the runtime layer (see
+                // encode "has_value" at the runtime layer (see
                 // taida_str_byte_at_lax helper below in core.c).
                 let result = func.alloc_var();
                 func.push(IrInst::Call(

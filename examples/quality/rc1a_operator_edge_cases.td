@@ -198,8 +198,8 @@ Div[10, 0]() ]=> d2
 stdout(d2.toString())
 
 // 9c: hasValue check
-stdout(Div[10, 3]().hasValue.toString())
-stdout(Div[10, 0]().hasValue.toString())
+stdout(Div[10, 3]().has_value.toString())
+stdout(Div[10, 0]().has_value.toString())
 
 // 9d: Mod
 Mod[10, 3]() ]=> m1
@@ -218,7 +218,7 @@ Int["42"]() ]=> ti1
 stdout(ti1.toString())
 Int["abc"]() ]=> ti2
 stdout(ti2.toString())
-stdout(Int["abc"]().hasValue.toString())
+stdout(Int["abc"]().has_value.toString())
 
 // 10b: String to Float
 Float["3.14"]() ]=> tf1
@@ -237,20 +237,20 @@ stdout(tb2.toString())
 // === 11. Multibyte character indexOf/lastIndexOf (T-1) ===
 
 // 11a: String indexOf with multibyte (UTF-8)
-mbStr <= "あいうえお"
-stdout(mbStr.indexOf("う").toString())
-stdout(mbStr.indexOf("お").toString())
-stdout(mbStr.indexOf("か").toString())
+mb_str <= "あいうえお"
+stdout(mb_str.indexOf("う").toString())
+stdout(mb_str.indexOf("お").toString())
+stdout(mb_str.indexOf("か").toString())
 
 // 11b: String lastIndexOf with multibyte
-mbStr2 <= "あいうあいう"
-stdout(mbStr2.lastIndexOf("う").toString())
-stdout(mbStr2.lastIndexOf("あ").toString())
-stdout(mbStr2.lastIndexOf("か").toString())
+mb_str2 <= "あいうあいう"
+stdout(mb_str2.lastIndexOf("う").toString())
+stdout(mb_str2.lastIndexOf("あ").toString())
+stdout(mb_str2.lastIndexOf("か").toString())
 
 // 11c: List indexOf with multibyte elements
-mbList <= @["あ", "い", "う", "え", "お"]
-stdout(mbList.indexOf("う").toString())
-stdout(mbList.lastIndexOf("い").toString())
+mb_list <= @["あ", "い", "う", "え", "お"]
+stdout(mb_list.indexOf("う").toString())
+stdout(mb_list.lastIndexOf("い").toString())
 
 stdout("=== ALL OPERATOR TESTS PASSED ===")

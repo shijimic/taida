@@ -86,6 +86,10 @@ fn run_install_with_env(
 
 #[test]
 fn c17_5_offline_with_sidecar_prints_offline_warning() {
+    if !common::taida_mock_github_base_url_supported() {
+        return;
+    }
+
     let work = unique_temp_dir("c17_offline_with_sidecar");
     let home = work.join("home");
     let project = work.join("project");
@@ -202,6 +206,10 @@ fn c17_5_offline_without_sidecar_prints_strong_warning() {
 
 #[test]
 fn c17_5_no_remote_check_skips_lookup_silently() {
+    if !common::taida_mock_github_base_url_supported() {
+        return;
+    }
+
     let work = unique_temp_dir("c17_no_remote");
     let home = work.join("home");
     let project = work.join("project");

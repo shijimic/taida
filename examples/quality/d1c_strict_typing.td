@@ -15,16 +15,16 @@ stdout(div_zero.toString())
 
 // hasValue check
 lax <= Div[10, 0]()
-stdout(lax.hasValue.toString())
+stdout(lax.has_value.toString())
 lax2 <= Div[10, 3]()
-stdout(lax2.hasValue.toString())
+stdout(lax2.has_value.toString())
 
 // Mod
 Mod[10, 3]() ]=> mod_result
 stdout(mod_result.toString())
 Mod[10, 0]() ]=> mod_zero
 stdout(mod_zero.toString())
-stdout(Mod[10, 0]().hasValue.toString())
+stdout(Mod[10, 0]().has_value.toString())
 
 // Range-safe access
 items <= @[10, 20, 30]
@@ -50,11 +50,11 @@ stdout(empty_max.toString())
 
 // hasValue for empty list
 lax3 <= empty.first()
-stdout(lax3.hasValue.toString())
+stdout(lax3.has_value.toString())
 
 // JSON as airlock
-Pilot = @(name: Str, age: Int, syncRate: Int)
-raw <= '{"name": "Shinji", "age": 14, "syncRate": 78}'
+Pilot = @(name: Str, age: Int, sync_rate: Int)
+raw <= '{"name": "Shinji", "age": 14, "sync_rate": 78}'
 JSON[raw, Pilot]() ]=> pilot
 stdout(pilot.name)
 stdout(pilot.age.toString())

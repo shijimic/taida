@@ -11,7 +11,7 @@ x ]=> b
 stdout(b)
 
 // Lax hasValue should also output as Bool
-stdout(x.hasValue)
+stdout(x.has_value)
 
 // Success case
 Bool[true]() ]=> c

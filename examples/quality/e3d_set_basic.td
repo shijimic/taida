@@ -1,5 +1,5 @@
 // QF-40: Set basic operations — 3-backend parity test
-// Tests: setOf, add, remove, has, size, isEmpty, union, intersect, diff, toList, toString
+// Tests: setOf, add, remove, has, size, is_empty, union, intersect, diff, toList, toString
 
 // Create Set
 s <= setOf(@[1, 2, 3])

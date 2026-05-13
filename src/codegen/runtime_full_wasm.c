@@ -122,7 +122,7 @@ static int _wf_looks_like_string(int64_t val) {
 #define WF_HM_MARKER_VAL  0x54414944484D5000LL  /* "TAIDHMP\0" */
 #define WF_SET_MARKER_VAL 0x5441494453455400LL  /* "TAIDSET\0" */
 #define WF_LIST_MARKER_VAL 0x544149444C535400LL /* "TAIDLST\0" */
-#define WF_HASH_HAS_VALUE   0x9e9c6dc733414d60LL
+#define WF_HASH_HAS_VALUE   0x175d21da0757452dLL
 #define WF_HASH___VALUE     0x0a7fc9f13472bbe0LL
 #define WF_HASH_THROW       0x5a5fe3720c9584cfLL
 
@@ -279,7 +279,7 @@ int64_t taida_polymorphic_is_empty_full(int64_t ptr) {
     if (!_wf_is_valid_ptr(ptr, 8)) return 0;
     int64_t *p = (int64_t *)(intptr_t)ptr;
     // fc=4/5 monadic types: Lax/Gorillax/RelaxedGorillax/Result
-    // field 0 = hasValue/isOk; isEmpty = !field0
+    // field 0 = has_value/isOk; isEmpty = !field0
     if (p[0] == 4 || p[0] == 5) {
         if (_wf_is_result(ptr)) return taida_result_is_error(ptr);
         return taida_pack_get_idx(ptr, 0) ? 0 : 1; // Lax/Gorillax
@@ -353,7 +353,7 @@ static int64_t _wf_gorillax_to_str(int64_t gx) {
 ///
 /// C24-A (2026-04-23): Gorillax's first-field hash was unified from
 /// WASM_HASH_IS_OK (0x6550c1c5b98b56bf) to WASM_HASH_HAS_VALUE
-/// (0x9e9c6dc733414d60) so `Str[Gorillax[v]()]()` matches interpreter /
+/// (0x175d21da0757452d) so `Str[Gorillax[v]()]()` matches interpreter /
 /// JS / native output. Lax / Gorillax / RelaxedGorillax now share hash0
 /// and are disambiguated via the `__type` field first character
 /// ('G' / 'R' = Gorillax / RelaxedGorillax; anything else = Lax).
@@ -366,7 +366,7 @@ int64_t taida_polymorphic_to_string_full(int64_t obj) {
         // C24-A: Gorillax / Lax share hash0 = HASH_HAS_VALUE. Disambiguate
         // via the field-2 hash: `__error` (0x15c3e6e41a99a6cb) for
         // Gorillax / RelaxedGorillax, `__default` for Lax.
-        if (p[0] == 4 && p[1] == 0x9e9c6dc733414d60LL
+        if (p[0] == 4 && p[1] == WF_HASH_HAS_VALUE
             && p[1 + 2 * 3] == 0x15c3e6e41a99a6cbLL) { // WASM_HASH___ERROR
             return _wf_gorillax_to_str(obj);
         }

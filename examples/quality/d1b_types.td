@@ -102,8 +102,8 @@ btrue <= true
 stdout(btrue.toString())
 
 // JSON schema matching
-Pilot2 = @(name: Str, age: Int, syncRate: Int)
-raw <= '{"name": "Asuka", "age": 14, "syncRate": 78}'
+Pilot2 = @(name: Str, age: Int, sync_rate: Int)
+raw <= '{"name": "Asuka", "age": 14, "sync_rate": 78}'
 JSON[raw, Pilot2]() ]=> json_pilot
 stdout(json_pilot.name)
 stdout(json_pilot.age.toString())
@@ -113,7 +113,7 @@ raw2 <= '{"name": "Rei"}'
 JSON[raw2, Pilot2]() ]=> json_pilot2
 stdout(json_pilot2.name)
 stdout(json_pilot2.age.toString())
-stdout(json_pilot2.syncRate.toString())
+stdout(json_pilot2.sync_rate.toString())
 
 // JSON null -> default
 raw3 <= '{"name": null, "age": null}'
@@ -122,7 +122,7 @@ stdout(json_pilot3.name)
 stdout(json_pilot3.age.toString())
 
 // jsonEncode
-pilot_out <= Pilot2(name <= "Asuka", age <= 14, syncRate <= 78)
+pilot_out <= Pilot2(name <= "Asuka", age <= 14, sync_rate <= 78)
 stdout(jsonEncode(pilot_out))
 
 // Type inference
@@ -141,7 +141,7 @@ stdout(sum2.toString())
 stdout(concat2)
 
 // Default values
-Pilot3 = @(name: Str, callSign: Str, age: Int)
+Pilot3 = @(name: Str, call_sign: Str, age: Int)
 rei <= Pilot3(name <= "Rei")
-stdout(rei.callSign)
+stdout(rei.call_sign)
 stdout(rei.age.toString())

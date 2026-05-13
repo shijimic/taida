@@ -261,14 +261,14 @@ int64_t taida_make_error_with_kind_code(int64_t type_ptr, int64_t msg_ptr, int64
 }
 
 /* ── W-5: Lax[T] runtime ────────────────────────────────── */
-/* Lax is a BuchiPack @(hasValue: Bool, __value: T, __default: T, __type: Str)
+/* Lax is a BuchiPack @(has_value: Bool, __value: T, __default: T, __type: Str)
    Layout: 4-field pack using same hash constants as native. */
 
 /* WASM_HASH_HAS_VALUE, __VALUE, __DEFAULT, __TYPE defined in W-5f monadic type hash section */
 
 /* C21B-seed-07: Register Lax's four field names so
    `_wasm_pack_to_string_full` can surface them in the interpreter-parity
-   stdout form `@(hasValue <= …, __value <= …, __default <= …, __type <=
+   stdout form `@(has_value <= …, __value <= …, __default <= …, __type <=
    "Lax")`. Without this, the lookup returns NULL and the field is skipped
    entirely — the symptom observed on wasm-wasi was `@()` for any Lax
    produced by `Int[x]()` / `Float[x]()` / `Bool[x]()` / `Str[x]()`. */
@@ -276,7 +276,7 @@ static int _wasm_lax_names_registered = 0;
 static void _wasm_register_lax_field_names(void) {
     if (_wasm_lax_names_registered) return;
     _wasm_lax_names_registered = 1;
-    taida_register_field_name(WASM_HASH_HAS_VALUE, (int64_t)(intptr_t)"hasValue");
+    taida_register_field_name(WASM_HASH_HAS_VALUE, (int64_t)(intptr_t)"has_value");
     taida_register_field_name(WASM_HASH___VALUE,   (int64_t)(intptr_t)"__value");
     taida_register_field_name(WASM_HASH___DEFAULT, (int64_t)(intptr_t)"__default");
     taida_register_field_name(WASM_HASH___TYPE,    (int64_t)(intptr_t)"__type");
@@ -286,7 +286,7 @@ int64_t taida_lax_new(int64_t value, int64_t default_value) {
     _wasm_register_lax_field_names();
     int64_t pack = taida_pack_new(4);
     taida_pack_set_hash(pack, 0, WASM_HASH_HAS_VALUE);
-    taida_pack_set(pack, 0, 1);  /* hasValue = true */
+    taida_pack_set(pack, 0, 1);  /* has_value = true */
     taida_pack_set_tag(pack, 0, 2); /* BOOL tag */
     taida_pack_set_hash(pack, 1, WASM_HASH___VALUE);
     taida_pack_set(pack, 1, value);
@@ -304,7 +304,7 @@ int64_t taida_lax_empty(int64_t default_value) {
     _wasm_register_lax_field_names();
     int64_t pack = taida_pack_new(4);
     taida_pack_set_hash(pack, 0, WASM_HASH_HAS_VALUE);
-    taida_pack_set(pack, 0, 0);  /* hasValue = false */
+    taida_pack_set(pack, 0, 0);  /* has_value = false */
     taida_pack_set_tag(pack, 0, 2); /* BOOL tag */
     taida_pack_set_hash(pack, 1, WASM_HASH___VALUE);
     taida_pack_set(pack, 1, default_value);
@@ -336,7 +336,7 @@ int64_t taida_lax_empty_error(int64_t default_value, int64_t error) {
 }
 
 int64_t taida_lax_has_value(int64_t lax_ptr) {
-    return taida_pack_get_idx(lax_ptr, 0);  /* hasValue field */
+    return taida_pack_get_idx(lax_ptr, 0);  /* has_value field */
 }
 
 int64_t taida_lax_get_or_default(int64_t lax_ptr, int64_t fallback) {
@@ -445,7 +445,7 @@ int64_t taida_error_info(int64_t source) {
 
 /* ── W-5: generic_unmold — now Lax-aware ── */
 /* Override the simplified version from W-1. When the value is a Lax pack
-   (detected by field count == 4 and hasValue field), extract the value;
+   (detected by field count == 4 and has_value field), extract the value;
    otherwise return identity. */
 
 /* Forward declare: check if a value is a Lax pack.
@@ -467,11 +467,11 @@ static int _wasm_is_lax(int64_t val) {
 }
 
 /* ── W-5: Gorillax (Result container) ── */
-/* Gorillax: @(hasValue: Bool, __value: T, __error: Error, __type: "Gorillax")
+/* Gorillax: @(has_value: Bool, __value: T, __error: Error, __type: "Gorillax")
    Using pack fields at fixed indices.
 
    C24-A (2026-04-23): unified Gorillax first-field name from `isOk` to
-   `hasValue` so `Str[Gorillax[v]()]()` on wasm matches the interpreter /
+   `has_value` so `Str[Gorillax[v]()]()` on wasm matches the interpreter /
    JS / native output byte-for-byte. The old `isOk` field name was WASM
    internal-only — no user-facing `.isOk()` method dispatches to this
    slot (that method lives on `Result`, routed through
@@ -486,11 +486,11 @@ static int _wasm_is_lax(int64_t val) {
    `_wasm_field_registry` so `_wasm_pack_to_string_full` can resolve the
    `__error` field (previously unregistered, which caused
    `Str[Gorillax[v]()]()` to silently skip the error slot). The other
-   three fields (`hasValue`, `__value`, `__type`) are already registered
+   three fields (`has_value`, `__value`, `__type`) are already registered
    by `_wasm_register_lax_field_names`, but we re-register them here as
    a defence-in-depth so the Gorillax path is self-sufficient. */
 static void _wasm_register_gorillax_field_names(void) {
-    taida_register_field_name(WASM_HASH_HAS_VALUE, (int64_t)(intptr_t)"hasValue");
+    taida_register_field_name(WASM_HASH_HAS_VALUE, (int64_t)(intptr_t)"has_value");
     taida_register_field_name(WASM_HASH___VALUE,   (int64_t)(intptr_t)"__value");
     taida_register_field_name(WASM_HASH___ERROR,   (int64_t)(intptr_t)"__error");
     taida_register_field_name(WASM_HASH___TYPE,    (int64_t)(intptr_t)"__type");
@@ -500,7 +500,7 @@ int64_t taida_gorillax_new(int64_t value) {
     _wasm_register_gorillax_field_names();
     int64_t pack = taida_pack_new(4);
     taida_pack_set_hash(pack, 0, WASM_HASH_HAS_VALUE);
-    taida_pack_set(pack, 0, 1); /* hasValue = true */
+    taida_pack_set(pack, 0, 1); /* has_value = true */
     taida_pack_set_tag(pack, 0, WASM_TAG_BOOL);
     taida_pack_set_hash(pack, 1, WASM_HASH___VALUE);
     taida_pack_set(pack, 1, value);
@@ -523,7 +523,7 @@ int64_t taida_gorillax_err(int64_t error) {
     _wasm_register_gorillax_field_names();
     int64_t pack = taida_pack_new(4);
     taida_pack_set_hash(pack, 0, WASM_HASH_HAS_VALUE);
-    taida_pack_set(pack, 0, 0); /* hasValue = false */
+    taida_pack_set(pack, 0, 0); /* has_value = false */
     taida_pack_set_tag(pack, 0, WASM_TAG_BOOL);
     taida_pack_set_hash(pack, 1, WASM_HASH___VALUE);
     taida_pack_set(pack, 1, 0);
@@ -1592,7 +1592,7 @@ int64_t taida_str_search_regex(int64_t s_raw, int64_t regex_raw) {
     return -1;
 }
 /* E32B-022 (Lock-N): wasm Regex stub — same no-op semantics as
- * `taida_str_search_regex`, surfaced as a hasValue=false Lax[Int] so the
+ * `taida_str_search_regex`, surfaced as a has_value=false Lax[Int] so the
  * caller path matches Interpreter / Native / JS shape. */
 int64_t taida_str_search_regex_lax(int64_t s_raw, int64_t regex_raw) {
     (void)s_raw; (void)regex_raw;

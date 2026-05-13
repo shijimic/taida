@@ -23,7 +23,7 @@ editor  <= EnvVar["EDITOR"]().getOrDefault("nvim")
 r       <= runInteractive(editor, @[path])
 
 // 3) exit code を検査（失敗は早期終了、成功は通過）
-| !r.hasValue |>
+| !r.has_value |>
   r.errorInfo() ]=> err
   bytes <= stderr("editor failed: " + err.message)
   ><
@@ -34,7 +34,7 @@ r ]=> proc
 
 // 4) 編集後の内容を読む
 edited <= Read[path]()
-| edited.hasValue |> stdout(edited.getOrDefault(""))
+| edited.has_value |> stdout(edited.getOrDefault(""))
 | _               |> stderr("read back failed")
 
 // 5) 一時ファイルを片付ける
@@ -55,8 +55,8 @@ pickEditor =
   editor <= EnvVar["EDITOR"]()
   // C20 / E0303: 複数行の rhs 多アーム条件は丸括弧で包む。
   picked <= (
-    | visual.hasValue |> visual.getOrDefault("")
-    | editor.hasValue |> editor.getOrDefault("")
+    | visual.has_value |> visual.getOrDefault("")
+    | editor.has_value |> editor.getOrDefault("")
     | _                 |> "nvim"
   )
   picked
@@ -84,7 +84,7 @@ r <= runInteractive(editor, @[path])
 RawModeEnter[]()            // TUI モードに復帰
 stdout(AltScreenEnter())
 
-| r.hasValue |>
+| r.has_value |>
     r ]=> proc
     | proc.code == 0 |> reloadBuffer(path)
 ```
@@ -107,7 +107,7 @@ stdout(AltScreenEnter())
 | 非 0 | 中断・エラー（vim `:cq`、nvim panic 等） |
 
 ```taida
-| !r.hasValue |>
+| !r.has_value |>
   r.errorInfo() ]=> err
   bytes <= stderr("editor failed: " + err.message)
   ><
@@ -155,7 +155,7 @@ writeFile(path, "# " + title + "\n\n")
 editor <= EnvVar["EDITOR"]().getOrDefault("nvim")
 r      <= runInteractive(editor, @[path])
 
-| !r.hasValue |> stderr("editor failed")
+| !r.has_value |> stderr("editor failed")
 | _           |> stdout(Read[path]().getOrDefault(""))
 ```
 

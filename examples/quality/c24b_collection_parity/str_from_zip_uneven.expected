@@ -1,1 +1,1 @@
-@(hasValue <= true, __value <= "@[@(first <= 1, second <= "x"), @(first <= 2, second <= "y")]", __default <= "", __type <= "Lax")
+@(has_value <= true, __value <= "@[@(first <= 1, second <= "x"), @(first <= 2, second <= "y")]", __default <= "", __type <= "Lax")

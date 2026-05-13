@@ -242,7 +242,7 @@ asuka <= Pilot(name <= "Asuka", age <= 14, active <= true)
 ```taida
 // 鋳型の定義
 Mold[T] => Result[T, P <= :T => :Bool] = @(throw: Error)  // 述語付き操作モールド
-Mold[T] => Lax[T] = @(hasValue: Bool)   // 安全モールド
+Mold[T] => Lax[T] = @(has_value: Bool)   // 安全モールド
 ```
 
 ### Result[T, P]
@@ -284,14 +284,14 @@ Int["42"]() ]=> num        // 42
 Int["abc"]() ]=> num       // 0 (変換失敗: デフォルト値)
 ```
 
-`hasValue` フィールドで成功/失敗を判別できます:
+`has_value` フィールドで成功/失敗を判別できます:
 
 ```taida
 lax <= Div[10, 0]()
-lax.hasValue               // false (ゼロ除算は失敗)
+lax.has_value               // false (ゼロ除算は失敗)
 
 lax2 <= Div[10, 3]()
-lax2.hasValue              // true (正常に割れた)
+lax2.has_value              // true (正常に割れた)
 ```
 
 **デフォルト値**: 内包する型 T のデフォルト値
@@ -480,7 +480,7 @@ ToRadix[26, 2]().getOrDefault("") ]=> bin     // "11010"
 | `Str[x]()` | Int, Float, Bool | Lax[Str] | 文字列に変換 |
 | `Bool[x]()` | Int, Str | Lax[Bool] | 真偽値に変換 |
 
-`Int[str]()` は文字列から整数への変換の正規経路です。`"+5"` や `"-7"` のような符号付き文字列も受理します。空文字列、数字以外の文字を含む文字列、小数点を含む文字列は変換失敗（`hasValue=false`）になります。
+`Int[str]()` は文字列から整数への変換の正規経路です。`"+5"` や `"-7"` のような符号付き文字列も受理します。空文字列、数字以外の文字を含む文字列、小数点を含む文字列は変換失敗（`has_value=false`）になります。
 
 ---
 

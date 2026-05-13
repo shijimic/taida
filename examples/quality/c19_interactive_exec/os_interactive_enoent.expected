@@ -1,4 +1,4 @@
-hasValue=false
+has_value=false
 type=IoError
 kind=not_found
 code=2

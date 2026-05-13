@@ -331,12 +331,12 @@ riskyOperation()
 - `.get(idx)` / `.first()` / `.last()` などの安全アクセス — 範囲外時
 - **`JSON[raw, Schema]()`** — パース失敗時、**および Schema 内の Enum 型フィールドが JSON 側の variant 集合に一致しなかった / キー欠落 / null だった場合**。silent coercion は行わず、該当フィールドは `Lax[Enum]` で返ります。
 
-Lax 境界は `|==` ではなく、`hasValue` / `getOrDefault` / `|` による分岐で処理します:
+Lax 境界は `|==` ではなく、`has_value` / `getOrDefault` / `|` による分岐で処理します:
 
 ```taida
 result <= JSON[raw, User]()
 result ]=> user
-| user.status.hasValue |> stdout("status=" + user.status.getOrDefault(Status:Pending()).toString())
+| user.status.has_value |> stdout("status=" + user.status.getOrDefault(Status:Pending()).toString())
 | _                    |> stdout("status missing or invalid")
 ```
 

@@ -10,10 +10,10 @@ Str[car.doors]() ]=> doors_str1
 stdout("T1: " + TypeName[car]() + " name=" + car.name + " speed=" + speed_str1 + " doors=" + doors_str1)
 
 // --- Test 2: Default values in inherited type ---
-Vehicle => Bike = @(hasPedals: Bool)
+Vehicle => Bike = @(has_pedals: Bool)
 bike <= Bike(name <= "BMX")
 Str[bike.speed]() ]=> speed_str2
-Str[bike.hasPedals]() ]=> pedals_str
+Str[bike.has_pedals]() ]=> pedals_str
 stdout("T2: name=" + bike.name + " speed=" + speed_str2 + " pedals=" + pedals_str)
 
 // --- Test 3: Multi-level inheritance ---
@@ -26,9 +26,9 @@ Str[sc.turbo]() ]=> sc_turbo
 stdout("T3: " + TypeName[sc]() + " name=" + sc.name + " speed=" + sc_speed + " doors=" + sc_doors + " turbo=" + sc_turbo)
 
 // --- Test 4: Child type as function parameter expecting parent type ---
-describe_vehicle v: Vehicle = v.name + " at speed " + Str[v.speed]().unmold() => :Str
+describeVehicle v: Vehicle = v.name + " at speed " + Str[v.speed]().unmold() => :Str
 my_car <= Car(name <= "Toyota", speed <= 100, doors <= 4)
-stdout("T4: " + describe_vehicle(my_car))
+stdout("T4: " + describeVehicle(my_car))
 
 // --- Test 5: Partial default values in inherited type ---
 Vehicle => Truck = @(payload: Int)

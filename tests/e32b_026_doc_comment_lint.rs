@@ -8,7 +8,7 @@
 //     process reference (`docs/reference/release_process.md`) likewise
 //     forbids semver-shaped numbers in release artefacts.
 //   - PHILOSOPHY I forbids `null` / `undefined` in the surface; the
-//     doc-comment AI-Constraints template must use `Lax.hasValue` /
+//     doc-comment AI-Constraints template must use `Lax.has_value` /
 //     `Result` predicate phrasing instead of "null チェック".
 //
 // This test pins the regression by walking `docs/` recursively and
@@ -195,7 +195,7 @@ fn e32b_026_doc_comment_template_no_null_check_phrasing() {
     // Walks `docs/` looking for the legacy "null チェック" / "nullチェック"
     // / "null check" phrasing that was removed in the Phase 1 cleanup.
     // PHILOSOPHY I forbids `null` / `undefined` in the surface, so the
-    // doc-comment template must steer AI users toward `Lax.hasValue` and
+    // doc-comment template must steer AI users toward `Lax.has_value` and
     // `Result` predicates instead of "null check"-style guidance.
     let docs_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("docs");
     let mut md_files = Vec::new();
@@ -229,7 +229,7 @@ fn e32b_026_doc_comment_template_no_null_check_phrasing() {
                         continue;
                     }
                     hits.push(format!(
-                        "{}:{}: legacy phrase `{}` — replace with `Lax.hasValue` / `Result` predicate guidance per PHILOSOPHY I",
+                        "{}:{}: legacy phrase `{}` — replace with `Lax.has_value` / `Result` predicate guidance per PHILOSOPHY I",
                         path.strip_prefix(env!("CARGO_MANIFEST_DIR"))
                             .unwrap_or(path)
                             .display(),
@@ -259,7 +259,7 @@ fn e32b_026_doc_generate_output_has_no_semver_or_null_surface() {
 ///@ Purpose: Generated documentation surface smoke.
 ///@ Since: e.32
 ///@ AI-Constraints:
-///@   - Lax.hasValue を確認する
+///@   - Lax.has_value を確認する
 ///@   - Result predicate を使う
 answer <= 42
 "#,

@@ -4,7 +4,7 @@
 // direct `stdout(triple(4.0))` case the Phase 5 original fix covered.
 //
 // Expected (4 backends):
-//   @(hasValue <= true, __value <= 12.0, __default <= 0.0, __type <= "Lax")
+//   @(has_value <= true, __value <= 12.0, __default <= 0.0, __type <= "Lax")
 triple x: Float =
   x * 3.0
 => :Float

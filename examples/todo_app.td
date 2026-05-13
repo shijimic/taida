@@ -90,7 +90,7 @@ allDone <= list5.all(isDone)
 pending_todo <= Find[list5, isNotDone]()
 pending_todo ]=> next_todo
 stdout("")
-| pending_todo.hasValue |>
+| pending_todo.has_value |>
   stdout("Next pending: " + next_todo.title)
 | _ |>
   stdout("No pending tasks!")

@@ -1692,7 +1692,7 @@ writeRes <= writeBytes("{path}", payload)
 stdout(writeRes.isSuccess().toString())
 readRes <= readBytes("{path}")
 readRes ]=> readResV
-stdout(readRes.hasValue.toString())
+stdout(readRes.has_value.toString())
 decoded <= Utf8Decode[readResV]()
 decoded ]=> text
 stdout(text)
@@ -1780,18 +1780,18 @@ writeRes <= writeBytes("{path}", payload)
 stdout(writeRes.isSuccess().toString())
 chunkA <= readBytesAt("{path}", 0, 4)
 chunkA ]=> chunkAV
-stdout(chunkA.hasValue.toString())
+stdout(chunkA.has_value.toString())
 decA <= Utf8Decode[chunkAV]()
 decA ]=> textA
 stdout(textA)
 chunkB <= readBytesAt("{path}", 12, 8)
 chunkB ]=> chunkBV
-stdout(chunkB.hasValue.toString())
+stdout(chunkB.has_value.toString())
 decB <= Utf8Decode[chunkBV]()
 decB ]=> textB
 stdout(textB)
 chunkC <= readBytesAt("{path}", 32, 4)
-stdout(chunkC.hasValue.toString())
+stdout(chunkC.has_value.toString())
 "#,
             path = path_s
         );
@@ -1945,7 +1945,7 @@ recvRes <= socketRecvBytes(cV.socket)
 recvRes ]=> r
 r ]=> rV
 stdout(sV.bytesSent.toString())
-stdout(r.hasValue.toString())
+stdout(r.has_value.toString())
 decoded <= Utf8Decode[rV]()
 decoded ]=> msg
 stdout(msg)
@@ -2044,7 +2044,7 @@ c ]=> cV
 closeListener <= listenerClose(lV.listener)
 closeListener ]=> lc
 lc ]=> lcV
-stdout(r.hasValue.toString())
+stdout(r.has_value.toString())
 stdout(msg)
 stdout(sV.bytesSent.toString())
 stdout(cV.ok.toString())
@@ -2163,7 +2163,7 @@ closeRes <= udpClose(sV.socket)
 closeRes ]=> closed
 closed ]=> closedV
 stdout(sentV.bytesSent.toString())
-stdout(recv.hasValue.toString())
+stdout(recv.has_value.toString())
 stdout(msg)
 stdout(closedV.ok.toString())
 "#
@@ -2387,7 +2387,7 @@ conn ]=> c
 c ]=> cV
 recvRes <= socketRecv(cV.socket, 50)
 recvRes ]=> r
-stdout(r.hasValue.toString())
+stdout(r.has_value.toString())
 "#
         );
 
@@ -2750,7 +2750,7 @@ fn test_https_get_loopback_three_way_parity() {
             r#"
 resp <= HttpGet["https://127.0.0.1:{}/"]()
 resp ]=> out
-stdout(out.hasValue.toString())
+stdout(out.has_value.toString())
 out ]=> resOut
 stdout(resOut.status.toString())
 "#,
@@ -3029,7 +3029,7 @@ fn test_endian_pack_unpack_three_way_parity() {
 
     let source = r#"
 u16be <= U16BE[513]()
-stdout(u16be.hasValue.toString())
+stdout(u16be.has_value.toString())
 u16be ]=> b16be
 u16be_dec <= U16BEDecode[b16be]()
 u16be_dec ]=> v16be
@@ -3042,7 +3042,7 @@ u16le_dec ]=> v16le
 stdout(v16le.toString())
 
 u32be <= U32BE[16909060]()
-stdout(u32be.hasValue.toString())
+stdout(u32be.has_value.toString())
 u32be ]=> b32be
 u32be_dec <= U32BEDecode[b32be]()
 u32be_dec ]=> v32be
@@ -3055,19 +3055,19 @@ u32le_dec ]=> v32le
 stdout(v32le.toString())
 
 bad16 <= U16BE[-1]()
-stdout(bad16.hasValue.toString())
+stdout(bad16.has_value.toString())
 bad32 <= U32BE[-1]()
-stdout(bad32.hasValue.toString())
+stdout(bad32.has_value.toString())
 
 shortLax <= Bytes[@[1]]()
 shortLax ]=> short
 badDec16 <= U16BEDecode[short]()
-stdout(badDec16.hasValue.toString())
+stdout(badDec16.has_value.toString())
 
 threeLax <= Bytes[@[1, 2, 3]]()
 threeLax ]=> three
 badDec32 <= U32LEDecode[three]()
-stdout(badDec32.hasValue.toString())
+stdout(badDec32.has_value.toString())
 "#;
 
     for backend in backends {
@@ -3200,7 +3200,7 @@ stdout(msg2.getOrDefault("bad"))
 stdout(BytesCursorRemaining[cursor4]().toString())
 
 overflow <= BytesCursorTake[cursor4, 1]()
-stdout(overflow.hasValue.toString())
+stdout(overflow.has_value.toString())
 "#;
 
     for backend in backends {
@@ -4545,7 +4545,7 @@ stdout(obj.has("z"))
 }
 
 /// F-59 regression: JS transpiler should emit `.hasValue()` (function call) instead of
-/// `.hasValue` (property access) for Lax field access.
+/// `.has_value` (property access) for Lax field access.
 #[test]
 fn test_f59_js_lax_has_value_property() {
     if !node_available() {
@@ -4554,13 +4554,13 @@ fn test_f59_js_lax_has_value_property() {
     let src = r#"
 x <= @[1, 2, 3]
 lax <= x.get(0)
-| lax.hasValue |>
+| lax.has_value |>
   stdout("has value: true")
 | _ |>
   stdout("has value: false")
 
 empty <= x.get(99)
-| empty.hasValue |>
+| empty.has_value |>
   stdout("empty has value: true")
 | _ |>
   stdout("empty has value: false")
@@ -4570,7 +4570,7 @@ empty <= x.get(99)
     let js = run_js_src(src, "f59_has_value").expect("F-59: JS should succeed");
     assert_eq!(
         interp, js,
-        "F-59: interp/JS mismatch for Lax.hasValue\ninterp: {}\njs: {}",
+        "F-59: interp/JS mismatch for Lax.has_value\ninterp: {}\njs: {}",
         interp, js
     );
 }
@@ -16779,7 +16779,7 @@ handler req writer =
   chunk <= readBodyChunk(req)
   chunk ]=> chunkV
   startResponse(writer, 200, @[@(name <= "Content-Type", value <= "text/plain")])
-  writeChunk(writer, chunk.hasValue.toString())
+  writeChunk(writer, chunk.has_value.toString())
   writeChunk(writer, chunkV)
   endResponse(writer)
 => :Unit
@@ -16853,7 +16853,7 @@ stdout(r.ok)
         "response should contain '200 OK', got: {:?}",
         resp_str
     );
-    // Chunk should have data (hasValue = true) and contain "Hello body"
+    // Chunk should have data (has_value = true) and contain "Hello body"
     assert!(
         resp_str.contains("true"),
         "response should contain 'true' (chunk has value), got: {:?}",
@@ -16884,7 +16884,7 @@ handler req writer =
   chunk <= readBodyChunk(req)
   chunk ]=> chunkV
   startResponse(writer, 200, @[@(name <= "Content-Type", value <= "text/plain")])
-  writeChunk(writer, chunk.hasValue.toString())
+  writeChunk(writer, chunk.has_value.toString())
   writeChunk(writer, "|")
   writeChunk(writer, chunkV)
   endResponse(writer)
@@ -17169,7 +17169,7 @@ fn test_net4_read_body_chunk_empty_body_interp() {
 handler req writer =
   chunk <= readBodyChunk(req)
   startResponse(writer, 200, @[@(name <= "Content-Type", value <= "text/plain")])
-  writeChunk(writer, chunk.hasValue.toString())
+  writeChunk(writer, chunk.has_value.toString())
   endResponse(writer)
 => :Unit
 
@@ -17237,7 +17237,7 @@ stdout(r.ok)
         "response should contain '200 OK', got: {:?}",
         resp_str
     );
-    // GET with no body -> readBodyChunk returns Lax empty -> hasValue = false
+    // GET with no body -> readBodyChunk returns Lax empty -> has_value = false
     assert!(
         resp_str.contains("false"),
         "response body should contain 'false' (hasValue), got: {:?}",
@@ -17625,7 +17625,7 @@ parseAttempt =
   handler req writer =
     upgrade <= wsUpgrade(req, writer)
     startResponse(writer, 200, @[@(name <= "Content-Type", value <= "text/plain")])
-    writeChunk(writer, upgrade.hasValue.toString())
+    writeChunk(writer, upgrade.has_value.toString())
     endResponse(writer)
   => :Unit
 
@@ -17700,7 +17700,7 @@ stdout(outcome.ok.toString())
         "response should contain '200 OK', got: {:?}",
         resp_str
     );
-    // Body should contain "false" (upgrade.hasValue == false).
+    // Body should contain "false" (upgrade.has_value == false).
     assert!(
         resp_str.contains("false"),
         "response body should contain 'false' (upgrade failed), got: {:?}",
@@ -17829,7 +17829,7 @@ parseAttempt =
   handler req writer =
     upgrade <= wsUpgrade(req, writer)
     startResponse(writer, 200, @[@(name <= "Content-Type", value <= "text/plain")])
-    writeChunk(writer, upgrade.hasValue.toString())
+    writeChunk(writer, upgrade.has_value.toString())
     endResponse(writer)
   => :Unit
 
@@ -18562,7 +18562,7 @@ fn test_net4_read_body_chunk_empty_interp_js_parity() {
 handler req writer =
   chunk <= readBodyChunk(req)
   startResponse(writer, 200, @[@(name <= "Content-Type", value <= "text/plain")])
-  writeChunk(writer, chunk.hasValue.toString())
+  writeChunk(writer, chunk.has_value.toString())
   endResponse(writer)
 => :Unit
 
@@ -18594,7 +18594,7 @@ stdout(r.ok)
             backend,
             resp_str
         );
-        // GET with no body -> readBodyChunk returns Lax empty -> hasValue = false
+        // GET with no body -> readBodyChunk returns Lax empty -> has_value = false
         assert!(
             resp_str.contains("false"),
             "[{}] response body should contain 'false', got: {:?}",
@@ -18812,7 +18812,7 @@ fn test_net4_ws_upgrade_failure_interp_js_parity() {
 handler req writer =
   upgrade <= wsUpgrade(req, writer)
   startResponse(writer, 200, @[@(name <= "Content-Type", value <= "text/plain")])
-  writeChunk(writer, upgrade.hasValue.toString())
+  writeChunk(writer, upgrade.has_value.toString())
   endResponse(writer)
 => :Unit
 
@@ -18845,7 +18845,7 @@ stdout(r.ok)
             backend,
             resp_str
         );
-        // wsUpgrade failed -> hasValue = false
+        // wsUpgrade failed -> has_value = false
         assert!(
             resp_str.contains("false"),
             "[{}] response body should contain 'false', got: {:?}",
@@ -19161,7 +19161,7 @@ fn test_net4_read_body_chunk_empty_3way_parity() {
 handler req writer =
   chunk <= readBodyChunk(req)
   startResponse(writer, 200, @[@(name <= "Content-Type", value <= "text/plain")])
-  writeChunk(writer, chunk.hasValue.toString())
+  writeChunk(writer, chunk.has_value.toString())
   endResponse(writer)
 => :Unit
 
@@ -19193,7 +19193,7 @@ stdout(r.requests)
             backend,
             resp_str
         );
-        // Empty body -> readBodyChunk returns Lax empty -> hasValue = false
+        // Empty body -> readBodyChunk returns Lax empty -> has_value = false
         assert!(
             resp_str.contains("false"),
             "[{}] response body should contain 'false' for empty body, got: {:?}",
@@ -19400,7 +19400,7 @@ fn test_net4_ws_upgrade_failure_3way_parity() {
 handler req writer =
   upgrade <= wsUpgrade(req, writer)
   startResponse(writer, 200, @[@(name <= "Content-Type", value <= "text/plain")])
-  writeChunk(writer, upgrade.hasValue.toString())
+  writeChunk(writer, upgrade.has_value.toString())
   endResponse(writer)
 => :Unit
 
@@ -19433,7 +19433,7 @@ stdout(r.requests)
             backend,
             resp_str
         );
-        // wsUpgrade failed -> hasValue = false
+        // wsUpgrade failed -> has_value = false
         assert!(
             resp_str.contains("false"),
             "[{}] response body should contain 'false', got: {:?}",
@@ -19615,7 +19615,7 @@ fn test_net4_5b_ws_upgrade_post_reject_3way_parity() {
 handler req writer =
   upgrade <= wsUpgrade(req, writer)
   startResponse(writer, 200, @[@(name <= "Content-Type", value <= "text/plain")])
-  writeChunk(writer, upgrade.hasValue.toString())
+  writeChunk(writer, upgrade.has_value.toString())
   endResponse(writer)
 => :Unit
 
@@ -19661,7 +19661,7 @@ stdout(r.requests)
             backend,
             resp_str
         );
-        // wsUpgrade should fail for POST -> hasValue = false
+        // wsUpgrade should fail for POST -> has_value = false
         assert!(
             resp_str.contains("false"),
             "[{}] response body should contain 'false', got: {:?}",
@@ -19856,7 +19856,7 @@ fn test_net4_5d_read_body_chunk_then_sse_3way_parity() {
 
 handler req writer =
   chunk <= readBodyChunk(req)
-  sseEvent(writer, "body", chunk.hasValue.toString())
+  sseEvent(writer, "body", chunk.has_value.toString())
   endResponse(writer)
 => :Unit
 
@@ -19894,7 +19894,7 @@ stdout(r.requests)
             backend,
             resp_str
         );
-        // readBodyChunk returns hasValue=true for 7 bytes
+        // readBodyChunk returns has_value=true for 7 bytes
         assert!(
             resp_str.contains("data: true"),
             "[{}] response should contain SSE 'data: true', got: {:?}",
@@ -20428,7 +20428,7 @@ fn test_net4_nb19_client_close_reply_3way_parity() {
         let port = find_free_loopback_port();
         // Handler: upgrade, receive (will get client close), handler returns.
         // wsReceive sees the close frame, sends close reply, returns Lax empty.
-        // wsSend is called with hasValue="false" string (close -> empty -> hasValue=false).
+        // wsSend is called with hasValue="false" string (close -> empty -> has_value=false).
         let source = format!(
             r#">>> taida-lang/net => @(httpServe, wsUpgrade, wsSend, wsReceive)
 
@@ -20437,7 +20437,7 @@ handler req writer =
   upgrade ]=> upgradeV
   ws <= upgradeV.ws
   msg <= wsReceive(ws)
-  stdout(msg.hasValue.toString())
+  stdout(msg.has_value.toString())
 => :Int
 
 asyncResult <= httpServe({port}, handler, 1)
@@ -38689,7 +38689,7 @@ fn c27b_021_div_float_three_backend_parity() {
 a <= 3.0
 b <= 2.0
 c <= Div[a, b]()
-stdout(c.hasValue.toString())
+stdout(c.has_value.toString())
 "#;
     assert_backend_parity_for_source(src, "c27b021_div_float_basic");
 }
@@ -38704,7 +38704,7 @@ fn c27b_021_div_float_zero_three_backend_parity() {
 a <= 1.0
 b <= 0.0
 c <= Div[a, b]()
-stdout(c.hasValue.toString())
+stdout(c.has_value.toString())
 "#;
     assert_backend_parity_for_source(src, "c27b021_div_float_zero_lax_empty");
 }
@@ -38743,7 +38743,7 @@ stdout(v7.toString())
 // Critical 1 root cause was an overflow / precision bug in
 // `taida_mod_mold_f` inside src/codegen/runtime_wasi_io.c. Critical 2
 // was that the existing C27B-021 parity tests only checked
-// `c.hasValue.toString()` and never compared the numeric Lax payload.
+// `c.has_value.toString()` and never compared the numeric Lax payload.
 // These tests close that gap on the non-wasm legs, and `debug(r)` is
 // the proven canonical Float Lax formatter (cf. C26B-011's
 // examples/quality/c26_float_edge/div_mod_float.td).
@@ -39322,15 +39322,15 @@ fn d28b_009_denormal_compare_three_backend_parity() {
     }
     let src = r#"
 tiny <= Div[1.0e-300, 1.0e24]()
-stdout(tiny.hasValue.toString())
+stdout(tiny.has_value.toString())
 tiny2 <= Div[2.0e-300, 1.0e24]()
-stdout(tiny2.hasValue.toString())
+stdout(tiny2.has_value.toString())
 zero_q <= Div[0.0, 1.0e10]()
-stdout(zero_q.hasValue.toString())
+stdout(zero_q.has_value.toString())
 zero_div <= Div[5.0e-300, 0.0]()
-stdout(zero_div.hasValue.toString())
+stdout(zero_div.has_value.toString())
 m1 <= Mod[1.0, 0.5]()
-stdout(m1.hasValue.toString())
+stdout(m1.has_value.toString())
 "#;
     assert_backend_parity_for_source(src, "d28b009_denormal_compare");
 }
@@ -40629,8 +40629,8 @@ stdout(b.label)
 // `-1` siblings stay around as deprecated and are NOT removed in E32 —
 // pinning their continued existence is left to the existing `indexOf`
 // tests above. Each new pin asserts:
-//   - hasValue=true path returns Lax(<idx>) for found elements
-//   - hasValue=false path returns Lax(default: 0) for missing — the
+//   - has_value=true path returns Lax(<idx>) for found elements
+//   - has_value=false path returns Lax(default: 0) for missing — the
 //     `__default` is `0` (Int's default) and never the legacy `-1`
 //   - the toString() and getOrDefault() shapes match across backends
 #[test]
@@ -40640,7 +40640,7 @@ fn e32b_022_string_index_of_lax_4backend_parity() {
 stdout("found:" + i.toString())
 "hello".indexOfLax("xyz") ]=> j
 stdout("missing:" + j.toString())
-stdout("missing_hv:" + "hello".indexOfLax("xyz").hasValue.toString())
+stdout("missing_hv:" + "hello".indexOfLax("xyz").has_value.toString())
 stdout("missing_def:" + "hello".indexOfLax("xyz").getOrDefault(7).toString())
 "#;
     assert_backend_parity_for_source(source, "e32b_022_string_index_of_lax");
@@ -40653,7 +40653,7 @@ fn e32b_022_string_last_index_of_lax_4backend_parity() {
 stdout("found:" + i.toString())
 "hello".lastIndexOfLax("xyz") ]=> j
 stdout("missing:" + j.toString())
-stdout("missing_hv:" + "hello".lastIndexOfLax("xyz").hasValue.toString())
+stdout("missing_hv:" + "hello".lastIndexOfLax("xyz").has_value.toString())
 "#;
     assert_backend_parity_for_source(source, "e32b_022_string_last_index_of_lax");
 }
@@ -40665,7 +40665,7 @@ fn e32b_022_list_index_of_lax_4backend_parity() {
 stdout("found:" + i.toString())
 @[10, 20, 30].indexOfLax(99) ]=> j
 stdout("missing:" + j.toString())
-stdout("missing_hv:" + @[10, 20, 30].indexOfLax(99).hasValue.toString())
+stdout("missing_hv:" + @[10, 20, 30].indexOfLax(99).has_value.toString())
 stdout("missing_def:" + @[10, 20, 30].indexOfLax(99).getOrDefault(42).toString())
 "#;
     assert_backend_parity_for_source(source, "e32b_022_list_index_of_lax");
@@ -40678,7 +40678,7 @@ fn e32b_022_list_last_index_of_lax_4backend_parity() {
 stdout("found:" + i.toString())
 @[10, 20, 30].lastIndexOfLax(99) ]=> j
 stdout("missing:" + j.toString())
-stdout("missing_hv:" + @[10, 20, 30].lastIndexOfLax(99).hasValue.toString())
+stdout("missing_hv:" + @[10, 20, 30].lastIndexOfLax(99).has_value.toString())
 "#;
     assert_backend_parity_for_source(source, "e32b_022_list_last_index_of_lax");
 }
@@ -40699,7 +40699,7 @@ FindIndexLax[@[1, 2, 3, 4], isEven]() ]=> i
 stdout("found:" + i.toString())
 FindIndexLax[@[1, 2, 3, 4], allOdd]() ]=> j
 stdout("missing:" + j.toString())
-stdout("missing_hv:" + FindIndexLax[@[1, 2, 3, 4], allOdd]().hasValue.toString())
+stdout("missing_hv:" + FindIndexLax[@[1, 2, 3, 4], allOdd]().has_value.toString())
 stdout("found_def:" + FindIndexLax[@[1, 2, 3, 4], isEven]().getOrDefault(99).toString())
 stdout("missing_def:" + FindIndexLax[@[1, 2, 3, 4], allOdd]().getOrDefault(99).toString())
 "#;
@@ -40720,7 +40720,7 @@ stdout("list_last:" + @[1, 2, 3].lastIndexOf(99).toString())
     assert_backend_parity_for_source(source, "e32b_022_legacy_sentinels_minus_one");
 }
 
-// E32B-071: `*Lax` long-form (`@(hasValue <= ..., __value <= ..., __default <=
+// E32B-071: `*Lax` long-form (`@(has_value <= ..., __value <= ..., __default <=
 // ..., __type <= "Lax")`) raw-pack output must be identical across backends
 // regardless of whether the value is consumed via direct method call
 // (`stdout(xs.indexOfLax(...))`) or routed through a let binding
@@ -40771,8 +40771,8 @@ fn e32b_022_search_lax_3backend_parity() {
 stdout("found:" + idx.toString())
 "hello world".searchLax(Regex("zz+")) ]=> idx2
 stdout("missing:" + idx2.toString())
-stdout("missing_hv:" + "hello world".searchLax(Regex("zz+")).hasValue.toString())
-stdout("found_hv:" + "hello world".searchLax(Regex("w[a-z]+")).hasValue.toString())
+stdout("missing_hv:" + "hello world".searchLax(Regex("zz+")).has_value.toString())
+stdout("found_hv:" + "hello world".searchLax(Regex("w[a-z]+")).has_value.toString())
 "#;
     assert_backend_parity_for_source(source, "e32b_022_search_lax");
 }

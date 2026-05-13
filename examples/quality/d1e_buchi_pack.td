@@ -15,18 +15,18 @@ rei <= Pilot(name <= "Rei", age <= 14, active <= true)
 stdout(rei.name)
 
 // Field access
-pilot <= @(name <= "Shinji", age <= 14, callSign <= "Ikari")
-pilotName <= pilot.name
-pilotAge <= pilot.age
-pilotCall <= pilot.callSign
-stdout(pilotName)
-stdout(pilotAge.toString())
-stdout(pilotCall)
+pilot <= @(name <= "Shinji", age <= 14, call_sign <= "Ikari")
+pilot_name <= pilot.name
+pilot_age <= pilot.age
+pilot_call <= pilot.call_sign
+stdout(pilot_name)
+stdout(pilot_age.toString())
+stdout(pilot_call)
 
 // Default values for typed fields
-Pilot2 = @(name: Str, callSign: Str, age: Int)
+Pilot2 = @(name: Str, call_sign: Str, age: Int)
 rei2 <= Pilot2(name <= "Rei")
-stdout(rei2.callSign)
+stdout(rei2.call_sign)
 stdout(rei2.age.toString())
 
 // Inheritance
@@ -67,26 +67,26 @@ Pilot5 = @(
   )
 )
 pilot5 <= Pilot5(name <= "Shinji", age <= 14, base <= @(city <= "Tokyo-3", zip <= "999-0003", org <= @(code <= "NERV", name <= "NERV HQ")))
-orgCode <= pilot5.base.org.code
-stdout(orgCode)
+org_code <= pilot5.base.org.code
+stdout(org_code)
 
 // Functions in buchi pack (via TypeDef - inline form doesn't parse, QF finding)
 MathUtils = @(
   add x y = x + y => :Int
   subtract x y = x - y => :Int
-  PI: Float
+  pi: Float
 )
-mathUtils <= MathUtils(PI <= 3.14159)
-result <= mathUtils.add(3, 5)
+math_utils <= MathUtils(pi <= 3.14159)
+result <= math_utils.add(3, 5)
 stdout(result.toString())
-stdout(mathUtils.PI.toString())
+stdout(math_utils.pi.toString())
 
 // Mold in buchi pack
-pilotData <= @(
+pilot_data <= @(
   name <= "Asuka",
-  syncRate <= Div[780, 10]()
+  sync_rate <= Div[780, 10]()
 )
-pilotData.syncRate ]=> rateValue
+pilot_data.sync_rate ]=> rateValue
 stdout(rateValue.toString())
 
 // List literal

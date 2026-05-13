@@ -19,5 +19,5 @@ stdout(val)
 // RelaxedGorillax toString
 stdout(relaxed.toString())
 
-// Gorillax isEmpty (success case)
+// Gorillax is_empty (success case)
 stdout(g.isEmpty())

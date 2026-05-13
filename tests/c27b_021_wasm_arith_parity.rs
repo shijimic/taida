@@ -167,13 +167,13 @@ fn check_4backend_parity(rel_fixture: &str, expected: &str) {
     assert_eq!(full_out, expected, "wasm-full parity for {}", rel_fixture);
 }
 
-/// Float Div with non-zero divisor: hasValue = true on every backend.
+/// Float Div with non-zero divisor: has_value = true on every backend.
 #[test]
 fn c27b_021_div_basic_4backend() {
     check_4backend_parity("examples/quality/c27_wasm_arith/div_basic.td", "true");
 }
 
-/// Float Div by zero: Lax empty (hasValue = false) -- C26B-011 semantics
+/// Float Div by zero: Lax empty (has_value = false) -- C26B-011 semantics
 /// (formerly success-with-default in W-5; corrected for parity with the
 /// native runtime in C26).
 #[test]
@@ -254,7 +254,7 @@ fn c27b_021_wasi_bitwise_compile_succeeds() {
 //               Empirical: `Mod[1.0e20, 7.0]()` returned 0 on wasm
 //               vs 2.0 on interp/native/js.
 //   Critical 2: All existing C27B-021 parity tests compared only
-//               `c.hasValue.toString()` ("true" / "false"). The numeric
+//               `c.has_value.toString()` ("true" / "false"). The numeric
 //               value of the Lax payload was never bit-pattern-checked
 //               across backends, which is why Critical 1 went unnoticed.
 //

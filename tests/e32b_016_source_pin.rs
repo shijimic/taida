@@ -24,6 +24,10 @@ integrity = "{integrity}"
 
 #[test]
 fn e32b_016_source_pin_mismatch_rejects_first_install() {
+    if !common::taida_mock_github_base_url_supported() {
+        return;
+    }
+
     let work = unique_temp_dir("e32b_016_mismatch");
     let home = work.join("home");
     let project = work.join("project");
@@ -86,6 +90,10 @@ fn e32b_016_source_pin_mismatch_rejects_first_install() {
 
 #[test]
 fn e32b_016_source_pin_match_allows_first_install() {
+    if !common::taida_mock_github_base_url_supported() {
+        return;
+    }
+
     let work = unique_temp_dir("e32b_016_match");
     let home = work.join("home");
     let project = work.join("project");
@@ -142,6 +150,10 @@ fn e32b_016_source_pin_match_allows_first_install() {
 
 #[test]
 fn e32b_016_cached_source_pin_mismatch_rejects_reuse() {
+    if !common::taida_mock_github_base_url_supported() {
+        return;
+    }
+
     let work = unique_temp_dir("e32b_016_cached_mismatch");
     let home = work.join("home");
     let project = work.join("project");

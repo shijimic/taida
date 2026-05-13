@@ -4,7 +4,7 @@ test
 @["a", "b", "c"]
 aXcabc
 aXcaXc
-@(hasValue <= true, __value <= "e", __default <= "", __type <= "Lax")
+@(has_value <= true, __value <= "e", __default <= "", __type <= "Lax")
 ababab
 cba
 3.14

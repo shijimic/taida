@@ -16,8 +16,8 @@ JSON[partial, Person]() ]=> person2
 stdout("Person2 age (default): " + person2.age.toString())
 
 // 3. Null -> defaults (Rule 4)
-withNull <= '{"name":null,"age":null}'
-JSON[withNull, Person]() ]=> person3
+with_null <= '{"name":null,"age":null}'
+JSON[with_null, Person]() ]=> person3
 stdout("Null name -> empty: '" + person3.name + "'")
 
 // 4. Primitive schema: Str
@@ -31,8 +31,8 @@ stdout("Num: " + num.toString())
 // 6. Nested schema (Rule 5: recursive matching)
 Address = @(city: Str, zip: Str)
 UserAddr = @(name: Str, address: Address)
-nestedRaw <= '{"name":"Asuka","address":{"city":"Tokyo-3","zip":"999"}}'
-JSON[nestedRaw, UserAddr]() ]=> user
+nested_raw <= '{"name":"Asuka","address":{"city":"Tokyo-3","zip":"999"}}'
+JSON[nested_raw, UserAddr]() ]=> user
 stdout("City: " + user.address.city)
 stdout("Zip: " + user.address.zip)
 
@@ -44,14 +44,14 @@ stdout("Trimmed age: " + trimmed.age.toString())
 
 // 8. Type mismatch -> default (Rule 3)
 TypeMismatch = @(age: Int, name: Str)
-mismatchRaw <= '{"age":"not a number","name":42}'
-JSON[mismatchRaw, TypeMismatch]() ]=> mm
+mismatch_raw <= '{"age":"not a number","name":42}'
+JSON[mismatch_raw, TypeMismatch]() ]=> mm
 stdout("Mismatch age: " + mm.age.toString())
 
 // 9. Multiple schemas on same data
 UserInfo = @(name: Str, age: Int)
 StatsInfo = @(score: Int, rank: Int)
-multiRaw <= '{"name":"Asuka","age":14,"score":95,"rank":3}'
-JSON[multiRaw, UserInfo]() ]=> u2
-JSON[multiRaw, StatsInfo]() ]=> s2
+multi_raw <= '{"name":"Asuka","age":14,"score":95,"rank":3}'
+JSON[multi_raw, UserInfo]() ]=> u2
+JSON[multi_raw, StatsInfo]() ]=> s2
 stdout("User: " + u2.name + ", Rank: " + s2.rank.toString())

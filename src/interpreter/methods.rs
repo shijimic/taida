@@ -42,24 +42,24 @@ fn try_build_fingerprint_set(items: &[Value]) -> Option<HashSet<u64>> {
 }
 
 /// Build a `Lax[Int]` BuchiPack for the `*Lax` methods that replaced the
-/// legacy `-1` sentinel. `Some(i)` becomes a hasValue=true pack; `None`
-/// becomes the hasValue=false default with `__value` = `__default` = `0`
+/// legacy `-1` sentinel. `Some(i)` becomes a has_value=true pack; `None`
+/// becomes the has_value=false default with `__value` = `__default` = `0`
 /// (Int's PHILOSOPHY-I default).
 ///
 /// Internal representation only — the `__value` / `__default` / `__type`
 /// fields must never be observed via `.__value` etc. from user code.
 /// Direct `__` field reads are rejected with `[E1960]`, and end users must
-/// unmold via `]=>` / `getOrDefault` / `isSuccess` / `hasValue` instead.
+/// unmold via `]=>` / `getOrDefault` / `isSuccess` / `has_value` instead.
 pub(crate) fn make_int_lax(idx: Option<i64>) -> Value {
     match idx {
         Some(i) => Value::pack(vec![
-            ("hasValue".into(), Value::Bool(true)),
+            ("has_value".into(), Value::Bool(true)),
             ("__value".into(), Value::Int(i)),
             ("__default".into(), Value::Int(0)),
             ("__type".into(), Value::str("Lax".into())),
         ]),
         None => Value::pack(vec![
-            ("hasValue".into(), Value::Bool(false)),
+            ("has_value".into(), Value::Bool(false)),
             ("__value".into(), Value::Int(0)),
             ("__default".into(), Value::Int(0)),
             ("__type".into(), Value::str("Lax".into())),
@@ -169,13 +169,13 @@ impl Interpreter {
         let default = Self::default_error_info_value();
         match error {
             Some(value) => Value::pack(vec![
-                ("hasValue".into(), Value::Bool(true)),
+                ("has_value".into(), Value::Bool(true)),
                 ("__value".into(), Self::error_info_value(value)),
                 ("__default".into(), default),
                 ("__type".into(), Value::str("Lax".into())),
             ]),
             None => Value::pack(vec![
-                ("hasValue".into(), Value::Bool(false)),
+                ("has_value".into(), Value::Bool(false)),
                 ("__value".into(), default.clone()),
                 ("__default".into(), default),
                 ("__type".into(), Value::str("Lax".into())),
@@ -185,7 +185,7 @@ impl Interpreter {
 
     pub(crate) fn lax_failure_with_error(default: Value, error: Value) -> Value {
         Value::pack(vec![
-            ("hasValue".into(), Value::Bool(false)),
+            ("has_value".into(), Value::Bool(false)),
             ("__value".into(), default.clone()),
             ("__default".into(), default),
             ("__type".into(), Value::str("Lax".into())),
@@ -648,7 +648,7 @@ impl Interpreter {
     ) -> Result<Signal, RuntimeError> {
         let has_value = fields
             .iter()
-            .find(|(n, _)| n == "hasValue")
+            .find(|(n, _)| n == "has_value")
             .map(|(_, v)| v.is_truthy())
             .unwrap_or(false);
         let inner_value = fields
@@ -675,7 +675,7 @@ impl Interpreter {
             "relax" => {
                 // Convert to RelaxedGorillax — throwable instead of gorilla
                 Ok(Signal::Value(Value::pack(vec![
-                    ("hasValue".into(), Value::Bool(has_value)),
+                    ("has_value".into(), Value::Bool(has_value)),
                     ("__value".into(), inner_value),
                     ("__error".into(), error_value),
                     ("__type".into(), Value::str("RelaxedGorillax".into())),
@@ -707,7 +707,7 @@ impl Interpreter {
     ) -> Result<Signal, RuntimeError> {
         let has_value = fields
             .iter()
-            .find(|(n, _)| n == "hasValue")
+            .find(|(n, _)| n == "has_value")
             .map(|(_, v)| v.is_truthy())
             .unwrap_or(false);
         let inner_value = fields
@@ -759,7 +759,7 @@ impl Interpreter {
     ) -> Result<Signal, RuntimeError> {
         let has_value = fields
             .iter()
-            .find(|(n, _)| n == "hasValue")
+            .find(|(n, _)| n == "has_value")
             .map(|(_, v)| v.is_truthy())
             .unwrap_or(false);
         let inner_value = fields
@@ -782,7 +782,7 @@ impl Interpreter {
             // `error_info_value`. The canonical metadata pipeline through
             // net/file/process/JSON failures is being built up in Phase 5;
             // until those producers populate `__error`, callers see
-            // hasValue=false even on failed Lax, which is consistent with
+            // has_value=false even on failed Lax, which is consistent with
             // PHILOSOPHY III (default-value guarantee, Lax never null).
             "errorInfo" => {
                 let error_value = fields
@@ -811,7 +811,7 @@ impl Interpreter {
                         .find(|(n, _)| n == "__error")
                         .map(|(_, v)| v.clone());
                     let mut out_fields = vec![
-                        ("hasValue".into(), Value::Bool(false)),
+                        ("has_value".into(), Value::Bool(false)),
                         ("__value".into(), default_value.clone()),
                         ("__default".into(), default_value),
                         ("__type".into(), Value::str("Lax".into())),
@@ -831,7 +831,7 @@ impl Interpreter {
                 };
                 let result = self.call_function_with_values(&func, &[inner_value])?;
                 Ok(Signal::Value(Value::pack(vec![
-                    ("hasValue".into(), Value::Bool(true)),
+                    ("has_value".into(), Value::Bool(true)),
                     ("__value".into(), result),
                     ("__default".into(), default_value),
                     ("__type".into(), Value::str("Lax".into())),
@@ -844,7 +844,7 @@ impl Interpreter {
                         .find(|(n, _)| n == "__error")
                         .map(|(_, v)| v.clone());
                     let mut out_fields = vec![
-                        ("hasValue".into(), Value::Bool(false)),
+                        ("has_value".into(), Value::Bool(false)),
                         ("__value".into(), default_value.clone()),
                         ("__default".into(), default_value),
                         ("__type".into(), Value::str("Lax".into())),
@@ -874,7 +874,7 @@ impl Interpreter {
                 }
                 // Wrap non-Lax result in Lax with value
                 Ok(Signal::Value(Value::pack(vec![
-                    ("hasValue".into(), Value::Bool(true)),
+                    ("has_value".into(), Value::Bool(true)),
                     ("__value".into(), result),
                     ("__default".into(), default_value),
                     ("__type".into(), Value::str("Lax".into())),
@@ -941,7 +941,7 @@ impl Interpreter {
                                 .unwrap_or(Value::Unit);
                             let default_value = Interpreter::default_for_value(&value);
                             return Ok(Signal::Value(Value::pack(vec![
-                                ("hasValue".into(), Value::Bool(true)),
+                                ("has_value".into(), Value::Bool(true)),
                                 ("__value".into(), value),
                                 ("__default".into(), default_value),
                                 ("__type".into(), Value::str("Lax".into())),
@@ -951,7 +951,7 @@ impl Interpreter {
                 }
                 // Key not found — return empty Lax
                 Ok(Signal::Value(Value::pack(vec![
-                    ("hasValue".into(), Value::Bool(false)),
+                    ("has_value".into(), Value::Bool(false)),
                     ("__value".into(), Value::Unit),
                     ("__default".into(), Value::Unit),
                     ("__type".into(), Value::str("Lax".into())),
@@ -1391,14 +1391,14 @@ impl Interpreter {
                 };
                 if idx >= 0 && (idx as usize) < bytes.len() {
                     Ok(Signal::Value(Value::pack(vec![
-                        ("hasValue".into(), Value::Bool(true)),
+                        ("has_value".into(), Value::Bool(true)),
                         ("__value".into(), Value::Int(bytes[idx as usize] as i64)),
                         ("__default".into(), Value::Int(0)),
                         ("__type".into(), Value::str("Lax".into())),
                     ])))
                 } else {
                     Ok(Signal::Value(Value::pack(vec![
-                        ("hasValue".into(), Value::Bool(false)),
+                        ("has_value".into(), Value::Bool(false)),
                         ("__value".into(), Value::Int(0)),
                         ("__default".into(), Value::Int(0)),
                         ("__type".into(), Value::str("Lax".into())),
@@ -1527,7 +1527,7 @@ impl Interpreter {
                 // C26B-018 (A) wU: O(1) char-indexed access via cache.
                 if idx < 0 {
                     return Ok(Signal::Value(Value::pack(vec![
-                        ("hasValue".into(), Value::Bool(false)),
+                        ("has_value".into(), Value::Bool(false)),
                         ("__value".into(), Value::str(String::new())),
                         ("__default".into(), Value::str(String::new())),
                         ("__type".into(), Value::str("Lax".into())),
@@ -1535,14 +1535,14 @@ impl Interpreter {
                 }
                 if let Some(ch) = s.cached_char_at(idx as usize) {
                     Ok(Signal::Value(Value::pack(vec![
-                        ("hasValue".into(), Value::Bool(true)),
+                        ("has_value".into(), Value::Bool(true)),
                         ("__value".into(), Value::str(ch)),
                         ("__default".into(), Value::str(String::new())),
                         ("__type".into(), Value::str("Lax".into())),
                     ])))
                 } else {
                     Ok(Signal::Value(Value::pack(vec![
-                        ("hasValue".into(), Value::Bool(false)),
+                        ("has_value".into(), Value::Bool(false)),
                         ("__value".into(), Value::str(String::new())),
                         ("__default".into(), Value::str(String::new())),
                         ("__type".into(), Value::str("Lax".into())),
@@ -1749,14 +1749,14 @@ impl Interpreter {
                 if let Some(val) = items.first() {
                     let default_val = super::eval::Interpreter::default_for_value(val);
                     Ok(Signal::Value(Value::pack(vec![
-                        ("hasValue".into(), Value::Bool(true)),
+                        ("has_value".into(), Value::Bool(true)),
                         ("__value".into(), val.clone()),
                         ("__default".into(), default_val),
                         ("__type".into(), Value::str("Lax".into())),
                     ])))
                 } else {
                     Ok(Signal::Value(Value::pack(vec![
-                        ("hasValue".into(), Value::Bool(false)),
+                        ("has_value".into(), Value::Bool(false)),
                         ("__value".into(), Value::Int(0)),
                         ("__default".into(), Value::Int(0)),
                         ("__type".into(), Value::str("Lax".into())),
@@ -1767,14 +1767,14 @@ impl Interpreter {
                 if let Some(val) = items.last() {
                     let default_val = super::eval::Interpreter::default_for_value(val);
                     Ok(Signal::Value(Value::pack(vec![
-                        ("hasValue".into(), Value::Bool(true)),
+                        ("has_value".into(), Value::Bool(true)),
                         ("__value".into(), val.clone()),
                         ("__default".into(), default_val),
                         ("__type".into(), Value::str("Lax".into())),
                     ])))
                 } else {
                     Ok(Signal::Value(Value::pack(vec![
-                        ("hasValue".into(), Value::Bool(false)),
+                        ("has_value".into(), Value::Bool(false)),
                         ("__value".into(), Value::Int(0)),
                         ("__default".into(), Value::Int(0)),
                         ("__type".into(), Value::str("Lax".into())),
@@ -1792,7 +1792,7 @@ impl Interpreter {
                     let default_val = custom_default
                         .unwrap_or_else(|| super::eval::Interpreter::default_for_value(&val));
                     Ok(Signal::Value(Value::pack(vec![
-                        ("hasValue".into(), Value::Bool(true)),
+                        ("has_value".into(), Value::Bool(true)),
                         ("__value".into(), val),
                         ("__default".into(), default_val),
                         ("__type".into(), Value::str("Lax".into())),
@@ -1806,7 +1806,7 @@ impl Interpreter {
                         }
                     });
                     Ok(Signal::Value(Value::pack(vec![
-                        ("hasValue".into(), Value::Bool(false)),
+                        ("has_value".into(), Value::Bool(false)),
                         ("__value".into(), default_val.clone()),
                         ("__default".into(), default_val),
                         ("__type".into(), Value::str("Lax".into())),
@@ -1846,7 +1846,7 @@ impl Interpreter {
             "max" => {
                 if items.is_empty() {
                     Ok(Signal::Value(Value::pack(vec![
-                        ("hasValue".into(), Value::Bool(false)),
+                        ("has_value".into(), Value::Bool(false)),
                         ("__value".into(), Value::Int(0)),
                         ("__default".into(), Value::Int(0)),
                         ("__type".into(), Value::str("Lax".into())),
@@ -1859,7 +1859,7 @@ impl Interpreter {
                         .unwrap_or_else(|| Value::default_for_list(items));
                     let default_val = super::eval::Interpreter::default_for_value(&max_val);
                     Ok(Signal::Value(Value::pack(vec![
-                        ("hasValue".into(), Value::Bool(true)),
+                        ("has_value".into(), Value::Bool(true)),
                         ("__value".into(), max_val),
                         ("__default".into(), default_val),
                         ("__type".into(), Value::str("Lax".into())),
@@ -1869,7 +1869,7 @@ impl Interpreter {
             "min" => {
                 if items.is_empty() {
                     Ok(Signal::Value(Value::pack(vec![
-                        ("hasValue".into(), Value::Bool(false)),
+                        ("has_value".into(), Value::Bool(false)),
                         ("__value".into(), Value::Int(0)),
                         ("__default".into(), Value::Int(0)),
                         ("__type".into(), Value::str("Lax".into())),
@@ -1882,7 +1882,7 @@ impl Interpreter {
                         .unwrap_or_else(|| Value::default_for_list(items));
                     let default_val = super::eval::Interpreter::default_for_value(&min_val);
                     Ok(Signal::Value(Value::pack(vec![
-                        ("hasValue".into(), Value::Bool(true)),
+                        ("has_value".into(), Value::Bool(true)),
                         ("__value".into(), min_val),
                         ("__default".into(), default_val),
                         ("__type".into(), Value::str("Lax".into())),

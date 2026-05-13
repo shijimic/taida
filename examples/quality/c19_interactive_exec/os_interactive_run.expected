@@ -1,4 +1,4 @@
-r1.hasValue=true
+r1.has_value=true
 r1.code=0
-r2.hasValue=false
-r3.hasValue=false
+r2.has_value=false
+r3.has_value=false

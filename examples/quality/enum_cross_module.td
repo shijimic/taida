@@ -17,11 +17,11 @@ stdout(match.toString())
 
 // 3. 関数越境の戻り値が import 先で Enum として再利用可能。
 picked <= pickColor(1)
-isGreen <= picked == Color:Green()
-stdout(isGreen.toString())
+is_green <= picked == Color:Green()
+stdout(is_green.toString())
 
 // 4. 別 variant でも同じ越境経路が期待通り動く (ordinal の健全性)。
 blue <= pickColor(99)
 stdout(blue.toString())
-isBlue <= blue == Color:Blue()
-stdout(isBlue.toString())
+is_blue <= blue == Color:Blue()
+stdout(is_blue.toString())

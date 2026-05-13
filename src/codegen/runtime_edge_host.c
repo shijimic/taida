@@ -86,7 +86,7 @@ extern int32_t taida_host_env_get_all(int32_t buf_ptr, int32_t buf_cap);
 
 /**
  * taida_os_env_var: Get a single environment variable.
- * Returns Lax[Str] -- hasValue if found, empty if not.
+ * Returns Lax[Str] -- has_value if found, empty if not.
  */
 int64_t taida_os_env_var(int64_t name_ptr) {
     const char *key = (const char *)(intptr_t)name_ptr;

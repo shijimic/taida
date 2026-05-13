@@ -14,7 +14,7 @@ UserSchema = @(name: Str, age: Int)
 loadUser =
   raw <= "{\"name\":\"alice\",\"age\":30}"
   parsed <= JSON[raw, UserSchema]()
-  | parsed.hasValue |>
+  | parsed.has_value |>
     parsed ]=> user
     user.name + "/" + user.age.toString()
   | _ |> "no"

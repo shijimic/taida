@@ -7,16 +7,16 @@
 // is implemented only on wasm-full (not on wasm-wasi) and is out of
 // scope for this smoke.
 //
-// Exercises three readBytesAt cases and prints `.hasValue` for each:
+// Exercises three readBytesAt cases and prints `.has_value` for each:
 //   (a) offset=0,  len=4    -> success, 4 bytes
 //   (b) offset=12, len=8    -> success, truncated tail (4 bytes)
 //   (c) offset=32, len=4    -> success, empty (beyond EOF)
 
 chunkA <= readBytesAt("_c26b_020_wasi_tmp.bin", 0, 4)
-stdout(chunkA.hasValue.toString())
+stdout(chunkA.has_value.toString())
 
 chunkB <= readBytesAt("_c26b_020_wasi_tmp.bin", 12, 8)
-stdout(chunkB.hasValue.toString())
+stdout(chunkB.has_value.toString())
 
 chunkC <= readBytesAt("_c26b_020_wasi_tmp.bin", 32, 4)
-stdout(chunkC.hasValue.toString())
+stdout(chunkC.has_value.toString())

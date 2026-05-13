@@ -1676,7 +1676,7 @@ impl Interpreter {
                         Value::Unit
                     };
                     return Ok(Value::pack(vec![
-                        ("hasValue".to_string(), Value::Bool(false)),
+                        ("has_value".to_string(), Value::Bool(false)),
                         ("__value".to_string(), inner.clone()),
                         ("__default".to_string(), inner),
                         ("__type".to_string(), Value::str("Lax".to_string())),

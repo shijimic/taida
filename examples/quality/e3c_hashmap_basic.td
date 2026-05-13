@@ -1,5 +1,5 @@
 // QF-40: HashMap basic operations — 3-backend parity test
-// Tests: hashMap(), set, get, has, size, isEmpty, remove, merge, keys, values, entries, toString
+// Tests: hashMap(), set, get, has, size, is_empty, remove, merge, keys, values, entries, toString
 
 // Empty HashMap
 m <= hashMap()
@@ -18,7 +18,7 @@ stdout(v.toString())
 
 // get missing key — hasValue is false
 zLax <= m1.get("z")
-stdout(zLax.hasValue.toString())
+stdout(zLax.has_value.toString())
 
 // remove
 m2 <= m1.remove("x")

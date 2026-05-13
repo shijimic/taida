@@ -28,26 +28,26 @@ User = @(name: Str, status: Status)
 Ticket = @(status: Status, prio: Priority, note: Str)
 
 // ── 1. Parse-error path — outer Lax.__value.status must be Int(0) ───
-JSON["INVALID", User]() => rBad
-stdout(rBad.hasValue.toString())
-stdout(rBad.__value.status.toString())
-stdout(rBad.__default.status.toString())
+JSON["INVALID", User]() => r_bad
+stdout(r_bad.has_value.toString())
+stdout(r_bad.__value.status.toString())
+stdout(r_bad.__default.status.toString())
 
 // ── 2. Success-path — outer Lax.__default.status also Int(0) ─────────
-rawOk <= '{"name":"Alice","status":"Active"}'
-JSON[rawOk, User]() => rOk
-stdout(rOk.hasValue.toString())
-stdout(rOk.__value.status.toString())
-stdout(rOk.__default.status.toString())
+raw_ok <= '{"name":"Alice","status":"Active"}'
+JSON[raw_ok, User]() => r_ok
+stdout(r_ok.has_value.toString())
+stdout(r_ok.__value.status.toString())
+stdout(r_ok.__default.status.toString())
 
 // ── 3. Lax[Enum].toString() 3-backend pin ────────────────────────────
-rawBogus <= '{"name":"Dave","status":"Bogus"}'
-JSON[rawBogus, User]() ]=> uBogus
+raw_bogus <= '{"name":"Dave","status":"Bogus"}'
+JSON[raw_bogus, User]() ]=> uBogus
 stdout(uBogus.status.toString())
 
 // ── 4. List[Enum] — per-element match / Lax wrap ─────────────────────
-rawList <= '["Active", "Bogus", "Pending", "Inactive"]'
-JSON[rawList, @[Status]]() ]=> items
+raw_list <= '["Active", "Bogus", "Pending", "Inactive"]'
+JSON[raw_list, @[Status]]() ]=> items
 stdout(items.length().toString())
 items.get(0) ]=> e0
 stdout(e0.toString())
@@ -59,8 +59,8 @@ items.get(3) ]=> e3
 stdout(e3.toString())
 
 // ── 5. List[TypeDef{Enum}] — nested Enum Lax per element ─────────────
-rawUsers <= '[{"name":"A","status":"Active"},{"name":"B","status":"Bogus"},{"name":"C"}]'
-JSON[rawUsers, @[User]]() ]=> us
+raw_users <= '[{"name":"A","status":"Active"},{"name":"B","status":"Bogus"},{"name":"C"}]'
+JSON[raw_users, @[User]]() ]=> us
 stdout(us.length().toString())
 us.get(0) ]=> u0
 stdout(u0.name)
@@ -73,10 +73,10 @@ stdout(u2.name)
 stdout(u2.status.toString())
 
 // ── 6. Multiple Enum fields, partial failure ─────────────────────────
-rawTicket <= '{"status":"Active","prio":"HighNope","note":"x"}'
-JSON[rawTicket, Ticket]() ]=> t
+raw_ticket <= '{"status":"Active","prio":"HighNope","note":"x"}'
+JSON[raw_ticket, Ticket]() ]=> t
 stdout(t.status.toString())
-stdout(t.prio.hasValue.toString())
+stdout(t.prio.has_value.toString())
 stdout(t.note)
 
 // ── 7. Variant name edge cases ───────────────────────────────────────
@@ -87,28 +87,28 @@ stdout(lv2.toString())
 JSON['"level3"', Level]() ]=> lv3
 stdout(lv3.toString())
 JSON['"LEVEL1"', Level]() ]=> lvBad
-stdout(lvBad.hasValue.toString())
+stdout(lvBad.has_value.toString())
 
 // ── 8. Mismatch edge cases ───────────────────────────────────────────
 JSON['"active"', Status]() ]=> mm1
-stdout(mm1.hasValue.toString())
+stdout(mm1.has_value.toString())
 JSON['" Active"', Status]() ]=> mm2
-stdout(mm2.hasValue.toString())
+stdout(mm2.has_value.toString())
 JSON['"Active "', Status]() ]=> mm3
-stdout(mm3.hasValue.toString())
+stdout(mm3.has_value.toString())
 JSON['""', Status]() ]=> mm4
-stdout(mm4.hasValue.toString())
+stdout(mm4.has_value.toString())
 JSON['"Act"', Status]() ]=> mm5
-stdout(mm5.hasValue.toString())
+stdout(mm5.has_value.toString())
 
 // ── 9. JSON input type variations ────────────────────────────────────
 JSON['0', Status]() ]=> tv1
-stdout(tv1.hasValue.toString())
+stdout(tv1.has_value.toString())
 JSON['true', Status]() ]=> tv2
-stdout(tv2.hasValue.toString())
+stdout(tv2.has_value.toString())
 JSON['["Active"]', Status]() ]=> tv3
-stdout(tv3.hasValue.toString())
+stdout(tv3.has_value.toString())
 JSON['{"v":"Active"}', Status]() ]=> tv4
-stdout(tv4.hasValue.toString())
+stdout(tv4.has_value.toString())
 JSON['null', Status]() ]=> tv5
-stdout(tv5.hasValue.toString())
+stdout(tv5.has_value.toString())

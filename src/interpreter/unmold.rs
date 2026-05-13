@@ -275,11 +275,11 @@ impl Interpreter {
                     return Ok(Signal::Value(Self::default_for_value(&sol)));
                 }
 
-                // Gorillax: hasValue==true → __value, hasValue==false → GORILLA (program terminates)
+                // Gorillax: has_value==true → __value, has_value==false → GORILLA (program terminates)
                 if type_name == Some("Gorillax") {
                     let has_value = fields
                         .iter()
-                        .find(|(k, _)| k == "hasValue")
+                        .find(|(k, _)| k == "has_value")
                         .map(|(_, v)| v.is_truthy())
                         .unwrap_or(false);
                     if has_value {
@@ -295,11 +295,11 @@ impl Interpreter {
                     }
                 }
 
-                // RelaxedGorillax: hasValue==true → __value, hasValue==false → throw RelaxedGorillaEscaped
+                // RelaxedGorillax: has_value==true → __value, has_value==false → throw RelaxedGorillaEscaped
                 if type_name == Some("RelaxedGorillax") {
                     let has_value = fields
                         .iter()
-                        .find(|(k, _)| k == "hasValue")
+                        .find(|(k, _)| k == "has_value")
                         .map(|(_, v)| v.is_truthy())
                         .unwrap_or(false);
                     if has_value {
@@ -320,11 +320,11 @@ impl Interpreter {
                     }
                 }
 
-                // Lax: hasValue==true → __value, hasValue==false → __default
+                // Lax: has_value==true → __value, has_value==false → __default
                 if type_name == Some("Lax") {
                     let has_value = fields
                         .iter()
-                        .find(|(k, _)| k == "hasValue")
+                        .find(|(k, _)| k == "has_value")
                         .map(|(_, v)| v.is_truthy())
                         .unwrap_or(false);
                     if has_value {

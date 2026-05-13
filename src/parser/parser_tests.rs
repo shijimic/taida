@@ -378,7 +378,7 @@ fn test_parse_generic_inheritance_headers() {
 #[test]
 fn test_parse_mold_def() {
     // (E30 Sub-step 2.1) ClassLikeDef + ClassLikeKind::Mold
-    match first_stmt("Mold[T] => Optional[T] = @(hasValue: Bool)") {
+    match first_stmt("Mold[T] => Optional[T] = @(has_value: Bool)") {
         Statement::ClassLikeDef(md) if md.is_mold() => {
             assert_eq!(md.name, "Optional");
             let mold_args = md.mold_args().unwrap();
@@ -387,7 +387,7 @@ fn test_parse_mold_def() {
             assert_eq!(md.type_params.len(), 1);
             assert_eq!(md.type_params[0].name, "T");
             assert_eq!(md.fields.len(), 1);
-            assert_eq!(md.fields[0].name, "hasValue");
+            assert_eq!(md.fields[0].name, "has_value");
         }
         other => panic!("Expected MoldDef, got {:?}", other),
     }

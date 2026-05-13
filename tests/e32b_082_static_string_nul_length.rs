@@ -213,9 +213,9 @@ stdout(oob.toString())
 #[test]
 fn e32b_084_byte_at_lax_tag_three_backend() {
     // The acceptance for the embedded-NUL byteAt fix also pins the Lax
-    // tag: an in-bounds NUL byte must report `hasValue=true` (the value
+    // tag: an in-bounds NUL byte must report `has_value=true` (the value
     // happens to be 0 but is real), while an out-of-bounds index must
-    // report `hasValue=false`. The previous strlen()-truncated path
+    // report `has_value=false`. The previous strlen()-truncated path
     // confused the two on Native because every index >= 1 fell into the
     // empty-Lax branch. This test reads the tag directly via
     // `.hasValue()` instead of `]=>` so a tag mistake cannot hide
@@ -235,7 +235,7 @@ stdout("hasOob:" + oobLax.hasValue().toString())
         .unwrap_or_default();
     assert_eq!(
         interp, "has1:true\nhasOob:false",
-        "interpreter must observe hasValue=true for the NUL byte and hasValue=false for the OOB index"
+        "interpreter must observe has_value=true for the NUL byte and has_value=false for the OOB index"
     );
     for (backend, out) in &results {
         if out.is_empty() {

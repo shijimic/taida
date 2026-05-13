@@ -39,6 +39,10 @@ fn taida_bin() -> PathBuf {
 
 #[test]
 fn c17_5_retagged_source_tarball_rejected_by_source_pin() {
+    if !common::taida_mock_github_base_url_supported() {
+        return;
+    }
+
     let work = unique_temp_dir("c17_retag");
     let fake_home = work.join("home");
     let project = work.join("project");

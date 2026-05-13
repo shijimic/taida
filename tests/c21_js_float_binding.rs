@@ -176,15 +176,15 @@ fn float_fn_result_local_td() -> &'static Path {
 // ---------------------------------------------------------------------------
 
 const EXPECTED_FLOAT_LOCAL_BINDING: &str = concat!(
-    "@(hasValue <= true, __value <= 3.0, __default <= 0.0, __type <= \"Lax\")",
+    "@(has_value <= true, __value <= 3.0, __default <= 0.0, __type <= \"Lax\")",
     "\n",
-    "@(hasValue <= true, __value <= 3, __default <= 0, __type <= \"Lax\")",
+    "@(has_value <= true, __value <= 3, __default <= 0, __type <= \"Lax\")",
 );
 
 const EXPECTED_FLOAT_LOCAL_TO_STRING: &str = "3.0\n3.0";
 
 const EXPECTED_FLOAT_FN_RESULT_LOCAL: &str =
-    "@(hasValue <= true, __value <= 12.0, __default <= 0.0, __type <= \"Lax\")";
+    "@(has_value <= true, __value <= 12.0, __default <= 0.0, __type <= \"Lax\")";
 
 #[test]
 fn float_local_binding_interpreter_reference() {

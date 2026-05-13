@@ -380,13 +380,13 @@ fn field_missing_default(schema: &JsonSchema) -> Value {
 ///
 /// Kept identical to `mold_eval::make_lax_value(false, Int(0), Int(0))` so that
 /// the 3-backend parity can be verified structurally:
-///   @(hasValue=false, __value=Int(0), __default=Int(0), __type="Lax")
+///   @(has_value=false, __value=Int(0), __default=Int(0), __type="Lax")
 ///
 /// `Int(0)` encodes the first variant's ordinal — Taida's "最初のバリアント = デフォルト"
 /// rule (`docs/guide/01_types.md:609`) is preserved as the Lax fallback.
 fn make_lax_enum_inline() -> Value {
     Value::pack(vec![
-        ("hasValue".to_string(), Value::Bool(false)),
+        ("has_value".to_string(), Value::Bool(false)),
         ("__value".to_string(), Value::Int(0)),
         ("__default".to_string(), Value::Int(0)),
         ("__type".to_string(), Value::str("Lax".to_string())),
@@ -840,7 +840,7 @@ mod tests {
         };
         let has_value = fields
             .iter()
-            .find(|(k, _)| k == "hasValue")
+            .find(|(k, _)| k == "has_value")
             .map(|(_, v)| v == &Value::Bool(false))
             .unwrap_or(false);
         let inner_value = fields

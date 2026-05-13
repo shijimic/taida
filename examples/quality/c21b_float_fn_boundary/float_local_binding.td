@@ -6,12 +6,12 @@
 // the Float-origin tag forward to the `Float[...]()` mold call site.
 //
 // Expected (4 backends):
-//   @(hasValue <= true, __value <= 3.0, __default <= 0.0, __type <= "Lax")
-//   @(hasValue <= true, __value <= 3, __default <= 0, __type <= "Lax")
+//   @(has_value <= true, __value <= 3.0, __default <= 0.0, __type <= "Lax")
+//   @(has_value <= true, __value <= 3, __default <= 0, __type <= "Lax")
 //
 // Pre-fix JS output:
-//   @(hasValue <= true, __value <= 3, __default <= 0, __type <= "Lax")  // BUG: should be 3.0
-//   @(hasValue <= true, __value <= 3, __default <= 0, __type <= "Lax")
+//   @(has_value <= true, __value <= 3, __default <= 0, __type <= "Lax")  // BUG: should be 3.0
+//   @(has_value <= true, __value <= 3, __default <= 0, __type <= "Lax")
 x <= 3.0
 stdout(Float[x]())
 stdout(Int[x]())

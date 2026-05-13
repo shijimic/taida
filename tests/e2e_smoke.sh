@@ -226,33 +226,33 @@ echo ""
 # =========================================================================
 echo "=== Section 6: Error Handling ==="
 
-# Div mold with zero returns Lax(hasValue=false), unmold gives default 0
+# Div mold with zero returns Lax(has_value=false), unmold gives default 0
 div_zero_src='
 r <= Div[10, 0]()
-stdout(r.hasValue.toString())
+stdout(r.has_value.toString())
 r ]=> val
 stdout(val.toString())
 '
 div_zero_output=$(echo "$div_zero_src" | $TAIDA /dev/stdin 2>/dev/null)
 if echo "$div_zero_output" | grep -q "false"; then
-  pass "Div[10, 0]() returns Lax(hasValue=false)"
+  pass "Div[10, 0]() returns Lax(has_value=false)"
 else
-  fail "Div[10, 0]() returns Lax(hasValue=false)" "got: $div_zero_output"
+  fail "Div[10, 0]() returns Lax(has_value=false)" "got: $div_zero_output"
 fi
 
-# Out of bounds get() returns Lax with hasValue=false
+# Out of bounds get() returns Lax with has_value=false
 oob_src='
 items <= @[1, 2, 3]
 lax <= items.get(100)
-stdout(lax.hasValue.toString())
+stdout(lax.has_value.toString())
 lax ]=> val
 stdout(val.toString())
 '
 oob_output=$(echo "$oob_src" | $TAIDA /dev/stdin 2>/dev/null)
 if echo "$oob_output" | head -1 | grep -q "false"; then
-  pass "OOB get() returns Lax(hasValue=false)"
+  pass "OOB get() returns Lax(has_value=false)"
 else
-  fail "OOB get() returns Lax(hasValue=false)" "got: $oob_output"
+  fail "OOB get() returns Lax(has_value=false)" "got: $oob_output"
 fi
 
 echo ""
@@ -405,9 +405,9 @@ echo "=== Section 8: Lax Fallback API ==="
 get_src='
 items <= @[10, 20, 30]
 lax <= items.get(1)
-stdout(lax.hasValue.toString())
+stdout(lax.has_value.toString())
 lax2 <= items.get(100)
-stdout(lax2.hasValue.toString())
+stdout(lax2.has_value.toString())
 '
 get_output=$(echo "$get_src" | $TAIDA /dev/stdin 2>/dev/null)
 if echo "$get_output" | head -1 | grep -q "true" && echo "$get_output" | tail -1 | grep -q "false"; then
@@ -457,11 +457,11 @@ if command -v node >/dev/null 2>&1; then
     node "$jsf" 2>/dev/null || true
   }
 
-  # 9-1: Empty list first() returns Lax(hasValue=false)
+  # 9-1: Empty list first() returns Lax(has_value=false)
   sem_src_first='
 items: @[Int] <= @[]
 lax <= items.first()
-stdout(lax.hasValue.toString())
+stdout(lax.has_value.toString())
 lax ]=> value
 stdout(value.toString())
 '
@@ -473,7 +473,7 @@ stdout(value.toString())
     fail "semantic: empty list first() Lax fallback" "interp='$interp_out' js='$js_out'"
   fi
 
-  # 9-2: Lax.hasValue as field access (Optional abolished, Lax is replacement)
+  # 9-2: Lax.has_value as field access (Optional abolished, Lax is replacement)
   sem_src_hasvalue='
 opt <= Lax[42]()
 stdout(opt.hasValue().toString())
@@ -481,9 +481,9 @@ stdout(opt.hasValue().toString())
   interp_out=$(sem_run_interp "$sem_src_hasvalue")
   js_out=$(sem_run_js "$sem_src_hasvalue")
   if [ "$interp_out" = "$js_out" ]; then
-    pass "semantic: Lax.hasValue field access"
+    pass "semantic: Lax.has_value field access"
   else
-    fail "semantic: Lax.hasValue field access" "interp='$interp_out' js='$js_out'"
+    fail "semantic: Lax.has_value field access" "interp='$interp_out' js='$js_out'"
   fi
 
   # 9-3: Bool predicate parity. Earlier revisions exercised non-Bool
@@ -519,11 +519,11 @@ stdout(result.toString())
     fail "semantic: structural equality in contains" "interp='$interp_out' js='$js_out'"
   fi
 
-  # 9-5: Empty list last() returns Lax(hasValue=false)
+  # 9-5: Empty list last() returns Lax(has_value=false)
   sem_src_last='
 items: @[Int] <= @[]
 lax <= items.last()
-stdout(lax.hasValue.toString())
+stdout(lax.has_value.toString())
 lax ]=> value
 stdout(value.toString())
 '
@@ -657,12 +657,12 @@ fi
 
 # 10-3: Div by zero hasValue is false
 div_hv_out=$(s10_run "div_hv" '
-stdout(Div[10, 0]().hasValue.toString())
+stdout(Div[10, 0]().has_value.toString())
 ')
 if [ "$div_hv_out" = "false" ]; then
-  pass "Div[10, 0]().hasValue => false"
+  pass "Div[10, 0]().has_value => false"
 else
-  fail "Div[10, 0]().hasValue => false" "got: $div_hv_out"
+  fail "Div[10, 0]().has_value => false" "got: $div_hv_out"
 fi
 
 # 10-4: Mod normal
@@ -716,7 +716,7 @@ items.get(1) ]=> val
 stdout(val.toString())
 items.get(100) ]=> val2
 stdout(val2.toString())
-stdout(items.get(100).hasValue.toString())
+stdout(items.get(100).has_value.toString())
 ')
 expected_list_get=$(printf "20\n0\nfalse")
 if [ "$list_get_out" = "$expected_list_get" ]; then
@@ -731,7 +731,7 @@ first_last_out=$(s10_run "first_last" '
 stdout(f.toString())
 @[].first() ]=> f2
 stdout(f2.toString())
-stdout(@[].first().hasValue.toString())
+stdout(@[].first().has_value.toString())
 @[1, 2, 3].last() ]=> l
 stdout(l.toString())
 @[].last() ]=> l2
@@ -798,7 +798,7 @@ Div[10, 3]() ]=> r
 stdout(r.toString())
 Div[10, 0]() ]=> r2
 stdout(r2.toString())
-stdout(Div[10, 0]().hasValue.toString())
+stdout(Div[10, 0]().has_value.toString())
 '
   interp_out=$(lax_run_interp "$lax_div_src")
   js_out=$(lax_run_js "$lax_div_src")
@@ -845,7 +845,7 @@ items.get(1) ]=> v
 stdout(v.toString())
 items.get(100) ]=> v2
 stdout(v2.toString())
-stdout(items.get(100).hasValue.toString())
+stdout(items.get(100).has_value.toString())
 '
   interp_out=$(lax_run_interp "$lax_get_src")
   js_out=$(lax_run_js "$lax_get_src")

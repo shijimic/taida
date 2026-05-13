@@ -109,21 +109,21 @@ pub(crate) const OS_SYMBOLS: &[&str] = &[
 
 // ── Helpers ─────────────────────────────────────────────────
 
-/// Create a Lax[T] success value: hasValue=true, __value=val, __default inferred.
+/// Create a Lax[T] success value: has_value=true, __value=val, __default inferred.
 fn make_lax_success(val: Value) -> Value {
     let default_val = Interpreter::default_for_value(&val);
     Value::pack(vec![
-        ("hasValue".into(), Value::Bool(true)),
+        ("has_value".into(), Value::Bool(true)),
         ("__value".into(), val),
         ("__default".into(), default_val),
         ("__type".into(), Value::str("Lax".into())),
     ])
 }
 
-/// Create a Lax[T] failure value: hasValue=false, __value=default, __default=default.
+/// Create a Lax[T] failure value: has_value=false, __value=default, __default=default.
 fn make_lax_failure(default_val: Value) -> Value {
     Value::pack(vec![
-        ("hasValue".into(), Value::Bool(false)),
+        ("has_value".into(), Value::Bool(false)),
         ("__value".into(), default_val.clone()),
         ("__default".into(), default_val),
         ("__type".into(), Value::str("Lax".into())),
@@ -205,20 +205,20 @@ fn make_async_fulfilled(value: Value) -> Value {
     })
 }
 
-/// Create a Gorillax success value: hasValue=true, __value=val, __error=Unit.
+/// Create a Gorillax success value: has_value=true, __value=val, __error=Unit.
 fn make_gorillax_success(val: Value) -> Value {
     Value::pack(vec![
-        ("hasValue".into(), Value::Bool(true)),
+        ("has_value".into(), Value::Bool(true)),
         ("__value".into(), val),
         ("__error".into(), Value::Unit),
         ("__type".into(), Value::str("Gorillax".into())),
     ])
 }
 
-/// Create a Gorillax failure value: hasValue=false, __error=err.
+/// Create a Gorillax failure value: has_value=false, __error=err.
 fn make_gorillax_failure(err: Value) -> Value {
     Value::pack(vec![
-        ("hasValue".into(), Value::Bool(false)),
+        ("has_value".into(), Value::Bool(false)),
         ("__value".into(), Value::Unit),
         ("__error".into(), err),
         ("__type".into(), Value::str("Gorillax".into())),
@@ -2998,7 +2998,7 @@ mod tests {
     fn lax_has_value(val: &Value) -> bool {
         if let Value::BuchiPack(fields) = val {
             for (name, v) in fields.iter() {
-                if name == "hasValue"
+                if name == "has_value"
                     && let Value::Bool(b) = v
                 {
                     return *b;
@@ -3153,7 +3153,7 @@ mod tests {
         let path = dir.join("test.txt").to_string_lossy().to_string();
         let code = format!(
             r#"result <= Read["{}"]()
-stdout(result.hasValue)
+stdout(result.has_value)
 result ]=> v
 stdout(v)"#,
             path
@@ -3167,7 +3167,7 @@ stdout(v)"#,
     #[test]
     fn test_read_nonexistent_file() {
         let code = r#"result <= Read["/tmp/taida_nonexistent_file_xyz.txt"]()
-stdout(result.hasValue)"#;
+stdout(result.has_value)"#;
         let output = run_code(code);
         assert_eq!(output, vec!["false"]);
     }
@@ -3185,7 +3185,7 @@ stdout(result.hasValue)"#;
         let path = dir.to_string_lossy().to_string();
         let code = format!(
             r#"result <= ListDir["{}"]()
-stdout(result.hasValue)"#,
+stdout(result.has_value)"#,
             path
         );
         let output = run_code(&code);
@@ -3197,7 +3197,7 @@ stdout(result.hasValue)"#,
     #[test]
     fn test_listdir_nonexistent() {
         let code = r#"result <= ListDir["/tmp/taida_nonexistent_dir_xyz"]()
-stdout(result.hasValue)"#;
+stdout(result.has_value)"#;
         let output = run_code(code);
         assert_eq!(output, vec!["false"]);
     }
@@ -3214,7 +3214,7 @@ stdout(result.hasValue)"#;
         let path = dir.join("data.txt").to_string_lossy().to_string();
         let code = format!(
             r#"result <= Stat["{}"]()
-stdout(result.hasValue)
+stdout(result.has_value)
 result ]=> info
 stdout(info.size)
 stdout(info.isDir)"#,
@@ -3250,7 +3250,7 @@ stdout(info.isDir)"#,
     #[test]
     fn test_stat_nonexistent() {
         let code = r#"result <= Stat["/tmp/taida_nonexistent_xyz"]()
-stdout(result.hasValue)"#;
+stdout(result.has_value)"#;
         let output = run_code(code);
         assert_eq!(output, vec!["false"]);
     }
@@ -3300,7 +3300,7 @@ stdout(exists)"#;
     fn test_envvar_exists() {
         // PATH should always exist
         let code = r#"result <= EnvVar["PATH"]()
-stdout(result.hasValue)"#;
+stdout(result.has_value)"#;
         let output = run_code(code);
         assert_eq!(output, vec!["true"]);
     }
@@ -3308,7 +3308,7 @@ stdout(result.hasValue)"#;
     #[test]
     fn test_envvar_missing() {
         let code = r#"result <= EnvVar["TAIDA_NONEXISTENT_VAR_XYZ"]()
-stdout(result.hasValue)"#;
+stdout(result.has_value)"#;
         let output = run_code(code);
         assert_eq!(output, vec!["false"]);
     }
@@ -3360,7 +3360,7 @@ payloadLax ]=> payload
 writeRes <= writeBytes("{}", payload)
 stdout(writeRes.isSuccess())
 readRes <= readBytes("{}")
-stdout(readRes.hasValue)
+stdout(readRes.has_value)
 readRes ]=> rawBytes
 decoded <= Utf8Decode[rawBytes]()
 decoded ]=> txt
@@ -3515,7 +3515,7 @@ stdout(proc.stdout)"#;
     #[test]
     fn test_run_failure() {
         let code = r#"result <= run("/nonexistent_program_xyz", @[])
-stdout(result.hasValue)"#;
+stdout(result.has_value)"#;
         // run() with nonexistent program should return failure Gorillax
         let output = run_code(code);
         assert_eq!(output, vec!["false"]);
@@ -3535,7 +3535,7 @@ stdout(proc.stdout)"#;
     #[test]
     fn test_execshell_failure() {
         let code = r#"result <= execShell("exit 7")
-stdout(result.hasValue)"#;
+stdout(result.has_value)"#;
         let output = run_code(code);
         assert_eq!(output, vec!["false"]);
     }
@@ -3631,11 +3631,11 @@ stdout(info.modified)"#,
         let path = dir.join("test.txt").to_string_lossy().to_string();
         // ReadAsync returns Async[Lax[Str]], ]=> unwraps the Async to get
         // Lax[Str]; the second `]=>` then unwraps the Lax to the Str default
-        // (or the read content when hasValue=true).
+        // (or the read content when has_value=true).
         let code = format!(
             r#"result <= ReadAsync["{}"]()
 result ]=> lax
-stdout(lax.hasValue)
+stdout(lax.has_value)
 lax ]=> contents
 stdout(contents)"#,
             path
@@ -3650,7 +3650,7 @@ stdout(contents)"#,
     fn test_readasync_nonexistent_file() {
         let code = r#"result <= ReadAsync["/tmp/taida_nonexistent_readasync_xyz.txt"]()
 result ]=> lax
-stdout(lax.hasValue)"#;
+stdout(lax.has_value)"#;
         let output = run_code(code);
         assert_eq!(output, vec!["false"]);
     }
@@ -3902,7 +3902,7 @@ stdout(lax.hasValue)"#;
     #[test]
     fn test_c19_run_interactive_exit_0() {
         let code = r#"r <= runInteractive("/bin/sh", @["-c", "exit 0"])
-stdout(r.hasValue)
+stdout(r.has_value)
 r ]=> proc
 stdout(proc.code)"#;
         let out = run_code(code);
@@ -3918,7 +3918,7 @@ stdout(proc.code)"#;
         // `fields` map (not a `Value::BuchiPack`), so we go through
         // `get_error_field` to read it at the Rust level.
         let code = r#"r <= runInteractive("/bin/sh", @["-c", "exit 7"])
-stdout(r.hasValue)
+stdout(r.has_value)
 r"#;
         let (value, out) = run_code_returning_value(code);
         assert_eq!(out, vec!["false"]);
@@ -3937,7 +3937,7 @@ r"#;
         // `__error.kind` from user code, so we read the error carrier at the
         // Rust level.
         let code = r#"r <= runInteractive("/nonexistent/taida_c19_xyz", @[])
-stdout(r.hasValue)
+stdout(r.has_value)
 r"#;
         let (value, out) = run_code_returning_value(code);
         assert_eq!(out, vec!["false"]);
@@ -3984,7 +3984,7 @@ r"#;
     #[test]
     fn test_c19_exec_shell_interactive_exit_0() {
         let code = r#"r <= execShellInteractive("exit 0")
-stdout(r.hasValue)
+stdout(r.has_value)
 r ]=> proc
 stdout(proc.code)"#;
         let out = run_code(code);
@@ -3996,7 +3996,7 @@ stdout(proc.code)"#;
         // E32B-035 migration: same Rust-level inspection pattern as
         // `runInteractive_exit_7`.
         let code = r#"r <= execShellInteractive("exit 3")
-stdout(r.hasValue)
+stdout(r.has_value)
 r"#;
         let (value, out) = run_code_returning_value(code);
         assert_eq!(out, vec!["false"]);
@@ -4158,18 +4158,18 @@ stdout(proc.code)"#;
 
     #[test]
     fn test_bt11_read_nonexistent_returns_lax_false() {
-        // E32B-035 migration: `]=>` on a Lax with hasValue=false unmolds to
+        // E32B-035 migration: `]=>` on a Lax with has_value=false unmolds to
         // the implicit default (empty string for Lax[Str]), giving us the
         // same assertion as the old `result.__default` path without
         // touching compiler-internal fields.
         let code = r#"result <= Read["/tmp/taida_bt11_nonexistent_xyz.txt"]()
-stdout(result.hasValue)
+stdout(result.has_value)
 result ]=> contents
 stdout(contents)"#;
         let output = run_code(code);
         assert_eq!(
             output[0], "false",
-            "Read nonexistent should return Lax(hasValue=false)"
+            "Read nonexistent should return Lax(has_value=false)"
         );
         assert_eq!(
             output[1], "",
@@ -4180,12 +4180,12 @@ stdout(contents)"#;
     #[test]
     fn test_bt11_stat_nonexistent_returns_lax_false() {
         let code = r#"result <= Stat["/tmp/taida_bt11_nonexistent_xyz"]()
-stdout(result.hasValue)"#;
+stdout(result.has_value)"#;
         let output = run_code(code);
         assert_eq!(
             output,
             vec!["false"],
-            "Stat nonexistent should return Lax(hasValue=false)"
+            "Stat nonexistent should return Lax(has_value=false)"
         );
     }
 
@@ -4236,7 +4236,7 @@ stdout(exists)"#;
         let path = dir.path().join("empty.txt").to_string_lossy().to_string();
         let code = format!(
             r#"result <= Read["{}"]()
-stdout(result.hasValue)
+stdout(result.has_value)
 result ]=> contents
 stdout(contents)"#,
             path
@@ -4244,7 +4244,7 @@ stdout(contents)"#,
         let output = run_code(&code);
         assert_eq!(
             output[0], "true",
-            "Empty file should still have hasValue=true"
+            "Empty file should still have has_value=true"
         );
         assert_eq!(output[1], "", "Empty file content should be empty string");
     }
@@ -4257,7 +4257,7 @@ stdout(contents)"#,
         let code = format!(
             r#"writeFile("{path}", "")
 result <= Read["{path}"]()
-stdout(result.hasValue)
+stdout(result.has_value)
 result ]=> contents
 stdout(contents)"#,
             path = path
@@ -4279,7 +4279,7 @@ stdout(contents)"#,
             .to_string();
         let code = format!(
             r#"result <= Read["{}"]()
-stdout(result.hasValue)
+stdout(result.has_value)
 result ]=> contents
 stdout(contents)"#,
             path
@@ -4300,7 +4300,7 @@ stdout(contents)"#,
         let path = dir.path().join("test.txt").to_string_lossy().to_string();
         let code = format!(
             r#"result <= Read["{}"]()
-stdout(result.hasValue)
+stdout(result.has_value)
 result ]=> contents
 stdout(contents)"#,
             path
@@ -4316,12 +4316,12 @@ stdout(contents)"#,
     #[test]
     fn test_bt11_listdir_nonexistent_returns_lax_false() {
         let code = r#"result <= ListDir["/tmp/taida_bt11_nonexistent_dir_xyz"]()
-stdout(result.hasValue)"#;
+stdout(result.has_value)"#;
         let output = run_code(code);
         assert_eq!(
             output,
             vec!["false"],
-            "ListDir nonexistent should return Lax(hasValue=false)"
+            "ListDir nonexistent should return Lax(has_value=false)"
         );
     }
 }

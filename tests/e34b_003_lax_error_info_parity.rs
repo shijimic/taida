@@ -3,7 +3,7 @@
 // backends. The parity invariant covers two states the canonical
 // shape must agree on:
 //
-//   1. Successful Lax → empty Lax[ErrorInfo] (hasValue=false).
+//   1. Successful Lax → empty Lax[ErrorInfo] (has_value=false).
 //   2. Failed Lax with no metadata → empty Lax[ErrorInfo] too.
 //
 // State (3) "Failed Lax with metadata → present Lax[ErrorInfo]"

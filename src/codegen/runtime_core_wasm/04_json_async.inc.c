@@ -1169,7 +1169,7 @@ static void _wc_json_serialize_typed(_wc_json_buf *jb, int64_t val, int indent, 
 
     /* Check monadic types (Result, Lax, Gorillax / RelaxedGorillax).
        C25B-028: include Gorillax family so jsonEncode expands `__error`
-       and normalises `hasValue` through the monadic branch above. */
+       and normalises `has_value` through the monadic branch above. */
     if (_wc_is_result(val) || _wc_is_lax(val) || _wc_is_gorillax_local(val)) {
         int64_t *pack = (int64_t *)(intptr_t)val;
         int64_t fc = pack[0];

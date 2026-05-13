@@ -5,5 +5,5 @@
 // Driver: pipe `hello\n` into stdin.
 
 stdinLine("") ]=> line
-stdout("hasValue=" + line.hasValue().toString())
+stdout("has_value=" + line.hasValue().toString())
 stdout("val=" + line.getOrDefault("<empty>"))

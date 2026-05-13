@@ -95,22 +95,22 @@ true.toString()           // "true"
 
 #### indexOfLax (推奨)
 
-部分文字列の位置を `Lax[Int]` で返します。見つからない場合は `hasValue = false`、デフォルト値は `0` です。
+部分文字列の位置を `Lax[Int]` で返します。見つからない場合は `has_value = false`、デフォルト値は `0` です。
 
 ```taida
 "hello world".indexOfLax("world") ]=> i  // 6
-"hello".indexOfLax("xyz").hasValue       // false
+"hello".indexOfLax("xyz").has_value       // false
 ```
 
 **シグネチャ**: `substr: Str => :Lax[Int]`
 
 #### lastIndexOfLax (推奨)
 
-部分文字列の最後の出現位置を `Lax[Int]` で返します。見つからない場合は `hasValue = false`、デフォルト値は `0` です。
+部分文字列の最後の出現位置を `Lax[Int]` で返します。見つからない場合は `has_value = false`、デフォルト値は `0` です。
 
 ```taida
 "hello hello".lastIndexOfLax("hello") ]=> i   // 6
-"hello".lastIndexOfLax("xyz").hasValue        // false
+"hello".lastIndexOfLax("xyz").has_value        // false
 ```
 
 **シグネチャ**: `substr: Str => :Lax[Int]`
@@ -129,12 +129,12 @@ true.toString()           // "true"
 
 #### get
 
-指定インデックスの文字を Lax で返します。範囲外の場合は `hasValue = false`。
+指定インデックスの文字を Lax で返します。範囲外の場合は `has_value = false`。
 
 ```taida fragment
 "hello".get(0) ]=> ch    // "h"
 "hello".get(10) ]=> ch   // "" (デフォルト値)
-"hello".get(10).hasValue  // false
+"hello".get(10).has_value  // false
 ```
 
 **シグネチャ**: `index: Int => :Lax[Str]`
@@ -218,11 +218,11 @@ true.toString()           // "true"
 #### match
 
 正規表現で最初の一致を取り出します。結果は `:RegexMatch` ぶちパックで、
-`hasValue`, `full`, `groups`, `start` フィールドを持ちます。
+`has_value`, `full`, `groups`, `start` フィールドを持ちます。
 
 ```taida
 m <= "id: 12-34".match(Regex("(\\d+)-(\\d+)"))
-stdout(m.hasValue)  // true
+stdout(m.has_value)  // true
 stdout(m.full)       // "12-34"
 stdout(m.groups)     // @["12", "34"]
 stdout(m.start)      // 4  (char index, not byte index)
@@ -230,18 +230,18 @@ stdout(m.start)      // 4  (char index, not byte index)
 
 **シグネチャ**: `pattern: Regex => :RegexMatch`
 
-一致なしの場合 `hasValue <= false`, `full <= ""`, `groups <= @[]` の
+一致なしの場合 `has_value <= false`, `full <= ""`, `groups <= @[]` の
 ぶちパックを返します（null / undefined は返さない — 哲学 I）。
-`hasValue` を確認する前に `start` を読まないでください。位置だけ必要な
+`has_value` を確認する前に `start` を読まないでください。位置だけ必要な
 場合は `searchLax` の `Lax[Int]` を直接使う方が安全です。
 
 #### searchLax (推奨)
 
-正規表現で最初の一致が見つかった位置を文字インデックスとして `Lax[Int]` で返します。一致がない場合は `hasValue = false`、デフォルト値は `0` です。
+正規表現で最初の一致が見つかった位置を文字インデックスとして `Lax[Int]` で返します。一致がない場合は `has_value = false`、デフォルト値は `0` です。
 
 ```taida
 "abc123".searchLax(Regex("\\d+")) ]=> i      // 3
-"nothing".searchLax(Regex("\\d+")).hasValue  // false
+"nothing".searchLax(Regex("\\d+")).has_value  // false
 ```
 
 **シグネチャ**: `pattern: Regex => :Lax[Int]`
@@ -352,12 +352,12 @@ b.length()  // 4
 
 #### get
 
-指定インデックスのバイト値を `Lax[Int]` で返します。範囲外は `hasValue = false`。
+指定インデックスのバイト値を `Lax[Int]` で返します。範囲外は `has_value = false`。
 
 ```taida
 Bytes[@[65, 66]]() ]=> b
 b.get(0) ]=> v    // 65
-b.get(99).hasValue  // false
+b.get(99).has_value  // false
 ```
 
 **シグネチャ**: `index: Int => :Lax[Int]`
@@ -563,22 +563,22 @@ NaN (非数) かどうかを返します。
 
 #### indexOfLax (推奨)
 
-要素の位置を `Lax[Int]` で返します。見つからない場合は `hasValue = false`、デフォルト値は `0` です。
+要素の位置を `Lax[Int]` で返します。見つからない場合は `has_value = false`、デフォルト値は `0` です。
 
 ```taida
 @[10, 20, 30].indexOfLax(20) ]=> i        // 1
-@[10, 20, 30].indexOfLax(50).hasValue     // false
+@[10, 20, 30].indexOfLax(50).has_value     // false
 ```
 
 **シグネチャ**: `item: T => :Lax[Int]`
 
 #### lastIndexOfLax (推奨)
 
-要素の最後の出現位置を `Lax[Int]` で返します。見つからない場合は `hasValue = false`、デフォルト値は `0` です。
+要素の最後の出現位置を `Lax[Int]` で返します。見つからない場合は `has_value = false`、デフォルト値は `0` です。
 
 ```taida
 @[1, 2, 1, 2].lastIndexOfLax(1) ]=> i     // 2
-@[1, 2, 1, 2].lastIndexOfLax(9).hasValue  // false
+@[1, 2, 1, 2].lastIndexOfLax(9).has_value  // false
 ```
 
 **シグネチャ**: `item: T => :Lax[Int]`
@@ -597,55 +597,55 @@ NaN (非数) かどうかを返します。
 
 #### first
 
-最初の要素を Lax で返します。空リストの場合は `hasValue = false`。
+最初の要素を Lax で返します。空リストの場合は `has_value = false`。
 
 ```taida
 @[1, 2, 3].first() ]=> val  // 1
-@[].first().hasValue         // false
+@[].first().has_value         // false
 ```
 
 **シグネチャ**: `=> :Lax[T]`
 
 #### last
 
-最後の要素を Lax で返します。空リストの場合は `hasValue = false`。
+最後の要素を Lax で返します。空リストの場合は `has_value = false`。
 
 ```taida
 @[1, 2, 3].last() ]=> val  // 3
-@[].last().hasValue         // false
+@[].last().has_value         // false
 ```
 
 **シグネチャ**: `=> :Lax[T]`
 
 #### get
 
-指定インデックスの要素を Lax で返します。範囲外の場合は `hasValue = false`。
+指定インデックスの要素を Lax で返します。範囲外の場合は `has_value = false`。
 
 ```taida
 @[10, 20, 30].get(1) ]=> val    // 20
-@[10, 20, 30].get(10).hasValue  // false
+@[10, 20, 30].get(10).has_value  // false
 ```
 
 **シグネチャ**: `index: Int => :Lax[T]`
 
 #### max
 
-最大値を Lax で返します。空リストの場合は `hasValue = false`。
+最大値を Lax で返します。空リストの場合は `has_value = false`。
 
 ```taida
 @[1, 3, 2].max() ]=> val  // 3
-@[].max().hasValue         // false
+@[].max().has_value         // false
 ```
 
 **シグネチャ**: `=> :Lax[T]`
 
 #### min
 
-最小値を Lax で返します。空リストの場合は `hasValue = false`。
+最小値を Lax で返します。空リストの場合は `has_value = false`。
 
 ```taida
 @[1, 3, 2].min() ]=> val  // 1
-@[].min().hasValue         // false
+@[].min().has_value         // false
 ```
 
 **シグネチャ**: `=> :Lax[T]`
@@ -747,13 +747,13 @@ Int[false]() ]=> num  // 0
 
 ### フィールド
 
-#### hasValue
+#### has_value
 
 値を持つかどうかを示すブールフィールドです。
 
 ```taida
-Div[10, 3]().hasValue   // true
-Div[10, 0]().hasValue   // false
+Div[10, 3]().has_value   // true
+Div[10, 0]().has_value   // false
 ```
 
 **型**: `Bool`
@@ -762,7 +762,7 @@ Div[10, 0]().hasValue   // false
 
 #### isEmpty
 
-値を持たないかどうかを返します。`!hasValue` と同じです。
+値を持たないかどうかを返します。`!has_value` と同じです。
 
 ```taida
 Div[10, 0]().isEmpty()  // true
@@ -788,7 +788,7 @@ Div[10, 0]().getOrDefault(99)  // 99
 
 #### unmold
 
-値を取り出します。`hasValue = false` の場合は型 T のデフォルト値を返します。
+値を取り出します。`has_value = false` の場合は型 T のデフォルト値を返します。
 
 ```taida
 Div[10, 3]().unmold()  // 3
@@ -844,7 +844,7 @@ result <= make().map(_ x = x.fooBar())  // [E1509] が出ない、silent pass
 
 #### errorInfo
 
-Lax が失敗 (`hasValue = false`) したとき、producer が保持している error 情報を `Lax[ErrorInfo]` として取り出します。JSON パース失敗など詳細を持つ producer では `hasValue = true` の `Lax[ErrorInfo]` を返します。単純な空 Lax (`Lax[T]()`、範囲外 `get()`、変換失敗など) は詳細を持たないため、戻り値も `hasValue = false` です。受け側の Lax が成功している場合も戻り値は空になります。`errorInfo()` を持つ allow-list は `Lax` / `Gorillax` / `RelaxedGorillax` / `Error` 系 (`RelaxedGorillaEscaped` を含む) で、それ以外の型へ呼ぶと `[E1509]` で reject されます (`Result` / `Async` には現状提供されていません)。
+Lax が失敗 (`has_value = false`) したとき、producer が保持している error 情報を `Lax[ErrorInfo]` として取り出します。JSON パース失敗など詳細を持つ producer では `has_value = true` の `Lax[ErrorInfo]` を返します。単純な空 Lax (`Lax[T]()`、範囲外 `get()`、変換失敗など) は詳細を持たないため、戻り値も `has_value = false` です。受け側の Lax が成功している場合も戻り値は空になります。`errorInfo()` を持つ allow-list は `Lax` / `Gorillax` / `RelaxedGorillax` / `Error` 系 (`RelaxedGorillaEscaped` を含む) で、それ以外の型へ呼ぶと `[E1509]` で reject されます (`Result` / `Async` には現状提供されていません)。
 
 ```taida fragment
 result <= JSON["not valid json", Pilot]()
@@ -880,12 +880,12 @@ Div[10, 0]().toString()  // "Lax(default: 0)"
 
 ### フィールド
 
-#### hasValue
+#### has_value
 
 値を持つかどうかを示すブールフィールドです。
 
 ```taida
-Gorillax[42]().hasValue  // true
+Gorillax[42]().has_value  // true
 ```
 
 **型**: `Bool`
@@ -906,7 +906,7 @@ Gorillax[42]().isEmpty()  // false
 
 #### errorInfo
 
-Gorillax が失敗 (`hasValue = false`) のときの error 情報を `Lax[ErrorInfo]` として取り出します。`__error` フィールドへの直接アクセス (`.__error.message` 等) は `[E1960]` で reject されるため、失敗詳細を読む公式 accessor として本メソッドを使います。`hasValue = true` (成功) のときは戻り値の `Lax` の `hasValue = false` (実体無し) を返します。
+Gorillax が失敗 (`has_value = false`) のときの error 情報を `Lax[ErrorInfo]` として取り出します。`__error` フィールドへの直接アクセス (`.__error.message` 等) は `[E1960]` で reject されるため、失敗詳細を読む公式 accessor として本メソッドを使います。`has_value = true` (成功) のときは戻り値の `Lax` の `has_value = false` (実体無し) を返します。
 
 ```taida fragment
 result = Cage[lodash, JSCall[@["sum"], @[items], Int]()]()
@@ -952,7 +952,7 @@ Gorillax[42]().toString()  // "Gorillax(42)"
 
 ### フィールド
 
-#### hasValue
+#### has_value
 
 値を持つかどうかを示すブールフィールドです。
 

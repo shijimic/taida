@@ -767,7 +767,7 @@ int64_t taida_os_exists(int64_t path_ptr) {
  * both rt_wasi and rt_full, does not see duplicate symbols.  Any
  * Bytes value produced here is layout-compatible with rt_full's
  * `_wf_is_bytes()` / `taida_bytes_len()` and round-trips through
- * `Utf8Decode` / `.hasValue` / `@size` identically on wasm-full.
+ * `Utf8Decode` / `.has_value` / `@size` identically on wasm-full.
  */
 
 /* Must match runtime_full_wasm.c::WF_BYTES_MAGIC exactly (layout
@@ -1583,7 +1583,7 @@ int64_t taida_utf8_single_scalar(int64_t v) {
  *   tagged FLOAT (matches native runtime exactly: see
  *   src/codegen/native_runtime/core.c::taida_div_mold_f).
  *
- *   The wasm runtime represents Lax as a 4-field pack (hasValue, __value,
+ *   The wasm runtime represents Lax as a 4-field pack (has_value, __value,
  *   __default, __type).  Tagging __value/__default with WASM_TAG_FLOAT (=1)
  *   makes `_wasm_pack_to_string_full` interpret them as f64 bit-patterns
  *   when stringifying -- mirrors `_float_lax_new` in

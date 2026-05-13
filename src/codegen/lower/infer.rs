@@ -669,7 +669,7 @@ impl Lowering {
         match expr {
             Expr::Ident(name, _) => self.bool_vars.contains(name),
             Expr::FieldAccess(obj, field, _) => {
-                field == "hasValue"
+                field == "has_value"
                     || self.field_access_has_named_type(obj, field, "Bool")
                     || self.field_type_tags.get(field).copied() == Some(LEGACY_FIELD_TYPE_BOOL)
             }

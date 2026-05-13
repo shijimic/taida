@@ -4,4 +4,4 @@
 a <= 3.0
 b <= 2.0
 c <= Div[a, b]()
-stdout(c.hasValue.toString())
+stdout(c.has_value.toString())

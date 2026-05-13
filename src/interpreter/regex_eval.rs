@@ -268,13 +268,13 @@ pub(crate) fn search_first(s: &str, pattern: &str, flags: &str) -> Result<i64, S
 }
 
 /// Build the `:RegexMatch` BuchiPack that `str.match(Regex(...))`
-/// returns. Uses `hasValue` / `__type <= "RegexMatch"` so that
-/// `result.hasValue` is queriable via the existing Lax-like idiom
+/// returns. Uses `has_value` / `__type <= "RegexMatch"` so that
+/// `result.has_value` is queriable via the existing Lax-like idiom
 /// while keeping the payload (`full`, `groups`, `start`) inspectable.
 pub(crate) fn build_match_value(m: Option<MatchResult>) -> Value {
     match m {
         Some(m) => Value::pack(vec![
-            ("hasValue".into(), Value::Bool(true)),
+            ("has_value".into(), Value::Bool(true)),
             ("full".into(), Value::str(m.full)),
             (
                 "groups".into(),
@@ -284,7 +284,7 @@ pub(crate) fn build_match_value(m: Option<MatchResult>) -> Value {
             ("__type".into(), Value::str("RegexMatch".into())),
         ]),
         None => Value::pack(vec![
-            ("hasValue".into(), Value::Bool(false)),
+            ("has_value".into(), Value::Bool(false)),
             ("full".into(), Value::str(String::new())),
             ("groups".into(), Value::list(Vec::new())),
             ("start".into(), Value::Int(-1)),
@@ -396,7 +396,7 @@ mod tests {
     #[test]
     fn test_as_regex_rejects_non_regex_buchipack() {
         let lax = Value::pack(vec![
-            ("hasValue".into(), Value::Bool(true)),
+            ("has_value".into(), Value::Bool(true)),
             ("__type".into(), Value::str("Lax".into())),
         ]);
         assert!(as_regex(&lax).is_none());
@@ -413,7 +413,7 @@ mod tests {
             assert!(
                 fields
                     .iter()
-                    .any(|(k, v)| k == "hasValue" && matches!(v, Value::Bool(true)))
+                    .any(|(k, v)| k == "has_value" && matches!(v, Value::Bool(true)))
             );
             assert!(
                 fields.iter().any(|(k, v)| k == "__type"
@@ -431,7 +431,7 @@ mod tests {
             assert!(
                 fields
                     .iter()
-                    .any(|(k, v)| k == "hasValue" && matches!(v, Value::Bool(false)))
+                    .any(|(k, v)| k == "has_value" && matches!(v, Value::Bool(false)))
             );
             assert!(
                 fields

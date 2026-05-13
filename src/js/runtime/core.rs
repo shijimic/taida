@@ -251,7 +251,8 @@ function __taida_lax_from_bytes(bytes, hasValue, error) {
     __type: 'Lax',
     __value: val,
     __default: new Uint8Array(0),
-    hasValue: __taida_hasValue(_hasValue),
+    has_value: _hasValue,
+    hasValue() { return _hasValue; },
     isEmpty() { return !_hasValue; },
     errorInfo() { return __taida_error_info_lax(_error); },
     getOrDefault(def) { return _hasValue ? val : def; },
@@ -648,10 +649,10 @@ function __taida_enumOrdinalStrict(v) {
 }
 
 // C16: Lax[Enum] shape identical to interpreter / native.
-//   @(hasValue=false, __value=Int(0), __default=Int(0), __type="Lax")
+//   @(has_value=false, __value=Int(0), __default=Int(0), __type="Lax")
 // First-variant-is-default rule is encoded via Int(0). Delegates to
 // `Lax(null, 0)` so the returned object carries the full Lax method set
-// (`hasValue`, `getOrDefault`, `isEmpty`, `map`, `flatMap`, `unmold`,
+// (`has_value`, `getOrDefault`, `isEmpty`, `map`, `flatMap`, `unmold`,
 // `toString`), preserving 3-backend parity for Lax-facing Taida code.
 function __taida_laxEnumEmpty() {
   return Lax(null, 0);
@@ -1003,15 +1004,6 @@ function __taida_lax_default(value) {
   return 0;
 }
 
-// Create a callable hasValue that also works as a Boolean-like property
-// Allows both `x.hasValue` (field access) and `x.hasValue()` (method call)
-function __taida_hasValue(val) {
-  const fn = function() { return val; };
-  fn.valueOf = function() { return val; };
-  fn.toString = function() { return String(val); };
-  return fn;
-}
-
 function Lax(value, typedDefault, floatHint, error) {
   const _hasValue = value !== null && value !== undefined;
   const _default = _hasValue ? __taida_lax_default(value) : (typedDefault !== undefined ? typedDefault : 0);
@@ -1039,7 +1031,8 @@ function Lax(value, typedDefault, floatHint, error) {
     __type: 'Lax',
     __value: _val,
     __default: _default,
-    hasValue: __taida_hasValue(_hasValue),
+    has_value: _hasValue,
+    hasValue() { return _hasValue; },
     isEmpty() { return !_hasValue; },
     errorInfo() { return _hasValue ? __taida_error_info_lax(null) : __taida_error_info_lax(_error); },
     getOrDefault(def) { return _hasValue ? _val : def; },
@@ -1110,7 +1103,8 @@ function Gorillax(value, error) {
     __type: 'Gorillax',
     __value: _hasValue ? value : null,
     __error: _error,
-    hasValue: __taida_hasValue(_hasValue),
+    has_value: _hasValue,
+    hasValue() { return _hasValue; },
     isEmpty() { return !_hasValue; },
     errorInfo() { return _hasValue ? __taida_error_info_lax(null) : __taida_error_info_lax(_error); },
     relax() {
@@ -1118,7 +1112,8 @@ function Gorillax(value, error) {
         __type: 'RelaxedGorillax',
         __value: _hasValue ? value : null,
         __error: _error,
-        hasValue: __taida_hasValue(_hasValue),
+        has_value: _hasValue,
+        hasValue() { return _hasValue; },
         isEmpty() { return !_hasValue; },
         errorInfo() { return _hasValue ? __taida_error_info_lax(null) : __taida_error_info_lax(_error); },
         toString() {
@@ -1200,7 +1195,7 @@ function Mod_mold(a, b, opts) {
 //   Bool        → `"true"` / `"false"`
 //   Str         → unquoted
 //   Array       → `@[item0, item1, ...]` (items via `__taida_format`)
-//   Lax typed   → `@(hasValue <= ..., __value <= ..., __default <= ..., __type <= "Lax")`
+//   Lax typed   → `@(has_value <= ..., __value <= ..., __default <= ..., __type <= "Lax")`
 //   Result / Async typed → full-form pack (all fields, including `__`-prefixed)
 //   HashMap / Set / TODO / Gorillax / RelaxedGorillax → synthetic full-form
 //       pack rebuilt from the interpreter's underlying `BuchiPack` layout
@@ -1239,11 +1234,11 @@ function __taida_display_string(v) {
     // `__`-prefixed internals). Lax carries an optional `__floatHint` for
     // C21B-seed-04 Float-origin rendering.
     if (v.__type === 'Lax') {
-      const _lhv = typeof v.hasValue === 'function' ? v.hasValue() : v.hasValue;
+      const _lhv = v.has_value;
       const _fmt = v.__floatHint === true
         ? (n => typeof n === 'number' ? __taida_float_render(n) : __taida_format(n))
         : __taida_format;
-      return '@(hasValue <= ' + String(!!_lhv)
+      return '@(has_value <= ' + String(!!_lhv)
         + ', __value <= ' + _fmt(v.__value)
         + ', __default <= ' + _fmt(v.__default)
         + ', __type <= "Lax")';
@@ -1321,16 +1316,16 @@ function __taida_display_string(v) {
         + ', __type <= "TODO")';
     }
     // C23B-003 reopen — Gorillax / RelaxedGorillax: interpreter
-    // `BuchiPack(hasValue, __value, __error, __type)`
+    // `BuchiPack(has_value, __value, __error, __type)`
     // (`src/interpreter/mold_eval.rs:1824-1829`). The interpreter always
     // emits `__error`; a missing error is `@()` (Value::Unit) — not `null`.
     if (v.__type === 'Gorillax' || v.__type === 'RelaxedGorillax') {
-      const hv = typeof v.hasValue === 'function' ? v.hasValue() : v.hasValue;
+      const hv = v.has_value;
       const err = v.__error;
       // Unit-equivalent absence of error renders as `@()`, matching the
       // interpreter's `Value::Unit.to_display_string()`.
       const errStr = (err === null || err === undefined) ? '@()' : __taida_format(err);
-      return '@(hasValue <= ' + String(!!hv)
+      return '@(has_value <= ' + String(!!hv)
         + ', __value <= ' + __taida_format(v.__value)
         + ', __error <= ' + errStr
         + ', __type <= "' + v.__type + '")';
@@ -1829,7 +1824,7 @@ function __taida_regex(pattern, flags) {
 // C12-6c: str.match(Regex(...)) returns a :RegexMatch BuchiPack.
 function __taida_str_match(s, rx) {
   const empty = Object.freeze({
-    hasValue: false,
+    has_value: false,
     full: '',
     groups: Object.freeze([]),
     start: -1,
@@ -1856,7 +1851,7 @@ function __taida_str_match(s, rx) {
     groups.push(typeof m[i] === 'string' ? m[i] : '');
   }
   return Object.freeze({
-    hasValue: true,
+    has_value: true,
     full: m[0],
     groups: Object.freeze(groups),
     start: charStart,
@@ -1881,8 +1876,8 @@ function __taida_str_search(s, rx) {
   const prefix = s.slice(0, m.index);
   return Array.from(prefix).length;
 }
-// E32B-022 (Lock-N): `searchLax` returns Lax[Int] — hasValue=true with
-// the char index on a hit, hasValue=false (default 0) on no-match.
+// E32B-022 (Lock-N): `searchLax` returns Lax[Int] — has_value=true with
+// the char index on a hit, has_value=false (default 0) on no-match.
 // PHILOSOPHY I rejects the `-1` magic value pattern of `search`.
 function __taida_str_search_lax(s, rx) {
   if (typeof s !== 'string') return Lax(null, 0);
@@ -2203,11 +2198,11 @@ function __taida_stdout(...args) {
       // (i.e. a Taida `Float[...]()` call), its __value / __default are
       // Float-semantic even if they round to integer JS Numbers. Render
       // them via __taida_float_render so `Lax[3.0]` prints with `.0`.
-      const _lhv = typeof arg.hasValue === 'function' ? arg.hasValue() : arg.hasValue;
+      const _lhv = arg.has_value;
       const _fmt = arg.__floatHint === true
         ? (n => typeof n === 'number' ? __taida_float_render(n) : __taida_format(n))
         : __taida_format;
-      rendered = '@(hasValue <= ' + String(!!_lhv) + ', __value <= ' + _fmt(arg.__value) + ', __default <= ' + _fmt(arg.__default) + ', __type <= "Lax")';
+      rendered = '@(has_value <= ' + String(!!_lhv) + ', __value <= ' + _fmt(arg.__value) + ', __default <= ' + _fmt(arg.__default) + ', __type <= "Lax")';
     } else if (arg && typeof arg === 'object' && !Array.isArray(arg)) {
       // BuchiPack-like object
       const entries = Object.entries(arg).filter(([k]) => !k.startsWith('__'));
@@ -2254,9 +2249,9 @@ function __taida_format(v) {
   // C21B-seed-04 re-fix: nested Float-hinted Lax — render __value/__default
   // as Float (with `.0`) so `@[Float[3.0]()]` etc. matches the interpreter.
   if (v && v.__type === 'Lax' && v.__floatHint === true) {
-    const _lhv = typeof v.hasValue === 'function' ? v.hasValue() : v.hasValue;
+    const _lhv = v.has_value;
     const _fmt = n => typeof n === 'number' ? __taida_float_render(n) : __taida_format(n);
-    return '@(hasValue <= ' + String(!!_lhv) + ', __value <= ' + _fmt(v.__value) + ', __default <= ' + _fmt(v.__default) + ', __type <= "Lax")';
+    return '@(has_value <= ' + String(!!_lhv) + ', __value <= ' + _fmt(v.__value) + ', __default <= ' + _fmt(v.__default) + ', __type <= "Lax")';
   }
   // C23B-003 reopen 2: nested typed runtime objects (HashMap / Set /
   // Gorillax / RelaxedGorillax / TODO / Stream / Molten / Lax / Result
@@ -2525,7 +2520,7 @@ function __taida_unmold(v) {
     if (v.__type === 'Stream') return __taida_stream_collect(v);
     // Lax unmold
     if (v.__type === 'Lax') {
-      const hv = typeof v.hasValue === 'function' ? v.hasValue() : v.hasValue;
+      const hv = v.has_value;
       return hv ? v.__value : v.__default;
     }
     // Result unmold — evaluate predicate if present
@@ -2553,14 +2548,14 @@ function __taida_unmold(v) {
     }
     // Gorillax unmold: success → value, failure → gorilla (exit)
     if (v.__type === 'Gorillax') {
-      const hv = typeof v.hasValue === 'function' ? v.hasValue() : v.hasValue;
+      const hv = v.has_value;
       if (hv) return v.__value;
       if (typeof process !== 'undefined') process.exit(1);
       throw new __NativeError('><');
     }
     // RelaxedGorillax unmold: success → value, failure → throw (catchable)
     if (v.__type === 'RelaxedGorillax') {
-      const hv = typeof v.hasValue === 'function' ? v.hasValue() : v.hasValue;
+      const hv = v.has_value;
       if (hv) return v.__value;
       const info = __taida_error_info(v.__error);
       throw __taida_error_pack(
@@ -2722,14 +2717,14 @@ if (!Array.prototype.__taida_patched) {
   Object.defineProperty(Array.prototype, 'isEmpty', {
     value: function() { return this.length === 0; }, enumerable: false
   });
-  // max() — return Lax (empty list returns Lax with hasValue=false)
+  // max() — return Lax (empty list returns Lax with has_value=false)
   Object.defineProperty(Array.prototype, 'max', {
     value: function() {
       if (this.length === 0) return Lax(null);
       return Lax(this.reduce((a, b) => a > b ? a : b));
     }, enumerable: false
   });
-  // min() — return Lax (empty list returns Lax with hasValue=false)
+  // min() — return Lax (empty list returns Lax with has_value=false)
   Object.defineProperty(Array.prototype, 'min', {
     value: function() {
       if (this.length === 0) return Lax(null);
@@ -2840,9 +2835,7 @@ if (!String.prototype.__taida_str_patched) {
 // C25B-028: monadic packs (Lax / Gorillax / RelaxedGorillax / Result) must
 // match the interpreter's `jsonEncode` output, which renders the `__*`
 // fields verbatim with two normalizations:
-//   - `hasValue` is exposed as a real Bool (the JS `Gorillax()` / `Lax()`
-//     constructors store it as a callable that returns a bool — JSON would
-//     otherwise drop the key).
+//   - `has_value` is exposed as a real Bool.
 //   - `__error` / `__predicate` / `throw` fields hold internal error
 //     callables or null; the interpreter represents the absent-error case
 //     as `Value::Unit` which serializes as `{}`. We normalise `null` and
@@ -2854,9 +2847,7 @@ function __taida_is_monadic_pack_obj(obj) {
      obj.__type === 'RelaxedGorillax' || obj.__type === 'Result');
 }
 function __taida_normalise_monadic_field(k, v) {
-  if (k === 'hasValue') {
-    // Callable wrapper from `__taida_hasValue` — unwrap to boolean.
-    if (typeof v === 'function') return !!v();
+  if (k === 'has_value') {
     return !!v;
   }
   // Absent-error sentinels (null / function / undefined) render as `{}` to
@@ -2883,7 +2874,7 @@ function __taidaSortKeys(obj) {
       // Skip any remaining function-valued fields outside the monadic
       // carve-out — JSON.stringify already drops them, but being explicit
       // here keeps the key-order deterministic.
-      if (typeof v === 'function' && !(isMonadic && k === 'hasValue')) continue;
+      if (typeof v === 'function') continue;
       if (isMonadic) v = __taida_normalise_monadic_field(k, v);
       sorted[k] = __taidaSortKeys(v);
     }
@@ -3173,14 +3164,14 @@ function __taida_to_js_value(value) {
   if (value instanceof __TaidaJSON) return value.__value;
   if (value && typeof value === 'object') {
     if (value.__type === 'Lax') {
-      const hv = typeof value.hasValue === 'function' ? value.hasValue() : value.hasValue;
+      const hv = value.has_value;
       return __taida_to_js_value(hv ? value.__value : value.__default);
     }
     if (value.__type === 'Result') {
       return __taida_to_js_value(value.__value);
     }
     if (value.__type === 'Gorillax' || value.__type === 'RelaxedGorillax') {
-      const hv = typeof value.hasValue === 'function' ? value.hasValue() : value.hasValue;
+      const hv = value.has_value;
       return hv ? __taida_to_js_value(value.__value) : undefined;
     }
     const out = {};

@@ -4,9 +4,9 @@
 // `os_interactive_run.td` for why the error-path fields are not probed.
 
 r1 <= execShellInteractive("exit 0")
-stdout("r1.hasValue=" + r1.hasValue.toString())
+stdout("r1.has_value=" + r1.has_value.toString())
 r1 ]=> r1V
 stdout("r1.code=" + r1V.code.toString())
 
 r2 <= execShellInteractive("exit 3")
-stdout("r2.hasValue=" + r2.hasValue.toString())
+stdout("r2.has_value=" + r2.has_value.toString())

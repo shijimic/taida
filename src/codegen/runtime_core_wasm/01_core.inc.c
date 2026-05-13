@@ -1519,7 +1519,7 @@ static int64_t _wasm_lookup_field_type(int64_t hash);
    Centralized here for use by both display_string and the runtime constructors below. */
 /* WFX-2: corrected FNV-1a hashes (previous values were wrong, causing
    field access mismatch with compiler-generated hashes from simple_hash()) */
-#define WASM_HASH_HAS_VALUE   0x9e9c6dc733414d60LL  /* FNV-1a("hasValue") */
+#define WASM_HASH_HAS_VALUE   0x175d21da0757452dLL  /* FNV-1a("has_value") */
 #define WASM_HASH_IS_OK       0x6550c1c5b98b56bfLL  /* FNV-1a("isOk") */
 #define WASM_HASH___ERROR     0x15c3e6e41a99a6cbLL  /* FNV-1a("__error") */
 /* BE-WASM-1: TODO field hashes (matching native_runtime.c) */
@@ -2072,12 +2072,12 @@ static int64_t _wasm_stdout_display_string(int64_t obj) {
 
 /* W-5f: Detect Lax, Result, Gorillax, RelaxedGorillax by pack structure.
    These all have fc=4 with distinctive first-field hashes:
-   - Lax:              hash0 = WASM_HASH_HAS_VALUE (0x9e9c6dc733414d60)
-   - Gorillax/Relaxed: hash0 = WASM_HASH_HAS_VALUE (0x9e9c6dc733414d60)  [C24-A]
+   - Lax:              hash0 = WASM_HASH_HAS_VALUE (0x175d21da0757452d)
+   - Gorillax/Relaxed: hash0 = WASM_HASH_HAS_VALUE (0x175d21da0757452d)  [C24-A]
    - Result:           hash0 = WASM_HASH___VALUE    (0x0a7fc9f13472bbe0)
 
    C24-A (2026-04-23): Lax and Gorillax now share hash0 (both use
-   `hasValue` as the first-field name to match interpreter / JS / native).
+   `has_value` as the first-field name to match interpreter / JS / native).
    `_wasm_is_gorillax` / `_wasm_is_lax` disambiguate via the field-2
    hash — `__error` (WASM_HASH___ERROR) for Gorillax / RelaxedGorillax
    vs `__default` (WASM_HASH___DEFAULT) for Lax. The hash check is a
@@ -2156,7 +2156,7 @@ static int64_t _wasm_lax_value_display(int64_t val, int64_t tag) {
 
 /* W-5f: Lax.toString() — "Lax(value)" or "Lax(default: value)" */
 static int64_t _wasm_lax_to_string(int64_t lax_ptr) {
-    int64_t has_value = taida_pack_get_idx(lax_ptr, 0); /* hasValue */
+    int64_t has_value = taida_pack_get_idx(lax_ptr, 0); /* has_value */
     int64_t value = taida_pack_get_idx(lax_ptr, 1);     /* __value */
     int64_t def = taida_pack_get_idx(lax_ptr, 2);       /* __default */
     /* TF-4: Use type tag from __value field (index 1) for type-aware display */
@@ -3452,7 +3452,7 @@ int64_t taida_lax_is_empty(int64_t lax_ptr);
 /* ── W-4f: taida_polymorphic_is_empty (wasm-min: Lax/List/Set/HashMap/String) ── */
 int64_t taida_polymorphic_is_empty(int64_t ptr) {
     if (ptr == 0) return 1;
-    /* Lax: isEmpty means hasValue == false */
+    /* Lax: isEmpty means has_value == false */
     if (_wasm_is_lax(ptr)) {
         return taida_lax_is_empty(ptr);
     }
@@ -3802,7 +3802,7 @@ int64_t taida_polymorphic_has_value(int64_t obj) {
     if (obj == 0) return 0;
     if (!_wasm_is_valid_ptr(obj, 104)) return 0;
     int64_t *p = (int64_t *)(intptr_t)obj;
-    if (p[0] == 4 || p[0] == 5) return taida_pack_get_idx(obj, 0); /* monadic hasValue */
+    if (p[0] == 4 || p[0] == 5) return taida_pack_get_idx(obj, 0); /* monadic has_value */
     return 0;
 }
 
@@ -3834,7 +3834,7 @@ int64_t taida_polymorphic_last_index_of(int64_t obj, int64_t needle) {
 
 /* E32B-022 (Lock-N): Lax[Int]-returning siblings of the legacy `-1`
  * sentinel `*indexOf*` helpers.  Same probe semantics as the raw
- * helpers above; the `-1` sentinel is rewritten to a hasValue=false
+ * helpers above; the `-1` sentinel is rewritten to a has_value=false
  * Lax with default 0 (PHILOSOPHY I — no magic-value sentinels).  */
 extern int64_t taida_list_find_index(int64_t list_ptr, int64_t fn_ptr);
 static int64_t _taida_int_lax_found_wasm(int64_t idx) { return taida_lax_new(idx, 0); }

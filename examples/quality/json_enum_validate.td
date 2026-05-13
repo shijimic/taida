@@ -26,21 +26,21 @@ stdout(u1c.status.toString())
 raw2 <= '{"name": "Dave", "status": "Bogus"}'
 JSON[raw2, User]() ]=> u2
 stdout(u2.name)
-stdout(u2.status.hasValue.toString())
+stdout(u2.status.has_value.toString())
 stdout(u2.status.getOrDefault(2).toString())
 
 // ── Case 3: Missing Enum key → Lax[Enum] ────────────────
 raw3 <= '{"name": "Eve"}'
 JSON[raw3, User]() ]=> u3
 stdout(u3.name)
-stdout(u3.status.hasValue.toString())
+stdout(u3.status.has_value.toString())
 stdout(u3.status.getOrDefault(1).toString())
 
 // ── Case 4: null Enum value → Lax[Enum] ─────────────────
 raw4 <= '{"name": "Frank", "status": null}'
 JSON[raw4, User]() ]=> u4
 stdout(u4.name)
-stdout(u4.status.hasValue.toString())
+stdout(u4.status.has_value.toString())
 
 // ── Case 5: Top-level Enum schema ───────────────────────
 raw5 <= '"Pending"'
@@ -49,4 +49,4 @@ stdout(s5.toString())
 
 raw5b <= '"NotReal"'
 JSON[raw5b, Status]() ]=> s5b
-stdout(s5b.hasValue.toString())
+stdout(s5b.has_value.toString())

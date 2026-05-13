@@ -5914,10 +5914,10 @@ fn json_enum_has_value_field_infers_bool() {
 User = @(name: Str, status: Status)
 raw <= '{"name": "Dave", "status": "Bogus"}'
 JSON[raw, User]() ]=> user
-statusHasValue <= user.status.hasValue
+statusHasValue <= user.status.has_value
 rawTop <= '"Bogus"'
 JSON[rawTop, Status]() ]=> topStatus
-topHasValue <= topStatus.hasValue
+topHasValue <= topStatus.has_value
 "#;
     let (program, parse_errors) = parse(src);
     assert!(parse_errors.is_empty(), "parse errors: {:?}", parse_errors);
@@ -5931,4 +5931,31 @@ topHasValue <= topStatus.hasValue
     );
     assert_eq!(checker.lookup_var("statusHasValue"), Some(Type::Bool));
     assert_eq!(checker.lookup_var("topHasValue"), Some(Type::Bool));
+}
+
+#[test]
+fn legacy_has_value_field_spelling_is_rejected_on_lax_like_types() {
+    let src = r#"l <= Lax[1]()
+l_bad <= l.hasValue
+g <= Gorillax[42]()
+g_bad <= g.hasValue
+g.relax() => r
+r_bad <= r.hasValue
+"#;
+    let (_, errors) = check(src);
+    let legacy_field_errors: Vec<_> = errors
+        .iter()
+        .filter(|e| {
+            e.message.contains("[E1602]")
+                && e.message.contains("hasValue")
+                && e.message.contains("has_value")
+                && e.message.contains("hasValue()")
+        })
+        .collect();
+    assert_eq!(
+        legacy_field_errors.len(),
+        3,
+        "Lax-like legacy hasValue field access should be rejected with migration guidance, got: {:?}",
+        errors
+    );
 }

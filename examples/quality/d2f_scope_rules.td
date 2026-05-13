@@ -1,13 +1,13 @@
 // D-2f: docs/reference/scope_rules.md code examples
 
 // Module scope
-globalName <= "Module Level"
-stdout(globalName)
+global_name <= "Module Level"
+stdout(global_name)
 
 // Function scope
 processData =
-  localVar <= "Function Level"
-  localVar
+  local_var <= "Function Level"
+  local_var
 => :Str
 
 stdout(processData())

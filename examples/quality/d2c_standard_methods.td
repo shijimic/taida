@@ -5,7 +5,7 @@ stdout("hello".length().toString())
 stdout("hello".contains("ell").toString())
 stdout("hello".startsWith("he").toString())
 stdout("hello".endsWith("lo").toString())
-// NOTE: String has no isEmpty method (QF finding: doc says it does)
+// NOTE: String has no is_empty method (QF finding: doc says it does)
 // stdout("".isEmpty().toString())
 stdout("hello".length().toString())
 stdout("hello".toString())
@@ -38,7 +38,7 @@ stdout(pilot.name)
 
 // Lax methods
 lax <= Div[10, 3]()
-stdout(lax.hasValue.toString())
+stdout(lax.has_value.toString())
 stdout(lax.isEmpty().toString())
 stdout(lax.getOrDefault(99).toString())
 lax ]=> unmolded

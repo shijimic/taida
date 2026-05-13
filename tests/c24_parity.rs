@@ -3,7 +3,7 @@
 //!
 //! - `str_from_gorillax` is already pinned by `c23_str_parity.rs` (and
 //!   was promoted to 4-backend by C24-A's field-name unification from
-//!   `isOk` → `hasValue`). This file covers the new C24-B fixtures:
+//!   `isOk` → `has_value`). This file covers the new C24-B fixtures:
 //!   `str_from_zip` / `str_from_zip_uneven` / `str_from_enumerate` /
 //!   `str_from_enumerate_empty`.
 //! - All fixtures live under `examples/quality/c24b_collection_parity/`.

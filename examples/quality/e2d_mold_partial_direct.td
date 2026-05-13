@@ -1,6 +1,6 @@
-trimIt <= Trim[_]()
-stdout(trimIt("  hi  "))
+trim_it <= Trim[_]()
+stdout(trim_it("  hi  "))
 
-splitComma <= Split[_, ","]()
-parts <= splitComma("a,b,c")
+split_comma <= Split[_, ","]()
+parts <= split_comma("a,b,c")
 stdout(parts.length().toString())

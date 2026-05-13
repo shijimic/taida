@@ -167,7 +167,7 @@ stdout(b2)
     parity_assert("ascii", source, "71\n69\n84");
 }
 
-/// `ByteAt`: out-of-bounds → Lax(hasValue=false, default 0).
+/// `ByteAt`: out-of-bounds → Lax(has_value=false, default 0).
 #[test]
 fn c26b_018_byte_at_oob_parity() {
     let source = r#"

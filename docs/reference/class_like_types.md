@@ -236,7 +236,7 @@ Slice["hello"](end <= 3)               // "hel"
 
 ### CharAt[str, idx]
 
-指定位置の文字を返します。Lax[Str] を返し、範囲外の場合は hasValue=false（デフォルト値 ""）。
+指定位置の文字を返します。Lax[Str] を返し、範囲外の場合は has_value=false（デフォルト値 ""）。
 
 ```taida fragment
 CharAt["hello", 0]() ]=> ch   // "h"
@@ -356,12 +356,12 @@ BitNot[0]()                    // -1
 
 ### ShiftL / ShiftR / ShiftRU
 
-`n`（シフト量）が `0..63` のとき成功し、`Lax[Int]` を返します。範囲外は `hasValue = false` です。
+`n`（シフト量）が `0..63` のとき成功し、`Lax[Int]` を返します。範囲外は `has_value = false` です。
 
 ```taida
 ShiftL[1, 40]() ]=> x          // 1099511627776
 ShiftRU[-1, 1]() ]=> y         // 9223372036854775807
-ShiftL[1, 64]().hasValue       // false
+ShiftL[1, 64]().has_value       // false
 ```
 
 ### ToRadix[int, base]
@@ -370,7 +370,7 @@ ShiftL[1, 64]().hasValue       // false
 
 ```taida
 ToRadix[255, 16]() ]=> s       // "ff"
-ToRadix[10, 1]().hasValue      // false
+ToRadix[10, 1]().has_value      // false
 ```
 
 ### Int[str, base]
@@ -384,8 +384,8 @@ Int["+ff", 16]() ]=> n         // 255 (+ prefix も受理)
 Int["1010", 2]() ]=> n         // 10
 Int["77", 8]() ]=> n           // 63
 Int["-ff", 16]() ]=> n         // -255
-Int["2", 2]().hasValue         // false (基数2で "2" は無効)
-Int["5", 1]().hasValue         // false (基数1は範囲外)
+Int["2", 2]().has_value         // false (基数2で "2" は無効)
+Int["5", 1]().has_value         // false (基数1は範囲外)
 ```
 
 ### Ordinal[enum] (C18-3)
@@ -429,7 +429,7 @@ Utf8Encode["pong"]() ]=> raw     // Bytes[@[112, 111, 110, 103]]
 Utf8Decode[raw]() ]=> text       // "pong"
 bad <= Bytes[@[255]]()
 bad ]=> badBytes
-Utf8Decode[badBytes]().hasValue   // false
+Utf8Decode[badBytes]().has_value   // false
 ```
 
 ---
@@ -529,7 +529,7 @@ Flatten[@[@[1, 2], @[3, 4]]]()  // @[1, 2, 3, 4]
 
 ```taida
 Find[@[1, 2, 3, 4], _ x = x > 2]() ]=> val  // 3
-Find[@[1, 2], _ x = x > 10]().hasValue       // false
+Find[@[1, 2], _ x = x > 10]().has_value       // false
 ```
 
 ### FindIndex[list, fn]
@@ -626,21 +626,21 @@ Foldr[@["a", "b", "c"], "", _ acc x = x + acc]() ]=> concat  // "abc"
 
 ### Div[x, y]
 
-除算を行い、Lax を返します。ゼロ除算の場合は `hasValue = false`。
+除算を行い、Lax を返します。ゼロ除算の場合は `has_value = false`。
 
 ```taida fragment
 Div[10, 3]() ]=> result   // 3
 Div[10, 0]() ]=> result   // 0 (ゼロ除算: デフォルト値)
-Div[10, 0]().hasValue      // false
+Div[10, 0]().has_value      // false
 ```
 
 ### Mod[x, y]
 
-剰余を計算し、Lax を返します。ゼロ除算の場合は `hasValue = false`。
+剰余を計算し、Lax を返します。ゼロ除算の場合は `has_value = false`。
 
 ```taida
 Mod[10, 3]() ]=> result   // 1
-Mod[10, 0]().hasValue      // false
+Mod[10, 0]().has_value      // false
 ```
 
 ---
@@ -762,7 +762,7 @@ Float[42]() ]=> val      // 42.0
 
 ### Str[x]
 
-値を文字列に変換し、Lax を返します。`x` はプリミティブ（Int / Float / Bool / Str）だけでなく、List / ぶちパック / 他の Lax など任意の Taida 値を受け取れます。戻り値は常に `Lax[Str]`（失敗条件が無いため `hasValue` は常に `true`）。
+値を文字列に変換し、Lax を返します。`x` はプリミティブ（Int / Float / Bool / Str）だけでなく、List / ぶちパック / 他の Lax など任意の Taida 値を受け取れます。戻り値は常に `Lax[Str]`（失敗条件が無いため `has_value` は常に `true`）。
 
 ```taida fragment
 Str[42]() ]=> text       // "42"
@@ -773,7 +773,7 @@ Str[true]() ]=> text     // "true"
 Str[@[1, 2, 3]]() ]=> t  // "@[1, 2, 3]"
 Str[@(a <= 1)]() ]=> t   // "@(a <= 1)"
 Str[Int[3.0]()]() ]=> t  // 内側 Lax の full-form 表示:
-                          // `@(hasValue <= true, __value <= 3, __default <= 0, __type <= "Lax")`
+                          // `@(has_value <= true, __value <= 3, __default <= 0, __type <= "Lax")`
 ```
 
 **パリティ保証**: Interpreter / JS / Native / WASM-wasi の 4 バックエンドで同一出力を返します。Interpreter が参照実装であり、その `Str` の変換規則は以下のとおりです:
@@ -784,7 +784,7 @@ Str[Int[3.0]()]() ]=> t  // 内側 Lax の full-form 表示:
 - `Str` → そのまま（クォート無し）
 - それ以外 (List / ぶちパック / Lax / Result / Async / HashMap / Set / Gorillax / TODO / Molten …) → 各値の display 文字列（ぶちパックは `__` で始まる内部フィールドも含む full-form、nested な HashMap / Set / ぶちパックも再帰的に full-form に展開）
 
-`Str[Gorillax[v]()]()` は C24-A 以降、WASM-wasi でも第 1 フィールド名を `hasValue` に統一済みです。`tests/c23_str_parity.rs` の skip list は空で、Gorillax / Stream を含む `Str[...]()` fixtures は 4 バックエンド parity の対象です。
+`Str[Gorillax[v]()]()` は C24-A 以降、WASM-wasi でも第 1 フィールド名を `has_value` に統一済みです。`tests/c23_str_parity.rs` の skip list は空で、Gorillax / Stream を含む `Str[...]()` fixtures は 4 バックエンド parity の対象です。
 
 ### Collection 検出と heterogeneous semantics (現在の動作)
 
@@ -829,7 +829,7 @@ Bool[0]() ]=> flag       // false
 
 ```taida
 Lax[42]() ]=> val     // 42
-Lax[42]().hasValue     // true
+Lax[42]().has_value     // true
 ```
 
 ---
@@ -848,7 +848,7 @@ base `Molten` は非 generic の不透明値です。`Molten[T]` や `Molten[Str
 
 ### JSON[raw, Schema]
 
-生の JSON を型安全な Taida 値へ鋳造します。戻り値は常に `Lax[T]`（パース失敗時は `hasValue = false`）。詳細は `docs/guide/03_json.md` を参照してください。
+生の JSON を型安全な Taida 値へ鋳造します。戻り値は常に `Lax[T]`（パース失敗時は `has_value = false`）。詳細は `docs/guide/03_json.md` を参照してください。
 
 ```taida
 User = @(name: Str, age: Int)
@@ -869,8 +869,8 @@ JSON[raw, User]() ]=> user
 #### Enum 検査規則（C16）
 
 - JSON 側の Str が variant 集合に**含まれる** → その variant の ordinal を `Int` として返します。
-- 含まれない / キー欠落 / `null` → **`Lax[Enum]`** を返します。`hasValue = false`、`__value = __default = Int(0)`（最初のバリアント）。
-- silent coercion は**行いません**。利用側は `hasValue` / `| .hasValue |> ... | _ |> ...` / `getOrDefault(Variant)` で境界を明示処理します（`|==` は throw キャッチ演算子なので Lax には使えません — `docs/reference/operators.md` 参照）。
+- 含まれない / キー欠落 / `null` → **`Lax[Enum]`** を返します。`has_value = false`、`__value = __default = Int(0)`（最初のバリアント）。
+- silent coercion は**行いません**。利用側は `has_value` / `| .has_value |> ... | _ |> ...` / `getOrDefault(Variant)` で境界を明示処理します（`|==` は throw キャッチ演算子なので Lax には使えません — `docs/reference/operators.md` 参照）。
 
 ```taida
 Enum => Status = :Active :Inactive :Pending
@@ -878,11 +878,11 @@ User = @(name: Str, status: Status)
 
 raw <= '{"name": "Bob", "status": "Bogus"}'
 JSON[raw, User]() ]=> u
-u.status.hasValue                          // false
+u.status.has_value                          // false
 u.status.getOrDefault(Status:Pending())    // 2
 ```
 
-`Lax[Enum]` の shape は他の Lax と完全に同一です（`@(hasValue, __value, __default, __type="Lax")`）。JSON モールドは 3 バックエンド（Interpreter / JS / Native）で同じ Lax を返します。
+`Lax[Enum]` の shape は他の Lax と完全に同一です（`@(has_value, __value, __default, __type="Lax")`）。JSON モールドは 3 バックエンド（Interpreter / JS / Native）で同じ Lax を返します。
 
 ---
 
@@ -918,7 +918,7 @@ Result[x, pred](throw <= err) ]=> r  // r: T（unmold 時に述語を評価 → 
 
 ```taida
 Gorillax[42]() ]=> val     // 42
-Gorillax[42]().hasValue     // true
+Gorillax[42]().has_value     // true
 ```
 
 ### Cage[subject, runner]
@@ -929,8 +929,8 @@ Gorillax[42]().hasValue     // true
 Cage[subject, JSCall[@["sum"], @[items], Int]()]() => result  // result: Gorillax[Int]
 // subject : 特定 branch を持つ Molten 値（branch=JS / Build / File）
 // runner  : CageRilla[Branch, Out] 子系統 descriptor
-// 成功: hasValue=true
-// 失敗: hasValue=false、詳細は errorInfo() で取得
+// 成功: has_value=true
+// 失敗: has_value=false、詳細は errorInfo() で取得
 ```
 
 subject branch と runner branch の不一致は compile error として弾かれ、`Gorillax(false)` には包まれません。`Gorillax(false)` は branch 一致後の branch operation 失敗だけを表します。Cage 第 2 引数に通常の Taida function / lambda を直接渡す form (旧 `Cage[molten, _ m = ...]()`) は canonical から外れます。
@@ -990,7 +990,7 @@ err.code        // Int -- numeric code（OS error / HTTP status 等）
 | `errorInfo()` | `RelaxedGorillax[T]` | `Lax[ErrorInfo]` |
 | `errorInfo()` | `Error` 系 (`RelaxedGorillaEscaped` を含む) | `Lax[ErrorInfo]` |
 
-`hasValue = true` の値では `errorInfo()` の戻り値 `Lax` の `hasValue = false`（実体は無い）。失敗のときだけ、producer が詳細を持っていれば `Lax(true)` で `ErrorInfo` を取り出せます。
+`has_value = true` の値では `errorInfo()` の戻り値 `Lax` の `has_value = false`（実体は無い）。失敗のときだけ、producer が詳細を持っていれば `Lax(true)` で `ErrorInfo` を取り出せます。
 
 ### ErrorInfo
 

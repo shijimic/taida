@@ -292,8 +292,8 @@ pilots <= hashMap()
 
 ```taida fragment
 // get は Lax を返します
-pilots.get("Misato").hasValue  // true
-pilots.get("Gendo").hasValue   // false
+pilots.get("Misato").has_value  // true
+pilots.get("Gendo").has_value   // false
 
 // イミュータブルなので元の HashMap は変化しません
 updated <= pilots.set("Shinji", @(age <= 14, role <= "Pilot"))

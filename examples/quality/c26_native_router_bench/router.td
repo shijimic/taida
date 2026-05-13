@@ -65,8 +65,8 @@ buildRoutesIter acc: @[@(method: Str, pattern: Str)] i: Int n: Int =
     pattern <= (| kind == 0 |> "/route/" + i.toString() + "/:id"
                 | kind == 1 |> "/api/v1/resource/" + i.toString()
                 | _ |> "/users/" + i.toString() + "/:name")
-    newRoute <= @(method <= "GET", pattern <= pattern)
-    buildRoutesIter(Append[acc, newRoute](), i + 1, n)
+    new_route <= @(method <= "GET", pattern <= pattern)
+    buildRoutesIter(Append[acc, new_route](), i + 1, n)
 => :@[@(method: Str, pattern: Str)]
 
 buildRoutes n: Int = buildRoutesIter(@[], 0, n) => :@[@(method: Str, pattern: Str)]

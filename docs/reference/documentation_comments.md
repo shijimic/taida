@@ -170,13 +170,13 @@ AI がこの関数で行ってはいけないことを説明します。
 ///@   - 未検証の入力を直接渡さない
 ///@   - 空文字列のnameを渡さない
 ///@   - この関数を認証なしで公開APIから呼び出さない
-///@   - 戻り値が Lax の場合は hasValue を確認してから取り出す
+///@   - 戻り値が Lax の場合は has_value を確認してから取り出す
 ///@   - Result を返す関数では成否述語を経由してから値を使う
 ```
 
 > **PHILOSOPHY.md — I.** 深く考えずに適当にぶちこんでけ
 >
-> Taida には null と undefined が存在しません。doc-comment 本文に「null チェック」という記述を使わず、`Lax.hasValue` の確認、`]=>` や `<=[` での取り出し、`Result` の述語を経由した扱いに統一してください。doc-comment の lint は、本文中の `null` / `undefined` を許可リスト方式 (外部プロトコル仕様の引用のみ許可) でエラー扱いにします。
+> Taida には null と undefined が存在しません。doc-comment 本文に「null チェック」という記述を使わず、`Lax.has_value` の確認、`]=>` や `<=[` での取り出し、`Result` の述語を経由した扱いに統一してください。doc-comment の lint は、本文中の `null` / `undefined` を許可リスト方式 (外部プロトコル仕様の引用のみ許可) でエラー扱いにします。
 
 ### @AI-Related
 

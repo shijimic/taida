@@ -53,7 +53,7 @@ stdout("")
 
 // Find item by name
 found <= findByName(items, "Widget B")
-| found.hasValue |>
+| found.has_value |>
   found ]=> item
   stdout("Found: " + item.name + " ($" + item.price.toString() + ", qty: " + item.qty.toString() + ")")
 | _ |>

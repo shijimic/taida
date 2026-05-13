@@ -566,7 +566,7 @@ impl Lowering {
                 let pack_var = func.alloc_var();
                 func.push(IrInst::PackNew(pack_var, 4));
 
-                self.emit_pack_field_hash(func, pack_var, 0, "hasValue");
+                self.emit_pack_field_hash(func, pack_var, 0, "has_value");
                 let has_value = func.alloc_var();
                 func.push(IrInst::ConstBool(has_value, false));
                 func.push(IrInst::PackSet(pack_var, 0, has_value));

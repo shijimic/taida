@@ -214,7 +214,7 @@ fibTail n: Int a: Int b: Int =
 
 ### 二分探索
 
-見つからない場合は `Lax[Int]` の `hasValue = false` で表現します。`-1` を「見つからなかった」のしるしに使うパターンは採用しません (有効な位置と区別できないため)。
+見つからない場合は `Lax[Int]` の `has_value = false` で表現します。`-1` を「見つからなかった」のしるしに使うパターンは採用しません (有効な位置と区別できないため)。
 
 ```taida
 binarySearch list: @[Int] target: Int =
@@ -222,7 +222,7 @@ binarySearch list: @[Int] target: Int =
 => :Lax[Int]
 
 searchTail list: @[Int] target: Int low: Int high: Int =
-  | low > high |> Lax[Int]()                           // 見つからなかった (hasValue = false)
+  | low > high |> Lax[Int]()                           // 見つからなかった (has_value = false)
   | _ |>
     Div[low + high, 2]() ]=> mid
     list.get(mid) ]=> value
@@ -232,7 +232,7 @@ searchTail list: @[Int] target: Int low: Int high: Int =
 => :Lax[Int]
 ```
 
-呼び出し側は `]=>` で取り出すか、`hasValue` を確認してから `getOrDefault` で既定値を渡します。
+呼び出し側は `]=>` で取り出すか、`has_value` を確認してから `getOrDefault` で既定値を渡します。
 
 ### 文字列の繰り返し
 

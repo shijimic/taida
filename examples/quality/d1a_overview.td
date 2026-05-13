@@ -48,7 +48,7 @@ Map[filtered, _ x2 = x2 * 2]() ]=> pipeResult
 stdout(jsonEncode(pipeResult))
 
 // Default values
-NervStaff = @(name: Str, callSign: Str, age: Int)
+NervStaff = @(name: Str, call_sign: Str, age: Int)
 ritchan <= NervStaff(name <= "Ritsuko")
-stdout(ritchan.callSign)
+stdout(ritchan.call_sign)
 stdout(ritchan.age.toString())

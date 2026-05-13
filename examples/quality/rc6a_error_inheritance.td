@@ -20,36 +20,36 @@ stdout("T3: tag=" + err3.tag)
 
 // --- Test 4: throw and |== (basic catch) ---
 Error => TestError = @(info: Str)
-safe_fn x =
+safeFn x =
   |== error: Error =
     "caught: " + error.message
   => :Str
   TestError(type <= "TestError", message <= "boom", info <= "detail").throw()
   "unreachable"
 => :Str
-stdout("T4: " + safe_fn(1))
+stdout("T4: " + safeFn(1))
 
 // --- Test 5: throw child, catch as parent Error ---
 Error => ChildError = @(reason: Str)
-catch_parent x =
+catchParent x =
   |== error: Error =
     "caught(" + error.type + "): " + error.message
   => :Str
   ChildError(type <= "ChildError", message <= "child failed", reason <= "timeout").throw()
   "unreachable"
 => :Str
-stdout("T5: " + catch_parent(1))
+stdout("T5: " + catchParent(1))
 
 // --- Test 6: Access child-specific fields in catch handler ---
 Error => FieldError = @(field: Str)
-catch_with_fields x =
+catchWithFields x =
   |== error: Error =
     "caught: " + error.field
   => :Str
   FieldError(type <= "FieldError", message <= "validation", field <= "email").throw()
   "unreachable"
 => :Str
-stdout("T6: " + catch_with_fields(1))
+stdout("T6: " + catchWithFields(1))
 
 // --- Test 7: Multi-level inheritance: Error => Base => Sub ---
 Error => BaseError = @(base_info: Str)
@@ -60,11 +60,11 @@ stdout("T7: " + TypeName[sub_err]() + " base_info=" + sub_err.base_info + " sub_
 // --- Test 8: Multi-level throw and catch ---
 Error => Level1Error = @(l1: Str)
 Level1Error => Level2Error = @(l2: Str)
-catch_multi x =
+catchMulti x =
   |== error: Error =
     "caught(" + error.type + "): " + error.l1 + "+" + error.l2
   => :Str
   Level2Error(type <= "Level2Error", message <= "deep error", l1 <= "one", l2 <= "two").throw()
   "unreachable"
 => :Str
-stdout("T8: " + catch_multi(1))
+stdout("T8: " + catchMulti(1))

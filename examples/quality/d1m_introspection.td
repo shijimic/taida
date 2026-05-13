@@ -30,5 +30,5 @@ validateSafe pilot: Pilot =
 => :Str
 
 stdout(validateSafe(asuka))
-emptyPilot <= Pilot(name <= "")
-stdout(validateSafe(emptyPilot))
+empty_pilot <= Pilot(name <= "")
+stdout(validateSafe(empty_pilot))
