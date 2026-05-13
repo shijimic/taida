@@ -844,7 +844,7 @@ result <= make().map(_ x = x.fooBar())  // [E1509] が出ない、silent pass
 
 #### errorInfo
 
-Lax が失敗 (`hasValue = false`) したとき、producer が保持している error 情報を `Lax[ErrorInfo]` として取り出します。JSON パース失敗など詳細を持つ producer では `hasValue = true` の `Lax[ErrorInfo]` を返します。単純な空 Lax (`Lax[T]()`、範囲外 `get()`、変換失敗など) は詳細を持たないため、戻り値も `hasValue = false` です。受け側の Lax が成功している場合も戻り値は空になります。`errorInfo()` を持つ allow-list は `Lax` / `Gorillax` / `RelaxedGorillax` / `Error` で、それ以外の型へ呼ぶと `[E1509]` で reject されます (`Result` / `Async` には現状提供されていません)。
+Lax が失敗 (`hasValue = false`) したとき、producer が保持している error 情報を `Lax[ErrorInfo]` として取り出します。JSON パース失敗など詳細を持つ producer では `hasValue = true` の `Lax[ErrorInfo]` を返します。単純な空 Lax (`Lax[T]()`、範囲外 `get()`、変換失敗など) は詳細を持たないため、戻り値も `hasValue = false` です。受け側の Lax が成功している場合も戻り値は空になります。`errorInfo()` を持つ allow-list は `Lax` / `Gorillax` / `RelaxedGorillax` / `Error` 系 (`RelaxedGorillaEscaped` を含む) で、それ以外の型へ呼ぶと `[E1509]` で reject されます (`Result` / `Async` には現状提供されていません)。
 
 ```taida fragment
 result <= JSON["not valid json", Pilot]()

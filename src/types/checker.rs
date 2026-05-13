@@ -1597,7 +1597,7 @@ impl TypeChecker {
             self.errors.push(TypeError {
                 message: format!(
                     "[E1612] {} supports only 1-arg response-return httpServe handlers. \
-                     Hint: taida-lang/net 2-arg streaming handlers require the interpreter, JS, or native backend.",
+                     Hint: 2-arg network streaming handlers require the interpreter, JS, or native backend.",
                     self.compile_target.label()
                 ),
                 span: args

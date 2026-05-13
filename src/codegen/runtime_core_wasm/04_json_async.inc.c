@@ -953,7 +953,7 @@ static int _wc_is_monadic_pack(int64_t val) {
 /* Helper: check whether the pack is a Lax specifically
    (slot 2 hash = WASM_HASH___DEFAULT). */
 static int _wc_is_lax_specifically(int64_t *pack) {
-    if (pack[0] != 4) return 0;
+    if (pack[0] != 4 && pack[0] != 5) return 0;
     if (pack[1] != WASM_HASH_HAS_VALUE) return 0;
     return pack[1 + 2 * 3] == WASM_HASH___DEFAULT ? 1 : 0;
 }
@@ -1014,6 +1014,10 @@ static void _wc_json_serialize_pack_fields(_wc_json_buf *jb, int64_t *pack, int6
         if (fname[0] == '_' && fname[1] == '_' && fname[2] == 't' &&
             fname[3] == 'y' && fname[4] == 'p' && fname[5] == 'e' &&
             fname[6] == '\0') continue;
+        if (_wc_is_lax_specifically(pack) &&
+            fname[0] == '_' && fname[1] == '_' && fname[2] == 'e' &&
+            fname[3] == 'r' && fname[4] == 'r' && fname[5] == 'o' &&
+            fname[6] == 'r' && fname[7] == '\0') continue;
         /* Non-monadic packs hide all __ fields. Monadic packs expose
            them so jsonEncode matches the interpreter. */
         if (!is_monadic && fname[0] == '_' && fname[1] == '_') continue;

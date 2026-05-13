@@ -242,15 +242,17 @@ int64_t taida_make_error(int64_t type_ptr, int64_t msg_ptr) {
 int64_t taida_make_error_with_kind(int64_t type_ptr, int64_t msg_ptr, int64_t kind_ptr) {
     _wasm_register_builtin_error_field_names();
 
-    int64_t pack = taida_pack_new(4);
+    int64_t pack = taida_pack_new(5);
     taida_pack_set_hash(pack, 0, WASM_HASH_TYPE);
     taida_pack_set(pack, 0, type_ptr);
     taida_pack_set_hash(pack, 1, WASM_HASH_MESSAGE);
     taida_pack_set(pack, 1, msg_ptr);
     taida_pack_set_hash(pack, 2, WASM_HASH_KIND);
     taida_pack_set(pack, 2, kind_ptr);
-    taida_pack_set_hash(pack, 3, WASM_HASH___TYPE);
-    taida_pack_set(pack, 3, type_ptr);
+    taida_pack_set_hash(pack, 3, WASM_HASH_CODE);
+    taida_pack_set(pack, 3, 0);
+    taida_pack_set_hash(pack, 4, WASM_HASH___TYPE);
+    taida_pack_set(pack, 4, type_ptr);
     return pack;
 }
 

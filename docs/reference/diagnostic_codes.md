@@ -95,7 +95,7 @@
 | `E1506` | 関数引数の型が宣言されたパラメータ型と不一致 | TypeChecker |
 | `E1507` | ビルトイン関数の引数個数が arity 範囲外 | TypeChecker |
 | `E1508` | メソッド呼び出しの引数個数または型が不一致 (`Lax[T]` / `Result[T, P]` / `Async[T]` の `map` / `flatMap` / `mapError` の関数引数型ピン違反を含む) | TypeChecker |
-| `E1509` | メソッドが型に存在しない、または generic function の型変数が declared constraint を満たさない (`errorInfo()` を `Lax` / `Gorillax` / `RelaxedGorillax` / `Error` 以外の型に呼んだ場合を含む) | TypeChecker |
+| `E1509` | メソッドが型に存在しない、または generic function の型変数が declared constraint を満たさない (`errorInfo()` を `Lax` / `Gorillax` / `RelaxedGorillax` / `Error` 系以外の型に呼んだ場合を含む) | TypeChecker |
 | `E1510` | inference-only generic function の型変数が parameter annotation / call から束縛・推論できない、または concrete type 名と衝突する | TypeChecker |
 | `E1511` | ユーザー定義関数を mold 構文 `Fn[args]()` で呼ぶ際に named fields `()` を渡せない — `Fn[a, b]()` か `Fn(a, b)` のみ | TypeChecker |
 | `E1512` | Cage / CageRilla: branch mismatch (compile-time) — `Cage[subject, runner]()` で subject の Molten branch と runner `CageRilla[Branch, Out]` の `Branch` 型引数が不一致 | TypeChecker |

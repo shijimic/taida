@@ -3666,14 +3666,17 @@ impl Interpreter {
                                 let schema = self.resolve_json_schema(&type_args[1])?;
                                 let default_val =
                                     crate::interpreter::json::default_for_schema(&schema);
-                                let error = Value::Error(crate::interpreter::value::ErrorValue {
-                                    error_type: "JsonError".into(),
-                                    message: format!("JSON parse error: {}", e),
-                                    fields: vec![
-                                        ("kind".into(), Value::str("parse".into())),
-                                        ("code".into(), Value::Int(0)),
-                                    ],
-                                });
+                                let _ = e;
+                                let error = Value::pack(vec![
+                                    ("type".into(), Value::str("JsonError".into())),
+                                    (
+                                        "message".into(),
+                                        Value::str("JSON parse error: invalid input".into()),
+                                    ),
+                                    ("kind".into(), Value::str("parse".into())),
+                                    ("code".into(), Value::Int(0)),
+                                    ("__type".into(), Value::str("JsonError".into())),
+                                ]);
                                 return Ok(Some(Signal::Value(
                                     crate::interpreter::Interpreter::lax_failure_with_error(
                                         default_val,

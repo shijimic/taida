@@ -1118,7 +1118,7 @@ static taida_val taida_make_error(const char *error_type, const char *error_msg)
 static taida_val taida_make_error_with_kind(const char *error_type, const char *error_msg, const char *error_kind) {
     taida_register_builtin_error_field_names();
 
-    taida_val pack = taida_pack_new(4);
+    taida_val pack = taida_pack_new(5);
     // type
     taida_pack_set_hash(pack, 0, (taida_val)HASH_TYPE);
     char *type_str = taida_str_new_copy(error_type);
@@ -1129,16 +1129,20 @@ static taida_val taida_make_error_with_kind(const char *error_type, const char *
     char *msg_str = taida_str_new_copy(error_msg);
     taida_pack_set(pack, 1, (taida_val)msg_str);
     taida_pack_set_tag(pack, 1, TAIDA_TAG_STR);
-    // __type (RCB-101)
-    taida_pack_set_hash(pack, 2, (taida_val)0x84d2d84b631f799bULL);
-    char *type_str2 = taida_str_new_copy(error_type);
-    taida_pack_set(pack, 2, (taida_val)type_str2);
-    taida_pack_set_tag(pack, 2, TAIDA_TAG_STR);
     // kind (E33B-003 Cat B parity field)
-    taida_pack_set_hash(pack, 3, taida_str_hash((taida_val)"kind"));
+    taida_pack_set_hash(pack, 2, taida_str_hash((taida_val)"kind"));
     char *kind_str = taida_str_new_copy(error_kind);
-    taida_pack_set(pack, 3, (taida_val)kind_str);
-    taida_pack_set_tag(pack, 3, TAIDA_TAG_STR);
+    taida_pack_set(pack, 2, (taida_val)kind_str);
+    taida_pack_set_tag(pack, 2, TAIDA_TAG_STR);
+    // code
+    taida_pack_set_hash(pack, 3, taida_str_hash((taida_val)"code"));
+    taida_pack_set(pack, 3, 0);
+    taida_pack_set_tag(pack, 3, TAIDA_TAG_INT);
+    // __type (RCB-101)
+    taida_pack_set_hash(pack, 4, (taida_val)0x84d2d84b631f799bULL);
+    char *type_str2 = taida_str_new_copy(error_type);
+    taida_pack_set(pack, 4, (taida_val)type_str2);
+    taida_pack_set_tag(pack, 4, TAIDA_TAG_STR);
     return pack;
 }
 
@@ -3158,7 +3162,7 @@ taida_val taida_pack_get_idx(taida_ptr pack_ptr, taida_val index) {
 static int taida_is_gorillax_like_pack(taida_val ptr) {
     if (!TAIDA_IS_PACK(ptr)) return 0;
     taida_val *pack = (taida_val*)ptr;
-    if (pack[1] < 4) return 0;
+    if (pack[1] != 4) return 0;
     return pack[2] == (taida_val)HASH_HAS_VALUE
         && pack[2 + 2 * 3] == (taida_val)HASH___ERROR;
 }
@@ -7964,6 +7968,11 @@ static taida_val taida_pack_to_display_string_full(taida_val pack_ptr) {
         taida_val field_val  = pack[2 + i * 3 + 2];
         const char *fname = taida_lookup_field_name(field_hash);
         if (!fname) continue;
+        if (fc >= 5
+            && pack[2 + 2 * 3] == (taida_val)HASH___DEFAULT
+            && field_hash == (taida_val)HASH___ERROR) {
+            continue;
+        }
         // NOTE: Unlike taida_pack_to_display_string, we do NOT skip __ fields
         if (count > 0) {
             const char *s = ", "; size_t sl = 2; while (len + sl + 1 > cap) { cap *= 2; TAIDA_REALLOC(buf, cap, "to_string_full"); } memcpy(buf + len, s, sl); len += sl; buf[len] = '\0';
@@ -8081,7 +8090,7 @@ static taida_val taida_value_to_display_string(taida_val val) {
     if (taida_is_buchi_pack(val)) {
         int fc = taida_monadic_field_count(val);
         if (fc == 3) return taida_result_to_string(val);
-        if (fc == 4) {
+        if (fc == 4 || fc == 5) {
             int gtype = taida_detect_gorillax_type(val);
             if (gtype == 1) return taida_gorillax_to_string(val);
             if (gtype == 2) return taida_relaxed_gorillax_to_string(val);
@@ -8116,7 +8125,7 @@ static taida_val taida_value_to_debug_string(taida_val val) {
     if (taida_is_buchi_pack(val)) {
         int fc = taida_monadic_field_count(val);
         if (fc == 3) return taida_result_to_string(val);
-        if (fc == 4) return taida_lax_to_string(val);
+        if (fc == 4 || fc == 5) return taida_lax_to_string(val);
         return taida_pack_to_display_string(val);
     }
 
@@ -10186,6 +10195,9 @@ static void json_serialize_pack_fields(char **buf, size_t *cap, size_t *len, tai
         if (!fname) continue;
         // Always skip __type (internal metadata, not user data).
         if (strcmp(fname, "__type") == 0) continue;
+        if (monadic_kind == 4 && fc >= 3
+            && pack[2 + 2 * 3] == (taida_val)HASH___DEFAULT
+            && strcmp(fname, "__error") == 0) continue;
         // Non-monadic packs hide all other __ fields.
         // Monadic packs (Lax/Gorillax/RelaxedGorillax/Result) expose them
         // so that jsonEncode output matches the interpreter.

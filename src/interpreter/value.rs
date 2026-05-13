@@ -1075,12 +1075,20 @@ impl Value {
             }
             Value::Bool(b) => b.to_string(),
             Value::BuchiPack(fields) => {
+                let is_lax = fields.iter().any(|(name, value)| {
+                    name == "__type" && matches!(value, Value::Str(s) if s.as_string() == "Lax")
+                });
                 let mut s = String::from("@(");
-                for (i, (name, val)) in fields.iter().enumerate() {
-                    if i > 0 {
+                let mut visible = 0;
+                for (name, val) in fields.iter() {
+                    if is_lax && name == "__error" {
+                        continue;
+                    }
+                    if visible > 0 {
                         s.push_str(", ");
                     }
                     s.push_str(&format!("{} <= {}", name, val.to_debug_string()));
+                    visible += 1;
                 }
                 s.push(')');
                 s

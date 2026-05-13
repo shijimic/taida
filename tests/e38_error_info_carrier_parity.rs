@@ -59,59 +59,54 @@ fn run_command_stdout(mut cmd: Command, label: &str) -> String {
 }
 
 fn run_four_backends(main_path: &Path, dir: &Path) -> [(String, String); 4] {
+    assert!(
+        node_available(),
+        "node is required for 4-backend E38 parity"
+    );
+    assert!(cc_available(), "cc is required for 4-backend E38 parity");
+    assert!(
+        wasmtime_available(),
+        "wasmtime is required for 4-backend E38 parity"
+    );
+
     let mut interp_cmd = Command::new(taida_bin());
     interp_cmd.arg(main_path);
     let interp = run_command_stdout(interp_cmd, "interp run");
 
-    let js = if node_available() {
-        let mjs = dir.join("main.mjs");
-        let mut build_cmd = Command::new(taida_bin());
-        build_cmd
-            .args(["build", "js"])
-            .arg(main_path)
-            .arg("-o")
-            .arg(&mjs);
-        run_command_stdout(build_cmd, "js build");
-        let mut run_cmd = Command::new("node");
-        run_cmd.arg(&mjs);
-        run_command_stdout(run_cmd, "js run")
-    } else {
-        eprintln!("node unavailable; skipping JS leg");
-        String::new()
-    };
+    let mjs = dir.join("main.mjs");
+    let mut build_cmd = Command::new(taida_bin());
+    build_cmd
+        .args(["build", "js"])
+        .arg(main_path)
+        .arg("-o")
+        .arg(&mjs);
+    run_command_stdout(build_cmd, "js build");
+    let mut run_cmd = Command::new("node");
+    run_cmd.arg(&mjs);
+    let js = run_command_stdout(run_cmd, "js run");
 
-    let native = if cc_available() {
-        let bin = dir.join("main.bin");
-        let mut build_cmd = Command::new(taida_bin());
-        build_cmd
-            .args(["build", "native"])
-            .arg(main_path)
-            .arg("-o")
-            .arg(&bin);
-        run_command_stdout(build_cmd, "native build");
-        let run_cmd = Command::new(&bin);
-        run_command_stdout(run_cmd, "native run")
-    } else {
-        eprintln!("cc unavailable; skipping native leg");
-        String::new()
-    };
+    let bin = dir.join("main.bin");
+    let mut build_cmd = Command::new(taida_bin());
+    build_cmd
+        .args(["build", "native"])
+        .arg(main_path)
+        .arg("-o")
+        .arg(&bin);
+    run_command_stdout(build_cmd, "native build");
+    let run_cmd = Command::new(&bin);
+    let native = run_command_stdout(run_cmd, "native run");
 
-    let wasm_full = if cc_available() && wasmtime_available() {
-        let wasm = dir.join("main.wasm");
-        let mut build_cmd = Command::new(taida_bin());
-        build_cmd
-            .args(["build", "wasm-full"])
-            .arg(main_path)
-            .arg("-o")
-            .arg(&wasm);
-        run_command_stdout(build_cmd, "wasm-full build");
-        let mut run_cmd = Command::new("wasmtime");
-        run_cmd.arg(&wasm);
-        run_command_stdout(run_cmd, "wasm-full run")
-    } else {
-        eprintln!("wasmtime unavailable; skipping wasm-full leg");
-        String::new()
-    };
+    let wasm = dir.join("main.wasm");
+    let mut build_cmd = Command::new(taida_bin());
+    build_cmd
+        .args(["build", "wasm-full"])
+        .arg(main_path)
+        .arg("-o")
+        .arg(&wasm);
+    run_command_stdout(build_cmd, "wasm-full build");
+    let mut run_cmd = Command::new("wasmtime");
+    run_cmd.arg(&wasm);
+    let wasm_full = run_command_stdout(run_cmd, "wasm-full run");
 
     [
         ("interp".to_string(), interp),
@@ -123,9 +118,6 @@ fn run_four_backends(main_path: &Path, dir: &Path) -> [(String, String); 4] {
 
 fn assert_four_backends_agree(results: &[(String, String); 4], expected: &str) {
     for (backend, out) in results {
-        if out.is_empty() {
-            continue;
-        }
         assert_eq!(out, expected, "{} backend output mismatch", backend);
     }
 }
@@ -136,15 +128,21 @@ fn json_parse_failure_carries_error_info_across_backends() {
     let main = dir.join("main.td");
     fs::write(
         &main,
-        "Data = @(x: Int)\n\
-         bad <= JSON[\"not valid json\", Data]()\n\
+        "bad <= JSON[\"not valid json\", Int]()\n\
          info <= bad.errorInfo()\n\
          stdout(bad.hasValue().toString())\n\
          stdout(info.hasValue().toString())\n\
          info ]=> err\n\
          stdout(err.type)\n\
          stdout(err.kind)\n\
-         stdout(err.message.contains(\"JSON parse error\").toString())\n\
+         stdout(err.code.toString())\n\
+         stdout(err.message)\n\
+         stdout(bad)\n\
+         stdout(bad.toString())\n\
+         stdout(jsonEncode(bad))\n\
+         stdout(bad.getOrDefault(99).toString())\n\
+         bad ]=> value\n\
+         stdout(value.toString())\n\
          mapped <= bad.map(_ x = x)\n\
          mappedInfo <= mapped.errorInfo()\n\
          stdout(mappedInfo.hasValue().toString())\n\
@@ -155,6 +153,9 @@ fn json_parse_failure_carries_error_info_across_backends() {
     .expect("write main");
 
     let results = run_four_backends(&main, &dir);
-    assert_four_backends_agree(&results, "false\ntrue\nJsonError\nparse\ntrue\ntrue\ntrue");
+    assert_four_backends_agree(
+        &results,
+        "false\ntrue\nJsonError\nparse\n0\nJSON parse error: invalid input\n@(hasValue <= false, __value <= 0, __default <= 0, __type <= \"Lax\")\nLax(default: 0)\n{\"__default\":0,\"__value\":0,\"hasValue\":false}\n99\n0\ntrue\ntrue",
+    );
     let _ = fs::remove_dir_all(&dir);
 }

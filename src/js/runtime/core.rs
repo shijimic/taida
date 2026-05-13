@@ -658,7 +658,7 @@ function JSON_mold(rawValue, schema) {
       return Lax(null, defaultVal, undefined, Object.freeze({
         __type: 'JsonError',
         type: 'JsonError',
-        message: 'JSON parse error: ' + e.message,
+        message: 'JSON parse error: invalid input',
         kind: 'parse',
         code: 0,
       }));
@@ -1007,7 +1007,11 @@ function Lax(value, typedDefault, floatHint, error) {
   // error is recorded — this preserves backwards-compatible JSON
   // serialisation (jsonEncode / __default / __value parity tests must
   // not see a null __error key on success).
-  const _error = error === undefined ? null : error;
+  const _incomingError = error === undefined ? null : error;
+  if (_hasValue && _incomingError !== null) {
+    throw new __TaidaError('StateError', 'Lax success cannot carry ErrorInfo', { kind: 'invalid_state', code: 0 });
+  }
+  const _error = _hasValue ? null : _incomingError;
   const pack = {
     __type: 'Lax',
     __value: _val,
@@ -1030,7 +1034,7 @@ function Lax(value, typedDefault, floatHint, error) {
     },
   };
   if (_floatHint) pack.__floatHint = true;
-  if (_error !== null) pack.__error = _error;
+  if (!_hasValue && _error !== null) pack.__error = _error;
   return Object.freeze(pack);
 }
 
@@ -2850,6 +2854,7 @@ function __taidaSortKeys(obj) {
     for (const k of Object.keys(obj).sort()) {
       // Skip __type — internal metadata, not user data
       if (k === '__type') continue;
+      if (obj.__type === 'Lax' && k === '__error') continue;
       let v = obj[k];
       // Skip any remaining function-valued fields outside the monadic
       // carve-out — JSON.stringify already drops them, but being explicit

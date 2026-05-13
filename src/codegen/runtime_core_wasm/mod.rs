@@ -485,9 +485,12 @@ mod tests {
     /// 2026-05-13 ErrorInfo carrier first slice adds the 5-field Lax
     /// error carrier, JSON parse ErrorInfo metadata, and Lax map/flatMap
     /// preservation; assembled runtime is 345,119 bytes.
+    /// 2026-05-13 E38 review fix-pass adds canonical error code slot
+    /// and hidden Lax `__error` JSON filtering; assembled runtime is
+    /// 345,459 bytes.
     #[test]
     fn test_runtime_core_wasm_fragment_concat_preserves_bytes() {
-        const EXPECTED_TOTAL_LEN: usize = 345_119;
+        const EXPECTED_TOTAL_LEN: usize = 345_459;
         let asm = *RUNTIME_CORE_WASM;
         assert_eq!(
             asm.len(),

@@ -15225,8 +15225,10 @@ stdout(serverResult.ok)
             stderr
         );
         assert!(
-            stderr.contains("startResponse") || stderr.contains("net"),
-            "NET3-6g: {} compile error should mention startResponse or net.\nstderr: {}",
+            stderr.contains("startResponse")
+                || stderr.contains("net")
+                || stderr.contains("2-arg streaming"),
+            "NET3-6g: {} compile error should mention startResponse, net, or the 2-arg streaming handler restriction.\nstderr: {}",
             profile,
             stderr
         );
