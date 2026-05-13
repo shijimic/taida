@@ -358,11 +358,16 @@ taida_val taida_os_exists(taida_val path_ptr) {
 }
 
 // ── EnvVar[name]() → Lax[Str] ─────────────────────────────
+static taida_val taida_os_env_var_lax_error(const char *kind) {
+    taida_val error = taida_make_error_with_kind_code("IoError", "EnvVar error", kind, 0);
+    return taida_lax_empty_error((taida_val)"", error);
+}
+
 taida_val taida_os_env_var(taida_val name_ptr) {
     const char *name = (const char*)name_ptr;
-    if (!name) return taida_lax_empty((taida_val)"");
+    if (!name) return taida_os_env_var_lax_error("invalid");
     const char *val = getenv(name);
-    if (!val) return taida_lax_empty((taida_val)"");
+    if (!val) return taida_os_env_var_lax_error("not_found");
     char *copy = taida_str_new_copy(val);
     return taida_lax_new((taida_val)copy, (taida_val)"");
 }

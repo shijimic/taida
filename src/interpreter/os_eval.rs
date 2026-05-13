@@ -267,6 +267,13 @@ fn make_read_lax_failure(default_val: Value, kind: &str) -> Value {
     make_lax_failure_with_error(default_val, make_io_error_with_kind(kind, "Read error", 0))
 }
 
+fn make_env_var_lax_failure(default_val: Value, kind: &str) -> Value {
+    make_lax_failure_with_error(
+        default_val,
+        make_io_error_with_kind(kind, "EnvVar error", 0),
+    )
+}
+
 fn classify_io_error_kind(err: &std::io::Error) -> &'static str {
     use std::io::ErrorKind;
     match err.kind() {
@@ -828,9 +835,12 @@ impl Interpreter {
 
                 match std::env::var(&name) {
                     Ok(val) => Ok(Some(Signal::Value(make_lax_success(Value::str(val))))),
-                    Err(_) => Ok(Some(Signal::Value(make_lax_failure(Value::str(
-                        String::new(),
-                    ))))),
+                    Err(std::env::VarError::NotPresent) => Ok(Some(Signal::Value(
+                        make_env_var_lax_failure(Value::str(String::new()), "not_found"),
+                    ))),
+                    Err(std::env::VarError::NotUnicode(_)) => Ok(Some(Signal::Value(
+                        make_env_var_lax_failure(Value::str(String::new()), "invalid"),
+                    ))),
                 }
             }
 

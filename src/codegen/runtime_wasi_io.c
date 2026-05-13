@@ -296,26 +296,36 @@ static char *wasi_str_copy(const char *src, int32_t len) {
 
 /* ── EnvVar[name]() → Lax[Str] ── */
 
+static int64_t wasi_env_var_lax_error(const char *kind) {
+    int64_t error = taida_make_error_with_kind_code(
+        (int64_t)(intptr_t)"IoError",
+        (int64_t)(intptr_t)"EnvVar error",
+        (int64_t)(intptr_t)(kind ? kind : "other"),
+        0);
+    return taida_lax_empty_error((int64_t)(intptr_t)"", error);
+}
+
 int64_t taida_os_env_var(int64_t name_ptr) {
     const char *name = (const char *)(intptr_t)name_ptr;
-    if (!name) return taida_lax_empty((int64_t)(intptr_t)"");
+    if (!name) return wasi_env_var_lax_error("invalid");
 
     int32_t name_len = wasi_strlen(name);
-    if (name_len == 0) return taida_lax_empty((int64_t)(intptr_t)"");
+    if (name_len == 0) return wasi_env_var_lax_error("invalid");
 
     /* Get environ sizes */
     int32_t env_count = 0;
     int32_t env_buf_size = 0;
     int32_t err = __wasi_environ_sizes_get(&env_count, &env_buf_size);
-    if (err != 0 || env_count == 0) return taida_lax_empty((int64_t)(intptr_t)"");
+    if (err != 0) return wasi_env_var_lax_error("other");
+    if (env_count == 0) return wasi_env_var_lax_error("not_found");
 
     /* Allocate buffers for environ pointers and data */
     int32_t *env_ptrs = (int32_t *)wasm_alloc(env_count * 4);
     char *env_buf = (char *)wasm_alloc(env_buf_size);
-    if (!env_ptrs || !env_buf) return taida_lax_empty((int64_t)(intptr_t)"");
+    if (!env_ptrs || !env_buf) return wasi_env_var_lax_error("other");
 
     err = __wasi_environ_get(env_ptrs, env_buf);
-    if (err != 0) return taida_lax_empty((int64_t)(intptr_t)"");
+    if (err != 0) return wasi_env_var_lax_error("other");
 
     /* Search for matching key */
     for (int32_t i = 0; i < env_count; i++) {
@@ -332,12 +342,12 @@ int64_t taida_os_env_var(int64_t name_ptr) {
             const char *val = entry + name_len + 1;
             int32_t val_len = wasi_strlen(val);
             char *copy = wasi_str_copy(val, val_len);
-            if (!copy) return taida_lax_empty((int64_t)(intptr_t)"");
+            if (!copy) return wasi_env_var_lax_error("other");
             return taida_lax_new((int64_t)(intptr_t)copy, (int64_t)(intptr_t)"");
         }
     }
 
-    return taida_lax_empty((int64_t)(intptr_t)"");
+    return wasi_env_var_lax_error("not_found");
 }
 
 /* ── allEnv() → HashMap[Str, Str] ── */

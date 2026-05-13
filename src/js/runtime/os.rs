@@ -245,7 +245,7 @@ function __taida_os_exists(path) {
 function __taida_os_envvar(name) {
   const val = typeof process !== 'undefined' && process.env ? process.env[name] : undefined;
   if (val !== undefined) return Lax(val);
-  return Lax(null, '');
+  return Lax(null, '', undefined, __taida_error_pack('IoError', 'EnvVar error', 'not_found', 0));
 }
 
 // ── Side-effect functions (writeFile, appendFile, remove, createDir, rename) ──
