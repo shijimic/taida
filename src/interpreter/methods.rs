@@ -150,6 +150,21 @@ impl Interpreter {
         ])
     }
 
+    pub(crate) fn canonical_error_pack(
+        error_type: &str,
+        message: String,
+        kind: String,
+        code: i64,
+    ) -> Value {
+        Value::pack(vec![
+            ("type".into(), Value::str(error_type.to_string())),
+            ("message".into(), Value::str(message)),
+            ("kind".into(), Value::str(kind)),
+            ("code".into(), Value::Int(code)),
+            ("__type".into(), Value::str(error_type.to_string())),
+        ])
+    }
+
     pub(crate) fn error_info_lax(error: Option<&Value>) -> Value {
         let default = Self::default_error_info_value();
         match error {
@@ -194,15 +209,7 @@ impl Interpreter {
         } else {
             format!("Relaxed gorilla escaped: {}", cause_message)
         };
-        Value::Error(super::value::ErrorValue {
-            error_type: "RelaxedGorillaEscaped".into(),
-            message,
-            fields: vec![
-                ("kind".into(), Value::str(kind)),
-                ("code".into(), Value::Int(code)),
-                ("cause".into(), error.clone()),
-            ],
-        })
+        Self::canonical_error_pack("RelaxedGorillaEscaped", message, kind, code)
     }
 
     /// Evaluate auto-mold method calls on values.
@@ -283,6 +290,14 @@ impl Interpreter {
                         // __value fallback — exactly the same path as ]=> / <=[
                         if method == "unmold" {
                             return self.unmold_value(obj.clone());
+                        }
+                        if method == "errorInfo"
+                            && let Some(type_name_str) = type_name
+                            && (type_name_str == "Error"
+                                || type_name_str == "RelaxedGorillaEscaped"
+                                || self.is_error_subtype(type_name_str, "Error"))
+                        {
+                            return Ok(Signal::Value(Self::error_info_lax(Some(obj))));
                         }
                         // Try user-defined methods from type_methods
                         if let Some(type_name_str) = type_name {

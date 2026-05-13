@@ -488,9 +488,12 @@ mod tests {
     /// 2026-05-13 E38 review fix-pass adds canonical error code slot
     /// and hidden Lax `__error` JSON filtering; assembled runtime is
     /// 345,459 bytes.
+    /// 2026-05-13 E38 Phase 3 canonicalizes RelaxedGorillax throw
+    /// carriers to the 5-field ErrorInfo-compatible shape; assembled
+    /// runtime is 346,202 bytes.
     #[test]
     fn test_runtime_core_wasm_fragment_concat_preserves_bytes() {
-        const EXPECTED_TOTAL_LEN: usize = 345_459;
+        const EXPECTED_TOTAL_LEN: usize = 346_202;
         let asm = *RUNTIME_CORE_WASM;
         assert_eq!(
             asm.len(),

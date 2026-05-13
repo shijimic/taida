@@ -677,6 +677,7 @@ int64_t taida_lax_new(int64_t value, int64_t default_value);
 int64_t taida_lax_empty(int64_t default_value);
 int64_t taida_lax_empty_error(int64_t default_value, int64_t error);
 int64_t taida_make_error_with_kind(int64_t type_ptr, int64_t msg_ptr, int64_t kind_ptr);
+int64_t taida_make_error_with_kind_code(int64_t type_ptr, int64_t msg_ptr, int64_t kind_ptr, int64_t code);
 int64_t taida_lax_unmold(int64_t lax_ptr);
 static int _wasm_is_lax(int64_t val);
 static int _wasm_is_result(int64_t val);

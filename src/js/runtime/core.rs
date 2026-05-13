@@ -349,6 +349,22 @@ function __taida_error_info_lax(error) {
   return Lax(__taida_error_info(error), def);
 }
 
+function __taida_error_pack(type, message, kind, code) {
+  const pack = {
+    __type: String(type || 'Error'),
+    type: String(type || 'Error'),
+    message: String(message || ''),
+    kind: String(kind || type || 'Error'),
+    code: Number.isInteger(code) ? code : 0,
+  };
+  Object.defineProperties(pack, {
+    errorInfo: { value() { return __taida_error_info_lax(pack); }, enumerable: false },
+    throw: { value() { throw pack; }, enumerable: false },
+    toString: { value() { return pack.message || pack.type; }, enumerable: false },
+  });
+  return Object.freeze(pack);
+}
+
 // RCB-101: Inheritance parent map for error type filtering in |==
 // Use globalThis so the registry is shared across ESM modules (each .mjs
 // embeds its own runtime copy, but all modules must see every parent
@@ -2540,10 +2556,11 @@ function __taida_unmold(v) {
       const hv = typeof v.hasValue === 'function' ? v.hasValue() : v.hasValue;
       if (hv) return v.__value;
       const info = __taida_error_info(v.__error);
-      throw new __TaidaError(
+      throw __taida_error_pack(
         'RelaxedGorillaEscaped',
         info.message ? 'Relaxed gorilla escaped: ' + info.message : 'Relaxed gorilla escaped',
-        { kind: info.kind || 'RelaxedGorillaEscaped', code: info.code || 0, cause: v.__error }
+        info.kind || 'RelaxedGorillaEscaped',
+        info.code || 0
       );
     }
   }

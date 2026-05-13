@@ -768,7 +768,10 @@ mod tests {
         //   dispatch add 341 bytes.
         // 2026-05-13 E38 review stdout parity follow-up: hidden Lax
         //   `__error` filtering in full-form Native display adds 168 bytes.
-        const EXPECTED_TOTAL_LEN: usize = 1_123_037;
+        // 2026-05-13 E38 Phase 3: RelaxedGorillax throw now uses the
+        //   canonical 5-field error carrier and propagates kind/code from
+        //   the source error; assembled runtime is 1,124,297 bytes.
+        const EXPECTED_TOTAL_LEN: usize = 1_124_297;
         let asm = *NATIVE_RUNTIME_C;
         assert_eq!(
             asm.len(),

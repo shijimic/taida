@@ -593,6 +593,8 @@ taida_ptr taida_pack_set(taida_ptr pack_ptr, taida_val field_idx, taida_val valu
 taida_ptr taida_pack_set_hash(taida_ptr pack_ptr, taida_val index, taida_val hash);
 taida_ptr taida_pack_set_tag(taida_ptr pack_ptr, taida_val index, taida_val tag);
 taida_val taida_pack_get_idx(taida_ptr pack_ptr, taida_val index);
+taida_val taida_pack_get(taida_ptr pack_ptr, taida_val field_hash);
+taida_val taida_pack_has_hash(taida_ptr pack_ptr, taida_val field_hash);
 taida_val taida_throw(taida_ptr error_val);
 taida_ptr taida_lax_new(taida_val value, taida_val default_value);
 taida_ptr taida_lax_empty(taida_val default_value);
@@ -720,6 +722,9 @@ static int taida_str_byte_len(const char *s, size_t *out_len);
 static taida_val taida_value_to_display_string(taida_val val);
 static taida_val taida_value_to_debug_string(taida_val val);
 static taida_val taida_throw_to_display_string(taida_val throw_val);
+static int taida_safe_cstr(taida_val ptr, size_t max_len);
+static taida_val taida_error_info_pack_from_error(taida_val error);
+static taida_val taida_make_error_with_kind_code(const char *error_type, const char *error_msg, const char *error_kind, taida_val error_code);
 // E34B-017: `taida_result_map_error` materialises the mapped value's
 // display string via the polymorphic helper before wrapping it in a
 // `ResultError`. The helper is defined far below, so forward declare
@@ -1116,6 +1121,10 @@ static taida_val taida_make_error(const char *error_type, const char *error_msg)
 // the Interpreter (which surfaces Error.fields[0] as a direct field via
 // `Value::get_error_field`) and the JS runtime (after the matching lift).
 static taida_val taida_make_error_with_kind(const char *error_type, const char *error_msg, const char *error_kind) {
+    return taida_make_error_with_kind_code(error_type, error_msg, error_kind, 0);
+}
+
+static taida_val taida_make_error_with_kind_code(const char *error_type, const char *error_msg, const char *error_kind, taida_val error_code) {
     taida_register_builtin_error_field_names();
 
     taida_val pack = taida_pack_new(5);
@@ -1136,7 +1145,7 @@ static taida_val taida_make_error_with_kind(const char *error_type, const char *
     taida_pack_set_tag(pack, 2, TAIDA_TAG_STR);
     // code
     taida_pack_set_hash(pack, 3, taida_str_hash((taida_val)"code"));
-    taida_pack_set(pack, 3, 0);
+    taida_pack_set(pack, 3, error_code);
     taida_pack_set_tag(pack, 3, TAIDA_TAG_INT);
     // __type (RCB-101)
     taida_pack_set_hash(pack, 4, (taida_val)0x84d2d84b631f799bULL);
@@ -1649,7 +1658,18 @@ taida_val taida_relaxed_gorillax_unmold(taida_val ptr) {
         return taida_pack_get_idx(ptr, 1);  // hasValue=true → __value
     }
     // hasValue=false → throw RelaxedGorillaEscaped
-    taida_val error = taida_make_error("RelaxedGorillaEscaped", "Relaxed gorilla escaped");
+    taida_val source_error = taida_pack_get_idx(ptr, 2);
+    taida_val info = taida_error_info_pack_from_error(source_error);
+    const char *kind = "RelaxedGorillaEscaped";
+    taida_val code = 0;
+    taida_val kind_hash = taida_str_hash((taida_val)"kind");
+    taida_val code_hash = taida_str_hash((taida_val)"code");
+    if (TAIDA_IS_PACK(info)) {
+        taida_val kind_val = taida_pack_get(info, kind_hash);
+        if (taida_safe_cstr(kind_val, 1024)) kind = (const char*)kind_val;
+        if (taida_pack_has_hash(info, code_hash)) code = taida_pack_get(info, code_hash);
+    }
+    taida_val error = taida_make_error_with_kind_code("RelaxedGorillaEscaped", "Relaxed gorilla escaped", kind, code);
     return taida_throw(error);
 }
 

@@ -284,7 +284,7 @@ impl Interpreter {
 
     /// RCB-101: Check if `thrown_type` IS-A `handler_type` by walking the inheritance chain.
     /// Returns true if they are the same type or if `thrown_type` inherits from `handler_type`.
-    fn is_error_subtype(&self, thrown_type: &str, handler_type: &str) -> bool {
+    pub(crate) fn is_error_subtype(&self, thrown_type: &str, handler_type: &str) -> bool {
         if thrown_type == handler_type {
             return true;
         }

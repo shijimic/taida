@@ -240,6 +240,10 @@ int64_t taida_make_error(int64_t type_ptr, int64_t msg_ptr) {
 }
 
 int64_t taida_make_error_with_kind(int64_t type_ptr, int64_t msg_ptr, int64_t kind_ptr) {
+    return taida_make_error_with_kind_code(type_ptr, msg_ptr, kind_ptr, 0);
+}
+
+int64_t taida_make_error_with_kind_code(int64_t type_ptr, int64_t msg_ptr, int64_t kind_ptr, int64_t code) {
     _wasm_register_builtin_error_field_names();
 
     int64_t pack = taida_pack_new(5);
@@ -250,7 +254,7 @@ int64_t taida_make_error_with_kind(int64_t type_ptr, int64_t msg_ptr, int64_t ki
     taida_pack_set_hash(pack, 2, WASM_HASH_KIND);
     taida_pack_set(pack, 2, kind_ptr);
     taida_pack_set_hash(pack, 3, WASM_HASH_CODE);
-    taida_pack_set(pack, 3, 0);
+    taida_pack_set(pack, 3, code);
     taida_pack_set_hash(pack, 4, WASM_HASH___TYPE);
     taida_pack_set(pack, 4, type_ptr);
     return pack;
@@ -918,9 +922,18 @@ int64_t taida_relaxed_gorillax_unmold(int64_t ptr) {
     if (taida_pack_get_idx(ptr, 0)) {
         return taida_pack_get_idx(ptr, 1);
     }
-    int64_t error = taida_make_error(
+    int64_t info = _wasm_error_info_from_error(taida_pack_get_idx(ptr, 2));
+    int64_t kind = (int64_t)(intptr_t)"RelaxedGorillaEscaped";
+    int64_t code = 0;
+    if (_looks_like_pack(info)) {
+        if (taida_pack_has_hash(info, WASM_HASH_KIND)) kind = taida_pack_get(info, WASM_HASH_KIND);
+        if (taida_pack_has_hash(info, WASM_HASH_CODE)) code = taida_pack_get(info, WASM_HASH_CODE);
+    }
+    int64_t error = taida_make_error_with_kind_code(
         (int64_t)(intptr_t)"RelaxedGorillaEscaped",
-        (int64_t)(intptr_t)"Relaxed gorilla escaped");
+        (int64_t)(intptr_t)"Relaxed gorilla escaped",
+        kind,
+        code);
     return taida_throw(error);
 }
 
