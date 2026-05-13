@@ -929,8 +929,8 @@ Gorillax[42]().hasValue     // true
 Cage[subject, JSCall[@["sum"], @[items], Int]()]() => result  // result: Gorillax[Int]
 // subject : 特定 branch を持つ Molten 値（branch=JS / Build / File）
 // runner  : CageRilla[Branch, Out] 子系統 descriptor
-// 成功: Gorillax(hasValue=true, __value=結果)
-// 失敗: Gorillax(hasValue=false, __error=エラー)
+// 成功: hasValue=true
+// 失敗: hasValue=false、詳細は errorInfo() で取得
 ```
 
 subject branch と runner branch の不一致は compile error として弾かれ、`Gorillax(false)` には包まれません。`Gorillax(false)` は branch 一致後の branch operation 失敗だけを表します。Cage 第 2 引数に通常の Taida function / lambda を直接渡す form (旧 `Cage[molten, _ m = ...]()`) は canonical から外れます。
@@ -970,7 +970,7 @@ relaxed ]=> val  // 失敗時: throw（キャッチ可能）
 
 ### errorInfo() による失敗情報取得
 
-`Gorillax[T]` / `RelaxedGorillax[T]` / `RelaxedGorillaEscaped` は失敗時の error 情報を `Lax[ErrorInfo]` として取り出す公式 accessor を備えます。直接 `__error` フィールドへアクセスする旧表記は `[E1960]` で reject されるため、失敗詳細を読みたい場合は `errorInfo()` を使います。
+`Lax[T]` / `Gorillax[T]` / `RelaxedGorillax[T]` / `RelaxedGorillaEscaped` は失敗時の error 情報を `Lax[ErrorInfo]` として取り出す公式 accessor を備えます。直接 `__error` フィールドへアクセスする旧表記は `[E1960]` で reject されるため、失敗詳細を読みたい場合は `errorInfo()` を使います。詳細を持たない空の `Lax` や成功値に対して呼んだ場合、戻り値の `Lax[ErrorInfo]` も空です。
 
 ```taida fragment
 result = Cage[subject, JSCall[@["fetch"], @[url], Molten]()]()
@@ -985,11 +985,12 @@ err.code        // Int -- numeric code（OS error / HTTP status 等）
 
 | メソッド | レシーバ | 戻り値 |
 |---------|---------|-------|
+| `errorInfo()` | `Lax[T]` | `Lax[ErrorInfo]` |
 | `errorInfo()` | `Gorillax[T]` | `Lax[ErrorInfo]` |
 | `errorInfo()` | `RelaxedGorillax[T]` | `Lax[ErrorInfo]` |
 | `errorInfo()` | `RelaxedGorillaEscaped` | `Lax[ErrorInfo]` |
 
-`Gorillax` が成功 (`hasValue = true`) のときは `errorInfo()` の戻り値 `Lax` の `hasValue = false`（実体は無い）。失敗のときだけ `Lax(true)` で `ErrorInfo` を取り出せます。
+`hasValue = true` の値では `errorInfo()` の戻り値 `Lax` の `hasValue = false`（実体は無い）。失敗のときだけ、producer が詳細を持っていれば `Lax(true)` で `ErrorInfo` を取り出せます。
 
 ### ErrorInfo
 

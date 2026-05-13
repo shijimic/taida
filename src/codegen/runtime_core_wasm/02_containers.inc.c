@@ -239,6 +239,21 @@ int64_t taida_make_error(int64_t type_ptr, int64_t msg_ptr) {
     return pack;
 }
 
+int64_t taida_make_error_with_kind(int64_t type_ptr, int64_t msg_ptr, int64_t kind_ptr) {
+    _wasm_register_builtin_error_field_names();
+
+    int64_t pack = taida_pack_new(4);
+    taida_pack_set_hash(pack, 0, WASM_HASH_TYPE);
+    taida_pack_set(pack, 0, type_ptr);
+    taida_pack_set_hash(pack, 1, WASM_HASH_MESSAGE);
+    taida_pack_set(pack, 1, msg_ptr);
+    taida_pack_set_hash(pack, 2, WASM_HASH_KIND);
+    taida_pack_set(pack, 2, kind_ptr);
+    taida_pack_set_hash(pack, 3, WASM_HASH___TYPE);
+    taida_pack_set(pack, 3, type_ptr);
+    return pack;
+}
+
 /* ── W-5: Lax[T] runtime ────────────────────────────────── */
 /* Lax is a BuchiPack @(hasValue: Bool, __value: T, __default: T, __type: Str)
    Layout: 4-field pack using same hash constants as native. */
@@ -292,6 +307,25 @@ int64_t taida_lax_empty(int64_t default_value) {
     taida_pack_set_hash(pack, 3, WASM_HASH___TYPE);
     taida_pack_set(pack, 3, (int64_t)(intptr_t)"Lax");
     taida_pack_set_tag(pack, 3, WASM_TAG_STR);
+    return pack;
+}
+
+int64_t taida_lax_empty_error(int64_t default_value, int64_t error) {
+    _wasm_register_lax_field_names();
+    int64_t pack = taida_pack_new(5);
+    taida_pack_set_hash(pack, 0, WASM_HASH_HAS_VALUE);
+    taida_pack_set(pack, 0, 0);
+    taida_pack_set_tag(pack, 0, WASM_TAG_BOOL);
+    taida_pack_set_hash(pack, 1, WASM_HASH___VALUE);
+    taida_pack_set(pack, 1, default_value);
+    taida_pack_set_hash(pack, 2, WASM_HASH___DEFAULT);
+    taida_pack_set(pack, 2, default_value);
+    taida_pack_set_hash(pack, 3, WASM_HASH___TYPE);
+    taida_pack_set(pack, 3, (int64_t)(intptr_t)"Lax");
+    taida_pack_set_tag(pack, 3, WASM_TAG_STR);
+    taida_pack_set_hash(pack, 4, WASM_HASH___ERROR);
+    taida_pack_set(pack, 4, error);
+    taida_pack_set_tag(pack, 4, WASM_TAG_PACK);
     return pack;
 }
 
@@ -393,6 +427,11 @@ int64_t taida_error_info(int64_t source) {
         if (taida_pack_get_idx(source, 0)) return taida_lax_empty(def);
         return taida_lax_new(_wasm_error_info_from_error(taida_pack_get_idx(source, 2)), def);
     }
+    if (_wasm_is_lax(source)) {
+        if (taida_pack_get_idx(source, 0)) return taida_lax_empty(def);
+        if (!taida_pack_has_hash(source, WASM_HASH___ERROR)) return taida_lax_empty(def);
+        return taida_lax_new(_wasm_error_info_from_error(taida_pack_get(source, WASM_HASH___ERROR)), def);
+    }
     if (source == 0) return taida_lax_empty(def);
     if (!_wasm_is_error_info_source_pack(source)) return taida_lax_empty(def);
     return taida_lax_new(_wasm_error_info_from_error(source), def);
@@ -416,7 +455,7 @@ int64_t taida_error_info(int64_t source) {
 static int _wasm_is_lax(int64_t val) {
     if (!_wasm_is_valid_ptr(val, 104)) return 0;
     int64_t *p = (int64_t *)(intptr_t)val;
-    if (p[0] != 4 || p[1] != WASM_HASH_HAS_VALUE) return 0;
+    if ((p[0] != 4 && p[0] != 5) || p[1] != WASM_HASH_HAS_VALUE) return 0;
     /* Reject Gorillax / RelaxedGorillax (slot-2 hash == __error). */
     return p[1 + 2 * 3] == WASM_HASH___DEFAULT ? 1 : 0;
 }
@@ -766,6 +805,9 @@ int64_t taida_invoke_callback1(int64_t fn_ptr, int64_t arg0);
 int64_t taida_lax_map(int64_t lax_ptr, int64_t fn_ptr) {
     if (!taida_pack_get_idx(lax_ptr, 0)) {
         int64_t def = taida_pack_get_idx(lax_ptr, 2);
+        if (taida_pack_has_hash(lax_ptr, WASM_HASH___ERROR)) {
+            return taida_lax_empty_error(def, taida_pack_get(lax_ptr, WASM_HASH___ERROR));
+        }
         return taida_lax_empty(def);
     }
     int64_t value = taida_pack_get_idx(lax_ptr, 1);
@@ -778,6 +820,9 @@ int64_t taida_lax_map(int64_t lax_ptr, int64_t fn_ptr) {
 int64_t taida_lax_flat_map(int64_t lax_ptr, int64_t fn_ptr) {
     if (!taida_pack_get_idx(lax_ptr, 0)) {
         int64_t def = taida_pack_get_idx(lax_ptr, 2);
+        if (taida_pack_has_hash(lax_ptr, WASM_HASH___ERROR)) {
+            return taida_lax_empty_error(def, taida_pack_get(lax_ptr, WASM_HASH___ERROR));
+        }
         return taida_lax_empty(def);
     }
     int64_t value = taida_pack_get_idx(lax_ptr, 1);

@@ -278,9 +278,9 @@ int64_t taida_polymorphic_is_empty_full(int64_t ptr) {
     if (ptr == 0) return 1;
     if (!_wf_is_valid_ptr(ptr, 8)) return 0;
     int64_t *p = (int64_t *)(intptr_t)ptr;
-    // fc=4 monadic types: Lax/Gorillax/RelaxedGorillax/Result
+    // fc=4/5 monadic types: Lax/Gorillax/RelaxedGorillax/Result
     // field 0 = hasValue/isOk; isEmpty = !field0
-    if (p[0] == 4) {
+    if (p[0] == 4 || p[0] == 5) {
         if (_wf_is_result(ptr)) return taida_result_is_error(ptr);
         return taida_pack_get_idx(ptr, 0) ? 0 : 1; // Lax/Gorillax
     }

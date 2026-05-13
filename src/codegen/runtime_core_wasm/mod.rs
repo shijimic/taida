@@ -482,9 +482,12 @@ mod tests {
     /// the assembled runtime at 342,258 bytes.
     /// 2026-05-13 Result structural probing now also requires the
     /// `__type` marker; assembled runtime is 342,342 bytes.
+    /// 2026-05-13 ErrorInfo carrier first slice adds the 5-field Lax
+    /// error carrier, JSON parse ErrorInfo metadata, and Lax map/flatMap
+    /// preservation; assembled runtime is 345,119 bytes.
     #[test]
     fn test_runtime_core_wasm_fragment_concat_preserves_bytes() {
-        const EXPECTED_TOTAL_LEN: usize = 342_342;
+        const EXPECTED_TOTAL_LEN: usize = 345_119;
         let asm = *RUNTIME_CORE_WASM;
         assert_eq!(
             asm.len(),

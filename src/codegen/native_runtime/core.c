@@ -1399,6 +1399,27 @@ taida_val taida_lax_empty(taida_val default_value) {
     return pack;
 }
 
+taida_val taida_lax_empty_error(taida_val default_value, taida_val error) {
+    taida_register_lax_field_names();
+    taida_val pack = taida_pack_new(5);
+    taida_pack_set_hash(pack, 0, (taida_val)HASH_HAS_VALUE);
+    taida_pack_set(pack, 0, 0);
+    taida_pack_set_tag(pack, 0, TAIDA_TAG_BOOL);
+    taida_pack_set_hash(pack, 1, (taida_val)HASH___VALUE);
+    taida_pack_set(pack, 1, default_value);
+    taida_retain_and_tag_field(pack, 1, default_value);
+    taida_pack_set_hash(pack, 2, (taida_val)HASH___DEFAULT);
+    taida_pack_set(pack, 2, default_value);
+    taida_retain_and_tag_field(pack, 2, default_value);
+    taida_pack_set_hash(pack, 3, (taida_val)HASH___TYPE);
+    taida_pack_set(pack, 3, (taida_val)__lax_type_str);
+    taida_pack_set_tag(pack, 3, TAIDA_TAG_STR);
+    taida_pack_set_hash(pack, 4, (taida_val)HASH___ERROR);
+    taida_pack_set(pack, 4, error);
+    taida_retain_and_tag_field(pack, 4, error);
+    return pack;
+}
+
 taida_val taida_lax_has_value(taida_val lax_ptr) {
     return taida_pack_get_idx(lax_ptr, 0);  // hasValue field
 }
@@ -3237,6 +3258,14 @@ taida_val taida_error_info(taida_val source) {
     if (taida_is_gorillax_like_pack(source)) {
         if (taida_pack_get_idx(source, 0)) return taida_lax_empty(def);
         taida_val error = taida_pack_get_idx(source, 2);
+        return taida_lax_new(taida_error_info_pack_from_error(error), def);
+    }
+    if (TAIDA_IS_PACK(source)
+        && taida_pack_has_hash(source, (taida_val)HASH_HAS_VALUE)
+        && taida_pack_has_hash(source, (taida_val)HASH___DEFAULT)) {
+        if (taida_pack_get_idx(source, 0)) return taida_lax_empty(def);
+        if (!taida_pack_has_hash(source, (taida_val)HASH___ERROR)) return taida_lax_empty(def);
+        taida_val error = taida_pack_get(source, (taida_val)HASH___ERROR);
         return taida_lax_new(taida_error_info_pack_from_error(error), def);
     }
     if (source == 0) return taida_lax_empty(def);
@@ -7577,6 +7606,9 @@ taida_val taida_lax_map(taida_val lax_ptr, taida_val fn_ptr) {
     if (!taida_pack_get_idx(lax_ptr, 0)) {
         // Empty Lax: return empty with same default
         taida_val def = taida_pack_get_idx(lax_ptr, 2);
+        if (taida_pack_has_hash(lax_ptr, (taida_val)HASH___ERROR)) {
+            return taida_lax_empty_error(def, taida_pack_get(lax_ptr, (taida_val)HASH___ERROR));
+        }
         return taida_lax_empty(def);
     }
     taida_val value = taida_pack_get_idx(lax_ptr, 1);
@@ -7589,6 +7621,9 @@ taida_val taida_lax_map(taida_val lax_ptr, taida_val fn_ptr) {
 taida_val taida_lax_flat_map(taida_val lax_ptr, taida_val fn_ptr) {
     if (!taida_pack_get_idx(lax_ptr, 0)) {
         taida_val def = taida_pack_get_idx(lax_ptr, 2);
+        if (taida_pack_has_hash(lax_ptr, (taida_val)HASH___ERROR)) {
+            return taida_lax_empty_error(def, taida_pack_get(lax_ptr, (taida_val)HASH___ERROR));
+        }
         return taida_lax_empty(def);
     }
     taida_val value = taida_pack_get_idx(lax_ptr, 1);
@@ -7662,13 +7697,13 @@ static int taida_monadic_field_count(taida_val ptr) {
     if (!taida_ptr_is_readable(ptr, sizeof(taida_val) * 3)) return 0;
     taida_val *obj = (taida_val*)ptr;
     taida_val fc = obj[1];
-    // Both Result and Lax are now fc=4; distinguish by hash0
-    if (fc == 4) {
+    // Result is fc=4; Lax may be fc=4 or fc=5 when it carries ErrorInfo metadata.
+    if (fc == 4 || fc == 5) {
         taida_val hash0 = obj[2];
         if (hash0 > 0x10000 || hash0 < 0) {
             // Result (fc=4, hash0=HASH_RES___VALUE) → return 3 for compat
-            if (hash0 == (taida_val)HASH_RES___VALUE) return 3;
-            // Lax/Gorillax/RelaxedGorillax (fc=4, hash0=HASH_HAS_VALUE) → return 4
+            if (fc == 4 && hash0 == (taida_val)HASH_RES___VALUE) return 3;
+            // Lax/Gorillax/RelaxedGorillax (hash0=HASH_HAS_VALUE) → return 4
             if (hash0 == (taida_val)HASH_HAS_VALUE) return 4;
         }
     }
@@ -8826,7 +8861,7 @@ taida_val taida_generic_unmold(taida_val ptr) {
         }
 
     // Lax/Gorillax/RelaxedGorillax (fc=4, hash0=HASH_HAS_VALUE)
-    if (field_count == 4 && hash0 == (taida_val)HASH_HAS_VALUE) {
+    if ((field_count == 4 || field_count == 5) && hash0 == (taida_val)HASH_HAS_VALUE) {
         int gtype = taida_detect_gorillax_type(ptr);
         if (gtype == 1) return taida_gorillax_unmold(ptr);
         if (gtype == 2) return taida_relaxed_gorillax_unmold(ptr);
@@ -9670,7 +9705,7 @@ taida_val taida_json_schema_cast(taida_val raw_ptr, taida_val schema_ptr) {
 
     if (!raw || !schema) {
         taida_val def = json_default_value_for_desc(schema);
-        return taida_lax_empty(def);
+        return taida_lax_empty_error(def, taida_make_error_with_kind("JsonError", "JSON parse error: missing raw value or schema", "parse"));
     }
 
     // Parse JSON
@@ -9679,7 +9714,7 @@ taida_val taida_json_schema_cast(taida_val raw_ptr, taida_val schema_ptr) {
     if (!*p) {
         // Empty string -> parse error
         taida_val def = json_default_value_for_desc(schema);
-        return taida_lax_empty(def);
+        return taida_lax_empty_error(def, taida_make_error_with_kind("JsonError", "JSON parse error: empty input", "parse"));
     }
 
     const char *before_parse = p;
@@ -9690,7 +9725,7 @@ taida_val taida_json_schema_cast(taida_val raw_ptr, taida_val schema_ptr) {
     if (p == before_parse) {
         // Parser didn't consume anything -> parse error
         taida_val def = json_default_value_for_desc(schema);
-        return taida_lax_empty(def);
+        return taida_lax_empty_error(def, taida_make_error_with_kind("JsonError", "JSON parse error: invalid input", "parse"));
     }
 
     // Check if there's trailing non-whitespace (malformed JSON)
@@ -9698,7 +9733,7 @@ taida_val taida_json_schema_cast(taida_val raw_ptr, taida_val schema_ptr) {
     if (*p != '\0') {
         // Trailing garbage -> parse error
         taida_val def = json_default_value_for_desc(schema);
-        return taida_lax_empty(def);
+        return taida_lax_empty_error(def, taida_make_error_with_kind("JsonError", "JSON parse error: trailing input", "parse"));
     }
 
     // Apply schema

@@ -204,6 +204,19 @@ fallback <= Pilot(name <= "Unknown", age <= 0, active <= false)
 JSON[raw, Pilot]().getOrDefault(fallback)
 ```
 
+### errorInfo で失敗詳細を読む
+
+パース失敗時の `Lax` は `ErrorInfo` を保持します。内部フィールドへ直接触れず、`errorInfo()` で取り出します。
+
+```taida fragment
+result <= JSON["not valid json", Pilot]()
+info <= result.errorInfo()
+info ]=> err
+err.type     // "JsonError"
+err.kind     // "parse"
+err.message  // "JSON parse error: ..."
+```
+
 ---
 
 ## スキーママッチングの 6 つのルール

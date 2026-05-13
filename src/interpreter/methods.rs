@@ -168,6 +168,16 @@ impl Interpreter {
         }
     }
 
+    pub(crate) fn lax_failure_with_error(default: Value, error: Value) -> Value {
+        Value::pack(vec![
+            ("hasValue".into(), Value::Bool(false)),
+            ("__value".into(), default.clone()),
+            ("__default".into(), default),
+            ("__type".into(), Value::str("Lax".into())),
+            ("__error".into(), error),
+        ])
+    }
+
     pub(crate) fn relaxed_gorilla_error(error: &Value) -> Value {
         let info = Self::error_info_value(error);
         let (kind, code, cause_message) = if let Value::BuchiPack(fields) = &info {
@@ -781,12 +791,20 @@ impl Interpreter {
             "map" => {
                 if !has_value {
                     // Empty Lax stays empty with same default
-                    return Ok(Signal::Value(Value::pack(vec![
+                    let source_error = fields
+                        .iter()
+                        .find(|(n, _)| n == "__error")
+                        .map(|(_, v)| v.clone());
+                    let mut out_fields = vec![
                         ("hasValue".into(), Value::Bool(false)),
                         ("__value".into(), default_value.clone()),
                         ("__default".into(), default_value),
                         ("__type".into(), Value::str("Lax".into())),
-                    ])));
+                    ];
+                    if let Some(error_value) = source_error {
+                        out_fields.push(("__error".into(), error_value));
+                    }
+                    return Ok(Signal::Value(Value::pack(out_fields)));
                 }
                 let func = match args.first() {
                     Some(Value::Function(f)) => f.clone(),
@@ -806,12 +824,20 @@ impl Interpreter {
             }
             "flatMap" => {
                 if !has_value {
-                    return Ok(Signal::Value(Value::pack(vec![
+                    let source_error = fields
+                        .iter()
+                        .find(|(n, _)| n == "__error")
+                        .map(|(_, v)| v.clone());
+                    let mut out_fields = vec![
                         ("hasValue".into(), Value::Bool(false)),
                         ("__value".into(), default_value.clone()),
                         ("__default".into(), default_value),
                         ("__type".into(), Value::str("Lax".into())),
-                    ])));
+                    ];
+                    if let Some(error_value) = source_error {
+                        out_fields.push(("__error".into(), error_value));
+                    }
+                    return Ok(Signal::Value(Value::pack(out_fields)));
                 }
                 let func = match args.first() {
                     Some(Value::Function(f)) => f.clone(),

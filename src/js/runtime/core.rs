@@ -655,7 +655,13 @@ function JSON_mold(rawValue, schema) {
     try { jsonData = JSON.parse(rawValue); }
     catch (e) {
       const defaultVal = __taida_defaultForSchema(schema);
-      return Lax(null, defaultVal, undefined, 'JSON parse error: ' + e.message);
+      return Lax(null, defaultVal, undefined, Object.freeze({
+        __type: 'JsonError',
+        type: 'JsonError',
+        message: 'JSON parse error: ' + e.message,
+        kind: 'parse',
+        code: 0,
+      }));
     }
   } else {
     jsonData = __taidaValueToJson(rawValue);

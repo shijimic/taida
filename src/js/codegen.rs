@@ -3306,7 +3306,7 @@ impl JsCodegen {
                 if field.starts_with("__") {
                     return Err(JsError {
                         message: format!(
-                            "[E1960] Field '{}' is compiler-internal and cannot be accessed from Taida code. Hint: use unmolding or public methods instead.",
+                            "[E1960] Field '{}' is compiler-internal and cannot be accessed from Taida code. Hint: use unmolding, getOrDefault(default), or errorInfo() instead.",
                             field
                         ),
                     });

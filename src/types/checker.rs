@@ -1597,7 +1597,7 @@ impl TypeChecker {
             self.errors.push(TypeError {
                 message: format!(
                     "[E1612] {} supports only 1-arg response-return httpServe handlers. \
-                     Hint: 2-arg streaming handlers require the interpreter, JS, or native backend.",
+                     Hint: taida-lang/net 2-arg streaming handlers require the interpreter, JS, or native backend.",
                     self.compile_target.label()
                 ),
                 span: args
@@ -5735,8 +5735,8 @@ defaulted fields must be provided via `()`",
                     self.errors.push(TypeError {
                         message: format!(
                             "[E1960] Field '{}' is compiler-internal and cannot be accessed from Taida code. \
-                             Hint: use `]=>` / `<=[` to unmold values, `getOrDefault(default)` for Lax, \
-                             or an official introspection API instead.",
+                             Hint: use `]=>` / `<=[` to unmold values, `getOrDefault(default)` for Lax values, \
+                             or `errorInfo()` for failure details.",
                             field
                         ),
                         span: span.clone(),

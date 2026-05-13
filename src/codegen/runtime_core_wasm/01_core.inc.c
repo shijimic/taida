@@ -675,6 +675,8 @@ int64_t taida_bool_not(int64_t a) { return a ? 0 : 1; }
 /* ── Forward declarations for Lax/Result/Gorillax (defined in W-5 section below) ── */
 int64_t taida_lax_new(int64_t value, int64_t default_value);
 int64_t taida_lax_empty(int64_t default_value);
+int64_t taida_lax_empty_error(int64_t default_value, int64_t error);
+int64_t taida_make_error_with_kind(int64_t type_ptr, int64_t msg_ptr, int64_t kind_ptr);
 int64_t taida_lax_unmold(int64_t lax_ptr);
 static int _wasm_is_lax(int64_t val);
 static int _wasm_is_result(int64_t val);
@@ -3799,7 +3801,7 @@ int64_t taida_polymorphic_has_value(int64_t obj) {
     if (obj == 0) return 0;
     if (!_wasm_is_valid_ptr(obj, 104)) return 0;
     int64_t *p = (int64_t *)(intptr_t)obj;
-    if (p[0] == 4) return taida_pack_get_idx(obj, 0); /* fc=4: Lax/Gorillax/Result */
+    if (p[0] == 4 || p[0] == 5) return taida_pack_get_idx(obj, 0); /* monadic hasValue */
     return 0;
 }
 

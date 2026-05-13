@@ -214,7 +214,7 @@ static int _wc_is_valid_ptr(int64_t val, unsigned int min_bytes) {
 static int _wc_is_lax(int64_t val) {
     if (!_wc_is_valid_ptr(val, 104)) return 0;
     int64_t *p = (int64_t *)(intptr_t)val;
-    if (p[0] == 4 && p[1] == WASM_HASH_HAS_VALUE) return 1;
+    if ((p[0] == 4 || p[0] == 5) && p[1] == WASM_HASH_HAS_VALUE) return 1;
     return 0;
 }
 
@@ -708,14 +708,14 @@ int64_t taida_json_schema_cast(int64_t raw_ptr, int64_t schema_ptr) {
 
     if (!raw || !schema) {
         int64_t def = _wc_json_default_value_for_desc(schema);
-        return taida_lax_empty(def);
+        return taida_lax_empty_error(def, taida_make_error_with_kind((int64_t)(intptr_t)"JsonError", (int64_t)(intptr_t)"JSON parse error: missing raw value or schema", (int64_t)(intptr_t)"parse"));
     }
 
     const char *p = raw;
     _wc_json_skip_ws(&p);
     if (!*p) {
         int64_t def = _wc_json_default_value_for_desc(schema);
-        return taida_lax_empty(def);
+        return taida_lax_empty_error(def, taida_make_error_with_kind((int64_t)(intptr_t)"JsonError", (int64_t)(intptr_t)"JSON parse error: empty input", (int64_t)(intptr_t)"parse"));
     }
 
     const char *before_parse = p;
@@ -723,13 +723,13 @@ int64_t taida_json_schema_cast(int64_t raw_ptr, int64_t schema_ptr) {
 
     if (p == before_parse) {
         int64_t def = _wc_json_default_value_for_desc(schema);
-        return taida_lax_empty(def);
+        return taida_lax_empty_error(def, taida_make_error_with_kind((int64_t)(intptr_t)"JsonError", (int64_t)(intptr_t)"JSON parse error: invalid input", (int64_t)(intptr_t)"parse"));
     }
 
     _wc_json_skip_ws(&p);
     if (*p != '\0') {
         int64_t def = _wc_json_default_value_for_desc(schema);
-        return taida_lax_empty(def);
+        return taida_lax_empty_error(def, taida_make_error_with_kind((int64_t)(intptr_t)"JsonError", (int64_t)(intptr_t)"JSON parse error: trailing input", (int64_t)(intptr_t)"parse"));
     }
 
     const char *desc = schema;
