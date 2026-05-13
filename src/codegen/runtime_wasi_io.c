@@ -800,6 +800,84 @@ static int64_t wasi_read_bytes_at_lax_error(const char *kind) {
     return taida_lax_empty_error(wasi_bytes_default_value(), error);
 }
 
+static int64_t wasi_read_bytes_lax_error(const char *kind) {
+    int64_t error = taida_make_error_with_kind_code(
+        (int64_t)(intptr_t)"IoError",
+        (int64_t)(intptr_t)"ReadBytes error",
+        (int64_t)(intptr_t)(kind ? kind : "other"),
+        0);
+    return taida_lax_empty_error(wasi_bytes_default_value(), error);
+}
+
+int64_t taida_os_read_bytes(int64_t path_ptr) {
+    const char *path = (const char *)(intptr_t)path_ptr;
+    if (!path) return wasi_read_bytes_lax_error("invalid");
+
+    int32_t path_len = wasi_strlen(path);
+    if (path_len == 0) return wasi_read_bytes_lax_error("invalid");
+
+    wasi_resolved_path rp = resolve_preopened_path(path, path_len);
+
+    wasi_fd file_fd = -1;
+    int32_t err = __wasi_path_open(
+        rp.fd,
+        1,  /* dirflags: LOOKUPFLAGS_SYMLINK_FOLLOW */
+        rp.rel_path,
+        rp.rel_path_len,
+        0,  /* oflags: none */
+        WASI_RIGHT_FD_READ | WASI_RIGHT_FD_SEEK,
+        0,
+        0,
+        &file_fd
+    );
+    if (err != 0) return wasi_read_bytes_lax_error(wasi_error_kind(err, 0));
+
+    int64_t file_size = 0;
+    err = __wasi_fd_seek(file_fd, 0, WASI_SEEK_END, &file_size);
+    if (err != 0 || file_size < 0) {
+        __wasi_fd_close(file_fd);
+        return wasi_read_bytes_lax_error(err != 0 ? wasi_error_kind(err, 0) : "invalid");
+    }
+    if (file_size > 64LL * 1024LL * 1024LL) {
+        __wasi_fd_close(file_fd);
+        return wasi_read_bytes_lax_error("too_large");
+    }
+
+    int64_t ignored = 0;
+    err = __wasi_fd_seek(file_fd, 0, WASI_SEEK_SET, &ignored);
+    if (err != 0) {
+        __wasi_fd_close(file_fd);
+        return wasi_read_bytes_lax_error(wasi_error_kind(err, 0));
+    }
+
+    unsigned char *buf = (unsigned char *)wasm_alloc((unsigned int)(file_size > 0 ? file_size : 1));
+    if (!buf) {
+        __wasi_fd_close(file_fd);
+        return wasi_read_bytes_lax_error("other");
+    }
+
+    int64_t filled = 0;
+    int32_t io_err = 0;
+    while (filled < file_size) {
+        wasi_iovec iov;
+        iov.buf = (int32_t)(intptr_t)(buf + filled);
+        iov.len = (int32_t)(file_size - filled);
+        int32_t nread = 0;
+        int32_t r = __wasi_fd_read(file_fd, &iov, 1, &nread);
+        if (r != 0) { io_err = r; break; }
+        if (nread == 0) break;
+        filled += nread;
+    }
+    __wasi_fd_close(file_fd);
+
+    if (io_err != 0) {
+        return wasi_read_bytes_lax_error(wasi_error_kind(io_err, 0));
+    }
+
+    int64_t bytes = wasi_bytes_from_raw(buf, filled);
+    return taida_lax_new(bytes, wasi_bytes_default_value());
+}
+
 int64_t taida_os_read_bytes_at(int64_t path_ptr, int64_t offset, int64_t len) {
     const char *path = (const char *)(intptr_t)path_ptr;
     if (!path) return wasi_read_bytes_at_lax_error("invalid");

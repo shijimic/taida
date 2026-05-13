@@ -267,6 +267,13 @@ fn make_read_lax_failure(default_val: Value, kind: &str) -> Value {
     make_lax_failure_with_error(default_val, make_io_error_with_kind(kind, "Read error", 0))
 }
 
+fn make_read_bytes_lax_failure(default_val: Value, kind: &str) -> Value {
+    make_lax_failure_with_error(
+        default_val,
+        make_io_error_with_kind(kind, "ReadBytes error", 0),
+    )
+}
+
 fn make_read_bytes_at_lax_failure(default_val: Value, kind: &str) -> Value {
     make_lax_failure_with_error(
         default_val,
@@ -1085,23 +1092,26 @@ impl Interpreter {
                 match std::fs::metadata(&path) {
                     Ok(meta) => {
                         if meta.len() > MAX_READ_SIZE {
-                            return Ok(Some(Signal::Value(make_lax_failure(Value::bytes(
-                                Vec::new(),
-                            )))));
+                            return Ok(Some(Signal::Value(make_read_bytes_lax_failure(
+                                Value::bytes(Vec::new()),
+                                "too_large",
+                            ))));
                         }
                     }
-                    Err(_) => {
-                        return Ok(Some(Signal::Value(make_lax_failure(Value::bytes(
-                            Vec::new(),
-                        )))));
+                    Err(e) => {
+                        return Ok(Some(Signal::Value(make_read_bytes_lax_failure(
+                            Value::bytes(Vec::new()),
+                            classify_io_error_kind(&e),
+                        ))));
                     }
                 }
 
                 match std::fs::read(&path) {
                     Ok(content) => Ok(Some(Signal::Value(make_lax_success(Value::bytes(content))))),
-                    Err(_) => Ok(Some(Signal::Value(make_lax_failure(Value::bytes(
-                        Vec::new(),
-                    ))))),
+                    Err(e) => Ok(Some(Signal::Value(make_read_bytes_lax_failure(
+                        Value::bytes(Vec::new()),
+                        classify_io_error_kind(&e),
+                    )))),
                 }
             }
 

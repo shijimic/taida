@@ -1126,6 +1126,9 @@ fn runtime_func_prototype(name: &str, profile: WasmProfile) -> Result<String, Wa
         "taida_os_read" if profile == WasmProfile::Wasi || profile == WasmProfile::Full => {
             "int64_t taida_os_read(int64_t path_ptr);".to_string()
         }
+        "taida_os_read_bytes" if profile == WasmProfile::Wasi || profile == WasmProfile::Full => {
+            "int64_t taida_os_read_bytes(int64_t path_ptr);".to_string()
+        }
         "taida_os_write_file" if profile == WasmProfile::Wasi || profile == WasmProfile::Full => {
             "int64_t taida_os_write_file(int64_t path_ptr, int64_t content_ptr);".to_string()
         }
@@ -1156,6 +1159,7 @@ fn runtime_func_prototype(name: &str, profile: WasmProfile) -> Result<String, Wa
         }
         // wasm-edge does not support file I/O
         "taida_os_read"
+        | "taida_os_read_bytes"
         | "taida_os_write_file"
         | "taida_os_exists"
         | "taida_os_read_bytes_at"
@@ -1173,6 +1177,7 @@ fn runtime_func_prototype(name: &str, profile: WasmProfile) -> Result<String, Wa
         "taida_os_env_var"
         | "taida_os_all_env"
         | "taida_os_read"
+        | "taida_os_read_bytes"
         | "taida_os_write_file"
         | "taida_os_exists"
         | "taida_os_read_bytes_at"

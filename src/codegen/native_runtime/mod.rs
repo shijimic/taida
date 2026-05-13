@@ -778,7 +778,9 @@ mod tests {
         // 2026-05-13 E38 Phase 4: readBytesAt(path, offset, len) Lax failure
         //   now carries canonical IoError metadata; assembled runtime is
         //   1,125,165 bytes.
-        const EXPECTED_TOTAL_LEN: usize = 1_125_165;
+        // 2026-05-13 E38 Phase 4: readBytes(path) Lax failure now carries
+        //   canonical IoError metadata; assembled runtime is 1,125,447 bytes.
+        const EXPECTED_TOTAL_LEN: usize = 1_125_447;
         let asm = *NATIVE_RUNTIME_C;
         assert_eq!(
             asm.len(),

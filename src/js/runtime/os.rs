@@ -159,15 +159,23 @@ function __taida_os_read(path) {
 }
 
 function __taida_os_readBytes(path) {
-  if (!__os_fs) return __taida_lax_from_bytes(new Uint8Array(0), false);
+  if (!__os_fs) return __taida_os_readBytes_error('unavailable');
   try {
     const stat = __os_fs.statSync(path);
-    if (stat.size > __OS_MAX_READ_SIZE) return __taida_lax_from_bytes(new Uint8Array(0), false);
+    if (stat.size > __OS_MAX_READ_SIZE) return __taida_os_readBytes_error('too_large');
     const content = __os_fs.readFileSync(path);
     return __taida_lax_from_bytes(new Uint8Array(content), true);
   } catch (e) {
-    return __taida_lax_from_bytes(new Uint8Array(0), false);
+    return __taida_os_readBytes_error(__taida_os_error_kind(e));
   }
+}
+
+function __taida_os_readBytes_error(kind) {
+  return __taida_lax_from_bytes(
+    new Uint8Array(0),
+    false,
+    __taida_error_pack('IoError', 'ReadBytes error', kind || 'other', 0)
+  );
 }
 
 // C26B-020 柱 1: chunked / large-file bytes read.
