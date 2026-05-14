@@ -273,6 +273,7 @@ jobs:
       base64-subjects: ${{ needs.sign.outputs.artefact_digests }}
       upload-assets: false
       provenance-name: taida-release-provenance.intoto.jsonl
+      compile-generator: true
 
   publish:
     name: Publish Release
