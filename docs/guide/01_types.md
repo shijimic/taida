@@ -28,17 +28,9 @@ rate <= 0.5
 
 **デフォルト値**: `0.0`
 
-**4-backend parity** (Interpreter / JS / Native / WASM):
-`3.0` と `3` は Taida parser で `FloatLit` / `IntLit` として区別されます。
-`Int[x]()` / `Float[x]()` の判定・`stdout(3.0)` の表示・関数戻り値を跨いだ
-Float → Str 変換のいずれも 4 backend で同一出力になります
-(C21-1〜C21-5)。
-
-WASM では `wasm-wasi` / `wasm-edge` / `wasm-full` 3 profile に `-msimd128`
-が付与されているため、Float の hot loop を LLVM の auto-vectorizer が
-`v128.*` / `f64x2.*` に降ろし得ます (C21-3)。`wasm-min` は後方互換のため
-simd128 を要求しない最小バイナリのままです。詳細は
-[reference/cli.md](../reference/cli.md) を参照してください。
+`3.0` と `3` は Taida のパーサで `FloatLit` / `IntLit` として区別されます。
+バックエンドごとの実行詳細 (WASM プロファイル別の SIMD 設定など) は
+[CLI リファレンス](../reference/cli.md) を参照してください。
 
 ### Str -- 文字列
 
@@ -136,20 +128,22 @@ Error => ValidationError = @(
 
 Molten には型パラメータがありません。Molten は Molten でしかありません。メソッドも持たず、直接操作は一切できません。
 
-`@e.X` 以降のドキュメント上のモデルでは、Molten は型引数を持たない基底とし、用途別に次の分岐へ分かれます:
+Molten は型引数を持たない基底であり、用途別に次の分岐へ分かれます:
 
 - `Molten => JSON`: JSON のデコード専用。`JSON[raw, Schema]()` で型安全な値へ鋳造します。
 - `Molten => JS`: JS / npm 連携専用。`Cage` と JS 補助モールドはこの分岐だけを扱います。
-- `Molten => TemperedMolten[T]`: ビルド記述子向けの将来分岐。`@e.X` のランタイムでは直接利用しません。
+- `Molten => TemperedMolten[T]`: ビルド記述子向けの分岐。ランタイムから直接は利用しません。
+
+スキーマ照合の挙動と JSON 出力方向の安全性は [JSON 溶鉄](03_json.md) を参照してください。
 
 `Bytes` と `Molten` は役割が異なります。
 
-- `Bytes`: 3バックエンド共通のバイナリデータ型
-- `Molten`: JS外部世界由来の不透明値（JS専用連携境界）
+- `Bytes`: バイナリデータを保持するバックエンド共通の組み込み型
+- `Molten`: 外部世界（JS / JSON など）由来の不透明値で、スキーマを通さなければ使えません
 
-`UnsafePointer` はコア言語に導入しません。危険な低レベル境界は `Molten` などの不透明ハンドル + 専用APIで隔離します。
+`UnsafePointer` はコア言語に導入しません。危険な低レベル境界は `Molten` などの不透明ハンドル + 専用 API で隔離します。
 
-**デフォルト値**: `Molten`（Molten 型のデフォルト値は Molten 自身です。空の溶鉄です）
+**デフォルト値**: `Molten`（空の溶鉄）
 
 ### JSON -- Molten の JSON 分岐
 
@@ -184,6 +178,8 @@ numbers <= @[1, 2, 3, 4, 5]
 names <= @["Asuka", "Rei"]
 empty: @[Int] <= @[]
 ```
+
+空リスト束縛では要素型を必ず型注釈で示してください。`empty <= @[]` のように省略すると要素型が確定せず、後続の要素操作で型エラー（`[E0401]`）の原因になります。
 
 **デフォルト値**: `@[]` (空リスト)
 
@@ -233,11 +229,11 @@ asuka <= Pilot(name <= "Asuka", age <= 14, active <= true)
 
 ---
 
-## モールディング型 `Mold[T]`
+## モールド型 `Mold[T]`
 
 > **PHILOSOPHY.md -- III.** カタめたいなら、鋳型を作りましょう
 
-型パラメータ化を実現する仕組みです。値を鋳型に流し込み（モールディング）、必要なときに取り出します（アンモールディング `]=>` / `<=[`）。
+型パラメータ化を実現する仕組みです。値を鋳型に流し込み（モールド）、必要なときに取り出します（アンモールド `]=>` / `<=[`）。
 
 ```taida
 // 鋳型の定義
@@ -309,7 +305,7 @@ rilax ]=> total              // 成功 → 値, 失敗 → ゴリラ（プログ
 rilax.relax() => relaxed     // relaxed: RelaxedGorillax[Int]
 ```
 
-**デフォルト値**: なし（unmold 失敗時はゴリラまたは throw）
+**デフォルト値**: なし（アンモールド失敗時はゴリラまたは throw）
 
 ### Async[T]
 
@@ -322,64 +318,6 @@ fetchData url: Str =
 
 data <= fetchData("https://api.nerv.jp/pilots")
 data ]=> response          // 完了まで待ちます
-```
-
----
-
-## 特殊型: Molten -- 溶鉄
-
-Molten は他の型とは根本的に異なります。溶鉄です。形がなく、メソッドを持たず、直接操作はできません。JSON は `Molten => JSON`、npm パッケージ等から得られる値は `Molten => JS` として扱います。
-
-### 溶鉄の鋳造
-
-```taida
-// スキーマ（鋳型）を定義します
-Pilot = @(
-  name: Str
-  age: Int
-  sync_rate: Int
-)
-
-// JSON を鋳型に流し込みます
-raw <= '{"name": "Asuka", "age": 14, "sync_rate": 78}'
-JSON[raw, Pilot]() ]=> pilot
-
-pilot.name      // "Asuka"
-pilot.age       // 14
-pilot.sync_rate  // 78
-```
-
-### スキーマ照合のルール
-
-| ルール | 動作 |
-|--------|------|
-| フィールド一致 | スキーマに定義されたフィールドのみ抽出。余分は無視 |
-| フィールド欠損 | 型のデフォルト値を使用 |
-| 型不一致 | 型のデフォルト値を使用 |
-| null | 型のデフォルト値に変換（null 排除） |
-| ネスト | 再帰的にスキーマ照合 |
-| リスト | 各要素にスキーマを適用 |
-
-```taida fragment
-// フィールド欠損 → デフォルト値
-raw <= '{"name": "Rei"}'
-JSON[raw, Pilot]() ]=> pilot
-// pilot = @(name <= "Rei", age <= 0, sync_rate <= 0)
-
-// null → デフォルト値
-raw <= '{"name": null, "age": null}'
-JSON[raw, Pilot]() ]=> pilot
-// pilot = @(name <= "", age <= 0, sync_rate <= 0)
-```
-
-### 出力方向は安全
-
-Taida の値を JSON 文字列にする方向は型安全です。プリリュード関数を使います:
-
-```taida
-pilot <= Pilot(name <= "Asuka", age <= 14, sync_rate <= 78)
-jsonEncode(pilot)   // '{"name":"Asuka","age":14,"sync_rate":78}'
-jsonPretty(pilot)   // 整形された JSON 文字列
 ```
 
 ---
@@ -446,9 +384,8 @@ true.toString()              // "true"
 
 `.toString()` は **全ての値型で利用できる共通メソッド** です。Int / Float /
 Bool / Str / List / ぶちパック / Lax / Result / HashMap / Set など、どの型に
-対しても呼び出せて、必ず `:Str` を返します。3 バックエンド (Interpreter / JS /
-Native) で挙動が一致します。文字列連結 (`+`) と組み合わせて使うのが標準的な
-使い方です:
+対しても呼び出せて、必ず `:Str` を返します。文字列連結 (`+`) と組み合わせて
+使うのが標準的な使い方です:
 
 ```taida
 status <= 404
@@ -459,7 +396,7 @@ stdout(msg)                  // "HTTP Error 404"
 引数は受け取りません。`n.toString(16)` のように base / precision を渡そう
 とすると、`taida way check` が `[E1508] Method 'toString' takes 0 argument(s)`
 で拒否します。基数指定が必要な場合は `ToRadix[n, base]()` モールド
-（`docs/reference/class_like_types.md` 参照）を使います。`ToRadix` は
+（[`docs/api/prelude.md §7.1`](../api/prelude.md#71-数値拡張モールド) 参照）を使います。`ToRadix` は
 `Lax[Str]` を返すので、通常は `getOrDefault` で unwrap します:
 
 ```taida
@@ -475,18 +412,25 @@ ToRadix[26, 2]().getOrDefault("") ]=> bin     // "11010"
 | モールド | 入力 | 出力 | 説明 |
 |---------|------|------|------|
 | `Int[x]()` | Str, Float, Bool | Lax[Int] | 整数に変換 |
-| `Int[str, base]()` | Str, Int (2..36) | Lax[Int] | 指定基数で文字列を整数に変換 |
 | `Float[x]()` | Str, Int | Lax[Float] | 浮動小数点に変換 |
 | `Str[x]()` | Int, Float, Bool | Lax[Str] | 文字列に変換 |
 | `Bool[x]()` | Int, Str | Lax[Bool] | 真偽値に変換 |
 
-`Int[str]()` は文字列から整数への変換の正規経路です。`"+5"` や `"-7"` のような符号付き文字列も受理します。空文字列、数字以外の文字を含む文字列、小数点を含む文字列は変換失敗（`has_value=false`）になります。
+`Int` モールドだけは引数の数を 1 個または 2 個から選べます。1 引数なら 10 進数として解釈し、2 引数なら第二引数で基数 (2〜36) を指定します。
+
+```taida fragment
+Int["42"]() ]=> dec           // 42 (10 進数として解釈)
+Int["ff", 16]() ]=> hex       // 255 (16 進数として解釈)
+Int["1010", 2]() ]=> bin      // 10 (2 進数として解釈)
+```
+
+`Int` は文字列から整数への変換の正規経路です。`"+5"` や `"-7"` のような符号付き文字列も受理します。空文字列、数字以外の文字を含む文字列、小数点を含む文字列は変換失敗（`has_value=false`）になります。
 
 ---
 
 ## 型アノテーション
 
-型推論があるので、ほとんどの場合は型アノテーションを書く必要がありません。書きたいときだけ書けば十分です。
+型推論があるので、変数束縛ではほとんどの場合に型アノテーションを書く必要がありません。書きたいときだけ書けば十分です。ただし**関数定義の戻り型 (`=> :T`) は必須**で、省略するとパースエラーになります。
 
 ```taida fragment
 // 型推論に任せます（ほとんどの場合はこれで十分です）
@@ -501,6 +445,8 @@ pilots: @[Pilot] <= @[Pilot(name <= "Ritsuko")]
 ```
 
 ### 関数の型指定
+
+関数の戻り型 (`=> :T`) は省略できません。引数の型は推論が効く文脈であれば省略可能ですが、ガイドラインとしては明示する方を推奨します。
 
 ```taida
 add x: Int y: Int =
@@ -575,21 +521,6 @@ message <= greet(staff)  // OK: NervStaff は Pilot の部分型です
 
 ---
 
-## 型エイリアス
-
-型に別名をつけることができます。
-
-```taida
-PilotId = Int
-PilotName = Str
-PilotList = @[Pilot]
-
-id: PilotId <= 2
-name: PilotName <= "Asuka"
-```
-
----
-
 ## Enum 型
 
 列挙型です。有限個のバリアントから1つを選ぶ値を定義します。
@@ -614,9 +545,9 @@ stdout(myStatus == Status:Retry())  // true
 
 enum値は ordinal（0始まりの Int）として評価されます。`Status:Ok()` は `0`、`Status:Fail()` は `1`、`Status:Retry()` は `2` です。
 
-### モジュール越境 (C18-1)
+### モジュール越境
 
-Enum 型は `<<< @(...)` で export、`>>> ./mod.td => @(...)` で import できます。import 先では `Status:Ok()` を直接使えます。
+Enum 型は `<<< @(...)` でエクスポート、`>>> ./mod.td => @(...)` でインポートできます。インポート先では `Status:Ok()` を直接呼び出せます。
 
 ```taida
 // status.td
@@ -630,17 +561,17 @@ s <= Status:Ok()
 stdout(s)  // 0
 ```
 
-**順序整合性**: import 先で同名の `Enum => Status = ...` を **再定義** している場合、variant の並びが import 元と一致している必要があります。不整合は `[E1618]` で検出されます。
+**順序整合性**: インポート先で同名の `Enum => Status = ...` を再定義している場合、バリアントの並びがインポート元と一致している必要があります。不整合があると `[E1618]` で拒否されます。
 
 ```
 [E1618] Enum 'Status' variant order mismatch across module boundary.
 ```
 
-Enum の宣言順は semantic です。import 元で順序を変更すると、既存 call site の ordinal が暗黙に変わり、`jsonEncode` 出力や ordering 比較 (C18-4) に影響します。順序変更時は all imports を grep して確認してください。
+バリアントの宣言順は意味を持ちます。インポート元で順序を変更すると、既存の呼び出し箇所の ordinal が暗黙に変わり、`jsonEncode` 出力や順序比較の挙動に影響するため、変更時は依存先をすべて確認してください。
 
-### 順序比較 (C18-4)
+### 順序比較
 
-同一 Enum のバリアント同士は、宣言順を使って比較できます:
+同一 Enum のバリアント同士は、宣言順を使って比較できます。
 
 ```taida
 Enum => HiveState = :Creating :Running :Stopped
@@ -656,18 +587,18 @@ ready s =
 => :Str
 ```
 
-許可されるのは:
+許可される比較:
 - 同一 Enum 同士: `HiveState:A() < HiveState:B()`
 
-拒否（`[E1605]`）されるのは:
+`[E1605]` で拒否される比較:
 - 異なる Enum 同士: `HiveState:A() < OtherEnum:B()`
 - Enum と Int: `HiveState:A() > 0` — 明示的な Int 変換が必要
 
-Enum ↔ Int で比較したい場合は、`Ordinal[]` モールド（次節）経由で Int 側に揃えてください。
+Enum と Int を比較したい場合は、次節の `Ordinal[]` モールドで Int 側に揃えてください。
 
-### `Ordinal[]` モールド (C18-3)
+### `Ordinal[]` モールド
 
-`Ordinal[Enum:Variant()]()` で Enum 値を宣言 ordinal の Int に変換します:
+`Ordinal[Enum:Variant()]()` で Enum 値を宣言 ordinal の Int に変換します。
 
 ```taida
 Enum => HiveState = :Creating :Running :Stopped
@@ -675,17 +606,16 @@ Enum => HiveState = :Creating :Running :Stopped
 n <= Ordinal[HiveState:Running()]()
 stdout(n.toString())  // 1
 
-// Int カラムとの比較 — C18-4 の ordering を使わず、
-// 明示的に Int 空間へ降ろしてから比較する。
+// Int 列との比較は順序比較ではなく Ordinal[] 経由で揃える。
 state <= HiveState:Stopped()
 ok <= Ordinal[state]() > 0
 ```
 
-`Ordinal[]` は Enum → Int の **唯一の正規経路** です。`.toString()` の戻り値を `Int[]` で parse する workaround は fragile なので使わないでください（`.toString()` の将来仕様変更で壊れます）。
+`Ordinal[]` は Enum → Int の唯一の正規経路です。`.toString()` の戻り値を `Int[]` でパースする回避策は将来の仕様変更で壊れるため使わないでください。
 
-### JSON wire 形式 (C18-2)
+### JSON wire 形式
 
-`jsonEncode` は Enum フィールドを **variant 名 Str** で出力します（C16 の `JSON[raw, Schema]()` decoder と対称）:
+`jsonEncode` は Enum フィールドをバリアント名の文字列として出力します（`JSON[raw, Schema]()` デコーダーと対称）。
 
 ```taida
 Enum => HiveState = :Creating :Running :Stopped
@@ -694,20 +624,7 @@ rec <= @(state <= HiveState:Running())
 stdout(jsonEncode(rec))  // {"state":"Running"}
 ```
 
-詳細は `docs/guide/03_json.md` 参照。
-
-### ビルトイン enum: HttpProtocol
-
-`taida-lang/net` パッケージは `HttpProtocol` enum をエクスポートします:
-
-```taida
->>> taida-lang/net => @(httpServe, HttpProtocol)
-
-// HttpProtocol:H1() → 0 (wire: "h1.1")
-// HttpProtocol:H2() → 1 (wire: "h2")
-// HttpProtocol:H3() → 2 (wire: "h3")
-httpServe(8080, handler, 1, 1000, 128, @(protocol <= HttpProtocol:H1()))
-```
+詳細は [JSON 溶鉄](03_json.md) を参照してください。
 
 **デフォルト値**: 最初のバリアント（ordinal 0）
 
@@ -725,9 +642,9 @@ httpServe(8080, handler, 1, 1000, 128, @(protocol <= HttpProtocol:H1()))
 | プリミティブ | JSON 分岐 | `{}` (メソッドなし) |
 | コレクション | @[T] (リスト) | `@[]` |
 | コレクション | @(...) (ぶちパック) | 各フィールドのデフォルト値 |
-| モールディング | Result[T, P] | T のデフォルト値 |
-| モールディング | Lax[T] | T のデフォルト値 |
-| モールディング | Async[T] | T のデフォルト値 |
+| モールド | Result[T, P] | T のデフォルト値 |
+| モールド | Lax[T] | T のデフォルト値 |
+| モールド | Async[T] | T のデフォルト値 |
 | 列挙型 | Enum | 最初のバリアント (ordinal 0) |
 
 操作はモールドで行います。メソッドは状態チェック + toString + モナディック操作のみです。型変換もモールドで明示的に行います。null はありません。

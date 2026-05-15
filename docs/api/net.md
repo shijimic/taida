@@ -1,505 +1,656 @@
 # `taida-lang/net` API リファレンス
 
-> Core bundled package. `>>> taida-lang/net => @(...)` で import、または import 無しで直接呼び出し可能（両経路とも checker で同じ型 signature に pin されます）。
+`taida-lang/net` は HTTP / WebSocket / Server-Sent Events を扱うコア同梱
+パッケージです。サーバー (`httpServe`)、リクエストパース
+(`httpParseRequestHead`)、レスポンスエンコード (`httpEncodeResponse`)、
+WebSocket 5 関数、SSE 出力関数、span 操作モールド 5 種を公開します。
 
-3-backend (Interpreter / JS / Native) で parity を保証します。タグ別の land 履歴は `CHANGELOG.md` を参照してください。
+```taida
+>>> taida-lang/net => @(httpServe, readBody, startResponse, endResponse, writeChunk)
+```
+
+`taida-lang/net` はプレリュード非含有のため、利用するには必ず明示的な
+インポートが必要です。
+
+HTTP クライアント (`HttpRequest`) は `taida-lang/os` 側で提供されます。
+[`docs/api/os.md`](os.md) を参照してください。
 
 ---
 
-## 1. 設計方針
+## 1. サーバー
 
-Taida の NET surface は **zero-copy span** を基本単位とします:
+### 1.1 `httpServe`
 
-- `httpServe` handler / `httpParseRequestHead` が返す `req` pack の `method` / `path` / `query` / `headers[i].name` / `headers[i].value` / `body` は **`@(start: Int, len: Int)` の span pack** で、元の `req.raw: Bytes` に対する view です。
-- 原本の `Bytes` を clone せず、必要になった時点で user が明示的に **span → Str** または **span-aware 比較** を呼ぶ形にしています。clone-heavy 抑制のため、内部的にはアトミック参照カウント付きの共有バッファに対する copy-on-write 共通基盤を用います。
-- span pack を受け取る公開 mold 群は `§ 4 span-aware 比較 mold` を参照。
-- 「`req.method` を自動で `Str` に昇格する」設計は **採用していません**。span pack を zero-copy の基本単位として永続保持し、ergonomics は span-aware 公開 mold 群 (`§ 4` の `SpanEquals` / `SpanStartsWith` / `SpanContains` / `SpanSlice` / `StrOf`) で解決します。
+> 指定ポートで HTTP サーバーを起動し、各リクエストを `handler` に渡す
+> 非同期処理を返す。
+
+```taida
+httpServe port: Int  handler: HandlerFn => :Async[Result[@(ok: Bool, requests: Int)]]
+httpServe port: Int  handler: HandlerFn  opts: ServeOpts => :Async[Result[@(ok: Bool, requests: Int)]]
+```
+
+**Parameters**:
+
+| Name | Type | Description |
+|------|------|-------------|
+| `port` | `Int` | bind するポート番号。`0` を渡すと OS が空きポートを割り当てる。 |
+| `handler` | `HandlerFn` | リクエスト処理関数。単引数形式 (応答返却) と双引数形式 (ストリーミング) のいずれか。§1.2 / §1.3 を参照。 |
+| `opts` | `ServeOpts` | 動作オプション。省略時は全項目デフォルト。§1.4 を参照。 |
+
+**Returns**: `:Async[Result[@(ok: Bool, requests: Int)]]` — `]=>` で待機
+すると `Result` が得られ、もう一度 `]=>` で終了結果 pack
+`@(ok: Bool, requests: Int)` を取り出します。`ok` は bind / accept ループが
+正常に閉じたかどうか、`requests` は実際に処理したリクエスト数です。
+
+**Example**:
+
+```taida
+handler req: Request =
+  "HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello"
+=> :Str
+
+httpServe(8080, handler) ]=> result    // Async unmold → Result
+result ]=> summary                     // Result unmold → @(ok, requests)。失敗時 throw
+stdout("requests: " + summary.requests.toString())
+```
+
+**AI-Context**:
+accept ループは終了条件 (`opts.maxRequests` 到達、外部からのキャンセル
+等) に達するまで継続します。`port = 0` で起動した場合の実効ポートは
+バックエンドの実装ログから観測します。
+
+### 1.2 `HandlerFn` — 単引数ハンドラ (応答返却形式)
+
+```taida
+handler req: Request => :Str
+handler req: Request => :Bytes
+```
+
+リクエスト 1 件あたり HTTP wire 文字列 (`"HTTP/1.1 200 OK\r\n..."`) または
+`Bytes` をそのまま return する形式です。`req` の shape は §2.1 を参照。
+
+### 1.3 `HandlerFn` — 双引数ハンドラ (ストリーミング形式)
+
+```taida
+handler req: Request  writer: Writer => @[]
+```
+
+`writer` 経由でレスポンス本体を逐次書き出す形式です。`writer` は
+§1.5 / §1.6 / §1.7 の API (`startResponse` / `writeChunk` / `endResponse`)
+を持ちます。戻り値は無視されるため、暫定で空 list `@[]` を返します。
+
+> **重要 — 双引数ハンドラでの body 取得**: 双引数形式は streaming 前提
+> で設計されており、ハンドラ呼び出し時点では body を読まずに `req.body`
+> の `len` は `0` です。body を読む場合は必ず `readBody(req)` /
+> `readBodyChunk(req)` / `readBodyAll(req)` のいずれかを使ってください。
+>
+> - `readBody(req)` — 単引数 / 双引数いずれにも対応。双引数では body を
+>   最後まで読む `readBodyAll` と同等。
+> - `readBodyChunk(req)` — 双引数専用。chunk 単位で `Lax[Bytes]` を返し、
+>   残り chunk が無くなった時点で `has_value <= false` になる。
+> - `readBodyAll(req)` — 双引数専用。body を最後まで読み切って `Bytes` を
+>   返す。
+>
+> 単引数で動く `Slice[req.raw, req.body.start, req.body.start + req.body.len]`
+> のような直接 slice を双引数ハンドラへ持ち込むと、`req.body.len` が `0`
+> なので **空 `Bytes` が静かに返る**点に注意してください。単引数から双引数
+> へ移行する際の典型的な落とし穴です。
+
+### 1.4 `ServeOpts`
+
+`opts` は次のフィールドを持つぶちパックです。
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `maxRequests` | `Int` | `0` (無制限) | この件数を処理した時点で accept ループを終える。 |
+| `timeoutMs` | `Int` | バックエンド既定値 | accept / read の待機時間上限 (ミリ秒)。 |
+| `maxConnections` | `Int` | バックエンド既定値 | 同時接続数の上限。 |
+| `tls` | `TlsOpts` | `@()` (TLS 無効) | TLS 設定。非空にすると HTTPS サーバーとして起動する。 |
+
+`TlsOpts` は以下のぶちパックです。
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `cert` | `Str` | `""` | サーバー証明書 (PEM)。 |
+| `key` | `Str` | `""` | 秘密鍵 (PEM)。 |
+| `protocol` | `Str` | `""` (= `"h1"`) | `"h2"` で HTTP/2 over TLS、`"h1"` または空文字で HTTP/1.1 over TLS。 |
+
+### 1.5 `startResponse`
+
+> ストリーミングレスポンスの開始行とヘッダを書き出す。
+
+```taida
+startResponse writer: Writer  status: Int  headers: @[@(name: Str, value: Str)] => @[]
+```
+
+**Parameters**:
+
+| Name | Type | Description |
+|------|------|-------------|
+| `writer` | `Writer` | 双引数ハンドラの 2 番目の引数。 |
+| `status` | `Int` | HTTP ステータスコード (`200`, `404`, `500` 等)。 |
+| `headers` | `@[@(name: Str, value: Str)]` | レスポンスヘッダ。要素は `@(name, value)` のぶちパックのみ受理。 |
+
+**Constraints**:
+
+- `headers` は **必ず** `@[@(name: Str, value: Str)]` 形式。他形式は reject。
+- `Content-Length` と `Transfer-Encoding` は指定不可 (ランタイムが framing を管理)。
+- ヘッダ名は 8192 byte 以下、値は 65536 byte 以下、いずれも CR / LF を含めない。
+- ヘッダ名のバイト文法 (RFC 7230 §3.2.6 token) と禁止文字は §3.5 を参照。
+
+### 1.6 `writeChunk`
+
+> ストリーミングレスポンスの body chunk を書き出す。
+
+```taida
+writeChunk writer: Writer  data: Str => @[]
+writeChunk writer: Writer  data: Bytes => @[]
+```
+
+`startResponse` の後、`endResponse` の前に 0 回以上呼び出します。`Str` を
+渡した場合は UTF-8 エンコードした byte 列が wire に出ます。
+
+### 1.7 `endResponse`
+
+> ストリーミングレスポンスを終端する。
+
+```taida
+endResponse writer: Writer => @[]
+endResponse writer: Writer  trailer: Bytes => @[]
+```
+
+最後の chunk を送り、必要に応じて trailing 部分を書き出して接続を閉じ
+ます。
 
 ---
 
-## 2. Server
+## 2. リクエスト / レスポンス型
 
-### 2.1 `httpServe`
+### 2.1 `Request` (単引数ハンドラ)
 
-```
-httpServe(port: Int, handler: Fn) -> Async[Gorillax[@(ok: Bool, requests: Int)]]
-httpServe(port: Int, handler: Fn, opts: BuchiPack) -> Async[Gorillax[@(ok: Bool, requests: Int)]]
-```
+| Field | Type | Description |
+|-------|------|-------------|
+| `raw` | `Bytes` | 生のリクエスト wire bytes (header + body 全体)。 |
+| `method` | `@(start: Int, len: Int)` | method の span (`raw` 内の `start` から `len` バイト)。 |
+| `path` | `@(start: Int, len: Int)` | path の span。 |
+| `query` | `@(start: Int, len: Int)` | query の span。query が無い場合は `len = 0`。 |
+| `version` | `@(major: Int, minor: Int)` | HTTP バージョン (`major=1 minor=1` 等)。 |
+| `headers` | `@[@(name: span, value: span)]` | ヘッダリスト。`name` / `value` のどちらも span。 |
+| `body` | `@(start: Int, len: Int)` | body の span (`start = bodyOffset`、`len = contentLength`)。 |
+| `bodyOffset` | `Int` | head 終端 offset (= body 開始位置)。 |
+| `contentLength` | `Int` | `Content-Length` ヘッダ値、または chunked の累積バイト数。 |
+| `remoteHost` | `Str` | peer の IP 文字列 (`"127.0.0.1"` 等)。 |
+| `remotePort` | `Int` | peer のポート番号。 |
+| `keepAlive` | `Bool` | HTTP/1.1 既定 `true`、`Connection: close` で `false`。 |
+| `chunked` | `Bool` | `Transfer-Encoding: chunked` の場合 `true`。 |
 
-指定ポートで HTTP サーバーを起動し、受信した各リクエストを `handler`
-に渡して処理する非同期処理を返します。サーバーは accept ループを
-継続し、終了条件 (リクエスト数上限・キャンセル等) に達するまで動作
+method / path / query / headers の各 span は `Request.raw` 上の view です。
+具体的な値が必要な場合は §3 の span モールドを使って取り出します。
+
+### 2.2 `Request` (双引数ハンドラ)
+
+双引数ハンドラは streaming 前提なので、`body` 系フィールドの初期値が
+単引数と異なります。
+
+| Field | 単引数ハンドラ | 双引数ハンドラ |
+|-------|----------------|----------------|
+| `body` | buffered body 全体に対する span | `@(start: bodyOffset, len: 0)` (body は未読) |
+| `contentLength` | 確定値 | ヘッダ値そのまま (>0 でも body は未読) |
+
+他のフィールドは単引数と同じです。
+
+---
+
+## 3. span モールド
+
+`Request.method` などの span から具体値を取り出すモールド 5 種を公開
 します。
 
-- `port` — bind するポート番号。`0` を渡すと OS が空きポートを割り当てます。
-- `handler` — 各リクエストを処理する関数値。1 引数形式 (レスポンス値を
-  return) と 2 引数形式 (writer を介してストリーミング) を受け付け
-  ます。詳細は §2.2 / §2.3 を参照してください。
-- `opts` — 動作オプションをまとめた `BuchiPack`。省略時はすべての
-  オプションがデフォルト値で動作します。受け付けるフィールドは次の
-  とおりです。
+### 3.0 一覧
 
-| フィールド | 型 | 省略時のデフォルト | 意味 |
-|------------|----|--------------------|------|
-| `maxRequests` | `Int` | `0` (無制限) | このリクエスト数を処理した時点でサーバーを停止 |
-| `timeoutMs` | `Int` | バックエンド既定値 | accept / read の待ち時間上限 (ミリ秒) |
-| `maxConnections` | `Int` | バックエンド既定値 | 同時接続数の上限 |
-| `tls` | `BuchiPack` | `@()` (TLS 無効) | TLS 設定。`@(cert: Str, key: Str, protocol: Str)` の形式 |
+| Mold | Signature | 用途 |
+|------|-----------|------|
+| `StrOf` | `StrOf[span, raw]() => :Str` | span を `Str` に取り出す。 |
+| `SpanEquals` | `SpanEquals[span, raw, needle: Str]() => :Bool` | span と `needle` が byte 列として一致するか。 |
+| `SpanStartsWith` | `SpanStartsWith[span, raw, prefix: Str]() => :Bool` | span の先頭が `prefix` で始まるか。 |
+| `SpanContains` | `SpanContains[span, raw, needle: Str]() => :Bool` | span 内に `needle` が含まれるか。 |
+| `SpanSlice` | `SpanSlice[span, raw, start: Int, end: Int]() => :@(start: Int, len: Int)` | 親 span 内の部分 span を返す。 |
 
-`tls` を非空にして起動すると、TLS 経由の HTTPS サーバーになります。
-`protocol <= "h2"` を指定すると HTTP/2 over TLS、省略 (`""` のデフォルト
-値) または `"h1"` で HTTP/1.1 over TLS です。
+すべての span モールドの `span` 引数は `@(start: Int, len: Int)` 形式の
+ぶちパック、`raw` 引数は `Bytes` を取ります。
 
-戻り値の `Async` を `]=>` で待つと `Gorillax[@(ok: Bool, requests: Int)]`
-が得られ、さらに `]=>` で summary pack を取り出します。`ok` は bind /
-accept loop が正常に閉じたか、`requests` は実際に処理したリクエスト数
-です。
+### 3.1 `StrOf`
 
-### 2.2 1-arg handler (response-return form)
+> span を `Str` として取り出す。
 
-```
-handler req: BuchiPack = ... => :Str
+```taida
+StrOf[span: @(start: Int, len: Int), raw: Bytes]() => :Str
+StrOf(span: @(start: Int, len: Int), raw: Bytes) => :Str
 ```
 
-戻り値は HTTP wire 文字列 (`"HTTP/1.1 200 OK\r\n..."`) または `Bytes`。Interpreter / Native は同じ HTTP/1.1 ライターパスを通ります。
+`StrOf` だけはモールド形式 (`StrOf[...]()`) と関数形式 (`StrOf(...)`) の
+両方を受理します。span が invalid UTF-8 や範囲外を指していた場合は空
+`Str` を返します。
 
-### 2.3 2-arg handler (streaming form)
+**Example**:
 
+```taida
+m <= StrOf[req.method, req.raw]()
+// m = "GET"
 ```
-handler req: BuchiPack writer: BuchiPack = ... => :Unit
+
+### 3.2 `SpanEquals`
+
+```taida
+SpanEquals[span: @(start: Int, len: Int), raw: Bytes, needle: Str]() => :Bool
 ```
 
-`writer` pack は下記 `writer.write(bytes)` / `writer.end()` などを持つ streaming API。Interpreter / Native は同じ chunked ライターパスを通ります。
+**Example**:
 
-> **Important — 2-arg handler body handling**: 2-arg form で handler 内から `req.body` を直接参照すると span の `len` が 0 になります (streaming 前提で body は eagerly 読まれない仕様)。**body を読む場合は必ず `readBody(req)` / `readBodyChunk(req)` / `readBodyAll(req)` のいずれかを使用**してください:
->
-> - `readBody(req)` — 1-arg / 2-arg 両対応。2-arg では `readBodyAll` と同等 (stream を全読)。
-> - `readBodyChunk(req)` — 2-arg 専用。chunk 単位で `Lax[Bytes]` を返す。残り chunk が無い場合 `Lax` の `has_value = false`。
-> - `readBodyAll(req)` — 2-arg 専用。body を最後まで読んで `Bytes` を返す。
->
-> 1-arg handler での `Slice[req.raw, req.body.start, req.body.start + req.body.len]` パスを 2-arg にそのまま持ち込むと **silent に空 Bytes が返る**ため注意。1-arg 形式から 2-arg + streaming 形式へ移行する際に最頻発するハマりどころです。詳細は §3.2 / §8 を参照。
+```taida
+isGet <= SpanEquals[req.method, req.raw, "GET"]()
+```
+
+### 3.3 `SpanStartsWith`
+
+```taida
+SpanStartsWith[span: @(start: Int, len: Int), raw: Bytes, prefix: Str]() => :Bool
+```
+
+**Example**:
+
+```taida
+isApi <= SpanStartsWith[req.path, req.raw, "/api"]()
+```
+
+### 3.4 `SpanContains`
+
+```taida
+SpanContains[span: @(start: Int, len: Int), raw: Bytes, needle: Str]() => :Bool
+```
+
+**Example**:
+
+```taida
+req.headers.get(0) ]=> first
+hasGzip <= SpanContains[first.value, req.raw, "gzip"]()
+```
+
+### 3.5 `SpanSlice`
+
+```taida
+SpanSlice[span: @(start: Int, len: Int), raw: Bytes, start: Int, end: Int]() => :@(start: Int, len: Int)
+```
+
+親 span 内の `[start, end)` 範囲を指す sub span を返します。`start` /
+`end` は親 span 内 0-based。
+
+**Example**:
+
+```taida
+subSpan <= SpanSlice[req.query, req.raw, 0, 10]()
+```
+
+### 3.6 使い分け
+
+| 用途 | 推奨モールド |
+|------|-------------|
+| method / path の文字列一致判定 | `SpanEquals` |
+| path の prefix 判定 | `SpanStartsWith` |
+| ヘッダ値内のトークン検索 | `SpanContains` |
+| query string の分解 | `SpanSlice` を併用して各部 span を取り出す |
+| ログ出力 / JSON parse 前の取り出し | `StrOf` |
 
 ---
 
-## 3. `req` pack shape
+## 4. HTTP parse / encode
 
-`httpServe` handler / `httpParseRequestHead` の返り値 pack は 2 arity で **フィールドの有無が異なります**:
+### 4.1 `httpParseRequestHead`
 
-### 3.1 1-arg handler req shape
+> リクエストヘッダ部 (start line + ヘッダ block、CRLFCRLF まで) を parse
+> する。
 
-| Field | Type | 意味 |
-|-------|------|------|
-| `raw` | `Bytes` | 生 request wire bytes (head + body 全体) |
-| `method` | `@(start: Int, len: Int)` | method の span (view over `raw`) |
-| `path` | `@(start: Int, len: Int)` | path の span |
-| `query` | `@(start: Int, len: Int)` | query の span (query 無しの場合 `len = 0`) |
-| `version` | `@(major: Int, minor: Int)` | HTTP version (`major=1 minor=1` / `major=2 minor=0` / ...) |
-| `headers` | `@[@(name: span, value: span)]` | header リスト。`name` / `value` 双方が span pack |
-| `body` | `@(start: Int, len: Int)` | body の span (`start = bodyOffset`, `len = contentLength` 想定) |
-| `bodyOffset` | `Int` | head 終端 offset (= body start) |
-| `contentLength` | `Int` | Content-Length header 値 (明示されない場合 `0` または chunked の累積) |
-| `remoteHost` | `Str` | peer address の IP string (`"127.0.0.1"` 等) |
-| `remotePort` | `Int` | peer port |
-| `keepAlive` | `Bool` | HTTP/1.1 default true, `Connection: close` で false |
-| `chunked` | `Bool` | `Transfer-Encoding: chunked` の場合 true |
-
-### 3.2 2-arg handler req shape
-
-2-arg form は **streaming** を意図するため、`body` の初期値が 1-arg form と異なります:
-
-| Field | 1-arg handler | 2-arg handler |
-|-------|---------------|---------------|
-| `body` | span over buffered body (`contentLength` が揃っている) | span `@(start: bodyOffset, len: 0)` (streaming 前提) |
-| `contentLength` | 確定値 | header 値をそのまま (>0 でも body は未読) |
-
-他のフィールドは 1-arg と同じ。上記差異は 3-backend で pin されています。
-
----
-
-## 4. Span-aware 比較 mold
-
-`taida-lang/net` は span pack を直接受け取る公開 mold 5 種を提供します。3-backend (Interpreter / JS / Native) で parity を保証します。
-
-### 4.0 API summary (full family)
-
-| mold | signature | path | 用途 |
-|------|-----------|------|------|
-| `SpanEquals` | `SpanEquals[span, raw, needle: Str]() -> Bool` | hot | router の method / path 一致判定 (memcmp 相当、zero allocation) |
-| `SpanStartsWith` | `SpanStartsWith[span, raw, prefix: Str]() -> Bool` | hot | router の prefix match (zero allocation) |
-| `SpanContains` | `SpanContains[span, raw, needle: Str]() -> Bool` | warm | header 値内の token 検索 (`Accept-Encoding: gzip` 等) |
-| `SpanSlice` | `SpanSlice[span, raw, start: Int, end: Int]() -> BuchiPack` | warm | 親 span 内での sub-span 抽出 (zero allocation、`@(start, len)` を返す) |
-| `StrOf` | `StrOf[span, raw]() -> Str` / `StrOf(span, raw) -> Str` | cold | span → `Str` 明示 materialize (log 出力 / JSON parse 前のみ使用) |
-
-> **Note on form**: `StrOf` は mold form (`StrOf[...]()`) と function-form (`StrOf(span, raw)`) の両方に対応しています。他の `Span*` family は hot path を意識して mold form 専用です。
-
-以下の public mold を `taida-lang/net` から公開します。3-backend (Interpreter / JS / Native) で parity 保証。
-
-### 4.1 `StrOf[span, raw]() -> Str`
-
-```
-m <= StrOf[req.method, req.raw]()     // "GET"
+```taida
+httpParseRequestHead bytes: Bytes => :Lax[BuchiPack]
 ```
 
-span を明示的に `Str` に変換します (PascalCase mold form、Span* family と統一)。**new allocation を発生させる cold path 用**で、ログ出力 / デバッグ / JSON parse 前の materialize に使用します。
+返り値の pack shape は §2.1 の `Request` から `body` / `bodyOffset` /
+`contentLength` / `remoteHost` / `remotePort` / `keepAlive` / `chunked` を
+除いたものです。
 
-- hot path (request ごとの router match 等) では `SpanEquals` / `SpanStartsWith` を使い、materialization を避けてください。
-- invalid UTF-8 span / OOB span は **empty `Str`** を返します (tolerant semantics、`Utf8Decode` の Lax と違い直接 Str を返す。cold-path 簡便さを優先)。
+### 4.2 `httpEncodeResponse`
 
-等価な既存構文:
+> ステータス・ヘッダ・body から HTTP wire bytes を組み立てる。
 
-```
-// 下記も動作 (char-based Slice、cold path の alternative):
-m <= Slice[req.raw](start <= req.method.start, end <= req.method.start + req.method.len)
-```
-
-既存の `Str[raw](start, end)` 形式も継続して同じ結果を返します。
-
-### 4.2 `SpanEquals[span, raw, needle: Str]() -> Bool`
-
-```
-SpanEquals[req.method, req.raw, "GET"]()   // Bool
+```taida
+httpEncodeResponse status: Int  headers: @[@(name: Str, value: Str)]  body: Bytes => :Bytes
 ```
 
-span が `needle` と byte-level で一致するか判定します。**zero-copy** (memcmp 相当)、router の method 判定に最適化した **hot path 用**。
+### 4.3 HTTP wire-byte 上限
 
-### 4.3 `SpanStartsWith[span, raw, prefix: Str]() -> Bool`
+`httpServe` / `httpParseRequestHead` は次のフィールドに parser 段階で
+上限を設けます。上限超過時はハンドラを呼ばずに `400 Bad Request` を返し
+て接続を閉じます。
 
-```
-SpanStartsWith[req.path, req.raw, "/api"]()
-```
+| Field | 上限 |
+|-------|------|
+| method | 16 byte |
+| path | 2048 byte |
+| authority (`Host` ヘッダ) | 256 byte |
 
-span の先頭が `prefix` か判定。router pattern match 用。
+### 4.4 chunked transfer-encoding ガード
 
-### 4.4 `SpanSlice[span, raw, start: Int, end: Int]() -> BuchiPack`
+`Transfer-Encoding: chunked` の `chunk-size` には 3 段のガードがあります。
+いずれかに違反するリクエストは `400 Bad Request` ＋ 接続クローズで reject
+されます。
 
-```
-subSpan <= SpanSlice[req.query, req.raw, 0, 10]()   // @(start, len) pack
-```
+1. **桁数上限**: 16 進 16 桁以上の `chunk-size` は parse せずに reject。
+   上限は 15 桁 (`FFFFFFFFFFFFFFF`)。leading-zero でも literal byte 数で
+   評価されるため、`0000000000000001` (16 桁) は magnitude が 1 でも
+   reject。
+2. **OWS reject**: `chunk-size` 内・前後の SP / HTAB / CR / LF は RFC 7230
+   §4.1 に従いすべて reject。リバースプロキシが OWS を寛容に解釈する一方
+   で本実装が strict に reject することで request smuggling 経路を遮断
+   します。
+3. **算術 overflow ガード**: 15 桁以下の入力でも、累算は 64 bit で
+   overflow 検知付きに行い、`SIZE_MAX` を超える値は reject。
 
-span の sub-span を返します。`start` / `end` は **親 span 内** の offset (0-based)。query の分解 / header value の部分抽出に使用。
+空 `chunk-size` (`;ext\r\n` のような行) は streaming / eager どちらの
+読み出し path でも reject されます。`;` 以降の chunk-extension 自体は
+ignore しますが、`chunk-size` 内に空白を含めることは許しません (RFC 7230
+errata 4667 の `BWS ";"` 寛容条項より strict)。
 
-### 4.5 `SpanContains[span, raw, needle: Str]() -> Bool`
+malformed `chunk-size` を検出した場合、`httpServe` は当該接続だけを閉じ、
+accept ループは他のクライアントを受け付け続けます。
 
-```
-SpanContains[req.headers(0).value, req.raw, "gzip"]()
-```
+#### chunk-line / trailer DoS ガード
 
-header 値の中に `needle` が含まれるか判定。`Accept-Encoding` 等の値検索に使用。
-
-### 4.6 使い分け指針
-
-| 用途 | 推奨 mold | 理由 |
-|------|----------|------|
-| router の method 分岐 (per request) | `SpanEquals` | hot path、allocation を避ける |
-| router の path prefix 判定 | `SpanStartsWith` | 同上 |
-| log 出力 / デバッグ (cold path) | `StrOf` | 1 回だけ allocation、可読性重視 |
-| body parsing / JSON 解析 | `StrOf(req.body, req.raw)` を JSON mold に渡す | 一度に allocate して再利用 |
-| query string 分解 | `SpanSlice` で分解 → 各 subspan に `StrOf` | 不要な allocation を避ける |
-
-Function-form `StrOf(span, raw)` は §4.1 を参照してください。
-
----
-
-## 5. HTTP parse / encode
-
-### 5.1 `httpParseRequestHead(bytes: Bytes) -> Lax[BuchiPack]`
-
-request head (start line + header block、CRLFCRLF まで) を parse。返り値の pack shape は §3 とほぼ同じ (`body` / `bodyOffset` / `contentLength` / `remoteHost` / `remotePort` / `keepAlive` / `chunked` は含まない)。
-
-### 5.2 `httpEncodeResponse(status: Int, headers: @[...], body: Bytes) -> Bytes`
-
-response を wire bytes に encode します。
-
-### 5.3 HTTP wire-byte ceilings
-
-`httpServe` / `httpParseRequestHead` は attacker 制御可能な HTTP wire field に **parser 段階で上限**を設け、over-limit 時は `400 Bad Request` を emit してハンドラを呼ばずに接続を閉じます。上限は Native codegen の固定 size stack buffer と揃えてあり、silent truncation を防ぎます。
-
-| field | 上限 | 根拠 |
-|-------|------|------|
-| method | **16 byte** | ネイティブランタイムの固定長メソッドバッファ |
-| path | **2048 byte** | ネイティブランタイムの固定長パスバッファ |
-| authority | **256 byte** | Host ヘッダ用の固定長バッファ |
-
-これらの上限はインタプリタ / ネイティブの両 HTTP/1.1 パーサで一貫して
-強制されます。HTTP/2 / HTTP/3 path の現況は `CHANGELOG.md` を参照
-してください。
-
-### 5.4 Chunked transfer-encoding overflow guard
-
-`Transfer-Encoding: chunked` の `chunk-size` は次のガードを通った値だけが採用されます。いずれかに違反するリクエストは `400 Bad Request` ＋ connection close で reject されます。
-
-1. **桁数 cap (leading-zero policy 含む)**: 16 進 16 桁以上 (= 65 bit 以上) の `chunk-size` は parse せずに reject します。`FFFFFFFFFFFFFFF` (15 桁、約 `0xFFFFFFFFFFFFFFF`) が上限です。**leading-zero でも 15 桁 cap は literal byte 数で評価**するため、`0000000000000001` (16 桁) は magnitude が 1 でも reject されます。Interpreter / Native / JS で同一 cap を共有します。
-2. **OWS reject**: `chunk-size` 内・前後の SP / HTAB / CR / LF をすべて reject します (RFC 7230 §4.1)。reverse proxy が OWS を寛容に解釈する一方で本実装が reject することで request smuggling 経路を遮断します。3 バックエンドで同一 grammar です。
-3. **算術 overflow guard**: 15 桁以下の入力でも、累算は `uint64_t` 上で `__builtin_mul_overflow` / `__builtin_add_overflow` (Native) または `checked_mul` / `checked_add` (Interpreter) で行い、`SIZE_MAX` を超えた値は reject します。`size_t` が 32-bit のプラットフォームで 8 桁目以降が silent wrap-around して terminator chunk として誤認される CL.TE / TE.TE smuggling 経路を塞ぐためです。
-
-streaming path (`readBodyChunk` / `readBodyAll`) は eager path と同じ OWS reject / 15 桁 leading-zero cap / 算術 overflow guard を共有します。Native は `strtoull` + `errno == ERANGE` + `chunk_size_ull > SIZE_MAX` の三段、Interpreter は `parse_chunk_size_hex_bytes` の `checked_mul` / `checked_add`、JS は `parseInt` 後の `Number.isSafeInteger` で同等の overflow guard を行います (`strtoul` は LP32 では 32-bit `unsigned long` に bound されるため使用しません)。空 chunk-size (`;ext\r\n` のような行) は streaming / eager 双方で reject します。
-
-`;` 以降の chunk-extension は通常 ignore しますが、本実装は **`chunk-size` 自体に空白を含めることを許しません**。RFC 7230 errata 4667 の `BWS ";"` 寛容条項より strict に振っているのは、reverse proxy が OWS を緩く扱う一方で本実装が strict に reject することで request smuggling 経路を遮断するための security hardening です。
-
-malformed な `chunk-size` を受信した場合は process 全体を terminate せず、`shutdown(fd, SHUT_RDWR)` で当該 connection のみを閉じ、httpServe の accept loop は他 client を受け付け続けます。
-
-#### Chunk-line / trailer DoS guard
-
-`chunked` framing には桁数 / OWS / overflow guard に加えて、長さ・個数のハード cap を 3 バックエンド共通で導入しています。chunk-extension flooding や trailer flooding で 1 リクエストあたりのメモリ / CPU を攻撃者が swing させる経路を塞ぎます。
+桁数 / OWS / overflow に加え、chunk-extension flooding と trailer flooding
+への hard cap を設けています。
 
 | Guard | 値 | 適用範囲 |
-|------|-----|---------|
-| `MAX_CHUNK_LINE_BYTES` | 1 MiB | `chunk-size` 行 (chunk-size + chunk-ext) と各 trailer 行の最大長 |
-| `MAX_TRAILER_COUNT` | 64 行 | 終端 chunk (`0\r\n`) 後に許容する trailer header 行数 |
-| `MAX_TRAILER_BYTES` | 8 KiB | 全 trailer 行の合計バイト数 (終端 CRLF を除く) |
+|-------|----|---------|
+| chunk-line 最大長 | 1 MiB | `chunk-size` 行 (chunk-size + chunk-extension) と各 trailer 行の最大長 |
+| trailer 行数上限 | 64 行 | 終端 chunk (`0\r\n`) 後に許容する trailer header 行数 |
+| trailer 合計上限 | 8 KiB | 全 trailer 行の合計バイト数 (終端 CRLF を除く) |
 
-Interpreter `helpers.rs::MAX_CHUNK_LINE_BYTES` / `MAX_TRAILER_COUNT` / `MAX_TRAILER_BYTES`、Native `net_h1_h2.c::TAIDA_NET_MAX_*`、JS `net.rs::__TAIDA_NET_MAX_*` で同じ値を共有します。いずれの cap を超えた framing も `chunk-size` overflow と同じく `400 Bad Request` ＋ connection close で reject されます。eager path (1-arg handler の `readBody`) と streaming path (2-arg handler の `readBodyChunk` / `readBodyAll`) の双方で同じ三段の cap が掛かります。
+いずれかを超えた framing は `400 Bad Request` ＋ 接続クローズで reject
+されます。eager path (単引数ハンドラの `readBody`) と streaming path
+(双引数ハンドラの `readBodyChunk` / `readBodyAll`) で同じ cap が掛かり
+ます。
 
-streaming path 側の cap 適用は、Interpreter `Self::read_line_from_body` / `Self::drain_chunked_trailers`、Native `taida_net4_read_line` (戻り値 `ssize_t`、cap 超過は `-1`) / `taida_net4_drain_chunked_trailers`、JS `__taida_net_readLineFromBody` / `__taida_net_drainChunkedTrailers` で実装されています。chunk-size 行 / chunk-data trailer 行が `MAX_CHUNK_LINE_BYTES` を超えた場合、または trailer drain で `MAX_TRAILER_COUNT` 行を超えるか累計 `MAX_TRAILER_BYTES` を超えた場合は、いずれもエラーとして報告され、上位 API は `taida_net4_abort_connection` 等で connection を close します。これにより eager / streaming のいずれを使っても `Trailer:` flooding / chunk-ext flooding に対する 3-backend parity が維持されます。
+`Trailer:` リクエストヘッダに列挙されていない trailer 名の reject
+(RFC 9110 §6.5 SHOULD) は現状未実装です。trailer 行数 / 合計上限の二段
+で実用上の攻撃面は閉じています。
 
-`Trailer:` request header に列挙されていない trailer 名の reject (RFC 9110 §6.5 SHOULD) は本リリース時点では対象外で、`MAX_TRAILER_COUNT` / `MAX_TRAILER_BYTES` の二段で attack surface を実用上閉じています。allowlist 化は将来のセキュリティ強化で再評価します。
+### 4.5 ヘッダ名 / 値の文法
 
-### 5.5 Header name / value grammar
+`startResponse` の `headers` と `httpEncodeResponse` の `headers` は次の
+RFC 7230 / 9110 文法を強制します。
 
-`startResponse` の headers list と `httpEncodeResponse` の headers list は、3 バックエンドすべてで以下の RFC 7230 / 9110 grammar を強制します。
+**name の文法**: RFC 7230 §3.2.6 token (= 1\*tchar)。`0-9 / A-Z / a-z`
+および `! # $ % & ' * + - . ^ _ \` | ~`。それ以外のバイト (NUL、`:`、
+SP、HTAB、CR、LF、0x00..0x1F / 0x7F の制御文字、0x80..0xFF の obs-text)
+はすべて reject。
 
-**name byte grammar**: RFC 7230 §3.2.6 token (= 1\*tchar)。具体的には `0-9 / A-Z / a-z` および `! # $ % & ' * + - . ^ _ \` | ~`。それ以外のバイト (NUL、コロン `:`、SP、HTAB、CR、LF、その他 0x00..0x1F / 0x7F の制御文字、obs-text バイト 0x80..0xFF) はすべて reject。
-
-**value byte grammar**: RFC 7230 §3.2 field-value byte (HTAB / SP / VCHAR / obs-text)。`0x09 / 0x20..0x7E / 0x80..0xFF` のみ許容。NUL、CR、LF、それ以外の 0x00..0x1F / 0x7F の制御文字はすべて reject。
+**value の文法**: RFC 7230 §3.2 field-value byte (HTAB / SP / VCHAR /
+obs-text)。`0x09 / 0x20..0x7E / 0x80..0xFF` のみ許容。NUL、CR、LF、
+それ以外の 0x00..0x1F / 0x7F の制御文字はすべて reject。
 
 **name の追加禁止**:
-- `_` を含む name は reject。reverse proxy が `underscores_in_headers` 設定で正規化を変えるため、attacker が `Content_Length: 10` を 1 個追加するだけで CL.CL request smuggling が成立する経路を遮断します。
-- `Content-Length` / `Transfer-Encoding` / `Set-Cookie` は runtime-managed reserved set。handler から指定すると reject。`Set-Cookie` は今後 cookie 専用 API に切り出される予定。
 
-これらの validator は eager path (`httpEncodeResponse`) と streaming path (`startResponse`) で同じ helper を共有するため、片方だけ通る抜け穴は生じません。
-
----
-
-## 6. Client
-
-HTTP client は `taida-lang/os` 側のモールド `HttpRequest[method, url](headers, body)` で提供します (歴史的経緯と OS 境界カテゴリの統一のため)。`taida-lang/net` から re-export はしていません。
-
-### 6.1 `HttpRequest[method, url](headers, body)`
-
-```
-HttpRequest[method: Str, url: Str](
-  headers: BuchiPack | List[@(name: Str, value: Str)],
-  body: Str | Bytes
-) -> Async[Lax[@(status: Int, body: Str, headers: BuchiPack)]]
-```
-
-- `method` — `"GET"` / `"POST"` / `"PUT"` / `"DELETE"` / `"HEAD"` / `"OPTIONS"` / `"PATCH"`。type-arg 1 番目で指定。
-- `url` — type-arg 2 番目。`https://` で始まれば自動で TLS、`http://` で平文。
-- `headers` — 2 形式受理 (`§ 6.1.1` 参照)。
-- `body` — `Str` / `Bytes`。GET / HEAD で空にする場合は `""`。
-
-戻り値 pack shape:
-
-| Field | Type | 意味 |
-|-------|------|------|
-| `status` | `Int` | HTTP status code (`200` / `404` / `500` 等) |
-| `body` | `Str` | response body (UTF-8 decode 済み)。binary が必要な場合は別 API を使う |
-| `headers` | `BuchiPack` | response headers (lower-cased name keys) |
-
-#### 6.1.1 `headers` 引数の 2 形式
-
-| 形式 | 構文 | 制約 |
-|------|------|------|
-| ぶちパック | `@(content_type <= "application/json")` | フィールド識別子がそのまま wire header 名。`-` や `.` を含むヘッダ名は書けない |
-| 名前-値ペアリスト | `@[@(name <= "x-api-key", value <= "secret"), ...]` | 任意の UTF-8 header 名が使える。`-` 含む header 名はこちら必須 |
-
-両形式とも 3 バックエンドで等価。
-
-`HttpRequest["GET"]()` のように type-arg が 2 未満の呼び出しは Interpreter / JS / Native すべてで reject されます。
+- `_` を含む name は reject。リバースプロキシが `underscores_in_headers`
+  設定で正規化を変えるため、攻撃者が `Content_Length: 10` を 1 個追加する
+  だけで CL.CL request smuggling が成立する経路を遮断します。
+- `Content-Length` / `Transfer-Encoding` / `Set-Cookie` はランタイム
+  予約。ハンドラから指定すると reject されます。
 
 ---
 
-## 7. WebSocket
+## 5. WebSocket
 
-`taida-lang/net` から export される 5 関数で WebSocket Upgrade / 双方向通信 / クローズを扱います。すべて 2-arg `httpServe` ハンドラの内部からのみ呼び出し可能です。
+`taida-lang/net` の WebSocket API は 5 関数で構成され、すべて双引数
+`httpServe` ハンドラ内からのみ呼び出せます。
 
-### 7.1 `wsUpgrade(req, writer)`
+### 5.1 `wsUpgrade`
 
-```
-wsUpgrade(req: BuchiPack, writer: BuchiPack) -> Lax[@(ws: WsToken, ...)]
-```
+> HTTP Upgrade を実行し WebSocket 通信用トークンを返す。
 
-HTTP Upgrade を実行し、以降の WebSocket 通信用 token を返します。**handler の冒頭** (`startResponse` / `writeChunk` / `endResponse` より前) で 1 度だけ呼べます。
-
-- `req` は handler 引数の 1 番目 (request pack)。
-- `writer` は handler 引数の 2 番目 (streaming writer)。
-- 戻り値を `]=>` で unmold し、得られた `ws` を以降の `wsSend` / `wsReceive` / `wsClose` に渡します。内部フィールド `.__value` への直接アクセスは E1960 で reject されます。
-- `Sec-WebSocket-Version: 13` (RFC 6455) 固定。GET method 以外、または `Sec-WebSocket-Key` 欠落時は `Lax.failure`。
-
-### 7.2 `wsSend(ws, data)`
-
-```
-wsSend(ws: WsToken, data: Str | Bytes) -> Lax[Unit]
+```taida
+wsUpgrade req: Request  writer: Writer => :Lax[@(ws: WsConn)]
 ```
 
-`Str` を渡すと text frame (`opcode 0x1`)、`Bytes` を渡すと binary frame (`opcode 0x2`) として送出。
+ハンドラの冒頭 (`startResponse` / `writeChunk` / `endResponse` より前) で
+1 度だけ呼べます。戻り値を `]=>` でアンモールドして得た `ws` を以降の
+`wsSend` / `wsReceive` / `wsClose` に渡します。
 
-### 7.3 `wsReceive(ws)`
+`Sec-WebSocket-Version: 13` (RFC 6455) 固定。GET 以外の method、または
+`Sec-WebSocket-Key` ヘッダ欠落時は `Lax.failure`。
 
+### 5.2 `wsSend`
+
+> WebSocket フレームを 1 件送出する。
+
+```taida
+wsSend ws: WsConn  data: Str => @[]
+wsSend ws: WsConn  data: Bytes => @[]
 ```
-wsReceive(ws: WsToken) -> Lax[@(type: Str, data: Str | Bytes)]
-```
 
-単一 frame を受信。
+`Str` を渡すと text frame (opcode `0x1`)、`Bytes` を渡すと binary frame
+(opcode `0x2`) として送出します。
+
+### 5.3 `wsReceive`
+
+> WebSocket フレームを 1 件受信する。
+
+```taida
+wsReceive ws: WsConn => :Lax[@(type: Str, data: Str | Bytes)]
+```
 
 | `type` | `data` の型 | 意味 |
 |--------|------------|------|
 | `"text"` | `Str` | UTF-8 text frame |
 | `"binary"` | `Bytes` | binary frame |
 
-`ping` は同じ payload の `pong` で自動応答し、次の data / close frame まで読み進めます。`pong` は unsolicited pong として無視されます。`close` frame を受けた場合は close reply を送って `Lax.failure` を返し、受信 close code は `wsCloseCode(ws)` で取得します。
+`ping` は同じ payload の `pong` で自動応答し、次の data / close frame まで
+読み進めます。`pong` は unsolicited pong として無視します。`close` frame
+を受け取った場合は close reply を送って `Lax.failure` を返し、受信 close
+code は `wsCloseCode` で取得します。
 
-### 7.3.1 WebSocket frame validation
+#### 5.3.1 フレーム検証
 
-`wsReceive` は RFC 6455 の frame validation を Interpreter / JS / Native で同一 policy に揃えます。
+`wsReceive` は RFC 6455 のフレーム検証を行います。違反フレームは
+close code を付けて接続を閉じます。
 
-- client-to-server frame は masked 必須。RSV bit 非 0、fragmented frame (`FIN=0`)、unexpected continuation、unknown opcode は protocol error として close `1002`。
-- payload length は最大 16 MiB。超過時は close `1002`。
-- control frame (`close` / `ping` / `pong`) の payload は最大 125 bytes。126 bytes 以上の close / ping / pong は close `1002`。
-- close frame は payload 0 bytes、または 2 bytes 以上の valid close code + UTF-8 reason のみ受理します。1 byte payload、不正 close code、不正 UTF-8 reason は close `1002`。
-- text frame payload は strict UTF-8 必須。不正 UTF-8 は user handler に lossy `Str` として渡さず、close `1007`。
+- client → server frame は masked 必須。RSV bit 非 0、fragmented frame
+  (`FIN = 0`)、unexpected continuation、unknown opcode は protocol error
+  として close `1002`。
+- payload 長は最大 16 MiB。超過時は close `1002`。
+- control frame (`close` / `ping` / `pong`) の payload は最大 125 byte。
+  126 byte 以上の close / ping / pong は close `1002`。
+- close frame は payload 0 byte、または 2 byte 以上の有効な close code +
+  UTF-8 reason のみ受理。1 byte payload、不正 close code、不正 UTF-8
+  reason は close `1002`。
+- text frame の payload は strict UTF-8 必須。不正 UTF-8 はユーザー
+  ハンドラに渡さず close `1007`。
 
-### 7.4 `wsClose`
+### 5.4 `wsClose`
 
+> WebSocket 接続を閉じる。
+
+```taida
+wsClose ws: WsConn => @[]
+wsClose ws: WsConn  code: Int => @[]
 ```
-wsClose(ws: WsToken) -> Lax[Unit]
-wsClose(ws: WsToken, code: Int) -> Lax[Unit]
-```
-
-WebSocket 接続にクローズ frame を送って閉じます。
 
 - `code` を省略した場合は `1000` (normal closure) として処理されます。
-  `1001` (going away) / `1011` (internal error) など RFC 6455 §7.4 の
-  ステータスコードを渡せます。
-- 受け付けられる `code` の範囲は `1000-4999` です。範囲外を渡すと失敗
-  `Lax` を返します。
-- 同一 `ws` に対して `wsClose` を 2 回以上呼んでもエラーにはなりません
+  RFC 6455 §7.4 の `1001` (going away)、`1011` (internal error) などを
+  指定できます。
+- 受け付ける `code` は `1000`〜`4999`。範囲外は失敗。
+- 同じ `ws` に対して `wsClose` を 2 回以上呼んでもエラーにはなりません
   (冪等)。
 
-### 7.5 `wsCloseCode(received)`
+### 5.5 `wsCloseCode`
 
-```
-wsCloseCode(received: BuchiPack) -> Lax[Int]
+> 受信した close frame の close code を取り出す。
+
+```taida
+wsCloseCode received: BuchiPack => :Int
 ```
 
-`wsReceive` で `type == "close"` の frame を受け取った場合に close code を取り出します。`received` に close 以外の frame を渡すと `Lax.failure`。
+`wsReceive` が `type == "close"` を返した frame 情報を渡すと close code
+が得られます。close 以外の frame を渡した場合、または close code が無い
+場合は `0` を返します。
 
 ---
 
-## 8. Server-Sent Events
+## 6. Server-Sent Events
 
-### 8.1 `sseEvent(writer, event, data)`
+### 6.1 `sseEvent`
 
+> SSE wire フォーマット (`event:`, `data:`, `\n\n`) を 1 イベント分書き
+> 出す。
+
+```taida
+sseEvent writer: Writer  event: Str  data: Str => @[]
 ```
-sseEvent(writer: BuchiPack, event: Str, data: Str) -> Lax[Int]
-```
 
-SSE wire フォーマット (`event:`, `data:`, `\n\n`) を 1 イベント分書き込みます。
+- `event` — SSE の `event:` フィールド。空文字を渡すと省略 (`event:` 行
+  を出力しない)。
+- `data` — `data:` フィールド。`\n` を含む場合は SSE 仕様に従って複数
+  の `data:` 行に展開されます。
 
-- `event` — SSE `event:` フィールド (空文字列で省略)。
-- `data` — `data:` フィールド。`\n` を含む場合、SSE 仕様に従って複数の `data:` 行に展開。
-- 戻り値は書き込んだ wire bytes 数。
-
-ブラウザ側は `EventSource` API で受信できます。`Content-Type: text/event-stream` の chunk transfer-encoding response として実装されており、`startResponse` を別途呼ぶ必要はありません (1 回目の `sseEvent` で自動送出)。
+ブラウザ側は `EventSource` API で受信できます。`Content-Type:
+text/event-stream` の chunked transfer-encoding レスポンスとして実装
+されており、`startResponse` を別途呼ぶ必要はありません (1 回目の
+`sseEvent` で自動送出)。
 
 ---
 
-## 9. HttpProtocol enum
+## 7. `HttpProtocol` enum
 
-`taida-lang/net` から `HttpProtocol` enum が export されます。
-
-```
+```taida
 Enum => HttpProtocol = :H1 :H2 :H3
 ```
 
-| variant | 意味 |
+| Variant | 意味 |
 |---------|------|
-| `:H1` | HTTP/1.1 (cleartext or TLS) |
+| `:H1` | HTTP/1.1 (cleartext または TLS) |
 | `:H2` | HTTP/2 over TLS (h2) |
 | `:H3` | HTTP/3 over QUIC |
 
-`httpServe` の `opts` 引数で `protocol <= "h2"` のように指定する形式と enum value の両方を受理します。詳しくは `httpServe` の `opts` 仕様を参照してください。
+`httpServe` の `opts.tls.protocol` には `"h2"` のような文字列形式と enum
+値の両方を渡せます。
 
 ---
 
-## 10. Backend scope
+## 8. 双引数ハンドラ body 処理パターン
 
-`taida-lang/net` の API surface は **3-backend (Interpreter / JS / Native)** で full parity を保証します。`wasm-wasi` / `wasm-full` は WASI preview1 の継承済み TCP listener を使う plaintext HTTP/1.1 `httpServe` 部分集合を提供します。`wasm-min` / `wasm-edge` は `httpServe` を受け付けず、該当 capability を呼び出した場合 `[E1612]` を返します。
-
-`wasm-wasi` / `wasm-full` で `httpServe` を実行する場合、guest は自前で bind/listen しません。host が `wasi_snapshot_preview1.sock_accept` を実装している場合は fd 3 の inherited listener を使います。`sock_accept` を提供しない host では、accept 済み TCP 接続を fd 0/1 に接続する socket-activation 形式で 1 request を処理します。
-
-この WASM 部分集合では `port` は host 側 listener 選択に使われず、`timeoutMs` / `maxConnections` は runtime 内で追加制御されません。TLS は非空 pack を compile-time reject します。2-arg streaming handler も compile-time reject されます。request header が 16 KiB を超えて header 終端に到達しない場合、handler を呼ばず `413 Payload Too Large` を返します。TLS / HTTP/2 / HTTP/3 / WebSocket / streaming body primitive はまだ提供されません。各 WASM プロファイルとアドオン dispatcher の対応関係は [`docs/reference/wasm_profiles.md`](wasm_profiles.md) と [`docs/reference/addon_manifest.md`](addon_manifest.md) を参照してください。
-
-例外として `readBytesAt` (bytes I/O) の `wasm-wasi` / `wasm-full` lowering のみ widening addition として land 済です。
-
-進行中の blocker や 24 h soak の現況、land 履歴は `CHANGELOG.md` を参照してください。
-
----
-
-## 11. 2-arg handler body handling patterns
-
-### 11.1 Correct pattern — `readBody` (recommended default)
+### 8.1 推奨パターン — `readBody`
 
 ```taida
->>> taida-lang/net => @(httpServe, readBody, startResponse, endResponse)
+>>> taida-lang/net => @(httpServe, readBody, startResponse, writeChunk, endResponse)
 
-handler req writer =
-  body <= readBody(req)                 // OK (1-arg / 2-arg 両対応)
-  // body is `Bytes`; decode to Str if needed
+handler req: Request  writer: Writer =
+  body <= readBody(req)
   bodyStr <= Utf8Decode[body]().getOrDefault("")
   startResponse(writer, 200, @[@(name <= "content-type", value <= "text/plain")])
-  endResponse(writer, bodyStr)
-=> :Unit
+  writeChunk(writer, bodyStr)
+  endResponse(writer)
+=> @[]
 ```
 
-`startResponse` の `headers` は `@[@(name <= Str, value <= Str)]` だけを受理します。`headers` が List ではない、要素が `@(name, value)` pack ではない、`name` / `value` が Str ではない場合はエラーです。streaming response では runtime が framing を管理するため、`Content-Length` と `Transfer-Encoding` は指定できません。header name は 8192 bytes 以下、header value は 65536 bytes 以下で、どちらも CR/LF を含められません。この validation は Interpreter / JS / Native で同じ契約です。
-
-### 11.2 Anti-pattern — direct `req.body` span slice (silent breakage)
+### 8.2 アンチパターン — `req.body` の直接読み出し
 
 ```taida
-// NG — 2-arg form では空 Bytes を返す
-handler req writer =
-  bodyBytes <= Slice[req.raw, req.body.start, req.body.start + req.body.len]
-  // bodyBytes は len=0 の空 Bytes になる (silent breakage)
-  ...
-=> :Unit
+// NG: 双引数ハンドラでは req.body の span が空 (len = 0) なので、何を経由しても body は取れない
+handler req: Request  writer: Writer =
+  bodyStr <= StrOf[req.body, req.raw]()
+  // bodyStr は "" (req.body.len = 0 のため)
+  startResponse(writer, 200, @[@(name <= "content-type", value <= "text/plain")])
+  writeChunk(writer, bodyStr)
+  endResponse(writer)
+=> @[]
 ```
 
-この anti-pattern は 1-arg handler で正しく動くため、1-arg → 2-arg 移行時に気づかず残ります。runtime warning 追加の現況は `CHANGELOG.md` を参照してください。
+このアンチパターンは単引数ハンドラ (`req.body` が buffered body 全体の
+span を持つ) では正しく動くため、単引数→双引数の移行時に気付かず残り
+やすい点に注意してください。
 
-### 11.3 Streaming chunk pattern — `readBodyChunk`
+### 8.3 chunk 単位での処理 — `readBodyChunk`
 
-大きな body を chunk ごとに処理する場合は `readBodyChunk`:
+`readBodyChunk(req)` は `Lax[Bytes]` を返し、chunk が尽きると
+`has_value <= false` の Lax を返します。実用上は再帰で全 chunk を回す
+形になります。
 
 ```taida
-handler req writer =
-  // chunk ごとに Lax[Bytes] を返す。has_value=false で終端
-  chunk1 <= readBodyChunk(req)
-  chunk1 |
-    @(has_value <= true) <= processChunk(chunk1.value)
-    _ <= stdout("EOF")
-  ...
-=> :Unit
+handler req: Request  writer: Writer =
+  startResponse(writer, 200, @[@(name <= "content-type", value <= "text/plain")])
+  forwardChunks(req, writer)
+  endResponse(writer)
+=> @[]
+
+forwardChunks req: Request  writer: Writer =
+  readBodyChunk(req) => chunkLax
+  | chunkLax.has_value |>
+      chunkLax ]=> chunk
+      writeChunk(writer, chunk)
+      forwardChunks(req, writer)
+  | _ |> @[]
+=> @[]
 ```
 
-`Transfer-Encoding: chunked` の chunk-size は strict hex で、chunk-extension
-より前の hex 部分は最大 15 桁です。16 桁以上、空、非 hex、または加算時に
-overflow する chunk-size は malformed body として扱われます。1-arg eager
-body path では handler を呼ばずに `400 Bad Request`、2-arg streaming
-`readBodyChunk` / `readBodyAll` path では protocol error になります。この
-上限と failure policy は Interpreter / JS / Native で揃えます。
+`Transfer-Encoding: chunked` の chunk-size は §4.4 の三段ガードを通った
+値だけが採用されます。violation 時は単引数 eager path では
+`400 Bad Request`、双引数 streaming path (`readBodyChunk` /
+`readBodyAll`) では protocol error として扱われます。
 
-### 11.4 Why 2-arg `req.body` span is intentionally empty
+### 8.4 なぜ双引数の `req.body` は空 span か
 
-2-arg handler は streaming 前提で設計されており、handler 呼び出し時点で body を eagerly 読まない (socket に残したまま)。そのため `req.body` pack は `@(start: bodyOffset, len: 0)` で差し込まれます (1-arg form の `body span = buffered body` とは別 shape)。
-
-`__body_stream` sentinel が内部的に pack に入っており、`readBody*` 系はこの sentinel を検出して socket から直接読み出します。**user 側からこの sentinel を直接触る必要はありません** — `readBody*` のいずれかを呼べば透過的に動作します。
+双引数ハンドラは streaming 前提のため、ハンドラ呼び出し時点では body を
+socket 上に残したままにします。そのため `req.body` は
+`@(start: bodyOffset, len: 0)` として渡されます (単引数の
+「buffered body 全体に対する span」とは形が異なります)。`readBody*` を
+呼べば、`req` の内部状態に応じて socket から透過的に読み出されます。
 
 ---
 
-## 12. References
+## 9. バックエンド対応
 
-- [`docs/reference/release_process.md`](release_process.md) — 公開仕様の保証範囲と互換性判断
-- [`docs/reference/standard_methods.md`](standard_methods.md) — `Lax` / `Result` / `Async` のメソッド契約
-- `CHANGELOG.md` — タグ別の land 履歴
-- [`docs/guide/15_net_package.md`](../guide/15_net_package.md) — `taida-lang/net` パッケージのナラティブ学習ガイド
+| バックエンド | 対応範囲 |
+|--------------|----------|
+| インタプリタ | 全 API 対応 |
+| ネイティブ | 全 API 対応 |
+| JS | 全 API 対応 |
+| WASM (`wasm-min` / `wasm-edge`) | `httpServe` 利用不可。呼び出した capability は `[E1612]` を返す。 |
+| WASM (`wasm-wasi` / `wasm-full`) | plaintext HTTP/1.1 `httpServe` の部分集合のみ対応。TLS / HTTP/2 / HTTP/3 / WebSocket / streaming body は未提供。 |
+
+`wasm-wasi` / `wasm-full` の `httpServe` 部分集合では、guest 側で
+bind / listen は行いません。host が `wasi_snapshot_preview1.sock_accept`
+を実装している場合は fd 3 の継承済み listener を使い、それ以外の host
+では accept 済み TCP 接続を fd 0 / 1 に接続する socket-activation 形式
+で 1 リクエストを処理します。
+
+この部分集合では `port` は host 側 listener の選択に使われず、
+`timeoutMs` / `maxConnections` はランタイム内で追加制御されません。`tls`
+を非空にすると compile-time reject されます。双引数 streaming ハンドラも
+compile-time reject されます。リクエストヘッダが 16 KiB を超えてヘッダ
+終端に到達しない場合はハンドラを呼ばずに `413 Payload Too Large` を返し
+ます。
+
+例外として `readBytesAt` (バイト I/O) の `wasm-wasi` / `wasm-full`
+lowering は land 済みです。
+
+各 WASM プロファイルとアドオン dispatcher の対応関係は
+[`docs/reference/wasm_profiles.md`](../reference/wasm_profiles.md) と
+[`docs/reference/addon_manifest.md`](../reference/addon_manifest.md) を
+参照してください。
+
+---
+
+## 10. 関連ドキュメント
+
+- [`docs/api/os.md`](os.md) — HTTP クライアント (`HttpRequest`) を含む `taida-lang/os` パッケージ
+- [`docs/api/prelude.md`](prelude.md) — `Lax` / `Result` / `Async` のメソッド契約
+- [`docs/reference/release_process.md`](../reference/release_process.md) — 公開仕様の保証範囲と互換性判断
+- [`docs/reference/wasm_profiles.md`](../reference/wasm_profiles.md) — WASM プロファイル別の対応 API 一覧

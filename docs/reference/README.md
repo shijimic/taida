@@ -4,8 +4,7 @@
 本ディレクトリの各ファイルは、現時点での言語仕様・API シグネチャ・
 診断コード・CLI コマンドの確定的な記述を提供します。
 
-学習目的でナラティブから読み始めたい場合は [ガイド](../guide/) を、
-典型パターン集は [クックブック](../cookbook/) を参照してください。
+学習目的でナラティブから読み始めたい場合は [ガイド](../guide/) を参照してください。
 
 ---
 
@@ -15,25 +14,24 @@
 |----------|------|
 | [`addon_manifest.md`](addon_manifest.md) | `native/addon.toml` のスキーマとアドオンバックエンドの方針 |
 | [`build_descriptors.md`](build_descriptors.md) | 複数ターゲットを組み合わせるビルド記述子と成果物グラフ |
-| [`class_like_types.md`](class_like_types.md) | モールド / クラスライク型ファミリー |
 | [`cli.md`](cli.md) | `taida` CLI のコマンドとフラグの公開仕様 |
 | [`diagnostic_codes.md`](diagnostic_codes.md) | 公開診断コードの一覧 |
 | [`documentation_comments.md`](documentation_comments.md) | ドキュメントコメントの構文 |
 | [`graph_model.md`](graph_model.md) | 構造的内省 (introspection) グラフモデル |
 | [`memory_model.md`](memory_model.md) | 4 バックエンドのメモリ管理戦略とアドオン所有権規約 |
 | [`naming_conventions.md`](naming_conventions.md) | 公開命名規則 |
-| [`operators.md`](operators.md) | 10 種の演算子と文法上の役割 |
+| [`operators.md`](operators.md) | 演算子と文法上の役割 |
 | [`perf_gates.md`](perf_gates.md) | リリース品質に関わるパフォーマンス／リソースゲート |
 | [`release_process.md`](release_process.md) | 世代番号・ビルド番号と互換性判断のプロセス |
 | [`scope_rules.md`](scope_rules.md) | 字句スコープとモジュールスコープの規則 |
-| [`standard_library.md`](standard_library.md) | プレリュードと標準同梱ライブラリの公開仕様 |
-| [`standard_methods.md`](standard_methods.md) | 標準メソッドのシグネチャと契約 |
 | [`tail_recursion.md`](tail_recursion.md) | 末尾呼び出しと再帰の保証 |
 | [`wasm_profiles.md`](wasm_profiles.md) | WASM ターゲットプロファイルと対応範囲 |
 
-パッケージ単位の API リファレンス (`taida-lang/os` / `taida-lang/net`
-の公開仕様、コア同梱パッケージの入口 index) は [`docs/api/`](../api/)
-を参照してください。
+パッケージ単位の API リファレンス (プレリュード関数 / ビルトイン型
+メソッド / コレクション / `taida-lang/os` / `taida-lang/net` / `taida-lang/build`
+等の公開仕様) は [`docs/api/`](../api/) を参照してください。クラスライク型
+の概念とモールドの解剖は [`docs/guide/05_mold.md`](../guide/05_mold.md) を
+参照してください。
 
 ---
 

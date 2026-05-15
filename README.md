@@ -29,7 +29,7 @@ message <= greet("World")
 stdout(message)
 ```
 
-`stdout` はプリリュード経由で常に利用可能なため、インポートは不要です。
+`stdout` はプレリュード経由で常に利用可能なため、インポートは不要です。
 
 ## 例: Enum とぶちパック
 
@@ -100,8 +100,7 @@ Taida バイナリには次のコアパッケージが同梱されており、`t
 | `taida-lang/pool` | 接続プーリング (`poolCreate` / `poolAcquire` 他) |
 
 各パッケージのインポート形式・公開シンボル・バックエンド対応は
-[同梱パッケージリファレンス](docs/api/bundled_packages.md) を
-参照してください。
+[API リファレンス](docs/api/README.md) を参照してください。
 
 `taida-lang/terminal` のような公式アドオンは、コア同梱とは別カテゴリです。
 `taida ingot install` で取得し、`packages.tdm` で依存宣言します。
@@ -135,37 +134,34 @@ taida ingot install                       # プレビルドのダウンロード
 |---|------------|------|
 | 00 | [概要](docs/guide/00_overview.md) | 言語概要 |
 | 01 | [型システム](docs/guide/01_types.md) | プリミティブ、Enum、コレクション、モールド型 |
-| 02 | [型のガチガチさ](docs/guide/02_strict_typing.md) | 暗黙変換禁止、Lax 安全操作、JSON エアロック |
+| 02 | [型のガチガチさ](docs/guide/02_strict_typing.md) | 暗黙変換禁止、Lax 安全操作、JSON のスキーマ必須 |
 | 03 | [JSON 溶鉄](docs/guide/03_json.md) | JSON の不透明プリミティブ化とスキーマ必須キャスト |
 | 04 | [ぶちパック](docs/guide/04_buchi_pack.md) | ぶちパック構文 |
-| 04+ | [クラスライク型定義](docs/guide/04_class_like.md) | 統一構文と 3 系統統合 |
-| 05 | [モールディング](docs/guide/05_molding.md) | モールド型 (全操作モールド) |
+| 04+ | [クラスライク型定義](docs/guide/04_class_like.md) | 統一構文 (構造化データ型 / モールド / エラー) |
+| 05 | [モールド](docs/guide/05_mold.md) | モールド型の解剖、`solidify` / `unmold`、ユーザー定義 |
 | 06 | [リスト操作](docs/guide/06_lists.md) | リストモールドと状態チェックメソッド |
 | 07 | [制御フロー](docs/guide/07_control_flow.md) | 条件分岐とパターンマッチ |
 | 08 | [エラー処理](docs/guide/08_error_handling.md) | Lax + throw/\|== + ゴリラ天井 |
 | 09 | [関数](docs/guide/09_functions.md) | 関数定義、パイプライン、末尾再帰、defaultFn |
-| 10 | [モジュール](docs/guide/10_modules.md) | インポート / エクスポート、プリリュード |
+| 10 | [モジュール](docs/guide/10_modules.md) | インポート / エクスポート、プレリュード |
 | 11 | [非同期処理](docs/guide/11_async.md) | `Async[T]` と `]=>` await |
 | 12 | [イントロスペクション](docs/guide/12_introspection.md) | 構造的内省 |
 | 13 | [アドオン作成](docs/guide/13_creating_addons.md) | Rust アドオン作成と配布 |
-| 14 | [taida-lang/os パッケージ](docs/guide/14_os_package.md) | OS 系標準パッケージ |
-| 15 | [taida-lang/net パッケージ](docs/guide/15_net_package.md) | ネットワーク標準パッケージ |
-| 16 | [taida-lang/terminal パッケージ](docs/guide/16_terminal_package.md) | 端末標準パッケージ |
+
+コア同梱パッケージの API リファレンスは [`docs/api/`](docs/api/) にあります。
 
 ### リファレンス
 
 | ドキュメント | 内容 |
 |--------------|------|
 | [CLI](docs/reference/cli.md) | `taida` CLI コマンドとフラグ |
-| [演算子](docs/reference/operators.md) | 10 種の演算子と算術 / 比較 / 論理演算 |
-| [クラスライク型](docs/reference/class_like_types.md) | クラスライク型 / モールド型のシグネチャ |
+| [演算子](docs/reference/operators.md) | 演算子と算術 / 比較 / 論理演算 |
 | [命名規則](docs/reference/naming_conventions.md) | 識別子の命名規則とバージョン記法 |
 | [グラフモデル](docs/reference/graph_model.md) | 5 つのグラフビュー |
 | [ドキュメントコメント](docs/reference/documentation_comments.md) | AI 協業タグ |
 | [末尾再帰](docs/reference/tail_recursion.md) | TCO の判定ルール |
 | [スコープルール](docs/reference/scope_rules.md) | スコープベース自動管理 |
-| [標準ライブラリ](docs/reference/standard_library.md) | プリリュードとビルトイン型 |
-| [標準メソッド](docs/reference/standard_methods.md) | 状態チェック / モナディックメソッド |
+| [プレリュード関数 / ビルトイン型メソッド](docs/api/prelude.md) | プレリュード API、ビルトイン型のメソッド、HashMap / Set |
 | [アドオンマニフェスト](docs/reference/addon_manifest.md) | `addon.toml` のスキーマと前方互換ポリシー |
 | [メモリ管理モデル](docs/reference/memory_model.md) | 4 バックエンドのメモリ戦略とアドオン所有権規約 |
 | [ビルド記述子](docs/reference/build_descriptors.md) | 複数ターゲットを束ねるビルド構成 |
@@ -178,8 +174,8 @@ taida ingot install                       # プレビルドのダウンロード
 
 | ドキュメント | 内容 |
 |--------------|------|
-| [プリリュード関数](docs/api/prelude.md) | `stdout` / `stdin` / `nowMs` / `sleep` / `jsonEncode` / `debug` / `typeof` / `range` / `exit` 等 |
-| [同梱パッケージ index](docs/api/bundled_packages.md) | コア同梱パッケージの入口とバックエンド対応表 |
+| [API リファレンス索引](docs/api/README.md) | `docs/api/` 全体の入口 |
+| [プレリュード関数](docs/api/prelude.md) | `stdout` / `stdin` / `nowMs` / `sleep` / `jsonEncode` / `debug` / `typeof` / `range` / `exit` 等 |
 | [`taida-lang/os`](docs/api/os.md) | ファイル I/O・プロセス・環境・ソケット・DNS の API |
 | [`taida-lang/net`](docs/api/net.md) | HTTP/1.1・H2・H3・WebSocket・SSE の API |
 | [`taida-lang/crypto`](docs/api/crypto.md) | `sha256` の API |

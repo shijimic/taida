@@ -141,7 +141,7 @@ Graph = @(
 
 ## 型階層グラフ
 
-クラスライク型の宣言は単一の構文に統一されています (`docs/reference/class_like_types.md`)。`TypeDef` / `Mold` / `Error` を別個のノード種別として持っていた以前の表現は廃止し、`ClassLikeType` 単一に揃えます。基底種別の情報は metadata `parent_lineage` に保持します。
+クラスライク型の宣言は単一の構文に統一されています ([`docs/guide/04_class_like.md`](../guide/04_class_like.md))。`TypeDef` / `Mold` / `Error` を別個のノード種別として持っていた以前の表現は廃止し、`ClassLikeType` 単一に揃えます。基底種別の情報は metadata `parent_lineage` に保持します。
 
 ### ノード種別
 

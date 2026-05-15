@@ -25,7 +25,7 @@
 | `E32K2_*` | ロックファイル整合性エラー | `taida ingot` / `pkg::lockfile` | `taida.lock` schema バージョン / integrity 不一致 / migration 失敗 |
 | `E32K3_*` | ソースパッケージ整合性エラー | `pkg::store` / `pkg::manifest` / `pkg::provider` | ソース pin / cosign 検証 / sha256 sidecar / 公式 namespace 制約 |
 
-## 現在の割り当て
+## コード一覧
 
 ### 制約違反 (`E03xx`)
 
@@ -33,13 +33,13 @@
 |--------|-----------|---------|
 | `E0301` | 単一方向制約違反 — `=>` と `<=` の混在禁止 | Parser / Verify |
 | `E0302` | 単一方向制約違反 — `]=>` と `<=[` の混在禁止 | Parser / Verify |
-| `E0303` | 単一方向制約違反 — `<=` の右辺に複数行の `\| cond \|> body` 多アーム条件を書けない (C20-1 silent-bug 禁圧) | Parser |
+| `E0303` | 単一方向制約違反 — `<=` の右辺に複数行の `\| cond \|> body` 多アーム条件を書けない | Parser |
 
 #### `E0303` — `<=` 右辺の複数行多アーム条件は禁止
 
 **フェーズ**: Parser
 
-**契機**: silent-bug 禁圧。`name <= | cond |> A | _ |> B` を複数行に分けて書くと、parser が続きの top-level 文を greedy に arm body として吸収する穴があった (`taida way check` は通り、module load で symbol が消える)。`<=` 束縛の右辺で条件分岐コンテキストを判別し、継続アームが別行に現れたら `[E0303]` を発射します。
+**契機**: silent-bug 禁圧。`name <= | cond |> A | _ |> B` を複数行に分けて書くと、parser が続きの top-level 文を greedy に arm body として吸収する穴がある。`<=` 束縛の右辺で条件分岐コンテキストを判別し、継続アームが別行に現れたら `[E0303]` を発射します。
 
 **代替手段**:
 
@@ -81,7 +81,7 @@
 | `E1410` | declare-only な関数フィールドに既定関数または明示値が必要 (戻り型が defaultFn 生成不能な opaque / unknown alias の場合に定義位置で発火) | TypeChecker |
 | `E1411` | 継承定義の子フィールドが親の型と互換でない再定義 | TypeChecker |
 | `E1412` | `RustAddon["fn"](arity <= N)` の explicit binding 違反: 表記不正 (`fn` が文字列リテラルでない / `arity` field 欠落 / 非整数 arity) / facade コンテキスト外 / 未宣言の関数 / マニフェストとの arity 不一致 | Interpreter / TypeChecker |
-| `E1413` | addon facade でマニフェスト `[functions]` の関数名を **bare 参照** している。`name <= RustAddon["name"](arity <= N)` を facade 先頭に明示する必要がある。`@e.X` 以降は移行コマンドを提供しないため、該当 facade は手動で修正する必要がある | Interpreter |
+| `E1413` | addon facade でマニフェスト `[functions]` の関数名を **bare 参照** している。`name <= RustAddon["name"](arity <= N)` を facade 先頭に明示する必要がある | Interpreter |
 
 ### 定義・意味論エラー (`E15xx`)
 
@@ -142,20 +142,20 @@
 
 | コード | メッセージ | フェーズ |
 |--------|-----------|---------|
-| `E1700` | E31 で削除された top-level command / CLI flag が呼ばれた。新しい command path / positional syntax を使うこと | CLI |
+| `E1700` | 提供されていない top-level command / CLI flag が呼ばれた。新しい command path / positional syntax を使うこと | CLI |
 | `E1701` | `packages.tdm` で宣言された公開 API とエントリモジュールの実シンボル群が不整合 (未公開 symbol import / 宣言済み symbol 欠如 / module 内シンボル未発見) | TypeChecker |
 
 `E1700` の標準表示:
 
 ```text
-[E1700] Command '<old>' was removed in @e.X. Use '<replacement>' instead.
-        See `taida --help` for the new command set.
+[E1700] Command '<old>' is not available. Use '<replacement>' instead.
+        See `taida --help` for the current command set.
 ```
 
-削除済み flag の表示例:
+提供されていない flag の表示例:
 
 ```text
-[E1700] Flag '--target <target>' was removed in @e.X. Use 'taida build <target> <PATH>' instead.
+[E1700] Flag '--target <target>' is not available. Use 'taida build <target> <PATH>' instead.
         For example: `taida build js src`.
 ```
 

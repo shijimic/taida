@@ -74,19 +74,21 @@ ts <= data.timestamp  // キャッシュされた値を取得します
 ```taida
 config <= @(host <= "localhost", port <= 8080)  // モジュールスコープ
 
-processData items =
-  temp <= @(processed <= items.length(), timestamp <= now())
+processData items: @[Int] =
+  temp <= @(processed <= items.length(), timestamp <= nowMs())
   result <= @(count <= temp.processed, time <= temp.timestamp)
   result  // 戻り値として返されます
-=> :@(count: Int, time: Str)
+=> :@(count: Int, time: Int)
 // temp は関数終了時に自動解放されます
 ```
+
+関数引数 `items` には型注釈 (`: @[Int]`) を明示しています。引数型は推論可能な文脈なら省略できますが、ガイドラインとしては明示する方を推奨します。詳細は [型システム / 関数の型指定](01_types.md#関数の型指定) を参照してください。
 
 ---
 
 ## 型定義との関係
 
-ぶちパックの **値リテラル** (`@(name <= "Asuka")`) と、それを受け取る **型定義** (`Pilot = @(name: Str)`) は別の概念です。E30 では型定義は [クラスライク型定義](04_class_like.md) の単一構文に統一されているため、本章では深入りしません。
+ぶちパックの **値リテラル** (`@(name <= "Asuka")`) と、それを受け取る **型定義** (`Pilot = @(name: Str)`) は別の概念です。型定義は [クラスライク型定義](04_class_like.md) の単一構文で書きます。本章は値リテラル中心です。
 
 簡単に対応関係を示します:
 
@@ -150,9 +152,9 @@ conn <= connect(options)  // パラメータが自動展開されます
 
 ---
 
-## モールディング型との統合
+## モールド型との統合
 
-ぶちパック内にモールディング型を格納できます:
+ぶちパック内にモールド型を格納できます。
 
 ```taida
 pilot_data <= @(
@@ -160,11 +162,11 @@ pilot_data <= @(
   sync_rate <= Div[780, 10]()
 )
 
-// ]=> でアンモールディング
+// ]=> でアンモールド
 pilot_data.sync_rate ]=> rate_value  // 78
 ```
 
-モールディング型の詳細は [操作モールド](05_molding.md) を参照してください。
+モールド型の詳細は [モールド](05_mold.md) を参照してください。
 
 ---
 
@@ -210,6 +212,6 @@ JSON[raw, Pilot]() ]=> pilot
 | リストリテラル | `@[elem1, elem2, ...]` | 本章 |
 | JSON 変換 | `JSON[raw, TypeName]() ]=> val` | [03_json.md](03_json.md) |
 | クラスライク型定義 | `Name[?type-args] [=> Parent] = @(...)` | [04_class_like.md](04_class_like.md) |
-| 操作モールド | `Upper[str]()` 等 | [05_molding.md](05_molding.md) |
+| モールド | `Upper[str]()` 等 | [05_mold.md](05_mold.md) |
 
-旧 D 世代までの「型の継承（InheritanceDef）」記述は [クラスライク型定義 / 継承](04_class_like.md#継承) に統合されました。
+型の継承記述は [クラスライク型定義 / 継承](04_class_like.md#継承) を参照してください。

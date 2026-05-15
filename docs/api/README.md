@@ -14,13 +14,13 @@
 
 | ファイル | 役割 |
 |----------|------|
-| [`prelude.md`](prelude.md) | プリリュード関数 (`stdout` / `stdin` / `nowMs` / `sleep` / `jsonEncode` / `debug` / `typeof` / `range` / `exit` 等) |
-| [`bundled_packages.md`](bundled_packages.md) | コア同梱パッケージ (`taida-lang/os` / `net` / `crypto` / `js` / `pool`) の入口 index とバックエンド対応 |
+| [`prelude.md`](prelude.md) | プレリュード関数 (`stdout` / `stdin` / `nowMs` / `sleep` / `jsonEncode` / `debug` / `range` / `exit` 等) + インポート不要モールド一覧 |
 | [`os.md`](os.md) | `taida-lang/os` の API 仕様 (ファイル I/O、プロセス、環境、ソケット、DNS) |
 | [`net.md`](net.md) | `taida-lang/net` の API 仕様 (HTTP/1.1、H2、H3、WebSocket、SSE) |
 | [`crypto.md`](crypto.md) | `taida-lang/crypto` の API 仕様 (`sha256`) |
 | [`js.md`](js.md) | `taida-lang/js` の API 仕様 (JS 相互運用 descriptor 群) |
 | [`pool.md`](pool.md) | `taida-lang/pool` の API 仕様 (リソースプーリング) |
+| [`build_descriptors.md`](build_descriptors.md) | `taida-lang/build` の API 仕様 (`BuildUnit` / `BuildPlan` / `AssetBundle` / `RouteAsset` / `BuildHook`) |
 
 ---
 
@@ -28,14 +28,14 @@
 
 Taida のパッケージは大きく次の 3 層に分かれます。
 
-1. **プリリュード** — インポート不要で常に利用可能な関数・型コンストラクタ。
-   詳細は [`docs/reference/standard_library.md`](../reference/standard_library.md)
-   を参照してください。
+1. **プレリュード** — インポート不要で常に利用可能な関数・型コンストラクタ。
+   詳細は [`prelude.md`](prelude.md) を参照してください。
 2. **コア同梱パッケージ** — `taida-lang/os` / `taida-lang/net` /
-   `taida-lang/crypto` / `taida-lang/js` / `taida-lang/pool`。Taida
-   バイナリに同梱されており、`taida ingot install` などのインストール
-   は不要です。`>>> taida-lang/<pkg> => @(...)` で明示インポート、
-   または import なしでの直接呼び出しに両対応します。本ディレクトリは
+   `taida-lang/crypto` / `taida-lang/js` / `taida-lang/pool` /
+   `taida-lang/build`。Taida バイナリに同梱されており、`taida ingot install`
+   などのインストールは不要です。`>>> taida-lang/<pkg> => @(...)` で
+   明示インポートします (`taida-lang/build` のディスクリプタは
+   ランタイム値ではなくビルドドライバ専用値として扱われます)。本ディレクトリは
    主にこの層を扱います。
 3. **公式アドオン** — `taida-lang/terminal` など。ネイティブ cdylib を
    `taida ingot install` で取得するインゴットとして配布されます。
@@ -43,5 +43,5 @@ Taida のパッケージは大きく次の 3 層に分かれます。
    [アドオンマニフェスト](../reference/addon_manifest.md) を参照
    してください。
 
-`bundled_packages.md` を最初の入口として、必要に応じて個別パッケージの
-API 仕様 (`os.md` / `net.md` 等) を参照する流れを推奨します。
+個別パッケージの API 仕様 (`os.md` / `net.md` / `crypto.md` /
+`js.md` / `pool.md` / `build_descriptors.md`) を直接参照してください。
