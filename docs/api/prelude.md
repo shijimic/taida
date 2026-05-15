@@ -383,7 +383,10 @@ exit code: Int => @[]
 |---------|--------|------|
 | `UInt8[x]()` | `Lax[Int]` | `0..255` 制約付き変換。 |
 | `Bytes[x](fill <= n)` | `Lax[Bytes]` | `Int` / `Str` / `@[Int]` / `Bytes` から Bytes へ変換。 |
+| `ByteLength[x]()` | `Int` | UTF-8 byte 長または Bytes 長。 |
+| `ByteAt[x, idx]()` | `Lax[Int]` | byte 位置の値を取得。 |
 | `ByteSet[bytes, idx, value]()` | `Lax[Bytes]` | 指定位置更新 (不変)。 |
+| `ByteSlice[x, start, end]()` | `Str` | UTF-8 byte 範囲を `Str` として取り出す。 |
 | `BytesToList[bytes]()` | `@[Int]` | Bytes を整数リストへ変換。 |
 | `BytesCursor[bytes](offset <= n)` | `@(bytes: Bytes, offset: Int, length: Int)` | Bytes の順次読み取りカーソルを生成。 |
 | `BytesCursorRemaining[cursor]()` | `Int` | 残り読み取り可能バイト数。 |
@@ -402,9 +405,24 @@ exit code: Int => @[]
 
 | モールド | 戻り値 | 説明 |
 |---------|--------|------|
+| `Lax[value]()` | `Lax[T]` | 失敗可能値を必ず値へ落とす安全モールド。 |
+| `Optional[value]()` | `Lax[T]` | 値省略を `Lax` 形状で表す互換コンストラクタ。 |
 | `Result[value, pred](throw <= error)` | `Result[T, _]` | 述語付き Result。`]=>` で述語評価、真なら値、偽なら throw。 |
+| `Async[value]()` | `Async[T]` | 即時 fulfilled の非同期値。 |
+| `AsyncReject[error]()` | `Async[T]` | 即時 rejected の非同期値。 |
 | `Gorillax[value]()` | `Gorillax[T]` | 覚悟のモールド型。unmold 失敗時にゴリラ (即時終了) が発動。 |
+| `RelaxedGorillax[value]()` | `RelaxedGorillax[T]` | `|==` で捕捉可能な Gorillax 形状。 |
+| `Stream[value]()` | `Stream[T]` | 逐次値を表す stream wrapper。 |
+| `StreamFrom[list]()` | `Stream[T]` | リストから stream を生成。 |
+| `Molten[]()` | `Molten` | 外部由来の不透明値。通常は境界 API が生成する。 |
+| `Stub[value]()` | `T` | stub marker を値として固める。 |
+| `TODO[]()` | `T` | 未実装 marker。release build では残存を拒否できる。 |
 | `Cage[subject, runner]()` | `Gorillax[T]` | Molten branch capability boundary。runner を実行し `Gorillax` で受ける。 |
+| `CageRilla[subject, runner]()` | `CageRilla[T]` | `Cage` の runner descriptor 基底。 |
+| `JSRilla[runner]()` | `JSRilla[T]` | JS branch runner descriptor。 |
+| `FileRilla[runner]()` | `FileRilla[T]` | file branch runner descriptor。 |
+| `BuildRilla[runner]()` | `BuildRilla[T]` | build descriptor branch runner。 |
+| `JSON[raw, Schema]()` | `Lax[T]` | JSON を schema 指定で Taida 値へ変換。 |
 
 ### 7.4 文字列モールド
 
@@ -418,11 +436,19 @@ exit code: Int => @[]
 | `Trim[str]()` | str | `start`, `end` | `Str` | 空白除去 (`start` / `end` でデフォルト `true` を `false` に) |
 | `Split[str, delim]()` | str, delim | — | `@[Str]` | 区切り文字で分割 |
 | `Replace[str, old, new]()` | str, old, new | `all` | `Str` | 置換 (`all <= true` で全置換) |
+| `ReplaceAll[str, old, new]()` | str, old, new | — | `Str` | 全一致を置換 |
 | `Slice[str]()` | str | `start`, `end` | `Str` | 範囲抽出 |
+| `Chars[str]()` | str | — | `@[Str]` | 文字単位のリストへ分解 |
 | `CharAt[str, idx]()` | str, idx | — | `Lax[Str]` | 指定位置の文字 (範囲外で failure) |
+| `Contains[str, needle]()` | str, needle | — | `Bool` | 部分文字列を含むか |
+| `IndexOf[str, needle]()` | str, needle | — | `Int` | 最初の出現位置 (-1 で見つからず) |
+| `LastIndexOf[str, needle]()` | str, needle | — | `Int` | 最後の出現位置 (-1 で見つからず) |
 | `Repeat[str, n]()` | str, n | — | `Str` | 文字列の繰り返し |
 | `Reverse[str]()` | str | — | `Str` | 逆順 |
 | `Pad[str, len]()` | str, len | `side`, `char` | `Str` | パディング (`side <= "start" / "end"`) |
+| `PadLeft[str, len, char]()` | str, len, char | — | `Str` | 左パディング |
+| `PadRight[str, len, char]()` | str, len, char | — | `Str` | 右パディング |
+| `StringRepeatJoin[str, n, sep]()` | str, n, sep | — | `Str` | 繰り返し文字列を separator で結合 |
 
 ```taida fragment
 Upper["hello"]()                              // "HELLO"
@@ -441,6 +467,24 @@ Pad["42", 5](side <= "start", char <= "0")    // "00042"
 | モールド | `[]` 必須 | `()` オプション | 戻り値 | 説明 |
 |---------|----------|----------------|--------|------|
 | `ToFixed[num, digits]()` | num, digits | — | `Str` | 小数点固定文字列 |
+| `Sqrt[num]()` | num | — | `Float` | 平方根 |
+| `Pow[x, y]()` | x, y | — | `Float` | 累乗 |
+| `Log[x]()` | x | — | `Float` | 自然対数 |
+| `Log[x, base]()` | x, base | — | `Float` | 任意底の対数 |
+| `Exp[x]()` | x | — | `Float` | 指数関数 |
+| `Ln[x]()` | x | — | `Float` | 自然対数 |
+| `Log2[x]()` | x | — | `Float` | 2 底対数 |
+| `Log10[x]()` | x | — | `Float` | 10 底対数 |
+| `Sin[x]()` | x | — | `Float` | 正弦 |
+| `Cos[x]()` | x | — | `Float` | 余弦 |
+| `Tan[x]()` | x | — | `Float` | 正接 |
+| `Asin[x]()` | x | — | `Float` | 逆正弦 |
+| `Acos[x]()` | x | — | `Float` | 逆余弦 |
+| `Atan[x]()` | x | — | `Float` | 逆正接 |
+| `Atan2[y, x]()` | y, x | — | `Float` | 2 引数逆正接 |
+| `Sinh[x]()` | x | — | `Float` | 双曲線正弦 |
+| `Cosh[x]()` | x | — | `Float` | 双曲線余弦 |
+| `Tanh[x]()` | x | — | `Float` | 双曲線正接 |
 | `Abs[num]()` | num | — | `Num` | 絶対値 |
 | `Floor[num]()` | num | — | `Int` | 切り捨て |
 | `Ceil[num]()` | num | — | `Int` | 切り上げ |
@@ -481,9 +525,14 @@ Clamp[15, 0, 10]()        // 10
 | `Flatten[list]()` | list | — | `@[U]` | 1 段階フラット化 |
 | `Join[list, sep]()` | list, sep | — | `Str` | 文字列結合 |
 | `Sum[list]()` | list | — | `Num` | 数値合計 |
+| `Min[list]()` | list | — | `T` | 最小値 |
+| `Max[list]()` | list | — | `T` | 最大値 |
 | `Find[list, fn]()` | list, fn | — | `Lax[T]` | 条件を満たす最初の要素 |
 | `FindIndex[list, fn]()` | list, fn | — | `Int` | 条件を満たす最初の位置 (-1 で見つからず) |
+| `FindIndexLax[list, fn]()` | list, fn | — | `Lax[Int]` | 条件を満たす最初の位置 |
 | `Count[list, fn]()` | list, fn | — | `Int` | 条件を満たす要素数 |
+| `Length[list]()` | list | — | `Int` | 要素数 |
+| `Reduce[list, init, fn]()` | list, init, fn | — | `A` | 左畳み込み |
 | `Zip[list, other]()` | list, other | — | `@[BuchiPack]` | ペア化 |
 | `Enumerate[list]()` | list | — | `@[BuchiPack]` | インデックス付与 |
 
@@ -538,7 +587,7 @@ result <= If[x > 0, "positive", "negative"]()
 | `Int[x]()` | x | `Lax[Int]` | 整数化 (`Int["123"]()` → 123、`Int["abc"]()` → 0) |
 | `Int[str, base]()` | str, base | `Lax[Int]` | 指定基数の文字列を整数化 (§7.1 と同一) |
 | `Float[x]()` | x | `Lax[Float]` | 浮動小数化 (`Float["3.14"]()` → 3.14) |
-| `Str[x]()` | x | `Str` | 文字列化 (`Str[42]()` → "42") |
+| `Str[x]()` | x | `Lax[Str]` | 文字列化 (`Str[42]()` → "42") |
 | `Bool[x]()` | x | `Lax[Bool]` | 真偽値化 (`Bool[1]()` → true、`Bool[0]()` → false) |
 | `Ordinal[e]()` | e | `Int` | Enum を宣言順 ordinal Int に変換 (非 Enum は runtime error) |
 
@@ -587,6 +636,18 @@ Enum variant (`EnumName:Variant`、TypeIs のみ)。inline BuchiPack 型
 `__type` フィールドへの直接アクセス (`err.__type` 等) は `[E1960]` で
 reject されるため、継承位置や variant 名を読みたい場合は必ず
 `TypeName[x]()` を使ってください。
+
+### 7.11 非同期合成モールド
+
+`Async[T]` の合成は、待ち方の詳細を利用者に露出しないためにモールドで
+表します。結果はすべて `Async[...]` 系の pack です。
+
+| モールド | `[]` 必須 | 戻り値 | 説明 |
+|---------|----------|--------|------|
+| `Cancel[async]()` | async | `Async[T]` | 非同期処理の cancellation を要求 |
+| `All[list]()` | list | `Async[@[T]]` | 全 async の完了を待つ |
+| `Race[list]()` | list | `Async[T]` | 最初に完了した async を返す |
+| `Timeout[async, ms]()` | async, ms | `Async[T]` | 指定時間で timeout |
 
 ---
 

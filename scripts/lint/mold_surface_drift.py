@@ -17,11 +17,12 @@ from pathlib import Path
 
 
 DOC_PATHS = [
-    Path("docs/reference/standard_methods.md"),
-    Path("docs/reference/class_like_types.md"),
-    Path("docs/reference/os_api.md"),
+    Path("docs/api/prelude.md"),
+    Path("docs/api/os.md"),
+    Path("docs/api/net.md"),
+    Path("docs/api/js.md"),
+    Path("docs/api/build_descriptors.md"),
     Path("docs/reference/addon_manifest.md"),
-    Path("docs/guide/14_os_package.md"),
 ]
 RUNTIME_PATHS = [
     Path("src/codegen/lower_molds.rs"),
@@ -29,7 +30,7 @@ RUNTIME_PATHS = [
 ]
 REGISTRY_PATH = Path("src/types/mold_specs.rs")
 
-SIG_RE = re.compile(r"`([A-Z][A-Za-z0-9_]*)\[([^`]*)\]\(\)`")
+BACKTICK_RE = re.compile(r"`([^`]+)`")
 HEADING_SIG_RE = re.compile(r"(?<![A-Za-z0-9_])([A-Z][A-Za-z0-9_]*)\[([^\]]*)\]")
 RUNTIME_ARM_NAME_RE = re.compile(r'"([A-Z][A-Za-z0-9_]*)"')
 
@@ -80,12 +81,29 @@ def split_args(args: str) -> int:
     stripped = args.strip()
     if not stripped:
         return 0
-    return len([part for part in (p.strip() for p in stripped.split(",")) if part])
+    parts: list[str] = []
+    start = 0
+    square_depth = 0
+    paren_depth = 0
+    for idx, char in enumerate(stripped):
+        if char == "[":
+            square_depth += 1
+        elif char == "]" and square_depth:
+            square_depth -= 1
+        elif char == "(":
+            paren_depth += 1
+        elif char == ")" and paren_depth:
+            paren_depth -= 1
+        elif char == "," and square_depth == 0 and paren_depth == 0:
+            parts.append(stripped[start:idx].strip())
+            start = idx + 1
+    parts.append(stripped[start:].strip())
+    return len([part for part in parts if part])
 
 
 def split_options(raw: str) -> set[str]:
     raw = raw.strip()
-    if not raw or raw == "-":
+    if not raw or raw in {"-", "—"}:
         return set()
     names: set[str] = set()
     for part in raw.split(","):
@@ -97,6 +115,49 @@ def split_options(raw: str) -> set[str]:
         if name:
             names.add(name)
     return names
+
+
+def extract_mold_sigs(raw: str) -> list[tuple[str, str]]:
+    sigs: list[tuple[str, str]] = []
+    index = 0
+    while index < len(raw):
+        match = re.search(r"(?<![A-Za-z0-9_])([A-Z][A-Za-z0-9_]*)\[", raw[index:])
+        if not match:
+            break
+        name = match.group(1)
+        bracket_start = index + match.end() - 1
+        cursor = bracket_start + 1
+        depth = 1
+        while cursor < len(raw) and depth:
+            if raw[cursor] == "[":
+                depth += 1
+            elif raw[cursor] == "]":
+                depth -= 1
+            cursor += 1
+        if depth:
+            index = bracket_start + 1
+            continue
+        args = raw[bracket_start + 1 : cursor - 1]
+        after = cursor
+        while after < len(raw) and raw[after].isspace():
+            after += 1
+        if after >= len(raw) or raw[after] != "(":
+            index = cursor
+            continue
+        paren = after + 1
+        paren_depth = 1
+        while paren < len(raw) and paren_depth:
+            if raw[paren] == "(":
+                paren_depth += 1
+            elif raw[paren] == ")":
+                paren_depth -= 1
+            paren += 1
+        if paren_depth:
+            index = after + 1
+            continue
+        sigs.append((name, args))
+        index = paren
+    return sigs
 
 
 def doc_return_kind(raw: str) -> str | None:
@@ -159,8 +220,14 @@ def parse_docs(root: Path) -> dict[str, DocSpec]:
                 if not cells or cells[0].startswith("---"):
                     continue
                 sig_cell = None
+                sigs: list[tuple[str, str]] = []
                 for idx, cell in enumerate(cells[:2]):
-                    if SIG_RE.search(cell):
+                    sigs = [
+                        sig
+                        for fragment in BACKTICK_RE.findall(cell)
+                        for sig in extract_mold_sigs(fragment)
+                    ]
+                    if sigs:
                         sig_cell = idx
                         break
                 if sig_cell is None:
@@ -168,18 +235,20 @@ def parse_docs(root: Path) -> dict[str, DocSpec]:
                 options: set[str] = set()
                 ret_kind: str | None = None
                 if sig_cell == 0:
-                    if len(cells) >= 4:
+                    if len(cells) >= 5:
                         options = split_options(cells[2])
                         ret_kind = doc_return_kind(cells[3])
+                    elif len(cells) >= 4:
+                        ret_kind = doc_return_kind(cells[2])
                     elif len(cells) >= 2:
                         ret_kind = doc_return_kind(cells[1])
-                for match in SIG_RE.finditer(cells[sig_cell]):
+                for name, args in sigs:
                     add_doc_entry(
                         docs,
                         rel,
                         line_no,
-                        match.group(1),
-                        match.group(2),
+                        name,
+                        args,
                         options,
                         ret_kind,
                     )
@@ -188,6 +257,17 @@ def parse_docs(root: Path) -> dict[str, DocSpec]:
                     continue
                 for match in HEADING_SIG_RE.finditer(line):
                     add_doc_entry(docs, rel, line_no, match.group(1), match.group(2))
+            else:
+                if "=> :" in line:
+                    for name, args in extract_mold_sigs(line):
+                        add_doc_entry(
+                            docs,
+                            rel,
+                            line_no,
+                            name,
+                            args,
+                            return_kind=doc_return_kind(line),
+                        )
     return docs
 
 

@@ -390,7 +390,7 @@ HttpPost[url: Str, body: Str]() => :Async[Lax[Str]]
 > 任意メソッド・任意ヘッダで HTTP リクエストを発行する。
 
 ```taida
-HttpRequest[method: Str, url: Str] headers: Headers  body: Str => :Async[Lax[@(status: Int, body: Str, headers: BuchiPack)]]
+HttpRequest[method: Str, url: Str](headers <= Headers, body <= Str) => :Async[Lax[@(status: Int, body: Str, headers: BuchiPack)]]
 ```
 
 `Headers` は次のいずれかの形式を取ります。
