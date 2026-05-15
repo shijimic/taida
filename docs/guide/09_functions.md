@@ -279,10 +279,10 @@ Fold[numbers, 0, _ acc x = acc + x]() ]=> total  // 15
 `<=` は右の値を左の名前に束縛します。`=>` の `value => name` 形でも束縛は可能ですが、`<=` のほうが「右辺から名前へ」というデータの流れが視覚的に伝わります。
 
 ```taida
-result <= Upper["hello"]()
-// result: "HELLO"
+left_bound <= Upper["hello"]()
+// left_bound: "HELLO"
 
-Upper["hello"]() => result   // 同じ意味
+Upper["hello"]() => right_bound   // 同じ意味
 ```
 
 > **注意**: 現在のパーサーは `<=` の単一束縛のみサポートしており、`<=` チェーンによる逆方向パイプライン (`result <= f() <= g() <= data`) は未対応です。逆方向のデータフローを書きたい場合は、順方向パイプライン `=>` または中間変数を使用してください。
