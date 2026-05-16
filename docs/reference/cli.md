@@ -1,8 +1,8 @@
 # Taida CLI リファレンス
 
-> 実装正本: `src/main.rs`
-
-このページは `@e.X` 以降の Taida CLI の単一リファレンスです。E31 は予告期間なしの破壊的変更として、旧トップレベルコマンドを `taida way` / `taida ingot` 配下へ整理します。タグごとの land 履歴は `CHANGELOG.md` を参照してください。
+このページは現行 Taida CLI の単一リファレンスです。`taida` トップレベル
+コマンドは `taida way` / `taida ingot` 配下のサブコマンド群に整理されて
+います。タグごとの land 履歴は `CHANGELOG.md` を参照してください。
 
 ---
 
@@ -43,7 +43,15 @@ taida --no-check <FILE>
 - `taida.toml` (将来予約)
 - `.git/` (git リポジトリルート)
 
-**E32 移行ノート**: `@e.32` で **`.taida` ディレクトリをプロジェクトルートマーカーから外しました**。E31 までは `~/.taida` を持つホームディレクトリ直下で `taida ./script.td` を実行すると `$HOME` がルートと誤判定されることがありましたが、E32 以降は `packages.tdm` / `taida.toml` / `.git` が無いディレクトリは「プロジェクトルートではない」と扱われ、CLI はファイル単独実行モードとしてフォールバックします。`.taida/` は依然としてビルドキャッシュ (`build/`, `deps/`, `taida.lock`) の格納先ですが、ルート判定の trigger にはなりません。`packages.tdm` を持たない単発スクリプト実行で従来挙動が必要な場合は、明示的に空の `packages.tdm` を置いてください (詳細は `docs/guide/10_modules.md` の「packages.tdm」セクションを参照)。
+`.taida/` ディレクトリはプロジェクトルートマーカーには **含まれません**。
+`packages.tdm` / `taida.toml` / `.git` のいずれも持たないディレクトリは
+「プロジェクトルートではない」と扱われ、CLI はファイル単独実行モードとして
+フォールバックします。`.taida/` はビルドキャッシュ (`build/`, `deps/`,
+`taida.lock`) の格納先として使われますが、ルート判定の trigger には
+なりません。`packages.tdm` を持たない単発スクリプト実行でプロジェクト
+ルート扱いが必要な場合は、明示的に空の `packages.tdm` を置いてください
+(詳細は [`docs/guide/10_modules.md`](../guide/10_modules.md) の
+「packages.tdm」セクションを参照)。
 
 ---
 
@@ -63,9 +71,9 @@ taida --no-check <FILE>
 | `community` | コミュニティ API へのアクセス |
 | `upgrade` | Taida 本体のセルフアップデート |
 
-`check` / `verify` / `lint` / `todo` / `inspect` / `transpile` / `compile` / `deps` / `install` / `update` / `publish` / `cache` / `c` は `@e.X` で削除されました。旧コマンドを叩いた場合は `[E1700]` と移行先を表示し、終了コード `2` で終了します。
+`check` / `verify` / `lint` / `todo` / `inspect` / `transpile` / `compile` / `deps` / `install` / `update` / `publish` / `cache` / `c` のトップレベルコマンドは提供されていません。これらを叩いた場合は `[E1700]` と移行先を表示し、終了コード `2` で終了します。
 
-| `@e.X` で削除 | 移行先 |
+| 旧コマンド | 移行先 |
 |---|---|
 | `taida check` | `taida way check`、または完全実行の `taida way` |
 | `taida verify` | `taida way verify` |
@@ -105,7 +113,7 @@ taida build [native|js|wasm-min|wasm-wasi|wasm-edge|wasm-full] [--release] [--di
 - `taida build native <PATH>` は Native バイナリを生成します。
 - `taida build js <PATH>` は `.mjs` を生成します。
 - `taida build wasm-* <PATH>` は `.wasm` を生成します。
-- 旧 `--target <target>` / `--target=<target>` フラグは `@e.X` で削除され、`[E1700]` + exit 2 になります。
+- `--target <target>` / `--target=<target>` フラグは提供していません。位置引数で指定してください。誤って指定した場合は `[E1700]` + exit 2 になります。
 - 既定では parse + type check を実行します。`--no-check` で型検査をスキップできます。
 - `--diag-format jsonl` を指定するとコンパイル診断を `taida.diagnostic.v1` JSONL 形式で出力します。
 
@@ -387,7 +395,7 @@ taida community <posts|post|messages|message|author>
 - `message`: `--to <user>` を使って公開メッセージを送信します。
 - `author`: 著者プロフィールを表示します。
 
-`taida c` のエイリアスは `@e.X` で削除されました。`taida community` を使ってください。
+`taida c` の短縮エイリアスは提供していません。`taida community` を使ってください。
 
 ---
 
@@ -397,7 +405,7 @@ taida community <posts|post|messages|message|author>
 taida upgrade [--check] [--gen GEN] [--label LABEL] [--version VERSION]
 ```
 
-Taida 本体のセルフアップデート専用コマンドです。旧 AST 書き換えフラグ (`--d28`, `--d29`, `--e30`) は `@e.X` で削除され、移行コマンドは提供しません。
+Taida 本体のセルフアップデート専用コマンドです。AST 書き換えフラグ (`--d28`, `--d29`, `--e30` 等の旧 alias) は提供していません。バージョン間の手動移行は CHANGELOG を参照してください。
 
 | オプション | 説明 |
 |---|---|

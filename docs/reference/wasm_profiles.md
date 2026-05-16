@@ -43,18 +43,26 @@ WASM からアドオンを呼び出すマニフェストでは、`native/addon.t
 
 ## コアパッケージの互換性
 
-コアパッケージの互換性はプロファイルごとに次のとおりです。
+taida 本体にバンドルされるコア同梱パッケージの互換性はプロファイルごとに次のとおりです。
 
 | パッケージ領域 | `wasm-min` | `wasm-wasi` | `wasm-edge` | `wasm-full` |
 |----------------|------------|-------------|-------------|-------------|
 | `taida-lang/os` | 利用不可 | 文書化済みの WASI 向け部分集合 | 文書化済みのエッジ向け部分集合 | `wasm-wasi` と同一の OS 部分集合 |
-| `taida-lang/net` | 利用不可 | 文書化済みの WASI 向け部分集合 | 利用不可 | `wasm-wasi` と同一の net 部分集合 |
-| `taida-lang/terminal` | 利用不可 | 利用不可 | 利用不可 | 利用不可 |
+| `taida-lang/net` | 利用不可 | 文書化済みの WASI 向け部分集合 (plaintext HTTP/1.1 `httpServe`) | 利用不可 | `wasm-wasi` と同一の net 部分集合 |
+| `taida-lang/crypto` | 利用不可 | 利用不可 | 利用不可 | 対応 |
+| `taida-lang/js` | 利用不可 | 利用不可 | 利用不可 | 利用不可 |
+| `taida-lang/pool` | 利用不可 | 利用不可 | 利用不可 | 全 API |
+| `taida-lang/build` (ディスクリプタ) | reject | `EnvVar` / `allEnv` / `Read` / `Exists` / `writeFile` / `readBytesAt` のみ受理 | `EnvVar` / `allEnv` のみ受理 | `wasm-wasi` と同一の OS subset |
 | アドオンに裏打ちされたパッケージ | 利用不可 | 利用不可 | 利用不可 | マニフェストが明示的に対応宣言した場合のみ利用可 |
 
-OS API のシンボル単位の対応範囲は `docs/reference/build_descriptors.md`
-と `docs/reference/os_api.md` を参照してください。NET API の対応方針は
-`docs/reference/net_api.md` に記載しています。
+各パッケージ内の API 単位の対応範囲は、対応する `docs/api/<package>.md`
+を参照してください。`taida-lang/build` のディスクリプタが各ターゲットで
+受理する OS API のサブセットは、`docs/api/build_descriptors.md` の
+ターゲット別コア API 互換性表に網羅されています。
+
+公式アドオン (例: `taida-lang/terminal`) は taida 本体にバンドルされて
+おらず、各アドオンの WASM 対応はそれぞれのマニフェストに従います。
+対応宣言の書式は `docs/reference/addon_manifest.md` を参照してください。
 
 `wasm-wasi` / `wasm-full` の net 部分集合は、WASI preview1 の継承 fd
 を使う plaintext HTTP/1.1 `httpServe` です。host が

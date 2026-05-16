@@ -174,9 +174,7 @@ AI がこの関数で行ってはいけないことを説明します。
 ///@   - Result を返す関数では成否述語を経由してから値を使う
 ```
 
-> **PHILOSOPHY.md — I.** 深く考えずに適当にぶちこんでけ
->
-> Taida には null と undefined が存在しません。doc-comment 本文に「null チェック」という記述を使わず、`Lax.has_value` の確認、`]=>` や `<=[` での取り出し、`Result` の述語を経由した扱いに統一してください。doc-comment の lint は、本文中の `null` / `undefined` を許可リスト方式 (外部プロトコル仕様の引用のみ許可) でエラー扱いにします。
+失敗可能性は Taida 流の表現に揃えてください。`Lax.has_value` の確認、`]=>` / `<=[` での取り出し、`Result` の述語を経由した扱いを使い、外部プロトコル仕様の引用以外で `null` / `undefined` の語を本文に書かないこと。doc-comment lint はこれを許可リスト方式で確認します。
 
 ### @AI-Related
 
@@ -336,7 +334,7 @@ Mold[T] => ApiResult[T] = @(
 ///@   - Space: O(limit)
 ///@   - Database: 1 query
 ///@
-///@ Since: 1.0.0
+///@ Since: e.32
 searchPilots query: Str limit: Int includeInactive: Bool =
   |== error: Error =
     @[]

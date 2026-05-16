@@ -883,6 +883,7 @@ const WASM_MIN_SKIP_STEMS: &[&str] = &[
     "terminal_line_editor", // D28B-018 interactive terminal example, requires raw-mode harness
     "terminal_spinner",     // D28B-018 interactive terminal example, time-bound harness
     "terminal_mouse",       // D28B-018 interactive terminal example, requires mouse capture
+    "wasm_min_pi_approx",   // covered by the dedicated runtime and size-gate tests above
 ];
 
 fn run_wasm_min_parity_fixture(stem: &str) {

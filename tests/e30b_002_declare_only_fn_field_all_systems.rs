@@ -22,32 +22,15 @@
 //! wasm behaviour. No new wasm-specific surface is introduced by Phase 4
 //! (the change is checker-only, AST / IR / codegen are untouched).
 
-use std::path::PathBuf;
 use std::process::Command;
 
-fn taida_bin() -> PathBuf {
-    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    manifest_dir.join("target").join("release").join("taida")
-}
+mod common;
 
-fn ensure_release_binary() {
-    let bin = taida_bin();
-    if bin.exists() {
-        return;
-    }
-    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let status = Command::new("cargo")
-        .args(["build", "--release", "--bin", "taida"])
-        .current_dir(&manifest_dir)
-        .status()
-        .expect("cargo build --release --bin taida failed to spawn");
-    assert!(status.success(), "cargo build --release --bin taida failed");
-}
+use common::taida_bin;
 
 /// Run `taida way check` on a temporary file written from `source` and assert
 /// it succeeds with no errors.
 fn assert_check_clean(source: &str, label: &str) {
-    ensure_release_binary();
     let tmp = std::env::temp_dir().join(format!("e30b_002_{}.td", label));
     std::fs::write(&tmp, source).expect("write tmp");
     let output = Command::new(taida_bin())
@@ -142,7 +125,6 @@ stdout(g.item.toString())
 /// declare-only fn field.
 #[test]
 fn e30b_002_mold_extension_unbound_type_param_still_rejected() {
-    ensure_release_binary();
     let source = r#"Mold[T] => Broken[T, U] = @(
   greet: T => :T
 )

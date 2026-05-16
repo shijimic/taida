@@ -11,7 +11,6 @@
 //! CLI binary to ensure the same diagnostics surface in both paths.
 
 use std::path::PathBuf;
-use std::process::Command;
 
 use taida::parser::lint::{LintDiagnostic, lint_program_with_source};
 use taida::parser::parse;
@@ -220,21 +219,6 @@ fn d28b_008_diagnostic_render_path_format() {
 
 // ── Curated user-facing examples must lint clean (CI ratchet) ────
 
-/// Resolve the `taida` CLI. We always exec via `cargo run` to stay
-/// independent of the test harness's environment.
-fn taida_cli() -> Command {
-    // Use the debug binary if it exists, falling back to `cargo run`.
-    let workspace = env_workspace_root();
-    let bin = workspace.join("target/debug/taida");
-    if bin.exists() {
-        Command::new(bin)
-    } else {
-        let mut c = Command::new("cargo");
-        c.args(["run", "--quiet", "--bin", "taida", "--"]);
-        c
-    }
-}
-
 fn env_workspace_root() -> PathBuf {
     // CARGO_MANIFEST_DIR points to the workspace root for tests/
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -278,15 +262,30 @@ fn d28b_008_curated_user_facing_examples_lint_clean() {
         if name.starts_with("compile_") || name == "addon_terminal.td" {
             continue;
         }
-        let out = taida_cli()
-            .arg("way")
-            .arg("lint")
-            .arg(&path)
-            .output()
-            .expect("taida way lint failed to spawn");
-        if !out.status.success() {
-            let stdout = String::from_utf8_lossy(&out.stdout);
-            violations.push(format!("{}\n{}", path.display(), stdout));
+        let source = match std::fs::read_to_string(&path) {
+            Ok(s) => s,
+            Err(err) => {
+                violations.push(format!("{}\nread failed: {}", path.display(), err));
+                continue;
+            }
+        };
+        let (program, parse_errors) = parse(&source);
+        if !parse_errors.is_empty() {
+            violations.push(format!(
+                "{}\nparse errors: {:?}",
+                path.display(),
+                parse_errors
+            ));
+            continue;
+        }
+        let diags = lint_program_with_source(&program, &source);
+        if !diags.is_empty() {
+            let rendered = diags
+                .iter()
+                .map(|d| d.render(&path.display().to_string()))
+                .collect::<Vec<_>>()
+                .join("\n");
+            violations.push(rendered);
         }
     }
     assert!(

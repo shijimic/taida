@@ -193,11 +193,9 @@ empty.max().getOrDefault(-1)             // -1
 
 リストの操作はすべてモールドで行います。結果は `]=>` で取り出すか、パイプラインで次の処理に渡します。
 
-### 変換: Map, Filter
+ここでは代表的な 4 種 (Map / Filter / Fold / Sort) の使い方を示します。リストモールドの **完全なシグネチャ一覧** (Take / Drop / Append / Prepend / Concat / Reverse / Unique / Flatten / Join / Sum / Find / FindIndex / Count / Zip / Enumerate / TakeWhile / DropWhile / Foldr) は [`docs/api/prelude.md §7.6`](../api/prelude.md#76-リストモールド) を参照してください。
 
-#### Map[list, fn]()
-
-各要素に関数を適用して新しいリストを返します。
+### Map[list, fn]() — 各要素を変換
 
 ```taida
 Map[@[1, 2, 3], _ x = x * 2]() ]=> doubled
@@ -211,9 +209,7 @@ Map[@[1, 2, 3, 4, 5], _ x =
 // processed: @[1, 2, 3, 40, 50]
 ```
 
-#### Filter[list, fn]()
-
-条件を満たす要素だけを抽出します。
+### Filter[list, fn]() — 条件で絞り込み
 
 ```taida
 scores <= @[85, 92, 78, 95, 88]
@@ -230,11 +226,7 @@ Filter[@[1, 2, 3, 4, 5, 6], isEven]() ]=> evens
 // evens: @[2, 4, 6]
 ```
 
-### 畳み込み: Fold, Foldr
-
-#### Fold[list, init, fn]()
-
-左から畳み込みます。`init` が初期値、`fn` がアキュムレータ関数です。
+### Fold[list, init, fn]() — 畳み込み
 
 ```taida
 // 合計
@@ -250,168 +242,23 @@ Fold[names, "", _ acc name =
 // joined: "Asuka, Rei, Shinji"
 ```
 
-#### Foldr[list, init, fn]()
+### Sort[list]() — ソート
 
-右から畳み込みます。
-
-```taida
-Foldr[@["a", "b", "c"], "", _ acc x = x + acc]() ]=> concat
-// concat: "abc"
-```
-
-### 取得: Take, Drop, TakeWhile, DropWhile
-
-#### Take[list, n]() / Drop[list, n]()
-
-先頭から n 個取得、または先頭 n 個をスキップします。
-
-```taida
-numbers <= @[1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
-
-Take[numbers, 3]() ]=> first3    // @[1, 2, 3]
-Drop[numbers, 3]() ]=> rest      // @[4, 5, 6, 7, 8, 9, 10]
-```
-
-#### TakeWhile[list, fn]() / DropWhile[list, fn]()
-
-条件を満たす間だけ取得、またはスキップします。
-
-```taida
-numbers <= @[1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
-
-TakeWhile[numbers, _ x = x < 5]() ]=> underFive  // @[1, 2, 3, 4]
-DropWhile[numbers, _ x = x < 5]() ]=> fromFive   // @[5, 6, 7, 8, 9, 10]
-```
-
-### 追加: Append, Prepend, Concat
-
-```taida
-Append[@[1, 2], 3]() ]=> appended         // @[1, 2, 3]
-Prepend[@[2, 3], 1]() ]=> prepended       // @[1, 2, 3]
-Concat[@[1, 2], @[3, 4]]() ]=> combined   // @[1, 2, 3, 4]
-```
-
-### 整形: Sort, Reverse, Unique, Flatten
-
-#### Sort[list]()
-
-要素をソートします。オプションで降順やキー関数を指定できます。
+オプション `reverse` で降順、`by` でキー関数を指定できます。
 
 ```taida
 Sort[@[3, 1, 4, 1, 5]]() ]=> sorted
 // sorted: @[1, 1, 3, 4, 5]
 
-// 降順
 Sort[@[3, 1, 4, 1, 5]](reverse <= true) ]=> desc
 // desc: @[5, 4, 3, 1, 1]
 
-// キー関数でソート
 pilots <= @[
   @(name <= "Asuka", age <= 14),
   @(name <= "Shinji", age <= 14),
   @(name <= "Rei", age <= 14)
 ]
 Sort[pilots](by <= _ p = p.age) ]=> byAge
-```
-
-| オプション | デフォルト | 説明 |
-|-----------|----------|------|
-| `reverse` | `false` | `true` で降順 |
-| `by` | なし（自然順） | キー抽出関数 |
-
-#### Reverse[list]()
-
-```taida
-Reverse[@[1, 2, 3]]() ]=> reversed  // @[3, 2, 1]
-```
-
-#### Unique[list]()
-
-重複を除去します。
-
-```taida fragment
-Unique[@[1, 2, 2, 3, 3, 1]]() ]=> uniq  // @[1, 2, 3]
-
-// キー関数で重複判定
-Unique[items](by <= _ x = x.id) ]=> uniqueById
-```
-
-#### Flatten[list]()
-
-ネストしたリストを1段階フラット化します。
-
-```taida
-Flatten[@[@[1, 2], @[3, 4]]]() ]=> flat  // @[1, 2, 3, 4]
-```
-
-### 結合: Join, Sum
-
-#### Join[list, sep]()
-
-要素を区切り文字で結合して文字列にします。
-
-```taida
-Join[@["a", "b", "c"], ","]() ]=> csv  // "a,b,c"
-Join[@[1, 2, 3], "-"]() ]=> dashed     // "1-2-3"
-```
-
-#### Sum[list]()
-
-数値リストの合計を返します。
-
-```taida
-Sum[@[1, 2, 3, 4, 5]]() ]=> total  // 15
-empty: @[Int] <= @[]
-Sum[empty]() ]=> zero               // 0
-```
-
-### 検索: Find, FindIndex, Count
-
-#### Find[list, fn]()
-
-条件を満たす最初の要素を Lax で返します。
-
-```taida
-Find[@[1, 2, 3, 4, 5], _ x = x > 3]() ]=> found
-// found: 4
-
-Find[@[1, 2, 3], _ x = x > 10]().has_value  // false
-```
-
-#### FindIndex[list, fn]()
-
-条件を満たす最初の要素の位置を返します。見つからない場合は -1。
-
-```taida
-FindIndex[@[10, 20, 30, 40], _ x = x > 25]()  // 2
-```
-
-#### Count[list, fn]()
-
-条件を満たす要素の数を返します。
-
-```taida
-Count[@[1, 2, 3, 4, 5], _ x = x > 2]()  // 3
-```
-
-### ペア: Zip, Enumerate
-
-#### Zip[list, other]()
-
-2つのリストを要素ごとにペアにします。短い方に合わせます。
-
-```taida
-Zip[@[1, 2, 3], @["a", "b", "c"]]() ]=> pairs
-// pairs: @[@(first <= 1, second <= "a"), @(first <= 2, second <= "b"), @(first <= 3, second <= "c")]
-```
-
-#### Enumerate[list]()
-
-各要素にインデックスを付与します。
-
-```taida
-Enumerate[@["Asuka", "Rei", "Shinji"]]() ]=> indexed
-// indexed: @[@(index <= 0, value <= "Asuka"), @(index <= 1, value <= "Rei"), @(index <= 2, value <= "Shinji")]
 ```
 
 ---
@@ -434,16 +281,9 @@ scores => Filter[_, _ x = x >= 90]() => Map[_, _ x = x * 2]() => highDoubled
 // result: @[5, 7, 8]
 ```
 
-### 中間変数による逆順処理
+> **注意**: `<=` のチェーンによる逆方向パイプライン (`result <= f() <= g() <= data`) は現在のパーサーでは単一の `<=` 代入のみサポートしています。順方向パイプライン `=>` または中間変数を使用してください。
 
-```taida
-// 順方向パイプラインで同じ結果を得られます
-@[5, 2, 8, 1, 9, 3, 7] => Filter[_, _ x = x > 3]() => Sort[_]() => Take[_, 3]() => result
-```
-
-> **注意**: `<=` のチェーンによる逆方向パイプライン（`result <= f() <= g() <= data`）は仕様上有効ですが、現在のパーサーでは単一の `<=` 代入のみサポートしています。順方向パイプライン `=>` または中間変数を使用してください。
-
-### 直接呼び出し（unmold）
+### 直接呼び出し（アンモールド）
 
 パイプラインを使わず、中間変数に結果を保持する方法もあります。
 
@@ -508,35 +348,6 @@ Sum[aSubtotals]() ]=> aRevenue
 
 ---
 
-## 型シグネチャ一覧
-
-| モールド | `[]` 必須引数 | `()` オプション | 戻り値 |
-|---------|-------------|----------------|--------|
-| `Map[list, fn]()` | list, fn | - | @[U] |
-| `Filter[list, fn]()` | list, fn | - | @[T] |
-| `Fold[list, init, fn]()` | list, init, fn | - | A |
-| `Foldr[list, init, fn]()` | list, init, fn | - | A |
-| `Take[list, n]()` | list, n | - | @[T] |
-| `Drop[list, n]()` | list, n | - | @[T] |
-| `TakeWhile[list, fn]()` | list, fn | - | @[T] |
-| `DropWhile[list, fn]()` | list, fn | - | @[T] |
-| `Append[list, val]()` | list, val | - | @[T] |
-| `Prepend[list, val]()` | list, val | - | @[T] |
-| `Concat[list, other]()` | list, other | - | @[T] |
-| `Sort[list]()` | list | reverse, by | @[T] |
-| `Reverse[list]()` | list | - | @[T] |
-| `Unique[list]()` | list | by | @[T] |
-| `Flatten[list]()` | list | - | @[U] |
-| `Join[list, sep]()` | list, sep | - | Str |
-| `Sum[list]()` | list | - | Num |
-| `Find[list, fn]()` | list, fn | - | Lax[T] |
-| `FindIndex[list, fn]()` | list, fn | - | Int |
-| `Count[list, fn]()` | list, fn | - | Int |
-| `Zip[list, other]()` | list, other | - | @[BuchiPack] |
-| `Enumerate[list]()` | list | - | @[BuchiPack] |
-
----
-
 ## まとめ
 
 | 分類 | API | 返す値 |
@@ -548,4 +359,4 @@ Sum[aSubtotals]() ]=> aRevenue
 
 メソッドは「聞くだけ」、モールドは「作り変える」。ゴリラリテラルは終了。この使い分けが Taida のリスト操作の基本です。
 
-詳しいモールドの仕様は [クラスライク型リファレンス (操作モールド中心)](../reference/class_like_types.md) を、メソッドの仕様は [標準メソッドリファレンス](../reference/standard_methods.md) を参照してください。
+リストモールドの完全シグネチャは [`docs/api/prelude.md §7.6`](../api/prelude.md#76-リストモールド) を、メソッドの仕様は [`docs/api/prelude.md §8.5`](../api/prelude.md#85-list-メソッド) を参照してください。

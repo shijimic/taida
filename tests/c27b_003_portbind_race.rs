@@ -28,7 +28,9 @@
 //! many times in a row from an integration-test crate, asserting 100%
 //! success across the iteration count. The `--ignored` gating allows CI
 //! to opt in for the long version (100 iters, ~7 minutes) while the
-//! default `cargo test` invocation runs a smoke (10 iters, ~45 s).
+//! default `cargo test` invocation runs a debug-profile smoke (2 iters). The
+//! smoke keeps a normal-CI guard without spending several minutes on repeated
+//! release cargo subprocesses.
 //!
 //! # D28 escalation checklist (3 points, all NO → C27 scope-in)
 //!
@@ -38,8 +40,8 @@
 //!
 //! # Acceptance
 //!
-//! - `cargo test --release --test c27b_003_portbind_race` (smoke, 10 iter)
-//!   → 10/10 GREEN, no ConnectionRefused panic.
+//! - `cargo test --test c27b_003_portbind_race` (debug smoke, 2 iter)
+//!   → 2/2 GREEN, no ConnectionRefused panic.
 //! - `cargo test --release --test c27b_003_portbind_race -- --ignored`
 //!   (long, 100 iter) → 100/100 GREEN.
 //!
@@ -51,11 +53,14 @@ mod common;
 use common::taida_bin;
 use std::process::Command;
 
-fn run_one_iteration() -> bool {
-    let out = Command::new("cargo")
+fn run_one_iteration(release: bool) -> bool {
+    let mut cmd = Command::new("cargo");
+    cmd.arg("test");
+    if release {
+        cmd.arg("--release");
+    }
+    let out = cmd
         .args([
-            "test",
-            "--release",
             "--lib",
             "net_eval::tests::test_http_serve_max_requests_3",
             "--",
@@ -68,14 +73,13 @@ fn run_one_iteration() -> bool {
 }
 
 #[test]
-fn c27b_003_portbind_race_smoke_10_iter() {
-    // Smoke variant: 10 iterations. Runs in ~45 s on a 16T machine, ~90 s
-    // on CI 2C. Catches gross regressions of the connect-with-retry
-    // helper without bloating CI wallclock.
+fn c27b_003_portbind_race_smoke_2_iter() {
+    // Smoke variant: 2 debug-profile iterations. Catches gross regressions
+    // of the connect-with-retry helper without bloating normal CI wallclock.
     //
-    // The pre-fix baseline on this workstation showed 6/100 failures, so
-    // 10 iterations is statistically tight (p(0 failure | 6% rate) ≈ 53%).
-    // For higher confidence run the `--ignored` long variant below.
+    // The pre-fix baseline on this workstation showed 6/100 failures.
+    // For statistical confidence run the `--ignored` long variant below,
+    // which is already wired into the net-stress workflow.
     //
     // We also smoke that `taida_bin()` resolves so harness errors are
     // distinguished from regression hits.
@@ -83,8 +87,9 @@ fn c27b_003_portbind_race_smoke_10_iter() {
 
     let mut pass = 0u32;
     let mut fail = 0u32;
-    for i in 0..10 {
-        if run_one_iteration() {
+    const SMOKE_ITERS: u32 = 2;
+    for i in 0..SMOKE_ITERS {
+        if run_one_iteration(false) {
             pass += 1;
         } else {
             fail += 1;
@@ -93,8 +98,8 @@ fn c27b_003_portbind_race_smoke_10_iter() {
     }
     assert_eq!(
         fail, 0,
-        "C27B-003 smoke regression: {} pass / {} fail (expected 10/0)",
-        pass, fail
+        "C27B-003 smoke regression: {} pass / {} fail (expected {}/0)",
+        pass, fail, SMOKE_ITERS
     );
 }
 
@@ -110,7 +115,7 @@ fn c27b_003_portbind_race_long_100_iter() {
     let mut pass = 0u32;
     let mut fail = 0u32;
     for i in 0..100 {
-        if run_one_iteration() {
+        if run_one_iteration(true) {
             pass += 1;
         } else {
             fail += 1;

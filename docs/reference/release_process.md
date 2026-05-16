@@ -87,14 +87,14 @@ Taida は Semantic Versioning を採用しません。公開バージョンは
 互換性判断は次の公開リファレンスを根拠にします。
 
 - `docs/reference/operators.md`
-- `docs/reference/standard_library.md`
-- `docs/reference/standard_methods.md`
-- `docs/reference/class_like_types.md`
 - `docs/reference/cli.md`
 - `docs/reference/diagnostic_codes.md`
 - `docs/reference/addon_manifest.md`
 - `docs/reference/wasm_profiles.md`
 - `docs/reference/perf_gates.md`
+- `docs/api/prelude.md` (プレリュード関数 / ビルトイン型メソッド / コレクション)
+- `docs/api/os.md`, `docs/api/net.md`, `docs/api/crypto.md`, `docs/api/pool.md`, `docs/api/js.md`, `docs/api/build_descriptors.md` (コア同梱パッケージ API)
+- `docs/guide/05_mold.md` (モールド型の解剖とユーザー定義)
 
 ---
 
@@ -104,8 +104,8 @@ Taida は Semantic Versioning を採用しません。公開バージョンは
 これらに依存することになり、ビルド番号の繰り上げで変化することが
 あります。
 
-- `src/interpreter/` / `src/codegen/` / `src/parser/` / `src/types/` /
-  `src/js/` / `src/addon/` の内部実装
+- Taida 本体の内部実装 (パーサ、型システム、インタプリタ、各バック
+  エンドのコード生成、アドオンローダーなど)
 - `taida build` が出力するネイティブバイナリ・WASM 成果物のオンディスク
   形式。再現性の保証はソースコード水準であり、バイナリ水準ではありません
 - 診断メッセージの正確な文言（公開診断コードそのものは安定仕様）
