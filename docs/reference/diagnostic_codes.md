@@ -106,8 +106,27 @@
 | `E1517` | Cage / CageRilla: validation pass 終了時点で subject branch または runner branch が未解決 (`Cage[target, runner]()` の boundary contract を静的に証明できない) | TypeChecker |
 | `E1518` | Cage / CageRilla: Hammer 系 schema cast facade (`JSON[raw, Schema]()` 等) を `Cage` の subject または runner に渡す boundary contract 違反。Hammer family は `Lax[T]` failure channel を維持し、`Cage` / `Gorillax` 経路には流さない | TypeChecker |
 | `E1519` | (予約) Cage / CageRilla 診断範囲の拡張用 | — |
+| `E1520` | (予約) 「値の不在を表す型」の完全排除 — `@()` (空ぶちパック) を「型」として書くことを禁止: **(R1)** 戻り型注釈 `:@()` / `:Unit` / `:Void`、**(R1対称)** 引数型注釈、**(R2)** 関数本体末尾の `@()` / `Unit` / `Void` リテラル、**(R2拡張)** 注釈なしで最終推論型が `@()` 等に確定、**(ジェネリック)** `Mold[T]` で `T = @()` 等に具象化、を `TypeChecker` で reject。Taida ではぶちパック値が動的に `@()` になるケースは構造的に発生しない (汎用 filter が存在せず、縮小操作は別の具体ぶちパック型を返すため)。情報がない場合は意味を持った値 (書き込んだバイト数、状態を表すぶちパック、共通 Enum のバリアント等) を返す。実装は後続 fix cycle で land 予定 | TypeChecker |
 
 `E1512`〜`E1519` は **Cage / CageRilla 診断範囲**。`Cage[subject, runner]()` の type rule および `CageRilla[Branch, Out]` 子系統 (`JSRilla` / `JSONRilla` / `BuildRilla` / `FileRilla`) の boundary contract を扱う。`E1513` と `E1519` は将来の runtime validation または追加診断用に予約している。
+
+`E1520` は **「値の不在を表す型」の完全排除** 診断。PHILOSOPHY.md I の系「値の不在は値の不在」と II の系「ふくろの中身が変わったら、別のふくろにしまいなおす」を整合的に実装する。
+
+**`@()` という構文を「型」として書くこと自体を禁止する**:
+
+- 戻り型注釈 / 引数型注釈 / 型引数として `@()` / `Unit` / `Void` を書く = 「情報なしを意味する型」の意図表明 → reject
+- Taida ではぶちパック値が動的に `@()` になるケースは構造的に発生しない (汎用 filter が Taida には存在せず、ぶちパックのフィールド集合を変える操作は別の具体ぶちパック型を戻り型として定義する → II の系参照)
+
+検出範囲:
+
+1. **R1** 戻り型注釈 `:@()` / `:Unit` / `:Void`
+2. **R1 対称版** 引数型注釈 `:@()` / `:Unit` / `:Void`
+3. **R2** 関数本体末尾で `@()` / `Unit` / `Void` リテラル
+4. **R2 拡張** 注釈なしで関数の最終推論型が `@()` / `Unit` / `Void` に確定 (中間変数経由の抜け道を塞ぐ)
+5. **ジェネリック制約** `Mold[T]` で `T` が `@()` / `Unit` / `Void` 等に具象化される
+6. **パターンマッチ** で `@()` パターンを書く (warning レベル、要検討)
+
+ぶちパックのフィールド集合を変える操作は、戻り型を別の具体ぶちパック型として定義する (例: `removePrice item: @(name: Str, price: Int) = ... => :@(name: Str)`)。汎用 filter は Taida に存在せず、「フィールドを完全に削り尽くす操作」は戻り型 `:@()` が禁止されるため関数として定義不可能。これにより型と実値のズレが構造的に発生しない設計を保証する。実装は後続 fix cycle で land。
 
 ### 型推論・演算意味論エラー (`E16xx`)
 
