@@ -27,6 +27,9 @@ docs/guide/10_modules.md:151
 docs/guide/11_async.md:81
 docs/guide/12_introspection.md:202
 docs/guide/12_introspection.md:213
+docs/reference/diagnostic_codes.md:49
+docs/reference/diagnostic_codes.md:57
+docs/reference/diagnostic_codes.md:63
 docs/reference/documentation_comments.md:102
 docs/reference/documentation_comments.md:112
 docs/reference/documentation_comments.md:120
@@ -48,9 +51,9 @@ docs/reference/documentation_comments.md:74
 docs/reference/documentation_comments.md:82
 docs/reference/documentation_comments.md:92
 docs/reference/naming_conventions.md:318
-docs/reference/operators.md:268
-docs/reference/operators.md:408
-docs/reference/operators.md:593
+docs/reference/operators.md:276
+docs/reference/operators.md:416
+docs/reference/operators.md:601
 docs/reference/tail_recursion.md:172
 docs/reference/tail_recursion.md:190
 docs/reference/tail_recursion.md:207

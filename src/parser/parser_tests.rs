@@ -800,6 +800,214 @@ fn test_parse_pipeline_ident_start() {
     }
 }
 
+#[test]
+fn test_parse_lt_chain_step_order() {
+    // Backward pipeline assignment: `name <= f(_) <= g(_) <= data` must
+    // lower to the same AST as `data => g(_) => f(_) => name`. Pin the
+    // step order directly so future parser changes can't silently
+    // reverse the chain without tripping this guard.
+    let source = "result <= addOne(_) <= double(_) <= 4";
+    match first_stmt(source) {
+        Statement::Assignment(a) => {
+            assert_eq!(a.target, "result");
+            match &a.value {
+                Expr::Pipeline(steps, _) => {
+                    assert_eq!(steps.len(), 3, "expected 3 steps, got {:?}", steps);
+                    match &steps[0] {
+                        Expr::IntLit(n, _) => assert_eq!(*n, 4),
+                        other => panic!("step[0] should be IntLit(4), got {:?}", other),
+                    }
+                    match &steps[1] {
+                        Expr::FuncCall(callee, _, _) => match callee.as_ref() {
+                            Expr::Ident(name, _) => assert_eq!(name, "double"),
+                            other => panic!("step[1] callee should be Ident, got {:?}", other),
+                        },
+                        other => panic!("step[1] should be FuncCall, got {:?}", other),
+                    }
+                    match &steps[2] {
+                        Expr::FuncCall(callee, _, _) => match callee.as_ref() {
+                            Expr::Ident(name, _) => assert_eq!(name, "addOne"),
+                            other => panic!("step[2] callee should be Ident, got {:?}", other),
+                        },
+                        other => panic!("step[2] should be FuncCall, got {:?}", other),
+                    }
+                }
+                other => panic!("expected Pipeline, got {:?}", other),
+            }
+        }
+        other => panic!("expected Assignment, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_parse_lt_chain_typed_step_order() {
+    // Typed backward pipeline assignment must carry the type annotation
+    // and the same reversed step order.
+    let source = "typed: Int <= addOne(_) <= double(_) <= 4";
+    match first_stmt(source) {
+        Statement::Assignment(a) => {
+            assert_eq!(a.target, "typed");
+            assert!(a.type_annotation.is_some(), "type annotation missing");
+            match &a.value {
+                Expr::Pipeline(steps, _) => assert_eq!(steps.len(), 3),
+                other => panic!("expected Pipeline, got {:?}", other),
+            }
+        }
+        other => panic!("expected Assignment, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_parse_lt_chain_empty_step_with_fat_arrow_rejected() {
+    // `<= => 99` shape: a leading `=>` after a chain `<=` would otherwise
+    // be silently re-interpreted by the expression parser as a return
+    // type annotation placeholder. Must be rejected with E0301.
+    let source = "result <= 3 <= => 99";
+    let (_, errors) = parse(source);
+    assert!(
+        errors.iter().any(|e| e.message.contains("E0301")),
+        "expected E0301 error for `<= =>` shape, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn test_parse_lt_chain_typed_mix_with_fat_arrow_rejected() {
+    // Typed `<=` assignment must also reject a trailing `=>` (the untyped
+    // path had this guard, the typed path used to be missing it).
+    let source = "typed: Int <= 3 => 99";
+    let (_, errors) = parse(source);
+    assert!(
+        errors.iter().any(|e| e.message.contains("E0301")),
+        "expected E0301 error for typed `<= ... =>`, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn test_parse_lt_chain_cross_line_step_rejected() {
+    // Chain continuation is restricted to the assignment target's
+    // physical line. A `<=` after a newline must NOT be absorbed into
+    // the chain — it should surface as a fresh-statement parse error.
+    let source = "result <= double(_)\n  <= 4";
+    let (_, errors) = parse(source);
+    assert!(
+        !errors.is_empty(),
+        "expected a parse error for cross-line `<=` chain, got none"
+    );
+}
+
+#[test]
+fn test_parse_lt_chain_multiline_call_args_in_first_rhs_rejected() {
+    // A first-rhs expression whose call argument list spans multiple
+    // physical lines must not absorb the trailing `<= 0` as a chain
+    // step. Without the same-physical-line guard, the orphan `<=` on
+    // line 5 would silently bind to the first rhs.
+    let source = "result <= addThree(\n  1,\n  2,\n  3\n) <= 0";
+    let (_, errors) = parse(source);
+    assert!(
+        !errors.is_empty(),
+        "expected a parse error for first rhs whose call args span multiple lines, got none"
+    );
+}
+
+#[test]
+fn test_parse_lt_chain_multiline_call_args_in_chain_step_rejected() {
+    // A real chain step (i.e. a step parsed after a chain `<=`
+    // separator) whose own call argument list spills across physical
+    // lines must be rejected with `[E0304]`. `FuncCall.span` is the
+    // `(` position, which alone is insufficient to detect the spill —
+    // the helper must compare the step's leading and trailing tokens.
+    let source = "result <= double(_) <= addThree(\n  1,\n  2,\n  3\n)";
+    let (_, errors) = parse(source);
+    assert!(
+        errors.iter().any(|e| e.message.contains("E0304")),
+        "expected E0304 for multi-line call args in chain step, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn test_parse_lt_chain_pipeline_span_anchor_matches_data_end_intlit() {
+    // Backward chain Pipeline span must anchor on the data end's
+    // leading token, mirroring the forward `=>` lowering so downstream
+    // span consumers (LSP hover, diagnostics, source maps) observe the
+    // same anchor regardless of pipeline direction.
+    //
+    // IntLit case: the data is a literal, so `Expr.span()` and the
+    // leading-token span coincide.
+    let backward = "name <= addOne(_) <= double(_) <= 4";
+    match first_stmt(backward) {
+        Statement::Assignment(a) => match &a.value {
+            Expr::Pipeline(steps, span) => {
+                let data_span = steps[0].span();
+                assert_eq!(
+                    span.line, data_span.line,
+                    "backward chain Pipeline span line should equal data leading-token line"
+                );
+                assert_eq!(
+                    span.column, data_span.column,
+                    "backward chain Pipeline span column should equal data leading-token column"
+                );
+            }
+            other => panic!("expected Pipeline, got {:?}", other),
+        },
+        other => panic!("expected Assignment, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_parse_lt_chain_pipeline_span_anchor_matches_forward_funccall_data() {
+    // FuncCall case: `Expr::FuncCall(..).span()` is the `(` position,
+    // NOT the callee's leading token. Forward `f(...) => g => result`
+    // anchors `Pipeline.span` on the callee identifier (= statement
+    // start). The backward equivalent must do the same semantically: in
+    // each source it must point at the `addThree` ident token, not the
+    // `(` position. This pin guards against the regression where the
+    // backward chain used `steps[0].span()` (= `(` position) and ended
+    // up anchored mid-step instead of on the data ident.
+    fn data_ident_span(stmt: Statement) -> (Span, Span) {
+        match stmt {
+            Statement::Assignment(a) => match a.value {
+                Expr::Pipeline(steps, pipeline_span) => match &steps[0] {
+                    Expr::FuncCall(callee, _, _) => match callee.as_ref() {
+                        Expr::Ident(_, ident_span) => (pipeline_span, ident_span.clone()),
+                        other => panic!("data callee should be Ident, got {:?}", other),
+                    },
+                    other => panic!("data step should be FuncCall, got {:?}", other),
+                },
+                other => panic!("expected Pipeline, got {:?}", other),
+            },
+            other => panic!("expected Assignment, got {:?}", other),
+        }
+    }
+    let forward = "addThree(1, 2, 3) => double(_) => result";
+    let backward = "result <= double(_) <= addThree(1, 2, 3)";
+    let (forward_pipeline_span, forward_data_ident) = data_ident_span(first_stmt(forward));
+    let (backward_pipeline_span, backward_data_ident) = data_ident_span(first_stmt(backward));
+
+    // Forward Pipeline.span anchors on the data ident (statement start).
+    assert_eq!(
+        forward_pipeline_span.line, forward_data_ident.line,
+        "forward Pipeline.span line should match data ident line"
+    );
+    assert_eq!(
+        forward_pipeline_span.column, forward_data_ident.column,
+        "forward Pipeline.span column should match data ident column"
+    );
+
+    // Backward Pipeline.span must do the same: anchor on the data
+    // ident, not on the `(` position of `Expr::FuncCall.span`.
+    assert_eq!(
+        backward_pipeline_span.line, backward_data_ident.line,
+        "backward Pipeline.span line should match data ident line"
+    );
+    assert_eq!(
+        backward_pipeline_span.column, backward_data_ident.column,
+        "backward Pipeline.span column should match data ident column (must NOT be the `(` position)"
+    );
+}
+
 // ── Single-direction constraint ──
 
 #[test]

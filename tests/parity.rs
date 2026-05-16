@@ -41271,3 +41271,149 @@ stdout("err_msg:" + ok.message)
         .expect("interpreter output should exist");
     assert_eq!(out, "anon_x:1\np_name:Rei\np_age:14\nq_age:0\nerr_msg:oops");
 }
+
+/// `<=` chain — backward pipeline assignment 3-way parity.
+///
+/// `result <= f(_) <= g(_) <= data` desugars to the same AST as
+/// `data => g(_) => f(_) => result`. Test confirms that
+/// Interpreter / JS / Native produce identical output for:
+///   - untyped chain
+///   - typed chain (`name: Type <= step <= ... <= data`)
+///   - degenerate single binding (no chain) still works
+#[test]
+fn test_lt_chain_3way_parity() {
+    let source = r#"double x = x * 2 => :Int
+plusOne x = x + 1 => :Int
+basic <= plusOne(_) <= double(_) <= 4
+stdout(basic.toString())
+typed: Int <= plusOne(_) <= double(_) <= 10
+stdout(typed.toString())
+single <= plusOne(7)
+stdout(single.toString())
+"#;
+    assert_backend_parity_for_source(source, "lt_chain");
+    let out = run_interpreter_src(source, "lt_chain_expected")
+        .expect("interpreter output should exist");
+    assert_eq!(out, "9\n21\n8");
+}
+
+/// `<=` chain inside a function body, multi-step, mixed with pipeline
+/// placeholder semantics. Confirms tail-position parity too.
+#[test]
+fn test_lt_chain_inside_func_3way_parity() {
+    let source = r#"square x = x * x => :Int
+addOne x = x + 1 => :Int
+compute n =
+  result <= addOne(_) <= square(_) <= n
+  result
+=> :Int
+stdout(compute(5).toString())
+stdout(compute(0).toString())
+"#;
+    assert_backend_parity_for_source(source, "lt_chain_inside_func");
+    let out = run_interpreter_src(source, "lt_chain_inside_func_expected")
+        .expect("interpreter output should exist");
+    assert_eq!(out, "26\n1");
+}
+
+/// Single-direction constraint still enforced when a `<=` chain is
+/// followed by `=>`. Both backends must reject with `[E0301]`.
+#[test]
+fn test_lt_chain_mix_with_fat_arrow_rejected() {
+    let source = r#"double x = x * 2 => :Int
+result <= double(_) <= 3 => 99
+stdout(result.toString())
+"#;
+    assert_backends_reject_source(source, "lt_chain_mix_fat_arrow");
+}
+
+/// Typed `<=` assignment also enforces the single-direction constraint
+/// against a trailing `=>` on the same line.
+#[test]
+fn test_lt_chain_typed_mix_with_fat_arrow_rejected() {
+    let source = r#"double x = x * 2 => :Int
+typed: Int <= double(_) <= 3 => 99
+stdout(typed.toString())
+"#;
+    assert_backends_reject_source(source, "lt_chain_typed_mix_fat_arrow");
+}
+
+/// Typed single binding without a chain also rejects a trailing `=>`.
+#[test]
+fn test_lt_chain_typed_single_mix_with_fat_arrow_rejected() {
+    let source = r#"typed: Int <= 3 => 99
+stdout(typed.toString())
+"#;
+    assert_backends_reject_source(source, "lt_chain_typed_single_mix_fat_arrow");
+}
+
+/// `<= => 99` shape: a leading `=>` token after a chain `<=` separator
+/// must be rejected. Without an explicit guard, the expression parser
+/// silently re-interprets `=>` as a return-type-annotation placeholder
+/// and the chain absorbs the `99` literal.
+#[test]
+fn test_lt_chain_empty_step_with_fat_arrow_rejected() {
+    let source = r#"result <= 3 <= => 99
+stdout(result.toString())
+"#;
+    assert_backends_reject_source(source, "lt_chain_empty_step_fat_arrow");
+}
+
+/// Multi-line `<=` chain attempt: the second `<=` lives on a different
+/// physical line than the assignment target, so chain absorption must
+/// stop. The resulting orphan `<=` token surfaces as a parse error
+/// rather than being silently merged into a single Pipeline.
+#[test]
+fn test_lt_chain_cross_line_step_rejected() {
+    let source = r#"double x = x * 2 => :Int
+result <= double(_)
+  <= 4
+stdout(result.toString())
+"#;
+    assert_backends_reject_source(source, "lt_chain_cross_line_step");
+}
+
+/// A first-rhs expression whose call argument list spans multiple
+/// physical lines must not absorb the trailing `<= 0` as a chain step.
+/// The orphan `<=` on a later line surfaces as a parse error.
+#[test]
+fn test_lt_chain_multiline_call_args_in_first_rhs_rejected() {
+    let source = r#"addThree x y z = x + y + z => :Int
+result <= addThree(
+  1,
+  2,
+  3
+) <= 0
+stdout(result.toString())
+"#;
+    assert_backends_reject_source(source, "lt_chain_multiline_call_args_in_first_rhs");
+}
+
+/// A real chain step (parsed after a chain `<=` separator) whose own
+/// call argument list spills across physical lines must be rejected
+/// with `[E0304]`. `FuncCall.span` is the `(` position, so the helper
+/// must compare the step's leading and trailing tokens.
+#[test]
+fn test_lt_chain_multiline_call_args_in_chain_step_rejected() {
+    let source = r#"addThree x y z = x + y + z => :Int
+result <= double(_) <= addThree(
+  1,
+  2,
+  3
+)
+stdout(result.toString())
+"#;
+    assert_backends_reject_source(source, "lt_chain_multiline_call_args_in_chain_step");
+}
+
+/// A parenthesised first-rhs that spans multiple lines must not absorb
+/// a subsequent `<=` token from a later line as a chain step.
+#[test]
+fn test_lt_chain_paren_multiline_first_rhs_rejected() {
+    let source = r#"result <= (
+  1 + 2
+) <= 99
+stdout(result.toString())
+"#;
+    assert_backends_reject_source(source, "lt_chain_paren_multiline_first_rhs");
+}

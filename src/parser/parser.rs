@@ -400,6 +400,7 @@ impl Parser {
             }
 
             // `name <= expr` -> assignment
+            // `name <= step <= step <= ... <= data` -> backward pipeline assignment
             TokenKind::LtEq => {
                 self.advance(); // consume `<=`
                 self.skip_newlines(); // allow multiline (e.g., condition branch on next line)
@@ -409,9 +410,17 @@ impl Parser {
                 // statements. Restored after the expression parses.
                 let saved_ctx =
                     std::mem::replace(&mut self.cond_branch_context, CondBranchContext::LetRhs);
-                let value = self.parse_expression();
+                // Remember the span of the first rhs token (= the data
+                // end of a `<=` chain) so the resulting Pipeline span
+                // can anchor on it, matching the forward `=>` lowering.
+                let first_rhs_start_span = self.current_span();
+                let first_rhs_result = self.parse_expression();
                 self.cond_branch_context = saved_ctx;
-                let value = value?;
+                let first_rhs = first_rhs_result?;
+
+                let value =
+                    self.parse_lt_eq_chain_tail(first_rhs, &first_rhs_start_span, &start_span)?;
+
                 // Single-direction constraint: <= used, => must not follow on same line
                 if self.check(&TokenKind::FatArrow) {
                     return Err(ParseError {
@@ -429,6 +438,7 @@ impl Parser {
             }
 
             // `name: Type <= expr` -> typed assignment
+            // `name: Type <= step <= ... <= data` -> typed backward pipeline assignment
             TokenKind::Colon => {
                 self.advance(); // consume `:`
                 let type_ann = self.parse_type_expr()?;
@@ -438,9 +448,20 @@ impl Parser {
                 // C20-1 (ROOT-5): same LetRhs guard as the untyped form.
                 let saved_ctx =
                     std::mem::replace(&mut self.cond_branch_context, CondBranchContext::LetRhs);
-                let value = self.parse_expression();
+                let first_rhs_start_span = self.current_span();
+                let first_rhs_result = self.parse_expression();
                 self.cond_branch_context = saved_ctx;
-                let value = value?;
+                let first_rhs = first_rhs_result?;
+                let value =
+                    self.parse_lt_eq_chain_tail(first_rhs, &first_rhs_start_span, &start_span)?;
+                // Single-direction constraint: <= used, => must not follow on
+                // the same line (mirrors the untyped <= entry).
+                if self.check(&TokenKind::FatArrow) {
+                    return Err(ParseError {
+                        message: "E0301: 単一方向制約違反 — 一つの文内で => と <= を混在させることはできません".to_string(),
+                        span: self.current_span(),
+                    });
+                }
                 Ok(Statement::Assignment(Assignment {
                     target: name,
                     type_annotation: Some(type_ann),
@@ -1767,6 +1788,106 @@ impl Parser {
     }
 
     // ── Pipeline / Assignment helpers ────────────────────────
+
+    /// Fold a backward pipeline (`<=` chain) into a single `Expr::Pipeline`.
+    ///
+    /// After the first `<= rhs` is parsed, any further `<= step` tokens on
+    /// the same physical line as the assignment target are absorbed. The
+    /// chain `name <= f(_) <= g(_) <= data` lowers to the same AST that
+    /// `data => g(_) => f(_) => name` produces:
+    /// `Expr::Pipeline([data, g(_), f(_)])` with `target = name`.
+    ///
+    /// When no further `<=` follows, the original `first_rhs` is returned
+    /// unchanged so the legacy single-binding path is preserved bit-for-bit.
+    ///
+    /// Chain continuation is intentionally restricted to a single physical
+    /// line: both the chain separators and every step's parse range must
+    /// stay on the assignment target's line. A multi-line rhs (`x <=\n
+    /// expr`), a multi-line call argument list inside a step, a
+    /// parenthesised multi-line expression, and backslash continuations
+    /// are all rejected via [`E0304`] so chain absorption never crosses a
+    /// newline silently.
+    ///
+    /// `first_rhs_start` is the span of the leading token of the first
+    /// rhs (captured by the caller before `parse_expression` is invoked).
+    /// Together with the leading-token span of every subsequent step it
+    /// lets the helper anchor `Expr::Pipeline` on the *data* end — the
+    /// same anchor the forward `=>` pipeline uses — so downstream span
+    /// consumers (LSP hover, diagnostics, source maps) observe the same
+    /// location regardless of pipeline direction.
+    fn parse_lt_eq_chain_tail(
+        &mut self,
+        first_rhs: Expr,
+        first_rhs_start: &Span,
+        start_span: &Span,
+    ) -> Result<Expr, ParseError> {
+        if !self.check(&TokenKind::LtEq) {
+            return Ok(first_rhs);
+        }
+        let target_line = start_span.line;
+        // Bail out (without consuming anything) when the first rhs already
+        // spilled onto another physical line. The legacy single-binding
+        // path then keeps that rhs and any trailing `<=` becomes the
+        // start of a fresh statement (parse error surfaces there).
+        if first_rhs_start.line != target_line || self.last_consumed_line() != target_line {
+            return Ok(first_rhs);
+        }
+        if self.current_span().line != target_line {
+            return Ok(first_rhs);
+        }
+        let mut steps_reversed: Vec<Expr> = vec![first_rhs];
+        let mut data_anchor_span: Span = first_rhs_start.clone();
+        while self.check(&TokenKind::LtEq) {
+            if self.current_span().line != target_line {
+                break;
+            }
+            self.advance(); // consume `<=`
+            // The chain step must be a normal expression. A leading `=>`
+            // here would otherwise be silently re-interpreted as a return
+            // type annotation placeholder by the expression parser, which
+            // would let `name <= a <= => 99` slip past the single-direction
+            // guard. Reject it explicitly.
+            if self.check(&TokenKind::FatArrow) {
+                return Err(ParseError {
+                    message: "E0301: 単一方向制約違反 — 一つの文内で => と <= を混在させることはできません".to_string(),
+                    span: self.current_span(),
+                });
+            }
+            let step_start_span = self.current_span();
+            let saved_ctx =
+                std::mem::replace(&mut self.cond_branch_context, CondBranchContext::LetRhs);
+            let step_result = self.parse_expression();
+            self.cond_branch_context = saved_ctx;
+            let step = step_result?;
+            // Same-physical-line guarantee: every token the step parser
+            // consumed must stay on the target line. A step whose start
+            // *or* end span left the line is a chain step that crossed a
+            // newline (multi-line call args, parenthesised multi-line
+            // expression, backslash continuation) and is rejected.
+            let step_end_line = self.last_consumed_line();
+            if step_start_span.line != target_line || step_end_line != target_line {
+                return Err(ParseError {
+                    message: "[E0304] `<=` chain step must stay on a single physical line as the assignment target".to_string(),
+                    span: step.span().clone(),
+                });
+            }
+            data_anchor_span = step_start_span;
+            steps_reversed.push(step);
+        }
+        let steps: Vec<Expr> = steps_reversed.into_iter().rev().collect();
+        Ok(Expr::Pipeline(steps, data_anchor_span))
+    }
+
+    /// Line of the most recently consumed token. Used by the `<=` chain
+    /// helper to detect chain steps whose parse range spilled beyond a
+    /// newline (the AST anchor `step.span()` alone is insufficient — for
+    /// `FuncCall` it is the `(` position, not the end of the call).
+    fn last_consumed_line(&self) -> usize {
+        if self.pos == 0 {
+            return self.current_span().line;
+        }
+        self.tokens[self.pos - 1].span.line
+    }
 
     /// After parsing an initial expression, check for `=> ...` pipeline chains.
     /// Returns a Statement:
