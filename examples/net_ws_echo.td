@@ -24,7 +24,7 @@ handler req writer =
   msg ]=> received
   wsSend(upgraded.ws, received.data)
   wsClose(upgraded.ws)
-=> :Unit
+=> :Int
 
 asyncResult <= httpServe(8082, handler, 1)
 asyncResult ]=> result

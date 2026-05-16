@@ -4089,22 +4089,336 @@ stdout(total)
     );
 }
 
-/// C12-5f: `exit(...)` keeps returning `Type::Unit` — it never returns
-/// normally, so Unit is still the right placeholder. This test pins
-/// that the C12-5 migration did NOT accidentally promote `exit` to Int
-/// along with stdout/stderr.
+/// F42 sweep: `exit(...)` now returns `Type::Int` (annotation-only, since
+/// the function never actually returns normally). PHILOSOPHY I forbids
+/// `Type::Unit` from leaking to Taida surface; `exit` therefore declares
+/// `:Int` and the post-exit code is unreachable (dead code). A dedicated
+/// `:Never` type for never-return semantics is deferred to a future
+/// cycle.
 #[test]
-fn test_c12_5_exit_return_type_remains_unit() {
+fn test_f42_exit_return_type_is_int() {
     let mut checker = TypeChecker::new();
-    // Direct call-site type inference for `exit(0)`.
-    let src = "x <= exit(0)\nstdout(x)";
+    // Direct call-site type inference for `exit(0)`: binding the result
+    // to `x` and using it as an `Int` must type-check (even though the
+    // runtime branch is unreachable).
+    let src = "x <= exit(0)\nstdout(x + 0)";
     let (program, parse_errors) = parse(src);
     assert!(parse_errors.is_empty(), "parse errors: {:?}", parse_errors);
     checker.check_program(&program);
-    // No assertion about errors (binding Unit to a variable may or may
-    // not warn depending on policy); the invariant we care about is
-    // that stdout/stderr changed and exit did not.
-    let _ = checker.errors.len();
+    assert!(
+        checker.errors.is_empty(),
+        "F42 sweep: exit must return Type::Int so dead-code arithmetic still type-checks, got: {:?}",
+        checker.errors
+    );
+}
+
+/// F42 sweep [E1520] R1: `:Unit` as a function return type annotation must
+/// be rejected on Taida surface. PHILOSOPHY I の系「値の不在は値の不在」.
+#[test]
+fn test_f42_e1520_r1_unit_return_type_rejected() {
+    let mut checker = TypeChecker::new();
+    let src = r#"f x: Int =
+  stdout("hi")
+=> :Unit
+"#;
+    let (program, parse_errors) = parse(src);
+    assert!(parse_errors.is_empty(), "parse errors: {:?}", parse_errors);
+    checker.check_program(&program);
+    let has_e1520 = checker.errors.iter().any(|e| e.message.contains("[E1520]"));
+    assert!(
+        has_e1520,
+        "[E1520] R1: function returning :Unit must be rejected, got: {:?}",
+        checker.errors
+    );
+}
+
+/// F42 sweep [E1520] R1: `:Void` is treated identically to `:Unit`.
+#[test]
+fn test_f42_e1520_r1_void_return_type_rejected() {
+    let mut checker = TypeChecker::new();
+    let src = r#"f x: Int =
+  stdout("hi")
+=> :Void
+"#;
+    let (program, parse_errors) = parse(src);
+    assert!(parse_errors.is_empty(), "parse errors: {:?}", parse_errors);
+    checker.check_program(&program);
+    let has_e1520 = checker.errors.iter().any(|e| e.message.contains("[E1520]"));
+    assert!(
+        has_e1520,
+        "[E1520] R1: function returning :Void must be rejected, got: {:?}",
+        checker.errors
+    );
+}
+
+/// F42 sweep [E1520] R1 対称版: `:Unit` / `:Void` / `:@()` as a parameter
+/// type annotation must be rejected on Taida surface.
+#[test]
+fn test_f42_e1520_r1_symmetric_unit_param_type_rejected() {
+    let mut checker = TypeChecker::new();
+    let src = r#"f x: Unit =
+  stdout("hi")
+=> :Int
+"#;
+    let (program, parse_errors) = parse(src);
+    assert!(parse_errors.is_empty(), "parse errors: {:?}", parse_errors);
+    checker.check_program(&program);
+    let has_e1520 = checker.errors.iter().any(|e| e.message.contains("[E1520]"));
+    assert!(
+        has_e1520,
+        "[E1520] R1 対称版: function parameter :Unit must be rejected, got: {:?}",
+        checker.errors
+    );
+}
+
+/// F42 sweep [E1520] R1: meaningful return types (`:Int`, `:Bool`, etc.)
+/// must NOT trigger the diagnostic — only "value-absence" types do.
+#[test]
+fn test_f42_e1520_r1_meaningful_return_types_accepted() {
+    let mut checker = TypeChecker::new();
+    let src = r#"f x: Int =
+  x
+=> :Int
+g y: Bool =
+  y
+=> :Bool
+"#;
+    let (program, parse_errors) = parse(src);
+    assert!(parse_errors.is_empty(), "parse errors: {:?}", parse_errors);
+    checker.check_program(&program);
+    let has_e1520 = checker.errors.iter().any(|e| e.message.contains("[E1520]"));
+    assert!(
+        !has_e1520,
+        "[E1520] R1: meaningful return types must be accepted, got: {:?}",
+        checker.errors
+    );
+}
+
+/// F42 sweep [E1520] R2: function body's final value resolves to an empty
+/// BuchiPack `@()` with no return annotation. Closes the bypass.
+#[test]
+fn test_f42_e1520_r2_empty_buchi_tail_rejected() {
+    let mut checker = TypeChecker::new();
+    let src = r#"f x: Int =
+  @()
+"#;
+    let (program, parse_errors) = parse(src);
+    assert!(parse_errors.is_empty(), "parse errors: {:?}", parse_errors);
+    checker.check_program(&program);
+    let has_e1520 = checker.errors.iter().any(|e| e.message.contains("[E1520]"));
+    assert!(
+        has_e1520,
+        "[E1520] R2: function inferring `@()` as return type must be rejected, got: {:?}",
+        checker.errors
+    );
+}
+
+/// F42 sweep [E1520] R2 拡張: 中間変数経由の抜け道もこの helper で塞ぐ
+/// — `x <= @() => x` 形式でも reject。
+#[test]
+fn test_f42_e1520_r2_extended_intermediate_var_rejected() {
+    let mut checker = TypeChecker::new();
+    let src = r#"f y: Int =
+  x <= @()
+  x
+"#;
+    let (program, parse_errors) = parse(src);
+    assert!(parse_errors.is_empty(), "parse errors: {:?}", parse_errors);
+    checker.check_program(&program);
+    let has_e1520 = checker.errors.iter().any(|e| e.message.contains("[E1520]"));
+    assert!(
+        has_e1520,
+        "[E1520] R2 拡張: intermediate variable carrying `@()` must be rejected, got: {:?}",
+        checker.errors
+    );
+}
+
+/// F42 sweep [E1520] Round 5 (Codex 第 4 ラウンド指摘): Cage runner の
+/// Out 型引数として `@()` literal を書く抜け道を塞ぐ。`type_arg_expr_to_type`
+/// が `Expr::BuchiPack` を `Type::BuchiPack` に正しく変換するようになるまで、
+/// `JSGet[@["x"], @()]()` 等は errors=0 で通っていた。
+#[test]
+fn test_f42_e1520_r5_cage_runner_jsget_empty_pack_out_rejected() {
+    let mut checker = TypeChecker::new();
+    let src = r#">>> npm:node:process => @(env)
+bad <= Cage[env, JSGet[@["PATH"], @()]()]()
+stdout("unreachable")
+"#;
+    let (program, parse_errors) = parse(src);
+    assert!(parse_errors.is_empty(), "parse errors: {:?}", parse_errors);
+    checker.check_program(&program);
+    let has_e1520 = checker.errors.iter().any(|e| e.message.contains("[E1520]"));
+    assert!(
+        has_e1520,
+        "[E1520] R5: Cage runner `JSGet[..., @()]` must be rejected, got: {:?}",
+        checker.errors
+    );
+}
+
+/// F42 sweep [E1520] R5: 同様に `JSCall[..., @()]()` も reject。
+#[test]
+fn test_f42_e1520_r5_cage_runner_jscall_empty_pack_out_rejected() {
+    let mut checker = TypeChecker::new();
+    let src = r#">>> npm:node:process => @(env)
+bad <= Cage[env, JSCall[@["exit"], @[], @()]()]()
+stdout("unreachable")
+"#;
+    let (program, parse_errors) = parse(src);
+    assert!(parse_errors.is_empty(), "parse errors: {:?}", parse_errors);
+    checker.check_program(&program);
+    let has_e1520 = checker.errors.iter().any(|e| e.message.contains("[E1520]"));
+    assert!(
+        has_e1520,
+        "[E1520] R5: Cage runner `JSCall[..., @()]` must be rejected, got: {:?}",
+        checker.errors
+    );
+}
+
+/// F42 sweep [E1520] R5: `JSNew[..., @()]()` も reject。
+#[test]
+fn test_f42_e1520_r5_cage_runner_jsnew_empty_pack_out_rejected() {
+    let mut checker = TypeChecker::new();
+    let src = r#">>> npm:node:url => @(URL)
+bad <= Cage[URL, JSNew[@[], @["x"], @()]()]()
+stdout("unreachable")
+"#;
+    let (program, parse_errors) = parse(src);
+    assert!(parse_errors.is_empty(), "parse errors: {:?}", parse_errors);
+    checker.check_program(&program);
+    let has_e1520 = checker.errors.iter().any(|e| e.message.contains("[E1520]"));
+    assert!(
+        has_e1520,
+        "[E1520] R5: Cage runner `JSNew[..., @()]` must be rejected, got: {:?}",
+        checker.errors
+    );
+}
+
+/// F42 sweep [E1520] R5: 子系統 `JSRilla[@()]()` の Out も reject。
+#[test]
+fn test_f42_e1520_r5_jsrilla_empty_pack_out_rejected() {
+    let mut checker = TypeChecker::new();
+    let src = r#">>> npm:node:process => @(env)
+bad <= Cage[env, JSRilla[@()]()]()
+stdout("unreachable")
+"#;
+    let (program, parse_errors) = parse(src);
+    assert!(parse_errors.is_empty(), "parse errors: {:?}", parse_errors);
+    checker.check_program(&program);
+    let has_e1520 = checker.errors.iter().any(|e| e.message.contains("[E1520]"));
+    assert!(
+        has_e1520,
+        "[E1520] R5: `JSRilla[@()]` must be rejected, got: {:?}",
+        checker.errors
+    );
+}
+
+/// F42 sweep [E1520] R5: 関数戻り型注釈での nested empty pack も再帰
+/// 検出される (`contains_unit_like_type` 再帰版の regression guard)。
+/// Cage runner Out 引数経由の generic nested form (`Async[Unit]`,
+/// `Result[Unit, Str]` 等) は別途 R5-follow up テスト 3 件で carry。
+#[test]
+fn test_f42_e1520_r5_function_return_nested_empty_pack_rejected() {
+    let mut checker = TypeChecker::new();
+    let src = r#"f x: Int =
+  x
+=> :@(payload: @())
+"#;
+    let (program, parse_errors) = parse(src);
+    assert!(parse_errors.is_empty(), "parse errors: {:?}", parse_errors);
+    checker.check_program(&program);
+    let has_e1520 = checker.errors.iter().any(|e| e.message.contains("[E1520]"));
+    assert!(
+        has_e1520,
+        "[E1520] R5: nested `@(payload: @())` in function return type must be rejected, got: {:?}",
+        checker.errors
+    );
+}
+
+/// F42 sweep [E1520] R5 follow-up (Codex 第 5 ラウンド指摘): Cage runner Out
+/// に書かれた `Async[Unit]` を `[E1520]` で reject する。`type_arg_expr_to_type`
+/// の `Expr::MoldInst` arm 追加までは `Type::Unknown` に落ちて検出網を
+/// すり抜けていた。
+#[test]
+fn test_f42_e1520_r5_cage_runner_async_unit_out_rejected() {
+    let mut checker = TypeChecker::new();
+    let src = r#">>> npm:node:process => @(env)
+bad <= Cage[env, JSGet[@["PATH"], Async[Unit]]()]()
+stdout("unreachable")
+"#;
+    let (program, parse_errors) = parse(src);
+    assert!(parse_errors.is_empty(), "parse errors: {:?}", parse_errors);
+    checker.check_program(&program);
+    let has_e1520 = checker.errors.iter().any(|e| e.message.contains("[E1520]"));
+    assert!(
+        has_e1520,
+        "[E1520] R5 follow-up: `JSGet[..., Async[Unit]]` must be rejected, got: {:?}",
+        checker.errors
+    );
+}
+
+/// F42 sweep [E1520] R5 follow-up: `JSRilla[Async[Unit]]()` も同じ経路で
+/// reject される (子系統 Cage runner Out)。
+#[test]
+fn test_f42_e1520_r5_jsrilla_async_unit_out_rejected() {
+    let mut checker = TypeChecker::new();
+    let src = r#">>> npm:node:process => @(env)
+bad <= Cage[env, JSRilla[Async[Unit]]()]()
+stdout("unreachable")
+"#;
+    let (program, parse_errors) = parse(src);
+    assert!(parse_errors.is_empty(), "parse errors: {:?}", parse_errors);
+    checker.check_program(&program);
+    let has_e1520 = checker.errors.iter().any(|e| e.message.contains("[E1520]"));
+    assert!(
+        has_e1520,
+        "[E1520] R5 follow-up: `JSRilla[Async[Unit]]` must be rejected, got: {:?}",
+        checker.errors
+    );
+}
+
+/// F42 sweep [E1520] R5 follow-up: `Result[Unit, Str]` 等の更にネストした
+/// generic 形も `contains_unit_like_type` の再帰で reject される。
+/// `Optional[Void]` / `List[Unit]` 系も同経路で塞がれることを確認する
+/// (`Generic` arm 再帰呼び出しの regression guard)。
+#[test]
+fn test_f42_e1520_r5_cage_runner_result_unit_out_rejected() {
+    let mut checker = TypeChecker::new();
+    let src = r#">>> npm:node:process => @(env)
+bad <= Cage[env, JSGet[@["PATH"], Result[Unit, Str]]()]()
+stdout("unreachable")
+"#;
+    let (program, parse_errors) = parse(src);
+    assert!(parse_errors.is_empty(), "parse errors: {:?}", parse_errors);
+    checker.check_program(&program);
+    let has_e1520 = checker.errors.iter().any(|e| e.message.contains("[E1520]"));
+    assert!(
+        has_e1520,
+        "[E1520] R5 follow-up: `JSGet[..., Result[Unit, Str]]` must be rejected, got: {:?}",
+        checker.errors
+    );
+}
+
+/// F42 sweep [E1520] R5 follow-up (Codex 第 5 ラウンド最終ゲート指摘):
+/// `CageRilla[JS, Async[Unit]]` 自身を Cage runner として使う形でも、
+/// `Expr::MoldInst` arm 経由で type-arg が `Type::Generic("Async", [Unit])`
+/// に解決されて E1520 で reject される。MoldInst arm の再帰 fan-out が
+/// 子系統 CageRilla descriptor まで届くことを示す。
+#[test]
+fn test_f42_e1520_r5_cagerilla_async_unit_out_rejected() {
+    let mut checker = TypeChecker::new();
+    let src = r#">>> npm:node:process => @(env)
+bad <= Cage[env, CageRilla[JS, Async[Unit]]()]()
+stdout("unreachable")
+"#;
+    let (program, parse_errors) = parse(src);
+    assert!(parse_errors.is_empty(), "parse errors: {:?}", parse_errors);
+    checker.check_program(&program);
+    let has_e1520 = checker.errors.iter().any(|e| e.message.contains("[E1520]"));
+    assert!(
+        has_e1520,
+        "[E1520] R5 follow-up: `CageRilla[JS, Async[Unit]]` must be rejected, got: {:?}",
+        checker.errors
+    );
 }
 
 /// C12-5d: `stdout` in a pipeline — the checker sees the RHS of
@@ -4802,11 +5116,17 @@ f <= Foo[1, "x"](transform <= _ x = x)"#;
 
 /// Error-inheritance variant accepts a declare-only function field
 /// (recovery hook). Instantiation only requires the regular fields.
+///
+/// F42 sweep update: the original fixture used `recovery: Unit => :Unit`,
+/// which now triggers `[E1520]` (PHILOSOPHY I forbids `:Unit` annotations).
+/// The fixture has been updated to use meaningful concrete types
+/// (`recovery: Str => :Bool`) — the field's purpose (a hook the user
+/// supplies later) is preserved, but the contract carries information.
 #[test]
 fn test_e30b_002_error_with_declare_only_fn_field_instantiate_ok() {
     let source = r#"Error => NotFound = @(
   msg: Str,
-  recovery: Unit => :Unit
+  recovery: Str => :Bool
 )
 err <= NotFound(msg <= "missing")"#;
     let (_, errors) = check(source);

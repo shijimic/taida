@@ -159,17 +159,19 @@ stdout((end - start).toString())   // 例: "10"
 > 指定ミリ秒の待機を行う非同期処理を返す。
 
 ```taida
-sleep ms: Int => :Async[@[]]
+sleep ms: Int => :Async[Int]
 ```
 
 **Parameters**:
 
 | Name | Type | Description |
 |------|------|-------------|
-| `ms` | `Int` | 待機ミリ秒数。`0` 以下は即座に完了 (待機なし)。 |
+| `ms` | `Int` | 待機ミリ秒数。`0` 以下は即座に完了 (待機なし)。`Int` の範囲は `0..=2_147_483_647`。範囲外は rejected `Async` になる。 |
 
-**Returns**: `:Async[@[]]` — `]=>` で展開すると待機が完了します。戻り値は
-プレースホルダで、観測する意味はありません。
+**Returns**: `:Async[Int]` — `]=>` で展開すると待機が完了し、実際に待機した
+ミリ秒数 (基本的には `ms` と同値) が解決値として得られます。Taida は
+`@()` / `:Unit` を「値の不在」型として認めないため、待機時間という意味
+ある値を `:Int` として返します。
 
 **AI-Context**:
 バックエンドごとに OS / ホストランタイム提供のスリープに委譲します。
@@ -177,8 +179,8 @@ sleep ms: Int => :Async[@[]]
 **Example**:
 
 ```taida
-sleep(100) ]=> _
-stdout("100ms 経過")
+sleep(100) ]=> elapsedMs
+stdout("100ms 経過 (実測: " + elapsedMs.toString() + "ms)")
 ```
 
 ---
@@ -325,7 +327,7 @@ range(5, 0)            // @[]
 > プロセスを指定の exit code で終了する。
 
 ```taida
-exit code: Int => @[]
+exit code: Int => :Int
 ```
 
 **Parameters**:
@@ -334,7 +336,13 @@ exit code: Int => @[]
 |------|------|-------------|
 | `code` | `Int` | プロセス終了コード。デフォルト値 `0` は正常終了。慣例的に異常終了は `1` 以上を使う。 |
 
-**Returns**: `@[]` — 戻り値は観測不能 (プロセスが終了するため)。
+**Returns**: `:Int` — 型注釈上は `code` と同値を返す `:Int`。実際には
+プロセス終了のため戻り先は実行されません (dead code)。Taida は `@()` /
+`:Unit` を「値の不在」型として認めないため、never-return 関数も意味の
+ある具体型を宣言します。`result <= exit(1)` のような戻り値束縛は構文
+上は許容されますが、`result` を参照するコードは実行されません。専用
+`:Never` 型 (never-return semantics 専用の型) の導入は型システム全体への
+影響が大きいため、現バージョンでは採用していません。
 
 **AI-Context**:
 `exit(code)` の主な用途は exit code を明示したい場合 (`exit(0)` の意図的
@@ -418,11 +426,15 @@ exit code: Int => @[]
 | `Stub[value]()` | `T` | stub marker を値として固める。 |
 | `TODO[]()` | `T` | 未実装 marker。release build では残存を拒否できる。 |
 | `Cage[subject, runner]()` | `Gorillax[T]` | Molten branch capability boundary。runner を実行し `Gorillax` で受ける。 |
-| `CageRilla[subject, runner]()` | `CageRilla[T]` | `Cage` の runner descriptor 基底。 |
-| `JSRilla[runner]()` | `JSRilla[T]` | JS branch runner descriptor。 |
-| `FileRilla[runner]()` | `FileRilla[T]` | file branch runner descriptor。 |
-| `BuildRilla[runner]()` | `BuildRilla[T]` | build descriptor branch runner。 |
 | `JSON[raw, Schema]()` | `Lax[T]` | JSON を schema 指定で Taida 値へ変換。 |
+
+> `CageRilla[Branch, Out]` および `JSRilla[Out]` / `FileRilla[Out]` /
+> `BuildRilla[Out]` は **直接呼び出さない型** です。`Cage[subject,
+> runner]()` の type rule と、`runner` 位置に置く descriptor (`JSGet`
+> / `JSCall` / `FileWrite` / `BuildPlan` 等) の戻り型としてのみ surface
+> に現れます。各 descriptor の詳細は `docs/api/js.md` /
+> `docs/api/build_descriptors.md` / 関連 API ドキュメントを参照
+> してください。
 
 ### 7.4 文字列モールド
 

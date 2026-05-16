@@ -788,7 +788,26 @@ mod tests {
         //   1,128,618 bytes.
         // 2026-05-14 Lax public data field rename (`hasValue` -> `has_value`)
         //   updates generated C literals; assembled runtime is 1,128,652 bytes.
-        const EXPECTED_TOTAL_LEN: usize = 1_128_652;
+        // 2026-05-16 F42 sweep `taida_time_sleep_task` returns `ms` (Int)
+        //   instead of an empty pack; assembled runtime is 1,128,851 bytes.
+        // 2026-05-16 F42 sweep net_h1_h2 streaming/ws API comments updated
+        //   ("Unit" → "F42 sweep: Int(0) ..."); assembled runtime grows by
+        //   1,345 bytes to 1,130,196.
+        // 2026-05-16 F42 sweep (R4): `taida_assert` Native helper added to
+        //   core.c (prototype declaration + 1,876-byte implementation
+        //   block, with F42 sweep contract comment). Restores 3-backend
+        //   parity for `assert(cond, msg?) -> Bool` (Phase 1 R3 review
+        //   verdict: Native used to segfault). Assembled runtime grows
+        //   by 2,077 bytes to 1,132,273.
+        // 2026-05-16 F42 sweep (R4) final: net_h1_h2 wsSend/wsClose comment
+        //   contract updated (Unit → Int / F42 sweep R3). +3 bytes to F5
+        //   (header-comment text only). Total grows to 1,132,276.
+        // 2026-05-16 F42 sweep (R6, NEEDS_DECISION C): doc-comment inside
+        //   net_h1_h2 / core.c rewrote `F42B-004` literal label to the
+        //   general "F42 sweep" expression (CLAUDE.md L13-15 — no internal
+        //   blocker IDs in source doc-comments). Net diff: F1 -12, F2 +4,
+        //   F5 +24, F6 0 → total +16 to 1,132,292.
+        const EXPECTED_TOTAL_LEN: usize = 1_132_292;
         let asm = *NATIVE_RUNTIME_C;
         assert_eq!(
             asm.len(),
@@ -1347,11 +1366,28 @@ mod tests {
         //   165,216 bytes.
         // 2026-05-14 Lax public data field rename moves the Error ceiling
         //   marker to byte offset 314,154. F2 grows to 165,227 bytes.
-        const F1_LEN: usize = 314_154;
+        // 2026-05-16 F42 sweep `taida_time_sleep_task` (which lives **inside
+        //   F2**, after the Error ceiling marker) returns the requested
+        //   `ms` value (Int) instead of `taida_pack_new(0)` (empty
+        //   BuchiPack). The diff adds 199 bytes to F2; F1 is unchanged.
+        //   F2 grows from 165,227 → 165,426 and core.c total from
+        //   479,381 → 479,580.
+        // 2026-05-16 F42 sweep (R4): `taida_assert` prototype declaration in
+        //   F1 (before Error ceiling marker; 201 bytes for the 3-line
+        //   declaration block) shifts the marker from 314,154 →
+        //   314,355. The implementation lives in F2 and adds 1,876 bytes
+        //   (1,028-char contract comment + 26-line C body). F2 grows
+        //   from 165,426 → 167,302.
+        // 2026-05-16 F42 sweep (R6): doc-comment label rewrite (F42B-004
+        //   → "F42 sweep") inside `taida_assert` contract trims 12 bytes
+        //   from F1 (taida_assert prototype area) and adds 4 bytes to F2
+        //   (implementation contract comment). F1 314,355 → 314,343 and
+        //   F2 167,302 → 167,306.
+        const F1_LEN: usize = 314_343;
         assert_eq!(
             CORE_SECTION.len(),
-            314_154 + 165_227,
-            "core.c total byte length must equal legacy fragment1 + fragment2 (C25B-001 / C25B-028 / C25B-025 / C26B-011 / C26B-020 / C26B-016 / C26B-018 / C26B-011-wS / C26B-024 / C26B-024-wepsilon adjusted; CI-red 2026-04-24 cppcheck clean-up adds 881/409 to F1/F2; @c.27 PR41 CI-red follow-up adds 61 to F1 for the cppcheck-suppress comment on the new taida_release_any helper; D28B-012 wF adds 4,821 to F1 for taida_arena_request_reset; D28B-026 review follow-up adds 425 to F1 for the active_chunk defensive corner; D29B-003 Track-β adds 6,407 to F1 for TAIDA_BYTES_CONTIG primitives + writev hot-path reflection; D29B-004 Track-ε adds 803 to F1 for taida_slice_mold inline note documenting deferred Native zero-copy view integration; D29B-005/012 Track-η adds 3,291 to F1 for taida_net_raw_as_bytes ABI Option-D rewrite + Span* release sites + taida_slice_mold CONTIG view fast path + subtraction-based Span* bounds checks; D29B-015 Track-β-2 adds 8,418 to F1 and 1,234 to F2 for Bytes dispatcher polymorphism + producer flip; D29B-016 Track-θ adds 910 to F1 for TAIDA_STR_ROPE_MAGIC sentinel + design rationale comment block; E32B-022 Lock-N adds 2,783 to F1 for the Lax[Int]-returning *indexOf*/search/FindIndex sibling helpers; E33B-003 Cat B adds 1,541 to F1 for `taida_make_error_with_kind` parity helper)"
+            314_343 + 167_306,
+            "core.c total byte length must equal legacy fragment1 + fragment2 (C25B-001 / C25B-028 / C25B-025 / C26B-011 / C26B-020 / C26B-016 / C26B-018 / C26B-011-wS / C26B-024 / C26B-024-wepsilon adjusted; CI-red 2026-04-24 cppcheck clean-up adds 881/409 to F1/F2; @c.27 PR41 CI-red follow-up adds 61 to F1 for the cppcheck-suppress comment on the new taida_release_any helper; D28B-012 wF adds 4,821 to F1 for taida_arena_request_reset; D28B-026 review follow-up adds 425 to F1 for the active_chunk defensive corner; D29B-003 Track-β adds 6,407 to F1 for TAIDA_BYTES_CONTIG primitives + writev hot-path reflection; D29B-004 Track-ε adds 803 to F1 for taida_slice_mold inline note documenting deferred Native zero-copy view integration; D29B-005/012 Track-η adds 3,291 to F1 for taida_net_raw_as_bytes ABI Option-D rewrite + Span* release sites + taida_slice_mold CONTIG view fast path + subtraction-based Span* bounds checks; D29B-015 Track-β-2 adds 8,418 to F1 and 1,234 to F2 for Bytes dispatcher polymorphism + producer flip; D29B-016 Track-θ adds 910 to F1 for TAIDA_STR_ROPE_MAGIC sentinel + design rationale comment block; E32B-022 Lock-N adds 2,783 to F1 for the Lax[Int]-returning *indexOf*/search/FindIndex sibling helpers; E33B-003 Cat B adds 1,541 to F1 for `taida_make_error_with_kind` parity helper; F42 sweep sleep-task return-value adds 199 to F2; F42 sweep (R4) `taida_assert` declaration adds 201 to F1 and 1,876 to F2)"
         );
         const F2_PREFIX: &[u8] = b"// \xE2\x94\x80\xE2\x94\x80 Error ceiling";
         let tail = &CORE_SECTION.as_bytes()[F1_LEN..F1_LEN + F2_PREFIX.len()];
@@ -1510,11 +1546,26 @@ mod tests {
         //   byte 222,543. The H2 tail is 106,127 bytes.
         // 2026-05-14 Lax public data field rename moves the marker to
         //   byte 222,545. The H2 tail is 106,128 bytes.
-        const F5_LEN: usize = 222_545;
+        // 2026-05-16 F42 sweep: 22 `return 0; // Unit` comments inside the
+        //   streaming/WS API (taida_net_start_response /
+        //   taida_net_write_chunk / taida_net_end_response /
+        //   taida_net_sse_event / taida_net_ws_send / taida_net_ws_close)
+        //   were rewritten to `// F42 sweep: Int(0) on abort/no-op;
+        //   actual byte count is Phase 2 follow-up` to make the surface
+        //   contract explicit (no Unit-typed surface returns). All edits
+        //   sit before the HTTP/2 divider; F6 is unchanged. F5 grows from
+        //   222,545 → 223,890 (+1,345 bytes).
+        // 2026-05-16 F42 sweep (R4): wsSend/wsClose header-comment contract
+        //   updated (Unit → Int / F42 sweep). +3 bytes to F5; F6 unchanged.
+        //   F5 grows from 223,890 → 223,893.
+        // 2026-05-16 F42 sweep (R6): F42B-004 → "F42 sweep" label rewrite
+        //   across the streaming/WS contract comments adds 24 bytes to F5.
+        //   F6 unchanged. F5 223,893 → 223,917.
+        const F5_LEN: usize = 223_917;
         assert_eq!(
             NET_H1_H2_SECTION.len(),
-            222_545 + 106_128,
-            "net_h1_h2.c total byte length must equal legacy fragment5 + fragment6 (C26B-026 / C26B-022-wS / C27B-014 / C27B-026 / D28B-012 wF / D28B-002 wG / D28B-025 review follow-up / D29B-003 Track-β contig writev hot-path / D29B-001 Track-ζ h2 arena+span request pack / D29B-015 Track-β-2 producer flip + consumer polymorphism adjusted; E33B-003 Cat B adds 210 to F5 for taida_net_result_fail switching to taida_make_error_with_kind)"
+            223_917 + 106_128,
+            "net_h1_h2.c total byte length must equal legacy fragment5 + fragment6 (C26B-026 / C26B-022-wS / C27B-014 / C27B-026 / D28B-012 wF / D28B-002 wG / D28B-025 review follow-up / D29B-003 Track-β contig writev hot-path / D29B-001 Track-ζ h2 arena+span request pack / D29B-015 Track-β-2 producer flip + consumer polymorphism adjusted; E33B-003 Cat B adds 210 to F5 for taida_net_result_fail switching to taida_make_error_with_kind; F42 sweep streaming/WS Unit-comment sweep adds 1,345 bytes to F5; F42 sweep (R4) wsSend/wsClose header-comment polish adds 3 bytes)"
         );
         const F6_PREFIX: &[u8] = b"// \xE2\x94\x80\xE2\x94\x80 Native HTTP/2 server";
         let tail = &NET_H1_H2_SECTION.as_bytes()[F5_LEN..F5_LEN + F6_PREFIX.len()];

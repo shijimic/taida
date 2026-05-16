@@ -183,7 +183,7 @@ end <= nowMs()
 stdout((end - start).toString())
 ```
 
-`sleep(ms)` は `Async[Unit]` を返します。`ms` は `Int` かつ `0..=2_147_483_647` の範囲です。範囲外は rejected `Async` になります。
+`sleep(ms)` は `Async[Int]` を返します。解決値は実際に経過した ms 数 (`ms` と同値が基本) です。`ms` は `Int` かつ `0..=2_147_483_647` の範囲です。範囲外は rejected `Async` になります。
 
 `nowMs()` は wall-clock（epoch ミリ秒）であり、単調時計ではありません。厳密な経過時間測定には差分と許容誤差を併用してください。
 

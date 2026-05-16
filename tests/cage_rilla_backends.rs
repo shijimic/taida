@@ -55,8 +55,8 @@ stdout(value)
         source: r#"
 >>> npm:node:process => @(env)
 set <= Cage[env, JSSet[@["TAIDA_E33_TEST"], "ok"]()]()
-set ]=> env2
-got <= Cage[env2, JSGet[@["TAIDA_E33_TEST"], Str]()]()
+set ]=> ok
+got <= Cage[env, JSGet[@["TAIDA_E33_TEST"], Str]()]()
 got ]=> value
 stdout(value)
 "#,

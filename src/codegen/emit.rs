@@ -1552,6 +1552,16 @@ fn runtime_abi(name: &str) -> Result<RuntimeAbi, String> {
             params: &[Val],
             returns: &[Val],
         },
+        // F42 sweep: assert(cond, msg?) -> Bool. Two `Val`
+        // parameters (cond + optional msg pointer encoded as Val). Native
+        // ABI passes the message C-string as a Taida `Str` value which is
+        // a pointer reinterpreted as `taida_val`. The function returns the
+        // success Bool (`1` for cond=true; on cond=false it throws via
+        // `taida_throw` and does not return).
+        "taida_assert" => RuntimeAbi {
+            params: &[Val, Val],
+            returns: &[Val],
+        },
         // jsonEncode / jsonPretty
         "taida_json_encode" => RuntimeAbi {
             params: &[Val],

@@ -152,7 +152,7 @@ handler req writer =
   msg ]=> received
   wsSend(ws, received.data)
   wsClose(ws)
-=> :Unit
+=> :Int
 
 asyncResult <= httpServe({port}, handler, 1)
 asyncResult ]=> result
@@ -174,7 +174,7 @@ handler req writer =
   msg ]=> received
   wsSend(ws, received.data)
   wsClose(ws)
-=> :Unit
+=> :Int
 
 asyncResult <= httpServe({port}, handler, 2)
 asyncResult ]=> result

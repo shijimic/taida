@@ -85,7 +85,7 @@ fn relaxed_gorillax_throw_uses_canonical_error_carrier() {
             "  stdout((encoded.contains(\"\\\"kind\\\"\")).toString())\n",
             "  stdout((encoded.contains(\"\\\"code\\\"\")).toString())\n",
             "  stdout((encoded.contains(\"\\\"cause\\\"\")).toString())\n",
-            "=> :Unit\n",
+            "=> :Int\n",
             "r.relax() ]=> value\n",
         ),
     )

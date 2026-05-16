@@ -110,12 +110,15 @@ fn e30b_003_mold_opaque_return_emits_e1410() {
 }
 
 /// E30B-003 acceptance #3: Error variant with declare-only function field
-/// whose return type is opaque → `[E1410]` fires.
+/// whose return type is opaque → `[E1410]` fires. The parameter type
+/// was changed from `Unit` to `Str` so the opaque-return diagnostic is
+/// the only thing the checker complains about (without `[E1520]` from
+/// the F42 sweep masking it).
 #[test]
 fn e30b_003_error_opaque_return_emits_e1410() {
     let source = r#"Error => MyErr = @(
   msg: Str,
-  recovery: Unit => :Opaque
+  recovery: Str => :Opaque
 )
 "#;
     let (combined, _ok) = run_check(source, "error_opaque");
@@ -234,10 +237,11 @@ stdout(f.name)
         combined
     );
 
-    // error variant
+    // error variant — recovery hook with meaningful concrete types
+    // (`Unit => :Unit` was disallowed by `[E1520]` after F42 sweep).
     let error_source = r#"Error => NotFound = @(
   msg: Str,
-  recovery: Unit => :Unit
+  recovery: Str => :Bool
 )
 err <= NotFound(msg <= "missing")
 stdout(err.msg)

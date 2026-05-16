@@ -2884,11 +2884,11 @@ fn test_async_cancel_three_way_parity() {
 handleCancel unused =
   |== e: Error =
     stdout(e.type)
-  => :Unit
+  => :Int
 
   c <= Cancel[sleep(1000)]()
   c ]=> ignored
-=> :Unit
+=> :Int
 
 handleCancel(0)
 "#;
@@ -16683,7 +16683,7 @@ handler req writer =
   startResponse(writer, 200, @[@(name <= "Content-Type", value <= "text/plain")])
   writeChunk(writer, body)
   endResponse(writer)
-=> :Unit
+=> :Int
 
 asyncResult <= httpServe({port}, handler, 1)
 asyncResult ]=> result
@@ -16782,7 +16782,7 @@ handler req writer =
   writeChunk(writer, chunk.has_value.toString())
   writeChunk(writer, chunkV)
   endResponse(writer)
-=> :Unit
+=> :Int
 
 asyncResult <= httpServe({port}, handler, 1)
 asyncResult ]=> result
@@ -16888,7 +16888,7 @@ handler req writer =
   writeChunk(writer, "|")
   writeChunk(writer, chunkV)
   endResponse(writer)
-=> :Unit
+=> :Int
 
 asyncResult <= httpServe({port}, handler, 1)
 asyncResult ]=> result
@@ -16983,7 +16983,7 @@ handler req writer =
   startResponse(writer, 200, @[@(name <= "Content-Type", value <= "text/plain")])
   writeChunk(writer, body)
   endResponse(writer)
-=> :Unit
+=> :Int
 
 asyncResult <= httpServe({port}, handler, 1)
 asyncResult ]=> result
@@ -17075,7 +17075,7 @@ handler req writer =
   startResponse(writer, 200, @[@(name <= "Content-Type", value <= "text/plain")])
   writeChunk(writer, body)
   endResponse(writer)
-=> :Unit
+=> :Int
 
 asyncResult <= httpServe({port}, handler, 1)
 asyncResult ]=> result
@@ -17171,7 +17171,7 @@ handler req writer =
   startResponse(writer, 200, @[@(name <= "Content-Type", value <= "text/plain")])
   writeChunk(writer, chunk.has_value.toString())
   endResponse(writer)
-=> :Unit
+=> :Int
 
 asyncResult <= httpServe({port}, handler, 1)
 asyncResult ]=> result
@@ -17350,7 +17350,7 @@ handler req writer =
   startResponse(writer, 200, @[@(name <= "Content-Type", value <= "text/plain")])
   writeChunk(writer, "v3 streaming ok")
   endResponse(writer)
-=> :Unit
+=> :Int
 
 asyncResult <= httpServe({port}, handler, 1)
 asyncResult ]=> result
@@ -17453,7 +17453,7 @@ parseAttempt =
     msg ]=> msgV
     wsSend(ws, msgV.data)
     wsClose(ws)
-  => :Unit
+  => :Int
 
   asyncResult <= httpServe({port}, handler, 1)
   asyncResult ]=> result
@@ -17627,7 +17627,7 @@ parseAttempt =
     startResponse(writer, 200, @[@(name <= "Content-Type", value <= "text/plain")])
     writeChunk(writer, upgrade.has_value.toString())
     endResponse(writer)
-  => :Unit
+  => :Int
 
   asyncResult <= httpServe({port}, handler, 1)
   asyncResult ]=> result
@@ -17734,7 +17734,7 @@ parseAttempt =
     // This should fail: cannot use writeChunk after WebSocket upgrade.
     writeChunk(writer, "should fail")
     wsClose(ws)
-  => :Unit
+  => :Int
 
   asyncResult <= httpServe({port}, handler, 1)
   asyncResult ]=> result
@@ -17831,7 +17831,7 @@ parseAttempt =
     startResponse(writer, 200, @[@(name <= "Content-Type", value <= "text/plain")])
     writeChunk(writer, upgrade.has_value.toString())
     endResponse(writer)
-  => :Unit
+  => :Int
 
   asyncResult <= httpServe({port}, handler, 1)
   asyncResult ]=> result
@@ -17955,7 +17955,7 @@ parseAttempt =
     msg ]=> msgV
     wsSend(ws, msgV.data)
     wsClose(ws)
-  => :Unit
+  => :Int
 
   asyncResult <= httpServe({port}, handler, 1)
   asyncResult ]=> result
@@ -18127,7 +18127,7 @@ parseAttempt =
     upgrade ]=> upgradeV
     ws <= upgradeV.ws
     wsSend(ws, "goodbye")
-  => :Unit
+  => :Int
 
   asyncResult <= httpServe({port}, handler, 1)
   asyncResult ]=> result
@@ -18345,7 +18345,7 @@ handler req writer =
   startResponse(writer, 200, @[@(name <= "Content-Type", value <= "text/plain")])
   writeChunk(writer, body)
   endResponse(writer)
-=> :Unit
+=> :Int
 
 asyncResult <= httpServe({port}, handler, 1)
 asyncResult ]=> result
@@ -18419,7 +18419,7 @@ handler req writer =
   startResponse(writer, 200, @[@(name <= "Content-Type", value <= "text/plain")])
   writeChunk(writer, chunkV)
   endResponse(writer)
-=> :Unit
+=> :Int
 
 asyncResult <= httpServe({port}, handler, 1)
 asyncResult ]=> result
@@ -18492,7 +18492,7 @@ handler req writer =
   startResponse(writer, 200, @[@(name <= "Content-Type", value <= "text/plain")])
   writeChunk(writer, body)
   endResponse(writer)
-=> :Unit
+=> :Int
 
 asyncResult <= httpServe({port}, handler, 1)
 asyncResult ]=> result
@@ -18564,7 +18564,7 @@ handler req writer =
   startResponse(writer, 200, @[@(name <= "Content-Type", value <= "text/plain")])
   writeChunk(writer, chunk.has_value.toString())
   endResponse(writer)
-=> :Unit
+=> :Int
 
 asyncResult <= httpServe({port}, handler, 1)
 asyncResult ]=> result
@@ -18641,7 +18641,7 @@ parseAttempt =
     msg ]=> msgV
     wsSend(ws, msgV.data)
     wsClose(ws)
-  => :Unit
+  => :Int
 
   asyncResult <= httpServe({port}, handler, 1)
   asyncResult ]=> result
@@ -18814,7 +18814,7 @@ handler req writer =
   startResponse(writer, 200, @[@(name <= "Content-Type", value <= "text/plain")])
   writeChunk(writer, upgrade.has_value.toString())
   endResponse(writer)
-=> :Unit
+=> :Int
 
 asyncResult <= httpServe({port}, handler, 1)
 asyncResult ]=> result
@@ -18949,7 +18949,7 @@ handler req writer =
   startResponse(writer, 200, @[@(name <= "Content-Type", value <= "text/plain")])
   writeChunk(writer, body)
   endResponse(writer)
-=> :Unit
+=> :Int
 
 asyncResult <= httpServe({port}, handler, 1)
 asyncResult ]=> result
@@ -19023,7 +19023,7 @@ handler req writer =
   startResponse(writer, 200, @[@(name <= "Content-Type", value <= "text/plain")])
   writeChunk(writer, chunkV)
   endResponse(writer)
-=> :Unit
+=> :Int
 
 asyncResult <= httpServe({port}, handler, 1)
 asyncResult ]=> result
@@ -19096,7 +19096,7 @@ handler req writer =
   startResponse(writer, 200, @[@(name <= "Content-Type", value <= "text/plain")])
   writeChunk(writer, body)
   endResponse(writer)
-=> :Unit
+=> :Int
 
 asyncResult <= httpServe({port}, handler, 1)
 asyncResult ]=> result
@@ -19163,7 +19163,7 @@ handler req writer =
   startResponse(writer, 200, @[@(name <= "Content-Type", value <= "text/plain")])
   writeChunk(writer, chunk.has_value.toString())
   endResponse(writer)
-=> :Unit
+=> :Int
 
 asyncResult <= httpServe({port}, handler, 1)
 asyncResult ]=> result
@@ -19234,7 +19234,7 @@ handler req writer =
   msg ]=> msgV
   wsSend(ws, msgV.data)
   wsClose(ws)
-=> :Unit
+=> :Int
 
 asyncResult <= httpServe({port}, handler, 1)
 asyncResult ]=> result
@@ -19402,7 +19402,7 @@ handler req writer =
   startResponse(writer, 200, @[@(name <= "Content-Type", value <= "text/plain")])
   writeChunk(writer, upgrade.has_value.toString())
   endResponse(writer)
-=> :Unit
+=> :Int
 
 asyncResult <= httpServe({port}, handler, 1)
 asyncResult ]=> result
@@ -19541,7 +19541,7 @@ handler req writer =
   startResponse(writer, 200, @[@(name <= "Content-Type", value <= "text/plain")])
   writeChunk(writer, body)
   endResponse(writer)
-=> :Unit
+=> :Int
 
 asyncResult <= httpServe({port}, handler, 1)
 asyncResult ]=> result
@@ -19617,7 +19617,7 @@ handler req writer =
   startResponse(writer, 200, @[@(name <= "Content-Type", value <= "text/plain")])
   writeChunk(writer, upgrade.has_value.toString())
   endResponse(writer)
-=> :Unit
+=> :Int
 
 asyncResult <= httpServe({port}, handler, 1)
 asyncResult ]=> result
@@ -19702,7 +19702,7 @@ fn test_net4_5c_non_ascii_sse_3way_parity() {
              \x20 sseEvent(writer, \"message\", \"\u{00E9}\u{00F1}\u{00FC}\")\n\
              \x20 sseEvent(writer, \"update\", \"\u{65E5}\u{672C}\u{8A9E}\")\n\
              \x20 endResponse(writer)\n\
-             => :Unit\n\
+             => :Int\n\
              \n\
              asyncResult <= httpServe({port}, handler, 1)\n\
              asyncResult ]=> result\n\
@@ -19779,7 +19779,7 @@ handler req writer =
   writeChunk(writer, "got:")
   writeChunk(writer, body)
   endResponse(writer)
-=> :Unit
+=> :Int
 
 asyncResult <= httpServe({port}, handler, 1)
 asyncResult ]=> result
@@ -19858,7 +19858,7 @@ handler req writer =
   chunk <= readBodyChunk(req)
   sseEvent(writer, "body", chunk.has_value.toString())
   endResponse(writer)
-=> :Unit
+=> :Int
 
 asyncResult <= httpServe({port}, handler, 1)
 asyncResult ]=> result
@@ -19932,7 +19932,7 @@ handler req writer =
   msg ]=> msgV
   wsSend(ws, msgV.data)
   wsClose(ws)
-=> :Unit
+=> :Int
 
 asyncResult <= httpServe({port}, handler, 1)
 asyncResult ]=> result
@@ -20087,7 +20087,7 @@ handler req writer =
   startResponse(writer, 400, @[@(name <= "Content-Type", value <= "text/plain")])
   writeChunk(writer, "upgrade-failed")
   endResponse(writer)
-=> :Unit
+=> :Int
 
 asyncResult <= httpServe({port}, handler, 1)
 asyncResult ]=> result
@@ -20621,7 +20621,7 @@ handler req writer =
   upgrade <= wsUpgrade(fakeReq, writer)
   startResponse(writer, 200, @[])
   endResponse(writer)
-=> :Unit
+=> :Int
 
 asyncResult <= httpServe(10000, handler, 1)
 asyncResult ]=> result
@@ -20696,7 +20696,7 @@ handler req writer =
   startResponse(writer, 200, @[@(name <= "Content-Type", value <= "text/plain")])
   writeChunk(writer, body)
   endResponse(writer)
-=> :Unit
+=> :Int
 
 asyncResult <= httpServe({port}, handler, 1)
 asyncResult ]=> result
@@ -20775,7 +20775,7 @@ handler req writer =
   startResponse(writer, 200, @[@(name <= "Content-Type", value <= "text/plain")])
   writeChunk(writer, body)
   endResponse(writer)
-=> :Unit
+=> :Int
 
 asyncResult <= httpServe({port}, handler, 1)
 asyncResult ]=> result
@@ -21362,7 +21362,7 @@ handler req writer =
   startResponse(writer, 200, @[@(name <= "Content-Type", value <= "text/plain")])
   writeChunk(writer, body)
   endResponse(writer)
-=> :Unit
+=> :Int
 
 asyncResult <= httpServe({port}, handler, 1, 5000, 128, @(cert <= "{cert}", key <= "{key}"))
 asyncResult ]=> result
@@ -21513,7 +21513,7 @@ handler req writer =
   startResponse(writer, 200, @[@(name <= "Content-Type", value <= "text/plain")])
   writeChunk(writer, chunkV)
   endResponse(writer)
-=> :Unit
+=> :Int
 
 asyncResult <= httpServe({port}, handler, 1, 5000, 128, @(cert <= "{cert}", key <= "{key}"))
 asyncResult ]=> result
@@ -21662,7 +21662,7 @@ handler req writer =
   startResponse(writer, 200, @[@(name <= "Content-Type", value <= "text/plain")])
   writeChunk(writer, body)
   endResponse(writer)
-=> :Unit
+=> :Int
 
 asyncResult <= httpServe({port}, handler, 1, 5000, 128, @(cert <= "{cert}", key <= "{key}"))
 asyncResult ]=> result
@@ -21823,7 +21823,7 @@ handler req writer =
   ws ]=> wsV
   wsSend(wsV.ws, "echo")
   wsClose(wsV.ws)
-=> :Unit
+=> :Int
 
 asyncResult <= httpServe({port}, handler, 1, 5000, 128, @(cert <= "{cert}", key <= "{key}"))
 asyncResult ]=> result
@@ -21955,7 +21955,7 @@ handler req writer =
   msg ]=> msgV
   wsSend(ws, msgV.data)
   wsClose(ws)
-=> :Unit
+=> :Int
 
 asyncResult <= httpServe({port}, handler, 1, 5000, 128, @(cert <= "{cert}", key <= "{key}"))
 asyncResult ]=> result
@@ -22392,7 +22392,7 @@ handler req writer =
   startResponse(writer, 200, @[@(name <= "content-type", value <= "text/plain")])
   writeChunk(writer, body)
   endResponse(writer)
-=> :@()
+=> :Int
 
 asyncResult <= httpServe({port}, handler, 1, 5000, 128, @(cert <= "{cert}", key <= "{key}"))
 asyncResult ]=> result
@@ -22833,7 +22833,7 @@ handler req writer =
   msg ]=> msgV
   wsSend(ws, msgV.data)
   wsClose(ws)
-=> :Unit
+=> :Int
 
 asyncResult <= httpServe({port}, handler, 1, 5000, 128, @(cert <= "{cert}", key <= "{key}"))
 asyncResult ]=> result
@@ -22977,7 +22977,7 @@ handler req writer =
   msg ]=> msgV
   wsSend(ws, msgV.data)
   wsClose(ws)
-=> :Unit
+=> :Int
 
 asyncResult <= httpServe({port}, handler, 1, 5000, 128, @(cert <= "{cert}", key <= "{key}"))
 asyncResult ]=> result
@@ -23266,7 +23266,7 @@ parseAttempt =
     code <= wsCloseCode(ws)
     stdout(code)
     wsClose(ws)
-  => :Unit
+  => :Int
 
   asyncResult <= httpServe({}, handler, 1, 5000)
   asyncResult ]=> result
@@ -23354,7 +23354,7 @@ parseAttempt =
     ws <= upgradeV.ws
     wsClose(ws, {code})
     stdout("ok")
-  => :Unit
+  => :Int
 
   asyncResult <= httpServe({port}, handler, 1, 5000)
   asyncResult ]=> result
@@ -23440,7 +23440,7 @@ parseAttempt =
     ws <= upgradeV.ws
     wsClose(ws, {code})
     stdout("ok")
-  => :Unit
+  => :Int
 
   asyncResult <= httpServe({port}, handler, 1, 5000)
   asyncResult ]=> result
@@ -23956,7 +23956,7 @@ handler req writer =
   startResponse(writer, 200, @[@(name <= "Content-Type", value <= "application/octet-stream")])
   writeChunk(writer, body)
   endResponse(writer)
-=> :Unit
+=> :Int
 
 asyncResult <= httpServe({port}, handler, 2)
 asyncResult ]=> result
@@ -25523,7 +25523,9 @@ fn test_nb6_10_dynamic_non_str_protocol_rejected_3way_parity() {
 
     // makeTls wraps the argument in @(protocol <= x).
     // Calling makeTls(true) produces a dynamic BuchiPack whose protocol
-    // field tag is UNKNOWN at compile time in Native.
+    // field tag is UNKNOWN at compile time in Native. F42 sweep migrated
+    // the `:@()` return annotation to an explicit single-field pack so
+    // the surface form remains expressive but does not trip `[E1520]`.
     let source_template = |port: u16| {
         format!(
             r#">>> taida-lang/net => @(httpServe)
@@ -25532,7 +25534,7 @@ handler req =
   @(status <= 200, headers <= @[], body <= "should-not-reach")
 => :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
 
-makeTls x = @(protocol <= x) => :@()
+makeTls x = @(protocol <= x) => :@(protocol: Bool)
 
 asyncResult <= httpServe({port}, handler, 1, 5000, 128, makeTls(true))
 asyncResult ]=> result
@@ -37077,7 +37079,7 @@ parseAttempt =
     upgrade ]=> upgradeV
     ws <= upgradeV.ws
     wsSend(ws, "goodbye")
-  => :Unit
+  => :Int
 
   asyncResult <= httpServe({port}, handler, 1)
   asyncResult ]=> result
@@ -37180,7 +37182,7 @@ parseAttempt =
     ws <= upgradeV.ws
     wsSend(ws, "bye")
     wsClose(ws)
-  => :Unit
+  => :Int
 
   asyncResult <= httpServe({port}, handler, 1)
   asyncResult ]=> result
@@ -37243,7 +37245,7 @@ parseAttempt =
     upgrade ]=> upgradeV
     ws <= upgradeV.ws
     wsSend(ws, "x")
-  => :Unit
+  => :Int
 
   asyncResult <= httpServe({port}, handler, 1)
   asyncResult ]=> result
@@ -37302,7 +37304,7 @@ parseAttempt =
     upgrade ]=> upgradeV
     ws <= upgradeV.ws
     wsClose(ws, 1004)
-  => :Unit
+  => :Int
 
   asyncResult <= httpServe({port}, handler, 1, 5000)
   asyncResult ]=> result
@@ -40333,10 +40335,13 @@ fn e30b_002_error_declare_only_fn_field_three_backend_parity() {
         eprintln!("SKIP: cc unavailable");
         return;
     }
+    // F42 sweep migrated `recovery: Unit => :Int` to `recovery: Str => :Int`
+    // — `[E1520]` forbids `:Unit` parameter annotations now. The parity
+    // surface (stdout output of `err.msg`) is unchanged.
     let src = r#"
 Error => NotFound = @(
   msg: Str,
-  recovery: Unit => :Unit
+  recovery: Str => :Int
 )
 err <= NotFound(msg <= "missing")
 stdout(err.msg)
@@ -40449,8 +40454,11 @@ stdout(p.name.length().toString())
     assert_backend_parity_for_source(src, "e30b_004_default_fn_typedef");
 }
 
-// Declare-only function fields use `Unit => :T` as the zero-argument
-// marker; the checker must surface that as an empty parameter list.
+// Declare-only function fields previously used `Unit => :T` as the
+// zero-argument marker; F42 sweep replaced that with `Int => :T` so
+// the parameter side carries information (Taida forbids `:Unit` on
+// the surface). The test calls `pick(0)` / `next(0)` to satisfy the
+// new arity.
 #[test]
 fn e30b_004_default_fn_enum_return_three_backend_parity() {
     if !cc_available() {
@@ -40459,9 +40467,9 @@ fn e30b_004_default_fn_enum_return_three_backend_parity() {
     }
     let src = r#"
 Enum => Status = :Ok :Fail
-Probe = @(label: Str, pick: Unit => :Status)
+Probe = @(label: Str, pick: Int => :Status)
 p <= Probe(label <= "status")
-s <= p.pick()
+s <= p.pick(0)
 stdout(s.toString())
 "#;
     assert_backend_parity_for_source(src, "e30b_004_default_fn_enum");
@@ -40474,9 +40482,9 @@ fn e30b_004_default_fn_self_recursive_typedef_three_backend_parity() {
         return;
     }
     let src = r#"
-Node = @(name: Str, next: Unit => :Node)
+Node = @(name: Str, next: Int => :Node)
 n <= Node(name <= "root")
-child <= n.next()
+child <= n.next(0)
 stdout(child.name.length().toString())
 "#;
     assert_backend_parity_for_source(src, "e30b_004_default_fn_self_recursive");

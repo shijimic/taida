@@ -457,19 +457,24 @@ impl Interpreter {
             }
         };
 
-        Self::write_ws_frame(stream, opcode, payload)?;
+        let bytes_written = Self::write_ws_frame(stream, opcode, payload)?;
 
-        Ok(Some(Signal::Value(Value::Unit)))
+        // F42 sweep: return total wire bytes (header + masked payload).
+        Ok(Some(Signal::Value(Value::Int(bytes_written as i64))))
     }
 
     /// Write a WebSocket frame to the stream.
     /// Server-to-client: FIN=1, MASK=0.
     /// Uses vectored write (header on stack, payload direct).
+    ///
+    /// F42 sweep: returns the total number of bytes written to wire (header +
+    /// payload). Callers that don't observe the byte count can use
+    /// `let _ = write_ws_frame(...)?` or `.ok()` to discard.
     pub(super) fn write_ws_frame(
         stream: &mut ConnStream,
         opcode: u8,
         payload: &[u8],
-    ) -> Result<(), RuntimeError> {
+    ) -> Result<usize, RuntimeError> {
         let payload_len = payload.len();
 
         // Build frame header on stack (max 10 bytes).
@@ -504,7 +509,8 @@ impl Interpreter {
             std::io::IoSlice::new(&header[..header_len]),
             std::io::IoSlice::new(payload),
         ];
-        write_vectored_all(stream, &bufs)
+        write_vectored_all(stream, &bufs)?;
+        Ok(header_len + payload_len)
     }
 
     /// `wsReceive(ws)` → `Lax[@(type: Str, data: Bytes)]` (NET4-2d).
@@ -865,16 +871,17 @@ impl Interpreter {
         }
     }
 
-    /// `wsClose(ws)` → Unit (NET4-2f).
+    /// `wsClose(ws)` → Int (F42 sweep / NET4-2f).
     ///
-    /// Sends a close frame. Idempotent (second call is no-op).
+    /// Sends a close frame. Idempotent (second call returns 0).
     /// Handler return auto-close is handled in dispatch_request.
-    /// `wsClose(ws)` or `wsClose(ws, code)` → Unit (NET4-2f, v5 revision).
+    /// `wsClose(ws)` or `wsClose(ws, code)` → Int (F42 sweep / NET4-2f, v5 revision).
     ///
     /// Sends a close frame. Optional close code (default 1000).
     /// v5: accepts an explicit close code in the range 1000-4999
     /// (excluding reserved codes 1004, 1005, 1006, 1015).
-    /// Idempotent (second call is no-op).
+    /// Idempotent (second call is a no-op and returns Int(0)).
+    /// F42 sweep: returns total wire bytes written by this call.
     pub(super) fn eval_ws_close(&mut self, args: &[Expr]) -> Result<Option<Signal>, RuntimeError> {
         if self.active_streaming_writer.is_none() {
             return Err(RuntimeError {
@@ -928,22 +935,25 @@ impl Interpreter {
         }
 
         // Idempotent: no-op if already closed.
+        // F42 sweep: return Int(0) instead of Unit (no bytes written).
         if active.ws_closed {
-            return Ok(Some(Signal::Value(Value::Unit)));
+            return Ok(Some(Signal::Value(Value::Int(0))));
         }
 
         let stream = unsafe { &mut *active.stream };
 
         // Send close frame (opcode 0x8) with the specified close code.
         let close_payload = [(close_code >> 8) as u8, (close_code & 0xFF) as u8];
-        let _ = Self::write_ws_frame(stream, Self::WS_OPCODE_CLOSE, &close_payload);
+        // F42 sweep: capture bytes_written even on send errors (best-effort close).
+        let bytes_written =
+            Self::write_ws_frame(stream, Self::WS_OPCODE_CLOSE, &close_payload).unwrap_or(0);
 
         // Mark as closed.
         if let Some(ref mut active) = self.active_streaming_writer {
             active.ws_closed = true;
         }
 
-        Ok(Some(Signal::Value(Value::Unit)))
+        Ok(Some(Signal::Value(Value::Int(bytes_written as i64))))
     }
 
     /// `wsCloseCode(ws)` → Int (v5 NET5-0d).

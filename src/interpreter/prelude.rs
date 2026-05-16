@@ -307,7 +307,8 @@ impl Interpreter {
                 Ok(Some(Signal::Value(Value::Int(ms as i64))))
             }
 
-            // ── sleep(ms): Async[Unit] wait primitive (prelude) ──
+            // ── sleep(ms): Async[Int] wait primitive (F42 sweep) ──
+            // Resolves to the requested ms count (elapsed time approximation).
             "sleep" => {
                 const MAX_SLEEP_MS: i64 = 2_147_483_647;
                 if args.len() != 1 {
@@ -338,7 +339,7 @@ impl Interpreter {
                     });
                     return Ok(Some(Signal::Value(Value::Async(AsyncValue {
                         status: AsyncStatus::Rejected,
-                        value: Box::new(Value::Unit),
+                        value: Box::new(Value::Int(0)),
                         error: Box::new(err),
                         task: None,
                     }))));
@@ -347,13 +348,13 @@ impl Interpreter {
                 let (tx, rx) = tokio::sync::oneshot::channel();
                 self.tokio_runtime.spawn(async move {
                     tokio::time::sleep(Duration::from_millis(ms as u64)).await;
-                    let _ = tx.send(Ok(Value::Unit));
+                    let _ = tx.send(Ok(Value::Int(ms)));
                 });
 
                 Ok(Some(Signal::Value(Value::Async(AsyncValue {
                     status: AsyncStatus::Pending,
-                    value: Box::new(Value::Unit),
-                    error: Box::new(Value::Unit),
+                    value: Box::new(Value::Int(0)),
+                    error: Box::new(Value::Int(0)),
                     task: Some(Arc::new(Mutex::new(PendingState::Waiting(rx)))),
                 }))))
             }

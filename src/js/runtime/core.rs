@@ -2489,8 +2489,11 @@ function __taida_sleep(ms) {
       'rejected'
     );
   }
+  // F42 sweep: resolve with the requested ms count (Int) instead of
+  // an empty object (which would be Unit on Taida surface).
+  // PHILOSOPHY I forbids `Async[Unit]` — `sleep` now returns `Async[Int]`.
   const promise = new Promise((resolve) => {
-    setTimeout(() => resolve(Object.freeze({})), ms);
+    setTimeout(() => resolve(ms), ms);
   });
   return __taida_async_pending_from_promise(promise);
 }
@@ -3096,7 +3099,12 @@ function zip(a, b) {
 }
 
 function __taida_assert(cond, msg) {
+  // F42 sweep: assert returns true on success (Bool) instead of undefined (Unit).
+  // PHILOSOPHY I forbids Unit on Taida surface; the interpreter
+  // (src/interpreter/prelude.rs:801) returns Value::Bool(true) for the
+  // success path and throws on failure. Keep parity across backends.
   if (!cond) throw new __TaidaError('AssertionError', msg || 'Assertion failed', {});
+  return true;
 }
 
 function __taida_list_method_removed(method) {
@@ -3264,7 +3272,11 @@ function __taida_js_set_runner(path, value) {
   return __taida_cagerilla_runner(function(subject) {
     const [receiver, key] = __taida_js_parent_and_key(subject, runnerPath, 'JSSet');
     receiver[key] = runnerValue;
-    return subject;
+    // F42 sweep: JSSet returns :JSRilla[Bool] — Cage unwraps the runner
+    // and surfaces this boolean as the assignment-success signal.
+    // PHILOSOPHY I forbids `Unit` / `Molten` placeholders as the surface
+    // return type for assignment-style descriptors.
+    return true;
   });
 }
 

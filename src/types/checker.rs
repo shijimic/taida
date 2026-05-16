@@ -432,21 +432,23 @@ impl TypeChecker {
             "typeOf" | "typeof" => Some(Type::Str),
             "jsonEncode" | "jsonPretty" => Some(Type::Str),
             "nowMs" => Some(Type::Int),
-            "assert" => Some(Type::Unit),
+            // F42 sweep: assert returns Bool(true) on success, throws on failure.
+            // Aligned with `src/interpreter/prelude.rs:801` (Value::Bool(true)).
+            "assert" => Some(Type::Bool),
             "range" => Some(Type::List(Box::new(Type::Int))),
             "enumerate" => Some(Type::List(Box::new(Type::Unknown))),
             "zip" => Some(Type::List(Box::new(Type::Unknown))),
             "hashMap" => Some(Type::Named("HashMap".to_string())),
             "setOf" => Some(Type::Named("Set".to_string())),
             "stdout" | "stderr" => Some(Type::Int),
-            "exit" => Some(Type::Unit),
+            "exit" => Some(Type::Int),
             "stdin" => Some(Type::Str),
             "stdinLine" => Some(Self::async_type(Type::Generic(
                 "Lax".to_string(),
                 vec![Type::Str],
             ))),
             "argv" => Some(Type::List(Box::new(Type::Str))),
-            "sleep" => Some(Self::async_type(Type::Unit)),
+            "sleep" => Some(Self::async_type(Type::Int)),
             "Regex" => Some(Type::Named("Regex".to_string())),
             "readBytes" | "readBytesAt" => {
                 Some(Type::Generic("Lax".to_string(), vec![Type::Bytes]))
@@ -1193,6 +1195,58 @@ impl TypeChecker {
         }
     }
 
+    /// F42 sweep [E1520]: Is this type a "value-absence" type that must not
+    /// appear on Taida surface as a return / parameter / type argument?
+    ///
+    /// Detects (shallow):
+    /// - `Type::Unit` (resolved from `:Unit` / `:Void` named types)
+    /// - `Type::BuchiPack` with no fields (resolved from `:@()`)
+    /// - `Type::Named("Unit" | "Void")` (un-resolved alias form)
+    ///
+    /// PHILOSOPHY.md I の系「値の不在は値の不在」と CLAUDE.md「Taida 実装側
+    /// の絶対ルール」を整合的に実装するための判定 helper。
+    pub(super) fn is_unit_like_type(ty: &Type) -> bool {
+        match ty {
+            Type::Unit => true,
+            Type::BuchiPack(fields) if fields.is_empty() => true,
+            Type::Named(name) if name == "Unit" || name == "Void" => true,
+            _ => false,
+        }
+    }
+
+    /// F42 sweep [E1520]: Recursive check that detects value-absence types
+    /// nested inside `Async[Unit]`, `Result[Unit, _]`, `Optional[Unit]`,
+    /// `List[Unit]`, `Function([Unit], Unit)`, **BuchiPack fields**, etc.
+    ///
+    /// The shallow `is_unit_like_type` is preserved for direct comparisons
+    /// (e.g. checking whether the immediate return type is `:Unit`). This
+    /// recursive variant is intended for callers that need to reject
+    /// `Async[Unit]` annotations, `Optional[Void]` annotations, and other
+    /// nested forms — every Type::Unit / empty BuchiPack hidden in the
+    /// composite is reachable from Taida surface.
+    ///
+    /// **Round-4 補強**: `Type::BuchiPack(fields)` の非空 fields 内に
+    /// `:Unit` / `:Void` / `:@()` を書く抜け道 (`:@(payload: @())` 等) を
+    /// 塞ぐため、非空 BuchiPack の各 field type を再帰的にチェック。
+    pub(super) fn contains_unit_like_type(ty: &Type) -> bool {
+        if Self::is_unit_like_type(ty) {
+            return true;
+        }
+        match ty {
+            Type::List(inner) => Self::contains_unit_like_type(inner),
+            Type::Generic(_, args) => args.iter().any(Self::contains_unit_like_type),
+            Type::Function(params, ret) => {
+                params.iter().any(Self::contains_unit_like_type)
+                    || Self::contains_unit_like_type(ret)
+            }
+            // F42 sweep (R4): BuchiPack 非空 fields 内の Unit 抜け道を塞ぐ。
+            Type::BuchiPack(fields) => {
+                fields.iter().any(|(_, field_ty)| Self::contains_unit_like_type(field_ty))
+            }
+            _ => false,
+        }
+    }
+
     /// RCB-50: Check whether a type contains an unresolved type variable.
     ///
     /// A `Named` type that is not registered in the type registry is
@@ -1276,6 +1330,34 @@ impl TypeChecker {
             Expr::ListLit(items, _) if items.len() == 1 => {
                 Type::List(Box::new(self.type_arg_expr_to_type(&items[0])))
             }
+            // F42 sweep (R5) (Codex 第 4 ラウンド指摘): 型引数として書かれた
+            // `@()` / `@(name: T, ...)` を `Type::BuchiPack` に正しく変換する。
+            // これ以前は `Expr::BuchiPack(...)` がすべて `Type::Unknown` に落ち、
+            // `JSGet[@["x"], @()]` のような Cage runner Out が
+            // `contains_unit_like_type` の検出網をすり抜けていた (E1520 抜け道)。
+            Expr::BuchiPack(fields, _) => Type::BuchiPack(
+                fields
+                    .iter()
+                    .map(|f| (f.name.clone(), self.type_arg_expr_to_type(&f.value)))
+                    .collect(),
+            ),
+            // F42 sweep (R5) follow-up (Codex 第 5 ラウンド指摘): 型引数として
+            // 書かれた `Async[Unit]` / `Result[Unit, Str]` / `Optional[Void]` 等の
+            // generic な mold instantiation を `Type::Generic` に変換する。これ以前は
+            // `Expr::MoldInst(...)` がすべて `Type::Unknown` に落ち、Cage runner Out
+            // で `JSGet[..., Async[Unit]]` のような nested unit-like 型が
+            // `contains_unit_like_type` の検出網をすり抜けていた (E1520 抜け道)。
+            // 関数戻り型注釈位置で書かれた `Async[Unit]` は別経路 `resolve_type` 経由で
+            // 既に reject されており、ここは Cage runner Out 等の type-arg 位置専用の
+            // 補完。`registry.resolve_type` を呼ぶと scope error を起こすので、
+            // shallow に `Type::Generic(name, args)` を構築するに留める。
+            Expr::MoldInst(name, type_args, _fields, _) => Type::Generic(
+                name.clone(),
+                type_args
+                    .iter()
+                    .map(|arg| self.type_arg_expr_to_type(arg))
+                    .collect(),
+            ),
             _ => Type::Unknown,
         }
     }
@@ -1347,7 +1429,7 @@ impl TypeChecker {
             }
             "JSSet" if type_args.len() == 2 => Some(CageRunnerType {
                 branch: CageBranch::Js,
-                output: Type::Molten,
+                output: Type::Bool,
             }),
             "JSBind" | "JSSpread" if type_args.len() == 1 => Some(CageRunnerType {
                 branch: CageBranch::Js,
@@ -1493,6 +1575,28 @@ impl TypeChecker {
                             "[E1517] Cage runner branch is unresolved for `{}`. \
                              Hint: pass a CageRilla child descriptor such as `JSCall[path, args, Out]()`.",
                             name
+                        ),
+                    );
+                }
+
+                // F42 sweep [E1520] Cage runner Out 検査: `Out = :@()` /
+                // `:Unit` / `:Void` (再帰形) を Cage runner の出力型として
+                // 書くことを禁止する。docs/api/js.md は「Out に Unit/@()/Void
+                // 不可」を明文化しているが、これまで type checker は enforce
+                // していなかった。
+                if let Some(ref runner_info) = info
+                    && Self::contains_unit_like_type(&runner_info.output)
+                {
+                    self.push_cage_error(
+                        "[E1520]",
+                        runner_span,
+                        format!(
+                            "[E1520] Cage runner `{}` declares output type {} ('value-absence' type, possibly nested). \
+                             Taida forbids `:@()` / `:Unit` / `:Void` (including nested forms like `:Async[Unit]`) as the \
+                             Cage descriptor's Out type. Use a meaningful concrete type instead (e.g., `:Int` for byte counts, \
+                             `:Bool` for status, a structured BuchiPack). See PHILOSOPHY.md I, docs/reference/diagnostic_codes.md \
+                             [E1520], and docs/api/js.md (Out section).",
+                            name, runner_info.output
                         ),
                     );
                 }
@@ -2995,6 +3099,27 @@ impl TypeChecker {
                     ),
                     span: field.span.clone(),
                 });
+            }
+
+            // F42 sweep [E1520] field-type check: reject value-absence types
+            // (`:@()` / `:Unit` / `:Void`) and nested forms (`:Async[Unit]` /
+            // `:Function([Unit], Unit)`) as a field's type annotation.
+            // ClassLike / Mold / InheritanceDef field definitions are part of
+            // the Taida surface contract, so the same prohibition applies.
+            if let Some(type_annotation) = &field.type_annotation {
+                let field_ty = self.registry.resolve_type(type_annotation);
+                if Self::contains_unit_like_type(&field_ty) {
+                    self.errors.push(TypeError {
+                        message: format!(
+                            "[E1520] {} '{}' field '{}' has type annotation {} ('value-absence' type, possibly nested). \
+                             Taida forbids `:@()` / `:Unit` / `:Void` (including nested forms like `:Async[Unit]` or \
+                             `:Function([Unit], Unit)`) as field type annotations. Use a meaningful concrete type instead. \
+                             See PHILOSOPHY.md I and docs/reference/diagnostic_codes.md [E1520].",
+                            kind, def_name, field.name, field_ty
+                        ),
+                        span: field.span.clone(),
+                    });
+                }
             }
 
             // (E30 Phase 5 / E30B-003) `[E1410]` reject path —
@@ -4618,6 +4743,48 @@ defaulted fields must be provided via `()`",
                             .unwrap_or(Type::Unknown)
                     })
                     .collect();
+
+                // F42 sweep [E1520] R1: reject `:@()` / `:Unit` / `:Void` as
+                // return type annotation on Taida-surface function definitions.
+                // PHILOSOPHY I の系「値の不在は値の不在」: 「情報なしを意味する型」を関数戻り型に書くこと自体を禁止する。
+                // 再帰的に Async[Unit] / Result[Unit, _] / Optional[Unit] / List[Unit] /
+                // Function([Unit], Unit) 等のネストした unit-like 型も検出する。
+                if fd.return_type.is_some() && Self::contains_unit_like_type(&ret_ty) {
+                    self.errors.push(TypeError {
+                        message: format!(
+                            "[E1520] Function '{}' declares return type {} ('value-absence' type, possibly nested). \
+                             Taida forbids `:@()` / `:Unit` / `:Void` (including nested forms like `:Async[Unit]`, \
+                             `:Result[Unit, _]`, `:List[Unit]`, `:Function([Unit], Unit)`) as function return type \
+                             annotations. Return a meaningful value instead (e.g., `:Int` for byte count, `:Bool` \
+                             for status, a structured BuchiPack, or a common Enum variant such as `:OpStatus`). \
+                             See PHILOSOPHY.md I and docs/reference/diagnostic_codes.md [E1520].",
+                            fd.name, ret_ty
+                        ),
+                        span: fd.span.clone(),
+                    });
+                }
+
+                // F42 sweep [E1520] R1 対称版: reject `:@()` / `:Unit` / `:Void` as
+                // parameter type annotation on Taida-surface function definitions
+                // (再帰検出も含む).
+                for (idx, param) in fd.params.iter().enumerate() {
+                    if param.type_annotation.is_some()
+                        && let Some(pty) = param_types.get(idx)
+                        && Self::contains_unit_like_type(pty)
+                    {
+                        self.errors.push(TypeError {
+                            message: format!(
+                                "[E1520] Function '{}' parameter '{}' has type annotation {} ('value-absence' type, possibly nested). \
+                                 Taida forbids `:@()` / `:Unit` / `:Void` (including nested forms like `:Async[Unit]`, \
+                                 `:Result[Unit, _]`) as parameter type annotations. Use a meaningful concrete type instead. \
+                                 See PHILOSOPHY.md I and docs/reference/diagnostic_codes.md [E1520].",
+                                fd.name, param.name, pty
+                            ),
+                            span: fd.span.clone(),
+                        });
+                    }
+                }
+
                 // Register the name in scope so duplicate detection still works.
                 // Invalid generic functions stay non-callable by using `Unknown`.
                 let function_value_ty = if self.invalid_func_defs.contains(&fd.name) {
@@ -4752,6 +4919,30 @@ defaulted fields must be provided via `()`",
                         }
                         _ => Type::Unknown,
                     };
+
+                    // F42 sweep [E1520] R2 / R2 拡張: reject functions whose
+                    // inferred return type is a "value-absence" type when no
+                    // return annotation is provided. This closes the
+                    // intermediate-variable bypass `x <= @() => x` and the
+                    // direct tail `... => @()` form simultaneously.
+                    if fd.type_params.is_empty()
+                        && body_ty != Type::Unknown
+                        && !Self::contains_unknown(&body_ty)
+                        && Self::is_unit_like_type(&body_ty)
+                    {
+                        self.errors.push(TypeError {
+                            message: format!(
+                                "[E1520] Function '{}' has no return type annotation, but its body's final value resolves to {} \
+                                 ('value-absence' type). Taida forbids `:@()` / `:Unit` / `:Void` from leaking as a function's \
+                                 inferred return type. Return a meaningful value instead (e.g. `:Int` byte count, `:Bool` status, \
+                                 a structured BuchiPack, or a common Enum variant). \
+                                 See PHILOSOPHY.md I and docs/reference/diagnostic_codes.md [E1520].",
+                                fd.name, body_ty
+                            ),
+                            span: fd.span.clone(),
+                        });
+                    }
+
                     if fd.type_params.is_empty()
                         && body_ty != Type::Unknown
                         && !Self::contains_unknown(&body_ty)
@@ -4781,6 +4972,21 @@ defaulted fields must be provided via `()`",
 
                 // Register the error parameter
                 let err_ty = self.registry.resolve_type(&ec.error_type);
+
+                // F42 sweep [E1520] R1 対称版: reject `:@()` / `:Unit` / `:Void`
+                // (recursive) as error-handler parameter type annotation.
+                if Self::contains_unit_like_type(&err_ty) {
+                    self.errors.push(TypeError {
+                        message: format!(
+                            "[E1520] ErrorCeiling parameter '{}' has type annotation {} ('value-absence' type, possibly nested). \
+                             Taida forbids `:@()` / `:Unit` / `:Void` (including nested forms) as handler parameter type annotations. \
+                             See PHILOSOPHY.md I and docs/reference/diagnostic_codes.md [E1520].",
+                            ec.error_param, err_ty
+                        ),
+                        span: ec.span.clone(),
+                    });
+                }
+
                 self.define_var(&ec.error_param, err_ty);
 
                 for body_stmt in &ec.handler_body {
@@ -4795,6 +5001,22 @@ defaulted fields must be provided via `()`",
                 // - Named/List/BuchiPack body: mold/fold inference imprecision
                 if let Some(ref ret_type_expr) = ec.return_type {
                     let declared_ret = self.registry.resolve_type(ret_type_expr);
+
+                    // F42 sweep [E1520] R1: reject `:@()` / `:Unit` / `:Void`
+                    // (recursive) as ErrorCeiling return-type annotation.
+                    if Self::contains_unit_like_type(&declared_ret) {
+                        self.errors.push(TypeError {
+                            message: format!(
+                                "[E1520] ErrorCeiling declares return type {} ('value-absence' type, possibly nested). \
+                                 Taida forbids `:@()` / `:Unit` / `:Void` (including nested forms like `:Async[Unit]`) \
+                                 as ErrorCeiling return type annotations. Return a meaningful value instead. \
+                                 See PHILOSOPHY.md I and docs/reference/diagnostic_codes.md [E1520].",
+                                declared_ret
+                            ),
+                            span: ec.span.clone(),
+                        });
+                    }
+
                     let is_unit_ret = matches!(declared_ret, Type::Unit)
                         || matches!(&declared_ret, Type::Named(n) if n == "Unit");
                     if !matches!(declared_ret, Type::Unknown)

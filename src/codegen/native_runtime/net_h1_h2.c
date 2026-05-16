@@ -1954,7 +1954,7 @@ static void taida_net3_extract_headers(Net3WriterState *w, taida_val headers) {
 // NET3-5b: startResponse(writer, status, headers)
 // Updates pending status/headers on the writer state. Does NOT commit to wire.
 taida_val taida_net_start_response(taida_val writer, taida_val status, taida_val headers) {
-    if (tl_net4_body && tl_net4_body->aborted) return 0; // Unit
+    if (tl_net4_body && tl_net4_body->aborted) return 0; // F42 sweep: Int(0) on abort/no-op; actual byte count is Phase 2 follow-up
     if (taida_net3_validate_writer(writer, "startResponse") < 0) return 0;
     Net3WriterState *w = tl_net3_writer;
     if (!w) {
@@ -1987,7 +1987,7 @@ taida_val taida_net_start_response(taida_val writer, taida_val status, taida_val
     w->pending_status = (int)status;
     taida_net3_extract_headers(w, headers);
     w->state = NET3_STATE_HEAD_PREPARED;
-    return 0; // Unit
+    return 0; // F42 sweep: Int(0) on abort/no-op; actual byte count is Phase 2 follow-up
 }
 
 // NET3-5b/5c/5d: writeChunk(writer, data)
@@ -1995,7 +1995,7 @@ taida_val taida_net_start_response(taida_val writer, taida_val status, taida_val
 // Bytes: extract from taida_val array to stack/stack-heap buffer, then writev.
 // Str: use C string directly.
 taida_val taida_net_write_chunk(taida_val writer, taida_val data) {
-    if (tl_net4_body && tl_net4_body->aborted) return 0; // Unit
+    if (tl_net4_body && tl_net4_body->aborted) return 0; // F42 sweep: Int(0) on abort/no-op; actual byte count is Phase 2 follow-up
     if (taida_net3_validate_writer(writer, "writeChunk") < 0) return 0;
     Net3WriterState *w = tl_net3_writer;
     int fd = tl_net3_client_fd;
@@ -2027,7 +2027,7 @@ taida_val taida_net_write_chunk(taida_val writer, taida_val data) {
         payload = taida_bytes_contig_data(data);
         taida_val blen = taida_bytes_contig_len(data);
         payload_len = (size_t)blen;
-        if (payload_len == 0) return 0; // empty chunk is no-op
+        if (payload_len == 0) return 0; // F42 sweep: empty chunk = Int(0) bytes written
     } else if (TAIDA_IS_BYTES(data)) {
         // Legacy taida_val[] Bytes form: materialize once via byte-loop. New
         // producers (readBody/readBodyAll) emit TAIDA_BYTES_CONTIG so this
@@ -2035,7 +2035,7 @@ taida_val taida_net_write_chunk(taida_val writer, taida_val data) {
         taida_val *bytes = (taida_val*)data;
         taida_val blen = bytes[1];
         payload_len = (size_t)blen;
-        if (payload_len == 0) return 0; // empty chunk is no-op
+        if (payload_len == 0) return 0; // F42 sweep: empty chunk = Int(0) bytes written
         if (payload_len <= sizeof(stack_payload)) {
             for (size_t i = 0; i < payload_len; i++) stack_payload[i] = (unsigned char)bytes[2 + i];
             payload = stack_payload;
@@ -2055,7 +2055,7 @@ taida_val taida_net_write_chunk(taida_val writer, taida_val data) {
         }
         payload = (const unsigned char*)str;
         payload_len = slen;
-        if (payload_len == 0) return 0; // empty chunk is no-op
+        if (payload_len == 0) return 0; // F42 sweep: empty chunk = Int(0) bytes written
     }
 
     // Bodyless status check
@@ -2070,7 +2070,7 @@ taida_val taida_net_write_chunk(taida_val writer, taida_val data) {
         if (taida_net3_commit_head(fd, w) != 0) {
             if (heap_payload) free(heap_payload);
             taida_net4_abort_connection("writeChunk: failed to commit response head");
-            return 0; // Unit
+            return 0; // F42 sweep: Int(0) on abort/no-op; actual byte count is Phase 2 follow-up
         }
         w->state = NET3_STATE_STREAMING;
     }
@@ -2093,18 +2093,18 @@ taida_val taida_net_write_chunk(taida_val writer, taida_val data) {
     if (taida_net_writev_all(fd, iov, 3) != 0) {
         if (heap_payload) free(heap_payload);
         taida_net4_abort_connection("writeChunk: failed to send chunk data");
-        return 0; // Unit
+        return 0; // F42 sweep: Int(0) on abort/no-op; actual byte count is Phase 2 follow-up
     }
 
     if (heap_payload) free(heap_payload);
-    return 0; // Unit
+    return 0; // F42 sweep: Int(0) on abort/no-op; actual byte count is Phase 2 follow-up
 }
 
 // NET3-5b: endResponse(writer)
 // Terminates the chunked response by sending 0\r\n\r\n.
 // Idempotent: second call is a no-op.
 taida_val taida_net_end_response(taida_val writer) {
-    if (tl_net4_body && tl_net4_body->aborted) return 0; // Unit
+    if (tl_net4_body && tl_net4_body->aborted) return 0; // F42 sweep: Int(0) on abort/no-op; actual byte count is Phase 2 follow-up
     if (taida_net3_validate_writer(writer, "endResponse") < 0) return 0;
     Net3WriterState *w = tl_net3_writer;
     int fd = tl_net3_client_fd;
@@ -2119,7 +2119,7 @@ taida_val taida_net_end_response(taida_val writer) {
     if (w->state == NET3_STATE_IDLE || w->state == NET3_STATE_HEAD_PREPARED) {
         if (taida_net3_commit_head(fd, w) != 0) {
             taida_net4_abort_connection("endResponse: failed to commit response head");
-            return 0; // Unit
+            return 0; // F42 sweep: Int(0) on abort/no-op; actual byte count is Phase 2 follow-up
         }
     }
 
@@ -2128,11 +2128,11 @@ taida_val taida_net_end_response(taida_val writer) {
     if (!taida_net3_is_bodyless_status(w->pending_status)) {
         if (taida_net_send_all(fd, "0\r\n\r\n", 5) != 0) {
             taida_net4_abort_connection("endResponse: failed to send chunked terminator");
-            return 0; // Unit
+            return 0; // F42 sweep: Int(0) on abort/no-op; actual byte count is Phase 2 follow-up
         }
     }
     w->state = NET3_STATE_ENDED;
-    return 0; // Unit
+    return 0; // F42 sweep: Int(0) on abort/no-op; actual byte count is Phase 2 follow-up
 }
 
 // NET3-5e: sseEvent(writer, event, data)
@@ -2140,7 +2140,7 @@ taida_val taida_net_end_response(taida_val writer) {
 // Auto-sets Content-Type and Cache-Control headers if not already set.
 // Splits multiline data into data: lines.
 taida_val taida_net_sse_event(taida_val writer, taida_val event, taida_val data) {
-    if (tl_net4_body && tl_net4_body->aborted) return 0; // Unit
+    if (tl_net4_body && tl_net4_body->aborted) return 0; // F42 sweep: Int(0) on abort/no-op; actual byte count is Phase 2 follow-up
     if (taida_net3_validate_writer(writer, "sseEvent") < 0) return 0;
     Net3WriterState *w = tl_net3_writer;
     int fd = tl_net3_client_fd;
@@ -2248,7 +2248,7 @@ taida_val taida_net_sse_event(taida_val writer, taida_val event, taida_val data)
     if (w->state == NET3_STATE_IDLE || w->state == NET3_STATE_HEAD_PREPARED) {
         if (taida_net3_commit_head(fd, w) != 0) {
             taida_net4_abort_connection("sseEvent: failed to commit response head");
-            return 0; // Unit
+            return 0; // F42 sweep: Int(0) on abort/no-op; actual byte count is Phase 2 follow-up
         }
         w->state = NET3_STATE_STREAMING;
     }
@@ -2353,12 +2353,12 @@ taida_val taida_net_sse_event(taida_val writer, taida_val event, taida_val data)
     if (taida_net_writev_all(fd, iov, iov_count) != 0) {
         if (iov != stack_iov) free(iov);
         taida_net4_abort_connection("sseEvent: failed to send SSE chunk data");
-        return 0; // Unit
+        return 0; // F42 sweep: Int(0) on abort/no-op; actual byte count is Phase 2 follow-up
     }
 
     if (iov != stack_iov) free(iov);
 
-    return 0; // Unit
+    return 0; // F42 sweep: Int(0) on abort/no-op; actual byte count is Phase 2 follow-up
 }
 
 // ── NET4-4: v4 Request Body Streaming + WebSocket — Native backend ──
@@ -3617,9 +3617,9 @@ taida_val taida_net_ws_upgrade(taida_val req, taida_val writer) {
     return taida_net4_make_lax_ws_value(ws_pack);
 }
 
-// ── wsSend(ws, data) → Unit (NET4-4d) ───────────────────────
+// ── wsSend(ws, data) → Int (NET4-4d / F42 sweep) ─────────────
 taida_val taida_net_ws_send(taida_val ws, taida_val data) {
-    if (tl_net4_body && tl_net4_body->aborted) return 0; // Unit
+    if (tl_net4_body && tl_net4_body->aborted) return 0; // F42 sweep: Int(0) on abort/no-op; actual byte count is Phase 2 follow-up
     Net3WriterState *w = tl_net3_writer;
     if (!w) {
         taida_net4_abort_connection("wsSend: can only be called inside a 2-argument httpServe handler");
@@ -3686,7 +3686,7 @@ taida_val taida_net_ws_send(taida_val ws, taida_val data) {
     }
     if (temp_buf) free(temp_buf);
 
-    return 0; // Unit
+    return 0; // F42 sweep: Int(0) on abort/no-op; actual byte count is Phase 2 follow-up
 }
 
 // ── wsReceive(ws) → Lax[@(type, data)] (NET4-4d) ────────────
@@ -3887,12 +3887,13 @@ taida_val taida_net_ws_receive(taida_val ws) {
     }
 }
 
-// ── wsClose(ws, code) → Unit (NET4-4d, v5 revision) ────────────────
-// v5: wsClose(ws) or wsClose(ws, code) → Unit.
+// ── wsClose(ws, code) → Int (NET4-4d / F42 sweep, v5 revision) ──
+// v5: wsClose(ws) or wsClose(ws, code) → Int (bytes written this call;
+// idempotent path returns 0).
 // 2nd arg (code): 0 = default 1000 (Normal Closure), otherwise explicit close code.
 // Valid codes: 1000-4999 excluding reserved 1004, 1005, 1006, 1015.
 taida_val taida_net_ws_close(taida_val ws, taida_val code_val) {
-    if (tl_net4_body && tl_net4_body->aborted) return 0; // Unit
+    if (tl_net4_body && tl_net4_body->aborted) return 0; // F42 sweep: Int(0) on abort/no-op; actual byte count is Phase 2 follow-up
     Net3WriterState *w = tl_net3_writer;
     if (!w) {
         taida_net4_abort_connection("wsClose: can only be called inside a 2-argument httpServe handler");
@@ -3913,7 +3914,7 @@ taida_val taida_net_ws_close(taida_val ws, taida_val code_val) {
 
     // Idempotent: no-op if already closed.
     if (bs && bs->ws_closed) {
-        return 0; // Unit
+        return 0; // F42 sweep: Int(0) on abort/no-op; actual byte count is Phase 2 follow-up
     }
 
     // v5: Determine close code from 2nd argument.
@@ -3949,7 +3950,7 @@ taida_val taida_net_ws_close(taida_val ws, taida_val code_val) {
 
     if (bs) bs->ws_closed = 1;
 
-    return 0; // Unit
+    return 0; // F42 sweep: Int(0) on abort/no-op; actual byte count is Phase 2 follow-up
 }
 
 // v5: wsCloseCode(ws) → Int (NET5-0d)

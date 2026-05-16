@@ -23,6 +23,12 @@ impl Lowering {
         // Prelude time functions (minimal kernel)
         stdlib_runtime_funcs.insert("nowMs".to_string(), "taida_time_now_ms".to_string());
         stdlib_runtime_funcs.insert("sleep".to_string(), "taida_time_sleep".to_string());
+        // F42 sweep: assert(cond, msg?) -> Bool. Native used to
+        // fall through to user-func lookup and segfault on call. Mapping
+        // to `taida_assert` (defined in core.c) restores 3-backend parity
+        // with `src/interpreter/prelude.rs::"assert"` and
+        // `src/js/runtime/core.rs::__taida_assert`.
+        stdlib_runtime_funcs.insert("assert".to_string(), "taida_assert".to_string());
         // Prelude constructors — ABOLISHED: Some/None/Ok/Err/Optional (v0.8.0)
         // Use Lax[value]() and Result[value]() mold syntax.
         // Prelude collection constructors

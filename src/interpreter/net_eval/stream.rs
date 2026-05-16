@@ -184,7 +184,13 @@ impl Interpreter {
         writer.pending_headers = headers;
         writer.state = WriterState::HeadPrepared;
 
-        Ok(Some(Signal::Value(Value::Unit)))
+        // F42 sweep: return prepared head byte size instead of Value::Unit.
+        // Actual wire commit is deferred to writeChunk/endResponse; the
+        // returned :Int represents the start-line + headers byte size that
+        // will be written on commit.
+        let prepared_head_bytes =
+            build_streaming_head(writer.pending_status, &writer.pending_headers).len();
+        Ok(Some(Signal::Value(Value::Int(prepared_head_bytes as i64))))
     }
 
     /// `writeChunk(writer, data)`
@@ -251,8 +257,9 @@ impl Interpreter {
         };
 
         // Empty chunk is no-op (design contract: avoid colliding with terminator).
+        // F42 sweep: return Int(0) instead of Unit (no bytes written).
         if payload.is_empty() {
-            return Ok(Some(Signal::Value(Value::Unit)));
+            return Ok(Some(Signal::Value(Value::Int(0))));
         }
 
         // Re-borrow after eval_expr.
@@ -289,7 +296,9 @@ impl Interpreter {
         ];
         write_vectored_all(stream, bufs)?;
 
-        Ok(Some(Signal::Value(Value::Unit)))
+        // F42 sweep: return total bytes written to wire (hex_prefix + payload + suffix).
+        let bytes_written = hex_prefix.len() + payload.len() + suffix.len();
+        Ok(Some(Signal::Value(Value::Int(bytes_written as i64))))
     }
 
     /// `endResponse(writer)`
@@ -317,8 +326,9 @@ impl Interpreter {
         let stream = unsafe { &mut *active.stream };
 
         // Idempotent: no-op if already ended.
+        // F42 sweep: return Int(0) instead of Unit for idempotent no-op.
         if writer.state == WriterState::Ended {
-            return Ok(Some(Signal::Value(Value::Unit)));
+            return Ok(Some(Signal::Value(Value::Int(0))));
         }
         if writer.state == WriterState::WebSocket {
             return Err(RuntimeError {
@@ -327,20 +337,26 @@ impl Interpreter {
             });
         }
 
+        // F42 sweep: track bytes written in this call.
+        let mut bytes_written: usize = 0;
+
         // Commit head if not yet committed.
         if writer.state == WriterState::Idle || writer.state == WriterState::HeadPrepared {
             let head_bytes = build_streaming_head(writer.pending_status, &writer.pending_headers);
             write_all_retry(stream, &head_bytes)?;
+            bytes_written += head_bytes.len();
         }
 
         // Send chunked terminator — but only for status codes that allow a body.
         // Bodyless statuses (1xx/204/205/304) have head-only responses.
         if !StreamingWriter::is_bodyless_status(writer.pending_status) {
-            write_all_retry(stream, b"0\r\n\r\n")?;
+            let terminator: &[u8] = b"0\r\n\r\n";
+            write_all_retry(stream, terminator)?;
+            bytes_written += terminator.len();
         }
         writer.state = WriterState::Ended;
 
-        Ok(Some(Signal::Value(Value::Unit)))
+        Ok(Some(Signal::Value(Value::Int(bytes_written as i64))))
     }
 
     /// `sseEvent(writer, event, data)`
@@ -554,7 +570,9 @@ impl Interpreter {
 
         write_vectored_all(stream, &bufs)?;
 
-        Ok(Some(Signal::Value(Value::Unit)))
+        // F42 sweep: return total wire bytes written (hex_prefix + payload + suffix).
+        let bytes_written = hex_prefix.len() + total_len + suffix.len();
+        Ok(Some(Signal::Value(Value::Int(bytes_written as i64))))
     }
 
     // ── v4 request body streaming implementation ─────────────────

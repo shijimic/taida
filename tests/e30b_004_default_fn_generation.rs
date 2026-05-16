@@ -88,10 +88,14 @@ stdout(p.name.length().toString())
 
 #[test]
 fn e30b_004_default_fn_self_recursive_typedef_return() {
+    // `Unit => :Node` was the legacy way to express a zero-arg recovery
+    // hook; that form is rejected by `[E1520]` now. Switch the input
+    // parameter to a meaningful concrete type (`Int`) while preserving
+    // the self-recursive return shape (the original purpose of the test).
     let src = r#"
-Node = @(name: Str, next: Unit => :Node)
+Node = @(name: Str, next: Int => :Node)
 n <= Node(name <= "root")
-child <= n.next()
+child <= n.next(0)
 stdout(child.name.length().toString())
 "#;
     assert_eq!(
@@ -102,11 +106,13 @@ stdout(child.name.length().toString())
 
 #[test]
 fn e30b_004_default_fn_enum_return() {
+    // Same migration as the test above: `Unit => :Status` becomes
+    // `Int => :Status` so the parameter side carries information.
     let src = r#"
 Enum => Status = :Ok :Fail
-Probe = @(label: Str, pick: Unit => :Status)
+Probe = @(label: Str, pick: Int => :Status)
 p <= Probe(label <= "status")
-s <= p.pick()
+s <= p.pick(0)
 stdout(s.toString())
 "#;
     assert_eq!(run_taida_source("default_fn_enum", src).trim(), "0");

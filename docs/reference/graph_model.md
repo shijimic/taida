@@ -16,7 +16,7 @@ GraphNode = @(
     line: Int
     column: Int
   )
-  metadata: @()
+  metadata: Str
 )
 ```
 
@@ -26,7 +26,7 @@ GraphNode = @(
 | `kind` | `Str` | ノード種別（ビューごとに定義） |
 | `label` | `Str` | 表示用ラベル |
 | `location` | `@(file, line, column)` | ソースコード上の位置 |
-| `metadata` | `@()` | ビュー固有の追加情報 |
+| `metadata` | `Str` | ビュー固有の追加情報を JSON 文字列としてシリアライズしたもの。空のときは `"{}"` を入れる。`@()` (空ぶちパック型) は「値の不在を表す型」として禁止されているため、自由形メタデータは構造を持つ別フィールドに分解するか、シリアライズした `Str` として運ぶ。 |
 
 ### GraphEdge
 
@@ -38,7 +38,7 @@ GraphEdge = @(
   target: Str
   kind: Str
   label: Str
-  metadata: @()
+  metadata: Str
 )
 ```
 
@@ -48,7 +48,7 @@ GraphEdge = @(
 | `target` | `Str` | 終点ノードのID |
 | `kind` | `Str` | エッジ種別（ビューごとに定義） |
 | `label` | `Str` | 表示用ラベル |
-| `metadata` | `@()` | ビュー固有の追加情報 |
+| `metadata` | `Str` | ビュー固有の追加情報を JSON 文字列としてシリアライズしたもの。空のときは `"{}"` を入れる。`@()` (空ぶちパック型) は「値の不在を表す型」として禁止されているため、自由形メタデータは構造を持つ別フィールドに分解するか、シリアライズした `Str` として運ぶ。 |
 
 ### Graph
 

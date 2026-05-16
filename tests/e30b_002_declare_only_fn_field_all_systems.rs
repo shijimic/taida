@@ -89,11 +89,17 @@ stdout(f.name)
 /// E30B-002 acceptance #3: an Error variant with a declare-only function
 /// field (recovery hook) accepts instantiation when only the regular
 /// fields are passed.
+///
+/// The recovery-hook field used `recovery: Unit => :Unit` in earlier
+/// generations; that form now triggers `[E1520]` because Taida disallows
+/// `:Unit` on the language surface. The fixture has been updated to use
+/// meaningful concrete types (`recovery: Str => :Bool`) without changing
+/// the test scenario.
 #[test]
 fn e30b_002_error_with_declare_only_fn_field_passes() {
     let source = r#"Error => NotFound = @(
   msg: Str,
-  recovery: Unit => :Unit
+  recovery: Str => :Bool
 )
 err <= NotFound(msg <= "missing")
 stdout(err.msg)

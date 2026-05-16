@@ -72,12 +72,15 @@ handler req: Request => :Bytes
 ### 1.3 `HandlerFn` — 双引数ハンドラ (ストリーミング形式)
 
 ```taida
-handler req: Request  writer: Writer => @[]
+handler req: Request  writer: Writer => :Int
 ```
 
 `writer` 経由でレスポンス本体を逐次書き出す形式です。`writer` は
 §1.5 / §1.6 / §1.7 の API (`startResponse` / `writeChunk` / `endResponse`)
-を持ちます。戻り値は無視されるため、暫定で空 list `@[]` を返します。
+を持ちます。戻り値はサーバー側で参照されませんが、関数末尾の I/O 呼び
+出し (`endResponse` 等) の `:Int` 戻り値をそのまま伝搬する形が標準
+パターンです。Taida は `@()` / `:Unit` を「値の不在」型として認めない
+ため、handler も意味のある型 (`:Int`) を返します。
 
 > **重要 — 双引数ハンドラでの body 取得**: 双引数形式は streaming 前提
 > で設計されており、ハンドラ呼び出し時点では body を読まずに `req.body`
@@ -120,8 +123,14 @@ handler req: Request  writer: Writer => @[]
 > ストリーミングレスポンスの開始行とヘッダを書き出す。
 
 ```taida
-startResponse writer: Writer  status: Int  headers: @[@(name: Str, value: Str)] => @[]
+startResponse writer: Writer  status: Int  headers: @[@(name: Str, value: Str)] => :Int
 ```
+
+戻り値は実装ごとに有意な `:Int` です。Interpreter / JS では準備した
+start-line + ヘッダ部の合計バイト数を返します (実際の wire 書き込みは
+最初の `writeChunk` または `endResponse` 呼び出し時に確定する遅延
+コミット方式)。Native は現バージョンでは `0` を返します (具体的な
+バイト数の計算は後続バージョンで land)。
 
 **Parameters**:
 
@@ -143,24 +152,41 @@ startResponse writer: Writer  status: Int  headers: @[@(name: Str, value: Str)] 
 > ストリーミングレスポンスの body chunk を書き出す。
 
 ```taida
-writeChunk writer: Writer  data: Str => @[]
-writeChunk writer: Writer  data: Bytes => @[]
+writeChunk writer: Writer  data: Str => :Int
+writeChunk writer: Writer  data: Bytes => :Int
 ```
 
 `startResponse` の後、`endResponse` の前に 0 回以上呼び出します。`Str` を
-渡した場合は UTF-8 エンコードした byte 列が wire に出ます。
+渡した場合は UTF-8 エンコードした byte 列が wire に出ます。戻り値は実装
+ごとに有意な `:Int` です。Interpreter / JS では実際に wire へ書き込んだ
+バイト数 (chunked transfer-encoding の hex-size prefix + payload + `\r\n`
+suffix を含む合計) を返します。Native は現バージョンでは `0` を返し、
+具体的なバイト数の計算は後続バージョンで land します。空 chunk は
+no-op で `0` を返します。
+
+書き込みに失敗した場合の挙動は backend ごとに異なります: 接続が中断
+されると runtime error が生成され、現状ではプログラム全体が停止する
+形で表面化します (handler 内に明示的な `|==` error ceiling を置けば
+そこで捕捉できます)。`docs/api/os.md` の `writeBytes` が
+`:Result[Int, _]` を返すのと異なり、net writer 系は失敗側を成功戻り値
+の `:Int` には混入させず、別経路 (error ceiling) で扱う contract です。
 
 ### 1.7 `endResponse`
 
 > ストリーミングレスポンスを終端する。
 
 ```taida
-endResponse writer: Writer => @[]
-endResponse writer: Writer  trailer: Bytes => @[]
+endResponse writer: Writer => :Int
+endResponse writer: Writer  trailer: Bytes => :Int
 ```
 
 最後の chunk を送り、必要に応じて trailing 部分を書き出して接続を閉じ
-ます。
+ます。戻り値は実装ごとに有意な `:Int` です。Interpreter / JS では終端化
+処理で wire に書き込んだバイト数 (chunked terminator `0\r\n\r\n` の 5
+バイト + trailer) を返します。Native は現バージョンでは `0` を返します
+(具体的なバイト数の計算は後続バージョンで land)。bodyless status (`1xx`
+/ `204` / `205` / `304`) では body 部を持たないため `0` を返します。
+冪等呼び出し (2 回目以降の `endResponse`) も `0` を返します。
 
 ---
 
@@ -311,12 +337,21 @@ subSpan <= SpanSlice[req.query, req.raw, 0, 10]()
 > する。
 
 ```taida
-httpParseRequestHead bytes: Bytes => :Lax[BuchiPack]
+httpParseRequestHead bytes: Bytes => :Result[BuchiPack, _]
 ```
 
-返り値の pack shape は §2.1 の `Request` から `body` / `bodyOffset` /
-`contentLength` / `remoteHost` / `remotePort` / `keepAlive` / `chunked` を
-除いたものです。
+`Result.Ok` 側の pack shape は §2.1 の `Request` から `body` /
+`bodyOffset` / `contentLength` / `remoteHost` / `remotePort` /
+`keepAlive` / `chunked` を除き、さらに以下 2 フィールドを加えたもの:
+
+| Field | Type | 意味 |
+|-------|------|------|
+| `complete` | `Bool` | `bytes` が CRLFCRLF まで揃っているか。`false` の場合は partial parse (続きの bytes を読んで再度呼ぶ) |
+| `consumed` | `Int` | head 部の終端 byte offset (`complete <= true` のとき意味あり) |
+
+partial parse は失敗ではなく `complete <= false` の **成功** として
+返ります (Ok 側)。`Err` 側に落ちるのは httparse が malformed と判断
+したケースのみです。
 
 ### 4.2 `httpEncodeResponse`
 
@@ -432,12 +467,15 @@ wsUpgrade req: Request  writer: Writer => :Lax[@(ws: WsConn)]
 > WebSocket フレームを 1 件送出する。
 
 ```taida
-wsSend ws: WsConn  data: Str => @[]
-wsSend ws: WsConn  data: Bytes => @[]
+wsSend ws: WsConn  data: Str => :Int
+wsSend ws: WsConn  data: Bytes => :Int
 ```
 
 `Str` を渡すと text frame (opcode `0x1`)、`Bytes` を渡すと binary frame
-(opcode `0x2`) として送出します。
+(opcode `0x2`) として送出します。戻り値は実装ごとに有意な `:Int` です。
+Interpreter / JS では WebSocket フレームとして wire に書き込んだバイト数
+(header + masked payload を含む) を返します。Native は現バージョンでは
+`0` を返します (具体的なバイト数の計算は後続バージョンで land)。
 
 ### 5.3 `wsReceive`
 
@@ -479,16 +517,23 @@ close code を付けて接続を閉じます。
 > WebSocket 接続を閉じる。
 
 ```taida
-wsClose ws: WsConn => @[]
-wsClose ws: WsConn  code: Int => @[]
+wsClose ws: WsConn => :Int
+wsClose ws: WsConn  code: Int => :Int
 ```
+
+戻り値は実装ごとに有意な `:Int` です。Interpreter / JS では wire に送出
+した close frame のバイト数 (典型的に header 2 byte + close code 2 byte
+= 4) を返します。Native は現バージョンでは `0` を返します (具体的な
+バイト数の計算は後続バージョンで land)。
 
 - `code` を省略した場合は `1000` (normal closure) として処理されます。
   RFC 6455 §7.4 の `1001` (going away)、`1011` (internal error) などを
   指定できます。
 - 受け付ける `code` は `1000`〜`4999`。範囲外は失敗。
 - 同じ `ws` に対して `wsClose` を 2 回以上呼んでもエラーにはなりません
-  (冪等)。
+  (冪等)。2 回目以降の呼び出しは wire に何も書かないため戻り値は `0`
+  になります (「この呼び出しで実際に書いた bytes」という net writer 系
+  共通 contract に従う)。
 
 ### 5.5 `wsCloseCode`
 
@@ -512,8 +557,16 @@ wsCloseCode received: BuchiPack => :Int
 > 出す。
 
 ```taida
-sseEvent writer: Writer  event: Str  data: Str => @[]
+sseEvent writer: Writer  event: Str  data: Str => :Int
 ```
+
+戻り値は実装ごとに有意な `:Int` です。Interpreter / JS では実際に書き
+込んだバイト数 (`event:` 行 + `data:` 行群 + 末尾 `\n` の chunked
+transfer-encoding wire byte 数) を返します。Native は現バージョンでは
+`0` を返します (具体的なバイト数の計算は後続バージョンで land)。net
+writer 系の他の API (`writeChunk` / `endResponse`) と同じ contract です。
+書き込みに失敗した場合の挙動は §1.6 と同じく runtime error 経路に流れ
+ます (戻り値の `:Int` に失敗状態は混入しません)。
 
 - `event` — SSE の `event:` フィールド。空文字を渡すと省略 (`event:` 行
   を出力しない)。
@@ -557,8 +610,11 @@ handler req: Request  writer: Writer =
   startResponse(writer, 200, @[@(name <= "content-type", value <= "text/plain")])
   writeChunk(writer, bodyStr)
   endResponse(writer)
-=> @[]
+=> :Int
 ```
+
+`endResponse(writer)` の戻り値 `:Int` がそのまま handler の戻り値として
+伝搬します。
 
 ### 8.2 アンチパターン — `req.body` の直接読み出し
 
@@ -570,7 +626,7 @@ handler req: Request  writer: Writer =
   startResponse(writer, 200, @[@(name <= "content-type", value <= "text/plain")])
   writeChunk(writer, bodyStr)
   endResponse(writer)
-=> @[]
+=> :Int
 ```
 
 このアンチパターンは単引数ハンドラ (`req.body` が buffered body 全体の
@@ -588,7 +644,7 @@ handler req: Request  writer: Writer =
   startResponse(writer, 200, @[@(name <= "content-type", value <= "text/plain")])
   forwardChunks(req, writer)
   endResponse(writer)
-=> @[]
+=> :Int
 
 forwardChunks req: Request  writer: Writer =
   readBodyChunk(req) => chunkLax
@@ -596,9 +652,14 @@ forwardChunks req: Request  writer: Writer =
       chunkLax ]=> chunk
       writeChunk(writer, chunk)
       forwardChunks(req, writer)
-  | _ |> @[]
-=> @[]
+  | _ |> 0
+=> :Int
 ```
+
+`forwardChunks` は再帰的に `writeChunk` を呼び続け、chunk が尽きたら `0`
+を返します (`|>` の default arm)。`writeChunk` / `forwardChunks` は
+いずれも `:Int` (書き込みバイト数または末尾の `0`) を返すので、handler
+全体も `:Int` を返します。
 
 `Transfer-Encoding: chunked` の chunk-size は §4.4 の三段ガードを通った
 値だけが採用されます。violation 時は単引数 eager path では

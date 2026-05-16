@@ -109,7 +109,7 @@ fn e32b_040_ws_receive_does_not_exit_on_attacker_input() {
     let ws_receive = slice_between(
         NATIVE_NET,
         "// ── wsReceive(ws) → Lax[@(type, data)] (NET4-4d) ────────────",
-        "// ── wsClose(ws, code) → Unit (NET4-4d, v5 revision) ────────────────",
+        "// ── wsClose(ws, code) → Int (NET4-4d / F42 sweep, v5 revision) ──",
     );
 
     // The function may keep `exit(1)` for programmer-error guards
@@ -389,7 +389,7 @@ fn e32b_079_ws_send_checks_write_frame_return() {
     // keeps serving siblings.
     let ws_send = slice_between(
         NATIVE_NET,
-        "// ── wsSend(ws, data) → Unit (NET4-4d) ───────────────────────",
+        "// ── wsSend(ws, data) → Int (NET4-4d / F42 sweep) ─────────────",
         "// ── wsReceive(ws) → Lax[@(type, data)] (NET4-4d) ────────────",
     );
     assert!(
@@ -765,7 +765,7 @@ fn e32b_085_ws_receive_checks_every_write_frame_return() {
     let ws_receive = slice_between(
         NATIVE_NET,
         "// ── wsReceive(ws) → Lax[@(type, data)] (NET4-4d) ────────────",
-        "// ── wsClose(ws, code) → Unit (NET4-4d, v5 revision) ────────────────",
+        "// ── wsClose(ws, code) → Int (NET4-4d / F42 sweep, v5 revision) ──",
     );
 
     let total_calls = ws_receive.matches("taida_net4_write_ws_frame(").count();
