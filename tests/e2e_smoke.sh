@@ -494,7 +494,7 @@ stdout(opt.hasValue().toString())
   # accepted as a predicate result; everything else is a hard error.
   sem_src_pred='
 items <= @[1, 2, 3]
-result <= items.any(_ x = x > 0)
+result <= items.any(_ x: Int = x > 0)
 stdout(result.toString())
 '
   interp_out=$(sem_run_interp "$sem_src_pred")
@@ -729,12 +729,13 @@ fi
 first_last_out=$(s10_run "first_last" '
 @[1, 2, 3].first() >=> f
 stdout(f.toString())
-@[].first() >=> f2
+empty: @[Int] <= @[]
+empty.first() >=> f2
 stdout(f2.toString())
-stdout(@[].first().has_value.toString())
+stdout(empty.first().has_value.toString())
 @[1, 2, 3].last() >=> l
 stdout(l.toString())
-@[].last() >=> l2
+empty.last() >=> l2
 stdout(l2.toString())
 ')
 expected_fl=$(printf "1\n0\nfalse\n3\n0")
@@ -748,11 +749,12 @@ fi
 max_min_out=$(s10_run "max_min" '
 @[3, 1, 2].max() >=> mx
 stdout(mx.toString())
-@[].max() >=> mx2
+empty: @[Int] <= @[]
+empty.max() >=> mx2
 stdout(mx2.toString())
 @[3, 1, 2].min() >=> mn
 stdout(mn.toString())
-@[].min() >=> mn2
+empty.min() >=> mn2
 stdout(mn2.toString())
 ')
 expected_mm=$(printf "3\n0\n1\n0")

@@ -46,7 +46,7 @@ cat >"$WORK_DIR/server.td" <<'TD'
 >>> taida-lang/net => @(httpServe)
 >>> taida-lang/os => @(Read)
 
-handler req =
+handler req: Request =
   body <= Read[".taida/build/assets/frontend/payload.txt"]().getOrDefault("")
   @(status <= 200, headers <= @[@(name <= "content-type", value <= "text/plain")], body <= body)
 => :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)

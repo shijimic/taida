@@ -19,5 +19,5 @@
 // Expected stdout: a single integer (sum), value not load-bearing.
 
 nums <= @[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
-Fold[nums, 0, _ acc x = acc + x]() >=> total
+Fold[nums, 0, _ acc: Int x: Int = acc + x]() >=> total
 stdout(total)
