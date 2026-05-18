@@ -5,7 +5,7 @@
 Enum => Color = :Red :Green :Blue
 
 // Color を引数に取り Enum を返す関数（#6 契約依存テストの pin 用）。
-pickColor n =
+pickColor n: Int =
   | n == 0 |> Color:Red()
   | n == 1 |> Color:Green()
   | _ |> Color:Blue()

@@ -2,6 +2,6 @@
 
 >>> ./mod_b.td => @(wrapB)
 
-wrapA x = "A(" + wrapB(x) + ")" => :Str
+wrapA x: Str = "A(" + wrapB(x) + ")" => :Str
 
 <<< @(wrapA)

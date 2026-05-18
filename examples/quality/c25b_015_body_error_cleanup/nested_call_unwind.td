@@ -11,18 +11,18 @@
 
 Error => MyError = @()
 
-throwBoom msg =
+throwBoom msg: Str =
   MyError(type <= "MyError", message <= msg).throw()
   ""
 => :Str
 
-deepest n = throwBoom("boom") => :Str
+deepest n: Int = throwBoom("boom") => :Str
 
-middle n = deepest(n) => :Str
+middle n: Int = deepest(n) => :Str
 
-top n = middle(n) => :Str
+top n: Int = middle(n) => :Str
 
-trial input =
+trial input: Int =
   |== error: Error =
     "caught:" + error.message
   => :Str

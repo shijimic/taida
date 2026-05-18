@@ -1,5 +1,5 @@
 // B-8f helper: export nested BuchiPack
-makePerson name age =
+makePerson name: Str age: Int =
   @(
     name <= name,
     age <= age,

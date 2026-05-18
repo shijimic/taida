@@ -160,8 +160,13 @@ fn d28b_008_e1808_typed_int_field_snake_clean() {
 
 #[test]
 fn d28b_008_e1809_missing_marker_flagged() {
-    let diags = lint_str("identity x: Int = x => Int\n");
-    assert!(codes(&diags).contains(&"[E1809]"));
+    let (_program, errs) = parse("identity x: Int = x => Int\n");
+    assert!(
+        errs.iter()
+            .any(|err| err.message.contains("must declare a return type")),
+        "missing return marker should be rejected before linting: {:?}",
+        errs
+    );
 }
 
 #[test]

@@ -265,7 +265,7 @@ fn js_writechunk_passes_uint8array_without_copy() {
     let src = format!(
         r#">>> taida-lang/net => @(httpServe, startResponse, writeChunk, endResponse)
 
-handler req writer =
+handler req: Request writer: Writer =
   startResponse(writer, 200, @[])
   payloadLax <= Bytes["{big_str}"]()
   payloadLax >=> payload

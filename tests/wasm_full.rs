@@ -1129,7 +1129,7 @@ fn test_c12b_023_wasm_full_rejects_str_search() {
 fn test_c12b_023_wasm_full_rejects_manual_pack_replaceall() {
     assert_full_regex_rejected(
         "bypass_replaceall",
-        "main =\n  re <= @(__type <= \"Regex\", pattern <= \"a\", flags <= \"\")\n  stdout(\"aba\".replaceAll(re, \"x\"))\n",
+        "main =\n  re <= @(__type <= \"Regex\", pattern <= \"a\", flags <= \"\")\n  stdout(\"aba\".replaceAll(re, \"x\"))\n=> :Str\n",
         &["reserved for compiler-internal use"],
     );
 }
@@ -1149,7 +1149,7 @@ fn test_c12b_023_wasm_full_rejects_manual_pack_match() {
 fn test_c12b_023_wasm_full_rejects_variable_bound_tag() {
     assert_full_regex_rejected(
         "bypass_var_tag",
-        "main =\n  tag <= \"Regex\"\n  re <= @(__type <= tag, pattern <= \"a\", flags <= \"\")\n  stdout(\"aba\".replaceAll(re, \"x\"))\n",
+        "main =\n  tag <= \"Regex\"\n  re <= @(__type <= tag, pattern <= \"a\", flags <= \"\")\n  stdout(\"aba\".replaceAll(re, \"x\"))\n=> :Str\n",
         &["reserved for compiler-internal use"],
     );
 }

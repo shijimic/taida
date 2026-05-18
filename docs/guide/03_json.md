@@ -343,7 +343,7 @@ stdout(rec2.state == HiveState:Running())  // true
 
 **既存の ordinal Int 出力が必要な場合**: `Ordinal[]` モールドで Int に明示変換してから encode してください。
 
-```taida
+```taida fragment
 // Int カラムとの互換が必要な場合
 payload <= @(state_id <= Ordinal[rec.state]())
 stdout(jsonEncode(payload))  // {"state_id":1}

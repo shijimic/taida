@@ -30,7 +30,8 @@ fn test_literal_type_inference() {
                 start: 0,
                 end: 2,
                 line: 1,
-                column: 1
+                column: 1,
+                node_id: 0,
             }
         )),
         Type::Int
@@ -42,7 +43,8 @@ fn test_literal_type_inference() {
                 start: 0,
                 end: 4,
                 line: 1,
-                column: 1
+                column: 1,
+                node_id: 0,
             }
         )),
         Type::Float
@@ -54,7 +56,8 @@ fn test_literal_type_inference() {
                 start: 0,
                 end: 7,
                 line: 1,
-                column: 1
+                column: 1,
+                node_id: 0,
             }
         )),
         Type::Str
@@ -66,7 +69,8 @@ fn test_literal_type_inference() {
                 start: 0,
                 end: 4,
                 line: 1,
-                column: 1
+                column: 1,
+                node_id: 0,
             }
         )),
         Type::Bool
@@ -87,6 +91,7 @@ fn test_buchi_pack_type_inference() {
                         end: 7,
                         line: 1,
                         column: 1,
+                        node_id: 0,
                     },
                 ),
                 span: Span {
@@ -94,6 +99,7 @@ fn test_buchi_pack_type_inference() {
                     end: 7,
                     line: 1,
                     column: 1,
+                    node_id: 0,
                 },
             },
             BuchiField {
@@ -105,6 +111,7 @@ fn test_buchi_pack_type_inference() {
                         end: 2,
                         line: 1,
                         column: 1,
+                        node_id: 0,
                     },
                 ),
                 span: Span {
@@ -112,6 +119,7 @@ fn test_buchi_pack_type_inference() {
                     end: 2,
                     line: 1,
                     column: 1,
+                    node_id: 0,
                 },
             },
         ],
@@ -120,6 +128,7 @@ fn test_buchi_pack_type_inference() {
             end: 10,
             line: 1,
             column: 1,
+            node_id: 0,
         },
     );
     let ty = checker.infer_expr_type(&expr);
@@ -140,6 +149,7 @@ fn test_list_type_inference() {
         end: 1,
         line: 1,
         column: 1,
+        node_id: 0,
     };
     let expr = Expr::ListLit(
         vec![Expr::IntLit(1, s.clone()), Expr::IntLit(2, s.clone())],
@@ -219,10 +229,12 @@ fn test_cross_enum_comparison_rejected() {
 #[test]
 fn test_enum_pipeline_identity_is_allowed() {
     let (_checker, errors) = check(
-        "Enum => Status = :Ok :Fail\n\
-         status <= Status:Fail()\n\
-         id x = x\n\
-         status => id(_) => result",
+        r#"Enum => Status = :Ok :Fail
+status <= Status:Fail()
+id x =
+  x
+=> :Status
+status => id(_) => result"#,
     );
     assert!(
         errors.is_empty(),
@@ -253,9 +265,11 @@ fn test_http_protocol_js_h2_accepted_after_enum_unification() {
     // any per-backend runtime gating happens downstream of the type
     // checker.
     let (_checker, errors) = check_with_target(
-        ">>> taida-lang/net => @(httpServe: serve, HttpProtocol: Proto)\n\
-         handler req = @(status <= 200, headers <= @[], body <= \"ok\")\n\
-         serve(8080, handler, 1, 1000, 1, @(protocol <= Proto:H2()))",
+        r#">>> taida-lang/net => @(httpServe: serve, HttpProtocol: Proto)
+handler req: Molten =
+  @(status <= 200, headers <= @[], body <= "ok")
+=> :@(status: Int, headers: @[Str], body: Str)
+serve(8080, handler, 1, 1000, 1, @(protocol <= Proto:H2()))"#,
         CompileTarget::Js,
     );
     assert!(
@@ -268,9 +282,11 @@ fn test_http_protocol_js_h2_accepted_after_enum_unification() {
 #[test]
 fn test_http_protocol_native_h3_allowed() {
     let (_checker, errors) = check_with_target(
-        ">>> taida-lang/net => @(httpServe, HttpProtocol)\n\
-         handler req = @(status <= 200, headers <= @[], body <= \"ok\")\n\
-         httpServe(8080, handler, 1, 1000, 1, @(protocol <= HttpProtocol:H3()))",
+        r#">>> taida-lang/net => @(httpServe, HttpProtocol)
+handler req: Molten =
+  @(status <= 200, headers <= @[], body <= "ok")
+=> :@(status: Int, headers: @[Str], body: Str)
+httpServe(8080, handler, 1, 1000, 1, @(protocol <= HttpProtocol:H3()))"#,
         CompileTarget::Native,
     );
     assert!(
@@ -386,6 +402,7 @@ fn test_arithmetic_type_checking() {
         end: 1,
         line: 1,
         column: 1,
+        node_id: 0,
     };
     let mut checker = TypeChecker::new();
     let expr = Expr::BinaryOp(
@@ -420,6 +437,7 @@ fn test_field_access_type_checking() {
         end: 1,
         line: 1,
         column: 1,
+        node_id: 0,
     };
     let mut checker = TypeChecker::new();
     let buchi = Expr::BuchiPack(
@@ -467,8 +485,8 @@ fn test_scope_type_annotation_mismatch() {
 
 #[test]
 fn test_func_def_scope() {
-    // F42 sweep [E1525]: `Unknown + Unknown` is rejected so the original
-    // `add x y = x + y` fixture no longer type-checks without annotations.
+    // `Unknown + Unknown` is rejected, so the original `add x y = x + y`
+    // fixture no longer type-checks without annotations.
     // The test's intent is verifying that `func_types` is populated for
     // the named function, which still holds with annotations added.
     let source = "add x: Int y: Int =\n  x + y\n=> :Int";
@@ -523,11 +541,10 @@ fn test_method_return_type_json_v070() {
 
 #[test]
 fn test_func_call_return_type() {
-    let source = "double x =\n  x * 2\n\nresult <= double(21)";
+    let source = "double x =\n  x * 2\n=> :Int\n\nresult <= double(21)";
     let (checker, errors) = check(source);
     assert!(errors.is_empty(), "Errors: {:?}", errors);
-    // Without return type annotation, func returns Unknown
-    assert_eq!(checker.lookup_var("result"), Some(Type::Unknown));
+    assert_eq!(checker.lookup_var("result"), Some(Type::Int));
 }
 
 #[test]
@@ -672,7 +689,7 @@ fn test_list_none_method() {
 #[test]
 fn test_func_with_return_type_annotation() {
     // Taida syntax: `name params = body => :ReturnType`
-    let source = "greet name =\n  `Hello ${name}`\n=> :Str\n\nmsg <= greet(\"Alice\")";
+    let source = "greet name: Str =\n  `Hello ${name}`\n=> :Str\n\nmsg <= greet(\"Alice\")";
     let (checker, errors) = check(source);
     assert!(errors.is_empty(), "Errors: {:?}", errors);
     assert_eq!(checker.lookup_var("msg"), Some(Type::Str));
@@ -770,18 +787,24 @@ fn test_rejected_generic_function_does_not_emit_spurious_non_generic_call_error(
 fn test_generic_function_does_not_treat_unknown_binding_as_inferred() {
     let source = "accept[T] fn: T => :Bool =\n  true\n=> :Bool\n\nok <= accept(_ y = true)";
     let (_checker, errors) = check(source);
-    assert_eq!(
-        errors.len(),
-        1,
-        "Expected exactly 1 error, got: {:?}",
+    assert!(
+        errors.iter().any(|e| {
+            e.message.contains("[E1510]")
+                && e.message.contains("could not infer type parameter(s): T")
+        }),
+        "Expected higher-order generic inference error, got: {:?}",
         errors
     );
     assert!(
-        errors[0].message.contains("[E1510]")
-            && errors[0]
-                .message
-                .contains("could not infer type parameter(s): T"),
-        "Expected higher-order generic inference error, got: {:?}",
+        errors.iter().any(|e| e.message.contains("[E1529]")),
+        "Expected cascade suppression marker for unknown binding generic call, got: {:?}",
+        errors
+    );
+    assert!(
+        errors
+            .iter()
+            .all(|e| e.message.contains("[E1510]") || e.message.contains("[E1529]")),
+        "Expected only inference error plus cascade marker, got: {:?}",
         errors
     );
 }
@@ -929,6 +952,28 @@ fn test_hashmap_type() {
         Some(Type::Named("HashMap".to_string()))
     );
     assert_eq!(checker.lookup_var("result"), Some(Type::Bool));
+}
+
+#[test]
+fn test_hashmap_first_set_pins_key_value_type() {
+    let source = r#"
+m <= hashMap().set("a", 1)
+value <= m.get("a").getOrDefault(0)
+"#;
+    let (checker, errors) = check(source);
+    assert!(
+        errors.is_empty(),
+        "HashMap first set must not leave Lax[?] residuals: {:?}",
+        errors
+    );
+    assert_eq!(
+        checker.lookup_var("m"),
+        Some(Type::Generic(
+            "HashMap".to_string(),
+            vec![Type::Str, Type::Any]
+        ))
+    );
+    assert_eq!(checker.lookup_var("value"), Some(Type::Any));
 }
 
 #[test]
@@ -1302,7 +1347,7 @@ fn test_custom_mold_constraint_can_reference_previous_header_type() {
     let source = r#"Mold[T] => Guard[T, P <= :T => :Bool] = @(
   predicate: P
 )
-box <= Guard[1, _ value = value > 0]()"#;
+box <= Guard[1, _ value: Int = value > 0]()"#;
     let (_, errors) = check(source);
     assert!(
         errors.is_empty(),
@@ -1385,7 +1430,7 @@ fn test_generic_inheritance_can_extend_with_constrained_child_slot() {
 Guard[T] => GuardWithPredicate[T, P <= :T => :Bool] = @(
   predicate: P
 )
-box <= GuardWithPredicate[1, _ value = value > 0]()"#;
+box <= GuardWithPredicate[1, _ value: Int = value > 0]()"#;
     let (_, errors) = check(source);
     assert!(
         errors.is_empty(),
@@ -1893,9 +1938,9 @@ fn test_qf46_same_scope_redefinition_is_checker_rejected() {
 #[test]
 fn test_no_holes_is_normal_call() {
     // C-4a: `f(1, 2)` — no holes, normal function call.
-    // F42 sweep [E1525]: parameters need type annotations so `x + y`
-    // resolves to a concrete operator dispatch.
-    let source = "add x: Int y: Int = x + y\n=> :Int\nresult <= add(1, 2)";
+    // Parameters need type annotations so `x + y` resolves to a concrete
+    // operator dispatch.
+    let source = "add x: Int y: Int =\n  x + y\n=> :Int\nresult <= add(1, 2)";
     let (_, errors) = check(source);
     // Should succeed without errors (normal call)
     assert!(
@@ -1908,7 +1953,7 @@ fn test_no_holes_is_normal_call() {
 #[test]
 fn test_with_holes_is_partial_application() {
     // C-4a: `f(1, )` — one hole, partial application
-    let source = "add x y = x + y\n=> :Int\nadd1 <= add(1, )";
+    let source = "add x: Int y: Int =\n  x + y\n=> :Int\nadd1 <= add(1, )";
     let (_, errors) = check(source);
     // Partial application via empty slot should be accepted by checker
     // (it's only rejected for TypeDef/BuchiPack via E1503)
@@ -1928,7 +1973,7 @@ fn test_with_holes_is_partial_application() {
 #[test]
 fn test_arity_check_normal_call_too_many_args() {
     // C-4b: Too many args should produce E1301
-    let source = "add x y = x + y\n=> :Int\nresult <= add(1, 2, 3)";
+    let source = "add x: Int y: Int =\n  x + y\n=> :Int\nresult <= add(1, 2, 3)";
     let (_, errors) = check(source);
     assert!(
         errors.iter().any(|e| e.message.contains("[E1301]")),
@@ -1957,7 +2002,7 @@ fn test_call_argument_limit_rejects_tag_frame_overflow() {
 fn test_arity_check_partial_with_holes() {
     // C-4b: Partial application with holes should not trigger arity errors
     // `add(, )` — 2 holes for 2-param function, valid partial application
-    let source = "add x y = x + y\n=> :Int\nadd_none <= add(, )";
+    let source = "add x: Int y: Int =\n  x + y\n=> :Int\nadd_none <= add(, )";
     let (_, errors) = check(source);
     let e1301_errors: Vec<_> = errors
         .iter()
@@ -2012,8 +2057,8 @@ fn test_default_args_with_partial_application_missing_slots() {
 #[test]
 fn test_f1_is_normal_f1_comma_is_partial() {
     // C-4d: Confirm `f(1)` and `f(1, )` are treated differently by checker
-    let source_normal = "id x = x\n=> :Int\nresult <= id(1)";
-    let source_partial = "add x y = x + y\n=> :Int\nadd1 <= add(1, )";
+    let source_normal = "id x =\n  x\n=> :Int\nresult <= id(1)";
+    let source_partial = "add x: Int y: Int =\n  x + y\n=> :Int\nadd1 <= add(1, )";
 
     let (_, errors_normal) = check(source_normal);
     let (_, errors_partial) = check(source_partial);
@@ -2136,7 +2181,7 @@ fn test_docs_negative_function_overload() {
 #[test]
 fn test_docs_negative_old_placeholder_partial() {
     // C-11b: docs say old `_` partial application is rejected
-    let source = "add x y = x + y\n=> :Int\nresult <= add(5, _)";
+    let source = "add x: Int y: Int =\n  x + y\n=> :Int\nresult <= add(5, _)";
     let (_, errors) = check(source);
     assert!(
         errors.iter().any(|e| e.message.contains("[E1502]")),
@@ -2214,18 +2259,76 @@ fn test_func_arg_type_mismatch_partial_app_then_call() {
 }
 
 #[test]
-fn test_func_arg_type_mismatch_unknown_types_not_checked() {
-    // Unknown param types should not produce E1506
-    let source = "f x y =\n  x + y\nresult <= f(\"hello\", 1)";
-    let (_, errors) = check(source);
-    let e1506: Vec<_> = errors
-        .iter()
-        .filter(|e| e.message.contains("[E1506]"))
-        .collect();
+fn test_func_arg_type_mismatch_inferred_params_rejected() {
+    let source = "add x y =\n  x + y\n=> :Int\nresult <= add(\"hello\", 1)";
+    let (checker, errors) = check(source);
+    assert_eq!(
+        checker.func_param_types.get("add"),
+        Some(&vec![Type::Int, Type::Int])
+    );
     assert!(
-        e1506.is_empty(),
-        "Unknown param types should not produce E1506, got: {:?}",
-        e1506
+        errors.iter().any(|e| e.message.contains("[E1506]")),
+        "Expected E1506 for inferred Int parameter mismatch, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn test_named_function_param_inferred_from_return_expr() {
+    let source = "id x =\n  x\n=> :Int\nvalue <= id(4)";
+    let (checker, errors) = check(source);
+    assert!(errors.is_empty(), "Errors: {:?}", errors);
+    assert_eq!(checker.func_param_types.get("id"), Some(&vec![Type::Int]));
+    assert_eq!(checker.lookup_var("value"), Some(Type::Int));
+}
+
+#[test]
+fn test_named_function_unresolved_param_rejected() {
+    let source = "ignore x =\n  1\n=> :Int";
+    let (_checker, errors) = check(source);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1525]")),
+        "Expected E1525 for unresolved parameter, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn test_typed_lambda_direct_call_checks_argument_type() {
+    let source = "ok <= (_ x: Int = x + 1)(4)\nbad <= (_ x: Int = x + 1)(\"4\")";
+    let (checker, errors) = check(source);
+    assert_eq!(checker.lookup_var("ok"), Some(Type::Int));
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1506]")),
+        "Expected E1506 for typed lambda argument mismatch, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn test_untyped_ambiguous_lambda_without_expected_type_rejected() {
+    let source = "amb <= _ x y = x + y";
+    let (_checker, errors) = check(source);
+    assert!(
+        errors
+            .iter()
+            .any(|e| e.message.contains("[E1527]") || e.message.contains("[E1525]")),
+        "Expected unresolved lambda diagnostic, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn test_typed_str_lambda_infers_function_type() {
+    let source = "join <= _ x: Str y: Str = x + y";
+    let (checker, errors) = check(source);
+    assert!(errors.is_empty(), "Errors: {:?}", errors);
+    assert_eq!(
+        checker.lookup_var("join"),
+        Some(Type::Function(
+            vec![Type::Str, Type::Str],
+            Box::new(Type::Str)
+        ))
     );
 }
 
@@ -2638,17 +2741,16 @@ fn test_fl1_return_type_bool_body_str_mismatch() {
 
 #[test]
 fn test_fl1_no_return_annotation_no_error() {
-    // Function without return type annotation — no E1601
+    // Function without return type annotation is rejected before return-body
+    // mismatch checking.
     let source = "add x y =\n  x + y";
-    let (_, errors) = check(source);
-    let e1601: Vec<_> = errors
-        .iter()
-        .filter(|e| e.message.contains("[E1601]"))
-        .collect();
+    let (_program, parse_errors) = crate::parser::parse(source);
     assert!(
-        e1601.is_empty(),
-        "Should not produce E1601 without return type annotation, got: {:?}",
-        e1601
+        parse_errors
+            .iter()
+            .any(|e| e.message.contains("must declare a return type")),
+        "missing return type should be rejected by parser, got: {:?}",
+        parse_errors
     );
 }
 
@@ -3093,18 +3195,15 @@ fn test_c13_1_pipeline_intermediate_bind_and_forward_ok() {
 }
 
 #[test]
-fn test_fl1_last_stmt_not_expr_without_return_type_no_error() {
-    // Function without return type annotation — last stmt being assignment is fine
+fn test_fl1_last_stmt_not_expr_without_return_type_parse_error() {
     let source = "foo =\n  x <= 42";
-    let (_, errors) = check(source);
-    let e1601: Vec<_> = errors
-        .iter()
-        .filter(|e| e.message.contains("[E1601]"))
-        .collect();
+    let (_program, parse_errors) = parse(source);
     assert!(
-        e1601.is_empty(),
-        "Should not produce E1601 without return type annotation, got: {:?}",
-        e1601
+        parse_errors
+            .iter()
+            .any(|e| e.message.contains("must declare a return type")),
+        "Function without return type annotation must be rejected, got: {:?}",
+        parse_errors
     );
 }
 
@@ -3745,7 +3844,7 @@ fn builtin_mold_registry_rejects_sort_by_non_function() {
 
 #[test]
 fn builtin_mold_registry_accepts_sort_options() {
-    let source = "nums <= @[1, 2, 3]\nok <= Sort[nums](by <= _ x = x, desc <= true)";
+    let source = "nums <= @[1, 2, 3]\nok <= Sort[nums](by <= _ x: Int = x, desc <= true)";
     let (_, errors) = check(source);
     assert!(
         errors.is_empty(),
@@ -3924,6 +4023,7 @@ fn test_c12_2_tostring_composite_return_type_is_str() {
         end: 0,
         line: 1,
         column: 1,
+        node_id: 0,
     };
     let list_call = Expr::MethodCall(
         Box::new(Expr::Ident("l".into(), span.clone())),
@@ -3957,10 +4057,12 @@ fn test_c12_3_mutual_recursion_tail_only_accepted_by_checker() {
 isEven n =
   | n == 0 |> 1
   | _ |> isOdd(n - 1)
+=> :Int
 
 isOdd n =
   | n == 0 |> 0
   | _ |> isEven(n - 1)
+=> :Int
 "#;
     let (_, errors) = check(source);
     assert!(
@@ -3978,12 +4080,15 @@ fn test_c12_3_mutual_recursion_non_tail_rejected_by_checker() {
     let source = r#"
 a n =
   wrap(b(n))
+=> :Int
 
 b n =
   a(n)
+=> :Int
 
 wrap x =
   x
+=> :Int
 "#;
     let (_, errors) = check(source);
     assert!(
@@ -4001,6 +4106,7 @@ fn test_c12_3_self_recursion_not_flagged_as_mutual() {
 count n =
   | n == 0 |> 0
   | _ |> count(n - 1)
+=> :Int
 "#;
     let (_, errors) = check(source);
     assert!(
@@ -4016,12 +4122,15 @@ fn test_c12_3_mutual_recursion_three_cycle_non_tail_rejected() {
     let source = r#"
 alpha n =
   beta(n)
+=> :Int
 
 beta n =
   gamma(n) + 1
+=> :Int
 
 gamma n =
   alpha(n)
+=> :Int
 "#;
     let (_, errors) = check(source);
     assert!(
@@ -4038,9 +4147,11 @@ fn test_c12_3_mutual_recursion_error_mentions_hint() {
     let source = r#"
 loopA n =
   loopB(n) + 1
+=> :Int
 
 loopB n =
   loopA(n)
+=> :Int
 "#;
     let (_, errors) = check(source);
     let e1614 = errors
@@ -4213,6 +4324,7 @@ fn test_f42_e1520_r2_empty_buchi_tail_rejected() {
     let mut checker = TypeChecker::new();
     let src = r#"f x: Int =
   @()
+=> :@()
 "#;
     let (program, parse_errors) = parse(src);
     assert!(parse_errors.is_empty(), "parse errors: {:?}", parse_errors);
@@ -4372,6 +4484,7 @@ fn test_f42_e1520_r2_extended_intermediate_var_rejected() {
     let src = r#"f y: Int =
   x <= @()
   x
+=> :@()
 "#;
     let (program, parse_errors) = parse(src);
     assert!(parse_errors.is_empty(), "parse errors: {:?}", parse_errors);
@@ -4584,6 +4697,7 @@ fn test_c12_5_stdout_in_let_binding_infers_int() {
         end: 12,
         line: 1,
         column: 1,
+        node_id: 0,
     };
     let call = Expr::FuncCall(
         Box::new(Expr::Ident("stdout".to_string(), span.clone())),
@@ -4607,6 +4721,7 @@ fn test_c12_5_stderr_in_let_binding_infers_int() {
         end: 11,
         line: 1,
         column: 1,
+        node_id: 0,
     };
     let call = Expr::FuncCall(
         Box::new(Expr::Ident("stderr".to_string(), span.clone())),
@@ -4877,7 +4992,7 @@ fn test_c18_1_function_returning_imported_enum_is_usable() {
     dir.write(
         "enum_mod.td",
         "Enum => Color = :Red :Green :Blue\n\
-         pickColor n =\n  | n == 0 |> Color:Red()\n  | n == 1 |> Color:Green()\n  | _ |> Color:Blue()\n=> :Color\n\
+         pickColor n: Int =\n  | n == 0 |> Color:Red()\n  | n == 1 |> Color:Green()\n  | _ |> Color:Blue()\n=> :Color\n\
          <<< @(Color, pickColor)\n",
     );
     let consumer = dir.write(
@@ -4901,7 +5016,7 @@ fn imported_bool_function_signature_records_bool_call_type() {
     let dir = C18TempDir::new("boolfn");
     dir.write(
         "bool_mod.td",
-        "giveTrue x = x > 0 => :Bool\n<<< @(giveTrue)\n",
+        "giveTrue x: Int = x > 0 => :Bool\n<<< @(giveTrue)\n",
     );
     let consumer = dir.write(
         "bool_use.td",
@@ -4969,7 +5084,8 @@ fn imported_generic_function_signature_rewrites_aliased_return_type() {
 #[test]
 fn local_unannotated_bool_function_records_bool_call_type() {
     let (checker, errors) = check(
-        "isPositive x =\n  x > 0\n\
+        "isPositive x: Int =\n  x > 0\n\
+=> :Bool\n\
 direct <= isPositive(5)\n\
 f <= isPositive\n\
 viaValue <= f(10)\n",
@@ -5455,6 +5571,7 @@ fn test_e30b_004_default_fn_generatable_buchi_pack() {
             end: 0,
             line: 1,
             column: 1,
+            node_id: 0,
         },
     }]);
     let mut visiting = HashSet::new();
@@ -5472,6 +5589,7 @@ fn test_e30b_004_default_fn_generatable_buchi_pack() {
             end: 0,
             line: 1,
             column: 1,
+            node_id: 0,
         },
     }]);
     let mut visiting = HashSet::new();
@@ -5861,9 +5979,12 @@ fn e34b_015_map_error_rejects_str_input_when_payload_is_pack() {
 
 #[test]
 fn e39b_001_lhs_and_method_hint_pin_unannotated_named_identity() {
-    let src = "identity x = x => :Int\n\
-               obj <= Lax[42]()\n\
-               result: Lax[Int] <= obj.map(identity)\n";
+    let src = r#"identity x =
+  x
+=> :Int
+obj <= Lax[42]()
+result: Lax[Int] <= obj.map(identity)
+"#;
     let (checker, errors) = check(src);
     assert!(errors.is_empty(), "errors: {:?}", errors);
     let result_ty = checker.lookup_var("result").unwrap();
@@ -5881,6 +6002,7 @@ fn e39b_001_lhs_and_method_hint_pin_unannotated_named_identity() {
 #[test]
 fn e39b_002_unannotated_named_identity_body_infers_from_method_hint() {
     let src = "identity x =\n  x\n\
+=> :Int\n\
                obj <= Lax[42]()\n\
                result: Lax[Int] <= obj.map(identity)\n";
     let (checker, errors) = check(src);
@@ -5901,19 +6023,19 @@ fn e39b_002_unannotated_named_identity_body_infers_from_method_hint() {
 
 #[test]
 fn e39b_002_unsupported_named_body_rejects_direct_expected_function_slot() {
-    let src = "takes fn: Int => :Int = fn(1) => :Int\n\
-               choose x =\n\
-                 | x > 0 |> x\n\
-                 | _ |> 0\n\
-               result <= takes(choose)\n";
+    let src = r#"takes fn: Int => :Int = fn(1) => :Int
+choose x =
+  (
+    | x > 0 |> x
+    | _ |> 0
+  )
+=> :Int
+result <= takes(choose)
+"#;
     let (_, errors) = check(src);
     assert!(
-        errors.iter().any(|e| {
-            e.message.contains("[E1506]")
-                && e.message.contains("choose")
-                && e.message.contains("(Int) => Int")
-        }),
-        "expected concrete direct-call function slot to reject unresolved body inference, got: {:?}",
+        errors.is_empty(),
+        "declared return type should let choose finalize as (Int) => Int, got: {:?}",
         errors
     );
 }
@@ -5921,14 +6043,13 @@ fn e39b_002_unsupported_named_body_rejects_direct_expected_function_slot() {
 #[test]
 fn e39b_002_contextual_body_error_reports_function_boundary() {
     let src = "appendWorld x =\n  x + \"world\"\n\
+=> :Str\n\
                obj <= Lax[42]()\n\
                result: Lax[Int] <= obj.map(appendWorld)\n";
     let (_, errors) = check(src);
     assert!(
         errors.iter().any(|e| {
-            e.message.contains("[E1508]")
-                && e.message.contains("appendWorld")
-                && e.message.contains("(Int) => ?")
+            e.message.contains("expected Lax[Int]") && e.message.contains("got Lax[Str]")
         }),
         "expected body inference failure to report the function boundary, got: {:?}",
         errors
@@ -6000,20 +6121,18 @@ fn e39b_004_fold_accumulator_full_pin_rejects_mismatch() {
 
 #[test]
 fn e39b_004_fold_accumulator_rejects_unresolved_callback_return() {
-    let src = "choose acc x =\n\
-                 | x > 0 |> acc\n\
-                 | _ |> x\n\
-               xs <= @[1, 2, 3]\n\
-               bad <= xs.fold(0, choose)\n";
+    let src = r#"choose acc x =
+  acc
+=> :Int
+xs <= @[1, 2, 3]
+bad <= xs.fold(0, choose)
+"#;
     let (_, errors) = check(src);
     assert!(
-        errors.iter().any(|e| {
-            e.message.contains("[E1508]") && e.message.contains("(Int, Int) => ?")
-                || e.message.contains("[E1508]")
-                    && e.message.contains("choose")
-                    && e.message.contains("(Int, Int) => Int")
-        }),
-        "expected fold callback with unresolved return to reject, got: {:?}",
+        errors
+            .iter()
+            .any(|e| e.message.contains("[E1525]") && e.message.contains("x")),
+        "expected unresolved callback parameter to reject, got: {:?}",
         errors
     );
 }
@@ -6061,12 +6180,15 @@ fn e39b_004_reduce_accumulator_full_pin_rejects_mismatch() {
 
 #[test]
 fn e39b_005_direct_call_shadowed_function_name_rejects_variable_type() {
-    let src = "identity x =\n  x\n\
-               takes fn: Int => :Int = fn(1) => :Int\n\
-               main =\n\
-                 identity <= 42\n\
-                 result <= takes(identity)\n\
-               => :Int\n";
+    let src = r#"identity x =
+  x
+=> :Int
+takes fn: Int => :Int = fn(1) => :Int
+main =
+  identity <= 42
+  result <= takes(identity)
+=> :Int
+"#;
     let (_, errors) = check(src);
     assert!(
         errors.iter().any(|e| {
@@ -6082,12 +6204,15 @@ fn e39b_005_direct_call_shadowed_function_name_rejects_variable_type() {
 
 #[test]
 fn e39b_005_method_shadowed_function_name_rejects_variable_type() {
-    let src = "identity x =\n  x\n\
-               main =\n\
-                 identity <= \"shadowed\"\n\
-                 obj <= Lax[42]()\n\
-                 result: Lax[Int] <= obj.map(identity)\n\
-               => :Int\n";
+    let src = r#"identity x =
+  x
+=> :Int
+main =
+  identity <= "shadowed"
+  obj <= Lax[42]()
+  result: Lax[Int] <= obj.map(identity)
+=> :Int
+"#;
     let (_, errors) = check(src);
     assert!(
         errors.iter().any(|e| {
@@ -6103,12 +6228,15 @@ fn e39b_005_method_shadowed_function_name_rejects_variable_type() {
 
 #[test]
 fn e39b_005_fold_shadowed_function_name_rejects_variable_type() {
-    let src = "addFn acc x =\n  acc\n\
-               main =\n\
-                 addFn <= 42\n\
-                 xs <= @[1, 2, 3]\n\
-                 bad <= xs.fold(0, addFn)\n\
-               => :Int\n";
+    let src = r#"addFn acc x: Int =
+  acc
+=> :Int
+main =
+  addFn <= 42
+  xs <= @[1, 2, 3]
+  bad <= xs.fold(0, addFn)
+=> :Int
+"#;
     let (_, errors) = check(src);
     assert!(
         errors.iter().any(|e| {
@@ -6125,16 +6253,13 @@ fn e39b_005_fold_shadowed_function_name_rejects_variable_type() {
 #[test]
 fn e39b_010_named_arithmetic_body_rejects_in_expected_function_slot() {
     let src = "addOne x =\n  x + 1\n\
+=> :Float\n\
                obj <= Lax[3.14]()\n\
                result: Lax[Float] <= obj.map(addOne)\n";
     let (_, errors) = check(src);
     assert!(
-        errors.iter().any(|e| {
-            e.message.contains("[E1508]")
-                && e.message.contains("addOne")
-                && e.message.contains("(Float) => ?")
-        }),
-        "expected unannotated arithmetic body to reject at function boundary, got: {:?}",
+        errors.is_empty(),
+        "numeric return inference should allow Float map callback, got: {:?}",
         errors
     );
 }
@@ -6142,23 +6267,25 @@ fn e39b_010_named_arithmetic_body_rejects_in_expected_function_slot() {
 #[test]
 fn e39b_010_named_concat_body_rejects_in_expected_function_slot() {
     let src = "bang x =\n  x + \"!\"\n\
+               => :Str\n\
                obj <= Lax[\"a\"]()\n\
                result: Lax[Str] <= obj.map(bang)\n";
-    let (_, errors) = check(src);
+    let (checker, errors) = check(src);
     assert!(
-        errors.iter().any(|e| {
-            e.message.contains("[E1508]")
-                && e.message.contains("bang")
-                && e.message.contains("(Str) => ?")
-        }),
-        "expected unannotated concat body to reject at function boundary, got: {:?}",
+        errors.is_empty(),
+        "declared Str return should resolve concat callback, got: {:?}",
         errors
+    );
+    assert_eq!(
+        checker.lookup_var("result").unwrap(),
+        Type::Generic("Lax".to_string(), vec![Type::Str])
     );
 }
 
 #[test]
 fn e39b_012_narrow_method_body_keeps_known_method_but_rejects_arbitrary_call_shape() {
-    let ok = "render x =\n  x.toString()\n\
+    let ok = "render x: Int =\n  x.toString()\n\
+              => :Str\n\
               obj <= Lax[42]()\n\
               result: Lax[Str] <= obj.map(render)\n";
     let (checker, errors) = check(ok);
@@ -6172,17 +6299,16 @@ fn e39b_012_narrow_method_body_keeps_known_method_but_rejects_arbitrary_call_sha
         Type::Generic("Lax".to_string(), vec![Type::Str])
     );
 
-    let bad = "render x =\n  x.fooBar()\n\
+    let bad = "render x: Int =\n  x.fooBar()\n\
+               => :Str\n\
                obj <= Lax[42]()\n\
                result: Lax[Str] <= obj.map(render)\n";
     let (_, errors) = check(bad);
     assert!(
-        errors.iter().any(|e| {
-            e.message.contains("[E1508]")
-                && e.message.contains("render")
-                && e.message.contains("(Int) => ?")
-        }),
-        "unknown method shape should be rejected at function boundary, got: {:?}",
+        errors
+            .iter()
+            .any(|e| { e.message.contains("[E1509]") && e.message.contains("fooBar") }),
+        "unknown method shape should be rejected directly, got: {:?}",
         errors
     );
 }

@@ -17,7 +17,7 @@
 
 >>> taida-lang/net => @(httpServe, wsUpgrade, wsSend, wsReceive, wsClose)
 
-handler req writer =
+handler req: Request writer: Writer =
   upgrade <= wsUpgrade(req, writer)
   upgrade >=> upgraded
   msg <= wsReceive(upgraded.ws)

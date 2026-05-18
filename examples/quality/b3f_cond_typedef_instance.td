@@ -2,7 +2,7 @@
 
 Color = @(r: Int, g: Int, b: Int)
 
-pickColor n =
+pickColor n: Int =
   | n == 1 |> Color(r <= 255, g <= 0, b <= 0)
   | n == 2 |> Color(r <= 0, g <= 255, b <= 0)
   | _ |> Color(r <= 0, g <= 0, b <= 255)

@@ -1184,11 +1184,13 @@ mod tests {
 
     #[test]
     fn e1809_missing_return_marker() {
-        let diags = lint_str("identity x: Int = x => Int\n");
+        let (_program, errors) = parse("identity x: Int = x => Int\n");
         assert!(
-            codes(&diags).contains(&"[E1809]"),
-            "expected E1809 for `=> Int`, got {:?}",
-            diags
+            errors
+                .iter()
+                .any(|e| e.message.contains("must declare a return type")),
+            "expected parser to reject `=> Int`, got {:?}",
+            errors
         );
     }
 

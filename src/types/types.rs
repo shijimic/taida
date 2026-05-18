@@ -91,7 +91,7 @@ impl fmt::Display for Type {
             Type::Error(name) => write!(f, "{}", name),
             Type::Unit => write!(f, "@()"),
             Type::Unknown => write!(f, "?"),
-            Type::Any => write!(f, "Any"),
+            Type::Any => write!(f, "?"),
             Type::Json => write!(f, "JSON"),
             Type::Molten => write!(f, "Molten"),
         }
@@ -132,10 +132,9 @@ impl Type {
     /// Width subtyping: a buchi pack with extra fields is a subtype of one with fewer.
     ///
     /// `Type::Function` follows the standard rule — parameters are
-    /// contravariant, the return type is covariant. `Type::Unknown` is
-    /// admitted as a propagation placeholder while inference is in
-    /// progress; the type-checker is expected to resolve it before any
-    /// method signature is recorded.
+    /// contravariant, the return type is covariant. `Type::Unknown` is not
+    /// a compatibility wildcard; unresolved types must be diagnosed before
+    /// subtype checks decide user-visible compatibility.
     pub fn is_subtype_of(&self, expected: &Type) -> bool {
         self.is_subtype_of_inner(expected, false)
     }
@@ -157,9 +156,10 @@ impl Type {
         }
 
         match (self, expected) {
-            // Any accepts everything
-            (_, Type::Any) | (_, Type::Unknown) => true,
-            (Type::Any, _) | (Type::Unknown, _) => true,
+            // Any accepts everything. Unknown does not: unresolved types
+            // must be finalized or rejected before compatibility checks.
+            (_, Type::Any) => true,
+            (Type::Any, _) => true,
 
             // Int is a subtype of Num, Float is a subtype of Num
             (Type::Int, Type::Num) | (Type::Float, Type::Num) => true,
@@ -636,17 +636,16 @@ mod tests {
     }
 
     #[test]
-    fn test_function_subtype_unknown_propagation() {
-        // Unknown is treated as a wildcard in either position (in-flight inference)
+    fn test_function_subtype_unknown_is_not_wildcard() {
         let f_unknown_param = Type::Function(vec![Type::Unknown], Box::new(Type::Int));
         let f_int_param = Type::Function(vec![Type::Int], Box::new(Type::Int));
-        assert!(f_unknown_param.is_subtype_of(&f_int_param));
-        assert!(f_int_param.is_subtype_of(&f_unknown_param));
+        assert!(!f_unknown_param.is_subtype_of(&f_int_param));
+        assert!(!f_int_param.is_subtype_of(&f_unknown_param));
 
         let f_unknown_ret = Type::Function(vec![Type::Int], Box::new(Type::Unknown));
         let f_int_ret = Type::Function(vec![Type::Int], Box::new(Type::Int));
-        assert!(f_unknown_ret.is_subtype_of(&f_int_ret));
-        assert!(f_int_ret.is_subtype_of(&f_unknown_ret));
+        assert!(!f_unknown_ret.is_subtype_of(&f_int_ret));
+        assert!(!f_int_ret.is_subtype_of(&f_unknown_ret));
     }
 
     #[test]

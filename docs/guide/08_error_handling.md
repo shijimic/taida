@@ -561,7 +561,7 @@ deleteUser userId: Str requesterId: Str =
 
 回復不能な前提条件の違反には `><` を使います。
 
-```taida
+```taida fragment
 initializeSystem config =
   | config.dbUrl == "" |> ><             // DB接続先なしは致命的です
   | config.port < 0 |> ><               // 不正なポートも致命的です
@@ -574,7 +574,7 @@ initializeSystem config =
 
 ### 4. バリデーションチェーン
 
-```taida
+```taida fragment
 Error => ValidationError = @(field: Str)
 
 validateAndProcess input =

@@ -3,7 +3,7 @@
 
 scale <= 1000000000000000000
 
-piStep sum k sign i n =
+piStep sum: Int k: Int sign: Int i: Int n: Int =
   | i == n |> sum
   | _ |>
     Div[scale, k]() >=> term

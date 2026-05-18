@@ -72,7 +72,7 @@ fn run_interpreter_source(source: &str) -> String {
 fn c25b016_three_level_lambda_captures_survive() {
     let src = r#"
 a <= 1
-f <= _ x = _ y = _ z = z + y + x + a
+f <= _ x: Int = _ y: Int = _ z: Int = z + y + x + a
 g <= f(2)
 h <= g(10)
 stdout(h(100).toString())
@@ -95,10 +95,10 @@ stdout(h(100).toString())
 #[test]
 fn c25b016_lambda_captured_into_returned_pack() {
     let src = r#"
-makeOps base =
+makeOps base: Int =
   @(
-    add <= _ x = x + base,
-    mul <= _ x = x * base
+    add <= _ x: Int = x + base,
+    mul <= _ x: Int = x * base
   )
 => :@(add: Int => :Int, mul: Int => :Int)
 
@@ -116,8 +116,8 @@ stdout(ops.mul(3).toString())
 #[test]
 fn c25b016_separate_snapshots_do_not_alias() {
     let src = r#"
-makeAdder k =
-  _ v = v + k
+makeAdder k: Int =
+  _ v: Int = v + k
 => :Int => :Int
 
 add5 <= makeAdder(5)

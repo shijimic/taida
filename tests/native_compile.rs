@@ -436,7 +436,7 @@ stdout(id(1, 2).toString())
 #[test]
 fn test_native_int_mold_from_function_param_matches_interpreter() {
     let source = r#"
-parseId arg =
+parseId arg: Str =
   Int[arg]().getOrDefault(-1)
 => :Int
 
@@ -649,9 +649,9 @@ fn test_native_hof_capture_callbacks_match_interpreter() {
     let source = r#"
 target <= 2
 nums <= @[1, 2, 3, 2]
-mapped <= Map[nums, _ x = x + target]()
-filtered <= Filter[mapped, _ x = x >= target]()
-sum <= Fold[filtered, 0, _ acc item = acc + item + target]()
+mapped <= Map[nums, _ x: Int = x + target]()
+filtered <= Filter[mapped, _ x: Int = x >= target]()
+sum <= Fold[filtered, 0, _ acc: Int item: Int = acc + item + target]()
 
 stdout(mapped)
 stdout(filtered)
@@ -665,12 +665,12 @@ fn test_native_result_predicate_capture_matches_interpreter() {
     let source = r#"
 limit <= 18
 
-ok <= Result[21, _ x = x >= limit]()
+ok <= Result[21, _ x: Int = x >= limit]()
 stdout(ok.isSuccess().toString())
 ok >=> v
 stdout(v.toString())
 
-ng <= Result[15, _ x = x >= limit]()
+ng <= Result[15, _ x: Int = x >= limit]()
 stdout(ng.isSuccess().toString())
 stdout(ng.getOrDefault(999).toString())
 "#;
@@ -684,7 +684,7 @@ Todo = @(id: Int, title: Str, done: Bool)
 items <= @[
   @(id <= 1, title <= "renamed task", done <= false)
 ]
-matched <= Filter[items, _ x = x.title.contains("renamed")]()
+matched <= Filter[items, _ x: @(id: Int, title: Str, done: Bool) = x.title.contains("renamed")]()
 stdout(matched.length().toString())
 "#;
     assert_native_matches_interpreter(source, "native_contains_field_access_lambda");
@@ -715,9 +715,9 @@ fn test_native_f47_lambda_capture_into_buchi_pack() {
         (
             "capture_into_buchi_pack",
             r#"Item = @(x: Int)
-test1 a =
+test1 a: Int =
   items <= @[1]
-  mapper <= _ item = @(x <= a)
+  mapper <= _ item: Int = @(x <= a)
   Map[items, mapper]() => result
   stdout(jsonPretty(result))
   0
@@ -727,9 +727,9 @@ test1(42)"#,
         (
             "capture_into_type_inst",
             r#"Item = @(id: Int, name: Str)
-test1 a b =
+test1 a: Int b: Str =
   items <= @[1]
-  mapper <= _ item = @(id <= a, name <= b)
+  mapper <= _ item: Int = @(id <= a, name <= b)
   Map[items, mapper]() => result
   stdout(jsonPretty(result))
   0
@@ -739,15 +739,14 @@ test1(42, "hello")"#,
         (
             "capture_3_args_into_pack",
             r#"Todo = @(id: Int, title: Str, done: Bool)
-doUpdate reqId reqTitle reqDone =
+doUpdate reqId: Int reqTitle: Str reqDone: Bool =
   items <= @[@(id <= 1, title <= "original", done <= false)]
-  mapper <= _ item = | item.id == reqId |> @(id <= reqId, title <= reqTitle, done <= reqDone) | _ |> item
-  newItems <= Map[items, mapper]()
-  found <= Find[newItems, _ item = item.id == reqId]()
-  found >=> foundValue
+  mapper <= _ item: @(id: Int, title: Str, done: Bool) = | item.id == reqId |> @(id <= reqId, title <= reqTitle, done <= reqDone) | _ |> item
+  newItems: @[@(id: Int, title: Str, done: Bool)] <= Map[items, mapper]()
+  newItems.first() >=> foundValue
   jsonPretty(foundValue)
 => :Str
-main dummy =
+main dummy: Int =
   result <= doUpdate(1, "updated", true)
   stdout(result)
   0
@@ -756,9 +755,9 @@ main(0)"#,
         ),
         (
             "capture_into_list_lit",
-            r#"test1 a b =
+            r#"test1 a: Int b: Int =
   items <= @[1]
-  mapper <= _ item = @[a, b, item]
+  mapper <= _ item: Int = @[a, b, item]
   Map[items, mapper]() => result
   stdout(jsonPretty(result))
   0
@@ -767,9 +766,9 @@ test1(10, 20)"#,
         ),
         (
             "capture_in_nested_lambda",
-            r#"test1 x =
+            r#"test1 x: Int =
   items <= @[1, 2, 3]
-  mapper <= _ item = Map[@[item], _ inner = inner + x]()
+  mapper <= _ item: Int = Map[@[item], _ inner: Int = inner + x]()
   Map[items, mapper]() => result
   stdout(jsonPretty(Flatten[result]()))
   0
@@ -791,14 +790,15 @@ fn test_f48_nested_buchi_pack_in_returned_list() {
     let source = r#"Todo = @(id: Int, title: Str, done: Bool, status: Str)
 Store = @(next_id: Int, items: @[Todo])
 
-addItem title store =
+addItem title: Str store: Store =
   item <= @(id <= store.next_id, title <= title, done <= false, status <= "todo")
   updated <= Append[store.items, item]()
   @(next_id <= store.next_id + 1, items <= updated)
 => :Store
 
-main dummy =
-  store <= @(next_id <= 1, items <= @[])
+main dummy: Int =
+  empty: @[Todo] <= @[]
+  store: Store <= @(next_id <= 1, items <= empty)
   result <= addItem("test1", store)
   stdout(jsonEncode(result))
   0
@@ -814,7 +814,7 @@ fn test_f48_multiple_nested_packs_in_returned_list() {
     let source = r#"Item = @(id: Int, name: Str)
 Container = @(items: @[Item])
 
-addTwo dummy =
+addTwo dummy: Int =
   items: @[Item] <= @[]
   a <= @(id <= 1, name <= "first")
   items2 <= Append[items, a]()
@@ -823,7 +823,7 @@ addTwo dummy =
   @(items <= items3)
 => :Container
 
-main dummy =
+main dummy: Int =
   result <= addTwo(0)
   stdout(jsonEncode(result))
   0
@@ -841,7 +841,7 @@ fn test_f48_field_name_type_conflict_json_serialize() {
     let source = r#"Todo = @(id: Int, title: Str, done: Bool, status: Str)
 HttpResp = @(status: Int, body: Str)
 
-addIssue title =
+addIssue title: Str =
   item <= @(id <= 1, title <= title, done <= false, status <= "todo")
   resp <= @(status <= 201, body <= "created")
   stdout(jsonEncode(item))
@@ -849,7 +849,7 @@ addIssue title =
   0
 => :Int
 
-main dummy =
+main dummy: Int =
   addIssue("test1")
 => :Int
 
@@ -863,7 +863,7 @@ fn test_f48_field_name_type_conflict_json_pretty() {
     let source = r#"Todo = @(id: Int, title: Str, done: Bool, status: Str)
 HttpResp = @(status: Int, body: Str)
 
-main dummy =
+main dummy: Int =
   todo <= @(id <= 1, title <= "hello", done <= false, status <= "in_progress")
   resp <= @(status <= 200, body <= jsonPretty(todo))
   stdout(jsonPretty(resp))
@@ -984,30 +984,30 @@ stdout(actions.greet())"#,
         ),
         (
             "pack_field_call_1_arg_str",
-            r#"echo <= @(say <= _ msg = msg)
+            r#"echo <= @(say <= _ msg: Str = msg)
 stdout(echo.say("hello from field"))"#,
         ),
         (
             "pack_field_call_1_arg_int",
-            r#"doubler <= @(run <= _ x = x * 2)
+            r#"doubler <= @(run <= _ x: Int = x * 2)
 stdout(doubler.run(21).toString())"#,
         ),
         (
             "pack_field_call_2_arg_int",
-            r#"calc <= @(plus <= _ a b = a + b)
+            r#"calc <= @(plus <= _ a: Int b: Int = a + b)
 stdout(calc.plus(3, 7).toString())"#,
         ),
         (
             "pack_field_call_closure",
             r#"tag <= "PREFIX"
-box <= @(wrap <= _ x = tag + x)
+box <= @(wrap <= _ x: Str = tag + x)
 stdout(box.wrap(":item"))"#,
         ),
         (
             "pack_field_call_kv_pattern",
             r#"kv <= @(
-  fetch <= _ key = "value"
-  store <= _ key value = "ok"
+  fetch <= _ key: Str = "value"
+  store <= _ key: Str value: Str = "ok"
 )
 stdout(kv.fetch("test"))
 stdout(kv.store("test", "val"))"#,
@@ -1030,17 +1030,17 @@ stdout(x == "GET")
 stdout(x != "POST")
 
 // Function param == literal
-check a = a == "hello" => :Bool
+check a: Str = a == "hello" => :Bool
 stdout(check("hello"))
 stdout(check("world"))
 
 // Function param == param (polymorphic)
-eq a b = a == b => :Bool
+eq a: Str b: Str = a == b => :Bool
 stdout(eq("foo", "foo"))
 stdout(eq("foo", "bar"))
 
 // Pattern match with string params
-route method path =
+route method: Str path: Str =
   | method == "GET" && path == "/" |> "root"
   | _ |> "other"
 => :Str
@@ -1129,8 +1129,9 @@ fn test_qf20_unmold_statement_preserves_global_capture() {
 items <= @[10, 20, 30]
 
 sumItems =
-  Fold[items, 0, _ acc x = acc + x]() >=> total
+  Sum[items]() >=> total
   total
+=> :Num
 
 stdout(sumItems().toString())
 "#;
@@ -1153,7 +1154,7 @@ fn test_qf26_imported_value_visible_in_main_function() {
         dir.join("main.td"),
         r#">>> ./helper.td => @(value)
 
-get dummy = value => :Int
+get dummy: Int = value => :Int
 stdout(get(0).toString())
 "#,
     )
@@ -1185,7 +1186,7 @@ make dummy = seed + 1 => :Int
         r#">>> ./mod_b.td => @(make)
 
 answer <= make(0)
-get dummy = answer => :Int
+get dummy: Int = answer => :Int
 <<< @(get)
 "#,
     )
@@ -1215,7 +1216,7 @@ fn test_qf28_duplicate_export_names_across_modules_do_not_collide() {
     fs::write(
         dir.join("a").join("foo.td"),
         r#"value <= "A"
-get dummy = value => :Str
+get dummy: Int = value => :Str
 <<< @(get)
 "#,
     )
@@ -1223,7 +1224,7 @@ get dummy = value => :Str
     fs::write(
         dir.join("b").join("bar.td"),
         r#"value <= "B"
-get dummy = value => :Str
+get dummy: Int = value => :Str
 <<< @(get)
 "#,
     )
@@ -1288,11 +1289,11 @@ stdout(getB(0))
 
 #[test]
 fn test_qf31_deep_nested_capture_includes_outer_assignments() {
-    let source = r#"f1 a =
+    let source = r#"f1 a: Int =
   x <= 100
-  f2 b =
+  f2 b: Int =
     y <= 200
-    f3 c =
+    f3 c: Int =
       x.toString() + ":" + y.toString() + ":" + a.toString() + ":" + b.toString() + ":" + c.toString()
     => :Str
     f3(3)
@@ -1492,7 +1493,7 @@ fn test_retain_on_store_func_returning_list_in_pack() {
     // Finding 1: A pack containing a function call that returns a list.
     // expr_type_tag FuncCall branch must detect list_returning_funcs.
     let source = r#"
-makeList n = @[n, n * 2, n * 3] => :@[Int]
+makeList n: Int = @[n, n * 2, n * 3] => :@[Int]
 wrapper <= @(nums <= makeList(10), label <= "test")
 stdout(wrapper.nums.length().toString())
 stdout(wrapper.label)

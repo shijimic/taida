@@ -10,16 +10,16 @@
 
 Error => MyError = @(detail: Str <= "")
 
-throwBoom msg =
+throwBoom msg: Str =
   MyError(type <= "MyError", message <= msg).throw()
   ""
 => :Str
 
-deepest n = throwBoom("boom") => :Str
-middle n = deepest(n) => :Str
-top n = middle(n) => :Str
+deepest n: Int = throwBoom("boom") => :Str
+middle n: Int = deepest(n) => :Str
+top n: Int = middle(n) => :Str
 
-trial input =
+trial input: Int =
   |== error: Error =
     "caught:" + error.message
   => :Str

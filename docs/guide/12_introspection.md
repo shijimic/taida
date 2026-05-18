@@ -269,7 +269,7 @@ taida graph summary ./src/main.td
 
 ```taida
 scores <= @[95, 82, 78, 91]
-scores => Filter[_, _ x = x > 80]() => debug => Map[_, _ x = x * 2]() => result
+scores => Filter[_, _ x: Int = x > 80]() => debug => Map[_, _ x: Int = x * 2]() => result
 ```
 
 `debug(value)` は渡された値をそのまま返すため、パイプラインを切断せずに観測地点を挟めます。単独で値を print したいときや、ラベル付きで `[label] Type: repr` 形式を出したいときは以下を使います。

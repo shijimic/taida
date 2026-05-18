@@ -10,7 +10,7 @@
 // See docs/guide/07_control_flow.md for the full rule.
 
 // Single-expression arm — the simplest form.
-classifyScore score =
+classifyScore score: Int =
   | score >= 90 |> "A"
   | score >= 80 |> "B"
   | score >= 70 |> "C"
@@ -22,7 +22,7 @@ stdout(classifyScore(85))
 stdout(classifyScore(60))
 
 // Let-binding followed by final expression (legal `<=` let inside arm).
-computeBlock flag n =
+computeBlock flag: Bool n: Int =
   | flag |>
     doubled <= n * 2
     doubled + 1
@@ -36,7 +36,7 @@ stdout(computeBlock(false, 5).toString())
 
 // Nested condition branch as an arm body — a single expression (the
 // inner `| |>`) remains legal. No let-binding needed.
-deepClassify x =
+deepClassify x: Int =
   | x > 100 |>
     | x > 500 |> "big"
     | _ |> "medium"

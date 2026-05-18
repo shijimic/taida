@@ -254,18 +254,18 @@ fn c25b_015_trial_does_not_leak_private_tag_to_top_level_interpreter() {
     let src = "\
 Error => MyError = @(detail: Str <= \"\")
 
-throwOops msg =
+throwOops msg: Str =
   MyError(type <= \"MyError\", message <= msg).throw()
   \"\"
 => :Str
 
-trial input =
+trial input: Str =
   |== error: Error =
     tag <= \"inner-tag\"
     \"caught:\" + error.message
   => :Str
   tag <= \"inner-tag\"
-  inner x = throwOops(\"oops\") + \" \" + tag + \" \" + x => :Str
+  inner x: Str = throwOops(\"oops\") + \" \" + tag + \" \" + x => :Str
   inner(input)
 => :Str
 

@@ -20,7 +20,7 @@ debug(Lax[99]().getOrDefault(0))
 debug(Div[0, 0]().getOrDefault(777))
 
 // Test 5: Lax.map(fn)
-double x = x * 2 => :Int
+double x: Int = x * 2 => :Int
 mapped <= Lax[21]().map(double)
 debug(mapped.getOrDefault(0))
 
@@ -61,7 +61,7 @@ err_mapped <= Result[0](throw <= TestError(message <= "fail")).map(double)
 debug(err_mapped.isError())
 
 // Test 14: Result.flatMap(fn)
-wrapResult x: Int = Result[x * 3]() => :Result[Int, TestError]
+wrapResult x: Int = Result[x * 3]() => :Result[Int, ErrorInfo]
 flat_ok <= Result[7]().flatMap(wrapResult)
 debug(flat_ok.getOrDefault(0))
 
@@ -95,9 +95,9 @@ debug(lfm_result)
 Result[42, _ = true]() >=> pred_ok
 debug(pred_ok)
 
-// Test 20: Result[value, _ x = x >= 18]() — validation predicate
-debug(Result[25, _ x = x >= 18]().isSuccess())
-debug(Result[15, _ x = x >= 18]().isSuccess())
+// Test 20: Result[value, _ x: Int = x >= 18]() — validation predicate
+debug(Result[25, _ x: Int = x >= 18]().isSuccess())
+debug(Result[15, _ x: Int = x >= 18]().isSuccess())
 
 // Test 21: getOrDefault with predicate
 debug(Result[42, _ = true]().getOrDefault(0))

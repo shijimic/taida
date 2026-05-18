@@ -937,6 +937,7 @@ value <= Child[1, 2]()
                     end: 0,
                     line: 0,
                     column: 0,
+                    node_id: 0,
                 },
             },
             crate::parser::FieldDef {
@@ -951,6 +952,7 @@ value <= Child[1, 2]()
                     end: 0,
                     line: 0,
                     column: 0,
+                    node_id: 0,
                 },
             },
         ]);

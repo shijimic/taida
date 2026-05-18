@@ -1037,6 +1037,7 @@ mod tests {
             end: 0,
             line: 1,
             column: 1,
+            node_id: 0,
         };
 
         let program = Program {
@@ -1307,6 +1308,7 @@ mod tests {
             end: 0,
             line: 1,
             column: 1,
+            node_id: 0,
         };
 
         let program = Program {
@@ -1357,6 +1359,7 @@ mod tests {
             end: 0,
             line: 1,
             column: 1,
+            node_id: 0,
         };
 
         let program = Program {
@@ -1427,6 +1430,7 @@ mod tests {
             end: 0,
             line: 1,
             column: 1,
+            node_id: 0,
         };
 
         let program = Program {
@@ -1476,6 +1480,7 @@ mod tests {
             end: 0,
             line: 1,
             column: 1,
+            node_id: 0,
         };
 
         let program = Program {

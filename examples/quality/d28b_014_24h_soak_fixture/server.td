@@ -25,7 +25,7 @@
 
 >>> taida-lang/net => @(httpServe)
 
-handler req =
+handler req: Request =
   @(status <= 200, headers <= @[@(name <= "content-type", value <= "text/plain")], body <= Repeat["x", 512]())
 => :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
 

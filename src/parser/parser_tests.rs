@@ -1,4 +1,5 @@
 use super::*;
+use std::collections::HashSet;
 
 fn parse_ok(source: &str) -> Program {
     let (program, errors) = parse(source);
@@ -10,6 +11,180 @@ fn first_stmt(source: &str) -> Statement {
     let program = parse_ok(source);
     assert!(!program.statements.is_empty(), "No statements parsed");
     program.statements.into_iter().next().unwrap()
+}
+
+fn collect_expr_node_ids(program: &Program) -> Vec<usize> {
+    let mut ids = Vec::new();
+    for stmt in &program.statements {
+        collect_stmt_expr_node_ids(stmt, &mut ids);
+    }
+    ids
+}
+
+fn collect_stmt_expr_node_ids(stmt: &Statement, ids: &mut Vec<usize>) {
+    match stmt {
+        Statement::Expr(expr) => collect_expr_node_ids_inner(expr, ids),
+        Statement::ClassLikeDef(def) => {
+            for field in &def.fields {
+                if let Some(default_value) = &field.default_value {
+                    collect_expr_node_ids_inner(default_value, ids);
+                }
+                if let Some(method_def) = &field.method_def {
+                    collect_func_expr_node_ids(method_def, ids);
+                }
+            }
+        }
+        Statement::FuncDef(func) => collect_func_expr_node_ids(func, ids),
+        Statement::Assignment(assign) => collect_expr_node_ids_inner(&assign.value, ids),
+        Statement::ErrorCeiling(ceiling) => {
+            for stmt in &ceiling.handler_body {
+                collect_stmt_expr_node_ids(stmt, ids);
+            }
+        }
+        Statement::UnmoldForward(stmt) => collect_expr_node_ids_inner(&stmt.source, ids),
+        Statement::UnmoldBackward(stmt) => collect_expr_node_ids_inner(&stmt.source, ids),
+        Statement::EnumDef(_) | Statement::Import(_) | Statement::Export(_) => {}
+    }
+}
+
+fn collect_func_expr_node_ids(func: &FuncDef, ids: &mut Vec<usize>) {
+    for param in &func.params {
+        if let Some(default_value) = &param.default_value {
+            collect_expr_node_ids_inner(default_value, ids);
+        }
+    }
+    for stmt in &func.body {
+        collect_stmt_expr_node_ids(stmt, ids);
+    }
+}
+
+fn collect_expr_node_ids_inner(expr: &Expr, ids: &mut Vec<usize>) {
+    ids.push(expr.node_id());
+    match expr {
+        Expr::BuchiPack(fields, _) | Expr::TypeInst(_, fields, _) => {
+            for field in fields {
+                collect_expr_node_ids_inner(&field.value, ids);
+            }
+        }
+        Expr::ListLit(items, _) | Expr::Pipeline(items, _) => {
+            for item in items {
+                collect_expr_node_ids_inner(item, ids);
+            }
+        }
+        Expr::BinaryOp(left, _, right, _) => {
+            collect_expr_node_ids_inner(left, ids);
+            collect_expr_node_ids_inner(right, ids);
+        }
+        Expr::UnaryOp(_, inner, _)
+        | Expr::FieldAccess(inner, _, _)
+        | Expr::Unmold(inner, _)
+        | Expr::Throw(inner, _) => collect_expr_node_ids_inner(inner, ids),
+        Expr::FuncCall(callee, args, _) => {
+            collect_expr_node_ids_inner(callee, ids);
+            for arg in args {
+                collect_expr_node_ids_inner(arg, ids);
+            }
+        }
+        Expr::MethodCall(receiver, _, args, _) => {
+            collect_expr_node_ids_inner(receiver, ids);
+            for arg in args {
+                collect_expr_node_ids_inner(arg, ids);
+            }
+        }
+        Expr::CondBranch(arms, _) => {
+            for arm in arms {
+                if let Some(condition) = &arm.condition {
+                    collect_expr_node_ids_inner(condition, ids);
+                }
+                for stmt in &arm.body {
+                    collect_stmt_expr_node_ids(stmt, ids);
+                }
+            }
+        }
+        Expr::MoldInst(_, type_args, fields, _) => {
+            for arg in type_args {
+                collect_expr_node_ids_inner(arg, ids);
+            }
+            for field in fields {
+                collect_expr_node_ids_inner(&field.value, ids);
+            }
+        }
+        Expr::Lambda(params, body, _) => {
+            for param in params {
+                if let Some(default_value) = &param.default_value {
+                    collect_expr_node_ids_inner(default_value, ids);
+                }
+            }
+            collect_expr_node_ids_inner(body, ids);
+        }
+        Expr::IntLit(_, _)
+        | Expr::FloatLit(_, _)
+        | Expr::StringLit(_, _)
+        | Expr::TemplateLit(_, _)
+        | Expr::BoolLit(_, _)
+        | Expr::Gorilla(_)
+        | Expr::Ident(_, _)
+        | Expr::Placeholder(_)
+        | Expr::Hole(_)
+        | Expr::EnumVariant(_, _, _)
+        | Expr::TypeLiteral(_, _, _) => {}
+    }
+}
+
+#[test]
+fn parser_assigns_unique_node_ids_to_all_expressions() {
+    let program = parse_ok(
+        r#"
+double n: Int = n + 2 => :Int
+items <= @[1, 2, 3]
+out <= double(items.get(0)) + (| true |> 10 | _ |> 0)
+"#,
+    );
+    let ids = collect_expr_node_ids(&program);
+    assert!(!ids.is_empty(), "test program should contain expressions");
+    assert!(
+        ids.iter().all(|id| *id != 0),
+        "all expressions should receive nonzero node ids: {:?}",
+        ids
+    );
+    let unique: HashSet<_> = ids.iter().copied().collect();
+    assert_eq!(
+        ids.len(),
+        unique.len(),
+        "expression node ids must be unique within a parsed program: {:?}",
+        ids
+    );
+}
+
+#[test]
+fn parser_assigns_distinct_node_ids_to_repeated_identifiers() {
+    let stmt = first_stmt("double x: Int = x + x => :Int");
+    let Statement::FuncDef(func) = stmt else {
+        panic!("expected function definition");
+    };
+    let Some(Statement::Expr(Expr::BinaryOp(left, _, right, _))) = func.body.first() else {
+        panic!("expected binary function body");
+    };
+    assert!(matches!(left.as_ref(), Expr::Ident(name, _) if name == "x"));
+    assert!(matches!(right.as_ref(), Expr::Ident(name, _) if name == "x"));
+    assert_ne!(left.node_id(), right.node_id());
+}
+
+#[test]
+fn reassign_expr_node_ids_replaces_clone_identity_without_changing_span() {
+    let stmt = first_stmt("value <= 1 + 2");
+    let Statement::Assignment(assign) = stmt else {
+        panic!("expected assignment");
+    };
+    let mut cloned = assign.value.clone();
+    assert_eq!(assign.value.node_id(), cloned.node_id());
+
+    let mut allocator = NodeIdAllocator::starting_at(10_000);
+    reassign_expr_node_ids(&mut cloned, &mut allocator);
+
+    assert_ne!(assign.value.node_id(), cloned.node_id());
+    assert_eq!(assign.value.span(), cloned.span());
+    assert_ne!(assign.value.span().node_id, cloned.span().node_id);
 }
 
 #[test]
@@ -515,6 +690,74 @@ fn test_parse_function_def_param_default_value() {
             }
         }
         other => panic!("Expected FuncDef, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_parse_function_def_missing_return_type_is_rejected() {
+    let (_program, errors) = parse("f x =\n  x");
+    assert!(
+        errors
+            .iter()
+            .any(|e| e.message.contains("[E1526]")
+                && e.message.contains("must declare a return type")),
+        "Expected missing return type parse error, got {:?}",
+        errors
+    );
+}
+
+#[test]
+fn test_parse_lambda_param_type_annotation_single() {
+    match first_stmt("f <= _ x: Int = x + 1") {
+        Statement::Assignment(a) => match &a.value {
+            Expr::Lambda(params, _, _) => {
+                assert_eq!(params.len(), 1);
+                assert_eq!(params[0].name, "x");
+                assert_eq!(
+                    params[0].type_annotation,
+                    Some(TypeExpr::Named("Int".to_string()))
+                );
+            }
+            other => panic!("Expected Lambda, got {:?}", other),
+        },
+        other => panic!("Expected Assignment, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_parse_lambda_param_type_annotation_multiple() {
+    match first_stmt("f <= _ a: Str b: Str = a + b") {
+        Statement::Assignment(a) => match &a.value {
+            Expr::Lambda(params, _, _) => {
+                assert_eq!(params.len(), 2);
+                assert_eq!(params[0].name, "a");
+                assert_eq!(params[1].name, "b");
+                assert_eq!(
+                    params[0].type_annotation,
+                    Some(TypeExpr::Named("Str".to_string()))
+                );
+                assert_eq!(
+                    params[1].type_annotation,
+                    Some(TypeExpr::Named("Str".to_string()))
+                );
+            }
+            other => panic!("Expected Lambda, got {:?}", other),
+        },
+        other => panic!("Expected Assignment, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_parse_zero_param_lambda_still_allowed() {
+    match first_stmt("f <= _ = true") {
+        Statement::Assignment(a) => match &a.value {
+            Expr::Lambda(params, body, _) => {
+                assert!(params.is_empty());
+                assert!(matches!(body.as_ref(), Expr::BoolLit(true, _)));
+            }
+            other => panic!("Expected Lambda, got {:?}", other),
+        },
+        other => panic!("Expected Assignment, got {:?}", other),
     }
 }
 
@@ -2039,7 +2282,7 @@ fn test_standalone_f_x_is_func_def_attempt() {
     // C-3a: Bare `f x` at statement level is parsed as a function definition attempt.
     // Without `= body`, the parser should try function def parsing and may succeed or fail
     // but NOT parse as function call.
-    let source = "f x = x + 1\n=> :Int";
+    let source = "f x =\n  x + 1\n=> :Int";
     let (_, errors) = parse(source);
     assert!(
         errors.is_empty(),
@@ -2327,7 +2570,7 @@ fn test_relative_import_requires_td_extension() {
 #[test]
 fn test_docs_sample_empty_slot_partial_application_parses() {
     // Empty slot partial application from docs/reference/operators.md
-    let source = "add x y = x + y\n=> :Int\nadd5 <= add(5, )";
+    let source = "add x y =\n  x + y\n=> :Int\nadd5 <= add(5, )";
     let (program, errors) = parse(source);
     assert!(
         errors.is_empty(),

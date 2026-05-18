@@ -93,7 +93,7 @@ fn test_check_json_e1501_same_scope_redefinition() {
 fn test_check_json_e1502_old_placeholder_partial_application() {
     let dir = unique_temp_dir("taida_check_e1502");
     let src = dir.join("main.td");
-    write_file(&src, "add x y = x\n=> :Int\nresult <= add(5, _)\n");
+    write_file(&src, "add x: Int y: Int = x => :Int\nresult <= add(5, _)\n");
 
     let output = Command::new(taida_bin())
         .arg("way")

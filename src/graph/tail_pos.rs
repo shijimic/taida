@@ -224,7 +224,7 @@ mod tests {
     #[test]
     fn test_single_tail_call() {
         // `f(n - 1)` is the only body stmt → tail.
-        let fd = parse_one_func("foo n =\n  f(n - 1)\n");
+        let fd = parse_one_func("foo n =\n  f(n - 1)\n=> :Int\n");
         let sites = collect_call_sites(&fd);
         assert_eq!(sites.len(), 1);
         assert_eq!(sites[0].callee, "f");
@@ -234,7 +234,7 @@ mod tests {
     #[test]
     fn test_assignment_then_call() {
         // Assignment is never tail; final expr is tail.
-        let fd = parse_one_func("foo n =\n  x <= g(n)\n  h(x)\n");
+        let fd = parse_one_func("foo n =\n  x <= g(n)\n  h(x)\n=> :Int\n");
         let sites = collect_call_sites(&fd);
         assert_eq!(sites.len(), 2);
         let g = sites.iter().find(|s| s.callee == "g").unwrap();
@@ -246,7 +246,7 @@ mod tests {
     #[test]
     fn test_arg_position_not_tail() {
         // `g` is an argument to `f`, only `f` is tail.
-        let fd = parse_one_func("foo n =\n  f(g(n))\n");
+        let fd = parse_one_func("foo n =\n  f(g(n))\n=> :Int\n");
         let sites = collect_call_sites(&fd);
         let f = sites.iter().find(|s| s.callee == "f").unwrap();
         let g = sites.iter().find(|s| s.callee == "g").unwrap();
@@ -257,7 +257,7 @@ mod tests {
     #[test]
     fn test_cond_branch_arm_tail() {
         // Each arm's last expr inherits tail from the enclosing branch.
-        let src = "foo n =\n  | n == 0 |> 1\n  | _ |> g(n - 1)\n";
+        let src = "foo n =\n  | n == 0 |> 1\n  | _ |> g(n - 1)\n=> :Int\n";
         let fd = parse_one_func(src);
         let sites = collect_call_sites(&fd);
         let g = sites.iter().find(|s| s.callee == "g").unwrap();
@@ -267,7 +267,7 @@ mod tests {
     #[test]
     fn test_binary_op_not_tail() {
         // `g(n) + 1` → g is inside a BinOp, not tail.
-        let fd = parse_one_func("foo n =\n  g(n) + 1\n");
+        let fd = parse_one_func("foo n =\n  g(n) + 1\n=> :Int\n");
         let sites = collect_call_sites(&fd);
         let g = sites.iter().find(|s| s.callee == "g").unwrap();
         assert!(!g.is_tail);
@@ -275,7 +275,7 @@ mod tests {
 
     #[test]
     fn test_list_element_not_tail() {
-        let fd = parse_one_func("foo n =\n  @[g(n), h(n)]\n");
+        let fd = parse_one_func("foo n =\n  @[g(n), h(n)]\n=> :@[Int]\n");
         let sites = collect_call_sites(&fd);
         for s in &sites {
             assert!(!s.is_tail, "list element {} should not be tail", s.callee);
@@ -285,7 +285,7 @@ mod tests {
     #[test]
     fn test_lambda_inside_body_not_tail() {
         // Lambda body call is scoped to lambda, not outer.
-        let fd = parse_one_func("foo xs =\n  xs.map(_ x = g(x))\n");
+        let fd = parse_one_func("foo xs =\n  xs.map(_ x = g(x))\n=> :@[Int]\n");
         let sites = collect_call_sites(&fd);
         let g = sites.iter().find(|s| s.callee == "g");
         if let Some(g) = g {

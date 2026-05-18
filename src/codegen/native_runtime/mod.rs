@@ -633,7 +633,9 @@ mod tests {
         // 2026-05-17 net_h3_quic addon-load hint message: replaced the
         //   internal `(see .dev/...)` reference with a self-contained
         //   user-facing hint. Net +31 bytes. Recomputed total = 1,132,061.
-        const EXPECTED_TOTAL_LEN: usize = 1_132_061;
+        // 2026-05-18 source doc-comment cleanup trims 18 bytes from core.c.
+        //   Recomputed total = 1,132,043.
+        const EXPECTED_TOTAL_LEN: usize = 1_132_043;
         let asm = *NATIVE_RUNTIME_C;
         assert_eq!(
             asm.len(),
@@ -1209,10 +1211,12 @@ mod tests {
         //   from F1 (taida_assert prototype area) and adds 4 bytes to F2
         //   (implementation contract comment). F1 314,355 → 314,343 and
         //   F2 167,302 → 167,306.
-        const F1_LEN: usize = 314_343;
+        // 2026-05-18 source doc-comment cleanup trims 18 bytes from F1.
+        //   F1 moves 314,343 → 314,325; F2 remains 167,299.
+        const F1_LEN: usize = 314_325;
         assert_eq!(
             CORE_SECTION.len(),
-            314_343 + 167_299,
+            314_325 + 167_299,
             "core.c total byte length must equal the expected concatenated runtime fragments"
         );
         const F2_PREFIX: &[u8] = b"// \xE2\x94\x80\xE2\x94\x80 Error ceiling";

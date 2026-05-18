@@ -14,13 +14,13 @@ stdout("name.getOrDefault('unknown') = " + name.getOrDefault("unknown"))
 stdout("empty.getOrDefault('unknown') = " + empty.getOrDefault("unknown"))
 
 // map
-double x = x * 2 => :Int
+double x: Int = x * 2 => :Int
 result <= Lax[21]().map(double)
 stdout("Lax[21]().map(double) = " + result.getOrDefault(0).toString())
 stdout("Div[0,0]().map(double) = " + Div[0, 0]().map(double).getOrDefault(0).toString())
 
 // flatMap
-safeDivide x =
+safeDivide x: Int =
   | x > 0 |> Lax[Div[100, x]().unmold()]()
   | _ |> Div[0, 0]()
 => :Lax[Int]

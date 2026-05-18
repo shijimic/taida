@@ -28,7 +28,7 @@
 
 >>> taida-lang/net => @(httpServe, readBody)
 
-handler req =
+handler req: Request =
   // Echo the request body back as the response body. readBody returns
   // a Bytes value (legacy taida_val[] form today), which flows through
   // taida_net_send_response_scatter's body_is_bytes branch. The newly

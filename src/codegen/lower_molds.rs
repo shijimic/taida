@@ -2771,6 +2771,46 @@ impl Lowering {
                     }
                     // Primitive type check: use compile-time type analysis
                     Expr::TypeLiteral(type_name, None, _) => {
+                        if let Expr::Ident(name, _) = &type_args[0] {
+                            let tracked_match = if self.int_vars.contains(name) {
+                                Some(matches!(type_name.as_str(), "Int" | "Num"))
+                            } else if self.float_vars.contains(name) {
+                                Some(matches!(type_name.as_str(), "Float" | "Num"))
+                            } else if self.bool_vars.contains(name) {
+                                Some(type_name == "Bool")
+                            } else if self.string_vars.contains(name) {
+                                Some(type_name == "Str")
+                            } else {
+                                None
+                            };
+                            if let Some(is_match) = tracked_match {
+                                func.push(IrInst::ConstBool(result, is_match));
+                                return Ok(result);
+                            }
+                        }
+
+                        if let Some(known_ty) = self.typed_expr_table.lookup(&type_args[0]) {
+                            let known_match = match (known_ty, type_name.as_str()) {
+                                (crate::types::Type::Int, "Int" | "Num") => Some(true),
+                                (crate::types::Type::Float, "Float" | "Num") => Some(true),
+                                (crate::types::Type::Bool, "Bool") => Some(true),
+                                (crate::types::Type::Str, "Str") => Some(true),
+                                (crate::types::Type::Int, "Float" | "Bool" | "Str") => Some(false),
+                                (crate::types::Type::Float, "Int" | "Bool" | "Str") => Some(false),
+                                (crate::types::Type::Bool, "Int" | "Float" | "Num" | "Str") => {
+                                    Some(false)
+                                }
+                                (crate::types::Type::Str, "Int" | "Float" | "Num" | "Bool") => {
+                                    Some(false)
+                                }
+                                _ => None,
+                            };
+                            if let Some(is_match) = known_match {
+                                func.push(IrInst::ConstBool(result, is_match));
+                                return Ok(result);
+                            }
+                        }
+
                         // C12B-022: If the operand is a function parameter whose
                         // runtime tag is threaded through `param_tag_vars`
                         // (caller-propagated type tag), prefer a runtime tag
@@ -2960,16 +3000,10 @@ impl Lowering {
             }),
             _ => {
                 let Some(mold_def) = self.mold_defs.get(type_name).cloned() else {
-                    // C20B-014 (ROOT-17): user-defined function called via mold syntax.
-                    //
-                    // Pre-C20B-014, `Fn[args]()` for a user function hit this
-                    // `unsupported mold type` error at lowering time, even though
-                    // the program is semantically valid (Interpreter wrapped,
-                    // JS `__taida_solidify(Fn(...))` accidentally worked).
-                    // Fix: when `type_name` is not a mold but *is* a registered
-                    // user function, lower as a plain function call with
-                    // `type_args` as positional arguments. Named `fields` are
-                    // rejected — user functions have no named-field ABI.
+                    // User-defined functions may be called with mold syntax.
+                    // Lower `Fn[args]()` as a plain positional function call;
+                    // named fields are rejected because functions have no
+                    // named-field ABI.
                     if self.user_funcs.contains(type_name) {
                         if !fields.is_empty() {
                             return Err(LowerError {
@@ -2981,9 +3015,13 @@ impl Lowering {
                                 ),
                             });
                         }
-                        let callee = Expr::Ident(
+                        let mut callee = Expr::Ident(
                             type_name.to_string(),
                             crate::lexer::Span::new(0, 0, 0, 0),
+                        );
+                        crate::parser::reassign_expr_node_ids(
+                            &mut callee,
+                            &mut crate::parser::NodeIdAllocator::new(),
                         );
                         return self.lower_func_call(func, &callee, type_args);
                     }
@@ -3087,7 +3125,11 @@ impl Lowering {
                     let value_var = if let Some(v) = named_vars.get(&field_def.name).copied() {
                         v
                     } else if let Some(default_expr) = field_def.default_value.as_ref() {
-                        let rewritten = rewrite_expr_ident_aliases(default_expr, &alias_map);
+                        let mut rewritten = rewrite_expr_ident_aliases(default_expr, &alias_map);
+                        crate::parser::reassign_expr_node_ids(
+                            &mut rewritten,
+                            &mut crate::parser::NodeIdAllocator::new(),
+                        );
                         self.lower_expr(func, &rewritten)?
                     } else {
                         zero_var(func)
@@ -3200,7 +3242,7 @@ fn rewrite_expr_ident_aliases(
         Expr::EnumVariant(enum_name, variant_name, s) => {
             Expr::EnumVariant(enum_name.clone(), variant_name.clone(), s.clone())
         }
-        // B11-6a: TypeLiteral passes through unchanged (compile-time construct)
+        // TypeLiteral passes through unchanged as a compile-time construct.
         Expr::TypeLiteral(name, variant, s) => {
             Expr::TypeLiteral(name.clone(), variant.clone(), s.clone())
         }

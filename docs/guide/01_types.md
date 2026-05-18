@@ -581,7 +581,7 @@ b <= HiveState:Running()
 stdout((a < b).toString())   // true — Creating(0) < Running(1)
 stdout((b >= a).toString())  // true
 
-ready s =
+ready s: HiveState =
   | s >= HiveState:Running() |> "yes"
   | _ |> "no"
 => :Str

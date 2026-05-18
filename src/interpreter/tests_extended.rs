@@ -1028,6 +1028,7 @@ total
 factorialTail n acc =
   | n < 1 |> acc
   | _ |> factorialTail(n - 1, acc * n)
+=> :Int
 
 result <= factorialTail(10, 1)
 result"#;
@@ -1040,6 +1041,7 @@ result"#;
 sumTail n acc =
   | n == 0 |> acc
   | _ |> sumTail(n - 1, acc + n)
+=> :Int
 
 result <= sumTail(100, 0)
 result"#;
@@ -1053,6 +1055,7 @@ fibTail n a b =
   | n == 0 |> a
   | n == 1 |> b
   | _ |> fibTail(n - 1, b, a + b)
+=> :Int
 
 result <= fibTail(20, 0, 1)
 result"#;
@@ -1066,6 +1069,7 @@ result"#;
 countdown n =
   | n == 0 |> 0
   | _ |> countdown(n - 1)
+=> :Int
 
 result <= countdown(100000)
 result"#;
@@ -1079,6 +1083,7 @@ result"#;
 factorial n =
   | n < 1 |> 1
   | _ |> n * factorial(n - 1)
+=> :Int
 
 result <= factorial(10)
 result"#;
@@ -1091,6 +1096,7 @@ result"#;
 repeatStr str n acc =
   | n < 1 |> acc
   | _ |> repeatStr(str, n - 1, acc + str)
+=> :Str
 
 result <= repeatStr("ab", 3, "")
 result"#;
@@ -1107,6 +1113,7 @@ safeDivLoop n total =
 
   | n == 0 |> total
   | _ |> safeDivLoop(n - 1, total + Div[100, n]().unmold())
+=> :Int
 
 result <= safeDivLoop(5, 0)
 result"#;
@@ -1122,10 +1129,12 @@ result"#;
 isEven n =
   | n == 0 |> true
   | _ |> isOdd(n - 1)
+=> :Bool
 
 isOdd n =
   | n == 0 |> false
   | _ |> isEven(n - 1)
+=> :Bool
 
 stdout(isEven(0))
 stdout(isEven(1))
@@ -1144,10 +1153,12 @@ stdout(isOdd(4))
 isEven n =
   | n == 0 |> true
   | _ |> isOdd(n - 1)
+=> :Bool
 
 isOdd n =
   | n == 0 |> false
   | _ |> isEven(n - 1)
+=> :Bool
 
 isEven(100000)
 "#;
@@ -1160,14 +1171,17 @@ isEven(100000)
 fizzBuzz n =
   | n == 0 |> 0
   | _ |> fizz(n - 1)
+=> :Int
 
 fizz n =
   | n == 0 |> 0
   | _ |> buzz(n - 1)
+=> :Int
 
 buzz n =
   | n == 0 |> 0
   | _ |> fizzBuzz(n - 1)
+=> :Int
 
 fizzBuzz(99999)
 "#;
@@ -1180,10 +1194,12 @@ fizzBuzz(99999)
 countDown n acc =
   | n == 0 |> acc
   | _ |> countUp(n - 1, acc + 1)
+=> :Int
 
 countUp n acc =
   | n == 0 |> acc
   | _ |> countDown(n - 1, acc + 1)
+=> :Int
 
 countDown(10, 0)
 "#;
@@ -1431,8 +1447,9 @@ a.toString()
     fn test_async_chain() {
         // Chain async operations via >=>
         let source = r#"
-addOne x =
+addOne x: Int =
   Async[x + 1]()
+=> :Async[Int]
 
 a <= Async[10]()
 a >=> v1

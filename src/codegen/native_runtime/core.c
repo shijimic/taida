@@ -692,12 +692,11 @@ taida_val taida_register_field_type(taida_val hash, taida_ptr name_ptr, taida_va
 /// points to a comma-separated list of variant names, used by
 /// `json_serialize_pack_fields` to emit variant-name Str in jsonEncode.
 taida_val taida_register_field_enum(taida_val hash, taida_ptr name_ptr, taida_ptr variants_ptr);
-/// C18B-003 fix: Register a per-pack enum descriptor so two packs that
-/// share the same field name (e.g. `state`) but hold different enums
-/// (`BuildState`, `RunState`) no longer collide in the global field
-/// registry. Keyed by `(pack_ptr, field_hash)`; looked up at
-/// `json_serialize_pack_fields` time before falling back to the global
-/// descriptor.
+/// Register a per-pack enum descriptor so two packs that share the same
+/// field name (e.g. `state`) but hold different enums (`BuildState`,
+/// `RunState`) no longer collide in the global field registry. Keyed by
+/// `(pack_ptr, field_hash)`; looked up at `json_serialize_pack_fields`
+/// time before falling back to the global descriptor.
 taida_val taida_register_pack_field_enum(taida_ptr pack_ptr, taida_val field_hash, taida_ptr variants_ptr);
 static const char* taida_lookup_field_name(taida_val hash);
 static int taida_lookup_field_type(taida_val hash);

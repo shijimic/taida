@@ -1990,6 +1990,12 @@ impl Lowering {
         let prev_lambda_param_counts = self.lambda_param_counts.clone();
         let prev_lambda_vars = self.lambda_vars.clone();
         let prev_closure_vars = self.closure_vars.clone();
+        let prev_int_vars = self.int_vars.clone();
+        let prev_float_vars = self.float_vars.clone();
+        let prev_string_vars = self.string_vars.clone();
+        let prev_bool_vars = self.bool_vars.clone();
+        let prev_pack_vars = self.pack_vars.clone();
+        let prev_list_vars = self.list_vars.clone();
         for p in params {
             if Self::NET_BUILTIN_NAMES.contains(&p.name.as_str()) {
                 self.shadowed_net_builtins.insert(p.name.clone());
@@ -2001,6 +2007,29 @@ impl Lowering {
             self.lambda_param_counts.remove(&p.name);
             self.lambda_vars.remove(&p.name);
             self.closure_vars.remove(&p.name);
+            if let Some(type_ann) = &p.type_annotation {
+                match type_ann {
+                    crate::parser::TypeExpr::Named(name) if name == "Int" || name == "Num" => {
+                        self.int_vars.insert(p.name.clone());
+                    }
+                    crate::parser::TypeExpr::Named(name) if name == "Float" => {
+                        self.float_vars.insert(p.name.clone());
+                    }
+                    crate::parser::TypeExpr::Named(name) if name == "Str" => {
+                        self.string_vars.insert(p.name.clone());
+                    }
+                    crate::parser::TypeExpr::Named(name) if name == "Bool" => {
+                        self.bool_vars.insert(p.name.clone());
+                    }
+                    crate::parser::TypeExpr::BuchiPack(_) => {
+                        self.pack_vars.insert(p.name.clone());
+                    }
+                    crate::parser::TypeExpr::List(_) => {
+                        self.list_vars.insert(p.name.clone());
+                    }
+                    _ => {}
+                }
+            }
         }
 
         // 全ラムダを統一的にクロージャとして生成する。
@@ -2106,6 +2135,12 @@ impl Lowering {
             self.lambda_param_counts = prev_lambda_param_counts;
             self.lambda_vars = prev_lambda_vars;
             self.closure_vars = prev_closure_vars;
+            self.int_vars = prev_int_vars;
+            self.float_vars = prev_float_vars;
+            self.string_vars = prev_string_vars;
+            self.bool_vars = prev_bool_vars;
+            self.pack_vars = prev_pack_vars;
+            self.list_vars = prev_list_vars;
 
             Ok(dst)
         }

@@ -174,7 +174,11 @@ fn expr_is_bool_cross_module_bool_get_or_default_four_backend_parity() {
     let lib = dir.join("lib.td");
     let main = dir.join("main.td");
 
-    fs::write(&lib, "giveTrue x = x > 0 => :Bool\n\n<<< @(giveTrue)\n").expect("write lib");
+    fs::write(
+        &lib,
+        "giveTrue x: Int = x > 0 => :Bool\n\n<<< @(giveTrue)\n",
+    )
+    .expect("write lib");
     fs::write(
         &main,
         ">>> ./lib.td => @(giveTrue)\n\nempty: @[Bool] <= @[]\nb <= empty.first().getOrDefault(giveTrue(5))\nstdout(\"bool:\" + b.toString())\n",

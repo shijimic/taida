@@ -17,18 +17,18 @@
 
 Error => MyError = @()
 
-throwOops msg =
+throwOops msg: Str =
   MyError(type <= "MyError", message <= msg).throw()
   ""
 => :Str
 
-trial input =
+trial input: Str =
   |== error: Error =
     tag <= "T"
     "caught:" + error.message + ";tag=" + tag
   => :Str
   tag <= "T"
-  inner x = throwOops("oops") + " " + tag + " " + x => :Str
+  inner x: Str = throwOops("oops") + " " + tag + " " + x => :Str
   inner(input)
 => :Str
 

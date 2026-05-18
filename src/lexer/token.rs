@@ -1,5 +1,5 @@
 /// Source location tracking for error reporting and graph model.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Eq)]
 pub struct Span {
     /// Char offset (Unicode scalar value index) of the start position.
     pub start: usize,
@@ -9,6 +9,18 @@ pub struct Span {
     pub line: usize,
     /// 1-based column number.
     pub column: usize,
+    /// Parser-assigned expression node identity. `0` means this span
+    /// is not attached to an expression node or has not been assigned yet.
+    pub node_id: usize,
+}
+
+impl PartialEq for Span {
+    fn eq(&self, other: &Self) -> bool {
+        self.start == other.start
+            && self.end == other.end
+            && self.line == other.line
+            && self.column == other.column
+    }
 }
 
 impl Span {
@@ -18,7 +30,13 @@ impl Span {
             end,
             line,
             column,
+            node_id: 0,
         }
+    }
+
+    pub fn with_node_id(mut self, node_id: usize) -> Self {
+        self.node_id = node_id;
+        self
     }
 }
 

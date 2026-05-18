@@ -109,7 +109,9 @@ impl Parser {
             }
             self.skip_newlines();
         }
-        (Program { statements }, self.errors)
+        let mut program = Program { statements };
+        assign_expr_node_ids(&mut program);
+        (program, self.errors)
     }
 
     // ── Helpers ──────────────────────────────────────────────
@@ -367,16 +369,24 @@ impl Parser {
                     // body — same rule as `| |>` arm body.
                     Self::reject_discard_bindings_in_expression_block(&body, "function body")?;
                     self.skip_newlines();
-                    let return_type = if self.check(&TokenKind::FatArrow) {
-                        self.advance();
-                        if self.match_token(&TokenKind::Colon) {
-                            Some(self.parse_type_expr()?)
-                        } else {
-                            None
-                        }
-                    } else {
-                        None
-                    };
+                    if !self.check(&TokenKind::FatArrow) {
+                        return Err(ParseError {
+                            message: format!(
+                                "[E1526] Function '{name}' must declare a return type with `=> :Type`."
+                            ),
+                            span: start_span,
+                        });
+                    }
+                    self.advance();
+                    if !self.match_token(&TokenKind::Colon) {
+                        return Err(ParseError {
+                            message: format!(
+                                "[E1526] Function '{name}' must declare a return type with `=> :Type`."
+                            ),
+                            span: self.current_span(),
+                        });
+                    }
+                    let return_type = Some(self.parse_type_expr()?);
                     Ok(Statement::FuncDef(FuncDef {
                         name,
                         type_params: Vec::new(),
@@ -683,17 +693,25 @@ impl Parser {
         // Skip any remaining indent/newline tokens after block
         self.skip_newlines();
 
-        // Parse optional return type `=> :Type`
-        let return_type = if self.check(&TokenKind::FatArrow) {
-            self.advance(); // consume `=>`
-            if self.match_token(&TokenKind::Colon) {
-                Some(self.parse_type_expr()?)
-            } else {
-                None
-            }
-        } else {
-            None
-        };
+        // Named functions must declare their return type with `=> :Type`.
+        if !self.check(&TokenKind::FatArrow) {
+            return Err(ParseError {
+                message: format!(
+                    "[E1526] Function '{name}' must declare a return type with `=> :Type`."
+                ),
+                span: start_span,
+            });
+        }
+        self.advance(); // consume `=>`
+        if !self.match_token(&TokenKind::Colon) {
+            return Err(ParseError {
+                message: format!(
+                    "[E1526] Function '{name}' must declare a return type with `=> :Type`."
+                ),
+                span: self.current_span(),
+            });
+        }
+        let return_type = Some(self.parse_type_expr()?);
 
         Ok(Statement::FuncDef(FuncDef {
             name,
@@ -1638,16 +1656,24 @@ impl Parser {
                 Self::reject_discard_bindings_in_expression_block(&body, "unmold method body")?;
                 self.skip_newlines();
 
-                let return_type = if self.check(&TokenKind::FatArrow) {
-                    self.advance();
-                    if self.match_token(&TokenKind::Colon) {
-                        Some(self.parse_type_expr()?)
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                };
+                if !self.check(&TokenKind::FatArrow) {
+                    return Err(ParseError {
+                        message:
+                            "[E1526] Method 'unmold' must declare a return type with `=> :Type`."
+                                .to_string(),
+                        span: field_span,
+                    });
+                }
+                self.advance();
+                if !self.match_token(&TokenKind::Colon) {
+                    return Err(ParseError {
+                        message:
+                            "[E1526] Method 'unmold' must declare a return type with `=> :Type`."
+                                .to_string(),
+                        span: self.current_span(),
+                    });
+                }
+                let return_type = Some(self.parse_type_expr()?);
 
                 fields.push(FieldDef {
                     name: "unmold".to_string(),
@@ -1738,16 +1764,24 @@ impl Parser {
                 Self::reject_discard_bindings_in_expression_block(&body, "method body")?;
                 self.skip_newlines();
 
-                let return_type = if self.check(&TokenKind::FatArrow) {
-                    self.advance();
-                    if self.match_token(&TokenKind::Colon) {
-                        Some(self.parse_type_expr()?)
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                };
+                if !self.check(&TokenKind::FatArrow) {
+                    return Err(ParseError {
+                        message: format!(
+                            "[E1526] Method '{field_name}' must declare a return type with `=> :Type`."
+                        ),
+                        span: field_span,
+                    });
+                }
+                self.advance();
+                if !self.match_token(&TokenKind::Colon) {
+                    return Err(ParseError {
+                        message: format!(
+                            "[E1526] Method '{field_name}' must declare a return type with `=> :Type`."
+                        ),
+                        span: self.current_span(),
+                    });
+                }
+                let return_type = Some(self.parse_type_expr()?);
 
                 fields.push(FieldDef {
                     name: field_name.clone(),

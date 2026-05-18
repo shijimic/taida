@@ -54,9 +54,17 @@ sync_rate <= pilot.sync_rate  // コンパイルエラー: フィールド 'sync
 ぶちパックのフィールドは代入時に即座に評価されます。
 
 ```taida
+nowMs =
+  1234567890
+=> :Int
+
+heavyCalc n: Int =
+  n * n + 1
+=> :Int
+
 data <= @(
-  timestamp <= getCurrentTime(),    // 代入時に即座に評価されます
-  computed <= heavyCalculation()    // 代入時に即座に評価されます
+  timestamp <= nowMs(),             // 代入時に即座に評価されます
+  computed <= heavyCalc(6)          // 代入時に即座に評価されます
 )
 
 // この時点で全フィールドは評価済みです
@@ -143,7 +151,7 @@ pi <= mathUtils.PI             // 3.14159
 
 ```taida fragment
 connect host: Str port: Int timeout: Int =
-  // 接続処理
+  connection
 => :Connection
 
 options <= @(host <= "localhost", port <= 8080, timeout <= 5000)

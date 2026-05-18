@@ -1,9 +1,9 @@
 // === Taida Lang: Closures ===
 
 // Function returning a function (closure)
-makeAdder x =
-  _ y = x + y
-=> :Int
+makeAdder x: Int =
+  _ y: Int = x + y
+=> :Int => :Int
 
 add5 <= makeAdder(5)
 add10 <= makeAdder(10)
@@ -14,9 +14,9 @@ stdout(`add10(3) = ${add10(3)}`)
 stdout(`add10(20) = ${add10(20)}`)
 
 // Counter-like pattern
-makeMultiplier factor =
-  _ x = x * factor
-=> :Int
+makeMultiplier factor: Int =
+  _ x: Int = x * factor
+=> :Int => :Int
 
 double <= makeMultiplier(2)
 triple <= makeMultiplier(3)

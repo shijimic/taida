@@ -14,7 +14,7 @@
 
 >>> taida-lang/net => @(httpServe, readBody)
 
-handler req =
+handler req: Request =
   // Echo the request body back as the response body. With D29B-015
   // landed, readBody emits a TAIDA_BYTES_CONTIG payload directly;
   // the writev hot path in taida_net_send_response_scatter then

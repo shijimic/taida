@@ -146,9 +146,21 @@
 | `E1521` | ぶちパックリテラルの positional field (`@(v1, v2, ...)`) は受理されない。PHILOSOPHY II「ぶちパック `@(...)` — 名前付きフィールドの集合」と矛盾するため、すべての buchi pack field は名前付き (`@(name <= value, ...)`) でなければならない。`<<<` / `>>>` の name list (`@(name1, name2)`) や TypeDef / ClassLike の field 定義 (`@(name: Type)`) は別 context で引き続き受理される。 | Parser |
 | `E1523` | Mold header 型変数名が組み込み型名 (`Int` / `Str` / `Bool` / `Float` / `Bytes` / `Lax` / `Result` / `Async` / `Optional` / 等) と衝突。`Mold[Int]` は型変数名 `Int` として silently 解釈されるが、意図は具体型 `Int` であることが多い。`Mold[:Int]` (具体型直接指定) または `Mold[T <= :Int]` (制約付き型変数) を使う。 | TypeChecker |
 | `E1524` | 条件分岐 `\| cond \|>` から default arm が欠落。`\| _ \|>` または `\| true \|>` を追加して全入力で結果が定義されるようにする。PHILOSOPHY IV「AI が構造として読めるよう、parser が一意に解釈でき、docs と実装が同じ規約を持つ」。 | TypeChecker |
-| `E1525` | (予約) `+` (`BinOp::Add`) の両辺が `Type::Unknown` の reject 化。Lambda 構文に parameter type-annotation parser path がないため、Lambda 内の `Unknown + Unknown` を context-sensitive に reject する設計が必要。後続 cycle で land 予定。 | TypeChecker |
+| `E1525` | 名前付き関数または式の operand など、公開境界に残った型変数を確定できない。戻り型・呼び出し文脈だけで決まらないパラメータや式には明示的な型注釈が必要 | TypeChecker |
+| `E1526` | 名前付き関数・メソッド定義に戻り型注釈 `=> :Type` がない。parser は定義構文の末尾で検出し、type checker は AST 境界の最終確認として検出する | Parser / TypeChecker |
+| `E1527` | lambda パラメータの型を推論できない。`_ x: Type = ...` と書くか、lambda を `Function([A], B)` が要求される位置で使う必要がある | TypeChecker |
+| `E1528` | lambda パラメータの明示型注釈が、呼び出し元から要求される関数型のパラメータ型と一致しない | TypeChecker |
+| `E1529` | 型検査完了後の typed HIR に未解決型が残っている。未解決型を含むプログラムは backend lowering に渡されない | TypeChecker |
 
 `E1512`〜`E1519` は **Cage / CageRilla 診断範囲**。`Cage[subject, runner]()` の type rule および `CageRilla[Branch, Out]` 子系統 (`JSRilla` / `JSONRilla` / `BuildRilla` / `FileRilla`) の boundary contract を扱う。`E1513` と `E1519` は将来の runtime validation または追加診断用に予約している。
+
+`E1525`〜`E1529` は **full-pin 境界診断**。Taida surface から backend lowering へ渡る式は、公開関数境界・lambda 境界・typed HIR side table のすべてで具体型に固定されている必要がある。
+
+- `E1525`: 名前付き関数の引数、または `Unknown` を含む式が型注釈なしで公開境界に残った場合。例: `add x y = x + y => :Int` は `x: Int` / `y: Int` のように注釈する。
+- `E1526`: `name args = body => :Type` の `=> :Type` が欠けている場合。parser が構文末尾で検出し、type checker も AST 由来の未注釈定義を拒否する。
+- `E1527`: lambda の引数型が呼び出し文脈から決まらない場合。例: `_ x = x + 1` は `_ x: Int = x + 1` と書く。
+- `E1528`: lambda の明示型注釈と呼び出し側が要求する `Function([A], B)` の引数型が一致しない場合。
+- `E1529`: type checker 完了後に typed HIR に `Unknown` が残った場合。backend は typed HIR を信頼して lower するため、この診断が出たプログラムは lowering に進まない。
 
 `E1520` は **「値の不在を表す型」の完全排除** 診断。PHILOSOPHY.md I の系「値の不在は値の不在」と II の系「ふくろの中身が変わったら、別のふくろにしまいなおす」を整合的に実装する。
 

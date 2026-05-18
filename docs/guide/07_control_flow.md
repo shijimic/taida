@@ -119,7 +119,7 @@ accessLevel <= (
 
 条件分岐の先に `><` を置くと、プログラムは即座に終了します。「**この分岐に到達したらもう終わり**」というプログラマの意思表明です。パターンマッチで到達不能を示すための主道リテラルとして使ってください。
 
-```taida
+```taida fragment
 processOrder order =
   | order.total < 0 |> ><          // 負の金額にゴリラが出現します
   | order.items.isEmpty() |> ><    // 商品なしにもゴリラが出現します
@@ -137,7 +137,7 @@ processOrder order =
 
 関数内での早期リターンとして条件分岐を使えます。異常系を先に弾き、正常系を最後に書くパターンです。
 
-```taida
+```taida fragment
 processStaff staff =
   | !staff.active |> @(success <= false, message <= "Inactive staff")
   | staff.age < 18 |> @(success <= false, message <= "Under age")
@@ -214,7 +214,7 @@ fibTail n: Int a: Int b: Int =
 
 多くのリスト処理はモールドで十分ですが、複雑なロジックには再帰が適しています。
 
-```taida
+```taida fragment
 // リストから条件を満たす最初の要素を見つけ、加工して返します
 findAndProcess items: @[Item] =
   | items.isEmpty() |> @(found <= false, result <= "")
@@ -388,7 +388,7 @@ message <= "Status: " + (| active |> "ON" | _ |> "OFF")
 
 条件分岐は [エラー処理](08_error_handling.md) の `|==` エラー天井や `throw` と組み合わせて使えます。
 
-```taida
+```taida fragment
 Error => RequestError = @(detail: Str)
 
 processRequest request =

@@ -8,7 +8,7 @@ use std::process::Command;
 fn sample_source() -> PathBuf {
     let dir = unique_temp_dir("e31_graph_summary");
     let file = dir.join("main.td");
-    write_file(&file, "add x y =\n  x + y\nx <= 42\n");
+    write_file(&file, "add x: Int y: Int =\n  x + y\n=> :Int\nx <= 42\n");
     file
 }
 

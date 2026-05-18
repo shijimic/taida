@@ -88,9 +88,10 @@ fn c25b_022_set_union_intersect_diff_1000x1000_completes_fast() {
     let src = r#"
 // Build Set A = {0..1000}, Set B = {500..1500} using fold over a
 // recursive builder (the interpreter has no native Range mold).
-buildSet acc i stop =
+buildSet acc: Set[Int] i: Int stop: Int =
   | i >= stop |> acc
   | _ |> buildSet(acc.add(i), i + 1, stop)
+=> :Set[Int]
 
 setA <= buildSet(setOf(@[]), 0, 1000)
 setB <= buildSet(setOf(@[]), 500, 1500)
@@ -126,9 +127,10 @@ fn c25b_023_hashmap_merge_1000x1000_completes_fast() {
 // pre-existing interpreter issue (expressions in `${...}` render
 // literally), so we encode which side a value came from via the
 // numeric prefix instead.
-buildMap acc i stop bias =
+buildMap acc: HashMap[Int, Int] i: Int stop: Int bias: Int =
   | i >= stop |> acc
   | _ |> buildMap(acc.set(i, bias + i), i + 1, stop, bias)
+=> :HashMap[Int, Int]
 
 mapA <= buildMap(hashMap(@[]), 0, 1000, 1000000)
 mapB <= buildMap(hashMap(@[]), 500, 1500, 2000000)
@@ -235,16 +237,15 @@ stdout(d.size())
     );
 }
 
-/// Semantic regression — `HashMap.merge` must treat
-/// `Int(0)` and `EnumVal("Color", 0)` as the same key, so B's value
-/// overwrites A's.
+/// Semantic regression — `HashMap.merge` must overwrite matching keys with
+/// the B-side value while keeping the key type concrete.
 #[test]
-fn c25b_023_hashmap_merge_int_enumval_key_overwrite() {
+fn c25b_023_hashmap_merge_same_int_key_overwrite() {
     let src = r#"
 Enum => Color = :Red :Green :Blue
 
-a <= hashMap().set(0, "int")
-b <= hashMap().set(Color:Red(), "enum")
+a: HashMap[Int, Str] <= hashMap().set(0, "int")
+b: HashMap[Int, Str] <= hashMap().set(0, "enum")
 merged <= a.merge(b)
 stdout(merged.size())
 stdout(merged.get(0))
@@ -253,8 +254,7 @@ stdout(merged.get(0))
     let lines: Vec<&str> = out.lines().collect();
     assert_eq!(
         lines[0], "1",
-        "Int(0) key and Color:Red() key are Value::eq-equal, so merge \
-         must fold to a single entry (got {:?})",
+        "matching Int keys must fold to a single entry (got {:?})",
         lines
     );
     assert!(
@@ -297,9 +297,10 @@ stdout(u.size())
 fn c25b_021_unique_1000_strs_completes_fast() {
     let src = r#"
 // Build a list of 1000 repeating integers (10 unique: 0..9, each 100×)
-buildList acc i =
+buildList acc: @[Int] i: Int =
   | i >= 1000 |> acc
   | _ |> buildList(Append[acc, Mod[i, 10]()](), i + 1)
+=> :@[Int]
 
 big <= buildList(@[], 0)
 uniq <= Unique[big]()

@@ -40,7 +40,7 @@ Pilot = @(name: Str, age: Int)  // 型定義
 MAX_SYNC_RATE <= 100  // 定数
 
 getPilot id: Int =
-  // 関数定義
+  Pilot(name <= "Misato", age <= id)
 => :Pilot
 
 // モジュール内のどこからでもアクセス可能
@@ -72,7 +72,7 @@ processData input: Str =
 ```taida
 processPilot pilot: Pilot =
   // 引数 pilot は関数スコープ
-  name <= pilot.name  // name は関数スコープ
+  name: Str <= pilot.name  // name は関数スコープ
 
   // 内部関数も関数スコープ
   formatName =
@@ -159,7 +159,7 @@ processValue value: Int =
 
 エラー天井 `|==` 内で定義された変数は、そのエラー天井内でのみ有効です。
 
-```taida
+```taida fragment
 processData data: Data =
   |== error: Error =
     // error はこのブロック内でのみ有効
@@ -229,7 +229,7 @@ counter_updated <= counter_initial + 1
 // リストの「更新」
 original <= @[1, 2, 3]
 // 新しいリストを生成
-Map[original, _ x = x * 2]() >=> updated
+Map[original, _ x: Int = x * 2]() >=> updated
 // original: @[1, 2, 3] (変更されない)
 // updated: @[2, 4, 6]
 

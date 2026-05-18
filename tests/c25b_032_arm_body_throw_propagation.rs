@@ -66,12 +66,12 @@ fn write_fixture(body: &str, name: &str) -> std::path::PathBuf {
 }
 
 const FIXTURE_SINGLE_ARM: &str = r#"Error => MyError = @(detail: Str <= "")
-throwBoom msg =
+throwBoom msg: Str =
   MyError(type <= "MyError", message <= msg).throw()
   ""
 => :Str
 
-trial flag =
+trial flag: Bool =
   |== error: Error =
     "caught:" + error.message
   => :Str
@@ -82,12 +82,12 @@ stdout(trial(true))
 "#;
 
 const FIXTURE_GUARDED_ARM: &str = r#"Error => MyError = @(detail: Str <= "")
-throwBoom msg =
+throwBoom msg: Str =
   MyError(type <= "MyError", message <= msg).throw()
   ""
 => :Str
 
-trial flag =
+trial flag: Bool =
   |== error: Error =
     "caught:" + error.message
   => :Str
@@ -99,14 +99,14 @@ stdout(trial(true))
 "#;
 
 const FIXTURE_CHAINED_ARM: &str = r#"Error => MyError = @(detail: Str <= "")
-throwBoom msg =
+throwBoom msg: Str =
   MyError(type <= "MyError", message <= msg).throw()
   ""
 => :Str
 
-relay msg = throwBoom(msg) => :Str
+relay msg: Str = throwBoom(msg) => :Str
 
-trial flag =
+trial flag: Bool =
   |== error: Error =
     "caught:" + error.message
   => :Str
@@ -262,12 +262,12 @@ fn c25b_032_default_arm_throw_3backend_parity() {
 #[test]
 fn c25b_032_direct_throw_without_arm_still_caught() {
     const FIXTURE: &str = r#"Error => MyError = @(detail: Str <= "")
-throwBoom msg =
+throwBoom msg: Str =
   MyError(type <= "MyError", message <= msg).throw()
   ""
 => :Str
 
-trial flag =
+trial flag: Bool =
   |== error: Error =
     "caught:" + error.message
   => :Str

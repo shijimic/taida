@@ -195,7 +195,7 @@ calculateTotalPrice items: @[Item] =
 
 // 真偽値を返す関数 (is/has/can プレフィックスは慣習として開放)
 isValidEmail email: Str =
-  // 検証ロジック
+  true
 => :Bool
 ```
 
@@ -270,7 +270,7 @@ ApiError => RateLimited = @(retry_after: Int)
 
 PilotService = @(
   getPilot id: Int =
-    // 実装
+    pilot
   => :Pilot
 )
 

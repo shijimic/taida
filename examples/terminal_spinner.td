@@ -9,7 +9,7 @@
 
 >>> taida-lang/terminal => @(SpinnerState, spinnerNext, spinnerRender, write, clearLine)
 
-renderTick state remaining: Int =
+renderTick state: SpinnerState remaining: Int =
   | remaining < 1 |> 0
   | _ |>
     bytes <= write(clearLine())

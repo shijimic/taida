@@ -341,12 +341,14 @@ fn announce_port_on_js() {
 /// Tiny tempdir helper — avoids pulling the `tempfile` crate just for
 /// these tests.
 fn tempdir_strict() -> PathBuf {
+    static TEMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let mut base = std::env::temp_dir();
     let nonce = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
-    base.push(format!("c27b014.{}.{}", std::process::id(), nonce));
+    let seq = TEMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    base.push(format!("c27b014.{}.{}.{}", std::process::id(), nonce, seq));
     std::fs::create_dir_all(&base).expect("mkdir tempdir");
     base
 }

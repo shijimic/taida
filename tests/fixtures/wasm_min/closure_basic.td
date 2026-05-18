@@ -1,6 +1,7 @@
 // W-5: Basic closure test — function returning a function
-makeAdder x =
-  _ y = x + y
+makeAdder x: Int =
+  _ y: Int = x + y
+=> :Int => :Int
 
 add5 <= makeAdder(5)
 add10 <= makeAdder(10)

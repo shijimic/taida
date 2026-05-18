@@ -8,12 +8,15 @@
 
 // -- Helper Functions --
 
-doneLabel b =
+Todo = @(title: Str, done: Bool)
+EnumeratedTodo = @(index: Int, value: Todo)
+
+doneLabel b: Bool =
   | b |> "[x]"
   | _ |> "[ ]"
 => :Str
 
-showOneTodo pair =
+showOneTodo pair: EnumeratedTodo =
   idx <= pair.index + 1
   todo <= pair.value
   status <= doneLabel(todo.done)
@@ -21,33 +24,36 @@ showOneTodo pair =
   0
 => :Int
 
-showTodos list =
+showTodos list: @[Todo] =
   enumerated <= Enumerate[list]()
   Map[enumerated, showOneTodo]() >=> shown
   0
 => :Int
 
-addTodo list title =
+addTodo list: @[Todo] title: Str =
   new_item <= @(title <= title, done <= false)
   Append[list, new_item]()
+=> :@[Todo]
 
-toggleAt index pair =
+toggleAt index: Int pair: EnumeratedTodo =
   | pair.index == index |>
     @(title <= pair.value.title, done <= !pair.value.done)
   | _ |> pair.value
+=> :Todo
 
-keepOther index pair =
+keepOther index: Int pair: EnumeratedTodo =
   pair.index != index
 => :Bool
 
-extractValue pair =
+extractValue pair: EnumeratedTodo =
   pair.value
+=> :Todo
 
-isDone x =
+isDone x: Todo =
   x.done
 => :Bool
 
-isNotDone x =
+isNotDone x: Todo =
   !x.done
 => :Bool
 
@@ -66,9 +72,9 @@ showTodos(list3)
 
 // Complete items 0 and 1
 enum3 <= Enumerate[list3]()
-Map[enum3, _ pair = toggleAt(0, pair)]() >=> list4
+Map[enum3, _ pair: EnumeratedTodo = toggleAt(0, pair)]() >=> list4
 enum4 <= Enumerate[list4]()
-Map[enum4, _ pair = toggleAt(1, pair)]() >=> list5
+Map[enum4, _ pair: EnumeratedTodo = toggleAt(1, pair)]() >=> list5
 
 stdout("")
 stdout("--- After completing 2 items ---")
@@ -87,7 +93,7 @@ allDone <= list5.all(isDone)
 | _ |> stdout("  Some tasks remain.")
 
 // Find[] -- locate first pending item
-pending_todo <= Find[list5, isNotDone]()
+pending_todo: Lax[Todo] <= Find[list5, isNotDone]()
 pending_todo >=> next_todo
 stdout("")
 | pending_todo.has_value |>
@@ -102,7 +108,7 @@ stdout("Has any completed: " + hasAnyDone.toString())
 
 // Remove item at index 1
 enum5 <= Enumerate[list5]()
-Filter[enum5, _ pair = keepOther(1, pair)]() >=> filtered
+Filter[enum5, _ pair: EnumeratedTodo = keepOther(1, pair)]() >=> filtered
 Map[filtered, extractValue]() >=> list6
 
 stdout("")
@@ -121,7 +127,7 @@ remaining <= Drop[list6, 1]()
 showTodos(remaining)
 
 // Sort[] with by option (descending) demo with numbers
-neg x =
+neg x: Int =
   0 - x
 => :Int
 
@@ -136,7 +142,7 @@ pilot_names <= @["Asuka", "Rei", "Shinji"]
 pilot_scores <= @[95, 87, 92]
 zipped <= Zip[pilot_names, pilot_scores]()
 
-showPair p =
+showPair p: @(first: Str, second: Int) =
   stdout("  " + p.first + ": " + p.second.toString())
   0
 => :Int
@@ -146,7 +152,7 @@ stdout("--- Zip example ---")
 Map[zipped, showPair]() >=> zipResult
 
 // FindIndex[] demo
-idx <= FindIndex[@[10, 20, 30, 40, 50], _ x = x > 25]()
+idx <= FindIndex[@[10, 20, 30, 40, 50], _ x: Int = x > 25]()
 stdout("")
 stdout("--- findIndex (first > 25) ---")
 stdout("  Index: " + idx.toString())

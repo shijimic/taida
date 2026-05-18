@@ -172,7 +172,7 @@ fn eager_source(port: u16) -> String {
     format!(
         r#">>> taida-lang/net => @(httpServe, readBody)
 
-handler req =
+handler req: Request =
   body <= readBody(req)
   @(status <= 200, headers <= @[], body <= body)
 => :@(status: Int, headers: @[@(name: Str, value: Str)], body: Bytes)
@@ -190,7 +190,7 @@ fn eager_source_two_request(port: u16) -> String {
     format!(
         r#">>> taida-lang/net => @(httpServe, readBody)
 
-handler req =
+handler req: Request =
   body <= readBody(req)
   @(status <= 200, headers <= @[], body <= body)
 => :@(status: Int, headers: @[@(name: Str, value: Str)], body: Bytes)
@@ -214,11 +214,12 @@ fn streaming_source(port: u16) -> String {
     format!(
         r#">>> taida-lang/net => @(httpServe, readBodyAll, startResponse, writeChunk, endResponse)
 
-handler req writer =
+handler req: Request writer: Writer =
   body <= readBodyAll(req)
   startResponse(writer, 200, @[@(name <= "Content-Type", value <= "application/octet-stream")])
   writeChunk(writer, body)
   endResponse(writer)
+=> :Int
 
 asyncResult <= httpServe({port}, handler, 1)
 asyncResult >=> result
@@ -241,12 +242,13 @@ fn streaming_chunk_source(port: u16) -> String {
     format!(
         r#">>> taida-lang/net => @(httpServe, readBodyChunk, startResponse, writeChunk, endResponse)
 
-handler req writer =
+handler req: Request writer: Writer =
   chunk <= readBodyChunk(req)
   chunk >=> bytes
   startResponse(writer, 200, @[@(name <= "Content-Type", value <= "application/octet-stream")])
   writeChunk(writer, bytes)
   endResponse(writer)
+=> :Int
 
 asyncResult <= httpServe({port}, handler, 1)
 asyncResult >=> result

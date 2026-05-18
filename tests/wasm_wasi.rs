@@ -103,7 +103,7 @@ fn compile_and_run_inherited_listener_http_serve(profile: &str, label: &str) {
     let source = format!(
         r#">>> taida-lang/net => @(httpServe)
 
-handler req =
+handler req: Request =
   @(status <= 200, headers <= @[], body <= "{label}-ok")
 => :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
 
@@ -403,7 +403,7 @@ fn wasm_wasi_http_serve_primary_fd3_listener() {
         let source = format!(
             r#">>> taida-lang/net => @(httpServe)
 
-handler req =
+handler req: Request =
   @(status <= 200, headers <= @[], body <= "primary-fd3-ok")
 => :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
 
@@ -537,7 +537,7 @@ fn wasm_wasi_http_serve_status_reason_and_wire_string() {
                 format!(
                     r#">>> taida-lang/net => @(httpServe)
 
-handler req =
+handler req: Request =
   @(status <= 404, headers <= @[], body <= "missing")
 => :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
 
@@ -560,7 +560,7 @@ asyncResult >=> result
                 format!(
                     r#">>> taida-lang/net => @(httpServe)
 
-handler req =
+handler req: Request =
   "HTTP/1.1 404 Not Found\r\nContent-Length: 9\r\nConnection: close\r\n\r\nwire-body"
 => :Str
 
@@ -594,7 +594,7 @@ fn wasm_wasi_http_serve_req_shape_uses_spans() {
                 format!(
                     r#">>> taida-lang/net => @(httpServe)
 
-handler req =
+handler req: Request =
   body <= req.method.start.toString() + ":" + req.method.len.toString() + "|" + req.path.start.toString() + ":" + req.path.len.toString() + "|" + req.query.start.toString() + ":" + req.query.len.toString() + "|" + req.body.start.toString() + ":" + req.body.len.toString()
   @(status <= 200, headers <= @[], body <= body)
 => :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
@@ -631,7 +631,7 @@ fn wasm_wasi_http_serve_rejects_large_header() {
                 format!(
                     r#">>> taida-lang/net => @(httpServe)
 
-handler req =
+handler req: Request =
   @(status <= 200, headers <= @[], body <= "should-not-run")
 => :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
 
@@ -653,7 +653,7 @@ asyncResult >=> result
 fn wasm_wasi_http_serve_rejects_2arg_handler_and_nonempty_tls_variable() {
     let streaming_source = r#">>> taida-lang/net => @(httpServe)
 
-handler req writer =
+handler req: Request writer: Writer =
   0
 => :Int
 
@@ -667,7 +667,7 @@ asyncResult <= httpServe(0, handler, 1, 1000, 128, @())
 
     let tls_source = r#">>> taida-lang/net => @(httpServe)
 
-handler req =
+handler req: Request =
   @(status <= 200, headers <= @[], body <= "ok")
 => :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
 
@@ -1611,7 +1611,7 @@ fn test_c12b_023_wasm_wasi_rejects_str_search() {
 fn test_c12b_023_wasm_wasi_rejects_manual_pack_replaceall() {
     assert_wasi_regex_rejected(
         "bypass_replaceall",
-        "main =\n  re <= @(__type <= \"Regex\", pattern <= \"a\", flags <= \"\")\n  stdout(\"aba\".replaceAll(re, \"x\"))\n",
+        "main =\n  re <= @(__type <= \"Regex\", pattern <= \"a\", flags <= \"\")\n  stdout(\"aba\".replaceAll(re, \"x\"))\n=> :Str\n",
         &["reserved for compiler-internal use"],
     );
 }
@@ -1631,7 +1631,7 @@ fn test_c12b_023_wasm_wasi_rejects_manual_pack_match() {
 fn test_c12b_023_wasm_wasi_rejects_variable_bound_tag() {
     assert_wasi_regex_rejected(
         "bypass_var_tag",
-        "main =\n  tag <= \"Regex\"\n  re <= @(__type <= tag, pattern <= \"a\", flags <= \"\")\n  stdout(\"aba\".replaceAll(re, \"x\"))\n",
+        "main =\n  tag <= \"Regex\"\n  re <= @(__type <= tag, pattern <= \"a\", flags <= \"\")\n  stdout(\"aba\".replaceAll(re, \"x\"))\n=> :Str\n",
         &["reserved for compiler-internal use"],
     );
 }

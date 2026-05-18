@@ -180,8 +180,8 @@ fn test_js_exec_closures() {
     assert_parity(
         "closures",
         r#"
-makeAdder n =
-  _ x = n + x
+makeAdder n: Int =
+  _ x: Int = n + x
 => :Int => :Int
 add5 <= makeAdder(5)
 stdout(add5(3).toString())
@@ -398,11 +398,11 @@ fn test_js_exec_hof_molds() {
         "hof_molds",
         r#"
 items <= @[1, 2, 3, 4, 5]
-doubled <= Map[items, _ x = x * 2]()
+doubled <= Map[items, _ x: Int = x * 2]()
 stdout(Join[doubled, ", "]())
-evens <= Filter[items, _ x = x > 2]()
+evens <= Filter[items, _ x: Int = x > 2]()
 stdout(Join[evens, ", "]())
-total <= Fold[items, 0, _ acc x = acc + x]()
+total <= Fold[items, 0, _ acc: Int x: Int = acc + x]()
 stdout(total.toString())
 "#,
     );
@@ -697,7 +697,7 @@ fn test_js_exec_tail_recursion() {
     assert_parity(
         "tail_recursion",
         r#"
-factorial n acc =
+factorial n: Int acc: Int =
   | n < 2 |> acc
   | _ |> factorial(n - 1, n * acc)
 => :Int
@@ -734,13 +734,15 @@ fn test_js_exec_mutual_recursion_basic() {
     assert_parity(
         "mutual_recursion_basic",
         r#"
-isEven n =
+isEven n: Int =
   | n == 0 |> true
   | _ |> isOdd(n - 1)
+=> :Bool
 
-isOdd n =
+isOdd n: Int =
   | n == 0 |> false
   | _ |> isEven(n - 1)
+=> :Bool
 
 stdout(isEven(0))
 stdout(isEven(1))
@@ -758,13 +760,15 @@ fn test_js_exec_mutual_recursion_deep() {
     assert_parity(
         "mutual_recursion_deep",
         r#"
-isEven n =
+isEven n: Int =
   | n == 0 |> true
   | _ |> isOdd(n - 1)
+=> :Bool
 
-isOdd n =
+isOdd n: Int =
   | n == 0 |> false
   | _ |> isEven(n - 1)
+=> :Bool
 
 stdout(isEven(100000))
 "#,

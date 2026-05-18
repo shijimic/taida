@@ -1332,8 +1332,8 @@ fn rc6_wasm_throw_catch() {
     let source = r#"
 Error => L1Error = @(l1: Str)
 L1Error => L2Error = @(l2: Str)
-catch_fn x =
-  |== error: Error =
+catch_fn x: Int =
+  |== error: L2Error =
     "caught(" + error.type + "): " + error.l1 + "+" + error.l2
   => :Str
   L2Error(type <= "L2Error", message <= "deep", l1 <= "one", l2 <= "two").throw()
@@ -1413,7 +1413,7 @@ stdout("[" + TypeName[@(a <= 1)]() + "]")
 fn test_nb30_wasm_min_net_http_serve_compile_error() {
     let source = r#">>> taida-lang/net => @(httpServe)
 
-handler req =
+handler req: Request =
   @(status <= 200, headers <= @[], body <= "ok")
 => :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
 
@@ -1663,6 +1663,7 @@ fn test_c12b_023_wasm_min_rejects_str_replace_all_with_regex() {
 const C12B_023_BYPASS_REPLACE_ALL: &str = r#"main =
   re <= @(__type <= "Regex", pattern <= "a", flags <= "")
   stdout("aba".replaceAll(re, "x"))
+=> :Str
 "#;
 
 const C12B_023_BYPASS_REPLACE_FIRST: &str = r#"re <= @(__type <= "Regex", pattern <= "a", flags <= "")
@@ -1727,6 +1728,7 @@ fn test_c12b_023_wasm_min_rejects_variable_bound_tag() {
   tag <= "Regex"
   re <= @(__type <= tag, pattern <= "a", flags <= "")
   stdout("aba".replaceAll(re, "x"))
+=> :Str
 "#;
     assert_regex_rejected(
         "min_bypass_var_tag",
@@ -1738,10 +1740,11 @@ fn test_c12b_023_wasm_min_rejects_variable_bound_tag() {
 
 #[test]
 fn test_c12b_023_wasm_min_rejects_funcarg_bound_tag() {
-    let src = r#"inner t = @(__type <= t, pattern <= "a", flags <= "")
+    let src = r#"inner t: Str = @(__type <= t, pattern <= "a", flags <= "") => :@(__type: Str, pattern: Str, flags: Str)
 main =
   re <= inner("Regex")
   stdout("aba".replaceAll(re, "x"))
+=> :Str
 "#;
     assert_regex_rejected(
         "min_bypass_funcarg",
@@ -1778,6 +1781,7 @@ fn test_c12b_023_wasm_min_rejects_typedef_forged_regex_pack() {
 main =
   re <= Fake(payload <= "x")
   stdout("aba".replaceAll(re, "x"))
+=> :Str
 "#;
     assert_regex_rejected(
         "min_bypass_typedef_forged",
@@ -1793,6 +1797,7 @@ fn test_c12b_023_wasm_min_rejects_typedef_forged_body_stream() {
 main =
   req <= FakeReq(x <= 1)
   stdout("ok")
+=> :Str
 "#;
     assert_regex_rejected(
         "min_bypass_typedef_body_stream",
@@ -1807,6 +1812,7 @@ fn test_c12b_023_wasm_min_rejects_inheritance_forged_regex_pack() {
     let src = r#"Error => CustomError = @(__type <= "Regex", info: Str)
 main =
   stdout("ok")
+=> :Str
 "#;
     assert_regex_rejected(
         "min_bypass_inheritance_forged",

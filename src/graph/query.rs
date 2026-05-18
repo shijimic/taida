@@ -599,7 +599,7 @@ mod tests {
 
     #[test]
     fn test_path_exists_simple() {
-        let source = "add x y =\n  x + y\nresult <= add(1, 2)";
+        let source = "add x y =\n  x + y\n=> :Int\nresult <= add(1, 2)";
         let graph = {
             let (program, errors) = crate::parser::parse(source);
             assert!(errors.is_empty());

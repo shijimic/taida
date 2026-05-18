@@ -629,13 +629,14 @@ result <= numbers.get(10).unmold()
 
     #[test]
     fn test_eval_function_def_and_call() {
-        let source = "add x y =\n  x + y\n\nresult <= add(3, 4)\nresult";
+        let source = "add x y =\n  x + y\n=> :Int\n\nresult <= add(3, 4)\nresult";
         assert_eq!(eval_ok(source), Value::Int(7));
     }
 
     #[test]
     fn test_eval_function_closure() {
-        let source = "multiplier <= 10\nscale x =\n  x * multiplier\n\nresult <= scale(5)\nresult";
+        let source =
+            "multiplier <= 10\nscale x =\n  x * multiplier\n=> :Int\n\nresult <= scale(5)\nresult";
         assert_eq!(eval_ok(source), Value::Int(50));
     }
 

@@ -63,14 +63,14 @@ pub struct Lowering {
     /// stdlib 定数: インポート名 → f64 値
     stdlib_constants: std::collections::HashMap<String, f64>,
     /// int 値を保持する変数名のセット（FL-16: poly_add 誤発火防止）
-    int_vars: std::collections::HashSet<String>,
+    pub(super) int_vars: std::collections::HashSet<String>,
     /// float を返す stdlib 関数の結果変数（型追跡用）
     /// float 値を保持する変数名のセット
-    float_vars: std::collections::HashSet<String>,
+    pub(super) float_vars: std::collections::HashSet<String>,
     /// 文字列値を保持する変数名のセット
-    string_vars: std::collections::HashSet<String>,
+    pub(super) string_vars: std::collections::HashSet<String>,
     /// bool 値を保持する変数名のセット
-    bool_vars: std::collections::HashSet<String>,
+    pub(super) bool_vars: std::collections::HashSet<String>,
     /// 現在処理中の関数名（末尾再帰検出用）
     current_func_name: Option<String>,
     /// BuchiPack フィールド名のセット（jsonEncode 用フィールド名レジストリ）

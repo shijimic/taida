@@ -10,7 +10,7 @@
 // corrupt output (which the parity assertion catches) or balloon
 // arena chunks past their 128/thread cap and slow down considerably.
 
-iter n =
+iter n: Int =
   | n == 0 |> 0
   | _ |>
       s <= Repeat["a", 32]()

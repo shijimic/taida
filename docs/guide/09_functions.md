@@ -80,7 +80,7 @@ mapValue[T, U] value: T fn: T => :U =
 
 id(1)                              // Int
 first(@["a", "b"]).unmold()        // "a"
-mapValue(1, _ x = x.toString())    // "1"
+mapValue(1, _ x: Int = x.toString())    // "1"
 ```
 
 制約が必要な場合は `T <= :Num` のように書きます。
@@ -143,14 +143,11 @@ add x: Int y: Int =
 => :Int
 ```
 
-例外として、関数値が必要な場所に渡される単一式の小さな関数は、呼び出し側の期待型から戻り型を推論できます。対象は、引数をそのまま返す形、フィールド参照、リテラル、戻り型が既知の標準メソッド呼び出しに限られます。
+例外として、関数値が必要な場所に渡される単一式の小さな lambda は、呼び出し側の期待型から戻り型を推論できます。対象は、引数をそのまま返す形、フィールド参照、リテラル、戻り型が既知の標準メソッド呼び出しに限られます。
 
 ```taida
-identity x =
-  x
-
 obj <= Lax[42]()
-result: Lax[Int] <= obj.map(identity)
+result: Lax[Int] <= obj.map(_ x: Int = x)
 ```
 
 複雑な分岐、自由な関数呼び出し、算術式などはこの省略推論の対象外です。その場合は `=> :Type` と必要な引数型注釈を書いてください。
@@ -210,10 +207,10 @@ sum3()         // 30
 
 ```taida
 // 基本形
-_ x = x * 2
+_ x: Int = x * 2
 
 // 複数引数
-_ x y = x + y
+_ x: Int y: Int = x + y
 
 // 無名引数無し
 x <= 12
@@ -226,8 +223,8 @@ _ = x
 
 ```taida
 // OK: 単一式
-_ x = x * 2
-_ x y = x + y
+_ x: Int = x * 2
+_ x: Int y: Int = x + y
 _ = 42
 
 // NG: 演算子が現れたら名前付き関数にすること
@@ -248,13 +245,13 @@ _ = 42
 numbers <= @[1, 2, 3, 4, 5]
 
 // Map: 各要素を変換します
-Map[numbers, _ x = x * 2]() >=> doubled       // @[2, 4, 6, 8, 10]
+Map[numbers, _ x: Int = x * 2]() >=> doubled       // @[2, 4, 6, 8, 10]
 
 // Filter: 条件に合う要素を抽出します
-Filter[numbers, _ x = x > 3]() >=> filtered   // @[4, 5]
+Filter[numbers, _ x: Int = x > 3]() >=> filtered   // @[4, 5]
 
 // Fold: 畳み込みで集約します
-Fold[numbers, 0, _ acc x = acc + x]() >=> total  // 15
+Fold[numbers, 0, _ acc: Int x: Int = acc + x]() >=> total  // 15
 ```
 
 ---
@@ -305,7 +302,7 @@ Upper["hello"]() => right_bound   // 同じ意味
 
 一つの文で `=>` と `<=` を混在させることはできません。
 
-```taida
+```taida fragment
 // OK: => のみ
 data => Filter[_, _ x = x > 0]() => Map[_, _ x = x * 2]() => result
 
@@ -338,7 +335,7 @@ result <= both(3, 5)  // 8
 
 穴の有無で通常呼び出しと部分適用が区別されます。
 
-```taida
+```taida fragment
 add(5, 3)   // 通常呼び出し → 8
 add(5, )    // 部分適用 → :Int => :Int の関数
 add(5)      // 通常呼び出し（第2引数はデフォルト値）

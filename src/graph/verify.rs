@@ -1829,7 +1829,7 @@ mod tests {
 
     #[test]
     fn test_structural_summary() {
-        let program = parse_source("add x y =\n  x + y\nx <= 42");
+        let program = parse_source("add x y =\n  x + y\n=> :Int\nx <= 42");
         let summary = structural_summary(&program, "test.td");
         assert!(summary.contains("\"version\": \"1.0\""));
         assert!(summary.contains("\"functions\":"));
@@ -1870,7 +1870,7 @@ mod tests {
     #[test]
     fn test_dead_code_function_called_directly() {
         // A function called directly should not be dead code
-        let program = parse_source("helper x =\n  x + 1\nresult <= helper(5)");
+        let program = parse_source("helper x =\n  x + 1\n=> :Int\nresult <= helper(5)");
         let findings = check_dead_code(&program, "test.td");
         assert!(
             findings.is_empty(),
@@ -1881,7 +1881,7 @@ mod tests {
     #[test]
     fn test_dead_code_function_in_pipeline() {
         // A function used in a pipeline (with _ placeholder) should not be dead code
-        let program = parse_source("double x =\n  x * 2\n5 => double(_)");
+        let program = parse_source("double x =\n  x * 2\n=> :Int\n5 => double(_)");
         let findings = check_dead_code(&program, "test.td");
         assert!(
             !findings.iter().any(|f| f.message.contains("double")),
@@ -1892,7 +1892,7 @@ mod tests {
     #[test]
     fn test_dead_code_function_assigned_to_variable() {
         // A function assigned to a variable (referenced) should not be dead code
-        let program = parse_source("myFunc x =\n  x + 1\nref <= myFunc");
+        let program = parse_source("myFunc x =\n  x + 1\n=> :Int\nref <= myFunc");
         let findings = check_dead_code(&program, "test.td");
         assert!(
             !findings.iter().any(|f| f.message.contains("myFunc")),
@@ -1903,7 +1903,7 @@ mod tests {
     #[test]
     fn test_dead_code_exported_function() {
         // An exported function should not be dead code
-        let program = parse_source("helper x =\n  x + 1\n<<< @(helper)");
+        let program = parse_source("helper x =\n  x + 1\n=> :Int\n<<< @(helper)");
         let findings = check_dead_code(&program, "test.td");
         assert!(
             !findings.iter().any(|f| f.message.contains("helper")),
@@ -2065,7 +2065,7 @@ mod tests {
     #[test]
     fn test_dead_code_truly_unused() {
         // A truly unused function should be dead code
-        let program = parse_source("unused x =\n  x + 1\nresult <= 42");
+        let program = parse_source("unused x =\n  x + 1\n=> :Int\nresult <= 42");
         let findings = check_dead_code(&program, "test.td");
         assert!(
             findings.iter().any(|f| f.message.contains("unused")),
@@ -2130,7 +2130,7 @@ mod tests {
     #[test]
     fn test_direction_constraint_in_function_body() {
         // Direction constraint applies within function bodies too
-        let program = parse_source("myFunc x =\n  result <= x + 1");
+        let program = parse_source("myFunc x =\n  result <= x + 1\n=> :Int");
         let findings = check_direction_constraint(&program, "test.td");
         assert!(
             findings.is_empty(),

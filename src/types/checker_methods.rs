@@ -15,28 +15,18 @@ impl TypeChecker {
                 "length" | "toString" => Some((0, 0, vec![])),
                 "contains" | "startsWith" | "endsWith" => Some((1, 1, vec![Type::Str])),
                 "indexOf" | "lastIndexOf" => Some((1, 1, vec![Type::Str])),
-                // E32B-022 (Lock-N): Lax[Int] additive replacements for
-                // the legacy `-1` sentinel methods.
                 "indexOfLax" | "lastIndexOfLax" => Some((1, 1, vec![Type::Str])),
                 "get" => Some((1, 1, vec![Type::Int])),
-                // B11-4e: replace / replaceAll / split — fixed-string overload.
-                // C12-6c: first argument may also be a :Regex BuchiPack
-                // (the `Regex(...)` constructor return value). The type
-                // checker uses Type::Unknown here so both Str and Named("Regex")
-                // are accepted without bypassing the arity check, and the
-                // runtime dispatches by inspecting the value's `__type` tag.
-                "replace" | "replaceAll" => Some((2, 2, vec![Type::Unknown, Type::Str])),
-                "split" => Some((1, 1, vec![Type::Unknown])),
-                // C12-6c / C12B-031: match / search are Regex-only APIs.
+                // `replace` / `replaceAll` / `split` accept either a fixed
+                // string or a Regex pack. The runtime dispatches by the value
+                // tag, so the checker keeps the slot intentionally open while
+                // still enforcing arity.
+                "replace" | "replaceAll" => Some((2, 2, vec![Type::Any, Type::Str])),
+                "split" => Some((1, 1, vec![Type::Any])),
+                // `match` / `search` are Regex-only APIs.
                 // The first argument must be a :Regex BuchiPack (the
-                // `Regex(...)` constructor's return value). Rejecting
-                // `str.match("a")` / `str.search("a")` at type-check time
-                // unifies the failure mode across backends (previously
-                // Interpreter/JS threw at runtime, Native silently returned
-                // an empty match — see C12B-031).
+                // `Regex(...)` constructor's return value).
                 "match" | "search" => Some((1, 1, vec![Type::Named("Regex".to_string())])),
-                // E32B-022 (Lock-N): `searchLax` mirrors `search` but
-                // returns Lax[Int] instead of `-1` on no-match.
                 "searchLax" => Some((1, 1, vec![Type::Named("Regex".to_string())])),
                 _ => None,
             },
@@ -64,14 +54,9 @@ impl TypeChecker {
                 "get" => Some((1, 1, vec![Type::Int])),
                 "contains" => Some((1, 1, vec![inner.as_ref().clone()])),
                 "indexOf" | "lastIndexOf" => Some((1, 1, vec![inner.as_ref().clone()])),
-                // E32B-022 (Lock-N): Lax[Int] additive replacements.
                 "indexOfLax" | "lastIndexOfLax" => Some((1, 1, vec![inner.as_ref().clone()])),
-                // E34B-013 / E34B-014 follow-up (Codex review #9): full
-                // pin the predicate / mapper signatures so that the
-                // List HOF surface is symmetric with `Lax[T]` /
-                // `Result[T, P]` / `Async[T]`. The expected param type
-                // is the element type T; any widening at the boundary
-                // is rejected the same way as Lax/Result/Async.
+                // Pin predicate / mapper parameter types to the list element
+                // type so higher-order method boundaries stay explicit.
                 "any" | "all" | "none" => Some((
                     1,
                     1,
@@ -82,12 +67,20 @@ impl TypeChecker {
                 )),
                 "take" | "drop" => Some((1, 1, vec![Type::Int])),
                 "unique" | "reverse" | "sort" | "flatten" => Some((0, 0, vec![])),
-                "map" | "filter" => Some((
+                "map" => Some((
                     1,
                     1,
                     vec![Type::Function(
                         vec![inner.as_ref().clone()],
-                        Box::new(Type::Unknown),
+                        Box::new(Type::Any),
+                    )],
+                )),
+                "filter" => Some((
+                    1,
+                    1,
+                    vec![Type::Function(
+                        vec![inner.as_ref().clone()],
+                        Box::new(Type::Bool),
                     )],
                 )),
                 "flatMap" => Some((
@@ -95,30 +88,30 @@ impl TypeChecker {
                     1,
                     vec![Type::Function(
                         vec![inner.as_ref().clone()],
-                        Box::new(Type::List(Box::new(Type::Unknown))),
+                        Box::new(Type::List(Box::new(Type::Any))),
                     )],
                 )),
                 // `fold` / `reduce` callback type depends on arg0 (`init`)
                 // and is checked by the dedicated accumulator path below.
                 // The static method signature stays arity-only here so the
                 // generic param loop does not infer a weaker callback first.
-                "reduce" | "fold" => Some((2, 2, vec![Type::Unknown, Type::Unknown])),
+                "reduce" | "fold" => Some((2, 2, vec![Type::Any, Type::Any])),
                 "join" => Some((1, 1, vec![Type::Str])),
                 "slice" => Some((2, 2, vec![Type::Int, Type::Int])),
                 "push" | "append" => Some((1, 1, vec![inner.as_ref().clone()])),
                 "concat" => Some((1, 1, vec![Type::List(Box::new(inner.as_ref().clone()))])),
-                "zip" => Some((1, 1, vec![Type::Unknown])),
+                "zip" => Some((1, 1, vec![Type::List(Box::new(Type::Any))])),
                 "toString" => Some((0, 0, vec![])),
                 _ => None,
             },
             Type::Named(name) if name == "HashMap" => match method {
-                "get" => Some((1, 1, vec![Type::Unknown])),
-                "set" => Some((2, 2, vec![Type::Unknown, Type::Unknown])),
-                "remove" => Some((1, 1, vec![Type::Unknown])),
-                "has" => Some((1, 1, vec![Type::Unknown])),
+                "get" => Some((1, 1, vec![Type::Any])),
+                "set" => Some((2, 2, vec![Type::Any, Type::Any])),
+                "remove" => Some((1, 1, vec![Type::Any])),
+                "has" => Some((1, 1, vec![Type::Any])),
                 "keys" | "values" | "entries" => Some((0, 0, vec![])),
                 "size" | "isEmpty" => Some((0, 0, vec![])),
-                "merge" => Some((1, 1, vec![Type::Unknown])),
+                "merge" => Some((1, 1, vec![Type::Any])),
                 "toString" => Some((0, 0, vec![])),
                 _ => None,
             },
@@ -130,15 +123,22 @@ impl TypeChecker {
                     "set" => Some((2, 2, vec![key, value])),
                     "keys" | "values" | "entries" => Some((0, 0, vec![])),
                     "size" | "isEmpty" => Some((0, 0, vec![])),
-                    "merge" => Some((1, 1, vec![Type::Unknown])),
+                    "merge" => Some((
+                        1,
+                        1,
+                        vec![Type::Generic(
+                            "HashMap".to_string(),
+                            vec![key.clone(), value.clone()],
+                        )],
+                    )),
                     "toString" => Some((0, 0, vec![])),
                     _ => None,
                 }
             }
             Type::Named(name) if name == "Set" => match method {
-                "add" | "remove" => Some((1, 1, vec![Type::Unknown])),
-                "has" => Some((1, 1, vec![Type::Unknown])),
-                "union" | "intersect" | "diff" => Some((1, 1, vec![Type::Unknown])),
+                "add" | "remove" => Some((1, 1, vec![Type::Any])),
+                "has" => Some((1, 1, vec![Type::Any])),
+                "union" | "intersect" | "diff" => Some((1, 1, vec![Type::Any])),
                 "toList" => Some((0, 0, vec![])),
                 "size" | "isEmpty" => Some((0, 0, vec![])),
                 "toString" => Some((0, 0, vec![])),
@@ -148,7 +148,11 @@ impl TypeChecker {
                 let value = args.first().cloned().unwrap_or(Type::Unknown);
                 match method {
                     "add" | "remove" | "has" => Some((1, 1, vec![value])),
-                    "union" | "intersect" | "diff" => Some((1, 1, vec![Type::Unknown])),
+                    "union" | "intersect" | "diff" => Some((
+                        1,
+                        1,
+                        vec![Type::Generic("Set".to_string(), vec![value.clone()])],
+                    )),
                     "toList" => Some((0, 0, vec![])),
                     "size" | "isEmpty" => Some((0, 0, vec![])),
                     "toString" => Some((0, 0, vec![])),
@@ -156,38 +160,32 @@ impl TypeChecker {
                 }
             }
             Type::Generic(name, inner_args) if name == "Lax" => {
-                // E32B-021 (Lock-M): the `default` arg of `getOrDefault`
-                // must match the Lax inner type T. Previously
-                // `Type::Unknown` silently accepted `Lax[Str].getOrDefault(99)`
-                // and broke at runtime. PHILOSOPHY I — no silent type drift.
+                // The `default` arg of `getOrDefault` must match the Lax
+                // inner type T. PHILOSOPHY I forbids silent type drift.
                 // `getOrThrow` is Result-only on the runtime side; Lax does
                 // not currently surface it, so we leave the existing arity-only
                 // signature for Result below.
                 //
-                // E34 Phase 1.4 (Lock-C=B full pin): map/flatMap signatures
-                // are pinned to `Function([T], U)` / `Function([T], Lax[U])`
-                // so that argument-type / return-type mismatch is caught at
-                // type-check time via [E1508].
+                // map/flatMap signatures are pinned to `Function([T], U)` /
+                // `Function([T], Lax[U])` so argument-type and return-wrapper
+                // mismatch is caught at type-check time via [E1508].
                 let inner = inner_args.first().cloned().unwrap_or(Type::Unknown);
                 match method {
                     "hasValue" | "isEmpty" => Some((0, 0, vec![])),
                     "getOrDefault" => Some((1, 1, vec![inner.clone()])),
-                    // Lock-C=B: fn: T -> U
                     "map" => Some((
                         1,
                         1,
-                        vec![Type::Function(vec![inner.clone()], Box::new(Type::Unknown))],
+                        vec![Type::Function(vec![inner.clone()], Box::new(Type::Any))],
                     )),
-                    // Lock-C=B: fn: T -> Lax[U]
                     "flatMap" => Some((
                         1,
                         1,
                         vec![Type::Function(
                             vec![inner.clone()],
-                            Box::new(Type::Generic("Lax".to_string(), vec![Type::Unknown])),
+                            Box::new(Type::Generic("Lax".to_string(), vec![Type::Any])),
                         )],
                     )),
-                    // Phase 1: errorInfo signature 追加 (Phase 3 で runtime 実装)
                     "errorInfo" => Some((0, 0, vec![])),
                     "unmold" => Some((0, 0, vec![])),
                     "toString" => Some((0, 0, vec![])),
@@ -195,11 +193,9 @@ impl TypeChecker {
                 }
             }
             Type::Generic(name, inner_args) if name == "Result" => {
-                // E32B-021 (Lock-M): match Lax/Result behaviour — both
-                // accumulators (success type at index 0) get strict
-                // `default` arg type checking.
+                // Match Lax/Result behaviour: both accumulators (success type
+                // at index 0) get strict `default` arg type checking.
                 //
-                // E34 Phase 1.4 (Lock-C=B full pin):
                 //   map(fn: T -> U) -> Result[U, P]              (error type P を保存)
                 //   flatMap(fn: T -> Result[U, P]) -> Result[U, P]  (方針 A: error type 保存 strict)
                 //   mapError(fn: P -> Q) -> Result[T, Q]
@@ -212,7 +208,7 @@ impl TypeChecker {
                         1,
                         vec![Type::Function(
                             vec![success_ty.clone()],
-                            Box::new(Type::Unknown),
+                            Box::new(Type::Any),
                         )],
                     )),
                     // 方針 A: return Result の error type が receiver と一致必須
@@ -223,17 +219,14 @@ impl TypeChecker {
                             vec![success_ty.clone()],
                             Box::new(Type::Generic(
                                 "Result".to_string(),
-                                vec![Type::Unknown, error_ty.clone()],
+                                vec![Type::Any, error_ty.clone()],
                             )),
                         )],
                     )),
                     "mapError" => Some((
                         1,
                         1,
-                        vec![Type::Function(
-                            vec![error_ty.clone()],
-                            Box::new(Type::Unknown),
-                        )],
+                        vec![Type::Function(vec![error_ty.clone()], Box::new(Type::Any))],
                     )),
                     "getOrDefault" => Some((1, 1, vec![success_ty])),
                     "getOrThrow" => Some((0, 0, vec![])),
@@ -241,7 +234,6 @@ impl TypeChecker {
                     _ => None,
                 }
             }
-            // E34 Phase 1.4 (Lock-C=B full pin): Async[T].map(fn: T -> U) -> Async[U]
             Type::Generic(name, inner_args) if name == "Async" => {
                 let inner = inner_args.first().cloned().unwrap_or(Type::Unknown);
                 match method {
@@ -249,7 +241,7 @@ impl TypeChecker {
                     "map" => Some((
                         1,
                         1,
-                        vec![Type::Function(vec![inner.clone()], Box::new(Type::Unknown))],
+                        vec![Type::Function(vec![inner.clone()], Box::new(Type::Any))],
                     )),
                     "getOrDefault" => Some((1, 1, vec![inner])),
                     "toString" => Some((0, 0, vec![])),
@@ -267,13 +259,11 @@ impl TypeChecker {
                 "errorInfo" | "throw" | "toString" => Some((0, 0, vec![])),
                 _ => None,
             },
-            // E34B-013 / E34B-014 follow-up (Codex review #9): a
-            // function-valued pack field invoked via `pack.fn(arg)` is
-            // syntactically a MethodCall, but the receiver is a
-            // BuchiPack and the "method" is really a stored function
-            // value. Surface its declared signature so that the regular
-            // boundary subtype check applies — otherwise the legacy
-            // unknown-method path silently swallowed every arg type.
+            // A function-valued pack field invoked via `pack.fn(arg)` is
+            // syntactically a MethodCall, but the receiver is a BuchiPack
+            // and the "method" is really a stored function value. Surface
+            // its declared signature so the regular boundary subtype check
+            // applies.
             Type::BuchiPack(fields) => {
                 fields
                     .iter()
@@ -281,9 +271,8 @@ impl TypeChecker {
                     .and_then(|(_, ty)| match ty {
                         Type::Function(params, _) => {
                             // `Unit => :T` is a zero-argument signature
-                            // marker (the only declare-only fn field shape
-                            // gen-E permits). Treat the single Unit param
-                            // as an empty signature so callers can write
+                            // marker. Treat the single Unit param as an
+                            // empty signature so callers can write
                             // `pack.fn()` without the arity check
                             // wrongly demanding one argument.
                             let effective = if params.len() == 1 && params[0] == Type::Unit {
@@ -296,20 +285,17 @@ impl TypeChecker {
                         _ => None,
                     })
             }
-            // E34B-013 / E34B-014 follow-up (Codex review #10): a
-            // function-valued field on a declared `Named` (TypeDef /
-            // MoldDef) struct must obey the same boundary discipline as
-            // a `BuchiPack` literal. Walk the type's registered fields
-            // and surface the signature of any `Type::Function` field
-            // that matches the called name.
+            // A function-valued field on a declared `Named` type must obey
+            // the same boundary discipline as a `BuchiPack` literal. Walk
+            // the type's registered fields and surface the signature of any
+            // `Type::Function` field that matches the called name.
             Type::Named(type_name) => self.registry.get_type_fields(type_name).and_then(|fields| {
                 fields
                     .iter()
                     .find(|(name, _)| name == method)
                     .and_then(|(_, ty)| match ty {
                         Type::Function(params, _) => {
-                            // See `Type::BuchiPack` arm: `Unit => :T` is the
-                            // gen-E declare-only fn field marker for a
+                            // See `Type::BuchiPack` arm: `Unit => :T` marks a
                             // zero-argument signature.
                             let effective = if params.len() == 1 && params[0] == Type::Unit {
                                 vec![]
@@ -322,11 +308,11 @@ impl TypeChecker {
                     })
             }),
             _ => {
-                // N-66: For unknown/unresolved receiver types (Type::Unknown, Type::Any,
-                // Type::Generic for non-Lax/Result/Async, user-defined Named types without
-                // known method signatures), we skip method argument checking. This is
-                // intentional: the checker cannot enumerate methods on types it does not
-                // fully know. FL-22 handles the known-type case above.
+                // For unknown/unresolved receiver types, generic receivers
+                // without method signatures, and user-defined Named types
+                // without function-valued fields, skip method argument
+                // checking. The checker cannot enumerate methods on types it
+                // does not fully know.
                 None
             }
         };
@@ -407,11 +393,11 @@ impl TypeChecker {
                     continue;
                 }
                 if let Some(expected_ty) = param_types.get(i) {
-                    if *expected_ty == Type::Unknown {
+                    if matches!(expected_ty, Type::Unknown | Type::Any) {
                         continue;
                     }
-                    // E34 Phase 1.4 (Lock-C=B): Lambda bidirectional inference.
-                    // When the expected param type is Function([T], _), hint the
+                    // Lambda bidirectional inference: when the expected param
+                    // type is Function([T], _), hint the
                     // lambda's untyped params with T. This lets users write
                     // `obj.map(_ x = x + 1)` without an explicit type annotation
                     // and still benefit from full pin checking.
@@ -419,20 +405,13 @@ impl TypeChecker {
                     if actual_ty == Type::Unknown {
                         continue;
                     }
-                    // E34B-014: If the HOF argument is a function value
-                    // whose return is `Type::Unknown` (e.g. a named
-                    // function with no return annotation, or a forward
-                    // reference whose body inference has not yet run),
-                    // reject when the expected wrapper demands a more
-                    // specific return type. The legacy wildcard rule
-                    // (`Type::Unknown <: anything`) is intended for
-                    // in-flight inference variables, not for function
-                    // values that escaped the type-checker without an
-                    // annotated return.
+                    // If the higher-order argument is a function value whose
+                    // return remains unresolved, reject it when the expected
+                    // wrapper demands a more specific return type.
                     if let (Type::Function(_, act_ret), Type::Function(_, exp_ret)) =
                         (&actual_ty, expected_ty)
                         && matches!(act_ret.as_ref(), Type::Unknown)
-                        && !matches!(exp_ret.as_ref(), Type::Unknown)
+                        && !matches!(exp_ret.as_ref(), Type::Unknown | Type::Any)
                     {
                         let arg_label = match arg {
                             Expr::Ident(name, _) => format!("'{}'", name),
@@ -450,40 +429,28 @@ impl TypeChecker {
                         });
                         continue;
                     }
-                    // E34B-014 follow-up (Codex review #8 / #11): if
-                    // the HOF argument is a named function reference
-                    // whose params include `Type::Unknown` and the
-                    // expected slot demands a concrete param type,
-                    // reject so that the legacy wildcard rule cannot
-                    // silently slip through. Lambdas are exempt — they
-                    // are bidirectionally inferred from `expected_ty`.
+                    // If the higher-order argument is a named function
+                    // reference whose params include unresolved types and the
+                    // expected slot demands a concrete param type, reject it.
+                    // Lambdas are exempt because they are bidirectionally
+                    // inferred from `expected_ty`.
                     //
-                    // Codex review #11 carve-out: a *fully* unannotated
-                    // named function (`f x = x * 2` with no param /
-                    // return annotation at all) is treated as gradual
-                    // typing — author opted out of explicit typing and
-                    // body inference fills in the gaps later. PHILOSOPHY
-                    // I "no implicit type conversion" only fires once
-                    // the author has *committed* to a partial
-                    // annotation (e.g. `f x = x * 2 => :Int` pins the
-                    // return; `f x: Int = ...` pins the param). This
-                    // restores the prelude examples (`double x = x * 2`
-                    // used through `xs.map(double)`) without
-                    // re-introducing the unbounded wildcard slip.
+                    // A fully unannotated named function (`f x = x * 2`) is
+                    // treated as gradual typing: body inference fills in the
+                    // gaps unless the author has committed to a partial
+                    // annotation such as an explicit return type or one
+                    // explicit parameter type.
                     if matches!(arg, Expr::Ident(_, _))
                         && let (Type::Function(act_params, act_ret), Type::Function(exp_params, _)) =
                             (&actual_ty, expected_ty)
                     {
-                        // E34B-014 follow-up (Codex review #11):
-                        // strict reject only fires when at least one
-                        // param has an explicit annotation. The two
-                        // gradual-typing shapes
+                        // Strict reject only fires when at least one param has
+                        // an explicit annotation. The two gradual-typing shapes
                         //   (a) fully unannotated:  `f x = ...`
                         //   (b) return-annotated, params unannotated:
                         //       `f x = x * 2 => :Int`
-                        // are admitted; PHILOSOPHY V "強力な型推論"
-                        // covers param inference from the body when
-                        // the author has not written annotations.
+                        // are admitted; body inference covers params when the
+                        // author has not written annotations.
                         // Mixed shapes (one param annotated, another
                         // not) still trip the strict rule.
                         let all_params_unannotated =
@@ -517,17 +484,35 @@ impl TypeChecker {
                         }
                         let _ = act_ret;
                     }
-                    // E34B-013 (Lock-H=A): apply the strict
-                    // function-arg subtype rule at every method-call
-                    // boundary, including registry-resolved Named /
-                    // BuchiPack structural paths. This forbids the
-                    // `Int → Float` implicit widening uniformly across
-                    // function/method-arg slots while preserving the
-                    // wider widening rule for non-boundary contexts
-                    // (numeric arithmetic / direct assignment).
-                    let pass = self
-                        .registry
-                        .is_function_arg_subtype_of(&actual_ty, expected_ty);
+                    // Apply the strict function-arg subtype rule at every
+                    // method-call boundary, including registry-resolved Named
+                    // and BuchiPack structural paths. This forbids `Int →
+                    // Float` implicit widening across function/method-arg
+                    // slots while preserving the wider rule for direct
+                    // numeric arithmetic and assignment.
+                    let pass = if let (
+                        Type::Function(actual_params, actual_ret),
+                        Type::Function(expected_params, expected_ret),
+                    ) = (&actual_ty, expected_ty)
+                    {
+                        actual_params.len() == expected_params.len()
+                            && actual_params.iter().zip(expected_params.iter()).all(
+                                |(actual, expected)| {
+                                    matches!(expected, Type::Unknown | Type::Any)
+                                        || self
+                                            .registry
+                                            .is_function_arg_subtype_of(expected, actual)
+                                },
+                            )
+                            && (matches!(expected_ret.as_ref(), Type::Unknown | Type::Any)
+                                || self.method_hof_return_compatible(
+                                    actual_ret.as_ref(),
+                                    expected_ret.as_ref(),
+                                ))
+                    } else {
+                        self.registry
+                            .is_function_arg_subtype_of(&actual_ty, expected_ty)
+                    };
                     if Self::contains_unknown(&actual_ty) && !Self::contains_unknown(expected_ty) {
                         self.errors.push(TypeError {
                             message: format!(
@@ -570,6 +555,32 @@ impl TypeChecker {
                 }
             }
             self.check_list_accumulator_method_args(obj_type, method, args, span);
+        }
+    }
+
+    fn method_hof_return_compatible(&self, actual: &Type, expected: &Type) -> bool {
+        match (actual, expected) {
+            // Method signatures use `?` as a local generic placeholder for
+            // HOF outputs such as `Lax[Any]`, `Result[Any, P]`, and `@[Any]`.
+            // Keep that wildcard scoped here so unresolved inference remains
+            // separate from explicit "any concrete type" slots.
+            (_, Type::Unknown) => true,
+            (_, Type::Any) => true,
+            (Type::List(actual_inner), Type::List(expected_inner)) => {
+                self.method_hof_return_compatible(actual_inner, expected_inner)
+            }
+            (
+                Type::Generic(actual_name, actual_args),
+                Type::Generic(expected_name, expected_args),
+            ) if actual_name == expected_name && actual_args.len() == expected_args.len() => {
+                actual_args
+                    .iter()
+                    .zip(expected_args.iter())
+                    .all(|(actual_arg, expected_arg)| {
+                        self.method_hof_return_compatible(actual_arg, expected_arg)
+                    })
+            }
+            _ => self.registry.is_subtype_of(actual, expected),
         }
     }
 
@@ -669,9 +680,9 @@ impl TypeChecker {
     /// Infer a Lambda's type using the expected
     /// `Type::Function(expected_params, _)` to fill in missing param
     /// annotations. If the lambda has explicit type annotations on
-    /// params, those win (they may legitimately reject via subtype
-    /// check downstream). If a param has no annotation, the expected
-    /// param type at the same index is used as a hint.
+    /// params, those win and must be compatible with the expected
+    /// parameter type. If a param has no annotation, the expected param
+    /// type at the same index is used as a hint.
     ///
     /// This is the only place where a bidirectional hint flows into
     /// Lambda inference. The general lambda inference path remains
@@ -687,7 +698,20 @@ impl TypeChecker {
             .enumerate()
             .map(|(i, p)| {
                 if let Some(annotation) = &p.type_annotation {
-                    self.registry.resolve_type(annotation)
+                    let annotated = self.registry.resolve_type(annotation);
+                    if let Some(expected_param) = expected_params.get(i)
+                        && *expected_param != Type::Unknown
+                        && !self.registry.is_subtype_of(&annotated, expected_param)
+                    {
+                        self.errors.push(TypeError {
+                            message: format!(
+                                "[E1528] Lambda parameter '{}' annotation {} conflicts with expected function parameter {}.",
+                                p.name, annotated, expected_param
+                            ),
+                            span: p.span.clone(),
+                        });
+                    }
+                    annotated
                 } else {
                     expected_params.get(i).cloned().unwrap_or(Type::Unknown)
                 }
@@ -722,6 +746,51 @@ impl TypeChecker {
         method: &str,
         args: &[Expr],
     ) -> Type {
+        if method == "set" {
+            match obj_type {
+                Type::Named(name) if name == "HashMap" => {
+                    let key = args
+                        .first()
+                        .map(|arg| self.infer_expr_type(arg))
+                        .unwrap_or(Type::Unknown);
+                    if let Some(value) = args.get(1) {
+                        self.infer_expr_type(value);
+                    }
+                    return Type::Generic("HashMap".to_string(), vec![key, Type::Any]);
+                }
+                Type::Generic(name, inner_args) if name == "HashMap" => {
+                    let existing_key = inner_args.first().cloned().unwrap_or(Type::Unknown);
+                    let existing_value = inner_args.get(1).cloned().unwrap_or(Type::Unknown);
+                    let key = if matches!(existing_key, Type::Unknown) {
+                        args.first()
+                            .map(|arg| self.infer_expr_type(arg))
+                            .unwrap_or(Type::Unknown)
+                    } else {
+                        existing_key
+                    };
+                    let value = if matches!(existing_value, Type::Unknown) {
+                        args.get(1)
+                            .map(|arg| self.infer_expr_type(arg))
+                            .unwrap_or(Type::Unknown)
+                    } else {
+                        existing_value
+                    };
+                    return Type::Generic("HashMap".to_string(), vec![key, value]);
+                }
+                _ => {}
+            }
+        }
+
+        if method == "merge"
+            && matches!(obj_type, Type::Named(name) if name == "HashMap")
+            && let Some(arg) = args.first()
+        {
+            let other = self.infer_expr_type(arg);
+            if matches!(&other, Type::Generic(name, _) if name == "HashMap") {
+                return other;
+            }
+        }
+
         // Only Lax/Result/Async map/flatMap/mapError need arg-aware inference.
         // Other methods use the existing arg-less variant.
         if let Type::Generic(name, inner_args) = obj_type {
@@ -827,20 +896,17 @@ impl TypeChecker {
                 "length" => Type::Int,
                 "contains" | "startsWith" | "endsWith" => Type::Bool,
                 "indexOf" | "lastIndexOf" => Type::Int,
-                // E32B-022 (Lock-N): Lax[Int] return for additive `*Lax`
-                // replacements of the legacy `-1` sentinel methods.
                 "indexOfLax" | "lastIndexOfLax" => {
                     Type::Generic("Lax".to_string(), vec![Type::Int])
                 }
                 "get" => Type::Generic("Lax".to_string(), vec![Type::Str]),
                 "toString" => Type::Str,
-                // B11-4e: replace / replaceAll / split (fixed-string + C12-6 Regex overload)
+                // replace / replaceAll / split accept fixed strings and Regex values.
                 "replace" | "replaceAll" => Type::Str,
                 "split" => Type::List(Box::new(Type::Str)),
-                // C12-6c: match returns a :RegexMatch BuchiPack; search
-                // returns an Int (char index or -1). We type `match` as
-                // Named("RegexMatch") so later field access is dispatched
-                // through the BuchiPack path at runtime.
+                // match returns a RegexMatch pack; search returns an Int
+                // character index. Typing `match` as Named("RegexMatch")
+                // preserves later field access lowering.
                 "match" => Type::Named("RegexMatch".to_string()),
                 "search" => Type::Int,
                 "searchLax" => Type::Generic("Lax".to_string(), vec![Type::Int]),
@@ -874,8 +940,6 @@ impl TypeChecker {
                 "get" => Type::Generic("Lax".to_string(), vec![*inner.clone()]),
                 "contains" => Type::Bool,
                 "indexOf" | "lastIndexOf" => Type::Int,
-                // E32B-022 (Lock-N): Lax[Int] return for additive `*Lax`
-                // replacements of the legacy `-1` sentinel methods.
                 "indexOfLax" | "lastIndexOfLax" => {
                     Type::Generic("Lax".to_string(), vec![Type::Int])
                 }
@@ -889,12 +953,12 @@ impl TypeChecker {
             Type::Molten => Type::Unknown,
             // HashMap methods
             Type::Named(name) if name == "HashMap" => match method {
-                "get" => Type::Generic("Lax".to_string(), vec![Type::Unknown]),
+                "get" => Type::Generic("Lax".to_string(), vec![Type::Any]),
                 "set" | "remove" | "merge" => Type::Named("HashMap".to_string()),
                 "has" => Type::Bool,
                 "keys" => Type::List(Box::new(Type::Str)),
-                "values" => Type::List(Box::new(Type::Unknown)),
-                "entries" => Type::List(Box::new(Type::Unknown)),
+                "values" => Type::List(Box::new(Type::Any)),
+                "entries" => Type::List(Box::new(Type::Any)),
                 "size" => Type::Int,
                 "isEmpty" => Type::Bool,
                 "toString" => Type::Str,

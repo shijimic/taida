@@ -21,9 +21,9 @@ debug(pt.y)
 
 // クロージャ（ヒープ確保される）
 multiplier <= 5
-scale <= _ x = x * multiplier
+scale <= _ x: Int = x * multiplier
 debug(scale(6))
 
 // リスト + map
-doubled <= Map[@[10, 20, 30], _ x = x * 2]()
+doubled <= Map[@[10, 20, 30], _ x: Int = x * 2]()
 debug(Sum[doubled]())

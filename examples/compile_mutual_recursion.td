@@ -3,13 +3,15 @@
 // to avoid stack overflow, just like self-recursive tail calls.
 
 // Classic isEven/isOdd mutual recursion (returns 1/0 for cross-backend parity)
-isEven n =
+isEven n: Int =
   | n == 0 |> 1
   | _ |> isOdd(n - 1)
+=> :Int
 
-isOdd n =
+isOdd n: Int =
   | n == 0 |> 0
   | _ |> isEven(n - 1)
+=> :Int
 
 stdout(isEven(0))
 stdout(isEven(1))

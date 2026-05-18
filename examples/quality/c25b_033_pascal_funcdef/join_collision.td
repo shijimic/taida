@@ -7,7 +7,7 @@
 // helper stays intact and user surface semantics are preserved. Output must
 // match the interpreter reference across all 4 backends.
 sep <= "-"
-Join a b =
+Join a: Str b: Str =
   `${a}${sep}${b}`
 => :Str
 

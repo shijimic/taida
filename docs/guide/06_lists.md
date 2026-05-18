@@ -214,11 +214,11 @@ Map[@[1, 2, 3, 4, 5], _ x =
 ```taida
 scores <= @[85, 92, 78, 95, 88]
 
-Filter[scores, _ x = x >= 90]() >=> highScores
+Filter[scores, _ x: Int = x >= 90]() >=> highScores
 // highScores: @[92, 95]
 
 // 名前付き関数も使えます
-isEven x =
+isEven x: Int =
   Mod[x, 2]() >=> r
   r == 0
 => :Bool
@@ -230,12 +230,12 @@ Filter[@[1, 2, 3, 4, 5, 6], isEven]() >=> evens
 
 ```taida
 // 合計
-Fold[@[1, 2, 3, 4, 5], 0, _ acc x = acc + x]() >=> total
+Fold[@[1, 2, 3, 4, 5], 0, _ acc: Int x: Int = acc + x]() >=> total
 // total: 15
 
 // 文字列の結合
 names <= @["Asuka", "Rei", "Shinji"]
-Fold[names, "", _ acc name =
+Fold[names, "", _ acc: Str name: Str =
   | acc == "" |> name
   | _ |> acc + ", " + name
 ]() >=> joined
@@ -253,12 +253,13 @@ Sort[@[3, 1, 4, 1, 5]]() >=> sorted
 Sort[@[3, 1, 4, 1, 5]](reverse <= true) >=> desc
 // desc: @[5, 4, 3, 1, 1]
 
+Pilot = @(name: Str, age: Int)
 pilots <= @[
   @(name <= "Asuka", age <= 14),
   @(name <= "Shinji", age <= 14),
   @(name <= "Rei", age <= 14)
 ]
-Sort[pilots](by <= _ p = p.age) >=> byAge
+Sort[pilots](by <= _ p: Pilot = p.age) >=> byAge
 ```
 
 ---
@@ -273,18 +274,18 @@ Sort[pilots](by <= _ p = p.age) >=> byAge
 scores <= @[85, 92, 78, 95, 88]
 
 // フィルタ → マップ → 結合
-scores => Filter[_, _ x = x >= 90]() => Map[_, _ x = x * 2]() => highDoubled
+scores => Filter[_, _ x: Int = x >= 90]() => Map[_, _ x: Int = x * 2]() => highDoubled
 // highDoubled: @[184, 190]
 
 // フィルタ → ソート → 先頭3件
-@[5, 2, 8, 1, 9, 3, 7] => Filter[_, _ x = x > 3]() => Sort[_]() => Take[_, 3]() => result
+@[5, 2, 8, 1, 9, 3, 7] => Filter[_, _ x: Int = x > 3]() => Sort[_]() => Take[_, 3]() => result
 // result: @[5, 7, 8]
 ```
 
 逆方向パイプラインを書きたい場合は `<=` チェーンを使えます。例:
 
 ```taida
-result <= Take[_, 3]() <= Sort[_]() <= Filter[_, _ x = x > 3]() <= @[5, 2, 8, 1, 9, 3, 7]
+result <= Take[_, 3]() <= Sort[_]() <= Filter[_, _ x: Int = x > 3]() <= @[5, 2, 8, 1, 9, 3, 7]
 // result: @[5, 7, 8]
 ```
 
@@ -297,14 +298,14 @@ result <= Take[_, 3]() <= Sort[_]() <= Filter[_, _ x = x > 3]() <= @[5, 2, 8, 1,
 ```taida
 numbers <= @[1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
 
-isEven x =
+isEven x: Int =
   Mod[x, 2]() >=> r
   r == 0
 => :Bool
 
 Filter[numbers, isEven]() >=> evens
-Map[evens, _ x = x * 2]() >=> doubled
-Fold[doubled, 0, _ acc x = acc + x]() >=> sum
+Map[evens, _ x: Int = x * 2]() >=> doubled
+Fold[doubled, 0, _ acc: Int x: Int = acc + x]() >=> sum
 // sum: 60
 ```
 
@@ -315,6 +316,8 @@ Fold[doubled, 0, _ acc x = acc + x]() >=> sum
 ### NERV スタッフデータの処理
 
 ```taida
+Staff = @(name: Str, age: Int, role: Str, active: Bool)
+
 staff <= @[
   @(name <= "Asuka", age <= 14, role <= "pilot", active <= true),
   @(name <= "Shinji", age <= 14, role <= "pilot", active <= true),
@@ -323,12 +326,12 @@ staff <= @[
 ]
 
 // アクティブなスタッフの名前を取得します
-staff => Filter[_, _ s = s.active]() => Map[_, _ s = s.name]() => activeNames
+staff => Filter[_, _ s: Staff = s.active]() => Map[_, _ s: Staff = s.name]() => activeNames
 // activeNames: @["Asuka", "Shinji", "Ritsuko"]
 
 // 平均年齢を計算します
-staff => Map[_, _ s = s.age]() => ages
-Fold[ages, 0, _ acc a = acc + a]() >=> totalAge
+staff => Map[_, _ s: Staff = s.age]() => ages
+Fold[ages, 0, _ acc: Int a: Int = acc + a]() >=> totalAge
 Div[totalAge, ages.length()]() >=> avgAge
 // avgAge: 18
 ```
@@ -336,6 +339,8 @@ Div[totalAge, ages.length()]() >=> avgAge
 ### 売上データの集計
 
 ```taida
+Order = @(product: Str, quantity: Int, price: Int)
+
 orders <= @[
   @(product <= "A", quantity <= 5, price <= 100),
   @(product <= "B", quantity <= 3, price <= 200),
@@ -343,12 +348,12 @@ orders <= @[
 ]
 
 // 各注文の小計を計算し、合計します
-orders => Map[_, _ o = o.quantity * o.price]() => subtotals
+orders => Map[_, _ o: Order = o.quantity * o.price]() => subtotals
 Sum[subtotals]() >=> totalRevenue
 // totalRevenue: 1300
 
 // 商品Aだけの合計
-orders => Filter[_, _ o = o.product == "A"]() => Map[_, _ o = o.quantity * o.price]() => aSubtotals
+orders => Filter[_, _ o: Order = o.product == "A"]() => Map[_, _ o: Order = o.quantity * o.price]() => aSubtotals
 Sum[aSubtotals]() >=> aRevenue
 // aRevenue: 700
 ```

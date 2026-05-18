@@ -119,9 +119,10 @@ fn run_fixture_under(src: &str, timeout: Duration, label: &str) {
 #[test]
 fn c25b_021_append_5000_completes_under_2s() {
     let src = r#"
-build acc i =
+build acc: @[Int] i: Int =
   | i >= 5000 |> acc
   | _ |> build(Append[acc, i](), i + 1)
+=> :@[Int]
 
 result <= build(@[], 0)
 stdout("ok")
@@ -136,9 +137,10 @@ stdout("ok")
 #[test]
 fn c25b_021_prepend_5000_completes_under_3s() {
     let src = r#"
-build acc i =
+build acc: @[Int] i: Int =
   | i >= 5000 |> acc
   | _ |> build(Prepend[acc, i](), i + 1)
+=> :@[Int]
 
 result <= build(@[], 0)
 stdout("ok")

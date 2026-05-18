@@ -17,7 +17,7 @@ grade <= (
 stdout(`Score: ${score}, Grade: ${grade}`)
 
 // FizzBuzz
-fizzbuzz n =
+fizzbuzz n: Int =
   | Mod[n, 15]().unmold() == 0 |> "FizzBuzz"
   | Mod[n, 3]().unmold() == 0 |> "Fizz"
   | Mod[n, 5]().unmold() == 0 |> "Buzz"

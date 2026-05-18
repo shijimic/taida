@@ -5,13 +5,15 @@
 // `test_c12_3_non_tail_mutual_recursion_reject_parity` and
 // docs/reference/tail_recursion.md.
 
-isEven n =
+isEven n: Int =
   | n == 0 |> 1
   | _ |> isOdd(n - 1)
+=> :Int
 
-isOdd n =
+isOdd n: Int =
   | n == 0 |> 0
   | _ |> isEven(n - 1)
+=> :Int
 
 stdout(isEven(0))
 stdout(isOdd(0))

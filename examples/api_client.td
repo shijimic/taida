@@ -42,13 +42,13 @@ stdout("Pilots from API:")
 stdout("")
 
 // Helper: convert active flag to status label
-activeLabel b =
+activeLabel b: Bool =
   | b |> "active"
   | _ |> "inactive"
 => :Str
 
 // Process each pilot (already typed)
-printPilot pilot =
+printPilot pilot: Pilot =
   statusLabel <= activeLabel(pilot.active)
   stdout("  #" + pilot.id.toString() + " " + pilot.name + " (" + statusLabel + ")")
   pilot.active
@@ -60,17 +60,17 @@ stdout("")
 
 // ── Step 4: Use list methods on processed data ───────────
 
-identity x =
-  x
+isActive pilot: Pilot =
+  pilot.active
 => :Bool
 
-Count[activeFlags, identity]() >=> activeCount
+Count[pilots, isActive]() >=> activeCount
 stdout("Active pilots: " + activeCount.toString())
 
-hasAnyActive <= activeFlags.any(identity)
+hasAnyActive <= pilots.any(isActive)
 stdout("Has active pilots: " + hasAnyActive.toString())
 
-allActive <= activeFlags.all(identity)
+allActive <= pilots.all(isActive)
 stdout("All active: " + allActive.toString())
 
 // ── Step 5: Build a new JSON payload ─────────────────────

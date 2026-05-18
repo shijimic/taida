@@ -12,6 +12,25 @@ use crate::parser::*;
 
 impl Lowering {
     pub fn lower_program(&mut self, program: &Program) -> Result<IrModule, LowerError> {
+        if !self.typed_expr_table.is_empty()
+            && !self.typed_expr_table.residual_unknown_types().is_empty()
+        {
+            let residuals = self
+                .typed_expr_table
+                .residual_unknown_types()
+                .into_iter()
+                .take(5)
+                .map(|ty| ty.to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Err(LowerError {
+                message: format!(
+                    "Typed expression table contains unresolved types before lowering: {}",
+                    residuals
+                ),
+            });
+        }
+
         let mut module = IrModule::new();
         module.module_key = Some(self.current_module_key().to_string());
 

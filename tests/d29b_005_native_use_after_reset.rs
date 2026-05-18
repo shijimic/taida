@@ -85,7 +85,7 @@ fn write_server(dir: &Path, port: u16) -> PathBuf {
     let src = format!(
         r#">>> taida-lang/net => @(httpServe)
 
-handler req =
+handler req: Request =
   isGet <= SpanEquals[req.method, req.raw, "GET"]()
   marker <= "ok-" + isGet.toString()
   @(status <= 200, headers <= @[], body <= marker)

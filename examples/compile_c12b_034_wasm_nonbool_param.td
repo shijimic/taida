@@ -11,10 +11,19 @@
 // 3 backend (interp / JS / native) + 3 wasm profile (min / wasi / full)
 // must all produce the same output.
 
-printAny v =
+printInt v: Int =
     stdout(v)
+=> :Int
 
-printAny(42)
-printAny("hello")
-printAny(true)
-printAny(false)
+printStr v: Str =
+    stdout(v)
+=> :Int
+
+printBool v: Bool =
+    stdout(v)
+=> :Int
+
+printInt(42)
+printStr("hello")
+printBool(true)
+printBool(false)

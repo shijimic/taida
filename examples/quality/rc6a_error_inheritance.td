@@ -61,7 +61,7 @@ stdout("T7: " + TypeName[sub_err]() + " base_info=" + sub_err.base_info + " sub_
 Error => Level1Error = @(l1: Str)
 Level1Error => Level2Error = @(l2: Str)
 catchMulti x =
-  |== error: Error =
+  |== error: Level2Error =
     "caught(" + error.type + "): " + error.l1 + "+" + error.l2
   => :Str
   Level2Error(type <= "Level2Error", message <= "deep error", l1 <= "one", l2 <= "two").throw()

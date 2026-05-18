@@ -8,7 +8,7 @@ Pilot = @(name: Str, age: Int)
 Error => ValidationError = @(field: Str)
 
 // Functions
-validate name =
+validate name: Str =
   |== error: Error =
     "invalid"
   => :Str
@@ -17,15 +17,16 @@ validate name =
   | _ |> name
 => :Str
 
-greet name =
+greet name: Str =
   valid <= validate(name)
   "Hello, " + valid
 => :Str
 
 // List operations
 names <= @["Asuka", "Rei", "Shinji"]
-double x =
+double x: Str =
   x + x
+=> :Str
 
 Map[names, double]() >=> doubled
 stdout(doubled)

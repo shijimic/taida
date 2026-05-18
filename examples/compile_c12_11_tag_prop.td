@@ -20,24 +20,26 @@
 // 3 backend (interp / JS / native) must produce the same output.
 
 // ── (a) direct Bool through user func param ─────────────────
-printAny v =
+printBool v: Bool =
     stdout(v)
-printAny(true)
-printAny(false)
+=> :Int
+printBool(true)
+printBool(false)
 
 // ── (a) Bool-returning MoldInst through user func param ─────
 // (TypeIs returns Bool per mold_returns.rs; emit_call_arg_tags
 //  propagates tag=2 into the callee's param_tag_vars slot.)
-printAny(TypeIs[42, :Int]())
+printBool(TypeIs[42, :Int]())
 
 // ── (b) user func returning Bool consumed directly by stdout ─
-isIntReturning v =
-    TypeIs[v, :Int]()
-stdout(isIntReturning(42))
+isIntReturning v: Bool =
+    TypeIs[v, :Bool]()
+=> :Bool
+stdout(isIntReturning(true))
 
 // ── let-binding of Bool-returning user func result ──────────
 // (body-based inference adds `isIntReturning` to
 //  bool_returning_funcs so `b <= isIntReturning(42)` tags `b`
 //  as Bool and `stdout(b)` routes through the tagged path.)
-b1 <= isIntReturning(42)
+b1 <= isIntReturning(true)
 stdout(b1)

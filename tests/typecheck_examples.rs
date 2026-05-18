@@ -113,7 +113,7 @@ fn test_negative_function_overload() {
 #[test]
 fn test_negative_old_placeholder_partial() {
     // docs: old `_` partial application is rejected
-    let errors = check_source("add x y = x + y\n=> :Int\nresult <= add(5, _)");
+    let errors = check_source("add x: Int y: Int = x + y => :Int\nresult <= add(5, _)");
     assert_eq!(
         errors.len(),
         1,
@@ -126,8 +126,8 @@ fn test_negative_old_placeholder_partial() {
         errors
     );
     assert!(
-        errors[0].contains("line 3"),
-        "Error should be on line 3, got: {}",
+        errors[0].contains("line 2"),
+        "Error should be on line 2, got: {}",
         errors[0]
     );
 }
@@ -138,19 +138,26 @@ fn test_negative_typedef_partial_application() {
     let errors = check_source("Point = @(x: Int, y: Int)\np <= Point(1, )");
     assert_eq!(
         errors.len(),
-        1,
-        "Expected exactly 1 error, got: {:?}",
+        2,
+        "Expected E1503 plus unresolved-type cascade marker, got: {:?}",
         errors
     );
     assert!(
-        errors[0].contains("[E1503]"),
+        errors.iter().any(|e| e.contains("[E1503]")),
         "Expected E1503, got: {:?}",
         errors
     );
     assert!(
-        errors[0].contains("line 2"),
+        errors.iter().any(|e| e.contains("[E1529]")),
+        "Expected E1529 cascade marker, got: {:?}",
+        errors
+    );
+    assert!(
+        errors
+            .iter()
+            .any(|e| e.contains("[E1503]") && e.contains("line 2")),
         "Error should be on line 2, got: {}",
-        errors[0]
+        errors.join("\n")
     );
 }
 
@@ -224,6 +231,7 @@ fn test_c12b_023_bypass_rejects_manual_regex_pack_inside_main() {
         r#"main =
   re <= @(__type <= "Regex", pattern <= "a", flags <= "")
   stdout("aba".replaceAll(re, "x"))
+=> :Str
 "#,
     );
     assert!(
@@ -358,6 +366,7 @@ fn test_c12b_023_bypass_rejects_variable_bound_tag() {
   tag <= "Regex"
   re <= @(__type <= tag, pattern <= "a", flags <= "")
   stdout("aba".replaceAll(re, "x"))
+=> :Str
 "#,
     );
     assert!(
@@ -373,10 +382,11 @@ fn test_c12b_023_bypass_rejects_variable_bound_tag() {
 fn test_c12b_023_bypass_rejects_function_arg_tag() {
     // Indirect bypass: pass the tag through a function parameter.
     let errors = check_source(
-        r#"inner t = @(__type <= t, pattern <= "a", flags <= "")
+        r#"inner t: Str = @(__type <= t, pattern <= "a", flags <= "") => :@(__type: Str, pattern: Str, flags: Str)
 main =
   re <= inner("Regex")
   stdout("aba".replaceAll(re, "x"))
+=> :Str
 "#,
     );
     assert!(
@@ -396,6 +406,7 @@ fn test_c12b_023_bypass_rejects_if_expr_tag() {
   cond <= true
   re <= @(__type <= if(cond, "Regex", "X"), pattern <= "a", flags <= "")
   stdout("aba".replaceAll(re, "x"))
+=> :Str
 "#,
     );
     assert!(
@@ -516,6 +527,7 @@ fn test_c12b_023_typedef_rejects_reserved_prefix_default_type() {
 main =
   re <= Fake(payload <= "x")
   stdout("aba".replaceAll(re, "x"))
+=> :Str
 "#,
     );
     assert!(
@@ -537,6 +549,7 @@ fn test_c12b_023_typedef_rejects_reserved_prefix_body_stream() {
 main =
   req <= FakeReq(x <= 1)
   stdout("ok")
+=> :Str
 "#,
     );
     assert!(
@@ -564,6 +577,7 @@ fn test_c12b_023_typedef_rejects_reserved_prefix_type_annotation_only() {
         r#"Fake = @(__type: Str, payload: Str)
 main =
   stdout("ok")
+=> :Str
 "#,
     );
     assert!(
@@ -583,6 +597,7 @@ fn test_c12b_023_inheritancedef_rejects_reserved_prefix_field() {
         r#"Error => CustomError = @(__type <= "Regex", info: Str)
 main =
   stdout("ok")
+=> :Str
 "#,
     );
     assert!(
@@ -602,6 +617,7 @@ fn test_c12b_023_molddef_rejects_reserved_prefix_field() {
         r#"Mold[T] => FakeMold[T] = @(__value: T, label: Str)
 main =
   stdout("ok")
+=> :Str
 "#,
     );
     assert!(
@@ -622,6 +638,7 @@ fn test_c12b_023_typedef_rejects_multiple_reserved_prefix_fields() {
         r#"Fake = @(__type <= "Regex", __value <= 0, __tag <= "x", payload: Str)
 main =
   stdout("ok")
+=> :Str
 "#,
     );
     let e1617_count = errors.iter().filter(|e| e.contains("[E1617]")).count();
@@ -641,6 +658,7 @@ fn test_c12b_023_typedef_non_reserved_field_still_allowed() {
 main =
   p <= Person(name <= "alice", age <= 30)
   stdout(p.name)
+=> :Int
 "#,
     );
     assert!(
@@ -659,6 +677,7 @@ fn test_e32b_018_typedef_internal_field_read_rejected() {
 main =
   e <= AppError(code <= 42)
   stdout("type=" + e.__type)
+=> :Str
 "#,
     );
     assert!(

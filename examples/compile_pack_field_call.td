@@ -9,25 +9,25 @@ stdout(actions.greet())
 
 // 1-arg field call: return arg directly (string)
 echo <= @(
-  say <= _ msg = msg
+  say <= _ msg: Str = msg
 )
 stdout(echo.say("hello from field"))
 
 // 1-arg field call: numeric operation
 doubler <= @(
-  run <= _ x = x * 2
+  run <= _ x: Int = x * 2
 )
 stdout(doubler.run(21).toString())
 
 // 2-arg field call: numeric addition
 calc <= @(
-  plus <= _ a b = a + b
+  plus <= _ a: Int b: Int = a + b
 )
 stdout(calc.plus(3, 7).toString())
 
 // 1-arg closure field call (captures outer variable)
 tag <= "PREFIX"
 box <= @(
-  wrap <= _ x = tag + x
+  wrap <= _ x: Str = tag + x
 )
 stdout(box.wrap(":item"))

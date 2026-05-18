@@ -88,7 +88,7 @@ fn write_server_fixture(dir: &Path, port: u16, body_marker: &str) -> PathBuf {
     let src = format!(
         r#">>> taida-lang/net => @(httpServe)
 
-handler req =
+handler req: Request =
   @(status <= 200, headers <= @[], body <= "{marker}")
 => :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
 

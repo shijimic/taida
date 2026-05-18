@@ -2,8 +2,8 @@
 
 >>> ./mod_c.td => @(wrapC)
 
-_internal_b x = "B(" + wrapC(x) + ")" => :Str
+_internal_b x: Str = "B(" + wrapC(x) + ")" => :Str
 
-wrapB x = _internal_b(x) => :Str
+wrapB x: Str = _internal_b(x) => :Str
 
 <<< @(wrapB)

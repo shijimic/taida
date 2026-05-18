@@ -5,7 +5,7 @@ m <= hashMap()
 stdout("isEmpty: " + m.isEmpty().toString())
 
 // set / has / size
-m2 <= m.set("name", "Asuka").set("age", 14)
+m2 <= m.set("name", "Asuka").set("age", "14")
 stdout("has name: " + m2.has("name").toString())
 stdout("size: " + m2.size().toString())
 

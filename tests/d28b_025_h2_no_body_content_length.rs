@@ -38,7 +38,7 @@ fn fixture_template() -> &'static str {
     // verbatim including content-length.
     r#">>> taida-lang/net => @(httpServe, HttpProtocol)
 
-handler req =
+handler req: Request =
   @(status <= 204, headers <= @[@(name <= "content-length", value <= "5"), @(name <= "x-test", value <= "d28b025")], body <= "hello")
 => :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
 

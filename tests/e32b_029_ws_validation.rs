@@ -144,7 +144,7 @@ fn ws_source(port: u16) -> String {
     format!(
         r#">>> taida-lang/net => @(httpServe, wsUpgrade, wsSend, wsReceive, wsClose)
 
-handler req writer =
+handler req: Request writer: Writer =
   upgrade <= wsUpgrade(req, writer)
   upgrade >=> accepted
   ws <= accepted.ws
@@ -166,7 +166,7 @@ fn ws_source_two_request(port: u16) -> String {
     format!(
         r#">>> taida-lang/net => @(httpServe, wsUpgrade, wsSend, wsReceive, wsClose)
 
-handler req writer =
+handler req: Request writer: Writer =
   upgrade <= wsUpgrade(req, writer)
   upgrade >=> accepted
   ws <= accepted.ws

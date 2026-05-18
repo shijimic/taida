@@ -58,7 +58,7 @@ fn fixture_template() -> &'static str {
     // used by every other h2 test in tests/parity.rs.
     r#">>> taida-lang/net => @(httpServe, HttpProtocol)
 
-handler req =
+handler req: Request =
   @(status <= 200, headers <= @[@(name <= "content-type", value <= "text/plain")], body <= Repeat["x", 512]())
 => :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
 

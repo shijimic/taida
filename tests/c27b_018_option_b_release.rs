@@ -95,7 +95,7 @@ fn write_temp_td(content: &str, stem: &str) -> PathBuf {
 #[cfg(target_os = "linux")]
 fn option_b_repeat_1m_peak_rss_capped() {
     let td = write_temp_td(
-        "iter n =\n  | n == 0 |> 0\n  | _ |>\n      s <= Repeat[\"x\", 512]()\n      iter(n - 1)\n=> :Int\n\nstdout(iter(1000000))\n",
+        "iter n: Int =\n  | n == 0 |> 0\n  | _ |>\n      s <= Repeat[\"x\", 512]()\n      iter(n - 1)\n=> :Int\n\nstdout(iter(1000000))\n",
         "repeat_1m",
     );
     let bin = build_native(&td).expect("native build should succeed");
@@ -157,7 +157,7 @@ fn option_b_repeat_1m_peak_rss_capped() {
 #[cfg(target_os = "linux")]
 fn option_b_runtime_helper_present_in_binary() {
     let td = write_temp_td(
-        "iter n =\n  | n == 0 |> 0\n  | _ |>\n      s <= Repeat[\"x\", 32]()\n      iter(n - 1)\n=> :Int\n\nstdout(iter(10))\n",
+        "iter n: Int =\n  | n == 0 |> 0\n  | _ |>\n      s <= Repeat[\"x\", 32]()\n      iter(n - 1)\n=> :Int\n\nstdout(iter(10))\n",
         "helper_observe",
     );
     let bin = build_native(&td).expect("native build should succeed");

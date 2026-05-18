@@ -146,7 +146,7 @@ fn named_pack_function_field_returns_bool_three_backends() {
     fs::write(
         &main,
         "Predicate = @(check: Int => :Bool)\n\
-         p <= Predicate(check <= _ x = x > 0)\n\
+         p <= Predicate(check <= _ x: Int = x > 0)\n\
          positive <= p.check(7)\n\
          negative <= p.check(-3)\n\
          stdout(positive.toString() + \"|\" + negative.toString())\n",

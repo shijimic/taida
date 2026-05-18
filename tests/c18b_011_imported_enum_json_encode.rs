@@ -210,7 +210,7 @@ fn set_up_package_project() -> PathBuf {
 
     let lib_td = r#"Enum => Color = :Red :Green :Blue
 
-pickColor n =
+pickColor n: Int =
   | n == 0 |> Color:Red()
   | n == 1 |> Color:Green()
   | _ |> Color:Blue()

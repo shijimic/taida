@@ -2,12 +2,12 @@
 // Tests: Map, Filter, Fold, Foldr, Reduce, Take, TakeWhile, Drop, DropWhile
 
 // helper
-double x = x * 2 => :Int
-isEven x =
+double x: Int = x * 2 => :Int
+isEven x: Int =
   Mod[x, 2]() >=> r
   r == 0
 => :Bool
-isSmall x = x < 5 => :Bool
+isSmall x: Int = x < 5 => :Bool
 
 nums <= @[1, 2, 3, 4, 5]
 
@@ -20,15 +20,15 @@ Filter[nums, isEven]() >=> evens
 stdout(Join[evens, " "]())
 
 // -- Fold[list, init, fn]() -- left fold (sum)
-Fold[nums, 0, _ acc x = acc + x]() >=> sum
+Fold[nums, 0, _ acc: Int x: Int = acc + x]() >=> sum
 stdout(sum.toString())
 
 // -- Foldr[list, init, fn]() -- right fold (sum from right)
-Foldr[nums, 0, _ acc x = acc + x]() >=> rsum
+Foldr[nums, 0, _ acc: Int x: Int = acc + x]() >=> rsum
 stdout(rsum.toString())
 
 // -- Reduce (alias of Fold)
-Reduce[nums, 10, _ acc x = acc + x]() >=> reduced
+Reduce[nums, 10, _ acc: Int x: Int = acc + x]() >=> reduced
 stdout(reduced.toString())
 
 // -- Take[list, n]()

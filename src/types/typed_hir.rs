@@ -9,15 +9,16 @@
 //!
 //! ## Design notes
 //!
-//! - **`ExprId` is a span-based hash** so the parser does not have to
-//! carry a node id field. The id is `(start, end, discriminant_tag)`.
-//! Within a single program every observed span is unique.
+//! - **`ExprId` is the AST expression node id** carried in `Span::node_id`.
+//! The parser assigns it in a post-parse pass. Source spans are diagnostic
+//! locations only; they are not expression identity.
 //! - **Side table, not an AST mirror**. The table lives next to the
 //! untyped AST and is keyed by id; consumers query it explicitly.
-//! - **`record(&Expr, Type)` is idempotent**: a second record for the
-//! same expression overwrites the first, which lets bidirectional
-//! lambda inference replace an earlier `Type::Unknown` placeholder
-//! with a hint-resolved function type.
+//! - **`record(&Expr, Type)` is idempotent**: a second concrete record
+//! for the same expression overwrites the first. Bare `Type::Unknown`
+//! remains checker-local and is removed rather than published through
+//! this table; nested residual `Unknown` remains visible so backend
+//! boundaries can reject it.
 
 use std::collections::HashMap;
 
@@ -26,26 +27,13 @@ use crate::parser::Expr;
 use super::types::Type;
 
 /// Stable identifier of an `Expr` in the AST.
-///
-/// `(start, end, discriminant_tag)` triple keyed off the span. Within a
-/// single program a `(span, variant)` pair uniquely identifies an
-/// expression without changing the parser to carry a dedicated node id.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct ExprId {
-    start: usize,
-    end: usize,
-    discriminant: u8,
-}
+pub struct ExprId(pub usize);
 
 impl ExprId {
-    /// Compute a stable id from an expression's span + variant discriminant.
+    /// Read the AST expression node id.
     pub fn from_expr(expr: &Expr) -> Self {
-        let span = expr.span();
-        Self {
-            start: span.start,
-            end: span.end,
-            discriminant: expr_discriminant(expr),
-        }
+        Self(expr.node_id())
     }
 }
 
@@ -61,13 +49,19 @@ impl TypedExprTable {
         Self::default()
     }
 
-    /// Record the inferred type of `expr`. Idempotent: a second record
-    /// for the same expression overwrites the first (last write wins),
-    /// which lets bidirectional lambda inference upgrade an earlier
-    /// placeholder with the hint-resolved function type.
+    /// Record the inferred type of `expr`. Bare `Type::Unknown` means
+    /// "not publishable yet", so it removes any earlier concrete entry
+    /// for that expression. Nested residual `Unknown` is retained and
+    /// caught by invariant checks.
     pub fn record(&mut self, expr: &Expr, ty: Type) {
         let id = ExprId::from_expr(expr);
-        self.types.insert(id, ty);
+        let suppress_unpublishable = matches!(&ty, Type::Unknown)
+            || matches!(&ty, Type::List(inner) if matches!(inner.as_ref(), Type::Unknown));
+        if suppress_unpublishable {
+            self.types.remove(&id);
+        } else {
+            self.types.insert(id, ty);
+        }
     }
 
     /// Lookup the type of `expr`. Returns `None` if not recorded.
@@ -101,42 +95,16 @@ impl TypedExprTable {
         self.types.values().any(|t| t.contains_concrete_unknown())
     }
 
+    pub fn residual_unknown_types(&self) -> Vec<&Type> {
+        self.types
+            .values()
+            .filter(|t| t.contains_concrete_unknown())
+            .collect()
+    }
+
     /// Iterate over all recorded `(ExprId, Type)` pairs.
     pub fn iter(&self) -> impl Iterator<Item = (&ExprId, &Type)> {
         self.types.iter()
-    }
-}
-
-/// Discriminant tag for each `Expr` variant. Used in `ExprId` to disambiguate
-/// expressions that happen to share a `Span` (rare but theoretically possible
-/// when parser nests expressions).
-fn expr_discriminant(expr: &Expr) -> u8 {
-    match expr {
-        Expr::IntLit(_, _) => 1,
-        Expr::FloatLit(_, _) => 2,
-        Expr::StringLit(_, _) => 3,
-        Expr::TemplateLit(_, _) => 4,
-        Expr::BoolLit(_, _) => 5,
-        Expr::Gorilla(_) => 6,
-        Expr::Ident(_, _) => 7,
-        Expr::Placeholder(_) => 8,
-        Expr::Hole(_) => 9,
-        Expr::BuchiPack(_, _) => 10,
-        Expr::ListLit(_, _) => 11,
-        Expr::BinaryOp(_, _, _, _) => 12,
-        Expr::UnaryOp(_, _, _) => 13,
-        Expr::FuncCall(_, _, _) => 14,
-        Expr::MethodCall(_, _, _, _) => 15,
-        Expr::FieldAccess(_, _, _) => 16,
-        Expr::CondBranch(_, _) => 17,
-        Expr::Pipeline(_, _) => 18,
-        Expr::MoldInst(_, _, _, _) => 19,
-        Expr::Unmold(_, _) => 20,
-        Expr::Lambda(_, _, _) => 21,
-        Expr::TypeInst(_, _, _) => 22,
-        Expr::EnumVariant(_, _, _) => 23,
-        Expr::TypeLiteral(_, _, _) => 24,
-        Expr::Throw(_, _) => 25,
     }
 }
 
@@ -152,7 +120,7 @@ mod tests {
     #[test]
     fn record_and_lookup_basic() {
         let mut table = TypedExprTable::new();
-        let expr = Expr::IntLit(42, span(0, 2));
+        let expr = Expr::IntLit(42, span(0, 2).with_node_id(1));
         assert!(table.is_empty());
         table.record(&expr, Type::Int);
         assert_eq!(table.len(), 1);
@@ -162,10 +130,10 @@ mod tests {
     #[test]
     fn record_idempotent_overwrites_with_last_write() {
         let mut table = TypedExprTable::new();
-        let expr = Expr::IntLit(42, span(0, 2));
+        let expr = Expr::IntLit(42, span(0, 2).with_node_id(1));
         table.record(&expr, Type::Unknown);
         table.record(&expr, Type::Int);
-        // Last-write wins (Phase 1.4 hint-付き path 上書き対応)
+        // Last-write wins when hinted inference revisits an expression.
         assert_eq!(table.lookup(&expr), Some(&Type::Int));
         assert_eq!(table.len(), 1);
     }
@@ -173,8 +141,8 @@ mod tests {
     #[test]
     fn is_bool_query() {
         let mut table = TypedExprTable::new();
-        let bool_expr = Expr::BoolLit(true, span(0, 4));
-        let int_expr = Expr::IntLit(42, span(5, 7));
+        let bool_expr = Expr::BoolLit(true, span(0, 4).with_node_id(1));
+        let int_expr = Expr::IntLit(42, span(5, 7).with_node_id(2));
         table.record(&bool_expr, Type::Bool);
         table.record(&int_expr, Type::Int);
         assert!(table.is_bool(&bool_expr));
@@ -182,42 +150,48 @@ mod tests {
     }
 
     #[test]
-    fn has_residual_unknown_detects_unknown() {
+    fn bare_unknown_is_not_published() {
         let mut table = TypedExprTable::new();
-        let e1 = Expr::IntLit(1, span(0, 1));
-        let e2 = Expr::IntLit(2, span(2, 3));
+        let e1 = Expr::IntLit(1, span(0, 1).with_node_id(1));
+        let e2 = Expr::IntLit(2, span(2, 3).with_node_id(2));
         table.record(&e1, Type::Int);
         assert!(!table.has_residual_unknown());
         table.record(&e2, Type::Unknown);
-        assert!(table.has_residual_unknown());
+        assert!(!table.has_residual_unknown());
+        assert_eq!(table.lookup(&e2), None);
+        table.record(&e1, Type::Unknown);
+        assert_eq!(table.lookup(&e1), None);
     }
 
     #[test]
     fn has_residual_unknown_detects_nested_unknown() {
         let mut table = TypedExprTable::new();
-        let e = Expr::ListLit(vec![], span(0, 2));
-        table.record(&e, Type::List(Box::new(Type::Unknown)));
+        let e = Expr::ListLit(vec![], span(0, 2).with_node_id(1));
+        table.record(
+            &e,
+            Type::Generic("Result".to_string(), vec![Type::Int, Type::Unknown]),
+        );
         assert!(table.has_residual_unknown());
     }
 
     #[test]
-    fn discriminant_disambiguates_same_span() {
-        // 2 expressions with the same span (theoretical edge case) get
-        // different ids via discriminant.
+    fn node_id_disambiguates_same_span_same_variant() {
+        // Two equivalent expression shapes with the same source span still
+        // get distinct ids when they are distinct AST nodes.
         let mut table = TypedExprTable::new();
-        let int_expr = Expr::IntLit(0, span(0, 1));
-        let bool_expr = Expr::BoolLit(true, span(0, 1));
-        table.record(&int_expr, Type::Int);
-        table.record(&bool_expr, Type::Bool);
-        assert_eq!(table.lookup(&int_expr), Some(&Type::Int));
-        assert_eq!(table.lookup(&bool_expr), Some(&Type::Bool));
+        let first = Expr::IntLit(0, span(0, 1).with_node_id(1));
+        let second = Expr::IntLit(0, span(0, 1).with_node_id(2));
+        table.record(&first, Type::Int);
+        table.record(&second, Type::Float);
+        assert_eq!(table.lookup(&first), Some(&Type::Int));
+        assert_eq!(table.lookup(&second), Some(&Type::Float));
         assert_eq!(table.len(), 2);
     }
 
     #[test]
     fn lookup_returns_none_for_unrecorded() {
         let table = TypedExprTable::new();
-        let expr = Expr::IntLit(42, span(0, 2));
+        let expr = Expr::IntLit(42, span(0, 2).with_node_id(1));
         assert!(table.lookup(&expr).is_none());
         assert!(!table.is_bool(&expr));
     }
@@ -225,8 +199,8 @@ mod tests {
     #[test]
     fn iter_yields_all_recorded() {
         let mut table = TypedExprTable::new();
-        let e1 = Expr::IntLit(1, span(0, 1));
-        let e2 = Expr::StringLit("x".to_string(), span(2, 5));
+        let e1 = Expr::IntLit(1, span(0, 1).with_node_id(1));
+        let e2 = Expr::StringLit("x".to_string(), span(2, 5).with_node_id(2));
         table.record(&e1, Type::Int);
         table.record(&e2, Type::Str);
         let entries: Vec<_> = table.iter().collect();

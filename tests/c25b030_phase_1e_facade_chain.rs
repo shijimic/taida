@@ -981,8 +981,9 @@ State <= @(
   action <= 0
 )
 
-MakeState initial =
+MakeState initial: Str =
   State(text <= initial, cursor <= initial.length(), action <= 0)
+=> :@(text: Str, cursor: Int, action: Int)
 
 <<< @(MakeState)
 "#;
@@ -1046,8 +1047,9 @@ State <= @(
   action <= 0
 )
 
-MakeState initial =
+MakeState initial: Str =
   State(text <= initial, action <= 0)
+=> :@(text: Str, action: Int)
 
 <<< @(State, MakeState)
 "#;

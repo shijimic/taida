@@ -87,7 +87,7 @@ fn e31_way_check_is_parse_and_type_only() {
     write_file(
         &src,
         r#"
-risky x =
+risky x: Str =
   Error(message <= "boom").throw()
 => :Str
 "#,
@@ -128,7 +128,7 @@ fn e31_way_verify_exits_nonzero_for_error_in_any_format() {
     write_file(
         &src,
         r#"
-risky x =
+risky x: Str =
   Error(message <= "boom").throw()
 => :Str
 "#,

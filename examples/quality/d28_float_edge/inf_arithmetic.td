@@ -7,24 +7,26 @@
 
 // (1) +Infinity from overflow division.
 Div[1e308, 1e-308] >=> big
-debug(big)
+big_value: Float <= big
+debug(big_value)
 
 // (2) -Infinity from negative overflow.
 Div[-1e308, 1e-308] >=> negbig
-debug(negbig)
+negbig_value: Float <= negbig
+debug(negbig_value)
 
 // (3) Mod[finite, +Inf] = finite (the dividend itself, sign preserved).
-Mod[1.5, big] >=> m_pos
+Mod[1.5, big_value] >=> m_pos
 debug(m_pos)
 
 // (4) Mod[finite, -Inf] = finite (still the dividend).
-Mod[2.5, negbig] >=> m_neg
+Mod[2.5, negbig_value] >=> m_neg
 debug(m_neg)
 
 // (5) Inf + finite = Inf.
-plus_inf <= big + 1.0
+plus_inf <= big_value + 1.0
 debug(plus_inf)
 
 // (6) -Inf - finite = -Inf.
-minus_inf <= negbig - 1.0
+minus_inf <= negbig_value - 1.0
 debug(minus_inf)

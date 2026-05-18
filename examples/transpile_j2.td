@@ -4,7 +4,7 @@ asuka <= Pilot(name <= "Asuka", age <= 14)
 debug(asuka.name)
 debug(asuka.age)
 
-double <= _ x = x * 2
+double <= _ x: Int = x * 2
 debug(double(5))
 
 nums <= @[1, 2, 3]

@@ -354,12 +354,13 @@ fn phase_1f_facade_funcdef_arity_and_guards_match_interpreter() {
     std::fs::create_dir_all(&project).unwrap();
 
     let terminal_td = r#"
-Clamp n lo hi =
+Clamp n: Int lo: Int hi: Int =
   | n < lo |> lo
   | n > hi |> hi
   | _      |> n
+=> :Int
 
-Sum3 a b c = a + b + c => :Int
+Sum3 a: Int b: Int c: Int = a + b + c => :Int
 
 Tag name = `<${name}>` => :Str
 

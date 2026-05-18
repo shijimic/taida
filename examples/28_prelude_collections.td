@@ -7,9 +7,9 @@ stdout("Empty HashMap: " + m.toString())
 stdout("isEmpty: " + m.isEmpty().toString())
 
 // set / get
-m2 <= m.set("name", "Asuka").set("age", 14)
+m2 <= m.set("name", "Asuka").set("age", "14")
 stdout("m2.get('name') = " + m2.get("name").getOrDefault(""))
-stdout("m2.get('age') = " + m2.get("age").getOrDefault(0).toString())
+stdout("m2.get('age') = " + m2.get("age").getOrDefault("0"))
 stdout("m2.get('missing') = " + m2.get("missing").getOrDefault("default"))
 
 // has / size
@@ -25,10 +25,10 @@ m3 <= m2.remove("age")
 stdout("After remove('age'): size = " + m3.size().toString())
 
 // merge
-other <= hashMap().set("age", 25).set("city", "Tokyo")
+other <= hashMap().set("age", "25").set("city", "Tokyo")
 merged <= m2.merge(other)
 stdout("After merge: size = " + merged.size().toString())
-stdout("Merged age = " + merged.get("age").getOrDefault(0).toString())
+stdout("Merged age = " + merged.get("age").getOrDefault("0"))
 
 // entries
 stdout("entries count = " + merged.entries().length().toString())

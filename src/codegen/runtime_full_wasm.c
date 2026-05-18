@@ -80,10 +80,10 @@ extern void *memcpy(void *dest, const void *src, unsigned long n);
 static int _wf_is_valid_ptr(int64_t val, unsigned int min_bytes);
 
 /// Helper: check if a pointer is a positively-identified WASM list.
-/// C23B-005 (2026-04-22): matches the `WASM_LIST_MAGIC` stamp that
-/// `taida_list_new` writes at `data[3]`. The previous cap/len range
-/// heuristic false-positived on any untagged large Int that aliased a
-/// heap allocation. Stays in sync with `_looks_like_list` in
+/// Matches the `WASM_LIST_MAGIC` stamp that `taida_list_new` writes at
+/// `data[3]`. The previous cap/len range heuristic false-positived on
+/// any untagged large Int that aliased a heap allocation. Stays in sync
+/// with `_looks_like_list` in
 /// `src/codegen/runtime_core_wasm/01_core.inc.c`.
 static int _wf_looks_like_list(int64_t ptr) {
     if (!_wf_is_valid_ptr(ptr, 32)) return 0;

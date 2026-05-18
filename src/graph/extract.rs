@@ -1709,8 +1709,7 @@ mod tests {
 
     #[test]
     fn test_dataflow_unmold_forward() {
-        let source =
-            "numbers <= @[1, 2, 3]\ndoubleFn x =\n  x * 2\nMap[numbers, doubleFn]() >=> doubled";
+        let source = "numbers <= @[1, 2, 3]\ndoubleFn x =\n  x * 2\n=> :Int\nMap[numbers, doubleFn]() >=> doubled";
         let graph = parse_and_extract(source, GraphView::Dataflow);
         assert!(graph.nodes.iter().any(|n| n.label == "doubled"));
         assert!(
@@ -1723,7 +1722,7 @@ mod tests {
 
     #[test]
     fn test_dataflow_function_call() {
-        let source = "add x y =\n  x + y\nresult <= add(1, 2)";
+        let source = "add x y =\n  x + y\n=> :Int\nresult <= add(1, 2)";
         let graph = parse_and_extract(source, GraphView::Dataflow);
         assert!(graph.nodes.iter().any(|n| n.kind == NodeKind::FunctionCall));
         assert!(graph.edges.iter().any(|e| e.kind == EdgeKind::Argument));
@@ -1810,7 +1809,7 @@ mod tests {
 
     #[test]
     fn test_call_graph_basic() {
-        let source = "add x y =\n  x + y\n\ndouble x =\n  add(x, x)\n\nresult <= double(5)";
+        let source = "add x y =\n  x + y\n=> :Int\n\ndouble x =\n  add(x, x)\n=> :Int\n\nresult <= double(5)";
         let graph = parse_and_extract(source, GraphView::Call);
         assert!(
             graph
@@ -1835,7 +1834,8 @@ mod tests {
 
     #[test]
     fn test_call_graph_lambda() {
-        let source = "numbers <= @[1, 2, 3]\ndoubleFn x =\n  x * 2\nMap[numbers, doubleFn]()";
+        let source =
+            "numbers <= @[1, 2, 3]\ndoubleFn x =\n  x * 2\n=> :Int\nMap[numbers, doubleFn]()";
         let graph = parse_and_extract(source, GraphView::Call);
         assert!(graph.nodes.iter().any(|n| n.kind == NodeKind::Entrypoint));
     }
@@ -1844,7 +1844,7 @@ mod tests {
     fn test_call_graph_func_ref_in_body() {
         // A function assigned to a variable inside another function's body
         // should create a reference edge and not be considered dead code.
-        let source = "helper x =\n  x + 1\n\nwrapper =\n  callback <= helper\n  callback(5)\n=> :Int\n\nresult <= wrapper()";
+        let source = "helper x =\n  x + 1\n=> :Int\n\nwrapper =\n  callback <= helper\n  callback(5)\n=> :Int\n\nresult <= wrapper()";
         let graph = parse_and_extract(source, GraphView::Call);
         // helper should have an edge from wrapper (referenced inside body)
         let wrapper_node = graph.nodes.iter().find(|n| n.label == "wrapper");
@@ -1865,7 +1865,8 @@ mod tests {
     #[test]
     fn test_call_graph_func_ref_in_expr_stmt() {
         // A function referenced in a top-level expression statement (e.g., passed as argument)
-        let source = "process x =\n  x * 2\n\napply fn x =\n  fn(x)\n\napply(process, 5)";
+        let source =
+            "process x =\n  x * 2\n=> :Int\n\napply fn x =\n  fn(x)\n=> :Int\n\napply(process, 5)";
         let graph = parse_and_extract(source, GraphView::Call);
         let process_node = graph.nodes.iter().find(|n| n.label == "process");
         assert!(process_node.is_some(), "process function node should exist");
@@ -1982,7 +1983,7 @@ outer input =
     #[test]
     fn test_call_graph_tail_call_basic() {
         // The last expression in `wrapper` is a call to `helper` — this is a tail call.
-        let source = "helper x =\n  x + 1\n\nwrapper x =\n  helper(x)\n=> :Int";
+        let source = "helper x =\n  x + 1\n=> :Int\n\nwrapper x =\n  helper(x)\n=> :Int";
         let graph = parse_and_extract(source, GraphView::Call);
         let wrapper_node = graph.nodes.iter().find(|n| n.label == "wrapper").unwrap();
         let has_tail = graph.edges.iter().any(|e| {
@@ -1996,7 +1997,7 @@ outer input =
     #[test]
     fn test_call_graph_non_tail_call() {
         // `add(x, x)` is NOT in tail position because there is a statement after it.
-        let source = "add x y =\n  x + y\n\ndouble x =\n  add(x, x)\n  42\n=> :Int";
+        let source = "add x y =\n  x + y\n=> :Int\n\ndouble x =\n  add(x, x)\n  42\n=> :Int";
         let graph = parse_and_extract(source, GraphView::Call);
         let double_node = graph.nodes.iter().find(|n| n.label == "double").unwrap();
         let has_tail = graph.edges.iter().any(|e| {
@@ -2015,7 +2016,7 @@ outer input =
     #[test]
     fn test_call_graph_tail_call_in_cond_branch() {
         // Tail call within a conditional branch arm (last expression is CondBranch with calls)
-        let source = "helper x =\n  x + 1\n\nother x =\n  x * 2\n\nwrapper x =\n  | x > 0 |> helper(x)\n  | _ |> other(x)";
+        let source = "helper x =\n  x + 1\n=> :Int\n\nother x =\n  x * 2\n=> :Int\n\nwrapper x =\n  | x > 0 |> helper(x)\n  | _ |> other(x)\n=> :Int";
         let graph = parse_and_extract(source, GraphView::Call);
         let wrapper_node = graph.nodes.iter().find(|n| n.label == "wrapper").unwrap();
         let tail_edges: Vec<_> = graph
@@ -2036,7 +2037,8 @@ outer input =
     #[test]
     fn test_call_graph_tail_call_recursive() {
         // Recursive tail call: factorial-like pattern
-        let source = "factorial n acc =\n  | n < 1 |> acc\n  | _ |> factorial(n - 1, n * acc)";
+        let source =
+            "factorial n acc =\n  | n < 1 |> acc\n  | _ |> factorial(n - 1, n * acc)\n=> :Int";
         let graph = parse_and_extract(source, GraphView::Call);
         let has_tail = graph
             .edges

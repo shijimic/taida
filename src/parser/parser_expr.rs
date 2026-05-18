@@ -487,14 +487,19 @@ impl Parser {
     }
 
     pub(super) fn parse_lambda(&mut self, start_span: Span) -> Result<Expr, ParseError> {
-        // `_ x y = expr` -> Lambda([x, y], expr)
+        // `_ x: Int y: Int = expr` -> Lambda([x, y], expr)
         let mut params = Vec::new();
         while self.check_ident() {
             let param_span = self.current_span();
             let param_name = self.expect_ident()?;
+            let type_annotation = if self.match_token(&TokenKind::Colon) {
+                Some(self.parse_type_expr()?)
+            } else {
+                None
+            };
             params.push(Param {
                 name: param_name,
-                type_annotation: None,
+                type_annotation,
                 default_value: None,
                 span: param_span,
             });

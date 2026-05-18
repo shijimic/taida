@@ -33,8 +33,9 @@ stdout(TypeIs["abc", :Int]())
 // rather than here so this fixture stays wasm-* compatible.
 
 // ── Pack round-trip through a user function ─────────────
-wrap s =
+wrap s: Str =
     @(label <= "up", value <= s)
+=> :@(label: Str, value: Str)
 p <= wrap(Upper["hello"]())
 stdout(p.value)
 stdout(p.label)

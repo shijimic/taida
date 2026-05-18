@@ -53,7 +53,7 @@ flat <= Flatten[nested]()
 stdout(Sum[flat]().toString())
 
 // -- FindIndex
-isEven x =
+isEven x: Int =
   Mod[x, 2]() >=> r
   r == 0
 => :Bool

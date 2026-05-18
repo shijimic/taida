@@ -83,7 +83,7 @@ fn set_up_project() -> PathBuf {
     // Enum exporter — package entry point.
     let lib_td = r#"Enum => Color = :Red :Green :Blue
 
-pickColor n =
+pickColor n: Int =
   | n == 0 |> Color:Red()
   | n == 1 |> Color:Green()
   | _ |> Color:Blue()

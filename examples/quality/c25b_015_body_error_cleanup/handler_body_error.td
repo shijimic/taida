@@ -16,17 +16,17 @@
 Error => FirstError = @()
 Error => SecondError = @()
 
-throwFirst msg =
+throwFirst msg: Str =
   FirstError(type <= "FirstError", message <= msg).throw()
   ""
 => :Str
 
-throwSecond msg =
+throwSecond msg: Str =
   SecondError(type <= "SecondError", message <= msg).throw()
   ""
 => :Str
 
-trial input =
+trial input: Str =
   |== outer: Error =
     "outer:" + outer.message + " inner-tag=gone"
   => :Str

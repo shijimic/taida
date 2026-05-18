@@ -12,7 +12,7 @@
 // pre-existing JS codegen duplicate-identifier bug on PascalCase
 // user FuncDef names (see C25B-033, isolated during Phase 9).
 sep <= "-"
-joiner a b =
+joiner a: Str b: Str =
   `${a}${sep}${b}`
 => :Str
 

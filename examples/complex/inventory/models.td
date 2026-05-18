@@ -12,26 +12,28 @@ Error => InventoryError = @(reason: Str)
 InventoryError => StockError = @(item: Str)
 
 // --- Factory functions ---
-mkStocked name price qty =
+mkStocked name: Str price: Int qty: Int =
   StockedItem(name <= name, price <= price, qty <= qty)
+=> :StockedItem
 
-mkPerishable name price qty days_left =
+mkPerishable name: Str price: Int qty: Int days_left: Int =
   PerishableItem(name <= name, price <= price, qty <= qty, days_left <= days_left)
+=> :PerishableItem
 
 // --- Domain predicates ---
-totalValue item =
+totalValue item: StockedItem =
   item.price * item.qty
 => :Int
 
-isLowStock item =
+isLowStock item: StockedItem =
   item.qty < 5
 => :Bool
 
-isExpensive item =
+isExpensive item: StockedItem =
   item.price > 100
 => :Bool
 
-isExpiring item =
+isExpiring item: PerishableItem =
   item.days_left < 3
 => :Bool
 

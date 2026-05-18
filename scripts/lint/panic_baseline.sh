@@ -43,7 +43,7 @@ set -euo pipefail
 # Each entry is `path:line` relative to the repo root, sorted ascending.
 # Update only with explicit review.
 PANIC_BASELINE=(
-  "src/parser/ast.rs:566"
+  "src/parser/ast.rs:756"
 )
 PANIC_BASELINE_COUNT=${#PANIC_BASELINE[@]}
 

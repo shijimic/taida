@@ -121,11 +121,12 @@ fn spawn_2arg_server_and_post_body(backend: &str, port: u16, body: &[u8]) -> (St
     let source = format!(
         r#">>> taida-lang/net => @(httpServe, readBody)
 
-handler req writer =
+handler req: Request writer: Writer =
   bodyBytes <= readBody(req)
   decoded <= Utf8Decode[bodyBytes]()
   decoded >=> bodyText
   @(status <= 200, headers <= @[@(name <= "Content-Type", value <= "text/plain")], body <= bodyText)
+=> :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
 
 asyncResult <= httpServe({port}, handler, 1)
 asyncResult >=> result

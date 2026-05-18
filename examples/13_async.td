@@ -15,7 +15,7 @@ stdout("isFulfilled: " + resolved.isFulfilled().toString())
 stdout("isRejected: " + resolved.isRejected().toString())
 
 // Create a rejected async
-rejected <= AsyncReject["something went wrong"]()
+rejected: Async[Str] <= AsyncReject["something went wrong"]()
 stdout("Rejected async: " + rejected.toString())
 stdout("isRejected: " + rejected.isRejected().toString())
 
@@ -24,7 +24,7 @@ stdout("getOrDefault fulfilled: " + resolved.getOrDefault(0).toString())
 stdout("getOrDefault rejected: " + rejected.getOrDefault(99).toString())
 
 // map — transform the inner value
-double x =
+double x: Int =
   x * 2
 => :Int
 
@@ -33,7 +33,7 @@ doubled >=> doubledVal
 stdout("Mapped (42 * 2): " + doubledVal.toString())
 
 // map on rejected propagates rejection
-rejectedMapped <= rejected.map(double)
+rejectedMapped <= rejected.map(_ x: Str = x + "!")
 stdout("Map on rejected still rejected: " + rejectedMapped.isRejected().toString())
 
 // All — collect all results
@@ -59,15 +59,16 @@ fetchData key: Str =
 
   a <= AsyncReject["network error"]()
   a >=> data
-  data
+  data.toString()
 => :Str
 
 result <= fetchData("config")
 stdout("Error ceiling result: " + result)
 
 // Chaining async operations
-addTen x =
+addTen x: Int =
   Async[x + 10]()
+=> :Async[Int]
 
 a <= Async[0]()
 a >=> v1

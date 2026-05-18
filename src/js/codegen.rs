@@ -5443,10 +5443,11 @@ mod tests {
     #[test]
     fn test_os_async_function_call_marks_function_async() {
         let src = r#"
-fetchUdp p =
+fetchUdp p: Int =
   s <= udpBind("127.0.0.1", 0)
   s >=> v
   v
+=> :Molten
 "#;
         let js = transpile(src).expect("transpile should succeed");
         assert!(

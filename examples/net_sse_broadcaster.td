@@ -18,7 +18,7 @@
 
 >>> taida-lang/net => @(httpServe, sseEvent, endResponse)
 
-handler req writer =
+handler req: Request writer: Writer =
   sseEvent(writer, "status", "online")
   sseEvent(writer, "tick", "1")
   sseEvent(writer, "tick", "2")

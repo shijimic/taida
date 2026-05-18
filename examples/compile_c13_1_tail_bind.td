@@ -12,7 +12,7 @@
 // See docs/guide/07_control_flow.md for the full rule.
 
 // ── 1. arm body, tail `name <= expr` ─────────────────────────
-armTailAssign x =
+armTailAssign x: Int =
   | x > 0 |>
     doubled <= x * 2
     result <= doubled + 1
@@ -22,7 +22,7 @@ armTailAssign x =
 stdout(armTailAssign(5).toString())
 
 // ── 2. arm body, tail `expr => name` ─────────────────────────
-armTailForward x =
+armTailForward x: Int =
   | x > 0 |>
     x * 2 => doubled
   | _ |> 0
@@ -31,7 +31,7 @@ armTailForward x =
 stdout(armTailForward(7).toString())
 
 // ── 3. arm body, tail `expr >=> name` (unmold forward) ──────
-armTailUnmold x =
+armTailUnmold x: Int =
   | x > 0 |>
     lax <= Lax[x * 10]()
     lax >=> n
@@ -49,7 +49,7 @@ funcTailForward =
 stdout(funcTailForward().toString())
 
 // ── 5. function body, tail `name <= expr` ────────────────────
-funcTailAssign x y =
+funcTailAssign x: Int y: Int =
   total <= x + y
   shifted <= total + 1
 => :Int

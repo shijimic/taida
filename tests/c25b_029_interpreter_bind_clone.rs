@@ -70,8 +70,9 @@ fn clone_probe_fixture() -> String {
         .collect::<Vec<_>>()
         .join(", ");
 
-    let mut fixture =
-        String::from("touch p =\n  @(cols <= p.cols, rows <= p.rows, cells <= p.cells)\n\n");
+    let mut fixture = String::from(
+        "touch p: @(cols: Int, rows: Int, cells: @[@(ch: Str, fg: Str, bg: Str)]) =\n  @(cols <= p.cols, rows <= p.rows, cells <= p.cells)\n=> :@(cols: Int, rows: Int, cells: @[@(ch: Str, fg: Str, bg: Str)])\n\n",
+    );
     fixture.push_str("cells <= @[");
     fixture.push_str(&cells);
     fixture.push_str("]\n");

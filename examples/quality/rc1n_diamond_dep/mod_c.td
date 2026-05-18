@@ -2,8 +2,8 @@
 
 >>> ./mod_d.td => @(shared)
 
-_c_helper x = shared(x) => :Str
+_c_helper x: Str = shared(x) => :Str
 
-fromC x = "C:" + _c_helper(x) => :Str
+fromC x: Str = "C:" + _c_helper(x) => :Str
 
 <<< @(fromC)

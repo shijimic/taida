@@ -11,16 +11,14 @@ use crate::parser::*;
 /// - Structural subtyping (width subtyping)
 /// - Scope-aware type inference
 ///
-/// ## Type inference convention: `unwrap_or(Type::Unknown)` (N-67)
+/// ## Type inference convention
 ///
-/// Throughout this module, `.unwrap_or(Type::Unknown)` is the standard fallback
-/// when type information is unavailable (e.g., unresolved generics, missing
-/// function parameter types, cross-module imports). `Type::Unknown` is **not**
-/// an error type -- it is a valid propagation signal meaning "the checker cannot
-/// determine this type statically." Unknown propagates silently through
-/// expressions, and downstream checks skip validation when either operand is
-/// Unknown. This prevents cascading false-positive errors while still catching
-/// errors where types are fully known.
+/// `Type::Unknown` is a checker-local sentinel for in-flight inference,
+/// recovery after an already emitted error, or an explicitly opaque
+/// boundary that has not yet been modeled as a concrete Taida type. It is
+/// not a subtype wildcard, and user-authored function, lambda, method, or
+/// lowering boundaries must resolve to concrete types or report a
+/// diagnostic.
 use std::collections::{HashMap, HashSet};
 
 /// bypass closure (2026-04-15, root fix): field names reserved
@@ -408,7 +406,10 @@ impl TypeChecker {
     }
 
     fn result_type(success_ty: Type) -> Type {
-        Type::Generic("Result".to_string(), vec![success_ty, Type::Unknown])
+        Type::Generic(
+            "Result".to_string(),
+            vec![success_ty, Type::Named("ErrorInfo".to_string())],
+        )
     }
 
     fn async_type(inner_ty: Type) -> Type {
@@ -1772,6 +1773,7 @@ impl TypeChecker {
                         end: 0,
                         line: 1,
                         column: 1,
+            node_id: 0,
                     }),
             });
             return;
@@ -1795,6 +1797,7 @@ impl TypeChecker {
                         end: 0,
                         line: 1,
                         column: 1,
+            node_id: 0,
                     }),
             });
         }
@@ -2677,6 +2680,24 @@ impl TypeChecker {
         // backend treats it as a regular call (see
         // docs/reference/tail_recursion.md).
         self.check_mutual_recursion_errors(program);
+
+        if self.typed_expr_table.has_residual_unknown() {
+            let residuals = self
+                .typed_expr_table
+                .residual_unknown_types()
+                .into_iter()
+                .take(5)
+                .map(|ty| ty.to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
+            self.errors.push(TypeError {
+                message: format!(
+                    "[E1529] Type inference left unresolved type(s): {}. Add explicit type annotations.",
+                    residuals
+                ),
+                span: Span::new(0, 0, 1, 1),
+            });
+        }
     }
 
     /// Run the `mutual-recursion` verify check and surface any findings as
@@ -2729,6 +2750,7 @@ impl TypeChecker {
                 .map(|line| Span {
                     line,
                     column: 1,
+                    node_id: 0,
                     start: 0,
                     end: 0,
                 })
@@ -2742,6 +2764,7 @@ impl TypeChecker {
                 .unwrap_or(Span {
                     line: 1,
                     column: 1,
+                    node_id: 0,
                     start: 0,
                     end: 0,
                 });
@@ -3093,32 +3116,26 @@ impl TypeChecker {
                     self.generic_func_defs.remove(&fd.name);
                 } else if fd.type_params.is_empty() || generic_is_inferable {
                     self.invalid_func_defs.remove(&fd.name);
-                    if fd.type_params.is_empty() {
-                        self.func_defs.insert(fd.name.clone(), fd.clone());
-                    }
-                    // Register function return type for later lookup
-                    let ret_ty = fd
-                        .return_type
-                        .as_ref()
-                        .map(|t| self.registry.resolve_type(t))
-                        .unwrap_or(Type::Unknown);
-                    self.func_types.insert(fd.name.clone(), ret_ty);
-                    self.func_param_counts
-                        .insert(fd.name.clone(), fd.params.len());
-                    // Register parameter types for partial application type inference
-                    let param_types: Vec<Type> = fd
-                        .params
-                        .iter()
-                        .map(|p| {
-                            p.type_annotation
-                                .as_ref()
-                                .map(|t| self.registry.resolve_type(t))
-                                .unwrap_or(Type::Unknown)
-                        })
-                        .collect();
-                    self.func_param_types.insert(fd.name.clone(), param_types);
-                    if !fd.type_params.is_empty() {
-                        self.generic_func_defs.insert(fd.name.clone(), fd.clone());
+                    if let Some((param_types, ret_ty)) = self.finalize_named_function_signature(fd)
+                    {
+                        if fd.type_params.is_empty() {
+                            self.func_defs.insert(fd.name.clone(), fd.clone());
+                        }
+                        self.func_types.insert(fd.name.clone(), ret_ty);
+                        self.func_param_counts
+                            .insert(fd.name.clone(), fd.params.len());
+                        self.func_param_types.insert(fd.name.clone(), param_types);
+                        if !fd.type_params.is_empty() {
+                            self.generic_func_defs.insert(fd.name.clone(), fd.clone());
+                        }
+                    } else {
+                        self.invalid_func_defs.insert(fd.name.clone());
+                        self.func_types.remove(&fd.name);
+                        self.func_param_counts.remove(&fd.name);
+                        self.func_param_types.remove(&fd.name);
+                        self.func_defs.remove(&fd.name);
+                        self.func_def_scope_depths.remove(&fd.name);
+                        self.generic_func_defs.remove(&fd.name);
                     }
                 } else {
                     self.invalid_func_defs.insert(fd.name.clone());
@@ -3341,7 +3358,8 @@ impl TypeChecker {
 
     fn mold_header_type_compatible(&self, actual: &Type, expected: &Type) -> bool {
         match (actual, expected) {
-            (_, Type::Unknown) | (Type::Unknown, _) => true,
+            (Type::Unknown, Type::Unknown) => true,
+            (Type::Unknown, _) | (_, Type::Unknown) => false,
             (
                 Type::Function(actual_params, actual_ret),
                 Type::Function(expected_params, expected_ret),
@@ -4020,6 +4038,163 @@ defaulted fields must be provided via `()`",
             span: span.clone(),
         });
         false
+    }
+
+    fn finalize_named_function_signature(&mut self, fd: &FuncDef) -> Option<(Vec<Type>, Type)> {
+        let Some(return_type) = &fd.return_type else {
+            self.errors.push(TypeError {
+                message: format!(
+                    "[E1526] Function '{}' must declare a return type with `=> :Type`.",
+                    fd.name
+                ),
+                span: fd.span.clone(),
+            });
+            return None;
+        };
+
+        let ret_ty = self.registry.resolve_type(return_type);
+        let mut param_types: Vec<Type> = fd
+            .params
+            .iter()
+            .map(|p| {
+                p.type_annotation
+                    .as_ref()
+                    .map(|t| self.registry.resolve_type(t))
+                    .unwrap_or(Type::Unknown)
+            })
+            .collect();
+
+        if let Some(tail_expr) = fd.body.last().and_then(Statement::yielded_expr) {
+            self.current_func_type_params.push(fd.type_params.clone());
+            self.collect_named_function_param_constraints(fd, tail_expr, &ret_ty, &mut param_types);
+            self.current_func_type_params.pop();
+        }
+
+        let mut ok = true;
+        for (idx, param) in fd.params.iter().enumerate() {
+            let ty = param_types.get(idx).cloned().unwrap_or(Type::Unknown);
+            if Self::contains_unknown(&ty) {
+                self.errors.push(TypeError {
+                    message: format!(
+                        "[E1525] Cannot infer type of parameter '{}' in function '{}'. Add a type annotation.",
+                        param.name, fd.name
+                    ),
+                    span: param.span.clone(),
+                });
+                ok = false;
+            }
+        }
+
+        ok.then_some((param_types, ret_ty))
+    }
+
+    fn collect_named_function_param_constraints(
+        &mut self,
+        fd: &FuncDef,
+        expr: &Expr,
+        expected: &Type,
+        param_types: &mut [Type],
+    ) {
+        match expr {
+            Expr::Ident(name, span) => {
+                self.constrain_named_function_param(fd, name, expected, param_types, span);
+            }
+            Expr::BinaryOp(left, op, right, span) => {
+                if let Some(operand_ty) = self.binary_operand_constraint_from_expected(op, expected)
+                {
+                    self.collect_named_function_param_constraints(
+                        fd,
+                        left,
+                        &operand_ty,
+                        param_types,
+                    );
+                    self.collect_named_function_param_constraints(
+                        fd,
+                        right,
+                        &operand_ty,
+                        param_types,
+                    );
+                } else if matches!(op, BinOp::Add) {
+                    self.errors.push(TypeError {
+                        message: format!(
+                            "[E1525] Cannot resolve overloaded '+' in function '{}'. Add parameter annotations or use a concrete return type.",
+                            fd.name
+                        ),
+                        span: span.clone(),
+                    });
+                }
+            }
+            Expr::UnaryOp(_, inner, _) => {
+                self.collect_named_function_param_constraints(fd, inner, expected, param_types);
+            }
+            Expr::Unmold(base, _) | Expr::Throw(base, _) => {
+                self.collect_named_function_param_constraints(fd, base, expected, param_types);
+            }
+            Expr::FieldAccess(_, _, _) => {}
+            Expr::CondBranch(arms, _) => {
+                for arm in arms {
+                    if let Some(arm_expr) = arm.last_expr() {
+                        self.collect_named_function_param_constraints(
+                            fd,
+                            arm_expr,
+                            expected,
+                            param_types,
+                        );
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn binary_operand_constraint_from_expected(&self, op: &BinOp, expected: &Type) -> Option<Type> {
+        match op {
+            BinOp::Add => match expected {
+                Type::Int | Type::Float | Type::Num | Type::Str => Some(expected.clone()),
+                Type::Named(name) if self.type_param_is_numeric(name) => Some(expected.clone()),
+                _ => None,
+            },
+            BinOp::Sub | BinOp::Mul => match expected {
+                Type::Int | Type::Float | Type::Num => Some(expected.clone()),
+                Type::Named(name) if self.type_param_is_numeric(name) => Some(expected.clone()),
+                _ => None,
+            },
+            BinOp::Lt | BinOp::Gt | BinOp::GtEq => None,
+            BinOp::Eq | BinOp::NotEq | BinOp::And | BinOp::Or | BinOp::Concat => None,
+        }
+    }
+
+    fn constrain_named_function_param(
+        &mut self,
+        fd: &FuncDef,
+        name: &str,
+        expected: &Type,
+        param_types: &mut [Type],
+        span: &Span,
+    ) {
+        if matches!(expected, Type::Unknown) || Self::contains_unknown(expected) {
+            return;
+        }
+        let Some(idx) = fd.params.iter().position(|param| param.name == name) else {
+            return;
+        };
+        let current = param_types.get(idx).cloned().unwrap_or(Type::Unknown);
+        if current == Type::Unknown {
+            param_types[idx] = expected.clone();
+            return;
+        }
+        if current != *expected
+            && !self.registry.is_subtype_of(&current, expected)
+            && !self.registry.is_subtype_of(expected, &current)
+        {
+            self.errors.push(TypeError {
+                message: format!(
+                    "[E1525] Conflicting inferred type for parameter '{}' in function '{}': {} vs {}.",
+                    name, fd.name, current, expected
+                ),
+                span: span.clone(),
+            });
+        }
     }
 
     fn validate_function_param_defaults(&mut self, fd: &FuncDef, param_types: &[Type]) {
@@ -4815,21 +4990,31 @@ defaulted fields must be provided via `()`",
                 }
             }
             Statement::FuncDef(fd) => {
-                let ret_ty = fd
-                    .return_type
-                    .as_ref()
-                    .map(|t| self.registry.resolve_type(t))
-                    .unwrap_or(Type::Unknown);
-                let param_types: Vec<Type> = fd
-                    .params
-                    .iter()
-                    .map(|p| {
-                        p.type_annotation
+                let ret_ty = self
+                    .func_types
+                    .get(&fd.name)
+                    .cloned()
+                    .or_else(|| {
+                        fd.return_type
                             .as_ref()
                             .map(|t| self.registry.resolve_type(t))
-                            .unwrap_or(Type::Unknown)
                     })
-                    .collect();
+                    .unwrap_or(Type::Unknown);
+                let param_types: Vec<Type> = self
+                    .func_param_types
+                    .get(&fd.name)
+                    .cloned()
+                    .unwrap_or_else(|| {
+                        fd.params
+                            .iter()
+                            .map(|p| {
+                                p.type_annotation
+                                    .as_ref()
+                                    .map(|t| self.registry.resolve_type(t))
+                                    .unwrap_or(Type::Unknown)
+                            })
+                            .collect()
+                    });
 
                 // F42 sweep [E1520] R1: reject `:@()` / `:Unit` / `:Void` as
                 // return type annotation on Taida-surface function definitions.
@@ -5598,7 +5783,7 @@ defaulted fields must be provided via `()`",
         }
 
         let error_len = self.errors.len();
-        let table_snapshot = self.typed_expr_table.clone();
+        let table_snapshot = std::mem::take(&mut self.typed_expr_table);
         let ret = self.infer_expr_type(expr);
         self.typed_expr_table = table_snapshot;
         let ret = if self.errors.len() > error_len {
@@ -5811,14 +5996,12 @@ defaulted fields must be provided via `()`",
                         {
                             Type::Str
                         } else if left_type == Type::Unknown || right_type == Type::Unknown {
-                            // F42 sweep [E1525] candidate: `Unknown + Unknown`
-                            // would normally be rejected here, but Lambda
-                            // bodies depend on bidirectional inference (E39)
-                            // and Taida's lambda syntax has no parameter
-                            // type-annotation parser path yet. Deferred to
-                            // Phase 4 / post-Phase-3 cycle, where a
-                            // context-sensitive enforcement (FuncDef-only or
-                            // post-inference) can be designed.
+                            if self.errors.is_empty() {
+                                self.errors.push(TypeError {
+                                    message: "[E1525] Cannot infer operand type for `+`. Add parameter or expression type annotations.".to_string(),
+                                    span: span.clone(),
+                                });
+                            }
                             Type::Unknown
                         } else {
                             self.errors.push(TypeError {
@@ -6462,6 +6645,37 @@ defaulted fields must be provided via `()`",
                                     span: span.clone(),
                                 });
                             }
+                            for (i, arg) in args.iter().enumerate() {
+                                if matches!(arg, Expr::Hole(_) | Expr::Placeholder(_)) {
+                                    continue;
+                                }
+                                let Some(expected_ty) = params.get(i) else {
+                                    continue;
+                                };
+                                if *expected_ty == Type::Unknown {
+                                    continue;
+                                }
+                                let actual_ty = self
+                                    .infer_expr_type_with_expected_for_function_arg(
+                                        arg,
+                                        expected_ty,
+                                    );
+                                if actual_ty == Type::Unknown {
+                                    continue;
+                                }
+                                if !self.registry.is_subtype_of(&actual_ty, expected_ty) {
+                                    self.errors.push(TypeError {
+                                        message: format!(
+                                            "[E1506] Argument {} has type {}, expected {}. \
+                                             Hint: Pass a value of the correct type, or use an explicit conversion.",
+                                            i + 1,
+                                            actual_ty,
+                                            expected_ty
+                                        ),
+                                        span: span.clone(),
+                                    });
+                                }
+                            }
                             if hole_count > 0 {
                                 let hole_param_types: Vec<Type> = args
                                     .iter()
@@ -6554,6 +6768,26 @@ defaulted fields must be provided via `()`",
                                     ),
                                     span: span.clone(),
                                 });
+                                Type::Unknown
+                            }
+                        } else {
+                            Type::Unknown
+                        }
+                    }
+                    Type::Error(error_name) => {
+                        if field == "kind" {
+                            return Type::Str;
+                        }
+                        if let Some(fields) = self.registry.get_type_fields(error_name) {
+                            if let Some((_, ty)) = fields.iter().find(|(name, _)| name == field) {
+                                ty.clone()
+                            } else if error_name != "Error"
+                                && let Some(base_fields) = self.registry.get_type_fields("Error")
+                                && let Some((_, ty)) =
+                                    base_fields.iter().find(|(name, _)| name == field)
+                            {
+                                ty.clone()
+                            } else {
                                 Type::Unknown
                             }
                         } else {
@@ -6690,9 +6924,9 @@ defaulted fields must be provided via `()`",
                             .unwrap_or(Type::Unknown);
                         Type::Generic("Lax".to_string(), vec![schema_ty])
                     }
-                    // Async[T] wraps a value. AsyncReject[err]() is still an
-                    // Async value, but its success payload is unavailable at
-                    // the type level.
+                    // Async[T] wraps a value. AsyncReject[err]() has no
+                    // fulfilled payload, so use the supplied rejection value
+                    // type as the best available concrete Async parameter.
                     "Async" => Type::Generic(
                         "Async".to_string(),
                         vec![
@@ -6702,7 +6936,15 @@ defaulted fields must be provided via `()`",
                                 .unwrap_or(Type::Unknown),
                         ],
                     ),
-                    "AsyncReject" => Type::Generic("Async".to_string(), vec![Type::Unknown]),
+                    "AsyncReject" => Type::Generic(
+                        "Async".to_string(),
+                        vec![
+                            type_args
+                                .first()
+                                .map(|a| self.infer_expr_type(a))
+                                .unwrap_or(Type::Unknown),
+                        ],
+                    ),
                     // Cancel[async]() returns Async[T] (or Async[Unknown] fallback)
                     "Cancel" => {
                         if type_args.len() != 1 {
@@ -6861,7 +7103,7 @@ defaulted fields must be provided via `()`",
                             .iter()
                             .find(|f| f.name == "throw")
                             .map(|f| self.infer_expr_type(&f.value))
-                            .unwrap_or(Type::Unknown);
+                            .unwrap_or(Type::Named("ErrorInfo".to_string()));
                         Type::Generic("Result".to_string(), vec![success_ty, error_ty])
                     }
                     // Lax[value]() returns Lax[T]
@@ -7307,6 +7549,33 @@ defaulted fields must be provided via `()`",
                 // Try to infer return type from the body expression
                 let ret_type = self.infer_expr_type(body);
                 self.pop_scope();
+                for (idx, param_ty) in param_types.iter().enumerate() {
+                    if Self::contains_unknown(param_ty) {
+                        let param_name = params
+                            .get(idx)
+                            .map(|param| param.name.as_str())
+                            .unwrap_or("<unknown>");
+                        let span = params
+                            .get(idx)
+                            .map(|param| param.span.clone())
+                            .unwrap_or_else(|| body.span().clone());
+                        self.errors.push(TypeError {
+                            message: format!(
+                                "[E1527] Lambda parameter '{}' has no inferred type. Add `{}: Type` or use the lambda where a function type is expected.",
+                                param_name, param_name
+                            ),
+                            span,
+                        });
+                    }
+                }
+                if Self::contains_unknown(&ret_type) {
+                    self.errors.push(TypeError {
+                        message:
+                            "[E1525] Lambda return type could not be inferred from its body. Add parameter annotations or use the lambda where a function type is expected."
+                                .to_string(),
+                        span: body.span().clone(),
+                    });
+                }
                 Type::Function(param_types, Box::new(ret_type))
             }
 

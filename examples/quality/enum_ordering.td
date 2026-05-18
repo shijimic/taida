@@ -20,7 +20,7 @@ stdout((c >= c).toString())
 stdout((c > c).toString())
 
 // ── Case 3: pipeline 相当の条件分岐で使う ────────────
-ready x =
+ready x: HiveState =
   | x >= HiveState:Running() |> "yes"
   | _ |> "no"
 => :Str

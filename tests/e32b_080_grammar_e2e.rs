@@ -199,7 +199,7 @@ fn handler_source(port: u16) -> String {
     format!(
         r#">>> taida-lang/net => @(httpServe)
 
-handler req =
+handler req: Request =
   isCase1 <= SpanEquals[req.path, req.raw, "/case1"]()
   isCase2 <= SpanEquals[req.path, req.raw, "/case2"]()
   isCase3 <= SpanEquals[req.path, req.raw, "/case3"]()

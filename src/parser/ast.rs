@@ -482,7 +482,7 @@ pub enum Expr {
     /// Enum value constructor: `Name:Variant()`
     EnumVariant(String, String, Span),
 
-    /// B11-6a: Restricted type literal inside mold args.
+    /// Restricted type literal inside mold args.
     /// `:Int` → TypeLiteral("Int", None, span)
     /// `EnumName:Variant` (without `()`) → TypeLiteral("EnumName", Some("Variant"), span)
     /// Only valid inside `TypeIs[...]` / `TypeExtends[...]` mold brackets.
@@ -521,6 +521,196 @@ impl Expr {
             | Expr::TypeLiteral(_, _, span)
             | Expr::Throw(_, span) => span,
         }
+    }
+
+    pub fn node_id(&self) -> usize {
+        self.span().node_id
+    }
+
+    pub fn span_mut(&mut self) -> &mut Span {
+        match self {
+            Expr::IntLit(_, span)
+            | Expr::FloatLit(_, span)
+            | Expr::StringLit(_, span)
+            | Expr::TemplateLit(_, span)
+            | Expr::BoolLit(_, span)
+            | Expr::Gorilla(span)
+            | Expr::Ident(_, span)
+            | Expr::Placeholder(span)
+            | Expr::Hole(span)
+            | Expr::BuchiPack(_, span)
+            | Expr::ListLit(_, span)
+            | Expr::BinaryOp(_, _, _, span)
+            | Expr::UnaryOp(_, _, span)
+            | Expr::FuncCall(_, _, span)
+            | Expr::MethodCall(_, _, _, span)
+            | Expr::FieldAccess(_, _, span)
+            | Expr::CondBranch(_, span)
+            | Expr::Pipeline(_, span)
+            | Expr::MoldInst(_, _, _, span)
+            | Expr::Unmold(_, span)
+            | Expr::Lambda(_, _, span)
+            | Expr::TypeInst(_, _, span)
+            | Expr::EnumVariant(_, _, span)
+            | Expr::TypeLiteral(_, _, span)
+            | Expr::Throw(_, span) => span,
+        }
+    }
+}
+
+/// Allocator for parser expression node ids.
+///
+/// Node ids are AST identity, not source location. The parser assigns them
+/// after parsing, and AST rewrites that create new expression nodes must
+/// reassign ids instead of preserving cloned ids from source expressions.
+#[derive(Debug, Clone)]
+pub struct NodeIdAllocator {
+    next: usize,
+}
+
+impl NodeIdAllocator {
+    pub fn new() -> Self {
+        Self { next: 1 }
+    }
+
+    pub fn starting_at(next: usize) -> Self {
+        Self { next }
+    }
+
+    pub fn fresh(&mut self) -> usize {
+        let id = self.next;
+        self.next += 1;
+        id
+    }
+}
+
+impl Default for NodeIdAllocator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Assign stable expression node ids to a parsed program.
+///
+/// The ids live in `Span::node_id` so existing expression variants keep their
+/// shape while `TypedExprTable` can key by AST identity instead of source span.
+pub fn assign_expr_node_ids(program: &mut Program) {
+    let mut allocator = NodeIdAllocator::new();
+    for stmt in &mut program.statements {
+        reassign_statement_expr_node_ids(stmt, &mut allocator);
+    }
+}
+
+pub fn reassign_statement_expr_node_ids(stmt: &mut Statement, allocator: &mut NodeIdAllocator) {
+    match stmt {
+        Statement::Expr(expr) => reassign_expr_node_ids(expr, allocator),
+        Statement::ClassLikeDef(def) => {
+            for field in &mut def.fields {
+                if let Some(default_value) = &mut field.default_value {
+                    reassign_expr_node_ids(default_value, allocator);
+                }
+                if let Some(method_def) = &mut field.method_def {
+                    reassign_func_expr_node_ids(method_def, allocator);
+                }
+            }
+        }
+        Statement::FuncDef(func) => reassign_func_expr_node_ids(func, allocator),
+        Statement::Assignment(assign) => reassign_expr_node_ids(&mut assign.value, allocator),
+        Statement::ErrorCeiling(ceiling) => {
+            for stmt in &mut ceiling.handler_body {
+                reassign_statement_expr_node_ids(stmt, allocator);
+            }
+        }
+        Statement::UnmoldForward(stmt) => reassign_expr_node_ids(&mut stmt.source, allocator),
+        Statement::UnmoldBackward(stmt) => reassign_expr_node_ids(&mut stmt.source, allocator),
+        Statement::EnumDef(_) | Statement::Import(_) | Statement::Export(_) => {}
+    }
+}
+
+pub fn reassign_func_expr_node_ids(func: &mut FuncDef, allocator: &mut NodeIdAllocator) {
+    for param in &mut func.params {
+        if let Some(default_value) = &mut param.default_value {
+            reassign_expr_node_ids(default_value, allocator);
+        }
+    }
+    for stmt in &mut func.body {
+        reassign_statement_expr_node_ids(stmt, allocator);
+    }
+}
+
+pub fn reassign_expr_node_ids(expr: &mut Expr, allocator: &mut NodeIdAllocator) {
+    expr.span_mut().node_id = allocator.fresh();
+
+    match expr {
+        Expr::BuchiPack(fields, _) | Expr::TypeInst(_, fields, _) => {
+            for field in fields {
+                reassign_expr_node_ids(&mut field.value, allocator);
+            }
+        }
+        Expr::ListLit(items, _) | Expr::Pipeline(items, _) => {
+            for item in items {
+                reassign_expr_node_ids(item, allocator);
+            }
+        }
+        Expr::BinaryOp(left, _, right, _) => {
+            reassign_expr_node_ids(left, allocator);
+            reassign_expr_node_ids(right, allocator);
+        }
+        Expr::UnaryOp(_, inner, _)
+        | Expr::FieldAccess(inner, _, _)
+        | Expr::Unmold(inner, _)
+        | Expr::Throw(inner, _) => {
+            reassign_expr_node_ids(inner, allocator);
+        }
+        Expr::FuncCall(func, args, _) => {
+            reassign_expr_node_ids(func, allocator);
+            for arg in args {
+                reassign_expr_node_ids(arg, allocator);
+            }
+        }
+        Expr::MethodCall(receiver, _, args, _) => {
+            reassign_expr_node_ids(receiver, allocator);
+            for arg in args {
+                reassign_expr_node_ids(arg, allocator);
+            }
+        }
+        Expr::CondBranch(arms, _) => {
+            for arm in arms {
+                if let Some(condition) = &mut arm.condition {
+                    reassign_expr_node_ids(condition, allocator);
+                }
+                for stmt in &mut arm.body {
+                    reassign_statement_expr_node_ids(stmt, allocator);
+                }
+            }
+        }
+        Expr::MoldInst(_, type_args, fields, _) => {
+            for arg in type_args {
+                reassign_expr_node_ids(arg, allocator);
+            }
+            for field in fields {
+                reassign_expr_node_ids(&mut field.value, allocator);
+            }
+        }
+        Expr::Lambda(params, body, _) => {
+            for param in params {
+                if let Some(default_value) = &mut param.default_value {
+                    reassign_expr_node_ids(default_value, allocator);
+                }
+            }
+            reassign_expr_node_ids(body, allocator);
+        }
+        Expr::IntLit(_, _)
+        | Expr::FloatLit(_, _)
+        | Expr::StringLit(_, _)
+        | Expr::TemplateLit(_, _)
+        | Expr::BoolLit(_, _)
+        | Expr::Gorilla(_)
+        | Expr::Ident(_, _)
+        | Expr::Placeholder(_)
+        | Expr::Hole(_)
+        | Expr::EnumVariant(_, _, _)
+        | Expr::TypeLiteral(_, _, _) => {}
     }
 }
 

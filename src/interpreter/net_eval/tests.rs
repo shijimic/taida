@@ -1561,9 +1561,7 @@ fn test_http_serve_request_pack_has_all_fields() {
 
 #[test]
 fn test_http_serve_max_requests_3() {
-    use std::sync::atomic::{AtomicU16, Ordering};
-    static PORT_COUNTER: AtomicU16 = AtomicU16::new(18300);
-    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let port = v3_free_port();
 
     let server_port = port;
     let server_handle = std::thread::spawn(move || {
@@ -1584,8 +1582,11 @@ fn test_http_serve_max_requests_3() {
     // Send 3 requests
     for _ in 0..3 {
         let mut client = connect_with_retry(port);
-        std::io::Write::write_all(&mut client, b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")
-            .unwrap();
+        std::io::Write::write_all(
+            &mut client,
+            b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+        )
+        .unwrap();
         let mut response = Vec::new();
         let _ = client.set_read_timeout(Some(std::time::Duration::from_secs(2)));
         loop {
@@ -1597,7 +1598,7 @@ fn test_http_serve_max_requests_3() {
             }
         }
         let resp = String::from_utf8_lossy(&response);
-        assert!(resp.contains("200 OK"));
+        assert!(resp.contains("200 OK"), "unexpected response: {resp:?}");
     }
 
     // Server should terminate
