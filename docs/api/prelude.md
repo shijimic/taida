@@ -426,6 +426,10 @@ exit code: Int => :Int
 | `Stub[value]()` | `T` | stub marker を値として固める。 |
 | `TODO[]()` | `T` | 未実装 marker。release build では残存を拒否できる。 |
 | `Cage[subject, runner]()` | `Gorillax[T]` | Molten branch capability boundary。runner を実行し `Gorillax` で受ける。 |
+| `CageRilla[Branch, Out]()` | `Pack` | Cage runner descriptor の抽象親型。直接呼び出さない。 |
+| `JSRilla[Out]()` | `Pack` | JS branch runner descriptor の抽象子系統。`JSGet` / `JSCall` 等が返す。 |
+| `FileRilla[Out]()` | `Pack` | File branch runner descriptor の抽象子系統。直接呼び出さない。 |
+| `BuildRilla[Out]()` | `Pack` | Build branch runner descriptor の抽象子系統。直接呼び出さない。 |
 | `JSON[raw, Schema]()` | `Lax[T]` | JSON を schema 指定で Taida 値へ変換。 |
 
 > `CageRilla[Branch, Out]` および `JSRilla[Out]` / `FileRilla[Out]` /
