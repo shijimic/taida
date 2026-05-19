@@ -54,17 +54,17 @@ Mold[T] => Pair[T, U] = @(second: U)
 // Mold[Item] => Box[Item] = @(value: Item)  // [E1807] 違反
 ```
 
-### header arity / 制約配置のルール
+### ヘッダーアリティ / 制約配置のルール
 
 | 操作 | 可否 | 根拠 |
 |------|------|------|
-| root の arity 増加 (`Mold[T, U] => ...`) | NG (`[E1407]`) | root の `mold_args.len() == 1` 強制 |
+| root のアリティ増加 (`Mold[T, U] => ...`) | NG (`[E1407]`) | root の `mold_args.len() == 1` 強制 |
 | root に制約付け (`Mold[T <= :Int] => Foo[T <= :Int]`) | OK | root と child の slot 完全一致 |
-| child で arity 増加 (`Mold[T] => Pair[T, U]`) | OK | 末尾 slot 追加は自由 |
+| child でアリティ増加 (`Mold[T] => Pair[T, U]`) | OK | 末尾 slot 追加は自由 |
 | child で既存 slot に制約後付け (`Mold[T] => Foo[T <= :Int]`) | NG (`[E1407]`) | constraint 込み exact match を要求 |
 | child の新規 slot に制約 (`Mold[T] => Guard[T, P <= :T => :Bool]`) | OK | 末尾追加 slot は自由 |
 
-つまり「**制約を書きたいなら root から書く**」「**root の arity は 1 固定で増やせない**」が Taida の設計です。
+つまり「**制約を書きたいなら root から書く**」「**root のアリティは 1 固定で増やせない**」が Taida の設計です。
 
 ## 補助規則
 

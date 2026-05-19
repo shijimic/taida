@@ -85,7 +85,7 @@ result >=> server                                              // server: Int（
 
 ```
 npm import (Molten / branch=JS)
-  -> JSRilla descriptor (JSGet / JSCall / JSNew / JSSet / JSBind / JSSpread)
+  -> JSRilla 実行記述 (JSGet / JSCall / JSNew / JSSet / JSBind / JSSpread)
   -> Cage (subject branch ↔ runner branch を照合)
   -> Gorillax[Out]
   -> >=> 値

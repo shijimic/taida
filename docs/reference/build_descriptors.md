@@ -21,13 +21,13 @@ Native / JS / WASM の混合ビルドを記述するための仕組みです。N
 
 - トップレベル export (`<<< serverX`、`<<< plan`) による named artifact entrypoint
 - 他ディスクリプタのフィールド (`BuildPlan.units` / `BuildUnit.assets` /
-  `RouteAsset.unit` / `RouteAsset.asset` / `<descriptor>.before`)
-- ビルドドライバの descriptor import
+  `RouteAsset.unit` / `RouteAsset.asset` / `<ディスクリプタ>.before`)
+- ビルドドライバの ディスクリプタ import
 
 `stdout(serverX)`、ユーザ関数引数への通常の受け渡し、`Str[serverX]()` などは
 すべてビルドドライバ専用値の濫用としてエラーになります。
 
-ディスクリプタは `packages.tdm` ではなく、descriptor module の中で組み立てます。
+ディスクリプタは `packages.tdm` ではなく、ディスクリプタ module の中で組み立てます。
 `packages.tdm` は依存宣言と公開 API マニフェストの責務に留めます。
 
 ## 2. CLI 連携
@@ -132,7 +132,7 @@ hard-fail します。
 
 ビルドドライバはプロジェクトルート (`packages.tdm`, `taida.toml`, `.git` の
 いずれかを持つ祖先ディレクトリ) の `.taida/build/.tmp-<transaction-id>/` を
-ステージング領域として使います。プロジェクトルートが見つからない descriptor
+ステージング領域として使います。プロジェクトルートが見つからない ディスクリプタ
 build は `[E1902]` で中断します。`transaction-id` はプロセス ID と高精度
 時刻から作り、ステージングディレクトリは既存パスを許容しない排他作成で
 確保します。
@@ -149,7 +149,7 @@ build は `[E1902]` で中断します。`transaction-id` はプロセス ID と
     .transaction-id
   hooks/<hook-name>/<transaction-id>.log
   hooks/<hook-name>/<transaction-id>-2.log
-  .lock                       # 実行中 descriptor build の排他 lock
+  .lock                       # 実行中 ディスクリプタ build の排他 lock
   .tmp-<transaction-id>/       # ステージング領域
     native/<unit-name>/
     ...

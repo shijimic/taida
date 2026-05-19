@@ -605,7 +605,7 @@ validateAndProcess input =
 | **Result** | `Result[T, P]` | 述語 P で成功/失敗を判定する操作モールド型です |
 | **ゴリラ** | `><` | 即時終了リテラルです。条件分岐と組み合わせて使います |
 | **Gorillax** | `Gorillax[T]` | 覚悟のモールド型。アンモールド失敗でゴリラ（プログラム終了） |
-| **Cage** | `Cage[subject, runner]` | Molten branch capability boundary。runner `CageRilla[Branch, Out]` を実行し Gorillax[Out] を返します |
+| **Cage** | `Cage[subject, runner]` | `Molten` を扱う実行を `Gorillax` で囲む境界です。`runner` (`CageRilla[Branch, Out]`) を実行して `Gorillax[Out]` を返します |
 | **errorInfo()** | `g.errorInfo()` | Lax / Gorillax / RelaxedGorillax / Error 系（RelaxedGorillaEscaped を含む）から失敗詳細を `Lax[ErrorInfo]` として取り出します |
 | **RelaxedGorillax** | `.relax()` | Gorillax を throw 可能に変換。`\|==` でキャッチ可能になります |
 

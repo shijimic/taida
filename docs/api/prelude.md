@@ -286,7 +286,7 @@ scores
   => result
 ```
 
-値の type identity を取り出したい場合は、関数ではなくモールド
+値の型情報を取り出したい場合は、関数ではなくモールド
 `TypeName[value]()` を使います。詳細は本書 §7.10 を参照してください。
 
 ---
@@ -336,14 +336,11 @@ exit code: Int => :Int
 |------|------|-------------|
 | `code` | `Int` | プロセス終了コード。デフォルト値 `0` は正常終了。慣例的に異常終了は `1` 以上を使う。 |
 
-**Returns**: `:Int` — 型注釈上は `code` と同値を返す `:Int`。実際には
-プロセス終了のため呼び出し以降のコードは実行されません (制御が到達
-しない)。Taida は `@()` / `:Unit` を「値の不在」型として認めないため
-(`[E1520]` 参照)、never-return 関数も意味のある具体型を宣言します。
-`result <= exit(1)` のような戻り値束縛は構文上は許容されますが、
-`result` を参照するコードには制御が到達しません。専用 `:Never` 型
-(never-return semantics 専用の型) の導入は型システム全体への影響が
-大きいため、現バージョンでは採用していません。
+**Returns**: `:Int` — 型注釈上は `code` と同値を返す `:Int`。
+
+実際にはプロセスがここで終了するため、呼び出し以降のコードには制御が到達しません。Taida は `@()` / `:Unit` を「値の不在」型として認めないため (`[E1520]` 参照)、終了しない関数であっても戻り型として意味のある具体型を宣言します。
+
+`result <= exit(1)` のような戻り値束縛は構文上は許容されますが、`result` を参照するコードには制御が到達しません。「終了することしかしない関数」を表す専用の戻り型は、現バージョンでは導入していません。
 
 **AI-Context**:
 `exit(code)` の主な用途は exit code を明示したい場合 (`exit(0)` の意図的
@@ -424,22 +421,22 @@ exit code: Int => :Int
 | `Stream[value]()` | `Stream[T]` | 逐次値を表す stream wrapper。 |
 | `StreamFrom[list]()` | `Stream[T]` | リストから stream を生成。 |
 | `Molten[]()` | `Molten` | 外部由来の不透明値。通常は境界 API が生成する。 |
-| `Stub[value]()` | `T` | stub marker を値として固める。 |
-| `TODO[]()` | `T` | 未実装 marker。release build では残存を拒否できる。 |
-| `Cage[subject, runner]()` | `Gorillax[T]` | Molten branch capability boundary。runner を実行し `Gorillax` で受ける。 |
-| `CageRilla[Branch, Out]()` | `Pack` | Cage runner descriptor の抽象親型。直接呼び出さない。 |
-| `JSRilla[Out]()` | `Pack` | JS branch runner descriptor の抽象子系統。`JSGet` / `JSCall` 等が返す。 |
-| `FileRilla[Out]()` | `Pack` | File branch runner descriptor の抽象子系統。直接呼び出さない。 |
-| `BuildRilla[Out]()` | `Pack` | Build branch runner descriptor の抽象子系統。直接呼び出さない。 |
+| `Stub[value]()` | `T` | 「ここはまだ仮の値」と印を付けた値を返す。 |
+| `TODO[]()` | `T` | 未実装の印として置く値。リリース版のビルドでは残存を拒否できる。 |
+| `Cage[subject, runner]()` | `Gorillax[T]` | `Molten` を扱う実行を `Gorillax` で囲む境界。`runner` を実行し結果を `Gorillax` で受ける。 |
+| `CageRilla[Branch, Out]()` | `Pack` | `Cage` で `runner` 位置に置く実行記述の親型。直接呼び出さない。 |
+| `JSRilla[Out]()` | `Pack` | JS 連携の実行記述。`JSGet` / `JSCall` 等が返す。直接呼び出さない。 |
+| `FileRilla[Out]()` | `Pack` | ファイル操作の実行記述。直接呼び出さない。 |
+| `BuildRilla[Out]()` | `Pack` | ビルド処理の実行記述。直接呼び出さない。 |
 | `JSON[raw, Schema]()` | `Lax[T]` | JSON を schema 指定で Taida 値へ変換。 |
 
 > `CageRilla[Branch, Out]` および `JSRilla[Out]` / `FileRilla[Out]` /
 > `BuildRilla[Out]` は **直接呼び出さない型** です。`Cage[subject,
-> runner]()` の type rule と、`runner` 位置に置く descriptor (`JSGet`
-> / `JSCall` / `FileWrite` / `BuildPlan` 等) の戻り型としてのみ surface
-> に現れます。各 descriptor の詳細は `docs/api/js.md` /
-> `docs/api/build_descriptors.md` / 関連 API ドキュメントを参照
-> してください。
+> runner]()` の型規則と、`runner` 位置に置く実行記述 (`JSGet` /
+> `JSCall` / `FileWrite` / `BuildPlan` 等) の戻り型としてのみ公開面に
+> 現れます。各実行記述の詳細は [`docs/api/js.md`](js.md) /
+> [`docs/api/build_descriptors.md`](build_descriptors.md) / 関連 API
+> ドキュメントを参照してください。
 
 ### 7.4 文字列モールド
 
@@ -606,7 +603,7 @@ result <= If[x > 0, "positive", "negative"]()
 | `Float[x]()` | x | `Lax[Float]` | 浮動小数化 (`Float["3.14"]()` → 3.14) |
 | `Str[x]()` | x | `Lax[Str]` | 文字列化 (`Str[42]()` → "42") |
 | `Bool[x]()` | x | `Lax[Bool]` | 真偽値化 (`Bool[1]()` → true、`Bool[0]()` → false) |
-| `Ordinal[e]()` | e | `Int` | Enum を宣言順 ordinal Int に変換 (非 Enum は runtime error) |
+| `Ordinal[e]()` | e | `Int` | Enum を宣言順の Int (ordinal) に変換。Enum 以外を渡すと実行時エラーになる |
 
 ```taida fragment
 Int["ff", 16]() >=> hex   // 255
@@ -629,7 +626,7 @@ Ordinal[Color:Green()]()  // 1
 | `TypeIs[value, :TypeName]()` | value, :TypeName | `Bool` | 値の実行時型と一致するかを返す |
 | `TypeIs[value, EnumName:Variant]()` | value, EnumName:Variant | `Bool` | Enum variant 一致判定 |
 | `TypeExtends[:TypeA, :TypeB]()` | :TypeA, :TypeB | `Bool` | TypeA が TypeB と同じか TypeB のサブタイプか |
-| `TypeName[value]()` | value | `Str` | 値の type identity (継承位置 / variant 名 / プリミティブ型名) を返す |
+| `TypeName[value]()` | value | `Str` | 値の型情報 (継承位置 / variant 名 / プリミティブ型名) を返す |
 
 ```taida fragment
 TypeIs[42, :Int]()         // true
@@ -723,10 +720,10 @@ Regex pattern: Str  flags: Str => :Regex
 — Interpreter / JS のみ。Native の POSIX ERE はサポート外)。
 
 サポートされるエスケープ: `\d` / `\D` / `\w` / `\W` / `\s` / `\S` / `\xHH` /
-`\x{HH…}` / `\uHHHH` / `\u{HH…}` / `\\` は全 backend、`\b` / `\B` は
-Interpreter / JS のみ。Native POSIX ERE は単語境界の概念を持ちません。
+`\x{HH…}` / `\uHHHH` / `\u{HH…}` / `\\` は全バックエンド対応、`\b` / `\B` は
+Interpreter / JS のみ対応。Native の POSIX ERE は単語境界の概念を持ちません。
 
-不正なフラグや不正なパターンは 3 backend 全てで構築時に `:Error`
+不正なフラグや不正なパターンは 3 バックエンドすべてで構築時に `:Error`
 (`ValueError`) が投げられます。JavaScript の `$&` / `$1` 等の置換メタ
 構文は無効化されており、置換文字列はリテラルとして挿入されます。
 
@@ -945,14 +942,14 @@ pilots <= hashMap()
 | `.isEmpty()` | `Bool` | 空判定 |
 | `.toString()` | `Str` | 文字列表現 |
 
-`a.merge(b)` は **retain-then-push semantics** に従います: (1) self のうち
-other に含まれない key のみを self-order で残し、(2) 続けて other の全
-エントリを other-order で append します。overlap key は **other 側の位置**
-に移動し、value は other のものになります。
+`a.merge(b)` は **「保持してから追記」** の順で動きます。具体的には次の 2 段階です。
 
-`HashMap.entries()` が返すペア pack のフィールド名は **`key` / `value`** に
-統一されています。`zip()` / `Zip[]()` は別仕様で `first` / `second` を使う
-ため、`.entries()` と `zip()` のフィールド名が異なる点に注意してください。
+1. レシーバ `a` のうち `b` にキーがないエントリを、`a` の挿入順そのままで残します。
+2. 続けて `b` の全エントリを、`b` の挿入順そのままで末尾に追加します。
+
+両方に存在するキーは `b` 側の位置へ移動し、値も `b` のものになります。
+
+`HashMap.entries()` が返すぶちパックのフィールド名は **`key` / `value`** に統一されています。`zip()` / `Zip[]()` は別仕様で `first` / `second` を使うため、`.entries()` と `zip()` のフィールド名が異なる点に注意してください。
 
 ### 9.2 Set
 
@@ -978,25 +975,18 @@ pilot_names <= setOf(@["Misato", "Ritsuko", "Shinji"])
 
 ---
 
-## 10. Span pack 冷路変換
+## 10. Span ぶちパックの文字列化
 
-`taida-lang/net` の `httpServe` / `httpParseRequestHead` が返す
-`@(start: Int, len: Int)` 形式の span pack は、元の `Bytes` を clone せず
-view として保持するプリミティブです。span を明示的に `Str` へ materialize
-する **cold path** は 2 系統提供されます。
+`taida-lang/net` の `httpServe` / `httpParseRequestHead` が返す `@(start: Int, len: Int)` 形式のぶちパックは、元の `Bytes` をコピーせず、その範囲を指す参照として保持します。これを明示的に `Str` へ変換したいときは、次の 2 系統を使います。
 
 ```taida fragment
-str_a <= strOf(req.path, req.bytes)            // function form
-str_b <= StrOf[req.path, req.bytes]()          // mold form
+str_a <= strOf(req.path, req.bytes)            // 関数形式
+str_b <= StrOf[req.path, req.bytes]()          // モールド形式
 ```
 
-両者は同じ結果を返します。`strOf` は関数呼び出し式チェーン
-(`callSign(req).path` のような形) で `StrOf[...]()` の括弧の二重を避けたい
-ときに使います。
+両者は同じ結果を返します。`strOf` は関数呼び出し式チェーン (`callSign(req).path` のような形) のなかで `StrOf[...]()` の括弧の二重を避けたいときに使います。
 
-hot path (router の比較等) は `SpanEquals` / `SpanStartsWith` /
-`SpanContains` / `SpanSlice` (詳細は [`docs/api/net.md §4`](net.md)) を使い、
-materialization を避けます。
+頻繁に走る経路 (ルーターでの比較など) では、文字列化せずに `SpanEquals` / `SpanStartsWith` / `SpanContains` / `SpanSlice` を使ってください。詳細は [`docs/api/net.md §4`](net.md) を参照してください。
 
 ---
 

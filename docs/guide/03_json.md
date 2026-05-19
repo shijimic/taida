@@ -132,7 +132,7 @@ JSON['[1, 2, 3]', @[Int]]() >=> nums  // @[1, 2, 3]
 Enum 型はスキーマの一級市民です。`JSON` モールドは JSON 側の文字列が variant 集合に含まれることを**検査します**。
 
 - 一致したとき → そのバリアントの ordinal（`Value::Int`）を返します
-- 一致しなかった / キーが無かった / `null` だった → **`Lax[Enum]`** を返します（silent coercion は行いません）
+- 一致しなかった / キーが無かった / `null` だった → **`Lax[Enum]`** を返します（暗黙の型変換は行いません）
 
 ```taida
 Enum => Status = :Active :Inactive :Pending
@@ -452,7 +452,7 @@ JSON 溶鉄の原則:
 2. **`JSON[raw, Schema]()` がただ一つの入口です** -- スキーマ（鋳型）を通さなければ中身に触れません
 3. **戻り値は Lax です** -- パース失敗時は `has_value = false` で、アンモールドするとデフォルト値が返ります
 4. **スキーママッチングの 6 ルールが動作します** -- フィールド一致、欠落はデフォルト値、型不一致はデフォルト値、null はデフォルト値、ネストは再帰、リストは各要素に適用
-5. **Enum 型フィールドは検査されます** -- variant 一致時は ordinal、不一致 / 欠落 / null は `Lax[Enum]`（silent coercion なし）
+5. **Enum 型フィールドは検査されます** -- variant 一致時は ordinal、不一致 / 欠落 / null は `Lax[Enum]`（暗黙の型変換なし）
 6. **出力方向は jsonEncode / jsonPretty** -- Taida の型安全な値から JSON 文字列への変換です
 7. **JSON パースは `JSON[raw, Schema]()` のみです** -- 他の手段はありません
 
