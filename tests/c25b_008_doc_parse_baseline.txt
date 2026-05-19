@@ -5,9 +5,9 @@ docs/guide/02_strict_typing.md:44
 docs/guide/02_strict_typing.md:61
 docs/guide/02_strict_typing.md:245
 docs/guide/03_json.md:42
-docs/guide/04_buchi_pack.md:137
-docs/guide/04_buchi_pack.md:211
-docs/guide/04_class_like.md:127
+docs/guide/04_buchi_pack.md:139
+docs/guide/04_buchi_pack.md:213
+docs/guide/04_class_like.md:129
 docs/guide/05_mold.md:36
 docs/guide/05_mold.md:119
 docs/guide/05_mold.md:204
