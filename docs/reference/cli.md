@@ -320,7 +320,7 @@ taida ingot cache [clean] [--addons|--store|--store-pkg <org>/<name>|--all] [--y
 `ingot publish` はタグの push のみを行います。
 
 1. `packages.tdm` のアイデンティティ (`<<<@version owner/name`) を検証
-2. `packages.tdm` の facade と entry module の export surface が一致することを検証
+2. `packages.tdm` のファサードと entry モジュールの公開 API が一致することを検証
 3. 前回のリリースタグと HEAD の公開 API 差分から次バージョンを決定
 4. `git tag <version>` + `git push origin <tag>`
 

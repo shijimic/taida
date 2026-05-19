@@ -412,7 +412,7 @@ HttpRequest[method: Str, url: Str](headers <= Headers, body <= Str) => :Async[La
 
 **Constraints**: `HttpRequest["GET"]()` のように type-arg が 2 未満の
 呼び出しは reject されます (JS バックエンドは `taida build js` 時点で
-arity error)。
+アリティエラー)。
 
 ---
 

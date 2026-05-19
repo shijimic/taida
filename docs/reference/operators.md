@@ -338,7 +338,7 @@ riskyOperation()
 - `Div[x, y]()` / `Mod[x, y]()` — 0 除算時
 - `Int[str]()` / `Float[str]()` などの型変換モールド — パース失敗時
 - `.get(idx)` / `.first()` / `.last()` などの安全アクセス — 範囲外時
-- **`JSON[raw, Schema]()`** — パース失敗時、**および Schema 内の Enum 型フィールドが JSON 側の variant 集合に一致しなかった / キー欠落 / null だった場合**。silent coercion は行わず、該当フィールドは `Lax[Enum]` で返ります。
+- **`JSON[raw, Schema]()`** — パース失敗時、**および Schema 内の Enum 型フィールドが JSON 側の variant 集合に一致しなかった / キー欠落 / null だった場合**。暗黙の型変換は行わず、該当フィールドは `Lax[Enum]` で返ります。
 
 Lax 境界は `|==` ではなく、`has_value` / `getOrDefault` / `|` による分岐で処理します:
 

@@ -1,7 +1,7 @@
 # `taida-lang/crypto` API リファレンス
 
 `taida-lang/crypto` は暗号系プリミティブを提供するコア同梱パッケージ
-です。現行公開 surface は SHA-256 ハッシュのみです。
+です。現行の公開 API は SHA-256 ハッシュのみです。
 
 ```taida
 >>> taida-lang/crypto => @(sha256)

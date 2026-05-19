@@ -179,7 +179,7 @@ taida ingot install                       # プレビルドのダウンロード
 | [`taida-lang/os`](docs/api/os.md) | ファイル I/O・プロセス・環境・ソケット・DNS の API |
 | [`taida-lang/net`](docs/api/net.md) | HTTP/1.1・H2・H3・WebSocket・SSE の API |
 | [`taida-lang/crypto`](docs/api/crypto.md) | `sha256` の API |
-| [`taida-lang/js`](docs/api/js.md) | JS 相互運用 descriptor の API |
+| [`taida-lang/js`](docs/api/js.md) | JS 相互運用の実行記述 API |
 | [`taida-lang/pool`](docs/api/pool.md) | リソースプーリングの API |
 
 ## バージョニング

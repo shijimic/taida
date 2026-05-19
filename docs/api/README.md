@@ -18,7 +18,7 @@
 | [`os.md`](os.md) | `taida-lang/os` の API 仕様 (ファイル I/O、プロセス、環境、ソケット、DNS) |
 | [`net.md`](net.md) | `taida-lang/net` の API 仕様 (HTTP/1.1、H2、H3、WebSocket、SSE) |
 | [`crypto.md`](crypto.md) | `taida-lang/crypto` の API 仕様 (`sha256`) |
-| [`js.md`](js.md) | `taida-lang/js` の API 仕様 (JS 相互運用 descriptor 群) |
+| [`js.md`](js.md) | `taida-lang/js` の API 仕様 (JS 相互運用の実行記述群) |
 | [`pool.md`](pool.md) | `taida-lang/pool` の API 仕様 (リソースプーリング) |
 | [`build_descriptors.md`](build_descriptors.md) | `taida-lang/build` の API 仕様 (`BuildUnit` / `BuildPlan` / `AssetBundle` / `RouteAsset` / `BuildHook`) |
 

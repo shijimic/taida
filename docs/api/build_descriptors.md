@@ -219,7 +219,7 @@ buildFrontend <= BuildHook(
 - `BuildUnit.assets`
 - `RouteAsset.unit` / `RouteAsset.asset`
 - `BuildUnit.before` / `AssetBundle.before` / `BuildPlan.before`
-- ビルドドライバの descriptor import
+- ビルドドライバのディスクリプタ取り込み
 
 ---
 
@@ -300,4 +300,4 @@ plan <= BuildPlan(
 | 関数 / 型 | Interpreter | Native | JS | WASM |
 |-----------|-------------|--------|----|------|
 | ディスクリプタ式の評価 | 受理 | 受理 | 受理 | 受理 |
-| ランタイム値としての使用 | reject (descriptor only) | 同左 | 同左 | 同左 |
+| ランタイム値としての使用 | reject (ディスクリプタのみ) | 同左 | 同左 | 同左 |
