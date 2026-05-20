@@ -2197,6 +2197,32 @@ safe input =
     }
 
     #[test]
+    fn test_error_coverage_worker_function_covered_by_parallel_unmold() {
+        let source = "TaskErr = @(type: Str, message: Str)
+
+failTask =
+  TaskErr(type <= \"TaskErr\", message <= \"boom\").throw()
+=> :Int
+
+handle =
+  |== error: Error =
+    error.type + \":\" + error.message
+  => :Str
+
+  jobs <= @[AsyncTask[_ = 1](), AsyncTask[_ = failTask()]()]
+  Par[jobs]() >=> out
+  out.toString()
+=> :Str";
+        let program = parse_source(source);
+        let findings = check_error_coverage(&program, "test.td");
+        assert!(
+            findings.is_empty(),
+            "worker throw should be covered by the surrounding parallel unmold ceiling: {:?}",
+            findings.iter().map(|f| &f.message).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
     fn test_error_coverage_uncovered_throw() {
         // risky has throw with no ceiling anywhere -> should report uncovered
         let source = "risky x =

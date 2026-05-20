@@ -3042,8 +3042,18 @@ fn test_race_empty_three_way_parity() {
     let source = r#"
 r: Async[Int] <= Race[@[]]()
 stdout(r.toString())
+stdout(r.isRejected().toString())
 "#;
     assert_backend_parity_for_source(source, "race_empty");
+}
+
+#[test]
+fn test_type_message_buchi_pack_display_is_not_error_parity() {
+    let source = r#"
+fake <= @(type <= "Plain", message <= "not error")
+stdout(fake.toString())
+"#;
+    assert_full_backend_parity_for_source(source, "type_message_pack_display_not_error", &[]);
 }
 
 #[test]

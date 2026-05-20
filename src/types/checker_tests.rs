@@ -6642,6 +6642,18 @@ fn cpu_parallel_par_map_rejects_effectful_mapper_reference() {
 }
 
 #[test]
+fn cpu_parallel_par_map_direct_throw_arm_infers_from_value_arm() {
+    let src = "TaskErr = @(type: Str, message: Str)\n\
+               out <= ParMap[@[3], _ x: Int = | x > 2 |> TaskErr(type <= \"TaskErr\", message <= \"boom\").throw() | _ |> x * 2]()\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.is_empty(),
+        "direct ParMap mapper with throw arm should type-check: {:?}",
+        errors
+    );
+}
+
+#[test]
 fn cpu_parallel_async_task_allows_structural_safe_capture() {
     let src = "Point = @(x: Int, label: Str)\n\
                point <= Point(x <= 41, label <= \"p\")\n\
@@ -6650,6 +6662,25 @@ fn cpu_parallel_async_task_allows_structural_safe_capture() {
     assert!(
         errors.is_empty(),
         "AsyncTask should allow structurally safe captures: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn cpu_parallel_worker_host_boundary_does_not_treat_output_type_as_capture() {
+    let src = ">>> npm:node:timers/promises => @(setImmediate)\n\
+               bad <= AsyncTask[_ = Cage[setImmediate, JSCallAsync[@[], @[7], Int]()]()]()\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1621]")),
+        "Expected host-boundary reject, got: {:?}",
+        errors
+    );
+    assert!(
+        !errors
+            .iter()
+            .any(|e| e.message.contains("[E1626]") && e.message.contains("'Int'")),
+        "JSCallAsync output type must not be reported as a worker capture: {:?}",
         errors
     );
 }

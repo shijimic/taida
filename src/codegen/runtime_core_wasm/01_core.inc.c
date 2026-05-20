@@ -2275,37 +2275,40 @@ static int64_t _wasm_gorillax_to_string(int64_t gx) {
     return _sb_finish(&sb);
 }
 
-/* Detect Error pack: fc in 2..10, first field hash == WASM_HASH_TYPE,
-   second field hash == WASM_HASH_MESSAGE. Two-field check prevents false
-   positives from user-defined packs like @(type <= "Foo", ...). */
+/* Detect Error pack: runtime-created errors carry type/message plus __type. */
 static int _wasm_is_error(int64_t val) {
     if (!_wasm_is_valid_ptr(val, 32)) return 0;
     int64_t *p = (int64_t *)(intptr_t)val;
-    if (p[0] >= 2 && p[0] <= 10 && p[1] == WASM_HASH_TYPE && p[4] == WASM_HASH_MESSAGE) return 1;
+    if (p[0] < 2 || p[0] > 10 || p[1] != WASM_HASH_TYPE || p[4] != WASM_HASH_MESSAGE) return 0;
+    for (int64_t i = 0; i < p[0]; i++) {
+        if (p[1 + i * 3] == WASM_HASH___TYPE) return 1;
+    }
     return 0;
 }
 
-/* Error.toString() — "Error: message" format (matching native/interpreter) */
+/* Error.toString() — "Error(type: message)" format (matching interpreter) */
 static int64_t _wasm_error_to_string(int64_t val) {
     int64_t *p = (int64_t *)(intptr_t)val;
     int64_t fc = p[0];
-    /* Find message field by hash */
+    int64_t type = 0;
     int64_t msg = 0;
     for (int64_t i = 0; i < fc; i++) {
-        if (p[1 + i * 3] == WASM_HASH_MESSAGE) {
+        if (p[1 + i * 3] == WASM_HASH_TYPE) {
+            type = p[1 + i * 3 + 2];
+        } else if (p[1 + i * 3] == WASM_HASH_MESSAGE) {
             msg = p[1 + i * 3 + 2];
-            break;
         }
     }
-    if (msg && _looks_like_string(msg)) {
-        const char *ms = (const char *)(intptr_t)msg;
-        _wasm_strbuf sb;
-        _sb_init(&sb);
-        _sb_append(&sb, "Error: ");
-        _sb_append(&sb, ms);
-        return _sb_finish(&sb);
-    }
-    return (int64_t)(intptr_t)"Error";
+    const char *type_s = (type && _looks_like_string(type)) ? (const char *)(intptr_t)type : "Error";
+    const char *msg_s = (msg && _looks_like_string(msg)) ? (const char *)(intptr_t)msg : "";
+    _wasm_strbuf sb;
+    _sb_init(&sb);
+    _sb_append(&sb, "Error(");
+    _sb_append(&sb, type_s);
+    _sb_append(&sb, ": ");
+    _sb_append(&sb, msg_s);
+    _sb_append(&sb, ")");
+    return _sb_finish(&sb);
 }
 
 static int _wasm_is_async_task_pack(int64_t val) {

@@ -694,7 +694,7 @@ async function __taida_os_tcpConnect(host, port, timeoutMs) {
     const finish = (result) => {
       if (settled) return;
       settled = true;
-      clearTimeout(timer);
+      globalThis.clearTimeout(timer);
       socket.removeListener('connect', onConnect);
       socket.removeListener('error', onError);
       resolve(result);
@@ -706,7 +706,7 @@ async function __taida_os_tcpConnect(host, port, timeoutMs) {
     const onError = (err) => {
       finish(__taida_os_result_fail(err));
     };
-    const timer = setTimeout(() => {
+    const timer = globalThis.setTimeout(() => {
       const err = new __NativeError(`tcpConnect: timed out after ${effectiveTimeout}ms`);
       err.errno = 110;
       if (typeof socket.destroy === 'function') socket.destroy();
@@ -733,7 +733,7 @@ async function __taida_os_tcpListen(port, timeoutMs) {
     const finish = (result) => {
       if (settled) return;
       settled = true;
-      clearTimeout(timer);
+      globalThis.clearTimeout(timer);
       server.removeListener('listening', onListening);
       server.removeListener('error', onError);
       resolve(result);
@@ -745,7 +745,7 @@ async function __taida_os_tcpListen(port, timeoutMs) {
     const onError = (err) => {
       finish(__taida_os_result_fail(err));
     };
-    const timer = setTimeout(() => {
+    const timer = globalThis.setTimeout(() => {
       const err = new __NativeError(`tcpListen: timed out after ${effectiveTimeout}ms`);
       err.errno = 110;
       try { server.close(); } catch (_) {}
@@ -772,7 +772,7 @@ async function __taida_os_tcpAccept(listenerOrPack, timeoutMs) {
     const finish = (result) => {
       if (settled) return;
       settled = true;
-      clearTimeout(timer);
+      globalThis.clearTimeout(timer);
       server.removeListener('connection', onConnection);
       server.removeListener('error', onError);
       resolve(result);
@@ -786,7 +786,7 @@ async function __taida_os_tcpAccept(listenerOrPack, timeoutMs) {
     const onError = (err) => {
       finish(__taida_os_result_fail(err));
     };
-    const timer = setTimeout(() => {
+    const timer = globalThis.setTimeout(() => {
       const err = new __NativeError(`tcpAccept: timed out after ${effectiveTimeout}ms`);
       try { err.errno = 110; } catch (_) {}
       finish(__taida_os_result_fail(err));
@@ -808,14 +808,14 @@ async function __taida_os_socketSend(socketOrPack, data, timeoutMs) {
     const finish = (result) => {
       if (settled) return;
       settled = true;
-      clearTimeout(timer);
+      globalThis.clearTimeout(timer);
       socket.removeListener('error', onError);
       resolve(result);
     };
     const onError = (err) => {
       finish(__taida_os_result_fail(err));
     };
-    const timer = setTimeout(() => {
+    const timer = globalThis.setTimeout(() => {
       const err = new __NativeError(`socketSend: timed out after ${effectiveTimeout}ms`);
       err.errno = 110;
       finish(__taida_os_result_fail(err));
@@ -848,14 +848,14 @@ async function __taida_os_socketSendBytes(socketOrPack, data, timeoutMs) {
     const finish = (result) => {
       if (settled) return;
       settled = true;
-      clearTimeout(timer);
+      globalThis.clearTimeout(timer);
       socket.removeListener('error', onError);
       resolve(result);
     };
     const onError = (err) => {
       finish(__taida_os_result_fail(err));
     };
-    const timer = setTimeout(() => {
+    const timer = globalThis.setTimeout(() => {
       const err = new __NativeError(`socketSendBytes: timed out after ${effectiveTimeout}ms`);
       err.errno = 110;
       finish(__taida_os_result_fail(err));
@@ -889,14 +889,14 @@ async function __taida_os_socketSendAll(socketOrPack, data, timeoutMs) {
     const finish = (result) => {
       if (settled) return;
       settled = true;
-      clearTimeout(timer);
+      globalThis.clearTimeout(timer);
       socket.removeListener('error', onError);
       resolve(result);
     };
     const onError = (err) => {
       finish(__taida_os_result_fail(err));
     };
-    const timer = setTimeout(() => {
+    const timer = globalThis.setTimeout(() => {
       const err = new __NativeError(`socketSendAll: timed out after ${effectiveTimeout}ms`);
       err.errno = 110;
       finish(__taida_os_result_fail(err));
@@ -928,7 +928,7 @@ async function __taida_os_socketRecv(socketOrPack, timeoutMs) {
     const finish = (result) => {
       if (settled) return;
       settled = true;
-      clearTimeout(timer);
+      globalThis.clearTimeout(timer);
       socket.removeListener('data', onData);
       socket.removeListener('end', onEnd);
       socket.removeListener('error', onError);
@@ -943,7 +943,7 @@ async function __taida_os_socketRecv(socketOrPack, timeoutMs) {
     const onError = (err) => {
       finish(__taida_os_str_lax_error('SocketRecv error', __taida_os_error_kind(err)));
     };
-    const timer = setTimeout(() => {
+    const timer = globalThis.setTimeout(() => {
       finish(__taida_os_str_lax_error('SocketRecv error', 'timeout'));
     }, effectiveTimeout);
 
@@ -963,7 +963,7 @@ async function __taida_os_socketRecvBytes(socketOrPack, timeoutMs) {
     const finish = (result) => {
       if (settled) return;
       settled = true;
-      clearTimeout(timer);
+      globalThis.clearTimeout(timer);
       socket.removeListener('data', onData);
       socket.removeListener('end', onEnd);
       socket.removeListener('error', onError);
@@ -979,7 +979,7 @@ async function __taida_os_socketRecvBytes(socketOrPack, timeoutMs) {
     const onError = (err) => {
       finish(__taida_os_bytes_lax_error('SocketRecvBytes error', __taida_os_error_kind(err)));
     };
-    const timer = setTimeout(() => {
+    const timer = globalThis.setTimeout(() => {
       finish(__taida_os_bytes_lax_error('SocketRecvBytes error', 'timeout'));
     }, effectiveTimeout);
 
@@ -999,7 +999,7 @@ async function __taida_os_udpBind(host, port, timeoutMs) {
     const finish = (result) => {
       if (settled) return;
       settled = true;
-      clearTimeout(timer);
+      globalThis.clearTimeout(timer);
       socket.removeListener('listening', onListening);
       socket.removeListener('error', onError);
       resolve(result);
@@ -1011,7 +1011,7 @@ async function __taida_os_udpBind(host, port, timeoutMs) {
     const onError = (err) => {
       finish(__taida_os_result_fail(err));
     };
-    const timer = setTimeout(() => {
+    const timer = globalThis.setTimeout(() => {
       const err = new __NativeError(`udpBind: timed out after ${effectiveTimeout}ms`);
       err.errno = 110;
       try { socket.close(); } catch (_) {}
@@ -1041,14 +1041,14 @@ async function __taida_os_udpSendTo(socketOrPack, host, port, data, timeoutMs) {
     const finish = (result) => {
       if (settled) return;
       settled = true;
-      clearTimeout(timer);
+      globalThis.clearTimeout(timer);
       socket.removeListener('error', onError);
       resolve(result);
     };
     const onError = (err) => {
       finish(__taida_os_result_fail(err));
     };
-    const timer = setTimeout(() => {
+    const timer = globalThis.setTimeout(() => {
       const err = new __NativeError(`udpSendTo: timed out after ${effectiveTimeout}ms`);
       err.errno = 110;
       finish(__taida_os_result_fail(err));
@@ -1081,7 +1081,7 @@ async function __taida_os_udpRecvFrom(socketOrPack, timeoutMs) {
     const finish = (result) => {
       if (settled) return;
       settled = true;
-      clearTimeout(timer);
+      globalThis.clearTimeout(timer);
       socket.removeListener('message', onMessage);
       socket.removeListener('error', onError);
       resolve(result);
@@ -1101,7 +1101,7 @@ async function __taida_os_udpRecvFrom(socketOrPack, timeoutMs) {
     const onError = (err) => {
       finish(__taida_os_udp_recv_error(__taida_os_error_kind(err)));
     };
-    const timer = setTimeout(() => {
+    const timer = globalThis.setTimeout(() => {
       finish(__taida_os_udp_recv_error('timeout'));
     }, effectiveTimeout);
 
@@ -1171,7 +1171,7 @@ async function __taida_os_socketRecvExact(socketOrPack, size, timeoutMs) {
     const finish = (result) => {
       if (settled) return;
       settled = true;
-      clearTimeout(timer);
+      globalThis.clearTimeout(timer);
       socket.removeListener('data', onData);
       socket.removeListener('error', onError);
       socket.removeListener('end', onEnd);
@@ -1193,7 +1193,7 @@ async function __taida_os_socketRecvExact(socketOrPack, size, timeoutMs) {
     };
     const onError = (err) => finish(__taida_os_bytes_lax_error('SocketRecvExact error', __taida_os_error_kind(err)));
     const onEnd = () => finish(__taida_os_bytes_lax_error('SocketRecvExact error', 'peer_closed'));
-    const timer = setTimeout(() => finish(__taida_os_bytes_lax_error('SocketRecvExact error', 'timeout')), effectiveTimeout);
+    const timer = globalThis.setTimeout(() => finish(__taida_os_bytes_lax_error('SocketRecvExact error', 'timeout')), effectiveTimeout);
     socket.on('data', onData);
     socket.once('error', onError);
     socket.once('end', onEnd);
@@ -1207,8 +1207,8 @@ async function __taida_os_dnsResolve(host, timeoutMs) {
   const effectiveTimeout = __taida_os_network_timeout_ms(timeoutMs);
   return new Promise((resolve) => {
     let settled = false;
-    const finish = (result) => { if (!settled) { settled = true; clearTimeout(timer); resolve(result); } };
-    const timer = setTimeout(() => {
+    const finish = (result) => { if (!settled) { settled = true; globalThis.clearTimeout(timer); resolve(result); } };
+    const timer = globalThis.setTimeout(() => {
       const err = new __NativeError(`dnsResolve: timed out after ${effectiveTimeout}ms`);
       err.errno = 110;
       finish(__taida_os_result_fail(err));

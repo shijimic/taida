@@ -1187,6 +1187,7 @@ impl GraphExtractor {
                     }
                 }
 
+                self.extract_error_expr(graph, callee, current_ceiling, current_func, func_names);
                 for arg in args {
                     self.extract_error_expr(graph, arg, current_ceiling, current_func, func_names);
                 }
@@ -1204,6 +1205,67 @@ impl GraphExtractor {
                 self.extract_error_expr(graph, right, current_ceiling, current_func, func_names);
             }
 
+            Expr::UnaryOp(_, inner, _)
+            | Expr::FieldAccess(inner, _, _)
+            | Expr::Unmold(inner, _) => {
+                self.extract_error_expr(graph, inner, current_ceiling, current_func, func_names);
+            }
+
+            Expr::ListLit(items, _) | Expr::Pipeline(items, _) => {
+                for item in items {
+                    self.extract_error_expr(graph, item, current_ceiling, current_func, func_names);
+                }
+            }
+
+            Expr::BuchiPack(fields, _) | Expr::TypeInst(_, fields, _) => {
+                for field in fields {
+                    self.extract_error_expr(
+                        graph,
+                        &field.value,
+                        current_ceiling,
+                        current_func,
+                        func_names,
+                    );
+                }
+            }
+
+            Expr::MoldInst(name, type_args, fields, _) => {
+                for (idx, arg) in type_args.iter().enumerate() {
+                    if let Expr::Lambda(_, body, _) = arg
+                        && (name == "AsyncTask" || name == "ParMap" && idx == 1)
+                    {
+                        self.extract_error_expr(
+                            graph,
+                            body,
+                            current_ceiling,
+                            current_func,
+                            func_names,
+                        );
+                    } else {
+                        self.extract_error_expr(
+                            graph,
+                            arg,
+                            current_ceiling,
+                            current_func,
+                            func_names,
+                        );
+                    }
+                }
+                for field in fields {
+                    self.extract_error_expr(
+                        graph,
+                        &field.value,
+                        current_ceiling,
+                        current_func,
+                        func_names,
+                    );
+                }
+            }
+
+            Expr::Lambda(_, body, _) => {
+                self.extract_error_expr(graph, body, None, current_func, func_names);
+            }
+
             Expr::CondBranch(arms, _) => {
                 for arm in arms {
                     if let Some(cond) = &arm.condition {
@@ -1215,17 +1277,13 @@ impl GraphExtractor {
                             func_names,
                         );
                     }
-                    for stmt in &arm.body {
-                        if let Statement::Expr(e) = stmt {
-                            self.extract_error_expr(
-                                graph,
-                                e,
-                                current_ceiling,
-                                current_func,
-                                func_names,
-                            );
-                        }
-                    }
+                    self.extract_error_stmts_inner(
+                        graph,
+                        &arm.body,
+                        current_ceiling,
+                        current_func,
+                        func_names,
+                    );
                 }
             }
 

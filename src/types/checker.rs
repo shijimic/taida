@@ -6166,7 +6166,8 @@ defaulted fields must be provided via `()`",
                 }
             }
             Expr::MoldInst(name, type_args, fields, span) => {
-                for arg in type_args {
+                let value_arg_count = Self::worker_mold_value_arg_count(name, type_args.len());
+                for arg in type_args.iter().take(value_arg_count) {
                     self.validate_worker_expr(arg, local_names, function_stack);
                 }
                 for field in fields {
@@ -6187,6 +6188,15 @@ defaulted fields must be provided via `()`",
             | Expr::Hole(_)
             | Expr::EnumVariant(_, _, _)
             | Expr::TypeLiteral(_, _, _) => {}
+        }
+    }
+
+    fn worker_mold_value_arg_count(name: &str, arg_count: usize) -> usize {
+        match name {
+            "JSGet" if arg_count == 2 => 1,
+            "JSCall" | "JSCallAsync" if arg_count == 3 => 2,
+            "JSNew" if arg_count == 3 => 2,
+            _ => arg_count,
         }
     }
 
@@ -8795,39 +8805,9 @@ defaulted fields must be provided via `()`",
                 span: span.clone(),
             });
         }
-        // Infer type from the first arm
-        let first_ty = if let Some(first_arm) = arms.first() {
-            // Check condition type
-            if let Some(cond) = &first_arm.condition {
-                let cond_ty = self.infer_expr_type(cond);
-                if cond_ty != Type::Bool
-                    && cond_ty != Type::Unknown
-                    && !Self::contains_unknown(&cond_ty)
-                {
-                    self.errors.push(TypeError {
-                        message: format!(
-                            "[E1604] Condition in branch must be Bool, got {}. \
-                             Hint: Use a boolean expression as the condition.",
-                            cond_ty
-                        ),
-                        span: first_arm.span.clone(),
-                    });
-                }
-            }
-            // Each arm gets its own scope for local bindings (e.g. >=>)
-            self.push_scope();
-            for body_stmt in &first_arm.body {
-                self.check_statement(body_stmt);
-            }
-            let ty = self.arm_result_type(first_arm);
-            self.pop_scope();
-            ty
-        } else {
-            Type::Unknown
-        };
+        let mut result_ty = Type::Unknown;
 
-        // Check subsequent arms for type consistency
-        for arm in arms.iter().skip(1) {
+        for arm in arms {
             // Check condition type
             if let Some(cond) = &arm.condition {
                 let cond_ty = self.infer_expr_type(cond);
@@ -8851,27 +8831,26 @@ defaulted fields must be provided via `()`",
                 self.check_statement(body_stmt);
             }
             let arm_ty = self.arm_result_type(arm);
-            if arm_ty != Type::Unknown
-                && !(first_ty == Type::Unknown
-                    || Self::contains_unknown(&first_ty)
-                    || Self::contains_unknown(&arm_ty)
-                    || self.registry.is_subtype_of(&arm_ty, &first_ty)
-                    // Allow Int/Float mixing (both are Num)
-                    || first_ty.is_numeric() && arm_ty.is_numeric())
-            {
-                self.errors.push(TypeError {
-                    message: format!(
-                        "[E1603] Condition branch type mismatch: first arm returns {}, but this arm returns {}. \
-                         Hint: All arms of a condition branch should return the same type.",
-                        first_ty, arm_ty
-                    ),
-                    span: span.clone(),
-                });
+            if arm_ty != Type::Unknown && !Self::contains_unknown(&arm_ty) {
+                if result_ty == Type::Unknown || Self::contains_unknown(&result_ty) {
+                    result_ty = arm_ty;
+                } else if !(self.registry.is_subtype_of(&arm_ty, &result_ty)
+                    || result_ty.is_numeric() && arm_ty.is_numeric())
+                {
+                    self.errors.push(TypeError {
+                        message: format!(
+                            "[E1603] Condition branch type mismatch: first resolved arm returns {}, but this arm returns {}. \
+                             Hint: All value-returning arms of a condition branch should return the same type.",
+                            result_ty, arm_ty
+                        ),
+                        span: span.clone(),
+                    });
+                }
             }
             self.pop_scope();
         }
 
-        first_ty
+        result_ty
     }
 
     /// Infer the type of an arm's result. The result is:

@@ -4021,10 +4021,15 @@ impl Interpreter {
                         })))),
                     }
                 } else {
+                    let error = Value::Error(ErrorValue {
+                        error_type: "AsyncRaceError".into(),
+                        message: "Race requires at least one value".into(),
+                        fields: Vec::new(),
+                    });
                     Ok(Some(Signal::Value(Value::Async(AsyncValue {
-                        status: AsyncStatus::Fulfilled,
-                        value: Box::new(Value::Unit),
-                        error: Box::new(Value::Unit),
+                        status: AsyncStatus::Rejected,
+                        value: Box::new(error.clone()),
+                        error: Box::new(error),
                         task: None,
                     }))))
                 }

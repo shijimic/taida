@@ -1065,7 +1065,7 @@ async function __taida_net_httpServe(port, handler, maxRequests, timeoutMs, maxC
           socket.end();
           // Ensure the socket is destroyed after a short timeout in case
           // end() stalls (e.g., unresponsive client).
-          setTimeout(() => {
+          globalThis.setTimeout(() => {
             if (!socket.destroyed) socket.destroy();
           }, 1000);
         } else {

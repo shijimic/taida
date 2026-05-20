@@ -653,6 +653,10 @@ impl JsCodegen {
         }
     }
 
+    fn callee_is_async_user_func(&self, callee: &Expr) -> bool {
+        matches!(callee, Expr::Ident(name, _) if self.async_funcs.contains(name))
+    }
+
     /// Try to write a net builtin rewrite. Returns true if the name was a net
     /// builtin and was rewritten (with optional suffix appended), false otherwise.
     /// This centralizes the 4-site rewrite pattern for net builtins.
@@ -1196,15 +1200,6 @@ impl JsCodegen {
         match stmt {
             Statement::Expr(expr) => {
                 self.write_indent();
-                // In async context, await standalone calls to async functions
-                // so their side effects complete before the next statement.
-                if self.in_async_context
-                    && let Expr::FuncCall(callee, _, _) = expr
-                    && let Expr::Ident(name, _) = callee.as_ref()
-                    && self.async_funcs.contains(name)
-                {
-                    self.write("await ");
-                }
                 self.gen_expr(expr)?;
                 self.write(";\n");
                 Ok(())
@@ -1212,14 +1207,6 @@ impl JsCodegen {
             Statement::Assignment(assign) => {
                 self.write_indent();
                 self.write(&format!("const {} = ", assign.target));
-                // In async context, await RHS calls to async functions
-                if self.in_async_context
-                    && let Expr::FuncCall(callee, _, _) = &assign.value
-                    && let Expr::Ident(name, _) = callee.as_ref()
-                    && self.async_funcs.contains(name)
-                {
-                    self.write("await ");
-                }
                 self.gen_expr(&assign.value)?;
                 self.write(";\n");
                 // Track local assignment shadow: if the target name matches a net
@@ -3124,6 +3111,12 @@ impl JsCodegen {
                     return Ok(());
                 }
 
+                let await_async_call =
+                    self.in_async_context && self.callee_is_async_user_func(callee.as_ref());
+                if await_async_call {
+                    self.write("(await ");
+                }
+
                 if let Expr::Ident(name, _) = callee.as_ref() {
                     // C21-5: specialise single-arg stdout / debug / stderr
                     // when the argument is statically Float-origin, so that
@@ -3219,6 +3212,9 @@ impl JsCodegen {
                     self.gen_expr(arg)?;
                 }
                 self.write(")");
+                if await_async_call {
+                    self.write(")");
+                }
                 Ok(())
             }
             Expr::MethodCall(obj, method, args, _) => {
@@ -5552,6 +5548,45 @@ waitWithTimeout p =
             js.contains("await __taida_unmold_async(t)"),
             "Timeout+sleep via var unmold should emit await unmold: got {}",
             js
+        );
+    }
+
+    #[test]
+    fn test_async_user_function_call_is_awaited_inside_expressions() {
+        let src = r#"
+readOne =
+  s <= sleep(0)
+  s >=> waited
+  waited + 1
+=> :Int
+
+stdout(readOne() + 2)
+stdout("value=" + readOne().toString())
+"#;
+        let js = transpile(src).expect("transpile should succeed");
+        assert!(
+            js.contains("__taida_add((await readOne()), 2)"),
+            "async user function inside binary expression should be awaited: got {}",
+            js
+        );
+        assert!(
+            js.contains("__taida_to_string((await readOne()))"),
+            "async user function as method receiver should be awaited: got {}",
+            js
+        );
+    }
+
+    #[test]
+    fn test_timer_helpers_use_global_this() {
+        let js = transpile("s <= sleep(0)\ns").expect("transpile should succeed");
+        assert!(
+            js.contains("globalThis.setTimeout(() => resolve(ms), ms)"),
+            "sleep helper should use host timer explicitly: got {}",
+            js
+        );
+        assert!(
+            !js.contains("new Promise((resolve) => {\n    setTimeout"),
+            "runtime helper should not use an unqualified timer"
         );
     }
 

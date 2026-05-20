@@ -303,6 +303,10 @@ class __TaidaError extends globalThis.Error {
   errorInfo() {
     return __taida_error_info_lax(this);
   }
+
+  toString() {
+    return `Error(${this.type}: ${this.message})`;
+  }
 }
 
 // Standalone throw function (no Object.prototype pollution)
@@ -581,7 +585,13 @@ function All(asyncList) {
 }
 
 function Race(asyncList) {
-  if (asyncList.length === 0) return new __TaidaAsync(Object.freeze({}));
+  if (asyncList.length === 0) {
+    return new __TaidaAsync(
+      null,
+      new __TaidaError('AsyncRaceError', 'Race requires at least one value', {}),
+      'rejected'
+    );
+  }
   // Fast path: no true Promise in inputs.
   const hasPromise = asyncList.some(item =>
     (item && typeof item.then === 'function' && !(item instanceof __TaidaAsync))
@@ -606,7 +616,7 @@ function Timeout(asyncVal, ms) {
     if (asyncVal.status === 'pending') {
       return Promise.race([
         Promise.resolve(asyncVal),
-        new Promise((_, reject) => setTimeout(() => reject(new __TaidaError('TimeoutError', 'timeout', {})), ms))
+        new Promise((_, reject) => globalThis.setTimeout(() => reject(new __TaidaError('TimeoutError', 'timeout', {})), ms))
       ]);
     }
     return asyncVal;
@@ -618,7 +628,7 @@ function Timeout(asyncVal, ms) {
   // Async path: race against timeout
   return Promise.race([
     asyncVal,
-    new Promise((_, reject) => setTimeout(() => reject(new __TaidaError('TimeoutError', 'timeout', {})), ms))
+    new Promise((_, reject) => globalThis.setTimeout(() => reject(new __TaidaError('TimeoutError', 'timeout', {})), ms))
   ]);
 }
 
@@ -2589,7 +2599,7 @@ function __taida_sleep(ms) {
   // an empty object (which would be Unit on Taida surface).
   // PHILOSOPHY I forbids `Async[Unit]` — `sleep` now returns `Async[Int]`.
   const promise = new Promise((resolve) => {
-    setTimeout(() => resolve(ms), ms);
+    globalThis.setTimeout(() => resolve(ms), ms);
   });
   return __taida_async_pending_from_promise(promise);
 }

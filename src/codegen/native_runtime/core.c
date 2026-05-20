@@ -7988,6 +7988,43 @@ static taida_val taida_pack_to_display_string(taida_val pack_ptr) {
     return result;
 }
 
+static int taida_is_error_pack(taida_val val) {
+    if (!taida_is_buchi_pack(val)) return 0;
+    taida_val *pack = (taida_val*)val;
+    taida_val fc = pack[1];
+    return fc >= 2 && fc <= 10
+        && pack[2] == (taida_val)HASH_TYPE
+        && pack[5] == (taida_val)HASH_MESSAGE
+        && taida_pack_has_hash(val, (taida_val)HASH___TYPE);
+}
+
+static taida_val taida_error_to_display_string(taida_val val) {
+    taida_val type = taida_pack_get(val, (taida_val)HASH_TYPE);
+    taida_val message = taida_pack_get(val, (taida_val)HASH_MESSAGE);
+    const char *type_s = (const char*)type;
+    const char *message_s = (const char*)message;
+    size_t type_len = 0;
+    size_t message_len = 0;
+    if (!type_s || !taida_read_cstr_len_safe(type_s, 65536, &type_len)) {
+        type_s = "Error";
+        type_len = 5;
+    }
+    if (!message_s || !taida_read_cstr_len_safe(message_s, 65536, &message_len)) {
+        message_s = "";
+        message_len = 0;
+    }
+    size_t out_len = 6 + type_len + 2 + message_len + 1;
+    char *out = taida_str_alloc(out_len);
+    size_t pos = 0;
+    memcpy(out + pos, "Error(", 6); pos += 6;
+    memcpy(out + pos, type_s, type_len); pos += type_len;
+    memcpy(out + pos, ": ", 2); pos += 2;
+    memcpy(out + pos, message_s, message_len); pos += message_len;
+    out[pos++] = ')';
+    out[pos] = '\0';
+    return (taida_val)out;
+}
+
 // TF-15: Pack to display string with ALL fields (including __ internal fields).
 // Matches interpreter's to_display_string() for BuchiPack which shows all fields.
 //
@@ -8144,6 +8181,7 @@ static taida_val taida_value_to_display_string(taida_val val) {
             if (gtype == 2) return taida_relaxed_gorillax_to_string(val);
             return taida_lax_to_string(val);
         }
+        if (taida_is_error_pack(val)) return taida_error_to_display_string(val);
         return taida_pack_to_display_string(val);
     }
 
@@ -8960,8 +8998,7 @@ taida_val taida_async_race(taida_val list_ptr) {
     taida_val *list = (taida_val*)list_ptr;
     taida_val len = list[2];
     if (len == 0) {
-        // Matches Interpreter behavior: Race[@[]] -> Async(@())
-        return taida_async_ok_tagged(taida_pack_new(0), TAIDA_TAG_PACK);
+        return taida_async_err(taida_make_error("AsyncRaceError", "Race requires at least one value"));
     }
     // Join all pending threads (simple approach: join all, pick first)
     for (taida_val i = 0; i < len; i++) {

@@ -1391,7 +1391,11 @@ int64_t taida_async_race(int64_t list_ptr) {
     if (!_looks_like_list(list_ptr)) return taida_async_ok_tagged(list_ptr, WASM_ASYNC_TAG_UNKNOWN);
     int64_t *list = (int64_t *)(intptr_t)list_ptr;
     int64_t len = list[1];  /* list[1] = length */
-    if (len == 0) return taida_async_ok_tagged(taida_pack_new(0), WASM_TAG_PACK);
+    if (len == 0) {
+        return taida_async_err(taida_make_error(
+            (int64_t)(intptr_t)"AsyncRaceError",
+            (int64_t)(intptr_t)"Race requires at least one value"));
+    }
     int64_t first = list[WASM_LIST_ELEMS];
     if (_wasm_is_async_obj(first)) {
         int64_t *aobj = (int64_t *)(intptr_t)first;
