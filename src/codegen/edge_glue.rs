@@ -207,18 +207,19 @@ export async function handleTaidaRequest(request, env, ctx) {{
       const decoder = new TextDecoder();
 
       const url = new URL(request.url);
-      const headers = {{}};
+      const headers = [];
       request.headers.forEach((value, key) => {{
-        headers[key] = value;
+        headers.push({{ name: key, value }});
       }});
-      const query = {{}};
+      const query = [];
       url.searchParams.forEach((value, key) => {{
-        query[key] = value;
+        query.push({{ name: key, value }});
       }});
       const bodyBase64 = arrayBufferToBase64(await request.arrayBuffer());
       const payload = JSON.stringify({{
         method: request.method,
         path: url.pathname,
+        rawQuery: url.search.length > 0 ? url.search.slice(1) : "",
         query,
         headers,
         bodyBase64,
@@ -231,18 +232,18 @@ export async function handleTaidaRequest(request, env, ctx) {{
       }}
       new Uint8Array(memory.buffer, inPtr, input.length).set(input);
 
-      const handle = exports.taida_abi_web_handle(inPtr, input.length);
-      const outPtr = exports.taida_abi_web_out_ptr(handle);
-      const outLen = exports.taida_abi_web_out_len(handle);
-      if (!outPtr || outLen < 0) {{
-        exports.taida_abi_web_free(handle);
-        return taidaErrorResponse(500, "invalid handler output");
-      }}
-      const raw = decoder.decode(new Uint8Array(memory.buffer, outPtr, outLen));
-      exports.taida_abi_web_free(handle);
+      const session = exports.taida_abi_web_start
+        ? exports.taida_abi_web_start(inPtr, input.length)
+        : exports.taida_abi_web_handle(inPtr, input.length);
+      const raw = await readTaidaWebSession(exports, memory, decoder, encoder, session, env);
 
       const result = JSON.parse(raw);
-      const responseHeaders = new Headers(result.headers || {{}});
+      const responseHeaders = new Headers();
+      for (const header of result.headers || []) {{
+        if (header && typeof header.name === "string" && typeof header.value === "string") {{
+          responseHeaders.append(header.name, header.value);
+        }}
+      }}
       const body = base64ToUint8Array(result.bodyBase64 || "");
       const status = clampStatus(result.status || 200);
       return new Response(body, {{
@@ -326,6 +327,67 @@ async function getInstance(env) {{
       }}
       return {{ instance, memory }};
     }});
+}}
+
+async function readTaidaWebSession(exports, memory, decoder, encoder, session, env) {{
+    for (let i = 0; i < 32; i++) {{
+      const state = exports.taida_abi_web_poll ? exports.taida_abi_web_poll(session) : 0;
+      if (state === 0) {{
+        const outPtr = exports.taida_abi_web_out_ptr(session);
+        const outLen = exports.taida_abi_web_out_len(session);
+        if (!outPtr || outLen < 0) {{
+          exports.taida_abi_web_free(session);
+          throw new Error("invalid handler output");
+        }}
+        const raw = decoder.decode(new Uint8Array(memory.buffer, outPtr, outLen));
+        exports.taida_abi_web_free(session);
+        return raw;
+      }}
+      if (state === 1) {{
+        if (!exports.taida_abi_web_resume) {{
+          exports.taida_abi_web_free(session);
+          throw new Error("host call resume unsupported");
+        }}
+        const outPtr = exports.taida_abi_web_out_ptr(session);
+        const outLen = exports.taida_abi_web_out_len(session);
+        if (!outPtr || outLen < 0) {{
+          exports.taida_abi_web_free(session);
+          throw new Error("invalid host call payload");
+        }}
+        const payload = JSON.parse(decoder.decode(new Uint8Array(memory.buffer, outPtr, outLen)));
+        const resumePayload = await dispatchTaidaHostCall(payload, env);
+        const resumeBytes = encoder.encode(JSON.stringify(resumePayload));
+        const resumePtr = exports.taida_abi_web_alloc(resumeBytes.length);
+        if (!resumePtr) {{
+          exports.taida_abi_web_free(session);
+          throw new Error("host call resume payload too large");
+        }}
+        new Uint8Array(memory.buffer, resumePtr, resumeBytes.length).set(resumeBytes);
+        exports.taida_abi_web_resume(session, resumePtr, resumeBytes.length);
+        continue;
+      }}
+      exports.taida_abi_web_free(session);
+      throw new Error("handler ABI error");
+    }}
+    exports.taida_abi_web_free(session);
+    throw new Error("handler ABI poll limit exceeded");
+}}
+
+async function dispatchTaidaHostCall(envelope, env) {{
+    const id = envelope.id;
+    try {{
+      let target = env[envelope.capability];
+      for (const step of envelope.steps) {{
+        target = await target[step.method](...step.args);
+      }}
+      return {{ id, ok: true, value: target }};
+    }} catch (err) {{
+      return {{
+        id,
+        ok: false,
+        error: err && err.message ? String(err.message) : String(err),
+      }};
+    }}
 }}
 
 function clampStatus(status) {{

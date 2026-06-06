@@ -41,12 +41,12 @@ impl Lowering {
             }
             p
         } else if import.path.starts_with("npm:")
-            || import.path == "taida-lang/net"
-            || import.path == "taida-lang/js"
-            || import.path == "taida-lang/os"
-            || import.path == "taida-lang/crypto"
-            || import.path == "taida-lang/pool"
-            || import.path == "taida-lang/abi"
+            // F54: catalog-driven core-bundled classification (was a
+            // six-entry hard-coded list that drifted from the resolver).
+            || import
+                .path
+                .split_once('/')
+                .is_some_and(|(org, name)| crate::pkg::catalog::is_core_bundled(org, name))
         {
             // Core-bundled / npm packages — they don't define user
             // Enum types in .td sources that we can read, so there is

@@ -403,24 +403,52 @@ impl Interpreter {
                             .define_force(sym, Value::str(format!("__net_builtin_{}", sym)));
                     }
                 } else if in_bundled("pool") {
-                    for sym in [
-                        "poolCreate",
-                        "poolAcquire",
-                        "poolRelease",
-                        "poolClose",
-                        "poolHealth",
-                    ] {
-                        self.env
-                            .define_force(sym, Value::str(format!("__pool_builtin_{}", sym)));
+                    // F54: sentinel list derived from the catalog so the
+                    // injected surface cannot drift from the export list.
+                    if let Some(spec) = crate::pkg::catalog::find("pool") {
+                        for sym in spec.exports {
+                            self.env
+                                .define_force(sym, Value::str(format!("__pool_builtin_{}", sym)));
+                        }
                     }
                 } else if in_bundled("abi") {
                     self.env
                         .define_force("WebRequest", Value::str("WebRequest".to_string()));
                     self.env
                         .define_force("WebResponse", Value::str("WebResponse".to_string()));
+                    for sym in ["HostCall", "HostStep", "HostCapability"] {
+                        self.env.define_force(sym, Value::str(sym.to_string()));
+                    }
                     for sym in super::abi_eval::abi_symbols() {
                         self.env
                             .define_force(sym, Value::str(format!("__abi_builtin_{}", sym)));
+                    }
+                } else if in_bundled("build") {
+                    // F54: descriptor-only package. The descriptor parser
+                    // recognizes `BuildUnit(...)` & co. by TYPE NAME, with or
+                    // without an import; these sentinels only make the
+                    // documented `>>> taida-lang/build => @(...)` import
+                    // resolve instead of failing at the export-collection
+                    // step. They are not runtime constructors.
+                    if let Some(spec) = crate::pkg::catalog::find("build") {
+                        for sym in spec.exports {
+                            self.env.define_force(
+                                sym,
+                                Value::str(format!("__build_descriptor_{}", sym)),
+                            );
+                        }
+                    }
+                } else if in_bundled("js") {
+                    // F54 (D-2 fix): `taida-lang/js` materialized but never
+                    // injected sentinels, so the import itself silently
+                    // half-worked. The descriptors are JS-backend-only; the
+                    // interpreter rejects their use at evaluation time, but
+                    // the import statement documents itself honestly now.
+                    if let Some(spec) = crate::pkg::catalog::find("js") {
+                        for sym in spec.exports {
+                            self.env
+                                .define_force(sym, Value::str(format!("__js_descriptor_{}", sym)));
+                        }
                     }
                 }
             }

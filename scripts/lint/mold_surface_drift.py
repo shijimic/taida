@@ -21,6 +21,7 @@ DOC_PATHS = [
     Path("docs/api/os.md"),
     Path("docs/api/net.md"),
     Path("docs/api/js.md"),
+    Path("docs/api/abi.md"),
     Path("docs/api/build_descriptors.md"),
     Path("docs/reference/addon_manifest.md"),
 ]

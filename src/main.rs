@@ -6547,12 +6547,25 @@ fn run_build_wasm_edge(
             );
         }
         if !no_check || handler_symbol.is_some() {
-            run_type_checks_and_warnings(
+            let host_capability_manifest =
+                match wasm_edge_host_capability_manifest_for_source(input_path) {
+                    Ok(manifest) => manifest,
+                    Err(message) => emit_build_cli_diagnostic_and_exit(
+                        compile_stats,
+                        diag_format,
+                        "E3603",
+                        &message,
+                        Some("Fix the Cloudflare manifest before building wasm-edge output."),
+                        1,
+                    ),
+                };
+            run_type_checks_and_warnings_with_host_capability_manifest(
                 &program,
                 &input_path.to_string_lossy(),
                 CompileTarget::WasmEdge,
                 diag_format,
                 compile_stats,
+                Some(&host_capability_manifest),
             );
         }
     }
@@ -6860,8 +6873,33 @@ fn run_type_checks_and_warnings(
     diag_format: DiagFormat,
     compile_stats: &mut CompileDiagStats,
 ) {
+    run_type_checks_and_warnings_with_host_capability_manifest(
+        program,
+        file,
+        compile_target,
+        diag_format,
+        compile_stats,
+        None,
+    );
+}
+
+fn run_type_checks_and_warnings_with_host_capability_manifest(
+    program: &Program,
+    file: &str,
+    compile_target: CompileTarget,
+    diag_format: DiagFormat,
+    compile_stats: &mut CompileDiagStats,
+    host_capability_manifest: Option<&[(String, String)]>,
+) {
     let mut checker = TypeChecker::new();
     checker.set_compile_target(compile_target);
+    if let Some(manifest) = host_capability_manifest {
+        checker.set_host_capability_manifest(
+            manifest
+                .iter()
+                .map(|(name, kind)| (name.as_str(), kind.as_str())),
+        );
+    }
     let file_path = std::path::Path::new(file);
     if file_path.exists() {
         checker.set_source_file(file_path);
@@ -9059,6 +9097,268 @@ fn find_packages_tdm() -> Option<PathBuf> {
     find_packages_tdm_from(&dir)
 }
 
+fn find_wrangler_manifest_for_source(source_path: &Path) -> Option<PathBuf> {
+    let mut dir = if source_path.is_dir() {
+        source_path.to_path_buf()
+    } else {
+        source_path.parent()?.to_path_buf()
+    };
+
+    loop {
+        for name in ["wrangler.jsonc", "wrangler.json"] {
+            let candidate = dir.join(name);
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+
+        if dir.join("packages.tdm").exists()
+            || dir.join("taida.toml").exists()
+            || dir.join(".git").exists()
+        {
+            return None;
+        }
+        if !dir.pop() {
+            return None;
+        }
+    }
+}
+
+fn strip_jsonc_comments(source: &str) -> String {
+    let mut out = String::with_capacity(source.len());
+    let mut chars = source.chars().peekable();
+    let mut in_string = false;
+    let mut escape = false;
+
+    while let Some(ch) = chars.next() {
+        if in_string {
+            out.push(ch);
+            if escape {
+                escape = false;
+            } else if ch == '\\' {
+                escape = true;
+            } else if ch == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+
+        if ch == '"' {
+            in_string = true;
+            out.push(ch);
+            continue;
+        }
+
+        if ch == '/' {
+            match chars.peek().copied() {
+                Some('/') => {
+                    chars.next();
+                    for next in chars.by_ref() {
+                        if next == '\n' {
+                            out.push('\n');
+                            break;
+                        }
+                    }
+                    continue;
+                }
+                Some('*') => {
+                    chars.next();
+                    let mut prev = '\0';
+                    for next in chars.by_ref() {
+                        if next == '\n' {
+                            out.push('\n');
+                        }
+                        if prev == '*' && next == '/' {
+                            break;
+                        }
+                        prev = next;
+                    }
+                    continue;
+                }
+                _ => {}
+            }
+        }
+
+        out.push(ch);
+    }
+
+    out
+}
+
+fn remove_json_trailing_commas(source: &str) -> String {
+    let chars: Vec<char> = source.chars().collect();
+    let mut out = String::with_capacity(source.len());
+    let mut in_string = false;
+    let mut escape = false;
+
+    for (idx, ch) in chars.iter().copied().enumerate() {
+        if in_string {
+            out.push(ch);
+            if escape {
+                escape = false;
+            } else if ch == '\\' {
+                escape = true;
+            } else if ch == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+
+        if ch == '"' {
+            in_string = true;
+            out.push(ch);
+            continue;
+        }
+
+        if ch == ',' {
+            let next = chars
+                .iter()
+                .skip(idx + 1)
+                .find(|candidate| !candidate.is_whitespace())
+                .copied();
+            if matches!(next, Some(']') | Some('}')) {
+                continue;
+            }
+        }
+
+        out.push(ch);
+    }
+
+    out
+}
+
+fn strip_jsonc_to_json(source: &str) -> String {
+    remove_json_trailing_commas(&strip_jsonc_comments(source))
+}
+
+fn wrangler_array_at<'a>(
+    root: &'a serde_json::Value,
+    path: &[&str],
+) -> Result<Option<&'a Vec<serde_json::Value>>, String> {
+    let mut current = root;
+    for key in path {
+        let Some(next) = current.get(*key) else {
+            return Ok(None);
+        };
+        current = next;
+    }
+    current.as_array().map(Some).ok_or_else(|| {
+        format!(
+            "wrangler manifest field `{}` must be an array.",
+            path.join(".")
+        )
+    })
+}
+
+fn push_wrangler_binding_capabilities(
+    capabilities: &mut Vec<(String, String)>,
+    seen: &mut HashSet<(String, String)>,
+    entries: Option<&Vec<serde_json::Value>>,
+    binding_keys: &[&str],
+    kind: &str,
+) {
+    let Some(entries) = entries else {
+        return;
+    };
+    for entry in entries {
+        let Some(name) = binding_keys
+            .iter()
+            .filter_map(|key| entry.get(*key).and_then(serde_json::Value::as_str))
+            .find(|value| !value.is_empty())
+        else {
+            continue;
+        };
+        let pair = (name.to_string(), kind.to_string());
+        if seen.insert(pair.clone()) {
+            capabilities.push(pair);
+        }
+    }
+}
+
+fn parse_wrangler_host_capability_manifest_str(
+    source: &str,
+) -> Result<Vec<(String, String)>, String> {
+    let json_source = strip_jsonc_to_json(source);
+    let root: serde_json::Value = serde_json::from_str(&json_source)
+        .map_err(|err| format!("wrangler manifest is not valid JSONC: {}", err))?;
+    if !root.is_object() {
+        return Err("wrangler manifest root must be a JSON object.".to_string());
+    }
+
+    let mut capabilities = Vec::new();
+    let mut seen = HashSet::new();
+    push_wrangler_binding_capabilities(
+        &mut capabilities,
+        &mut seen,
+        wrangler_array_at(&root, &["d1_databases"])?,
+        &["binding"],
+        "cloudflare/d1",
+    );
+    push_wrangler_binding_capabilities(
+        &mut capabilities,
+        &mut seen,
+        wrangler_array_at(&root, &["kv_namespaces"])?,
+        &["binding"],
+        "cloudflare/kv",
+    );
+    push_wrangler_binding_capabilities(
+        &mut capabilities,
+        &mut seen,
+        wrangler_array_at(&root, &["durable_objects", "bindings"])?,
+        &["name", "binding"],
+        "cloudflare/do_namespace",
+    );
+    push_wrangler_binding_capabilities(
+        &mut capabilities,
+        &mut seen,
+        wrangler_array_at(&root, &["r2_buckets"])?,
+        &["binding"],
+        "cloudflare/r2",
+    );
+    push_wrangler_binding_capabilities(
+        &mut capabilities,
+        &mut seen,
+        wrangler_array_at(&root, &["queues", "producers"])?,
+        &["binding"],
+        "cloudflare/queue_producer",
+    );
+    push_wrangler_binding_capabilities(
+        &mut capabilities,
+        &mut seen,
+        wrangler_array_at(&root, &["services"])?,
+        &["binding"],
+        "cloudflare/fetcher",
+    );
+
+    Ok(capabilities)
+}
+
+fn load_wrangler_host_capability_manifest(path: &Path) -> Result<Vec<(String, String)>, String> {
+    let source = fs::read_to_string(path).map_err(|err| {
+        format!(
+            "Error reading wrangler manifest '{}': {}",
+            path.display(),
+            err
+        )
+    })?;
+    parse_wrangler_host_capability_manifest_str(&source).map_err(|err| {
+        format!(
+            "Error parsing wrangler manifest '{}': {}",
+            path.display(),
+            err
+        )
+    })
+}
+
+fn wasm_edge_host_capability_manifest_for_source(
+    source_path: &Path,
+) -> Result<Vec<(String, String)>, String> {
+    match find_wrangler_manifest_for_source(source_path) {
+        Some(path) => load_wrangler_host_capability_manifest(&path),
+        None => Ok(Vec::new()),
+    }
+}
+
 // ── LSP server ─────────────────────────────────────────
 
 #[cfg(feature = "lsp")]
@@ -9289,6 +9589,64 @@ mod tests {
             .expect("non-wasm targets must skip the closure re-parse pass");
 
         fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn wrangler_manifest_reader_maps_cloudflare_bindings() {
+        let source = r#"
+{
+  // JSONC comments and trailing commas are accepted.
+  "name": "edge-app",
+  "route": "https://example.com/*",
+  "d1_databases": [{ "binding": "DB" }],
+  "kv_namespaces": [{ "binding": "CACHE" }],
+  "durable_objects": {
+    "bindings": [{ "name": "COUNTER", "class_name": "Counter" }],
+  },
+  "r2_buckets": [{ "binding": "ASSETS" }],
+  "queues": {
+    "producers": [{ "binding": "OUTBOX", "queue": "outbox" }],
+  },
+  "services": [{ "binding": "API", "service": "api" }],
+}
+"#;
+
+        let capabilities =
+            parse_wrangler_host_capability_manifest_str(source).expect("manifest should parse");
+        assert_eq!(
+            capabilities,
+            vec![
+                ("DB".to_string(), "cloudflare/d1".to_string()),
+                ("CACHE".to_string(), "cloudflare/kv".to_string()),
+                ("COUNTER".to_string(), "cloudflare/do_namespace".to_string()),
+                ("ASSETS".to_string(), "cloudflare/r2".to_string()),
+                (
+                    "OUTBOX".to_string(),
+                    "cloudflare/queue_producer".to_string()
+                ),
+                ("API".to_string(), "cloudflare/fetcher".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn wrangler_manifest_reader_stops_at_project_marker() {
+        let outer = temp_test_dir("wrangler-outer");
+        let project = outer.join("project");
+        let src = project.join("src");
+        fs::create_dir_all(&src).expect("create project tree");
+        fs::write(outer.join("wrangler.jsonc"), r#"{ "d1_databases": [] }"#)
+            .expect("write outer wrangler");
+        fs::write(project.join("taida.toml"), "").expect("write project marker");
+        let td = src.join("main.td");
+        fs::write(&td, "stdout(\"ok\")\n").expect("write source");
+
+        assert!(
+            find_wrangler_manifest_for_source(&td).is_none(),
+            "manifest search must not cross the project marker"
+        );
+
+        fs::remove_dir_all(&outer).ok();
     }
 
     fn parse_single_import(source: &str) -> ImportStmt {

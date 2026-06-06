@@ -381,7 +381,21 @@ impl Lowering {
                             });
                         }
                         let pool = self.lower_expr(func, &args[0])?;
-                        let timeout = timeout_var(self, func, 1)?;
+                        // Unlike the socket APIs above, the pool carries its
+                        // own configured acquireTimeoutMs. Injecting
+                        // OS_NET_DEFAULT_TIMEOUT_MS here made the omitted-arg
+                        // call always pass an explicit 30s, silently dead-
+                        // lettering poolCreate's acquireTimeoutMs (interpreter
+                        // falls back to the pool config). i64::MIN is the
+                        // omitted-argument sentinel the runtime maps to the
+                        // pool's configured timeout.
+                        let timeout = if let Some(arg) = args.get(1) {
+                            self.lower_expr(func, arg)?
+                        } else {
+                            let t = func.alloc_var();
+                            func.push(IrInst::ConstInt(t, i64::MIN));
+                            t
+                        };
                         let result = func.alloc_var();
                         func.push(IrInst::Call(
                             result,
@@ -1422,12 +1436,16 @@ impl Lowering {
                 }
             }
             // BinOp::Div and BinOp::Mod removed — use Div[x, y]() and Mod[x, y]() molds
+            // F54 numeric parity: a Float on either side routes to the
+            // f64 comparison helpers (covering Int↔Float cross-type via
+            // _to_double). Raw i64 comparison of f64 bit patterns made
+            // `3 == 3.0` false and inverted negative-float ordering.
             BinOp::Eq => {
                 if lhs_is_str || rhs_is_str {
                     "taida_str_eq"
-                } else if self.expr_returns_float(lhs)
-                    || self.expr_returns_float(rhs)
-                    || self.expr_is_bool(lhs)
+                } else if self.expr_returns_float(lhs) || self.expr_returns_float(rhs) {
+                    "taida_float_eq"
+                } else if self.expr_is_bool(lhs)
                     || self.expr_is_bool(rhs)
                     || matches!(lhs, Expr::IntLit(_, _))
                     || matches!(rhs, Expr::IntLit(_, _))
@@ -1440,9 +1458,9 @@ impl Lowering {
             BinOp::NotEq => {
                 if lhs_is_str || rhs_is_str {
                     "taida_str_neq"
-                } else if self.expr_returns_float(lhs)
-                    || self.expr_returns_float(rhs)
-                    || self.expr_is_bool(lhs)
+                } else if self.expr_returns_float(lhs) || self.expr_returns_float(rhs) {
+                    "taida_float_neq"
+                } else if self.expr_is_bool(lhs)
                     || self.expr_is_bool(rhs)
                     || matches!(lhs, Expr::IntLit(_, _))
                     || matches!(rhs, Expr::IntLit(_, _))
@@ -1452,9 +1470,27 @@ impl Lowering {
                     "taida_poly_neq"
                 }
             }
-            BinOp::Lt => "taida_int_lt",
-            BinOp::Gt => "taida_int_gt",
-            BinOp::GtEq => "taida_int_gte",
+            BinOp::Lt => {
+                if self.expr_returns_float(lhs) || self.expr_returns_float(rhs) {
+                    "taida_float_lt"
+                } else {
+                    "taida_int_lt"
+                }
+            }
+            BinOp::Gt => {
+                if self.expr_returns_float(lhs) || self.expr_returns_float(rhs) {
+                    "taida_float_gt"
+                } else {
+                    "taida_int_gt"
+                }
+            }
+            BinOp::GtEq => {
+                if self.expr_returns_float(lhs) || self.expr_returns_float(rhs) {
+                    "taida_float_gte"
+                } else {
+                    "taida_int_gte"
+                }
+            }
             BinOp::And => "taida_bool_and",
             BinOp::Or => "taida_bool_or",
             BinOp::Concat => "taida_str_concat",

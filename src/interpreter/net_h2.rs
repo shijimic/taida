@@ -60,6 +60,14 @@ const MAX_CONTINUATION_BUFFER_SIZE: usize = 128 * 1024;
 /// We enforce 64KB as a hard safety limit to prevent HPACK bombs.
 const MAX_DECODED_HEADER_LIST_SIZE: usize = 64 * 1024;
 
+/// Maximum eager-accumulated request body size per HTTP/2 stream (16 MiB).
+/// The stream flow-control window is replenished without an overall cap, so
+/// the per-stream `request_body` buffer must be bounded here; otherwise a
+/// single stream can grow its body indefinitely until END_STREAM arrives,
+/// exhausting memory. Matches the WebSocket max payload bound. Exceeding it
+/// resets the stream with ENHANCE_YOUR_CALM.
+const MAX_REQUEST_BODY_SIZE: usize = 16 * 1024 * 1024;
+
 // ── Frame Types (RFC 9113 Section 6) ────────────────────────────────
 
 pub(crate) const FRAME_DATA: u8 = 0x0;
@@ -1867,6 +1875,23 @@ pub(crate) fn process_frame(
             conn.conn_recv_window -= data_len;
             stream.recv_window -= data_len;
 
+            // Bound eager body accumulation. The flow-control window is
+            // replenished without an overall cap (see net_eval/h2.rs), so
+            // without this guard a single stream's body grows until END_STREAM
+            // — an unbounded-memory (OOM) vector. `data` is the post-padding
+            // body slice; reset the stream once the accumulated body would
+            // exceed the cap.
+            if stream.request_body.len().saturating_add(data.len()) > MAX_REQUEST_BODY_SIZE {
+                return Err(H2Error::Stream(
+                    stream_id,
+                    ERROR_ENHANCE_YOUR_CALM,
+                    format!(
+                        "request body exceeds maximum of {} bytes on stream {}",
+                        MAX_REQUEST_BODY_SIZE, stream_id
+                    ),
+                ));
+            }
+
             // Accumulate body data
             stream.request_body.extend_from_slice(data);
 
@@ -3133,6 +3158,64 @@ mod tests {
             }
             other => panic!("expected Stream error, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn test_recv_body_size_limit_exceeded() {
+        // A DATA frame whose body would push the accumulated request body past
+        // MAX_REQUEST_BODY_SIZE must reset the stream with ENHANCE_YOUR_CALM,
+        // even when both flow-control windows are ample. Flow-control windows
+        // are replenished without an overall cap, so this is the OOM guard.
+        let mut conn = H2Connection::new();
+
+        let mut stream = H2Stream::new(65535);
+        stream.state = StreamState::HalfClosedRemote;
+        stream.recv_window = MAX_FLOW_CONTROL_WINDOW; // ample stream window
+        conn.streams.insert(1, stream);
+        conn.conn_recv_window = MAX_FLOW_CONTROL_WINDOW; // ample connection window
+
+        let over = MAX_REQUEST_BODY_SIZE + 1;
+        let payload = vec![0u8; over];
+        let header = FrameHeader {
+            length: over as u32,
+            frame_type: FRAME_DATA,
+            flags: 0,
+            stream_id: 1,
+        };
+        let result = process_frame(&mut conn, &header, &payload);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            H2Error::Stream(stream_id, code, _) => {
+                assert_eq!(stream_id, 1);
+                assert_eq!(code, ERROR_ENHANCE_YOUR_CALM);
+            }
+            other => panic!("expected Stream ENHANCE_YOUR_CALM error, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_recv_body_at_limit_succeeds() {
+        // A DATA frame whose body is exactly MAX_REQUEST_BODY_SIZE (with
+        // END_STREAM) must be accepted — the cap is a ceiling, not a fencepost
+        // off-by-one.
+        let mut conn = H2Connection::new();
+
+        let mut stream = H2Stream::new(65535);
+        stream.state = StreamState::HalfClosedRemote;
+        stream.recv_window = MAX_FLOW_CONTROL_WINDOW;
+        conn.streams.insert(1, stream);
+        conn.conn_recv_window = MAX_FLOW_CONTROL_WINDOW;
+
+        let exact = MAX_REQUEST_BODY_SIZE;
+        let payload = vec![0u8; exact];
+        let header = FrameHeader {
+            length: exact as u32,
+            frame_type: FRAME_DATA,
+            flags: FLAG_END_STREAM,
+            stream_id: 1,
+        };
+        let result = process_frame(&mut conn, &header, &payload);
+        assert!(result.is_ok(), "body exactly at the cap must be accepted");
     }
 
     #[test]

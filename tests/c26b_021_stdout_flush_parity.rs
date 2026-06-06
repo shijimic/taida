@@ -79,8 +79,11 @@ fn write_fixture(dir: &Path, body: &str) -> PathBuf {
 /// Minimal fixture: sleep between two stdout writes, so a buffered
 /// stdout would hold BOTH lines until exit, whereas a line-buffered
 /// stdout would emit "first" immediately.
-const FIXTURE_SLEEP_BETWEEN_LINES: &str = r#">>> taida-lang/os => @(sleep)
-stdout("first")
+///
+/// F54: `sleep` is a prelude function, not an os export — the old
+/// `>>> taida-lang/os => @(sleep)` import only built because bundled
+/// packages used to skip import validation. No import is needed.
+const FIXTURE_SLEEP_BETWEEN_LINES: &str = r#"stdout("first")
 sleep(0.2)
 stdout("second")
 "#;

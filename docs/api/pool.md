@@ -1,17 +1,19 @@
 # `taida-lang/pool` API リファレンス
 
-`taida-lang/pool` はリソースプーリングの最小契約を提供するコア同梱
-パッケージです。HTTP クライアントコネクション、DB ドライバ接続、その他
-共有資源のプール化を必要とする場面で、生成・取得・返却・破棄の共通 API
-を提供します。
+`taida-lang/pool` はリソースプーリングの待機セマフォ契約を提供するコア
+同梱パッケージです。HTTP クライアントコネクション、DB ドライバ接続、
+その他共有資源のプール化を必要とする場面で、取得・返却・破棄・観測の
+共通 API を提供します。
 
 ```taida
 >>> taida-lang/pool => @(poolCreate, poolAcquire, poolRelease, poolClose, poolHealth)
 ```
 
+プールは **BYO (bring-your-own) リソースモデル** です。リソースの生成
+(接続確立など) は呼び出し側の責務で、`poolRelease` で預けた値が次の
+`poolAcquire` の再利用リソースとして `Lax` に包まれて返ります。
 ドライバごとの接続確立・検証ポリシーは `taida-lang/pool` 自体には
-含まれません。上位ライブラリでプール化対象 (`Molten` ハンドル) を
-具体化する設計です。
+含まれません。
 
 ---
 
@@ -64,11 +66,12 @@ pool <= created.pool
 
 ### 2.1 `poolAcquire`
 
-> プールからリソースを 1 つ取得する非同期処理を返す。
+> プールからスロットを 1 つ取得する非同期処理を返す。プールが満杯の
+> 場合は空きが出るまで (最大 `acquireTimeoutMs` まで) 待機します。
 
 ```taida
-poolAcquire pool: Pool => :Async[Result[@(resource: Resource, token: Token), _]]
-poolAcquire pool: Pool  timeoutMs: Int => :Async[Result[@(resource: Resource, token: Token), _]]
+poolAcquire pool: Pool => :Async[Result[@(resource: Lax[Resource], token: Token), _]]
+poolAcquire pool: Pool  timeoutMs: Int => :Async[Result[@(resource: Lax[Resource], token: Token), _]]
 ```
 
 **Parameters**:
@@ -76,20 +79,33 @@ poolAcquire pool: Pool  timeoutMs: Int => :Async[Result[@(resource: Resource, to
 | Name | Type | Description |
 |------|------|-------------|
 | `pool` | `Pool` | `poolCreate` で得た不透明ハンドル。 |
-| `timeoutMs` | `Int` | このコール限定の取得待ちタイムアウト (ミリ秒)。省略時は `poolCreate` 時の `acquireTimeoutMs`。明示する場合は `1` 以上の正の整数。 |
+| `timeoutMs` | `Int` | このコール限定の取得待ちタイムアウト (ミリ秒)。省略時は `poolCreate` 時の `acquireTimeoutMs`。明示する場合は `1` 以上の正の整数 (`0` 以下は `kind: "invalid"` の失敗)。 |
 
-**Returns**: `:Async[Result[@(resource: Resource, token: Token), _]]` —
+**Returns**: `:Async[Result[@(resource: Lax[Resource], token: Token), _]]` —
 `>=>` で待機すると `Result` が、もう一度 `>=>` で
-`@(resource: Resource, token: Token)` が得られます。`resource` は取り出した
-リソース本体、`token` は `poolRelease` に渡す返却用ハンドルです。
+`@(resource: Lax[Resource], token: Token)` が得られます。
+
+- `resource` は `Lax` です。アイドルキューの再利用リソース (以前の
+  `poolRelease` で預けた値) がある場合は成功側 (`has_value <= true`)、
+  新規スロット (fresh) の場合は失敗側 (`has_value <= false`) になります。
+  fresh のときはリソース (接続など) を呼び出し側で生成してください。
+  失敗側 `Lax` の既定値は実装定義のプレースホルダなので、`>=>` で直接
+  アンモールドせず `has_value` 分岐または `getOrDefault` で扱います。
+- `token` は `poolRelease` に渡す返却用ハンドルです。
+
+**待機セマンティクス**: プールが満杯 (貸出数が `maxSize` に到達し
+アイドルも空) の場合、この `Async` は空きが出るまで実際にブロック
+します。待機中に `poolRelease` / `poolClose` が起きれば直ちに進行し、
+タイムアウトに達した場合のみ `kind: "timeout"` の失敗になります。
 
 **Failure modes**:
 
-- プールが閉じられている: 失敗側に `kind: "closed"` が入る。
-- タイムアウト: 失敗側に `kind: "timeout"` が入る。
+- プールが閉じられている (待機中に閉じられた場合を含む): `kind: "closed"`。
+- タイムアウト: `kind: "timeout"`。
+- `timeoutMs` が `0` 以下: `kind: "invalid"`。
 
-`Token` / `Resource` は `poolAcquire` 戻り値の `.token` / `.resource` に
-それぞれ対応する型エイリアスです。
+`Token` / `Resource` は `poolAcquire` 戻り値の `.token` /
+`.resource` の中身にそれぞれ対応する型エイリアスです。
 
 **Example**:
 
@@ -98,10 +114,12 @@ poolAcquire pool: Pool  timeoutMs: Int => :Async[Result[@(resource: Resource, to
   stderr("acquire failed: " + error.message)
 => :Int
 
-poolAcquire(pool, 2000) >=> result    // Async unmold → Result
+poolAcquire(pool, 2000) >=> result    // Async unmold → Result (満杯なら空き待ち)
 result >=> acquired                   // Result unmold → @(resource, token)。失敗時 throw
-// acquired.resource を使った処理 ...
-poolRelease(pool, acquired.token, acquired.resource) >=> _
+acquired.resource => resLax
+conn <= resLax.getOrDefault(makeConnection())   // 再利用 or 新規生成
+// conn を使った処理 ...
+poolRelease(pool, acquired.token, conn) >=> _
 ```
 
 ---
@@ -122,7 +140,7 @@ poolRelease pool: Pool  token: Token  resource: Resource => :Result[@(ok: Bool, 
 |------|------|-------------|
 | `pool` | `Pool` | 取得時と同じプールハンドル。 |
 | `token` | `Token` | `poolAcquire` 戻り値の `.token` をそのまま渡す。 |
-| `resource` | `Resource` | 取得時のリソース本体。 |
+| `resource` | `Resource` | リソース**本体**。`poolAcquire` が返す `Lax` ラッパーではなく、その中身 (または fresh 時に自作した値) を渡します。預けた値はそのままアイドルキューに入り、次の `poolAcquire` で `Lax` に包まれて返ります (渡した型 `T` が `Lax[T]` で返る対称性)。 |
 
 **Returns**: `:Result[@(ok: Bool, reused: Bool), _]` — `ok` は返却が
 成功したか、`reused` は返却したリソースがアイドルキューに再投入されたか
@@ -200,7 +218,7 @@ poolHealth pool: Pool => :@(open: Bool, idle: Int, inUse: Int, waiting: Int)
 | `open` | `Bool` | プールが利用可能か (`poolClose` 後は `false`)。 |
 | `idle` | `Int` | アイドルキューに保持されているリソース数。 |
 | `inUse` | `Int` | 現在貸し出し中のリソース数。 |
-| `waiting` | `Int` | 取得待ちを起こしている呼び出し数。 |
+| `waiting` | `Int` | いま空き待ちでブロックしている `poolAcquire` 呼び出しの実数。 |
 
 **AI-Context**:
 監視 / メトリクス送信のための観測ポイントとしての利用を想定します。
@@ -223,12 +241,11 @@ stdout("idle: " + health.idle.toString() + ", in use: " + health.inUse.toString(
 | インタプリタ | 全 API |
 | ネイティブ | 全 API |
 | 旧 JS ターゲット | 全 API |
-| WASM (`wasm-min` / `wasm-wasi` / `wasm-edge`) | 利用不可 |
-| WASM (`wasm-full`) | 全 API |
+| WASM (全プロファイル) | 利用不可 |
 
-`wasm-min` / `wasm-wasi` / `wasm-edge` プロファイルではプール本体の
-ランタイムスレッドモデルが利用できないため、インポート自体が拒否
-されます。詳細は
+WASM プロファイルではプール本体のランタイムスレッドモデル (空き待ち
+ブロックを成立させる並行実行主体) が利用できないため、`taida-lang/pool`
+は利用できません。詳細は
 [`docs/reference/wasm_profiles.md`](../reference/wasm_profiles.md) を
 参照してください。
 

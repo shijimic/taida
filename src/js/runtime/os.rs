@@ -1263,7 +1263,7 @@ function __taida_os_poolCreate(config) {
   const poolId = __taida_next_pool_id++;
   __taida_pool_states.set(poolId, {
     open: true, maxSize, maxIdle, acquireTimeoutMs,
-    idle: [], inUse: new __NativeSet(), nextToken: 1
+    idle: [], inUse: new __NativeSet(), nextToken: 1, waiting: 0
   });
   return __taida_os_result_ok(Object.freeze({ pool: poolId }));
 }
@@ -1274,21 +1274,47 @@ async function __taida_os_poolAcquire(poolOrPack, timeoutMs) {
   const state = __taida_pool_states.get(poolId);
   if (!state) return __taida_os_result_fail_with_kind('invalid', 'poolAcquire: unknown pool handle');
   if (!state.open) return __taida_os_result_fail_with_kind('closed', 'poolAcquire: pool is closed');
-  const effectiveTimeout = (__taida_isIntNumber(timeoutMs) && timeoutMs > 0)
-    ? timeoutMs : state.acquireTimeoutMs;
-  let resource = Object.freeze({});
-  let token;
-  if (state.idle.length > 0) {
-    const entry = state.idle.pop();
-    resource = entry.resource;
-    token = entry.token;
-  } else if (state.inUse.size < state.maxSize) {
-    token = state.nextToken++;
+  let effectiveTimeout;
+  if (timeoutMs === undefined || timeoutMs === null) {
+    effectiveTimeout = state.acquireTimeoutMs;
+  } else if (!__taida_isIntNumber(timeoutMs) || timeoutMs <= 0) {
+    return __taida_os_result_fail_with_kind('invalid', `poolAcquire: timeoutMs must be > 0, got ${timeoutMs}`);
   } else {
-    return __taida_os_result_fail_with_kind('timeout', `poolAcquire: timed out after ${effectiveTimeout}ms`);
+    effectiveTimeout = timeoutMs;
   }
-  state.inUse.add(token);
-  return __taida_os_result_ok(Object.freeze({ resource, token }));
+  // Waiting-semaphore contract: `resource` is Lax — Lax(value) when an idle
+  // (BYO, deposited via poolRelease) resource is reused, failure-side Lax
+  // (placeholder default 0; the pool does not know the element type) when
+  // the slot is fresh. When the pool is exhausted, block on the event loop
+  // until a slot frees up or the deadline passes; poolRelease / poolClose
+  // make progress visible on the next poll tick. `waiting` is the live
+  // count of blocked acquires.
+  const deadline = Date.now() + effectiveTimeout;
+  let registeredWaiter = false;
+  for (;;) {
+    if (!state.open) {
+      if (registeredWaiter) state.waiting--;
+      return __taida_os_result_fail_with_kind('closed', 'poolAcquire: pool is closed');
+    }
+    if (state.idle.length > 0) {
+      const entry = state.idle.pop();
+      if (registeredWaiter) state.waiting--;
+      state.inUse.add(entry.token);
+      return __taida_os_result_ok(Object.freeze({ resource: Lax(entry.resource), token: entry.token }));
+    }
+    if (state.inUse.size < state.maxSize) {
+      const token = state.nextToken++;
+      if (registeredWaiter) state.waiting--;
+      state.inUse.add(token);
+      return __taida_os_result_ok(Object.freeze({ resource: Lax(null, 0), token }));
+    }
+    if (Date.now() >= deadline) {
+      if (registeredWaiter) state.waiting--;
+      return __taida_os_result_fail_with_kind('timeout', `poolAcquire: timed out after ${effectiveTimeout}ms`);
+    }
+    if (!registeredWaiter) { state.waiting++; registeredWaiter = true; }
+    await new Promise(resolve => setTimeout(resolve, 2));
+  }
 }
 
 function __taida_os_poolRelease(poolOrPack, token, resource) {
@@ -1328,7 +1354,7 @@ function __taida_os_poolHealth(poolOrPack) {
     open: state.open,
     idle: state.idle.length,
     inUse: state.inUse.size,
-    waiting: 0
+    waiting: state.waiting
   });
 }
 
@@ -1476,9 +1502,12 @@ function __taida_lax_from_bytes_cursor_step(step, hasValue) {
 // ── taida-lang/crypto: sha256 ──────────────────────────────────
 const __taida_crypto = await import('node:crypto').catch(() => null);
 function sha256(value) {
-  const data = typeof value === 'string' ? value : String(value);
   if (__taida_crypto) {
-    return __taida_crypto.createHash('sha256').update(data, 'utf8').digest('hex');
+    const hash = __taida_crypto.createHash('sha256');
+    if (typeof value === 'string') return hash.update(value, 'utf8').digest('hex');
+    if (value instanceof Uint8Array) return hash.update(Buffer.from(value)).digest('hex');
+    if (typeof Buffer !== 'undefined' && Buffer.isBuffer(value)) return hash.update(value).digest('hex');
+    throw new TypeError('sha256: input must be Str or Bytes');
   }
   // Fallback: pure-JS SHA-256 (should not reach here in Node.js)
   return '';

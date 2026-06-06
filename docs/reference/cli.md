@@ -117,7 +117,11 @@ taida build [native|wasm-min|wasm-wasi|wasm-edge|wasm-full] [--release] [--no-ca
 - `--handler <SYMBOL>` を指定すると、`taida-lang/abi` の `WebRequest` /
   `WebResponse` handler としてビルドします。Native は標準入力/標準出力の
   JSON bridge を持つ binary、WASM は host adapter から呼び出す ABI export
-  を持つ module を生成します。詳細は [`docs/api/abi.md`](../api/abi.md) を参照してください。
+  を持つ module を生成します。Host capability を使う WASM handler は
+  `start` / `poll` / `resume` の session ABI で host call を待ち、adapter が
+  resume JSON を返します。`wasm-edge --handler` は Workers 用 glue と、
+  同じ stem の `.edge.js` を生成します。詳細は [`docs/api/abi.md`](../api/abi.md)
+  を参照してください。
 - 旧 `js` ターゲットは移行期間の互換機能です。正式なリリースパリティ契約には含めず、新規コードは Native または WASM を選んでください。
 - `--target <target>` / `--target=<target>` フラグは提供していません。位置引数で指定してください。誤って指定した場合は `[E1700]` + exit 2 になります。
 - 既定では parse + type check を実行します。`--no-check` で型検査をスキップできます。

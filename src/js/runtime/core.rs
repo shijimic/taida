@@ -2269,21 +2269,21 @@ function Sort(list, opts) {
   return Object.freeze(copy);
 }
 function Unique(list, opts) {
-  const result = [];
   const arr = list || [];
   if (opts && opts.by) {
     const fn = opts.by;
-    const seen = [];
+    const seen = Object.create(null);
+    const result = [];
     for (const item of arr) {
       const key = fn(item);
-      if (!seen.some(k => __taida_equals(k, key))) { seen.push(key); result.push(item); }
+      const fp = __taida_fingerprint(key);
+      let b = seen[fp];
+      if (b === undefined) { b = []; seen[fp] = b; }
+      if (!b.some(k => __taida_equals(k, key))) { b.push(key); result.push(item); }
     }
-  } else {
-    for (const item of arr) {
-      if (!result.some(x => __taida_equals(x, item))) result.push(item);
-    }
+    return Object.freeze(result);
   }
-  return Object.freeze(result);
+  return Object.freeze(__taida_dedupe(arr));
 }
 function Flatten(list) {
   const result = [];
@@ -2798,9 +2798,15 @@ function __taida_equals(a, b) {
     return a.every((v, i) => __taida_equals(v, b[i]));
   }
   if (Array.isArray(a) || Array.isArray(b)) return false;
-  // Filter out internal keys (__*) and method keys (function values)
-  const ka = Object.keys(a).filter(k => !k.startsWith('__') && typeof a[k] !== 'function');
-  const kb = Object.keys(b).filter(k => !k.startsWith('__') && typeof b[k] !== 'function');
+  // Filter out method keys (function values) only. Closure-mold packs
+  // (Lax / Result / Gorillax / Set / ...) carry their real payload in
+  // dunder DATA fields (__type / __value / __default / __items / __error);
+  // the interpreter's BuchiPack equality compares every field, so dropping
+  // all __-prefixed keys here collapsed e.g. every same-arm Lax into one
+  // value regardless of payload (F54 parity fix: dedup now matches the
+  // interpreter / native pack comparison).
+  const ka = Object.keys(a).filter(k => typeof a[k] !== 'function');
+  const kb = Object.keys(b).filter(k => typeof b[k] !== 'function');
   if (ka.length !== kb.length) return false;
   return ka.every(k => __taida_equals(a[k], b[k]));
 }
@@ -3209,6 +3215,49 @@ function hashMap(entries) {
 // ── Set — immutable unique collection ──
 // Internal: items = [...unique values] (frozen array)
 // All mutating methods return a new Set.
+// F54B-016 (G4) commit 2: O(n) structural dedupe. __taida_fingerprint groups
+// values that __taida_equals MIGHT consider equal into one bucket (it never
+// splits an equal pair: Enum<->Number share "n:<ord>", arrays are order-
+// sensitive, objects are key-order-independent), then each bucket is confirmed
+// with __taida_equals. setOf / union / intersect / diff / Unique drop from
+// O(n^2) to O(n)/O(n+m); createSet's per-call add/has/remove stay structural
+// (the immutable-clone cost is unchanged, matching the native `add` policy).
+function __taida_fingerprint(x) {
+  if (x === null || x === undefined) return "u";
+  if (__taida_isEnumVal(x)) return "n:" + x.__taida_enum_ordinal;
+  const t = typeof x;
+  if (t === 'bigint') return "n:" + x.toString();
+  if (t === 'number') return "n:" + x;
+  if (t === 'boolean') return "B:" + x;
+  if (t === 'string') return "s:" + x;
+  if (Array.isArray(x)) return "L:" + x.length + ":" + x.map(__taida_fingerprint).join(",");
+  if (t === 'object') {
+    // Keep dunder DATA fields (mirror __taida_equals): only methods are
+    // excluded, so Lax/Result/Gorillax fingerprints reflect their payload.
+    const ks = Object.keys(x).filter(k => typeof x[k] !== 'function').sort();
+    return "O:" + ks.map(k => k + "=" + __taida_fingerprint(x[k])).join(",");
+  }
+  return "x"; // non-hashable (function etc.) -> single bucket + __taida_equals confirm
+}
+function __taida_dedupe(items) {
+  const seen = Object.create(null); const out = [];
+  for (const item of items) {
+    const fp = __taida_fingerprint(item);
+    let b = seen[fp];
+    if (b === undefined) { b = []; seen[fp] = b; }
+    if (!b.some(x => __taida_equals(x, item))) { b.push(item); out.push(item); }
+  }
+  return out;
+}
+function __taida_fp_set(items) {
+  const m = Object.create(null);
+  for (const x of items) { const fp = __taida_fingerprint(x); const b = m[fp]; if (b) b.push(x); else m[fp] = [x]; }
+  return m;
+}
+function __taida_fp_has(m, item) {
+  const b = m[__taida_fingerprint(item)];
+  return b !== undefined && b.some(x => __taida_equals(x, item));
+}
 function __taida_createSet(items) {
   const _items = Object.freeze(items);
   const s = {
@@ -3226,19 +3275,17 @@ function __taida_createSet(items) {
     },
     union(other) {
       if (!other || other.__type !== 'Set') return s;
-      const result = [..._items];
-      for (const item of other.__items) {
-        if (!result.some(x => __taida_equals(x, item))) result.push(item);
-      }
-      return __taida_createSet(result);
+      return __taida_createSet(__taida_dedupe([..._items, ...other.__items]));
     },
     intersect(other) {
       if (!other || other.__type !== 'Set') return __taida_createSet([]);
-      return __taida_createSet(_items.filter(item => other.__items.some(x => __taida_equals(x, item))));
+      const m = __taida_fp_set(other.__items);
+      return __taida_createSet(_items.filter(item => __taida_fp_has(m, item)));
     },
     diff(other) {
       if (!other || other.__type !== 'Set') return s;
-      return __taida_createSet(_items.filter(item => !other.__items.some(x => __taida_equals(x, item))));
+      const m = __taida_fp_set(other.__items);
+      return __taida_createSet(_items.filter(item => !__taida_fp_has(m, item)));
     },
     toList() {
       return _items;
@@ -3262,11 +3309,7 @@ function __taida_createSet(items) {
 
 function setOf(items) {
   if (!Array.isArray(items)) return __taida_createSet([]);
-  const unique = [];
-  for (const item of items) {
-    if (!unique.some(x => __taida_equals(x, item))) unique.push(item);
-  }
-  return __taida_createSet(unique);
+  return __taida_createSet(__taida_dedupe(items));
 }
 
 function range(start, end) {

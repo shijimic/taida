@@ -2338,6 +2338,168 @@ impl Interpreter {
         }
     }
 
+    fn eval_host_boundary_str_arg(
+        &mut self,
+        arg: &Expr,
+        label: &str,
+    ) -> Result<String, RuntimeError> {
+        match self.eval_expr(arg)? {
+            Signal::Value(Value::Str(s)) => Ok(Value::str_take(s)),
+            Signal::Value(other) => Err(RuntimeError {
+                message: format!("{} must be Str, got {}", label, Self::type_name_of(&other)),
+            }),
+            other => Err(RuntimeError {
+                message: format!("{}: unexpected control signal {:?}", label, other),
+            }),
+        }
+    }
+
+    fn host_descriptor_has_type(value: &Value, expected: &str) -> bool {
+        matches!(value.get_field("__type"), Some(Value::Str(s)) if s.as_str() == expected)
+    }
+
+    fn host_descriptor_str_field(
+        value: &Value,
+        descriptor: &str,
+        field: &str,
+    ) -> Result<String, RuntimeError> {
+        let Some(field_value) = value.get_field(field) else {
+            return Err(RuntimeError {
+                message: format!("{} descriptor is missing '{}' field", descriptor, field),
+            });
+        };
+        match field_value {
+            Value::Str(s) => Ok(s.as_string().clone()),
+            other => Err(RuntimeError {
+                message: format!(
+                    "{} descriptor field '{}' must be Str, got {}",
+                    descriptor,
+                    field,
+                    Self::type_name_of(other)
+                ),
+            }),
+        }
+    }
+
+    fn host_descriptor_list_field<'a>(
+        value: &'a Value,
+        descriptor: &str,
+        field: &str,
+    ) -> Result<&'a [Value], RuntimeError> {
+        let Some(field_value) = value.get_field(field) else {
+            return Err(RuntimeError {
+                message: format!("{} descriptor is missing '{}' field", descriptor, field),
+            });
+        };
+        match field_value {
+            Value::List(items) => Ok(items.as_slice()),
+            other => Err(RuntimeError {
+                message: format!(
+                    "{} descriptor field '{}' must be List, got {}",
+                    descriptor,
+                    field,
+                    Self::type_name_of(other)
+                ),
+            }),
+        }
+    }
+
+    fn host_step_descriptor_args(step: &Value) -> Result<(String, &[Value]), RuntimeError> {
+        if !Self::host_descriptor_has_type(step, "HostStep") {
+            return Err(RuntimeError {
+                message: format!(
+                    "HostCall steps must contain HostStep descriptors, got {}",
+                    Self::type_name_of(step)
+                ),
+            });
+        }
+        let method = Self::host_descriptor_str_field(step, "HostStep", "method")?;
+        let args = Self::host_descriptor_list_field(step, "HostStep", "args")?;
+        Ok((method, args))
+    }
+
+    fn eval_host_call_cage(&self, subject: Value, runner: Value) -> Result<Value, RuntimeError> {
+        if !Self::host_descriptor_has_type(&subject, "HostCapability") {
+            return Err(RuntimeError {
+                message: format!(
+                    "Host Cage requires HostCapability as first argument, got {}",
+                    Self::type_name_of(&subject)
+                ),
+            });
+        }
+        let capability_name = Self::host_descriptor_str_field(&subject, "HostCapability", "name")?;
+        let _capability_kind = Self::host_descriptor_str_field(&subject, "HostCapability", "kind")?;
+        let actual_steps = Self::host_descriptor_list_field(&runner, "HostCall", "steps")?;
+        let Some(expected_steps) = self.host_capability_mocks.get(&capability_name) else {
+            return Ok(async_rejected(
+                "HostCapabilityError",
+                format!(
+                    "No interpreter host fixture registered for capability '{}'",
+                    capability_name
+                ),
+            ));
+        };
+        if actual_steps.is_empty() {
+            return Ok(async_rejected(
+                "HostCapabilityError",
+                format!(
+                    "HostCall for capability '{}' must contain at least one HostStep",
+                    capability_name
+                ),
+            ));
+        }
+        if actual_steps.len() != expected_steps.len() {
+            return Ok(async_rejected(
+                "HostCapabilityError",
+                format!(
+                    "HostCall for capability '{}' expected {} step(s), got {}",
+                    capability_name,
+                    expected_steps.len(),
+                    actual_steps.len()
+                ),
+            ));
+        }
+
+        let mut result = None;
+        for (idx, (actual_step, expected_step)) in
+            actual_steps.iter().zip(expected_steps.iter()).enumerate()
+        {
+            let (actual_method, actual_args) = match Self::host_step_descriptor_args(actual_step) {
+                Ok(step) => step,
+                Err(err) => {
+                    return Ok(async_rejected("HostCapabilityError", err.message));
+                }
+            };
+            if actual_method != expected_step.method || actual_args != expected_step.args.as_slice()
+            {
+                return Ok(async_rejected(
+                    "HostCapabilityError",
+                    format!(
+                        "HostCall for capability '{}' step {} expected {}({}), got {}({})",
+                        capability_name,
+                        idx,
+                        expected_step.method,
+                        Value::list(expected_step.args.clone()).to_debug_string(),
+                        actual_method,
+                        Value::list(actual_args.to_vec()).to_debug_string()
+                    ),
+                ));
+            }
+            result = Some(expected_step.result.clone());
+        }
+
+        match result {
+            Some(value) => Ok(async_fulfilled(value)),
+            None => Ok(async_rejected(
+                "HostCapabilityError",
+                format!(
+                    "HostCall for capability '{}' did not produce a fixture value",
+                    capability_name
+                ),
+            )),
+        }
+    }
+
     /// Try to evaluate core built-in molds that were historically special-cased
     /// in eval.rs (Result/Lax/Gorillax/Cage and conversion molds).
     pub(crate) fn try_core_mold(
@@ -2503,7 +2665,7 @@ impl Interpreter {
                 ]))))
             }
 
-            // Cage[subject, runner](): Molten branch capability boundary.
+            // Cage[subject, runner](): host capability or Molten branch boundary.
             //
             // The legacy `Cage[molten, fn]()` function/lambda form is no
             // longer canonical. Interpreter has no executable CageRilla
@@ -2518,10 +2680,15 @@ impl Interpreter {
                     Signal::Value(v) => v,
                     other => return Ok(Some(other)),
                 };
-                let _runner = match self.eval_expr(&type_args[1])? {
+                let runner = match self.eval_expr(&type_args[1])? {
                     Signal::Value(v) => v,
                     other => return Ok(Some(other)),
                 };
+                if Self::host_descriptor_has_type(&runner, "HostCall") {
+                    return Ok(Some(Signal::Value(
+                        self.eval_host_call_cage(cage_value, runner)?,
+                    )));
+                }
                 if !matches!(cage_value, Value::Molten) {
                     let type_name = Self::type_name_of(&cage_value);
                     return Err(RuntimeError {
@@ -4408,6 +4575,99 @@ impl Interpreter {
                     other => return Ok(Some(other)),
                 };
                 Ok(Some(Signal::Value(Value::str(self.value_type_name(&val)))))
+            }
+
+            // ── Host boundary descriptor molds ──────────────────
+            "HostCapability" => {
+                if type_args.len() != 2 {
+                    return Err(RuntimeError {
+                        message: format!(
+                            "HostCapability requires exactly 2 type arguments: HostCapability[name, kind](), got {}",
+                            type_args.len()
+                        ),
+                    });
+                }
+                let name = self.eval_host_boundary_str_arg(&type_args[0], "HostCapability name")?;
+                let kind = self.eval_host_boundary_str_arg(&type_args[1], "HostCapability kind")?;
+                Ok(Some(Signal::Value(Value::pack(vec![
+                    ("__type".into(), Value::str("HostCapability".to_string())),
+                    ("name".into(), Value::str(name)),
+                    ("kind".into(), Value::str(kind)),
+                ]))))
+            }
+            "HostStep" => {
+                if type_args.len() != 2 {
+                    return Err(RuntimeError {
+                        message: format!(
+                            "HostStep requires exactly 2 type arguments: HostStep[method, args](), got {}",
+                            type_args.len()
+                        ),
+                    });
+                }
+                let method = self.eval_host_boundary_str_arg(&type_args[0], "HostStep method")?;
+                let args_value = match self.eval_expr(&type_args[1])? {
+                    Signal::Value(v) => v,
+                    other => {
+                        return Err(RuntimeError {
+                            message: format!(
+                                "HostStep args: unexpected control signal {:?}",
+                                other
+                            ),
+                        });
+                    }
+                };
+                if !matches!(args_value, Value::List(_)) {
+                    return Err(RuntimeError {
+                        message: format!(
+                            "HostStep args must be a list, got {}",
+                            Self::type_name_of(&args_value)
+                        ),
+                    });
+                }
+                Ok(Some(Signal::Value(Value::pack(vec![
+                    ("__type".into(), Value::str("HostStep".to_string())),
+                    ("method".into(), Value::str(method)),
+                    ("args".into(), args_value),
+                ]))))
+            }
+            "HostCall" => {
+                if type_args.len() != 2 {
+                    return Err(RuntimeError {
+                        message: format!(
+                            "HostCall requires exactly 2 type arguments: HostCall[steps, Out](), got {}",
+                            type_args.len()
+                        ),
+                    });
+                }
+                let steps_value = match self.eval_expr(&type_args[0])? {
+                    Signal::Value(v) => v,
+                    other => {
+                        return Err(RuntimeError {
+                            message: format!(
+                                "HostCall steps: unexpected control signal {:?}",
+                                other
+                            ),
+                        });
+                    }
+                };
+                let steps = match &steps_value {
+                    Value::List(items) => items,
+                    other => {
+                        return Err(RuntimeError {
+                            message: format!(
+                                "HostCall steps must be a list, got {}",
+                                Self::type_name_of(other)
+                            ),
+                        });
+                    }
+                };
+                for step in steps.iter() {
+                    Self::host_step_descriptor_args(step)?;
+                }
+                Ok(Some(Signal::Value(Value::pack(vec![
+                    ("__type".into(), Value::str("HostCall".to_string())),
+                    ("steps".into(), steps_value),
+                ]))))
             }
 
             // ── JS-backend-only mold types ──────────────────────

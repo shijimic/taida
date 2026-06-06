@@ -85,15 +85,20 @@ fn native_build_succeeds(source: &str, label: &str) -> bool {
 
 #[test]
 fn c25b030_phase1d_os_getenv_compiles_native() {
-    // getEnv is a pure read — no filesystem / process side effects.
+    // Env read is a pure read — no filesystem / process side effects.
+    // F54: this used to import `getEnv`, which never existed in the os
+    // export list (the real surface is the `EnvVar` mold); the checker
+    // skipped bundled-package validation so the typo built anyway. The
+    // catalog-driven validation now rejects it, so the guard uses the
+    // real symbol.
     let source = "\
->>> taida-lang/os => @(getEnv)
-value <= getEnv(\"PATH\", \"fallback\")
+>>> taida-lang/os => @(EnvVar)
+value <= EnvVar[\"PATH\"]().getOrDefault(\"fallback\")
 stdout(value)
 ";
     assert!(
         native_build_succeeds(source, "os_getenv"),
-        "taida-lang/os getEnv must compile on native (C25B-030 Phase 1D regression guard)"
+        "taida-lang/os EnvVar must compile on native (C25B-030 Phase 1D regression guard)"
     );
 }
 
@@ -145,15 +150,14 @@ fn c25b030_phase1d_js_import_compiles_native() {
     // must still resolve at native build time (the core-bundled symbol
     // table binds sentinels for every backend). Runtime use would
     // trigger a deterministic error; we do not invoke the sentinel.
+    // F54: this used to import `jsEval`, which never existed in the js
+    // export list — the old note here said a rejection would mean "the
+    // symbol table drifted", and that is exactly what the catalog-driven
+    // validation reported. Use a real export.
     let source = "\
->>> taida-lang/js => @(jsEval)
-handle <= jsEval
+>>> taida-lang/js => @(JSGet)
 stdout(\"ok\")
 ";
-    // Note: if jsEval is not a registered core-bundled symbol, the
-    // native backend will reject the import at lower time — which is
-    // still information we want (the test then tells us the symbol
-    // table drifted, not that the backend broke).
     assert!(
         native_build_succeeds(source, "js_symbol"),
         "taida-lang/js import must compile on native (C25B-030 Phase 1D regression guard)"

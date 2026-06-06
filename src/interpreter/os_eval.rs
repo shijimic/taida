@@ -2629,6 +2629,7 @@ impl Interpreter {
                     idle: Vec::new(),
                     in_use_tokens: std::collections::HashSet::new(),
                     next_token: 1,
+                    waiting: 0,
                 };
                 self.pool_states
                     .lock()
@@ -2686,19 +2687,87 @@ impl Interpreter {
                 }
 
                 let timeout_ms = explicit_timeout.unwrap_or(state.acquire_timeout_ms);
+                // G6 waiting-semaphore contract: the acquired pack carries
+                // `resource: Lax[Resource]` — `Lax(value)` when an idle
+                // (BYO, deposited via poolRelease) resource is reused,
+                // failure-side Lax when the slot is fresh and the caller
+                // must construct the resource itself. The placeholder
+                // default is Int 0 because the pool does not know the
+                // element type; callers branch on has_value / getOrDefault.
                 let (resource, token) = if let Some(entry) = state.idle.pop() {
-                    (entry.resource, entry.token)
+                    (make_lax_success(entry.resource), entry.token)
                 } else if (state.in_use_tokens.len() as i64) < state.max_size {
                     let token = state.next_token;
                     state.next_token += 1;
-                    (Value::Unit, token)
+                    (make_lax_failure(Value::Int(0)), token)
                 } else {
-                    return Ok(Some(Signal::Value(make_async_fulfilled(
-                        make_result_failure_with_kind(
-                            "timeout",
-                            format!("poolAcquire: timed out after {}ms", timeout_ms),
-                        ),
-                    ))));
+                    // Pool exhausted: block on a pending Async (same path as
+                    // net I/O) until a slot frees up or the deadline passes.
+                    // poolRelease / poolClose make progress visible on the
+                    // next poll tick; `waiting` is the live count of blocked
+                    // acquires.
+                    state.waiting += 1;
+                    drop(table);
+                    let pool_states = Arc::clone(&self.pool_states);
+                    let (tx, rx) = tokio::sync::oneshot::channel();
+                    self.tokio_runtime.spawn(async move {
+                        let deadline = std::time::Instant::now()
+                            + std::time::Duration::from_millis(timeout_ms.max(1) as u64);
+                        let result = loop {
+                            tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+                            let Ok(mut table) = pool_states.lock() else {
+                                break make_result_failure_with_kind(
+                                    "other",
+                                    "poolAcquire: internal pool table lock error",
+                                );
+                            };
+                            let Some(state) = table.get_mut(&pool_id) else {
+                                break make_result_failure_with_kind(
+                                    "invalid",
+                                    "poolAcquire: unknown pool handle",
+                                );
+                            };
+                            if !state.open {
+                                state.waiting -= 1;
+                                break make_result_failure_with_kind(
+                                    "closed",
+                                    "poolAcquire: pool is closed",
+                                );
+                            }
+                            if let Some(entry) = state.idle.pop() {
+                                state.waiting -= 1;
+                                state.in_use_tokens.insert(entry.token);
+                                break make_result_success(Value::pack(vec![
+                                    ("resource".into(), make_lax_success(entry.resource)),
+                                    ("token".into(), Value::Int(entry.token)),
+                                ]));
+                            }
+                            if (state.in_use_tokens.len() as i64) < state.max_size {
+                                let token = state.next_token;
+                                state.next_token += 1;
+                                state.waiting -= 1;
+                                state.in_use_tokens.insert(token);
+                                break make_result_success(Value::pack(vec![
+                                    ("resource".into(), make_lax_failure(Value::Int(0))),
+                                    ("token".into(), Value::Int(token)),
+                                ]));
+                            }
+                            if std::time::Instant::now() >= deadline {
+                                state.waiting -= 1;
+                                break make_result_failure_with_kind(
+                                    "timeout",
+                                    format!("poolAcquire: timed out after {}ms", timeout_ms),
+                                );
+                            }
+                        };
+                        let _ = tx.send(Ok(result));
+                    });
+                    return Ok(Some(Signal::Value(Value::Async(AsyncValue {
+                        status: AsyncStatus::Pending,
+                        value: Box::new(Value::Unit),
+                        error: Box::new(Value::Unit),
+                        task: Some(Arc::new(Mutex::new(PendingState::Waiting(rx)))),
+                    }))));
                 };
                 state.in_use_tokens.insert(token);
 
@@ -2816,7 +2885,7 @@ impl Interpreter {
                     ("open".into(), Value::Bool(state.open)),
                     ("idle".into(), Value::Int(state.idle.len() as i64)),
                     ("inUse".into(), Value::Int(state.in_use_tokens.len() as i64)),
-                    ("waiting".into(), Value::Int(0)),
+                    ("waiting".into(), Value::Int(state.waiting)),
                 ]);
                 Ok(Some(Signal::Value(health)))
             }
@@ -3802,6 +3871,22 @@ stdout(lax.has_value)"#;
     }
 
     // ── OS_SYMBOLS test ──
+
+    #[test]
+    fn test_os_symbols_match_catalog_exports() {
+        // F54: the interpreter sentinel list and the bundled package
+        // catalog must agree on the os surface (set equality — the
+        // sentinel keeps its historical, index-stable order).
+        let spec = crate::pkg::catalog::find("os").expect("os catalog entry");
+        let mut sentinel: Vec<&str> = OS_SYMBOLS.to_vec();
+        let mut exports: Vec<&str> = spec.exports.to_vec();
+        sentinel.sort_unstable();
+        exports.sort_unstable();
+        assert_eq!(
+            sentinel, exports,
+            "OS_SYMBOLS drifted from the catalog os export list"
+        );
+    }
 
     #[test]
     fn test_os_symbols_count() {

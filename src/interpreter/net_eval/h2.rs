@@ -273,6 +273,13 @@ impl Interpreter {
                 }
                 Err(H2Error::Stream(stream_id, error_code, _)) => {
                     let _ = send_rst_stream(stream, stream_id, error_code);
+                    // Drop the reset stream so its accumulated `request_body`
+                    // is freed immediately (parity with native
+                    // `h2_conn_remove_closed_streams`). Without this, a body
+                    // accumulated up to MAX_REQUEST_BODY_SIZE before the cap
+                    // tripped would linger in the `streams` map until the
+                    // connection closed, undermining the OOM cap (G1).
+                    h2_conn.streams.remove(&stream_id);
                     continue;
                 }
                 Err(H2Error::Compression(ref msg)) => {

@@ -78,7 +78,7 @@ mod tests {
     /// rotting the source surface, so the log is no longer kept inline.
     #[test]
     fn test_runtime_core_wasm_fragment_concat_preserves_bytes() {
-        const EXPECTED_TOTAL_LEN: usize = 351_707;
+        const EXPECTED_TOTAL_LEN: usize = 393_294;
         let asm = *RUNTIME_CORE_WASM;
         assert_eq!(
             asm.len(),

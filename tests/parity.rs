@@ -3001,6 +3001,15 @@ stdout(okShellV.code.toString())
 
 badShell <= execShell("exit 7")
 stdout(badShell.hasValue().toString())
+
+// Large stderr (200KB, > the ~64KB pipe buffer) must not deadlock the parent
+// reader: draining stdout to EOF before stderr would block the child on its
+// stderr write while the parent blocks on the stdout read. All backends must
+// drain both pipes concurrently and still recover stdout "OK".
+bigErr <= execShell("yes x | head -c 200000 >&2; printf OK")
+bigErr >=> bigErrV
+stdout(bigErrV.stdout)
+stdout(bigErrV.code.toString())
 "#;
     assert_backend_parity_for_source(source, "os_process_gorillax");
 }
@@ -3132,7 +3141,22 @@ fn test_sha256_three_way_parity() {
 
     let source = r#"
 >>> taida-lang/crypto => @(sha256)
+emptyLax <= Bytes[@[]]()
+emptyLax >=> emptyBytes
+abcLax <= Bytes[@[65, 66, 67]]()
+abcLax >=> abcBytes
+nulLax <= Bytes[@[72, 0, 73]]()
+nulLax >=> nulBytes
+zeroLax <= Bytes[@[0, 0, 0, 0]]()
+zeroLax >=> zeroBytes
+stdout(sha256(""))
 stdout(sha256("abc"))
+stdout(sha256("\x01hello"))
+stdout(sha256("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"))
+stdout(sha256(emptyBytes))
+stdout(sha256(abcBytes))
+stdout(sha256(nulBytes))
+stdout(sha256(zeroBytes))
 "#;
     std::fs::write(&main_path, source).expect("write main.td");
     std::fs::write(&packages_path, ">>> taida-lang/crypto@a.1\n").expect("write packages.tdm");
@@ -3158,10 +3182,18 @@ stdout(sha256("abc"))
         assert_eq!(interp, js, "interpreter/js mismatch for sha256");
     }
 
-    assert_eq!(
-        interp,
-        "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
-    );
+    let expected = [
+        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+        "cceeb7a985ecc3dabcb4c8f666cd637f16f008e3c963db6aa6f83a7b288c54ef",
+        "ffe054fe7ae0cb6dc65c3af9b61d5209f439851db43d0ba5997337df154668eb",
+        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "b5d4045c3f466fa91fe2cc6abe79232a1a57cdf104f7a26e716e0a1e2789df78",
+        "827768ed493ac4f0c3f0374242e98408ced57830e9d0bf65b99d730502255776",
+        "df3f619804a92fdb4057192dc43dd748ea778adc52bc498ce80524c014b81119",
+    ]
+    .join("\n");
+    assert_eq!(interp, expected);
 
     let _ = std::fs::remove_dir_all(&project_dir);
 }
@@ -41963,4 +41995,539 @@ stdout(JSON["true", Int]().toString())
 stdout(JSON["true", Int]().hasValue().toString())
 "#;
     assert_native_and_js_when_available(source, "json_strict_mismatch_lax_empty_backend_parity");
+}
+
+/// F54B-016 (G4): Set / `Unique` must dedup by STRUCTURE across every backend,
+/// not by raw pointer identity. This builds structurally-equal-but-distinct-
+/// pointer strings (via `+`), BuchiPacks and Lists, then checks that set /
+/// union / intersect / diff / unique sizes agree with the interpreter (the
+/// structural reference) on native, JS and wasm-min. Before G4 the native
+/// backend used pointer identity and wasm-min a string-only `_wasm_value_eq`,
+/// so both over-counted; the prior parity suite only used Int literals and
+/// missed it. Interpreter reference output is `2 3 1 1 1 1 2`.
+#[test]
+fn test_f54b016_structural_set_unique_parity() {
+    let source = r#"
+sa <= setOf(@["a" + "b", "c"])
+sb <= setOf(@["ab", "d"])
+dupStrs <= @["x" + "y", "xy", "z"]
+stdout(setOf(dupStrs).size().toString())
+stdout(sa.union(sb).size().toString())
+stdout(sa.intersect(sb).size().toString())
+stdout(sa.diff(sb).size().toString())
+p1 <= @(name <= "f" + "oo", n <= 1)
+p2 <= @(name <= "foo", n <= 1)
+stdout(setOf(@[p1, p2]).size().toString())
+l1 <= @["a" + "b"]
+l2 <= @["ab"]
+stdout(setOf(@[l1, l2]).size().toString())
+uniqList <= @["m" + "n", "mn", "z"]
+stdout(Unique[uniqList]().length().toString())
+"#;
+    let label = "f54b016_structural_set_unique";
+    let interp = run_interpreter_src(source, label).expect("interpreter run");
+    if cc_available() {
+        let native = run_native_src(source, label).expect("native run");
+        assert_eq!(interp, native, "interpreter/native structural Set parity");
+    }
+    if node_available() {
+        let js = run_js_src(source, label).expect("js run");
+        assert_eq!(interp, js, "interpreter/js structural Set parity");
+    }
+    if let Ok(Some(wasm)) = run_wasm_min_src(source, label) {
+        assert_eq!(interp, wasm, "interpreter/wasm-min structural Set parity");
+    }
+}
+
+/// F54B-016 (G4 follow-up): Bytes must dedup by STRUCTURE across backends, like
+/// the other key-eligible variants. native dedups Bytes by content (TKIND_BYTES);
+/// WASM originally had no Bytes branch in `_wasm_value_eq` / `_wasm_fp_accum` /
+/// `_wasm_value_hashable`, so structurally-equal distinct-pointer Bytes fell back
+/// to raw pointer identity and over-counted. `.unmold()` strips the Lax wrapper
+/// so the Set holds raw Bytes -- a `Lax[Bytes]` element would instead trip the
+/// separate JS Lax-equality gap (F54B-020), unrelated to Bytes dedup. The
+/// `Bytes[...]()` constructor mold is wasm-full only (not wasm-min / wasm-wasi),
+/// so this checks interpreter / native / JS + wasm-full. Interpreter reference
+/// output is `2 1 2 1` (size{ab,cd}=2, unique{ab,ab,ab}=1, union=2, intersect=1).
+#[test]
+fn test_f54b016_bytes_structural_set_parity() {
+    let source = r#"
+b1 <= Bytes["ab"]().unmold()
+b2 <= Bytes["a" + "b"]().unmold()
+b3 <= Bytes["cd"]().unmold()
+stdout(setOf(@[b1, b2, b3]).size().toString())
+stdout(Unique[@[b1, b2, b1]]().length().toString())
+sa <= setOf(@[b1])
+sb <= setOf(@[b2, b3])
+stdout(sa.union(sb).size().toString())
+stdout(sa.intersect(sb).size().toString())
+"#;
+    let label = "f54b016_bytes_structural_set";
+    let interp = run_interpreter_src(source, label).expect("interpreter run");
+    if cc_available() {
+        let native = run_native_src(source, label).expect("native run");
+        assert_eq!(
+            interp, native,
+            "interpreter/native Bytes structural Set parity"
+        );
+    }
+    if node_available() {
+        let js = run_js_src(source, label).expect("js run");
+        assert_eq!(interp, js, "interpreter/js Bytes structural Set parity");
+    }
+    if let Ok(Some(wasm)) = run_wasm_full_src(source, label, &[]) {
+        assert_eq!(
+            interp, wasm,
+            "interpreter/wasm-full Bytes structural Set parity"
+        );
+    }
+}
+
+/// F54B-016 (G4 follow-up): `Unique[](by)` must dedup the extracted keys by
+/// STRUCTURE. native / WASM `taida_list_unique_by` compared keys by raw value /
+/// pointer, so a `by` callback returning a freshly-built (distinct-pointer)
+/// structurally-equal key (here `s + "!"`) was not deduped, diverging from the
+/// interpreter (Value::eq) and JS (fingerprint + __taida_equals). Keys are Str so
+/// this runs on wasm-min too. Interpreter reference output is `2`.
+#[test]
+fn test_f54b016_unique_by_structural_parity() {
+    let source = r#"
+addBang s: Str = s + "!" => :Str
+items <= @["a", "b", "a"]
+u <= Unique[items](by <= addBang)
+stdout(u.length().toString())
+"#;
+    let label = "f54b016_unique_by_structural";
+    let interp = run_interpreter_src(source, label).expect("interpreter run");
+    if cc_available() {
+        let native = run_native_src(source, label).expect("native run");
+        assert_eq!(
+            interp, native,
+            "interpreter/native unique_by structural parity"
+        );
+    }
+    if node_available() {
+        let js = run_js_src(source, label).expect("js run");
+        assert_eq!(interp, js, "interpreter/js unique_by structural parity");
+    }
+    if let Ok(Some(wasm)) = run_wasm_min_src(source, label) {
+        assert_eq!(
+            interp, wasm,
+            "interpreter/wasm-min unique_by structural parity"
+        );
+    }
+}
+
+/// F54B-014 (G5): the abi `header(...)` helper must return a NEW WebResponse
+/// and leave the input response untouched. native/WASM stored the headers
+/// list pointer into each derived response pack without copying, and
+/// `taida_list_push` mutates the spine in place, so deriving twice from the
+/// same base (`header("x-a", .., base)` + `header("x-b", .., base)`) leaked
+/// both names into `base` and every derived response (observed native /
+/// wasm: `3 3 3` vs interpreter `1 2 2`). Both C runtimes now copy the
+/// spine before appending; the interpreter side gained a COW fast path
+/// (pack_take / list_take) that makes direct `header(..)` chains O(k)
+/// without changing output. Expected output:
+/// `1 2 2` (base untouched) then `201 4 x-a=1 x-c=3` (chain order intact).
+/// JS codegen cannot resolve `taida-lang/abi` imports, so this checks
+/// interpreter / native / wasm-min.
+#[test]
+fn test_f54b014_abi_header_no_input_mutation_parity() {
+    let source = r#"
+>>> taida-lang/abi => @(WebRequest, WebResponse, text, status, header)
+
+base <= text("b")
+r1 <= header("x-a", "1", base)
+r2 <= header("x-b", "2", base)
+stdout(base.headers.length().toString())
+stdout(r1.headers.length().toString())
+stdout(r2.headers.length().toString())
+chained <= header("x-c", "3", header("x-b", "2", header("x-a", "1", status(201, text("ok")))))
+stdout(chained.status.toString())
+stdout(chained.headers.length().toString())
+chained.headers.get(1) >=> h1
+stdout(h1.name + "=" + h1.value)
+chained.headers.get(3) >=> h3
+stdout(h3.name + "=" + h3.value)
+"#;
+    let label = "f54b014_abi_header_no_input_mutation";
+    let interp = run_interpreter_src(source, label).expect("interpreter run");
+    // Pin the interpreter reference output shape itself so a COW regression
+    // on the reference implementation cannot slip through backend-vs-backend
+    // comparison alone.
+    let tokens: Vec<&str> = interp.split_whitespace().collect();
+    assert_eq!(
+        tokens,
+        ["1", "2", "2", "201", "4", "x-a=1", "x-c=3"],
+        "interpreter abi header no-mutation reference output"
+    );
+    if cc_available() {
+        let native = run_native_src(source, label).expect("native run");
+        assert_eq!(interp, native, "interpreter/native abi header parity");
+    }
+    if let Ok(Some(wasm)) = run_wasm_min_src(source, label) {
+        assert_eq!(interp, wasm, "interpreter/wasm-min abi header parity");
+    }
+}
+
+/// F54B-020 (G7): JS `__taida_equals` / `__taida_fingerprint` excluded every
+/// `__`-prefixed key, which also dropped the closure-mold DATA fields
+/// (`__value` / `__default` / `__type` / `__error`), so any two Lax values
+/// with the same `has_value` compared equal regardless of payload — JS
+/// deduped `Lax(12)` vs `Lax(34)` into one element (observed `1 1 1` vs the
+/// interpreter's `1 2 2`). The filter now only drops method keys (function
+/// values), matching the interpreter's whole-pack BuchiPack comparison and
+/// the native pack comparison. Expected output: `1 2 1 2`
+/// (same-payload success Lax dedup, success-vs-failure distinct,
+/// same-shape failure Lax dedup, mixed unique). `Int[Str]()` conversion
+/// molds are available on all four backends.
+#[test]
+fn test_f54b020_lax_payload_equality_parity() {
+    let source = r#"
+i1 <= Int["12"]()
+i2 <= Int["12"]()
+i3 <= Int["abc"]()
+i4 <= Int["xyz"]()
+stdout(setOf(@[i1, i2]).size().toString())
+stdout(setOf(@[i1, i3]).size().toString())
+stdout(setOf(@[i3, i4]).size().toString())
+stdout(Unique[@[i1, i2, i3, i4]]().length().toString())
+"#;
+    let label = "f54b020_lax_payload_equality";
+    let interp = run_interpreter_src(source, label).expect("interpreter run");
+    let tokens: Vec<&str> = interp.split_whitespace().collect();
+    assert_eq!(
+        tokens,
+        ["1", "2", "1", "2"],
+        "interpreter Lax payload equality reference output"
+    );
+    if cc_available() {
+        let native = run_native_src(source, label).expect("native run");
+        assert_eq!(interp, native, "interpreter/native Lax equality parity");
+    }
+    if node_available() {
+        let js = run_js_src(source, label).expect("js run");
+        assert_eq!(interp, js, "interpreter/js Lax equality parity");
+    }
+    if let Ok(Some(wasm)) = run_wasm_min_src(source, label) {
+        assert_eq!(interp, wasm, "interpreter/wasm-min Lax equality parity");
+    }
+}
+
+/// F54B-020 companion: the original reproducer kept the `Lax[Bytes]` wrapper
+/// (no `.unmold()`), which is exactly the shape the `__`-filter bug
+/// collapsed. `Bytes[...]()` molds exist on interpreter / native / JS
+/// (wasm-full only on WASM, so WASM is skipped here). Expected `1 2 2`.
+#[test]
+fn test_f54b020_lax_bytes_wrapper_equality_parity() {
+    let source = r#"
+a <= Bytes["ab"]()
+b <= Bytes["ab"]()
+c <= Bytes["cd"]()
+stdout(setOf(@[a, b]).size().toString())
+stdout(setOf(@[a, c]).size().toString())
+stdout(Unique[@[a, b, c]]().length().toString())
+"#;
+    let label = "f54b020_lax_bytes_wrapper_equality";
+    let interp = run_interpreter_src(source, label).expect("interpreter run");
+    let tokens: Vec<&str> = interp.split_whitespace().collect();
+    assert_eq!(
+        tokens,
+        ["1", "2", "2"],
+        "interpreter Lax[Bytes] wrapper equality reference output"
+    );
+    if cc_available() {
+        let native = run_native_src(source, label).expect("native run");
+        assert_eq!(interp, native, "interpreter/native Lax[Bytes] parity");
+    }
+    if node_available() {
+        let js = run_js_src(source, label).expect("js run");
+        assert_eq!(interp, js, "interpreter/js Lax[Bytes] parity");
+    }
+}
+
+/// F54B-009 (G6): pool waiting-semaphore contract across backends.
+/// - `resource` is now `Lax`: failure-side on a fresh slot (the caller
+///   builds the resource), `Lax(value)` when an idle BYO resource
+///   deposited via poolRelease is reused.
+/// - An exhausted pool BLOCKS up to the configured acquireTimeoutMs
+///   (previously it failed immediately and the config value was only
+///   used in the error message; native lowering additionally injected
+///   an explicit 30s default that dead-lettered the pool config).
+/// - An explicit timeoutMs <= 0 is `kind:"invalid"` on every backend
+///   (JS used to silently fall back to the pool config).
+/// - `poolHealth.waiting` returns to 0 after a timed-out wait.
+///
+/// The elapsed check asserts only the lower bound (>= 250ms of a 300ms
+/// budget) so slow CI cannot make it flaky.
+#[test]
+fn test_f54b009_pool_wait_semaphore_parity() {
+    let source = r#"
+poolCreate(@(maxSize <= 1, acquireTimeoutMs <= 300)) >=> c1
+p <= c1.pool
+
+tryAcquire =
+  |== err: Error =
+    @(kind <= err.kind)
+  => :@(kind: Str)
+  poolAcquire(p) >=> rr
+  rr >=> aa
+  @(kind <= "ok")
+=> :@(kind: Str)
+
+tryAcquireZero =
+  |== err: Error =
+    @(kind <= err.kind)
+  => :@(kind: Str)
+  poolAcquire(p, 0) >=> rr
+  rr >=> aa
+  @(kind <= "ok")
+=> :@(kind: Str)
+
+poolAcquire(p) >=> r1
+r1 >=> a1
+stdout("fresh=" + a1.resource.has_value.toString())
+poolRelease(p, a1.token, "res-G6") >=> rl1
+poolAcquire(p) >=> r2
+r2 >=> a2
+stdout("reused=" + a2.resource.has_value.toString())
+a2.resource >=> res
+stdout("val=" + res)
+
+t0 <= nowMs()
+to1 <= tryAcquire()
+t1 <= nowMs()
+stdout("kind=" + to1.kind)
+stdout("waited=" + (t1 - t0 >= 250).toString())
+h <= poolHealth(p)
+stdout("waiting=" + h.waiting.toString())
+
+bad <= tryAcquireZero()
+stdout("zero=" + bad.kind)
+"#;
+    let label = "f54b009_pool_wait_semaphore";
+    let interp = run_interpreter_src(source, label).expect("interpreter run");
+    let tokens: Vec<&str> = interp.split_whitespace().collect();
+    assert_eq!(
+        tokens,
+        [
+            "fresh=false",
+            "reused=true",
+            "val=res-G6",
+            "kind=timeout",
+            "waited=true",
+            "waiting=0",
+            "zero=invalid"
+        ],
+        "interpreter pool wait-semaphore reference output"
+    );
+    if cc_available() {
+        let native = run_native_src(source, label).expect("native run");
+        assert_eq!(interp, native, "interpreter/native pool wait parity");
+    }
+    if node_available() {
+        let js = run_js_src(source, label).expect("js run");
+        assert_eq!(interp, js, "interpreter/js pool wait parity");
+    }
+}
+
+/// F54B-019 (G8 tier 1): Float comparison operators must use f64 semantics
+/// on native/WASM. The lowering routed every Float-involved Eq/NotEq to the
+/// raw i64 comparison (so `3 == 3.0` was false — the bit pattern of 3.0 is
+/// not 3) and Lt/Gt/GtEq were unconditionally raw (so `-1.0 < -2.0` was
+/// TRUE — more-negative floats have larger bit patterns — and `3 > 2.5`
+/// was false). Now a Float on either side routes to taida_float_eq/neq/
+/// lt/gt/gte, whose _to_double lifts the Int side for the interpreter's
+/// Int↔Float cross-type semantics. Bool↔Int comparison stays statically
+/// rejected by the checker ([E1605]), so no dynamic case exists here.
+/// Expected: false true true true true false true true false
+#[test]
+fn test_f54b019_float_comparison_parity() {
+    let source = r#"
+a <= 0.0 - 1.0
+b <= 0.0 - 2.0
+stdout((a < b).toString())
+stdout((b < a).toString())
+stdout((a > b).toString())
+f <= 2.5
+stdout((f > 2).toString())
+stdout((3 > f).toString())
+stdout((3 == f).toString())
+g <= 3.0
+stdout((3 == g).toString())
+stdout((g >= 3).toString())
+stdout((2.5 >= g).toString())
+"#;
+    let label = "f54b019_float_comparison";
+    let interp = run_interpreter_src(source, label).expect("interpreter run");
+    let tokens: Vec<&str> = interp.split_whitespace().collect();
+    assert_eq!(
+        tokens,
+        [
+            "false", "true", "true", "true", "true", "false", "true", "true", "false"
+        ],
+        "interpreter float comparison reference output"
+    );
+    if cc_available() {
+        let native = run_native_src(source, label).expect("native run");
+        assert_eq!(interp, native, "interpreter/native float comparison parity");
+    }
+    if node_available() {
+        let js = run_js_src(source, label).expect("js run");
+        assert_eq!(interp, js, "interpreter/js float comparison parity");
+    }
+    if let Ok(Some(wasm)) = run_wasm_min_src(source, label) {
+        assert_eq!(interp, wasm, "interpreter/wasm-min float comparison parity");
+    }
+}
+
+/// F54B-019 (G8 tier 2): Set×Set operations across numeric domains.
+/// Sets carry one elem_type_tag; when the two operands of union /
+/// intersect / diff pin DIFFERENT scalar domains (or a Float domain is
+/// in play), native/WASM previously compared raw i64 values — the f64
+/// bit pattern of 3.0 never equals 3 — so `union(@[3,4], @[3.0])` had
+/// 3 elements while the interpreter (Int↔Float cross-type equality)
+/// has 2. Both C runtimes now walk a tagged linear path in that case
+/// (the interpreter also degrades to a linear scan whenever Float is
+/// involved, so complexity matches). Heterogeneous-tagged containers
+/// remain on the structural engine: per-element type identity is not
+/// representable without value-level tags. Expected: 2 1 1 3 2
+#[test]
+fn test_f54b019_set_numeric_cross_parity() {
+    let source = r#"
+s1 <= setOf(@[3, 4])
+s2 <= setOf(@[3.0])
+stdout(s1.union(s2).size().toString())
+stdout(s1.intersect(s2).size().toString())
+stdout(s1.diff(s2).size().toString())
+s3 <= setOf(@[4.5])
+u <= s1.union(s3)
+stdout(u.size().toString())
+lst <= @[1.5, 1.5, 2.5]
+stdout(Unique[lst]().length().toString())
+"#;
+    let label = "f54b019_set_numeric_cross";
+    let interp = run_interpreter_src(source, label).expect("interpreter run");
+    let tokens: Vec<&str> = interp.split_whitespace().collect();
+    assert_eq!(
+        tokens,
+        ["2", "1", "1", "3", "2"],
+        "interpreter set numeric-cross reference output"
+    );
+    if cc_available() {
+        let native = run_native_src(source, label).expect("native run");
+        assert_eq!(
+            interp, native,
+            "interpreter/native set numeric-cross parity"
+        );
+    }
+    if node_available() {
+        let js = run_js_src(source, label).expect("js run");
+        assert_eq!(interp, js, "interpreter/js set numeric-cross parity");
+    }
+    if let Ok(Some(wasm)) = run_wasm_min_src(source, label) {
+        assert_eq!(
+            interp, wasm,
+            "interpreter/wasm-min set numeric-cross parity"
+        );
+    }
+}
+
+/// Regression: numeric-cross Set ops must keep an honest result elem tag.
+/// `union(@[3,4], @[3.0])` adds nothing (3.0 is a numeric dup of 3), so
+/// the result is all-Int — but native latched HETEROGENEOUS up front
+/// whenever the operand domains differed, and WASM left the union /
+/// intersect / diff / remove results untagged entirely. Either way the
+/// FOLLOW-UP Set op lost the numeric-domain path and fell back to the
+/// structural engine (raw i64: the bit pattern of 3.0 never equals 3),
+/// returning 0 where interpreter/JS return 1. Every b element that
+/// actually lands in a union result now stamps its tag through the
+/// shared latch: an UNKNOWN-tagged result (empty-a union) promotes to
+/// the b tag, a matching tag is a no-op, and a genuine cross-domain add
+/// downgrades to HETEROGENEOUS.
+/// Expected: 1 1 1 1 1 1
+#[test]
+fn test_f54b025_set_op_result_tag_parity() {
+    let source = r#"
+u <= setOf(@[3, 4]).union(setOf(@[3.0]))
+stdout(u.intersect(setOf(@[3.0])).size().toString())
+stdout(u.diff(setOf(@[4.0])).size().toString())
+i <= setOf(@[3, 4]).intersect(setOf(@[3.0, 4.0]))
+stdout(i.intersect(setOf(@[3.0])).size().toString())
+r <= setOf(@[3, 4]).remove(4)
+stdout(r.intersect(setOf(@[3.0])).size().toString())
+e <= setOf(@[]).union(setOf(@[3]))
+stdout(e.size().toString())
+stdout(e.intersect(setOf(@[3.0])).size().toString())
+"#;
+    let label = "f54b025_set_op_result_tag";
+    let interp = run_interpreter_src(source, label).expect("interpreter run");
+    let tokens: Vec<&str> = interp.split_whitespace().collect();
+    assert_eq!(
+        tokens,
+        ["1", "1", "1", "1", "1", "1"],
+        "interpreter set-op result-tag reference output"
+    );
+    if cc_available() {
+        let native = run_native_src(source, label).expect("native run");
+        assert_eq!(
+            interp, native,
+            "interpreter/native set-op result-tag parity"
+        );
+    }
+    if node_available() {
+        let js = run_js_src(source, label).expect("js run");
+        assert_eq!(interp, js, "interpreter/js set-op result-tag parity");
+    }
+    if let Ok(Some(wasm)) = run_wasm_min_src(source, label) {
+        assert_eq!(
+            interp, wasm,
+            "interpreter/wasm-min set-op result-tag parity"
+        );
+    }
+}
+
+/// Regression: a pool-exhausted poolAcquire must return a PENDING Async
+/// instead of blocking inside the runtime call. The native runtime ran
+/// the cond-wait loop synchronously before returning a (resolved)
+/// Async, so "create a pending acquire → poolRelease → await" timed
+/// out: the release could never run while the acquire was blocking the
+/// only Taida thread. The wait loop now runs on a background pthread
+/// that resolves a pending Async (interpreter: tokio task; JS: async
+/// function — both already kept the exhausted acquire pending).
+/// Expected: released=true val=res-X
+#[test]
+fn test_f54b024_pool_pending_acquire_release_parity() {
+    let source = r#"
+poolCreate(@(maxSize <= 1, acquireTimeoutMs <= 2000)) >=> c1
+p <= c1.pool
+poolAcquire(p) >=> r1
+r1 >=> a1
+pending <= poolAcquire(p, 1500)
+poolRelease(p, a1.token, "res-X") >=> rl1
+pending >=> r2
+r2 >=> a2
+stdout("released=" + a2.resource.has_value.toString())
+a2.resource >=> res
+stdout("val=" + res)
+"#;
+    let label = "f54b024_pool_pending_acquire";
+    let interp = run_interpreter_src(source, label).expect("interpreter run");
+    let tokens: Vec<&str> = interp.split_whitespace().collect();
+    assert_eq!(
+        tokens,
+        ["released=true", "val=res-X"],
+        "interpreter pool pending-acquire reference output"
+    );
+    if cc_available() {
+        let native = run_native_src(source, label).expect("native run");
+        assert_eq!(
+            interp, native,
+            "interpreter/native pool pending-acquire parity"
+        );
+    }
+    if node_available() {
+        let js = run_js_src(source, label).expect("js run");
+        assert_eq!(interp, js, "interpreter/js pool pending-acquire parity");
+    }
 }

@@ -649,7 +649,77 @@ mod tests {
         // 2026-05-22 final handler ABI hardening adds UTF-8 JSON escape
         //   decoding and bare throw lowering support. Recomputed total =
         //   1,170,587.
-        const EXPECTED_TOTAL_LEN: usize = 1_170_587;
+        // 2026-05-23 handler ABI pair-list conversion adds rawQuery and
+        //   duplicate-preserving query/header arrays. Recomputed total =
+        //   1,175,909.
+        // 2026-05-30 HTTP/2 request body cap: +1,113 bytes inside fragment 6
+        //   (net_h2 server) for the per-stream eager-body size limit
+        //   (H2_MAX_REQUEST_BODY_SIZE + ENHANCE_YOUR_CALM reset + the two new
+        //   #defines). Recomputed total = 1,177,022.
+        // 2026-05-30 HTTP/1.1 head-scan O(H) fix: +639 bytes inside fragment 5
+        //   (HTTP/1 worker) for the resumable CRLFCRLF scan (head_scan_pos +
+        //   3-byte overlap margin) replacing the O(H²) re-scan. Recomputed
+        //   total = 1,177,661.
+        // 2026-05-30 os run/execShell deadlock fix: +1,835 bytes in os.c for
+        //   taida_os_drain_two_pipes (poll-based concurrent stdout/stderr
+        //   drain) + #include <poll.h>, replacing the two sequential read
+        //   loops. os.c is outside the F1/F2/F5/F6 boundaries so only the grand
+        //   total shifts. Recomputed total = 1,179,496.
+        // 2026-05-30 F54B-016 (G4) commit 1: +4,335 bytes in core.c F1 for the
+        //   structural Set / list.unique equality engine (taida_value_kind +
+        //   taida_value_struct_eq + bytes helpers) plus the three struct-eq call
+        //   sites, all before the "Error ceiling" marker. F1_LEN 324,657 ->
+        //   328,992; total 1,179,496 -> 1,183,831.
+        // 2026-05-30 F54B-016 (G4) commit 2: +6,803 bytes in core.c F1 for the
+        //   fingerprint seen-set (taida_value_fingerprint + taida_value_hashable
+        //   + taida_seen_* open-addressing) wired into from_list / union /
+        //   intersect / diff / list_unique. F1_LEN 328,992 -> 335,795; total
+        //   1,183,831 -> 1,190,634.
+        // 2026-05-31 F54B-016 (C2 follow-up): +916 bytes in core.c F1 for
+        //   taida_list_unique_by structural-key dedup (fingerprint seen-set +
+        //   struct-eq fallback replacing the raw `==` key scan). F1_LEN
+        //   335,795 -> 336,711; total 1,190,634 -> 1,191,550. The WASM Bytes /
+        //   unique_by edits land outside NATIVE_RUNTIME_C, so they do not move
+        //   these constants.
+        // 2026-06-04 F54B-014 (G5): +1,000 bytes in core.c F1 for
+        //   taida_abi_pair_list_copy — the abi `header(...)` helper now copies
+        //   the headers spine before appending so derived responses stop
+        //   mutating the input response's shared list (pair packs stay
+        //   shared/retained). F1_LEN 336,711 -> 337,711; total
+        //   1,191,550 -> 1,192,550. The matching runtime_abi_web_wasm.c edit
+        //   lands outside NATIVE_RUNTIME_C.
+        // 2026-06-04 F54B-009 (G6): +5,010 bytes in tls.c for the pool
+        //   waiting semaphore — pthread mutex/cond guarding the pool table
+        //   (POOL-5), open-addressing in-use hash for O(1) release (POOL-4),
+        //   cond_timedwait blocking acquire with live `waiting` count, and
+        //   Lax-wrapped acquire resources. core.c fragments are untouched,
+        //   so F1_LEN stays at 337,711. Total 1,192,550 -> 1,197,560, then
+        //   +299 bytes for the INT64_MIN omitted-timeout sentinel (the
+        //   lowering used to inject an explicit 30s, dead-lettering
+        //   poolCreate's acquireTimeoutMs). Total -> 1,197,859.
+        // 2026-06-04 F54B-019 (G8 tier 1): +1,092 bytes in core.c F2 for the
+        //   taida_float_eq/neq/lt/gt/lte/gte comparison family (f64 semantics
+        //   via _to_double, mirroring the dormant wasm W-5 helpers). F1 is
+        //   untouched; F2 200,593 -> 201,685. Total -> 1,198,951.
+        // 2026-06-04 F54B-019 (G8 tier 2): +4,116 bytes in core.c F1 for the
+        //   numeric-domain aware Set×Set comparison (taida_set_numeric_cross /
+        //   taida_tagged_scalar_eq / taida_tagged_set_contains wired into
+        //   union/intersect/diff). F1 337,711 -> 341,827. Total -> 1,203,067.
+        // 2026-06-04 F54B-024/025 (Codex post-F54 review): +4,147 bytes in
+        //   tls.c for the pending-Async pool acquire (taida_pool_try_take_slot /
+        //   taida_pool_acquire_success / taida_pool_acquire_wait_thread — the
+        //   exhausted-pool cond-wait loop moved to a background pthread), and
+        //   +400 bytes in core.c F1 for the honest union result tag (per-add
+        //   HETEROGENEOUS latch instead of unconditional downgrade).
+        //   F1 341,827 -> 342,227. Total -> 1,207,614.
+        // 2026-06-06 F54B-028/029 (Codex review round 2): +584 bytes in
+        //   core.c F1 (union latch now stamps EVERY actually-added b element
+        //   so an empty-a UNKNOWN result promotes to the b tag, + the Async
+        //   release path joins any remaining worker handle) and +495 bytes
+        //   in core.c F2 (taida_async_join is handle-based: it also reclaims
+        //   resolved-but-unjoined worker pthreads in unmold/map/get_or_default).
+        //   F1 342,227 -> 342,811. Total -> 1,208,693.
+        const EXPECTED_TOTAL_LEN: usize = 1_208_693;
         let asm = *NATIVE_RUNTIME_C;
         assert_eq!(
             asm.len(),
@@ -1238,10 +1308,38 @@ mod tests {
         // 2026-05-22 final handler ABI hardening adds UTF-8 JSON escape
         //   decoding after the marker. F1 is unchanged; F2 grows by 1,834
         //   bytes.
-        const F1_LEN: usize = 324_185;
+        // 2026-05-23 handler ABI pair-list conversion keeps request decode
+        //   before the marker and response encode after it. Marker now sits
+        //   at byte offset 324,657.
+        // F54B-016 (G4 commit 1+2 + C2 follow-up) all land before the Error
+        // ceiling marker: structural engine (+4,335) + fingerprint seen-set
+        // (+6,803) + unique_by structural-key dedup (+916), moving F1_LEN
+        // 324,657 -> 336,711.
+        // F54B-014 (G5) adds taida_abi_pair_list_copy (+1,000) before the
+        // marker as well: F1_LEN 336,711 -> 337,711.
+        // F54B-019 (G8 tier 2) adds the tagged numeric Set comparison
+        // helpers (+4,116) before the marker: F1_LEN 337,711 -> 341,827.
+        // F54B-025 (Codex post-F54 review) reworks taida_set_union's result
+        // tag to the per-add HETEROGENEOUS latch (+400) before the marker:
+        // F1_LEN 341,827 -> 342,227.
+        // F54B-028/029 (Codex review round 2) widen the union latch to every
+        // actually-added b element and join leftover worker handles in the
+        // Async release path (+584) before the marker: F1_LEN 342,227 ->
+        // 342,811.
+        const F1_LEN: usize = 342_811;
+        // CORE_SECTION = F1_LEN (before the Error ceiling marker) + F2 (after it).
+        // F2 was 200,593 bytes (the previous 200_740 figure was stale: the
+        // post-handler-ABI F2 had already shrunk by 147 bytes without this
+        // sub-assert being refreshed). G8 tier 1 adds the taida_float_eq/neq/
+        // lt/gt/lte/gte family after the marker: F2 200,593 -> 201,685.
+        // F54B-029 (Codex review round 2) makes taida_async_join handle-based
+        // (reclaims resolved-but-unjoined worker pthreads) after the marker:
+        // F2 201,685 -> 202,180.
+        // Express it as F1_LEN + F2 so the F1 side stays in lockstep with the
+        // const above.
         assert_eq!(
             CORE_SECTION.len(),
-            324_185 + 195_890,
+            F1_LEN + 202_180,
             "core.c total byte length must equal the expected concatenated runtime fragments"
         );
         const F2_PREFIX: &[u8] = b"// \xE2\x94\x80\xE2\x94\x80 Error ceiling";
@@ -1416,10 +1514,22 @@ mod tests {
         // 2026-05-16 F42 sweep (R6): contract label rewrite
         //   across the streaming/WS contract comments adds 24 bytes to F5.
         //   F6 unchanged. F5 223,893 → 223,917.
-        const F5_LEN: usize = 223_917;
+        // 2026-05-30 HTTP/1.1 head-scan O(H) fix: +639 bytes inside fragment 5
+        //   (HTTP/1 worker, before the divider) for the resumable CRLFCRLF scan
+        //   (head_scan_pos). F5_LEN: 223,917 + 639 = 224,556.
+        const F5_LEN: usize = 224_556;
+        // 2026-05-30 HTTP/2 request body cap lands inside fragment 6 (net_h2
+        //   server, after the divider): the H2_MAX_REQUEST_BODY_SIZE guard +
+        //   ENHANCE_YOUR_CALM reset + the two new #defines net to +1,113 bytes.
+        //   F6 grows: 106,128 + 1,113 = 107,241.
         assert_eq!(
             NET_H1_H2_SECTION.len(),
-            223_917 + 106_128,
+            // F6 = 107,388. The previous 107_241 was stale on HEAD: a net_h2
+            // change added 147 bytes after the divider without refreshing this
+            // sub-assert (EXPECTED_TOTAL_LEN already tracked the true total, so
+            // c13_4 had been failing on net_h1_h2.c independently of G4). F5_LEN
+            // and the F6_PREFIX anchor are unaffected.
+            224_556 + 107_388,
             "net_h1_h2.c total byte length must equal the expected concatenated runtime fragments"
         );
         const F6_PREFIX: &[u8] = b"// \xE2\x94\x80\xE2\x94\x80 Native HTTP/2 server";

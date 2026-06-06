@@ -3,7 +3,9 @@
 `taida-lang/net` は HTTP / WebSocket / Server-Sent Events を扱うコア同梱
 パッケージです。サーバー (`httpServe`)、リクエストパース
 (`httpParseRequestHead`)、レスポンスエンコード (`httpEncodeResponse`)、
-WebSocket 5 関数、SSE 出力関数、span 操作モールド 5 種を公開します。
+WebSocket 5 関数、SSE 出力関数を公開します。`Request` の span を扱う
+モールド 5 種 (§3) は `taida-lang/net` の export ではなく、import 不要の
+組み込みモールドです (本書で仕様を定義します)。
 
 ```taida
 >>> taida-lang/net => @(httpServe, readBody, startResponse, endResponse, writeChunk, HttpProtocol)
@@ -229,8 +231,9 @@ method / path / query / headers の各 span は `Request.raw` 上の view です
 
 ## 3. span モールド
 
-`Request.method` などの span から具体値を取り出すモールド 5 種を公開
-します。
+`Request.method` などの span から具体値を取り出すモールド 5 種の仕様を
+定義します。これらは import 不要の組み込みモールドです
+(`>>> taida-lang/net` の export リストには含まれません)。
 
 ### 3.0 一覧
 

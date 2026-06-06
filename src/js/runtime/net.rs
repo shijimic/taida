@@ -1042,12 +1042,19 @@ async function __taida_net_httpServe(port, handler, maxRequests, timeoutMs, maxC
         _bl -= n;
         if (_bl <= 0) { _bo = 0; _bl = 0; }
         buf = _bb.subarray(_bo, _bo + _bl);
+        headScanned = 0; // NET-1: buf advanced; next head starts at offset 0
       }
       function bufReset() {
         _bo = 0; _bl = 0;
         buf = _bb.subarray(0, 0);
+        headScanned = 0; // NET-1: buffer cleared; restart head scan
       }
       let buf = _bb.subarray(0, 0);
+      // NET-1: byte offset up to which the head terminator (CRLFCRLF) has been
+      // scanned, so each onData resumes from new bytes only (O(total), not
+      // O(H²) re-scanning the whole buffer on every chunk). Reset to 0 whenever
+      // the buffer is advanced/cleared for the next keep-alive request.
+      let headScanned = 0;
       let connClosed_ = false;
       let connRequests = 0;
 
@@ -1129,15 +1136,21 @@ async function __taida_net_httpServe(port, handler, maxRequests, timeoutMs, maxC
       function tryProcessRequest() {
         if (connClosed_ || serverClosed) return false;
 
-        // Check if head is complete
+        // NET-1: find the head terminator (CRLFCRLF), resuming from
+        // headScanned (minus a 3-byte overlap so a terminator split across
+        // chunks is not missed) so repeated onData calls scan only new bytes —
+        // O(total), not O(H²).
         let headEnd = -1;
-        for (let i = 0; i <= buf.length - 4; i++) {
+        for (let i = Math.max(0, headScanned - 3); i <= buf.length - 4; i++) {
           if (buf[i] === 13 && buf[i+1] === 10 && buf[i+2] === 13 && buf[i+3] === 10) {
             headEnd = i + 4;
             break;
           }
         }
-        if (headEnd < 0) return false; // need more data
+        if (headEnd < 0) {
+          headScanned = buf.length > 3 ? buf.length - 3 : 0; // scanned up to here
+          return false; // need more data
+        }
 
         // NB2-18: Pass buf directly (Buffer IS-A Uint8Array, no copy needed)
         const parseResult = __taida_net_httpParseRequestHead(buf);

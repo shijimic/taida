@@ -613,6 +613,7 @@ impl Interpreter {
                             total_read: 0,
                             conn_requests: 0,
                             last_activity: std::time::Instant::now(),
+                            head_scanned: 0,
                         });
                     }
                     Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
@@ -804,40 +805,20 @@ impl Interpreter {
             return ConnReadResult::Malformed;
         }
 
-        // Try to parse what we already have in the buffer
-        if conn.total_read > 0 {
-            let parse_result = parse_request_head(&conn.buf[..conn.total_read]);
-            let completion_info = match extract_result_value(&parse_result) {
-                None => return ConnReadResult::Malformed,
-                Some(inner) => {
-                    if get_field_bool(inner, "complete").unwrap_or(false) {
-                        let consumed = get_field_int(inner, "consumed").unwrap_or(0) as usize;
-                        let cl = get_field_int(inner, "contentLength").unwrap_or(0);
-                        let is_chunked = get_field_bool(inner, "chunked").unwrap_or(false);
-                        // C12B-032: internal-only presence bit; absent in
-                        // legacy fixtures → conservative false.
-                        let had_cl_header =
-                            get_field_bool(inner, "__hasContentLengthHeader").unwrap_or(false);
-                        Some((consumed, cl, is_chunked, had_cl_header))
-                    } else {
-                        None
-                    }
-                }
-            };
-            if let Some((consumed, cl, is_chunked, had_cl_header)) = completion_info {
-                match extract_result_value_owned(parse_result) {
-                    Some(fields) => {
-                        return ConnReadResult::Ready(
-                            fields,
-                            consumed,
-                            cl,
-                            is_chunked,
-                            had_cl_header,
-                        );
-                    }
-                    None => return ConnReadResult::Malformed,
-                }
-            }
+        // Self-heal: if the buffer shrank since the last scan (keep-alive
+        // advance/reset), restart the terminator search from the front.
+        if conn.head_scanned > conn.total_read {
+            conn.head_scanned = 0;
+        }
+
+        // NET-1: complete the head from data already buffered. The terminator
+        // search resumes from `head_scanned`, so head accumulation is O(total
+        // bytes) rather than O(H²) — previously the whole buffer was re-parsed
+        // with httparse on every read, letting a slowloris-style byte trickle
+        // pin a CPU. The full `parse_request_head` pass runs only once, after
+        // the head is known to be complete.
+        if conn.total_read > 0 && Self::find_head_terminator(conn).is_some() {
+            return Self::parse_complete_head(conn);
         }
 
         // Need more data -- try a non-blocking read
@@ -853,37 +834,11 @@ impl Interpreter {
                 // slow-but-active clients (sending data within each timeout
                 // window) are not incorrectly timed out.
                 conn.last_activity = std::time::Instant::now();
-                // Re-check parse after new data
-                let parse_result = parse_request_head(&conn.buf[..conn.total_read]);
-                let completion_info = match extract_result_value(&parse_result) {
-                    None => return ConnReadResult::Malformed,
-                    Some(inner) => {
-                        if get_field_bool(inner, "complete").unwrap_or(false) {
-                            let consumed = get_field_int(inner, "consumed").unwrap_or(0) as usize;
-                            let cl = get_field_int(inner, "contentLength").unwrap_or(0);
-                            let is_chunked = get_field_bool(inner, "chunked").unwrap_or(false);
-                            let had_cl_header =
-                                get_field_bool(inner, "__hasContentLengthHeader").unwrap_or(false);
-                            Some((consumed, cl, is_chunked, had_cl_header))
-                        } else {
-                            None
-                        }
-                    }
-                };
-                match completion_info {
-                    Some((consumed, cl, is_chunked, had_cl_header)) => {
-                        match extract_result_value_owned(parse_result) {
-                            Some(fields) => ConnReadResult::Ready(
-                                fields,
-                                consumed,
-                                cl,
-                                is_chunked,
-                                had_cl_header,
-                            ),
-                            None => ConnReadResult::Malformed,
-                        }
-                    }
-                    None => ConnReadResult::NeedMore,
+                // Re-check for the head terminator over the newly-read bytes.
+                if Self::find_head_terminator(conn).is_some() {
+                    Self::parse_complete_head(conn)
+                } else {
+                    ConnReadResult::NeedMore
                 }
             }
             Err(ref e)
@@ -898,6 +853,63 @@ impl Interpreter {
                 }
             }
             Err(_) => ConnReadResult::Eof,
+        }
+    }
+
+    /// NET-1: search for the end-of-head marker (`\r\n\r\n`) in the connection
+    /// buffer, resuming from `head_scanned` (minus a 3-byte overlap margin so a
+    /// terminator split across reads is not missed). Returns the byte offset
+    /// just past the terminator when found. When not found, advances
+    /// `head_scanned` to the current end of buffered data so subsequent calls
+    /// only scan newly-received bytes — O(total) across one head's lifetime.
+    fn find_head_terminator(conn: &mut HttpConnection) -> Option<usize> {
+        let total = conn.total_read;
+        if total >= 4 {
+            let start = conn.head_scanned.saturating_sub(3).min(total - 4);
+            if let Some(rel) = conn.buf[start..total]
+                .windows(4)
+                .position(|w| w == b"\r\n\r\n")
+            {
+                return Some(start + rel + 4);
+            }
+        }
+        conn.head_scanned = total;
+        None
+    }
+
+    /// NET-1: parse a buffered request head that is known to be complete (the
+    /// terminator was found). Runs the full `parse_request_head` exactly once
+    /// per request and maps the result onto `ConnReadResult`.
+    fn parse_complete_head(conn: &mut HttpConnection) -> ConnReadResult {
+        let parse_result = parse_request_head(&conn.buf[..conn.total_read]);
+        let completion_info = match extract_result_value(&parse_result) {
+            None => return ConnReadResult::Malformed,
+            Some(inner) => {
+                if get_field_bool(inner, "complete").unwrap_or(false) {
+                    let consumed = get_field_int(inner, "consumed").unwrap_or(0) as usize;
+                    let cl = get_field_int(inner, "contentLength").unwrap_or(0);
+                    let is_chunked = get_field_bool(inner, "chunked").unwrap_or(false);
+                    // C12B-032: internal-only presence bit; absent in
+                    // legacy fixtures → conservative false.
+                    let had_cl_header =
+                        get_field_bool(inner, "__hasContentLengthHeader").unwrap_or(false);
+                    Some((consumed, cl, is_chunked, had_cl_header))
+                } else {
+                    None
+                }
+            }
+        };
+        match completion_info {
+            Some((consumed, cl, is_chunked, had_cl_header)) => {
+                match extract_result_value_owned(parse_result) {
+                    Some(fields) => {
+                        ConnReadResult::Ready(fields, consumed, cl, is_chunked, had_cl_header)
+                    }
+                    None => ConnReadResult::Malformed,
+                }
+            }
+            // Terminator present but parser reports incomplete → malformed head.
+            None => ConnReadResult::Malformed,
         }
     }
     /// Dispatch a single request on a connection: read body, call handler, write response.
@@ -1165,6 +1177,9 @@ impl Interpreter {
                     conn.buf.resize(8192, 0);
                 }
             }
+            // NET-1: the buffer now begins at the next request's head; restart
+            // the head-terminator scan from offset 0.
+            conn.head_scanned = 0;
 
             ConnAction::KeepAlive
         } else {
@@ -1375,6 +1390,9 @@ impl Interpreter {
             if conn.buf.len() < 8192 {
                 conn.buf.resize(8192, 0);
             }
+            // NET-1: buffer advanced; the next request's head starts at offset
+            // 0, so restart the head-terminator scan.
+            conn.head_scanned = 0;
 
             // ── Keep-alive decision ──
             if !keep_alive {

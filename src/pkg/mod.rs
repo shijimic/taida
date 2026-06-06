@@ -1,6 +1,7 @@
 // RC2.7 Phase 2: GitHub Release REST API driver.
 pub mod addon_purity_policy;
 pub mod api_diff;
+pub mod catalog;
 pub mod facade;
 #[cfg(feature = "community")]
 pub mod github_release;

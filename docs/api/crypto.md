@@ -51,9 +51,10 @@ sha256("") => empty_hex
 
 **AI-Context**:
 副作用なし。同じ入力からは常に同じ出力を返す純粋関数。`Str` と
-`Bytes` の両方を受けるが、暗黙の型変換ではなく実装側でそれぞれを
-独立に処理する。`Lax[Bytes]` を直接渡すと意図しない経路に落ちるため、
-`Bytes[...]()` の結果は必ず `>=>` でアンモールドしてから渡すこと。
+`Bytes` の両方を受けるが、それ以外の型は型検査で拒否される。暗黙の
+文字列化は行わず、それぞれの実バイト列を独立に処理する。
+`Bytes[...]()` の結果は `Lax[Bytes]` なので、必ず `>=>` でアンモールド
+してから渡すこと。各バックエンドは 1 回の入力を最大 256 MiB まで扱う。
 
 ---
 
@@ -64,10 +65,10 @@ sha256("") => empty_hex
 | インタプリタ | 対応 |
 | ネイティブ | 対応 |
 | 旧 JS ターゲット | 対応 |
-| WASM (`wasm-min` / `wasm-wasi` / `wasm-edge`) | 利用不可 |
-| WASM (`wasm-full`) | 対応 |
+| WASM (`wasm-min` / `wasm-wasi` / `wasm-edge` / `wasm-full`) | `sha256` に対応 |
 
-`wasm-min` / `wasm-wasi` / `wasm-edge` プロファイルでは
-`taida-lang/crypto` のインポート自体がコンパイル時に拒否されます。
-詳細は [`docs/reference/wasm_profiles.md`](../reference/wasm_profiles.md)
-を参照してください。
+WASM プロファイルの `sha256` は guest 内の純粋な実装で完結し、host
+capability bridge を使いません。HMAC、乱数、署名検証などの追加 API は
+まだ公開 surface ではありません。詳細は
+[`docs/reference/wasm_profiles.md`](../reference/wasm_profiles.md) を参照して
+ください。

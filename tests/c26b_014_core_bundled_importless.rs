@@ -148,9 +148,14 @@ stdout(\"pool-ok\")
 fn c26b_014_native_os_importless_build_ok() {
     // The native backend already handles this via its own
     // `is_core_bundled_path` branch. Pin the 3-backend agreement.
+    // F54: this used to import `getEnv`, which does not exist in the os
+    // export list (the real surface is the `EnvVar` mold). The checker
+    // skipped non-net/abi bundled packages, so the typo built fine while
+    // the symbol silently lowered to nothing — exactly the unknown-symbol
+    // hole the catalog-driven validation now closes.
     let source = "\
->>> taida-lang/os => @(getEnv)
-value <= getEnv(\"PATH\", \"fallback\")
+>>> taida-lang/os => @(EnvVar)
+value <= EnvVar[\"PATH\"]().getOrDefault(\"fallback\")
 stdout(value)
 ";
     let (ok, stderr) = native_build(source, "os_native");

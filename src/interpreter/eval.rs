@@ -82,6 +82,17 @@ pub(crate) struct PoolState {
     pub(crate) idle: Vec<PoolEntry>,
     pub(crate) in_use_tokens: HashSet<i64>,
     pub(crate) next_token: i64,
+    /// Number of poolAcquire calls currently blocked waiting for a free
+    /// slot (waiting semaphore). Surfaced as `poolHealth.waiting`.
+    pub(crate) waiting: i64,
+}
+
+/// One expected host-capability call in an interpreter fixture.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HostCallMockStep {
+    pub method: String,
+    pub args: Vec<Value>,
+    pub result: Value,
 }
 
 /// The Taida interpreter.
@@ -167,6 +178,9 @@ pub struct Interpreter {
     pub(crate) pool_states: Arc<Mutex<HashMap<i64, PoolState>>>,
     /// Monotonic handle allocator for pool_states.
     pub(crate) next_pool_id: Arc<AtomicI64>,
+    /// Host capability scripts used by the interpreter's fixture-only
+    /// HostCall path.
+    pub(crate) host_capability_mocks: HashMap<String, Vec<HostCallMockStep>>,
     /// Pending throw from a HOF callback (Map/Filter/Fold etc.).
     /// When a callback inside call_function_with_values throws, the thrown value
     /// is stored here so that eval_statements' error ceiling can recover it.
@@ -250,6 +264,7 @@ impl Interpreter {
             udp_socket_handles: Arc::new(Mutex::new(HashMap::new())),
             pool_states: Arc::new(Mutex::new(HashMap::new())),
             next_pool_id: Arc::new(AtomicI64::new(1)),
+            host_capability_mocks: HashMap::new(),
             pending_throw: None,
             type_parents: HashMap::new(),
             call_depth: 0,
@@ -280,6 +295,20 @@ impl Interpreter {
         let mut interp = Self::new();
         interp.stream_stdout = true;
         interp
+    }
+
+    /// Register a fixture script for `Cage[HostCapability[name, kind](), HostCall[...]]()`.
+    pub fn set_host_capability_mock_steps(
+        &mut self,
+        name: impl Into<String>,
+        steps: Vec<HostCallMockStep>,
+    ) {
+        self.host_capability_mocks.insert(name.into(), steps);
+    }
+
+    /// Remove all registered host capability fixture scripts.
+    pub fn clear_host_capability_mock_steps(&mut self) {
+        self.host_capability_mocks.clear();
     }
 
     /// RCB-101: Check if `thrown_type` IS-A `handler_type` by walking the inheritance chain.

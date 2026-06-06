@@ -1,6 +1,6 @@
 use super::types::{Type, TypeRegistry};
 use crate::lexer::Span;
-use crate::net_surface::{NET_HTTP_PROTOCOL_VARIANTS, is_net_export_name, net_export_list};
+use crate::net_surface::NET_HTTP_PROTOCOL_VARIANTS;
 use crate::parser::*;
 /// Type checker for Taida Lang.
 ///
@@ -58,6 +58,7 @@ pub(super) enum CageBranch {
     Js,
     Build,
     File,
+    Host,
 }
 
 impl CageBranch {
@@ -66,6 +67,7 @@ impl CageBranch {
             Self::Js => "JS",
             Self::Build => "Build",
             Self::File => "File",
+            Self::Host => "Host",
         }
     }
 
@@ -74,6 +76,7 @@ impl CageBranch {
             "JS" => Some(Self::Js),
             "Build" => Some(Self::Build),
             "File" => Some(Self::File),
+            "Host" => Some(Self::Host),
             _ => None,
         }
     }
@@ -184,6 +187,8 @@ pub struct TypeChecker {
     func_param_counts: HashMap<String, usize>,
     /// Function parameter types (name -> param types). Used for partial application type inference.
     func_param_types: HashMap<String, Vec<Type>>,
+    /// Imported local names for `taida-lang/crypto::sha256`.
+    crypto_sha256_funcs: HashSet<String>,
     /// Function definitions retained for expected-type body inference.
     func_defs: HashMap<String, FuncDef>,
     /// Scope depth where a function name was bound as the function value.
@@ -229,6 +234,13 @@ pub struct TypeChecker {
     /// remains the public type; this side table records the branch only
     /// when the checker can prove it.
     branch_scope_stack: Vec<HashMap<String, BranchInfo>>,
+    /// Scope-aligned compile-time string constants. `None` marks a local
+    /// shadow that is known not to be a compile-time string constant.
+    string_const_scope_stack: Vec<HashMap<String, Option<String>>>,
+    /// Optional host capability manifest injected by a build adapter or test
+    /// fixture. When present, every statically resolvable HostCapability pair
+    /// must be declared here.
+    host_capability_manifest: Option<HashSet<(String, String)>>,
     /// stack of type parameter declarations for the
     /// enclosing generic functions. Pushed on `Statement::FuncDef` body
     /// entry, popped on exit. Used to resolve constrained type variables
@@ -311,6 +323,7 @@ impl TypeChecker {
             func_types: HashMap::new(),
             func_param_counts: HashMap::new(),
             func_param_types: HashMap::new(),
+            crypto_sha256_funcs: HashSet::new(),
             func_defs: HashMap::new(),
             func_def_scope_depths: HashMap::new(),
             generic_func_defs: HashMap::new(),
@@ -330,6 +343,8 @@ impl TypeChecker {
             worker_addon_symbols: HashSet::new(),
             worker_addon_bindings: HashMap::new(),
             branch_scope_stack: vec![HashMap::new()],
+            string_const_scope_stack: vec![HashMap::new()],
+            host_capability_manifest: None,
             current_func_type_params: Vec::new(),
             hinted_func_stack: Vec::new(),
             typed_expr_table: super::typed_hir::TypedExprTable::new(),
@@ -533,6 +548,20 @@ impl TypeChecker {
         self.compile_target = target;
     }
 
+    pub fn set_host_capability_manifest<I, N, K>(&mut self, capabilities: I)
+    where
+        I: IntoIterator<Item = (N, K)>,
+        N: Into<String>,
+        K: Into<String>,
+    {
+        self.host_capability_manifest = Some(
+            capabilities
+                .into_iter()
+                .map(|(name, kind)| (name.into(), kind.into()))
+                .collect(),
+        );
+    }
+
     fn register_net_import_symbol(&mut self, symbol_name: &str, local_name: &str) {
         match symbol_name {
             "httpServe" => {
@@ -590,30 +619,31 @@ impl TypeChecker {
     }
 
     fn abi_request_fields() -> Vec<(String, Type)> {
+        let pair_list = Self::abi_name_value_pair_list_type();
         vec![
             ("method".to_string(), Type::Str),
             ("path".to_string(), Type::Str),
-            (
-                "query".to_string(),
-                Type::Generic("HashMap".to_string(), vec![Type::Str, Type::Str]),
-            ),
-            (
-                "headers".to_string(),
-                Type::Generic("HashMap".to_string(), vec![Type::Str, Type::Str]),
-            ),
+            ("rawQuery".to_string(), Type::Str),
+            ("query".to_string(), pair_list.clone()),
+            ("headers".to_string(), pair_list),
             ("body".to_string(), Type::Bytes),
         ]
     }
 
     fn abi_response_fields() -> Vec<(String, Type)> {
+        let pair_list = Self::abi_name_value_pair_list_type();
         vec![
             ("status".to_string(), Type::Int),
-            (
-                "headers".to_string(),
-                Type::Generic("HashMap".to_string(), vec![Type::Str, Type::Str]),
-            ),
+            ("headers".to_string(), pair_list),
             ("body".to_string(), Type::Bytes),
         ]
+    }
+
+    fn abi_name_value_pair_list_type() -> Type {
+        Type::List(Box::new(Type::BuchiPack(vec![
+            ("name".to_string(), Type::Str),
+            ("value".to_string(), Type::Str),
+        ])))
     }
 
     fn register_abi_type_symbol(&mut self, symbol_name: &str, local_name: &str) {
@@ -1408,6 +1438,231 @@ impl TypeChecker {
         }
     }
 
+    fn is_wired_constraint_type(ty: &Type) -> bool {
+        matches!(ty, Type::Named(name) if name == "Wired")
+            || matches!(ty, Type::Generic(name, args) if name == "Wired" && args.len() == 1)
+    }
+
+    fn is_host_step_type(ty: &Type) -> bool {
+        matches!(ty, Type::Generic(name, args) if name == "HostStep" && args.len() == 2)
+    }
+
+    fn is_crypto_hash_input_type(ty: &Type) -> bool {
+        matches!(ty, Type::Str | Type::Bytes)
+    }
+
+    fn validate_crypto_sha256_call(&mut self, name: &str, args: &[Expr], span: &Span) {
+        for (i, arg) in args.iter().take(1).enumerate() {
+            if matches!(arg, Expr::Hole(_) | Expr::Placeholder(_)) {
+                continue;
+            }
+            let actual_ty = self.infer_expr_type(arg);
+            if actual_ty == Type::Unknown {
+                continue;
+            }
+            if !Self::is_crypto_hash_input_type(&actual_ty) {
+                self.errors.push(TypeError {
+                    message: format!(
+                        "[E1506] Argument {} of '{}' has type {}, expected Str or Bytes. \
+                         Hint: use `Bytes[...]()` and unmold the Lax value with `>=>` before hashing raw bytes.",
+                        i + 1,
+                        name,
+                        actual_ty
+                    ),
+                    span: span.clone(),
+                });
+            }
+        }
+    }
+
+    fn erased_host_step_type() -> Type {
+        Type::Generic("HostStep".to_string(), vec![Type::Any, Type::Any])
+    }
+
+    fn is_wire_encodable_type(&self, ty: &Type) -> bool {
+        if Self::contains_unit_like_type(ty) {
+            return false;
+        }
+        match ty {
+            Type::Str | Type::Int | Type::Float | Type::Bool | Type::Bytes => true,
+            Type::List(inner) => self.is_wire_encodable_type(inner),
+            Type::BuchiPack(fields) => {
+                !fields.is_empty()
+                    && fields
+                        .iter()
+                        .all(|(_, field_ty)| self.is_wire_encodable_type(field_ty))
+            }
+            Type::Named(name) => self.registry.get_type_fields(name).is_some_and(|fields| {
+                !fields.is_empty()
+                    && fields
+                        .iter()
+                        .all(|(_, field_ty)| self.is_wire_encodable_type(field_ty))
+            }),
+            Type::Generic(name, args) if name == "HostCapability" => {
+                args.len() == 2 && args.iter().all(|arg| matches!(arg, Type::Str))
+            }
+            _ => false,
+        }
+    }
+
+    fn wire_encodable_expr_type(&mut self, expr: &Expr) -> (Type, bool) {
+        if matches!(expr, Expr::ListLit(items, _) if items.is_empty()) {
+            let ty = Type::List(Box::new(Type::Any));
+            return (ty, true);
+        }
+        let ty = self.infer_expr_type(expr);
+        let ok = self.is_wire_encodable_type(&ty);
+        (ty, ok)
+    }
+
+    fn is_host_capability_type(ty: &Type) -> bool {
+        matches!(ty, Type::Generic(name, args) if name == "HostCapability" && args.len() == 2 && args.iter().all(|arg| matches!(arg, Type::Str)))
+    }
+
+    fn push_wired_constraint_error(&mut self, subject: &str, actual: &Type, span: &Span) {
+        self.errors.push(TypeError {
+            message: format!(
+                "[E3601] {} must satisfy Wired[T], got {}. \
+                 Hint: use Str / Int / Float / Bool / Bytes, a non-empty buchi pack whose fields are wired, a wired list, WebRequest, WebResponse, or HostCapability.",
+                subject, actual
+            ),
+            span: span.clone(),
+        });
+    }
+
+    fn validate_host_call_descriptor(&mut self, type_args: &[Expr], span: &Span) {
+        if let Some(steps) = type_args.first() {
+            let steps_ty = self.infer_expr_type(steps);
+            let steps_ok = matches!(&steps_ty, Type::List(inner) if Self::is_host_step_type(inner));
+            if !steps_ok {
+                self.errors.push(TypeError {
+                    message: format!(
+                        "[E3602] HostCall steps must be a list containing only HostStep[...] values, got {}. \
+                         Hint: build steps with `@[HostStep[method, args](), ...]`.",
+                        steps_ty
+                    ),
+                    span: steps.span().clone(),
+                });
+            }
+        }
+
+        if let Some(out) = type_args.get(1) {
+            let out_ty = self.type_arg_expr_to_type(out);
+            if !self.is_wire_encodable_type(&out_ty) {
+                self.push_wired_constraint_error("HostCall output", &out_ty, span);
+            }
+        }
+    }
+
+    fn validate_host_capability_manifest(&mut self, type_args: &[Expr], span: &Span) {
+        let Some(manifest) = &self.host_capability_manifest else {
+            return;
+        };
+        let Some(name_arg) = type_args.first() else {
+            return;
+        };
+        let Some(kind_arg) = type_args.get(1) else {
+            return;
+        };
+        let name = self.string_const_expr(name_arg);
+        let kind = self.string_const_expr(kind_arg);
+        let (Some(name), Some(kind)) = (name, kind) else {
+            self.errors.push(TypeError {
+                message: "[E3603] HostCapability[name, kind] requires compile-time Str values when a host capability manifest is active. \
+                         Hint: use a string literal for the capability name and a Str constant for the kind."
+                    .to_string(),
+                span: span.clone(),
+            });
+            return;
+        };
+        if !manifest.contains(&(name.clone(), kind.clone())) {
+            self.errors.push(TypeError {
+                message: format!(
+                    "[E3603] HostCapability[\"{}\", \"{}\"] is not declared in the active host capability manifest. \
+                     Hint: declare the capability in the selected build target manifest or use a declared binding.",
+                    name, kind
+                ),
+                span: span.clone(),
+            });
+        }
+    }
+
+    fn infer_host_capability_type(&mut self, type_args: &[Expr], span: &Span) -> Type {
+        if type_args.len() != 2 {
+            self.errors.push(TypeError {
+                message: format!(
+                    "[E1505] `HostCapability[name, kind]()` requires exactly 2 `[]` argument(s), got {}.",
+                    type_args.len()
+                ),
+                span: span.clone(),
+            });
+        }
+        for (idx, arg) in type_args.iter().take(2).enumerate() {
+            let ty = self.infer_expr_type(arg);
+            if ty != Type::Str && ty != Type::Unknown {
+                self.errors.push(TypeError {
+                    message: format!(
+                        "[E1506] HostCapability argument {} must be Str, got {}.",
+                        idx + 1,
+                        ty
+                    ),
+                    span: arg.span().clone(),
+                });
+            }
+        }
+        self.validate_host_capability_manifest(type_args, span);
+        Type::Generic("HostCapability".to_string(), vec![Type::Str, Type::Str])
+    }
+
+    fn infer_host_step_type(&mut self, type_args: &[Expr], span: &Span) -> Type {
+        if type_args.len() != 2 {
+            self.errors.push(TypeError {
+                message: format!(
+                    "[E1505] `HostStep[method, args]()` requires exactly 2 `[]` argument(s), got {}.",
+                    type_args.len()
+                ),
+                span: span.clone(),
+            });
+        }
+        if let Some(method) = type_args.first() {
+            let method_ty = self.infer_expr_type(method);
+            if method_ty != Type::Str && method_ty != Type::Unknown {
+                self.errors.push(TypeError {
+                    message: format!("[E1506] HostStep method must be Str, got {}.", method_ty),
+                    span: method.span().clone(),
+                });
+            }
+            if method_ty == Type::Str && self.string_const_expr(method).is_none() {
+                self.errors.push(TypeError {
+                    message: "[E3603] HostStep method must be a compile-time Str value. \
+                             Hint: use a string literal or a Str constant for the method name."
+                        .to_string(),
+                    span: method.span().clone(),
+                });
+            }
+        }
+        let args_ty = if let Some(args) = type_args.get(1) {
+            let (args_ty, args_ok) = self.wire_encodable_expr_type(args);
+            if !args_ok {
+                self.push_wired_constraint_error("HostStep args", &args_ty, args.span());
+            }
+            if !matches!(args_ty, Type::List(_)) && !matches!(args_ty, Type::Unknown) && args_ok {
+                self.errors.push(TypeError {
+                    message: format!(
+                        "[E3601] HostStep args must be a wire-encodable list, got {}. \
+                         Hint: pass positional arguments as `@[arg0, arg1, ...]`; use `@[]` for no arguments.",
+                        args_ty
+                    ),
+                    span: args.span().clone(),
+                });
+            }
+            args_ty
+        } else {
+            Type::Unknown
+        };
+        Type::Generic("HostStep".to_string(), vec![Type::Str, args_ty])
+    }
+
     fn is_async_type(ty: &Type) -> bool {
         matches!(ty, Type::Generic(name, _) if name == "Async")
     }
@@ -1553,7 +1808,8 @@ impl TypeChecker {
     /// - Primitive / scalar: `Int`, `Float`, `Num`, `Number`, `Str`,
     /// `String`, `Bytes`, `Bool`, `Boolean`
     /// - Special / forbidden surface types: `Unit`, `Void`, `JSON`, `Molten`
-    /// - Built-in molds with `MoldSpec::range`: `Lax`, `Result`, `Async`,
+    /// - Built-in type constraints / molds: `Wired`, `HostCall`, `HostStep`,
+    /// `HostCapability`, `Lax`, `Result`, `Async`,
     /// `Optional`, `Stream`, `Mold`, `TODO`, `Log`, `Slice`, `Concat`
     pub(super) fn is_builtin_type_name(name: &str) -> bool {
         matches!(
@@ -1571,6 +1827,10 @@ impl TypeChecker {
                 | "Void"
                 | "JSON"
                 | "Molten"
+                | "Wired"
+                | "HostCall"
+                | "HostStep"
+                | "HostCapability"
                 | "Lax"
                 | "Result"
                 | "Async"
@@ -1600,6 +1860,10 @@ impl TypeChecker {
         )
     }
 
+    fn is_cage_runner_constructor(name: &str) -> bool {
+        Self::is_js_rilla_constructor(name) || name == "HostCall"
+    }
+
     fn js_rilla_constructor_signature(name: &str) -> Option<(usize, &'static str)> {
         match name {
             "JSGet" => Some((2, "JSGet[path, Out]()")),
@@ -1609,6 +1873,7 @@ impl TypeChecker {
             "JSSet" => Some((2, "JSSet[path, value]()")),
             "JSBind" => Some((1, "JSBind[path]()")),
             "JSSpread" => Some((1, "JSSpread[source]()")),
+            "HostCall" => Some((2, "HostCall[steps, Out]()")),
             _ => None,
         }
     }
@@ -1667,6 +1932,11 @@ impl TypeChecker {
                 branch: CageBranch::Build,
                 output: self.type_arg_expr_to_type(out),
                 async_boundary: false,
+            }),
+            "HostCall" if type_args.len() == 2 => type_args.get(1).map(|out| CageRunnerType {
+                branch: CageBranch::Host,
+                output: self.type_arg_expr_to_type(out),
+                async_boundary: true,
             }),
             "CageRilla" => {
                 let branch = type_args
@@ -1791,6 +2061,9 @@ impl TypeChecker {
                     );
                     return None;
                 }
+                if name == "HostCall" {
+                    self.validate_host_call_descriptor(type_args, runner_span);
+                }
                 let info = self.cage_runner_type(runner);
                 if info.is_none() {
                     self.push_cage_error(
@@ -1896,12 +2169,14 @@ impl TypeChecker {
     fn push_scope(&mut self) {
         self.scope_stack.push(HashMap::new());
         self.branch_scope_stack.push(HashMap::new());
+        self.string_const_scope_stack.push(HashMap::new());
     }
 
     /// Pop a scope (e.g., leaving a function body).
     fn pop_scope(&mut self) {
         self.scope_stack.pop();
         self.branch_scope_stack.pop();
+        self.string_const_scope_stack.pop();
     }
 
     fn define_branch_info(&mut self, name: &str, info: BranchInfo) {
@@ -1930,6 +2205,34 @@ impl TypeChecker {
         match self.lookup_branch_info(name) {
             BranchInfo::GorillaxValue(branch) => Some(branch),
             BranchInfo::None | BranchInfo::Molten(_) => None,
+        }
+    }
+
+    fn define_string_const(&mut self, name: &str, value: Option<String>) {
+        if let Some(scope) = self.string_const_scope_stack.last_mut() {
+            scope.insert(name.to_string(), value);
+        }
+    }
+
+    fn define_string_const_from_expr(&mut self, name: &str, expr: &Expr) {
+        let value = self.string_const_expr(expr);
+        self.define_string_const(name, value);
+    }
+
+    fn lookup_string_const(&self, name: &str) -> Option<String> {
+        for scope in self.string_const_scope_stack.iter().rev() {
+            if let Some(value) = scope.get(name) {
+                return value.clone();
+            }
+        }
+        None
+    }
+
+    fn string_const_expr(&self, expr: &Expr) -> Option<String> {
+        match expr {
+            Expr::StringLit(value, _) => Some(value.clone()),
+            Expr::Ident(name, _) => self.lookup_string_const(name),
+            _ => None,
         }
     }
 
@@ -2097,40 +2400,38 @@ impl TypeChecker {
     fn validate_import_symbols(&mut self, imp: &crate::parser::ImportStmt) {
         use crate::parser::Statement as S;
 
-        if imp.path == "taida-lang/net" {
+        // F54 (unknown-symbol unification): every core-bundled package is
+        // validated against the catalog export list. Previously only net
+        // and abi were checked; a typo'd symbol on os / crypto / pool / js
+        // skipped the checker, lowered to Type::Unknown, and was silently
+        // dropped by the native lowering — vanishing without a diagnostic.
+        if let Some((org, name)) = imp.path.split_once('/')
+            && org == crate::pkg::catalog::BUNDLED_ORG
+            && let Some(spec) = crate::pkg::catalog::find(name)
+        {
             for sym in &imp.symbols {
-                if !is_net_export_name(&sym.name) {
+                if !spec.exports.contains(&sym.name.as_str()) {
                     self.errors.push(TypeError {
                         message: format!(
                             "Symbol '{}' not found in module '{}'. The module exports: {}",
                             sym.name,
                             imp.path,
-                            net_export_list()
+                            spec.exports.join(", ")
                         ),
                         span: imp.span.clone(),
                     });
-                }
-            }
-            return;
-        }
-        if imp.path == "taida-lang/abi" {
-            const ABI_EXPORTS: &[&str] = &[
-                "WebRequest",
-                "WebResponse",
-                "text",
-                "json",
-                "bytes",
-                "status",
-                "header",
-            ];
-            for sym in &imp.symbols {
-                if !ABI_EXPORTS.contains(&sym.name.as_str()) {
+                } else if name == "abi"
+                    && matches!(
+                        sym.name.as_str(),
+                        "HostCall" | "HostStep" | "HostCapability"
+                    )
+                    && sym.alias.is_some()
+                {
                     self.errors.push(TypeError {
                         message: format!(
-                            "Symbol '{}' not found in module '{}'. The module exports: {}",
-                            sym.name,
-                            imp.path,
-                            ABI_EXPORTS.join(", ")
+                            "[E1502] taida-lang/abi descriptor '{}' cannot be imported with an alias. \
+                             Hint: import '{}' directly so the checker can recognize the built-in host boundary descriptor.",
+                            sym.name, sym.name
                         ),
                         span: imp.span.clone(),
                     });
@@ -2139,7 +2440,8 @@ impl TypeChecker {
             return;
         }
 
-        // Skip other core-bundled and npm packages
+        // Skip unknown taida-lang/* paths (resolver rejects them at runtime)
+        // and npm packages.
         if imp.path.starts_with("npm:") || imp.path.starts_with("taida-lang/") {
             return;
         }
@@ -2797,10 +3099,11 @@ impl TypeChecker {
             scope.insert(name.to_string(), ty);
         }
         self.define_branch_info(name, BranchInfo::None);
+        self.define_string_const(name, None);
     }
 
     /// Define a variable with a span for duplicate detection.
-    fn define_var_with_span(&mut self, name: &str, ty: Type, span: Option<&Span>) {
+    fn define_var_with_span(&mut self, name: &str, ty: Type, span: Option<&Span>) -> bool {
         if let Some(scope) = self.scope_stack.last_mut() {
             if let Some(span) = span
                 && scope.contains_key(name)
@@ -2814,11 +3117,13 @@ impl TypeChecker {
                         ),
                         span: span.clone(),
                     });
-                return;
+                return false;
             }
             scope.insert(name.to_string(), ty);
         }
         self.define_branch_info(name, BranchInfo::None);
+        self.define_string_const(name, None);
+        true
     }
 
     /// True if `name` in an intermediate pipeline
@@ -3505,7 +3810,8 @@ impl TypeChecker {
                         if sym.name == "sha256" {
                             let local_name = sym.alias.as_ref().unwrap_or(&sym.name).clone();
                             self.func_types.insert(local_name.clone(), Type::Str);
-                            self.func_param_counts.insert(local_name, 1);
+                            self.func_param_counts.insert(local_name.clone(), 1);
+                            self.crypto_sha256_funcs.insert(local_name);
                         }
                     }
                 } else if imp.path == "taida-lang/net" {
@@ -4085,6 +4391,21 @@ defaulted fields must be provided via `()`",
             MoldHeaderArg::TypeParam(tp) => {
                 if let Some(constraint) = &tp.constraint {
                     let expected = self.resolve_mold_header_type(constraint, bound_types);
+                    if Self::is_wired_constraint_type(&expected) {
+                        if !self.is_wire_encodable_type(actual) {
+                            self.push_wired_constraint_error(
+                                &format!(
+                                    "MoldInst '{}' positional `[]` argument {} ('{}')",
+                                    name,
+                                    idx + 1,
+                                    tp.name
+                                ),
+                                actual,
+                                span,
+                            );
+                        }
+                        return;
+                    }
                     if !self.mold_header_type_compatible(actual, &expected) {
                         self.errors.push(TypeError {
                             message: Self::binding_diag(
@@ -4354,6 +4675,16 @@ defaulted fields must be provided via `()`",
                 continue;
             };
             let expected = self.resolve_mold_header_type(constraint, bindings);
+            if Self::is_wired_constraint_type(&expected) {
+                if !self.is_wire_encodable_type(actual) {
+                    self.push_wired_constraint_error(
+                        &format!("Generic function type parameter '{}'", type_param.name),
+                        actual,
+                        span,
+                    );
+                }
+                continue;
+            }
             if !self.mold_header_type_compatible(actual, &expected) {
                 self.errors.push(TypeError {
                     message: format!(
@@ -4625,7 +4956,7 @@ defaulted fields must be provided via `()`",
         match expr {
             // B11B-016: TypeExtends does not accept enum variant literals
             Expr::MoldInst(name, type_args, fields, _) => {
-                if Self::is_js_rilla_constructor(name) && !in_cage_runner {
+                if Self::is_cage_runner_constructor(name) && !in_cage_runner {
                     self.push_cage_error(
                         "[E1515]",
                         expr.span(),
@@ -5322,11 +5653,13 @@ defaulted fields must be provided via `()`",
                         });
                     }
                     // Register with the annotated type
-                    self.define_var_with_span(&assign.target, expected, Some(&assign.span));
-                    self.define_branch_info(
-                        &assign.target,
-                        self.branch_info_for_assignment_expr(&assign.value, &inferred),
-                    );
+                    if self.define_var_with_span(&assign.target, expected, Some(&assign.span)) {
+                        self.define_string_const_from_expr(&assign.target, &assign.value);
+                        self.define_branch_info(
+                            &assign.target,
+                            self.branch_info_for_assignment_expr(&assign.value, &inferred),
+                        );
+                    }
                 } else {
                     // @[] without type annotation is ambiguous — element type is unknown
                     if matches!(&inferred, Type::List(inner) if matches!(inner.as_ref(), Type::Unknown))
@@ -5343,8 +5676,10 @@ defaulted fields must be provided via `()`",
                     // Register with the inferred type
                     let branch_info =
                         self.branch_info_for_assignment_expr(&assign.value, &inferred);
-                    self.define_var_with_span(&assign.target, inferred, Some(&assign.span));
-                    self.define_branch_info(&assign.target, branch_info);
+                    if self.define_var_with_span(&assign.target, inferred, Some(&assign.span)) {
+                        self.define_string_const_from_expr(&assign.target, &assign.value);
+                        self.define_branch_info(&assign.target, branch_info);
+                    }
                 }
                 if is_addon_binding {
                     self.worker_addon_symbols.insert(assign.target.clone());
@@ -7105,9 +7440,30 @@ defaulted fields must be provided via `()`",
                     let first_type = self.infer_expr_type(&items[0]);
                     // リスト要素の同質性チェック (E0401)
                     // Int/Float 混在は Num に統一
-                    let mut unified_type = first_type.clone();
+                    let mut unified_type = if Self::is_host_step_type(&first_type) {
+                        Self::erased_host_step_type()
+                    } else {
+                        first_type.clone()
+                    };
                     for (i, item) in items.iter().enumerate().skip(1) {
                         let item_type = self.infer_expr_type(item);
+                        let unified_is_host_step = Self::is_host_step_type(&unified_type);
+                        let item_is_host_step = Self::is_host_step_type(&item_type);
+                        if unified_is_host_step || item_is_host_step {
+                            if unified_is_host_step && item_is_host_step {
+                                unified_type = Self::erased_host_step_type();
+                                continue;
+                            }
+                            self.errors.push(TypeError {
+                                message: format!(
+                                    "[E3602] HostStep list literals cannot mix HostStep elements with {} at position {}. \
+                                     Hint: keep HostCall steps as a list containing only HostStep[...] values.",
+                                    item_type, i
+                                ),
+                                span: span.clone(),
+                            });
+                            break;
+                        }
                         if Self::contains_unknown(&item_type)
                             || Self::contains_unknown(&unified_type)
                         {
@@ -7512,6 +7868,9 @@ defaulted fields must be provided via `()`",
                                     span: span.clone(),
                                 });
                             }
+                        }
+                        if self.crypto_sha256_funcs.contains(name) {
+                            self.validate_crypto_sha256_call(name, args, span);
                         }
                         // E1506: Check argument types against registered parameter types
                         if let Some(param_types) = self.func_param_types.get(name).cloned() {
@@ -8123,6 +8482,22 @@ defaulted fields must be provided via `()`",
                 self.validate_mold_header_constraints(name, type_args, mold_span);
                 self.validate_builtin_mold_spec(name, type_args, fields, mold_span);
                 match name.as_str() {
+                    "HostCapability" => self.infer_host_capability_type(type_args, mold_span),
+                    "HostStep" => self.infer_host_step_type(type_args, mold_span),
+                    "HostCall" => {
+                        self.validate_host_call_descriptor(type_args, mold_span);
+                        self.cage_runner_type(expr)
+                            .map(|runner| {
+                                Type::Generic(
+                                    "CageRilla".to_string(),
+                                    vec![
+                                        Type::Named(runner.branch.label().to_string()),
+                                        runner.output,
+                                    ],
+                                )
+                            })
+                            .unwrap_or(Type::Unknown)
+                    }
                     // JSON[raw, Schema]() returns Lax[Schema].
                     "JSON" => {
                         let schema_ty = type_args
@@ -8727,36 +9102,6 @@ defaulted fields must be provided via `()`",
                             return Type::Generic("Gorillax".to_string(), vec![Type::Unknown]);
                         };
                         let subject_type = self.infer_expr_type(subject);
-                        if Self::is_hammer_cage_boundary_expr(subject) {
-                            self.push_cage_error(
-                                "[E1518]",
-                                subject.span(),
-                                "[E1518] JSON/Hammer schema casts must not be used as Cage subjects. \
-                                 Hint: keep `JSON[raw, Schema]()` on its `Lax[T]` path."
-                                    .to_string(),
-                            );
-                        } else if subject_type != Type::Molten && subject_type != Type::Unknown {
-                            self.push_cage_error(
-                                "[E1517]",
-                                subject.span(),
-                                format!(
-                                    "[E1517] Cage subject must carry a resolved Molten branch, got {}. \
-                                     Hint: pass an external Molten value such as an `npm:` import.",
-                                    subject_type
-                                ),
-                            );
-                        }
-
-                        let subject_branch = self.molten_branch_for_expr(subject);
-                        if subject_type == Type::Molten && subject_branch.is_none() {
-                            self.push_cage_error(
-                                "[E1517]",
-                                subject.span(),
-                                "[E1517] Cage subject branch is unresolved. \
-                                 Hint: use a Molten value whose source fixes the branch, such as an `npm:` import for JS."
-                                    .to_string(),
-                            );
-                        }
 
                         let Some(runner_expr) = type_args.get(1) else {
                             self.push_cage_error(
@@ -8768,35 +9113,77 @@ defaulted fields must be provided via `()`",
                             return Type::Generic("Gorillax".to_string(), vec![Type::Unknown]);
                         };
                         let runner = self.validate_cage_runner_expr(runner_expr, mold_span);
-                        match (subject_branch, runner) {
-                            (Some(subject_branch), Some(runner)) => {
-                                if subject_branch != runner.branch {
+                        if let Some(runner) = runner {
+                            if runner.branch == CageBranch::Host {
+                                if !Self::is_host_capability_type(&subject_type)
+                                    && subject_type != Type::Unknown
+                                {
                                     self.push_cage_error(
-                                        "[E1512]",
-                                        runner_expr.span(),
+                                        "[E1517]",
+                                        subject.span(),
                                         format!(
-                                            "[E1512] Cage branch mismatch: subject is {}, runner is {}. \
-                                             Hint: choose a runner descriptor from the matching CageRilla family.",
-                                            subject_branch.label(),
-                                            runner.branch.label()
+                                            "[E1517] Host Cage subject must be HostCapability, got {}. \
+                                             Hint: construct the subject with `HostCapability[name, kind]()`.",
+                                            subject_type
                                         ),
                                     );
                                 }
-                                if runner.async_boundary {
-                                    Type::Generic("Async".to_string(), vec![runner.output])
-                                } else {
-                                    Type::Generic("Gorillax".to_string(), vec![runner.output])
-                                }
+                                return Type::Generic("Async".to_string(), vec![runner.output]);
                             }
-                            (_, Some(runner)) => {
-                                if runner.async_boundary {
-                                    Type::Generic("Async".to_string(), vec![runner.output])
-                                } else {
-                                    Type::Generic("Gorillax".to_string(), vec![runner.output])
-                                }
+
+                            if Self::is_hammer_cage_boundary_expr(subject) {
+                                self.push_cage_error(
+                                    "[E1518]",
+                                    subject.span(),
+                                    "[E1518] JSON/Hammer schema casts must not be used as Cage subjects. \
+                                     Hint: keep `JSON[raw, Schema]()` on its `Lax[T]` path."
+                                        .to_string(),
+                                );
+                            } else if subject_type != Type::Molten && subject_type != Type::Unknown
+                            {
+                                self.push_cage_error(
+                                    "[E1517]",
+                                    subject.span(),
+                                    format!(
+                                        "[E1517] Cage subject must carry a resolved Molten branch, got {}. \
+                                         Hint: pass an external Molten value such as an `npm:` import.",
+                                        subject_type
+                                    ),
+                                );
                             }
-                            _ => Type::Generic("Gorillax".to_string(), vec![Type::Unknown]),
+
+                            let subject_branch = self.molten_branch_for_expr(subject);
+                            if subject_type == Type::Molten && subject_branch.is_none() {
+                                self.push_cage_error(
+                                    "[E1517]",
+                                    subject.span(),
+                                    "[E1517] Cage subject branch is unresolved. \
+                                     Hint: use a Molten value whose source fixes the branch, such as an `npm:` import for JS."
+                                        .to_string(),
+                                );
+                            }
+
+                            if let Some(subject_branch) = subject_branch
+                                && subject_branch != runner.branch
+                            {
+                                self.push_cage_error(
+                                    "[E1512]",
+                                    runner_expr.span(),
+                                    format!(
+                                        "[E1512] Cage branch mismatch: subject is {}, runner is {}. \
+                                         Hint: choose a runner descriptor from the matching CageRilla family.",
+                                        subject_branch.label(),
+                                        runner.branch.label()
+                                    ),
+                                );
+                            }
+                            return if runner.async_boundary {
+                                Type::Generic("Async".to_string(), vec![runner.output])
+                            } else {
+                                Type::Generic("Gorillax".to_string(), vec![runner.output])
+                            };
                         }
+                        Type::Generic("Gorillax".to_string(), vec![Type::Unknown])
                     }
                     _ => {
                         if matches!(

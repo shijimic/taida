@@ -118,6 +118,74 @@ static taida_val taida_os_read_lax_error(const char *kind) {
     return taida_lax_empty_error((taida_val)"", error);
 }
 
+#include <poll.h>  // G3: poll() for concurrent stdout/stderr drain
+
+// G3 (NET/OS): concurrently drain a child's stdout and stderr pipes. Draining
+// one pipe to EOF before touching the other deadlocks when the child writes
+// more than a pipe buffer (~64KB) to the undrained pipe: the child blocks in
+// write() while the parent blocks in read() of the other pipe. Set both fds
+// non-blocking and poll() them, reading whichever is ready, until both reach
+// EOF. Both output buffers are heap-allocated (caller frees) and NUL-terminated.
+static void taida_os_drain_two_pipes(int out_fd, int err_fd,
+                                     char **out_buf_p, size_t *out_len_p,
+                                     char **err_buf_p, size_t *err_len_p) {
+    int of = fcntl(out_fd, F_GETFL, 0);
+    if (of != -1) fcntl(out_fd, F_SETFL, of | O_NONBLOCK);
+    int ef = fcntl(err_fd, F_GETFL, 0);
+    if (ef != -1) fcntl(err_fd, F_SETFL, ef | O_NONBLOCK);
+
+    char *bufs[2];
+    size_t caps[2] = { 4096, 4096 };
+    size_t lens[2] = { 0, 0 };
+    bufs[0] = (char*)TAIDA_MALLOC(caps[0], "os_drain_stdout");
+    bufs[1] = (char*)TAIDA_MALLOC(caps[1], "os_drain_stderr");
+
+    struct pollfd fds[2];
+    fds[0].fd = out_fd; fds[0].events = POLLIN; fds[0].revents = 0;
+    fds[1].fd = err_fd; fds[1].events = POLLIN; fds[1].revents = 0;
+    int open_count = 2;
+
+    while (open_count > 0) {
+        int pr = poll(fds, 2, -1);
+        if (pr < 0) {
+            if (errno == EINTR) continue;
+            break; // unexpected poll error — return what we have so far
+        }
+        for (int k = 0; k < 2; k++) {
+            if (fds[k].fd < 0) continue;
+            if (!(fds[k].revents & (POLLIN | POLLHUP | POLLERR))) continue;
+            // Drain everything currently buffered on this fd.
+            for (;;) {
+                if (lens[k] + 1 >= caps[k]) {
+                    caps[k] *= 2;
+                    TAIDA_REALLOC(bufs[k], caps[k], "os_drain");
+                }
+                ssize_t n = read(fds[k].fd, bufs[k] + lens[k], caps[k] - lens[k] - 1);
+                if (n > 0) {
+                    lens[k] += (size_t)n;
+                } else if (n == 0) {
+                    close(fds[k].fd);
+                    fds[k].fd = -1;
+                    open_count--;
+                    break;
+                } else {
+                    if (errno == EAGAIN || errno == EWOULDBLOCK) break;
+                    if (errno == EINTR) continue;
+                    close(fds[k].fd);
+                    fds[k].fd = -1;
+                    open_count--;
+                    break;
+                }
+            }
+        }
+    }
+
+    bufs[0][lens[0]] = '\0';
+    bufs[1][lens[1]] = '\0';
+    *out_buf_p = bufs[0]; *out_len_p = lens[0];
+    *err_buf_p = bufs[1]; *err_len_p = lens[1];
+}
+
 taida_val taida_os_read(taida_val path_ptr) {
     const char *path = (const char*)path_ptr;
     if (!path) return taida_os_read_lax_error("invalid");
@@ -630,32 +698,13 @@ taida_val taida_os_run(taida_val program_ptr, taida_val args_list_ptr) {
     close(stdout_pipe[1]);
     close(stderr_pipe[1]);
 
-    // Read stdout
-    size_t out_cap = 4096, out_len = 0;
-    char *out_buf = (char*)TAIDA_MALLOC(out_cap, "os_run_stdout");
-    ssize_t n;
-    while ((n = read(stdout_pipe[0], out_buf + out_len, out_cap - out_len - 1)) > 0) {
-        out_len += n;
-        if (out_len >= out_cap - 1) {
-            out_cap *= 2;
-            TAIDA_REALLOC(out_buf, out_cap, "os_run_stdout");
-        }
-    }
-    out_buf[out_len] = '\0';
-    close(stdout_pipe[0]);
-
-    // Read stderr
-    size_t err_cap = 4096, err_len = 0;
-    char *err_buf = (char*)TAIDA_MALLOC(err_cap, "os_run_stderr");
-    while ((n = read(stderr_pipe[0], err_buf + err_len, err_cap - err_len - 1)) > 0) {
-        err_len += n;
-        if (err_len >= err_cap - 1) {
-            err_cap *= 2;
-            TAIDA_REALLOC(err_buf, err_cap, "os_run_stderr");
-        }
-    }
-    err_buf[err_len] = '\0';
-    close(stderr_pipe[0]);
+    // G3: drain stdout + stderr concurrently. Reading one pipe to EOF before
+    // the other deadlocks if the child writes >64KB to the undrained pipe.
+    char *out_buf, *err_buf;
+    size_t out_len, err_len;
+    taida_os_drain_two_pipes(stdout_pipe[0], stderr_pipe[0],
+                             &out_buf, &out_len, &err_buf, &err_len);
+    (void)out_len; (void)err_len; // process_inner uses NUL-terminated buffers
 
     int status;
     waitpid(pid, &status, 0);
@@ -708,24 +757,12 @@ taida_val taida_os_exec_shell(taida_val command_ptr) {
     close(stdout_pipe[1]);
     close(stderr_pipe[1]);
 
-    size_t out_cap = 4096, out_len = 0;
-    char *out_buf = (char*)TAIDA_MALLOC(out_cap, "execShell_stdout");
-    ssize_t n;
-    while ((n = read(stdout_pipe[0], out_buf + out_len, out_cap - out_len - 1)) > 0) {
-        out_len += n;
-        if (out_len >= out_cap - 1) { out_cap *= 2; TAIDA_REALLOC(out_buf, out_cap, "execShell_stdout"); }
-    }
-    out_buf[out_len] = '\0';
-    close(stdout_pipe[0]);
-
-    size_t err_cap = 4096, err_len = 0;
-    char *err_buf = (char*)TAIDA_MALLOC(err_cap, "execShell_stderr");
-    while ((n = read(stderr_pipe[0], err_buf + err_len, err_cap - err_len - 1)) > 0) {
-        err_len += n;
-        if (err_len >= err_cap - 1) { err_cap *= 2; TAIDA_REALLOC(err_buf, err_cap, "execShell_stderr"); }
-    }
-    err_buf[err_len] = '\0';
-    close(stderr_pipe[0]);
+    // G3: drain stdout + stderr concurrently (see taida_os_drain_two_pipes).
+    char *out_buf, *err_buf;
+    size_t out_len, err_len;
+    taida_os_drain_two_pipes(stdout_pipe[0], stderr_pipe[0],
+                             &out_buf, &out_len, &err_buf, &err_len);
+    (void)out_len; (void)err_len;
 
     int status;
     waitpid(pid, &status, 0);

@@ -370,15 +370,12 @@ impl Lowering {
                         continue;
                     }
 
-                    let is_core_bundled_path = matches!(
-                        path.as_str(),
-                        "taida-lang/os"
-                            | "taida-lang/js"
-                            | "taida-lang/crypto"
-                            | "taida-lang/net"
-                            | "taida-lang/pool"
-                            | "taida-lang/abi"
-                    );
+                    // F54: derive the core-bundled classification from the
+                    // package catalog instead of a per-layer hard-coded list.
+                    let is_core_bundled_path = path
+                        .as_str()
+                        .split_once('/')
+                        .is_some_and(|(org, name)| crate::pkg::catalog::is_core_bundled(org, name));
 
                     // B11B-023 + B11B-026: Pre-resolve facade once per import statement
                     // instead of per-symbol. Validates all symbols at once.

@@ -25,6 +25,7 @@
 | [`release_process.md`](release_process.md) | 世代番号・ビルド番号と互換性判断のプロセス |
 | [`scope_rules.md`](scope_rules.md) | 字句スコープとモジュールスコープの規則 |
 | [`tail_recursion.md`](tail_recursion.md) | 末尾呼び出しと再帰の保証 |
+| [`type_constraints.md`](type_constraints.md) | ジェネリック関数とモールドの型制約 |
 | [`wasm_profiles.md`](wasm_profiles.md) | WASM ターゲットプロファイルと対応範囲 |
 
 パッケージ単位の API リファレンス (プレリュード関数 / ビルトイン型

@@ -377,6 +377,12 @@ pub static MOLD_SPECS: &[MoldSpec] = &[
         .with_worker_boundary(WorkerMoldBoundary::HostBoundary),
     MoldSpec::exact("CageRilla", 2, ANY2, MoldReturnKind::Pack)
         .with_worker_boundary(WorkerMoldBoundary::HostBoundary),
+    MoldSpec::exact("HostCall", 2, ANY2, MoldReturnKind::Pack)
+        .with_worker_boundary(WorkerMoldBoundary::HostBoundary),
+    MoldSpec::exact("HostStep", 2, ANY2, MoldReturnKind::Pack)
+        .with_worker_boundary(WorkerMoldBoundary::HostBoundary),
+    MoldSpec::exact("HostCapability", 2, ANY2, MoldReturnKind::Pack)
+        .with_worker_boundary(WorkerMoldBoundary::HostBoundary),
     MoldSpec::exact("JSRilla", 1, ANY1, MoldReturnKind::Pack)
         .with_worker_boundary(WorkerMoldBoundary::HostBoundary),
     MoldSpec::exact("FileRilla", 1, ANY1, MoldReturnKind::Pack)

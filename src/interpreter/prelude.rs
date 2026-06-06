@@ -135,7 +135,11 @@ impl Interpreter {
             let bytes: Vec<u8> = match val {
                 Value::Bytes(b) => Value::bytes_take(b),
                 Value::Str(s) => Value::str_take(s).into_bytes(),
-                other => other.to_display_string().into_bytes(),
+                other => {
+                    return Err(RuntimeError {
+                        message: format!("sha256: input must be Str or Bytes, got {}", other),
+                    });
+                }
             };
             return Ok(Some(Signal::Value(Value::str(sha256_hex_bytes(&bytes)))));
         }

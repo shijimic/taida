@@ -599,7 +599,25 @@ ProcessError = @(
 
 ---
 
-## 9. パス境界ポリシー (import / module loader)
+## 9. バックエンド対応
+
+| バックエンド | 対応範囲 |
+|--------------|----------|
+| インタプリタ | 全 API |
+| ネイティブ | 全 API |
+| 旧 JS ターゲット | 全 API |
+| WASM (`wasm-min`) | 利用不可 |
+| WASM (`wasm-wasi` / `wasm-full`) | 文書化済みの WASI 向け部分集合 (`EnvVar` / `allEnv` / `Read` / `Exists` / `writeFile` / `readBytesAt`) |
+| WASM (`wasm-edge`) | `EnvVar` / `allEnv` のみ |
+
+WASM プロファイル別の詳細は
+[`docs/reference/wasm_profiles.md`](../reference/wasm_profiles.md) と
+[`docs/api/build_descriptors.md`](build_descriptors.md) のターゲット別
+コア API 互換性表を参照してください。
+
+---
+
+## 10. パス境界ポリシー (import / module loader)
 
 `>>> ./X.td` / `>>> ../Y.td` / `>>> /absolute/Y.td` のような filesystem
 import は **プロジェクトルート** を境界とします。プロジェクトルートの
@@ -635,7 +653,7 @@ Import path '<exact import token>' resolves outside the project root. Path trave
 
 ---
 
-## 10. 関連ドキュメント
+## 11. 関連ドキュメント
 
 - [`docs/api/net.md`](net.md) — HTTP サーバー / WebSocket / SSE を扱う `taida-lang/net` パッケージ
 - [`docs/api/prelude.md`](prelude.md) — `Result[T, P]` / `Lax[T]` / `Gorillax[T]` のメソッドと型コンストラクタ

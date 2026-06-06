@@ -603,6 +603,14 @@ pub(crate) struct HttpConnection {
     pub(crate) conn_requests: i64,
     /// Last activity timestamp (for idle timeout detection)
     pub(crate) last_activity: std::time::Instant,
+    /// NET-1: byte offset up to which the request-head terminator (`\r\n\r\n`)
+    /// has already been scanned. Lets `try_read_request` resume the search
+    /// from newly-received bytes only, giving O(total) head accumulation
+    /// instead of re-scanning (and re-parsing) the whole buffer on every read.
+    /// Reset to 0 whenever the buffer is advanced/reset for the next
+    /// keep-alive request; `try_read_request` also self-heals if it ever
+    /// exceeds `total_read`.
+    pub(crate) head_scanned: usize,
 }
 
 /// Result of a non-blocking read attempt on a connection.

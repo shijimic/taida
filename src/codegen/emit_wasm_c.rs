@@ -463,9 +463,12 @@ fn collect_needed_runtime_funcs(insts: &[IrInst], set: &mut HashSet<String>) {
         match inst {
             IrInst::Call(_, name, _) => {
                 set.insert(name.clone());
-                // RCB-101 fix: taida_error_type_check_or_rethrow needs
+                // Calls that may rethrow under the WASM error-flag runtime need
                 // taida_is_error_thrown for the post-call early-return check.
-                if name == "taida_error_type_check_or_rethrow" {
+                if name == "taida_error_type_check_or_rethrow"
+                    || name == "taida_generic_unmold"
+                    || name == "taida_throw"
+                {
                     set.insert("taida_is_error_thrown".to_string());
                 }
             }
@@ -756,6 +759,19 @@ fn runtime_func_prototype(name: &str, profile: WasmProfile) -> Result<String, Wa
         "taida_make_error" => {
             "int64_t taida_make_error(int64_t type_ptr, int64_t msg_ptr);".to_string()
         }
+        "taida_abi_host_capability" => {
+            "int64_t taida_abi_host_capability(int64_t name, int64_t kind);".to_string()
+        }
+        "taida_abi_host_step" => {
+            "int64_t taida_abi_host_step(int64_t method, int64_t args, int64_t args_schema);"
+                .to_string()
+        }
+        "taida_abi_host_call" => {
+            "int64_t taida_abi_host_call(int64_t steps, int64_t schema);".to_string()
+        }
+        "taida_abi_host_cage" => {
+            "int64_t taida_abi_host_cage(int64_t capability, int64_t call);".to_string()
+        }
         // W-5: Lax runtime functions
         "taida_lax_new" => {
             "int64_t taida_lax_new(int64_t value, int64_t default_value);".to_string()
@@ -829,6 +845,8 @@ fn runtime_func_prototype(name: &str, profile: WasmProfile) -> Result<String, Wa
         // W-5: String template helpers (str_from_int/float/bool are aliases)
         "taida_str_from_int" => "int64_t taida_str_from_int(int64_t v);".to_string(),
         "taida_str_from_float" => "int64_t taida_str_from_float(int64_t v);".to_string(),
+        // taida-lang/crypto: pure SHA-256 is available in every WASM profile.
+        "taida_sha256" => "int64_t taida_sha256(int64_t value);".to_string(),
         // W-5: Lax method helpers
         "taida_can_throw_payload" => "int64_t taida_can_throw_payload(int64_t val);".to_string(),
         // W-5: Float comparison
@@ -1003,6 +1021,9 @@ fn runtime_func_prototype(name: &str, profile: WasmProfile) -> Result<String, Wa
             format!("int64_t {}(int64_t val);", name)
         }
         "taida_json_schema_cast" => "int64_t taida_json_schema_cast(int64_t raw, int64_t schema);".to_string(),
+        "taida_json_encode_wire" => {
+            "int64_t taida_json_encode_wire(int64_t value, int64_t schema);".to_string()
+        }
         "taida_json_empty" => "int64_t taida_json_empty(void);".to_string(),
         "taida_json_has" => "int64_t taida_json_has(int64_t json, int64_t key);".to_string(),
         "taida_json_size" => "int64_t taida_json_size(int64_t json);".to_string(),
@@ -1108,6 +1129,9 @@ fn runtime_func_prototype(name: &str, profile: WasmProfile) -> Result<String, Wa
         }
         "taida_async_ok" => "int64_t taida_async_ok(int64_t value);".to_string(),
         "taida_async_err" => "int64_t taida_async_err(int64_t error);".to_string(),
+        "taida_async_pending_with_error" => {
+            "int64_t taida_async_pending_with_error(int64_t error);".to_string()
+        }
         "taida_async_set_value_tag" => {
             "void taida_async_set_value_tag(int64_t async_ptr, int64_t tag);".to_string()
         }
@@ -1684,11 +1708,13 @@ fn emit_inst(
                     write!(c, "v_{}", arg).unwrap();
                 }
                 writeln!(c, ");").unwrap();
-                // RCB-101 fix: In WASM, taida_throw sets a flag instead of
-                // longjmp.  After taida_error_type_check_or_rethrow re-throws,
-                // the handler body must not continue — return immediately so
-                // the error propagates to the outer ceiling.
-                if name == "taida_error_type_check_or_rethrow" {
+                // In WASM, taida_throw sets a flag instead of longjmp. After
+                // a rethrow-capable call, the current function must not keep
+                // executing with a dummy value.
+                if name == "taida_error_type_check_or_rethrow"
+                    || name == "taida_generic_unmold"
+                    || name == "taida_throw"
+                {
                     writeln!(c, "{}if (taida_is_error_thrown()) return 0;", indent).unwrap();
                 }
             }

@@ -933,16 +933,32 @@ int64_t taida_list_unique_by(int64_t list_ptr, int64_t fn_ptr) {
     int64_t *nl_init = (int64_t *)(intptr_t)new_list;
     nl_init[2] = elem_tag;
     if (len == 0) return new_list;
+    /* F54B-016 (C2): dedup keys by STRUCTURE (was raw `==`), mirroring the
+       interpreter Unique[](by) path: a fingerprint seen-set while keys are
+       hashable, switching to a linear struct-eq scan once a non-hashable key
+       appears. `seen_keys` retains every emitted key so the fallback scan still
+       sees keys added during the hashable phase. Float/Bool key cross-type
+       equality stays out of scope here (value-tag limitation, tracked
+       separately). seen-set is bump-allocated (no free, matching seen_keys). */
     int64_t *seen_keys = (int64_t *)wasm_alloc((unsigned int)(len * 8));
     int64_t seen_count = 0;
+    _wasm_seen seen;
+    int use_hash = _wasm_seen_init(&seen, len);
+    int fallback = 0;
     for (int64_t i = 0; i < len; i++) {
         int64_t item = list[WASM_LIST_ELEMS + i];
         int64_t key = taida_invoke_callback1(fn_ptr, item);
-        int64_t found = 0;
-        for (int64_t j = 0; j < seen_count; j++) {
-            if (seen_keys[j] == key) { found = 1; break; }
+        int dup;
+        if (!fallback && use_hash && _wasm_value_hashable(key)) {
+            dup = !_wasm_seen_add(&seen, key);
+        } else {
+            fallback = 1;  /* a non-hashable key appeared: linear from now on */
+            dup = 0;
+            for (int64_t j = 0; j < seen_count; j++) {
+                if (_wasm_value_eq(seen_keys[j], key)) { dup = 1; break; }
+            }
         }
-        if (!found) {
+        if (!dup) {
             seen_keys[seen_count++] = key;
             new_list = taida_list_push(new_list, item);
         }
@@ -993,16 +1009,22 @@ int64_t taida_list_unique(int64_t list_ptr) {
     int64_t new_list = taida_list_new();
     int64_t *nl_init = (int64_t *)(intptr_t)new_list;
     nl_init[2] = elem_tag;
+    _wasm_seen seen;
+    int use_hash = _wasm_list_all_hashable(list) && _wasm_seen_init(&seen, len);
     for (int64_t i = 0; i < len; i++) {
         int64_t item = list[WASM_LIST_ELEMS + i];
-        /* Check if already in new_list */
-        int64_t *nl = (int64_t *)(intptr_t)new_list;
-        int64_t nlen = nl[1];
-        int64_t found = 0;
-        for (int64_t j = 0; j < nlen; j++) {
-            if (nl[WASM_LIST_ELEMS + j] == item) { found = 1; break; }
+        int dup;
+        if (use_hash) {
+            dup = !_wasm_seen_add(&seen, item);
+        } else {
+            int64_t *nl = (int64_t *)(intptr_t)new_list;
+            int64_t nlen = nl[1];
+            dup = 0;
+            for (int64_t j = 0; j < nlen; j++) {
+                if (_wasm_value_eq(nl[WASM_LIST_ELEMS + j], item)) { dup = 1; break; }
+            }
         }
-        if (!found) {
+        if (!dup) {
             new_list = taida_list_push(new_list, item);
         }
     }

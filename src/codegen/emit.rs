@@ -202,7 +202,9 @@ fn runtime_abi(name: &str) -> Result<RuntimeAbi, String> {
         // Note: taida_str_eq/neq は Ptr 比較だが、boxed I64 として渡すため Val として扱う。
         // taida_poly_eq/neq は動的ディスパッチで型不明なため Val として扱う。
         "taida_int_eq" | "taida_int_neq" | "taida_str_eq" | "taida_str_neq" | "taida_poly_eq"
-        | "taida_poly_neq" | "taida_int_lt" | "taida_int_gt" | "taida_int_gte" => RuntimeAbi {
+        | "taida_poly_neq" | "taida_int_lt" | "taida_int_gt" | "taida_int_gte"
+        | "taida_float_eq" | "taida_float_neq" | "taida_float_lt" | "taida_float_gt"
+        | "taida_float_lte" | "taida_float_gte" => RuntimeAbi {
             params: &[Val, Val],
             returns: &[Val],
         },

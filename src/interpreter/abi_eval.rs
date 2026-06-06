@@ -157,7 +157,7 @@ impl Interpreter {
 fn abi_response(status: i64, headers: Vec<(String, String)>, body: Vec<u8>) -> Value {
     Value::pack(vec![
         ("status".to_string(), Value::Int(clamp_status(status))),
-        ("headers".to_string(), header_map(headers)),
+        ("headers".to_string(), header_list(headers)),
         ("body".to_string(), Value::bytes(body)),
     ])
 }
@@ -204,33 +204,31 @@ fn invalid_header_response() -> Value {
     )
 }
 
-fn header_map(headers: Vec<(String, String)>) -> Value {
+fn header_list(headers: Vec<(String, String)>) -> Value {
     let entries = headers
         .into_iter()
-        .map(|(key, value)| {
+        .map(|(name, value)| {
             Value::pack(vec![
-                ("key".to_string(), Value::str(key)),
+                ("name".to_string(), Value::str(name)),
                 ("value".to_string(), Value::str(value)),
             ])
         })
         .collect();
-    Value::pack(vec![
-        ("__entries".to_string(), Value::list(entries)),
-        ("__type".to_string(), Value::str("HashMap".to_string())),
-    ])
+    Value::list(entries)
 }
 
 fn with_response_field(response: Value, field_name: &str, field_value: Value) -> Value {
     match response {
         Value::BuchiPack(fields) => {
-            let mut out = Vec::with_capacity(fields.len().max(3));
+            // COW: chained helper calls (`header(.., status(.., text(..)))`)
+            // hand us the only reference, so `pack_take` moves the fields
+            // out without cloning; shared packs fall back to a clone.
+            let mut out = Value::pack_take(fields);
             let mut replaced = false;
-            for (name, value) in fields.iter() {
+            for (name, value) in out.iter_mut() {
                 if name == field_name {
-                    out.push((name.clone(), field_value.clone()));
+                    *value = field_value.clone();
                     replaced = true;
-                } else {
-                    out.push((name.clone(), value.clone()));
                 }
             }
             if !replaced {
@@ -245,20 +243,24 @@ fn with_response_field(response: Value, field_name: &str, field_value: Value) ->
 fn add_response_header(response: Value, key: String, value: String) -> Value {
     match response {
         Value::BuchiPack(fields) => {
-            let mut out = Vec::with_capacity(fields.len().max(3));
-            let mut replaced = false;
-            for (name, field_value) in fields.iter() {
+            // COW: take ownership of the pack fields and append to the
+            // headers list in place. A `header(...)` chain of k calls is
+            // O(k) total — each link moves the uniquely-owned list and
+            // pushes one entry — instead of re-cloning the whole pack and
+            // headers list per link (O(k²)).
+            let mut out = Value::pack_take(fields);
+            let mut appended = false;
+            for (name, field_value) in out.iter_mut() {
                 if name == "headers" {
-                    out.push((name.clone(), append_header(field_value, &key, &value)));
-                    replaced = true;
-                } else {
-                    out.push((name.clone(), field_value.clone()));
+                    let headers = std::mem::replace(field_value, Value::default_list());
+                    *field_value = append_header(headers, &key, &value);
+                    appended = true;
                 }
             }
-            if !replaced {
+            if !appended {
                 out.push((
                     "headers".to_string(),
-                    header_map(vec![(key.clone(), value.clone())]),
+                    header_list(vec![(key.clone(), value.clone())]),
                 ));
             }
             Value::pack(out)
@@ -267,39 +269,14 @@ fn add_response_header(response: Value, key: String, value: String) -> Value {
     }
 }
 
-fn append_header(headers: &Value, key: &str, value: &str) -> Value {
-    if let Value::BuchiPack(fields) = headers
-        && let Some(Value::List(entries)) = fields
-            .iter()
-            .find(|(name, _)| name == "__entries")
-            .map(|(_, value)| value)
-    {
-        let mut next: Vec<Value> = entries
-            .as_ref()
-            .iter()
-            .filter(|entry| !header_entry_key_eq(entry, key))
-            .cloned()
-            .collect();
+fn append_header(headers: Value, key: &str, value: &str) -> Value {
+    if let Value::List(entries) = headers {
+        let mut next = Value::list_take(entries);
         next.push(Value::pack(vec![
-            ("key".to_string(), Value::str(key.to_string())),
+            ("name".to_string(), Value::str(key.to_string())),
             ("value".to_string(), Value::str(value.to_string())),
         ]));
-        return Value::pack(vec![
-            ("__entries".to_string(), Value::list(next)),
-            ("__type".to_string(), Value::str("HashMap".to_string())),
-        ]);
+        return Value::list(next);
     }
-    header_map(vec![(key.to_string(), value.to_string())])
-}
-
-fn header_entry_key_eq(entry: &Value, key: &str) -> bool {
-    if let Value::BuchiPack(fields) = entry
-        && let Some(Value::Str(existing)) = fields
-            .iter()
-            .find(|(name, _)| name == "key")
-            .map(|(_, value)| value)
-    {
-        return existing.as_str() == key;
-    }
-    false
+    header_list(vec![(key.to_string(), value.to_string())])
 }

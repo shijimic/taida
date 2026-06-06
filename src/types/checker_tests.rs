@@ -959,6 +959,38 @@ fn test_sha256_returns_str() {
 }
 
 #[test]
+fn test_sha256_accepts_bytes() {
+    let source = r#">>> taida-lang/crypto => @(sha256)
+rawLax <= Bytes[@[65, 66, 67]]()
+rawLax >=> raw
+h <= sha256(raw)"#;
+    let (checker, errors) = check(source);
+    assert!(
+        errors.is_empty(),
+        "sha256(Bytes) should type-check cleanly, got: {:?}",
+        errors
+    );
+    assert_eq!(checker.lookup_var("h"), Some(Type::Str));
+}
+
+#[test]
+fn test_sha256_rejects_non_hash_inputs() {
+    for source in [
+        ">>> taida-lang/crypto => @(sha256)\nh <= sha256(42)",
+        ">>> taida-lang/crypto => @(sha256)\nh <= sha256(@(x <= \"y\"))",
+        ">>> taida-lang/crypto => @(sha256)\nh <= sha256(sleep(1))",
+    ] {
+        let (_checker, errors) = check(source);
+        assert!(
+            errors.iter().any(|err| err.message.contains("[E1506]")
+                && err.message.contains("expected Str or Bytes")),
+            "sha256 should reject unsupported input, got: {:?}",
+            errors
+        );
+    }
+}
+
+#[test]
 fn test_range_returns_int_list() {
     let source = "nums <= range(1, 10)";
     let (checker, _errors) = check(source);

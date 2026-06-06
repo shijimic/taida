@@ -471,6 +471,166 @@ static wc_json_val *_wc_json_obj_get(wc_json_obj *obj, const char *key) {
     return (wc_json_val *)0;
 }
 
+static int64_t _wc_json_to_int(wc_json_val *jv);
+static int64_t _wc_json_to_str(wc_json_val *jv);
+
+static int _wc_json_schema_error = 0;
+static const char *_wc_json_schema_error_message = (const char *)0;
+
+static void _wc_json_schema_fail(const char *message) {
+    if (!_wc_json_schema_error) {
+        _wc_json_schema_error = 1;
+        _wc_json_schema_error_message = message ? message : "JSON schema decode failed";
+    }
+}
+
+static int64_t _wc_json_bytes_from_raw(const unsigned char *src, int len) {
+    int64_t list = taida_list_new();
+    taida_list_set_elem_tag(list, 0);
+    if (len < 0) len = 0;
+    for (int i = 0; i < len; i++) {
+        list = taida_list_push(list, src ? (int64_t)src[i] : 0);
+    }
+    return list;
+}
+
+static int _wc_b64_value(char c) {
+    if (c >= 'A' && c <= 'Z') return c - 'A';
+    if (c >= 'a' && c <= 'z') return 26 + (c - 'a');
+    if (c >= '0' && c <= '9') return 52 + (c - '0');
+    if (c == '+') return 62;
+    if (c == '/') return 63;
+    return -1;
+}
+
+static int64_t _wc_json_bytes_from_base64_string(const char *src) {
+    if (!src) return _wc_json_bytes_from_raw((const unsigned char *)"", 0);
+    int raw_len = _wf_strlen(src);
+    char *clean = (char *)wasm_alloc((unsigned int)(raw_len + 1));
+    int clen = 0;
+    for (int i = 0; i < raw_len; i++) {
+        char c = src[i];
+        if (c == ' ' || c == '\n' || c == '\r' || c == '\t') continue;
+        if (c != '=' && _wc_b64_value(c) < 0) {
+            _wc_json_schema_fail("JSON schema decode failed: invalid base64 character");
+            return _wc_json_bytes_from_raw((const unsigned char *)"", 0);
+        }
+        clean[clen++] = c;
+    }
+    clean[clen] = '\0';
+    if ((clen % 4) != 0) {
+        _wc_json_schema_fail("JSON schema decode failed: invalid base64 length");
+        return _wc_json_bytes_from_raw((const unsigned char *)"", 0);
+    }
+
+    unsigned char *out = (unsigned char *)wasm_alloc((unsigned int)((clen / 4) * 3 + 1));
+    int opos = 0;
+    for (int i = 0; i < clen; i += 4) {
+        char c0 = clean[i];
+        char c1 = clean[i + 1];
+        char c2 = clean[i + 2];
+        char c3 = clean[i + 3];
+        if (c0 == '=' || c1 == '=') {
+            _wc_json_schema_fail("JSON schema decode failed: invalid base64 padding");
+            return _wc_json_bytes_from_raw((const unsigned char *)"", 0);
+        }
+        int v0 = _wc_b64_value(c0);
+        int v1 = _wc_b64_value(c1);
+        int v2 = c2 == '=' ? 0 : _wc_b64_value(c2);
+        int v3 = c3 == '=' ? 0 : _wc_b64_value(c3);
+        if (v0 < 0 || v1 < 0 || v2 < 0 || v3 < 0) {
+            _wc_json_schema_fail("JSON schema decode failed: invalid base64 character");
+            return _wc_json_bytes_from_raw((const unsigned char *)"", 0);
+        }
+        if (c2 == '=' && c3 != '=') {
+            _wc_json_schema_fail("JSON schema decode failed: invalid base64 padding");
+            return _wc_json_bytes_from_raw((const unsigned char *)"", 0);
+        }
+        if ((c2 == '=' || c3 == '=') && i + 4 != clen) {
+            _wc_json_schema_fail("JSON schema decode failed: invalid base64 padding");
+            return _wc_json_bytes_from_raw((const unsigned char *)"", 0);
+        }
+        out[opos++] = (unsigned char)((v0 << 2) | (v1 >> 4));
+        if (c2 != '=') out[opos++] = (unsigned char)(((v1 & 15) << 4) | (v2 >> 2));
+        if (c3 != '=') out[opos++] = (unsigned char)(((v2 & 3) << 6) | v3);
+    }
+    return _wc_json_bytes_from_raw(out, opos);
+}
+
+static int64_t _wc_json_make_name_value_pair(wc_json_val *jval) {
+    int64_t pack = taida_pack_new(2);
+    taida_pack_set_hash(pack, 0, _wc_fnv1a("name", 4));
+    taida_pack_set_hash(pack, 1, _wc_fnv1a("value", 5));
+    wc_json_val *name_jv = (jval && jval->type == WC_JSON_OBJECT)
+        ? _wc_json_obj_get(jval->obj, "name")
+        : (wc_json_val *)0;
+    wc_json_val *value_jv = (jval && jval->type == WC_JSON_OBJECT)
+        ? _wc_json_obj_get(jval->obj, "value")
+        : (wc_json_val *)0;
+    taida_pack_set(pack, 0, _wc_json_to_str(name_jv));
+    taida_pack_set(pack, 1, _wc_json_to_str(value_jv));
+    return pack;
+}
+
+static int64_t _wc_json_name_value_list(wc_json_val *jval) {
+    int64_t list = taida_list_new();
+    taida_list_set_elem_tag(list, 4);
+    if (jval && jval->type == WC_JSON_ARRAY && jval->arr) {
+        for (int i = 0; i < jval->arr->count; i++) {
+            list = taida_list_push(list, _wc_json_make_name_value_pair(&jval->arr->items[i]));
+        }
+    }
+    return list;
+}
+
+static int64_t _wc_json_apply_web_request(wc_json_val *jval) {
+    int64_t pack = taida_pack_new(7);
+    taida_pack_set_hash(pack, 0, _wc_fnv1a("method", 6));
+    taida_pack_set_hash(pack, 1, _wc_fnv1a("path", 4));
+    taida_pack_set_hash(pack, 2, _wc_fnv1a("rawQuery", 8));
+    taida_pack_set_hash(pack, 3, _wc_fnv1a("query", 5));
+    taida_pack_set_hash(pack, 4, _wc_fnv1a("headers", 7));
+    taida_pack_set_hash(pack, 5, _wc_fnv1a("body", 4));
+    taida_pack_set_hash(pack, 6, _wc_fnv1a("__type", 6));
+
+    wc_json_obj *obj = (jval && jval->type == WC_JSON_OBJECT) ? jval->obj : (wc_json_obj *)0;
+    taida_pack_set(pack, 0, _wc_json_to_str(_wc_json_obj_get(obj, "method")));
+    taida_pack_set(pack, 1, _wc_json_to_str(_wc_json_obj_get(obj, "path")));
+    taida_pack_set(pack, 2, _wc_json_to_str(_wc_json_obj_get(obj, "rawQuery")));
+    taida_pack_set(pack, 3, _wc_json_name_value_list(_wc_json_obj_get(obj, "query")));
+    taida_pack_set(pack, 4, _wc_json_name_value_list(_wc_json_obj_get(obj, "headers")));
+    wc_json_val *body = _wc_json_obj_get(obj, "bodyBase64");
+    taida_pack_set(
+        pack,
+        5,
+        body && body->type == WC_JSON_STRING
+            ? _wc_json_bytes_from_base64_string(body->str_val)
+            : _wc_json_bytes_from_raw((const unsigned char *)"", 0));
+    taida_pack_set(pack, 6, (int64_t)(intptr_t)"WebRequest");
+    return pack;
+}
+
+static int64_t _wc_json_apply_web_response(wc_json_val *jval) {
+    int64_t pack = taida_pack_new(4);
+    taida_pack_set_hash(pack, 0, _wc_fnv1a("status", 6));
+    taida_pack_set_hash(pack, 1, _wc_fnv1a("headers", 7));
+    taida_pack_set_hash(pack, 2, _wc_fnv1a("body", 4));
+    taida_pack_set_hash(pack, 3, _wc_fnv1a("__type", 6));
+
+    wc_json_obj *obj = (jval && jval->type == WC_JSON_OBJECT) ? jval->obj : (wc_json_obj *)0;
+    taida_pack_set(pack, 0, _wc_json_to_int(_wc_json_obj_get(obj, "status")));
+    taida_pack_set(pack, 1, _wc_json_name_value_list(_wc_json_obj_get(obj, "headers")));
+    wc_json_val *body = _wc_json_obj_get(obj, "bodyBase64");
+    taida_pack_set(
+        pack,
+        2,
+        body && body->type == WC_JSON_STRING
+            ? _wc_json_bytes_from_base64_string(body->str_val)
+            : _wc_json_bytes_from_raw((const unsigned char *)"", 0));
+    taida_pack_set(pack, 3, (int64_t)(intptr_t)"WebResponse");
+    return pack;
+}
+
 /* ── Schema helpers ── */
 static int _wc_schema_find_closing_brace(const char *desc) {
     int depth = 1;
@@ -494,6 +654,21 @@ static int64_t _wc_json_default_value_for_desc(const char *desc) {
             return (int64_t)(intptr_t)empty;
         }
         case 'b': return 0;
+        case 'y': return _wc_json_bytes_from_raw((const unsigned char *)"", 0);
+        case 'Q': {
+            wc_json_val null_val;
+            null_val.type = WC_JSON_NULL;
+            null_val.str_val = (char *)0; null_val.arr = (wc_json_array *)0; null_val.obj = (wc_json_obj *)0;
+            null_val.int_val = 0; null_val.float_val = 0.0;
+            return _wc_json_apply_web_request(&null_val);
+        }
+        case 'R': {
+            wc_json_val null_val;
+            null_val.type = WC_JSON_NULL;
+            null_val.str_val = (char *)0; null_val.arr = (wc_json_array *)0; null_val.obj = (wc_json_obj *)0;
+            null_val.int_val = 0; null_val.float_val = 0.0;
+            return _wc_json_apply_web_response(&null_val);
+        }
         case 'T': {
             wc_json_val null_val;
             null_val.type = WC_JSON_NULL;
@@ -609,6 +784,25 @@ static int64_t _wc_json_apply_schema(wc_json_val *jval, const char **desc) {
             *desc = d + 1;
             if (!jval || jval->type == WC_JSON_NULL) return 0;
             return _wc_json_to_bool(jval);
+        }
+        case 'y': {
+            *desc = d + 1;
+            if (!jval || jval->type == WC_JSON_NULL) {
+                return _wc_json_bytes_from_raw((const unsigned char *)"", 0);
+            }
+            if (jval->type != WC_JSON_STRING) {
+                _wc_json_schema_fail("JSON schema decode failed: Bytes value must be a base64 string");
+                return _wc_json_bytes_from_raw((const unsigned char *)"", 0);
+            }
+            return _wc_json_bytes_from_base64_string(jval->str_val);
+        }
+        case 'Q': {
+            *desc = d + 1;
+            return _wc_json_apply_web_request(jval);
+        }
+        case 'R': {
+            *desc = d + 1;
+            return _wc_json_apply_web_response(jval);
         }
         case 'T': {
             if (d[1] != '{') { *desc = d + 1; return 0; }
@@ -733,8 +927,16 @@ int64_t taida_json_schema_cast(int64_t raw_ptr, int64_t schema_ptr) {
     }
 
     const char *desc = schema;
+    _wc_json_schema_error = 0;
+    _wc_json_schema_error_message = (const char *)0;
     int64_t result = _wc_json_apply_schema(&jval, &desc);
     int64_t def = _wc_json_default_value_for_desc(schema);
+    if (_wc_json_schema_error) {
+        const char *message = _wc_json_schema_error_message
+            ? _wc_json_schema_error_message
+            : "JSON schema decode failed";
+        return taida_lax_empty_error(def, taida_make_error_with_kind((int64_t)(intptr_t)"JsonError", (int64_t)(intptr_t)message, (int64_t)(intptr_t)"schema"));
+    }
     return taida_lax_new(result, def);
 }
 
@@ -889,6 +1091,13 @@ static void _wc_jb_ensure(_wc_json_buf *jb, int needed) {
 
 static void _wc_jb_append(_wc_json_buf *jb, const char *s) {
     int slen = _wf_strlen(s);
+    _wc_jb_ensure(jb, slen);
+    for (int i = 0; i < slen; i++) jb->buf[jb->len + i] = s[i];
+    jb->len += slen;
+    jb->buf[jb->len] = '\0';
+}
+
+static void _wc_jb_append_len(_wc_json_buf *jb, const char *s, int slen) {
     _wc_jb_ensure(jb, slen);
     for (int i = 0; i < slen; i++) jb->buf[jb->len + i] = s[i];
     jb->len += slen;
@@ -1223,6 +1432,203 @@ static void _wc_json_serialize_typed(_wc_json_buf *jb, int64_t val, int indent, 
     _wc_jb_append(jb, num);
 }
 
+static int _wc_wire_schema_desc_len(const char *d) {
+    int i = 0;
+    int depth = 0;
+    while (d[i]) {
+        if (depth == 0 && (d[i] == ',' || d[i] == '}')) break;
+        if (d[i] == '{') depth++;
+        else if (d[i] == '}') depth--;
+        i++;
+    }
+    return i;
+}
+
+static char *_wc_wire_schema_copy(const char *d, int len) {
+    char *out = (char *)wasm_alloc((unsigned int)(len + 1));
+    _wf_memcpy(out, d, len);
+    out[len] = '\0';
+    return out;
+}
+
+static int _wc_wire_bytes_len(int64_t value) {
+    if (_wc_looks_like_string(value)) return _wf_strlen((const char *)(intptr_t)value);
+    if (!_wc_looks_like_list(value)) return 0;
+    int64_t *list = (int64_t *)(intptr_t)value;
+    int64_t len = list[1];
+    if (len < 0) return 0;
+    if (len > 0x1000000) return 0x1000000;
+    return (int)len;
+}
+
+static unsigned char _wc_wire_bytes_at(int64_t value, int idx) {
+    if (_wc_looks_like_string(value)) {
+        const unsigned char *s = (const unsigned char *)(intptr_t)value;
+        return s ? s[idx] : 0;
+    }
+    if (!_wc_looks_like_list(value)) return 0;
+    int64_t *list = (int64_t *)(intptr_t)value;
+    return (unsigned char)(list[WASM_LIST_ELEMS + idx] & 0xff);
+}
+
+static char _wc_b64_char(int n) {
+    static const char table[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    return table[n & 63];
+}
+
+static void _wc_json_wire_append_base64(_wc_json_buf *jb, int64_t value) {
+    int len = _wc_wire_bytes_len(value);
+    for (int i = 0; i < len; i += 3) {
+        int rem = len - i;
+        unsigned int b0 = _wc_wire_bytes_at(value, i);
+        unsigned int b1 = rem > 1 ? _wc_wire_bytes_at(value, i + 1) : 0;
+        unsigned int b2 = rem > 2 ? _wc_wire_bytes_at(value, i + 2) : 0;
+        char out[4];
+        out[0] = _wc_b64_char((b0 >> 2) & 63);
+        out[1] = _wc_b64_char(((b0 & 3) << 4) | ((b1 >> 4) & 15));
+        out[2] = rem > 1 ? _wc_b64_char(((b1 & 15) << 2) | ((b2 >> 6) & 3)) : '=';
+        out[3] = rem > 2 ? _wc_b64_char(b2 & 63) : '=';
+        _wc_jb_append_len(jb, out, 4);
+    }
+}
+
+static void _wc_json_wire_serialize(_wc_json_buf *jb, int64_t val, const char *schema);
+
+static void _wc_json_wire_serialize_list(_wc_json_buf *jb, int64_t val, const char *inner) {
+    _wc_jb_append_char(jb, '[');
+    if (_wc_looks_like_list(val)) {
+        int64_t *list = (int64_t *)(intptr_t)val;
+        int64_t len = list[1];
+        if (len < 0 || len > 0x1000000) len = 0;
+        for (int64_t i = 0; i < len; i++) {
+            if (i > 0) _wc_jb_append_char(jb, ',');
+            _wc_json_wire_serialize(jb, list[WASM_LIST_ELEMS + i], inner);
+        }
+    }
+    _wc_jb_append_char(jb, ']');
+}
+
+static void _wc_json_wire_serialize_pack(_wc_json_buf *jb, int64_t val, const char *schema) {
+    const char *d = schema;
+    if (d[0] != 'T' || d[1] != '{') {
+        _wc_json_serialize_typed(jb, val, 0, 0, 0);
+        return;
+    }
+    d += 2;
+    while (*d && *d != '|') d++;
+    if (*d == '|') d++;
+
+    _wc_jb_append_char(jb, '{');
+    int first = 1;
+    while (*d && *d != '}') {
+        char fname[256];
+        int fn_len = 0;
+        while (*d && *d != ':' && *d != '}' && fn_len < 255) {
+            fname[fn_len++] = *d;
+            d++;
+        }
+        fname[fn_len] = '\0';
+        if (*d == ':') d++;
+        int desc_len = _wc_wire_schema_desc_len(d);
+        char *field_desc = _wc_wire_schema_copy(d, desc_len);
+        int64_t field_val = taida_pack_get(val, (int64_t)_wc_fnv1a(fname, fn_len));
+        if (!first) _wc_jb_append_char(jb, ',');
+        first = 0;
+        _wc_jb_append_escaped_str(jb, fname);
+        _wc_jb_append_char(jb, ':');
+        _wc_json_wire_serialize(jb, field_val, field_desc);
+        d += desc_len;
+        if (*d == ',') d++;
+    }
+    _wc_jb_append_char(jb, '}');
+}
+
+static void _wc_json_wire_serialize_web_request(_wc_json_buf *jb, int64_t val) {
+    int64_t method = taida_pack_get(val, (int64_t)_wc_fnv1a("method", 6));
+    int64_t path = taida_pack_get(val, (int64_t)_wc_fnv1a("path", 4));
+    int64_t raw_query = taida_pack_get(val, (int64_t)_wc_fnv1a("rawQuery", 8));
+    int64_t query = taida_pack_get(val, (int64_t)_wc_fnv1a("query", 5));
+    int64_t headers = taida_pack_get(val, (int64_t)_wc_fnv1a("headers", 7));
+    int64_t body = taida_pack_get(val, (int64_t)_wc_fnv1a("body", 4));
+
+    _wc_jb_append(jb, "{\"method\":");
+    _wc_json_wire_serialize(jb, method, "s");
+    _wc_jb_append(jb, ",\"path\":");
+    _wc_json_wire_serialize(jb, path, "s");
+    _wc_jb_append(jb, ",\"rawQuery\":");
+    _wc_json_wire_serialize(jb, raw_query, "s");
+    _wc_jb_append(jb, ",\"query\":");
+    _wc_json_wire_serialize(jb, query, "L{T{NameValue|name:s,value:s}}");
+    _wc_jb_append(jb, ",\"headers\":");
+    _wc_json_wire_serialize(jb, headers, "L{T{NameValue|name:s,value:s}}");
+    _wc_jb_append(jb, ",\"bodyBase64\":\"");
+    _wc_json_wire_append_base64(jb, body);
+    _wc_jb_append(jb, "\"}");
+}
+
+static void _wc_json_wire_serialize_web_response(_wc_json_buf *jb, int64_t val) {
+    int64_t status = taida_pack_get(val, (int64_t)_wc_fnv1a("status", 6));
+    int64_t headers = taida_pack_get(val, (int64_t)_wc_fnv1a("headers", 7));
+    int64_t body = taida_pack_get(val, (int64_t)_wc_fnv1a("body", 4));
+
+    _wc_jb_append(jb, "{\"status\":");
+    _wc_json_wire_serialize(jb, status, "i");
+    _wc_jb_append(jb, ",\"headers\":");
+    _wc_json_wire_serialize(jb, headers, "L{T{NameValue|name:s,value:s}}");
+    _wc_jb_append(jb, ",\"bodyBase64\":\"");
+    _wc_json_wire_append_base64(jb, body);
+    _wc_jb_append(jb, "\"}");
+}
+
+static void _wc_json_wire_serialize(_wc_json_buf *jb, int64_t val, const char *schema) {
+    if (!schema || !schema[0] || schema[0] == 'a') {
+        _wc_json_serialize_typed(jb, val, 0, 0, 0);
+        return;
+    }
+    switch (schema[0]) {
+        case 'i': _wc_json_serialize_typed(jb, val, 0, 0, 1); return;
+        case 'f': _wc_json_serialize_typed(jb, val, 0, 0, 2); return;
+        case 's': _wc_json_serialize_typed(jb, val, 0, 0, 3); return;
+        case 'b': _wc_json_serialize_typed(jb, val, 0, 0, 4); return;
+        case 'y':
+            _wc_jb_append_char(jb, '"');
+            _wc_json_wire_append_base64(jb, val);
+            _wc_jb_append_char(jb, '"');
+            return;
+        case 'Q':
+            _wc_json_wire_serialize_web_request(jb, val);
+            return;
+        case 'R':
+            _wc_json_wire_serialize_web_response(jb, val);
+            return;
+        case 'L': {
+            if (schema[1] != '{') {
+                _wc_json_wire_serialize_list(jb, val, "a");
+                return;
+            }
+            const char *inner_start = schema + 2;
+            int inner_len = _wc_schema_find_closing_brace(inner_start);
+            char *inner = _wc_wire_schema_copy(inner_start, inner_len);
+            _wc_json_wire_serialize_list(jb, val, inner);
+            return;
+        }
+        case 'T':
+            _wc_json_wire_serialize_pack(jb, val, schema);
+            return;
+        default:
+            _wc_json_serialize_typed(jb, val, 0, 0, 0);
+            return;
+    }
+}
+
+int64_t taida_json_encode_wire(int64_t value, int64_t schema_ptr) {
+    const char *schema = (const char *)(intptr_t)schema_ptr;
+    _wc_json_buf jb;
+    _wc_jb_init(&jb);
+    _wc_json_wire_serialize(&jb, value, schema);
+    return (int64_t)(intptr_t)jb.buf;
+}
+
 /* jsonEncode: serialize value as JSON (compact) */
 int64_t taida_json_encode(int64_t val) {
     _wc_json_buf jb;
@@ -1293,6 +1699,19 @@ int64_t taida_async_err(int64_t error) {
     return (int64_t)(intptr_t)obj;
 }
 
+int64_t taida_async_pending_with_error(int64_t error) {
+    int64_t *obj = (int64_t *)wasm_alloc(7 * 8);
+    if (!obj) return 0;
+    obj[0] = WASM_ASYNC_MAGIC;
+    obj[1] = 0;  /* pending */
+    obj[2] = 0;
+    obj[3] = error;
+    obj[4] = 0;
+    obj[5] = WASM_ASYNC_TAG_UNKNOWN;
+    obj[6] = WASM_TAG_PACK;
+    return (int64_t)(intptr_t)obj;
+}
+
 void taida_async_set_value_tag(int64_t async_ptr, int64_t tag) {
     if (!_wasm_is_async_obj(async_ptr)) return;
     ((int64_t *)(intptr_t)async_ptr)[5] = tag;
@@ -1311,6 +1730,9 @@ int64_t taida_async_unmold(int64_t async_ptr) {
             (int64_t)(intptr_t)"AsyncError",
             (int64_t)(intptr_t)"Async rejected");
         return taida_throw(err);
+    }
+    if (status == 0 && obj[3] != 0) {
+        return taida_throw(obj[3]);
     }
     return 0;  /* pending (should not happen in wasm-min) */
 }

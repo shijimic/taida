@@ -212,9 +212,7 @@ buildFrontend <= BuildHook(
 
 ## 6. ディスクリプタが有効な文脈
 
-ディスクリプタ値は以下の文脈でのみ有効です。それ以外でランタイム値として
-使う (`stdout(serverX)`、ユーザ関数引数への通常の受け渡し、`Str[serverX]()`
-など) と、型検査器またはビルドドライバが診断を出します。
+ディスクリプタ値は以下の文脈でのみ有効です。
 
 - トップレベル export (`<<< serverX`、`<<< plan`) による named artifact entrypoint
 - `BuildPlan.units`
@@ -223,6 +221,14 @@ buildFrontend <= BuildHook(
 - `BuildUnit.before` / `AssetBundle.before` / `BuildPlan.before`
 - ビルドドライバのディスクリプタ取り込み
 
+ビルドドライバはディスクリプタ取り込み時に shape・パス安全性・参照整合を
+検証し、違反を `[E19xx]` 系の診断として報告します (§1〜§5 の各
+Constraints を参照)。上記以外の文脈でランタイム値として使った場合
+(`stdout(serverX)` など)、ディスクリプタは `__type` フィールドを持つ
+通常のぶちパックとして見えます — 専用の reject 診断は現在ありません。
+ディスクリプタはビルドドライバ専用値として扱い、ランタイムロジックに
+混ぜないでください。
+
 ---
 
 ## 7. ターゲット別コア API 互換性
@@ -230,13 +236,13 @@ buildFrontend <= BuildHook(
 各 `BuildUnit` は `target` に応じて、依存閉包に含めて良いコア API を制限します。
 表にない外部パッケージは通常の依存解決とビルド対象バックエンドの能力に従います。
 
-| target | `taida-lang/os` | `taida-lang/net` | `taida-lang/abi` | `taida-lang/terminal` |
-|--------|-----------------|------------------|------------------|-----------------------|
-| `native` | 受理 | 受理 | 受理 | 受理 |
-| `wasm-min` | reject | reject | 受理 | reject |
-| `wasm-edge` | `EnvVar`, `allEnv` のみ受理 | reject | 受理 | reject |
-| `wasm-wasi` | `EnvVar`, `allEnv`, `Read`, `Exists`, `writeFile`, `readBytesAt` のみ受理 | reject | 受理 | reject |
-| `wasm-full` | `wasm-wasi` と同じ OS subset を受理 | reject | 受理 | reject |
+| target | `taida-lang/os` | `taida-lang/net` | `taida-lang/crypto` | `taida-lang/abi` | `taida-lang/terminal` |
+|--------|-----------------|------------------|----------------------|------------------|-----------------------|
+| `native` | 受理 | 受理 | `sha256` | 受理 | 受理 |
+| `wasm-min` | reject | reject | `sha256` | 受理 | reject |
+| `wasm-edge` | `EnvVar`, `allEnv` のみ受理 | reject | `sha256` | 受理 | reject |
+| `wasm-wasi` | `EnvVar`, `allEnv`, `Read`, `Exists`, `writeFile`, `readBytesAt` のみ受理 | reject | `sha256` | 受理 | reject |
+| `wasm-full` | `wasm-wasi` と同じ OS subset を受理 | reject | `sha256` | 受理 | reject |
 
 allow list は import 元のシンボル名で判定します。alias は判定を変えません。
 コア API import でシンボルリストが空の場合は package wildcard とみなし、
@@ -301,4 +307,4 @@ plan <= BuildPlan(
 | 関数 / 型 | Interpreter | Native | WASM |
 |-----------|-------------|--------|------|
 | ディスクリプタ式の評価 | 受理 | 受理 | 受理 |
-| ランタイム値としての使用 | reject (ディスクリプタのみ) | 同左 | 同左 |
+| ランタイム値としての使用 | 通常のぶちパックとして可視 (§6 参照、非推奨) | 同左 | 同左 |

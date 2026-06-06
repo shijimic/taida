@@ -176,31 +176,18 @@ impl Default for CoreBundledProvider {
 
 impl CoreBundledProvider {
     pub fn new() -> Self {
+        // F54: the known list is derived from the bundled package catalog
+        // so the resolver can never drift from the other layers.
         let mut known = BTreeMap::new();
-        known.insert(
-            ("taida-lang".to_string(), "os".to_string()),
-            "a.1".to_string(),
-        );
-        known.insert(
-            ("taida-lang".to_string(), "js".to_string()),
-            "a.1".to_string(),
-        );
-        known.insert(
-            ("taida-lang".to_string(), "crypto".to_string()),
-            "a.1".to_string(),
-        );
-        known.insert(
-            ("taida-lang".to_string(), "net".to_string()),
-            "a.1".to_string(),
-        );
-        known.insert(
-            ("taida-lang".to_string(), "pool".to_string()),
-            "a.1".to_string(),
-        );
-        known.insert(
-            ("taida-lang".to_string(), "abi".to_string()),
-            "a.1".to_string(),
-        );
+        for spec in super::catalog::BUNDLED_PACKAGES {
+            known.insert(
+                (
+                    super::catalog::BUNDLED_ORG.to_string(),
+                    spec.name.to_string(),
+                ),
+                spec.version.to_string(),
+            );
+        }
         CoreBundledProvider {
             known,
             bundled_root_override: None,
@@ -216,8 +203,10 @@ impl CoreBundledProvider {
     }
 
     /// Check if a package is a known core-bundled package.
+    /// Delegates to the bundled package catalog (F54): every layer that
+    /// needs the package set derives it from the same array.
     pub fn is_core_bundled(org: &str, name: &str) -> bool {
-        org == "taida-lang" && matches!(name, "os" | "js" | "crypto" | "net" | "pool" | "abi")
+        super::catalog::is_core_bundled(org, name)
     }
 
     /// materialize a core-bundled package on-demand even when
@@ -245,14 +234,9 @@ impl CoreBundledProvider {
             )));
         }
         let main_td = bundled_dir.join("main.td");
-        let source: &str = match name {
-            "os" => Self::os_package_source(),
-            "js" => Self::js_package_source(),
-            "crypto" => Self::crypto_package_source(),
-            "net" => Self::net_package_source(),
-            "pool" => Self::pool_package_source(),
-            "abi" => Self::abi_package_source(),
-            _ => return None,
+        let source: &str = match super::catalog::find(name) {
+            Some(spec) => spec.stub_source,
+            None => return None,
         };
         let needs_write = match std::fs::read_to_string(&main_td) {
             Ok(existing) => existing != source,
@@ -265,164 +249,6 @@ impl CoreBundledProvider {
             )));
         }
         Some(Ok(bundled_dir))
-    }
-
-    /// Generate the os package stub source.
-    fn os_package_source() -> &'static str {
-        r#"// taida-lang/os — Core bundled package
-//
-// Input APIs (molds -> Lax/Bool):
-//   Read[path]()       -- read file contents (64MB limit)
-//   ListDir[path]()    -- list directory entries
-//   Stat[path]()       -- file metadata (size, modified, isDir)
-//   Exists[path]()     -- existence check (returns Bool)
-//   EnvVar[name]()     -- environment variable (read-only)
-//
-// Binary file APIs:
-//   readBytes(path)                      -- read file as Bytes (64MB limit)
-//   readBytesAt(path, offset, len)       -- chunked read (C26B-020 柱 1)
-//   writeBytes(path, content)            -- write Bytes payload to file
-//
-// Side-effect APIs (functions -> Result):
-//   writeFile(path, content)    -- write file (create or overwrite)
-//   appendFile(path, content)   -- append to file
-//   remove(path)                -- remove file/directory
-//   createDir(path)             -- mkdir -p
-//   rename(from, to)            -- move/rename (atomic)
-//
-// Process APIs (functions -> Gorillax):
-//   run(program, args)          -- direct exec (safe, no shell) — captures stdout/stderr
-//   execShell(command)          -- shell exec (pipes, redirects) — captures stdout/stderr
-//     WARNING: Shell injection risk. Prefer run() for safety.
-//
-// Interactive process APIs (functions -> Gorillax[@(code: Int)], C19):
-//   runInteractive(program, args)  -- TTY passthrough, child inherits parent's stdin/stdout/stderr
-//   execShellInteractive(command)  -- TTY passthrough via `sh -c` (POSIX) / `cmd /C` (Windows)
-//     NOTE: stdout / stderr are NOT captured — only the exit code is observable.
-//     Intended for TUI apps (nvim, less, fzf, git commit). If you need to
-//     inspect output programmatically, use the captured `run` / `execShell`.
-//
-// Query APIs:
-//   allEnv()                    -- all env vars as HashMap[Str, Str]
-//   argv()                      -- CLI user args as @[Str]
-//
-// Async input APIs (molds -> Async[Lax[T]]):
-//   ReadAsync[path]()           -- async file read
-//   HttpGet[url]()              -- HTTP GET
-//   HttpPost[url, body]()       -- HTTP POST
-//   HttpRequest[method, url](...) -- generic HTTP request
-//
-// Async socket APIs (functions -> Async[Result/Lax]):
-//   tcpConnect(host, port[, timeoutMs])
-//   tcpListen(port[, timeoutMs])
-//   tcpAccept(listener[, timeoutMs])
-//   socketSend(socket, data[, timeoutMs])
-//   socketSendAll(socket, data[, timeoutMs])
-//   socketRecv(socket[, timeoutMs])
-//   socketSendBytes(socket, data[, timeoutMs])
-//   socketRecvBytes(socket[, timeoutMs])
-//   socketRecvExact(socket, size[, timeoutMs])
-//   udpBind(host, port[, timeoutMs])
-//   udpSendTo(socket, host, port, data[, timeoutMs])
-//   udpRecvFrom(socket[, timeoutMs])
-//   socketClose(socket)
-//   listenerClose(listener)
-//   udpClose(socket)            -- alias of socketClose
-
-<<< @(Read, ListDir, Stat, Exists, readBytes, readBytesAt, writeFile, writeBytes, appendFile, remove, createDir, rename, run, execShell, runInteractive, execShellInteractive, EnvVar, allEnv, argv, ReadAsync, HttpGet, HttpPost, HttpRequest, tcpConnect, tcpListen, tcpAccept, socketSend, socketSendAll, socketRecv, socketSendBytes, socketRecvBytes, socketRecvExact, udpBind, udpSendTo, udpRecvFrom, socketClose, listenerClose, udpClose)
-"#
-    }
-
-    /// Generate the js package stub source.
-    fn js_package_source() -> &'static str {
-        r#"// taida-lang/js — JS interop package (core bundled)
-// JSRilla[Out] subfamily of CageRilla[Branch, Out] for Cage[subject, JSRilla[...]()]() boundaries.
-// canonical: Cage[subject, JSNew[@["Hono"], @[], Molten]()]() >=> app
-// All descriptors are JS-backend only. Interpreter/Native will error.
-
-<<< @(JSGet, JSCall, JSCallAsync, JSNew, JSSet, JSBind, JSSpread)
-"#
-    }
-
-    /// Generate the crypto package stub source.
-    fn crypto_package_source() -> &'static str {
-        r#"// taida-lang/crypto — Core bundled crypto package
-// Current surface:
-//   sha256(value) -- SHA-256 lower-hex digest
-//
-// Note:
-//   `sha256` is exposed via taida-lang/crypto import path only.
-//   Prelude compatibility is intentionally not provided.
-
-<<< @(sha256)
-"#
-    }
-
-    /// Generate the net package stub source.
-    fn net_package_source() -> &'static str {
-        r#"// taida-lang/net — Core bundled network package
-// HTTP server/runtime surface only.
-// Low-level socket / DNS APIs live in taida-lang/os.
-//
-// HTTP surface:
-//   httpServe, httpParseRequestHead, httpEncodeResponse, readBody
-//   startResponse, writeChunk, endResponse, sseEvent
-//   readBodyChunk, readBodyAll
-//   wsUpgrade, wsSend, wsReceive, wsClose, wsCloseCode
-//   HttpProtocol
-//
-// TI-21 contract notes:
-//   TLS verification on Http* uses backend default trust store (no insecure -k path)
-//   Protocol/runtime details remain behind httpServe contract
-//   Legacy tcp*/udp*/dnsResolve re-exports were removed after HTTP/3 package freeze
-
-Enum => HttpProtocol = :H1 :H2 :H3
-
-<<< @(httpServe, httpParseRequestHead, httpEncodeResponse, readBody, startResponse, writeChunk, endResponse, sseEvent, readBodyChunk, readBodyAll, wsUpgrade, wsSend, wsReceive, wsClose, wsCloseCode, HttpProtocol)
-"#
-    }
-
-    /// Generate the pool package stub source.
-    fn pool_package_source() -> &'static str {
-        r#"// taida-lang/pool — Core bundled pool package (contract stub)
-// TI-22 minimal contract (official upper package):
-//   poolCreate(config) -> Result[@(pool)]
-//   poolAcquire(pool[, timeoutMs]) -> Async[Result[@(resource, token), _]]
-//   poolRelease(pool, token, resource) -> Result[@(ok, reused)]
-//   poolClose(pool) -> Async[Result[@(ok), _]]
-//   poolHealth(pool) -> @(open, idle, inUse, waiting)
-//
-// Implementation note:
-//   Minimal in-memory pool runtime is provided by core backends.
-//   Driver-level connect/validate policy is delegated to upper libraries.
-
-<<< @(poolCreate, poolAcquire, poolRelease, poolClose, poolHealth)
-"#
-    }
-
-    /// Generate the abi package stub source.
-    fn abi_package_source() -> &'static str {
-        r#"// taida-lang/abi — Core bundled request/response ABI package
-// Handler-mode surface:
-//   WebRequest, WebResponse
-//   text, json, bytes, status, header
-
-WebRequest = @(
-  method: Str,
-  path: Str,
-  query: HashMap[Str, Str],
-  headers: HashMap[Str, Str],
-  body: Bytes
-)
-
-WebResponse = @(
-  status: Int,
-  headers: HashMap[Str, Str],
-  body: Bytes
-)
-
-<<< @(WebRequest, WebResponse, text, json, bytes, status, header)
-"#
     }
 
     /// Get the global bundled directory (`~/.taida/bundled/`).
@@ -443,14 +269,9 @@ WebResponse = @(
 
         // Write the package source file
         let main_td = bundled_dir.join("main.td");
-        let source = match pkg_name {
-            "os" => Self::os_package_source(),
-            "js" => Self::js_package_source(),
-            "crypto" => Self::crypto_package_source(),
-            "net" => Self::net_package_source(),
-            "pool" => Self::pool_package_source(),
-            "abi" => Self::abi_package_source(),
-            _ => "// Unknown core-bundled package\n",
+        let source = match super::catalog::find(pkg_name) {
+            Some(spec) => spec.stub_source,
+            None => "// Unknown core-bundled package\n",
         };
         let needs_write = match std::fs::read_to_string(&main_td) {
             Ok(existing) => existing != source,
@@ -1676,16 +1497,26 @@ mod tests {
 
     #[test]
     fn test_is_core_bundled() {
-        assert!(CoreBundledProvider::is_core_bundled("taida-lang", "os"));
-        assert!(CoreBundledProvider::is_core_bundled("taida-lang", "js"));
-        assert!(CoreBundledProvider::is_core_bundled("taida-lang", "crypto"));
-        assert!(CoreBundledProvider::is_core_bundled("taida-lang", "net"));
-        assert!(CoreBundledProvider::is_core_bundled("taida-lang", "pool"));
+        // F54 (D-5 fix): assert every catalog entry instead of a manual
+        // five-package list that silently missed `abi` (and would have
+        // missed `build`). The provider delegates to the catalog, so the
+        // two can no longer diverge, but this pins the delegation itself.
+        for spec in crate::pkg::catalog::BUNDLED_PACKAGES {
+            assert!(
+                CoreBundledProvider::is_core_bundled("taida-lang", spec.name),
+                "is_core_bundled must accept '{}'",
+                spec.name
+            );
+        }
         assert!(!CoreBundledProvider::is_core_bundled(
             "taida-community",
             "os"
         ));
         assert!(!CoreBundledProvider::is_core_bundled("taida-lang", "http"));
+        assert!(!CoreBundledProvider::is_core_bundled(
+            "taida-lang",
+            "terminal"
+        ));
     }
 
     #[test]
@@ -1767,9 +1598,13 @@ mod tests {
         };
 
         let provider = CoreBundledProvider::with_bundled_root(dir.join("bundled"));
+        // F54 (D-4 / F54B-005 fix): the net token used to be "dnsResolve",
+        // which only survives inside a stub COMMENT describing its removal —
+        // the test was green for a symbol that is not exported. Use a real
+        // export; the structural export-line check lives in catalog tests.
         for (pkg, expected_token) in [
             ("crypto", "sha256"),
-            ("net", "dnsResolve"),
+            ("net", "httpServe"),
             ("pool", "poolAcquire"),
         ] {
             let dep = Dependency::Registry {

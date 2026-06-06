@@ -1826,6 +1826,9 @@ fn wasm_handler_export_flags(handler_mode: bool) -> Vec<&'static str> {
         vec![
             "--export-memory",
             "--export=taida_abi_web_alloc",
+            "--export=taida_abi_web_start",
+            "--export=taida_abi_web_poll",
+            "--export=taida_abi_web_resume",
             "--export=taida_abi_web_handle",
             "--export=taida_abi_web_out_ptr",
             "--export=taida_abi_web_out_len",
@@ -1837,7 +1840,9 @@ fn wasm_handler_export_flags(handler_mode: bool) -> Vec<&'static str> {
 }
 
 fn wasm_needs_abi_web_runtime(generated_c: &str, handler_mode: bool) -> bool {
-    handler_mode || generated_c.contains("taida_abi_response_")
+    handler_mode
+        || generated_c.contains("taida_abi_response_")
+        || generated_c.contains("taida_abi_host_")
 }
 
 fn handler_link_symbol(input_path: &Path, handler_name: &str) -> Result<String, CompileError> {
@@ -1876,11 +1881,18 @@ extern int64_t taida_error_ceiling_push(void);
 extern void taida_error_ceiling_pop(void);
 extern int64_t taida_error_try_call(int64_t fn_ptr, int64_t env_ptr, int64_t depth);
 extern int64_t taida_error_try_get_result(int64_t depth);
+extern int64_t taida_error_get_value(int64_t depth);
 extern int64_t taida_abi_web_make_request(int32_t ptr, int32_t len);
 extern int32_t taida_abi_web_begin_request(int32_t ptr, int32_t len);
 extern int32_t taida_abi_web_validate_request(int32_t ptr, int32_t len);
 extern int64_t taida_abi_web_store_response_json(int64_t response);
 extern int64_t taida_abi_web_store_error_response_json(int64_t status, int64_t message_ptr);
+extern int32_t taida_abi_web_is_host_call_pending_error(int64_t error);
+extern int64_t taida_abi_web_store_pending_host_call_json(int32_t ptr, int32_t len);
+extern int32_t taida_abi_web_resume_begin(int64_t handle, int32_t ptr, int32_t len);
+extern int32_t taida_abi_web_resume_request_ptr(int64_t handle);
+extern int32_t taida_abi_web_resume_request_len(int64_t handle);
+extern void taida_abi_web_replace_handle(int64_t dst_handle, int64_t src_handle);
 
 int64_t taida_abi_web_handle(int32_t ptr, int32_t len) {{
     taida_abi_web_begin_request(ptr, len);
@@ -1891,12 +1903,30 @@ int64_t taida_abi_web_handle(int32_t ptr, int32_t len) {{
     int64_t depth = taida_error_ceiling_push();
     int64_t thrown = taida_error_try_call((int64_t)(intptr_t)&{handler_symbol}, request, depth);
     if (thrown) {{
+        int64_t error = taida_error_get_value(depth);
+        if (taida_abi_web_is_host_call_pending_error(error)) {{
+            taida_error_ceiling_pop();
+            return taida_abi_web_store_pending_host_call_json(ptr, len);
+        }}
         taida_error_ceiling_pop();
         return taida_abi_web_store_error_response_json(500, (int64_t)(intptr_t)"handler throw");
     }}
     int64_t response = taida_error_try_get_result(depth);
     taida_error_ceiling_pop();
     return taida_abi_web_store_response_json(response);
+}}
+
+int64_t taida_abi_web_start(int32_t ptr, int32_t len) {{
+    return taida_abi_web_handle(ptr, len);
+}}
+
+void taida_abi_web_resume(int64_t handle, int32_t ptr, int32_t len) {{
+    if (!taida_abi_web_resume_begin(handle, ptr, len)) return;
+    int32_t req_ptr = taida_abi_web_resume_request_ptr(handle);
+    int32_t req_len = taida_abi_web_resume_request_len(handle);
+    if (!req_ptr || req_len < 0) return;
+    int64_t next = taida_abi_web_handle(req_ptr, req_len);
+    taida_abi_web_replace_handle(handle, next);
 }}
 "#,
         handler_symbol = handler_symbol

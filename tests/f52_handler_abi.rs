@@ -38,20 +38,23 @@ fn f52_interpreter_response_helpers_construct_meaningful_values() {
 >>> taida-lang/crypto => @(sha256)
 
 textResponse <= header("x-mode", "interp", status(202, text("hello")))
-stdout(textResponse.status.toString() + ":" + textResponse.headers.get("x-mode").getOrDefault("") + ":" + sha256(textResponse.body))
+textMode <= textResponse.headers.get(1).getOrDefault(@(name <= "", value <= "")).value
+stdout(textResponse.status.toString() + ":" + textMode + ":" + sha256(textResponse.body))
 
 jsonResponse <= json(@(ok <= "yes"))
-stdout(jsonResponse.headers.get("content-type").getOrDefault(""))
+stdout(jsonResponse.headers.get(0).getOrDefault(@(name <= "", value <= "")).value)
 
 Bytes["Hi"]() >=> raw
 bytesResponse <= bytes(raw)
-stdout(bytesResponse.headers.get("content-type").getOrDefault("") + ":" + sha256(bytesResponse.body))
+stdout(bytesResponse.headers.get(0).getOrDefault(@(name <= "", value <= "")).value + ":" + sha256(bytesResponse.body))
 
 dupResponse <= header("x-mode", "second", header("x-mode", "first", status(99, text("dup"))))
-stdout(dupResponse.status.toString() + ":" + dupResponse.headers.get("x-mode").getOrDefault(""))
+dupFirst <= dupResponse.headers.get(1).getOrDefault(@(name <= "", value <= "")).value
+dupSecond <= dupResponse.headers.get(2).getOrDefault(@(name <= "", value <= "")).value
+stdout(dupResponse.status.toString() + ":" + dupFirst + ":" + dupSecond)
 
 badHeader <= header("bad\r\nname", "value", text("bad"))
-stdout(badHeader.status.toString() + ":" + badHeader.headers.get("x-taida-error").getOrDefault(""))
+stdout(badHeader.status.toString() + ":" + badHeader.headers.get(0).getOrDefault(@(name <= "", value <= "")).value)
 "#;
 
     let stem = format!("taida_f52_interp_{}", std::process::id());
@@ -78,8 +81,8 @@ stdout(badHeader.status.toString() + ":" + badHeader.headers.get("x-taida-error"
         out
     );
     assert!(
-        out.contains("100:second"),
-        "status clamp or header overwrite mismatch: {}",
+        out.contains("100:first:second"),
+        "status clamp or duplicate header append mismatch: {}",
         out
     );
     assert!(
@@ -135,17 +138,23 @@ const fs = require("fs");
   }}
   const encoder = new TextEncoder();
   const decoder = new TextDecoder();
+  if (typeof instance.exports.taida_abi_web_start !== "function") throw new Error("missing start export");
+  if (typeof instance.exports.taida_abi_web_poll !== "function") throw new Error("missing poll export");
+  if (typeof instance.exports.taida_abi_web_resume !== "function") throw new Error("missing resume export");
   const payload = encoder.encode(JSON.stringify({{
     method: "POST",
     path: "{path}",
-    query: {{ q: "search" }},
-    headers: {{ "x-mode": "edge" }},
+    rawQuery: "q=search",
+    query: [{{ name: "q", value: "search" }}],
+    headers: [{{ name: "x-mode", value: "edge" }}],
     bodyBase64: "{body_base64}",
   }}));
   const inPtr = instance.exports.taida_abi_web_alloc(payload.length);
   if (!inPtr) throw new Error("alloc failed");
   new Uint8Array(memory.buffer, inPtr, payload.length).set(payload);
-  const handle = instance.exports.taida_abi_web_handle(inPtr, payload.length);
+  const handle = instance.exports.taida_abi_web_start(inPtr, payload.length);
+  const poll = instance.exports.taida_abi_web_poll(handle);
+  if (poll !== 0) throw new Error("unexpected poll state " + poll);
   const outPtr = instance.exports.taida_abi_web_out_ptr(handle);
   const outLen = instance.exports.taida_abi_web_out_len(handle);
   const raw = decoder.decode(new Uint8Array(memory.buffer, outPtr, outLen));
@@ -262,11 +271,16 @@ const fs = require("fs");
   }}
   const encoder = new TextEncoder();
   const decoder = new TextDecoder();
+  if (typeof instance.exports.taida_abi_web_start !== "function") throw new Error("missing start export");
+  if (typeof instance.exports.taida_abi_web_poll !== "function") throw new Error("missing poll export");
+  if (typeof instance.exports.taida_abi_web_resume !== "function") throw new Error("missing resume export");
   const payload = encoder.encode({request_literal});
   const inPtr = instance.exports.taida_abi_web_alloc(payload.length);
   if (!inPtr) throw new Error("alloc failed");
   new Uint8Array(memory.buffer, inPtr, payload.length).set(payload);
-  const handle = instance.exports.taida_abi_web_handle(inPtr, payload.length);
+  const handle = instance.exports.taida_abi_web_start(inPtr, payload.length);
+  const poll = instance.exports.taida_abi_web_poll(handle);
+  if (poll !== 0) throw new Error("unexpected poll state " + poll);
   const outPtr = instance.exports.taida_abi_web_out_ptr(handle);
   const outLen = instance.exports.taida_abi_web_out_len(handle);
   const raw = decoder.decode(new Uint8Array(memory.buffer, outPtr, outLen));
@@ -420,6 +434,27 @@ fn response_body_text(value: &serde_json::Value) -> String {
     String::from_utf8(bytes).expect("response body must be utf-8")
 }
 
+fn response_header_values(value: &serde_json::Value, name: &str) -> Vec<String> {
+    value["headers"]
+        .as_array()
+        .unwrap_or_else(|| panic!("response headers must be an array: {value}"))
+        .iter()
+        .filter_map(|header| {
+            let header_name = header["name"].as_str()?;
+            let header_value = header["value"].as_str()?;
+            if header_name.eq_ignore_ascii_case(name) {
+                Some(header_value.to_string())
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+fn response_header_value(value: &serde_json::Value, name: &str) -> Option<String> {
+    response_header_values(value, name).into_iter().next()
+}
+
 #[test]
 fn f52_wasm_profiles_share_handler_json_fixture() {
     if !node_available() {
@@ -427,13 +462,15 @@ fn f52_wasm_profiles_share_handler_json_fixture() {
         return;
     }
 
-    let source = r#">>> taida-lang/abi => @(WebRequest, WebResponse, text, bytes)
+    let source = r#">>> taida-lang/abi => @(WebRequest, WebResponse, text, bytes, header)
 
 handle req: WebRequest =
   | req.path == "/bytes" |> bytes(req.body)
   | req.path == "/body-info" |> text(req.body.length().toString() + ":" + req.body.get(1).getOrDefault(0).toString())
+  | req.path == "/pairs" |> text(req.rawQuery + ":" + req.query.get(0).getOrDefault(@(name <= "", value <= "")).value + "," + req.query.get(1).getOrDefault(@(name <= "", value <= "")).value + "," + req.query.get(2).getOrDefault(@(name <= "", value <= "")).value + ":" + req.headers.get(0).getOrDefault(@(name <= "", value <= "")).value + "," + req.headers.get(1).getOrDefault(@(name <= "", value <= "")).value)
+  | req.path == "/cookies" |> header("set-cookie", "b=2", header("set-cookie", "a=1", text("cookies")))
   | req.path == "/bare-throw" |> throw("secret-token-xyz")
-  | _ |> text(req.method + ":" + req.path + ":" + req.query.get("q").getOrDefault("") + ":" + req.headers.get("x-mode").getOrDefault(""))
+  | _ |> text(req.method + ":" + req.path + ":" + req.query.get(0).getOrDefault(@(name <= "", value <= "")).value + ":" + req.headers.get(0).getOrDefault(@(name <= "", value <= "")).value)
 => :WebResponse
 "#;
 
@@ -483,13 +520,33 @@ handle req: WebRequest =
         let value = run_handler_with_node_raw_request(
             &wasm_path,
             target,
-            r#"{"method":"POST","path":"/caf\u00e9","query":{"q":"\u6771"},"headers":{"x-mode":"\u30a8\u30c3\u30b8"},"bodyBase64":""}"#,
+            r#"{"method":"POST","path":"/caf\u00e9","rawQuery":"q=%E6%9D%B1","query":[{"name":"q","value":"\u6771"}],"headers":[{"name":"x-mode","value":"\u30a8\u30c3\u30b8"}],"bodyBase64":""}"#,
         )
         .unwrap_or_else(|| panic!("{} handler unicode host should run", target));
         assert_eq!(
             response_body_text(&value),
             "POST:/café:東:エッジ",
             "target={} must decode JSON unicode escapes as UTF-8",
+            target
+        );
+        let value = run_handler_with_node_raw_request(
+            &wasm_path,
+            target,
+            r#"{"method":"GET","path":"/pairs","rawQuery":"tag=a&tag=b&tag=c","query":[{"name":"tag","value":"a"},{"name":"tag","value":"b"},{"name":"tag","value":"c"}],"headers":[{"name":"x-repeat","value":"a"},{"name":"x-repeat","value":"b"}],"bodyBase64":""}"#,
+        )
+        .unwrap_or_else(|| panic!("{} handler duplicate pair host should run", target));
+        assert_eq!(
+            response_body_text(&value),
+            "tag=a&tag=b&tag=c:a,b,c:a,b",
+            "target={} must preserve duplicate query/header pair order",
+            target
+        );
+        let value = run_handler_with_node_response(&wasm_path, target, "/cookies", "")
+            .unwrap_or_else(|| panic!("{} handler duplicate response headers should run", target));
+        assert_eq!(
+            response_header_values(&value["response"], "set-cookie"),
+            vec!["a=1".to_string(), "b=2".to_string()],
+            "target={} must preserve duplicate response header fields",
             target
         );
         let value = run_handler_with_node_response(&wasm_path, target, "/bare-throw", "")
@@ -510,12 +567,14 @@ handle req: WebRequest =
 
 #[test]
 fn f52_native_handler_decodes_request_body_bytes() {
-    let source = r#">>> taida-lang/abi => @(WebRequest, WebResponse, text)
+    let source = r#">>> taida-lang/abi => @(WebRequest, WebResponse, text, header)
 >>> taida-lang/crypto => @(sha256)
 
 handle req: WebRequest =
   | req.path == "/body-info" |> text(req.body.length().toString() + ":" + req.body.get(1).getOrDefault(0).toString())
-  | _ |> text(req.method + ":" + req.path + ":" + req.query.get("q").getOrDefault("") + ":" + req.headers.get("x-mode").getOrDefault("") + ":" + sha256(req.body))
+  | req.path == "/pairs" |> text(req.rawQuery + ":" + req.query.get(0).getOrDefault(@(name <= "", value <= "")).value + "," + req.query.get(1).getOrDefault(@(name <= "", value <= "")).value + "," + req.query.get(2).getOrDefault(@(name <= "", value <= "")).value + ":" + req.headers.get(0).getOrDefault(@(name <= "", value <= "")).value + "," + req.headers.get(1).getOrDefault(@(name <= "", value <= "")).value)
+  | req.path == "/cookies" |> header("set-cookie", "b=2", header("set-cookie", "a=1", text("cookies")))
+  | _ |> text(req.method + ":" + req.path + ":" + req.query.get(0).getOrDefault(@(name <= "", value <= "")).value + ":" + req.headers.get(0).getOrDefault(@(name <= "", value <= "")).value + ":" + sha256(req.body))
 => :WebResponse
 "#;
 
@@ -535,7 +594,7 @@ handle req: WebRequest =
     );
     let raw = run_handler_native(
         &bin_path,
-        br#"{"method":"POST","path":"/f52","query":{"q":"search"},"headers":{"x-mode":"native"},"bodyBase64":"cGF5bG9hZA=="}"#,
+        br#"{"method":"POST","path":"/f52","rawQuery":"q=search","query":[{"name":"q","value":"search"}],"headers":[{"name":"x-mode","value":"native"}],"bodyBase64":"cGF5bG9hZA=="}"#,
     )
     .expect("native handler should run");
     let json = response_json(&raw);
@@ -548,11 +607,35 @@ handle req: WebRequest =
     );
     let raw = run_handler_native(
         &bin_path,
-        br#"{"method":"POST","path":"/body-info","query":{},"headers":{},"bodyBase64":"QQBD"}"#,
+        br#"{"method":"POST","path":"/body-info","rawQuery":"","query":[],"headers":[],"bodyBase64":"QQBD"}"#,
     )
     .expect("native body-info handler should run");
     let json = response_json(&raw);
     assert_eq!(response_body_text(&json), "3:0");
+
+    let raw = run_handler_native(
+        &bin_path,
+        br#"{"method":"GET","path":"/pairs","rawQuery":"tag=a&tag=b&tag=c","query":[{"name":"tag","value":"a"},{"name":"tag","value":"b"},{"name":"tag","value":"c"}],"headers":[{"name":"x-repeat","value":"a"},{"name":"x-repeat","value":"b"}],"bodyBase64":""}"#,
+    )
+    .expect("native pair-list handler should run");
+    let json = response_json(&raw);
+    assert_eq!(
+        response_body_text(&json),
+        "tag=a&tag=b&tag=c:a,b,c:a,b",
+        "native bridge must preserve duplicate query/header pair order"
+    );
+
+    let raw = run_handler_native(
+        &bin_path,
+        br#"{"method":"GET","path":"/cookies","rawQuery":"","query":[],"headers":[],"bodyBase64":""}"#,
+    )
+    .expect("native duplicate response header handler should run");
+    let json = response_json(&raw);
+    assert_eq!(
+        response_header_values(&json, "set-cookie"),
+        vec!["a=1".to_string(), "b=2".to_string()],
+        "native bridge must preserve duplicate response header fields"
+    );
 
     let _ = std::fs::remove_file(&td_path);
     let _ = std::fs::remove_file(&bin_path);
@@ -562,7 +645,7 @@ handle req: WebRequest =
 fn f52_native_handler_decodes_unicode_escapes() {
     let source = r#">>> taida-lang/abi => @(WebRequest, WebResponse, text)
 
-handle req: WebRequest = text(req.path + ":" + req.query.get("q").getOrDefault("") + ":" + req.headers.get("x-mode").getOrDefault("")) => :WebResponse
+handle req: WebRequest = text(req.path + ":" + req.query.get(0).getOrDefault(@(name <= "", value <= "")).value + ":" + req.headers.get(0).getOrDefault(@(name <= "", value <= "")).value) => :WebResponse
 "#;
 
     let stem = format!("taida_f52_native_unicode_{}", std::process::id());
@@ -581,7 +664,7 @@ handle req: WebRequest = text(req.path + ":" + req.query.get("q").getOrDefault("
     );
     let raw = run_handler_native(
         &bin_path,
-        br#"{"method":"POST","path":"/caf\u00e9","query":{"q":"\u6771"},"headers":{"x-mode":"\u30a8\u30c3\u30b8"},"bodyBase64":""}"#,
+        br#"{"method":"POST","path":"/caf\u00e9","rawQuery":"q=%E6%9D%B1","query":[{"name":"q","value":"\u6771"}],"headers":[{"name":"x-mode","value":"\u30a8\u30c3\u30b8"}],"bodyBase64":""}"#,
     )
     .expect("native unicode handler should run");
     let json = response_json(&raw);
@@ -626,7 +709,7 @@ handle req: WebRequest =
 
     let stdout_raw = run_handler_native(
         &bin_path,
-        br#"{"method":"GET","path":"/stdout","query":{},"headers":{},"bodyBase64":""}"#,
+        br#"{"method":"GET","path":"/stdout","rawQuery":"","query":[],"headers":[],"bodyBase64":""}"#,
     )
     .expect("native stdout handler should run");
     let stdout_json = response_json(&stdout_raw);
@@ -635,13 +718,13 @@ handle req: WebRequest =
 
     let throw_raw = run_handler_native(
         &bin_path,
-        br#"{"method":"GET","path":"/throw","query":{},"headers":{},"bodyBase64":""}"#,
+        br#"{"method":"GET","path":"/throw","rawQuery":"","query":[],"headers":[],"bodyBase64":""}"#,
     )
     .expect("native throw handler should run");
     let throw_json = response_json(&throw_raw);
     assert_eq!(throw_json["status"].as_i64(), Some(500));
     assert_eq!(
-        throw_json["headers"]["x-taida-error"].as_str(),
+        response_header_value(&throw_json, "x-taida-error").as_deref(),
         Some("handler-throw")
     );
     let throw_body = base64::engine::general_purpose::STANDARD
@@ -656,33 +739,33 @@ handle req: WebRequest =
 
     let bare_throw_raw = run_handler_native(
         &bin_path,
-        br#"{"method":"GET","path":"/bare-throw","query":{},"headers":{},"bodyBase64":""}"#,
+        br#"{"method":"GET","path":"/bare-throw","rawQuery":"","query":[],"headers":[],"bodyBase64":""}"#,
     )
     .expect("native bare throw handler should run");
     let bare_throw_json = response_json(&bare_throw_raw);
     assert_eq!(bare_throw_json["status"].as_i64(), Some(500));
     assert_eq!(
-        bare_throw_json["headers"]["x-taida-error"].as_str(),
+        response_header_value(&bare_throw_json, "x-taida-error").as_deref(),
         Some("handler-throw")
     );
     assert_eq!(response_body_text(&bare_throw_json), "handler throw");
 
     let status_raw = run_handler_native(
         &bin_path,
-        br#"{"method":"GET","path":"/status","query":{},"headers":{},"bodyBase64":""}"#,
+        br#"{"method":"GET","path":"/status","rawQuery":"","query":[],"headers":[],"bodyBase64":""}"#,
     )
     .expect("native status handler should run");
     assert_eq!(response_json(&status_raw)["status"].as_i64(), Some(599));
 
     let header_raw = run_handler_native(
         &bin_path,
-        br#"{"method":"GET","path":"/header","query":{},"headers":{},"bodyBase64":""}"#,
+        br#"{"method":"GET","path":"/header","rawQuery":"","query":[],"headers":[],"bodyBase64":""}"#,
     )
     .expect("native invalid-header handler should run");
     let header_json = response_json(&header_raw);
     assert_eq!(header_json["status"].as_i64(), Some(500));
     assert_eq!(
-        header_json["headers"]["x-taida-error"].as_str(),
+        response_header_value(&header_json, "x-taida-error").as_deref(),
         Some("abi")
     );
 
@@ -752,7 +835,10 @@ handle req: WebRequest = text(req.method + ":" + req.path) => :WebResponse
         .expect("oversized native request should return structured JSON");
     let json = response_json(&raw);
     assert_eq!(json["status"].as_i64(), Some(413));
-    assert_eq!(json["headers"]["x-taida-error"].as_str(), Some("abi"));
+    assert_eq!(
+        response_header_value(&json, "x-taida-error").as_deref(),
+        Some("abi")
+    );
 
     let body = base64::engine::general_purpose::STANDARD
         .decode(json["bodyBase64"].as_str().unwrap_or_default())

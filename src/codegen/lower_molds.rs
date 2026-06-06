@@ -2651,15 +2651,81 @@ impl Lowering {
                 ));
                 Ok(result)
             }
+            "HostCapability" => {
+                if type_args.len() != 2 {
+                    return Err(LowerError {
+                        message:
+                            "HostCapability requires 2 arguments: HostCapability[name, kind]()"
+                                .into(),
+                    });
+                }
+                let name = self.lower_expr(func, &type_args[0])?;
+                let kind = self.lower_expr(func, &type_args[1])?;
+                let result = func.alloc_var();
+                func.push(IrInst::Call(
+                    result,
+                    "taida_abi_host_capability".to_string(),
+                    vec![name, kind],
+                ));
+                Ok(result)
+            }
+            "HostStep" => {
+                if type_args.len() != 2 {
+                    return Err(LowerError {
+                        message: "HostStep requires 2 arguments: HostStep[method, args]()".into(),
+                    });
+                }
+                let method = self.lower_expr(func, &type_args[0])?;
+                let args = self.lower_expr(func, &type_args[1])?;
+                let args_schema_desc = self.resolve_wire_schema_descriptor(&type_args[1])?;
+                let args_schema = func.alloc_var();
+                func.push(IrInst::ConstStr(args_schema, args_schema_desc));
+                let result = func.alloc_var();
+                func.push(IrInst::Call(
+                    result,
+                    "taida_abi_host_step".to_string(),
+                    vec![method, args, args_schema],
+                ));
+                Ok(result)
+            }
+            "HostCall" => {
+                if type_args.len() != 2 {
+                    return Err(LowerError {
+                        message: "HostCall requires 2 arguments: HostCall[steps, Out]()".into(),
+                    });
+                }
+                let steps = self.lower_expr(func, &type_args[0])?;
+                let schema_desc = self.resolve_json_schema_descriptor(&type_args[1])?;
+                let schema = func.alloc_var();
+                func.push(IrInst::ConstStr(schema, schema_desc));
+                let result = func.alloc_var();
+                func.push(IrInst::Call(
+                    result,
+                    "taida_abi_host_call".to_string(),
+                    vec![steps, schema],
+                ));
+                Ok(result)
+            }
             "Cage" => {
-                // Cage[subject, runner](): JS-only CageRilla descriptors are
-                // rejected while lowering the runner expression. Direct native
-                // function/lambda runners are not part of the Cage contract.
                 if type_args.len() < 2 {
                     return Err(LowerError {
                         message: "Cage requires 2 type arguments: Cage[subject, runner]".into(),
                     });
                 }
+                if matches!(&type_args[1], Expr::MoldInst(name, _, _, _) if name == "HostCall") {
+                    let subject = self.lower_expr(func, &type_args[0])?;
+                    let runner = self.lower_expr(func, &type_args[1])?;
+                    let result = func.alloc_var();
+                    func.push(IrInst::Call(
+                        result,
+                        "taida_abi_host_cage".to_string(),
+                        vec![subject, runner],
+                    ));
+                    return Ok(result);
+                }
+                // Cage[subject, runner](): JS-only CageRilla descriptors are
+                // rejected while lowering the runner expression. Direct native
+                // function/lambda runners are not part of the Cage contract.
                 let _subject = self.lower_expr(func, &type_args[0])?;
                 let _runner = self.lower_expr(func, &type_args[1])?;
                 Err(LowerError {

@@ -1,8 +1,7 @@
 use super::runtime::RUNTIME_JS;
 /// Taida AST → JavaScript コード生成
 use crate::net_surface::{
-    NET_HTTP_PROTOCOL_SYMBOL, NET_HTTP_PROTOCOL_VARIANTS, is_net_export_name,
-    is_net_runtime_builtin, net_export_list,
+    NET_HTTP_PROTOCOL_SYMBOL, NET_HTTP_PROTOCOL_VARIANTS, is_net_runtime_builtin,
 };
 use crate::parser::*;
 
@@ -2035,11 +2034,12 @@ impl JsCodegen {
                 None => return,
             }
         } else if import.path.starts_with("npm:")
-            || import.path == "taida-lang/net"
-            || import.path == "taida-lang/js"
-            || import.path == "taida-lang/os"
-            || import.path == "taida-lang/crypto"
-            || import.path == "taida-lang/pool"
+            // F54: catalog-driven core-bundled classification (the old
+            // five-entry list was missing abi/build).
+            || import
+                .path
+                .split_once('/')
+                .is_some_and(|(org, name)| crate::pkg::catalog::is_core_bundled(org, name))
         {
             // Core-bundled / npm packages — nothing to absorb.
             return;
@@ -2137,15 +2137,23 @@ impl JsCodegen {
     /// Reads and parses the target `.td` file, checks for explicit `<<<` declarations,
     /// and returns an error if any imported symbol is not in the export list.
     fn validate_import_symbols(&self, import: &ImportStmt) -> Result<(), JsError> {
-        if import.path == "taida-lang/net" {
+        // F54: validate every core-bundled import against the catalog
+        // export list. This used to be a net-only check plus a hard-coded
+        // skip list that was missing `abi` and `build`, so their imports
+        // fell through to the `.taida/deps` resolver and failed with an
+        // unrelated "project root context" error.
+        if let Some((org, name)) = import.path.split_once('/')
+            && org == crate::pkg::catalog::BUNDLED_ORG
+            && let Some(spec) = crate::pkg::catalog::find(name)
+        {
             for sym in &import.symbols {
-                if !is_net_export_name(&sym.name) {
+                if !spec.exports.contains(&sym.name.as_str()) {
                     return Err(JsError {
                         message: format!(
                             "Symbol '{}' not found in module '{}'. The module exports: {}",
                             sym.name,
                             import.path,
-                            net_export_list()
+                            spec.exports.join(", ")
                         ),
                     });
                 }
@@ -2153,13 +2161,8 @@ impl JsCodegen {
             return Ok(());
         }
 
-        // Skip other core-bundled and npm packages — they don't have .td export declarations
-        if import.path.starts_with("npm:")
-            || import.path == "taida-lang/js"
-            || import.path == "taida-lang/os"
-            || import.path == "taida-lang/crypto"
-            || import.path == "taida-lang/pool"
-        {
+        // Skip npm packages — they don't have .td export declarations
+        if import.path.starts_with("npm:") {
             return Ok(());
         }
 
@@ -2321,21 +2324,29 @@ impl JsCodegen {
             });
         }
 
-        // taida-lang/js: JSNew is a compile-time construct, no runtime import needed
-        if import.path == "taida-lang/js" {
-            return Ok(());
-        }
-        // taida-lang/os: core-bundled, runtime functions already embedded
-        if import.path == "taida-lang/os" {
-            return Ok(());
-        }
-        // taida-lang/crypto: core-bundled, runtime sha256 already embedded
-        if import.path == "taida-lang/crypto" {
-            return Ok(());
-        }
-        // taida-lang/net: core-bundled, HTTP v1 runtime functions already embedded
-        if import.path == "taida-lang/net" {
-            self.has_net_import = true;
+        // F54: core-bundled package imports resolve to embedded runtimes /
+        // compile-time constructs, never to a `.taida/deps` module. Catalog-
+        // driven so this list cannot drift from the resolver (`pool`, `abi`
+        // and `build` used to be missing here and fell through to package
+        // resolution).
+        if let Some((org, name)) = import.path.split_once('/')
+            && org == crate::pkg::catalog::BUNDLED_ORG
+            && crate::pkg::catalog::find(name).is_some()
+        {
+            if name == "abi" {
+                // The legacy JS target has no abi runtime (handler mode and
+                // the response helpers are unimplemented); reject the import
+                // deterministically instead of failing later with undefined
+                // runtime functions.
+                return Err(JsError {
+                    message: "taida-lang/abi is not supported on the legacy JS target: \
+                              handler mode and the response helpers have no JS runtime."
+                        .to_string(),
+                });
+            }
+            if name == "net" {
+                self.has_net_import = true;
+            }
             return Ok(());
         }
 
