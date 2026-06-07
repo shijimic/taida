@@ -52,7 +52,7 @@ mod quic;
 
 // ── Re-exports: preserve exact same public API as the old monolithic net_h3.rs ──
 // NB7-73: These re-exports are intentional API surface. They are used by
-// `net_eval.rs` via `use super::net_h3` and serve as the stable public interface.
+// the `eval` sibling module and serve as the stable public interface.
 
 // From qpack.rs
 #[allow(unused_imports)]
@@ -2673,10 +2673,10 @@ mod tests {
     #[test]
     fn test_net7_11b_0rtt_not_exposed_in_h3_api() {
         let h3_modules = [
-            "src/interpreter/net_h3/qpack.rs",
-            "src/interpreter/net_h3/frame.rs",
-            "src/interpreter/net_h3/connection.rs",
-            "src/interpreter/net_h3/request.rs",
+            "src/interpreter/net/h3/qpack.rs",
+            "src/interpreter/net/h3/frame.rs",
+            "src/interpreter/net/h3/connection.rs",
+            "src/interpreter/net/h3/request.rs",
         ];
 
         // These are API-level 0-RTT knobs that must NOT appear in the H3 layer

@@ -118,7 +118,7 @@ fn main() {
         &crash_td,
     );
 
-    // ----- tests/parity.rs + src/interpreter/net_h2.rs (NET6-5b release gate) -----
+    // ----- tests/parity.rs + src/interpreter/net/h2.rs (NET6-5b release gate) -----
     //
     // C25B-003 Phase 2: eliminate cargo subprocess spawn from
     // `test_net6_5b_release_gate_v6_test_counts`. Previously the test shelled
@@ -138,7 +138,8 @@ fn main() {
     let net_h2_rs = manifest_dir
         .join("src")
         .join("interpreter")
-        .join("net_h2.rs");
+        .join("net")
+        .join("h2.rs");
     println!("cargo:rerun-if-changed={}", parity_rs.display());
     println!("cargo:rerun-if-changed={}", net_h2_rs.display());
 

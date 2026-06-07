@@ -1,3 +1,4 @@
+use super::types::{ConnStream, ResponseFields, StreamingWriter};
 /// Free helper functions for net_eval (mechanical split).
 ///
 /// This file contains all free functions extracted from net_eval.rs:
@@ -9,9 +10,8 @@
 /// - Keep-alive determination
 /// - HTTP response encoder
 /// - Request body helpers (is_body_stream_request, extract_body_token, eval_read_body)
-use super::super::eval::RuntimeError;
-use super::super::value::{AsyncStatus, AsyncValue, ErrorValue, Value};
-use super::types::{ConnStream, ResponseFields, StreamingWriter};
+use crate::interpreter::eval::RuntimeError;
+use crate::interpreter::value::{AsyncStatus, AsyncValue, ErrorValue, Value};
 
 /// Build the HTTP response head bytes for a streaming response.
 ///
@@ -1164,7 +1164,7 @@ pub(crate) fn extract_response_fields(response: &Value) -> Result<ResponseFields
             return Err(format!("httpEncodeResponse: headers[{}].name is empty", i));
         }
         for &b in name.as_bytes() {
-            if !crate::interpreter::net_eval::types::is_rfc7230_token_byte(b) {
+            if !crate::interpreter::net::eval::types::is_rfc7230_token_byte(b) {
                 return Err(format!(
                     "httpEncodeResponse: headers[{}].name contains a byte outside RFC 7230 token grammar (0x{:02X})",
                     i, b
@@ -1178,7 +1178,7 @@ pub(crate) fn extract_response_fields(response: &Value) -> Result<ResponseFields
             ));
         }
         for &b in value.as_bytes() {
-            if !crate::interpreter::net_eval::types::is_rfc7230_field_value_byte(b) {
+            if !crate::interpreter::net::eval::types::is_rfc7230_field_value_byte(b) {
                 return Err(format!(
                     "httpEncodeResponse: headers[{}].value contains a byte outside RFC 7230 field-value grammar (0x{:02X})",
                     i, b

@@ -13,7 +13,7 @@
 //! `@(start, len)` span packs into that arena.
 //!
 //! This file is the structural regression guard for the h3 path. It pins
-//! the arena shape inside both `src/interpreter/net_eval/h3.rs::serve_h3`
+//! the arena shape inside both `src/interpreter/net/eval/h3.rs::serve_h3`
 //! (interp h3) and
 //! `src/codegen/native_runtime/net_h3_quic.c::h3_build_request_pack`
 //! (native h3) by string-matching the arena builder pattern.
@@ -30,8 +30,8 @@
 //! cheap (no quinn / TLS / fork) and runs as a CI hard-fail gate.
 
 fn read_interp_h3_source() -> String {
-    std::fs::read_to_string("src/interpreter/net_eval/h3.rs")
-        .expect("read src/interpreter/net_eval/h3.rs")
+    std::fs::read_to_string("src/interpreter/net/eval/h3.rs")
+        .expect("read src/interpreter/net/eval/h3.rs")
 }
 
 fn read_native_runtime_source() -> String {
@@ -251,8 +251,8 @@ fn h2_and_h3_request_pack_arenas_are_structurally_symmetric() {
     //      backend-specific labels ("h2_arena" / "h3_arena").
     // If a future track refactors only one of the four sites, this test
     // will catch the divergence before it lands.
-    let h2_interp = std::fs::read_to_string("src/interpreter/net_eval/h2.rs")
-        .expect("read src/interpreter/net_eval/h2.rs");
+    let h2_interp = std::fs::read_to_string("src/interpreter/net/eval/h2.rs")
+        .expect("read src/interpreter/net/eval/h2.rs");
     let h3_interp = read_interp_h3_source();
     assert!(h2_interp.contains("Strategy V1-A"));
     assert!(h3_interp.contains("Strategy V1-A"));

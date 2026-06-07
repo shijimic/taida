@@ -6,8 +6,8 @@
 //! regression visible in code review.
 
 const NATIVE_NET: &str = include_str!("../src/codegen/native_runtime/net_h1_h2.c");
-const INTERP_TYPES: &str = include_str!("../src/interpreter/net_eval/types.rs");
-const INTERP_HELPERS: &str = include_str!("../src/interpreter/net_eval/helpers.rs");
+const INTERP_TYPES: &str = include_str!("../src/interpreter/net/eval/types.rs");
+const INTERP_HELPERS: &str = include_str!("../src/interpreter/net/eval/helpers.rs");
 const JS_NET: &str = include_str!("../src/js/runtime/net.rs");
 
 // ── E32B-039 ────────────────────────────────────────────────────

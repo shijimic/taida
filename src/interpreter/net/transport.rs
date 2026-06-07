@@ -756,9 +756,9 @@ impl ConnectionConfig {
 // IMPORTANT (NB7-7): The QUIC transport does NOT implement the `Transport`,
 // `TransportAcceptor`, or `TransportConnection` traits defined above. Those
 // are TCP-only and remain unchanged for h1/h2. The h3 path uses a dedicated
-// QUIC accept/connection/stream model. See the module-level NB7-7 design
-// decision and `.dev/NET_DESIGN.md` "QUIC / TCP Transport Separation" for
-// full rationale.
+// QUIC accept/connection/stream model (QUIC / TCP transport separation:
+// stream-multiplexed QUIC does not fit the single-duplex-socket trait
+// shape, so forcing the traits would leak h3 concerns into h1/h2).
 //
 // ## QuicStreamTransport (NET7-1a)
 //

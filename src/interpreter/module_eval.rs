@@ -401,7 +401,7 @@ impl Interpreter {
                         }
                     }
                 } else if in_bundled("net") {
-                    for sym in super::net_eval::NET_SYMBOLS {
+                    for sym in super::net::eval::NET_SYMBOLS {
                         self.env
                             .define_force(sym, Value::str(format!("__net_builtin_{}", sym)));
                     }

@@ -5,19 +5,19 @@
 //! (`serve_h2`), drive a single connection's frame state machine
 //! (`h2_connection_loop`), and emit a completed HEADERS + DATA response
 //! (`send_h2_response`). The underlying HPACK / frame codec lives in
-//! `super::super::net_h2`; this module is the interpreter-side glue.
+//! `super::super::h2`; this module is the interpreter-side glue.
 //!
 //! note: pure mechanical move — no behavior change. The HTTP/1.1
 //! `eval_http_serve` implementation in `h1.rs` delegates into
 //! `self.serve_h2(...)` when `protocol: "h2"` is negotiated.
 
-use super::super::eval::{Interpreter, RuntimeError, Signal};
-use super::super::value::Value;
 use super::helpers::{
     extract_response_fields, make_fulfilled_async, make_result_failure_msg, make_result_success,
     make_span,
 };
 use super::types::{ActiveStreamingWriter, ConnStream, RequestBodyState, StreamingWriter};
+use crate::interpreter::eval::{Interpreter, RuntimeError, Signal};
+use crate::interpreter::value::Value;
 
 impl Interpreter {
     /// 2b/2c: HTTP/2 serve loop (Interpreter reference implementation).
@@ -35,12 +35,12 @@ impl Interpreter {
         &mut self,
         listener: std::net::TcpListener,
         tls_config: std::sync::Arc<rustls::ServerConfig>,
-        handler: super::super::value::FuncValue,
+        handler: crate::interpreter::value::FuncValue,
         max_requests: i64,
         _max_connections: usize,
         read_timeout: std::time::Duration,
     ) -> Result<Option<Signal>, RuntimeError> {
-        use super::super::net_h2::*;
+        use super::super::h2::*;
 
         let mut total_request_count: i64 = 0;
         let mut total_connection_count: i64 = 0;
@@ -80,11 +80,9 @@ impl Interpreter {
                 Err(_) => continue, // TLS setup error, skip connection
             };
             let mut tls_transport =
-                super::super::net_transport::TlsTransport::new(tls_conn, tcp_stream);
-            match super::super::net_transport::complete_tls_handshake(
-                &mut tls_transport,
-                read_timeout,
-            ) {
+                super::super::transport::TlsTransport::new(tls_conn, tcp_stream);
+            match super::super::transport::complete_tls_handshake(&mut tls_transport, read_timeout)
+            {
                 Ok(()) => {}
                 Err(_) => continue, // Handshake failure, skip connection
             }
@@ -186,13 +184,13 @@ impl Interpreter {
     pub(super) fn h2_connection_loop(
         &mut self,
         stream: &mut ConnStream,
-        h2_conn: &mut super::super::net_h2::H2Connection,
-        handler: &super::super::value::FuncValue,
+        h2_conn: &mut super::super::h2::H2Connection,
+        handler: &crate::interpreter::value::FuncValue,
         peer_addr: &std::net::SocketAddr,
         max_requests: i64,
         total_request_count: &mut i64,
     ) -> Result<(), RuntimeError> {
-        use super::super::net_h2::*;
+        use super::super::h2::*;
 
         let mut settings_ack_pending = false;
         // NB6-38: Reusable buffer for frame reading — avoids per-frame heap allocation
@@ -243,15 +241,15 @@ impl Interpreter {
             };
 
             // Check if we need to send SETTINGS ACK after receiving client's SETTINGS
-            if header.frame_type == super::super::net_h2::FRAME_SETTINGS
-                && header.flags & super::super::net_h2::FLAG_ACK == 0
+            if header.frame_type == super::super::h2::FRAME_SETTINGS
+                && header.flags & super::super::h2::FLAG_ACK == 0
             {
                 settings_ack_pending = true;
             }
 
             // Check for PING that needs response (NB6-38: minimal copy — PING is always 8 bytes)
-            let is_ping_needing_ack = header.frame_type == super::super::net_h2::FRAME_PING
-                && header.flags & super::super::net_h2::FLAG_ACK == 0;
+            let is_ping_needing_ack = header.frame_type == super::super::h2::FRAME_PING
+                && header.flags & super::super::h2::FLAG_ACK == 0;
             let ping_data = if is_ping_needing_ack {
                 Some(payload.to_vec())
             } else {
@@ -600,13 +598,13 @@ impl Interpreter {
 
                 // Mark stream as closed
                 if let Some(s) = h2_conn.streams.get_mut(&stream_id) {
-                    s.state = super::super::net_h2::StreamState::Closed;
+                    s.state = super::super::h2::StreamState::Closed;
                 }
 
                 // Clean up closed streams to prevent unbounded growth
                 h2_conn
                     .streams
-                    .retain(|_, s| s.state != super::super::net_h2::StreamState::Closed);
+                    .retain(|_, s| s.state != super::super::h2::StreamState::Closed);
             }
         }
     }
@@ -652,11 +650,11 @@ impl Interpreter {
     pub(super) fn send_h2_response(
         &self,
         stream: &mut ConnStream,
-        h2_conn: &mut super::super::net_h2::H2Connection,
+        h2_conn: &mut super::super::h2::H2Connection,
         stream_id: u32,
         response: &Value,
     ) -> Result<(), RuntimeError> {
-        use super::super::net_h2::*;
+        use super::super::h2::*;
 
         let (status, headers, body_bytes) = match extract_response_fields(response) {
             Ok(fields) => fields,

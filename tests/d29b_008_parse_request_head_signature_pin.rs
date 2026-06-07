@@ -1,6 +1,6 @@
 //! `parse_request_head` の関数 signature を string match で pin する CI test。
 //!
-//! このテストは `src/interpreter/net_eval/helpers.rs` を読み込んで、
+//! このテストは `src/interpreter/net/eval/helpers.rs` を読み込んで、
 //! `parse_request_head` が **`pub(crate) fn parse_request_head(bytes: &[u8]) -> Value`**
 //! という正確な signature を保っていることを assert する。
 //!
@@ -22,7 +22,7 @@
 use std::fs;
 use std::path::PathBuf;
 
-const HELPERS_RELATIVE: &str = "src/interpreter/net_eval/helpers.rs";
+const HELPERS_RELATIVE: &str = "src/interpreter/net/eval/helpers.rs";
 
 fn read_helpers() -> String {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(HELPERS_RELATIVE);

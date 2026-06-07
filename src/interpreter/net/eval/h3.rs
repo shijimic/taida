@@ -4,19 +4,19 @@
 //! Owns the `impl Interpreter` method `serve_h3` which mirrors the
 //! native backend's `taida_net_h3_serve()`: runs protocol self-tests,
 //! wires up the handler closure that materializes a 14-field request
-//! pack, and hands control to `super::super::super::net_h3::serve_h3_loop`.
+//! pack, and hands control to `super::super::super::h3::serve_h3_loop`.
 //!
 //! note: pure mechanical move — no behavior change. The HTTP/1.1
 //! `eval_http_serve` implementation in `h1.rs` delegates into
 //! `self.serve_h3(...)` when `protocol: "h3"` is requested.
 
-use super::super::eval::{Interpreter, RuntimeError, Signal};
-use super::super::value::Value;
 use super::helpers::{
     extract_response_fields, make_fulfilled_async, make_result_failure_msg, make_result_success,
     make_span,
 };
 use super::types::{ActiveStreamingWriter, ConnStream, RequestBodyState, StreamingWriter};
+use crate::interpreter::eval::{Interpreter, RuntimeError, Signal};
+use crate::interpreter::value::Value;
 
 impl Interpreter {
     /// HTTP/3 serve entry point (: Interpreter parity backend).
@@ -44,11 +44,11 @@ impl Interpreter {
         &mut self,
         cert_path: String,
         key_path: String,
-        handler: super::super::value::FuncValue,
+        handler: crate::interpreter::value::FuncValue,
         max_requests: i64,
         port: u16,
     ) -> Result<Option<Signal>, RuntimeError> {
-        use super::super::net_h3;
+        use super::super::h3 as net_h3;
 
         // Run embedded self-tests to validate QPACK round-trip
         // and H3 request pseudo-header validation, matching Native behavior.

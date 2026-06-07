@@ -283,7 +283,7 @@ mod tests {
         //   +621 bytes in net_h1_h2.c   (h2 serve, after listen() ok,
         //         same block — slightly shorter comment header).
         // Default-off so production stdout surface is unchanged. Mirrors
-        // the interpreter (`src/interpreter/net_eval/h1.rs`) and JS
+        // the interpreter (`src/interpreter/net/eval/h1.rs`) and JS
         // (`src/js/runtime/net.rs`) implementations for 3-backend parity.
         // F1_LEN / F2_LEN constants unchanged (the new blocks live in
         // the net fragments, not in core.c).

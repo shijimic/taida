@@ -10,12 +10,12 @@
 //! `try_net_func` dispatcher in `mod.rs` continues to route these calls;
 //! this file merely hosts the implementations.
 
-use super::super::eval::{Interpreter, RuntimeError, Signal};
-use super::super::value::Value;
 use super::helpers::{
     extract_body_token, get_field_int, get_field_value, write_all_retry, write_vectored_all,
 };
 use super::types::{ActiveStreamingWriter, ConnStream, NEXT_WS_TOKEN, WriterState, WsFrame};
+use crate::interpreter::eval::{Interpreter, RuntimeError, Signal};
+use crate::interpreter::value::Value;
 use crate::parser::Expr;
 
 impl Interpreter {

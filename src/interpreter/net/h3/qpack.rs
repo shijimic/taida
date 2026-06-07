@@ -7,7 +7,7 @@ use super::frame::is_canonical_varint;
 /// - QPACK header block encode/decode (RFC 9204 Section 4.5)
 /// - QPACK dynamic table (RFC 9204 Section 4.3)
 /// - QPACK encoder/decoder instruction streams (RFC 9204 Sections 5.2/6.2)
-use crate::interpreter::net_h2;
+use crate::interpreter::net::h2 as net_h2;
 
 pub(crate) struct QpackStaticEntry {
     pub name: &'static str,

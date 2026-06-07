@@ -13,7 +13,7 @@
 //! `req.raw`.
 //!
 //! This file is the **structural** regression guard: it pins the arena
-//! shape inside both `src/interpreter/net_eval/h2.rs::serve_h2` (interp
+//! shape inside both `src/interpreter/net/eval/h2.rs::serve_h2` (interp
 //! backend) and `src/codegen/native_runtime/net_h1_h2.c::h2_build_request_pack`
 //! (native backend) by string-matching the exact arena builder pattern.
 //! The wire-level parity is exercised in `tests/parity.rs` under the
@@ -28,11 +28,11 @@
 //! a future revert that would silently re-introduce the protocol-divergent
 //! Str-pack form.
 
-/// Read the full `src/interpreter/net_eval/h2.rs` source to verify the
+/// Read the full `src/interpreter/net/eval/h2.rs` source to verify the
 /// arena builder lives where we expect.
 fn read_interp_h2_source() -> String {
-    std::fs::read_to_string("src/interpreter/net_eval/h2.rs")
-        .expect("read src/interpreter/net_eval/h2.rs")
+    std::fs::read_to_string("src/interpreter/net/eval/h2.rs")
+        .expect("read src/interpreter/net/eval/h2.rs")
 }
 
 /// Read the assembled native runtime so we can string-search for the

@@ -5530,7 +5530,7 @@ use std::sync::Arc;
 /// streaming API calls. Each call is a Statement::Expr(Expr::FuncCall(...)).
 /// The handler has params (req, writer) and body is the statements.
 fn make_streaming_handler(stmts: Vec<Statement>) -> Value {
-    Value::Function(super::super::value::FuncValue {
+    Value::Function(crate::interpreter::value::FuncValue {
         name: "<streaming_handler>".to_string(),
         params: vec![
             Param {
@@ -7308,7 +7308,7 @@ fn test_http_serve_tls_arg_non_pack_rejected() {
     // Define a dummy handler function.
     interp.env.define_force(
         "test_handler",
-        Value::Function(super::super::value::FuncValue {
+        Value::Function(crate::interpreter::value::FuncValue {
             name: "test_handler".into(),
             params: vec![Param {
                 name: "req".into(),
@@ -7353,7 +7353,7 @@ fn test_http_serve_tls_cert_key_returns_phase2_error() {
 
     interp.env.define_force(
         "test_handler",
-        Value::Function(super::super::value::FuncValue {
+        Value::Function(crate::interpreter::value::FuncValue {
             name: "test_handler".into(),
             params: vec![Param {
                 name: "req".into(),

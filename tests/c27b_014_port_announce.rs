@@ -39,7 +39,7 @@
 //!
 //! | backend     | source                                                | how the line is emitted              |
 //! |-------------|-------------------------------------------------------|--------------------------------------|
-//! | interpreter | `src/interpreter/net_eval/h1.rs`                      | `writeln!(stdout(), …)` after bind   |
+//! | interpreter | `src/interpreter/net/eval/h1.rs`                      | `writeln!(stdout(), …)` after bind   |
 //! | native h1   | `src/codegen/native_runtime/net_h3_quic.c`            | `printf` + `fflush(stdout)` post-listen |
 //! | native h2   | `src/codegen/native_runtime/net_h1_h2.c`              | same                                 |
 //! | JS (Node)   | `src/js/runtime/net.rs` — `server.on('listening')`    | `console.log(...)`                   |

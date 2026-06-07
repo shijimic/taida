@@ -15,8 +15,6 @@
 //!
 //! note: pure mechanical move — no behavior change.
 
-use super::super::eval::{Interpreter, RuntimeError, Signal};
-use super::super::value::Value;
 use super::helpers::{
     ChunkedBodyError, build_streaming_head, chunked_body_complete, chunked_in_place_compact,
     determine_keep_alive, extract_result_value, extract_result_value_owned, get_field_bool,
@@ -27,6 +25,8 @@ use super::types::{
     ActiveStreamingWriter, ConnAction, ConnReadResult, ConnStream, HttpConnection,
     RequestBodyState, StreamingWriter, WriterState,
 };
+use crate::interpreter::eval::{Interpreter, RuntimeError, Signal};
+use crate::interpreter::value::Value;
 use crate::net_surface::http_protocol_ordinal_to_wire;
 use crate::parser::Expr;
 
@@ -469,9 +469,9 @@ impl Interpreter {
             match (tls_cert_path.as_deref(), tls_key_path.as_deref()) {
                 (Some(cert), Some(key)) => {
                     let load_result = if is_h2 {
-                        super::super::net_transport::load_tls_config_h2(cert, key)
+                        super::super::transport::load_tls_config_h2(cert, key)
                     } else {
-                        super::super::net_transport::load_tls_config(cert, key)
+                        super::super::transport::load_tls_config(cert, key)
                     };
                     match load_result {
                         Ok(config) => Some(config),
@@ -513,7 +513,7 @@ impl Interpreter {
         // (resolved via local_addr so port=0 callers learn the OS-assigned
         // value) on a single stdout line so shell wrappers can `read` it.
         // 3-backend parity: same env var name, same surface format on
-        // interpreter / native / JS. See `.dev/C27_BLOCKERS.md::C27B-014`.
+        // interpreter / native / JS.
         if std::env::var("TAIDA_NET_ANNOUNCE_PORT").as_deref() == Ok("1")
             && let Ok(local) = listener.local_addr()
         {
@@ -587,10 +587,9 @@ impl Interpreter {
                                 Ok(c) => c,
                                 Err(_) => continue, // TLS setup error, skip connection
                             };
-                            let mut tls_transport = super::super::net_transport::TlsTransport::new(
-                                tls_conn, tcp_stream,
-                            );
-                            match super::super::net_transport::complete_tls_handshake(
+                            let mut tls_transport =
+                                super::super::transport::TlsTransport::new(tls_conn, tcp_stream);
+                            match super::super::transport::complete_tls_handshake(
                                 &mut tls_transport,
                                 read_timeout,
                             ) {
@@ -918,7 +917,7 @@ impl Interpreter {
     pub(super) fn dispatch_request(
         &mut self,
         conn: &mut HttpConnection,
-        handler: &super::super::value::FuncValue,
+        handler: &crate::interpreter::value::FuncValue,
         parsed_fields: Vec<(String, Value)>,
         head_consumed: usize,
         content_length: i64,

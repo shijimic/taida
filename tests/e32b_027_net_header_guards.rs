@@ -2,8 +2,8 @@
 //! input — CR/LF, NUL, control bytes, ':' in name, space/tab, underscore
 //! (CL.CL bypass), and Set-Cookie are all blocked at the grammar layer.
 
-const INTERP_TYPES: &str = include_str!("../src/interpreter/net_eval/types.rs");
-const INTERP_STREAM: &str = include_str!("../src/interpreter/net_eval/stream.rs");
+const INTERP_TYPES: &str = include_str!("../src/interpreter/net/eval/types.rs");
+const INTERP_STREAM: &str = include_str!("../src/interpreter/net/eval/stream.rs");
 const JS_NET: &str = include_str!("../src/js/runtime/net.rs");
 const NATIVE_NET: &str = include_str!("../src/codegen/native_runtime/net_h1_h2.c");
 

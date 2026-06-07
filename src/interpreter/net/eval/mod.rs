@@ -55,8 +55,8 @@ mod tests;
 // `super::net_eval::NET_SYMBOLS` used by sibling modules (eval.rs, module_eval.rs).
 pub(crate) use types::{ActiveStreamingWriter, NET_SYMBOLS};
 
-use super::eval::{Interpreter, RuntimeError, Signal};
-use super::value::Value;
+use crate::interpreter::eval::{Interpreter, RuntimeError, Signal};
+use crate::interpreter::value::Value;
 use crate::parser::Expr;
 
 use helpers::{

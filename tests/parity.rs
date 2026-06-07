@@ -58,14 +58,14 @@ fn read_native_runtime_source() -> String {
     out
 }
 
-/// `src/interpreter/net_eval.rs` was mechanically split
-/// into `src/interpreter/net_eval/{mod,types,helpers,tests}.rs`,
+/// the interpreter net eval surface was mechanically split
+/// into `src/interpreter/net/eval/{mod,types,helpers,tests}.rs`,
 /// then further split into `h1/h2/h3/stream/ws`. Audit tests
 /// that look for wire-format patterns across the net runtime concatenate the
 /// non-test files so the checks remain path-stable.
 fn read_net_eval_source() -> String {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let dir = manifest_dir.join("src/interpreter/net_eval");
+    let dir = manifest_dir.join("src/interpreter/net/eval");
     let fragments = [
         "mod.rs",
         "types.rs",
@@ -28836,7 +28836,7 @@ stdout(result.throw.message)
 //
 // Phase 5a tests verify that malformed h2 frames, invalid pseudo-headers,
 // HPACK bombs, and protocol edge cases are properly rejected.
-// The bulk of 5a coverage is in unit tests (src/interpreter/net_h2.rs: 91 tests).
+// The bulk of 5a coverage is in unit tests (src/interpreter/net/h2.rs: 91 tests).
 // The parity-level tests here verify that the hardening is consistent across
 // Interpreter and Native backends for observable behavior.
 
@@ -29014,10 +29014,10 @@ fn test_net6_5b_native_tls_linearization() {
 fn test_net6_5b_h2_module_architecture() {
     // Phase 2 design: h2 is in a separate module from h1.
     assert!(
-        std::path::Path::new("src/interpreter/net_h2.rs").exists(),
+        std::path::Path::new("src/interpreter/net/h2.rs").exists(),
         "NET6-5b audit: net_h2.rs module must exist"
     );
-    let source = std::fs::read_to_string("src/interpreter/net_h2.rs").expect("read net_h2.rs");
+    let source = std::fs::read_to_string("src/interpreter/net/h2.rs").expect("read net_h2.rs");
     // Core h2 protocol elements must be present
     assert!(
         source.contains("CONNECTION_PREFACE"),
@@ -29130,7 +29130,7 @@ stdout(serverResult.ok)
 //                                        tests/parity.rs
 //   - NET_H2_UNIT_TEST_COUNT: usize   -- #[test] count inside the
 //                                        #[cfg(test)] mod tests { } region of
-//                                        src/interpreter/net_h2.rs
+//                                        src/interpreter/net/h2.rs
 // These are the same invariants the old gate enforced via `cargo test --list`
 // / `cargo test --lib --list`, but evaluated in-process (sub-millisecond)
 // instead of spawning cargo (~79s on CI 2C, per PR #38 attempt-3 profile).
@@ -29173,7 +29173,7 @@ fn test_net6_5b_release_gate_v6_test_counts() {
         );
     }
 
-    // Verify net_h2 unit tests exist in src/interpreter/net_h2.rs. The old
+    // Verify net_h2 unit tests exist in src/interpreter/net/h2.rs. The old
     // gate parsed `cargo test --lib --list` stdout for lines containing
     // `net_h2` with suffix `: test`; the invariant it actually checked was
     // "the net_h2 module has at least 91 unit tests". We enforce it
@@ -29182,7 +29182,7 @@ fn test_net6_5b_release_gate_v6_test_counts() {
     let net_h2_count = parity_release_gate::NET_H2_UNIT_TEST_COUNT;
     assert!(
         net_h2_count >= 91,
-        "NET6-5b release gate: expected >= 91 net_h2 unit tests in src/interpreter/net_h2.rs, found {} (scanned at build time)",
+        "NET6-5b release gate: expected >= 91 net_h2 unit tests in src/interpreter/net/h2.rs, found {} (scanned at build time)",
         net_h2_count
     );
 }
@@ -29307,7 +29307,7 @@ fn test_nb6_32_native_tls_writev_null_check() {
 #[test]
 fn test_nb6_33_hpack_dyntable_o1_insert() {
     // Interpreter: VecDeque instead of Vec
-    let h2_source = std::fs::read_to_string("src/interpreter/net_h2.rs").expect("read net_h2.rs");
+    let h2_source = std::fs::read_to_string("src/interpreter/net/h2.rs").expect("read net_h2.rs");
     assert!(
         h2_source.contains("VecDeque<HpackEntry>"),
         "NB6-33: Interpreter HPACK dynamic table must use VecDeque for O(1) insert"
@@ -29353,7 +29353,7 @@ fn test_nb6_34_native_huffman_lut() {
 /// NB6-35: Verify write_frame does not flush per-frame.
 #[test]
 fn test_nb6_35_no_per_frame_flush() {
-    let source = std::fs::read_to_string("src/interpreter/net_h2.rs").expect("read net_h2.rs");
+    let source = std::fs::read_to_string("src/interpreter/net/h2.rs").expect("read net_h2.rs");
     // Find the write_frame function body
     let write_frame_section: String = source
         .lines()
@@ -29409,7 +29409,7 @@ fn test_nb6_24_native_h2_header_stack_fallback() {
 /// NB6-39: Verify Interpreter HPACK encoder uses HashMap for static table lookup.
 #[test]
 fn test_nb6_39_hpack_encoder_hashmap_lookup() {
-    let source = std::fs::read_to_string("src/interpreter/net_h2.rs").expect("read net_h2.rs");
+    let source = std::fs::read_to_string("src/interpreter/net/h2.rs").expect("read net_h2.rs");
     assert!(
         source.contains("STATIC_EXACT_MAP"),
         "NB6-39: Interpreter HPACK encoder must use HashMap for exact static table lookup"
@@ -32710,9 +32710,9 @@ stdout(result.throw.message)
 fn test_net7_5a_h3_non_canonical_varint_hardening_source_parity() {
     let native_src = read_native_runtime_source();
     let interp_src_qpack =
-        fs::read_to_string("src/interpreter/net_h3/qpack.rs").expect("read net_h3/qpack.rs");
+        fs::read_to_string("src/interpreter/net/h3/qpack.rs").expect("read net_h3/qpack.rs");
     let interp_src_frame =
-        fs::read_to_string("src/interpreter/net_h3/frame.rs").expect("read net_h3/frame.rs");
+        fs::read_to_string("src/interpreter/net/h3/frame.rs").expect("read net_h3/frame.rs");
     let interp_src = format!("{interp_src_qpack}\n{interp_src_frame}");
 
     // Interpreter must have the is_canonical_varint helper function.
@@ -32750,13 +32750,13 @@ fn test_net7_5a_h3_non_canonical_varint_hardening_source_parity() {
 #[test]
 fn test_net7_5a_h3_frame_bounds_hardening_source() {
     let interp_src_qpack =
-        fs::read_to_string("src/interpreter/net_h3/qpack.rs").expect("read net_h3/qpack.rs");
+        fs::read_to_string("src/interpreter/net/h3/qpack.rs").expect("read net_h3/qpack.rs");
     let interp_src_frame =
-        fs::read_to_string("src/interpreter/net_h3/frame.rs").expect("read net_h3/frame.rs");
-    let interp_src_conn = fs::read_to_string("src/interpreter/net_h3/connection.rs")
+        fs::read_to_string("src/interpreter/net/h3/frame.rs").expect("read net_h3/frame.rs");
+    let interp_src_conn = fs::read_to_string("src/interpreter/net/h3/connection.rs")
         .expect("read net_h3/connection.rs");
     let interp_src_req =
-        fs::read_to_string("src/interpreter/net_h3/request.rs").expect("read net_h3/request.rs");
+        fs::read_to_string("src/interpreter/net/h3/request.rs").expect("read net_h3/request.rs");
     let interp_src =
         format!("{interp_src_qpack}\n{interp_src_frame}\n{interp_src_conn}\n{interp_src_req}");
     let native_src = read_native_runtime_source();
@@ -32791,13 +32791,13 @@ fn test_net7_5a_h3_frame_bounds_hardening_source() {
 #[test]
 fn test_net7_5b_h3_frame_type_source_parity() {
     let interp_src_qpack =
-        fs::read_to_string("src/interpreter/net_h3/qpack.rs").expect("read net_h3/qpack.rs");
+        fs::read_to_string("src/interpreter/net/h3/qpack.rs").expect("read net_h3/qpack.rs");
     let interp_src_frame =
-        fs::read_to_string("src/interpreter/net_h3/frame.rs").expect("read net_h3/frame.rs");
-    let interp_src_conn = fs::read_to_string("src/interpreter/net_h3/connection.rs")
+        fs::read_to_string("src/interpreter/net/h3/frame.rs").expect("read net_h3/frame.rs");
+    let interp_src_conn = fs::read_to_string("src/interpreter/net/h3/connection.rs")
         .expect("read net_h3/connection.rs");
     let interp_src_req =
-        fs::read_to_string("src/interpreter/net_h3/request.rs").expect("read net_h3/request.rs");
+        fs::read_to_string("src/interpreter/net/h3/request.rs").expect("read net_h3/request.rs");
     let interp_src =
         format!("{interp_src_qpack}\n{interp_src_frame}\n{interp_src_conn}\n{interp_src_req}");
     let native_src = read_native_runtime_source();
@@ -32871,13 +32871,13 @@ main =
 fn test_net7_5c_h3_bounded_copy_structural_audit() {
     let native_src = read_native_runtime_source();
     let interp_src_qpack =
-        fs::read_to_string("src/interpreter/net_h3/qpack.rs").expect("read net_h3/qpack.rs");
+        fs::read_to_string("src/interpreter/net/h3/qpack.rs").expect("read net_h3/qpack.rs");
     let interp_src_frame =
-        fs::read_to_string("src/interpreter/net_h3/frame.rs").expect("read net_h3/frame.rs");
-    let interp_src_conn = fs::read_to_string("src/interpreter/net_h3/connection.rs")
+        fs::read_to_string("src/interpreter/net/h3/frame.rs").expect("read net_h3/frame.rs");
+    let interp_src_conn = fs::read_to_string("src/interpreter/net/h3/connection.rs")
         .expect("read net_h3/connection.rs");
     let interp_src_req =
-        fs::read_to_string("src/interpreter/net_h3/request.rs").expect("read net_h3/request.rs");
+        fs::read_to_string("src/interpreter/net/h3/request.rs").expect("read net_h3/request.rs");
     let interp_src =
         format!("{interp_src_qpack}\n{interp_src_frame}\n{interp_src_conn}\n{interp_src_req}");
 
@@ -32943,7 +32943,7 @@ fn test_net7_5c_h3_bounded_copy_structural_audit() {
 fn test_net7_10c_qpack_static_table_count_parity() {
     let native_src = read_native_runtime_source();
     let interp_src =
-        fs::read_to_string("src/interpreter/net_h3/qpack.rs").expect("read net_h3/qpack.rs");
+        fs::read_to_string("src/interpreter/net/h3/qpack.rs").expect("read net_h3/qpack.rs");
 
     // Native: C array of 99 {name, value} pairs.
     assert!(
@@ -32979,9 +32979,9 @@ fn test_net7_10c_qpack_static_table_count_parity() {
 fn test_net7_10c_h3_error_code_iana_parity() {
     let native_src = read_native_runtime_source();
     let interp_src_frame =
-        fs::read_to_string("src/interpreter/net_h3/frame.rs").expect("read net_h3/frame.rs");
+        fs::read_to_string("src/interpreter/net/h3/frame.rs").expect("read net_h3/frame.rs");
     let interp_src_quic =
-        fs::read_to_string("src/interpreter/net_h3/quic.rs").expect("read net_h3/quic.rs");
+        fs::read_to_string("src/interpreter/net/h3/quic.rs").expect("read net_h3/quic.rs");
     let interp_src = format!("{interp_src_frame}\n{interp_src_quic}");
 
     // KEY error codes that must match between backends:
@@ -33027,7 +33027,7 @@ fn test_net7_10c_h3_error_code_iana_parity() {
 fn test_net7_10c_settings_ids_parity() {
     let native_src = read_native_runtime_source();
     let interp_src =
-        fs::read_to_string("src/interpreter/net_h3/frame.rs").expect("read net_h3/frame.rs");
+        fs::read_to_string("src/interpreter/net/h3/frame.rs").expect("read net_h3/frame.rs");
 
     // SETTINGS identifiers per RFC 9114:
     // QPACK_MAX_TABLE_CAPACITY = 0x01, MAX_FIELD_SECTION_SIZE = 0x06,
@@ -33055,7 +33055,7 @@ fn test_net7_10c_settings_ids_parity() {
 #[test]
 fn test_net7_10c_connection_state_machine_parity() {
     let native_src = read_native_runtime_source();
-    let interp_src_conn = fs::read_to_string("src/interpreter/net_h3/connection.rs")
+    let interp_src_conn = fs::read_to_string("src/interpreter/net/h3/connection.rs")
         .expect("read net_h3/connection.rs");
 
     // Both backends must have the same state machine transitions:
@@ -33099,7 +33099,7 @@ fn test_net7_10c_connection_state_machine_parity() {
 fn test_net7_10c_request_validation_semantics_parity() {
     let native_src = read_native_runtime_source();
     let interp_src_req =
-        fs::read_to_string("src/interpreter/net_h3/request.rs").expect("read net_h3/request.rs");
+        fs::read_to_string("src/interpreter/net/h3/request.rs").expect("read net_h3/request.rs");
 
     // Both backends must validate the same pseudo-header rules.
 
@@ -33163,7 +33163,7 @@ fn test_net7_10c_request_validation_semantics_parity() {
 fn test_net7_10c_goaway_encode_parity() {
     let native_src = read_native_runtime_source();
     let interp_src_frame =
-        fs::read_to_string("src/interpreter/net_h3/frame.rs").expect("read net_h3/frame.rs");
+        fs::read_to_string("src/interpreter/net/h3/frame.rs").expect("read net_h3/frame.rs");
 
     // Both backends must have encode_goaway that frames a varint.
     assert!(
@@ -33186,7 +33186,7 @@ fn test_net7_10c_goaway_encode_parity() {
 #[test]
 fn test_net7_10c_idle_timeout_default_parity() {
     let native_src = read_native_runtime_source();
-    let interp_src_conn = fs::read_to_string("src/interpreter/net_h3/connection.rs")
+    let interp_src_conn = fs::read_to_string("src/interpreter/net/h3/connection.rs")
         .expect("read net_h3/connection.rs");
 
     // Interpreter: DEFAULT_IDLE_TIMEOUT = 30s
@@ -33311,7 +33311,7 @@ fn test_net7_10d_dynamic_table_struct_parity() {
     // Interpreter: verify H3DynamicTable::new(capacity) initializes to correct defaults
     // by inspecting the source for expected fields and values
     let interp_src = fs::read_to_string(
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/interpreter/net_h3/qpack.rs"),
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/interpreter/net/h3/qpack.rs"),
     )
     .unwrap();
     assert!(
@@ -33362,7 +33362,7 @@ fn test_net7_10d_eviction_semantics_parity() {
     // Source-level parity check: both backends must use the same size formula
     // entry_size = name.len + value.len + 32 (RFC 9204 Section 4.1.3)
     let interp_src = fs::read_to_string(
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/interpreter/net_h3/qpack.rs"),
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/interpreter/net/h3/qpack.rs"),
     )
     .unwrap();
     let native_src = read_native_runtime_source();
@@ -33402,7 +33402,7 @@ fn test_net7_10d_eviction_semantics_parity() {
 #[test]
 fn test_net7_10d_post_base_lookup_parity() {
     let interp_src = fs::read_to_string(
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/interpreter/net_h3/qpack.rs"),
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/interpreter/net/h3/qpack.rs"),
     )
     .unwrap();
     let native_src = read_native_runtime_source();
@@ -33432,7 +33432,7 @@ fn test_net7_10d_post_base_lookup_parity() {
 #[test]
 fn test_net7_10d_encoder_instruction_parity() {
     let interp_src = fs::read_to_string(
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/interpreter/net_h3/qpack.rs"),
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/interpreter/net/h3/qpack.rs"),
     )
     .unwrap();
     let native_src = read_native_runtime_source();
@@ -33502,7 +33502,7 @@ fn test_net7_10d_encoder_instruction_parity() {
 #[test]
 fn test_net7_10d_decoder_instruction_parity() {
     let interp_src = fs::read_to_string(
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/interpreter/net_h3/qpack.rs"),
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/interpreter/net/h3/qpack.rs"),
     )
     .unwrap();
     let native_src = read_native_runtime_source();
@@ -33572,7 +33572,7 @@ fn test_net7_10d_decoder_instruction_parity() {
 #[test]
 fn test_net7_10d_decode_block_dynamic_integration() {
     let interp_src = fs::read_to_string(
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/interpreter/net_h3/qpack.rs"),
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/interpreter/net/h3/qpack.rs"),
     )
     .unwrap();
     let native_src = read_native_runtime_source();
@@ -33689,7 +33689,7 @@ fn test_net7_11b_runtime_malformed_reject_selftest_passes() {
     // The interpreter selftest (test_net7_11b_runtime_malformed_h3_reject)
     // is a lib test. This parity test confirms the runtime test exists.
     let interp_src =
-        fs::read_to_string("src/interpreter/net_h3/mod.rs").expect("read net_h3/mod.rs");
+        fs::read_to_string("src/interpreter/net/h3/mod.rs").expect("read net_h3/mod.rs");
     assert!(
         interp_src.contains("test_net7_11b_runtime_malformed_h3_reject"),
         "NET7-11b: Interpreter must have runtime malformed H3 reject tests"
@@ -33700,10 +33700,10 @@ fn test_net7_11b_runtime_malformed_reject_selftest_passes() {
 #[test]
 fn test_net7_11b_0rtt_default_off_no_surface() {
     let files = [
-        "src/interpreter/net_h3/qpack.rs",
-        "src/interpreter/net_h3/frame.rs",
-        "src/interpreter/net_h3/connection.rs",
-        "src/interpreter/net_h3/request.rs",
+        "src/interpreter/net/h3/qpack.rs",
+        "src/interpreter/net/h3/frame.rs",
+        "src/interpreter/net/h3/connection.rs",
+        "src/interpreter/net/h3/request.rs",
     ];
 
     let forbidden = [
@@ -33801,7 +33801,7 @@ stdout(result.throw.kind)
 #[test]
 fn test_net7_11b_hardening_bounded_copy_parity() {
     let nat_src = read_native_runtime_source();
-    let ip_src = fs::read_to_string("src/interpreter/net_h3/frame.rs").expect("read frame.rs");
+    let ip_src = fs::read_to_string("src/interpreter/net/h3/frame.rs").expect("read frame.rs");
 
     // Both backends must define the same bounded limits
     assert!(
@@ -33814,7 +33814,7 @@ fn test_net7_11b_hardening_bounded_copy_parity() {
     );
 
     // Interpreter has runtime hardening tests
-    let mod_src = fs::read_to_string("src/interpreter/net_h3/mod.rs").expect("read mod.rs");
+    let mod_src = fs::read_to_string("src/interpreter/net/h3/mod.rs").expect("read mod.rs");
     assert!(
         mod_src.contains("test_net7_11b_runtime_malformed_h3_reject"),
         "NET7-11b: malformed H3 reject unit test must exist"
@@ -33927,7 +33927,7 @@ fn test_net7_12c_native_interpreter_h3_handler_contract_parity() {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
 
     let native_src = read_native_runtime_source();
-    let interp_quic_src = fs::read_to_string(manifest_dir.join("src/interpreter/net_h3/quic.rs"))
+    let interp_quic_src = fs::read_to_string(manifest_dir.join("src/interpreter/net/h3/quic.rs"))
         .expect("read quic.rs");
 
     // Both backends build request packs from decoded headers.
@@ -33985,10 +33985,10 @@ fn test_net7_12d_graceful_shutdown_goaway_drain_close_parity() {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
 
     let native_src = read_native_runtime_source();
-    let interp_quic_src = fs::read_to_string(manifest_dir.join("src/interpreter/net_h3/quic.rs"))
+    let interp_quic_src = fs::read_to_string(manifest_dir.join("src/interpreter/net/h3/quic.rs"))
         .expect("read quic.rs");
     let interp_conn_src =
-        fs::read_to_string(manifest_dir.join("src/interpreter/net_h3/connection.rs"))
+        fs::read_to_string(manifest_dir.join("src/interpreter/net/h3/connection.rs"))
             .expect("read connection.rs");
 
     // --- Native: GOAWAY -> drain wait -> close ---
@@ -34092,10 +34092,10 @@ fn test_net7_12d_graceful_shutdown_goaway_drain_close_parity() {
 fn test_net7_12d_shutdown_test_coverage() {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
 
-    let interp_quic_src = fs::read_to_string(manifest_dir.join("src/interpreter/net_h3/quic.rs"))
+    let interp_quic_src = fs::read_to_string(manifest_dir.join("src/interpreter/net/h3/quic.rs"))
         .expect("read quic.rs");
     let interp_conn_src =
-        fs::read_to_string(manifest_dir.join("src/interpreter/net_h3/connection.rs"))
+        fs::read_to_string(manifest_dir.join("src/interpreter/net/h3/connection.rs"))
             .expect("read connection.rs");
 
     // Interpreter must have both test cases in quic.rs or connection.rs tests.
@@ -34159,9 +34159,9 @@ fn test_net7_12e_h3_e2e_headers_only_benchmark() {
     }
 
     // Read Interpreter source to count allocation observation points.
-    let frame_src = fs::read_to_string("src/interpreter/net_h3/frame.rs").expect("read frame.rs");
+    let frame_src = fs::read_to_string("src/interpreter/net/h3/frame.rs").expect("read frame.rs");
     let request_src =
-        fs::read_to_string("src/interpreter/net_h3/request.rs").expect("read request.rs");
+        fs::read_to_string("src/interpreter/net/h3/request.rs").expect("read request.rs");
 
     // Build a simulated H3 request: QPACK-encoded HEADERS frame.
     // Mirrors what a real H3 client would send on a request stream.
@@ -34461,13 +34461,13 @@ fn test_net7_12e_h3_e2e_32_request_throughput_benchmark() {
 fn test_net7_12e_h3_allocation_materialization_audit() {
     let native_src = read_native_runtime_source();
     let interp_frame_src =
-        fs::read_to_string("src/interpreter/net_h3/frame.rs").expect("read frame.rs");
+        fs::read_to_string("src/interpreter/net/h3/frame.rs").expect("read frame.rs");
     let _interp_request_src =
-        fs::read_to_string("src/interpreter/net_h3/request.rs").expect("read request.rs");
+        fs::read_to_string("src/interpreter/net/h3/request.rs").expect("read request.rs");
     let interp_qpack_src =
-        fs::read_to_string("src/interpreter/net_h3/qpack.rs").expect("read qpack.rs");
+        fs::read_to_string("src/interpreter/net/h3/qpack.rs").expect("read qpack.rs");
     let interp_quic_src =
-        fs::read_to_string("src/interpreter/net_h3/quic.rs").expect("read quic.rs");
+        fs::read_to_string("src/interpreter/net/h3/quic.rs").expect("read quic.rs");
 
     // ── Interpreter: encode_frame per-frame allocation audit ──
     let encode_frame_vec_allocs = interp_frame_src.matches("vec![0u8;").count();
@@ -34624,7 +34624,7 @@ fn test_net7_12f_release_truth_blocker_closure_verified() {
     );
     // Interpreter: shutdown + drain
     let interp_quic_src =
-        fs::read_to_string("src/interpreter/net_h3/quic.rs").expect("read quic.rs");
+        fs::read_to_string("src/interpreter/net/h3/quic.rs").expect("read quic.rs");
     assert!(
         interp_quic_src.contains("shutdown") || interp_quic_src.contains("GOAWAY"),
         "NET7-12f: NB7-67 requires shutdown/GOAWAY in Interpreter H3 path"
@@ -34670,7 +34670,7 @@ fn test_net7_12f_release_gate_all_criteria_met() {
 
     // Gate 2: h3 runtime parity — both backends have h3 implementation
     let native_src = read_native_runtime_source();
-    let interp_h3_exists = std::path::Path::new("src/interpreter/net_h3/mod.rs").exists();
+    let interp_h3_exists = std::path::Path::new("src/interpreter/net/h3/mod.rs").exists();
     assert!(
         native_src.contains("serve_h3_loop"),
         "NET7-12f Gate 2: Native must have serve_h3_loop"
@@ -34700,7 +34700,7 @@ fn test_net7_12f_release_gate_all_criteria_met() {
 
     // Gate 5: interop — both backends have QPACK + H3 frame codec
     let interp_qpack_src =
-        fs::read_to_string("src/interpreter/net_h3/qpack.rs").expect("read qpack.rs");
+        fs::read_to_string("src/interpreter/net/h3/qpack.rs").expect("read qpack.rs");
     assert!(
         interp_qpack_src.contains("qpack_encode_block")
             && interp_qpack_src.contains("qpack_decode_block"),
@@ -34717,7 +34717,7 @@ fn test_net7_12f_release_gate_all_criteria_met() {
         "NET7-12f Gate 6: Native must not have aggregate buffer copies"
     );
     let interp_quic_src =
-        fs::read_to_string("src/interpreter/net_h3/quic.rs").expect("read quic.rs");
+        fs::read_to_string("src/interpreter/net/h3/quic.rs").expect("read quic.rs");
     assert!(
         !interp_quic_src.contains("extend_from_slice(&hdrs_frame"),
         "NET7-12f Gate 6: Interpreter must not aggregate HEADERS+DATA"
@@ -34725,7 +34725,7 @@ fn test_net7_12f_release_gate_all_criteria_met() {
 
     // Gate 7: hardening — malformed reject + 0-RTT default-off + no silent fallback
     let interp_frame_src =
-        fs::read_to_string("src/interpreter/net_h3/frame.rs").expect("read frame.rs");
+        fs::read_to_string("src/interpreter/net/h3/frame.rs").expect("read frame.rs");
     // Frame type validation exists
     assert!(
         interp_frame_src.contains("SETTINGS") && interp_frame_src.contains("HEADERS"),
@@ -34786,7 +34786,7 @@ fn test_net7_12f_phase_completion_structural_audit() {
     );
 
     // No TODO(NB7-87) in interpreter H3 source
-    let quic_src = fs::read_to_string("src/interpreter/net_h3/quic.rs").expect("read quic.rs");
+    let quic_src = fs::read_to_string("src/interpreter/net/h3/quic.rs").expect("read quic.rs");
     assert!(
         !quic_src.contains("TODO(NB7-87)"),
         "NET7-12f: NB7-87 TODO must be resolved"
@@ -35054,7 +35054,7 @@ fn test_nb7_116_native_multi_data_body_concatenation() {
 /// stream with SETTINGS as the first frame. GOAWAY is then sent on this stream.
 #[test]
 fn test_nb7_115_interpreter_control_stream_init() {
-    let source = std::fs::read_to_string("src/interpreter/net_h3/quic.rs").expect("read quic.rs");
+    let source = std::fs::read_to_string("src/interpreter/net/h3/quic.rs").expect("read quic.rs");
 
     // The control stream initialization must exist in serve_h3_loop.
     let serve_loop_section: String = source
@@ -35091,7 +35091,7 @@ fn test_nb7_115_interpreter_control_stream_init() {
 /// existing control stream, not on a newly opened unidirectional stream.
 #[test]
 fn test_nb7_115_interpreter_goaway_uses_control_stream() {
-    let source = std::fs::read_to_string("src/interpreter/net_h3/quic.rs").expect("read quic.rs");
+    let source = std::fs::read_to_string("src/interpreter/net/h3/quic.rs").expect("read quic.rs");
 
     // Find the GOAWAY shutdown section.
     let shutdown_section: String = source
@@ -35126,7 +35126,7 @@ fn test_nb7_115_interpreter_goaway_uses_control_stream() {
 #[test]
 fn test_nb7_115_116_multi_data_parity_interp_native() {
     let interp_source =
-        std::fs::read_to_string("src/interpreter/net_h3/quic.rs").expect("read quic.rs");
+        std::fs::read_to_string("src/interpreter/net/h3/quic.rs").expect("read quic.rs");
     let native_source = read_native_runtime_source();
 
     // Interpreter: body_data.extend_from_slice in read_request_stream
@@ -38698,7 +38698,7 @@ fn test_net6_c26b001_7_h2_method_patch_3backend_parity() {
 // truncate. Option confirmation: Step 3 Option B (parser reject) per
 // Phase 0 Design Lock.
 //
-// Limits (from src/interpreter/net_eval/h1.rs):
+// Limits (from src/interpreter/net/eval/h1.rs):
 //   HTTP_WIRE_MAX_METHOD_LEN = 16
 //   HTTP_WIRE_MAX_PATH_LEN   = 2048
 //   HTTP_WIRE_MAX_AUTHORITY_LEN = 256  (reserved, Host header follow-up)
@@ -40380,7 +40380,7 @@ fn test_net6_3b_native_h2_d28b002_6_status_500_4backend_parity() {
 /// Case 7: h2 long path (1024 chars) request.
 ///
 /// The h2 path field is unbounded by HTTP/2 itself; Taida's wire-limit
-/// check is HTTP_WIRE_MAX_PATH_LEN = 2048 (per src/interpreter/net_eval/h1.rs).
+/// check is HTTP_WIRE_MAX_PATH_LEN = 2048 (per src/interpreter/net/eval/h1.rs).
 /// 1024 chars is comfortably under the limit but 2x larger than the
 /// typical handler-side path buffer, so any silent truncation in the
 /// h2 frame parser would surface as a body-mismatch parity failure.
@@ -40791,10 +40791,10 @@ stdout(r.requests)
 /// (e.g. someone reverting only h3 leaving h2 intact) trips this test.
 #[test]
 fn test_d29b_011_h3_arena_implementation_symmetry_with_h2() {
-    let h2_src = std::fs::read_to_string("src/interpreter/net_eval/h2.rs")
-        .expect("read src/interpreter/net_eval/h2.rs");
-    let h3_src = std::fs::read_to_string("src/interpreter/net_eval/h3.rs")
-        .expect("read src/interpreter/net_eval/h3.rs");
+    let h2_src = std::fs::read_to_string("src/interpreter/net/eval/h2.rs")
+        .expect("read src/interpreter/net/eval/h2.rs");
+    let h3_src = std::fs::read_to_string("src/interpreter/net/eval/h3.rs")
+        .expect("read src/interpreter/net/eval/h3.rs");
     assert!(
         h2_src.contains("D29B-001 (Track-ζ Lock-H, 2026-04-27)"),
         "Interpreter h2 must keep the D29B-001 Lock-H banner so a \

@@ -5,7 +5,7 @@
 //! C26B-003 closed the kernel-ephemeral port collision window in
 //! `tests/parity.rs::find_free_loopback_port` (cooldown list, double-bind
 //! check, allocator restricted below `ip_local_port_range.min`). However,
-//! a separate failure mode persisted in `src/interpreter/net_eval/tests.rs`
+//! a separate failure mode persisted in `src/interpreter/net/eval/tests.rs`
 //! unit tests: a blind `sleep(100ms)` followed by a bare
 //! `TcpStream::connect(...).unwrap()` would surface ConnectionRefused
 //! (errno 111) when a freshly spawned interpreter thread had not yet

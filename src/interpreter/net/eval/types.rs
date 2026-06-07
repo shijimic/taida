@@ -7,7 +7,7 @@
 /// - Connection stream types (ConnStream, HttpConnection, ConnReadResult, ConnAction)
 /// - Internal helper types (ChunkedCompactResult, ChunkedBodyError, ResponseFields)
 /// - Global atomic counters (NEXT_REQUEST_TOKEN, NEXT_WS_TOKEN)
-use super::super::value::Value;
+use crate::interpreter::value::Value;
 use crate::net_surface::NET_RUNTIME_BUILTIN_NAMES;
 
 /// (status_code, headers, body_bytes)
@@ -221,9 +221,7 @@ pub(crate) struct ActiveStreamingWriter {
 // the flattened `contentLength: Int` and `chunked: Bool` pair for v1
 // compatibility. The `BodyEncoding` enum is the single source of
 // truth that the internal wiring promotes to when v2 chunked /
-// trailers / HTTP/2 DATA frames gain first-class support — see
-// `.dev/taida-logs/docs/design/net_v2_chunked.md` for the upgrade
-// path.
+// trailers / HTTP/2 DATA frames gain first-class support.
 //
 // Representation rules (matches RFC 7230 § 3.3.3):
 //   - `Transfer-Encoding: chunked` present (alone) → `Chunked`
@@ -504,7 +502,7 @@ impl RequestBodyState {
 /// so existing streaming helpers work unchanged.
 pub(crate) enum ConnStream {
     Plain(std::net::TcpStream),
-    Tls(Box<super::super::net_transport::TlsTransport>),
+    Tls(Box<super::super::transport::TlsTransport>),
     /// F55 S2: a transport-less placeholder used when an
     /// `ActiveStreamingWriter` must be installed for body observation but no
     /// socket-backed stream exists (HTTP/3, whose body is supplied entirely
@@ -520,7 +518,7 @@ impl std::io::Read for ConnStream {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         match self {
             ConnStream::Plain(s) => std::io::Read::read(s, buf),
-            ConnStream::Tls(t) => super::super::net_transport::Transport::read(t.as_mut(), buf),
+            ConnStream::Tls(t) => super::super::transport::Transport::read(t.as_mut(), buf),
             // Clean EOF: a Detached stream has no further bytes. The H3 2-arg
             // body supply is fully buffered in RequestBodyState.leftover, so
             // this arm is reached only if a caller reads past the buffered
@@ -535,7 +533,7 @@ impl std::io::Write for ConnStream {
         match self {
             ConnStream::Plain(s) => std::io::Write::write(s, buf),
             ConnStream::Tls(t) => {
-                super::super::net_transport::Transport::write_all(t.as_mut(), buf)?;
+                super::super::transport::Transport::write_all(t.as_mut(), buf)?;
                 Ok(buf.len())
             }
             ConnStream::Detached => Err(std::io::Error::new(
@@ -548,7 +546,7 @@ impl std::io::Write for ConnStream {
     fn flush(&mut self) -> std::io::Result<()> {
         match self {
             ConnStream::Plain(s) => std::io::Write::flush(s),
-            ConnStream::Tls(t) => super::super::net_transport::Transport::flush(t.as_mut()),
+            ConnStream::Tls(t) => super::super::transport::Transport::flush(t.as_mut()),
             ConnStream::Detached => Ok(()),
         }
     }
@@ -556,9 +554,7 @@ impl std::io::Write for ConnStream {
     fn write_all(&mut self, buf: &[u8]) -> std::io::Result<()> {
         match self {
             ConnStream::Plain(s) => std::io::Write::write_all(s, buf),
-            ConnStream::Tls(t) => {
-                super::super::net_transport::Transport::write_all(t.as_mut(), buf)
-            }
+            ConnStream::Tls(t) => super::super::transport::Transport::write_all(t.as_mut(), buf),
             ConnStream::Detached => Err(std::io::Error::new(
                 std::io::ErrorKind::BrokenPipe,
                 "write to a detached stream is not supported (HTTP/3 streaming response writer)",
@@ -587,9 +583,7 @@ impl ConnStream {
     pub(crate) fn shutdown_write_graceful(&mut self) -> std::io::Result<()> {
         match self {
             ConnStream::Plain(s) => s.shutdown(std::net::Shutdown::Write),
-            ConnStream::Tls(t) => {
-                super::super::net_transport::Transport::shutdown_write(t.as_mut())
-            }
+            ConnStream::Tls(t) => super::super::transport::Transport::shutdown_write(t.as_mut()),
             ConnStream::Detached => Ok(()),
         }
     }

@@ -37,7 +37,7 @@
 //!
 //! | backend     | source                                                |
 //! |-------------|-------------------------------------------------------|
-//! | interpreter | `src/interpreter/net_eval/mod.rs::readBody` (2-arg)   |
+//! | interpreter | `src/interpreter/net/eval/mod.rs::readBody` (2-arg)   |
 //! | native h1   | `src/codegen/native_runtime/net_h1_h2.c::taida_net_read_body` |
 //! | JS (Node)   | `src/js/runtime/net.rs::__taida_net_readBody`         |
 //!

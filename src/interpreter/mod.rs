@@ -8,12 +8,7 @@ pub(crate) mod json;
 mod methods;
 mod module_eval;
 mod mold_eval;
-mod net_eval;
-mod net_h2;
-#[allow(dead_code)] // Phase 3: protocol layer ready, QUIC transport gated
-mod net_h3;
-#[allow(dead_code)] // Phase 1 defines interfaces consumed in Phase 2+
-mod net_transport;
+mod net;
 mod os_eval;
 mod prelude;
 // D29B-016 / Phase 10-B: gap-buffer rope path for `Value::Str` mutation hot

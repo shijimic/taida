@@ -197,7 +197,7 @@ pub struct Interpreter {
     /// the connection's StreamingWriter state and TcpStream during handler execution.
     /// Safety: The interpreter is single-threaded (!Send). The raw pointers point to
     /// stack-local variables in dispatch_request that outlive the handler call.
-    pub(crate) active_streaming_writer: Option<super::net_eval::ActiveStreamingWriter>,
+    pub(crate) active_streaming_writer: Option<super::net::eval::ActiveStreamingWriter>,
     /// Context for the addon facade currently being loaded.
     ///
     /// When `load_addon_facade` is evaluating a `<pkg>/taida/<stem>.td` file,

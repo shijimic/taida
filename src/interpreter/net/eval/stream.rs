@@ -10,8 +10,6 @@
 //! dispatcher in `mod.rs` continues to route these calls; this file merely
 //! hosts the implementations.
 
-use super::super::eval::{Interpreter, RuntimeError, Signal};
-use super::super::value::Value;
 use super::helpers::{
     build_streaming_head, parse_chunk_size_hex_bytes, write_all_retry, write_vectored_all,
 };
@@ -19,6 +17,8 @@ use super::types::{
     ActiveStreamingWriter, BodyEncoding, ChunkedDecoderState, ConnStream, RequestBodyState,
     StreamingWriter, WriterState,
 };
+use crate::interpreter::eval::{Interpreter, RuntimeError, Signal};
+use crate::interpreter::value::Value;
 use crate::parser::Expr;
 
 impl Interpreter {

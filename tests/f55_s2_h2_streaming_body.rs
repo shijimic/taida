@@ -931,8 +931,8 @@ stdout(r.requests)
 // (silently re-treating 2-arg H3 handlers as 1-arg) flips this assertion.
 
 fn read_interp_h3_source() -> String {
-    std::fs::read_to_string("src/interpreter/net_eval/h3.rs")
-        .expect("read src/interpreter/net_eval/h3.rs")
+    std::fs::read_to_string("src/interpreter/net/eval/h3.rs")
+        .expect("read src/interpreter/net/eval/h3.rs")
 }
 
 #[test]
@@ -980,8 +980,8 @@ fn f55_s2_interp_h3_serves_2arg_streaming_branch() {
 
 #[test]
 fn f55_s2_interp_h2_serves_2arg_streaming_branch() {
-    let src = std::fs::read_to_string("src/interpreter/net_eval/h2.rs")
-        .expect("read src/interpreter/net_eval/h2.rs");
+    let src = std::fs::read_to_string("src/interpreter/net/eval/h2.rs")
+        .expect("read src/interpreter/net/eval/h2.rs");
 
     assert!(
         src.contains("F55 S2"),
