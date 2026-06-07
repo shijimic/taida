@@ -1,5 +1,5 @@
-use super::ir::*;
-use super::lower::{LowerError, Lowering};
+use super::{LowerError, Lowering};
+use crate::codegen::ir::*;
 /// Mold instantiation lowering for the Taida native backend.
 ///
 /// Contains `lower_mold_inst` (68 mold types) and mold field processing helpers.
@@ -2852,12 +2852,12 @@ impl Lowering {
                 func.push(IrInst::CondBranch(
                     result_var,
                     vec![
-                        super::ir::CondArm {
+                        crate::codegen::ir::CondArm {
                             condition: Some(cond_var),
                             body: then_body,
                             result: then_result,
                         },
-                        super::ir::CondArm {
+                        crate::codegen::ir::CondArm {
                             condition: None,
                             body: else_body,
                             result: else_result,

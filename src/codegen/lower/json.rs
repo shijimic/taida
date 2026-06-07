@@ -1,4 +1,4 @@
-use super::lower::{LowerError, Lowering};
+use super::{LowerError, Lowering};
 /// JSON schema resolution for the Taida native backend.
 ///
 /// Contains `resolve_json_schema_descriptor`, `typedef_to_schema_descriptor`,

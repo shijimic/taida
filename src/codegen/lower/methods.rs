@@ -1,5 +1,5 @@
-use super::ir::*;
-use super::lower::{LowerError, Lowering, simple_hash};
+use super::{LowerError, Lowering, simple_hash};
+use crate::codegen::ir::*;
 /// Method call lowering for the Taida native backend.
 ///
 /// Contains `lower_method_call` and polymorphic dispatch helpers.
