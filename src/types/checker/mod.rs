@@ -1102,6 +1102,7 @@ mod checker_methods;
 mod descriptor;
 mod imports;
 mod infer;
+pub(crate) mod method_spec;
 mod mold_header;
 mod resolve;
 mod validate;
