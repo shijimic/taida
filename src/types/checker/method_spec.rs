@@ -119,9 +119,10 @@ pub(crate) enum ReturnKind {
     Unknown,
 }
 
-/// One builtin method: existence + arity + argless return kind. The
-/// single source of truth for "which methods exist on which builtin
-/// type, taking how many args, returning what".
+/// One builtin method: existence + arity + argless return kind — the
+/// statically enumerable facet of the checker's two builtin method
+/// paths. Not yet an existence SSOT: the module doc lists the paths
+/// this table deliberately does not cover.
 #[allow(dead_code)]
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct BuiltinMethodSpec {
@@ -516,18 +517,25 @@ mod tests {
     fn known_path_asymmetries_hold() {
         let mut checker = TypeChecker::new();
         let stream = Type::Generic("Stream".to_string(), vec![Type::Int]);
-        assert_eq!(
-            checker
-                .builtin_method_signature(&stream, "length")
-                .map(|(min, max, _)| (min, max)),
-            None,
-            "arity path unexpectedly learned Stream.length — add Stream \
-             to the spec table"
-        );
-        assert_eq!(
-            checker.infer_method_return_type(&stream, "length"),
-            Type::Int
-        );
+        for (name, ret) in [
+            ("length", Type::Int),
+            ("isEmpty", Type::Bool),
+            ("toString", Type::Str),
+        ] {
+            assert_eq!(
+                checker
+                    .builtin_method_signature(&stream, name)
+                    .map(|(min, max, _)| (min, max)),
+                None,
+                "arity path unexpectedly learned Stream.{name} — add Stream \
+                 to the spec table"
+            );
+            assert_eq!(
+                checker.infer_method_return_type(&stream, name),
+                ret,
+                "return path lost Stream.{name} — update the asymmetry pin"
+            );
+        }
 
         let async_ty = Type::Generic("Async".to_string(), vec![Type::Int]);
         assert_eq!(
