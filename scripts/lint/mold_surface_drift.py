@@ -26,7 +26,7 @@ DOC_PATHS = [
     Path("docs/reference/addon_manifest.md"),
 ]
 RUNTIME_PATHS = [
-    Path("src/codegen/lower_molds.rs"),
+    Path("src/codegen/lower/molds_inst.rs"),
     Path("src/interpreter/mold_eval.rs"),
 ]
 REGISTRY_PATH = Path("src/types/mold_specs.rs")
