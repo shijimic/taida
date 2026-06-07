@@ -19,11 +19,11 @@ use taida::types::{CompileTarget, TypeChecker};
 
 use crate::cli::build_descriptor::{DescriptorBuildFlags, run_build_descriptor_mode};
 use crate::cli::help::{print_build_help, print_build_usage_and_exit};
+use crate::cli::ingot::{find_packages_tdm, find_packages_tdm_from};
 use crate::cli::way::{
     collect_release_gate_sites_for_files, collect_td_files, report_release_gate_violations,
     scan_release_gate_sites,
 };
-use crate::{find_packages_tdm, find_packages_tdm_from};
 
 // JSONL diagnostics mirror the public record fields directly; bundling them
 // into a transient struct would obscure the emitter contract at call sites.
