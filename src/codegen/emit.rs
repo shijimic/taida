@@ -1749,6 +1749,11 @@ fn runtime_abi(name: &str) -> Result<RuntimeAbi, String> {
             params: &[Ptr],
             returns: &[Ptr],
         },
+        // F56 Phase 6+: From{File,Input} -> Async[Lax[Secret[_]]].
+        "taida_os_secret_from_file" | "taida_os_secret_from_input" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Ptr],
+        },
         // F56 Phase 4: secret-aware consumers. (secret pack, Str|Bytes) ->
         // HmacSha256 -> Str (Ptr); ConstantTimeEq -> Bool (Val).
         "taida_hmac_sha256_secret" => RuntimeAbi {

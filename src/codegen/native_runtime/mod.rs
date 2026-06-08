@@ -831,7 +831,11 @@ mod tests {
         //   in taida_list_contains (closes the `@[a].contains(a)` identity oracle
         //   found by the close /so review; in F1, before the marker).
         //   1,293,147 -> 1,293,522.
-        const EXPECTED_TOTAL_LEN: usize = 1_293_522;
+        // 2026-06-09 F56 Phase 6+ (os.c): +1,960 bytes for the native file/stdin
+        //   secret producers taida_os_secret_from_file / _from_input
+        //   (Async[Lax[Secret[_]]]). os.c is outside CORE_SECTION, so F1_LEN and
+        //   the c13_4 boundary are unchanged. 1,293,522 -> 1,295,482.
+        const EXPECTED_TOTAL_LEN: usize = 1_295_482;
         let asm = *NATIVE_RUNTIME_C;
         assert_eq!(
             asm.len(),

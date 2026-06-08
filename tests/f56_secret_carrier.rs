@@ -652,14 +652,12 @@ fn secret_source_producers_seal_at_boundary() {
     let fdir = unique_temp_dir("f56-fromfile");
     let keyfile = fdir.join("key.bin");
     write_file(&keyfile, CANARY);
-    let fsrc = fdir.join("main.td");
-    write_file(
-        &fsrc,
-        &format!(
-            "MoltenizeSecretFromFile[\"{}\"]() >=> lx\nlx >=> sec\nstdout(Redact[sec]())\n",
-            keyfile.display()
-        ),
+    let fromfile_src = format!(
+        "MoltenizeSecretFromFile[\"{}\"]() >=> lx\nlx >=> sec\nstdout(Redact[sec]())\n",
+        keyfile.display()
     );
+    let fsrc = fdir.join("main.td");
+    write_file(&fsrc, &fromfile_src);
     let fout = Command::new(taida_bin())
         .arg(&fsrc)
         .output()
@@ -670,5 +668,18 @@ fn secret_source_producers_seal_at_boundary() {
         !ft.contains(CANARY),
         "FromFile leaked the file secret:\n{ft}"
     );
+
+    // FromFile is also implemented on Native (Phase 6+): the same masked output,
+    // no leak. (WASM / JS gate it with a capability error — design L0-5.)
+    let ndir = unique_temp_dir("f56-fromfile-native");
+    if let Some(nout) = build_and_run(&ndir, &fromfile_src, "native") {
+        assert_eq!(
+            nout.trim(),
+            "***",
+            "native FromFile -> Redact must be ***:\n{nout}"
+        );
+        assert!(!nout.contains(CANARY), "native FromFile leaked:\n{nout}");
+    }
+    let _ = fs::remove_dir_all(&ndir);
     let _ = fs::remove_dir_all(&fdir);
 }

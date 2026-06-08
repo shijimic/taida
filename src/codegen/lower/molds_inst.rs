@@ -2062,18 +2062,28 @@ impl Lowering {
                           (HmacSha256 / ConstantTimeEq) instead of revealing the plaintext."
                     .into(),
             }),
-            // F56 Phase 2: the file / stdin secret producers are Interpreter-only
-            // for now (the env producer is the canonical four-backend ingestion).
-            // Compiled backends gate them with a capability error rather than
-            // silently miscompiling.
-            "MoltenizeSecretFromFile" | "MoltenizeSecretFromInput" => Err(LowerError {
-                message: format!(
-                    "{} is supported on the Interpreter backend only. On compiled backends, \
-                     read the secret with MoltenizeSecretFromEnv[name]() (the canonical \
-                     four-backend secret source).",
-                    type_name
-                ),
-            }),
+            // F56 Phase 6+: source-side secret producers from file / stdin ->
+            // Async[Lax[Secret[_]]]. Implemented on Native (the env producer is
+            // already four-backend). WASM has no file/stdin capability, so the
+            // emitted runtime call has no WASM prototype and the WASM C emitter
+            // rejects it with a capability error (design L0-5); JS rejects in its
+            // codegen.
+            "MoltenizeSecretFromFile" | "MoltenizeSecretFromInput" => {
+                if type_args.len() != 1 {
+                    return Err(LowerError {
+                        message: format!("{} requires 1 type argument: {}[arg]", type_name, type_name),
+                    });
+                }
+                let arg = self.lower_expr(func, &type_args[0])?;
+                let result = func.alloc_var();
+                let fn_name = if type_name == "MoltenizeSecretFromFile" {
+                    "taida_os_secret_from_file"
+                } else {
+                    "taida_os_secret_from_input"
+                };
+                func.push(IrInst::Call(result, fn_name.to_string(), vec![arg]));
+                Ok(result)
+            }
             // F56 Phase 2: MoltenizeSecretFromEnv[name]() -> Lax[Secret[Str]].
             "MoltenizeSecretFromEnv" => {
                 if type_args.len() != 1 {

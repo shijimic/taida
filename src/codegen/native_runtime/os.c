@@ -489,6 +489,43 @@ taida_val taida_os_env_var_secret(taida_val name_ptr) {
     return taida_lax_new(sealed, empty_secret);
 }
 
+// ── F56 Phase 6+: MoltenizeSecretFromFile[path]() → Async[Lax[Secret[Bytes]]] ──
+// Reads the file's bytes straight into a sealed carrier, wrapped in a fulfilled
+// Async (the `>=>` await returns immediately), mirroring the interpreter. Both
+// the success value and the failure-channel default are sealed Bytes.
+taida_val taida_os_secret_from_file(taida_val path_ptr) {
+    taida_val empty_secret =
+        taida_secret_new(taida_bytes_contig_new((const unsigned char *)"", 0));
+    taida_val lax_bytes = taida_os_read_bytes(path_ptr); // Lax[Bytes]
+    taida_val lax_secret;
+    if (taida_lax_has_value(lax_bytes)) {
+        taida_val sealed = taida_secret_new(taida_lax_unmold((taida_ptr)lax_bytes));
+        lax_secret = taida_lax_new(sealed, empty_secret);
+    } else {
+        taida_val error = taida_make_error_with_kind_code(
+            "IoError", "MoltenizeSecretFromFile error", "not_found", 0);
+        lax_secret = taida_lax_empty_error(empty_secret, error);
+    }
+    return taida_async_ok_tagged(lax_secret, TAIDA_TAG_PACK);
+}
+
+// ── F56 Phase 6+: MoltenizeSecretFromInput[prompt]() → Async[Lax[Secret[Str]]] ──
+// Reads a stdin line into a sealed carrier. Reuses taida_io_stdin_line (which
+// returns Async[Lax[Str]]), unwraps it, seals the line, and re-wraps.
+taida_val taida_os_secret_from_input(taida_val prompt_ptr) {
+    taida_val empty_secret = taida_secret_new((taida_val)taida_str_new_copy(""));
+    taida_val async_line = taida_io_stdin_line((taida_ptr)prompt_ptr); // Async[Lax[Str]]
+    taida_val lax_line = taida_async_unmold((taida_ptr)async_line);    // Lax[Str]
+    taida_val lax_secret;
+    if (taida_lax_has_value(lax_line)) {
+        taida_val sealed = taida_secret_new(taida_lax_unmold((taida_ptr)lax_line));
+        lax_secret = taida_lax_new(sealed, empty_secret);
+    } else {
+        lax_secret = taida_lax_empty(empty_secret);
+    }
+    return taida_async_ok_tagged(lax_secret, TAIDA_TAG_PACK);
+}
+
 // ── writeFile(path, content) → Result[Int] ─────────────────
 //
 // C12B-021: the Result's inner value is the byte count written,
