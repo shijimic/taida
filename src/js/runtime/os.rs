@@ -1558,6 +1558,23 @@ function constantTimeEquals(a, b) {
   }
   return diff === 0;
 }
+// F56 Phase 4: secret-aware consumers. Reveal the sealed secret's inner value
+// (Level 0: it lives in `__value`) and feed it to the crypto primitive — the
+// secret is consumed without being surfaced as a plain value. The MAC / verdict
+// is public.
+function __taida_reveal_secret(carrier, fnName) {
+  if (carrier && carrier.__type === 'Moltenized') return carrier.__value;
+  throw new __TaidaError(
+    fnName + ' expects a sealed Secret as its first argument — seal it with ' +
+    'MoltenizeSecret[...] or read it via MoltenizeSecretFromEnv / MoltenizeSecretFromFile'
+  );
+}
+function __taida_hmac_sha256_secret(secret, message) {
+  return hmacSha256(__taida_reveal_secret(secret, 'HmacSha256'), message);
+}
+function __taida_constant_time_eq_secret(secret, candidate) {
+  return constantTimeEquals(__taida_reveal_secret(secret, 'ConstantTimeEq'), candidate);
+}
 const __TAIDA_HEX = '0123456789abcdef';
 function hexEncode(value) {
   const buf = __taida_crypto_to_buffer(value, 'hexEncode');

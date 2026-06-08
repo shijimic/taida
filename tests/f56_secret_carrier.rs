@@ -176,6 +176,77 @@ fn redact_returns_fixed_mask() {
     assert!(!t.contains(CANARY), "Redact leaked the sealed value:\n{t}");
 }
 
+#[test]
+fn secret_aware_consumers_use_secret_without_leak() {
+    // HmacSha256 / ConstantTimeEq consume a sealed secret directly. The MAC must
+    // equal the HMAC computed over the plaintext key (proving the sealed bytes
+    // reach the primitive), the comparison verdicts must be correct, and the
+    // secret must never surface in the output.
+    let src = format!(
+        "secret <= MoltenizeSecret[\"{CANARY}\"]()\n\
+         mac <= HmacSha256[secret, \"payload\"]()\n\
+         stdout(mac)\n\
+         same <= ConstantTimeEq[secret, \"{CANARY}\"]()\n\
+         stdout(same.toString())\n\
+         diff <= ConstantTimeEq[secret, \"wrong\"]()\n\
+         stdout(diff.toString())\n"
+    );
+    let out = run_interp("consumers", &src, false);
+    let t = combined(&out);
+    assert!(out.status.success(), "consumer program should run:\n{t}");
+    assert!(
+        !t.contains(CANARY),
+        "a consumer leaked the sealed secret:\n{t}"
+    );
+
+    let lines: Vec<&str> = t.lines().collect();
+    // Cross-check the MAC against the public lowercase crypto over the plaintext.
+    let xref = run_interp(
+        "consumers-xref",
+        &format!(
+            ">>> taida-lang/crypto => @(hmacSha256)\nstdout(hmacSha256(\"{CANARY}\", \"payload\"))\n"
+        ),
+        false,
+    );
+    let xref_mac = combined(&xref).trim().to_string();
+    assert_eq!(
+        lines.first().copied(),
+        Some(xref_mac.as_str()),
+        "HmacSha256 over the sealed secret must equal the HMAC over its plaintext"
+    );
+    assert_eq!(
+        lines.get(1).copied(),
+        Some("true"),
+        "ConstantTimeEq must match the equal candidate"
+    );
+    assert_eq!(
+        lines.get(2).copied(),
+        Some("false"),
+        "ConstantTimeEq must reject the wrong candidate"
+    );
+}
+
+#[test]
+fn secret_aware_consumer_rejects_non_secret() {
+    // A secret-aware consumer requires a sealed Secret as its first argument; a
+    // plain value is a misuse (use the lowercase `hmacSha256` for those).
+    let out = run_interp(
+        "consumer-non-secret",
+        "mac <= HmacSha256[\"plain-not-sealed\", \"msg\"]()\nstdout(mac)\n",
+        false,
+    );
+    assert!(
+        !out.status.success(),
+        "HmacSha256 must reject a non-secret first argument:\n{}",
+        combined(&out)
+    );
+    assert!(
+        combined(&out).contains("sealed Secret"),
+        "the rejection should name the sealed-Secret requirement:\n{}",
+        combined(&out)
+    );
+}
+
 // ── Layer 2 (cross-backend): no plaintext leak on any compiled backend ──────
 
 /// Build `source` for `profile` into `out`, returning the captured run output

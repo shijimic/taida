@@ -830,6 +830,8 @@ taida_ptr taida_molten_new(void);
 taida_ptr taida_moltenize_new(taida_val value);
 taida_ptr taida_secret_new(taida_val value);
 taida_ptr taida_redact(taida_val carrier);
+taida_val taida_hmac_sha256_secret(taida_val secret_ptr, taida_val msg_val);
+taida_val taida_constant_time_eq_secret(taida_val secret_ptr, taida_val cand_val);
 taida_ptr taida_stub_new(taida_ptr message);
 taida_ptr taida_todo_new(taida_ptr id, taida_ptr task, taida_ptr sol, taida_ptr unm);
 taida_ptr taida_gorillax_err(taida_ptr error);
@@ -13543,6 +13545,25 @@ taida_val taida_crypto_constant_time_equals(taida_val a_val, taida_val b_val) {
     if (a) free(a);
     if (b) free(b);
     return (taida_val)(eq ? 1 : 0);
+}
+
+// F56 Phase 4: secret-aware consumers. Reveal the sealed secret's inner value
+// (pack index 1 = __value) and feed it to the crypto primitive, so the secret
+// is consumed without being surfaced as a plain value. The result (MAC hex /
+// bool) is public. (Level 0 on Native: the inner value lives in the pack; see
+// the F56 backend guarantee matrix.)
+taida_val taida_hmac_sha256_secret(taida_val secret_ptr, taida_val msg_val) {
+    taida_val inner = taida_is_moltenized(secret_ptr)
+        ? taida_pack_get_idx((taida_ptr)secret_ptr, 1)
+        : secret_ptr;
+    return taida_crypto_hmac_sha256(inner, msg_val);
+}
+
+taida_val taida_constant_time_eq_secret(taida_val secret_ptr, taida_val cand_val) {
+    taida_val inner = taida_is_moltenized(secret_ptr)
+        ? taida_pack_get_idx((taida_ptr)secret_ptr, 1)
+        : secret_ptr;
+    return taida_crypto_constant_time_equals(inner, cand_val);
 }
 
 // hexEncode: Str|Bytes -> lower-hex Str.

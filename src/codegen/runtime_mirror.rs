@@ -418,6 +418,11 @@ const DIVERGENT_CRYPTO: &[&str] = &[
     "taida_crypto_sha224",
     "taida_crypto_sha384",
     "taida_crypto_sha512",
+    // F56 Phase 4: secret-aware consumers reveal via the per-target carrier
+    // probe (`taida_is_moltenized` / `_wasm_carrier_kind`) then share the
+    // crypto algorithm — same divergence class as the primitives above.
+    "taida_constant_time_eq_secret",
+    "taida_hmac_sha256_secret",
 ];
 
 /// Deliberately divergent: container construction/mutation sits on

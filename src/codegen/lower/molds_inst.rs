@@ -2027,6 +2027,27 @@ impl Lowering {
                 func.push(IrInst::Call(result, fn_name.to_string(), vec![val]));
                 Ok(result)
             }
+            // F56 Phase 4: secret-aware consumers. HmacSha256[secret, msg]() ->
+            // taida_hmac_sha256_secret; ConstantTimeEq[secret, cand]() ->
+            // taida_constant_time_eq_secret. The secret's inner bytes are read
+            // from the sealed pack and fed to the crypto primitive.
+            "HmacSha256" | "ConstantTimeEq" => {
+                if type_args.len() != 2 {
+                    return Err(LowerError {
+                        message: format!("{} requires 2 type arguments: {}[secret, x]", type_name, type_name),
+                    });
+                }
+                let secret = self.lower_expr(func, &type_args[0])?;
+                let other = self.lower_expr(func, &type_args[1])?;
+                let result = func.alloc_var();
+                let fn_name = if type_name == "HmacSha256" {
+                    "taida_hmac_sha256_secret"
+                } else {
+                    "taida_constant_time_eq_secret"
+                };
+                func.push(IrInst::Call(result, fn_name.to_string(), vec![secret, other]));
+                Ok(result)
+            }
             // F56 Phase 2: MoltenizeSecretFromEnv[name]() -> Lax[Secret[Str]].
             "MoltenizeSecretFromEnv" => {
                 if type_args.len() != 1 {

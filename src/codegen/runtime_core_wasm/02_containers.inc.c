@@ -2056,6 +2056,24 @@ int64_t taida_crypto_constant_time_equals(int64_t a_val, int64_t b_val) {
     return (int64_t)(diff == 0 ? 1 : 0);
 }
 
+/* F56 Phase 4: secret-aware consumers. Reveal the sealed secret's inner value
+   (pack index 1 = __value) and feed it to the crypto primitive; the result
+   (MAC hex / bool) is public. (Level 0 on WASM: the inner value lives in the
+   pack — see the F56 backend guarantee matrix.) */
+int64_t taida_hmac_sha256_secret(int64_t secret_ptr, int64_t msg_val) {
+    int64_t inner = _wasm_carrier_kind(secret_ptr)
+        ? taida_pack_get_idx(secret_ptr, 1)
+        : secret_ptr;
+    return taida_crypto_hmac_sha256(inner, msg_val);
+}
+
+int64_t taida_constant_time_eq_secret(int64_t secret_ptr, int64_t cand_val) {
+    int64_t inner = _wasm_carrier_kind(secret_ptr)
+        ? taida_pack_get_idx(secret_ptr, 1)
+        : secret_ptr;
+    return taida_crypto_constant_time_equals(inner, cand_val);
+}
+
 /* hexEncode: Str|Bytes -> lower-hex Str. */
 int64_t taida_crypto_hex_encode(int64_t value) {
     unsigned char *raw = (unsigned char *)0; int64_t len = 0;

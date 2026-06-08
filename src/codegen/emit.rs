@@ -1749,6 +1749,16 @@ fn runtime_abi(name: &str) -> Result<RuntimeAbi, String> {
             params: &[Ptr],
             returns: &[Ptr],
         },
+        // F56 Phase 4: secret-aware consumers. (secret pack, Str|Bytes) ->
+        // HmacSha256 -> Str (Ptr); ConstantTimeEq -> Bool (Val).
+        "taida_hmac_sha256_secret" => RuntimeAbi {
+            params: &[Ptr, Val],
+            returns: &[Ptr],
+        },
+        "taida_constant_time_eq_secret" => RuntimeAbi {
+            params: &[Ptr, Val],
+            returns: &[Val],
+        },
         // taida-lang/os package — side-effect functions
         "taida_os_write_file" => RuntimeAbi {
             params: &[Ptr, Ptr],

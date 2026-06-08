@@ -896,6 +896,10 @@ fn runtime_func_prototype(name: &str, profile: WasmProfile) -> Result<String, Wa
         "taida_crypto_hmac_sha256" | "taida_crypto_constant_time_equals" => {
             format!("int64_t {}(int64_t a, int64_t b);", name)
         }
+        // F56 Phase 4: secret-aware consumers (sealed secret, Str|Bytes).
+        "taida_hmac_sha256_secret" | "taida_constant_time_eq_secret" => {
+            format!("int64_t {}(int64_t secret_ptr, int64_t x);", name)
+        }
         // W-5: Lax method helpers
         "taida_can_throw_payload" => "int64_t taida_can_throw_payload(int64_t val);".to_string(),
         // W-5: Float comparison

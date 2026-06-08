@@ -121,7 +121,10 @@ mod tests {
         //   taida_pack_get, which iterate the hash slots and OOB-trapped on
         //   magic-tagged Async/Lax/Result packs reaching the equality helpers
         //   (`i == n` in pi_approx). 455,981 -> 456,795.
-        const EXPECTED_TOTAL_LEN: usize = 456_795;
+        // 2026-06-09 F56 Phase 4: +793 bytes for the secret-aware consumers
+        //   taida_hmac_sha256_secret / taida_constant_time_eq_secret next to the
+        //   crypto primitives in 02_containers.inc.c. 456,795 -> 457,588.
+        const EXPECTED_TOTAL_LEN: usize = 457_588;
         let asm = *RUNTIME_CORE_WASM;
         assert_eq!(
             asm.len(),

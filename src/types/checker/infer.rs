@@ -1971,6 +1971,11 @@ impl TypeChecker {
                             vec![Type::Generic("Secret".to_string(), vec![Type::Bytes])],
                         )],
                     ),
+                    // F56 Phase 4: secret-aware consumers. The result is public —
+                    // the MAC (`Str`) / comparison verdict (`Bool`) is not a
+                    // secret, so it leaves the sealed-carrier type behind.
+                    "HmacSha256" => Type::Str,
+                    "ConstantTimeEq" => Type::Bool,
                     // Div[x, y]() and Mod[x, y]() return Lax[Num]
                     "Div" | "Mod" => {
                         let inner = type_args

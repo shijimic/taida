@@ -823,7 +823,11 @@ mod tests {
         //   + taida_list_last_index_of. Total 1,288,808 -> 1,291,077.
         // 2026-06-09 F56 Phase 2 (os.c): +1,011 bytes for taida_os_env_var_secret
         //   (MoltenizeSecretFromEnv -> Lax[Secret[Str]]). 1,291,077 -> 1,292,088.
-        const EXPECTED_TOTAL_LEN: usize = 1_292_088;
+        // 2026-06-09 F56 Phase 4 (core.c): +1,059 bytes for the secret-aware
+        //   consumers taida_hmac_sha256_secret / taida_constant_time_eq_secret
+        //   (forward decls in F1 + definitions next to the crypto in F2).
+        //   1,292,088 -> 1,293,147.
+        const EXPECTED_TOTAL_LEN: usize = 1_293_147;
         let asm = *NATIVE_RUNTIME_C;
         assert_eq!(
             asm.len(),
@@ -1519,7 +1523,10 @@ mod tests {
         //   / taida_poly_eq / taida_poly_neq / taida_list_index_of /
         //   taida_list_last_index_of, all before the Error-ceiling marker).
         //   F1_LEN 387,641 -> 389,910.
-        const F1_LEN: usize = 389_910;
+        // 2026-06-09 F56 Phase 4: the two secret-aware-consumer forward
+        //   declarations sit before the Error-ceiling marker (next to the other
+        //   carrier prototypes): +160 bytes. F1_LEN 389,910 -> 390,070.
+        const F1_LEN: usize = 390_070;
         // CORE_SECTION = F1_LEN (before the Error ceiling marker) + F2 (after it).
         // F2 was 200,593 bytes (the previous 200_740 figure was stale: the
         // post-handler-ABI F2 had already shrunk by 147 bytes without this
@@ -1542,7 +1549,9 @@ mod tests {
             CORE_SECTION.len(),
             // F56 after the marker: +335 (unmold reject) +970 (display pack-renderer
             // guards + json_serialize_typed fail-closed guard). F2 222,688 -> 223,993.
-            F1_LEN + 223_993,
+            // F56 Phase 4: the consumer definitions sit next to the crypto helpers
+            // (after the marker): +899 bytes. F2 223,993 -> 224,892.
+            F1_LEN + 224_892,
             "core.c total byte length must equal the expected concatenated runtime fragments"
         );
         const F2_PREFIX: &[u8] = b"// \xE2\x94\x80\xE2\x94\x80 Error ceiling";

@@ -4009,6 +4009,31 @@ impl JsCodegen {
                     self.write(")");
                     return Ok(());
                 }
+                // F56 Phase 4: secret-aware consumers.
+                // HmacSha256[secret, msg]() → __taida_hmac_sha256_secret(secret, msg)
+                // ConstantTimeEq[secret, cand]() → __taida_constant_time_eq_secret(secret, cand)
+                if name == "HmacSha256" || name == "ConstantTimeEq" {
+                    if type_args.len() != 2 {
+                        return Err(JsError {
+                            message: format!(
+                                "{} requires 2 type arguments: {}[secret, x]",
+                                name, name
+                            ),
+                        });
+                    }
+                    let func = if name == "HmacSha256" {
+                        "__taida_hmac_sha256_secret"
+                    } else {
+                        "__taida_constant_time_eq_secret"
+                    };
+                    self.write(func);
+                    self.write("(");
+                    self.gen_expr(&type_args[0])?;
+                    self.write(", ");
+                    self.gen_expr(&type_args[1])?;
+                    self.write(")");
+                    return Ok(());
+                }
                 // Stream[value]() → Stream_mold(value)
                 if name == "Stream" {
                     self.write("Stream_mold(");

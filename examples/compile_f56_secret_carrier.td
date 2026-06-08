@@ -10,3 +10,13 @@ stdout(Redact[secret]())
 
 opaque <= Moltenize[42]()
 stdout(Redact[opaque]())
+
+// F56 Phase 4: secret-aware consumers. The sealed secret is used (HMAC'd,
+// compared in constant time) without ever being revealed to a plain `Str`.
+// The MAC (public) and the Bool verdicts are pinned identical across backends.
+mac <= HmacSha256[secret, "payload"]()
+stdout(mac)
+same <= ConstantTimeEq[secret, "api-key"]()
+stdout(same.toString())
+diff <= ConstantTimeEq[secret, "nope"]()
+stdout(diff.toString())

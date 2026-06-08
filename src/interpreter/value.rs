@@ -827,9 +827,9 @@ impl SealedCell {
 
     /// Borrow the sealed plaintext. Crate-internal only — the Taida surface
     /// never reaches this (the sink matrix plus the fail-closed runtime block
-    /// every display / serialize / compare path). Reserved for secret-aware
-    /// consumers (`Reveal` / `HmacSha256` / `ConstantTimeEq`, F56 Phase 4).
-    #[allow(dead_code)]
+    /// every display / serialize / compare path). Used by the secret-aware
+    /// consumers (`HmacSha256` / `ConstantTimeEq`, F56 Phase 4) to feed the
+    /// sealed bytes to a crypto primitive by reference, without revealing them.
     pub fn reveal(&self) -> &Value {
         &self.0.value
     }

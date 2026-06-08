@@ -397,6 +397,18 @@ pub static MOLD_SPECS: &[MoldSpec] = &[
     MoldSpec::exact("MoltenizeSecretFromFile", 1, ANY1, MoldReturnKind::Pack)
         .with_worker_boundary(WorkerMoldBoundary::HostBoundary)
         .enforce_checker(),
+    // F56 Phase 4: secret-aware consumers. Each accepts a sealed `Secret`/
+    // `Moltenized` as its first argument and consumes the sealed bytes directly
+    // (read by reference from the sealed buffer — no plaintext `Str` round-trip),
+    // so a secret can be used without being revealed. `HmacSha256[secret, msg]`
+    // returns the MAC as a public `Str`; `ConstantTimeEq[secret, candidate]`
+    // returns a `Bool`. Host-bound (a secret never crosses a worker boundary).
+    MoldSpec::exact("HmacSha256", 2, ANY2, MoldReturnKind::Str)
+        .with_worker_boundary(WorkerMoldBoundary::HostBoundary)
+        .enforce_checker(),
+    MoldSpec::exact("ConstantTimeEq", 2, ANY2, MoldReturnKind::Bool)
+        .with_worker_boundary(WorkerMoldBoundary::HostBoundary)
+        .enforce_checker(),
     MoldSpec::exact("Stub", 1, ANY1, MoldReturnKind::Pack),
     MoldSpec::range("TODO", 0, Some(4), ANY4, MoldReturnKind::Pack).with_options(TODO_OPTIONS),
     MoldSpec::exact("Cage", 2, ANY2, MoldReturnKind::Pack)

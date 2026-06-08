@@ -97,6 +97,44 @@ fn make_bytes_cursor_step(value: Value, cursor: Value) -> Value {
     Value::pack(vec![("value".into(), value), ("cursor".into(), cursor)])
 }
 
+/// F56 Phase 4: borrow the plaintext bytes of a sealed `Secret` / `Moltenized`
+/// argument for a secret-aware consumer (`HmacSha256` / `ConstantTimeEq`).
+///
+/// The bytes are read by reference from the sealed buffer — the secret is *not*
+/// copied into a fresh plaintext `Vec` / `Str`. Errors if the argument is not a
+/// sealed carrier (a non-secret input should use the lowercase `Str`/`Bytes`
+/// crypto API such as `hmacSha256` instead).
+fn sealed_secret_bytes<'a>(v: &'a Value, ctx: &str) -> Result<&'a [u8], RuntimeError> {
+    match v {
+        Value::Moltenized { value, .. } => match value.reveal() {
+            Value::Str(s) => Ok(s.as_str().as_bytes()),
+            Value::Bytes(b) => Ok(b.as_slice()),
+            _ => Err(RuntimeError {
+                message: format!("{ctx}: a sealed secret must wrap Str or Bytes"),
+            }),
+        },
+        _ => Err(RuntimeError {
+            message: format!(
+                "{ctx} expects a sealed Secret as its first argument — seal it with \
+                 MoltenizeSecret[...] or read it via MoltenizeSecretFromEnv / \
+                 MoltenizeSecretFromFile"
+            ),
+        }),
+    }
+}
+
+/// F56 Phase 4: borrow the bytes of a non-secret consumer argument (the HMAC
+/// message / comparison candidate). Accepts `Str` or `Bytes`.
+fn plain_consumer_bytes<'a>(v: &'a Value, ctx: &str) -> Result<&'a [u8], RuntimeError> {
+    match v {
+        Value::Str(s) => Ok(s.as_str().as_bytes()),
+        Value::Bytes(b) => Ok(b.as_slice()),
+        _ => Err(RuntimeError {
+            message: format!("{ctx} must be Str or Bytes"),
+        }),
+    }
+}
+
 fn parse_bytes_cursor(value: Value, name: &str) -> Result<(Arc<BytesValue>, usize), RuntimeError> {
     let Value::BuchiPack(fields) = value else {
         return Err(RuntimeError {
@@ -2688,6 +2726,59 @@ impl Interpreter {
                     other => return Ok(Some(other)),
                 }
                 Ok(Some(Signal::Value(Value::str("***".to_string()))))
+            }
+
+            // F56 Phase 4: HmacSha256[secret, message]() -> Str. A secret-aware
+            // consumer — the key bytes are read by reference from the sealed
+            // buffer and fed straight to the HMAC primitive, so the secret is
+            // used without being revealed to a plain `Str`. The MAC is public.
+            "HmacSha256" => {
+                if type_args.len() != 2 {
+                    return Err(RuntimeError {
+                        message: "HmacSha256 requires 2 type arguments: \
+                                  HmacSha256[secret, message]"
+                            .into(),
+                    });
+                }
+                let secret = match self.eval_expr(&type_args[0])? {
+                    Signal::Value(v) => v,
+                    other => return Ok(Some(other)),
+                };
+                let message = match self.eval_expr(&type_args[1])? {
+                    Signal::Value(v) => v,
+                    other => return Ok(Some(other)),
+                };
+                let key = sealed_secret_bytes(&secret, "HmacSha256")?;
+                let data = plain_consumer_bytes(&message, "HmacSha256 message")?;
+                let mac = crate::crypto::hmac_sha256_hex(key, data);
+                Ok(Some(Signal::Value(Value::str(mac))))
+            }
+
+            // F56 Phase 4: ConstantTimeEq[secret, candidate]() -> Bool. Compares
+            // a sealed secret against a candidate in constant time, reading the
+            // secret bytes by reference (no plaintext round-trip). Use this — not
+            // `==` (a compile sink) — to verify a secret.
+            "ConstantTimeEq" => {
+                if type_args.len() != 2 {
+                    return Err(RuntimeError {
+                        message: "ConstantTimeEq requires 2 type arguments: \
+                                  ConstantTimeEq[secret, candidate]"
+                            .into(),
+                    });
+                }
+                let secret = match self.eval_expr(&type_args[0])? {
+                    Signal::Value(v) => v,
+                    other => return Ok(Some(other)),
+                };
+                let candidate = match self.eval_expr(&type_args[1])? {
+                    Signal::Value(v) => v,
+                    other => return Ok(Some(other)),
+                };
+                let a = sealed_secret_bytes(&secret, "ConstantTimeEq")?;
+                let b = plain_consumer_bytes(&candidate, "ConstantTimeEq candidate")?;
+                Ok(Some(Signal::Value(Value::Bool(
+                    crate::crypto::constant_time_eq(a, b),
+                ))))
             }
 
             // F56 Phase 2: MoltenizeSecretFromEnv[name]() -> Lax[Secret[Str]].
