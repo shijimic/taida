@@ -353,3 +353,74 @@ fn equality_is_fail_closed_across_backends() {
         "no compiled backend was available to exercise the equality-oracle guards"
     );
 }
+
+// ── F56 Phase 2: source-side secret producers ──────────────────────────────
+
+#[test]
+fn secret_source_producers_seal_at_boundary() {
+    // MoltenizeSecretFromEnv reads an env var straight into a Secret[Str]: the
+    // value is sealed at the boundary, so Redact masks it and the plaintext
+    // never appears. The unwrapped value is a Secret and is display-rejected at
+    // compile time.
+    let dir = unique_temp_dir("f56-fromenv");
+    let src = dir.join("main.td");
+    write_file(
+        &src,
+        "MoltenizeSecretFromEnv[\"F56_TEST_SECRET\"]() >=> s\nstdout(Redact[s]())\n",
+    );
+    let masked = Command::new(taida_bin())
+        .env("F56_TEST_SECRET", CANARY)
+        .arg(&src)
+        .output()
+        .expect("run FromEnv");
+    let masked_t = combined(&masked);
+    assert_eq!(
+        masked_t.trim(),
+        "***",
+        "FromEnv -> Redact must be ***:\n{masked_t}"
+    );
+    assert!(
+        !masked_t.contains(CANARY),
+        "FromEnv leaked the env secret:\n{masked_t}"
+    );
+
+    write_file(
+        &src,
+        "MoltenizeSecretFromEnv[\"F56_TEST_SECRET\"]() >=> s\nstdout(s)\n",
+    );
+    let rejected = Command::new(taida_bin())
+        .env("F56_TEST_SECRET", CANARY)
+        .arg(&src)
+        .output()
+        .expect("run FromEnv display");
+    assert!(
+        combined(&rejected).contains("[E1533]"),
+        "the unwrapped FromEnv value is a Secret and must be display-rejected"
+    );
+    let _ = fs::remove_dir_all(&dir);
+
+    // MoltenizeSecretFromFile reads a file's bytes into a Secret[Bytes]
+    // (Async[Lax[Secret[Bytes]]], so two unmolds reach the carrier).
+    let fdir = unique_temp_dir("f56-fromfile");
+    let keyfile = fdir.join("key.bin");
+    write_file(&keyfile, CANARY);
+    let fsrc = fdir.join("main.td");
+    write_file(
+        &fsrc,
+        &format!(
+            "MoltenizeSecretFromFile[\"{}\"]() >=> lx\nlx >=> sec\nstdout(Redact[sec]())\n",
+            keyfile.display()
+        ),
+    );
+    let fout = Command::new(taida_bin())
+        .arg(&fsrc)
+        .output()
+        .expect("run FromFile");
+    let ft = combined(&fout);
+    assert_eq!(ft.trim(), "***", "FromFile -> Redact must be ***:\n{ft}");
+    assert!(
+        !ft.contains(CANARY),
+        "FromFile leaked the file secret:\n{ft}"
+    );
+    let _ = fs::remove_dir_all(&fdir);
+}

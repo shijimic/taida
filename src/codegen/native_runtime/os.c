@@ -468,6 +468,27 @@ taida_val taida_os_env_var(taida_val name_ptr) {
     return taida_lax_new((taida_val)copy, (taida_val)"");
 }
 
+// ── F56 Phase 2: MoltenizeSecretFromEnv[name]() → Lax[Secret[Str]] ──
+// Reads the env var straight into a sealed carrier. Both the success value and
+// the failure-channel default are sealed (never a plain Str on the surface).
+taida_val taida_os_env_var_secret(taida_val name_ptr) {
+    const char *name = (const char*)name_ptr;
+    taida_val empty_secret = taida_secret_new((taida_val)taida_str_new_copy(""));
+    if (!name) {
+        taida_val error = taida_make_error_with_kind_code(
+            "IoError", "MoltenizeSecretFromEnv error", "invalid", 0);
+        return taida_lax_empty_error(empty_secret, error);
+    }
+    const char *val = getenv(name);
+    if (!val) {
+        taida_val error = taida_make_error_with_kind_code(
+            "IoError", "MoltenizeSecretFromEnv error", "not_found", 0);
+        return taida_lax_empty_error(empty_secret, error);
+    }
+    taida_val sealed = taida_secret_new((taida_val)taida_str_new_copy(val));
+    return taida_lax_new(sealed, empty_secret);
+}
+
 // ── writeFile(path, content) → Result[Int] ─────────────────
 //
 // C12B-021: the Result's inner value is the byte count written,

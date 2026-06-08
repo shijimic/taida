@@ -821,7 +821,9 @@ mod tests {
         //   review #2): taida_value_struct_eq + taida_value_hashable +
         //   taida_fp_accum + taida_poly_eq + taida_poly_neq + taida_list_index_of
         //   + taida_list_last_index_of. Total 1,288,808 -> 1,291,077.
-        const EXPECTED_TOTAL_LEN: usize = 1_291_077;
+        // 2026-06-09 F56 Phase 2 (os.c): +1,011 bytes for taida_os_env_var_secret
+        //   (MoltenizeSecretFromEnv -> Lax[Secret[Str]]). 1,291,077 -> 1,292,088.
+        const EXPECTED_TOTAL_LEN: usize = 1_292_088;
         let asm = *NATIVE_RUNTIME_C;
         assert_eq!(
             asm.len(),

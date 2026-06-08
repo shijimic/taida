@@ -425,6 +425,9 @@ exit code: Int => :Int
 | `Moltenize[value]()` | `Moltenized[T]` | 値を不透明な封印キャリアに包む。表示・シリアライズ・直接 unmold・等値比較は型レベルで遮断される。 |
 | `MoltenizeSecret[value]()` | `Secret[T]` | secret / credential 用の封印キャリア。`Moltenized[T]` と同じ遮断に加え、用途をシグネチャで明示する。 |
 | `Redact[secret]()` | `Str` | 封印キャリアを固定マスク `"***"` の文字列へ落とす。内部値は読み出さない唯一の表示手段。 |
+| `MoltenizeSecretFromEnv[name]()` | `Lax[Secret[Str]]` | 環境変数を封印キャリアへ直接読み込む（同期）。値は境界で封印され、平文 `Str` を経由しない。 |
+| `MoltenizeSecretFromInput[prompt]()` | `Async[Lax[Secret[Str]]]` | 標準入力 1 行を封印キャリアへ読み込む。 |
+| `MoltenizeSecretFromFile[path]()` | `Async[Lax[Secret[Bytes]]]` | ファイルのバイト列を封印キャリアへ読み込む。 |
 | `Stub[value]()` | `T` | 「ここはまだ仮の値」と印を付けた値を返す。 |
 | `TODO[]()` | `T` | 未実装の印として置く値。リリース版のビルドでは残存を拒否できる。 |
 | `Cage[subject, runner]()` | `Gorillax[T]` / `Async[T]` | `Molten` を扱う境界。同期 runner は `Gorillax[T]`、Promise-returning JS runner (`JSCallAsync`) は `Async[T]` で受ける。 |

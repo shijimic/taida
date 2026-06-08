@@ -331,6 +331,16 @@ function __taida_os_envvar(name) {
   return Lax(null, '', undefined, __taida_error_pack('IoError', 'EnvVar error', 'not_found', 0));
 }
 
+// F56 Phase 2: MoltenizeSecretFromEnv[name]() → Lax[Secret[Str]]. The value is
+// sealed at the boundary; the failure-channel default is a sealed empty string
+// (never a plain Str on the surface).
+function __taida_os_envvar_secret(name) {
+  const val = typeof process !== 'undefined' && process.env ? process.env[name] : undefined;
+  if (val !== undefined) return Lax(__taida_moltenize(val, 'Secret'));
+  return Lax(null, __taida_moltenize('', 'Secret'), undefined,
+    __taida_error_pack('IoError', 'MoltenizeSecretFromEnv error', 'not_found', 0));
+}
+
 // ── Side-effect functions (writeFile, appendFile, remove, createDir, rename) ──
 
 // The five write/remove/create APIs return Result[Int]. The inner

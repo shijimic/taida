@@ -2027,6 +2027,25 @@ impl Lowering {
                 func.push(IrInst::Call(result, fn_name.to_string(), vec![val]));
                 Ok(result)
             }
+            // F56 Phase 2: MoltenizeSecretFromEnv[name]() -> Lax[Secret[Str]].
+            "MoltenizeSecretFromEnv" => {
+                if type_args.len() != 1 {
+                    return Err(LowerError {
+                        message:
+                            "MoltenizeSecretFromEnv requires 1 type argument: \
+                             MoltenizeSecretFromEnv[name]"
+                                .into(),
+                    });
+                }
+                let name = self.lower_expr(func, &type_args[0])?;
+                let result = func.alloc_var();
+                func.push(IrInst::Call(
+                    result,
+                    "taida_os_env_var_secret".to_string(),
+                    vec![name],
+                ));
+                Ok(result)
+            }
             // C25B-001: Stream[val]() — minimal native/wasm lowering for
             // string-form parity. Wraps a single value into a completed
             // single-item stream; `Str[stream]()` renders it as

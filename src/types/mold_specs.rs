@@ -382,6 +382,21 @@ pub static MOLD_SPECS: &[MoldSpec] = &[
     MoldSpec::exact("Redact", 1, ANY1, MoldReturnKind::Str)
         .with_worker_boundary(WorkerMoldBoundary::HostBoundary)
         .enforce_checker(),
+    // F56 Phase 2: source-side secret producers — read a secret directly from an
+    // OS source into a sealed carrier (canonical ingestion: the value is sealed
+    // at the boundary rather than wrapped after living as a plain `Str`). All
+    // return failure-channel-wrapped sealed carriers; none may cross a worker
+    // boundary. `FromEnv` is synchronous (`Lax[Secret[Str]]`); `FromInput` /
+    // `FromFile` are `Async[Lax[Secret[_]]]`.
+    MoldSpec::exact("MoltenizeSecretFromEnv", 1, ANY1, MoldReturnKind::Pack)
+        .with_worker_boundary(WorkerMoldBoundary::HostBoundary)
+        .enforce_checker(),
+    MoldSpec::exact("MoltenizeSecretFromInput", 1, ANY1, MoldReturnKind::Pack)
+        .with_worker_boundary(WorkerMoldBoundary::HostBoundary)
+        .enforce_checker(),
+    MoldSpec::exact("MoltenizeSecretFromFile", 1, ANY1, MoldReturnKind::Pack)
+        .with_worker_boundary(WorkerMoldBoundary::HostBoundary)
+        .enforce_checker(),
     MoldSpec::exact("Stub", 1, ANY1, MoldReturnKind::Pack),
     MoldSpec::range("TODO", 0, Some(4), ANY4, MoldReturnKind::Pack).with_options(TODO_OPTIONS),
     MoldSpec::exact("Cage", 2, ANY2, MoldReturnKind::Pack)

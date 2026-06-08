@@ -1744,6 +1744,11 @@ fn runtime_abi(name: &str) -> Result<RuntimeAbi, String> {
             params: &[Ptr],
             returns: &[Ptr],
         },
+        // F56 Phase 2: MoltenizeSecretFromEnv[name]() -> Lax[Secret[Str]].
+        "taida_os_env_var_secret" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Ptr],
+        },
         // taida-lang/os package — side-effect functions
         "taida_os_write_file" => RuntimeAbi {
             params: &[Ptr, Ptr],

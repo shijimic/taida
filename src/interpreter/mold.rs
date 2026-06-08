@@ -2690,6 +2690,113 @@ impl Interpreter {
                 Ok(Some(Signal::Value(Value::str("***".to_string()))))
             }
 
+            // F56 Phase 2: MoltenizeSecretFromEnv[name]() -> Lax[Secret[Str]].
+            // Reads an environment variable straight into a sealed carrier — the
+            // value is sealed at the boundary instead of living as a plain `Str`.
+            // (Source-side zeroize of the temporary plaintext is Phase 3.)
+            "MoltenizeSecretFromEnv" => {
+                if type_args.len() != 1 {
+                    return Err(RuntimeError {
+                        message:
+                            "MoltenizeSecretFromEnv requires 1 type argument: \
+                             MoltenizeSecretFromEnv[name]"
+                                .into(),
+                    });
+                }
+                let var_name = match self.eval_expr(&type_args[0])? {
+                    Signal::Value(Value::Str(s)) => Value::str_take(s),
+                    Signal::Value(v) => {
+                        return Err(RuntimeError {
+                            message: format!(
+                                "MoltenizeSecretFromEnv: name must be a string, got {}",
+                                v
+                            ),
+                        });
+                    }
+                    other => return Ok(Some(other)),
+                };
+                let seal = |inner: String| Value::Moltenized {
+                    value: Box::new(Value::str(inner)),
+                    reveal_type: "Str".to_string(),
+                    policy: "Secret".to_string(),
+                };
+                let lax = match std::env::var(&var_name) {
+                    Ok(val) => super::os::make_lax_success_pub(seal(val)),
+                    // Not present / not-unicode: a sealed empty-string default on
+                    // the Lax failure channel (never a plain `Str`).
+                    Err(_) => super::os::make_lax_failure_pub(seal(String::new())),
+                };
+                Ok(Some(Signal::Value(lax)))
+            }
+
+            // F56 Phase 2: MoltenizeSecretFromInput[prompt]() ->
+            // Async[Lax[Secret[Str]]]. Reads a line of stdin into a sealed
+            // carrier. (No-echo / masked input and zeroize are Phase 3.)
+            "MoltenizeSecretFromInput" => {
+                use rustyline::{DefaultEditor, error::ReadlineError};
+                let prompt = match type_args.first() {
+                    Some(arg) => match self.eval_expr(arg)? {
+                        Signal::Value(v) => v.to_display_string(),
+                        other => return Ok(Some(other)),
+                    },
+                    None => String::new(),
+                };
+                let seal = |inner: String| Value::Moltenized {
+                    value: Box::new(Value::str(inner)),
+                    reveal_type: "Str".to_string(),
+                    policy: "Secret".to_string(),
+                };
+                let inner = match DefaultEditor::new() {
+                    Ok(mut rl) => match rl.readline(&prompt) {
+                        Ok(line) => super::os::make_lax_success_pub(seal(line)),
+                        Err(ReadlineError::Eof)
+                        | Err(ReadlineError::Interrupted)
+                        | Err(_) => super::os::make_lax_failure_pub(seal(String::new())),
+                    },
+                    Err(_) => super::os::make_lax_failure_pub(seal(String::new())),
+                };
+                Ok(Some(Signal::Value(Value::Async(AsyncValue {
+                    status: AsyncStatus::Fulfilled,
+                    value: Box::new(inner),
+                    error: Box::new(Value::Unit),
+                    task: None,
+                }))))
+            }
+
+            // F56 Phase 2: MoltenizeSecretFromFile[path]() ->
+            // Async[Lax[Secret[Bytes]]]. Reads a file's bytes into a sealed
+            // carrier. Synchronous read wrapped in a fulfilled Async (the `>=>`
+            // await returns immediately), mirroring `stdinLine`'s shape.
+            "MoltenizeSecretFromFile" => {
+                let path = match self.eval_expr(&type_args[0])? {
+                    Signal::Value(Value::Str(s)) => Value::str_take(s),
+                    Signal::Value(v) => {
+                        return Err(RuntimeError {
+                            message: format!(
+                                "MoltenizeSecretFromFile: path must be a string, got {}",
+                                v
+                            ),
+                        });
+                    }
+                    other => return Ok(Some(other)),
+                };
+                let seal = |inner: Vec<u8>| Value::Moltenized {
+                    value: Box::new(Value::bytes(inner)),
+                    reveal_type: "Bytes".to_string(),
+                    policy: "Secret".to_string(),
+                };
+                let inner = match std::fs::read(&path) {
+                    Ok(bytes) => super::os::make_lax_success_pub(seal(bytes)),
+                    Err(_) => super::os::make_lax_failure_pub(seal(Vec::new())),
+                };
+                Ok(Some(Signal::Value(Value::Async(AsyncValue {
+                    status: AsyncStatus::Fulfilled,
+                    value: Box::new(inner),
+                    error: Box::new(Value::Unit),
+                    task: None,
+                }))))
+            }
+
             // Gorillax[T](): create Gorillax.
             "Gorillax" => {
                 let inner_value = if !type_args.is_empty() {

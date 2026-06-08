@@ -3982,6 +3982,20 @@ impl JsCodegen {
                     self.write(&format!(", '{}')", policy));
                     return Ok(());
                 }
+                // F56 Phase 2: MoltenizeSecretFromEnv[name]() → Lax[Secret[Str]].
+                if name == "MoltenizeSecretFromEnv" {
+                    if type_args.len() != 1 {
+                        return Err(JsError {
+                            message: "MoltenizeSecretFromEnv requires 1 type argument: \
+                                      MoltenizeSecretFromEnv[name]"
+                                .to_string(),
+                        });
+                    }
+                    self.write("__taida_os_envvar_secret(");
+                    self.gen_expr(&type_args[0])?;
+                    self.write(")");
+                    return Ok(());
+                }
                 // F56: Redact[secret]() → __taida_redact(secret)
                 if name == "Redact" {
                     if type_args.len() != 1 {

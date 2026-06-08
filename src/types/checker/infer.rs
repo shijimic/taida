@@ -1950,6 +1950,27 @@ impl TypeChecker {
                     }
                     // Redact[secret]() -> Str (fixed "***").
                     "Redact" => Type::Str,
+                    // F56 Phase 2: source-side secret producers. The read value is
+                    // sealed at the boundary; the failure channel is `Lax` (sync
+                    // env) or `Async[Lax]` (input / file I/O).
+                    "MoltenizeSecretFromEnv" => Type::Generic(
+                        "Lax".to_string(),
+                        vec![Type::Generic("Secret".to_string(), vec![Type::Str])],
+                    ),
+                    "MoltenizeSecretFromInput" => Type::Generic(
+                        "Async".to_string(),
+                        vec![Type::Generic(
+                            "Lax".to_string(),
+                            vec![Type::Generic("Secret".to_string(), vec![Type::Str])],
+                        )],
+                    ),
+                    "MoltenizeSecretFromFile" => Type::Generic(
+                        "Async".to_string(),
+                        vec![Type::Generic(
+                            "Lax".to_string(),
+                            vec![Type::Generic("Secret".to_string(), vec![Type::Bytes])],
+                        )],
+                    ),
                     // Div[x, y]() and Mod[x, y]() return Lax[Num]
                     "Div" | "Mod" => {
                         let inner = type_args
