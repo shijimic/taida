@@ -2062,6 +2062,18 @@ impl Lowering {
                           (HmacSha256 / ConstantTimeEq) instead of revealing the plaintext."
                     .into(),
             }),
+            // F56 Phase 2: the file / stdin secret producers are Interpreter-only
+            // for now (the env producer is the canonical four-backend ingestion).
+            // Compiled backends gate them with a capability error rather than
+            // silently miscompiling.
+            "MoltenizeSecretFromFile" | "MoltenizeSecretFromInput" => Err(LowerError {
+                message: format!(
+                    "{} is supported on the Interpreter backend only. On compiled backends, \
+                     read the secret with MoltenizeSecretFromEnv[name]() (the canonical \
+                     four-backend secret source).",
+                    type_name
+                ),
+            }),
             // F56 Phase 2: MoltenizeSecretFromEnv[name]() -> Lax[Secret[Str]].
             "MoltenizeSecretFromEnv" => {
                 if type_args.len() != 1 {

@@ -3996,6 +3996,18 @@ impl JsCodegen {
                     self.write(")");
                     return Ok(());
                 }
+                // F56 Phase 2: the file / stdin secret producers are
+                // Interpreter-only for now (the env producer is the canonical
+                // cross-backend ingestion). Reject rather than miscompile.
+                if name == "MoltenizeSecretFromFile" || name == "MoltenizeSecretFromInput" {
+                    return Err(JsError {
+                        message: format!(
+                            "{} is supported on the Interpreter backend only. Read the secret \
+                             with MoltenizeSecretFromEnv[name]() on compiled backends.",
+                            name
+                        ),
+                    });
+                }
                 // F56: Redact[secret]() → __taida_redact(secret)
                 if name == "Redact" {
                     if type_args.len() != 1 {
