@@ -184,10 +184,10 @@
 
 - `E1533`: 表示ビルトイン (`stdout` / `stderr` / `debug`) に封印キャリアを渡した場合。
 - `E1534`: シリアライズ (`jsonEncode` / `jsonPretty`) に封印キャリアを渡した場合。
-- `E1535`: `>=>` / `<=<` で封印キャリアを直接 unmold した場合。封印値を平文へ戻す唯一の手段は secret-aware consumer である。
+- `E1535`: `>=>` / `<=<` で封印キャリアを直接 unmold した場合。封印値を秘密のまま使う正規の手段は secret-aware consumer (`HmacSha256` / `ConstantTimeEq`) である。
 - `E1536`: 封印キャリアを二項演算 (`+` 連結、`==` / `!=` / `<` 等の比較) のオペランドにした場合、または `assert` で観測した場合 (`assert(secret == x)` 等)。
 
-値を観測する正当な手段は `Redact[secret]()` (固定マスク `"***"` を返す) と secret-aware consumer のみ。`Str[]` 変換・文字列補間・`toString` のように上記でコンパイルエラーにならない経路でも、4 バックエンド (interpreter / JS / native / wasm) のランタイムが fail-closed で封印値の代わりに policy ラベル (`<Secret>` / `<Moltenized>`) を返す。したがって型検査を省いた場合 (`--no-check`) でも封印値が平文として現れることはない。
+封印値を扱う正規の手段は次の通り: `Redact[secret]()` (固定マスク `"***"` を返す)、secret-aware consumer (`HmacSha256` / `ConstantTimeEq`、秘密を平文化せず消費)、そして escape hatch `Reveal[secret, consumer]()` (平文を consumer に渡す。封印を弱めるため最終手段。`taida way verify --check secret-flow` で de-seal 点を監査できる)。`Str[]` 変換・文字列補間・`toString` のように上記でコンパイルエラーにならない経路でも、4 バックエンド (interpreter / JS / native / wasm) のランタイムが fail-closed で封印値の代わりに policy ラベル (`<Secret>` / `<Moltenized>`) を返す。標準的な sink (表示・シリアライズ・連結・比較) は型検査を省いた場合 (`--no-check`) でも fail-closed である。ただし `--no-check` で型検査を放棄した上に、低レベルの JS interop (`JSGet` / `JSSpread` 等) でキャリアの内部表現を意図的に走査するような迂回までは保証範囲外であり、秘密を扱うコードは通常のコンパイル (型検査あり) で運用すること。
 
 `E1520` は **「値の不在を表す型」の完全排除** 診断。PHILOSOPHY.md I の系「値の不在は値の不在」と II の系「ふくろの中身が変わったら、別のふくろにしまいなおす」を整合的に実装する。
 

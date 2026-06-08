@@ -327,6 +327,25 @@ fn secret_flow_audit_surfaces_reveal() {
         "secret-flow must flag the Reveal de-seal point:\n{t}"
     );
 
+    // A Reveal nested in a function body must also be surfaced (the walker
+    // recurses into FuncDef / ClassLikeDef bodies, not just top-level).
+    let nested_src = dir.join("nested.td");
+    write_file(
+        &nested_src,
+        "useSecret s: Secret[Str] =\n  Reveal[s, _ p: Str = p.length()]()\n=> :Int\n\
+         k <= MoltenizeSecret[\"x\"]()\nstdout(useSecret(k).toString())\n",
+    );
+    let out_nested = Command::new(taida_bin())
+        .args(["way", "verify", "--check", "secret-flow"])
+        .arg(&nested_src)
+        .output()
+        .expect("run way verify");
+    assert!(
+        combined(&out_nested).to_lowercase().contains("reveal"),
+        "secret-flow must flag a Reveal nested in a function body:\n{}",
+        combined(&out_nested)
+    );
+
     let clean_src = dir.join("clean.td");
     write_file(
         &clean_src,
@@ -482,7 +501,9 @@ fn equality_is_fail_closed_across_backends() {
         ("stdout(Unique[@[a, b]]().length())", "2"), // dedup must not collapse
         ("stdout(Unique[@[a, a]]().length())", "2"), // even the same object
         ("stdout(@[a].contains(b))", "false"),
-        ("stdout(@[a, b].indexOf(b))", "-1"), // membership by identity must not find it
+        ("stdout(@[a].contains(a))", "false"), // same object — identity must NOT match
+        ("stdout(@[a, b].indexOf(b))", "-1"),  // membership by identity must not find it
+        ("stdout(@[a, b].indexOf(a))", "-1"),  // same object too
         ("stdout(@[a] == @[b])", "false"),
         ("stdout(@(x <= a) == @(x <= b))", "false"),
     ];

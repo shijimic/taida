@@ -1080,6 +1080,21 @@ fn scan_stmt_for_reveal(stmt: &Statement, file: &str, findings: &mut Vec<VerifyF
                 scan_stmt_for_reveal(handler_stmt, file, findings);
             }
         }
+        Statement::ClassLikeDef(cl) => {
+            // Reveal can hide in a field default or a method body of a
+            // buchi-pack / mold definition — walk those too so the audit lists
+            // every de-seal point, not just the top-level ones.
+            for field in &cl.fields {
+                if let Some(default) = &field.default_value {
+                    scan_expr_for_reveal(default, file, findings);
+                }
+                if let Some(method) = &field.method_def {
+                    for body_stmt in &method.body {
+                        scan_stmt_for_reveal(body_stmt, file, findings);
+                    }
+                }
+            }
+        }
         _ => {}
     }
 }

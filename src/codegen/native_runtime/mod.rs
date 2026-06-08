@@ -827,7 +827,11 @@ mod tests {
         //   consumers taida_hmac_sha256_secret / taida_constant_time_eq_secret
         //   (forward decls in F1 + definitions next to the crypto in F2).
         //   1,292,088 -> 1,293,147.
-        const EXPECTED_TOTAL_LEN: usize = 1_293_147;
+        // 2026-06-09 F56 final review (core.c): +375 bytes for the carrier guard
+        //   in taida_list_contains (closes the `@[a].contains(a)` identity oracle
+        //   found by the close /so review; in F1, before the marker).
+        //   1,293,147 -> 1,293,522.
+        const EXPECTED_TOTAL_LEN: usize = 1_293_522;
         let asm = *NATIVE_RUNTIME_C;
         assert_eq!(
             asm.len(),
@@ -1526,7 +1530,9 @@ mod tests {
         // 2026-06-09 F56 Phase 4: the two secret-aware-consumer forward
         //   declarations sit before the Error-ceiling marker (next to the other
         //   carrier prototypes): +160 bytes. F1_LEN 389,910 -> 390,070.
-        const F1_LEN: usize = 390_070;
+        // 2026-06-09 F56 final review: the taida_list_contains carrier guard is
+        //   before the marker: +375 bytes. F1_LEN 390,070 -> 390,445.
+        const F1_LEN: usize = 390_445;
         // CORE_SECTION = F1_LEN (before the Error ceiling marker) + F2 (after it).
         // F2 was 200,593 bytes (the previous 200_740 figure was stale: the
         // post-handler-ABI F2 had already shrunk by 147 bytes without this

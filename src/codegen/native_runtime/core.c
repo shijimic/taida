@@ -3988,6 +3988,11 @@ taida_val taida_list_reverse(taida_val list_ptr) {
 }
 
 taida_val taida_list_contains(taida_val list_ptr, taida_val item) {
+    // F56: a sealed carrier is never equal to anything — even to itself, and even
+    // by pointer identity — so it is never "contained". Fail-closed here too,
+    // matching the interpreter and taida_list_index_of (otherwise `@[a].contains(a)`
+    // on the same object would leak a 1-bit identity oracle on native/wasm).
+    if (taida_is_moltenized(item)) return 0;
     taida_val *list = (taida_val*)list_ptr;
     taida_val len = list[2];
     for (taida_val i = 0; i < len; i++) {

@@ -1448,6 +1448,10 @@ int64_t taida_list_sum(int64_t list_ptr) {
 }
 
 int64_t taida_list_contains(int64_t list_ptr, int64_t item) {
+    /* F56: a sealed carrier is never "contained" (non-equal to everything,
+       including the same pointer) — matching the interpreter and taida_list_index_of
+       above, closing the `@[a].contains(a)` identity oracle. */
+    if (_wasm_carrier_kind(item)) return 0;
     int64_t *list = (int64_t *)(intptr_t)list_ptr;
     int64_t len = list[1];
     for (int64_t i = 0; i < len; i++) {

@@ -124,7 +124,10 @@ mod tests {
         // 2026-06-09 F56 Phase 4: +793 bytes for the secret-aware consumers
         //   taida_hmac_sha256_secret / taida_constant_time_eq_secret next to the
         //   crypto primitives in 02_containers.inc.c. 456,795 -> 457,588.
-        const EXPECTED_TOTAL_LEN: usize = 457_588;
+        // 2026-06-09 F56 final review: +273 bytes for the taida_list_contains
+        //   carrier guard in 03_typeof_list.inc.c (closes the contains identity
+        //   oracle). 457,588 -> 457,861.
+        const EXPECTED_TOTAL_LEN: usize = 457_861;
         let asm = *RUNTIME_CORE_WASM;
         assert_eq!(
             asm.len(),
