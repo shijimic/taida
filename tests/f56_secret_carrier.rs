@@ -227,24 +227,38 @@ fn secret_aware_consumers_use_secret_without_leak() {
 }
 
 #[test]
-fn secret_aware_consumer_rejects_non_secret() {
-    // A secret-aware consumer requires a sealed Secret as its first argument; a
-    // plain value is a misuse (use the lowercase `hmacSha256` for those).
-    let out = run_interp(
-        "consumer-non-secret",
-        "mac <= HmacSha256[\"plain-not-sealed\", \"msg\"]()\nstdout(mac)\n",
-        false,
-    );
-    assert!(
-        !out.status.success(),
-        "HmacSha256 must reject a non-secret first argument:\n{}",
-        combined(&out)
-    );
-    assert!(
-        combined(&out).contains("sealed Secret"),
-        "the rejection should name the sealed-Secret requirement:\n{}",
-        combined(&out)
-    );
+fn secret_aware_consumer_misuse_rejected_at_compile_time() {
+    // review #4 (code-reviewer + /so Codex): the consumers' argument contract is
+    // enforced by the checker ([E1506]), so a misuse is a *compile* error — the
+    // same on all four backends — instead of a runtime split where interp/JS
+    // reject but Native/WASM compute over raw bytes. Each case must be rejected
+    // with [E1506] before any backend lowering runs.
+    let cases = [
+        // Non-sealed first argument (use the lowercase `hmacSha256` for plain inputs).
+        "mac <= HmacSha256[\"plain-not-sealed\", \"msg\"]()\nstdout(mac)\n".to_string(),
+        // Sealed value as the (non-secret) second argument.
+        format!(
+            "secret <= MoltenizeSecret[\"{CANARY}\"]()\n\
+             b <= ConstantTimeEq[secret, secret]()\nstdout(b.toString())\n"
+        ),
+        // A Secret wrapping a non-byte payload (would diverge between Native/WASM).
+        "secret <= MoltenizeSecret[Bytes[\"abc\"]()]()\n\
+         mac <= HmacSha256[secret, \"m\"]()\nstdout(mac)\n"
+            .to_string(),
+    ];
+    for (i, src) in cases.iter().enumerate() {
+        let out = run_interp(&format!("consumer-misuse-{i}"), src, false);
+        let t = combined(&out);
+        assert!(
+            !out.status.success(),
+            "misuse #{i} should be rejected:\n{t}"
+        );
+        assert!(
+            t.contains("[E1506]"),
+            "misuse #{i} should emit [E1506]:\n{t}"
+        );
+        assert!(!t.contains(CANARY), "misuse #{i} leaked the canary:\n{t}");
+    }
 }
 
 #[test]

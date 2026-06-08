@@ -351,6 +351,21 @@ impl TypeChecker {
                     || matches!(actual, Type::Generic(name, _) if name == "Stream")
             }
             MoldArgKind::Numeric => actual.is_numeric(),
+            // F56 Phase 4: a sealed carrier of any inner type.
+            MoldArgKind::Sealed => {
+                matches!(actual, Type::Generic(name, _) if name == "Secret" || name == "Moltenized")
+            }
+            // F56 Phase 4: a sealed carrier whose inner is byte-like (Str/Bytes).
+            MoldArgKind::SealedBytes => match actual {
+                Type::Generic(name, args) if name == "Secret" || name == "Moltenized" => {
+                    args.first().is_none_or(|inner| {
+                        matches!(inner, Type::Str | Type::Bytes | Type::Unknown | Type::Any)
+                    })
+                }
+                _ => false,
+            },
+            // F56 Phase 4: a non-secret Str/Bytes (rejects a sealed argument).
+            MoldArgKind::StrOrBytes => matches!(actual, Type::Str | Type::Bytes),
         }
     }
 
@@ -372,6 +387,9 @@ impl TypeChecker {
             MoldArgKind::List => "List",
             MoldArgKind::ListOrStream => "List or Stream",
             MoldArgKind::Numeric => "numeric",
+            MoldArgKind::Sealed => "a sealed Secret/Moltenized",
+            MoldArgKind::SealedBytes => "a sealed Secret/Moltenized wrapping Str or Bytes",
+            MoldArgKind::StrOrBytes => "Str or Bytes",
         }
     }
 
