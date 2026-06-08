@@ -111,6 +111,62 @@ fn e1536_binary_ops_rejected() {
     );
 }
 
+#[test]
+fn phase6_extended_display_sinks_rejected() {
+    // Phase 6+: the display sinks the runtime already fails closed are now also
+    // compile errors (lock L0-4): `.toString()`, `Str[]`, interpolation, and a
+    // sealed carrier nested in a `@(...)` / `@[...]` literal reaching a sink.
+    let p = format!("secret <= MoltenizeSecret[\"{CANARY}\"]()\n");
+    assert_code(
+        &format!("{p}stdout(secret.toString())\n"),
+        "[E1533]",
+        "toString",
+    );
+    assert_code(
+        &format!("{p}x <= Str[secret]()\nstdout(x)\n"),
+        "[E1533]",
+        "str-mold",
+    );
+    assert_code(
+        &format!("{p}stdout(`a${{secret}}b`)\n"),
+        "[E1533]",
+        "interpolation",
+    );
+    assert_code(
+        &format!("{p}stdout(jsonEncode(@(token <= secret, id <= 7)))\n"),
+        "[E1534]",
+        "nested-pack-json",
+    );
+    assert_code(
+        &format!("{p}stdout(@(token <= secret))\n"),
+        "[E1533]",
+        "nested-pack-display",
+    );
+    assert_code(
+        &format!("{p}stdout(jsonEncode(@[secret]))\n"),
+        "[E1534]",
+        "nested-list-json",
+    );
+}
+
+#[test]
+fn phase6_collection_membership_rejected() {
+    // Phase 6+: `.contains(secret)` / `.indexOf(secret)` are equality oracles
+    // (lock L0-4 collection sink) — now compile errors, not just runtime
+    // fail-closed. Use ConstantTimeEq instead.
+    let p = format!("secret <= MoltenizeSecret[\"{CANARY}\"]()\n");
+    assert_code(
+        &format!("{p}stdout(@[secret].contains(secret))\n"),
+        "[E1536]",
+        "contains",
+    );
+    assert_code(
+        &format!("{p}stdout(@[secret].indexOf(secret).toString())\n"),
+        "[E1536]",
+        "indexOf",
+    );
+}
+
 // ── Layer 2: runtime fail-closed on the interpreter (reference) ─────────────
 
 #[test]

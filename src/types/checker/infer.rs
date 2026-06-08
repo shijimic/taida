@@ -1179,6 +1179,29 @@ impl TypeChecker {
                         // label / `null`, never plaintext).
                         for arg in args.iter() {
                             let Some(carrier) = self.first_direct_sealed_operand(arg) else {
+                                // F56 (lock L0-4c): a sealed carrier nested in a
+                                // `@(...)` / `@[...]` literal passed to the sink —
+                                // the structure as a whole reaches serialization /
+                                // display. Reject it too (runtime fails closed with
+                                // `null` / `<policy>` for the nested element).
+                                if let Some(nested) = self.first_nested_sealed_in_literal(arg) {
+                                    let code =
+                                        if matches!(name.as_str(), "jsonEncode" | "jsonPretty") {
+                                            "E1534"
+                                        } else {
+                                            "E1533"
+                                        };
+                                    self.errors.push(TypeError {
+                                        message: format!(
+                                            "[{}] `{}` cannot receive a structure containing a \
+                                             sealed carrier ({}); the secret value would be \
+                                             exposed. Hint: project the secret out (e.g. with \
+                                             `Redact[secret]()`) before serializing.",
+                                            code, name, nested
+                                        ),
+                                        span: span.clone(),
+                                    });
+                                }
                                 continue;
                             };
                             if matches!(arg, Expr::Ident(_, _) | Expr::MoldInst(_, _, _, _)) {
@@ -1344,6 +1367,42 @@ impl TypeChecker {
 
             Expr::MethodCall(obj, method, args, span) => {
                 let obj_type = self.infer_expr_type(obj);
+                // F56: `.toString()` / `.toStr()` on a sealed carrier is a display
+                // sink — the same leak as `stdout(secret)`. The runtime renders the
+                // policy label, but reject it at compile time too (lock L0-4).
+                if matches!(method.as_str(), "toString" | "toStr")
+                    && matches!(&obj_type, Type::Generic(n, _) if n == "Secret" || n == "Moltenized")
+                {
+                    self.errors.push(TypeError {
+                        message: format!(
+                            "[E1533] `.{}()` cannot stringify a sealed carrier ({}); the secret \
+                             value would be exposed. Hint: use `Redact[secret]()` for a masked \
+                             string, or a secret-aware consumer such as `HmacSha256[]`.",
+                            method, obj_type
+                        ),
+                        span: span.clone(),
+                    });
+                }
+                // F56: membership of a sealed carrier (`list.contains(secret)` /
+                // `.indexOf(secret)`) is an equality oracle — the match bit would
+                // leak whether the secret is present. The runtime is fail-closed
+                // (never finds it), but reject at compile time too (lock L0-4
+                // collection sink). Compare with `ConstantTimeEq[]` instead.
+                if matches!(method.as_str(), "contains" | "indexOf" | "lastIndexOf") {
+                    for arg in args {
+                        if let Some(carrier) = self.first_direct_sealed_operand(arg) {
+                            self.errors.push(TypeError {
+                                message: format!(
+                                    "[E1536] `.{}()` cannot test membership of a sealed carrier \
+                                     ({}); the match would be an equality oracle. Hint: compare \
+                                     with `ConstantTimeEq[secret, candidate]()`.",
+                                    method, carrier
+                                ),
+                                span: span.clone(),
+                            });
+                        }
+                    }
+                }
                 if !self.in_comparison_error_walk {
                     for arg in args {
                         if !matches!(arg, Expr::Hole(_) | Expr::Placeholder(_)) {
@@ -1563,6 +1622,24 @@ impl TypeChecker {
                 self.validate_custom_mold_inst_bindings(name, type_args, fields, mold_span);
                 self.validate_mold_header_constraints(name, type_args, mold_span);
                 self.validate_builtin_mold_spec(name, type_args, fields, mold_span);
+                // F56: `Str[secret]()` stringifies a sealed carrier — a display
+                // sink. Reject at compile time (lock L0-4), matching the runtime
+                // policy-label fail-close. Side-effect-free detection only.
+                if name == "Str"
+                    && let Some(carrier) = type_args
+                        .first()
+                        .and_then(|a| self.first_direct_sealed_operand(a))
+                {
+                    self.errors.push(TypeError {
+                        message: format!(
+                            "[E1533] `Str[]` cannot stringify a sealed carrier ({}); the secret \
+                             value would be exposed. Hint: use `Redact[secret]()` for a masked \
+                             string.",
+                            carrier
+                        ),
+                        span: mold_span.clone(),
+                    });
+                }
                 match name.as_str() {
                     "HostCapability" => self.infer_host_capability_type(type_args, mold_span),
                     "HostStep" => self.infer_host_step_type(type_args, mold_span),
@@ -2615,6 +2692,28 @@ impl TypeChecker {
                 .first_direct_sealed_operand(l)
                 .or_else(|| self.first_direct_sealed_operand(r)),
             Expr::UnaryOp(_, inner, _) => self.first_direct_sealed_operand(inner),
+            _ => None,
+        }
+    }
+
+    /// F56: find a sealed carrier nested one or more levels inside a `@(...)` /
+    /// `@[...]` literal (lock L0-4c). Used by the serialization / display sink
+    /// guard so `jsonEncode(@(token <= secret))` is rejected at compile time,
+    /// matching the runtime's nested fail-close (`null` / `<policy>`). Only walks
+    /// literal structures and `first_direct_sealed_operand` leaves — side-effect-
+    /// free, so it never re-infers a method chain.
+    pub(super) fn first_nested_sealed_in_literal(&self, expr: &Expr) -> Option<Type> {
+        match expr {
+            Expr::BuchiPack(fields, _) | Expr::TypeInst(_, fields, _) => {
+                fields.iter().find_map(|f| {
+                    self.first_direct_sealed_operand(&f.value)
+                        .or_else(|| self.first_nested_sealed_in_literal(&f.value))
+                })
+            }
+            Expr::ListLit(items, _) => items.iter().find_map(|item| {
+                self.first_direct_sealed_operand(item)
+                    .or_else(|| self.first_nested_sealed_in_literal(item))
+            }),
             _ => None,
         }
     }
