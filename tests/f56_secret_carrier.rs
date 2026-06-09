@@ -350,6 +350,51 @@ fn secret_aware_consumer_misuse_rejected_at_compile_time() {
 }
 
 #[test]
+fn consumer_non_sealed_first_arg_rejected_at_runtime_across_backends() {
+    // F56-FB-002: under `--no-check` the checker [E1506] is bypassed, so the
+    // *runtime* must reject a non-sealed first argument. The interpreter and JS
+    // throw; Native/WASM previously passed the plain value straight to the crypto
+    // primitive (MAC'd it) — a backend-parity break vs the reference interpreter.
+    // Now every backend rejects.
+    let src = "mac <= HmacSha256[\"plain-not-sealed\", \"msg\"]()\nstdout(mac)\n";
+
+    // Reference: the interpreter rejects at runtime even with the checker off.
+    let interp = run_interp("fb002-interp", src, true);
+    let it = combined(&interp);
+    assert!(
+        !interp.status.success() && it.contains("sealed Secret"),
+        "interp should reject the non-sealed first arg under --no-check:\n{it}"
+    );
+
+    // The compiled backends must match the reference: reject, never MAC the plain
+    // value (a bare HMAC-SHA256 would surface as a 64-hex-char line).
+    for profile in ["native", "wasm-wasi", "js"] {
+        let dir = unique_temp_dir(&format!("fb002-{profile}"));
+        if let Some(out) = build_and_run(&dir, src, profile) {
+            let mac_leaked = out.lines().any(|l| {
+                let t = l.trim();
+                t.len() == 64 && t.chars().all(|c| c.is_ascii_hexdigit())
+            });
+            assert!(
+                !mac_leaked,
+                "{profile}: non-sealed first arg was MAC'd instead of rejected:\n{out}"
+            );
+            // native/interp/JS surface the message; WASM reports an uncaught throw
+            // as a generic trap (the same as every other WASM `taida_throw`, e.g.
+            // the unmold reject) — both are rejections, neither MACs the value.
+            assert!(
+                out.contains("sealed Secret")
+                    || out.contains("TypeError")
+                    || out.contains("Unhandled error")
+                    || out.contains("trap"),
+                "{profile}: non-sealed first arg should be rejected at runtime:\n{out}"
+            );
+        }
+        let _ = fs::remove_dir_all(&dir);
+    }
+}
+
+#[test]
 fn reveal_applies_consumer_to_plaintext() {
     // Reveal is the escape hatch: it hands the plaintext to a consumer and
     // returns the consumer's result. Here the consumer returns the secret's

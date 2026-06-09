@@ -2061,16 +2061,25 @@ int64_t taida_crypto_constant_time_equals(int64_t a_val, int64_t b_val) {
    (MAC hex / bool) is public. (Level 0 on WASM: the inner value lives in the
    pack — see the F56 backend guarantee matrix.) */
 int64_t taida_hmac_sha256_secret(int64_t secret_ptr, int64_t msg_val) {
-    int64_t inner = _wasm_carrier_kind(secret_ptr)
-        ? taida_pack_get_idx(secret_ptr, 1)
-        : secret_ptr;
+    /* F56-FB-002: reject a non-sealed first argument (parity with the interpreter
+       and JS, which throw). Without this guard WASM silently MAC'd the plain value
+       under `--no-check`; the checker [E1506] gates it normally. */
+    if (!_wasm_carrier_kind(secret_ptr)) {
+        return taida_throw(taida_make_error(
+            (int64_t)(intptr_t)"TypeError",
+            (int64_t)(intptr_t)"HmacSha256 expects a sealed Secret as its first argument — seal it with MoltenizeSecret[...] or read it via MoltenizeSecretFromEnv / MoltenizeSecretFromFile"));
+    }
+    int64_t inner = taida_pack_get_idx(secret_ptr, 1);
     return taida_crypto_hmac_sha256(inner, msg_val);
 }
 
 int64_t taida_constant_time_eq_secret(int64_t secret_ptr, int64_t cand_val) {
-    int64_t inner = _wasm_carrier_kind(secret_ptr)
-        ? taida_pack_get_idx(secret_ptr, 1)
-        : secret_ptr;
+    if (!_wasm_carrier_kind(secret_ptr)) { /* F56-FB-002: see taida_hmac_sha256_secret. */
+        return taida_throw(taida_make_error(
+            (int64_t)(intptr_t)"TypeError",
+            (int64_t)(intptr_t)"ConstantTimeEq expects a sealed Secret as its first argument — seal it with MoltenizeSecret[...] or read it via MoltenizeSecretFromEnv / MoltenizeSecretFromFile"));
+    }
+    int64_t inner = taida_pack_get_idx(secret_ptr, 1);
     return taida_crypto_constant_time_equals(inner, cand_val);
 }
 

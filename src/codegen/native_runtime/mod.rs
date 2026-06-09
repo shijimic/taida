@@ -839,7 +839,12 @@ mod tests {
         //   receiver guards in taida_polymorphic_contains / _index_of /
         //   _last_index_of (close the `secret.contains(x)` OOB read found by the
         //   Phase 6+ /so review; before the marker -> F1). 1,295,482 -> 1,295,944.
-        const EXPECTED_TOTAL_LEN: usize = 1_295_944;
+        // 2026-06-09 F56-FB-002 (core.c): +870 bytes for the non-sealed first-arg
+        //   reject in taida_hmac_sha256_secret / taida_constant_time_eq_secret
+        //   (parity with the interpreter/JS, which throw; closes the `--no-check`
+        //   pass-through. Definitions sit after the marker -> F2, so F1_LEN is
+        //   unchanged). 1,295,944 -> 1,296,814.
+        const EXPECTED_TOTAL_LEN: usize = 1_296_814;
         let asm = *NATIVE_RUNTIME_C;
         assert_eq!(
             asm.len(),
@@ -1568,7 +1573,9 @@ mod tests {
             // guards + json_serialize_typed fail-closed guard). F2 222,688 -> 223,993.
             // F56 Phase 4: the consumer definitions sit next to the crypto helpers
             // (after the marker): +899 bytes. F2 223,993 -> 224,892.
-            F1_LEN + 224_892,
+            // F56-FB-002: the non-sealed first-arg reject in the two consumer
+            // definitions (after the marker): +870 bytes. F2 224,892 -> 225,762.
+            F1_LEN + 225_762,
             "core.c total byte length must equal the expected concatenated runtime fragments"
         );
         const F2_PREFIX: &[u8] = b"// \xE2\x94\x80\xE2\x94\x80 Error ceiling";

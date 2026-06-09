@@ -13564,16 +13564,28 @@ taida_val taida_crypto_constant_time_equals(taida_val a_val, taida_val b_val) {
 // bool) is public. (Level 0 on Native: the inner value lives in the pack; see
 // the F56 backend guarantee matrix.)
 taida_val taida_hmac_sha256_secret(taida_val secret_ptr, taida_val msg_val) {
-    taida_val inner = taida_is_moltenized(secret_ptr)
-        ? taida_pack_get_idx((taida_ptr)secret_ptr, 1)
-        : secret_ptr;
+    // F56-FB-002: a non-sealed first argument must be rejected, not consumed as a
+    // raw value. The interpreter and JS throw here; without this guard Native/WASM
+    // silently MAC'd the plain value under `--no-check` (the checker [E1506] gates
+    // it normally), a backend-parity break vs the reference interpreter.
+    if (!taida_is_moltenized(secret_ptr)) {
+        return taida_throw(taida_make_error(
+            "TypeError",
+            "HmacSha256 expects a sealed Secret as its first argument — seal it with "
+            "MoltenizeSecret[...] or read it via MoltenizeSecretFromEnv / MoltenizeSecretFromFile"));
+    }
+    taida_val inner = taida_pack_get_idx((taida_ptr)secret_ptr, 1);
     return taida_crypto_hmac_sha256(inner, msg_val);
 }
 
 taida_val taida_constant_time_eq_secret(taida_val secret_ptr, taida_val cand_val) {
-    taida_val inner = taida_is_moltenized(secret_ptr)
-        ? taida_pack_get_idx((taida_ptr)secret_ptr, 1)
-        : secret_ptr;
+    if (!taida_is_moltenized(secret_ptr)) { // F56-FB-002: see taida_hmac_sha256_secret.
+        return taida_throw(taida_make_error(
+            "TypeError",
+            "ConstantTimeEq expects a sealed Secret as its first argument — seal it with "
+            "MoltenizeSecret[...] or read it via MoltenizeSecretFromEnv / MoltenizeSecretFromFile"));
+    }
+    taida_val inner = taida_pack_get_idx((taida_ptr)secret_ptr, 1);
     return taida_crypto_constant_time_equals(inner, cand_val);
 }
 

@@ -130,7 +130,10 @@ mod tests {
         // 2026-06-09 F56 Phase 6+ review: +431 bytes for the sealed-receiver
         //   guards in taida_polymorphic_contains / _index_of / _last_index_of
         //   (01_core.inc.c). 457,861 -> 458,292.
-        const EXPECTED_TOTAL_LEN: usize = 458_292;
+        // 2026-06-09 F56-FB-002: +830 bytes for the non-sealed first-arg reject in
+        //   taida_hmac_sha256_secret / taida_constant_time_eq_secret
+        //   (02_containers.inc.c; parity with interpreter/JS throw). 458,292 -> 459,122.
+        const EXPECTED_TOTAL_LEN: usize = 459_122;
         let asm = *RUNTIME_CORE_WASM;
         assert_eq!(
             asm.len(),
