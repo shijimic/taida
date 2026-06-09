@@ -1376,7 +1376,11 @@ impl TypeChecker {
                 // the carrier pack as a list. `.toString()` / `.toStr()` and the
                 // membership methods get their specific code; anything else is a
                 // display/observation attempt.
-                if matches!(&obj_type, Type::Generic(n, _) if n == "Secret" || n == "Moltenized") {
+                let receiver_sealed = matches!(
+                    &obj_type,
+                    Type::Generic(n, _) if n == "Secret" || n == "Moltenized"
+                );
+                if receiver_sealed {
                     let (code, hint) = if matches!(
                         method.as_str(),
                         "contains" | "indexOf" | "lastIndexOf"
@@ -1405,7 +1409,10 @@ impl TypeChecker {
                 // leak whether the secret is present. The runtime is fail-closed
                 // (never finds it), but reject at compile time too (lock L0-4
                 // collection sink). Compare with `ConstantTimeEq[]` instead.
-                if matches!(method.as_str(), "contains" | "indexOf" | "lastIndexOf") {
+                // Only when the receiver is *not* itself sealed: a sealed receiver
+                // is already rejected above, and firing both guards would emit a
+                // duplicate `[E1536]` on the same span (`secret.contains(other)`).
+                else if matches!(method.as_str(), "contains" | "indexOf" | "lastIndexOf") {
                     for arg in args {
                         if let Some(carrier) = self.first_direct_sealed_operand(arg) {
                             self.errors.push(TypeError {
