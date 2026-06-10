@@ -164,7 +164,12 @@ mod tests {
         //   _wasm_is_string_ptr. Plus the pack/list section headers now
         //   describe the trailing-magic layouts instead of "no magic".
         //   -> 466,461.
-        const EXPECTED_TOTAL_LEN: usize = 466_461;
+        // 2026-06-10 scalar-intrinsic expansion (01_core.inc.c): the
+        //   return-tag slot `__wasm_return_tag` goes non-static so the
+        //   generated C can expand taida_get/set_return_tag into a
+        //   direct slot swap (one runtime call per user-function call
+        //   otherwise), with a rationale comment. -> 466,785.
+        const EXPECTED_TOTAL_LEN: usize = 466_785;
         let asm = *RUNTIME_CORE_WASM;
         assert_eq!(
             asm.len(),

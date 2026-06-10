@@ -3236,6 +3236,13 @@ impl Emitter {
                 Some(builder.ins().ineg(a))
             }
 
+            // ── Int → Float conversion (boxed f64 bits in I64) ──
+            "taida_int_to_float" if args.len() == 1 => {
+                let a = ectx.val_map[&args[0]];
+                let f = builder.ins().fcvt_from_sint(types::F64, a);
+                Some(builder.ins().bitcast(types::I64, clif::MemFlags::new(), f))
+            }
+
             // ── Boolean operations ──
             "taida_bool_not" if args.len() == 1 => {
                 let a = ectx.val_map[&args[0]];

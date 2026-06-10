@@ -3026,7 +3026,12 @@ int64_t taida_primitive_tag_match(int64_t tag, int64_t expected) {
 }
 
 // NB-14: Return type tag propagation (WASM mirror of native_runtime.c).
-static int64_t __wasm_return_tag = -1; // UNKNOWN
+/* Non-static: the generated C reads/writes this slot directly (the
+   call-site expansion of taida_get/set_return_tag — one runtime call
+   per user-function call showed up as half the remaining call
+   overhead in recursive hot loops). The two functions below stay as
+   the ABI for any caller outside the generated module. */
+int64_t __wasm_return_tag = -1; // UNKNOWN
 
 int64_t taida_set_return_tag(int64_t tag) {
     __wasm_return_tag = tag;
