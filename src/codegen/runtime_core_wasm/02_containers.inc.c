@@ -2205,19 +2205,33 @@ int64_t taida_str_trim_end(int64_t s_raw) {
 
 /// Split[str, sep]() -- split string by separator, return list of strings.
 /// If sep is empty, splits into individual characters.
+static int _wc_utf8_decode_one(const unsigned char *buf, int len, int *consumed, uint32_t *out_cp); /* fwd */
+
 int64_t taida_str_split(int64_t s_raw, int64_t sep_raw) {
     const char *s = (const char *)s_raw;
     const char *sep = (const char *)sep_raw;
     if (!s) return taida_list_new();
     int64_t list = taida_list_new();
     if (!sep || _wf_strlen(sep) == 0) {
-        /* Split into individual characters */
+        /* Locked split("") semantics (B11 method lock, matches the
+           interpreter / native / JS): chars split with no empty
+           fragments, empty input gives the empty list. CODEPOINT-wise:
+           the previous per-BYTE walk tore multibyte UTF-8 apart,
+           diverging from native/interp on non-ASCII input. */
         int len = _wf_strlen(s);
-        for (int i = 0; i < len; i++) {
-            char *c = _wasm_str_alloc(2);
-            c[0] = s[i];
-            c[1] = '\0';
+        int off = 0;
+        while (off < len) {
+            int consumed = 0;
+            uint32_t cp = 0;
+            if (!_wc_utf8_decode_one((const unsigned char *)s + off, len - off, &consumed, &cp)
+                || consumed <= 0) {
+                consumed = 1; /* invalid byte: keep it as a single fragment */
+            }
+            char *c = _wasm_str_alloc((unsigned int)(consumed + 1));
+            _wf_memcpy(c, s + off, consumed);
+            c[consumed] = '\0';
             list = taida_list_push(list, (int64_t)c);
+            off += consumed;
         }
         return list;
     }

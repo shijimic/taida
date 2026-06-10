@@ -19,6 +19,22 @@
 extern void *wasm_alloc(unsigned int size);
 extern char *_wasm_str_alloc(unsigned int total); /* header-carrying */
 
+/* Header-carrying string literal — the profile-runtime twin of the
+   core runtime's WSTR. Every string entering the Taida value space
+   must carry the magic word: identification is positive-only (no byte
+   heuristics), so a bare C literal cast to int64_t is invisible to
+   _wasm_is_string_ptr and renders as a pointer-valued integer. */
+#define WSTR_MAGIC 0x5441494453545300LL /* "TAIDSTS\0" */
+#define WSTR(str) \
+    ({ \
+        static const struct { \
+            int64_t m; \
+            char s[sizeof(str)]; \
+        } _wstr_lit = {WSTR_MAGIC, str}; \
+        (int64_t)(intptr_t)_wstr_lit.s; \
+    })
+
+
 static int32_t edge_strlen(const char *s) {
     int32_t n = 0;
     while (s[n]) n++;
@@ -50,7 +66,7 @@ extern int32_t taida_host_env_get_all(int32_t buf_ptr, int32_t buf_cap);
 int64_t taida_os_env_var(int64_t name_ptr) {
     const char *key = (const char *)(intptr_t)name_ptr;
     if (!key) {
-        return taida_lax_empty((int64_t)(intptr_t)"");
+        return taida_lax_empty(WSTR(""));
     }
 
     int32_t key_len = edge_strlen(key);
@@ -62,7 +78,7 @@ int64_t taida_os_env_var(int64_t name_ptr) {
     );
 
     if (actual == 0) {
-        return taida_lax_empty((int64_t)(intptr_t)"");
+        return taida_lax_empty(WSTR(""));
     }
 
     if (actual > buf_cap) {
@@ -75,7 +91,7 @@ int64_t taida_os_env_var(int64_t name_ptr) {
     }
 
     buf[actual] = '\0';
-    return taida_lax_new((int64_t)(intptr_t)buf, (int64_t)(intptr_t)"");
+    return taida_lax_new((int64_t)(intptr_t)buf, WSTR(""));
 }
 
 int64_t taida_os_all_env(void) {

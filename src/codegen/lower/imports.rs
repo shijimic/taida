@@ -279,7 +279,12 @@ impl Lowering {
         // set of already-registered mangled symbols.
         if let Some(facade_summary) = &facade {
             let pkg_hash = simple_hash(&manifest.package);
-            for (fn_local_name, fn_def) in &facade_summary.facade_funcs {
+            // Sorted: HashMap iteration order is per-process random and
+            // this loop's order decides the IR function order (and so
+            // the generated code layout) — builds must be reproducible.
+            let mut facade_funcs_sorted: Vec<_> = facade_summary.facade_funcs.iter().collect();
+            facade_funcs_sorted.sort_by(|a, b| a.0.cmp(b.0));
+            for (fn_local_name, fn_def) in facade_funcs_sorted {
                 let mangled = format!("_taida_fn_facade_{:016x}_{}", pkg_hash, fn_local_name);
                 if !self.addon_facade_mangled.insert(mangled.clone()) {
                     // Already registered via an earlier import
@@ -349,7 +354,10 @@ impl Lowering {
             // dedup set — we prefix the value-binding marker with
             // a distinct `facade_value::` namespace to avoid
             // colliding with FuncDef mangles.
-            for (local_name, value_expr) in &facade_summary.pack_bindings {
+            // Sorted for the same reproducibility reason as above.
+            let mut pack_bindings_sorted: Vec<_> = facade_summary.pack_bindings.iter().collect();
+            pack_bindings_sorted.sort_by(|a, b| a.0.cmp(b.0));
+            for (local_name, value_expr) in pack_bindings_sorted {
                 let marker = format!("_taida_facade_value_{:016x}_{}", pkg_hash, local_name);
                 if !self.addon_facade_mangled.insert(marker) {
                     continue;
@@ -1301,6 +1309,47 @@ impl Lowering {
                 Statement::Assignment(assign) => {
                     let val = self.lower_expr(&mut init_fn, &assign.value)?;
                     let hash = simple_hash(&format!("{}:{}", module_key, assign.target)) as i64;
+                    init_fn.push(IrInst::GlobalSet(hash, val));
+                }
+                // Unmold bindings are module-level values too: without
+                // these arms an exported `... >=> name` left the module
+                // global at 0 and every importer read the wrong value
+                // (the facade classifier fix makes such exports link;
+                // this makes them carry the value).
+                Statement::UnmoldForward(uf) => {
+                    let val = if let Some(result) =
+                        self.try_lower_fused_unmold(&mut init_fn, &uf.source)?
+                    {
+                        result
+                    } else {
+                        let source_var = self.lower_expr(&mut init_fn, &uf.source)?;
+                        let result = init_fn.alloc_var();
+                        init_fn.push(IrInst::Call(
+                            result,
+                            "taida_generic_unmold".to_string(),
+                            vec![source_var],
+                        ));
+                        result
+                    };
+                    let hash = simple_hash(&format!("{}:{}", module_key, uf.target)) as i64;
+                    init_fn.push(IrInst::GlobalSet(hash, val));
+                }
+                Statement::UnmoldBackward(ub) => {
+                    let val = if let Some(result) =
+                        self.try_lower_fused_unmold(&mut init_fn, &ub.source)?
+                    {
+                        result
+                    } else {
+                        let source_var = self.lower_expr(&mut init_fn, &ub.source)?;
+                        let result = init_fn.alloc_var();
+                        init_fn.push(IrInst::Call(
+                            result,
+                            "taida_generic_unmold".to_string(),
+                            vec![source_var],
+                        ));
+                        result
+                    };
+                    let hash = simple_hash(&format!("{}:{}", module_key, ub.target)) as i64;
                     init_fn.push(IrInst::GlobalSet(hash, val));
                 }
                 Statement::ClassLikeDef(inh_def) if inh_def.is_inheritance() => {

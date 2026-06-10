@@ -2143,7 +2143,7 @@ impl Lowering {
     ///
     /// Named arguments (an explicit default, etc.) keep the general
     /// materialised path.
-    fn try_lower_fused_unmold(
+    pub(super) fn try_lower_fused_unmold(
         &mut self,
         func: &mut IrFunction,
         source: &Expr,

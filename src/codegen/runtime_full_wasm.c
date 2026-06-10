@@ -28,6 +28,22 @@
 // ---------------------------------------------------------------------------
 extern void *wasm_alloc(unsigned int size);
 extern char *_wasm_str_alloc(unsigned int total); /* header-carrying */
+
+/* Header-carrying string literal — the profile-runtime twin of the
+   core runtime's WSTR. Every string entering the Taida value space
+   must carry the magic word: identification is positive-only (no byte
+   heuristics), so a bare C literal cast to int64_t is invisible to
+   _wasm_is_string_ptr and renders as a pointer-valued integer. */
+#define WSTR_MAGIC 0x5441494453545300LL /* "TAIDSTS\0" */
+#define WSTR(str) \
+    ({ \
+        static const struct { \
+            int64_t m; \
+            char s[sizeof(str)]; \
+        } _wstr_lit = {WSTR_MAGIC, str}; \
+        (int64_t)(intptr_t)_wstr_lit.s; \
+    })
+
 extern int64_t taida_lax_new(int64_t value, int64_t default_value);
 extern int64_t taida_lax_empty(int64_t default_value);
 extern int64_t taida_list_new(void);
@@ -342,9 +358,9 @@ static int64_t _wf_gorillax_to_str(int64_t gx) {
         return (int64_t)(intptr_t)buf;
     }
     if (gtype == 2) {
-        return (int64_t)(intptr_t)"RelaxedGorillax(escaped)";
+        return WSTR("RelaxedGorillax(escaped)");
     }
-    return (int64_t)(intptr_t)"Gorillax(><)";
+    return WSTR("Gorillax(><)");
 }
 
 /// Polymorphic .toString() -- wasm-full override.
@@ -359,7 +375,7 @@ static int64_t _wf_gorillax_to_str(int64_t gx) {
 /// and are disambiguated via the `__type` field first character
 /// ('G' / 'R' = Gorillax / RelaxedGorillax; anything else = Lax).
 int64_t taida_polymorphic_to_string_full(int64_t obj) {
-    if (obj == 0) return (int64_t)(intptr_t)"0";
+    if (obj == 0) return WSTR("0");
     // Check Gorillax BEFORE delegating to core (core's gorillax type detection
     // has the > 4096 threshold issue)
     if (_wf_is_valid_ptr(obj, 104)) {
@@ -582,7 +598,7 @@ static void _wf_sb_append(_wf_strbuf *sb, const char *s) {
 
 int64_t taida_bytes_to_display_string(int64_t bytes_ptr) {
     if (!_wf_is_bytes(bytes_ptr)) {
-        return taida_str_new_copy((int64_t)(intptr_t)"Bytes()");
+        return taida_str_new_copy(WSTR("Bytes()"));
     }
     int64_t *bytes = (int64_t *)(intptr_t)bytes_ptr;
     int64_t len = bytes[1];
@@ -679,7 +695,8 @@ int64_t taida_bytes_cursor_new(int64_t bytes_ptr, int64_t offset) {
     taida_pack_set(pack, 2, len);
     uint64_t type_hash = _wf_fnv1a("__type", 6);
     taida_pack_set_hash(pack, 3, (int64_t)type_hash);
-    taida_pack_set(pack, 3, (int64_t)(intptr_t)"BytesCursor");
+    taida_pack_set(pack, 3, WSTR("BytesCursor"));
+    taida_pack_set_tag(pack, 3, 3 /* STR */);
     return pack;
 }
 

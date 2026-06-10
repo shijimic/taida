@@ -418,10 +418,23 @@ impl Interpreter {
                     }
                     other => return Ok(Some(other)),
                 };
-                let parts: Vec<Value> = s
-                    .split(delim.as_str())
-                    .map(|p| Value::str(p.to_string()))
-                    .collect();
+                // Empty separator follows the locked `.split("")` method
+                // semantics (chars split, empty input gives the empty
+                // list) — NOT Rust's split(""), whose leading/trailing
+                // empty fragments this mold path used to leak, splitting
+                // the language in two against the method and every
+                // compiled backend.
+                let parts: Vec<Value> = if delim.is_empty() {
+                    if s.is_empty() {
+                        vec![]
+                    } else {
+                        s.chars().map(|ch| Value::str(ch.to_string())).collect()
+                    }
+                } else {
+                    s.split(delim.as_str())
+                        .map(|p| Value::str(p.to_string()))
+                        .collect()
+                };
                 Ok(Some(Signal::Value(Value::list(parts))))
             }
             "Chars" => {

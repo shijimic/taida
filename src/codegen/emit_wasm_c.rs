@@ -288,11 +288,15 @@ fn c_string_literal(s: &str) -> String {
             '\0' => out.push_str("\\0"),
             c if c.is_ascii_graphic() || c == ' ' => out.push(c),
             c => {
-                // UTF-8 bytes as hex escapes
+                // UTF-8 bytes as OCTAL escapes: C's \x is greedy
+                // (unbounded digits), so "\xe3\x81\x82b" parses the
+                // trailing `b` into the last escape and fails with
+                // "hex escape sequence out of range". Octal stops at
+                // three digits, so any following character is safe.
                 let mut buf = [0u8; 4];
                 let encoded = c.encode_utf8(&mut buf);
                 for b in encoded.bytes() {
-                    write!(out, "\\x{:02x}", b).unwrap();
+                    write!(out, "\\{:03o}", b).unwrap();
                 }
             }
         }

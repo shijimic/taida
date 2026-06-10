@@ -192,7 +192,12 @@ mod tests {
         //   O(n^2) — a thousand-part split re-measured ~5MB of tail per
         //   pipeline pass. Now terminator-driven. string_ops: 629ms ->
         //   16ms. -> 466,389.
-        const EXPECTED_TOTAL_LEN: usize = 466_389;
+        // 2026-06-10 empty-separator Split codepoint fix
+        //   (02_containers.inc.c): the per-byte walk tore multibyte UTF-8
+        //   apart, diverging from the locked chars-split semantics that
+        //   the interpreter / native / JS already implement. Fragments
+        //   stay empty-free per the B11 method lock. -> 467,164.
+        const EXPECTED_TOTAL_LEN: usize = 467_164;
         let asm = *RUNTIME_CORE_WASM;
         assert_eq!(
             asm.len(),
