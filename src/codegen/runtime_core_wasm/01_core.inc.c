@@ -714,10 +714,25 @@ int64_t taida_io_stdout(int64_t val_ptr) {
        contract and C12B-034 hardening.
 
    C12-5: returns bytes written (Int). */
+int64_t taida_int_to_str(int64_t a); /* fwd: early Int display path */
+
 int64_t taida_io_stdout_with_tag(int64_t val, int64_t tag) {
     if ((int)tag == WASM_TAG_BOOL) {
         int32_t len = val ? 4 : 5;
         if (val) { write_stdout("true", 4); } else { write_stdout("false", 5); }
+        write_stdout("\n", 1);
+        return (int64_t)len;
+    }
+    /* Statically-known Int: the value IS the integer — format it
+       directly, before any runtime re-detection. An Int whose value
+       coincides with a live string's data address carries a REAL magic
+       word at v-8, so the detection heuristics below cannot tell it
+       from a string and would print that string instead. */
+    if ((int)tag == WASM_TAG_INT) {
+        int64_t str_v = taida_int_to_str(val);
+        const char *si = (const char *)(intptr_t)str_v;
+        int32_t len = wasm_strlen(si);
+        write_stdout(si, len);
         write_stdout("\n", 1);
         return (int64_t)len;
     }
@@ -827,6 +842,22 @@ int64_t taida_io_stderr_with_tag(int64_t val, int64_t tag) {
         int32_t len = val ? 4 : 5;
         wasi_ciovec iov;
         iov.buf = (int32_t)(intptr_t)s;
+        iov.len = len;
+        int32_t nwritten;
+        __wasi_fd_write(2, &iov, 1, &nwritten);
+        iov.buf = (int32_t)(intptr_t)"\n";
+        iov.len = 1;
+        __wasi_fd_write(2, &iov, 1, &nwritten);
+        return (int64_t)len;
+    }
+    /* Statically-known Int: format directly, before runtime
+       re-detection — symmetric with taida_io_stdout_with_tag. */
+    if ((int)tag == WASM_TAG_INT) {
+        int64_t str_v = taida_int_to_str(val);
+        const char *si = (const char *)(intptr_t)str_v;
+        int32_t len = wasm_strlen(si);
+        wasi_ciovec iov;
+        iov.buf = (int32_t)(intptr_t)si;
         iov.len = len;
         int32_t nwritten;
         __wasi_fd_write(2, &iov, 1, &nwritten);

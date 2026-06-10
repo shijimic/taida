@@ -605,6 +605,18 @@ impl Lowering {
                         .insert(assign.target.clone(), type_name.clone());
                 }
             }
+            // `>=>` / `<=<` bindings are top-level variables too: the
+            // free-var collector filters on this set, so a name missing
+            // here never reaches globals_referenced — a function body
+            // referencing an unmold-bound top-level then reads 0 from
+            // the uninitialised global slot (silently, on native and
+            // wasm; the interpreter scopes it correctly).
+            if let Statement::UnmoldForward(uf) = stmt {
+                self.top_level_vars.insert(uf.target.clone());
+            }
+            if let Statement::UnmoldBackward(ub) = stmt {
+                self.top_level_vars.insert(ub.target.clone());
+            }
         }
 
         // ライブラリモジュール判定（2nd pass の前に実施 — is_library_module フラグが必要）
@@ -1386,6 +1398,20 @@ impl Lowering {
         })
     }
 
+    /// A top-level binding that some function body references must
+    /// also land in the global table: function bodies restore their
+    /// free variables through GlobalGet, so a binding that only does
+    /// DefVar in `_taida_main` leaves the global slot at 0 and the
+    /// function silently reads the wrong value. The Assignment arm has
+    /// always done this; every other binding form (the `>=>` / `<=<`
+    /// unmolds) must apply the same rule.
+    fn maybe_globalize_toplevel_binding(&mut self, func: &mut IrFunction, name: &str, val: IrVar) {
+        if self.current_func_name.is_none() && self.globals_referenced.contains(name) {
+            let hash = self.global_var_hash(name);
+            func.push(IrInst::GlobalSet(hash, val));
+        }
+    }
+
     fn maybe_insert_iter_scope(ir_func: &mut IrFunction, func_def: &FuncDef) {
         if !Self::ir_insts_contain_tail_call(&ir_func.body) {
             return;
@@ -1775,12 +1801,7 @@ impl Lowering {
 
                 // トップレベル変数をグローバルテーブルにも格納
                 // （_taida_main 内で、かつ関数から参照されるトップレベル変数のみ）
-                if self.current_func_name.is_none()
-                    && self.globals_referenced.contains(&assign.target)
-                {
-                    let hash = self.global_var_hash(&assign.target);
-                    func.push(IrInst::GlobalSet(hash, val));
-                }
+                self.maybe_globalize_toplevel_binding(func, &assign.target, val);
 
                 // NB-31: int を返す式の結果を追跡（callable_type_tag 精度向上）
                 if self.expr_is_int(&assign.value) {
@@ -2043,6 +2064,7 @@ impl Lowering {
                 // has_value branch.
                 if let Some(result) = self.try_lower_fused_unmold(func, &uf.source)? {
                     func.push(IrInst::DefVar(uf.target.clone(), result));
+                    self.maybe_globalize_toplevel_binding(func, &uf.target, result);
                     self.track_unmold_type(&uf.target, &uf.source);
                     // A rebind invalidates any previous shadow kind for
                     // this name (mirrors maybe_capture_shadow_kind).
@@ -2060,6 +2082,7 @@ impl Lowering {
                     vec![source_var],
                 ));
                 func.push(IrInst::DefVar(uf.target.clone(), result));
+                self.maybe_globalize_toplevel_binding(func, &uf.target, result);
                 // Track type from mold source for debug display
                 self.track_unmold_type(&uf.target, &uf.source);
                 self.maybe_capture_shadow_kind(func, &uf.target, &uf.source, source_var);
@@ -2074,6 +2097,7 @@ impl Lowering {
                 // F58 P2-4: same direct-form fusion as UnmoldForward.
                 if let Some(result) = self.try_lower_fused_unmold(func, &ub.source)? {
                     func.push(IrInst::DefVar(ub.target.clone(), result));
+                    self.maybe_globalize_toplevel_binding(func, &ub.target, result);
                     self.track_unmold_type(&ub.target, &ub.source);
                     self.shadow_kind_vars.remove(&ub.target);
                     if Self::NET_BUILTIN_NAMES.contains(&ub.target.as_str()) {
@@ -2089,6 +2113,7 @@ impl Lowering {
                     vec![source_var],
                 ));
                 func.push(IrInst::DefVar(ub.target.clone(), result));
+                self.maybe_globalize_toplevel_binding(func, &ub.target, result);
                 // Track type from mold source for debug display
                 self.track_unmold_type(&ub.target, &ub.source);
                 self.maybe_capture_shadow_kind(func, &ub.target, &ub.source, source_var);
@@ -2609,6 +2634,16 @@ impl Lowering {
         for stmt in body {
             if let Statement::Assignment(assign) = stmt {
                 bound.insert(assign.target.as_str());
+            }
+            // Unmold bindings are local definitions as well — without
+            // this, a body-local `... >=> v` whose name collides with a
+            // top-level variable would be misread as a global reference
+            // and the GlobalGet restore would clobber the local.
+            if let Statement::UnmoldForward(uf) = stmt {
+                bound.insert(uf.target.as_str());
+            }
+            if let Statement::UnmoldBackward(ub) = stmt {
+                bound.insert(ub.target.as_str());
             }
         }
         for stmt in body {

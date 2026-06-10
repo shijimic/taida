@@ -255,6 +255,16 @@ impl Lowering {
                     if self.list_returning_funcs.contains(name.as_str()) {
                         return 5;
                     }
+                    // `=> :Int` annotated functions: every other return
+                    // kind was consulted here but Int fell through to
+                    // UNKNOWN. An untagged Int whose value coincides
+                    // with a live string's data address passes even the
+                    // magic-word identification (the header there is
+                    // real), so display routed `stdout(intFn(...))`
+                    // through the heuristics and printed that string.
+                    if self.int_returning_funcs.contains(name.as_str()) {
+                        return 0;
+                    }
                     // Builtin range() returns a List
                     if name == "range" {
                         return 5;

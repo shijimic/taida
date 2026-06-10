@@ -180,7 +180,13 @@ mod tests {
         //   structural heuristics. _wasm_str_alloc goes non-static for
         //   the profile runtimes. -> 464,735 (the removed fallback and
         //   delegated duplicates outweigh the macro).
-        const EXPECTED_TOTAL_LEN: usize = 464_735;
+        // 2026-06-10 early Int display paths (01_core.inc.c): stdout /
+        //   stderr _with_tag format a statically-known Int directly,
+        //   before any runtime re-detection — an Int whose value
+        //   coincides with a live string's data address carries that
+        //   string's real magic word, so detection cannot save it.
+        //   Plus the int_to_str forward declaration. -> 466,038.
+        const EXPECTED_TOTAL_LEN: usize = 466_038;
         let asm = *RUNTIME_CORE_WASM;
         assert_eq!(
             asm.len(),
